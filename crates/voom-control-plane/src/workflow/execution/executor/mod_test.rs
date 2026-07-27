@@ -2562,10 +2562,23 @@ fn require_correlated_dispatch(
     lease_id: LeaseId,
     idempotency_key: &str,
 ) -> Result<(), ProtocolError> {
+    if matches!(
+        behavior,
+        FakeBehavior::RequireCorrelatedExtractAudioDispatch
+    ) {
+        if lease_id != LeaseId(1) || !idempotency_key.starts_with("audio-extract:") {
+            return Err(ProtocolError::InvalidPayload {
+                detail: format!(
+                    "audio extraction dispatch must use lease 1 and an operation key, got \
+                     {lease_id:?} / {idempotency_key}"
+                ),
+            });
+        }
+        return Ok(());
+    }
     let label = match behavior {
         FakeBehavior::RequireCorrelatedRemuxDispatch => "remux",
-        FakeBehavior::RequireCorrelatedTranscodeAudioDispatch
-        | FakeBehavior::RequireCorrelatedExtractAudioDispatch => "audio",
+        FakeBehavior::RequireCorrelatedTranscodeAudioDispatch => "audio",
         _ => return Ok(()),
     };
     if lease_id != LeaseId(1) {

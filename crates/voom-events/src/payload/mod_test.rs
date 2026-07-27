@@ -82,6 +82,7 @@ fn _event_variants_are_exhaustive(e: &Event) {
         Event::ArtifactAudioExtractProgress(_) => {}
         Event::ArtifactAudioExtractSucceeded(_) => {}
         Event::ArtifactAudioExtractFailed(_) => {}
+        Event::ArtifactAudioExtractQuiesced(_) => {}
         Event::IssueOpened(_) => {}
         Event::IssueUpdated(_) => {}
         Event::IssueResolved(_) => {}

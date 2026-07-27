@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use time::OffsetDateTime;
 use voom_core::FailureClass;
 
 // --- artifacts -------------------------------------------------------------
@@ -545,6 +546,19 @@ pub struct ArtifactAudioExtractFailedPayload {
     pub provider_version: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub outputs: Vec<ArtifactAudioExtractMemberPayload>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ArtifactAudioExtractQuiescedPayload {
+    pub operation_key: String,
+    pub generation: u32,
+    pub attempt_id: u64,
+    pub worker_id: u64,
+    pub worker_epoch: u32,
+    pub idempotency_key: String,
+    pub acknowledged_by: String,
+    pub acknowledged_at: OffsetDateTime,
 }
 
 #[cfg(test)]

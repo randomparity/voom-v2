@@ -47,14 +47,21 @@ impl TranscodeAudioDispatcher for BundledTranscodeAudioDispatcher {
 impl ExtractAudioDispatcher for BundledExtractAudioDispatcher {
     async fn dispatch_extract_audio(
         &self,
+        idempotency_key: &str,
         request: ExtractAudioRequest,
     ) -> Result<ExtractAudioResult, VoomError> {
         let command = bundled_ffmpeg_worker_command();
         let worker = BundledWorkerProcess::launch(WorkerId(0), command)
             .await
             .map_err(|err| VoomError::WorkerCrash(err.to_string()))?;
-        let result =
-            dispatch_extract_audio_with_client(&worker.client, &worker.credentials, request).await;
+        let result = dispatch_extract_audio_with_client_context(
+            &worker.client,
+            &worker.credentials,
+            LeaseId(0),
+            idempotency_key,
+            request,
+        )
+        .await;
         let _status = worker.shutdown(Duration::from_secs(5)).await;
         result
     }
@@ -94,24 +101,6 @@ where
         OperationKind::TranscodeAudio,
         lease_id,
         idempotency_key,
-        request,
-    )
-    .await
-}
-
-pub(crate) async fn dispatch_extract_audio_with_client<C>(
-    client: &C,
-    credentials: &WorkerCredentials,
-    request: ExtractAudioRequest,
-) -> Result<ExtractAudioResult, VoomError>
-where
-    C: ClientHandle + ?Sized,
-{
-    dispatch_extract_audio_with_client_context(
-        client,
-        credentials,
-        LeaseId(0),
-        "extract-audio-control-plane",
         request,
     )
     .await

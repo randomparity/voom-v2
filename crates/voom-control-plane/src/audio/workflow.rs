@@ -216,10 +216,9 @@ struct RuntimeExtractAudioDispatcher<'a> {
 impl ExtractAudioDispatcher for RuntimeExtractAudioDispatcher<'_> {
     async fn dispatch_extract_audio(
         &self,
+        idempotency_key: &str,
         request: ExtractAudioRequest,
     ) -> Result<ExtractAudioResult, VoomError> {
-        let idempotency_key =
-            workflow_idempotency_key(self.context.ticket_id, self.context.lease_id);
         await_with_lease_heartbeats(
             self.context,
             OperationKind::ExtractAudio,
@@ -227,7 +226,7 @@ impl ExtractAudioDispatcher for RuntimeExtractAudioDispatcher<'_> {
                 self.context.runtime.client.as_ref(),
                 &self.context.runtime.credentials,
                 self.context.lease_id,
-                &idempotency_key,
+                idempotency_key,
                 request,
             ),
         )

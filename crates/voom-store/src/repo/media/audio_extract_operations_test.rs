@@ -326,3 +326,172 @@ async fn dispatch_attempt_and_paths_are_durable_before_send() {
     assert_eq!(stored_paths, attempt.paths);
     assert_eq!(attempt.status, AudioExtractDispatchAttemptStatus::Active);
 }
+
+#[tokio::test]
+async fn terminal_dispatch_can_advance_only_its_claimed_generation() {
+    let fixture = fixture().await;
+    let now = OffsetDateTime::from_unix_timestamp(0).unwrap();
+    fixture
+        .repo
+        .create_planned(fixture.operation(), &outputs(), now)
+        .await
+        .unwrap();
+    let claim = NewAudioExtractClaim {
+        operation_key: "extract:v1:key".to_owned(),
+        expected_generation: 0,
+        lease_id: fixture.lease_id,
+        claim_token: "claim-one".to_owned(),
+        expires_at: OffsetDateTime::from_unix_timestamp(10).unwrap(),
+    };
+    fixture.repo.acquire_claim(&claim, now).await.unwrap();
+    let attempt = fixture
+        .repo
+        .record_dispatch_attempt(
+            &claim,
+            NewAudioExtractDispatchAttempt {
+                worker_id: fixture.worker_id,
+                worker_epoch: 0,
+                idempotency_key: "audio-extract:key:0".to_owned(),
+                attempt_directory: "/staging/attempt-0".to_owned(),
+                paths: vec!["/staging/attempt-0/out-1.ogg".to_owned()],
+            },
+            now,
+        )
+        .await
+        .unwrap();
+
+    fixture
+        .repo
+        .mark_dispatch_terminal(
+            &claim,
+            attempt.id,
+            OffsetDateTime::from_unix_timestamp(1).unwrap(),
+        )
+        .await
+        .unwrap();
+    fixture
+        .repo
+        .advance_terminal_generation(
+            &claim,
+            attempt.id,
+            OffsetDateTime::from_unix_timestamp(1).unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let operation = fixture
+        .repo
+        .get_by_key("extract:v1:key")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(operation.operation.dispatch_generation, 1);
+}
+
+#[tokio::test]
+async fn quarantined_dispatch_requires_expiry_and_exact_operator_acknowledgement() {
+    let fixture = fixture().await;
+    let now = OffsetDateTime::from_unix_timestamp(0).unwrap();
+    fixture
+        .repo
+        .create_planned(fixture.operation(), &outputs(), now)
+        .await
+        .unwrap();
+    let claim = NewAudioExtractClaim {
+        operation_key: "extract:v1:key".to_owned(),
+        expected_generation: 0,
+        lease_id: fixture.lease_id,
+        claim_token: "claim-one".to_owned(),
+        expires_at: OffsetDateTime::from_unix_timestamp(10).unwrap(),
+    };
+    fixture.repo.acquire_claim(&claim, now).await.unwrap();
+    let attempt = fixture
+        .repo
+        .record_dispatch_attempt(
+            &claim,
+            NewAudioExtractDispatchAttempt {
+                worker_id: fixture.worker_id,
+                worker_epoch: 7,
+                idempotency_key: "audio-extract:key:0".to_owned(),
+                attempt_directory: "/staging/attempt-0".to_owned(),
+                paths: vec!["/staging/attempt-0/out-1.ogg".to_owned()],
+            },
+            now,
+        )
+        .await
+        .unwrap();
+    fixture
+        .repo
+        .quarantine_dispatch(
+            &claim,
+            attempt.id,
+            OffsetDateTime::from_unix_timestamp(1).unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let live_error = fixture
+        .repo
+        .acknowledge_quiescence(
+            &AudioExtractQuiescenceAcknowledgement {
+                operation_key: "extract:v1:key".to_owned(),
+                generation: 0,
+                attempt_id: attempt.id,
+                worker_id: fixture.worker_id,
+                worker_epoch: 7,
+                idempotency_key: "audio-extract:key:0".to_owned(),
+                acknowledged_by: "operator".to_owned(),
+            },
+            OffsetDateTime::from_unix_timestamp(5).unwrap(),
+        )
+        .await
+        .unwrap_err();
+    assert!(live_error.to_string().contains("does not exactly match"));
+
+    let exact = AudioExtractQuiescenceAcknowledgement {
+        operation_key: "extract:v1:key".to_owned(),
+        generation: 0,
+        attempt_id: attempt.id,
+        worker_id: fixture.worker_id,
+        worker_epoch: 7,
+        idempotency_key: "audio-extract:key:0".to_owned(),
+        acknowledged_by: "operator".to_owned(),
+    };
+    let mut mismatches = Vec::new();
+    let mut wrong = exact.clone();
+    wrong.operation_key = "extract:v1:wrong".to_owned();
+    mismatches.push(wrong);
+    let mut wrong = exact.clone();
+    wrong.generation = 1;
+    mismatches.push(wrong);
+    let mut wrong = exact.clone();
+    wrong.worker_id = WorkerId(fixture.worker_id.0 + 1);
+    mismatches.push(wrong);
+    let mut wrong = exact.clone();
+    wrong.worker_epoch = 8;
+    mismatches.push(wrong);
+    let mut wrong = exact.clone();
+    wrong.idempotency_key = "audio-extract:wrong:0".to_owned();
+    mismatches.push(wrong);
+    for mismatch in mismatches {
+        let error = fixture
+            .repo
+            .acknowledge_quiescence(&mismatch, OffsetDateTime::from_unix_timestamp(11).unwrap())
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("does not exactly match"));
+    }
+
+    fixture
+        .repo
+        .acknowledge_quiescence(&exact, OffsetDateTime::from_unix_timestamp(11).unwrap())
+        .await
+        .unwrap();
+    let stored = fixture
+        .repo
+        .get_dispatch_attempt(1, 0)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.status, AudioExtractDispatchAttemptStatus::Quiesced);
+}

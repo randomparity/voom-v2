@@ -23,7 +23,9 @@ use voom_store::repo::artifacts::{
     ArtifactCommitFailure, ArtifactCommitRecord, ArtifactCommitState, NewArtifactCommitRecord,
     NewArtifactHandle, NewArtifactLocation, NewSidecarArtifactCommit, SidecarArtifactCommit,
 };
-use voom_store::repo::audio_extract_operations::AudioExtractOperationRecord;
+use voom_store::repo::audio_extract_operations::{
+    AudioExtractOperationRecord, NewAudioExtractClaim,
+};
 use voom_store::repo::bundles::{BundleMemberRole, NewBundleMember};
 use voom_store::repo::check_lineage_commit_leases_in_tx;
 use voom_store::repo::identity::{IdentityRepo, MediaSnapshot, NewMediaSnapshot};
@@ -226,15 +228,29 @@ pub async fn record_staged_audio_extract(
     .await
 }
 
+pub struct StageAudioExtractSetInput<'a> {
+    pub execution: &'a ExecuteExtractAudioInput,
+    pub source_file_location_id: FileLocationId,
+    pub staging_paths: &'a [PathBuf],
+    pub operation: &'a AudioExtractOperationRecord,
+    pub selection: &'a ExtractAudioSelectionPlan,
+    pub result: &'a ExtractAudioResult,
+    pub claim: &'a NewAudioExtractClaim,
+}
+
 pub async fn record_staged_audio_extract_set(
     cp: &ControlPlane,
-    input: &ExecuteExtractAudioInput,
-    source_file_location_id: FileLocationId,
-    staging_paths: &[PathBuf],
-    operation: &AudioExtractOperationRecord,
-    selection: &ExtractAudioSelectionPlan,
-    result: &ExtractAudioResult,
+    input: StageAudioExtractSetInput<'_>,
 ) -> Result<Vec<StagedAudioArtifact>, VoomError> {
+    let StageAudioExtractSetInput {
+        execution,
+        source_file_location_id,
+        staging_paths,
+        operation,
+        selection,
+        result,
+        claim,
+    } = input;
     let result_outputs = extract_result_output_facts(result);
     if staging_paths.len() != selection.outputs.len()
         || staging_paths.len() != result_outputs.len()
@@ -257,7 +273,7 @@ pub async fn record_staged_audio_extract_set(
             cp,
             &mut tx,
             NewStagedAudioArtifact {
-                source_file_version_id: input.source_file_version_id,
+                source_file_version_id: execution.source_file_version_id,
                 source_file_location_id,
                 staging_path: path,
                 size_bytes: output.size_bytes,
@@ -266,7 +282,7 @@ pub async fn record_staged_audio_extract_set(
                     "operation": "extract_audio",
                     "operation_id": selection.operation_id,
                     "output_id": selected.output_id,
-                    "source_file_version_id": input.source_file_version_id.0,
+                    "source_file_version_id": execution.source_file_version_id.0,
                     "source_file_location_id": source_file_location_id.0,
                     "source_snapshot_stream_id": selected.stream.snapshot_stream_id,
                     "source_provider_stream_index": selected.stream.provider_stream_index,
@@ -284,13 +300,26 @@ pub async fn record_staged_audio_extract_set(
     })?;
     let update = sqlx::query(
         "UPDATE audio_extract_operations SET state = 'staged', worker_result = ? \
-         WHERE id = ? AND state = 'planned' AND worker_result IS NULL",
+         WHERE id = ? AND state = 'planned' AND worker_result IS NULL \
+         AND dispatch_generation = ? AND claim_lease_id = ? AND claim_token = ? \
+         AND claim_expires_at > ?",
     )
     .bind(worker_result)
     .bind(sqlite_id(
         operation.operation.id,
         "audio extraction operation",
     )?)
+    .bind(i64::from(claim.expected_generation))
+    .bind(sqlite_id(claim.lease_id.0, "audio extraction claim lease")?)
+    .bind(&claim.claim_token)
+    .bind(
+        cp.clock()
+            .now()
+            .format(&time::format_description::well_known::Rfc3339)
+            .map_err(|error| {
+                VoomError::Internal(format!("format audio extraction claim check: {error}"))
+            })?,
+    )
     .execute(&mut *tx)
     .await
     .map_err(|error| VoomError::database_context("stage audio extraction operation", error))?;

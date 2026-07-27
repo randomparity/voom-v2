@@ -126,6 +126,17 @@ pub struct AudioExtractDispatchAttempt {
     pub status: AudioExtractDispatchAttemptStatus,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AudioExtractQuiescenceAcknowledgement {
+    pub operation_key: String,
+    pub generation: u32,
+    pub attempt_id: u64,
+    pub worker_id: WorkerId,
+    pub worker_epoch: u32,
+    pub idempotency_key: String,
+    pub acknowledged_by: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct SqliteAudioExtractOperationRepo {
     pool: SqlitePool,
@@ -242,6 +253,217 @@ impl SqliteAudioExtractOperationRepo {
             VoomError::database_context("audio extract dispatch attempt commit", error)
         })?;
         Ok(stored)
+    }
+
+    pub async fn get_dispatch_attempt(
+        &self,
+        operation_id: u64,
+        generation: u32,
+    ) -> Result<Option<AudioExtractDispatchAttempt>, VoomError> {
+        let attempt_id: Option<i64> = sqlx::query_scalar(
+            "SELECT id FROM audio_extract_dispatch_attempts \
+             WHERE operation_id = ? AND generation = ?",
+        )
+        .bind(i64_from_u64(operation_id))
+        .bind(i64::from(generation))
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|error| {
+            VoomError::database_context("audio extract dispatch attempt find", error)
+        })?;
+        let Some(attempt_id) = attempt_id else {
+            return Ok(None);
+        };
+        let mut tx = self.pool.begin().await.map_err(|error| {
+            VoomError::database_context("audio extract dispatch attempt get begin", error)
+        })?;
+        let attempt = load_dispatch_attempt(&mut tx, attempt_id).await?;
+        tx.commit().await.map_err(|error| {
+            VoomError::database_context("audio extract dispatch attempt get commit", error)
+        })?;
+        Ok(Some(attempt))
+    }
+
+    pub async fn mark_dispatch_terminal(
+        &self,
+        claim: &NewAudioExtractClaim,
+        attempt_id: u64,
+        now: OffsetDateTime,
+    ) -> Result<(), VoomError> {
+        self.update_dispatch_status(
+            claim,
+            attempt_id,
+            AudioExtractDispatchAttemptStatus::Terminal,
+            now,
+        )
+        .await
+    }
+
+    pub async fn quarantine_dispatch(
+        &self,
+        claim: &NewAudioExtractClaim,
+        attempt_id: u64,
+        now: OffsetDateTime,
+    ) -> Result<(), VoomError> {
+        self.update_dispatch_status(
+            claim,
+            attempt_id,
+            AudioExtractDispatchAttemptStatus::Quarantined,
+            now,
+        )
+        .await
+    }
+
+    async fn update_dispatch_status(
+        &self,
+        claim: &NewAudioExtractClaim,
+        attempt_id: u64,
+        status: AudioExtractDispatchAttemptStatus,
+        now: OffsetDateTime,
+    ) -> Result<(), VoomError> {
+        let (status, evidence_kind, evidence_at) = match status {
+            AudioExtractDispatchAttemptStatus::Terminal => {
+                ("terminal", Some("terminal_response"), Some(iso8601(now)?))
+            }
+            AudioExtractDispatchAttemptStatus::Quarantined => ("quarantined", None, None),
+            AudioExtractDispatchAttemptStatus::Active
+            | AudioExtractDispatchAttemptStatus::Quiesced => {
+                return Err(VoomError::Internal(
+                    "unsupported audio dispatch status transition".to_owned(),
+                ));
+            }
+        };
+        let result = sqlx::query(
+            "UPDATE audio_extract_dispatch_attempts SET status = ?, evidence_kind = ?, \
+             evidence_at = ? WHERE id = ? AND status = 'active' AND operation_id = \
+             (SELECT id FROM audio_extract_operations WHERE operation_key = ? \
+              AND dispatch_generation = ? AND claim_lease_id = ? AND claim_token = ? \
+              AND claim_expires_at > ?)",
+        )
+        .bind(status)
+        .bind(evidence_kind)
+        .bind(evidence_at)
+        .bind(i64_from_u64(attempt_id))
+        .bind(&claim.operation_key)
+        .bind(i64::from(claim.expected_generation))
+        .bind(i64_from_u64(claim.lease_id.0))
+        .bind(&claim.claim_token)
+        .bind(iso8601(now)?)
+        .execute(&self.pool)
+        .await
+        .map_err(|error| {
+            VoomError::database_context("audio extract dispatch status update", error)
+        })?;
+        if result.rows_affected() == 1 {
+            return Ok(());
+        }
+        Err(VoomError::Conflict(format!(
+            "audio extraction dispatch attempt {attempt_id} lost its claim or is not active"
+        )))
+    }
+
+    pub async fn advance_terminal_generation(
+        &self,
+        claim: &NewAudioExtractClaim,
+        attempt_id: u64,
+        now: OffsetDateTime,
+    ) -> Result<(), VoomError> {
+        let result = sqlx::query(
+            "UPDATE audio_extract_operations SET dispatch_generation = dispatch_generation + 1, \
+             claim_lease_id = NULL, claim_token = NULL, claim_expires_at = NULL \
+             WHERE operation_key = ? AND state = 'planned' AND dispatch_generation = ? \
+             AND claim_lease_id = ? AND claim_token = ? AND claim_expires_at > ? \
+             AND EXISTS (SELECT 1 FROM audio_extract_dispatch_attempts attempt \
+                         WHERE attempt.id = ? \
+                         AND attempt.operation_id = audio_extract_operations.id \
+                         AND attempt.generation = audio_extract_operations.dispatch_generation \
+                         AND attempt.status IN ('terminal', 'quiesced')) \
+             AND NOT EXISTS (SELECT 1 FROM audio_extract_operation_outputs output \
+                             WHERE output.operation_id = audio_extract_operations.id \
+                             AND output.staging_path IS NOT NULL)",
+        )
+        .bind(&claim.operation_key)
+        .bind(i64::from(claim.expected_generation))
+        .bind(i64_from_u64(claim.lease_id.0))
+        .bind(&claim.claim_token)
+        .bind(iso8601(now)?)
+        .bind(i64_from_u64(attempt_id))
+        .execute(&self.pool)
+        .await
+        .map_err(|error| {
+            VoomError::database_context("audio extract dispatch generation advance", error)
+        })?;
+        if result.rows_affected() == 1 {
+            return Ok(());
+        }
+        Err(VoomError::Conflict(format!(
+            "audio extraction dispatch attempt {attempt_id} is not safe to clean and advance"
+        )))
+    }
+
+    pub async fn acknowledge_quiescence(
+        &self,
+        acknowledgement: &AudioExtractQuiescenceAcknowledgement,
+        now: OffsetDateTime,
+    ) -> Result<(), VoomError> {
+        let mut tx = self
+            .pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(|error| {
+                VoomError::database_context("audio extract quiescence begin", error)
+            })?;
+        Self::acknowledge_quiescence_in_tx(&mut tx, acknowledgement, now).await?;
+        tx.commit()
+            .await
+            .map_err(|error| VoomError::database_context("audio extract quiescence commit", error))
+    }
+
+    pub async fn acknowledge_quiescence_in_tx(
+        tx: &mut Transaction<'_, Sqlite>,
+        acknowledgement: &AudioExtractQuiescenceAcknowledgement,
+        now: OffsetDateTime,
+    ) -> Result<(), VoomError> {
+        if acknowledgement.acknowledged_by.trim().is_empty() {
+            return Err(VoomError::Config(
+                "audio extraction quiescence acknowledgement requires an actor".to_owned(),
+            ));
+        }
+        let now = iso8601(now)?;
+        let result = sqlx::query(
+            "UPDATE audio_extract_dispatch_attempts \
+             SET status = 'quiesced', evidence_kind = 'operator_acknowledgement', \
+                 evidence_at = ?, acknowledged_by = ? \
+             WHERE id = ? AND generation = ? AND worker_id = ? AND worker_epoch = ? \
+             AND idempotency_key = ? AND status = 'quarantined' \
+             AND operation_id = (SELECT id FROM audio_extract_operations \
+                                 WHERE operation_key = ? AND state = 'planned' \
+                                 AND dispatch_generation = ? \
+                                 AND (claim_token IS NULL OR claim_expires_at <= ?))",
+        )
+        .bind(&now)
+        .bind(&acknowledgement.acknowledged_by)
+        .bind(i64_from_u64(acknowledgement.attempt_id))
+        .bind(i64::from(acknowledgement.generation))
+        .bind(i64_from_u64(acknowledgement.worker_id.0))
+        .bind(i64::from(acknowledgement.worker_epoch))
+        .bind(&acknowledgement.idempotency_key)
+        .bind(&acknowledgement.operation_key)
+        .bind(i64::from(acknowledgement.generation))
+        .bind(&now)
+        .execute(&mut **tx)
+        .await
+        .map_err(|error| {
+            VoomError::database_context("audio extract quiescence acknowledgement", error)
+        })?;
+        if result.rows_affected() == 1 {
+            return Ok(());
+        }
+        Err(VoomError::Conflict(
+            "audio extraction quiescence evidence does not exactly match an expired, \
+             quarantined planned attempt"
+                .to_owned(),
+        ))
     }
 }
 

@@ -229,6 +229,84 @@ async fn extract_audio_plural_commits_every_output_and_lineage_atomically() {
 }
 
 #[tokio::test]
+async fn exact_extract_quiescence_acknowledgement_records_audit_event() {
+    let (cp, _db, dir) = fixture_with_dir().await;
+    let source = seed_audio_source(&cp, &dir, b"source").await;
+    let bundle = seed_bundle(&cp).await;
+    let repo = SqliteAudioExtractOperationRepo::new(cp.pool.clone());
+    let now = cp.clock().now();
+    let operation = repo
+        .create_planned(
+            NewAudioExtractOperation {
+                operation_key: "extract:quiescence-test".to_owned(),
+                operation_id: Some("op-test".to_owned()),
+                target_set_hash: "extract:quiescence-test".to_owned(),
+                source_file_version_id: source.version,
+                source_bundle_id: bundle.id,
+                source_media_snapshot_id: MediaSnapshotId(source.snapshot),
+            },
+            &[NewAudioExtractOutput {
+                output_id: Some("out-test".to_owned()),
+                source_snapshot_stream_id: "a-1".to_owned(),
+                source_provider_stream_index: 1,
+                bundle_role: "external_audio".to_owned(),
+                target_path: dir.path().join("out.ogg").display().to_string(),
+            }],
+            now,
+        )
+        .await
+        .unwrap();
+    let claim = NewAudioExtractClaim {
+        operation_key: operation.operation.operation_key.clone(),
+        expected_generation: 0,
+        lease_id: LeaseId(3),
+        claim_token: "quiescence-claim".to_owned(),
+        expires_at: now + time::Duration::minutes(1),
+    };
+    repo.acquire_claim(&claim, now).await.unwrap();
+    let attempt = repo
+        .record_dispatch_attempt(
+            &claim,
+            NewAudioExtractDispatchAttempt {
+                worker_id: voom_core::WorkerId(1),
+                worker_epoch: 0,
+                idempotency_key: "audio-extract:extract:quiescence-test:0".to_owned(),
+                attempt_directory: dir.path().display().to_string(),
+                paths: vec![dir.path().join("attempt.ogg").display().to_string()],
+            },
+            now,
+        )
+        .await
+        .unwrap();
+    repo.quarantine_dispatch(&claim, attempt.id, now)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE audio_extract_operations SET claim_expires_at = ? WHERE id = ?")
+        .bind(now - time::Duration::seconds(1))
+        .bind(i64::try_from(operation.operation.id).unwrap())
+        .execute(cp.pool_for_test())
+        .await
+        .unwrap();
+
+    cp.acknowledge_extract_dispatch_quiescence(AcknowledgeExtractDispatchQuiescenceInput {
+        operation_key: operation.operation.operation_key,
+        generation: 0,
+        attempt_id: attempt.id,
+        worker_id: attempt.worker_id,
+        worker_epoch: attempt.worker_epoch,
+        idempotency_key: attempt.idempotency_key,
+        acknowledged_by: "operator@example".to_owned(),
+    })
+    .await
+    .unwrap();
+
+    let event = latest_event_payload(&cp, "artifact.audio_extract_quiesced").await;
+    assert_eq!(event["attempt_id"], attempt.id);
+    assert_eq!(event["worker_id"], 1);
+    assert_eq!(event["acknowledged_by"], "operator@example");
+}
+
+#[tokio::test]
 async fn committed_plural_extract_retry_returns_same_ordered_identities_without_dispatch() {
     let (cp, _db, dir) = fixture_with_dir().await;
     let mut source = seed_audio_source(&cp, &dir, b"source").await;
@@ -768,6 +846,7 @@ async fn fixture() -> (crate::ControlPlane, tempfile::NamedTempFile) {
     let url = format!("sqlite://{}", db.path().display());
     voom_store::init(&url).await.unwrap();
     let pool = voom_store::connect(&url).await.unwrap();
+    seed_extract_execution_lease(&pool).await;
     let cp = crate::ControlPlane::open_with_pool_and_rng(
         pool,
         std::sync::Arc::new(voom_core::SystemClock),
@@ -776,6 +855,53 @@ async fn fixture() -> (crate::ControlPlane, tempfile::NamedTempFile) {
     .await
     .unwrap();
     (cp, db)
+}
+
+async fn seed_extract_execution_lease(pool: &sqlx::SqlitePool) {
+    let now = OffsetDateTime::now_utc();
+    let expires_at = now + time::Duration::hours(1);
+    sqlx::query(
+        "INSERT INTO workers \
+         (id, name, kind, status, registered_at, last_seen_at) \
+         VALUES (1, 'audio-test-worker', 'synthetic', 'active', ?, ?)",
+    )
+    .bind(now)
+    .bind(now)
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO jobs (id, kind, state, priority, created_at, updated_at) \
+         VALUES (1, 'audio-test', 'open', 0, ?, ?)",
+    )
+    .bind(now)
+    .bind(now)
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO tickets \
+         (id, job_id, kind, state, priority, payload, attempt, max_attempts, \
+          next_eligible_at, created_at, state_changed_at) \
+         VALUES (2, 1, 'audio-test', 'leased', 0, '{}', 1, 3, ?, ?, ?)",
+    )
+    .bind(now)
+    .bind(now)
+    .bind(now)
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO leases \
+         (id, ticket_id, worker_id, state, acquired_at, expires_at, \
+          last_heartbeat_at, ttl_seconds) VALUES (3, 2, 1, 'held', ?, ?, ?, 3600)",
+    )
+    .bind(now)
+    .bind(expires_at)
+    .bind(now)
+    .execute(pool)
+    .await
+    .unwrap();
 }
 
 async fn fixture_with_dir() -> (
@@ -1097,6 +1223,7 @@ struct UncalledExtractDispatcher;
 impl ExtractAudioDispatcher for UncalledExtractDispatcher {
     async fn dispatch_extract_audio(
         &self,
+        _idempotency_key: &str,
         _request: ExtractAudioRequest,
     ) -> Result<ExtractAudioResult, VoomError> {
         panic!("extract dispatcher should not be called")
@@ -1343,12 +1470,13 @@ struct MutatingOutputsExtractDispatcher {
 impl ExtractAudioDispatcher for MutatingOutputsExtractDispatcher {
     async fn dispatch_extract_audio(
         &self,
+        idempotency_key: &str,
         request: ExtractAudioRequest,
     ) -> Result<ExtractAudioResult, VoomError> {
         let mut result = WritingExtractDispatcher {
             output_bytes: self.output_bytes.clone(),
         }
-        .dispatch_extract_audio(request)
+        .dispatch_extract_audio(idempotency_key, request)
         .await?;
         match self.mutation {
             ExtractResultMutation::ProjectionMismatch => {
@@ -1376,12 +1504,13 @@ impl ExtractAudioDispatcher for MutatingOutputsExtractDispatcher {
 impl ExtractAudioDispatcher for MissingOutputsExtractDispatcher {
     async fn dispatch_extract_audio(
         &self,
+        idempotency_key: &str,
         request: ExtractAudioRequest,
     ) -> Result<ExtractAudioResult, VoomError> {
         let mut result = WritingExtractDispatcher {
             output_bytes: self.output_bytes.clone(),
         }
-        .dispatch_extract_audio(request)
+        .dispatch_extract_audio(idempotency_key, request)
         .await?;
         result.outputs = None;
         Ok(result)
@@ -1392,12 +1521,13 @@ impl ExtractAudioDispatcher for MissingOutputsExtractDispatcher {
 impl ExtractAudioDispatcher for PartialOutputsExtractDispatcher {
     async fn dispatch_extract_audio(
         &self,
+        idempotency_key: &str,
         request: ExtractAudioRequest,
     ) -> Result<ExtractAudioResult, VoomError> {
         let mut result = WritingExtractDispatcher {
             output_bytes: self.output_bytes.clone(),
         }
-        .dispatch_extract_audio(request.clone())
+        .dispatch_extract_audio(idempotency_key, request.clone())
         .await?;
         let outputs = request.outputs.as_ref().unwrap();
         for output in &outputs[1..] {
@@ -1412,6 +1542,7 @@ impl ExtractAudioDispatcher for PartialOutputsExtractDispatcher {
 impl ExtractAudioDispatcher for WritingExtractDispatcher {
     async fn dispatch_extract_audio(
         &self,
+        _idempotency_key: &str,
         request: ExtractAudioRequest,
     ) -> Result<ExtractAudioResult, VoomError> {
         if let Some(outputs) = &request.outputs {
