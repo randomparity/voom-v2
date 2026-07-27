@@ -7,9 +7,7 @@ use voom_store::repo::events::{EventFilter, EventRepo, Page};
 use voom_store::repo::jobs::{JobState, NewJob};
 use voom_store::repo::leases::{LeaseFilter, LeaseState};
 use voom_store::repo::tickets::{NewTicket, Ticket, TicketState};
-use voom_store::repo::workers::{
-    NewCapability, NewGrant, NewWorker, Worker, WorkerKind,
-};
+use voom_store::repo::workers::{NewCapability, NewGrant, NewWorker, Worker, WorkerKind};
 
 use crate::cases::{count, cp, issue_link_targets, terminal_failure_issues};
 

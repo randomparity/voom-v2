@@ -165,14 +165,17 @@ async fn cancel_open_job_emits_one_envelope_and_persists_audited_state() {
         after.cancelled_event_count,
         before.cancelled_event_count + 1
     );
-    let reason: String = sqlx::query_scalar(
-        "SELECT json_extract(payload, '$.reason') FROM events \
+    let event: (i64, i64, String) = sqlx::query_as(
+        "SELECT subject_id, json_extract(payload, '$.job_id'), \
+                json_extract(payload, '$.reason') FROM events \
          WHERE kind = 'job.cancelled' ORDER BY event_id DESC LIMIT 1",
     )
     .fetch_one(&fixture.pool)
     .await
     .unwrap();
-    assert_eq!(reason, "operator requested stop");
+    assert_eq!(event.0, i64::try_from(job_id.0).unwrap());
+    assert_eq!(event.1, i64::try_from(job_id.0).unwrap());
+    assert_eq!(event.2, "operator requested stop");
 }
 
 #[tokio::test]

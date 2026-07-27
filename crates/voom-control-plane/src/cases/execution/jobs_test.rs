@@ -147,9 +147,11 @@ async fn cancel_job_persists_state_and_reason_in_one_event() {
         .await
         .unwrap();
     assert_eq!(page.items.len(), 1);
+    assert_eq!(page.items[0].envelope.subject_id, Some(job.id.0));
     let voom_events::Event::JobCancelled(payload) = &page.items[0].envelope.payload else {
         panic!("expected JobCancelled payload");
     };
+    assert_eq!(payload.job_id, job.id.0);
     assert_eq!(payload.reason, "operator cancel");
 }
 
@@ -196,5 +198,41 @@ async fn cancel_missing_job_is_not_found_without_event() {
         .unwrap_err();
 
     assert!(matches!(err, VoomError::NotFound(_)), "got: {err:?}");
+    assert_eq!(count(&cp, EventKind::JobCancelled).await, 0);
+}
+
+#[tokio::test]
+async fn cancel_job_rolls_back_when_event_append_fails() {
+    let (cp, _tmp) = cp().await;
+    let job = cp
+        .open_job(NewJob {
+            kind: "ingest".to_owned(),
+            priority: 0,
+            created_at: OffsetDateTime::UNIX_EPOCH,
+        })
+        .await
+        .unwrap();
+    sqlx::query("ALTER TABLE events RENAME TO unavailable_events")
+        .execute(&cp.pool)
+        .await
+        .unwrap();
+
+    let err = cp
+        .cancel_job(
+            job.id,
+            "operator cancel".to_owned(),
+            OffsetDateTime::UNIX_EPOCH + time::Duration::seconds(1),
+        )
+        .await
+        .unwrap_err();
+
+    assert!(matches!(err, VoomError::Database { .. }), "got: {err:?}");
+    sqlx::query("ALTER TABLE unavailable_events RENAME TO events")
+        .execute(&cp.pool)
+        .await
+        .unwrap();
+    let stored = cp.get_job(job.id.0).await.unwrap().unwrap();
+    assert_eq!(stored.state, JobState::Open);
+    assert_eq!(stored.epoch, 0);
     assert_eq!(count(&cp, EventKind::JobCancelled).await, 0);
 }
