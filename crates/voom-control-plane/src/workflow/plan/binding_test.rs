@@ -3,6 +3,7 @@ use crate::workflow::plan::binding::{
     PolicyFileSource, branch_context_with_probe_codec, render_default_payload,
     render_default_payload_with_fan_out, render_policy_extract_audio_payload,
     render_policy_remux_payload, render_policy_transcode_audio_payload,
+    render_policy_verify_artifact_payload,
 };
 use crate::workflow::plan::model::WorkflowPlan;
 use voom_core::OperationKind;
@@ -91,6 +92,29 @@ fn scan_payload_uses_effective_fan_out() {
     .unwrap();
 
     assert_eq!(rendered["fan_out_count"], 7);
+}
+
+#[test]
+fn policy_verify_payload_pins_exact_file_identity_without_dsl_arguments() {
+    let rendered = render_policy_verify_artifact_payload(
+        PolicyFileSource {
+            file_version_id: FileVersionId(42),
+            location_id: Some(FileLocationId(7)),
+        },
+        EffectiveTiming::for_test(25, 10),
+    )
+    .unwrap();
+
+    assert_eq!(
+        rendered,
+        serde_json::json!({
+            "operation": "verify_artifact",
+            "source_file_version_id": 42,
+            "source_location_id": 7,
+            "duration_ms": 25,
+            "progress_interval_ms": 10,
+        })
+    );
 }
 
 #[test]

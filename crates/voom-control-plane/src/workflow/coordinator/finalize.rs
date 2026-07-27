@@ -6,8 +6,10 @@
 //! job (succeeded or zero-phase) into a [`CoordinatorOutcome`].
 
 use sqlx::Row;
+use voom_core::ids::ArtifactVerificationId;
 use voom_core::{
-    FileAssetId, FileLocationId, FileVersionId, JobId, MediaSnapshotId, TicketId, VoomError,
+    ArtifactHandleId, FileAssetId, FileLocationId, FileVersionId, JobId, MediaSnapshotId, TicketId,
+    VoomError,
 };
 use voom_store::repo::identity::{IdentityRepo, MediaSnapshot};
 use voom_store::repo::workflow_summaries::{
@@ -31,6 +33,8 @@ use crate::workflow::plan::policy_bridge::policy_workflow_node_id;
 pub(super) struct ProducedRefs {
     file_version_id: Option<FileVersionId>,
     file_location_id: Option<FileLocationId>,
+    artifact_handle_id: Option<ArtifactHandleId>,
+    artifact_verification_id: Option<ArtifactVerificationId>,
     reprobe_snapshot_id: Option<MediaSnapshotId>,
 }
 
@@ -54,15 +58,18 @@ impl ProducedRefs {
         Ok(Self {
             file_version_id: Some(file_version_id),
             file_location_id: Some(location.id),
+            artifact_handle_id: None,
+            artifact_verification_id: None,
             reprobe_snapshot_id: Some(snapshot.id),
         })
     }
 
-    pub(super) fn committed_seed(
+    pub(super) fn seed(
         self,
         job_id: JobId,
         phase_ordinal: u32,
         branch_id: String,
+        outcome: FilePhaseOutcome,
     ) -> NewFilePhaseSummary {
         NewFilePhaseSummary {
             job_id,
@@ -71,11 +78,61 @@ impl ProducedRefs {
             ticket_ids: Vec::new(),
             produced_file_version_id: self.file_version_id,
             produced_file_location_id: self.file_location_id,
-            artifact_handle_id: None,
+            artifact_handle_id: self.artifact_handle_id,
+            artifact_verification_id: self.artifact_verification_id,
             reprobe_snapshot_id: self.reprobe_snapshot_id,
-            outcome: FilePhaseOutcome::Committed,
+            outcome,
         }
     }
+
+    pub(super) fn verified_seed(row: &FilePhaseSummary) -> Result<Self, VoomError> {
+        if row.outcome != FilePhaseOutcome::Verified {
+            return Err(VoomError::Internal(format!(
+                "phase row {} is not verified",
+                row.id
+            )));
+        }
+        Ok(Self {
+            file_version_id: row.produced_file_version_id,
+            file_location_id: row.produced_file_location_id,
+            artifact_handle_id: row.artifact_handle_id,
+            artifact_verification_id: row.artifact_verification_id,
+            reprobe_snapshot_id: row.reprobe_snapshot_id,
+        })
+    }
+
+    fn verified(result: &VerifiedTicketResult) -> Self {
+        Self {
+            file_version_id: Some(result.source_file_version_id),
+            file_location_id: Some(result.source_location_id),
+            artifact_handle_id: Some(result.artifact_handle_id),
+            artifact_verification_id: Some(result.artifact_verification_id),
+            reprobe_snapshot_id: Some(result.source_media_snapshot_id),
+        }
+    }
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct VerifiedTicketResult {
+    source_file_version_id: FileVersionId,
+    source_location_id: FileLocationId,
+    source_media_snapshot_id: MediaSnapshotId,
+    artifact_handle_id: ArtifactHandleId,
+    artifact_location_id: voom_core::ArtifactLocationId,
+    artifact_verification_id: ArtifactVerificationId,
+    #[serde(rename = "status")]
+    _status: VerifiedTicketStatus,
+    expected_size_bytes: u64,
+    expected_checksum: String,
+    observed_size_bytes: Option<u64>,
+    observed_checksum: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum VerifiedTicketStatus {
+    Verified,
 }
 
 /// A live local-path artifact location considered for promotion, with the asset
@@ -281,13 +338,27 @@ impl ControlPlane {
                         file.asset_id
                     ))
                 })?;
-            if tip.id == file.version_id {
-                continue;
-            }
             let workflow_node_id = policy_workflow_node_id(node_id);
             let ticket_ids = self
                 .ticket_ids_for_phase_node(job_id, phase_ordinal, &workflow_node_id)
                 .await?;
+            if let Some(verified) = self.verified_refs_for_tickets(file, &ticket_ids).await? {
+                let row = self
+                    .write_file_row(
+                        job_id,
+                        phase_ordinal,
+                        file,
+                        FilePhaseOutcome::Verified,
+                        &ticket_ids,
+                        Some(verified),
+                    )
+                    .await?;
+                file_phases.push(row);
+                continue;
+            }
+            if tip.id == file.version_id {
+                continue;
+            }
             let produced = ProducedRefs::resolve(self, tip.id, &snapshot).await?;
             let row = self
                 .write_file_row(
@@ -405,6 +476,23 @@ impl ControlPlane {
                         ))
                     })?;
                 if tip.id == file.version_id {
+                    if let Some(verified) =
+                        self.verified_refs_for_tickets(&file, &ticket_ids).await?
+                    {
+                        let row = self
+                            .write_file_row(
+                                job_id,
+                                phase_ordinal,
+                                &file,
+                                FilePhaseOutcome::Verified,
+                                &ticket_ids,
+                                Some(verified),
+                            )
+                            .await?;
+                        file.phase_history
+                            .insert(phase_ordinal, FilePhaseOutcome::Verified);
+                        return Ok((row, file.snapshot.clone(), Some(file)));
+                    }
                     // Planned but the chain tip did not advance: no commit landed
                     // (e.g. a no-op transform). Record it as skipped, keep active.
                     let row = self
@@ -460,13 +548,155 @@ impl ControlPlane {
                     ticket_ids: ticket_ids.to_vec(),
                     produced_file_version_id: produced.file_version_id,
                     produced_file_location_id: produced.file_location_id,
-                    artifact_handle_id: None,
+                    artifact_handle_id: produced.artifact_handle_id,
+                    artifact_verification_id: produced.artifact_verification_id,
                     reprobe_snapshot_id: produced.reprobe_snapshot_id,
                     outcome,
                 },
                 self.clock().now(),
             )
             .await
+    }
+
+    async fn verified_refs_for_tickets(
+        &self,
+        file: &PhaseFile,
+        ticket_ids: &[TicketId],
+    ) -> Result<Option<ProducedRefs>, VoomError> {
+        if ticket_ids.is_empty() {
+            return Ok(None);
+        }
+        let ticket_ids = ticket_ids
+            .iter()
+            .map(|id| sqlite_i64(id.0, "verification ticket id"))
+            .collect::<Result<Vec<_>, _>>()?;
+        let ids = serde_json::to_string(&ticket_ids).map_err(|error| {
+            VoomError::Internal(format!("verification tickets encode: {error}"))
+        })?;
+        let results: Vec<String> = sqlx::query_scalar(
+            "SELECT result FROM tickets \
+             WHERE id IN (SELECT value FROM json_each(?)) \
+               AND state = 'succeeded' \
+               AND json_extract(result, '$.status') = 'verified' \
+             ORDER BY id",
+        )
+        .bind(ids)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|error| VoomError::database_context("verified ticket results", error))?;
+        let [result] = results.as_slice() else {
+            if results.is_empty() {
+                return Ok(None);
+            }
+            return Err(VoomError::Conflict(format!(
+                "branch {} has {} successful verification ticket results",
+                file.branch_id,
+                results.len()
+            )));
+        };
+        let result: VerifiedTicketResult = serde_json::from_str(result).map_err(|error| {
+            VoomError::database_context("verified workflow ticket result", error)
+        })?;
+        self.validate_verified_ticket_result(file, &result).await?;
+        Ok(Some(ProducedRefs::verified(&result)))
+    }
+
+    pub(super) async fn unfinalized_verified_refs(
+        &self,
+        job_id: JobId,
+        phase_ordinal: u32,
+        file: &PhaseFile,
+    ) -> Result<Option<ProducedRefs>, VoomError> {
+        let workflow_id = format!("workflow-{}-phase-{phase_ordinal}", job_id.0);
+        let ticket_ids: Vec<TicketId> = sqlx::query_scalar(
+            "SELECT id FROM tickets \
+             WHERE job_id = ? AND state = 'succeeded' \
+               AND kind = 'synthetic.workflow.operation.verify_artifact' \
+               AND json_extract(payload, '$.workflow_id') = ? \
+               AND json_extract(payload, '$.rendered_payload.source_file_version_id') = ? \
+             ORDER BY id",
+        )
+        .bind(sqlite_i64(job_id.0, "verification recovery job id")?)
+        .bind(workflow_id)
+        .bind(sqlite_i64(
+            file.version_id.0,
+            "verification recovery file version id",
+        )?)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|error| {
+            VoomError::database_context("unfinalized verification ticket lookup", error)
+        })?
+        .into_iter()
+        .map(|id: i64| sqlite_u64(id, "unfinalized verification ticket id").map(TicketId))
+        .collect::<Result<Vec<_>, _>>()?;
+        self.verified_refs_for_tickets(file, &ticket_ids).await
+    }
+
+    async fn validate_verified_ticket_result(
+        &self,
+        file: &PhaseFile,
+        result: &VerifiedTicketResult,
+    ) -> Result<(), VoomError> {
+        if result.source_file_version_id != file.version_id
+            || result.source_media_snapshot_id != file.snapshot.id
+            || result.observed_size_bytes != Some(result.expected_size_bytes)
+            || result.observed_checksum.as_deref() != Some(result.expected_checksum.as_str())
+        {
+            return Err(VoomError::Conflict(format!(
+                "verified ticket result does not match branch {} selected facts",
+                file.branch_id
+            )));
+        }
+        let evidence: Option<(i64, i64, String)> = sqlx::query_as(
+            "SELECT artifact_handle_id, artifact_location_id, status \
+             FROM artifact_verifications WHERE id = ?",
+        )
+        .bind(sqlite_i64(
+            result.artifact_verification_id.0,
+            "artifact verification id",
+        )?)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|error| VoomError::database_context("verified evidence lookup", error))?;
+        let Some((handle_id, location_id, status)) = evidence else {
+            return Err(VoomError::NotFound(format!(
+                "artifact_verification {}",
+                result.artifact_verification_id
+            )));
+        };
+        if sqlite_u64(handle_id, "verification artifact handle")? != result.artifact_handle_id.0
+            || sqlite_u64(location_id, "verification artifact location")?
+                != result.artifact_location_id.0
+            || status != "succeeded"
+        {
+            return Err(VoomError::Conflict(format!(
+                "artifact_verification {} does not match verified ticket result",
+                result.artifact_verification_id
+            )));
+        }
+        let location_version: Option<i64> = sqlx::query_scalar(
+            "SELECT file_version_id FROM file_locations \
+             WHERE id = ? AND retired_at IS NULL",
+        )
+        .bind(sqlite_i64(
+            result.source_location_id.0,
+            "verified file location id",
+        )?)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|error| VoomError::database_context("verified file location lookup", error))?;
+        if location_version
+            .map(|id| sqlite_u64(id, "verified location version"))
+            .transpose()?
+            != Some(file.version_id.0)
+        {
+            return Err(VoomError::Conflict(format!(
+                "verified file_location {} does not match branch {}",
+                result.source_location_id, file.branch_id
+            )));
+        }
+        Ok(())
     }
 
     /// Ticket ids whose invocation and payload `node_id` match a phase node.

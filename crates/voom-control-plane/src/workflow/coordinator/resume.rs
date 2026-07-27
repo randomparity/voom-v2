@@ -25,6 +25,7 @@ pub(super) struct PreparedResumeSeed {
     pub(super) phase_ordinal: u32,
     pub(super) branch_id: String,
     pub(super) produced: ProducedRefs,
+    pub(super) outcome: FilePhaseOutcome,
 }
 
 #[derive(Debug)]
@@ -33,6 +34,19 @@ pub(super) struct ResumePreparation {
     pub(super) run_starts: Vec<NewFileRunStart>,
     pub(super) history: Vec<NewFileRunHistory>,
     pub(super) seeds: Vec<PreparedResumeSeed>,
+}
+
+struct PriorBranch<'a> {
+    start: &'a FileRunStart,
+    rows: &'a [&'a FilePhaseSummary],
+    inherited: &'a [&'a FileRunHistory],
+}
+
+struct PreparedResumeBranch {
+    survivor: Option<PhaseFile>,
+    run_start: NewFileRunStart,
+    history: Vec<NewFileRunHistory>,
+    seeds: Vec<PreparedResumeSeed>,
 }
 
 impl ControlPlane {
@@ -113,60 +127,32 @@ impl ControlPlane {
         let mut run_starts = Vec::with_capacity(files.len());
         let mut history = Vec::new();
         let mut seeds = Vec::new();
-        for mut file in files {
+        for file in files {
             let start = starts.get(&file.branch_id).ok_or_else(|| {
                 resume_incomplete(format!("missing start for branch {}", file.branch_id))
             })?;
             let branch_rows = rows_by_branch
                 .get(file.branch_id.as_str())
                 .map_or(&[][..], Vec::as_slice);
-            self.validate_resume_lineage(&file, start, branch_rows)
-                .await?;
-            let state = validate_prior_row_shape(start, branch_rows, phase_count)?;
             let inherited_rows = inherited_by_branch
                 .get(file.branch_id.as_str())
                 .map_or(&[][..], Vec::as_slice);
-            let mut phase_history = validate_prior_history(start, inherited_rows, phase_count)?;
-            merge_prior_rows(&file.branch_id, &mut phase_history, branch_rows)?;
-            let mut next_ordinal = state.next_ordinal;
-            if state.terminal {
-                if file.version_id != state.recorded_tip {
-                    return Err(resume_incomplete(format!(
-                        "terminal branch {} changed from version {} to {}",
-                        file.branch_id, state.recorded_tip, file.version_id
-                    )));
-                }
-                next_ordinal = phase_count;
-            } else if file.version_id != state.recorded_tip {
-                let produced = ProducedRefs::resolve(self, file.version_id, &file.snapshot).await?;
-                seeds.push(PreparedResumeSeed {
-                    phase_ordinal: next_ordinal,
-                    branch_id: file.branch_id.clone(),
-                    produced,
-                });
-                merge_phase_outcome(
-                    &file.branch_id,
-                    &mut phase_history,
-                    next_ordinal,
-                    FilePhaseOutcome::Committed,
-                )?;
-                next_ordinal += 1;
-            }
-            run_starts.push(NewFileRunStart {
-                branch_id: file.branch_id.clone(),
-                starting_file_version_id: file.version_id,
-                starting_phase_ordinal: next_ordinal,
-            });
-            history.extend(phase_history.iter().map(|(&phase_ordinal, &outcome)| {
-                NewFileRunHistory {
-                    branch_id: file.branch_id.clone(),
-                    phase_ordinal,
-                    outcome,
-                }
-            }));
-            if next_ordinal < phase_count && !state.terminal {
-                file.resume_ordinal = next_ordinal;
-                file.phase_history = phase_history;
+            let prepared = self
+                .prepare_resume_branch(
+                    prior_job_id,
+                    file,
+                    PriorBranch {
+                        start,
+                        rows: branch_rows,
+                        inherited: inherited_rows,
+                    },
+                    phase_count,
+                )
+                .await?;
+            run_starts.push(prepared.run_start);
+            history.extend(prepared.history);
+            seeds.extend(prepared.seeds);
+            if let Some(file) = prepared.survivor {
                 survivors.push(file);
             }
         }
@@ -178,6 +164,97 @@ impl ControlPlane {
         Ok(ResumePreparation {
             files: survivors,
             run_starts,
+            history,
+            seeds,
+        })
+    }
+
+    async fn prepare_resume_branch(
+        &self,
+        prior_job_id: JobId,
+        mut file: PhaseFile,
+        prior: PriorBranch<'_>,
+        phase_count: u32,
+    ) -> Result<PreparedResumeBranch, VoomError> {
+        self.validate_resume_lineage(&file, prior.start, prior.rows)
+            .await?;
+        let state = validate_prior_row_shape(prior.start, prior.rows, phase_count)?;
+        let mut phase_history = validate_prior_history(prior.start, prior.inherited, phase_count)?;
+        merge_prior_rows(&file.branch_id, &mut phase_history, prior.rows)?;
+        let mut seeds = Vec::new();
+        for row in prior.rows {
+            if row.outcome == FilePhaseOutcome::Verified {
+                seeds.push(PreparedResumeSeed {
+                    phase_ordinal: row.phase_ordinal,
+                    branch_id: file.branch_id.clone(),
+                    produced: ProducedRefs::verified_seed(row)?,
+                    outcome: FilePhaseOutcome::Verified,
+                });
+            }
+        }
+        let mut next_ordinal = state.next_ordinal;
+        if state.terminal {
+            if file.version_id != state.recorded_tip {
+                return Err(resume_incomplete(format!(
+                    "terminal branch {} changed from version {} to {}",
+                    file.branch_id, state.recorded_tip, file.version_id
+                )));
+            }
+            next_ordinal = phase_count;
+        } else if file.version_id != state.recorded_tip {
+            let produced = ProducedRefs::resolve(self, file.version_id, &file.snapshot).await?;
+            seeds.push(PreparedResumeSeed {
+                phase_ordinal: next_ordinal,
+                branch_id: file.branch_id.clone(),
+                produced,
+                outcome: FilePhaseOutcome::Committed,
+            });
+            merge_phase_outcome(
+                &file.branch_id,
+                &mut phase_history,
+                next_ordinal,
+                FilePhaseOutcome::Committed,
+            )?;
+            next_ordinal += 1;
+        } else if let Some(produced) = self
+            .unfinalized_verified_refs(prior_job_id, next_ordinal, &file)
+            .await?
+        {
+            seeds.push(PreparedResumeSeed {
+                phase_ordinal: next_ordinal,
+                branch_id: file.branch_id.clone(),
+                produced,
+                outcome: FilePhaseOutcome::Verified,
+            });
+            merge_phase_outcome(
+                &file.branch_id,
+                &mut phase_history,
+                next_ordinal,
+                FilePhaseOutcome::Verified,
+            )?;
+            next_ordinal += 1;
+        }
+        let run_start = NewFileRunStart {
+            branch_id: file.branch_id.clone(),
+            starting_file_version_id: file.version_id,
+            starting_phase_ordinal: next_ordinal,
+        };
+        let mut history = Vec::with_capacity(phase_history.len());
+        for (&phase_ordinal, &outcome) in &phase_history {
+            history.push(NewFileRunHistory {
+                branch_id: file.branch_id.clone(),
+                phase_ordinal,
+                outcome,
+            });
+        }
+        let survivor = (next_ordinal < phase_count && !state.terminal).then(|| {
+            file.resume_ordinal = next_ordinal;
+            file.phase_history = phase_history;
+            file
+        });
+        Ok(PreparedResumeBranch {
+            survivor,
+            run_start,
             history,
             seeds,
         })
@@ -418,9 +495,13 @@ fn validate_prior_row_shape(
 }
 
 fn validate_seed_row(start: &FileRunStart, row: &FilePhaseSummary) -> Result<(), VoomError> {
-    if row.outcome != FilePhaseOutcome::Committed || !row.ticket_ids.is_empty() {
+    if !matches!(
+        row.outcome,
+        FilePhaseOutcome::Committed | FilePhaseOutcome::Verified
+    ) || !row.ticket_ids.is_empty()
+    {
         return Err(resume_incomplete(format!(
-            "branch {} phase {} is not a committed empty-ticket reconciliation seed",
+            "branch {} phase {} is not an advancing empty-ticket reconciliation seed",
             start.branch_id, row.phase_ordinal
         )));
     }

@@ -27,7 +27,7 @@ async fn probe_returns_uninitialized_on_fresh_db() {
 #[tokio::test]
 async fn expected_migrations_matches_embedded_count() {
     // review whenever a migration is added/removed.
-    assert_eq!(expected_migrations(), 25);
+    assert_eq!(expected_migrations(), 26);
 }
 
 #[tokio::test]
@@ -82,7 +82,7 @@ async fn workflow_file_run_history_schema_is_strict_and_run_owned() {
     .unwrap();
     assert!(table_sql.contains("PRIMARY KEY (job_id, branch_id, phase_ordinal)"));
     assert!(table_sql.contains("CHECK (phase_ordinal >= 0)"));
-    assert!(table_sql.contains("CHECK (outcome IN ('committed', 'skipped'))"));
+    assert!(table_sql.contains("CHECK (outcome IN ('committed', 'verified', 'skipped'))"));
     assert!(table_sql.ends_with("STRICT"));
 
     let run_fk_columns: Vec<(String, String, String)> = sqlx::query_as(
@@ -356,10 +356,13 @@ async fn workflow_summary_schema_links_grains_to_jobs_and_artifacts() {
     .fetch_one(&pool)
     .await
     .unwrap();
-    assert!(file_phase_sql.contains("CHECK (outcome IN ('committed', 'skipped', 'blocked'))"));
+    assert!(
+        file_phase_sql
+            .contains("CHECK (outcome IN ('committed', 'verified', 'skipped', 'blocked'))")
+    );
     assert!(file_phase_sql.contains("CHECK (json_valid(ticket_ids))"));
 
-    // The grandchild references jobs plus the four produced-artifact tables.
+    // The grandchild references jobs plus produced-artifact and verification tables.
     let mut fk_tables: Vec<String> = sqlx::query_scalar(
         "SELECT \"table\" FROM pragma_foreign_key_list('workflow_file_phase_summaries')",
     )
@@ -371,6 +374,7 @@ async fn workflow_summary_schema_links_grains_to_jobs_and_artifacts() {
         fk_tables,
         vec![
             "artifact_handles".to_owned(),
+            "artifact_verifications".to_owned(),
             "file_locations".to_owned(),
             "file_versions".to_owned(),
             "jobs".to_owned(),

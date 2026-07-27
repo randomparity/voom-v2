@@ -2,7 +2,7 @@ use super::*;
 
 use serde_json::json;
 use time::OffsetDateTime;
-use voom_core::{FileAssetId, FileLocationId, FileVersionId};
+use voom_core::{FileAssetId, FileLocationId, FileVersionId, LeaseId, TicketId};
 
 use crate::repo::execution::workers::{NewWorker, SqliteWorkerRepo, WorkerKind};
 use crate::repo::media::identity::{
@@ -66,6 +66,17 @@ async fn source_version_and_location(pool: &sqlx::SqlitePool) -> (FileVersionId,
     (source.id, source_location.id)
 }
 
+async fn record_media_snapshot(pool: &sqlx::SqlitePool, version_id: FileVersionId) {
+    sqlx::query(
+        "INSERT INTO media_snapshots (file_version_id, probed_at, payload) \
+         VALUES (?, '1970-01-01T00:00:00Z', '{}')",
+    )
+    .bind(i64::try_from(version_id.0).unwrap())
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
 async fn verification_worker(pool: &sqlx::SqlitePool) -> voom_core::WorkerId {
     let workers = SqliteWorkerRepo::new(pool.clone());
     workers
@@ -125,6 +136,254 @@ async fn artifact_handles_carries_identity_link_columns() {
 }
 
 #[tokio::test]
+async fn policy_target_resolution_creates_then_reuses_active_artifact() {
+    let (pool, _tmp) = pool().await;
+    let repo = SqliteArtifactRepo::new(pool.clone());
+    let (version_id, location_id) = source_version_and_location(&pool).await;
+    record_media_snapshot(&pool, version_id).await;
+
+    let mut first_tx = pool.begin().await.unwrap();
+    let first = repo
+        .resolve_policy_artifact_target_in_tx(
+            &mut first_tx,
+            version_id,
+            Some(location_id),
+            OffsetDateTime::UNIX_EPOCH,
+        )
+        .await
+        .unwrap();
+    first_tx.commit().await.unwrap();
+
+    let mut second_tx = pool.begin().await.unwrap();
+    let second = repo
+        .resolve_policy_artifact_target_in_tx(
+            &mut second_tx,
+            version_id,
+            Some(location_id),
+            OffsetDateTime::UNIX_EPOCH,
+        )
+        .await
+        .unwrap();
+    second_tx.commit().await.unwrap();
+
+    assert!(first.created_handle.is_some());
+    assert!(first.created_location.is_some());
+    assert!(second.created_handle.is_none());
+    assert!(second.created_location.is_none());
+    assert_eq!(
+        first.target.artifact_handle_id,
+        second.target.artifact_handle_id
+    );
+    assert_eq!(
+        first.target.artifact_location_id,
+        second.target.artifact_location_id
+    );
+    assert_eq!(second.target.file_version_id, version_id);
+    assert_eq!(second.target.file_location_id, location_id);
+    assert_eq!(second.target.path, "/media/source.mkv");
+    assert_eq!(second.target.size_bytes, 1024);
+    assert_eq!(second.target.checksum, "source-hash");
+}
+
+#[tokio::test]
+async fn policy_target_resolution_reuses_dependency_committed_handle() {
+    let (pool, _tmp) = pool().await;
+    let repo = SqliteArtifactRepo::new(pool.clone());
+    let (version_id, file_location_id) = source_version_and_location(&pool).await;
+    record_media_snapshot(&pool, version_id).await;
+    let mut handle_input = sample_new_handle();
+    handle_input.file_version_id = Some(version_id);
+    handle_input.checksum = Some("source-hash".to_owned());
+    let handle = repo.create_handle(handle_input).await.unwrap();
+    let artifact_location = repo
+        .record_location(NewArtifactLocation {
+            artifact_handle_id: handle.id,
+            kind: "staging".to_owned(),
+            value: "/tmp/source.mkv".to_owned(),
+            observed_at: OffsetDateTime::UNIX_EPOCH,
+        })
+        .await
+        .unwrap();
+    let worker_id = verification_worker(&pool).await;
+    let mut verification_tx = pool.begin().await.unwrap();
+    let verification = repo
+        .record_verification_in_tx(
+            &mut verification_tx,
+            NewArtifactVerification {
+                artifact_handle_id: handle.id,
+                artifact_location_id: artifact_location.id,
+                path: artifact_location.value,
+                worker_id,
+                workflow_ticket_id: None,
+                workflow_lease_id: None,
+                status: ArtifactVerificationStatus::Succeeded,
+                expected_size_bytes: 1024,
+                expected_checksum: "source-hash".to_owned(),
+                observed_size_bytes: Some(1024),
+                observed_checksum: Some("source-hash".to_owned()),
+                failure_class: None,
+                error_code: None,
+                message: None,
+                report: json!({}),
+                started_at: OffsetDateTime::UNIX_EPOCH,
+                finished_at: OffsetDateTime::UNIX_EPOCH,
+            },
+        )
+        .await
+        .unwrap();
+    verification_tx.commit().await.unwrap();
+    sqlx::query(
+        "INSERT INTO artifact_commit_records \
+         (artifact_handle_id, source_file_version_id, verification_id, target_path, \
+          result_file_version_id, result_file_location_id, state, report, started_at, \
+          promotion_started_at, finished_at) \
+         VALUES (?, ?, ?, '/media/source.mkv', ?, ?, 'committed', '{}', \
+                 '1970-01-01T00:00:00Z', '1970-01-01T00:00:00Z', '1970-01-01T00:00:00Z')",
+    )
+    .bind(i64::try_from(handle.id.0).unwrap())
+    .bind(i64::try_from(version_id.0).unwrap())
+    .bind(i64::try_from(verification.id.0).unwrap())
+    .bind(i64::try_from(version_id.0).unwrap())
+    .bind(i64::try_from(file_location_id.0).unwrap())
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let mut tx = pool.begin().await.unwrap();
+    let resolved = repo
+        .resolve_policy_artifact_target_in_tx(
+            &mut tx,
+            version_id,
+            Some(file_location_id),
+            OffsetDateTime::UNIX_EPOCH,
+        )
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+
+    assert_eq!(resolved.target.artifact_handle_id, handle.id);
+    assert!(resolved.created_handle.is_none());
+    assert!(resolved.created_location.is_some());
+}
+
+#[tokio::test]
+async fn policy_target_resolution_rejects_superseded_version() {
+    let (pool, _tmp) = pool().await;
+    let repo = SqliteArtifactRepo::new(pool.clone());
+    let identity = SqliteIdentityRepo::new(pool.clone());
+    let (version_id, location_id) = source_version_and_location(&pool).await;
+    let asset_id = source_asset_id(&identity, version_id).await;
+    identity
+        .create_file_version(NewFileVersion {
+            file_asset_id: asset_id,
+            content_hash: "new-hash".to_owned(),
+            size_bytes: 2048,
+            produced_by: ProducedBy::Remux,
+            produced_from_version_id: Some(version_id),
+            created_at: OffsetDateTime::UNIX_EPOCH,
+        })
+        .await
+        .unwrap();
+
+    let mut tx = pool.begin().await.unwrap();
+    let error = repo
+        .resolve_policy_artifact_target_in_tx(
+            &mut tx,
+            version_id,
+            Some(location_id),
+            OffsetDateTime::UNIX_EPOCH,
+        )
+        .await
+        .unwrap_err();
+
+    assert!(matches!(error, VoomError::Conflict(_)));
+    assert!(error.to_string().contains("superseded"));
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM artifact_handles")
+        .fetch_one(&mut *tx)
+        .await
+        .unwrap();
+    assert_eq!(count, 0);
+}
+
+#[tokio::test]
+async fn policy_target_resolution_rejects_retired_or_mismatched_location() {
+    let (pool, _tmp) = pool().await;
+    let repo = SqliteArtifactRepo::new(pool.clone());
+    let (version_id, location_id) = source_version_and_location(&pool).await;
+    let (_, other_location_id) = source_version_and_location(&pool).await;
+    record_media_snapshot(&pool, version_id).await;
+
+    let mut mismatched_tx = pool.begin().await.unwrap();
+    let mismatched = repo
+        .resolve_policy_artifact_target_in_tx(
+            &mut mismatched_tx,
+            version_id,
+            Some(other_location_id),
+            OffsetDateTime::UNIX_EPOCH,
+        )
+        .await
+        .unwrap_err();
+    mismatched_tx.rollback().await.unwrap();
+    assert!(matches!(mismatched, VoomError::Conflict(_)));
+
+    sqlx::query("UPDATE file_locations SET retired_at = '1970-01-01T00:00:01Z' WHERE id = ?")
+        .bind(i64::try_from(location_id.0).unwrap())
+        .execute(&pool)
+        .await
+        .unwrap();
+    let mut retired_tx = pool.begin().await.unwrap();
+    let retired = repo
+        .resolve_policy_artifact_target_in_tx(
+            &mut retired_tx,
+            version_id,
+            Some(location_id),
+            OffsetDateTime::UNIX_EPOCH,
+        )
+        .await
+        .unwrap_err();
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM artifact_handles")
+        .fetch_one(&mut *retired_tx)
+        .await
+        .unwrap();
+
+    assert!(matches!(retired, VoomError::Config(_)));
+    assert_eq!(count, 0);
+}
+
+#[tokio::test]
+async fn policy_target_resolution_rejects_ambiguous_unpinned_local_path() {
+    let (pool, _tmp) = pool().await;
+    let repo = SqliteArtifactRepo::new(pool.clone());
+    let identity = SqliteIdentityRepo::new(pool.clone());
+    let (version_id, _) = source_version_and_location(&pool).await;
+    record_media_snapshot(&pool, version_id).await;
+    let mut location_tx = pool.begin().await.unwrap();
+    identity
+        .create_file_location_in_tx(
+            &mut location_tx,
+            NewFileLocation {
+                file_version_id: version_id,
+                kind: FileLocationKind::LocalPath,
+                value: "/media/duplicate-source.mkv".to_owned(),
+                proof: None,
+                observed_at: OffsetDateTime::UNIX_EPOCH,
+            },
+        )
+        .await
+        .unwrap();
+    location_tx.commit().await.unwrap();
+
+    let mut tx = pool.begin().await.unwrap();
+    let error = repo
+        .resolve_policy_artifact_target_in_tx(&mut tx, version_id, None, OffsetDateTime::UNIX_EPOCH)
+        .await
+        .unwrap_err();
+
+    assert!(matches!(error, VoomError::Config(_)));
+    assert!(error.to_string().contains("found 2"));
+}
+
+#[tokio::test]
 async fn create_handle_returns_id() {
     let (pool, _tmp) = pool().await;
     let repo = SqliteArtifactRepo::new(pool.clone());
@@ -176,6 +435,8 @@ async fn record_verification_persists_success_and_failure_rows() {
                 artifact_location_id: location.id,
                 path: "/staging/out.mkv".to_owned(),
                 worker_id,
+                workflow_ticket_id: None,
+                workflow_lease_id: None,
                 status: ArtifactVerificationStatus::Succeeded,
                 expected_size_bytes: 1024,
                 expected_checksum: "abc".to_owned(),
@@ -199,6 +460,8 @@ async fn record_verification_persists_success_and_failure_rows() {
                 artifact_location_id: location.id,
                 path: "/staging/out.mkv".to_owned(),
                 worker_id,
+                workflow_ticket_id: None,
+                workflow_lease_id: None,
                 status: ArtifactVerificationStatus::Failed,
                 expected_size_bytes: 1024,
                 expected_checksum: "abc".to_owned(),
@@ -322,6 +585,94 @@ async fn latest_successful_verification_uses_live_staging_location() {
     assert!(retired_success.id.0 < live_success.id.0);
     assert_eq!(latest.id, latest_live_success.id);
     assert_eq!(latest.report, json!({"label": "live-new"}));
+}
+
+#[tokio::test]
+async fn workflow_verification_is_unique_per_lease_but_allows_ticket_retry() {
+    let (pool, _tmp) = pool().await;
+    let repo = SqliteArtifactRepo::new(pool.clone());
+    let worker_id = verification_worker(&pool).await;
+    let handle = repo.create_handle(sample_new_handle()).await.unwrap();
+    let location = repo
+        .record_location(NewArtifactLocation {
+            artifact_handle_id: handle.id,
+            kind: "local_path".to_owned(),
+            value: "/media/retry.mkv".to_owned(),
+            observed_at: OffsetDateTime::UNIX_EPOCH,
+        })
+        .await
+        .unwrap();
+    seed_ticket_and_leases(&pool, worker_id).await;
+
+    let mut first = successful_verification(
+        handle.id,
+        location.id,
+        worker_id,
+        &location.value,
+        "first",
+        1,
+    );
+    first.workflow_ticket_id = Some(TicketId(1));
+    first.workflow_lease_id = Some(LeaseId(1));
+    let mut tx = pool.begin().await.unwrap();
+    repo.record_verification_in_tx(&mut tx, first.clone())
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+
+    let mut duplicate_tx = pool.begin().await.unwrap();
+    let duplicate = repo
+        .record_verification_in_tx(&mut duplicate_tx, first)
+        .await
+        .unwrap_err();
+    assert!(matches!(duplicate, voom_core::VoomError::Database { .. }));
+    duplicate_tx.rollback().await.unwrap();
+
+    let mut retry = successful_verification(
+        handle.id,
+        location.id,
+        worker_id,
+        &location.value,
+        "retry",
+        2,
+    );
+    retry.workflow_ticket_id = Some(TicketId(1));
+    retry.workflow_lease_id = Some(LeaseId(2));
+    let mut retry_tx = pool.begin().await.unwrap();
+    repo.record_verification_in_tx(&mut retry_tx, retry)
+        .await
+        .unwrap();
+    retry_tx.commit().await.unwrap();
+
+    assert_eq!(repo.list_verifications(handle.id).await.unwrap().len(), 2);
+}
+
+async fn seed_ticket_and_leases(pool: &sqlx::SqlitePool, worker_id: WorkerId) {
+    sqlx::query(
+        "INSERT INTO tickets \
+         (id, kind, state, priority, payload, attempt, max_attempts, \
+          next_eligible_at, created_at, state_changed_at) \
+         VALUES (1, 'verify', 'succeeded', 0, '{}', 1, 3, \
+          '1970-01-01T00:00:00Z', '1970-01-01T00:00:00Z', '1970-01-01T00:00:00Z')",
+    )
+    .execute(pool)
+    .await
+    .unwrap();
+    for id in [1_i64, 2] {
+        sqlx::query(
+            "INSERT INTO leases \
+             (id, ticket_id, worker_id, state, acquired_at, expires_at, \
+              last_heartbeat_at, ttl_seconds, release_reason, released_at) \
+             VALUES (?, 1, ?, 'released', '1970-01-01T00:00:00Z', \
+             '1970-01-01T00:00:01Z', '1970-01-01T00:00:00Z', 1, \
+             'test', '1970-01-01T00:00:01Z')",
+        )
+        .bind(id)
+        .bind(i64::try_from(worker_id.0).unwrap())
+        .execute(pool)
+        .await
+        .unwrap();
+    }
 }
 
 #[tokio::test]
@@ -1477,6 +1828,8 @@ fn successful_verification(
         artifact_location_id,
         path: path.to_owned(),
         worker_id,
+        workflow_ticket_id: None,
+        workflow_lease_id: None,
         status: ArtifactVerificationStatus::Succeeded,
         expected_size_bytes: 1024,
         expected_checksum: "abc".to_owned(),
@@ -1504,6 +1857,8 @@ fn failed_verification(
         artifact_location_id,
         path: path.to_owned(),
         worker_id,
+        workflow_ticket_id: None,
+        workflow_lease_id: None,
         status: ArtifactVerificationStatus::Failed,
         expected_size_bytes: 1024,
         expected_checksum: "abc".to_owned(),

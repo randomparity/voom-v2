@@ -46,6 +46,7 @@ const EXPECTED_MIGRATION_FILES: &[&str] = &[
     "0023_workflow_file_run_history.sql",
     "0024_atomic_audio_extract_operations.sql",
     "0025_recoverable_audio_synthesis.sql",
+    "0026_policy_artifact_verification.sql",
 ];
 
 fn workspace_root() -> PathBuf {
@@ -280,6 +281,175 @@ async fn worker_grant_max_parallel_migration_rewrites_legacy_limit() {
 
     assert_eq!(values[0], serde_json::json!({"*": 3}));
     assert_eq!(values[1], serde_json::json!({"transcode_video": 2}));
+}
+
+#[tokio::test]
+async fn policy_verification_migration_preserves_workflow_progress() {
+    let migration_path = migrations_dir().join("0026_policy_artifact_verification.sql");
+    assert!(
+        migration_path.is_file(),
+        "{} must exist before the upgrade path can be exercised",
+        migration_path.display()
+    );
+
+    let tmp = NamedTempFile::new().unwrap();
+    let url = sqlite_url_for(tmp.path());
+    let pool = connect_or_create(&url).await.unwrap();
+
+    migrator_through(25).run(&pool).await.unwrap();
+
+    let (file_version_id, job_id) = seed_legacy_workflow_progress(&pool).await;
+    seed_legacy_artifact_verification(&pool, file_version_id).await;
+
+    MIGRATOR.run(&pool).await.unwrap();
+
+    let summary: (String, Option<i64>) = sqlx::query_as(
+        "SELECT outcome, artifact_verification_id \
+         FROM workflow_file_phase_summaries \
+         WHERE job_id = ? AND phase_ordinal = 0 AND branch_id = 'movie'",
+    )
+    .bind(job_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let history: String = sqlx::query_scalar(
+        "SELECT outcome FROM workflow_file_run_history \
+         WHERE job_id = ? AND branch_id = 'movie' AND phase_ordinal = 0",
+    )
+    .bind(job_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let verification_owner: (Option<i64>, Option<i64>) =
+        sqlx::query_as("SELECT workflow_ticket_id, workflow_lease_id FROM artifact_verifications")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let violations: Vec<(String, i64, String, i64)> = sqlx::query_as("PRAGMA foreign_key_check")
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+
+    assert_eq!(summary, ("skipped".to_owned(), None));
+    assert_eq!(history, "skipped");
+    assert_eq!(verification_owner, (None, None));
+    assert_eq!(violations, Vec::<(String, i64, String, i64)>::new());
+}
+
+async fn seed_legacy_workflow_progress(pool: &sqlx::SqlitePool) -> (i64, i64) {
+    let now = "2026-07-27T00:00:00Z";
+    let file_asset_id = sqlx::query("INSERT INTO file_assets (created_at) VALUES (?)")
+        .bind(now)
+        .execute(pool)
+        .await
+        .unwrap()
+        .last_insert_rowid();
+    let file_version_id = sqlx::query(
+        "INSERT INTO file_versions \
+         (file_asset_id, content_hash, size_bytes, produced_by, created_at) \
+         VALUES (?, 'blake3:source', 3, 'external_observed', ?)",
+    )
+    .bind(file_asset_id)
+    .bind(now)
+    .execute(pool)
+    .await
+    .unwrap()
+    .last_insert_rowid();
+    let job_id = sqlx::query(
+        "INSERT INTO jobs (kind, state, priority, created_at, updated_at) \
+         VALUES ('policy', 'open', 0, ?, ?)",
+    )
+    .bind(now)
+    .bind(now)
+    .execute(pool)
+    .await
+    .unwrap()
+    .last_insert_rowid();
+    sqlx::query(
+        "INSERT INTO workflow_file_run_starts \
+         (job_id, branch_id, starting_file_version_id, starting_phase_ordinal) \
+         VALUES (?, 'movie', ?, 1)",
+    )
+    .bind(job_id)
+    .bind(file_version_id)
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO workflow_file_run_history \
+         (job_id, branch_id, phase_ordinal, outcome) \
+         VALUES (?, 'movie', 0, 'skipped')",
+    )
+    .bind(job_id)
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO workflow_file_phase_summaries \
+         (job_id, phase_ordinal, branch_id, ticket_ids, outcome, created_at) \
+         VALUES (?, 0, 'movie', '[]', 'skipped', ?)",
+    )
+    .bind(job_id)
+    .bind(now)
+    .execute(pool)
+    .await
+    .unwrap();
+    (file_version_id, job_id)
+}
+
+async fn seed_legacy_artifact_verification(pool: &sqlx::SqlitePool, file_version_id: i64) {
+    let now = "2026-07-27T00:00:00Z";
+    let worker_id = sqlx::query(
+        "INSERT INTO workers \
+         (name, kind, status, registered_at, last_seen_at) \
+         VALUES ('legacy-verifier', 'synthetic', 'active', ?, ?)",
+    )
+    .bind(now)
+    .bind(now)
+    .execute(pool)
+    .await
+    .unwrap()
+    .last_insert_rowid();
+    let artifact_handle_id = sqlx::query(
+        "INSERT INTO artifact_handles \
+         (size_bytes, checksum, privacy_class, durability_class, allowed_access_modes, \
+          mutability, source_lineage, created_at, file_version_id) \
+         VALUES (3, 'blake3:source', 'internal', 'durable', '[\"local_path\"]', \
+                 'immutable', '{}', ?, ?)",
+    )
+    .bind(now)
+    .bind(file_version_id)
+    .execute(pool)
+    .await
+    .unwrap()
+    .last_insert_rowid();
+    let artifact_location_id = sqlx::query(
+        "INSERT INTO artifact_locations \
+         (artifact_handle_id, kind, value, observed_at) \
+         VALUES (?, 'local_path', '/media/source.mkv', ?)",
+    )
+    .bind(artifact_handle_id)
+    .bind(now)
+    .execute(pool)
+    .await
+    .unwrap()
+    .last_insert_rowid();
+    sqlx::query(
+        "INSERT INTO artifact_verifications \
+         (artifact_handle_id, artifact_location_id, path, worker_id, status, \
+          expected_size_bytes, expected_checksum, observed_size_bytes, observed_checksum, \
+          report, started_at, finished_at) \
+         VALUES (?, ?, '/media/source.mkv', ?, 'succeeded', 3, 'blake3:source', \
+                 3, 'blake3:source', '{}', ?, ?)",
+    )
+    .bind(artifact_handle_id)
+    .bind(artifact_location_id)
+    .bind(worker_id)
+    .bind(now)
+    .bind(now)
+    .execute(pool)
+    .await
+    .unwrap();
 }
 
 #[test]

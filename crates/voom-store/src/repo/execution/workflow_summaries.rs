@@ -13,6 +13,7 @@ use std::time::Duration;
 use serde_json::Value;
 use sqlx::{Row, Sqlite, SqlitePool, Transaction};
 use time::OffsetDateTime;
+use voom_core::ids::ArtifactVerificationId;
 use voom_core::{
     ArtifactHandleId, FileLocationId, FileVersionId, JobId, MediaSnapshotId, TicketId, VoomError,
 };
@@ -59,6 +60,7 @@ impl PhaseOutcome {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FilePhaseOutcome {
     Committed,
+    Verified,
     Skipped,
     Blocked,
 }
@@ -68,6 +70,7 @@ impl FilePhaseOutcome {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Committed => "committed",
+            Self::Verified => "verified",
             Self::Skipped => "skipped",
             Self::Blocked => "blocked",
         }
@@ -76,6 +79,7 @@ impl FilePhaseOutcome {
     fn parse(s: &str, table: &'static str) -> Result<Self, VoomError> {
         match s {
             "committed" => Ok(Self::Committed),
+            "verified" => Ok(Self::Verified),
             "skipped" => Ok(Self::Skipped),
             "blocked" => Ok(Self::Blocked),
             other => Err(VoomError::database(format!(
@@ -146,8 +150,9 @@ pub struct PhaseSummary {
     pub created_at: OffsetDateTime,
 }
 
-/// Per-`(file, phase)` summary input. Produced references are `Some` only for a
-/// `Committed` outcome (enforced by a DB CHECK).
+/// Per-`(file, phase)` summary input. File references are present for advancing
+/// `Committed` outcomes and read-only `Verified` outcomes (enforced by a DB
+/// CHECK).
 #[derive(Debug, Clone, PartialEq)]
 pub struct NewFilePhaseSummary {
     pub job_id: JobId,
@@ -162,6 +167,7 @@ pub struct NewFilePhaseSummary {
     pub produced_file_version_id: Option<FileVersionId>,
     pub produced_file_location_id: Option<FileLocationId>,
     pub artifact_handle_id: Option<ArtifactHandleId>,
+    pub artifact_verification_id: Option<ArtifactVerificationId>,
     pub reprobe_snapshot_id: Option<MediaSnapshotId>,
     pub outcome: FilePhaseOutcome,
 }
@@ -177,6 +183,7 @@ pub struct FilePhaseSummary {
     pub produced_file_version_id: Option<FileVersionId>,
     pub produced_file_location_id: Option<FileLocationId>,
     pub artifact_handle_id: Option<ArtifactHandleId>,
+    pub artifact_verification_id: Option<ArtifactVerificationId>,
     pub reprobe_snapshot_id: Option<MediaSnapshotId>,
     pub outcome: FilePhaseOutcome,
     pub created_at: OffsetDateTime,
@@ -238,7 +245,7 @@ const PHASE_COLS: &str =
 
 const FILE_PHASE_COLS: &str = "id, job_id, phase_ordinal, branch_id, ticket_ids, \
      produced_file_version_id, produced_file_location_id, artifact_handle_id, \
-     reprobe_snapshot_id, outcome, created_at";
+     artifact_verification_id, reprobe_snapshot_id, outcome, created_at";
 
 const FILE_RUN_START_COLS: &str =
     "job_id, branch_id, starting_file_version_id, starting_phase_ordinal";
@@ -470,9 +477,9 @@ impl SqliteWorkflowSummaryRepo {
         let res = sqlx::query(
             "INSERT INTO workflow_file_phase_summaries \
              (job_id, phase_ordinal, branch_id, ticket_ids, produced_file_version_id, \
-              produced_file_location_id, artifact_handle_id, reprobe_snapshot_id, outcome, \
-              created_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+              produced_file_location_id, artifact_handle_id, artifact_verification_id, \
+              reprobe_snapshot_id, outcome, created_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
              ON CONFLICT (job_id, phase_ordinal, branch_id) DO NOTHING",
         )
         .bind(i64_from_u64(input.job_id.0))
@@ -482,6 +489,7 @@ impl SqliteWorkflowSummaryRepo {
         .bind(input.produced_file_version_id.map(|i| i64_from_u64(i.0)))
         .bind(input.produced_file_location_id.map(|i| i64_from_u64(i.0)))
         .bind(input.artifact_handle_id.map(|i| i64_from_u64(i.0)))
+        .bind(input.artifact_verification_id.map(|i| i64_from_u64(i.0)))
         .bind(input.reprobe_snapshot_id.map(|i| i64_from_u64(i.0)))
         .bind(input.outcome.as_str())
         .bind(&created)
@@ -514,6 +522,7 @@ impl SqliteWorkflowSummaryRepo {
             produced_file_version_id: input.produced_file_version_id,
             produced_file_location_id: input.produced_file_location_id,
             artifact_handle_id: input.artifact_handle_id,
+            artifact_verification_id: input.artifact_verification_id,
             reprobe_snapshot_id: input.reprobe_snapshot_id,
             outcome: input.outcome,
             created_at: now,
@@ -802,6 +811,7 @@ fn row_to_file_phase(row: &sqlx::sqlite::SqliteRow) -> Result<FilePhaseSummary, 
         produced_file_version_id: opt_id(row, "produced_file_version_id", FileVersionId)?,
         produced_file_location_id: opt_id(row, "produced_file_location_id", FileLocationId)?,
         artifact_handle_id: opt_id(row, "artifact_handle_id", ArtifactHandleId)?,
+        artifact_verification_id: opt_id(row, "artifact_verification_id", ArtifactVerificationId)?,
         reprobe_snapshot_id: opt_id(row, "reprobe_snapshot_id", MediaSnapshotId)?,
         outcome: FilePhaseOutcome::parse(&outcome, t)?,
         created_at: parse_iso8601(&created)?,
