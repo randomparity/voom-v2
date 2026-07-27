@@ -15,6 +15,7 @@ use voom_events::payload::{
 };
 use voom_events::{Event, SubjectType};
 use voom_store::repo::artifacts::{ArtifactCommitState, ArtifactVerificationStatus};
+use voom_store::repo::identity::IdentityRepo;
 use voom_store::repo::media::audio_extract_operations::{
     AudioExtractDispatchAttemptStatus, AudioExtractOperationRecord, AudioExtractOperationState,
     AudioExtractQuiescenceAcknowledgement, NewAudioExtractClaim, NewAudioExtractDispatchAttempt,
@@ -198,6 +199,7 @@ pub struct AcknowledgeExtractDispatchQuiescenceInput {
 pub trait TranscodeAudioDispatcher: Send + Sync {
     async fn dispatch_transcode_audio(
         &self,
+        dispatch_lease_id: LeaseId,
         idempotency_key: &str,
         request: voom_worker_protocol::TranscodeAudioRequest,
     ) -> Result<TranscodeAudioResult, VoomError>;
@@ -466,7 +468,7 @@ async fn execute_replacement_audio(
     let idempotency_key = format!("ticket-{}-lease-{}", input.ticket_id.0, input.lease_id.0);
     let result = dispatchers
         .transcode
-        .dispatch_transcode_audio(&idempotency_key, request)
+        .dispatch_transcode_audio(input.lease_id, &idempotency_key, request)
         .await?;
     context.result = Some(result.clone());
     worker_contract::validate_transcode_result(&selected, &selection, &result)?;
@@ -604,7 +606,11 @@ async fn dispatch_synthesis_result(
     context: &mut TranscodeAttemptContext,
 ) -> Result<TranscodeAudioResult, VoomError> {
     match transcode
-        .dispatch_transcode_audio(&dispatch.attempt.idempotency_key, request)
+        .dispatch_transcode_audio(
+            dispatch.attempt.dispatch_lease_id,
+            &dispatch.attempt.idempotency_key,
+            request,
+        )
         .await
     {
         Ok(result) => {
@@ -753,6 +759,7 @@ async fn claim_synthesis_dispatch(
         .record_dispatch_attempt(
             &claim,
             &NewAudioSynthesisDispatchAttempt {
+                dispatch_lease_id: input.lease_id,
                 worker_id: worker_id.0,
                 worker_epoch,
                 idempotency_key: format!(
@@ -1013,7 +1020,7 @@ async fn finalize_synthesis_lineage(
         VoomError::Internal("audio synthesis commit has no result file location".to_owned())
     })?;
     let result_file_asset_id =
-        synthesis_result_file_asset_id(&mut tx, result_file_version_id).await?;
+        synthesis_result_file_asset_id(cp, &mut tx, result_file_version_id).await?;
     let snapshot = crate::media_snapshot::record_with_event_in_tx(
         cp,
         &mut tx,
@@ -1090,27 +1097,17 @@ async fn finalize_synthesis_lineage(
 }
 
 async fn synthesis_result_file_asset_id(
+    cp: &ControlPlane,
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     result_file_version_id: FileVersionId,
 ) -> Result<voom_core::FileAssetId, VoomError> {
-    let version_id = i64::try_from(result_file_version_id.0).map_err(|error| {
-        VoomError::Internal(format!(
-            "result file version exceeds SQLite integer: {error}"
-        ))
-    })?;
-    let file_asset_id: i64 =
-        sqlx::query_scalar("SELECT file_asset_id FROM file_versions WHERE id = ?")
-            .bind(version_id)
-            .fetch_one(&mut **tx)
-            .await
-            .map_err(|error| {
-                VoomError::database_context("load synthesis result file asset", error)
-            })?;
-    Ok(voom_core::FileAssetId(
-        u64::try_from(file_asset_id).map_err(|error| {
-            VoomError::Internal(format!("negative synthesis result file asset: {error}"))
-        })?,
-    ))
+    cp.identity
+        .get_file_version_in_tx(tx, result_file_version_id)
+        .await?
+        .map(|version| version.file_asset_id)
+        .ok_or_else(|| {
+            VoomError::Internal("committed synthesis result file version disappeared".to_owned())
+        })
 }
 
 fn synthesis_event_companions(

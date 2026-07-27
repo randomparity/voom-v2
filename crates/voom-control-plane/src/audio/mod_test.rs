@@ -423,6 +423,7 @@ async fn active_synthesis_attempt_replays_same_worker_key_and_path_after_restart
         .record_dispatch_attempt(
             &claim,
             &NewAudioSynthesisDispatchAttempt {
+                dispatch_lease_id: input.lease_id,
                 worker_id: 1,
                 worker_epoch: 0,
                 idempotency_key: idempotency_key.clone(),
@@ -440,11 +441,13 @@ async fn active_synthesis_attempt_replays_same_worker_key_and_path_after_restart
         .await
         .unwrap();
 
+    let expected_dispatch_lease_id = input.lease_id;
     let report = execute_transcode_audio_with_dispatchers(
         &cp,
         input,
         &ExpectedKeySynthesisDispatcher {
             expected_key: idempotency_key,
+            expected_dispatch_lease_id,
             output_bytes: b"replayed-synthesis".to_vec(),
         },
         &SuccessfulVerifyDispatcher,
@@ -513,7 +516,7 @@ async fn ambiguous_synthesis_dispatch_error_replays_same_attempt_key() {
     let (cp, _db, dir) = fixture_with_dir().await;
     let mut source = seed_audio_source(&cp, &dir, b"source").await;
     source.snapshot = record_surround_audio_snapshot(&cp, source.version).await;
-    let input = synthesis_input_for_source(&source, &dir);
+    let mut input = synthesis_input_for_source(&source, &dir);
 
     let error = execute_transcode_audio_with_dispatchers(
         &cp,
@@ -532,12 +535,37 @@ async fn ambiguous_synthesis_dispatch_error_replays_same_attempt_key() {
             .await
             .unwrap();
     assert_eq!(status, "active");
+    let now = OffsetDateTime::now_utc();
+    sqlx::query(
+        "UPDATE leases SET state = 'released', release_reason = 'failure', released_at = ? \
+         WHERE id = ?",
+    )
+    .bind(now)
+    .bind(i64::try_from(input.lease_id.0).unwrap())
+    .execute(cp.pool_for_test())
+    .await
+    .unwrap();
+    let successor_lease_id = LeaseId(4);
+    sqlx::query(
+        "INSERT INTO leases \
+         (id, ticket_id, worker_id, state, acquired_at, expires_at, last_heartbeat_at, ttl_seconds) \
+         VALUES (?, 2, 1, 'held', ?, ?, ?, 3600)",
+    )
+    .bind(i64::try_from(successor_lease_id.0).unwrap())
+    .bind(now)
+    .bind(now + time::Duration::hours(1))
+    .bind(now)
+    .execute(cp.pool_for_test())
+    .await
+    .unwrap();
+    input.lease_id = successor_lease_id;
 
     let report = execute_transcode_audio_with_dispatchers(
         &cp,
         input,
         &ExpectedKeySynthesisDispatcher {
             expected_key: idempotency_key,
+            expected_dispatch_lease_id: LeaseId(3),
             output_bytes: b"replayed-after-ambiguous-error".to_vec(),
         },
         &SuccessfulVerifyDispatcher,
@@ -969,6 +997,7 @@ async fn workflow_lease_heartbeat_renews_audio_operation_claims() {
         .record_dispatch_attempt(
             &synthesis_claim,
             &NewAudioSynthesisDispatchAttempt {
+                dispatch_lease_id: LeaseId(3),
                 worker_id: 1,
                 worker_epoch: 0,
                 idempotency_key: "audio-synthesis:synthesize:heartbeat-test:0".to_owned(),
@@ -2812,6 +2841,7 @@ struct UncalledTranscodeDispatcher;
 impl TranscodeAudioDispatcher for UncalledTranscodeDispatcher {
     async fn dispatch_transcode_audio(
         &self,
+        _dispatch_lease_id: LeaseId,
         _idempotency_key: &str,
         _request: TranscodeAudioRequest,
     ) -> Result<TranscodeAudioResult, VoomError> {
@@ -3152,6 +3182,7 @@ struct WritingSynthesisDispatcher {
 
 struct ExpectedKeySynthesisDispatcher {
     expected_key: String,
+    expected_dispatch_lease_id: LeaseId,
     output_bytes: Vec<u8>,
 }
 
@@ -3163,6 +3194,7 @@ struct CrashingSynthesisDispatcher;
 impl TranscodeAudioDispatcher for CrashingSynthesisDispatcher {
     async fn dispatch_transcode_audio(
         &self,
+        _dispatch_lease_id: LeaseId,
         _idempotency_key: &str,
         _request: TranscodeAudioRequest,
     ) -> Result<TranscodeAudioResult, VoomError> {
@@ -3174,6 +3206,7 @@ impl TranscodeAudioDispatcher for CrashingSynthesisDispatcher {
 impl TranscodeAudioDispatcher for PartialSynthesisDispatcher {
     async fn dispatch_transcode_audio(
         &self,
+        _dispatch_lease_id: LeaseId,
         _idempotency_key: &str,
         request: TranscodeAudioRequest,
     ) -> Result<TranscodeAudioResult, VoomError> {
@@ -3209,6 +3242,7 @@ impl TranscodeAudioDispatcher for PartialSynthesisDispatcher {
 impl TranscodeAudioDispatcher for WritingSynthesisDispatcher {
     async fn dispatch_transcode_audio(
         &self,
+        _dispatch_lease_id: LeaseId,
         _idempotency_key: &str,
         request: TranscodeAudioRequest,
     ) -> Result<TranscodeAudioResult, VoomError> {
@@ -3274,14 +3308,16 @@ impl TranscodeAudioDispatcher for WritingSynthesisDispatcher {
 impl TranscodeAudioDispatcher for ExpectedKeySynthesisDispatcher {
     async fn dispatch_transcode_audio(
         &self,
+        dispatch_lease_id: LeaseId,
         idempotency_key: &str,
         request: TranscodeAudioRequest,
     ) -> Result<TranscodeAudioResult, VoomError> {
         assert_eq!(idempotency_key, self.expected_key);
+        assert_eq!(dispatch_lease_id, self.expected_dispatch_lease_id);
         WritingSynthesisDispatcher {
             output_bytes: self.output_bytes.clone(),
         }
-        .dispatch_transcode_audio(idempotency_key, request)
+        .dispatch_transcode_audio(dispatch_lease_id, idempotency_key, request)
         .await
     }
 }
@@ -3290,6 +3326,7 @@ impl TranscodeAudioDispatcher for ExpectedKeySynthesisDispatcher {
 impl TranscodeAudioDispatcher for WritingTranscodeDispatcher {
     async fn dispatch_transcode_audio(
         &self,
+        _dispatch_lease_id: LeaseId,
         _idempotency_key: &str,
         request: TranscodeAudioRequest,
     ) -> Result<TranscodeAudioResult, VoomError> {

@@ -157,20 +157,6 @@ impl ControlPlane {
     ) -> Result<CommitArtifactReport, VoomError> {
         recovery::recover_commit_inner(self, artifact_handle_id).await
     }
-
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "pending recovery is exercised directly by commit crash-boundary tests"
-        )
-    )]
-    pub(crate) async fn recover_pending_commit(
-        &self,
-        artifact_handle_id: ArtifactHandleId,
-    ) -> Result<CommitArtifactReport, VoomError> {
-        recovery::recover_pending_commit_inner(self, artifact_handle_id).await
-    }
 }
 
 #[derive(Debug, Clone, Copy)]

@@ -106,6 +106,7 @@ pub struct NewAudioSynthesisClaim {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewAudioSynthesisDispatchAttempt {
+    pub dispatch_lease_id: LeaseId,
     pub worker_id: u64,
     pub worker_epoch: u32,
     pub idempotency_key: String,
@@ -164,6 +165,7 @@ pub struct AudioSynthesisDispatchAttempt {
     pub id: u64,
     pub operation_id: u64,
     pub generation: u32,
+    pub dispatch_lease_id: LeaseId,
     pub worker_id: u64,
     pub worker_epoch: u32,
     pub idempotency_key: String,
@@ -534,6 +536,11 @@ impl SqliteAudioSynthesisOperationRepo {
         now: OffsetDateTime,
     ) -> Result<AudioSynthesisDispatchAttempt, VoomError> {
         validate_dispatch_attempt(attempt)?;
+        if attempt.dispatch_lease_id != claim.lease_id {
+            return Err(VoomError::Config(
+                "audio synthesis dispatch lease must match the creating claim".to_owned(),
+            ));
+        }
         let mut tx = self
             .pool
             .begin_with("BEGIN IMMEDIATE")
@@ -544,12 +551,13 @@ impl SqliteAudioSynthesisOperationRepo {
         let operation_id = require_live_planned_claim(&mut tx, claim, now).await?;
         let result = sqlx::query(
             "INSERT INTO audio_synthesis_dispatch_attempts \
-             (operation_id, generation, worker_id, worker_epoch, idempotency_key, \
+             (operation_id, generation, dispatch_lease_id, worker_id, worker_epoch, idempotency_key, \
               attempt_directory, staging_path, status, created_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?)",
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', ?)",
         )
         .bind(i64_from_u64(operation_id))
         .bind(i64::from(claim.expected_generation))
+        .bind(i64_from_u64(attempt.dispatch_lease_id.0))
         .bind(i64_from_u64(attempt.worker_id))
         .bind(i64::from(attempt.worker_epoch))
         .bind(&attempt.idempotency_key)
@@ -1141,6 +1149,10 @@ async fn load_dispatch_attempt(
         id: u64_from_i64(row.try_get("id").map_err(synthesis_row_err)?),
         operation_id: u64_from_i64(row.try_get("operation_id").map_err(synthesis_row_err)?),
         generation: u32_from_i64(row.try_get("generation").map_err(synthesis_row_err)?)?,
+        dispatch_lease_id: LeaseId(u64_from_i64(
+            row.try_get("dispatch_lease_id")
+                .map_err(synthesis_row_err)?,
+        )),
         worker_id: u64_from_i64(row.try_get("worker_id").map_err(synthesis_row_err)?),
         worker_epoch: u32_from_i64(row.try_get("worker_epoch").map_err(synthesis_row_err)?)?,
         idempotency_key: row.try_get("idempotency_key").map_err(synthesis_row_err)?,

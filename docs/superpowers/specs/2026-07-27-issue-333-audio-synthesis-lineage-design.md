@@ -237,8 +237,9 @@ One ordered row per descriptor:
 
 ### Dispatch attempts
 
-One attempt row per operation generation records worker ID/epoch, idempotency
-key, exact attempt directory/path, and terminal/quarantined status. The key is:
+One attempt row per operation generation records the original wire lease,
+worker ID/epoch, idempotency key, exact attempt directory/path, and
+terminal/quarantined status. The key is:
 
 ```text
 audio-synthesis:<operation-key>:<generation>
@@ -283,7 +284,8 @@ operation claim. Claim loss stops the former actor before further mutation.
 The first generation writes beneath a private operation/generation directory.
 The attempt row and exact path are durable before send.
 
-- Same live worker epoch after restart: replay the exact key/path.
+- Same live worker epoch after restart: replay the exact key/path and original
+  wire lease even when the workflow retry owns a successor lease.
 - Terminal response: validate and bind only if generation/claim still match.
 - Worker epoch unavailable: quarantine the attempt, increment generation, and
   dispatch to a new path.

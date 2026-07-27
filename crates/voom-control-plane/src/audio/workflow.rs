@@ -188,6 +188,7 @@ struct RuntimeTranscodeAudioDispatcher<'a> {
 impl TranscodeAudioDispatcher for RuntimeTranscodeAudioDispatcher<'_> {
     async fn dispatch_transcode_audio(
         &self,
+        dispatch_lease_id: voom_core::LeaseId,
         idempotency_key: &str,
         request: TranscodeAudioRequest,
     ) -> Result<TranscodeAudioResult, VoomError> {
@@ -197,7 +198,7 @@ impl TranscodeAudioDispatcher for RuntimeTranscodeAudioDispatcher<'_> {
             crate::audio::dispatch::dispatch_transcode_audio_with_client_context(
                 self.context.runtime.client.as_ref(),
                 &self.context.runtime.credentials,
-                self.context.lease_id,
+                dispatch_lease_id,
                 idempotency_key,
                 request,
             ),

@@ -127,6 +127,7 @@ CREATE TABLE audio_synthesis_dispatch_attempts (
     operation_id           INTEGER NOT NULL
         REFERENCES audio_synthesis_operations(id) ON DELETE CASCADE,
     generation             INTEGER NOT NULL CHECK (generation >= 0),
+    dispatch_lease_id      INTEGER NOT NULL REFERENCES leases(id) ON DELETE RESTRICT,
     worker_id              INTEGER NOT NULL REFERENCES workers(id) ON DELETE RESTRICT,
     worker_epoch           INTEGER NOT NULL CHECK (worker_epoch >= 0),
     idempotency_key        TEXT NOT NULL UNIQUE CHECK (length(idempotency_key) > 0),

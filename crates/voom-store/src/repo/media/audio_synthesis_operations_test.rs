@@ -254,6 +254,7 @@ async fn claim_and_generation_fence_dispatch_paths() {
         .record_dispatch_attempt(
             &first_claim,
             &NewAudioSynthesisDispatchAttempt {
+                dispatch_lease_id: fixture.lease_id,
                 worker_id: fixture.worker_id,
                 worker_epoch: 7,
                 idempotency_key: "synthesis:key:0".to_owned(),
@@ -286,6 +287,7 @@ async fn claim_and_generation_fence_dispatch_paths() {
         .record_dispatch_attempt(
             &second_claim,
             &NewAudioSynthesisDispatchAttempt {
+                dispatch_lease_id: fixture.lease_id,
                 worker_id: fixture.worker_id,
                 worker_epoch: 8,
                 idempotency_key: "synthesis:key:1".to_owned(),

@@ -70,8 +70,10 @@ this decision, so no historical committed synthesis artifact can be proven.
 A live, expiring claim tied to the workflow lease fences every noncommitted
 operation mutation. Each worker generation uses a distinct private staging
 path and a stable idempotency key derived from the operation key and
-generation. The dispatch attempt, worker identity/epoch, key, and exact path
-are durable before send.
+generation. The dispatch attempt, original wire lease, worker identity/epoch,
+key, and exact path are durable before send. A successor workflow lease
+heartbeats its own lease while replaying the worker request with the original
+wire lease, preserving the exact idempotency body and cached response contract.
 
 A host restart first replays the same key to the same live worker epoch. A
 persisted terminal attempt advances to a new generation because its response

@@ -29,6 +29,7 @@ pub struct BundledExtractAudioDispatcher;
 impl TranscodeAudioDispatcher for BundledTranscodeAudioDispatcher {
     async fn dispatch_transcode_audio(
         &self,
+        dispatch_lease_id: LeaseId,
         idempotency_key: &str,
         request: TranscodeAudioRequest,
     ) -> Result<TranscodeAudioResult, VoomError> {
@@ -39,7 +40,7 @@ impl TranscodeAudioDispatcher for BundledTranscodeAudioDispatcher {
         let result = dispatch_transcode_audio_with_client_context(
             &worker.client,
             &worker.credentials,
-            LeaseId(0),
+            dispatch_lease_id,
             idempotency_key,
             request,
         )

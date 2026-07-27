@@ -402,37 +402,6 @@ async fn recover_commit_repromotes_when_target_absent() {
 }
 
 #[tokio::test]
-async fn owned_pending_commit_repromotes_after_process_boundary() {
-    let (cp, _db, dir) = fixture().await;
-    let staged = stage_and_verify_bytes(&cp, dir.path(), b"source bytes").await;
-    let target = dir.path().join("target.bin");
-
-    let prepared = prepare::prepare_commit(
-        &cp,
-        CommitArtifactInput {
-            artifact_handle_id: staged.artifact_handle_id,
-            target_path: target.clone(),
-        },
-    )
-    .await
-    .unwrap();
-    drop(prepared);
-    assert!(!target.exists());
-
-    let report = cp
-        .recover_pending_commit(staged.artifact_handle_id)
-        .await
-        .unwrap();
-
-    assert_eq!(report.state, ArtifactCommitState::Committed);
-    assert_eq!(std::fs::read(&target).unwrap(), b"source bytes");
-    assert_eq!(
-        count_commit_records(&cp, staged.artifact_handle_id).await,
-        1
-    );
-}
-
-#[tokio::test]
 async fn recover_commit_errors_when_target_stat_fails_non_absent() {
     let (cp, _db, dir) = fixture().await;
     let staged = stage_and_verify_bytes(&cp, dir.path(), b"source bytes").await;

@@ -50,13 +50,6 @@ pub(super) async fn recover_commit_inner(
     .await
 }
 
-pub(super) async fn recover_pending_commit_inner(
-    cp: &ControlPlane,
-    artifact_handle_id: ArtifactHandleId,
-) -> Result<CommitArtifactReport, VoomError> {
-    recover_commit_from_state(cp, artifact_handle_id, ArtifactCommitState::Pending).await
-}
-
 async fn recover_commit_from_state(
     cp: &ControlPlane,
     artifact_handle_id: ArtifactHandleId,
