@@ -1,7 +1,7 @@
 # Issue #338 — Published Grammar CLI Corpus Execution
 
 Date: 2026-07-27
-Status: Draft
+Status: Approved
 Base: `main` at `e3eacd93848bca40bb68e1383b83ee96de3f8326`
 
 ## Context
@@ -192,8 +192,9 @@ Generate the three documented files:
 After scan, derive F1c's source file-version id from the scan envelope. Before
 execution, create the exact remux working target
 `<staging>/.committed/remux/v<file-version-id>/fail.remux.mkv` with different
-bytes. This makes F1c fail at the add-only operation commit guard before any
-dependent phase dispatch, while F1a continues and F1b exercises
+bytes. This makes F1c fail at the add-only target-preparation guard before any
+mutation-worker dispatch or dependent phase dispatch, while F1a continues and
+F1b exercises
 completed-but-unmodified gates. A flat `fail.mkv` in the final output directory
 would not exercise this guard because terminal promotion happens only after
 the phase chain completes.

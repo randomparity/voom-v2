@@ -84,9 +84,9 @@ The set contains these exact cases:
   source file-version id and before the batch starts, create the exact remux
   working target
   `.committed/remux/v<file-version-id>/fail.remux.mkv` with different bytes.
-  The existing-target operation commit guard makes F1c's `inspect` remux fail
-  deterministically before terminal promotion; its dependent phases do not run,
-  while F1a continues and commits.
+  The existing-target preparation guard makes F1c's `inspect` remux fail
+  deterministically before mutation-worker dispatch or terminal promotion; its
+  dependent phases do not run, while F1a continues and commits.
 - Focused coordinator tests owned by #330 resume F1a after two durable
   boundaries: first after the `inspect` per-file summary is committed and
   before `normalize` dispatch, then after the `normalize` summary is committed
