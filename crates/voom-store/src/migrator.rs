@@ -97,6 +97,11 @@ const MIGRATION_0022_SQL: &str =
 const MIGRATION_0023_SQL: &str =
     include_str!("../../../migrations/0023_workflow_file_run_history.sql");
 
+/// SQL for migration 0024 (atomic plural audio extraction, #337), embedded at
+/// compile time.
+const MIGRATION_0024_SQL: &str =
+    include_str!("../../../migrations/0024_atomic_audio_extract_operations.sql");
+
 /// Embedded migration set, constructed without the `sqlx::migrate!` macro.
 ///
 /// We don't use sqlx's `macros` feature: it pulls `sqlx-macros-core`, which
@@ -271,6 +276,13 @@ pub static MIGRATOR: LazyLock<Migrator> = LazyLock::new(|| Migrator {
             Cow::Borrowed("workflow_file_run_history"),
             MigrationType::Simple,
             Cow::Borrowed(MIGRATION_0023_SQL),
+            false,
+        ),
+        Migration::new(
+            24,
+            Cow::Borrowed("atomic_audio_extract_operations"),
+            MigrationType::Simple,
+            Cow::Borrowed(MIGRATION_0024_SQL),
             false,
         ),
     ]),

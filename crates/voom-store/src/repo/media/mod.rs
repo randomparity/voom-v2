@@ -2,6 +2,7 @@ use super::{Repository, common};
 
 pub mod artifact_access_plans;
 pub mod artifacts;
+pub mod audio_extract_operations;
 pub mod backups;
 pub mod bundles;
 pub mod commit_safety_gate;
