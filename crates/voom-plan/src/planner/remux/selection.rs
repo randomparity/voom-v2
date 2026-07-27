@@ -122,7 +122,7 @@ pub fn evaluate_filter(
     stream: &SnapshotStreamFact,
 ) -> Result<bool, RemuxPlanningBlock> {
     match filter {
-        TrackFilter::LanguageIn { values } => {
+        TrackFilter::LanguageIn(voom_policy::compiled::LanguageInTrackFilter { values }) => {
             let language = match &stream.language {
                 SnapshotFact::Missing => "und",
                 SnapshotFact::Value(language) => language,
@@ -132,40 +132,52 @@ pub fn evaluate_filter(
             };
             Ok(values.iter().any(|value| value == language))
         }
-        TrackFilter::CodecIn { values } => {
+        TrackFilter::CodecIn(voom_policy::compiled::CodecInTrackFilter { values }) => {
             let codec_name = stream
                 .codec_name
                 .as_ref()
                 .ok_or(RemuxPlanningBlock::InsufficientSnapshotFacts)?;
             Ok(values.iter().any(|value| value == codec_name))
         }
-        TrackFilter::Channels { op, value } => {
+        TrackFilter::Channels(voom_policy::compiled::ChannelsTrackFilter { op, value }) => {
             let channels = stream
                 .channels
                 .ok_or(RemuxPlanningBlock::InsufficientSnapshotFacts)?;
             Ok(compare_u64(u64::from(channels), *op, *value))
         }
-        TrackFilter::Commentary => required_bool_fact(&stream.commentary),
-        TrackFilter::TitleMatches { .. } => Err(RemuxPlanningBlock::UnsupportedMediaShape),
-        TrackFilter::Forced => required_bool_fact(&stream.is_forced),
-        TrackFilter::Default => required_bool_fact(&stream.is_default),
-        TrackFilter::Font => evaluate_font_filter(stream),
-        TrackFilter::TitleContains { value } => {
+        TrackFilter::Commentary(voom_policy::compiled::CommentaryTrackFilter {}) => {
+            required_bool_fact(&stream.commentary)
+        }
+        TrackFilter::TitleMatches(voom_policy::compiled::TitleMatchesTrackFilter { .. }) => {
+            Err(RemuxPlanningBlock::UnsupportedMediaShape)
+        }
+        TrackFilter::Forced(voom_policy::compiled::ForcedTrackFilter {}) => {
+            required_bool_fact(&stream.is_forced)
+        }
+        TrackFilter::Default(voom_policy::compiled::DefaultTrackFilter {}) => {
+            required_bool_fact(&stream.is_default)
+        }
+        TrackFilter::Font(voom_policy::compiled::FontTrackFilter {}) => {
+            evaluate_font_filter(stream)
+        }
+        TrackFilter::TitleContains(voom_policy::compiled::TitleContainsTrackFilter { value }) => {
             let title = stream
                 .title
                 .as_ref()
                 .ok_or(RemuxPlanningBlock::InsufficientSnapshotFacts)?;
             Ok(title.contains(value))
         }
-        TrackFilter::Not { inner } => Ok(!evaluate_filter(inner, stream)?),
-        TrackFilter::And { filters } => {
+        TrackFilter::Not(voom_policy::compiled::NotTrackFilter { inner }) => {
+            Ok(!evaluate_filter(inner, stream)?)
+        }
+        TrackFilter::And(voom_policy::compiled::AndTrackFilter { filters }) => {
             let mut matched = true;
             for filter in filters {
                 matched = evaluate_filter(filter, stream)? && matched;
             }
             Ok(matched)
         }
-        TrackFilter::Or { filters } => {
+        TrackFilter::Or(voom_policy::compiled::OrTrackFilter { filters }) => {
             let mut insufficient = false;
             for filter in filters {
                 match evaluate_filter(filter, stream) {

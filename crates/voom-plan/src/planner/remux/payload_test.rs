@@ -84,7 +84,10 @@ fn remux_payload_accepts_attachment_actions_with_exact_filters() {
     let payload = RemuxOperationPayload::try_from_execution_value(&payload_json).unwrap();
 
     assert_eq!(payload.track_actions[0].target, TrackTarget::Attachment);
-    assert_eq!(payload.track_actions[0].filter, Some(TrackFilter::Font));
+    assert_eq!(
+        payload.track_actions[0].filter,
+        Some(TrackFilter::Font(voom_policy::compiled::FontTrackFilter {}))
+    );
 }
 
 #[test]

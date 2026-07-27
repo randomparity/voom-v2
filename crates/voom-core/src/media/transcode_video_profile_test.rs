@@ -48,6 +48,16 @@ fn default_hevc_profile_serializes_minimal_superset() {
 }
 
 #[test]
+fn transcode_video_profile_rejects_unknown_durable_fields() {
+    let mut value = serde_json::to_value(TranscodeVideoProfile::default_hevc()).unwrap();
+    value["future_profile"] = serde_json::json!(true);
+
+    let error = serde_json::from_value::<TranscodeVideoProfile>(value).unwrap_err();
+
+    assert!(error.to_string().contains("unknown field `future_profile`"));
+}
+
+#[test]
 fn profile_validates_against_its_encoder_descriptor() {
     let ok = TranscodeVideoProfile::default_hevc();
     assert!(validate_profile_against_descriptor(&ok).is_ok());

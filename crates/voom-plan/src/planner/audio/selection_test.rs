@@ -45,10 +45,10 @@ fn synthesize_audio_shape_blocks_when_target_is_not_a_downmix() {
 #[test]
 fn synthesize_audio_shape_blocks_when_filter_matches_nothing() {
     let snapshot = snapshot_with_audio_facts(vec![surround_fact()]);
-    let filter = TrackFilter::Channels {
+    let filter = TrackFilter::Channels(voom_policy::compiled::ChannelsTrackFilter {
         op: ComparisonOp::Gte,
         value: 8,
-    };
+    });
     assert_eq!(
         synthesize_audio_shape(&snapshot, 2, Some(&filter)),
         AudioPlanShape::Blocked(AudioPlanningBlock::ZeroMatches)
@@ -153,11 +153,17 @@ fn commentary_filter_requires_known_commentary_fact() {
     let unknown_stream = audio_fact(None);
 
     assert_eq!(
-        evaluate_audio_filter(&TrackFilter::Commentary, &commentary_stream),
+        evaluate_audio_filter(
+            &TrackFilter::Commentary(voom_policy::compiled::CommentaryTrackFilter {}),
+            &commentary_stream
+        ),
         Ok(true)
     );
     assert_eq!(
-        evaluate_audio_filter(&TrackFilter::Commentary, &unknown_stream),
+        evaluate_audio_filter(
+            &TrackFilter::Commentary(voom_policy::compiled::CommentaryTrackFilter {}),
+            &unknown_stream
+        ),
         Err(AudioPlanningBlock::InsufficientSnapshotFacts)
     );
 }
@@ -220,28 +226,28 @@ fn transcode_audio_shape_blocks_stream_without_codec() {
 fn audio_and_filter_false_branch_beats_later_missing_fact() {
     let mut stream = audio_fact(None);
     stream.language = Some("jpn".to_owned());
-    let filter = TrackFilter::And {
+    let filter = TrackFilter::And(voom_policy::compiled::AndTrackFilter {
         filters: vec![
-            TrackFilter::LanguageIn {
+            TrackFilter::LanguageIn(voom_policy::compiled::LanguageInTrackFilter {
                 values: vec!["eng".to_owned()],
-            },
-            TrackFilter::Commentary,
+            }),
+            TrackFilter::Commentary(voom_policy::compiled::CommentaryTrackFilter {}),
         ],
-    };
+    });
 
     assert_eq!(evaluate_audio_filter(&filter, &stream), Ok(false));
 }
 
 #[test]
 fn audio_or_filter_does_not_mask_unsupported_selector() {
-    let filter = TrackFilter::Or {
+    let filter = TrackFilter::Or(voom_policy::compiled::OrTrackFilter {
         filters: vec![
-            TrackFilter::LanguageIn {
+            TrackFilter::LanguageIn(voom_policy::compiled::LanguageInTrackFilter {
                 values: vec!["eng".to_owned()],
-            },
-            TrackFilter::Font,
+            }),
+            TrackFilter::Font(voom_policy::compiled::FontTrackFilter {}),
         ],
-    };
+    });
 
     assert_eq!(
         evaluate_audio_filter(&filter, &audio_fact(Some(false))),
@@ -260,18 +266,18 @@ fn audio_language_filter_untagged_matches_as_und() {
 
     assert_eq!(
         evaluate_audio_filter(
-            &TrackFilter::LanguageIn {
+            &TrackFilter::LanguageIn(voom_policy::compiled::LanguageInTrackFilter {
                 values: vec!["eng".to_owned()],
-            },
+            }),
             &untagged,
         ),
         Ok(false)
     );
     assert_eq!(
         evaluate_audio_filter(
-            &TrackFilter::LanguageIn {
+            &TrackFilter::LanguageIn(voom_policy::compiled::LanguageInTrackFilter {
                 values: vec!["und".to_owned()],
-            },
+            }),
             &untagged,
         ),
         Ok(true)
@@ -287,18 +293,18 @@ fn audio_language_filter_explicit_und_matches_like_untagged() {
 
     assert_eq!(
         evaluate_audio_filter(
-            &TrackFilter::LanguageIn {
+            &TrackFilter::LanguageIn(voom_policy::compiled::LanguageInTrackFilter {
                 values: vec!["und".to_owned()],
-            },
+            }),
             &explicit_und,
         ),
         Ok(true)
     );
     assert_eq!(
         evaluate_audio_filter(
-            &TrackFilter::LanguageIn {
+            &TrackFilter::LanguageIn(voom_policy::compiled::LanguageInTrackFilter {
                 values: vec!["eng".to_owned()],
-            },
+            }),
             &explicit_und,
         ),
         Ok(false)

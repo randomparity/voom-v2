@@ -2,46 +2,37 @@ use std::collections::BTreeMap;
 
 use crate::PolicyDiagnostic;
 
-#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CompiledConfig {
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "deserialize_languages"
+    )]
     pub languages: Vec<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_on_error"
+    )]
     pub on_error: Option<ErrorStrategy>,
 }
 
-impl<'de> serde::Deserialize<'de> for CompiledConfig {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let values =
-            <BTreeMap<String, serde_json::Value> as serde::Deserialize>::deserialize(deserializer)?;
-        if let Some(key) = values
-            .keys()
-            .find(|key| !matches!(key.as_str(), "languages" | "on_error"))
-        {
-            return Err(serde::de::Error::custom(format!(
-                "config contains unknown field `{key}`"
-            )));
-        }
-        let languages = values
-            .get("languages")
-            .map(decode_languages)
-            .transpose()
-            .map_err(serde::de::Error::custom)?
-            .unwrap_or_default();
-        let on_error = values
-            .get("on_error")
-            .map(decode_on_error)
-            .transpose()
-            .map_err(serde::de::Error::custom)?
-            .flatten();
-        Ok(Self {
-            languages,
-            on_error,
-        })
-    }
+fn deserialize_languages<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = <serde_json::Value as serde::Deserialize>::deserialize(deserializer)?;
+    decode_languages(&value).map_err(serde::de::Error::custom)
+}
+
+fn deserialize_on_error<'de, D>(deserializer: D) -> Result<Option<ErrorStrategy>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = <serde_json::Value as serde::Deserialize>::deserialize(deserializer)?;
+    decode_on_error(&value).map_err(serde::de::Error::custom)
 }
 
 fn decode_languages(value: &serde_json::Value) -> Result<Vec<String>, String> {
@@ -209,6 +200,7 @@ impl std::fmt::Display for RequiredToolsError {
 impl std::error::Error for RequiredToolsError {}
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CompiledPolicy {
     pub policy_name: String,
     pub slug: String,
@@ -289,6 +281,7 @@ impl CompiledPolicy {
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PolicyProvenance {
     pub compiler: String,
     pub format: String,
@@ -306,6 +299,7 @@ impl Default for PolicyProvenance {
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CompiledPhase {
     pub name: String,
     pub depends_on: Vec<String>,
@@ -315,6 +309,7 @@ pub struct CompiledPhase {
     pub operations: Vec<CompiledOperation>,
 }
 
+// payload-contract: exempt — Deserialize delegates to strict CompiledRunIfWire.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(try_from = "CompiledRunIfWire", into = "CompiledRunIfWire")]
 pub struct CompiledRunIf {
@@ -403,91 +398,148 @@ impl From<CompiledRunIf> for CompiledRunIfWire {
     reason = "TranscodeVideo.resolved_profile is a pinned cross-phase contract field (Phase 6 fills it in-memory); boxing would diverge from the Sprint 15 plan's typed signature"
 )]
 pub enum CompiledOperation {
-    SetContainer {
-        container: String,
-    },
-    KeepTracks {
-        target: TrackTarget,
-        filter: Option<TrackFilter>,
-    },
-    RemoveTracks {
-        target: TrackTarget,
-        filter: Option<TrackFilter>,
-    },
-    ReorderTracks {
-        targets: Vec<TrackTarget>,
-        /// `order tracks … where <filter>` pins the single filter-selected track
-        /// to the head of the track order, ahead of the group order. Additive
-        /// since ADR 0023 (#277); absent ⇒ group-only ordering.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        head_filter: Option<TrackFilter>,
-    },
-    SetDefaults {
-        target: TrackTarget,
-        strategy: DefaultStrategy,
-        /// `defaults … where <filter>` makes the single filter-selected track
-        /// the default for its group. Additive since ADR 0023 (#277); when
-        /// present, `strategy` is not consulted. Absent ⇒ strategy-only.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        filter: Option<TrackFilter>,
-    },
-    ClearTrackActions {
-        target: TrackTarget,
-    },
-    ClearTags,
-    SetTag {
-        key: String,
-        value: CompiledValue,
-    },
-    DeleteTag {
-        key: String,
-    },
-    TranscodeVideo {
-        target_codec: String,
-        container: String,
-        profile: crate::VideoProfileRef,
-        /// Populated in-memory by the control plane's resolution step
-        /// (Phase 6) before planning; never written to `compiled_json`
-        /// (skipped when `None`, defaults to `None` on read) so stored
-        /// rows and `source_hash` are unaffected and legacy bare-string
-        /// policies still deserialize.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        resolved_profile: Option<voom_core::TranscodeVideoProfile>,
-    },
-    TranscodeAudio {
-        target_codec: String,
-        container: String,
-        filter: Option<TrackFilter>,
-    },
-    ExtractAudio {
-        target_codec: String,
-        container: String,
-        filter: Option<TrackFilter>,
-    },
-    /// `synthesize audio from <filter> { codec … channels … }` — add a
-    /// downmixed companion track derived from the filter-selected source
-    /// stream(s) (ADR 0026, #276). Unlike `TranscodeAudio` this *adds* a stream
-    /// rather than replacing it; `target_channels` is the companion's channel
-    /// count (a downmix, so fewer than the source).
-    SynthesizeAudio {
-        target_codec: String,
-        container: String,
-        target_channels: u64,
-        filter: Option<TrackFilter>,
-    },
-    /// `verify artifact` — verify the produced artifact against its expected
-    /// facts. The spec production takes no arguments, so the variant is
-    /// fieldless; the target artifact is identified by the plan node's target
-    /// and snapshot, not by operation parameters.
-    VerifyArtifact,
-    Conditional {
-        condition: CompiledCondition,
-        operations: Vec<CompiledOperation>,
-    },
-    Rules {
-        mode: RuleMatchMode,
-        rules: Vec<CompiledRule>,
-    },
+    SetContainer(CompiledSetContainerOperation),
+    KeepTracks(CompiledKeepTracksOperation),
+    RemoveTracks(CompiledRemoveTracksOperation),
+    ReorderTracks(CompiledReorderTracksOperation),
+    SetDefaults(CompiledSetDefaultsOperation),
+    ClearTrackActions(CompiledClearTrackActionsOperation),
+    ClearTags(CompiledClearTagsOperation),
+    SetTag(CompiledSetTagOperation),
+    DeleteTag(CompiledDeleteTagOperation),
+    TranscodeVideo(CompiledTranscodeVideoOperation),
+    TranscodeAudio(CompiledTranscodeAudioOperation),
+    ExtractAudio(CompiledExtractAudioOperation),
+    SynthesizeAudio(CompiledSynthesizeAudioOperation),
+    VerifyArtifact(CompiledVerifyArtifactOperation),
+    Conditional(CompiledConditionalOperation),
+    Rules(CompiledRulesOperation),
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CompiledSetContainerOperation {
+    pub container: String,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CompiledKeepTracksOperation {
+    pub target: TrackTarget,
+    pub filter: Option<TrackFilter>,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CompiledRemoveTracksOperation {
+    pub target: TrackTarget,
+    pub filter: Option<TrackFilter>,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CompiledReorderTracksOperation {
+    pub targets: Vec<TrackTarget>,
+    /// `order tracks … where <filter>` pins the single filter-selected track
+    /// to the head of the track order, ahead of the group order. Additive since
+    /// ADR 0023 (#277); absent means group-only ordering.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub head_filter: Option<TrackFilter>,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CompiledSetDefaultsOperation {
+    pub target: TrackTarget,
+    pub strategy: DefaultStrategy,
+    /// `defaults … where <filter>` makes the single filter-selected track the
+    /// default for its group. Additive since ADR 0023 (#277); when present,
+    /// `strategy` is not consulted. Absent means strategy-only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filter: Option<TrackFilter>,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CompiledClearTrackActionsOperation {
+    pub target: TrackTarget,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CompiledClearTagsOperation {}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CompiledSetTagOperation {
+    pub key: String,
+    pub value: CompiledValue,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CompiledDeleteTagOperation {
+    pub key: String,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CompiledTranscodeVideoOperation {
+    pub target_codec: String,
+    pub container: String,
+    pub profile: crate::VideoProfileRef,
+    /// Populated in-memory by the control plane's resolution step before
+    /// planning. It is never written to `compiled_json`, so stored rows and
+    /// `source_hash` are unaffected and legacy bare-string profiles remain
+    /// readable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_profile: Option<voom_core::TranscodeVideoProfile>,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CompiledTranscodeAudioOperation {
+    pub target_codec: String,
+    pub container: String,
+    pub filter: Option<TrackFilter>,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CompiledExtractAudioOperation {
+    pub target_codec: String,
+    pub container: String,
+    pub filter: Option<TrackFilter>,
+}
+
+/// `synthesize audio from <filter> { codec … channels … }` adds a downmixed
+/// companion track derived from the filter-selected source streams.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CompiledSynthesizeAudioOperation {
+    pub target_codec: String,
+    pub container: String,
+    pub target_channels: u64,
+    pub filter: Option<TrackFilter>,
+}
+
+/// `verify artifact` takes no arguments; the plan node identifies the target.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CompiledVerifyArtifactOperation {}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CompiledConditionalOperation {
+    pub condition: CompiledCondition,
+    pub operations: Vec<CompiledOperation>,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CompiledRulesOperation {
+    pub mode: RuleMatchMode,
+    pub rules: Vec<CompiledRule>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -502,55 +554,153 @@ pub enum TrackTarget {
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum TrackFilter {
-    LanguageIn { values: Vec<String> },
-    CodecIn { values: Vec<String> },
-    Channels { op: ComparisonOp, value: u64 },
-    Commentary,
-    Forced,
-    Default,
-    Font,
-    TitleContains { value: String },
-    TitleMatches { value: String },
-    Not { inner: Box<TrackFilter> },
-    And { filters: Vec<TrackFilter> },
-    Or { filters: Vec<TrackFilter> },
+    LanguageIn(LanguageInTrackFilter),
+    CodecIn(CodecInTrackFilter),
+    Channels(ChannelsTrackFilter),
+    Commentary(CommentaryTrackFilter),
+    Forced(ForcedTrackFilter),
+    Default(DefaultTrackFilter),
+    Font(FontTrackFilter),
+    TitleContains(TitleContainsTrackFilter),
+    TitleMatches(TitleMatchesTrackFilter),
+    Not(NotTrackFilter),
+    And(AndTrackFilter),
+    Or(OrTrackFilter),
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LanguageInTrackFilter {
+    pub values: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CodecInTrackFilter {
+    pub values: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChannelsTrackFilter {
+    pub op: ComparisonOp,
+    pub value: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CommentaryTrackFilter {}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ForcedTrackFilter {}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DefaultTrackFilter {}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FontTrackFilter {}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TitleContainsTrackFilter {
+    pub value: String,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TitleMatchesTrackFilter {
+    pub value: String,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NotTrackFilter {
+    pub inner: Box<TrackFilter>,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AndTrackFilter {
+    pub filters: Vec<TrackFilter>,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OrTrackFilter {
+    pub filters: Vec<TrackFilter>,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum CompiledCondition {
-    Exists {
-        target: TrackTarget,
-        filter: Option<TrackFilter>,
-    },
-    Count {
-        target: TrackTarget,
-        op: ComparisonOp,
-        value: u64,
-    },
-    FieldComparison {
-        path: Vec<String>,
-        op: ComparisonOp,
-        value: CompiledValue,
-    },
-    FieldExists {
-        path: Vec<String>,
-    },
-    Predicate {
-        name: String,
-    },
-    Not {
-        inner: Box<CompiledCondition>,
-    },
-    And {
-        conditions: Vec<CompiledCondition>,
-    },
-    Or {
-        conditions: Vec<CompiledCondition>,
-    },
+    Exists(CompiledExistsCondition),
+    Count(CompiledCountCondition),
+    FieldComparison(CompiledFieldComparisonCondition),
+    FieldExists(CompiledFieldExistsCondition),
+    Predicate(CompiledPredicateCondition),
+    Not(CompiledNotCondition),
+    And(CompiledAndCondition),
+    Or(CompiledOrCondition),
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CompiledExistsCondition {
+    pub target: TrackTarget,
+    pub filter: Option<TrackFilter>,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CompiledCountCondition {
+    pub target: TrackTarget,
+    pub op: ComparisonOp,
+    pub value: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CompiledFieldComparisonCondition {
+    pub path: Vec<String>,
+    pub op: ComparisonOp,
+    pub value: CompiledValue,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CompiledFieldExistsCondition {
+    pub path: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CompiledPredicateCondition {
+    pub name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CompiledNotCondition {
+    pub inner: Box<CompiledCondition>,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CompiledAndCondition {
+    pub conditions: Vec<CompiledCondition>,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CompiledOrCondition {
+    pub conditions: Vec<CompiledCondition>,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CompiledRule {
     pub name: String,
     pub condition: Option<CompiledCondition>,
@@ -560,11 +710,41 @@ pub struct CompiledRule {
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum CompiledValue {
-    String { value: String },
-    Number { value: String },
-    Boolean { value: bool },
-    FieldPath { path: Vec<String> },
-    List { values: Vec<CompiledValue> },
+    String(CompiledStringValue),
+    Number(CompiledNumberValue),
+    Boolean(CompiledBooleanValue),
+    FieldPath(CompiledFieldPathValue),
+    List(CompiledListValue),
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CompiledStringValue {
+    pub value: String,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CompiledNumberValue {
+    pub value: String,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CompiledBooleanValue {
+    pub value: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CompiledFieldPathValue {
+    pub path: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CompiledListValue {
+    pub values: Vec<CompiledValue>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

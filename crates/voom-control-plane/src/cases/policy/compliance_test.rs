@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 
+use sqlx::Row;
 use time::OffsetDateTime;
 use voom_core::{OperationKind, TicketOperation};
 use voom_events::EventKind;
@@ -535,6 +536,71 @@ async fn compliance_tool_preflight_fails_before_issue_and_job_writes() {
 }
 
 #[tokio::test]
+async fn compliance_execution_rejects_unknown_compiled_fields_without_partial_writes() {
+    let (cp, _tmp) = cp().await;
+    let (policy_version_id, input_set_id, _document_id) = seed_noncompliant(&cp).await;
+    cp.apply_compliance_report(policy_version_id, input_set_id)
+        .await
+        .unwrap();
+
+    sqlx::query("DROP TRIGGER policy_versions_are_immutable")
+        .execute(cp.pool_for_test())
+        .await
+        .unwrap();
+    sqlx::query(
+        "UPDATE policy_versions \
+         SET compiled_json = json_set( \
+             compiled_json, \
+             '$.phases[0].operations[0].future_operation', \
+             json('true') \
+         ) \
+         WHERE id = ?",
+    )
+    .bind(i64::try_from(policy_version_id.0).unwrap())
+    .execute(cp.pool_for_test())
+    .await
+    .unwrap();
+
+    let corrupted_json: String =
+        sqlx::query_scalar("SELECT compiled_json FROM policy_versions WHERE id = ?")
+            .bind(i64::try_from(policy_version_id.0).unwrap())
+            .fetch_one(cp.pool_for_test())
+            .await
+            .unwrap();
+    let before = durable_policy_execution_rows(&cp).await;
+
+    let error = cp
+        .execute_compliance_policy_with_runtime_registry_and_options_for_test(
+            policy_version_id,
+            input_set_id,
+            WorkerRuntimeRegistry::new(),
+            super::ComplianceExecutionOptions::default(),
+        )
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.source.code(), "PLAN_GENERATION_ERROR");
+    assert!(
+        error
+            .source
+            .to_string()
+            .contains("unknown field `future_operation`")
+    );
+    assert!(error.partial.is_none());
+    assert_eq!(before, durable_policy_execution_rows(&cp).await);
+    let persisted_json: String =
+        sqlx::query_scalar("SELECT compiled_json FROM policy_versions WHERE id = ?")
+            .bind(i64::try_from(policy_version_id.0).unwrap())
+            .fetch_one(cp.pool_for_test())
+            .await
+            .unwrap();
+    assert_eq!(persisted_json.as_bytes(), corrupted_json.as_bytes());
+    for table in ["jobs", "tickets", "leases"] {
+        assert_eq!(count_rows(&cp, table).await, 0, "{table} received a row");
+    }
+}
+
+#[tokio::test]
 async fn compliance_execute_options_reach_policy_remux_ticket_payload() {
     let (cp, _tmp) = cp().await;
     let source = load_policy_fixture("fixtures/policies/container-metadata.voom").unwrap();
@@ -899,6 +965,69 @@ async fn count_rows(cp: &crate::ControlPlane, table: &str) -> i64 {
         .fetch_one(cp.pool_for_test())
         .await
         .unwrap()
+}
+
+const DURABLE_POLICY_EXECUTION_TABLES: &[&str] = &[
+    "issues",
+    "events",
+    "policy_input_sets",
+    "policy_input_set_fixture_labels",
+    "policy_input_synthetic_targets",
+    "policy_media_snapshot_inputs",
+    "policy_identity_evidence_inputs",
+    "policy_bundle_target_inputs",
+    "policy_quality_profile_selections",
+    "policy_issue_inputs",
+];
+
+async fn durable_policy_execution_rows(cp: &crate::ControlPlane) -> Vec<(&'static str, String)> {
+    let mut snapshots = Vec::with_capacity(DURABLE_POLICY_EXECUTION_TABLES.len());
+    for table in DURABLE_POLICY_EXECUTION_TABLES {
+        snapshots.push((*table, ordered_table_json(cp, table).await));
+    }
+    snapshots
+}
+
+async fn ordered_table_json(cp: &crate::ControlPlane, table: &str) -> String {
+    let table_identifier = quoted_identifier(table);
+    let pragma = format!("PRAGMA table_info({table_identifier})");
+    let columns = sqlx::query(&pragma)
+        .fetch_all(cp.pool_for_test())
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|row| row.get::<String, _>("name"))
+        .collect::<Vec<_>>();
+    assert!(!columns.is_empty(), "{table} has no columns");
+    let object_fields = columns
+        .iter()
+        .map(|column| {
+            let literal = column.replace('\'', "''");
+            format!("'{literal}', {}", quoted_identifier(column))
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let order = columns
+        .iter()
+        .map(|column| quoted_identifier(column))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let query = format!(
+        "SELECT COALESCE(json_group_array(json(row_json)), '[]') \
+         FROM ( \
+             SELECT json_object({object_fields}) AS row_json \
+             FROM {table_identifier} \
+             ORDER BY {order} \
+         )"
+    );
+    sqlx::query_scalar(&query)
+        .fetch_one(cp.pool_for_test())
+        .await
+        .unwrap()
+}
+
+fn quoted_identifier(identifier: &str) -> String {
+    format!("\"{}\"", identifier.replace('"', "\"\""))
 }
 
 async fn scanned_snapshot_with_video(

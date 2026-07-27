@@ -89,33 +89,39 @@ fn preserves_boolean_precedence_and_nary_source_order() {
     let and = parse_track_filter("commentary and forced and default").unwrap();
     assert_eq!(
         and,
-        TrackFilter::And {
+        TrackFilter::And(crate::compiled::AndTrackFilter {
             filters: vec![
-                TrackFilter::Commentary,
-                TrackFilter::Forced,
-                TrackFilter::Default,
+                TrackFilter::Commentary(crate::compiled::CommentaryTrackFilter {}),
+                TrackFilter::Forced(crate::compiled::ForcedTrackFilter {}),
+                TrackFilter::Default(crate::compiled::DefaultTrackFilter {}),
             ],
-        }
+        })
     );
 
     let parsed = parse_track_filter("commentary or forced or default and not font").unwrap();
-    let TrackFilter::Or { filters } = parsed else {
+    let TrackFilter::Or(crate::compiled::OrTrackFilter { filters }) = parsed else {
         unreachable!("expected top-level or");
     };
 
     assert_eq!(filters.len(), 3);
-    assert_eq!(filters[0], TrackFilter::Commentary);
-    assert_eq!(filters[1], TrackFilter::Forced);
+    assert_eq!(
+        filters[0],
+        TrackFilter::Commentary(crate::compiled::CommentaryTrackFilter {})
+    );
+    assert_eq!(
+        filters[1],
+        TrackFilter::Forced(crate::compiled::ForcedTrackFilter {})
+    );
     assert_eq!(
         filters[2],
-        TrackFilter::And {
+        TrackFilter::And(crate::compiled::AndTrackFilter {
             filters: vec![
-                TrackFilter::Default,
-                TrackFilter::Not {
-                    inner: Box::new(TrackFilter::Font),
-                },
+                TrackFilter::Default(crate::compiled::DefaultTrackFilter {}),
+                TrackFilter::Not(crate::compiled::NotTrackFilter {
+                    inner: Box::new(TrackFilter::Font(crate::compiled::FontTrackFilter {})),
+                }),
             ],
-        }
+        })
     );
 }
 

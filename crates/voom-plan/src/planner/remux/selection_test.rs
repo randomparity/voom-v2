@@ -106,18 +106,18 @@ fn remux_language_filter_untagged_matches_as_und() {
 
     assert_eq!(
         evaluate_filter(
-            &TrackFilter::LanguageIn {
+            &TrackFilter::LanguageIn(voom_policy::compiled::LanguageInTrackFilter {
                 values: vec!["eng".to_owned()],
-            },
+            }),
             &untagged,
         ),
         Ok(false)
     );
     assert_eq!(
         evaluate_filter(
-            &TrackFilter::LanguageIn {
+            &TrackFilter::LanguageIn(voom_policy::compiled::LanguageInTrackFilter {
                 values: vec!["und".to_owned()],
-            },
+            }),
             &untagged,
         ),
         Ok(true)
@@ -130,18 +130,18 @@ fn remux_language_filter_explicit_und_matches_like_untagged() {
 
     assert_eq!(
         evaluate_filter(
-            &TrackFilter::LanguageIn {
+            &TrackFilter::LanguageIn(voom_policy::compiled::LanguageInTrackFilter {
                 values: vec!["und".to_owned()],
-            },
+            }),
             &explicit_und,
         ),
         Ok(true)
     );
     assert_eq!(
         evaluate_filter(
-            &TrackFilter::LanguageIn {
+            &TrackFilter::LanguageIn(voom_policy::compiled::LanguageInTrackFilter {
                 values: vec!["eng".to_owned()],
-            },
+            }),
             &explicit_und,
         ),
         Ok(false)
@@ -160,9 +160,9 @@ fn remux_language_filter_blocks_on_non_string_value() {
 
     assert_eq!(
         evaluate_filter(
-            &TrackFilter::LanguageIn {
+            &TrackFilter::LanguageIn(voom_policy::compiled::LanguageInTrackFilter {
                 values: vec!["und".to_owned()],
-            },
+            }),
             &facts[0],
         ),
         Err(RemuxPlanningBlock::InsufficientSnapshotFacts)
@@ -188,16 +188,19 @@ fn remux_default_and_forced_filters_require_boolean_facts_under_negation() {
     let facts = stream_facts(&snapshot_with_streams(&streams)).unwrap();
 
     for fact in &facts {
-        for filter in [TrackFilter::Default, TrackFilter::Forced] {
+        for filter in [
+            TrackFilter::Default(voom_policy::compiled::DefaultTrackFilter {}),
+            TrackFilter::Forced(voom_policy::compiled::ForcedTrackFilter {}),
+        ] {
             assert_eq!(
                 evaluate_filter(&filter, fact),
                 Err(RemuxPlanningBlock::InsufficientSnapshotFacts)
             );
             assert_eq!(
                 evaluate_filter(
-                    &TrackFilter::Not {
+                    &TrackFilter::Not(voom_policy::compiled::NotTrackFilter {
                         inner: Box::new(filter),
-                    },
+                    }),
                     fact,
                 ),
                 Err(RemuxPlanningBlock::InsufficientSnapshotFacts)
@@ -213,16 +216,16 @@ fn remux_or_returns_true_before_later_insufficient_child() {
     let stream = audio_stream(None);
 
     let matched = evaluate_filter(
-        &TrackFilter::Or {
+        &TrackFilter::Or(voom_policy::compiled::OrTrackFilter {
             filters: vec![
-                TrackFilter::CodecIn {
+                TrackFilter::CodecIn(voom_policy::compiled::CodecInTrackFilter {
                     values: vec!["aac".to_owned()],
-                },
-                TrackFilter::TitleContains {
+                }),
+                TrackFilter::TitleContains(voom_policy::compiled::TitleContainsTrackFilter {
                     value: "main".to_owned(),
-                },
+                }),
             ],
-        },
+        }),
         &stream,
     )
     .unwrap();
@@ -237,16 +240,16 @@ fn remux_and_evaluates_later_missing_facts_after_false_child() {
     let stream = audio_stream(None);
 
     let err = evaluate_filter(
-        &TrackFilter::And {
+        &TrackFilter::And(voom_policy::compiled::AndTrackFilter {
             filters: vec![
-                TrackFilter::CodecIn {
+                TrackFilter::CodecIn(voom_policy::compiled::CodecInTrackFilter {
                     values: vec!["flac".to_owned()],
-                },
-                TrackFilter::TitleContains {
+                }),
+                TrackFilter::TitleContains(voom_policy::compiled::TitleContainsTrackFilter {
                     value: "main".to_owned(),
-                },
+                }),
             ],
-        },
+        }),
         &stream,
     )
     .unwrap_err();
@@ -272,9 +275,9 @@ fn remux_title_contains_is_case_sensitive() {
     };
 
     let matched = evaluate_filter(
-        &TrackFilter::TitleContains {
+        &TrackFilter::TitleContains(voom_policy::compiled::TitleContainsTrackFilter {
             value: "main".to_owned(),
-        },
+        }),
         &stream,
     )
     .unwrap();
@@ -300,10 +303,10 @@ fn remux_channels_filter_uses_comparison_op() {
     };
 
     let matched = evaluate_filter(
-        &TrackFilter::Channels {
+        &TrackFilter::Channels(voom_policy::compiled::ChannelsTrackFilter {
             op: ComparisonOp::Gte,
             value: 6,
-        },
+        }),
         &stream,
     )
     .unwrap();
@@ -328,7 +331,11 @@ fn remux_font_filter_is_false_for_non_font_attachment() {
         is_forced: SnapshotFact::Value(false),
     };
 
-    let matched = evaluate_filter(&TrackFilter::Font, &stream).unwrap();
+    let matched = evaluate_filter(
+        &TrackFilter::Font(voom_policy::compiled::FontTrackFilter {}),
+        &stream,
+    )
+    .unwrap();
 
     assert!(!matched);
 }
@@ -352,14 +359,23 @@ fn remux_font_filter_accepts_only_published_matroska_font_media_types() {
     for media_type in media_types {
         let stream = attachment_stream(Some(media_type));
         assert_eq!(
-            evaluate_filter(&TrackFilter::Font, &stream),
+            evaluate_filter(
+                &TrackFilter::Font(voom_policy::compiled::FontTrackFilter {}),
+                &stream
+            ),
             Ok(true),
             "expected {media_type} to be classified as a font"
         );
     }
 
     let unpublished = attachment_stream(Some("application/font-awesome"));
-    assert_eq!(evaluate_filter(&TrackFilter::Font, &unpublished), Ok(false));
+    assert_eq!(
+        evaluate_filter(
+            &TrackFilter::Font(voom_policy::compiled::FontTrackFilter {}),
+            &unpublished
+        ),
+        Ok(false)
+    );
 }
 
 #[test]
@@ -367,7 +383,10 @@ fn remux_font_filter_blocks_when_attachment_mime_type_is_missing() {
     let stream = attachment_stream(None);
 
     assert_eq!(
-        evaluate_filter(&TrackFilter::Font, &stream),
+        evaluate_filter(
+            &TrackFilter::Font(voom_policy::compiled::FontTrackFilter {}),
+            &stream
+        ),
         Err(RemuxPlanningBlock::InsufficientSnapshotFacts)
     );
 }
@@ -397,15 +416,24 @@ fn remux_commentary_filter_requires_a_boolean_disposition_fact() {
     let facts = stream_facts(&snapshot_with_streams(&streams)).unwrap();
 
     assert_eq!(
-        evaluate_filter(&TrackFilter::Commentary, &facts[0]),
+        evaluate_filter(
+            &TrackFilter::Commentary(voom_policy::compiled::CommentaryTrackFilter {}),
+            &facts[0]
+        ),
         Ok(true)
     );
     assert_eq!(
-        evaluate_filter(&TrackFilter::Commentary, &facts[1]),
+        evaluate_filter(
+            &TrackFilter::Commentary(voom_policy::compiled::CommentaryTrackFilter {}),
+            &facts[1]
+        ),
         Ok(false)
     );
     assert_eq!(
-        evaluate_filter(&TrackFilter::Commentary, &facts[2]),
+        evaluate_filter(
+            &TrackFilter::Commentary(voom_policy::compiled::CommentaryTrackFilter {}),
+            &facts[2]
+        ),
         Err(RemuxPlanningBlock::InsufficientSnapshotFacts)
     );
 }
@@ -421,7 +449,10 @@ fn remux_commentary_filter_blocks_on_non_boolean_durable_value() {
     let facts = stream_facts(&snapshot_with_streams(&streams)).unwrap();
 
     assert_eq!(
-        evaluate_filter(&TrackFilter::Commentary, &facts[0]),
+        evaluate_filter(
+            &TrackFilter::Commentary(voom_policy::compiled::CommentaryTrackFilter {}),
+            &facts[0]
+        ),
         Err(RemuxPlanningBlock::InsufficientSnapshotFacts)
     );
 }

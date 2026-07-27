@@ -1,6 +1,18 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::json;
+use voom_policy::compiled::{
+    CompiledAndCondition, CompiledBooleanValue, CompiledClearTagsOperation,
+    CompiledClearTrackActionsOperation, CompiledConditionalOperation, CompiledCountCondition,
+    CompiledDeleteTagOperation, CompiledExistsCondition, CompiledExtractAudioOperation,
+    CompiledFieldComparisonCondition, CompiledFieldExistsCondition, CompiledFieldPathValue,
+    CompiledKeepTracksOperation, CompiledListValue, CompiledNotCondition, CompiledNumberValue,
+    CompiledOrCondition, CompiledPredicateCondition, CompiledRemoveTracksOperation,
+    CompiledReorderTracksOperation, CompiledRulesOperation, CompiledSetContainerOperation,
+    CompiledSetDefaultsOperation, CompiledSetTagOperation, CompiledStringValue,
+    CompiledSynthesizeAudioOperation, CompiledTranscodeAudioOperation,
+    CompiledTranscodeVideoOperation, CompiledVerifyArtifactOperation,
+};
 use voom_policy::{
     ComparisonOp, CompiledCondition, CompiledOperation, CompiledPolicy, CompiledRule,
     CompiledValue, DiagnosticSeverity, MediaSnapshotInput, PolicyDiagnostic, PolicyInputSetDraft,
@@ -399,18 +411,18 @@ impl<'a> PlanBuilder<'a> {
         operation: &CompiledOperation,
     ) {
         match operation {
-            CompiledOperation::SetContainer { container } => {
+            CompiledOperation::SetContainer(CompiledSetContainerOperation { container }) => {
                 self.push_operation_plan(
                     phase_name,
                     snapshot,
                     remux::plan_set_container(phase_name, snapshot, container),
                 );
             }
-            CompiledOperation::TranscodeVideo {
+            CompiledOperation::TranscodeVideo(CompiledTranscodeVideoOperation {
                 container,
                 resolved_profile,
                 ..
-            } => {
+            }) => {
                 let Some(resolved) = resolved_profile.as_ref() else {
                     // Resolution invariant (pinned Phase 5↔6 contract): the control
                     // plane fills `resolved_profile` in-memory before planning. A
@@ -426,11 +438,11 @@ impl<'a> PlanBuilder<'a> {
                     Err(error) => self.record_fatal(error),
                 }
             }
-            CompiledOperation::TranscodeAudio {
+            CompiledOperation::TranscodeAudio(CompiledTranscodeAudioOperation {
                 target_codec,
                 container,
                 filter,
-            } => self.push_operation_plan(
+            }) => self.push_operation_plan(
                 phase_name,
                 snapshot,
                 audio::plan_transcode(
@@ -441,23 +453,23 @@ impl<'a> PlanBuilder<'a> {
                     filter.as_ref(),
                 ),
             ),
-            CompiledOperation::ExtractAudio {
+            CompiledOperation::ExtractAudio(CompiledExtractAudioOperation {
                 target_codec,
                 container,
                 filter,
-            } => self.push_extract_audio_plan(
+            }) => self.push_extract_audio_plan(
                 phase_name,
                 snapshot,
                 target_codec,
                 container,
                 filter.as_ref(),
             ),
-            CompiledOperation::SynthesizeAudio {
+            CompiledOperation::SynthesizeAudio(CompiledSynthesizeAudioOperation {
                 target_codec,
                 container,
                 target_channels,
                 filter,
-            } => {
+            }) => {
                 let operation_id = next_operation_id(
                     self.nodes.len(),
                     phase_name,
@@ -478,7 +490,7 @@ impl<'a> PlanBuilder<'a> {
                     ),
                 );
             }
-            CompiledOperation::VerifyArtifact => {
+            CompiledOperation::VerifyArtifact(CompiledVerifyArtifactOperation {}) => {
                 self.push_operation_plan(phase_name, snapshot, plan_verify_artifact(snapshot));
             }
             unsupported => {
@@ -733,10 +745,10 @@ fn append_snapshot_operations<'a>(
 ) {
     for operation in operations {
         match operation {
-            CompiledOperation::Conditional {
+            CompiledOperation::Conditional(CompiledConditionalOperation {
                 condition,
                 operations,
-            } => match evaluate_condition(condition, snapshot) {
+            }) => match evaluate_condition(condition, snapshot) {
                 ConditionEval::Matched => {
                     append_snapshot_operations(snapshot, operations, flattened);
                 }
@@ -745,7 +757,7 @@ fn append_snapshot_operations<'a>(
                     append_blocked_insufficient_operations(operations, flattened);
                 }
             },
-            CompiledOperation::Rules { mode, rules } => {
+            CompiledOperation::Rules(CompiledRulesOperation { mode, rules }) => {
                 append_rule_operations(snapshot, *mode, rules, flattened);
             }
             operation => flattened.push(SnapshotOperation::Operation(operation)),
@@ -842,14 +854,18 @@ fn evaluate_condition(
     snapshot: &MediaSnapshotInput,
 ) -> ConditionEval {
     match condition {
-        CompiledCondition::FieldComparison { path, op, value } => {
-            evaluate_field_comparison(path, *op, value, snapshot)
-        }
-        CompiledCondition::FieldExists { path } => {
+        CompiledCondition::FieldComparison(CompiledFieldComparisonCondition {
+            path,
+            op,
+            value,
+        }) => evaluate_field_comparison(path, *op, value, snapshot),
+        CompiledCondition::FieldExists(CompiledFieldExistsCondition { path }) => {
             ConditionEval::from_bool(snapshot_field(path, snapshot).is_some())
         }
-        CompiledCondition::Not { inner } => evaluate_condition(inner, snapshot).negate(),
-        CompiledCondition::And { conditions } => {
+        CompiledCondition::Not(CompiledNotCondition { inner }) => {
+            evaluate_condition(inner, snapshot).negate()
+        }
+        CompiledCondition::And(CompiledAndCondition { conditions }) => {
             let mut saw_unknown = false;
             for condition in conditions {
                 match evaluate_condition(condition, snapshot) {
@@ -864,7 +880,7 @@ fn evaluate_condition(
                 ConditionEval::Matched
             }
         }
-        CompiledCondition::Or { conditions } => {
+        CompiledCondition::Or(CompiledOrCondition { conditions }) => {
             let mut saw_unknown = false;
             for condition in conditions {
                 match evaluate_condition(condition, snapshot) {
@@ -879,21 +895,22 @@ fn evaluate_condition(
                 ConditionEval::NotMatched
             }
         }
-        CompiledCondition::Exists {
+        CompiledCondition::Exists(CompiledExistsCondition {
             target,
             filter: None,
-        } => stream_target_count(*target, snapshot).map_or(ConditionEval::Unknown, |count| {
+        }) => stream_target_count(*target, snapshot).map_or(ConditionEval::Unknown, |count| {
             ConditionEval::from_bool(count > 0)
         }),
-        CompiledCondition::Count { target, op, value } => stream_target_count(*target, snapshot)
-            .map_or(ConditionEval::Unknown, |count| {
+        CompiledCondition::Count(CompiledCountCondition { target, op, value }) => {
+            stream_target_count(*target, snapshot).map_or(ConditionEval::Unknown, |count| {
                 compare_numbers(count, *op, *value)
-            }),
-        CompiledCondition::Exists {
+            })
+        }
+        CompiledCondition::Exists(CompiledExistsCondition {
             target: _,
             filter: Some(_),
-        }
-        | CompiledCondition::Predicate { .. } => ConditionEval::Unknown,
+        })
+        | CompiledCondition::Predicate(CompiledPredicateCondition { .. }) => ConditionEval::Unknown,
     }
 }
 
@@ -1020,13 +1037,17 @@ fn condition_value<'a>(
     snapshot: &'a MediaSnapshotInput,
 ) -> Option<SnapshotFieldValue<'a>> {
     match value {
-        CompiledValue::String { value } => Some(SnapshotFieldValue::String(value)),
-        CompiledValue::Number { value } => {
+        CompiledValue::String(CompiledStringValue { value }) => {
+            Some(SnapshotFieldValue::String(value))
+        }
+        CompiledValue::Number(CompiledNumberValue { value }) => {
             value.parse::<u64>().ok().map(SnapshotFieldValue::Number)
         }
-        CompiledValue::Boolean { value } => Some(SnapshotFieldValue::Boolean(*value)),
-        CompiledValue::FieldPath { path } => snapshot_field(path, snapshot),
-        CompiledValue::List { .. } => None,
+        CompiledValue::Boolean(CompiledBooleanValue { value }) => {
+            Some(SnapshotFieldValue::Boolean(*value))
+        }
+        CompiledValue::FieldPath(CompiledFieldPathValue { path }) => snapshot_field(path, snapshot),
+        CompiledValue::List(CompiledListValue { .. }) => None,
     }
 }
 
@@ -1232,26 +1253,49 @@ fn plan_verify_artifact(snapshot: &MediaSnapshotInput) -> OperationPlan {
 
 fn operation_kind(operation: &CompiledOperation) -> PlanOperationKind {
     match operation {
-        CompiledOperation::SetContainer { .. } => PlanOperationKind::SetContainer,
-        CompiledOperation::KeepTracks { .. } => PlanOperationKind::KeepTracks,
-        CompiledOperation::RemoveTracks { .. } => PlanOperationKind::RemoveTracks,
-        CompiledOperation::ReorderTracks { .. } => PlanOperationKind::ReorderTracks,
-        CompiledOperation::SetDefaults { .. } => PlanOperationKind::SetDefaults,
-        CompiledOperation::ClearTrackActions { .. } => PlanOperationKind::ClearTrackActions,
-        CompiledOperation::ClearTags => PlanOperationKind::ClearTags,
-        CompiledOperation::SetTag { .. } => PlanOperationKind::SetTag,
-        CompiledOperation::DeleteTag { .. } => PlanOperationKind::DeleteTag,
-        CompiledOperation::TranscodeVideo { .. } => PlanOperationKind::TranscodeVideo,
+        CompiledOperation::SetContainer(CompiledSetContainerOperation { .. }) => {
+            PlanOperationKind::SetContainer
+        }
+        CompiledOperation::KeepTracks(CompiledKeepTracksOperation { .. }) => {
+            PlanOperationKind::KeepTracks
+        }
+        CompiledOperation::RemoveTracks(CompiledRemoveTracksOperation { .. }) => {
+            PlanOperationKind::RemoveTracks
+        }
+        CompiledOperation::ReorderTracks(CompiledReorderTracksOperation { .. }) => {
+            PlanOperationKind::ReorderTracks
+        }
+        CompiledOperation::SetDefaults(CompiledSetDefaultsOperation { .. }) => {
+            PlanOperationKind::SetDefaults
+        }
+        CompiledOperation::ClearTrackActions(CompiledClearTrackActionsOperation { .. }) => {
+            PlanOperationKind::ClearTrackActions
+        }
+        CompiledOperation::ClearTags(CompiledClearTagsOperation {}) => PlanOperationKind::ClearTags,
+        CompiledOperation::SetTag(CompiledSetTagOperation { .. }) => PlanOperationKind::SetTag,
+        CompiledOperation::DeleteTag(CompiledDeleteTagOperation { .. }) => {
+            PlanOperationKind::DeleteTag
+        }
+        CompiledOperation::TranscodeVideo(CompiledTranscodeVideoOperation { .. }) => {
+            PlanOperationKind::TranscodeVideo
+        }
         // Synthesis rides the transcode_audio operation kind end-to-end (ADR 0026,
         // Option B) so no new voom_core OperationKind or control-plane routing is
         // needed; the plan payload's `type` distinguishes the add-track mode.
-        CompiledOperation::TranscodeAudio { .. } | CompiledOperation::SynthesizeAudio { .. } => {
+        CompiledOperation::TranscodeAudio(CompiledTranscodeAudioOperation { .. })
+        | CompiledOperation::SynthesizeAudio(CompiledSynthesizeAudioOperation { .. }) => {
             PlanOperationKind::TranscodeAudio
         }
-        CompiledOperation::ExtractAudio { .. } => PlanOperationKind::ExtractAudio,
-        CompiledOperation::VerifyArtifact => PlanOperationKind::VerifyArtifact,
-        CompiledOperation::Conditional { .. } => PlanOperationKind::Conditional,
-        CompiledOperation::Rules { .. } => PlanOperationKind::Rules,
+        CompiledOperation::ExtractAudio(CompiledExtractAudioOperation { .. }) => {
+            PlanOperationKind::ExtractAudio
+        }
+        CompiledOperation::VerifyArtifact(CompiledVerifyArtifactOperation {}) => {
+            PlanOperationKind::VerifyArtifact
+        }
+        CompiledOperation::Conditional(CompiledConditionalOperation { .. }) => {
+            PlanOperationKind::Conditional
+        }
+        CompiledOperation::Rules(CompiledRulesOperation { .. }) => PlanOperationKind::Rules,
     }
 }
 

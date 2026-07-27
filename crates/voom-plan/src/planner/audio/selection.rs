@@ -123,39 +123,43 @@ fn evaluate_supported_audio_filter(
     stream: &SnapshotAudioStreamFact,
 ) -> Result<bool, AudioPlanningBlock> {
     match filter {
-        TrackFilter::LanguageIn { values } => {
+        TrackFilter::LanguageIn(voom_policy::compiled::LanguageInTrackFilter { values }) => {
             // A missing language tag matches as `und` (ISO 639-2 undetermined)
             // rather than blocking planning (ADR 0021, issue #272).
             let language = stream.language.as_deref().unwrap_or("und");
             Ok(values.iter().any(|value| value == language))
         }
-        TrackFilter::CodecIn { values } => {
+        TrackFilter::CodecIn(voom_policy::compiled::CodecInTrackFilter { values }) => {
             let codec = stream
                 .codec
                 .as_ref()
                 .ok_or(AudioPlanningBlock::InsufficientSnapshotFacts)?;
             Ok(values.iter().any(|value| value == codec))
         }
-        TrackFilter::Channels { op, value } => {
+        TrackFilter::Channels(voom_policy::compiled::ChannelsTrackFilter { op, value }) => {
             let channels = stream
                 .channels
                 .ok_or(AudioPlanningBlock::InsufficientSnapshotFacts)?;
             Ok(compare_u64(u64::from(channels), *op, *value))
         }
-        TrackFilter::Commentary => stream
+        TrackFilter::Commentary(voom_policy::compiled::CommentaryTrackFilter {}) => stream
             .commentary
             .ok_or(AudioPlanningBlock::InsufficientSnapshotFacts),
-        TrackFilter::Forced => Ok(stream.disposition.forced),
-        TrackFilter::Default => Ok(stream.default),
-        TrackFilter::TitleContains { value } => {
+        TrackFilter::Forced(voom_policy::compiled::ForcedTrackFilter {}) => {
+            Ok(stream.disposition.forced)
+        }
+        TrackFilter::Default(voom_policy::compiled::DefaultTrackFilter {}) => Ok(stream.default),
+        TrackFilter::TitleContains(voom_policy::compiled::TitleContainsTrackFilter { value }) => {
             let title = stream
                 .title
                 .as_ref()
                 .ok_or(AudioPlanningBlock::InsufficientSnapshotFacts)?;
             Ok(title.contains(value))
         }
-        TrackFilter::Not { inner } => Ok(!evaluate_supported_audio_filter(inner, stream)?),
-        TrackFilter::And { filters } => {
+        TrackFilter::Not(voom_policy::compiled::NotTrackFilter { inner }) => {
+            Ok(!evaluate_supported_audio_filter(inner, stream)?)
+        }
+        TrackFilter::And(voom_policy::compiled::AndTrackFilter { filters }) => {
             let mut insufficient = false;
             for filter in filters {
                 match evaluate_supported_audio_filter(filter, stream) {
@@ -171,7 +175,7 @@ fn evaluate_supported_audio_filter(
                 Ok(true)
             }
         }
-        TrackFilter::Or { filters } => {
+        TrackFilter::Or(voom_policy::compiled::OrTrackFilter { filters }) => {
             let mut insufficient = false;
             for filter in filters {
                 match evaluate_supported_audio_filter(filter, stream) {
@@ -187,7 +191,8 @@ fn evaluate_supported_audio_filter(
                 Ok(false)
             }
         }
-        TrackFilter::Font | TrackFilter::TitleMatches { .. } => {
+        TrackFilter::Font(voom_policy::compiled::FontTrackFilter {})
+        | TrackFilter::TitleMatches(voom_policy::compiled::TitleMatchesTrackFilter { .. }) => {
             Err(AudioPlanningBlock::UnsupportedSelector)
         }
     }
@@ -195,18 +200,24 @@ fn evaluate_supported_audio_filter(
 
 fn audio_filter_has_unsupported_selector(filter: &TrackFilter) -> bool {
     match filter {
-        TrackFilter::Font | TrackFilter::TitleMatches { .. } => true,
-        TrackFilter::Not { inner } => audio_filter_has_unsupported_selector(inner),
-        TrackFilter::And { filters } | TrackFilter::Or { filters } => {
+        TrackFilter::Font(voom_policy::compiled::FontTrackFilter {})
+        | TrackFilter::TitleMatches(voom_policy::compiled::TitleMatchesTrackFilter { .. }) => true,
+        TrackFilter::Not(voom_policy::compiled::NotTrackFilter { inner }) => {
+            audio_filter_has_unsupported_selector(inner)
+        }
+        TrackFilter::And(voom_policy::compiled::AndTrackFilter { filters })
+        | TrackFilter::Or(voom_policy::compiled::OrTrackFilter { filters }) => {
             filters.iter().any(audio_filter_has_unsupported_selector)
         }
-        TrackFilter::LanguageIn { .. }
-        | TrackFilter::CodecIn { .. }
-        | TrackFilter::Channels { .. }
-        | TrackFilter::Commentary
-        | TrackFilter::Forced
-        | TrackFilter::Default
-        | TrackFilter::TitleContains { .. } => false,
+        TrackFilter::LanguageIn(voom_policy::compiled::LanguageInTrackFilter { .. })
+        | TrackFilter::CodecIn(voom_policy::compiled::CodecInTrackFilter { .. })
+        | TrackFilter::Channels(voom_policy::compiled::ChannelsTrackFilter { .. })
+        | TrackFilter::Commentary(voom_policy::compiled::CommentaryTrackFilter {})
+        | TrackFilter::Forced(voom_policy::compiled::ForcedTrackFilter {})
+        | TrackFilter::Default(voom_policy::compiled::DefaultTrackFilter {})
+        | TrackFilter::TitleContains(voom_policy::compiled::TitleContainsTrackFilter { .. }) => {
+            false
+        }
     }
 }
 

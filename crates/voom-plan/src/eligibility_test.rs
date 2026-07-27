@@ -35,18 +35,18 @@ fn phase(name: &str, operations: Vec<CompiledOperation>) -> CompiledPhase {
 }
 
 fn exists(target: TrackTarget) -> CompiledCondition {
-    CompiledCondition::Exists {
+    CompiledCondition::Exists(voom_policy::compiled::CompiledExistsCondition {
         target,
         filter: None,
-    }
+    })
 }
 
 fn count(target: TrackTarget, op: ComparisonOp) -> CompiledCondition {
-    CompiledCondition::Count {
+    CompiledCondition::Count(voom_policy::compiled::CompiledCountCondition {
         target,
         op,
         value: 1,
-    }
+    })
 }
 
 #[test]
@@ -54,18 +54,18 @@ fn published_stream_conditions_are_eligible_on_ordinary_surfaces() {
     let policy = policy(vec![phase(
         "normalize",
         vec![
-            CompiledOperation::Conditional {
+            CompiledOperation::Conditional(voom_policy::compiled::CompiledConditionalOperation {
                 condition: exists(TrackTarget::Audio),
                 operations: Vec::new(),
-            },
-            CompiledOperation::Rules {
+            }),
+            CompiledOperation::Rules(voom_policy::compiled::CompiledRulesOperation {
                 mode: RuleMatchMode::All,
                 rules: vec![CompiledRule {
                     name: "subtitles".to_owned(),
                     condition: Some(count(TrackTarget::Subtitle, ComparisonOp::Gte)),
                     operations: Vec::new(),
                 }],
-            },
+            }),
         ],
     )]);
 
@@ -77,36 +77,44 @@ fn eligibility_collects_unpublished_leaves_in_structural_order() {
     let mut normalize = phase(
         "normalize",
         vec![
-            CompiledOperation::Conditional {
-                condition: CompiledCondition::And {
+            CompiledOperation::Conditional(voom_policy::compiled::CompiledConditionalOperation {
+                condition: CompiledCondition::And(voom_policy::compiled::CompiledAndCondition {
                     conditions: vec![
                         exists(TrackTarget::Audio),
                         count(TrackTarget::Audio, ComparisonOp::Contains),
                     ],
-                },
-                operations: vec![CompiledOperation::Conditional {
-                    condition: CompiledCondition::Exists {
-                        target: TrackTarget::Audio,
-                        filter: Some(TrackFilter::Commentary),
+                }),
+                operations: vec![CompiledOperation::Conditional(
+                    voom_policy::compiled::CompiledConditionalOperation {
+                        condition: CompiledCondition::Exists(
+                            voom_policy::compiled::CompiledExistsCondition {
+                                target: TrackTarget::Audio,
+                                filter: Some(TrackFilter::Commentary(
+                                    voom_policy::compiled::CommentaryTrackFilter {},
+                                )),
+                            },
+                        ),
+                        operations: Vec::new(),
                     },
-                    operations: Vec::new(),
-                }],
-            },
-            CompiledOperation::Rules {
+                )],
+            }),
+            CompiledOperation::Rules(voom_policy::compiled::CompiledRulesOperation {
                 mode: RuleMatchMode::First,
                 rules: vec![CompiledRule {
                     name: "nested".to_owned(),
                     condition: Some(count(TrackTarget::Subtitle, ComparisonOp::Eq)),
-                    operations: vec![CompiledOperation::Rules {
-                        mode: RuleMatchMode::All,
-                        rules: vec![CompiledRule {
-                            name: "attachments".to_owned(),
-                            condition: Some(exists(TrackTarget::Attachment)),
-                            operations: Vec::new(),
-                        }],
-                    }],
+                    operations: vec![CompiledOperation::Rules(
+                        voom_policy::compiled::CompiledRulesOperation {
+                            mode: RuleMatchMode::All,
+                            rules: vec![CompiledRule {
+                                name: "attachments".to_owned(),
+                                condition: Some(exists(TrackTarget::Attachment)),
+                                operations: Vec::new(),
+                            }],
+                        },
+                    )],
                 }],
-            },
+            }),
         ],
     );
     normalize.skip_if = Some(exists(TrackTarget::Video));
@@ -139,22 +147,28 @@ fn eligibility_collects_unpublished_leaves_in_structural_order() {
 fn stream_condition_usage_finds_nested_leaves() {
     let stream_policy = policy(vec![phase(
         "normalize",
-        vec![CompiledOperation::Rules {
-            mode: RuleMatchMode::First,
-            rules: vec![CompiledRule {
-                name: "nested".to_owned(),
-                condition: Some(CompiledCondition::Not {
-                    inner: Box::new(exists(TrackTarget::Audio)),
-                }),
-                operations: Vec::new(),
-            }],
-        }],
+        vec![CompiledOperation::Rules(
+            voom_policy::compiled::CompiledRulesOperation {
+                mode: RuleMatchMode::First,
+                rules: vec![CompiledRule {
+                    name: "nested".to_owned(),
+                    condition: Some(CompiledCondition::Not(
+                        voom_policy::compiled::CompiledNotCondition {
+                            inner: Box::new(exists(TrackTarget::Audio)),
+                        },
+                    )),
+                    operations: Vec::new(),
+                }],
+            },
+        )],
     )]);
     let condition_free = policy(vec![phase(
         "normalize",
-        vec![CompiledOperation::SetContainer {
-            container: "mkv".to_owned(),
-        }],
+        vec![CompiledOperation::SetContainer(
+            voom_policy::compiled::CompiledSetContainerOperation {
+                container: "mkv".to_owned(),
+            },
+        )],
     )]);
 
     assert!(policy_uses_stream_conditions(&stream_policy));

@@ -227,19 +227,22 @@ fn audio_has_untagged_language(snapshot: &MediaSnapshotInput) -> bool {
 
 fn filter_references_language(filter: &TrackFilter) -> bool {
     match filter {
-        TrackFilter::LanguageIn { .. } => true,
-        TrackFilter::Not { inner } => filter_references_language(inner),
-        TrackFilter::And { filters } | TrackFilter::Or { filters } => {
+        TrackFilter::LanguageIn(voom_policy::compiled::LanguageInTrackFilter { .. }) => true,
+        TrackFilter::Not(voom_policy::compiled::NotTrackFilter { inner }) => {
+            filter_references_language(inner)
+        }
+        TrackFilter::And(voom_policy::compiled::AndTrackFilter { filters })
+        | TrackFilter::Or(voom_policy::compiled::OrTrackFilter { filters }) => {
             filters.iter().any(filter_references_language)
         }
-        TrackFilter::CodecIn { .. }
-        | TrackFilter::Channels { .. }
-        | TrackFilter::Commentary
-        | TrackFilter::Forced
-        | TrackFilter::Default
-        | TrackFilter::Font
-        | TrackFilter::TitleContains { .. }
-        | TrackFilter::TitleMatches { .. } => false,
+        TrackFilter::CodecIn(voom_policy::compiled::CodecInTrackFilter { .. })
+        | TrackFilter::Channels(voom_policy::compiled::ChannelsTrackFilter { .. })
+        | TrackFilter::Commentary(voom_policy::compiled::CommentaryTrackFilter {})
+        | TrackFilter::Forced(voom_policy::compiled::ForcedTrackFilter {})
+        | TrackFilter::Default(voom_policy::compiled::DefaultTrackFilter {})
+        | TrackFilter::Font(voom_policy::compiled::FontTrackFilter {})
+        | TrackFilter::TitleContains(voom_policy::compiled::TitleContainsTrackFilter { .. })
+        | TrackFilter::TitleMatches(voom_policy::compiled::TitleMatchesTrackFilter { .. }) => false,
     }
 }
 
