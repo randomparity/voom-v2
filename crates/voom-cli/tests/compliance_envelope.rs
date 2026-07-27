@@ -102,6 +102,8 @@ async fn execute_scanned_remux_outputs_committed_file_phase() {
 
 #[tokio::test]
 async fn execute_and_report_expose_policy_artifact_verification() {
+    let _verify_worker =
+        cargo_bin_or_build("voom-verify-artifact-worker", "voom-verify-artifact-worker").unwrap();
     let seeded = seed_scanned_verify().await;
 
     let execute = compliance_command(&seeded.url, "execute", seeded.version_id, seeded.input_id);

@@ -9,6 +9,7 @@ use voom_policy::{FixtureName, load_fixture, load_policy_fixture};
 use voom_store::repo::identity::{DiscoveredFile, FileLocationKind, IngestOutcome};
 use voom_store::repo::tickets::NewTicket;
 use voom_store::repo::workers::{NewCapability, NewGrant, NewWorker, WorkerKind};
+use voom_test_support::worker::cargo_bin_or_build;
 
 use crate::cases::policy::policy_inputs::PolicyInputFromScanInput;
 use crate::cases::{count, cp, transcodable_input};
@@ -889,6 +890,7 @@ async fn execute_reports_actionable_error_when_no_live_worker_for_remux() {
 
 #[tokio::test]
 async fn compliance_execute_verifies_existing_active_artifact_through_bundled_worker() {
+    ensure_policy_verify_worker();
     let (cp, _tmp) = cp().await;
     let media_dir = tempfile::tempdir().unwrap();
     let media_path = media_dir.path().join("movie.mkv");
@@ -964,6 +966,7 @@ async fn compliance_execute_verifies_existing_active_artifact_through_bundled_wo
 
 #[tokio::test]
 async fn failed_policy_verification_persists_evidence_and_gates_downstream_phase() {
+    ensure_policy_verify_worker();
     let (cp, _tmp) = cp().await;
     let media_dir = tempfile::tempdir().unwrap();
     let media_path = media_dir.path().join("movie.mkv");
@@ -1061,6 +1064,7 @@ async fn failed_policy_verification_persists_evidence_and_gates_downstream_phase
 
 #[tokio::test]
 async fn resume_carries_verified_phase_without_duplicate_verification() {
+    ensure_policy_verify_worker();
     let (cp, _tmp) = cp().await;
     let media_dir = tempfile::tempdir().unwrap();
     let media_path = media_dir.path().join("movie.mkv");
@@ -1151,6 +1155,7 @@ async fn resume_carries_verified_phase_without_duplicate_verification() {
 
 #[tokio::test]
 async fn resume_adopts_successful_evidence_missing_its_phase_row() {
+    ensure_policy_verify_worker();
     let (cp, _tmp) = cp().await;
     let media_dir = tempfile::tempdir().unwrap();
     let media_path = media_dir.path().join("movie.mkv");
@@ -1293,6 +1298,10 @@ async fn assert_corrupted_verification_result_rejected(
         .execute(cp.pool_for_test())
         .await
         .unwrap();
+}
+
+fn ensure_policy_verify_worker() {
+    cargo_bin_or_build("voom-verify-artifact-worker", "voom-verify-artifact-worker").unwrap();
 }
 
 #[tokio::test]
