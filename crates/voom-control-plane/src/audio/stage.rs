@@ -63,6 +63,21 @@ pub async fn prepare_extract_staging_paths(
     generation: u32,
     target_paths: &[PathBuf],
 ) -> Result<PreparedStagingPaths, VoomError> {
+    let staging =
+        resolve_extract_staging_paths(staging_root, operation_token, generation, target_paths)
+            .await?;
+    for path in &staging.paths {
+        reject_existing_file(path, "staging path").await?;
+    }
+    Ok(staging)
+}
+
+pub async fn resolve_extract_staging_paths(
+    staging_root: &Path,
+    operation_token: &str,
+    generation: u32,
+    target_paths: &[PathBuf],
+) -> Result<PreparedStagingPaths, VoomError> {
     require_safe_component(operation_token, "audio extraction operation token")?;
     if target_paths.is_empty() {
         return Err(VoomError::Config(
@@ -83,9 +98,7 @@ pub async fn prepare_extract_staging_paths(
                 target_path.display()
             ))
         })?;
-        let path = canonical_parent.join(file_name);
-        reject_existing_file(&path, "staging path").await?;
-        paths.push(path);
+        paths.push(canonical_parent.join(file_name));
     }
     Ok(PreparedStagingPaths {
         canonical_root,

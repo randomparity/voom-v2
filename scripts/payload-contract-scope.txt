@@ -15,3 +15,5 @@ crates/voom-store/src/repo/media/commit_safety_gate/codecs.rs
 crates/voom-store/src/repo/media/commit_safety_gate.rs
 crates/voom-control-plane/src/workflow/plan/ticket_payload.rs
 crates/voom-control-plane/src/workflow/execution/timing.rs
+crates/voom-control-plane/src/audio/mod.rs
+crates/voom-control-plane/src/cases/policy/compliance.rs

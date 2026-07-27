@@ -278,6 +278,49 @@ async fn claim_fences_competing_tokens_until_expiry() {
 }
 
 #[tokio::test]
+async fn lease_heartbeat_cannot_resurrect_an_expired_operation_claim() {
+    let fixture = fixture().await;
+    let now = OffsetDateTime::from_unix_timestamp(0).unwrap();
+    fixture
+        .repo
+        .create_planned(fixture.operation(), &outputs(), now)
+        .await
+        .unwrap();
+    let claim = NewAudioExtractClaim {
+        operation_key: "extract:v1:key".to_owned(),
+        expected_generation: 0,
+        lease_id: fixture.lease_id,
+        claim_token: "claim-one".to_owned(),
+        expires_at: OffsetDateTime::from_unix_timestamp(10).unwrap(),
+    };
+    fixture.repo.acquire_claim(&claim, now).await.unwrap();
+    let mut tx = fixture.pool.begin().await.unwrap();
+
+    let error = SqliteAudioExtractOperationRepo::renew_claims_for_lease_in_tx(
+        &mut tx,
+        fixture.lease_id,
+        OffsetDateTime::from_unix_timestamp(20).unwrap(),
+        OffsetDateTime::from_unix_timestamp(11).unwrap(),
+    )
+    .await
+    .unwrap_err();
+
+    assert!(error.to_string().contains("cannot renew an expired"));
+    tx.rollback().await.unwrap();
+    let expires_at: String = sqlx::query_scalar(
+        "SELECT claim_expires_at FROM audio_extract_operations WHERE operation_key = ?",
+    )
+    .bind("extract:v1:key")
+    .fetch_one(&fixture.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        OffsetDateTime::parse(&expires_at, &time::format_description::well_known::Rfc3339).unwrap(),
+        OffsetDateTime::from_unix_timestamp(10).unwrap()
+    );
+}
+
+#[tokio::test]
 async fn dispatch_attempt_and_paths_are_durable_before_send() {
     let fixture = fixture().await;
     let now = OffsetDateTime::from_unix_timestamp(0).unwrap();

@@ -613,21 +613,23 @@ pub async fn commit_audio_extract_set(
         ));
     }
     let prepared = prepare_extract_set(cp, input).await?;
-    for member in &prepared {
-        assert_extract_claim(cp, input).await?;
-        if let Err(error) = promote_sidecar(member).await {
-            mark_extract_set_recovery_required(cp, input, &prepared, &error).await?;
-            return Err(error);
-        }
-        assert_extract_claim(cp, input).await?;
-    }
-    match finalize_extract_set(cp, input, &prepared).await {
+    match commit_audio_extract_set_inner(cp, input, &prepared).await {
         Ok(outputs) => Ok(outputs),
-        Err(error) => {
-            mark_extract_set_recovery_required(cp, input, &prepared, &error).await?;
-            Err(error)
-        }
+        Err(error) => Err(record_extract_recovery_failure(cp, input, &prepared, error).await),
     }
+}
+
+async fn commit_audio_extract_set_inner(
+    cp: &ControlPlane,
+    input: &CommitAudioExtractSetInput,
+    prepared: &[PreparedSidecarCommit],
+) -> Result<Vec<CommittedAudioExtractOutput>, VoomError> {
+    for member in prepared {
+        assert_extract_claim(cp, input).await?;
+        promote_sidecar(member).await?;
+        assert_extract_claim(cp, input).await?;
+    }
+    finalize_extract_set(cp, input, prepared).await
 }
 
 pub async fn recover_audio_extract_set(
@@ -635,12 +637,41 @@ pub async fn recover_audio_extract_set(
     input: &CommitAudioExtractSetInput,
 ) -> Result<Vec<CommittedAudioExtractOutput>, VoomError> {
     let prepared = load_recovery_extract_set(cp, input).await?;
-    for member in &prepared {
+    match recover_audio_extract_set_inner(cp, input, &prepared).await {
+        Ok(outputs) => Ok(outputs),
+        Err(error) => Err(record_extract_recovery_failure(cp, input, &prepared, error).await),
+    }
+}
+
+async fn recover_audio_extract_set_inner(
+    cp: &ControlPlane,
+    input: &CommitAudioExtractSetInput,
+    prepared: &[PreparedSidecarCommit],
+) -> Result<Vec<CommittedAudioExtractOutput>, VoomError> {
+    for member in prepared {
         assert_extract_claim(cp, input).await?;
         recover_promote_extract_member(member).await?;
         assert_extract_claim(cp, input).await?;
     }
-    finalize_extract_set(cp, input, &prepared).await
+    finalize_extract_set(cp, input, prepared).await
+}
+
+async fn record_extract_recovery_failure(
+    cp: &ControlPlane,
+    input: &CommitAudioExtractSetInput,
+    prepared: &[PreparedSidecarCommit],
+    error: VoomError,
+) -> VoomError {
+    if let Err(record_error) = mark_extract_set_recovery_required(cp, input, prepared, &error).await
+    {
+        tracing::warn!(
+            primary_error_code = error.error_code().as_str(),
+            secondary_error = %record_error,
+            operation_id = input.operation_row_id,
+            "audio extraction recovery evidence write failed while preserving the primary error"
+        );
+    }
+    error
 }
 
 async fn load_recovery_extract_set(

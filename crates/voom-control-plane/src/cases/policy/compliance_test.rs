@@ -1284,6 +1284,44 @@ fn compliance_audio_extract_outputs_reject_incomplete_published_members() {
     );
 }
 
+#[test]
+fn compliance_audio_extract_outputs_reject_unknown_published_fields() {
+    let mut output = published_extract_output("output-a", "a-1", 1, 11, 1);
+    output["unexpected"] = serde_json::json!(true);
+    let result = serde_json::json!({ "outputs": [output] });
+
+    let error = super::decode_compliance_extract_result(42, &result.to_string()).unwrap_err();
+
+    assert!(
+        error
+            .to_string()
+            .contains("audio extraction ticket 42 published output is malformed")
+    );
+}
+
+#[test]
+fn compliance_audio_extract_outputs_reject_unknown_legacy_fields() {
+    let result = serde_json::json!({
+        "staged_artifact_handle_id": 21,
+        "staged_artifact_location_id": 22,
+        "verification_id": 23,
+        "commit_record_id": 24,
+        "result_file_version_id": 25,
+        "result_file_location_id": 26,
+        "staging_path": "/stage/legacy.ogg",
+        "target_path": "/target/legacy.ogg",
+        "unexpected": true
+    });
+
+    let error = super::decode_compliance_extract_result(42, &result.to_string()).unwrap_err();
+
+    assert!(
+        error
+            .to_string()
+            .contains("audio extraction ticket 42 legacy result is malformed")
+    );
+}
+
 #[tokio::test]
 async fn read_compliance_run_report_in_flight_job_has_no_summary() {
     let (cp, _tmp) = cp().await;

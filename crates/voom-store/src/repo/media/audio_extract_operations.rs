@@ -423,7 +423,7 @@ impl SqliteAudioExtractOperationRepo {
         let result = sqlx::query(
             "UPDATE audio_extract_operations SET state = 'recovery_required', \
              recovery_failure_class = 'commit_failure', recovery_error_code = ?, \
-             recovery_message = ? WHERE id = ? AND state = 'prepared' \
+             recovery_message = ? WHERE id = ? AND state IN ('prepared', 'recovery_required') \
              AND dispatch_generation = ? AND claim_lease_id = ? AND claim_token = ? \
              AND claim_expires_at > ?",
         )
@@ -439,7 +439,11 @@ impl SqliteAudioExtractOperationRepo {
         .map_err(|error| {
             VoomError::database_context("mark audio extraction set recovery required", error)
         })?;
-        require_one_operation_update(result.rows_affected(), operation_id, "prepared")
+        require_one_operation_update(
+            result.rows_affected(),
+            operation_id,
+            "prepared/recovery_required",
+        )
     }
 
     pub async fn create_planned(
@@ -508,6 +512,51 @@ impl SqliteAudioExtractOperationRepo {
         Err(VoomError::Config(format!(
             "audio extraction operation {} claim is held or generation changed",
             claim.operation_key
+        )))
+    }
+
+    pub async fn renew_claims_for_lease_in_tx(
+        tx: &mut Transaction<'_, Sqlite>,
+        lease_id: LeaseId,
+        expires_at: OffsetDateTime,
+        now: OffsetDateTime,
+    ) -> Result<(), VoomError> {
+        let lease_id = i64_from_u64(lease_id.0);
+        let now = iso8601(now)?;
+        let claimed: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM audio_extract_operations \
+             WHERE claim_lease_id = ? AND claim_token IS NOT NULL AND state != 'committed'",
+        )
+        .bind(lease_id)
+        .fetch_one(&mut **tx)
+        .await
+        .map_err(|error| {
+            VoomError::database_context("count audio extraction claims for heartbeat", error)
+        })?;
+        let claimed = u64::try_from(claimed).map_err(|error| {
+            VoomError::database(format!(
+                "audio extraction claim count is invalid for lease {lease_id}: {error}"
+            ))
+        })?;
+        let renewed = sqlx::query(
+            "UPDATE audio_extract_operations SET claim_expires_at = ? \
+             WHERE claim_lease_id = ? AND claim_token IS NOT NULL AND state != 'committed' \
+               AND claim_expires_at > ?",
+        )
+        .bind(iso8601(expires_at)?)
+        .bind(lease_id)
+        .bind(now)
+        .execute(&mut **tx)
+        .await
+        .map_err(|error| {
+            VoomError::database_context("renew audio extraction claims with heartbeat", error)
+        })?
+        .rows_affected();
+        if claimed == renewed {
+            return Ok(());
+        }
+        Err(VoomError::Conflict(format!(
+            "workflow lease {lease_id} heartbeat cannot renew an expired audio extraction claim"
         )))
     }
 

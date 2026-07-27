@@ -113,6 +113,7 @@ pub enum ComplianceAudioExtractOutput {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct ComplianceLegacyAudioExtractOutput {
     #[serde(default)]
     pub output_id: Option<String>,

@@ -117,6 +117,7 @@ pub struct ExecuteExtractAudioReport {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct ExecuteExtractAudioOutputReport {
     pub operation_output_id: u64,
     pub output_id: Option<String>,
@@ -814,14 +815,25 @@ async fn dispatch_extract_worker(
     VoomError,
 > {
     let repo = &cp.audio_extract_operations;
-    let attempt = repo
-        .record_dispatch_attempt(
+    let attempt = if let Some(attempt) = &dispatch.replay_attempt {
+        attempt.clone()
+    } else {
+        let attempt_directory = staging
+            .paths
+            .first()
+            .and_then(|path| path.parent())
+            .ok_or_else(|| {
+                VoomError::Internal("audio extraction staging path has no parent".to_owned())
+            })?
+            .display()
+            .to_string();
+        repo.record_dispatch_attempt(
             &dispatch.claim,
             NewAudioExtractDispatchAttempt {
                 worker_id: dispatch.worker_id,
                 worker_epoch: dispatch.worker_epoch,
                 idempotency_key: dispatch.idempotency_key.clone(),
-                attempt_directory: staging.canonical_root.display().to_string(),
+                attempt_directory,
                 paths: staging
                     .paths
                     .iter()
@@ -830,7 +842,8 @@ async fn dispatch_extract_worker(
             },
             cp.clock().now(),
         )
-        .await?;
+        .await?
+    };
     match extract
         .dispatch_extract_audio(&dispatch.idempotency_key, request)
         .await
@@ -1028,6 +1041,7 @@ struct ClaimedExtractDispatch {
     worker_epoch: u32,
     idempotency_key: String,
     staging: stage::PreparedStagingPaths,
+    replay_attempt: Option<voom_store::repo::audio_extract_operations::AudioExtractDispatchAttempt>,
 }
 
 fn extract_attempt_members(
@@ -1119,7 +1133,23 @@ async fn claim_extract_dispatch(
         .get_dispatch_attempt(operation.operation.id, claim.expected_generation)
         .await?
     {
-        return reconcile_prior_dispatch_attempt(repo, &claim, attempt, now).await;
+        let expected = stage::resolve_extract_staging_paths(
+            &input.staging_root,
+            &operation.operation.operation_key,
+            operation.operation.dispatch_generation,
+            targets,
+        )
+        .await?;
+        return reconcile_prior_dispatch_attempt(
+            repo,
+            &claim,
+            attempt,
+            worker_id,
+            worker_epoch,
+            &expected,
+            now,
+        )
+        .await;
     }
     let staging = stage::prepare_extract_staging_paths(
         &input.staging_root,
@@ -1137,6 +1167,7 @@ async fn claim_extract_dispatch(
         worker_id,
         worker_epoch,
         staging,
+        replay_attempt: None,
     })
 }
 
@@ -1208,7 +1239,10 @@ async fn extract_dispatch_lease(
 async fn reconcile_prior_dispatch_attempt(
     repo: &SqliteAudioExtractOperationRepo,
     claim: &NewAudioExtractClaim,
-    attempt: voom_store::repo::media::audio_extract_operations::AudioExtractDispatchAttempt,
+    mut attempt: voom_store::repo::media::audio_extract_operations::AudioExtractDispatchAttempt,
+    worker_id: voom_core::WorkerId,
+    worker_epoch: u32,
+    expected: &stage::PreparedStagingPaths,
     now: time::OffsetDateTime,
 ) -> Result<ClaimedExtractDispatch, VoomError> {
     match attempt.status {
@@ -1223,16 +1257,71 @@ async fn reconcile_prior_dispatch_attempt(
             )))
         }
         AudioExtractDispatchAttemptStatus::Active
-        | AudioExtractDispatchAttemptStatus::Quarantined => Err(VoomError::Conflict(format!(
-            "audio extraction attempt {} is {:?}; worker {} epoch {} must prove terminal \
-             completion or be explicitly quiesced before retry (key {})",
-            attempt.id,
-            attempt.status,
-            attempt.worker_id.0,
-            attempt.worker_epoch,
-            attempt.idempotency_key
-        ))),
+            if attempt.worker_id == worker_id && attempt.worker_epoch == worker_epoch =>
+        {
+            let staging = match replay_staging_paths(&attempt, expected) {
+                Ok(staging) => staging,
+                Err(error) => {
+                    repo.quarantine_dispatch(claim, attempt.id, now).await?;
+                    repo.release_claim(claim).await?;
+                    return Err(error);
+                }
+            };
+            Ok(ClaimedExtractDispatch {
+                claim: claim.clone(),
+                worker_id,
+                worker_epoch,
+                idempotency_key: attempt.idempotency_key.clone(),
+                staging,
+                replay_attempt: Some(attempt),
+            })
+        }
+        AudioExtractDispatchAttemptStatus::Active => {
+            repo.quarantine_dispatch(claim, attempt.id, now).await?;
+            repo.release_claim(claim).await?;
+            attempt.status = AudioExtractDispatchAttemptStatus::Quarantined;
+            Err(dispatch_quiescence_required(&attempt))
+        }
+        AudioExtractDispatchAttemptStatus::Quarantined => {
+            repo.release_claim(claim).await?;
+            Err(dispatch_quiescence_required(&attempt))
+        }
     }
+}
+
+fn replay_staging_paths(
+    attempt: &voom_store::repo::media::audio_extract_operations::AudioExtractDispatchAttempt,
+    expected: &stage::PreparedStagingPaths,
+) -> Result<stage::PreparedStagingPaths, VoomError> {
+    let attempt_directory = PathBuf::from(&attempt.attempt_directory);
+    let paths = attempt.paths.iter().map(PathBuf::from).collect::<Vec<_>>();
+    let expected_directory = expected.paths.first().and_then(|path| path.parent());
+    if expected_directory != Some(attempt_directory.as_path())
+        || paths != expected.paths
+        || paths
+            .iter()
+            .any(|path| path.parent() != Some(attempt_directory.as_path()))
+    {
+        return Err(VoomError::Conflict(format!(
+            "audio extraction attempt {} does not match its deterministic ordered staging paths",
+            attempt.id
+        )));
+    }
+    Ok(expected.clone())
+}
+
+fn dispatch_quiescence_required(
+    attempt: &voom_store::repo::media::audio_extract_operations::AudioExtractDispatchAttempt,
+) -> VoomError {
+    VoomError::Conflict(format!(
+        "audio extraction attempt {} is {:?}; worker {} epoch {} must prove terminal \
+         completion or be explicitly quiesced before retry (key {})",
+        attempt.id,
+        attempt.status,
+        attempt.worker_id.0,
+        attempt.worker_epoch,
+        attempt.idempotency_key
+    ))
 }
 
 async fn cleanup_recorded_dispatch_paths(

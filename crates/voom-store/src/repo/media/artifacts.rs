@@ -795,7 +795,7 @@ impl SqliteArtifactRepo {
             "UPDATE artifact_commit_records \
              SET state = 'recovery_required', failure_class = ?, error_code = ?, message = ?, \
                  recovery_reason = ?, finished_at = ? \
-             WHERE id = ? AND state = 'pending'",
+             WHERE id = ? AND state IN ('pending', 'recovery_required')",
         )
         .bind(&failure.failure_class)
         .bind(&failure.error_code)
