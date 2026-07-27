@@ -684,6 +684,35 @@ The V1 condition and track-filter vocabulary is intentionally finite:
 <op> = == | != | < | <= | > | >=
 ```
 
+#### Quoted track-filter strings
+
+The `<quoted-string>` in `title contains <quoted-string>` uses ASCII double
+quotes as delimiters. While locating the closing delimiter, a backslash causes
+the scanner to consume the next Unicode scalar value as content. The backslash
+and scalar are retained exactly; the compiler does not decode or normalize
+escape pairs. The quoted value must consume the complete filter leaf. A missing
+closing delimiter, including a terminal backslash that consumes the only
+remaining quote, is invalid.
+
+Compiled-policy schema V2 preserves the historical lowering contract: after
+the complete lexeme is validated, lowering removes its opening delimiter and
+the maximal trailing run of double quotes. The run always contains the closing
+delimiter. When an escaped quote is adjacent to that delimiter, the escaped
+quote is also removed and its preceding backslash remains. For example:
+
+```text
+title contains "\"Quoted\" middle"  -> value: \"Quoted\" middle
+title contains "Path\\Name"          -> value: Path\\Name
+title contains "Director \"Cut\""    -> value: Director \"Cut\
+title contains "Path\\"              -> value: Path\\
+title contains "Caf\é"               -> value: Caf\é
+```
+
+These source spellings and values are versioned behavior: the exact source
+bytes determine `source_hash`, so a compiler must not reinterpret them in
+place. The quoted-token forms used by `language` and `codec` are narrower and
+do not accept backslashes.
+
 #### Track-filter language semantics
 
 The `language` track-filter forms (`language == <token>`, `language in [...]`)

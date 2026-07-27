@@ -45,11 +45,39 @@ fn rejects_unpublished_and_malformed_leaves() {
         "commentary trailing",
         "title contains \"\"",
         "title contains \"unterminated",
+        r#"title contains "terminal\"#,
         "title contains \"trailing\" input",
     ];
 
     for source in cases {
         assert!(parse_track_filter(source).is_err(), "accepted `{source}`");
+    }
+}
+
+#[test]
+fn quoted_titles_preserve_schema_v2_source_spelling() {
+    let cases = [
+        (
+            r#"title contains "\"Quoted\" middle""#,
+            r#"\"Quoted\" middle"#,
+        ),
+        (r#"title contains "Path\\Name""#, r"Path\\Name"),
+        (r#"title contains "Director \"Cut\"""#, r#"Director \"Cut\"#),
+        (r#"title contains "Path\\""#, r"Path\\"),
+        (r#"title contains "Caf\é""#, r"Caf\é"),
+        (r#"title contains "Other\qPair""#, r"Other\qPair"),
+    ];
+
+    for (source, expected) in cases {
+        assert_eq!(
+            parse_track_filter(source),
+            Ok(TrackFilter::TitleContains(
+                crate::compiled::TitleContainsTrackFilter {
+                    value: expected.to_owned(),
+                },
+            )),
+            "unexpected V2 value for `{source}`"
+        );
     }
 }
 

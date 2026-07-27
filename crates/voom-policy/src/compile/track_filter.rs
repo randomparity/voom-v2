@@ -144,9 +144,14 @@ fn parse_title(text: &str) -> Result<TrackFilter, ParseError> {
     }
     Ok(TrackFilter::TitleContains(
         crate::compiled::TitleContainsTrackFilter {
-            value: value.trim_matches('"').to_owned(),
+            value: schema_v2_title_value(value)?,
         },
     ))
+}
+
+fn schema_v2_title_value(quoted: &str) -> Result<String, ParseError> {
+    let value = quoted.strip_prefix('"').ok_or(ParseError)?;
+    Ok(value.trim_end_matches('"').to_owned())
 }
 
 fn parse_quoted_token(text: &str) -> Result<String, ParseError> {
