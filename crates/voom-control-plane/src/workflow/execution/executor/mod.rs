@@ -46,10 +46,6 @@ pub(crate) struct PlannedLineageGuard {
 }
 
 impl PlannedLineageGuard {
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "called by the pending coordinator migration")
-    )]
     pub(crate) fn new(
         planned_file_count: usize,
         expectations: Vec<(FileAssetId, FileVersionId)>,
@@ -487,6 +483,7 @@ impl WorkflowExecutor {
     }
 
     /// Run one phase invocation inside a caller-owned, already-open job.
+    #[cfg(test)]
     pub(crate) async fn submit_and_run_invocation_in_job(
         &self,
         job_id: JobId,
@@ -511,10 +508,6 @@ impl WorkflowExecutor {
 
     /// Run one phase invocation after atomically validating its planned file
     /// lineage and creating every root ticket.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "called by the pending coordinator migration")
-    )]
     pub(crate) async fn submit_and_run_guarded_invocation_in_job(
         &self,
         job_id: JobId,
