@@ -277,6 +277,15 @@ fn transcode_selection_rejects_synthesize_payload_with_clear_message() {
         &json!({"type": "channels", "op": "gte", "value": 6}),
     );
     payload["target_channels"] = json!(2);
+    let operation_id = "node_test_synthesis";
+    let companion_id = voom_plan::planner::audio::synthesis_companion_id(operation_id, "a-1");
+    payload["operation_id"] = json!(operation_id);
+    payload["companions"] = json!([{
+        "companion_id": companion_id,
+        "source_snapshot_stream_id": "a-1",
+        "source_provider_stream_index": 1,
+        "result_snapshot_stream_id": companion_id
+    }]);
     let snapshot = snapshot_with_streams(vec![audio(
         "a-1",
         1,

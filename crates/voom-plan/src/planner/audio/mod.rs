@@ -6,12 +6,14 @@ mod selection;
 
 pub use payload::{
     AUDIO_EXTRACT_CODEC, AUDIO_EXTRACT_CONTAINER, AUDIO_TRANSCODE_CONTAINER, AudioOperationPayload,
-    AudioOperationType, AudioPayloadError, ExtractAudioOutputDescriptor, extract_output_id,
+    AudioOperationType, AudioPayloadError, ExtractAudioOutputDescriptor,
+    SynthesizeAudioCompanionDescriptor, extract_output_id, synthesis_companion_id,
 };
 pub use selection::{
     AudioBundleRole, AudioDispositionFact, AudioPlanShape, AudioPlanningBlock,
     SnapshotAudioStreamFact, evaluate_audio_filter, extract_audio_outputs, extraction_role,
-    selected_audio_streams, stream_facts, synthesize_audio_shape, transcode_audio_shape,
+    selected_audio_streams, stream_facts, synthesize_audio_companions, synthesize_audio_shape,
+    transcode_audio_shape,
 };
 
 use crate::{NodeStatus, PlanOperationKind, PlanningDiagnostic, PlanningDiagnosticCode};
@@ -34,6 +36,7 @@ pub(super) fn plan_transcode(
         source_media_snapshot_id: snapshot.existing_media_snapshot_id.map(|id| id.0),
         filter: filter.cloned(),
         outputs: None,
+        companions: None,
         target_channels: None,
     }
     .into_value();
@@ -107,6 +110,7 @@ pub(super) fn plan_extract(
         source_media_snapshot_id: snapshot.existing_media_snapshot_id.map(|id| id.0),
         filter: filter.cloned(),
         outputs,
+        companions: None,
         target_channels: None,
     }
     .into_value();
@@ -131,18 +135,21 @@ pub(super) fn plan_synthesize(
     container: &str,
     target_channels: u64,
     filter: Option<&TrackFilter>,
+    operation_id: &str,
 ) -> OperationPlan {
     // Synthesis rides the transcode_audio operation kind and worker capability
     // (ADR 0026); the plan payload's `type` carries the add-track distinction.
     let operation_kind = PlanOperationKind::TranscodeAudio;
+    let companions = synthesize_audio_companions(snapshot, filter, operation_id).ok();
     let payload = AudioOperationPayload {
         operation_type: AudioOperationType::SynthesizeAudio,
-        operation_id: None,
+        operation_id: Some(operation_id.to_owned()),
         target_codec: target_codec.to_owned(),
         container: container.to_owned(),
         source_media_snapshot_id: snapshot.existing_media_snapshot_id.map(|id| id.0),
         filter: filter.cloned(),
         outputs: None,
+        companions,
         target_channels: Some(target_channels),
     }
     .into_value();

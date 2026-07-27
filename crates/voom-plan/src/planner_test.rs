@@ -327,6 +327,19 @@ fn request_with_extract_audio(snapshot: MediaSnapshotInput) -> PlanningRequest {
     }
 }
 
+fn request_with_synthesize_audio(snapshot: MediaSnapshotInput) -> PlanningRequest {
+    PlanningRequest {
+        policy: policy(CompiledOperation::SynthesizeAudio {
+            target_codec: "aac".to_owned(),
+            container: "mkv".to_owned(),
+            target_channels: 2,
+            filter: None,
+        }),
+        input: input_with_snapshot(snapshot),
+        context: PlanningContext::default(),
+    }
+}
+
 #[test]
 fn groups_container_and_track_operations_into_one_remux_node() {
     let policy = compiled_policy_with_ops(vec![
@@ -2246,6 +2259,38 @@ fn transcode_audio_blocks_when_selector_matches_zero_audio_streams() {
         plan.diagnostics[0].operation_kind.as_deref(),
         Some("transcode_audio")
     );
+}
+
+#[test]
+fn synthesize_audio_plans_stable_companions_in_source_stream_order() {
+    let mut late = audio_stream(3, "eac3", "spa", Some(false));
+    late["channels"] = serde_json::json!(6);
+    let mut early = audio_stream(1, "eac3", "eng", Some(false));
+    early["channels"] = serde_json::json!(6);
+    let request =
+        request_with_synthesize_audio(snapshot_with_audio_streams(Some("mkv"), &[late, early]));
+
+    let first = generate_plan(request.clone()).unwrap();
+    let second = generate_plan(request).unwrap();
+    let payload = &first.nodes[0].operation_payload;
+
+    assert_eq!(first.nodes[0].status, NodeStatus::Planned);
+    assert_eq!(payload["type"], "synthesize_audio");
+    assert_eq!(payload["operation_id"], first.nodes[0].node_id);
+    let companions = payload["companions"].as_array().unwrap();
+    assert_eq!(
+        companions
+            .iter()
+            .map(|companion| companion["source_provider_stream_index"].as_u64().unwrap())
+            .collect::<Vec<_>>(),
+        vec![1, 3]
+    );
+    for companion in companions {
+        let id = companion["companion_id"].as_str().unwrap();
+        assert!(id.starts_with("synth_companion_"));
+        assert_eq!(companion["result_snapshot_stream_id"], id);
+    }
+    assert_eq!(payload, &second.nodes[0].operation_payload);
 }
 
 #[test]
