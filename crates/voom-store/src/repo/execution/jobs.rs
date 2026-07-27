@@ -255,9 +255,17 @@ async fn transition_open_to(
     .await
     .map_err(|e| VoomError::database_context("jobs update", e))?;
     if res.rows_affected() == 0 {
+        let state: Option<String> = sqlx::query_scalar("SELECT state FROM jobs WHERE id = ?")
+            .bind(i64_from_u64(id.0))
+            .fetch_optional(&mut **tx)
+            .await
+            .map_err(|e| VoomError::database_context("jobs transition state read", e))?;
+        let Some(state) = state else {
+            return Err(VoomError::NotFound(format!("job {id}")));
+        };
         return Err(VoomError::Conflict(format!(
-            "jobs transition rejected: id={id} next={next:?} \
-             (row missing or non-open state)"
+            "jobs transition rejected: job {id} is {state}, cannot transition to {}",
+            next.as_str()
         )));
     }
     // Re-read inside the same transaction so the caller sees the updated

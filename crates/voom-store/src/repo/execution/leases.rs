@@ -226,7 +226,11 @@ impl SqliteLeaseRepo {
              SET state = 'leased', state_changed_at = ?, attempt = attempt + 1, \
                  epoch = epoch + 1 \
              WHERE id = ? AND state = 'ready' AND next_eligible_at <= ? \
-                   AND attempt < max_attempts",
+                   AND attempt < max_attempts \
+                   AND (job_id IS NULL OR EXISTS ( \
+                       SELECT 1 FROM jobs \
+                       WHERE jobs.id = tickets.job_id AND jobs.state = 'open' \
+                   ))",
         )
         .bind(&now_str)
         .bind(i64_from_u64(input.ticket_id.0))
@@ -236,7 +240,8 @@ impl SqliteLeaseRepo {
         .map_err(|e| VoomError::database_context("tickets transition to leased", e))?;
         if res.rows_affected() == 0 {
             return Err(VoomError::Conflict(format!(
-                "acquire rejected for ticket {}: not ready, not eligible, or out of attempts",
+                "acquire rejected for ticket {}: not ready, not eligible, \
+                 parent job not open, or out of attempts",
                 input.ticket_id
             )));
         }

@@ -432,7 +432,14 @@ impl SqliteTicketRepo {
                AND next_eligible_at <= ",
         );
         query.push_bind(ts);
-        query.push(" AND attempt < max_attempts AND kind IN (");
+        query.push(
+            " AND attempt < max_attempts \
+               AND (job_id IS NULL OR EXISTS ( \
+                   SELECT 1 FROM jobs \
+                   WHERE jobs.id = tickets.job_id AND jobs.state = 'open' \
+               )) \
+               AND kind IN (",
+        );
         let mut separated = query.separated(", ");
         for operation in operations {
             separated.push_bind(operation.as_str());

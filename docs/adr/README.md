@@ -51,3 +51,4 @@ are append-only — supersede an ADR with a new one rather than rewriting histor
 | [0043](0043-recoverable-audio-synthesis-lineage.md) | Publish synthesized audio companions with recoverable stream lineage |
 | [0044](0044-preserve-v2-track-filter-escape-semantics.md) | Preserve V2 quoted track-filter escape semantics |
 | [0045](0045-linearize-lineage-validation-with-phase-ticket-creation.md) | Linearize lineage validation with phase ticket creation |
+| [0046](0046-cancel-jobs-without-dispatching-new-work.md) | Cancel jobs without dispatching new work |

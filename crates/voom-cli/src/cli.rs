@@ -1136,6 +1136,13 @@ pub enum JobCommand {
         #[arg(long)]
         job_id: u64,
     },
+    /// Cancel one open job and record the operator's reason.
+    Cancel {
+        #[arg(long)]
+        job_id: u64,
+        #[arg(long)]
+        reason: String,
+    },
 }
 
 #[derive(Copy, Clone, Debug, ValueEnum, PartialEq, Eq)]

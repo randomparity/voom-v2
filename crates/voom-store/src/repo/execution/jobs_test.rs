@@ -166,3 +166,36 @@ async fn succeed_rejects_terminal_job() {
         .unwrap_err();
     assert!(matches!(err, VoomError::Conflict(_)));
 }
+
+#[tokio::test]
+async fn cancel_missing_job_is_not_found() {
+    let (pool, _tmp) = pool().await;
+    let repo = SqliteJobRepo::new(pool);
+
+    let err = repo
+        .cancel(JobId(999), OffsetDateTime::UNIX_EPOCH)
+        .await
+        .unwrap_err();
+
+    assert!(matches!(err, VoomError::NotFound(_)), "got: {err:?}");
+}
+
+#[tokio::test]
+async fn cancel_terminal_job_reports_its_state_as_conflict() {
+    let (pool, _tmp) = pool().await;
+    let repo = SqliteJobRepo::new(pool);
+    let job = repo.create(sample_new_job()).await.unwrap();
+    repo.succeed(job.id, OffsetDateTime::UNIX_EPOCH)
+        .await
+        .unwrap();
+
+    let err = repo
+        .cancel(job.id, OffsetDateTime::UNIX_EPOCH)
+        .await
+        .unwrap_err();
+
+    let VoomError::Conflict(message) = err else {
+        panic!("expected conflict");
+    };
+    assert!(message.contains("succeeded"), "got: {message}");
+}
