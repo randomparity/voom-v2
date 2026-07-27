@@ -115,16 +115,19 @@ fn default_refs(
         match *action {
             EffectiveDefaultAction::Resolved {
                 target,
-                selected_id,
+                ref selected_ids,
             } => {
-                let selected = resolved_kept_stream(selected_id, Some(target), facts, keep_ids)?;
-                default_streams.push(stream_ref(selected));
+                for selected_id in selected_ids {
+                    let selected =
+                        resolved_kept_stream(selected_id, Some(target), facts, keep_ids)?;
+                    default_streams.push(stream_ref(selected));
+                }
                 clear_default_streams.extend(
                     facts
                         .iter()
                         .filter(|stream| {
                             stream.kind == target
-                                && stream.snapshot_stream_id != selected_id
+                                && !selected_ids.contains(&stream.snapshot_stream_id.as_str())
                                 && keep_ids.contains(&stream.snapshot_stream_id)
                         })
                         .map(stream_ref),
@@ -262,7 +265,7 @@ impl<'a> ClassifiedDefaultAction<'a> {
                 selected_id,
             } => Ok(EffectiveDefaultAction::Resolved {
                 target,
-                selected_id,
+                selected_ids: vec![selected_id],
             }),
             Self::UnresolvedBest { .. } => Err(VoomError::Config(
                 "default strategy best requires a resolved selected_snapshot_stream_id".to_owned(),
@@ -274,11 +277,10 @@ impl<'a> ClassifiedDefaultAction<'a> {
     }
 }
 
-#[derive(Clone, Copy)]
 enum EffectiveDefaultAction<'a> {
     Resolved {
         target: TrackTarget,
-        selected_id: &'a str,
+        selected_ids: Vec<&'a str>,
     },
     First {
         target: TrackTarget,
@@ -292,8 +294,8 @@ enum EffectiveDefaultAction<'a> {
 }
 
 impl EffectiveDefaultAction<'_> {
-    fn target(self) -> TrackTarget {
-        match self {
+    fn target(&self) -> TrackTarget {
+        match *self {
             Self::Resolved { target, .. }
             | Self::First { target }
             | Self::None { target }
@@ -309,31 +311,45 @@ fn effective_default_actions(
         .iter()
         .map(classify_default_action)
         .collect::<Result<Vec<_>, _>>()?;
-    let mut explicit_targets = Vec::new();
+    let mut explicit = Vec::<EffectiveDefaultAction<'_>>::new();
     for action in &classified {
-        if !action.is_resolved_explicit() {
+        let ClassifiedDefaultAction::ResolvedExplicit {
+            target,
+            selected_id,
+        } = *action
+        else {
             continue;
+        };
+        if let Some(EffectiveDefaultAction::Resolved { selected_ids, .. }) = explicit
+            .iter_mut()
+            .find(|candidate| candidate.target() == target)
+        {
+            selected_ids.push(selected_id);
+        } else {
+            explicit.push(EffectiveDefaultAction::Resolved {
+                target,
+                selected_ids: vec![selected_id],
+            });
         }
-        let target = action.target();
-        if explicit_targets.contains(&target) {
-            return Err(VoomError::Config(format!(
-                "multiple explicit defaults actions target {}",
-                track_target_name(target)
-            )));
-        }
-        explicit_targets.push(target);
     }
-    let effective = classified
-        .into_iter()
+    let strategies = classified
+        .iter()
+        .copied()
         .filter(|action| {
-            action.is_resolved_explicit() || !explicit_targets.contains(&action.target())
+            !action.is_resolved_explicit()
+                && !explicit
+                    .iter()
+                    .any(|candidate| candidate.target() == action.target())
         })
         .collect::<Vec<_>>();
-    validate_best_default_strategy_conflicts(&effective)?;
-    effective
-        .into_iter()
-        .map(ClassifiedDefaultAction::into_effective)
-        .collect()
+    validate_best_default_strategy_conflicts(&strategies)?;
+    explicit.extend(
+        strategies
+            .into_iter()
+            .map(ClassifiedDefaultAction::into_effective)
+            .collect::<Result<Vec<_>, _>>()?,
+    );
+    Ok(explicit)
 }
 
 fn classify_default_action(
@@ -382,11 +398,12 @@ fn validate_best_default_strategy_conflicts(
             continue;
         }
         let target = action.target();
-        let same_target_count = defaults
+        if defaults
             .iter()
             .filter(|candidate| candidate.target() == target)
-            .count();
-        if same_target_count > 1 {
+            .count()
+            > 1
+        {
             return Err(VoomError::Config(format!(
                 "multiple defaults strategy actions target {} and include best",
                 track_target_name(target)

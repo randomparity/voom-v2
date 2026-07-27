@@ -459,7 +459,7 @@ fn selection_preserves_legacy_non_best_strategy_composition() {
 }
 
 #[test]
-fn selection_rejects_multiple_explicit_defaults_for_one_target() {
+fn selection_applies_multiple_explicit_defaults_for_one_target() {
     let payload = json!({
         "type": "remux",
         "container": "mkv",
@@ -481,14 +481,17 @@ fn selection_rejects_multiple_explicit_defaults_for_one_target() {
     });
     let snapshot = snapshot_with_video_audio_languages(["eng", "spa"]);
 
-    let err = selection_from_payload_and_snapshot(&payload, &snapshot).unwrap_err();
+    let selection = selection_from_payload_and_snapshot(&payload, &snapshot).unwrap();
 
-    assert_eq!(err.error_code(), ErrorCode::ConfigInvalid);
-    assert!(
-        err.to_string()
-            .contains("multiple explicit defaults actions target audio"),
-        "{err}"
+    assert_eq!(
+        selection
+            .default_streams
+            .iter()
+            .map(|stream| stream.snapshot_stream_id.as_str())
+            .collect::<Vec<_>>(),
+        ["stream-1", "stream-2", "stream-0"]
     );
+    assert!(selection.clear_default_streams.is_empty());
 }
 
 #[test]

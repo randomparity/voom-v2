@@ -338,19 +338,31 @@ fn build_args_rejects_attachment_in_track_only_selection_fields() {
 }
 
 #[test]
-fn build_args_rejects_attachment_track_order() {
+fn build_args_omits_attachment_from_provider_track_order() {
     let request = remux_request(base_selection(vec![stream(0)]));
     let mut request = request;
-    request.selection.track_order = vec![RemuxTrackGroup::Attachment];
+    request.selection.track_order = vec![RemuxTrackGroup::Video, RemuxTrackGroup::Attachment];
     let mapping = MkvmergeTrackMapping::from_pairs([(0, 7)]);
 
-    let err = build_mkvmerge_args(&request, &mapping).unwrap_err();
+    let args = build_mkvmerge_args(&request, &mapping).unwrap();
 
-    assert!(
-        err.to_string()
-            .contains("track_order cannot contain attachment"),
-        "{err}"
-    );
+    assert_eq!(first_arg_value(&args, "--track-order"), Some("0:7"));
+}
+
+#[test]
+fn build_args_pins_source_order_when_no_reorder_was_requested() {
+    let identify = serde_json::json!({
+        "tracks": [
+            {"id": 12, "type": "audio", "properties": {"number": 1}},
+            {"id": 7, "type": "video", "properties": {"number": 2}}
+        ]
+    });
+    let mapping = track_mapping_from_identify(&identify).unwrap();
+    let request = remux_request(base_selection(vec![stream(0), stream(1)]));
+
+    let args = build_mkvmerge_args(&request, &mapping).unwrap();
+
+    assert_eq!(first_arg_value(&args, "--track-order"), Some("0:12,0:7"));
 }
 
 fn stream(provider_stream_index: u32) -> RemuxStreamRef {

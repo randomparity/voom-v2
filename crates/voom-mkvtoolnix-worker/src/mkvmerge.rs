@@ -322,11 +322,6 @@ fn validate_attachment_selection_boundaries(
     selection: &RemuxSelection,
     mapping: &MkvmergeTrackMapping,
 ) -> Result<(), MkvtoolnixError> {
-    if selection.track_order.contains(&RemuxTrackGroup::Attachment) {
-        return Err(MkvtoolnixError::ConfigInvalid(
-            "track_order cannot contain attachment".to_owned(),
-        ));
-    }
     let selection_fields = [
         ("default_streams", selection.default_streams.as_slice()),
         (
@@ -620,9 +615,6 @@ fn track_order(
     selection: &RemuxSelection,
     mapping: &MkvmergeTrackMapping,
 ) -> Result<Option<String>, MkvtoolnixError> {
-    if selection.track_order.is_empty() && selection.head_streams.is_empty() {
-        return Ok(None);
-    }
     let mut ordered = Vec::new();
     for stream in ordered_keep_streams(selection, mapping)? {
         let track = mapping

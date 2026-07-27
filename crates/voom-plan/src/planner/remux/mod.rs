@@ -20,8 +20,6 @@ pub use selection::{
 use crate::{NodeStatus, PlanOperationKind, PlanningDiagnostic, PlanningDiagnosticCode};
 
 use super::{OperationPlan, video_stream_count};
-use payload::default_track_order;
-
 pub(super) enum CandidateSupport {
     Supported,
     Unsupported(&'static str),
@@ -490,12 +488,21 @@ fn base_remux_payload(
             _ => None,
         })
         .collect::<Vec<_>>();
+    let has_set_container = operations.iter().any(|operation| {
+        matches!(
+            operation,
+            CompiledOperation::SetContainer(
+                voom_policy::compiled::CompiledSetContainerOperation { .. }
+            )
+        )
+    });
     let track_order = match reorder_operations.as_slice() {
         [targets] => targets
             .iter()
             .map(|target| remux_track_group(*target))
             .collect::<Vec<_>>(),
-        _ => default_track_order(),
+        [] if has_set_container => payload::default_track_order(),
+        _ => Vec::new(),
     };
     let defaults = operations
         .iter()
@@ -610,7 +617,17 @@ fn resolve_remux_operations(
     changed |= defaults_change(&payload.defaults, &facts, &keep_ids)?;
     let (track_order, head_snapshot_stream_id, order_changed) =
         resolve_track_order(operations, &facts, &keep_ids)?;
-    payload.track_order = track_order;
+    let has_reorder = operations.iter().any(|operation| {
+        matches!(
+            operation,
+            CompiledOperation::ReorderTracks(
+                voom_policy::compiled::CompiledReorderTracksOperation { .. }
+            )
+        )
+    });
+    if has_reorder {
+        payload.track_order = track_order;
+    }
     payload.head_snapshot_stream_id = head_snapshot_stream_id;
     changed |= order_changed;
 
@@ -627,11 +644,9 @@ fn resolve_default_actions(
     keep_ids: &BTreeSet<String>,
     preferred_languages: &[String],
 ) -> Result<RemuxDefaultsResolution, RemuxPlanningBlock> {
-    let explicit_targets = explicit_default_targets(operations)?;
-    validate_best_default_strategy_conflicts(operations, &explicit_targets)?;
     let mut defaults = Vec::new();
     let mut evaluated_untagged_language = false;
-    for operation in operations {
+    for operation in effective_default_operations(operations) {
         let CompiledOperation::SetDefaults(voom_policy::compiled::CompiledSetDefaultsOperation {
             target,
             strategy,
@@ -640,15 +655,21 @@ fn resolve_default_actions(
         else {
             continue;
         };
-        if filter.is_none() && explicit_targets.contains(target) {
-            continue;
-        }
-        let selected_snapshot_stream_id = match (filter, strategy) {
-            (Some(filter), _) => Some(resolve_unique_filter(
-                retained_streams(facts, keep_ids, Some(*target)),
-                filter,
-                RemuxFilterOperation::Defaults(*target),
-            )?),
+        match (filter, strategy) {
+            (Some(filter), _) => {
+                let selected = resolve_filter_matches(
+                    retained_streams(facts, keep_ids, Some(*target)),
+                    filter,
+                    RemuxFilterOperation::Defaults(*target),
+                )?;
+                defaults.extend(selected.into_iter().map(|selected_snapshot_stream_id| {
+                    RemuxDefaultAction {
+                        target: *target,
+                        strategy: *strategy,
+                        selected_snapshot_stream_id: Some(selected_snapshot_stream_id),
+                    }
+                }));
+            }
             (None, DefaultStrategy::Best) => {
                 let Some(resolved) = resolve_best_default(
                     retained_streams(facts, keep_ids, Some(*target)),
@@ -658,20 +679,76 @@ fn resolve_default_actions(
                     continue;
                 };
                 evaluated_untagged_language |= resolved.evaluated_untagged_language;
-                Some(resolved.selected_snapshot_stream_id)
+                defaults.push(RemuxDefaultAction {
+                    target: *target,
+                    strategy: *strategy,
+                    selected_snapshot_stream_id: Some(resolved.selected_snapshot_stream_id),
+                });
             }
-            (None, _) => None,
-        };
-        defaults.push(RemuxDefaultAction {
-            target: *target,
-            strategy: *strategy,
-            selected_snapshot_stream_id,
-        });
+            (None, _) => defaults.push(RemuxDefaultAction {
+                target: *target,
+                strategy: *strategy,
+                selected_snapshot_stream_id: None,
+            }),
+        }
     }
     Ok(RemuxDefaultsResolution {
         actions: defaults,
         evaluated_untagged_language,
     })
+}
+
+fn effective_default_operations<'a>(
+    operations: &'a [&'a CompiledOperation],
+) -> Vec<&'a CompiledOperation> {
+    let explicit_targets = operations
+        .iter()
+        .filter_map(|operation| {
+            let CompiledOperation::SetDefaults(
+                voom_policy::compiled::CompiledSetDefaultsOperation {
+                    target,
+                    filter: Some(_),
+                    ..
+                },
+            ) = operation
+            else {
+                return None;
+            };
+            Some(*target)
+        })
+        .collect::<Vec<_>>();
+    let mut effective: Vec<&CompiledOperation> = Vec::new();
+    for operation in operations {
+        let CompiledOperation::SetDefaults(voom_policy::compiled::CompiledSetDefaultsOperation {
+            target,
+            filter,
+            ..
+        }) = operation
+        else {
+            continue;
+        };
+        if filter.is_none() && explicit_targets.contains(target) {
+            continue;
+        }
+        if filter.is_some() {
+            effective.push(*operation);
+            continue;
+        }
+        effective.retain(|candidate| {
+            let CompiledOperation::SetDefaults(
+                voom_policy::compiled::CompiledSetDefaultsOperation {
+                    target: candidate_target,
+                    ..
+                },
+            ) = candidate
+            else {
+                return true;
+            };
+            candidate_target != target
+        });
+        effective.push(*operation);
+    }
+    effective
 }
 
 fn resolve_best_default(
@@ -717,66 +794,6 @@ fn resolve_best_default(
     }))
 }
 
-fn validate_best_default_strategy_conflicts(
-    operations: &[&CompiledOperation],
-    explicit_targets: &[TrackTarget],
-) -> Result<(), RemuxPlanningBlock> {
-    for operation in operations {
-        let CompiledOperation::SetDefaults(voom_policy::compiled::CompiledSetDefaultsOperation {
-            target,
-            strategy: DefaultStrategy::Best,
-            filter: None,
-        }) = operation
-        else {
-            continue;
-        };
-        if explicit_targets.contains(target) {
-            continue;
-        }
-        let mut strategy_count = 0;
-        for candidate in operations {
-            let CompiledOperation::SetDefaults(
-                voom_policy::compiled::CompiledSetDefaultsOperation {
-                    target: candidate_target,
-                    filter: None,
-                    ..
-                },
-            ) = candidate
-            else {
-                continue;
-            };
-            if candidate_target == target {
-                strategy_count += 1;
-            }
-        }
-        if strategy_count > 1 {
-            return Err(RemuxPlanningBlock::ConflictingBestDefaultStrategies { target: *target });
-        }
-    }
-    Ok(())
-}
-
-fn explicit_default_targets(
-    operations: &[&CompiledOperation],
-) -> Result<Vec<TrackTarget>, RemuxPlanningBlock> {
-    let mut targets = Vec::new();
-    for operation in operations {
-        let CompiledOperation::SetDefaults(voom_policy::compiled::CompiledSetDefaultsOperation {
-            target,
-            filter: Some(_),
-            ..
-        }) = operation
-        else {
-            continue;
-        };
-        if targets.contains(target) {
-            return Err(RemuxPlanningBlock::ConflictingExplicitDefaults { target: *target });
-        }
-        targets.push(*target);
-    }
-    Ok(targets)
-}
-
 fn resolve_track_order(
     operations: &[&CompiledOperation],
     facts: &[SnapshotStreamFact],
@@ -801,10 +818,7 @@ fn resolve_track_order(
         let [(targets, head_filter)] = reorders.as_slice() else {
             return Err(RemuxPlanningBlock::UnsupportedMediaShape);
         };
-        if targets.contains(&TrackTarget::Attachment)
-            || duplicate_track_targets(targets)
-            || targets.is_empty() && head_filter.is_none()
-        {
+        if duplicate_track_targets(targets) || targets.is_empty() && head_filter.is_none() {
             return Err(RemuxPlanningBlock::UnsupportedMediaShape);
         }
         let head = head_filter
@@ -825,7 +839,7 @@ fn resolve_track_order(
             .collect::<Vec<_>>();
         return Ok((order, head, changed));
     };
-    Ok((default_track_order(), None, false))
+    Ok((Vec::new(), None, false))
 }
 
 fn retained_streams<'a>(
@@ -848,19 +862,31 @@ fn resolve_unique_filter(
     filter: &TrackFilter,
     operation: RemuxFilterOperation,
 ) -> Result<String, RemuxPlanningBlock> {
+    let matches = resolve_filter_matches(streams, filter, operation)?;
+    match matches.as_slice() {
+        [snapshot_stream_id] => Ok(snapshot_stream_id.clone()),
+        _ => Err(RemuxPlanningBlock::AmbiguousTrackFilterSelection {
+            operation,
+            match_count: matches.len(),
+        }),
+    }
+}
+
+fn resolve_filter_matches(
+    streams: Vec<&SnapshotStreamFact>,
+    filter: &TrackFilter,
+    operation: RemuxFilterOperation,
+) -> Result<Vec<String>, RemuxPlanningBlock> {
     let mut matches = Vec::new();
     for stream in streams {
         if evaluate_filter(filter, stream)? {
             matches.push(stream.snapshot_stream_id.clone());
         }
     }
-    match matches.as_slice() {
-        [snapshot_stream_id] => Ok(snapshot_stream_id.clone()),
-        [] => Err(RemuxPlanningBlock::EmptyTrackFilterSelection { operation }),
-        _ => Err(RemuxPlanningBlock::AmbiguousTrackFilterSelection {
-            operation,
-            match_count: matches.len(),
-        }),
+    if matches.is_empty() {
+        Err(RemuxPlanningBlock::EmptyTrackFilterSelection { operation })
+    } else {
+        Ok(matches)
     }
 }
 
@@ -870,12 +896,23 @@ fn defaults_change(
     keep_ids: &BTreeSet<String>,
 ) -> Result<bool, RemuxPlanningBlock> {
     let mut changed = false;
+    let mut handled_targets = Vec::new();
     for action in defaults {
-        if let Some(selected_id) = &action.selected_snapshot_stream_id {
+        if handled_targets.contains(&action.target) {
+            continue;
+        }
+        handled_targets.push(action.target);
+        let selected_ids = defaults
+            .iter()
+            .filter(|candidate| candidate.target == action.target)
+            .filter_map(|candidate| candidate.selected_snapshot_stream_id.as_deref())
+            .collect::<Vec<_>>();
+        if !selected_ids.is_empty() {
             for stream in facts.iter().filter(|stream| {
                 stream.kind == action.target && keep_ids.contains(&stream.snapshot_stream_id)
             }) {
-                changed |= required_default(stream)? != (stream.snapshot_stream_id == *selected_id);
+                changed |= required_default(stream)?
+                    != selected_ids.contains(&stream.snapshot_stream_id.as_str());
             }
             continue;
         }

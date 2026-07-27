@@ -159,19 +159,14 @@ async fn handler_rejects_dropping_final_source_audio_before_provider_run() {
 }
 
 #[tokio::test]
-async fn handler_rejects_attachment_track_order_before_provider_run() {
+async fn handler_accepts_attachment_at_end_of_track_order() {
     let fixture = remux_fixture().await;
     let mut request = fixture.request;
     request.selection.track_order = vec![RemuxTrackGroup::Video, RemuxTrackGroup::Attachment];
 
-    let err = handle_remux(&request, &fixture.config).await.unwrap_err();
+    let result = handle_remux(&request, &fixture.config).await.unwrap();
 
-    assert_eq!(err.error_code(), ErrorCode::ConfigInvalid);
-    assert!(
-        err.to_string()
-            .contains("track_order cannot contain attachment")
-    );
-    assert!(!tokio::fs::try_exists(&request.output.path).await.unwrap());
+    assert_eq!(result.kept_snapshot_stream_ids, ["stream-0", "stream-1"]);
 }
 
 #[tokio::test]
