@@ -88,12 +88,14 @@ pub fn resolve_inline_profiles_in_policy(
 ) -> Result<(), VoomError> {
     for phase in &mut policy.phases {
         for operation in &mut phase.operations {
-            if let voom_policy::CompiledOperation::TranscodeVideo {
-                profile,
-                target_codec,
-                container,
-                resolved_profile,
-            } = operation
+            if let voom_policy::CompiledOperation::TranscodeVideo(
+                voom_policy::compiled::CompiledTranscodeVideoOperation {
+                    profile,
+                    target_codec,
+                    container,
+                    resolved_profile,
+                },
+            ) = operation
             {
                 match profile {
                     VideoProfileRef::Inline(settings) => {

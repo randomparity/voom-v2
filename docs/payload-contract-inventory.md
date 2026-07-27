@@ -27,6 +27,7 @@ and `crates/voom-control-plane/src/` (typed higher layer for T-upstream columns)
 | worker_capabilities.{codecs,hardware,artifact_access}; worker_grants.{can_execute,can_access_read,can_access_write,denies}; workflow_file_phase_summaries.ticket_ids; policy_media_snapshot_inputs.{audio_languages,subtitle_languages,health_flags} | T | executor.rs:1403 `json_string_array_contains` (`Vec<String>`); workflow_summaries.rs:622 (`Vec<u64>`); policy_inputs.rs:813–815 `json_value` → `Vec<String>` | `Vec<String>` / `Vec<u64>` | — | n/a | scalar element types, no named-field surface; NOT in scope |
 | tickets.payload | T-upstream | store: repo/execution/tickets.rs:532 (`JsonValue`); typed: ticket_payload.rs:83 `from_value` → `WorkflowTicketPayload` | `WorkflowTicketPayload` | `EffectiveTiming` (named struct); `OperationKind` (unit enum — no surface) | ticket_payload.rs, timing.rs | add attr+tests to `WorkflowTicketPayload` and `EffectiveTiming` (Task 4) |
 | tickets.result | T-upstream | store: repo/execution/tickets.rs (`JsonValue`); typed: compliance.rs `decode_compliance_extract_result` and workflow execution ticket-result normalization | `ExecuteExtractAudioOutputReport`; `ComplianceLegacyAudioExtractResult` | — (historical `commit_recovery_required` is intentionally opaque `JsonValue`) | audio/mod.rs, cases/policy/compliance.rs | complete: published and complete historical scalar wire forms reject unknown fields; pre-#337 serialization compatibility and rejection tests present (#337) |
+| policy_versions.compiled_json | T-upstream | store: repo/policy/policies.rs:483 (`JsonValue`); typed: plans.rs:291 `deserialize_stored_compiled_policy` → `CompiledPolicy`, used by accepted-version planning and compliance execution | `CompiledPolicy` | all distinct content structs for `CompiledOperation`, `TrackFilter`, `CompiledCondition`, and `CompiledValue`; `CompiledConfig`; `CompiledPhase`; `CompiledRunIfWire`; `CompiledRule`; `PolicyProvenance`; diagnostic/span structs; `VideoProfileSettings`; `TranscodeVideoProfile` | compile/compiled.rs, data/video_profile.rs, diagnostic.rs, syntax/span.rs, voom-core/src/media/transcode_video_profile.rs | complete: all 41 tagged variants retain their exact wire shape and reject unknown fields; current and historical compiled versions remain readable (#344) |
 
 ### Transitive typed closure (named-field `Deserialize` sub-structs)
 
@@ -60,6 +61,12 @@ structs (the field-drop surface) and the no-surface members:
   recovery subpayload remains intentionally opaque. `ComplianceAudioExtractOutput`
   and `ComplianceLegacyAudioExtractOutput` are Serialize-only report projections,
   not typed durable-read roots.
+- `CompiledPolicy` (compiled.rs) → strict ordinary structs and distinct strict
+  content structs for all 41 tagged variants. `CompiledRunIf` delegates to the
+  strict `CompiledRunIfWire`. `VideoProfileRef` retains its audited compatibility
+  visitor, whose inline form delegates to strict `VideoProfileSettings`.
+  `TranscodeVideoProfile` is strict. Metadata and provenance flags remain
+  intentionally opaque `JsonValue` maps.
 
 **No named fields → attribute inapplicable, safe by construction** (recorded, not in
 scope): `TargetRowEpochTriple` (tuple newtype), `EvidenceId` (id newtype),
@@ -76,6 +83,9 @@ Every Class-T / T-upstream defining file in scope maps to a sweep task:
   `…/execution/timing.rs` → Task 4
 - `crates/voom-control-plane/src/audio/mod.rs`,
   `…/cases/policy/compliance.rs` → complete in #337
+- `crates/voom-policy/src/compile/compiled.rs`, `…/data/video_profile.rs`,
+  `…/diagnostic.rs`, `…/syntax/span.rs`, and
+  `crates/voom-core/src/media/transcode_video_profile.rs` → complete in #344
 
 A full sweep of every non-test typed deserialization read (`from_value::<T>`,
 `from_str::<T>`, and type-annotated-let `from_str`/`from_value`) across all crates
@@ -98,7 +108,7 @@ external_systems.{connection_profile,rate_limit_config};
 quality_scoring_profiles.definition; quality_scores.{dimension_scores,provenance};
 remote_idempotency_keys.response_json;
 artifact_access_plans.{input_handles,output_handles,evidence};
-policy_versions.compiled_json; workflow_summaries.per_operation;
+workflow_summaries.per_operation;
 workflow_phase_summaries.report; scheduler_decisions.explanation_json;
 nodes.metadata; identity_evidence.provenance; media_snapshots.payload;
 identity_evidence.{pinned_file_version_ids,pinned_hashes,pinned_locations}

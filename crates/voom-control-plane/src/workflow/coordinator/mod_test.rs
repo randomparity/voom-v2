@@ -978,7 +978,9 @@ async fn phase_planning_applies_each_files_modified_gate_decision() {
     skipped.phase_history.insert(0, FilePhaseOutcome::Skipped);
     let files = vec![committed, skipped];
     let mut policy = policy_with_run_if(voom_policy::RunIfTrigger::Modified);
-    policy.phases[1].operations = vec![voom_policy::CompiledOperation::ClearTags];
+    policy.phases[1].operations = vec![voom_policy::CompiledOperation::ClearTags(
+        voom_policy::compiled::CompiledClearTagsOperation {},
+    )];
     let phase_loop = super::PhaseLoop::new(
         &cp,
         super::PhaseLoopInputs {
@@ -1032,7 +1034,9 @@ async fn phase_planning_reports_zero_checks_when_no_files_pass_the_gate() {
     file.phase_history.insert(0, FilePhaseOutcome::Skipped);
     let files = vec![file];
     let mut policy = policy_with_run_if(voom_policy::RunIfTrigger::Modified);
-    policy.phases[1].operations = vec![voom_policy::CompiledOperation::ClearTags];
+    policy.phases[1].operations = vec![voom_policy::CompiledOperation::ClearTags(
+        voom_policy::compiled::CompiledClearTagsOperation {},
+    )];
     let phase_loop = super::PhaseLoop::new(
         &cp,
         super::PhaseLoopInputs {

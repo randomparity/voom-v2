@@ -32,18 +32,20 @@ fn parse_expression(text: &str, remaining: usize) -> Result<TrackFilter, ParseEr
     if let Some(parts) = split_top_level(text, " or ")? {
         let remaining = descend(remaining)?;
         let filters = parse_children(parts, remaining)?;
-        return Ok(TrackFilter::Or { filters });
+        return Ok(TrackFilter::Or(crate::compiled::OrTrackFilter { filters }));
     }
     if let Some(parts) = split_top_level(text, " and ")? {
         let remaining = descend(remaining)?;
         let filters = parse_children(parts, remaining)?;
-        return Ok(TrackFilter::And { filters });
+        return Ok(TrackFilter::And(crate::compiled::AndTrackFilter {
+            filters,
+        }));
     }
     if let Some(inner) = text.strip_prefix("not ") {
         let inner = parse_expression(inner.trim(), descend(remaining)?)?;
-        return Ok(TrackFilter::Not {
+        return Ok(TrackFilter::Not(crate::compiled::NotTrackFilter {
             inner: Box::new(inner),
-        });
+        }));
     }
     if owns_outer_group(text) {
         let inner = &text[1..text.len() - 1];
@@ -68,19 +70,23 @@ const fn descend(remaining: usize) -> Result<usize, ParseError> {
 
 fn parse_leaf(text: &str) -> Result<TrackFilter, ParseError> {
     if let Some(value) = text.strip_prefix("language == ") {
-        return Ok(TrackFilter::LanguageIn {
-            values: vec![parse_quoted_token(value)?],
-        });
+        return Ok(TrackFilter::LanguageIn(
+            crate::compiled::LanguageInTrackFilter {
+                values: vec![parse_quoted_token(value)?],
+            },
+        ));
     }
     if let Some(value) = text.strip_prefix("language in ") {
-        return Ok(TrackFilter::LanguageIn {
-            values: parse_quoted_token_list(value)?,
-        });
+        return Ok(TrackFilter::LanguageIn(
+            crate::compiled::LanguageInTrackFilter {
+                values: parse_quoted_token_list(value)?,
+            },
+        ));
     }
     if let Some(value) = text.strip_prefix("codec in ") {
-        return Ok(TrackFilter::CodecIn {
+        return Ok(TrackFilter::CodecIn(crate::compiled::CodecInTrackFilter {
             values: parse_quoted_token_list(value)?,
-        });
+        }));
     }
     parse_scalar_leaf(text)
 }
@@ -90,10 +96,12 @@ fn parse_scalar_leaf(text: &str) -> Result<TrackFilter, ParseError> {
         return parse_channels(value);
     }
     match text {
-        "commentary" => Ok(TrackFilter::Commentary),
-        "forced" => Ok(TrackFilter::Forced),
-        "default" => Ok(TrackFilter::Default),
-        "font" => Ok(TrackFilter::Font),
+        "commentary" => Ok(TrackFilter::Commentary(
+            crate::compiled::CommentaryTrackFilter {},
+        )),
+        "forced" => Ok(TrackFilter::Forced(crate::compiled::ForcedTrackFilter {})),
+        "default" => Ok(TrackFilter::Default(crate::compiled::DefaultTrackFilter {})),
+        "font" => Ok(TrackFilter::Font(crate::compiled::FontTrackFilter {})),
         _ => parse_title(text),
     }
 }
@@ -116,10 +124,12 @@ fn parse_channels(text: &str) -> Result<TrackFilter, ParseError> {
     {
         return Err(ParseError);
     }
-    Ok(TrackFilter::Channels {
-        op,
-        value: value.parse::<u64>().map_err(|_| ParseError)?,
-    })
+    Ok(TrackFilter::Channels(
+        crate::compiled::ChannelsTrackFilter {
+            op,
+            value: value.parse::<u64>().map_err(|_| ParseError)?,
+        },
+    ))
 }
 
 fn parse_title(text: &str) -> Result<TrackFilter, ParseError> {
@@ -132,9 +142,11 @@ fn parse_title(text: &str) -> Result<TrackFilter, ParseError> {
     if end != value.len() || end == 2 {
         return Err(ParseError);
     }
-    Ok(TrackFilter::TitleContains {
-        value: value.trim_matches('"').to_owned(),
-    })
+    Ok(TrackFilter::TitleContains(
+        crate::compiled::TitleContainsTrackFilter {
+            value: value.trim_matches('"').to_owned(),
+        },
+    ))
 }
 
 fn parse_quoted_token(text: &str) -> Result<String, ParseError> {

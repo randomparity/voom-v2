@@ -1,3 +1,14 @@
+use voom_policy::compiled::{
+    CompiledAndCondition, CompiledClearTagsOperation, CompiledClearTrackActionsOperation,
+    CompiledConditionalOperation, CompiledCountCondition, CompiledDeleteTagOperation,
+    CompiledExistsCondition, CompiledExtractAudioOperation, CompiledFieldComparisonCondition,
+    CompiledFieldExistsCondition, CompiledKeepTracksOperation, CompiledNotCondition,
+    CompiledOrCondition, CompiledPredicateCondition, CompiledRemoveTracksOperation,
+    CompiledReorderTracksOperation, CompiledRulesOperation, CompiledSetContainerOperation,
+    CompiledSetDefaultsOperation, CompiledSetTagOperation, CompiledSynthesizeAudioOperation,
+    CompiledTranscodeAudioOperation, CompiledTranscodeVideoOperation,
+    CompiledVerifyArtifactOperation,
+};
 use voom_policy::{
     ComparisonOp, CompiledCondition, CompiledOperation, CompiledPolicy, TrackTarget,
 };
@@ -53,16 +64,16 @@ pub fn policy_uses_stream_conditions(policy: &CompiledPolicy) -> bool {
 fn operations_use_stream_facts(operations: &[CompiledOperation]) -> bool {
     for operation in operations {
         match operation {
-            CompiledOperation::Conditional {
+            CompiledOperation::Conditional(CompiledConditionalOperation {
                 condition,
                 operations,
-            } => {
+            }) => {
                 if condition_uses_stream_facts(condition) || operations_use_stream_facts(operations)
                 {
                     return true;
                 }
             }
-            CompiledOperation::Rules { mode: _, rules } => {
+            CompiledOperation::Rules(CompiledRulesOperation { mode: _, rules }) => {
                 for rule in rules {
                     if rule
                         .condition
@@ -74,51 +85,53 @@ fn operations_use_stream_facts(operations: &[CompiledOperation]) -> bool {
                     }
                 }
             }
-            CompiledOperation::SetContainer { container: _ }
-            | CompiledOperation::KeepTracks {
+            CompiledOperation::SetContainer(CompiledSetContainerOperation { container: _ })
+            | CompiledOperation::KeepTracks(CompiledKeepTracksOperation {
                 target: _,
                 filter: _,
-            }
-            | CompiledOperation::RemoveTracks {
+            })
+            | CompiledOperation::RemoveTracks(CompiledRemoveTracksOperation {
                 target: _,
                 filter: _,
-            }
-            | CompiledOperation::ReorderTracks {
+            })
+            | CompiledOperation::ReorderTracks(CompiledReorderTracksOperation {
                 targets: _,
                 head_filter: _,
-            }
-            | CompiledOperation::SetDefaults {
+            })
+            | CompiledOperation::SetDefaults(CompiledSetDefaultsOperation {
                 target: _,
                 strategy: _,
                 filter: _,
-            }
-            | CompiledOperation::ClearTrackActions { target: _ }
-            | CompiledOperation::ClearTags
-            | CompiledOperation::SetTag { key: _, value: _ }
-            | CompiledOperation::DeleteTag { key: _ }
-            | CompiledOperation::TranscodeVideo {
+            })
+            | CompiledOperation::ClearTrackActions(CompiledClearTrackActionsOperation {
+                target: _,
+            })
+            | CompiledOperation::ClearTags(CompiledClearTagsOperation {})
+            | CompiledOperation::SetTag(CompiledSetTagOperation { key: _, value: _ })
+            | CompiledOperation::DeleteTag(CompiledDeleteTagOperation { key: _ })
+            | CompiledOperation::TranscodeVideo(CompiledTranscodeVideoOperation {
                 target_codec: _,
                 container: _,
                 profile: _,
                 resolved_profile: _,
-            }
-            | CompiledOperation::TranscodeAudio {
+            })
+            | CompiledOperation::TranscodeAudio(CompiledTranscodeAudioOperation {
                 target_codec: _,
                 container: _,
                 filter: _,
-            }
-            | CompiledOperation::ExtractAudio {
+            })
+            | CompiledOperation::ExtractAudio(CompiledExtractAudioOperation {
                 target_codec: _,
                 container: _,
                 filter: _,
-            }
-            | CompiledOperation::SynthesizeAudio {
+            })
+            | CompiledOperation::SynthesizeAudio(CompiledSynthesizeAudioOperation {
                 target_codec: _,
                 container: _,
                 target_channels: _,
                 filter: _,
-            }
-            | CompiledOperation::VerifyArtifact => {}
+            })
+            | CompiledOperation::VerifyArtifact(CompiledVerifyArtifactOperation {}) => {}
         }
     }
     false
@@ -126,26 +139,29 @@ fn operations_use_stream_facts(operations: &[CompiledOperation]) -> bool {
 
 fn condition_uses_stream_facts(condition: &CompiledCondition) -> bool {
     match condition {
-        CompiledCondition::Exists {
+        CompiledCondition::Exists(CompiledExistsCondition {
             target: _,
             filter: _,
-        }
-        | CompiledCondition::Count {
+        })
+        | CompiledCondition::Count(CompiledCountCondition {
             target: _,
             op: _,
             value: _,
-        } => true,
-        CompiledCondition::Not { inner } => condition_uses_stream_facts(inner),
-        CompiledCondition::And { conditions } | CompiledCondition::Or { conditions } => {
+        }) => true,
+        CompiledCondition::Not(CompiledNotCondition { inner }) => {
+            condition_uses_stream_facts(inner)
+        }
+        CompiledCondition::And(CompiledAndCondition { conditions })
+        | CompiledCondition::Or(CompiledOrCondition { conditions }) => {
             conditions.iter().any(condition_uses_stream_facts)
         }
-        CompiledCondition::FieldComparison {
+        CompiledCondition::FieldComparison(CompiledFieldComparisonCondition {
             path: _,
             op: _,
             value: _,
-        }
-        | CompiledCondition::FieldExists { path: _ }
-        | CompiledCondition::Predicate { name: _ } => false,
+        })
+        | CompiledCondition::FieldExists(CompiledFieldExistsCondition { path: _ })
+        | CompiledCondition::Predicate(CompiledPredicateCondition { name: _ }) => false,
     }
 }
 
@@ -158,10 +174,10 @@ fn visit_operations(
     for (index, operation) in operations.iter().enumerate() {
         let operation_path = format!("{path}[{index}]");
         match operation {
-            CompiledOperation::Conditional {
+            CompiledOperation::Conditional(CompiledConditionalOperation {
                 condition,
                 operations,
-            } => {
+            }) => {
                 visit_condition(
                     condition,
                     &format!("{operation_path}.condition"),
@@ -175,7 +191,7 @@ fn visit_operations(
                     diagnostics,
                 );
             }
-            CompiledOperation::Rules { mode: _, rules } => {
+            CompiledOperation::Rules(CompiledRulesOperation { mode: _, rules }) => {
                 for (rule_index, rule) in rules.iter().enumerate() {
                     let rule_path = format!("{operation_path}.rules[{rule_index}]");
                     if let Some(condition) = &rule.condition {
@@ -194,51 +210,53 @@ fn visit_operations(
                     );
                 }
             }
-            CompiledOperation::SetContainer { container: _ }
-            | CompiledOperation::KeepTracks {
+            CompiledOperation::SetContainer(CompiledSetContainerOperation { container: _ })
+            | CompiledOperation::KeepTracks(CompiledKeepTracksOperation {
                 target: _,
                 filter: _,
-            }
-            | CompiledOperation::RemoveTracks {
+            })
+            | CompiledOperation::RemoveTracks(CompiledRemoveTracksOperation {
                 target: _,
                 filter: _,
-            }
-            | CompiledOperation::ReorderTracks {
+            })
+            | CompiledOperation::ReorderTracks(CompiledReorderTracksOperation {
                 targets: _,
                 head_filter: _,
-            }
-            | CompiledOperation::SetDefaults {
+            })
+            | CompiledOperation::SetDefaults(CompiledSetDefaultsOperation {
                 target: _,
                 strategy: _,
                 filter: _,
-            }
-            | CompiledOperation::ClearTrackActions { target: _ }
-            | CompiledOperation::ClearTags
-            | CompiledOperation::SetTag { key: _, value: _ }
-            | CompiledOperation::DeleteTag { key: _ }
-            | CompiledOperation::TranscodeVideo {
+            })
+            | CompiledOperation::ClearTrackActions(CompiledClearTrackActionsOperation {
+                target: _,
+            })
+            | CompiledOperation::ClearTags(CompiledClearTagsOperation {})
+            | CompiledOperation::SetTag(CompiledSetTagOperation { key: _, value: _ })
+            | CompiledOperation::DeleteTag(CompiledDeleteTagOperation { key: _ })
+            | CompiledOperation::TranscodeVideo(CompiledTranscodeVideoOperation {
                 target_codec: _,
                 container: _,
                 profile: _,
                 resolved_profile: _,
-            }
-            | CompiledOperation::TranscodeAudio {
+            })
+            | CompiledOperation::TranscodeAudio(CompiledTranscodeAudioOperation {
                 target_codec: _,
                 container: _,
                 filter: _,
-            }
-            | CompiledOperation::ExtractAudio {
+            })
+            | CompiledOperation::ExtractAudio(CompiledExtractAudioOperation {
                 target_codec: _,
                 container: _,
                 filter: _,
-            }
-            | CompiledOperation::SynthesizeAudio {
+            })
+            | CompiledOperation::SynthesizeAudio(CompiledSynthesizeAudioOperation {
                 target_codec: _,
                 container: _,
                 target_channels: _,
                 filter: _,
-            }
-            | CompiledOperation::VerifyArtifact => {}
+            })
+            | CompiledOperation::VerifyArtifact(CompiledVerifyArtifactOperation {}) => {}
         }
     }
 }
@@ -250,27 +268,28 @@ fn visit_condition(
     diagnostics: &mut Vec<PlanningDiagnostic>,
 ) {
     match condition {
-        CompiledCondition::Exists { .. } | CompiledCondition::Count { .. } => {
+        CompiledCondition::Exists(CompiledExistsCondition { .. })
+        | CompiledCondition::Count(CompiledCountCondition { .. }) => {
             if let Some(diagnostic) = unpublished_diagnostic(condition, path, phase_name) {
                 diagnostics.push(diagnostic);
             }
         }
-        CompiledCondition::Not { inner } => {
+        CompiledCondition::Not(CompiledNotCondition { inner }) => {
             visit_condition(inner, &format!("{path}.not"), phase_name, diagnostics);
         }
-        CompiledCondition::And { conditions } => {
+        CompiledCondition::And(CompiledAndCondition { conditions }) => {
             visit_boolean_children(conditions, path, "and", phase_name, diagnostics);
         }
-        CompiledCondition::Or { conditions } => {
+        CompiledCondition::Or(CompiledOrCondition { conditions }) => {
             visit_boolean_children(conditions, path, "or", phase_name, diagnostics);
         }
-        CompiledCondition::FieldComparison {
+        CompiledCondition::FieldComparison(CompiledFieldComparisonCondition {
             path: _,
             op: _,
             value: _,
-        }
-        | CompiledCondition::FieldExists { path: _ }
-        | CompiledCondition::Predicate { name: _ } => {}
+        })
+        | CompiledCondition::FieldExists(CompiledFieldExistsCondition { path: _ })
+        | CompiledCondition::Predicate(CompiledPredicateCondition { name: _ }) => {}
     }
 }
 
@@ -297,7 +316,7 @@ fn unpublished_diagnostic(
     phase_name: &str,
 ) -> Option<PlanningDiagnostic> {
     let detail = match condition {
-        CompiledCondition::Exists { target, filter } => {
+        CompiledCondition::Exists(CompiledExistsCondition { target, filter }) => {
             if is_published_target(*target) && filter.is_none() {
                 return None;
             }
@@ -311,7 +330,7 @@ fn unpublished_diagnostic(
                 }
             )
         }
-        CompiledCondition::Count { target, op, value } => {
+        CompiledCondition::Count(CompiledCountCondition { target, op, value }) => {
             if is_published_target(*target) && is_numeric_comparison(*op) {
                 return None;
             }
@@ -321,16 +340,18 @@ fn unpublished_diagnostic(
                 comparison_name(*op)
             )
         }
-        CompiledCondition::FieldComparison {
+        CompiledCondition::FieldComparison(CompiledFieldComparisonCondition {
             path: _,
             op: _,
             value: _,
+        })
+        | CompiledCondition::FieldExists(CompiledFieldExistsCondition { path: _ })
+        | CompiledCondition::Predicate(CompiledPredicateCondition { name: _ })
+        | CompiledCondition::Not(CompiledNotCondition { inner: _ })
+        | CompiledCondition::And(CompiledAndCondition { conditions: _ })
+        | CompiledCondition::Or(CompiledOrCondition { conditions: _ }) => {
+            return None;
         }
-        | CompiledCondition::FieldExists { path: _ }
-        | CompiledCondition::Predicate { name: _ }
-        | CompiledCondition::Not { inner: _ }
-        | CompiledCondition::And { conditions: _ }
-        | CompiledCondition::Or { conditions: _ } => return None,
     };
     Some(
         PlanningDiagnostic::error(

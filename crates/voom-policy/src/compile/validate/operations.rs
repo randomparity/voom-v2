@@ -884,7 +884,7 @@ impl Validator<'_> {
 
     fn validate_filter_languages(&mut self, statement: &StatementAst, filter: &TrackFilter) {
         match filter {
-            TrackFilter::LanguageIn { values } => {
+            TrackFilter::LanguageIn(crate::compiled::LanguageInTrackFilter { values }) => {
                 for value in values {
                     if !is_canonical_language_code(value) {
                         self.error(
@@ -896,20 +896,23 @@ impl Validator<'_> {
                     }
                 }
             }
-            TrackFilter::And { filters } | TrackFilter::Or { filters } => {
+            TrackFilter::And(crate::compiled::AndTrackFilter { filters })
+            | TrackFilter::Or(crate::compiled::OrTrackFilter { filters }) => {
                 for filter in filters {
                     self.validate_filter_languages(statement, filter);
                 }
             }
-            TrackFilter::Not { inner } => self.validate_filter_languages(statement, inner),
-            TrackFilter::CodecIn { .. }
-            | TrackFilter::Channels { .. }
-            | TrackFilter::Commentary
-            | TrackFilter::Forced
-            | TrackFilter::Default
-            | TrackFilter::Font
-            | TrackFilter::TitleContains { .. }
-            | TrackFilter::TitleMatches { .. } => {}
+            TrackFilter::Not(crate::compiled::NotTrackFilter { inner }) => {
+                self.validate_filter_languages(statement, inner);
+            }
+            TrackFilter::CodecIn(crate::compiled::CodecInTrackFilter { .. })
+            | TrackFilter::Channels(crate::compiled::ChannelsTrackFilter { .. })
+            | TrackFilter::Commentary(crate::compiled::CommentaryTrackFilter {})
+            | TrackFilter::Forced(crate::compiled::ForcedTrackFilter {})
+            | TrackFilter::Default(crate::compiled::DefaultTrackFilter {})
+            | TrackFilter::Font(crate::compiled::FontTrackFilter {})
+            | TrackFilter::TitleContains(crate::compiled::TitleContainsTrackFilter { .. })
+            | TrackFilter::TitleMatches(crate::compiled::TitleMatchesTrackFilter { .. }) => {}
         }
     }
 

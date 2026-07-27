@@ -8,12 +8,12 @@ fn compile_policy_preserves_sprint12_video_hevc_transcode() {
 
     assert_eq!(
         out.policy.phases[0].operations[0],
-        CompiledOperation::TranscodeVideo {
+        CompiledOperation::TranscodeVideo(crate::compiled::CompiledTranscodeVideoOperation {
             target_codec: "hevc".to_owned(),
             container: "mkv".to_owned(),
             profile: crate::VideoProfileRef::Named("default-hevc".to_owned()),
             resolved_profile: None,
-        }
+        })
     );
 }
 
@@ -26,11 +26,11 @@ fn compile_policy_lowers_defaults_where_to_filter_addressed_default() {
     )
     .unwrap();
 
-    let CompiledOperation::SetDefaults {
+    let CompiledOperation::SetDefaults(crate::compiled::CompiledSetDefaultsOperation {
         target,
         strategy,
-        filter: Some(TrackFilter::And { filters }),
-    } = &out.policy.phases[0].operations[0]
+        filter: Some(TrackFilter::And(crate::compiled::AndTrackFilter { filters })),
+    }) = &out.policy.phases[0].operations[0]
     else {
         unreachable!("expected filter-addressed default");
     };
@@ -48,11 +48,11 @@ fn compile_policy_keeps_strategy_default_without_filter() {
 
     assert_eq!(
         out.policy.phases[0].operations[0],
-        CompiledOperation::SetDefaults {
+        CompiledOperation::SetDefaults(crate::compiled::CompiledSetDefaultsOperation {
             target: crate::TrackTarget::Audio,
             strategy: crate::DefaultStrategy::First,
             filter: None,
-        }
+        })
     );
 }
 
@@ -63,10 +63,11 @@ fn compile_policy_lowers_order_tracks_where_to_head_filter() {
     )
     .unwrap();
 
-    let CompiledOperation::ReorderTracks {
+    let CompiledOperation::ReorderTracks(crate::compiled::CompiledReorderTracksOperation {
         targets,
-        head_filter: Some(TrackFilter::LanguageIn { values }),
-    } = &out.policy.phases[0].operations[0]
+        head_filter:
+            Some(TrackFilter::LanguageIn(crate::compiled::LanguageInTrackFilter { values })),
+    }) = &out.policy.phases[0].operations[0]
     else {
         unreachable!("expected head-filter reorder");
     };
@@ -81,10 +82,10 @@ fn compile_policy_keeps_group_order_without_head_filter() {
 
     assert_eq!(
         out.policy.phases[0].operations[0],
-        CompiledOperation::ReorderTracks {
+        CompiledOperation::ReorderTracks(crate::compiled::CompiledReorderTracksOperation {
             targets: vec![crate::TrackTarget::Video, crate::TrackTarget::Audio],
             head_filter: None,
-        }
+        })
     );
 }
 
@@ -152,12 +153,16 @@ fn compile_policy_lowers_negated_exists_phase_skip_condition() {
 
     assert_eq!(
         out.policy.phases[0].skip_if,
-        Some(CompiledCondition::Not {
-            inner: Box::new(CompiledCondition::Exists {
-                target: crate::TrackTarget::Audio,
-                filter: None,
-            }),
-        })
+        Some(CompiledCondition::Not(
+            crate::compiled::CompiledNotCondition {
+                inner: Box::new(CompiledCondition::Exists(
+                    crate::compiled::CompiledExistsCondition {
+                        target: crate::TrackTarget::Audio,
+                        filter: None,
+                    }
+                )),
+            }
+        ))
     );
 }
 
@@ -167,11 +172,13 @@ fn compile_policy_lowers_count_phase_skip_condition() {
 
     assert_eq!(
         out.policy.phases[0].skip_if,
-        Some(CompiledCondition::Count {
-            target: crate::TrackTarget::Audio,
-            op: crate::ComparisonOp::Lt,
-            value: 2,
-        })
+        Some(CompiledCondition::Count(
+            crate::compiled::CompiledCountCondition {
+                target: crate::TrackTarget::Audio,
+                op: crate::ComparisonOp::Lt,
+                value: 2,
+            }
+        ))
     );
 }
 
@@ -181,17 +188,23 @@ fn compile_policy_preserves_boolean_track_filters() {
         "policy \"p\" { phase a { keep audio where language in [\"eng\"] or commentary } }",
     )
     .unwrap();
-    let CompiledOperation::KeepTracks {
-        filter: Some(TrackFilter::Or { filters }),
+    let CompiledOperation::KeepTracks(crate::compiled::CompiledKeepTracksOperation {
+        filter: Some(TrackFilter::Or(crate::compiled::OrTrackFilter { filters })),
         ..
-    } = &out.policy.phases[0].operations[0]
+    }) = &out.policy.phases[0].operations[0]
     else {
         unreachable!("expected boolean track filter");
     };
 
     assert_eq!(filters.len(), 2);
-    assert!(matches!(filters[0], TrackFilter::LanguageIn { .. }));
-    assert!(matches!(filters[1], TrackFilter::Commentary));
+    assert!(matches!(
+        filters[0],
+        TrackFilter::LanguageIn(crate::compiled::LanguageInTrackFilter { .. })
+    ));
+    assert!(matches!(
+        filters[1],
+        TrackFilter::Commentary(crate::compiled::CommentaryTrackFilter {})
+    ));
 }
 
 #[test]
@@ -203,12 +216,14 @@ fn compile_policy_preserves_quoted_title_filter_with_boolean_words() {
 
     assert_eq!(
         out.policy.phases[0].operations[0],
-        crate::CompiledOperation::KeepTracks {
+        crate::CompiledOperation::KeepTracks(crate::compiled::CompiledKeepTracksOperation {
             target: crate::TrackTarget::Subtitle,
-            filter: Some(crate::TrackFilter::TitleContains {
-                value: "Director or Commentary".to_owned(),
-            }),
-        }
+            filter: Some(crate::TrackFilter::TitleContains(
+                crate::compiled::TitleContainsTrackFilter {
+                    value: "Director or Commentary".to_owned(),
+                }
+            )),
+        })
     );
 }
 
@@ -218,17 +233,23 @@ fn compile_policy_preserves_boolean_conditions() {
         "policy \"p\" { phase a { when exists audio or exists subtitle { container mkv } } }",
     )
     .unwrap();
-    let CompiledOperation::Conditional {
-        condition: CompiledCondition::Or { conditions },
+    let CompiledOperation::Conditional(crate::compiled::CompiledConditionalOperation {
+        condition: CompiledCondition::Or(crate::compiled::CompiledOrCondition { conditions }),
         ..
-    } = &out.policy.phases[0].operations[0]
+    }) = &out.policy.phases[0].operations[0]
     else {
         unreachable!("expected boolean condition");
     };
 
     assert_eq!(conditions.len(), 2);
-    assert!(matches!(conditions[0], CompiledCondition::Exists { .. }));
-    assert!(matches!(conditions[1], CompiledCondition::Exists { .. }));
+    assert!(matches!(
+        conditions[0],
+        CompiledCondition::Exists(crate::compiled::CompiledExistsCondition { .. })
+    ));
+    assert!(matches!(
+        conditions[1],
+        CompiledCondition::Exists(crate::compiled::CompiledExistsCondition { .. })
+    ));
 }
 
 #[test]
@@ -237,23 +258,26 @@ fn compile_policy_preserves_parenthesized_boolean_conditions() {
         "policy \"p\" { phase a { when (exists audio or exists subtitle) and count audio > 0 { container mkv } } }",
     )
     .unwrap();
-    let CompiledOperation::Conditional {
-        condition: CompiledCondition::And { conditions },
+    let CompiledOperation::Conditional(crate::compiled::CompiledConditionalOperation {
+        condition: CompiledCondition::And(crate::compiled::CompiledAndCondition { conditions }),
         ..
-    } = &out.policy.phases[0].operations[0]
+    }) = &out.policy.phases[0].operations[0]
     else {
         unreachable!("expected parenthesized boolean condition");
     };
 
     assert_eq!(conditions.len(), 2);
-    assert!(matches!(conditions[0], CompiledCondition::Or { .. }));
+    assert!(matches!(
+        conditions[0],
+        CompiledCondition::Or(crate::compiled::CompiledOrCondition { .. })
+    ));
     assert_eq!(
         conditions[1],
-        CompiledCondition::Count {
+        CompiledCondition::Count(crate::compiled::CompiledCountCondition {
             target: crate::TrackTarget::Audio,
             op: crate::ComparisonOp::Gt,
             value: 0,
-        }
+        })
     );
 }
 
@@ -265,17 +289,23 @@ fn compile_policy_preserves_parenthesized_boolean_track_filters() {
          } }",
     )
     .unwrap();
-    let CompiledOperation::KeepTracks {
-        filter: Some(TrackFilter::And { filters }),
+    let CompiledOperation::KeepTracks(crate::compiled::CompiledKeepTracksOperation {
+        filter: Some(TrackFilter::And(crate::compiled::AndTrackFilter { filters })),
         ..
-    } = &out.policy.phases[0].operations[0]
+    }) = &out.policy.phases[0].operations[0]
     else {
         unreachable!("expected parenthesized boolean track filter");
     };
 
     assert_eq!(filters.len(), 2);
-    assert!(matches!(filters[0], TrackFilter::Or { .. }));
-    assert!(matches!(filters[1], TrackFilter::Not { .. }));
+    assert!(matches!(
+        filters[0],
+        TrackFilter::Or(crate::compiled::OrTrackFilter { .. })
+    ));
+    assert!(matches!(
+        filters[1],
+        TrackFilter::Not(crate::compiled::NotTrackFilter { .. })
+    ));
 }
 
 #[test]
@@ -287,16 +317,20 @@ fn compile_policy_preserves_quoted_condition_comparison_value() {
 
     assert_eq!(
         out.policy.phases[0].operations[0],
-        CompiledOperation::Conditional {
-            condition: CompiledCondition::FieldComparison {
-                path: vec!["video".to_owned(), "title".to_owned()],
-                op: crate::ComparisonOp::Contains,
-                value: crate::CompiledValue::String {
-                    value: "Director or Commentary".to_owned(),
-                },
-            },
-            operations: vec![CompiledOperation::ClearTags],
-        }
+        CompiledOperation::Conditional(crate::compiled::CompiledConditionalOperation {
+            condition: CompiledCondition::FieldComparison(
+                crate::compiled::CompiledFieldComparisonCondition {
+                    path: vec!["video".to_owned(), "title".to_owned()],
+                    op: crate::ComparisonOp::Contains,
+                    value: crate::CompiledValue::String(crate::compiled::CompiledStringValue {
+                        value: "Director or Commentary".to_owned(),
+                    }),
+                }
+            ),
+            operations: vec![CompiledOperation::ClearTags(
+                crate::compiled::CompiledClearTagsOperation {}
+            )],
+        })
     );
 }
 
@@ -307,13 +341,15 @@ fn compile_policy_preserves_channel_count_track_filter() {
 
     assert_eq!(
         out.policy.phases[0].operations[0],
-        CompiledOperation::KeepTracks {
+        CompiledOperation::KeepTracks(crate::compiled::CompiledKeepTracksOperation {
             target: crate::TrackTarget::Audio,
-            filter: Some(TrackFilter::Channels {
-                op: crate::ComparisonOp::Gte,
-                value: 6,
-            }),
-        }
+            filter: Some(TrackFilter::Channels(
+                crate::compiled::ChannelsTrackFilter {
+                    op: crate::ComparisonOp::Gte,
+                    value: 6,
+                }
+            )),
+        })
     );
 }
 
@@ -321,15 +357,17 @@ fn compile_policy_preserves_channel_count_track_filter() {
 fn compile_policy_preserves_quoted_tag_value_with_dot_as_string() {
     let out =
         compile_policy("policy \"p\" { phase a { set_tag \"title\" \"Movie.Name\" } }").unwrap();
-    let CompiledOperation::SetTag { value, .. } = &out.policy.phases[0].operations[0] else {
+    let CompiledOperation::SetTag(crate::compiled::CompiledSetTagOperation { value, .. }) =
+        &out.policy.phases[0].operations[0]
+    else {
         unreachable!("expected set_tag operation");
     };
 
     assert_eq!(
         *value,
-        crate::CompiledValue::String {
+        crate::CompiledValue::String(crate::compiled::CompiledStringValue {
             value: "Movie.Name".to_owned()
-        }
+        })
     );
 }
 
@@ -376,12 +414,14 @@ fn single_op(body: &str) -> CompiledOperation {
 fn conformance_language_equals_lowers_to_single_language_in() {
     assert_eq!(
         single_op("keep audio where language == \"eng\""),
-        CompiledOperation::KeepTracks {
+        CompiledOperation::KeepTracks(crate::compiled::CompiledKeepTracksOperation {
             target: crate::TrackTarget::Audio,
-            filter: Some(TrackFilter::LanguageIn {
-                values: vec!["eng".to_owned()],
-            }),
-        }
+            filter: Some(TrackFilter::LanguageIn(
+                crate::compiled::LanguageInTrackFilter {
+                    values: vec!["eng".to_owned()],
+                }
+            )),
+        })
     );
 }
 
@@ -389,21 +429,23 @@ fn conformance_language_equals_lowers_to_single_language_in() {
 fn conformance_quoted_filter_lists_lower_without_quote_characters() {
     assert_eq!(
         single_op("keep audio where language in [\"eng\", \"und\"]"),
-        CompiledOperation::KeepTracks {
+        CompiledOperation::KeepTracks(crate::compiled::CompiledKeepTracksOperation {
             target: crate::TrackTarget::Audio,
-            filter: Some(TrackFilter::LanguageIn {
-                values: vec!["eng".to_owned(), "und".to_owned()],
-            }),
-        }
+            filter: Some(TrackFilter::LanguageIn(
+                crate::compiled::LanguageInTrackFilter {
+                    values: vec!["eng".to_owned(), "und".to_owned()],
+                }
+            )),
+        })
     );
     assert_eq!(
         single_op("keep audio where codec in [\"aac\", \"eac3\"]"),
-        CompiledOperation::KeepTracks {
+        CompiledOperation::KeepTracks(crate::compiled::CompiledKeepTracksOperation {
             target: crate::TrackTarget::Audio,
-            filter: Some(TrackFilter::CodecIn {
+            filter: Some(TrackFilter::CodecIn(crate::compiled::CodecInTrackFilter {
                 values: vec!["aac".to_owned(), "eac3".to_owned()],
-            }),
-        }
+            })),
+        })
     );
 }
 
@@ -471,21 +513,24 @@ fn conformance_every_track_filter_consumer_accepts_canonical_source() {
 #[test]
 fn conformance_spec_example_language_equals_and_not_commentary() {
     // The spec's own example (design doc line ~590).
-    let CompiledOperation::KeepTracks {
-        filter: Some(TrackFilter::And { filters }),
+    let CompiledOperation::KeepTracks(crate::compiled::CompiledKeepTracksOperation {
+        filter: Some(TrackFilter::And(crate::compiled::AndTrackFilter { filters })),
         ..
-    } = single_op("keep audio where language == \"eng\" and not commentary")
+    }) = single_op("keep audio where language == \"eng\" and not commentary")
     else {
         unreachable!("expected boolean track filter");
     };
     assert_eq!(filters.len(), 2);
     assert_eq!(
         filters[0],
-        TrackFilter::LanguageIn {
+        TrackFilter::LanguageIn(crate::compiled::LanguageInTrackFilter {
             values: vec!["eng".to_owned()],
-        }
+        })
     );
-    assert!(matches!(filters[1], TrackFilter::Not { .. }));
+    assert!(matches!(
+        filters[1],
+        TrackFilter::Not(crate::compiled::NotTrackFilter { .. })
+    ));
 }
 
 #[test]
@@ -502,39 +547,43 @@ fn conformance_language_equals_rejects_invalid_code() {
 
 #[test]
 fn conformance_media_container_condition_compiles_and_lowers() {
-    let CompiledOperation::Conditional { condition, .. } =
-        single_op("when media.container == mkv { container mkv }")
+    let CompiledOperation::Conditional(crate::compiled::CompiledConditionalOperation {
+        condition,
+        ..
+    }) = single_op("when media.container == mkv { container mkv }")
     else {
         unreachable!("expected conditional");
     };
     assert_eq!(
         condition,
-        CompiledCondition::FieldComparison {
+        CompiledCondition::FieldComparison(crate::compiled::CompiledFieldComparisonCondition {
             path: vec!["media".to_owned(), "container".to_owned()],
             op: crate::ComparisonOp::Eq,
-            value: crate::CompiledValue::String {
+            value: crate::CompiledValue::String(crate::compiled::CompiledStringValue {
                 value: "mkv".to_owned(),
-            },
-        }
+            }),
+        })
     );
 }
 
 #[test]
 fn conformance_media_duration_millis_condition_compiles_and_lowers() {
-    let CompiledOperation::Conditional { condition, .. } =
-        single_op("when media.duration_millis > 1000 { container mkv }")
+    let CompiledOperation::Conditional(crate::compiled::CompiledConditionalOperation {
+        condition,
+        ..
+    }) = single_op("when media.duration_millis > 1000 { container mkv }")
     else {
         unreachable!("expected conditional");
     };
     assert_eq!(
         condition,
-        CompiledCondition::FieldComparison {
+        CompiledCondition::FieldComparison(crate::compiled::CompiledFieldComparisonCondition {
             path: vec!["media".to_owned(), "duration_millis".to_owned()],
             op: crate::ComparisonOp::Gt,
-            value: crate::CompiledValue::Number {
+            value: crate::CompiledValue::Number(crate::compiled::CompiledNumberValue {
                 value: "1000".to_owned(),
-            },
-        }
+            }),
+        })
     );
 }
 
@@ -554,11 +603,11 @@ fn conformance_unknown_media_field_still_rejected() {
 fn conformance_transcode_audio_without_where_selects_all() {
     assert_eq!(
         single_op("transcode audio to aac"),
-        CompiledOperation::TranscodeAudio {
+        CompiledOperation::TranscodeAudio(crate::compiled::CompiledTranscodeAudioOperation {
             target_codec: "aac".to_owned(),
             container: "mkv".to_owned(),
             filter: None,
-        }
+        })
     );
 }
 
@@ -566,11 +615,11 @@ fn conformance_transcode_audio_without_where_selects_all() {
 fn conformance_extract_audio_without_where_selects_all() {
     assert_eq!(
         single_op("extract audio"),
-        CompiledOperation::ExtractAudio {
+        CompiledOperation::ExtractAudio(crate::compiled::CompiledExtractAudioOperation {
             target_codec: "opus".to_owned(),
             container: "ogg".to_owned(),
             filter: None,
-        }
+        })
     );
 }
 
@@ -581,13 +630,16 @@ fn conformance_extract_audio_without_where_selects_all() {
 fn conformance_verify_artifact_compiles_and_lowers() {
     assert_eq!(
         single_op("verify artifact"),
-        CompiledOperation::VerifyArtifact
+        CompiledOperation::VerifyArtifact(crate::compiled::CompiledVerifyArtifactOperation {})
     );
 }
 
 #[test]
 fn conformance_verify_artifact_serializes_with_snake_case_tag() {
-    let value = serde_json::to_value(CompiledOperation::VerifyArtifact).unwrap();
+    let value = serde_json::to_value(CompiledOperation::VerifyArtifact(
+        crate::compiled::CompiledVerifyArtifactOperation {},
+    ))
+    .unwrap();
     assert_eq!(value, serde_json::json!({ "type": "verify_artifact" }));
 }
 
@@ -629,15 +681,17 @@ fn conformance_synthesize_audio_downmix_compiles_clean() {
 fn conformance_synthesize_audio_downmix_lowers_to_synthesize_operation() {
     assert_eq!(
         single_op("synthesize audio from channels >= 6 { codec aac  channels 2 }"),
-        CompiledOperation::SynthesizeAudio {
+        CompiledOperation::SynthesizeAudio(crate::compiled::CompiledSynthesizeAudioOperation {
             target_codec: "aac".to_owned(),
             container: "mkv".to_owned(),
             target_channels: 2,
-            filter: Some(TrackFilter::Channels {
-                op: crate::ComparisonOp::Gte,
-                value: 6,
-            }),
-        }
+            filter: Some(TrackFilter::Channels(
+                crate::compiled::ChannelsTrackFilter {
+                    op: crate::ComparisonOp::Gte,
+                    value: 6,
+                }
+            )),
+        })
     );
 }
 
@@ -663,18 +717,18 @@ fn conformance_synthesize_audio_rejects_missing_channels() {
 
 #[test]
 fn conformance_transcode_audio_with_where_still_lowers_filter() {
-    let CompiledOperation::TranscodeAudio {
+    let CompiledOperation::TranscodeAudio(crate::compiled::CompiledTranscodeAudioOperation {
         filter: Some(filter),
         ..
-    } = single_op("transcode audio to aac where language == \"eng\"")
+    }) = single_op("transcode audio to aac where language == \"eng\"")
     else {
         unreachable!("expected filter");
     };
     assert_eq!(
         filter,
-        TrackFilter::LanguageIn {
+        TrackFilter::LanguageIn(crate::compiled::LanguageInTrackFilter {
             values: vec!["eng".to_owned()],
-        }
+        })
     );
 }
 
@@ -716,7 +770,7 @@ fn conformance_working_v1_productions_compile_clean() {
 
 #[test]
 fn conformance_published_rule_header_lowers_condition_and_operations() {
-    let CompiledOperation::Rules { mode, rules } =
+    let CompiledOperation::Rules(crate::compiled::CompiledRulesOperation { mode, rules }) =
         single_op("rules first { rule \"has audio\" when exists audio { container mkv } }")
     else {
         unreachable!("expected rules operation");
@@ -726,22 +780,26 @@ fn conformance_published_rule_header_lowers_condition_and_operations() {
     assert_eq!(rules[0].name, "has audio");
     assert_eq!(
         rules[0].condition,
-        Some(CompiledCondition::Exists {
-            target: crate::TrackTarget::Audio,
-            filter: None,
-        })
+        Some(CompiledCondition::Exists(
+            crate::compiled::CompiledExistsCondition {
+                target: crate::TrackTarget::Audio,
+                filter: None,
+            }
+        ))
     );
     assert_eq!(
         rules[0].operations,
-        vec![CompiledOperation::SetContainer {
-            container: "mkv".to_owned(),
-        }]
+        vec![CompiledOperation::SetContainer(
+            crate::compiled::CompiledSetContainerOperation {
+                container: "mkv".to_owned(),
+            }
+        )]
     );
 }
 
 #[test]
 fn conformance_published_rule_header_accepts_escaped_quotes_in_name() {
-    let CompiledOperation::Rules { rules, .. } =
+    let CompiledOperation::Rules(crate::compiled::CompiledRulesOperation { rules, .. }) =
         single_op(r#"rules first { rule "has \"named\" audio" when exists audio {} }"#)
     else {
         unreachable!("expected rules operation");

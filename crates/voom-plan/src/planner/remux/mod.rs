@@ -29,25 +29,41 @@ pub(super) enum CandidateSupport {
 
 pub(super) fn candidate_kind(operation: &CompiledOperation) -> Option<PlanOperationKind> {
     match operation {
-        CompiledOperation::SetContainer { .. } => Some(PlanOperationKind::SetContainer),
-        CompiledOperation::KeepTracks { .. } => Some(PlanOperationKind::KeepTracks),
-        CompiledOperation::RemoveTracks { .. } => Some(PlanOperationKind::RemoveTracks),
-        CompiledOperation::ReorderTracks { .. } => Some(PlanOperationKind::ReorderTracks),
-        CompiledOperation::SetDefaults { .. } => Some(PlanOperationKind::SetDefaults),
+        CompiledOperation::SetContainer(voom_policy::compiled::CompiledSetContainerOperation {
+            ..
+        }) => Some(PlanOperationKind::SetContainer),
+        CompiledOperation::KeepTracks(voom_policy::compiled::CompiledKeepTracksOperation {
+            ..
+        }) => Some(PlanOperationKind::KeepTracks),
+        CompiledOperation::RemoveTracks(voom_policy::compiled::CompiledRemoveTracksOperation {
+            ..
+        }) => Some(PlanOperationKind::RemoveTracks),
+        CompiledOperation::ReorderTracks(
+            voom_policy::compiled::CompiledReorderTracksOperation { .. },
+        ) => Some(PlanOperationKind::ReorderTracks),
+        CompiledOperation::SetDefaults(voom_policy::compiled::CompiledSetDefaultsOperation {
+            ..
+        }) => Some(PlanOperationKind::SetDefaults),
         _ => None,
     }
 }
 
 pub(super) fn candidate_support(operation: &CompiledOperation) -> CandidateSupport {
     match operation {
-        CompiledOperation::SetContainer { container } if container.eq_ignore_ascii_case("mkv") => {
-            CandidateSupport::Supported
-        }
-        CompiledOperation::SetContainer { .. } => {
-            CandidateSupport::Unsupported("only mkv remux containers are supported")
-        }
-        CompiledOperation::KeepTracks { target, filter }
-        | CompiledOperation::RemoveTracks { target, filter } => {
+        CompiledOperation::SetContainer(voom_policy::compiled::CompiledSetContainerOperation {
+            container,
+        }) if container.eq_ignore_ascii_case("mkv") => CandidateSupport::Supported,
+        CompiledOperation::SetContainer(voom_policy::compiled::CompiledSetContainerOperation {
+            ..
+        }) => CandidateSupport::Unsupported("only mkv remux containers are supported"),
+        CompiledOperation::KeepTracks(voom_policy::compiled::CompiledKeepTracksOperation {
+            target,
+            filter,
+        })
+        | CompiledOperation::RemoveTracks(voom_policy::compiled::CompiledRemoveTracksOperation {
+            target,
+            filter,
+        }) => {
             if *target == TrackTarget::Video {
                 return CandidateSupport::Unsupported(
                     "video track selection is not supported by remux planning",
@@ -59,14 +75,18 @@ pub(super) fn candidate_support(operation: &CompiledOperation) -> CandidateSuppo
                 CandidateSupport::Supported
             }
         }
-        CompiledOperation::ReorderTracks { targets, .. } => {
+        CompiledOperation::ReorderTracks(
+            voom_policy::compiled::CompiledReorderTracksOperation { targets, .. },
+        ) => {
             if duplicate_track_targets(targets) {
                 CandidateSupport::Unsupported("track order contains duplicate target groups")
             } else {
                 CandidateSupport::Supported
             }
         }
-        CompiledOperation::SetDefaults { .. } => CandidateSupport::Supported,
+        CompiledOperation::SetDefaults(voom_policy::compiled::CompiledSetDefaultsOperation {
+            ..
+        }) => CandidateSupport::Supported,
         _ => CandidateSupport::Unsupported("operation is not supported by remux planning"),
     }
 }
@@ -278,14 +298,19 @@ fn remux_has_untagged_language_filter(
     };
     operations.iter().any(|operation| {
         let (target, filter, excludes_attachments) = match operation {
-            CompiledOperation::KeepTracks { target, filter }
-            | CompiledOperation::RemoveTracks { target, filter }
-            | CompiledOperation::SetDefaults { target, filter, .. } => {
-                (Some(*target), filter.as_ref(), false)
-            }
-            CompiledOperation::ReorderTracks { head_filter, .. } => {
-                (None, head_filter.as_ref(), true)
-            }
+            CompiledOperation::KeepTracks(voom_policy::compiled::CompiledKeepTracksOperation {
+                target,
+                filter,
+            })
+            | CompiledOperation::RemoveTracks(
+                voom_policy::compiled::CompiledRemoveTracksOperation { target, filter },
+            )
+            | CompiledOperation::SetDefaults(
+                voom_policy::compiled::CompiledSetDefaultsOperation { target, filter, .. },
+            ) => (Some(*target), filter.as_ref(), false),
+            CompiledOperation::ReorderTracks(
+                voom_policy::compiled::CompiledReorderTracksOperation { head_filter, .. },
+            ) => (None, head_filter.as_ref(), true),
             _ => return false,
         };
         filter.is_some_and(|filter| {
@@ -301,19 +326,22 @@ fn remux_has_untagged_language_filter(
 
 fn filter_references_language(filter: &TrackFilter) -> bool {
     match filter {
-        TrackFilter::LanguageIn { .. } => true,
-        TrackFilter::Not { inner } => filter_references_language(inner),
-        TrackFilter::And { filters } | TrackFilter::Or { filters } => {
+        TrackFilter::LanguageIn(voom_policy::compiled::LanguageInTrackFilter { .. }) => true,
+        TrackFilter::Not(voom_policy::compiled::NotTrackFilter { inner }) => {
+            filter_references_language(inner)
+        }
+        TrackFilter::And(voom_policy::compiled::AndTrackFilter { filters })
+        | TrackFilter::Or(voom_policy::compiled::OrTrackFilter { filters }) => {
             filters.iter().any(filter_references_language)
         }
-        TrackFilter::CodecIn { .. }
-        | TrackFilter::Channels { .. }
-        | TrackFilter::Commentary
-        | TrackFilter::Forced
-        | TrackFilter::Default
-        | TrackFilter::Font
-        | TrackFilter::TitleContains { .. }
-        | TrackFilter::TitleMatches { .. } => false,
+        TrackFilter::CodecIn(voom_policy::compiled::CodecInTrackFilter { .. })
+        | TrackFilter::Channels(voom_policy::compiled::ChannelsTrackFilter { .. })
+        | TrackFilter::Commentary(voom_policy::compiled::CommentaryTrackFilter {})
+        | TrackFilter::Forced(voom_policy::compiled::ForcedTrackFilter {})
+        | TrackFilter::Default(voom_policy::compiled::DefaultTrackFilter {})
+        | TrackFilter::Font(voom_policy::compiled::FontTrackFilter {})
+        | TrackFilter::TitleContains(voom_policy::compiled::TitleContainsTrackFilter { .. })
+        | TrackFilter::TitleMatches(voom_policy::compiled::TitleMatchesTrackFilter { .. }) => false,
     }
 }
 
@@ -391,19 +419,24 @@ fn duplicate_track_targets(targets: &[TrackTarget]) -> bool {
 
 fn filter_has_unsupported_shape(filter: &TrackFilter) -> bool {
     match filter {
-        TrackFilter::TitleMatches { .. } => true,
-        TrackFilter::Not { inner } => filter_has_unsupported_shape(inner),
-        TrackFilter::And { filters } | TrackFilter::Or { filters } => {
+        TrackFilter::TitleMatches(voom_policy::compiled::TitleMatchesTrackFilter { .. }) => true,
+        TrackFilter::Not(voom_policy::compiled::NotTrackFilter { inner }) => {
+            filter_has_unsupported_shape(inner)
+        }
+        TrackFilter::And(voom_policy::compiled::AndTrackFilter { filters })
+        | TrackFilter::Or(voom_policy::compiled::OrTrackFilter { filters }) => {
             filters.iter().any(filter_has_unsupported_shape)
         }
-        TrackFilter::LanguageIn { .. }
-        | TrackFilter::CodecIn { .. }
-        | TrackFilter::Channels { .. }
-        | TrackFilter::Commentary
-        | TrackFilter::Forced
-        | TrackFilter::Default
-        | TrackFilter::Font
-        | TrackFilter::TitleContains { .. } => false,
+        TrackFilter::LanguageIn(voom_policy::compiled::LanguageInTrackFilter { .. })
+        | TrackFilter::CodecIn(voom_policy::compiled::CodecInTrackFilter { .. })
+        | TrackFilter::Channels(voom_policy::compiled::ChannelsTrackFilter { .. })
+        | TrackFilter::Commentary(voom_policy::compiled::CommentaryTrackFilter {})
+        | TrackFilter::Forced(voom_policy::compiled::ForcedTrackFilter {})
+        | TrackFilter::Default(voom_policy::compiled::DefaultTrackFilter {})
+        | TrackFilter::Font(voom_policy::compiled::FontTrackFilter {})
+        | TrackFilter::TitleContains(voom_policy::compiled::TitleContainsTrackFilter { .. }) => {
+            false
+        }
     }
 }
 
@@ -421,19 +454,26 @@ fn base_remux_payload(
     let container = operations
         .iter()
         .find_map(|operation| match operation {
-            CompiledOperation::SetContainer { container } => Some(container.as_str()),
+            CompiledOperation::SetContainer(
+                voom_policy::compiled::CompiledSetContainerOperation { container },
+            ) => Some(container.as_str()),
             _ => None,
         })
         .unwrap_or("mkv");
     let track_actions = operations
         .iter()
         .filter_map(|operation| match operation {
-            CompiledOperation::KeepTracks { target, filter } => Some(track_action_payload(
+            CompiledOperation::KeepTracks(voom_policy::compiled::CompiledKeepTracksOperation {
+                target,
+                filter,
+            }) => Some(track_action_payload(
                 RemuxTrackActionKind::KeepTracks,
                 *target,
                 filter.clone(),
             )),
-            CompiledOperation::RemoveTracks { target, filter } => Some(track_action_payload(
+            CompiledOperation::RemoveTracks(
+                voom_policy::compiled::CompiledRemoveTracksOperation { target, filter },
+            ) => Some(track_action_payload(
                 RemuxTrackActionKind::RemoveTracks,
                 *target,
                 filter.clone(),
@@ -444,7 +484,9 @@ fn base_remux_payload(
     let reorder_operations = operations
         .iter()
         .filter_map(|operation| match operation {
-            CompiledOperation::ReorderTracks { targets, .. } => Some(targets),
+            CompiledOperation::ReorderTracks(
+                voom_policy::compiled::CompiledReorderTracksOperation { targets, .. },
+            ) => Some(targets),
             _ => None,
         })
         .collect::<Vec<_>>();
@@ -458,9 +500,11 @@ fn base_remux_payload(
     let defaults = operations
         .iter()
         .filter_map(|operation| match operation {
-            CompiledOperation::SetDefaults {
-                target, strategy, ..
-            } => Some(RemuxDefaultAction {
+            CompiledOperation::SetDefaults(
+                voom_policy::compiled::CompiledSetDefaultsOperation {
+                    target, strategy, ..
+                },
+            ) => Some(RemuxDefaultAction {
                 target: *target,
                 strategy: *strategy,
                 selected_snapshot_stream_id: None,
@@ -525,9 +569,14 @@ fn resolve_remux_operations(
     preferred_languages: &[String],
 ) -> Result<RemuxResolution, RemuxPlanningBlock> {
     let mut payload = base_remux_payload(snapshot, operations);
-    let has_track_operation = operations
-        .iter()
-        .any(|operation| !matches!(operation, CompiledOperation::SetContainer { .. }));
+    let has_track_operation = operations.iter().any(|operation| {
+        !matches!(
+            operation,
+            CompiledOperation::SetContainer(
+                voom_policy::compiled::CompiledSetContainerOperation { .. }
+            )
+        )
+    });
     let has_stream_facts = has_remux_stream_fact_shape(snapshot);
     if !has_track_operation && !has_stream_facts {
         if video_stream_count(snapshot) == Some(0) {
@@ -583,11 +632,11 @@ fn resolve_default_actions(
     let mut defaults = Vec::new();
     let mut evaluated_untagged_language = false;
     for operation in operations {
-        let CompiledOperation::SetDefaults {
+        let CompiledOperation::SetDefaults(voom_policy::compiled::CompiledSetDefaultsOperation {
             target,
             strategy,
             filter,
-        } = operation
+        }) = operation
         else {
             continue;
         };
@@ -673,11 +722,11 @@ fn validate_best_default_strategy_conflicts(
     explicit_targets: &[TrackTarget],
 ) -> Result<(), RemuxPlanningBlock> {
     for operation in operations {
-        let CompiledOperation::SetDefaults {
+        let CompiledOperation::SetDefaults(voom_policy::compiled::CompiledSetDefaultsOperation {
             target,
             strategy: DefaultStrategy::Best,
             filter: None,
-        } = operation
+        }) = operation
         else {
             continue;
         };
@@ -686,11 +735,13 @@ fn validate_best_default_strategy_conflicts(
         }
         let mut strategy_count = 0;
         for candidate in operations {
-            let CompiledOperation::SetDefaults {
-                target: candidate_target,
-                filter: None,
-                ..
-            } = candidate
+            let CompiledOperation::SetDefaults(
+                voom_policy::compiled::CompiledSetDefaultsOperation {
+                    target: candidate_target,
+                    filter: None,
+                    ..
+                },
+            ) = candidate
             else {
                 continue;
             };
@@ -710,11 +761,11 @@ fn explicit_default_targets(
 ) -> Result<Vec<TrackTarget>, RemuxPlanningBlock> {
     let mut targets = Vec::new();
     for operation in operations {
-        let CompiledOperation::SetDefaults {
+        let CompiledOperation::SetDefaults(voom_policy::compiled::CompiledSetDefaultsOperation {
             target,
             filter: Some(_),
             ..
-        } = operation
+        }) = operation
         else {
             continue;
         };
@@ -734,10 +785,12 @@ fn resolve_track_order(
     let reorders = operations
         .iter()
         .filter_map(|operation| {
-            let CompiledOperation::ReorderTracks {
-                targets,
-                head_filter,
-            } = operation
+            let CompiledOperation::ReorderTracks(
+                voom_policy::compiled::CompiledReorderTracksOperation {
+                    targets,
+                    head_filter,
+                },
+            ) = operation
             else {
                 return None;
             };

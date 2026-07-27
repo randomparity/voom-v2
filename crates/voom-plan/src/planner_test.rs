@@ -290,12 +290,14 @@ fn request(policy: CompiledPolicy, snapshot: MediaSnapshotInput) -> PlanningRequ
 
 fn request_with_transcode(snapshot: MediaSnapshotInput) -> PlanningRequest {
     PlanningRequest {
-        policy: policy(CompiledOperation::TranscodeVideo {
-            target_codec: "hevc".to_owned(),
-            container: "mkv".to_owned(),
-            profile: voom_policy::VideoProfileRef::Named("default-hevc".to_owned()),
-            resolved_profile: Some(voom_core::TranscodeVideoProfile::default_hevc()),
-        }),
+        policy: policy(CompiledOperation::TranscodeVideo(
+            voom_policy::compiled::CompiledTranscodeVideoOperation {
+                target_codec: "hevc".to_owned(),
+                container: "mkv".to_owned(),
+                profile: voom_policy::VideoProfileRef::Named("default-hevc".to_owned()),
+                resolved_profile: Some(voom_core::TranscodeVideoProfile::default_hevc()),
+            },
+        )),
         input: input_with_snapshot(snapshot),
         context: PlanningContext::default(),
     }
@@ -303,13 +305,17 @@ fn request_with_transcode(snapshot: MediaSnapshotInput) -> PlanningRequest {
 
 fn request_with_transcode_audio(snapshot: MediaSnapshotInput) -> PlanningRequest {
     PlanningRequest {
-        policy: policy(CompiledOperation::TranscodeAudio {
-            target_codec: "opus".to_owned(),
-            container: "mkv".to_owned(),
-            filter: Some(TrackFilter::LanguageIn {
-                values: vec!["eng".to_owned()],
-            }),
-        }),
+        policy: policy(CompiledOperation::TranscodeAudio(
+            voom_policy::compiled::CompiledTranscodeAudioOperation {
+                target_codec: "opus".to_owned(),
+                container: "mkv".to_owned(),
+                filter: Some(TrackFilter::LanguageIn(
+                    voom_policy::compiled::LanguageInTrackFilter {
+                        values: vec!["eng".to_owned()],
+                    },
+                )),
+            },
+        )),
         input: input_with_snapshot(snapshot),
         context: PlanningContext::default(),
     }
@@ -317,11 +323,15 @@ fn request_with_transcode_audio(snapshot: MediaSnapshotInput) -> PlanningRequest
 
 fn request_with_extract_audio(snapshot: MediaSnapshotInput) -> PlanningRequest {
     PlanningRequest {
-        policy: policy(CompiledOperation::ExtractAudio {
-            target_codec: "opus".to_owned(),
-            container: "ogg".to_owned(),
-            filter: Some(TrackFilter::Commentary),
-        }),
+        policy: policy(CompiledOperation::ExtractAudio(
+            voom_policy::compiled::CompiledExtractAudioOperation {
+                target_codec: "opus".to_owned(),
+                container: "ogg".to_owned(),
+                filter: Some(TrackFilter::Commentary(
+                    voom_policy::compiled::CommentaryTrackFilter {},
+                )),
+            },
+        )),
         input: input_with_snapshot(snapshot),
         context: PlanningContext::default(),
     }
@@ -329,12 +339,14 @@ fn request_with_extract_audio(snapshot: MediaSnapshotInput) -> PlanningRequest {
 
 fn request_with_synthesize_audio(snapshot: MediaSnapshotInput) -> PlanningRequest {
     PlanningRequest {
-        policy: policy(CompiledOperation::SynthesizeAudio {
-            target_codec: "aac".to_owned(),
-            container: "mkv".to_owned(),
-            target_channels: 2,
-            filter: None,
-        }),
+        policy: policy(CompiledOperation::SynthesizeAudio(
+            voom_policy::compiled::CompiledSynthesizeAudioOperation {
+                target_codec: "aac".to_owned(),
+                container: "mkv".to_owned(),
+                target_channels: 2,
+                filter: None,
+            },
+        )),
         input: input_with_snapshot(snapshot),
         context: PlanningContext::default(),
     }
@@ -343,20 +355,22 @@ fn request_with_synthesize_audio(snapshot: MediaSnapshotInput) -> PlanningReques
 #[test]
 fn groups_container_and_track_operations_into_one_remux_node() {
     let policy = compiled_policy_with_ops(vec![
-        CompiledOperation::SetContainer {
+        CompiledOperation::SetContainer(voom_policy::compiled::CompiledSetContainerOperation {
             container: "mkv".to_owned(),
-        },
-        CompiledOperation::KeepTracks {
+        }),
+        CompiledOperation::KeepTracks(voom_policy::compiled::CompiledKeepTracksOperation {
             target: TrackTarget::Audio,
-            filter: Some(TrackFilter::LanguageIn {
-                values: vec!["eng".to_owned(), "und".to_owned()],
-            }),
-        },
-        CompiledOperation::SetDefaults {
+            filter: Some(TrackFilter::LanguageIn(
+                voom_policy::compiled::LanguageInTrackFilter {
+                    values: vec!["eng".to_owned(), "und".to_owned()],
+                },
+            )),
+        }),
+        CompiledOperation::SetDefaults(voom_policy::compiled::CompiledSetDefaultsOperation {
             target: TrackTarget::Audio,
             strategy: DefaultStrategy::First,
             filter: None,
-        },
+        }),
     ]);
 
     let plan = generate_plan(request(policy, snapshot_mp4_with_video_audio_subtitle())).unwrap();
@@ -418,12 +432,16 @@ fn transcode_audio_untagged_language_emits_per_file_warning() {
 
 #[test]
 fn remux_keep_untagged_language_emits_per_file_warning() {
-    let policy = compiled_policy_with_ops(vec![CompiledOperation::KeepTracks {
-        target: TrackTarget::Audio,
-        filter: Some(TrackFilter::LanguageIn {
-            values: vec!["eng".to_owned()],
-        }),
-    }]);
+    let policy = compiled_policy_with_ops(vec![CompiledOperation::KeepTracks(
+        voom_policy::compiled::CompiledKeepTracksOperation {
+            target: TrackTarget::Audio,
+            filter: Some(TrackFilter::LanguageIn(
+                voom_policy::compiled::LanguageInTrackFilter {
+                    values: vec!["eng".to_owned()],
+                },
+            )),
+        },
+    )]);
 
     let plan = generate_plan(request(policy, snapshot_mkv_with_untagged_audio())).unwrap();
 
@@ -445,20 +463,20 @@ fn remux_filter_addressed_operations_emit_untagged_language_warning() {
         .as_object_mut()
         .unwrap()
         .remove("language");
-    let language_filter = TrackFilter::LanguageIn {
+    let language_filter = TrackFilter::LanguageIn(voom_policy::compiled::LanguageInTrackFilter {
         values: vec!["eng".to_owned()],
-    };
+    });
 
     for operation in [
-        CompiledOperation::SetDefaults {
+        CompiledOperation::SetDefaults(voom_policy::compiled::CompiledSetDefaultsOperation {
             target: TrackTarget::Audio,
             strategy: DefaultStrategy::Preserve,
             filter: Some(language_filter.clone()),
-        },
-        CompiledOperation::ReorderTracks {
+        }),
+        CompiledOperation::ReorderTracks(voom_policy::compiled::CompiledReorderTracksOperation {
             targets: vec![TrackTarget::Video, TrackTarget::Audio],
             head_filter: Some(language_filter.clone()),
-        },
+        }),
     ] {
         let plan = generate_plan(request(policy(operation), snapshot.clone())).unwrap();
 
@@ -490,9 +508,11 @@ fn language_filter_over_fully_tagged_audio_emits_no_untagged_warning() {
 
 #[test]
 fn remux_payload_includes_existing_media_snapshot_id_when_available() {
-    let policy = compiled_policy_with_ops(vec![CompiledOperation::SetContainer {
-        container: "mkv".to_owned(),
-    }]);
+    let policy = compiled_policy_with_ops(vec![CompiledOperation::SetContainer(
+        voom_policy::compiled::CompiledSetContainerOperation {
+            container: "mkv".to_owned(),
+        },
+    )]);
     let mut snapshot = snapshot_with_streams(Some("mp4"));
     snapshot.existing_media_snapshot_id = Some(MediaSnapshotId(99));
 
@@ -507,9 +527,11 @@ fn remux_payload_includes_existing_media_snapshot_id_when_available() {
 
 #[test]
 fn container_mkv_alone_is_no_op_when_snapshot_is_already_mkv() {
-    let policy = compiled_policy_with_ops(vec![CompiledOperation::SetContainer {
-        container: "mkv".to_owned(),
-    }]);
+    let policy = compiled_policy_with_ops(vec![CompiledOperation::SetContainer(
+        voom_policy::compiled::CompiledSetContainerOperation {
+            container: "mkv".to_owned(),
+        },
+    )]);
 
     let plan = generate_plan(request(policy, snapshot_mkv_with_video_audio_subtitle())).unwrap();
 
@@ -523,9 +545,11 @@ fn container_mkv_alone_is_no_op_when_snapshot_is_already_mkv() {
 
 #[test]
 fn container_mkv_alone_plans_when_snapshot_container_is_not_mkv() {
-    let policy = compiled_policy_with_ops(vec![CompiledOperation::SetContainer {
-        container: "mkv".to_owned(),
-    }]);
+    let policy = compiled_policy_with_ops(vec![CompiledOperation::SetContainer(
+        voom_policy::compiled::CompiledSetContainerOperation {
+            container: "mkv".to_owned(),
+        },
+    )]);
 
     let plan = generate_plan(request(policy, snapshot_mp4_with_video_audio_subtitle())).unwrap();
 
@@ -539,9 +563,11 @@ fn container_mkv_alone_plans_when_snapshot_container_is_not_mkv() {
 
 #[test]
 fn container_mkv_alone_blocks_when_snapshot_container_is_unknown() {
-    let policy = compiled_policy_with_ops(vec![CompiledOperation::SetContainer {
-        container: "mkv".to_owned(),
-    }]);
+    let policy = compiled_policy_with_ops(vec![CompiledOperation::SetContainer(
+        voom_policy::compiled::CompiledSetContainerOperation {
+            container: "mkv".to_owned(),
+        },
+    )]);
     let mut snapshot = snapshot_mp4_with_video_audio_subtitle();
     snapshot.container = None;
 
@@ -557,9 +583,11 @@ fn container_mkv_alone_blocks_when_snapshot_container_is_unknown() {
 
 #[test]
 fn container_mkv_alone_blocks_when_stream_summary_has_zero_video_and_no_streams_array() {
-    let policy = compiled_policy_with_ops(vec![CompiledOperation::SetContainer {
-        container: "mkv".to_owned(),
-    }]);
+    let policy = compiled_policy_with_ops(vec![CompiledOperation::SetContainer(
+        voom_policy::compiled::CompiledSetContainerOperation {
+            container: "mkv".to_owned(),
+        },
+    )]);
     // mp4 container with a video_stream_count: 0 summary and NO streams array.
     // A SetContainer-only remux must still enforce video presence and block —
     // not silently bypass the check and emit a Planned remux for a video-less
@@ -579,21 +607,23 @@ fn container_mkv_alone_blocks_when_stream_summary_has_zero_video_and_no_streams_
 #[test]
 fn intervening_non_remux_operation_does_not_split_same_phase_remux_group() {
     let policy = compiled_policy_with_ops(vec![
-        CompiledOperation::SetContainer {
+        CompiledOperation::SetContainer(voom_policy::compiled::CompiledSetContainerOperation {
             container: "mkv".to_owned(),
-        },
-        CompiledOperation::SetTag {
+        }),
+        CompiledOperation::SetTag(voom_policy::compiled::CompiledSetTagOperation {
             key: "title".to_owned(),
-            value: CompiledValue::String {
+            value: CompiledValue::String(voom_policy::compiled::CompiledStringValue {
                 value: "Movie".to_owned(),
-            },
-        },
-        CompiledOperation::KeepTracks {
-            target: TrackTarget::Audio,
-            filter: Some(TrackFilter::LanguageIn {
-                values: vec!["eng".to_owned()],
             }),
-        },
+        }),
+        CompiledOperation::KeepTracks(voom_policy::compiled::CompiledKeepTracksOperation {
+            target: TrackTarget::Audio,
+            filter: Some(TrackFilter::LanguageIn(
+                voom_policy::compiled::LanguageInTrackFilter {
+                    values: vec!["eng".to_owned()],
+                },
+            )),
+        }),
     ]);
 
     let plan = generate_plan(request(policy, snapshot_mp4_with_video_audio_subtitle())).unwrap();
@@ -621,18 +651,24 @@ fn remux_operations_in_different_phases_remain_separate_nodes() {
     let policy = compiled_policy_with_phases(&[
         (
             "normalize",
-            vec![CompiledOperation::SetContainer {
-                container: "mkv".to_owned(),
-            }],
+            vec![CompiledOperation::SetContainer(
+                voom_policy::compiled::CompiledSetContainerOperation {
+                    container: "mkv".to_owned(),
+                },
+            )],
         ),
         (
             "tracks",
-            vec![CompiledOperation::KeepTracks {
-                target: TrackTarget::Audio,
-                filter: Some(TrackFilter::LanguageIn {
-                    values: vec!["eng".to_owned()],
-                }),
-            }],
+            vec![CompiledOperation::KeepTracks(
+                voom_policy::compiled::CompiledKeepTracksOperation {
+                    target: TrackTarget::Audio,
+                    filter: Some(TrackFilter::LanguageIn(
+                        voom_policy::compiled::LanguageInTrackFilter {
+                            values: vec!["eng".to_owned()],
+                        },
+                    )),
+                },
+            )],
         ),
     ]);
 
@@ -655,11 +691,13 @@ fn remux_operations_in_different_phases_remain_separate_nodes() {
 fn defaults_best_prefers_configured_language_before_source_order() {
     let policy = compiled_policy_with_languages_and_ops(
         &["spa", "eng"],
-        vec![CompiledOperation::SetDefaults {
-            target: TrackTarget::Audio,
-            strategy: DefaultStrategy::Best,
-            filter: None,
-        }],
+        vec![CompiledOperation::SetDefaults(
+            voom_policy::compiled::CompiledSetDefaultsOperation {
+                target: TrackTarget::Audio,
+                strategy: DefaultStrategy::Best,
+                filter: None,
+            },
+        )],
     );
 
     let plan = generate_plan(request(
@@ -685,11 +723,13 @@ fn defaults_best_prefers_configured_language_before_source_order() {
 fn defaults_best_uses_canonical_source_order_and_detects_compliance() {
     let policy = compiled_policy_with_languages_and_ops(
         &["eng"],
-        vec![CompiledOperation::SetDefaults {
-            target: TrackTarget::Audio,
-            strategy: DefaultStrategy::Best,
-            filter: None,
-        }],
+        vec![CompiledOperation::SetDefaults(
+            voom_policy::compiled::CompiledSetDefaultsOperation {
+                target: TrackTarget::Audio,
+                strategy: DefaultStrategy::Best,
+                filter: None,
+            },
+        )],
     );
     let mut snapshot =
         snapshot_mkv_with_audio_languages_and_defaults(&[("eng", true), ("eng", false)]);
@@ -725,11 +765,13 @@ fn defaults_best_fallbacks_and_duplicate_preferences_are_deterministic() {
     ] {
         let policy = compiled_policy_with_languages_and_ops(
             &languages,
-            vec![CompiledOperation::SetDefaults {
-                target: TrackTarget::Audio,
-                strategy: DefaultStrategy::Best,
-                filter: None,
-            }],
+            vec![CompiledOperation::SetDefaults(
+                voom_policy::compiled::CompiledSetDefaultsOperation {
+                    target: TrackTarget::Audio,
+                    strategy: DefaultStrategy::Best,
+                    filter: None,
+                },
+            )],
         );
 
         let plan = generate_plan(request(
@@ -747,11 +789,12 @@ fn defaults_best_fallbacks_and_duplicate_preferences_are_deterministic() {
 
 #[test]
 fn defaults_best_supports_subtitle_selection_and_an_empty_subtitle_set() {
-    let operation = CompiledOperation::SetDefaults {
-        target: TrackTarget::Subtitle,
-        strategy: DefaultStrategy::Best,
-        filter: None,
-    };
+    let operation =
+        CompiledOperation::SetDefaults(voom_policy::compiled::CompiledSetDefaultsOperation {
+            target: TrackTarget::Subtitle,
+            strategy: DefaultStrategy::Best,
+            filter: None,
+        });
     let selected = generate_plan(request(
         compiled_policy_with_languages_and_ops(&["spa"], vec![operation.clone()]),
         snapshot_mkv_with_video_audio_subtitle(),
@@ -782,11 +825,13 @@ fn defaults_best_supports_subtitle_selection_and_an_empty_subtitle_set() {
 fn defaults_best_validates_every_candidate_language() {
     let policy = compiled_policy_with_languages_and_ops(
         &["eng"],
-        vec![CompiledOperation::SetDefaults {
-            target: TrackTarget::Audio,
-            strategy: DefaultStrategy::Best,
-            filter: None,
-        }],
+        vec![CompiledOperation::SetDefaults(
+            voom_policy::compiled::CompiledSetDefaultsOperation {
+                target: TrackTarget::Audio,
+                strategy: DefaultStrategy::Best,
+                filter: None,
+            },
+        )],
     );
     let mut snapshot =
         snapshot_mkv_with_audio_languages_and_defaults(&[("eng", false), ("spa", false)]);
@@ -805,11 +850,13 @@ fn defaults_best_validates_every_candidate_language() {
 fn defaults_best_warns_when_nonempty_preferences_consume_untagged_language() {
     let policy = compiled_policy_with_languages_and_ops(
         &["eng"],
-        vec![CompiledOperation::SetDefaults {
-            target: TrackTarget::Audio,
-            strategy: DefaultStrategy::Best,
-            filter: None,
-        }],
+        vec![CompiledOperation::SetDefaults(
+            voom_policy::compiled::CompiledSetDefaultsOperation {
+                target: TrackTarget::Audio,
+                strategy: DefaultStrategy::Best,
+                filter: None,
+            },
+        )],
     );
     let mut snapshot =
         snapshot_mkv_with_audio_languages_and_defaults(&[("eng", false), ("spa", false)]);
@@ -836,11 +883,13 @@ fn defaults_best_warns_when_nonempty_preferences_consume_untagged_language() {
 fn defaults_best_empty_preferences_do_not_read_or_warn_on_language_facts() {
     let policy = compiled_policy_with_languages_and_ops(
         &[],
-        vec![CompiledOperation::SetDefaults {
-            target: TrackTarget::Audio,
-            strategy: DefaultStrategy::Best,
-            filter: None,
-        }],
+        vec![CompiledOperation::SetDefaults(
+            voom_policy::compiled::CompiledSetDefaultsOperation {
+                target: TrackTarget::Audio,
+                strategy: DefaultStrategy::Best,
+                filter: None,
+            },
+        )],
     );
     let mut snapshot =
         snapshot_mkv_with_audio_languages_and_defaults(&[("eng", false), ("spa", false)]);
@@ -864,16 +913,20 @@ fn defaults_best_empty_preferences_do_not_read_or_warn_on_language_facts() {
 
 #[test]
 fn defaults_best_shadowed_by_explicit_does_not_read_or_warn_on_languages() {
-    let explicit = CompiledOperation::SetDefaults {
-        target: TrackTarget::Audio,
-        strategy: DefaultStrategy::Preserve,
-        filter: Some(TrackFilter::Commentary),
-    };
-    let best = CompiledOperation::SetDefaults {
-        target: TrackTarget::Audio,
-        strategy: DefaultStrategy::Best,
-        filter: None,
-    };
+    let explicit =
+        CompiledOperation::SetDefaults(voom_policy::compiled::CompiledSetDefaultsOperation {
+            target: TrackTarget::Audio,
+            strategy: DefaultStrategy::Preserve,
+            filter: Some(TrackFilter::Commentary(
+                voom_policy::compiled::CommentaryTrackFilter {},
+            )),
+        });
+    let best =
+        CompiledOperation::SetDefaults(voom_policy::compiled::CompiledSetDefaultsOperation {
+            target: TrackTarget::Audio,
+            strategy: DefaultStrategy::Best,
+            filter: None,
+        });
     for operations in [
         vec![explicit.clone(), best.clone()],
         vec![best.clone(), explicit.clone()],
@@ -910,16 +963,18 @@ fn defaults_best_shadowed_by_explicit_does_not_read_or_warn_on_languages() {
 
 #[test]
 fn defaults_best_conflicts_with_other_same_target_strategies() {
-    let best = CompiledOperation::SetDefaults {
-        target: TrackTarget::Audio,
-        strategy: DefaultStrategy::Best,
-        filter: None,
-    };
-    let none = CompiledOperation::SetDefaults {
-        target: TrackTarget::Audio,
-        strategy: DefaultStrategy::None,
-        filter: None,
-    };
+    let best =
+        CompiledOperation::SetDefaults(voom_policy::compiled::CompiledSetDefaultsOperation {
+            target: TrackTarget::Audio,
+            strategy: DefaultStrategy::Best,
+            filter: None,
+        });
+    let none =
+        CompiledOperation::SetDefaults(voom_policy::compiled::CompiledSetDefaultsOperation {
+            target: TrackTarget::Audio,
+            strategy: DefaultStrategy::None,
+            filter: None,
+        });
     for operations in [
         vec![best.clone(), none.clone()],
         vec![none, best.clone()],
@@ -947,16 +1002,16 @@ fn defaults_best_conflicts_with_other_same_target_strategies() {
 #[test]
 fn defaults_best_preserves_legacy_non_best_strategy_composition() {
     let policy = compiled_policy_with_ops(vec![
-        CompiledOperation::SetDefaults {
+        CompiledOperation::SetDefaults(voom_policy::compiled::CompiledSetDefaultsOperation {
             target: TrackTarget::Audio,
             strategy: DefaultStrategy::None,
             filter: None,
-        },
-        CompiledOperation::SetDefaults {
+        }),
+        CompiledOperation::SetDefaults(voom_policy::compiled::CompiledSetDefaultsOperation {
             target: TrackTarget::Audio,
             strategy: DefaultStrategy::Preserve,
             filter: None,
-        },
+        }),
     ]);
 
     let plan = generate_plan(request(
@@ -978,14 +1033,14 @@ fn defaults_best_preserves_legacy_non_best_strategy_composition() {
 #[test]
 fn attachment_target_track_selection_is_plannable() {
     for operation in [
-        CompiledOperation::KeepTracks {
+        CompiledOperation::KeepTracks(voom_policy::compiled::CompiledKeepTracksOperation {
             target: TrackTarget::Attachment,
-            filter: Some(TrackFilter::Font),
-        },
-        CompiledOperation::RemoveTracks {
+            filter: Some(TrackFilter::Font(voom_policy::compiled::FontTrackFilter {})),
+        }),
+        CompiledOperation::RemoveTracks(voom_policy::compiled::CompiledRemoveTracksOperation {
             target: TrackTarget::Attachment,
-            filter: Some(TrackFilter::Font),
-        },
+            filter: Some(TrackFilter::Font(voom_policy::compiled::FontTrackFilter {})),
+        }),
     ] {
         let plan = generate_plan(request(
             compiled_policy_with_ops(vec![operation]),
@@ -1000,9 +1055,11 @@ fn attachment_target_track_selection_is_plannable() {
 
 #[test]
 fn container_remux_preserves_source_attachment_streams() {
-    let policy = compiled_policy_with_ops(vec![CompiledOperation::SetContainer {
-        container: "mkv".to_owned(),
-    }]);
+    let policy = compiled_policy_with_ops(vec![CompiledOperation::SetContainer(
+        voom_policy::compiled::CompiledSetContainerOperation {
+            container: "mkv".to_owned(),
+        },
+    )]);
 
     let plan = generate_plan(request(
         policy,
@@ -1016,10 +1073,14 @@ fn container_remux_preserves_source_attachment_streams() {
 
 #[test]
 fn commentary_removal_plans_from_structured_disposition_facts() {
-    let policy = compiled_policy_with_ops(vec![CompiledOperation::RemoveTracks {
-        target: TrackTarget::Audio,
-        filter: Some(TrackFilter::Commentary),
-    }]);
+    let policy = compiled_policy_with_ops(vec![CompiledOperation::RemoveTracks(
+        voom_policy::compiled::CompiledRemoveTracksOperation {
+            target: TrackTarget::Audio,
+            filter: Some(TrackFilter::Commentary(
+                voom_policy::compiled::CommentaryTrackFilter {},
+            )),
+        },
+    )]);
     let mut snapshot = snapshot_with_streams(Some("mkv"));
     snapshot.stream_summary["streams"][1]["disposition"]["commentary"] =
         serde_json::Value::Bool(true);
@@ -1035,14 +1096,16 @@ fn commentary_removal_plans_from_structured_disposition_facts() {
 #[test]
 fn counteracting_audio_track_actions_no_op_after_ordered_resolution() {
     let policy = compiled_policy_with_ops(vec![
-        CompiledOperation::RemoveTracks {
+        CompiledOperation::RemoveTracks(voom_policy::compiled::CompiledRemoveTracksOperation {
             target: TrackTarget::Audio,
-            filter: Some(TrackFilter::Commentary),
-        },
-        CompiledOperation::KeepTracks {
+            filter: Some(TrackFilter::Commentary(
+                voom_policy::compiled::CommentaryTrackFilter {},
+            )),
+        }),
+        CompiledOperation::KeepTracks(voom_policy::compiled::CompiledKeepTracksOperation {
             target: TrackTarget::Audio,
             filter: None,
-        },
+        }),
     ]);
     let mut snapshot = snapshot_with_streams(Some("mkv"));
     snapshot.stream_summary["streams"][1]["disposition"]["commentary"] =
@@ -1059,14 +1122,14 @@ fn counteracting_audio_track_actions_no_op_after_ordered_resolution() {
 #[test]
 fn counteracting_attachment_track_actions_no_op_after_ordered_resolution() {
     let policy = compiled_policy_with_ops(vec![
-        CompiledOperation::RemoveTracks {
+        CompiledOperation::RemoveTracks(voom_policy::compiled::CompiledRemoveTracksOperation {
             target: TrackTarget::Attachment,
             filter: None,
-        },
-        CompiledOperation::KeepTracks {
+        }),
+        CompiledOperation::KeepTracks(voom_policy::compiled::CompiledKeepTracksOperation {
             target: TrackTarget::Attachment,
             filter: None,
-        },
+        }),
     ]);
 
     let plan = generate_plan(request(
@@ -1081,12 +1144,16 @@ fn counteracting_attachment_track_actions_no_op_after_ordered_resolution() {
 
 #[test]
 fn track_remux_keep_audio_language_selection_no_ops_when_output_matches_snapshot() {
-    let policy = compiled_policy_with_ops(vec![CompiledOperation::KeepTracks {
-        target: TrackTarget::Audio,
-        filter: Some(TrackFilter::LanguageIn {
-            values: vec!["eng".to_owned(), "spa".to_owned()],
-        }),
-    }]);
+    let policy = compiled_policy_with_ops(vec![CompiledOperation::KeepTracks(
+        voom_policy::compiled::CompiledKeepTracksOperation {
+            target: TrackTarget::Audio,
+            filter: Some(TrackFilter::LanguageIn(
+                voom_policy::compiled::LanguageInTrackFilter {
+                    values: vec!["eng".to_owned(), "spa".to_owned()],
+                },
+            )),
+        },
+    )]);
 
     let plan = generate_plan(request(
         policy,
@@ -1104,11 +1171,13 @@ fn track_remux_keep_audio_language_selection_no_ops_when_output_matches_snapshot
 
 #[test]
 fn track_remux_set_default_first_no_ops_when_first_audio_is_only_default() {
-    let policy = compiled_policy_with_ops(vec![CompiledOperation::SetDefaults {
-        target: TrackTarget::Audio,
-        strategy: DefaultStrategy::First,
-        filter: None,
-    }]);
+    let policy = compiled_policy_with_ops(vec![CompiledOperation::SetDefaults(
+        voom_policy::compiled::CompiledSetDefaultsOperation {
+            target: TrackTarget::Audio,
+            strategy: DefaultStrategy::First,
+            filter: None,
+        },
+    )]);
 
     let plan = generate_plan(request(
         policy,
@@ -1126,13 +1195,17 @@ fn track_remux_set_default_first_no_ops_when_first_audio_is_only_default() {
 
 #[test]
 fn track_remux_filter_default_carries_the_unique_retained_stream() {
-    let policy = compiled_policy_with_ops(vec![CompiledOperation::SetDefaults {
-        target: TrackTarget::Audio,
-        strategy: DefaultStrategy::Preserve,
-        filter: Some(TrackFilter::LanguageIn {
-            values: vec!["eng".to_owned()],
-        }),
-    }]);
+    let policy = compiled_policy_with_ops(vec![CompiledOperation::SetDefaults(
+        voom_policy::compiled::CompiledSetDefaultsOperation {
+            target: TrackTarget::Audio,
+            strategy: DefaultStrategy::Preserve,
+            filter: Some(TrackFilter::LanguageIn(
+                voom_policy::compiled::LanguageInTrackFilter {
+                    values: vec!["eng".to_owned()],
+                },
+            )),
+        },
+    )]);
 
     let plan = generate_plan(request(
         policy,
@@ -1153,13 +1226,17 @@ fn track_remux_filter_default_carries_the_unique_retained_stream() {
 
 #[test]
 fn track_remux_filter_default_no_ops_when_unique_stream_is_already_default() {
-    let policy = compiled_policy_with_ops(vec![CompiledOperation::SetDefaults {
-        target: TrackTarget::Audio,
-        strategy: DefaultStrategy::Preserve,
-        filter: Some(TrackFilter::LanguageIn {
-            values: vec!["eng".to_owned()],
-        }),
-    }]);
+    let policy = compiled_policy_with_ops(vec![CompiledOperation::SetDefaults(
+        voom_policy::compiled::CompiledSetDefaultsOperation {
+            target: TrackTarget::Audio,
+            strategy: DefaultStrategy::Preserve,
+            filter: Some(TrackFilter::LanguageIn(
+                voom_policy::compiled::LanguageInTrackFilter {
+                    values: vec!["eng".to_owned()],
+                },
+            )),
+        },
+    )]);
 
     let plan = generate_plan(request(
         policy,
@@ -1178,13 +1255,17 @@ fn track_remux_filter_default_no_ops_when_unique_stream_is_already_default() {
 fn track_remux_filter_default_reports_empty_and_ambiguous_retained_matches() {
     let plan_for = |languages: &[(&str, bool)]| {
         generate_plan(request(
-            compiled_policy_with_ops(vec![CompiledOperation::SetDefaults {
-                target: TrackTarget::Audio,
-                strategy: DefaultStrategy::Preserve,
-                filter: Some(TrackFilter::LanguageIn {
-                    values: vec!["eng".to_owned()],
-                }),
-            }]),
+            compiled_policy_with_ops(vec![CompiledOperation::SetDefaults(
+                voom_policy::compiled::CompiledSetDefaultsOperation {
+                    target: TrackTarget::Audio,
+                    strategy: DefaultStrategy::Preserve,
+                    filter: Some(TrackFilter::LanguageIn(
+                        voom_policy::compiled::LanguageInTrackFilter {
+                            values: vec!["eng".to_owned()],
+                        },
+                    )),
+                },
+            )]),
             snapshot_mkv_with_audio_languages_and_defaults(languages),
         ))
         .unwrap()
@@ -1216,19 +1297,23 @@ fn track_remux_filter_default_reports_empty_and_ambiguous_retained_matches() {
 #[test]
 fn track_remux_filter_default_does_not_match_a_removed_stream() {
     let policy = compiled_policy_with_ops(vec![
-        CompiledOperation::RemoveTracks {
+        CompiledOperation::RemoveTracks(voom_policy::compiled::CompiledRemoveTracksOperation {
             target: TrackTarget::Audio,
-            filter: Some(TrackFilter::LanguageIn {
-                values: vec!["eng".to_owned()],
-            }),
-        },
-        CompiledOperation::SetDefaults {
+            filter: Some(TrackFilter::LanguageIn(
+                voom_policy::compiled::LanguageInTrackFilter {
+                    values: vec!["eng".to_owned()],
+                },
+            )),
+        }),
+        CompiledOperation::SetDefaults(voom_policy::compiled::CompiledSetDefaultsOperation {
             target: TrackTarget::Audio,
             strategy: DefaultStrategy::Preserve,
-            filter: Some(TrackFilter::LanguageIn {
-                values: vec!["eng".to_owned()],
-            }),
-        },
+            filter: Some(TrackFilter::LanguageIn(
+                voom_policy::compiled::LanguageInTrackFilter {
+                    values: vec!["eng".to_owned()],
+                },
+            )),
+        }),
     ]);
 
     let plan = generate_plan(request(
@@ -1246,19 +1331,23 @@ fn track_remux_filter_default_does_not_match_a_removed_stream() {
 
 #[test]
 fn track_remux_explicit_default_overrides_strategy_in_both_source_orders() {
-    let explicit = CompiledOperation::SetDefaults {
-        target: TrackTarget::Audio,
-        strategy: DefaultStrategy::Preserve,
-        filter: Some(TrackFilter::LanguageIn {
-            values: vec!["eng".to_owned()],
-        }),
-    };
-    for strategy in [DefaultStrategy::None, DefaultStrategy::Best] {
-        let strategy = CompiledOperation::SetDefaults {
+    let explicit =
+        CompiledOperation::SetDefaults(voom_policy::compiled::CompiledSetDefaultsOperation {
             target: TrackTarget::Audio,
-            strategy,
-            filter: None,
-        };
+            strategy: DefaultStrategy::Preserve,
+            filter: Some(TrackFilter::LanguageIn(
+                voom_policy::compiled::LanguageInTrackFilter {
+                    values: vec!["eng".to_owned()],
+                },
+            )),
+        });
+    for strategy in [DefaultStrategy::None, DefaultStrategy::Best] {
+        let strategy =
+            CompiledOperation::SetDefaults(voom_policy::compiled::CompiledSetDefaultsOperation {
+                target: TrackTarget::Audio,
+                strategy,
+                filter: None,
+            });
         for operations in [
             vec![explicit.clone(), strategy.clone()],
             vec![strategy.clone(), explicit.clone()],
@@ -1286,20 +1375,24 @@ fn track_remux_explicit_default_overrides_strategy_in_both_source_orders() {
 #[test]
 fn track_remux_multiple_explicit_defaults_for_one_target_block() {
     let policy = compiled_policy_with_ops(vec![
-        CompiledOperation::SetDefaults {
+        CompiledOperation::SetDefaults(voom_policy::compiled::CompiledSetDefaultsOperation {
             target: TrackTarget::Audio,
             strategy: DefaultStrategy::Preserve,
-            filter: Some(TrackFilter::LanguageIn {
-                values: vec!["eng".to_owned()],
-            }),
-        },
-        CompiledOperation::SetDefaults {
+            filter: Some(TrackFilter::LanguageIn(
+                voom_policy::compiled::LanguageInTrackFilter {
+                    values: vec!["eng".to_owned()],
+                },
+            )),
+        }),
+        CompiledOperation::SetDefaults(voom_policy::compiled::CompiledSetDefaultsOperation {
             target: TrackTarget::Audio,
             strategy: DefaultStrategy::Preserve,
-            filter: Some(TrackFilter::LanguageIn {
-                values: vec!["spa".to_owned()],
-            }),
-        },
+            filter: Some(TrackFilter::LanguageIn(
+                voom_policy::compiled::LanguageInTrackFilter {
+                    values: vec!["spa".to_owned()],
+                },
+            )),
+        }),
     ]);
 
     let plan = generate_plan(request(
@@ -1322,14 +1415,16 @@ fn track_remux_multiple_explicit_defaults_for_one_target_block() {
 
 #[test]
 fn track_remux_reorder_no_ops_when_group_order_already_matches_snapshot() {
-    let policy = compiled_policy_with_ops(vec![CompiledOperation::ReorderTracks {
-        targets: vec![
-            TrackTarget::Video,
-            TrackTarget::Audio,
-            TrackTarget::Subtitle,
-        ],
-        head_filter: None,
-    }]);
+    let policy = compiled_policy_with_ops(vec![CompiledOperation::ReorderTracks(
+        voom_policy::compiled::CompiledReorderTracksOperation {
+            targets: vec![
+                TrackTarget::Video,
+                TrackTarget::Audio,
+                TrackTarget::Subtitle,
+            ],
+            head_filter: None,
+        },
+    )]);
 
     let plan = generate_plan(request(policy, snapshot_mkv_with_video_audio_subtitle())).unwrap();
 
@@ -1343,16 +1438,20 @@ fn track_remux_reorder_no_ops_when_group_order_already_matches_snapshot() {
 
 #[test]
 fn track_remux_order_filter_carries_head_and_detects_compliance() {
-    let policy = compiled_policy_with_ops(vec![CompiledOperation::ReorderTracks {
-        targets: vec![
-            TrackTarget::Video,
-            TrackTarget::Audio,
-            TrackTarget::Subtitle,
-        ],
-        head_filter: Some(TrackFilter::LanguageIn {
-            values: vec!["eng".to_owned()],
-        }),
-    }]);
+    let policy = compiled_policy_with_ops(vec![CompiledOperation::ReorderTracks(
+        voom_policy::compiled::CompiledReorderTracksOperation {
+            targets: vec![
+                TrackTarget::Video,
+                TrackTarget::Audio,
+                TrackTarget::Subtitle,
+            ],
+            head_filter: Some(TrackFilter::LanguageIn(
+                voom_policy::compiled::LanguageInTrackFilter {
+                    values: vec!["eng".to_owned()],
+                },
+            )),
+        },
+    )]);
 
     let changed = generate_plan(request(
         policy.clone(),
@@ -1380,12 +1479,16 @@ fn track_remux_order_filter_carries_head_and_detects_compliance() {
 fn track_remux_order_filter_reports_empty_and_ambiguous_retained_matches() {
     let plan_for = |values: &[&str]| {
         generate_plan(request(
-            compiled_policy_with_ops(vec![CompiledOperation::ReorderTracks {
-                targets: vec![TrackTarget::Video, TrackTarget::Audio],
-                head_filter: Some(TrackFilter::LanguageIn {
-                    values: values.iter().map(|value| (*value).to_owned()).collect(),
-                }),
-            }]),
+            compiled_policy_with_ops(vec![CompiledOperation::ReorderTracks(
+                voom_policy::compiled::CompiledReorderTracksOperation {
+                    targets: vec![TrackTarget::Video, TrackTarget::Audio],
+                    head_filter: Some(TrackFilter::LanguageIn(
+                        voom_policy::compiled::LanguageInTrackFilter {
+                            values: values.iter().map(|value| (*value).to_owned()).collect(),
+                        },
+                    )),
+                },
+            )]),
             snapshot_mkv_with_video_audio_subtitle(),
         ))
         .unwrap()
@@ -1415,10 +1518,12 @@ fn track_remux_order_filter_reports_empty_and_ambiguous_retained_matches() {
 
 #[test]
 fn track_remux_order_filter_excludes_attachments_from_candidates() {
-    let policy = compiled_policy_with_ops(vec![CompiledOperation::ReorderTracks {
-        targets: vec![TrackTarget::Video, TrackTarget::Audio],
-        head_filter: Some(TrackFilter::Font),
-    }]);
+    let policy = compiled_policy_with_ops(vec![CompiledOperation::ReorderTracks(
+        voom_policy::compiled::CompiledReorderTracksOperation {
+            targets: vec![TrackTarget::Video, TrackTarget::Audio],
+            head_filter: Some(TrackFilter::Font(voom_policy::compiled::FontTrackFilter {})),
+        },
+    )]);
     let mut snapshot = snapshot_with_attachment_stream(Some("mkv"));
     snapshot.stream_summary["streams"][4]["codec_name"] = serde_json::json!("ttf");
     snapshot.stream_summary["streams"][4]["filename"] = serde_json::json!("font.ttf");
@@ -1435,12 +1540,16 @@ fn track_remux_order_filter_excludes_attachments_from_candidates() {
 
 #[test]
 fn track_remux_bare_order_filter_preserves_remaining_source_order() {
-    let policy = compiled_policy_with_ops(vec![CompiledOperation::ReorderTracks {
-        targets: Vec::new(),
-        head_filter: Some(TrackFilter::LanguageIn {
-            values: vec!["spa".to_owned()],
-        }),
-    }]);
+    let policy = compiled_policy_with_ops(vec![CompiledOperation::ReorderTracks(
+        voom_policy::compiled::CompiledReorderTracksOperation {
+            targets: Vec::new(),
+            head_filter: Some(TrackFilter::LanguageIn(
+                voom_policy::compiled::LanguageInTrackFilter {
+                    values: vec!["spa".to_owned()],
+                },
+            )),
+        },
+    )]);
 
     let plan = generate_plan(request(policy, snapshot_mkv_with_video_audio_subtitle())).unwrap();
 
@@ -1458,23 +1567,27 @@ fn track_remux_bare_order_filter_preserves_remaining_source_order() {
 #[test]
 fn track_remux_resolution_ignores_stream_summary_array_order() {
     let policy = compiled_policy_with_ops(vec![
-        CompiledOperation::SetDefaults {
+        CompiledOperation::SetDefaults(voom_policy::compiled::CompiledSetDefaultsOperation {
             target: TrackTarget::Audio,
             strategy: DefaultStrategy::Preserve,
-            filter: Some(TrackFilter::LanguageIn {
-                values: vec!["eng".to_owned()],
-            }),
-        },
-        CompiledOperation::ReorderTracks {
+            filter: Some(TrackFilter::LanguageIn(
+                voom_policy::compiled::LanguageInTrackFilter {
+                    values: vec!["eng".to_owned()],
+                },
+            )),
+        }),
+        CompiledOperation::ReorderTracks(voom_policy::compiled::CompiledReorderTracksOperation {
             targets: vec![
                 TrackTarget::Video,
                 TrackTarget::Audio,
                 TrackTarget::Subtitle,
             ],
-            head_filter: Some(TrackFilter::LanguageIn {
-                values: vec!["spa".to_owned()],
-            }),
-        },
+            head_filter: Some(TrackFilter::LanguageIn(
+                voom_policy::compiled::LanguageInTrackFilter {
+                    values: vec!["spa".to_owned()],
+                },
+            )),
+        }),
     ]);
     let canonical_snapshot =
         snapshot_mkv_with_audio_languages_and_defaults(&[("eng", true), ("spa", false)]);
@@ -1498,10 +1611,12 @@ fn track_remux_resolution_ignores_stream_summary_array_order() {
 
 #[test]
 fn track_remux_rejects_duplicate_provider_indexes_before_ordering() {
-    let policy = compiled_policy_with_ops(vec![CompiledOperation::ReorderTracks {
-        targets: vec![TrackTarget::Video, TrackTarget::Audio],
-        head_filter: None,
-    }]);
+    let policy = compiled_policy_with_ops(vec![CompiledOperation::ReorderTracks(
+        voom_policy::compiled::CompiledReorderTracksOperation {
+            targets: vec![TrackTarget::Video, TrackTarget::Audio],
+            head_filter: None,
+        },
+    )]);
     let mut snapshot =
         snapshot_mkv_with_audio_languages_and_defaults(&[("eng", true), ("spa", false)]);
     snapshot.stream_summary["streams"][2]["index"] = serde_json::json!(1);
@@ -1526,14 +1641,16 @@ fn track_remux_rejects_duplicate_provider_indexes_before_ordering() {
 
 #[test]
 fn track_remux_reorder_no_ops_when_absent_groups_are_in_canonical_order() {
-    let policy = compiled_policy_with_ops(vec![CompiledOperation::ReorderTracks {
-        targets: vec![
-            TrackTarget::Video,
-            TrackTarget::Audio,
-            TrackTarget::Subtitle,
-        ],
-        head_filter: None,
-    }]);
+    let policy = compiled_policy_with_ops(vec![CompiledOperation::ReorderTracks(
+        voom_policy::compiled::CompiledReorderTracksOperation {
+            targets: vec![
+                TrackTarget::Video,
+                TrackTarget::Audio,
+                TrackTarget::Subtitle,
+            ],
+            head_filter: None,
+        },
+    )]);
 
     let plan = generate_plan(request(
         policy,
@@ -1551,11 +1668,13 @@ fn track_remux_reorder_no_ops_when_absent_groups_are_in_canonical_order() {
 
 #[test]
 fn track_remux_preserve_defaults_no_ops_when_no_other_shape_change() {
-    let policy = compiled_policy_with_ops(vec![CompiledOperation::SetDefaults {
-        target: TrackTarget::Audio,
-        strategy: DefaultStrategy::Preserve,
-        filter: None,
-    }]);
+    let policy = compiled_policy_with_ops(vec![CompiledOperation::SetDefaults(
+        voom_policy::compiled::CompiledSetDefaultsOperation {
+            target: TrackTarget::Audio,
+            strategy: DefaultStrategy::Preserve,
+            filter: None,
+        },
+    )]);
 
     let plan = generate_plan(request(policy, snapshot_mkv_with_video_audio_subtitle())).unwrap();
 
@@ -1569,11 +1688,13 @@ fn track_remux_preserve_defaults_no_ops_when_no_other_shape_change() {
 
 #[test]
 fn track_remux_defaults_none_no_ops_when_target_track_kind_is_absent() {
-    let policy = compiled_policy_with_ops(vec![CompiledOperation::SetDefaults {
-        target: TrackTarget::Subtitle,
-        strategy: DefaultStrategy::None,
-        filter: None,
-    }]);
+    let policy = compiled_policy_with_ops(vec![CompiledOperation::SetDefaults(
+        voom_policy::compiled::CompiledSetDefaultsOperation {
+            target: TrackTarget::Subtitle,
+            strategy: DefaultStrategy::None,
+            filter: None,
+        },
+    )]);
 
     let plan = generate_plan(request(
         policy,
@@ -1591,11 +1712,13 @@ fn track_remux_defaults_none_no_ops_when_target_track_kind_is_absent() {
 
 #[test]
 fn track_remux_defaults_preserve_no_ops_when_target_track_kind_is_absent() {
-    let policy = compiled_policy_with_ops(vec![CompiledOperation::SetDefaults {
-        target: TrackTarget::Subtitle,
-        strategy: DefaultStrategy::Preserve,
-        filter: None,
-    }]);
+    let policy = compiled_policy_with_ops(vec![CompiledOperation::SetDefaults(
+        voom_policy::compiled::CompiledSetDefaultsOperation {
+            target: TrackTarget::Subtitle,
+            strategy: DefaultStrategy::Preserve,
+            filter: None,
+        },
+    )]);
 
     let plan = generate_plan(request(
         policy,
@@ -1613,14 +1736,16 @@ fn track_remux_defaults_preserve_no_ops_when_target_track_kind_is_absent() {
 
 #[test]
 fn track_remux_reorder_plans_when_group_order_differs_from_snapshot() {
-    let policy = compiled_policy_with_ops(vec![CompiledOperation::ReorderTracks {
-        targets: vec![
-            TrackTarget::Audio,
-            TrackTarget::Video,
-            TrackTarget::Subtitle,
-        ],
-        head_filter: None,
-    }]);
+    let policy = compiled_policy_with_ops(vec![CompiledOperation::ReorderTracks(
+        voom_policy::compiled::CompiledReorderTracksOperation {
+            targets: vec![
+                TrackTarget::Audio,
+                TrackTarget::Video,
+                TrackTarget::Subtitle,
+            ],
+            head_filter: None,
+        },
+    )]);
 
     let plan = generate_plan(request(policy, snapshot_mkv_with_video_audio_subtitle())).unwrap();
 
@@ -1635,22 +1760,22 @@ fn track_remux_reorder_plans_when_group_order_differs_from_snapshot() {
 #[test]
 fn track_remux_multiple_reorders_in_same_group_blocks_as_ambiguous() {
     let policy = compiled_policy_with_ops(vec![
-        CompiledOperation::ReorderTracks {
+        CompiledOperation::ReorderTracks(voom_policy::compiled::CompiledReorderTracksOperation {
             targets: vec![
                 TrackTarget::Audio,
                 TrackTarget::Video,
                 TrackTarget::Subtitle,
             ],
             head_filter: None,
-        },
-        CompiledOperation::ReorderTracks {
+        }),
+        CompiledOperation::ReorderTracks(voom_policy::compiled::CompiledReorderTracksOperation {
             targets: vec![
                 TrackTarget::Video,
                 TrackTarget::Audio,
                 TrackTarget::Subtitle,
             ],
             head_filter: None,
-        },
+        }),
     ]);
 
     let plan = generate_plan(request(policy, snapshot_mkv_with_video_audio_subtitle())).unwrap();
@@ -1665,10 +1790,12 @@ fn track_remux_multiple_reorders_in_same_group_blocks_as_ambiguous() {
 
 #[test]
 fn track_remux_reorder_with_duplicate_group_blocks_as_unsupported_shape() {
-    let policy = compiled_policy_with_ops(vec![CompiledOperation::ReorderTracks {
-        targets: vec![TrackTarget::Video, TrackTarget::Audio, TrackTarget::Audio],
-        head_filter: None,
-    }]);
+    let policy = compiled_policy_with_ops(vec![CompiledOperation::ReorderTracks(
+        voom_policy::compiled::CompiledReorderTracksOperation {
+            targets: vec![TrackTarget::Video, TrackTarget::Audio, TrackTarget::Audio],
+            head_filter: None,
+        },
+    )]);
 
     let plan = generate_plan(request(policy, snapshot_mkv_with_video_audio_subtitle())).unwrap();
 
@@ -1685,9 +1812,11 @@ fn track_remux_reorder_with_duplicate_group_blocks_as_unsupported_shape() {
 
 #[test]
 fn track_remux_container_only_blocks_when_stream_facts_have_no_video() {
-    let policy = compiled_policy_with_ops(vec![CompiledOperation::SetContainer {
-        container: "mkv".to_owned(),
-    }]);
+    let policy = compiled_policy_with_ops(vec![CompiledOperation::SetContainer(
+        voom_policy::compiled::CompiledSetContainerOperation {
+            container: "mkv".to_owned(),
+        },
+    )]);
 
     let plan = generate_plan(request(policy, snapshot_mp4_with_audio_only_stream_facts())).unwrap();
 
@@ -1702,9 +1831,11 @@ fn track_remux_container_only_blocks_when_stream_facts_have_no_video() {
 #[test]
 fn set_container_plans_non_mkv_snapshot() {
     let plan = generate_plan(PlanningRequest {
-        policy: policy(CompiledOperation::SetContainer {
-            container: "mkv".to_owned(),
-        }),
+        policy: policy(CompiledOperation::SetContainer(
+            voom_policy::compiled::CompiledSetContainerOperation {
+                container: "mkv".to_owned(),
+            },
+        )),
         input: input(Some("mp4")),
         context: PlanningContext::default(),
     })
@@ -1744,9 +1875,11 @@ fn set_container_plans_non_mkv_snapshot() {
 #[test]
 fn set_container_plan_nodes_carry_structured_observed_container_when_known() {
     let plan = generate_plan(PlanningRequest {
-        policy: policy(CompiledOperation::SetContainer {
-            container: "mkv".to_owned(),
-        }),
+        policy: policy(CompiledOperation::SetContainer(
+            voom_policy::compiled::CompiledSetContainerOperation {
+                container: "mkv".to_owned(),
+            },
+        )),
         input: input(Some("mp4")),
         context: PlanningContext::default(),
     })
@@ -1766,9 +1899,11 @@ fn set_container_plan_nodes_carry_structured_observed_container_when_known() {
 #[test]
 fn set_container_plan_nodes_leave_observed_state_absent_when_unknown() {
     let plan = generate_plan(PlanningRequest {
-        policy: policy(CompiledOperation::SetContainer {
-            container: "mkv".to_owned(),
-        }),
+        policy: policy(CompiledOperation::SetContainer(
+            voom_policy::compiled::CompiledSetContainerOperation {
+                container: "mkv".to_owned(),
+            },
+        )),
         input: input(None),
         context: PlanningContext::default(),
     })
@@ -1786,9 +1921,11 @@ fn set_container_plan_nodes_leave_observed_state_absent_when_unknown() {
 #[test]
 fn set_container_no_ops_already_mkv_snapshot() {
     let plan = generate_plan(PlanningRequest {
-        policy: policy(CompiledOperation::SetContainer {
-            container: "mkv".to_owned(),
-        }),
+        policy: policy(CompiledOperation::SetContainer(
+            voom_policy::compiled::CompiledSetContainerOperation {
+                container: "mkv".to_owned(),
+            },
+        )),
         input: input(Some("mkv")),
         context: PlanningContext::default(),
     })
@@ -1805,9 +1942,11 @@ fn set_container_no_ops_already_mkv_snapshot() {
 #[test]
 fn set_container_blocks_unknown_container_snapshot() {
     let plan = generate_plan(PlanningRequest {
-        policy: policy(CompiledOperation::SetContainer {
-            container: "mkv".to_owned(),
-        }),
+        policy: policy(CompiledOperation::SetContainer(
+            voom_policy::compiled::CompiledSetContainerOperation {
+                container: "mkv".to_owned(),
+            },
+        )),
         input: input(None),
         context: PlanningContext::default(),
     })
@@ -2023,12 +2162,14 @@ fn plan_transcode_with_container(
     snapshot: MediaSnapshotInput,
     container: &str,
 ) -> crate::ExecutionPlan {
-    let policy = policy(CompiledOperation::TranscodeVideo {
-        target_codec: profile.target_codec.clone(),
-        container: container.to_owned(),
-        profile: voom_policy::VideoProfileRef::Named(profile.name.clone()),
-        resolved_profile: Some(profile),
-    });
+    let policy = policy(CompiledOperation::TranscodeVideo(
+        voom_policy::compiled::CompiledTranscodeVideoOperation {
+            target_codec: profile.target_codec.clone(),
+            container: container.to_owned(),
+            profile: voom_policy::VideoProfileRef::Named(profile.name.clone()),
+            resolved_profile: Some(profile),
+        },
+    ));
     generate_plan(request(policy, snapshot)).unwrap()
 }
 
@@ -2154,12 +2295,14 @@ fn transcode_video_node_payload_carries_profile_and_resolved_profile() {
 
 #[test]
 fn transcode_video_blocks_when_profile_unresolved() {
-    let policy = policy(CompiledOperation::TranscodeVideo {
-        target_codec: "hevc".to_owned(),
-        container: "mkv".to_owned(),
-        profile: voom_policy::VideoProfileRef::Named("default-hevc".to_owned()),
-        resolved_profile: None,
-    });
+    let policy = policy(CompiledOperation::TranscodeVideo(
+        voom_policy::compiled::CompiledTranscodeVideoOperation {
+            target_codec: "hevc".to_owned(),
+            container: "mkv".to_owned(),
+            profile: voom_policy::VideoProfileRef::Named("default-hevc".to_owned()),
+            resolved_profile: None,
+        },
+    ));
     let result = generate_plan(request(policy, source_hevc_720_mkv()));
     let error = result.unwrap_err();
     assert_eq!(
@@ -2170,12 +2313,14 @@ fn transcode_video_blocks_when_profile_unresolved() {
 
 #[test]
 fn unresolved_profile_reports_every_missing_snapshot() {
-    let policy = policy(CompiledOperation::TranscodeVideo {
-        target_codec: "hevc".to_owned(),
-        container: "mkv".to_owned(),
-        profile: voom_policy::VideoProfileRef::Named("default-hevc".to_owned()),
-        resolved_profile: None,
-    });
+    let policy = policy(CompiledOperation::TranscodeVideo(
+        voom_policy::compiled::CompiledTranscodeVideoOperation {
+            target_codec: "hevc".to_owned(),
+            container: "mkv".to_owned(),
+            profile: voom_policy::VideoProfileRef::Named("default-hevc".to_owned()),
+            resolved_profile: None,
+        },
+    ));
     let mut input = input_with_snapshot(source_hevc_720_mkv());
     input.media_snapshots.push(source_hevc_2160_mkv());
 
@@ -2346,11 +2491,13 @@ fn bare_extract_audio_plans_all_matches_in_provider_stream_order() {
         ],
     );
     let request = request(
-        policy(CompiledOperation::ExtractAudio {
-            target_codec: "opus".to_owned(),
-            container: "ogg".to_owned(),
-            filter: None,
-        }),
+        policy(CompiledOperation::ExtractAudio(
+            voom_policy::compiled::CompiledExtractAudioOperation {
+                target_codec: "opus".to_owned(),
+                container: "ogg".to_owned(),
+                filter: None,
+            },
+        )),
         snapshot,
     );
 
@@ -2405,11 +2552,13 @@ fn plural_extract_audio_names_are_unique_after_sanitization_and_case_folding() {
         named_audio_stream("audio:1", 2),
     ];
     let plan = generate_plan(request(
-        policy(CompiledOperation::ExtractAudio {
-            target_codec: "opus".to_owned(),
-            container: "ogg".to_owned(),
-            filter: None,
-        }),
+        policy(CompiledOperation::ExtractAudio(
+            voom_policy::compiled::CompiledExtractAudioOperation {
+                target_codec: "opus".to_owned(),
+                container: "ogg".to_owned(),
+                filter: None,
+            },
+        )),
         snapshot_with_audio_streams(Some("mkv"), &streams),
     ))
     .unwrap();
@@ -2458,7 +2607,9 @@ fn assert_extract_audio_blocked(snapshot: MediaSnapshotInput) {
 #[test]
 fn verify_artifact_plans_a_worker_node_routed_to_verify_capability() {
     let plan = generate_plan(request(
-        policy(CompiledOperation::VerifyArtifact),
+        policy(CompiledOperation::VerifyArtifact(
+            voom_policy::compiled::CompiledVerifyArtifactOperation {},
+        )),
         snapshot_mkv_with_video_audio_subtitle(),
     ))
     .unwrap();
@@ -2485,7 +2636,13 @@ fn verify_artifact_payload_carries_source_media_snapshot_id_when_available() {
     let mut snapshot = snapshot_mkv_with_video_audio_subtitle();
     snapshot.existing_media_snapshot_id = Some(MediaSnapshotId(77));
 
-    let plan = generate_plan(request(policy(CompiledOperation::VerifyArtifact), snapshot)).unwrap();
+    let plan = generate_plan(request(
+        policy(CompiledOperation::VerifyArtifact(
+            voom_policy::compiled::CompiledVerifyArtifactOperation {},
+        )),
+        snapshot,
+    ))
+    .unwrap();
 
     assert_eq!(
         plan.nodes[0].operation_payload["source_media_snapshot_id"],
@@ -2499,7 +2656,9 @@ fn verify_artifact_plans_even_without_stream_facts() {
     // streams, so a fact-poor snapshot still yields a planned node rather than a
     // blocked one.
     let plan = generate_plan(request(
-        policy(CompiledOperation::VerifyArtifact),
+        policy(CompiledOperation::VerifyArtifact(
+            voom_policy::compiled::CompiledVerifyArtifactOperation {},
+        )),
         snapshot_with(None, None, None),
     ))
     .unwrap();
@@ -2513,11 +2672,18 @@ fn verify_phase_after_normalize_links_a_dependency_edge() {
     let policy = compiled_policy_with_phases(&[
         (
             "normalize",
-            vec![CompiledOperation::SetContainer {
-                container: "mkv".to_owned(),
-            }],
+            vec![CompiledOperation::SetContainer(
+                voom_policy::compiled::CompiledSetContainerOperation {
+                    container: "mkv".to_owned(),
+                },
+            )],
         ),
-        ("verify", vec![CompiledOperation::VerifyArtifact]),
+        (
+            "verify",
+            vec![CompiledOperation::VerifyArtifact(
+                voom_policy::compiled::CompiledVerifyArtifactOperation {},
+            )],
+        ),
     ]);
 
     let plan = generate_plan(request(policy, snapshot_with_streams(Some("mp4")))).unwrap();
@@ -2602,9 +2768,11 @@ fn named_audio_stream(id: &str, index: u32) -> serde_json::Value {
 
 #[test]
 fn policy_warnings_are_visible_in_plan_output() {
-    let mut compiled = policy(CompiledOperation::SetContainer {
-        container: "mkv".to_owned(),
-    });
+    let mut compiled = policy(CompiledOperation::SetContainer(
+        voom_policy::compiled::CompiledSetContainerOperation {
+            container: "mkv".to_owned(),
+        },
+    ));
     compiled.warnings.push(PolicyDiagnostic::warning(
         DiagnosticCode::UnknownExtensionNamespace,
         DiagnosticStage::Validate,
@@ -2628,16 +2796,20 @@ fn policy_warnings_are_visible_in_plan_output() {
 
 #[test]
 fn phase_skip_if_true_suppresses_phase_operations() {
-    let mut compiled = policy(CompiledOperation::SetContainer {
-        container: "mkv".to_owned(),
-    });
-    compiled.phases[0].skip_if = Some(CompiledCondition::FieldComparison {
-        path: vec!["container".to_owned(), "name".to_owned()],
-        op: ComparisonOp::Eq,
-        value: CompiledValue::String {
-            value: "mp4".to_owned(),
+    let mut compiled = policy(CompiledOperation::SetContainer(
+        voom_policy::compiled::CompiledSetContainerOperation {
+            container: "mkv".to_owned(),
         },
-    });
+    ));
+    compiled.phases[0].skip_if = Some(CompiledCondition::FieldComparison(
+        voom_policy::compiled::CompiledFieldComparisonCondition {
+            path: vec!["container".to_owned(), "name".to_owned()],
+            op: ComparisonOp::Eq,
+            value: CompiledValue::String(voom_policy::compiled::CompiledStringValue {
+                value: "mp4".to_owned(),
+            }),
+        },
+    ));
 
     let skipped = generate_plan(PlanningRequest {
         policy: compiled.clone(),
@@ -2660,9 +2832,11 @@ fn phase_skip_if_true_suppresses_phase_operations() {
 
 #[test]
 fn unresolved_phase_run_if_blocks_phase_operations() {
-    let mut compiled = policy(CompiledOperation::SetContainer {
-        container: "mkv".to_owned(),
-    });
+    let mut compiled = policy(CompiledOperation::SetContainer(
+        voom_policy::compiled::CompiledSetContainerOperation {
+            container: "mkv".to_owned(),
+        },
+    ));
     compiled.phases[0].run_if = Some(CompiledRunIf {
         trigger: RunIfTrigger::Modified,
         phase: "inspect".to_owned(),
@@ -2690,9 +2864,11 @@ fn unresolved_phase_run_if_blocks_phase_operations() {
 #[test]
 fn plan_id_includes_schema_version_identity() {
     let request = |schema_version| PlanningRequest {
-        policy: policy(CompiledOperation::SetContainer {
-            container: "mkv".to_owned(),
-        }),
+        policy: policy(CompiledOperation::SetContainer(
+            voom_policy::compiled::CompiledSetContainerOperation {
+                container: "mkv".to_owned(),
+            },
+        )),
         input: input(Some("mp4")),
         context: PlanningContext {
             schema_version,
@@ -2710,14 +2886,20 @@ fn plan_id_includes_schema_version_identity() {
 #[test]
 fn unresolved_condition_emits_blocked_node_for_nested_operation() {
     let plan = generate_plan(PlanningRequest {
-        policy: policy(CompiledOperation::Conditional {
-            condition: CompiledCondition::Predicate {
-                name: "external_host_state".to_owned(),
+        policy: policy(CompiledOperation::Conditional(
+            voom_policy::compiled::CompiledConditionalOperation {
+                condition: CompiledCondition::Predicate(
+                    voom_policy::compiled::CompiledPredicateCondition {
+                        name: "external_host_state".to_owned(),
+                    },
+                ),
+                operations: vec![CompiledOperation::SetContainer(
+                    voom_policy::compiled::CompiledSetContainerOperation {
+                        container: "mkv".to_owned(),
+                    },
+                )],
             },
-            operations: vec![CompiledOperation::SetContainer {
-                container: "mkv".to_owned(),
-            }],
-        }),
+        )),
         input: input(Some("mp4")),
         context: PlanningContext::default(),
     })
@@ -2829,45 +3011,45 @@ fn published_stream_conditions_preserve_three_valued_boolean_composition() {
 
     assert_eq!(
         evaluate_condition(
-            &CompiledCondition::Not {
+            &CompiledCondition::Not(voom_policy::compiled::CompiledNotCondition {
                 inner: Box::new(unknown.clone()),
-            },
+            }),
             &unavailable
         ),
         ConditionEval::Unknown
     );
     assert_eq!(
         evaluate_condition(
-            &CompiledCondition::And {
+            &CompiledCondition::And(voom_policy::compiled::CompiledAndCondition {
                 conditions: vec![container_is("mp4"), unknown.clone()],
-            },
+            }),
             &unavailable
         ),
         ConditionEval::NotMatched
     );
     assert_eq!(
         evaluate_condition(
-            &CompiledCondition::And {
+            &CompiledCondition::And(voom_policy::compiled::CompiledAndCondition {
                 conditions: vec![container_is("mkv"), unknown.clone()],
-            },
+            }),
             &unavailable
         ),
         ConditionEval::Unknown
     );
     assert_eq!(
         evaluate_condition(
-            &CompiledCondition::Or {
+            &CompiledCondition::Or(voom_policy::compiled::CompiledOrCondition {
                 conditions: vec![container_is("mkv"), unknown.clone()],
-            },
+            }),
             &unavailable
         ),
         ConditionEval::Matched
     );
     assert_eq!(
         evaluate_condition(
-            &CompiledCondition::Or {
+            &CompiledCondition::Or(voom_policy::compiled::CompiledOrCondition {
                 conditions: vec![container_is("mp4"), unknown],
-            },
+            }),
             &unavailable
         ),
         ConditionEval::Unknown
@@ -2877,22 +3059,27 @@ fn published_stream_conditions_preserve_three_valued_boolean_composition() {
 #[test]
 fn published_stream_condition_outcomes_propagate_through_when_and_skip() {
     let snapshot = snapshot_mp4_with_untagged_audio();
-    let operation = CompiledOperation::SetContainer {
-        container: "mkv".to_owned(),
-    };
+    let operation =
+        CompiledOperation::SetContainer(voom_policy::compiled::CompiledSetContainerOperation {
+            container: "mkv".to_owned(),
+        });
     let when_true = generate_plan(request(
-        policy(CompiledOperation::Conditional {
-            condition: exists_condition(TrackTarget::Audio),
-            operations: vec![operation.clone()],
-        }),
+        policy(CompiledOperation::Conditional(
+            voom_policy::compiled::CompiledConditionalOperation {
+                condition: exists_condition(TrackTarget::Audio),
+                operations: vec![operation.clone()],
+            },
+        )),
         snapshot.clone(),
     ))
     .unwrap();
     let when_false = generate_plan(request(
-        policy(CompiledOperation::Conditional {
-            condition: exists_condition(TrackTarget::Subtitle),
-            operations: vec![operation.clone()],
-        }),
+        policy(CompiledOperation::Conditional(
+            voom_policy::compiled::CompiledConditionalOperation {
+                condition: exists_condition(TrackTarget::Subtitle),
+                operations: vec![operation.clone()],
+            },
+        )),
         snapshot.clone(),
     ))
     .unwrap();
@@ -2921,40 +3108,55 @@ fn published_stream_condition_outcomes_propagate_through_when_and_skip() {
 #[test]
 fn published_stream_condition_outcomes_propagate_through_both_rule_modes() {
     let snapshot = snapshot_mp4_with_untagged_audio();
-    let set_container = CompiledOperation::SetContainer {
-        container: "mkv".to_owned(),
-    };
-    let first = policy(CompiledOperation::Rules {
-        mode: RuleMatchMode::First,
-        rules: vec![
-            rule(
-                "no-subtitles",
-                Some(count_condition(TrackTarget::Subtitle, ComparisonOp::Gt, 0)),
-                vec![CompiledOperation::ClearTags],
-            ),
-            rule(
-                "has-audio",
-                Some(exists_condition(TrackTarget::Audio)),
-                vec![set_container.clone()],
-            ),
-            rule("not-reached", None, vec![CompiledOperation::ClearTags]),
-        ],
-    });
-    let all = policy(CompiledOperation::Rules {
-        mode: RuleMatchMode::All,
-        rules: vec![
-            rule(
-                "has-audio",
-                Some(exists_condition(TrackTarget::Audio)),
-                vec![set_container],
-            ),
-            rule(
-                "has-subtitles",
-                Some(exists_condition(TrackTarget::Subtitle)),
-                vec![CompiledOperation::ClearTags],
-            ),
-        ],
-    });
+    let set_container =
+        CompiledOperation::SetContainer(voom_policy::compiled::CompiledSetContainerOperation {
+            container: "mkv".to_owned(),
+        });
+    let first = policy(CompiledOperation::Rules(
+        voom_policy::compiled::CompiledRulesOperation {
+            mode: RuleMatchMode::First,
+            rules: vec![
+                rule(
+                    "no-subtitles",
+                    Some(count_condition(TrackTarget::Subtitle, ComparisonOp::Gt, 0)),
+                    vec![CompiledOperation::ClearTags(
+                        voom_policy::compiled::CompiledClearTagsOperation {},
+                    )],
+                ),
+                rule(
+                    "has-audio",
+                    Some(exists_condition(TrackTarget::Audio)),
+                    vec![set_container.clone()],
+                ),
+                rule(
+                    "not-reached",
+                    None,
+                    vec![CompiledOperation::ClearTags(
+                        voom_policy::compiled::CompiledClearTagsOperation {},
+                    )],
+                ),
+            ],
+        },
+    ));
+    let all = policy(CompiledOperation::Rules(
+        voom_policy::compiled::CompiledRulesOperation {
+            mode: RuleMatchMode::All,
+            rules: vec![
+                rule(
+                    "has-audio",
+                    Some(exists_condition(TrackTarget::Audio)),
+                    vec![set_container],
+                ),
+                rule(
+                    "has-subtitles",
+                    Some(exists_condition(TrackTarget::Subtitle)),
+                    vec![CompiledOperation::ClearTags(
+                        voom_policy::compiled::CompiledClearTagsOperation {},
+                    )],
+                ),
+            ],
+        },
+    ));
 
     for plan in [
         generate_plan(request(first, snapshot.clone())).unwrap(),
@@ -2969,10 +3171,12 @@ fn published_stream_condition_outcomes_propagate_through_both_rule_modes() {
 #[test]
 fn track_operations_block_when_snapshot_stream_facts_are_missing() {
     let plan = generate_plan(PlanningRequest {
-        policy: policy(CompiledOperation::KeepTracks {
-            target: TrackTarget::Audio,
-            filter: None,
-        }),
+        policy: policy(CompiledOperation::KeepTracks(
+            voom_policy::compiled::CompiledKeepTracksOperation {
+                target: TrackTarget::Audio,
+                filter: None,
+            },
+        )),
         input: input(Some("mkv")),
         context: PlanningContext::default(),
     })
@@ -2992,7 +3196,9 @@ fn track_operations_block_when_snapshot_stream_facts_are_missing() {
 #[test]
 fn tag_operations_emit_blocked_nodes_instead_of_disappearing() {
     let plan = generate_plan(PlanningRequest {
-        policy: policy(CompiledOperation::ClearTags),
+        policy: policy(CompiledOperation::ClearTags(
+            voom_policy::compiled::CompiledClearTagsOperation {},
+        )),
         input: input(Some("mkv")),
         context: PlanningContext::default(),
     })
@@ -3007,16 +3213,20 @@ fn tag_operations_emit_blocked_nodes_instead_of_disappearing() {
 
 #[test]
 fn phase_depends_on_creates_stable_edges() {
-    let mut compiled = policy(CompiledOperation::SetContainer {
-        container: "mkv".to_owned(),
-    });
+    let mut compiled = policy(CompiledOperation::SetContainer(
+        voom_policy::compiled::CompiledSetContainerOperation {
+            container: "mkv".to_owned(),
+        },
+    ));
     compiled.phases.push(CompiledPhase {
         name: "verify".to_owned(),
         depends_on: vec!["normalize".to_owned()],
         run_if: None,
         skip_if: None,
         on_error: None,
-        operations: vec![CompiledOperation::ClearTags],
+        operations: vec![CompiledOperation::ClearTags(
+            voom_policy::compiled::CompiledClearTagsOperation {},
+        )],
     });
     compiled.phase_order = vec!["normalize".to_owned(), "verify".to_owned()];
 
@@ -3041,18 +3251,26 @@ fn phase_depends_on_creates_stable_edges() {
 fn container_name_condition_selects_resolved_branch() {
     let plan_for = |container| {
         generate_plan(PlanningRequest {
-            policy: policy(CompiledOperation::Conditional {
-                condition: CompiledCondition::FieldComparison {
-                    path: vec!["container".to_owned(), "name".to_owned()],
-                    op: ComparisonOp::Eq,
-                    value: CompiledValue::String {
-                        value: "mp4".to_owned(),
-                    },
+            policy: policy(CompiledOperation::Conditional(
+                voom_policy::compiled::CompiledConditionalOperation {
+                    condition: CompiledCondition::FieldComparison(
+                        voom_policy::compiled::CompiledFieldComparisonCondition {
+                            path: vec!["container".to_owned(), "name".to_owned()],
+                            op: ComparisonOp::Eq,
+                            value: CompiledValue::String(
+                                voom_policy::compiled::CompiledStringValue {
+                                    value: "mp4".to_owned(),
+                                },
+                            ),
+                        },
+                    ),
+                    operations: vec![CompiledOperation::SetContainer(
+                        voom_policy::compiled::CompiledSetContainerOperation {
+                            container: "mkv".to_owned(),
+                        },
+                    )],
                 },
-                operations: vec![CompiledOperation::SetContainer {
-                    container: "mkv".to_owned(),
-                }],
-            }),
+            )),
             input: input(Some(container)),
             context: PlanningContext::default(),
         })
@@ -3071,18 +3289,24 @@ fn container_name_condition_selects_resolved_branch() {
 #[test]
 fn missing_condition_field_blocks_nested_operation() {
     let plan = generate_plan(PlanningRequest {
-        policy: policy(CompiledOperation::Conditional {
-            condition: CompiledCondition::FieldComparison {
-                path: vec!["video".to_owned(), "codec".to_owned()],
-                op: ComparisonOp::Eq,
-                value: CompiledValue::String {
-                    value: "hevc".to_owned(),
-                },
+        policy: policy(CompiledOperation::Conditional(
+            voom_policy::compiled::CompiledConditionalOperation {
+                condition: CompiledCondition::FieldComparison(
+                    voom_policy::compiled::CompiledFieldComparisonCondition {
+                        path: vec!["video".to_owned(), "codec".to_owned()],
+                        op: ComparisonOp::Eq,
+                        value: CompiledValue::String(voom_policy::compiled::CompiledStringValue {
+                            value: "hevc".to_owned(),
+                        }),
+                    },
+                ),
+                operations: vec![CompiledOperation::SetContainer(
+                    voom_policy::compiled::CompiledSetContainerOperation {
+                        container: "mkv".to_owned(),
+                    },
+                )],
             },
-            operations: vec![CompiledOperation::SetContainer {
-                container: "mkv".to_owned(),
-            }],
-        }),
+        )),
         input: input(Some("mp4")),
         context: PlanningContext::default(),
     })
@@ -3103,18 +3327,24 @@ fn missing_condition_field_blocks_nested_operation() {
 #[test]
 fn unsupported_condition_comparison_blocks_nested_operation() {
     let plan = generate_plan(PlanningRequest {
-        policy: policy(CompiledOperation::Conditional {
-            condition: CompiledCondition::FieldComparison {
-                path: vec!["container".to_owned(), "name".to_owned()],
-                op: ComparisonOp::Lt,
-                value: CompiledValue::String {
-                    value: "mkv".to_owned(),
-                },
+        policy: policy(CompiledOperation::Conditional(
+            voom_policy::compiled::CompiledConditionalOperation {
+                condition: CompiledCondition::FieldComparison(
+                    voom_policy::compiled::CompiledFieldComparisonCondition {
+                        path: vec!["container".to_owned(), "name".to_owned()],
+                        op: ComparisonOp::Lt,
+                        value: CompiledValue::String(voom_policy::compiled::CompiledStringValue {
+                            value: "mkv".to_owned(),
+                        }),
+                    },
+                ),
+                operations: vec![CompiledOperation::SetContainer(
+                    voom_policy::compiled::CompiledSetContainerOperation {
+                        container: "mkv".to_owned(),
+                    },
+                )],
             },
-            operations: vec![CompiledOperation::SetContainer {
-                container: "mkv".to_owned(),
-            }],
-        }),
+        )),
         input: input(Some("mp4")),
         context: PlanningContext::default(),
     })
@@ -3135,22 +3365,32 @@ fn unsupported_condition_comparison_blocks_nested_operation() {
 #[test]
 fn rules_first_uses_first_matching_rule_only() {
     let plan = generate_plan(PlanningRequest {
-        policy: policy(CompiledOperation::Rules {
-            mode: RuleMatchMode::First,
-            rules: vec![
-                rule(
-                    "wrong-container",
-                    Some(container_is("avi")),
-                    vec![CompiledOperation::ClearTags],
-                ),
-                rule(
-                    "matching-container",
-                    Some(container_is("mp4")),
-                    vec![transcode_video()],
-                ),
-                rule("not-reached", None, vec![CompiledOperation::ClearTags]),
-            ],
-        }),
+        policy: policy(CompiledOperation::Rules(
+            voom_policy::compiled::CompiledRulesOperation {
+                mode: RuleMatchMode::First,
+                rules: vec![
+                    rule(
+                        "wrong-container",
+                        Some(container_is("avi")),
+                        vec![CompiledOperation::ClearTags(
+                            voom_policy::compiled::CompiledClearTagsOperation {},
+                        )],
+                    ),
+                    rule(
+                        "matching-container",
+                        Some(container_is("mp4")),
+                        vec![transcode_video()],
+                    ),
+                    rule(
+                        "not-reached",
+                        None,
+                        vec![CompiledOperation::ClearTags(
+                            voom_policy::compiled::CompiledClearTagsOperation {},
+                        )],
+                    ),
+                ],
+            },
+        )),
         input: transcodable_input("mp4"),
         context: PlanningContext::default(),
     })
@@ -3167,21 +3407,25 @@ fn rules_first_uses_first_matching_rule_only() {
 #[test]
 fn rules_all_preserves_matching_rule_order() {
     let plan = generate_plan(PlanningRequest {
-        policy: policy(CompiledOperation::Rules {
-            mode: RuleMatchMode::All,
-            rules: vec![
-                rule(
-                    "transcode",
-                    Some(container_is("mp4")),
-                    vec![transcode_video()],
-                ),
-                rule(
-                    "clear-tags",
-                    Some(container_is("mp4")),
-                    vec![CompiledOperation::ClearTags],
-                ),
-            ],
-        }),
+        policy: policy(CompiledOperation::Rules(
+            voom_policy::compiled::CompiledRulesOperation {
+                mode: RuleMatchMode::All,
+                rules: vec![
+                    rule(
+                        "transcode",
+                        Some(container_is("mp4")),
+                        vec![transcode_video()],
+                    ),
+                    rule(
+                        "clear-tags",
+                        Some(container_is("mp4")),
+                        vec![CompiledOperation::ClearTags(
+                            voom_policy::compiled::CompiledClearTagsOperation {},
+                        )],
+                    ),
+                ],
+            },
+        )),
         input: transcodable_input("mp4"),
         context: PlanningContext::default(),
     })
@@ -3200,16 +3444,20 @@ fn rules_all_preserves_matching_rule_order() {
 #[test]
 fn rules_unknown_condition_blocks_nested_leaf_operation() {
     let plan = generate_plan(PlanningRequest {
-        policy: policy(CompiledOperation::Rules {
-            mode: RuleMatchMode::First,
-            rules: vec![rule(
-                "host-state",
-                Some(CompiledCondition::Predicate {
-                    name: "external_host_state".to_owned(),
-                }),
-                vec![transcode_video()],
-            )],
-        }),
+        policy: policy(CompiledOperation::Rules(
+            voom_policy::compiled::CompiledRulesOperation {
+                mode: RuleMatchMode::First,
+                rules: vec![rule(
+                    "host-state",
+                    Some(CompiledCondition::Predicate(
+                        voom_policy::compiled::CompiledPredicateCondition {
+                            name: "external_host_state".to_owned(),
+                        },
+                    )),
+                    vec![transcode_video()],
+                )],
+            },
+        )),
         input: input(Some("mp4")),
         context: PlanningContext::default(),
     })
@@ -3232,18 +3480,24 @@ fn plan_phase_plans_only_the_named_phase() {
     let policy = compiled_policy_with_phases(&[
         (
             "normalize",
-            vec![CompiledOperation::SetContainer {
-                container: "mkv".to_owned(),
-            }],
+            vec![CompiledOperation::SetContainer(
+                voom_policy::compiled::CompiledSetContainerOperation {
+                    container: "mkv".to_owned(),
+                },
+            )],
         ),
         (
             "tracks",
-            vec![CompiledOperation::KeepTracks {
-                target: TrackTarget::Audio,
-                filter: Some(TrackFilter::LanguageIn {
-                    values: vec!["eng".to_owned()],
-                }),
-            }],
+            vec![CompiledOperation::KeepTracks(
+                voom_policy::compiled::CompiledKeepTracksOperation {
+                    target: TrackTarget::Audio,
+                    filter: Some(TrackFilter::LanguageIn(
+                        voom_policy::compiled::LanguageInTrackFilter {
+                            values: vec!["eng".to_owned()],
+                        },
+                    )),
+                },
+            )],
         ),
     ]);
 
@@ -3280,9 +3534,11 @@ fn plan_phase_plans_only_the_named_phase() {
 fn plan_phase_reevaluates_skip_if_against_supplied_snapshot() {
     let mut policy = compiled_policy_with_phases(&[(
         "normalize",
-        vec![CompiledOperation::SetContainer {
-            container: "mkv".to_owned(),
-        }],
+        vec![CompiledOperation::SetContainer(
+            voom_policy::compiled::CompiledSetContainerOperation {
+                container: "mkv".to_owned(),
+            },
+        )],
     )]);
     policy.phases[0].skip_if = Some(container_is("mp4"));
 
@@ -3310,9 +3566,11 @@ fn plan_phase_reevaluates_skip_if_against_supplied_snapshot() {
 fn plan_phase_leaves_run_if_resolution_to_the_coordinator() {
     let mut policy = compiled_policy_with_phases(&[(
         "normalize",
-        vec![CompiledOperation::SetContainer {
-            container: "mkv".to_owned(),
-        }],
+        vec![CompiledOperation::SetContainer(
+            voom_policy::compiled::CompiledSetContainerOperation {
+                container: "mkv".to_owned(),
+            },
+        )],
     )]);
     policy.phases[0].run_if = Some(CompiledRunIf {
         trigger: RunIfTrigger::Completed,
@@ -3339,16 +3597,20 @@ fn planner_entry_points_reject_unpublished_condition_in_later_phase() {
     let mut policy = compiled_policy_with_phases(&[
         (
             "normalize",
-            vec![CompiledOperation::SetContainer {
-                container: "mkv".to_owned(),
-            }],
+            vec![CompiledOperation::SetContainer(
+                voom_policy::compiled::CompiledSetContainerOperation {
+                    container: "mkv".to_owned(),
+                },
+            )],
         ),
         ("tracks", Vec::new()),
     ]);
-    policy.phases[1].skip_if = Some(CompiledCondition::Exists {
-        target: TrackTarget::Video,
-        filter: None,
-    });
+    policy.phases[1].skip_if = Some(CompiledCondition::Exists(
+        voom_policy::compiled::CompiledExistsCondition {
+            target: TrackTarget::Video,
+            filter: None,
+        },
+    ));
     let snapshot = snapshot_mp4_with_video_audio_subtitle();
 
     let complete = generate_plan(request(policy.clone(), snapshot.clone())).unwrap_err();
@@ -3375,13 +3637,17 @@ fn planner_entry_points_reject_unpublished_condition_in_later_phase() {
 fn plan_phase_unplannable_operation_yields_blocked_node_and_diagnostic() {
     let policy = compiled_policy_with_phases(&[(
         "audio",
-        vec![CompiledOperation::ExtractAudio {
-            target_codec: "opus".to_owned(),
-            container: "ogg".to_owned(),
-            filter: Some(TrackFilter::LanguageIn {
-                values: vec!["jpn".to_owned()],
-            }),
-        }],
+        vec![CompiledOperation::ExtractAudio(
+            voom_policy::compiled::CompiledExtractAudioOperation {
+                target_codec: "opus".to_owned(),
+                container: "ogg".to_owned(),
+                filter: Some(TrackFilter::LanguageIn(
+                    voom_policy::compiled::LanguageInTrackFilter {
+                        values: vec!["jpn".to_owned()],
+                    },
+                )),
+            },
+        )],
     )]);
 
     let plan = plan_phase(
@@ -3408,9 +3674,11 @@ fn plan_phase_unplannable_operation_yields_blocked_node_and_diagnostic() {
 fn plan_phase_rejects_phase_not_in_phase_order() {
     let policy = compiled_policy_with_phases(&[(
         "normalize",
-        vec![CompiledOperation::SetContainer {
-            container: "mkv".to_owned(),
-        }],
+        vec![CompiledOperation::SetContainer(
+            voom_policy::compiled::CompiledSetContainerOperation {
+                container: "mkv".to_owned(),
+            },
+        )],
     )]);
 
     let error: PlanGenerationError = plan_phase(
@@ -3430,9 +3698,11 @@ fn plan_phase_rejects_phase_not_in_phase_order() {
 fn plan_phase_rejects_phase_declared_in_order_but_missing_from_phases() {
     let mut policy = compiled_policy_with_phases(&[(
         "normalize",
-        vec![CompiledOperation::SetContainer {
-            container: "mkv".to_owned(),
-        }],
+        vec![CompiledOperation::SetContainer(
+            voom_policy::compiled::CompiledSetContainerOperation {
+                container: "mkv".to_owned(),
+            },
+        )],
     )]);
     // An internally inconsistent policy: the name is bounded by phase_order but
     // has no phase body to plan. Fail loud rather than returning a node-less
@@ -3456,9 +3726,11 @@ fn plan_phase_rejects_phase_declared_in_order_but_missing_from_phases() {
 fn plan_phase_blocks_phase_when_run_if_facts_are_insufficient() {
     let mut policy = compiled_policy_with_phases(&[(
         "normalize",
-        vec![CompiledOperation::SetContainer {
-            container: "mkv".to_owned(),
-        }],
+        vec![CompiledOperation::SetContainer(
+            voom_policy::compiled::CompiledSetContainerOperation {
+                container: "mkv".to_owned(),
+            },
+        )],
     )]);
     policy.phases[0].run_if = Some(CompiledRunIf {
         trigger: RunIfTrigger::Modified,
@@ -3483,9 +3755,11 @@ fn plan_phase_blocks_phase_when_run_if_facts_are_insufficient() {
 fn plan_phase_is_deterministic_for_same_inputs() {
     let policy = compiled_policy_with_phases(&[(
         "normalize",
-        vec![CompiledOperation::SetContainer {
-            container: "mkv".to_owned(),
-        }],
+        vec![CompiledOperation::SetContainer(
+            voom_policy::compiled::CompiledSetContainerOperation {
+                container: "mkv".to_owned(),
+            },
+        )],
     )]);
 
     let first = plan_phase(
@@ -3508,18 +3782,24 @@ fn plan_phase_carries_no_inter_phase_edges() {
     let policy = compiled_policy_with_phases(&[
         (
             "normalize",
-            vec![CompiledOperation::SetContainer {
-                container: "mkv".to_owned(),
-            }],
+            vec![CompiledOperation::SetContainer(
+                voom_policy::compiled::CompiledSetContainerOperation {
+                    container: "mkv".to_owned(),
+                },
+            )],
         ),
         (
             "tracks",
-            vec![CompiledOperation::KeepTracks {
-                target: TrackTarget::Audio,
-                filter: Some(TrackFilter::LanguageIn {
-                    values: vec!["eng".to_owned()],
-                }),
-            }],
+            vec![CompiledOperation::KeepTracks(
+                voom_policy::compiled::CompiledKeepTracksOperation {
+                    target: TrackTarget::Audio,
+                    filter: Some(TrackFilter::LanguageIn(
+                        voom_policy::compiled::LanguageInTrackFilter {
+                            values: vec!["eng".to_owned()],
+                        },
+                    )),
+                },
+            )],
         ),
     ]);
 
@@ -3539,9 +3819,11 @@ fn plan_phase_carries_no_inter_phase_edges() {
 fn plan_phase_rejects_empty_input_set() {
     let policy = compiled_policy_with_phases(&[(
         "normalize",
-        vec![CompiledOperation::SetContainer {
-            container: "mkv".to_owned(),
-        }],
+        vec![CompiledOperation::SetContainer(
+            voom_policy::compiled::CompiledSetContainerOperation {
+                container: "mkv".to_owned(),
+            },
+        )],
     )]);
     let mut input = input_with_snapshot(snapshot_with(Some("mp4"), None, None));
     input.media_snapshots.clear();
@@ -3574,24 +3856,24 @@ fn rule(
 }
 
 fn container_is(container: &str) -> CompiledCondition {
-    CompiledCondition::FieldComparison {
+    CompiledCondition::FieldComparison(voom_policy::compiled::CompiledFieldComparisonCondition {
         path: vec!["container".to_owned(), "name".to_owned()],
         op: ComparisonOp::Eq,
-        value: CompiledValue::String {
+        value: CompiledValue::String(voom_policy::compiled::CompiledStringValue {
             value: container.to_owned(),
-        },
-    }
+        }),
+    })
 }
 
 fn exists_condition(target: TrackTarget) -> CompiledCondition {
-    CompiledCondition::Exists {
+    CompiledCondition::Exists(voom_policy::compiled::CompiledExistsCondition {
         target,
         filter: None,
-    }
+    })
 }
 
 fn count_condition(target: TrackTarget, op: ComparisonOp, value: u64) -> CompiledCondition {
-    CompiledCondition::Count { target, op, value }
+    CompiledCondition::Count(voom_policy::compiled::CompiledCountCondition { target, op, value })
 }
 
 fn snapshot_with_stream_inventory(streams: &serde_json::Value) -> MediaSnapshotInput {
@@ -3601,12 +3883,12 @@ fn snapshot_with_stream_inventory(streams: &serde_json::Value) -> MediaSnapshotI
 }
 
 fn transcode_video() -> CompiledOperation {
-    CompiledOperation::TranscodeVideo {
+    CompiledOperation::TranscodeVideo(voom_policy::compiled::CompiledTranscodeVideoOperation {
         target_codec: "hevc".to_owned(),
         container: "mkv".to_owned(),
         profile: voom_policy::VideoProfileRef::Named("default-hevc".to_owned()),
         resolved_profile: Some(voom_core::TranscodeVideoProfile::default_hevc()),
-    }
+    })
 }
 
 fn transcodable_input(container: &str) -> PolicyInputSetDraft {

@@ -639,6 +639,53 @@ async fn stored_policy_loader_rejects_raw_and_typed_unpublished_stream_shapes() 
     );
 }
 
+#[tokio::test]
+async fn stored_planning_rejects_unknown_compiled_fields_without_durable_writes() {
+    let (cp, _tmp) = cp().await;
+    let created_policy = cp
+        .create_policy_document(
+            "unknown-compiled-field",
+            "policy \"unknown compiled field\" { phase normalize { container mkv } }",
+        )
+        .await
+        .unwrap();
+    let input = cp
+        .create_policy_input_set(load_fixture(FixtureName::SyntheticCompliantBaseline).unwrap())
+        .await
+        .unwrap();
+    sqlx::query("DROP TRIGGER policy_versions_are_immutable")
+        .execute(cp.pool_for_test())
+        .await
+        .unwrap();
+    sqlx::query(
+        "UPDATE policy_versions \
+         SET compiled_json = json_set( \
+             compiled_json, \
+             '$.phases[0].operations[0].future_operation', \
+             json('true') \
+         ) \
+         WHERE id = ?",
+    )
+    .bind(i64::try_from(created_policy.version.id.0).unwrap())
+    .execute(cp.pool_for_test())
+    .await
+    .unwrap();
+    let before = read_only_table_counts(&cp).await;
+
+    let error = cp
+        .plan_accepted_policy_version_with_input_set(created_policy.version.id, input.id)
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.code(), "PLAN_GENERATION_ERROR");
+    assert!(
+        error
+            .to_string()
+            .contains("unknown field `future_operation`")
+    );
+    assert_eq!(before, read_only_table_counts(&cp).await);
+}
+
 const PLAN_READ_ONLY_TABLES: &[&str] = &[
     "jobs",
     "tickets",

@@ -181,9 +181,16 @@ fn canonical_published_grammar_policies_compile_and_define_execution_oracles() {
 
 fn has_mutation(operation: &CompiledOperation) -> bool {
     match operation {
-        CompiledOperation::VerifyArtifact => false,
-        CompiledOperation::Conditional { operations, .. } => operations.iter().any(has_mutation),
-        CompiledOperation::Rules { rules, .. } => rules
+        CompiledOperation::VerifyArtifact(
+            voom_policy::compiled::CompiledVerifyArtifactOperation {},
+        ) => false,
+        CompiledOperation::Conditional(voom_policy::compiled::CompiledConditionalOperation {
+            operations,
+            ..
+        }) => operations.iter().any(has_mutation),
+        CompiledOperation::Rules(voom_policy::compiled::CompiledRulesOperation {
+            rules, ..
+        }) => rules
             .iter()
             .flat_map(|rule| &rule.operations)
             .any(has_mutation),
@@ -193,11 +200,16 @@ fn has_mutation(operation: &CompiledOperation) -> bool {
 
 fn has_verification(operation: &CompiledOperation) -> bool {
     match operation {
-        CompiledOperation::VerifyArtifact => true,
-        CompiledOperation::Conditional { operations, .. } => {
-            operations.iter().any(has_verification)
-        }
-        CompiledOperation::Rules { rules, .. } => rules
+        CompiledOperation::VerifyArtifact(
+            voom_policy::compiled::CompiledVerifyArtifactOperation {},
+        ) => true,
+        CompiledOperation::Conditional(voom_policy::compiled::CompiledConditionalOperation {
+            operations,
+            ..
+        }) => operations.iter().any(has_verification),
+        CompiledOperation::Rules(voom_policy::compiled::CompiledRulesOperation {
+            rules, ..
+        }) => rules
             .iter()
             .flat_map(|rule| &rule.operations)
             .any(has_verification),

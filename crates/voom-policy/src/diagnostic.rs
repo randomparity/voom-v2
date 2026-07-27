@@ -84,6 +84,7 @@ pub enum DiagnosticStage {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RelatedSpan {
     pub span: crate::span::SourceSpan,
     pub location: crate::span::SourceLocation,
@@ -91,6 +92,7 @@ pub struct RelatedSpan {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PolicyDiagnostic {
     pub code: String,
     pub severity: DiagnosticSeverity,

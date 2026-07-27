@@ -5,36 +5,36 @@ use super::super::compiled::{ComparisonOp, CompiledCondition, CompiledValue, Tra
 pub(super) fn condition_from_text(text: &str) -> CompiledCondition {
     let text = strip_outer_group(text.trim());
     if let Some(parts) = split_bool_condition(text, " or ") {
-        return CompiledCondition::Or {
+        return CompiledCondition::Or(crate::compiled::CompiledOrCondition {
             conditions: parts.into_iter().map(condition_from_text).collect(),
-        };
+        });
     }
     if let Some(parts) = split_bool_condition(text, " and ") {
-        return CompiledCondition::And {
+        return CompiledCondition::And(crate::compiled::CompiledAndCondition {
             conditions: parts.into_iter().map(condition_from_text).collect(),
-        };
+        });
     }
     let tokens = words(text);
     if tokens.first() == Some(&"not") {
-        return CompiledCondition::Not {
+        return CompiledCondition::Not(crate::compiled::CompiledNotCondition {
             inner: Box::new(condition_from_text(text.trim_start_matches("not").trim())),
-        };
+        });
     }
     if tokens.first() == Some(&"exists") {
-        return CompiledCondition::Exists {
+        return CompiledCondition::Exists(crate::compiled::CompiledExistsCondition {
             target: track_target(tokens.get(1).copied()).unwrap_or(TrackTarget::Audio),
             filter: None,
-        };
+        });
     }
     if tokens.first() == Some(&"count") {
-        return CompiledCondition::Count {
+        return CompiledCondition::Count(crate::compiled::CompiledCountCondition {
             target: track_target(tokens.get(1).copied()).unwrap_or(TrackTarget::Audio),
             op: comparison_op(tokens.get(2).copied()).unwrap_or(ComparisonOp::Eq),
             value: tokens
                 .get(3)
                 .and_then(|value| value.parse::<u64>().ok())
                 .unwrap_or_default(),
-        };
+        });
     }
     if let Some(index) = tokens
         .iter()
@@ -48,44 +48,46 @@ pub(super) fn condition_from_text(text: &str) -> CompiledCondition {
             || compiled_value(tokens.get(index + 1).copied().unwrap_or_default()),
             compiled_value,
         );
-        return CompiledCondition::FieldComparison { path, op, value };
+        return CompiledCondition::FieldComparison(
+            crate::compiled::CompiledFieldComparisonCondition { path, op, value },
+        );
     }
     if let Some(path) = tokens.first().filter(|token| token.contains('.')) {
-        return CompiledCondition::FieldExists {
+        return CompiledCondition::FieldExists(crate::compiled::CompiledFieldExistsCondition {
             path: field_path_segments(path),
-        };
+        });
     }
-    CompiledCondition::Predicate {
+    CompiledCondition::Predicate(crate::compiled::CompiledPredicateCondition {
         name: text.to_owned(),
-    }
+    })
 }
 
 pub(super) fn compiled_value(text: &str) -> CompiledValue {
     let text = text.trim();
     if text.starts_with('"') && text.ends_with('"') {
-        return CompiledValue::String {
+        return CompiledValue::String(crate::compiled::CompiledStringValue {
             value: strip_quotes(text),
-        };
+        });
     }
     if text == "true" {
-        return CompiledValue::Boolean { value: true };
+        return CompiledValue::Boolean(crate::compiled::CompiledBooleanValue { value: true });
     }
     if text == "false" {
-        return CompiledValue::Boolean { value: false };
+        return CompiledValue::Boolean(crate::compiled::CompiledBooleanValue { value: false });
     }
     if text.contains('.') {
-        return CompiledValue::FieldPath {
+        return CompiledValue::FieldPath(crate::compiled::CompiledFieldPathValue {
             path: field_path_segments(text),
-        };
+        });
     }
     if text.bytes().all(|byte| byte.is_ascii_digit()) && !text.is_empty() {
-        return CompiledValue::Number {
+        return CompiledValue::Number(crate::compiled::CompiledNumberValue {
             value: text.to_owned(),
-        };
+        });
     }
-    CompiledValue::String {
+    CompiledValue::String(crate::compiled::CompiledStringValue {
         value: strip_quotes(text),
-    }
+    })
 }
 
 pub(super) fn track_target(token: Option<&str>) -> Option<TrackTarget> {
