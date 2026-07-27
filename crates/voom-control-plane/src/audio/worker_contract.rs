@@ -242,6 +242,13 @@ pub async fn require_extract_output_files_match_result(
     Ok(())
 }
 
+pub fn extract_result_output_facts(result: &ExtractAudioResult) -> Vec<&AudioObservedFacts> {
+    match &result.outputs {
+        Some(outputs) => outputs.iter().map(|output| &output.output).collect(),
+        None => vec![&result.output],
+    }
+}
+
 async fn require_output_file_matches_result(
     staging_path: &Path,
     result: &AudioObservedFacts,

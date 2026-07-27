@@ -145,7 +145,7 @@ async fn extract_failure_records_audio_failed_event() {
 }
 
 #[tokio::test]
-async fn extract_audio_plural_rejects_before_staging_target_or_dispatch() {
+async fn extract_audio_plural_commits_every_output_and_lineage_atomically() {
     let (cp, _db, dir) = fixture_with_dir().await;
     let mut source = seed_audio_source(&cp, &dir, b"source").await;
     source.snapshot = record_plural_audio_snapshot(&cp, source.version).await;
@@ -169,34 +169,172 @@ async fn extract_audio_plural_rejects_before_staging_target_or_dispatch() {
             "bundle_role": "commentary_audio"
         }
     ]);
-    let staging_root = input.staging_root.clone();
-    let target_dir = input.target_dir.clone();
-    let backup_root = dir.path().join("backups");
-    input.backup_root = Some(backup_root.clone());
+    let report = execute_extract_audio_with_dispatchers(
+        &cp,
+        input,
+        &WritingExtractDispatcher {
+            output_bytes: b"extracted".to_vec(),
+        },
+        &SuccessfulVerifyDispatcher,
+    )
+    .await
+    .unwrap();
 
-    let error = execute_extract_audio_with_dispatchers(
+    assert_eq!(report.outputs.len(), 2);
+    assert!(
+        report.outputs[0]
+            .target_path
+            .ends_with("source.a-1.opus.ogg")
+    );
+    assert!(
+        report.outputs[1]
+            .target_path
+            .ends_with("source.a-2.opus.ogg")
+    );
+    assert!(
+        report
+            .outputs
+            .iter()
+            .all(|output| output.target_path.is_file())
+    );
+    assert_table_count(&cp, "artifact_handles", 2).await;
+    assert_table_count(&cp, "artifact_commit_records", 2).await;
+    assert_table_count(&cp, "file_versions", 3).await;
+    assert_table_count(&cp, "asset_bundle_members", 2).await;
+    assert_table_count(&cp, "audio_extract_output_lineage", 2).await;
+    assert_event_count(&cp, "artifact.audio_extract_succeeded", 1).await;
+}
+
+#[tokio::test]
+async fn committed_plural_extract_retry_returns_same_ordered_identities_without_dispatch() {
+    let (cp, _db, dir) = fixture_with_dir().await;
+    let mut source = seed_audio_source(&cp, &dir, b"source").await;
+    source.snapshot = record_plural_audio_snapshot(&cp, source.version).await;
+    let bundle = seed_bundle(&cp).await;
+    let mut input = extract_input_for_source(&source, bundle.id, &dir);
+    let operation_id = "node_extract_audio_retry";
+    input.operation_payload["operation_id"] = serde_json::json!(operation_id);
+    input.operation_payload["outputs"] = serde_json::json!([
+        {
+            "output_id": voom_plan::audio::extract_output_id(operation_id, "a-1"),
+            "source_snapshot_stream_id": "a-1",
+            "source_provider_stream_index": 1,
+            "name_suffix": "a-1.opus.ogg",
+            "bundle_role": "external_audio"
+        },
+        {
+            "output_id": voom_plan::audio::extract_output_id(operation_id, "a-2"),
+            "source_snapshot_stream_id": "a-2",
+            "source_provider_stream_index": 2,
+            "name_suffix": "a-2.opus.ogg",
+            "bundle_role": "commentary_audio"
+        }
+    ]);
+
+    let first = execute_extract_audio_with_dispatchers(
+        &cp,
+        input.clone(),
+        &WritingExtractDispatcher {
+            output_bytes: b"extracted".to_vec(),
+        },
+        &SuccessfulVerifyDispatcher,
+    )
+    .await
+    .unwrap();
+    let retry = execute_extract_audio_with_dispatchers(
         &cp,
         input,
         &UncalledExtractDispatcher,
         &UncalledVerifyDispatcher,
     )
     .await
+    .unwrap();
+
+    assert_eq!(retry.outputs, first.outputs);
+    assert_table_count(&cp, "artifact_handles", 2).await;
+    assert_table_count(&cp, "artifact_commit_records", 2).await;
+    assert_table_count(&cp, "file_versions", 3).await;
+    assert_table_count(&cp, "asset_bundle_members", 2).await;
+    assert_table_count(&cp, "audio_extract_output_lineage", 2).await;
+}
+
+#[tokio::test]
+async fn plural_extract_recovers_after_promotions_without_duplicate_rows() {
+    let (cp, _db, dir) = fixture_with_dir().await;
+    let mut source = seed_audio_source(&cp, &dir, b"source").await;
+    source.snapshot = record_plural_audio_snapshot(&cp, source.version).await;
+    let bundle = seed_bundle(&cp).await;
+    let mut input = extract_input_for_source(&source, bundle.id, &dir);
+    let operation_id = "node_extract_audio_recovery";
+    input.operation_payload["operation_id"] = serde_json::json!(operation_id);
+    input.operation_payload["outputs"] = serde_json::json!([
+        {
+            "output_id": voom_plan::audio::extract_output_id(operation_id, "a-1"),
+            "source_snapshot_stream_id": "a-1",
+            "source_provider_stream_index": 1,
+            "name_suffix": "a-1.opus.ogg",
+            "bundle_role": "external_audio"
+        },
+        {
+            "output_id": voom_plan::audio::extract_output_id(operation_id, "a-2"),
+            "source_snapshot_stream_id": "a-2",
+            "source_provider_stream_index": 2,
+            "name_suffix": "a-2.opus.ogg",
+            "bundle_role": "commentary_audio"
+        }
+    ]);
+    sqlx::query(
+        "CREATE TRIGGER fail_audio_extract_finalize BEFORE INSERT ON file_assets \
+         BEGIN SELECT RAISE(ABORT, 'injected finalize failure'); END;",
+    )
+    .execute(cp.pool_for_test())
+    .await
+    .unwrap();
+
+    let error = execute_extract_audio_with_dispatchers(
+        &cp,
+        input.clone(),
+        &WritingExtractDispatcher {
+            output_bytes: b"extracted".to_vec(),
+        },
+        &SuccessfulVerifyDispatcher,
+    )
+    .await
     .unwrap_err();
 
-    assert_eq!(
-        error.error_code(),
-        voom_core::ErrorCode::ConfigInvalid,
-        "{error}"
-    );
-    assert!(error.to_string().contains("planned 2 outputs"));
-    assert!(!staging_root.exists());
-    assert!(!target_dir.exists());
-    assert!(!backup_root.exists());
-    assert_table_count(&cp, "backups", 0).await;
-    assert_table_count(&cp, "artifact_handles", 0).await;
-    assert_table_count(&cp, "artifact_commit_records", 0).await;
+    assert_eq!(error.error_code(), voom_core::ErrorCode::DbUnreachable);
+    assert!(input.target_dir.join("source.a-1.opus.ogg").is_file());
+    assert!(input.target_dir.join("source.a-2.opus.ogg").is_file());
+    assert_table_count(&cp, "artifact_commit_records", 2).await;
     assert_table_count(&cp, "file_versions", 1).await;
-    assert_event_count(&cp, "artifact.audio_extract_succeeded", 0).await;
+    assert_table_count(&cp, "asset_bundle_members", 0).await;
+    assert_table_count(&cp, "audio_extract_output_lineage", 0).await;
+    sqlx::query("DROP TRIGGER fail_audio_extract_finalize")
+        .execute(cp.pool_for_test())
+        .await
+        .unwrap();
+
+    let recovered = execute_extract_audio_with_dispatchers(
+        &cp,
+        input,
+        &UncalledExtractDispatcher,
+        &UncalledVerifyDispatcher,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(recovered.outputs.len(), 2);
+    assert!(
+        recovered
+            .outputs
+            .iter()
+            .all(|output| output.target_path.is_file())
+    );
+    assert_table_count(&cp, "artifact_handles", 2).await;
+    assert_table_count(&cp, "artifact_commit_records", 2).await;
+    assert_table_count(&cp, "file_versions", 3).await;
+    assert_table_count(&cp, "asset_bundle_members", 2).await;
+    assert_table_count(&cp, "audio_extract_output_lineage", 2).await;
 }
 
 #[tokio::test]
@@ -1053,9 +1191,17 @@ impl ExtractAudioDispatcher for WritingExtractDispatcher {
         &self,
         request: ExtractAudioRequest,
     ) -> Result<ExtractAudioResult, VoomError> {
-        tokio::fs::write(&request.output.path, &self.output_bytes)
-            .await
-            .unwrap();
+        if let Some(outputs) = &request.outputs {
+            for descriptor in outputs {
+                tokio::fs::write(&descriptor.output.path, &self.output_bytes)
+                    .await
+                    .unwrap();
+            }
+        } else {
+            tokio::fs::write(&request.output.path, &self.output_bytes)
+                .await
+                .unwrap();
+        }
         let output_hash = blake3_checksum(&self.output_bytes);
         let output = observed(
             u64::try_from(self.output_bytes.len()).unwrap(),
@@ -1072,7 +1218,14 @@ impl ExtractAudioDispatcher for WritingExtractDispatcher {
                     output_container: "ogg".to_owned(),
                     output_audio_codec: "opus".to_owned(),
                     output_language: Some("eng".to_owned()),
-                    output_title: Some("Main".to_owned()),
+                    output_title: Some(
+                        if descriptor.selection.snapshot_stream_id == "a-2" {
+                            "Commentary"
+                        } else {
+                            "Main"
+                        }
+                        .to_owned(),
+                    ),
                 })
                 .collect()
         });

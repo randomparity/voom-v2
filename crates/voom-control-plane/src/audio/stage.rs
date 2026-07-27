@@ -54,9 +54,6 @@ pub async fn extract_target_paths(
         .into_iter()
         .map(|file_name| canonical_dir.join(file_name))
         .collect::<Vec<_>>();
-    for path in &paths {
-        reject_existing_file(path, "target path").await?;
-    }
     Ok(paths)
 }
 

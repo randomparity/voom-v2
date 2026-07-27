@@ -865,7 +865,7 @@ impl SqliteArtifactRepo {
         tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
         input: NewSidecarArtifactCommit,
     ) -> Result<SidecarArtifactCommit, VoomError> {
-        let pending = get_pending_commit_record_in_tx(tx, input.commit_record_id).await?;
+        let pending = get_active_commit_record_in_tx(tx, input.commit_record_id).await?;
         if pending.target_path != input.target_path {
             return Err(VoomError::Conflict(format!(
                 "artifact_commit_records sidecar commit: target_path {:?} does not match pending target {:?}",
@@ -939,8 +939,9 @@ impl SqliteArtifactRepo {
         let res = sqlx::query(
             "UPDATE artifact_commit_records \
              SET state = 'committed', result_file_version_id = ?, result_file_location_id = ?, \
-                 promotion_started_at = NULL, finished_at = ? \
-             WHERE id = ? AND state = 'pending'",
+                 promotion_started_at = NULL, finished_at = ?, failure_class = NULL, \
+                 error_code = NULL, message = NULL, recovery_reason = NULL \
+             WHERE id = ? AND state IN ('pending', 'recovery_required')",
         )
         .bind(i64_from_u64(file_version_id.0))
         .bind(i64_from_u64(file_location_id.0))
@@ -1313,12 +1314,13 @@ async fn validate_committed_result(
     Ok(())
 }
 
-async fn get_pending_commit_record_in_tx(
+async fn get_active_commit_record_in_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     id: ArtifactCommitRecordId,
 ) -> Result<ArtifactCommitRecord, VoomError> {
     let sql = SELECT_ARTIFACT_COMMIT_RECORD_COLS.to_owned()
-        + " FROM artifact_commit_records c WHERE c.id = ? AND c.state = 'pending'";
+        + " FROM artifact_commit_records c \
+           WHERE c.id = ? AND c.state IN ('pending', 'recovery_required')";
     let row = sqlx::query(&sql)
         .bind(i64_from_u64(id.0))
         .fetch_optional(&mut **tx)
@@ -1329,7 +1331,7 @@ async fn get_pending_commit_record_in_tx(
         .transpose()?
         .ok_or_else(|| {
             VoomError::Conflict(format!(
-                "artifact_commit_records sidecar commit: id={id} not pending"
+                "artifact_commit_records sidecar commit: id={id} is not active"
             ))
         })
 }

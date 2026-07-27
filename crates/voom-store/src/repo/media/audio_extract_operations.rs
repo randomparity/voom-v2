@@ -3,7 +3,11 @@
 use sqlx::sqlite::SqliteRow;
 use sqlx::{Row, Sqlite, SqlitePool, Transaction};
 use time::OffsetDateTime;
-use voom_core::{BundleId, FileVersionId, LeaseId, MediaSnapshotId, VoomError, WorkerId};
+use voom_core::ids::{ArtifactCommitRecordId, ArtifactVerificationId};
+use voom_core::{
+    ArtifactHandleId, ArtifactLocationId, BundleId, FileLocationId, FileVersionId, LeaseId,
+    MediaSnapshotId, VoomError, WorkerId,
+};
 
 use super::Repository;
 use super::common::{i64_from_u64, iso8601, map_row_err, u32_from_i64, u64_from_i64};
@@ -59,6 +63,17 @@ pub struct AudioExtractOperationOutput {
     pub source_provider_stream_index: u32,
     pub bundle_role: String,
     pub target_path: String,
+    pub staging_path: Option<String>,
+    pub temp_path: Option<String>,
+    pub artifact_handle_id: Option<ArtifactHandleId>,
+    pub artifact_location_id: Option<ArtifactLocationId>,
+    pub verification_id: Option<ArtifactVerificationId>,
+    pub commit_record_id: Option<ArtifactCommitRecordId>,
+    pub result_file_version_id: Option<FileVersionId>,
+    pub result_file_location_id: Option<FileLocationId>,
+    pub result_media_snapshot_id: Option<MediaSnapshotId>,
+    pub bundle_member_id: Option<u64>,
+    pub result_facts: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -115,6 +130,20 @@ impl SqliteAudioExtractOperationRepo {
     #[must_use]
     pub fn new(pool: SqlitePool) -> Self {
         Self { pool }
+    }
+
+    pub async fn get_by_key(
+        &self,
+        operation_key: &str,
+    ) -> Result<Option<AudioExtractOperationRecord>, VoomError> {
+        let mut tx = self.pool.begin().await.map_err(|error| {
+            VoomError::database_context("audio_extract_operations get begin", error)
+        })?;
+        let record = load_record_by_key(&mut tx, operation_key).await?;
+        tx.commit().await.map_err(|error| {
+            VoomError::database_context("audio_extract_operations get commit", error)
+        })?;
+        Ok(record)
     }
 
     pub async fn create_planned(
@@ -477,7 +506,10 @@ async fn load_record_for_operation_row(
     let operation = decode_operation(&row)?;
     let rows = sqlx::query(
         "SELECT id, operation_id, ordinal, output_id, source_snapshot_stream_id, \
-         source_provider_stream_index, bundle_role, target_path \
+         source_provider_stream_index, bundle_role, target_path, staging_path, temp_path, \
+         artifact_handle_id, artifact_location_id, verification_id, commit_record_id, \
+         result_file_version_id, result_file_location_id, result_media_snapshot_id, \
+         bundle_member_id, result_facts \
          FROM audio_extract_operation_outputs WHERE operation_id = ? ORDER BY ordinal",
     )
     .bind(i64_from_u64(operation.id))
@@ -532,7 +564,43 @@ fn decode_output(row: &SqliteRow) -> Result<AudioExtractOperationOutput, VoomErr
         )?,
         bundle_role: row.try_get("bundle_role").map_err(output_row_err)?,
         target_path: row.try_get("target_path").map_err(output_row_err)?,
+        staging_path: row.try_get("staging_path").map_err(output_row_err)?,
+        temp_path: row.try_get("temp_path").map_err(output_row_err)?,
+        artifact_handle_id: optional_id(row, "artifact_handle_id", ArtifactHandleId)?,
+        artifact_location_id: optional_id(row, "artifact_location_id", ArtifactLocationId)?,
+        verification_id: optional_id(row, "verification_id", ArtifactVerificationId)?,
+        commit_record_id: optional_id(row, "commit_record_id", ArtifactCommitRecordId)?,
+        result_file_version_id: optional_id(row, "result_file_version_id", FileVersionId)?,
+        result_file_location_id: optional_id(row, "result_file_location_id", FileLocationId)?,
+        result_media_snapshot_id: optional_id(row, "result_media_snapshot_id", MediaSnapshotId)?,
+        bundle_member_id: row
+            .try_get::<Option<i64>, _>("bundle_member_id")
+            .map_err(output_row_err)?
+            .map(u64_from_i64),
+        result_facts: row
+            .try_get::<Option<String>, _>("result_facts")
+            .map_err(output_row_err)?
+            .map(|value| {
+                serde_json::from_str(&value).map_err(|error| {
+                    VoomError::database(format!(
+                        "audio_extract_operation_outputs.result_facts malformed: {error}"
+                    ))
+                })
+            })
+            .transpose()?,
     })
+}
+
+fn optional_id<T>(
+    row: &SqliteRow,
+    column: &str,
+    constructor: impl FnOnce(u64) -> T,
+) -> Result<Option<T>, VoomError> {
+    Ok(row
+        .try_get::<Option<i64>, _>(column)
+        .map_err(output_row_err)?
+        .map(u64_from_i64)
+        .map(constructor))
 }
 
 fn require_exact_replay(
