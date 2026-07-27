@@ -17,7 +17,6 @@
 //! - [`resume`] — resume reconciliation and chain-tip/snapshot projection.
 
 use std::collections::{BTreeMap, BTreeSet};
-#[cfg(test)]
 use std::future::Future;
 #[cfg(test)]
 use std::pin::Pin;
@@ -402,7 +401,19 @@ impl<'a> PhaseLoop<'a> {
         }
     }
 
-    async fn run(mut self) -> Result<CoordinatorOutcome, CoordinatorError> {
+    async fn run(self) -> Result<CoordinatorOutcome, CoordinatorError> {
+        self.run_after_phase_plan(|_| std::future::ready(Ok(())))
+            .await
+    }
+
+    async fn run_after_phase_plan<F, Fut>(
+        mut self,
+        mut after_phase_plan: F,
+    ) -> Result<CoordinatorOutcome, CoordinatorError>
+    where
+        F: FnMut(u32) -> Fut,
+        Fut: Future<Output = Result<(), VoomError>>,
+    {
         let phase_order = self.policy.phase_order.clone();
         for (index, phase_name) in phase_order.iter().enumerate() {
             if self.files.is_empty() {
@@ -413,6 +424,7 @@ impl<'a> PhaseLoop<'a> {
                 continue;
             };
             let mut planned = self.plan_phase_for_files(phase_name, &entry.entering)?;
+            after_phase_plan(phase_ordinal).await?;
             if let Err(failure) = self
                 .dispatch_phase_work(phase_ordinal, &entry.entering, &planned)
                 .await

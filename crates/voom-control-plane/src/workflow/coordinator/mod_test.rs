@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::future::Future;
 use std::time::Duration;
 
 use serde_json::{Value, json};
@@ -23,6 +24,92 @@ use crate::cases::policy::compliance::ComplianceExecutionOptions;
 use super::PhaseFile;
 
 const T0: OffsetDateTime = OffsetDateTime::UNIX_EPOCH;
+
+async fn run_prepared_fresh_after_phase_plan<F, Fut>(
+    cp: &crate::ControlPlane,
+    inputs: super::PhaseBarrierRunInputs,
+    options: ComplianceExecutionOptions,
+    runtimes: crate::workflow::WorkerRuntimeRegistry,
+    after_phase_plan: F,
+) -> Result<super::CoordinatorOutcome, super::CoordinatorError>
+where
+    F: FnMut(u32) -> Fut,
+    Fut: Future<Output = Result<(), voom_core::VoomError>>,
+{
+    let starts = super::run_starts_for_files(&inputs.files);
+    let (job, _) = cp
+        .open_phase_barrier_job(&starts, Vec::new(), Vec::new())
+        .await?;
+    let super::PhaseBarrierRunInputs {
+        policy,
+        context,
+        base_draft,
+        files,
+    } = inputs;
+    let result = super::PhaseLoop::new(
+        cp,
+        super::PhaseLoopInputs {
+            job_id: job.id,
+            promotion_job_ids: vec![job.id],
+            policy,
+            context,
+            base_draft,
+            files,
+            seed_file_phases: Vec::new(),
+            options,
+            runtimes,
+        },
+    )
+    .run_after_phase_plan(after_phase_plan)
+    .await;
+    cp.finish_phase_barrier_job(job.id, result).await
+}
+
+async fn run_prepared_resume_after_phase_plan<F, Fut>(
+    cp: &crate::ControlPlane,
+    prior_job_id: JobId,
+    inputs: super::PreparedResumeRunInputs,
+    options: ComplianceExecutionOptions,
+    runtimes: crate::workflow::WorkerRuntimeRegistry,
+    after_phase_plan: F,
+) -> Result<super::CoordinatorOutcome, super::CoordinatorError>
+where
+    F: FnMut(u32) -> Fut,
+    Fut: Future<Output = Result<(), voom_core::VoomError>>,
+{
+    let super::PreparedResumeRunInputs {
+        policy,
+        context,
+        base_draft,
+        preparation:
+            super::ResumePreparation {
+                files,
+                run_starts,
+                history,
+                seeds,
+            },
+    } = inputs;
+    let (job, seed_file_phases) = cp
+        .open_phase_barrier_job(&run_starts, history, seeds)
+        .await?;
+    let result = super::PhaseLoop::new(
+        cp,
+        super::PhaseLoopInputs {
+            job_id: job.id,
+            policy,
+            context,
+            base_draft,
+            files,
+            seed_file_phases,
+            promotion_job_ids: vec![job.id, prior_job_id],
+            options,
+            runtimes,
+        },
+    )
+    .run_after_phase_plan(after_phase_plan)
+    .await;
+    cp.finish_phase_barrier_job(job.id, result).await
+}
 
 async fn job_state(cp: &crate::ControlPlane, job_id: JobId) -> String {
     sqlx::query_scalar("SELECT state FROM jobs WHERE id = ?")
@@ -590,21 +677,30 @@ async fn superseded_prepared_fresh_phase_rejects_every_planned_file_before_dispa
         base_draft: file_draft("superseded-fresh", &snapshots),
         files,
     };
-    let current = advance_chain_tip(
+    let promotion_cp = cp.clone();
+    let error = run_prepared_fresh_after_phase_plan(
         &cp,
-        second,
-        "hash-superseded-second-v2",
-        reprobe_payload("hevc"),
-    )
-    .await;
-
-    let error = Box::pin(cp.run_prepared_phase_barrier(
         prepared,
         ComplianceExecutionOptions::default(),
         crate::workflow::WorkerRuntimeRegistry::new(),
-    ))
+        move |phase_ordinal| {
+            let cp = promotion_cp.clone();
+            async move {
+                assert_eq!(phase_ordinal, 0);
+                advance_chain_tip(
+                    &cp,
+                    second,
+                    "hash-superseded-second-v2",
+                    reprobe_payload("hevc"),
+                )
+                .await;
+                Ok(())
+            }
+        },
+    )
     .await
     .unwrap_err();
+    let current = active_version_id(&cp, second).await;
 
     assert_eq!(
         error.source.code(),
@@ -676,23 +772,31 @@ async fn superseded_prepared_resume_rejects_dispatch_without_mutating_prior_work
         .await
         .unwrap();
     let prior_event_count = ticket_and_lease_event_count(&cp).await;
-    let current = advance_chain_tip(
+    let promotion_cp = cp.clone();
+    let error = run_prepared_resume_after_phase_plan(
         &cp,
-        selected,
-        "hash-superseded-resume-v2",
-        reprobe_payload("hevc"),
+        prior_job_id,
+        prepared,
+        ComplianceExecutionOptions::default(),
+        crate::workflow::WorkerRuntimeRegistry::new(),
+        move |phase_ordinal| {
+            let cp = promotion_cp.clone();
+            async move {
+                assert_eq!(phase_ordinal, 0);
+                advance_chain_tip(
+                    &cp,
+                    selected,
+                    "hash-superseded-resume-v2",
+                    reprobe_payload("hevc"),
+                )
+                .await;
+                Ok(())
+            }
+        },
     )
-    .await;
-
-    let error = cp
-        .run_prepared_resume_phase_barrier(
-            prior_job_id,
-            prepared,
-            ComplianceExecutionOptions::default(),
-            crate::workflow::WorkerRuntimeRegistry::new(),
-        )
-        .await
-        .unwrap_err();
+    .await
+    .unwrap_err();
+    let current = active_version_id(&cp, selected).await;
 
     assert_eq!(error.source.code(), "STALE_IDENTITY_EVIDENCE");
     assert!(error.source.to_string().contains(&selected.to_string()));
@@ -985,6 +1089,16 @@ async fn assert_active_version(
     lineage_version: FileVersionId,
     expected_active: FileVersionId,
 ) {
+    assert_eq!(
+        active_version_id(cp, lineage_version).await,
+        expected_active
+    );
+}
+
+async fn active_version_id(
+    cp: &crate::ControlPlane,
+    lineage_version: FileVersionId,
+) -> FileVersionId {
     let asset_id = cp
         .identity()
         .get_file_version(lineage_version)
@@ -999,7 +1113,7 @@ async fn assert_active_version(
         .unwrap()
         .unwrap()
         .0;
-    assert_eq!(active.id, expected_active);
+    active.id
 }
 
 async fn workflow_effect_counts(cp: &crate::ControlPlane, job_id: JobId) -> (i64, i64, i64) {
