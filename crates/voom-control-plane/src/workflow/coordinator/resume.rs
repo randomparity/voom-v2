@@ -456,12 +456,12 @@ fn validate_prior_row_shape(
     }
     let mut next = start.starting_phase_ordinal;
     let mut index = 0;
-    if let Some(seed) = rows.first().filter(|row| {
-        start.starting_phase_ordinal > 0
-            && row.phase_ordinal.checked_add(1) == Some(start.starting_phase_ordinal)
-    }) {
+    while let Some(seed) = rows
+        .get(index)
+        .filter(|row| row.phase_ordinal < start.starting_phase_ordinal)
+    {
         validate_seed_row(start, seed)?;
-        index = 1;
+        index += 1;
     }
     for (tail_index, row) in rows[index..].iter().enumerate() {
         if row.phase_ordinal >= phase_count || row.phase_ordinal != next {

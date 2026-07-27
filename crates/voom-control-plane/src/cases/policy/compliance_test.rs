@@ -1071,8 +1071,9 @@ async fn resume_carries_verified_phase_without_duplicate_verification() {
         .create_policy_document(
             "resume-verified-phase",
             "policy \"resume verified phase\" { \
-               phase verify { verify artifact } \
-               phase normalize { depends_on: [verify] container mkv } \
+               phase verify_one { verify artifact } \
+               phase verify_two { depends_on: [verify_one] verify artifact } \
+               phase normalize { depends_on: [verify_two] container mkv } \
              }",
         )
         .await
@@ -1109,36 +1110,43 @@ async fn resume_carries_verified_phase_without_duplicate_verification() {
         .await
         .unwrap_err();
     let first = first.partial.unwrap();
-    assert_eq!(first.file_phases.len(), 1);
-    assert_eq!(first.file_phases[0].outcome, "verified");
-
-    let resumed = cp
-        .resume_phase_barrier_with_runtimes(
-            voom_core::JobId(first.summary.job_id),
-            policy.version.id,
-            input.input_set_id,
-            super::ComplianceExecutionOptions::default(),
-            WorkerRuntimeRegistry::new(),
-        )
-        .await
-        .unwrap_err();
-    let resumed = resumed
-        .partial
-        .unwrap_or_else(|| panic!("resumed second phase must be partial: {}", resumed.source));
-
-    assert_eq!(resumed.file_phases.len(), 1);
-    assert_eq!(
-        resumed.file_phases[0].outcome.as_str(),
-        "verified",
-        "the replacement job must carry the read-only phase"
+    assert_eq!(first.file_phases.len(), 2);
+    assert!(
+        first
+            .file_phases
+            .iter()
+            .all(|phase| phase.outcome == "verified")
     );
-    assert!(resumed.file_phases[0].ticket_ids.is_empty());
+
+    let mut prior_job_id = voom_core::JobId(first.summary.job_id);
+    for _attempt in 0..2 {
+        let resumed = cp
+            .resume_phase_barrier_with_runtimes(
+                prior_job_id,
+                policy.version.id,
+                input.input_set_id,
+                super::ComplianceExecutionOptions::default(),
+                WorkerRuntimeRegistry::new(),
+            )
+            .await
+            .unwrap_err();
+        let resumed = resumed
+            .partial
+            .unwrap_or_else(|| panic!("resumed third phase must be partial: {}", resumed.source));
+        assert_eq!(resumed.file_phases.len(), 2);
+        assert!(
+            resumed.file_phases.iter().all(|phase| {
+                phase.outcome.as_str() == "verified" && phase.ticket_ids.is_empty()
+            })
+        );
+        prior_job_id = resumed.summary.job_id;
+    }
     let evidence_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM artifact_verifications")
         .fetch_one(cp.pool_for_test())
         .await
         .unwrap();
-    assert_eq!(evidence_count, 1);
-    assert_eq!(count(&cp, EventKind::ArtifactVerificationStarted).await, 1);
+    assert_eq!(evidence_count, 2);
+    assert_eq!(count(&cp, EventKind::ArtifactVerificationStarted).await, 2);
 }
 
 #[tokio::test]
