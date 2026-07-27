@@ -32,8 +32,12 @@ scan-import and historical-input contracts.
 - **Compatibility:** the public in-transaction store method replaces its raw
   draft parameter with the proof type. The repository is pre-release and has
   one production caller; no deprecated or unchecked compatibility path is
-  retained. No persisted JSON or SQL shape, error code, event, or policy
-  grammar changes.
+  retained. Model validation now precedes transaction acquisition, so a
+  malformed draft returns `POLICY_VALIDATION_ERROR` even when the pool is
+  unavailable; previously the begin failure won. This deliberate precedence
+  change matches other store create methods that validate before
+  `BEGIN IMMEDIATE`. No persisted JSON or SQL shape, error code, event, or
+  policy grammar changes.
 
 Explicit exclusions:
 
@@ -175,6 +179,21 @@ Inside the transaction, the handler:
 No root, label, synthetic-target, or child insert starts until the complete
 linked member list passes.
 
+The complete public failure precedence is:
+
+1. model validation while constructing `ValidatedPolicyInputSetDraft`;
+2. deterministic identity-query preparation;
+3. `BEGIN IMMEDIATE` acquisition;
+4. the set-based identity read;
+5. linked members in original draft order, with snapshot existence checked
+   before target shape, then exact file-version equality;
+6. aggregate insertion; and
+7. commit.
+
+Sorting snapshot IDs for the set query never changes member-error selection.
+The handler indexes the results, then walks the immutable proof's original
+media-member order.
+
 ### Link contract
 
 For each `MediaSnapshotInput` with
@@ -242,6 +261,9 @@ introduced.
   consuming extraction.
 - The store convenience method validates before opening its transaction, while
   the in-transaction API accepts only the proof and does not repeat validation.
+- An invalid model plus invalid link returns `POLICY_VALIDATION_ERROR`,
+  including after the test closes the pool; a valid model against the same
+  closed pool returns `DB_UNREACHABLE`.
 - The bulk identity read returns immediately for an empty slice, collapses
   duplicate IDs, orders results deterministically, reports existing pairs
   while omitting missing IDs, and uses one SQL bind for an ID list larger than
@@ -249,6 +271,10 @@ introduced.
   supported aggregate-size or writer-budget claim; #375 owns those boundaries.
 - A missing snapshot returns `NOT_FOUND`.
 - A linked non-file target returns `CONFLICT`.
+- One member combining a missing snapshot with a non-file target returns
+  `NOT_FOUND`, proving existence wins within the member.
+- Two invalid members whose snapshot-ID sort order differs from draft order
+  report the first draft member's contextual error.
 - A later mismatched member returns `CONFLICT` after an earlier valid member
   was inspected.
 - Every failure asserts all eight policy-input aggregate tables remain empty

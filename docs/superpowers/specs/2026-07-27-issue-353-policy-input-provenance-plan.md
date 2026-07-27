@@ -20,6 +20,8 @@ make no persisted schema or wire changes.
 - valid current and historical links remain writable;
 - the in-transaction repository API cannot accept an unvalidated draft or
   repeat validation under the immediate writer lock;
+- public failures follow the design's model, transaction, identity-read, then
+  draft-order member precedence;
 - scan-import behavior is unchanged; and
 - focused tests and `just ci` pass without warnings.
 
@@ -102,8 +104,16 @@ the method has no independent product behavior.
 3. Add an event helper using `ControlPlane::list_events`.
 4. Add behavior tests for:
    - an exact valid link round-trip;
+   - an invalid model plus invalid link, both with a live and closed pool,
+     proving model validation wins before transaction acquisition;
+   - a valid model with a closed pool, proving transaction failure remains
+     `DB_UNREACHABLE`;
    - a missing snapshot;
    - a valid snapshot linked from a non-file target;
+   - one member combining a missing snapshot and non-file target, proving
+     `NOT_FOUND` wins;
+   - two invalid members whose snapshot-ID order differs from their draft
+     order, proving the first draft member's contextual error wins;
    - two members where the first link is valid and the second belongs to a
      different file version; and
    - an exact historical link after the selected version is retired.
