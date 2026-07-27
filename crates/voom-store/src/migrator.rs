@@ -102,6 +102,11 @@ const MIGRATION_0023_SQL: &str =
 const MIGRATION_0024_SQL: &str =
     include_str!("../../../migrations/0024_atomic_audio_extract_operations.sql");
 
+/// SQL for migration 0025 (recoverable audio synthesis, #333), embedded at
+/// compile time.
+const MIGRATION_0025_SQL: &str =
+    include_str!("../../../migrations/0025_recoverable_audio_synthesis.sql");
+
 /// Embedded migration set, constructed without the `sqlx::migrate!` macro.
 ///
 /// We don't use sqlx's `macros` feature: it pulls `sqlx-macros-core`, which
@@ -283,6 +288,13 @@ pub static MIGRATOR: LazyLock<Migrator> = LazyLock::new(|| Migrator {
             Cow::Borrowed("atomic_audio_extract_operations"),
             MigrationType::Simple,
             Cow::Borrowed(MIGRATION_0024_SQL),
+            false,
+        ),
+        Migration::new(
+            25,
+            Cow::Borrowed("recoverable_audio_synthesis"),
+            MigrationType::Simple,
+            Cow::Borrowed(MIGRATION_0025_SQL),
             false,
         ),
     ]),
