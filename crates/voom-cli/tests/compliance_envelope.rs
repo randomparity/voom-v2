@@ -101,6 +101,49 @@ async fn execute_scanned_remux_outputs_committed_file_phase() {
 }
 
 #[tokio::test]
+async fn execute_and_report_expose_policy_artifact_verification() {
+    let seeded = seed_scanned_verify().await;
+
+    let execute = compliance_command(&seeded.url, "execute", seeded.version_id, seeded.input_id);
+    assert_eq!(
+        execute.status.code(),
+        Some(0),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&execute.stdout),
+        String::from_utf8_lossy(&execute.stderr)
+    );
+    let execute = envelope(execute.stdout);
+    assert_eq!(execute["status"], "ok");
+    assert_eq!(execute["data"]["file_phases"][0]["outcome"], "verified");
+    assert_eq!(
+        execute["data"]["artifact_verifications"][0]["status"],
+        "succeeded"
+    );
+    let job_id = execute["data"]["summary"]["job_id"].as_u64().unwrap();
+    let verification_id = execute["data"]["artifact_verifications"][0]["verification_id"].clone();
+
+    let report = Command::new(env!("CARGO_BIN_EXE_voom"))
+        .args([
+            "--database-url",
+            &seeded.url,
+            "compliance",
+            "report",
+            "--job-id",
+            &job_id.to_string(),
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(report.status.code(), Some(0));
+    let report = envelope(report.stdout);
+    assert_eq!(report["status"], "ok");
+    assert_eq!(
+        report["data"]["artifact_verifications"][0]["verification_id"],
+        verification_id
+    );
+    assert_eq!(report["data"]["file_phases"][0]["outcome"], "verified");
+}
+
+#[tokio::test]
 async fn execute_scanned_remux_existing_target_outputs_failure_envelope() {
     let seeded = seed_scanned_remux().await;
     let mut provider = RemuxProviderLaunch::start(&seeded.url).await.unwrap();
@@ -468,6 +511,85 @@ async fn seed_scanned_remux() -> Seeded {
             file_version_id,
             media_snapshot_id: snapshot.id,
             container: "mp4".to_owned(),
+            video_codec: "h264".to_owned(),
+        })
+        .await
+        .unwrap();
+    Seeded {
+        _tmp: tmp,
+        dir,
+        url,
+        version_id: created.version.id.0,
+        input_id: input.input_set_id.0,
+    }
+}
+
+async fn seed_scanned_verify() -> Seeded {
+    let tmp = NamedTempFile::new().unwrap();
+    let dir = TempDir::new().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    let url = sqlite_url_for(tmp.path());
+    voom_store::init(&url).await.unwrap();
+    let pool = voom_store::connect(&url).await.unwrap();
+    let cp = voom_control_plane::ControlPlane::open_with_pool(
+        pool,
+        std::sync::Arc::new(voom_core::SystemClock),
+    )
+    .await
+    .unwrap();
+    let created = cp
+        .create_policy_document(
+            "verify-artifact",
+            "policy \"verify artifact\" { phase verify { verify artifact } }",
+        )
+        .await
+        .unwrap();
+    let source = root.join("Movie.mkv");
+    let source_bytes = b"cli policy verify bytes";
+    std::fs::write(&source, source_bytes).unwrap();
+    let outcome = cp
+        .record_discovered_file(
+            DiscoveredFile {
+                location_kind: FileLocationKind::LocalPath,
+                location_value: source.display().to_string(),
+                content_hash: blake3_checksum(source_bytes),
+                size_bytes: u64::try_from(source_bytes.len()).unwrap(),
+                observed_at: OffsetDateTime::UNIX_EPOCH,
+                proof: None,
+            },
+            None,
+        )
+        .await
+        .unwrap();
+    let IngestOutcome::NewFileAsset {
+        file_version_id, ..
+    } = outcome
+    else {
+        panic!("seed_scanned_verify should create a new file asset");
+    };
+    let snapshot = cp
+        .record_media_snapshot(
+            file_version_id,
+            None,
+            json!({
+                "container": { "format_name": "mkv" },
+                "streams": [{
+                    "id": "stream-0",
+                    "index": 0,
+                    "kind": "video",
+                    "codec_name": "h264"
+                }]
+            }),
+            OffsetDateTime::UNIX_EPOCH,
+        )
+        .await
+        .unwrap();
+    let input = cp
+        .create_policy_input_set_from_scan(PolicyInputFromScanInput {
+            slug: "cli-scan-verify".to_owned(),
+            file_version_id,
+            media_snapshot_id: snapshot.id,
+            container: "mkv".to_owned(),
             video_codec: "h264".to_owned(),
         })
         .await
