@@ -18,7 +18,7 @@ use voom_core::{SystemClock, TicketOperation};
 use voom_store::repo::leases::{NewLease, ReleaseReason};
 use voom_store::repo::tickets::{NewTicket, TicketState};
 use voom_store::repo::workers::{NewWorker, WorkerKind};
-use voom_store::test_support::{T0, sqlite_url_for};
+use voom_store::test_support::{T0, record_worker_eligibility, sqlite_url_for};
 use voom_store::{connect, init};
 
 #[tokio::test]
@@ -51,6 +51,9 @@ async fn m1_fixture_flow_persists_across_reconnect() {
                 registered_at: T0,
                 node_id: None,
             })
+            .await
+            .unwrap();
+        record_worker_eligibility(cp.workers(), w.id, std::slice::from_ref(&t.kind))
             .await
             .unwrap();
         cp.mark_ready_if_unblocked(t.id, T0).await.unwrap();

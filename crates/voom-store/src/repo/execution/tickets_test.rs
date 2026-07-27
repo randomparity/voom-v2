@@ -288,7 +288,9 @@ async fn add_dependency_rejects_leased_dependent() {
     // A leased ticket is mid-execution — adding a new blocker now would
     // pretend it had been gated on the new edge all along. Reject it.
     use crate::repo::execution::leases::{NewLease, SqliteLeaseRepo};
-    use crate::repo::execution::workers::{NewWorker, SqliteWorkerRepo, WorkerKind};
+    use crate::repo::execution::workers::{
+        NewCapability, NewGrant, NewWorker, SqliteWorkerRepo, WorkerKind,
+    };
     use time::Duration;
 
     let (pool, _tmp) = pool().await;
@@ -307,6 +309,28 @@ async fn add_dependency_rejects_leased_dependent() {
             kind: WorkerKind::Synthetic,
             registered_at: OffsetDateTime::UNIX_EPOCH,
             node_id: None,
+        })
+        .await
+        .unwrap();
+    wrepo
+        .record_capability(NewCapability {
+            worker_id: w.id,
+            operation: a.kind.clone(),
+            codecs: Vec::new(),
+            hardware: Vec::new(),
+            artifact_access: Vec::new(),
+            extra: serde_json::json!({}),
+        })
+        .await
+        .unwrap();
+    wrepo
+        .record_grant(NewGrant {
+            worker_id: w.id,
+            can_execute: vec![a.kind.clone()],
+            can_access_read: Vec::new(),
+            can_access_write: Vec::new(),
+            denies: Vec::new(),
+            max_parallel: serde_json::json!({}),
         })
         .await
         .unwrap();

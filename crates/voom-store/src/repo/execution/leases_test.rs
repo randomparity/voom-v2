@@ -7,7 +7,9 @@ use voom_core::rng_test_support::FrozenRng;
 use voom_core::{FailureClass, LeaseId, TicketId, TicketOperation, VoomError, WorkerId};
 
 use crate::repo::execution::tickets::{NewTicket, SqliteTicketRepo, TicketState};
-use crate::repo::execution::workers::{NewWorker, SqliteWorkerRepo, WorkerKind};
+use crate::repo::execution::workers::{
+    NewCapability, NewGrant, NewWorker, SqliteWorkerRepo, WorkerKind,
+};
 use crate::test_support::{T0, fresh_initialized_pool_at};
 
 /// Helper: build a (clock, rng) pair pinned to `T0` and the jitter
@@ -72,7 +74,37 @@ async fn setup() -> (
         })
         .await
         .unwrap();
+    make_worker_eligible(&wrepo, w.id, ticket_op("noop")).await;
     (pool, trepo, wrepo, lrepo, t.id, w.id, tmp)
+}
+
+async fn make_worker_eligible(
+    workers: &SqliteWorkerRepo,
+    worker_id: WorkerId,
+    operation: TicketOperation,
+) {
+    workers
+        .record_capability(NewCapability {
+            worker_id,
+            operation: operation.clone(),
+            codecs: Vec::new(),
+            hardware: Vec::new(),
+            artifact_access: Vec::new(),
+            extra: json!({}),
+        })
+        .await
+        .unwrap();
+    workers
+        .record_grant(NewGrant {
+            worker_id,
+            can_execute: vec![operation],
+            can_access_read: Vec::new(),
+            can_access_write: Vec::new(),
+            denies: Vec::new(),
+            max_parallel: json!({}),
+        })
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
@@ -175,6 +207,28 @@ async fn acquire_promotes_ticket_to_leased_and_bumps_attempt() {
 }
 
 #[tokio::test]
+async fn acquire_resolves_namespaced_workflow_ticket_kind_to_worker_operation() {
+    let (pool, _trepo, _wrepo, lrepo, ticket_id, worker_id, _tmp) = setup().await;
+    sqlx::query("UPDATE tickets SET kind = 'synthetic.workflow.operation.noop' WHERE id = ?")
+        .bind(i64::try_from(ticket_id.0).unwrap())
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let lease = lrepo
+        .acquire(NewLease {
+            ticket_id,
+            worker_id,
+            ttl: Duration::seconds(60),
+            now: T0,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(lease.ticket_id, ticket_id);
+}
+
+#[tokio::test]
 async fn acquire_rejects_when_ticket_not_ready() {
     let (_pool, _trepo, _wrepo, lrepo, tid, wid, _tmp) = setup().await;
     lrepo
@@ -197,6 +251,135 @@ async fn acquire_rejects_when_ticket_not_ready() {
         .await
         .unwrap_err();
     assert!(matches!(err, VoomError::Conflict(_)));
+}
+
+#[derive(Debug, Clone, Copy)]
+enum IneligibleWorkerState {
+    Missing,
+    Stale,
+    Retired,
+    MissingCapability,
+    MissingGrant,
+    Denied,
+}
+
+impl IneligibleWorkerState {
+    const ALL: [Self; 6] = [
+        Self::Missing,
+        Self::Stale,
+        Self::Retired,
+        Self::MissingCapability,
+        Self::MissingGrant,
+        Self::Denied,
+    ];
+
+    const fn error_fragment(self) -> &'static str {
+        match self {
+            Self::Missing => "not found",
+            Self::Stale => "stale",
+            Self::Retired => "retired",
+            Self::MissingCapability => "capability",
+            Self::MissingGrant => "grant",
+            Self::Denied => "denied",
+        }
+    }
+}
+
+#[tokio::test]
+async fn acquire_rejects_ineffective_worker_without_partial_durable_state() {
+    for state in IneligibleWorkerState::ALL {
+        let (pool, trepo, wrepo, lrepo, ticket_id, worker_id, _tmp) = setup().await;
+        make_worker_ineligible(&pool, &wrepo, worker_id, state).await;
+        let before = trepo.get(ticket_id).await.unwrap().unwrap();
+        let mut tx = pool.begin().await.unwrap();
+
+        let err = lrepo
+            .acquire_in_tx(
+                &mut tx,
+                NewLease {
+                    ticket_id,
+                    worker_id,
+                    ttl: Duration::seconds(60),
+                    now: T0,
+                },
+            )
+            .await
+            .unwrap_err();
+        tx.commit().await.unwrap();
+
+        assert!(
+            err.to_string().contains(state.error_fragment()),
+            "state={state:?}, error={err}"
+        );
+        let after = trepo.get(ticket_id).await.unwrap().unwrap();
+        assert_eq!(after.state, TicketState::Ready, "state={state:?}");
+        assert_eq!(after.attempt, before.attempt, "state={state:?}");
+        assert_eq!(after.epoch, before.epoch, "state={state:?}");
+        let lease_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM leases")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(lease_count, 0, "state={state:?}");
+    }
+}
+
+async fn make_worker_ineligible(
+    pool: &sqlx::SqlitePool,
+    workers: &SqliteWorkerRepo,
+    worker_id: WorkerId,
+    state: IneligibleWorkerState,
+) {
+    match state {
+        IneligibleWorkerState::Missing => {
+            sqlx::query("DELETE FROM workers WHERE id = ?")
+                .bind(i64::try_from(worker_id.0).unwrap())
+                .execute(pool)
+                .await
+                .unwrap();
+        }
+        IneligibleWorkerState::Stale => {
+            sqlx::query("UPDATE workers SET status = 'stale' WHERE id = ?")
+                .bind(i64::try_from(worker_id.0).unwrap())
+                .execute(pool)
+                .await
+                .unwrap();
+        }
+        IneligibleWorkerState::Retired => {
+            sqlx::query("UPDATE workers SET status = 'retired', retired_at = ? WHERE id = ?")
+                .bind("1970-01-01T00:00:00Z")
+                .bind(i64::try_from(worker_id.0).unwrap())
+                .execute(pool)
+                .await
+                .unwrap();
+        }
+        IneligibleWorkerState::MissingCapability => {
+            sqlx::query("DELETE FROM worker_capabilities WHERE worker_id = ?")
+                .bind(i64::try_from(worker_id.0).unwrap())
+                .execute(pool)
+                .await
+                .unwrap();
+        }
+        IneligibleWorkerState::MissingGrant => {
+            sqlx::query("DELETE FROM worker_grants WHERE worker_id = ?")
+                .bind(i64::try_from(worker_id.0).unwrap())
+                .execute(pool)
+                .await
+                .unwrap();
+        }
+        IneligibleWorkerState::Denied => {
+            workers
+                .record_grant(NewGrant {
+                    worker_id,
+                    can_execute: Vec::new(),
+                    can_access_read: Vec::new(),
+                    can_access_write: Vec::new(),
+                    denies: vec![ticket_op("noop")],
+                    max_parallel: json!({}),
+                })
+                .await
+                .unwrap();
+        }
+    }
 }
 
 #[tokio::test]
@@ -678,6 +861,7 @@ async fn force_release_with_requeue_rejects_when_attempts_exhausted() {
         })
         .await
         .unwrap();
+    make_worker_eligible(&wrepo, w.id, ticket_op("noop")).await;
     let l = lrepo
         .acquire(NewLease {
             ticket_id: t.id,
@@ -743,6 +927,7 @@ async fn force_release_with_requeue_marks_ready_when_attempts_remain() {
         })
         .await
         .unwrap();
+    make_worker_eligible(&wrepo, w.id, ticket_op("noop")).await;
     let l = lrepo
         .acquire(NewLease {
             ticket_id: t.id,
@@ -1052,11 +1237,38 @@ async fn expire_due_caps_at_lease_batch_limit_and_drains_remainder() {
 
     let limit = usize::try_from(LEASE_BATCH_LIMIT).unwrap();
     let total = limit + 1;
-    for i in 0..total {
+    let operations = (0..total)
+        .map(|i| ticket_op(&format!("k-{i}")))
+        .collect::<Vec<_>>();
+    for operation in &operations {
+        wrepo
+            .record_capability(NewCapability {
+                worker_id: w.id,
+                operation: operation.clone(),
+                codecs: Vec::new(),
+                hardware: Vec::new(),
+                artifact_access: Vec::new(),
+                extra: json!({}),
+            })
+            .await
+            .unwrap();
+    }
+    wrepo
+        .record_grant(NewGrant {
+            worker_id: w.id,
+            can_execute: operations.clone(),
+            can_access_read: Vec::new(),
+            can_access_write: Vec::new(),
+            denies: Vec::new(),
+            max_parallel: json!({}),
+        })
+        .await
+        .unwrap();
+    for operation in operations {
         let t = trepo
             .create(NewTicket {
                 job_id: None,
-                kind: ticket_op(&format!("k-{i}")),
+                kind: operation,
                 priority: 0,
                 payload: json!({}),
                 max_attempts: 3,

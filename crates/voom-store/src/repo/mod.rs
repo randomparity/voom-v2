@@ -105,7 +105,8 @@ pub use use_leases::{
 pub use video_profiles::{NewVideoProfile, SqliteVideoProfileRepo, VideoProfile};
 pub use workers::{
     Capability, Grant, NewCapability, NewGrant, NewWorker, SqliteWorkerRepo, Worker,
-    WorkerInspection, WorkerKind, WorkerNodeContext, WorkerOperationEligibility, WorkerStatus,
+    WorkerInspection, WorkerKind, WorkerNodeContext, WorkerOperationCandidate,
+    WorkerOperationEligibility, WorkerStatus,
 };
 pub use workflow_summaries::{
     FilePhaseOutcome, FilePhaseSummary, FileRunHistory, FileRunStart, NewFilePhaseSummary,

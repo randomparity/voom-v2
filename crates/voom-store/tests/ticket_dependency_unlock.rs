@@ -18,7 +18,7 @@ use voom_core::{SystemClock, TicketOperation, VoomError};
 use voom_store::repo::leases::NewLease;
 use voom_store::repo::tickets::{NewTicket, TicketState};
 use voom_store::repo::workers::{NewWorker, WorkerKind};
-use voom_store::test_support::T0;
+use voom_store::test_support::{T0, record_worker_eligibility};
 
 async fn cp() -> (ControlPlane, tempfile::NamedTempFile) {
     let tmp = tempfile::NamedTempFile::new().unwrap();
@@ -48,13 +48,19 @@ async fn linear_chain_unlocks_in_order() {
         })
         .await
         .unwrap();
+    let operations = (0..10)
+        .map(|i| ticket_op(&format!("step-{i}")))
+        .collect::<Vec<_>>();
+    record_worker_eligibility(cp.workers(), w.id, &operations)
+        .await
+        .unwrap();
 
     let mut ids = Vec::with_capacity(10);
-    for i in 0..10 {
+    for operation in operations {
         let t = cp
             .create_ticket(NewTicket {
                 job_id: None,
-                kind: ticket_op(&format!("step-{i}")),
+                kind: operation,
                 priority: 0,
                 payload: json!({}),
                 max_attempts: 1,
