@@ -52,3 +52,13 @@ voom-core = { workspace = true, features = ["test"] }
 voom-fake-support = { workspace = true }
 voom-ffmpeg-worker = { workspace = true }
 voom-test-support = { workspace = true }
+
+[[test]]
+name = "commit_use_lease_gate"
+path = "tests/commit_use_lease_gate.rs"
+required-features = ["test"]
+
+[[test]]
+name = "recover_commit_gate"
+path = "tests/recover_commit_gate.rs"
+required-features = ["test"]
