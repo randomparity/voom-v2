@@ -83,7 +83,8 @@ Reconciliation result: [x] all discovered roots map to Tasks 3–5 (no new task 
 
 tickets.result; worker_capabilities.extra; worker_grants.max_parallel;
 artifact_handles.{allowed_access_modes,source_lineage};
-artifact_commit_records.report; artifact_verifications.report
+artifact_commit_records.report; artifact_verifications.report;
+audio_extract_operation_outputs.probe_payload
 (in-memory `*Report` derive neither Serialize nor Deserialize);
 external_systems.{connection_profile,rate_limit_config};
 quality_scoring_profiles.definition; quality_scores.{dimension_scores,provenance};
