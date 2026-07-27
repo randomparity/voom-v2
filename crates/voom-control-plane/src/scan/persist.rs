@@ -11,8 +11,7 @@ use voom_core::{
 use voom_events::payload::{
     AssetBundleCreatedPayload, AssetBundleMemberAddedPayload, FileAssetCreatedPayload,
     FileLocationAliasedPayload, FileLocationRecordedPayload, FileVersionCreatedPayload,
-    IdentityEvidenceRecordedPayload, MediaSnapshotRecordedPayload, MediaVariantCreatedPayload,
-    MediaWorkCreatedPayload,
+    IdentityEvidenceRecordedPayload, MediaVariantCreatedPayload, MediaWorkCreatedPayload,
 };
 use voom_events::{Event, SubjectType};
 use voom_store::repo::{
@@ -378,30 +377,15 @@ async fn ingest_new_scanned_file(
     let IngestedIds(file_asset_id, file_version_id, file_location_id) =
         emit_ingest_events(control_plane, tx, &outcome, now).await?;
     record_scan_fact(tx, file_location_id, candidate, now).await?;
-    let snapshot = control_plane
-        .identity
-        .record_media_snapshot_in_tx(
-            tx,
-            NewMediaSnapshot {
-                file_version_id,
-                probed_by: Some(worker_id),
-                probed_at: now,
-                payload: snapshot_payload,
-            },
-        )
-        .await?;
-    append_event(
-        &control_plane.events,
+    let snapshot = crate::media_snapshot::record_with_event_in_tx(
+        control_plane,
         tx,
-        SubjectType::MediaSnapshot,
-        Some(snapshot.id.0),
-        now,
-        Event::MediaSnapshotRecorded(MediaSnapshotRecordedPayload {
-            media_snapshot_id: snapshot.id.0,
-            file_version_id: snapshot.file_version_id.0,
-            probed_by_worker_id: snapshot.probed_by.map(|w| w.0),
-            probed_at: snapshot.probed_at,
-        }),
+        NewMediaSnapshot {
+            file_version_id,
+            probed_by: Some(worker_id),
+            probed_at: now,
+            payload: snapshot_payload,
+        },
     )
     .await?;
     Ok(ResolvedScanIdentity {

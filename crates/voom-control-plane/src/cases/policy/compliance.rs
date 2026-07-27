@@ -24,6 +24,7 @@ use crate::workflow::WorkerRuntimeRegistry;
 use crate::workflow::execution::executor::{
     OperationArtifactRoots, WorkflowArtifactRoots, WorkflowExecutorOptions,
 };
+use crate::workflow::ticket_results::{OrderedTicketResult, ordered_ticket_result};
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ComplianceReportData {
@@ -103,6 +104,158 @@ pub struct ComplianceApplyData {
     pub issues: IssueApplicationSummary,
 }
 
+/// Ordered published or historical sidecar facts from one extraction output.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(untagged)]
+pub enum ComplianceAudioExtractOutput {
+    Published(crate::audio::ExecuteExtractAudioOutputReport),
+    Legacy(ComplianceLegacyAudioExtractOutput),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct ComplianceLegacyAudioExtractOutput {
+    pub output_id: Option<String>,
+    pub staged_artifact_handle_id: u64,
+    pub staged_artifact_location_id: u64,
+    pub verification_id: u64,
+    pub commit_record_id: u64,
+    pub result_file_version_id: u64,
+    pub result_file_location_id: u64,
+    pub staging_path: String,
+    pub target_path: String,
+    pub legacy_singleton: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ComplianceLegacyAudioExtractResult {
+    pub job_id: u64,
+    pub ticket_id: u64,
+    pub lease_id: u64,
+    pub source_file_version_id: u64,
+    pub source_file_location_id: u64,
+    pub staged_artifact_handle_id: u64,
+    pub staged_artifact_location_id: u64,
+    pub verification_id: u64,
+    pub commit_record_id: u64,
+    pub result_file_version_id: u64,
+    pub result_file_location_id: u64,
+    pub staging_path: String,
+    pub target_path: String,
+    #[serde(default)]
+    pub commit_recovery_required: Option<serde_json::Value>,
+}
+
+impl From<ComplianceLegacyAudioExtractResult> for ComplianceLegacyAudioExtractOutput {
+    fn from(result: ComplianceLegacyAudioExtractResult) -> Self {
+        let ComplianceLegacyAudioExtractResult {
+            job_id: _,
+            ticket_id: _,
+            lease_id: _,
+            source_file_version_id: _,
+            source_file_location_id: _,
+            staged_artifact_handle_id,
+            staged_artifact_location_id,
+            verification_id,
+            commit_record_id,
+            result_file_version_id,
+            result_file_location_id,
+            staging_path,
+            target_path,
+            commit_recovery_required: _,
+        } = result;
+        Self {
+            output_id: None,
+            staged_artifact_handle_id,
+            staged_artifact_location_id,
+            verification_id,
+            commit_record_id,
+            result_file_version_id,
+            result_file_location_id,
+            staging_path,
+            target_path,
+            legacy_singleton: true,
+        }
+    }
+}
+
+impl ComplianceAudioExtractOutput {
+    #[must_use]
+    pub fn output_id(&self) -> Option<&str> {
+        match self {
+            Self::Published(output) => output.output_id.as_deref(),
+            Self::Legacy(output) => output.output_id.as_deref(),
+        }
+    }
+
+    #[must_use]
+    pub fn source_snapshot_stream_id(&self) -> Option<&str> {
+        match self {
+            Self::Published(output) => Some(output.source_snapshot_stream_id.as_str()),
+            Self::Legacy(_) => None,
+        }
+    }
+
+    #[must_use]
+    pub fn source_provider_stream_index(&self) -> Option<u32> {
+        match self {
+            Self::Published(output) => Some(output.source_provider_stream_index),
+            Self::Legacy(_) => None,
+        }
+    }
+
+    #[must_use]
+    pub fn result_file_version_id(&self) -> u64 {
+        match self {
+            Self::Published(output) => output.result_file_version_id.0,
+            Self::Legacy(output) => output.result_file_version_id,
+        }
+    }
+
+    #[must_use]
+    pub fn result_file_location_id(&self) -> u64 {
+        match self {
+            Self::Published(output) => output.result_file_location_id.0,
+            Self::Legacy(output) => output.result_file_location_id,
+        }
+    }
+
+    #[must_use]
+    pub fn is_legacy_singleton(&self) -> bool {
+        matches!(self, Self::Legacy(_))
+    }
+}
+
+fn decode_compliance_extract_result(
+    ticket_id: i64,
+    result: &str,
+) -> Result<Vec<ComplianceAudioExtractOutput>, VoomError> {
+    match ordered_ticket_result(result)? {
+        OrderedTicketResult::Outputs(outputs) => outputs
+            .into_iter()
+            .map(|output| {
+                serde_json::from_value(output)
+                    .map(ComplianceAudioExtractOutput::Published)
+                    .map_err(|error| {
+                        VoomError::database(format!(
+                            "audio extraction ticket {ticket_id} published output is malformed: \
+                             {error}"
+                        ))
+                    })
+            })
+            .collect(),
+        OrderedTicketResult::Scalar(result) => {
+            let result: ComplianceLegacyAudioExtractResult = serde_json::from_value(result)
+                .map_err(|error| {
+                    VoomError::database(format!(
+                        "audio extraction ticket {ticket_id} legacy result is malformed: {error}"
+                    ))
+                })?;
+            Ok(vec![ComplianceAudioExtractOutput::Legacy(result.into())])
+        }
+    }
+}
+
 /// The durable result of a `compliance execute` run: the issues applied from
 /// the initial report, plus the phase-barrier coordinator's job-grain summary
 /// and per-phase / per-`(file, phase)` rows. The flat single-report / flat-ticket
@@ -118,6 +271,8 @@ pub struct ComplianceExecuteData {
     pub summary: WorkflowSummaryView,
     pub phases: Vec<PhaseSummaryView>,
     pub file_phases: Vec<FilePhaseSummaryView>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub audio_extract_outputs: Vec<ComplianceAudioExtractOutput>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub latest_phase_index: Option<usize>,
 }
@@ -126,6 +281,7 @@ impl ComplianceExecuteData {
     fn from_outcome(
         issues: IssueApplicationSummary,
         outcome: &crate::workflow::coordinator::CoordinatorOutcome,
+        audio_extract_outputs: Vec<ComplianceAudioExtractOutput>,
     ) -> Self {
         let phases: Vec<PhaseSummaryView> =
             outcome.phases.iter().map(PhaseSummaryView::from).collect();
@@ -140,6 +296,7 @@ impl ComplianceExecuteData {
             summary: WorkflowSummaryView::from_summary(&outcome.summary, &file_phases),
             phases,
             file_phases,
+            audio_extract_outputs,
             latest_phase_index,
         }
     }
@@ -466,6 +623,8 @@ pub struct ComplianceRunReportData {
     pub summary: WorkflowSummaryView,
     pub phases: Vec<PhaseSummaryView>,
     pub file_phases: Vec<FilePhaseSummaryView>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub audio_extract_outputs: Vec<ComplianceAudioExtractOutput>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub latest_phase_index: Option<usize>,
 }
@@ -792,13 +951,32 @@ impl ControlPlane {
             .map_err(no_partial)?;
         let issues = apply_data.issues;
         match Box::pin(self.run_prepared_phase_barrier(prepared, options, runtimes)).await {
-            Ok(outcome) => Ok(ComplianceExecuteData::from_outcome(issues, &outcome)),
-            Err(err) => Err(ComplianceExecuteError {
-                source: err.source,
-                partial: err
-                    .partial
-                    .map(|outcome| ComplianceExecuteData::from_outcome(issues, &outcome)),
-            }),
+            Ok(outcome) => {
+                let outputs = self
+                    .audio_extract_outputs_for_job(outcome.job_id)
+                    .await
+                    .map_err(no_partial)?;
+                Ok(ComplianceExecuteData::from_outcome(
+                    issues, &outcome, outputs,
+                ))
+            }
+            Err(err) => {
+                let partial = if let Some(outcome) = err.partial {
+                    let outputs = self
+                        .audio_extract_outputs_for_job(outcome.job_id)
+                        .await
+                        .map_err(no_partial)?;
+                    Some(ComplianceExecuteData::from_outcome(
+                        issues, &outcome, outputs,
+                    ))
+                } else {
+                    None
+                };
+                Err(ComplianceExecuteError {
+                    source: err.source,
+                    partial,
+                })
+            }
         }
     }
 
@@ -1071,13 +1249,41 @@ impl ControlPlane {
             .iter()
             .map(FilePhaseSummaryView::from)
             .collect();
+        let audio_extract_outputs = self.audio_extract_outputs_for_job(job_id).await?;
         let latest_phase_index = latest_phase_index(&phases);
         Ok(ComplianceRunReportData {
             summary: WorkflowSummaryView::from_summary(&summary, &file_phases),
             phases,
             file_phases,
+            audio_extract_outputs,
             latest_phase_index,
         })
+    }
+
+    async fn audio_extract_outputs_for_job(
+        &self,
+        job_id: voom_core::JobId,
+    ) -> Result<Vec<ComplianceAudioExtractOutput>, VoomError> {
+        let job_id = i64::try_from(job_id.0).map_err(|error| {
+            VoomError::Internal(format!("audio extract report job id overflow: {error}"))
+        })?;
+        let rows: Vec<(i64, String)> = sqlx::query_as(
+            "SELECT id, result FROM tickets \
+             WHERE job_id = ? AND state = 'succeeded' AND result IS NOT NULL \
+               AND kind = 'synthetic.workflow.operation.extract_audio' \
+             ORDER BY id ASC",
+        )
+        .bind(job_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|error| {
+            VoomError::database_context("compliance audio extract output report", error)
+        })?;
+        let mut outputs = Vec::new();
+        for (ticket_id, result) in rows {
+            outputs.extend(decode_compliance_extract_result(ticket_id, &result)?);
+        }
+        Ok(outputs)
     }
 }
 

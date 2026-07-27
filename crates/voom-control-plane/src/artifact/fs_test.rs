@@ -264,6 +264,63 @@ async fn promote_staged_add_only_with_temp_uses_caller_supplied_temp_path() {
     assert_eq!(std::fs::read(&target).unwrap(), b"final bytes");
 }
 
+#[tokio::test]
+async fn recovery_installs_exact_persisted_temp_when_target_is_missing() {
+    let dir = artifact_tempdir();
+    let staging = dir.path().join("staged.bin");
+    let target = dir.path().join("target.bin");
+    let temp = dir.path().join(".prepared-sidecar.tmp");
+    std::fs::write(&staging, b"final bytes").unwrap();
+    std::fs::write(&temp, b"final bytes").unwrap();
+    let expected = observe_regular_file(&staging).await.unwrap();
+
+    let report = recover_staged_add_only_with_temp(&staging, &target, &temp, &expected)
+        .await
+        .unwrap();
+
+    assert_eq!(report.target.content_hash, expected.content_hash);
+    assert!(!temp.exists());
+    assert_eq!(std::fs::read(&target).unwrap(), b"final bytes");
+}
+
+#[tokio::test]
+async fn recovery_removes_exact_temp_alias_when_target_is_already_installed() {
+    let dir = artifact_tempdir();
+    let staging = dir.path().join("staged.bin");
+    let target = dir.path().join("target.bin");
+    let temp = dir.path().join(".prepared-sidecar.tmp");
+    std::fs::write(&staging, b"final bytes").unwrap();
+    std::fs::write(&temp, b"final bytes").unwrap();
+    std::fs::hard_link(&temp, &target).unwrap();
+    let expected = observe_regular_file(&staging).await.unwrap();
+
+    recover_staged_add_only_with_temp(&staging, &target, &temp, &expected)
+        .await
+        .unwrap();
+
+    assert!(!temp.exists());
+    assert_eq!(std::fs::read(&target).unwrap(), b"final bytes");
+}
+
+#[tokio::test]
+async fn recovery_rejects_mismatched_persisted_temp_without_mutation() {
+    let dir = artifact_tempdir();
+    let staging = dir.path().join("staged.bin");
+    let target = dir.path().join("target.bin");
+    let temp = dir.path().join(".prepared-sidecar.tmp");
+    std::fs::write(&staging, b"final bytes").unwrap();
+    std::fs::write(&temp, b"wrong bytes").unwrap();
+    let expected = observe_regular_file(&staging).await.unwrap();
+
+    let error = recover_staged_add_only_with_temp(&staging, &target, &temp, &expected)
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.error_code(), voom_core::ErrorCode::Conflict);
+    assert!(!target.exists());
+    assert_eq!(std::fs::read(&temp).unwrap(), b"wrong bytes");
+}
+
 struct RejectBeforeInstall;
 
 impl PromotionFailpoint for RejectBeforeInstall {

@@ -57,6 +57,7 @@ fn each_kind_has_distinct_wire_string() {
         EventKind::ArtifactAudioExtractProgress,
         EventKind::ArtifactAudioExtractSucceeded,
         EventKind::ArtifactAudioExtractFailed,
+        EventKind::ArtifactAudioExtractQuiesced,
         EventKind::IssueOpened,
         EventKind::IssueUpdated,
         EventKind::IssueResolved,
@@ -179,6 +180,7 @@ fn every_kind_round_trips_through_as_str_and_from_str() {
         EventKind::ArtifactAudioExtractProgress,
         EventKind::ArtifactAudioExtractSucceeded,
         EventKind::ArtifactAudioExtractFailed,
+        EventKind::ArtifactAudioExtractQuiesced,
         EventKind::IssueOpened,
         EventKind::IssueUpdated,
         EventKind::IssueResolved,
@@ -287,6 +289,10 @@ fn audio_artifact_event_kinds_use_exact_sprint_14_wire_strings() {
         (
             EventKind::ArtifactAudioExtractFailed,
             "artifact.audio_extract_failed",
+        ),
+        (
+            EventKind::ArtifactAudioExtractQuiesced,
+            "artifact.audio_extract_quiesced",
         ),
     ];
 

@@ -11,7 +11,7 @@ use tempfile::NamedTempFile;
 use voom_control_plane::ControlPlane;
 use voom_control_plane::policy::{ComplianceExecutionOptions, PolicyInputFromScanInput};
 use voom_control_plane::scan::{ScanPathInput, ScanReportFileStatus};
-use voom_core::{BundleId, FileAssetId, FileVersionId, MediaSnapshotId};
+use voom_core::{BundleId, FileAssetId, FileVersionId, JobId, MediaSnapshotId};
 use voom_plan::PlanOperationKind;
 use voom_store::repo::bundles::{
     BundleMemberRole, NewAssetBundle, NewBundleMember, SqliteBundleRepo,
@@ -116,14 +116,18 @@ async fn audio_extract_flow_verifies_commits_and_adds_sidecar_to_source_bundle()
         .unwrap();
     worker.shutdown().unwrap();
 
-    assert_extract_execution_result(&url, &out_dir, source_bundle_id, &executed).await;
+    let outputs =
+        assert_extract_execution_result(&url, &out_dir, source_bundle_id, &executed, 1).await;
+    assert_produced_audio_facts(&outputs, &["Commentary"]);
 }
 
 #[tokio::test]
-async fn audio_extract_multi_match_plans_without_sidecar_commit() {
+async fn audio_extract_multi_match_publishes_ordered_media_and_lineage() {
     let _guard = AUDIO_EXTRACT_FLOW_LOCK.lock().await;
     require_command("ffmpeg", &["-version"]);
     cargo_build_package("voom-ffprobe-worker").unwrap();
+    cargo_build_package("voom-verify-artifact-worker").unwrap();
+    cargo_build_package("voom-ffmpeg-worker").unwrap();
     let _ffprobe_guard = hide_stale_fake_ffprobe_sibling("audio-extract-flow").unwrap();
 
     let tmp = tempdir_in_repo();
@@ -141,7 +145,7 @@ async fn audio_extract_multi_match_plans_without_sidecar_commit() {
 
     let scanned = scan_source(&cp, &source).await;
     let scanned = enrich_audio_snapshot_for_extract(&cp, &url, scanned).await;
-    create_primary_bundle(&pool, scanned.file_version_id).await;
+    let source_bundle_id = create_primary_bundle(&pool, scanned.file_version_id).await;
     let policy = cp
         .create_policy_document("extract-english-audio", EXTRACT_ENGLISH_POLICY)
         .await
@@ -168,8 +172,54 @@ async fn audio_extract_multi_match_plans_without_sidecar_commit() {
         PlanOperationKind::ExtractAudio
     );
     assert_eq!(plan.plan.nodes[0].status, voom_plan::NodeStatus::Planned);
-    assert_table_count(&pool, "artifact_commit_records", 0).await;
-    assert!(!tmp.path().join("out").exists());
+
+    let mut worker = ExtractAudioWorkerLaunch::start(&cp).await.unwrap();
+    let out_dir = tmp.path().join("out");
+    let executed = cp
+        .execute_compliance_policy_with_options(
+            policy.version.id,
+            input.input_set_id,
+            ComplianceExecutionOptions {
+                audio_staging_root: tmp.path().join("audio-stage"),
+                audio_target_dir: out_dir.clone(),
+                ..ComplianceExecutionOptions::default()
+            },
+        )
+        .await
+        .unwrap();
+    worker.shutdown().unwrap();
+
+    let outputs =
+        assert_extract_execution_result(&url, &out_dir, source_bundle_id, &executed, 2).await;
+    assert_ne!(outputs[0].file_name(), outputs[1].file_name());
+    assert_ne!(
+        executed.audio_extract_outputs[0].output_id(),
+        executed.audio_extract_outputs[1].output_id()
+    );
+    assert_eq!(
+        executed.audio_extract_outputs[0].source_provider_stream_index(),
+        Some(1)
+    );
+    assert_eq!(
+        executed.audio_extract_outputs[1].source_provider_stream_index(),
+        Some(2)
+    );
+    let post_run = cp
+        .read_compliance_run_report(JobId(executed.summary.job_id))
+        .await
+        .unwrap();
+    assert_eq!(
+        post_run.audio_extract_outputs,
+        executed.audio_extract_outputs
+    );
+    assert_produced_audio_facts(&outputs, &["Main", "Commentary"]);
+    assert_extract_lineage(
+        &pool,
+        scanned.file_version_id,
+        scanned.snapshot_id,
+        &executed.audio_extract_outputs,
+    )
+    .await;
 }
 
 fn tempdir_in_repo() -> tempfile::TempDir {
@@ -369,75 +419,135 @@ async fn assert_extract_execution_result(
     out_dir: &Path,
     source_bundle_id: BundleId,
     executed: &voom_control_plane::policy::ComplianceExecuteData,
-) {
+    expected_count: usize,
+) -> Vec<PathBuf> {
     let result = ticket_result(url, executed.summary.job_id, "extract_audio").await;
-    let staged_artifact_handle_id = result["staged_artifact_handle_id"].as_u64().unwrap();
-    let verification_id = result["verification_id"].as_u64().unwrap();
-    let commit_record_id = result["commit_record_id"].as_u64().unwrap();
-    let result_file_version_id = FileVersionId(result["result_file_version_id"].as_u64().unwrap());
-    let result_file_location_id = result["result_file_location_id"].as_u64().unwrap();
-    let committed_target = PathBuf::from(result["target_path"].as_str().unwrap());
-
-    assert!(staged_artifact_handle_id > 0);
-    assert!(verification_id > 0);
-    assert!(commit_record_id > 0);
-    assert!(result_file_version_id.0 > 0);
-    assert!(result_file_location_id > 0);
-    // The worker committed into the per-operation working dir; post-run promotion
-    // moved the terminal artifact into --output-dir, keeping its file name.
-    assert!(
-        committed_target
-            .to_str()
-            .is_some_and(|target| target.contains("/.committed/audio/")),
-        "commit must target the working dir, got {}",
-        committed_target.display()
+    let outputs = result["outputs"].as_array().unwrap();
+    assert_eq!(outputs.len(), expected_count);
+    assert_eq!(
+        serde_json::to_value(&executed.audio_extract_outputs).unwrap(),
+        serde_json::Value::Array(outputs.clone())
     );
-    let file_name = committed_target.file_name().unwrap();
-    let promoted = out_dir.canonicalize().unwrap().join(file_name);
-    assert!(promoted.is_file(), "{} must exist", promoted.display());
-    assert!(
-        file_name
-            .to_str()
-            .is_some_and(|file_name| file_name.ends_with(".opus.ogg"))
-    );
-
     let pool = voom_store::connect(url).await.unwrap();
-    assert_row_exists(
-        &pool,
-        "SELECT COUNT(*) FROM artifact_handles WHERE id = ?",
-        staged_artifact_handle_id,
-    )
-    .await;
-    assert_row_exists(
-        &pool,
-        "SELECT COUNT(*) FROM artifact_verifications WHERE id = ?",
-        verification_id,
-    )
-    .await;
-    assert_row_exists(
-        &pool,
-        "SELECT COUNT(*) FROM artifact_commit_records WHERE id = ?",
-        commit_record_id,
-    )
-    .await;
-    assert_row_exists(
-        &pool,
-        "SELECT COUNT(*) FROM file_locations WHERE id = ?",
-        result_file_location_id,
-    )
-    .await;
-
-    let result_asset_id = file_asset_id_for(&pool, result_file_version_id).await;
+    let mut promoted = Vec::with_capacity(outputs.len());
+    let mut result_asset_ids = Vec::with_capacity(outputs.len());
+    for output in outputs {
+        let (path, asset_id) = assert_published_output(&pool, out_dir, output).await;
+        promoted.push(path);
+        result_asset_ids.push(asset_id);
+    }
     let members = SqliteBundleRepo::new(pool)
         .list_members(source_bundle_id)
         .await
         .unwrap();
     assert!(members.iter().any(|member| {
-        member.role == BundleMemberRole::PrimaryVideo && member.file_asset_id != result_asset_id
+        member.role == BundleMemberRole::PrimaryVideo
+            && !result_asset_ids.contains(&member.file_asset_id)
     }));
-    assert!(members.iter().any(|member| {
-        member.role == BundleMemberRole::CommentaryAudio && member.file_asset_id == result_asset_id
-    }));
+    for result_asset_id in result_asset_ids {
+        assert!(
+            members
+                .iter()
+                .any(|member| member.file_asset_id == result_asset_id)
+        );
+    }
+    promoted
+}
+
+async fn assert_published_output(
+    pool: &sqlx::SqlitePool,
+    out_dir: &Path,
+    output: &serde_json::Value,
+) -> (PathBuf, FileAssetId) {
+    for (table, field) in [
+        ("artifact_handles", "staged_artifact_handle_id"),
+        ("artifact_verifications", "verification_id"),
+        ("artifact_commit_records", "commit_record_id"),
+        ("file_locations", "result_file_location_id"),
+    ] {
+        assert_row_exists(
+            pool,
+            &format!("SELECT COUNT(*) FROM {table} WHERE id = ?"),
+            output[field].as_u64().unwrap(),
+        )
+        .await;
+    }
+    let committed_target = PathBuf::from(output["target_path"].as_str().unwrap());
+    assert!(
+        committed_target
+            .to_str()
+            .is_some_and(|target| target.contains("/.committed/audio/"))
+    );
+    let file_name = committed_target.file_name().unwrap();
+    assert!(
+        file_name
+            .to_str()
+            .is_some_and(|name| name.ends_with(".opus.ogg"))
+    );
+    let promoted = out_dir.canonicalize().unwrap().join(file_name);
+    assert!(promoted.is_file(), "{} must exist", promoted.display());
+    let version_id = FileVersionId(output["result_file_version_id"].as_u64().unwrap());
+    (promoted, file_asset_id_for(pool, version_id).await)
+}
+
+fn assert_produced_audio_facts(paths: &[PathBuf], expected_titles: &[&str]) {
+    assert_eq!(paths.len(), expected_titles.len());
+    for (path, expected_title) in paths.iter().zip(expected_titles) {
+        let output = Command::new("ffprobe")
+            .args(["-v", "error", "-show_streams", "-of", "json"])
+            .arg(path)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "ffprobe failed for {}: {}",
+            path.display(),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let probe: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        let streams = probe["streams"].as_array().unwrap();
+        assert_eq!(streams.len(), 1);
+        assert_eq!(streams[0]["codec_type"], "audio");
+        assert_eq!(streams[0]["codec_name"], "opus");
+        assert_eq!(streams[0]["tags"]["language"], "eng");
+        assert_eq!(streams[0]["tags"]["title"], *expected_title);
+    }
+}
+
+async fn assert_extract_lineage(
+    pool: &sqlx::SqlitePool,
+    source_file_version_id: FileVersionId,
+    source_snapshot_id: MediaSnapshotId,
+    outputs: &[voom_control_plane::policy::ComplianceAudioExtractOutput],
+) {
+    let rows: Vec<(i64, i64, i64, String, i64, i64)> = sqlx::query_as(
+        "SELECT output.ordinal, lineage.source_file_version_id, \
+                lineage.source_media_snapshot_id, lineage.source_snapshot_stream_id, \
+                lineage.source_provider_stream_index, lineage.result_file_version_id \
+         FROM audio_extract_output_lineage lineage \
+         JOIN audio_extract_operation_outputs output \
+           ON output.id = lineage.operation_output_id \
+         ORDER BY output.ordinal ASC",
+    )
+    .fetch_all(pool)
+    .await
+    .unwrap();
+    assert_eq!(rows.len(), outputs.len());
+    for (ordinal, row) in rows.iter().enumerate() {
+        let output = &outputs[ordinal];
+        assert_eq!(row.0, i64::try_from(ordinal).unwrap());
+        assert_eq!(row.1, i64::try_from(source_file_version_id.0).unwrap());
+        assert_eq!(row.2, i64::try_from(source_snapshot_id.0).unwrap());
+        assert_eq!(row.3, output.source_snapshot_stream_id().unwrap());
+        assert_eq!(
+            row.4,
+            i64::from(output.source_provider_stream_index().unwrap())
+        );
+        assert_eq!(
+            row.5,
+            i64::try_from(output.result_file_version_id()).unwrap()
+        );
+    }
 }
 
 async fn file_asset_id_for(pool: &sqlx::SqlitePool, file_version_id: FileVersionId) -> FileAssetId {
@@ -456,12 +566,6 @@ async fn assert_row_exists(pool: &sqlx::SqlitePool, sql: &str, id: u64) {
         .await
         .unwrap();
     assert_eq!(count, 1);
-}
-
-async fn assert_table_count(pool: &sqlx::SqlitePool, table: &str, expected: i64) {
-    let sql = format!("SELECT COUNT(*) FROM {table}");
-    let count: i64 = sqlx::query_scalar(&sql).fetch_one(pool).await.unwrap();
-    assert_eq!(count, expected);
 }
 
 fn require_command(program: &str, args: &[&str]) {

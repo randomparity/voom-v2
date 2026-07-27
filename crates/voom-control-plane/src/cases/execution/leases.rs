@@ -13,6 +13,7 @@ use voom_events::payload::{
     TicketSucceededPayload,
 };
 use voom_events::{Event, SubjectType};
+use voom_store::repo::audio_extract_operations::SqliteAudioExtractOperationRepo;
 use voom_store::repo::leases::{ExpireReport, ForceReleaseOutcome, Lease, NewLease};
 use voom_store::repo::tickets::TicketState;
 
@@ -116,7 +117,15 @@ impl ControlPlane {
         ttl: Duration,
         now: OffsetDateTime,
     ) -> Result<Lease, VoomError> {
-        self.leases.heartbeat_in_tx(tx, lease_id, ttl, now).await
+        let lease = self.leases.heartbeat_in_tx(tx, lease_id, ttl, now).await?;
+        SqliteAudioExtractOperationRepo::renew_claims_for_lease_in_tx(
+            tx,
+            lease_id,
+            lease.expires_at,
+            now,
+        )
+        .await?;
+        Ok(lease)
     }
 
     /// Release a lease successfully. Emits `lease.released` +

@@ -153,23 +153,53 @@ impl ControlPlane {
         &self,
         job_id: JobId,
     ) -> Result<Vec<FileLocationId>, VoomError> {
-        let rows: Vec<(i64,)> = sqlx::query_as(
-            "SELECT json_extract(result, '$.result_file_location_id') \
-             FROM tickets \
-             WHERE job_id = ? \
-               AND state = 'succeeded' \
-               AND result IS NOT NULL \
-               AND json_type(result, '$.result_file_location_id') = 'integer' \
+        let ticket_ids: Vec<(i64,)> =
+            sqlx::query_as("SELECT id FROM tickets WHERE job_id = ? ORDER BY id ASC")
+                .bind(sqlite_i64(job_id.0, "promotion job id")?)
+                .fetch_all(&self.pool)
+                .await
+                .map_err(|error| VoomError::database_context("promotion job tickets", error))?;
+        let ticket_ids = ticket_ids
+            .into_iter()
+            .map(|(id,)| sqlite_u64(id, "promotion ticket id"))
+            .map(|result| result.map(TicketId))
+            .collect::<Result<Vec<_>, _>>()?;
+        self.ticket_result_location_ids_for_tickets(&ticket_ids)
+            .await
+    }
+
+    pub(super) async fn ticket_result_location_ids_for_tickets(
+        &self,
+        ticket_ids: &[TicketId],
+    ) -> Result<Vec<FileLocationId>, VoomError> {
+        if ticket_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let ticket_ids = ticket_ids
+            .iter()
+            .map(|id| sqlite_i64(id.0, "promotion ticket id"))
+            .collect::<Result<Vec<_>, _>>()?;
+        let ticket_ids = serde_json::to_string(&ticket_ids)
+            .map_err(|error| VoomError::Internal(format!("promotion tickets encode: {error}")))?;
+        let rows: Vec<(String,)> = sqlx::query_as(
+            "SELECT result FROM tickets \
+             WHERE id IN (SELECT value FROM json_each(?)) \
+               AND state = 'succeeded' AND result IS NOT NULL \
              ORDER BY id ASC",
         )
-        .bind(sqlite_i64(job_id.0, "promotion job id")?)
+        .bind(&ticket_ids)
         .fetch_all(&self.pool)
         .await
         .map_err(|e| VoomError::database_context("promotion ticket results", e))?;
-        rows.into_iter()
-            .map(|(id,)| sqlite_u64(id, "promotion ticket result location id"))
-            .map(|result| result.map(FileLocationId))
-            .collect()
+        let mut ids = Vec::new();
+        for (result,) in rows {
+            ids.extend(
+                crate::workflow::ticket_results::result_location_ids(&result)?
+                    .into_iter()
+                    .map(FileLocationId),
+            );
+        }
+        Ok(ids)
     }
 
     /// Scoped live local-path chain-tip file locations, paired with their owning

@@ -82,6 +82,7 @@ fn _event_variants_are_exhaustive(e: &Event) {
         Event::ArtifactAudioExtractProgress(_) => {}
         Event::ArtifactAudioExtractSucceeded(_) => {}
         Event::ArtifactAudioExtractFailed(_) => {}
+        Event::ArtifactAudioExtractQuiesced(_) => {}
         Event::IssueOpened(_) => {}
         Event::IssueUpdated(_) => {}
         Event::IssueResolved(_) => {}
@@ -574,6 +575,7 @@ fn event_kind_matches_serde_tag() {
             output_container: "mka".to_owned(),
             provider: None,
             provider_version: None,
+            outputs: Vec::new(),
         }),
         Event::ArtifactAudioExtractProgress(ArtifactAudioExtractProgressPayload {
             job_id: 1,
@@ -614,6 +616,7 @@ fn event_kind_matches_serde_tag() {
             output_audio_codec: "aac".to_owned(),
             provider: "ffmpeg".to_owned(),
             provider_version: "1".to_owned(),
+            outputs: Vec::new(),
         }),
         Event::ArtifactAudioExtractFailed(ArtifactAudioExtractFailedPayload {
             job_id: 1,
@@ -633,6 +636,7 @@ fn event_kind_matches_serde_tag() {
             message: "m".to_owned(),
             provider: None,
             provider_version: None,
+            outputs: Vec::new(),
         }),
         Event::IssueOpened(issue_payload("planned")),
         Event::IssueUpdated(issue_payload("open")),

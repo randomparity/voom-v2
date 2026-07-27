@@ -377,30 +377,11 @@ impl ControlPlane {
         if ticket_ids.is_empty() {
             return Ok(location_ids);
         }
-        let ticket_ids = ticket_ids
-            .into_iter()
-            .map(|id| i64::try_from(id.0))
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|error| {
-                VoomError::Internal(format!("promotion ticket id overflow: {error}"))
-            })?;
-        let ticket_ids = serde_json::to_string(&ticket_ids)
-            .map_err(|error| VoomError::Internal(format!("promotion tickets encode: {error}")))?;
-        let rows: Vec<(i64,)> = sqlx::query_as(
-            "SELECT json_extract(result, '$.result_file_location_id') FROM tickets \
-             WHERE id IN (SELECT value FROM json_each(?)) \
-               AND state = 'succeeded' AND result IS NOT NULL \
-               AND json_type(result, '$.result_file_location_id') = 'integer' \
-             ORDER BY id ASC",
-        )
-        .bind(ticket_ids)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(|error| VoomError::database_context("branch promotion results", error))?;
-        for (id,) in rows {
-            let location_id = FileLocationId(u64::try_from(id).map_err(|error| {
-                VoomError::Internal(format!("promotion location id invalid: {error}"))
-            })?);
+        let ticket_ids = ticket_ids.into_iter().collect::<Vec<_>>();
+        for location_id in self
+            .ticket_result_location_ids_for_tickets(&ticket_ids)
+            .await?
+        {
             if seen.insert(location_id) {
                 location_ids.push(location_id);
             }

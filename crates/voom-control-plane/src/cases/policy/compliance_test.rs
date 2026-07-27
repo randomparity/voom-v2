@@ -6,6 +6,7 @@ use voom_events::EventKind;
 use voom_plan::PlanOperationKind;
 use voom_policy::{FixtureName, load_fixture, load_policy_fixture};
 use voom_store::repo::identity::{DiscoveredFile, FileLocationKind, IngestOutcome};
+use voom_store::repo::tickets::NewTicket;
 use voom_store::repo::workers::{NewCapability, NewGrant, NewWorker, WorkerKind};
 
 use crate::cases::policy::policy_inputs::PolicyInputFromScanInput;
@@ -1150,6 +1151,196 @@ async fn read_compliance_run_report_unknown_job_is_not_found() {
                 if message.contains("no job with id 999999")
         ),
         "unknown job must be NotFound(no job with id), got {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn compliance_audio_extract_outputs_preserve_ticket_and_descriptor_order() {
+    let (cp, _tmp) = cp().await;
+    let job = cp
+        .open_job(voom_store::repo::jobs::NewJob {
+            kind: "synthetic.workflow".to_owned(),
+            priority: 0,
+            created_at: T0,
+        })
+        .await
+        .unwrap();
+    let ticket = cp
+        .create_ticket(NewTicket {
+            job_id: Some(job.id),
+            kind: TicketOperation::new("synthetic.workflow.operation.extract_audio").unwrap(),
+            priority: 0,
+            payload: serde_json::json!({}),
+            max_attempts: 1,
+            created_at: T0,
+        })
+        .await
+        .unwrap();
+    let result = serde_json::json!({
+        "result_file_location_id": 11,
+        "outputs": [
+            published_extract_output("output-a", "a-1", 1, 11, 1),
+            published_extract_output("output-b", "a-2", 2, 12, 2)
+        ]
+    });
+    sqlx::query(
+        "UPDATE tickets SET state = 'succeeded', result = ?, state_changed_at = ? WHERE id = ?",
+    )
+    .bind(serde_json::to_string(&result).unwrap())
+    .bind("1970-01-01T00:00:00Z")
+    .bind(i64::try_from(ticket.id.0).unwrap())
+    .execute(cp.pool_for_test())
+    .await
+    .unwrap();
+
+    let outputs = cp.audio_extract_outputs_for_job(job.id).await.unwrap();
+
+    assert_eq!(outputs.len(), 2);
+    assert_eq!(outputs[0].output_id(), Some("output-a"));
+    assert_eq!(outputs[1].output_id(), Some("output-b"));
+
+    let legacy = cp
+        .create_ticket(NewTicket {
+            job_id: Some(job.id),
+            kind: TicketOperation::new("synthetic.workflow.operation.extract_audio").unwrap(),
+            priority: 0,
+            payload: serde_json::json!({}),
+            max_attempts: 1,
+            created_at: T0,
+        })
+        .await
+        .unwrap();
+    let legacy_result = historical_extract_result();
+    sqlx::query(
+        "UPDATE tickets SET state = 'succeeded', result = ?, state_changed_at = ? WHERE id = ?",
+    )
+    .bind(serde_json::to_string(&legacy_result).unwrap())
+    .bind("1970-01-01T00:00:00Z")
+    .bind(i64::try_from(legacy.id.0).unwrap())
+    .execute(cp.pool_for_test())
+    .await
+    .unwrap();
+
+    let outputs = cp.audio_extract_outputs_for_job(job.id).await.unwrap();
+    assert_eq!(outputs.len(), 3);
+    assert_eq!(outputs[2].result_file_location_id(), 26);
+    assert!(outputs[2].is_legacy_singleton());
+}
+
+fn published_extract_output(
+    output_id: &str,
+    source_snapshot_stream_id: &str,
+    source_provider_stream_index: u32,
+    result_file_location_id: u64,
+    seed: u64,
+) -> serde_json::Value {
+    serde_json::json!({
+        "operation_output_id": 100 + seed,
+        "output_id": output_id,
+        "source_file_version_id": 200 + seed,
+        "source_media_snapshot_id": 300 + seed,
+        "source_snapshot_stream_id": source_snapshot_stream_id,
+        "source_provider_stream_index": source_provider_stream_index,
+        "role": "extract_audio_sidecar",
+        "staged_artifact_handle_id": 400 + seed,
+        "staged_artifact_location_id": 500 + seed,
+        "verification_id": 600 + seed,
+        "commit_record_id": 700 + seed,
+        "result_file_version_id": 800 + seed,
+        "result_file_location_id": result_file_location_id,
+        "result_file_asset_id": 900 + seed,
+        "result_media_snapshot_id": 1000 + seed,
+        "bundle_member_id": 1100 + seed,
+        "lineage_id": 1200 + seed,
+        "staging_path": format!("/stage/{output_id}.ogg"),
+        "target_path": format!("/target/{output_id}.ogg")
+    })
+}
+
+#[derive(serde::Serialize)]
+struct HistoricalExecuteExtractAudioReport {
+    job_id: u64,
+    ticket_id: u64,
+    lease_id: u64,
+    source_file_version_id: u64,
+    source_file_location_id: u64,
+    staged_artifact_handle_id: u64,
+    staged_artifact_location_id: u64,
+    verification_id: u64,
+    commit_record_id: u64,
+    result_file_version_id: u64,
+    result_file_location_id: u64,
+    staging_path: &'static str,
+    target_path: &'static str,
+    commit_recovery_required: Option<serde_json::Value>,
+}
+
+fn historical_extract_result() -> serde_json::Value {
+    serde_json::to_value(HistoricalExecuteExtractAudioReport {
+        job_id: 1,
+        ticket_id: 2,
+        lease_id: 3,
+        source_file_version_id: 20,
+        source_file_location_id: 21,
+        staged_artifact_handle_id: 21,
+        staged_artifact_location_id: 22,
+        verification_id: 23,
+        commit_record_id: 24,
+        result_file_version_id: 25,
+        result_file_location_id: 26,
+        staging_path: "/stage/legacy.ogg",
+        target_path: "/target/legacy.ogg",
+        commit_recovery_required: Some(serde_json::json!({
+            "recovery_reason": "historical recovery payload remains opaque"
+        })),
+    })
+    .unwrap()
+}
+
+#[test]
+fn compliance_audio_extract_outputs_reject_incomplete_published_members() {
+    let result = serde_json::json!({
+        "outputs": [{
+            "output_id": "incomplete",
+            "result_file_location_id": 1
+        }]
+    });
+
+    let error = super::decode_compliance_extract_result(42, &result.to_string()).unwrap_err();
+
+    assert!(
+        error
+            .to_string()
+            .contains("audio extraction ticket 42 published output is malformed")
+    );
+}
+
+#[test]
+fn compliance_audio_extract_outputs_reject_unknown_published_fields() {
+    let mut output = published_extract_output("output-a", "a-1", 1, 11, 1);
+    output["unexpected"] = serde_json::json!(true);
+    let result = serde_json::json!({ "outputs": [output] });
+
+    let error = super::decode_compliance_extract_result(42, &result.to_string()).unwrap_err();
+
+    assert!(
+        error
+            .to_string()
+            .contains("audio extraction ticket 42 published output is malformed")
+    );
+}
+
+#[test]
+fn compliance_audio_extract_outputs_reject_unknown_legacy_fields() {
+    let mut result = historical_extract_result();
+    result["unexpected"] = serde_json::json!(true);
+
+    let error = super::decode_compliance_extract_result(42, &result.to_string()).unwrap_err();
+
+    assert!(
+        error
+            .to_string()
+            .contains("audio extraction ticket 42 legacy result is malformed")
     );
 }
 

@@ -108,12 +108,12 @@ fn extraction_selection_returns_exactly_one_stream_and_role() {
 
     let selection = extract_selection_from_payload_and_snapshot(&payload, &snapshot).unwrap();
 
-    assert_eq!(selection.stream.snapshot_stream_id, "commentary");
-    assert_eq!(selection.role, AudioBundleRole::CommentaryAudio);
+    assert_eq!(selection.outputs.len(), 1);
+    assert_eq!(selection.outputs[0].stream.snapshot_stream_id, "commentary");
+    assert_eq!(selection.outputs[0].role, AudioBundleRole::CommentaryAudio);
     assert_eq!(selection.operation_id, None);
-    assert_eq!(selection.output_id, None);
-    assert_eq!(selection.name_suffix, None);
-    assert_eq!(selection.output_count, 1);
+    assert_eq!(selection.outputs[0].output_id, None);
+    assert_eq!(selection.outputs[0].name_suffix, None);
 }
 
 #[test]
@@ -179,12 +179,16 @@ fn extraction_validates_ordered_planned_outputs_against_pinned_snapshot() {
 
     assert_eq!(selection.operation_id.as_deref(), Some(operation_id));
     assert_eq!(
-        selection.output_id.as_deref(),
+        selection.outputs[0].output_id.as_deref(),
         Some(first_output_id.as_str())
     );
-    assert_eq!(selection.name_suffix.as_deref(), Some("main.opus.ogg"));
-    assert_eq!(selection.output_count, 2);
-    assert_eq!(selection.stream.snapshot_stream_id, "main");
+    assert_eq!(
+        selection.outputs[0].name_suffix.as_deref(),
+        Some("main.opus.ogg")
+    );
+    assert_eq!(selection.outputs.len(), 2);
+    assert_eq!(selection.outputs[0].stream.snapshot_stream_id, "main");
+    assert_eq!(selection.outputs[1].stream.snapshot_stream_id, "alt");
 
     payload["outputs"][0]["name_suffix"] = json!("wrong.opus.ogg");
     let error = extract_selection_from_payload_and_snapshot(&payload, &snapshot).unwrap_err();

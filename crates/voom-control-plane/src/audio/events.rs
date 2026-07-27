@@ -1,22 +1,24 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use voom_core::{ArtifactHandleId, ArtifactLocationId, FailureClass, FileLocationId, VoomError};
 use voom_events::payload::{
     ArtifactAudioDispositionPayload, ArtifactAudioExtractFailedPayload,
+    ArtifactAudioExtractMemberPayload, ArtifactAudioExtractOutputPayload,
     ArtifactAudioExtractStartedPayload, ArtifactAudioExtractSucceededPayload,
     ArtifactAudioOutputStreamPayload, ArtifactAudioStreamPayload,
     ArtifactAudioTranscodeFailedPayload, ArtifactAudioTranscodeStartedPayload,
     ArtifactAudioTranscodeSucceededPayload,
 };
 use voom_events::{Event, SubjectType};
-use voom_plan::audio::AudioBundleRole;
 use voom_worker_protocol::{
     AudioDispositionFact, AudioOutputStreamFact, AudioStreamRef, ExtractAudioResult,
     TranscodeAudioResult,
 };
 
 use super::selection::{ExtractAudioSelectionPlan, TranscodeAudioSelectionPlan};
-use super::{ExecuteExtractAudioInput, ExecuteTranscodeAudioInput};
+use super::{
+    ExecuteExtractAudioInput, ExecuteExtractAudioOutputReport, ExecuteTranscodeAudioInput,
+};
 use crate::ControlPlane;
 use crate::cases::{append_event, begin_tx, commit_tx};
 
@@ -140,6 +142,7 @@ pub async fn record_extract_started(
     source_media_snapshot_id: u64,
     staging_path: &Path,
     selection: &ExtractAudioSelectionPlan,
+    outputs: &[ArtifactAudioExtractMemberPayload],
 ) -> Result<(), VoomError> {
     let payload = extract_started_payload(
         input,
@@ -147,6 +150,7 @@ pub async fn record_extract_started(
         source_media_snapshot_id,
         staging_path.display().to_string(),
         selection,
+        outputs,
     );
     append_audio_event(
         cp,
@@ -166,6 +170,7 @@ pub struct ExtractSucceededEventInput<'a> {
     pub artifact_location_id: ArtifactLocationId,
     pub selection: &'a ExtractAudioSelectionPlan,
     pub result: &'a ExtractAudioResult,
+    pub outputs: &'a [ExecuteExtractAudioOutputReport],
 }
 
 pub async fn record_extract_succeeded(
@@ -193,16 +198,44 @@ pub async fn record_extract_succeeded(
             artifact_handle_id: event.artifact_handle_id.0,
             artifact_location_id: event.artifact_location_id.0,
             staging_path,
-            selected_stream: stream_payload(&event.selection.stream),
+            selected_stream: stream_payload(&event.selection.outputs[0].stream),
             selected_snapshot_stream_id: event.result.selected_snapshot_stream_id.clone(),
-            role: role_name(event.selection.role).to_owned(),
+            role: super::commit::bundle_role(event.selection.outputs[0].role)
+                .as_str()
+                .to_owned(),
             output_container: event.result.output_container.clone(),
             output_audio_codec: event.result.output_audio_codec.clone(),
             provider: event.result.provider.clone(),
             provider_version: event.result.provider_version.clone(),
+            outputs: event.outputs.iter().map(extract_output_payload).collect(),
         }),
     )
     .await
+}
+
+fn extract_output_payload(
+    output: &ExecuteExtractAudioOutputReport,
+) -> ArtifactAudioExtractOutputPayload {
+    ArtifactAudioExtractOutputPayload {
+        output_id: output.output_id.clone(),
+        source_file_version_id: output.source_file_version_id.0,
+        source_media_snapshot_id: output.source_media_snapshot_id.0,
+        source_snapshot_stream_id: output.source_snapshot_stream_id.clone(),
+        source_provider_stream_index: output.source_provider_stream_index,
+        role: output.role.clone(),
+        artifact_handle_id: output.staged_artifact_handle_id.0,
+        artifact_location_id: output.staged_artifact_location_id.0,
+        verification_id: output.verification_id.0,
+        commit_record_id: output.commit_record_id.0,
+        result_file_version_id: output.result_file_version_id.0,
+        result_file_location_id: output.result_file_location_id.0,
+        result_file_asset_id: output.result_file_asset_id,
+        result_media_snapshot_id: output.result_media_snapshot_id.0,
+        bundle_member_id: output.bundle_member_id,
+        lineage_id: output.lineage_id,
+        staging_path: output.staging_path.display().to_string(),
+        target_path: output.target_path.display().to_string(),
+    }
 }
 
 #[derive(Debug)]
@@ -215,6 +248,7 @@ pub struct ExtractFailedEventInput<'a> {
     pub artifact_handle_id: Option<ArtifactHandleId>,
     pub artifact_location_id: Option<ArtifactLocationId>,
     pub result: Option<&'a ExtractAudioResult>,
+    pub outputs: &'a [ArtifactAudioExtractMemberPayload],
     pub error: &'a VoomError,
 }
 
@@ -231,11 +265,14 @@ pub async fn record_extract_failed(
         staging_path: event.staging_path.map(|path| path.display().to_string()),
         selected_stream: event
             .selection
-            .map(|selection| stream_payload(&selection.stream)),
-        role: event
-            .selection
-            .map(|selection| role_name(selection.role).to_owned()),
+            .map(|selection| stream_payload(&selection.outputs[0].stream)),
+        role: event.selection.map(|selection| {
+            super::commit::bundle_role(selection.outputs[0].role)
+                .as_str()
+                .to_owned()
+        }),
         result: event.result,
+        outputs: event.outputs,
         error: event.error,
     });
     let subject_type = if event.artifact_handle_id.is_some() {
@@ -358,6 +395,7 @@ fn extract_started_payload(
     source_media_snapshot_id: u64,
     staging_path: String,
     selection: &ExtractAudioSelectionPlan,
+    outputs: &[ArtifactAudioExtractMemberPayload],
 ) -> ArtifactAudioExtractStartedPayload {
     ArtifactAudioExtractStartedPayload {
         job_id: input.job_id.0,
@@ -368,12 +406,15 @@ fn extract_started_payload(
         source_media_snapshot_id,
         source_bundle_id: input.source_bundle_id.0,
         staging_path,
-        selected_stream: stream_payload(&selection.stream),
-        role: role_name(selection.role).to_owned(),
+        selected_stream: stream_payload(&selection.outputs[0].stream),
+        role: super::commit::bundle_role(selection.outputs[0].role)
+            .as_str()
+            .to_owned(),
         target_codec: selection.target_codec.clone(),
         output_container: selection.container.clone(),
         provider: Some("ffmpeg".to_owned()),
         provider_version: None,
+        outputs: outputs.to_vec(),
     }
 }
 
@@ -387,6 +428,7 @@ struct ExtractFailedEventPayloadInput<'a> {
     selected_stream: Option<ArtifactAudioStreamPayload>,
     role: Option<String>,
     result: Option<&'a ExtractAudioResult>,
+    outputs: &'a [ArtifactAudioExtractMemberPayload],
     error: &'a VoomError,
 }
 
@@ -411,7 +453,35 @@ fn extract_failed_payload(
         message: event.error.to_string(),
         provider: event.result.map(|result| result.provider.clone()),
         provider_version: event.result.map(|result| result.provider_version.clone()),
+        outputs: event.outputs.to_vec(),
     }
+}
+
+pub(super) fn extract_member_payloads(
+    selection: &ExtractAudioSelectionPlan,
+    staging_paths: &[PathBuf],
+    target_paths: &[PathBuf],
+) -> Vec<ArtifactAudioExtractMemberPayload> {
+    selection
+        .outputs
+        .iter()
+        .zip(staging_paths)
+        .zip(target_paths)
+        .enumerate()
+        .map(
+            |(ordinal, ((output, staging_path), target_path))| ArtifactAudioExtractMemberPayload {
+                ordinal: u64::try_from(ordinal).unwrap_or(u64::MAX),
+                output_id: output.output_id.clone(),
+                source_snapshot_stream_id: output.stream.snapshot_stream_id.clone(),
+                source_provider_stream_index: output.stream.provider_stream_index,
+                role: super::commit::bundle_role(output.role).as_str().to_owned(),
+                staging_path: staging_path.display().to_string(),
+                target_path: target_path.display().to_string(),
+                artifact_handle_id: None,
+                artifact_location_id: None,
+            },
+        )
+        .collect()
 }
 
 async fn append_audio_event(
@@ -461,13 +531,6 @@ fn disposition_payload(disposition: &AudioDispositionFact) -> ArtifactAudioDispo
         default: disposition.default,
         forced: disposition.forced,
         commentary: disposition.commentary,
-    }
-}
-
-fn role_name(role: AudioBundleRole) -> &'static str {
-    match role {
-        AudioBundleRole::CommentaryAudio => "commentary_audio",
-        AudioBundleRole::ExternalAudio => "external_audio",
     }
 }
 

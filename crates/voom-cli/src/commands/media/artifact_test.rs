@@ -65,6 +65,26 @@ fn artifact_command_names_and_flags_parse() {
         ]
         .as_slice(),
         [
+            "voom",
+            "artifact",
+            "acknowledge-extract-quiescence",
+            "--operation-key",
+            "extract:key",
+            "--generation",
+            "2",
+            "--attempt-id",
+            "9",
+            "--worker-id",
+            "4",
+            "--worker-epoch",
+            "3",
+            "--idempotency-key",
+            "audio-extract:extract:key:2",
+            "--acknowledged-by",
+            "operator",
+        ]
+        .as_slice(),
+        [
             "voom", "artifact", "list", "--state", "verified", "--limit", "5",
         ]
         .as_slice(),

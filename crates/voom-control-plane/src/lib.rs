@@ -24,6 +24,7 @@ use voom_events::EventId;
 use voom_store::repo::{
     artifact_access_plans::SqliteArtifactAccessPlanRepo,
     artifacts::SqliteArtifactRepo,
+    audio_extract_operations::SqliteAudioExtractOperationRepo,
     backups::SqliteBackupRepo,
     bundles::SqliteBundleRepo,
     events::{EventFilter, EventRepo, EventRow, Page, SqliteEventRepo},
@@ -77,9 +78,10 @@ pub mod execution {
 
 pub mod policy {
     pub use crate::cases::policy::compliance::{
-        ComplianceApplyData, ComplianceExecuteData, ComplianceExecuteError,
-        ComplianceExecutionOptions, ComplianceReportData, ComplianceRunReportData,
-        FilePhaseSummaryView, IssueApplicationSummary, PhaseSummaryView, WorkflowSummaryView,
+        ComplianceApplyData, ComplianceAudioExtractOutput, ComplianceExecuteData,
+        ComplianceExecuteError, ComplianceExecutionOptions, ComplianceLegacyAudioExtractOutput,
+        ComplianceReportData, ComplianceRunReportData, FilePhaseSummaryView,
+        IssueApplicationSummary, PhaseSummaryView, WorkflowSummaryView,
     };
     pub use crate::cases::policy::policies::PolicyMutationError;
     pub use crate::cases::policy::policy_inputs::{
@@ -107,7 +109,8 @@ pub use artifact::{
     VerifyArtifactInput, VerifyArtifactReport,
 };
 pub use audio::{
-    ExecuteExtractAudioInput, ExecuteExtractAudioReport, ExecuteTranscodeAudioInput,
+    AcknowledgeExtractDispatchQuiescenceInput, ExecuteExtractAudioInput,
+    ExecuteExtractAudioOutputReport, ExecuteExtractAudioReport, ExecuteTranscodeAudioInput,
     ExecuteTranscodeAudioReport, ExtractAudioDispatcher, TranscodeAudioDispatcher,
     TranscodePostCommitRecoveryReport,
 };
@@ -141,6 +144,7 @@ pub struct ControlPlane {
     pub(crate) remote_idempotency: SqliteRemoteIdempotencyRepo,
     pub(crate) artifact_access_plans: SqliteArtifactAccessPlanRepo,
     pub(crate) artifacts: SqliteArtifactRepo,
+    pub(crate) audio_extract_operations: SqliteAudioExtractOperationRepo,
     pub(crate) issues: SqliteIssueRepo,
     pub(crate) identity: SqliteIdentityRepo,
     pub(crate) bundles: SqliteBundleRepo,
@@ -178,6 +182,7 @@ impl std::fmt::Debug for ControlPlane {
             .field("remote_idempotency", &self.remote_idempotency)
             .field("artifact_access_plans", &self.artifact_access_plans)
             .field("artifacts", &self.artifacts)
+            .field("audio_extract_operations", &self.audio_extract_operations)
             .field("issues", &self.issues)
             .field("identity", &self.identity)
             .field("bundles", &self.bundles)
@@ -288,6 +293,7 @@ impl ControlPlane {
             remote_idempotency: SqliteRemoteIdempotencyRepo::new(pool.clone()),
             artifact_access_plans: SqliteArtifactAccessPlanRepo::new(pool.clone()),
             artifacts: SqliteArtifactRepo::new(pool.clone()),
+            audio_extract_operations: SqliteAudioExtractOperationRepo::new(pool.clone()),
             issues: SqliteIssueRepo::new(pool.clone()),
             identity: SqliteIdentityRepo::new(pool.clone()),
             bundles: SqliteBundleRepo::new(pool.clone()),

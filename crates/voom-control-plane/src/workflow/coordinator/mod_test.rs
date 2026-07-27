@@ -2364,6 +2364,35 @@ async fn promotion_location_ids_include_prior_job_ticket_results() {
     assert_eq!(location_ids, vec![FileLocationId(202), FileLocationId(101)]);
 }
 
+#[tokio::test]
+async fn promotion_location_ids_include_every_ordered_extract_output() {
+    let (cp, _db) = cp().await;
+    let job = cp
+        .open_job(NewJob {
+            kind: "synthetic.workflow".to_owned(),
+            priority: 0,
+            created_at: T0,
+        })
+        .await
+        .unwrap();
+    seed_succeeded_result_ticket_value(
+        &cp,
+        job.id,
+        json!({
+            "result_file_location_id": 101,
+            "outputs": [
+                {"result_file_location_id": 101},
+                {"result_file_location_id": 102}
+            ]
+        }),
+    )
+    .await;
+
+    let location_ids = cp.promotion_location_ids(&[job.id], &[]).await.unwrap();
+
+    assert_eq!(location_ids, vec![FileLocationId(101), FileLocationId(102)]);
+}
+
 struct TerminalArtifact {
     version_id: FileVersionId,
     location_id: FileLocationId,
@@ -2428,6 +2457,19 @@ async fn seed_succeeded_result_ticket(
     job_id: JobId,
     result_file_location_id: FileLocationId,
 ) {
+    seed_succeeded_result_ticket_value(
+        cp,
+        job_id,
+        json!({"result_file_location_id": result_file_location_id.0}),
+    )
+    .await;
+}
+
+async fn seed_succeeded_result_ticket_value(
+    cp: &crate::ControlPlane,
+    job_id: JobId,
+    result: serde_json::Value,
+) {
     let ticket = cp
         .create_ticket(NewTicket {
             job_id: Some(job_id),
@@ -2443,12 +2485,7 @@ async fn seed_succeeded_result_ticket(
         "UPDATE tickets SET state = 'succeeded', result = ?, state_changed_at = ?, \
          epoch = epoch + 1 WHERE id = ?",
     )
-    .bind(
-        serde_json::to_string(&json!({
-            "result_file_location_id": result_file_location_id.0
-        }))
-        .unwrap(),
-    )
+    .bind(serde_json::to_string(&result).unwrap())
     .bind(T0.format(&Iso8601::DEFAULT).unwrap())
     .bind(i64::try_from(ticket.id.0).unwrap())
     .execute(&cp.pool)

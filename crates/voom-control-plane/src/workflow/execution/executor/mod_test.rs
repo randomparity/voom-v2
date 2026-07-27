@@ -1470,6 +1470,15 @@ async fn policy_extract_audio_dispatch_sends_worker_protocol_payload() {
             .unwrap()
             .ends_with("Movie.stream-audio-1.opus.ogg")
     );
+    assert_eq!(result["outputs"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        result["outputs"][0]["result_file_location_id"],
+        result["result_file_location_id"]
+    );
+    assert_eq!(
+        result["outputs"][0]["source_snapshot_stream_id"],
+        "stream-audio-1"
+    );
 }
 
 fn workflow_tempdir() -> tempfile::TempDir {
@@ -2553,10 +2562,23 @@ fn require_correlated_dispatch(
     lease_id: LeaseId,
     idempotency_key: &str,
 ) -> Result<(), ProtocolError> {
+    if matches!(
+        behavior,
+        FakeBehavior::RequireCorrelatedExtractAudioDispatch
+    ) {
+        if lease_id != LeaseId(1) || !idempotency_key.starts_with("audio-extract:") {
+            return Err(ProtocolError::InvalidPayload {
+                detail: format!(
+                    "audio extraction dispatch must use lease 1 and an operation key, got \
+                     {lease_id:?} / {idempotency_key}"
+                ),
+            });
+        }
+        return Ok(());
+    }
     let label = match behavior {
         FakeBehavior::RequireCorrelatedRemuxDispatch => "remux",
-        FakeBehavior::RequireCorrelatedTranscodeAudioDispatch
-        | FakeBehavior::RequireCorrelatedExtractAudioDispatch => "audio",
+        FakeBehavior::RequireCorrelatedTranscodeAudioDispatch => "audio",
         _ => return Ok(()),
     };
     if lease_id != LeaseId(1) {
@@ -2788,7 +2810,7 @@ async fn transcode_audio_result_payload_for_request(request: &OperationRequest) 
 
 async fn extract_audio_result_payload_for_request(request: &OperationRequest) -> Value {
     let request = serde_json::from_value::<ExtractAudioRequest>(request.payload.clone()).unwrap();
-    let output_bytes = b"extract-output!";
+    let output_bytes = include_bytes!("../../../../../voom-ffprobe-worker/fixtures/media/tiny.mp4");
     tokio::fs::write(&request.output.path, output_bytes)
         .await
         .unwrap();

@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use voom_core::VoomError;
 use voom_worker_protocol::{
@@ -47,31 +47,42 @@ pub fn extract_audio_request_for(
     selected: &SelectedSource,
     selection: &ExtractAudioSelectionPlan,
     staging_root: &Path,
-    staging_path: &Path,
-) -> ExtractAudioRequest {
-    let output = ExtractAudioOutput {
-        staging_root: staging_root.to_string_lossy().into_owned(),
-        path: staging_path.to_string_lossy().into_owned(),
-        container: EXTRACT_AUDIO_CONTAINER.to_owned(),
-        audio_codec: EXTRACT_AUDIO_CODEC.to_owned(),
-        overwrite: false,
+    staging_paths: &[PathBuf],
+) -> Result<ExtractAudioRequest, VoomError> {
+    if selection.outputs.len() != staging_paths.len() {
+        return Err(VoomError::Config(format!(
+            "audio extraction selection/path count mismatch: {} selections, {} paths",
+            selection.outputs.len(),
+            staging_paths.len()
+        )));
+    }
+    let descriptors = selection
+        .outputs
+        .iter()
+        .zip(staging_paths)
+        .map(
+            |(selected_output, staging_path)| ExtractAudioOutputDescriptor {
+                output_id: selected_output.output_id.clone().unwrap_or_default(),
+                selection: selected_output.stream.clone(),
+                output: extract_output(staging_root, staging_path),
+            },
+        )
+        .collect::<Vec<_>>();
+    let Some(first) = descriptors.first() else {
+        return Err(VoomError::Config(
+            "audio extraction request must contain at least one output".to_owned(),
+        ));
     };
-    let outputs = selection.output_id.as_ref().map(|output_id| {
-        vec![ExtractAudioOutputDescriptor {
-            output_id: output_id.clone(),
-            selection: selection.stream.clone(),
-            output: output.clone(),
-        }]
-    });
-    ExtractAudioRequest {
+    let outputs = selection.operation_id.as_ref().map(|_| descriptors.clone());
+    Ok(ExtractAudioRequest {
         input: ExtractAudioInput {
             path: selected.canonical_path.to_string_lossy().into_owned(),
             expected: expected_facts(selected),
         },
-        output,
-        selection: selection.stream.clone(),
+        output: first.output.clone(),
+        selection: first.selection.clone(),
         outputs,
-    }
+    })
 }
 
 pub async fn revalidate_source_file(selected: &SelectedSource) -> Result<(), VoomError> {
@@ -183,15 +194,24 @@ pub fn validate_extract_result(
     validate_extract_audio_result(request, result)
         .map_err(|error| VoomError::MalformedWorkerResult(error.to_string()))?;
     validate_input_facts(selected, &result.input_pre, &result.input_post)?;
-    if selection.source.language.is_some() && result.output_language != selection.source.language {
-        return Err(VoomError::MalformedWorkerResult(
-            "audio extract output language does not match source snapshot".to_owned(),
-        ));
-    }
-    if selection.source.title.is_some() && result.output_title != selection.source.title {
-        return Err(VoomError::MalformedWorkerResult(
-            "audio extract output title does not match source snapshot".to_owned(),
-        ));
+    let actual_outputs = match &result.outputs {
+        Some(outputs) => outputs
+            .iter()
+            .map(|output| (&output.output_language, &output.output_title))
+            .collect::<Vec<_>>(),
+        None => vec![(&result.output_language, &result.output_title)],
+    };
+    for (expected, (language, title)) in selection.outputs.iter().zip(actual_outputs) {
+        if expected.source.language.is_some() && language != &expected.source.language {
+            return Err(VoomError::MalformedWorkerResult(
+                "audio extract output language does not match source snapshot".to_owned(),
+            ));
+        }
+        if expected.source.title.is_some() && title != &expected.source.title {
+            return Err(VoomError::MalformedWorkerResult(
+                "audio extract output title does not match source snapshot".to_owned(),
+            ));
+        }
     }
     Ok(())
 }
@@ -203,11 +223,30 @@ pub async fn require_transcode_output_file_matches_result(
     require_output_file_matches_result(staging_path, &result.output).await
 }
 
-pub async fn require_extract_output_file_matches_result(
-    staging_path: &Path,
+pub async fn require_extract_output_files_match_result(
+    staging_paths: &[PathBuf],
     result: &ExtractAudioResult,
 ) -> Result<(), VoomError> {
-    require_output_file_matches_result(staging_path, &result.output).await
+    let observed = match &result.outputs {
+        Some(outputs) => outputs.iter().map(|output| &output.output).collect(),
+        None => vec![&result.output],
+    };
+    if staging_paths.len() != observed.len() {
+        return Err(VoomError::MalformedWorkerResult(
+            "audio extract staged path/result count mismatch".to_owned(),
+        ));
+    }
+    for (path, facts) in staging_paths.iter().zip(observed) {
+        require_output_file_matches_result(path, facts).await?;
+    }
+    Ok(())
+}
+
+pub fn extract_result_output_facts(result: &ExtractAudioResult) -> Vec<&AudioObservedFacts> {
+    match &result.outputs {
+        Some(outputs) => outputs.iter().map(|output| &output.output).collect(),
+        None => vec![&result.output],
+    }
 }
 
 async fn require_output_file_matches_result(
@@ -250,6 +289,16 @@ fn expected_facts(selected: &SelectedSource) -> AudioExpectedFacts {
         content_hash: selected.version.content_hash.clone(),
         modified_at: None,
         local_file_key: None,
+    }
+}
+
+fn extract_output(staging_root: &Path, staging_path: &Path) -> ExtractAudioOutput {
+    ExtractAudioOutput {
+        staging_root: staging_root.to_string_lossy().into_owned(),
+        path: staging_path.to_string_lossy().into_owned(),
+        container: EXTRACT_AUDIO_CONTAINER.to_owned(),
+        audio_codec: EXTRACT_AUDIO_CODEC.to_owned(),
+        overwrite: false,
     }
 }
 

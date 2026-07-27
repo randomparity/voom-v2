@@ -1,71 +1,27 @@
 use super::*;
 
+use std::sync::atomic::{AtomicUsize, Ordering};
+
 use async_trait::async_trait;
 use sqlx::Row;
 use time::OffsetDateTime;
-use voom_core::ids::{ArtifactCommitRecordId, BundleId};
+use voom_core::ids::BundleId;
 use voom_core::rng_test_support::FrozenRng;
 use voom_core::{JobId, LeaseId, TicketId};
-use voom_store::repo::bundles::NewAssetBundle;
+use voom_store::repo::artifacts::{
+    NewArtifactCommitRecord, NewArtifactHandle, NewArtifactLocation, NewSidecarArtifactCommit,
+};
+use voom_store::repo::bundles::{BundleMemberRole, NewAssetBundle, NewBundleMember};
 use voom_store::repo::identity::{DiscoveredFile, FileLocationKind, IdentityRepo, IngestOutcome};
 use voom_store::repo::identity::{MediaWorkKind, NewMediaVariant, NewMediaWork};
+use voom_store::repo::{
+    BlockingMode, IssuerKind, LeaseScope, NewUseLease, UseLeaseKind, UseLeaseReleaseReason,
+};
 use voom_worker_protocol::{
     AudioObservedFacts, AudioOutputStreamFact, ExtractAudioOutputResult, ExtractAudioRequest,
     ExtractAudioResult, TranscodeAudioRequest, TranscodeAudioResult, VerifyArtifactObservedFacts,
     VerifyArtifactRequest, VerifyArtifactResult, VerifyArtifactStatus,
 };
-
-#[test]
-fn extract_commit_recovery_without_target_is_not_reported_as_success() {
-    let report = commit::CommitAudioExtractSidecarReport {
-        commit_record_id: ArtifactCommitRecordId(9),
-        result_file_version_id: None,
-        result_file_location_id: None,
-        state: ArtifactCommitState::RecoveryRequired,
-        target_path: PathBuf::from("/tmp/target.ogg"),
-        temp_path: PathBuf::from("/tmp/.target.ogg.tmp"),
-        recovery_required: Some(commit::AudioExtractRecoveryReport {
-            recovery_reason: "audio sidecar commit failed after durable prepare".to_owned(),
-            commit_record_id: ArtifactCommitRecordId(9),
-            source_bundle_id: BundleId(7),
-            role: "commentary_audio",
-            target_path: PathBuf::from("/tmp/target.ogg"),
-            target_exists: false,
-            temp_path: PathBuf::from("/tmp/.target.ogg.tmp"),
-            temp_exists: false,
-            staging_path: PathBuf::from("/tmp/staged.ogg"),
-            staging_exists: true,
-            result_file_version_id: None,
-            result_file_location_id: None,
-            error_code: "CONFLICT",
-            message: "bundle membership conflict".to_owned(),
-        }),
-    };
-
-    let err = ensure_extract_commit_succeeded(&report).unwrap_err();
-
-    assert_eq!(err.error_code(), voom_core::ErrorCode::CommitFailure);
-    assert!(err.to_string().contains("requires recovery"));
-    assert!(err.to_string().contains("bundle membership conflict"));
-}
-
-#[test]
-fn extract_commit_non_committed_state_is_not_reported_as_success() {
-    let report = commit::CommitAudioExtractSidecarReport {
-        commit_record_id: ArtifactCommitRecordId(10),
-        result_file_version_id: None,
-        result_file_location_id: None,
-        state: ArtifactCommitState::Pending,
-        target_path: PathBuf::from("/tmp/target.ogg"),
-        temp_path: PathBuf::from("/tmp/.target.ogg.tmp"),
-        recovery_required: None,
-    };
-
-    let err = ensure_extract_commit_succeeded(&report).unwrap_err();
-
-    assert_eq!(err.error_code(), voom_core::ErrorCode::CommitFailure);
-    assert!(err.to_string().contains("ended in Pending"));
-}
 
 #[tokio::test]
 async fn transcode_failure_records_audio_failed_event() {
@@ -136,6 +92,7 @@ async fn extract_failure_records_audio_failed_event() {
         input,
         &UncalledExtractDispatcher,
         &UncalledVerifyDispatcher,
+        &UncalledProbeDispatcher,
     )
     .await
     .unwrap_err();
@@ -145,7 +102,46 @@ async fn extract_failure_records_audio_failed_event() {
 }
 
 #[tokio::test]
-async fn extract_audio_plural_rejects_before_staging_target_or_dispatch() {
+async fn extract_failure_preserves_primary_error_when_cleanup_and_event_writes_fail() {
+    let (cp, _db, dir) = fixture_with_dir().await;
+    let source = seed_audio_source(&cp, &dir, b"source").await;
+    let bundle = seed_bundle(&cp).await;
+    let input = extract_input_for_source(&source, bundle.id, &dir);
+    sqlx::query(
+        "CREATE TRIGGER fail_extract_claim_release \
+         BEFORE UPDATE OF claim_token ON audio_extract_operations \
+         WHEN OLD.claim_token IS NOT NULL AND NEW.claim_token IS NULL \
+         BEGIN SELECT RAISE(ABORT, 'injected claim release failure'); END",
+    )
+    .execute(cp.pool_for_test())
+    .await
+    .unwrap();
+    sqlx::query(
+        "CREATE TRIGGER fail_extract_failure_event \
+         BEFORE INSERT ON events WHEN NEW.kind = 'artifact.audio_extract_failed' \
+         BEGIN SELECT RAISE(ABORT, 'injected failure event failure'); END",
+    )
+    .execute(cp.pool_for_test())
+    .await
+    .unwrap();
+
+    let error = execute_extract_audio_with_dispatchers(
+        &cp,
+        input,
+        &CrashingExtractDispatcher,
+        &UncalledVerifyDispatcher,
+        &UncalledProbeDispatcher,
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error.error_code(), voom_core::ErrorCode::WorkerCrash);
+    assert!(error.to_string().contains("injected worker crash"));
+    assert_event_count(&cp, "artifact.audio_extract_failed", 0).await;
+}
+
+#[tokio::test]
+async fn extract_audio_plural_commits_every_output_and_lineage_atomically() {
     let (cp, _db, dir) = fixture_with_dir().await;
     let mut source = seed_audio_source(&cp, &dir, b"source").await;
     source.snapshot = record_plural_audio_snapshot(&cp, source.version).await;
@@ -169,34 +165,850 @@ async fn extract_audio_plural_rejects_before_staging_target_or_dispatch() {
             "bundle_role": "commentary_audio"
         }
     ]);
-    let staging_root = input.staging_root.clone();
-    let target_dir = input.target_dir.clone();
-    let backup_root = dir.path().join("backups");
-    input.backup_root = Some(backup_root.clone());
+    let report = execute_extract_audio_with_dispatchers(
+        &cp,
+        input,
+        &WritingExtractDispatcher {
+            output_bytes: b"extracted".to_vec(),
+        },
+        &SuccessfulVerifyDispatcher,
+        &SucceedingProbeDispatcher,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(report.outputs.len(), 2);
+    assert!(
+        report.outputs[0]
+            .target_path
+            .ends_with("source.a-1.opus.ogg")
+    );
+    assert!(
+        report.outputs[1]
+            .target_path
+            .ends_with("source.a-2.opus.ogg")
+    );
+    assert!(
+        report
+            .outputs
+            .iter()
+            .all(|output| output.target_path.is_file())
+    );
+    assert_table_count(&cp, "artifact_handles", 2).await;
+    assert_table_count(&cp, "artifact_commit_records", 2).await;
+    assert_table_count(&cp, "file_versions", 3).await;
+    assert_table_count(&cp, "asset_bundle_members", 2).await;
+    assert_table_count(&cp, "audio_extract_output_lineage", 2).await;
+    assert_event_count(&cp, "artifact.audio_extract_succeeded", 1).await;
+    let started = latest_event_payload(&cp, "artifact.audio_extract_started").await;
+    assert_eq!(started["outputs"].as_array().unwrap().len(), 2);
+    assert_eq!(started["outputs"][0]["source_snapshot_stream_id"], "a-1");
+    assert_eq!(started["outputs"][1]["source_snapshot_stream_id"], "a-2");
+    let event = latest_event_payload(&cp, "artifact.audio_extract_succeeded").await;
+    assert_eq!(event["outputs"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        event["outputs"][0]["output_id"],
+        voom_plan::audio::extract_output_id(operation_id, "a-1")
+    );
+    assert_eq!(event["outputs"][1]["source_snapshot_stream_id"], "a-2");
+    assert_eq!(
+        event["outputs"][1]["result_file_location_id"],
+        report.outputs[1].result_file_location_id.0
+    );
+    assert_eq!(
+        event["outputs"][1]["bundle_member_id"],
+        report.outputs[1].bundle_member_id
+    );
+}
+
+#[tokio::test]
+async fn committed_legacy_singleton_is_adopted_once_without_redispatch() {
+    let (cp, _db, dir) = fixture_with_dir().await;
+    let seeded = seed_legacy_singleton(&cp, &dir).await;
+    let SeededLegacySingleton {
+        input,
+        target,
+        legacy_commit_record_id,
+        legacy_result_file_version_id,
+        ..
+    } = seeded;
+    assert_table_count(&cp, "media_snapshots", 1).await;
+    let immutable_counts = legacy_publication_counts(&cp).await;
+
+    let adopted = execute_extract_audio_with_dispatchers(
+        &cp,
+        input.clone(),
+        &UncalledExtractDispatcher,
+        &UncalledVerifyDispatcher,
+        &SucceedingProbeDispatcher,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(adopted.outputs.len(), 1);
+    assert_eq!(adopted.outputs[0].target_path, target);
+    assert_eq!(adopted.outputs[0].commit_record_id, legacy_commit_record_id);
+    assert_eq!(
+        adopted.outputs[0].result_file_version_id,
+        legacy_result_file_version_id
+    );
+    assert_eq!(legacy_publication_counts(&cp).await, immutable_counts);
+    assert_table_count(&cp, "media_snapshots", 2).await;
+    assert_table_count(&cp, "audio_extract_operations", 1).await;
+    assert_table_count(&cp, "audio_extract_operation_outputs", 1).await;
+    assert_table_count(&cp, "audio_extract_output_lineage", 1).await;
+
+    let replay = execute_extract_audio_with_dispatchers(
+        &cp,
+        input,
+        &UncalledExtractDispatcher,
+        &UncalledVerifyDispatcher,
+        &UncalledProbeDispatcher,
+    )
+    .await
+    .unwrap();
+    assert_eq!(replay, adopted);
+    assert_eq!(legacy_publication_counts(&cp).await, immutable_counts);
+    assert_table_count(&cp, "media_snapshots", 2).await;
+    assert_table_count(&cp, "audio_extract_output_lineage", 1).await;
+}
+
+#[tokio::test]
+async fn legacy_adoption_rejects_ambiguous_or_different_source_snapshot() {
+    let (cp, _db, dir) = fixture_with_dir().await;
+    let seeded = seed_legacy_singleton(&cp, &dir).await;
+    let original = cp
+        .identity()
+        .get_media_snapshot(MediaSnapshotId(seeded.source.snapshot))
+        .await
+        .unwrap()
+        .unwrap();
+    let second = cp
+        .record_media_snapshot(
+            seeded.source.version,
+            None,
+            original.payload,
+            OffsetDateTime::UNIX_EPOCH + time::Duration::seconds(1),
+        )
+        .await
+        .unwrap();
+    let mut input = seeded.input;
+    input.operation_payload["source_media_snapshot_id"] = serde_json::json!(second.id.0);
+
+    assert_legacy_adoption_rejected_without_mutation(&cp, input, &seeded.target).await;
+}
+
+#[tokio::test]
+async fn legacy_adoption_rejects_different_published_operation_key() {
+    let (cp, _db, dir) = fixture_with_dir().await;
+    let seeded = seed_legacy_singleton(&cp, &dir).await;
+    let mut input = seeded.input;
+    let operation_id = "different-published-operation";
+    input.operation_payload["operation_id"] = serde_json::json!(operation_id);
+    input.operation_payload["outputs"] = serde_json::json!([{
+        "output_id": voom_plan::audio::extract_output_id(operation_id, "a-1"),
+        "source_snapshot_stream_id": "a-1",
+        "source_provider_stream_index": 1,
+        "name_suffix": "a-1.opus.ogg",
+        "bundle_role": "external_audio"
+    }]);
+
+    assert_legacy_adoption_rejected_without_mutation(&cp, input, &seeded.target).await;
+}
+
+#[derive(Debug, Clone, Copy)]
+enum LegacyEvidenceMutation {
+    WrongStream,
+    MissingLineage,
+    MismatchedVerification,
+    RetiredResultLocation,
+}
+
+#[tokio::test]
+async fn legacy_adoption_rejects_mismatched_or_incomplete_evidence() {
+    for mutation in [
+        LegacyEvidenceMutation::WrongStream,
+        LegacyEvidenceMutation::MissingLineage,
+        LegacyEvidenceMutation::MismatchedVerification,
+        LegacyEvidenceMutation::RetiredResultLocation,
+    ] {
+        let (cp, _db, dir) = fixture_with_dir().await;
+        let seeded = seed_legacy_singleton(&cp, &dir).await;
+        mutate_legacy_evidence(&cp, mutation).await;
+
+        assert_legacy_adoption_rejected_without_mutation(&cp, seeded.input, &seeded.target).await;
+    }
+}
+
+#[tokio::test]
+async fn legacy_adoption_rejects_unowned_existing_target() {
+    let (cp, _db, dir) = fixture_with_dir().await;
+    let source = seed_audio_source(&cp, &dir, b"source").await;
+    let bundle = seed_bundle(&cp).await;
+    let mut input = extract_input_for_source(&source, bundle.id, &dir);
+    let payload = input.operation_payload.as_object_mut().unwrap();
+    payload.remove("operation_id");
+    payload.remove("outputs");
+    payload.remove("snapshot_stream_id");
+    let snapshot = cp
+        .identity()
+        .get_media_snapshot(MediaSnapshotId(source.snapshot))
+        .await
+        .unwrap()
+        .unwrap();
+    let selection =
+        selection::extract_selection_from_payload_and_snapshot(&input.operation_payload, &snapshot)
+            .unwrap();
+    let target = stage::extract_target_paths(
+        &input.target_dir,
+        &dir.path().join("source.mkv"),
+        &selection,
+    )
+    .await
+    .unwrap()
+    .remove(0);
+    tokio::fs::write(&target, b"unowned").await.unwrap();
+
+    assert_legacy_adoption_rejected_without_mutation(&cp, input, &target).await;
+}
+
+#[tokio::test]
+async fn exact_extract_quiescence_acknowledgement_records_audit_event() {
+    let (cp, _db, dir) = fixture_with_dir().await;
+    let source = seed_audio_source(&cp, &dir, b"source").await;
+    let bundle = seed_bundle(&cp).await;
+    let repo = SqliteAudioExtractOperationRepo::new(cp.pool.clone());
+    let now = cp.clock().now();
+    let operation = repo
+        .create_planned(
+            NewAudioExtractOperation {
+                operation_key: "extract:quiescence-test".to_owned(),
+                operation_id: Some("op-test".to_owned()),
+                source_file_version_id: source.version,
+                source_bundle_id: bundle.id,
+                source_media_snapshot_id: MediaSnapshotId(source.snapshot),
+            },
+            &[NewAudioExtractOutput {
+                output_id: Some("out-test".to_owned()),
+                source_snapshot_stream_id: "a-1".to_owned(),
+                source_provider_stream_index: 1,
+                bundle_role: "external_audio".to_owned(),
+                target_path: dir.path().join("out.ogg").display().to_string(),
+            }],
+            now,
+        )
+        .await
+        .unwrap();
+    let claim = NewAudioExtractClaim {
+        operation_key: operation.operation.operation_key.clone(),
+        expected_generation: 0,
+        lease_id: LeaseId(3),
+        claim_token: "quiescence-claim".to_owned(),
+        expires_at: now + time::Duration::minutes(1),
+    };
+    repo.acquire_claim(&claim, now).await.unwrap();
+    let attempt = repo
+        .record_dispatch_attempt(
+            &claim,
+            NewAudioExtractDispatchAttempt {
+                worker_id: voom_core::WorkerId(1),
+                worker_epoch: 0,
+                idempotency_key: "audio-extract:extract:quiescence-test:0".to_owned(),
+                attempt_directory: dir.path().display().to_string(),
+                paths: vec![dir.path().join("attempt.ogg").display().to_string()],
+            },
+            now,
+        )
+        .await
+        .unwrap();
+    repo.quarantine_dispatch(&claim, attempt.id, now)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE audio_extract_operations SET claim_expires_at = ? WHERE id = ?")
+        .bind(now - time::Duration::seconds(1))
+        .bind(i64::try_from(operation.operation.id).unwrap())
+        .execute(cp.pool_for_test())
+        .await
+        .unwrap();
+
+    cp.acknowledge_extract_dispatch_quiescence(AcknowledgeExtractDispatchQuiescenceInput {
+        operation_key: operation.operation.operation_key,
+        generation: 0,
+        attempt_id: attempt.id,
+        worker_id: attempt.worker_id,
+        worker_epoch: attempt.worker_epoch,
+        idempotency_key: attempt.idempotency_key,
+        acknowledged_by: "operator@example".to_owned(),
+    })
+    .await
+    .unwrap();
+
+    let event = latest_event_payload(&cp, "artifact.audio_extract_quiesced").await;
+    assert_eq!(event["attempt_id"], attempt.id);
+    assert_eq!(event["worker_id"], 1);
+    assert_eq!(event["acknowledged_by"], "operator@example");
+}
+
+#[tokio::test]
+async fn workflow_lease_heartbeat_renews_the_exact_audio_operation_claim() {
+    let (cp, _db, dir) = fixture_with_dir().await;
+    let source = seed_audio_source(&cp, &dir, b"source").await;
+    let bundle = seed_bundle(&cp).await;
+    let now = cp.clock().now();
+    let operation = cp
+        .audio_extract_operations
+        .create_planned(
+            NewAudioExtractOperation {
+                operation_key: "extract:heartbeat-test".to_owned(),
+                operation_id: Some("op-heartbeat".to_owned()),
+                source_file_version_id: source.version,
+                source_bundle_id: bundle.id,
+                source_media_snapshot_id: MediaSnapshotId(source.snapshot),
+            },
+            &[NewAudioExtractOutput {
+                output_id: Some("out-heartbeat".to_owned()),
+                source_snapshot_stream_id: "a-1".to_owned(),
+                source_provider_stream_index: 1,
+                bundle_role: "external_audio".to_owned(),
+                target_path: dir.path().join("heartbeat.ogg").display().to_string(),
+            }],
+            now,
+        )
+        .await
+        .unwrap();
+    let claim = NewAudioExtractClaim {
+        operation_key: operation.operation.operation_key,
+        expected_generation: 0,
+        lease_id: LeaseId(3),
+        claim_token: "heartbeat-claim".to_owned(),
+        expires_at: now + time::Duration::seconds(1),
+    };
+    cp.audio_extract_operations
+        .acquire_claim(&claim, now)
+        .await
+        .unwrap();
+
+    cp.heartbeat_lease(
+        claim.lease_id,
+        time::Duration::minutes(1),
+        now + time::Duration::milliseconds(500),
+    )
+    .await
+    .unwrap();
+    cp.audio_extract_operations
+        .record_dispatch_attempt(
+            &claim,
+            NewAudioExtractDispatchAttempt {
+                worker_id: voom_core::WorkerId(1),
+                worker_epoch: 0,
+                idempotency_key: "audio-extract:extract:heartbeat-test:0".to_owned(),
+                attempt_directory: dir.path().display().to_string(),
+                paths: vec![dir.path().join("heartbeat.ogg").display().to_string()],
+            },
+            now + time::Duration::seconds(2),
+        )
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn active_extract_attempt_replays_after_crash_before_worker_response() {
+    assert_active_extract_attempt_replays(false).await;
+}
+
+#[tokio::test]
+async fn active_extract_attempt_replays_after_response_before_terminal_persistence() {
+    assert_active_extract_attempt_replays(true).await;
+}
+
+#[tokio::test]
+async fn active_extract_attempt_from_lost_worker_epoch_requires_quiescence() {
+    let (cp, _db, dir) = fixture_with_dir().await;
+    let source = seed_audio_source(&cp, &dir, b"source").await;
+    let bundle = seed_bundle(&cp).await;
+    let input = extract_input_for_source(&source, bundle.id, &dir);
+    let seeded = seed_active_extract_attempt(&cp, &input).await;
+    sqlx::query("UPDATE workers SET epoch = 1 WHERE id = 1")
+        .execute(cp.pool_for_test())
+        .await
+        .unwrap();
 
     let error = execute_extract_audio_with_dispatchers(
         &cp,
         input,
         &UncalledExtractDispatcher,
         &UncalledVerifyDispatcher,
+        &UncalledProbeDispatcher,
     )
     .await
     .unwrap_err();
 
+    assert_eq!(error.error_code(), voom_core::ErrorCode::Conflict);
+    assert!(error.to_string().contains("must prove terminal completion"));
     assert_eq!(
-        error.error_code(),
-        voom_core::ErrorCode::ConfigInvalid,
-        "{error}"
+        dispatch_attempt_status(&cp, seeded.attempt.id).await,
+        "quarantined"
     );
-    assert!(error.to_string().contains("planned 2 outputs"));
-    assert!(!staging_root.exists());
-    assert!(!target_dir.exists());
-    assert!(!backup_root.exists());
-    assert_table_count(&cp, "backups", 0).await;
-    assert_table_count(&cp, "artifact_handles", 0).await;
-    assert_table_count(&cp, "artifact_commit_records", 0).await;
+    let row = sqlx::query(
+        "SELECT dispatch_generation, claim_token FROM audio_extract_operations WHERE id = ?",
+    )
+    .bind(i64::try_from(seeded.attempt.operation_id).unwrap())
+    .fetch_one(cp.pool_for_test())
+    .await
+    .unwrap();
+    assert_eq!(row.try_get::<i64, _>("dispatch_generation").unwrap(), 0);
+    assert!(
+        row.try_get::<Option<String>, _>("claim_token")
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn malformed_active_extract_attempt_paths_quarantine_without_dispatch() {
+    let (cp, _db, dir) = fixture_with_dir().await;
+    let mut source = seed_audio_source(&cp, &dir, b"source").await;
+    source.snapshot = record_plural_audio_snapshot(&cp, source.version).await;
+    let bundle = seed_bundle(&cp).await;
+    let mut input = extract_input_for_source(&source, bundle.id, &dir);
+    set_plural_extract_outputs(&mut input, "node_extract_audio_malformed_replay");
+    let seeded = seed_active_extract_attempt(&cp, &input).await;
+    sqlx::query(
+        "DELETE FROM audio_extract_dispatch_attempt_paths \
+         WHERE attempt_id = ? AND ordinal = 1",
+    )
+    .bind(i64::try_from(seeded.attempt.id).unwrap())
+    .execute(cp.pool_for_test())
+    .await
+    .unwrap();
+
+    let error = execute_extract_audio_with_dispatchers(
+        &cp,
+        input,
+        &UncalledExtractDispatcher,
+        &UncalledVerifyDispatcher,
+        &UncalledProbeDispatcher,
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error.error_code(), voom_core::ErrorCode::Conflict);
+    assert!(
+        error
+            .to_string()
+            .contains("deterministic ordered staging paths")
+    );
+    assert_eq!(
+        dispatch_attempt_status(&cp, seeded.attempt.id).await,
+        "quarantined"
+    );
+    assert_table_count(&cp, "audio_extract_dispatch_attempts", 1).await;
+}
+
+#[tokio::test]
+async fn committed_plural_extract_retry_returns_same_ordered_identities_without_dispatch() {
+    let (cp, _db, dir) = fixture_with_dir().await;
+    let mut source = seed_audio_source(&cp, &dir, b"source").await;
+    source.snapshot = record_plural_audio_snapshot(&cp, source.version).await;
+    let bundle = seed_bundle(&cp).await;
+    let mut input = extract_input_for_source(&source, bundle.id, &dir);
+    let operation_id = "node_extract_audio_retry";
+    input.operation_payload["operation_id"] = serde_json::json!(operation_id);
+    input.operation_payload["outputs"] = serde_json::json!([
+        {
+            "output_id": voom_plan::audio::extract_output_id(operation_id, "a-1"),
+            "source_snapshot_stream_id": "a-1",
+            "source_provider_stream_index": 1,
+            "name_suffix": "a-1.opus.ogg",
+            "bundle_role": "external_audio"
+        },
+        {
+            "output_id": voom_plan::audio::extract_output_id(operation_id, "a-2"),
+            "source_snapshot_stream_id": "a-2",
+            "source_provider_stream_index": 2,
+            "name_suffix": "a-2.opus.ogg",
+            "bundle_role": "commentary_audio"
+        }
+    ]);
+
+    let first = execute_extract_audio_with_dispatchers(
+        &cp,
+        input.clone(),
+        &WritingExtractDispatcher {
+            output_bytes: b"extracted".to_vec(),
+        },
+        &SuccessfulVerifyDispatcher,
+        &SucceedingProbeDispatcher,
+    )
+    .await
+    .unwrap();
+    let retry = execute_extract_audio_with_dispatchers(
+        &cp,
+        input,
+        &UncalledExtractDispatcher,
+        &UncalledVerifyDispatcher,
+        &UncalledProbeDispatcher,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(retry.outputs, first.outputs);
+    assert_table_count(&cp, "artifact_handles", 2).await;
+    assert_table_count(&cp, "artifact_commit_records", 2).await;
+    assert_table_count(&cp, "file_versions", 3).await;
+    assert_table_count(&cp, "asset_bundle_members", 2).await;
+    assert_table_count(&cp, "audio_extract_output_lineage", 2).await;
+}
+
+#[tokio::test]
+async fn committed_extract_rejects_replay_into_a_different_bundle() {
+    let (cp, _db, dir) = fixture_with_dir().await;
+    let source = seed_audio_source(&cp, &dir, b"source").await;
+    let first_bundle = seed_bundle(&cp).await;
+    let second_bundle = seed_bundle(&cp).await;
+    let input = extract_input_for_source(&source, first_bundle.id, &dir);
+
+    execute_extract_audio_with_dispatchers(
+        &cp,
+        input.clone(),
+        &WritingExtractDispatcher {
+            output_bytes: b"extracted".to_vec(),
+        },
+        &SuccessfulVerifyDispatcher,
+        &SucceedingProbeDispatcher,
+    )
+    .await
+    .unwrap();
+    let mut replay = input;
+    replay.source_bundle_id = second_bundle.id;
+
+    let error = execute_extract_audio_with_dispatchers(
+        &cp,
+        replay,
+        &UncalledExtractDispatcher,
+        &UncalledVerifyDispatcher,
+        &UncalledProbeDispatcher,
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error.error_code(), voom_core::ErrorCode::ConfigInvalid);
+    assert!(
+        error
+            .to_string()
+            .contains("does not match persisted descriptor")
+    );
+    assert_eq!(
+        cp.bundles
+            .list_members(first_bundle.id)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(
+        cp.bundles
+            .list_members(second_bundle.id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_table_count(&cp, "audio_extract_operations", 1).await;
+    assert_table_count(&cp, "audio_extract_output_lineage", 1).await;
+}
+
+#[tokio::test]
+async fn prepared_extract_resume_failure_persists_diagnostics_then_recovers_without_duplicates() {
+    let (cp, _db, dir) = fixture_with_dir().await;
+    let mut source = seed_audio_source(&cp, &dir, b"source").await;
+    source.snapshot = record_plural_audio_snapshot(&cp, source.version).await;
+    let bundle = seed_bundle(&cp).await;
+    let mut input = extract_input_for_source(&source, bundle.id, &dir);
+    let operation_id = "node_extract_audio_recovery";
+    input.operation_payload["operation_id"] = serde_json::json!(operation_id);
+    input.operation_payload["outputs"] = serde_json::json!([
+        {
+            "output_id": voom_plan::audio::extract_output_id(operation_id, "a-1"),
+            "source_snapshot_stream_id": "a-1",
+            "source_provider_stream_index": 1,
+            "name_suffix": "a-1.opus.ogg",
+            "bundle_role": "external_audio"
+        },
+        {
+            "output_id": voom_plan::audio::extract_output_id(operation_id, "a-2"),
+            "source_snapshot_stream_id": "a-2",
+            "source_provider_stream_index": 2,
+            "name_suffix": "a-2.opus.ogg",
+            "bundle_role": "commentary_audio"
+        }
+    ]);
+    sqlx::query(
+        "CREATE TRIGGER fail_audio_extract_finalize BEFORE INSERT ON file_assets \
+         BEGIN SELECT RAISE(ABORT, 'injected finalize failure'); END;",
+    )
+    .execute(cp.pool_for_test())
+    .await
+    .unwrap();
+
+    let error = execute_extract_audio_with_dispatchers(
+        &cp,
+        input.clone(),
+        &WritingExtractDispatcher {
+            output_bytes: b"extracted".to_vec(),
+        },
+        &SuccessfulVerifyDispatcher,
+        &SucceedingProbeDispatcher,
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error.error_code(), voom_core::ErrorCode::DbUnreachable);
+    assert!(input.target_dir.join("source.a-1.opus.ogg").is_file());
+    assert!(input.target_dir.join("source.a-2.opus.ogg").is_file());
+    assert_table_count(&cp, "artifact_commit_records", 2).await;
     assert_table_count(&cp, "file_versions", 1).await;
-    assert_event_count(&cp, "artifact.audio_extract_succeeded", 0).await;
+    assert_table_count(&cp, "asset_bundle_members", 0).await;
+    assert_table_count(&cp, "audio_extract_output_lineage", 0).await;
+    assert_prepared_resume_failure_is_durable(&cp, &input).await;
+    sqlx::query("DROP TRIGGER fail_audio_extract_finalize")
+        .execute(cp.pool_for_test())
+        .await
+        .unwrap();
+
+    let recovered = execute_extract_audio_with_dispatchers(
+        &cp,
+        input,
+        &UncalledExtractDispatcher,
+        &UncalledVerifyDispatcher,
+        &UncalledProbeDispatcher,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(recovered.outputs.len(), 2);
+    assert!(
+        recovered
+            .outputs
+            .iter()
+            .all(|output| output.target_path.is_file())
+    );
+    assert_table_count(&cp, "artifact_handles", 2).await;
+    assert_table_count(&cp, "artifact_commit_records", 2).await;
+    assert_table_count(&cp, "file_versions", 3).await;
+    assert_table_count(&cp, "asset_bundle_members", 2).await;
+    assert_table_count(&cp, "audio_extract_output_lineage", 2).await;
+    let failed = latest_event_payload(&cp, "artifact.audio_extract_failed").await;
+    assert_eq!(failed["outputs"].as_array().unwrap().len(), 2);
+    assert!(failed["outputs"][0]["artifact_handle_id"].is_u64());
+    assert!(failed["outputs"][1]["artifact_handle_id"].is_u64());
+}
+
+async fn assert_prepared_resume_failure_is_durable(
+    cp: &crate::ControlPlane,
+    input: &ExecuteExtractAudioInput,
+) {
+    let operation_id = rewind_extract_recovery_to_prepared(cp).await;
+    let blocking = cp
+        .use_leases
+        .acquire(NewUseLease {
+            kind: UseLeaseKind::Playback,
+            scope: LeaseScope::Version(input.source_file_version_id),
+            issuer_kind: IssuerKind::User,
+            issuer_ref: "prepared-recovery-test".to_owned(),
+            blocking_mode: BlockingMode::Blocking,
+            ttl: Some(time::Duration::hours(1)),
+            acquired_at: cp.clock().now(),
+        })
+        .await
+        .unwrap();
+
+    let error = execute_extract_audio_with_dispatchers(
+        cp,
+        input.clone(),
+        &UncalledExtractDispatcher,
+        &UncalledVerifyDispatcher,
+        &UncalledProbeDispatcher,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.error_code(), voom_core::ErrorCode::BlockedByUseLease);
+    let recovery = sqlx::query(
+        "SELECT state, recovery_failure_class, recovery_error_code, recovery_message \
+         FROM audio_extract_operations WHERE id = ?",
+    )
+    .bind(operation_id)
+    .fetch_one(cp.pool_for_test())
+    .await
+    .unwrap();
+    assert_eq!(
+        recovery.try_get::<String, _>("state").unwrap(),
+        "recovery_required"
+    );
+    assert_eq!(
+        recovery
+            .try_get::<String, _>("recovery_failure_class")
+            .unwrap(),
+        "commit_failure"
+    );
+    assert_eq!(
+        recovery
+            .try_get::<String, _>("recovery_error_code")
+            .unwrap(),
+        "BLOCKED_BY_USE_LEASE"
+    );
+    assert!(
+        recovery
+            .try_get::<String, _>("recovery_message")
+            .unwrap()
+            .contains(&blocking.id.0.to_string())
+    );
+    assert_event_count(cp, "artifact.commit_recovery_required", 6).await;
+    let claim_loss_events: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM events WHERE kind = 'artifact.commit_recovery_required' \
+         AND json_extract(payload, '$.recovery_reason') = \
+             'audio extraction successor recovery after prior claim loss'",
+    )
+    .fetch_one(cp.pool_for_test())
+    .await
+    .unwrap();
+    assert_eq!(claim_loss_events, 2);
+    assert_table_count(cp, "artifact_handles", 2).await;
+    assert_table_count(cp, "artifact_commit_records", 2).await;
+    assert_table_count(cp, "file_versions", 1).await;
+    assert_table_count(cp, "asset_bundle_members", 0).await;
+    assert_table_count(cp, "audio_extract_output_lineage", 0).await;
+    cp.use_leases
+        .release(
+            blocking.id,
+            UseLeaseReleaseReason::Released,
+            cp.clock().now(),
+        )
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn prepared_successor_records_evidence_before_missing_member_field_decode() {
+    let (cp, _db, dir) = fixture_with_dir().await;
+    let source = seed_audio_source(&cp, &dir, b"source").await;
+    let bundle = seed_bundle(&cp).await;
+    let input = extract_input_for_source(&source, bundle.id, &dir);
+    seed_rewound_prepared_extract(&cp, &input).await;
+    sqlx::query("UPDATE audio_extract_operation_outputs SET temp_path = NULL")
+        .execute(cp.pool_for_test())
+        .await
+        .unwrap();
+
+    let error = execute_extract_audio_with_dispatchers(
+        &cp,
+        input,
+        &UncalledExtractDispatcher,
+        &UncalledVerifyDispatcher,
+        &UncalledProbeDispatcher,
+    )
+    .await
+    .unwrap_err();
+
+    assert!(error.to_string().contains("missing temp_path"));
+    assert_decode_failure_left_recovery_evidence(&cp, "missing temp_path").await;
+}
+
+#[tokio::test]
+async fn prepared_successor_records_evidence_before_malformed_result_decode() {
+    let (cp, _db, dir) = fixture_with_dir().await;
+    let source = seed_audio_source(&cp, &dir, b"source").await;
+    let bundle = seed_bundle(&cp).await;
+    let input = extract_input_for_source(&source, bundle.id, &dir);
+    seed_rewound_prepared_extract(&cp, &input).await;
+    sqlx::query("UPDATE audio_extract_operation_outputs SET result_facts = '{}'")
+        .execute(cp.pool_for_test())
+        .await
+        .unwrap();
+
+    let error = execute_extract_audio_with_dispatchers(
+        &cp,
+        input,
+        &UncalledExtractDispatcher,
+        &UncalledVerifyDispatcher,
+        &UncalledProbeDispatcher,
+    )
+    .await
+    .unwrap_err();
+
+    assert!(error.to_string().contains("malformed result_facts"));
+    assert_decode_failure_left_recovery_evidence(&cp, "malformed result_facts").await;
+}
+
+async fn seed_rewound_prepared_extract(cp: &crate::ControlPlane, input: &ExecuteExtractAudioInput) {
+    sqlx::query(
+        "CREATE TRIGGER fail_audio_extract_finalize BEFORE INSERT ON file_assets \
+         BEGIN SELECT RAISE(ABORT, 'injected finalize failure'); END;",
+    )
+    .execute(cp.pool_for_test())
+    .await
+    .unwrap();
+    execute_extract_audio_with_dispatchers(
+        cp,
+        input.clone(),
+        &WritingExtractDispatcher {
+            output_bytes: b"extracted".to_vec(),
+        },
+        &SuccessfulVerifyDispatcher,
+        &SucceedingProbeDispatcher,
+    )
+    .await
+    .unwrap_err();
+    sqlx::query("DROP TRIGGER fail_audio_extract_finalize")
+        .execute(cp.pool_for_test())
+        .await
+        .unwrap();
+    rewind_extract_recovery_to_prepared(cp).await;
+}
+
+async fn rewind_extract_recovery_to_prepared(cp: &crate::ControlPlane) -> i64 {
+    let operation_id = sqlx::query_scalar("SELECT id FROM audio_extract_operations")
+        .fetch_one(cp.pool_for_test())
+        .await
+        .unwrap();
+    sqlx::query(
+        "UPDATE audio_extract_operations SET state = 'prepared', \
+         recovery_failure_class = NULL, recovery_error_code = NULL, recovery_message = NULL \
+         WHERE id = ?",
+    )
+    .bind(operation_id)
+    .execute(cp.pool_for_test())
+    .await
+    .unwrap();
+    sqlx::query(
+        "UPDATE artifact_commit_records SET state = 'pending', failure_class = NULL, \
+         error_code = NULL, message = NULL, recovery_reason = NULL, finished_at = NULL",
+    )
+    .execute(cp.pool_for_test())
+    .await
+    .unwrap();
+    operation_id
+}
+
+async fn assert_decode_failure_left_recovery_evidence(
+    cp: &crate::ControlPlane,
+    expected_message: &str,
+) {
+    let row = sqlx::query("SELECT state, recovery_message FROM audio_extract_operations")
+        .fetch_one(cp.pool_for_test())
+        .await
+        .unwrap();
+    assert_eq!(
+        row.try_get::<String, _>("state").unwrap(),
+        "recovery_required"
+    );
+    assert!(
+        row.try_get::<String, _>("recovery_message")
+            .unwrap()
+            .contains(expected_message)
+    );
+    assert_table_count(cp, "file_versions", 1).await;
+    assert_table_count(cp, "asset_bundle_members", 0).await;
+    assert_table_count(cp, "audio_extract_output_lineage", 0).await;
 }
 
 #[tokio::test]
@@ -209,11 +1021,12 @@ async fn extract_audio_malformed_result_list_stops_before_verifier_and_commit() 
 
     let error = execute_extract_audio_with_dispatchers(
         &cp,
-        input,
+        input.clone(),
         &MissingOutputsExtractDispatcher {
             output_bytes: b"extracted".to_vec(),
         },
         &UncalledVerifyDispatcher,
+        &UncalledProbeDispatcher,
     )
     .await
     .unwrap_err();
@@ -228,6 +1041,138 @@ async fn extract_audio_malformed_result_list_stops_before_verifier_and_commit() 
     assert_table_count(&cp, "artifact_commit_records", 0).await;
     assert_table_count(&cp, "file_versions", 1).await;
     assert_event_count(&cp, "artifact.audio_extract_succeeded", 0).await;
+}
+
+#[tokio::test]
+async fn partial_extract_result_cleans_terminal_staging_and_retries_without_duplicates() {
+    let (cp, _db, dir) = fixture_with_dir().await;
+    let mut source = seed_audio_source(&cp, &dir, b"source").await;
+    source.snapshot = record_plural_audio_snapshot(&cp, source.version).await;
+    let bundle = seed_bundle(&cp).await;
+    let mut input = extract_input_for_source(&source, bundle.id, &dir);
+    let operation_id = "node_extract_audio_partial_retry";
+    input.operation_payload["operation_id"] = serde_json::json!(operation_id);
+    input.operation_payload["outputs"] = serde_json::json!([
+        {
+            "output_id": voom_plan::audio::extract_output_id(operation_id, "a-1"),
+            "source_snapshot_stream_id": "a-1",
+            "source_provider_stream_index": 1,
+            "name_suffix": "a-1.opus.ogg",
+            "bundle_role": "external_audio"
+        },
+        {
+            "output_id": voom_plan::audio::extract_output_id(operation_id, "a-2"),
+            "source_snapshot_stream_id": "a-2",
+            "source_provider_stream_index": 2,
+            "name_suffix": "a-2.opus.ogg",
+            "bundle_role": "commentary_audio"
+        }
+    ]);
+
+    let error = execute_extract_audio_with_dispatchers(
+        &cp,
+        input.clone(),
+        &PartialOutputsExtractDispatcher {
+            output_bytes: b"partial".to_vec(),
+        },
+        &UncalledVerifyDispatcher,
+        &UncalledProbeDispatcher,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(
+        error.error_code(),
+        voom_core::ErrorCode::MalformedWorkerResult
+    );
+    assert_table_count(&cp, "artifact_handles", 0).await;
+    assert_table_count(&cp, "artifact_commit_records", 0).await;
+
+    let retry = execute_extract_audio_with_dispatchers(
+        &cp,
+        input,
+        &WritingExtractDispatcher {
+            output_bytes: b"complete".to_vec(),
+        },
+        &SuccessfulVerifyDispatcher,
+        &SucceedingProbeDispatcher,
+    )
+    .await
+    .unwrap();
+    assert_eq!(retry.outputs.len(), 2);
+    assert_table_count(&cp, "artifact_handles", 2).await;
+    assert_table_count(&cp, "artifact_commit_records", 2).await;
+    assert_table_count(&cp, "asset_bundle_members", 2).await;
+    assert_table_count(&cp, "audio_extract_output_lineage", 2).await;
+}
+
+#[tokio::test]
+async fn second_extract_verification_failure_never_promotes_or_registers_any_member() {
+    let (cp, _db, dir) = fixture_with_dir().await;
+    let mut source = seed_audio_source(&cp, &dir, b"source").await;
+    source.snapshot = record_plural_audio_snapshot(&cp, source.version).await;
+    let bundle = seed_bundle(&cp).await;
+    let mut input = extract_input_for_source(&source, bundle.id, &dir);
+    let operation_id = "node_extract_audio_verify_second";
+    input.operation_payload["operation_id"] = serde_json::json!(operation_id);
+    input.operation_payload["outputs"] = serde_json::json!([
+        {
+            "output_id": voom_plan::audio::extract_output_id(operation_id, "a-1"),
+            "source_snapshot_stream_id": "a-1",
+            "source_provider_stream_index": 1,
+            "name_suffix": "a-1.opus.ogg",
+            "bundle_role": "external_audio"
+        },
+        {
+            "output_id": voom_plan::audio::extract_output_id(operation_id, "a-2"),
+            "source_snapshot_stream_id": "a-2",
+            "source_provider_stream_index": 2,
+            "name_suffix": "a-2.opus.ogg",
+            "bundle_role": "commentary_audio"
+        }
+    ]);
+    let first_target = input.target_dir.join("source.a-1.opus.ogg");
+    let second_target = input.target_dir.join("source.a-2.opus.ogg");
+
+    let error = execute_extract_audio_with_dispatchers(
+        &cp,
+        input.clone(),
+        &WritingExtractDispatcher {
+            output_bytes: b"extracted".to_vec(),
+        },
+        &FailSecondVerifyDispatcher::default(),
+        &UncalledProbeDispatcher,
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(
+        error.error_code(),
+        voom_core::ErrorCode::VerificationFailure
+    );
+    assert!(!first_target.exists());
+    assert!(!second_target.exists());
+    assert_table_count(&cp, "artifact_commit_records", 0).await;
+    assert_table_count(&cp, "asset_bundle_members", 0).await;
+    assert_table_count(&cp, "audio_extract_output_lineage", 0).await;
+
+    let retry = execute_extract_audio_with_dispatchers(
+        &cp,
+        input,
+        &UncalledExtractDispatcher,
+        &SuccessfulVerifyDispatcher,
+        &SucceedingProbeDispatcher,
+    )
+    .await
+    .unwrap();
+    assert_eq!(retry.outputs.len(), 2);
+    assert_table_count(&cp, "artifact_handles", 2).await;
+    assert_table_count(&cp, "artifact_commit_records", 2).await;
+    assert_table_count(&cp, "asset_bundle_members", 2).await;
+    assert_table_count(&cp, "audio_extract_output_lineage", 2).await;
+    let failed = latest_event_payload(&cp, "artifact.audio_extract_failed").await;
+    assert_eq!(failed["outputs"].as_array().unwrap().len(), 2);
+    assert!(failed["outputs"][0]["artifact_handle_id"].is_u64());
+    assert!(failed["outputs"][1]["artifact_handle_id"].is_u64());
 }
 
 #[tokio::test]
@@ -250,6 +1195,7 @@ async fn extract_audio_inconsistent_or_extra_results_stop_before_verifier_and_co
                 mutation,
             },
             &UncalledVerifyDispatcher,
+            &UncalledProbeDispatcher,
         )
         .await
         .unwrap_err();
@@ -283,6 +1229,7 @@ async fn extract_audio_legacy_singleton_remains_executable() {
             output_bytes: b"extracted".to_vec(),
         },
         &SuccessfulVerifyDispatcher,
+        &SucceedingProbeDispatcher,
     )
     .await
     .unwrap();
@@ -291,39 +1238,6 @@ async fn extract_audio_legacy_singleton_remains_executable() {
     assert!(report.commit_record_id.0 > 0);
     assert!(report.result_file_version_id.0 > source.version.0);
     assert_event_count(&cp, "artifact.audio_extract_succeeded", 1).await;
-}
-
-#[test]
-fn committed_extract_recovery_with_target_is_not_reported_as_success() {
-    let report = commit::CommitAudioExtractSidecarReport {
-        commit_record_id: ArtifactCommitRecordId(9),
-        result_file_version_id: None,
-        result_file_location_id: None,
-        state: ArtifactCommitState::RecoveryRequired,
-        target_path: PathBuf::from("/tmp/target.ogg"),
-        temp_path: PathBuf::from("/tmp/.target.ogg.tmp"),
-        recovery_required: Some(commit::AudioExtractRecoveryReport {
-            recovery_reason: "audio sidecar commit failed after durable prepare".to_owned(),
-            commit_record_id: ArtifactCommitRecordId(9),
-            source_bundle_id: BundleId(7),
-            role: "commentary_audio",
-            target_path: PathBuf::from("/tmp/target.ogg"),
-            target_exists: true,
-            temp_path: PathBuf::from("/tmp/.target.ogg.tmp"),
-            temp_exists: false,
-            staging_path: PathBuf::from("/tmp/staged.ogg"),
-            staging_exists: true,
-            result_file_version_id: None,
-            result_file_location_id: None,
-            error_code: "CONFLICT",
-            message: "bundle membership conflict".to_owned(),
-        }),
-    };
-
-    let err = ensure_extract_commit_succeeded(&report).unwrap_err();
-
-    assert_eq!(err.error_code(), voom_core::ErrorCode::CommitFailure);
-    assert!(err.to_string().contains("requires recovery"));
 }
 
 #[tokio::test]
@@ -431,6 +1345,7 @@ async fn test_extract_post_commit_succeeded_event_failure_returns_ok_with_contex
             output_bytes: b"extracted".to_vec(),
         },
         &SuccessfulVerifyDispatcher,
+        &SucceedingProbeDispatcher,
     )
     .await
     .unwrap();
@@ -463,6 +1378,7 @@ async fn fixture() -> (crate::ControlPlane, tempfile::NamedTempFile) {
     let url = format!("sqlite://{}", db.path().display());
     voom_store::init(&url).await.unwrap();
     let pool = voom_store::connect(&url).await.unwrap();
+    seed_extract_execution_lease(&pool).await;
     let cp = crate::ControlPlane::open_with_pool_and_rng(
         pool,
         std::sync::Arc::new(voom_core::SystemClock),
@@ -471,6 +1387,53 @@ async fn fixture() -> (crate::ControlPlane, tempfile::NamedTempFile) {
     .await
     .unwrap();
     (cp, db)
+}
+
+async fn seed_extract_execution_lease(pool: &sqlx::SqlitePool) {
+    let now = OffsetDateTime::now_utc();
+    let expires_at = now + time::Duration::hours(1);
+    sqlx::query(
+        "INSERT INTO workers \
+         (id, name, kind, status, registered_at, last_seen_at) \
+         VALUES (1, 'audio-test-worker', 'synthetic', 'active', ?, ?)",
+    )
+    .bind(now)
+    .bind(now)
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO jobs (id, kind, state, priority, created_at, updated_at) \
+         VALUES (1, 'audio-test', 'open', 0, ?, ?)",
+    )
+    .bind(now)
+    .bind(now)
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO tickets \
+         (id, job_id, kind, state, priority, payload, attempt, max_attempts, \
+          next_eligible_at, created_at, state_changed_at) \
+         VALUES (2, 1, 'audio-test', 'leased', 0, '{}', 1, 3, ?, ?, ?)",
+    )
+    .bind(now)
+    .bind(now)
+    .bind(now)
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO leases \
+         (id, ticket_id, worker_id, state, acquired_at, expires_at, \
+          last_heartbeat_at, ttl_seconds) VALUES (3, 2, 1, 'held', ?, ?, ?, 3600)",
+    )
+    .bind(now)
+    .bind(expires_at)
+    .bind(now)
+    .execute(pool)
+    .await
+    .unwrap();
 }
 
 async fn fixture_with_dir() -> (
@@ -491,6 +1454,359 @@ struct SeededAudioSource {
     version: FileVersionId,
     location: FileLocationId,
     snapshot: u64,
+}
+
+struct SeededLegacySingleton {
+    source: SeededAudioSource,
+    input: ExecuteExtractAudioInput,
+    target: PathBuf,
+    legacy_commit_record_id: ArtifactCommitRecordId,
+    legacy_result_file_version_id: FileVersionId,
+}
+
+struct HistoricalStagedArtifact {
+    handle_id: ArtifactHandleId,
+    verification_id: ArtifactVerificationId,
+}
+
+struct SeededActiveExtractAttempt {
+    attempt: voom_store::repo::audio_extract_operations::AudioExtractDispatchAttempt,
+    staging: stage::PreparedStagingPaths,
+}
+
+async fn seed_active_extract_attempt(
+    cp: &crate::ControlPlane,
+    input: &ExecuteExtractAudioInput,
+) -> SeededActiveExtractAttempt {
+    let mut context = ExtractAttemptContext::default();
+    let prepared = prepare_extract_execution(cp, input, &UncalledProbeDispatcher, &mut context)
+        .await
+        .unwrap();
+    let dispatch = claim_extract_dispatch(
+        cp,
+        input,
+        &prepared.paths.operation,
+        &prepared.paths.targets,
+    )
+    .await
+    .unwrap();
+    let attempt_directory = dispatch
+        .staging
+        .paths
+        .first()
+        .and_then(|path| path.parent())
+        .unwrap()
+        .display()
+        .to_string();
+    let attempt = cp
+        .audio_extract_operations
+        .record_dispatch_attempt(
+            &dispatch.claim,
+            NewAudioExtractDispatchAttempt {
+                worker_id: dispatch.worker_id,
+                worker_epoch: dispatch.worker_epoch,
+                idempotency_key: dispatch.idempotency_key,
+                attempt_directory,
+                paths: dispatch
+                    .staging
+                    .paths
+                    .iter()
+                    .map(|path| path.display().to_string())
+                    .collect(),
+            },
+            cp.clock().now(),
+        )
+        .await
+        .unwrap();
+    sqlx::query("UPDATE audio_extract_operations SET claim_expires_at = ? WHERE id = ?")
+        .bind(OffsetDateTime::UNIX_EPOCH)
+        .bind(i64::try_from(prepared.paths.operation.operation.id).unwrap())
+        .execute(cp.pool_for_test())
+        .await
+        .unwrap();
+    SeededActiveExtractAttempt {
+        attempt,
+        staging: dispatch.staging,
+    }
+}
+
+async fn assert_active_extract_attempt_replays(worker_already_responded: bool) {
+    let (cp, _db, dir) = fixture_with_dir().await;
+    let source = seed_audio_source(&cp, &dir, b"source").await;
+    let bundle = seed_bundle(&cp).await;
+    let input = extract_input_for_source(&source, bundle.id, &dir);
+    let seeded = seed_active_extract_attempt(&cp, &input).await;
+    let output_bytes = b"replayed-extract".to_vec();
+    if worker_already_responded {
+        for path in &seeded.staging.paths {
+            tokio::fs::write(path, &output_bytes).await.unwrap();
+        }
+    }
+    let expected_paths = seeded.attempt.paths.clone();
+    let report = execute_extract_audio_with_dispatchers(
+        &cp,
+        input,
+        &ReplayedExtractDispatcher {
+            expected_idempotency_key: seeded.attempt.idempotency_key.clone(),
+            expected_paths,
+            output_bytes,
+            worker_already_responded,
+        },
+        &SuccessfulVerifyDispatcher,
+        &SucceedingProbeDispatcher,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(report.outputs.len(), 1);
+    assert_table_count(&cp, "audio_extract_dispatch_attempts", 1).await;
+    assert_eq!(
+        dispatch_attempt_status(&cp, seeded.attempt.id).await,
+        "terminal"
+    );
+}
+
+async fn dispatch_attempt_status(cp: &crate::ControlPlane, attempt_id: u64) -> String {
+    sqlx::query_scalar("SELECT status FROM audio_extract_dispatch_attempts WHERE id = ?")
+        .bind(i64::try_from(attempt_id).unwrap())
+        .fetch_one(cp.pool_for_test())
+        .await
+        .unwrap()
+}
+
+fn set_plural_extract_outputs(input: &mut ExecuteExtractAudioInput, operation_id: &str) {
+    input.operation_payload["operation_id"] = serde_json::json!(operation_id);
+    input.operation_payload["outputs"] = serde_json::json!([
+        {
+            "output_id": voom_plan::audio::extract_output_id(operation_id, "a-1"),
+            "source_snapshot_stream_id": "a-1",
+            "source_provider_stream_index": 1,
+            "name_suffix": "a-1.opus.ogg",
+            "bundle_role": "external_audio"
+        },
+        {
+            "output_id": voom_plan::audio::extract_output_id(operation_id, "a-2"),
+            "source_snapshot_stream_id": "a-2",
+            "source_provider_stream_index": 2,
+            "name_suffix": "a-2.opus.ogg",
+            "bundle_role": "commentary_audio"
+        }
+    ]);
+}
+
+async fn seed_legacy_singleton(
+    cp: &crate::ControlPlane,
+    dir: &tempfile::TempDir,
+) -> SeededLegacySingleton {
+    let source = seed_audio_source(cp, dir, b"source").await;
+    let bundle = seed_bundle(cp).await;
+    let mut input = extract_input_for_source(&source, bundle.id, dir);
+    let payload = input.operation_payload.as_object_mut().unwrap();
+    payload.remove("operation_id");
+    payload.remove("outputs");
+    payload.remove("snapshot_stream_id");
+    let snapshot = cp
+        .identity()
+        .get_media_snapshot(MediaSnapshotId(source.snapshot))
+        .await
+        .unwrap()
+        .unwrap();
+    let selection =
+        selection::extract_selection_from_payload_and_snapshot(&input.operation_payload, &snapshot)
+            .unwrap();
+    let targets = stage::extract_target_paths(
+        &input.target_dir,
+        &dir.path().join("source.mkv"),
+        &selection,
+    )
+    .await
+    .unwrap();
+    let target = targets[0].clone();
+    let staging = dir.path().join("legacy-singleton.ogg");
+    let bytes = b"legacy-sidecar";
+    tokio::fs::write(&staging, bytes).await.unwrap();
+    let output = observed(u64::try_from(bytes.len()).unwrap(), &blake3_checksum(bytes));
+    let staged = seed_historical_staged_artifact(cp, source, &staging, &output).await;
+    tokio::fs::write(&target, bytes).await.unwrap();
+    let sidecar =
+        commit_historical_sidecar(cp, source.version, bundle.id, &staged, &target, &output).await;
+    SeededLegacySingleton {
+        source,
+        input,
+        target,
+        legacy_commit_record_id: sidecar.commit_record.id,
+        legacy_result_file_version_id: sidecar.file_version_id,
+    }
+}
+
+async fn seed_historical_staged_artifact(
+    cp: &crate::ControlPlane,
+    source: SeededAudioSource,
+    staging: &std::path::Path,
+    output: &AudioObservedFacts,
+) -> HistoricalStagedArtifact {
+    let mut tx = cp.pool_for_test().begin().await.unwrap();
+    let handle = cp
+        .artifacts()
+        .create_handle_in_tx(
+            &mut tx,
+            NewArtifactHandle {
+                size_bytes: Some(i64::try_from(output.size_bytes).unwrap()),
+                checksum: Some(output.content_hash.clone()),
+                privacy_class: "internal".to_owned(),
+                durability_class: "staging".to_owned(),
+                allowed_access_modes: vec!["local_path".to_owned()],
+                mutability: "immutable".to_owned(),
+                source_lineage: Some(serde_json::json!({
+                    "operation": "extract_audio",
+                    "source_file_version_id": source.version.0,
+                    "source_file_location_id": source.location.0,
+                    "selected_snapshot_stream_id": "a-1",
+                    "intended_role": "external_audio",
+                })),
+                file_version_id: Some(source.version),
+                created_at: OffsetDateTime::UNIX_EPOCH,
+            },
+        )
+        .await
+        .unwrap();
+    let location = cp
+        .artifacts()
+        .record_location_in_tx(
+            &mut tx,
+            NewArtifactLocation {
+                artifact_handle_id: handle.id,
+                kind: "staging".to_owned(),
+                value: staging.display().to_string(),
+                observed_at: OffsetDateTime::UNIX_EPOCH,
+            },
+        )
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    let verification = crate::artifact::verify::verify_artifact_with_dispatcher(
+        cp,
+        crate::artifact::VerifyArtifactInput::for_staged_file(handle.id, staging),
+        &SuccessfulVerifyDispatcher,
+        &crate::artifact::verify::NoVerifyArtifactHooks,
+    )
+    .await
+    .unwrap();
+    assert_eq!(verification.artifact_location_id, location.id);
+    HistoricalStagedArtifact {
+        handle_id: handle.id,
+        verification_id: verification.verification_id,
+    }
+}
+
+async fn commit_historical_sidecar(
+    cp: &crate::ControlPlane,
+    source_file_version_id: FileVersionId,
+    source_bundle_id: BundleId,
+    staged: &HistoricalStagedArtifact,
+    target: &std::path::Path,
+    output: &AudioObservedFacts,
+) -> voom_store::repo::artifacts::SidecarArtifactCommit {
+    let mut tx = cp.pool_for_test().begin().await.unwrap();
+    let pending = cp
+        .artifacts()
+        .create_pending_commit_in_tx(
+            &mut tx,
+            NewArtifactCommitRecord {
+                artifact_handle_id: staged.handle_id,
+                source_file_version_id,
+                verification_id: staged.verification_id,
+                target_path: target.display().to_string(),
+                temp_path: Some(format!("{}.legacy-tmp", target.display())),
+                report: serde_json::json!({"operation": "extract_audio_sidecar"}),
+                started_at: OffsetDateTime::UNIX_EPOCH,
+            },
+        )
+        .await
+        .unwrap();
+    let sidecar = cp
+        .artifacts()
+        .record_verified_sidecar_commit_rows_in_tx(
+            &mut tx,
+            NewSidecarArtifactCommit {
+                commit_record_id: pending.id,
+                target_path: target.display().to_string(),
+                content_hash: output.content_hash.clone(),
+                size_bytes: output.size_bytes,
+                observed_at: OffsetDateTime::UNIX_EPOCH,
+                finished_at: OffsetDateTime::UNIX_EPOCH,
+            },
+        )
+        .await
+        .unwrap();
+    cp.bundles
+        .add_member_in_tx(
+            &mut tx,
+            NewBundleMember {
+                bundle_id: source_bundle_id,
+                file_asset_id: sidecar.file_asset_id,
+                role: BundleMemberRole::ExternalAudio,
+            },
+        )
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    sidecar
+}
+
+async fn mutate_legacy_evidence(cp: &crate::ControlPlane, mutation: LegacyEvidenceMutation) {
+    let query = match mutation {
+        LegacyEvidenceMutation::WrongStream => {
+            "UPDATE artifact_handles \
+             SET source_lineage = json_set(source_lineage, \
+                 '$.selected_snapshot_stream_id', 'a-2')"
+        }
+        LegacyEvidenceMutation::MissingLineage => {
+            "UPDATE artifact_handles SET source_lineage = NULL"
+        }
+        LegacyEvidenceMutation::MismatchedVerification => {
+            "UPDATE artifact_verifications SET expected_checksum = 'blake3:mismatch'"
+        }
+        LegacyEvidenceMutation::RetiredResultLocation => {
+            "UPDATE file_locations SET retired_at = '1970-01-01T00:00:01Z' \
+             WHERE id = (SELECT result_file_location_id FROM artifact_commit_records)"
+        }
+    };
+    sqlx::query(query)
+        .execute(cp.pool_for_test())
+        .await
+        .unwrap();
+}
+
+async fn assert_legacy_adoption_rejected_without_mutation(
+    cp: &crate::ControlPlane,
+    input: ExecuteExtractAudioInput,
+    target: &std::path::Path,
+) {
+    let publication_counts = legacy_publication_counts(cp).await;
+    let media_snapshot_count = table_count(cp, "media_snapshots").await;
+    let target_bytes = tokio::fs::read(target).await.unwrap();
+
+    let error = execute_extract_audio_with_dispatchers(
+        cp,
+        input,
+        &UncalledExtractDispatcher,
+        &UncalledVerifyDispatcher,
+        &UncalledProbeDispatcher,
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error.error_code(), voom_core::ErrorCode::Conflict);
+    assert_eq!(legacy_publication_counts(cp).await, publication_counts);
+    assert_eq!(
+        table_count(cp, "media_snapshots").await,
+        media_snapshot_count
+    );
+    assert_eq!(table_count(cp, "audio_extract_operations").await, 0);
+    assert_eq!(table_count(cp, "audio_extract_operation_outputs").await, 0);
+    assert_eq!(table_count(cp, "audio_extract_output_lineage").await, 0);
+    assert_eq!(tokio::fs::read(target).await.unwrap(), target_bytes);
 }
 
 async fn seed_audio_source(
@@ -743,6 +2059,27 @@ fn extract_input_for_source(
     }
 }
 
+async fn legacy_publication_counts(cp: &crate::ControlPlane) -> (i64, i64, i64, i64, i64) {
+    let row = sqlx::query(
+        "SELECT \
+         (SELECT COUNT(*) FROM artifact_handles) AS handles, \
+         (SELECT COUNT(*) FROM artifact_commit_records) AS commits, \
+         (SELECT COUNT(*) FROM file_versions) AS versions, \
+         (SELECT COUNT(*) FROM file_locations) AS locations, \
+         (SELECT COUNT(*) FROM asset_bundle_members) AS members",
+    )
+    .fetch_one(cp.pool_for_test())
+    .await
+    .unwrap();
+    (
+        row.try_get("handles").unwrap(),
+        row.try_get("commits").unwrap(),
+        row.try_get("versions").unwrap(),
+        row.try_get("locations").unwrap(),
+        row.try_get("members").unwrap(),
+    )
+}
+
 async fn assert_event_count(cp: &crate::ControlPlane, kind: &str, expected: i64) {
     let row = sqlx::query("SELECT COUNT(*) AS count FROM events WHERE kind = ?")
         .bind(kind)
@@ -754,13 +2091,16 @@ async fn assert_event_count(cp: &crate::ControlPlane, kind: &str, expected: i64)
 }
 
 async fn assert_table_count(cp: &crate::ControlPlane, table: &str, expected: i64) {
+    assert_eq!(table_count(cp, table).await, expected);
+}
+
+async fn table_count(cp: &crate::ControlPlane, table: &str) -> i64 {
     let query = format!("SELECT COUNT(*) AS count FROM {table}");
     let row = sqlx::query(&query)
         .fetch_one(cp.pool_for_test())
         .await
         .unwrap();
-    let count: i64 = row.try_get("count").unwrap();
-    assert_eq!(count, expected, "unexpected row count for {table}");
+    row.try_get("count").unwrap()
 }
 
 async fn latest_event_payload(cp: &crate::ControlPlane, kind: &str) -> serde_json::Value {
@@ -792,9 +2132,23 @@ struct UncalledExtractDispatcher;
 impl ExtractAudioDispatcher for UncalledExtractDispatcher {
     async fn dispatch_extract_audio(
         &self,
+        _idempotency_key: &str,
         _request: ExtractAudioRequest,
     ) -> Result<ExtractAudioResult, VoomError> {
         panic!("extract dispatcher should not be called")
+    }
+}
+
+struct CrashingExtractDispatcher;
+
+#[async_trait]
+impl ExtractAudioDispatcher for CrashingExtractDispatcher {
+    async fn dispatch_extract_audio(
+        &self,
+        _idempotency_key: &str,
+        _request: ExtractAudioRequest,
+    ) -> Result<ExtractAudioResult, VoomError> {
+        Err(VoomError::WorkerCrash("injected worker crash".to_owned()))
     }
 }
 
@@ -835,6 +2189,38 @@ impl VerifyArtifactDispatcher for MismatchedVerifyDispatcher {
 }
 
 struct SuccessfulVerifyDispatcher;
+
+#[derive(Default)]
+struct FailSecondVerifyDispatcher {
+    calls: AtomicUsize,
+}
+
+#[async_trait]
+impl VerifyArtifactDispatcher for FailSecondVerifyDispatcher {
+    async fn dispatch_verify_artifact(
+        &self,
+        _worker_id: voom_core::WorkerId,
+        request: VerifyArtifactRequest,
+    ) -> Result<VerifyArtifactResult, crate::artifact::worker::VerifyWorkerError> {
+        let call = self.calls.fetch_add(1, Ordering::Relaxed);
+        let content_hash = if call == 1 {
+            "blake3:mismatch".to_owned()
+        } else {
+            request.expected.content_hash
+        };
+        Ok(VerifyArtifactResult {
+            status: VerifyArtifactStatus::Verified,
+            provider: "test-verify".to_owned(),
+            provider_version: "test".to_owned(),
+            observed: VerifyArtifactObservedFacts {
+                size_bytes: request.expected.size_bytes,
+                content_hash,
+                modified_at: None,
+                local_file_key: None,
+            },
+        })
+    }
+}
 
 #[async_trait]
 impl VerifyArtifactDispatcher for SuccessfulVerifyDispatcher {
@@ -983,7 +2369,18 @@ struct WritingExtractDispatcher {
     output_bytes: Vec<u8>,
 }
 
+struct ReplayedExtractDispatcher {
+    expected_idempotency_key: String,
+    expected_paths: Vec<String>,
+    output_bytes: Vec<u8>,
+    worker_already_responded: bool,
+}
+
 struct MissingOutputsExtractDispatcher {
+    output_bytes: Vec<u8>,
+}
+
+struct PartialOutputsExtractDispatcher {
     output_bytes: Vec<u8>,
 }
 
@@ -1002,12 +2399,13 @@ struct MutatingOutputsExtractDispatcher {
 impl ExtractAudioDispatcher for MutatingOutputsExtractDispatcher {
     async fn dispatch_extract_audio(
         &self,
+        idempotency_key: &str,
         request: ExtractAudioRequest,
     ) -> Result<ExtractAudioResult, VoomError> {
         let mut result = WritingExtractDispatcher {
             output_bytes: self.output_bytes.clone(),
         }
-        .dispatch_extract_audio(request)
+        .dispatch_extract_audio(idempotency_key, request)
         .await?;
         match self.mutation {
             ExtractResultMutation::ProjectionMismatch => {
@@ -1035,14 +2433,36 @@ impl ExtractAudioDispatcher for MutatingOutputsExtractDispatcher {
 impl ExtractAudioDispatcher for MissingOutputsExtractDispatcher {
     async fn dispatch_extract_audio(
         &self,
+        idempotency_key: &str,
         request: ExtractAudioRequest,
     ) -> Result<ExtractAudioResult, VoomError> {
         let mut result = WritingExtractDispatcher {
             output_bytes: self.output_bytes.clone(),
         }
-        .dispatch_extract_audio(request)
+        .dispatch_extract_audio(idempotency_key, request)
         .await?;
         result.outputs = None;
+        Ok(result)
+    }
+}
+
+#[async_trait]
+impl ExtractAudioDispatcher for PartialOutputsExtractDispatcher {
+    async fn dispatch_extract_audio(
+        &self,
+        idempotency_key: &str,
+        request: ExtractAudioRequest,
+    ) -> Result<ExtractAudioResult, VoomError> {
+        let mut result = WritingExtractDispatcher {
+            output_bytes: self.output_bytes.clone(),
+        }
+        .dispatch_extract_audio(idempotency_key, request.clone())
+        .await?;
+        let outputs = request.outputs.as_ref().unwrap();
+        for output in &outputs[1..] {
+            tokio::fs::remove_file(&output.output.path).await.unwrap();
+        }
+        result.outputs.as_mut().unwrap().truncate(1);
         Ok(result)
     }
 }
@@ -1051,51 +2471,98 @@ impl ExtractAudioDispatcher for MissingOutputsExtractDispatcher {
 impl ExtractAudioDispatcher for WritingExtractDispatcher {
     async fn dispatch_extract_audio(
         &self,
+        _idempotency_key: &str,
         request: ExtractAudioRequest,
     ) -> Result<ExtractAudioResult, VoomError> {
-        tokio::fs::write(&request.output.path, &self.output_bytes)
-            .await
-            .unwrap();
-        let output_hash = blake3_checksum(&self.output_bytes);
-        let output = observed(
-            u64::try_from(self.output_bytes.len()).unwrap(),
-            &output_hash,
-        );
-        let outputs = request.outputs.as_ref().map(|descriptors| {
-            descriptors
-                .iter()
-                .map(|descriptor| ExtractAudioOutputResult {
-                    output_id: descriptor.output_id.clone(),
-                    selection: descriptor.selection.clone(),
-                    path: descriptor.output.path.clone(),
-                    output: output.clone(),
-                    output_container: "ogg".to_owned(),
-                    output_audio_codec: "opus".to_owned(),
-                    output_language: Some("eng".to_owned()),
-                    output_title: Some("Main".to_owned()),
-                })
-                .collect()
-        });
-        Ok(ExtractAudioResult {
-            status: voom_worker_protocol::ExtractAudioStatus::Extracted,
-            provider: "ffmpeg".to_owned(),
-            provider_version: "test".to_owned(),
-            input_pre: observed(
-                request.input.expected.size_bytes,
-                &request.input.expected.content_hash,
-            ),
-            input_post: observed(
-                request.input.expected.size_bytes,
-                &request.input.expected.content_hash,
-            ),
-            output,
-            output_container: "ogg".to_owned(),
-            output_audio_codec: "opus".to_owned(),
-            selected_snapshot_stream_id: request.selection.snapshot_stream_id.clone(),
-            output_language: Some("eng".to_owned()),
-            output_title: Some("Main".to_owned()),
-            outputs,
-        })
+        if let Some(outputs) = &request.outputs {
+            for descriptor in outputs {
+                tokio::fs::write(&descriptor.output.path, &self.output_bytes)
+                    .await
+                    .unwrap();
+            }
+        } else {
+            tokio::fs::write(&request.output.path, &self.output_bytes)
+                .await
+                .unwrap();
+        }
+        Ok(extract_result_for_request(&request, &self.output_bytes))
+    }
+}
+
+#[async_trait]
+impl ExtractAudioDispatcher for ReplayedExtractDispatcher {
+    async fn dispatch_extract_audio(
+        &self,
+        idempotency_key: &str,
+        request: ExtractAudioRequest,
+    ) -> Result<ExtractAudioResult, VoomError> {
+        assert_eq!(idempotency_key, self.expected_idempotency_key);
+        let paths = request
+            .outputs
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(|output| output.output.path.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(paths, self.expected_paths);
+        for path in &paths {
+            if self.worker_already_responded {
+                assert_eq!(tokio::fs::read(path).await.unwrap(), self.output_bytes);
+            } else {
+                tokio::fs::write(path, &self.output_bytes).await.unwrap();
+            }
+        }
+        Ok(extract_result_for_request(&request, &self.output_bytes))
+    }
+}
+
+fn extract_result_for_request(
+    request: &ExtractAudioRequest,
+    output_bytes: &[u8],
+) -> ExtractAudioResult {
+    let output_hash = blake3_checksum(output_bytes);
+    let output = observed(u64::try_from(output_bytes.len()).unwrap(), &output_hash);
+    let outputs = request.outputs.as_ref().map(|descriptors| {
+        descriptors
+            .iter()
+            .map(|descriptor| ExtractAudioOutputResult {
+                output_id: descriptor.output_id.clone(),
+                selection: descriptor.selection.clone(),
+                path: descriptor.output.path.clone(),
+                output: output.clone(),
+                output_container: "ogg".to_owned(),
+                output_audio_codec: "opus".to_owned(),
+                output_language: Some("eng".to_owned()),
+                output_title: Some(
+                    if descriptor.selection.snapshot_stream_id == "a-2" {
+                        "Commentary"
+                    } else {
+                        "Main"
+                    }
+                    .to_owned(),
+                ),
+            })
+            .collect()
+    });
+    ExtractAudioResult {
+        status: voom_worker_protocol::ExtractAudioStatus::Extracted,
+        provider: "ffmpeg".to_owned(),
+        provider_version: "test".to_owned(),
+        input_pre: observed(
+            request.input.expected.size_bytes,
+            &request.input.expected.content_hash,
+        ),
+        input_post: observed(
+            request.input.expected.size_bytes,
+            &request.input.expected.content_hash,
+        ),
+        output,
+        output_container: "ogg".to_owned(),
+        output_audio_codec: "opus".to_owned(),
+        selected_snapshot_stream_id: request.selection.snapshot_stream_id.clone(),
+        output_language: Some("eng".to_owned()),
+        output_title: Some("Main".to_owned()),
+        outputs,
     }
 }
 

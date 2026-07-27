@@ -206,6 +206,38 @@ async fn init_is_idempotent_on_same_pool() {
 }
 
 #[tokio::test]
+async fn migration_race_recovery_waits_for_slow_winner() {
+    let pool = connect("sqlite::memory:").await.unwrap();
+    sqlx::query(
+        "CREATE TABLE _sqlx_migrations ( \
+         version BIGINT PRIMARY KEY, \
+         description TEXT NOT NULL, \
+         installed_on TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, \
+         success BOOLEAN NOT NULL, \
+         checksum BLOB NOT NULL, \
+         execution_time BIGINT NOT NULL \
+         )",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let migration_pool = pool.clone();
+    let migration = tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        MIGRATOR.run(&migration_pool).await.unwrap();
+    });
+
+    let state = probe_after_failure(&pool).await.unwrap();
+    migration.await.unwrap();
+
+    assert!(
+        matches!(state, SchemaState::Current { .. }),
+        "recovery must wait for a winning migrator that takes longer than one second: {state:?}"
+    );
+}
+
+#[tokio::test]
 async fn init_refuses_when_db_schema_is_too_new() {
     let pool = connect("sqlite::memory:").await.unwrap();
     init_on(&pool).await.unwrap();

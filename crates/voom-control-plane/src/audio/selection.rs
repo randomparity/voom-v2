@@ -25,23 +25,23 @@ pub struct TranscodeAudioSelectionPlan {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExtractAudioSelectionPlan {
     pub operation_id: Option<String>,
-    pub output_id: Option<String>,
-    pub name_suffix: Option<String>,
-    pub output_count: usize,
-    pub stream: AudioStreamRef,
-    pub source: SnapshotAudioStreamFact,
-    pub role: AudioBundleRole,
+    pub outputs: Vec<ExtractAudioSelectionOutput>,
     pub target_codec: String,
     pub container: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExtractAudioSelectionOutput {
+    pub output_id: Option<String>,
+    pub name_suffix: Option<String>,
+    pub stream: AudioStreamRef,
+    pub source: SnapshotAudioStreamFact,
+    pub role: AudioBundleRole,
+}
+
 struct ResolvedExtractSelection {
     operation_id: Option<String>,
-    output_id: Option<String>,
-    name_suffix: Option<String>,
-    output_count: usize,
-    source: SnapshotAudioStreamFact,
-    role: AudioBundleRole,
+    outputs: Vec<ExtractAudioSelectionOutput>,
 }
 
 pub fn transcode_selection_from_payload_and_snapshot(
@@ -132,30 +132,40 @@ pub fn extract_selection_from_payload_and_snapshot(
                     "audio extract outputs do not match the pinned source snapshot".to_owned(),
                 ));
             }
-            let Some(first) = expected.first() else {
+            if expected.is_empty() {
                 return Err(VoomError::Config(
                     "audio extract outputs must not be empty".to_owned(),
                 ));
-            };
-            let source = selected
-                .into_iter()
-                .find(|source| {
-                    source.snapshot_stream_id == first.source_snapshot_stream_id
-                        && source.provider_stream_index == first.source_provider_stream_index
+            }
+            let resolved_outputs = expected
+                .iter()
+                .map(|descriptor| {
+                    let source = selected
+                        .iter()
+                        .find(|source| {
+                            source.snapshot_stream_id == descriptor.source_snapshot_stream_id
+                                && source.provider_stream_index
+                                    == descriptor.source_provider_stream_index
+                        })
+                        .ok_or_else(|| {
+                            VoomError::Config(format!(
+                                "audio extract output {} does not identify a selected source stream",
+                                descriptor.output_id
+                            ))
+                        })?
+                        .clone();
+                    Ok(ExtractAudioSelectionOutput {
+                        output_id: Some(descriptor.output_id.clone()),
+                        name_suffix: Some(descriptor.name_suffix.clone()),
+                        stream: stream_ref(&source),
+                        source,
+                        role: descriptor.bundle_role,
+                    })
                 })
-                .ok_or_else(|| {
-                    VoomError::Config(
-                        "audio extract first output does not identify a selected source stream"
-                            .to_owned(),
-                    )
-                })?;
+                .collect::<Result<Vec<_>, VoomError>>()?;
             ResolvedExtractSelection {
                 operation_id: Some(operation_id.clone()),
-                output_id: Some(first.output_id.clone()),
-                name_suffix: Some(first.name_suffix.clone()),
-                output_count: expected.len(),
-                source,
-                role: first.bundle_role,
+                outputs: resolved_outputs,
             }
         }
         (Some(_), None) | (None, Some(_)) => {
@@ -166,12 +176,7 @@ pub fn extract_selection_from_payload_and_snapshot(
     };
     Ok(ExtractAudioSelectionPlan {
         operation_id: resolved.operation_id,
-        output_id: resolved.output_id,
-        name_suffix: resolved.name_suffix,
-        output_count: resolved.output_count,
-        stream: stream_ref(&resolved.source),
-        source: resolved.source,
-        role: resolved.role,
+        outputs: resolved.outputs,
         target_codec: payload.target_codec,
         container: payload.container,
     })
@@ -190,11 +195,13 @@ fn legacy_extract_selection(
     let role = extraction_role(source).map_err(audio_block_error)?;
     Ok(ResolvedExtractSelection {
         operation_id: None,
-        output_id: None,
-        name_suffix: None,
-        output_count: 1,
-        source: source.clone(),
-        role,
+        outputs: vec![ExtractAudioSelectionOutput {
+            output_id: None,
+            name_suffix: None,
+            stream: stream_ref(source),
+            source: source.clone(),
+            role,
+        }],
     })
 }
 

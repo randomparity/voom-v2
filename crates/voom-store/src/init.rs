@@ -8,6 +8,10 @@ use crate::pool::connect_or_create;
 use crate::repo::common::iso8601;
 use crate::schema::{SchemaState, probe_schema};
 
+const MIGRATION_RACE_RECOVERY_BUDGET: std::time::Duration = std::time::Duration::from_secs(30);
+const MIGRATION_RACE_INITIAL_DELAY: std::time::Duration = std::time::Duration::from_millis(25);
+const MIGRATION_RACE_MAX_DELAY: std::time::Duration = std::time::Duration::from_secs(1);
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InitReport {
     pub migrations_applied: u32,
@@ -192,28 +196,33 @@ async fn run_migrations_on(pool: &SqlitePool) -> Result<InitReport, VoomError> {
 /// A single post-error probe in that window reports `Partial` even
 /// though the schema will be `Current` once the winning peer finishes.
 ///
-/// The retry loop's first re-probe runs after 25 ms; subsequent attempts
-/// double the wait up to a cumulative budget of ~775 ms (25 + 50 + 100 +
-/// 200 + 400). The winning peer's per-migration tx is sub-millisecond on
-/// the SQL we ship, so any racing peer should observe the terminal state
-/// well within budget. If the probe never reaches a terminal state, the
-/// last observed `SchemaState` is returned and the caller classifies it
-/// the same way as a single-shot probe would.
+/// The retry loop uses bounded exponential backoff for up to 30 seconds,
+/// matching the `SQLite` busy timeout. A losing migrator can fail on the first
+/// migration and must wait for the winner to finish the complete migration
+/// set; under load that can take seconds even when each individual
+/// transaction is short. If the probe never reaches a terminal state, the
+/// last observed `SchemaState` is returned and the caller classifies it the
+/// same way as a single-shot probe would.
 async fn probe_after_failure(pool: &SqlitePool) -> Result<SchemaState, VoomError> {
-    let mut state = probe_schema(pool).await?;
-    let mut delay = std::time::Duration::from_millis(25);
-    for _ in 0..5 {
+    let deadline = tokio::time::Instant::now() + MIGRATION_RACE_RECOVERY_BUDGET;
+    let mut delay = MIGRATION_RACE_INITIAL_DELAY;
+    loop {
+        let state = probe_schema(pool).await?;
         if matches!(
             state,
             SchemaState::Current { .. } | SchemaState::Dirty { .. } | SchemaState::TooNew { .. }
         ) {
             return Ok(state);
         }
-        tokio::time::sleep(delay).await;
-        delay = delay.saturating_mul(2);
-        state = probe_schema(pool).await?;
+
+        let now = tokio::time::Instant::now();
+        if now >= deadline {
+            return Ok(state);
+        }
+
+        tokio::time::sleep(delay.min(deadline - now)).await;
+        delay = delay.saturating_mul(2).min(MIGRATION_RACE_MAX_DELAY);
     }
-    Ok(state)
 }
 
 async fn emit_schema_initialized_if_missing(

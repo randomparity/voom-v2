@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use time::OffsetDateTime;
 use voom_core::FailureClass;
 
 // --- artifacts -------------------------------------------------------------
@@ -425,6 +426,20 @@ pub struct ArtifactAudioTranscodeFailedPayload {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct ArtifactAudioExtractMemberPayload {
+    pub ordinal: u64,
+    pub output_id: Option<String>,
+    pub source_snapshot_stream_id: String,
+    pub source_provider_stream_index: u32,
+    pub role: String,
+    pub staging_path: String,
+    pub target_path: String,
+    pub artifact_handle_id: Option<u64>,
+    pub artifact_location_id: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ArtifactAudioExtractStartedPayload {
     pub job_id: u64,
     pub ticket_id: u64,
@@ -440,6 +455,8 @@ pub struct ArtifactAudioExtractStartedPayload {
     pub output_container: String,
     pub provider: Option<String>,
     pub provider_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub outputs: Vec<ArtifactAudioExtractMemberPayload>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -462,6 +479,29 @@ pub struct ArtifactAudioExtractProgressPayload {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct ArtifactAudioExtractOutputPayload {
+    pub output_id: Option<String>,
+    pub source_file_version_id: u64,
+    pub source_media_snapshot_id: u64,
+    pub source_snapshot_stream_id: String,
+    pub source_provider_stream_index: u32,
+    pub role: String,
+    pub artifact_handle_id: u64,
+    pub artifact_location_id: u64,
+    pub verification_id: u64,
+    pub commit_record_id: u64,
+    pub result_file_version_id: u64,
+    pub result_file_location_id: u64,
+    pub result_file_asset_id: u64,
+    pub result_media_snapshot_id: u64,
+    pub bundle_member_id: u64,
+    pub lineage_id: u64,
+    pub staging_path: String,
+    pub target_path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ArtifactAudioExtractSucceededPayload {
     pub job_id: u64,
     pub ticket_id: u64,
@@ -480,6 +520,8 @@ pub struct ArtifactAudioExtractSucceededPayload {
     pub output_audio_codec: String,
     pub provider: String,
     pub provider_version: String,
+    #[serde(default)]
+    pub outputs: Vec<ArtifactAudioExtractOutputPayload>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -502,6 +544,21 @@ pub struct ArtifactAudioExtractFailedPayload {
     pub message: String,
     pub provider: Option<String>,
     pub provider_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub outputs: Vec<ArtifactAudioExtractMemberPayload>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ArtifactAudioExtractQuiescedPayload {
+    pub operation_key: String,
+    pub generation: u32,
+    pub attempt_id: u64,
+    pub worker_id: u64,
+    pub worker_epoch: u32,
+    pub idempotency_key: String,
+    pub acknowledged_by: String,
+    pub acknowledged_at: OffsetDateTime,
 }
 
 #[cfg(test)]

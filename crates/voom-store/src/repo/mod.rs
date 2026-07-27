@@ -22,8 +22,8 @@ pub use external::systems::{
     ExternalSystem, ExternalSystemHealth, ExternalSystemKind, NewExternalSystem,
 };
 pub use media::{
-    artifact_access_plans, artifacts, backups, bundles, commit_safety_gate, identity, scan_facts,
-    use_leases,
+    artifact_access_plans, artifacts, audio_extract_operations, backups, bundles,
+    commit_safety_gate, identity, scan_facts, use_leases,
 };
 pub use policy::{
     issues, policies, policy_inputs, quality_scoring_profiles, safety_policies,

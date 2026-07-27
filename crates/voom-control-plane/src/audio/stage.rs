@@ -1,12 +1,21 @@
+use std::collections::HashSet;
 use std::io::ErrorKind;
 use std::path::{Component, Path, PathBuf};
 
 use voom_core::{LeaseId, TicketId, VoomError};
 
+use super::selection::ExtractAudioSelectionPlan;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PreparedStagingPath {
     pub canonical_root: PathBuf,
     pub path: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreparedStagingPaths {
+    pub canonical_root: PathBuf,
+    pub paths: Vec<PathBuf>,
 }
 
 pub async fn prepare_transcode_staging_path(
@@ -25,23 +34,6 @@ pub async fn prepare_transcode_staging_path(
     .await
 }
 
-pub async fn prepare_extract_staging_path(
-    staging_root: &Path,
-    ticket_id: TicketId,
-    lease_id: LeaseId,
-    source_path: &Path,
-    snapshot_stream_id: &str,
-    codec: &str,
-) -> Result<PreparedStagingPath, VoomError> {
-    prepare_staging_path(
-        staging_root,
-        ticket_id,
-        lease_id,
-        &extract_file_name(source_path, snapshot_stream_id, codec),
-    )
-    .await
-}
-
 pub async fn transcode_target_path(
     target_dir: &Path,
     source_path: &Path,
@@ -50,17 +42,68 @@ pub async fn transcode_target_path(
     target_path(target_dir, &transcode_file_name(source_path, codec)).await
 }
 
-pub async fn extract_target_path(
+pub async fn extract_target_paths(
     target_dir: &Path,
     source_path: &Path,
-    snapshot_stream_id: &str,
-    codec: &str,
-) -> Result<PathBuf, VoomError> {
-    target_path(
-        target_dir,
-        &extract_file_name(source_path, snapshot_stream_id, codec),
-    )
-    .await
+    selection: &ExtractAudioSelectionPlan,
+) -> Result<Vec<PathBuf>, VoomError> {
+    let file_names = extract_file_names(source_path, selection)?;
+    require_distinct_file_names(&file_names)?;
+    let canonical_dir = prepare_target_directory(target_dir).await?;
+    let paths = file_names
+        .into_iter()
+        .map(|file_name| canonical_dir.join(file_name))
+        .collect::<Vec<_>>();
+    Ok(paths)
+}
+
+pub async fn prepare_extract_staging_paths(
+    staging_root: &Path,
+    operation_token: &str,
+    generation: u32,
+    target_paths: &[PathBuf],
+) -> Result<PreparedStagingPaths, VoomError> {
+    let staging =
+        resolve_extract_staging_paths(staging_root, operation_token, generation, target_paths)
+            .await?;
+    for path in &staging.paths {
+        reject_existing_file(path, "staging path").await?;
+    }
+    Ok(staging)
+}
+
+pub async fn resolve_extract_staging_paths(
+    staging_root: &Path,
+    operation_token: &str,
+    generation: u32,
+    target_paths: &[PathBuf],
+) -> Result<PreparedStagingPaths, VoomError> {
+    require_safe_component(operation_token, "audio extraction operation token")?;
+    if target_paths.is_empty() {
+        return Err(VoomError::Config(
+            "audio extraction requires at least one staging path".to_owned(),
+        ));
+    }
+    let components = [
+        format!("operation-{operation_token}"),
+        format!("generation-{generation}"),
+    ];
+    let (canonical_root, canonical_parent) =
+        prepare_staging_parent(staging_root, &components).await?;
+    let mut paths = Vec::with_capacity(target_paths.len());
+    for target_path in target_paths {
+        let file_name = target_path.file_name().ok_or_else(|| {
+            VoomError::Config(format!(
+                "audio extraction target has no file name: {}",
+                target_path.display()
+            ))
+        })?;
+        paths.push(canonical_parent.join(file_name));
+    }
+    Ok(PreparedStagingPaths {
+        canonical_root,
+        paths,
+    })
 }
 
 async fn prepare_staging_path(
@@ -69,6 +112,24 @@ async fn prepare_staging_path(
     lease_id: LeaseId,
     file_name: &str,
 ) -> Result<PreparedStagingPath, VoomError> {
+    let components = [
+        format!("ticket-{}", ticket_id.0),
+        format!("lease-{}", lease_id.0),
+    ];
+    let (canonical_root, canonical_parent) =
+        prepare_staging_parent(staging_root, &components).await?;
+    let path = canonical_parent.join(file_name);
+    reject_existing_file(&path, "staging path").await?;
+    Ok(PreparedStagingPath {
+        canonical_root,
+        path,
+    })
+}
+
+async fn prepare_staging_parent(
+    staging_root: &Path,
+    components: &[String],
+) -> Result<(PathBuf, PathBuf), VoomError> {
     reject_symlink_components(staging_root, "audio staging root").await?;
     tokio::fs::create_dir_all(staging_root)
         .await
@@ -86,28 +147,20 @@ async fn prepare_staging_path(
             staging_root.display()
         ))
     })?;
-    let ticket_parent = canonical_root.join(format!("ticket-{}", ticket_id.0));
-    reject_symlink_components(&ticket_parent, "audio staging ticket parent").await?;
-    tokio::fs::create_dir_all(&ticket_parent)
-        .await
-        .map_err(|err| {
+    let mut parent = canonical_root.clone();
+    for component in components {
+        require_safe_component(component, "audio staging directory component")?;
+        parent.push(component);
+        reject_symlink_components(&parent, "audio staging parent").await?;
+        tokio::fs::create_dir_all(&parent).await.map_err(|err| {
             VoomError::Config(format!(
-                "create audio staging ticket parent {}: {err}",
-                ticket_parent.display()
+                "create audio staging parent {}: {err}",
+                parent.display()
             ))
         })?;
-    reject_symlink_dir(&ticket_parent, "audio staging ticket parent").await?;
-    secure_private_dir(&ticket_parent, "audio staging ticket parent").await?;
-    let parent = ticket_parent.join(format!("lease-{}", lease_id.0));
-    reject_symlink_components(&parent, "audio staging parent").await?;
-    tokio::fs::create_dir_all(&parent).await.map_err(|err| {
-        VoomError::Config(format!(
-            "create audio staging parent {}: {err}",
-            parent.display()
-        ))
-    })?;
-    reject_symlink_dir(&parent, "audio staging parent").await?;
-    secure_private_dir(&parent, "audio staging parent").await?;
+        reject_symlink_dir(&parent, "audio staging parent").await?;
+        secure_private_dir(&parent, "audio staging parent").await?;
+    }
     let canonical_parent = tokio::fs::canonicalize(&parent).await.map_err(|err| {
         VoomError::Config(format!(
             "canonicalize audio staging parent {}: {err}",
@@ -121,15 +174,17 @@ async fn prepare_staging_path(
             canonical_root.display()
         )));
     }
-    let path = canonical_parent.join(file_name);
-    reject_existing_file(&path, "staging path").await?;
-    Ok(PreparedStagingPath {
-        canonical_root,
-        path,
-    })
+    Ok((canonical_root, canonical_parent))
 }
 
 async fn target_path(target_dir: &Path, file_name: &str) -> Result<PathBuf, VoomError> {
+    let canonical_dir = prepare_target_directory(target_dir).await?;
+    let path = canonical_dir.join(file_name);
+    reject_existing_file(&path, "target path").await?;
+    Ok(path)
+}
+
+async fn prepare_target_directory(target_dir: &Path) -> Result<PathBuf, VoomError> {
     reject_symlink_components(target_dir, "audio target dir").await?;
     tokio::fs::create_dir_all(target_dir).await.map_err(|err| {
         VoomError::Config(format!(
@@ -144,9 +199,7 @@ async fn target_path(target_dir: &Path, file_name: &str) -> Result<PathBuf, Voom
             target_dir.display()
         ))
     })?;
-    let path = canonical_dir.join(file_name);
-    reject_existing_file(&path, "target path").await?;
-    Ok(path)
+    Ok(canonical_dir)
 }
 
 fn transcode_file_name(source: &Path, codec: &str) -> String {
@@ -164,6 +217,54 @@ fn extract_file_name(source: &Path, snapshot_stream_id: &str, codec: &str) -> St
         sanitize_component(snapshot_stream_id),
         sanitize_component(codec)
     )
+}
+
+fn extract_file_names(
+    source: &Path,
+    selection: &ExtractAudioSelectionPlan,
+) -> Result<Vec<String>, VoomError> {
+    selection
+        .outputs
+        .iter()
+        .map(|output| {
+            if let Some(suffix) = &output.name_suffix {
+                require_safe_component(suffix, "audio extraction name suffix")?;
+                Ok(format!("{}.{}", source_stem(source), suffix))
+            } else {
+                Ok(extract_file_name(
+                    source,
+                    &output.stream.snapshot_stream_id,
+                    &selection.target_codec,
+                ))
+            }
+        })
+        .collect()
+}
+
+fn require_distinct_file_names(file_names: &[String]) -> Result<(), VoomError> {
+    let mut distinct = HashSet::with_capacity(file_names.len());
+    for file_name in file_names {
+        if !distinct.insert(file_name) {
+            return Err(VoomError::Config(format!(
+                "audio extraction output path collision for {file_name}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn require_safe_component(value: &str, label: &str) -> Result<(), VoomError> {
+    let mut components = Path::new(value).components();
+    let is_single_normal = matches!(components.next(), Some(Component::Normal(_)))
+        && components.next().is_none()
+        && value != "."
+        && value != "..";
+    if !is_single_normal {
+        return Err(VoomError::Config(format!(
+            "{label} must be one relative path component: {value}"
+        )));
+    }
+    Ok(())
 }
 
 fn source_stem(source: &Path) -> String {

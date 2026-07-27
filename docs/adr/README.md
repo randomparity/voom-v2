@@ -47,3 +47,4 @@ are append-only — supersede an ADR with a new one rather than rewriting histor
 | [0039](0039-isolate-continued-ticket-failures-per-file.md) | Isolate continued ticket failures per file |
 | [0040](0040-structured-remux-attachment-selection.md) | Resolve remux attachments from structured provider facts |
 | [0041](0041-deterministic-multi-output-audio-extraction.md) | Deterministic multi-output audio extraction descriptors |
+| [0042](0042-atomic-audio-extraction-publication.md) | Publish audio extraction outputs as one recoverable operation |

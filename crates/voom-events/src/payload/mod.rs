@@ -149,6 +149,8 @@ pub enum Event {
     ArtifactAudioExtractSucceeded(ArtifactAudioExtractSucceededPayload),
     #[serde(rename = "artifact.audio_extract_failed")]
     ArtifactAudioExtractFailed(ArtifactAudioExtractFailedPayload),
+    #[serde(rename = "artifact.audio_extract_quiesced")]
+    ArtifactAudioExtractQuiesced(ArtifactAudioExtractQuiescedPayload),
     #[serde(rename = "issue.opened")]
     IssueOpened(IssueLifecyclePayload),
     #[serde(rename = "issue.updated")]
@@ -294,6 +296,7 @@ impl Event {
             Self::ArtifactAudioExtractProgress(_) => EventKind::ArtifactAudioExtractProgress,
             Self::ArtifactAudioExtractSucceeded(_) => EventKind::ArtifactAudioExtractSucceeded,
             Self::ArtifactAudioExtractFailed(_) => EventKind::ArtifactAudioExtractFailed,
+            Self::ArtifactAudioExtractQuiesced(_) => EventKind::ArtifactAudioExtractQuiesced,
             Self::IssueOpened(_) => EventKind::IssueOpened,
             Self::IssueUpdated(_) => EventKind::IssueUpdated,
             Self::IssueResolved(_) => EventKind::IssueResolved,

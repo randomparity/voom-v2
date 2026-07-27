@@ -16,6 +16,8 @@ mod prepare;
 mod promote;
 mod recovery;
 
+pub(crate) use prepare::evaluate_commit_safety_gate;
+
 #[derive(Debug)]
 pub struct CommitArtifactInput {
     pub artifact_handle_id: ArtifactHandleId,
