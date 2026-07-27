@@ -1,11 +1,11 @@
 use std::path::Path;
 
 use voom_worker_protocol::{
-    AudioDispositionFact, AudioObservedFacts, AudioOutputStreamFact, ExtractAudioRequest,
-    ExtractAudioResult, ExtractAudioStatus, OperationKind, ProtocolError, RemuxObservedFacts,
-    RemuxRequest, RemuxResult, RemuxStatus, TranscodeAudioRequest, TranscodeAudioResult,
-    TranscodeAudioStatus, TranscodeVideoObservedFacts, TranscodeVideoRequest, TranscodeVideoResult,
-    TranscodeVideoStatus,
+    AudioDispositionFact, AudioObservedFacts, AudioOutputStreamFact, ExtractAudioOutputResult,
+    ExtractAudioRequest, ExtractAudioResult, ExtractAudioStatus, OperationKind, ProtocolError,
+    RemuxObservedFacts, RemuxRequest, RemuxResult, RemuxStatus, TranscodeAudioRequest,
+    TranscodeAudioResult, TranscodeAudioStatus, TranscodeVideoObservedFacts, TranscodeVideoRequest,
+    TranscodeVideoResult, TranscodeVideoStatus,
 };
 
 use crate::catalog::operation_name;
@@ -279,7 +279,31 @@ fn fake_extract_audio_result(
     provider: &str,
     request: &ExtractAudioRequest,
 ) -> Result<ExtractAudioResult, ProtocolError> {
-    let output = fake_audio_output_facts(&request.output.path)?;
+    let outputs = request
+        .outputs
+        .as_ref()
+        .map(|descriptors| {
+            descriptors
+                .iter()
+                .map(|descriptor| {
+                    Ok(ExtractAudioOutputResult {
+                        output_id: descriptor.output_id.clone(),
+                        selection: descriptor.selection.clone(),
+                        path: descriptor.output.path.clone(),
+                        output: fake_audio_output_facts(&descriptor.output.path)?,
+                        output_container: descriptor.output.container.clone(),
+                        output_audio_codec: descriptor.output.audio_codec.clone(),
+                        output_language: None,
+                        output_title: None,
+                    })
+                })
+                .collect::<Result<Vec<_>, ProtocolError>>()
+        })
+        .transpose()?;
+    let output = match outputs.as_ref().and_then(|outputs| outputs.first()) {
+        Some(first) => first.output.clone(),
+        None => fake_audio_output_facts(&request.output.path)?,
+    };
     let input = audio_observed_from_expected(
         request.input.expected.size_bytes,
         &request.input.expected.content_hash,
@@ -296,6 +320,7 @@ fn fake_extract_audio_result(
         selected_snapshot_stream_id: request.selection.snapshot_stream_id.clone(),
         output_language: None,
         output_title: None,
+        outputs,
     })
 }
 

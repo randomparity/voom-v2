@@ -3,11 +3,11 @@ use std::path::{Path, PathBuf};
 use voom_core::{ErrorCode, FailureClass, LeaseId};
 use voom_worker_protocol::{
     AUDIO_PROFILE_DEFAULT, AudioExpectedFacts, AudioStreamRef, ExtractAudioInput,
-    ExtractAudioOutput, ExtractAudioRequest, OperationDispatch, OperationFuture, OperationKind,
-    OperationRequest, ProgressFrame, ProtocolError, TranscodeAudioInput, TranscodeAudioOutput,
-    TranscodeAudioRequest, TranscodeAudioSelection, TranscodeAudioSettings,
-    TranscodeVideoExpectedFacts, TranscodeVideoInput, TranscodeVideoOutput, TranscodeVideoProfile,
-    TranscodeVideoRequest,
+    ExtractAudioOutput, ExtractAudioOutputDescriptor, ExtractAudioRequest, OperationDispatch,
+    OperationFuture, OperationKind, OperationRequest, ProgressFrame, ProtocolError,
+    TranscodeAudioInput, TranscodeAudioOutput, TranscodeAudioRequest, TranscodeAudioSelection,
+    TranscodeAudioSettings, TranscodeVideoExpectedFacts, TranscodeVideoInput, TranscodeVideoOutput,
+    TranscodeVideoProfile, TranscodeVideoRequest,
 };
 
 use crate::DEFAULT_PROCESS_TIMEOUT;
@@ -440,6 +440,111 @@ async fn extract_audio_rejects_dropped_source_language_or_title() {
     assert_eq!(err.failure_class(), FailureClass::MalformedWorkerResult);
 }
 
+#[tokio::test]
+async fn extract_audio_executes_plural_outputs_in_source_order() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("input.mkv");
+    tokio::fs::write(&input, b"input").await.unwrap();
+    let request = plural_extract_audio_request(dir.path(), &input, audio_expected(&input).await);
+
+    let result = handle_extract_audio(
+        &request,
+        &audio_extract_plural_config(
+            dir.path(),
+            "#!/bin/sh\nlast=\"\"\nfor arg in \"$@\"; do last=\"$arg\"; done\nprintf output > \"$last\"\n",
+        ),
+    )
+    .await
+    .unwrap();
+
+    let outputs = result.outputs.unwrap();
+    assert_eq!(outputs.len(), 2);
+    assert_eq!(outputs[0].output_id, "extract_output_1");
+    assert_eq!(outputs[0].selection.snapshot_stream_id, "stream-1");
+    assert_eq!(outputs[1].output_id, "extract_output_2");
+    assert_eq!(outputs[1].selection.snapshot_stream_id, "stream-2");
+    assert_eq!(outputs[1].output_language.as_deref(), Some("jpn"));
+    assert_eq!(outputs[1].output_title.as_deref(), Some("Second"));
+    assert!(Path::new(&outputs[0].path).is_file());
+    assert!(Path::new(&outputs[1].path).is_file());
+}
+
+#[tokio::test]
+async fn extract_audio_allows_identical_facts_for_distinct_plural_outputs() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("input.mkv");
+    tokio::fs::write(&input, b"input").await.unwrap();
+    let request = plural_extract_audio_request(dir.path(), &input, audio_expected(&input).await);
+
+    let result = handle_extract_audio(
+        &request,
+        &audio_extract_plural_config_with_metadata(
+            dir.path(),
+            "#!/bin/sh\nlast=\"\"\nfor arg in \"$@\"; do last=\"$arg\"; done\nprintf output > \"$last\"\n",
+            true,
+        ),
+    )
+    .await
+    .unwrap();
+
+    let outputs = result.outputs.unwrap();
+    assert_ne!(outputs[0].output_id, outputs[1].output_id);
+    assert_ne!(outputs[0].path, outputs[1].path);
+    assert_eq!(outputs[0].output.size_bytes, outputs[1].output.size_bytes);
+    assert_eq!(
+        outputs[0].output.content_hash,
+        outputs[1].output.content_hash
+    );
+    assert_eq!(outputs[0].output_language, outputs[1].output_language);
+    assert_eq!(outputs[0].output_title, outputs[1].output_title);
+}
+
+#[tokio::test]
+async fn extract_audio_rejects_plural_path_collision_before_ffmpeg() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("input.mkv");
+    tokio::fs::write(&input, b"input").await.unwrap();
+    let marker = dir.path().join("ffmpeg-invoked");
+    let mut request =
+        plural_extract_audio_request(dir.path(), &input, audio_expected(&input).await);
+    request.outputs.as_mut().unwrap()[1].output.path = request.outputs.as_ref().unwrap()[0]
+        .output
+        .path
+        .to_uppercase();
+    let ffmpeg = format!(
+        "#!/bin/sh\nprintf invoked > '{}'\nexit 1\n",
+        marker.display()
+    );
+
+    let error = handle_extract_audio(&request, &audio_extract_plural_config(dir.path(), &ffmpeg))
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.error_code(), ErrorCode::ConfigInvalid);
+    assert!(!marker.exists());
+}
+
+#[tokio::test]
+async fn extract_audio_second_output_failure_returns_no_partial_result() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("input.mkv");
+    tokio::fs::write(&input, b"input").await.unwrap();
+    let request = plural_extract_audio_request(dir.path(), &input, audio_expected(&input).await);
+    let ffmpeg = "#!/bin/sh\nlast=\"\"\nfor arg in \"$@\"; do last=\"$arg\"; done\ncase \"$last\" in\n  *second*) exit 9 ;;\n  *) printf output > \"$last\" ;;\nesac\n";
+
+    let error = handle_extract_audio(&request, &audio_extract_plural_config(dir.path(), ffmpeg))
+        .await
+        .unwrap_err();
+
+    assert_eq!(
+        error.failure_class(),
+        FailureClass::ExternalSystemUnavailable
+    );
+    let outputs = request.outputs.as_ref().unwrap();
+    assert!(Path::new(&outputs[0].output.path).is_file());
+    assert!(!Path::new(&outputs[1].output.path).exists());
+}
+
 // ---- Task 7.2 tests ----
 
 #[tokio::test]
@@ -798,7 +903,67 @@ fn extract_audio_request(
             snapshot_stream_id: "stream-1".to_owned(),
             provider_stream_index: 1,
         },
+        outputs: None,
     }
+}
+
+fn plural_extract_audio_request(
+    root: &Path,
+    input: &Path,
+    expected: AudioExpectedFacts,
+) -> ExtractAudioRequest {
+    let mut request = extract_audio_request(root, input, expected);
+    let first = ExtractAudioOutputDescriptor {
+        output_id: "extract_output_1".to_owned(),
+        selection: request.selection.clone(),
+        output: request.output.clone(),
+    };
+    let second = ExtractAudioOutputDescriptor {
+        output_id: "extract_output_2".to_owned(),
+        selection: AudioStreamRef {
+            snapshot_stream_id: "stream-2".to_owned(),
+            provider_stream_index: 2,
+        },
+        output: ExtractAudioOutput {
+            staging_root: request.output.staging_root.clone(),
+            path: root
+                .join("extract-stage/input.second.audio.ogg")
+                .to_string_lossy()
+                .into_owned(),
+            container: "ogg".to_owned(),
+            audio_codec: "opus".to_owned(),
+            overwrite: false,
+        },
+    };
+    request.outputs = Some(vec![first, second]);
+    request
+}
+
+fn audio_extract_plural_config(root: &Path, ffmpeg_body: &str) -> FfmpegConfig {
+    audio_extract_plural_config_with_metadata(root, ffmpeg_body, false)
+}
+
+fn audio_extract_plural_config_with_metadata(
+    root: &Path,
+    ffmpeg_body: &str,
+    identical_metadata: bool,
+) -> FfmpegConfig {
+    let ffmpeg = stub_bin(root, "ffmpeg", ffmpeg_body);
+    let probe_body = "#!/bin/sh\nlast=\"\"\nfor arg in \"$@\"; do last=\"$arg\"; done\ncase \"$last\" in\n  *extract-stage*second*) cat <<'JSON'\n{\"format\":{\"format_name\":\"ogg\"},\"streams\":[{\"index\":0,\"codec_type\":\"audio\",\"codec_name\":\"opus\",\"tags\":{\"snapshot_stream_id\":\"stream-2\",\"language\":\"jpn\",\"title\":\"Second\"},\"disposition\":{\"default\":0,\"forced\":0,\"comment\":0}}]}\nJSON\n    ;;\n  *extract-stage*) cat <<'JSON'\n{\"format\":{\"format_name\":\"ogg\"},\"streams\":[{\"index\":0,\"codec_type\":\"audio\",\"codec_name\":\"opus\",\"tags\":{\"snapshot_stream_id\":\"stream-1\",\"language\":\"eng\",\"title\":\"Main\"},\"disposition\":{\"default\":1,\"forced\":0,\"comment\":0}}]}\nJSON\n    ;;\n  *) cat <<'JSON'\n{\"format\":{\"format_name\":\"matroska\"},\"streams\":[{\"index\":1,\"codec_type\":\"audio\",\"codec_name\":\"aac\",\"tags\":{\"language\":\"eng\",\"title\":\"Main\"},\"disposition\":{\"default\":1,\"forced\":0,\"comment\":0}},{\"index\":2,\"codec_type\":\"audio\",\"codec_name\":\"aac\",\"tags\":{\"language\":\"jpn\",\"title\":\"Second\"},\"disposition\":{\"default\":0,\"forced\":0,\"comment\":0}}]}\nJSON\n    ;;\nesac\n";
+    let probe_body = if identical_metadata {
+        probe_body
+            .replace("\"language\":\"jpn\"", "\"language\":\"eng\"")
+            .replace("\"title\":\"Second\"", "\"title\":\"Main\"")
+    } else {
+        probe_body.to_owned()
+    };
+    let ffprobe = stub_bin(root, "ffprobe", &probe_body);
+    FfmpegConfig::new(
+        ffmpeg,
+        ffprobe,
+        "ffmpeg version test".to_owned(),
+        DEFAULT_PROCESS_TIMEOUT,
+    )
 }
 
 /// Returns a config backed by stub binaries plus the `TempDir` guard. Hold the

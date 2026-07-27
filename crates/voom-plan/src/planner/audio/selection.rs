@@ -1,7 +1,9 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use serde_json::Value;
 use voom_policy::{ComparisonOp, MediaSnapshotInput, TrackFilter};
+
+use super::payload::{ExtractAudioOutputDescriptor, extract_output_id};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SnapshotAudioStreamFact {
@@ -23,7 +25,8 @@ pub struct AudioDispositionFact {
     pub commentary: Option<bool>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum AudioBundleRole {
     CommentaryAudio,
     ExternalAudio,
@@ -34,7 +37,6 @@ pub enum AudioPlanningBlock {
     InsufficientSnapshotFacts,
     UnsupportedSelector,
     ZeroMatches,
-    MultipleMatches,
     NoVideo,
     UnsupportedMediaShape,
     /// `synthesize audio` target channel count is not a downmix (>= the source
@@ -59,6 +61,7 @@ pub fn stream_facts(
         .and_then(Value::as_array)
         .ok_or(AudioPlanningBlock::InsufficientSnapshotFacts)?;
     let mut ids = HashSet::with_capacity(streams.len());
+    let mut provider_indexes = HashSet::with_capacity(streams.len());
     let mut facts = Vec::new();
 
     for stream in streams {
@@ -78,6 +81,9 @@ pub fn stream_facts(
             .and_then(Value::as_u64)
             .and_then(|value| u32::try_from(value).ok())
             .ok_or(AudioPlanningBlock::InsufficientSnapshotFacts)?;
+        if !provider_indexes.insert(provider_stream_index) {
+            return Err(AudioPlanningBlock::InsufficientSnapshotFacts);
+        }
         let disposition = audio_disposition(stream.get("disposition"));
 
         facts.push(SnapshotAudioStreamFact {
@@ -262,24 +268,100 @@ pub fn synthesize_audio_shape(
     AudioPlanShape::Planned
 }
 
-#[must_use]
-pub fn extract_audio_shape(
+pub fn extract_audio_outputs(
     snapshot: &MediaSnapshotInput,
     filter: Option<&TrackFilter>,
-) -> AudioPlanShape {
-    let selected = match selected_audio_streams(snapshot, filter) {
-        Ok(selected) => selected,
-        Err(block) => return AudioPlanShape::Blocked(block),
-    };
-    match selected.len() {
-        0 => AudioPlanShape::Blocked(AudioPlanningBlock::ZeroMatches),
-        1 => match extraction_role(&selected[0]) {
-            Ok(AudioBundleRole::CommentaryAudio | AudioBundleRole::ExternalAudio) => {
-                AudioPlanShape::Planned
+    operation_id: &str,
+    target_codec: &str,
+) -> Result<Vec<ExtractAudioOutputDescriptor>, AudioPlanningBlock> {
+    let mut selected = selected_audio_streams(snapshot, filter)?;
+    if selected.is_empty() {
+        return Err(AudioPlanningBlock::ZeroMatches);
+    }
+    selected.sort_by_key(|stream| stream.provider_stream_index);
+    let mut outputs = Vec::with_capacity(selected.len());
+    for stream in selected {
+        let bundle_role = extraction_role(&stream)?;
+        outputs.push(ExtractAudioOutputDescriptor {
+            output_id: extract_output_id(operation_id, &stream.snapshot_stream_id),
+            source_snapshot_stream_id: stream.snapshot_stream_id,
+            source_provider_stream_index: stream.provider_stream_index,
+            name_suffix: String::new(),
+            bundle_role,
+        });
+    }
+    let names = extract_output_name_suffixes(&outputs, target_codec)?;
+    for (output, name_suffix) in outputs.iter_mut().zip(names) {
+        output.name_suffix = name_suffix;
+    }
+    Ok(outputs)
+}
+
+fn extract_output_name_suffixes(
+    outputs: &[ExtractAudioOutputDescriptor],
+    target_codec: &str,
+) -> Result<Vec<String>, AudioPlanningBlock> {
+    let bases = outputs
+        .iter()
+        .map(|output| sanitize_component(&output.source_snapshot_stream_id))
+        .collect::<Vec<_>>();
+    let mut names = bases
+        .iter()
+        .map(|base| format!("{base}.{target_codec}.ogg"))
+        .collect::<Vec<_>>();
+    let mut suffixed = vec![false; outputs.len()];
+
+    loop {
+        let collisions = collision_indexes(&names);
+        if collisions.is_empty() {
+            return Ok(names);
+        }
+        let mut changed = false;
+        for index in collisions {
+            if suffixed[index] {
+                continue;
             }
-            Err(block) => AudioPlanShape::Blocked(block),
-        },
-        _ => AudioPlanShape::Blocked(AudioPlanningBlock::MultipleMatches),
+            let output_hash = outputs[index]
+                .output_id
+                .strip_prefix("extract_output_")
+                .ok_or(AudioPlanningBlock::UnsupportedMediaShape)?;
+            names[index] = format!("{}-{output_hash}.{target_codec}.ogg", bases[index]);
+            suffixed[index] = true;
+            changed = true;
+        }
+        if !changed {
+            return Err(AudioPlanningBlock::UnsupportedMediaShape);
+        }
+    }
+}
+
+fn collision_indexes(names: &[String]) -> Vec<usize> {
+    let mut counts = HashMap::with_capacity(names.len());
+    for name in names {
+        *counts.entry(name.to_ascii_lowercase()).or_insert(0_usize) += 1;
+    }
+    names
+        .iter()
+        .enumerate()
+        .filter_map(|(index, name)| (counts[&name.to_ascii_lowercase()] > 1).then_some(index))
+        .collect()
+}
+
+fn sanitize_component(value: &str) -> String {
+    let sanitized = value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                ch
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>();
+    if sanitized.is_empty() {
+        "stream".to_owned()
+    } else {
+        sanitized
     }
 }
 

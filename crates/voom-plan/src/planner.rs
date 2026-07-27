@@ -445,17 +445,26 @@ impl<'a> PlanBuilder<'a> {
                 target_codec,
                 container,
                 filter,
-            } => self.push_operation_plan(
-                phase_name,
-                snapshot,
-                audio::plan_extract(
+            } => {
+                let operation_id = node_id(
+                    phase_name,
+                    checked_ordinal(self.nodes.len()),
+                    PlanOperationKind::ExtractAudio.as_str(),
+                    &target_key(&snapshot.target),
+                );
+                self.push_operation_plan(
                     phase_name,
                     snapshot,
-                    target_codec,
-                    container,
-                    filter.as_ref(),
-                ),
-            ),
+                    audio::plan_extract(
+                        phase_name,
+                        snapshot,
+                        target_codec,
+                        container,
+                        filter.as_ref(),
+                        &operation_id,
+                    ),
+                );
+            }
             CompiledOperation::SynthesizeAudio {
                 target_codec,
                 container,

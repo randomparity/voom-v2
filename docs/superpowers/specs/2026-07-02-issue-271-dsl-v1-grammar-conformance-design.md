@@ -85,10 +85,10 @@ arm. Reuse existing compiled representations — introduce no new `TrackFilter`,
 ## Semantics of an unfiltered `extract audio`
 
 `extract audio` with no `where` selects all audio streams; the planner's
-`extract_audio_shape` already blocks with `MultipleMatches` when more than one
-stream is selected. This is the existing, spec-consistent behavior (single-stream
-extraction), so no new failure mode is introduced — an unfiltered extract on a
-multi-audio file fails to plan exactly as an over-broad filter does today.
+ordered extraction planning emits one stable output descriptor for every
+matched stream. Zero matches block visibly. Before issue #337, host execution
+rejects a plural payload before staging or worker dispatch; the grammar does not
+introduce a separate plural form.
 
 ## Verification — spec-conformance fixture suite
 

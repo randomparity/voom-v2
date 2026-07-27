@@ -1,6 +1,6 @@
 ---
 name: voom-sprint-14-design
-description: Sprint 14 design for policy-driven audio transcode and exactly-one audio extraction through durable tickets, FFmpeg workers, staged artifacts, and bundle registration.
+description: Sprint 14 design for policy-driven audio transcode and ordered audio extraction through durable tickets, FFmpeg workers, staged artifacts, and bundle registration.
 status: draft
 date: 2026-05-26
 sprint: 14
@@ -13,22 +13,26 @@ references:
 
 # VOOM Sprint 14 - Audio Transcode And Extract V1
 
+> **Current extraction contract:** ADR 0041 supersedes this design's original
+> exactly-one cardinality limit. Planning and worker execution now use one stable,
+> ordered output descriptor per matched source stream. Before issue #337, the
+> control plane executes singleton payloads and rejects plural payloads before
+> preparing staging or target paths or dispatching a worker; #337 owns atomic
+> plural host commit, lineage, recovery, and reporting.
+
 ## 1. Goal
 
 Sprint 14 makes audio mutation policy operations executable through the real
 media control-plane path. A policy containing `transcode audio to aac|opus where
 ...` compiles into a planned `transcode_audio` node that replaces selected audio
 streams inside a new committed media file. A policy containing `extract audio
-where ...` compiles into a planned `extract_audio` node that produces one
-standalone audio sidecar file and registers that file as a bundle member.
+where ...` compiles into a planned `extract_audio` node with one ordered
+standalone audio sidecar descriptor per selected stream.
 
 The two operations share FFmpeg, selector evaluation, staged artifact recording,
 verification, durable ticket execution, and agent-facing reports. They do not
 share commit semantics. Audio transcode is a same-file media successor. Audio
 extraction is a sidecar-producing bundle mutation.
-
-Sprint 14 deliberately limits extraction to exactly one selected audio stream.
-Multi-output extraction is deferred and tracked by GitHub issue #99.
 
 ## 2. Scope
 
@@ -53,10 +57,11 @@ Sprint 14 delivers:
   snapshot re-read, selector re-evaluation, deterministic staging, worker
   dispatch, staged artifact recording, verification, add-only commit, result
   snapshot recording, lineage, events, and CLI report IDs.
-- Control-plane orchestration for audio extraction: source selection, snapshot
-  re-read, exactly-one selector validation, deterministic staging, worker
+- Control-plane orchestration for singleton audio extraction: source selection,
+  snapshot re-read, ordered descriptor validation, deterministic staging, worker
   dispatch, staged artifact recording, verification, add-only sidecar commit,
-  bundle-member registration, lineage, events, and CLI report IDs.
+  bundle-member registration, lineage, events, and CLI report IDs. Plural
+  orchestration belongs to issue #337.
 - A focused sidecar commit helper for verified staged artifacts. Unlike the
   same-file artifact commit path, extraction must create a new sidecar
   `FileAsset` with its own `FileVersion` and `FileLocation`, while preserving
@@ -131,11 +136,11 @@ voom scan --path <file>
 
 accepted policy with `extract audio where ...`
   -> compiled ExtractAudio operation
-  -> planner requires exactly one matching audio stream
+  -> planner emits one stable descriptor per matching audio stream
   -> ExecutionPlan node operation_kind = "extract_audio"
   -> compliance execute submits durable workflow ticket
   -> scheduler leases ticket to builtin.ffmpeg
-  -> FFmpeg worker writes one staged standalone audio artifact
+  -> FFmpeg worker writes the requested ordered staged audio artifacts
   -> control plane records artifact_handle + staging artifact_location
   -> verify_artifact worker verifies staged bytes
   -> host commit creates add-only sidecar FileAsset/FileVersion/FileLocation
@@ -229,10 +234,9 @@ Planning behavior for `transcode_audio`:
 
 Planning behavior for `extract_audio`:
 
-- Plans only when exactly one audio stream matches the selector.
+- Plans one output descriptor per matched audio stream in ascending provider
+  stream-index order.
 - Blocks when zero audio streams match.
-- Blocks when more than one audio stream matches. Multi-output extraction is
-  deferred to issue #99.
 - Blocks when required stream facts are absent.
 - Uses a deterministic V1 sidecar format: Opus audio in an Ogg container.
 - Preserves selected audio language and title in the sidecar when present in the
@@ -309,7 +313,9 @@ language, title, default/disposition state, and channel count when ffprobe
 reports it. The control plane compares those facts to the request and source
 snapshot before committing.
 
-Sprint 14 also adds typed protocol structs for exactly-one audio extraction.
+Sprint 14 also adds typed protocol structs for audio extraction. ADR 0041
+extends them additively with ordered output descriptor lists while preserving
+the historical singleton projections.
 
 Request shape:
 
@@ -374,7 +380,8 @@ The worker must:
 - invoke FFmpeg out of process with deterministic command shapes derived from
   typed request fields;
 - copy non-selected streams explicitly in the audio transcode command shape;
-- map exactly one stream in the extraction command shape;
+- map exactly one source stream per ordered extraction output descriptor (an
+  extraction operation may carry multiple descriptors under ADR 0041);
 - emit progress frames when FFmpeg exposes useful progress;
 - observe output bytes after FFmpeg exits;
 - validate output codec/container facts with ffprobe before returning success;
@@ -430,7 +437,10 @@ For each audio extraction ticket, the control plane must:
 4. Resolve the source `FileAsset` bundle membership and require
    `BundleMemberRole::PrimaryVideo`.
 5. Re-read the source media snapshot.
-6. Re-evaluate the audio selector and require exactly one selected stream.
+6. Validate the planned ordered output descriptors against the pinned snapshot
+   and require one or more selected streams. Before issue #337, reject more than
+   one descriptor before preparing staging or target paths or dispatching a
+   worker.
 7. Re-observe source bytes and compare them to the source version facts before
    dispatch.
 8. Choose a canonical new staging path under the configured or command-scoped
@@ -468,15 +478,16 @@ silently reuse, delete, truncate, or overwrite the file.
 Target paths are add-only and deterministic:
 
 - audio transcode: `<source-stem>.audio-<codec>.mkv`
-- audio extraction: `<source-stem>.<snapshot-stream-id>.<codec>.<extension>`
+- audio extraction: `<source-stem>.<planned-name-suffix>`
 
 If the target exists, the operation fails with `CONFIG_INVALID`; replace
 semantics remain deferred.
 
-The extraction target name must use a sanitized durable `snapshot_stream_id`.
-It must not use track title, language, or provider-specific stream index as the
-unique filename component. Human-readable stream metadata belongs in result
-payloads and CLI reports, not in path identity.
+The planner derives each extraction name suffix from the sanitized durable
+`snapshot_stream_id`. Names that collide after final sanitization and ASCII
+case-folding receive a deterministic fixed-width output-identity suffix. Track
+title, language, and provider-specific stream index are not filename identity.
+No later layer may re-sanitize or reorder these planned suffixes.
 
 The control plane applies the same local path hardening as Sprint 13:
 canonicalize source paths, staging parents, and target parents; reject symlink
@@ -540,8 +551,11 @@ Stable Sprint 14 behavior:
   reported as `CONFIG_INVALID` at execution time.
 - Audio transcode selector matches zero streams: planning or execution
   diagnostic, reported as `CONFIG_INVALID` at execution time.
-- Audio extraction selector matches zero or multiple streams: planning or
-  execution diagnostic, reported as `CONFIG_INVALID` at execution time.
+- Audio extraction selector matches zero streams: planning or execution
+  diagnostic, reported as `CONFIG_INVALID` at execution time.
+- Audio extraction selector matches multiple streams: planning emits ordered
+  descriptors; before issue #337, host execution rejects the plural payload
+  before staging or worker dispatch with `CONFIG_INVALID`.
 - Extraction source asset is not a primary bundle member: `CONFIG_INVALID`.
 - FFmpeg spawn/exit failure: `EXTERNAL_SYSTEM_UNAVAILABLE`.
 - Worker crash, timeout, malformed result, and protocol errors use the existing
@@ -572,9 +586,9 @@ Required tests:
   shapes and rejected unsupported shapes.
 - Planner tests for audio transcode planned/no-op/blocked cases, including zero
   selector matches and missing facts.
-- Planner tests for audio extraction exactly-one planned cases and zero/multiple
-  selector blocked cases, plus commentary and non-commentary bundle-role
-  selection.
+- Planner tests for audio extraction zero/one/multiple match cases, canonical
+  source order, stable identities, collision-safe names, and commentary and
+  non-commentary bundle-role selection.
 - Compliance bridge tests proving `transcode_audio` and `extract_audio` planned
   nodes submit real workflow tickets with policy targets and typed payloads.
 - Worker protocol serialization tests for audio transcode and extract
@@ -622,9 +636,10 @@ Sprint 14 is complete when:
 - Already-compliant selected audio streams produce no-op nodes with clear
   reasons.
 - Audio transcode selectors that match zero streams block visibly.
-- A policy containing supported audio extraction text compiles and plans to
-  `extract_audio` only when exactly one audio stream matches.
-- Audio extraction selectors that match zero or multiple streams block visibly.
+- A policy containing supported audio extraction text compiles and plans one
+  ordered `extract_audio` output descriptor per matched source stream.
+- Audio extraction selectors that match zero streams block visibly; one and
+  multiple matches plan without parser-only or unpublished DSL forms.
 - Compliance execution runs planned audio transcode through durable tickets and
   an out-of-process FFmpeg worker.
 - Compliance execution runs planned audio extraction through durable tickets and
@@ -647,9 +662,12 @@ Sprint 14 is complete when:
 - Missing FFmpeg/ffprobe binaries or unsupported provider capabilities fail
   during worker discovery/preflight with explicit diagnostics; required CI tests
   are not skipped.
-- Existing staging output, retried leases, symlink/path escape attempts,
-  unknown media facts, and extraction multi-match selectors fail before
-  destructive or ambiguous mutation.
+- Existing staging output, retried leases, symlink/path escape attempts, and
+  unknown media facts fail before destructive or ambiguous mutation.
+- Extraction multi-match selectors plan stable ordered outputs under ADR 0041.
+  Until the atomic plural host commit unit lands, the host rejects a validated
+  plural payload before staging or worker dispatch rather than committing a
+  partial bundle.
 - CLI golden tests lock the agent-facing envelope shape.
 - The Sprint 14 closeout matrix records repeatable evidence for DSL, planning,
   execution, artifact, bundle, verification, and reporting behavior.

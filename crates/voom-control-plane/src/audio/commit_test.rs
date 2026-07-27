@@ -629,6 +629,10 @@ fn extract_input(source_file_version_id: FileVersionId) -> ExecuteExtractAudioIn
 
 fn extract_selection() -> ExtractAudioSelectionPlan {
     ExtractAudioSelectionPlan {
+        operation_id: None,
+        output_id: None,
+        name_suffix: None,
+        output_count: 1,
         stream: voom_worker_protocol::AudioStreamRef {
             snapshot_stream_id: "a-1".to_owned(),
             provider_stream_index: 1,
@@ -684,6 +688,7 @@ fn extract_result() -> ExtractAudioResult {
         selected_snapshot_stream_id: "a-1".to_owned(),
         output_language: Some("eng".to_owned()),
         output_title: Some("Main".to_owned()),
+        outputs: None,
     }
 }
 

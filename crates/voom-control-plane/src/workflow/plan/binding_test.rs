@@ -161,9 +161,26 @@ fn policy_transcode_audio_payload_renders_source_target_and_operation_payload() 
 fn policy_extract_audio_payload_renders_source_target_and_operation_payload() {
     let operation_payload = serde_json::json!({
         "type": "extract_audio",
+        "operation_id": "node_extract_audio_test",
         "target_codec": "opus",
         "container": "ogg",
-        "source_media_snapshot_id": 99
+        "source_media_snapshot_id": 99,
+        "outputs": [
+            {
+                "output_id": "extract_output_first",
+                "source_snapshot_stream_id": "audio-1",
+                "source_provider_stream_index": 1,
+                "name_suffix": "audio-1.opus.ogg",
+                "bundle_role": "external_audio"
+            },
+            {
+                "output_id": "extract_output_second",
+                "source_snapshot_stream_id": "audio-2",
+                "source_provider_stream_index": 2,
+                "name_suffix": "audio-2.opus.ogg",
+                "bundle_role": "commentary_audio"
+            }
+        ]
     });
 
     let rendered = render_policy_extract_audio_payload(

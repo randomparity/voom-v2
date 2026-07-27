@@ -1040,6 +1040,7 @@ fn extract_audio_request(root: &Path, selected: u32) -> ExtractAudioRequest {
             snapshot_stream_id: format!("stream-{selected}"),
             provider_stream_index: selected,
         },
+        outputs: None,
     }
 }
 

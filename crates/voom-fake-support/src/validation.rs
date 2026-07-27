@@ -369,14 +369,6 @@ fn validate_transcode_audio_request(request: &TranscodeAudioRequest) -> Result<(
 }
 
 fn validate_extract_audio_request(request: &ExtractAudioRequest) -> Result<(), ProtocolError> {
-    if request.input.path.trim().is_empty() {
-        return Err(invalid("extract_audio input.path must not be empty"));
-    }
-    if request.output.container != "ogg" || request.output.audio_codec != "opus" {
-        return Err(invalid("extract_audio output must be opus in ogg"));
-    }
-    if request.selection.snapshot_stream_id.trim().is_empty() {
-        return Err(invalid("extract_audio selection must not be empty"));
-    }
-    Ok(())
+    voom_worker_protocol::validate_extract_audio_request(request)
+        .map_err(|error| invalid(error.to_string()))
 }

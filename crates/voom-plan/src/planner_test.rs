@@ -2268,6 +2268,20 @@ fn extract_audio_where_commentary_plans_for_exactly_one_known_commentary_stream(
     assert_eq!(plan.nodes[0].operation_payload["target_codec"], "opus");
     assert_eq!(plan.nodes[0].operation_payload["container"], "ogg");
     assert_eq!(
+        plan.nodes[0].operation_payload["operation_id"],
+        plan.nodes[0].node_id
+    );
+    assert_eq!(
+        plan.nodes[0].operation_payload["outputs"],
+        serde_json::json!([{
+            "output_id": plan.nodes[0].operation_payload["outputs"][0]["output_id"],
+            "source_snapshot_stream_id": "stream-2",
+            "source_provider_stream_index": 2,
+            "name_suffix": "stream-2.opus.ogg",
+            "bundle_role": "commentary_audio"
+        }])
+    );
+    assert_eq!(
         plan.nodes[0]
             .capability_hints
             .operation_capability
@@ -2277,21 +2291,109 @@ fn extract_audio_where_commentary_plans_for_exactly_one_known_commentary_stream(
 }
 
 #[test]
-fn extract_audio_where_commentary_blocks_on_zero_multiple_or_unknown_commentary() {
+fn bare_extract_audio_plans_all_matches_in_provider_stream_order() {
+    let snapshot = snapshot_with_audio_streams(
+        Some("mkv"),
+        &[
+            audio_stream(3, "aac", "spa", Some(false)),
+            audio_stream(1, "aac", "eng", Some(false)),
+            audio_stream(2, "aac", "jpn", Some(true)),
+        ],
+    );
+    let request = request(
+        policy(CompiledOperation::ExtractAudio {
+            target_codec: "opus".to_owned(),
+            container: "ogg".to_owned(),
+            filter: None,
+        }),
+        snapshot,
+    );
+
+    let first = generate_plan(request.clone()).unwrap();
+    let second = generate_plan(request).unwrap();
+
+    assert_eq!(first.nodes[0].status, NodeStatus::Planned);
+    assert_eq!(
+        first.nodes[0].operation_payload["operation_id"],
+        first.nodes[0].node_id
+    );
+    assert_eq!(
+        first.nodes[0].operation_payload["outputs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|output| output["source_provider_stream_index"].as_u64().unwrap())
+            .collect::<Vec<_>>(),
+        vec![1, 2, 3]
+    );
+    assert_eq!(
+        first.nodes[0].operation_payload["outputs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|output| output["source_snapshot_stream_id"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        vec!["stream-1", "stream-2", "stream-3"]
+    );
+    assert!(
+        first.nodes[0].operation_payload["outputs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|output| output["name_suffix"].as_str().unwrap())
+            .eq([
+                "stream-1.opus.ogg",
+                "stream-2.opus.ogg",
+                "stream-3.opus.ogg"
+            ])
+    );
+    assert_eq!(
+        first.nodes[0].operation_payload,
+        second.nodes[0].operation_payload
+    );
+}
+
+#[test]
+fn plural_extract_audio_names_are_unique_after_sanitization_and_case_folding() {
+    let streams = [
+        named_audio_stream("Audio/1", 1),
+        named_audio_stream("audio:1", 2),
+    ];
+    let plan = generate_plan(request(
+        policy(CompiledOperation::ExtractAudio {
+            target_codec: "opus".to_owned(),
+            container: "ogg".to_owned(),
+            filter: None,
+        }),
+        snapshot_with_audio_streams(Some("mkv"), &streams),
+    ))
+    .unwrap();
+    let names = plan.nodes[0].operation_payload["outputs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|output| output["name_suffix"].as_str().unwrap().to_ascii_lowercase())
+        .collect::<std::collections::BTreeSet<_>>();
+
+    assert_eq!(names.len(), 2);
+    assert!(names.iter().all(|name| name.ends_with(".opus.ogg")));
+}
+
+#[test]
+fn extract_audio_blocks_on_zero_unknown_role_or_duplicate_provider_index() {
     assert_extract_audio_blocked(snapshot_with_audio_streams(
         Some("mkv"),
         &[audio_stream(1, "aac", "eng", Some(false))],
     ));
     assert_extract_audio_blocked(snapshot_with_audio_streams(
         Some("mkv"),
-        &[
-            audio_stream(1, "aac", "eng", Some(true)),
-            audio_stream(2, "aac", "eng", Some(true)),
-        ],
+        &[audio_stream(1, "aac", "eng", None)],
     ));
+    let mut duplicate_index = audio_stream(2, "aac", "eng", Some(true));
+    duplicate_index["index"] = serde_json::json!(1);
     assert_extract_audio_blocked(snapshot_with_audio_streams(
         Some("mkv"),
-        &[audio_stream(1, "aac", "eng", None)],
+        &[audio_stream(1, "aac", "eng", Some(true)), duplicate_index],
     ));
 }
 
@@ -2444,6 +2546,12 @@ fn audio_stream(
             "commentary": commentary
         });
     }
+    stream
+}
+
+fn named_audio_stream(id: &str, index: u32) -> serde_json::Value {
+    let mut stream = audio_stream(index, "aac", "eng", Some(false));
+    stream["id"] = serde_json::json!(id);
     stream
 }
 

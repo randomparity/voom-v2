@@ -3,9 +3,10 @@ use std::path::Path;
 use voom_core::VoomError;
 use voom_worker_protocol::{
     AudioExpectedFacts, AudioObservedFacts, EXTRACT_AUDIO_CODEC, EXTRACT_AUDIO_CONTAINER,
-    ExtractAudioInput, ExtractAudioOutput, ExtractAudioRequest, ExtractAudioResult,
-    TRANSCODE_AUDIO_CONTAINER, TranscodeAudioInput, TranscodeAudioOutput, TranscodeAudioRequest,
-    TranscodeAudioResult, TranscodeAudioSettings,
+    ExtractAudioInput, ExtractAudioOutput, ExtractAudioOutputDescriptor, ExtractAudioRequest,
+    ExtractAudioResult, TRANSCODE_AUDIO_CONTAINER, TranscodeAudioInput, TranscodeAudioOutput,
+    TranscodeAudioRequest, TranscodeAudioResult, TranscodeAudioSettings,
+    validate_extract_audio_result,
 };
 
 use super::selection::{ExtractAudioSelectionPlan, TranscodeAudioSelectionPlan};
@@ -48,19 +49,28 @@ pub fn extract_audio_request_for(
     staging_root: &Path,
     staging_path: &Path,
 ) -> ExtractAudioRequest {
+    let output = ExtractAudioOutput {
+        staging_root: staging_root.to_string_lossy().into_owned(),
+        path: staging_path.to_string_lossy().into_owned(),
+        container: EXTRACT_AUDIO_CONTAINER.to_owned(),
+        audio_codec: EXTRACT_AUDIO_CODEC.to_owned(),
+        overwrite: false,
+    };
+    let outputs = selection.output_id.as_ref().map(|output_id| {
+        vec![ExtractAudioOutputDescriptor {
+            output_id: output_id.clone(),
+            selection: selection.stream.clone(),
+            output: output.clone(),
+        }]
+    });
     ExtractAudioRequest {
         input: ExtractAudioInput {
             path: selected.canonical_path.to_string_lossy().into_owned(),
             expected: expected_facts(selected),
         },
-        output: ExtractAudioOutput {
-            staging_root: staging_root.to_string_lossy().into_owned(),
-            path: staging_path.to_string_lossy().into_owned(),
-            container: EXTRACT_AUDIO_CONTAINER.to_owned(),
-            audio_codec: EXTRACT_AUDIO_CODEC.to_owned(),
-            overwrite: false,
-        },
+        output,
         selection: selection.stream.clone(),
+        outputs,
     }
 }
 
@@ -167,22 +177,12 @@ pub fn validate_transcode_result(
 pub fn validate_extract_result(
     selected: &SelectedSource,
     selection: &ExtractAudioSelectionPlan,
+    request: &ExtractAudioRequest,
     result: &ExtractAudioResult,
 ) -> Result<(), VoomError> {
+    validate_extract_audio_result(request, result)
+        .map_err(|error| VoomError::MalformedWorkerResult(error.to_string()))?;
     validate_input_facts(selected, &result.input_pre, &result.input_post)?;
-    if result.output_container != EXTRACT_AUDIO_CONTAINER
-        || result.output_audio_codec != EXTRACT_AUDIO_CODEC
-    {
-        return Err(VoomError::MalformedWorkerResult(format!(
-            "audio extract result expected ogg/opus, got {}/{}",
-            result.output_container, result.output_audio_codec
-        )));
-    }
-    if result.selected_snapshot_stream_id != selection.stream.snapshot_stream_id {
-        return Err(VoomError::MalformedWorkerResult(
-            "audio extract selected stream id does not match request".to_owned(),
-        ));
-    }
     if selection.source.language.is_some() && result.output_language != selection.source.language {
         return Err(VoomError::MalformedWorkerResult(
             "audio extract output language does not match source snapshot".to_owned(),

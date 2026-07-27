@@ -214,6 +214,18 @@ fn bridge_maps_planned_extract_audio() {
         workflow.nodes[0].operation_payload()["type"],
         "extract_audio"
     );
+    assert_eq!(
+        workflow.nodes[0].operation_payload()["operation_id"],
+        "node_extract_audio_test"
+    );
+    assert_eq!(
+        workflow.nodes[0].operation_payload()["outputs"][0]["source_provider_stream_index"],
+        1
+    );
+    assert_eq!(
+        workflow.nodes[0].operation_payload()["outputs"][1]["source_provider_stream_index"],
+        3
+    );
 }
 
 #[test]
@@ -373,9 +385,26 @@ fn operation_payload(operation_kind: PlanOperationKind) -> serde_json::Value {
         }),
         PlanOperationKind::ExtractAudio => json!({
             "type": "extract_audio",
+            "operation_id": "node_extract_audio_test",
             "target_codec": "opus",
             "container": "ogg",
-            "source_media_snapshot_id": 99
+            "source_media_snapshot_id": 99,
+            "outputs": [
+                {
+                    "output_id": "extract_output_first",
+                    "source_snapshot_stream_id": "audio-1",
+                    "source_provider_stream_index": 1,
+                    "name_suffix": "audio-1.opus.ogg",
+                    "bundle_role": "external_audio"
+                },
+                {
+                    "output_id": "extract_output_second",
+                    "source_snapshot_stream_id": "audio-3",
+                    "source_provider_stream_index": 3,
+                    "name_suffix": "audio-3.opus.ogg",
+                    "bundle_role": "commentary_audio"
+                }
+            ]
         }),
         _ => json!({"container": "mkv"}),
     }
