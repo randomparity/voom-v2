@@ -327,6 +327,122 @@ async fn malformed_synthesis_output_fences_staging_generation_before_retry() {
 }
 
 #[tokio::test]
+async fn plural_synthesis_preserves_sources_and_reports_ordered_lineage() {
+    let (cp, _db, dir) = fixture_with_dir().await;
+    let mut source = seed_audio_source(&cp, &dir, b"source").await;
+    source.snapshot = record_plural_surround_audio_snapshot(&cp, source.version).await;
+    let input = plural_synthesis_input_for_source(&source, &dir);
+
+    let report = execute_transcode_audio_with_dispatchers(
+        &cp,
+        input,
+        &WritingSynthesisDispatcher {
+            output_bytes: b"plural-synthesized".to_vec(),
+        },
+        &SuccessfulVerifyDispatcher,
+        &PluralSynthesisProbeDispatcher,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(report.synthesis_companions.len(), 2);
+    assert_eq!(
+        report
+            .synthesis_companions
+            .iter()
+            .map(|companion| companion.source_snapshot_stream_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["a-1", "a-2"]
+    );
+    assert_eq!(
+        report
+            .synthesis_companions
+            .iter()
+            .map(|companion| companion.result_provider_stream_index)
+            .collect::<Vec<_>>(),
+        vec![3, 4]
+    );
+    assert!(
+        report
+            .synthesis_companions
+            .iter()
+            .all(|companion| companion.lineage_id > 0 && companion.channels == 2)
+    );
+    let snapshot = cp
+        .identity()
+        .get_media_snapshot(report.result_media_snapshot_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(snapshot.payload["streams"][1]["channels"], 6);
+    assert_eq!(snapshot.payload["streams"][2]["channels"], 6);
+    assert_eq!(
+        snapshot.payload["streams"][3]["id"],
+        report.synthesis_companions[0].result_snapshot_stream_id
+    );
+    assert_eq!(
+        snapshot.payload["streams"][4]["id"],
+        report.synthesis_companions[1].result_snapshot_stream_id
+    );
+    assert_table_count(&cp, "audio_synthesis_stream_lineage", 2).await;
+}
+
+#[tokio::test]
+async fn synthesis_replays_committed_artifact_after_lineage_transaction_failure() {
+    let (cp, _db, dir) = fixture_with_dir().await;
+    let mut source = seed_audio_source(&cp, &dir, b"source").await;
+    source.snapshot = record_surround_audio_snapshot(&cp, source.version).await;
+    let input = synthesis_input_for_source(&source, &dir);
+    sqlx::query(
+        "CREATE TRIGGER fail_synthesis_lineage \
+         BEFORE INSERT ON audio_synthesis_stream_lineage \
+         BEGIN SELECT RAISE(ABORT, 'injected lineage failure'); END",
+    )
+    .execute(cp.pool_for_test())
+    .await
+    .unwrap();
+
+    let error = execute_transcode_audio_with_dispatchers(
+        &cp,
+        input.clone(),
+        &WritingSynthesisDispatcher {
+            output_bytes: b"synthesized".to_vec(),
+        },
+        &SuccessfulVerifyDispatcher,
+        &SynthesisProbeDispatcher,
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error.error_code(), voom_core::ErrorCode::DbUnreachable);
+    assert_table_count(&cp, "artifact_commit_records", 1).await;
+    assert_table_count(&cp, "audio_synthesis_stream_lineage", 0).await;
+    sqlx::query("DROP TRIGGER fail_synthesis_lineage")
+        .execute(cp.pool_for_test())
+        .await
+        .unwrap();
+    let counts_before_replay = synthesis_publication_counts(&cp).await;
+
+    let report = execute_transcode_audio_with_dispatchers(
+        &cp,
+        input,
+        &UncalledTranscodeDispatcher,
+        &UncalledVerifyDispatcher,
+        &UncalledProbeDispatcher,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(report.synthesis_companions.len(), 1);
+    assert_table_count(&cp, "artifact_commit_records", 1).await;
+    assert_table_count(&cp, "audio_synthesis_stream_lineage", 1).await;
+    let counts_after_replay = synthesis_publication_counts(&cp).await;
+    assert_eq!(counts_after_replay[0], counts_before_replay[0]);
+    assert_eq!(counts_after_replay[1], counts_before_replay[1]);
+    assert_eq!(counts_after_replay[2], counts_before_replay[2]);
+}
+
+#[tokio::test]
 async fn committed_legacy_singleton_is_adopted_once_without_redispatch() {
     let (cp, _db, dir) = fixture_with_dir().await;
     let seeded = seed_legacy_singleton(&cp, &dir).await;
@@ -2077,6 +2193,55 @@ async fn record_surround_audio_snapshot(
     .0
 }
 
+async fn record_plural_surround_audio_snapshot(
+    cp: &crate::ControlPlane,
+    file_version_id: FileVersionId,
+) -> u64 {
+    cp.record_media_snapshot(
+        file_version_id,
+        None,
+        serde_json::json!({
+            "container": "mkv",
+            "streams": [
+                {"id": "v-1", "index": 0, "kind": "video", "codec_name": "h264"},
+                {
+                    "id": "a-1",
+                    "index": 1,
+                    "kind": "audio",
+                    "codec_name": "ac3",
+                    "language": "eng",
+                    "title": "Main",
+                    "channels": 6,
+                    "disposition": {
+                        "default": true,
+                        "forced": false,
+                        "commentary": false
+                    }
+                },
+                {
+                    "id": "a-2",
+                    "index": 2,
+                    "kind": "audio",
+                    "codec_name": "ac3",
+                    "language": "jpn",
+                    "title": "Secondary",
+                    "channels": 6,
+                    "disposition": {
+                        "default": false,
+                        "forced": false,
+                        "commentary": false
+                    }
+                }
+            ]
+        }),
+        OffsetDateTime::UNIX_EPOCH + time::Duration::seconds(1),
+    )
+    .await
+    .unwrap()
+    .id
+    .0
+}
+
 async fn seed_bundle(cp: &crate::ControlPlane) -> voom_store::repo::bundles::AssetBundle {
     let work = cp
         .create_media_work(NewMediaWork {
@@ -2179,6 +2344,34 @@ fn synthesis_input_for_source(
         target_dir: dir.path().join("voom-audio-out"),
         backup_root: None,
     }
+}
+
+fn plural_synthesis_input_for_source(
+    source: &SeededAudioSource,
+    dir: &tempfile::TempDir,
+) -> ExecuteTranscodeAudioInput {
+    let operation_id = "node_plural_synthesis_test";
+    let first = voom_plan::audio::synthesis_companion_id(operation_id, "a-1");
+    let second = voom_plan::audio::synthesis_companion_id(operation_id, "a-2");
+    let mut input = synthesis_input_for_source(source, dir);
+    input.operation_payload["operation_id"] = serde_json::json!(operation_id);
+    input.operation_payload["filter"] =
+        serde_json::json!({"type": "channels", "op": "gte", "value": 6});
+    input.operation_payload["companions"] = serde_json::json!([
+        {
+            "companion_id": first,
+            "source_snapshot_stream_id": "a-1",
+            "source_provider_stream_index": 1,
+            "result_snapshot_stream_id": first
+        },
+        {
+            "companion_id": second,
+            "source_snapshot_stream_id": "a-2",
+            "source_provider_stream_index": 2,
+            "result_snapshot_stream_id": second
+        }
+    ]);
+    input
 }
 
 async fn synthesis_publication_counts(cp: &crate::ControlPlane) -> Vec<i64> {
@@ -2517,6 +2710,7 @@ impl commit::AudioResultProbeDispatcher for SucceedingProbeDispatcher {
 }
 
 struct SynthesisProbeDispatcher;
+struct PluralSynthesisProbeDispatcher;
 
 #[async_trait]
 impl commit::AudioResultProbeDispatcher for SynthesisProbeDispatcher {
@@ -2585,6 +2779,71 @@ impl commit::AudioResultProbeDispatcher for SynthesisProbeDispatcher {
     }
 }
 
+#[async_trait]
+impl commit::AudioResultProbeDispatcher for PluralSynthesisProbeDispatcher {
+    async fn dispatch_result_probe(
+        &self,
+        cp: &crate::ControlPlane,
+        request: voom_worker_protocol::ProbeFileRequest,
+    ) -> Result<commit::ProbedAudioResult, VoomError> {
+        let mut tx = cp.pool_for_test().begin().await.unwrap();
+        let worker = crate::scan::bootstrap::ensure_builtin_ffprobe_worker_in_tx(cp, &mut tx)
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        let facts = voom_worker_protocol::ObservedFileFacts {
+            size_bytes: request.expected.size_bytes,
+            content_hash: request.expected.content_hash,
+            modified_at: None,
+            local_file_key: None,
+        };
+        Ok(commit::ProbedAudioResult {
+            worker_id: worker.id,
+            result: voom_worker_protocol::ProbeFileResult {
+                status: voom_worker_protocol::ProbeFileStatus::Probed,
+                provider: "ffprobe".to_owned(),
+                provider_version: "test".to_owned(),
+                pre_probe: facts.clone(),
+                post_probe: facts,
+                snapshot: serde_json::json!({
+                    "container": "mkv",
+                    "streams": [
+                        {"index": 0, "kind": "video", "codec_name": "h264"},
+                        {
+                            "index": 1, "kind": "audio", "codec_name": "ac3", "channels": 6,
+                            "language": "eng", "title": "Main",
+                            "disposition": {
+                                "default": true, "forced": false, "commentary": false
+                            }
+                        },
+                        {
+                            "index": 2, "kind": "audio", "codec_name": "ac3", "channels": 6,
+                            "language": "jpn", "title": "Secondary",
+                            "disposition": {
+                                "default": false, "forced": false, "commentary": false
+                            }
+                        },
+                        {
+                            "index": 3, "kind": "audio", "codec_name": "aac", "channels": 2,
+                            "language": "eng", "title": "Main",
+                            "disposition": {
+                                "default": true, "forced": false, "commentary": false
+                            }
+                        },
+                        {
+                            "index": 4, "kind": "audio", "codec_name": "aac", "channels": 2,
+                            "language": "jpn", "title": "Secondary",
+                            "disposition": {
+                                "default": false, "forced": false, "commentary": false
+                            }
+                        }
+                    ]
+                }),
+            },
+        })
+    }
+}
+
 struct WritingTranscodeDispatcher {
     output_bytes: Vec<u8>,
 }
@@ -2638,9 +2897,34 @@ impl TranscodeAudioDispatcher for WritingSynthesisDispatcher {
         tokio::fs::write(&request.output.path, &self.output_bytes)
             .await
             .unwrap();
-        let companion_id = request.selection.selected_streams[0]
-            .snapshot_stream_id
-            .clone();
+        let base_index = u32::try_from(request.selection.selected_streams.len() + 1).unwrap();
+        let output_streams = request
+            .selection
+            .selected_streams
+            .iter()
+            .enumerate()
+            .map(|(ordinal, selected)| {
+                let (language, title, default) = if ordinal == 0 {
+                    ("eng", "Main", true)
+                } else {
+                    ("jpn", "Secondary", false)
+                };
+                AudioOutputStreamFact {
+                    snapshot_stream_id: selected.snapshot_stream_id.clone(),
+                    output_provider_stream_index: base_index + u32::try_from(ordinal).unwrap(),
+                    codec: "aac".to_owned(),
+                    language: Some(language.to_owned()),
+                    title: Some(title.to_owned()),
+                    default: Some(default),
+                    disposition: Some(voom_worker_protocol::AudioDispositionFact {
+                        default: Some(default),
+                        forced: Some(false),
+                        commentary: Some(false),
+                    }),
+                    channels: Some(2),
+                }
+            })
+            .collect::<Vec<_>>();
         Ok(TranscodeAudioResult {
             status: voom_worker_protocol::TranscodeAudioStatus::Transcoded,
             provider: "ffmpeg".to_owned(),
@@ -2658,22 +2942,12 @@ impl TranscodeAudioDispatcher for WritingSynthesisDispatcher {
                 &blake3_checksum(&self.output_bytes),
             ),
             output_container: "mkv".to_owned(),
-            selected_snapshot_stream_ids: vec![companion_id.clone()],
-            output_audio_codecs: vec!["aac".to_owned()],
-            selected_output_streams: vec![AudioOutputStreamFact {
-                snapshot_stream_id: companion_id,
-                output_provider_stream_index: 2,
-                codec: "aac".to_owned(),
-                language: Some("eng".to_owned()),
-                title: Some("Main".to_owned()),
-                default: Some(true),
-                disposition: Some(voom_worker_protocol::AudioDispositionFact {
-                    default: Some(true),
-                    forced: Some(false),
-                    commentary: Some(false),
-                }),
-                channels: Some(2),
-            }],
+            selected_snapshot_stream_ids: output_streams
+                .iter()
+                .map(|stream| stream.snapshot_stream_id.clone())
+                .collect(),
+            output_audio_codecs: vec!["aac".to_owned(); output_streams.len()],
+            selected_output_streams: output_streams,
         })
     }
 }
