@@ -1,4 +1,4 @@
-# Issue 358 design: Version quoted track-filter escape semantics
+# Issue 358 design: Define quoted track-filter escape semantics
 
 ## Objective
 
@@ -14,7 +14,8 @@ In scope:
 - quoted-title scanning and compiled-value transformation in `voom-policy`;
 - the exact-byte `source_hash` and schema-V2 compiled projection;
 - duplicate-source behavior in the `voom-store` policy registry;
-- published language documentation; and
+- the track-filter grammar section in the authoritative published contract,
+  `docs/specs/voom-control-plane-design.md`; and
 - historical, current, upgrade, and rollback compatibility fixtures for
   escaped quotes, escaped backslashes, and terminal escaped quotes.
 
@@ -97,6 +98,24 @@ contain:
 - escaped quotes away from the terminal boundary; and
 - an unknown backslash pair proving no decoding occurs.
 
+Before changing compiler code, add
+`crates/voom-policy/fixtures/historical/escaped-title-filter-boundaries.voom`
+and capture its complete unmodified-compiler output at
+`crates/voom-policy/fixtures/compiled/historical-track-filter-source/escaped-title-filter-boundaries.json`.
+It contains these exact title lexemes:
+
+- `"Path\\"`: an even two-backslash run immediately before the closing
+  delimiter, proving the first backslash escapes the second and the following
+  quote still closes the string; and
+- `"Caf\é"`: a backslash followed by a multi-byte Unicode scalar and then the
+  closing quote, proving scanning advances by one scalar rather than one UTF-8
+  byte.
+
+The boundary fixture's exact bytes, BLAKE3 hash, compiled values, schema
+version, and complete deterministic JSON become immutable pre-change oracles.
+They join the existing fixture in every matrix row; neither fixture is first
+generated or accepted after the lowering implementation changes.
+
 The matrix is:
 
 | Path | Setup | Required evidence |
@@ -137,19 +156,31 @@ already exposed by policy-version inspection.
 Compiler tests:
 
 - assert exact values for escaped quotes, escaped backslashes, terminal escaped
-  quotes, and non-decoded unknown backslash pairs;
-- assert source hash equals BLAKE3 of the exact fixture bytes;
-- compare the complete current deterministic JSON to the historical golden;
-- deserialize and reserialize the historical golden without semantic change;
-  and
+  quotes, non-decoded unknown backslash pairs, an even backslash run at the
+  closing delimiter, and a backslash-escaped non-ASCII scalar;
+- assert each source hash equals BLAKE3 of the exact fixture bytes and a pinned
+  literal digest;
+- compare the complete current deterministic JSON to both historical goldens;
+- deserialize and reserialize both historical goldens without semantic change;
 - keep unterminated and terminal-backslash inputs rejected.
 
 Store tests:
 
-- seed a historical document/version row and prove a current duplicate upload
-  returns it without mutation; and
-- create the same source in a fresh database and prove its stored identity and
-  projection equal the historical oracle that a rollback binary understands.
+- for each historical fixture, seed a document/version row and prove a current
+  duplicate upload returns it without mutation; and
+- for each fixture, create the same source in a fresh database and prove its
+  stored identity and projection equal the historical oracle that a rollback
+  binary understands.
+
+Published-contract evidence:
+
+- update the track-filter language section of
+  `docs/specs/voom-control-plane-design.md` to state the ASCII delimiter,
+  scalar-aware backslash scanning, no decoding or normalization, complete-leaf
+  consumption, rejection of missing delimiters and terminal backslashes, and
+  the pinned schema-V2 terminal escaped-quote result; and
+- re-read the rendered source examples and require every example to compile to
+  the value stated by the contract.
 
 Focused verification:
 
