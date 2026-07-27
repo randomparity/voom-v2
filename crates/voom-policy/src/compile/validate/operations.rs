@@ -3,8 +3,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::compile::compiled::{TrackFilter, is_canonical_language_code};
 use crate::compile::track_filter::parse_track_filter;
 use crate::text::{
-    is_single_value, list_values, quoted_value, rule_header, setting_value, statement_text,
-    text_after_list, text_after_quoted_value, words,
+    is_single_value, list_values, quoted_value, rule_header, statement_text, text_after_list,
+    text_after_quoted_value, words,
 };
 use crate::{DiagnosticCode, ExprAst, SourceSpan, StatementAst};
 
@@ -219,19 +219,26 @@ impl Validator<'_> {
         }
     }
 
-    pub(super) fn validate_on_error(&mut self, statement: &StatementAst, text: &str) {
-        if setting_value(text).is_none_or(|value| !matches!(value, "abort" | "continue" | "skip")) {
+    pub(super) fn validate_on_error(&mut self, statement: &StatementAst) {
+        let span = statement.span();
+        let is_published = self.source.get(span.start..span.end).is_some_and(|text| {
+            let Some(text) = text.strip_prefix("on_error") else {
+                return false;
+            };
+            let text = text.trim_start_matches(|ch: char| ch.is_ascii_whitespace());
+            let Some(text) = text.strip_prefix(':') else {
+                return false;
+            };
+            matches!(
+                text.trim_matches(|ch: char| ch.is_ascii_whitespace()),
+                "abort" | "continue"
+            )
+        });
+        if !is_published {
             self.error(
                 DiagnosticCode::InvalidOnErrorValue,
-                statement.span(),
-                "on_error must be abort, continue, or skip",
-            );
-        }
-        if !text.contains(':') && words(text).len() > 2 {
-            self.error(
-                DiagnosticCode::UnknownPhaseStatementOrOperation,
-                statement.span(),
-                "on_error does not accept extra arguments",
+                span,
+                "on_error must use `on_error: abort` or `on_error: continue`",
             );
         }
     }

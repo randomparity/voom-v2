@@ -531,19 +531,79 @@ fn rejects_order_tracks_where_unknown_filter() {
 }
 
 #[test]
-fn rejects_on_error_without_value() {
-    assert!(
-        codes("policy \"p\" { phase a { on_error: } }")
-            .contains(&"invalid_on_error_value".to_owned())
-    );
+fn accepts_only_published_phase_on_error_values() {
+    for (control, expected, wire_value) in [
+        ("on_error: abort", crate::ErrorStrategy::Abort, "abort"),
+        (
+            "on_error: continue",
+            crate::ErrorStrategy::Continue,
+            "continue",
+        ),
+        ("on_error:abort", crate::ErrorStrategy::Abort, "abort"),
+        (
+            "on_error \t: \t continue",
+            crate::ErrorStrategy::Continue,
+            "continue",
+        ),
+    ] {
+        let source = format!("policy \"p\" {{ phase a {{ {control} }} }}");
+        let policy = compile_policy(&source).unwrap().policy;
+
+        assert_eq!(policy.phases[0].on_error, Some(expected));
+        assert_eq!(
+            serde_json::to_value(&policy).unwrap()["phases"][0]["on_error"],
+            wire_value
+        );
+    }
 }
 
 #[test]
-fn rejects_on_error_with_extra_tokens() {
-    assert!(
-        codes("policy \"p\" { phase a { on_error abort retry } }")
-            .contains(&"unknown_phase_statement_or_operation".to_owned())
+fn rejects_unpublished_phase_on_error_forms() {
+    for source in [
+        "policy \"p\" { phase a { on_error: } }",
+        "policy \"p\" { phase a { on_error: skip } }",
+        "policy \"p\" { phase a { on_error skip } }",
+        "policy \"p\" { phase a { on_error abort } }",
+        "policy \"p\" { phase a { on_error continue } }",
+        "policy \"p\" { phase a { on_error abort: continue } }",
+        "policy \"p\" { phase a { on_error junk: abort } }",
+        "policy \"p\" { phase a { on_error:: abort } }",
+        "policy \"p\" { phase a { on_error: \"abort\" } }",
+        "policy \"p\" { phase a { on_error: Abort } }",
+        "policy \"p\" { phase a { on_error: abort retry } }",
+        "policy \"p\" { phase a { on_error\u{a0}: abort } }",
+        "policy \"p\" { phase a { on_error:\u{a0}abort } }",
+        "policy \"p\" { phase a { on_error: abort\u{a0} } }",
+        "policy \"p\" { phase a {\non_error: continue\u{a0}\n} }",
+    ] {
+        assert!(
+            codes(source).contains(&"invalid_on_error_value".to_owned()),
+            "{source:?}"
+        );
+    }
+}
+
+#[test]
+fn phase_on_error_validation_handles_mismatched_source_without_panicking() {
+    let parsed_source = "policy \"p\" { phase a { on_error: abort } }";
+    let ast = parse_policy_source(parsed_source).unwrap();
+    let span = ast.phases[0].controls[0].span();
+    let unaligned_source = format!(
+        "{}é{}",
+        "x".repeat(span.start - 1),
+        "x".repeat(span.end - span.start)
     );
+
+    for source in ["", unaligned_source.as_str()] {
+        let result = validate_policy_ast(source, &ast);
+
+        assert!(
+            result
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "invalid_on_error_value")
+        );
+    }
 }
 
 #[test]

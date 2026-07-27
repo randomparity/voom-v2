@@ -197,7 +197,6 @@ fn error_strategy(token: Option<&str>) -> Option<ErrorStrategy> {
     match token {
         Some("abort") => Some(ErrorStrategy::Abort),
         Some("continue") => Some(ErrorStrategy::Continue),
-        Some("skip") => Some(ErrorStrategy::Skip),
         _ => None,
     }
 }

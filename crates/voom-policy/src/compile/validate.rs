@@ -402,7 +402,7 @@ impl<'a> Validator<'a> {
             match control.keyword().value.as_str() {
                 "depends_on" | "run_if" => {}
                 "skip" => self.validate_skip_condition(control, text.as_ref()),
-                "on_error" => self.validate_on_error(control, text.as_ref()),
+                "on_error" => self.validate_on_error(control),
                 _ => self.error(
                     DiagnosticCode::UnknownPhaseStatementOrOperation,
                     control.span(),

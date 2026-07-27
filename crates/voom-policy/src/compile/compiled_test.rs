@@ -410,6 +410,16 @@ fn legacy_compiled_config_reads_previously_published_skip_value() {
 }
 
 #[test]
+fn legacy_compiled_phase_skip_wire_remains_readable_and_stable() {
+    let json = include_str!("../../fixtures/compiled/legacy-phase-on-error-skip-v2.json");
+    let expected: serde_json::Value = serde_json::from_str(json).unwrap();
+    let policy: CompiledPolicy = serde_json::from_str(json).unwrap();
+
+    assert_eq!(policy.phases[0].on_error, Some(ErrorStrategy::Skip));
+    assert_eq!(serde_json::to_value(policy).unwrap(), expected);
+}
+
+#[test]
 fn compiled_config_reads_previous_language_targets_and_whitespace() {
     let cases = [
         (

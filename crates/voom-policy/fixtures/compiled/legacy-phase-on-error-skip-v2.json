@@ -1,0 +1,27 @@
+{
+  "policy_name": "legacy phase skip",
+  "slug": "legacy-phase-skip",
+  "source_hash": "historical-source-hash",
+  "schema_version": 2,
+  "metadata": {},
+  "config": {},
+  "phases": [
+    {
+      "name": "inspect",
+      "depends_on": [],
+      "run_if": null,
+      "skip_if": null,
+      "on_error": "skip",
+      "operations": []
+    }
+  ],
+  "phase_order": [
+    "inspect"
+  ],
+  "warnings": [],
+  "provenance": {
+    "compiler": "voom-policy",
+    "format": "sprint4-v2",
+    "flags": {}
+  }
+}
