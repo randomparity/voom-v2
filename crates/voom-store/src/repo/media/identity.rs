@@ -646,6 +646,13 @@ pub trait IdentityRepo: Repository {
         &self,
         asset_id: FileAssetId,
     ) -> Result<Option<(FileVersion, MediaSnapshot)>, VoomError>;
+    /// Require each expected version to remain the greatest live version for
+    /// its file asset inside the caller's transaction.
+    async fn require_active_file_versions_in_tx<'tx>(
+        &self,
+        tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
+        expected: &[(FileAssetId, FileVersionId)],
+    ) -> Result<(), VoomError>;
     /// List every live (non-retired) `file_versions` row in id order.
     ///
     /// Anchors whole-library operations that have no durable scan id:
@@ -1377,6 +1384,40 @@ impl IdentityRepo for SqliteIdentityRepo {
         row.as_ref()
             .map(|row| Ok((row_to_file_version(row)?, row_to_active_snapshot(row)?)))
             .transpose()
+    }
+
+    async fn require_active_file_versions_in_tx<'tx>(
+        &self,
+        tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
+        expected: &[(FileAssetId, FileVersionId)],
+    ) -> Result<(), VoomError> {
+        for &(asset_id, expected_version_id) in expected {
+            let current_id: Option<i64> = sqlx::query_scalar(
+                "SELECT id FROM file_versions \
+                 WHERE file_asset_id = ? AND retired_at IS NULL \
+                 ORDER BY id DESC LIMIT 1",
+            )
+            .bind(i64_from_u64(asset_id.0))
+            .fetch_optional(&mut **tx)
+            .await
+            .map_err(|error| {
+                VoomError::database_context("active file version dispatch guard", error)
+            })?;
+            let Some(current_id) = current_id else {
+                return Err(VoomError::StaleIdentityEvidence(format!(
+                    "file asset {asset_id} has no live file version; \
+                     expected {expected_version_id}; replan from current inputs"
+                )));
+            };
+            let current_id = FileVersionId(u64_from_i64(current_id));
+            if current_id != expected_version_id {
+                return Err(VoomError::StaleIdentityEvidence(format!(
+                    "file asset {asset_id} expected active version {expected_version_id}, \
+                     but current active version is {current_id}; replan from current inputs"
+                )));
+            }
+        }
+        Ok(())
     }
 
     async fn list_live_file_versions(&self) -> Result<Vec<FileVersion>, VoomError> {

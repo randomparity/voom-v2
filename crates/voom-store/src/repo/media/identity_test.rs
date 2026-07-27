@@ -842,6 +842,121 @@ async fn active_version_snapshot_pair_does_not_fall_back_to_older_version() {
     assert!(pair.is_none());
 }
 
+async fn create_active_file_version(
+    repo: &SqliteIdentityRepo,
+    asset_id: FileAssetId,
+    hash: &str,
+    parent_id: Option<FileVersionId>,
+) -> FileVersion {
+    repo.create_file_version(NewFileVersion {
+        file_asset_id: asset_id,
+        content_hash: hash.to_owned(),
+        size_bytes: 1,
+        produced_by: if parent_id.is_some() {
+            ProducedBy::Transcode
+        } else {
+            ProducedBy::Ingest
+        },
+        produced_from_version_id: parent_id,
+        created_at: T0,
+    })
+    .await
+    .unwrap()
+}
+
+#[tokio::test]
+async fn active_file_version_guard_accepts_exact_live_tip() {
+    let (repo, _tmp) = fresh().await;
+    let asset = repo.create_file_asset(T0).await.unwrap();
+    let version = create_active_file_version(&repo, asset.id, "current", None).await;
+    let mut tx = repo.pool.begin().await.unwrap();
+
+    repo.require_active_file_versions_in_tx(&mut tx, &[(asset.id, version.id)])
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn active_file_version_guard_rejects_newer_snapshotted_tip() {
+    let (repo, _tmp) = fresh().await;
+    let asset = repo.create_file_asset(T0).await.unwrap();
+    let planned = create_active_file_version(&repo, asset.id, "planned", None).await;
+    let current = create_active_file_version(&repo, asset.id, "current", Some(planned.id)).await;
+    let mut tx = repo.pool.begin().await.unwrap();
+    repo.record_media_snapshot_in_tx(
+        &mut tx,
+        NewMediaSnapshot {
+            file_version_id: current.id,
+            probed_by: None,
+            probed_at: T0,
+            payload: json!({"streams": []}),
+        },
+    )
+    .await
+    .unwrap();
+
+    let err = repo
+        .require_active_file_versions_in_tx(&mut tx, &[(asset.id, planned.id)])
+        .await
+        .unwrap_err();
+
+    assert!(
+        matches!(err, VoomError::StaleIdentityEvidence(ref message)
+            if message.contains(&asset.id.to_string())
+                && message.contains(&planned.id.to_string())
+                && message.contains(&current.id.to_string())
+                && message.contains("replan")),
+        "got: {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn active_file_version_guard_rejects_newer_unprobed_tip() {
+    let (repo, _tmp) = fresh().await;
+    let asset = repo.create_file_asset(T0).await.unwrap();
+    let planned = create_active_file_version(&repo, asset.id, "planned", None).await;
+    let current = create_active_file_version(&repo, asset.id, "unprobed", Some(planned.id)).await;
+    let mut tx = repo.pool.begin().await.unwrap();
+
+    let err = repo
+        .require_active_file_versions_in_tx(&mut tx, &[(asset.id, planned.id)])
+        .await
+        .unwrap_err();
+
+    assert!(
+        matches!(err, VoomError::StaleIdentityEvidence(ref message)
+            if message.contains(&current.id.to_string())),
+        "got: {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn active_file_version_guard_rejects_asset_without_live_version() {
+    let (repo, _tmp) = fresh().await;
+    let asset = repo.create_file_asset(T0).await.unwrap();
+    let planned = create_active_file_version(&repo, asset.id, "retired", None).await;
+    let mut tx = repo.pool.begin().await.unwrap();
+    repo.retire_file_version_in_tx(
+        &mut tx,
+        planned.id,
+        T0 + Duration::seconds(1),
+        planned.epoch,
+    )
+    .await
+    .unwrap();
+
+    let err = repo
+        .require_active_file_versions_in_tx(&mut tx, &[(asset.id, planned.id)])
+        .await
+        .unwrap_err();
+
+    assert!(
+        matches!(err, VoomError::StaleIdentityEvidence(ref message)
+            if message.contains("no live file version")),
+        "got: {err:?}"
+    );
+}
+
 // ---- record_discovered_file: NewFileAsset path ---------------------------
 
 #[tokio::test]
