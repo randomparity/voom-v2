@@ -4,9 +4,8 @@ use voom_policy::ComparisonOp;
 
 use super::{
     AudioBundleRole, AudioDispositionFact, AudioPlanShape, AudioPlanningBlock,
-    SnapshotAudioStreamFact, evaluate_audio_filter, extract_audio_shape,
-    extract_output_name_suffixes, extraction_role, stream_facts, synthesize_audio_shape,
-    transcode_audio_shape,
+    SnapshotAudioStreamFact, evaluate_audio_filter, extract_output_name_suffixes, extraction_role,
+    stream_facts, synthesize_audio_shape, transcode_audio_shape,
 };
 use crate::planner::audio::{AUDIO_TRANSCODE_CONTAINER, ExtractAudioOutputDescriptor};
 
@@ -213,16 +212,6 @@ fn transcode_audio_shape_blocks_stream_without_codec() {
 
     assert_eq!(
         transcode_audio_shape(&snapshot, "opus", AUDIO_TRANSCODE_CONTAINER, None),
-        AudioPlanShape::Blocked(AudioPlanningBlock::InsufficientSnapshotFacts)
-    );
-}
-
-#[test]
-fn extract_audio_shape_blocks_unknown_commentary_role() {
-    let snapshot = snapshot_with_audio_facts(vec![audio_fact(None)]);
-
-    assert_eq!(
-        extract_audio_shape(&snapshot, None),
         AudioPlanShape::Blocked(AudioPlanningBlock::InsufficientSnapshotFacts)
     );
 }

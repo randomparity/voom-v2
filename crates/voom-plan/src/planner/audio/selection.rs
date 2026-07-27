@@ -268,26 +268,6 @@ pub fn synthesize_audio_shape(
     AudioPlanShape::Planned
 }
 
-#[must_use]
-pub fn extract_audio_shape(
-    snapshot: &MediaSnapshotInput,
-    filter: Option<&TrackFilter>,
-) -> AudioPlanShape {
-    let selected = match selected_audio_streams(snapshot, filter) {
-        Ok(selected) => selected,
-        Err(block) => return AudioPlanShape::Blocked(block),
-    };
-    if selected.is_empty() {
-        return AudioPlanShape::Blocked(AudioPlanningBlock::ZeroMatches);
-    }
-    for stream in &selected {
-        if let Err(block) = extraction_role(stream) {
-            return AudioPlanShape::Blocked(block);
-        }
-    }
-    AudioPlanShape::Planned
-}
-
 pub fn extract_audio_outputs(
     snapshot: &MediaSnapshotInput,
     filter: Option<&TrackFilter>,

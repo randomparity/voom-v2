@@ -183,19 +183,6 @@ pub fn validate_extract_result(
     validate_extract_audio_result(request, result)
         .map_err(|error| VoomError::MalformedWorkerResult(error.to_string()))?;
     validate_input_facts(selected, &result.input_pre, &result.input_post)?;
-    if result.output_container != EXTRACT_AUDIO_CONTAINER
-        || result.output_audio_codec != EXTRACT_AUDIO_CODEC
-    {
-        return Err(VoomError::MalformedWorkerResult(format!(
-            "audio extract result expected ogg/opus, got {}/{}",
-            result.output_container, result.output_audio_codec
-        )));
-    }
-    if result.selected_snapshot_stream_id != selection.stream.snapshot_stream_id {
-        return Err(VoomError::MalformedWorkerResult(
-            "audio extract selected stream id does not match request".to_owned(),
-        ));
-    }
     if selection.source.language.is_some() && result.output_language != selection.source.language {
         return Err(VoomError::MalformedWorkerResult(
             "audio extract output language does not match source snapshot".to_owned(),

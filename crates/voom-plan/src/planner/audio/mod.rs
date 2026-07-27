@@ -10,9 +10,8 @@ pub use payload::{
 };
 pub use selection::{
     AudioBundleRole, AudioDispositionFact, AudioPlanShape, AudioPlanningBlock,
-    SnapshotAudioStreamFact, evaluate_audio_filter, extract_audio_outputs, extract_audio_shape,
-    extraction_role, selected_audio_streams, stream_facts, synthesize_audio_shape,
-    transcode_audio_shape,
+    SnapshotAudioStreamFact, evaluate_audio_filter, extract_audio_outputs, extraction_role,
+    selected_audio_streams, stream_facts, synthesize_audio_shape, transcode_audio_shape,
 };
 
 use crate::{NodeStatus, PlanOperationKind, PlanningDiagnostic, PlanningDiagnosticCode};
@@ -80,7 +79,26 @@ pub(super) fn plan_extract(
     operation_id: &str,
 ) -> OperationPlan {
     let operation_kind = PlanOperationKind::ExtractAudio;
-    let outputs = extract_audio_outputs(snapshot, filter, operation_id, target_codec);
+    let (outputs, status, status_reason, capability, diagnostic) =
+        match extract_audio_outputs(snapshot, filter, operation_id, target_codec) {
+            Ok(outputs) => (
+                Some(outputs),
+                NodeStatus::Planned,
+                format!("selected audio will be extracted as {target_codec} in {container}"),
+                Some("extract_audio".to_owned()),
+                None,
+            ),
+            Err(block) => {
+                let (code, message) = audio_block_diagnostic(block, operation_kind);
+                (
+                    None,
+                    NodeStatus::Blocked,
+                    message.to_owned(),
+                    None,
+                    Some(code),
+                )
+            }
+        };
     let payload = AudioOperationPayload {
         operation_type: AudioOperationType::ExtractAudio,
         operation_id: Some(operation_id.to_owned()),
@@ -88,30 +106,11 @@ pub(super) fn plan_extract(
         container: container.to_owned(),
         source_media_snapshot_id: snapshot.existing_media_snapshot_id.map(|id| id.0),
         filter: filter.cloned(),
-        outputs: outputs.clone().ok(),
+        outputs,
         target_channels: None,
     }
     .into_value();
     let observed_state = audio_observed_state(snapshot, filter);
-    let (status, status_reason, capability, diagnostic) =
-        match outputs.map_or_else(AudioPlanShape::Blocked, |_| AudioPlanShape::Planned) {
-            AudioPlanShape::NoOp => (
-                NodeStatus::NoOp,
-                format!("selected audio is already extracted as {target_codec} in {container}"),
-                None,
-                None,
-            ),
-            AudioPlanShape::Planned => (
-                NodeStatus::Planned,
-                format!("selected audio will be extracted as {target_codec} in {container}"),
-                Some("extract_audio".to_owned()),
-                None,
-            ),
-            AudioPlanShape::Blocked(block) => {
-                let (code, message) = audio_block_diagnostic(block, operation_kind);
-                (NodeStatus::Blocked, message.to_owned(), None, Some(code))
-            }
-        };
 
     let plan = OperationPlan::new(
         operation_kind,
