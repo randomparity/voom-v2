@@ -50,3 +50,4 @@ are append-only — supersede an ADR with a new one rather than rewriting histor
 | [0042](0042-atomic-audio-extraction-publication.md) | Publish audio extraction outputs as one recoverable operation |
 | [0043](0043-recoverable-audio-synthesis-lineage.md) | Publish synthesized audio companions with recoverable stream lineage |
 | [0044](0044-preserve-v2-track-filter-escape-semantics.md) | Preserve V2 quoted track-filter escape semantics |
+| [0045](0045-linearize-lineage-validation-with-phase-ticket-creation.md) | Linearize lineage validation with phase ticket creation |
