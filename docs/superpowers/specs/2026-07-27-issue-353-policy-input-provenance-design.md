@@ -1,7 +1,7 @@
 # Policy Input Snapshot Provenance Design
 
 **Issue:** #353
-**Status:** Draft
+**Status:** Approved
 **Base:** `main` at `4fc6bf74e00dba51b253d084c7cb7654cf3df47c`
 
 ## Goal
