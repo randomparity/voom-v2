@@ -5,11 +5,9 @@
 
 use std::collections::HashMap;
 
-use serde_json::Value;
-use sqlx::Row;
 use tokio::task::JoinSet;
 use voom_core::OperationKind;
-use voom_core::{JobId, TicketId, VoomError, WorkerId};
+use voom_core::{JobId, TicketId, TicketOperation, VoomError, WorkerId};
 use voom_scheduler::{SingleWorkerPerKindSelector, WorkerSelector, WorkerView};
 use voom_store::repo::leases::NewLease;
 use voom_store::repo::tickets::{Ticket, TicketState};
@@ -17,9 +15,7 @@ use voom_store::repo::tickets::{Ticket, TicketState};
 use crate::workflow::execution::dispatch::{DispatchOutcome, DispatchTerminal, dispatch_ticket};
 use crate::workflow::execution::executor::RunFailureMode;
 use crate::workflow::execution::executor::WorkflowExecutor;
-use crate::workflow::execution::executor::errors::{
-    selector_failure_class, sqlite_u32, sqlite_u64,
-};
+use crate::workflow::execution::executor::errors::selector_failure_class;
 use crate::workflow::execution::executor::tickets::parse_payload;
 use crate::workflow::execution::leases::{
     acquire_lease_with_retry, failure_class_for_error, time_duration,
@@ -183,57 +179,22 @@ impl WorkflowExecutor {
         operation: OperationKind,
         reservations: &HashMap<WorkerId, u32>,
     ) -> Result<Vec<WorkerView>, VoomError> {
-        let operation_name = operation.as_str();
-        let rows = sqlx::query(
-            "SELECT w.id AS worker_id, wg.can_execute, wg.denies, wg.max_parallel, \
-                    COALESCE(held.active_leases, 0) AS active_leases \
-             FROM workers w \
-             JOIN worker_capabilities wc ON wc.worker_id = w.id \
-             JOIN worker_grants wg ON wg.worker_id = w.id \
-             LEFT JOIN ( \
-                 SELECT worker_id, COUNT(*) AS active_leases \
-                 FROM leases WHERE state = 'held' GROUP BY worker_id \
-             ) held ON held.worker_id = w.id \
-             WHERE w.status IN ('registered', 'active') AND wc.operation = ? \
-             ORDER BY w.id ASC",
-        )
-        .bind(operation_name)
-        .fetch_all(&self.control_plane.pool)
-        .await
-        .map_err(|e| VoomError::database_context("workflow worker candidates", e))?;
-
-        let mut views = Vec::new();
-        for row in rows {
-            let worker_id: i64 = row
-                .try_get("worker_id")
-                .map_err(|e| VoomError::database_context("worker candidate row", e))?;
-            let can_execute: String = row
-                .try_get("can_execute")
-                .map_err(|e| VoomError::database_context("worker grant can_execute", e))?;
-            let denies: String = row
-                .try_get("denies")
-                .map_err(|e| VoomError::database_context("worker grant denies", e))?;
-            let max_parallel: String = row
-                .try_get("max_parallel")
-                .map_err(|e| VoomError::database_context("worker grant max_parallel", e))?;
-            if !json_string_array_contains(&can_execute, operation_name)?
-                || json_string_array_contains(&denies, operation_name)?
-            {
-                continue;
-            }
-            let worker_id = WorkerId(sqlite_u64(worker_id));
-            let active_leases: i64 = row
-                .try_get("active_leases")
-                .map_err(|e| VoomError::database_context("worker active lease count", e))?;
-            let reserved = reservations.get(&worker_id).copied().unwrap_or(0);
-            views.push(WorkerView {
-                worker_id,
+        let candidates = self
+            .control_plane
+            .workers
+            .operation_candidates(&TicketOperation::from(operation))
+            .await?;
+        Ok(candidates
+            .into_iter()
+            .map(|candidate| WorkerView {
+                worker_id: candidate.worker_id,
                 supports: vec![operation],
-                active_leases: sqlite_u32(active_leases).saturating_add(reserved),
-                max_parallel: max_parallel_for_operation(&max_parallel, operation_name)?,
-            });
-        }
-        Ok(views)
+                active_leases: candidate
+                    .active_leases
+                    .saturating_add(reservations.get(&candidate.worker_id).copied().unwrap_or(0)),
+                max_parallel: candidate.max_parallel,
+            })
+            .collect())
     }
 }
 
@@ -258,21 +219,4 @@ fn local_reservation_blocks(
         reservations.get(&candidate.worker_id).copied().unwrap_or(0) > 0
             && candidate.active_leases >= candidate.max_parallel
     })
-}
-
-fn json_string_array_contains(raw: &str, needle: &str) -> Result<bool, VoomError> {
-    let values: Vec<String> = serde_json::from_str(raw)
-        .map_err(|e| VoomError::database_context("parse worker grant array", e))?;
-    Ok(values.iter().any(|value| value == needle))
-}
-
-fn max_parallel_for_operation(raw: &str, operation: &str) -> Result<u32, VoomError> {
-    let value: Value = serde_json::from_str(raw)
-        .map_err(|e| VoomError::database_context("parse worker max_parallel", e))?;
-    let max = value
-        .get(operation)
-        .or_else(|| value.get("*"))
-        .and_then(Value::as_u64)
-        .unwrap_or(1);
-    Ok(u32::try_from(max).unwrap_or(u32::MAX).max(1))
 }

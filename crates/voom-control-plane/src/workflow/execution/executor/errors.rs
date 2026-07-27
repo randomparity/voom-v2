@@ -177,7 +177,3 @@ pub(super) fn sqlite_i64(value: u64) -> i64 {
 pub(super) fn sqlite_u64(value: i64) -> u64 {
     u64::try_from(value).unwrap_or(0)
 }
-
-pub(super) fn sqlite_u32(value: i64) -> u32 {
-    u32::try_from(value).unwrap_or(0)
-}

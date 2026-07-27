@@ -184,6 +184,29 @@ async fn no_eligible_worker_is_recorded_before_lease_dispatch() {
 }
 
 #[tokio::test]
+async fn separate_deny_grant_removes_worker_before_lease_dispatch() {
+    let fixture = ExecutorFixture::with_ready_tickets(1).await;
+    fixture
+        .deny_worker_operation(fixture.worker_id(), OperationKind::HashFile)
+        .await;
+
+    let err = fixture.run().await.unwrap_err();
+
+    assert_eq!(err.source.error_code(), ErrorCode::NoEligibleWorker);
+    assert_eq!(err.summary.dispatch_count, 0);
+    assert_eq!(err.summary.peak_active_workflow_leases, 0);
+    assert_eq!(err.summary.failure_count, 1);
+    assert_eq!(fixture.lease_count().await, 0);
+    assert_eq!(fixture.event_count("lease.acquired").await, 0);
+    assert_eq!(fixture.event_count("ticket.leased").await, 0);
+    assert_eq!(fixture.event_count("ticket.failed_terminal").await, 1);
+    assert_eq!(
+        fixture.first_ticket_failed_class().await,
+        "no_eligible_worker"
+    );
+}
+
+#[tokio::test]
 async fn ambiguous_worker_selection_is_recorded_before_lease_dispatch() {
     let fixture = ExecutorFixture::ambiguous_workers().await;
     let err = fixture.run().await.unwrap_err();
@@ -2001,6 +2024,20 @@ impl ExecutorFixture {
             .await
             .unwrap();
         worker.id
+    }
+
+    async fn deny_worker_operation(&self, worker_id: WorkerId, operation: OperationKind) {
+        self.cp
+            .record_grant(NewGrant {
+                worker_id,
+                can_execute: Vec::new(),
+                can_access_read: Vec::new(),
+                can_access_write: Vec::new(),
+                denies: vec![TicketOperation::from(operation)],
+                max_parallel: json!({}),
+            })
+            .await
+            .unwrap();
     }
 
     fn worker_id(&self) -> WorkerId {
