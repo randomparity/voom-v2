@@ -582,6 +582,11 @@ pub(crate) async fn execute_extract_audio_with_dispatchers(
     {
         Ok(report) => Ok(report),
         Err(err) => {
+            if let Some(claim) = &context.claim {
+                SqliteAudioExtractOperationRepo::new(cp.pool.clone())
+                    .release_claim(claim)
+                    .await?;
+            }
             events::record_extract_failed(
                 cp,
                 events::ExtractFailedEventInput {
@@ -619,13 +624,16 @@ async fn execute_extract_audio_inner(
     let selection = prepared.selection;
     let paths = prepared.paths;
     if let Some(report) = maybe_resume_extract_operation(
-        cp,
-        &input,
-        selected.location.id,
-        &selection,
-        &paths.operation,
+        ExtractResumeContext {
+            cp,
+            input: &input,
+            source_location_id: selected.location.id,
+            selection: &selection,
+            operation: &paths.operation,
+        },
         verify,
         result_probe,
+        context,
     )
     .await?
     {
@@ -694,6 +702,7 @@ async fn execute_new_extract_attempt(
     )
     .await?;
     let dispatch = claim_extract_dispatch(cp, &input, &paths.operation, &paths.targets).await?;
+    context.claim = Some(dispatch.claim.clone());
     let staging = &dispatch.staging;
     context.outputs = events::extract_member_payloads(&selection, &staging.paths, &paths.targets);
     let staging_path = staging.paths.first().ok_or_else(|| {
@@ -765,6 +774,7 @@ async fn execute_new_extract_attempt(
             result,
             verification_ids,
             probed,
+            claim: dispatch.claim.clone(),
         },
     )
     .await
@@ -898,48 +908,73 @@ async fn prepare_extract_execution(
     })
 }
 
-async fn maybe_resume_extract_operation(
-    cp: &ControlPlane,
-    input: &ExecuteExtractAudioInput,
+struct ExtractResumeContext<'a> {
+    cp: &'a ControlPlane,
+    input: &'a ExecuteExtractAudioInput,
     source_location_id: FileLocationId,
-    selection: &selection::ExtractAudioSelectionPlan,
-    operation: &AudioExtractOperationRecord,
+    selection: &'a selection::ExtractAudioSelectionPlan,
+    operation: &'a AudioExtractOperationRecord,
+}
+
+async fn maybe_resume_extract_operation(
+    resume: ExtractResumeContext<'_>,
     verify: &dyn VerifyArtifactDispatcher,
     result_probe: &dyn commit::AudioResultProbeDispatcher,
+    context: &mut ExtractAttemptContext,
 ) -> Result<Option<ExecuteExtractAudioReport>, VoomError> {
+    let ExtractResumeContext {
+        cp,
+        input,
+        source_location_id,
+        selection,
+        operation,
+    } = resume;
     match operation.operation.state {
         AudioExtractOperationState::Committed => {
             committed_extract_report(input, source_location_id, selection, operation).map(Some)
         }
         AudioExtractOperationState::Prepared | AudioExtractOperationState::RecoveryRequired => {
-            recover_extract_report(cp, input, source_location_id, selection, operation)
+            let (claim, _, _) = acquire_extract_claim(cp, input, operation).await?;
+            context.claim = Some(claim.clone());
+            recover_extract_report(cp, input, source_location_id, selection, operation, &claim)
                 .await
                 .map(Some)
         }
         AudioExtractOperationState::Planned => Ok(None),
-        AudioExtractOperationState::Staged => resume_staged_extract_report(
-            cp,
-            input,
-            source_location_id,
-            selection,
-            operation,
-            verify,
-            result_probe,
-        )
-        .await
-        .map(Some),
+        AudioExtractOperationState::Staged => {
+            let (claim, _, _) = acquire_extract_claim(cp, input, operation).await?;
+            context.claim = Some(claim.clone());
+            resume_staged_extract_report(
+                ExtractResumeContext {
+                    cp,
+                    input,
+                    source_location_id,
+                    selection,
+                    operation,
+                },
+                &claim,
+                verify,
+                result_probe,
+            )
+            .await
+            .map(Some)
+        }
     }
 }
 
 async fn resume_staged_extract_report(
-    cp: &ControlPlane,
-    input: &ExecuteExtractAudioInput,
-    source_location_id: FileLocationId,
-    selection: &selection::ExtractAudioSelectionPlan,
-    operation: &AudioExtractOperationRecord,
+    resume: ExtractResumeContext<'_>,
+    claim: &NewAudioExtractClaim,
     verify: &dyn VerifyArtifactDispatcher,
     result_probe: &dyn commit::AudioResultProbeDispatcher,
 ) -> Result<ExecuteExtractAudioReport, VoomError> {
+    let ExtractResumeContext {
+        cp,
+        input,
+        source_location_id,
+        selection,
+        operation,
+    } = resume;
     if operation.outputs.len() != selection.outputs.len() {
         return Err(VoomError::Internal(format!(
             "staged audio extraction {} has an incomplete output set",
@@ -1001,6 +1036,7 @@ async fn resume_staged_extract_report(
             result,
             verification_ids,
             probed,
+            claim: claim.clone(),
         },
     )
     .await
@@ -1096,20 +1132,8 @@ async fn claim_extract_dispatch(
     targets: &[PathBuf],
 ) -> Result<ClaimedExtractDispatch, VoomError> {
     let now = cp.clock().now();
-    let (worker_id, worker_epoch, expires_at) = extract_dispatch_lease(cp, input.lease_id).await?;
-    let claim = NewAudioExtractClaim {
-        operation_key: operation.operation.operation_key.clone(),
-        expected_generation: operation.operation.dispatch_generation,
-        lease_id: input.lease_id,
-        claim_token: format!(
-            "lease-{}-{}",
-            input.lease_id.0,
-            crate::worker_process::random_hex_128()
-        ),
-        expires_at,
-    };
+    let (claim, worker_id, worker_epoch) = acquire_extract_claim(cp, input, operation).await?;
     let repo = SqliteAudioExtractOperationRepo::new(cp.pool.clone());
-    repo.acquire_claim(&claim, now).await?;
     if let Some(attempt) = repo
         .get_dispatch_attempt(operation.operation.id, claim.expected_generation)
         .await?
@@ -1133,6 +1157,29 @@ async fn claim_extract_dispatch(
         worker_epoch,
         staging,
     })
+}
+
+async fn acquire_extract_claim(
+    cp: &ControlPlane,
+    input: &ExecuteExtractAudioInput,
+    operation: &AudioExtractOperationRecord,
+) -> Result<(NewAudioExtractClaim, voom_core::WorkerId, u32), VoomError> {
+    let (worker_id, worker_epoch, expires_at) = extract_dispatch_lease(cp, input.lease_id).await?;
+    let claim = NewAudioExtractClaim {
+        operation_key: operation.operation.operation_key.clone(),
+        expected_generation: operation.operation.dispatch_generation,
+        lease_id: input.lease_id,
+        claim_token: format!(
+            "lease-{}-{}",
+            input.lease_id.0,
+            crate::worker_process::random_hex_128()
+        ),
+        expires_at,
+    };
+    SqliteAudioExtractOperationRepo::new(cp.pool.clone())
+        .acquire_claim(&claim, cp.clock().now())
+        .await?;
+    Ok((claim, worker_id, worker_epoch))
 }
 
 async fn extract_dispatch_lease(
@@ -1312,6 +1359,7 @@ async fn recover_extract_report(
     source_location_id: FileLocationId,
     selection: &selection::ExtractAudioSelectionPlan,
     operation: &AudioExtractOperationRecord,
+    claim: &NewAudioExtractClaim,
 ) -> Result<ExecuteExtractAudioReport, VoomError> {
     if operation.outputs.len() != selection.outputs.len() {
         return Err(VoomError::Internal(format!(
@@ -1333,6 +1381,7 @@ async fn recover_extract_report(
             source_media_snapshot_id: operation.operation.source_media_snapshot_id,
             source_bundle_id: input.source_bundle_id,
             outputs,
+            claim: claim.clone(),
         },
     )
     .await?;
@@ -1615,6 +1664,7 @@ struct ExtractAttemptContext {
     artifact_location_id: Option<ArtifactLocationId>,
     result: Option<ExtractAudioResult>,
     outputs: Vec<voom_events::payload::ArtifactAudioExtractMemberPayload>,
+    claim: Option<NewAudioExtractClaim>,
 }
 
 struct ExtractCommitRequest {
@@ -1629,6 +1679,7 @@ struct ExtractCommitRequest {
     result: ExtractAudioResult,
     verification_ids: Vec<ArtifactVerificationId>,
     probed: Vec<commit::ProbedResultPayload>,
+    claim: NewAudioExtractClaim,
 }
 
 async fn commit_verified_extract_audio(
@@ -1646,6 +1697,7 @@ async fn commit_verified_extract_audio(
             source_media_snapshot_id: MediaSnapshotId(request.source_media_snapshot_id),
             source_bundle_id: request.input.source_bundle_id,
             outputs: commit_inputs,
+            claim: request.claim.clone(),
         },
     )
     .await?;

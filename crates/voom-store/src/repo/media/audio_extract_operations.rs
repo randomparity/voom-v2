@@ -231,6 +231,26 @@ impl SqliteAudioExtractOperationRepo {
         )))
     }
 
+    pub async fn release_claim(&self, claim: &NewAudioExtractClaim) -> Result<(), VoomError> {
+        let result = sqlx::query(
+            "UPDATE audio_extract_operations \
+             SET claim_lease_id = NULL, claim_token = NULL, claim_expires_at = NULL \
+             WHERE operation_key = ? AND dispatch_generation = ? \
+             AND claim_lease_id = ? AND claim_token = ? AND state != 'committed'",
+        )
+        .bind(&claim.operation_key)
+        .bind(i64::from(claim.expected_generation))
+        .bind(i64_from_u64(claim.lease_id.0))
+        .bind(&claim.claim_token)
+        .execute(&self.pool)
+        .await
+        .map_err(|error| {
+            VoomError::database_context("audio_extract_operations release claim", error)
+        })?;
+        let _ = result.rows_affected();
+        Ok(())
+    }
+
     pub async fn record_dispatch_attempt(
         &self,
         claim: &NewAudioExtractClaim,

@@ -100,6 +100,7 @@ pub struct CommitAudioExtractSetInput {
     pub source_media_snapshot_id: MediaSnapshotId,
     pub source_bundle_id: BundleId,
     pub outputs: Vec<CommitAudioExtractOutputInput>,
+    pub claim: NewAudioExtractClaim,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -536,10 +537,12 @@ pub async fn commit_audio_extract_set(
     }
     let prepared = prepare_extract_set(cp, input).await?;
     for member in &prepared {
+        assert_extract_claim(cp, input).await?;
         if let Err(error) = promote_sidecar(&member.prepared).await {
             mark_extract_set_recovery_required(cp, input, &prepared, &error).await?;
             return Err(error);
         }
+        assert_extract_claim(cp, input).await?;
     }
     match finalize_extract_set(cp, input, &prepared).await {
         Ok(outputs) => Ok(outputs),
@@ -556,7 +559,9 @@ pub async fn recover_audio_extract_set(
 ) -> Result<Vec<CommittedAudioExtractOutput>, VoomError> {
     let prepared = load_recovery_extract_set(cp, input).await?;
     for member in &prepared {
+        assert_extract_claim(cp, input).await?;
         recover_promote_extract_member(member).await?;
+        assert_extract_claim(cp, input).await?;
     }
     finalize_extract_set(cp, input, &prepared).await
 }
@@ -666,7 +671,7 @@ async fn prepare_extract_set(
             },
         });
     }
-    update_extract_operation_state(&mut tx, input.operation_row_id, "staged", "prepared").await?;
+    update_extract_operation_state(&mut tx, input, "staged", "prepared", now).await?;
     commit_tx(tx).await?;
     Ok(prepared)
 }
@@ -806,26 +811,55 @@ async fn bind_prepared_extract_output(
 
 async fn update_extract_operation_state(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-    operation_row_id: u64,
+    input: &CommitAudioExtractSetInput,
     expected: &str,
     next: &str,
+    now: time::OffsetDateTime,
 ) -> Result<(), VoomError> {
-    let result =
-        sqlx::query("UPDATE audio_extract_operations SET state = ? WHERE id = ? AND state = ?")
-            .bind(next)
-            .bind(sqlite_id(operation_row_id, "audio extraction operation")?)
-            .bind(expected)
-            .execute(&mut **tx)
-            .await
+    let result = sqlx::query(
+        "UPDATE audio_extract_operations SET state = ? WHERE id = ? AND state = ? \
+         AND dispatch_generation = ? AND claim_lease_id = ? AND claim_token = ? \
+         AND claim_expires_at > ?",
+    )
+    .bind(next)
+    .bind(sqlite_id(
+        input.operation_row_id,
+        "audio extraction operation",
+    )?)
+    .bind(expected)
+    .bind(i64::from(input.claim.expected_generation))
+    .bind(sqlite_id(
+        input.claim.lease_id.0,
+        "audio extraction claim lease",
+    )?)
+    .bind(&input.claim.claim_token)
+    .bind(
+        now.format(&time::format_description::well_known::Rfc3339)
             .map_err(|error| {
-                VoomError::database_context("transition audio extract operation", error)
-            })?;
+                VoomError::Internal(format!("format audio extraction claim check: {error}"))
+            })?,
+    )
+    .execute(&mut **tx)
+    .await
+    .map_err(|error| VoomError::database_context("transition audio extract operation", error))?;
     if result.rows_affected() != 1 {
         return Err(VoomError::Conflict(format!(
-            "audio extraction operation {operation_row_id} is not {expected}"
+            "audio extraction operation {} is not claimed in {expected}",
+            input.operation_row_id
         )));
     }
     Ok(())
+}
+
+async fn assert_extract_claim(
+    cp: &ControlPlane,
+    input: &CommitAudioExtractSetInput,
+) -> Result<(), VoomError> {
+    voom_store::repo::audio_extract_operations::SqliteAudioExtractOperationRepo::new(
+        cp.pool.clone(),
+    )
+    .acquire_claim(&input.claim, cp.clock().now())
+    .await
 }
 
 fn sqlite_id(value: u64, label: &str) -> Result<i64, VoomError> {
@@ -1137,7 +1171,7 @@ async fn finalize_extract_set(
     for (output, member) in input.outputs.iter().zip(prepared) {
         committed.push(finalize_extract_member(cp, &mut tx, input, (output, member), now).await?);
     }
-    complete_extract_operation_in_tx(&mut tx, input.operation_row_id, now).await?;
+    complete_extract_operation_in_tx(&mut tx, input, now).await?;
     commit_tx(tx).await?;
     Ok(committed)
 }
@@ -1274,7 +1308,7 @@ async fn append_extract_commit_completed_event(
 
 async fn complete_extract_operation_in_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-    operation_row_id: u64,
+    input: &CommitAudioExtractSetInput,
     now: time::OffsetDateTime,
 ) -> Result<(), VoomError> {
     let finished_at = now
@@ -1285,16 +1319,29 @@ async fn complete_extract_operation_in_tx(
     let result = sqlx::query(
         "UPDATE audio_extract_operations SET state = 'committed', finished_at = ?, \
          recovery_failure_class = NULL, recovery_error_code = NULL, recovery_message = NULL \
-         WHERE id = ? AND state IN ('prepared', 'recovery_required')",
+         WHERE id = ? AND state IN ('prepared', 'recovery_required') \
+         AND dispatch_generation = ? AND claim_lease_id = ? AND claim_token = ? \
+         AND claim_expires_at > ?",
     )
-    .bind(finished_at)
-    .bind(sqlite_id(operation_row_id, "audio extraction operation")?)
+    .bind(&finished_at)
+    .bind(sqlite_id(
+        input.operation_row_id,
+        "audio extraction operation",
+    )?)
+    .bind(i64::from(input.claim.expected_generation))
+    .bind(sqlite_id(
+        input.claim.lease_id.0,
+        "audio extraction claim lease",
+    )?)
+    .bind(&input.claim.claim_token)
+    .bind(&finished_at)
     .execute(&mut **tx)
     .await
     .map_err(|error| VoomError::database_context("finalize audio extract operation", error))?;
     if result.rows_affected() != 1 {
         return Err(VoomError::Conflict(format!(
-            "audio extraction operation {operation_row_id} is not prepared"
+            "audio extraction operation {} is not claimed for finalize",
+            input.operation_row_id
         )));
     }
     Ok(())
@@ -1435,7 +1482,9 @@ async fn mark_extract_set_recovery_required(
     let result = sqlx::query(
         "UPDATE audio_extract_operations SET state = 'recovery_required', \
          recovery_failure_class = 'commit_failure', recovery_error_code = ?, \
-         recovery_message = ? WHERE id = ? AND state = 'prepared'",
+         recovery_message = ? WHERE id = ? AND state = 'prepared' \
+         AND dispatch_generation = ? AND claim_lease_id = ? AND claim_token = ? \
+         AND claim_expires_at > ?",
     )
     .bind(error.error_code().as_str())
     .bind(error.to_string())
@@ -1443,6 +1492,20 @@ async fn mark_extract_set_recovery_required(
         input.operation_row_id,
         "audio extraction operation",
     )?)
+    .bind(i64::from(input.claim.expected_generation))
+    .bind(sqlite_id(
+        input.claim.lease_id.0,
+        "audio extraction claim lease",
+    )?)
+    .bind(&input.claim.claim_token)
+    .bind(
+        now.format(&time::format_description::well_known::Rfc3339)
+            .map_err(|format_error| {
+                VoomError::Internal(format!(
+                    "format audio extraction recovery claim check: {format_error}"
+                ))
+            })?,
+    )
     .execute(&mut *tx)
     .await
     .map_err(|db_error| {
