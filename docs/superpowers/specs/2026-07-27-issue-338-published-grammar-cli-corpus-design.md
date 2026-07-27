@@ -152,7 +152,13 @@ does not claim either payload is a valid font parser input.
 Assemble one MKV containing H.264 video plus default English 5.1 E-AC-3,
 English stereo AAC, untagged stereo AAC, and Japanese commentary AAC.
 Distinct generated tones let the test identify source streams through decoded
-audio fingerprints without pinning encoder-version-specific bytes.
+audio fingerprints without pinning encoder-version-specific bytes. The
+fingerprint runner decodes each selected stream to mono 8 kHz signed 16-bit
+PCM, measures Goertzel energy at the small fixed set of generated tone
+frequencies, and requires the expected frequency's normalized energy to exceed
+every other generated frequency by a generous fixed ratio. This tolerates
+codec and platform rounding while still detecting wrong-source lineage; it
+does not compare PCM hashes or exact sample values.
 
 #### F1a–F1c
 

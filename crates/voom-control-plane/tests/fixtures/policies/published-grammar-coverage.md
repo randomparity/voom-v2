@@ -65,7 +65,9 @@ untagged stereo AAC, and Japanese commentary AAC.
 - Oracle: the VOOM report records committed audio phases, sidecar lineage, and
   successful artifact verification. The filtered extract selects only the
   commentary AAC track; ffprobe proves codecs and channel counts, and hashes
-  distinguish every sidecar.
+  are not required to differ when two operations select the same source.
+  Durable output identities and exact ordered source stream lineage distinguish
+  sidecars; decoded tone-frequency energy distinguishes different sources.
 
 ### F1 — control-flow input set
 
@@ -78,11 +80,13 @@ The set contains these exact cases:
   `inspect` completes without mutation, `normalize` runs because `completed`
   is true but completes without mutation, and `organize` does not run because
   `modified` is false.
-- F1c `fail.mp4`: byte-identical media facts to F1a. Before the same two-file
-  batch containing F1a and F1c starts, create the exact final `fail.mkv`
-  destination with different bytes. The existing-target commit guard makes
-  F1c's `inspect` remux fail deterministically; its dependent phases do not
-  run, while F1a continues and commits.
+- F1c `fail.mp4`: byte-identical media facts to F1a. After scan identifies its
+  source file-version id and before the batch starts, create the exact remux
+  working target
+  `.committed/remux/v<file-version-id>/fail.remux.mkv` with different bytes.
+  The existing-target operation commit guard makes F1c's `inspect` remux fail
+  deterministically before terminal promotion; its dependent phases do not run,
+  while F1a continues and commits.
 - Focused coordinator tests owned by #330 resume F1a after two durable
   boundaries: first after the `inspect` per-file summary is committed and
   before `normalize` dispatch, then after the `normalize` summary is committed
