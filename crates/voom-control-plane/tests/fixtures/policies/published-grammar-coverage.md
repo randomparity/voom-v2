@@ -102,8 +102,9 @@ The set contains these exact cases:
   successful-file commits.
 - Oracle: per-file VOOM phase summaries prove skip/rule decisions, `completed`
   admission after committed or skipped predecessors, true and false `modified`
-  gates, and visible failure for missing predecessor history. Focused #330
-  coordinator tests prove identical decisions after repeated resume.
+  gates, and terminal blocking after a visible predecessor failure. Focused
+  #330 coordinator tests prove the separate fail-loud missing-history case and
+  identical decisions after repeated resume.
   The batch report and exit status identify partial failure while retaining the
   successful file's committed output and artifact-verification result.
 

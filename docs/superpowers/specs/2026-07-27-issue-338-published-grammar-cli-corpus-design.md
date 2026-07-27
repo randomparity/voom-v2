@@ -44,7 +44,8 @@ production library.
 - A new public resume CLI. Repeated-resume equivalence is not a grammar
   production and remains owned by #330's focused coordinator tests. The F1
   process test proves fresh-run `completed` and `modified` decisions plus
-  visible missing/failed predecessor behavior.
+  terminal blocking after a failed predecessor. Focused #330 tests own the
+  fail-loud missing-history case, which cannot arise in a fresh F1 run.
 - Performance work owned by #367–#369.
 
 ## Design
@@ -95,7 +96,8 @@ Every scenario performs only shipped commands for VOOM state transitions:
 
 1. `voom init`;
 2. `voom scan --path <scenario-library>`;
-3. `voom policy create --slug <scenario> --file <canonical-source>`;
+3. `voom policy create --slug <canonical-compiled-slug> --file
+   <canonical-source>`;
 4. `voom policy input create-from-scan --all --slug <scenario-input>`;
 5. `voom compliance report --policy-version-id ... --input-set-id ...`;
 6. `voom compliance execute ...`;
@@ -105,6 +107,12 @@ Every scenario performs only shipped commands for VOOM state transitions:
 
 External `ffmpeg`, `ffprobe`, and `mkvmerge -J` commands generate or inspect
 media bytes; they never mutate VOOM durable state.
+
+The policy slugs are fixed by the canonical compiled fixtures and must match
+the source-derived values accepted by the store:
+`published-grammar-core`, `published-grammar-tracks`,
+`published-grammar-audio`, and `published-grammar-control-flow`. Scenario
+isolation comes from distinct databases, not invented policy slugs.
 
 Each command assertion checks exit status, envelope status, command name, and
 the exact allowed warning set. Untagged-track warnings in T1/A1 are asserted
@@ -234,7 +242,9 @@ second. This separates a bad fixture from an execution regression.
   dependent mutation, and produces no success verification;
 - the job, tickets, file-phase summaries, and events exposed by shipped CLI
   inspection agree with the partial envelope;
-- the pre-existing `fail.mkv` bytes remain unchanged.
+- the exact pre-existing
+  `.committed/remux/v<file-version-id>/fail.remux.mkv` sentinel bytes remain
+  unchanged.
 
 ### Output discovery
 
