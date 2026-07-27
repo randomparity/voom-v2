@@ -957,7 +957,15 @@ async fn maybe_resume_extract_operation(
         AudioExtractOperationState::Committed => {
             committed_extract_report(input, source_location_id, selection, operation).map(Some)
         }
-        AudioExtractOperationState::Prepared | AudioExtractOperationState::RecoveryRequired => {
+        AudioExtractOperationState::Prepared => {
+            let (claim, _, _) = acquire_extract_claim(cp, input, operation).await?;
+            context.claim = Some(claim.clone());
+            commit::record_prepared_successor_evidence(cp, operation, &claim).await?;
+            recover_extract_report(cp, input, source_location_id, selection, operation, &claim)
+                .await
+                .map(Some)
+        }
+        AudioExtractOperationState::RecoveryRequired => {
             let (claim, _, _) = acquire_extract_claim(cp, input, operation).await?;
             context.claim = Some(claim.clone());
             recover_extract_report(cp, input, source_location_id, selection, operation, &claim)
@@ -1413,7 +1421,15 @@ async fn recover_extract_report(
         .iter()
         .zip(&selection.outputs)
         .map(|(stored, selected)| recovery_output_input(stored, selected))
-        .collect::<Result<Vec<_>, _>>()?;
+        .collect::<Result<Vec<_>, _>>();
+    let outputs = match outputs {
+        Ok(outputs) => outputs,
+        Err(error) => {
+            return Err(
+                commit::record_recovery_projection_failure(cp, operation, claim, error).await,
+            );
+        }
+    };
     let committed = commit::recover_audio_extract_set(
         cp,
         &commit::CommitAudioExtractSetInput {
@@ -1423,10 +1439,6 @@ async fn recover_extract_report(
             source_bundle_id: input.source_bundle_id,
             outputs,
             claim: claim.clone(),
-            successor_claimed_prepared: matches!(
-                operation.operation.state,
-                AudioExtractOperationState::Prepared
-            ),
         },
     )
     .await?;
@@ -1867,7 +1879,6 @@ async fn commit_verified_extract_audio(
             source_bundle_id: request.input.source_bundle_id,
             outputs,
             claim: request.claim.clone(),
-            successor_claimed_prepared: false,
         },
     )
     .await?;

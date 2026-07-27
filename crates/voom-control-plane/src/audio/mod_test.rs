@@ -807,26 +807,7 @@ async fn assert_prepared_resume_failure_is_durable(
     cp: &crate::ControlPlane,
     input: &ExecuteExtractAudioInput,
 ) {
-    let operation_id: i64 = sqlx::query_scalar("SELECT id FROM audio_extract_operations")
-        .fetch_one(cp.pool_for_test())
-        .await
-        .unwrap();
-    sqlx::query(
-        "UPDATE audio_extract_operations SET state = 'prepared', \
-         recovery_failure_class = NULL, recovery_error_code = NULL, recovery_message = NULL \
-         WHERE id = ?",
-    )
-    .bind(operation_id)
-    .execute(cp.pool_for_test())
-    .await
-    .unwrap();
-    sqlx::query(
-        "UPDATE artifact_commit_records SET state = 'pending', failure_class = NULL, \
-         error_code = NULL, message = NULL, recovery_reason = NULL, finished_at = NULL",
-    )
-    .execute(cp.pool_for_test())
-    .await
-    .unwrap();
+    let operation_id = rewind_extract_recovery_to_prepared(cp).await;
     let blocking = cp
         .use_leases
         .acquire(NewUseLease {
@@ -904,6 +885,130 @@ async fn assert_prepared_resume_failure_is_durable(
         )
         .await
         .unwrap();
+}
+
+#[tokio::test]
+async fn prepared_successor_records_evidence_before_missing_member_field_decode() {
+    let (cp, _db, dir) = fixture_with_dir().await;
+    let source = seed_audio_source(&cp, &dir, b"source").await;
+    let bundle = seed_bundle(&cp).await;
+    let input = extract_input_for_source(&source, bundle.id, &dir);
+    seed_rewound_prepared_extract(&cp, &input).await;
+    sqlx::query("UPDATE audio_extract_operation_outputs SET temp_path = NULL")
+        .execute(cp.pool_for_test())
+        .await
+        .unwrap();
+
+    let error = execute_extract_audio_with_dispatchers(
+        &cp,
+        input,
+        &UncalledExtractDispatcher,
+        &UncalledVerifyDispatcher,
+        &UncalledProbeDispatcher,
+    )
+    .await
+    .unwrap_err();
+
+    assert!(error.to_string().contains("missing temp_path"));
+    assert_decode_failure_left_recovery_evidence(&cp, "missing temp_path").await;
+}
+
+#[tokio::test]
+async fn prepared_successor_records_evidence_before_malformed_result_decode() {
+    let (cp, _db, dir) = fixture_with_dir().await;
+    let source = seed_audio_source(&cp, &dir, b"source").await;
+    let bundle = seed_bundle(&cp).await;
+    let input = extract_input_for_source(&source, bundle.id, &dir);
+    seed_rewound_prepared_extract(&cp, &input).await;
+    sqlx::query("UPDATE audio_extract_operation_outputs SET result_facts = '{}'")
+        .execute(cp.pool_for_test())
+        .await
+        .unwrap();
+
+    let error = execute_extract_audio_with_dispatchers(
+        &cp,
+        input,
+        &UncalledExtractDispatcher,
+        &UncalledVerifyDispatcher,
+        &UncalledProbeDispatcher,
+    )
+    .await
+    .unwrap_err();
+
+    assert!(error.to_string().contains("malformed result_facts"));
+    assert_decode_failure_left_recovery_evidence(&cp, "malformed result_facts").await;
+}
+
+async fn seed_rewound_prepared_extract(cp: &crate::ControlPlane, input: &ExecuteExtractAudioInput) {
+    sqlx::query(
+        "CREATE TRIGGER fail_audio_extract_finalize BEFORE INSERT ON file_assets \
+         BEGIN SELECT RAISE(ABORT, 'injected finalize failure'); END;",
+    )
+    .execute(cp.pool_for_test())
+    .await
+    .unwrap();
+    execute_extract_audio_with_dispatchers(
+        cp,
+        input.clone(),
+        &WritingExtractDispatcher {
+            output_bytes: b"extracted".to_vec(),
+        },
+        &SuccessfulVerifyDispatcher,
+        &SucceedingProbeDispatcher,
+    )
+    .await
+    .unwrap_err();
+    sqlx::query("DROP TRIGGER fail_audio_extract_finalize")
+        .execute(cp.pool_for_test())
+        .await
+        .unwrap();
+    rewind_extract_recovery_to_prepared(cp).await;
+}
+
+async fn rewind_extract_recovery_to_prepared(cp: &crate::ControlPlane) -> i64 {
+    let operation_id = sqlx::query_scalar("SELECT id FROM audio_extract_operations")
+        .fetch_one(cp.pool_for_test())
+        .await
+        .unwrap();
+    sqlx::query(
+        "UPDATE audio_extract_operations SET state = 'prepared', \
+         recovery_failure_class = NULL, recovery_error_code = NULL, recovery_message = NULL \
+         WHERE id = ?",
+    )
+    .bind(operation_id)
+    .execute(cp.pool_for_test())
+    .await
+    .unwrap();
+    sqlx::query(
+        "UPDATE artifact_commit_records SET state = 'pending', failure_class = NULL, \
+         error_code = NULL, message = NULL, recovery_reason = NULL, finished_at = NULL",
+    )
+    .execute(cp.pool_for_test())
+    .await
+    .unwrap();
+    operation_id
+}
+
+async fn assert_decode_failure_left_recovery_evidence(
+    cp: &crate::ControlPlane,
+    expected_message: &str,
+) {
+    let row = sqlx::query("SELECT state, recovery_message FROM audio_extract_operations")
+        .fetch_one(cp.pool_for_test())
+        .await
+        .unwrap();
+    assert_eq!(
+        row.try_get::<String, _>("state").unwrap(),
+        "recovery_required"
+    );
+    assert!(
+        row.try_get::<String, _>("recovery_message")
+            .unwrap()
+            .contains(expected_message)
+    );
+    assert_table_count(cp, "file_versions", 1).await;
+    assert_table_count(cp, "asset_bundle_members", 0).await;
+    assert_table_count(cp, "audio_extract_output_lineage", 0).await;
 }
 
 #[tokio::test]

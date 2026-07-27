@@ -79,7 +79,6 @@ pub struct CommitAudioExtractSetInput {
     pub source_bundle_id: BundleId,
     pub outputs: Vec<CommitAudioExtractOutputInput>,
     pub claim: NewAudioExtractClaim,
-    pub successor_claimed_prepared: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -637,19 +636,6 @@ pub async fn recover_audio_extract_set(
     cp: &ControlPlane,
     input: &CommitAudioExtractSetInput,
 ) -> Result<Vec<CommittedAudioExtractOutput>, VoomError> {
-    if input.successor_claimed_prepared {
-        let claim_loss = VoomError::Conflict(
-            "audio extraction successor claimed an operation left prepared by a lost claim"
-                .to_owned(),
-        );
-        mark_recovery_input_required(
-            cp,
-            input,
-            &claim_loss,
-            "audio extraction successor recovery after prior claim loss",
-        )
-        .await?;
-    }
     let mut prepared = match load_recovery_extract_set(cp, input).await {
         Ok(prepared) => prepared,
         Err(error) => {
@@ -660,6 +646,68 @@ pub async fn recover_audio_extract_set(
         Ok(outputs) => Ok(outputs),
         Err(error) => Err(record_extract_recovery_failure(cp, input, &prepared, error).await),
     }
+}
+
+pub(crate) async fn record_prepared_successor_evidence(
+    cp: &ControlPlane,
+    operation: &AudioExtractOperationRecord,
+    claim: &NewAudioExtractClaim,
+) -> Result<(), VoomError> {
+    let error = VoomError::Conflict(
+        "audio extraction successor claimed an operation left prepared by a lost claim".to_owned(),
+    );
+    let members = raw_recovery_members(operation);
+    mark_extract_recovery_members(
+        cp,
+        operation.operation.id,
+        claim,
+        &members,
+        &error,
+        "audio extraction successor recovery after prior claim loss",
+    )
+    .await
+}
+
+pub(crate) async fn record_recovery_projection_failure(
+    cp: &ControlPlane,
+    operation: &AudioExtractOperationRecord,
+    claim: &NewAudioExtractClaim,
+    error: VoomError,
+) -> VoomError {
+    let members = raw_recovery_members(operation);
+    if let Err(record_error) = mark_extract_recovery_members(
+        cp,
+        operation.operation.id,
+        claim,
+        &members,
+        &error,
+        "audio extraction recovery input decoding failed",
+    )
+    .await
+    {
+        tracing::warn!(
+            primary_error_code = error.error_code().as_str(),
+            secondary_error = %record_error,
+            operation_id = operation.operation.id,
+            "audio extraction recovery projection evidence failed while preserving primary error"
+        );
+    }
+    error
+}
+
+fn raw_recovery_members(operation: &AudioExtractOperationRecord) -> Vec<ExtractRecoveryMember> {
+    operation
+        .outputs
+        .iter()
+        .filter_map(|output| {
+            Some(ExtractRecoveryMember {
+                commit_record_id: output.commit_record_id?,
+                artifact_handle_id: output.artifact_handle_id?,
+                target_path: PathBuf::from(&output.target_path),
+                temp_path: PathBuf::from(output.temp_path.as_ref()?),
+            })
+        })
+        .collect()
 }
 
 async fn recover_audio_extract_set_inner(
@@ -1232,7 +1280,8 @@ async fn mark_extract_set_recovery_required(
         .collect::<Vec<_>>();
     mark_extract_recovery_members(
         cp,
-        input,
+        input.operation_row_id,
+        &input.claim,
         &members,
         error,
         "audio extraction set commit failed after durable prepare",
@@ -1270,7 +1319,15 @@ async fn mark_recovery_input_required(
             })
         })
         .collect::<Result<Vec<_>, VoomError>>()?;
-    mark_extract_recovery_members(cp, input, &members, error, recovery_reason).await
+    mark_extract_recovery_members(
+        cp,
+        input.operation_row_id,
+        &input.claim,
+        &members,
+        error,
+        recovery_reason,
+    )
+    .await
 }
 
 struct ExtractRecoveryMember {
@@ -1282,7 +1339,8 @@ struct ExtractRecoveryMember {
 
 async fn mark_extract_recovery_members(
     cp: &ControlPlane,
-    input: &CommitAudioExtractSetInput,
+    operation_row_id: u64,
+    claim: &NewAudioExtractClaim,
     members: &[ExtractRecoveryMember],
     error: &VoomError,
     recovery_reason: &str,
@@ -1323,8 +1381,8 @@ async fn mark_extract_recovery_members(
     }
     SqliteAudioExtractOperationRepo::mark_recovery_required_in_tx(
         &mut tx,
-        input.operation_row_id,
-        &input.claim,
+        operation_row_id,
+        claim,
         &AudioExtractRecoveryFailure {
             error_code: error.error_code().as_str().to_owned(),
             message: error.to_string(),
