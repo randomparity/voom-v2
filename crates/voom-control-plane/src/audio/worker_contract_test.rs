@@ -66,6 +66,43 @@ fn selected_stream_id_mismatch_returns_malformed_worker_result() {
 }
 
 #[test]
+fn synthesis_request_uses_add_track_target_channels_and_derived_identity() {
+    let selection = synthesis_selection();
+    let request = transcode_audio_request_for(
+        &selected_source(),
+        &selection,
+        std::path::Path::new("/tmp/stage"),
+        std::path::Path::new("/tmp/stage/result.mkv"),
+    );
+
+    assert!(request.audio.add_track);
+    assert_eq!(request.audio.target_channels, Some(2));
+    assert_eq!(
+        request.selection.selected_streams[0].snapshot_stream_id,
+        "companion-1"
+    );
+    assert_eq!(
+        request.selection.selected_streams[0].provider_stream_index,
+        1
+    );
+}
+
+#[test]
+fn synthesis_result_requires_target_channels_and_unique_provider_indexes() {
+    let selection = synthesis_selection();
+    let mut result = transcode_result();
+    result.selected_snapshot_stream_ids = vec!["companion-1".to_owned()];
+    result.selected_output_streams[0].snapshot_stream_id = "companion-1".to_owned();
+    result.selected_output_streams[0].channels = Some(6);
+
+    let error = validate_transcode_result(&selected_source(), &selection, &result).unwrap_err();
+    assert_eq!(
+        error.error_code(),
+        voom_core::ErrorCode::MalformedWorkerResult
+    );
+}
+
+#[test]
 fn selected_output_ordering_mismatch_returns_malformed_worker_result() {
     let selection = transcode_selection_two();
     let mut result = transcode_result();
@@ -235,7 +272,21 @@ fn transcode_selection() -> TranscodeAudioSelectionPlan {
         }],
         target_codec: "aac".to_owned(),
         container: "mkv".to_owned(),
+        operation_id: None,
+        add_track: false,
+        target_channels: None,
     }
+}
+
+fn synthesis_selection() -> TranscodeAudioSelectionPlan {
+    let mut selection = transcode_selection();
+    selection.operation_id = Some("node-1".to_owned());
+    selection.add_track = true;
+    selection.target_channels = Some(2);
+    selection.selection.selected_streams[0].snapshot_stream_id = "companion-1".to_owned();
+    selection.selected_streams[0].stream.snapshot_stream_id = "companion-1".to_owned();
+    selection.selected_streams[0].source.channels = Some(6);
+    selection
 }
 
 fn transcode_selection_two() -> TranscodeAudioSelectionPlan {

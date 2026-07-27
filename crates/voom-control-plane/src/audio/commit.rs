@@ -36,8 +36,9 @@ use voom_worker_protocol::{
     ProbeFileRequest, ProbeFileResult, TranscodeAudioResult,
 };
 
-use super::selection::ExtractAudioSelectionOutput;
-use super::selection::ExtractAudioSelectionPlan;
+use super::selection::{
+    ExtractAudioSelectionOutput, ExtractAudioSelectionPlan, TranscodeAudioSelectionPlan,
+};
 use super::worker_contract::extract_result_output_facts;
 use super::{ExecuteExtractAudioInput, ExecuteTranscodeAudioInput};
 use crate::ControlPlane;
@@ -515,6 +516,31 @@ pub(crate) async fn probe_staged_result(
     })
 }
 
+pub(crate) async fn probe_staged_synthesis_result(
+    cp: &ControlPlane,
+    staging_path: &Path,
+    source_snapshot: &MediaSnapshot,
+    selection: &TranscodeAudioSelectionPlan,
+    result: &TranscodeAudioResult,
+    dispatcher: &dyn AudioResultProbeDispatcher,
+) -> Result<ProbedResultPayload, VoomError> {
+    let expected = ObservedCandidateFacts {
+        size_bytes: result.output.size_bytes,
+        content_hash: result.output.content_hash.clone(),
+        modified_at: None,
+        dev: None,
+        ino: None,
+        nlink: None,
+    };
+    let probed = dispatch_verified_result_probe(cp, staging_path, &expected, dispatcher).await?;
+    let mut payload = snapshot_with_stream_ids(&probed.result.snapshot)?;
+    bind_synthesis_companions(&mut payload, source_snapshot, selection, result)?;
+    Ok(ProbedResultPayload {
+        worker_id: probed.worker_id,
+        payload,
+    })
+}
+
 pub(crate) async fn probe_staged_extract_result(
     cp: &ControlPlane,
     staging_path: &Path,
@@ -583,24 +609,226 @@ fn merge_audio_output_facts(payload: &mut serde_json::Value, facts: &[AudioOutpu
         }) else {
             continue;
         };
-        if let Some(language) = &fact.language {
-            stream["language"] = serde_json::Value::String(language.clone());
-        }
-        if let Some(title) = &fact.title {
-            stream["title"] = serde_json::Value::String(title.clone());
-        }
-        if let Some(channels) = fact.channels {
-            stream["channels"] = serde_json::Value::from(channels);
-        }
-        if let Some(disposition) = &fact.disposition {
-            stream["disposition"]["default"] =
-                serde_json::Value::Bool(disposition.default.unwrap_or(false));
-            stream["disposition"]["forced"] =
-                serde_json::Value::Bool(disposition.forced.unwrap_or(false));
-            stream["disposition"]["commentary"] =
-                serde_json::Value::Bool(disposition.commentary.unwrap_or(false));
+        apply_audio_output_fact(stream, fact);
+    }
+}
+
+fn bind_synthesis_companions(
+    payload: &mut serde_json::Value,
+    source_snapshot: &MediaSnapshot,
+    selection: &TranscodeAudioSelectionPlan,
+    result: &TranscodeAudioResult,
+) -> Result<(), VoomError> {
+    if !selection.add_track {
+        return Err(malformed_synthesis(
+            "synthesis result validation requires add-track mode",
+        ));
+    }
+    let source_streams = snapshot_streams(&source_snapshot.payload, "source")?;
+    let streams = payload
+        .get_mut("streams")
+        .and_then(serde_json::Value::as_array_mut)
+        .ok_or_else(|| malformed_synthesis("probed result has no stream array"))?;
+    if streams.len() != source_streams.len() + result.selected_output_streams.len() {
+        return Err(malformed_synthesis(
+            "probed result does not contain every source stream and companion",
+        ));
+    }
+    validate_unique_provider_indexes(streams)?;
+    validate_preserved_source_streams(source_streams, streams)?;
+    bind_companion_streams(
+        streams,
+        source_streams,
+        selection,
+        &result.selected_output_streams,
+    )
+}
+
+fn snapshot_streams<'a>(
+    payload: &'a serde_json::Value,
+    label: &str,
+) -> Result<&'a [serde_json::Value], VoomError> {
+    payload
+        .get("streams")
+        .and_then(serde_json::Value::as_array)
+        .map(Vec::as_slice)
+        .ok_or_else(|| malformed_synthesis(&format!("{label} snapshot has no stream array")))
+}
+
+fn validate_unique_provider_indexes(streams: &[serde_json::Value]) -> Result<(), VoomError> {
+    let mut indexes = std::collections::BTreeSet::new();
+    for stream in streams {
+        let index = stream_index(stream)?;
+        if !indexes.insert(index) {
+            return Err(malformed_synthesis(
+                "probed result contains duplicate provider stream indexes",
+            ));
         }
     }
+    Ok(())
+}
+
+fn validate_preserved_source_streams(
+    source_streams: &[serde_json::Value],
+    result_streams: &[serde_json::Value],
+) -> Result<(), VoomError> {
+    const PRESERVED_FIELDS: [&str; 9] = [
+        "kind",
+        "codec_name",
+        "channels",
+        "language",
+        "title",
+        "disposition",
+        "width",
+        "height",
+        "pixel_format",
+    ];
+    for source in source_streams {
+        let index = stream_index(source)?;
+        let result = stream_at_index(result_streams, index).ok_or_else(|| {
+            malformed_synthesis(&format!(
+                "probed result omitted source provider stream index {index}"
+            ))
+        })?;
+        for field in PRESERVED_FIELDS {
+            if source.get(field) != result.get(field) {
+                return Err(malformed_synthesis(&format!(
+                    "probed result changed source provider stream index {index} field {field}"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn bind_companion_streams(
+    streams: &mut [serde_json::Value],
+    source_streams: &[serde_json::Value],
+    selection: &TranscodeAudioSelectionPlan,
+    facts: &[AudioOutputStreamFact],
+) -> Result<(), VoomError> {
+    if selection.selected_streams.len() != facts.len() {
+        return Err(malformed_synthesis(
+            "synthesis selection and output fact counts differ",
+        ));
+    }
+    for (selected, fact) in selection.selected_streams.iter().zip(facts) {
+        if fact.snapshot_stream_id != selected.stream.snapshot_stream_id {
+            return Err(malformed_synthesis(
+                "synthesis output identity differs from the planned companion",
+            ));
+        }
+        let planned_id = &selected.stream.snapshot_stream_id;
+        if stream_at_index(source_streams, fact.output_provider_stream_index).is_some() {
+            return Err(malformed_synthesis(&format!(
+                "companion provider stream index {} collides with a source stream",
+                fact.output_provider_stream_index
+            )));
+        }
+        if streams.iter().any(|candidate| {
+            candidate.get("id").and_then(serde_json::Value::as_str) == Some(planned_id)
+        }) {
+            return Err(malformed_synthesis(&format!(
+                "planned companion identity {planned_id} is already occupied"
+            )));
+        }
+        let stream =
+            stream_at_index_mut(streams, fact.output_provider_stream_index).ok_or_else(|| {
+                malformed_synthesis(&format!(
+                    "probed result omitted companion provider stream index {}",
+                    fact.output_provider_stream_index
+                ))
+            })?;
+        validate_companion_facts(stream, fact)?;
+        stream["id"] = serde_json::Value::String(planned_id.clone());
+        apply_audio_output_fact(stream, fact);
+    }
+    Ok(())
+}
+
+fn validate_companion_facts(
+    stream: &serde_json::Value,
+    fact: &AudioOutputStreamFact,
+) -> Result<(), VoomError> {
+    let disposition = fact.disposition.as_ref();
+    let matches = stream.get("kind").and_then(serde_json::Value::as_str) == Some("audio")
+        && stream.get("codec_name").and_then(serde_json::Value::as_str) == Some(&fact.codec)
+        && stream.get("channels").and_then(serde_json::Value::as_u64) == fact.channels
+        && optional_string(stream, "language") == fact.language.as_deref()
+        && optional_string(stream, "title") == fact.title.as_deref()
+        && optional_bool(stream, "disposition", "default")
+            == disposition.and_then(|value| value.default).or(fact.default)
+        && optional_bool(stream, "disposition", "forced")
+            == disposition.and_then(|value| value.forced)
+        && optional_bool(stream, "disposition", "commentary")
+            == disposition.and_then(|value| value.commentary);
+    if matches {
+        Ok(())
+    } else {
+        Err(malformed_synthesis(&format!(
+            "probed companion stream {} does not match worker facts",
+            fact.output_provider_stream_index
+        )))
+    }
+}
+
+fn apply_audio_output_fact(stream: &mut serde_json::Value, fact: &AudioOutputStreamFact) {
+    if let Some(language) = &fact.language {
+        stream["language"] = serde_json::Value::String(language.clone());
+    }
+    if let Some(title) = &fact.title {
+        stream["title"] = serde_json::Value::String(title.clone());
+    }
+    if let Some(channels) = fact.channels {
+        stream["channels"] = serde_json::Value::from(channels);
+    }
+    if let Some(disposition) = &fact.disposition {
+        stream["disposition"]["default"] =
+            serde_json::Value::Bool(disposition.default.unwrap_or(false));
+        stream["disposition"]["forced"] =
+            serde_json::Value::Bool(disposition.forced.unwrap_or(false));
+        stream["disposition"]["commentary"] =
+            serde_json::Value::Bool(disposition.commentary.unwrap_or(false));
+    }
+}
+
+fn stream_at_index(streams: &[serde_json::Value], index: u32) -> Option<&serde_json::Value> {
+    streams.iter().find(|stream| {
+        stream.get("index").and_then(serde_json::Value::as_u64) == Some(u64::from(index))
+    })
+}
+
+fn stream_at_index_mut(
+    streams: &mut [serde_json::Value],
+    index: u32,
+) -> Option<&mut serde_json::Value> {
+    streams.iter_mut().find(|stream| {
+        stream.get("index").and_then(serde_json::Value::as_u64) == Some(u64::from(index))
+    })
+}
+
+fn stream_index(stream: &serde_json::Value) -> Result<u32, VoomError> {
+    let index = stream
+        .get("index")
+        .and_then(serde_json::Value::as_u64)
+        .ok_or_else(|| malformed_synthesis("snapshot stream has no numeric provider index"))?;
+    u32::try_from(index)
+        .map_err(|_| malformed_synthesis("snapshot provider stream index exceeds u32"))
+}
+
+fn optional_string<'a>(stream: &'a serde_json::Value, field: &str) -> Option<&'a str> {
+    stream.get(field).and_then(serde_json::Value::as_str)
+}
+
+fn optional_bool(stream: &serde_json::Value, object: &str, field: &str) -> Option<bool> {
+    stream
+        .get(object)
+        .and_then(|value| value.get(field))
+        .and_then(serde_json::Value::as_bool)
+}
+
+fn malformed_synthesis(message: &str) -> VoomError {
+    VoomError::MalformedWorkerResult(format!("synthesize_audio: {message}"))
 }
 
 pub async fn commit_audio_extract_set(

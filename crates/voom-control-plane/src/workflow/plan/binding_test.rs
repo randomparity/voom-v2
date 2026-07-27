@@ -158,6 +158,41 @@ fn policy_transcode_audio_payload_renders_source_target_and_operation_payload() 
 }
 
 #[test]
+fn policy_transcode_audio_payload_accepts_published_synthesis_mode() {
+    let operation_id = "node_synthesis_test";
+    let companion_id = voom_plan::planner::audio::synthesis_companion_id(operation_id, "audio-1");
+    let operation_payload = serde_json::json!({
+        "type": "synthesize_audio",
+        "operation_id": operation_id,
+        "target_codec": "aac",
+        "container": "mkv",
+        "target_channels": 2,
+        "source_media_snapshot_id": 99,
+        "companions": [{
+            "companion_id": companion_id,
+            "source_snapshot_stream_id": "audio-1",
+            "source_provider_stream_index": 1,
+            "result_snapshot_stream_id": companion_id
+        }]
+    });
+
+    let rendered = render_policy_transcode_audio_payload(
+        PolicyFileSource {
+            file_version_id: FileVersionId(42),
+            location_id: Some(FileLocationId(7)),
+        },
+        &operation_payload,
+        std::path::Path::new("/custom/audio/staging"),
+        std::path::Path::new("/custom/audio/output"),
+        EffectiveTiming::for_test(25, 10),
+    )
+    .unwrap();
+
+    assert_eq!(rendered["operation"], "transcode_audio");
+    assert_eq!(rendered["audio"], operation_payload);
+}
+
+#[test]
 fn policy_extract_audio_payload_renders_source_target_and_operation_payload() {
     let operation_payload = serde_json::json!({
         "type": "extract_audio",

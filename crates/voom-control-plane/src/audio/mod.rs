@@ -376,6 +376,8 @@ async fn execute_transcode_audio_inner(
             input,
             source_location_id: selected.location.id,
             source_media_snapshot_id: snapshot.id.0,
+            source_snapshot: snapshot,
+            selection: selection.clone(),
             staged,
             staging_path: staging.path,
             target_path,
@@ -425,9 +427,7 @@ async fn commit_verified_transcode_audio(
     // the content-hash-verified staged file (byte-identical to the add-only
     // committed target), so a probe failure leaves nothing committed and
     // propagates as Err (the caller records the failed event).
-    let probed =
-        commit::probe_staged_result(cp, &request.staging_path, &request.result, result_probe)
-            .await?;
+    let probed = probe_verified_transcode_result(cp, &request, result_probe).await?;
     let committed = cp
         .commit_artifact(CommitArtifactInput {
             artifact_handle_id: request.staged.artifact_handle_id,
@@ -509,6 +509,25 @@ async fn commit_verified_transcode_audio(
     ))
 }
 
+async fn probe_verified_transcode_result(
+    cp: &ControlPlane,
+    request: &TranscodeCommitRequest,
+    result_probe: &dyn commit::AudioResultProbeDispatcher,
+) -> Result<commit::ProbedResultPayload, VoomError> {
+    if request.selection.add_track {
+        return commit::probe_staged_synthesis_result(
+            cp,
+            &request.staging_path,
+            &request.source_snapshot,
+            &request.selection,
+            &request.result,
+            result_probe,
+        )
+        .await;
+    }
+    commit::probe_staged_result(cp, &request.staging_path, &request.result, result_probe).await
+}
+
 fn transcode_report_after_commit(
     request: &TranscodeCommitRequest,
     verified: &crate::artifact::verify::VerifyArtifactReport,
@@ -561,6 +580,8 @@ struct TranscodeCommitRequest {
     input: ExecuteTranscodeAudioInput,
     source_location_id: FileLocationId,
     source_media_snapshot_id: u64,
+    source_snapshot: voom_store::repo::identity::MediaSnapshot,
+    selection: selection::TranscodeAudioSelectionPlan,
     staged: commit::StagedAudioArtifact,
     staging_path: PathBuf,
     target_path: PathBuf,
