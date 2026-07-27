@@ -85,6 +85,7 @@ pub(crate) async fn dispatch_control_plane_extract_audio(
             context: context.runtime_dispatch_context(),
         },
         &crate::artifact::verify::BundledVerifyArtifactDispatcher,
+        &crate::audio::commit::BundledAudioResultProbeDispatcher,
     )
     .await
     {

@@ -2797,7 +2797,7 @@ async fn transcode_audio_result_payload_for_request(request: &OperationRequest) 
 
 async fn extract_audio_result_payload_for_request(request: &OperationRequest) -> Value {
     let request = serde_json::from_value::<ExtractAudioRequest>(request.payload.clone()).unwrap();
-    let output_bytes = b"extract-output!";
+    let output_bytes = include_bytes!("../../../../../voom-ffprobe-worker/fixtures/media/tiny.mp4");
     tokio::fs::write(&request.output.path, output_bytes)
         .await
         .unwrap();

@@ -574,6 +574,7 @@ fn event_kind_matches_serde_tag() {
             output_container: "mka".to_owned(),
             provider: None,
             provider_version: None,
+            outputs: Vec::new(),
         }),
         Event::ArtifactAudioExtractProgress(ArtifactAudioExtractProgressPayload {
             job_id: 1,
@@ -634,6 +635,7 @@ fn event_kind_matches_serde_tag() {
             message: "m".to_owned(),
             provider: None,
             provider_version: None,
+            outputs: Vec::new(),
         }),
         Event::IssueOpened(issue_payload("planned")),
         Event::IssueUpdated(issue_payload("open")),

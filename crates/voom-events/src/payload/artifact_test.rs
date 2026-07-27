@@ -665,6 +665,7 @@ fn artifact_audio_extract_started_and_progress_payloads_round_trip() {
         output_container: "ogg".to_owned(),
         provider: None,
         provider_version: None,
+        outputs: Vec::new(),
     };
     let progress = ArtifactAudioExtractProgressPayload {
         job_id: 10,
@@ -747,6 +748,7 @@ fn artifact_audio_extract_succeeded_and_failed_payloads_round_trip() {
         message: "source stream missing".to_owned(),
         provider: Some("ffmpeg".to_owned()),
         provider_version: Some("6.1".to_owned()),
+        outputs: Vec::new(),
     };
     let succeeded_json =
         serde_json::to_value(Event::ArtifactAudioExtractSucceeded(succeeded.clone())).unwrap();

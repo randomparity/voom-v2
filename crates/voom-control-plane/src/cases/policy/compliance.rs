@@ -1115,13 +1115,41 @@ impl ControlPlane {
             VoomError::Internal(format!("audio extract report job id overflow: {error}"))
         })?;
         let rows: Vec<(String,)> = sqlx::query_as(
-            "SELECT member.value \
-             FROM tickets t, json_each(t.result, '$.outputs') AS member \
-             WHERE t.job_id = ? AND t.state = 'succeeded' AND t.result IS NOT NULL \
-               AND t.kind = 'synthetic.workflow.operation.extract_audio' \
-               AND json_type(t.result, '$.outputs') = 'array' \
-             ORDER BY t.id ASC, CAST(member.key AS INTEGER) ASC",
+            "SELECT value FROM ( \
+               SELECT t.id AS ticket_id, 0 AS ordinal, \
+                      json_object( \
+                        'output_id', NULL, \
+                        'staged_artifact_handle_id', \
+                          json_extract(t.result, '$.staged_artifact_handle_id'), \
+                        'staged_artifact_location_id', \
+                          json_extract(t.result, '$.staged_artifact_location_id'), \
+                        'verification_id', json_extract(t.result, '$.verification_id'), \
+                        'commit_record_id', json_extract(t.result, '$.commit_record_id'), \
+                        'result_file_version_id', \
+                          json_extract(t.result, '$.result_file_version_id'), \
+                        'result_file_location_id', \
+                          json_extract(t.result, '$.result_file_location_id'), \
+                        'staging_path', json_extract(t.result, '$.staging_path'), \
+                        'target_path', json_extract(t.result, '$.target_path'), \
+                        'legacy_singleton', json('true') \
+                      ) AS value \
+               FROM tickets t \
+               WHERE t.job_id = ? AND t.state = 'succeeded' AND t.result IS NOT NULL \
+                 AND t.kind = 'synthetic.workflow.operation.extract_audio' \
+                 AND json_type(t.result, '$.result_file_location_id') = 'integer' \
+                 AND (json_type(t.result, '$.outputs') IS NULL \
+                      OR json_type(t.result, '$.outputs') != 'array' \
+                      OR json_array_length(t.result, '$.outputs') = 0) \
+               UNION ALL \
+               SELECT t.id AS ticket_id, CAST(member.key AS INTEGER) AS ordinal, \
+                      member.value AS value \
+               FROM tickets t, json_each(t.result, '$.outputs') AS member \
+               WHERE t.job_id = ? AND t.state = 'succeeded' AND t.result IS NOT NULL \
+                 AND t.kind = 'synthetic.workflow.operation.extract_audio' \
+                 AND json_type(t.result, '$.outputs') = 'array' \
+             ) ORDER BY ticket_id ASC, ordinal ASC",
         )
+        .bind(job_id)
         .bind(job_id)
         .fetch_all(&self.pool)
         .await

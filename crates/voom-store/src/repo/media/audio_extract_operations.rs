@@ -51,6 +51,7 @@ pub struct AudioExtractOperation {
     pub source_media_snapshot_id: MediaSnapshotId,
     pub state: AudioExtractOperationState,
     pub dispatch_generation: u32,
+    pub worker_result: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -69,10 +70,14 @@ pub struct AudioExtractOperationOutput {
     pub artifact_location_id: Option<ArtifactLocationId>,
     pub verification_id: Option<ArtifactVerificationId>,
     pub commit_record_id: Option<ArtifactCommitRecordId>,
+    pub probe_worker_id: Option<WorkerId>,
+    pub probe_payload: Option<serde_json::Value>,
+    pub result_file_asset_id: Option<u64>,
     pub result_file_version_id: Option<FileVersionId>,
     pub result_file_location_id: Option<FileLocationId>,
     pub result_media_snapshot_id: Option<MediaSnapshotId>,
     pub bundle_member_id: Option<u64>,
+    pub lineage_id: Option<u64>,
     pub result_facts: Option<serde_json::Value>,
 }
 
@@ -467,7 +472,7 @@ async fn load_record_by_key(
 ) -> Result<Option<AudioExtractOperationRecord>, VoomError> {
     let row = sqlx::query(
         "SELECT id, operation_key, operation_id, target_set_hash, source_file_version_id, \
-         source_bundle_id, source_media_snapshot_id, state, dispatch_generation \
+         source_bundle_id, source_media_snapshot_id, state, dispatch_generation, worker_result \
          FROM audio_extract_operations WHERE operation_key = ?",
     )
     .bind(operation_key)
@@ -486,7 +491,7 @@ async fn load_record_by_id(
 ) -> Result<Option<AudioExtractOperationRecord>, VoomError> {
     let row = sqlx::query(
         "SELECT id, operation_key, operation_id, target_set_hash, source_file_version_id, \
-         source_bundle_id, source_media_snapshot_id, state, dispatch_generation \
+         source_bundle_id, source_media_snapshot_id, state, dispatch_generation, worker_result \
          FROM audio_extract_operations WHERE id = ?",
     )
     .bind(id)
@@ -508,8 +513,11 @@ async fn load_record_for_operation_row(
         "SELECT id, operation_id, ordinal, output_id, source_snapshot_stream_id, \
          source_provider_stream_index, bundle_role, target_path, staging_path, temp_path, \
          artifact_handle_id, artifact_location_id, verification_id, commit_record_id, \
-         result_file_version_id, result_file_location_id, result_media_snapshot_id, \
-         bundle_member_id, result_facts \
+         probe_worker_id, probe_payload, \
+         result_file_asset_id, result_file_version_id, result_file_location_id, \
+         result_media_snapshot_id, bundle_member_id, result_facts, \
+         (SELECT lineage.id FROM audio_extract_output_lineage lineage \
+          WHERE lineage.operation_output_id = audio_extract_operation_outputs.id) AS lineage_id \
          FROM audio_extract_operation_outputs WHERE operation_id = ? ORDER BY ordinal",
     )
     .bind(i64_from_u64(operation.id))
@@ -546,6 +554,17 @@ fn decode_operation(row: &SqliteRow) -> Result<AudioExtractOperation, VoomError>
             row.try_get("dispatch_generation")
                 .map_err(operation_row_err)?,
         )?,
+        worker_result: row
+            .try_get::<Option<String>, _>("worker_result")
+            .map_err(operation_row_err)?
+            .map(|value| {
+                serde_json::from_str(&value).map_err(|error| {
+                    VoomError::database(format!(
+                        "audio_extract_operations.worker_result malformed: {error}"
+                    ))
+                })
+            })
+            .transpose()?,
     })
 }
 
@@ -570,11 +589,31 @@ fn decode_output(row: &SqliteRow) -> Result<AudioExtractOperationOutput, VoomErr
         artifact_location_id: optional_id(row, "artifact_location_id", ArtifactLocationId)?,
         verification_id: optional_id(row, "verification_id", ArtifactVerificationId)?,
         commit_record_id: optional_id(row, "commit_record_id", ArtifactCommitRecordId)?,
+        probe_worker_id: optional_id(row, "probe_worker_id", WorkerId)?,
+        probe_payload: row
+            .try_get::<Option<String>, _>("probe_payload")
+            .map_err(output_row_err)?
+            .map(|value| {
+                serde_json::from_str(&value).map_err(|error| {
+                    VoomError::database(format!(
+                        "audio_extract_operation_outputs.probe_payload malformed: {error}"
+                    ))
+                })
+            })
+            .transpose()?,
+        result_file_asset_id: row
+            .try_get::<Option<i64>, _>("result_file_asset_id")
+            .map_err(output_row_err)?
+            .map(u64_from_i64),
         result_file_version_id: optional_id(row, "result_file_version_id", FileVersionId)?,
         result_file_location_id: optional_id(row, "result_file_location_id", FileLocationId)?,
         result_media_snapshot_id: optional_id(row, "result_media_snapshot_id", MediaSnapshotId)?,
         bundle_member_id: row
             .try_get::<Option<i64>, _>("bundle_member_id")
+            .map_err(output_row_err)?
+            .map(u64_from_i64),
+        lineage_id: row
+            .try_get::<Option<i64>, _>("lineage_id")
             .map_err(output_row_err)?
             .map(u64_from_i64),
         result_facts: row

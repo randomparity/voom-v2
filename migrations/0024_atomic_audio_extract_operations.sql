@@ -22,6 +22,7 @@ CREATE TABLE audio_extract_operations (
     recovery_error_code         TEXT,
     recovery_message            TEXT,
     recovery_gate_evaluation_id TEXT,
+    worker_result               TEXT CHECK (worker_result IS NULL OR json_valid(worker_result)),
     created_at                  TEXT NOT NULL,
     finished_at                 TEXT,
     CHECK (

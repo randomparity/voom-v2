@@ -1206,6 +1206,42 @@ async fn compliance_audio_extract_outputs_preserve_ticket_and_descriptor_order()
     assert_eq!(outputs.len(), 2);
     assert_eq!(outputs[0]["output_id"], "output-a");
     assert_eq!(outputs[1]["output_id"], "output-b");
+
+    let legacy = cp
+        .create_ticket(NewTicket {
+            job_id: Some(job.id),
+            kind: TicketOperation::new("synthetic.workflow.operation.extract_audio").unwrap(),
+            priority: 0,
+            payload: serde_json::json!({}),
+            max_attempts: 1,
+            created_at: T0,
+        })
+        .await
+        .unwrap();
+    let legacy_result = serde_json::json!({
+        "staged_artifact_handle_id": 21,
+        "staged_artifact_location_id": 22,
+        "verification_id": 23,
+        "commit_record_id": 24,
+        "result_file_version_id": 25,
+        "result_file_location_id": 26,
+        "staging_path": "/stage/legacy.ogg",
+        "target_path": "/target/legacy.ogg"
+    });
+    sqlx::query(
+        "UPDATE tickets SET state = 'succeeded', result = ?, state_changed_at = ? WHERE id = ?",
+    )
+    .bind(serde_json::to_string(&legacy_result).unwrap())
+    .bind("1970-01-01T00:00:00Z")
+    .bind(i64::try_from(legacy.id.0).unwrap())
+    .execute(cp.pool_for_test())
+    .await
+    .unwrap();
+
+    let outputs = cp.audio_extract_outputs_for_job(job.id).await.unwrap();
+    assert_eq!(outputs.len(), 3);
+    assert_eq!(outputs[2]["result_file_location_id"], 26);
+    assert_eq!(outputs[2]["legacy_singleton"], true);
 }
 
 #[tokio::test]

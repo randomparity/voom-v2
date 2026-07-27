@@ -1,5 +1,7 @@
 use super::*;
 
+use std::sync::atomic::{AtomicUsize, Ordering};
+
 use async_trait::async_trait;
 use sqlx::Row;
 use time::OffsetDateTime;
@@ -136,6 +138,7 @@ async fn extract_failure_records_audio_failed_event() {
         input,
         &UncalledExtractDispatcher,
         &UncalledVerifyDispatcher,
+        &UncalledProbeDispatcher,
     )
     .await
     .unwrap_err();
@@ -176,6 +179,7 @@ async fn extract_audio_plural_commits_every_output_and_lineage_atomically() {
             output_bytes: b"extracted".to_vec(),
         },
         &SuccessfulVerifyDispatcher,
+        &SucceedingProbeDispatcher,
     )
     .await
     .unwrap();
@@ -203,6 +207,10 @@ async fn extract_audio_plural_commits_every_output_and_lineage_atomically() {
     assert_table_count(&cp, "asset_bundle_members", 2).await;
     assert_table_count(&cp, "audio_extract_output_lineage", 2).await;
     assert_event_count(&cp, "artifact.audio_extract_succeeded", 1).await;
+    let started = latest_event_payload(&cp, "artifact.audio_extract_started").await;
+    assert_eq!(started["outputs"].as_array().unwrap().len(), 2);
+    assert_eq!(started["outputs"][0]["source_snapshot_stream_id"], "a-1");
+    assert_eq!(started["outputs"][1]["source_snapshot_stream_id"], "a-2");
     let event = latest_event_payload(&cp, "artifact.audio_extract_succeeded").await;
     assert_eq!(event["outputs"].as_array().unwrap().len(), 2);
     assert_eq!(
@@ -253,6 +261,7 @@ async fn committed_plural_extract_retry_returns_same_ordered_identities_without_
             output_bytes: b"extracted".to_vec(),
         },
         &SuccessfulVerifyDispatcher,
+        &SucceedingProbeDispatcher,
     )
     .await
     .unwrap();
@@ -261,6 +270,7 @@ async fn committed_plural_extract_retry_returns_same_ordered_identities_without_
         input,
         &UncalledExtractDispatcher,
         &UncalledVerifyDispatcher,
+        &UncalledProbeDispatcher,
     )
     .await
     .unwrap();
@@ -313,6 +323,7 @@ async fn plural_extract_recovers_after_promotions_without_duplicate_rows() {
             output_bytes: b"extracted".to_vec(),
         },
         &SuccessfulVerifyDispatcher,
+        &SucceedingProbeDispatcher,
     )
     .await
     .unwrap_err();
@@ -334,6 +345,7 @@ async fn plural_extract_recovers_after_promotions_without_duplicate_rows() {
         input,
         &UncalledExtractDispatcher,
         &UncalledVerifyDispatcher,
+        &UncalledProbeDispatcher,
     )
     .await
     .unwrap();
@@ -350,6 +362,10 @@ async fn plural_extract_recovers_after_promotions_without_duplicate_rows() {
     assert_table_count(&cp, "file_versions", 3).await;
     assert_table_count(&cp, "asset_bundle_members", 2).await;
     assert_table_count(&cp, "audio_extract_output_lineage", 2).await;
+    let failed = latest_event_payload(&cp, "artifact.audio_extract_failed").await;
+    assert_eq!(failed["outputs"].as_array().unwrap().len(), 2);
+    assert!(failed["outputs"][0]["artifact_handle_id"].is_u64());
+    assert!(failed["outputs"][1]["artifact_handle_id"].is_u64());
 }
 
 #[tokio::test]
@@ -362,11 +378,12 @@ async fn extract_audio_malformed_result_list_stops_before_verifier_and_commit() 
 
     let error = execute_extract_audio_with_dispatchers(
         &cp,
-        input,
+        input.clone(),
         &MissingOutputsExtractDispatcher {
             output_bytes: b"extracted".to_vec(),
         },
         &UncalledVerifyDispatcher,
+        &UncalledProbeDispatcher,
     )
     .await
     .unwrap_err();
@@ -381,6 +398,138 @@ async fn extract_audio_malformed_result_list_stops_before_verifier_and_commit() 
     assert_table_count(&cp, "artifact_commit_records", 0).await;
     assert_table_count(&cp, "file_versions", 1).await;
     assert_event_count(&cp, "artifact.audio_extract_succeeded", 0).await;
+}
+
+#[tokio::test]
+async fn partial_extract_result_cleans_terminal_staging_and_retries_without_duplicates() {
+    let (cp, _db, dir) = fixture_with_dir().await;
+    let mut source = seed_audio_source(&cp, &dir, b"source").await;
+    source.snapshot = record_plural_audio_snapshot(&cp, source.version).await;
+    let bundle = seed_bundle(&cp).await;
+    let mut input = extract_input_for_source(&source, bundle.id, &dir);
+    let operation_id = "node_extract_audio_partial_retry";
+    input.operation_payload["operation_id"] = serde_json::json!(operation_id);
+    input.operation_payload["outputs"] = serde_json::json!([
+        {
+            "output_id": voom_plan::audio::extract_output_id(operation_id, "a-1"),
+            "source_snapshot_stream_id": "a-1",
+            "source_provider_stream_index": 1,
+            "name_suffix": "a-1.opus.ogg",
+            "bundle_role": "external_audio"
+        },
+        {
+            "output_id": voom_plan::audio::extract_output_id(operation_id, "a-2"),
+            "source_snapshot_stream_id": "a-2",
+            "source_provider_stream_index": 2,
+            "name_suffix": "a-2.opus.ogg",
+            "bundle_role": "commentary_audio"
+        }
+    ]);
+
+    let error = execute_extract_audio_with_dispatchers(
+        &cp,
+        input.clone(),
+        &PartialOutputsExtractDispatcher {
+            output_bytes: b"partial".to_vec(),
+        },
+        &UncalledVerifyDispatcher,
+        &UncalledProbeDispatcher,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(
+        error.error_code(),
+        voom_core::ErrorCode::MalformedWorkerResult
+    );
+    assert_table_count(&cp, "artifact_handles", 0).await;
+    assert_table_count(&cp, "artifact_commit_records", 0).await;
+
+    let retry = execute_extract_audio_with_dispatchers(
+        &cp,
+        input,
+        &WritingExtractDispatcher {
+            output_bytes: b"complete".to_vec(),
+        },
+        &SuccessfulVerifyDispatcher,
+        &SucceedingProbeDispatcher,
+    )
+    .await
+    .unwrap();
+    assert_eq!(retry.outputs.len(), 2);
+    assert_table_count(&cp, "artifact_handles", 2).await;
+    assert_table_count(&cp, "artifact_commit_records", 2).await;
+    assert_table_count(&cp, "asset_bundle_members", 2).await;
+    assert_table_count(&cp, "audio_extract_output_lineage", 2).await;
+}
+
+#[tokio::test]
+async fn second_extract_verification_failure_never_promotes_or_registers_any_member() {
+    let (cp, _db, dir) = fixture_with_dir().await;
+    let mut source = seed_audio_source(&cp, &dir, b"source").await;
+    source.snapshot = record_plural_audio_snapshot(&cp, source.version).await;
+    let bundle = seed_bundle(&cp).await;
+    let mut input = extract_input_for_source(&source, bundle.id, &dir);
+    let operation_id = "node_extract_audio_verify_second";
+    input.operation_payload["operation_id"] = serde_json::json!(operation_id);
+    input.operation_payload["outputs"] = serde_json::json!([
+        {
+            "output_id": voom_plan::audio::extract_output_id(operation_id, "a-1"),
+            "source_snapshot_stream_id": "a-1",
+            "source_provider_stream_index": 1,
+            "name_suffix": "a-1.opus.ogg",
+            "bundle_role": "external_audio"
+        },
+        {
+            "output_id": voom_plan::audio::extract_output_id(operation_id, "a-2"),
+            "source_snapshot_stream_id": "a-2",
+            "source_provider_stream_index": 2,
+            "name_suffix": "a-2.opus.ogg",
+            "bundle_role": "commentary_audio"
+        }
+    ]);
+    let first_target = input.target_dir.join("source.a-1.opus.ogg");
+    let second_target = input.target_dir.join("source.a-2.opus.ogg");
+
+    let error = execute_extract_audio_with_dispatchers(
+        &cp,
+        input.clone(),
+        &WritingExtractDispatcher {
+            output_bytes: b"extracted".to_vec(),
+        },
+        &FailSecondVerifyDispatcher::default(),
+        &UncalledProbeDispatcher,
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(
+        error.error_code(),
+        voom_core::ErrorCode::VerificationFailure
+    );
+    assert!(!first_target.exists());
+    assert!(!second_target.exists());
+    assert_table_count(&cp, "artifact_commit_records", 0).await;
+    assert_table_count(&cp, "asset_bundle_members", 0).await;
+    assert_table_count(&cp, "audio_extract_output_lineage", 0).await;
+
+    let retry = execute_extract_audio_with_dispatchers(
+        &cp,
+        input,
+        &UncalledExtractDispatcher,
+        &SuccessfulVerifyDispatcher,
+        &SucceedingProbeDispatcher,
+    )
+    .await
+    .unwrap();
+    assert_eq!(retry.outputs.len(), 2);
+    assert_table_count(&cp, "artifact_handles", 2).await;
+    assert_table_count(&cp, "artifact_commit_records", 2).await;
+    assert_table_count(&cp, "asset_bundle_members", 2).await;
+    assert_table_count(&cp, "audio_extract_output_lineage", 2).await;
+    let failed = latest_event_payload(&cp, "artifact.audio_extract_failed").await;
+    assert_eq!(failed["outputs"].as_array().unwrap().len(), 2);
+    assert!(failed["outputs"][0]["artifact_handle_id"].is_u64());
+    assert!(failed["outputs"][1]["artifact_handle_id"].is_u64());
 }
 
 #[tokio::test]
@@ -403,6 +552,7 @@ async fn extract_audio_inconsistent_or_extra_results_stop_before_verifier_and_co
                 mutation,
             },
             &UncalledVerifyDispatcher,
+            &UncalledProbeDispatcher,
         )
         .await
         .unwrap_err();
@@ -436,6 +586,7 @@ async fn extract_audio_legacy_singleton_remains_executable() {
             output_bytes: b"extracted".to_vec(),
         },
         &SuccessfulVerifyDispatcher,
+        &SucceedingProbeDispatcher,
     )
     .await
     .unwrap();
@@ -584,6 +735,7 @@ async fn test_extract_post_commit_succeeded_event_failure_returns_ok_with_contex
             output_bytes: b"extracted".to_vec(),
         },
         &SuccessfulVerifyDispatcher,
+        &SucceedingProbeDispatcher,
     )
     .await
     .unwrap();
@@ -989,6 +1141,38 @@ impl VerifyArtifactDispatcher for MismatchedVerifyDispatcher {
 
 struct SuccessfulVerifyDispatcher;
 
+#[derive(Default)]
+struct FailSecondVerifyDispatcher {
+    calls: AtomicUsize,
+}
+
+#[async_trait]
+impl VerifyArtifactDispatcher for FailSecondVerifyDispatcher {
+    async fn dispatch_verify_artifact(
+        &self,
+        _worker_id: voom_core::WorkerId,
+        request: VerifyArtifactRequest,
+    ) -> Result<VerifyArtifactResult, crate::artifact::worker::VerifyWorkerError> {
+        let call = self.calls.fetch_add(1, Ordering::Relaxed);
+        let content_hash = if call == 1 {
+            "blake3:mismatch".to_owned()
+        } else {
+            request.expected.content_hash
+        };
+        Ok(VerifyArtifactResult {
+            status: VerifyArtifactStatus::Verified,
+            provider: "test-verify".to_owned(),
+            provider_version: "test".to_owned(),
+            observed: VerifyArtifactObservedFacts {
+                size_bytes: request.expected.size_bytes,
+                content_hash,
+                modified_at: None,
+                local_file_key: None,
+            },
+        })
+    }
+}
+
 #[async_trait]
 impl VerifyArtifactDispatcher for SuccessfulVerifyDispatcher {
     async fn dispatch_verify_artifact(
@@ -1140,6 +1324,10 @@ struct MissingOutputsExtractDispatcher {
     output_bytes: Vec<u8>,
 }
 
+struct PartialOutputsExtractDispatcher {
+    output_bytes: Vec<u8>,
+}
+
 #[derive(Debug, Clone, Copy)]
 enum ExtractResultMutation {
     ProjectionMismatch,
@@ -1196,6 +1384,26 @@ impl ExtractAudioDispatcher for MissingOutputsExtractDispatcher {
         .dispatch_extract_audio(request)
         .await?;
         result.outputs = None;
+        Ok(result)
+    }
+}
+
+#[async_trait]
+impl ExtractAudioDispatcher for PartialOutputsExtractDispatcher {
+    async fn dispatch_extract_audio(
+        &self,
+        request: ExtractAudioRequest,
+    ) -> Result<ExtractAudioResult, VoomError> {
+        let mut result = WritingExtractDispatcher {
+            output_bytes: self.output_bytes.clone(),
+        }
+        .dispatch_extract_audio(request.clone())
+        .await?;
+        let outputs = request.outputs.as_ref().unwrap();
+        for output in &outputs[1..] {
+            tokio::fs::remove_file(&output.output.path).await.unwrap();
+        }
+        result.outputs.as_mut().unwrap().truncate(1);
         Ok(result)
     }
 }

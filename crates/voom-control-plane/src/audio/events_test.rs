@@ -132,6 +132,7 @@ fn extract_failed_payload_uses_public_error_code_and_known_ids() {
         }),
         role: Some("external_audio".to_owned()),
         result: Some(&extract_result()),
+        outputs: &[],
         error: &error,
     });
 
