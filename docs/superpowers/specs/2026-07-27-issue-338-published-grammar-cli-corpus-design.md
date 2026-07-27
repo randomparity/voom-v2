@@ -89,6 +89,9 @@ stdout and stderr concurrently, polls for completion until a fixed deadline,
 then kills and reaps the child before reporting its arguments and captured
 output. Supervisor shutdown has its own deadline and the same kill-and-reap
 fallback. No test process can wait forever on a child or a full output pipe.
+Worker prebuilds preserve the existing `VOOM_TEST_PREBUILT_WORKERS` no-op path
+and derived target-directory behavior; when a nested Cargo build is necessary,
+that Cargo child also runs through the bounded runner.
 
 ### Shipped CLI flow
 
@@ -115,10 +118,18 @@ the source-derived values accepted by the store:
 isolation comes from distinct databases, not invented policy slugs.
 
 Each command assertion checks exit status, envelope status, command name, and
-the exact allowed warning set. Untagged-track warnings in T1/A1 are asserted
-when the generated fixture requires them; all other warnings fail the test.
-Expected F1 partial failure checks the error envelope and its partial `data`,
-then reads the same durable job through shipped inspection commands.
+an empty CLI envelope-warning set. Policy planning diagnostics are a separate
+contract under the preview report's `data.plan.diagnostics`: T1/A1 assert the
+exact documented untagged-track diagnostics required by their fixtures, while
+all other unexpected diagnostics fail the test. Expected F1 partial failure
+checks the error envelope and its partial `data`, then reads the same durable
+job through shipped inspection commands.
+
+Every scenario runs a common preview oracle before execution. It correlates
+plan nodes to source file-version ids, requires the matrix operations and
+conditional branches expected for that scenario, and rejects unexpected
+blocked or extra nodes. F1's preview must be planning-clean; its later
+deliberate runtime commit failure is asserted separately through durable state.
 
 ### Generated media
 
@@ -164,9 +175,11 @@ audio fingerprints without pinning encoder-version-specific bytes. The
 fingerprint runner decodes each selected stream to mono 8 kHz signed 16-bit
 PCM, measures Goertzel energy at the small fixed set of generated tone
 frequencies, and requires the expected frequency's normalized energy to exceed
-every other generated frequency by a generous fixed ratio. This tolerates
-codec and platform rounding while still detecting wrong-source lineage; it
-does not compare PCM hashes or exact sample values.
+every other generated frequency by at least 8×. It rejects fewer than 5,120
+decoded samples, skips the first 1,024 samples, and applies a Hann window to
+the next 4,096 samples before measurement. This tolerates codec and platform
+rounding while still detecting wrong-source lineage; it does not compare PCM
+hashes or exact sample values.
 
 #### F1a–F1c
 
@@ -204,6 +217,9 @@ second. This separates a bad fixture from an execution regression.
 #### T1 oracle
 
 - all three generated variants enter one input set;
+- preview contains the exact selection, ordering, defaults,
+  alternate-defaults, and verification operations for each matching variant,
+  with no unexpected blocked/extra nodes;
 - the ordered phases commit where their documented predicates match;
 - every successful file has a verified final phase;
 - `mkvmerge -J` proves exact surviving track kind order, language, title,
@@ -213,6 +229,9 @@ second. This separates a bad fixture from an execution regression.
 
 #### A1 oracle
 
+- preview contains the exact audio transcode, synthesis, filtered/bare
+  extraction, and verification operations with no unexpected blocked/extra
+  nodes;
 - audio phases report all three transcode targets and all three synthesis
   targets;
 - filtered extraction yields only the commentary AAC source;
@@ -232,6 +251,8 @@ second. This separates a bad fixture from an execution regression.
 
 #### F1 oracle
 
+- preview contains the expected per-file conditional/rule operations and gate
+  decisions with no unexpected blocked/extra nodes;
 - execute exits with the expected policy-execution failure envelope and partial
   data, not an unstructured process failure;
 - F1a commits inspect and normalize, enters organize through `modified`, and
@@ -286,8 +307,9 @@ corpus. Independent gaps become native #325 sub-issues with
 
 ## Verification
 
-- Deliberately break each scenario's core oracle and confirm its focused test
-  fails.
+- Temporarily mutate the relevant planner, selector, coordinator gate, or
+  verification behavior for each scenario and confirm its focused acceptance
+  path fails; restore the product mutation before committing.
 - Run the corpus test from a clean target after prebuilding real workers.
 - Run the existing operator E2E to prove the shared harness preserves behavior.
 - Run strict affected-crate Clippy and repository structural guards.
