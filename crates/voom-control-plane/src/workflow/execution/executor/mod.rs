@@ -1,9 +1,9 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 use tokio::task::JoinSet;
 use voom_core::OperationKind;
-use voom_core::{JobId, VoomError, WorkerId};
+use voom_core::{FileAssetId, FileVersionId, JobId, VoomError, WorkerId};
 #[cfg(test)]
 use voom_store::repo::jobs::NewJob;
 use voom_store::repo::tickets::Ticket;
@@ -38,6 +38,42 @@ pub struct WorkflowExecutor {
 pub(crate) enum RunFailureMode {
     AbortJob,
     ContinueIndependent,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct PlannedLineageGuard {
+    expectations: Vec<(FileAssetId, FileVersionId)>,
+}
+
+impl PlannedLineageGuard {
+    pub(crate) fn new(
+        planned_file_count: usize,
+        expectations: Vec<(FileAssetId, FileVersionId)>,
+    ) -> Result<Self, VoomError> {
+        if planned_file_count == 0 {
+            return Err(VoomError::Config(
+                "lineage guard requires at least one planned file".to_owned(),
+            ));
+        }
+        if expectations.len() != planned_file_count {
+            return Err(VoomError::Config(format!(
+                "lineage guard has {} expectations for {planned_file_count} planned files",
+                expectations.len()
+            )));
+        }
+        let unique_assets: HashSet<_> =
+            expectations.iter().map(|(asset_id, _)| *asset_id).collect();
+        if unique_assets.len() != expectations.len() {
+            return Err(VoomError::Config(
+                "lineage guard contains a duplicate file asset".to_owned(),
+            ));
+        }
+        Ok(Self { expectations })
+    }
+
+    fn expectations(&self) -> &[(FileAssetId, FileVersionId)] {
+        &self.expectations
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -111,6 +147,7 @@ struct RunLoopState {
     summary: WorkflowRunSummary,
     fatal_error: Option<VoomError>,
     isolated_error: Option<VoomError>,
+    dispatch_started: bool,
 }
 
 struct RunInvocation<'a> {
@@ -128,6 +165,7 @@ impl RunLoopState {
             summary: WorkflowRunSummary::empty(job_id, elapsed),
             fatal_error: None,
             isolated_error: None,
+            dispatch_started: false,
         }
     }
 
@@ -197,6 +235,7 @@ impl RunLoopState {
             summary: self.summary.clone(),
             source,
             job_failed: true,
+            dispatch_started: self.dispatch_started,
         }
     }
 
@@ -212,6 +251,7 @@ impl RunLoopState {
             summary: self.summary.clone(),
             source,
             job_failed: false,
+            dispatch_started: self.dispatch_started,
         }
     }
 
@@ -398,6 +438,7 @@ impl WorkflowExecutor {
                 summary,
                 source,
                 job_failed: false,
+                dispatch_started: false,
             });
         }
 
@@ -418,6 +459,7 @@ impl WorkflowExecutor {
                     summary,
                     source,
                     job_failed: false,
+                    dispatch_started: false,
                 });
             }
         };
@@ -430,6 +472,7 @@ impl WorkflowExecutor {
                 plan,
                 started,
                 RunFailureMode::AbortJob,
+                None,
             )
             .await?;
         let _ = self
@@ -440,6 +483,7 @@ impl WorkflowExecutor {
     }
 
     /// Run one phase invocation inside a caller-owned, already-open job.
+    #[cfg(test)]
     pub(crate) async fn submit_and_run_invocation_in_job(
         &self,
         job_id: JobId,
@@ -458,8 +502,40 @@ impl WorkflowExecutor {
                 .await);
         }
         let workflow_id = format!("workflow-{}-{invocation_id}", job_id.0);
-        self.run_plan_in_job(job_id, &workflow_id, plan, started, failure_mode)
+        self.run_plan_in_job(job_id, &workflow_id, plan, started, failure_mode, None)
             .await
+    }
+
+    /// Run one phase invocation after atomically validating its planned file
+    /// lineage and creating every root ticket.
+    pub(crate) async fn submit_and_run_guarded_invocation_in_job(
+        &self,
+        job_id: JobId,
+        invocation_id: &str,
+        plan: WorkflowPlan,
+        failure_mode: RunFailureMode,
+        lineage_guard: PlannedLineageGuard,
+    ) -> Result<WorkflowRunSummary, WorkflowRunError> {
+        let started = Instant::now();
+        if let Err(source) = plan
+            .validate()
+            .map_err(|e| VoomError::Config(format!("workflow plan invalid: {e}")))
+        {
+            let mut state = RunLoopState::new(job_id, started.elapsed());
+            return Err(state
+                .fail_job(&self.control_plane, job_id, source, started)
+                .await);
+        }
+        let workflow_id = format!("workflow-{}-{invocation_id}", job_id.0);
+        self.run_plan_in_job(
+            job_id,
+            &workflow_id,
+            plan,
+            started,
+            failure_mode,
+            Some(lineage_guard),
+        )
+        .await
     }
 
     /// Drive a validated plan to completion within an open job.
@@ -478,6 +554,7 @@ impl WorkflowExecutor {
         plan: WorkflowPlan,
         started: Instant,
         failure_mode: RunFailureMode,
+        lineage_guard: Option<PlannedLineageGuard>,
     ) -> Result<WorkflowRunSummary, WorkflowRunError> {
         let now = self.control_plane.clock().now();
         let mut state = RunLoopState::new(job_id, started.elapsed());
@@ -489,12 +566,20 @@ impl WorkflowExecutor {
             failure_mode,
         };
 
-        if let Err(source) = self
-            .create_root_tickets(&plan, workflow_id, job_id, now)
-            .await
-        {
+        let root_result = match lineage_guard {
+            Some(guard) => {
+                self.create_guarded_root_tickets(&plan, workflow_id, job_id, now, &guard)
+                    .await
+            }
+            None => {
+                self.create_root_tickets(&plan, workflow_id, job_id, now)
+                    .await
+            }
+        };
+        if let Err(source) = root_result {
             return Err(state.fail_job(control, job_id, source, started).await);
         }
+        state.dispatch_started = true;
 
         loop {
             state

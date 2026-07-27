@@ -18,6 +18,7 @@ pub struct WorkflowRunError {
     pub summary: WorkflowRunSummary,
     pub source: VoomError,
     pub(crate) job_failed: bool,
+    pub(crate) dispatch_started: bool,
 }
 
 impl WorkflowExecutor {

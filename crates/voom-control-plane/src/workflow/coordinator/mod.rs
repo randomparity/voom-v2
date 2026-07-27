@@ -17,7 +17,6 @@
 //! - [`resume`] — resume reconciliation and chain-tip/snapshot projection.
 
 use std::collections::{BTreeMap, BTreeSet};
-#[cfg(test)]
 use std::future::Future;
 #[cfg(test)]
 use std::pin::Pin;
@@ -40,7 +39,8 @@ use crate::cases::{begin_tx, commit_tx};
 
 use super::execution::WorkerRuntimeRegistry;
 use super::execution::executor::{
-    RunFailureMode, WORKFLOW_JOB_KIND, WorkflowExecutor, WorkflowExecutorOptions,
+    PlannedLineageGuard, RunFailureMode, WORKFLOW_JOB_KIND, WorkflowExecutor,
+    WorkflowExecutorOptions,
 };
 use super::plan::policy_bridge::{WorkflowExecutionShape, workflow_plan_from_compliance};
 
@@ -169,6 +169,44 @@ enum Disposition {
     Planned { node_id: String },
 }
 
+struct PhaseDispatchScope {
+    planned_count: usize,
+    lineage_guard: PlannedLineageGuard,
+}
+
+fn phase_dispatch_scope(
+    files: &[PhaseFile],
+    dispositions: &[Disposition],
+) -> Result<Option<PhaseDispatchScope>, VoomError> {
+    if files.len() != dispositions.len() {
+        return Err(VoomError::Internal(format!(
+            "phase dispatch has {} files but {} dispositions",
+            files.len(),
+            dispositions.len()
+        )));
+    }
+    let planned_count = dispositions
+        .iter()
+        .filter(|disposition| matches!(disposition, Disposition::Planned { .. }))
+        .count();
+    if planned_count == 0 {
+        return Ok(None);
+    }
+    let expectations = files
+        .iter()
+        .zip(dispositions)
+        .filter_map(|(file, disposition)| {
+            matches!(disposition, Disposition::Planned { .. })
+                .then_some((file.asset_id, file.version_id))
+        })
+        .collect::<Vec<_>>();
+    let lineage_guard = PlannedLineageGuard::new(planned_count, expectations)?;
+    Ok(Some(PhaseDispatchScope {
+        planned_count,
+        lineage_guard,
+    }))
+}
+
 fn continued_disposition(
     disposition: &Disposition,
     ticket_states: &[TicketState],
@@ -270,6 +308,13 @@ pub(crate) struct PhaseBarrierRunInputs {
     files: Vec<PhaseFile>,
 }
 
+pub(crate) struct PreparedResumeRunInputs {
+    policy: voom_policy::CompiledPolicy,
+    context: PlanningContext,
+    base_draft: PolicyInputSetDraft,
+    preparation: ResumePreparation,
+}
+
 /// Everything the phase-loop runner owns once an in-job run starts.
 struct PhaseLoopInputs {
     job_id: JobId,
@@ -356,7 +401,19 @@ impl<'a> PhaseLoop<'a> {
         }
     }
 
-    async fn run(mut self) -> Result<CoordinatorOutcome, CoordinatorError> {
+    async fn run(self) -> Result<CoordinatorOutcome, CoordinatorError> {
+        self.run_after_phase_plan(|_| std::future::ready(Ok(())))
+            .await
+    }
+
+    async fn run_after_phase_plan<F, Fut>(
+        mut self,
+        mut after_phase_plan: F,
+    ) -> Result<CoordinatorOutcome, CoordinatorError>
+    where
+        F: FnMut(u32) -> Fut,
+        Fut: Future<Output = Result<(), VoomError>>,
+    {
         let phase_order = self.policy.phase_order.clone();
         for (index, phase_name) in phase_order.iter().enumerate() {
             if self.files.is_empty() {
@@ -367,7 +424,11 @@ impl<'a> PhaseLoop<'a> {
                 continue;
             };
             let mut planned = self.plan_phase_for_files(phase_name, &entry.entering)?;
-            if let Err(failure) = self.dispatch_phase_work(phase_ordinal, &planned).await {
+            after_phase_plan(phase_ordinal).await?;
+            if let Err(failure) = self
+                .dispatch_phase_work(phase_ordinal, &entry.entering, &planned)
+                .await
+            {
                 if !failure.job_failed {
                     let before = planned.dispositions.clone();
                     planned.dispositions = self
@@ -476,11 +537,18 @@ impl<'a> PhaseLoop<'a> {
     async fn dispatch_phase_work(
         &mut self,
         phase_ordinal: u32,
+        entering: &[PhaseFile],
         planned: &PlannedPhase,
     ) -> Result<(), PhaseDispatchFailure> {
         let run = self
             .control_plane
-            .dispatch_phase(&self.executor, self.job_id, phase_ordinal, planned)
+            .dispatch_phase(
+                &self.executor,
+                self.job_id,
+                phase_ordinal,
+                entering,
+                planned,
+            )
             .await?;
         if let Some(run) = run {
             self.record_run(run);
@@ -786,25 +854,59 @@ impl ControlPlane {
         let (_, inputs) = self
             .prepare_phase_barrier_run_inputs(policy_version_id, input_set_id, &runtimes)
             .await?;
+        let prepared = self
+            .prepare_resume_phase_barrier_run_inputs(prior_job_id, inputs)
+            .await?;
+        self.run_prepared_resume_phase_barrier(prior_job_id, prepared, options, runtimes)
+            .await
+    }
+
+    pub(crate) async fn prepare_resume_phase_barrier_run_inputs(
+        &self,
+        prior_job_id: JobId,
+        inputs: PhaseBarrierRunInputs,
+    ) -> Result<PreparedResumeRunInputs, VoomError> {
         let phase_count = u32::try_from(inputs.policy.phase_order.len())
             .map_err(|e| VoomError::Internal(format!("phase count overflow: {e}")))?;
-        let ResumePreparation {
-            files,
-            run_starts,
-            history,
-            seeds,
-        } = self
+        let preparation = self
             .prepare_resume(prior_job_id, inputs.files, phase_count)
             .await?;
+        Ok(PreparedResumeRunInputs {
+            policy: inputs.policy,
+            context: inputs.context,
+            base_draft: inputs.base_draft,
+            preparation,
+        })
+    }
+
+    pub(crate) async fn run_prepared_resume_phase_barrier(
+        &self,
+        prior_job_id: JobId,
+        inputs: PreparedResumeRunInputs,
+        options: ComplianceExecutionOptions,
+        runtimes: WorkerRuntimeRegistry,
+    ) -> Result<CoordinatorOutcome, CoordinatorError> {
+        let PreparedResumeRunInputs {
+            policy,
+            context,
+            base_draft,
+            preparation:
+                ResumePreparation {
+                    files,
+                    run_starts,
+                    history,
+                    seeds,
+                },
+        } = inputs;
         let (job, seed_file_phases) = self
             .open_phase_barrier_job(&run_starts, history, seeds)
             .await?;
         let result = self
             .drive_phase_loop(PhaseLoopInputs {
                 job_id: job.id,
-                policy: inputs.policy,
-                context: inputs.context,
-                base_draft: inputs.base_draft,
+                policy,
+                context,
+                base_draft,
                 files,
                 seed_file_phases,
                 promotion_job_ids: vec![job.id, prior_job_id],
@@ -1030,23 +1132,27 @@ impl ControlPlane {
         executor: &WorkflowExecutor,
         job_id: JobId,
         phase_ordinal: u32,
+        entering: &[PhaseFile],
         planned_phase: &PlannedPhase,
     ) -> Result<Option<crate::workflow::WorkflowRunSummary>, PhaseDispatchFailure> {
-        let planned = planned_phase
-            .dispositions
-            .iter()
-            .filter(|d| matches!(d, Disposition::Planned { .. }))
-            .count();
-        if planned == 0 {
+        let scope =
+            phase_dispatch_scope(entering, &planned_phase.dispositions).map_err(|source| {
+                PhaseDispatchFailure {
+                    source,
+                    run_summary: None,
+                    job_failed: true,
+                }
+            })?;
+        let Some(scope) = scope else {
             return Ok(None);
-        }
-        let shape = WorkflowExecutionShape::new(planned, planned).map_err(|source| {
-            PhaseDispatchFailure {
+        };
+        let shape = WorkflowExecutionShape::new(scope.planned_count, scope.planned_count).map_err(
+            |source| PhaseDispatchFailure {
                 source,
                 run_summary: None,
                 job_failed: true,
-            }
-        })?;
+            },
+        )?;
         let bridge =
             workflow_plan_from_compliance(&planned_phase.plan, &planned_phase.report, shape)
                 .map_err(|source| PhaseDispatchFailure {
@@ -1062,7 +1168,7 @@ impl ControlPlane {
         // carry its run summary so the partial outcome reports the job-cumulative
         // counts including the failure.
         let run = executor
-            .submit_and_run_invocation_in_job(
+            .submit_and_run_guarded_invocation_in_job(
                 job_id,
                 &format!("phase-{phase_ordinal}"),
                 workflow,
@@ -1072,12 +1178,16 @@ impl ControlPlane {
                         RunFailureMode::AbortJob
                     }
                 },
+                scope.lineage_guard,
             )
             .await
-            .map_err(|err| PhaseDispatchFailure {
-                source: err.source,
-                run_summary: Some(err.summary),
-                job_failed: err.job_failed,
+            .map_err(|err| {
+                let run_summary = err.dispatch_started.then_some(err.summary);
+                PhaseDispatchFailure {
+                    source: err.source,
+                    run_summary,
+                    job_failed: err.job_failed,
+                }
             })?;
         Ok(Some(run))
     }

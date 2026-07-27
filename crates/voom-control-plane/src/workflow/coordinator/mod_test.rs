@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::future::Future;
 use std::time::Duration;
 
 use serde_json::{Value, json};
@@ -23,6 +24,92 @@ use crate::cases::policy::compliance::ComplianceExecutionOptions;
 use super::PhaseFile;
 
 const T0: OffsetDateTime = OffsetDateTime::UNIX_EPOCH;
+
+async fn run_prepared_fresh_after_phase_plan<F, Fut>(
+    cp: &crate::ControlPlane,
+    inputs: super::PhaseBarrierRunInputs,
+    options: ComplianceExecutionOptions,
+    runtimes: crate::workflow::WorkerRuntimeRegistry,
+    after_phase_plan: F,
+) -> Result<super::CoordinatorOutcome, super::CoordinatorError>
+where
+    F: FnMut(u32) -> Fut,
+    Fut: Future<Output = Result<(), voom_core::VoomError>>,
+{
+    let starts = super::run_starts_for_files(&inputs.files);
+    let (job, _) = cp
+        .open_phase_barrier_job(&starts, Vec::new(), Vec::new())
+        .await?;
+    let super::PhaseBarrierRunInputs {
+        policy,
+        context,
+        base_draft,
+        files,
+    } = inputs;
+    let result = super::PhaseLoop::new(
+        cp,
+        super::PhaseLoopInputs {
+            job_id: job.id,
+            promotion_job_ids: vec![job.id],
+            policy,
+            context,
+            base_draft,
+            files,
+            seed_file_phases: Vec::new(),
+            options,
+            runtimes,
+        },
+    )
+    .run_after_phase_plan(after_phase_plan)
+    .await;
+    cp.finish_phase_barrier_job(job.id, result).await
+}
+
+async fn run_prepared_resume_after_phase_plan<F, Fut>(
+    cp: &crate::ControlPlane,
+    prior_job_id: JobId,
+    inputs: super::PreparedResumeRunInputs,
+    options: ComplianceExecutionOptions,
+    runtimes: crate::workflow::WorkerRuntimeRegistry,
+    after_phase_plan: F,
+) -> Result<super::CoordinatorOutcome, super::CoordinatorError>
+where
+    F: FnMut(u32) -> Fut,
+    Fut: Future<Output = Result<(), voom_core::VoomError>>,
+{
+    let super::PreparedResumeRunInputs {
+        policy,
+        context,
+        base_draft,
+        preparation:
+            super::ResumePreparation {
+                files,
+                run_starts,
+                history,
+                seeds,
+            },
+    } = inputs;
+    let (job, seed_file_phases) = cp
+        .open_phase_barrier_job(&run_starts, history, seeds)
+        .await?;
+    let result = super::PhaseLoop::new(
+        cp,
+        super::PhaseLoopInputs {
+            job_id: job.id,
+            policy,
+            context,
+            base_draft,
+            files,
+            seed_file_phases,
+            promotion_job_ids: vec![job.id, prior_job_id],
+            options,
+            runtimes,
+        },
+    )
+    .run_after_phase_plan(after_phase_plan)
+    .await;
+    cp.finish_phase_barrier_job(job.id, result).await
+}
 
 async fn job_state(cp: &crate::ControlPlane, job_id: JobId) -> String {
     sqlx::query_scalar("SELECT state FROM jobs WHERE id = ?")
@@ -560,6 +647,192 @@ async fn fresh_run_records_retained_active_version_at_phase_zero() {
 }
 
 #[tokio::test]
+async fn superseded_prepared_fresh_phase_rejects_every_planned_file_before_dispatch() {
+    let (cp, _tmp) = cp().await;
+    let first = seed_version(
+        &cp,
+        "/lib/superseded/first.mkv",
+        "hash-superseded-first",
+        reprobe_payload("h264"),
+    )
+    .await;
+    let second = seed_version(
+        &cp,
+        "/lib/superseded/second.mkv",
+        "hash-superseded-second-v1",
+        reprobe_payload("h264"),
+    )
+    .await;
+    let files = vec![
+        phase_file(&cp, first, "first").await,
+        phase_file(&cp, second, "second").await,
+    ];
+    let snapshots = files
+        .iter()
+        .map(|file| file.snapshot.clone())
+        .collect::<Vec<_>>();
+    let prepared = super::PhaseBarrierRunInputs {
+        policy: transcode_hevc_policy(),
+        context: voom_plan::PlanningContext::default(),
+        base_draft: file_draft("superseded-fresh", &snapshots),
+        files,
+    };
+    let promotion_cp = cp.clone();
+    let error = run_prepared_fresh_after_phase_plan(
+        &cp,
+        prepared,
+        ComplianceExecutionOptions::default(),
+        crate::workflow::WorkerRuntimeRegistry::new(),
+        move |phase_ordinal| {
+            let cp = promotion_cp.clone();
+            async move {
+                assert_eq!(phase_ordinal, 0);
+                advance_chain_tip(
+                    &cp,
+                    second,
+                    "hash-superseded-second-v2",
+                    reprobe_payload("hevc"),
+                )
+                .await;
+                Ok(())
+            }
+        },
+    )
+    .await
+    .unwrap_err();
+    let current = active_version_id(&cp, second).await;
+
+    assert_eq!(
+        error.source.code(),
+        "STALE_IDENTITY_EVIDENCE",
+        "{:?}",
+        error.source
+    );
+    assert!(error.source.to_string().contains(&second.to_string()));
+    assert!(error.source.to_string().contains(&current.to_string()));
+    assert!(error.partial.is_none());
+    let job_id = latest_job_id(&cp).await;
+    assert_eq!(job_state(&cp, job_id).await, "failed");
+    assert_job_opened_then_failed_with_stale_reason(&cp, job_id).await;
+    assert_eq!(job_ticket_count(&cp, job_id).await, 0);
+    assert_eq!(job_lease_count(&cp, job_id).await, 0);
+    assert_eq!(ticket_and_lease_event_count(&cp).await, 0);
+    assert_eq!(workflow_effect_counts(&cp, job_id).await, (0, 0, 0));
+    assert_eq!(artifact_count(&cp).await, 0);
+    let starts = cp
+        .workflow_summaries()
+        .file_run_starts_for_job(job_id)
+        .await
+        .unwrap();
+    assert_eq!(starts.len(), 2);
+    assert_eq!(starts[0].starting_file_version_id, first);
+    assert_eq!(starts[1].starting_file_version_id, second);
+    assert_active_version(&cp, first, first).await;
+    assert_active_version(&cp, second, current).await;
+}
+
+#[tokio::test]
+async fn superseded_prepared_resume_rejects_dispatch_without_mutating_prior_work() {
+    let (cp, _tmp) = cp().await;
+    let selected = seed_version(
+        &cp,
+        "/lib/superseded/resume.mkv",
+        "hash-superseded-resume-v1",
+        reprobe_payload("h264"),
+    )
+    .await;
+    let file = phase_file(&cp, selected, "resume").await;
+    let prior_job_id = open_workflow_job(&cp).await;
+    record_run_start(&cp, prior_job_id, "resume", selected, 0).await;
+    let prior_ticket = cp
+        .create_ticket(NewTicket {
+            job_id: Some(prior_job_id),
+            kind: TicketOperation::new("historical.resume").unwrap(),
+            priority: 0,
+            payload: json!({}),
+            max_attempts: 1,
+            created_at: T0,
+        })
+        .await
+        .unwrap();
+    cp.mark_ready_if_unblocked(prior_ticket.id, T0)
+        .await
+        .unwrap();
+    cp.fail_job(prior_job_id, "prior failure".to_owned(), T0)
+        .await
+        .unwrap();
+    let inputs = super::PhaseBarrierRunInputs {
+        policy: transcode_hevc_policy(),
+        context: voom_plan::PlanningContext::default(),
+        base_draft: file_draft("superseded-resume", std::slice::from_ref(&file.snapshot)),
+        files: vec![file],
+    };
+    let prepared = cp
+        .prepare_resume_phase_barrier_run_inputs(prior_job_id, inputs)
+        .await
+        .unwrap();
+    let prior_event_count = ticket_and_lease_event_count(&cp).await;
+    let promotion_cp = cp.clone();
+    let error = run_prepared_resume_after_phase_plan(
+        &cp,
+        prior_job_id,
+        prepared,
+        ComplianceExecutionOptions::default(),
+        crate::workflow::WorkerRuntimeRegistry::new(),
+        move |phase_ordinal| {
+            let cp = promotion_cp.clone();
+            async move {
+                assert_eq!(phase_ordinal, 0);
+                advance_chain_tip(
+                    &cp,
+                    selected,
+                    "hash-superseded-resume-v2",
+                    reprobe_payload("hevc"),
+                )
+                .await;
+                Ok(())
+            }
+        },
+    )
+    .await
+    .unwrap_err();
+    let current = active_version_id(&cp, selected).await;
+
+    assert_eq!(error.source.code(), "STALE_IDENTITY_EVIDENCE");
+    assert!(error.source.to_string().contains(&selected.to_string()));
+    assert!(error.source.to_string().contains(&current.to_string()));
+    assert!(error.partial.is_none());
+    let job_id = latest_job_id(&cp).await;
+    assert_ne!(job_id, prior_job_id);
+    assert_eq!(job_state(&cp, job_id).await, "failed");
+    assert_job_opened_then_failed_with_stale_reason(&cp, job_id).await;
+    assert_eq!(job_state(&cp, prior_job_id).await, "failed");
+    assert_eq!(job_ticket_count(&cp, job_id).await, 0);
+    assert_eq!(job_ticket_count(&cp, prior_job_id).await, 1);
+    assert_eq!(job_lease_count(&cp, job_id).await, 0);
+    assert_eq!(ticket_and_lease_event_count(&cp).await, prior_event_count);
+    assert_eq!(
+        cp.tickets()
+            .get(prior_ticket.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .state,
+        TicketState::Ready
+    );
+    assert_eq!(workflow_effect_counts(&cp, job_id).await, (0, 0, 0));
+    assert_eq!(artifact_count(&cp).await, 0);
+    let starts = cp
+        .workflow_summaries()
+        .file_run_starts_for_job(job_id)
+        .await
+        .unwrap();
+    assert_eq!(starts.len(), 1);
+    assert_eq!(starts[0].starting_file_version_id, selected);
+    assert_active_version(&cp, selected, current).await;
+}
+
+#[tokio::test]
 async fn control_plane_persists_workflow_summary_over_shared_pool() {
     let (cp, _tmp) = cp().await;
     let job = cp
@@ -639,6 +912,18 @@ fn policy_with_on_error(
         warnings: Vec::new(),
         provenance: voom_policy::PolicyProvenance::default(),
     }
+}
+
+fn transcode_hevc_policy() -> voom_policy::CompiledPolicy {
+    let source = load_policy_fixture("fixtures/policies/video-transcode-hevc.voom").unwrap();
+    let mut policy = voom_policy::compile_policy(&source).unwrap().policy;
+    let voom_policy::CompiledOperation::TranscodeVideo(operation) =
+        &mut policy.phases[0].operations[0]
+    else {
+        panic!("fixture must compile to transcode video");
+    };
+    operation.resolved_profile = Some(voom_core::TranscodeVideoProfile::default_hevc());
+    policy
 }
 
 fn policy_with_run_if(trigger: voom_policy::RunIfTrigger) -> voom_policy::CompiledPolicy {
@@ -738,6 +1023,118 @@ async fn open_workflow_job(cp: &crate::ControlPlane) -> JobId {
     .await
     .unwrap()
     .id
+}
+
+async fn latest_job_id(cp: &crate::ControlPlane) -> JobId {
+    let id: i64 = sqlx::query_scalar("SELECT MAX(id) FROM jobs")
+        .fetch_one(&cp.pool)
+        .await
+        .unwrap();
+    JobId(u64::try_from(id).unwrap())
+}
+
+async fn job_ticket_count(cp: &crate::ControlPlane, job_id: JobId) -> i64 {
+    sqlx::query_scalar("SELECT COUNT(*) FROM tickets WHERE job_id = ?")
+        .bind(i64::try_from(job_id.0).unwrap())
+        .fetch_one(&cp.pool)
+        .await
+        .unwrap()
+}
+
+async fn job_lease_count(cp: &crate::ControlPlane, job_id: JobId) -> i64 {
+    sqlx::query_scalar(
+        "SELECT COUNT(*) FROM leases l \
+         JOIN tickets t ON t.id = l.ticket_id WHERE t.job_id = ?",
+    )
+    .bind(i64::try_from(job_id.0).unwrap())
+    .fetch_one(&cp.pool)
+    .await
+    .unwrap()
+}
+
+async fn ticket_and_lease_event_count(cp: &crate::ControlPlane) -> i64 {
+    sqlx::query_scalar(
+        "SELECT COUNT(*) FROM events \
+         WHERE subject_type IN ('ticket', 'lease')",
+    )
+    .fetch_one(&cp.pool)
+    .await
+    .unwrap()
+}
+
+async fn assert_job_opened_then_failed_with_stale_reason(cp: &crate::ControlPlane, job_id: JobId) {
+    let rows: Vec<(String, String)> = sqlx::query_as(
+        "SELECT kind, payload FROM events \
+         WHERE subject_type = 'job' AND subject_id = ? ORDER BY event_id",
+    )
+    .bind(i64::try_from(job_id.0).unwrap())
+    .fetch_all(&cp.pool)
+    .await
+    .unwrap();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].0, "job.opened");
+    assert_eq!(rows[1].0, "job.failed");
+    assert!(rows[1].1.contains("stale identity evidence"));
+}
+
+async fn artifact_count(cp: &crate::ControlPlane) -> i64 {
+    sqlx::query_scalar("SELECT COUNT(*) FROM artifact_handles")
+        .fetch_one(&cp.pool)
+        .await
+        .unwrap()
+}
+
+async fn assert_active_version(
+    cp: &crate::ControlPlane,
+    lineage_version: FileVersionId,
+    expected_active: FileVersionId,
+) {
+    assert_eq!(
+        active_version_id(cp, lineage_version).await,
+        expected_active
+    );
+}
+
+async fn active_version_id(
+    cp: &crate::ControlPlane,
+    lineage_version: FileVersionId,
+) -> FileVersionId {
+    let asset_id = cp
+        .identity()
+        .get_file_version(lineage_version)
+        .await
+        .unwrap()
+        .unwrap()
+        .file_asset_id;
+    let active = cp
+        .identity()
+        .get_active_version_with_snapshot(asset_id)
+        .await
+        .unwrap()
+        .unwrap()
+        .0;
+    active.id
+}
+
+async fn workflow_effect_counts(cp: &crate::ControlPlane, job_id: JobId) -> (i64, i64, i64) {
+    let summaries = sqlx::query_scalar("SELECT COUNT(*) FROM workflow_summaries WHERE job_id = ?")
+        .bind(i64::try_from(job_id.0).unwrap())
+        .fetch_one(&cp.pool)
+        .await
+        .unwrap();
+    let phases =
+        sqlx::query_scalar("SELECT COUNT(*) FROM workflow_phase_summaries WHERE job_id = ?")
+            .bind(i64::try_from(job_id.0).unwrap())
+            .fetch_one(&cp.pool)
+            .await
+            .unwrap();
+    let file_phases =
+        sqlx::query_scalar("SELECT COUNT(*) FROM workflow_file_phase_summaries WHERE job_id = ?")
+            .bind(i64::try_from(job_id.0).unwrap())
+            .fetch_one(&cp.pool)
+            .await
+            .unwrap();
+    (summaries, phases, file_phases)
 }
 
 async fn record_run_start(

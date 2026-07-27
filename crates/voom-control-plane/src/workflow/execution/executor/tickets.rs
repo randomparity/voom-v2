@@ -11,7 +11,8 @@ use voom_core::{JobId, TicketOperation, VoomError};
 use voom_store::repo::identity::IdentityRepo;
 use voom_store::repo::tickets::{NewTicket, Ticket};
 
-use crate::workflow::execution::executor::WorkflowExecutor;
+use crate::cases::{begin_immediate_tx, commit_tx};
+use crate::workflow::execution::executor::{PlannedLineageGuard, WorkflowExecutor};
 use crate::workflow::execution::timing::{EffectiveTiming, seeded_timing};
 use crate::workflow::plan::binding::{
     BindingError, BranchContext, PolicyFileSource, render_default_payload,
@@ -40,6 +41,48 @@ impl WorkflowExecutor {
         Ok(())
     }
 
+    pub(super) async fn create_guarded_root_tickets(
+        &self,
+        plan: &WorkflowPlan,
+        workflow_id: &str,
+        job_id: JobId,
+        now: OffsetDateTime,
+        lineage_guard: &PlannedLineageGuard,
+    ) -> Result<(), VoomError> {
+        let mut inputs = Vec::new();
+        for node in &plan.nodes {
+            if node.depends_on().is_empty() && node.depends_on_selected().is_empty() {
+                inputs.push(
+                    self.render_node_ticket(plan, node, workflow_id, job_id, now)
+                        .await?,
+                );
+            }
+        }
+
+        let mut tx = begin_immediate_tx(&self.control_plane.pool).await?;
+        self.control_plane
+            .identity
+            .require_active_file_versions_in_tx(&mut tx, lineage_guard.expectations())
+            .await?;
+        for input in inputs {
+            let ticket = self
+                .control_plane
+                .create_ticket_in_tx(&mut tx, input)
+                .await?;
+            let promoted = self
+                .control_plane
+                .mark_ready_if_unblocked_in_tx(&mut tx, ticket.id, now)
+                .await?;
+            if promoted.len() != 1 {
+                return Err(VoomError::Internal(format!(
+                    "workflow root ticket {} was not promoted to ready",
+                    ticket.id
+                )));
+            }
+        }
+        commit_tx(tx).await
+    }
+
     pub(super) async fn create_node_ticket(
         &self,
         plan: &WorkflowPlan,
@@ -48,6 +91,24 @@ impl WorkflowExecutor {
         job_id: JobId,
         now: OffsetDateTime,
     ) -> Result<(), VoomError> {
+        let input = self
+            .render_node_ticket(plan, node, workflow_id, job_id, now)
+            .await?;
+        let ticket = self.control_plane.create_ticket(input).await?;
+        self.control_plane
+            .mark_ready_if_unblocked(ticket.id, now)
+            .await?;
+        Ok(())
+    }
+
+    async fn render_node_ticket(
+        &self,
+        plan: &WorkflowPlan,
+        node: &OperationNode,
+        workflow_id: &str,
+        job_id: JobId,
+        now: OffsetDateTime,
+    ) -> Result<NewTicket, VoomError> {
         let operation = node.operation();
         let branch = BranchContext {
             branch_id: "root".to_owned(),
@@ -77,21 +138,14 @@ impl WorkflowExecutor {
         }
         .to_ticket_payload()
         .map_err(|e| VoomError::Config(format!("workflow ticket payload encode: {e}")))?;
-        let ticket = self
-            .control_plane
-            .create_ticket(NewTicket {
-                job_id: Some(job_id),
-                kind: ticket_kind(operation)?,
-                priority: 0,
-                payload,
-                max_attempts: self.options.queue.max_attempts,
-                created_at: now,
-            })
-            .await?;
-        self.control_plane
-            .mark_ready_if_unblocked(ticket.id, now)
-            .await?;
-        Ok(())
+        Ok(NewTicket {
+            job_id: Some(job_id),
+            kind: ticket_kind(operation)?,
+            priority: 0,
+            payload,
+            max_attempts: self.options.queue.max_attempts,
+            created_at: now,
+        })
     }
 
     async fn render_root_payload(
