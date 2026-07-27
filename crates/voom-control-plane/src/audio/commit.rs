@@ -24,7 +24,9 @@ use voom_store::repo::artifacts::{
     NewArtifactHandle, NewArtifactLocation, NewSidecarArtifactCommit, SidecarArtifactCommit,
 };
 use voom_store::repo::audio_extract_operations::{
-    AudioExtractOperationRecord, NewAudioExtractClaim,
+    AudioExtractOperationRecord, LegacyAudioExtractOwner, NewAudioExtractClaim,
+    NewAudioExtractOperation, NewAudioExtractOutput, NewLegacyAudioExtractAdoption,
+    SqliteAudioExtractOperationRepo,
 };
 use voom_store::repo::bundles::{BundleMemberRole, NewBundleMember};
 use voom_store::repo::check_lineage_commit_leases_in_tx;
@@ -34,6 +36,7 @@ use voom_worker_protocol::{
     ProbeFileRequest, ProbeFileResult, TranscodeAudioResult,
 };
 
+use super::selection::ExtractAudioSelectionOutput;
 use super::selection::ExtractAudioSelectionPlan;
 use super::worker_contract::extract_result_output_facts;
 use super::{ExecuteExtractAudioInput, ExecuteTranscodeAudioInput};
@@ -385,6 +388,215 @@ async fn bind_staged_extract_output(
 pub(crate) struct ProbedResultPayload {
     pub worker_id: WorkerId,
     pub payload: serde_json::Value,
+}
+
+pub(crate) struct LegacyExtractAdoptionInput {
+    pub operation: NewAudioExtractOperation,
+    pub output: NewAudioExtractOutput,
+    pub selection: ExtractAudioSelectionOutput,
+}
+
+pub(crate) async fn try_adopt_legacy_extract(
+    cp: &ControlPlane,
+    input: LegacyExtractAdoptionInput,
+    dispatcher: &dyn AudioResultProbeDispatcher,
+) -> Result<Option<AudioExtractOperationRecord>, VoomError> {
+    let target = PathBuf::from(&input.output.target_path);
+    let target_exists = tokio::fs::symlink_metadata(&target).await.is_ok();
+    let repo = SqliteAudioExtractOperationRepo::new(cp.pool.clone());
+    let owner = repo
+        .legacy_committed_owner(
+            &input.output.target_path,
+            input.operation.source_bundle_id,
+            &input.output.bundle_role,
+        )
+        .await?;
+    let Some(owner) = owner else {
+        if target_exists {
+            return Err(VoomError::Conflict(format!(
+                "audio extraction target {} exists without a committed artifact owner",
+                target.display()
+            )));
+        }
+        return Ok(None);
+    };
+    if !target_exists {
+        return Err(VoomError::Conflict(format!(
+            "committed legacy audio extraction {} owns missing target {}",
+            owner.commit_record_id,
+            target.display()
+        )));
+    }
+    let observed = validate_legacy_extract_owner(&input, &owner, &target).await?;
+    let probed = probe_staged_extract_result(
+        cp,
+        &target,
+        &AudioObservedFacts {
+            size_bytes: observed.size_bytes,
+            content_hash: observed.content_hash.clone(),
+            modified_at: None,
+            local_file_key: observed.local_file_key.clone(),
+        },
+        dispatcher,
+    )
+    .await?;
+    insert_legacy_extract_adoption(cp, &input, &owner, &observed, probed)
+        .await
+        .map(Some)
+}
+
+async fn validate_legacy_extract_owner(
+    input: &LegacyExtractAdoptionInput,
+    owner: &LegacyAudioExtractOwner,
+    target: &Path,
+) -> Result<ArtifactFileFacts, VoomError> {
+    let expected_role = &input.output.bundle_role;
+    let lineage = &owner.source_lineage;
+    let selection_matches = input.selection.output_id == input.output.output_id
+        && input.selection.stream.snapshot_stream_id == input.output.source_snapshot_stream_id
+        && input.selection.stream.provider_stream_index
+            == input.output.source_provider_stream_index
+        && super::extract_role_name(input.selection.role) == expected_role;
+    let lineage_stream_id = lineage
+        .get("source_snapshot_stream_id")
+        .or_else(|| lineage.get("selected_snapshot_stream_id"))
+        .and_then(serde_json::Value::as_str);
+    let lineage_stream_index = lineage
+        .get("source_provider_stream_index")
+        .and_then(serde_json::Value::as_u64);
+    let operation_identity_matches =
+        optional_lineage_identity(
+            lineage,
+            "operation_id",
+            input.operation.operation_id.as_deref(),
+        ) && optional_lineage_identity(lineage, "output_id", input.output.output_id.as_deref());
+    let lineage_matches = lineage.get("operation").and_then(serde_json::Value::as_str)
+        == Some("extract_audio")
+        && lineage
+            .get("source_file_version_id")
+            .and_then(serde_json::Value::as_u64)
+            == Some(input.operation.source_file_version_id.0)
+        && lineage_stream_id == Some(&input.output.source_snapshot_stream_id)
+        && lineage_stream_index
+            .is_none_or(|index| index == u64::from(input.output.source_provider_stream_index))
+        && lineage
+            .get("intended_role")
+            .and_then(serde_json::Value::as_str)
+            == Some(expected_role);
+    let durable_matches = owner.source_file_version_id == input.operation.source_file_version_id.0
+        && owner.source_media_snapshot_count == 1
+        && owner.sole_source_media_snapshot_id == Some(input.operation.source_media_snapshot_id.0)
+        && owner.verification_artifact_handle_id == owner.artifact_handle_id
+        && owner.artifact_location_handle_id == owner.artifact_handle_id
+        && owner.verification_status == "succeeded"
+        && owner.artifact_location_value == owner.staging_path
+        && owner.artifact_location_retired_at.is_none()
+        && owner.bundle_id == input.operation.source_bundle_id.0
+        && owner.bundle_role == *expected_role
+        && owner.result_location_file_version_id == owner.result_file_version_id
+        && owner.result_location == input.output.target_path
+        && owner.result_location_retired_at.is_none()
+        && owner.expected_size_bytes == owner.observed_size_bytes
+        && owner.expected_checksum == owner.observed_checksum
+        && owner.result_size_bytes == owner.observed_size_bytes
+        && owner.result_checksum == owner.observed_checksum;
+    if !selection_matches || !operation_identity_matches || !lineage_matches || !durable_matches {
+        return Err(VoomError::Conflict(format!(
+            "committed legacy audio extraction {} does not match source, stream, role, \
+             verification, result, and bundle evidence",
+            owner.commit_record_id
+        )));
+    }
+    let observed = crate::artifact::fs::observe_regular_file(target).await?;
+    if observed.size_bytes != owner.result_size_bytes
+        || observed.content_hash != owner.result_checksum
+    {
+        return Err(VoomError::ArtifactChecksumMismatch(format!(
+            "legacy audio extraction target {} differs from committed owner {}",
+            target.display(),
+            owner.commit_record_id
+        )));
+    }
+    Ok(observed)
+}
+
+fn optional_lineage_identity(
+    lineage: &serde_json::Value,
+    field: &str,
+    expected: Option<&str>,
+) -> bool {
+    let actual = lineage.get(field).and_then(serde_json::Value::as_str);
+    actual == expected
+}
+
+async fn insert_legacy_extract_adoption(
+    cp: &ControlPlane,
+    input: &LegacyExtractAdoptionInput,
+    owner: &LegacyAudioExtractOwner,
+    observed: &ArtifactFileFacts,
+    probed: ProbedResultPayload,
+) -> Result<AudioExtractOperationRecord, VoomError> {
+    let now = cp.clock().now();
+    let mut tx = begin_immediate_tx(&cp.pool).await?;
+    if let Some(existing) = SqliteAudioExtractOperationRepo::get_exact_by_key_in_tx(
+        &mut tx,
+        &input.operation,
+        std::slice::from_ref(&input.output),
+    )
+    .await?
+    {
+        commit_tx(tx).await?;
+        return Ok(existing);
+    }
+    let snapshot = cp
+        .identity
+        .record_media_snapshot_in_tx(
+            &mut tx,
+            NewMediaSnapshot {
+                file_version_id: FileVersionId(owner.result_file_version_id),
+                probed_by: Some(probed.worker_id),
+                probed_at: now,
+                payload: probed.payload.clone(),
+            },
+        )
+        .await?;
+    let result_facts = serde_json::to_value(AudioObservedFacts {
+        size_bytes: observed.size_bytes,
+        content_hash: observed.content_hash.clone(),
+        modified_at: None,
+        local_file_key: observed.local_file_key.clone(),
+    })
+    .map_err(|error| VoomError::Internal(format!("encode adopted result facts: {error}")))?;
+    let record = SqliteAudioExtractOperationRepo::insert_legacy_adoption_in_tx(
+        &mut tx,
+        &NewLegacyAudioExtractAdoption {
+            operation: input.operation.clone(),
+            output: input.output.clone(),
+            owner: owner.clone(),
+            probe_worker_id: probed.worker_id,
+            probe_payload: probed.payload,
+            result_media_snapshot_id: snapshot.id,
+            result_facts,
+            recorded_at: now,
+        },
+    )
+    .await?;
+    append_event(
+        &cp.events,
+        &mut tx,
+        SubjectType::MediaSnapshot,
+        Some(snapshot.id.0),
+        now,
+        Event::MediaSnapshotRecorded(MediaSnapshotRecordedPayload {
+            media_snapshot_id: snapshot.id.0,
+            file_version_id: owner.result_file_version_id,
+            probed_by_worker_id: Some(probed.worker_id.0),
+            probed_at: now,
+        }),
+    )
+    .await?;
+    commit_tx(tx).await?;
+    Ok(record)
 }
 
 /// Probes the STAGED artifact (the content-hash-verified file at the staging

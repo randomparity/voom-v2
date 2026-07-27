@@ -229,6 +229,157 @@ async fn extract_audio_plural_commits_every_output_and_lineage_atomically() {
 }
 
 #[tokio::test]
+async fn committed_legacy_singleton_is_adopted_once_without_redispatch() {
+    let (cp, _db, dir) = fixture_with_dir().await;
+    let seeded = seed_legacy_singleton(&cp, &dir).await;
+    let SeededLegacySingleton {
+        input,
+        target,
+        legacy,
+        ..
+    } = seeded;
+    assert_eq!(legacy.state, ArtifactCommitState::Committed);
+    assert_table_count(&cp, "media_snapshots", 1).await;
+    let immutable_counts = legacy_publication_counts(&cp).await;
+
+    let adopted = execute_extract_audio_with_dispatchers(
+        &cp,
+        input.clone(),
+        &UncalledExtractDispatcher,
+        &UncalledVerifyDispatcher,
+        &SucceedingProbeDispatcher,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(adopted.outputs.len(), 1);
+    assert_eq!(adopted.outputs[0].target_path, target);
+    assert_eq!(adopted.outputs[0].commit_record_id, legacy.commit_record_id);
+    assert_eq!(
+        adopted.outputs[0].result_file_version_id,
+        legacy.result_file_version_id.unwrap()
+    );
+    assert_eq!(legacy_publication_counts(&cp).await, immutable_counts);
+    assert_table_count(&cp, "media_snapshots", 2).await;
+    assert_table_count(&cp, "audio_extract_operations", 1).await;
+    assert_table_count(&cp, "audio_extract_operation_outputs", 1).await;
+    assert_table_count(&cp, "audio_extract_output_lineage", 1).await;
+
+    let replay = execute_extract_audio_with_dispatchers(
+        &cp,
+        input,
+        &UncalledExtractDispatcher,
+        &UncalledVerifyDispatcher,
+        &UncalledProbeDispatcher,
+    )
+    .await
+    .unwrap();
+    assert_eq!(replay, adopted);
+    assert_eq!(legacy_publication_counts(&cp).await, immutable_counts);
+    assert_table_count(&cp, "media_snapshots", 2).await;
+    assert_table_count(&cp, "audio_extract_output_lineage", 1).await;
+}
+
+#[tokio::test]
+async fn legacy_adoption_rejects_ambiguous_or_different_source_snapshot() {
+    let (cp, _db, dir) = fixture_with_dir().await;
+    let seeded = seed_legacy_singleton(&cp, &dir).await;
+    let original = cp
+        .identity()
+        .get_media_snapshot(MediaSnapshotId(seeded.source.snapshot))
+        .await
+        .unwrap()
+        .unwrap();
+    let second = cp
+        .record_media_snapshot(
+            seeded.source.version,
+            None,
+            original.payload,
+            OffsetDateTime::UNIX_EPOCH + time::Duration::seconds(1),
+        )
+        .await
+        .unwrap();
+    let mut input = seeded.input;
+    input.operation_payload["source_media_snapshot_id"] = serde_json::json!(second.id.0);
+
+    assert_legacy_adoption_rejected_without_mutation(&cp, input, &seeded.target).await;
+}
+
+#[tokio::test]
+async fn legacy_adoption_rejects_different_published_operation_key() {
+    let (cp, _db, dir) = fixture_with_dir().await;
+    let seeded = seed_legacy_singleton(&cp, &dir).await;
+    let mut input = seeded.input;
+    let operation_id = "different-published-operation";
+    input.operation_payload["operation_id"] = serde_json::json!(operation_id);
+    input.operation_payload["outputs"] = serde_json::json!([{
+        "output_id": voom_plan::audio::extract_output_id(operation_id, "a-1"),
+        "source_snapshot_stream_id": "a-1",
+        "source_provider_stream_index": 1,
+        "name_suffix": "a-1.opus.ogg",
+        "bundle_role": "external_audio"
+    }]);
+
+    assert_legacy_adoption_rejected_without_mutation(&cp, input, &seeded.target).await;
+}
+
+#[derive(Debug, Clone, Copy)]
+enum LegacyEvidenceMutation {
+    WrongStream,
+    MissingLineage,
+    MismatchedVerification,
+    RetiredResultLocation,
+}
+
+#[tokio::test]
+async fn legacy_adoption_rejects_mismatched_or_incomplete_evidence() {
+    for mutation in [
+        LegacyEvidenceMutation::WrongStream,
+        LegacyEvidenceMutation::MissingLineage,
+        LegacyEvidenceMutation::MismatchedVerification,
+        LegacyEvidenceMutation::RetiredResultLocation,
+    ] {
+        let (cp, _db, dir) = fixture_with_dir().await;
+        let seeded = seed_legacy_singleton(&cp, &dir).await;
+        mutate_legacy_evidence(&cp, mutation).await;
+
+        assert_legacy_adoption_rejected_without_mutation(&cp, seeded.input, &seeded.target).await;
+    }
+}
+
+#[tokio::test]
+async fn legacy_adoption_rejects_unowned_existing_target() {
+    let (cp, _db, dir) = fixture_with_dir().await;
+    let source = seed_audio_source(&cp, &dir, b"source").await;
+    let bundle = seed_bundle(&cp).await;
+    let mut input = extract_input_for_source(&source, bundle.id, &dir);
+    let payload = input.operation_payload.as_object_mut().unwrap();
+    payload.remove("operation_id");
+    payload.remove("outputs");
+    payload.remove("snapshot_stream_id");
+    let snapshot = cp
+        .identity()
+        .get_media_snapshot(MediaSnapshotId(source.snapshot))
+        .await
+        .unwrap()
+        .unwrap();
+    let selection =
+        selection::extract_selection_from_payload_and_snapshot(&input.operation_payload, &snapshot)
+            .unwrap();
+    let target = stage::extract_target_paths(
+        &input.target_dir,
+        &dir.path().join("source.mkv"),
+        &selection,
+    )
+    .await
+    .unwrap()
+    .remove(0);
+    tokio::fs::write(&target, b"unowned").await.unwrap();
+
+    assert_legacy_adoption_rejected_without_mutation(&cp, input, &target).await;
+}
+
+#[tokio::test]
 async fn exact_extract_quiescence_acknowledgement_records_audit_event() {
     let (cp, _db, dir) = fixture_with_dir().await;
     let source = seed_audio_source(&cp, &dir, b"source").await;
@@ -924,6 +1075,141 @@ struct SeededAudioSource {
     snapshot: u64,
 }
 
+struct SeededLegacySingleton {
+    source: SeededAudioSource,
+    input: ExecuteExtractAudioInput,
+    target: PathBuf,
+    legacy: commit::CommitAudioExtractSidecarReport,
+}
+
+async fn seed_legacy_singleton(
+    cp: &crate::ControlPlane,
+    dir: &tempfile::TempDir,
+) -> SeededLegacySingleton {
+    let source = seed_audio_source(cp, dir, b"source").await;
+    let bundle = seed_bundle(cp).await;
+    let mut input = extract_input_for_source(&source, bundle.id, dir);
+    let payload = input.operation_payload.as_object_mut().unwrap();
+    payload.remove("operation_id");
+    payload.remove("outputs");
+    payload.remove("snapshot_stream_id");
+    let snapshot = cp
+        .identity()
+        .get_media_snapshot(MediaSnapshotId(source.snapshot))
+        .await
+        .unwrap()
+        .unwrap();
+    let selection =
+        selection::extract_selection_from_payload_and_snapshot(&input.operation_payload, &snapshot)
+            .unwrap();
+    let targets = stage::extract_target_paths(
+        &input.target_dir,
+        &dir.path().join("source.mkv"),
+        &selection,
+    )
+    .await
+    .unwrap();
+    let target = targets[0].clone();
+    let staging = dir.path().join("legacy-singleton.ogg");
+    let bytes = b"legacy-sidecar";
+    tokio::fs::write(&staging, bytes).await.unwrap();
+    let output = observed(u64::try_from(bytes.len()).unwrap(), &blake3_checksum(bytes));
+    let staged = commit::record_staged_audio_extract(
+        cp,
+        &input,
+        source.location,
+        &staging,
+        &selection,
+        &legacy_extract_result(&output),
+    )
+    .await
+    .unwrap();
+    let verification = crate::artifact::verify::verify_artifact_with_dispatcher(
+        cp,
+        crate::artifact::VerifyArtifactInput::for_staged_file(staged.artifact_handle_id, &staging),
+        &SuccessfulVerifyDispatcher,
+        &crate::artifact::verify::NoVerifyArtifactHooks,
+    )
+    .await
+    .unwrap();
+    let legacy = commit::commit_audio_extract_sidecar(
+        cp,
+        commit::CommitAudioExtractSidecarInput {
+            artifact_handle_id: staged.artifact_handle_id,
+            verification_id: verification.verification_id,
+            source_file_version_id: source.version,
+            source_bundle_id: bundle.id,
+            role: selection.outputs[0].role,
+            staging_path: staging,
+            target_path: target.clone(),
+            output,
+        },
+    )
+    .await
+    .unwrap();
+    SeededLegacySingleton {
+        source,
+        input,
+        target,
+        legacy,
+    }
+}
+
+async fn mutate_legacy_evidence(cp: &crate::ControlPlane, mutation: LegacyEvidenceMutation) {
+    let query = match mutation {
+        LegacyEvidenceMutation::WrongStream => {
+            "UPDATE artifact_handles \
+             SET source_lineage = json_set(source_lineage, \
+                 '$.selected_snapshot_stream_id', 'a-2')"
+        }
+        LegacyEvidenceMutation::MissingLineage => {
+            "UPDATE artifact_handles SET source_lineage = NULL"
+        }
+        LegacyEvidenceMutation::MismatchedVerification => {
+            "UPDATE artifact_verifications SET expected_checksum = 'blake3:mismatch'"
+        }
+        LegacyEvidenceMutation::RetiredResultLocation => {
+            "UPDATE file_locations SET retired_at = '1970-01-01T00:00:01Z' \
+             WHERE id = (SELECT result_file_location_id FROM artifact_commit_records)"
+        }
+    };
+    sqlx::query(query)
+        .execute(cp.pool_for_test())
+        .await
+        .unwrap();
+}
+
+async fn assert_legacy_adoption_rejected_without_mutation(
+    cp: &crate::ControlPlane,
+    input: ExecuteExtractAudioInput,
+    target: &std::path::Path,
+) {
+    let publication_counts = legacy_publication_counts(cp).await;
+    let media_snapshot_count = table_count(cp, "media_snapshots").await;
+    let target_bytes = tokio::fs::read(target).await.unwrap();
+
+    let error = execute_extract_audio_with_dispatchers(
+        cp,
+        input,
+        &UncalledExtractDispatcher,
+        &UncalledVerifyDispatcher,
+        &UncalledProbeDispatcher,
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error.error_code(), voom_core::ErrorCode::Conflict);
+    assert_eq!(legacy_publication_counts(cp).await, publication_counts);
+    assert_eq!(
+        table_count(cp, "media_snapshots").await,
+        media_snapshot_count
+    );
+    assert_eq!(table_count(cp, "audio_extract_operations").await, 0);
+    assert_eq!(table_count(cp, "audio_extract_operation_outputs").await, 0);
+    assert_eq!(table_count(cp, "audio_extract_output_lineage").await, 0);
+    assert_eq!(tokio::fs::read(target).await.unwrap(), target_bytes);
+}
+
 async fn seed_audio_source(
     cp: &crate::ControlPlane,
     dir: &tempfile::TempDir,
@@ -1174,6 +1460,48 @@ fn extract_input_for_source(
     }
 }
 
+fn legacy_extract_result(output: &AudioObservedFacts) -> ExtractAudioResult {
+    let source = observed(
+        u64::try_from(b"source".len()).unwrap(),
+        &blake3_checksum(b"source"),
+    );
+    ExtractAudioResult {
+        status: voom_worker_protocol::ExtractAudioStatus::Extracted,
+        provider: "ffmpeg".to_owned(),
+        provider_version: "legacy-test".to_owned(),
+        input_pre: source.clone(),
+        input_post: source,
+        output: output.clone(),
+        output_container: "ogg".to_owned(),
+        output_audio_codec: "opus".to_owned(),
+        selected_snapshot_stream_id: "a-1".to_owned(),
+        output_language: Some("eng".to_owned()),
+        output_title: Some("Main".to_owned()),
+        outputs: None,
+    }
+}
+
+async fn legacy_publication_counts(cp: &crate::ControlPlane) -> (i64, i64, i64, i64, i64) {
+    let row = sqlx::query(
+        "SELECT \
+         (SELECT COUNT(*) FROM artifact_handles) AS handles, \
+         (SELECT COUNT(*) FROM artifact_commit_records) AS commits, \
+         (SELECT COUNT(*) FROM file_versions) AS versions, \
+         (SELECT COUNT(*) FROM file_locations) AS locations, \
+         (SELECT COUNT(*) FROM asset_bundle_members) AS members",
+    )
+    .fetch_one(cp.pool_for_test())
+    .await
+    .unwrap();
+    (
+        row.try_get("handles").unwrap(),
+        row.try_get("commits").unwrap(),
+        row.try_get("versions").unwrap(),
+        row.try_get("locations").unwrap(),
+        row.try_get("members").unwrap(),
+    )
+}
+
 async fn assert_event_count(cp: &crate::ControlPlane, kind: &str, expected: i64) {
     let row = sqlx::query("SELECT COUNT(*) AS count FROM events WHERE kind = ?")
         .bind(kind)
@@ -1185,13 +1513,16 @@ async fn assert_event_count(cp: &crate::ControlPlane, kind: &str, expected: i64)
 }
 
 async fn assert_table_count(cp: &crate::ControlPlane, table: &str, expected: i64) {
+    assert_eq!(table_count(cp, table).await, expected);
+}
+
+async fn table_count(cp: &crate::ControlPlane, table: &str) -> i64 {
     let query = format!("SELECT COUNT(*) AS count FROM {table}");
     let row = sqlx::query(&query)
         .fetch_one(cp.pool_for_test())
         .await
         .unwrap();
-    let count: i64 = row.try_get("count").unwrap();
-    assert_eq!(count, expected, "unexpected row count for {table}");
+    row.try_get("count").unwrap()
 }
 
 async fn latest_event_payload(cp: &crate::ControlPlane, kind: &str) -> serde_json::Value {

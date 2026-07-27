@@ -618,7 +618,7 @@ async fn execute_extract_audio_inner(
     result_probe: &dyn commit::AudioResultProbeDispatcher,
     context: &mut ExtractAttemptContext,
 ) -> Result<ExecuteExtractAudioReport, VoomError> {
-    let prepared = prepare_extract_execution(cp, &input, context).await?;
+    let prepared = prepare_extract_execution(cp, &input, result_probe, context).await?;
     let selected = prepared.selected;
     let snapshot = prepared.snapshot;
     let selection = prepared.selection;
@@ -877,6 +877,7 @@ struct PreparedExtractExecution {
 async fn prepare_extract_execution(
     cp: &ControlPlane,
     input: &ExecuteExtractAudioInput,
+    result_probe: &dyn commit::AudioResultProbeDispatcher,
     context: &mut ExtractAttemptContext,
 ) -> Result<PreparedExtractExecution, VoomError> {
     let selected =
@@ -897,6 +898,7 @@ async fn prepare_extract_execution(
         std::path::Path::new(&selected.location.value),
         snapshot.id.0,
         &selection,
+        result_probe,
     )
     .await?;
     context.outputs = extract_attempt_members(&selection, &paths);
@@ -1084,6 +1086,7 @@ async fn prepare_extract_paths(
     source_path: &std::path::Path,
     source_media_snapshot_id: u64,
     selection: &selection::ExtractAudioSelectionPlan,
+    result_probe: &dyn commit::AudioResultProbeDispatcher,
 ) -> Result<ExtractExecutionPaths, VoomError> {
     let targets = stage::extract_target_paths(&input.target_dir, source_path, selection).await?;
     let operation_token = extract_operation_token(
@@ -1104,7 +1107,40 @@ async fn prepare_extract_paths(
             target_path: target.display().to_string(),
         })
         .collect::<Vec<_>>();
-    let operation = SqliteAudioExtractOperationRepo::new(cp.pool.clone())
+    let repo = SqliteAudioExtractOperationRepo::new(cp.pool.clone());
+    if let Some(operation) = repo.get_by_key(&operation_token).await? {
+        return Ok(ExtractExecutionPaths {
+            staging: None,
+            targets,
+            operation,
+        });
+    }
+    if outputs.len() == 1
+        && let Some(operation) = commit::try_adopt_legacy_extract(
+            cp,
+            commit::LegacyExtractAdoptionInput {
+                operation: NewAudioExtractOperation {
+                    operation_key: operation_token.clone(),
+                    operation_id: selection.operation_id.clone(),
+                    target_set_hash: operation_token.clone(),
+                    source_file_version_id: input.source_file_version_id,
+                    source_bundle_id: input.source_bundle_id,
+                    source_media_snapshot_id: MediaSnapshotId(source_media_snapshot_id),
+                },
+                output: outputs[0].clone(),
+                selection: selection.outputs[0].clone(),
+            },
+            result_probe,
+        )
+        .await?
+    {
+        return Ok(ExtractExecutionPaths {
+            staging: None,
+            targets,
+            operation,
+        });
+    }
+    let operation = repo
         .create_planned(
             NewAudioExtractOperation {
                 operation_key: operation_token.clone(),

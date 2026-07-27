@@ -41,6 +41,52 @@ pub struct NewAudioExtractOutput {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LegacyAudioExtractOwner {
+    pub commit_record_id: u64,
+    pub source_file_version_id: u64,
+    pub source_media_snapshot_count: u64,
+    pub sole_source_media_snapshot_id: Option<u64>,
+    pub artifact_handle_id: u64,
+    pub artifact_location_id: u64,
+    pub artifact_location_handle_id: u64,
+    pub artifact_location_value: String,
+    pub artifact_location_retired_at: Option<String>,
+    pub verification_id: u64,
+    pub verification_artifact_handle_id: u64,
+    pub verification_status: String,
+    pub staging_path: String,
+    pub temp_path: Option<String>,
+    pub source_lineage: serde_json::Value,
+    pub expected_size_bytes: u64,
+    pub expected_checksum: String,
+    pub observed_size_bytes: u64,
+    pub observed_checksum: String,
+    pub result_file_asset_id: u64,
+    pub result_file_version_id: u64,
+    pub result_file_location_id: u64,
+    pub result_location_file_version_id: u64,
+    pub result_location: String,
+    pub result_location_retired_at: Option<String>,
+    pub result_size_bytes: u64,
+    pub result_checksum: String,
+    pub bundle_member_id: u64,
+    pub bundle_id: u64,
+    pub bundle_role: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewLegacyAudioExtractAdoption {
+    pub operation: NewAudioExtractOperation,
+    pub output: NewAudioExtractOutput,
+    pub owner: LegacyAudioExtractOwner,
+    pub probe_worker_id: WorkerId,
+    pub probe_payload: serde_json::Value,
+    pub result_media_snapshot_id: MediaSnapshotId,
+    pub result_facts: serde_json::Value,
+    pub recorded_at: OffsetDateTime,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AudioExtractOperation {
     pub id: u64,
     pub operation_key: String,
@@ -160,6 +206,55 @@ impl SqliteAudioExtractOperationRepo {
             VoomError::database_context("audio_extract_operations get commit", error)
         })?;
         Ok(record)
+    }
+
+    pub async fn get_exact_by_key_in_tx(
+        tx: &mut Transaction<'_, Sqlite>,
+        input: &NewAudioExtractOperation,
+        outputs: &[NewAudioExtractOutput],
+    ) -> Result<Option<AudioExtractOperationRecord>, VoomError> {
+        let Some(record) = load_record_by_key(tx, &input.operation_key).await? else {
+            return Ok(None);
+        };
+        require_exact_replay(&record, input, outputs)?;
+        Ok(Some(record))
+    }
+
+    pub async fn legacy_committed_owner(
+        &self,
+        target_path: &str,
+        bundle_id: BundleId,
+        bundle_role: &str,
+    ) -> Result<Option<LegacyAudioExtractOwner>, VoomError> {
+        let row = legacy_owner_row(&self.pool, target_path, bundle_id, bundle_role).await?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        require_committed_legacy_owner(&row)?;
+        decode_legacy_owner(&row).map(Some)
+    }
+
+    pub async fn insert_legacy_adoption_in_tx(
+        tx: &mut Transaction<'_, Sqlite>,
+        input: &NewLegacyAudioExtractAdoption,
+    ) -> Result<AudioExtractOperationRecord, VoomError> {
+        validate_new_operation(&input.operation, std::slice::from_ref(&input.output))?;
+        if load_record_by_key(tx, &input.operation.operation_key)
+            .await?
+            .is_some()
+        {
+            return Err(VoomError::Conflict(format!(
+                "audio extraction operation {} appeared during legacy adoption",
+                input.operation.operation_key
+            )));
+        }
+        let recorded_at = iso8601(input.recorded_at)?;
+        let operation_id = insert_legacy_adopted_operation(tx, input, &recorded_at).await?;
+        let output_id = insert_legacy_adopted_output(tx, operation_id, input).await?;
+        insert_legacy_adopted_lineage(tx, output_id, input, &recorded_at).await?;
+        load_record_by_id(tx, operation_id)
+            .await?
+            .ok_or_else(|| VoomError::Internal("adopted audio extraction disappeared".to_owned()))
     }
 
     pub async fn create_planned(
@@ -488,6 +583,267 @@ impl SqliteAudioExtractOperationRepo {
 }
 
 impl Repository for SqliteAudioExtractOperationRepo {}
+
+async fn legacy_owner_row(
+    pool: &SqlitePool,
+    target_path: &str,
+    bundle_id: BundleId,
+    bundle_role: &str,
+) -> Result<Option<SqliteRow>, VoomError> {
+    sqlx::query(
+        "SELECT commit_record.id AS commit_record_id, commit_record.state, \
+         commit_record.source_file_version_id, commit_record.artifact_handle_id, \
+         commit_record.verification_id, commit_record.temp_path, handle.source_lineage, \
+         (SELECT COUNT(*) FROM media_snapshots source_snapshot \
+          WHERE source_snapshot.file_version_id = commit_record.source_file_version_id) \
+           AS source_media_snapshot_count, \
+         (SELECT MIN(source_snapshot.id) FROM media_snapshots source_snapshot \
+          WHERE source_snapshot.file_version_id = commit_record.source_file_version_id) \
+           AS sole_source_media_snapshot_id, \
+         verification.artifact_handle_id AS verification_artifact_handle_id, \
+         verification.artifact_location_id, verification.path, verification.status, \
+         verification.expected_size_bytes, verification.expected_checksum, \
+         verification.observed_size_bytes, verification.observed_checksum, \
+         artifact_location.artifact_handle_id AS artifact_location_handle_id, \
+         artifact_location.value AS artifact_location_value, \
+         artifact_location.retired_at AS artifact_location_retired_at, \
+         result_version.file_asset_id AS result_file_asset_id, \
+         commit_record.result_file_version_id, commit_record.result_file_location_id, \
+         result_location.file_version_id AS result_location_file_version_id, \
+         result_location.value AS result_location, \
+         result_location.retired_at AS result_location_retired_at, \
+         result_version.size_bytes AS result_size_bytes, \
+         result_version.content_hash AS result_checksum, member.id AS bundle_member_id, \
+         member.bundle_id, member.role AS bundle_role \
+         FROM artifact_commit_records commit_record \
+         JOIN artifact_handles handle ON handle.id = commit_record.artifact_handle_id \
+         JOIN artifact_verifications verification \
+           ON verification.id = commit_record.verification_id \
+         JOIN artifact_locations artifact_location \
+           ON artifact_location.id = verification.artifact_location_id \
+         LEFT JOIN file_versions result_version \
+           ON result_version.id = commit_record.result_file_version_id \
+         LEFT JOIN file_locations result_location \
+           ON result_location.id = commit_record.result_file_location_id \
+         LEFT JOIN asset_bundle_members member \
+           ON member.file_asset_id = result_version.file_asset_id \
+         WHERE commit_record.target_path = ? \
+           AND commit_record.state IN ('pending', 'committed', 'recovery_required') \
+           AND member.bundle_id = ? AND member.role = ?",
+    )
+    .bind(target_path)
+    .bind(i64_from_u64(bundle_id.0))
+    .bind(bundle_role)
+    .fetch_optional(pool)
+    .await
+    .map_err(|error| VoomError::database_context("legacy audio extract owner", error))
+}
+
+fn require_committed_legacy_owner(row: &SqliteRow) -> Result<(), VoomError> {
+    let state: String = row.try_get("state").map_err(legacy_owner_row_err)?;
+    if state == "committed" {
+        return Ok(());
+    }
+    let id: i64 = row
+        .try_get("commit_record_id")
+        .map_err(legacy_owner_row_err)?;
+    Err(VoomError::Conflict(format!(
+        "audio extraction target has uncommitted owner {id} in state {state}"
+    )))
+}
+
+fn decode_legacy_owner(row: &SqliteRow) -> Result<LegacyAudioExtractOwner, VoomError> {
+    let lineage: Option<String> = row
+        .try_get("source_lineage")
+        .map_err(legacy_owner_row_err)?;
+    let lineage = lineage.ok_or_else(|| {
+        VoomError::Conflict(
+            "committed legacy audio extraction is missing source lineage".to_owned(),
+        )
+    })?;
+    Ok(LegacyAudioExtractOwner {
+        commit_record_id: legacy_required_u64(row, "commit_record_id")?,
+        source_file_version_id: legacy_required_u64(row, "source_file_version_id")?,
+        source_media_snapshot_count: legacy_required_u64(row, "source_media_snapshot_count")?,
+        sole_source_media_snapshot_id: legacy_maybe_u64(row, "sole_source_media_snapshot_id")?,
+        artifact_handle_id: legacy_required_u64(row, "artifact_handle_id")?,
+        artifact_location_id: legacy_required_u64(row, "artifact_location_id")?,
+        artifact_location_handle_id: legacy_required_u64(row, "artifact_location_handle_id")?,
+        artifact_location_value: legacy_string(row, "artifact_location_value")?,
+        artifact_location_retired_at: legacy_optional_string(row, "artifact_location_retired_at")?,
+        verification_id: legacy_required_u64(row, "verification_id")?,
+        verification_artifact_handle_id: legacy_required_u64(
+            row,
+            "verification_artifact_handle_id",
+        )?,
+        verification_status: legacy_string(row, "status")?,
+        staging_path: legacy_string(row, "path")?,
+        temp_path: legacy_optional_string(row, "temp_path")?,
+        source_lineage: serde_json::from_str(&lineage).map_err(|error| {
+            VoomError::Conflict(format!(
+                "legacy audio extraction lineage is malformed: {error}"
+            ))
+        })?,
+        expected_size_bytes: legacy_optional_u64(row, "expected_size_bytes")?,
+        expected_checksum: legacy_string(row, "expected_checksum")?,
+        observed_size_bytes: legacy_optional_u64(row, "observed_size_bytes")?,
+        observed_checksum: legacy_string(row, "observed_checksum")?,
+        result_file_asset_id: legacy_optional_u64(row, "result_file_asset_id")?,
+        result_file_version_id: legacy_optional_u64(row, "result_file_version_id")?,
+        result_file_location_id: legacy_optional_u64(row, "result_file_location_id")?,
+        result_location_file_version_id: legacy_optional_u64(
+            row,
+            "result_location_file_version_id",
+        )?,
+        result_location: legacy_string(row, "result_location")?,
+        result_location_retired_at: legacy_optional_string(row, "result_location_retired_at")?,
+        result_size_bytes: legacy_optional_u64(row, "result_size_bytes")?,
+        result_checksum: legacy_string(row, "result_checksum")?,
+        bundle_member_id: legacy_optional_u64(row, "bundle_member_id")?,
+        bundle_id: legacy_optional_u64(row, "bundle_id")?,
+        bundle_role: legacy_string(row, "bundle_role")?,
+    })
+}
+
+fn legacy_required_u64(row: &SqliteRow, column: &str) -> Result<u64, VoomError> {
+    let value: i64 = row.try_get(column).map_err(legacy_owner_row_err)?;
+    u64::try_from(value).map_err(|error| VoomError::database_context(column, error))
+}
+
+fn legacy_optional_u64(row: &SqliteRow, column: &str) -> Result<u64, VoomError> {
+    let value = row
+        .try_get::<Option<i64>, _>(column)
+        .map_err(legacy_owner_row_err)?
+        .ok_or_else(|| legacy_missing_column(column))?;
+    u64::try_from(value).map_err(|error| VoomError::database_context(column, error))
+}
+
+fn legacy_maybe_u64(row: &SqliteRow, column: &str) -> Result<Option<u64>, VoomError> {
+    row.try_get::<Option<i64>, _>(column)
+        .map_err(legacy_owner_row_err)?
+        .map(u64::try_from)
+        .transpose()
+        .map_err(|error| VoomError::database_context(column, error))
+}
+
+fn legacy_string(row: &SqliteRow, column: &str) -> Result<String, VoomError> {
+    row.try_get::<Option<String>, _>(column)
+        .map_err(legacy_owner_row_err)?
+        .ok_or_else(|| legacy_missing_column(column))
+}
+
+fn legacy_optional_string(row: &SqliteRow, column: &str) -> Result<Option<String>, VoomError> {
+    row.try_get(column).map_err(legacy_owner_row_err)
+}
+
+fn legacy_missing_column(column: &str) -> VoomError {
+    VoomError::Conflict(format!(
+        "committed legacy audio extraction is missing {column}"
+    ))
+}
+
+fn legacy_owner_row_err(error: sqlx::Error) -> VoomError {
+    VoomError::database_context("legacy audio extraction owner decode", error)
+}
+
+async fn insert_legacy_adopted_operation(
+    tx: &mut Transaction<'_, Sqlite>,
+    input: &NewLegacyAudioExtractAdoption,
+    recorded_at: &str,
+) -> Result<i64, VoomError> {
+    sqlx::query(
+        "INSERT INTO audio_extract_operations \
+         (operation_key, operation_id, target_set_hash, source_file_version_id, \
+          source_bundle_id, source_media_snapshot_id, state, created_at, finished_at) \
+         VALUES (?, ?, ?, ?, ?, ?, 'committed', ?, ?)",
+    )
+    .bind(&input.operation.operation_key)
+    .bind(&input.operation.operation_id)
+    .bind(&input.operation.target_set_hash)
+    .bind(i64_from_u64(input.operation.source_file_version_id.0))
+    .bind(i64_from_u64(input.operation.source_bundle_id.0))
+    .bind(i64_from_u64(input.operation.source_media_snapshot_id.0))
+    .bind(recorded_at)
+    .bind(recorded_at)
+    .execute(&mut **tx)
+    .await
+    .map_err(|error| VoomError::database_context("insert adopted audio operation", error))
+    .map(|result| result.last_insert_rowid())
+}
+
+async fn insert_legacy_adopted_output(
+    tx: &mut Transaction<'_, Sqlite>,
+    operation_id: i64,
+    input: &NewLegacyAudioExtractAdoption,
+) -> Result<u64, VoomError> {
+    let probe_payload = serde_json::to_string(&input.probe_payload)
+        .map_err(|error| VoomError::Internal(format!("encode adopted probe: {error}")))?;
+    let result_facts = serde_json::to_string(&input.result_facts)
+        .map_err(|error| VoomError::Internal(format!("encode adopted result facts: {error}")))?;
+    let owner = &input.owner;
+    let result = sqlx::query(
+        "INSERT INTO audio_extract_operation_outputs \
+         (operation_id, ordinal, output_id, source_snapshot_stream_id, \
+          source_provider_stream_index, bundle_role, target_path, staging_path, temp_path, \
+          expected_size_bytes, expected_checksum, artifact_handle_id, artifact_location_id, \
+          verification_id, commit_record_id, probe_worker_id, probe_payload, \
+          result_file_asset_id, result_file_version_id, result_file_location_id, \
+          result_media_snapshot_id, bundle_member_id, result_facts) \
+         VALUES (?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(operation_id)
+    .bind(&input.output.output_id)
+    .bind(&input.output.source_snapshot_stream_id)
+    .bind(i64::from(input.output.source_provider_stream_index))
+    .bind(&input.output.bundle_role)
+    .bind(&input.output.target_path)
+    .bind(&owner.staging_path)
+    .bind(&owner.temp_path)
+    .bind(i64_from_u64(owner.expected_size_bytes))
+    .bind(&owner.expected_checksum)
+    .bind(i64_from_u64(owner.artifact_handle_id))
+    .bind(i64_from_u64(owner.artifact_location_id))
+    .bind(i64_from_u64(owner.verification_id))
+    .bind(i64_from_u64(owner.commit_record_id))
+    .bind(i64_from_u64(input.probe_worker_id.0))
+    .bind(probe_payload)
+    .bind(i64_from_u64(owner.result_file_asset_id))
+    .bind(i64_from_u64(owner.result_file_version_id))
+    .bind(i64_from_u64(owner.result_file_location_id))
+    .bind(i64_from_u64(input.result_media_snapshot_id.0))
+    .bind(i64_from_u64(owner.bundle_member_id))
+    .bind(result_facts)
+    .execute(&mut **tx)
+    .await
+    .map_err(|error| VoomError::database_context("insert adopted audio output", error))?;
+    u64::try_from(result.last_insert_rowid())
+        .map_err(|error| VoomError::Internal(format!("adopted output id: {error}")))
+}
+
+async fn insert_legacy_adopted_lineage(
+    tx: &mut Transaction<'_, Sqlite>,
+    output_id: u64,
+    input: &NewLegacyAudioExtractAdoption,
+    recorded_at: &str,
+) -> Result<(), VoomError> {
+    sqlx::query(
+        "INSERT INTO audio_extract_output_lineage \
+         (operation_output_id, source_file_version_id, source_media_snapshot_id, \
+          source_snapshot_stream_id, source_provider_stream_index, \
+          result_file_version_id, recorded_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(i64_from_u64(output_id))
+    .bind(i64_from_u64(input.operation.source_file_version_id.0))
+    .bind(i64_from_u64(input.operation.source_media_snapshot_id.0))
+    .bind(&input.output.source_snapshot_stream_id)
+    .bind(i64::from(input.output.source_provider_stream_index))
+    .bind(i64_from_u64(input.owner.result_file_version_id))
+    .bind(recorded_at)
+    .execute(&mut **tx)
+    .await
+    .map_err(|error| VoomError::database_context("insert adopted audio lineage", error))?;
+    Ok(())
+}
 
 fn validate_new_operation(
     input: &NewAudioExtractOperation,
