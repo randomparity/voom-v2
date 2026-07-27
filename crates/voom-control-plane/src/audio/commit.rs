@@ -172,7 +172,7 @@ pub async fn record_staged_audio_extract(
             "source_file_version_id": input.source_file_version_id.0,
             "source_file_location_id": source_file_location_id.0,
             "selected_snapshot_stream_id": result.selected_snapshot_stream_id,
-            "intended_role": bundle_role(selection.role).as_str(),
+            "intended_role": bundle_role(selection.outputs[0].role).as_str(),
         }),
     )
     .await

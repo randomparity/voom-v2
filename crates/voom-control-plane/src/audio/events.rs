@@ -193,9 +193,9 @@ pub async fn record_extract_succeeded(
             artifact_handle_id: event.artifact_handle_id.0,
             artifact_location_id: event.artifact_location_id.0,
             staging_path,
-            selected_stream: stream_payload(&event.selection.stream),
+            selected_stream: stream_payload(&event.selection.outputs[0].stream),
             selected_snapshot_stream_id: event.result.selected_snapshot_stream_id.clone(),
-            role: role_name(event.selection.role).to_owned(),
+            role: role_name(event.selection.outputs[0].role).to_owned(),
             output_container: event.result.output_container.clone(),
             output_audio_codec: event.result.output_audio_codec.clone(),
             provider: event.result.provider.clone(),
@@ -231,10 +231,10 @@ pub async fn record_extract_failed(
         staging_path: event.staging_path.map(|path| path.display().to_string()),
         selected_stream: event
             .selection
-            .map(|selection| stream_payload(&selection.stream)),
+            .map(|selection| stream_payload(&selection.outputs[0].stream)),
         role: event
             .selection
-            .map(|selection| role_name(selection.role).to_owned()),
+            .map(|selection| role_name(selection.outputs[0].role).to_owned()),
         result: event.result,
         error: event.error,
     });
@@ -368,8 +368,8 @@ fn extract_started_payload(
         source_media_snapshot_id,
         source_bundle_id: input.source_bundle_id.0,
         staging_path,
-        selected_stream: stream_payload(&selection.stream),
-        role: role_name(selection.role).to_owned(),
+        selected_stream: stream_payload(&selection.outputs[0].stream),
+        role: role_name(selection.outputs[0].role).to_owned(),
         target_codec: selection.target_codec.clone(),
         output_container: selection.container.clone(),
         provider: Some("ffmpeg".to_owned()),

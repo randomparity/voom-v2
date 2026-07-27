@@ -12,18 +12,29 @@ use voom_worker_protocol::{
 use crate::audio::selection::SelectedAudioStream;
 
 #[test]
-fn planned_extract_request_carries_exact_singleton_output_projection() {
+fn planned_extract_request_carries_every_ordered_output_and_first_projection() {
     let mut selection = extract_selection();
     selection.operation_id = Some("node_extract_audio_test".to_owned());
-    selection.output_id = Some("extract_output_1234".to_owned());
-    selection.name_suffix = Some("a-1.opus.ogg".to_owned());
+    selection.outputs[0].output_id = Some("extract_output_1234".to_owned());
+    selection.outputs[0].name_suffix = Some("a-1.opus.ogg".to_owned());
+    let mut second = selection.outputs[0].clone();
+    second.output_id = Some("extract_output_5678".to_owned());
+    second.name_suffix = Some("a-2.opus.ogg".to_owned());
+    second.stream.snapshot_stream_id = "a-2".to_owned();
+    second.stream.provider_stream_index = 2;
+    second.source.snapshot_stream_id = "a-2".to_owned();
+    second.source.provider_stream_index = 2;
+    selection.outputs.push(second);
     let request = extract_request(&selection);
 
     let outputs = request.outputs.as_ref().unwrap();
-    assert_eq!(outputs.len(), 1);
+    assert_eq!(outputs.len(), 2);
     assert_eq!(outputs[0].output_id, "extract_output_1234");
+    assert_eq!(outputs[1].output_id, "extract_output_5678");
     assert_eq!(outputs[0].selection, request.selection);
     assert_eq!(outputs[0].output, request.output);
+    assert!(outputs[0].output.path.ends_with("out-0.ogg"));
+    assert!(outputs[1].output.path.ends_with("out-1.ogg"));
 }
 
 #[test]
@@ -169,7 +180,7 @@ async fn output_file_facts_must_match_result_facts() {
     tokio::fs::write(&path, b"actual").await.unwrap();
     let result = extract_result();
 
-    let err = require_extract_output_file_matches_result(&path, &result)
+    let err = require_extract_output_files_match_result(&[path], &result)
         .await
         .unwrap_err();
 
@@ -249,27 +260,32 @@ fn transcode_selection_two() -> TranscodeAudioSelectionPlan {
 fn extract_selection() -> ExtractAudioSelectionPlan {
     ExtractAudioSelectionPlan {
         operation_id: None,
-        output_id: None,
-        name_suffix: None,
-        output_count: 1,
-        stream: voom_worker_protocol::AudioStreamRef {
-            snapshot_stream_id: "a-1".to_owned(),
-            provider_stream_index: 1,
-        },
-        source: source_fact("a-1"),
-        role: AudioBundleRole::ExternalAudio,
+        outputs: vec![crate::audio::selection::ExtractAudioSelectionOutput {
+            output_id: None,
+            name_suffix: None,
+            stream: voom_worker_protocol::AudioStreamRef {
+                snapshot_stream_id: "a-1".to_owned(),
+                provider_stream_index: 1,
+            },
+            source: source_fact("a-1"),
+            role: AudioBundleRole::ExternalAudio,
+        }],
         target_codec: "opus".to_owned(),
         container: "ogg".to_owned(),
     }
 }
 
 fn extract_request(selection: &ExtractAudioSelectionPlan) -> ExtractAudioRequest {
+    let paths = (0..selection.outputs.len())
+        .map(|ordinal| PathBuf::from(format!("/tmp/stage/out-{ordinal}.ogg")))
+        .collect::<Vec<_>>();
     extract_audio_request_for(
         &selected_source(),
         selection,
         std::path::Path::new("/tmp/stage"),
-        std::path::Path::new("/tmp/stage/out.ogg"),
+        &paths,
     )
+    .unwrap()
 }
 
 fn source_fact(id: &str) -> SnapshotAudioStreamFact {

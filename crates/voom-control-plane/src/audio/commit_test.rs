@@ -630,29 +630,30 @@ fn extract_input(source_file_version_id: FileVersionId) -> ExecuteExtractAudioIn
 fn extract_selection() -> ExtractAudioSelectionPlan {
     ExtractAudioSelectionPlan {
         operation_id: None,
-        output_id: None,
-        name_suffix: None,
-        output_count: 1,
-        stream: voom_worker_protocol::AudioStreamRef {
-            snapshot_stream_id: "a-1".to_owned(),
-            provider_stream_index: 1,
-        },
-        source: voom_plan::audio::SnapshotAudioStreamFact {
-            snapshot_stream_id: "a-1".to_owned(),
-            provider_stream_index: 1,
-            codec: Some("aac".to_owned()),
-            language: Some("eng".to_owned()),
-            title: Some("Main".to_owned()),
-            channels: Some(2),
-            default: true,
-            disposition: voom_plan::audio::AudioDispositionFact {
+        outputs: vec![crate::audio::selection::ExtractAudioSelectionOutput {
+            output_id: None,
+            name_suffix: None,
+            stream: voom_worker_protocol::AudioStreamRef {
+                snapshot_stream_id: "a-1".to_owned(),
+                provider_stream_index: 1,
+            },
+            source: voom_plan::audio::SnapshotAudioStreamFact {
+                snapshot_stream_id: "a-1".to_owned(),
+                provider_stream_index: 1,
+                codec: Some("aac".to_owned()),
+                language: Some("eng".to_owned()),
+                title: Some("Main".to_owned()),
+                channels: Some(2),
                 default: true,
-                forced: false,
+                disposition: voom_plan::audio::AudioDispositionFact {
+                    default: true,
+                    forced: false,
+                    commentary: Some(false),
+                },
                 commentary: Some(false),
             },
-            commentary: Some(false),
-        },
-        role: voom_plan::audio::AudioBundleRole::ExternalAudio,
+            role: voom_plan::audio::AudioBundleRole::ExternalAudio,
+        }],
         target_codec: "opus".to_owned(),
         container: "ogg".to_owned(),
     }

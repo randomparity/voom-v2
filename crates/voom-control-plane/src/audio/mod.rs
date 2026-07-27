@@ -2,6 +2,7 @@ use std::path::PathBuf;
 
 use async_trait::async_trait;
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 use voom_core::ids::{ArtifactCommitRecordId, ArtifactVerificationId};
 use voom_core::{
     ArtifactHandleId, ArtifactLocationId, FileLocationId, FileVersionId, JobId, LeaseId,
@@ -536,30 +537,31 @@ async fn execute_extract_audio_inner(
         input.ticket_id,
     )
     .await?;
-    let staging = stage::prepare_extract_staging_path(
-        &input.staging_root,
-        input.ticket_id,
-        input.lease_id,
+    let paths = prepare_extract_paths(
+        &input,
         std::path::Path::new(&selected.location.value),
-        &selection.stream.snapshot_stream_id,
-        &selection.target_codec,
+        snapshot.id.0,
+        &selection,
     )
     .await?;
-    context.staging_path = Some(staging.path.clone());
-    let target_path = stage::extract_target_path(
-        &input.target_dir,
-        std::path::Path::new(&selected.location.value),
-        &selection.stream.snapshot_stream_id,
-        &selection.target_codec,
-    )
-    .await?;
+    let [staging_path] = paths.staging.paths.as_slice() else {
+        return Err(VoomError::Internal(
+            "singleton audio extraction produced an invalid staging path set".to_owned(),
+        ));
+    };
+    let [target_path] = paths.targets.as_slice() else {
+        return Err(VoomError::Internal(
+            "singleton audio extraction produced an invalid target path set".to_owned(),
+        ));
+    };
+    context.staging_path = Some(staging_path.clone());
 
     events::record_extract_started(
         cp,
         &input,
         selected.location.id,
         snapshot.id.0,
-        &staging.path,
+        staging_path,
         &selection,
     )
     .await?;
@@ -567,27 +569,103 @@ async fn execute_extract_audio_inner(
     let request = worker_contract::extract_audio_request_for(
         &selected,
         &selection,
-        &staging.canonical_root,
-        &staging.path,
-    );
+        &paths.staging.canonical_root,
+        &paths.staging.paths,
+    )?;
     let result = extract.dispatch_extract_audio(request.clone()).await?;
     context.result = Some(result.clone());
-    worker_contract::validate_extract_result(&selected, &selection, &request, &result)?;
-    worker_contract::require_extract_output_file_matches_result(&staging.path, &result).await?;
+    validate_extract_worker_result(
+        &selected,
+        &selection,
+        &request,
+        &paths.staging.paths,
+        &result,
+    )
+    .await?;
     let staged = commit::record_staged_audio_extract(
         cp,
         &input,
         selected.location.id,
-        &staging.path,
+        staging_path,
         &selection,
         &result,
     )
     .await?;
     context.artifact_handle_id = Some(staged.artifact_handle_id);
     context.artifact_location_id = Some(staged.artifact_location_id);
+    let verification_id = verify_staged_extract(cp, &staged, staging_path, verify).await?;
+    commit_verified_extract_audio(
+        cp,
+        ExtractCommitRequest {
+            input,
+            source_location_id: selected.location.id,
+            source_media_snapshot_id: snapshot.id.0,
+            staged,
+            staging_path: staging_path.clone(),
+            target_path: target_path.clone(),
+            selection,
+            result,
+            verification_id,
+        },
+    )
+    .await
+}
+
+struct ExtractExecutionPaths {
+    staging: stage::PreparedStagingPaths,
+    targets: Vec<PathBuf>,
+}
+
+async fn prepare_extract_paths(
+    input: &ExecuteExtractAudioInput,
+    source_path: &std::path::Path,
+    source_media_snapshot_id: u64,
+    selection: &selection::ExtractAudioSelectionPlan,
+) -> Result<ExtractExecutionPaths, VoomError> {
+    let targets = stage::extract_target_paths(&input.target_dir, source_path, selection).await?;
+    let operation_token = extract_operation_token(
+        input.source_file_version_id,
+        source_media_snapshot_id,
+        selection.operation_id.as_deref(),
+        &targets,
+    );
+    let staging =
+        stage::prepare_extract_staging_paths(&input.staging_root, &operation_token, 0, &targets)
+            .await?;
+    Ok(ExtractExecutionPaths { staging, targets })
+}
+
+fn extract_operation_token(
+    source_file_version_id: FileVersionId,
+    source_media_snapshot_id: u64,
+    operation_id: Option<&str>,
+    target_paths: &[PathBuf],
+) -> String {
+    let mut hasher = Sha256::new();
+    update_operation_hash(&mut hasher, &source_file_version_id.0.to_string());
+    update_operation_hash(&mut hasher, &source_media_snapshot_id.to_string());
+    update_operation_hash(&mut hasher, operation_id.unwrap_or("legacy"));
+    for path in target_paths {
+        update_operation_hash(&mut hasher, &path.to_string_lossy());
+    }
+    format!("{:x}", hasher.finalize())
+}
+
+fn update_operation_hash(hasher: &mut Sha256, value: &str) {
+    hasher.update(value.len().to_string());
+    hasher.update(b":");
+    hasher.update(value.as_bytes());
+}
+
+async fn verify_staged_extract(
+    cp: &ControlPlane,
+    staged: &commit::StagedAudioArtifact,
+    staging_path: &std::path::Path,
+    verify: &dyn VerifyArtifactDispatcher,
+) -> Result<ArtifactVerificationId, VoomError> {
     let verified = verify_artifact_with_dispatcher(
         cp,
-        VerifyArtifactInput::for_staged_file(staged.artifact_handle_id, &staging.path),
+        VerifyArtifactInput::for_staged_file(staged.artifact_handle_id, staging_path),
         verify,
         &NoVerifyArtifactHooks,
     )
@@ -598,21 +676,18 @@ async fn execute_extract_audio_inner(
             staged.artifact_handle_id
         )));
     }
-    commit_verified_extract_audio(
-        cp,
-        ExtractCommitRequest {
-            input,
-            source_location_id: selected.location.id,
-            source_media_snapshot_id: snapshot.id.0,
-            staged,
-            staging_path: staging.path,
-            target_path,
-            selection,
-            result,
-            verification_id: verified.verification_id,
-        },
-    )
-    .await
+    Ok(verified.verification_id)
+}
+
+async fn validate_extract_worker_result(
+    selected: &source::SelectedSource,
+    selection: &selection::ExtractAudioSelectionPlan,
+    request: &voom_worker_protocol::ExtractAudioRequest,
+    staging_paths: &[PathBuf],
+    result: &ExtractAudioResult,
+) -> Result<(), VoomError> {
+    worker_contract::validate_extract_result(selected, selection, request, result)?;
+    worker_contract::require_extract_output_files_match_result(staging_paths, result).await
 }
 
 #[derive(Debug, Default)]
@@ -641,12 +716,12 @@ struct ExtractCommitRequest {
 fn require_single_extract_output(
     selection: &selection::ExtractAudioSelectionPlan,
 ) -> Result<(), VoomError> {
-    if selection.output_count == 1 {
+    if selection.outputs.len() == 1 {
         return Ok(());
     }
     Err(VoomError::Config(format!(
         "audio extract planned {} outputs; atomic plural host commit is not available yet",
-        selection.output_count
+        selection.outputs.len()
     )))
 }
 
@@ -661,7 +736,7 @@ async fn commit_verified_extract_audio(
             verification_id: request.verification_id,
             source_file_version_id: request.input.source_file_version_id,
             source_bundle_id: request.input.source_bundle_id,
-            role: request.selection.role,
+            role: request.selection.outputs[0].role,
             staging_path: request.staging_path.clone(),
             target_path: request.target_path.clone(),
             output: request.result.output.clone(),
@@ -698,7 +773,7 @@ async fn commit_verified_extract_audio(
             commit::extract_post_commit_recovery(
                 &committed,
                 request.input.source_bundle_id,
-                request.selection.role,
+                request.selection.outputs[0].role,
                 &request.staging_path,
                 &err,
             )
