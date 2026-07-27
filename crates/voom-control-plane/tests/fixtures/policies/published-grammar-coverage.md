@@ -83,11 +83,14 @@ The set contains these exact cases:
   destination with different bytes. The existing-target commit guard makes
   F1c's `inspect` remux fail deterministically; its dependent phases do not
   run, while F1a continues and commits.
-- Resume F1a after two durable boundaries: first after the `inspect` per-file
-  summary is committed and before `normalize` dispatch, then after the
-  `normalize` summary is committed and before `organize` dispatch. Each resume
-  opens a new job, copies the prior job's inherited committed/skipped outcomes,
-  and produces the same per-file gate decision without walking older jobs.
+- Focused coordinator tests owned by #330 resume F1a after two durable
+  boundaries: first after the `inspect` per-file summary is committed and
+  before `normalize` dispatch, then after the `normalize` summary is committed
+  and before `organize` dispatch. Each resume opens a new job, copies the prior
+  job's inherited committed/skipped outcomes, and produces the same per-file
+  gate decision without walking older jobs. #338's process-boundary acceptance
+  uses the shipped fresh-execution CLI; it does not introduce a public resume
+  command.
 
 - Expected mutation: for the passing source, the matching conditional remuxes
   to MKV, the first-rule phase transcodes video to HEVC, and the all-rules phase
@@ -95,8 +98,8 @@ The set contains these exact cases:
   successful-file commits.
 - Oracle: per-file VOOM phase summaries prove skip/rule decisions, `completed`
   admission after committed or skipped predecessors, true and false `modified`
-  gates, visible failure for missing predecessor history, and identical
-  decisions after repeated resume.
+  gates, and visible failure for missing predecessor history. Focused #330
+  coordinator tests prove identical decisions after repeated resume.
   The batch report and exit status identify partial failure while retaining the
   successful file's committed output and artifact-verification result.
 
