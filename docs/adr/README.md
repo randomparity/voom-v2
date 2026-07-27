@@ -48,3 +48,4 @@ are append-only — supersede an ADR with a new one rather than rewriting histor
 | [0040](0040-structured-remux-attachment-selection.md) | Resolve remux attachments from structured provider facts |
 | [0041](0041-deterministic-multi-output-audio-extraction.md) | Deterministic multi-output audio extraction descriptors |
 | [0042](0042-atomic-audio-extraction-publication.md) | Publish audio extraction outputs as one recoverable operation |
+| [0043](0043-recoverable-audio-synthesis-lineage.md) | Publish synthesized audio companions with recoverable stream lineage |
