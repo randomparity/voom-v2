@@ -8,7 +8,7 @@ pub use voom_core::{WorkerKind, WorkerStatus};
 
 use super::Repository;
 use super::common::{
-    i64_from_u64, iso8601, map_row_err, parse_iso8601, serialize_json, u64_from_i64,
+    i64_from_u64, iso8601, map_row_err, parse_iso8601, serialize_json, u32_from_i64, u64_from_i64,
 };
 use super::nodes::{NodeKind, NodeStatus};
 
@@ -50,10 +50,30 @@ pub struct WorkerInspection {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkerOperationEligibility {
+    pub worker_status: Option<WorkerStatus>,
     pub has_capability: bool,
     pub has_grant: bool,
     pub is_denied: bool,
     pub artifact_access: Vec<String>,
+}
+
+impl WorkerOperationEligibility {
+    /// Return whether the worker may execute the operation now.
+    #[must_use]
+    pub const fn is_eligible(&self) -> bool {
+        let is_live = match self.worker_status {
+            Some(WorkerStatus::Registered | WorkerStatus::Active) => true,
+            Some(WorkerStatus::Stale | WorkerStatus::Retired) | None => false,
+        };
+        is_live && self.has_capability && self.has_grant && !self.is_denied
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkerOperationCandidate {
+    pub worker_id: WorkerId,
+    pub active_leases: u32,
+    pub max_parallel: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -449,6 +469,7 @@ impl SqliteWorkerRepo {
         worker_id: WorkerId,
         operation: &TicketOperation,
     ) -> Result<WorkerOperationEligibility, VoomError> {
+        let worker_status = get_in_tx(tx, worker_id).await?.map(|worker| worker.status);
         let capability_rows = sqlx::query(
             "SELECT artifact_access FROM worker_capabilities \
              WHERE worker_id = ? AND operation = ? ORDER BY id ASC",
@@ -493,6 +514,7 @@ impl SqliteWorkerRepo {
         }
 
         Ok(WorkerOperationEligibility {
+            worker_status,
             has_capability: !capability_rows.is_empty(),
             has_grant,
             is_denied,
@@ -519,6 +541,66 @@ impl SqliteWorkerRepo {
         Ok(out)
     }
 
+    /// List workers whose effective capability and grants allow an operation.
+    ///
+    /// Each worker appears at most once. The result is observational; lease
+    /// acquisition must recheck eligibility in its write transaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns a database error when worker, lease, or grant rows cannot be
+    /// read or decoded.
+    pub async fn operation_candidates(
+        &self,
+        operation: &TicketOperation,
+    ) -> Result<Vec<WorkerOperationCandidate>, VoomError> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| VoomError::database_context("begin", e))?;
+        let out = self.operation_candidates_in_tx(&mut tx, operation).await?;
+        tx.commit()
+            .await
+            .map_err(|e| VoomError::database_context("commit", e))?;
+        Ok(out)
+    }
+
+    async fn operation_candidates_in_tx(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        operation: &TicketOperation,
+    ) -> Result<Vec<WorkerOperationCandidate>, VoomError> {
+        let rows = sqlx::query(
+            "SELECT w.id AS worker_id, COALESCE(held.active_leases, 0) AS active_leases \
+             FROM workers w \
+             LEFT JOIN ( \
+                 SELECT worker_id, COUNT(*) AS active_leases \
+                 FROM leases WHERE state = 'held' GROUP BY worker_id \
+             ) held ON held.worker_id = w.id \
+             ORDER BY w.id ASC",
+        )
+        .fetch_all(&mut **tx)
+        .await
+        .map_err(|e| VoomError::database_context("worker operation candidates", e))?;
+        let mut candidates = Vec::new();
+        for row in rows {
+            let worker_id = worker_candidate_id(&row)?;
+            let eligibility = self
+                .operation_eligibility_in_tx(tx, worker_id, operation)
+                .await?;
+            if !eligibility.is_eligible() {
+                continue;
+            }
+            candidates.push(WorkerOperationCandidate {
+                worker_id,
+                active_leases: worker_candidate_active_leases(&row)?,
+                max_parallel: max_parallel_in_tx(tx, worker_id, operation).await?,
+            });
+        }
+        Ok(candidates)
+    }
+
     pub async fn node_owned_worker_in_tx(
         &self,
         tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
@@ -540,6 +622,75 @@ impl SqliteWorkerRepo {
         }
         Ok(worker)
     }
+}
+
+fn worker_candidate_id(row: &sqlx::sqlite::SqliteRow) -> Result<WorkerId, VoomError> {
+    let worker_id: i64 = row
+        .try_get("worker_id")
+        .map_err(|e| map_row_err("worker operation candidates", &e))?;
+    Ok(WorkerId(u64_from_i64(worker_id)))
+}
+
+fn worker_candidate_active_leases(row: &sqlx::sqlite::SqliteRow) -> Result<u32, VoomError> {
+    let active_leases: i64 = row
+        .try_get("active_leases")
+        .map_err(|e| map_row_err("worker operation candidates", &e))?;
+    u32_from_i64(active_leases)
+}
+
+async fn max_parallel_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    worker_id: WorkerId,
+    operation: &TicketOperation,
+) -> Result<u32, VoomError> {
+    let rows =
+        sqlx::query("SELECT max_parallel FROM worker_grants WHERE worker_id = ? ORDER BY id")
+            .bind(i64_from_u64(worker_id.0))
+            .fetch_all(&mut **tx)
+            .await
+            .map_err(|e| VoomError::database_context("worker max_parallel read", e))?;
+    let mut operation_limit = None;
+    let mut wildcard_limit = None;
+    for row in rows {
+        let raw: String = row
+            .try_get("max_parallel")
+            .map_err(|e| map_row_err("worker max_parallel", &e))?;
+        let value: JsonValue = serde_json::from_str(&raw)
+            .map_err(|e| VoomError::database_context("parse worker max_parallel", e))?;
+        operation_limit = max_limit(
+            operation_limit,
+            positive_u32(value.get(operation.as_str()), "max_parallel operation")?,
+        );
+        wildcard_limit = max_limit(
+            wildcard_limit,
+            positive_u32(value.get("*"), "max_parallel wildcard")?,
+        );
+    }
+    Ok(operation_limit.or(wildcard_limit).unwrap_or(1))
+}
+
+fn max_limit(current: Option<u32>, candidate: Option<u32>) -> Option<u32> {
+    match (current, candidate) {
+        (Some(current), Some(candidate)) => Some(current.max(candidate)),
+        (Some(current), None) => Some(current),
+        (None, Some(candidate)) => Some(candidate),
+        (None, None) => None,
+    }
+}
+
+fn positive_u32(value: Option<&JsonValue>, field: &'static str) -> Result<Option<u32>, VoomError> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let Some(limit) = value.as_u64() else {
+        return Err(VoomError::database(format!("{field} must be an integer")));
+    };
+    if limit == 0 {
+        return Err(VoomError::database(format!("{field} must be positive")));
+    }
+    u32::try_from(limit)
+        .map(Some)
+        .map_err(|_| VoomError::database(format!("{field} does not fit u32")))
 }
 
 async fn get_in_tx(

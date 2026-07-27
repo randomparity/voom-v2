@@ -353,25 +353,84 @@ async fn worker_operation_eligibility_requires_capability_and_grant_without_deny
     assert!(eligible.has_capability);
     assert!(eligible.has_grant);
     assert!(!eligible.is_denied);
+    assert_eq!(eligible.worker_status, Some(WorkerStatus::Registered));
+    assert!(eligible.is_eligible());
     assert_eq!(eligible.artifact_access, vec!["shared_mount"]);
 }
 
 #[tokio::test]
-async fn worker_operation_eligibility_surfaces_denies() {
+async fn worker_operation_eligibility_applies_deny_across_split_grant_rows() {
+    let fixture = worker_fixture().await;
+    fixture
+        .insert_capability("transcode_video", &["shared_mount"])
+        .await;
+    fixture.insert_grant(&["transcode_video"], &[]).await;
+    fixture.insert_grant(&[], &["transcode_video"]).await;
+
+    let eligibility = fixture
+        .repo
+        .operation_eligibility(fixture.worker_id, &worker_op("transcode_video"))
+        .await
+        .unwrap();
+    assert!(eligibility.has_grant);
+    assert!(eligibility.is_denied);
+    assert!(!eligibility.is_eligible());
+}
+
+#[tokio::test]
+async fn worker_operation_eligibility_rejects_stale_and_retired_lifecycle_states() {
+    let fixture = worker_fixture().await;
+    fixture
+        .insert_capability("transcode_video", &["shared_mount"])
+        .await;
+    fixture.insert_grant(&["transcode_video"], &[]).await;
+
+    fixture.set_status("stale").await;
+    let stale = fixture
+        .repo
+        .operation_eligibility(fixture.worker_id, &worker_op("transcode_video"))
+        .await
+        .unwrap();
+    assert_eq!(stale.worker_status, Some(WorkerStatus::Stale));
+    assert!(!stale.is_eligible());
+
+    fixture.set_retired().await;
+    let retired = fixture
+        .repo
+        .operation_eligibility(fixture.worker_id, &worker_op("transcode_video"))
+        .await
+        .unwrap();
+    assert_eq!(retired.worker_status, Some(WorkerStatus::Retired));
+    assert!(!retired.is_eligible());
+}
+
+#[tokio::test]
+async fn operation_candidates_returns_each_effective_worker_once() {
     let fixture = worker_fixture().await;
     fixture
         .insert_capability("transcode_video", &["shared_mount"])
         .await;
     fixture
-        .insert_grant(&["transcode_video"], &["transcode_video"])
+        .insert_grant_with_limit(&["transcode_video"], &[], serde_json::json!({"*": 2}))
+        .await;
+    fixture
+        .insert_grant_with_limit(
+            &["transcode_video"],
+            &[],
+            serde_json::json!({"transcode_video": 4}),
+        )
         .await;
 
-    let eligible = fixture
+    let candidates = fixture
         .repo
-        .operation_eligibility(fixture.worker_id, &worker_op("transcode_video"))
+        .operation_candidates(&worker_op("transcode_video"))
         .await
         .unwrap();
-    assert!(eligible.is_denied);
+
+    assert_eq!(candidates.len(), 1);
+    assert_eq!(candidates[0].worker_id, fixture.worker_id);
+    assert_eq!(candidates[0].active_leases, 0);
+    assert_eq!(candidates[0].max_parallel, 4);
 }
 
 #[tokio::test]
@@ -552,6 +611,16 @@ impl WorkerFixture {
     }
 
     async fn insert_grant(&self, can_execute: &[&str], denies: &[&str]) {
+        self.insert_grant_with_limit(can_execute, denies, serde_json::json!({}))
+            .await;
+    }
+
+    async fn insert_grant_with_limit(
+        &self,
+        can_execute: &[&str],
+        denies: &[&str],
+        max_parallel: serde_json::Value,
+    ) {
         self.repo
             .record_grant(NewGrant {
                 worker_id: self.worker_id,
@@ -565,8 +634,26 @@ impl WorkerFixture {
                     .iter()
                     .map(|operation| worker_op(operation))
                     .collect(),
-                max_parallel: serde_json::json!({}),
+                max_parallel,
             })
+            .await
+            .unwrap();
+    }
+
+    async fn set_status(&self, status: &str) {
+        sqlx::query("UPDATE workers SET status = ? WHERE id = ?")
+            .bind(status)
+            .bind(i64::try_from(self.worker_id.0).unwrap())
+            .execute(&self.repo.pool)
+            .await
+            .unwrap();
+    }
+
+    async fn set_retired(&self) {
+        sqlx::query("UPDATE workers SET status = 'retired', retired_at = ? WHERE id = ?")
+            .bind("1970-01-01T00:00:00Z")
+            .bind(i64::try_from(self.worker_id.0).unwrap())
+            .execute(&self.repo.pool)
             .await
             .unwrap();
     }
