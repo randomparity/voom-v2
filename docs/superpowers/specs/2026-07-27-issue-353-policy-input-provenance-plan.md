@@ -3,11 +3,12 @@
 **Goal:** Reject missing, non-file, or mismatched generic policy-input snapshot
 links inside the write transaction without persisting partial aggregate state.
 
-**Design:** Validate the complete draft and collect distinct linked IDs before
-taking a database lock. Use one `json_each`-backed identity-repository read in
-an immediate SQLite transaction, validate every linked media member in memory,
-then call the policy-input repository. Keep the existing `NOT_FOUND` and
-`CONFLICT` codes and make no schema or wire changes.
+**Design:** Validate the complete draft and prepare an opaque, sorted,
+deduplicated, JSON-encoded identity query before taking a database lock. Use
+that query for one `json_each`-backed identity-repository read in an immediate
+SQLite transaction, validate every linked media member in memory, then call the
+policy-input repository. Keep the existing `NOT_FOUND` and `CONFLICT` codes and
+make no schema or wire changes.
 
 **Success criteria:**
 
@@ -19,26 +20,31 @@ then call the policy-input repository. Keep the existing `NOT_FOUND` and
 - scan-import behavior is unchanged; and
 - focused tests and `just ci` pass without warnings.
 
-## Task 1: Add a bounded bulk identity read
+## Task 1: Add a set-based bulk identity read
 
 **Files:**
 
 - Modify: `crates/voom-store/src/repo/media/identity.rs`
 - Modify: `crates/voom-store/src/repo/media/identity_test.rs`
 
-1. Add
-   `IdentityRepo::get_media_snapshot_file_versions_in_tx`, accepting a slice of
-   snapshot IDs and returning deterministic `(snapshot ID, file-version ID)`
-   pairs for the IDs that exist.
-2. Return an empty vector before constructing SQL when the input is empty.
-3. Convert IDs to SQLite's `i64` representation, encode them in one JSON
-   array, and bind that array to one query using
+1. Add an opaque `MediaSnapshotFileVersionQuery` whose constructor sorts,
+   deduplicates, converts, and JSON-encodes snapshot IDs before a transaction
+   begins. Keep the encoded representation private.
+2. Add
+   `IdentityRepo::get_media_snapshot_file_versions_in_tx`, accepting the
+   prepared query and returning deterministic
+   `(snapshot ID, file-version ID)` pairs for the IDs that exist.
+3. Return an empty vector before constructing SQL when the prepared input is
+   empty.
+4. Bind the pre-encoded JSON array to one query using
    `IN (SELECT value FROM json_each(?))`.
-4. Order results by snapshot ID. Missing IDs are omitted for the policy caller
+5. Order results by snapshot ID. Missing IDs are omitted for the policy caller
    to classify; duplicate inputs yield one row.
-5. Add store tests for empty input, duplicate/existing/missing IDs, stable
+6. Add store tests for empty input, duplicate/existing/missing IDs, stable
    ordering, and a request larger than SQLite's ordinary parameter limit.
-6. Run:
+   Treat the large request as a one-bind query-shape test, not a supported
+   aggregate-size claim; #375 owns the writer budget.
+7. Run:
 
    ```sh
    cargo test -p voom-store --all-features --lib \
@@ -91,11 +97,12 @@ test-only commit would leave the branch red.
 
 1. Run `voom_policy::validate_input_set` before acquiring the write lock and
    map the error to the existing `PolicyValidationError` contract.
-2. Collect linked snapshot IDs into a `BTreeSet`, then change the generic
-   writer to `begin_immediate_tx`.
+2. Collect linked snapshot IDs and construct
+   `MediaSnapshotFileVersionQuery` before changing the generic writer to
+   `begin_immediate_tx`.
 3. Call
    `IdentityRepo::get_media_snapshot_file_versions_in_tx` once with the
-   distinct IDs and index its result by snapshot ID.
+   prepared IDs and index its result by snapshot ID.
 4. Iterate every linked member in draft order.
 5. Return `NotFound` when its snapshot ID is absent from the result.
 6. Return `Conflict` when the linked member does not target a file version or
@@ -122,7 +129,8 @@ fix(control-plane): validate policy input provenance
 ## Task 4: Verify and hand off
 
 1. Re-read the complete `main...HEAD` diff for unrelated changes, insertions
-   before validation, error-code drift, and accidental liveness checks.
+   before validation, error-code drift, accidental liveness checks, and any
+   claim to solve #375's independent writer-budget problem.
 2. Run:
 
    ```sh

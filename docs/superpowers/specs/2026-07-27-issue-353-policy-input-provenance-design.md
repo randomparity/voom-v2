@@ -18,15 +18,17 @@ scan-import and historical-input contracts.
   `existing_media_snapshot_id` is checked against the exact
   `TargetRef::FileVersion` in the same write transaction.
 - **Permitted surface:** the control-plane policy-input case handler and
-  sibling tests; one bounded set-based `IdentityRepo` method and its store
-  tests; and this issue's design and plan.
+  sibling tests; one prepared identity-ID query type, one set-based
+  `IdentityRepo` method, their store tests; and this issue's design and plan.
 - **Direct dependencies:** a new
   `IdentityRepo::get_media_snapshot_file_versions_in_tx` bulk read,
+  its opaque `MediaSnapshotFileVersionQuery` input,
   `SqlitePolicyInputRepo::create_input_set_in_tx`, `begin_immediate_tx`,
   SQLite `json_each`, the Sprint 3 aggregate transaction, and ADR 0036's
   selected-version provenance rule.
-- **Compatibility:** no public type, JSON, SQL, error-code, event, or policy
-  grammar changes.
+- **Compatibility:** the new Rust API is additive; no existing method
+  signature, persisted JSON or SQL shape, error code, event, or policy grammar
+  changes.
 
 Explicit exclusions:
 
@@ -42,6 +44,10 @@ Explicit exclusions:
   plane, as established by the Sprint 3 architecture.
 - Generic writes do not adopt scan import's live-version requirement.
   Historical file-version/snapshot pairs remain valid durable selections.
+- Policy-input aggregate size and SQLite writer-budget enforcement are owned by
+  #375. The existing repository already validates and inserts an unbounded
+  number of members while holding the writer lock. #353 adds no size limit and
+  does not claim that one set-based read makes an unbounded aggregate safe.
 
 An excluded concern is blocking if this change depends on it or makes it
 worse.
@@ -62,21 +68,31 @@ not be admitted in the first place.
 
 ## Decision
 
-### Bounded identity read
+### Set-based identity read
 
-`IdentityRepo` adds this transaction-scoped read:
+The control plane prepares an opaque identity query before it acquires a
+database lock:
+
+```text
+MediaSnapshotFileVersionQuery::new(snapshot_ids)
+```
+
+The constructor sorts and deduplicates the IDs, converts them to the
+repository's SQLite `i64` representation, and serializes the vector once. Its
+encoded representation is private so callers cannot inject arbitrary
+`json_each` input.
+
+`IdentityRepo` then accepts the prepared query in its transaction-scoped read:
 
 ```text
 get_media_snapshot_file_versions_in_tx(
     transaction,
-    snapshot_ids: &[MediaSnapshotId],
+    prepared_query: &MediaSnapshotFileVersionQuery,
 ) -> [(MediaSnapshotId, FileVersionId)]
 ```
 
-The implementation returns an empty vector without issuing SQL when the input
-is empty. Otherwise it converts the IDs to the repository's SQLite `i64`
-representation, serializes that vector once, and binds it to one set-based
-query:
+The read returns an empty vector without issuing SQL when the prepared query is
+empty. Otherwise it binds the pre-encoded IDs to one set-based query:
 
 ```sql
 SELECT id, file_version_id
@@ -85,11 +101,9 @@ WHERE id IN (SELECT value FROM json_each(?))
 ORDER BY id
 ```
 
-This established repository pattern uses one bind regardless of aggregate
-size, so it does not hit SQLite's variable limit. `IN` makes duplicate input
-IDs produce one result row. The control plane still deduplicates linked IDs
-before calling the repository so the request and returned map have one entry
-per identity.
+This established repository pattern uses one bind instead of one bind per
+member. `IN` also provides defense-in-depth against duplicate input rows. The
+prepared query and returned map contain one entry per identity.
 
 The method returns every existing requested `(snapshot, version)` pair and
 omits missing IDs. The control plane owns the public `NOT_FOUND` decision and
@@ -102,7 +116,9 @@ Before acquiring a database lock, the generic writer:
 
 1. runs `voom_policy::validate_input_set`, preserving the existing
    model-validation error precedence; and
-2. collects all linked snapshot IDs into a `BTreeSet`.
+2. collects all linked snapshot IDs; then
+3. constructs `MediaSnapshotFileVersionQuery`, completing deterministic
+   sorting, deduplication, integer conversion, and JSON encoding.
 
 The repository repeats model validation before insertion as defense in depth.
 
@@ -112,6 +128,12 @@ avoids a deferred lock-upgrade failure and keeps provenance validation and
 insertion in one serializable writer boundary. The lock-held validation work is
 one set-based query plus an in-memory pass; it no longer grows by one database
 round trip per member.
+
+The aggregate's existing validation and row inserts remain linear and
+unbounded while the writer lock is held. #375 owns defining a supported size
+and proving a writer-time budget. #353 neither fixes nor hides that
+pre-existing limit; it minimizes its new lock-held work to the required
+database read and exact-link checks.
 
 Inside the transaction, the handler:
 
@@ -186,8 +208,9 @@ introduced.
 - Exact valid link round-trips through the generic writer.
 - The bulk identity read returns immediately for an empty slice, collapses
   duplicate IDs, orders results deterministically, reports existing pairs
-  while omitting missing IDs, and accepts more IDs than SQLite's ordinary bind
-  limit because it uses one JSON bind.
+  while omitting missing IDs, and uses one SQL bind for an ID list larger than
+  SQLite's ordinary parameter limit. This is a query-shape test, not a
+  supported aggregate-size or writer-budget claim; #375 owns those boundaries.
 - A missing snapshot returns `NOT_FOUND`.
 - A linked non-file target returns `CONFLICT`.
 - A later mismatched member returns `CONFLICT` after an earlier valid member
