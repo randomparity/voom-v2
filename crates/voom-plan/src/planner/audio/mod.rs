@@ -313,10 +313,6 @@ fn audio_block_diagnostic(
             PlanningDiagnosticCode::UnsupportedMediaShape,
             "media shape is not supported by audio planning",
         ),
-        AudioPlanningBlock::MultipleMatches => (
-            PlanningDiagnosticCode::UnsupportedMediaShape,
-            "extract_audio selector matched multiple audio streams",
-        ),
         AudioPlanningBlock::SynthesisNotDownmix => (
             PlanningDiagnosticCode::UnsupportedMediaShape,
             "synthesize audio target channel count must be fewer than the source (a downmix)",

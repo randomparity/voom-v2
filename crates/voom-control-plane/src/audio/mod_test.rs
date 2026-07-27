@@ -10,8 +10,8 @@ use voom_store::repo::bundles::NewAssetBundle;
 use voom_store::repo::identity::{DiscoveredFile, FileLocationKind, IdentityRepo, IngestOutcome};
 use voom_store::repo::identity::{MediaWorkKind, NewMediaVariant, NewMediaWork};
 use voom_worker_protocol::{
-    AudioObservedFacts, AudioOutputStreamFact, ExtractAudioRequest, ExtractAudioResult,
-    TranscodeAudioRequest, TranscodeAudioResult, VerifyArtifactObservedFacts,
+    AudioObservedFacts, AudioOutputStreamFact, ExtractAudioOutputResult, ExtractAudioRequest,
+    ExtractAudioResult, TranscodeAudioRequest, TranscodeAudioResult, VerifyArtifactObservedFacts,
     VerifyArtifactRequest, VerifyArtifactResult, VerifyArtifactStatus,
 };
 
@@ -142,6 +142,147 @@ async fn extract_failure_records_audio_failed_event() {
 
     assert_eq!(err.error_code(), voom_core::ErrorCode::NotFound);
     assert_event_count(&cp, "artifact.audio_extract_failed", 1).await;
+}
+
+#[tokio::test]
+async fn extract_audio_plural_rejects_before_staging_target_or_dispatch() {
+    let (cp, _db, dir) = fixture_with_dir().await;
+    let mut source = seed_audio_source(&cp, &dir, b"source").await;
+    source.snapshot = record_plural_audio_snapshot(&cp, source.version).await;
+    let bundle = seed_bundle(&cp).await;
+    let mut input = extract_input_for_source(&source, bundle.id, &dir);
+    let operation_id = "node_extract_audio_plural";
+    input.operation_payload["operation_id"] = serde_json::json!(operation_id);
+    input.operation_payload["outputs"] = serde_json::json!([
+        {
+            "output_id": voom_plan::audio::extract_output_id(operation_id, "a-1"),
+            "source_snapshot_stream_id": "a-1",
+            "source_provider_stream_index": 1,
+            "name_suffix": "a-1.opus.ogg",
+            "bundle_role": "external_audio"
+        },
+        {
+            "output_id": voom_plan::audio::extract_output_id(operation_id, "a-2"),
+            "source_snapshot_stream_id": "a-2",
+            "source_provider_stream_index": 2,
+            "name_suffix": "a-2.opus.ogg",
+            "bundle_role": "commentary_audio"
+        }
+    ]);
+    let staging_root = input.staging_root.clone();
+    let target_dir = input.target_dir.clone();
+
+    let error = execute_extract_audio_with_dispatchers(
+        &cp,
+        input,
+        &UncalledExtractDispatcher,
+        &UncalledVerifyDispatcher,
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error.error_code(), voom_core::ErrorCode::ConfigInvalid);
+    assert!(error.to_string().contains("planned 2 outputs"));
+    assert!(!staging_root.exists());
+    assert!(!target_dir.exists());
+    assert_table_count(&cp, "artifact_handles", 0).await;
+    assert_table_count(&cp, "artifact_commit_records", 0).await;
+    assert_table_count(&cp, "file_versions", 1).await;
+    assert_event_count(&cp, "artifact.audio_extract_succeeded", 0).await;
+}
+
+#[tokio::test]
+async fn extract_audio_malformed_result_list_stops_before_verifier_and_commit() {
+    let (cp, _db, dir) = fixture_with_dir().await;
+    let source = seed_audio_source(&cp, &dir, b"source").await;
+    let bundle = seed_bundle(&cp).await;
+    let input = extract_input_for_source(&source, bundle.id, &dir);
+    let target_path = input.target_dir.join("source.a-1.opus.ogg");
+
+    let error = execute_extract_audio_with_dispatchers(
+        &cp,
+        input,
+        &MissingOutputsExtractDispatcher {
+            output_bytes: b"extracted".to_vec(),
+        },
+        &UncalledVerifyDispatcher,
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(
+        error.error_code(),
+        voom_core::ErrorCode::MalformedWorkerResult
+    );
+    assert!(error.to_string().contains("missing the outputs list"));
+    assert!(!target_path.exists());
+    assert_table_count(&cp, "artifact_handles", 0).await;
+    assert_table_count(&cp, "artifact_commit_records", 0).await;
+    assert_table_count(&cp, "file_versions", 1).await;
+    assert_event_count(&cp, "artifact.audio_extract_succeeded", 0).await;
+}
+
+#[tokio::test]
+async fn extract_audio_inconsistent_or_extra_results_stop_before_verifier_and_commit() {
+    for mutation in [
+        ExtractResultMutation::ProjectionMismatch,
+        ExtractResultMutation::ExtraOutput,
+    ] {
+        let (cp, _db, dir) = fixture_with_dir().await;
+        let source = seed_audio_source(&cp, &dir, b"source").await;
+        let bundle = seed_bundle(&cp).await;
+        let input = extract_input_for_source(&source, bundle.id, &dir);
+        let target_path = input.target_dir.join("source.a-1.opus.ogg");
+
+        let error = execute_extract_audio_with_dispatchers(
+            &cp,
+            input,
+            &MutatingOutputsExtractDispatcher {
+                output_bytes: b"extracted".to_vec(),
+                mutation,
+            },
+            &UncalledVerifyDispatcher,
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(
+            error.error_code(),
+            voom_core::ErrorCode::MalformedWorkerResult
+        );
+        assert!(!target_path.exists());
+        assert_table_count(&cp, "artifact_handles", 0).await;
+        assert_table_count(&cp, "artifact_commit_records", 0).await;
+        assert_table_count(&cp, "file_versions", 1).await;
+        assert_event_count(&cp, "artifact.audio_extract_succeeded", 0).await;
+    }
+}
+
+#[tokio::test]
+async fn extract_audio_legacy_singleton_remains_executable() {
+    let (cp, _db, dir) = fixture_with_dir().await;
+    let source = seed_audio_source(&cp, &dir, b"source").await;
+    let bundle = seed_bundle(&cp).await;
+    let mut input = extract_input_for_source(&source, bundle.id, &dir);
+    let payload = input.operation_payload.as_object_mut().unwrap();
+    payload.remove("operation_id");
+    payload.remove("outputs");
+
+    let report = execute_extract_audio_with_dispatchers(
+        &cp,
+        input,
+        &WritingExtractDispatcher {
+            output_bytes: b"extracted".to_vec(),
+        },
+        &SuccessfulVerifyDispatcher,
+    )
+    .await
+    .unwrap();
+
+    assert!(report.target_path.is_file());
+    assert!(report.commit_record_id.0 > 0);
+    assert!(report.result_file_version_id.0 > source.version.0);
+    assert_event_count(&cp, "artifact.audio_extract_succeeded", 1).await;
 }
 
 #[test]
@@ -413,6 +554,60 @@ async fn seed_audio_source(
     }
 }
 
+async fn record_plural_audio_snapshot(
+    cp: &crate::ControlPlane,
+    file_version_id: FileVersionId,
+) -> u64 {
+    cp.record_media_snapshot(
+        file_version_id,
+        None,
+        serde_json::json!({
+            "container": "mkv",
+            "streams": [
+                {
+                    "id": "v-1",
+                    "index": 0,
+                    "kind": "video",
+                    "codec_name": "h264"
+                },
+                {
+                    "id": "a-1",
+                    "index": 1,
+                    "kind": "audio",
+                    "codec_name": "aac",
+                    "language": "eng",
+                    "title": "Main",
+                    "channels": 2,
+                    "disposition": {
+                        "default": true,
+                        "forced": false,
+                        "commentary": false
+                    }
+                },
+                {
+                    "id": "a-2",
+                    "index": 2,
+                    "kind": "audio",
+                    "codec_name": "aac",
+                    "language": "eng",
+                    "title": "Commentary",
+                    "channels": 2,
+                    "disposition": {
+                        "default": false,
+                        "forced": false,
+                        "commentary": true
+                    }
+                }
+            ]
+        }),
+        OffsetDateTime::UNIX_EPOCH,
+    )
+    .await
+    .unwrap()
+    .id
+    .0
+}
+
 async fn seed_bundle(cp: &crate::ControlPlane) -> voom_store::repo::bundles::AssetBundle {
     let work = cp
         .create_media_work(NewMediaWork {
@@ -510,6 +705,7 @@ fn extract_input_for_source(
     source_bundle_id: BundleId,
     dir: &tempfile::TempDir,
 ) -> ExecuteExtractAudioInput {
+    let operation_id = "node_extract_audio_test";
     ExecuteExtractAudioInput {
         job_id: JobId(1),
         ticket_id: TicketId(2),
@@ -519,11 +715,19 @@ fn extract_input_for_source(
         source_bundle_id,
         operation_payload: serde_json::json!({
             "type": "extract_audio",
+            "operation_id": operation_id,
             "target_codec": "opus",
             "container": "ogg",
             "source_media_snapshot_id": source.snapshot,
             "snapshot_stream_id": "a-1",
-            "filter": null
+            "filter": null,
+            "outputs": [{
+                "output_id": voom_plan::audio::extract_output_id(operation_id, "a-1"),
+                "source_snapshot_stream_id": "a-1",
+                "source_provider_stream_index": 1,
+                "name_suffix": "a-1.opus.ogg",
+                "bundle_role": "external_audio"
+            }]
         }),
         staging_root: dir.path().join("voom-audio-stage"),
         target_dir: dir.path().join("voom-audio-out"),
@@ -539,6 +743,16 @@ async fn assert_event_count(cp: &crate::ControlPlane, kind: &str, expected: i64)
         .unwrap();
     let count: i64 = row.try_get("count").unwrap();
     assert_eq!(count, expected);
+}
+
+async fn assert_table_count(cp: &crate::ControlPlane, table: &str, expected: i64) {
+    let query = format!("SELECT COUNT(*) AS count FROM {table}");
+    let row = sqlx::query(&query)
+        .fetch_one(cp.pool_for_test())
+        .await
+        .unwrap();
+    let count: i64 = row.try_get("count").unwrap();
+    assert_eq!(count, expected, "unexpected row count for {table}");
 }
 
 async fn latest_event_payload(cp: &crate::ControlPlane, kind: &str) -> serde_json::Value {
@@ -761,6 +975,70 @@ struct WritingExtractDispatcher {
     output_bytes: Vec<u8>,
 }
 
+struct MissingOutputsExtractDispatcher {
+    output_bytes: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ExtractResultMutation {
+    ProjectionMismatch,
+    ExtraOutput,
+}
+
+struct MutatingOutputsExtractDispatcher {
+    output_bytes: Vec<u8>,
+    mutation: ExtractResultMutation,
+}
+
+#[async_trait]
+impl ExtractAudioDispatcher for MutatingOutputsExtractDispatcher {
+    async fn dispatch_extract_audio(
+        &self,
+        request: ExtractAudioRequest,
+    ) -> Result<ExtractAudioResult, VoomError> {
+        let mut result = WritingExtractDispatcher {
+            output_bytes: self.output_bytes.clone(),
+        }
+        .dispatch_extract_audio(request)
+        .await?;
+        match self.mutation {
+            ExtractResultMutation::ProjectionMismatch => {
+                result.output_title = Some("Wrong projection".to_owned());
+            }
+            ExtractResultMutation::ExtraOutput => {
+                let Some(outputs) = result.outputs.as_mut() else {
+                    return Err(VoomError::Internal(
+                        "planned singleton request did not produce an output list".to_owned(),
+                    ));
+                };
+                let mut extra = outputs[0].clone();
+                extra.output_id.push_str("_extra");
+                extra.selection.snapshot_stream_id.push_str("-extra");
+                extra.selection.provider_stream_index += 1;
+                extra.path.push_str(".extra");
+                outputs.push(extra);
+            }
+        }
+        Ok(result)
+    }
+}
+
+#[async_trait]
+impl ExtractAudioDispatcher for MissingOutputsExtractDispatcher {
+    async fn dispatch_extract_audio(
+        &self,
+        request: ExtractAudioRequest,
+    ) -> Result<ExtractAudioResult, VoomError> {
+        let mut result = WritingExtractDispatcher {
+            output_bytes: self.output_bytes.clone(),
+        }
+        .dispatch_extract_audio(request)
+        .await?;
+        result.outputs = None;
+        Ok(result)
+    }
+}
+
 #[async_trait]
 impl ExtractAudioDispatcher for WritingExtractDispatcher {
     async fn dispatch_extract_audio(
@@ -771,6 +1049,25 @@ impl ExtractAudioDispatcher for WritingExtractDispatcher {
             .await
             .unwrap();
         let output_hash = blake3_checksum(&self.output_bytes);
+        let output = observed(
+            u64::try_from(self.output_bytes.len()).unwrap(),
+            &output_hash,
+        );
+        let outputs = request.outputs.as_ref().map(|descriptors| {
+            descriptors
+                .iter()
+                .map(|descriptor| ExtractAudioOutputResult {
+                    output_id: descriptor.output_id.clone(),
+                    selection: descriptor.selection.clone(),
+                    path: descriptor.output.path.clone(),
+                    output: output.clone(),
+                    output_container: "ogg".to_owned(),
+                    output_audio_codec: "opus".to_owned(),
+                    output_language: Some("eng".to_owned()),
+                    output_title: Some("Main".to_owned()),
+                })
+                .collect()
+        });
         Ok(ExtractAudioResult {
             status: voom_worker_protocol::ExtractAudioStatus::Extracted,
             provider: "ffmpeg".to_owned(),
@@ -783,16 +1080,13 @@ impl ExtractAudioDispatcher for WritingExtractDispatcher {
                 request.input.expected.size_bytes,
                 &request.input.expected.content_hash,
             ),
-            output: observed(
-                u64::try_from(self.output_bytes.len()).unwrap(),
-                &output_hash,
-            ),
+            output,
             output_container: "ogg".to_owned(),
             output_audio_codec: "opus".to_owned(),
             selected_snapshot_stream_id: request.selection.snapshot_stream_id.clone(),
             output_language: Some("eng".to_owned()),
             output_title: Some("Main".to_owned()),
-            outputs: None,
+            outputs,
         })
     }
 }

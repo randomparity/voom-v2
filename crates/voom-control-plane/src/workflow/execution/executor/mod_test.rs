@@ -25,11 +25,12 @@ use voom_store::repo::leases::NewLease;
 use voom_store::repo::tickets::NewTicket;
 use voom_store::repo::workers::{NewCapability, NewGrant, NewWorker, WorkerKind};
 use voom_worker_protocol::{
-    AudioObservedFacts, AudioOutputStreamFact, ClientHandle, DispatchStream, ExtractAudioRequest,
-    ExtractAudioResult, ExtractAudioStatus, HandshakeResponse, NdjsonReader, OperationKind,
-    OperationRequest, OperationResponse, PercentBps, ProgressFrame, ProtocolError,
-    RemuxObservedFacts, RemuxRequest, RemuxResult, RemuxStatus, TranscodeAudioRequest,
-    TranscodeAudioResult, TranscodeAudioStatus, TranscodeVideoRequest, WorkerCredentials,
+    AudioObservedFacts, AudioOutputStreamFact, ClientHandle, DispatchStream,
+    ExtractAudioOutputResult, ExtractAudioRequest, ExtractAudioResult, ExtractAudioStatus,
+    HandshakeResponse, NdjsonReader, OperationKind, OperationRequest, OperationResponse,
+    PercentBps, ProgressFrame, ProtocolError, RemuxObservedFacts, RemuxRequest, RemuxResult,
+    RemuxStatus, TranscodeAudioRequest, TranscodeAudioResult, TranscodeAudioStatus,
+    TranscodeVideoRequest, WorkerCredentials,
 };
 
 use super::super::leases::retry_on_database_locked;
@@ -865,6 +866,18 @@ async fn policy_extract_audio_root_ticket_carries_source_ids_audio_payload_and_r
     assert_eq!(
         workflow_payload.rendered_payload["audio"]["type"],
         "extract_audio"
+    );
+    assert_eq!(
+        workflow_payload.rendered_payload["audio"]["operation_id"],
+        "node_extract_audio_test"
+    );
+    assert_eq!(
+        workflow_payload.rendered_payload["audio"]["outputs"][0]["output_id"],
+        voom_plan::audio::extract_output_id("node_extract_audio_test", "stream-audio-1")
+    );
+    assert_eq!(
+        workflow_payload.rendered_payload["audio"]["outputs"][0]["name_suffix"],
+        "stream-audio-1.opus.ogg"
     );
     assert_eq!(
         workflow_payload.rendered_payload["staging_root"],
@@ -2785,24 +2798,40 @@ async fn extract_audio_result_payload_for_request(request: &OperationRequest) ->
         modified_at: None,
         local_file_key: None,
     };
+    let output = AudioObservedFacts {
+        size_bytes: output_bytes.len().try_into().unwrap(),
+        content_hash: format!("blake3:{}", blake3::hash(output_bytes).to_hex()),
+        modified_at: None,
+        local_file_key: None,
+    };
+    let outputs = request.outputs.as_ref().map(|descriptors| {
+        descriptors
+            .iter()
+            .map(|descriptor| ExtractAudioOutputResult {
+                output_id: descriptor.output_id.clone(),
+                selection: descriptor.selection.clone(),
+                path: descriptor.output.path.clone(),
+                output: output.clone(),
+                output_container: "ogg".to_owned(),
+                output_audio_codec: "opus".to_owned(),
+                output_language: Some("eng".to_owned()),
+                output_title: Some("Commentary".to_owned()),
+            })
+            .collect()
+    });
     serde_json::to_value(ExtractAudioResult {
         status: ExtractAudioStatus::Extracted,
         provider: "ffmpeg".to_owned(),
         provider_version: "test".to_owned(),
         input_pre: input.clone(),
         input_post: input,
-        output: AudioObservedFacts {
-            size_bytes: output_bytes.len().try_into().unwrap(),
-            content_hash: format!("blake3:{}", blake3::hash(output_bytes).to_hex()),
-            modified_at: None,
-            local_file_key: None,
-        },
+        output,
         output_container: "ogg".to_owned(),
         output_audio_codec: "opus".to_owned(),
         selected_snapshot_stream_id: request.selection.snapshot_stream_id,
         output_language: Some("eng".to_owned()),
         output_title: Some("Commentary".to_owned()),
-        outputs: None,
+        outputs,
     })
     .unwrap()
 }
@@ -3027,6 +3056,7 @@ fn policy_extract_audio_plan_for_snapshot(
     target: TargetRef,
     source_media_snapshot_id: MediaSnapshotId,
 ) -> WorkflowPlan {
+    let operation_id = "node_extract_audio_test";
     policy_audio_plan(
         "policy-extract-audio-test",
         "policy-node_extract_audio",
@@ -3034,12 +3064,23 @@ fn policy_extract_audio_plan_for_snapshot(
         target,
         json!({
             "type": "extract_audio",
+            "operation_id": operation_id,
             "target_codec": "opus",
             "container": "ogg",
             "source_media_snapshot_id": source_media_snapshot_id.0,
             "filter": {
                 "type": "commentary"
-            }
+            },
+            "outputs": [{
+                "output_id": voom_plan::audio::extract_output_id(
+                    operation_id,
+                    "stream-audio-1"
+                ),
+                "source_snapshot_stream_id": "stream-audio-1",
+                "source_provider_stream_index": 1,
+                "name_suffix": "stream-audio-1.opus.ogg",
+                "bundle_role": "commentary_audio"
+            }]
         }),
     )
 }

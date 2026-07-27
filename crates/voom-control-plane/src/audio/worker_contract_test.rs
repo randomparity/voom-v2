@@ -12,6 +12,21 @@ use voom_worker_protocol::{
 use crate::audio::selection::SelectedAudioStream;
 
 #[test]
+fn planned_extract_request_carries_exact_singleton_output_projection() {
+    let mut selection = extract_selection();
+    selection.operation_id = Some("node_extract_audio_test".to_owned());
+    selection.output_id = Some("extract_output_1234".to_owned());
+    selection.name_suffix = Some("a-1.opus.ogg".to_owned());
+    let request = extract_request(&selection);
+
+    let outputs = request.outputs.as_ref().unwrap();
+    assert_eq!(outputs.len(), 1);
+    assert_eq!(outputs[0].output_id, "extract_output_1234");
+    assert_eq!(outputs[0].selection, request.selection);
+    assert_eq!(outputs[0].output, request.output);
+}
+
+#[test]
 fn input_pre_post_drift_returns_artifact_checksum_mismatch() {
     let selection = transcode_selection();
     let mut result = transcode_result();
@@ -100,10 +115,12 @@ fn transcode_preserved_output_facts_that_differ_from_source_return_malformed_wor
 #[test]
 fn extraction_output_container_or_codec_mismatch_returns_malformed_worker_result() {
     let selection = extract_selection();
+    let request = extract_request(&selection);
     let mut result = extract_result();
     result.output_container = "mkv".to_owned();
 
-    let err = validate_extract_result(&selected_source(), &selection, &result).unwrap_err();
+    let err =
+        validate_extract_result(&selected_source(), &selection, &request, &result).unwrap_err();
 
     assert_eq!(
         err.error_code(),
@@ -112,7 +129,8 @@ fn extraction_output_container_or_codec_mismatch_returns_malformed_worker_result
 
     let mut result = extract_result();
     result.output_audio_codec = "aac".to_owned();
-    let err = validate_extract_result(&selected_source(), &selection, &result).unwrap_err();
+    let err =
+        validate_extract_result(&selected_source(), &selection, &request, &result).unwrap_err();
     assert_eq!(
         err.error_code(),
         voom_core::ErrorCode::MalformedWorkerResult
@@ -122,10 +140,12 @@ fn extraction_output_container_or_codec_mismatch_returns_malformed_worker_result
 #[test]
 fn extraction_missing_language_or_title_present_on_source_returns_malformed_worker_result() {
     let selection = extract_selection();
+    let request = extract_request(&selection);
     let mut result = extract_result();
     result.output_language = None;
 
-    let err = validate_extract_result(&selected_source(), &selection, &result).unwrap_err();
+    let err =
+        validate_extract_result(&selected_source(), &selection, &request, &result).unwrap_err();
 
     assert_eq!(
         err.error_code(),
@@ -134,7 +154,8 @@ fn extraction_missing_language_or_title_present_on_source_returns_malformed_work
 
     let mut result = extract_result();
     result.output_title = None;
-    let err = validate_extract_result(&selected_source(), &selection, &result).unwrap_err();
+    let err =
+        validate_extract_result(&selected_source(), &selection, &request, &result).unwrap_err();
     assert_eq!(
         err.error_code(),
         voom_core::ErrorCode::MalformedWorkerResult
@@ -227,6 +248,10 @@ fn transcode_selection_two() -> TranscodeAudioSelectionPlan {
 
 fn extract_selection() -> ExtractAudioSelectionPlan {
     ExtractAudioSelectionPlan {
+        operation_id: None,
+        output_id: None,
+        name_suffix: None,
+        output_count: 1,
         stream: voom_worker_protocol::AudioStreamRef {
             snapshot_stream_id: "a-1".to_owned(),
             provider_stream_index: 1,
@@ -236,6 +261,15 @@ fn extract_selection() -> ExtractAudioSelectionPlan {
         target_codec: "opus".to_owned(),
         container: "ogg".to_owned(),
     }
+}
+
+fn extract_request(selection: &ExtractAudioSelectionPlan) -> ExtractAudioRequest {
+    extract_audio_request_for(
+        &selected_source(),
+        selection,
+        std::path::Path::new("/tmp/stage"),
+        std::path::Path::new("/tmp/stage/out.ogg"),
+    )
 }
 
 fn source_fact(id: &str) -> SnapshotAudioStreamFact {

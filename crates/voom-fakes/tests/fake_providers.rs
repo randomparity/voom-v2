@@ -507,7 +507,7 @@ fn extract_audio_payload(file_name: &str, audio_codec: &str) -> serde_json::Valu
             "path": output_path.to_string_lossy().into_owned(),
             "container": "ogg",
             "audio_codec": audio_codec,
-            "overwrite": true
+            "overwrite": false
         },
         "selection": {
             "snapshot_stream_id": "stream-1",

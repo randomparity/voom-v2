@@ -37,7 +37,6 @@ pub enum AudioPlanningBlock {
     InsufficientSnapshotFacts,
     UnsupportedSelector,
     ZeroMatches,
-    MultipleMatches,
     NoVideo,
     UnsupportedMediaShape,
     /// `synthesize audio` target channel count is not a downmix (>= the source

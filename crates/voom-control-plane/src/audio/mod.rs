@@ -535,6 +535,7 @@ async fn execute_extract_audio_inner(
         &snapshot,
     )?;
     context.selection = Some(selection.clone());
+    require_single_extract_output(&selection)?;
     let staging = stage::prepare_extract_staging_path(
         &input.staging_root,
         input.ticket_id,
@@ -569,9 +570,9 @@ async fn execute_extract_audio_inner(
         &staging.canonical_root,
         &staging.path,
     );
-    let result = extract.dispatch_extract_audio(request).await?;
+    let result = extract.dispatch_extract_audio(request.clone()).await?;
     context.result = Some(result.clone());
-    worker_contract::validate_extract_result(&selected, &selection, &result)?;
+    worker_contract::validate_extract_result(&selected, &selection, &request, &result)?;
     worker_contract::require_extract_output_file_matches_result(&staging.path, &result).await?;
     let staged = commit::record_staged_audio_extract(
         cp,
@@ -635,6 +636,18 @@ struct ExtractCommitRequest {
     selection: selection::ExtractAudioSelectionPlan,
     result: ExtractAudioResult,
     verification_id: ArtifactVerificationId,
+}
+
+fn require_single_extract_output(
+    selection: &selection::ExtractAudioSelectionPlan,
+) -> Result<(), VoomError> {
+    if selection.output_count == 1 {
+        return Ok(());
+    }
+    Err(VoomError::Config(format!(
+        "audio extract planned {} outputs; atomic plural host commit is not available yet",
+        selection.output_count
+    )))
 }
 
 async fn commit_verified_extract_audio(

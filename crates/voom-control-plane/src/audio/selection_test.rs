@@ -110,10 +110,14 @@ fn extraction_selection_returns_exactly_one_stream_and_role() {
 
     assert_eq!(selection.stream.snapshot_stream_id, "commentary");
     assert_eq!(selection.role, AudioBundleRole::CommentaryAudio);
+    assert_eq!(selection.operation_id, None);
+    assert_eq!(selection.output_id, None);
+    assert_eq!(selection.name_suffix, None);
+    assert_eq!(selection.output_count, 1);
 }
 
 #[test]
-fn extraction_rejects_zero_multiple_or_unknown_commentary_state() {
+fn extraction_rejects_zero_legacy_multiple_or_unknown_commentary_state() {
     let snapshot = snapshot_with_streams(vec![
         audio("main", 1, "aac", Some("eng"), Some("Main"), Some(false)),
         audio("alt", 2, "aac", Some("jpn"), Some("Alt"), Some(false)),
@@ -129,7 +133,7 @@ fn extraction_rejects_zero_multiple_or_unknown_commentary_state() {
     let multiple =
         extract_selection_from_payload_and_snapshot(&extract_payload(&Value::Null), &snapshot)
             .unwrap_err();
-    assert!(multiple.to_string().contains("multiple streams"));
+    assert!(multiple.to_string().contains("regenerate the plan"));
 
     let unknown = snapshot_with_streams(vec![audio(
         "main",
@@ -142,6 +146,53 @@ fn extraction_rejects_zero_multiple_or_unknown_commentary_state() {
     let err = extract_selection_from_payload_and_snapshot(&extract_payload(&Value::Null), &unknown)
         .unwrap_err();
     assert!(err.to_string().contains("insufficient stream facts"));
+}
+
+#[test]
+fn extraction_validates_ordered_planned_outputs_against_pinned_snapshot() {
+    let operation_id = "node_extract_audio_1";
+    let first_output_id = voom_plan::audio::extract_output_id(operation_id, "main");
+    let snapshot = snapshot_with_streams(vec![
+        audio("main", 1, "aac", Some("eng"), Some("Main"), Some(false)),
+        audio("alt", 2, "aac", Some("jpn"), Some("Alt"), Some(false)),
+    ]);
+    let mut payload = extract_payload(&Value::Null);
+    payload["operation_id"] = json!(operation_id);
+    payload["outputs"] = json!([
+        {
+            "output_id": first_output_id.clone(),
+            "source_snapshot_stream_id": "main",
+            "source_provider_stream_index": 1,
+            "name_suffix": "main.opus.ogg",
+            "bundle_role": "external_audio"
+        },
+        {
+            "output_id": voom_plan::audio::extract_output_id(operation_id, "alt"),
+            "source_snapshot_stream_id": "alt",
+            "source_provider_stream_index": 2,
+            "name_suffix": "alt.opus.ogg",
+            "bundle_role": "external_audio"
+        }
+    ]);
+
+    let selection = extract_selection_from_payload_and_snapshot(&payload, &snapshot).unwrap();
+
+    assert_eq!(selection.operation_id.as_deref(), Some(operation_id));
+    assert_eq!(
+        selection.output_id.as_deref(),
+        Some(first_output_id.as_str())
+    );
+    assert_eq!(selection.name_suffix.as_deref(), Some("main.opus.ogg"));
+    assert_eq!(selection.output_count, 2);
+    assert_eq!(selection.stream.snapshot_stream_id, "main");
+
+    payload["outputs"][0]["name_suffix"] = json!("wrong.opus.ogg");
+    let error = extract_selection_from_payload_and_snapshot(&payload, &snapshot).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("do not match the pinned source snapshot")
+    );
 }
 
 #[test]
