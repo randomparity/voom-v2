@@ -1,5 +1,6 @@
 use serde_json::{Value, json};
 use sqlx::{Sqlite, Transaction};
+use std::time::Duration;
 use voom_core::VoomError;
 use voom_events::payload::MediaSnapshotRecordedPayload;
 use voom_events::{Event, SubjectType};
@@ -52,6 +53,7 @@ pub(crate) fn planning_input(ordinal: u32, snapshot: &MediaSnapshot) -> MediaSna
                 .find(|stream| stream.get("kind").and_then(Value::as_str) == Some("video"))
         });
     let container = canonical_container(payload);
+    let container_facts = payload.get("container").and_then(Value::as_object);
     let video_codec = video_stream
         .and_then(|stream| payload_str(stream, "codec_name"))
         .or_else(|| payload_str(payload, "video_codec"));
@@ -67,13 +69,23 @@ pub(crate) fn planning_input(ordinal: u32, snapshot: &MediaSnapshot) -> MediaSna
         width: video_stream.and_then(|stream| payload_u32(stream, "width")),
         height: video_stream.and_then(|stream| payload_u32(stream, "height")),
         hdr: None,
-        bitrate: None,
-        duration_millis: None,
+        bitrate: container_facts
+            .and_then(|facts| facts.get("bit_rate"))
+            .and_then(Value::as_u64),
+        duration_millis: container_facts
+            .and_then(|facts| facts.get("duration_seconds"))
+            .and_then(Value::as_f64)
+            .and_then(duration_millis),
         audio_languages: Vec::new(),
         subtitle_languages: Vec::new(),
         health_flags: Vec::new(),
         existing_media_snapshot_id: Some(snapshot.id),
     }
+}
+
+fn duration_millis(seconds: f64) -> Option<u64> {
+    let duration = Duration::try_from_secs_f64(seconds).ok()?;
+    u64::try_from(duration.as_millis()).ok()
 }
 
 fn canonical_container(payload: &Value) -> Option<String> {

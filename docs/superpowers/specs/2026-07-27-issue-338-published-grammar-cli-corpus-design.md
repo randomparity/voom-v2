@@ -291,9 +291,21 @@ extra output and to pass observed media paths to ffprobe/mkvmerge.
 
 ## Compatibility and rollback
 
-The intended change is test-only. Canonical policy source and compiled goldens
-are inputs and must remain byte-for-byte unchanged. No schema, durable payload,
-CLI envelope, error-code, or worker-protocol change is planned.
+Corpus construction exposed one necessary production correction:
+`media_snapshot::planning_input` currently projects container, codec, and
+dimensions from the exact durable snapshot but drops its numeric
+`container.duration_seconds` and `container.bit_rate` facts. Whole-scan input
+creation therefore stores `None` for the published `media.duration_millis` and
+`video.bitrate` condition fields, making F1's duration and bitrate branches
+unreachable. Project those two existing facts into `duration_millis` and
+`bitrate`, rejecting malformed/negative/overflowing values. Focused tests cover
+present and malformed facts before the process corpus uses them.
+
+Beyond that projection, the intended change is test-only. Canonical policy
+source and compiled goldens are inputs and must remain byte-for-byte unchanged.
+No schema, durable payload, CLI envelope, error-code, or worker-protocol change
+is planned. The projection changes no durable or wire shape and rollback simply
+returns those optional planning fields to absent.
 
 The coverage matrix is corrected to distinguish two acceptance layers without
 changing policy text: #338 owns the fresh real-CLI F1 execution witness; #330
