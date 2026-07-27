@@ -31,6 +31,10 @@ use voom_store::repo::audio_extract_operations::{
 };
 use voom_store::repo::bundles::{BundleMemberRole, NewBundleMember};
 use voom_store::repo::identity::{IdentityRepo, MediaSnapshot, NewMediaSnapshot};
+use voom_store::repo::media::audio_synthesis_operations::{
+    BindAudioSynthesisOperation, NewAudioSynthesisClaim, SqliteAudioSynthesisOperationRepo,
+    StagedAudioSynthesisCompanion,
+};
 use voom_worker_protocol::{
     AudioObservedFacts, AudioOutputStreamFact, ExpectedFileFacts, ExtractAudioResult,
     ProbeFileRequest, ProbeFileResult, TranscodeAudioResult,
@@ -179,6 +183,63 @@ pub async fn record_staged_audio_transcode(
         }),
     )
     .await
+}
+
+pub struct StageAudioSynthesisArtifactInput<'a> {
+    pub execution: &'a ExecuteTranscodeAudioInput,
+    pub source_file_location_id: FileLocationId,
+    pub staging_path: &'a Path,
+    pub operation_id: u64,
+    pub claim: &'a NewAudioSynthesisClaim,
+    pub result: &'a TranscodeAudioResult,
+    pub companions: Vec<StagedAudioSynthesisCompanion>,
+}
+
+pub async fn record_staged_audio_synthesis(
+    cp: &ControlPlane,
+    input: StageAudioSynthesisArtifactInput<'_>,
+) -> Result<StagedAudioArtifact, VoomError> {
+    let mut tx = begin_tx(&cp.pool).await?;
+    let now = cp.clock().now();
+    let artifact = record_staged_audio_in_tx(
+        cp,
+        &mut tx,
+        NewStagedAudioArtifact {
+            source_file_version_id: input.execution.source_file_version_id,
+            source_file_location_id: input.source_file_location_id,
+            staging_path: input.staging_path,
+            size_bytes: input.result.output.size_bytes,
+            checksum: &input.result.output.content_hash,
+            lineage: json!({
+                "operation": "synthesize_audio",
+                "source_file_version_id": input.execution.source_file_version_id.0,
+                "source_file_location_id": input.source_file_location_id.0,
+                "selected_snapshot_stream_ids": input.result.selected_snapshot_stream_ids,
+            }),
+        },
+        now,
+    )
+    .await?;
+    SqliteAudioSynthesisOperationRepo::bind_staged_in_tx(
+        &mut tx,
+        &BindAudioSynthesisOperation {
+            operation_id: input.operation_id,
+            claim: input.claim.clone(),
+            staging_path: input.staging_path.display().to_string(),
+            expected_size_bytes: input.result.output.size_bytes,
+            expected_checksum: input.result.output.content_hash.clone(),
+            worker_result: serde_json::to_value(input.result).map_err(|error| {
+                VoomError::Internal(format!("encode audio synthesis result: {error}"))
+            })?,
+            artifact_handle_id: artifact.artifact_handle_id,
+            artifact_location_id: artifact.artifact_location_id,
+            companions: input.companions,
+        },
+        now,
+    )
+    .await?;
+    commit_tx(tx).await?;
+    Ok(artifact)
 }
 
 pub struct StageAudioExtractSetInput<'a> {

@@ -62,6 +62,15 @@ async fn recover_commit_from_state(
     artifact_handle_id: ArtifactHandleId,
     state: ArtifactCommitState,
 ) -> Result<CommitArtifactReport, VoomError> {
+    let prepared = prepare_commit_recovery(cp, artifact_handle_id, state).await?;
+    finalize_commit(cp, &prepared.prepared, &prepared.promotion).await
+}
+
+pub(crate) async fn prepare_commit_recovery(
+    cp: &ControlPlane,
+    artifact_handle_id: ArtifactHandleId,
+    state: ArtifactCommitState,
+) -> Result<super::PreparedArtifactCommit, VoomError> {
     let record = cp
         .artifacts
         .list_commit_records(artifact_handle_id)
@@ -171,7 +180,10 @@ async fn recover_commit_from_state(
         promote_prepared(cp, &prepared, &NoCommitArtifactHooks).await?
     };
 
-    finalize_commit(cp, &prepared, &promotion).await
+    Ok(super::PreparedArtifactCommit {
+        prepared,
+        promotion,
+    })
 }
 
 pub(super) async fn transition_recovery(

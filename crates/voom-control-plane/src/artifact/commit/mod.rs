@@ -158,6 +158,13 @@ impl ControlPlane {
         recovery::recover_commit_inner(self, artifact_handle_id).await
     }
 
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "pending recovery is exercised directly by commit crash-boundary tests"
+        )
+    )]
     pub(crate) async fn recover_pending_commit(
         &self,
         artifact_handle_id: ArtifactHandleId,
@@ -286,6 +293,56 @@ pub(crate) async fn commit_artifact_with_hooks(
             })
         }
     }
+}
+
+pub(crate) struct PreparedArtifactCommit {
+    prepared: PreparedCommit,
+    promotion: PromotionOutcome,
+}
+
+pub(crate) async fn prepare_and_promote_artifact(
+    cp: &ControlPlane,
+    input: CommitArtifactInput,
+) -> Result<PreparedArtifactCommit, CommitArtifactCommandError> {
+    let prepared = prepare::prepare_commit(cp, input).await?;
+    let promotion = match promote::promote_prepared(cp, &prepared, &NoCommitArtifactHooks).await {
+        Ok(promotion) => promotion,
+        Err(err) => {
+            let report = recovery::transition_recovery(cp, &prepared, err).await?;
+            return Err(CommitArtifactCommandError::committed_error(
+                &VoomError::CommitFailure("commit promotion requires recovery".to_owned()),
+                report,
+            ));
+        }
+    };
+    Ok(PreparedArtifactCommit {
+        prepared,
+        promotion,
+    })
+}
+
+pub(crate) async fn finalize_prepared_artifact_in_tx(
+    cp: &ControlPlane,
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    prepared: &PreparedArtifactCommit,
+) -> Result<CommitArtifactReport, VoomError> {
+    finalize::finalize_commit_in_tx(cp, tx, &prepared.prepared, &prepared.promotion).await
+}
+
+pub(crate) async fn transition_prepared_artifact_recovery(
+    cp: &ControlPlane,
+    prepared: &PreparedArtifactCommit,
+    error: VoomError,
+) -> Result<CommitArtifactReport, CommitArtifactCommandError> {
+    recovery::transition_recovery(cp, &prepared.prepared, error).await
+}
+
+pub(crate) async fn prepare_artifact_recovery(
+    cp: &ControlPlane,
+    artifact_handle_id: ArtifactHandleId,
+    state: ArtifactCommitState,
+) -> Result<PreparedArtifactCommit, VoomError> {
+    recovery::prepare_commit_recovery(cp, artifact_handle_id, state).await
 }
 
 #[derive(Debug)]

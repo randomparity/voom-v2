@@ -331,7 +331,9 @@ fn transcode_started_payload(
         provider: Some("ffmpeg".to_owned()),
         provider_version: None,
         synthesis_operation_id: selection.operation_id.clone(),
-        synthesis_operation_key: synthesis_operation_key(input, selection),
+        synthesis_operation_key: selection.operation_id.as_deref().map(|operation_id| {
+            super::synthesis_operation_key(input.source_file_version_id, operation_id)
+        }),
         synthesized_companions: planned_synthesis_companions(selection),
     }
 }
@@ -408,18 +410,6 @@ fn transcode_failed_payload(
         synthesis_operation_key: event.synthesis_operation_key,
         synthesized_companions: event.synthesized_companions,
     }
-}
-
-fn synthesis_operation_key(
-    input: &ExecuteTranscodeAudioInput,
-    selection: &TranscodeAudioSelectionPlan,
-) -> Option<String> {
-    selection.operation_id.as_ref().map(|operation_id| {
-        format!(
-            "synthesize:{}:{operation_id}",
-            input.source_file_version_id.0
-        )
-    })
 }
 
 pub(super) fn planned_synthesis_companions(

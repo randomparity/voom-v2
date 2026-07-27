@@ -24,11 +24,22 @@ pub(super) async fn finalize_commit(
     promotion: &PromotionOutcome,
 ) -> Result<CommitArtifactReport, VoomError> {
     let mut tx = begin_tx(&cp.pool).await?;
+    let report = finalize_commit_in_tx(cp, &mut tx, prepared, promotion).await?;
+    commit_tx(tx).await?;
+    Ok(report)
+}
+
+pub(crate) async fn finalize_commit_in_tx(
+    cp: &ControlPlane,
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    prepared: &PreparedCommit,
+    promotion: &PromotionOutcome,
+) -> Result<CommitArtifactReport, VoomError> {
     let now = cp.clock().now();
     let result_version = cp
         .identity
         .create_file_version_in_tx(
-            &mut tx,
+            tx,
             NewFileVersion {
                 file_asset_id: prepared.source_file_asset_id,
                 content_hash: promotion.target_facts.content_hash.clone(),
@@ -42,7 +53,7 @@ pub(super) async fn finalize_commit(
     let result_location = cp
         .identity
         .create_file_location_in_tx(
-            &mut tx,
+            tx,
             NewFileLocation {
                 file_version_id: result_version.id,
                 kind: FileLocationKind::LocalPath,
@@ -53,12 +64,12 @@ pub(super) async fn finalize_commit(
         )
         .await?;
     cp.artifacts
-        .retire_location_in_tx(&mut tx, prepared.staging_location_id, now)
+        .retire_location_in_tx(tx, prepared.staging_location_id, now)
         .await?;
     let committed = cp
         .artifacts
         .mark_commit_committed_in_tx(
-            &mut tx,
+            tx,
             prepared.record.id,
             result_version.id,
             result_location.id,
@@ -68,7 +79,7 @@ pub(super) async fn finalize_commit(
         .await?;
     append_commit_event_in_tx(
         &cp.events,
-        &mut tx,
+        tx,
         prepared.artifact_handle_id,
         now,
         Event::ArtifactCommitCompleted(ArtifactCommitCompletedPayload {
@@ -85,7 +96,6 @@ pub(super) async fn finalize_commit(
         }),
     )
     .await?;
-    commit_tx(tx).await?;
     Ok(report_from_record(&committed, &prepared.target_path, None))
 }
 

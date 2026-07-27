@@ -107,7 +107,11 @@ planned companion ID. It rejects an occupied or ambiguous ID/index mapping.
 This bound payload, not the unbound normalized probe, is the result snapshot
 prepared for publication.
 
-Malformed or partial results leave no staged artifact binding.
+Malformed or partial worker results leave no staged artifact binding. Once the
+complete worker result and exact staging-file facts pass, artifact creation and
+synthesis-operation binding commit in one transaction. Verification or probe
+failure then leaves one resumable staged operation bound to that same artifact;
+retry never redispatches or creates another handle.
 
 ### Finalize the result snapshot and lineage atomically
 
@@ -118,13 +122,15 @@ when its exact size and hash match the staged artifact.
 
 After the target is exact, one SQLite transaction:
 
-1. finalizes the artifact commit and result file asset/version/location;
+1. finalizes the generic artifact commit and result file asset/version/location,
+   including its commit-completed event;
 2. records the preprobed and companion-bound result media snapshot;
 3. records one synthesis lineage row per ordered companion, including the
    source and result stream identities plus codec, channels, language, title,
    and disposition facts;
 4. marks every companion finalized; and
-5. marks the synthesis operation committed.
+5. marks the synthesis operation committed and records the synthesis-success
+   event.
 
 Relational publication therefore exposes the result snapshot and complete
 lineage set together or neither. The generic artifact ledger owns pending and

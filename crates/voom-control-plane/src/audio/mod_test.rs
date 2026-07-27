@@ -469,6 +469,89 @@ async fn active_synthesis_attempt_replays_same_worker_key_and_path_after_restart
 }
 
 #[tokio::test]
+async fn staged_synthesis_probe_failure_reuses_bound_artifact_on_retry() {
+    let (cp, _db, dir) = fixture_with_dir().await;
+    let mut source = seed_audio_source(&cp, &dir, b"source").await;
+    source.snapshot = record_surround_audio_snapshot(&cp, source.version).await;
+    let input = synthesis_input_for_source(&source, &dir);
+
+    let error = execute_transcode_audio_with_dispatchers(
+        &cp,
+        input.clone(),
+        &WritingSynthesisDispatcher {
+            output_bytes: b"synthesized".to_vec(),
+        },
+        &SuccessfulVerifyDispatcher,
+        &FailingProbeDispatcher,
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error.error_code(), voom_core::ErrorCode::Internal);
+    assert_table_count(&cp, "artifact_handles", 1).await;
+    assert_table_count(&cp, "artifact_locations", 1).await;
+    assert_table_count(&cp, "audio_synthesis_stream_lineage", 0).await;
+
+    let report = execute_transcode_audio_with_dispatchers(
+        &cp,
+        input,
+        &UncalledTranscodeDispatcher,
+        &SuccessfulVerifyDispatcher,
+        &SynthesisProbeDispatcher,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(report.synthesized_companions.len(), 1);
+    assert_table_count(&cp, "artifact_handles", 1).await;
+    assert_table_count(&cp, "artifact_commit_records", 1).await;
+    assert_table_count(&cp, "audio_synthesis_stream_lineage", 1).await;
+}
+
+#[tokio::test]
+async fn ambiguous_synthesis_dispatch_error_replays_same_attempt_key() {
+    let (cp, _db, dir) = fixture_with_dir().await;
+    let mut source = seed_audio_source(&cp, &dir, b"source").await;
+    source.snapshot = record_surround_audio_snapshot(&cp, source.version).await;
+    let input = synthesis_input_for_source(&source, &dir);
+
+    let error = execute_transcode_audio_with_dispatchers(
+        &cp,
+        input.clone(),
+        &CrashingSynthesisDispatcher,
+        &UncalledVerifyDispatcher,
+        &UncalledProbeDispatcher,
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error.error_code(), voom_core::ErrorCode::WorkerCrash);
+    let (idempotency_key, status): (String, String) =
+        sqlx::query_as("SELECT idempotency_key, status FROM audio_synthesis_dispatch_attempts")
+            .fetch_one(cp.pool_for_test())
+            .await
+            .unwrap();
+    assert_eq!(status, "active");
+
+    let report = execute_transcode_audio_with_dispatchers(
+        &cp,
+        input,
+        &ExpectedKeySynthesisDispatcher {
+            expected_key: idempotency_key,
+            output_bytes: b"replayed-after-ambiguous-error".to_vec(),
+        },
+        &SuccessfulVerifyDispatcher,
+        &SynthesisProbeDispatcher,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(report.synthesized_companions.len(), 1);
+    assert_table_count(&cp, "audio_synthesis_dispatch_attempts", 1).await;
+    assert_table_count(&cp, "artifact_handles", 1).await;
+}
+
+#[tokio::test]
 async fn plural_synthesis_preserves_sources_and_reports_ordered_lineage() {
     let (cp, _db, dir) = fixture_with_dir().await;
     let mut source = seed_audio_source(&cp, &dir, b"source").await;
@@ -530,7 +613,7 @@ async fn plural_synthesis_preserves_sources_and_reports_ordered_lineage() {
 }
 
 #[tokio::test]
-async fn synthesis_replays_committed_artifact_after_lineage_transaction_failure() {
+async fn synthesis_atomically_recovers_after_lineage_transaction_failure() {
     let (cp, _db, dir) = fixture_with_dir().await;
     let mut source = seed_audio_source(&cp, &dir, b"source").await;
     source.snapshot = record_surround_audio_snapshot(&cp, source.version).await;
@@ -558,7 +641,10 @@ async fn synthesis_replays_committed_artifact_after_lineage_transaction_failure(
 
     assert_eq!(error.error_code(), voom_core::ErrorCode::DbUnreachable);
     assert_table_count(&cp, "artifact_commit_records", 1).await;
+    assert_table_count(&cp, "file_versions", 1).await;
     assert_table_count(&cp, "audio_synthesis_stream_lineage", 0).await;
+    assert_event_count(&cp, "artifact.commit_completed", 0).await;
+    assert_event_count(&cp, "artifact.audio_transcode_succeeded", 0).await;
     sqlx::query("DROP TRIGGER fail_synthesis_lineage")
         .execute(cp.pool_for_test())
         .await
@@ -578,10 +664,16 @@ async fn synthesis_replays_committed_artifact_after_lineage_transaction_failure(
     assert_eq!(report.synthesized_companions.len(), 1);
     assert_table_count(&cp, "artifact_commit_records", 1).await;
     assert_table_count(&cp, "audio_synthesis_stream_lineage", 1).await;
+    assert_event_count(&cp, "artifact.commit_completed", 1).await;
+    assert_event_count(&cp, "artifact.audio_transcode_succeeded", 1).await;
     let counts_after_replay = synthesis_publication_counts(&cp).await;
     assert_eq!(counts_after_replay[0], counts_before_replay[0]);
     assert_eq!(counts_after_replay[1], counts_before_replay[1]);
-    assert_eq!(counts_after_replay[2], counts_before_replay[2]);
+    assert_eq!(counts_after_replay[2], counts_before_replay[2] + 1);
+    assert_eq!(counts_after_replay[3], counts_before_replay[3] + 1);
+    assert_eq!(counts_after_replay[4], counts_before_replay[4]);
+    assert_eq!(counts_after_replay[5], counts_before_replay[5]);
+    assert_eq!(counts_after_replay[6], counts_before_replay[6] + 1);
 }
 
 #[tokio::test]
@@ -3064,6 +3156,19 @@ struct ExpectedKeySynthesisDispatcher {
 }
 
 struct PartialSynthesisDispatcher;
+
+struct CrashingSynthesisDispatcher;
+
+#[async_trait]
+impl TranscodeAudioDispatcher for CrashingSynthesisDispatcher {
+    async fn dispatch_transcode_audio(
+        &self,
+        _idempotency_key: &str,
+        _request: TranscodeAudioRequest,
+    ) -> Result<TranscodeAudioResult, VoomError> {
+        Err(VoomError::WorkerCrash("injected worker crash".to_owned()))
+    }
+}
 
 #[async_trait]
 impl TranscodeAudioDispatcher for PartialSynthesisDispatcher {

@@ -114,7 +114,7 @@ pub struct NewAudioSynthesisDispatchAttempt {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct StageAudioSynthesisOperation {
+pub struct BindAudioSynthesisOperation {
     pub operation_id: u64,
     pub claim: NewAudioSynthesisClaim,
     pub staging_path: String,
@@ -123,10 +123,15 @@ pub struct StageAudioSynthesisOperation {
     pub worker_result: Value,
     pub artifact_handle_id: ArtifactHandleId,
     pub artifact_location_id: ArtifactLocationId,
+    pub companions: Vec<StagedAudioSynthesisCompanion>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ValidateAudioSynthesisOperation {
+    pub operation_id: u64,
     pub verification_id: ArtifactVerificationId,
     pub probe_worker_id: WorkerId,
     pub probe_payload: Value,
-    pub companions: Vec<StagedAudioSynthesisCompanion>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -228,17 +233,12 @@ impl SqliteAudioSynthesisOperationRepo {
         Ok(record)
     }
 
-    pub async fn stage(
-        &self,
-        input: &StageAudioSynthesisOperation,
+    pub async fn bind_staged_in_tx(
+        tx: &mut Transaction<'_, Sqlite>,
+        input: &BindAudioSynthesisOperation,
         now: OffsetDateTime,
     ) -> Result<(), VoomError> {
-        let mut tx = self
-            .pool
-            .begin_with("BEGIN IMMEDIATE")
-            .await
-            .map_err(|error| VoomError::database_context("audio synthesis stage begin", error))?;
-        require_live_planned_claim(&mut tx, &input.claim, now).await?;
+        require_live_planned_claim(tx, &input.claim, now).await?;
         if input.companions.is_empty() {
             return Err(VoomError::Config(
                 "audio synthesis stage requires companion facts".to_owned(),
@@ -267,7 +267,7 @@ impl SqliteAudioSynthesisOperationRepo {
             )
             .bind(i64_from_u64(input.operation_id))
             .bind(&companion.companion_id)
-            .execute(&mut *tx)
+            .execute(&mut **tx)
             .await
             .map_err(|error| {
                 VoomError::database_context("stage audio synthesis companion", error)
@@ -280,8 +280,7 @@ impl SqliteAudioSynthesisOperationRepo {
         let result = sqlx::query(
             "UPDATE audio_synthesis_operations SET state = 'staged', staging_path = ?, \
              expected_size_bytes = ?, expected_checksum = ?, worker_result = ?, \
-             artifact_handle_id = ?, artifact_location_id = ?, verification_id = ?, \
-             probe_worker_id = ?, probe_payload = ? \
+             artifact_handle_id = ?, artifact_location_id = ? \
              WHERE id = ? AND state = 'planned' AND claim_lease_id = ? AND claim_token = ? \
              AND claim_expires_at > ?",
         )
@@ -295,6 +294,25 @@ impl SqliteAudioSynthesisOperationRepo {
         )
         .bind(i64_from_u64(input.artifact_handle_id.0))
         .bind(i64_from_u64(input.artifact_location_id.0))
+        .bind(i64_from_u64(input.operation_id))
+        .bind(i64_from_u64(input.claim.lease_id.0))
+        .bind(&input.claim.claim_token)
+        .bind(iso8601(now)?)
+        .execute(&mut **tx)
+        .await
+        .map_err(|error| VoomError::database_context("stage audio synthesis operation", error))?;
+        require_one_update(result.rows_affected(), "audio synthesis operation stage")
+    }
+
+    pub async fn record_validation(
+        &self,
+        input: &ValidateAudioSynthesisOperation,
+    ) -> Result<(), VoomError> {
+        let result = sqlx::query(
+            "UPDATE audio_synthesis_operations SET verification_id = ?, probe_worker_id = ?, \
+             probe_payload = ? WHERE id = ? AND state = 'staged' AND verification_id IS NULL \
+             AND probe_worker_id IS NULL AND probe_payload IS NULL",
+        )
         .bind(i64_from_u64(input.verification_id.0))
         .bind(i64_from_u64(input.probe_worker_id.0))
         .bind(
@@ -303,16 +321,15 @@ impl SqliteAudioSynthesisOperationRepo {
             })?,
         )
         .bind(i64_from_u64(input.operation_id))
-        .bind(i64_from_u64(input.claim.lease_id.0))
-        .bind(&input.claim.claim_token)
-        .bind(iso8601(now)?)
-        .execute(&mut *tx)
+        .execute(&self.pool)
         .await
-        .map_err(|error| VoomError::database_context("stage audio synthesis operation", error))?;
-        require_one_update(result.rows_affected(), "audio synthesis operation stage")?;
-        tx.commit()
-            .await
-            .map_err(|error| VoomError::database_context("audio synthesis stage commit", error))
+        .map_err(|error| {
+            VoomError::database_context("validate audio synthesis operation", error)
+        })?;
+        require_one_update(
+            result.rows_affected(),
+            "audio synthesis operation validation",
+        )
     }
 
     pub async fn finalize_in_tx(
@@ -457,6 +474,26 @@ impl SqliteAudioSynthesisOperationRepo {
         Err(VoomError::Conflict(format!(
             "workflow lease {lease_id} heartbeat cannot renew an expired audio synthesis claim"
         )))
+    }
+
+    pub async fn release_claim(&self, claim: &NewAudioSynthesisClaim) -> Result<(), VoomError> {
+        let result = sqlx::query(
+            "UPDATE audio_synthesis_operations \
+             SET claim_lease_id = NULL, claim_token = NULL, claim_expires_at = NULL \
+             WHERE operation_key = ? AND dispatch_generation = ? AND state = 'planned' \
+             AND claim_lease_id = ? AND claim_token = ?",
+        )
+        .bind(&claim.operation_key)
+        .bind(i64::from(claim.expected_generation))
+        .bind(i64_from_u64(claim.lease_id.0))
+        .bind(&claim.claim_token)
+        .execute(&self.pool)
+        .await
+        .map_err(|error| VoomError::database_context("release audio synthesis claim", error))?;
+        require_one_update(
+            result.rows_affected(),
+            &format!("audio synthesis operation {} claim", claim.operation_key),
+        )
     }
 
     pub async fn abandon_planned_generation(

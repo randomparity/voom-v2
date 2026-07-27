@@ -291,9 +291,11 @@ The attempt row and exact path are durable before send.
 
 No target path is given to the worker.
 
-The dispatch response is marked terminal before validation. After complete
-validation, one transaction creates the staged artifact handle/location,
-records result/companion facts, and transitions the operation to staged.
+The dispatch response is marked terminal before validation. After the complete
+worker result and exact staging-file facts pass, one transaction creates the
+staged artifact handle/location, records result/companion facts, and
+transitions the operation to staged. Verification and probing resume against
+that bound artifact, so a failure cannot orphan a handle or cause redispatch.
 
 ### Verify, prepare, promote, finalize
 
@@ -307,15 +309,16 @@ generation are renewed/rechecked. An occupied target is accepted only when
 size and hash match. After mutation, claim loss leaves the exact target as
 successor recovery evidence.
 
-Finalize is one transaction:
+Finalize is one caller-owned transaction:
 
 - `record_verified_sidecar_commit_rows_in_tx` creates the committed result
   file identities and completes the artifact commit;
+- the artifact commit-completed event is appended;
 - `record_with_event_in_tx` records the preprobed snapshot;
 - every descriptor is resolved to exactly one result snapshot stream;
 - companion lineage rows are inserted;
 - the operation becomes committed; and
-- the artifact commit-completed event is appended.
+- the synthesis-success event is appended.
 
 Despite the helper's historical sidecar name, its contract is generic:
 finalize one verified add-only artifact into file asset/version/location rows.
