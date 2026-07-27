@@ -58,9 +58,9 @@ boundary for retries and resume.
 
 The operation owns one staged artifact and commit record. Companion rows own
 the stable source-to-result mappings and validated output facts. A committed
-operation returns its recorded report. A staged, prepared, or
-recovery-required operation resumes without creating another artifact,
-commit, snapshot, or lineage row.
+operation returns its recorded report. A staged operation resumes the generic
+artifact commit ledger without creating another artifact, commit, snapshot,
+or lineage row.
 
 There is no legacy adoption path. Synthesis execution did not exist before
 this decision, so no historical committed synthesis artifact can be proven.
@@ -74,8 +74,9 @@ generation. The dispatch attempt, worker identity/epoch, key, and exact path
 are durable before send.
 
 A host restart first replays the same key to the same live worker epoch. A
-terminal replay may bind its exact result. If the worker epoch is unavailable,
-the attempt is quarantined and a new generation writes a different path.
+persisted terminal attempt advances to a new generation because its response
+was not durably bound. If the worker epoch changed, the attempt is quarantined
+and a new generation writes a different path.
 Old-generation writers can never reach the current staging or target path;
 their late completions fail the generation/claim predicate. Quarantined paths
 remain diagnostic evidence and are not reused.
@@ -110,10 +111,10 @@ Malformed or partial results leave no staged artifact binding.
 
 ### Finalize the result snapshot and lineage atomically
 
-After all validation and verification, prepare creates one pending artifact
-commit and binds it to the operation in one transaction. Filesystem promotion
-is add-only and accepts an occupied target only when its exact size and hash
-match the prepared artifact.
+After all validation and verification, the synthesis operation is staged with
+one generic artifact handle. Generic artifact commit creates its pending
+record and performs add-only promotion, accepting an occupied target only
+when its exact size and hash match the staged artifact.
 
 After the target is exact, one SQLite transaction:
 
@@ -126,10 +127,10 @@ After the target is exact, one SQLite transaction:
 5. marks the synthesis operation committed.
 
 Relational publication therefore exposes the result snapshot and complete
-lineage set together or neither. A failure after durable prepare marks the
-artifact commit and synthesis operation recovery-required. Recovery compares
-the exact target/staging/temp facts, promotes only when needed, and reuses the
-same finalization transaction. A committed replay returns the same identities.
+lineage set together or neither. The generic artifact ledger owns pending and
+recovery-required commit evidence; the synthesis operation remains staged.
+Recovery resumes that exact commit, then reuses the same synthesis
+finalization transaction. A committed replay returns the same identities.
 
 ### Report synthesis distinctly within transcode execution
 

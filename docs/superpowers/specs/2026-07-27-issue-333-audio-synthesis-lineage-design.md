@@ -209,13 +209,13 @@ One row per semantic execution:
 - source file version and source media snapshot;
 - codec/container/target channels;
 - canonical staging and target paths;
-- state: `planned`, `staged`, `prepared`, `recovery_required`, `committed`;
+- state: `planned`, `staged`, `committed`;
 - dispatch generation;
 - live claim lease/token/expiry;
 - staged artifact handle/location, verification, commit, result
   file/version/location/snapshot references;
 - precommit probe worker/payload;
-- observed file facts and recovery diagnostic; and
+- observed file facts; and
 - timestamps.
 
 The operation key is a SHA-256 domain hash over planned operation ID, source
@@ -241,7 +241,7 @@ One attempt row per operation generation records worker ID/epoch, idempotency
 key, exact attempt directory/path, and terminal/quarantined status. The key is:
 
 ```text
-audio-synthesize:<operation-key>:<generation>
+audio-synthesis:<operation-key>:<generation>
 ```
 
 The attempt and path are committed before send.
@@ -271,8 +271,8 @@ companion rows. Callers cannot insert arbitrary relationships.
 2. Compute the operation key.
 3. Load or insert the planned operation and companions.
 4. Compare every stored semantic field on replay.
-5. Return a committed report, resume a staged/prepared/recovery row, or acquire
-   the planned writer claim.
+5. Return a committed report, resume a staged row through the generic artifact
+   ledger, or acquire the planned writer claim.
 
 Every noncommitted transition predicates on operation ID, expected state,
 generation, claim token, and live expiry. Workflow lease heartbeats renew the
@@ -291,16 +291,16 @@ The attempt row and exact path are durable before send.
 
 No target path is given to the worker.
 
-After complete validation, one transaction creates the staged artifact
-handle/location, records result/companion facts, marks the attempt terminal,
-and transitions the operation to staged.
+The dispatch response is marked terminal before validation. After complete
+validation, one transaction creates the staged artifact handle/location,
+records result/companion facts, and transitions the operation to staged.
 
 ### Verify, prepare, promote, finalize
 
 Verification and the result probe run against the exact staged bytes.
-Prepare uses the commit-safety gate, creates one pending artifact commit,
-persists temp/probe evidence, and transitions the operation to prepared in one
-transaction.
+Generic artifact commit uses the commit-safety gate, creates one pending
+artifact commit, and persists temp/recovery evidence in the artifact ledger.
+The synthesis operation remains staged until lineage finalization.
 
 Promotion uses add-only no-replace semantics. Before mutation, the claim and
 generation are renewed/rechecked. An occupied target is accepted only when
@@ -323,13 +323,13 @@ No bundle member is created for the synthesized container result.
 
 ### Recovery
 
-Owned errors after prepare atomically mark the operation and artifact commit
-recovery-required. A successor claim:
+Owned errors after pending commit mark the generic artifact commit
+recovery-required. The synthesis operation remains staged. A successor:
 
-1. loads the persisted staging/target/temp facts and probe payload;
+1. loads the generic artifact ledger's persisted staging/target/temp facts;
 2. rechecks the source commit-safety gate;
 3. accepts exact target bytes or resumes promotion;
-4. runs the same finalize transaction; and
+4. runs the same synthesis finalize transaction; and
 5. returns the committed report.
 
 Crashes before staged binding redispatch through generation fencing. Crashes

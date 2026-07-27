@@ -350,6 +350,27 @@ pub struct ArtifactAudioOutputStreamPayload {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct ArtifactAudioSynthesisCompanionPayload {
+    pub companion_id: String,
+    pub source_snapshot_stream_id: String,
+    pub source_provider_stream_index: u32,
+    pub result_snapshot_stream_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result_provider_stream_index: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codec: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channels: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub language: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disposition: Option<ArtifactAudioDispositionPayload>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ArtifactAudioTranscodeStartedPayload {
     pub job_id: u64,
     pub ticket_id: u64,
@@ -363,6 +384,12 @@ pub struct ArtifactAudioTranscodeStartedPayload {
     pub output_container: String,
     pub provider: Option<String>,
     pub provider_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub synthesis_operation_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub synthesis_operation_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub synthesized_companions: Vec<ArtifactAudioSynthesisCompanionPayload>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -401,6 +428,12 @@ pub struct ArtifactAudioTranscodeSucceededPayload {
     pub output_audio_codecs: Vec<String>,
     pub provider: String,
     pub provider_version: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub synthesis_operation_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub synthesis_operation_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub synthesized_companions: Vec<ArtifactAudioSynthesisCompanionPayload>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -422,6 +455,12 @@ pub struct ArtifactAudioTranscodeFailedPayload {
     pub message: String,
     pub provider: Option<String>,
     pub provider_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub synthesis_operation_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub synthesis_operation_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub synthesized_companions: Vec<ArtifactAudioSynthesisCompanionPayload>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

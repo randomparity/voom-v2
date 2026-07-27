@@ -4,7 +4,7 @@ use std::collections::HashSet;
 
 use serde_json::Value;
 use sqlx::sqlite::SqliteRow;
-use sqlx::{Row, SqlitePool};
+use sqlx::{Row, Sqlite, SqlitePool, Transaction};
 use time::OffsetDateTime;
 use voom_core::ids::{ArtifactCommitRecordId, ArtifactVerificationId};
 use voom_core::{
@@ -19,8 +19,6 @@ use super::common::{i64_from_u64, iso8601, map_row_err, u32_from_i64, u64_from_i
 pub enum AudioSynthesisOperationState {
     Planned,
     Staged,
-    Prepared,
-    RecoveryRequired,
     Committed,
 }
 
@@ -416,6 +414,51 @@ impl SqliteAudioSynthesisOperationRepo {
         )))
     }
 
+    pub async fn renew_claims_for_lease_in_tx(
+        tx: &mut Transaction<'_, Sqlite>,
+        lease_id: LeaseId,
+        expires_at: OffsetDateTime,
+        now: OffsetDateTime,
+    ) -> Result<(), VoomError> {
+        let lease_id = i64_from_u64(lease_id.0);
+        let now = iso8601(now)?;
+        let claimed: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM audio_synthesis_operations \
+             WHERE claim_lease_id = ? AND claim_token IS NOT NULL AND state != 'committed'",
+        )
+        .bind(lease_id)
+        .fetch_one(&mut **tx)
+        .await
+        .map_err(|error| {
+            VoomError::database_context("count audio synthesis claims for heartbeat", error)
+        })?;
+        let claimed = u64::try_from(claimed).map_err(|error| {
+            VoomError::database(format!(
+                "audio synthesis claim count is invalid for lease {lease_id}: {error}"
+            ))
+        })?;
+        let renewed = sqlx::query(
+            "UPDATE audio_synthesis_operations SET claim_expires_at = ? \
+             WHERE claim_lease_id = ? AND claim_token IS NOT NULL AND state != 'committed' \
+               AND claim_expires_at > ?",
+        )
+        .bind(iso8601(expires_at)?)
+        .bind(lease_id)
+        .bind(now)
+        .execute(&mut **tx)
+        .await
+        .map_err(|error| {
+            VoomError::database_context("renew audio synthesis claims with heartbeat", error)
+        })?
+        .rows_affected();
+        if claimed == renewed {
+            return Ok(());
+        }
+        Err(VoomError::Conflict(format!(
+            "workflow lease {lease_id} heartbeat cannot renew an expired audio synthesis claim"
+        )))
+    }
+
     pub async fn abandon_planned_generation(
         &self,
         claim: &NewAudioSynthesisClaim,
@@ -486,6 +529,35 @@ impl SqliteAudioSynthesisOperationRepo {
             VoomError::database_context("audio synthesis dispatch commit", error)
         })?;
         Ok(stored)
+    }
+
+    pub async fn get_dispatch_attempt(
+        &self,
+        operation_id: u64,
+        generation: u32,
+    ) -> Result<Option<AudioSynthesisDispatchAttempt>, VoomError> {
+        let attempt_id: Option<i64> = sqlx::query_scalar(
+            "SELECT id FROM audio_synthesis_dispatch_attempts \
+             WHERE operation_id = ? AND generation = ?",
+        )
+        .bind(i64_from_u64(operation_id))
+        .bind(i64::from(generation))
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|error| {
+            VoomError::database_context("audio synthesis dispatch attempt find", error)
+        })?;
+        let Some(attempt_id) = attempt_id else {
+            return Ok(None);
+        };
+        let mut tx = self.pool.begin().await.map_err(|error| {
+            VoomError::database_context("audio synthesis dispatch attempt get begin", error)
+        })?;
+        let attempt = load_dispatch_attempt(&mut tx, attempt_id).await?;
+        tx.commit().await.map_err(|error| {
+            VoomError::database_context("audio synthesis dispatch attempt get commit", error)
+        })?;
+        Ok(Some(attempt))
     }
 
     pub async fn mark_dispatch_terminal(
@@ -1065,8 +1137,6 @@ impl AudioSynthesisOperationState {
         match value {
             "planned" => Ok(Self::Planned),
             "staged" => Ok(Self::Staged),
-            "prepared" => Ok(Self::Prepared),
-            "recovery_required" => Ok(Self::RecoveryRequired),
             "committed" => Ok(Self::Committed),
             other => Err(VoomError::database(format!(
                 "audio synthesis operation has unknown state `{other}`"

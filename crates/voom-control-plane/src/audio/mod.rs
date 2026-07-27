@@ -9,7 +9,10 @@ use voom_core::{
     ArtifactHandleId, ArtifactLocationId, FileLocationId, FileVersionId, JobId, LeaseId,
     MediaSnapshotId, TicketId, VoomError,
 };
-use voom_events::payload::{ArtifactAudioExtractQuiescedPayload, ArtifactAudioStreamPayload};
+use voom_events::payload::{
+    ArtifactAudioDispositionPayload, ArtifactAudioExtractQuiescedPayload,
+    ArtifactAudioStreamPayload, ArtifactAudioSynthesisCompanionPayload,
+};
 use voom_events::{Event, SubjectType};
 use voom_store::repo::artifacts::{ArtifactCommitState, ArtifactVerificationStatus};
 use voom_store::repo::media::audio_extract_operations::{
@@ -18,8 +21,9 @@ use voom_store::repo::media::audio_extract_operations::{
     NewAudioExtractOperation, NewAudioExtractOutput, SqliteAudioExtractOperationRepo,
 };
 use voom_store::repo::media::audio_synthesis_operations::{
-    AudioSynthesisOperationRecord, AudioSynthesisOperationState, FinalizeAudioSynthesisOperation,
-    NewAudioSynthesisClaim, NewAudioSynthesisCompanion, NewAudioSynthesisOperation,
+    AudioSynthesisDispatchAttempt, AudioSynthesisOperationRecord, AudioSynthesisOperationState,
+    FinalizeAudioSynthesisOperation, NewAudioSynthesisClaim, NewAudioSynthesisCompanion,
+    NewAudioSynthesisDispatchAttempt, NewAudioSynthesisOperation,
     SqliteAudioSynthesisOperationRepo, StageAudioSynthesisOperation, StagedAudioSynthesisCompanion,
 };
 use voom_worker_protocol::{ExtractAudioResult, TranscodeAudioResult};
@@ -90,11 +94,14 @@ pub struct ExecuteTranscodeAudioReport {
     pub commit_recovery_required: Option<TranscodePostCommitRecoveryReport>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub synthesis_operation_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub synthesis_operation_key: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub synthesis_companions: Vec<ExecuteSynthesisCompanionReport>,
+    pub synthesized_companions: Vec<ExecuteSynthesisCompanionReport>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct ExecuteSynthesisCompanionReport {
     pub ordinal: u32,
     pub companion_id: String,
@@ -190,6 +197,7 @@ pub struct AcknowledgeExtractDispatchQuiescenceInput {
 pub trait TranscodeAudioDispatcher: Send + Sync {
     async fn dispatch_transcode_audio(
         &self,
+        idempotency_key: &str,
         request: voom_worker_protocol::TranscodeAudioRequest,
     ) -> Result<TranscodeAudioResult, VoomError>;
 }
@@ -323,6 +331,9 @@ pub(crate) async fn execute_transcode_audio_with_dispatchers(
                     selected_streams: context.selected_streams,
                     result: context.result.as_ref(),
                     error: &err,
+                    synthesis_operation_id: context.synthesis_operation_id.clone(),
+                    synthesis_operation_key: context.synthesis_operation_key.clone(),
+                    synthesized_companions: context.synthesized_companions.clone(),
                 },
             )
             .await?;
@@ -359,21 +370,68 @@ async fn execute_transcode_audio_inner(
         &input.operation_payload,
         &snapshot,
     )?;
-    context.selected_streams = events::stream_payloads(&selection.selection.selected_streams);
-    if selection.add_track {
-        return execute_synthesis_audio(
-            cp,
-            input,
-            selected,
-            snapshot,
-            selection,
-            transcode,
-            verify,
-            result_probe,
-            context,
-        )
-        .await;
+    record_transcode_selection_context(context, &input, &selection);
+    let add_track = selection.add_track;
+    let resolved = ResolvedTranscodeAudio {
+        input,
+        selected,
+        snapshot,
+        selection,
+    };
+    let dispatchers = TranscodeAudioDispatchers {
+        transcode,
+        verify,
+        result_probe,
+    };
+    if add_track {
+        return execute_synthesis_audio(cp, resolved, &dispatchers, context).await;
     }
+    execute_replacement_audio(cp, resolved, &dispatchers, context).await
+}
+
+fn record_transcode_selection_context(
+    context: &mut TranscodeAttemptContext,
+    input: &ExecuteTranscodeAudioInput,
+    selection: &selection::TranscodeAudioSelectionPlan,
+) {
+    context.selected_streams = events::stream_payloads(&selection.selection.selected_streams);
+    context
+        .synthesis_operation_id
+        .clone_from(&selection.operation_id);
+    context.synthesis_operation_key = selection.operation_id.as_ref().map(|operation_id| {
+        format!(
+            "synthesize:{}:{operation_id}",
+            input.source_file_version_id.0
+        )
+    });
+    context.synthesized_companions = events::planned_synthesis_companions(selection);
+}
+
+struct ResolvedTranscodeAudio {
+    input: ExecuteTranscodeAudioInput,
+    selected: source::SelectedSource,
+    snapshot: voom_store::repo::identity::MediaSnapshot,
+    selection: selection::TranscodeAudioSelectionPlan,
+}
+
+struct TranscodeAudioDispatchers<'a> {
+    transcode: &'a dyn TranscodeAudioDispatcher,
+    verify: &'a dyn VerifyArtifactDispatcher,
+    result_probe: &'a dyn commit::AudioResultProbeDispatcher,
+}
+
+async fn execute_replacement_audio(
+    cp: &ControlPlane,
+    resolved: ResolvedTranscodeAudio,
+    dispatchers: &TranscodeAudioDispatchers<'_>,
+    context: &mut TranscodeAttemptContext,
+) -> Result<ExecuteTranscodeAudioReport, VoomError> {
+    let ResolvedTranscodeAudio {
+        input,
+        selected,
+        snapshot,
+        selection,
+    } = resolved;
     let staging = stage::prepare_transcode_staging_path(
         &input.staging_root,
         input.ticket_id,
@@ -406,7 +464,11 @@ async fn execute_transcode_audio_inner(
         &staging.canonical_root,
         &staging.path,
     );
-    let result = transcode.dispatch_transcode_audio(request).await?;
+    let idempotency_key = format!("ticket-{}-lease-{}", input.ticket_id.0, input.lease_id.0);
+    let result = dispatchers
+        .transcode
+        .dispatch_transcode_audio(&idempotency_key, request)
+        .await?;
     context.result = Some(result.clone());
     worker_contract::validate_transcode_result(&selected, &selection, &result)?;
     worker_contract::require_transcode_output_file_matches_result(&staging.path, &result).await?;
@@ -426,35 +488,30 @@ async fn execute_transcode_audio_inner(
             input,
             source_location_id: selected.location.id,
             source_media_snapshot_id: snapshot.id.0,
-            source_snapshot: snapshot,
-            selection: selection.clone(),
             staged,
             staging_path: staging.path,
             target_path,
             selected_streams: events::stream_payloads(&selection.selection.selected_streams),
             result,
         },
-        verify,
-        result_probe,
+        dispatchers.verify,
+        dispatchers.result_probe,
     )
     .await
 }
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "the synthesis boundary receives the already-resolved execution dependencies"
-)]
 async fn execute_synthesis_audio(
     cp: &ControlPlane,
-    input: ExecuteTranscodeAudioInput,
-    selected: source::SelectedSource,
-    snapshot: voom_store::repo::identity::MediaSnapshot,
-    selection: selection::TranscodeAudioSelectionPlan,
-    transcode: &dyn TranscodeAudioDispatcher,
-    verify: &dyn VerifyArtifactDispatcher,
-    result_probe: &dyn commit::AudioResultProbeDispatcher,
+    resolved: ResolvedTranscodeAudio,
+    dispatchers: &TranscodeAudioDispatchers<'_>,
     context: &mut TranscodeAttemptContext,
 ) -> Result<ExecuteTranscodeAudioReport, VoomError> {
+    let ResolvedTranscodeAudio {
+        input,
+        selected,
+        snapshot,
+        selection,
+    } = resolved;
     let target_path = stage::synthesis_target_path(
         &input.target_dir,
         &selected.canonical_path,
@@ -464,22 +521,19 @@ async fn execute_synthesis_audio(
     let operation =
         resolve_synthesis_operation(cp, &input, &snapshot, &selection, &target_path).await?;
     if operation.operation.state != AudioSynthesisOperationState::Planned {
-        return finish_synthesis_operation(cp, &input, &operation).await;
+        return finish_synthesis_operation(cp, &input, selected.location.id, &operation).await;
     }
-    let claim = synthesis_claim(&input, &operation, cp.clock().now());
-    cp.audio_synthesis_operations
-        .acquire_claim(&claim, cp.clock().now())
-        .await?;
-    context.synthesis_claim = Some(claim.clone());
-    let token = synthesis_operation_token(&operation.operation.operation_key);
-    let staging = stage::prepare_synthesis_staging_path(
-        &input.staging_root,
-        &token,
-        operation.operation.dispatch_generation,
+    let dispatch = claim_synthesis_dispatch(
+        cp,
+        &input,
+        &operation,
         &selected.canonical_path,
         &selection.target_codec,
     )
     .await?;
+    let claim = dispatch.claim.clone();
+    let staging = dispatch.staging.clone();
+    context.synthesis_claim = Some(claim.clone());
     context.staging_path = Some(staging.path.clone());
     events::record_transcode_started(
         cp,
@@ -497,7 +551,8 @@ async fn execute_synthesis_audio(
         &staging.canonical_root,
         &staging.path,
     );
-    let result = transcode.dispatch_transcode_audio(request).await?;
+    let result =
+        dispatch_synthesis_result(cp, dispatchers.transcode, &dispatch, request, context).await?;
     context.result = Some(result.clone());
     worker_contract::validate_transcode_result(&selected, &selection, &result)?;
     worker_contract::require_transcode_output_file_matches_result(&staging.path, &result).await?;
@@ -514,22 +569,18 @@ async fn execute_synthesis_audio(
     let verified = verify_artifact_with_dispatcher(
         cp,
         VerifyArtifactInput::for_staged_file(staged.artifact_handle_id, &staging.path),
-        verify,
+        dispatchers.verify,
         &NoVerifyArtifactHooks,
     )
     .await?;
-    if verified.status != ArtifactVerificationStatus::Succeeded {
-        return Err(VoomError::VerificationFailure(
-            "audio synthesis artifact verification failed".to_owned(),
-        ));
-    }
+    require_synthesis_verification(&verified)?;
     let probed = commit::probe_staged_synthesis_result(
         cp,
         &staging.path,
         &snapshot,
         &selection,
         &result,
-        result_probe,
+        dispatchers.result_probe,
     )
     .await?;
     stage_synthesis_operation(
@@ -551,7 +602,49 @@ async fn execute_synthesis_audio(
         .get_by_key(&operation.operation.operation_key)
         .await?
         .ok_or_else(|| VoomError::Internal("staged audio synthesis disappeared".to_owned()))?;
-    finish_synthesis_operation(cp, &input, &operation).await
+    finish_synthesis_operation(cp, &input, selected.location.id, &operation).await
+}
+
+fn require_synthesis_verification(
+    verified: &crate::artifact::verify::VerifyArtifactReport,
+) -> Result<(), VoomError> {
+    if verified.status == ArtifactVerificationStatus::Succeeded {
+        return Ok(());
+    }
+    Err(VoomError::VerificationFailure(
+        "audio synthesis artifact verification failed".to_owned(),
+    ))
+}
+
+async fn dispatch_synthesis_result(
+    cp: &ControlPlane,
+    transcode: &dyn TranscodeAudioDispatcher,
+    dispatch: &ClaimedSynthesisDispatch,
+    request: voom_worker_protocol::TranscodeAudioRequest,
+    context: &mut TranscodeAttemptContext,
+) -> Result<TranscodeAudioResult, VoomError> {
+    match transcode
+        .dispatch_transcode_audio(&dispatch.attempt.idempotency_key, request)
+        .await
+    {
+        Ok(result) => {
+            cp.audio_synthesis_operations
+                .mark_dispatch_terminal(&dispatch.claim, dispatch.attempt.id, cp.clock().now())
+                .await?;
+            Ok(result)
+        }
+        Err(error) => {
+            cp.audio_synthesis_operations
+                .quarantine_and_advance_generation(
+                    &dispatch.claim,
+                    dispatch.attempt.id,
+                    cp.clock().now(),
+                )
+                .await?;
+            context.synthesis_claim = None;
+            Err(error)
+        }
+    }
 }
 
 async fn resolve_synthesis_operation(
@@ -604,22 +697,141 @@ async fn resolve_synthesis_operation(
         .await
 }
 
-fn synthesis_claim(
+fn synthesis_operation_token(operation_key: &str) -> String {
+    blake3::hash(operation_key.as_bytes()).to_hex()[..16].to_owned()
+}
+
+struct ClaimedSynthesisDispatch {
+    claim: NewAudioSynthesisClaim,
+    attempt: AudioSynthesisDispatchAttempt,
+    staging: stage::PreparedStagingPath,
+}
+
+async fn claim_synthesis_dispatch(
+    cp: &ControlPlane,
     input: &ExecuteTranscodeAudioInput,
     operation: &AudioSynthesisOperationRecord,
-    now: time::OffsetDateTime,
-) -> NewAudioSynthesisClaim {
-    NewAudioSynthesisClaim {
+    source_path: &Path,
+    codec: &str,
+) -> Result<ClaimedSynthesisDispatch, VoomError> {
+    let now = cp.clock().now();
+    let (worker_id, worker_epoch, expires_at) = audio_dispatch_lease(cp, input.lease_id).await?;
+    let claim = NewAudioSynthesisClaim {
         operation_key: operation.operation.operation_key.clone(),
         expected_generation: operation.operation.dispatch_generation,
         lease_id: input.lease_id,
-        claim_token: format!("lease-{}", input.lease_id.0),
-        expires_at: now + time::Duration::minutes(10),
+        claim_token: format!(
+            "lease-{}-{}",
+            input.lease_id.0,
+            crate::worker_process::random_hex_128()
+        ),
+        expires_at,
+    };
+    let repo = &cp.audio_synthesis_operations;
+    repo.acquire_claim(&claim, now).await?;
+    let token = synthesis_operation_token(&operation.operation.operation_key);
+    if let Some(attempt) = repo
+        .get_dispatch_attempt(operation.operation.id, claim.expected_generation)
+        .await?
+    {
+        return reconcile_synthesis_dispatch(
+            repo,
+            claim,
+            attempt,
+            worker_id,
+            worker_epoch,
+            stage::resolve_synthesis_staging_path(
+                &input.staging_root,
+                &token,
+                operation.operation.dispatch_generation,
+                source_path,
+                codec,
+            )
+            .await?,
+            now,
+        )
+        .await;
     }
+    let staging = stage::prepare_synthesis_staging_path(
+        &input.staging_root,
+        &token,
+        operation.operation.dispatch_generation,
+        source_path,
+        codec,
+    )
+    .await?;
+    let attempt_directory = staging.path.parent().ok_or_else(|| {
+        VoomError::Internal("audio synthesis staging path has no parent".to_owned())
+    })?;
+    let attempt = repo
+        .record_dispatch_attempt(
+            &claim,
+            &NewAudioSynthesisDispatchAttempt {
+                worker_id: worker_id.0,
+                worker_epoch,
+                idempotency_key: format!(
+                    "audio-synthesis:{}:{}",
+                    operation.operation.operation_key, operation.operation.dispatch_generation
+                ),
+                attempt_directory: attempt_directory.display().to_string(),
+                staging_path: staging.path.display().to_string(),
+            },
+            now,
+        )
+        .await?;
+    Ok(ClaimedSynthesisDispatch {
+        claim,
+        attempt,
+        staging,
+    })
 }
 
-fn synthesis_operation_token(operation_key: &str) -> String {
-    blake3::hash(operation_key.as_bytes()).to_hex()[..16].to_owned()
+async fn reconcile_synthesis_dispatch(
+    repo: &voom_store::repo::media::audio_synthesis_operations::SqliteAudioSynthesisOperationRepo,
+    claim: NewAudioSynthesisClaim,
+    attempt: AudioSynthesisDispatchAttempt,
+    worker_id: voom_core::WorkerId,
+    worker_epoch: u32,
+    staging: stage::PreparedStagingPath,
+    now: time::OffsetDateTime,
+) -> Result<ClaimedSynthesisDispatch, VoomError> {
+    if attempt.status == "active"
+        && attempt.worker_id == worker_id.0
+        && attempt.worker_epoch == worker_epoch
+    {
+        let attempt_directory = staging.path.parent().ok_or_else(|| {
+            VoomError::Internal("audio synthesis staging path has no parent".to_owned())
+        })?;
+        if attempt.attempt_directory != attempt_directory.display().to_string()
+            || attempt.staging_path != staging.path.display().to_string()
+        {
+            repo.quarantine_and_advance_generation(&claim, attempt.id, now)
+                .await?;
+            return Err(VoomError::Conflict(format!(
+                "audio synthesis attempt {} does not match its deterministic staging path",
+                attempt.id
+            )));
+        }
+        return Ok(ClaimedSynthesisDispatch {
+            claim,
+            attempt,
+            staging,
+        });
+    }
+    if attempt.status == "active" {
+        repo.quarantine_and_advance_generation(&claim, attempt.id, now)
+            .await?;
+        return Err(VoomError::Conflict(format!(
+            "audio synthesis attempt {} belongs to worker {} epoch {}; generation advanced \
+             before retry",
+            attempt.id, attempt.worker_id, attempt.worker_epoch
+        )));
+    }
+    repo.abandon_planned_generation(&claim, now).await?;
+    Err(VoomError::Conflict(format!(
+        "audio synthesis attempt {} is {}; generation advanced before retry",
+        attempt.id, attempt.status
+    )))
 }
 
 struct StageSynthesisEvidence<'a> {
@@ -705,10 +917,11 @@ struct CommittedSynthesisArtifact {
 async fn finish_synthesis_operation(
     cp: &ControlPlane,
     input: &ExecuteTranscodeAudioInput,
+    source_location_id: FileLocationId,
     operation: &AudioSynthesisOperationRecord,
 ) -> Result<ExecuteTranscodeAudioReport, VoomError> {
     if operation.operation.state == AudioSynthesisOperationState::Committed {
-        return synthesis_report(cp, input, operation).await;
+        return synthesis_report(input, source_location_id, operation);
     }
     if operation.operation.state != AudioSynthesisOperationState::Staged {
         return Err(VoomError::Conflict(format!(
@@ -720,13 +933,13 @@ async fn finish_synthesis_operation(
         VoomError::Internal("staged audio synthesis has no artifact handle".to_owned())
     })?;
     let committed = commit_or_recover_synthesis(cp, operation, artifact_handle_id).await?;
-    finalize_synthesis_lineage(cp, operation, &committed).await?;
+    finalize_synthesis_lineage(cp, input, source_location_id, operation, &committed).await?;
     let operation = cp
         .audio_synthesis_operations
         .get_by_key(&operation.operation.operation_key)
         .await?
         .ok_or_else(|| VoomError::Internal("committed audio synthesis disappeared".to_owned()))?;
-    synthesis_report(cp, input, &operation).await
+    synthesis_report(input, source_location_id, &operation)
 }
 
 async fn commit_or_recover_synthesis(
@@ -788,6 +1001,8 @@ fn committed_synthesis_artifact(
 
 async fn finalize_synthesis_lineage(
     cp: &ControlPlane,
+    input: &ExecuteTranscodeAudioInput,
+    source_location_id: FileLocationId,
     operation: &AudioSynthesisOperationRecord,
     committed: &CommittedSynthesisArtifact,
 ) -> Result<(), VoomError> {
@@ -838,16 +1053,107 @@ async fn finalize_synthesis_lineage(
         },
     )
     .await?;
+    let worker_result: TranscodeAudioResult =
+        serde_json::from_value(operation.operation.worker_result.clone().ok_or_else(|| {
+            VoomError::Internal("staged audio synthesis has no worker result".to_owned())
+        })?)
+        .map_err(|error| {
+            VoomError::database(format!(
+                "staged audio synthesis worker result is malformed: {error}"
+            ))
+        })?;
+    let synthesized_companions = synthesis_event_companions(operation)?;
+    crate::cases::append_event(
+        &cp.events,
+        &mut tx,
+        SubjectType::ArtifactHandle,
+        Some(
+            operation
+                .operation
+                .artifact_handle_id
+                .ok_or_else(|| {
+                    VoomError::Internal("staged audio synthesis has no artifact handle".to_owned())
+                })?
+                .0,
+        ),
+        cp.clock().now(),
+        events::transcode_succeeded_event(events::TranscodeSucceededEventInput {
+            input,
+            source_location_id,
+            source_media_snapshot_id: operation.operation.source_media_snapshot_id.0,
+            artifact_handle_id: operation.operation.artifact_handle_id.ok_or_else(|| {
+                VoomError::Internal("staged audio synthesis has no artifact handle".to_owned())
+            })?,
+            artifact_location_id: operation.operation.artifact_location_id.ok_or_else(|| {
+                VoomError::Internal("staged audio synthesis has no artifact location".to_owned())
+            })?,
+            selected_streams: synthesized_companions
+                .iter()
+                .map(|companion| ArtifactAudioStreamPayload {
+                    snapshot_stream_id: companion.companion_id.clone(),
+                    provider_stream_index: companion.source_provider_stream_index,
+                })
+                .collect(),
+            result: &worker_result,
+            synthesis_operation_id: Some(operation.operation.planned_operation_id.clone()),
+            synthesis_operation_key: Some(operation.operation.operation_key.clone()),
+            synthesized_companions,
+        }),
+    )
+    .await?;
     crate::cases::commit_tx(tx).await
 }
 
-async fn synthesis_report(
-    cp: &ControlPlane,
+fn synthesis_event_companions(
+    operation: &AudioSynthesisOperationRecord,
+) -> Result<Vec<ArtifactAudioSynthesisCompanionPayload>, VoomError> {
+    operation
+        .companions
+        .iter()
+        .map(|companion| {
+            Ok(ArtifactAudioSynthesisCompanionPayload {
+                companion_id: companion.companion_id.clone(),
+                source_snapshot_stream_id: companion.source_snapshot_stream_id.clone(),
+                source_provider_stream_index: companion.source_provider_stream_index,
+                result_snapshot_stream_id: companion.result_snapshot_stream_id.clone(),
+                result_provider_stream_index: Some(required_synthesis_field(
+                    companion.result_provider_stream_index,
+                    "companion result provider stream",
+                )?),
+                codec: Some(required_synthesis_field(
+                    companion.codec.clone(),
+                    "companion codec",
+                )?),
+                channels: Some(u64::from(required_synthesis_field(
+                    companion.channels,
+                    "companion channel count",
+                )?)),
+                language: companion.language.clone(),
+                title: companion.title.clone(),
+                disposition: Some(ArtifactAudioDispositionPayload {
+                    default: Some(required_synthesis_field(
+                        companion.disposition_default,
+                        "companion default disposition",
+                    )?),
+                    forced: Some(required_synthesis_field(
+                        companion.disposition_forced,
+                        "companion forced disposition",
+                    )?),
+                    commentary: Some(required_synthesis_field(
+                        companion.disposition_commentary,
+                        "companion commentary disposition",
+                    )?),
+                }),
+            })
+        })
+        .collect()
+}
+
+fn synthesis_report(
     input: &ExecuteTranscodeAudioInput,
+    source_location_id: FileLocationId,
     operation: &AudioSynthesisOperationRecord,
 ) -> Result<ExecuteTranscodeAudioReport, VoomError> {
-    let source =
-        source::select_source(cp, input.source_file_version_id, input.source_location_id).await?;
     let artifact_handle_id =
         required_synthesis_field(operation.operation.artifact_handle_id, "artifact handle")?;
     let artifact_location_id = required_synthesis_field(
@@ -866,7 +1172,7 @@ async fn synthesis_report(
         operation.operation.result_media_snapshot_id,
         "result media snapshot",
     )?;
-    let synthesis_companions = operation
+    let synthesized_companions = operation
         .companions
         .iter()
         .map(|companion| {
@@ -913,7 +1219,7 @@ async fn synthesis_report(
         ticket_id: input.ticket_id,
         lease_id: input.lease_id,
         source_file_version_id: input.source_file_version_id,
-        source_file_location_id: source.location.id,
+        source_file_location_id: source_location_id,
         staged_artifact_handle_id: artifact_handle_id,
         staged_artifact_location_id: artifact_location_id,
         verification_id: required_synthesis_field(
@@ -934,7 +1240,8 @@ async fn synthesis_report(
         target_path: PathBuf::from(&operation.operation.target_path),
         commit_recovery_required: None,
         synthesis_operation_id: Some(operation.operation.planned_operation_id.clone()),
-        synthesis_companions,
+        synthesis_operation_key: Some(operation.operation.operation_key.clone()),
+        synthesized_companions,
     })
 }
 
@@ -954,6 +1261,9 @@ struct TranscodeAttemptContext {
     artifact_location_id: Option<ArtifactLocationId>,
     result: Option<TranscodeAudioResult>,
     synthesis_claim: Option<NewAudioSynthesisClaim>,
+    synthesis_operation_id: Option<String>,
+    synthesis_operation_key: Option<String>,
+    synthesized_companions: Vec<voom_events::payload::ArtifactAudioSynthesisCompanionPayload>,
 }
 
 async fn abandon_failed_synthesis_generation(
@@ -1004,7 +1314,9 @@ async fn commit_verified_transcode_audio(
     // the content-hash-verified staged file (byte-identical to the add-only
     // committed target), so a probe failure leaves nothing committed and
     // propagates as Err (the caller records the failed event).
-    let probed = probe_verified_transcode_result(cp, &request, result_probe).await?;
+    let probed =
+        commit::probe_staged_result(cp, &request.staging_path, &request.result, result_probe)
+            .await?;
     let committed = cp
         .commit_artifact(CommitArtifactInput {
             artifact_handle_id: request.staged.artifact_handle_id,
@@ -1054,6 +1366,9 @@ async fn commit_verified_transcode_audio(
             artifact_location_id: request.staged.artifact_location_id,
             selected_streams: request.selected_streams.clone(),
             result: &request.result,
+            synthesis_operation_id: None,
+            synthesis_operation_key: None,
+            synthesized_companions: Vec::new(),
         },
     )
     .await
@@ -1086,25 +1401,6 @@ async fn commit_verified_transcode_audio(
     ))
 }
 
-async fn probe_verified_transcode_result(
-    cp: &ControlPlane,
-    request: &TranscodeCommitRequest,
-    result_probe: &dyn commit::AudioResultProbeDispatcher,
-) -> Result<commit::ProbedResultPayload, VoomError> {
-    if request.selection.add_track {
-        return commit::probe_staged_synthesis_result(
-            cp,
-            &request.staging_path,
-            &request.source_snapshot,
-            &request.selection,
-            &request.result,
-            result_probe,
-        )
-        .await;
-    }
-    commit::probe_staged_result(cp, &request.staging_path, &request.result, result_probe).await
-}
-
 fn transcode_report_after_commit(
     request: &TranscodeCommitRequest,
     verified: &crate::artifact::verify::VerifyArtifactReport,
@@ -1131,7 +1427,8 @@ fn transcode_report_after_commit(
         target_path: request.target_path.clone(),
         commit_recovery_required: recovery,
         synthesis_operation_id: None,
-        synthesis_companions: Vec::new(),
+        synthesis_operation_key: None,
+        synthesized_companions: Vec::new(),
     }
 }
 
@@ -1159,8 +1456,6 @@ struct TranscodeCommitRequest {
     input: ExecuteTranscodeAudioInput,
     source_location_id: FileLocationId,
     source_media_snapshot_id: u64,
-    source_snapshot: voom_store::repo::identity::MediaSnapshot,
-    selection: selection::TranscodeAudioSelectionPlan,
     staged: commit::StagedAudioArtifact,
     staging_path: PathBuf,
     target_path: PathBuf,
@@ -1784,7 +2079,7 @@ async fn acquire_extract_claim(
     input: &ExecuteExtractAudioInput,
     operation: &AudioExtractOperationRecord,
 ) -> Result<(NewAudioExtractClaim, voom_core::WorkerId, u32), VoomError> {
-    let (worker_id, worker_epoch, expires_at) = extract_dispatch_lease(cp, input.lease_id).await?;
+    let (worker_id, worker_epoch, expires_at) = audio_dispatch_lease(cp, input.lease_id).await?;
     let claim = NewAudioExtractClaim {
         operation_key: operation.operation.operation_key.clone(),
         expected_generation: operation.operation.dispatch_generation,
@@ -1802,7 +2097,7 @@ async fn acquire_extract_claim(
     Ok((claim, worker_id, worker_epoch))
 }
 
-async fn extract_dispatch_lease(
+async fn audio_dispatch_lease(
     cp: &ControlPlane,
     lease_id: LeaseId,
 ) -> Result<(voom_core::WorkerId, u32, time::OffsetDateTime), VoomError> {
@@ -1812,31 +2107,33 @@ async fn extract_dispatch_lease(
          WHERE leases.id = ? AND leases.state = 'held'",
     )
     .bind(i64::try_from(lease_id.0).map_err(|error| {
-        VoomError::Config(format!("audio extraction lease id is invalid: {error}"))
+        VoomError::Config(format!("audio dispatch lease id is invalid: {error}"))
     })?)
     .fetch_optional(&cp.pool)
     .await
-    .map_err(|error| VoomError::database_context("audio extraction dispatch lease", error))?
+    .map_err(|error| VoomError::database_context("audio dispatch lease", error))?
     .ok_or_else(|| {
-        VoomError::Conflict(format!("audio extraction lease {} is not held", lease_id.0))
+        VoomError::Conflict(format!("audio dispatch lease {} is not held", lease_id.0))
     })?;
     let expires_at: String = row.try_get("expires_at").map_err(|error| {
-        VoomError::database_context("audio extraction lease expiry decode", error)
+        VoomError::database_context("audio dispatch lease expiry decode", error)
     })?;
     let expires_at =
         time::OffsetDateTime::parse(&expires_at, &time::format_description::well_known::Rfc3339)
             .map_err(|error| {
-                VoomError::database(format!("audio extraction lease expiry: {error}"))
+                VoomError::database(format!("audio dispatch lease expiry: {error}"))
             })?;
-    let worker_epoch: i64 = row.try_get("worker_epoch").map_err(|error| {
-        VoomError::database_context("audio extraction worker epoch decode", error)
-    })?;
+    let worker_epoch: i64 = row
+        .try_get("worker_epoch")
+        .map_err(|error| VoomError::database_context("audio worker epoch decode", error))?;
     Ok((
         voom_core::WorkerId(
-            u64::try_from(row.try_get::<i64, _>("worker_id").map_err(|error| {
-                VoomError::database_context("audio extraction worker id decode", error)
-            })?)
-            .map_err(|error| VoomError::database(format!("audio extraction worker id: {error}")))?,
+            u64::try_from(
+                row.try_get::<i64, _>("worker_id").map_err(|error| {
+                    VoomError::database_context("audio worker id decode", error)
+                })?,
+            )
+            .map_err(|error| VoomError::database(format!("audio worker id: {error}")))?,
         ),
         u32::try_from(worker_epoch)
             .map_err(|error| VoomError::database(format!("audio worker epoch: {error}")))?,

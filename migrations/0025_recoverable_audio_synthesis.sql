@@ -13,14 +13,13 @@ CREATE TABLE audio_synthesis_operations (
     container                   TEXT NOT NULL CHECK (length(container) > 0),
     target_path                 TEXT NOT NULL UNIQUE CHECK (length(target_path) > 0),
     state                       TEXT NOT NULL
-        CHECK (state IN ('planned','staged','prepared','recovery_required','committed')),
+        CHECK (state IN ('planned','staged','committed')),
     dispatch_generation         INTEGER NOT NULL DEFAULT 0
         CHECK (dispatch_generation >= 0),
     claim_lease_id              INTEGER REFERENCES leases(id) ON DELETE RESTRICT,
     claim_token                 TEXT,
     claim_expires_at            TEXT,
     staging_path                TEXT UNIQUE,
-    temp_path                   TEXT UNIQUE,
     expected_size_bytes         INTEGER CHECK (expected_size_bytes >= 0),
     expected_checksum           TEXT,
     worker_result               TEXT CHECK (worker_result IS NULL OR json_valid(worker_result)),
@@ -42,9 +41,6 @@ CREATE TABLE audio_synthesis_operations (
         REFERENCES file_locations(id) ON DELETE RESTRICT,
     result_media_snapshot_id    INTEGER UNIQUE
         REFERENCES media_snapshots(id) ON DELETE RESTRICT,
-    recovery_failure_class      TEXT,
-    recovery_error_code         TEXT,
-    recovery_message            TEXT,
     created_at                  TEXT NOT NULL,
     finished_at                 TEXT,
     CHECK (
@@ -88,17 +84,6 @@ CREATE TABLE audio_synthesis_operations (
         (state = 'committed' AND finished_at IS NOT NULL)
         OR
         (state != 'committed' AND finished_at IS NULL)
-    ),
-    CHECK (
-        (state = 'recovery_required'
-         AND recovery_failure_class IS NOT NULL
-         AND recovery_error_code IS NOT NULL
-         AND recovery_message IS NOT NULL)
-        OR
-        (state != 'recovery_required'
-         AND recovery_failure_class IS NULL
-         AND recovery_error_code IS NULL
-         AND recovery_message IS NULL)
     )
 ) STRICT;
 

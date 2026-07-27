@@ -79,10 +79,10 @@ pub mod execution {
 
 pub mod policy {
     pub use crate::cases::policy::compliance::{
-        ComplianceApplyData, ComplianceAudioExtractOutput, ComplianceExecuteData,
-        ComplianceExecuteError, ComplianceExecutionOptions, ComplianceLegacyAudioExtractOutput,
-        ComplianceReportData, ComplianceRunReportData, FilePhaseSummaryView,
-        IssueApplicationSummary, PhaseSummaryView, WorkflowSummaryView,
+        ComplianceApplyData, ComplianceAudioExtractOutput, ComplianceAudioSynthesisCompanion,
+        ComplianceExecuteData, ComplianceExecuteError, ComplianceExecutionOptions,
+        ComplianceLegacyAudioExtractOutput, ComplianceReportData, ComplianceRunReportData,
+        FilePhaseSummaryView, IssueApplicationSummary, PhaseSummaryView, WorkflowSummaryView,
     };
     pub use crate::cases::policy::policies::PolicyMutationError;
     pub use crate::cases::policy::policy_inputs::{

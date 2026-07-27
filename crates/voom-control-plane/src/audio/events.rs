@@ -6,8 +6,8 @@ use voom_events::payload::{
     ArtifactAudioExtractMemberPayload, ArtifactAudioExtractOutputPayload,
     ArtifactAudioExtractStartedPayload, ArtifactAudioExtractSucceededPayload,
     ArtifactAudioOutputStreamPayload, ArtifactAudioStreamPayload,
-    ArtifactAudioTranscodeFailedPayload, ArtifactAudioTranscodeStartedPayload,
-    ArtifactAudioTranscodeSucceededPayload,
+    ArtifactAudioSynthesisCompanionPayload, ArtifactAudioTranscodeFailedPayload,
+    ArtifactAudioTranscodeStartedPayload, ArtifactAudioTranscodeSucceededPayload,
 };
 use voom_events::{Event, SubjectType};
 use voom_worker_protocol::{
@@ -55,37 +55,48 @@ pub struct TranscodeSucceededEventInput<'a> {
     pub artifact_location_id: ArtifactLocationId,
     pub selected_streams: Vec<ArtifactAudioStreamPayload>,
     pub result: &'a TranscodeAudioResult,
+    pub synthesis_operation_id: Option<String>,
+    pub synthesis_operation_key: Option<String>,
+    pub synthesized_companions: Vec<ArtifactAudioSynthesisCompanionPayload>,
 }
 
 pub async fn record_transcode_succeeded(
     cp: &ControlPlane,
     event: TranscodeSucceededEventInput<'_>,
 ) -> Result<(), VoomError> {
+    let artifact_handle_id = event.artifact_handle_id;
+    let event = transcode_succeeded_event(event);
+    append_audio_event(
+        cp,
+        SubjectType::ArtifactHandle,
+        Some(artifact_handle_id.0),
+        event,
+    )
+    .await
+}
+
+pub(super) fn transcode_succeeded_event(event: TranscodeSucceededEventInput<'_>) -> Event {
     let staging_path = event
         .result
         .output
         .local_file_key
         .clone()
         .unwrap_or_default();
-    let payload = transcode_succeeded_payload(
+    Event::ArtifactAudioTranscodeSucceeded(transcode_succeeded_payload(
         event.input,
         TranscodeSucceededContext {
             source_location: event.source_location_id,
             source_media_snapshot: event.source_media_snapshot_id,
             artifact_handle: event.artifact_handle_id,
             artifact_location: event.artifact_location_id,
+            synthesis_operation_id: event.synthesis_operation_id,
+            synthesis_operation_key: event.synthesis_operation_key,
+            synthesized_companions: event.synthesized_companions,
         },
         staging_path,
         event.selected_streams,
         event.result,
-    );
-    append_audio_event(
-        cp,
-        SubjectType::ArtifactHandle,
-        Some(event.artifact_handle_id.0),
-        Event::ArtifactAudioTranscodeSucceeded(payload),
-    )
-    .await
+    ))
 }
 
 #[derive(Debug)]
@@ -99,6 +110,9 @@ pub struct TranscodeFailedEventInput<'a> {
     pub selected_streams: Vec<ArtifactAudioStreamPayload>,
     pub result: Option<&'a TranscodeAudioResult>,
     pub error: &'a VoomError,
+    pub synthesis_operation_id: Option<String>,
+    pub synthesis_operation_key: Option<String>,
+    pub synthesized_companions: Vec<ArtifactAudioSynthesisCompanionPayload>,
 }
 
 pub async fn record_transcode_failed(
@@ -129,6 +143,9 @@ pub async fn record_transcode_failed(
                 selected_streams: event.selected_streams,
                 result: event.result,
                 error: event.error,
+                synthesis_operation_id: event.synthesis_operation_id,
+                synthesis_operation_key: event.synthesis_operation_key,
+                synthesized_companions: event.synthesized_companions,
             },
         )),
     )
@@ -313,6 +330,9 @@ fn transcode_started_payload(
         output_container: selection.container.clone(),
         provider: Some("ffmpeg".to_owned()),
         provider_version: None,
+        synthesis_operation_id: selection.operation_id.clone(),
+        synthesis_operation_key: synthesis_operation_key(input, selection),
+        synthesized_companions: planned_synthesis_companions(selection),
     }
 }
 
@@ -340,6 +360,9 @@ fn transcode_succeeded_payload(
         output_audio_codecs: result.output_audio_codecs.clone(),
         provider: result.provider.clone(),
         provider_version: result.provider_version.clone(),
+        synthesis_operation_id: context.synthesis_operation_id,
+        synthesis_operation_key: context.synthesis_operation_key,
+        synthesized_companions: context.synthesized_companions,
     }
 }
 
@@ -353,6 +376,9 @@ struct TranscodeFailedEventPayloadInput<'a> {
     selected_streams: Vec<ArtifactAudioStreamPayload>,
     result: Option<&'a TranscodeAudioResult>,
     error: &'a VoomError,
+    synthesis_operation_id: Option<String>,
+    synthesis_operation_key: Option<String>,
+    synthesized_companions: Vec<ArtifactAudioSynthesisCompanionPayload>,
 }
 
 fn transcode_failed_payload(
@@ -378,15 +404,61 @@ fn transcode_failed_payload(
         message: event.error.to_string(),
         provider: event.result.map(|result| result.provider.clone()),
         provider_version: event.result.map(|result| result.provider_version.clone()),
+        synthesis_operation_id: event.synthesis_operation_id,
+        synthesis_operation_key: event.synthesis_operation_key,
+        synthesized_companions: event.synthesized_companions,
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+fn synthesis_operation_key(
+    input: &ExecuteTranscodeAudioInput,
+    selection: &TranscodeAudioSelectionPlan,
+) -> Option<String> {
+    selection.operation_id.as_ref().map(|operation_id| {
+        format!(
+            "synthesize:{}:{operation_id}",
+            input.source_file_version_id.0
+        )
+    })
+}
+
+pub(super) fn planned_synthesis_companions(
+    selection: &TranscodeAudioSelectionPlan,
+) -> Vec<ArtifactAudioSynthesisCompanionPayload> {
+    if !selection.add_track {
+        return Vec::new();
+    }
+    selection
+        .selected_streams
+        .iter()
+        .map(|selected| ArtifactAudioSynthesisCompanionPayload {
+            companion_id: selected.stream.snapshot_stream_id.clone(),
+            source_snapshot_stream_id: selected.source.snapshot_stream_id.clone(),
+            source_provider_stream_index: selected.source.provider_stream_index,
+            result_snapshot_stream_id: selected.stream.snapshot_stream_id.clone(),
+            result_provider_stream_index: None,
+            codec: None,
+            channels: None,
+            language: selected.source.language.clone(),
+            title: selected.source.title.clone(),
+            disposition: Some(ArtifactAudioDispositionPayload {
+                default: Some(selected.source.disposition.default),
+                forced: Some(selected.source.disposition.forced),
+                commentary: selected.source.disposition.commentary,
+            }),
+        })
+        .collect()
+}
+
+#[derive(Debug, Clone)]
 struct TranscodeSucceededContext {
     source_location: FileLocationId,
     source_media_snapshot: u64,
     artifact_handle: ArtifactHandleId,
     artifact_location: ArtifactLocationId,
+    synthesis_operation_id: Option<String>,
+    synthesis_operation_key: Option<String>,
+    synthesized_companions: Vec<ArtifactAudioSynthesisCompanionPayload>,
 }
 
 fn extract_started_payload(

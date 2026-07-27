@@ -45,8 +45,8 @@ Files:
 
 Behavior:
 
-- persist exact operation, ordered companion, dispatch, claim, prepared commit,
-  result, and lineage evidence;
+- persist exact operation, ordered companion, dispatch, claim, staged artifact,
+  result, and lineage evidence while reusing the generic commit ledger;
 - enforce semantic/path/result-stream/lineage uniqueness;
 - provide claimed state transitions and exact committed replay;
 - atomically finalize all companion lineage rows with operation state.
@@ -118,7 +118,8 @@ Behavior:
 - verify and preprobe before prepare;
 - add-only promote one result artifact;
 - finalize result file/snapshot and all lineage in one transaction;
-- resume staged/prepared/recovery/committed states without duplicates.
+- resume staged operations through generic artifact recovery and replay
+  committed operations without duplicates.
 
 Red tests:
 

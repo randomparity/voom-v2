@@ -73,6 +73,26 @@ pub async fn prepare_synthesis_staging_path(
     })
 }
 
+pub async fn resolve_synthesis_staging_path(
+    staging_root: &Path,
+    operation_token: &str,
+    generation: u32,
+    source_path: &Path,
+    codec: &str,
+) -> Result<PreparedStagingPath, VoomError> {
+    require_safe_component(operation_token, "audio synthesis operation token")?;
+    let components = [
+        format!("operation-{operation_token}"),
+        format!("generation-{generation}"),
+    ];
+    let (canonical_root, canonical_parent) =
+        prepare_staging_parent(staging_root, &components).await?;
+    Ok(PreparedStagingPath {
+        canonical_root,
+        path: canonical_parent.join(transcode_file_name(source_path, codec)),
+    })
+}
+
 pub async fn extract_target_paths(
     target_dir: &Path,
     source_path: &Path,
