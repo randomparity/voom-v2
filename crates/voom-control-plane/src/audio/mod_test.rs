@@ -14,6 +14,9 @@ use voom_store::repo::artifacts::{
 use voom_store::repo::bundles::{BundleMemberRole, NewAssetBundle, NewBundleMember};
 use voom_store::repo::identity::{DiscoveredFile, FileLocationKind, IdentityRepo, IngestOutcome};
 use voom_store::repo::identity::{MediaWorkKind, NewMediaVariant, NewMediaWork};
+use voom_store::repo::{
+    BlockingMode, IssuerKind, LeaseScope, NewUseLease, UseLeaseKind, UseLeaseReleaseReason,
+};
 use voom_worker_protocol::{
     AudioObservedFacts, AudioOutputStreamFact, ExtractAudioOutputResult, ExtractAudioRequest,
     ExtractAudioResult, TranscodeAudioRequest, TranscodeAudioResult, VerifyArtifactObservedFacts,
@@ -824,6 +827,19 @@ async fn assert_prepared_resume_failure_is_durable(
     .execute(cp.pool_for_test())
     .await
     .unwrap();
+    let blocking = cp
+        .use_leases
+        .acquire(NewUseLease {
+            kind: UseLeaseKind::Playback,
+            scope: LeaseScope::Version(input.source_file_version_id),
+            issuer_kind: IssuerKind::User,
+            issuer_ref: "prepared-recovery-test".to_owned(),
+            blocking_mode: BlockingMode::Blocking,
+            ttl: Some(time::Duration::hours(1)),
+            acquired_at: cp.clock().now(),
+        })
+        .await
+        .unwrap();
 
     let error = execute_extract_audio_with_dispatchers(
         cp,
@@ -834,7 +850,7 @@ async fn assert_prepared_resume_failure_is_durable(
     )
     .await
     .unwrap_err();
-    assert_eq!(error.error_code(), voom_core::ErrorCode::DbUnreachable);
+    assert_eq!(error.error_code(), voom_core::ErrorCode::BlockedByUseLease);
     let recovery = sqlx::query(
         "SELECT state, recovery_failure_class, recovery_error_code, recovery_message \
          FROM audio_extract_operations WHERE id = ?",
@@ -857,20 +873,37 @@ async fn assert_prepared_resume_failure_is_durable(
         recovery
             .try_get::<String, _>("recovery_error_code")
             .unwrap(),
-        "DB_UNREACHABLE"
+        "BLOCKED_BY_USE_LEASE"
     );
     assert!(
         recovery
             .try_get::<String, _>("recovery_message")
             .unwrap()
-            .contains("injected finalize failure")
+            .contains(&blocking.id.0.to_string())
     );
-    assert_event_count(cp, "artifact.commit_recovery_required", 4).await;
+    assert_event_count(cp, "artifact.commit_recovery_required", 6).await;
+    let claim_loss_events: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM events WHERE kind = 'artifact.commit_recovery_required' \
+         AND json_extract(payload, '$.recovery_reason') = \
+             'audio extraction successor recovery after prior claim loss'",
+    )
+    .fetch_one(cp.pool_for_test())
+    .await
+    .unwrap();
+    assert_eq!(claim_loss_events, 2);
     assert_table_count(cp, "artifact_handles", 2).await;
     assert_table_count(cp, "artifact_commit_records", 2).await;
     assert_table_count(cp, "file_versions", 1).await;
     assert_table_count(cp, "asset_bundle_members", 0).await;
     assert_table_count(cp, "audio_extract_output_lineage", 0).await;
+    cp.use_leases
+        .release(
+            blocking.id,
+            UseLeaseReleaseReason::Released,
+            cp.clock().now(),
+        )
+        .await
+        .unwrap();
 }
 
 #[tokio::test]

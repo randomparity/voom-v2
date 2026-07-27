@@ -105,17 +105,15 @@ pub struct ComplianceApplyData {
 }
 
 /// Ordered published or historical sidecar facts from one extraction output.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 #[serde(untagged)]
 pub enum ComplianceAudioExtractOutput {
     Published(crate::audio::ExecuteExtractAudioOutputReport),
     Legacy(ComplianceLegacyAudioExtractOutput),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct ComplianceLegacyAudioExtractOutput {
-    #[serde(default)]
     pub output_id: Option<String>,
     pub staged_artifact_handle_id: u64,
     pub staged_artifact_location_id: u64,
@@ -125,12 +123,60 @@ pub struct ComplianceLegacyAudioExtractOutput {
     pub result_file_location_id: u64,
     pub staging_path: String,
     pub target_path: String,
-    #[serde(default = "legacy_singleton")]
     pub legacy_singleton: bool,
 }
 
-const fn legacy_singleton() -> bool {
-    true
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ComplianceLegacyAudioExtractResult {
+    pub job_id: u64,
+    pub ticket_id: u64,
+    pub lease_id: u64,
+    pub source_file_version_id: u64,
+    pub source_file_location_id: u64,
+    pub staged_artifact_handle_id: u64,
+    pub staged_artifact_location_id: u64,
+    pub verification_id: u64,
+    pub commit_record_id: u64,
+    pub result_file_version_id: u64,
+    pub result_file_location_id: u64,
+    pub staging_path: String,
+    pub target_path: String,
+    #[serde(default)]
+    pub commit_recovery_required: Option<serde_json::Value>,
+}
+
+impl From<ComplianceLegacyAudioExtractResult> for ComplianceLegacyAudioExtractOutput {
+    fn from(result: ComplianceLegacyAudioExtractResult) -> Self {
+        let ComplianceLegacyAudioExtractResult {
+            job_id: _,
+            ticket_id: _,
+            lease_id: _,
+            source_file_version_id: _,
+            source_file_location_id: _,
+            staged_artifact_handle_id,
+            staged_artifact_location_id,
+            verification_id,
+            commit_record_id,
+            result_file_version_id,
+            result_file_location_id,
+            staging_path,
+            target_path,
+            commit_recovery_required: _,
+        } = result;
+        Self {
+            output_id: None,
+            staged_artifact_handle_id,
+            staged_artifact_location_id,
+            verification_id,
+            commit_record_id,
+            result_file_version_id,
+            result_file_location_id,
+            staging_path,
+            target_path,
+            legacy_singleton: true,
+        }
+    }
 }
 
 impl ComplianceAudioExtractOutput {
@@ -199,14 +245,13 @@ fn decode_compliance_extract_result(
             })
             .collect(),
         OrderedTicketResult::Scalar(result) => {
-            let mut output: ComplianceLegacyAudioExtractOutput = serde_json::from_value(result)
+            let result: ComplianceLegacyAudioExtractResult = serde_json::from_value(result)
                 .map_err(|error| {
                     VoomError::database(format!(
                         "audio extraction ticket {ticket_id} legacy result is malformed: {error}"
                     ))
                 })?;
-            output.legacy_singleton = true;
-            Ok(vec![ComplianceAudioExtractOutput::Legacy(output)])
+            Ok(vec![ComplianceAudioExtractOutput::Legacy(result.into())])
         }
     }
 }

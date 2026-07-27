@@ -1210,16 +1210,7 @@ async fn compliance_audio_extract_outputs_preserve_ticket_and_descriptor_order()
         })
         .await
         .unwrap();
-    let legacy_result = serde_json::json!({
-        "staged_artifact_handle_id": 21,
-        "staged_artifact_location_id": 22,
-        "verification_id": 23,
-        "commit_record_id": 24,
-        "result_file_version_id": 25,
-        "result_file_location_id": 26,
-        "staging_path": "/stage/legacy.ogg",
-        "target_path": "/target/legacy.ogg"
-    });
+    let legacy_result = historical_extract_result();
     sqlx::query(
         "UPDATE tickets SET state = 'succeeded', result = ?, state_changed_at = ? WHERE id = ?",
     )
@@ -1266,6 +1257,46 @@ fn published_extract_output(
     })
 }
 
+#[derive(serde::Serialize)]
+struct HistoricalExecuteExtractAudioReport {
+    job_id: u64,
+    ticket_id: u64,
+    lease_id: u64,
+    source_file_version_id: u64,
+    source_file_location_id: u64,
+    staged_artifact_handle_id: u64,
+    staged_artifact_location_id: u64,
+    verification_id: u64,
+    commit_record_id: u64,
+    result_file_version_id: u64,
+    result_file_location_id: u64,
+    staging_path: &'static str,
+    target_path: &'static str,
+    commit_recovery_required: Option<serde_json::Value>,
+}
+
+fn historical_extract_result() -> serde_json::Value {
+    serde_json::to_value(HistoricalExecuteExtractAudioReport {
+        job_id: 1,
+        ticket_id: 2,
+        lease_id: 3,
+        source_file_version_id: 20,
+        source_file_location_id: 21,
+        staged_artifact_handle_id: 21,
+        staged_artifact_location_id: 22,
+        verification_id: 23,
+        commit_record_id: 24,
+        result_file_version_id: 25,
+        result_file_location_id: 26,
+        staging_path: "/stage/legacy.ogg",
+        target_path: "/target/legacy.ogg",
+        commit_recovery_required: Some(serde_json::json!({
+            "recovery_reason": "historical recovery payload remains opaque"
+        })),
+    })
+    .unwrap()
+}
+
 #[test]
 fn compliance_audio_extract_outputs_reject_incomplete_published_members() {
     let result = serde_json::json!({
@@ -1301,17 +1332,8 @@ fn compliance_audio_extract_outputs_reject_unknown_published_fields() {
 
 #[test]
 fn compliance_audio_extract_outputs_reject_unknown_legacy_fields() {
-    let result = serde_json::json!({
-        "staged_artifact_handle_id": 21,
-        "staged_artifact_location_id": 22,
-        "verification_id": 23,
-        "commit_record_id": 24,
-        "result_file_version_id": 25,
-        "result_file_location_id": 26,
-        "staging_path": "/stage/legacy.ogg",
-        "target_path": "/target/legacy.ogg",
-        "unexpected": true
-    });
+    let mut result = historical_extract_result();
+    result["unexpected"] = serde_json::json!(true);
 
     let error = super::decode_compliance_extract_result(42, &result.to_string()).unwrap_err();
 

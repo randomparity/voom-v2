@@ -1423,6 +1423,10 @@ async fn recover_extract_report(
             source_bundle_id: input.source_bundle_id,
             outputs,
             claim: claim.clone(),
+            successor_claimed_prepared: matches!(
+                operation.operation.state,
+                AudioExtractOperationState::Prepared
+            ),
         },
     )
     .await?;
@@ -1863,6 +1867,7 @@ async fn commit_verified_extract_audio(
             source_bundle_id: request.input.source_bundle_id,
             outputs,
             claim: request.claim.clone(),
+            successor_claimed_prepared: false,
         },
     )
     .await?;

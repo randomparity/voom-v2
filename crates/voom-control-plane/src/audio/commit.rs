@@ -79,6 +79,7 @@ pub struct CommitAudioExtractSetInput {
     pub source_bundle_id: BundleId,
     pub outputs: Vec<CommitAudioExtractOutputInput>,
     pub claim: NewAudioExtractClaim,
+    pub successor_claimed_prepared: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -636,8 +637,26 @@ pub async fn recover_audio_extract_set(
     cp: &ControlPlane,
     input: &CommitAudioExtractSetInput,
 ) -> Result<Vec<CommittedAudioExtractOutput>, VoomError> {
-    let prepared = load_recovery_extract_set(cp, input).await?;
-    match recover_audio_extract_set_inner(cp, input, &prepared).await {
+    if input.successor_claimed_prepared {
+        let claim_loss = VoomError::Conflict(
+            "audio extraction successor claimed an operation left prepared by a lost claim"
+                .to_owned(),
+        );
+        mark_recovery_input_required(
+            cp,
+            input,
+            &claim_loss,
+            "audio extraction successor recovery after prior claim loss",
+        )
+        .await?;
+    }
+    let mut prepared = match load_recovery_extract_set(cp, input).await {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            return Err(record_extract_input_recovery_failure(cp, input, error).await);
+        }
+    };
+    match recover_audio_extract_set_inner(cp, input, &mut prepared).await {
         Ok(outputs) => Ok(outputs),
         Err(error) => Err(record_extract_recovery_failure(cp, input, &prepared, error).await),
     }
@@ -646,14 +665,41 @@ pub async fn recover_audio_extract_set(
 async fn recover_audio_extract_set_inner(
     cp: &ControlPlane,
     input: &CommitAudioExtractSetInput,
-    prepared: &[PreparedSidecarCommit],
+    prepared: &mut [PreparedSidecarCommit],
 ) -> Result<Vec<CommittedAudioExtractOutput>, VoomError> {
-    for member in prepared {
+    let evaluated = check_recovery_extract_gate(cp, input).await?;
+    for member in &mut *prepared {
+        member.gate_evaluated_lease_ids.clone_from(&evaluated);
+    }
+    for member in &*prepared {
         assert_extract_claim(cp, input).await?;
         recover_promote_extract_member(member).await?;
         assert_extract_claim(cp, input).await?;
     }
     finalize_extract_set(cp, input, prepared).await
+}
+
+async fn record_extract_input_recovery_failure(
+    cp: &ControlPlane,
+    input: &CommitAudioExtractSetInput,
+    error: VoomError,
+) -> VoomError {
+    if let Err(record_error) = mark_recovery_input_required(
+        cp,
+        input,
+        &error,
+        "audio extraction recovery failed after durable prepare",
+    )
+    .await
+    {
+        tracing::warn!(
+            primary_error_code = error.error_code().as_str(),
+            secondary_error = %record_error,
+            operation_id = input.operation_row_id,
+            "audio extraction input recovery evidence write failed while preserving primary error"
+        );
+    }
+    error
 }
 
 async fn record_extract_recovery_failure(
@@ -678,11 +724,6 @@ async fn load_recovery_extract_set(
     cp: &ControlPlane,
     input: &CommitAudioExtractSetInput,
 ) -> Result<Vec<PreparedSidecarCommit>, VoomError> {
-    let mut tx = begin_tx(&cp.pool).await?;
-    let evaluated =
-        check_sidecar_commit_gate(cp, &mut tx, input.source_file_version_id, cp.clock().now())
-            .await?;
-    commit_tx(tx).await?;
     let mut prepared = Vec::with_capacity(input.outputs.len());
     for output in &input.outputs {
         let commit_record_id = output.prepared_commit_record_id.ok_or_else(|| {
@@ -726,10 +767,22 @@ async fn load_recovery_extract_set(
                 modified_at: None,
                 local_file_key: output.output.local_file_key.clone(),
             },
-            gate_evaluated_lease_ids: evaluated.clone(),
+            gate_evaluated_lease_ids: Vec::new(),
         });
     }
     Ok(prepared)
+}
+
+async fn check_recovery_extract_gate(
+    cp: &ControlPlane,
+    input: &CommitAudioExtractSetInput,
+) -> Result<Vec<UseLeaseId>, VoomError> {
+    let mut tx = begin_tx(&cp.pool).await?;
+    let evaluated =
+        check_sidecar_commit_gate(cp, &mut tx, input.source_file_version_id, cp.clock().now())
+            .await?;
+    commit_tx(tx).await?;
+    Ok(evaluated)
 }
 
 async fn recover_promote_extract_member(member: &PreparedSidecarCommit) -> Result<(), VoomError> {
@@ -876,7 +929,7 @@ async fn assert_extract_claim(
     input: &CommitAudioExtractSetInput,
 ) -> Result<(), VoomError> {
     cp.audio_extract_operations
-        .acquire_claim(&input.claim, cp.clock().now())
+        .assert_live_claim(&input.claim, cp.clock().now())
         .await
 }
 
@@ -1166,17 +1219,85 @@ async fn mark_extract_set_recovery_required(
     prepared: &[PreparedSidecarCommit],
     error: &VoomError,
 ) -> Result<(), VoomError> {
+    let members = input
+        .outputs
+        .iter()
+        .zip(prepared)
+        .map(|(output, member)| ExtractRecoveryMember {
+            commit_record_id: member.record.id,
+            artifact_handle_id: output.artifact_handle_id,
+            target_path: member.target_path.clone(),
+            temp_path: member.temp_path.clone(),
+        })
+        .collect::<Vec<_>>();
+    mark_extract_recovery_members(
+        cp,
+        input,
+        &members,
+        error,
+        "audio extraction set commit failed after durable prepare",
+    )
+    .await
+}
+
+async fn mark_recovery_input_required(
+    cp: &ControlPlane,
+    input: &CommitAudioExtractSetInput,
+    error: &VoomError,
+    recovery_reason: &str,
+) -> Result<(), VoomError> {
+    let members = input
+        .outputs
+        .iter()
+        .map(|output| {
+            let commit_record_id = output.prepared_commit_record_id.ok_or_else(|| {
+                VoomError::Internal(format!(
+                    "recoverable audio extraction output {} is missing commit_record_id",
+                    output.operation_output_id
+                ))
+            })?;
+            let temp_path = output.prepared_temp_path.clone().ok_or_else(|| {
+                VoomError::Internal(format!(
+                    "recoverable audio extraction output {} is missing temp_path",
+                    output.operation_output_id
+                ))
+            })?;
+            Ok(ExtractRecoveryMember {
+                commit_record_id,
+                artifact_handle_id: output.artifact_handle_id,
+                target_path: output.target_path.clone(),
+                temp_path,
+            })
+        })
+        .collect::<Result<Vec<_>, VoomError>>()?;
+    mark_extract_recovery_members(cp, input, &members, error, recovery_reason).await
+}
+
+struct ExtractRecoveryMember {
+    commit_record_id: ArtifactCommitRecordId,
+    artifact_handle_id: ArtifactHandleId,
+    target_path: PathBuf,
+    temp_path: PathBuf,
+}
+
+async fn mark_extract_recovery_members(
+    cp: &ControlPlane,
+    input: &CommitAudioExtractSetInput,
+    members: &[ExtractRecoveryMember],
+    error: &VoomError,
+    recovery_reason: &str,
+) -> Result<(), VoomError> {
     let mut tx = begin_tx(&cp.pool).await?;
     let now = cp.clock().now();
-    for (output, member) in input.outputs.iter().zip(prepared) {
-        let recovery_reason = "audio extraction set commit failed after durable prepare".to_owned();
+    for member in members {
+        let recovery_reason = recovery_reason.to_owned();
         mark_recovery_required_with_event_in_tx(
             &cp.artifacts,
             &cp.events,
             &mut tx,
             RecoveryRequiredCommit {
-                commit_record_id: member.record.id,
-                artifact_handle_id: output.artifact_handle_id,
+                commit_record_id: member.commit_record_id,
+                artifact_handle_id: member.artifact_handle_id,
                 failure: ArtifactCommitFailure {
                     failure_class: "commit_failure".to_owned(),
                     error_code: error.error_code().as_str().to_owned(),
@@ -1186,8 +1307,8 @@ async fn mark_extract_set_recovery_required(
                 recovery_reason: recovery_reason.clone(),
                 event: Event::ArtifactCommitRecoveryRequired(
                     ArtifactCommitRecoveryRequiredPayload {
-                        commit_record_id: member.record.id.0,
-                        artifact_handle_id: output.artifact_handle_id.0,
+                        commit_record_id: member.commit_record_id.0,
+                        artifact_handle_id: member.artifact_handle_id.0,
                         target_path: member.target_path.display().to_string(),
                         temp_path: member.temp_path.display().to_string(),
                         recovery_reason,

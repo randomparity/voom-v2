@@ -515,6 +515,35 @@ impl SqliteAudioExtractOperationRepo {
         )))
     }
 
+    pub async fn assert_live_claim(
+        &self,
+        claim: &NewAudioExtractClaim,
+        now: OffsetDateTime,
+    ) -> Result<(), VoomError> {
+        let present: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM audio_extract_operations \
+             WHERE operation_key = ? AND dispatch_generation = ? AND state != 'committed' \
+               AND claim_lease_id = ? AND claim_token = ? AND claim_expires_at > ?)",
+        )
+        .bind(&claim.operation_key)
+        .bind(i64::from(claim.expected_generation))
+        .bind(i64_from_u64(claim.lease_id.0))
+        .bind(&claim.claim_token)
+        .bind(iso8601(now)?)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|error| {
+            VoomError::database_context("assert live audio extraction claim", error)
+        })?;
+        if present {
+            return Ok(());
+        }
+        Err(VoomError::Conflict(format!(
+            "audio extraction operation {} lost its exact live claim",
+            claim.operation_key
+        )))
+    }
+
     pub async fn renew_claims_for_lease_in_tx(
         tx: &mut Transaction<'_, Sqlite>,
         lease_id: LeaseId,

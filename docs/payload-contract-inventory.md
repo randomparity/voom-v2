@@ -26,7 +26,7 @@ and `crates/voom-control-plane/src/` (typed higher layer for T-upstream columns)
 | commit_intents.accepted_evidence_ids | T | repo/media/commit_safety_gate/authorize.rs:362 / abort_list.rs:279 (`Vec<EvidenceId>`) | `EvidenceId` (id newtype) | — | n/a | safe by construction; NOT in scope |
 | worker_capabilities.{codecs,hardware,artifact_access}; worker_grants.{can_execute,can_access_read,can_access_write,denies}; workflow_file_phase_summaries.ticket_ids; policy_media_snapshot_inputs.{audio_languages,subtitle_languages,health_flags} | T | executor.rs:1403 `json_string_array_contains` (`Vec<String>`); workflow_summaries.rs:622 (`Vec<u64>`); policy_inputs.rs:813–815 `json_value` → `Vec<String>` | `Vec<String>` / `Vec<u64>` | — | n/a | scalar element types, no named-field surface; NOT in scope |
 | tickets.payload | T-upstream | store: repo/execution/tickets.rs:532 (`JsonValue`); typed: ticket_payload.rs:83 `from_value` → `WorkflowTicketPayload` | `WorkflowTicketPayload` | `EffectiveTiming` (named struct); `OperationKind` (unit enum — no surface) | ticket_payload.rs, timing.rs | add attr+tests to `WorkflowTicketPayload` and `EffectiveTiming` (Task 4) |
-| tickets.result | T-upstream | store: repo/execution/tickets.rs (`JsonValue`); typed: compliance.rs `decode_compliance_extract_result` and workflow execution ticket-result normalization | `ComplianceAudioExtractOutput` (untagged enum; attribute belongs on content structs) | `ExecuteExtractAudioOutputReport`, `ComplianceLegacyAudioExtractOutput` | audio/mod.rs, cases/policy/compliance.rs | complete: published and historical scalar forms reject unknown fields; compatibility and rejection tests present (#337) |
+| tickets.result | T-upstream | store: repo/execution/tickets.rs (`JsonValue`); typed: compliance.rs `decode_compliance_extract_result` and workflow execution ticket-result normalization | `ExecuteExtractAudioOutputReport`; `ComplianceLegacyAudioExtractResult` | — (historical `commit_recovery_required` is intentionally opaque `JsonValue`) | audio/mod.rs, cases/policy/compliance.rs | complete: published and complete historical scalar wire forms reject unknown fields; pre-#337 serialization compatibility and rejection tests present (#337) |
 
 ### Transitive typed closure (named-field `Deserialize` sub-structs)
 
@@ -55,9 +55,11 @@ structs (the field-drop surface) and the no-surface members:
   untyped passthrough (not a deserialization boundary, not in scope).
 - `EffectiveTiming` (timing.rs:4) → only `u64` scalar fields; terminal, no further
   nested structs.
-- `ComplianceAudioExtractOutput` (compliance.rs) →
-  `ExecuteExtractAudioOutputReport` and `ComplianceLegacyAudioExtractOutput`
-  (named-field structs, **in scope**). The untagged enum is not annotated.
+- `ExecuteExtractAudioOutputReport` and `ComplianceLegacyAudioExtractResult`
+  (compliance.rs) are terminal named-field roots, **in scope**. The historical
+  recovery subpayload remains intentionally opaque. `ComplianceAudioExtractOutput`
+  and `ComplianceLegacyAudioExtractOutput` are Serialize-only report projections,
+  not typed durable-read roots.
 
 **No named fields → attribute inapplicable, safe by construction** (recorded, not in
 scope): `TargetRowEpochTriple` (tuple newtype), `EvidenceId` (id newtype),
