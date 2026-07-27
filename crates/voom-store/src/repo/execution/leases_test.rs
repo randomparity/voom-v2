@@ -255,6 +255,7 @@ async fn acquire_rejects_when_ticket_not_ready() {
 
 #[derive(Debug, Clone, Copy)]
 enum IneligibleWorkerState {
+    Missing,
     Stale,
     Retired,
     MissingCapability,
@@ -263,7 +264,8 @@ enum IneligibleWorkerState {
 }
 
 impl IneligibleWorkerState {
-    const ALL: [Self; 5] = [
+    const ALL: [Self; 6] = [
+        Self::Missing,
         Self::Stale,
         Self::Retired,
         Self::MissingCapability,
@@ -273,6 +275,7 @@ impl IneligibleWorkerState {
 
     const fn error_fragment(self) -> &'static str {
         match self {
+            Self::Missing => "not found",
             Self::Stale => "stale",
             Self::Retired => "retired",
             Self::MissingCapability => "capability",
@@ -327,6 +330,13 @@ async fn make_worker_ineligible(
     state: IneligibleWorkerState,
 ) {
     match state {
+        IneligibleWorkerState::Missing => {
+            sqlx::query("DELETE FROM workers WHERE id = ?")
+                .bind(i64::try_from(worker_id.0).unwrap())
+                .execute(pool)
+                .await
+                .unwrap();
+        }
         IneligibleWorkerState::Stale => {
             sqlx::query("UPDATE workers SET status = 'stale' WHERE id = ?")
                 .bind(i64::try_from(worker_id.0).unwrap())

@@ -356,6 +356,15 @@ async fn worker_operation_eligibility_requires_capability_and_grant_without_deny
     assert_eq!(eligible.worker_status, Some(WorkerStatus::Registered));
     assert!(eligible.is_eligible());
     assert_eq!(eligible.artifact_access, vec!["shared_mount"]);
+
+    fixture.set_status("active").await;
+    let active = fixture
+        .repo
+        .operation_eligibility(fixture.worker_id, &worker_op("transcode_video"))
+        .await
+        .unwrap();
+    assert_eq!(active.worker_status, Some(WorkerStatus::Active));
+    assert!(active.is_eligible());
 }
 
 #[tokio::test]

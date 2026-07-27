@@ -999,6 +999,9 @@ fn require_operation_eligibility(
     operation: &TicketOperation,
     eligibility: &WorkerOperationEligibility,
 ) -> Result<(), VoomError> {
+    if eligibility.is_eligible() {
+        return Ok(());
+    }
     match eligibility.worker_status {
         None => return Err(VoomError::NotFound(format!("worker {worker_id}"))),
         Some(WorkerStatus::Stale) => {
@@ -1028,7 +1031,9 @@ fn require_operation_eligibility(
             "acquire rejected: worker {worker_id} missing grant {operation}"
         )));
     }
-    Ok(())
+    Err(VoomError::Internal(format!(
+        "worker {worker_id} failed eligibility for {operation} without a rejection reason"
+    )))
 }
 
 fn worker_operation_for_ticket(
