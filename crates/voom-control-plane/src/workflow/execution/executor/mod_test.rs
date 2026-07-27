@@ -13,12 +13,13 @@ use tokio::io::{AsyncWriteExt, DuplexStream};
 use voom_core::clock_test_support::ManualClock;
 use voom_core::rng_test_support::FrozenRng;
 use voom_core::{
-    BundleId, ErrorCode, FailureClass, FileVersionId, JobId, LeaseId, MediaSnapshotId, TicketId,
-    TicketOperation, VoomError, WorkerId,
+    BundleId, ErrorCode, FailureClass, FileAssetId, FileVersionId, JobId, LeaseId, MediaSnapshotId,
+    TicketId, TicketOperation, VoomError, WorkerId,
 };
 use voom_store::repo::bundles::{BundleMemberRole, NewAssetBundle};
 use voom_store::repo::identity::{
-    DiscoveredFile, FileLocationKind, IngestOutcome, MediaWorkKind, NewMediaVariant, NewMediaWork,
+    DiscoveredFile, FileLocationKind, IdentityRepo, IngestOutcome, MediaWorkKind, NewFileVersion,
+    NewMediaVariant, NewMediaWork, ProducedBy,
 };
 use voom_store::repo::jobs::NewJob;
 use voom_store::repo::leases::NewLease;
@@ -364,6 +365,128 @@ async fn malformed_ready_ticket_payload_reports_read_error() {
     assert!(err.source.to_string().contains("workflow ready tickets"));
     assert!(err.source.to_string().contains("payload decode"));
     assert!(!err.source.to_string().contains("no dispatchable work"));
+}
+
+#[test]
+fn planned_lineage_guard_rejects_incomplete_expectations() {
+    let asset = FileAssetId(1);
+    let version = FileVersionId(2);
+
+    let empty = super::PlannedLineageGuard::new(0, Vec::new()).unwrap_err();
+    let missing = super::PlannedLineageGuard::new(2, vec![(asset, version)]).unwrap_err();
+    let duplicate =
+        super::PlannedLineageGuard::new(2, vec![(asset, version), (asset, version)]).unwrap_err();
+
+    assert!(empty.to_string().contains("at least one planned file"));
+    assert!(missing.to_string().contains("2 planned files"));
+    assert!(duplicate.to_string().contains("duplicate file asset"));
+}
+
+#[tokio::test]
+async fn guarded_root_dispatch_waits_for_promoter_then_rejects_every_root() {
+    let fixture = ExecutorFixture::without_workers(2).await;
+    let asset = fixture.cp.identity.create_file_asset(T0).await.unwrap();
+    let planned = fixture
+        .cp
+        .identity
+        .create_file_version(NewFileVersion {
+            file_asset_id: asset.id,
+            content_hash: "planned".to_owned(),
+            size_bytes: 1,
+            produced_by: ProducedBy::Ingest,
+            produced_from_version_id: None,
+            created_at: T0,
+        })
+        .await
+        .unwrap();
+    let job_id = fixture.open_workflow_job().await;
+    let mut promoter = crate::cases::begin_immediate_tx(&fixture.cp.pool)
+        .await
+        .unwrap();
+    let current = fixture
+        .cp
+        .identity
+        .create_file_version_in_tx(
+            &mut promoter,
+            NewFileVersion {
+                file_asset_id: asset.id,
+                content_hash: "current".to_owned(),
+                size_bytes: 2,
+                produced_by: ProducedBy::Transcode,
+                produced_from_version_id: Some(planned.id),
+                created_at: T0,
+            },
+        )
+        .await
+        .unwrap();
+    let guard = super::PlannedLineageGuard::new(1, vec![(asset.id, planned.id)]).unwrap();
+    let executor = fixture.executor_with_options(WorkflowExecutorOptions::for_tests());
+    let mut invocation = tokio::spawn(async move {
+        executor
+            .submit_and_run_guarded_invocation_in_job(
+                job_id,
+                "guarded",
+                independent_hash_plan(2),
+                super::RunFailureMode::AbortJob,
+                guard,
+            )
+            .await
+    });
+
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), &mut invocation)
+            .await
+            .is_err(),
+        "guarded dispatch must wait for the promoter's write transaction"
+    );
+    promoter.commit().await.unwrap();
+    let error = invocation.await.unwrap().unwrap_err();
+
+    assert_eq!(error.source.error_code(), ErrorCode::StaleIdentityEvidence);
+    assert!(error.source.to_string().contains(&planned.id.to_string()));
+    assert!(error.source.to_string().contains(&current.id.to_string()));
+    assert!(!error.dispatch_started);
+    assert_eq!(fixture.ticket_count_for_job(job_id).await, 0);
+    assert_eq!(fixture.ticket_lifecycle_event_count().await, 0);
+    assert_eq!(fixture.lease_count().await, 0);
+}
+
+#[tokio::test]
+async fn guarded_error_after_root_commit_reports_dispatch_started() {
+    let fixture = ExecutorFixture::without_workers(1).await;
+    let asset = fixture.cp.identity.create_file_asset(T0).await.unwrap();
+    let planned = fixture
+        .cp
+        .identity
+        .create_file_version(NewFileVersion {
+            file_asset_id: asset.id,
+            content_hash: "planned".to_owned(),
+            size_bytes: 1,
+            produced_by: ProducedBy::Ingest,
+            produced_from_version_id: None,
+            created_at: T0,
+        })
+        .await
+        .unwrap();
+    let job_id = fixture.open_workflow_job().await;
+    let guard = super::PlannedLineageGuard::new(1, vec![(asset.id, planned.id)]).unwrap();
+    let executor = fixture.executor_with_options(WorkflowExecutorOptions::for_tests());
+
+    let error = executor
+        .submit_and_run_guarded_invocation_in_job(
+            job_id,
+            "guarded",
+            independent_hash_plan(1),
+            super::RunFailureMode::AbortJob,
+            guard,
+        )
+        .await
+        .unwrap_err();
+
+    assert!(error.dispatch_started);
+    assert_eq!(error.source.error_code(), ErrorCode::NoEligibleWorker);
+    assert_eq!(fixture.ticket_count_for_job(job_id).await, 1);
+    assert_eq!(fixture.ticket_lifecycle_event_count().await, 2);
 }
 
 #[tokio::test]
@@ -1929,6 +2052,25 @@ impl ExecutorFixture {
             .fetch_one(&self.cp.pool)
             .await
             .unwrap()
+    }
+
+    async fn ticket_count_for_job(&self, job_id: JobId) -> i64 {
+        sqlx::query_scalar("SELECT COUNT(*) FROM tickets WHERE job_id = ?")
+            .bind(i64::try_from(job_id.0).unwrap())
+            .fetch_one(&self.cp.pool)
+            .await
+            .unwrap()
+    }
+
+    async fn ticket_lifecycle_event_count(&self) -> i64 {
+        sqlx::query_scalar(
+            "SELECT COUNT(*) FROM events \
+             WHERE subject_type = 'ticket' \
+               AND kind IN ('ticket.created', 'ticket.ready')",
+        )
+        .fetch_one(&self.cp.pool)
+        .await
+        .unwrap()
     }
 
     async fn create_heartbeat_test_lease(&self, worker_id: WorkerId) -> (TicketId, LeaseId) {
