@@ -40,24 +40,78 @@ database. No migration or restore step is safe while writers are active.
 
 ### 2. Confirm the current schema state
 
+Run the downgraded binary with the same database configuration that production
+uses. Capture stdout and the exit code separately; piping `voom health`
+directly into `jq` would replace the CLI exit code with `jq`'s exit code.
+
 ```bash
-voom health
+set -euo pipefail
+
+health_json="$(mktemp -t voom-health.XXXXXX)"
+trap 'rm -f "$health_json"' EXIT
+
+health_exit=0
+voom health >"$health_json" || health_exit=$?
+
+case "$health_exit" in
+  0)
+    if ! jq -e '
+.schema_version == "0" and
+.command == "health" and
+.status == "ok" and
+.data.db.status == "current" and
+.error == null
+' "$health_json" >/dev/null; then
+      echo "voom health returned exit 0 with an unexpected envelope" >&2
+      exit 2
+    fi
+    health_state="current"
+    ;;
+  2)
+    health_state="$(jq -er '.error.code | select(type == "string")' "$health_json")"
+    case "$health_state" in
+      DB_SCHEMA_TOO_NEW | DB_PARTIAL_SCHEMA | DB_DIRTY_MIGRATION) ;;
+      *)
+        echo "voom health returned an unexpected error code: $health_state" >&2
+        exit 2
+        ;;
+    esac
+    if ! jq -e --arg code "$health_state" '
+.schema_version == "0" and
+.command == "health" and
+.status == "error" and
+.data == null and
+.error.code == $code
+' "$health_json" >/dev/null; then
+      echo "voom health returned exit 2 with an unexpected envelope" >&2
+      exit 2
+    fi
+    ;;
+  *)
+    echo "voom health returned unexpected exit code $health_exit" >&2
+    exit 2
+    ;;
+esac
+
+printf 'rollback health state: %s\n' "$health_state"
 ```
 
-The response envelope includes `schema_state`. After a binary downgrade the
-expected states are:
+The accepted results and next actions are:
 
-| `schema_state` | Meaning |
-|---|---|
-| `DB_SCHEMA_TOO_NEW` | Database has migrations the downgraded binary does not know. Restore required. |
-| `current` | Schema matches the binary. No schema action needed. |
-| `DB_DIRTY_MIGRATION` | A migration aborted mid-flight. See [Dirty migration recovery](#dirty-migration-recovery) below. |
+| Exit | JSON predicate | Meaning and next action |
+|---|---|---|
+| `0` | `.status == "ok"` and `.data.db.status == "current"` | Schema matches the selected binary. Skip to step 5. |
+| `2` | `.status == "error"` and `.error.code == "DB_SCHEMA_TOO_NEW"` | Database is ahead of the selected binary. Continue to step 3. |
+| `2` | `.status == "error"` and `.error.code == "DB_PARTIAL_SCHEMA"` | Database is behind the selected binary or its migration metadata is damaged. Do **not** choose an older backup; follow [Partial schema recovery](#partial-schema-recovery). |
+| `2` | `.status == "error"` and `.error.code == "DB_DIRTY_MIGRATION"` | A migration aborted mid-flight. Follow [Dirty migration recovery](#dirty-migration-recovery). |
 
 If the state is already `current` after the binary swap, skip to step 5.
 
-### 3. Restore the pre-upgrade database snapshot
+### 3. Restore one pre-upgrade database snapshot
 
-Replace the database file with the backup taken before the upgrade:
+`DB_SCHEMA_TOO_NEW` establishes that the active database is ahead of the
+selected binary. Replace it with the newest snapshot taken before the
+incompatible upgrade:
 
 ```bash
 # Stop all VOOM processes first (step 1).
@@ -77,16 +131,51 @@ sqlite3 /var/lib/voom/voom.db "PRAGMA integrity_check;"
 
 ### 4. Verify the schema matches the downgraded binary
 
-Run `voom health` again with the downgraded binary against the restored database.
-The response should show `schema_state: current`. If it shows `DB_PARTIAL_SCHEMA`,
-the backup predates the version the binary expects — choose an older backup or
-run `voom init` to apply the missing migrations forward.
+Run the complete diagnosis block from step 2 again with the downgraded binary
+against the restored database:
+
+- `current`: the candidate is compatible; continue to step 5.
+- `DB_SCHEMA_TOO_NEW`: this candidate is still ahead of the binary. Try the
+  next earlier pre-upgrade snapshot, then repeat the integrity check and
+  diagnosis.
+- `DB_PARTIAL_SCHEMA`: stop moving backward. The candidate is behind the
+  binary or damaged; an even older snapshot cannot make it compatible. Follow
+  [Partial schema recovery](#partial-schema-recovery).
+- `DB_DIRTY_MIGRATION`: do not infer a safe direction from snapshot age.
+  Follow [Dirty migration recovery](#dirty-migration-recovery), or reject this
+  candidate and diagnose a separately known-consistent snapshot from the
+  beginning.
+
+This brackets the compatible schema: moving to earlier snapshots is allowed
+only while the result remains `DB_SCHEMA_TOO_NEW`. Never continue to
+progressively older snapshots after `DB_PARTIAL_SCHEMA`.
 
 ### 5. Resume normal operation
 
 Start VOOM processes normally. `connect()` opens the database without migrating;
 only `voom init` applies migrations (ADR 0003). Do not run `voom init` unless you
 intend to advance the schema.
+
+## Partial schema recovery
+
+`DB_PARTIAL_SCHEMA` has two forms. Inspect the emitted diagnostic:
+
+```bash
+jq -r '.error.message, (.error.hint // "")' "$health_json"
+```
+
+- If the hint explicitly says `Run voom init against the current binary`, the
+  snapshot has a clean older migration set. Keep an untouched copy of the
+  snapshot, make a working copy, run `voom init` with the selected downgraded
+  binary to apply its missing migrations forward, and then repeat the
+  integrity check and step 2 diagnosis. Resume only after `current`.
+- If the message or hint reports corrupted or incompatible migration metadata
+  (for example, a missing or malformed `schema_meta` table), `voom init` is not
+  a repair path. Restore a newer known-consistent pre-upgrade snapshot or
+  perform a deliberate metadata repair. Diagnose the result again.
+
+Do not choose an older snapshot in response to `DB_PARTIAL_SCHEMA`; that moves
+away from the selected binary's required schema.
 
 ## Dirty migration recovery
 
@@ -95,7 +184,10 @@ A `DB_DIRTY_MIGRATION` state means a migration ran far enough to insert a
 further migrations over a dirty row. Two options:
 
 **Option A — restore from backup (preferred).**
-Follow steps 3–5 above to replace the database with a pre-upgrade snapshot.
+Replace the database with a known-consistent pre-upgrade snapshot, then run its
+integrity check and the complete step 2 diagnosis. Snapshot age alone is not
+evidence of consistency. Resume only after the selected binary reports
+`current`.
 
 **Option B — remove the failed row manually.**
 Use this only if you have confirmed the migration left no partial schema changes
