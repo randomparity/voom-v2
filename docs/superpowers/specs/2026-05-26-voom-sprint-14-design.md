@@ -551,8 +551,11 @@ Stable Sprint 14 behavior:
   reported as `CONFIG_INVALID` at execution time.
 - Audio transcode selector matches zero streams: planning or execution
   diagnostic, reported as `CONFIG_INVALID` at execution time.
-- Audio extraction selector matches zero or multiple streams: planning or
-  execution diagnostic, reported as `CONFIG_INVALID` at execution time.
+- Audio extraction selector matches zero streams: planning or execution
+  diagnostic, reported as `CONFIG_INVALID` at execution time.
+- Audio extraction selector matches multiple streams: planning emits ordered
+  descriptors; before issue #337, host execution rejects the plural payload
+  before staging or worker dispatch with `CONFIG_INVALID`.
 - Extraction source asset is not a primary bundle member: `CONFIG_INVALID`.
 - FFmpeg spawn/exit failure: `EXTERNAL_SYSTEM_UNAVAILABLE`.
 - Worker crash, timeout, malformed result, and protocol errors use the existing
