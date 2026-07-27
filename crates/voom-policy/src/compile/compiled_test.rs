@@ -26,22 +26,6 @@ fn compiled_policy_rejects_unknown_root_fields() {
     assert!(error.to_string().contains("unknown field `future_root`"));
 }
 
-#[test]
-fn compiled_operation_rejects_unknown_variant_fields() {
-    let error = serde_json::from_value::<CompiledOperation>(serde_json::json!({
-        "type": "set_container",
-        "container": "mkv",
-        "future_operation": true
-    }))
-    .unwrap_err();
-
-    assert!(
-        error
-            .to_string()
-            .contains("unknown field `future_operation`")
-    );
-}
-
 fn assert_tagged_wire_contract<T>(wires: &[serde_json::Value])
 where
     T: serde::de::DeserializeOwned + serde::Serialize + std::fmt::Debug,
@@ -66,11 +50,16 @@ fn all_compiled_operation_variants_preserve_wire_and_reject_unknown_fields() {
         serde_json::json!({"type": "set_container", "container": "mkv"}),
         serde_json::json!({"type": "keep_tracks", "target": "audio", "filter": null}),
         serde_json::json!({"type": "remove_tracks", "target": "audio", "filter": null}),
-        serde_json::json!({"type": "reorder_tracks", "targets": ["audio"]}),
+        serde_json::json!({
+            "type": "reorder_tracks",
+            "targets": ["audio"],
+            "head_filter": {"type": "commentary"}
+        }),
         serde_json::json!({
             "type": "set_defaults",
             "target": "audio",
-            "strategy": "first"
+            "strategy": "first",
+            "filter": {"type": "language_in", "values": ["eng"]}
         }),
         serde_json::json!({"type": "clear_track_actions", "target": "audio"}),
         serde_json::json!({"type": "clear_tags"}),
@@ -84,7 +73,14 @@ fn all_compiled_operation_variants_preserve_wire_and_reject_unknown_fields() {
             "type": "transcode_video",
             "target_codec": "hevc",
             "container": "mkv",
-            "profile": {"named": "default-hevc"}
+            "profile": {"named": "default-hevc"},
+            "resolved_profile": {
+                "name": "default-hevc",
+                "target_codec": "hevc",
+                "encoder": "libx265",
+                "crf": 23,
+                "preset": "medium"
+            }
         }),
         serde_json::json!({
             "type": "transcode_audio",
@@ -109,9 +105,17 @@ fn all_compiled_operation_variants_preserve_wire_and_reject_unknown_fields() {
         serde_json::json!({
             "type": "conditional",
             "condition": {"type": "predicate", "name": "ready"},
-            "operations": []
+            "operations": [{"type": "clear_tags"}]
         }),
-        serde_json::json!({"type": "rules", "mode": "first", "rules": []}),
+        serde_json::json!({
+            "type": "rules",
+            "mode": "first",
+            "rules": [{
+                "name": "ready-rule",
+                "condition": {"type": "predicate", "name": "ready"},
+                "operations": [{"type": "clear_tags"}]
+            }]
+        }),
     ];
 
     assert_eq!(wires.len(), 16);
@@ -134,8 +138,14 @@ fn all_track_filter_variants_preserve_wire_and_reject_unknown_fields() {
             "type": "not",
             "inner": {"type": "commentary"}
         }),
-        serde_json::json!({"type": "and", "filters": []}),
-        serde_json::json!({"type": "or", "filters": []}),
+        serde_json::json!({
+            "type": "and",
+            "filters": [{"type": "commentary"}]
+        }),
+        serde_json::json!({
+            "type": "or",
+            "filters": [{"type": "forced"}]
+        }),
     ];
 
     assert_eq!(wires.len(), 12);
@@ -164,8 +174,14 @@ fn all_compiled_condition_variants_preserve_wire_and_reject_unknown_fields() {
             "type": "not",
             "inner": {"type": "predicate", "name": "ready"}
         }),
-        serde_json::json!({"type": "and", "conditions": []}),
-        serde_json::json!({"type": "or", "conditions": []}),
+        serde_json::json!({
+            "type": "and",
+            "conditions": [{"type": "predicate", "name": "ready"}]
+        }),
+        serde_json::json!({
+            "type": "or",
+            "conditions": [{"type": "predicate", "name": "ready"}]
+        }),
     ];
 
     assert_eq!(wires.len(), 8);
@@ -179,7 +195,13 @@ fn all_compiled_value_variants_preserve_wire_and_reject_unknown_fields() {
         serde_json::json!({"type": "number", "value": "2"}),
         serde_json::json!({"type": "boolean", "value": true}),
         serde_json::json!({"type": "field_path", "path": ["media", "container"]}),
-        serde_json::json!({"type": "list", "values": []}),
+        serde_json::json!({
+            "type": "list",
+            "values": [
+                {"type": "string", "value": "mkv"},
+                {"type": "list", "values": [{"type": "boolean", "value": true}]}
+            ]
+        }),
     ];
 
     assert_eq!(wires.len(), 5);
@@ -215,6 +237,19 @@ fn reachable_compiled_structs_reject_unknown_fields() {
         provenance_error
             .to_string()
             .contains("unknown field `future_provenance`")
+    );
+
+    let rule_error = serde_json::from_value::<CompiledRule>(serde_json::json!({
+        "name": "ready-rule",
+        "condition": null,
+        "operations": [],
+        "future_rule": true
+    }))
+    .unwrap_err();
+    assert!(
+        rule_error
+            .to_string()
+            .contains("unknown field `future_rule`")
     );
 }
 
