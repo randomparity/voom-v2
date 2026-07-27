@@ -1179,16 +1179,8 @@ async fn compliance_audio_extract_outputs_preserve_ticket_and_descriptor_order()
     let result = serde_json::json!({
         "result_file_location_id": 11,
         "outputs": [
-            {
-                "output_id": "output-a",
-                "source_snapshot_stream_id": "a-1",
-                "result_file_location_id": 11
-            },
-            {
-                "output_id": "output-b",
-                "source_snapshot_stream_id": "a-2",
-                "result_file_location_id": 12
-            }
+            published_extract_output("output-a", "a-1", 1, 11, 1),
+            published_extract_output("output-b", "a-2", 2, 12, 2)
         ]
     });
     sqlx::query(
@@ -1204,8 +1196,8 @@ async fn compliance_audio_extract_outputs_preserve_ticket_and_descriptor_order()
     let outputs = cp.audio_extract_outputs_for_job(job.id).await.unwrap();
 
     assert_eq!(outputs.len(), 2);
-    assert_eq!(outputs[0].output_id.as_deref(), Some("output-a"));
-    assert_eq!(outputs[1].output_id.as_deref(), Some("output-b"));
+    assert_eq!(outputs[0].output_id(), Some("output-a"));
+    assert_eq!(outputs[1].output_id(), Some("output-b"));
 
     let legacy = cp
         .create_ticket(NewTicket {
@@ -1240,8 +1232,56 @@ async fn compliance_audio_extract_outputs_preserve_ticket_and_descriptor_order()
 
     let outputs = cp.audio_extract_outputs_for_job(job.id).await.unwrap();
     assert_eq!(outputs.len(), 3);
-    assert_eq!(outputs[2].result_file_location_id, Some(26));
-    assert!(outputs[2].legacy_singleton);
+    assert_eq!(outputs[2].result_file_location_id(), 26);
+    assert!(outputs[2].is_legacy_singleton());
+}
+
+fn published_extract_output(
+    output_id: &str,
+    source_snapshot_stream_id: &str,
+    source_provider_stream_index: u32,
+    result_file_location_id: u64,
+    seed: u64,
+) -> serde_json::Value {
+    serde_json::json!({
+        "operation_output_id": 100 + seed,
+        "output_id": output_id,
+        "source_file_version_id": 200 + seed,
+        "source_media_snapshot_id": 300 + seed,
+        "source_snapshot_stream_id": source_snapshot_stream_id,
+        "source_provider_stream_index": source_provider_stream_index,
+        "role": "extract_audio_sidecar",
+        "staged_artifact_handle_id": 400 + seed,
+        "staged_artifact_location_id": 500 + seed,
+        "verification_id": 600 + seed,
+        "commit_record_id": 700 + seed,
+        "result_file_version_id": 800 + seed,
+        "result_file_location_id": result_file_location_id,
+        "result_file_asset_id": 900 + seed,
+        "result_media_snapshot_id": 1000 + seed,
+        "bundle_member_id": 1100 + seed,
+        "lineage_id": 1200 + seed,
+        "staging_path": format!("/stage/{output_id}.ogg"),
+        "target_path": format!("/target/{output_id}.ogg")
+    })
+}
+
+#[test]
+fn compliance_audio_extract_outputs_reject_incomplete_published_members() {
+    let result = serde_json::json!({
+        "outputs": [{
+            "output_id": "incomplete",
+            "result_file_location_id": 1
+        }]
+    });
+
+    let error = super::decode_compliance_extract_result(42, &result.to_string()).unwrap_err();
+
+    assert!(
+        error
+            .to_string()
+            .contains("audio extraction ticket 42 published output is malformed")
+    );
 }
 
 #[tokio::test]

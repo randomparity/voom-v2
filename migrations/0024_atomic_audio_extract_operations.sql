@@ -127,9 +127,6 @@ CREATE TABLE audio_extract_operation_outputs (
     )
 ) STRICT;
 
-CREATE INDEX audio_extract_outputs_by_operation
-    ON audio_extract_operation_outputs (operation_id, ordinal);
-
 CREATE TABLE audio_extract_dispatch_attempts (
     id                     INTEGER PRIMARY KEY,
     operation_id           INTEGER NOT NULL

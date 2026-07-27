@@ -4,6 +4,7 @@ mod durable_workflow;
 pub(crate) mod execution;
 pub(crate) mod plan;
 pub(crate) mod summary;
+pub(crate) mod ticket_results;
 
 pub(crate) use execution::WorkerRuntimeRegistry;
 #[cfg(test)]

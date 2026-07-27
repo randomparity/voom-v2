@@ -193,15 +193,15 @@ async fn audio_extract_multi_match_publishes_ordered_media_and_lineage() {
         assert_extract_execution_result(&url, &out_dir, source_bundle_id, &executed, 2).await;
     assert_ne!(outputs[0].file_name(), outputs[1].file_name());
     assert_ne!(
-        executed.audio_extract_outputs[0].output_id,
-        executed.audio_extract_outputs[1].output_id
+        executed.audio_extract_outputs[0].output_id(),
+        executed.audio_extract_outputs[1].output_id()
     );
     assert_eq!(
-        executed.audio_extract_outputs[0].source_provider_stream_index,
+        executed.audio_extract_outputs[0].source_provider_stream_index(),
         Some(1)
     );
     assert_eq!(
-        executed.audio_extract_outputs[1].source_provider_stream_index,
+        executed.audio_extract_outputs[1].source_provider_stream_index(),
         Some(2)
     );
     let post_run = cp
@@ -538,14 +538,14 @@ async fn assert_extract_lineage(
         assert_eq!(row.0, i64::try_from(ordinal).unwrap());
         assert_eq!(row.1, i64::try_from(source_file_version_id.0).unwrap());
         assert_eq!(row.2, i64::try_from(source_snapshot_id.0).unwrap());
-        assert_eq!(row.3, output.source_snapshot_stream_id.as_deref().unwrap());
+        assert_eq!(row.3, output.source_snapshot_stream_id().unwrap());
         assert_eq!(
             row.4,
-            i64::from(output.source_provider_stream_index.unwrap())
+            i64::from(output.source_provider_stream_index().unwrap())
         );
         assert_eq!(
             row.5,
-            i64::try_from(output.result_file_version_id.unwrap()).unwrap()
+            i64::try_from(output.result_file_version_id()).unwrap()
         );
     }
 }

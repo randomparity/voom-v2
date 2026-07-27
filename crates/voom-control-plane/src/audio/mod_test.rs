@@ -99,6 +99,45 @@ async fn extract_failure_records_audio_failed_event() {
 }
 
 #[tokio::test]
+async fn extract_failure_preserves_primary_error_when_cleanup_and_event_writes_fail() {
+    let (cp, _db, dir) = fixture_with_dir().await;
+    let source = seed_audio_source(&cp, &dir, b"source").await;
+    let bundle = seed_bundle(&cp).await;
+    let input = extract_input_for_source(&source, bundle.id, &dir);
+    sqlx::query(
+        "CREATE TRIGGER fail_extract_claim_release \
+         BEFORE UPDATE OF claim_token ON audio_extract_operations \
+         WHEN OLD.claim_token IS NOT NULL AND NEW.claim_token IS NULL \
+         BEGIN SELECT RAISE(ABORT, 'injected claim release failure'); END",
+    )
+    .execute(cp.pool_for_test())
+    .await
+    .unwrap();
+    sqlx::query(
+        "CREATE TRIGGER fail_extract_failure_event \
+         BEFORE INSERT ON events WHEN NEW.kind = 'artifact.audio_extract_failed' \
+         BEGIN SELECT RAISE(ABORT, 'injected failure event failure'); END",
+    )
+    .execute(cp.pool_for_test())
+    .await
+    .unwrap();
+
+    let error = execute_extract_audio_with_dispatchers(
+        &cp,
+        input,
+        &CrashingExtractDispatcher,
+        &UncalledVerifyDispatcher,
+        &UncalledProbeDispatcher,
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error.error_code(), voom_core::ErrorCode::WorkerCrash);
+    assert!(error.to_string().contains("injected worker crash"));
+    assert_event_count(&cp, "artifact.audio_extract_failed", 0).await;
+}
+
+#[tokio::test]
 async fn extract_audio_plural_commits_every_output_and_lineage_atomically() {
     let (cp, _db, dir) = fixture_with_dir().await;
     let mut source = seed_audio_source(&cp, &dir, b"source").await;
@@ -460,6 +499,63 @@ async fn committed_plural_extract_retry_returns_same_ordered_identities_without_
     assert_table_count(&cp, "file_versions", 3).await;
     assert_table_count(&cp, "asset_bundle_members", 2).await;
     assert_table_count(&cp, "audio_extract_output_lineage", 2).await;
+}
+
+#[tokio::test]
+async fn committed_extract_rejects_replay_into_a_different_bundle() {
+    let (cp, _db, dir) = fixture_with_dir().await;
+    let source = seed_audio_source(&cp, &dir, b"source").await;
+    let first_bundle = seed_bundle(&cp).await;
+    let second_bundle = seed_bundle(&cp).await;
+    let input = extract_input_for_source(&source, first_bundle.id, &dir);
+
+    execute_extract_audio_with_dispatchers(
+        &cp,
+        input.clone(),
+        &WritingExtractDispatcher {
+            output_bytes: b"extracted".to_vec(),
+        },
+        &SuccessfulVerifyDispatcher,
+        &SucceedingProbeDispatcher,
+    )
+    .await
+    .unwrap();
+    let mut replay = input;
+    replay.source_bundle_id = second_bundle.id;
+
+    let error = execute_extract_audio_with_dispatchers(
+        &cp,
+        replay,
+        &UncalledExtractDispatcher,
+        &UncalledVerifyDispatcher,
+        &UncalledProbeDispatcher,
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error.error_code(), voom_core::ErrorCode::ConfigInvalid);
+    assert!(
+        error
+            .to_string()
+            .contains("does not match persisted descriptor")
+    );
+    assert_eq!(
+        cp.bundles
+            .list_members(first_bundle.id)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(
+        cp.bundles
+            .list_members(second_bundle.id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_table_count(&cp, "audio_extract_operations", 1).await;
+    assert_table_count(&cp, "audio_extract_output_lineage", 1).await;
 }
 
 #[tokio::test]
@@ -1547,6 +1643,19 @@ impl ExtractAudioDispatcher for UncalledExtractDispatcher {
         _request: ExtractAudioRequest,
     ) -> Result<ExtractAudioResult, VoomError> {
         panic!("extract dispatcher should not be called")
+    }
+}
+
+struct CrashingExtractDispatcher;
+
+#[async_trait]
+impl ExtractAudioDispatcher for CrashingExtractDispatcher {
+    async fn dispatch_extract_audio(
+        &self,
+        _idempotency_key: &str,
+        _request: ExtractAudioRequest,
+    ) -> Result<ExtractAudioResult, VoomError> {
+        Err(VoomError::WorkerCrash("injected worker crash".to_owned()))
     }
 }
 

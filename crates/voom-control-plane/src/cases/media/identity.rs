@@ -12,8 +12,8 @@ use voom_events::payload::{
     FileAssetCreatedPayload, FileLocationAliasedPayload, FileLocationRecordedByMovePayload,
     FileLocationRecordedPayload, FileLocationRetiredByMovePayload, FileVersionCreatedPayload,
     IdentityEvidenceAcceptedPayload, IdentityEvidenceRecordedPayload,
-    IdentityEvidenceSupersededPayload, MediaSnapshotRecordedPayload, MediaVariantCreatedPayload,
-    MediaWorkCreatedPayload, UseLeaseReanchoredByMovePayload,
+    IdentityEvidenceSupersededPayload, MediaVariantCreatedPayload, MediaWorkCreatedPayload,
+    UseLeaseReanchoredByMovePayload,
 };
 use voom_events::{Event, SubjectType};
 use voom_store::repo::identity::{
@@ -432,30 +432,15 @@ impl ControlPlane {
         probed_at: OffsetDateTime,
     ) -> Result<MediaSnapshot, VoomError> {
         let mut tx = begin_tx(&self.pool).await?;
-        let snap = self
-            .identity
-            .record_media_snapshot_in_tx(
-                &mut tx,
-                NewMediaSnapshot {
-                    file_version_id,
-                    probed_by,
-                    probed_at,
-                    payload,
-                },
-            )
-            .await?;
-        append_event(
-            &self.events,
+        let snap = crate::media_snapshot::record_with_event_in_tx(
+            self,
             &mut tx,
-            SubjectType::MediaSnapshot,
-            Some(snap.id.0),
-            probed_at,
-            Event::MediaSnapshotRecorded(MediaSnapshotRecordedPayload {
-                media_snapshot_id: snap.id.0,
-                file_version_id: snap.file_version_id.0,
-                probed_by_worker_id: snap.probed_by.map(|w| w.0),
+            NewMediaSnapshot {
+                file_version_id,
+                probed_by,
                 probed_at,
-            }),
+                payload,
+            },
         )
         .await?;
         commit_tx(tx).await?;

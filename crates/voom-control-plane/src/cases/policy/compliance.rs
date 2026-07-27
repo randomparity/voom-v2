@@ -24,6 +24,7 @@ use crate::workflow::WorkerRuntimeRegistry;
 use crate::workflow::execution::executor::{
     OperationArtifactRoots, WorkflowArtifactRoots, WorkflowExecutorOptions,
 };
+use crate::workflow::ticket_results::{OrderedTicketResult, ordered_ticket_result};
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ComplianceReportData {
@@ -103,56 +104,110 @@ pub struct ComplianceApplyData {
     pub issues: IssueApplicationSummary,
 }
 
-/// Ordered published sidecar identity and lineage facts from one extraction output.
+/// Ordered published or historical sidecar facts from one extraction output.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
-pub struct ComplianceAudioExtractOutput {
+#[serde(untagged)]
+pub enum ComplianceAudioExtractOutput {
+    Published(crate::audio::ExecuteExtractAudioOutputReport),
+    Legacy(ComplianceLegacyAudioExtractOutput),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct ComplianceLegacyAudioExtractOutput {
+    #[serde(default)]
     pub output_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub operation_output_id: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub source_file_version_id: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub source_media_snapshot_id: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub source_snapshot_stream_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub source_provider_stream_index: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub role: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub staged_artifact_handle_id: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub staged_artifact_location_id: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub verification_id: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub commit_record_id: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub result_file_version_id: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub result_file_location_id: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub result_file_asset_id: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub result_media_snapshot_id: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub bundle_member_id: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub lineage_id: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub staging_path: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub target_path: Option<String>,
-    #[serde(default, skip_serializing_if = "is_false")]
+    pub staged_artifact_handle_id: u64,
+    pub staged_artifact_location_id: u64,
+    pub verification_id: u64,
+    pub commit_record_id: u64,
+    pub result_file_version_id: u64,
+    pub result_file_location_id: u64,
+    pub staging_path: String,
+    pub target_path: String,
+    #[serde(default = "legacy_singleton")]
     pub legacy_singleton: bool,
 }
 
-#[expect(
-    clippy::trivially_copy_pass_by_ref,
-    reason = "serde skip_serializing_if requires a reference predicate"
-)]
-fn is_false(value: &bool) -> bool {
-    !*value
+const fn legacy_singleton() -> bool {
+    true
+}
+
+impl ComplianceAudioExtractOutput {
+    #[must_use]
+    pub fn output_id(&self) -> Option<&str> {
+        match self {
+            Self::Published(output) => output.output_id.as_deref(),
+            Self::Legacy(output) => output.output_id.as_deref(),
+        }
+    }
+
+    #[must_use]
+    pub fn source_snapshot_stream_id(&self) -> Option<&str> {
+        match self {
+            Self::Published(output) => Some(output.source_snapshot_stream_id.as_str()),
+            Self::Legacy(_) => None,
+        }
+    }
+
+    #[must_use]
+    pub fn source_provider_stream_index(&self) -> Option<u32> {
+        match self {
+            Self::Published(output) => Some(output.source_provider_stream_index),
+            Self::Legacy(_) => None,
+        }
+    }
+
+    #[must_use]
+    pub fn result_file_version_id(&self) -> u64 {
+        match self {
+            Self::Published(output) => output.result_file_version_id.0,
+            Self::Legacy(output) => output.result_file_version_id,
+        }
+    }
+
+    #[must_use]
+    pub fn result_file_location_id(&self) -> u64 {
+        match self {
+            Self::Published(output) => output.result_file_location_id.0,
+            Self::Legacy(output) => output.result_file_location_id,
+        }
+    }
+
+    #[must_use]
+    pub fn is_legacy_singleton(&self) -> bool {
+        matches!(self, Self::Legacy(_))
+    }
+}
+
+fn decode_compliance_extract_result(
+    ticket_id: i64,
+    result: &str,
+) -> Result<Vec<ComplianceAudioExtractOutput>, VoomError> {
+    match ordered_ticket_result(result)? {
+        OrderedTicketResult::Outputs(outputs) => outputs
+            .into_iter()
+            .map(|output| {
+                serde_json::from_value(output)
+                    .map(ComplianceAudioExtractOutput::Published)
+                    .map_err(|error| {
+                        VoomError::database(format!(
+                            "audio extraction ticket {ticket_id} published output is malformed: \
+                             {error}"
+                        ))
+                    })
+            })
+            .collect(),
+        OrderedTicketResult::Scalar(result) => {
+            let mut output: ComplianceLegacyAudioExtractOutput = serde_json::from_value(result)
+                .map_err(|error| {
+                    VoomError::database(format!(
+                        "audio extraction ticket {ticket_id} legacy result is malformed: {error}"
+                    ))
+                })?;
+            output.legacy_singleton = true;
+            Ok(vec![ComplianceAudioExtractOutput::Legacy(output)])
+        }
+    }
 }
 
 /// The durable result of a `compliance execute` run: the issues applied from
@@ -1166,57 +1221,23 @@ impl ControlPlane {
         let job_id = i64::try_from(job_id.0).map_err(|error| {
             VoomError::Internal(format!("audio extract report job id overflow: {error}"))
         })?;
-        let rows: Vec<(String,)> = sqlx::query_as(
-            "SELECT value FROM ( \
-               SELECT t.id AS ticket_id, 0 AS ordinal, \
-                      json_object( \
-                        'output_id', NULL, \
-                        'staged_artifact_handle_id', \
-                          json_extract(t.result, '$.staged_artifact_handle_id'), \
-                        'staged_artifact_location_id', \
-                          json_extract(t.result, '$.staged_artifact_location_id'), \
-                        'verification_id', json_extract(t.result, '$.verification_id'), \
-                        'commit_record_id', json_extract(t.result, '$.commit_record_id'), \
-                        'result_file_version_id', \
-                          json_extract(t.result, '$.result_file_version_id'), \
-                        'result_file_location_id', \
-                          json_extract(t.result, '$.result_file_location_id'), \
-                        'staging_path', json_extract(t.result, '$.staging_path'), \
-                        'target_path', json_extract(t.result, '$.target_path'), \
-                        'legacy_singleton', json('true') \
-                      ) AS value \
-               FROM tickets t \
-               WHERE t.job_id = ? AND t.state = 'succeeded' AND t.result IS NOT NULL \
-                 AND t.kind = 'synthetic.workflow.operation.extract_audio' \
-                 AND json_type(t.result, '$.result_file_location_id') = 'integer' \
-                 AND (json_type(t.result, '$.outputs') IS NULL \
-                      OR json_type(t.result, '$.outputs') != 'array' \
-                      OR json_array_length(t.result, '$.outputs') = 0) \
-               UNION ALL \
-               SELECT t.id AS ticket_id, CAST(member.key AS INTEGER) AS ordinal, \
-                      member.value AS value \
-               FROM tickets t, json_each(t.result, '$.outputs') AS member \
-               WHERE t.job_id = ? AND t.state = 'succeeded' AND t.result IS NOT NULL \
-                 AND t.kind = 'synthetic.workflow.operation.extract_audio' \
-                 AND json_type(t.result, '$.outputs') = 'array' \
-             ) ORDER BY ticket_id ASC, ordinal ASC",
+        let rows: Vec<(i64, String)> = sqlx::query_as(
+            "SELECT id, result FROM tickets \
+             WHERE job_id = ? AND state = 'succeeded' AND result IS NOT NULL \
+               AND kind = 'synthetic.workflow.operation.extract_audio' \
+             ORDER BY id ASC",
         )
-        .bind(job_id)
         .bind(job_id)
         .fetch_all(&self.pool)
         .await
         .map_err(|error| {
             VoomError::database_context("compliance audio extract output report", error)
         })?;
-        rows.into_iter()
-            .map(|(value,)| {
-                serde_json::from_str(&value).map_err(|error| {
-                    VoomError::database(format!(
-                        "compliance audio extract output is malformed: {error}"
-                    ))
-                })
-            })
-            .collect()
+        let mut outputs = Vec::new();
+        for (ticket_id, result) in rows {
+            outputs.extend(decode_compliance_extract_result(ticket_id, &result)?);
+        }
+        Ok(outputs)
     }
 }
 

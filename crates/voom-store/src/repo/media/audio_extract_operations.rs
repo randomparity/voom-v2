@@ -260,6 +260,21 @@ impl SqliteAudioExtractOperationRepo {
         Ok(record)
     }
 
+    pub async fn get_exact_by_key(
+        &self,
+        input: &NewAudioExtractOperation,
+        outputs: &[NewAudioExtractOutput],
+    ) -> Result<Option<AudioExtractOperationRecord>, VoomError> {
+        let mut tx = self.pool.begin().await.map_err(|error| {
+            VoomError::database_context("audio_extract_operations exact get begin", error)
+        })?;
+        let record = Self::get_exact_by_key_in_tx(&mut tx, input, outputs).await?;
+        tx.commit().await.map_err(|error| {
+            VoomError::database_context("audio_extract_operations exact get commit", error)
+        })?;
+        Ok(record)
+    }
+
     pub async fn get_exact_by_key_in_tx(
         tx: &mut Transaction<'_, Sqlite>,
         input: &NewAudioExtractOperation,
@@ -368,23 +383,20 @@ impl SqliteAudioExtractOperationRepo {
         tx: &mut Transaction<'_, Sqlite>,
         output: &NewFinalizedAudioExtractOutput,
     ) -> Result<u64, VoomError> {
-        let lineage = sqlx::query(
-            "INSERT INTO audio_extract_output_lineage \
-             (operation_output_id, source_file_version_id, source_media_snapshot_id, \
-              source_snapshot_stream_id, source_provider_stream_index, \
-              result_file_version_id, recorded_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        let recorded_at = iso8601(output.recorded_at)?;
+        let lineage_id = insert_output_lineage(
+            tx,
+            &AudioExtractLineageInput {
+                operation_output_id: output.operation_output_id,
+                source_file_version_id: output.source_file_version_id,
+                source_media_snapshot_id: output.source_media_snapshot_id,
+                source_snapshot_stream_id: &output.source_snapshot_stream_id,
+                source_provider_stream_index: output.source_provider_stream_index,
+                result_file_version_id: output.result_file_version_id,
+                recorded_at: &recorded_at,
+            },
         )
-        .bind(i64_from_u64(output.operation_output_id))
-        .bind(i64_from_u64(output.source_file_version_id.0))
-        .bind(i64_from_u64(output.source_media_snapshot_id.0))
-        .bind(&output.source_snapshot_stream_id)
-        .bind(i64::from(output.source_provider_stream_index))
-        .bind(i64_from_u64(output.result_file_version_id.0))
-        .bind(iso8601(output.recorded_at)?)
-        .execute(&mut **tx)
-        .await
-        .map_err(|error| VoomError::database_context("insert audio extraction lineage", error))?;
-        let lineage_id = u64_from_i64(lineage.last_insert_rowid());
+        .await?;
         bind_finalized_output(tx, output).await?;
         Ok(lineage_id)
     }
@@ -1122,23 +1134,53 @@ async fn insert_legacy_adopted_lineage(
     input: &NewLegacyAudioExtractAdoption,
     recorded_at: &str,
 ) -> Result<(), VoomError> {
-    sqlx::query(
+    insert_output_lineage(
+        tx,
+        &AudioExtractLineageInput {
+            operation_output_id: output_id,
+            source_file_version_id: input.operation.source_file_version_id,
+            source_media_snapshot_id: input.operation.source_media_snapshot_id,
+            source_snapshot_stream_id: &input.output.source_snapshot_stream_id,
+            source_provider_stream_index: input.output.source_provider_stream_index,
+            result_file_version_id: FileVersionId(input.owner.result_file_version_id),
+            recorded_at,
+        },
+    )
+    .await?;
+    Ok(())
+}
+
+struct AudioExtractLineageInput<'a> {
+    operation_output_id: u64,
+    source_file_version_id: FileVersionId,
+    source_media_snapshot_id: MediaSnapshotId,
+    source_snapshot_stream_id: &'a str,
+    source_provider_stream_index: u32,
+    result_file_version_id: FileVersionId,
+    recorded_at: &'a str,
+}
+
+async fn insert_output_lineage(
+    tx: &mut Transaction<'_, Sqlite>,
+    input: &AudioExtractLineageInput<'_>,
+) -> Result<u64, VoomError> {
+    let result = sqlx::query(
         "INSERT INTO audio_extract_output_lineage \
          (operation_output_id, source_file_version_id, source_media_snapshot_id, \
           source_snapshot_stream_id, source_provider_stream_index, \
           result_file_version_id, recorded_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
     )
-    .bind(i64_from_u64(output_id))
-    .bind(i64_from_u64(input.operation.source_file_version_id.0))
-    .bind(i64_from_u64(input.operation.source_media_snapshot_id.0))
-    .bind(&input.output.source_snapshot_stream_id)
-    .bind(i64::from(input.output.source_provider_stream_index))
-    .bind(i64_from_u64(input.owner.result_file_version_id))
-    .bind(recorded_at)
+    .bind(i64_from_u64(input.operation_output_id))
+    .bind(i64_from_u64(input.source_file_version_id.0))
+    .bind(i64_from_u64(input.source_media_snapshot_id.0))
+    .bind(input.source_snapshot_stream_id)
+    .bind(i64::from(input.source_provider_stream_index))
+    .bind(i64_from_u64(input.result_file_version_id.0))
+    .bind(input.recorded_at)
     .execute(&mut **tx)
     .await
-    .map_err(|error| VoomError::database_context("insert adopted audio lineage", error))?;
-    Ok(())
+    .map_err(|error| VoomError::database_context("insert audio extraction lineage", error))?;
+    Ok(u64_from_i64(result.last_insert_rowid()))
 }
 
 fn validate_new_operation(

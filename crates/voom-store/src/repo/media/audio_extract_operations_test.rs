@@ -327,7 +327,7 @@ async fn dispatch_attempt_and_paths_are_durable_before_send() {
 }
 
 #[tokio::test]
-async fn terminal_dispatch_can_advance_only_its_claimed_generation() {
+async fn terminal_dispatch_advance_fences_stale_generation_completion() {
     let fixture = fixture().await;
     let now = OffsetDateTime::from_unix_timestamp(0).unwrap();
     fixture
@@ -385,6 +385,20 @@ async fn terminal_dispatch_can_advance_only_its_claimed_generation() {
         .unwrap()
         .unwrap();
     assert_eq!(operation.operation.dispatch_generation, 1);
+    let stale_error = fixture
+        .repo
+        .mark_dispatch_terminal(
+            &claim,
+            attempt.id,
+            OffsetDateTime::from_unix_timestamp(2).unwrap(),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        stale_error
+            .to_string()
+            .contains("lost its claim or is not active")
+    );
 }
 
 #[tokio::test]

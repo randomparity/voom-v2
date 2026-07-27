@@ -10,7 +10,6 @@ use voom_events::payload::{
     ArtifactAudioTranscodeSucceededPayload,
 };
 use voom_events::{Event, SubjectType};
-use voom_plan::audio::AudioBundleRole;
 use voom_worker_protocol::{
     AudioDispositionFact, AudioOutputStreamFact, AudioStreamRef, ExtractAudioResult,
     TranscodeAudioResult,
@@ -201,7 +200,9 @@ pub async fn record_extract_succeeded(
             staging_path,
             selected_stream: stream_payload(&event.selection.outputs[0].stream),
             selected_snapshot_stream_id: event.result.selected_snapshot_stream_id.clone(),
-            role: role_name(event.selection.outputs[0].role).to_owned(),
+            role: super::commit::bundle_role(event.selection.outputs[0].role)
+                .as_str()
+                .to_owned(),
             output_container: event.result.output_container.clone(),
             output_audio_codec: event.result.output_audio_codec.clone(),
             provider: event.result.provider.clone(),
@@ -265,9 +266,11 @@ pub async fn record_extract_failed(
         selected_stream: event
             .selection
             .map(|selection| stream_payload(&selection.outputs[0].stream)),
-        role: event
-            .selection
-            .map(|selection| role_name(selection.outputs[0].role).to_owned()),
+        role: event.selection.map(|selection| {
+            super::commit::bundle_role(selection.outputs[0].role)
+                .as_str()
+                .to_owned()
+        }),
         result: event.result,
         outputs: event.outputs,
         error: event.error,
@@ -404,7 +407,9 @@ fn extract_started_payload(
         source_bundle_id: input.source_bundle_id.0,
         staging_path,
         selected_stream: stream_payload(&selection.outputs[0].stream),
-        role: role_name(selection.outputs[0].role).to_owned(),
+        role: super::commit::bundle_role(selection.outputs[0].role)
+            .as_str()
+            .to_owned(),
         target_codec: selection.target_codec.clone(),
         output_container: selection.container.clone(),
         provider: Some("ffmpeg".to_owned()),
@@ -469,7 +474,7 @@ pub(super) fn extract_member_payloads(
                 output_id: output.output_id.clone(),
                 source_snapshot_stream_id: output.stream.snapshot_stream_id.clone(),
                 source_provider_stream_index: output.stream.provider_stream_index,
-                role: role_name(output.role).to_owned(),
+                role: super::commit::bundle_role(output.role).as_str().to_owned(),
                 staging_path: staging_path.display().to_string(),
                 target_path: target_path.display().to_string(),
                 artifact_handle_id: None,
@@ -526,13 +531,6 @@ fn disposition_payload(disposition: &AudioDispositionFact) -> ArtifactAudioDispo
         default: disposition.default,
         forced: disposition.forced,
         commentary: disposition.commentary,
-    }
-}
-
-fn role_name(role: AudioBundleRole) -> &'static str {
-    match role {
-        AudioBundleRole::CommentaryAudio => "commentary_audio",
-        AudioBundleRole::ExternalAudio => "external_audio",
     }
 }
 

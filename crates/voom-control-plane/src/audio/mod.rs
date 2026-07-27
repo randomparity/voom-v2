@@ -1,7 +1,7 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sqlx::Row;
 use voom_core::ids::{ArtifactCommitRecordId, ArtifactVerificationId};
@@ -116,7 +116,7 @@ pub struct ExecuteExtractAudioReport {
     pub outputs: Vec<ExecuteExtractAudioOutputReport>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct ExecuteExtractAudioOutputReport {
     pub operation_output_id: u64,
     pub output_id: Option<String>,
@@ -579,33 +579,53 @@ pub(crate) async fn execute_extract_audio_with_dispatchers(
     match execute_extract_audio_inner(cp, input, extract, verify, result_probe, &mut context).await
     {
         Ok(report) => Ok(report),
-        Err(err) => {
-            if let Some(claim) = &context.claim {
-                SqliteAudioExtractOperationRepo::new(cp.pool.clone())
-                    .release_claim(claim)
-                    .await?;
-            }
-            events::record_extract_failed(
-                cp,
-                events::ExtractFailedEventInput {
-                    input: &failure_input,
-                    source_location_id: context.source_location_id,
-                    source_media_snapshot_id: context
-                        .source_media_snapshot_id
-                        .or_else(|| audio_payload_snapshot_id(&failure_input.operation_payload)),
-                    selection: context.selection.as_ref(),
-                    staging_path: context.staging_path.as_deref(),
-                    artifact_handle_id: context.artifact_handle_id,
-                    artifact_location_id: context.artifact_location_id,
-                    result: context.result.as_ref(),
-                    outputs: &context.outputs,
-                    error: &err,
-                },
-            )
-            .await?;
-            Err(err)
-        }
+        Err(error) => Err(finalize_extract_failure(cp, &failure_input, &context, error).await),
     }
+}
+
+async fn finalize_extract_failure(
+    cp: &ControlPlane,
+    input: &ExecuteExtractAudioInput,
+    context: &ExtractAttemptContext,
+    error: VoomError,
+) -> VoomError {
+    if let Some(claim) = &context.claim
+        && let Err(release_error) = cp.audio_extract_operations.release_claim(claim).await
+    {
+        tracing::warn!(
+            primary_error_code = error.error_code().as_str(),
+            secondary_error = %release_error,
+            operation_key = claim.operation_key,
+            "audio extraction claim release failed while preserving the primary error"
+        );
+    }
+    if let Err(event_error) = events::record_extract_failed(
+        cp,
+        events::ExtractFailedEventInput {
+            input,
+            source_location_id: context.source_location_id,
+            source_media_snapshot_id: context
+                .source_media_snapshot_id
+                .or_else(|| audio_payload_snapshot_id(&input.operation_payload)),
+            selection: context.selection.as_ref(),
+            staging_path: context.staging_path.as_deref(),
+            artifact_handle_id: context.artifact_handle_id,
+            artifact_location_id: context.artifact_location_id,
+            result: context.result.as_ref(),
+            outputs: &context.outputs,
+            error: &error,
+        },
+    )
+    .await
+    {
+        tracing::warn!(
+            primary_error_code = error.error_code().as_str(),
+            secondary_error = %event_error,
+            ticket_id = input.ticket_id.0,
+            "audio extraction failure-event persistence failed while preserving the primary error"
+        );
+    }
+    error
 }
 
 async fn execute_extract_audio_inner(
@@ -617,23 +637,15 @@ async fn execute_extract_audio_inner(
     context: &mut ExtractAttemptContext,
 ) -> Result<ExecuteExtractAudioReport, VoomError> {
     let prepared = prepare_extract_execution(cp, &input, result_probe, context).await?;
-    let selected = prepared.selected;
-    let snapshot = prepared.snapshot;
-    let selection = prepared.selection;
-    let paths = prepared.paths;
-    if let Some(report) = maybe_resume_extract_operation(
-        ExtractResumeContext {
-            cp,
-            input: &input,
-            source_location_id: selected.location.id,
-            selection: &selection,
-            operation: &paths.operation,
-        },
-        verify,
-        result_probe,
-        context,
-    )
-    .await?
+    let resume = ExtractResumeContext {
+        cp,
+        input: &input,
+        source_location_id: prepared.selected.location.id,
+        selection: &prepared.selection,
+        operation: &prepared.paths.operation,
+    };
+    if let Some(report) =
+        maybe_resume_extract_operation(&resume, verify, result_probe, context).await?
     {
         return Ok(report);
     }
@@ -645,24 +657,10 @@ async fn execute_extract_audio_inner(
             result_probe,
         },
         input,
-        prepared_from_parts(selected, snapshot, selection, paths),
+        prepared,
         context,
     ))
     .await
-}
-
-fn prepared_from_parts(
-    selected: source::SelectedSource,
-    snapshot: voom_store::repo::identity::MediaSnapshot,
-    selection: selection::ExtractAudioSelectionPlan,
-    paths: ExtractExecutionPaths,
-) -> PreparedExtractExecution {
-    PreparedExtractExecution {
-        selected,
-        snapshot,
-        selection,
-        paths,
-    }
 }
 
 struct ExtractExecutionDependencies<'a> {
@@ -719,7 +717,7 @@ async fn execute_new_extract_attempt(
     )?;
     let (result, attempt) =
         dispatch_extract_worker(cp, extract, &dispatch, staging, request.clone()).await?;
-    let repo = SqliteAudioExtractOperationRepo::new(cp.pool.clone());
+    let repo = &cp.audio_extract_operations;
     context.result = Some(result.clone());
     if let Err(error) = validate_and_cleanup_extract_result(
         &selected,
@@ -748,19 +746,16 @@ async fn execute_new_extract_attempt(
     )
     .await?;
     hydrate_extract_artifact_context(context, &staged);
-    let verification_ids = verify_staged_extract_set(cp, &staged, &staging.paths, verify).await?;
-    let probed = probe_staged_extract_set(cp, &staging.paths, &result, result_probe).await?;
-    let commit_parts = ExtractCommitParts {
+    let staged_members = prepare_new_extract_members(NewExtractMemberInputs {
         operation: &paths.operation,
         staged: &staged,
-        verification_ids: &verification_ids,
         selection: &selection,
         staging_paths: &staging.paths,
         target_paths: &paths.targets,
-        probed: &probed,
         result: &result,
-    };
-    let commit_outputs = prepare_extract_commit_outputs(&commit_parts)?;
+    })?;
+    let commit_outputs =
+        verify_and_probe_extract_members(cp, staged_members, verify, result_probe).await?;
     commit_verified_extract_audio(
         cp,
         ExtractCommitRequest {
@@ -818,7 +813,7 @@ async fn dispatch_extract_worker(
     ),
     VoomError,
 > {
-    let repo = SqliteAudioExtractOperationRepo::new(cp.pool.clone());
+    let repo = &cp.audio_extract_operations;
     let attempt = repo
         .record_dispatch_attempt(
             &dispatch.claim,
@@ -923,6 +918,7 @@ async fn prepare_extract_execution(
     })
 }
 
+#[derive(Clone, Copy)]
 struct ExtractResumeContext<'a> {
     cp: &'a ControlPlane,
     input: &'a ExecuteExtractAudioInput,
@@ -932,7 +928,7 @@ struct ExtractResumeContext<'a> {
 }
 
 async fn maybe_resume_extract_operation(
-    resume: ExtractResumeContext<'_>,
+    resume: &ExtractResumeContext<'_>,
     verify: &dyn VerifyArtifactDispatcher,
     result_probe: &dyn commit::AudioResultProbeDispatcher,
     context: &mut ExtractAttemptContext,
@@ -943,7 +939,7 @@ async fn maybe_resume_extract_operation(
         source_location_id,
         selection,
         operation,
-    } = resume;
+    } = *resume;
     match operation.operation.state {
         AudioExtractOperationState::Committed => {
             committed_extract_report(input, source_location_id, selection, operation).map(Some)
@@ -959,26 +955,15 @@ async fn maybe_resume_extract_operation(
         AudioExtractOperationState::Staged => {
             let (claim, _, _) = acquire_extract_claim(cp, input, operation).await?;
             context.claim = Some(claim.clone());
-            resume_staged_extract_report(
-                ExtractResumeContext {
-                    cp,
-                    input,
-                    source_location_id,
-                    selection,
-                    operation,
-                },
-                &claim,
-                verify,
-                result_probe,
-            )
-            .await
-            .map(Some)
+            resume_staged_extract_report(resume, &claim, verify, result_probe)
+                .await
+                .map(Some)
         }
     }
 }
 
 async fn resume_staged_extract_report(
-    resume: ExtractResumeContext<'_>,
+    resume: &ExtractResumeContext<'_>,
     claim: &NewAudioExtractClaim,
     verify: &dyn VerifyArtifactDispatcher,
     result_probe: &dyn commit::AudioResultProbeDispatcher,
@@ -989,7 +974,7 @@ async fn resume_staged_extract_report(
         source_location_id,
         selection,
         operation,
-    } = resume;
+    } = *resume;
     if operation.outputs.len() != selection.outputs.len() {
         return Err(VoomError::Internal(format!(
             "staged audio extraction {} has an incomplete output set",
@@ -1001,24 +986,6 @@ async fn resume_staged_extract_report(
             "staged audio extraction output {output_id} is missing {field}"
         ))
     };
-    let mut staged = Vec::with_capacity(operation.outputs.len());
-    let mut staging_paths = Vec::with_capacity(operation.outputs.len());
-    for output in &operation.outputs {
-        staged.push(commit::StagedAudioArtifact {
-            artifact_handle_id: output
-                .artifact_handle_id
-                .ok_or_else(|| missing(output.id, "artifact_handle_id"))?,
-            artifact_location_id: output
-                .artifact_location_id
-                .ok_or_else(|| missing(output.id, "artifact_location_id"))?,
-        });
-        staging_paths.push(PathBuf::from(
-            output
-                .staging_path
-                .as_ref()
-                .ok_or_else(|| missing(output.id, "staging_path"))?,
-        ));
-    }
     let result: ExtractAudioResult =
         serde_json::from_value(operation.operation.worker_result.clone().ok_or_else(|| {
             VoomError::Internal(format!(
@@ -1031,24 +998,9 @@ async fn resume_staged_extract_report(
                 "staged audio extraction worker_result is malformed: {error}"
             ))
         })?;
-    let verification_ids = verify_staged_extract_set(cp, &staged, &staging_paths, verify).await?;
-    let probed = probe_staged_extract_set(cp, &staging_paths, &result, result_probe).await?;
-    let target_paths = operation
-        .outputs
-        .iter()
-        .map(|output| PathBuf::from(&output.target_path))
-        .collect::<Vec<_>>();
-    let commit_parts = ExtractCommitParts {
-        operation,
-        staged: &staged,
-        verification_ids: &verification_ids,
-        selection,
-        staging_paths: &staging_paths,
-        target_paths: &target_paths,
-        probed: &probed,
-        result: &result,
-    };
-    let commit_outputs = prepare_extract_commit_outputs(&commit_parts)?;
+    let staged_members = prepare_resumed_extract_members(operation, selection, &result, missing)?;
+    let commit_outputs =
+        verify_and_probe_extract_members(cp, staged_members, verify, result_probe).await?;
     commit_verified_extract_audio(
         cp,
         ExtractCommitRequest {
@@ -1119,25 +1071,26 @@ async fn prepare_extract_paths(
             output_id: output.output_id.clone(),
             source_snapshot_stream_id: output.stream.snapshot_stream_id.clone(),
             source_provider_stream_index: output.stream.provider_stream_index,
-            bundle_role: extract_role_name(output.role).to_owned(),
+            bundle_role: commit::bundle_role(output.role).as_str().to_owned(),
             target_path: target.display().to_string(),
         })
         .collect::<Vec<_>>();
-    let repo = SqliteAudioExtractOperationRepo::new(cp.pool.clone());
-    if let Some(operation) = repo.get_by_key(&operation_token).await? {
+    let repo = &cp.audio_extract_operations;
+    let new_operation = NewAudioExtractOperation {
+        operation_key: operation_token,
+        operation_id: selection.operation_id.clone(),
+        source_file_version_id: input.source_file_version_id,
+        source_bundle_id: input.source_bundle_id,
+        source_media_snapshot_id: MediaSnapshotId(source_media_snapshot_id),
+    };
+    if let Some(operation) = repo.get_exact_by_key(&new_operation, &outputs).await? {
         return Ok(ExtractExecutionPaths { targets, operation });
     }
     if outputs.len() == 1
         && let Some(operation) = commit::try_adopt_legacy_extract(
             cp,
             commit::LegacyExtractAdoptionInput {
-                operation: NewAudioExtractOperation {
-                    operation_key: operation_token.clone(),
-                    operation_id: selection.operation_id.clone(),
-                    source_file_version_id: input.source_file_version_id,
-                    source_bundle_id: input.source_bundle_id,
-                    source_media_snapshot_id: MediaSnapshotId(source_media_snapshot_id),
-                },
+                operation: new_operation.clone(),
                 output: outputs[0].clone(),
                 selection: selection.outputs[0].clone(),
             },
@@ -1148,17 +1101,7 @@ async fn prepare_extract_paths(
         return Ok(ExtractExecutionPaths { targets, operation });
     }
     let operation = repo
-        .create_planned(
-            NewAudioExtractOperation {
-                operation_key: operation_token.clone(),
-                operation_id: selection.operation_id.clone(),
-                source_file_version_id: input.source_file_version_id,
-                source_bundle_id: input.source_bundle_id,
-                source_media_snapshot_id: MediaSnapshotId(source_media_snapshot_id),
-            },
-            &outputs,
-            cp.clock().now(),
-        )
+        .create_planned(new_operation, &outputs, cp.clock().now())
         .await?;
     Ok(ExtractExecutionPaths { targets, operation })
 }
@@ -1171,12 +1114,12 @@ async fn claim_extract_dispatch(
 ) -> Result<ClaimedExtractDispatch, VoomError> {
     let now = cp.clock().now();
     let (claim, worker_id, worker_epoch) = acquire_extract_claim(cp, input, operation).await?;
-    let repo = SqliteAudioExtractOperationRepo::new(cp.pool.clone());
+    let repo = &cp.audio_extract_operations;
     if let Some(attempt) = repo
         .get_dispatch_attempt(operation.operation.id, claim.expected_generation)
         .await?
     {
-        return reconcile_prior_dispatch_attempt(&repo, &claim, attempt, now).await;
+        return reconcile_prior_dispatch_attempt(repo, &claim, attempt, now).await;
     }
     let staging = stage::prepare_extract_staging_paths(
         &input.staging_root,
@@ -1214,7 +1157,7 @@ async fn acquire_extract_claim(
         ),
         expires_at,
     };
-    SqliteAudioExtractOperationRepo::new(cp.pool.clone())
+    cp.audio_extract_operations
         .acquire_claim(&claim, cp.clock().now())
         .await?;
     Ok((claim, worker_id, worker_epoch))
@@ -1332,13 +1275,6 @@ async fn cleanup_recorded_dispatch_paths(
         }
     }
     Ok(())
-}
-
-fn extract_role_name(role: voom_plan::audio::AudioBundleRole) -> &'static str {
-    match role {
-        voom_plan::audio::AudioBundleRole::CommentaryAudio => "commentary_audio",
-        voom_plan::audio::AudioBundleRole::ExternalAudio => "external_audio",
-    }
 }
 
 fn committed_extract_report(
@@ -1607,41 +1543,170 @@ async fn verify_staged_extract(
     Ok(verified.verification_id)
 }
 
-async fn verify_staged_extract_set(
-    cp: &ControlPlane,
-    staged: &[commit::StagedAudioArtifact],
-    staging_paths: &[PathBuf],
-    verify: &dyn VerifyArtifactDispatcher,
-) -> Result<Vec<ArtifactVerificationId>, VoomError> {
-    if staged.len() != staging_paths.len() {
-        return Err(VoomError::Internal(
-            "audio extraction staged artifact/path count mismatch".to_owned(),
-        ));
-    }
-    let mut verification_ids = Vec::with_capacity(staged.len());
-    for (artifact, path) in staged.iter().zip(staging_paths) {
-        verification_ids.push(verify_staged_extract(cp, artifact, path, verify).await?);
-    }
-    Ok(verification_ids)
+struct StagedExtractMember {
+    operation_output_id: u64,
+    artifact: commit::StagedAudioArtifact,
+    role: voom_plan::audio::AudioBundleRole,
+    source_snapshot_stream_id: String,
+    source_provider_stream_index: u32,
+    staging_path: PathBuf,
+    target_path: PathBuf,
+    output: voom_worker_protocol::AudioObservedFacts,
 }
 
-async fn probe_staged_extract_set(
-    cp: &ControlPlane,
-    staging_paths: &[PathBuf],
-    result: &ExtractAudioResult,
-    probe: &dyn commit::AudioResultProbeDispatcher,
-) -> Result<Vec<commit::ProbedResultPayload>, VoomError> {
-    let output_facts = worker_contract::extract_result_output_facts(result);
-    if staging_paths.len() != output_facts.len() {
+struct VerifiedExtractMember {
+    staged: StagedExtractMember,
+    verification_id: ArtifactVerificationId,
+}
+
+#[derive(Clone, Copy)]
+struct NewExtractMemberInputs<'a> {
+    operation: &'a AudioExtractOperationRecord,
+    staged: &'a [commit::StagedAudioArtifact],
+    selection: &'a selection::ExtractAudioSelectionPlan,
+    staging_paths: &'a [PathBuf],
+    target_paths: &'a [PathBuf],
+    result: &'a ExtractAudioResult,
+}
+
+fn prepare_new_extract_members(
+    input: NewExtractMemberInputs<'_>,
+) -> Result<Vec<StagedExtractMember>, VoomError> {
+    let output_facts = worker_contract::extract_result_output_facts(input.result);
+    let expected_count = input.selection.outputs.len();
+    if input.operation.outputs.len() != expected_count
+        || input.staged.len() != expected_count
+        || input.staging_paths.len() != expected_count
+        || input.target_paths.len() != expected_count
+        || output_facts.len() != expected_count
+    {
         return Err(VoomError::Internal(
-            "audio extraction probe inputs have inconsistent output counts".to_owned(),
+            "audio extraction staged member inputs have inconsistent output counts".to_owned(),
         ));
     }
-    let mut probed = Vec::with_capacity(staging_paths.len());
-    for (path, output) in staging_paths.iter().zip(output_facts) {
-        probed.push(commit::probe_staged_extract_result(cp, path, output, probe).await?);
+    let mut members = Vec::with_capacity(expected_count);
+    for (index, selected) in input.selection.outputs.iter().enumerate() {
+        members.push(staged_extract_member(StagedExtractMemberInput {
+            operation: &input.operation.outputs[index],
+            artifact: &input.staged[index],
+            selected,
+            staging_path: &input.staging_paths[index],
+            target_path: &input.target_paths[index],
+            output: output_facts[index],
+        }));
     }
-    Ok(probed)
+    Ok(members)
+}
+
+fn prepare_resumed_extract_members(
+    operation: &AudioExtractOperationRecord,
+    selection: &selection::ExtractAudioSelectionPlan,
+    result: &ExtractAudioResult,
+    missing: impl Fn(u64, &str) -> VoomError,
+) -> Result<Vec<StagedExtractMember>, VoomError> {
+    let output_facts = worker_contract::extract_result_output_facts(result);
+    if output_facts.len() != operation.outputs.len() {
+        return Err(VoomError::Internal(format!(
+            "staged audio extraction {} has inconsistent worker outputs",
+            operation.operation.operation_key
+        )));
+    }
+    let mut members = Vec::with_capacity(operation.outputs.len());
+    for (index, output) in operation.outputs.iter().enumerate() {
+        let artifact = commit::StagedAudioArtifact {
+            artifact_handle_id: output
+                .artifact_handle_id
+                .ok_or_else(|| missing(output.id, "artifact_handle_id"))?,
+            artifact_location_id: output
+                .artifact_location_id
+                .ok_or_else(|| missing(output.id, "artifact_location_id"))?,
+        };
+        let staging_path = PathBuf::from(
+            output
+                .staging_path
+                .as_ref()
+                .ok_or_else(|| missing(output.id, "staging_path"))?,
+        );
+        members.push(staged_extract_member(StagedExtractMemberInput {
+            operation: output,
+            artifact: &artifact,
+            selected: &selection.outputs[index],
+            staging_path: &staging_path,
+            target_path: Path::new(&output.target_path),
+            output: output_facts[index],
+        }));
+    }
+    Ok(members)
+}
+
+#[derive(Clone, Copy)]
+struct StagedExtractMemberInput<'a> {
+    operation: &'a voom_store::repo::audio_extract_operations::AudioExtractOperationOutput,
+    artifact: &'a commit::StagedAudioArtifact,
+    selected: &'a selection::ExtractAudioSelectionOutput,
+    staging_path: &'a Path,
+    target_path: &'a Path,
+    output: &'a voom_worker_protocol::AudioObservedFacts,
+}
+
+fn staged_extract_member(input: StagedExtractMemberInput<'_>) -> StagedExtractMember {
+    StagedExtractMember {
+        operation_output_id: input.operation.id,
+        artifact: input.artifact.clone(),
+        role: input.selected.role,
+        source_snapshot_stream_id: input.selected.stream.snapshot_stream_id.clone(),
+        source_provider_stream_index: input.selected.stream.provider_stream_index,
+        staging_path: input.staging_path.to_owned(),
+        target_path: input.target_path.to_owned(),
+        output: input.output.clone(),
+    }
+}
+
+async fn verify_and_probe_extract_members(
+    cp: &ControlPlane,
+    members: Vec<StagedExtractMember>,
+    verify: &dyn VerifyArtifactDispatcher,
+    probe: &dyn commit::AudioResultProbeDispatcher,
+) -> Result<Vec<commit::CommitAudioExtractOutputInput>, VoomError> {
+    let mut verified = Vec::with_capacity(members.len());
+    for member in members {
+        let verification_id =
+            verify_staged_extract(cp, &member.artifact, &member.staging_path, verify).await?;
+        verified.push(VerifiedExtractMember {
+            staged: member,
+            verification_id,
+        });
+    }
+    let mut outputs = Vec::with_capacity(verified.len());
+    for member in verified {
+        let StagedExtractMember {
+            operation_output_id,
+            artifact,
+            role,
+            source_snapshot_stream_id,
+            source_provider_stream_index,
+            staging_path,
+            target_path,
+            output,
+        } = member.staged;
+        let probed = commit::probe_staged_extract_result(cp, &staging_path, &output, probe).await?;
+        outputs.push(commit::CommitAudioExtractOutputInput {
+            operation_output_id,
+            artifact_handle_id: artifact.artifact_handle_id,
+            artifact_location_id: artifact.artifact_location_id,
+            verification_id: member.verification_id,
+            role,
+            source_snapshot_stream_id,
+            source_provider_stream_index,
+            staging_path,
+            target_path,
+            prepared_temp_path: None,
+            prepared_commit_record_id: None,
+            output,
+            probed,
+        });
+    }
+    Ok(outputs)
 }
 
 async fn validate_extract_worker_result(
@@ -1715,45 +1780,6 @@ async fn commit_verified_extract_audio(
     complete_extract_report(cp, request, committed).await
 }
 
-struct ExtractCommitParts<'a> {
-    operation: &'a AudioExtractOperationRecord,
-    staged: &'a [commit::StagedAudioArtifact],
-    verification_ids: &'a [ArtifactVerificationId],
-    selection: &'a selection::ExtractAudioSelectionPlan,
-    staging_paths: &'a [PathBuf],
-    target_paths: &'a [PathBuf],
-    probed: &'a [commit::ProbedResultPayload],
-    result: &'a ExtractAudioResult,
-}
-
-fn prepare_extract_commit_outputs(
-    parts: &ExtractCommitParts<'_>,
-) -> Result<Vec<commit::CommitAudioExtractOutputInput>, VoomError> {
-    let output_facts = worker_contract::extract_result_output_facts(parts.result);
-    require_extract_commit_input_counts(parts, output_facts.len())?;
-    let mut outputs = Vec::with_capacity(parts.selection.outputs.len());
-    for (index, selection) in parts.selection.outputs.iter().enumerate() {
-        let operation = &parts.operation.outputs[index];
-        let staged = &parts.staged[index];
-        outputs.push(commit::CommitAudioExtractOutputInput {
-            operation_output_id: operation.id,
-            artifact_handle_id: staged.artifact_handle_id,
-            artifact_location_id: staged.artifact_location_id,
-            verification_id: parts.verification_ids[index],
-            role: selection.role,
-            source_snapshot_stream_id: selection.stream.snapshot_stream_id.clone(),
-            source_provider_stream_index: selection.stream.provider_stream_index,
-            staging_path: parts.staging_paths[index].clone(),
-            target_path: parts.target_paths[index].clone(),
-            prepared_temp_path: None,
-            prepared_commit_record_id: None,
-            output: output_facts[index].clone(),
-            probed: parts.probed[index].clone(),
-        });
-    }
-    Ok(outputs)
-}
-
 async fn complete_extract_report(
     cp: &ControlPlane,
     request: ExtractCommitRequest,
@@ -1818,7 +1844,7 @@ async fn extract_set_post_commit_recovery(
         recovery_reason: "audio extract post-commit reporting failed".to_owned(),
         commit_record_id: committed.commit_record_id,
         source_bundle_id: request.input.source_bundle_id,
-        role: extract_role_name(role),
+        role: commit::bundle_role(role).as_str(),
         target_path: committed.target_path.clone(),
         target_exists: tokio::fs::symlink_metadata(&committed.target_path)
             .await
@@ -1836,28 +1862,6 @@ async fn extract_set_post_commit_recovery(
         error_code: error.error_code().as_str(),
         message: error.to_string(),
     }
-}
-
-fn require_extract_commit_input_counts(
-    parts: &ExtractCommitParts<'_>,
-    result_count: usize,
-) -> Result<(), VoomError> {
-    let expected = parts.selection.outputs.len();
-    let counts = [
-        parts.operation.outputs.len(),
-        parts.staged.len(),
-        parts.verification_ids.len(),
-        parts.staging_paths.len(),
-        parts.target_paths.len(),
-        parts.probed.len(),
-        result_count,
-    ];
-    if counts.into_iter().all(|count| count == expected) {
-        return Ok(());
-    }
-    Err(VoomError::Internal(format!(
-        "audio extraction commit inputs disagree with {expected} planned outputs: {counts:?}"
-    )))
 }
 
 fn extract_output_reports(
@@ -1881,7 +1885,7 @@ fn extract_output_reports(
             source_media_snapshot_id,
             source_snapshot_stream_id: selection.stream.snapshot_stream_id.clone(),
             source_provider_stream_index: selection.stream.provider_stream_index,
-            role: extract_role_name(selection.role).to_owned(),
+            role: commit::bundle_role(selection.role).as_str().to_owned(),
             staged_artifact_handle_id: output.artifact_handle_id,
             staged_artifact_location_id: output.artifact_location_id,
             verification_id: output.verification_id,

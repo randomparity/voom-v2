@@ -166,7 +166,7 @@ async fn check_commit_safety_gate(
 /// `BlockedByUseLease` when one is, or the underlying storage error (fail-closed)
 /// when the check itself fails. Callers treat any error as fail-closed — the
 /// commit must not proceed.
-pub(super) async fn evaluate_commit_safety_gate(
+pub(crate) async fn evaluate_commit_safety_gate(
     cp: &ControlPlane,
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     source_file_asset_id: FileAssetId,

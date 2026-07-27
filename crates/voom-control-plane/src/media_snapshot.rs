@@ -1,6 +1,39 @@
 use serde_json::{Value, json};
+use sqlx::{Sqlite, Transaction};
+use voom_core::VoomError;
+use voom_events::payload::MediaSnapshotRecordedPayload;
+use voom_events::{Event, SubjectType};
 use voom_policy::{MediaSnapshotInput, TargetRef};
-use voom_store::repo::identity::MediaSnapshot;
+use voom_store::repo::identity::{IdentityRepo, MediaSnapshot, NewMediaSnapshot};
+
+use crate::ControlPlane;
+use crate::cases::append_event;
+
+pub(crate) async fn record_with_event_in_tx(
+    control_plane: &ControlPlane,
+    tx: &mut Transaction<'_, Sqlite>,
+    input: NewMediaSnapshot,
+) -> Result<MediaSnapshot, VoomError> {
+    let snapshot = control_plane
+        .identity
+        .record_media_snapshot_in_tx(tx, input)
+        .await?;
+    append_event(
+        &control_plane.events,
+        tx,
+        SubjectType::MediaSnapshot,
+        Some(snapshot.id.0),
+        snapshot.probed_at,
+        Event::MediaSnapshotRecorded(MediaSnapshotRecordedPayload {
+            media_snapshot_id: snapshot.id.0,
+            file_version_id: snapshot.file_version_id.0,
+            probed_by_worker_id: snapshot.probed_by.map(|worker| worker.0),
+            probed_at: snapshot.probed_at,
+        }),
+    )
+    .await?;
+    Ok(snapshot)
+}
 
 /// Convert a durable [`MediaSnapshot`] row into the planning-layer
 /// [`MediaSnapshotInput`] shared by the audio and remux runtime selection paths.
