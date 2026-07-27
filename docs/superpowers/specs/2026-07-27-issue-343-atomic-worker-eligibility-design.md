@@ -88,9 +88,12 @@ transaction cannot persist the provisional ticket transition. Once the first
 write succeeds, other writers cannot change worker status, capabilities, or
 grants before the eligibility read and lease insert complete.
 
-The ticket operation comes from the durable ticket row. `NewLease` gains no
-caller-controlled operation field, preventing a caller from authorizing one
-operation while leasing another.
+The worker operation comes from the durable ticket kind. Direct execution
+tickets use their kind unchanged; workflow tickets use the operation suffix
+from the established `synthetic.workflow.operation.<operation>` kind contract.
+`NewLease` gains no caller-controlled operation field, preventing a caller from
+authorizing one operation while leasing another. The store does not reinterpret
+the workflow payload to make this decision.
 
 ### Failure behavior
 

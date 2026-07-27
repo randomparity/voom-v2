@@ -5,7 +5,7 @@ use voom_core::{FailureClass, TicketId, TicketOperation, VoomError};
 use voom_events::EventKind;
 use voom_store::repo::events::{EventFilter, EventRepo, Page};
 use voom_store::repo::tickets::{NewTicket, TicketState};
-use voom_store::repo::workers::{NewWorker, WorkerKind};
+use voom_store::repo::workers::{NewCapability, NewGrant, NewWorker, Worker, WorkerKind};
 
 use crate::cases::{count, cp, issue_link_targets, terminal_failure_issues};
 
@@ -31,12 +31,41 @@ fn worker(name: &str) -> NewWorker {
     }
 }
 
+async fn eligible_worker(
+    cp: &crate::ControlPlane,
+    name: &str,
+    operation: &TicketOperation,
+) -> Worker {
+    let worker = cp.register_worker(worker(name)).await.unwrap();
+    cp.record_capability(NewCapability {
+        worker_id: worker.id,
+        operation: operation.clone(),
+        codecs: Vec::new(),
+        hardware: Vec::new(),
+        artifact_access: Vec::new(),
+        extra: serde_json::json!({}),
+    })
+    .await
+    .unwrap();
+    cp.record_grant(NewGrant {
+        worker_id: worker.id,
+        can_execute: vec![operation.clone()],
+        can_access_read: Vec::new(),
+        can_access_write: Vec::new(),
+        denies: Vec::new(),
+        max_parallel: serde_json::json!({}),
+    })
+    .await
+    .unwrap();
+    worker
+}
+
 #[tokio::test]
 async fn acquire_lease_emits_lease_acquired_and_ticket_leased() {
     let (cp, _tmp) = cp().await;
     let t = cp.create_ticket(ticket("noop", 2)).await.unwrap();
     cp.mark_ready_if_unblocked(t.id, T0).await.unwrap();
-    let w = cp.register_worker(worker("alpha")).await.unwrap();
+    let w = eligible_worker(&cp, "alpha", &t.kind).await;
     let lease = cp
         .acquire_lease(NewLease {
             ticket_id: t.id,
@@ -74,7 +103,7 @@ async fn acquire_lease_in_tx_rolls_back_with_caller_transaction() {
     let (cp, _tmp) = cp().await;
     let t = cp.create_ticket(ticket("noop", 2)).await.unwrap();
     cp.mark_ready_if_unblocked(t.id, T0).await.unwrap();
-    let w = cp.register_worker(worker("alpha")).await.unwrap();
+    let w = eligible_worker(&cp, "alpha", &t.kind).await;
     let mut tx = begin_tx(&cp.pool).await.unwrap();
 
     let lease = cp
@@ -101,11 +130,69 @@ async fn acquire_lease_in_tx_rolls_back_with_caller_transaction() {
 }
 
 #[tokio::test]
+async fn acquire_lease_rechecks_deny_after_candidate_selection_without_side_effects() {
+    let (cp, _tmp) = cp().await;
+    let t = cp.create_ticket(ticket("noop", 2)).await.unwrap();
+    cp.mark_ready_if_unblocked(t.id, T0).await.unwrap();
+    let w = eligible_worker(&cp, "alpha", &t.kind).await;
+
+    let candidates = cp.workers.operation_candidates(&t.kind).await.unwrap();
+    assert_eq!(candidates.len(), 1);
+    assert_eq!(candidates[0].worker_id, w.id);
+
+    cp.record_grant(NewGrant {
+        worker_id: w.id,
+        can_execute: Vec::new(),
+        can_access_read: Vec::new(),
+        can_access_write: Vec::new(),
+        denies: vec![t.kind.clone()],
+        max_parallel: serde_json::json!({}),
+    })
+    .await
+    .unwrap();
+
+    assert!(
+        cp.workers
+            .operation_candidates(&t.kind)
+            .await
+            .unwrap()
+            .is_empty(),
+        "a later deny must remove the worker from candidate selection"
+    );
+    let before = cp.tickets().get(t.id).await.unwrap().unwrap();
+    let err = cp
+        .acquire_lease(NewLease {
+            ticket_id: t.id,
+            worker_id: w.id,
+            ttl: TDuration::seconds(60),
+            now: T0,
+        })
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, VoomError::Conflict(ref message) if message.contains("denied")),
+        "got {err:?}"
+    );
+
+    let after = cp.tickets().get(t.id).await.unwrap().unwrap();
+    assert_eq!(after.state, TicketState::Ready);
+    assert_eq!(after.attempt, before.attempt);
+    assert_eq!(after.epoch, before.epoch);
+    let lease_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM leases")
+        .fetch_one(&cp.pool)
+        .await
+        .unwrap();
+    assert_eq!(lease_count, 0);
+    assert_eq!(count(&cp, EventKind::LeaseAcquired).await, 0);
+    assert_eq!(count(&cp, EventKind::TicketLeased).await, 0);
+}
+
+#[tokio::test]
 async fn release_lease_emits_lease_released_and_ticket_succeeded() {
     let (cp, _tmp) = cp().await;
     let t = cp.create_ticket(ticket("noop", 1)).await.unwrap();
     cp.mark_ready_if_unblocked(t.id, T0).await.unwrap();
-    let w = cp.register_worker(worker("alpha")).await.unwrap();
+    let w = eligible_worker(&cp, "alpha", &t.kind).await;
     let lease = cp
         .acquire_lease(NewLease {
             ticket_id: t.id,
@@ -127,7 +214,7 @@ async fn fail_lease_retriable_emits_lease_released_and_ticket_failed_retriable()
     let (cp, _tmp) = cp().await;
     let t = cp.create_ticket(ticket("noop", 3)).await.unwrap();
     cp.mark_ready_if_unblocked(t.id, T0).await.unwrap();
-    let w = cp.register_worker(worker("alpha")).await.unwrap();
+    let w = eligible_worker(&cp, "alpha", &t.kind).await;
     let lease = cp
         .acquire_lease(NewLease {
             ticket_id: t.id,
@@ -155,7 +242,7 @@ async fn fail_lease_terminal_emits_lease_released_and_ticket_failed_terminal() {
     let (cp, _tmp) = cp().await;
     let t = cp.create_ticket(ticket("noop", 1)).await.unwrap();
     cp.mark_ready_if_unblocked(t.id, T0).await.unwrap();
-    let w = cp.register_worker(worker("alpha")).await.unwrap();
+    let w = eligible_worker(&cp, "alpha", &t.kind).await;
     let lease = cp
         .acquire_lease(NewLease {
             ticket_id: t.id,
@@ -187,7 +274,7 @@ async fn expire_due_emits_paired_events_requeued() {
     let (cp, _tmp) = cp().await;
     let t = cp.create_ticket(ticket("noop", 3)).await.unwrap();
     cp.mark_ready_if_unblocked(t.id, T0).await.unwrap();
-    let w = cp.register_worker(worker("alpha")).await.unwrap();
+    let w = eligible_worker(&cp, "alpha", &t.kind).await;
     let _lease = cp
         .acquire_lease(NewLease {
             ticket_id: t.id,
@@ -214,7 +301,7 @@ async fn expire_due_emits_paired_events_terminal() {
     let (cp, _tmp) = cp().await;
     let t = cp.create_ticket(ticket("noop", 1)).await.unwrap();
     cp.mark_ready_if_unblocked(t.id, T0).await.unwrap();
-    let w = cp.register_worker(worker("alpha")).await.unwrap();
+    let w = eligible_worker(&cp, "alpha", &t.kind).await;
     let _lease = cp
         .acquire_lease(NewLease {
             ticket_id: t.id,
@@ -262,7 +349,7 @@ async fn force_release_with_requeue_emits_ticket_requeued_after_force_release_wh
     let (cp, _tmp) = cp().await;
     let t = cp.create_ticket(ticket("noop", 2)).await.unwrap();
     cp.mark_ready_if_unblocked(t.id, T0).await.unwrap();
-    let w = cp.register_worker(worker("alpha")).await.unwrap();
+    let w = eligible_worker(&cp, "alpha", &t.kind).await;
     let lease = cp
         .acquire_lease(NewLease {
             ticket_id: t.id,
@@ -307,7 +394,7 @@ async fn force_release_with_requeue_rejects_when_attempts_exhausted() {
     let (cp, _tmp) = cp().await;
     let t = cp.create_ticket(ticket("noop", 1)).await.unwrap();
     cp.mark_ready_if_unblocked(t.id, T0).await.unwrap();
-    let w = cp.register_worker(worker("alpha")).await.unwrap();
+    let w = eligible_worker(&cp, "alpha", &t.kind).await;
     let lease = cp
         .acquire_lease(NewLease {
             ticket_id: t.id,
@@ -397,7 +484,7 @@ async fn release_lease_promotes_dependent_and_emits_ticket_ready() {
     let none = cp.mark_ready_if_unblocked(child.id, T0).await.unwrap();
     assert!(none.is_empty(), "child must stay pending while parent runs");
 
-    let w = cp.register_worker(worker("alpha")).await.unwrap();
+    let w = eligible_worker(&cp, "alpha", &parent.kind).await;
     let lease = cp
         .acquire_lease(NewLease {
             ticket_id: parent.id,
@@ -467,7 +554,27 @@ async fn release_lease_does_not_promote_child_with_outstanding_parent() {
     cp.mark_ready_if_unblocked(parent_a.id, T0).await.unwrap();
     cp.mark_ready_if_unblocked(parent_b.id, T0).await.unwrap();
 
-    let w = cp.register_worker(worker("alpha")).await.unwrap();
+    let w = eligible_worker(&cp, "alpha", &parent_a.kind).await;
+    cp.record_capability(NewCapability {
+        worker_id: w.id,
+        operation: parent_b.kind.clone(),
+        codecs: Vec::new(),
+        hardware: Vec::new(),
+        artifact_access: Vec::new(),
+        extra: serde_json::json!({}),
+    })
+    .await
+    .unwrap();
+    cp.record_grant(NewGrant {
+        worker_id: w.id,
+        can_execute: vec![parent_b.kind.clone()],
+        can_access_read: Vec::new(),
+        can_access_write: Vec::new(),
+        denies: Vec::new(),
+        max_parallel: serde_json::json!({}),
+    })
+    .await
+    .unwrap();
     let lease_a = cp
         .acquire_lease(NewLease {
             ticket_id: parent_a.id,
@@ -515,7 +622,7 @@ async fn force_release_without_requeue_emits_lease_force_released_and_ticket_fai
     let (cp, _tmp) = cp().await;
     let t = cp.create_ticket(ticket("noop", 2)).await.unwrap();
     cp.mark_ready_if_unblocked(t.id, T0).await.unwrap();
-    let w = cp.register_worker(worker("alpha")).await.unwrap();
+    let w = eligible_worker(&cp, "alpha", &t.kind).await;
     let lease = cp
         .acquire_lease(NewLease {
             ticket_id: t.id,
@@ -543,7 +650,7 @@ async fn force_release_lease_rejects_empty_actor() {
     let (cp, _tmp) = cp().await;
     let t = cp.create_ticket(ticket("noop", 2)).await.unwrap();
     cp.mark_ready_if_unblocked(t.id, T0).await.unwrap();
-    let w = cp.register_worker(worker("alpha")).await.unwrap();
+    let w = eligible_worker(&cp, "alpha", &t.kind).await;
     let lease = cp
         .acquire_lease(NewLease {
             ticket_id: t.id,
@@ -577,7 +684,7 @@ async fn force_release_lease_rejects_whitespace_reason() {
     let (cp, _tmp) = cp().await;
     let t = cp.create_ticket(ticket("noop", 2)).await.unwrap();
     cp.mark_ready_if_unblocked(t.id, T0).await.unwrap();
-    let w = cp.register_worker(worker("alpha")).await.unwrap();
+    let w = eligible_worker(&cp, "alpha", &t.kind).await;
     let lease = cp
         .acquire_lease(NewLease {
             ticket_id: t.id,
@@ -642,7 +749,7 @@ async fn fail_lease_terminal_opens_retriable_exhausted_issue_linked_to_ticket_an
     let (cp, _tmp) = cp().await;
     let t = cp.create_ticket(ticket("noop", 1)).await.unwrap();
     cp.mark_ready_if_unblocked(t.id, T0).await.unwrap();
-    let w = cp.register_worker(worker("alpha")).await.unwrap();
+    let w = eligible_worker(&cp, "alpha", &t.kind).await;
     let lease = cp
         .acquire_lease(NewLease {
             ticket_id: t.id,
@@ -688,7 +795,7 @@ async fn fail_lease_non_retriable_opens_high_severity_terminal_failure_issue() {
     let (cp, _tmp) = cp().await;
     let t = cp.create_ticket(ticket("noop", 3)).await.unwrap();
     cp.mark_ready_if_unblocked(t.id, T0).await.unwrap();
-    let w = cp.register_worker(worker("alpha")).await.unwrap();
+    let w = eligible_worker(&cp, "alpha", &t.kind).await;
     let lease = cp
         .acquire_lease(NewLease {
             ticket_id: t.id,
@@ -726,7 +833,7 @@ async fn fail_lease_operator_required_opens_high_severity_terminal_failure_issue
     let (cp, _tmp) = cp().await;
     let t = cp.create_ticket(ticket("noop", 3)).await.unwrap();
     cp.mark_ready_if_unblocked(t.id, T0).await.unwrap();
-    let w = cp.register_worker(worker("alpha")).await.unwrap();
+    let w = eligible_worker(&cp, "alpha", &t.kind).await;
     let lease = cp
         .acquire_lease(NewLease {
             ticket_id: t.id,
@@ -763,7 +870,7 @@ async fn expire_due_terminal_opens_issue_linked_to_ticket_and_lease() {
     let (cp, _tmp) = cp().await;
     let t = cp.create_ticket(ticket("noop", 1)).await.unwrap();
     cp.mark_ready_if_unblocked(t.id, T0).await.unwrap();
-    let w = cp.register_worker(worker("alpha")).await.unwrap();
+    let w = eligible_worker(&cp, "alpha", &t.kind).await;
     let lease = cp
         .acquire_lease(NewLease {
             ticket_id: t.id,
@@ -803,7 +910,7 @@ async fn force_release_without_requeue_opens_terminal_failure_issue() {
     let (cp, _tmp) = cp().await;
     let t = cp.create_ticket(ticket("noop", 2)).await.unwrap();
     cp.mark_ready_if_unblocked(t.id, T0).await.unwrap();
-    let w = cp.register_worker(worker("alpha")).await.unwrap();
+    let w = eligible_worker(&cp, "alpha", &t.kind).await;
     let lease = cp
         .acquire_lease(NewLease {
             ticket_id: t.id,

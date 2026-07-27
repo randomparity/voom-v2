@@ -24,7 +24,7 @@ use voom_store::repo::events::{EventFilter, EventRepo, Page};
 use voom_store::repo::leases::NewLease;
 use voom_store::repo::tickets::{NewTicket, TicketState};
 use voom_store::repo::workers::{NewWorker, WorkerKind};
-use voom_store::test_support::T0;
+use voom_store::test_support::{T0, record_worker_eligibility};
 
 async fn cp() -> (ControlPlane, tempfile::NamedTempFile) {
     let tmp = tempfile::NamedTempFile::new().unwrap();
@@ -87,6 +87,9 @@ async fn happy_path_ready_leased_succeeded_with_events() {
         })
         .await
         .unwrap();
+    record_worker_eligibility(cp.workers(), w.id, std::slice::from_ref(&t.kind))
+        .await
+        .unwrap();
 
     let promoted = cp.mark_ready_if_unblocked(t.id, T0).await.unwrap();
     assert_eq!(promoted.len(), 1);
@@ -145,6 +148,9 @@ async fn max_attempts_2_via_fail_retriable_yields_two_dispatched_attempts() {
             registered_at: T0,
             node_id: None,
         })
+        .await
+        .unwrap();
+    record_worker_eligibility(cp.workers(), w.id, std::slice::from_ref(&t.kind))
         .await
         .unwrap();
     cp.mark_ready_if_unblocked(t.id, T0).await.unwrap();
@@ -227,6 +233,9 @@ async fn max_attempts_2_via_expire_due_yields_two_dispatched_attempts() {
         })
         .await
         .unwrap();
+    record_worker_eligibility(cp.workers(), w.id, std::slice::from_ref(&t.kind))
+        .await
+        .unwrap();
     cp.mark_ready_if_unblocked(t.id, T0).await.unwrap();
 
     // attempt 1
@@ -289,6 +298,9 @@ async fn max_attempts_3_mixed_fail_and_expire_due() {
             registered_at: T0,
             node_id: None,
         })
+        .await
+        .unwrap();
+    record_worker_eligibility(cp.workers(), w.id, std::slice::from_ref(&t.kind))
         .await
         .unwrap();
     cp.mark_ready_if_unblocked(t.id, T0).await.unwrap();
@@ -389,6 +401,9 @@ async fn force_release_requeue_rejects_when_exhausted() {
             registered_at: T0,
             node_id: None,
         })
+        .await
+        .unwrap();
+    record_worker_eligibility(cp.workers(), w.id, std::slice::from_ref(&t.kind))
         .await
         .unwrap();
     let lease = cp

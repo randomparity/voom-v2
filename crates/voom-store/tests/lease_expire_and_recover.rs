@@ -22,7 +22,7 @@ use voom_store::repo::events::{EventFilter, EventRepo, Page};
 use voom_store::repo::leases::{LEASE_BATCH_LIMIT, NewLease};
 use voom_store::repo::tickets::NewTicket;
 use voom_store::repo::workers::{NewWorker, WorkerKind};
-use voom_store::test_support::T0;
+use voom_store::test_support::{T0, record_worker_eligibility};
 
 const N: usize = 500;
 
@@ -53,11 +53,17 @@ async fn expire_due_handles_bulk_overdue_leases() {
         })
         .await
         .unwrap();
-    for i in 0..N {
+    let operations = (0..N)
+        .map(|i| ticket_op(&format!("k-{i}")))
+        .collect::<Vec<_>>();
+    record_worker_eligibility(cp.workers(), w.id, &operations)
+        .await
+        .unwrap();
+    for operation in operations {
         let t = cp
             .create_ticket(NewTicket {
                 job_id: None,
-                kind: ticket_op(&format!("k-{i}")),
+                kind: operation,
                 priority: 0,
                 payload: json!({}),
                 max_attempts: 3,
@@ -146,11 +152,17 @@ async fn expire_due_handles_backlog_above_chunk_size() {
         })
         .await
         .unwrap();
-    for i in 0..N_BACKLOG {
+    let operations = (0..N_BACKLOG)
+        .map(|i| ticket_op(&format!("k-{i}")))
+        .collect::<Vec<_>>();
+    record_worker_eligibility(cp.workers(), w.id, &operations)
+        .await
+        .unwrap();
+    for operation in operations {
         let t = cp
             .create_ticket(NewTicket {
                 job_id: None,
-                kind: ticket_op(&format!("k-{i}")),
+                kind: operation,
                 priority: 0,
                 payload: json!({}),
                 max_attempts: 3,
@@ -201,11 +213,17 @@ async fn expire_due_drains_backlog_above_batch_limit() {
         .unwrap();
     let limit = usize::try_from(LEASE_BATCH_LIMIT).unwrap();
     let total = limit + 50;
-    for i in 0..total {
+    let operations = (0..total)
+        .map(|i| ticket_op(&format!("k-{i}")))
+        .collect::<Vec<_>>();
+    record_worker_eligibility(cp.workers(), w.id, &operations)
+        .await
+        .unwrap();
+    for operation in operations {
         let t = cp
             .create_ticket(NewTicket {
                 job_id: None,
-                kind: ticket_op(&format!("k-{i}")),
+                kind: operation,
                 priority: 0,
                 payload: json!({}),
                 max_attempts: 3,

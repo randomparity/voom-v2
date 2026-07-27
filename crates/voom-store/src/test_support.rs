@@ -26,12 +26,14 @@ use std::path::Path;
 use serde_json::Value as JsonValue;
 use sqlx::SqlitePool;
 use time::OffsetDateTime;
-use voom_core::{JobId, TicketOperation, VoomError};
+use voom_core::{JobId, TicketOperation, VoomError, WorkerId};
 
 use crate::init::init;
 use crate::pool::connect;
 use crate::repo::execution::tickets::{NewTicket, SqliteTicketRepo, Ticket};
-use crate::repo::execution::workers::{NewWorker, SqliteWorkerRepo, Worker, WorkerKind};
+use crate::repo::execution::workers::{
+    NewCapability, NewGrant, NewWorker, SqliteWorkerRepo, Worker, WorkerKind,
+};
 
 /// Shared default timestamp for builder fixtures and tests. Keyed on
 /// `OffsetDateTime::UNIX_EPOCH` so snapshot diffs are stable across runs.
@@ -86,6 +88,41 @@ pub async fn insert_synthetic_migration(
     .bind(success_int)
     .execute(pool)
     .await?;
+    Ok(())
+}
+
+/// Record matching capabilities and one allow grant for test worker operations.
+///
+/// # Errors
+///
+/// Returns the first capability or grant insertion error.
+pub async fn record_worker_eligibility(
+    workers: &SqliteWorkerRepo,
+    worker_id: WorkerId,
+    operations: &[TicketOperation],
+) -> Result<(), VoomError> {
+    for operation in operations {
+        workers
+            .record_capability(NewCapability {
+                worker_id,
+                operation: operation.clone(),
+                codecs: Vec::new(),
+                hardware: Vec::new(),
+                artifact_access: Vec::new(),
+                extra: serde_json::json!({}),
+            })
+            .await?;
+    }
+    workers
+        .record_grant(NewGrant {
+            worker_id,
+            can_execute: operations.to_vec(),
+            can_access_read: Vec::new(),
+            can_access_write: Vec::new(),
+            denies: Vec::new(),
+            max_parallel: serde_json::json!({}),
+        })
+        .await?;
     Ok(())
 }
 

@@ -6,7 +6,7 @@ use voom_events::EventKind;
 use voom_store::repo::events::{EventFilter, EventPage, EventRepo, Page};
 use voom_store::repo::leases::NewLease;
 use voom_store::repo::tickets::TicketState;
-use voom_store::repo::workers::{NewWorker, WorkerKind};
+use voom_store::repo::workers::{NewCapability, NewGrant, NewWorker, WorkerKind};
 
 use crate::cases::{cp, issue_link_targets, terminal_failure_issues};
 
@@ -359,6 +359,26 @@ async fn pre_lease_failure_rejects_ticket_with_active_lease() {
         .unwrap();
     cp.mark_ready_if_unblocked(t.id, T0).await.unwrap();
     let w = cp.register_worker(worker("alpha")).await.unwrap();
+    cp.record_capability(NewCapability {
+        worker_id: w.id,
+        operation: t.kind.clone(),
+        codecs: Vec::new(),
+        hardware: Vec::new(),
+        artifact_access: Vec::new(),
+        extra: serde_json::json!({}),
+    })
+    .await
+    .unwrap();
+    cp.record_grant(NewGrant {
+        worker_id: w.id,
+        can_execute: vec![t.kind.clone()],
+        can_access_read: Vec::new(),
+        can_access_write: Vec::new(),
+        denies: Vec::new(),
+        max_parallel: serde_json::json!({}),
+    })
+    .await
+    .unwrap();
     cp.acquire_lease(NewLease {
         ticket_id: t.id,
         worker_id: w.id,

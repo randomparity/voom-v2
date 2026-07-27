@@ -2,15 +2,16 @@
 
 use rand::RngCore;
 use serde_json::Value as JsonValue;
-use sqlx::{Row, SqlitePool};
+use sqlx::{Acquire, Row, SqlitePool};
 use time::{Duration, OffsetDateTime};
-use voom_core::{Clock, FailureClass, LeaseId, TicketId, VoomError, WorkerId};
+use voom_core::{Clock, FailureClass, LeaseId, TicketId, TicketOperation, VoomError, WorkerId};
 
 use super::Repository;
 use super::common::{
     i64_from_u64, iso8601, map_row_err, parse_iso8601, serialize_json, u32_from_i64, u64_from_i64,
 };
 use super::tickets::SqliteTicketRepo;
+use super::workers::{SqliteWorkerRepo, WorkerOperationEligibility, WorkerStatus};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LeaseState {
@@ -173,10 +174,6 @@ impl SqliteLeaseRepo {
 impl Repository for SqliteLeaseRepo {}
 
 impl SqliteLeaseRepo {
-    // Capability / grant / deny / max_parallel gating is deferred to
-    // Sprint 3 (policy) and Sprint 4 (remote workers). The supporting
-    // tables exist now so Sprint 1 use cases can populate them. See
-    // docs/superpowers/specs/2026-05-16-voom-sprint-1-design.md §7.5.
     pub async fn acquire_in_tx(
         &self,
         tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
@@ -188,26 +185,42 @@ impl SqliteLeaseRepo {
                 "ttl must be positive, got {ttl_secs}s"
             )));
         }
-        // Worker must exist and not be retired. Retired workers must never
-        // acquire — checked here so the worker lifecycle is an effective
-        // trust boundary. CHECK constraint on workers.status guarantees the
-        // returned string is one of the four-value vocab.
-        let worker_status: Option<String> =
-            sqlx::query_scalar("SELECT status FROM workers WHERE id = ?")
-                .bind(i64_from_u64(input.worker_id.0))
-                .fetch_optional(&mut **tx)
-                .await
-                .map_err(|e| VoomError::database_context("workers status read", e))?;
-        let status = worker_status
-            .ok_or_else(|| VoomError::NotFound(format!("worker {}", input.worker_id)))?;
-        if status == "retired" {
-            return Err(VoomError::Conflict(format!(
-                "acquire rejected: worker {} retired",
-                input.worker_id
-            )));
+
+        let mut savepoint = tx
+            .begin()
+            .await
+            .map_err(|e| VoomError::database_context("lease acquire savepoint begin", e))?;
+        let result = self.acquire_guarded(&mut savepoint, &input, ttl_secs).await;
+        match result {
+            Ok(lease) => {
+                savepoint.commit().await.map_err(|e| {
+                    VoomError::database_context("lease acquire savepoint release", e)
+                })?;
+                Ok(lease)
+            }
+            Err(error) => {
+                savepoint.rollback().await.map_err(|rollback_error| {
+                    VoomError::database(format!(
+                        "lease acquire rollback after {error}: {rollback_error}"
+                    ))
+                })?;
+                Err(error)
+            }
         }
+    }
+
+    async fn acquire_guarded(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        input: &NewLease,
+        ttl_secs: i64,
+    ) -> Result<Lease, VoomError> {
+        let ticket = SqliteTicketRepo::new(self.pool.clone())
+            .get_in_tx(tx, input.ticket_id)
+            .await?
+            .ok_or_else(|| VoomError::NotFound(format!("ticket {}", input.ticket_id)))?;
+        let operation = worker_operation_for_ticket(&ticket.kind)?;
         let now_str = iso8601(input.now)?;
-        // Promote ticket: assert ready + eligible + retries remain; bump attempt.
         let res = sqlx::query(
             "UPDATE tickets \
              SET state = 'leased', state_changed_at = ?, attempt = attempt + 1, \
@@ -227,7 +240,11 @@ impl SqliteLeaseRepo {
                 input.ticket_id
             )));
         }
-        // Insert lease.
+        let eligibility = SqliteWorkerRepo::new(self.pool.clone())
+            .operation_eligibility_in_tx(tx, input.worker_id, &operation)
+            .await?;
+        require_operation_eligibility(input.worker_id, &operation, &eligibility)?;
+
         let expires = input.now + input.ttl;
         let expires_str = iso8601(expires)?;
         let res2 = sqlx::query(
@@ -975,6 +992,54 @@ async fn process_expired_lease(
     report.expired_leases.push(lease_id);
     report.pairs.push((lease_id, ticket_id));
     Ok(())
+}
+
+fn require_operation_eligibility(
+    worker_id: WorkerId,
+    operation: &TicketOperation,
+    eligibility: &WorkerOperationEligibility,
+) -> Result<(), VoomError> {
+    match eligibility.worker_status {
+        None => return Err(VoomError::NotFound(format!("worker {worker_id}"))),
+        Some(WorkerStatus::Stale) => {
+            return Err(VoomError::Conflict(format!(
+                "acquire rejected: worker {worker_id} stale"
+            )));
+        }
+        Some(WorkerStatus::Retired) => {
+            return Err(VoomError::Conflict(format!(
+                "acquire rejected: worker {worker_id} retired"
+            )));
+        }
+        Some(WorkerStatus::Registered | WorkerStatus::Active) => {}
+    }
+    if eligibility.is_denied {
+        return Err(VoomError::Conflict(format!(
+            "acquire rejected: worker {worker_id} denied operation {operation}"
+        )));
+    }
+    if !eligibility.has_capability {
+        return Err(VoomError::Conflict(format!(
+            "acquire rejected: worker {worker_id} missing capability {operation}"
+        )));
+    }
+    if !eligibility.has_grant {
+        return Err(VoomError::Conflict(format!(
+            "acquire rejected: worker {worker_id} missing grant {operation}"
+        )));
+    }
+    Ok(())
+}
+
+fn worker_operation_for_ticket(
+    ticket_kind: &TicketOperation,
+) -> Result<TicketOperation, VoomError> {
+    const WORKFLOW_OPERATION_PREFIX: &str = "synthetic.workflow.operation.";
+
+    let Some(operation) = ticket_kind.as_str().strip_prefix(WORKFLOW_OPERATION_PREFIX) else {
+        return Ok(ticket_kind.clone());
+    };
+    TicketOperation::from_stored(operation, "tickets.kind workflow operation")
 }
 
 async fn get_lease_in_tx(
