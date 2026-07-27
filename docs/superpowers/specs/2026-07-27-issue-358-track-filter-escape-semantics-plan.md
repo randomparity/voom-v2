@@ -164,6 +164,15 @@ Upgrade path:
    schema version, and compiled projection remain unchanged; and exactly one
    version row exists.
 
+Add a permanent ordering sentinel beside the two escape-oracle cases. Seed an
+immutable row whose exact source bytes are rejected by the current compiler but
+whose stored source hash and compiled policy identity agree. Uploading those
+identical bytes must still return the existing version. This distinguishes the
+required outer duplicate lookup from the later in-transaction duplicate check:
+any attempt to compile first returns a policy diagnostic and fails the test.
+The sentinel guards repository ordering only; it is not a published source
+fixture and does not add an accepted grammar form.
+
 Rollback path:
 
 1. Create the same policy through
@@ -176,9 +185,27 @@ Rollback path:
 These tests inspect durable state. They do not infer success from a returned ID
 or process status alone.
 
-Expected pre-implementation failure: the new tests do not compile until the
-historical seeding/oracle helpers and full durable assertions are added.
-Implement only test-local setup; production repository behavior is unchanged.
+Mutation evidence:
+
+1. Temporarily bypass the outer
+   `get_version_by_document_and_hash` lookup in `add_version`. The rejected-source
+   ordering sentinel must fail at compilation before reaching the
+   in-transaction lookup.
+2. Restore the outer lookup and rerun the sentinel green.
+3. Temporarily change the V2 lowering transformation to remove exactly one
+   closing delimiter. Both fresh-database rollback cases must fail their
+   complete historical-golden comparison, including the terminal escaped-quote
+   case.
+4. Restore V2 lowering and rerun the complete store and policy fixture tests
+   green.
+
+Do not commit either mutation. Record the expected focused failures in the
+implementation checkpoint.
+
+The durable tests are expected to pass once their test-local seeding helpers
+and assertions compile because production ordering and V2 output already exist.
+Their mutation failures provide the required proof that the tests detect both
+load-bearing regressions. Production repository behavior remains unchanged.
 
 Verification:
 
