@@ -17,12 +17,14 @@ scan-import and historical-input contracts.
   `ControlPlane::create_policy_input_set` with an
   `existing_media_snapshot_id` is checked against the exact
   `TargetRef::FileVersion` in the same write transaction.
-- **Permitted surface:** the control-plane policy-input case handler, its
-  sibling tests, and this issue's design and plan.
-- **Direct dependencies:** `IdentityRepo::get_media_snapshot_in_tx`,
+- **Permitted surface:** the control-plane policy-input case handler and
+  sibling tests; one bounded set-based `IdentityRepo` method and its store
+  tests; and this issue's design and plan.
+- **Direct dependencies:** a new
+  `IdentityRepo::get_media_snapshot_file_versions_in_tx` bulk read,
   `SqlitePolicyInputRepo::create_input_set_in_tx`, `begin_immediate_tx`,
-  the Sprint 3 aggregate transaction, and ADR 0036's selected-version
-  provenance rule.
+  SQLite `json_each`, the Sprint 3 aggregate transaction, and ADR 0036's
+  selected-version provenance rule.
 - **Compatibility:** no public type, JSON, SQL, error-code, event, or policy
   grammar changes.
 
@@ -60,27 +62,68 @@ not be admitted in the first place.
 
 ## Decision
 
+### Bounded identity read
+
+`IdentityRepo` adds this transaction-scoped read:
+
+```text
+get_media_snapshot_file_versions_in_tx(
+    transaction,
+    snapshot_ids: &[MediaSnapshotId],
+) -> [(MediaSnapshotId, FileVersionId)]
+```
+
+The implementation returns an empty vector without issuing SQL when the input
+is empty. Otherwise it converts the IDs to the repository's SQLite `i64`
+representation, serializes that vector once, and binds it to one set-based
+query:
+
+```sql
+SELECT id, file_version_id
+FROM media_snapshots
+WHERE id IN (SELECT value FROM json_each(?))
+ORDER BY id
+```
+
+This established repository pattern uses one bind regardless of aggregate
+size, so it does not hit SQLite's variable limit. `IN` makes duplicate input
+IDs produce one result row. The control plane still deduplicates linked IDs
+before calling the repository so the request and returned map have one entry
+per identity.
+
+The method returns every existing requested `(snapshot, version)` pair and
+omits missing IDs. The control plane owns the public `NOT_FOUND` decision and
+member context; the repository remains a deterministic identity read rather
+than policy validation.
+
 ### Transaction boundary
 
-The generic writer changes from a deferred transaction to
-`begin_immediate_tx`. It is now a read-then-write transaction, so taking the
-SQLite write lock before validation avoids a deferred lock-upgrade failure and
-keeps validation and insertion in one serializable write boundary.
+Before acquiring a database lock, the generic writer:
 
-The handler performs these steps in order:
+1. runs `voom_policy::validate_input_set`, preserving the existing
+   model-validation error precedence; and
+2. collects all linked snapshot IDs into a `BTreeSet`.
 
-1. run `voom_policy::validate_input_set` before provenance reads, preserving
-   the existing model-validation error precedence;
-2. inspect every media-snapshot member with a linked snapshot;
-3. load each linked snapshot through
-   `IdentityRepo::get_media_snapshot_in_tx`;
-4. validate the member's target and exact version;
-5. call `create_input_set_in_tx`; and
-6. commit.
+The repository repeats model validation before insertion as defense in depth.
 
-The repository retains its own model validation as defense in depth. No root,
-label, synthetic-target, or child insert starts until the complete linked
-member list passes.
+The generic writer then uses `begin_immediate_tx`. It is a read-then-write
+transaction, so taking the SQLite write lock before the one bulk identity read
+avoids a deferred lock-upgrade failure and keeps provenance validation and
+insertion in one serializable writer boundary. The lock-held validation work is
+one set-based query plus an in-memory pass; it no longer grows by one database
+round trip per member.
+
+Inside the transaction, the handler:
+
+1. bulk-loads all distinct linked snapshot/version pairs;
+2. indexes the returned pairs by snapshot ID;
+3. inspects every linked media-snapshot member in draft order;
+4. validates snapshot existence, member target, and exact version;
+5. calls `create_input_set_in_tx`; and
+6. commits.
+
+No root, label, synthetic-target, or child insert starts until the complete
+linked member list passes.
 
 ### Link contract
 
@@ -141,6 +184,10 @@ introduced.
 ## Test strategy
 
 - Exact valid link round-trips through the generic writer.
+- The bulk identity read returns immediately for an empty slice, collapses
+  duplicate IDs, orders results deterministically, reports existing pairs
+  while omitting missing IDs, and accepts more IDs than SQLite's ordinary bind
+  limit because it uses one JSON bind.
 - A missing snapshot returns `NOT_FOUND`.
 - A linked non-file target returns `CONFLICT`.
 - A later mismatched member returns `CONFLICT` after an earlier valid member
@@ -151,7 +198,8 @@ introduced.
 - Existing scan-import missing, mismatch, and retired tests remain green.
 - Mutate the version comparison locally, confirm the mismatch test fails, then
   restore it.
-- Run the focused control-plane tests, formatting, linting, and `just ci`.
+- Run the focused store identity and control-plane tests, formatting, linting,
+  and `just ci`.
 
 ## Campaign sequencing
 

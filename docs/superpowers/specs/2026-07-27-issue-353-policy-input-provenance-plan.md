@@ -3,10 +3,11 @@
 **Goal:** Reject missing, non-file, or mismatched generic policy-input snapshot
 links inside the write transaction without persisting partial aggregate state.
 
-**Design:** Validate the complete draft and every linked media member before
-calling the policy-input repository. Use an immediate SQLite transaction,
-identity-repository snapshot reads, the existing `NOT_FOUND` and `CONFLICT`
-codes, and no schema or wire changes.
+**Design:** Validate the complete draft and collect distinct linked IDs before
+taking a database lock. Use one `json_each`-backed identity-repository read in
+an immediate SQLite transaction, validate every linked media member in memory,
+then call the policy-input repository. Keep the existing `NOT_FOUND` and
+`CONFLICT` codes and make no schema or wire changes.
 
 **Success criteria:**
 
@@ -18,7 +19,36 @@ codes, and no schema or wire changes.
 - scan-import behavior is unchanged; and
 - focused tests and `just ci` pass without warnings.
 
-## Task 1: Pin generic provenance and atomicity with failing tests
+## Task 1: Add a bounded bulk identity read
+
+**Files:**
+
+- Modify: `crates/voom-store/src/repo/media/identity.rs`
+- Modify: `crates/voom-store/src/repo/media/identity_test.rs`
+
+1. Add
+   `IdentityRepo::get_media_snapshot_file_versions_in_tx`, accepting a slice of
+   snapshot IDs and returning deterministic `(snapshot ID, file-version ID)`
+   pairs for the IDs that exist.
+2. Return an empty vector before constructing SQL when the input is empty.
+3. Convert IDs to SQLite's `i64` representation, encode them in one JSON
+   array, and bind that array to one query using
+   `IN (SELECT value FROM json_each(?))`.
+4. Order results by snapshot ID. Missing IDs are omitted for the policy caller
+   to classify; duplicate inputs yield one row.
+5. Add store tests for empty input, duplicate/existing/missing IDs, stable
+   ordering, and a request larger than SQLite's ordinary parameter limit.
+6. Run:
+
+   ```sh
+   cargo test -p voom-store --all-features --lib \
+     get_media_snapshot_file_versions_in_tx
+   ```
+
+**Commit boundary:** tests and implementation stay in the issue's one logical
+behavior commit because the method has no consumer until Task 3.
+
+## Task 2: Pin generic provenance and atomicity with failing tests
 
 **Files:**
 
@@ -52,32 +82,35 @@ codes, and no schema or wire changes.
 **Commit boundary:** tests are committed with the implementation because a
 test-only commit would leave the branch red.
 
-## Task 2: Validate every link before insertion
+## Task 3: Validate every link before insertion
 
 **Files:**
 
 - Modify:
   `crates/voom-control-plane/src/cases/policy/policy_inputs.rs`
 
-1. Change the generic writer to `begin_immediate_tx`.
-2. Run `voom_policy::validate_input_set` before provenance reads and map the
-   error to the existing `PolicyValidationError` contract.
-3. Iterate every linked media member and load the named snapshot with
-   `IdentityRepo::get_media_snapshot_in_tx`.
-4. Return `NotFound` for a missing snapshot.
-5. Return `Conflict` when the linked member does not target a file version or
+1. Run `voom_policy::validate_input_set` before acquiring the write lock and
+   map the error to the existing `PolicyValidationError` contract.
+2. Collect linked snapshot IDs into a `BTreeSet`, then change the generic
+   writer to `begin_immediate_tx`.
+3. Call
+   `IdentityRepo::get_media_snapshot_file_versions_in_tx` once with the
+   distinct IDs and index its result by snapshot ID.
+4. Iterate every linked member in draft order.
+5. Return `NotFound` when its snapshot ID is absent from the result.
+6. Return `Conflict` when the linked member does not target a file version or
    when the snapshot's version differs.
-6. Call `create_input_set_in_tx` only after the whole linked list passes, then
+7. Call `create_input_set_in_tx` only after the whole linked list passes, then
    commit.
-7. Run the focused tests from Task 1. All must pass.
-8. Run the existing scan-input tests to prove the specialized liveness
+8. Run the focused tests from Tasks 1 and 2. All must pass.
+9. Run the existing scan-input tests to prove the specialized liveness
    contract remains unchanged:
 
    ```sh
    cargo test -p voom-control-plane --lib create_policy_input_set_from_scan
    ```
 
-9. Temporarily remove the exact-version comparison, confirm the mismatch test
+10. Temporarily remove the exact-version comparison, confirm the mismatch test
    fails because the write succeeds, then restore the comparison.
 
 **Commit boundary:**
@@ -86,7 +119,7 @@ test-only commit would leave the branch red.
 fix(control-plane): validate policy input provenance
 ```
 
-## Task 3: Verify and hand off
+## Task 4: Verify and hand off
 
 1. Re-read the complete `main...HEAD` diff for unrelated changes, insertions
    before validation, error-code drift, and accidental liveness checks.
@@ -95,6 +128,8 @@ fix(control-plane): validate policy input provenance
    ```sh
    just fmt
    git diff --check
+   cargo test -p voom-store --all-features --lib \
+     get_media_snapshot_file_versions_in_tx
    cargo test -p voom-control-plane --lib cases::policy::policy_inputs::tests
    just lint
    prek run
