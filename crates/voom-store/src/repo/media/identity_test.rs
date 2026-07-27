@@ -549,6 +549,143 @@ async fn supersede_inserts_new_row_and_marks_old() {
 
 // ---- media_snapshots -----------------------------------------------------
 
+async fn media_snapshot(
+    repo: &SqliteIdentityRepo,
+    content_hash: &str,
+) -> (FileVersionId, MediaSnapshotId) {
+    let asset = repo.create_file_asset(T0).await.unwrap();
+    let version = repo
+        .create_file_version(NewFileVersion {
+            file_asset_id: asset.id,
+            content_hash: content_hash.to_owned(),
+            size_bytes: 1,
+            produced_by: ProducedBy::Ingest,
+            produced_from_version_id: None,
+            created_at: T0,
+        })
+        .await
+        .unwrap();
+    let mut tx = repo.pool.begin().await.unwrap();
+    let snapshot = repo
+        .record_media_snapshot_in_tx(
+            &mut tx,
+            NewMediaSnapshot {
+                file_version_id: version.id,
+                probed_by: None,
+                probed_at: T0,
+                payload: json!({"streams": []}),
+            },
+        )
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    (version.id, snapshot.id)
+}
+
+#[test]
+fn get_media_snapshot_file_versions_in_tx_uses_one_json_bind() {
+    assert!(MEDIA_SNAPSHOT_FILE_VERSION_QUERY_SQL.contains("json_each(?)"));
+    assert_eq!(
+        MEDIA_SNAPSHOT_FILE_VERSION_QUERY_SQL
+            .chars()
+            .filter(|character| *character == '?')
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn get_media_snapshot_file_versions_in_tx_prepares_sorted_unique_ids() {
+    let query = MediaSnapshotFileVersionQuery::new([
+        MediaSnapshotId(3),
+        MediaSnapshotId(1),
+        MediaSnapshotId(3),
+    ])
+    .unwrap();
+
+    assert_eq!(query.encoded_ids.as_deref(), Some("[1,3]"));
+}
+
+#[tokio::test]
+async fn get_media_snapshot_file_versions_in_tx_empty_query_executes_no_sql() {
+    let (repo, _tmp) = fresh().await;
+    let query = MediaSnapshotFileVersionQuery::new([]).unwrap();
+    let mut tx = repo.pool.begin().await.unwrap();
+    sqlx::query("ALTER TABLE media_snapshots RENAME TO unavailable_media_snapshots")
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+
+    let rows = repo
+        .get_media_snapshot_file_versions_in_tx(&mut tx, &query)
+        .await
+        .unwrap();
+
+    assert!(rows.is_empty());
+}
+
+#[tokio::test]
+async fn get_media_snapshot_file_versions_in_tx_nonempty_query_executes_sql() {
+    let (repo, _tmp) = fresh().await;
+    let query = MediaSnapshotFileVersionQuery::new([MediaSnapshotId(1)]).unwrap();
+    let mut tx = repo.pool.begin().await.unwrap();
+    sqlx::query("ALTER TABLE media_snapshots RENAME TO unavailable_media_snapshots")
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+
+    let err = repo
+        .get_media_snapshot_file_versions_in_tx(&mut tx, &query)
+        .await
+        .unwrap_err();
+
+    assert_eq!(err.code(), "DB_UNREACHABLE");
+    assert!(err.to_string().contains("media snapshot provenance lookup"));
+}
+
+#[tokio::test]
+async fn get_media_snapshot_file_versions_in_tx_deduplicates_and_orders_rows() {
+    let (repo, _tmp) = fresh().await;
+    let (first_version_id, first_snapshot_id) = media_snapshot(&repo, "first-query").await;
+    let (second_version_id, second_snapshot_id) = media_snapshot(&repo, "second-query").await;
+    let query = MediaSnapshotFileVersionQuery::new([
+        second_snapshot_id,
+        MediaSnapshotId(999_999),
+        first_snapshot_id,
+        second_snapshot_id,
+    ])
+    .unwrap();
+    let mut tx = repo.pool.begin().await.unwrap();
+
+    let rows = repo
+        .get_media_snapshot_file_versions_in_tx(&mut tx, &query)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        rows,
+        [
+            (first_snapshot_id, first_version_id),
+            (second_snapshot_id, second_version_id),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn get_media_snapshot_file_versions_in_tx_accepts_more_than_one_thousand_ids() {
+    let (repo, _tmp) = fresh().await;
+    let snapshot_ids: Vec<MediaSnapshotId> = (1..=1_001).map(MediaSnapshotId).collect();
+    let query = MediaSnapshotFileVersionQuery::new(snapshot_ids).unwrap();
+    let mut tx = repo.pool.begin().await.unwrap();
+
+    let rows = repo
+        .get_media_snapshot_file_versions_in_tx(&mut tx, &query)
+        .await
+        .unwrap();
+
+    assert!(rows.is_empty());
+}
+
 #[tokio::test]
 async fn record_and_list_media_snapshot() {
     let (repo, _tmp) = fresh().await;

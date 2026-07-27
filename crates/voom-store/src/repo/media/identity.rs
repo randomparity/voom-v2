@@ -479,6 +479,40 @@ pub struct MediaSnapshot {
     pub payload: JsonValue,
 }
 
+/// Prepared snapshot IDs for one set-based provenance lookup.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MediaSnapshotFileVersionQuery {
+    encoded_ids: Option<String>,
+}
+
+impl MediaSnapshotFileVersionQuery {
+    /// Sort, deduplicate, and encode snapshot IDs before transaction entry.
+    ///
+    /// # Errors
+    /// Returns an internal error if the deterministic JSON encoding fails.
+    pub fn new(snapshot_ids: impl IntoIterator<Item = MediaSnapshotId>) -> Result<Self, VoomError> {
+        let mut snapshot_ids: Vec<i64> = snapshot_ids
+            .into_iter()
+            .map(|id| i64_from_u64(id.0))
+            .collect();
+        snapshot_ids.sort_unstable();
+        snapshot_ids.dedup();
+        let encoded_ids = if snapshot_ids.is_empty() {
+            None
+        } else {
+            Some(serialize_json(
+                &snapshot_ids,
+                "media snapshot provenance ids",
+            )?)
+        };
+        Ok(Self { encoded_ids })
+    }
+
+    fn encoded_ids(&self) -> Option<&str> {
+        self.encoded_ids.as_deref()
+    }
+}
+
 // ---------- trait ----------------------------------------------------------
 
 #[async_trait]
@@ -785,6 +819,13 @@ pub trait IdentityRepo: Repository {
         tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
         id: MediaSnapshotId,
     ) -> Result<Option<MediaSnapshot>, VoomError>;
+    /// Resolve existing snapshot IDs to their exact file-version IDs in one
+    /// deterministic set read. Missing snapshots are omitted.
+    async fn get_media_snapshot_file_versions_in_tx<'tx>(
+        &self,
+        tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
+        query: &MediaSnapshotFileVersionQuery,
+    ) -> Result<Vec<(MediaSnapshotId, FileVersionId)>, VoomError>;
     async fn list_media_snapshots_by_version(
         &self,
         version_id: FileVersionId,
@@ -1833,6 +1874,35 @@ impl IdentityRepo for SqliteIdentityRepo {
         get_media_snapshot_in_tx(tx, id).await
     }
 
+    async fn get_media_snapshot_file_versions_in_tx<'tx>(
+        &self,
+        tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
+        query: &MediaSnapshotFileVersionQuery,
+    ) -> Result<Vec<(MediaSnapshotId, FileVersionId)>, VoomError> {
+        let Some(encoded_ids) = query.encoded_ids() else {
+            return Ok(Vec::new());
+        };
+        let rows = sqlx::query(MEDIA_SNAPSHOT_FILE_VERSION_QUERY_SQL)
+            .bind(encoded_ids)
+            .fetch_all(&mut **tx)
+            .await
+            .map_err(|e| VoomError::database_context("media snapshot provenance lookup", e))?;
+        rows.iter()
+            .map(|row| {
+                let snapshot_id: i64 = row
+                    .try_get("id")
+                    .map_err(|e| map_row_err("media snapshot provenance lookup", &e))?;
+                let file_version_id: i64 = row
+                    .try_get("file_version_id")
+                    .map_err(|e| map_row_err("media snapshot provenance lookup", &e))?;
+                Ok((
+                    MediaSnapshotId(u64_from_i64(snapshot_id)),
+                    FileVersionId(u64_from_i64(file_version_id)),
+                ))
+            })
+            .collect()
+    }
+
     async fn list_media_snapshots_by_version(
         &self,
         version_id: FileVersionId,
@@ -2712,6 +2782,8 @@ fn row_to_identity_evidence(row: &sqlx::sqlite::SqliteRow) -> Result<IdentityEvi
 
 const SELECT_MEDIA_SNAPSHOT_COLS: &str = "SELECT id, file_version_id, probed_by, probed_at, payload \
      FROM media_snapshots WHERE id = ?";
+const MEDIA_SNAPSHOT_FILE_VERSION_QUERY_SQL: &str = "SELECT id, file_version_id FROM media_snapshots \
+     WHERE id IN (SELECT value FROM json_each(?)) ORDER BY id";
 
 async fn get_media_snapshot_in_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,

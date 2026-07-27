@@ -1,7 +1,8 @@
 use super::{
     BundleTargetInput, BundleTargetState, IdentityEvidenceInput, IssueInput, IssueInputState,
     MediaSnapshotInput, PolicyInputSetDraft, PolicyInputSourceKind, PolicySyntheticTarget,
-    QualityProfileSelection, TargetKind, TargetRef, validate_input_set,
+    QualityProfileSelection, TargetKind, TargetRef, ValidatedPolicyInputSetDraft,
+    validate_input_set,
 };
 
 fn minimal_input_set() -> PolicyInputSetDraft {
@@ -49,6 +50,24 @@ fn valid_minimal_input_set_passes() {
     let input = minimal_input_set();
 
     assert!(validate_input_set(&input).is_ok());
+}
+
+#[test]
+fn validated_draft_preserves_valid_input() {
+    let input = minimal_input_set();
+
+    let validated = ValidatedPolicyInputSetDraft::new(input.clone()).unwrap();
+
+    assert_eq!(validated.as_draft(), &input);
+    assert_eq!(validated.into_draft(), input);
+}
+
+#[test]
+fn invalid_input_cannot_produce_validated_draft() {
+    let mut input = minimal_input_set();
+    input.slug = " ".to_owned();
+
+    assert!(ValidatedPolicyInputSetDraft::new(input).is_err());
 }
 
 #[test]

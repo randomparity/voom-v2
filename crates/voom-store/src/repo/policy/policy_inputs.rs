@@ -11,7 +11,7 @@ use voom_core::{
 };
 use voom_policy::{
     BundleTargetState, IssueInputState, PolicyInputSetDraft, PolicyInputSourceKind, TargetKind,
-    TargetRef,
+    TargetRef, ValidatedPolicyInputSetDraft,
 };
 
 use super::Repository;
@@ -174,6 +174,8 @@ impl SqlitePolicyInputRepo {
         &self,
         input: PolicyInputSetDraft,
     ) -> Result<PolicyInputSet, VoomError> {
+        let input = ValidatedPolicyInputSetDraft::new(input)
+            .map_err(|e| VoomError::PolicyValidationError(format!("{e:?}")))?;
         let mut tx = self
             .pool
             .begin()
@@ -189,10 +191,9 @@ impl SqlitePolicyInputRepo {
     pub async fn create_input_set_in_tx(
         &self,
         tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-        input: PolicyInputSetDraft,
+        input: ValidatedPolicyInputSetDraft,
     ) -> Result<PolicyInputSet, VoomError> {
-        voom_policy::validate_input_set(&input)
-            .map_err(|e| VoomError::PolicyValidationError(format!("{e:?}")))?;
+        let input = input.into_draft();
 
         let created_at = iso8601(input.created_at)?;
         let res = sqlx::query(

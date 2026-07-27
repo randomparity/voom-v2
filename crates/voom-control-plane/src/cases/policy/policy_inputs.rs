@@ -1,13 +1,18 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use voom_core::{FileVersionId, LibraryRootId, MediaSnapshotId, PolicyInputSetId, VoomError};
-use voom_policy::{MediaSnapshotInput, PolicyInputSetDraft, PolicyInputSourceKind, TargetRef};
+use voom_policy::{
+    MediaSnapshotInput, PolicyInputSetDraft, PolicyInputSourceKind, TargetRef,
+    ValidatedPolicyInputSetDraft,
+};
 use voom_store::repo::{
-    identity::{FileLocationKind, IdentityRepo},
+    identity::{FileLocationKind, IdentityRepo, MediaSnapshotFileVersionQuery},
     policy_inputs::{PolicyInputSet, PolicyInputSetSummary},
 };
 
 use crate::ControlPlane;
+use crate::cases::begin_immediate_tx;
 use crate::media_snapshot::stream_summary_from_snapshot_payload;
 
 use super::{begin_tx, commit_tx};
@@ -74,7 +79,23 @@ impl ControlPlane {
         &self,
         input: voom_policy::PolicyInputSetDraft,
     ) -> Result<PolicyInputSet, VoomError> {
-        let mut tx = begin_tx(&self.pool).await?;
+        let input = ValidatedPolicyInputSetDraft::new(input)
+            .map_err(|e| VoomError::PolicyValidationError(format!("{e:?}")))?;
+        let query = MediaSnapshotFileVersionQuery::new(
+            input
+                .as_draft()
+                .media_snapshots
+                .iter()
+                .filter_map(|snapshot| snapshot.existing_media_snapshot_id),
+        )?;
+        let mut tx = begin_immediate_tx(&self.pool).await?;
+        let snapshot_versions: HashMap<MediaSnapshotId, FileVersionId> = self
+            .identity
+            .get_media_snapshot_file_versions_in_tx(&mut tx, &query)
+            .await?
+            .into_iter()
+            .collect();
+        validate_snapshot_links(input.as_draft(), &snapshot_versions)?;
         let out = self
             .policy_inputs
             .create_input_set_in_tx(&mut tx, input)
@@ -156,6 +177,8 @@ impl ControlPlane {
             quality_profiles: Vec::new(),
             issues: Vec::new(),
         };
+        let draft = ValidatedPolicyInputSetDraft::new(draft)
+            .map_err(|e| VoomError::PolicyValidationError(format!("{e:?}")))?;
         let created = self
             .policy_inputs
             .create_input_set_in_tx(&mut tx, draft)
@@ -341,6 +364,38 @@ impl ControlPlane {
     pub async fn list_policy_input_sets(&self) -> Result<Vec<PolicyInputSetSummary>, VoomError> {
         self.policy_inputs.list_input_sets().await
     }
+}
+
+fn validate_snapshot_links(
+    input: &PolicyInputSetDraft,
+    snapshot_versions: &HashMap<MediaSnapshotId, FileVersionId>,
+) -> Result<(), VoomError> {
+    for member in &input.media_snapshots {
+        let Some(snapshot_id) = member.existing_media_snapshot_id else {
+            continue;
+        };
+        let Some(snapshot_version_id) = snapshot_versions.get(&snapshot_id) else {
+            return Err(VoomError::NotFound(format!(
+                "media snapshot {snapshot_id} not found"
+            )));
+        };
+        let TargetRef::FileVersion {
+            id: target_version_id,
+        } = member.target
+        else {
+            return Err(VoomError::Conflict(format!(
+                "media snapshot {snapshot_id} linked from policy input member ordinal {} \
+                 must target a file version",
+                member.ordinal
+            )));
+        };
+        if *snapshot_version_id != target_version_id {
+            return Err(VoomError::Conflict(format!(
+                "media snapshot {snapshot_id} does not belong to file version {target_version_id}"
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn snapshot_has_video_stream(payload: &serde_json::Value) -> bool {
