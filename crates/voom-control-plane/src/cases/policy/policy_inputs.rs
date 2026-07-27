@@ -81,13 +81,13 @@ impl ControlPlane {
     ) -> Result<PolicyInputSet, VoomError> {
         let input = ValidatedPolicyInputSetDraft::new(input)
             .map_err(|e| VoomError::PolicyValidationError(format!("{e:?}")))?;
-        let snapshot_ids: Vec<MediaSnapshotId> = input
-            .as_draft()
-            .media_snapshots
-            .iter()
-            .filter_map(|snapshot| snapshot.existing_media_snapshot_id)
-            .collect();
-        let query = MediaSnapshotFileVersionQuery::new(&snapshot_ids)?;
+        let query = MediaSnapshotFileVersionQuery::new(
+            input
+                .as_draft()
+                .media_snapshots
+                .iter()
+                .filter_map(|snapshot| snapshot.existing_media_snapshot_id),
+        )?;
         let mut tx = begin_immediate_tx(&self.pool).await?;
         let snapshot_versions: HashMap<MediaSnapshotId, FileVersionId> = self
             .identity

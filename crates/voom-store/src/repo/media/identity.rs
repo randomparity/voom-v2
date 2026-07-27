@@ -8,8 +8,6 @@
 //! (`SqliteBundleRepo`) because the membership UNIQUE constraint and the
 //! variant scoping make the surface noticeably different.
 
-use std::collections::BTreeSet;
-
 use async_trait::async_trait;
 use serde_json::Value as JsonValue;
 use sqlx::{Acquire, Row, SqlitePool};
@@ -484,8 +482,7 @@ pub struct MediaSnapshot {
 /// Prepared snapshot IDs for one set-based provenance lookup.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MediaSnapshotFileVersionQuery {
-    encoded_ids: String,
-    is_empty: bool,
+    encoded_ids: Option<String>,
 }
 
 impl MediaSnapshotFileVersionQuery {
@@ -493,21 +490,26 @@ impl MediaSnapshotFileVersionQuery {
     ///
     /// # Errors
     /// Returns an internal error if the deterministic JSON encoding fails.
-    pub fn new(snapshot_ids: &[MediaSnapshotId]) -> Result<Self, VoomError> {
-        let snapshot_ids: Vec<i64> = snapshot_ids
-            .iter()
-            .map(|id| i64_from_u64(id.0))
-            .collect::<BTreeSet<_>>()
+    pub fn new(snapshot_ids: impl IntoIterator<Item = MediaSnapshotId>) -> Result<Self, VoomError> {
+        let mut snapshot_ids: Vec<i64> = snapshot_ids
             .into_iter()
+            .map(|id| i64_from_u64(id.0))
             .collect();
-        Ok(Self {
-            encoded_ids: serialize_json(&snapshot_ids, "media snapshot provenance ids")?,
-            is_empty: snapshot_ids.is_empty(),
-        })
+        snapshot_ids.sort_unstable();
+        snapshot_ids.dedup();
+        let encoded_ids = if snapshot_ids.is_empty() {
+            None
+        } else {
+            Some(serialize_json(
+                &snapshot_ids,
+                "media snapshot provenance ids",
+            )?)
+        };
+        Ok(Self { encoded_ids })
     }
 
-    const fn is_empty(&self) -> bool {
-        self.is_empty
+    fn encoded_ids(&self) -> Option<&str> {
+        self.encoded_ids.as_deref()
     }
 }
 
@@ -1877,11 +1879,11 @@ impl IdentityRepo for SqliteIdentityRepo {
         tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
         query: &MediaSnapshotFileVersionQuery,
     ) -> Result<Vec<(MediaSnapshotId, FileVersionId)>, VoomError> {
-        if query.is_empty() {
+        let Some(encoded_ids) = query.encoded_ids() else {
             return Ok(Vec::new());
-        }
+        };
         let rows = sqlx::query(MEDIA_SNAPSHOT_FILE_VERSION_QUERY_SQL)
-            .bind(&query.encoded_ids)
+            .bind(encoded_ids)
             .fetch_all(&mut **tx)
             .await
             .map_err(|e| VoomError::database_context("media snapshot provenance lookup", e))?;
