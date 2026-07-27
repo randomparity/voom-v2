@@ -4,10 +4,11 @@
 -- produced it. Existing staged-commit verification rows remain unowned.
 
 ALTER TABLE artifact_verifications
-    ADD COLUMN workflow_ticket_id INTEGER REFERENCES tickets(id) ON DELETE RESTRICT;
+    ADD COLUMN workflow_lease_id INTEGER REFERENCES leases(id) ON DELETE RESTRICT;
 
 ALTER TABLE artifact_verifications
-    ADD COLUMN workflow_lease_id INTEGER REFERENCES leases(id) ON DELETE RESTRICT;
+    ADD COLUMN workflow_ticket_id INTEGER REFERENCES tickets(id) ON DELETE RESTRICT
+        CHECK ((workflow_ticket_id IS NULL) = (workflow_lease_id IS NULL));
 
 CREATE UNIQUE INDEX artifact_verifications_by_workflow_lease
     ON artifact_verifications (workflow_lease_id)
@@ -16,6 +17,10 @@ CREATE UNIQUE INDEX artifact_verifications_by_workflow_lease
 CREATE INDEX artifact_verifications_by_workflow_ticket
     ON artifact_verifications (workflow_ticket_id, id)
     WHERE workflow_ticket_id IS NOT NULL;
+
+CREATE INDEX artifact_commit_records_by_committed_result_version
+    ON artifact_commit_records (result_file_version_id)
+    WHERE state = 'committed';
 
 -- A successful verification is durable read-only work. It carries the
 -- unchanged active file refs plus the exact artifact and verification evidence.

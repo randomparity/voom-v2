@@ -614,11 +614,33 @@ async fn workflow_verification_is_unique_per_lease_but_allows_ticket_retry() {
     );
     first.workflow_ticket_id = Some(TicketId(1));
     first.workflow_lease_id = Some(LeaseId(1));
+    let mut half_owned = first.clone();
+    half_owned.workflow_lease_id = None;
+    let mut invalid_tx = pool.begin().await.unwrap();
+    let invalid = repo
+        .record_verification_in_tx(&mut invalid_tx, half_owned)
+        .await
+        .unwrap_err();
+    assert!(matches!(invalid, VoomError::Config(_)));
+    invalid_tx.rollback().await.unwrap();
+
     let mut tx = pool.begin().await.unwrap();
-    repo.record_verification_in_tx(&mut tx, first.clone())
+    let first_verification = repo
+        .record_verification_in_tx(&mut tx, first.clone())
         .await
         .unwrap();
     tx.commit().await.unwrap();
+    let half_owned_update =
+        sqlx::query("UPDATE artifact_verifications SET workflow_lease_id = NULL WHERE id = ?")
+            .bind(i64::try_from(first_verification.id.0).unwrap())
+            .execute(&pool)
+            .await
+            .unwrap_err();
+    assert!(
+        half_owned_update
+            .to_string()
+            .contains("CHECK constraint failed")
+    );
 
     let mut duplicate_tx = pool.begin().await.unwrap();
     let duplicate = repo

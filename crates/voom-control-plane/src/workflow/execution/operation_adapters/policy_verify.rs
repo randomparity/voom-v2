@@ -1,51 +1,49 @@
-use serde_json::{Value, json};
-use voom_core::{
-    ErrorCode, FileLocationId, FileVersionId, LeaseId, OperationKind, VoomError, WorkerId,
-};
+use serde_json::to_value;
+use voom_core::{ErrorCode, FileLocationId, FileVersionId, OperationKind, VoomError};
 use voom_store::repo::artifacts::ArtifactVerificationStatus;
-use voom_store::repo::tickets::Ticket;
 
-use super::{LeaseHeartbeatContext, await_with_lease_heartbeats_without_runtime};
-use crate::ControlPlane;
+use super::{
+    LeaseHeartbeatContext, TicketDispatchContext, await_with_lease_heartbeats_without_runtime,
+    optional_u64, required_u64,
+};
 use crate::artifact::verify::{
     BundledVerifyArtifactDispatcher, NoVerifyArtifactHooks, PolicyVerifyArtifactInput,
     verify_policy_artifact_with_dispatcher,
 };
-use crate::workflow::execution::executor::{WorkflowChaosOptions, WorkflowTimingOptions};
 use crate::workflow::execution::leases::{
     fail_lease_and_return, failure_class_for_error, release_lease_with_retry,
 };
+use crate::workflow::ticket_results::{
+    PolicyVerificationTicketResult, PolicyVerificationTicketStatus,
+};
 
 pub(super) async fn dispatch_policy_verify_artifact(
-    control: &ControlPlane,
-    ticket: &Ticket,
-    worker_id: WorkerId,
-    lease_id: LeaseId,
-    payload: &Value,
-    timing: &WorkflowTimingOptions,
-    chaos: &WorkflowChaosOptions,
+    context: TicketDispatchContext<'_>,
 ) -> Result<(), VoomError> {
-    let source_file_version_id = FileVersionId(required_u64(payload, "source_file_version_id")?);
-    let source_location_id = optional_u64(payload, "source_location_id").map(FileLocationId);
-    let target = control
+    let source_file_version_id =
+        FileVersionId(required_u64(context.payload, "source_file_version_id")?);
+    let source_location_id =
+        optional_u64(context.payload, "source_location_id").map(FileLocationId);
+    let target = context
+        .control
         .resolve_policy_artifact_target(source_file_version_id, source_location_id)
         .await?;
     let input = PolicyVerifyArtifactInput {
         target,
-        worker_id,
-        ticket_id: ticket.id,
-        lease_id,
+        worker_id: context.worker_id,
+        ticket_id: context.ticket.id,
+        lease_id: context.lease_id,
     };
     let report = await_with_lease_heartbeats_without_runtime(
         LeaseHeartbeatContext {
-            control,
-            lease_id,
-            timing,
-            chaos,
+            control: context.control,
+            lease_id: context.lease_id,
+            timing: &context.options.timing,
+            chaos: &context.options.chaos,
         },
         OperationKind::VerifyArtifact,
         verify_policy_artifact_with_dispatcher(
-            control,
+            context.control,
             &input,
             &BundledVerifyArtifactDispatcher,
             &NoVerifyArtifactHooks,
@@ -53,28 +51,38 @@ pub(super) async fn dispatch_policy_verify_artifact(
     )
     .await?;
     if report.status == ArtifactVerificationStatus::Succeeded {
+        let result = PolicyVerificationTicketResult {
+            source_file_version_id: input.target.file_version_id,
+            source_location_id: input.target.file_location_id,
+            source_media_snapshot_id: input.target.media_snapshot_id,
+            artifact_handle_id: report.artifact_handle_id,
+            artifact_location_id: report.artifact_location_id,
+            artifact_verification_id: report.verification_id,
+            status: PolicyVerificationTicketStatus::Verified,
+            path: report.path.to_string_lossy().into_owned(),
+            expected_size_bytes: report.expected_size_bytes,
+            expected_checksum: report.expected_checksum,
+            observed_size_bytes: report.observed_size_bytes,
+            observed_checksum: report.observed_checksum,
+        };
         return release_lease_with_retry(
-            control,
-            lease_id,
-            json!({
-                "source_file_version_id": input.target.file_version_id,
-                "source_location_id": input.target.file_location_id,
-                "source_media_snapshot_id": input.target.media_snapshot_id,
-                "artifact_handle_id": report.artifact_handle_id,
-                "artifact_location_id": report.artifact_location_id,
-                "artifact_verification_id": report.verification_id,
-                "status": "verified",
-                "expected_size_bytes": report.expected_size_bytes,
-                "expected_checksum": report.expected_checksum,
-                "observed_size_bytes": report.observed_size_bytes,
-                "observed_checksum": report.observed_checksum,
-            }),
+            context.control,
+            context.lease_id,
+            to_value(result).map_err(|error| {
+                VoomError::Internal(format!("policy verification ticket result encode: {error}"))
+            })?,
         )
         .await;
     }
 
     let source = verification_error(&report);
-    fail_lease_and_return(control, lease_id, failure_class_for_error(&source), source).await
+    fail_lease_and_return(
+        context.control,
+        context.lease_id,
+        failure_class_for_error(&source),
+        source,
+    )
+    .await
 }
 
 fn verification_error(report: &crate::artifact::VerifyArtifactReport) -> VoomError {
@@ -90,15 +98,4 @@ fn verification_error(report: &crate::artifact::VerifyArtifactReport) -> VoomErr
         Some(ErrorCode::WorkerCrash) => VoomError::WorkerCrash(message),
         _ => VoomError::VerificationFailure(message),
     }
-}
-
-fn required_u64(payload: &Value, field: &str) -> Result<u64, VoomError> {
-    payload
-        .get(field)
-        .and_then(Value::as_u64)
-        .ok_or_else(|| VoomError::Config(format!("workflow payload missing `{field}`")))
-}
-
-fn optional_u64(payload: &Value, field: &str) -> Option<u64> {
-    payload.get(field).and_then(Value::as_u64)
 }

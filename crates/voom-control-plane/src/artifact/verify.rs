@@ -191,39 +191,19 @@ pub(crate) async fn verify_artifact_with_dispatcher(
         .await
         .map_or_else(VerifyOutcome::Failed, VerifyOutcome::Succeeded);
 
-    hooks
-        .before_persist(
-            cp,
-            VerifyArtifactPersistContext {
-                artifact_handle_id: input.artifact_handle_id,
-                artifact_location_id: location.id,
-                worker_id,
-                path: &path,
-                location_kind: "staging",
-                require_only_live_kind: true,
-                workflow_ticket_id: None,
-                workflow_lease_id: None,
-            },
-        )
-        .await?;
+    let context = VerifyArtifactPersistContext {
+        artifact_handle_id: input.artifact_handle_id,
+        artifact_location_id: location.id,
+        worker_id,
+        path: &path,
+        location_kind: "staging",
+        require_only_live_kind: true,
+        workflow_ticket_id: None,
+        workflow_lease_id: None,
+    };
+    hooks.before_persist(cp, context).await?;
 
-    persist_verification_outcome(
-        cp,
-        VerifyArtifactPersistContext {
-            artifact_handle_id: input.artifact_handle_id,
-            artifact_location_id: location.id,
-            worker_id,
-            path: &path,
-            location_kind: "staging",
-            require_only_live_kind: true,
-            workflow_ticket_id: None,
-            workflow_lease_id: None,
-        },
-        expected,
-        outcome,
-        hooks,
-    )
-    .await
+    persist_verification_outcome(cp, context, expected, outcome, hooks).await
 }
 
 pub(crate) async fn verify_policy_artifact_with_dispatcher(
@@ -496,24 +476,7 @@ async fn persist_verification_outcome(
     append_terminal_event(cp, &mut tx, &verification, &outcome, now, context).await?;
     commit_tx(tx).await?;
 
-    Ok(VerifyArtifactReport {
-        artifact_handle_id: context.artifact_handle_id,
-        artifact_location_id: context.artifact_location_id,
-        verification_id: verification.id,
-        worker_id: context.worker_id,
-        status: verification.status,
-        path: PathBuf::from(context.path),
-        expected_size_bytes: expected.size_bytes,
-        expected_checksum: expected.checksum,
-        observed_size_bytes: verification.observed_size_bytes,
-        observed_checksum: verification.observed_checksum,
-        error_code: verification
-            .error_code
-            .as_deref()
-            .map(parse_error_code)
-            .transpose()?,
-        message: verification.message,
-    })
+    report_from_verification(verification)
 }
 
 async fn revalidate_selected_live_location(

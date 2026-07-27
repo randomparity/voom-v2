@@ -723,6 +723,12 @@ impl SqliteArtifactRepo {
         tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
         input: NewArtifactVerification,
     ) -> Result<ArtifactVerification, VoomError> {
+        if input.workflow_ticket_id.is_some() != input.workflow_lease_id.is_some() {
+            return Err(VoomError::Config(
+                "artifact_verifications workflow ticket and lease must be both set or both absent"
+                    .to_owned(),
+            ));
+        }
         let owner: Option<(i64, String)> =
             sqlx::query_as("SELECT artifact_handle_id, value FROM artifact_locations WHERE id = ?")
                 .bind(i64_from_u64(input.artifact_location_id.0))

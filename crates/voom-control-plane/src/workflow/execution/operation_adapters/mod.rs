@@ -21,19 +21,8 @@ pub(super) async fn dispatch_control_plane_ticket(
     context: TicketDispatchContext<'_>,
 ) -> Option<Result<(), VoomError>> {
     context.payload.get("source_file_version_id")?;
-    if context.operation == OperationKind::VerifyArtifact {
-        return Some(
-            policy_verify::dispatch_policy_verify_artifact(
-                context.control,
-                context.ticket,
-                context.worker_id,
-                context.lease_id,
-                context.payload,
-                &context.options.timing,
-                &context.options.chaos,
-            )
-            .await,
-        );
+    if uses_bundled_policy_verification(context.operation, context.payload) {
+        return Some(policy_verify::dispatch_policy_verify_artifact(context).await);
     }
     let Some(runtime) = context.runtime else {
         return Some(Err(VoomError::Config(format!(
@@ -79,6 +68,10 @@ pub(super) async fn dispatch_control_plane_ticket(
         ),
         _ => None,
     }
+}
+
+pub(super) fn uses_bundled_policy_verification(operation: OperationKind, payload: &Value) -> bool {
+    operation == OperationKind::VerifyArtifact && payload.get("source_file_version_id").is_some()
 }
 
 #[derive(Clone, Copy)]
@@ -211,13 +204,13 @@ pub(crate) fn workflow_idempotency_key(ticket_id: TicketId, lease_id: LeaseId) -
     format!("ticket-{}-lease-{}", ticket_id.0, lease_id.0)
 }
 
-fn required_u64(payload: &Value, field: &str) -> Result<u64, VoomError> {
+pub(super) fn required_u64(payload: &Value, field: &str) -> Result<u64, VoomError> {
     payload
         .get(field)
         .and_then(Value::as_u64)
         .ok_or_else(|| VoomError::Config(format!("workflow payload missing `{field}`")))
 }
 
-fn optional_u64(payload: &Value, field: &str) -> Option<u64> {
+pub(super) fn optional_u64(payload: &Value, field: &str) -> Option<u64> {
     payload.get(field).and_then(Value::as_u64)
 }

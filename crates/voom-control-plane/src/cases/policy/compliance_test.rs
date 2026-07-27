@@ -1201,8 +1201,8 @@ async fn resume_adopts_successful_evidence_missing_its_phase_row() {
         .execute(cp.pool_for_test())
         .await
         .unwrap();
-    let prior_ticket: (String, String) =
-        sqlx::query_as("SELECT state, payload FROM tickets WHERE job_id = ?")
+    let prior_ticket: (String, String, String) =
+        sqlx::query_as("SELECT state, payload, result FROM tickets WHERE job_id = ?")
             .bind(i64::try_from(prior_job_id.0).unwrap())
             .fetch_one(cp.pool_for_test())
             .await
@@ -1211,6 +1211,15 @@ async fn resume_adopts_successful_evidence_missing_its_phase_row() {
     assert_eq!(prior_ticket.0, "succeeded");
     assert_eq!(prior_payload["workflow_id"], "workflow-1-phase-0");
     assert_eq!(prior_payload["branch_id"], "root");
+
+    Box::pin(assert_corrupted_verification_result_rejected(
+        &cp,
+        prior_job_id,
+        policy.version.id,
+        input.input_set_id,
+        &prior_ticket.2,
+    ))
+    .await;
 
     let resumed = cp
         .resume_phase_barrier_with_runtimes(
@@ -1232,6 +1241,50 @@ async fn resume_adopts_successful_evidence_missing_its_phase_row() {
         .unwrap();
     assert_eq!(evidence_count, 1);
     assert_eq!(count(&cp, EventKind::ArtifactVerificationStarted).await, 1);
+}
+
+async fn assert_corrupted_verification_result_rejected(
+    cp: &crate::ControlPlane,
+    prior_job_id: voom_core::JobId,
+    policy_version_id: voom_core::PolicyVersionId,
+    input_set_id: voom_core::PolicyInputSetId,
+    original_result: &str,
+) {
+    sqlx::query(
+        "UPDATE tickets SET result = json_set(result, '$.path', '/wrong') WHERE job_id = ?",
+    )
+    .bind(i64::try_from(prior_job_id.0).unwrap())
+    .execute(cp.pool_for_test())
+    .await
+    .unwrap();
+    let corrupted = cp
+        .resume_phase_barrier_with_runtimes(
+            prior_job_id,
+            policy_version_id,
+            input_set_id,
+            super::ComplianceExecutionOptions::default(),
+            WorkerRuntimeRegistry::new(),
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        corrupted.source,
+        voom_core::VoomError::Conflict(_)
+    ));
+    let job_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM jobs")
+        .fetch_one(cp.pool_for_test())
+        .await
+        .unwrap();
+    assert_eq!(
+        job_count, 1,
+        "corrupt evidence must fail before opening a job"
+    );
+    sqlx::query("UPDATE tickets SET result = ? WHERE job_id = ?")
+        .bind(original_result)
+        .bind(i64::try_from(prior_job_id.0).unwrap())
+        .execute(cp.pool_for_test())
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
