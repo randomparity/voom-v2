@@ -139,10 +139,15 @@ fn assert_title_values(policy: &crate::CompiledPolicy, expected: &[&str]) {
         .iter()
         .map(|phase| {
             let [
-                crate::CompiledOperation::KeepTracks {
-                    filter: Some(crate::TrackFilter::TitleContains { value }),
-                    ..
-                },
+                crate::CompiledOperation::KeepTracks(
+                    crate::compiled::CompiledKeepTracksOperation {
+                        filter:
+                            Some(crate::TrackFilter::TitleContains(
+                                crate::compiled::TitleContainsTrackFilter { value },
+                            )),
+                        ..
+                    },
+                ),
             ] = phase.operations.as_slice()
             else {
                 unreachable!("expected one title-filtered keep operation");
