@@ -1,0 +1,54 @@
+{
+  "policy_name": "escaped-title-filter-boundaries",
+  "slug": "escaped-title-filter-boundaries",
+  "source_hash": "03fcaff76ec94729cbb436aebd2711cf52f0329c9aa4be168357c2a59a841e32",
+  "schema_version": 2,
+  "metadata": {},
+  "config": {},
+  "phases": [
+    {
+      "name": "terminal_escaped_backslash",
+      "depends_on": [],
+      "run_if": null,
+      "skip_if": null,
+      "on_error": null,
+      "operations": [
+        {
+          "type": "keep_tracks",
+          "target": "subtitle",
+          "filter": {
+            "type": "title_contains",
+            "value": "Path\\\\"
+          }
+        }
+      ]
+    },
+    {
+      "name": "escaped_unicode_scalar",
+      "depends_on": [],
+      "run_if": null,
+      "skip_if": null,
+      "on_error": null,
+      "operations": [
+        {
+          "type": "keep_tracks",
+          "target": "subtitle",
+          "filter": {
+            "type": "title_contains",
+            "value": "Caf\\é"
+          }
+        }
+      ]
+    }
+  ],
+  "phase_order": [
+    "terminal_escaped_backslash",
+    "escaped_unicode_scalar"
+  ],
+  "warnings": [],
+  "provenance": {
+    "compiler": "voom-policy",
+    "format": "sprint4-v2",
+    "flags": {}
+  }
+}
