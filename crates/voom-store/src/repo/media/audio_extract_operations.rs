@@ -246,20 +246,6 @@ impl SqliteAudioExtractOperationRepo {
         Self { pool }
     }
 
-    pub async fn get_by_key(
-        &self,
-        operation_key: &str,
-    ) -> Result<Option<AudioExtractOperationRecord>, VoomError> {
-        let mut tx = self.pool.begin().await.map_err(|error| {
-            VoomError::database_context("audio_extract_operations get begin", error)
-        })?;
-        let record = load_record_by_key(&mut tx, operation_key).await?;
-        tx.commit().await.map_err(|error| {
-            VoomError::database_context("audio_extract_operations get commit", error)
-        })?;
-        Ok(record)
-    }
-
     pub async fn get_exact_by_key(
         &self,
         input: &NewAudioExtractOperation,

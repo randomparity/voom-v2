@@ -380,7 +380,7 @@ async fn terminal_dispatch_advance_fences_stale_generation_completion() {
 
     let operation = fixture
         .repo
-        .get_by_key("extract:v1:key")
+        .get_exact_by_key(&fixture.operation(), &outputs())
         .await
         .unwrap()
         .unwrap();
