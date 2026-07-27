@@ -6,8 +6,8 @@ use sqlx::{Row, SqlitePool};
 use time::OffsetDateTime;
 use voom_core::ids::{ArtifactCommitRecordId, ArtifactVerificationId};
 use voom_core::{
-    ArtifactHandleId, ArtifactLocationId, FileAssetId, FileLocationId, FileVersionId, VoomError,
-    WorkerId,
+    ArtifactHandleId, ArtifactLocationId, FileAssetId, FileLocationId, FileVersionId, JobId,
+    LeaseId, MediaSnapshotId, TicketId, VoomError, WorkerId,
 };
 
 use super::Repository;
@@ -57,6 +57,25 @@ pub struct ArtifactLocation {
 }
 
 #[derive(Debug, Clone)]
+pub struct PolicyArtifactTarget {
+    pub artifact_handle_id: ArtifactHandleId,
+    pub artifact_location_id: ArtifactLocationId,
+    pub file_version_id: FileVersionId,
+    pub file_location_id: FileLocationId,
+    pub media_snapshot_id: MediaSnapshotId,
+    pub path: String,
+    pub size_bytes: u64,
+    pub checksum: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct PolicyArtifactResolution {
+    pub target: PolicyArtifactTarget,
+    pub created_handle: Option<ArtifactHandle>,
+    pub created_location: Option<ArtifactLocation>,
+}
+
+#[derive(Debug, Clone)]
 pub struct NewArtifactLineage {
     pub parent_artifact_id: ArtifactHandleId,
     pub child_artifact_id: ArtifactHandleId,
@@ -101,6 +120,8 @@ pub struct NewArtifactVerification {
     pub artifact_location_id: ArtifactLocationId,
     pub path: String,
     pub worker_id: WorkerId,
+    pub workflow_ticket_id: Option<TicketId>,
+    pub workflow_lease_id: Option<LeaseId>,
     pub status: ArtifactVerificationStatus,
     pub expected_size_bytes: u64,
     pub expected_checksum: String,
@@ -121,6 +142,8 @@ pub struct ArtifactVerification {
     pub artifact_location_id: ArtifactLocationId,
     pub path: String,
     pub worker_id: WorkerId,
+    pub workflow_ticket_id: Option<TicketId>,
+    pub workflow_lease_id: Option<LeaseId>,
     pub status: ArtifactVerificationStatus,
     pub expected_size_bytes: u64,
     pub expected_checksum: String,
@@ -295,6 +318,14 @@ pub trait ArtifactVerificationRepo: Repository {
     async fn list_verifications(
         &self,
         handle_id: ArtifactHandleId,
+    ) -> Result<Vec<ArtifactVerification>, VoomError>;
+    async fn verification_for_workflow_lease(
+        &self,
+        lease_id: LeaseId,
+    ) -> Result<Option<ArtifactVerification>, VoomError>;
+    async fn verifications_for_workflow_job(
+        &self,
+        job_id: JobId,
     ) -> Result<Vec<ArtifactVerification>, VoomError>;
 }
 
@@ -564,11 +595,140 @@ impl SqliteArtifactRepo {
         rows.iter().map(row_to_location).collect()
     }
 
+    pub async fn resolve_policy_artifact_target_in_tx(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        file_version_id: FileVersionId,
+        file_location_id: Option<FileLocationId>,
+        now: OffsetDateTime,
+    ) -> Result<PolicyArtifactResolution, VoomError> {
+        let version = require_active_policy_file_version(tx, file_version_id).await?;
+        let location = select_policy_file_location(tx, file_version_id, file_location_id).await?;
+        let media_snapshot_id = latest_policy_media_snapshot(tx, file_version_id).await?;
+        let (handle, created_handle) = self
+            .resolve_policy_artifact_handle(tx, &version, &location, now)
+            .await?;
+        let (artifact_location, created_location) = self
+            .resolve_policy_artifact_location(tx, handle.id, &location, now)
+            .await?;
+
+        Ok(PolicyArtifactResolution {
+            target: PolicyArtifactTarget {
+                artifact_handle_id: handle.id,
+                artifact_location_id: artifact_location.id,
+                file_version_id,
+                file_location_id: location.id,
+                media_snapshot_id,
+                path: location.value,
+                size_bytes: version.size_bytes,
+                checksum: version.content_hash,
+            },
+            created_handle,
+            created_location,
+        })
+    }
+
+    async fn resolve_policy_artifact_handle(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        version: &PolicyFileVersion,
+        location: &PolicyFileLocation,
+        now: OffsetDateTime,
+    ) -> Result<(ArtifactHandle, Option<ArtifactHandle>), VoomError> {
+        let committed = policy_committed_handles(tx, version.id).await?;
+        let handle = match committed.as_slice() {
+            [] => policy_canonical_handle(tx, version.id).await?,
+            [handle] => Some(handle.clone()),
+            _ => {
+                return Err(VoomError::Conflict(format!(
+                    "file_version {} has {} committed artifact handles",
+                    version.id,
+                    committed.len()
+                )));
+            }
+        };
+        if let Some(handle) = handle {
+            require_policy_handle_facts(tx, handle.id, version).await?;
+            return Ok((handle, None));
+        }
+
+        let handle = self
+            .create_handle_in_tx(
+                tx,
+                NewArtifactHandle {
+                    size_bytes: Some(i64_from_u64(version.size_bytes)),
+                    checksum: Some(version.content_hash.clone()),
+                    privacy_class: "internal".to_owned(),
+                    durability_class: "active".to_owned(),
+                    allowed_access_modes: vec!["local_path".to_owned()],
+                    mutability: "immutable".to_owned(),
+                    source_lineage: Some(serde_json::json!({
+                        "kind": "policy_verification",
+                        "file_version_id": version.id.0,
+                        "file_location_id": location.id.0,
+                    })),
+                    file_version_id: Some(version.id),
+                    created_at: now,
+                },
+            )
+            .await?;
+        Ok((handle.clone(), Some(handle)))
+    }
+
+    async fn resolve_policy_artifact_location(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        handle_id: ArtifactHandleId,
+        location: &PolicyFileLocation,
+        now: OffsetDateTime,
+    ) -> Result<(ArtifactLocation, Option<ArtifactLocation>), VoomError> {
+        let rows = sqlx::query(
+            "SELECT id, artifact_handle_id, kind, value, observed_at, retired_at \
+             FROM artifact_locations \
+             WHERE artifact_handle_id = ? AND kind = 'local_path' \
+               AND value = ? AND retired_at IS NULL \
+             ORDER BY id",
+        )
+        .bind(i64_from_u64(handle_id.0))
+        .bind(&location.value)
+        .fetch_all(&mut **tx)
+        .await
+        .map_err(|err| VoomError::database_context("policy artifact location lookup", err))?;
+        match rows.as_slice() {
+            [] => {
+                let created = self
+                    .record_location_in_tx(
+                        tx,
+                        NewArtifactLocation {
+                            artifact_handle_id: handle_id,
+                            kind: "local_path".to_owned(),
+                            value: location.value.clone(),
+                            observed_at: now,
+                        },
+                    )
+                    .await?;
+                Ok((created.clone(), Some(created)))
+            }
+            [row] => Ok((row_to_location(row)?, None)),
+            _ => Err(VoomError::Conflict(format!(
+                "artifact_handle {handle_id} has {} live local_path locations for {:?}",
+                rows.len(),
+                location.value
+            ))),
+        }
+    }
+
     pub async fn record_verification_in_tx(
         &self,
         tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
         input: NewArtifactVerification,
     ) -> Result<ArtifactVerification, VoomError> {
+        if input.workflow_ticket_id.is_some() != input.workflow_lease_id.is_some() {
+            return Err(VoomError::Config(
+                "artifact_verifications workflow ticket and lease must be both set or both absent"
+                    .to_owned(),
+            ));
+        }
         let owner: Option<(i64, String)> =
             sqlx::query_as("SELECT artifact_handle_id, value FROM artifact_locations WHERE id = ?")
                 .bind(i64_from_u64(input.artifact_location_id.0))
@@ -600,15 +760,18 @@ impl SqliteArtifactRepo {
         let finished_at = iso8601(input.finished_at)?;
         let res = sqlx::query(
             "INSERT INTO artifact_verifications \
-             (artifact_handle_id, artifact_location_id, path, worker_id, status, \
+             (artifact_handle_id, artifact_location_id, path, worker_id, \
+              workflow_ticket_id, workflow_lease_id, status, \
               expected_size_bytes, expected_checksum, observed_size_bytes, observed_checksum, \
               failure_class, error_code, message, report, started_at, finished_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(i64_from_u64(input.artifact_handle_id.0))
         .bind(i64_from_u64(input.artifact_location_id.0))
         .bind(&input.path)
         .bind(i64_from_u64(input.worker_id.0))
+        .bind(input.workflow_ticket_id.map(|id| i64_from_u64(id.0)))
+        .bind(input.workflow_lease_id.map(|id| i64_from_u64(id.0)))
         .bind(input.status.as_str())
         .bind(i64_from_u64(input.expected_size_bytes))
         .bind(&input.expected_checksum)
@@ -630,6 +793,8 @@ impl SqliteArtifactRepo {
             artifact_location_id: input.artifact_location_id,
             path: input.path,
             worker_id: input.worker_id,
+            workflow_ticket_id: input.workflow_ticket_id,
+            workflow_lease_id: input.workflow_lease_id,
             status: input.status,
             expected_size_bytes: input.expected_size_bytes,
             expected_checksum: input.expected_checksum,
@@ -678,6 +843,46 @@ impl SqliteArtifactRepo {
             .fetch_all(&self.pool)
             .await
             .map_err(|e| VoomError::database_context("artifact_verifications list", e))?;
+        rows.iter().map(row_to_verification).collect()
+    }
+
+    pub async fn verification_for_workflow_lease(
+        &self,
+        lease_id: LeaseId,
+    ) -> Result<Option<ArtifactVerification>, VoomError> {
+        let sql = SELECT_ARTIFACT_VERIFICATION_COLS.to_owned()
+            + " FROM artifact_verifications v WHERE v.workflow_lease_id = ?";
+        let row = sqlx::query(&sql)
+            .bind(i64_from_u64(lease_id.0))
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|err| {
+                VoomError::database_context("artifact_verifications workflow lease lookup", err)
+            })?;
+        row.as_ref().map(row_to_verification).transpose()
+    }
+
+    pub async fn verifications_for_workflow_job(
+        &self,
+        job_id: JobId,
+    ) -> Result<Vec<ArtifactVerification>, VoomError> {
+        let sql = SELECT_ARTIFACT_VERIFICATION_COLS.to_owned()
+            + " FROM artifact_verifications v \
+               WHERE v.workflow_ticket_id IN (SELECT id FROM tickets WHERE job_id = ?) \
+                  OR v.id IN ( \
+                      SELECT artifact_verification_id \
+                      FROM workflow_file_phase_summaries \
+                      WHERE job_id = ? AND artifact_verification_id IS NOT NULL \
+                  ) \
+               ORDER BY v.id";
+        let rows = sqlx::query(&sql)
+            .bind(i64_from_u64(job_id.0))
+            .bind(i64_from_u64(job_id.0))
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|err| {
+                VoomError::database_context("artifact_verifications workflow job lookup", err)
+            })?;
         rows.iter().map(row_to_verification).collect()
     }
 
@@ -1067,6 +1272,20 @@ impl ArtifactVerificationRepo for SqliteArtifactRepo {
     ) -> Result<Vec<ArtifactVerification>, VoomError> {
         SqliteArtifactRepo::list_verifications(self, handle_id).await
     }
+
+    async fn verification_for_workflow_lease(
+        &self,
+        lease_id: LeaseId,
+    ) -> Result<Option<ArtifactVerification>, VoomError> {
+        SqliteArtifactRepo::verification_for_workflow_lease(self, lease_id).await
+    }
+
+    async fn verifications_for_workflow_job(
+        &self,
+        job_id: JobId,
+    ) -> Result<Vec<ArtifactVerification>, VoomError> {
+        SqliteArtifactRepo::verifications_for_workflow_job(self, job_id).await
+    }
 }
 
 #[async_trait]
@@ -1150,7 +1369,8 @@ impl ArtifactCommitRepo for SqliteArtifactRepo {
 }
 
 const SELECT_ARTIFACT_VERIFICATION_COLS: &str = "SELECT v.id, v.artifact_handle_id, \
-    v.artifact_location_id, v.path, v.worker_id, v.status, v.expected_size_bytes, \
+    v.artifact_location_id, v.path, v.worker_id, v.workflow_ticket_id, v.workflow_lease_id, \
+    v.status, v.expected_size_bytes, \
     v.expected_checksum, v.observed_size_bytes, v.observed_checksum, v.failure_class, \
     v.error_code, v.message, v.report, v.started_at, v.finished_at";
 
@@ -1358,6 +1578,196 @@ fn is_unique_violation(err: &sqlx::Error) -> bool {
     }
 }
 
+#[derive(Debug)]
+struct PolicyFileVersion {
+    id: FileVersionId,
+    content_hash: String,
+    size_bytes: u64,
+}
+
+#[derive(Debug)]
+struct PolicyFileLocation {
+    id: FileLocationId,
+    value: String,
+}
+
+async fn require_active_policy_file_version(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    id: FileVersionId,
+) -> Result<PolicyFileVersion, VoomError> {
+    let row: Option<(i64, String, i64, i64)> = sqlx::query_as(
+        "SELECT v.id, v.content_hash, v.size_bytes, \
+                (SELECT MAX(current.id) FROM file_versions current \
+                 WHERE current.file_asset_id = v.file_asset_id \
+                   AND current.retired_at IS NULL) \
+         FROM file_versions v \
+         WHERE v.id = ? AND v.retired_at IS NULL",
+    )
+    .bind(i64_from_u64(id.0))
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(|err| VoomError::database_context("policy file version lookup", err))?;
+    let Some((row_id, content_hash, size_bytes, active_id)) = row else {
+        return Err(VoomError::NotFound(format!(
+            "active file_version {id} missing"
+        )));
+    };
+    if row_id != active_id {
+        return Err(VoomError::Conflict(format!(
+            "file_version {id} was superseded by {}",
+            FileVersionId(u64_from_i64(active_id))
+        )));
+    }
+    Ok(PolicyFileVersion {
+        id,
+        content_hash,
+        size_bytes: u64_from_i64(size_bytes),
+    })
+}
+
+async fn select_policy_file_location(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    version_id: FileVersionId,
+    selected_id: Option<FileLocationId>,
+) -> Result<PolicyFileLocation, VoomError> {
+    let mut rows: Vec<(i64, i64, String, String)> = if let Some(location_id) = selected_id {
+        sqlx::query_as(
+            "SELECT id, file_version_id, kind, value \
+             FROM file_locations \
+             WHERE id = ? AND retired_at IS NULL",
+        )
+        .bind(i64_from_u64(location_id.0))
+        .fetch_all(&mut **tx)
+        .await
+        .map_err(|err| VoomError::database_context("policy file location lookup", err))?
+    } else {
+        sqlx::query_as(
+            "SELECT id, file_version_id, kind, value \
+             FROM file_locations \
+             WHERE file_version_id = ? AND kind = 'local_path' \
+               AND retired_at IS NULL ORDER BY id",
+        )
+        .bind(i64_from_u64(version_id.0))
+        .fetch_all(&mut **tx)
+        .await
+        .map_err(|err| VoomError::database_context("policy local path lookup", err))?
+    };
+    let [row] = rows.as_mut_slice() else {
+        return Err(VoomError::Config(format!(
+            "file_version {version_id} must have exactly one selected live local_path; found {}",
+            rows.len()
+        )));
+    };
+    let location_id = FileLocationId(u64_from_i64(row.0));
+    if u64_from_i64(row.1) != version_id.0 {
+        return Err(VoomError::Conflict(format!(
+            "file_location {location_id} belongs to file_version {}, not {version_id}",
+            FileVersionId(u64_from_i64(row.1))
+        )));
+    }
+    if row.2 != "local_path" {
+        return Err(VoomError::Config(format!(
+            "file_location {location_id} must be kind local_path"
+        )));
+    }
+    Ok(PolicyFileLocation {
+        id: location_id,
+        value: std::mem::take(&mut row.3),
+    })
+}
+
+async fn latest_policy_media_snapshot(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    version_id: FileVersionId,
+) -> Result<MediaSnapshotId, VoomError> {
+    let id: Option<i64> =
+        sqlx::query_scalar("SELECT MAX(id) FROM media_snapshots WHERE file_version_id = ?")
+            .bind(i64_from_u64(version_id.0))
+            .fetch_one(&mut **tx)
+            .await
+            .map_err(|err| VoomError::database_context("policy media snapshot lookup", err))?;
+    id.map(|value| MediaSnapshotId(u64_from_i64(value)))
+        .ok_or_else(|| {
+            VoomError::Config(format!(
+                "file_version {version_id} has no media snapshot for verification"
+            ))
+        })
+}
+
+async fn policy_committed_handles(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    version_id: FileVersionId,
+) -> Result<Vec<ArtifactHandle>, VoomError> {
+    let rows = sqlx::query(
+        "SELECT h.id, h.file_version_id, h.privacy_class, h.durability_class, \
+                h.mutability, h.created_at \
+         FROM artifact_commit_records c \
+         JOIN artifact_handles h ON h.id = c.artifact_handle_id \
+         WHERE c.state = 'committed' AND c.result_file_version_id = ? \
+         ORDER BY h.id",
+    )
+    .bind(i64_from_u64(version_id.0))
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(|err| VoomError::database_context("policy committed artifact lookup", err))?;
+    rows.iter().map(row_to_handle).collect()
+}
+
+async fn policy_canonical_handle(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    version_id: FileVersionId,
+) -> Result<Option<ArtifactHandle>, VoomError> {
+    let rows = sqlx::query(
+        "SELECT id, file_version_id, privacy_class, durability_class, mutability, created_at \
+         FROM artifact_handles \
+         WHERE file_version_id = ? AND durability_class = 'active' \
+           AND json_extract(source_lineage, '$.kind') = 'policy_verification' \
+         ORDER BY id",
+    )
+    .bind(i64_from_u64(version_id.0))
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(|err| VoomError::database_context("policy canonical artifact lookup", err))?;
+    match rows.as_slice() {
+        [] => Ok(None),
+        [row] => row_to_handle(row).map(Some),
+        _ => Err(VoomError::Conflict(format!(
+            "file_version {version_id} has {} canonical verification handles",
+            rows.len()
+        ))),
+    }
+}
+
+async fn require_policy_handle_facts(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    handle_id: ArtifactHandleId,
+    version: &PolicyFileVersion,
+) -> Result<(), VoomError> {
+    let row: Option<(Option<i64>, Option<String>, Option<i64>)> = sqlx::query_as(
+        "SELECT size_bytes, checksum, file_version_id \
+         FROM artifact_handles WHERE id = ?",
+    )
+    .bind(i64_from_u64(handle_id.0))
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(|err| VoomError::database_context("policy artifact facts lookup", err))?;
+    let Some((size_bytes, checksum, file_version_id)) = row else {
+        return Err(VoomError::NotFound(format!(
+            "artifact_handle {handle_id} missing"
+        )));
+    };
+    if size_bytes != Some(i64_from_u64(version.size_bytes))
+        || checksum.as_deref() != Some(version.content_hash.as_str())
+        || file_version_id.map(u64_from_i64) != Some(version.id.0)
+    {
+        return Err(VoomError::Conflict(format!(
+            "artifact_handle {handle_id} facts do not match file_version {}",
+            version.id
+        )));
+    }
+    Ok(())
+}
+
 fn row_to_handle(row: &sqlx::sqlite::SqliteRow) -> Result<ArtifactHandle, VoomError> {
     let id: i64 = row
         .try_get("id")
@@ -1403,6 +1813,12 @@ fn row_to_verification(row: &sqlx::sqlite::SqliteRow) -> Result<ArtifactVerifica
     let worker_id: i64 = row
         .try_get("worker_id")
         .map_err(|e| map_row_err("artifact_verifications", &e))?;
+    let workflow_ticket_id: Option<i64> = row
+        .try_get("workflow_ticket_id")
+        .map_err(|e| map_row_err("artifact_verifications", &e))?;
+    let workflow_lease_id: Option<i64> = row
+        .try_get("workflow_lease_id")
+        .map_err(|e| map_row_err("artifact_verifications", &e))?;
     let status: String = row
         .try_get("status")
         .map_err(|e| map_row_err("artifact_verifications", &e))?;
@@ -1443,6 +1859,8 @@ fn row_to_verification(row: &sqlx::sqlite::SqliteRow) -> Result<ArtifactVerifica
         artifact_location_id: ArtifactLocationId(u64_from_i64(artifact_location_id)),
         path,
         worker_id: WorkerId(u64_from_i64(worker_id)),
+        workflow_ticket_id: workflow_ticket_id.map(|id| TicketId(u64_from_i64(id))),
+        workflow_lease_id: workflow_lease_id.map(|id| LeaseId(u64_from_i64(id))),
         status: ArtifactVerificationStatus::parse(&status)?,
         expected_size_bytes: u64_from_i64(expected_size_bytes),
         expected_checksum,

@@ -1,4 +1,30 @@
-use voom_core::VoomError;
+use voom_core::ids::ArtifactVerificationId;
+use voom_core::{
+    ArtifactHandleId, ArtifactLocationId, FileLocationId, FileVersionId, MediaSnapshotId, VoomError,
+};
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PolicyVerificationTicketResult {
+    pub(crate) source_file_version_id: FileVersionId,
+    pub(crate) source_location_id: FileLocationId,
+    pub(crate) source_media_snapshot_id: MediaSnapshotId,
+    pub(crate) artifact_handle_id: ArtifactHandleId,
+    pub(crate) artifact_location_id: ArtifactLocationId,
+    pub(crate) artifact_verification_id: ArtifactVerificationId,
+    pub(crate) status: PolicyVerificationTicketStatus,
+    pub(crate) path: String,
+    pub(crate) expected_size_bytes: u64,
+    pub(crate) expected_checksum: String,
+    pub(crate) observed_size_bytes: Option<u64>,
+    pub(crate) observed_checksum: Option<String>,
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum PolicyVerificationTicketStatus {
+    Verified,
+}
 
 #[derive(Debug)]
 pub(crate) enum OrderedTicketResult {

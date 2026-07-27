@@ -339,6 +339,8 @@ pub struct ComplianceExecuteData {
     pub phases: Vec<PhaseSummaryView>,
     pub file_phases: Vec<FilePhaseSummaryView>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub artifact_verifications: Vec<ArtifactVerificationView>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub audio_extract_outputs: Vec<ComplianceAudioExtractOutput>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub audio_synthesis_companions: Vec<ComplianceAudioSynthesisCompanion>,
@@ -352,6 +354,7 @@ impl ComplianceExecuteData {
         outcome: &crate::workflow::coordinator::CoordinatorOutcome,
         audio_extract_outputs: Vec<ComplianceAudioExtractOutput>,
         audio_synthesis_companions: Vec<ComplianceAudioSynthesisCompanion>,
+        artifact_verifications: Vec<ArtifactVerificationView>,
     ) -> Self {
         let phases: Vec<PhaseSummaryView> =
             outcome.phases.iter().map(PhaseSummaryView::from).collect();
@@ -366,6 +369,7 @@ impl ComplianceExecuteData {
             summary: WorkflowSummaryView::from_summary(&outcome.summary, &file_phases),
             phases,
             file_phases,
+            artifact_verifications,
             audio_extract_outputs,
             audio_synthesis_companions,
             latest_phase_index,
@@ -453,7 +457,7 @@ fn progress_counts(file_phases: &[FilePhaseSummaryView]) -> ProgressCountsView {
     };
     for (_, outcome) in latest.values() {
         match *outcome {
-            "committed" => counts.completed += 1,
+            "committed" | "verified" => counts.completed += 1,
             "blocked" => counts.failed += 1,
             "skipped" => counts.skipped += 1,
             _ => {}
@@ -505,6 +509,8 @@ pub struct FilePhaseSummaryView {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub artifact_handle_id: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub artifact_verification_id: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub reprobe_snapshot_id: Option<u64>,
 }
 
@@ -518,7 +524,49 @@ impl From<&voom_store::repo::workflow_summaries::FilePhaseSummary> for FilePhase
             produced_file_version_id: file_phase.produced_file_version_id.map(|id| id.0),
             produced_file_location_id: file_phase.produced_file_location_id.map(|id| id.0),
             artifact_handle_id: file_phase.artifact_handle_id.map(|id| id.0),
+            artifact_verification_id: file_phase.artifact_verification_id.map(|id| id.0),
             reprobe_snapshot_id: file_phase.reprobe_snapshot_id.map(|id| id.0),
+        }
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ArtifactVerificationView {
+    pub verification_id: u64,
+    pub ticket_id: Option<u64>,
+    pub lease_id: Option<u64>,
+    pub artifact_handle_id: u64,
+    pub artifact_location_id: u64,
+    pub worker_id: u64,
+    pub status: &'static str,
+    pub path: String,
+    pub expected_size_bytes: u64,
+    pub expected_checksum: String,
+    pub observed_size_bytes: Option<u64>,
+    pub observed_checksum: Option<String>,
+    pub failure_class: Option<String>,
+    pub error_code: Option<String>,
+    pub message: Option<String>,
+}
+
+impl From<voom_store::repo::artifacts::ArtifactVerification> for ArtifactVerificationView {
+    fn from(value: voom_store::repo::artifacts::ArtifactVerification) -> Self {
+        Self {
+            verification_id: value.id.0,
+            ticket_id: value.workflow_ticket_id.map(|id| id.0),
+            lease_id: value.workflow_lease_id.map(|id| id.0),
+            artifact_handle_id: value.artifact_handle_id.0,
+            artifact_location_id: value.artifact_location_id.0,
+            worker_id: value.worker_id.0,
+            status: value.status.as_str(),
+            path: value.path,
+            expected_size_bytes: value.expected_size_bytes,
+            expected_checksum: value.expected_checksum,
+            observed_size_bytes: value.observed_size_bytes,
+            observed_checksum: value.observed_checksum,
+            failure_class: value.failure_class,
+            error_code: value.error_code,
+            message: value.message,
         }
     }
 }
@@ -694,6 +742,8 @@ pub struct ComplianceRunReportData {
     pub summary: WorkflowSummaryView,
     pub phases: Vec<PhaseSummaryView>,
     pub file_phases: Vec<FilePhaseSummaryView>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub artifact_verifications: Vec<ArtifactVerificationView>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub audio_extract_outputs: Vec<ComplianceAudioExtractOutput>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -1033,8 +1083,16 @@ impl ControlPlane {
                     .audio_synthesis_companions_for_job(outcome.job_id)
                     .await
                     .map_err(no_partial)?;
+                let artifact_verifications = self
+                    .artifact_verifications_for_job(outcome.job_id)
+                    .await
+                    .map_err(no_partial)?;
                 Ok(ComplianceExecuteData::from_outcome(
-                    issues, &outcome, outputs, companions,
+                    issues,
+                    &outcome,
+                    outputs,
+                    companions,
+                    artifact_verifications,
                 ))
             }
             Err(err) => {
@@ -1047,8 +1105,16 @@ impl ControlPlane {
                         .audio_synthesis_companions_for_job(outcome.job_id)
                         .await
                         .map_err(no_partial)?;
+                    let artifact_verifications = self
+                        .artifact_verifications_for_job(outcome.job_id)
+                        .await
+                        .map_err(no_partial)?;
                     Some(ComplianceExecuteData::from_outcome(
-                        issues, &outcome, outputs, companions,
+                        issues,
+                        &outcome,
+                        outputs,
+                        companions,
+                        artifact_verifications,
                     ))
                 } else {
                     None
@@ -1332,15 +1398,30 @@ impl ControlPlane {
             .collect();
         let audio_extract_outputs = self.audio_extract_outputs_for_job(job_id).await?;
         let audio_synthesis_companions = self.audio_synthesis_companions_for_job(job_id).await?;
+        let artifact_verifications = self.artifact_verifications_for_job(job_id).await?;
         let latest_phase_index = latest_phase_index(&phases);
         Ok(ComplianceRunReportData {
             summary: WorkflowSummaryView::from_summary(&summary, &file_phases),
             phases,
             file_phases,
+            artifact_verifications,
             audio_extract_outputs,
             audio_synthesis_companions,
             latest_phase_index,
         })
+    }
+
+    async fn artifact_verifications_for_job(
+        &self,
+        job_id: voom_core::JobId,
+    ) -> Result<Vec<ArtifactVerificationView>, VoomError> {
+        Ok(self
+            .artifacts
+            .verifications_for_workflow_job(job_id)
+            .await?
+            .into_iter()
+            .map(ArtifactVerificationView::from)
+            .collect())
     }
 
     async fn audio_extract_outputs_for_job(
@@ -1412,9 +1493,9 @@ fn no_partial(source: VoomError) -> ComplianceExecuteError {
 /// `run-local --kind` value that starts a worker for it. Operations with no
 /// `run-local`-startable worker (metadata edits, container set, conditionals)
 /// return `None`: the coordinator handles them without a separately-launched
-/// runtime. `verify_artifact` also returns `None` — the verify worker is not
-/// `run-local`-startable and verification runs inside the staged-commit flow;
-/// wiring its policy-driven dispatch is deferred to T19 (#288).
+/// runtime. `verify_artifact` also returns `None`: the coordinator launches its
+/// bundled worker through the ticket's explicit policy-verification adapter,
+/// rather than through the generic `run-local` HTTP runtime.
 fn policy_worker_requirement(kind: PlanOperationKind) -> Option<(&'static str, &'static str)> {
     match kind {
         PlanOperationKind::Remux => Some(("remux", "mkvtoolnix")),

@@ -35,7 +35,7 @@ use voom_store::repo::workflow_summaries::{
 use crate::ControlPlane;
 use crate::cases::policy::compliance::{ComplianceExecutionOptions, PromotionPlan};
 use crate::cases::policy::plans::plan_compiled_policy_with_input;
-use crate::cases::{begin_tx, commit_tx};
+use crate::cases::{begin_immediate_tx, begin_tx, commit_tx};
 
 use super::execution::WorkerRuntimeRegistry;
 use super::execution::executor::{
@@ -143,10 +143,15 @@ fn phase_gate_admission(
             match (gate.trigger, outcome) {
                 (
                     voom_policy::RunIfTrigger::Completed,
-                    FilePhaseOutcome::Committed | FilePhaseOutcome::Skipped,
+                    FilePhaseOutcome::Committed
+                    | FilePhaseOutcome::Verified
+                    | FilePhaseOutcome::Skipped,
                 )
                 | (voom_policy::RunIfTrigger::Modified, FilePhaseOutcome::Committed) => Ok(true),
-                (voom_policy::RunIfTrigger::Modified, FilePhaseOutcome::Skipped) => Ok(false),
+                (
+                    voom_policy::RunIfTrigger::Modified,
+                    FilePhaseOutcome::Verified | FilePhaseOutcome::Skipped,
+                ) => Ok(false),
                 (
                     voom_policy::RunIfTrigger::Completed | voom_policy::RunIfTrigger::Modified,
                     FilePhaseOutcome::Blocked,
@@ -932,6 +937,7 @@ impl ControlPlane {
         let mut policy = self.compiled_policy_for_version(&inputs.version).await?;
         reject_unpublished_on_error(&policy)?;
         self.preflight_policy_tools(&mut policy, runtimes).await?;
+        self.ensure_policy_verifier(&policy).await?;
         let stored = self
             .resolve_stored_planning_input(&policy, inputs.input)
             .await?;
@@ -959,6 +965,24 @@ impl ControlPlane {
                 files,
             },
         ))
+    }
+
+    async fn ensure_policy_verifier(
+        &self,
+        policy: &voom_policy::CompiledPolicy,
+    ) -> Result<(), VoomError> {
+        let needs_verifier = policy.phases.iter().any(|phase| {
+            phase.operations.iter().any(|operation| {
+                matches!(operation, voom_policy::CompiledOperation::VerifyArtifact(_))
+            })
+        });
+        if !needs_verifier {
+            return Ok(());
+        }
+        let mut tx = begin_immediate_tx(&self.pool).await?;
+        crate::artifact::bootstrap::ensure_builtin_verify_artifact_worker_in_tx(self, &mut tx)
+            .await?;
+        commit_tx(tx).await
     }
 
     /// Open the owned workflow job, run the supplied in-job phase-barrier work,
@@ -1008,8 +1032,12 @@ impl ControlPlane {
                 self.workflow_summaries
                     .upsert_file_phase_summary_in_tx(
                         &mut tx,
-                        seed.produced
-                            .committed_seed(job.id, seed.phase_ordinal, seed.branch_id),
+                        seed.produced.seed(
+                            job.id,
+                            seed.phase_ordinal,
+                            seed.branch_id,
+                            seed.outcome,
+                        ),
                         now,
                     )
                     .await?,

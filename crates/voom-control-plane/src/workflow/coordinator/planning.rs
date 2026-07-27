@@ -47,14 +47,21 @@ pub(super) fn phase_outcome(file_outcomes: &[FilePhaseOutcome]) -> PhaseOutcome 
     if file_outcomes.is_empty() {
         return PhaseOutcome::Skipped;
     }
-    let any_committed = file_outcomes.contains(&FilePhaseOutcome::Committed);
+    let any_completed = file_outcomes.iter().any(|outcome| {
+        matches!(
+            outcome,
+            FilePhaseOutcome::Committed | FilePhaseOutcome::Verified
+        )
+    });
     let any_blocked = file_outcomes.contains(&FilePhaseOutcome::Blocked);
-    if file_outcomes
-        .iter()
-        .all(|outcome| *outcome == FilePhaseOutcome::Committed)
-    {
+    if file_outcomes.iter().all(|outcome| {
+        matches!(
+            outcome,
+            FilePhaseOutcome::Committed | FilePhaseOutcome::Verified
+        )
+    }) {
         PhaseOutcome::Completed
-    } else if any_committed {
+    } else if any_completed {
         PhaseOutcome::PartiallyCommitted
     } else if any_blocked {
         PhaseOutcome::Blocked

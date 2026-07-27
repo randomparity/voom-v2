@@ -107,6 +107,11 @@ const MIGRATION_0024_SQL: &str =
 const MIGRATION_0025_SQL: &str =
     include_str!("../../../migrations/0025_recoverable_audio_synthesis.sql");
 
+/// SQL for migration 0026 (policy-driven artifact verification, #334),
+/// embedded at compile time.
+const MIGRATION_0026_SQL: &str =
+    include_str!("../../../migrations/0026_policy_artifact_verification.sql");
+
 /// Embedded migration set, constructed without the `sqlx::migrate!` macro.
 ///
 /// We don't use sqlx's `macros` feature: it pulls `sqlx-macros-core`, which
@@ -295,6 +300,13 @@ pub static MIGRATOR: LazyLock<Migrator> = LazyLock::new(|| Migrator {
             Cow::Borrowed("recoverable_audio_synthesis"),
             MigrationType::Simple,
             Cow::Borrowed(MIGRATION_0025_SQL),
+            false,
+        ),
+        Migration::new(
+            26,
+            Cow::Borrowed("policy_artifact_verification"),
+            MigrationType::Simple,
+            Cow::Borrowed(MIGRATION_0026_SQL),
             false,
         ),
     ]),

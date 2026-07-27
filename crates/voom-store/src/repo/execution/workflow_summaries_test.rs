@@ -1,6 +1,7 @@
 use serde_json::json;
 use std::time::Duration;
 use time::OffsetDateTime;
+use voom_core::ids::ArtifactVerificationId;
 use voom_core::{
     ArtifactHandleId, FileLocationId, FileVersionId, JobId, MediaSnapshotId, TicketId,
 };
@@ -94,8 +95,24 @@ fn committed_file_phase(branch_id: &str) -> NewFilePhaseSummary {
         produced_file_version_id: Some(FileVersionId(1)),
         produced_file_location_id: Some(FileLocationId(1)),
         artifact_handle_id: Some(ArtifactHandleId(1)),
+        artifact_verification_id: None,
         reprobe_snapshot_id: Some(MediaSnapshotId(1)),
         outcome: FilePhaseOutcome::Committed,
+    }
+}
+
+fn verified_file_phase(branch_id: &str) -> NewFilePhaseSummary {
+    NewFilePhaseSummary {
+        job_id: JOB,
+        phase_ordinal: 0,
+        branch_id: branch_id.to_owned(),
+        ticket_ids: vec![TicketId(1)],
+        produced_file_version_id: Some(FileVersionId(1)),
+        produced_file_location_id: Some(FileLocationId(1)),
+        artifact_handle_id: Some(ArtifactHandleId(1)),
+        artifact_verification_id: Some(ArtifactVerificationId(1)),
+        reprobe_snapshot_id: Some(MediaSnapshotId(1)),
+        outcome: FilePhaseOutcome::Verified,
     }
 }
 
@@ -337,8 +354,69 @@ async fn file_phase_summary_links_artifacts() {
     assert_eq!(got.produced_file_version_id, Some(FileVersionId(1)));
     assert_eq!(got.produced_file_location_id, Some(FileLocationId(1)));
     assert_eq!(got.artifact_handle_id, Some(ArtifactHandleId(1)));
+    assert_eq!(got.artifact_verification_id, None);
     assert_eq!(got.reprobe_snapshot_id, Some(MediaSnapshotId(1)));
     assert_eq!(got.outcome, FilePhaseOutcome::Committed);
+}
+
+#[tokio::test]
+async fn verified_file_phase_links_unchanged_file_and_exact_evidence() {
+    let (repo, _tmp) = repo().await;
+    seed_verification(&repo.pool).await;
+
+    let inserted = repo
+        .upsert_file_phase_summary(verified_file_phase("verified"), T0)
+        .await
+        .unwrap();
+
+    assert_eq!(inserted.outcome, FilePhaseOutcome::Verified);
+    assert_eq!(
+        inserted.artifact_verification_id,
+        Some(ArtifactVerificationId(1))
+    );
+    assert_eq!(inserted.produced_file_version_id, Some(FileVersionId(1)));
+}
+
+#[tokio::test]
+async fn verified_file_phase_requires_exact_evidence() {
+    let (repo, _tmp) = repo().await;
+    let mut input = verified_file_phase("missing-evidence");
+    input.artifact_verification_id = None;
+
+    let error = repo.upsert_file_phase_summary(input, T0).await.unwrap_err();
+
+    assert!(matches!(error, voom_core::VoomError::Database { .. }));
+}
+
+async fn seed_verification(pool: &sqlx::SqlitePool) {
+    sqlx::query(
+        "INSERT INTO workers \
+         (id, name, kind, status, registered_at, last_seen_at) \
+         VALUES (1, 'verify', 'local', 'registered', \
+         '1970-01-01T00:00:00Z', '1970-01-01T00:00:00Z')",
+    )
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO artifact_locations \
+         (id, artifact_handle_id, kind, value, observed_at) \
+         VALUES (1, 1, 'local_path', '/media/1.mkv', '1970-01-01T00:00:00Z')",
+    )
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO artifact_verifications \
+         (id, artifact_handle_id, artifact_location_id, path, worker_id, status, \
+          expected_size_bytes, expected_checksum, observed_size_bytes, observed_checksum, \
+          report, started_at, finished_at) \
+         VALUES (1, 1, 1, '/media/1.mkv', 1, 'succeeded', 100, 'hash-1', 100, \
+         'hash-1', '{}', '1970-01-01T00:00:00Z', '1970-01-01T00:00:00Z')",
+    )
+    .execute(pool)
+    .await
+    .unwrap();
 }
 
 #[tokio::test]
@@ -429,6 +507,7 @@ async fn file_phase_upsert_is_first_write_wins() {
         produced_file_version_id: None,
         produced_file_location_id: None,
         artifact_handle_id: None,
+        artifact_verification_id: None,
         reprobe_snapshot_id: None,
         ..committed_file_phase("a")
     };

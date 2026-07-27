@@ -16,7 +16,7 @@ use super::leases::{
     fail_if_watchdog_elapsed, fail_lease_and_return, failure_class_for_error,
     heartbeat_workflow_lease, release_lease_with_retry,
 };
-use super::operation_adapters::dispatch_control_plane_ticket;
+use super::operation_adapters::{TicketDispatchContext, dispatch_control_plane_ticket};
 use super::runtime::WorkerRuntime;
 use crate::ControlPlane;
 use crate::workflow::plan::ticket_payload::WorkflowTicketPayload;
@@ -37,17 +37,18 @@ pub(super) enum DispatchTerminal {
 
 pub(super) async fn dispatch_ticket(
     control: ControlPlane,
-    runtime: WorkerRuntime,
+    worker_id: WorkerId,
+    runtime: Option<WorkerRuntime>,
     ticket: Ticket,
     workflow_payload: WorkflowTicketPayload,
     lease_id: LeaseId,
     options: WorkflowDispatchOptions,
 ) -> DispatchOutcome {
-    let worker_id = runtime.credentials.worker_id;
     let operation = workflow_payload.operation;
     let terminal = match dispatch_ticket_inner(
         &control,
-        &runtime,
+        runtime.as_ref(),
+        worker_id,
         &ticket,
         &workflow_payload,
         lease_id,
@@ -68,7 +69,8 @@ pub(super) async fn dispatch_ticket(
 
 async fn dispatch_ticket_inner(
     control: &ControlPlane,
-    runtime: &WorkerRuntime,
+    runtime: Option<&WorkerRuntime>,
+    worker_id: WorkerId,
     ticket: &Ticket,
     workflow_payload: &WorkflowTicketPayload,
     lease_id: LeaseId,
@@ -76,19 +78,22 @@ async fn dispatch_ticket_inner(
 ) -> Result<(), VoomError> {
     let mut payload = workflow_payload.rendered_payload.clone();
     apply_chaos_payload_override(&mut payload, workflow_payload.operation, &options.chaos)?;
-    if let Some(result) = dispatch_control_plane_ticket(
+    if let Some(result) = dispatch_control_plane_ticket(TicketDispatchContext {
         control,
         runtime,
+        worker_id,
         ticket,
-        workflow_payload.operation,
+        operation: workflow_payload.operation,
         lease_id,
-        &payload,
-        &options,
-    )
+        payload: &payload,
+        options: &options,
+    })
     .await
     {
         return result;
     }
+    let runtime = runtime
+        .ok_or_else(|| VoomError::Config(format!("missing runtime for worker {worker_id}")))?;
     let request = OperationRequest {
         operation: workflow_payload.operation,
         lease_id,

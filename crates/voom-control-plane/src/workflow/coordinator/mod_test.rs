@@ -1227,6 +1227,7 @@ async fn record_file_phase(
                 produced_file_version_id: produced.0,
                 produced_file_location_id: produced.1,
                 artifact_handle_id: None,
+                artifact_verification_id: None,
                 reprobe_snapshot_id: produced.2,
                 outcome,
             },

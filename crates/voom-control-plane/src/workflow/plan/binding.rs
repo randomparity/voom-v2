@@ -250,6 +250,22 @@ pub fn render_policy_extract_audio_payload(
     )
 }
 
+pub fn render_policy_verify_artifact_payload(
+    source: PolicyFileSource,
+    timing: EffectiveTiming,
+) -> Result<Value, BindingError> {
+    let mut payload = json!({
+        "operation": "verify_artifact",
+        "duration_ms": timing.duration_ms,
+        "progress_interval_ms": timing.progress_interval_ms,
+    });
+    let Some(object) = payload.as_object_mut() else {
+        return Err(BindingError::new("rendered payload must be a JSON object"));
+    };
+    insert_policy_file_source(object, source);
+    Ok(payload)
+}
+
 fn render_policy_audio_payload(
     source: PolicyFileSource,
     operation_payload: &Value,

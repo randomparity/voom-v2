@@ -9,6 +9,7 @@ use voom_policy::{FixtureName, load_fixture, load_policy_fixture};
 use voom_store::repo::identity::{DiscoveredFile, FileLocationKind, IngestOutcome};
 use voom_store::repo::tickets::NewTicket;
 use voom_store::repo::workers::{NewCapability, NewGrant, NewWorker, WorkerKind};
+use voom_test_support::worker::cargo_bin_or_build;
 
 use crate::cases::policy::policy_inputs::PolicyInputFromScanInput;
 use crate::cases::{count, cp, transcodable_input};
@@ -31,6 +32,7 @@ fn file_phase_view(
         produced_file_version_id: None,
         produced_file_location_id: None,
         artifact_handle_id: None,
+        artifact_verification_id: None,
         reprobe_snapshot_id: None,
     }
 }
@@ -887,6 +889,422 @@ async fn execute_reports_actionable_error_when_no_live_worker_for_remux() {
 }
 
 #[tokio::test]
+async fn compliance_execute_verifies_existing_active_artifact_through_bundled_worker() {
+    ensure_policy_verify_worker();
+    let (cp, _tmp) = cp().await;
+    let media_dir = tempfile::tempdir().unwrap();
+    let media_path = media_dir.path().join("movie.mkv");
+    tokio::fs::write(&media_path, b"published policy verification")
+        .await
+        .unwrap();
+    let policy = cp
+        .create_policy_document(
+            "verify-existing-artifact",
+            "policy \"verify existing artifact\" { phase verify { verify artifact } }",
+        )
+        .await
+        .unwrap();
+    let (file_version_id, media_snapshot_id) =
+        scanned_snapshot_for_existing_file(&cp, &media_path).await;
+    let input = cp
+        .create_policy_input_set_from_scan(PolicyInputFromScanInput {
+            slug: "verify-existing-artifact".to_owned(),
+            file_version_id,
+            media_snapshot_id,
+            container: "mkv".to_owned(),
+            video_codec: "h264".to_owned(),
+        })
+        .await
+        .unwrap();
+
+    let data = cp
+        .execute_compliance_policy_with_runtime_registry_and_options_for_test(
+            policy.version.id,
+            input.input_set_id,
+            WorkerRuntimeRegistry::new(),
+            super::ComplianceExecutionOptions::default(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(data.file_phases.len(), 1);
+    assert_eq!(data.file_phases[0].outcome, "verified");
+    assert_eq!(
+        data.file_phases[0].produced_file_version_id,
+        Some(file_version_id.0)
+    );
+    assert!(data.file_phases[0].artifact_handle_id.is_some());
+    assert!(data.file_phases[0].artifact_verification_id.is_some());
+    assert_eq!(data.summary.progress.completed, 1);
+    assert_eq!(data.artifact_verifications.len(), 1);
+    assert_eq!(data.artifact_verifications[0].status, "succeeded");
+    let report = cp
+        .read_compliance_run_report(voom_core::JobId(data.summary.job_id))
+        .await
+        .unwrap();
+    assert_eq!(report.artifact_verifications.len(), 1);
+    assert_eq!(
+        report.artifact_verifications[0].verification_id,
+        data.artifact_verifications[0].verification_id
+    );
+    let evidence: (String, i64, i64) = sqlx::query_as(
+        "SELECT status, workflow_ticket_id, workflow_lease_id \
+         FROM artifact_verifications",
+    )
+    .fetch_one(cp.pool_for_test())
+    .await
+    .unwrap();
+    assert_eq!(evidence.0, "succeeded");
+    assert!(evidence.1 > 0);
+    assert!(evidence.2 > 0);
+    assert_eq!(count(&cp, EventKind::ArtifactVerificationStarted).await, 1);
+    assert_eq!(
+        count(&cp, EventKind::ArtifactVerificationSucceeded).await,
+        1
+    );
+}
+
+#[tokio::test]
+async fn failed_policy_verification_persists_evidence_and_gates_downstream_phase() {
+    ensure_policy_verify_worker();
+    let (cp, _tmp) = cp().await;
+    let media_dir = tempfile::tempdir().unwrap();
+    let media_path = media_dir.path().join("movie.mkv");
+    tokio::fs::write(&media_path, b"bytes that do not match durable provenance")
+        .await
+        .unwrap();
+    let policy = cp
+        .create_policy_document(
+            "verify-failure-gates-downstream",
+            "policy \"verify failure gates downstream\" { \
+               phase verify { verify artifact } \
+               phase downstream { depends_on: [verify] verify artifact } \
+             }",
+        )
+        .await
+        .unwrap();
+    let (file_version_id, media_snapshot_id) =
+        scanned_snapshot_for_existing_file(&cp, &media_path).await;
+    sqlx::query("UPDATE file_versions SET content_hash = 'blake3:wrong' WHERE id = ?")
+        .bind(i64::try_from(file_version_id.0).unwrap())
+        .execute(cp.pool_for_test())
+        .await
+        .unwrap();
+    let input = cp
+        .create_policy_input_set_from_scan(PolicyInputFromScanInput {
+            slug: "verify-failure-gates-downstream".to_owned(),
+            file_version_id,
+            media_snapshot_id,
+            container: "mkv".to_owned(),
+            video_codec: "h264".to_owned(),
+        })
+        .await
+        .unwrap();
+
+    let error = cp
+        .execute_compliance_policy_with_runtime_registry_and_options_for_test(
+            policy.version.id,
+            input.input_set_id,
+            WorkerRuntimeRegistry::new(),
+            super::ComplianceExecutionOptions::default(),
+        )
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.source.code(), "ARTIFACT_CHECKSUM_MISMATCH");
+    let partial = error.partial.unwrap();
+    assert_eq!(partial.summary.failure_count, 1);
+    assert!(partial.file_phases.is_empty());
+    assert_eq!(partial.artifact_verifications.len(), 1);
+    assert_eq!(partial.artifact_verifications[0].status, "failed");
+    assert_eq!(
+        partial.artifact_verifications[0].error_code.as_deref(),
+        Some("ARTIFACT_CHECKSUM_MISMATCH")
+    );
+    let stored = cp
+        .read_compliance_run_report(voom_core::JobId(partial.summary.job_id))
+        .await
+        .unwrap();
+    assert_eq!(stored.artifact_verifications.len(), 1);
+    assert_eq!(stored.artifact_verifications[0].status, "failed");
+
+    let states: Vec<(String, String)> =
+        sqlx::query_as("SELECT kind, state FROM tickets ORDER BY id")
+            .fetch_all(cp.pool_for_test())
+            .await
+            .unwrap();
+    assert_eq!(
+        states,
+        vec![(
+            "synthetic.workflow.operation.verify_artifact".to_owned(),
+            "failed".to_owned()
+        )],
+        "the dependent phase must never create or dispatch a ticket"
+    );
+    let job_state: String = sqlx::query_scalar("SELECT state FROM jobs")
+        .fetch_one(cp.pool_for_test())
+        .await
+        .unwrap();
+    let lease_states: Vec<(i64, String, Option<String>)> =
+        sqlx::query_as("SELECT ticket_id, state, release_reason FROM leases ORDER BY id")
+            .fetch_all(cp.pool_for_test())
+            .await
+            .unwrap();
+    assert_eq!(job_state, "failed");
+    assert_eq!(
+        lease_states,
+        vec![(1, "released".to_owned(), Some("failed_terminal".to_owned()))]
+    );
+    assert_eq!(count(&cp, EventKind::ArtifactVerificationFailed).await, 1);
+    assert_eq!(
+        count(&cp, EventKind::ArtifactVerificationSucceeded).await,
+        0
+    );
+}
+
+#[tokio::test]
+async fn resume_carries_verified_phase_without_duplicate_verification() {
+    ensure_policy_verify_worker();
+    let (cp, _tmp) = cp().await;
+    let media_dir = tempfile::tempdir().unwrap();
+    let media_path = media_dir.path().join("movie.mkv");
+    tokio::fs::write(&media_path, b"resume verified bytes")
+        .await
+        .unwrap();
+    let policy = cp
+        .create_policy_document(
+            "resume-verified-phase",
+            "policy \"resume verified phase\" { \
+               phase verify_one { verify artifact } \
+               phase verify_two { depends_on: [verify_one] verify artifact } \
+               phase normalize { depends_on: [verify_two] container mkv } \
+             }",
+        )
+        .await
+        .unwrap();
+    let (file_version_id, media_snapshot_id) =
+        scanned_snapshot_for_existing_file(&cp, &media_path).await;
+    sqlx::query(
+        "UPDATE media_snapshots \
+         SET payload = json_set(payload, '$.container.format_name', 'mp4') \
+         WHERE id = ?",
+    )
+    .bind(i64::try_from(media_snapshot_id.0).unwrap())
+    .execute(cp.pool_for_test())
+    .await
+    .unwrap();
+    let input = cp
+        .create_policy_input_set_from_scan(PolicyInputFromScanInput {
+            slug: "resume-verified-phase".to_owned(),
+            file_version_id,
+            media_snapshot_id,
+            container: "mp4".to_owned(),
+            video_codec: "h264".to_owned(),
+        })
+        .await
+        .unwrap();
+
+    let first = cp
+        .execute_compliance_policy_with_runtime_registry_and_options_for_test(
+            policy.version.id,
+            input.input_set_id,
+            WorkerRuntimeRegistry::new(),
+            super::ComplianceExecutionOptions::default(),
+        )
+        .await
+        .unwrap_err();
+    let first = first.partial.unwrap();
+    assert_eq!(first.file_phases.len(), 2);
+    assert!(
+        first
+            .file_phases
+            .iter()
+            .all(|phase| phase.outcome == "verified")
+    );
+
+    let mut prior_job_id = voom_core::JobId(first.summary.job_id);
+    for _attempt in 0..2 {
+        let resumed = cp
+            .resume_phase_barrier_with_runtimes(
+                prior_job_id,
+                policy.version.id,
+                input.input_set_id,
+                super::ComplianceExecutionOptions::default(),
+                WorkerRuntimeRegistry::new(),
+            )
+            .await
+            .unwrap_err();
+        let resumed = resumed
+            .partial
+            .unwrap_or_else(|| panic!("resumed third phase must be partial: {}", resumed.source));
+        assert_eq!(resumed.file_phases.len(), 2);
+        assert!(
+            resumed.file_phases.iter().all(|phase| {
+                phase.outcome.as_str() == "verified" && phase.ticket_ids.is_empty()
+            })
+        );
+        prior_job_id = resumed.summary.job_id;
+    }
+    let evidence_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM artifact_verifications")
+        .fetch_one(cp.pool_for_test())
+        .await
+        .unwrap();
+    assert_eq!(evidence_count, 2);
+    assert_eq!(count(&cp, EventKind::ArtifactVerificationStarted).await, 2);
+}
+
+#[tokio::test]
+async fn resume_adopts_successful_evidence_missing_its_phase_row() {
+    ensure_policy_verify_worker();
+    let (cp, _tmp) = cp().await;
+    let media_dir = tempfile::tempdir().unwrap();
+    let media_path = media_dir.path().join("movie.mkv");
+    tokio::fs::write(&media_path, b"crash-window verified bytes")
+        .await
+        .unwrap();
+    let policy = cp
+        .create_policy_document(
+            "resume-verification-crash-window",
+            "policy \"resume verification crash window\" { \
+               phase verify { verify artifact } \
+             }",
+        )
+        .await
+        .unwrap();
+    let (file_version_id, media_snapshot_id) =
+        scanned_snapshot_for_existing_file(&cp, &media_path).await;
+    let input = cp
+        .create_policy_input_set_from_scan(PolicyInputFromScanInput {
+            slug: "resume-verification-crash-window".to_owned(),
+            file_version_id,
+            media_snapshot_id,
+            container: "mkv".to_owned(),
+            video_codec: "h264".to_owned(),
+        })
+        .await
+        .unwrap();
+    let completed = cp
+        .execute_compliance_policy_with_runtime_registry_and_options_for_test(
+            policy.version.id,
+            input.input_set_id,
+            WorkerRuntimeRegistry::new(),
+            super::ComplianceExecutionOptions::default(),
+        )
+        .await
+        .unwrap();
+    let prior_job_id = voom_core::JobId(completed.summary.job_id);
+
+    sqlx::query("DELETE FROM workflow_file_phase_summaries WHERE job_id = ?")
+        .bind(i64::try_from(prior_job_id.0).unwrap())
+        .execute(cp.pool_for_test())
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM workflow_phase_summaries WHERE job_id = ?")
+        .bind(i64::try_from(prior_job_id.0).unwrap())
+        .execute(cp.pool_for_test())
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM workflow_summaries WHERE job_id = ?")
+        .bind(i64::try_from(prior_job_id.0).unwrap())
+        .execute(cp.pool_for_test())
+        .await
+        .unwrap();
+    sqlx::query("UPDATE jobs SET state = 'failed' WHERE id = ?")
+        .bind(i64::try_from(prior_job_id.0).unwrap())
+        .execute(cp.pool_for_test())
+        .await
+        .unwrap();
+    let prior_ticket: (String, String, String) =
+        sqlx::query_as("SELECT state, payload, result FROM tickets WHERE job_id = ?")
+            .bind(i64::try_from(prior_job_id.0).unwrap())
+            .fetch_one(cp.pool_for_test())
+            .await
+            .unwrap();
+    let prior_payload: serde_json::Value = serde_json::from_str(&prior_ticket.1).unwrap();
+    assert_eq!(prior_ticket.0, "succeeded");
+    assert_eq!(prior_payload["workflow_id"], "workflow-1-phase-0");
+    assert_eq!(prior_payload["branch_id"], "root");
+
+    Box::pin(assert_corrupted_verification_result_rejected(
+        &cp,
+        prior_job_id,
+        policy.version.id,
+        input.input_set_id,
+        &prior_ticket.2,
+    ))
+    .await;
+
+    let resumed = cp
+        .resume_phase_barrier_with_runtimes(
+            prior_job_id,
+            policy.version.id,
+            input.input_set_id,
+            super::ComplianceExecutionOptions::default(),
+            WorkerRuntimeRegistry::new(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resumed.file_phases.len(), 1);
+    assert_eq!(resumed.file_phases[0].outcome.as_str(), "verified");
+    assert!(resumed.file_phases[0].ticket_ids.is_empty());
+    let evidence_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM artifact_verifications")
+        .fetch_one(cp.pool_for_test())
+        .await
+        .unwrap();
+    assert_eq!(evidence_count, 1);
+    assert_eq!(count(&cp, EventKind::ArtifactVerificationStarted).await, 1);
+}
+
+async fn assert_corrupted_verification_result_rejected(
+    cp: &crate::ControlPlane,
+    prior_job_id: voom_core::JobId,
+    policy_version_id: voom_core::PolicyVersionId,
+    input_set_id: voom_core::PolicyInputSetId,
+    original_result: &str,
+) {
+    sqlx::query(
+        "UPDATE tickets SET result = json_set(result, '$.path', '/wrong') WHERE job_id = ?",
+    )
+    .bind(i64::try_from(prior_job_id.0).unwrap())
+    .execute(cp.pool_for_test())
+    .await
+    .unwrap();
+    let corrupted = cp
+        .resume_phase_barrier_with_runtimes(
+            prior_job_id,
+            policy_version_id,
+            input_set_id,
+            super::ComplianceExecutionOptions::default(),
+            WorkerRuntimeRegistry::new(),
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        corrupted.source,
+        voom_core::VoomError::Conflict(_)
+    ));
+    let job_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM jobs")
+        .fetch_one(cp.pool_for_test())
+        .await
+        .unwrap();
+    assert_eq!(
+        job_count, 1,
+        "corrupt evidence must fail before opening a job"
+    );
+    sqlx::query("UPDATE tickets SET result = ? WHERE job_id = ?")
+        .bind(original_result)
+        .bind(i64::try_from(prior_job_id.0).unwrap())
+        .execute(cp.pool_for_test())
+        .await
+        .unwrap();
+}
+
+fn ensure_policy_verify_worker() {
+    cargo_bin_or_build("voom-verify-artifact-worker", "voom-verify-artifact-worker").unwrap();
+}
+
+#[tokio::test]
 async fn report_mutates_no_durable_work_or_issue_tables() {
     let (cp, _tmp) = cp().await;
     let (policy_version_id, input_set_id, _document_id) = seed_noncompliant(&cp).await;
@@ -1068,6 +1486,54 @@ async fn scanned_snapshot_with_video(
                         "codec_name": "h264"
                     }
                 ]
+            }),
+            T0,
+        )
+        .await
+        .unwrap();
+    (file_version_id, snapshot.id)
+}
+
+async fn scanned_snapshot_for_existing_file(
+    cp: &crate::ControlPlane,
+    path: &std::path::Path,
+) -> (voom_core::FileVersionId, voom_core::MediaSnapshotId) {
+    let facts = crate::scan::hash::observe_candidate_file(path)
+        .await
+        .unwrap();
+    let outcome = cp
+        .record_discovered_file(
+            DiscoveredFile {
+                location_kind: FileLocationKind::LocalPath,
+                location_value: path.display().to_string(),
+                content_hash: facts.content_hash,
+                size_bytes: facts.size_bytes,
+                observed_at: T0,
+                proof: None,
+            },
+            None,
+        )
+        .await
+        .unwrap();
+    let IngestOutcome::NewFileAsset {
+        file_version_id, ..
+    } = outcome
+    else {
+        panic!("expected a new file asset");
+    };
+    let snapshot = cp
+        .record_media_snapshot(
+            file_version_id,
+            None,
+            serde_json::json!({
+                "format": "test",
+                "container": { "format_name": "mkv" },
+                "streams": [{
+                    "id": "stream-0",
+                    "index": 0,
+                    "kind": "video",
+                    "codec_name": "h264"
+                }]
             }),
             T0,
         )

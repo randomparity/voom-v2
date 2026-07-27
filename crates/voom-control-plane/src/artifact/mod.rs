@@ -9,6 +9,7 @@ pub(crate) mod bootstrap;
 pub(crate) mod commit;
 pub(crate) mod fs;
 pub(crate) mod inspect;
+pub(crate) mod policy_target;
 pub(crate) mod stage;
 pub(crate) mod verify;
 pub(crate) mod worker;

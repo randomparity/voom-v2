@@ -20,6 +20,7 @@ use crate::workflow::execution::executor::tickets::parse_payload;
 use crate::workflow::execution::leases::{
     acquire_lease_with_retry, failure_class_for_error, time_duration,
 };
+use crate::workflow::execution::operation_adapters::uses_bundled_policy_verification;
 use crate::workflow::plan::model::WorkflowPlan;
 use crate::workflow::summary::WorkflowRunSummary;
 
@@ -68,7 +69,15 @@ impl WorkflowExecutor {
                 return Ok(SpawnOutcome::PreLeaseRetriable);
             }
         };
-        let runtime = self.runtimes.get(worker_id)?;
+        let uses_bundled_verify = uses_bundled_policy_verification(
+            workflow_payload.operation,
+            &workflow_payload.rendered_payload,
+        );
+        let runtime = if uses_bundled_verify {
+            None
+        } else {
+            Some(self.runtimes.get(worker_id)?)
+        };
         let lease = acquire_lease_with_retry(
             &self.control_plane,
             NewLease {
@@ -88,6 +97,7 @@ impl WorkflowExecutor {
         active.spawn(async move {
             dispatch_ticket(
                 control,
+                worker_id,
                 runtime,
                 ticket,
                 workflow_payload,

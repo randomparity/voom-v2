@@ -18,7 +18,7 @@ use crate::workflow::plan::binding::{
     BindingError, BranchContext, PolicyFileSource, render_default_payload,
     render_default_payload_with_fan_out, render_policy_extract_audio_payload,
     render_policy_remux_payload, render_policy_transcode_audio_payload,
-    render_policy_transcode_payload,
+    render_policy_transcode_payload, render_policy_verify_artifact_payload,
 };
 use crate::workflow::plan::model::{OperationNode, WorkflowPlan};
 use crate::workflow::plan::ticket_payload::WorkflowTicketPayload;
@@ -194,6 +194,14 @@ impl WorkflowExecutor {
                     node.operation_payload(),
                     &roots.audio.staging_root,
                     &roots.audio.target_dir,
+                    timing,
+                )),
+                None => root_payload_result(render_default_payload(operation, branch, timing)),
+            },
+            OperationKind::VerifyArtifact => match node.policy_target() {
+                Some(target) => root_payload_result(render_policy_verify_artifact_payload(
+                    self.resolve_policy_file_source(target, "verify_artifact")
+                        .await?,
                     timing,
                 )),
                 None => root_payload_result(render_default_payload(operation, branch, timing)),
