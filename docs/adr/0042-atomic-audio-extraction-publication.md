@@ -111,19 +111,17 @@ worker retirement is not proof that a process stopped writing. Automatic
 recovery first replays the same idempotency key to the same live worker epoch;
 a cached terminal response proves quiescence only because the extraction worker
 contract requires every provider child and output writer to exit before a
-terminal response. A supervisor-observed process exit is also proof.
-When neither is available, recovery reports the exact worker epoch and paths
+terminal response. When that is unavailable, recovery reports the exact worker epoch and paths
 and stays blocked until the operator stops/isolates that process and records an
 explicit quiescence acknowledgement. Without proof the operation creates no
 competing generation. After proof, cleanup removes only the recorded leaves
-following canonical ownership and file-type checks, then advances the durable
+following path-containment and file-type checks, then advances the durable
 generation and worker idempotency key. This recovers a host crash after worker
 completion through idempotent replay without changing published
 operation/output identity.
 
 The operation table has one semantic uniqueness constraint: the complete
-`operation_key` derived above. It stores the ordered-target-set hash for
-diagnostics but has no narrower unique constraint on
+`operation_key` derived above. It has no narrower unique constraint on
 `(source_file_version_id, operation_id)`, because the same plan/source may
 legitimately execute to a distinct complete target set. Resume recomputes the
 key and compares every ordered descriptor and target path before accepting the
@@ -156,22 +154,15 @@ update predicate includes the live claim/generation:
 
 The transaction either publishes the complete ordered set or publishes none.
 
-Publication targets are created only beneath the host-owned Unix commit working
-directory. The host creates the parent with mode `0700`, records its UID,
-device, and inode, and rejects any symlink or non-directory component. Promoted
-targets are non-symlink regular files owned by that same host UID; after install
-the host sets mode `0400` and records device, inode, link count, size, and
-content hash.
+Publication rejects symlink and non-regular target leaves. Every add-only
+install and recovery comparison uses the exact persisted size and checksum;
+those facts, the staging path, target path, and local file key are also durable
+audit evidence. An occupied target is accepted only when its bytes match.
 
-Immediately before finalize, the host canonicalizes the parent without
-following a changed leaf and requires the same host UID/device/inode, directory
-type, and mode `0700`. It opens each target without following symlinks and
-requires regular-file type, the same host UID, mode `0400`, and the exact
-recorded device/inode/link-count/size/hash facts. Any parent or target drift
-fails recovery closed. A bounded check-to-transaction TOCTOU remains for a
-malicious same-account process that bypasses directory permissions, read-only
-mode, and VOOM's advisory lock; that process is outside the existing filesystem
-identity threat model and is not broadened into #338/#339 here.
+This decision does not claim host ownership, mode, device, inode, or link-count
+fencing. Stronger parent/leaf identity checks and protection from a malicious
+same-account process belong to the following execution-safety campaign, not
+#337.
 
 ### Recover partial filesystem promotion
 

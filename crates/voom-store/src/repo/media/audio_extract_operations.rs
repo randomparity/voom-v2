@@ -25,7 +25,6 @@ pub enum AudioExtractOperationState {
 pub struct NewAudioExtractOperation {
     pub operation_key: String,
     pub operation_id: Option<String>,
-    pub target_set_hash: String,
     pub source_file_version_id: FileVersionId,
     pub source_bundle_id: BundleId,
     pub source_media_snapshot_id: MediaSnapshotId,
@@ -38,6 +37,60 @@ pub struct NewAudioExtractOutput {
     pub source_provider_stream_index: u32,
     pub bundle_role: String,
     pub target_path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewStagedAudioExtractOutput {
+    pub operation_output_id: u64,
+    pub staging_path: String,
+    pub expected_size_bytes: u64,
+    pub expected_checksum: String,
+    pub artifact_handle_id: ArtifactHandleId,
+    pub artifact_location_id: ArtifactLocationId,
+    pub result_facts: serde_json::Value,
+}
+
+#[derive(Debug)]
+pub struct StageAudioExtractOperation<'a> {
+    pub operation_id: u64,
+    pub claim: &'a NewAudioExtractClaim,
+    pub worker_result: &'a serde_json::Value,
+    pub outputs: &'a [NewStagedAudioExtractOutput],
+    pub observed_at: OffsetDateTime,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewPreparedAudioExtractOutput {
+    pub operation_output_id: u64,
+    pub staging_path: String,
+    pub temp_path: String,
+    pub artifact_handle_id: ArtifactHandleId,
+    pub artifact_location_id: ArtifactLocationId,
+    pub verification_id: ArtifactVerificationId,
+    pub commit_record_id: ArtifactCommitRecordId,
+    pub probe_worker_id: WorkerId,
+    pub probe_payload: serde_json::Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewFinalizedAudioExtractOutput {
+    pub operation_output_id: u64,
+    pub source_file_version_id: FileVersionId,
+    pub source_media_snapshot_id: MediaSnapshotId,
+    pub source_snapshot_stream_id: String,
+    pub source_provider_stream_index: u32,
+    pub result_file_asset_id: u64,
+    pub result_file_version_id: FileVersionId,
+    pub result_file_location_id: FileLocationId,
+    pub result_media_snapshot_id: MediaSnapshotId,
+    pub bundle_member_id: u64,
+    pub recorded_at: OffsetDateTime,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AudioExtractRecoveryFailure {
+    pub error_code: String,
+    pub message: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -91,7 +144,6 @@ pub struct AudioExtractOperation {
     pub id: u64,
     pub operation_key: String,
     pub operation_id: Option<String>,
-    pub target_set_hash: String,
     pub source_file_version_id: FileVersionId,
     pub source_bundle_id: BundleId,
     pub source_media_snapshot_id: MediaSnapshotId,
@@ -255,6 +307,141 @@ impl SqliteAudioExtractOperationRepo {
         load_record_by_id(tx, operation_id)
             .await?
             .ok_or_else(|| VoomError::Internal("adopted audio extraction disappeared".to_owned()))
+    }
+
+    pub async fn stage_operation_in_tx(
+        tx: &mut Transaction<'_, Sqlite>,
+        input: StageAudioExtractOperation<'_>,
+    ) -> Result<(), VoomError> {
+        for output in input.outputs {
+            bind_staged_output(tx, output).await?;
+        }
+        let worker_result = serde_json::to_string(input.worker_result).map_err(|error| {
+            VoomError::Internal(format!("serialize staged audio extraction result: {error}"))
+        })?;
+        let result = sqlx::query(
+            "UPDATE audio_extract_operations SET state = 'staged', worker_result = ? \
+             WHERE id = ? AND state = 'planned' AND worker_result IS NULL \
+             AND dispatch_generation = ? AND claim_lease_id = ? AND claim_token = ? \
+             AND claim_expires_at > ?",
+        )
+        .bind(worker_result)
+        .bind(i64_from_u64(input.operation_id))
+        .bind(i64::from(input.claim.expected_generation))
+        .bind(i64_from_u64(input.claim.lease_id.0))
+        .bind(&input.claim.claim_token)
+        .bind(iso8601(input.observed_at)?)
+        .execute(&mut **tx)
+        .await
+        .map_err(|error| VoomError::database_context("stage audio extraction operation", error))?;
+        require_one_operation_update(result.rows_affected(), input.operation_id, "planned")
+    }
+
+    pub async fn prepare_operation_in_tx(
+        tx: &mut Transaction<'_, Sqlite>,
+        operation_id: u64,
+        claim: &NewAudioExtractClaim,
+        outputs: &[NewPreparedAudioExtractOutput],
+        now: OffsetDateTime,
+    ) -> Result<(), VoomError> {
+        for output in outputs {
+            bind_prepared_output(tx, output).await?;
+        }
+        let result = sqlx::query(
+            "UPDATE audio_extract_operations SET state = 'prepared' \
+             WHERE id = ? AND state = 'staged' \
+             AND dispatch_generation = ? AND claim_lease_id = ? AND claim_token = ? \
+             AND claim_expires_at > ?",
+        )
+        .bind(i64_from_u64(operation_id))
+        .bind(i64::from(claim.expected_generation))
+        .bind(i64_from_u64(claim.lease_id.0))
+        .bind(&claim.claim_token)
+        .bind(iso8601(now)?)
+        .execute(&mut **tx)
+        .await
+        .map_err(|error| VoomError::database_context("prepare audio extract operation", error))?;
+        require_one_operation_update(result.rows_affected(), operation_id, "staged")
+    }
+
+    pub async fn record_finalized_output_in_tx(
+        tx: &mut Transaction<'_, Sqlite>,
+        output: &NewFinalizedAudioExtractOutput,
+    ) -> Result<u64, VoomError> {
+        let lineage = sqlx::query(
+            "INSERT INTO audio_extract_output_lineage \
+             (operation_output_id, source_file_version_id, source_media_snapshot_id, \
+              source_snapshot_stream_id, source_provider_stream_index, \
+              result_file_version_id, recorded_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(i64_from_u64(output.operation_output_id))
+        .bind(i64_from_u64(output.source_file_version_id.0))
+        .bind(i64_from_u64(output.source_media_snapshot_id.0))
+        .bind(&output.source_snapshot_stream_id)
+        .bind(i64::from(output.source_provider_stream_index))
+        .bind(i64_from_u64(output.result_file_version_id.0))
+        .bind(iso8601(output.recorded_at)?)
+        .execute(&mut **tx)
+        .await
+        .map_err(|error| VoomError::database_context("insert audio extraction lineage", error))?;
+        let lineage_id = u64_from_i64(lineage.last_insert_rowid());
+        bind_finalized_output(tx, output).await?;
+        Ok(lineage_id)
+    }
+
+    pub async fn complete_operation_in_tx(
+        tx: &mut Transaction<'_, Sqlite>,
+        operation_id: u64,
+        claim: &NewAudioExtractClaim,
+        now: OffsetDateTime,
+    ) -> Result<(), VoomError> {
+        let finished_at = iso8601(now)?;
+        let result = sqlx::query(
+            "UPDATE audio_extract_operations SET state = 'committed', finished_at = ?, \
+             recovery_failure_class = NULL, recovery_error_code = NULL, recovery_message = NULL \
+             WHERE id = ? AND state IN ('prepared', 'recovery_required') \
+             AND dispatch_generation = ? AND claim_lease_id = ? AND claim_token = ? \
+             AND claim_expires_at > ?",
+        )
+        .bind(&finished_at)
+        .bind(i64_from_u64(operation_id))
+        .bind(i64::from(claim.expected_generation))
+        .bind(i64_from_u64(claim.lease_id.0))
+        .bind(&claim.claim_token)
+        .bind(&finished_at)
+        .execute(&mut **tx)
+        .await
+        .map_err(|error| VoomError::database_context("finalize audio extract operation", error))?;
+        require_one_operation_update(result.rows_affected(), operation_id, "prepared/recovery")
+    }
+
+    pub async fn mark_recovery_required_in_tx(
+        tx: &mut Transaction<'_, Sqlite>,
+        operation_id: u64,
+        claim: &NewAudioExtractClaim,
+        failure: &AudioExtractRecoveryFailure,
+        now: OffsetDateTime,
+    ) -> Result<(), VoomError> {
+        let result = sqlx::query(
+            "UPDATE audio_extract_operations SET state = 'recovery_required', \
+             recovery_failure_class = 'commit_failure', recovery_error_code = ?, \
+             recovery_message = ? WHERE id = ? AND state = 'prepared' \
+             AND dispatch_generation = ? AND claim_lease_id = ? AND claim_token = ? \
+             AND claim_expires_at > ?",
+        )
+        .bind(&failure.error_code)
+        .bind(&failure.message)
+        .bind(i64_from_u64(operation_id))
+        .bind(i64::from(claim.expected_generation))
+        .bind(i64_from_u64(claim.lease_id.0))
+        .bind(&claim.claim_token)
+        .bind(iso8601(now)?)
+        .execute(&mut **tx)
+        .await
+        .map_err(|error| {
+            VoomError::database_context("mark audio extraction set recovery required", error)
+        })?;
+        require_one_operation_update(result.rows_affected(), operation_id, "prepared")
     }
 
     pub async fn create_planned(
@@ -584,6 +771,116 @@ impl SqliteAudioExtractOperationRepo {
 
 impl Repository for SqliteAudioExtractOperationRepo {}
 
+async fn bind_staged_output(
+    tx: &mut Transaction<'_, Sqlite>,
+    output: &NewStagedAudioExtractOutput,
+) -> Result<(), VoomError> {
+    let result_facts = serde_json::to_string(&output.result_facts).map_err(|error| {
+        VoomError::Internal(format!("serialize staged audio extraction output: {error}"))
+    })?;
+    let result = sqlx::query(
+        "UPDATE audio_extract_operation_outputs SET staging_path = ?, expected_size_bytes = ?, \
+         expected_checksum = ?, artifact_handle_id = ?, artifact_location_id = ?, \
+         result_facts = ? \
+         WHERE id = ? AND staging_path IS NULL AND artifact_handle_id IS NULL",
+    )
+    .bind(&output.staging_path)
+    .bind(i64_from_u64(output.expected_size_bytes))
+    .bind(&output.expected_checksum)
+    .bind(i64_from_u64(output.artifact_handle_id.0))
+    .bind(i64_from_u64(output.artifact_location_id.0))
+    .bind(result_facts)
+    .bind(i64_from_u64(output.operation_output_id))
+    .execute(&mut **tx)
+    .await
+    .map_err(|error| VoomError::database_context("bind staged audio extract output", error))?;
+    require_one_output_update(result.rows_affected(), output.operation_output_id, "staged")
+}
+
+async fn bind_prepared_output(
+    tx: &mut Transaction<'_, Sqlite>,
+    output: &NewPreparedAudioExtractOutput,
+) -> Result<(), VoomError> {
+    let probe_payload = serde_json::to_string(&output.probe_payload).map_err(|error| {
+        VoomError::Internal(format!("serialize audio extraction probe payload: {error}"))
+    })?;
+    let result = sqlx::query(
+        "UPDATE audio_extract_operation_outputs SET temp_path = ?, verification_id = ?, \
+         commit_record_id = ?, probe_worker_id = ?, probe_payload = ? \
+         WHERE id = ? AND staging_path = ? AND artifact_handle_id = ? \
+           AND artifact_location_id = ? AND verification_id IS NULL AND commit_record_id IS NULL",
+    )
+    .bind(&output.temp_path)
+    .bind(i64_from_u64(output.verification_id.0))
+    .bind(i64_from_u64(output.commit_record_id.0))
+    .bind(i64_from_u64(output.probe_worker_id.0))
+    .bind(probe_payload)
+    .bind(i64_from_u64(output.operation_output_id))
+    .bind(&output.staging_path)
+    .bind(i64_from_u64(output.artifact_handle_id.0))
+    .bind(i64_from_u64(output.artifact_location_id.0))
+    .execute(&mut **tx)
+    .await
+    .map_err(|error| VoomError::database_context("bind prepared audio extract output", error))?;
+    require_one_output_update(
+        result.rows_affected(),
+        output.operation_output_id,
+        "prepared",
+    )
+}
+
+async fn bind_finalized_output(
+    tx: &mut Transaction<'_, Sqlite>,
+    output: &NewFinalizedAudioExtractOutput,
+) -> Result<(), VoomError> {
+    let result = sqlx::query(
+        "UPDATE audio_extract_operation_outputs SET result_file_asset_id = ?, \
+         result_file_version_id = ?, result_file_location_id = ?, result_media_snapshot_id = ?, \
+         bundle_member_id = ? \
+         WHERE id = ? AND result_file_version_id IS NULL",
+    )
+    .bind(i64_from_u64(output.result_file_asset_id))
+    .bind(i64_from_u64(output.result_file_version_id.0))
+    .bind(i64_from_u64(output.result_file_location_id.0))
+    .bind(i64_from_u64(output.result_media_snapshot_id.0))
+    .bind(i64_from_u64(output.bundle_member_id))
+    .bind(i64_from_u64(output.operation_output_id))
+    .execute(&mut **tx)
+    .await
+    .map_err(|error| VoomError::database_context("bind finalized audio extract output", error))?;
+    require_one_output_update(
+        result.rows_affected(),
+        output.operation_output_id,
+        "finalized",
+    )
+}
+
+fn require_one_operation_update(
+    rows_affected: u64,
+    operation_id: u64,
+    expected: &str,
+) -> Result<(), VoomError> {
+    if rows_affected == 1 {
+        return Ok(());
+    }
+    Err(VoomError::Conflict(format!(
+        "audio extraction operation {operation_id} is not claimed in {expected}"
+    )))
+}
+
+fn require_one_output_update(
+    rows_affected: u64,
+    output_id: u64,
+    transition: &str,
+) -> Result<(), VoomError> {
+    if rows_affected == 1 {
+        return Ok(());
+    }
+    Err(VoomError::Conflict(format!(
+        "audio extraction output {output_id} could not be {transition}"
+    )))
+}
+
 async fn legacy_owner_row(
     pool: &SqlitePool,
     target_path: &str,
@@ -753,13 +1050,12 @@ async fn insert_legacy_adopted_operation(
 ) -> Result<i64, VoomError> {
     sqlx::query(
         "INSERT INTO audio_extract_operations \
-         (operation_key, operation_id, target_set_hash, source_file_version_id, \
-          source_bundle_id, source_media_snapshot_id, state, created_at, finished_at) \
-         VALUES (?, ?, ?, ?, ?, ?, 'committed', ?, ?)",
+         (operation_key, operation_id, source_file_version_id, source_bundle_id, \
+          source_media_snapshot_id, state, created_at, finished_at) \
+         VALUES (?, ?, ?, ?, ?, 'committed', ?, ?)",
     )
     .bind(&input.operation.operation_key)
     .bind(&input.operation.operation_id)
-    .bind(&input.operation.target_set_hash)
     .bind(i64_from_u64(input.operation.source_file_version_id.0))
     .bind(i64_from_u64(input.operation.source_bundle_id.0))
     .bind(i64_from_u64(input.operation.source_media_snapshot_id.0))
@@ -849,9 +1145,9 @@ fn validate_new_operation(
     input: &NewAudioExtractOperation,
     outputs: &[NewAudioExtractOutput],
 ) -> Result<(), VoomError> {
-    if input.operation_key.is_empty() || input.target_set_hash.is_empty() {
+    if input.operation_key.is_empty() {
         return Err(VoomError::Config(
-            "audio extraction operation key and target-set hash must not be empty".to_owned(),
+            "audio extraction operation key must not be empty".to_owned(),
         ));
     }
     if outputs.is_empty() {
@@ -1003,13 +1299,12 @@ async fn insert_planned(
     let created_at = iso8601(now)?;
     let result = sqlx::query(
         "INSERT INTO audio_extract_operations \
-         (operation_key, operation_id, target_set_hash, source_file_version_id, \
-          source_bundle_id, source_media_snapshot_id, state, created_at) \
-         VALUES (?, ?, ?, ?, ?, ?, 'planned', ?)",
+         (operation_key, operation_id, source_file_version_id, source_bundle_id, \
+          source_media_snapshot_id, state, created_at) \
+         VALUES (?, ?, ?, ?, ?, 'planned', ?)",
     )
     .bind(&input.operation_key)
     .bind(&input.operation_id)
-    .bind(&input.target_set_hash)
     .bind(i64_from_u64(input.source_file_version_id.0))
     .bind(i64_from_u64(input.source_bundle_id.0))
     .bind(i64_from_u64(input.source_media_snapshot_id.0))
@@ -1069,7 +1364,7 @@ async fn load_record_by_key(
     operation_key: &str,
 ) -> Result<Option<AudioExtractOperationRecord>, VoomError> {
     let row = sqlx::query(
-        "SELECT id, operation_key, operation_id, target_set_hash, source_file_version_id, \
+        "SELECT id, operation_key, operation_id, source_file_version_id, \
          source_bundle_id, source_media_snapshot_id, state, dispatch_generation, worker_result \
          FROM audio_extract_operations WHERE operation_key = ?",
     )
@@ -1088,7 +1383,7 @@ async fn load_record_by_id(
     id: i64,
 ) -> Result<Option<AudioExtractOperationRecord>, VoomError> {
     let row = sqlx::query(
-        "SELECT id, operation_key, operation_id, target_set_hash, source_file_version_id, \
+        "SELECT id, operation_key, operation_id, source_file_version_id, \
          source_bundle_id, source_media_snapshot_id, state, dispatch_generation, worker_result \
          FROM audio_extract_operations WHERE id = ?",
     )
@@ -1135,7 +1430,6 @@ fn decode_operation(row: &SqliteRow) -> Result<AudioExtractOperation, VoomError>
         id: u64_from_i64(row.try_get("id").map_err(operation_row_err)?),
         operation_key: row.try_get("operation_key").map_err(operation_row_err)?,
         operation_id: row.try_get("operation_id").map_err(operation_row_err)?,
-        target_set_hash: row.try_get("target_set_hash").map_err(operation_row_err)?,
         source_file_version_id: FileVersionId(u64_from_i64(
             row.try_get("source_file_version_id")
                 .map_err(operation_row_err)?,
@@ -1246,7 +1540,6 @@ fn require_exact_replay(
     outputs: &[NewAudioExtractOutput],
 ) -> Result<(), VoomError> {
     let operation_matches = record.operation.operation_id == input.operation_id
-        && record.operation.target_set_hash == input.target_set_hash
         && record.operation.source_file_version_id == input.source_file_version_id
         && record.operation.source_bundle_id == input.source_bundle_id
         && record.operation.source_media_snapshot_id == input.source_media_snapshot_id;

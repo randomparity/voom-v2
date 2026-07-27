@@ -163,7 +163,6 @@ impl Fixture {
         NewAudioExtractOperation {
             operation_key: "extract:v1:key".to_owned(),
             operation_id: Some("op-1".to_owned()),
-            target_set_hash: "targets-1".to_owned(),
             source_file_version_id: self.source_file_version_id,
             source_bundle_id: self.source_bundle_id,
             source_media_snapshot_id: self.source_media_snapshot_id,

@@ -5,10 +5,13 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use async_trait::async_trait;
 use sqlx::Row;
 use time::OffsetDateTime;
-use voom_core::ids::{ArtifactCommitRecordId, BundleId};
+use voom_core::ids::BundleId;
 use voom_core::rng_test_support::FrozenRng;
 use voom_core::{JobId, LeaseId, TicketId};
-use voom_store::repo::bundles::NewAssetBundle;
+use voom_store::repo::artifacts::{
+    NewArtifactCommitRecord, NewArtifactHandle, NewArtifactLocation, NewSidecarArtifactCommit,
+};
+use voom_store::repo::bundles::{BundleMemberRole, NewAssetBundle, NewBundleMember};
 use voom_store::repo::identity::{DiscoveredFile, FileLocationKind, IdentityRepo, IngestOutcome};
 use voom_store::repo::identity::{MediaWorkKind, NewMediaVariant, NewMediaWork};
 use voom_worker_protocol::{
@@ -16,58 +19,6 @@ use voom_worker_protocol::{
     ExtractAudioResult, TranscodeAudioRequest, TranscodeAudioResult, VerifyArtifactObservedFacts,
     VerifyArtifactRequest, VerifyArtifactResult, VerifyArtifactStatus,
 };
-
-#[test]
-fn extract_commit_recovery_without_target_is_not_reported_as_success() {
-    let report = commit::CommitAudioExtractSidecarReport {
-        commit_record_id: ArtifactCommitRecordId(9),
-        result_file_version_id: None,
-        result_file_location_id: None,
-        state: ArtifactCommitState::RecoveryRequired,
-        target_path: PathBuf::from("/tmp/target.ogg"),
-        temp_path: PathBuf::from("/tmp/.target.ogg.tmp"),
-        recovery_required: Some(commit::AudioExtractRecoveryReport {
-            recovery_reason: "audio sidecar commit failed after durable prepare".to_owned(),
-            commit_record_id: ArtifactCommitRecordId(9),
-            source_bundle_id: BundleId(7),
-            role: "commentary_audio",
-            target_path: PathBuf::from("/tmp/target.ogg"),
-            target_exists: false,
-            temp_path: PathBuf::from("/tmp/.target.ogg.tmp"),
-            temp_exists: false,
-            staging_path: PathBuf::from("/tmp/staged.ogg"),
-            staging_exists: true,
-            result_file_version_id: None,
-            result_file_location_id: None,
-            error_code: "CONFLICT",
-            message: "bundle membership conflict".to_owned(),
-        }),
-    };
-
-    let err = ensure_extract_commit_succeeded(&report).unwrap_err();
-
-    assert_eq!(err.error_code(), voom_core::ErrorCode::CommitFailure);
-    assert!(err.to_string().contains("requires recovery"));
-    assert!(err.to_string().contains("bundle membership conflict"));
-}
-
-#[test]
-fn extract_commit_non_committed_state_is_not_reported_as_success() {
-    let report = commit::CommitAudioExtractSidecarReport {
-        commit_record_id: ArtifactCommitRecordId(10),
-        result_file_version_id: None,
-        result_file_location_id: None,
-        state: ArtifactCommitState::Pending,
-        target_path: PathBuf::from("/tmp/target.ogg"),
-        temp_path: PathBuf::from("/tmp/.target.ogg.tmp"),
-        recovery_required: None,
-    };
-
-    let err = ensure_extract_commit_succeeded(&report).unwrap_err();
-
-    assert_eq!(err.error_code(), voom_core::ErrorCode::CommitFailure);
-    assert!(err.to_string().contains("ended in Pending"));
-}
 
 #[tokio::test]
 async fn transcode_failure_records_audio_failed_event() {
@@ -235,10 +186,10 @@ async fn committed_legacy_singleton_is_adopted_once_without_redispatch() {
     let SeededLegacySingleton {
         input,
         target,
-        legacy,
+        legacy_commit_record_id,
+        legacy_result_file_version_id,
         ..
     } = seeded;
-    assert_eq!(legacy.state, ArtifactCommitState::Committed);
     assert_table_count(&cp, "media_snapshots", 1).await;
     let immutable_counts = legacy_publication_counts(&cp).await;
 
@@ -254,10 +205,10 @@ async fn committed_legacy_singleton_is_adopted_once_without_redispatch() {
 
     assert_eq!(adopted.outputs.len(), 1);
     assert_eq!(adopted.outputs[0].target_path, target);
-    assert_eq!(adopted.outputs[0].commit_record_id, legacy.commit_record_id);
+    assert_eq!(adopted.outputs[0].commit_record_id, legacy_commit_record_id);
     assert_eq!(
         adopted.outputs[0].result_file_version_id,
-        legacy.result_file_version_id.unwrap()
+        legacy_result_file_version_id
     );
     assert_eq!(legacy_publication_counts(&cp).await, immutable_counts);
     assert_table_count(&cp, "media_snapshots", 2).await;
@@ -391,7 +342,6 @@ async fn exact_extract_quiescence_acknowledgement_records_audit_event() {
             NewAudioExtractOperation {
                 operation_key: "extract:quiescence-test".to_owned(),
                 operation_id: Some("op-test".to_owned()),
-                target_set_hash: "extract:quiescence-test".to_owned(),
                 source_file_version_id: source.version,
                 source_bundle_id: bundle.id,
                 source_media_snapshot_id: MediaSnapshotId(source.snapshot),
@@ -826,39 +776,6 @@ async fn extract_audio_legacy_singleton_remains_executable() {
     assert_event_count(&cp, "artifact.audio_extract_succeeded", 1).await;
 }
 
-#[test]
-fn committed_extract_recovery_with_target_is_not_reported_as_success() {
-    let report = commit::CommitAudioExtractSidecarReport {
-        commit_record_id: ArtifactCommitRecordId(9),
-        result_file_version_id: None,
-        result_file_location_id: None,
-        state: ArtifactCommitState::RecoveryRequired,
-        target_path: PathBuf::from("/tmp/target.ogg"),
-        temp_path: PathBuf::from("/tmp/.target.ogg.tmp"),
-        recovery_required: Some(commit::AudioExtractRecoveryReport {
-            recovery_reason: "audio sidecar commit failed after durable prepare".to_owned(),
-            commit_record_id: ArtifactCommitRecordId(9),
-            source_bundle_id: BundleId(7),
-            role: "commentary_audio",
-            target_path: PathBuf::from("/tmp/target.ogg"),
-            target_exists: true,
-            temp_path: PathBuf::from("/tmp/.target.ogg.tmp"),
-            temp_exists: false,
-            staging_path: PathBuf::from("/tmp/staged.ogg"),
-            staging_exists: true,
-            result_file_version_id: None,
-            result_file_location_id: None,
-            error_code: "CONFLICT",
-            message: "bundle membership conflict".to_owned(),
-        }),
-    };
-
-    let err = ensure_extract_commit_succeeded(&report).unwrap_err();
-
-    assert_eq!(err.error_code(), voom_core::ErrorCode::CommitFailure);
-    assert!(err.to_string().contains("requires recovery"));
-}
-
 #[tokio::test]
 async fn staged_result_probe_failure_does_not_commit() {
     let (cp, _db, dir) = fixture_with_dir().await;
@@ -1079,7 +996,13 @@ struct SeededLegacySingleton {
     source: SeededAudioSource,
     input: ExecuteExtractAudioInput,
     target: PathBuf,
-    legacy: commit::CommitAudioExtractSidecarReport,
+    legacy_commit_record_id: ArtifactCommitRecordId,
+    legacy_result_file_version_id: FileVersionId,
+}
+
+struct HistoricalStagedArtifact {
+    handle_id: ArtifactHandleId,
+    verification_id: ArtifactVerificationId,
 }
 
 async fn seed_legacy_singleton(
@@ -1114,45 +1037,132 @@ async fn seed_legacy_singleton(
     let bytes = b"legacy-sidecar";
     tokio::fs::write(&staging, bytes).await.unwrap();
     let output = observed(u64::try_from(bytes.len()).unwrap(), &blake3_checksum(bytes));
-    let staged = commit::record_staged_audio_extract(
-        cp,
-        &input,
-        source.location,
-        &staging,
-        &selection,
-        &legacy_extract_result(&output),
-    )
-    .await
-    .unwrap();
+    let staged = seed_historical_staged_artifact(cp, source, &staging, &output).await;
+    tokio::fs::write(&target, bytes).await.unwrap();
+    let sidecar =
+        commit_historical_sidecar(cp, source.version, bundle.id, &staged, &target, &output).await;
+    SeededLegacySingleton {
+        source,
+        input,
+        target,
+        legacy_commit_record_id: sidecar.commit_record.id,
+        legacy_result_file_version_id: sidecar.file_version_id,
+    }
+}
+
+async fn seed_historical_staged_artifact(
+    cp: &crate::ControlPlane,
+    source: SeededAudioSource,
+    staging: &std::path::Path,
+    output: &AudioObservedFacts,
+) -> HistoricalStagedArtifact {
+    let mut tx = cp.pool_for_test().begin().await.unwrap();
+    let handle = cp
+        .artifacts()
+        .create_handle_in_tx(
+            &mut tx,
+            NewArtifactHandle {
+                size_bytes: Some(i64::try_from(output.size_bytes).unwrap()),
+                checksum: Some(output.content_hash.clone()),
+                privacy_class: "internal".to_owned(),
+                durability_class: "staging".to_owned(),
+                allowed_access_modes: vec!["local_path".to_owned()],
+                mutability: "immutable".to_owned(),
+                source_lineage: Some(serde_json::json!({
+                    "operation": "extract_audio",
+                    "source_file_version_id": source.version.0,
+                    "source_file_location_id": source.location.0,
+                    "selected_snapshot_stream_id": "a-1",
+                    "intended_role": "external_audio",
+                })),
+                file_version_id: Some(source.version),
+                created_at: OffsetDateTime::UNIX_EPOCH,
+            },
+        )
+        .await
+        .unwrap();
+    let location = cp
+        .artifacts()
+        .record_location_in_tx(
+            &mut tx,
+            NewArtifactLocation {
+                artifact_handle_id: handle.id,
+                kind: "staging".to_owned(),
+                value: staging.display().to_string(),
+                observed_at: OffsetDateTime::UNIX_EPOCH,
+            },
+        )
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
     let verification = crate::artifact::verify::verify_artifact_with_dispatcher(
         cp,
-        crate::artifact::VerifyArtifactInput::for_staged_file(staged.artifact_handle_id, &staging),
+        crate::artifact::VerifyArtifactInput::for_staged_file(handle.id, staging),
         &SuccessfulVerifyDispatcher,
         &crate::artifact::verify::NoVerifyArtifactHooks,
     )
     .await
     .unwrap();
-    let legacy = commit::commit_audio_extract_sidecar(
-        cp,
-        commit::CommitAudioExtractSidecarInput {
-            artifact_handle_id: staged.artifact_handle_id,
-            verification_id: verification.verification_id,
-            source_file_version_id: source.version,
-            source_bundle_id: bundle.id,
-            role: selection.outputs[0].role,
-            staging_path: staging,
-            target_path: target.clone(),
-            output,
-        },
-    )
-    .await
-    .unwrap();
-    SeededLegacySingleton {
-        source,
-        input,
-        target,
-        legacy,
+    assert_eq!(verification.artifact_location_id, location.id);
+    HistoricalStagedArtifact {
+        handle_id: handle.id,
+        verification_id: verification.verification_id,
     }
+}
+
+async fn commit_historical_sidecar(
+    cp: &crate::ControlPlane,
+    source_file_version_id: FileVersionId,
+    source_bundle_id: BundleId,
+    staged: &HistoricalStagedArtifact,
+    target: &std::path::Path,
+    output: &AudioObservedFacts,
+) -> voom_store::repo::artifacts::SidecarArtifactCommit {
+    let mut tx = cp.pool_for_test().begin().await.unwrap();
+    let pending = cp
+        .artifacts()
+        .create_pending_commit_in_tx(
+            &mut tx,
+            NewArtifactCommitRecord {
+                artifact_handle_id: staged.handle_id,
+                source_file_version_id,
+                verification_id: staged.verification_id,
+                target_path: target.display().to_string(),
+                temp_path: Some(format!("{}.legacy-tmp", target.display())),
+                report: serde_json::json!({"operation": "extract_audio_sidecar"}),
+                started_at: OffsetDateTime::UNIX_EPOCH,
+            },
+        )
+        .await
+        .unwrap();
+    let sidecar = cp
+        .artifacts()
+        .record_verified_sidecar_commit_rows_in_tx(
+            &mut tx,
+            NewSidecarArtifactCommit {
+                commit_record_id: pending.id,
+                target_path: target.display().to_string(),
+                content_hash: output.content_hash.clone(),
+                size_bytes: output.size_bytes,
+                observed_at: OffsetDateTime::UNIX_EPOCH,
+                finished_at: OffsetDateTime::UNIX_EPOCH,
+            },
+        )
+        .await
+        .unwrap();
+    cp.bundles
+        .add_member_in_tx(
+            &mut tx,
+            NewBundleMember {
+                bundle_id: source_bundle_id,
+                file_asset_id: sidecar.file_asset_id,
+                role: BundleMemberRole::ExternalAudio,
+            },
+        )
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    sidecar
 }
 
 async fn mutate_legacy_evidence(cp: &crate::ControlPlane, mutation: LegacyEvidenceMutation) {
@@ -1457,27 +1467,6 @@ fn extract_input_for_source(
         staging_root: dir.path().join("voom-audio-stage"),
         target_dir: dir.path().join("voom-audio-out"),
         backup_root: None,
-    }
-}
-
-fn legacy_extract_result(output: &AudioObservedFacts) -> ExtractAudioResult {
-    let source = observed(
-        u64::try_from(b"source".len()).unwrap(),
-        &blake3_checksum(b"source"),
-    );
-    ExtractAudioResult {
-        status: voom_worker_protocol::ExtractAudioStatus::Extracted,
-        provider: "ffmpeg".to_owned(),
-        provider_version: "legacy-test".to_owned(),
-        input_pre: source.clone(),
-        input_post: source,
-        output: output.clone(),
-        output_container: "ogg".to_owned(),
-        output_audio_codec: "opus".to_owned(),
-        selected_snapshot_stream_id: "a-1".to_owned(),
-        output_language: Some("eng".to_owned()),
-        output_title: Some("Main".to_owned()),
-        outputs: None,
     }
 }
 

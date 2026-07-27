@@ -65,8 +65,7 @@ because the legacy contract cannot own two different artifacts at one path;
 the second execution was already a target collision before this change.
 
 `operation_key` is the operation table's sole semantic uniqueness constraint.
-The schema also stores the ordered-target-set hash used in that key for
-diagnostics, but deliberately has no narrower unique index on
+The schema deliberately has no narrower unique index on
 `(source_file_version_id, operation_id)`: the same published plan operation and
 source may legitimately execute to a different complete target set. On resume,
 the host recomputes the key and compares every ordered target path and
@@ -207,9 +206,8 @@ each redispatch the host:
 1. canonicalizes and mode-checks the private operation/attempt directories;
 2. resolves every prior-generation staging leaf and proves it is an immediate
    child of its recorded attempt directory;
-3. requires a cached terminal response, cancellation/process-exit
-   acknowledgement, or explicit operator quiescence acknowledgement after the
-   named worker epoch has been stopped/isolated;
+3. requires a cached terminal response or explicit operator quiescence
+   acknowledgement after the named worker epoch has been stopped/isolated;
 4. removes only regular-file leaves from that exact ledger;
 5. treats absent leaves as already clean;
 6. rejects symlinks, directories, device nodes, and cleanup/stat errors; and
@@ -330,22 +328,14 @@ exact size/hash validation; mismatched bytes are a conflict. The former
 claimant rechecks after install and performs no further mutation after claim
 loss.
 
-Targets live in a host-created Unix directory with mode `0700`. Creation
-records its host UID, device, and inode and rejects symlink or non-directory
-components. Each installed target is a non-symlink regular file with the same
-host UID; the host sets mode `0400` and records device, inode, link count, size,
-and checksum.
+Publication rejects symlink and non-regular target leaves. Add-only install and
+recovery accept an occupied target only when its size and checksum match the
+persisted expected facts. The ledger records those facts plus the staging path,
+target path, and local file key.
 
-Immediately before finalize, canonicalize and `lstat` the parent and require
-the same host UID/device/inode, directory type, and mode `0700`. Open every
-target without following symlinks and require regular-file type, the same host
-UID, mode `0400`, and identical device/inode/link-count/size/checksum. Drift
-fails closed and the successor-owned failure transaction keeps the bundle
-recoverable. There is an unavoidable bounded interval between the last
-filesystem observation and the SQLite commit in which another process running
-as the same service account could mutate the file. Defending against that
-malicious same-account race requires stronger filesystem isolation and belongs
-to #338/#339, not #337.
+Host ownership, permission mode, device, inode, link-count, and stronger parent
+identity fencing are deliberately outside #337. They belong to the following
+execution-safety campaign before the full published grammar corpus runs.
 
 ### Finalize
 
@@ -450,7 +440,7 @@ parser, or compiled-policy shape changes.
 | crash after prepare | none | none | promote all |
 | crash after promotion member N | exact prefix may exist | none | validate prefix, promote rest |
 | claim loss after install | exact prefix may exist | none | successor records recovery, resumes |
-| target ownership/inode/hash drift | conflicting bytes/evidence | none | fail closed |
+| target size/hash drift or symlink | conflicting bytes/evidence | none | fail closed |
 | crash after all promotions | all may exist | none | finalize all |
 | SQLite finalize failure | all may exist | none | retry finalize |
 | retry after committed | all | all | return recorded report |
@@ -483,9 +473,8 @@ only request bytes or exit codes.
   and staged; it cannot bind rows, delete, stage, or overwrite N+1 paths. Its
   orphan attempt bytes remain evidence until positive quiescence. A worker that
   outlives TTL blocks cleanup/redispatch until terminal,
-  cancellation/process-exit, or an explicit post-isolation operator
-  acknowledgement.
-- Quarantine test: without terminal/process-exit/operator proof, retry cannot
+  or an explicit post-isolation operator acknowledgement.
+- Quarantine test: without terminal/operator proof, retry cannot
   clean or create generation N+1. Recording proof after retiring and actually
   stopping the named worker epoch unlocks cleanup/redispatch without operation
   or output identity drift. Host crash after worker completion replays the same
@@ -505,10 +494,8 @@ only request bytes or exit codes.
   expected bytes, one actor finalizes, and neither overwrites a mismatch.
 - Exact collision recovery: accept matching bytes and reject mismatched bytes
   without overwriting.
-- Finalize drift: replace or mutate a target after install; changed ownership,
-  mode, device/inode, link count, size, or hash blocks relational publication.
-  Change the parent UID/mode/inode or substitute a symlink/non-directory and
-  prove the same.
+- Finalize drift: replace or mutate a target after install; changed size/hash
+  or a symlink/non-regular leaf blocks relational publication.
 - Operation identity: the same plan/source/ordered target set resumes one
   ledger, while changing any target or target order creates a distinct ledger
   without conflicting on a narrower plan/source uniqueness constraint.

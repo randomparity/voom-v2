@@ -153,12 +153,41 @@ impl ControlPlane {
         &self,
         job_id: JobId,
     ) -> Result<Vec<FileLocationId>, VoomError> {
+        let ticket_ids: Vec<(i64,)> =
+            sqlx::query_as("SELECT id FROM tickets WHERE job_id = ? ORDER BY id ASC")
+                .bind(sqlite_i64(job_id.0, "promotion job id")?)
+                .fetch_all(&self.pool)
+                .await
+                .map_err(|error| VoomError::database_context("promotion job tickets", error))?;
+        let ticket_ids = ticket_ids
+            .into_iter()
+            .map(|(id,)| sqlite_u64(id, "promotion ticket id"))
+            .map(|result| result.map(TicketId))
+            .collect::<Result<Vec<_>, _>>()?;
+        self.ticket_result_location_ids_for_tickets(&ticket_ids)
+            .await
+    }
+
+    pub(super) async fn ticket_result_location_ids_for_tickets(
+        &self,
+        ticket_ids: &[TicketId],
+    ) -> Result<Vec<FileLocationId>, VoomError> {
+        if ticket_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let ticket_ids = ticket_ids
+            .iter()
+            .map(|id| sqlite_i64(id.0, "promotion ticket id"))
+            .collect::<Result<Vec<_>, _>>()?;
+        let ticket_ids = serde_json::to_string(&ticket_ids)
+            .map_err(|error| VoomError::Internal(format!("promotion tickets encode: {error}")))?;
         let rows: Vec<(i64,)> = sqlx::query_as(
             "SELECT location_id FROM ( \
                SELECT t.id AS ticket_id, 0 AS ordinal, \
                       json_extract(t.result, '$.result_file_location_id') AS location_id \
                FROM tickets t \
-               WHERE t.job_id = ? AND t.state = 'succeeded' AND t.result IS NOT NULL \
+               WHERE t.id IN (SELECT value FROM json_each(?)) \
+                 AND t.state = 'succeeded' AND t.result IS NOT NULL \
                  AND json_type(t.result, '$.result_file_location_id') = 'integer' \
                  AND (json_type(t.result, '$.outputs') IS NULL \
                       OR json_type(t.result, '$.outputs') != 'array' \
@@ -167,12 +196,13 @@ impl ControlPlane {
                SELECT t.id AS ticket_id, CAST(member.key AS INTEGER) AS ordinal, \
                       json_extract(member.value, '$.result_file_location_id') AS location_id \
                FROM tickets t, json_each(t.result, '$.outputs') AS member \
-               WHERE t.job_id = ? AND t.state = 'succeeded' AND t.result IS NOT NULL \
+               WHERE t.id IN (SELECT value FROM json_each(?)) \
+                 AND t.state = 'succeeded' AND t.result IS NOT NULL \
                  AND json_type(member.value, '$.result_file_location_id') = 'integer' \
              ) ORDER BY ticket_id ASC, ordinal ASC",
         )
-        .bind(sqlite_i64(job_id.0, "promotion job id")?)
-        .bind(sqlite_i64(job_id.0, "promotion job id")?)
+        .bind(&ticket_ids)
+        .bind(&ticket_ids)
         .fetch_all(&self.pool)
         .await
         .map_err(|e| VoomError::database_context("promotion ticket results", e))?;

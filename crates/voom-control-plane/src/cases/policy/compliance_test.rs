@@ -1204,8 +1204,8 @@ async fn compliance_audio_extract_outputs_preserve_ticket_and_descriptor_order()
     let outputs = cp.audio_extract_outputs_for_job(job.id).await.unwrap();
 
     assert_eq!(outputs.len(), 2);
-    assert_eq!(outputs[0]["output_id"], "output-a");
-    assert_eq!(outputs[1]["output_id"], "output-b");
+    assert_eq!(outputs[0].output_id.as_deref(), Some("output-a"));
+    assert_eq!(outputs[1].output_id.as_deref(), Some("output-b"));
 
     let legacy = cp
         .create_ticket(NewTicket {
@@ -1240,8 +1240,8 @@ async fn compliance_audio_extract_outputs_preserve_ticket_and_descriptor_order()
 
     let outputs = cp.audio_extract_outputs_for_job(job.id).await.unwrap();
     assert_eq!(outputs.len(), 3);
-    assert_eq!(outputs[2]["result_file_location_id"], 26);
-    assert_eq!(outputs[2]["legacy_singleton"], true);
+    assert_eq!(outputs[2].result_file_location_id, Some(26));
+    assert!(outputs[2].legacy_singleton);
 }
 
 #[tokio::test]

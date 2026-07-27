@@ -162,8 +162,8 @@ Red tests:
 - concurrent resume admits one claimant, and a delayed old-generation result
   completing after the new generation is staged cannot affect bound staging or
   target paths; stale cleanup/redispatch requires cached terminal,
-  cancellation/process-exit, or explicit post-isolation operator
-  acknowledgement, never TTL or database retirement alone;
+  or explicit post-isolation operator acknowledgement, never TTL or database
+  retirement alone;
 - host-crash recovery replays the same generation/idempotency key to obtain the
   cached terminal result;
 - crash immediately before send and immediately after send both recover through
@@ -253,15 +253,11 @@ Behavior:
 - on claim loss, fence the loser from all writes and require the successor to
   atomically mark the operation and every active member commit recoverable
   before continuing;
-- record target ownership, regular-file mode, device, inode, link count, size,
-  and checksum after install; reopen without following symlinks and require
-  those facts immediately before finalize;
-- create the Unix parent as host-owned mode `0700`, record its device/inode, and
-  require the same parent ownership/type/mode/identity plus host-owned regular
-  mode-`0400` targets immediately before finalize;
-- use a typed Unix observation for UID, mode, device, inode, link count, size,
-  and hash; separate pure comparison tests from real no-follow,
-  mode/symlink/inode tests that require no privileged ownership changes;
+- persist exact target size/checksum, staging/target paths, and local file key;
+- reject symlink and non-regular target leaves;
+- leave host ownership, permission mode, device/inode/link-count, parent
+  identity fencing, and stronger same-account isolation to the following
+  execution-safety campaign;
 - recover missing/exact targets and reject mismatched collisions;
 - finalize every identity, result media snapshot, bundle member, commit record,
   and lineage row in one transaction;
@@ -280,10 +276,8 @@ Red tests:
   exact-byte collision handling remains safe;
 - prove the claim loser writes no recovery transition and the successor marks
   every active member recovery-required before continuing;
-- mutate a promoted target in place before finalize and prove ownership,
-  mode/inode/link/size/hash drift fails closed;
-- alter parent ownership/mode/inode or substitute symlink/non-directory
-  components and prove finalize fails closed;
+- mutate or replace a promoted target before finalize and prove size/hash drift
+  or a symlink/non-regular leaf fails closed;
 - assert every member commit is recovery-required after an observed failure;
 - no visible result rows before finalize;
 - recovery returns the same ordered identities;
@@ -366,8 +360,8 @@ Commit: `test(audio): verify atomic plural extraction media`
 - Re-read the complete branch diff for scope and compatibility.
 - Run adversarial review against `main`; fix every defensible finding and
   re-review.
-- Run security-focused review of path ownership, symlink/collision handling,
-  worker result trust, and recovery.
+- Run security-focused review of symlink/collision handling, worker result
+  trust, and recovery within #337's stated threat model.
 - Run simplification review and apply only behavior-preserving reductions.
 - Run `just ci`.
 - Rebase on the latest `origin/main`, rerun `just ci`, push, and open a PR with

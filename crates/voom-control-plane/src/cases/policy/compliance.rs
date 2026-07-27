@@ -103,6 +103,58 @@ pub struct ComplianceApplyData {
     pub issues: IssueApplicationSummary,
 }
 
+/// Ordered published sidecar identity and lineage facts from one extraction output.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct ComplianceAudioExtractOutput {
+    pub output_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub operation_output_id: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_file_version_id: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_media_snapshot_id: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_snapshot_stream_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_provider_stream_index: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub staged_artifact_handle_id: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub staged_artifact_location_id: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub verification_id: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub commit_record_id: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result_file_version_id: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result_file_location_id: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result_file_asset_id: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result_media_snapshot_id: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bundle_member_id: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lineage_id: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub staging_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_path: Option<String>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub legacy_singleton: bool,
+}
+
+#[expect(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "serde skip_serializing_if requires a reference predicate"
+)]
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
 /// The durable result of a `compliance execute` run: the issues applied from
 /// the initial report, plus the phase-barrier coordinator's job-grain summary
 /// and per-phase / per-`(file, phase)` rows. The flat single-report / flat-ticket
@@ -119,7 +171,7 @@ pub struct ComplianceExecuteData {
     pub phases: Vec<PhaseSummaryView>,
     pub file_phases: Vec<FilePhaseSummaryView>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub audio_extract_outputs: Vec<serde_json::Value>,
+    pub audio_extract_outputs: Vec<ComplianceAudioExtractOutput>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub latest_phase_index: Option<usize>,
 }
@@ -128,7 +180,7 @@ impl ComplianceExecuteData {
     fn from_outcome(
         issues: IssueApplicationSummary,
         outcome: &crate::workflow::coordinator::CoordinatorOutcome,
-        audio_extract_outputs: Vec<serde_json::Value>,
+        audio_extract_outputs: Vec<ComplianceAudioExtractOutput>,
     ) -> Self {
         let phases: Vec<PhaseSummaryView> =
             outcome.phases.iter().map(PhaseSummaryView::from).collect();
@@ -471,7 +523,7 @@ pub struct ComplianceRunReportData {
     pub phases: Vec<PhaseSummaryView>,
     pub file_phases: Vec<FilePhaseSummaryView>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub audio_extract_outputs: Vec<serde_json::Value>,
+    pub audio_extract_outputs: Vec<ComplianceAudioExtractOutput>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub latest_phase_index: Option<usize>,
 }
@@ -1110,7 +1162,7 @@ impl ControlPlane {
     async fn audio_extract_outputs_for_job(
         &self,
         job_id: voom_core::JobId,
-    ) -> Result<Vec<serde_json::Value>, VoomError> {
+    ) -> Result<Vec<ComplianceAudioExtractOutput>, VoomError> {
         let job_id = i64::try_from(job_id.0).map_err(|error| {
             VoomError::Internal(format!("audio extract report job id overflow: {error}"))
         })?;

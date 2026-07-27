@@ -193,16 +193,16 @@ async fn audio_extract_multi_match_publishes_ordered_media_and_lineage() {
         assert_extract_execution_result(&url, &out_dir, source_bundle_id, &executed, 2).await;
     assert_ne!(outputs[0].file_name(), outputs[1].file_name());
     assert_ne!(
-        executed.audio_extract_outputs[0]["output_id"],
-        executed.audio_extract_outputs[1]["output_id"]
+        executed.audio_extract_outputs[0].output_id,
+        executed.audio_extract_outputs[1].output_id
     );
     assert_eq!(
-        executed.audio_extract_outputs[0]["source_provider_stream_index"],
-        1
+        executed.audio_extract_outputs[0].source_provider_stream_index,
+        Some(1)
     );
     assert_eq!(
-        executed.audio_extract_outputs[1]["source_provider_stream_index"],
-        2
+        executed.audio_extract_outputs[1].source_provider_stream_index,
+        Some(2)
     );
     let post_run = cp
         .read_compliance_run_report(JobId(executed.summary.job_id))
@@ -424,7 +424,10 @@ async fn assert_extract_execution_result(
     let result = ticket_result(url, executed.summary.job_id, "extract_audio").await;
     let outputs = result["outputs"].as_array().unwrap();
     assert_eq!(outputs.len(), expected_count);
-    assert_eq!(executed.audio_extract_outputs, *outputs);
+    assert_eq!(
+        serde_json::to_value(&executed.audio_extract_outputs).unwrap(),
+        serde_json::Value::Array(outputs.clone())
+    );
     let pool = voom_store::connect(url).await.unwrap();
     let mut promoted = Vec::with_capacity(outputs.len());
     let mut result_asset_ids = Vec::with_capacity(outputs.len());
@@ -515,7 +518,7 @@ async fn assert_extract_lineage(
     pool: &sqlx::SqlitePool,
     source_file_version_id: FileVersionId,
     source_snapshot_id: MediaSnapshotId,
-    outputs: &[serde_json::Value],
+    outputs: &[voom_control_plane::policy::ComplianceAudioExtractOutput],
 ) {
     let rows: Vec<(i64, i64, i64, String, i64, i64)> = sqlx::query_as(
         "SELECT output.ordinal, lineage.source_file_version_id, \
@@ -535,14 +538,14 @@ async fn assert_extract_lineage(
         assert_eq!(row.0, i64::try_from(ordinal).unwrap());
         assert_eq!(row.1, i64::try_from(source_file_version_id.0).unwrap());
         assert_eq!(row.2, i64::try_from(source_snapshot_id.0).unwrap());
-        assert_eq!(row.3, output["source_snapshot_stream_id"].as_str().unwrap());
+        assert_eq!(row.3, output.source_snapshot_stream_id.as_deref().unwrap());
         assert_eq!(
             row.4,
-            i64::try_from(output["source_provider_stream_index"].as_u64().unwrap()).unwrap()
+            i64::from(output.source_provider_stream_index.unwrap())
         );
         assert_eq!(
             row.5,
-            i64::try_from(output["result_file_version_id"].as_u64().unwrap()).unwrap()
+            i64::try_from(output.result_file_version_id.unwrap()).unwrap()
         );
     }
 }

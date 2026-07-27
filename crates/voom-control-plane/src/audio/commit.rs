@@ -24,9 +24,10 @@ use voom_store::repo::artifacts::{
     NewArtifactHandle, NewArtifactLocation, NewSidecarArtifactCommit, SidecarArtifactCommit,
 };
 use voom_store::repo::audio_extract_operations::{
-    AudioExtractOperationRecord, LegacyAudioExtractOwner, NewAudioExtractClaim,
-    NewAudioExtractOperation, NewAudioExtractOutput, NewLegacyAudioExtractAdoption,
-    SqliteAudioExtractOperationRepo,
+    AudioExtractOperationRecord, AudioExtractRecoveryFailure, LegacyAudioExtractOwner,
+    NewAudioExtractClaim, NewAudioExtractOperation, NewAudioExtractOutput,
+    NewFinalizedAudioExtractOutput, NewLegacyAudioExtractAdoption, NewPreparedAudioExtractOutput,
+    NewStagedAudioExtractOutput, SqliteAudioExtractOperationRepo, StageAudioExtractOperation,
 };
 use voom_store::repo::bundles::{BundleMemberRole, NewBundleMember};
 use voom_store::repo::check_lineage_commit_leases_in_tx;
@@ -52,31 +53,6 @@ use crate::scan::persist::{ObservedCandidateFacts, snapshot_with_stream_ids, ver
 pub struct StagedAudioArtifact {
     pub artifact_handle_id: ArtifactHandleId,
     pub artifact_location_id: ArtifactLocationId,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[cfg(test)]
-pub struct CommitAudioExtractSidecarInput {
-    pub artifact_handle_id: ArtifactHandleId,
-    pub verification_id: ArtifactVerificationId,
-    pub source_file_version_id: FileVersionId,
-    pub source_bundle_id: BundleId,
-    pub role: AudioBundleRole,
-    pub staging_path: PathBuf,
-    pub target_path: PathBuf,
-    pub output: AudioObservedFacts,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[cfg(test)]
-pub struct CommitAudioExtractSidecarReport {
-    pub commit_record_id: ArtifactCommitRecordId,
-    pub result_file_version_id: Option<FileVersionId>,
-    pub result_file_location_id: Option<FileLocationId>,
-    pub state: ArtifactCommitState,
-    pub target_path: PathBuf,
-    pub temp_path: PathBuf,
-    pub recovery_required: Option<AudioExtractRecoveryReport>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -205,33 +181,6 @@ pub async fn record_staged_audio_transcode(
     .await
 }
 
-#[cfg(test)]
-pub async fn record_staged_audio_extract(
-    cp: &ControlPlane,
-    input: &ExecuteExtractAudioInput,
-    source_file_location_id: FileLocationId,
-    staging_path: &Path,
-    selection: &ExtractAudioSelectionPlan,
-    result: &ExtractAudioResult,
-) -> Result<StagedAudioArtifact, VoomError> {
-    record_staged_audio(
-        cp,
-        input.source_file_version_id,
-        source_file_location_id,
-        staging_path,
-        result.output.size_bytes,
-        &result.output.content_hash,
-        json!({
-            "operation": "extract_audio",
-            "source_file_version_id": input.source_file_version_id.0,
-            "source_file_location_id": source_file_location_id.0,
-            "selected_snapshot_stream_id": result.selected_snapshot_stream_id,
-            "intended_role": bundle_role(selection.outputs[0].role).as_str(),
-        }),
-    )
-    .await
-}
-
 pub struct StageAudioExtractSetInput<'a> {
     pub execution: &'a ExecuteExtractAudioInput,
     pub source_file_location_id: FileLocationId,
@@ -267,6 +216,7 @@ pub async fn record_staged_audio_extract_set(
     let mut tx = begin_tx(&cp.pool).await?;
     let now = cp.clock().now();
     let mut staged = Vec::with_capacity(staging_paths.len());
+    let mut bindings = Vec::with_capacity(staging_paths.len());
     for (((path, selected), output), operation_output) in staging_paths
         .iter()
         .zip(&selection.outputs)
@@ -296,89 +246,35 @@ pub async fn record_staged_audio_extract_set(
             now,
         )
         .await?;
-        bind_staged_extract_output(&mut tx, operation_output.id, path, output, &artifact).await?;
+        bindings.push(NewStagedAudioExtractOutput {
+            operation_output_id: operation_output.id,
+            staging_path: path.display().to_string(),
+            expected_size_bytes: output.size_bytes,
+            expected_checksum: output.content_hash.clone(),
+            artifact_handle_id: artifact.artifact_handle_id,
+            artifact_location_id: artifact.artifact_location_id,
+            result_facts: serde_json::to_value(output).map_err(|error| {
+                VoomError::Internal(format!("serialize staged audio extraction output: {error}"))
+            })?,
+        });
         staged.push(artifact);
     }
-    let worker_result = serde_json::to_string(result).map_err(|error| {
+    let worker_result = serde_json::to_value(result).map_err(|error| {
         VoomError::Internal(format!("serialize staged audio extraction result: {error}"))
     })?;
-    let update = sqlx::query(
-        "UPDATE audio_extract_operations SET state = 'staged', worker_result = ? \
-         WHERE id = ? AND state = 'planned' AND worker_result IS NULL \
-         AND dispatch_generation = ? AND claim_lease_id = ? AND claim_token = ? \
-         AND claim_expires_at > ?",
+    SqliteAudioExtractOperationRepo::stage_operation_in_tx(
+        &mut tx,
+        StageAudioExtractOperation {
+            operation_id: operation.operation.id,
+            claim,
+            worker_result: &worker_result,
+            outputs: &bindings,
+            observed_at: cp.clock().now(),
+        },
     )
-    .bind(worker_result)
-    .bind(sqlite_id(
-        operation.operation.id,
-        "audio extraction operation",
-    )?)
-    .bind(i64::from(claim.expected_generation))
-    .bind(sqlite_id(claim.lease_id.0, "audio extraction claim lease")?)
-    .bind(&claim.claim_token)
-    .bind(
-        cp.clock()
-            .now()
-            .format(&time::format_description::well_known::Rfc3339)
-            .map_err(|error| {
-                VoomError::Internal(format!("format audio extraction claim check: {error}"))
-            })?,
-    )
-    .execute(&mut *tx)
-    .await
-    .map_err(|error| VoomError::database_context("stage audio extraction operation", error))?;
-    if update.rows_affected() != 1 {
-        return Err(VoomError::Conflict(format!(
-            "audio extraction operation {} was not planned",
-            operation.operation.id
-        )));
-    }
+    .await?;
     commit_tx(tx).await?;
     Ok(staged)
-}
-
-async fn bind_staged_extract_output(
-    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-    operation_output_id: u64,
-    staging_path: &Path,
-    output: &AudioObservedFacts,
-    artifact: &StagedAudioArtifact,
-) -> Result<(), VoomError> {
-    let result_facts = serde_json::to_string(output).map_err(|error| {
-        VoomError::Internal(format!("serialize staged audio extraction output: {error}"))
-    })?;
-    let result = sqlx::query(
-        "UPDATE audio_extract_operation_outputs SET staging_path = ?, expected_size_bytes = ?, \
-         expected_checksum = ?, staging_local_file_key = ?, artifact_handle_id = ?, \
-         artifact_location_id = ?, result_facts = ? \
-         WHERE id = ? AND staging_path IS NULL AND artifact_handle_id IS NULL",
-    )
-    .bind(staging_path.display().to_string())
-    .bind(sqlite_id(output.size_bytes, "audio extraction size")?)
-    .bind(&output.content_hash)
-    .bind(&output.local_file_key)
-    .bind(sqlite_id(
-        artifact.artifact_handle_id.0,
-        "audio extraction artifact handle",
-    )?)
-    .bind(sqlite_id(
-        artifact.artifact_location_id.0,
-        "audio extraction artifact location",
-    )?)
-    .bind(result_facts)
-    .bind(sqlite_id(
-        operation_output_id,
-        "audio extraction operation output",
-    )?)
-    .execute(&mut **tx)
-    .await
-    .map_err(|error| VoomError::database_context("bind staged audio extract output", error))?;
-    if result.rows_affected() != 1 {
-        return Err(VoomError::Conflict(format!(
-            "audio extraction output {operation_output_id} was already staged or is missing"
-        )));
-    }
-    Ok(())
 }
 
 /// The normalized media-snapshot payload probed from the staged artifact (with
@@ -716,28 +612,6 @@ fn merge_audio_output_facts(payload: &mut serde_json::Value, facts: &[AudioOutpu
     }
 }
 
-#[cfg(test)]
-pub async fn commit_audio_extract_sidecar(
-    cp: &ControlPlane,
-    input: CommitAudioExtractSidecarInput,
-) -> Result<CommitAudioExtractSidecarReport, VoomError> {
-    let prepared = prepare_sidecar_commit(cp, &input).await?;
-    match promote_sidecar(&prepared).await {
-        Ok(()) => {}
-        Err(err) => {
-            let report = mark_sidecar_recovery_required(cp, &prepared, &input, err).await?;
-            return Ok(report);
-        }
-    }
-    match finalize_sidecar_commit(cp, &prepared, &input).await {
-        Ok(report) => Ok(report),
-        Err(err) => {
-            let report = mark_sidecar_recovery_required(cp, &prepared, &input, err).await?;
-            Ok(report)
-        }
-    }
-}
-
 pub async fn commit_audio_extract_set(
     cp: &ControlPlane,
     input: &CommitAudioExtractSetInput,
@@ -868,10 +742,21 @@ async fn prepare_extract_set(
     let evaluated =
         check_sidecar_commit_gate(cp, &mut tx, input.source_file_version_id, now).await?;
     let mut prepared = Vec::with_capacity(input.outputs.len());
+    let mut bindings = Vec::with_capacity(input.outputs.len());
     for (output, inspected) in input.outputs.iter().zip(inspected) {
         let record =
             create_extract_pending_in_tx(cp, &mut tx, input, output, &inspected, now).await?;
-        bind_prepared_extract_output(&mut tx, output, &inspected, record.id).await?;
+        bindings.push(NewPreparedAudioExtractOutput {
+            operation_output_id: output.operation_output_id,
+            staging_path: output.staging_path.display().to_string(),
+            temp_path: inspected.temp_path.display().to_string(),
+            artifact_handle_id: output.artifact_handle_id,
+            artifact_location_id: output.artifact_location_id,
+            verification_id: output.verification_id,
+            commit_record_id: record.id,
+            probe_worker_id: output.probed.worker_id,
+            probe_payload: output.probed.payload.clone(),
+        });
         prepared.push(PreparedExtractSetMember {
             prepared: PreparedSidecarCommit {
                 record,
@@ -883,7 +768,14 @@ async fn prepare_extract_set(
             },
         });
     }
-    update_extract_operation_state(&mut tx, input, "staged", "prepared", now).await?;
+    SqliteAudioExtractOperationRepo::prepare_operation_in_tx(
+        &mut tx,
+        input.operation_row_id,
+        &input.claim,
+        &bindings,
+        now,
+    )
+    .await?;
     commit_tx(tx).await?;
     Ok(prepared)
 }
@@ -967,102 +859,6 @@ async fn create_extract_pending_in_tx(
     .map_err(PendingCommitRecordError::into_inner)
 }
 
-async fn bind_prepared_extract_output(
-    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-    output: &CommitAudioExtractOutputInput,
-    inspected: &InspectedExtractOutput,
-    commit_record_id: ArtifactCommitRecordId,
-) -> Result<(), VoomError> {
-    let probe_payload = serde_json::to_string(&output.probed.payload).map_err(|error| {
-        VoomError::Internal(format!("serialize audio extraction probe payload: {error}"))
-    })?;
-    let result = sqlx::query(
-        "UPDATE audio_extract_operation_outputs SET temp_path = ?, verification_id = ?, \
-         commit_record_id = ?, probe_worker_id = ?, probe_payload = ? \
-         WHERE id = ? AND staging_path = ? AND artifact_handle_id = ? \
-           AND artifact_location_id = ? AND verification_id IS NULL AND commit_record_id IS NULL",
-    )
-    .bind(inspected.temp_path.display().to_string())
-    .bind(sqlite_id(
-        output.verification_id.0,
-        "audio extraction verification",
-    )?)
-    .bind(sqlite_id(
-        commit_record_id.0,
-        "audio extraction commit record",
-    )?)
-    .bind(sqlite_id(
-        output.probed.worker_id.0,
-        "audio extraction probe worker",
-    )?)
-    .bind(probe_payload)
-    .bind(sqlite_id(
-        output.operation_output_id,
-        "audio extraction operation output",
-    )?)
-    .bind(output.staging_path.display().to_string())
-    .bind(sqlite_id(
-        output.artifact_handle_id.0,
-        "audio extraction artifact handle",
-    )?)
-    .bind(sqlite_id(
-        output.artifact_location_id.0,
-        "audio extraction artifact location",
-    )?)
-    .execute(&mut **tx)
-    .await
-    .map_err(|error| VoomError::database_context("bind prepared audio extract output", error))?;
-    if result.rows_affected() != 1 {
-        return Err(VoomError::Conflict(format!(
-            "audio extraction output {} was already bound or is missing",
-            output.operation_output_id
-        )));
-    }
-    Ok(())
-}
-
-async fn update_extract_operation_state(
-    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-    input: &CommitAudioExtractSetInput,
-    expected: &str,
-    next: &str,
-    now: time::OffsetDateTime,
-) -> Result<(), VoomError> {
-    let result = sqlx::query(
-        "UPDATE audio_extract_operations SET state = ? WHERE id = ? AND state = ? \
-         AND dispatch_generation = ? AND claim_lease_id = ? AND claim_token = ? \
-         AND claim_expires_at > ?",
-    )
-    .bind(next)
-    .bind(sqlite_id(
-        input.operation_row_id,
-        "audio extraction operation",
-    )?)
-    .bind(expected)
-    .bind(i64::from(input.claim.expected_generation))
-    .bind(sqlite_id(
-        input.claim.lease_id.0,
-        "audio extraction claim lease",
-    )?)
-    .bind(&input.claim.claim_token)
-    .bind(
-        now.format(&time::format_description::well_known::Rfc3339)
-            .map_err(|error| {
-                VoomError::Internal(format!("format audio extraction claim check: {error}"))
-            })?,
-    )
-    .execute(&mut **tx)
-    .await
-    .map_err(|error| VoomError::database_context("transition audio extract operation", error))?;
-    if result.rows_affected() != 1 {
-        return Err(VoomError::Conflict(format!(
-            "audio extraction operation {} is not claimed in {expected}",
-            input.operation_row_id
-        )));
-    }
-    Ok(())
-}
-
 async fn assert_extract_claim(
     cp: &ControlPlane,
     input: &CommitAudioExtractSetInput,
@@ -1072,11 +868,6 @@ async fn assert_extract_claim(
     )
     .acquire_claim(&input.claim, cp.clock().now())
     .await
-}
-
-fn sqlite_id(value: u64, label: &str) -> Result<i64, VoomError> {
-    i64::try_from(value)
-        .map_err(|error| VoomError::Internal(format!("{label} exceeds SQLite integer: {error}")))
 }
 
 async fn record_staged_audio(
@@ -1187,79 +978,6 @@ struct PreparedSidecarCommit {
     gate_evaluated_lease_ids: Vec<UseLeaseId>,
 }
 
-#[cfg(test)]
-async fn prepare_sidecar_commit(
-    cp: &ControlPlane,
-    input: &CommitAudioExtractSidecarInput,
-) -> Result<PreparedSidecarCommit, VoomError> {
-    let target_path = canonical_new_leaf_no_symlink(&input.target_path).await?;
-    let temp_path = canonical_new_leaf_no_symlink(unique_temp_sibling_path(&target_path)?).await?;
-    let reported_facts = ArtifactFileFacts {
-        path: input.staging_path.clone(),
-        size_bytes: input.output.size_bytes,
-        content_hash: input.output.content_hash.clone(),
-        modified_at: None,
-        local_file_key: input.output.local_file_key.clone(),
-    };
-    let expected_facts =
-        require_expected_staging_facts(&input.staging_path, &reported_facts).await?;
-    let mut tx = begin_tx(&cp.pool).await?;
-    let now = cp.clock().now();
-    // Commit safety gate: a blocking use lease live at commit time on the
-    // source lineage fails the sidecar commit here, before the pending commit
-    // record and before any filesystem mutation. The evaluated lease ids are
-    // recorded in the completed event. Any gate-check error is fail-closed.
-    let gate_evaluated_lease_ids =
-        check_sidecar_commit_gate(cp, &mut tx, input.source_file_version_id, now).await?;
-    let pending_input = NewArtifactCommitRecord {
-        artifact_handle_id: input.artifact_handle_id,
-        source_file_version_id: input.source_file_version_id,
-        verification_id: input.verification_id,
-        target_path: target_path.display().to_string(),
-        temp_path: Some(temp_path.display().to_string()),
-        report: json!({
-            "operation": "extract_audio_sidecar",
-            "phase": "prepared",
-            "source_bundle_id": input.source_bundle_id.0,
-            "role": bundle_role(input.role).as_str(),
-            "staging_path": input.staging_path.display().to_string(),
-            "target_path": target_path.display().to_string(),
-            "temp_path": temp_path.display().to_string(),
-            "expected_size_bytes": expected_facts.size_bytes,
-            "expected_checksum": expected_facts.content_hash,
-            "staging_local_file_key": expected_facts.local_file_key,
-        }),
-        started_at: now,
-    };
-    let record = create_pending_commit_with_started_event_in_tx(
-        &cp.artifacts,
-        &cp.events,
-        &mut tx,
-        pending_input,
-        |commit_record_id| {
-            Event::ArtifactCommitStarted(ArtifactCommitStartedPayload {
-                commit_record_id: commit_record_id.0,
-                artifact_handle_id: input.artifact_handle_id.0,
-                source_file_version_id: input.source_file_version_id.0,
-                verification_id: input.verification_id.0,
-                target_path: target_path.display().to_string(),
-                temp_path: temp_path.display().to_string(),
-            })
-        },
-    )
-    .await
-    .map_err(PendingCommitRecordError::into_inner)?;
-    commit_tx(tx).await?;
-    Ok(PreparedSidecarCommit {
-        record,
-        staging_path: input.staging_path.clone(),
-        target_path,
-        temp_path,
-        expected_facts,
-        gate_evaluated_lease_ids,
-    })
-}
-
 /// Consult the commit safety gate for the audio sidecar extract commit. Returns
 /// the use-lease ids the gate evaluated (recorded in the completed event) when
 /// no blocking lease is live; a blocking lease fails the commit with
@@ -1309,69 +1027,6 @@ async fn promote_sidecar(prepared: &PreparedSidecarCommit) -> Result<(), VoomErr
     Ok(())
 }
 
-#[cfg(test)]
-async fn finalize_sidecar_commit(
-    cp: &ControlPlane,
-    prepared: &PreparedSidecarCommit,
-    input: &CommitAudioExtractSidecarInput,
-) -> Result<CommitAudioExtractSidecarReport, VoomError> {
-    let mut tx = begin_tx(&cp.pool).await?;
-    let now = cp.clock().now();
-    let sidecar = cp
-        .artifacts
-        .record_verified_sidecar_commit_rows_in_tx(
-            &mut tx,
-            NewSidecarArtifactCommit {
-                commit_record_id: prepared.record.id,
-                target_path: prepared.target_path.display().to_string(),
-                content_hash: prepared.expected_facts.content_hash.clone(),
-                size_bytes: prepared.expected_facts.size_bytes,
-                observed_at: now,
-                finished_at: now,
-            },
-        )
-        .await?;
-    cp.bundles
-        .add_member_in_tx(
-            &mut tx,
-            NewBundleMember {
-                bundle_id: input.source_bundle_id,
-                file_asset_id: sidecar.file_asset_id,
-                role: bundle_role(input.role),
-            },
-        )
-        .await?;
-    append_commit_event_in_tx(
-        &cp.events,
-        &mut tx,
-        input.artifact_handle_id,
-        now,
-        Event::ArtifactCommitCompleted(ArtifactCommitCompletedPayload {
-            commit_record_id: sidecar.commit_record.id.0,
-            artifact_handle_id: input.artifact_handle_id.0,
-            result_file_version_id: sidecar.file_version_id.0,
-            result_file_location_id: sidecar.file_location_id.0,
-            target_path: prepared.target_path.display().to_string(),
-            gate_evaluated_lease_ids: prepared
-                .gate_evaluated_lease_ids
-                .iter()
-                .map(|id| id.0)
-                .collect(),
-        }),
-    )
-    .await?;
-    commit_tx(tx).await?;
-    Ok(CommitAudioExtractSidecarReport {
-        commit_record_id: sidecar.commit_record.id,
-        result_file_version_id: Some(sidecar.file_version_id),
-        result_file_location_id: Some(sidecar.file_location_id),
-        state: sidecar.commit_record.state,
-        target_path: prepared.target_path.clone(),
-        temp_path: prepared.temp_path.clone(),
-        recovery_required: None,
-    })
-}
-
 async fn finalize_extract_set(
     cp: &ControlPlane,
     input: &CommitAudioExtractSetInput,
@@ -1383,7 +1038,13 @@ async fn finalize_extract_set(
     for (output, member) in input.outputs.iter().zip(prepared) {
         committed.push(finalize_extract_member(cp, &mut tx, input, (output, member), now).await?);
     }
-    complete_extract_operation_in_tx(&mut tx, input, now).await?;
+    SqliteAudioExtractOperationRepo::complete_operation_in_tx(
+        &mut tx,
+        input.operation_row_id,
+        &input.claim,
+        now,
+    )
+    .await?;
     commit_tx(tx).await?;
     Ok(committed)
 }
@@ -1434,16 +1095,21 @@ async fn finalize_extract_member(
             },
         )
         .await?;
-    let lineage_id =
-        record_extract_lineage_in_tx(tx, input, output, sidecar.file_version_id, now).await?;
-    bind_finalized_extract_output(
+    let lineage_id = SqliteAudioExtractOperationRepo::record_finalized_output_in_tx(
         tx,
-        output.operation_output_id,
-        sidecar.file_asset_id.0,
-        sidecar.file_version_id,
-        sidecar.file_location_id,
-        result_snapshot.id,
-        bundle_member.id,
+        &NewFinalizedAudioExtractOutput {
+            operation_output_id: output.operation_output_id,
+            source_file_version_id: input.source_file_version_id,
+            source_media_snapshot_id: input.source_media_snapshot_id,
+            source_snapshot_stream_id: output.source_snapshot_stream_id.clone(),
+            source_provider_stream_index: output.source_provider_stream_index,
+            result_file_asset_id: sidecar.file_asset_id.0,
+            result_file_version_id: sidecar.file_version_id,
+            result_file_location_id: sidecar.file_location_id,
+            result_media_snapshot_id: result_snapshot.id,
+            bundle_member_id: bundle_member.id,
+            recorded_at: now,
+        },
     )
     .await?;
     append_extract_commit_completed_event(cp, tx, (output, member), &sidecar, now).await?;
@@ -1518,139 +1184,6 @@ async fn append_extract_commit_completed_event(
     .await
 }
 
-async fn complete_extract_operation_in_tx(
-    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-    input: &CommitAudioExtractSetInput,
-    now: time::OffsetDateTime,
-) -> Result<(), VoomError> {
-    let finished_at = now
-        .format(&time::format_description::well_known::Rfc3339)
-        .map_err(|error| {
-            VoomError::Internal(format!("format audio extract completion time: {error}"))
-        })?;
-    let result = sqlx::query(
-        "UPDATE audio_extract_operations SET state = 'committed', finished_at = ?, \
-         recovery_failure_class = NULL, recovery_error_code = NULL, recovery_message = NULL \
-         WHERE id = ? AND state IN ('prepared', 'recovery_required') \
-         AND dispatch_generation = ? AND claim_lease_id = ? AND claim_token = ? \
-         AND claim_expires_at > ?",
-    )
-    .bind(&finished_at)
-    .bind(sqlite_id(
-        input.operation_row_id,
-        "audio extraction operation",
-    )?)
-    .bind(i64::from(input.claim.expected_generation))
-    .bind(sqlite_id(
-        input.claim.lease_id.0,
-        "audio extraction claim lease",
-    )?)
-    .bind(&input.claim.claim_token)
-    .bind(&finished_at)
-    .execute(&mut **tx)
-    .await
-    .map_err(|error| VoomError::database_context("finalize audio extract operation", error))?;
-    if result.rows_affected() != 1 {
-        return Err(VoomError::Conflict(format!(
-            "audio extraction operation {} is not claimed for finalize",
-            input.operation_row_id
-        )));
-    }
-    Ok(())
-}
-
-async fn record_extract_lineage_in_tx(
-    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-    input: &CommitAudioExtractSetInput,
-    output: &CommitAudioExtractOutputInput,
-    result_file_version_id: FileVersionId,
-    now: time::OffsetDateTime,
-) -> Result<u64, VoomError> {
-    let result = sqlx::query(
-        "INSERT INTO audio_extract_output_lineage \
-         (operation_output_id, source_file_version_id, source_media_snapshot_id, \
-          source_snapshot_stream_id, source_provider_stream_index, \
-          result_file_version_id, recorded_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-    )
-    .bind(sqlite_id(
-        output.operation_output_id,
-        "audio extraction operation output",
-    )?)
-    .bind(sqlite_id(
-        input.source_file_version_id.0,
-        "audio extraction source version",
-    )?)
-    .bind(sqlite_id(
-        input.source_media_snapshot_id.0,
-        "audio extraction source snapshot",
-    )?)
-    .bind(&output.source_snapshot_stream_id)
-    .bind(i64::from(output.source_provider_stream_index))
-    .bind(sqlite_id(
-        result_file_version_id.0,
-        "audio extraction result version",
-    )?)
-    .bind(
-        now.format(&time::format_description::well_known::Rfc3339)
-            .map_err(|error| {
-                VoomError::Internal(format!("format audio extraction lineage time: {error}"))
-            })?,
-    )
-    .execute(&mut **tx)
-    .await
-    .map_err(|error| VoomError::database_context("insert audio extraction lineage", error))?;
-    u64::try_from(result.last_insert_rowid()).map_err(|error| {
-        VoomError::Internal(format!("audio extraction lineage id is invalid: {error}"))
-    })
-}
-
-async fn bind_finalized_extract_output(
-    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-    operation_output_id: u64,
-    file_asset_id: u64,
-    file_version_id: FileVersionId,
-    file_location_id: FileLocationId,
-    media_snapshot_id: MediaSnapshotId,
-    bundle_member_id: u64,
-) -> Result<(), VoomError> {
-    let result = sqlx::query(
-        "UPDATE audio_extract_operation_outputs SET result_file_asset_id = ?, \
-         result_file_version_id = ?, result_file_location_id = ?, result_media_snapshot_id = ?, \
-         bundle_member_id = ? \
-         WHERE id = ? AND result_file_version_id IS NULL",
-    )
-    .bind(sqlite_id(file_asset_id, "audio extraction result asset")?)
-    .bind(sqlite_id(
-        file_version_id.0,
-        "audio extraction result version",
-    )?)
-    .bind(sqlite_id(
-        file_location_id.0,
-        "audio extraction result location",
-    )?)
-    .bind(sqlite_id(
-        media_snapshot_id.0,
-        "audio extraction result snapshot",
-    )?)
-    .bind(sqlite_id(
-        bundle_member_id,
-        "audio extraction bundle member",
-    )?)
-    .bind(sqlite_id(
-        operation_output_id,
-        "audio extraction operation output",
-    )?)
-    .execute(&mut **tx)
-    .await
-    .map_err(|error| VoomError::database_context("bind finalized audio extract output", error))?;
-    if result.rows_affected() != 1 {
-        return Err(VoomError::Conflict(format!(
-            "audio extraction output {operation_output_id} was already finalized or is missing"
-        )));
-    }
-    Ok(())
-}
-
 async fn mark_extract_set_recovery_required(
     cp: &ControlPlane,
     input: &CommitAudioExtractSetInput,
@@ -1691,121 +1224,18 @@ async fn mark_extract_set_recovery_required(
         )
         .await?;
     }
-    let result = sqlx::query(
-        "UPDATE audio_extract_operations SET state = 'recovery_required', \
-         recovery_failure_class = 'commit_failure', recovery_error_code = ?, \
-         recovery_message = ? WHERE id = ? AND state = 'prepared' \
-         AND dispatch_generation = ? AND claim_lease_id = ? AND claim_token = ? \
-         AND claim_expires_at > ?",
-    )
-    .bind(error.error_code().as_str())
-    .bind(error.to_string())
-    .bind(sqlite_id(
-        input.operation_row_id,
-        "audio extraction operation",
-    )?)
-    .bind(i64::from(input.claim.expected_generation))
-    .bind(sqlite_id(
-        input.claim.lease_id.0,
-        "audio extraction claim lease",
-    )?)
-    .bind(&input.claim.claim_token)
-    .bind(
-        now.format(&time::format_description::well_known::Rfc3339)
-            .map_err(|format_error| {
-                VoomError::Internal(format!(
-                    "format audio extraction recovery claim check: {format_error}"
-                ))
-            })?,
-    )
-    .execute(&mut *tx)
-    .await
-    .map_err(|db_error| {
-        VoomError::database_context("mark audio extraction set recovery required", db_error)
-    })?;
-    if result.rows_affected() != 1 {
-        return Err(VoomError::Conflict(format!(
-            "audio extraction operation {} could not enter recovery",
-            input.operation_row_id
-        )));
-    }
-    commit_tx(tx).await
-}
-
-#[cfg(test)]
-async fn mark_sidecar_recovery_required(
-    cp: &ControlPlane,
-    prepared: &PreparedSidecarCommit,
-    input: &CommitAudioExtractSidecarInput,
-    err: VoomError,
-) -> Result<CommitAudioExtractSidecarReport, VoomError> {
-    let mut tx = begin_tx(&cp.pool).await?;
-    let now = cp.clock().now();
-    let recovery_reason = "audio sidecar commit failed after durable prepare".to_owned();
-    let error_code = err.error_code().as_str().to_owned();
-    let message = err.to_string();
-    let recovered = mark_recovery_required_with_event_in_tx(
-        &cp.artifacts,
-        &cp.events,
+    SqliteAudioExtractOperationRepo::mark_recovery_required_in_tx(
         &mut tx,
-        RecoveryRequiredCommit {
-            commit_record_id: prepared.record.id,
-            artifact_handle_id: input.artifact_handle_id,
-            failure: ArtifactCommitFailure {
-                failure_class: "commit_failure".to_owned(),
-                error_code: error_code.clone(),
-                message: message.clone(),
-                finished_at: now,
-            },
-            recovery_reason: recovery_reason.clone(),
-            event: Event::ArtifactCommitRecoveryRequired(ArtifactCommitRecoveryRequiredPayload {
-                commit_record_id: prepared.record.id.0,
-                artifact_handle_id: input.artifact_handle_id.0,
-                target_path: prepared.target_path.display().to_string(),
-                temp_path: prepared.temp_path.display().to_string(),
-                recovery_reason,
-                error_code,
-                message,
-            }),
-            occurred_at: now,
+        input.operation_row_id,
+        &input.claim,
+        &AudioExtractRecoveryFailure {
+            error_code: error.error_code().as_str().to_owned(),
+            message: error.to_string(),
         },
+        now,
     )
     .await?;
-    commit_tx(tx).await?;
-    let recovery = recovery_report(prepared, input, &err).await;
-    Ok(CommitAudioExtractSidecarReport {
-        commit_record_id: recovered.id,
-        result_file_version_id: recovered.result_file_version_id,
-        result_file_location_id: recovered.result_file_location_id,
-        state: recovered.state,
-        target_path: prepared.target_path.clone(),
-        temp_path: prepared.temp_path.clone(),
-        recovery_required: Some(recovery),
-    })
-}
-
-#[cfg(test)]
-async fn recovery_report(
-    prepared: &PreparedSidecarCommit,
-    input: &CommitAudioExtractSidecarInput,
-    err: &VoomError,
-) -> AudioExtractRecoveryReport {
-    AudioExtractRecoveryReport {
-        recovery_reason: "audio sidecar commit failed after durable prepare".to_owned(),
-        commit_record_id: prepared.record.id,
-        source_bundle_id: input.source_bundle_id,
-        role: bundle_role(input.role).as_str(),
-        target_path: prepared.target_path.clone(),
-        target_exists: path_exists(&prepared.target_path).await,
-        temp_path: prepared.temp_path.clone(),
-        temp_exists: path_exists(&prepared.temp_path).await,
-        staging_path: prepared.staging_path.clone(),
-        staging_exists: path_exists(&prepared.staging_path).await,
-        result_file_version_id: None,
-        result_file_location_id: None,
-        error_code: err.error_code().as_str(),
-        message: err.to_string(),
-    }
+    commit_tx(tx).await
 }
 
 fn bundle_role(role: AudioBundleRole) -> BundleMemberRole {
@@ -1813,11 +1243,6 @@ fn bundle_role(role: AudioBundleRole) -> BundleMemberRole {
         AudioBundleRole::CommentaryAudio => BundleMemberRole::CommentaryAudio,
         AudioBundleRole::ExternalAudio => BundleMemberRole::ExternalAudio,
     }
-}
-
-#[cfg(test)]
-async fn path_exists(path: &Path) -> bool {
-    tokio::fs::symlink_metadata(path).await.is_ok()
 }
 
 fn result_probe_request(
