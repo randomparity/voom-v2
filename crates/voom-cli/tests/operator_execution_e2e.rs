@@ -47,42 +47,49 @@ const BUILD_TIMEOUT: Duration = Duration::from_mins(5);
 
 #[tokio::test(flavor = "multi_thread")]
 async fn operator_runs_real_media_pipeline_through_cli() {
-    // Bundled workers the live topology spawns: the two mutation workers we run
-    // via `run-local`, plus the ffprobe + verify workers the control plane spawns
-    // as siblings during scan/execute.
-    build_worker_package("voom-ffmpeg-worker", BUILD_TIMEOUT).unwrap();
-    build_worker_package("voom-mkvtoolnix-worker", BUILD_TIMEOUT).unwrap();
-    build_worker_package("voom-ffprobe-worker", BUILD_TIMEOUT).unwrap();
-    build_worker_package("voom-verify-artifact-worker", BUILD_TIMEOUT).unwrap();
-    // Post-commit result probes must run REAL ffprobe against committed bytes;
-    // hide any canned test-helper `ffprobe` stub a sibling test left in the
-    // shared profile dir.
+    prepare_worker_binaries();
     let _ffprobe_guard = hide_stale_fake_ffprobe_sibling("operator-execution-e2e").unwrap();
+    let (_tmp, root, library, url) = prepare_operator_fixture();
+    assert_ok(&run_voom(&url, &["init"]), "init");
 
-    let tmp = tempfile::TempDir::new().unwrap();
-    let root = tmp.path().canonicalize().unwrap();
-    let library = root.join("library");
-    std::fs::create_dir(&library).unwrap();
-    let movie = library.join("Movie.mp4");
-    generate_h264_fixture(&movie);
-    std::fs::write(library.join("notes.txt"), b"just some notes, not a video\n").unwrap();
-
-    let db = tempfile::NamedTempFile::new_in(&root).unwrap();
-    let url = format!("sqlite://{}", db.path().display());
-
-    // 3. Apply migrations against the shared DB.
-    let init = run_voom(&url, &["init"]);
-    assert_ok(&init, "init");
-
-    // 4. Spawn the two real worker processes and gate on their readiness lines.
     let mut ffmpeg = LocalWorker::spawn(&url, "ffmpeg").unwrap();
     let mut mkvtoolnix = LocalWorker::spawn(&url, "mkvtoolnix").unwrap();
     ffmpeg.wait_for_ready(READY_TIMEOUT).unwrap();
     mkvtoolnix.wait_for_ready(READY_TIMEOUT).unwrap();
+    let (policy_version_id, input_set_id) = create_library_policy(&url, &root, &library);
 
-    // 5. Scan the library directory. notes.txt is filtered at discovery as an
-    // unsupported extension, so the video is ingested and the text file skipped.
-    let scan = run_voom(&url, &["scan", "--path", &library.display().to_string()]);
+    let out_dir = root.join("out");
+    let staging_root = root.join("stage");
+    let execute = run_execute_with_concurrent_reader(
+        &url,
+        policy_version_id,
+        input_set_id,
+        &staging_root,
+        &out_dir,
+    );
+    assert_execute_committed(&execute, &out_dir);
+
+    let ffmpeg_id = ffmpeg.worker_id();
+    let mkvtoolnix_id = mkvtoolnix.worker_id();
+    assert_retired_envelope(
+        &ffmpeg.shutdown(SHUTDOWN_TIMEOUT).unwrap(),
+        ffmpeg_id,
+        "ffmpeg",
+    );
+    assert_retired_envelope(
+        &mkvtoolnix.shutdown(SHUTDOWN_TIMEOUT).unwrap(),
+        mkvtoolnix_id,
+        "mkvtoolnix",
+    );
+
+    let final_list = run_voom(&url, &["worker", "list"]);
+    let final_json = assert_ok(&final_list, "worker list (post-shutdown)");
+    assert_no_live_worker(&final_json, ffmpeg_id);
+    assert_no_live_worker(&final_json, mkvtoolnix_id);
+}
+
+fn create_library_policy(url: &str, root: &Path, library: &Path) -> (u64, u64) {
+    let scan = run_voom(url, &["scan", "--path", &library.display().to_string()]);
     let scan_json = assert_ok(&scan, "scan");
     assert_eq!(
         scan_json["data"]["summary"]["ingested"], 1,
@@ -93,11 +100,10 @@ async fn operator_runs_real_media_pipeline_through_cli() {
         "notes.txt is skipped at scan as an unsupported extension: {scan_json}"
     );
 
-    // 6. Create the policy; capture the accepted version id.
     let policy_file = root.join("remux-and-hevc.voom");
     std::fs::write(&policy_file, POLICY).unwrap();
     let policy = run_voom(
-        &url,
+        url,
         &[
             "policy",
             "create",
@@ -112,9 +118,8 @@ async fn operator_runs_real_media_pipeline_through_cli() {
         .as_u64()
         .unwrap();
 
-    // 7. Build the whole-library input set from scan rows; capture its id.
     let input = run_voom(
-        &url,
+        url,
         &[
             "policy",
             "input",
@@ -140,40 +145,35 @@ async fn operator_runs_real_media_pipeline_through_cli() {
          already filtered at scan: {input_json}"
     );
     let input_set_id = input_set["input_set_id"].as_u64().unwrap();
+    (policy_version_id, input_set_id)
+}
 
-    // 8. + 9. Run `compliance execute` while a concurrent `worker list` reader
-    // hits the same DB; execution is the oracle for what commits.
-    let out_dir = root.join("out");
-    let staging_root = root.join("stage");
-    let execute = run_execute_with_concurrent_reader(
-        &url,
-        policy_version_id,
-        input_set_id,
-        &staging_root,
-        &out_dir,
-    );
-    assert_execute_committed(&execute, &out_dir);
+fn prepare_worker_binaries() {
+    for package in [
+        "voom-ffmpeg-worker",
+        "voom-mkvtoolnix-worker",
+        "voom-ffprobe-worker",
+        "voom-verify-artifact-worker",
+    ] {
+        build_worker_package(package, BUILD_TIMEOUT).unwrap();
+    }
+}
 
-    // 10. Retire the workers by closing their stdin; assert each prints its final
-    // retirement envelope and exits cleanly.
-    let ffmpeg_id = ffmpeg.worker_id();
-    let mkvtoolnix_id = mkvtoolnix.worker_id();
-    assert_retired_envelope(
-        &ffmpeg.shutdown(SHUTDOWN_TIMEOUT).unwrap(),
-        ffmpeg_id,
-        "ffmpeg",
-    );
-    assert_retired_envelope(
-        &mkvtoolnix.shutdown(SHUTDOWN_TIMEOUT).unwrap(),
-        mkvtoolnix_id,
-        "mkvtoolnix",
-    );
-
-    // After both supervisors retired their workers, neither is live anymore.
-    let final_list = run_voom(&url, &["worker", "list"]);
-    let final_json = assert_ok(&final_list, "worker list (post-shutdown)");
-    assert_no_live_worker(&final_json, ffmpeg_id);
-    assert_no_live_worker(&final_json, mkvtoolnix_id);
+fn prepare_operator_fixture() -> (
+    tempfile::TempDir,
+    std::path::PathBuf,
+    std::path::PathBuf,
+    String,
+) {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    let library = root.join("library");
+    std::fs::create_dir(&library).unwrap();
+    generate_h264_fixture(&library.join("Movie.mp4"));
+    std::fs::write(library.join("notes.txt"), b"just some notes, not a video\n").unwrap();
+    let db = tempfile::NamedTempFile::new_in(&root).unwrap();
+    let url = format!("sqlite://{}", db.path().display());
+    (tmp, root, library, url)
 }
 
 /// Run `compliance execute` on a worker thread while the main thread issues
