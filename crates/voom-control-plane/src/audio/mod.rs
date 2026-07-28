@@ -1476,16 +1476,51 @@ pub(crate) async fn execute_extract_audio_with_dispatchers(
     verify: &dyn VerifyArtifactDispatcher,
     result_probe: &dyn commit::AudioResultProbeDispatcher,
 ) -> Result<ExecuteExtractAudioReport, VoomError> {
+    execute_extract_audio_with_services(
+        cp,
+        input,
+        ExtractAudioExecutionServices {
+            extract,
+            verify,
+            result_probe,
+            claim_fence_hooks: &commit::NoExtractClaimFenceHooks,
+        },
+    )
+    .await
+}
+
+#[derive(Clone, Copy)]
+struct ExtractAudioExecutionServices<'a> {
+    extract: &'a dyn ExtractAudioDispatcher,
+    verify: &'a dyn VerifyArtifactDispatcher,
+    result_probe: &'a dyn commit::AudioResultProbeDispatcher,
+    claim_fence_hooks: &'a dyn commit::ExtractClaimFenceHooks,
+}
+
+async fn execute_extract_audio_with_services(
+    cp: &ControlPlane,
+    input: ExecuteExtractAudioInput,
+    services: ExtractAudioExecutionServices<'_>,
+) -> Result<ExecuteExtractAudioReport, VoomError> {
+    let ExtractAudioExecutionServices {
+        extract,
+        verify,
+        result_probe,
+        claim_fence_hooks,
+    } = services;
     let failure_input = input.clone();
     let mut context = ExtractAttemptContext::default();
     let verify = verify.start_session();
     let result_probe = result_probe.start_session();
     let outcome = execute_extract_audio_inner(
-        cp,
+        ExtractExecutionDependencies {
+            cp,
+            extract,
+            verify: verify.as_ref(),
+            result_probe: result_probe.as_ref(),
+            claim_fence_hooks,
+        },
         input,
-        extract,
-        verify.as_ref(),
-        result_probe.as_ref(),
         &mut context,
     )
     .await;
@@ -1543,13 +1578,17 @@ async fn finalize_extract_failure(
 }
 
 async fn execute_extract_audio_inner(
-    cp: &ControlPlane,
+    dependencies: ExtractExecutionDependencies<'_>,
     input: ExecuteExtractAudioInput,
-    extract: &dyn ExtractAudioDispatcher,
-    verify: &dyn VerifyArtifactDispatcher,
-    result_probe: &dyn commit::AudioResultProbeDispatcher,
     context: &mut ExtractAttemptContext,
 ) -> Result<ExecuteExtractAudioReport, VoomError> {
+    let ExtractExecutionDependencies {
+        cp,
+        extract,
+        verify,
+        result_probe,
+        claim_fence_hooks,
+    } = dependencies;
     let prepared = prepare_extract_execution(cp, &input, result_probe, context).await?;
     let resume = ExtractResumeContext {
         cp,
@@ -1559,7 +1598,8 @@ async fn execute_extract_audio_inner(
         operation: &prepared.paths.operation,
     };
     if let Some(report) =
-        maybe_resume_extract_operation(&resume, verify, result_probe, context).await?
+        maybe_resume_extract_operation(&resume, verify, result_probe, context, claim_fence_hooks)
+            .await?
     {
         return Ok(report);
     }
@@ -1569,6 +1609,7 @@ async fn execute_extract_audio_inner(
             extract,
             verify,
             result_probe,
+            claim_fence_hooks,
         },
         input,
         prepared,
@@ -1582,6 +1623,7 @@ struct ExtractExecutionDependencies<'a> {
     extract: &'a dyn ExtractAudioDispatcher,
     verify: &'a dyn VerifyArtifactDispatcher,
     result_probe: &'a dyn commit::AudioResultProbeDispatcher,
+    claim_fence_hooks: &'a dyn commit::ExtractClaimFenceHooks,
 }
 
 async fn execute_new_extract_attempt(
@@ -1595,6 +1637,7 @@ async fn execute_new_extract_attempt(
         extract,
         verify,
         result_probe,
+        claim_fence_hooks,
     } = dependencies;
     let PreparedExtractExecution {
         selected,
@@ -1670,7 +1713,7 @@ async fn execute_new_extract_attempt(
     })?;
     let commit_outputs =
         verify_and_probe_extract_members(cp, staged_members, verify, result_probe).await?;
-    commit_verified_extract_audio(
+    commit_verified_extract_audio_with_hooks(
         cp,
         ExtractCommitRequest {
             input,
@@ -1682,6 +1725,7 @@ async fn execute_new_extract_attempt(
             outputs: commit_outputs,
             claim: dispatch.claim.clone(),
         },
+        claim_fence_hooks,
     )
     .await
 }
@@ -1858,6 +1902,7 @@ async fn maybe_resume_extract_operation(
     verify: &dyn VerifyArtifactDispatcher,
     result_probe: &dyn commit::AudioResultProbeDispatcher,
     context: &mut ExtractAttemptContext,
+    claim_fence_hooks: &dyn commit::ExtractClaimFenceHooks,
 ) -> Result<Option<ExecuteExtractAudioReport>, VoomError> {
     let ExtractResumeContext {
         cp,
@@ -1874,14 +1919,14 @@ async fn maybe_resume_extract_operation(
             let (claim, _, _) = acquire_extract_claim(cp, input, operation).await?;
             context.claim = Some(claim.clone());
             commit::record_prepared_successor_evidence(cp, operation, &claim).await?;
-            recover_extract_report(cp, input, source_location_id, selection, operation, &claim)
+            recover_extract_report(resume, &claim, claim_fence_hooks)
                 .await
                 .map(Some)
         }
         AudioExtractOperationState::RecoveryRequired => {
             let (claim, _, _) = acquire_extract_claim(cp, input, operation).await?;
             context.claim = Some(claim.clone());
-            recover_extract_report(cp, input, source_location_id, selection, operation, &claim)
+            recover_extract_report(resume, &claim, claim_fence_hooks)
                 .await
                 .map(Some)
         }
@@ -1889,7 +1934,7 @@ async fn maybe_resume_extract_operation(
         AudioExtractOperationState::Staged => {
             let (claim, _, _) = acquire_extract_claim(cp, input, operation).await?;
             context.claim = Some(claim.clone());
-            resume_staged_extract_report(resume, &claim, verify, result_probe)
+            resume_staged_extract_report(resume, &claim, verify, result_probe, claim_fence_hooks)
                 .await
                 .map(Some)
         }
@@ -1901,6 +1946,7 @@ async fn resume_staged_extract_report(
     claim: &NewAudioExtractClaim,
     verify: &dyn VerifyArtifactDispatcher,
     result_probe: &dyn commit::AudioResultProbeDispatcher,
+    claim_fence_hooks: &dyn commit::ExtractClaimFenceHooks,
 ) -> Result<ExecuteExtractAudioReport, VoomError> {
     let ExtractResumeContext {
         cp,
@@ -1935,7 +1981,7 @@ async fn resume_staged_extract_report(
     let staged_members = prepare_resumed_extract_members(operation, selection, &result, missing)?;
     let commit_outputs =
         verify_and_probe_extract_members(cp, staged_members, verify, result_probe).await?;
-    commit_verified_extract_audio(
+    commit_verified_extract_audio_with_hooks(
         cp,
         ExtractCommitRequest {
             input: input.clone(),
@@ -1947,6 +1993,7 @@ async fn resume_staged_extract_report(
             outputs: commit_outputs,
             claim: claim.clone(),
         },
+        claim_fence_hooks,
     )
     .await
 }
@@ -2318,13 +2365,17 @@ fn committed_extract_report(
 }
 
 async fn recover_extract_report(
-    cp: &ControlPlane,
-    input: &ExecuteExtractAudioInput,
-    source_location_id: FileLocationId,
-    selection: &selection::ExtractAudioSelectionPlan,
-    operation: &AudioExtractOperationRecord,
+    resume: &ExtractResumeContext<'_>,
     claim: &NewAudioExtractClaim,
+    claim_fence_hooks: &dyn commit::ExtractClaimFenceHooks,
 ) -> Result<ExecuteExtractAudioReport, VoomError> {
+    let ExtractResumeContext {
+        cp,
+        input,
+        source_location_id,
+        selection,
+        operation,
+    } = *resume;
     if operation.outputs.len() != selection.outputs.len() {
         return Err(VoomError::Internal(format!(
             "recoverable audio extraction {} has an incomplete output set",
@@ -2345,7 +2396,7 @@ async fn recover_extract_report(
             );
         }
     };
-    let committed = commit::recover_audio_extract_set(
+    let committed = commit::recover_audio_extract_set_with_hooks(
         cp,
         &commit::CommitAudioExtractSetInput {
             operation_row_id: operation.operation.id,
@@ -2355,6 +2406,7 @@ async fn recover_extract_report(
             outputs,
             claim: claim.clone(),
         },
+        claim_fence_hooks,
     )
     .await?;
     let outputs = extract_output_reports(
@@ -2780,12 +2832,13 @@ struct ExtractCommitRequest {
     claim: NewAudioExtractClaim,
 }
 
-async fn commit_verified_extract_audio(
+async fn commit_verified_extract_audio_with_hooks(
     cp: &ControlPlane,
     mut request: ExtractCommitRequest,
+    claim_fence_hooks: &dyn commit::ExtractClaimFenceHooks,
 ) -> Result<ExecuteExtractAudioReport, VoomError> {
     let outputs = std::mem::take(&mut request.outputs);
-    let committed = commit::commit_audio_extract_set(
+    let committed = commit::commit_audio_extract_set_with_hooks(
         cp,
         &commit::CommitAudioExtractSetInput {
             operation_row_id: request.operation_row_id,
@@ -2795,6 +2848,7 @@ async fn commit_verified_extract_audio(
             outputs,
             claim: request.claim.clone(),
         },
+        claim_fence_hooks,
     )
     .await?;
     complete_extract_report(cp, request, committed).await
