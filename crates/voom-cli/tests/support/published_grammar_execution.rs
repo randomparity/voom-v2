@@ -14,9 +14,12 @@ use tempfile::NamedTempFile;
 use voom_test_support::worker::hide_stale_fake_ffprobe_sibling;
 
 use crate::local_worker::LocalWorker;
-use crate::media_inspect::{ffprobe, mkvmerge_identify};
+use crate::media_inspect::{assert_stream_tone, ffprobe, mkvmerge_identify};
 use crate::process::{BoundedOutput, build_worker_package, run_bounded};
-use crate::published_grammar_media::ScenarioMedia;
+use crate::published_grammar_media::{
+    ALL_TONES_HZ, COMMENTARY_TONE_HZ, ENGLISH_TONE_HZ, SURROUND_TONE_HZ, ScenarioMedia,
+    UNTAGGED_TONE_HZ,
+};
 
 const BUILD_TIMEOUT: Duration = Duration::from_mins(5);
 const PROCESS_TIMEOUT: Duration = Duration::from_mins(2);
@@ -121,6 +124,33 @@ pub fn execute_tracks(media: &ScenarioMedia) -> io::Result<()> {
     assert_stored_matches(&execute, &stored)?;
     assert_successful_job(&run, job_id, 20, "T1")?;
     assert_tracks_output(&output)?;
+    run.shutdown()?;
+    Ok(())
+}
+
+pub fn execute_audio(media: &ScenarioMedia) -> io::Result<()> {
+    let mut run = ScenarioRun::start(&media.root)?;
+    let scan = run.scan(&media.library)?;
+    require(scan["data"]["summary"]["ingested"] == 2, "A1 scan ingested")?;
+    require(scan["data"]["summary"]["failed"] == 0, "A1 scan failures")?;
+    let version_id =
+        run.create_policy("published-grammar-audio", "published-grammar-audio.voom")?;
+    let input_id = run.create_input("published-grammar-audio-input", 1)?;
+    let preview = run.preview(version_id, input_id)?;
+    assert_audio_preview(&preview)?;
+    let staging = media.root.join("stage");
+    let output = media.root.join("output");
+    let execute = run.execute(version_id, input_id, &staging, &output)?;
+    assert_audio_execute(&execute)?;
+    let job_id = number(&execute["data"]["summary"]["job_id"], "A1 job id")?;
+    let stored = run.ok(
+        &["compliance", "report", "--job-id", &job_id.to_string()],
+        "compliance",
+        "A1 stored report",
+    )?;
+    assert_stored_matches(&execute, &stored)?;
+    assert_audio_inspections(&run, &execute, job_id)?;
+    assert_audio_sidecars(&execute, &output)?;
     run.shutdown()?;
     Ok(())
 }
@@ -334,7 +364,14 @@ fn assert_core_execute(execute: &Value) -> io::Result<()> {
 }
 
 fn assert_stored_matches(execute: &Value, stored: &Value) -> io::Result<()> {
-    for field in ["summary", "phases", "file_phases", "artifact_verifications"] {
+    for field in [
+        "summary",
+        "phases",
+        "file_phases",
+        "artifact_verifications",
+        "audio_extract_outputs",
+        "audio_synthesis_companions",
+    ] {
         require(
             execute["data"][field] == stored["data"][field],
             format!("stored report differs at {field}"),
@@ -468,6 +505,325 @@ fn assert_tracks_execute(execute: &Value) -> io::Result<()> {
                     && item["expected_size_bytes"] == item["observed_size_bytes"]
             }),
         format!("T1 verification evidence: {evidence:?}"),
+    )
+}
+
+fn assert_audio_preview(preview: &Value) -> io::Result<()> {
+    let nodes = array(&preview["data"]["plan"]["nodes"], "A1 preview nodes")?;
+    let phases = nodes
+        .iter()
+        .filter_map(|node| node["phase_name"].as_str())
+        .collect::<Vec<_>>();
+    require(
+        phases
+            == [
+                "aac",
+                "opus",
+                "eac3",
+                "companion_aac",
+                "companion_opus",
+                "companion_eac3",
+                "filtered_extract",
+                "all_extracts",
+                "verify",
+            ]
+            && preview["data"]["plan"]["summary"]["executable_node_count"] == 8
+            && preview["data"]["plan"]["summary"]["no_op_node_count"] == 1
+            && preview["data"]["plan"]["summary"]["blocked_node_count"] == 0,
+        format!("A1 preview shape: {preview}"),
+    )?;
+    let diagnostics = array(&preview["data"]["plan"]["diagnostics"], "A1 diagnostics")?;
+    require(
+        diagnostics.len() == 1
+            && diagnostics[0]["code"] == "untagged_track_language_defaulted"
+            && diagnostics[0]["phase_name"] == "opus",
+        format!("A1 diagnostics: {diagnostics:?}"),
+    )
+}
+
+fn assert_audio_execute(execute: &Value) -> io::Result<()> {
+    require(
+        execute["data"]["summary"]["failure_count"] == 0
+            && execute["data"]["summary"]["progress"]["completed"] == 1,
+        format!("A1 summary: {execute}"),
+    )?;
+    let phases = array(&execute["data"]["phases"], "A1 phases")?;
+    require(
+        phases.len() == 9
+            && phases[..6]
+                .iter()
+                .all(|phase| phase["outcome"] == "completed")
+            && phases[6..8]
+                .iter()
+                .all(|phase| phase["outcome"] == "skipped")
+            && phases[8]["outcome"] == "completed",
+        format!("A1 phase outcomes: {phases:?}"),
+    )?;
+    let file_phases = array(&execute["data"]["file_phases"], "A1 file phases")?;
+    require(
+        file_phases.len() == 9
+            && file_phases[..6]
+                .iter()
+                .all(|row| row["outcome"] == "committed")
+            && file_phases[6..8]
+                .iter()
+                .all(|row| row["outcome"] == "skipped")
+            && file_phases[8]["outcome"] == "verified",
+        format!("A1 file phases: {file_phases:?}"),
+    )?;
+    assert_audio_synthesis(execute)?;
+    assert_audio_extract_lineage(execute)?;
+    let evidence = array(
+        &execute["data"]["artifact_verifications"],
+        "A1 verification evidence",
+    )?;
+    require(
+        evidence.len() == 1
+            && evidence[0]["status"] == "succeeded"
+            && evidence[0]["expected_checksum"] == evidence[0]["observed_checksum"]
+            && evidence[0]["expected_size_bytes"] == evidence[0]["observed_size_bytes"],
+        format!("A1 verification evidence: {evidence:?}"),
+    )
+}
+
+fn assert_audio_synthesis(execute: &Value) -> io::Result<()> {
+    let rows = array(
+        &execute["data"]["audio_synthesis_companions"],
+        "A1 synthesis companions",
+    )?;
+    require(rows.len() == 3, format!("A1 synthesis count: {rows:?}"))?;
+    let codecs = rows
+        .iter()
+        .filter_map(|row| row["codec"].as_str())
+        .collect::<Vec<_>>();
+    require(
+        codecs == ["aac", "opus", "eac3"]
+            && rows
+                .iter()
+                .all(|row| row["source_snapshot_stream_id"] == "stream-1")
+            && rows
+                .iter()
+                .all(|row| row["source_provider_stream_index"] == 1)
+            && rows.iter().all(|row| row["channels"] == 2),
+        format!("A1 synthesis facts: {rows:?}"),
+    )?;
+    for pair in rows.windows(2) {
+        require(
+            pair[0]["result_file_version_id"] == pair[1]["source_file_version_id"],
+            format!("A1 synthesis version chain: {rows:?}"),
+        )?;
+    }
+    let identities = rows
+        .iter()
+        .map(|row| {
+            (
+                row["companion_id"].as_str(),
+                row["result_file_version_id"].as_u64(),
+                row["result_file_location_id"].as_u64(),
+                row["result_media_snapshot_id"].as_u64(),
+                row["artifact_handle_id"].as_u64(),
+            )
+        })
+        .collect::<BTreeSet<_>>();
+    require(
+        identities.len() == rows.len(),
+        format!("A1 synthesis identities: {rows:?}"),
+    )
+}
+
+fn assert_audio_extract_lineage(execute: &Value) -> io::Result<()> {
+    let rows = array(
+        &execute["data"]["audio_extract_outputs"],
+        "A1 extraction outputs",
+    )?;
+    require(rows.len() == 8, format!("A1 extraction count: {rows:?}"))?;
+    let expected = [
+        ("stream-4", 4_u64, "commentary_audio"),
+        ("stream-1", 1, "external_audio"),
+        ("stream-2", 2, "external_audio"),
+        ("stream-3", 3, "external_audio"),
+        ("stream-4", 4, "commentary_audio"),
+        ("stream-5", 5, "external_audio"),
+        ("stream-6", 6, "external_audio"),
+    ];
+    for (row, (stream_id, provider_index, role)) in rows.iter().take(7).zip(expected) {
+        require(
+            row["source_snapshot_stream_id"] == stream_id
+                && row["source_provider_stream_index"] == provider_index
+                && row["role"] == role,
+            format!("A1 extraction source lineage: {rows:?}"),
+        )?;
+    }
+    require(
+        rows[7]["source_snapshot_stream_id"]
+            .as_str()
+            .is_some_and(|id| id.starts_with("synth_companion_"))
+            && rows[7]["source_provider_stream_index"] == 7
+            && rows[7]["role"] == "external_audio",
+        format!("A1 synthesized extraction lineage: {rows:?}"),
+    )?;
+    for field in [
+        "operation_output_id",
+        "output_id",
+        "staged_artifact_handle_id",
+        "staged_artifact_location_id",
+        "verification_id",
+        "commit_record_id",
+        "result_file_version_id",
+        "result_file_location_id",
+        "result_file_asset_id",
+        "result_media_snapshot_id",
+        "bundle_member_id",
+        "lineage_id",
+        "target_path",
+    ] {
+        let values = rows
+            .iter()
+            .map(|row| row[field].to_string())
+            .collect::<BTreeSet<_>>();
+        require(
+            values.len() == rows.len(),
+            format!("A1 extraction {field} identities: {rows:?}"),
+        )?;
+    }
+    Ok(())
+}
+
+fn assert_audio_sidecars(execute: &Value, output_dir: &Path) -> io::Result<()> {
+    let rows = array(
+        &execute["data"]["audio_extract_outputs"],
+        "A1 sidecar outputs",
+    )?;
+    let published = files_under(output_dir)?;
+    let expected = [
+        (
+            COMMENTARY_TONE_HZ,
+            2_u64,
+            Some("jpn"),
+            Some("Japanese Commentary"),
+        ),
+        (SURROUND_TONE_HZ, 6, Some("eng"), Some("Surround")),
+        (ENGLISH_TONE_HZ, 2, Some("eng"), Some("Main")),
+        (UNTAGGED_TONE_HZ, 2, None, Some("Untagged")),
+        (
+            COMMENTARY_TONE_HZ,
+            2,
+            Some("jpn"),
+            Some("Japanese Commentary"),
+        ),
+        (SURROUND_TONE_HZ, 2, Some("eng"), Some("Surround")),
+        (SURROUND_TONE_HZ, 2, Some("eng"), Some("Surround")),
+        (SURROUND_TONE_HZ, 2, Some("eng"), Some("Surround")),
+    ];
+    for (row, (tone, channels, language, title)) in rows.iter().zip(expected) {
+        let target_path = row["target_path"]
+            .as_str()
+            .ok_or_else(|| io::Error::other(format!("A1 target path: {row}")))?;
+        let target_path = Path::new(target_path);
+        let file_name = target_path.file_name().ok_or_else(|| {
+            io::Error::other(format!("A1 target file name: {}", target_path.display()))
+        })?;
+        let operation_dir = target_path
+            .parent()
+            .and_then(Path::file_name)
+            .ok_or_else(|| {
+                io::Error::other(format!("A1 target operation: {}", target_path.display()))
+            })?;
+        let matches = published
+            .iter()
+            .filter(|path| {
+                path.file_name() == Some(file_name)
+                    && path.parent().and_then(Path::file_name) == Some(operation_dir)
+            })
+            .collect::<Vec<_>>();
+        require(
+            matches.len() == 1,
+            format!(
+                "A1 published sidecar {}: {published:?}",
+                file_name.to_string_lossy()
+            ),
+        )?;
+        let path = matches[0];
+        let probe = ffprobe(path)?;
+        let streams = array(&probe["streams"], "A1 sidecar streams")?;
+        require(
+            probe["format"]["format_name"]
+                .as_str()
+                .is_some_and(|format| format.contains("ogg"))
+                && streams.len() == 1
+                && streams[0]["codec_name"] == "opus"
+                && streams[0]["channels"] == channels
+                && streams[0]["tags"]["language"].as_str() == language
+                && streams[0]["tags"]["title"].as_str() == title,
+            format!("A1 sidecar facts for {}: {probe}", path.display()),
+        )?;
+        assert_stream_tone(path, 0, tone, &ALL_TONES_HZ)?;
+    }
+    Ok(())
+}
+
+fn assert_audio_inspections(run: &ScenarioRun, execute: &Value, job_id: u64) -> io::Result<()> {
+    assert_successful_job(run, job_id, 9, "A1")?;
+    let events = run.ok(
+        &[
+            "event",
+            "list",
+            "--kind",
+            "artifact.audio_extract_succeeded",
+        ],
+        "event",
+        "A1 extraction events",
+    )?;
+    let events = array(&events["data"]["events"], "A1 extraction events")?;
+    let counts = events
+        .iter()
+        .map(|event| event["payload"]["outputs"].as_array().map_or(0, Vec::len))
+        .collect::<BTreeSet<_>>();
+    let event_output_ids = events
+        .iter()
+        .flat_map(|event| event["payload"]["outputs"].as_array().into_iter().flatten())
+        .map(|output| output["output_id"].to_string())
+        .collect::<BTreeSet<_>>();
+    let report_output_ids = array(
+        &execute["data"]["audio_extract_outputs"],
+        "A1 report extraction outputs",
+    )?
+    .iter()
+    .map(|output| output["output_id"].to_string())
+    .collect::<BTreeSet<_>>();
+    require(
+        events.len() == 2
+            && counts == BTreeSet::from([1, 7])
+            && event_output_ids == report_output_ids,
+        format!("A1 durable extraction events: {events:?}"),
+    )?;
+    assert_verification_inspection(run, execute, "A1")
+}
+
+fn assert_verification_inspection(
+    run: &ScenarioRun,
+    execute: &Value,
+    scenario: &str,
+) -> io::Result<()> {
+    let evidence = &execute["data"]["artifact_verifications"][0];
+    let handle_id = number(
+        &evidence["artifact_handle_id"],
+        "verification artifact handle",
+    )?;
+    let artifact = run.ok(
+        &[
+            "artifact",
+            "show",
+            "--artifact-handle-id",
+            &handle_id.to_string(),
+        ],
+        "artifact.show",
+        "artifact show",
+    )?;
+    require(
+        artifact["data"]["artifact"]["state"] == "committed"
+            && artifact["data"]["artifact"]["latest_verification"]["status"] == "succeeded",
+        format!("{scenario} verification artifact: {artifact}"),
     )
 }
 

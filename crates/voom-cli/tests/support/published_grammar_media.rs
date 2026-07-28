@@ -161,7 +161,7 @@ fn generate_audio_policy_media() -> io::Result<ScenarioMedia> {
     let shared = generate_shared_tracks(&scenario.scratch, "audio")?;
     let video = scenario.scratch.join("audio-video.mkv");
     generate_video(&video, 1280, 720, "h264", None)?;
-    let target = scenario.insert("a1", "audio.mkv");
+    let target = scenario.insert("a1", "feature.mkv");
     let tracks = [
         video_track(&video),
         audio_track(&shared.surround, "eng", "Surround", true, false),
@@ -176,6 +176,10 @@ fn generate_audio_policy_media() -> io::Result<ScenarioMedia> {
         ),
     ];
     assemble_mkv(&target, &tracks, &[])?;
+    write_subtitle(
+        &scenario.library.join("feature.eng.srt"),
+        "Existing sidecar",
+    )?;
     Ok(scenario)
 }
 
