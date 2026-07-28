@@ -20,8 +20,6 @@ pub use selection::{
 use crate::{NodeStatus, PlanOperationKind, PlanningDiagnostic, PlanningDiagnosticCode};
 
 use super::{OperationPlan, video_stream_count};
-use payload::default_track_order;
-
 pub(super) enum CandidateSupport {
     Supported,
     Unsupported(&'static str),
@@ -490,12 +488,21 @@ fn base_remux_payload(
             _ => None,
         })
         .collect::<Vec<_>>();
+    let has_set_container = operations.iter().any(|operation| {
+        matches!(
+            operation,
+            CompiledOperation::SetContainer(
+                voom_policy::compiled::CompiledSetContainerOperation { .. }
+            )
+        )
+    });
     let track_order = match reorder_operations.as_slice() {
         [targets] => targets
             .iter()
             .map(|target| remux_track_group(*target))
             .collect::<Vec<_>>(),
-        _ => default_track_order(),
+        [] if has_set_container => payload::default_track_order(),
+        _ => Vec::new(),
     };
     let defaults = operations
         .iter()
@@ -610,7 +617,17 @@ fn resolve_remux_operations(
     changed |= defaults_change(&payload.defaults, &facts, &keep_ids)?;
     let (track_order, head_snapshot_stream_id, order_changed) =
         resolve_track_order(operations, &facts, &keep_ids)?;
-    payload.track_order = track_order;
+    let has_reorder = operations.iter().any(|operation| {
+        matches!(
+            operation,
+            CompiledOperation::ReorderTracks(
+                voom_policy::compiled::CompiledReorderTracksOperation { .. }
+            )
+        )
+    });
+    if has_reorder {
+        payload.track_order = track_order;
+    }
     payload.head_snapshot_stream_id = head_snapshot_stream_id;
     changed |= order_changed;
 
@@ -801,10 +818,7 @@ fn resolve_track_order(
         let [(targets, head_filter)] = reorders.as_slice() else {
             return Err(RemuxPlanningBlock::UnsupportedMediaShape);
         };
-        if targets.contains(&TrackTarget::Attachment)
-            || duplicate_track_targets(targets)
-            || targets.is_empty() && head_filter.is_none()
-        {
+        if duplicate_track_targets(targets) || targets.is_empty() && head_filter.is_none() {
             return Err(RemuxPlanningBlock::UnsupportedMediaShape);
         }
         let head = head_filter
@@ -825,7 +839,7 @@ fn resolve_track_order(
             .collect::<Vec<_>>();
         return Ok((order, head, changed));
     };
-    Ok((default_track_order(), None, false))
+    Ok((Vec::new(), None, false))
 }
 
 fn retained_streams<'a>(

@@ -636,9 +636,12 @@ impl SqliteArtifactRepo {
         now: OffsetDateTime,
     ) -> Result<(ArtifactHandle, Option<ArtifactHandle>), VoomError> {
         let committed = policy_committed_handles(tx, version.id).await?;
-        let handle = match committed.as_slice() {
-            [] => policy_canonical_handle(tx, version.id).await?,
-            [handle] => Some(handle.clone()),
+        match committed.as_slice() {
+            [] => {}
+            [handle] => {
+                require_policy_handle_content_facts(tx, handle.id, version).await?;
+                return Ok((handle.clone(), None));
+            }
             _ => {
                 return Err(VoomError::Conflict(format!(
                     "file_version {} has {} committed artifact handles",
@@ -646,7 +649,8 @@ impl SqliteArtifactRepo {
                     committed.len()
                 )));
             }
-        };
+        }
+        let handle = policy_canonical_handle(tx, version.id).await?;
         if let Some(handle) = handle {
             require_policy_handle_facts(tx, handle.id, version).await?;
             return Ok((handle, None));
@@ -1743,6 +1747,18 @@ async fn require_policy_handle_facts(
     handle_id: ArtifactHandleId,
     version: &PolicyFileVersion,
 ) -> Result<(), VoomError> {
+    let file_version_id = require_policy_handle_content_facts(tx, handle_id, version).await?;
+    if file_version_id != Some(version.id.0) {
+        return Err(policy_handle_facts_conflict(handle_id, version.id));
+    }
+    Ok(())
+}
+
+async fn require_policy_handle_content_facts(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    handle_id: ArtifactHandleId,
+    version: &PolicyFileVersion,
+) -> Result<Option<u64>, VoomError> {
     let row: Option<(Option<i64>, Option<String>, Option<i64>)> = sqlx::query_as(
         "SELECT size_bytes, checksum, file_version_id \
          FROM artifact_handles WHERE id = ?",
@@ -1758,14 +1774,19 @@ async fn require_policy_handle_facts(
     };
     if size_bytes != Some(i64_from_u64(version.size_bytes))
         || checksum.as_deref() != Some(version.content_hash.as_str())
-        || file_version_id.map(u64_from_i64) != Some(version.id.0)
     {
-        return Err(VoomError::Conflict(format!(
-            "artifact_handle {handle_id} facts do not match file_version {}",
-            version.id
-        )));
+        return Err(policy_handle_facts_conflict(handle_id, version.id));
     }
-    Ok(())
+    Ok(file_version_id.map(u64_from_i64))
+}
+
+fn policy_handle_facts_conflict(
+    handle_id: ArtifactHandleId,
+    version_id: FileVersionId,
+) -> VoomError {
+    VoomError::Conflict(format!(
+        "artifact_handle {handle_id} facts do not match file_version {version_id}"
+    ))
 }
 
 fn row_to_handle(row: &sqlx::sqlite::SqliteRow) -> Result<ArtifactHandle, VoomError> {

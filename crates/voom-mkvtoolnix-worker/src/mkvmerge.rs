@@ -82,6 +82,7 @@ pub(crate) struct MkvmergeTrack {
     pub(crate) id: u64,
     pub(crate) kind: MkvmergeTrackKind,
     pub(crate) default: bool,
+    pub(crate) forced: bool,
     pub(crate) commentary: Option<bool>,
     pub(crate) fingerprint: MkvmergeTrackFingerprint,
 }
@@ -104,6 +105,7 @@ impl MkvmergeTrackMapping {
                             id,
                             kind: MkvmergeTrackKind::Video,
                             default: false,
+                            forced: false,
                             commentary: None,
                             fingerprint: MkvmergeTrackFingerprint::synthetic(
                                 MkvmergeTrackKind::Video,
@@ -188,6 +190,10 @@ pub fn track_mapping_from_identify(
         let commentary = track
             .pointer("/properties/flag_commentary")
             .and_then(Value::as_bool);
+        let forced = track
+            .pointer("/properties/forced_track")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
         mapped.insert(
             u32::try_from(provider_index)
                 .map_err(|err| MkvtoolnixError::IdentifyFailed(err.to_string()))?,
@@ -195,6 +201,7 @@ pub fn track_mapping_from_identify(
                 id,
                 kind,
                 default,
+                forced,
                 commentary,
                 fingerprint: MkvmergeTrackFingerprint::from_identify(track),
             },
@@ -223,6 +230,7 @@ pub fn track_mapping_from_identify(
                 id,
                 kind: MkvmergeTrackKind::Attachment,
                 default: false,
+                forced: false,
                 commentary: None,
                 fingerprint: MkvmergeTrackFingerprint::from_attachment(attachment)?,
             },
@@ -257,8 +265,7 @@ fn required_attachment_string<'a>(
 
 const TRACK_FINGERPRINT_FIELDS: &[&str] = &["type"];
 
-const TRACK_PROPERTY_FINGERPRINT_FIELDS: &[&str] =
-    &["flag_commentary", "forced_track", "language", "track_name"];
+const TRACK_PROPERTY_FINGERPRINT_FIELDS: &[&str] = &["flag_commentary", "language", "track_name"];
 
 fn collect_fingerprint_fields(track: &Value, fields: &mut Vec<String>) {
     for key in TRACK_FINGERPRINT_FIELDS {
@@ -269,6 +276,9 @@ fn collect_fingerprint_fields(track: &Value, fields: &mut Vec<String>) {
     if let Some(properties) = track.get("properties").and_then(Value::as_object) {
         for key in TRACK_PROPERTY_FINGERPRINT_FIELDS {
             if let Some(value) = properties.get(*key) {
+                if *key == "flag_commentary" && value.as_bool() == Some(false) {
+                    continue;
+                }
                 fields.push(format!("/properties/{key}={value}"));
             }
         }
@@ -322,11 +332,6 @@ fn validate_attachment_selection_boundaries(
     selection: &RemuxSelection,
     mapping: &MkvmergeTrackMapping,
 ) -> Result<(), MkvtoolnixError> {
-    if selection.track_order.contains(&RemuxTrackGroup::Attachment) {
-        return Err(MkvtoolnixError::ConfigInvalid(
-            "track_order cannot contain attachment".to_owned(),
-        ));
-    }
     let selection_fields = [
         ("default_streams", selection.default_streams.as_slice()),
         (
@@ -523,7 +528,7 @@ fn extend_forced_flags(
                 ))
             })?;
         seen.insert(id);
-        args.push("--forced-track-flag".to_owned());
+        args.push("--forced-display-flag".to_owned());
         args.push(format!("{id}:1"));
     }
     for stream in &selection.clear_forced_streams {
@@ -536,7 +541,7 @@ fn extend_forced_flags(
                 ))
             })?;
         if !seen.contains(&id) {
-            args.push("--forced-track-flag".to_owned());
+            args.push("--forced-display-flag".to_owned());
             args.push(format!("{id}:0"));
         }
     }
@@ -620,9 +625,6 @@ fn track_order(
     selection: &RemuxSelection,
     mapping: &MkvmergeTrackMapping,
 ) -> Result<Option<String>, MkvtoolnixError> {
-    if selection.track_order.is_empty() && selection.head_streams.is_empty() {
-        return Ok(None);
-    }
     let mut ordered = Vec::new();
     for stream in ordered_keep_streams(selection, mapping)? {
         let track = mapping

@@ -110,6 +110,48 @@ fn track_fingerprint_ignores_remux_changed_fields() {
 }
 
 #[test]
+fn track_fingerprint_treats_omitted_and_false_dispositions_as_equivalent() {
+    let omitted = serde_json::json!({
+        "id": 1,
+        "type": "audio",
+        "properties": {"language": "eng"}
+    });
+    let explicit = serde_json::json!({
+        "id": 2,
+        "type": "audio",
+        "properties": {
+            "language": "eng",
+            "flag_commentary": false,
+            "forced_track": false
+        }
+    });
+
+    assert_eq!(
+        MkvmergeTrackFingerprint::from_identify(&omitted),
+        MkvmergeTrackFingerprint::from_identify(&explicit)
+    );
+}
+
+#[test]
+fn track_fingerprint_ignores_forced_disposition_mutations() {
+    let unforced = serde_json::json!({
+        "id": 1,
+        "type": "subtitles",
+        "properties": {"language": "eng", "forced_track": false}
+    });
+    let forced = serde_json::json!({
+        "id": 2,
+        "type": "subtitles",
+        "properties": {"language": "eng", "forced_track": true}
+    });
+
+    assert_eq!(
+        MkvmergeTrackFingerprint::from_identify(&unforced),
+        MkvmergeTrackFingerprint::from_identify(&forced)
+    );
+}
+
+#[test]
 fn track_fingerprint_distinguishes_same_kind_languages() {
     let identify = serde_json::json!({
         "tracks": [
@@ -338,19 +380,31 @@ fn build_args_rejects_attachment_in_track_only_selection_fields() {
 }
 
 #[test]
-fn build_args_rejects_attachment_track_order() {
+fn build_args_omits_attachment_from_provider_track_order() {
     let request = remux_request(base_selection(vec![stream(0)]));
     let mut request = request;
-    request.selection.track_order = vec![RemuxTrackGroup::Attachment];
+    request.selection.track_order = vec![RemuxTrackGroup::Video, RemuxTrackGroup::Attachment];
     let mapping = MkvmergeTrackMapping::from_pairs([(0, 7)]);
 
-    let err = build_mkvmerge_args(&request, &mapping).unwrap_err();
+    let args = build_mkvmerge_args(&request, &mapping).unwrap();
 
-    assert!(
-        err.to_string()
-            .contains("track_order cannot contain attachment"),
-        "{err}"
-    );
+    assert_eq!(first_arg_value(&args, "--track-order"), Some("0:7"));
+}
+
+#[test]
+fn build_args_pins_source_order_when_no_reorder_was_requested() {
+    let identify = serde_json::json!({
+        "tracks": [
+            {"id": 12, "type": "audio", "properties": {"number": 1}},
+            {"id": 7, "type": "video", "properties": {"number": 2}}
+        ]
+    });
+    let mapping = track_mapping_from_identify(&identify).unwrap();
+    let request = remux_request(base_selection(vec![stream(0), stream(1)]));
+
+    let args = build_mkvmerge_args(&request, &mapping).unwrap();
+
+    assert_eq!(first_arg_value(&args, "--track-order"), Some("0:12,0:7"));
 }
 
 fn stream(provider_stream_index: u32) -> RemuxStreamRef {
@@ -414,12 +468,31 @@ fn build_args_emits_forced_track_flags_for_set_and_clear() {
     let args = build_mkvmerge_args(&request, &mapping).unwrap();
 
     assert!(
-        flag_pair(&args, "--forced-track-flag", "12:1"),
+        flag_pair(&args, "--forced-display-flag", "12:1"),
         "forced set flag missing: {args:?}"
     );
     assert!(
-        flag_pair(&args, "--forced-track-flag", "14:0"),
+        flag_pair(&args, "--forced-display-flag", "14:0"),
         "forced clear flag missing: {args:?}"
+    );
+}
+
+#[test]
+fn build_args_emits_only_explicit_default_set_and_clear_flags() {
+    let mut selection = base_selection(vec![stream(0), stream(1), stream(2)]);
+    selection.default_streams = vec![stream(1)];
+    selection.clear_default_streams = vec![stream(0)];
+    let request = remux_request(selection);
+    let mapping = MkvmergeTrackMapping::from_pairs([(0, 7), (1, 12), (2, 14)]);
+
+    let args = build_mkvmerge_args(&request, &mapping).unwrap();
+
+    assert!(flag_pair(&args, "--default-track-flag", "7:0"));
+    assert!(flag_pair(&args, "--default-track-flag", "12:1"));
+    assert!(
+        !args
+            .windows(2)
+            .any(|pair| { pair[0] == "--default-track-flag" && pair[1].starts_with("14:") })
     );
 }
 
@@ -433,9 +506,9 @@ fn build_args_forced_set_wins_over_clear_on_collision() {
 
     let args = build_mkvmerge_args(&request, &mapping).unwrap();
 
-    assert!(flag_pair(&args, "--forced-track-flag", "12:1"));
+    assert!(flag_pair(&args, "--forced-display-flag", "12:1"));
     assert!(
-        !flag_pair(&args, "--forced-track-flag", "12:0"),
+        !flag_pair(&args, "--forced-display-flag", "12:0"),
         "clear must not fire when the same id is set forced: {args:?}"
     );
 }

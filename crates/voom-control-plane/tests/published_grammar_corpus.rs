@@ -47,10 +47,10 @@ const TRACK_FORMS: [&str; 19] = [
     "defaults subtitle best",
     "defaults audio none",
     "defaults subtitle preserve",
-    "defaults audio where language == \"eng\"",
+    "defaults audio where language == \"eng\" and channels >= 6",
     "defaults subtitle where forced",
     "when video.width < 640 {\n      remove subtitle",
-    "when exists subtitle {\n      defaults subtitle best",
+    "when exists subtitle and video.width >= 1280 {\n      defaults subtitle best",
     "when video.width < 1280 and count subtitle >= 2 {\n      defaults audio none",
     "defaults audio none\n      defaults subtitle preserve",
 ];

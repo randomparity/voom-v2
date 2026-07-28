@@ -159,19 +159,14 @@ async fn handler_rejects_dropping_final_source_audio_before_provider_run() {
 }
 
 #[tokio::test]
-async fn handler_rejects_attachment_track_order_before_provider_run() {
+async fn handler_accepts_attachment_at_end_of_track_order() {
     let fixture = remux_fixture().await;
     let mut request = fixture.request;
     request.selection.track_order = vec![RemuxTrackGroup::Video, RemuxTrackGroup::Attachment];
 
-    let err = handle_remux(&request, &fixture.config).await.unwrap_err();
+    let result = handle_remux(&request, &fixture.config).await.unwrap();
 
-    assert_eq!(err.error_code(), ErrorCode::ConfigInvalid);
-    assert!(
-        err.to_string()
-            .contains("track_order cannot contain attachment")
-    );
-    assert!(!tokio::fs::try_exists(&request.output.path).await.unwrap());
+    assert_eq!(result.kept_snapshot_stream_ids, ["stream-0", "stream-1"]);
 }
 
 #[tokio::test]
@@ -385,6 +380,20 @@ async fn handler_rejects_default_track_mismatch() {
 }
 
 #[tokio::test]
+async fn handler_rejects_forced_track_mismatch() {
+    let mut fixture =
+        remux_fixture_with_output_probe(vec!["stream-0", "stream-1"], vec!["stream-1"]).await;
+    fixture.request.selection.forced_streams = vec![audio_ref("stream-1", 1)];
+
+    let err = handle_remux(&fixture.request, &fixture.config)
+        .await
+        .unwrap_err();
+
+    assert_eq!(err.error_code(), ErrorCode::MalformedWorkerResult);
+    assert!(err.to_string().contains("forced stream mismatch"));
+}
+
+#[tokio::test]
 async fn handler_rejects_non_mkv_output_facts() {
     let fixture = remux_fixture_with_output_container("mp4").await;
 
@@ -505,6 +514,36 @@ async fn handler_rejects_ambiguous_same_kind_selected_track_identity() {
     );
 }
 
+#[tokio::test]
+async fn handler_accepts_complete_ambiguous_same_kind_identity_set() {
+    let fixture = remux_fixture_with_input_specs_and_output_specs(
+        vec![
+            input_track("video"),
+            input_track("audio"),
+            input_track("audio"),
+        ],
+        vec![
+            output_track("video", false),
+            output_track("audio", true),
+            output_track("audio", false),
+        ],
+    )
+    .await;
+    let mut request = fixture.request;
+    request.selection.keep_streams = vec![
+        video_ref("stream-0", 0),
+        audio_ref("stream-1", 1),
+        audio_ref("stream-2", 2),
+    ];
+
+    let result = handle_remux(&request, &fixture.config).await.unwrap();
+
+    assert_eq!(
+        result.kept_snapshot_stream_ids,
+        ["stream-0", "stream-1", "stream-2"]
+    );
+}
+
 #[test]
 fn output_validation_rejects_ambiguous_attachment_identity() {
     let input_mapping = crate::mkvmerge::track_mapping_from_identify(&serde_json::json!({
@@ -535,15 +574,12 @@ fn output_validation_rejects_ambiguous_attachment_identity() {
         }]
     }))
     .unwrap();
-    let expected = input_mapping.track_for_provider_index(0).unwrap();
-    let output = output_mapping.track_for_provider_index(0).unwrap();
-
     let err = validate_output_track_identity(
         &input_mapping,
+        &output_mapping,
+        &[&attachment_ref("stream-0", 0)],
         &attachment_ref("stream-0", 0),
         0,
-        expected,
-        output,
     )
     .unwrap_err();
 

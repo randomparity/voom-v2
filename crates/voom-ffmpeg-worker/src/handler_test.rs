@@ -1024,6 +1024,7 @@ fn input_probe_with_codec(codec: &str) -> InputProbe {
         codec_profile: None,
         codec_level: None,
         video_stream_count: 1,
+        forced_subtitle_ordinals: Vec::new(),
     }
 }
 

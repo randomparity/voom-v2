@@ -112,6 +112,11 @@ const MIGRATION_0025_SQL: &str =
 const MIGRATION_0026_SQL: &str =
     include_str!("../../../migrations/0026_policy_artifact_verification.sql");
 
+/// SQL for migration 0027 (sequential audio-synthesis asset lineage, #338),
+/// embedded at compile time.
+const MIGRATION_0027_SQL: &str =
+    include_str!("../../../migrations/0027_audio_synthesis_asset_lineage.sql");
+
 /// Embedded migration set, constructed without the `sqlx::migrate!` macro.
 ///
 /// We don't use sqlx's `macros` feature: it pulls `sqlx-macros-core`, which
@@ -307,6 +312,13 @@ pub static MIGRATOR: LazyLock<Migrator> = LazyLock::new(|| Migrator {
             Cow::Borrowed("policy_artifact_verification"),
             MigrationType::Simple,
             Cow::Borrowed(MIGRATION_0026_SQL),
+            false,
+        ),
+        Migration::new(
+            27,
+            Cow::Borrowed("audio_synthesis_asset_lineage"),
+            MigrationType::Simple,
+            Cow::Borrowed(MIGRATION_0027_SQL),
             false,
         ),
     ]),

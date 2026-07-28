@@ -65,7 +65,9 @@ untagged stereo AAC, and Japanese commentary AAC.
 - Oracle: the VOOM report records committed audio phases, sidecar lineage, and
   successful artifact verification. The filtered extract selects only the
   commentary AAC track; ffprobe proves codecs and channel counts, and hashes
-  distinguish every sidecar.
+  are not required to differ when two operations select the same source.
+  Durable output identities and exact ordered source stream lineage distinguish
+  sidecars; decoded tone-frequency energy distinguishes different sources.
 
 ### F1 — control-flow input set
 
@@ -78,16 +80,21 @@ The set contains these exact cases:
   `inspect` completes without mutation, `normalize` runs because `completed`
   is true but completes without mutation, and `organize` does not run because
   `modified` is false.
-- F1c `fail.mp4`: byte-identical media facts to F1a. Before the same two-file
-  batch containing F1a and F1c starts, create the exact final `fail.mkv`
-  destination with different bytes. The existing-target commit guard makes
-  F1c's `inspect` remux fail deterministically; its dependent phases do not
-  run, while F1a continues and commits.
-- Resume F1a after two durable boundaries: first after the `inspect` per-file
-  summary is committed and before `normalize` dispatch, then after the
-  `normalize` summary is committed and before `organize` dispatch. Each resume
-  opens a new job, copies the prior job's inherited committed/skipped outcomes,
-  and produces the same per-file gate decision without walking older jobs.
+- F1c `fail.mp4`: byte-identical media facts to F1a. After scan identifies its
+  source file-version id and before the batch starts, create the exact remux
+  working target
+  `.committed/remux/v<file-version-id>/fail.remux.mkv` with different bytes.
+  The existing-target preparation guard makes F1c's `inspect` remux fail
+  deterministically before mutation-worker dispatch or terminal promotion; its
+  dependent phases do not run, while F1a continues and commits.
+- Focused coordinator tests owned by #330 resume F1a after two durable
+  boundaries: first after the `inspect` per-file summary is committed and
+  before `normalize` dispatch, then after the `normalize` summary is committed
+  and before `organize` dispatch. Each resume opens a new job, copies the prior
+  job's inherited committed/skipped outcomes, and produces the same per-file
+  gate decision without walking older jobs. #338's process-boundary acceptance
+  uses the shipped fresh-execution CLI; it does not introduce a public resume
+  command.
 
 - Expected mutation: for the passing source, the matching conditional remuxes
   to MKV, the first-rule phase transcodes video to HEVC, and the all-rules phase
@@ -95,8 +102,9 @@ The set contains these exact cases:
   successful-file commits.
 - Oracle: per-file VOOM phase summaries prove skip/rule decisions, `completed`
   admission after committed or skipped predecessors, true and false `modified`
-  gates, visible failure for missing predecessor history, and identical
-  decisions after repeated resume.
+  gates, and terminal blocking after a visible predecessor failure. Focused
+  #330 coordinator tests prove the separate fail-loud missing-history case and
+  identical decisions after repeated resume.
   The batch report and exit status identify partial failure while retaining the
   successful file's committed output and artifact-verification result.
 

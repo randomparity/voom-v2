@@ -91,6 +91,27 @@ fn remux_payload_accepts_attachment_actions_with_exact_filters() {
 }
 
 #[test]
+fn remux_payload_accepts_published_attachment_track_order() {
+    let payload = RemuxOperationPayload::try_from_execution_value(&json!({
+        "type": "remux",
+        "container": "mkv",
+        "source_media_snapshot_id": 99,
+        "track_order": ["video", "audio", "subtitle", "attachment"]
+    }))
+    .unwrap();
+
+    assert_eq!(
+        payload.track_order,
+        [
+            RemuxTrackGroup::Video,
+            RemuxTrackGroup::Audio,
+            RemuxTrackGroup::Subtitle,
+            RemuxTrackGroup::Attachment,
+        ]
+    );
+}
+
+#[test]
 fn remux_payload_rejects_invalid_contract_fields() {
     assert_remux_payload_error(
         &json!({
@@ -131,15 +152,6 @@ fn remux_payload_rejects_invalid_contract_fields() {
             "track_actions": [{"type": "copy_tracks", "target": "audio"}]
         }),
         "remux track_actions[0] type `copy_tracks` is unsupported",
-    );
-    assert_remux_payload_error(
-        &json!({
-            "type": "remux",
-            "container": "mkv",
-            "source_media_snapshot_id": 99,
-            "track_order": []
-        }),
-        "remux track_order must include at least one group",
     );
     assert_remux_payload_error(
         &json!({

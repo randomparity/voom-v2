@@ -1,7 +1,7 @@
 {
   "policy_name": "published grammar tracks",
   "slug": "published-grammar-tracks",
-  "source_hash": "d3bdffa685ceb08baa8c860c97e5661edac72d6f171cd5c95a13fefbc685f50d",
+  "source_hash": "5d198c9a887f409f4b15ecd14be20cde1e5220d6ce09cb97f658b5d6e8e7f3d5",
   "schema_version": 2,
   "metadata": {},
   "config": {
@@ -19,13 +19,6 @@
       "skip_if": null,
       "on_error": "abort",
       "operations": [
-        {
-          "type": "remove_tracks",
-          "target": "audio",
-          "filter": {
-            "type": "commentary"
-          }
-        },
         {
           "type": "keep_tracks",
           "target": "audio",
@@ -56,21 +49,9 @@
         },
         {
           "type": "remove_tracks",
-          "target": "subtitle",
+          "target": "audio",
           "filter": {
-            "type": "and",
-            "filters": [
-              {
-                "type": "title_contains",
-                "value": "Signs"
-              },
-              {
-                "type": "not",
-                "inner": {
-                  "type": "forced"
-                }
-              }
-            ]
+            "type": "commentary"
           }
         },
         {
@@ -94,12 +75,21 @@
         },
         {
           "type": "remove_tracks",
-          "target": "attachment",
+          "target": "subtitle",
           "filter": {
-            "type": "not",
-            "inner": {
-              "type": "font"
-            }
+            "type": "and",
+            "filters": [
+              {
+                "type": "title_contains",
+                "value": "Signs"
+              },
+              {
+                "type": "not",
+                "inner": {
+                  "type": "forced"
+                }
+              }
+            ]
           }
         },
         {
@@ -107,6 +97,16 @@
           "target": "attachment",
           "filter": {
             "type": "font"
+          }
+        },
+        {
+          "type": "remove_tracks",
+          "target": "attachment",
+          "filter": {
+            "type": "not",
+            "inner": {
+              "type": "font"
+            }
           }
         }
       ]
@@ -196,9 +196,19 @@
           "target": "audio",
           "strategy": "preserve",
           "filter": {
-            "type": "language_in",
-            "values": [
-              "eng"
+            "type": "and",
+            "filters": [
+              {
+                "type": "language_in",
+                "values": [
+                  "eng"
+                ]
+              },
+              {
+                "type": "channels",
+                "op": "gte",
+                "value": 6
+              }
             ]
           }
         },
@@ -246,9 +256,26 @@
         {
           "type": "conditional",
           "condition": {
-            "type": "exists",
-            "target": "subtitle",
-            "filter": null
+            "type": "and",
+            "conditions": [
+              {
+                "type": "exists",
+                "target": "subtitle",
+                "filter": null
+              },
+              {
+                "type": "field_comparison",
+                "path": [
+                  "video",
+                  "width"
+                ],
+                "op": "gte",
+                "value": {
+                  "type": "number",
+                  "value": "1280"
+                }
+              }
+            ]
           },
           "operations": [
             {

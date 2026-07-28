@@ -782,7 +782,7 @@ async fn legacy_adoption_rejects_ambiguous_or_different_source_snapshot() {
 }
 
 #[tokio::test]
-async fn legacy_adoption_rejects_different_published_operation_key() {
+async fn published_operation_isolated_from_legacy_singleton() {
     let (cp, _db, dir) = fixture_with_dir().await;
     let seeded = seed_legacy_singleton(&cp, &dir).await;
     let mut input = seeded.input;
@@ -796,7 +796,29 @@ async fn legacy_adoption_rejects_different_published_operation_key() {
         "bundle_role": "external_audio"
     }]);
 
-    assert_legacy_adoption_rejected_without_mutation(&cp, input, &seeded.target).await;
+    let legacy_bytes = tokio::fs::read(&seeded.target).await.unwrap();
+    let report = execute_extract_audio_with_dispatchers(
+        &cp,
+        input,
+        &WritingExtractDispatcher {
+            output_bytes: b"published-output".to_vec(),
+        },
+        &SuccessfulVerifyDispatcher,
+        &SucceedingProbeDispatcher,
+    )
+    .await
+    .unwrap();
+
+    assert_ne!(report.commit_record_id, seeded.legacy_commit_record_id);
+    assert_ne!(
+        report.result_file_version_id,
+        seeded.legacy_result_file_version_id
+    );
+    assert_ne!(report.target_path, seeded.target);
+    assert!(report.target_path.is_file());
+    assert_eq!(tokio::fs::read(&seeded.target).await.unwrap(), legacy_bytes);
+    assert_table_count(&cp, "audio_extract_operations", 1).await;
+    assert_table_count(&cp, "audio_extract_output_lineage", 1).await;
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1267,8 +1289,9 @@ async fn prepared_extract_resume_failure_persists_diagnostics_then_recovers_with
     .unwrap_err();
 
     assert_eq!(error.error_code(), voom_core::ErrorCode::DbUnreachable);
-    assert!(input.target_dir.join("source.a-1.opus.ogg").is_file());
-    assert!(input.target_dir.join("source.a-2.opus.ogg").is_file());
+    let target_dir = input.target_dir.join(format!("operation-{operation_id}"));
+    assert!(target_dir.join("source.a-1.opus.ogg").is_file());
+    assert!(target_dir.join("source.a-2.opus.ogg").is_file());
     assert_table_count(&cp, "artifact_commit_records", 2).await;
     assert_table_count(&cp, "file_versions", 1).await;
     assert_table_count(&cp, "asset_bundle_members", 0).await;

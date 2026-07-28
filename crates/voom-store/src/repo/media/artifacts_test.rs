@@ -112,6 +112,41 @@ async fn source_asset_id(
         .file_asset_id
 }
 
+async fn dependency_produced_version_and_location(
+    pool: &sqlx::SqlitePool,
+    identity: &SqliteIdentityRepo,
+    source_version_id: FileVersionId,
+) -> (FileVersionId, FileLocationId) {
+    let asset_id = source_asset_id(identity, source_version_id).await;
+    let version = identity
+        .create_file_version(NewFileVersion {
+            file_asset_id: asset_id,
+            content_hash: "produced-hash".to_owned(),
+            size_bytes: 2048,
+            produced_by: ProducedBy::Transcode,
+            produced_from_version_id: Some(source_version_id),
+            created_at: OffsetDateTime::UNIX_EPOCH,
+        })
+        .await
+        .unwrap();
+    let mut tx = pool.begin().await.unwrap();
+    let location = identity
+        .create_file_location_in_tx(
+            &mut tx,
+            NewFileLocation {
+                file_version_id: version.id,
+                kind: FileLocationKind::LocalPath,
+                value: "/media/produced.mkv".to_owned(),
+                proof: None,
+                observed_at: OffsetDateTime::UNIX_EPOCH,
+            },
+        )
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    (version.id, location.id)
+}
+
 #[tokio::test]
 async fn artifact_handles_carries_identity_link_columns() {
     let (pool, _tmp) = pool().await;
@@ -189,11 +224,15 @@ async fn policy_target_resolution_creates_then_reuses_active_artifact() {
 async fn policy_target_resolution_reuses_dependency_committed_handle() {
     let (pool, _tmp) = pool().await;
     let repo = SqliteArtifactRepo::new(pool.clone());
-    let (version_id, file_location_id) = source_version_and_location(&pool).await;
+    let identity = SqliteIdentityRepo::new(pool.clone());
+    let (source_version_id, _) = source_version_and_location(&pool).await;
+    let (version_id, location_id) =
+        dependency_produced_version_and_location(&pool, &identity, source_version_id).await;
     record_media_snapshot(&pool, version_id).await;
     let mut handle_input = sample_new_handle();
-    handle_input.file_version_id = Some(version_id);
-    handle_input.checksum = Some("source-hash".to_owned());
+    handle_input.file_version_id = Some(source_version_id);
+    handle_input.size_bytes = Some(2048);
+    handle_input.checksum = Some("produced-hash".to_owned());
     let handle = repo.create_handle(handle_input).await.unwrap();
     let artifact_location = repo
         .record_location(NewArtifactLocation {
@@ -217,10 +256,10 @@ async fn policy_target_resolution_reuses_dependency_committed_handle() {
                 workflow_ticket_id: None,
                 workflow_lease_id: None,
                 status: ArtifactVerificationStatus::Succeeded,
-                expected_size_bytes: 1024,
-                expected_checksum: "source-hash".to_owned(),
-                observed_size_bytes: Some(1024),
-                observed_checksum: Some("source-hash".to_owned()),
+                expected_size_bytes: 2048,
+                expected_checksum: "produced-hash".to_owned(),
+                observed_size_bytes: Some(2048),
+                observed_checksum: Some("produced-hash".to_owned()),
                 failure_class: None,
                 error_code: None,
                 message: None,
@@ -241,10 +280,10 @@ async fn policy_target_resolution_reuses_dependency_committed_handle() {
                  '1970-01-01T00:00:00Z', '1970-01-01T00:00:00Z', '1970-01-01T00:00:00Z')",
     )
     .bind(i64::try_from(handle.id.0).unwrap())
-    .bind(i64::try_from(version_id.0).unwrap())
+    .bind(i64::try_from(source_version_id.0).unwrap())
     .bind(i64::try_from(verification.id.0).unwrap())
     .bind(i64::try_from(version_id.0).unwrap())
-    .bind(i64::try_from(file_location_id.0).unwrap())
+    .bind(i64::try_from(location_id.0).unwrap())
     .execute(&pool)
     .await
     .unwrap();
@@ -254,7 +293,7 @@ async fn policy_target_resolution_reuses_dependency_committed_handle() {
         .resolve_policy_artifact_target_in_tx(
             &mut tx,
             version_id,
-            Some(file_location_id),
+            Some(location_id),
             OffsetDateTime::UNIX_EPOCH,
         )
         .await
@@ -262,6 +301,10 @@ async fn policy_target_resolution_reuses_dependency_committed_handle() {
     tx.commit().await.unwrap();
 
     assert_eq!(resolved.target.artifact_handle_id, handle.id);
+    assert_eq!(resolved.target.file_version_id, version_id);
+    assert_eq!(resolved.target.file_location_id, location_id);
+    assert_eq!(resolved.target.size_bytes, 2048);
+    assert_eq!(resolved.target.checksum, "produced-hash");
     assert!(resolved.created_handle.is_none());
     assert!(resolved.created_location.is_some());
 }

@@ -65,6 +65,7 @@ pub fn selection_from_payload_and_snapshot(
         .collect::<Vec<_>>();
     let defaults = effective_default_actions(&payload.defaults)?;
     let (default_streams, clear_default_streams) = default_refs(&defaults, &facts, &keep_ids)?;
+    let (forced_streams, clear_forced_streams) = forced_refs(&facts, &keep_ids);
     let head_streams = head_refs(
         payload.head_snapshot_stream_id.as_deref(),
         &facts,
@@ -77,9 +78,27 @@ pub fn selection_from_payload_and_snapshot(
         clear_default_streams,
         track_order: payload.track_order,
         head_streams,
-        forced_streams: Vec::new(),
-        clear_forced_streams: Vec::new(),
+        forced_streams,
+        clear_forced_streams,
     })
+}
+
+fn forced_refs(
+    facts: &[SnapshotStreamFact],
+    keep_ids: &BTreeSet<String>,
+) -> (Vec<RemuxStreamRef>, Vec<RemuxStreamRef>) {
+    let mut forced_streams = Vec::new();
+    let mut clear_forced_streams = Vec::new();
+    for stream in facts.iter().filter(|stream| {
+        stream.kind != TrackTarget::Attachment && keep_ids.contains(&stream.snapshot_stream_id)
+    }) {
+        match stream.is_forced {
+            SnapshotFact::Value(true) => forced_streams.push(stream_ref(stream)),
+            SnapshotFact::Value(false) => clear_forced_streams.push(stream_ref(stream)),
+            SnapshotFact::Missing | SnapshotFact::Malformed => {}
+        }
+    }
+    (forced_streams, clear_forced_streams)
 }
 
 /// A remux must never strip a source's audio to nothing: a file with audio that
@@ -152,12 +171,15 @@ fn default_refs(
             }
             EffectiveDefaultAction::Preserve { target } => {
                 let kept_target = kept_target_streams(facts, keep_ids, target);
-                default_streams.extend(
-                    kept_target
-                        .into_iter()
-                        .filter(|stream| stream.is_default == SnapshotFact::Value(true))
-                        .map(stream_ref),
-                );
+                for stream in kept_target {
+                    match stream.is_default {
+                        SnapshotFact::Value(true) => default_streams.push(stream_ref(stream)),
+                        SnapshotFact::Value(false) => {
+                            clear_default_streams.push(stream_ref(stream));
+                        }
+                        SnapshotFact::Missing | SnapshotFact::Malformed => {}
+                    }
+                }
             }
         }
     }
@@ -169,12 +191,15 @@ fn default_refs(
         if defaults.iter().any(|action| action.target() == target) {
             continue;
         }
-        for stream in facts.iter().filter(|stream| {
-            stream.kind == target
-                && stream.is_default == SnapshotFact::Value(true)
-                && keep_ids.contains(&stream.snapshot_stream_id)
-        }) {
-            default_streams.push(stream_ref(stream));
+        for stream in facts
+            .iter()
+            .filter(|stream| stream.kind == target && keep_ids.contains(&stream.snapshot_stream_id))
+        {
+            match stream.is_default {
+                SnapshotFact::Value(true) => default_streams.push(stream_ref(stream)),
+                SnapshotFact::Value(false) => clear_default_streams.push(stream_ref(stream)),
+                SnapshotFact::Missing | SnapshotFact::Malformed => {}
+            }
         }
     }
     Ok((
@@ -382,11 +407,12 @@ fn validate_best_default_strategy_conflicts(
             continue;
         }
         let target = action.target();
-        let same_target_count = defaults
+        if defaults
             .iter()
             .filter(|candidate| candidate.target() == target)
-            .count();
-        if same_target_count > 1 {
+            .count()
+            > 1
+        {
             return Err(VoomError::Config(format!(
                 "multiple defaults strategy actions target {} and include best",
                 track_target_name(target)

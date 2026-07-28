@@ -72,11 +72,6 @@ impl RemuxOperationPayload {
             parse_optional_stream_id(object.get("head_snapshot_stream_id"), || {
                 "remux payload `head_snapshot_stream_id` must be a non-empty string".to_owned()
             })?;
-        if track_order.is_empty() && head_snapshot_stream_id.is_none() {
-            return Err(RemuxPayloadError::new(
-                "remux track_order must include at least one group",
-            ));
-        }
         let defaults = match object.get("defaults") {
             Some(value) => {
                 let defaults = value.as_array().ok_or_else(|| {
@@ -246,11 +241,7 @@ fn parse_track_order(order: &[Value]) -> Result<Vec<RemuxTrackGroup>, RemuxPaylo
             "video" => RemuxTrackGroup::Video,
             "audio" => RemuxTrackGroup::Audio,
             "subtitle" => RemuxTrackGroup::Subtitle,
-            "attachment" => {
-                return Err(RemuxPayloadError::new(format!(
-                    "remux track_order[{index}] target `attachment` is unsupported"
-                )));
-            }
+            "attachment" => RemuxTrackGroup::Attachment,
             other => {
                 return Err(RemuxPayloadError::new(format!(
                     "remux track_order[{index}] has unsupported target `{other}`"

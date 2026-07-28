@@ -85,6 +85,45 @@ fn planning_input_projects_video_dimensions() {
 }
 
 #[test]
+fn planning_input_projects_duration_and_bitrate_from_container_facts() {
+    let snapshot = snapshot_with_payload(serde_json::json!({
+        "container": {
+            "format_name": "mov,mp4,m4a,3gp,3g2,mj2",
+            "duration_seconds": 2.1259,
+            "bit_rate": 2_048_000
+        },
+        "streams": [{
+            "id": "stream-0", "index": 0, "kind": "video", "codec_name": "h264"
+        }]
+    }));
+
+    let input = planning_input(1, &snapshot);
+
+    assert_eq!(input.duration_millis, Some(2_125));
+    assert_eq!(input.bitrate, Some(2_048_000));
+}
+
+#[test]
+fn planning_input_omits_malformed_duration_and_bitrate_facts() {
+    for container in [
+        json!({"format_name": "matroska", "duration_seconds": -1.0, "bit_rate": "2M"}),
+        json!({"format_name": "matroska", "duration_seconds": "2.0", "bit_rate": -1}),
+        json!({"format_name": "matroska", "duration_seconds": 1.0e30, "bit_rate": 1.0e30}),
+    ] {
+        let input = planning_input(
+            1,
+            &snapshot_with_payload(json!({
+                "container": container,
+                "streams": []
+            })),
+        );
+
+        assert_eq!(input.duration_millis, None);
+        assert_eq!(input.bitrate, None);
+    }
+}
+
+#[test]
 fn planning_input_canonicalizes_supported_container_names() {
     let cases = [
         ("mkv", "mkv"),

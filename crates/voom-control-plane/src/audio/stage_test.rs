@@ -88,6 +88,27 @@ async fn planned_extraction_paths_preserve_suffix_order_and_use_operation_genera
 }
 
 #[tokio::test]
+async fn planned_extraction_targets_are_isolated_by_operation() {
+    let root = stage_tempdir();
+    let mut first = plural_selection(["same.opus.ogg"]);
+    first.operation_id = Some("node_extract_first".to_owned());
+    let mut second = first.clone();
+    second.operation_id = Some("node_extract_second".to_owned());
+
+    let first_targets = extract_target_paths(root.path(), Path::new("/library/Movie.mp4"), &first)
+        .await
+        .unwrap();
+    let second_targets =
+        extract_target_paths(root.path(), Path::new("/library/Movie.mp4"), &second)
+            .await
+            .unwrap();
+
+    assert_ne!(first_targets, second_targets);
+    assert!(first_targets[0].ends_with("operation-node_extract_first/Movie.same.opus.ogg"));
+    assert!(second_targets[0].ends_with("operation-node_extract_second/Movie.same.opus.ogg"));
+}
+
+#[tokio::test]
 async fn planned_extraction_path_collision_fails_before_creating_directories() {
     let root = stage_tempdir();
     let target_dir = root.path().join("targets");

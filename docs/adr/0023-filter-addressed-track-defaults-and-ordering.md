@@ -19,7 +19,7 @@ is forced":
 - **`order tracks <target-list>`** reorders by `RemuxTrackGroup`
   (video/audio/subtitle). It cannot pin one individual track ahead of its group.
 - **The forced flag is not settable at all.** `RemuxSelection` has no forced
-  field and `mkvmerge.rs` never emits `--forced-track-flag`, even though it
+  field and `mkvmerge.rs` never emits `--forced-display-flag`, even though it
   already emits per-track `--default-track-flag id:1|0`
   (`crates/voom-mkvtoolnix-worker/src/mkvmerge.rs:365-399`).
 
@@ -123,8 +123,8 @@ With no retained target stream, the action is omitted.
 Three new `Vec<RemuxStreamRef>` fields, each `#[serde(default)]`:
 
 - `head_streams` — streams pinned to the front of the track order.
-- `forced_streams` — streams to mark forced (`--forced-track-flag id:1`).
-- `clear_forced_streams` — streams to clear forced (`--forced-track-flag id:0`),
+- `forced_streams` — streams to mark forced (`--forced-display-flag id:1`).
+- `clear_forced_streams` — streams to clear forced (`--forced-display-flag id:0`),
   mirroring the existing `default_streams` / `clear_default_streams` pair.
 
 ### 4. Worker emission (`voom-mkvtoolnix-worker`)
@@ -132,7 +132,7 @@ Three new `Vec<RemuxStreamRef>` fields, each `#[serde(default)]`:
 - `track_order()` emits `head_streams` first (in listed order), then the
   existing group order, then any remaining kept tracks — so a head stream pins
   ahead of its group.
-- A new `extend_forced_flags()` emits `--forced-track-flag id:1` for
+- A new `extend_forced_flags()` emits `--forced-display-flag id:1` for
   `forced_streams` and `id:0` for `clear_forced_streams`, mirroring
   `extend_default_flags()` (set wins over clear on collision).
 
@@ -191,7 +191,7 @@ missing or malformed values as false.
 - The typed per-file remux payload carries additive optional resolved snapshot
   stream IDs for filter-addressed defaults and ordering. Old payloads read with
   those fields absent.
-- The mkvmerge worker emits `--forced-track-flag id:1|0` and head-pinned
+- The mkvmerge worker emits `--forced-display-flag id:1|0` and head-pinned
   `--track-order`, covered by worker conformance tests that build a
   `RemuxRequest` directly.
 - Adding `head_streams`/`forced_streams`/`clear_forced_streams` to
@@ -216,12 +216,13 @@ missing or malformed values as false.
 
 - The `forced audio|subtitle where <filter>` DSL op and its compiled `SetForced`
   variant. Forced is delivered only at the wire (`RemuxSelection.forced_streams`
-  / `clear_forced_streams`) and worker (`--forced-track-flag`) layer here; the
+  / `clear_forced_streams`) and worker (`--forced-display-flag`) layer here; the
   DSL surface needs a new `PlanOperationKind` and a separate published
   execution contract.
-- Populating `forced_streams` / `clear_forced_streams` from policy remains tied
-  to the unpublished forced DSL operation. No forced selection is inferred from
-  defaults or ordering.
+- Policy-driven changes to `forced_streams` / `clear_forced_streams` remain tied
+  to the unpublished forced DSL operation. Remux dispatch may populate them from
+  the pinned source snapshot solely to preserve existing forced dispositions;
+  no forced selection is inferred from defaults or ordering.
 
 ## Considered & rejected
 

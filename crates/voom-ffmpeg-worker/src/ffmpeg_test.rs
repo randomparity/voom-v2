@@ -184,7 +184,7 @@ async fn libx265_command_uses_named_preset_and_optional_flags() {
     let request = basic_request(dir.path(), container, codec, profile_x265_main10());
     let config = FfmpegConfig::new(ffmpeg, ffprobe, "test".to_owned(), DEFAULT_PROCESS_TIMEOUT);
 
-    run_ffmpeg_transcode(&config, &request, 1920, 1080)
+    run_ffmpeg_transcode(&config, &request, 1920, 1080, &[])
         .await
         .unwrap();
 
@@ -226,7 +226,7 @@ async fn libsvtav1_command_uses_numeric_preset() {
     let request = basic_request(dir.path(), container, codec, profile_svtav1());
     let config = FfmpegConfig::new(ffmpeg, ffprobe, "test".to_owned(), DEFAULT_PROCESS_TIMEOUT);
 
-    run_ffmpeg_transcode(&config, &request, 1920, 1080)
+    run_ffmpeg_transcode(&config, &request, 1920, 1080, &[])
         .await
         .unwrap();
 
@@ -252,7 +252,7 @@ async fn libaom_command_sets_cpu_used_and_bitrate_zero() {
     let request = basic_request(dir.path(), "mkv", "av1", profile_libaom());
     let config = FfmpegConfig::new(ffmpeg, ffprobe, "test".to_owned(), DEFAULT_PROCESS_TIMEOUT);
 
-    run_ffmpeg_transcode(&config, &request, 1920, 1080)
+    run_ffmpeg_transcode(&config, &request, 1920, 1080, &[])
         .await
         .unwrap();
 
@@ -281,7 +281,7 @@ async fn mp4_hevc_tags_hvc1() {
     let request = basic_request(dir.path(), container, codec, profile_x265_main10());
     let config = FfmpegConfig::new(ffmpeg, ffprobe, "test".to_owned(), DEFAULT_PROCESS_TIMEOUT);
 
-    run_ffmpeg_transcode(&config, &request, 1920, 1080)
+    run_ffmpeg_transcode(&config, &request, 1920, 1080, &[])
         .await
         .unwrap();
 
@@ -311,7 +311,7 @@ async fn downscale_applies_only_when_source_exceeds_cap() {
     );
 
     // 3840x2160 exceeds 1920x1080 cap → scale filter applied
-    run_ffmpeg_transcode(&config, &request, 3840, 2160)
+    run_ffmpeg_transcode(&config, &request, 3840, 2160, &[])
         .await
         .unwrap();
     let args = std::fs::read_to_string(&args_path).unwrap();
@@ -343,7 +343,7 @@ async fn downscale_applies_only_when_source_exceeds_cap() {
         DEFAULT_PROCESS_TIMEOUT,
     );
 
-    run_ffmpeg_transcode(&config2, &request2, 1280, 720)
+    run_ffmpeg_transcode(&config2, &request2, 1280, 720, &[])
         .await
         .unwrap();
     let args2 = std::fs::read_to_string(args_path2).unwrap();
@@ -374,7 +374,7 @@ async fn copy_video_emits_stream_copy() {
         "test".to_owned(),
         DEFAULT_PROCESS_TIMEOUT,
     );
-    run_ffmpeg_transcode(&config, &request, 1920, 1080)
+    run_ffmpeg_transcode(&config, &request, 1920, 1080, &[])
         .await
         .unwrap();
 
@@ -384,6 +384,46 @@ async fn copy_video_emits_stream_copy() {
         !args.contains("-c:v\nlibx265\n"),
         "unexpected -c:v libx265 when copy_video"
     );
+}
+
+#[tokio::test]
+async fn video_transcode_restores_forced_subtitle_dispositions() {
+    let dir = tempfile::tempdir().unwrap();
+    let (ffmpeg, args_path) = arg_capture_ffmpeg(dir.path());
+    let ffprobe = hevc_mkv_ffprobe(dir.path());
+    let input = dir.path().join("input.mkv");
+    tokio::fs::write(&input, b"input").await.unwrap();
+    let request = basic_request(dir.path(), "mkv", "hevc", profile_x265());
+    let config = FfmpegConfig::new(ffmpeg, ffprobe, "test".to_owned(), DEFAULT_PROCESS_TIMEOUT);
+
+    run_ffmpeg_transcode(&config, &request, 1920, 1080, &[1])
+        .await
+        .unwrap();
+
+    let args = std::fs::read_to_string(args_path).unwrap();
+    assert!(args.contains("-disposition:s:1\n+forced\n"), "{args}");
+}
+
+#[tokio::test]
+async fn input_probe_collects_forced_subtitle_ordinals() {
+    let dir = tempfile::tempdir().unwrap();
+    let ffprobe = stub_bin(
+        dir.path(),
+        "ffprobe",
+        "#!/bin/sh\ncat <<'JSON'\n{\"streams\":[{\"codec_type\":\"video\",\"codec_name\":\"h264\",\"width\":1920,\"height\":1080,\"pix_fmt\":\"yuv420p\"},{\"codec_type\":\"subtitle\",\"disposition\":{\"forced\":0}},{\"codec_type\":\"audio\",\"disposition\":{\"forced\":1}},{\"codec_type\":\"subtitle\",\"disposition\":{\"forced\":1}}]}\nJSON\n",
+    );
+    let config = FfmpegConfig::new(
+        dir.path().join("ffmpeg"),
+        ffprobe,
+        "test".to_owned(),
+        DEFAULT_PROCESS_TIMEOUT,
+    );
+
+    let probe = probe_input(&config, &dir.path().join("input.mkv"))
+        .await
+        .unwrap();
+
+    assert_eq!(probe.forced_subtitle_ordinals, [1]);
 }
 
 // ---------------------------------------------------------------------------
@@ -613,6 +653,7 @@ async fn ffmpeg_non_zero_exit_is_error() {
         &request,
         1920,
         1080,
+        &[],
     )
     .await
     .unwrap_err();
@@ -663,6 +704,7 @@ async fn ffmpeg_success_requires_hevc_matroska_probe() {
         &request,
         1920,
         1080,
+        &[],
     )
     .await
     .unwrap();
@@ -832,6 +874,8 @@ async fn opus_extraction_requests_ogg_output() {
     let args = std::fs::read_to_string(args_path).unwrap();
     assert!(args.contains("-f\nogg\n"));
     assert!(args.contains("-c:a\nlibopus\n"));
+    assert!(args.contains("-mapping_family\n1\n"));
+    assert!(args.contains("-channel_layout\n5.1\n"));
 }
 
 #[tokio::test]

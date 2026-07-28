@@ -76,7 +76,14 @@ fn selection_preserves_source_default_video_without_defaults_action() {
             .collect::<Vec<_>>(),
         vec!["stream-0"]
     );
-    assert!(selection.clear_default_streams.is_empty());
+    assert_eq!(
+        selection
+            .clear_default_streams
+            .iter()
+            .map(|stream| stream.snapshot_stream_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["stream-1"]
+    );
 }
 
 #[test]
@@ -107,7 +114,14 @@ fn selection_preserves_source_default_video_with_explicit_preserve_action() {
             .collect::<Vec<_>>(),
         vec!["stream-0"]
     );
-    assert!(selection.clear_default_streams.is_empty());
+    assert_eq!(
+        selection
+            .clear_default_streams
+            .iter()
+            .map(|stream| stream.snapshot_stream_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["stream-1"]
+    );
 }
 
 #[test]
@@ -563,7 +577,14 @@ fn selection_keeps_default_streams_empty_for_non_default_video() {
         selection.default_streams.is_empty(),
         "a non-default source video must not be forced default (MKV-source behavior)"
     );
-    assert!(selection.clear_default_streams.is_empty());
+    assert_eq!(
+        selection
+            .clear_default_streams
+            .iter()
+            .map(|stream| stream.snapshot_stream_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["stream-0", "stream-1"]
+    );
 }
 
 #[test]
@@ -656,6 +677,20 @@ fn selection_executes_commentary_and_font_actions_without_touching_other_kinds()
         .collect::<Vec<_>>();
 
     assert_eq!(kept, ["video", "main", "subtitle", "font"]);
+    assert_eq!(
+        selection
+            .forced_streams
+            .iter()
+            .map(|stream| stream.snapshot_stream_id.as_str())
+            .collect::<Vec<_>>(),
+        ["subtitle"]
+    );
+    assert!(
+        selection
+            .clear_forced_streams
+            .iter()
+            .all(|stream| stream.snapshot_stream_id != "font")
+    );
 }
 
 #[test]

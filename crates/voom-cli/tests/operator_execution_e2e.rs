@@ -19,15 +19,20 @@
     reason = "integration tests fail loudly and preserve paths/stderr for diagnosis"
 )]
 
-use std::io::{BufRead, BufReader, Read};
 use std::path::Path;
-use std::process::{Child, ChildStdin, Command, Stdio};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::process::Command;
+use std::time::Duration;
 
 use serde_json::Value;
-use voom_test_support::worker::{cargo_build_package, hide_stale_fake_ffprobe_sibling};
+use voom_test_support::worker::hide_stale_fake_ffprobe_sibling;
+
+#[path = "support/local_worker.rs"]
+mod local_worker;
+#[path = "support/process.rs"]
+mod process;
+
+use local_worker::LocalWorker;
+use process::{BoundedOutput, build_worker_package, run_bounded};
 
 /// The Task 1 sample policy: a single `normalize` phase that remuxes to MKV and
 /// transcodes video to HEVC. For an h264/mp4 source this plans `[Remux,
@@ -37,45 +42,54 @@ const POLICY: &str = "policy \"remux-hevc\" {\n  \
 
 const READY_TIMEOUT: Duration = Duration::from_mins(1);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
+const PROCESS_TIMEOUT: Duration = Duration::from_mins(2);
+const BUILD_TIMEOUT: Duration = Duration::from_mins(5);
 
 #[tokio::test(flavor = "multi_thread")]
 async fn operator_runs_real_media_pipeline_through_cli() {
-    // Bundled workers the live topology spawns: the two mutation workers we run
-    // via `run-local`, plus the ffprobe + verify workers the control plane spawns
-    // as siblings during scan/execute.
-    cargo_build_package("voom-ffmpeg-worker").unwrap();
-    cargo_build_package("voom-mkvtoolnix-worker").unwrap();
-    cargo_build_package("voom-ffprobe-worker").unwrap();
-    cargo_build_package("voom-verify-artifact-worker").unwrap();
-    // Post-commit result probes must run REAL ffprobe against committed bytes;
-    // hide any canned test-helper `ffprobe` stub a sibling test left in the
-    // shared profile dir.
+    prepare_worker_binaries();
     let _ffprobe_guard = hide_stale_fake_ffprobe_sibling("operator-execution-e2e").unwrap();
+    let (_tmp, root, library, url) = prepare_operator_fixture();
+    assert_ok(&run_voom(&url, &["init"]), "init");
 
-    let tmp = tempfile::TempDir::new().unwrap();
-    let root = tmp.path().canonicalize().unwrap();
-    let library = root.join("library");
-    std::fs::create_dir(&library).unwrap();
-    let movie = library.join("Movie.mp4");
-    generate_h264_fixture(&movie);
-    std::fs::write(library.join("notes.txt"), b"just some notes, not a video\n").unwrap();
+    let mut ffmpeg = LocalWorker::spawn(&url, "ffmpeg").unwrap();
+    let mut mkvtoolnix = LocalWorker::spawn(&url, "mkvtoolnix").unwrap();
+    ffmpeg.wait_for_ready(READY_TIMEOUT).unwrap();
+    mkvtoolnix.wait_for_ready(READY_TIMEOUT).unwrap();
+    let (policy_version_id, input_set_id) = create_library_policy(&url, &root, &library);
 
-    let db = tempfile::NamedTempFile::new_in(&root).unwrap();
-    let url = format!("sqlite://{}", db.path().display());
+    let out_dir = root.join("out");
+    let staging_root = root.join("stage");
+    let execute = run_execute_with_concurrent_reader(
+        &url,
+        policy_version_id,
+        input_set_id,
+        &staging_root,
+        &out_dir,
+    );
+    assert_execute_committed(&execute, &out_dir);
 
-    // 3. Apply migrations against the shared DB.
-    let init = run_voom(&url, &["init"]);
-    assert_ok(&init, "init");
+    let ffmpeg_id = ffmpeg.worker_id();
+    let mkvtoolnix_id = mkvtoolnix.worker_id();
+    assert_retired_envelope(
+        &ffmpeg.shutdown(SHUTDOWN_TIMEOUT).unwrap(),
+        ffmpeg_id,
+        "ffmpeg",
+    );
+    assert_retired_envelope(
+        &mkvtoolnix.shutdown(SHUTDOWN_TIMEOUT).unwrap(),
+        mkvtoolnix_id,
+        "mkvtoolnix",
+    );
 
-    // 4. Spawn the two real worker processes and gate on their readiness lines.
-    let mut ffmpeg = LocalWorker::spawn(&url, "ffmpeg");
-    let mut mkvtoolnix = LocalWorker::spawn(&url, "mkvtoolnix");
-    ffmpeg.wait_for_ready(READY_TIMEOUT);
-    mkvtoolnix.wait_for_ready(READY_TIMEOUT);
+    let final_list = run_voom(&url, &["worker", "list"]);
+    let final_json = assert_ok(&final_list, "worker list (post-shutdown)");
+    assert_no_live_worker(&final_json, ffmpeg_id);
+    assert_no_live_worker(&final_json, mkvtoolnix_id);
+}
 
-    // 5. Scan the library directory. notes.txt is filtered at discovery as an
-    // unsupported extension, so the video is ingested and the text file skipped.
-    let scan = run_voom(&url, &["scan", "--path", &library.display().to_string()]);
+fn create_library_policy(url: &str, root: &Path, library: &Path) -> (u64, u64) {
+    let scan = run_voom(url, &["scan", "--path", &library.display().to_string()]);
     let scan_json = assert_ok(&scan, "scan");
     assert_eq!(
         scan_json["data"]["summary"]["ingested"], 1,
@@ -86,11 +100,10 @@ async fn operator_runs_real_media_pipeline_through_cli() {
         "notes.txt is skipped at scan as an unsupported extension: {scan_json}"
     );
 
-    // 6. Create the policy; capture the accepted version id.
     let policy_file = root.join("remux-and-hevc.voom");
     std::fs::write(&policy_file, POLICY).unwrap();
     let policy = run_voom(
-        &url,
+        url,
         &[
             "policy",
             "create",
@@ -105,9 +118,8 @@ async fn operator_runs_real_media_pipeline_through_cli() {
         .as_u64()
         .unwrap();
 
-    // 7. Build the whole-library input set from scan rows; capture its id.
     let input = run_voom(
-        &url,
+        url,
         &[
             "policy",
             "input",
@@ -133,32 +145,35 @@ async fn operator_runs_real_media_pipeline_through_cli() {
          already filtered at scan: {input_json}"
     );
     let input_set_id = input_set["input_set_id"].as_u64().unwrap();
+    (policy_version_id, input_set_id)
+}
 
-    // 8. + 9. Run `compliance execute` while a concurrent `worker list` reader
-    // hits the same DB; execution is the oracle for what commits.
-    let out_dir = root.join("out");
-    let staging_root = root.join("stage");
-    let execute = run_execute_with_concurrent_reader(
-        &url,
-        policy_version_id,
-        input_set_id,
-        &staging_root,
-        &out_dir,
-    );
-    assert_execute_committed(&execute, &out_dir);
+fn prepare_worker_binaries() {
+    for package in [
+        "voom-ffmpeg-worker",
+        "voom-mkvtoolnix-worker",
+        "voom-ffprobe-worker",
+        "voom-verify-artifact-worker",
+    ] {
+        build_worker_package(package, BUILD_TIMEOUT).unwrap();
+    }
+}
 
-    // 10. Retire the workers by closing their stdin; assert each prints its final
-    // retirement envelope and exits cleanly.
-    let ffmpeg_id = ffmpeg.worker_id;
-    let mkvtoolnix_id = mkvtoolnix.worker_id;
-    assert_retired_envelope(&ffmpeg.shutdown(), ffmpeg_id, "ffmpeg");
-    assert_retired_envelope(&mkvtoolnix.shutdown(), mkvtoolnix_id, "mkvtoolnix");
-
-    // After both supervisors retired their workers, neither is live anymore.
-    let final_list = run_voom(&url, &["worker", "list"]);
-    let final_json = assert_ok(&final_list, "worker list (post-shutdown)");
-    assert_no_live_worker(&final_json, ffmpeg_id);
-    assert_no_live_worker(&final_json, mkvtoolnix_id);
+fn prepare_operator_fixture() -> (
+    tempfile::TempDir,
+    std::path::PathBuf,
+    std::path::PathBuf,
+    String,
+) {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    let library = root.join("library");
+    std::fs::create_dir(&library).unwrap();
+    generate_h264_fixture(&library.join("Movie.mp4"));
+    std::fs::write(library.join("notes.txt"), b"just some notes, not a video\n").unwrap();
+    let db = tempfile::NamedTempFile::new_in(&root).unwrap();
+    let url = format!("sqlite://{}", db.path().display());
+    (tmp, root, library, url)
 }
 
 /// Run `compliance execute` on a worker thread while the main thread issues
@@ -172,7 +187,7 @@ fn run_execute_with_concurrent_reader(
     input_set_id: u64,
     staging_root: &Path,
     out_dir: &Path,
-) -> std::process::Output {
+) -> BoundedOutput {
     let exec_url = url.to_owned();
     let staging = staging_root.display().to_string();
     let output = out_dir.display().to_string();
@@ -215,7 +230,7 @@ fn run_execute_with_concurrent_reader(
 /// Assert the execute run succeeded and inspect what it actually committed:
 /// exactly one completed `normalize` phase, one committed per-`(file, phase)` row
 /// for the lone video, and a single on-disk MKV in `--output-dir`.
-fn assert_execute_committed(execute: &std::process::Output, out_dir: &Path) {
+fn assert_execute_committed(execute: &BoundedOutput, out_dir: &Path) {
     let execute_json = assert_ok(execute, "compliance execute");
     assert_eq!(execute_json["command"], "compliance");
 
@@ -315,170 +330,27 @@ fn assert_no_live_worker(list_json: &Value, worker_id: u64) {
     );
 }
 
-/// A `voom worker run-local` child process: a real `voom` invocation that binds
-/// a bundled mutation worker, prints a readiness line, and supervises until its
-/// stdin closes. stdout is read line-by-line off-thread (the readiness line then
-/// the final retirement envelope); stderr is drained into a buffer for failure
-/// diagnostics.
-struct LocalWorker {
-    kind: &'static str,
-    child: Child,
-    stdin: Option<ChildStdin>,
-    stdout_rx: Receiver<String>,
-    stderr: Arc<Mutex<String>>,
-    worker_id: u64,
-}
-
-impl LocalWorker {
-    fn spawn(url: &str, kind: &'static str) -> Self {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_voom"))
-            .env("VOOM_DATABASE_URL", url)
-            .args(["worker", "run-local", "--kind", kind])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap();
-        let stdin = child.stdin.take().unwrap();
-        let stdout = child.stdout.take().unwrap();
-        let stderr = child.stderr.take().unwrap();
-
-        let stderr_buf = Arc::new(Mutex::new(String::new()));
-        let drain = Arc::clone(&stderr_buf);
-        std::thread::spawn(move || {
-            let mut buf = String::new();
-            let _ = BufReader::new(stderr).read_to_string(&mut buf);
-            drain.lock().unwrap().push_str(&buf);
-        });
-
-        let (tx, rx) = mpsc::channel();
-        std::thread::spawn(move || {
-            for line in BufReader::new(stdout).lines() {
-                match line {
-                    Ok(line) => {
-                        if tx.send(line).is_err() {
-                            break;
-                        }
-                    }
-                    Err(_) => break,
-                }
-            }
-        });
-
-        Self {
-            kind,
-            child,
-            stdin: Some(stdin),
-            stdout_rx: rx,
-            stderr: stderr_buf,
-            worker_id: 0,
-        }
-    }
-
-    /// Block until the child prints `{"status":"ready",...}`, recording its
-    /// worker id. Panics (with captured stderr) if the child exits first or the
-    /// readiness line never arrives within `timeout`.
-    fn wait_for_ready(&mut self, timeout: Duration) {
-        let deadline = Instant::now() + timeout;
-        loop {
-            if let Some(status) = self.child.try_wait().unwrap() {
-                panic!(
-                    "run-local {} exited before ready (status={status}); stderr:\n{}",
-                    self.kind,
-                    self.stderr_snapshot()
-                );
-            }
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            assert!(
-                !remaining.is_zero(),
-                "timed out waiting for {} readiness; stderr:\n{}",
-                self.kind,
-                self.stderr_snapshot()
-            );
-            match self
-                .stdout_rx
-                .recv_timeout(remaining.min(Duration::from_millis(250)))
-            {
-                Ok(line) => {
-                    let Ok(value) = serde_json::from_str::<Value>(&line) else {
-                        continue;
-                    };
-                    if value["status"] == "ready" {
-                        assert_eq!(value["kind"], self.kind, "ready line kind mismatch");
-                        self.worker_id = value["worker_id"].as_u64().unwrap();
-                        return;
-                    }
-                }
-                Err(RecvTimeoutError::Timeout) => {}
-                Err(RecvTimeoutError::Disconnected) => panic!(
-                    "run-local {} closed stdout before ready; stderr:\n{}",
-                    self.kind,
-                    self.stderr_snapshot()
-                ),
-            }
-        }
-    }
-
-    /// Close stdin (the supervisor's shutdown signal), drain the remaining stdout
-    /// lines, and return the final JSON envelope the supervisor prints on retire.
-    fn shutdown(&mut self) -> Value {
-        drop(self.stdin.take());
-        let mut last = None;
-        while let Ok(line) = self.stdout_rx.recv_timeout(SHUTDOWN_TIMEOUT) {
-            if let Ok(value) = serde_json::from_str::<Value>(&line) {
-                last = Some(value);
-            }
-        }
-        let status = self.child.wait().unwrap();
-        assert!(
-            status.success(),
-            "run-local {} exited nonzero ({status}); stderr:\n{}",
-            self.kind,
-            self.stderr_snapshot()
-        );
-        last.unwrap_or_else(|| {
-            panic!(
-                "run-local {} printed no shutdown envelope; stderr:\n{}",
-                self.kind,
-                self.stderr_snapshot()
-            )
-        })
-    }
-
-    fn stderr_snapshot(&self) -> String {
-        self.stderr.lock().unwrap().clone()
-    }
-}
-
-impl Drop for LocalWorker {
-    fn drop(&mut self) {
-        drop(self.stdin.take());
-        if self.child.try_wait().ok().flatten().is_none() {
-            let _ = self.child.kill();
-            let _ = self.child.wait();
-        }
-    }
-}
-
 /// Invoke the shipped `voom` binary against the shared DB. The database URL is
 /// passed via `VOOM_DATABASE_URL` so every process in the topology agrees.
-fn run_voom(url: &str, args: &[&str]) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_voom"))
-        .env("VOOM_DATABASE_URL", url)
-        .args(args)
-        .output()
-        .unwrap()
+fn run_voom(url: &str, args: &[&str]) -> BoundedOutput {
+    run_bounded(
+        Command::new(env!("CARGO_BIN_EXE_voom"))
+            .env("VOOM_DATABASE_URL", url)
+            .args(args),
+        PROCESS_TIMEOUT,
+    )
+    .unwrap()
 }
 
 /// Assert the command exited 0 with an `ok` envelope on stdout, returning it.
-fn assert_ok(output: &std::process::Output, what: &str) -> Value {
+fn assert_ok(output: &BoundedOutput, what: &str) -> Value {
     assert_eq!(
         output.status.code(),
         Some(0),
-        "{what} must exit 0; stdout={} stderr={}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
+        "{}",
+        output.diagnostics(what)
     );
+    assert!(!output.timed_out, "{}", output.diagnostics(what));
     let value = envelope(&output.stdout);
     assert_eq!(value["status"], "ok", "{what} must be ok: {value}");
     value
@@ -503,8 +375,8 @@ fn list_dir(dir: &Path) -> Vec<String> {
 }
 
 fn generate_h264_fixture(path: &Path) {
-    let status = Command::new("ffmpeg")
-        .args([
+    let output = run_bounded(
+        Command::new("ffmpeg").args([
             "-y",
             "-hide_banner",
             "-loglevel",
@@ -520,11 +392,13 @@ fn generate_h264_fixture(path: &Path) {
             "-pix_fmt",
             "yuv420p",
             path.to_str().unwrap(),
-        ])
-        .status()
-        .unwrap();
+        ]),
+        PROCESS_TIMEOUT,
+    )
+    .unwrap();
     assert!(
-        status.success(),
-        "ffmpeg fixture generation failed: {status}"
+        !output.timed_out && output.status.success(),
+        "{}",
+        output.diagnostics("ffmpeg fixture generation")
     );
 }
