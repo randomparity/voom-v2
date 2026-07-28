@@ -69,6 +69,24 @@ async fn eligible_worker(
     worker
 }
 
+async fn grant_capacity(
+    cp: &crate::ControlPlane,
+    worker: &Worker,
+    operation: &TicketOperation,
+    limit: u32,
+) {
+    cp.record_grant(NewGrant {
+        worker_id: worker.id,
+        can_execute: vec![operation.clone()],
+        can_access_read: Vec::new(),
+        can_access_write: Vec::new(),
+        denies: Vec::new(),
+        max_parallel: serde_json::json!({operation.as_str(): limit}),
+    })
+    .await
+    .unwrap();
+}
+
 #[tokio::test]
 async fn acquire_lease_emits_lease_acquired_and_ticket_leased() {
     let (cp, _tmp) = cp().await;
@@ -287,6 +305,182 @@ async fn acquire_lease_rechecks_deny_after_candidate_selection_without_side_effe
     assert_eq!(lease_count, 0);
     assert_eq!(count(&cp, EventKind::LeaseAcquired).await, 0);
     assert_eq!(count(&cp, EventKind::TicketLeased).await, 0);
+}
+
+#[tokio::test]
+async fn acquire_lease_rechecks_stale_worker_capacity_without_side_effects() {
+    let (cp, _tmp) = cp().await;
+    let first = cp.create_ticket(ticket("noop", 2)).await.unwrap();
+    let second = cp.create_ticket(ticket("noop", 2)).await.unwrap();
+    cp.mark_ready_if_unblocked(first.id, T0).await.unwrap();
+    cp.mark_ready_if_unblocked(second.id, T0).await.unwrap();
+    let worker = eligible_worker(&cp, "capacity-stale", &first.kind).await;
+    grant_capacity(&cp, &worker, &first.kind, 1).await;
+
+    let candidates = cp.workers.operation_candidates(&first.kind).await.unwrap();
+    assert_eq!(candidates.len(), 1);
+    assert_eq!(candidates[0].active_leases, 0);
+
+    cp.acquire_lease(NewLease {
+        ticket_id: first.id,
+        worker_id: worker.id,
+        ttl: TDuration::seconds(60),
+        now: T0,
+    })
+    .await
+    .unwrap();
+    let ready = cp.tickets().get(second.id).await.unwrap().unwrap();
+
+    let err = cp
+        .acquire_lease(NewLease {
+            ticket_id: second.id,
+            worker_id: worker.id,
+            ttl: TDuration::seconds(60),
+            now: T0,
+        })
+        .await
+        .unwrap_err();
+
+    assert!(
+        matches!(err, VoomError::NoEligibleWorker(ref message) if message.contains("capacity")),
+        "got {err:?}"
+    );
+    assert_ticket_unchanged(&cp, &ready).await;
+    let held: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM leases WHERE worker_id = ? AND state = 'held'")
+            .bind(i64::try_from(worker.id.0).unwrap())
+            .fetch_one(&cp.pool)
+            .await
+            .unwrap();
+    assert_eq!(held, 1);
+    assert_eq!(count(&cp, EventKind::LeaseAcquired).await, 1);
+    assert_eq!(count(&cp, EventKind::TicketLeased).await, 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_local_acquire_never_exceeds_worker_operation_capacity() {
+    const ATTEMPTS: usize = 8;
+
+    let (cp, _tmp) = cp().await;
+    let operation = TicketOperation::new("noop").unwrap();
+    let worker = eligible_worker(&cp, "capacity-concurrent", &operation).await;
+    grant_capacity(&cp, &worker, &operation, 1).await;
+    let mut tickets = Vec::with_capacity(ATTEMPTS);
+    for _ in 0..ATTEMPTS {
+        let ticket = cp.create_ticket(ticket("noop", 2)).await.unwrap();
+        cp.mark_ready_if_unblocked(ticket.id, T0).await.unwrap();
+        tickets.push(ticket);
+    }
+    let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(ATTEMPTS));
+    let mut handles = Vec::with_capacity(ATTEMPTS);
+    for ticket in &tickets {
+        let cp = cp.clone();
+        let barrier = barrier.clone();
+        let input = NewLease {
+            ticket_id: ticket.id,
+            worker_id: worker.id,
+            ttl: TDuration::seconds(60),
+            now: T0,
+        };
+        handles.push(tokio::spawn(async move {
+            barrier.wait().await;
+            cp.acquire_lease(input).await
+        }));
+    }
+
+    let mut acquired = 0;
+    for handle in handles {
+        match handle.await.unwrap() {
+            Ok(_) => acquired += 1,
+            Err(VoomError::NoEligibleWorker(message)) => {
+                assert!(message.contains("capacity"), "got {message}");
+            }
+            Err(error) => panic!("unexpected concurrent acquire error: {error:?}"),
+        }
+    }
+
+    assert_eq!(acquired, 1);
+    let held: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM leases WHERE worker_id = ? AND state = 'held'")
+            .bind(i64::try_from(worker.id.0).unwrap())
+            .fetch_one(&cp.pool)
+            .await
+            .unwrap();
+    assert_eq!(held, 1);
+    let states: Vec<(String, i64)> =
+        sqlx::query_as("SELECT state, attempt FROM tickets ORDER BY id")
+            .fetch_all(&cp.pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        states
+            .iter()
+            .filter(|(state, attempt)| state == "leased" && *attempt == 1)
+            .count(),
+        1
+    );
+    assert_eq!(
+        states
+            .iter()
+            .filter(|(state, attempt)| state == "ready" && *attempt == 0)
+            .count(),
+        ATTEMPTS - 1
+    );
+    assert_eq!(count(&cp, EventKind::LeaseAcquired).await, 1);
+    assert_eq!(count(&cp, EventKind::TicketLeased).await, 1);
+}
+
+#[tokio::test]
+async fn worker_capacity_counts_normalized_operation_not_unrelated_leases() {
+    let (cp, _tmp) = cp().await;
+    let remux = TicketOperation::new("remux").unwrap();
+    let probe = TicketOperation::new("probe_file").unwrap();
+    let worker = eligible_worker(&cp, "capacity-by-operation", &remux).await;
+    grant_capacity(&cp, &worker, &remux, 2).await;
+    cp.record_capability(NewCapability {
+        worker_id: worker.id,
+        operation: probe.clone(),
+        codecs: Vec::new(),
+        hardware: Vec::new(),
+        artifact_access: Vec::new(),
+        extra: serde_json::json!({}),
+    })
+    .await
+    .unwrap();
+    grant_capacity(&cp, &worker, &probe, 1).await;
+    let workflow_remux = cp
+        .create_ticket(ticket("synthetic.workflow.operation.remux", 2))
+        .await
+        .unwrap();
+    let probe_ticket = cp.create_ticket(ticket("probe_file", 2)).await.unwrap();
+    cp.mark_ready_if_unblocked(workflow_remux.id, T0)
+        .await
+        .unwrap();
+    cp.mark_ready_if_unblocked(probe_ticket.id, T0)
+        .await
+        .unwrap();
+    cp.acquire_lease(NewLease {
+        ticket_id: workflow_remux.id,
+        worker_id: worker.id,
+        ttl: TDuration::seconds(60),
+        now: T0,
+    })
+    .await
+    .unwrap();
+    cp.acquire_lease(NewLease {
+        ticket_id: probe_ticket.id,
+        worker_id: worker.id,
+        ttl: TDuration::seconds(60),
+        now: T0,
+    })
+    .await
+    .unwrap();
+
+    let candidates = cp.workers.operation_candidates(&remux).await.unwrap();
+
+    assert_eq!(candidates.len(), 1);
+    assert_eq!(candidates[0].active_leases, 1);
+    assert_eq!(candidates[0].max_parallel, 2);
 }
 
 #[tokio::test]

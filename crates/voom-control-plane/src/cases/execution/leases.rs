@@ -19,6 +19,7 @@ use voom_store::repo::media::audio_synthesis_operations::SqliteAudioSynthesisOpe
 use voom_store::repo::tickets::TicketState;
 
 use crate::ControlPlane;
+use crate::cases::begin_immediate_tx;
 
 use super::{append_event, begin_tx, commit_tx, require_audit_field};
 
@@ -30,7 +31,7 @@ impl ControlPlane {
     /// # Errors
     /// Propagates repo and event-append errors.
     pub async fn acquire_lease(&self, input: NewLease) -> Result<Lease, VoomError> {
-        let mut tx = begin_tx(&self.pool).await?;
+        let mut tx = begin_immediate_tx(&self.pool).await?;
         let lease = self.acquire_lease_in_tx(&mut tx, input).await?;
         commit_tx(tx).await?;
         Ok(lease)

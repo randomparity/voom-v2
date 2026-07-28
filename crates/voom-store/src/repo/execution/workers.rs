@@ -76,6 +76,20 @@ pub struct WorkerOperationCandidate {
     pub max_parallel: u32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WorkerOperationCapacity {
+    pub active_leases: u32,
+    pub max_parallel: u32,
+}
+
+impl WorkerOperationCapacity {
+    /// Return whether another lease may be acquired for this worker operation.
+    #[must_use]
+    pub const fn has_capacity(self) -> bool {
+        self.active_leases < self.max_parallel
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct NewCapability {
     pub worker_id: WorkerId,
@@ -541,6 +555,35 @@ impl SqliteWorkerRepo {
         Ok(out)
     }
 
+    /// Read the effective held-lease count and grant limit for one worker
+    /// operation in the caller's transaction.
+    pub async fn operation_capacity_in_tx(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        worker_id: WorkerId,
+        operation: &TicketOperation,
+    ) -> Result<WorkerOperationCapacity, VoomError> {
+        let operation = normalized_worker_operation(operation)?;
+        let workflow_operation = format!("{WORKFLOW_OPERATION_PREFIX}{}", operation.as_str());
+        let active_leases = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) \
+             FROM leases \
+             JOIN tickets ON tickets.id = leases.ticket_id \
+             WHERE leases.state = 'held' AND leases.worker_id = ? \
+               AND (tickets.kind = ? OR tickets.kind = ?)",
+        )
+        .bind(i64_from_u64(worker_id.0))
+        .bind(operation.as_str())
+        .bind(workflow_operation)
+        .fetch_one(&mut **tx)
+        .await
+        .map_err(|e| VoomError::database_context("worker operation active lease count", e))?;
+        Ok(WorkerOperationCapacity {
+            active_leases: u32_from_i64(active_leases)?,
+            max_parallel: max_parallel_in_tx(tx, worker_id, &operation).await?,
+        })
+    }
+
     /// List workers whose effective capability and grants allow an operation.
     ///
     /// Each worker appears at most once. The result is observational; lease
@@ -571,18 +614,10 @@ impl SqliteWorkerRepo {
         tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
         operation: &TicketOperation,
     ) -> Result<Vec<WorkerOperationCandidate>, VoomError> {
-        let rows = sqlx::query(
-            "SELECT w.id AS worker_id, COALESCE(held.active_leases, 0) AS active_leases \
-             FROM workers w \
-             LEFT JOIN ( \
-                 SELECT worker_id, COUNT(*) AS active_leases \
-                 FROM leases WHERE state = 'held' GROUP BY worker_id \
-             ) held ON held.worker_id = w.id \
-             ORDER BY w.id ASC",
-        )
-        .fetch_all(&mut **tx)
-        .await
-        .map_err(|e| VoomError::database_context("worker operation candidates", e))?;
+        let rows = sqlx::query("SELECT id AS worker_id FROM workers ORDER BY id ASC")
+            .fetch_all(&mut **tx)
+            .await
+            .map_err(|e| VoomError::database_context("worker operation candidates", e))?;
         let mut candidates = Vec::new();
         for row in rows {
             let worker_id = worker_candidate_id(&row)?;
@@ -592,10 +627,13 @@ impl SqliteWorkerRepo {
             if !eligibility.is_eligible() {
                 continue;
             }
+            let capacity = self
+                .operation_capacity_in_tx(tx, worker_id, operation)
+                .await?;
             candidates.push(WorkerOperationCandidate {
                 worker_id,
-                active_leases: worker_candidate_active_leases(&row)?,
-                max_parallel: max_parallel_in_tx(tx, worker_id, operation).await?,
+                active_leases: capacity.active_leases,
+                max_parallel: capacity.max_parallel,
             });
         }
         Ok(candidates)
@@ -631,13 +669,6 @@ fn worker_candidate_id(row: &sqlx::sqlite::SqliteRow) -> Result<WorkerId, VoomEr
     Ok(WorkerId(u64_from_i64(worker_id)))
 }
 
-fn worker_candidate_active_leases(row: &sqlx::sqlite::SqliteRow) -> Result<u32, VoomError> {
-    let active_leases: i64 = row
-        .try_get("active_leases")
-        .map_err(|e| map_row_err("worker operation candidates", &e))?;
-    u32_from_i64(active_leases)
-}
-
 async fn max_parallel_in_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     worker_id: WorkerId,
@@ -667,6 +698,17 @@ async fn max_parallel_in_tx(
         );
     }
     Ok(operation_limit.or(wildcard_limit).unwrap_or(1))
+}
+
+const WORKFLOW_OPERATION_PREFIX: &str = "synthetic.workflow.operation.";
+
+pub(super) fn normalized_worker_operation(
+    operation: &TicketOperation,
+) -> Result<TicketOperation, VoomError> {
+    let Some(operation) = operation.as_str().strip_prefix(WORKFLOW_OPERATION_PREFIX) else {
+        return Ok(operation.clone());
+    };
+    TicketOperation::from_stored(operation, "worker capacity operation")
 }
 
 fn max_limit(current: Option<u32>, candidate: Option<u32>) -> Option<u32> {

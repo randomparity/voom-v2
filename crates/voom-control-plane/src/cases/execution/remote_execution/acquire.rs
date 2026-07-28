@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 
 use serde_json::{Value as JsonValue, json};
-use sqlx::{Row, Sqlite, Transaction};
+use sqlx::{Sqlite, Transaction};
 use time::{Duration, OffsetDateTime};
 use voom_core::{LeaseId, NodeId, TicketId, TicketOperation, VoomError, WorkerId};
 use voom_scheduler::{
@@ -284,8 +284,7 @@ impl ControlPlane {
         tickets: Vec<Ticket>,
     ) -> Result<RemoteAcquireCandidateSet, VoomError> {
         let mut eligibility_by_operation = HashMap::new();
-        let mut worker_active_by_operation = HashMap::new();
-        let mut worker_limit_by_operation = HashMap::new();
+        let mut capacity_by_operation = HashMap::new();
         let node_limit = self
             .scheduler_node_limits
             .node_limit_in_tx(tx, input.node_id)
@@ -306,33 +305,22 @@ impl ControlPlane {
                     eligibility
                 };
 
-            let worker_active = if let Some(active) = worker_active_by_operation.get(&ticket.kind) {
-                *active
+            let capacity = if let Some(capacity) = capacity_by_operation.get(&ticket.kind) {
+                *capacity
             } else {
-                let active = active_lease_count_for_worker_operation_in_tx(
-                    tx,
-                    input.worker_id,
-                    &ticket.kind,
-                )
-                .await?;
-                worker_active_by_operation.insert(ticket.kind.clone(), active);
-                active
-            };
-            let worker_limit = if let Some(limit) = worker_limit_by_operation.get(&ticket.kind) {
-                *limit
-            } else {
-                let limit =
-                    max_parallel_for_worker_operation_in_tx(tx, input.worker_id, &ticket.kind)
-                        .await?;
-                worker_limit_by_operation.insert(ticket.kind.clone(), limit);
-                limit
+                let capacity = self
+                    .workers
+                    .operation_capacity_in_tx(tx, input.worker_id, &ticket.kind)
+                    .await?;
+                capacity_by_operation.insert(ticket.kind.clone(), capacity);
+                capacity
             };
             candidates.push(candidate_from_ticket(
                 input,
                 ticket,
                 &eligibility,
-                worker_active,
-                worker_limit,
+                capacity.active_leases,
+                capacity.max_parallel,
                 node_active_leases,
                 node_limit,
             )?);
@@ -356,12 +344,11 @@ impl ControlPlane {
         // Candidate scoring uses advisory capacity facts; re-read the selected
         // worker and node before lease creation so capacity decisions use the
         // current transaction view.
-        let worker_active =
-            active_lease_count_for_worker_operation_in_tx(tx, input.worker_id, &ticket.kind)
-                .await?;
-        let worker_limit =
-            max_parallel_for_worker_operation_in_tx(tx, input.worker_id, &ticket.kind).await?;
-        if worker_active >= worker_limit {
+        let capacity = self
+            .workers
+            .operation_capacity_in_tx(tx, input.worker_id, &ticket.kind)
+            .await?;
+        if !capacity.has_capacity() {
             return self
                 .capacity_no_candidate_in_tx(
                     tx,
@@ -369,8 +356,8 @@ impl ControlPlane {
                     SelectedCapacityFull {
                         reason_code: StoreSchedulerReasonCode::WorkerCapacityFull,
                         selected_candidate,
-                        observed_active: worker_active,
-                        observed_limit: worker_limit,
+                        observed_active: capacity.active_leases,
+                        observed_limit: capacity.max_parallel,
                     },
                     now,
                 )
@@ -798,85 +785,6 @@ async fn active_lease_count_for_node_in_tx(
     .await
     .map_err(|e| VoomError::database_context("node active lease count", e))?;
     count_to_u32(count, "node active lease count")
-}
-
-async fn active_lease_count_for_worker_operation_in_tx(
-    tx: &mut Transaction<'_, Sqlite>,
-    worker_id: WorkerId,
-    operation: &TicketOperation,
-) -> Result<u32, VoomError> {
-    let count = sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*) \
-         FROM leases \
-         JOIN tickets ON tickets.id = leases.ticket_id \
-         WHERE leases.state = 'held' AND leases.worker_id = ? AND tickets.kind = ?",
-    )
-    .bind(sqlite_id(worker_id.0, "worker id")?)
-    .bind(operation.as_str())
-    .fetch_one(&mut **tx)
-    .await
-    .map_err(|e| VoomError::database_context("worker operation active lease count", e))?;
-    count_to_u32(count, "worker operation active lease count")
-}
-
-async fn max_parallel_for_worker_operation_in_tx(
-    tx: &mut Transaction<'_, Sqlite>,
-    worker_id: WorkerId,
-    operation: &TicketOperation,
-) -> Result<u32, VoomError> {
-    let rows =
-        sqlx::query("SELECT max_parallel FROM worker_grants WHERE worker_id = ? ORDER BY id")
-            .bind(sqlite_id(worker_id.0, "worker id")?)
-            .fetch_all(&mut **tx)
-            .await
-            .map_err(|e| VoomError::database_context("worker max_parallel read", e))?;
-
-    let mut operation_limit = None;
-    let mut wildcard_limit = None;
-    for row in rows {
-        let raw: String = row
-            .try_get("max_parallel")
-            .map_err(|e| VoomError::database_context("worker max_parallel row", e))?;
-        let value: JsonValue = serde_json::from_str(&raw)
-            .map_err(|e| VoomError::database_context("parse worker max_parallel", e))?;
-        operation_limit = max_optional_limit(
-            operation_limit,
-            json_positive_u32(value.get(operation.as_str()), "max_parallel operation")?,
-        );
-        wildcard_limit = max_optional_limit(
-            wildcard_limit,
-            json_positive_u32(value.get("*"), "max_parallel wildcard")?,
-        );
-    }
-
-    Ok(operation_limit.or(wildcard_limit).unwrap_or(1))
-}
-
-fn max_optional_limit(current: Option<u32>, candidate: Option<u32>) -> Option<u32> {
-    match (current, candidate) {
-        (Some(current), Some(candidate)) => Some(current.max(candidate)),
-        (Some(current), None) => Some(current),
-        (None, Some(candidate)) => Some(candidate),
-        (None, None) => None,
-    }
-}
-
-fn json_positive_u32(
-    value: Option<&JsonValue>,
-    label: &'static str,
-) -> Result<Option<u32>, VoomError> {
-    let Some(value) = value else {
-        return Ok(None);
-    };
-    let Some(limit) = value.as_u64() else {
-        return Err(VoomError::Config(format!("{label} must be an integer")));
-    };
-    if limit == 0 {
-        return Err(VoomError::Config(format!("{label} must be positive")));
-    }
-    u32::try_from(limit)
-        .map(Some)
-        .map_err(|_| VoomError::Config(format!("{label} does not fit u32")))
 }
 
 fn sqlite_id(id: u64, label: &'static str) -> Result<i64, VoomError> {

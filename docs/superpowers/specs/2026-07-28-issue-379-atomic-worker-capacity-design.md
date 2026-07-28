@@ -79,10 +79,13 @@ changes retain #343's existing errors.
 ### Executor behavior
 
 Candidate selection normally filters full workers. If the candidate becomes
-full before acquisition, the atomic guard returns `NoEligibleWorker`. The local
-executor maps that post-selection result to `CapacityDeferred`, leaving the
-ready ticket available for a later scheduling pass. It does not record a
-pre-lease failure, consume an attempt, or dispatch a worker request.
+full before acquisition, the atomic guard returns `NoEligibleWorker` while
+leaving the ready ticket unchanged. Defining how an executor should wait for
+capacity held by another process requires a separate retry policy: treating
+that state as the existing process-local `CapacityDeferred` outcome can leave
+the run loop with no active dispatch to await. This issue therefore preserves
+the existing public error behavior and keeps external-capacity retry policy out
+of the durable semaphore change.
 
 Remote acquisition retains its `NoCandidate` scheduler-decision behavior. Its
 worker-capacity recheck uses the store snapshot; the lease guard remains the
@@ -114,8 +117,6 @@ serialization and leaves the same no-partial-state shape.
 4. Separate operation limits do not block each other.
 5. Existing remote contention tests continue to prove one lease plus durable
    capacity decisions, now through the shared store predicate.
-6. An executor-level test forces capacity to fill after selection and proves no
-   worker request is sent and the work is deferred.
 
 ## Compatibility
 
@@ -134,8 +135,10 @@ unchanged; only their ownership and atomic enforcement change.
   includes the direct and workflow-prefixed spellings.
 - **Rely on process-local reservations:** cannot coordinate separate executor
   processes and remains only an advisory scheduling optimization.
-- **Record a pre-lease failure on a stale full candidate:** consumes retry
-  budget for ordinary backpressure. Capacity exhaustion is deferred instead.
+- **Add executor retry policy here:** the store now exposes capacity rejection
+  without partial state, but waiting safely for capacity held by another
+  process needs an explicit wakeup or bounded polling policy. That independent
+  scheduler concern is tracked separately.
 - **Remove the remote precheck:** would turn a normal remote `NoCandidate`
   response into an error after a scheduler decision was selected. Remote keeps
   the response-shaping precheck but shares the store calculation.
@@ -149,7 +152,5 @@ unchanged; only their ownership and atomic enforcement change.
 3. Enforce the snapshot in `SqliteLeaseRepo::acquire_guarded` and start the
    local use case with `BEGIN IMMEDIATE`.
 4. Replace remote worker-capacity helpers with the store method.
-5. Map atomic capacity rejection to executor deferral and add the forced-race
-   executor test.
-6. Run focused store/control-plane/remote/executor tests, strict clippy, review,
+5. Run focused store/control-plane/remote/executor tests, strict clippy, review,
    simplification, and `just ci`.
