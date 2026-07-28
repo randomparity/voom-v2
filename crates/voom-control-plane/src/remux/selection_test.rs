@@ -659,6 +659,20 @@ fn selection_executes_commentary_and_font_actions_without_touching_other_kinds()
         .collect::<Vec<_>>();
 
     assert_eq!(kept, ["video", "main", "subtitle", "font"]);
+    assert_eq!(
+        selection
+            .forced_streams
+            .iter()
+            .map(|stream| stream.snapshot_stream_id.as_str())
+            .collect::<Vec<_>>(),
+        ["subtitle"]
+    );
+    assert!(
+        selection
+            .clear_forced_streams
+            .iter()
+            .all(|stream| stream.snapshot_stream_id != "font")
+    );
 }
 
 #[test]

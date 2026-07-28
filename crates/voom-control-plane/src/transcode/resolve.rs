@@ -87,17 +87,25 @@ pub fn resolve_inline_profiles_in_policy(
     policy: &mut voom_policy::CompiledPolicy,
 ) -> Result<(), VoomError> {
     for phase in &mut policy.phases {
-        for operation in &mut phase.operations {
-            if let voom_policy::CompiledOperation::TranscodeVideo(
-                voom_policy::compiled::CompiledTranscodeVideoOperation {
-                    profile,
-                    target_codec,
-                    container,
-                    resolved_profile,
-                },
-            ) = operation
-            {
-                match profile {
+        let mut pending = phase.operations.iter_mut().rev().collect::<Vec<_>>();
+        while let Some(operation) = pending.pop() {
+            match operation {
+                voom_policy::CompiledOperation::Conditional(conditional) => {
+                    pending.extend(conditional.operations.iter_mut().rev());
+                }
+                voom_policy::CompiledOperation::Rules(rules) => {
+                    for rule in rules.rules.iter_mut().rev() {
+                        pending.extend(rule.operations.iter_mut().rev());
+                    }
+                }
+                voom_policy::CompiledOperation::TranscodeVideo(
+                    voom_policy::compiled::CompiledTranscodeVideoOperation {
+                        profile,
+                        target_codec,
+                        container,
+                        resolved_profile,
+                    },
+                ) => match profile {
                     VideoProfileRef::Inline(settings) => {
                         let typed = inline_to_worker_profile(settings)?;
                         target_codec.clone_from(&typed.target_codec);
@@ -110,10 +118,11 @@ pub fn resolve_inline_profiles_in_policy(
                     VideoProfileRef::Named(name) => {
                         return Err(VoomError::Config(format!(
                             "named video profile `{name}` cannot be resolved offline; \
-                             use `voom plan show` against an initialized store"
+                                 use `voom plan show` against an initialized store"
                         )));
                     }
-                }
+                },
+                _ => {}
             }
         }
     }

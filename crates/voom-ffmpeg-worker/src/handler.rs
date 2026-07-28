@@ -247,9 +247,15 @@ pub async fn handle_transcode_video(
         validate_copy_video_preconditions(request, &input_probe)?;
     }
 
-    let probe = run_ffmpeg_transcode(config, request, input_probe.width, input_probe.height)
-        .await
-        .map_err(TranscodeVideoError::from)?;
+    let probe = run_ffmpeg_transcode(
+        config,
+        request,
+        input_probe.width,
+        input_probe.height,
+        &input_probe.forced_subtitle_ordinals,
+    )
+    .await
+    .map_err(TranscodeVideoError::from)?;
     let (input_post, output) =
         finalize_video_operation(&input_path, &output_path, &input_pre).await?;
 

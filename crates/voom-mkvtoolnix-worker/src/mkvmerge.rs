@@ -82,6 +82,7 @@ pub(crate) struct MkvmergeTrack {
     pub(crate) id: u64,
     pub(crate) kind: MkvmergeTrackKind,
     pub(crate) default: bool,
+    pub(crate) forced: bool,
     pub(crate) commentary: Option<bool>,
     pub(crate) fingerprint: MkvmergeTrackFingerprint,
 }
@@ -104,6 +105,7 @@ impl MkvmergeTrackMapping {
                             id,
                             kind: MkvmergeTrackKind::Video,
                             default: false,
+                            forced: false,
                             commentary: None,
                             fingerprint: MkvmergeTrackFingerprint::synthetic(
                                 MkvmergeTrackKind::Video,
@@ -188,6 +190,10 @@ pub fn track_mapping_from_identify(
         let commentary = track
             .pointer("/properties/flag_commentary")
             .and_then(Value::as_bool);
+        let forced = track
+            .pointer("/properties/forced_track")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
         mapped.insert(
             u32::try_from(provider_index)
                 .map_err(|err| MkvtoolnixError::IdentifyFailed(err.to_string()))?,
@@ -195,6 +201,7 @@ pub fn track_mapping_from_identify(
                 id,
                 kind,
                 default,
+                forced,
                 commentary,
                 fingerprint: MkvmergeTrackFingerprint::from_identify(track),
             },
@@ -223,6 +230,7 @@ pub fn track_mapping_from_identify(
                 id,
                 kind: MkvmergeTrackKind::Attachment,
                 default: false,
+                forced: false,
                 commentary: None,
                 fingerprint: MkvmergeTrackFingerprint::from_attachment(attachment)?,
             },
@@ -257,8 +265,7 @@ fn required_attachment_string<'a>(
 
 const TRACK_FINGERPRINT_FIELDS: &[&str] = &["type"];
 
-const TRACK_PROPERTY_FINGERPRINT_FIELDS: &[&str] =
-    &["flag_commentary", "forced_track", "language", "track_name"];
+const TRACK_PROPERTY_FINGERPRINT_FIELDS: &[&str] = &["flag_commentary", "language", "track_name"];
 
 fn collect_fingerprint_fields(track: &Value, fields: &mut Vec<String>) {
     for key in TRACK_FINGERPRINT_FIELDS {
@@ -269,6 +276,9 @@ fn collect_fingerprint_fields(track: &Value, fields: &mut Vec<String>) {
     if let Some(properties) = track.get("properties").and_then(Value::as_object) {
         for key in TRACK_PROPERTY_FINGERPRINT_FIELDS {
             if let Some(value) = properties.get(*key) {
+                if *key == "flag_commentary" && value.as_bool() == Some(false) {
+                    continue;
+                }
                 fields.push(format!("/properties/{key}={value}"));
             }
         }
@@ -471,32 +481,24 @@ fn extend_default_flags(
     selection: &RemuxSelection,
     mapping: &MkvmergeTrackMapping,
 ) -> Result<(), MkvtoolnixError> {
-    let mut seen = BTreeSet::new();
-    for stream in &selection.default_streams {
-        let id = mapping
-            .mkvmerge_track_id_for_provider_index(stream.provider_stream_index)
+    let defaults = selection
+        .default_streams
+        .iter()
+        .map(|stream| stream.provider_stream_index)
+        .collect::<BTreeSet<_>>();
+    for stream in &selection.keep_streams {
+        let track = mapping
+            .track_for_provider_index(stream.provider_stream_index)
             .ok_or_else(|| {
                 MkvtoolnixError::ConfigInvalid(format!(
                     "missing mkvmerge track id for provider stream index {}",
                     stream.provider_stream_index
                 ))
             })?;
-        seen.insert(id);
-        args.push("--default-track-flag".to_owned());
-        args.push(format!("{id}:1"));
-    }
-    for stream in &selection.clear_default_streams {
-        let id = mapping
-            .mkvmerge_track_id_for_provider_index(stream.provider_stream_index)
-            .ok_or_else(|| {
-                MkvtoolnixError::ConfigInvalid(format!(
-                    "missing mkvmerge track id for provider stream index {}",
-                    stream.provider_stream_index
-                ))
-            })?;
-        if !seen.contains(&id) {
+        if track.kind != MkvmergeTrackKind::Attachment {
+            let value = u8::from(defaults.contains(&stream.provider_stream_index));
             args.push("--default-track-flag".to_owned());
-            args.push(format!("{id}:0"));
+            args.push(format!("{}:{value}", track.id));
         }
     }
     Ok(())
@@ -518,7 +520,7 @@ fn extend_forced_flags(
                 ))
             })?;
         seen.insert(id);
-        args.push("--forced-track-flag".to_owned());
+        args.push("--forced-display-flag".to_owned());
         args.push(format!("{id}:1"));
     }
     for stream in &selection.clear_forced_streams {
@@ -531,7 +533,7 @@ fn extend_forced_flags(
                 ))
             })?;
         if !seen.contains(&id) {
-            args.push("--forced-track-flag".to_owned());
+            args.push("--forced-display-flag".to_owned());
             args.push(format!("{id}:0"));
         }
     }

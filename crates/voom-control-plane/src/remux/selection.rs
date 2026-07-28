@@ -65,6 +65,7 @@ pub fn selection_from_payload_and_snapshot(
         .collect::<Vec<_>>();
     let defaults = effective_default_actions(&payload.defaults)?;
     let (default_streams, clear_default_streams) = default_refs(&defaults, &facts, &keep_ids)?;
+    let (forced_streams, clear_forced_streams) = forced_refs(&facts, &keep_ids);
     let head_streams = head_refs(
         payload.head_snapshot_stream_id.as_deref(),
         &facts,
@@ -77,9 +78,27 @@ pub fn selection_from_payload_and_snapshot(
         clear_default_streams,
         track_order: payload.track_order,
         head_streams,
-        forced_streams: Vec::new(),
-        clear_forced_streams: Vec::new(),
+        forced_streams,
+        clear_forced_streams,
     })
+}
+
+fn forced_refs(
+    facts: &[SnapshotStreamFact],
+    keep_ids: &BTreeSet<String>,
+) -> (Vec<RemuxStreamRef>, Vec<RemuxStreamRef>) {
+    let mut forced_streams = Vec::new();
+    let mut clear_forced_streams = Vec::new();
+    for stream in facts.iter().filter(|stream| {
+        stream.kind != TrackTarget::Attachment && keep_ids.contains(&stream.snapshot_stream_id)
+    }) {
+        match stream.is_forced {
+            SnapshotFact::Value(true) => forced_streams.push(stream_ref(stream)),
+            SnapshotFact::Value(false) => clear_forced_streams.push(stream_ref(stream)),
+            SnapshotFact::Missing | SnapshotFact::Malformed => {}
+        }
+    }
+    (forced_streams, clear_forced_streams)
 }
 
 /// A remux must never strip a source's audio to nothing: a file with audio that

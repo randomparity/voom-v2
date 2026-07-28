@@ -135,6 +135,7 @@ pub struct InputProbe {
     pub codec_profile: Option<String>,
     pub codec_level: Option<String>,
     pub video_stream_count: u32,
+    pub forced_subtitle_ordinals: Vec<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -340,6 +341,7 @@ pub async fn run_ffmpeg_transcode(
     request: &TranscodeVideoRequest,
     src_width: u32,
     src_height: u32,
+    forced_subtitle_ordinals: &[usize],
 ) -> Result<OutputProbe, FfmpegError> {
     let input = Path::new(&request.input.path);
     let output = Path::new(&request.output.path);
@@ -378,6 +380,11 @@ pub async fn run_ffmpeg_transcode(
         .arg("copy")
         .arg("-map_metadata")
         .arg("0");
+    for ordinal in forced_subtitle_ordinals {
+        command
+            .arg(format!("-disposition:s:{ordinal}"))
+            .arg("+forced");
+    }
     for arg in container_args(container, codec)? {
         command.arg(arg);
     }
@@ -656,6 +663,22 @@ pub async fn probe_input(config: &FfmpegConfig, path: &Path) -> Result<InputProb
         })
         .and_then(|n| u32::try_from(n).ok())
         .unwrap_or(0);
+    let forced_subtitle_ordinals = json
+        .get("streams")
+        .and_then(Value::as_array)
+        .map(|streams| {
+            streams
+                .iter()
+                .filter(|stream| {
+                    stream.get("codec_type").and_then(Value::as_str) == Some("subtitle")
+                })
+                .enumerate()
+                .filter_map(|(ordinal, stream)| {
+                    (disposition_bool(stream, "forced") == Some(true)).then_some(ordinal)
+                })
+                .collect()
+        })
+        .unwrap_or_default();
 
     Ok(InputProbe {
         width,
@@ -665,6 +688,7 @@ pub async fn probe_input(config: &FfmpegConfig, path: &Path) -> Result<InputProb
         codec_profile,
         codec_level,
         video_stream_count,
+        forced_subtitle_ordinals,
     })
 }
 

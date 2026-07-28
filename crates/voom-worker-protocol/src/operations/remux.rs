@@ -57,11 +57,11 @@ pub struct RemuxSelection {
     /// older payloads and defaults empty.
     #[serde(default)]
     pub head_streams: Vec<RemuxStreamRef>,
-    /// Streams to mark with the forced flag (`--forced-track-flag id:1`).
+    /// Streams to mark with the forced flag (`--forced-display-flag id:1`).
     /// Additive since ADR 0023 (#277); defaults empty.
     #[serde(default)]
     pub forced_streams: Vec<RemuxStreamRef>,
-    /// Streams to clear the forced flag on (`--forced-track-flag id:0`),
+    /// Streams to clear the forced flag on (`--forced-display-flag id:0`),
     /// mirroring `clear_default_streams`. Additive since ADR 0023 (#277).
     #[serde(default)]
     pub clear_forced_streams: Vec<RemuxStreamRef>,

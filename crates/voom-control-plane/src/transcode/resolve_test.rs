@@ -101,6 +101,21 @@ async fn inline_profile_gets_synthetic_identity() {
     assert_eq!(resolved.output_container, "mp4");
 }
 
+#[test]
+fn offline_resolution_rejects_named_profile_nested_in_rules() {
+    let mut policy = voom_policy::compile_policy(
+        "policy \"nested named\" { phase normalize { rules first { \
+         rule \"encode\" when video.width >= 1 { transcode video to hevc } } } }",
+    )
+    .unwrap()
+    .policy;
+
+    let error = resolve_inline_profiles_in_policy(&mut policy).unwrap_err();
+
+    assert_eq!(error.code(), "CONFIG_INVALID");
+    assert!(error.to_string().contains("default-hevc"));
+}
+
 // -- decide_copy_video tests --
 
 fn profile_hevc_mp4_copy_compatible() -> TranscodeVideoProfile {

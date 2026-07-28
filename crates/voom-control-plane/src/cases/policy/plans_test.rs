@@ -774,3 +774,34 @@ async fn dry_run_known_named_profile_resolves_default_hevc_before_planning() {
     );
     assert_eq!(node.operation_payload["resolved_profile"]["crf"], 23);
 }
+
+#[tokio::test]
+async fn dry_run_resolves_named_profile_nested_in_rules() {
+    let (cp, _tmp) = cp().await;
+    let policy = cp
+        .create_policy_document(
+            "transcode-rule-default-hevc",
+            "policy \"transcode rule default hevc\" { phase normalize { rules first { \
+             rule \"encode\" when video.width >= 1 { transcode video to hevc } } } }",
+        )
+        .await
+        .unwrap();
+    let input_set_id = transcodable_input(&cp, "dry-run-rule-default-input").await;
+
+    let plan = cp
+        .plan_accepted_policy_version_with_input_set(policy.version.id, input_set_id)
+        .await
+        .unwrap();
+
+    let node = plan
+        .nodes
+        .iter()
+        .find(|node| node.operation_kind == PlanOperationKind::TranscodeVideo)
+        .unwrap();
+    assert_eq!(node.status, voom_plan::NodeStatus::Planned);
+    assert_eq!(node.operation_payload["profile"], "default-hevc");
+    assert_eq!(
+        node.operation_payload["resolved_profile"]["encoder"],
+        "libx265"
+    );
+}

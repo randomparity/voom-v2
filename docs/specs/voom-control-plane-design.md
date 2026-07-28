@@ -779,7 +779,9 @@ The forced flag is also addressable at the worker boundary, but its DSL surface
 (a `forced … where` production and compiled `SetForced` operation) is
 **deferred**. ADR 0023 delivers forced only at the wire
 (`RemuxSelection.forced_streams` / `clear_forced_streams`) and mkvmerge worker
-(`--forced-track-flag id:1|0`) layer for now.
+(`--forced-display-flag id:1|0`) layer for now. Dispatch uses those fields to
+preserve forced dispositions from the pinned source snapshot; policy-driven
+forced mutations remain unpublished.
 
 The `defaults … where` and `order tracks … where` filters **must select exactly
 one track at plan time**; zero or many matches fail the file with a plan-time
@@ -791,7 +793,7 @@ matches. This is additive: the strategy form of `defaults` and the group form of
 gain optional filter fields (absent ⇒ existing meaning). See ADR 0023 for the
 schema, resolved per-file payload identity, wire
 (`RemuxSelection.head_streams` / `forced_streams` /
-`clear_forced_streams`), and mkvmerge (`--forced-track-flag`, head-pinned
+`clear_forced_streams`), and mkvmerge (`--forced-display-flag`, head-pinned
 `--track-order`) contracts. The deferred forced DSL remains separate.
 
 Filter facts fail closed when a required structured value is missing or

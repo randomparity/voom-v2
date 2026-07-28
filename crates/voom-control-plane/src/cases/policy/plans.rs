@@ -80,24 +80,35 @@ pub(crate) async fn resolve_profiles_in_policy(
     policy: &mut voom_policy::CompiledPolicy,
 ) -> Result<(), VoomError> {
     for phase in &mut policy.phases {
-        for operation in &mut phase.operations {
-            if let voom_policy::CompiledOperation::TranscodeVideo(
-                voom_policy::compiled::CompiledTranscodeVideoOperation {
-                    profile,
-                    target_codec,
-                    container,
-                    resolved_profile,
-                },
-            ) = operation
-            {
-                let resolved = crate::transcode::resolve::resolve_video_profile_ref(
-                    &cp.video_profiles,
-                    profile,
-                )
-                .await?;
-                target_codec.clone_from(&resolved.profile.target_codec);
-                container.clone_from(&resolved.output_container);
-                *resolved_profile = Some(resolved.profile);
+        let mut pending = phase.operations.iter_mut().rev().collect::<Vec<_>>();
+        while let Some(operation) = pending.pop() {
+            match operation {
+                voom_policy::CompiledOperation::Conditional(conditional) => {
+                    pending.extend(conditional.operations.iter_mut().rev());
+                }
+                voom_policy::CompiledOperation::Rules(rules) => {
+                    for rule in rules.rules.iter_mut().rev() {
+                        pending.extend(rule.operations.iter_mut().rev());
+                    }
+                }
+                voom_policy::CompiledOperation::TranscodeVideo(
+                    voom_policy::compiled::CompiledTranscodeVideoOperation {
+                        profile,
+                        target_codec,
+                        container,
+                        resolved_profile,
+                    },
+                ) => {
+                    let resolved = crate::transcode::resolve::resolve_video_profile_ref(
+                        &cp.video_profiles,
+                        profile,
+                    )
+                    .await?;
+                    target_codec.clone_from(&resolved.profile.target_codec);
+                    container.clone_from(&resolved.output_container);
+                    *resolved_profile = Some(resolved.profile);
+                }
+                _ => {}
             }
         }
     }
