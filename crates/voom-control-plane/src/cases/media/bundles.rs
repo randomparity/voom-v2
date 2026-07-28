@@ -1,22 +1,76 @@
-//! Bundle-layer use cases. `create_bundle`, `add_bundle_member`,
-//! `remove_bundle_member` each compose a `SqliteBundleRepo` `_in_tx` write
-//! with the matching `asset_bundle.*` event.
+//! Bundle-layer use cases. Mutations compose `SqliteBundleRepo` `_in_tx`
+//! writes with matching identity and `asset_bundle.*` events.
+
+use std::path::Path;
 
 use time::OffsetDateTime;
-use voom_core::{BundleId, FileAssetId, MediaVariantId, VoomError};
+use voom_core::{BundleId, FileAssetId, FileVersionId, MediaVariantId, MediaWorkId, VoomError};
 use voom_events::payload::{
     AssetBundleCreatedPayload, AssetBundleMemberAddedPayload, AssetBundleMemberRemovedPayload,
+    MediaVariantCreatedPayload, MediaWorkCreatedPayload,
 };
 use voom_events::{Event, SubjectType};
 use voom_store::repo::bundles::{
     AssetBundle, BundleMember, BundleMemberRole, NewAssetBundle, NewBundleMember,
 };
+use voom_store::repo::identity::{IdentityRepo, MediaWorkKind, NewMediaVariant, NewMediaWork};
 
 use crate::ControlPlane;
 
 use super::{append_event, begin_tx, commit_tx};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PrimaryBundleResolution {
+    pub(crate) bundle_id: BundleId,
+    pub(crate) created: bool,
+}
+
 impl ControlPlane {
+    pub(crate) async fn resolve_or_create_primary_bundle_in_tx(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        file_version_id: FileVersionId,
+        source_path: &Path,
+        observed_at: OffsetDateTime,
+    ) -> Result<PrimaryBundleResolution, VoomError> {
+        let version = self
+            .identity
+            .get_file_version_in_tx(tx, file_version_id)
+            .await?
+            .ok_or_else(|| VoomError::NotFound(format!("file_version {file_version_id}")))?;
+        self.identity
+            .require_active_file_versions_in_tx(tx, &[(version.file_asset_id, file_version_id)])
+            .await?;
+        if let Some(member) = self
+            .bundles
+            .get_member_by_file_asset_in_tx(tx, version.file_asset_id)
+            .await?
+        {
+            if member.role != BundleMemberRole::PrimaryVideo {
+                return Err(VoomError::Conflict(format!(
+                    "primary asset {} is already a {:?} bundle member",
+                    version.file_asset_id, member.role
+                )));
+            }
+            return Ok(PrimaryBundleResolution {
+                bundle_id: member.bundle_id,
+                created: false,
+            });
+        }
+        let bundle_id = create_primary_bundle_identity_in_tx(
+            self,
+            tx,
+            version.file_asset_id,
+            display_name_from_path(source_path),
+            observed_at,
+        )
+        .await?;
+        Ok(PrimaryBundleResolution {
+            bundle_id,
+            created: true,
+        })
+    }
+
     /// Create an `AssetBundle`. Emits `asset_bundle.created`.
     ///
     /// # Errors
@@ -168,6 +222,157 @@ impl ControlPlane {
     ) -> Result<Vec<BundleMember>, VoomError> {
         self.bundles.list_members(bundle_id).await
     }
+}
+
+async fn create_primary_bundle_identity_in_tx(
+    control_plane: &ControlPlane,
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    file_asset_id: FileAssetId,
+    display_name: String,
+    observed_at: OffsetDateTime,
+) -> Result<BundleId, VoomError> {
+    let media_work_id =
+        create_provisional_media_work_in_tx(control_plane, tx, &display_name, observed_at).await?;
+    let media_variant_id =
+        create_provisional_media_variant_in_tx(control_plane, tx, media_work_id, observed_at)
+            .await?;
+    let bundle = control_plane
+        .bundles
+        .create_in_tx(
+            tx,
+            NewAssetBundle {
+                media_variant_id,
+                display_name,
+                created_at: observed_at,
+            },
+        )
+        .await?;
+    append_event(
+        &control_plane.events,
+        tx,
+        SubjectType::AssetBundle,
+        Some(bundle.id.0),
+        observed_at,
+        Event::AssetBundleCreated(AssetBundleCreatedPayload {
+            bundle_id: bundle.id.0,
+            media_variant_id: bundle.media_variant_id.0,
+            display_name: bundle.display_name,
+        }),
+    )
+    .await?;
+    add_primary_member_in_tx(control_plane, tx, bundle.id, file_asset_id, observed_at).await?;
+    Ok(bundle.id)
+}
+
+async fn create_provisional_media_work_in_tx(
+    control_plane: &ControlPlane,
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    display_name: &str,
+    observed_at: OffsetDateTime,
+) -> Result<MediaWorkId, VoomError> {
+    let work = control_plane
+        .identity
+        .create_media_work_in_tx(
+            tx,
+            NewMediaWork {
+                kind: MediaWorkKind::Unknown,
+                display_title: display_name.to_owned(),
+                provisional: true,
+                created_at: observed_at,
+            },
+        )
+        .await?;
+    append_event(
+        &control_plane.events,
+        tx,
+        SubjectType::MediaWork,
+        Some(work.id.0),
+        observed_at,
+        Event::MediaWorkCreated(MediaWorkCreatedPayload {
+            media_work_id: work.id.0,
+            kind: work.kind.as_str().to_owned(),
+            display_title: work.display_title,
+            provisional: work.provisional,
+        }),
+    )
+    .await?;
+    Ok(work.id)
+}
+
+async fn create_provisional_media_variant_in_tx(
+    control_plane: &ControlPlane,
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    media_work_id: MediaWorkId,
+    observed_at: OffsetDateTime,
+) -> Result<MediaVariantId, VoomError> {
+    let variant = control_plane
+        .identity
+        .create_media_variant_in_tx(
+            tx,
+            NewMediaVariant {
+                media_work_id,
+                label: "scan".to_owned(),
+                provisional: true,
+                created_at: observed_at,
+            },
+        )
+        .await?;
+    append_event(
+        &control_plane.events,
+        tx,
+        SubjectType::MediaVariant,
+        Some(variant.id.0),
+        observed_at,
+        Event::MediaVariantCreated(MediaVariantCreatedPayload {
+            media_variant_id: variant.id.0,
+            media_work_id: variant.media_work_id.0,
+            label: variant.label,
+            provisional: variant.provisional,
+        }),
+    )
+    .await?;
+    Ok(variant.id)
+}
+
+async fn add_primary_member_in_tx(
+    control_plane: &ControlPlane,
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    bundle_id: BundleId,
+    file_asset_id: FileAssetId,
+    observed_at: OffsetDateTime,
+) -> Result<(), VoomError> {
+    let role = BundleMemberRole::PrimaryVideo;
+    control_plane
+        .bundles
+        .add_member_in_tx(
+            tx,
+            NewBundleMember {
+                bundle_id,
+                file_asset_id,
+                role,
+            },
+        )
+        .await?;
+    append_event(
+        &control_plane.events,
+        tx,
+        SubjectType::AssetBundle,
+        Some(bundle_id.0),
+        observed_at,
+        Event::AssetBundleMemberAdded(AssetBundleMemberAddedPayload {
+            bundle_id: bundle_id.0,
+            file_asset_id: file_asset_id.0,
+            role: role.as_str().to_owned(),
+        }),
+    )
+    .await
+}
+
+fn display_name_from_path(path: &Path) -> String {
+    path.file_stem()
+        .and_then(|stem| stem.to_str())
+        .filter(|stem| !stem.is_empty())
+        .map_or_else(|| path.display().to_string(), str::to_owned)
 }
 
 #[cfg(test)]
