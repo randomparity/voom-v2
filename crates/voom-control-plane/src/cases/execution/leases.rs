@@ -14,7 +14,9 @@ use voom_events::payload::{
 };
 use voom_events::{Event, SubjectType};
 use voom_store::repo::audio_extract_operations::SqliteAudioExtractOperationRepo;
-use voom_store::repo::leases::{ExpireReport, ForceReleaseOutcome, Lease, NewLease};
+use voom_store::repo::leases::{
+    ExpireReport, ForceReleaseOutcome, Lease, LeaseAcquireOutcome, NewLease,
+};
 use voom_store::repo::media::audio_synthesis_operations::SqliteAudioSynthesisOperationRepo;
 use voom_store::repo::tickets::TicketState;
 
@@ -37,6 +39,16 @@ impl ControlPlane {
         Ok(lease)
     }
 
+    pub(crate) async fn try_acquire_lease(
+        &self,
+        input: NewLease,
+    ) -> Result<LeaseAcquireOutcome, VoomError> {
+        let mut tx = begin_immediate_tx(&self.pool).await?;
+        let outcome = self.try_acquire_lease_in_tx(&mut tx, input).await?;
+        commit_tx(tx).await?;
+        Ok(outcome)
+    }
+
     /// Acquire a worker lease and emit lease/ticket events.
     ///
     /// The caller owns the transaction boundary.
@@ -48,8 +60,21 @@ impl ControlPlane {
         tx: &mut Transaction<'_, Sqlite>,
         input: NewLease,
     ) -> Result<Lease, VoomError> {
+        self.try_acquire_lease_in_tx(tx, input)
+            .await?
+            .into_lease_result()
+    }
+
+    async fn try_acquire_lease_in_tx(
+        &self,
+        tx: &mut Transaction<'_, Sqlite>,
+        input: NewLease,
+    ) -> Result<LeaseAcquireOutcome, VoomError> {
         let now = input.now;
-        let lease = self.leases.acquire_in_tx(tx, input).await?;
+        let outcome = self.leases.try_acquire_in_tx(tx, input).await?;
+        let LeaseAcquireOutcome::Acquired(lease) = &outcome else {
+            return Ok(outcome);
+        };
         append_event(
             &self.events,
             tx,
@@ -86,7 +111,7 @@ impl ControlPlane {
             }),
         )
         .await?;
-        Ok(lease)
+        Ok(outcome)
     }
 
     /// Heartbeat a lease. Emits no event per spec §7.5 — heartbeats are

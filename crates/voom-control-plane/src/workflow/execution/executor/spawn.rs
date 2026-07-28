@@ -9,7 +9,7 @@ use tokio::task::JoinSet;
 use voom_core::OperationKind;
 use voom_core::{JobId, TicketId, TicketOperation, VoomError, WorkerId};
 use voom_scheduler::{SingleWorkerPerKindSelector, WorkerSelector, WorkerView};
-use voom_store::repo::leases::NewLease;
+use voom_store::repo::leases::{LeaseAcquireOutcome, NewLease};
 use voom_store::repo::tickets::{Ticket, TicketState};
 
 use crate::workflow::execution::dispatch::{DispatchOutcome, DispatchTerminal, dispatch_ticket};
@@ -49,7 +49,7 @@ impl WorkflowExecutor {
             Ok(worker_id) => worker_id,
             Err(source) => {
                 if matches!(source, VoomError::NoEligibleWorker(_))
-                    && local_reservation_blocks(&candidates, reservations)
+                    && all_candidates_at_capacity(&candidates)
                 {
                     return Ok(SpawnOutcome::CapacityDeferred);
                 }
@@ -78,7 +78,7 @@ impl WorkflowExecutor {
         } else {
             Some(self.runtimes.get(worker_id)?)
         };
-        let lease = acquire_lease_with_retry(
+        let acquisition = acquire_lease_with_retry(
             &self.control_plane,
             NewLease {
                 ticket_id: ticket.id,
@@ -88,6 +88,9 @@ impl WorkflowExecutor {
             },
         )
         .await?;
+        let LeaseAcquireOutcome::Acquired(lease) = acquisition else {
+            return Ok(SpawnOutcome::CapacityDeferred);
+        };
         increment_reservation(reservations, worker_id);
         summary.dispatch_count += 1;
         summary.record_dispatch(workflow_payload.operation, worker_id, reservations);
@@ -221,12 +224,9 @@ fn decrement_reservation(reservations: &mut HashMap<WorkerId, u32>, worker_id: W
     }
 }
 
-fn local_reservation_blocks(
-    candidates: &[WorkerView],
-    reservations: &HashMap<WorkerId, u32>,
-) -> bool {
-    candidates.iter().any(|candidate| {
-        reservations.get(&candidate.worker_id).copied().unwrap_or(0) > 0
-            && candidate.active_leases >= candidate.max_parallel
-    })
+fn all_candidates_at_capacity(candidates: &[WorkerView]) -> bool {
+    !candidates.is_empty()
+        && candidates
+            .iter()
+            .all(|candidate| candidate.active_leases >= candidate.max_parallel)
 }

@@ -4,6 +4,7 @@ use std::time::{Duration, Instant};
 use tokio::task::JoinSet;
 use voom_core::OperationKind;
 use voom_core::{FileAssetId, FileVersionId, JobId, VoomError, WorkerId};
+use voom_store::repo::jobs::JobState;
 #[cfg(test)]
 use voom_store::repo::jobs::NewJob;
 use voom_store::repo::tickets::Ticket;
@@ -99,7 +100,7 @@ impl WorkflowExecutorOptions {
     pub fn for_tests() -> Self {
         Self {
             timing: WorkflowTimingOptions::for_tests(),
-            queue: WorkflowQueueOptions::default(),
+            queue: WorkflowQueueOptions::for_tests(),
             artifact_roots: WorkflowArtifactRoots::for_tests(),
             chaos: WorkflowChaosOptions::default(),
         }
@@ -148,6 +149,7 @@ struct RunLoopState {
     fatal_error: Option<VoomError>,
     isolated_error: Option<VoomError>,
     dispatch_started: bool,
+    capacity_wait_started: Option<Instant>,
 }
 
 struct RunInvocation<'a> {
@@ -155,6 +157,18 @@ struct RunInvocation<'a> {
     workflow_id: &'a str,
     plan: &'a WorkflowPlan,
     failure_mode: RunFailureMode,
+}
+
+#[derive(Debug, Default)]
+struct DispatchReadyOutcome {
+    made_progress: bool,
+    capacity_deferred: bool,
+}
+
+enum CapacityWaitOutcome {
+    RetryAfter(Duration),
+    TimedOut,
+    Cancelled,
 }
 
 impl RunLoopState {
@@ -166,6 +180,7 @@ impl RunLoopState {
             fatal_error: None,
             isolated_error: None,
             dispatch_started: false,
+            capacity_wait_started: None,
         }
     }
 
@@ -202,6 +217,16 @@ impl RunLoopState {
 
     fn take_isolated_error(&mut self) -> Option<VoomError> {
         self.isolated_error.take()
+    }
+
+    fn reset_capacity_wait(&mut self) {
+        self.capacity_wait_started = None;
+    }
+
+    fn capacity_wait_elapsed(&mut self) -> Duration {
+        self.capacity_wait_started
+            .get_or_insert_with(Instant::now)
+            .elapsed()
     }
 
     async fn refresh(&mut self, control: &ControlPlane, job_id: JobId, started: Instant) {
@@ -363,8 +388,8 @@ impl WorkflowExecutor {
         &self,
         state: &mut RunLoopState,
         invocation: &RunInvocation<'_>,
-    ) -> bool {
-        let mut made_progress = false;
+    ) -> DispatchReadyOutcome {
+        let mut outcome = DispatchReadyOutcome::default();
         let max_in_flight = invocation.plan.concurrency.max_in_flight_dispatches;
         while state.has_dispatch_capacity(max_in_flight) {
             let tickets = match self
@@ -375,7 +400,8 @@ impl WorkflowExecutor {
                 Ok(tickets) => tickets,
                 Err(source) => {
                     state.record_fatal_error(source);
-                    return true;
+                    outcome.made_progress = true;
+                    return outcome;
                 }
             };
             let mut batch_made_progress = false;
@@ -386,7 +412,7 @@ impl WorkflowExecutor {
                 match state.try_spawn_dispatch(self, ticket).await {
                     Ok(SpawnOutcome::PreLeaseTerminal(source)) => {
                         state.record_ticket_failure(invocation.failure_mode, source);
-                        made_progress = true;
+                        outcome.made_progress = true;
                         batch_made_progress = true;
                         if invocation.failure_mode == RunFailureMode::AbortJob {
                             break;
@@ -394,20 +420,92 @@ impl WorkflowExecutor {
                     }
                     Err(source) => {
                         state.record_fatal_error(source);
-                        return true;
+                        outcome.made_progress = true;
+                        return outcome;
                     }
                     Ok(SpawnOutcome::Spawned | SpawnOutcome::PreLeaseRetriable) => {
-                        made_progress = true;
+                        outcome.made_progress = true;
                         batch_made_progress = true;
                     }
-                    Ok(SpawnOutcome::CapacityDeferred) => {}
+                    Ok(SpawnOutcome::CapacityDeferred) => {
+                        outcome.capacity_deferred = true;
+                    }
                 }
             }
             if state.has_fatal_error() || !batch_made_progress {
                 break;
             }
         }
-        made_progress
+        outcome
+    }
+
+    async fn capacity_wait_outcome(
+        &self,
+        state: &mut RunLoopState,
+        job_id: JobId,
+    ) -> Result<CapacityWaitOutcome, VoomError> {
+        let job = self
+            .control_plane
+            .jobs
+            .get(job_id)
+            .await?
+            .ok_or_else(|| VoomError::NotFound(format!("job {job_id}")))?;
+        match job.state {
+            JobState::Cancelled => return Ok(CapacityWaitOutcome::Cancelled),
+            JobState::Open => {}
+            JobState::Succeeded | JobState::Failed => {
+                return Err(VoomError::Conflict(format!(
+                    "workflow capacity wait rejected: job {job_id} is {}",
+                    job.state.as_str()
+                )));
+            }
+        }
+
+        let interval = self.options.queue.capacity_retry_interval;
+        let timeout = self.options.queue.capacity_retry_timeout;
+        if interval.is_zero() || timeout.is_zero() {
+            return Err(VoomError::Config(
+                "worker capacity retry interval and timeout must be positive".to_owned(),
+            ));
+        }
+        let elapsed = state.capacity_wait_elapsed();
+        if elapsed >= timeout {
+            return Ok(CapacityWaitOutcome::TimedOut);
+        }
+        Ok(CapacityWaitOutcome::RetryAfter(
+            interval.min(timeout.saturating_sub(elapsed)),
+        ))
+    }
+
+    async fn wait_for_external_capacity(
+        &self,
+        state: &mut RunLoopState,
+        job_id: JobId,
+        started: Instant,
+    ) -> Result<(), WorkflowRunError> {
+        let control = &self.control_plane;
+        match self.capacity_wait_outcome(state, job_id).await {
+            Ok(CapacityWaitOutcome::RetryAfter(delay)) => {
+                tokio::time::sleep(delay).await;
+                Ok(())
+            }
+            Ok(CapacityWaitOutcome::TimedOut) => {
+                let source = VoomError::NoEligibleWorker(format!(
+                    "workflow {job_id} worker capacity remained full for {:?}",
+                    self.options.queue.capacity_retry_timeout
+                ));
+                Err(state.fail_job(control, job_id, source, started).await)
+            }
+            Ok(CapacityWaitOutcome::Cancelled) => {
+                let source = VoomError::UserCancellation(format!(
+                    "workflow {job_id} cancelled while waiting for worker capacity"
+                ));
+                Err(state
+                    .finish_isolated_failure(control, job_id, source, started)
+                    .await)
+            }
+            Err(source) => Err(state.fail_job(control, job_id, source, started).await),
+        }
     }
 
     #[must_use]
@@ -620,11 +718,18 @@ impl WorkflowExecutor {
                 }
             }
 
-            if self.dispatch_ready_tickets(&mut state, &invocation).await {
+            let dispatch = self.dispatch_ready_tickets(&mut state, &invocation).await;
+            if dispatch.made_progress {
+                state.reset_capacity_wait();
                 continue;
             }
 
             if state.active_is_empty() {
+                if dispatch.capacity_deferred {
+                    self.wait_for_external_capacity(&mut state, job_id, started)
+                        .await?;
+                    continue;
+                }
                 match self
                     .retry_delay(job_id, workflow_id, self.control_plane.clock().now())
                     .await
@@ -643,6 +748,7 @@ impl WorkflowExecutor {
                 ));
                 return Err(state.fail_job(control, job_id, source, started).await);
             }
+            state.reset_capacity_wait();
             state
                 .wait_for_one(self, &plan, workflow_id, job_id, failure_mode)
                 .await;

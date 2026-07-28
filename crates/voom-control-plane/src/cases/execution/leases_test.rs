@@ -5,7 +5,7 @@ use voom_core::{FailureClass, JobId, TicketId, TicketOperation, VoomError};
 use voom_events::EventKind;
 use voom_store::repo::events::{EventFilter, EventRepo, Page};
 use voom_store::repo::jobs::{JobState, NewJob};
-use voom_store::repo::leases::{LeaseFilter, LeaseState};
+use voom_store::repo::leases::{LeaseAcquireOutcome, LeaseFilter, LeaseState};
 use voom_store::repo::tickets::{NewTicket, Ticket, TicketState};
 use voom_store::repo::workers::{NewCapability, NewGrant, NewWorker, Worker, WorkerKind};
 
@@ -355,6 +355,83 @@ async fn acquire_lease_rechecks_stale_worker_capacity_without_side_effects() {
     assert_eq!(held, 1);
     assert_eq!(count(&cp, EventKind::LeaseAcquired).await, 1);
     assert_eq!(count(&cp, EventKind::TicketLeased).await, 1);
+}
+
+#[tokio::test]
+async fn try_acquire_lease_reports_capacity_without_durable_side_effects() {
+    let (cp, _tmp) = cp().await;
+    let job = cp
+        .open_job(NewJob {
+            kind: "capacity-test".to_owned(),
+            priority: 0,
+            created_at: T0,
+        })
+        .await
+        .unwrap();
+    let first = cp
+        .create_ticket(ticket_for_job("noop", 2, job.id))
+        .await
+        .unwrap();
+    let second = cp
+        .create_ticket(ticket_for_job("noop", 2, job.id))
+        .await
+        .unwrap();
+    cp.mark_ready_if_unblocked(first.id, T0).await.unwrap();
+    cp.mark_ready_if_unblocked(second.id, T0).await.unwrap();
+    let worker = eligible_worker(&cp, "typed-capacity", &first.kind).await;
+    grant_capacity(&cp, &worker, &first.kind, 1).await;
+    cp.acquire_lease(NewLease {
+        ticket_id: first.id,
+        worker_id: worker.id,
+        ttl: TDuration::seconds(60),
+        now: T0,
+    })
+    .await
+    .unwrap();
+
+    let ticket_before = cp.tickets().get(second.id).await.unwrap().unwrap();
+    let job_before = cp.jobs.get(job.id).await.unwrap().unwrap();
+    let lease_count_before: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM leases")
+        .fetch_one(&cp.pool)
+        .await
+        .unwrap();
+    let event_count_before: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM events")
+        .fetch_one(&cp.pool)
+        .await
+        .unwrap();
+
+    let outcome = cp
+        .try_acquire_lease(NewLease {
+            ticket_id: second.id,
+            worker_id: worker.id,
+            ttl: TDuration::seconds(60),
+            now: T0,
+        })
+        .await
+        .unwrap();
+
+    let LeaseAcquireOutcome::CapacityFull(saturation) = outcome else {
+        panic!("expected typed capacity saturation");
+    };
+    assert_eq!(saturation.worker_id, worker.id);
+    assert_eq!(saturation.operation, first.kind);
+    assert_eq!(saturation.active_leases, 1);
+    assert_eq!(saturation.max_parallel, 1);
+    assert_ticket_unchanged(&cp, &ticket_before).await;
+    let job_after = cp.jobs.get(job.id).await.unwrap().unwrap();
+    assert_eq!(job_after.state, job_before.state);
+    assert_eq!(job_after.epoch, job_before.epoch);
+    assert_eq!(job_after.updated_at, job_before.updated_at);
+    let lease_count_after: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM leases")
+        .fetch_one(&cp.pool)
+        .await
+        .unwrap();
+    let event_count_after: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM events")
+        .fetch_one(&cp.pool)
+        .await
+        .unwrap();
+    assert_eq!(lease_count_after, lease_count_before);
+    assert_eq!(event_count_after, event_count_before);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

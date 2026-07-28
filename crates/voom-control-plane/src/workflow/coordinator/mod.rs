@@ -1199,28 +1199,27 @@ impl ControlPlane {
         // terminal state (so any inline commit has landed) and fails the job;
         // carry its run summary so the partial outcome reports the job-cumulative
         // counts including the failure.
-        let run = executor
-            .submit_and_run_guarded_invocation_in_job(
-                job_id,
-                &format!("phase-{phase_ordinal}"),
-                workflow,
-                match planned_phase.error_strategy {
-                    voom_policy::ErrorStrategy::Continue => RunFailureMode::ContinueIndependent,
-                    voom_policy::ErrorStrategy::Abort | voom_policy::ErrorStrategy::Skip => {
-                        RunFailureMode::AbortJob
-                    }
-                },
-                scope.lineage_guard,
-            )
-            .await
-            .map_err(|err| {
-                let run_summary = err.dispatch_started.then_some(err.summary);
-                PhaseDispatchFailure {
-                    source: err.source,
-                    run_summary,
-                    job_failed: err.job_failed,
+        let run = Box::pin(executor.submit_and_run_guarded_invocation_in_job(
+            job_id,
+            &format!("phase-{phase_ordinal}"),
+            workflow,
+            match planned_phase.error_strategy {
+                voom_policy::ErrorStrategy::Continue => RunFailureMode::ContinueIndependent,
+                voom_policy::ErrorStrategy::Abort | voom_policy::ErrorStrategy::Skip => {
+                    RunFailureMode::AbortJob
                 }
-            })?;
+            },
+            scope.lineage_guard,
+        ))
+        .await
+        .map_err(|err| {
+            let run_summary = err.dispatch_started.then_some(err.summary);
+            PhaseDispatchFailure {
+                source: err.source,
+                run_summary,
+                job_failed: err.job_failed,
+            }
+        })?;
         Ok(Some(run))
     }
 }

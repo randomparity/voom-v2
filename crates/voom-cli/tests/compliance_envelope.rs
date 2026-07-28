@@ -5,15 +5,19 @@
 )]
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Child, Command, Stdio};
+use std::time::Duration;
 
 use serde_json::{Value, json};
 use tempfile::{NamedTempFile, TempDir};
 use time::OffsetDateTime;
 use voom_control_plane::WorkflowTicketPayload;
 use voom_control_plane::policy::PolicyInputFromScanInput;
+use voom_core::{TicketOperation, WorkerId};
 use voom_policy::{FixtureName, load_fixture, load_policy_fixture};
 use voom_store::repo::identity::{DiscoveredFile, FileLocationKind, IngestOutcome};
+use voom_store::repo::leases::NewLease;
+use voom_store::repo::tickets::NewTicket;
 use voom_store::test_support::sqlite_url_for;
 use voom_test_support::worker::{TestWorkerConfig, TestWorkerLaunch, cargo_bin_or_build};
 
@@ -98,6 +102,86 @@ async fn execute_scanned_remux_outputs_committed_file_phase() {
     redact_local(&mut json);
     redact_execute_ids(&mut json);
     insta::assert_json_snapshot!("execute_scanned_remux_outputs_committed_file_phase", json);
+}
+
+#[tokio::test]
+async fn execute_process_waits_for_cross_process_worker_capacity() {
+    let seeded = seed_scanned_remux().await;
+    let mut provider = RemuxProviderLaunch::start(&seeded.url).await.unwrap();
+    let pool = voom_store::connect(&seeded.url).await.unwrap();
+    let cp = voom_control_plane::ControlPlane::open_with_pool(
+        pool.clone(),
+        std::sync::Arc::new(voom_core::SystemClock),
+    )
+    .await
+    .unwrap();
+    let worker_id: i64 = sqlx::query_scalar("SELECT id FROM workers WHERE name = ?")
+        .bind("cli-compliance-remux")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let worker_id = WorkerId(u64::try_from(worker_id).unwrap());
+    let now = cp.clock().now();
+    let capacity_ticket = cp
+        .create_ticket(NewTicket {
+            job_id: None,
+            kind: TicketOperation::new("remux").unwrap(),
+            priority: 0,
+            payload: json!({}),
+            max_attempts: 1,
+            created_at: now,
+        })
+        .await
+        .unwrap();
+    cp.mark_ready_if_unblocked(capacity_ticket.id, now)
+        .await
+        .unwrap();
+    let capacity_lease = cp
+        .acquire_lease(NewLease {
+            ticket_id: capacity_ticket.id,
+            worker_id,
+            ttl: time::Duration::seconds(60),
+            now,
+        })
+        .await
+        .unwrap();
+
+    let root = seeded.dir.path().canonicalize().unwrap();
+    let staging_root = root.join("stage");
+    let output_dir = root.join("out");
+    let ffprobe_bin = fake_ffprobe_bin(&root);
+    let mut execution = spawn_compliance_execute(&seeded, &staging_root, &output_dir, &ffprobe_bin);
+    let workflow_ticket_id = wait_for_ready_workflow_remux_ticket(&pool).await;
+
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    assert_waiting_capacity_state(&mut execution, &pool, workflow_ticket_id).await;
+
+    cp.release_lease(
+        capacity_lease.id,
+        json!({"status": "capacity released"}),
+        cp.clock().now(),
+    )
+    .await
+    .unwrap();
+    let output = execution.wait_with_output().unwrap();
+    provider.shutdown().unwrap();
+
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json = envelope(output.stdout);
+    assert_eq!(json["status"], "ok");
+    assert_eq!(json["data"]["file_phases"][0]["outcome"], "committed");
+    let completed: String = sqlx::query_scalar("SELECT state FROM tickets WHERE id = ?")
+        .bind(i64::try_from(workflow_ticket_id).unwrap())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(completed, "succeeded");
 }
 
 #[tokio::test]
@@ -775,6 +859,85 @@ fn compliance_execute_command_with_dirs(
         ])
         .output()
         .unwrap()
+}
+
+async fn wait_for_ready_workflow_remux_ticket(pool: &sqlx::SqlitePool) -> u64 {
+    for _ in 0..500 {
+        let ticket_id: Option<i64> = sqlx::query_scalar(
+            "SELECT id FROM tickets \
+             WHERE kind = 'synthetic.workflow.operation.remux' AND state = 'ready' \
+             ORDER BY id ASC LIMIT 1",
+        )
+        .fetch_optional(pool)
+        .await
+        .unwrap();
+        if let Some(ticket_id) = ticket_id {
+            return u64::try_from(ticket_id).unwrap();
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    panic!("CLI execution did not create a ready remux ticket");
+}
+
+fn spawn_compliance_execute(
+    seeded: &Seeded,
+    staging_root: &Path,
+    output_dir: &Path,
+    ffprobe_bin: &Path,
+) -> Child {
+    Command::new(env!("CARGO_BIN_EXE_voom"))
+        .env("VOOM_FFPROBE_BIN", ffprobe_bin)
+        .args([
+            "--database-url",
+            &seeded.url,
+            "compliance",
+            "execute",
+            "--policy-version-id",
+            &seeded.version_id.to_string(),
+            "--input-set-id",
+            &seeded.input_id.to_string(),
+            "--staging-root",
+            &staging_root.display().to_string(),
+            "--output-dir",
+            &output_dir.display().to_string(),
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap()
+}
+
+async fn assert_waiting_capacity_state(
+    execution: &mut Child,
+    pool: &sqlx::SqlitePool,
+    workflow_ticket_id: u64,
+) {
+    assert!(
+        execution.try_wait().unwrap().is_none(),
+        "execution must still be waiting while durable capacity is full"
+    );
+    let waiting: (String, i64, i64) =
+        sqlx::query_as("SELECT state, attempt, epoch FROM tickets WHERE id = ?")
+            .bind(i64::try_from(workflow_ticket_id).unwrap())
+            .fetch_one(pool)
+            .await
+            .unwrap();
+    assert_eq!(waiting, ("ready".to_owned(), 0, 1));
+    let waiting_events: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM events \
+         WHERE subject_type = 'ticket' AND subject_id = ? \
+           AND kind IN ('ticket.leased', 'ticket.failed_retriable', 'ticket.failed_terminal')",
+    )
+    .bind(i64::try_from(workflow_ticket_id).unwrap())
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    assert_eq!(waiting_events, 0);
+    let held: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM leases WHERE state = 'held'")
+        .fetch_one(pool)
+        .await
+        .unwrap();
+    assert_eq!(held, 1);
 }
 
 fn fake_ffprobe_bin(dir: &Path) -> PathBuf {
