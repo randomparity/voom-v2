@@ -11,14 +11,10 @@ use tempfile::NamedTempFile;
 use voom_control_plane::ControlPlane;
 use voom_control_plane::policy::{ComplianceExecutionOptions, PolicyInputFromScanInput};
 use voom_control_plane::scan::{ScanPathInput, ScanReportFileStatus};
-use voom_core::{BundleId, FileAssetId, FileVersionId, JobId, MediaSnapshotId};
+use voom_core::{FileAssetId, FileVersionId, JobId, MediaSnapshotId};
 use voom_plan::PlanOperationKind;
-use voom_store::repo::bundles::{
-    BundleMemberRole, NewAssetBundle, NewBundleMember, SqliteBundleRepo,
-};
-use voom_store::repo::identity::{
-    IdentityRepo, MediaWorkKind, NewMediaVariant, NewMediaWork, SqliteIdentityRepo,
-};
+use voom_store::repo::bundles::{BundleMemberRole, SqliteBundleRepo};
+use voom_store::repo::identity::{IdentityRepo, SqliteIdentityRepo};
 use voom_test_support::worker::{
     TestWorkerConfig, TestWorkerLaunch, cargo_build_package, hide_stale_fake_ffprobe_sibling,
     target_debug_binary,
@@ -72,8 +68,6 @@ async fn audio_extract_flow_verifies_commits_and_adds_sidecar_to_source_bundle()
         scanned.snapshot_id,
     )
     .await;
-    let source_bundle_id = create_primary_bundle(&pool, scanned.file_version_id).await;
-
     let policy = cp
         .create_policy_document("extract-commentary-audio", EXTRACT_COMMENTARY_POLICY)
         .await
@@ -117,7 +111,8 @@ async fn audio_extract_flow_verifies_commits_and_adds_sidecar_to_source_bundle()
     worker.shutdown().unwrap();
 
     let outputs =
-        assert_extract_execution_result(&url, &out_dir, source_bundle_id, &executed, 1).await;
+        assert_extract_execution_result(&url, &out_dir, scanned.file_version_id, &executed, 1)
+            .await;
     assert_produced_audio_facts(&outputs, &["Commentary"]);
 }
 
@@ -145,7 +140,6 @@ async fn audio_extract_multi_match_publishes_ordered_media_and_lineage() {
 
     let scanned = scan_source(&cp, &source).await;
     let scanned = enrich_audio_snapshot_for_extract(&cp, &url, scanned).await;
-    let source_bundle_id = create_primary_bundle(&pool, scanned.file_version_id).await;
     let policy = cp
         .create_policy_document("extract-english-audio", EXTRACT_ENGLISH_POLICY)
         .await
@@ -190,7 +184,8 @@ async fn audio_extract_multi_match_publishes_ordered_media_and_lineage() {
     worker.shutdown().unwrap();
 
     let outputs =
-        assert_extract_execution_result(&url, &out_dir, source_bundle_id, &executed, 2).await;
+        assert_extract_execution_result(&url, &out_dir, scanned.file_version_id, &executed, 2)
+            .await;
     assert_ne!(outputs[0].file_name(), outputs[1].file_name());
     assert_ne!(
         executed.audio_extract_outputs[0].output_id(),
@@ -350,50 +345,6 @@ async fn enrich_audio_snapshot_for_extract(
     }
 }
 
-async fn create_primary_bundle(
-    pool: &sqlx::SqlitePool,
-    file_version_id: FileVersionId,
-) -> BundleId {
-    let identity = SqliteIdentityRepo::new(pool.clone());
-    let bundles = SqliteBundleRepo::new(pool.clone());
-    let work = identity
-        .create_media_work(NewMediaWork {
-            kind: MediaWorkKind::Movie,
-            display_title: "Movie".to_owned(),
-            provisional: true,
-            created_at: time::OffsetDateTime::UNIX_EPOCH,
-        })
-        .await
-        .unwrap();
-    let variant = identity
-        .create_media_variant(NewMediaVariant {
-            media_work_id: work.id,
-            label: "source".to_owned(),
-            provisional: true,
-            created_at: time::OffsetDateTime::UNIX_EPOCH,
-        })
-        .await
-        .unwrap();
-    let file_asset_id = file_asset_id_for(pool, file_version_id).await;
-    let bundle = bundles
-        .create(NewAssetBundle {
-            media_variant_id: variant.id,
-            display_name: "Movie".to_owned(),
-            created_at: time::OffsetDateTime::UNIX_EPOCH,
-        })
-        .await
-        .unwrap();
-    bundles
-        .add_member(NewBundleMember {
-            bundle_id: bundle.id,
-            file_asset_id,
-            role: BundleMemberRole::PrimaryVideo,
-        })
-        .await
-        .unwrap();
-    bundle.id
-}
-
 /// Read a succeeded operation ticket's durable result JSON for a job. The flat
 /// `tickets` field was removed from `ComplianceExecuteData`; the tickets a run
 /// executed remain queryable in the `tickets` table (`state = 'succeeded'`
@@ -417,7 +368,7 @@ async fn ticket_result(url: &str, job_id: u64, operation: &str) -> serde_json::V
 async fn assert_extract_execution_result(
     url: &str,
     out_dir: &Path,
-    source_bundle_id: BundleId,
+    source_file_version_id: FileVersionId,
     executed: &voom_control_plane::policy::ComplianceExecuteData,
     expected_count: usize,
 ) -> Vec<PathBuf> {
@@ -436,8 +387,20 @@ async fn assert_extract_execution_result(
         promoted.push(path);
         result_asset_ids.push(asset_id);
     }
-    let members = SqliteBundleRepo::new(pool)
-        .list_members(source_bundle_id)
+    let source_bundle_id: i64 = sqlx::query_scalar(
+        "SELECT abm.bundle_id FROM file_versions fv \
+         JOIN asset_bundle_members abm ON abm.file_asset_id = fv.file_asset_id \
+         WHERE fv.id = ? AND abm.role = 'primary_video'",
+    )
+    .bind(i64::try_from(source_file_version_id.0).unwrap())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_primary_bundle_creation(&pool, source_file_version_id).await;
+    let members = SqliteBundleRepo::new(pool.clone())
+        .list_members(voom_core::BundleId(
+            u64::try_from(source_bundle_id).unwrap(),
+        ))
         .await
         .unwrap();
     assert!(members.iter().any(|member| {
@@ -452,6 +415,44 @@ async fn assert_extract_execution_result(
         );
     }
     promoted
+}
+
+async fn assert_primary_bundle_creation(
+    pool: &sqlx::SqlitePool,
+    source_file_version_id: FileVersionId,
+) {
+    let primary_members: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM file_versions fv \
+         JOIN asset_bundle_members abm ON abm.file_asset_id = fv.file_asset_id \
+         WHERE fv.id = ? AND abm.role = 'primary_video'",
+    )
+    .bind(i64::try_from(source_file_version_id.0).unwrap())
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    assert_eq!(primary_members, 1);
+    let kinds: Vec<String> = sqlx::query_scalar(
+        "SELECT kind FROM events \
+         WHERE kind IN (\
+           'media_work.created', \
+           'media_variant.created', \
+           'asset_bundle.created', \
+           'asset_bundle.member_added'\
+         ) \
+         ORDER BY event_id",
+    )
+    .fetch_all(pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        kinds,
+        [
+            "media_work.created",
+            "media_variant.created",
+            "asset_bundle.created",
+            "asset_bundle.member_added",
+        ]
+    );
 }
 
 async fn assert_published_output(

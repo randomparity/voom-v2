@@ -9,17 +9,13 @@ use voom_core::{
     VoomError, WorkerId,
 };
 use voom_events::payload::{
-    AssetBundleCreatedPayload, AssetBundleMemberAddedPayload, FileAssetCreatedPayload,
-    FileLocationAliasedPayload, FileLocationRecordedPayload, FileVersionCreatedPayload,
-    IdentityEvidenceRecordedPayload, MediaVariantCreatedPayload, MediaWorkCreatedPayload,
+    AssetBundleMemberAddedPayload, FileAssetCreatedPayload, FileLocationAliasedPayload,
+    FileLocationRecordedPayload, FileVersionCreatedPayload, IdentityEvidenceRecordedPayload,
 };
 use voom_events::{Event, SubjectType};
 use voom_store::repo::{
-    bundles::{BundleMemberRole, NewAssetBundle, NewBundleMember},
-    identity::{
-        DiscoveredFile, FileLocationKind, IdentityRepo, IngestOutcome, MediaWorkKind,
-        NewMediaSnapshot, NewMediaVariant, NewMediaWork,
-    },
+    bundles::{BundleMemberRole, NewBundleMember},
+    identity::{DiscoveredFile, FileLocationKind, IdentityRepo, IngestOutcome, NewMediaSnapshot},
     scan_facts::{find_live_hardlink_location_in_tx, record_scan_fact_in_tx},
 };
 use voom_worker_protocol::ProbeFileResult;
@@ -239,9 +235,10 @@ pub async fn persist_scanned_media_snapshot(
     let (bundle_id, bundle_member_role, persisted_sidecars) = if observed_sidecars.is_empty() {
         (None, None, Vec::new())
     } else {
-        let bundle_id =
-            ensure_primary_bundle(control_plane, &mut tx, file_asset_id, canonical_path, now)
-                .await?;
+        let bundle_id = control_plane
+            .resolve_or_create_primary_bundle_in_tx(&mut tx, file_version_id, canonical_path, now)
+            .await?
+            .bundle_id;
         let mut persisted_sidecars = Vec::with_capacity(observed_sidecars.len());
         for sidecar in observed_sidecars {
             persisted_sidecars
@@ -469,122 +466,6 @@ async fn observe_sidecars(
     Ok(observed)
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "keeps provisional work, variant, bundle, and primary-member event writes in one readable transaction step"
-)]
-async fn ensure_primary_bundle(
-    control_plane: &ControlPlane,
-    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-    file_asset_id: FileAssetId,
-    canonical_path: &Path,
-    observed_at: time::OffsetDateTime,
-) -> Result<BundleId, VoomError> {
-    if let Some(member) = control_plane
-        .bundles
-        .get_member_by_file_asset_in_tx(tx, file_asset_id)
-        .await?
-    {
-        if member.role != BundleMemberRole::PrimaryVideo {
-            return Err(VoomError::Conflict(format!(
-                "scan primary asset {file_asset_id} is already a {:?} bundle member",
-                member.role
-            )));
-        }
-        return Ok(member.bundle_id);
-    }
-
-    let display_name = display_name_from_path(canonical_path);
-    let work = control_plane
-        .identity
-        .create_media_work_in_tx(
-            tx,
-            NewMediaWork {
-                kind: MediaWorkKind::Unknown,
-                display_title: display_name.clone(),
-                provisional: true,
-                created_at: observed_at,
-            },
-        )
-        .await?;
-    append_event(
-        &control_plane.events,
-        tx,
-        SubjectType::MediaWork,
-        Some(work.id.0),
-        observed_at,
-        Event::MediaWorkCreated(MediaWorkCreatedPayload {
-            media_work_id: work.id.0,
-            kind: work.kind.as_str().to_owned(),
-            display_title: work.display_title.clone(),
-            provisional: work.provisional,
-        }),
-    )
-    .await?;
-
-    let variant = control_plane
-        .identity
-        .create_media_variant_in_tx(
-            tx,
-            NewMediaVariant {
-                media_work_id: work.id,
-                label: "scan".to_owned(),
-                provisional: true,
-                created_at: observed_at,
-            },
-        )
-        .await?;
-    append_event(
-        &control_plane.events,
-        tx,
-        SubjectType::MediaVariant,
-        Some(variant.id.0),
-        observed_at,
-        Event::MediaVariantCreated(MediaVariantCreatedPayload {
-            media_variant_id: variant.id.0,
-            media_work_id: variant.media_work_id.0,
-            label: variant.label.clone(),
-            provisional: variant.provisional,
-        }),
-    )
-    .await?;
-
-    let bundle = control_plane
-        .bundles
-        .create_in_tx(
-            tx,
-            NewAssetBundle {
-                media_variant_id: variant.id,
-                display_name,
-                created_at: observed_at,
-            },
-        )
-        .await?;
-    append_event(
-        &control_plane.events,
-        tx,
-        SubjectType::AssetBundle,
-        Some(bundle.id.0),
-        observed_at,
-        Event::AssetBundleCreated(AssetBundleCreatedPayload {
-            bundle_id: bundle.id.0,
-            media_variant_id: bundle.media_variant_id.0,
-            display_name: bundle.display_name.clone(),
-        }),
-    )
-    .await?;
-    add_bundle_member_event(
-        control_plane,
-        tx,
-        bundle.id,
-        file_asset_id,
-        BundleMemberRole::PrimaryVideo,
-        observed_at,
-    )
-    .await?;
-    Ok(bundle.id)
-}
-
 async fn persist_sidecar(
     control_plane: &ControlPlane,
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
@@ -699,13 +580,6 @@ async fn add_bundle_member_event(
         }),
     )
     .await
-}
-
-fn display_name_from_path(path: &Path) -> String {
-    path.file_stem()
-        .and_then(|stem| stem.to_str())
-        .filter(|stem| !stem.is_empty())
-        .map_or_else(|| path.display().to_string(), str::to_owned)
 }
 
 struct IngestedIds(FileAssetId, FileVersionId, FileLocationId);

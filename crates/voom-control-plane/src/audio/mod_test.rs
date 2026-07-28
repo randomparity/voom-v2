@@ -102,6 +102,102 @@ async fn extract_failure_records_audio_failed_event() {
 }
 
 #[tokio::test]
+async fn first_extract_plan_failure_rolls_back_bundle_operation_outputs_and_events() {
+    let (cp, _db, dir) = fixture_with_dir().await;
+    let source = seed_audio_source(&cp, &dir, b"source").await;
+    sqlx::query(
+        "CREATE TRIGGER fail_first_extract_output \
+         BEFORE INSERT ON audio_extract_operation_outputs \
+         BEGIN SELECT RAISE(ABORT, 'injected first extract output failure'); END",
+    )
+    .execute(cp.pool_for_test())
+    .await
+    .unwrap();
+    let tables = [
+        "media_works",
+        "media_variants",
+        "asset_bundles",
+        "asset_bundle_members",
+        "audio_extract_operations",
+        "audio_extract_operation_outputs",
+    ];
+    let before = table_counts(&cp, &tables).await;
+
+    let error = plan_first_extract_with_bundle(&cp, first_extract_plan_input(&source, &dir))
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.error_code(), voom_core::ErrorCode::DbUnreachable);
+    assert_eq!(table_counts(&cp, &tables).await, before);
+    for kind in [
+        "media_work.created",
+        "media_variant.created",
+        "asset_bundle.created",
+        "asset_bundle.member_added",
+    ] {
+        assert_event_count(&cp, kind, 0).await;
+    }
+    assert!(
+        directory_is_empty(
+            &dir.path()
+                .join("voom-audio-out")
+                .join("operation-node_extract_audio_test")
+        )
+        .await
+    );
+}
+
+#[tokio::test]
+async fn concurrent_first_extract_plans_converge_without_duplicate_rows_or_events() {
+    let (cp, _db, dir) = fixture_with_dir().await;
+    let source = seed_audio_source(&cp, &dir, b"source").await;
+    let input = first_extract_plan_input(&source, &dir);
+
+    let (first, second) = tokio::join!(
+        plan_first_extract_with_bundle(&cp, input.clone()),
+        plan_first_extract_with_bundle(&cp, input.clone()),
+    );
+
+    let first = first.unwrap();
+    let second = second.unwrap();
+    assert_eq!(first, second);
+    assert_eq!(
+        table_counts(
+            &cp,
+            &[
+                "media_works",
+                "media_variants",
+                "asset_bundles",
+                "asset_bundle_members",
+                "audio_extract_operations",
+                "audio_extract_operation_outputs",
+            ],
+        )
+        .await,
+        [1, 1, 1, 1, 1, 1]
+    );
+    for kind in [
+        "media_work.created",
+        "media_variant.created",
+        "asset_bundle.created",
+        "asset_bundle.member_added",
+    ] {
+        assert_event_count(&cp, kind, 1).await;
+    }
+
+    let replay = plan_first_extract_with_bundle(&cp, input).await.unwrap();
+    assert_eq!(replay, first);
+    for kind in [
+        "media_work.created",
+        "media_variant.created",
+        "asset_bundle.created",
+        "asset_bundle.member_added",
+    ] {
+        assert_event_count(&cp, kind, 1).await;
+    }
+}
+
+#[tokio::test]
 async fn extract_failure_preserves_primary_error_when_cleanup_and_event_writes_fail() {
     let (cp, _db, dir) = fixture_with_dir().await;
     let source = seed_audio_source(&cp, &dir, b"source").await;
@@ -2929,6 +3025,32 @@ fn extract_input_for_source(
         target_dir: dir.path().join("voom-audio-out"),
         backup_root: None,
     }
+}
+
+fn first_extract_plan_input(
+    source: &SeededAudioSource,
+    dir: &tempfile::TempDir,
+) -> FirstExtractPlanInput {
+    let input = extract_input_for_source(source, BundleId(0), dir);
+    FirstExtractPlanInput {
+        source_file_version_id: input.source_file_version_id,
+        source_location_id: input.source_location_id,
+        operation_payload: input.operation_payload,
+        target_dir: input.target_dir,
+    }
+}
+
+async fn table_counts<const N: usize>(cp: &crate::ControlPlane, tables: &[&str; N]) -> [i64; N] {
+    let mut counts = [0; N];
+    for (index, table) in tables.iter().enumerate() {
+        counts[index] = table_count(cp, table).await;
+    }
+    counts
+}
+
+async fn directory_is_empty(path: &std::path::Path) -> bool {
+    let mut entries = tokio::fs::read_dir(path).await.unwrap();
+    entries.next_entry().await.unwrap().is_none()
 }
 
 #[derive(Default)]
