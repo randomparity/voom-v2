@@ -28,7 +28,7 @@ use voom_store::repo::workers::{NewCapability, NewGrant, NewWorker, WorkerKind};
 use voom_worker_protocol::http::OperationBody;
 use voom_worker_protocol::{
     ClientHandle, DispatchStream, HandshakeResponse, HttpClient, NdjsonReader, OperationKind,
-    OperationRequest, ProtocolError, WorkerCredentials,
+    OperationRequest, OperationResponse, ProgressFrame, ProtocolError, WorkerCredentials,
 };
 
 const T0: OffsetDateTime = OffsetDateTime::UNIX_EPOCH;
@@ -80,13 +80,12 @@ async fn default_ci_workflow_runs_all_branches_through_real_scheduler() -> TestR
 // Chaos / fault-injection coverage. Five tests pin the failure-class mapping the
 // executor applies to a misbehaving worker: WorkerCrash, WorkerTimeout (dispatch
 // timeout), MalformedWorkerResult, ProgressTimeout, and the missed-heartbeat
-// watchdog. WorkerCrash / MalformedResult / ProgressTimeout / missed-heartbeat run
-// the in-house `chaos-worker` fake out-of-process so the crash and stall modes have
-// real-process fidelity. The dispatch-timeout case is driven deterministically by
-// an in-process runtime whose dispatch never returns (see
-// `start_with_unreachable_runtime_override`); it previously relied on a real
-// timeout elapsing under a 120ms watchdog with out-of-process prerequisites, which
-// flaked on loaded runners.
+// watchdog. WorkerCrash / MalformedResult / missed-heartbeat run the in-house
+// `chaos-worker` fake out-of-process so the crash and stall modes have real-process
+// fidelity. Dispatch timeout and progress timeout use deterministic in-process
+// fault boundaries: one never returns from dispatch, and one emits a progress
+// frame followed by a typed ProgressTimeout terminal signal. The latter preserves
+// lease-heartbeat evidence without depending on a short wall-clock deadline.
 //
 // `third_party/chaos-librarian` is unrelated: it is a media-library *fixture*
 // generator (synthetic files/scenarios for scanner/probe tests), with no worker,
@@ -205,12 +204,9 @@ async fn chaos_malformed_result_maps_to_malformed_worker_result() -> TestResult<
 
 #[tokio::test]
 async fn chaos_progress_timeout_maps_to_progress_timeout() -> TestResult<()> {
-    let _process_provider_guard = process_provider_test_guard().await;
-    let mut fixture = DurableWorkflowFixture::start_with_chaos_override(
-        OperationKind::ProbeFile,
-        ChaosWorkerMode::DeadlineExceeded,
-    )
-    .await?;
+    let mut fixture =
+        DurableWorkflowFixture::start_with_progress_timeout_signal(OperationKind::ProbeFile)
+            .await?;
     let result = async {
         let summary = fixture
             .executor()
@@ -557,6 +553,21 @@ impl DurableWorkflowFixture {
         Ok(fixture)
     }
 
+    async fn start_with_progress_timeout_signal(operation: OperationKind) -> TestResult<Self> {
+        let mut fixture = Self::without_fake_providers().await?;
+        let setup = async {
+            fixture
+                .register_in_process_providers_except(operation, 4)
+                .await?;
+            fixture.register_progress_timeout_runtime(operation).await
+        }
+        .await;
+        if let Err(err) = setup {
+            return combine_result_and_cleanup(Err(err), fixture.shutdown().await);
+        }
+        Ok(fixture)
+    }
+
     async fn without_fake_providers() -> TestResult<Self> {
         let tmp = tempfile::NamedTempFile::new()?;
         let url = format!("sqlite://{}", tmp.path().display());
@@ -740,6 +751,27 @@ impl DurableWorkflowFixture {
         self.registry.register_in_process_runtime(
             worker,
             Arc::new(UnreachableInProcessProvider),
+            WorkerCredentials {
+                worker_id: worker,
+                worker_epoch: 0,
+                secret: SecretString::from(secret.to_owned()),
+            },
+        );
+        Ok(())
+    }
+
+    async fn register_progress_timeout_runtime(
+        &mut self,
+        operation: OperationKind,
+    ) -> TestResult<()> {
+        let secret = "durable-workflow-progress-timeout-secret";
+        let worker = self
+            .register_worker_without_runtime("progress-timeout-probe", &[operation], 1, secret)
+            .await?;
+        self.registered_workers.push((worker, 1));
+        self.registry.register_in_process_runtime(
+            worker,
+            Arc::new(ProgressTimeoutInProcessProvider),
             WorkerCredentials {
                 worker_id: worker,
                 worker_epoch: 0,
@@ -1111,7 +1143,6 @@ struct ProviderSpec {
 enum ChaosWorkerMode {
     Crash,
     MalformedResult,
-    DeadlineExceeded,
     Stall,
 }
 
@@ -1120,7 +1151,6 @@ impl ChaosWorkerMode {
         match self {
             Self::Crash => "crash",
             Self::MalformedResult => "malformed_result",
-            Self::DeadlineExceeded => "deadline_exceeded",
             Self::Stall => "stall",
         }
     }
@@ -1353,6 +1383,71 @@ impl ClientHandle for UnreachableInProcessProvider {
         _request: OperationRequest,
     ) -> Result<DispatchStream, ProtocolError> {
         std::future::pending().await
+    }
+}
+
+#[derive(Debug)]
+struct ProgressTimeoutInProcessProvider;
+
+#[async_trait::async_trait]
+impl ClientHandle for ProgressTimeoutInProcessProvider {
+    async fn handshake(&self, _offered: u32) -> Result<HandshakeResponse, ProtocolError> {
+        Err(ProtocolError::InternalServerError)
+    }
+
+    async fn identity(
+        &self,
+        _credentials: &WorkerCredentials,
+    ) -> Result<voom_worker_protocol::WorkerIdentityResponse, ProtocolError> {
+        Err(ProtocolError::InternalServerError)
+    }
+
+    async fn dispatch(
+        &self,
+        _creds: &WorkerCredentials,
+        _idempotency_key: &str,
+        request: OperationRequest,
+    ) -> Result<DispatchStream, ProtocolError> {
+        let lease_id = request.lease_id;
+        let frames = [
+            ProgressFrame::Progress {
+                lease_id,
+                seq: 0,
+                emitted_at: T0,
+                percent: None,
+                message: Some("accepted".to_owned()),
+                payload: None,
+            },
+            ProgressFrame::Error {
+                lease_id,
+                seq: 1,
+                emitted_at: T0,
+                class: FailureClass::ProgressTimeout,
+                code: ErrorCode::WorkerTimeout,
+                message: "deterministic progress-timeout signal".to_owned(),
+                payload: None,
+            },
+        ];
+        let mut body = Vec::new();
+        for frame in frames {
+            body.extend_from_slice(&serde_json::to_vec(&frame).map_err(|err| {
+                ProtocolError::MalformedFrame {
+                    detail: format!("encode deterministic timeout frame: {err}"),
+                }
+            })?);
+            body.push(b'\n');
+        }
+        let (mut writer, reader) = tokio::io::duplex(16 * 1024);
+        tokio::spawn(async move {
+            let _ = writer.write_all(&body).await;
+        });
+        Ok(DispatchStream {
+            response: OperationResponse {
+                lease_id,
+                accepted_at: T0,
+            },
+            frames: NdjsonReader::new(Box::pin(reader), lease_id),
+        })
     }
 }
 
