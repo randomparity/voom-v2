@@ -572,6 +572,13 @@ pub async fn run_ffmpeg_extract_audio(
         .arg(format!("0:{}", source.provider_stream_index))
         .arg("-c:a")
         .arg(audio_encoder(&request.output.audio_codec)?);
+    if request.output.audio_codec == "opus" && source.channels.is_some_and(|channels| channels > 2)
+    {
+        command.arg("-mapping_family").arg("1");
+        if source.channels == Some(6) {
+            command.arg("-channel_layout").arg("5.1");
+        }
+    }
     append_audio_metadata(&mut command, 0, source);
     command
         .arg("-f")

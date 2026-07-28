@@ -832,6 +832,8 @@ async fn opus_extraction_requests_ogg_output() {
     let args = std::fs::read_to_string(args_path).unwrap();
     assert!(args.contains("-f\nogg\n"));
     assert!(args.contains("-c:a\nlibopus\n"));
+    assert!(args.contains("-mapping_family\n1\n"));
+    assert!(args.contains("-channel_layout\n5.1\n"));
 }
 
 #[tokio::test]

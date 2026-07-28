@@ -47,6 +47,7 @@ const EXPECTED_MIGRATION_FILES: &[&str] = &[
     "0024_atomic_audio_extract_operations.sql",
     "0025_recoverable_audio_synthesis.sql",
     "0026_policy_artifact_verification.sql",
+    "0027_audio_synthesis_asset_lineage.sql",
 ];
 
 fn workspace_root() -> PathBuf {
@@ -334,6 +335,162 @@ async fn policy_verification_migration_preserves_workflow_progress() {
     assert_eq!(history, "skipped");
     assert_eq!(verification_owner, (None, None));
     assert_eq!(violations, Vec::<(String, i64, String, i64)>::new());
+}
+
+#[tokio::test]
+async fn audio_synthesis_lineage_migration_allows_sequential_versions_of_one_asset() {
+    let migration_path = migrations_dir().join("0027_audio_synthesis_asset_lineage.sql");
+    assert!(
+        migration_path.is_file(),
+        "{} must exist before the upgrade path can be exercised",
+        migration_path.display()
+    );
+    let tmp = NamedTempFile::new().unwrap();
+    let url = sqlite_url_for(tmp.path());
+    let pool = connect_or_create(&url).await.unwrap();
+    migrator_through(26).run(&pool).await.unwrap();
+
+    let (asset_id, versions, locations, snapshots) = seed_synthesis_versions(&pool).await;
+    insert_synthesis_operation(
+        &pool,
+        SynthesisOperationSeed {
+            operation_key: "synthesis:first",
+            target_path: "/media/first.mkv",
+            source_version_id: versions[0],
+            source_snapshot_id: snapshots[0],
+            result_asset_id: asset_id,
+            result_version_id: versions[1],
+            result_location_id: locations[1],
+            result_snapshot_id: snapshots[1],
+        },
+    )
+    .await;
+
+    MIGRATOR.run(&pool).await.unwrap();
+
+    insert_synthesis_operation(
+        &pool,
+        SynthesisOperationSeed {
+            operation_key: "synthesis:second",
+            target_path: "/media/second.mkv",
+            source_version_id: versions[1],
+            source_snapshot_id: snapshots[1],
+            result_asset_id: asset_id,
+            result_version_id: versions[2],
+            result_location_id: locations[2],
+            result_snapshot_id: snapshots[2],
+        },
+    )
+    .await;
+    let asset_ids: Vec<i64> = sqlx::query_scalar(
+        "SELECT result_file_asset_id FROM audio_synthesis_operations ORDER BY id",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    let violations: Vec<(String, i64, String, i64)> = sqlx::query_as("PRAGMA foreign_key_check")
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+    assert_eq!(asset_ids, vec![asset_id, asset_id]);
+    assert_eq!(violations, Vec::<(String, i64, String, i64)>::new());
+}
+
+async fn seed_synthesis_versions(pool: &sqlx::SqlitePool) -> (i64, Vec<i64>, Vec<i64>, Vec<i64>) {
+    let now = "2026-07-27T00:00:00Z";
+    let asset_id = sqlx::query("INSERT INTO file_assets (created_at) VALUES (?)")
+        .bind(now)
+        .execute(pool)
+        .await
+        .unwrap()
+        .last_insert_rowid();
+    let mut versions = Vec::new();
+    let mut locations = Vec::new();
+    let mut snapshots = Vec::new();
+    for ordinal in 0..3 {
+        let produced_by = if ordinal == 0 {
+            "external_observed"
+        } else {
+            "staged_commit"
+        };
+        let produced_from_version_id = versions.last().copied();
+        let version_id = sqlx::query(
+            "INSERT INTO file_versions \
+             (file_asset_id, content_hash, size_bytes, produced_by, produced_from_version_id, \
+              created_at) \
+             VALUES (?, ?, 3, ?, ?, ?)",
+        )
+        .bind(asset_id)
+        .bind(format!("blake3:version-{ordinal}"))
+        .bind(produced_by)
+        .bind(produced_from_version_id)
+        .bind(now)
+        .execute(pool)
+        .await
+        .unwrap()
+        .last_insert_rowid();
+        let location_id = sqlx::query(
+            "INSERT INTO file_locations (file_version_id, kind, value, observed_at) \
+             VALUES (?, 'local_path', ?, ?)",
+        )
+        .bind(version_id)
+        .bind(format!("/media/version-{ordinal}.mkv"))
+        .bind(now)
+        .execute(pool)
+        .await
+        .unwrap()
+        .last_insert_rowid();
+        let snapshot_id = sqlx::query(
+            "INSERT INTO media_snapshots (file_version_id, probed_at, payload) \
+             VALUES (?, ?, '{}')",
+        )
+        .bind(version_id)
+        .bind(now)
+        .execute(pool)
+        .await
+        .unwrap()
+        .last_insert_rowid();
+        versions.push(version_id);
+        locations.push(location_id);
+        snapshots.push(snapshot_id);
+    }
+    (asset_id, versions, locations, snapshots)
+}
+
+struct SynthesisOperationSeed<'a> {
+    operation_key: &'a str,
+    target_path: &'a str,
+    source_version_id: i64,
+    source_snapshot_id: i64,
+    result_asset_id: i64,
+    result_version_id: i64,
+    result_location_id: i64,
+    result_snapshot_id: i64,
+}
+
+async fn insert_synthesis_operation(pool: &sqlx::SqlitePool, seed: SynthesisOperationSeed<'_>) {
+    sqlx::query(
+        "INSERT INTO audio_synthesis_operations \
+         (operation_key, planned_operation_id, source_file_version_id, \
+          source_media_snapshot_id, target_codec, target_channels, container, target_path, \
+          state, result_file_asset_id, result_file_version_id, result_file_location_id, \
+          result_media_snapshot_id, created_at, finished_at) \
+         VALUES (?, ?, ?, ?, 'aac', 2, 'mkv', ?, 'committed', ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(seed.operation_key)
+    .bind(seed.operation_key)
+    .bind(seed.source_version_id)
+    .bind(seed.source_snapshot_id)
+    .bind(seed.target_path)
+    .bind(seed.result_asset_id)
+    .bind(seed.result_version_id)
+    .bind(seed.result_location_id)
+    .bind(seed.result_snapshot_id)
+    .bind("2026-07-27T00:00:00Z")
+    .bind("2026-07-27T00:00:01Z")
+    .execute(pool)
+    .await
+    .unwrap();
 }
 
 async fn seed_legacy_workflow_progress(pool: &sqlx::SqlitePool) -> (i64, i64) {

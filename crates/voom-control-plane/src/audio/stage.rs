@@ -101,6 +101,14 @@ pub async fn extract_target_paths(
     let file_names = extract_file_names(source_path, selection)?;
     require_distinct_file_names(&file_names)?;
     let canonical_dir = prepare_target_directory(target_dir).await?;
+    let canonical_dir = match &selection.operation_id {
+        Some(operation_id) => {
+            let directory = format!("operation-{operation_id}");
+            require_safe_component(&directory, "audio extraction operation directory")?;
+            prepare_target_directory(&canonical_dir.join(directory)).await?
+        }
+        None => canonical_dir,
+    };
     let paths = file_names
         .into_iter()
         .map(|file_name| canonical_dir.join(file_name))
