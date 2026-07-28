@@ -4,7 +4,7 @@ use std::time::Duration;
 use serde_json::Value;
 use tokio::time::Instant;
 use voom_core::{FailureClass, LeaseId, VoomError};
-use voom_store::repo::leases::{Lease, NewLease};
+use voom_store::repo::leases::{LeaseAcquireOutcome, NewLease};
 
 use crate::ControlPlane;
 use crate::workflow::execution::executor::WorkflowTimingOptions;
@@ -12,10 +12,10 @@ use crate::workflow::execution::executor::WorkflowTimingOptions;
 pub(super) async fn acquire_lease_with_retry(
     control: &ControlPlane,
     input: NewLease,
-) -> Result<Lease, VoomError> {
+) -> Result<LeaseAcquireOutcome, VoomError> {
     retry_on_database_locked(|| {
         let input = input.clone();
-        async move { control.acquire_lease(input).await }
+        async move { control.try_acquire_lease(input).await }
     })
     .await
 }

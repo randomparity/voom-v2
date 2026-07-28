@@ -13,6 +13,8 @@ const DEFAULT_HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(20);
 const DEFAULT_PROGRESS_IDLE_TIMEOUT: Duration = Duration::from_secs(20);
 const DEFAULT_READY_BATCH_SIZE: u32 = 64;
 const DEFAULT_MAX_ATTEMPTS: u32 = 1;
+const DEFAULT_CAPACITY_RETRY_INTERVAL: Duration = Duration::from_millis(250);
+const DEFAULT_CAPACITY_RETRY_TIMEOUT: Duration = Duration::from_mins(1);
 
 #[derive(Debug, Clone)]
 pub(crate) struct WorkflowTimingOptions {
@@ -26,6 +28,8 @@ pub(crate) struct WorkflowTimingOptions {
 pub(crate) struct WorkflowQueueOptions {
     pub ready_batch_size: u32,
     pub max_attempts: u32,
+    pub capacity_retry_interval: Duration,
+    pub capacity_retry_timeout: Duration,
 }
 
 #[derive(Debug, Clone)]
@@ -87,6 +91,20 @@ impl Default for WorkflowQueueOptions {
         Self {
             ready_batch_size: DEFAULT_READY_BATCH_SIZE,
             max_attempts: DEFAULT_MAX_ATTEMPTS,
+            capacity_retry_interval: DEFAULT_CAPACITY_RETRY_INTERVAL,
+            capacity_retry_timeout: DEFAULT_CAPACITY_RETRY_TIMEOUT,
+        }
+    }
+}
+
+impl WorkflowQueueOptions {
+    #[cfg(test)]
+    #[must_use]
+    pub fn for_tests() -> Self {
+        Self {
+            capacity_retry_interval: Duration::from_millis(10),
+            capacity_retry_timeout: Duration::from_millis(250),
+            ..Self::default()
         }
     }
 }

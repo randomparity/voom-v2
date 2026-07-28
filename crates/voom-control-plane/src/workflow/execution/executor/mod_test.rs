@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
@@ -21,7 +22,7 @@ use voom_store::repo::identity::{
 };
 use voom_store::repo::jobs::NewJob;
 use voom_store::repo::leases::NewLease;
-use voom_store::repo::tickets::NewTicket;
+use voom_store::repo::tickets::{NewTicket, Ticket};
 use voom_store::repo::workers::{NewCapability, NewGrant, NewWorker, WorkerKind};
 use voom_worker_protocol::{
     AudioObservedFacts, AudioOutputStreamFact, ClientHandle, DispatchStream,
@@ -170,6 +171,251 @@ async fn capacity_deferred_ready_ticket_does_not_block_later_ready_ticket() {
 }
 
 #[tokio::test]
+async fn external_capacity_release_allows_eventual_dispatch_without_early_request() {
+    let mut fixture = ExecutorFixture::without_workers(1).await;
+    let worker_id = fixture
+        .register_worker(
+            "cross-connection-worker",
+            OperationKind::HashFile,
+            1,
+            FakeBehavior::Success,
+        )
+        .await;
+    let other = fixture.second_control_plane().await;
+    let external_lease = fixture
+        .occupy_worker_capacity(&other, worker_id, OperationKind::HashFile)
+        .await;
+    let executor = fixture.executor_with_options(WorkflowExecutorOptions::for_tests());
+    let plan = fixture.plan.clone();
+    let run = tokio::spawn(async move { executor.submit_and_run(plan).await });
+    let ticket = fixture.wait_for_workflow_ticket().await;
+
+    tokio::time::sleep(Duration::from_millis(40)).await;
+    assert!(!run.is_finished());
+    assert_eq!(fixture.worker_dispatch_count(worker_id), 0);
+    assert_eq!(ticket.attempt, 0);
+    assert_eq!(fixture.ticket_state(ticket.id).await, "ready");
+    assert_eq!(
+        fixture.ticket_event_count(ticket.id, "ticket.leased").await,
+        0
+    );
+    assert_eq!(
+        fixture
+            .ticket_event_count(ticket.id, "ticket.failed_terminal")
+            .await,
+        0
+    );
+
+    other
+        .release_lease(external_lease, json!({"status": "released"}), T0)
+        .await
+        .unwrap();
+    let summary = tokio::time::timeout(Duration::from_secs(2), run)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(summary.dispatch_count, 1);
+    assert_eq!(fixture.worker_dispatch_count(worker_id), 1);
+    assert_eq!(fixture.ticket_state(ticket.id).await, "succeeded");
+}
+
+#[tokio::test]
+async fn external_capacity_timeout_fails_job_without_consuming_ticket() {
+    let mut fixture = ExecutorFixture::without_workers(1).await;
+    let worker_id = fixture
+        .register_worker(
+            "capacity-timeout-worker",
+            OperationKind::HashFile,
+            1,
+            FakeBehavior::Success,
+        )
+        .await;
+    let other = fixture.second_control_plane().await;
+    let external_lease = fixture
+        .occupy_worker_capacity(&other, worker_id, OperationKind::HashFile)
+        .await;
+    let mut options = WorkflowExecutorOptions::for_tests();
+    options.queue.capacity_retry_interval = Duration::from_millis(10);
+    options.queue.capacity_retry_timeout = Duration::from_millis(40);
+
+    let error = fixture.run_with_options(options).await.unwrap_err();
+    let ticket = fixture.first_workflow_ticket().await;
+
+    assert_eq!(error.source.error_code(), ErrorCode::NoEligibleWorker);
+    assert!(error.source.to_string().contains("capacity"));
+    assert_eq!(error.summary.dispatch_count, 0);
+    assert_eq!(fixture.worker_dispatch_count(worker_id), 0);
+    assert_eq!(fixture.job_state(error.summary.job_id).await, "failed");
+    assert_eq!(ticket.state.as_str(), "ready");
+    assert_eq!(ticket.attempt, 0);
+    assert_eq!(fixture.held_lease_count().await, 1);
+    assert_eq!(
+        fixture.ticket_event_count(ticket.id, "ticket.leased").await,
+        0
+    );
+    assert_eq!(
+        fixture
+            .ticket_event_count(ticket.id, "ticket.failed_terminal")
+            .await,
+        0
+    );
+    assert_eq!(
+        fixture
+            .ticket_event_count(ticket.id, "ticket.failed_retriable")
+            .await,
+        0
+    );
+    assert_eq!(fixture.event_count("job.failed").await, 1);
+
+    other
+        .release_lease(external_lease, json!({"status": "cleanup"}), T0)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn cancelling_job_stops_external_capacity_wait_without_failure_events() {
+    let mut fixture = ExecutorFixture::without_workers(1).await;
+    let worker_id = fixture
+        .register_worker(
+            "capacity-cancel-worker",
+            OperationKind::HashFile,
+            1,
+            FakeBehavior::Success,
+        )
+        .await;
+    let other = fixture.second_control_plane().await;
+    let external_lease = fixture
+        .occupy_worker_capacity(&other, worker_id, OperationKind::HashFile)
+        .await;
+    let job_id = fixture.open_workflow_job().await;
+    let executor = fixture.executor_with_options(WorkflowExecutorOptions::for_tests());
+    let plan = fixture.plan.clone();
+    let run = tokio::spawn(async move {
+        executor
+            .submit_and_run_invocation_in_job(
+                job_id,
+                "capacity-cancel",
+                plan,
+                super::RunFailureMode::AbortJob,
+            )
+            .await
+    });
+    let ticket = fixture.wait_for_workflow_ticket().await;
+    fixture
+        .cp
+        .cancel_job(job_id, "operator cancelled wait".to_owned(), T0)
+        .await
+        .unwrap();
+
+    let error = tokio::time::timeout(Duration::from_secs(1), run)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap_err();
+
+    assert_eq!(error.source.error_code(), ErrorCode::UserCancellation);
+    assert!(!error.job_failed);
+    assert_eq!(fixture.job_state(job_id).await, "cancelled");
+    assert_eq!(fixture.ticket_state(ticket.id).await, "ready");
+    assert_eq!(fixture.worker_dispatch_count(worker_id), 0);
+    assert_eq!(
+        fixture.ticket_event_count(ticket.id, "ticket.leased").await,
+        0
+    );
+    assert_eq!(
+        fixture
+            .ticket_event_count(ticket.id, "ticket.failed_terminal")
+            .await,
+        0
+    );
+    assert_eq!(fixture.event_count("job.cancelled").await, 1);
+    assert_eq!(fixture.event_count("job.failed").await, 0);
+
+    other
+        .release_lease(external_lease, json!({"status": "cleanup"}), T0)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn stopped_capacity_wait_leaves_restartable_durable_state() {
+    let mut fixture = ExecutorFixture::without_workers(1).await;
+    let worker_id = fixture
+        .register_worker(
+            "capacity-restart-worker",
+            OperationKind::HashFile,
+            1,
+            FakeBehavior::Success,
+        )
+        .await;
+    let other = fixture.second_control_plane().await;
+    let external_lease = fixture
+        .occupy_worker_capacity(&other, worker_id, OperationKind::HashFile)
+        .await;
+    let job_id = fixture.open_workflow_job().await;
+    let executor = fixture.executor_with_options(WorkflowExecutorOptions::for_tests());
+    let plan = fixture.plan.clone();
+    let run = tokio::spawn(async move {
+        executor
+            .submit_and_run_invocation_in_job(
+                job_id,
+                "capacity-restart",
+                plan,
+                super::RunFailureMode::AbortJob,
+            )
+            .await
+    });
+    let ticket_before = fixture.wait_for_workflow_ticket().await;
+    tokio::time::sleep(Duration::from_millis(30)).await;
+
+    run.abort();
+    assert!(run.await.unwrap_err().is_cancelled());
+    let ticket_after = fixture
+        .cp
+        .tickets
+        .get(ticket_before.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(fixture.job_state(job_id).await, "open");
+    assert_eq!(ticket_after.state, ticket_before.state);
+    assert_eq!(ticket_after.attempt, ticket_before.attempt);
+    assert_eq!(ticket_after.epoch, ticket_before.epoch);
+    assert_eq!(fixture.worker_dispatch_count(worker_id), 0);
+    assert_eq!(
+        fixture
+            .ticket_event_count(ticket_before.id, "ticket.leased")
+            .await,
+        0
+    );
+    assert_eq!(
+        fixture
+            .ticket_event_count(ticket_before.id, "ticket.failed_terminal")
+            .await,
+        0
+    );
+
+    fixture
+        .cp
+        .cancel_job(job_id, "executor process stopped".to_owned(), T0)
+        .await
+        .unwrap();
+    other
+        .release_lease(external_lease, json!({"status": "released"}), T0)
+        .await
+        .unwrap();
+    let summary = fixture.run().await.unwrap();
+
+    assert_eq!(summary.dispatch_count, 1);
+    assert_eq!(fixture.worker_dispatch_count(worker_id), 1);
+    assert_eq!(fixture.job_state(job_id).await, "cancelled");
+    assert_eq!(fixture.ticket_state(ticket_before.id).await, "ready");
+}
+
+#[tokio::test]
 async fn no_eligible_worker_is_recorded_before_lease_dispatch() {
     let fixture = ExecutorFixture::without_workers(1).await;
     let err = fixture.run().await.unwrap_err();
@@ -202,6 +448,44 @@ async fn separate_deny_grant_removes_worker_before_lease_dispatch() {
         fixture.first_ticket_failed_class().await,
         "no_eligible_worker"
     );
+}
+
+#[tokio::test]
+async fn terminal_worker_ineligibility_never_enters_capacity_wait() {
+    for ineligibility in [
+        TerminalWorkerIneligibility::Stale,
+        TerminalWorkerIneligibility::Retired,
+        TerminalWorkerIneligibility::Denied,
+        TerminalWorkerIneligibility::Incapable,
+        TerminalWorkerIneligibility::Ungranted,
+    ] {
+        let fixture = ExecutorFixture::without_workers(1).await;
+        seed_terminally_ineligible_worker(&fixture, ineligibility).await;
+
+        let error = fixture.run().await.unwrap_err();
+        let ticket = fixture.first_workflow_ticket().await;
+
+        assert_eq!(
+            error.source.error_code(),
+            ErrorCode::NoEligibleWorker,
+            "{}",
+            ineligibility.label()
+        );
+        assert_eq!(error.summary.dispatch_count, 0);
+        assert_eq!(ticket.state.as_str(), "failed");
+        assert_eq!(ticket.attempt, 1);
+        assert_eq!(fixture.lease_count().await, 0);
+        assert_eq!(
+            fixture
+                .ticket_event_count(ticket.id, "ticket.failed_terminal")
+                .await,
+            1
+        );
+        assert_eq!(
+            fixture.first_ticket_failed_class().await,
+            "no_eligible_worker"
+        );
+    }
 }
 
 #[tokio::test]
@@ -1916,12 +2200,103 @@ fn summary_branch_count_only_excludes_synthetic_root_ticket() {
     assert!(!is_synthetic_root_ticket(&real_root_branch));
 }
 
+#[derive(Clone, Copy)]
+enum TerminalWorkerIneligibility {
+    Stale,
+    Retired,
+    Denied,
+    Incapable,
+    Ungranted,
+}
+
+impl TerminalWorkerIneligibility {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Stale => "stale",
+            Self::Retired => "retired",
+            Self::Denied => "denied",
+            Self::Incapable => "incapable",
+            Self::Ungranted => "ungranted",
+        }
+    }
+}
+
+async fn seed_terminally_ineligible_worker(
+    fixture: &ExecutorFixture,
+    ineligibility: TerminalWorkerIneligibility,
+) {
+    let worker = fixture
+        .cp
+        .register_worker(NewWorker {
+            name: format!("{}-worker", ineligibility.label()),
+            kind: WorkerKind::Synthetic,
+            registered_at: T0,
+            node_id: None,
+        })
+        .await
+        .unwrap();
+    let operation = TicketOperation::from(OperationKind::HashFile);
+    if !matches!(ineligibility, TerminalWorkerIneligibility::Incapable) {
+        fixture
+            .cp
+            .record_capability(NewCapability {
+                worker_id: worker.id,
+                operation: operation.clone(),
+                codecs: Vec::new(),
+                hardware: Vec::new(),
+                artifact_access: Vec::new(),
+                extra: json!({}),
+            })
+            .await
+            .unwrap();
+    }
+    if !matches!(ineligibility, TerminalWorkerIneligibility::Ungranted) {
+        fixture
+            .cp
+            .record_grant(NewGrant {
+                worker_id: worker.id,
+                can_execute: vec![operation.clone()],
+                can_access_read: Vec::new(),
+                can_access_write: Vec::new(),
+                denies: if matches!(ineligibility, TerminalWorkerIneligibility::Denied) {
+                    vec![operation]
+                } else {
+                    Vec::new()
+                },
+                max_parallel: json!({}),
+            })
+            .await
+            .unwrap();
+    }
+    match ineligibility {
+        TerminalWorkerIneligibility::Stale => {
+            sqlx::query("UPDATE workers SET status = 'stale' WHERE id = ?")
+                .bind(i64::try_from(worker.id.0).unwrap())
+                .execute(&fixture.cp.pool)
+                .await
+                .unwrap();
+        }
+        TerminalWorkerIneligibility::Retired => {
+            fixture
+                .cp
+                .retire_worker(worker.id, worker.epoch, T0 + time::Duration::seconds(1))
+                .await
+                .unwrap();
+        }
+        TerminalWorkerIneligibility::Denied
+        | TerminalWorkerIneligibility::Incapable
+        | TerminalWorkerIneligibility::Ungranted => {}
+    }
+}
+
 struct ExecutorFixture {
     cp: crate::ControlPlane,
     clock: Arc<ManualClock>,
+    database_url: String,
     _tmp: tempfile::NamedTempFile,
     plan: WorkflowPlan,
     registry: WorkerRuntimeRegistry,
+    clients: HashMap<WorkerId, Arc<FakeClient>>,
     first_worker_id: Option<WorkerId>,
     other_job_id: Option<JobId>,
 }
@@ -2025,9 +2400,11 @@ impl ExecutorFixture {
         Self {
             cp,
             clock,
+            database_url: url,
             _tmp: tmp,
             plan: independent_hash_plan(ticket_count),
             registry: WorkerRuntimeRegistry::new(),
+            clients: HashMap::new(),
             first_worker_id: None,
             other_job_id: None,
         }
@@ -2046,13 +2423,14 @@ impl ExecutorFixture {
         let client = Arc::new(FakeClient::new(worker, behavior));
         self.registry.register_in_process_runtime(
             worker,
-            client,
+            client.clone(),
             WorkerCredentials {
                 worker_id: worker,
                 worker_epoch: 0,
                 secret: SecretString::from("test-secret"),
             },
         );
+        self.clients.insert(worker, client);
         worker
     }
 
@@ -2115,6 +2493,116 @@ impl ExecutorFixture {
 
     fn worker_id(&self) -> WorkerId {
         self.first_worker_id.unwrap()
+    }
+
+    fn worker_dispatch_count(&self, worker_id: WorkerId) -> u32 {
+        self.clients[&worker_id].dispatch_count()
+    }
+
+    async fn second_control_plane(&self) -> crate::ControlPlane {
+        let pool = voom_store::connect(&self.database_url).await.unwrap();
+        crate::ControlPlane::open_with_pool_and_rng(
+            pool,
+            self.clock.clone(),
+            Arc::new(Mutex::new(FrozenRng::new(0))),
+        )
+        .await
+        .unwrap()
+    }
+
+    async fn occupy_worker_capacity(
+        &self,
+        control_plane: &crate::ControlPlane,
+        worker_id: WorkerId,
+        operation: OperationKind,
+    ) -> LeaseId {
+        let ticket = control_plane
+            .create_ticket(NewTicket {
+                job_id: None,
+                kind: TicketOperation::from(operation),
+                priority: 0,
+                payload: json!({}),
+                max_attempts: 1,
+                created_at: T0,
+            })
+            .await
+            .unwrap();
+        control_plane
+            .mark_ready_if_unblocked(ticket.id, T0)
+            .await
+            .unwrap();
+        control_plane
+            .acquire_lease(NewLease {
+                ticket_id: ticket.id,
+                worker_id,
+                ttl: time::Duration::seconds(60),
+                now: T0,
+            })
+            .await
+            .unwrap()
+            .id
+    }
+
+    async fn wait_for_workflow_ticket(&self) -> Ticket {
+        for _ in 0..100 {
+            if let Some(ticket) = self.optional_ready_workflow_ticket().await {
+                return ticket;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        panic!("workflow ticket was not created");
+    }
+
+    async fn first_workflow_ticket(&self) -> Ticket {
+        let Some(ticket) = self.optional_first_workflow_ticket().await else {
+            panic!("workflow ticket");
+        };
+        ticket
+    }
+
+    async fn optional_ready_workflow_ticket(&self) -> Option<Ticket> {
+        let id: Option<i64> = sqlx::query_scalar(
+            "SELECT id FROM tickets \
+             WHERE kind LIKE 'synthetic.workflow.operation.%' AND state = 'ready' \
+             ORDER BY id ASC LIMIT 1",
+        )
+        .fetch_optional(&self.cp.pool)
+        .await
+        .unwrap();
+        self.workflow_ticket_by_id(id).await
+    }
+
+    async fn optional_first_workflow_ticket(&self) -> Option<Ticket> {
+        let id: Option<i64> = sqlx::query_scalar(
+            "SELECT id FROM tickets \
+             WHERE kind LIKE 'synthetic.workflow.operation.%' \
+             ORDER BY id ASC LIMIT 1",
+        )
+        .fetch_optional(&self.cp.pool)
+        .await
+        .unwrap();
+        self.workflow_ticket_by_id(id).await
+    }
+
+    async fn workflow_ticket_by_id(&self, id: Option<i64>) -> Option<Ticket> {
+        let id = id?;
+        self.cp
+            .tickets
+            .get(TicketId(u64::try_from(id).unwrap()))
+            .await
+            .unwrap()
+    }
+
+    async fn ticket_event_count(&self, ticket_id: TicketId, kind: &str) -> i64 {
+        sqlx::query_scalar(
+            "SELECT COUNT(*) FROM events \
+             WHERE subject_type = 'ticket' AND subject_id = ? AND kind = ?",
+        )
+        .bind(i64::try_from(ticket_id.0).unwrap())
+        .bind(kind)
+        .fetch_one(&self.cp.pool)
+        .await
+        .unwrap()
     }
 
     async fn run(
@@ -2625,6 +3113,7 @@ impl ExecutorFixture {
 struct FakeClient {
     worker_id: WorkerId,
     behavior: FakeBehavior,
+    dispatches: AtomicU32,
     active: Arc<AtomicU32>,
     max_active: AtomicU32,
 }
@@ -2634,9 +3123,14 @@ impl FakeClient {
         Self {
             worker_id,
             behavior,
+            dispatches: AtomicU32::new(0),
             active: Arc::new(AtomicU32::new(0)),
             max_active: AtomicU32::new(0),
         }
+    }
+
+    fn dispatch_count(&self) -> u32 {
+        self.dispatches.load(Ordering::SeqCst)
     }
 
     fn enter_active(&self) {
@@ -2684,6 +3178,7 @@ impl ClientHandle for FakeClient {
         request: OperationRequest,
     ) -> Result<DispatchStream, ProtocolError> {
         assert_eq!(_creds.worker_id, self.worker_id);
+        self.dispatches.fetch_add(1, Ordering::SeqCst);
         if let FakeBehavior::RejectUnexpectedDispatch = self.behavior {
             return Err(ProtocolError::InvalidPayload {
                 detail: "first extraction dispatched before planning committed".to_owned(),

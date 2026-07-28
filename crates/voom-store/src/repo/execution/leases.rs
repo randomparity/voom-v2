@@ -12,8 +12,7 @@ use super::common::{
 };
 use super::tickets::SqliteTicketRepo;
 use super::workers::{
-    SqliteWorkerRepo, WorkerOperationCapacity, WorkerOperationEligibility, WorkerStatus,
-    normalized_worker_operation,
+    SqliteWorkerRepo, WorkerOperationEligibility, WorkerStatus, normalized_worker_operation,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -112,6 +111,51 @@ pub struct Lease {
     pub epoch: u64,
 }
 
+/// Durable operation-capacity observation that rejected a lease acquisition.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkerCapacitySaturation {
+    /// Worker whose operation slot was requested.
+    pub worker_id: WorkerId,
+    /// Normalized worker operation used by the store-owned capacity predicate.
+    pub operation: TicketOperation,
+    /// Held leases observed for the worker and operation.
+    pub active_leases: u32,
+    /// Effective grant limit for the worker and operation.
+    pub max_parallel: u32,
+}
+
+impl WorkerCapacitySaturation {
+    fn into_error(self) -> VoomError {
+        VoomError::NoEligibleWorker(format!(
+            "acquire rejected: worker {} capacity full for {} (active {}, limit {})",
+            self.worker_id, self.operation, self.active_leases, self.max_parallel
+        ))
+    }
+}
+
+/// Store-owned result of an otherwise valid lease-acquisition attempt.
+#[derive(Debug, Clone)]
+pub enum LeaseAcquireOutcome {
+    /// The ticket transition and held lease committed inside the savepoint.
+    Acquired(Lease),
+    /// Capacity was full and the savepoint was rolled back without side effects.
+    CapacityFull(WorkerCapacitySaturation),
+}
+
+impl LeaseAcquireOutcome {
+    /// Convert to the legacy acquisition result and public error classification.
+    ///
+    /// # Errors
+    ///
+    /// Returns `NoEligibleWorker` when the typed outcome is capacity saturation.
+    pub fn into_lease_result(self) -> Result<Lease, VoomError> {
+        match self {
+            Self::Acquired(lease) => Ok(lease),
+            Self::CapacityFull(saturation) => Err(saturation.into_error()),
+        }
+    }
+}
+
 /// Outcome of `force_release_in_tx` — surfaces the post-update ticket fate
 /// so the case handler can emit `TicketReady` or `TicketFailedTerminal`
 /// based on what actually happened, not just the caller's `also_requeue`
@@ -177,11 +221,20 @@ impl SqliteLeaseRepo {
 impl Repository for SqliteLeaseRepo {}
 
 impl SqliteLeaseRepo {
-    pub async fn acquire_in_tx(
+    /// Acquire a lease or return typed durable-capacity backpressure.
+    ///
+    /// Capacity rejection rolls back the method's savepoint, including the
+    /// provisional ticket transition. Other rejection reasons remain errors.
+    ///
+    /// # Errors
+    ///
+    /// Returns configuration, database, ticket-state, or worker-eligibility
+    /// errors encountered before a lease can be committed.
+    pub async fn try_acquire_in_tx(
         &self,
         tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
         input: NewLease,
-    ) -> Result<Lease, VoomError> {
+    ) -> Result<LeaseAcquireOutcome, VoomError> {
         let ttl_secs = input.ttl.whole_seconds();
         if ttl_secs <= 0 {
             return Err(VoomError::Config(format!(
@@ -195,11 +248,19 @@ impl SqliteLeaseRepo {
             .map_err(|e| VoomError::database_context("lease acquire savepoint begin", e))?;
         let result = self.acquire_guarded(&mut savepoint, &input, ttl_secs).await;
         match result {
-            Ok(lease) => {
+            Ok(LeaseAcquireOutcome::Acquired(lease)) => {
                 savepoint.commit().await.map_err(|e| {
                     VoomError::database_context("lease acquire savepoint release", e)
                 })?;
-                Ok(lease)
+                Ok(LeaseAcquireOutcome::Acquired(lease))
+            }
+            Ok(LeaseAcquireOutcome::CapacityFull(saturation)) => {
+                savepoint.rollback().await.map_err(|rollback_error| {
+                    VoomError::database(format!(
+                        "lease acquire rollback after capacity saturation: {rollback_error}"
+                    ))
+                })?;
+                Ok(LeaseAcquireOutcome::CapacityFull(saturation))
             }
             Err(error) => {
                 savepoint.rollback().await.map_err(|rollback_error| {
@@ -212,12 +273,20 @@ impl SqliteLeaseRepo {
         }
     }
 
+    pub async fn acquire_in_tx(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        input: NewLease,
+    ) -> Result<Lease, VoomError> {
+        self.try_acquire_in_tx(tx, input).await?.into_lease_result()
+    }
+
     async fn acquire_guarded(
         &self,
         tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
         input: &NewLease,
         ttl_secs: i64,
-    ) -> Result<Lease, VoomError> {
+    ) -> Result<LeaseAcquireOutcome, VoomError> {
         let ticket = SqliteTicketRepo::new(self.pool.clone())
             .get_in_tx(tx, input.ticket_id)
             .await?
@@ -256,7 +325,16 @@ impl SqliteLeaseRepo {
         let capacity = workers
             .operation_capacity_in_tx(tx, input.worker_id, &operation)
             .await?;
-        require_operation_capacity(input.worker_id, &operation, capacity)?;
+        if !capacity.has_capacity() {
+            return Ok(LeaseAcquireOutcome::CapacityFull(
+                WorkerCapacitySaturation {
+                    worker_id: input.worker_id,
+                    operation,
+                    active_leases: capacity.active_leases,
+                    max_parallel: capacity.max_parallel,
+                },
+            ));
+        }
 
         let expires = input.now + input.ttl;
         let expires_str = iso8601(expires)?;
@@ -275,9 +353,10 @@ impl SqliteLeaseRepo {
         .execute(&mut **tx)
         .await
         .map_err(|e| VoomError::database_context("leases insert", e))?;
-        get_lease_in_tx(tx, LeaseId(u64_from_i64(res2.last_insert_rowid())))
+        let lease = get_lease_in_tx(tx, LeaseId(u64_from_i64(res2.last_insert_rowid())))
             .await?
-            .ok_or_else(|| VoomError::Internal("acquire: post-insert get vanished".to_owned()))
+            .ok_or_else(|| VoomError::Internal("acquire: post-insert get vanished".to_owned()))?;
+        Ok(LeaseAcquireOutcome::Acquired(lease))
     }
 
     pub async fn acquire(&self, input: NewLease) -> Result<Lease, VoomError> {
@@ -1046,21 +1125,6 @@ fn require_operation_eligibility(
     }
     Err(VoomError::Internal(format!(
         "worker {worker_id} failed eligibility for {operation} without a rejection reason"
-    )))
-}
-
-fn require_operation_capacity(
-    worker_id: WorkerId,
-    operation: &TicketOperation,
-    capacity: WorkerOperationCapacity,
-) -> Result<(), VoomError> {
-    if capacity.has_capacity() {
-        return Ok(());
-    }
-    Err(VoomError::NoEligibleWorker(format!(
-        "acquire rejected: worker {worker_id} capacity full for {operation} \
-         (active {}, limit {})",
-        capacity.active_leases, capacity.max_parallel
     )))
 }
 
