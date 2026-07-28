@@ -120,7 +120,7 @@ fn wait_until_deadline(child: &mut Child, timeout: Duration) -> io::Result<(Exit
 fn kill_process_group(child: &mut Child) -> io::Result<()> {
     let process_group = format!("-{}", child.id());
     let status = Command::new("/bin/kill")
-        .args(["-KILL", &process_group])
+        .args(["-KILL", "--", &process_group])
         .status()?;
     if status.success() {
         return Ok(());
