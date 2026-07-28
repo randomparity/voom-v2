@@ -155,6 +155,62 @@ pub fn execute_audio(media: &ScenarioMedia) -> io::Result<()> {
     Ok(())
 }
 
+pub fn execute_control_flow(media: &ScenarioMedia) -> io::Result<()> {
+    let mut run = ScenarioRun::start(&media.root)?;
+    let scan = run.scan(&media.library)?;
+    require(scan["data"]["summary"]["ingested"] == 3, "F1 scan ingested")?;
+    require(scan["data"]["summary"]["failed"] == 0, "F1 scan failures")?;
+    let fail_version_id = scanned_version_id(&scan, media.file("f1c")?)?;
+    let modify_version_id = scanned_version_id(&scan, media.file("f1a")?)?;
+    let version_id = run.create_policy(
+        "published-grammar-control-flow",
+        "published-grammar-control-flow.voom",
+    )?;
+    let input_id = run.create_input("published-grammar-control-flow-input", 3)?;
+    let preview = run.preview(version_id, input_id)?;
+    assert_control_flow_preview(&preview)?;
+    let staging = media.root.join("stage");
+    let output = media.root.join("output");
+    let sentinel = staging
+        .join(".committed")
+        .join("remux")
+        .join(format!("v{fail_version_id}"))
+        .join("fail.remux.mkv");
+    std::fs::create_dir_all(
+        sentinel
+            .parent()
+            .ok_or_else(|| io::Error::other("F1 sentinel has no parent"))?,
+    )?;
+    let sentinel_bytes = b"published grammar F1 sentinel\n";
+    std::fs::write(&sentinel, sentinel_bytes)?;
+    let execute = run.execute_error(version_id, input_id, &staging, &output)?;
+    require(
+        execute["error"]["code"] == "CONFIG_INVALID",
+        format!("F1 execution error: {execute}"),
+    )?;
+    require(
+        std::fs::read(&sentinel)? == sentinel_bytes,
+        "F1 sentinel bytes changed",
+    )?;
+    assert_control_flow_execute(&execute)?;
+    let job_id = number(&execute["data"]["summary"]["job_id"], "F1 job id")?;
+    let stored = run.ok(
+        &["compliance", "report", "--job-id", &job_id.to_string()],
+        "compliance",
+        "F1 stored report",
+    )?;
+    assert_stored_matches(&execute, &stored)?;
+    assert_control_flow_inspections(
+        &run,
+        &execute,
+        job_id,
+        fail_version_id,
+        modify_version_id,
+        &sentinel,
+    )?;
+    run.shutdown()
+}
+
 impl ScenarioRun {
     fn start(root: &Path) -> io::Result<Self> {
         let db = NamedTempFile::new_in(root)?;
@@ -268,6 +324,35 @@ impl ScenarioRun {
         })
     }
 
+    fn execute_error(
+        &self,
+        version_id: u64,
+        input_id: u64,
+        staging: &Path,
+        output: &Path,
+    ) -> io::Result<Value> {
+        let version_id = version_id.to_string();
+        let input_id = input_id.to_string();
+        let staging = staging.display().to_string();
+        let output = output.display().to_string();
+        let output = run_cli(
+            &self.url,
+            &[
+                "compliance",
+                "execute",
+                "--policy-version-id",
+                &version_id,
+                "--input-set-id",
+                &input_id,
+                "--staging-root",
+                &staging,
+                "--output-dir",
+                &output,
+            ],
+        )?;
+        assert_error_envelope(&output, "compliance", "F1 compliance execute")
+    }
+
     fn ok(&self, args: &[&str], command: &str, what: &str) -> io::Result<Value> {
         let output = run_cli(&self.url, args)?;
         assert_ok_envelope(&output, command, what)
@@ -302,6 +387,265 @@ impl ScenarioRun {
         .collect::<Vec<_>>()
         .join("\n")
     }
+}
+
+fn assert_control_flow_preview(preview: &Value) -> io::Result<()> {
+    let nodes = array(&preview["data"]["plan"]["nodes"], "F1 preview nodes")?;
+    let phases = nodes
+        .iter()
+        .filter_map(|node| node["phase_name"].as_str())
+        .collect::<Vec<_>>();
+    require(
+        phases
+            == [
+                "inspect",
+                "inspect",
+                "inspect",
+                "normalize",
+                "normalize",
+                "normalize",
+                "organize",
+                "organize",
+                "organize",
+                "verify",
+                "verify",
+                "verify",
+            ]
+            && preview["data"]["plan"]["summary"]["executable_node_count"] == 5
+            && preview["data"]["plan"]["summary"]["no_op_node_count"] == 1
+            && preview["data"]["plan"]["summary"]["blocked_node_count"] == 6,
+        format!("F1 preview shape: {preview}"),
+    )?;
+    let diagnostics = array(&preview["data"]["plan"]["diagnostics"], "F1 diagnostics")?;
+    require(
+        diagnostics.len() == 6
+            && diagnostics
+                .iter()
+                .all(|item| item["code"] == "insufficient_snapshot_facts")
+            && diagnostics[..3]
+                .iter()
+                .all(|item| item["phase_name"] == "normalize")
+            && diagnostics[3..]
+                .iter()
+                .all(|item| item["phase_name"] == "organize"),
+        format!("F1 expected unresolved gate diagnostics: {diagnostics:?}"),
+    )
+}
+
+fn assert_control_flow_execute(execute: &Value) -> io::Result<()> {
+    require(
+        execute["data"]["summary"]["ticket_count"] == 5
+            && execute["data"]["summary"]["failure_count"] == 1
+            && execute["data"]["summary"]["progress"]["completed"] == 2
+            && execute["data"]["summary"]["progress"]["failed"] == 1,
+        format!("F1 summary: {execute}"),
+    )?;
+    let phases = array(&execute["data"]["phases"], "F1 phases")?;
+    let outcomes = phases
+        .iter()
+        .map(|phase| {
+            (
+                phase["phase_name"].as_str().unwrap_or_default(),
+                phase["outcome"].as_str().unwrap_or_default(),
+            )
+        })
+        .collect::<Vec<_>>();
+    require(
+        outcomes
+            == [
+                ("inspect", "partially-committed"),
+                ("normalize", "partially-committed"),
+                ("organize", "skipped"),
+                ("verify", "completed"),
+            ],
+        format!("F1 phase outcomes: {outcomes:?}"),
+    )?;
+    let rows = array(&execute["data"]["file_phases"], "F1 file phases")?;
+    let outcomes = rows
+        .iter()
+        .map(|row| {
+            (
+                row["phase_ordinal"].as_u64().unwrap_or(u64::MAX),
+                row["branch_id"].as_str().unwrap_or_default(),
+                row["outcome"].as_str().unwrap_or_default(),
+            )
+        })
+        .collect::<Vec<_>>();
+    require(
+        outcomes
+            == [
+                (0, "already-normalized", "skipped"),
+                (0, "fail", "blocked"),
+                (0, "modify", "committed"),
+                (1, "already-normalized", "skipped"),
+                (1, "modify", "committed"),
+                (2, "already-normalized", "skipped"),
+                (2, "modify", "skipped"),
+                (3, "already-normalized", "verified"),
+                (3, "modify", "verified"),
+            ],
+        format!("F1 file outcomes: {outcomes:?}"),
+    )?;
+    let normalize_version = rows
+        .iter()
+        .find(|row| row["phase_ordinal"] == 1 && row["branch_id"] == "modify")
+        .and_then(|row| row["produced_file_version_id"].as_u64())
+        .ok_or_else(|| io::Error::other("F1 missing normalize result version"))?;
+    let organize_checks = array(&phases[2]["report"]["checks"], "F1 organize gate checks")?;
+    require(
+        organize_checks.len() == 1
+            && organize_checks[0]["target"]["id"] == normalize_version
+            && organize_checks[0]["check_status"] == "compliant",
+        format!("F1 modified gate did not select only the changed branch: {organize_checks:?}"),
+    )?;
+    let evidence = array(
+        &execute["data"]["artifact_verifications"],
+        "F1 verification evidence",
+    )?;
+    require(
+        evidence.len() == 2
+            && evidence.iter().all(|row| {
+                row["status"] == "succeeded"
+                    && row["expected_checksum"] == row["observed_checksum"]
+                    && row["expected_size_bytes"] == row["observed_size_bytes"]
+            }),
+        format!("F1 verification evidence: {evidence:?}"),
+    )
+}
+
+fn assert_control_flow_inspections(
+    run: &ScenarioRun,
+    execute: &Value,
+    job_id: u64,
+    fail_version_id: u64,
+    modify_version_id: u64,
+    sentinel: &Path,
+) -> io::Result<()> {
+    let job = run.ok(
+        &["job", "show", "--job-id", &job_id.to_string()],
+        "job",
+        "F1 job",
+    )?;
+    require(
+        job["data"]["job"]["state"] == "failed",
+        format!("F1 durable job: {job}"),
+    )?;
+    let tickets = run.ok(&["ticket", "list"], "ticket", "F1 tickets")?;
+    let tickets = array(&tickets["data"]["tickets"], "F1 tickets")?
+        .iter()
+        .filter(|ticket| ticket["job_id"] == job_id)
+        .collect::<Vec<_>>();
+    require(
+        tickets.len() == 5
+            && tickets
+                .iter()
+                .filter(|ticket| ticket["state"] == "failed")
+                .count()
+                == 1
+            && tickets
+                .iter()
+                .filter(|ticket| ticket["state"] == "succeeded")
+                .count()
+                == 4,
+        format!("F1 durable tickets: {tickets:?}"),
+    )?;
+    assert_control_flow_failure_event(run, fail_version_id, sentinel)?;
+    assert_control_flow_success_events(run, execute, modify_version_id)?;
+    let verification_events = run.ok(
+        &["event", "list", "--kind", "artifact.verification_succeeded"],
+        "event",
+        "F1 verification events",
+    )?;
+    let expected_ids = array(
+        &execute["data"]["artifact_verifications"],
+        "F1 verification rows",
+    )?
+    .iter()
+    .map(|row| row["verification_id"].to_string())
+    .collect::<BTreeSet<_>>();
+    let actual_ids = array(
+        &verification_events["data"]["events"],
+        "F1 verification events",
+    )?
+    .iter()
+    .map(|event| event["payload"]["verification_id"].to_string())
+    .collect::<BTreeSet<_>>();
+    require(
+        expected_ids.is_subset(&actual_ids) && actual_ids.len() == 4,
+        format!("F1 verification events: {verification_events}"),
+    )
+}
+
+fn assert_control_flow_failure_event(
+    run: &ScenarioRun,
+    fail_version_id: u64,
+    sentinel: &Path,
+) -> io::Result<()> {
+    let events = run.ok(
+        &["event", "list", "--kind", "artifact.remux_failed"],
+        "event",
+        "F1 remux failure",
+    )?;
+    let events = array(&events["data"]["events"], "F1 remux failure")?;
+    require(
+        events.len() == 1
+            && events[0]["subject_id"] == fail_version_id
+            && events[0]["payload"]["source_file_version_id"] == fail_version_id
+            && events[0]["payload"]["artifact_handle_id"].is_null()
+            && events[0]["payload"]["artifact_location_id"].is_null()
+            && events[0]["payload"]["error_code"] == "CONFIG_INVALID"
+            && events[0]["payload"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains(&sentinel.display().to_string())),
+        format!("F1 durable failure event: {events:?}"),
+    )
+}
+
+fn assert_control_flow_success_events(
+    run: &ScenarioRun,
+    execute: &Value,
+    modify_version_id: u64,
+) -> io::Result<()> {
+    let rows = array(&execute["data"]["file_phases"], "F1 lineage rows")?;
+    let inspect_version = rows
+        .iter()
+        .find(|row| row["phase_ordinal"] == 0 && row["branch_id"] == "modify")
+        .and_then(|row| row["produced_file_version_id"].as_u64())
+        .ok_or_else(|| io::Error::other("F1 missing inspect result version"))?;
+    let normalize_version = rows
+        .iter()
+        .find(|row| row["phase_ordinal"] == 1 && row["branch_id"] == "modify")
+        .and_then(|row| row["produced_file_version_id"].as_u64())
+        .ok_or_else(|| io::Error::other("F1 missing normalize result version"))?;
+    require(
+        modify_version_id != inspect_version && inspect_version != normalize_version,
+        format!(
+            "F1 version lineage did not advance: {modify_version_id} -> {inspect_version} -> {normalize_version}"
+        ),
+    )?;
+    for (kind, source_version) in [
+        ("artifact.remux_succeeded", modify_version_id),
+        ("artifact.transcode_succeeded", inspect_version),
+    ] {
+        let events = run.ok(
+            &["event", "list", "--kind", kind],
+            "event",
+            "F1 success events",
+        )?;
+        let events = array(&events["data"]["events"], "F1 success events")?;
+        require(
+            events.len() == 1
+                && events[0]["payload"]["source_file_version_id"] == source_version
+                && events[0]["payload"]["artifact_handle_id"]
+                    .as_u64()
+                    .is_some()
+                && events[0]["payload"]["artifact_location_id"]
+                    .as_u64()
+                    .is_some(),
+            format!("F1 {kind}: {events:?}"),
+        )?;
+    }
+    Ok(())
 }
 
 fn assert_core_preview(preview: &Value) -> io::Result<()> {
@@ -970,6 +1314,27 @@ fn assert_ok_envelope(output: &BoundedOutput, command: &str, what: &str) -> io::
     Ok(json)
 }
 
+fn assert_error_envelope(output: &BoundedOutput, command: &str, what: &str) -> io::Result<Value> {
+    if output.timed_out || output.status.code() != Some(2) {
+        return Err(io::Error::other(output.diagnostics(what)));
+    }
+    let json: Value = serde_json::from_slice(&output.stdout).map_err(|error| {
+        io::Error::other(format!(
+            "{what} stdout is not one JSON envelope: {error}; stdout={}",
+            String::from_utf8_lossy(&output.stdout)
+        ))
+    })?;
+    require(
+        json["command"] == command && json["status"] == "error",
+        format!("{what} envelope: {json}"),
+    )?;
+    require(
+        json["warnings"].as_array().is_some_and(Vec::is_empty),
+        format!("{what} envelope warnings: {json}"),
+    )?;
+    Ok(json)
+}
+
 fn assert_retired(envelope: &Value, worker_id: u64, kind: &str) -> io::Result<()> {
     require(
         envelope["command"] == "worker"
@@ -1018,6 +1383,15 @@ fn number(value: &Value, what: &str) -> io::Result<u64> {
     value
         .as_u64()
         .ok_or_else(|| io::Error::other(format!("{what} is not a number: {value}")))
+}
+
+fn scanned_version_id(scan: &Value, path: &Path) -> io::Result<u64> {
+    let path = path.display().to_string();
+    let file = array(&scan["data"]["files"], "scan files")?
+        .iter()
+        .find(|file| file["path"] == path)
+        .ok_or_else(|| io::Error::other(format!("scan did not report {path}: {scan}")))?;
+    number(&file["file_version_id"], "scanned file version id")
 }
 
 fn require(condition: bool, message: impl std::fmt::Display) -> io::Result<()> {

@@ -24,4 +24,5 @@ fn published_grammar_corpus_is_executable() {
     published_grammar_execution::execute_core(&corpus.core).unwrap();
     published_grammar_execution::execute_tracks(&corpus.tracks).unwrap();
     published_grammar_execution::execute_audio(&corpus.audio).unwrap();
+    published_grammar_execution::execute_control_flow(&corpus.flow).unwrap();
 }

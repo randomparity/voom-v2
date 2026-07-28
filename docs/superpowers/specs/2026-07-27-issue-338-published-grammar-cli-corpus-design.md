@@ -256,8 +256,9 @@ second. This separates a bad fixture from an execution regression.
   decisions with no unexpected blocked/extra nodes;
 - execute exits with the expected policy-execution failure envelope and partial
   data, not an unstructured process failure;
-- F1a commits inspect and normalize, enters organize through `modified`, and
-  records verification;
+- F1a commits inspect and normalize, enters organize through `modified`,
+  records its already-satisfied track rule as a no-op, and records
+  verification;
 - F1b records inspect/normalize completion without mutation and does not enter
   organize because `modified` is false;
 - F1c records the deterministic existing-target failure, dispatches no
