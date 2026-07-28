@@ -98,6 +98,21 @@ impl ValidatedPolicyInputSetDraft {
         Ok(Self(input))
     }
 
+    /// Validate an imported, scan-derived input with no eligible media.
+    ///
+    /// This constructor is the explicit exception to the generic requirement
+    /// for at least one snapshot or bundle target.
+    ///
+    /// # Errors
+    /// Returns a policy-domain validation error unless the draft has the exact
+    /// empty imported shape and passes the shared aggregate validation.
+    pub fn new_empty_scan(
+        input: PolicyInputSetDraft,
+    ) -> Result<Self, PolicyInputSetValidationError> {
+        validate_empty_scan_input(&input)?;
+        Ok(Self(input))
+    }
+
     #[must_use]
     pub const fn as_draft(&self) -> &PolicyInputSetDraft {
         &self.0
@@ -236,6 +251,7 @@ pub enum PolicyInputSetValidationError {
     },
     DuplicateFixtureLabel(String),
     MissingSnapshotOrBundleTarget,
+    InvalidEmptyScanInput,
     InvalidSyntheticKey {
         key: String,
     },
@@ -299,6 +315,45 @@ impl PolicyInputSetValidationError {
 pub fn validate_input_set(
     input: &PolicyInputSetDraft,
 ) -> Result<(), PolicyInputSetValidationError> {
+    validate_input_header(input)?;
+
+    if input.media_snapshots.is_empty() && input.bundle_targets.is_empty() {
+        return Err(PolicyInputSetValidationError::MissingSnapshotOrBundleTarget);
+    }
+
+    let synthetic_targets = validate_synthetic_declarations(&input.synthetic_targets)?;
+    validate_child_ordinals(input)?;
+    validate_child_targets(input, &synthetic_targets)?;
+    validate_evidence(&input.identity_evidence)?;
+    validate_quality_profiles(&input.quality_profiles)?;
+    validate_aggregate_budget(input)?;
+
+    Ok(())
+}
+
+/// Validate the exact imported aggregate shape produced by an empty scan.
+///
+/// # Errors
+/// Returns a policy-domain validation error for non-imported, member-bearing,
+/// or otherwise invalid drafts.
+pub fn validate_empty_scan_input(
+    input: &PolicyInputSetDraft,
+) -> Result<(), PolicyInputSetValidationError> {
+    validate_input_header(input)?;
+    if input.source_kind != PolicyInputSourceKind::Imported
+        || !input.synthetic_targets.is_empty()
+        || !input.media_snapshots.is_empty()
+        || !input.identity_evidence.is_empty()
+        || !input.bundle_targets.is_empty()
+        || !input.quality_profiles.is_empty()
+        || !input.issues.is_empty()
+    {
+        return Err(PolicyInputSetValidationError::InvalidEmptyScanInput);
+    }
+    validate_aggregate_budget(input)
+}
+
+fn validate_input_header(input: &PolicyInputSetDraft) -> Result<(), PolicyInputSetValidationError> {
     if input.slug.trim().is_empty() {
         return Err(PolicyInputSetValidationError::EmptySlug);
     }
@@ -313,17 +368,6 @@ pub fn validate_input_set(
     }
 
     validate_fixture_labels(&input.fixture_labels)?;
-
-    if input.media_snapshots.is_empty() && input.bundle_targets.is_empty() {
-        return Err(PolicyInputSetValidationError::MissingSnapshotOrBundleTarget);
-    }
-
-    let synthetic_targets = validate_synthetic_declarations(&input.synthetic_targets)?;
-    validate_child_ordinals(input)?;
-    validate_child_targets(input, &synthetic_targets)?;
-    validate_evidence(&input.identity_evidence)?;
-    validate_quality_profiles(&input.quality_profiles)?;
-    validate_aggregate_budget(input)?;
 
     Ok(())
 }

@@ -11,7 +11,7 @@ use voom_store::repo::tickets::NewTicket;
 use voom_store::repo::workers::{NewCapability, NewGrant, NewWorker, WorkerKind};
 use voom_test_support::worker::cargo_bin_or_build;
 
-use crate::cases::policy::policy_inputs::PolicyInputFromScanInput;
+use crate::cases::policy::policy_inputs::{PolicyInputFromScanInput, WholeScanInput};
 use crate::cases::{count, cp, transcodable_input};
 use crate::workflow::WorkerRuntimeRegistry;
 use crate::workflow::execution::executor::WorkflowExecutorOptions;
@@ -303,6 +303,76 @@ async fn compliance_report_is_read_only() {
 
     assert_eq!(data.report.summary.status, voom_plan::ReportStatus::Mixed);
     assert_eq!(before, table_counts(&cp).await);
+}
+
+#[tokio::test]
+async fn empty_scan_plans_reports_and_executes_as_durable_zero_work() {
+    let (cp, _tmp) = cp().await;
+    let source = "policy \"empty tools\" { \
+                  metadata { requires_tools: [mkvtoolnix] } \
+                  phase normalize { container mkv } \
+                  }";
+    let policy = cp
+        .create_policy_document("empty-tools", source)
+        .await
+        .unwrap();
+    let input = cp
+        .create_policy_input_set_from_whole_scan(WholeScanInput {
+            slug: "empty-scan-execution".to_owned(),
+        })
+        .await
+        .unwrap();
+
+    let plan = cp
+        .plan_accepted_policy_version_with_input_set(policy.version.id, input.input_set_id)
+        .await
+        .unwrap();
+    assert_eq!(plan.summary, voom_plan::PlanSummary::default());
+    assert!(plan.nodes.is_empty());
+
+    let preview = cp
+        .generate_compliance_report(policy.version.id, input.input_set_id)
+        .await
+        .unwrap();
+    assert_eq!(preview.report.summary.total_check_count, 0);
+    assert_eq!(preview.report.summary.executable_check_count, 0);
+    assert!(preview.report.checks.is_empty());
+
+    let executed = cp
+        .execute_compliance_policy(policy.version.id, input.input_set_id)
+        .await
+        .unwrap();
+    assert_eq!(executed.summary.branch_count, 0);
+    assert_eq!(executed.summary.ticket_count, 0);
+    assert_eq!(executed.summary.dispatch_count, 0);
+    assert_eq!(executed.summary.failure_count, 0);
+    assert!(executed.phases.is_empty());
+    assert!(executed.file_phases.is_empty());
+
+    let report = cp
+        .read_compliance_run_report(voom_core::JobId(executed.summary.job_id))
+        .await
+        .unwrap();
+    assert_eq!(report.summary.ticket_count, 0);
+    assert_eq!(report.summary.progress.total, 0);
+    assert!(report.phases.is_empty());
+    assert!(report.file_phases.is_empty());
+
+    let durable: (i64, i64, i64, i64, i64) = sqlx::query_as(
+        "SELECT \
+         (SELECT COUNT(*) FROM jobs), \
+         (SELECT COUNT(*) FROM workflow_summaries), \
+         (SELECT COUNT(*) FROM workflow_phase_summaries), \
+         (SELECT COUNT(*) FROM tickets), \
+         (SELECT COUNT(*) FROM leases)",
+    )
+    .fetch_one(cp.pool_for_test())
+    .await
+    .unwrap();
+    assert_eq!(durable, (1, 1, 0, 0, 0));
+    assert_eq!(count(&cp, EventKind::JobOpened).await, 1);
+    assert_eq!(count(&cp, EventKind::JobSucceeded).await, 1);
+    assert_eq!(count(&cp, EventKind::TicketCreated).await, 0);
 }
 
 #[tokio::test]

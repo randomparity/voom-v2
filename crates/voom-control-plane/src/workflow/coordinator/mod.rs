@@ -936,11 +936,15 @@ impl ControlPlane {
             .await?;
         let mut policy = self.compiled_policy_for_version(&inputs.version).await?;
         reject_unpublished_on_error(&policy)?;
-        self.preflight_policy_tools(&mut policy, runtimes).await?;
-        self.ensure_policy_verifier(&policy).await?;
         let stored = self
             .resolve_stored_planning_input(&policy, inputs.input)
             .await?;
+        if stored.files.is_empty() {
+            crate::cases::policy::tool_preflight::normalize_policy_tool_requirements(&mut policy)?;
+        } else {
+            self.preflight_policy_tools(&mut policy, runtimes).await?;
+            self.ensure_policy_verifier(&policy).await?;
+        }
         let context = PlanningContext {
             policy_document_id: Some(inputs.version.policy_document_id),
             policy_version_id: Some(policy_version_id),
