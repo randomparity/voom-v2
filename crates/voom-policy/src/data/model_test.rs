@@ -1,8 +1,8 @@
 use super::{
     BundleTargetInput, BundleTargetState, IdentityEvidenceInput, IssueInput, IssueInputState,
-    MediaSnapshotInput, PolicyInputSetDraft, PolicyInputSourceKind, PolicySyntheticTarget,
-    QualityProfileSelection, TargetKind, TargetRef, ValidatedPolicyInputSetDraft,
-    validate_input_set,
+    MediaSnapshotInput, POLICY_INPUT_MAX_MEMBERS, POLICY_INPUT_MAX_SERIALIZED_BYTES,
+    PolicyInputSetDraft, PolicyInputSourceKind, PolicySyntheticTarget, QualityProfileSelection,
+    TargetKind, TargetRef, ValidatedPolicyInputSetDraft, validate_input_set,
 };
 
 fn minimal_input_set() -> PolicyInputSetDraft {
@@ -45,6 +45,20 @@ fn minimal_input_set() -> PolicyInputSetDraft {
     }
 }
 
+fn input_with_member_count(member_count: usize) -> PolicyInputSetDraft {
+    let mut input = minimal_input_set();
+    let fixed_members = input.fixture_labels.len() + input.synthetic_targets.len();
+    let snapshot_count = member_count.checked_sub(fixed_members).unwrap();
+    let template = input.media_snapshots[0].clone();
+    input.media_snapshots = (0..snapshot_count)
+        .map(|ordinal| MediaSnapshotInput {
+            ordinal: u32::try_from(ordinal).unwrap(),
+            ..template.clone()
+        })
+        .collect();
+    input
+}
+
 #[test]
 fn valid_minimal_input_set_passes() {
     let input = minimal_input_set();
@@ -68,6 +82,49 @@ fn invalid_input_cannot_produce_validated_draft() {
     input.slug = " ".to_owned();
 
     assert!(ValidatedPolicyInputSetDraft::new(input).is_err());
+}
+
+#[test]
+fn aggregate_member_budget_accepts_boundary_and_rejects_one_over() {
+    let boundary = input_with_member_count(POLICY_INPUT_MAX_MEMBERS);
+    assert!(validate_input_set(&boundary).is_ok());
+
+    let over = input_with_member_count(POLICY_INPUT_MAX_MEMBERS + 1);
+    let err = validate_input_set(&over).unwrap_err();
+
+    assert_eq!(
+        err.message(),
+        format!(
+            "policy input aggregate has {} members; maximum is {}",
+            POLICY_INPUT_MAX_MEMBERS + 1,
+            POLICY_INPUT_MAX_MEMBERS
+        )
+    );
+}
+
+#[test]
+fn aggregate_serialized_budget_accepts_boundary_and_rejects_one_over() {
+    let mut input = minimal_input_set();
+    input.description = Some(String::new());
+    let base_size = serde_json::to_vec(&input).unwrap().len();
+    input.description = Some("x".repeat(POLICY_INPUT_MAX_SERIALIZED_BYTES - base_size));
+    assert_eq!(
+        serde_json::to_vec(&input).unwrap().len(),
+        POLICY_INPUT_MAX_SERIALIZED_BYTES
+    );
+    assert!(validate_input_set(&input).is_ok());
+
+    input.description.as_mut().unwrap().push('x');
+    let err = validate_input_set(&input).unwrap_err();
+
+    assert_eq!(
+        err.message(),
+        format!(
+            "policy input aggregate serializes to {} bytes; maximum is {}",
+            POLICY_INPUT_MAX_SERIALIZED_BYTES + 1,
+            POLICY_INPUT_MAX_SERIALIZED_BYTES
+        )
+    );
 }
 
 #[test]

@@ -1,9 +1,11 @@
 use super::*;
 
 use voom_policy::{
-    BundleTargetState, FixtureName, IssueInputState, TargetKind, TargetRef, load_fixture,
+    BundleTargetState, FixtureName, IssueInputState, POLICY_INPUT_MAX_MEMBERS, TargetKind,
+    TargetRef, ValidatedPolicyInputSetDraft, load_fixture,
 };
 
+use crate::repo::jobs::{NewJob, SqliteJobRepo};
 use crate::test_support::fresh_initialized_pool_at;
 
 async fn pool() -> (sqlx::SqlitePool, tempfile::NamedTempFile) {
@@ -14,6 +16,27 @@ async fn pool() -> (sqlx::SqlitePool, tempfile::NamedTempFile) {
 
 fn compliant_fixture() -> voom_policy::PolicyInputSetDraft {
     load_fixture(FixtureName::SyntheticCompliantBaseline).unwrap()
+}
+
+fn draft_with_member_count(member_count: usize) -> voom_policy::PolicyInputSetDraft {
+    let mut draft = compliant_fixture();
+    draft.slug = format!("writer-boundary-{member_count}");
+    draft.fixture_labels = vec![format!("writer_boundary_{member_count}")];
+    let fixed_members = draft.fixture_labels.len()
+        + draft.synthetic_targets.len()
+        + draft.identity_evidence.len()
+        + draft.bundle_targets.len()
+        + draft.quality_profiles.len()
+        + draft.issues.len();
+    let snapshot_count = member_count.checked_sub(fixed_members).unwrap();
+    let template = draft.media_snapshots[0].clone();
+    draft.media_snapshots = (0..snapshot_count)
+        .map(|ordinal| voom_policy::MediaSnapshotInput {
+            ordinal: u32::try_from(ordinal).unwrap(),
+            ..template.clone()
+        })
+        .collect();
+    draft
 }
 
 #[tokio::test]
@@ -142,6 +165,49 @@ async fn create_rolls_back_when_child_insert_fails() {
 
     assert_eq!(err.code(), "DB_UNREACHABLE");
     assert!(listed.is_empty());
+}
+
+#[tokio::test]
+async fn maximum_aggregate_commits_before_waiting_writer_times_out() {
+    let (pool, _tmp) = pool().await;
+    let repo = SqlitePolicyInputRepo::new(pool.clone());
+    let input =
+        ValidatedPolicyInputSetDraft::new(draft_with_member_count(POLICY_INPUT_MAX_MEMBERS))
+            .unwrap();
+    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await.unwrap();
+    let jobs = SqliteJobRepo::new(pool.clone());
+    let mut waiting_writer = tokio::spawn(async move {
+        jobs.create(NewJob {
+            kind: "writer-budget-contender".to_owned(),
+            priority: 1,
+            created_at: time::OffsetDateTime::UNIX_EPOCH,
+        })
+        .await
+    });
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(100), &mut waiting_writer)
+            .await
+            .is_err(),
+        "unrelated writer must wait behind the aggregate transaction"
+    );
+
+    let created = repo.create_input_set_in_tx(&mut tx, input).await.unwrap();
+    tx.commit().await.unwrap();
+    let job = tokio::time::timeout(std::time::Duration::from_secs(35), waiting_writer)
+        .await
+        .expect("unrelated writer must finish within SQLite busy timeout")
+        .unwrap()
+        .unwrap();
+
+    let persisted_member_count = created.fixture_labels.len()
+        + created.synthetic_targets.len()
+        + created.media_snapshots.len()
+        + created.identity_evidence.len()
+        + created.bundle_targets.len()
+        + created.quality_profiles.len()
+        + created.issues.len();
+    assert_eq!(persisted_member_count, POLICY_INPUT_MAX_MEMBERS);
+    assert_eq!(job.kind, "writer-budget-contender");
 }
 
 #[tokio::test]

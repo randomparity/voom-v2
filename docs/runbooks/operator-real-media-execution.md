@@ -145,6 +145,16 @@ Builds one input set covering every live **video** file-version; non-video /
 unprobeable files are skipped (the envelope reports `included_count` /
 `skipped_count`). Capture `input_set_id`.
 
+Policy-input creation accepts at most 10,000 aggregate members and 32 MiB of
+serialized draft data. An ordinary whole-scan input uses one member for its
+fixture label, leaving room for 9,999 video snapshots. An over-budget request
+fails with `POLICY_VALIDATION_ERROR` before any input-set rows are written.
+Split a larger or fact-heavy library into root-scoped inputs:
+
+```
+voom policy input create-from-scan --root <library_root_id> --slug lib1-root1
+```
+
 ### 6. Execute
 
 ```

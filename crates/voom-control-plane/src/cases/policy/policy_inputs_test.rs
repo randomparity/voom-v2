@@ -1,7 +1,9 @@
 use serde_json::json;
 use time::OffsetDateTime;
 use voom_core::{ErrorCode, FileVersionId, MediaSnapshotId, MediaWorkId, VoomError};
-use voom_policy::{FixtureName, PolicyInputSetDraft, TargetRef, load_fixture};
+use voom_policy::{
+    FixtureName, POLICY_INPUT_MAX_MEMBERS, PolicyInputSetDraft, TargetRef, load_fixture,
+};
 use voom_store::repo::events::EventFilter;
 use voom_store::repo::identity::{DiscoveredFile, FileLocationKind, IngestOutcome};
 use voom_store::repo::policy_inputs::PolicyInputTargetRef;
@@ -82,6 +84,27 @@ fn linked_draft(
         id: file_version_id,
     };
     draft.media_snapshots[0].existing_media_snapshot_id = Some(media_snapshot_id);
+    draft
+}
+
+fn draft_with_member_count(member_count: usize) -> PolicyInputSetDraft {
+    let mut draft = load_fixture(FixtureName::SyntheticCompliantBaseline).unwrap();
+    draft.slug = format!("member-budget-{member_count}");
+    draft.fixture_labels = vec![format!("member_budget_{member_count}")];
+    let fixed_members = draft.fixture_labels.len()
+        + draft.synthetic_targets.len()
+        + draft.identity_evidence.len()
+        + draft.bundle_targets.len()
+        + draft.quality_profiles.len()
+        + draft.issues.len();
+    let snapshot_count = member_count.checked_sub(fixed_members).unwrap();
+    let template = draft.media_snapshots[0].clone();
+    draft.media_snapshots = (0..snapshot_count)
+        .map(|ordinal| voom_policy::MediaSnapshotInput {
+            ordinal: u32::try_from(ordinal).unwrap(),
+            ..template.clone()
+        })
+        .collect();
     draft
 }
 
@@ -358,6 +381,33 @@ async fn create_policy_input_set_rejects_invalid_model() {
     let err = cp.create_policy_input_set(draft).await.unwrap_err();
 
     assert_eq!(err.code(), "POLICY_VALIDATION_ERROR");
+}
+
+#[tokio::test]
+async fn over_budget_input_fails_before_database_access_without_durable_state() {
+    let (cp, tmp) = cp().await;
+    let observer = observer_for(&tmp).await;
+    let before_events = event_count(&observer).await;
+    let draft = draft_with_member_count(POLICY_INPUT_MAX_MEMBERS + 1);
+
+    let err = cp.create_policy_input_set(draft).await.unwrap_err();
+
+    assert_eq!(err.code(), "POLICY_VALIDATION_ERROR");
+    assert_eq!(
+        err.to_string(),
+        format!(
+            "policy validation error: policy input aggregate has {} members; maximum is {}",
+            POLICY_INPUT_MAX_MEMBERS + 1,
+            POLICY_INPUT_MAX_MEMBERS
+        )
+    );
+    assert_rejected_without_policy_state(
+        &observer,
+        before_events,
+        &err,
+        ErrorCode::PolicyValidationError,
+    )
+    .await;
 }
 
 #[tokio::test]

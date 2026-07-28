@@ -57,8 +57,11 @@ SQLite's storage limits: they are an operational writer-latency contract.
 
 ### Validation and public error contract
 
-Budget validation runs after existing semantic validation and before any
-database transaction or provenance read. Existing invalid-draft error
+Budget validation runs after existing semantic validation. Generic and
+whole-scan drafts are validated before any database transaction or provenance
+read. The fixed one-snapshot builder constructs and validates its draft after
+reading that snapshot in a deferred transaction, but before any write; its
+fixed member count cannot approach either budget. Existing invalid-draft error
 precedence remains unchanged.
 
 Over-budget drafts return the existing `POLICY_VALIDATION_ERROR` code with one
@@ -109,8 +112,8 @@ rejection occurs earlier and therefore creates no root, child, or event rows.
 - **Measure only JSON-valued columns:** rejected. Large ordinary strings also
   consume writer time and database pages; complete-draft serialization is a
   clearer contract.
-- **Check after `BEGIN IMMEDIATE`:** rejected. An oversized request must not
-  reserve the writer while discovering that it cannot proceed.
+- **Check an unbounded draft after `BEGIN IMMEDIATE`:** rejected. An oversized
+  request must not reserve the writer while discovering that it cannot proceed.
 - **Chunk commits without construction state:** rejected. Readers could observe
   partial aggregates, and rollback would no longer remove the whole input set.
 - **Use only a wall-clock assertion:** rejected. Timing thresholds are flaky on

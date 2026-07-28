@@ -35,7 +35,8 @@ pub use diagnostic::{
 pub use fixtures::{FixtureName, load_fixture};
 pub use model::{
     BundleTargetInput, BundleTargetState, IdentityEvidenceInput, IssueInput, IssueInputState,
-    MediaSnapshotInput, PolicyInputSetDraft, PolicyInputSetValidationError, PolicyInputSourceKind,
+    MediaSnapshotInput, POLICY_INPUT_MAX_MEMBERS, POLICY_INPUT_MAX_SERIALIZED_BYTES,
+    PolicyInputSetDraft, PolicyInputSetValidationError, PolicyInputSourceKind,
     PolicySyntheticTarget, QualityProfileSelection, TargetKind, TargetRef,
     ValidatedPolicyInputSetDraft, validate_input_set,
 };
