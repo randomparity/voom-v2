@@ -227,41 +227,82 @@ pub fn unique_temp_sibling_path(final_path: impl AsRef<Path>) -> Result<PathBuf,
     Ok(parent.join(temp_name))
 }
 
-pub async fn copy_regular_file_checked(
+pub(crate) async fn copy_regular_file_with_expected(
     source: impl AsRef<Path>,
     destination: impl AsRef<Path>,
+    expected: &ArtifactFileFacts,
 ) -> Result<ArtifactFileFacts, VoomError> {
-    let source = observe_regular_file(source).await?;
+    let (source_path, mut source_file, source_metadata) = open_copy_source(source.as_ref()).await?;
     let destination = canonical_new_leaf_no_symlink(destination).await?;
-
-    if let Err(err) = copy_regular_file_contents(&source.path, &destination).await {
-        return match err {
-            CopyFileError::NotCreated(err) => Err(err),
-            CopyFileError::Created(err) => {
-                Err(remove_new_file_after_error(&destination, err).await)
-            }
-        };
-    }
-    if let Err(err) = fsync_file(&destination).await {
-        return Err(remove_new_file_after_error(&destination, err).await);
-    }
-
-    let copied = match observe_regular_file(&destination).await {
-        Ok(facts) => facts,
+    let copied = match copy_open_regular_file_with_hash(
+        &mut source_file,
+        &source_path,
+        &destination,
+    )
+    .await
+    {
+        Ok(copied) => copied,
+        Err(CopyFileError::NotCreated(err)) => return Err(err),
+        Err(CopyFileError::Created(err)) => {
+            return Err(remove_new_file_after_error(&destination, err).await);
+        }
+    };
+    let final_source_metadata = source_file.metadata().await.map_err(|err| {
+        VoomError::ArtifactUnavailable(format!(
+            "cannot inspect artifact path {} after copy: {err}",
+            source_path.display()
+        ))
+    });
+    let final_source_metadata = match final_source_metadata {
+        Ok(metadata) => metadata,
         Err(err) => return Err(remove_new_file_after_error(&destination, err).await),
     };
-    if !same_file_facts(&source, &copied) {
+    if metadata_changed(&source_metadata, &final_source_metadata) {
         return Err(remove_new_file_after_error(
             &destination,
             VoomError::ArtifactChecksumMismatch(format!(
-                "copied artifact facts do not match source: {}",
+                "artifact changed while copying it: {}",
+                source_path.display()
+            )),
+        )
+        .await);
+    }
+    if copied.size_bytes != expected.size_bytes || copied.content_hash != expected.content_hash {
+        return Err(remove_new_file_after_error(
+            &destination,
+            VoomError::ArtifactChecksumMismatch(format!(
+                "copied artifact facts do not match expected facts: {}",
+                source_path.display()
+            )),
+        )
+        .await);
+    }
+    if copied.destination_size_bytes != copied.size_bytes {
+        return Err(remove_new_file_after_error(
+            &destination,
+            VoomError::ArtifactChecksumMismatch(format!(
+                "copied artifact size does not match bytes written: {}",
                 destination.display()
             )),
         )
         .await);
     }
+    if let Err(err) = fsync_file(&destination).await {
+        return Err(remove_new_file_after_error(&destination, err).await);
+    }
 
-    Ok(copied)
+    #[cfg(unix)]
+    let local_file_key = Some(local_file_key(&final_source_metadata));
+    #[cfg(not(unix))]
+    let local_file_key = None;
+
+    Ok(ArtifactFileFacts {
+        path: source_path,
+        size_bytes: copied.size_bytes,
+        content_hash: copied.content_hash,
+        modified_at: final_source_metadata.modified().ok(),
+        local_file_key,
+    })
 }
 
 #[cfg(test)]
@@ -283,8 +324,7 @@ pub async fn promote_staged_add_only(
 ) -> Result<PromotionReport, VoomError> {
     let staging = staging.as_ref();
     let target = canonical_new_leaf_no_symlink(target).await?;
-    let staging_facts = require_expected_staging_facts(staging, expected).await?;
-    let temp_path = copy_to_unique_temp(staging, &target).await?;
+    let (temp_path, staging_facts) = copy_to_unique_temp(staging, &target, expected).await?;
     promote_staged_add_only_from_temp(staging_facts, &target, temp_path, expected, failpoint).await
 }
 
@@ -304,8 +344,7 @@ pub async fn promote_staged_add_only_with_temp(
             target.display()
         )));
     }
-    let staging_facts = require_expected_staging_facts(staging, expected).await?;
-    copy_regular_file_checked(staging, &temp_path).await?;
+    let staging_facts = copy_regular_file_with_expected(staging, &temp_path, expected).await?;
     promote_staged_add_only_from_temp(
         staging_facts,
         &target,
@@ -484,7 +523,11 @@ async fn promote_staged_add_only_from_temp(
     })
 }
 
-async fn copy_to_unique_temp(source: &Path, target: &Path) -> Result<PathBuf, VoomError> {
+async fn copy_to_unique_temp(
+    source: &Path,
+    target: &Path,
+    expected: &ArtifactFileFacts,
+) -> Result<(PathBuf, ArtifactFileFacts), VoomError> {
     for _ in 0..16 {
         let temp_path = unique_temp_sibling_path(target)?;
         match fs::symlink_metadata(&temp_path).await {
@@ -497,8 +540,8 @@ async fn copy_to_unique_temp(source: &Path, target: &Path) -> Result<PathBuf, Vo
                 )));
             }
         }
-        copy_regular_file_checked(source, &temp_path).await?;
-        return Ok(temp_path);
+        let source_facts = copy_regular_file_with_expected(source, &temp_path, expected).await?;
+        return Ok((temp_path, source_facts));
     }
 
     Err(VoomError::CommitFailure(format!(
@@ -513,14 +556,119 @@ enum CopyFileError {
     Created(VoomError),
 }
 
-async fn copy_regular_file_contents(
+#[derive(Debug)]
+struct CopiedStream {
+    size_bytes: u64,
+    content_hash: String,
+    destination_size_bytes: u64,
+}
+
+async fn open_copy_source(
     source: &Path,
+) -> Result<(PathBuf, fs::File, std::fs::Metadata), VoomError> {
+    let path_metadata = fs::symlink_metadata(source).await.map_err(|err| {
+        VoomError::ArtifactUnavailable(format!(
+            "cannot inspect artifact path {}: {err}",
+            source.display()
+        ))
+    })?;
+    if path_metadata.file_type().is_symlink() {
+        return Err(VoomError::ArtifactUnavailable(format!(
+            "artifact path must not be a symlink: {}",
+            source.display()
+        )));
+    }
+    if !path_metadata.is_file() {
+        return Err(VoomError::ArtifactUnavailable(format!(
+            "artifact path must be a regular file: {}",
+            source.display()
+        )));
+    }
+    let source = fs::canonicalize(source).await.map_err(|err| {
+        VoomError::ArtifactUnavailable(format!(
+            "cannot canonicalize artifact path {}: {err}",
+            source.display()
+        ))
+    })?;
+    let file = open_regular_file_no_follow(&source).await?;
+    let metadata = file.metadata().await.map_err(|err| {
+        VoomError::ArtifactUnavailable(format!(
+            "cannot inspect artifact path {}: {err}",
+            source.display()
+        ))
+    })?;
+    if !metadata.is_file() {
+        return Err(VoomError::ArtifactUnavailable(format!(
+            "artifact path must be a regular file: {}",
+            source.display()
+        )));
+    }
+    Ok((source, file, metadata))
+}
+
+async fn copy_open_regular_file_with_hash(
+    source_file: &mut fs::File,
+    source_path: &Path,
     destination: &Path,
-) -> Result<(), CopyFileError> {
-    let mut source_file = open_regular_file_no_follow(source)
-        .await
-        .map_err(CopyFileError::NotCreated)?;
-    let mut destination_file = fs::OpenOptions::new()
+) -> Result<CopiedStream, CopyFileError> {
+    let mut destination_file = create_new_destination(destination).await?;
+    let mut hasher = blake3::Hasher::new();
+    let mut size_bytes = 0_u64;
+    let mut buffer = vec![0; 64 * 1024];
+    loop {
+        let read = source_file.read(&mut buffer).await.map_err(|err| {
+            CopyFileError::Created(VoomError::ArtifactUnavailable(format!(
+                "cannot read artifact path {} during copy: {err}",
+                source_path.display()
+            )))
+        })?;
+        if read == 0 {
+            break;
+        }
+        destination_file
+            .write_all(&buffer[..read])
+            .await
+            .map_err(|err| {
+                CopyFileError::Created(VoomError::CommitFailure(format!(
+                    "cannot copy artifact {} to {}: {err}",
+                    source_path.display(),
+                    destination.display()
+                )))
+            })?;
+        hasher.update(&buffer[..read]);
+        size_bytes = size_bytes
+            .checked_add(u64::try_from(read).map_err(|err| {
+                CopyFileError::Created(VoomError::Internal(format!(
+                    "artifact copy read count exceeds u64: {err}"
+                )))
+            })?)
+            .ok_or_else(|| {
+                CopyFileError::Created(VoomError::Internal(
+                    "artifact copy byte count overflowed u64".to_owned(),
+                ))
+            })?;
+    }
+    destination_file.flush().await.map_err(|err| {
+        CopyFileError::Created(VoomError::CommitFailure(format!(
+            "cannot flush artifact destination {}: {err}",
+            destination.display()
+        )))
+    })?;
+    let destination_metadata = destination_file.metadata().await.map_err(|err| {
+        CopyFileError::Created(VoomError::CommitFailure(format!(
+            "cannot inspect artifact destination {}: {err}",
+            destination.display()
+        )))
+    })?;
+    Ok(CopiedStream {
+        size_bytes,
+        content_hash: format!("blake3:{}", hasher.finalize().to_hex()),
+        destination_size_bytes: destination_metadata.len(),
+    })
+}
+
+async fn create_new_destination(destination: &Path) -> Result<fs::File, CopyFileError> {
+    fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(destination)
@@ -536,25 +684,7 @@ async fn copy_regular_file_contents(
                 "cannot create artifact destination {}: {err}",
                 destination.display()
             ))),
-        })?;
-
-    tokio::io::copy(&mut source_file, &mut destination_file)
-        .await
-        .map_err(|err| {
-            CopyFileError::Created(VoomError::ArtifactUnavailable(format!(
-                "cannot copy artifact {} to {}: {err}",
-                source.display(),
-                destination.display()
-            )))
-        })?;
-    destination_file.flush().await.map_err(|err| {
-        CopyFileError::Created(VoomError::CommitFailure(format!(
-            "cannot flush artifact destination {}: {err}",
-            destination.display()
-        )))
-    })?;
-    drop(destination_file);
-    Ok(())
+        })
 }
 
 async fn install_temp_no_replace(temp_path: &Path, target: &Path) -> Result<(), VoomError> {
