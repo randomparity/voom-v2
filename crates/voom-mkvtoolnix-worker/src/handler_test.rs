@@ -574,16 +574,12 @@ fn output_validation_rejects_ambiguous_attachment_identity() {
         }]
     }))
     .unwrap();
-    let expected = input_mapping.track_for_provider_index(0).unwrap();
-    let output = output_mapping.track_for_provider_index(0).unwrap();
-
     let err = validate_output_track_identity(
         &input_mapping,
+        &output_mapping,
         &[&attachment_ref("stream-0", 0)],
         &attachment_ref("stream-0", 0),
         0,
-        expected,
-        output,
     )
     .unwrap_err();
 

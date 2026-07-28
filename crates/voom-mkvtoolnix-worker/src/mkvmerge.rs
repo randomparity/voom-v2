@@ -481,24 +481,32 @@ fn extend_default_flags(
     selection: &RemuxSelection,
     mapping: &MkvmergeTrackMapping,
 ) -> Result<(), MkvtoolnixError> {
-    let defaults = selection
-        .default_streams
-        .iter()
-        .map(|stream| stream.provider_stream_index)
-        .collect::<BTreeSet<_>>();
-    for stream in &selection.keep_streams {
-        let track = mapping
-            .track_for_provider_index(stream.provider_stream_index)
+    let mut seen = BTreeSet::new();
+    for stream in &selection.default_streams {
+        let id = mapping
+            .mkvmerge_track_id_for_provider_index(stream.provider_stream_index)
             .ok_or_else(|| {
                 MkvtoolnixError::ConfigInvalid(format!(
                     "missing mkvmerge track id for provider stream index {}",
                     stream.provider_stream_index
                 ))
             })?;
-        if track.kind != MkvmergeTrackKind::Attachment {
-            let value = u8::from(defaults.contains(&stream.provider_stream_index));
+        seen.insert(id);
+        args.push("--default-track-flag".to_owned());
+        args.push(format!("{id}:1"));
+    }
+    for stream in &selection.clear_default_streams {
+        let id = mapping
+            .mkvmerge_track_id_for_provider_index(stream.provider_stream_index)
+            .ok_or_else(|| {
+                MkvtoolnixError::ConfigInvalid(format!(
+                    "missing mkvmerge track id for provider stream index {}",
+                    stream.provider_stream_index
+                ))
+            })?;
+        if !seen.contains(&id) {
             args.push("--default-track-flag".to_owned());
-            args.push(format!("{}:{value}", track.id));
+            args.push(format!("{id}:0"));
         }
     }
     Ok(())

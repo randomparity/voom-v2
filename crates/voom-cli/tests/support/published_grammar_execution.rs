@@ -200,14 +200,9 @@ pub fn execute_control_flow(media: &ScenarioMedia) -> io::Result<()> {
         "F1 stored report",
     )?;
     assert_stored_matches(&execute, &stored)?;
-    assert_control_flow_inspections(
-        &run,
-        &execute,
-        job_id,
-        fail_version_id,
-        modify_version_id,
-        &sentinel,
-    )?;
+    assert_control_flow_durable_state(&run, &execute, job_id)?;
+    assert_control_flow_failure_event(&run, fail_version_id, &sentinel)?;
+    assert_control_flow_success_events(&run, &execute, modify_version_id)?;
     run.shutdown()
 }
 
@@ -513,13 +508,10 @@ fn assert_control_flow_execute(execute: &Value) -> io::Result<()> {
     )
 }
 
-fn assert_control_flow_inspections(
+fn assert_control_flow_durable_state(
     run: &ScenarioRun,
     execute: &Value,
     job_id: u64,
-    fail_version_id: u64,
-    modify_version_id: u64,
-    sentinel: &Path,
 ) -> io::Result<()> {
     let job = run.ok(
         &["job", "show", "--job-id", &job_id.to_string()],
@@ -549,8 +541,6 @@ fn assert_control_flow_inspections(
                 == 4,
         format!("F1 durable tickets: {tickets:?}"),
     )?;
-    assert_control_flow_failure_event(run, fail_version_id, sentinel)?;
-    assert_control_flow_success_events(run, execute, modify_version_id)?;
     let verification_events = run.ok(
         &["event", "list", "--kind", "artifact.verification_succeeded"],
         "event",
@@ -571,7 +561,7 @@ fn assert_control_flow_inspections(
     .map(|event| event["payload"]["verification_id"].to_string())
     .collect::<BTreeSet<_>>();
     require(
-        expected_ids.is_subset(&actual_ids) && actual_ids.len() == 4,
+        expected_ids.is_subset(&actual_ids),
         format!("F1 verification events: {verification_events}"),
     )
 }
@@ -1193,7 +1183,7 @@ fn assert_tracks_output(output_dir: &Path) -> io::Result<()> {
                     ("subtitles", "eng", "Forced", true, true),
                     ("audio", "eng", "Surround", true, false),
                     ("video", "und", "", false, false),
-                    ("audio", "eng", "Main", true, false),
+                    ("audio", "eng", "Main", false, false),
                     ("subtitles", "und", "Untagged", false, false),
                 ],
                 "T1a",

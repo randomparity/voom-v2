@@ -475,43 +475,22 @@ fn validate_output_selection(
     }
 
     for (output_index, kept_stream) in expected_order.iter().enumerate() {
-        let expected_track = input_mapping
-            .track_for_provider_index(kept_stream.provider_stream_index)
-            .ok_or_else(|| {
-                malformed_worker_result(
-                    "output_probe",
-                    format!(
-                        "selected stream mismatch: missing input track for provider index {}",
-                        kept_stream.provider_stream_index
-                    ),
-                )
-            })?;
-        let output_track = output_track_at(output_mapping, output_index)?;
-        if output_track.kind != expected_track.kind {
-            return Err(malformed_worker_result(
-                "output_probe",
-                format!(
-                    "selected stream mismatch: expected {:?} for {}, got {:?}",
-                    expected_track.kind, kept_stream.snapshot_stream_id, output_track.kind
-                ),
-            ));
-        }
         validate_output_track_identity(
             input_mapping,
+            output_mapping,
             &expected_order,
             kept_stream,
             output_index,
-            expected_track,
-            output_track,
         )?;
     }
 
-    validate_output_default_flags(request, &expected_order, output_mapping)?;
-    validate_output_forced_flags(request, &expected_order, output_mapping)
+    validate_output_default_flags(request, input_mapping, &expected_order, output_mapping)?;
+    validate_output_forced_flags(request, input_mapping, &expected_order, output_mapping)
 }
 
 fn validate_output_default_flags(
     request: &RemuxRequest,
+    input_mapping: &crate::mkvmerge::MkvmergeTrackMapping,
     expected_order: &[&RemuxStreamRef],
     output_mapping: &crate::mkvmerge::MkvmergeTrackMapping,
 ) -> Result<(), MkvtoolnixWorkerError> {
@@ -526,15 +505,35 @@ fn validate_output_default_flags(
             )
         })
         .collect::<BTreeSet<_>>();
-    let expected_default = expected_order
+    let cleared = request
+        .selection
+        .clear_default_streams
         .iter()
-        .filter(|stream| {
-            selected.contains(&(
+        .map(|stream| {
+            (
                 stream.snapshot_stream_id.as_str(),
                 stream.provider_stream_index,
-            ))
+            )
         })
-        .map(|stream| stream.snapshot_stream_id.clone())
+        .collect::<BTreeSet<_>>();
+    let expected_default = expected_order
+        .iter()
+        .filter_map(|stream| {
+            let identity = (
+                stream.snapshot_stream_id.as_str(),
+                stream.provider_stream_index,
+            );
+            let is_default = if selected.contains(&identity) {
+                true
+            } else if cleared.contains(&identity) {
+                false
+            } else {
+                input_mapping
+                    .track_for_provider_index(stream.provider_stream_index)?
+                    .default
+            };
+            is_default.then(|| stream.snapshot_stream_id.clone())
+        })
         .collect::<Vec<_>>();
     let actual_default = expected_order
         .iter()
@@ -558,6 +557,7 @@ fn validate_output_default_flags(
 
 fn validate_output_forced_flags(
     request: &RemuxRequest,
+    input_mapping: &crate::mkvmerge::MkvmergeTrackMapping,
     expected_order: &[&RemuxStreamRef],
     output_mapping: &crate::mkvmerge::MkvmergeTrackMapping,
 ) -> Result<(), MkvtoolnixWorkerError> {
@@ -572,15 +572,35 @@ fn validate_output_forced_flags(
             )
         })
         .collect::<BTreeSet<_>>();
-    let expected = expected_order
+    let cleared = request
+        .selection
+        .clear_forced_streams
         .iter()
-        .filter(|stream| {
-            selected.contains(&(
+        .map(|stream| {
+            (
                 stream.snapshot_stream_id.as_str(),
                 stream.provider_stream_index,
-            ))
+            )
         })
-        .map(|stream| stream.snapshot_stream_id.clone())
+        .collect::<BTreeSet<_>>();
+    let expected = expected_order
+        .iter()
+        .filter_map(|stream| {
+            let identity = (
+                stream.snapshot_stream_id.as_str(),
+                stream.provider_stream_index,
+            );
+            let is_forced = if selected.contains(&identity) {
+                true
+            } else if cleared.contains(&identity) {
+                false
+            } else {
+                input_mapping
+                    .track_for_provider_index(stream.provider_stream_index)?
+                    .forced
+            };
+            is_forced.then(|| stream.snapshot_stream_id.clone())
+        })
         .collect::<Vec<_>>();
     let actual = expected_order
         .iter()
@@ -602,12 +622,32 @@ fn validate_output_forced_flags(
 
 fn validate_output_track_identity(
     input_mapping: &crate::mkvmerge::MkvmergeTrackMapping,
+    output_mapping: &crate::mkvmerge::MkvmergeTrackMapping,
     selected_streams: &[&RemuxStreamRef],
     kept_stream: &RemuxStreamRef,
     output_index: usize,
-    expected_track: &crate::mkvmerge::MkvmergeTrack,
-    output_track: &crate::mkvmerge::MkvmergeTrack,
 ) -> Result<(), MkvtoolnixWorkerError> {
+    let expected_track = input_mapping
+        .track_for_provider_index(kept_stream.provider_stream_index)
+        .ok_or_else(|| {
+            malformed_worker_result(
+                "output_probe",
+                format!(
+                    "selected stream mismatch: missing input track for provider index {}",
+                    kept_stream.provider_stream_index
+                ),
+            )
+        })?;
+    let output_track = output_track_at(output_mapping, output_index)?;
+    if output_track.kind != expected_track.kind {
+        return Err(malformed_worker_result(
+            "output_probe",
+            format!(
+                "selected stream mismatch: expected {:?} for {}, got {:?}",
+                expected_track.kind, kept_stream.snapshot_stream_id, output_track.kind
+            ),
+        ));
+    }
     let matching_input_indexes = input_mapping
         .provider_indexes_matching_identity(expected_track.kind, &expected_track.fingerprint);
     let selected_match_count = selected_streams

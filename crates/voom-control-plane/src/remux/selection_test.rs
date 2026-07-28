@@ -76,7 +76,14 @@ fn selection_preserves_source_default_video_without_defaults_action() {
             .collect::<Vec<_>>(),
         vec!["stream-0"]
     );
-    assert!(selection.clear_default_streams.is_empty());
+    assert_eq!(
+        selection
+            .clear_default_streams
+            .iter()
+            .map(|stream| stream.snapshot_stream_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["stream-1"]
+    );
 }
 
 #[test]
@@ -107,7 +114,14 @@ fn selection_preserves_source_default_video_with_explicit_preserve_action() {
             .collect::<Vec<_>>(),
         vec!["stream-0"]
     );
-    assert!(selection.clear_default_streams.is_empty());
+    assert_eq!(
+        selection
+            .clear_default_streams
+            .iter()
+            .map(|stream| stream.snapshot_stream_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["stream-1"]
+    );
 }
 
 #[test]
@@ -459,7 +473,7 @@ fn selection_preserves_legacy_non_best_strategy_composition() {
 }
 
 #[test]
-fn selection_applies_multiple_explicit_defaults_for_one_target() {
+fn selection_rejects_multiple_explicit_defaults_for_one_target() {
     let payload = json!({
         "type": "remux",
         "container": "mkv",
@@ -481,17 +495,14 @@ fn selection_applies_multiple_explicit_defaults_for_one_target() {
     });
     let snapshot = snapshot_with_video_audio_languages(["eng", "spa"]);
 
-    let selection = selection_from_payload_and_snapshot(&payload, &snapshot).unwrap();
+    let err = selection_from_payload_and_snapshot(&payload, &snapshot).unwrap_err();
 
-    assert_eq!(
-        selection
-            .default_streams
-            .iter()
-            .map(|stream| stream.snapshot_stream_id.as_str())
-            .collect::<Vec<_>>(),
-        ["stream-1", "stream-2", "stream-0"]
+    assert_eq!(err.error_code(), ErrorCode::ConfigInvalid);
+    assert!(
+        err.to_string()
+            .contains("multiple explicit defaults actions target audio"),
+        "{err}"
     );
-    assert!(selection.clear_default_streams.is_empty());
 }
 
 #[test]
@@ -566,7 +577,14 @@ fn selection_keeps_default_streams_empty_for_non_default_video() {
         selection.default_streams.is_empty(),
         "a non-default source video must not be forced default (MKV-source behavior)"
     );
-    assert!(selection.clear_default_streams.is_empty());
+    assert_eq!(
+        selection
+            .clear_default_streams
+            .iter()
+            .map(|stream| stream.snapshot_stream_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["stream-0", "stream-1"]
+    );
 }
 
 #[test]

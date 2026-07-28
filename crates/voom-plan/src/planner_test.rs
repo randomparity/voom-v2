@@ -962,7 +962,7 @@ fn defaults_best_shadowed_by_explicit_does_not_read_or_warn_on_languages() {
 }
 
 #[test]
-fn later_same_target_default_strategy_replaces_earlier_strategy() {
+fn defaults_best_conflicts_with_other_same_target_strategies() {
     let best =
         CompiledOperation::SetDefaults(voom_policy::compiled::CompiledSetDefaultsOperation {
             target: TrackTarget::Audio,
@@ -975,10 +975,10 @@ fn later_same_target_default_strategy_replaces_earlier_strategy() {
             strategy: DefaultStrategy::None,
             filter: None,
         });
-    for (operations, expected_strategy) in [
-        (vec![best.clone(), none.clone()], "none"),
-        (vec![none, best.clone()], "best"),
-        (vec![best.clone(), best], "best"),
+    for operations in [
+        vec![best.clone(), none.clone()],
+        vec![none, best.clone()],
+        vec![best.clone(), best],
     ] {
         let policy = compiled_policy_with_languages_and_ops(&["eng"], operations);
         let snapshot =
@@ -986,23 +986,21 @@ fn later_same_target_default_strategy_replaces_earlier_strategy() {
 
         let plan = generate_plan(request(policy, snapshot)).unwrap();
 
-        assert_ne!(plan.nodes[0].status, NodeStatus::Blocked);
+        assert_eq!(plan.nodes[0].status, NodeStatus::Blocked);
         assert_eq!(
-            plan.nodes[0].operation_payload["defaults"][0]["strategy"],
-            expected_strategy
+            plan.diagnostics[0].code,
+            PlanningDiagnosticCode::UnsupportedMediaShape
         );
-        assert_eq!(
-            plan.nodes[0].operation_payload["defaults"]
-                .as_array()
-                .unwrap()
-                .len(),
-            1
+        assert!(
+            plan.nodes[0]
+                .status_reason
+                .contains("defaults strategy operations target audio and include best")
         );
     }
 }
 
 #[test]
-fn later_non_best_default_strategy_replaces_earlier_strategy() {
+fn defaults_best_preserves_legacy_non_best_strategy_composition() {
     let policy = compiled_policy_with_ops(vec![
         CompiledOperation::SetDefaults(voom_policy::compiled::CompiledSetDefaultsOperation {
             target: TrackTarget::Audio,
@@ -1028,11 +1026,7 @@ fn later_non_best_default_strategy_replaces_earlier_strategy() {
             .as_array()
             .unwrap()
             .len(),
-        1
-    );
-    assert_eq!(
-        plan.nodes[0].operation_payload["defaults"][0]["strategy"],
-        "preserve"
+        2
     );
 }
 
@@ -1258,7 +1252,7 @@ fn track_remux_filter_default_no_ops_when_unique_stream_is_already_default() {
 }
 
 #[test]
-fn track_remux_filter_default_reports_empty_and_selects_all_matches() {
+fn track_remux_filter_default_reports_empty_and_ambiguous_retained_matches() {
     let plan_for = |languages: &[(&str, bool)]| {
         generate_plan(request(
             compiled_policy_with_ops(vec![CompiledOperation::SetDefaults(
@@ -1287,21 +1281,16 @@ fn track_remux_filter_default_reports_empty_and_selects_all_matches() {
     assert!(empty.nodes[0].status_reason.contains("0 retained streams"));
 
     let ambiguous = plan_for(&[("eng", false), ("eng", true)]);
-    assert_eq!(ambiguous.nodes[0].status, NodeStatus::Planned);
+    assert_eq!(ambiguous.nodes[0].status, NodeStatus::Blocked);
     assert_eq!(
-        ambiguous.nodes[0].operation_payload["defaults"],
-        serde_json::json!([
-            {
-                "target": "audio",
-                "strategy": "preserve",
-                "selected_snapshot_stream_id": "stream-1"
-            },
-            {
-                "target": "audio",
-                "strategy": "preserve",
-                "selected_snapshot_stream_id": "stream-2"
-            }
-        ])
+        ambiguous.diagnostics[0].code,
+        PlanningDiagnosticCode::AmbiguousTrackFilterSelection
+    );
+    assert!(ambiguous.nodes[0].status_reason.contains("defaults audio"));
+    assert!(
+        ambiguous.nodes[0]
+            .status_reason
+            .contains("2 retained streams")
     );
 }
 
@@ -1384,7 +1373,7 @@ fn track_remux_explicit_default_overrides_strategy_in_both_source_orders() {
 }
 
 #[test]
-fn track_remux_multiple_explicit_defaults_for_one_target_are_combined() {
+fn track_remux_multiple_explicit_defaults_for_one_target_block() {
     let policy = compiled_policy_with_ops(vec![
         CompiledOperation::SetDefaults(voom_policy::compiled::CompiledSetDefaultsOperation {
             target: TrackTarget::Audio,
@@ -1412,21 +1401,15 @@ fn track_remux_multiple_explicit_defaults_for_one_target_are_combined() {
     ))
     .unwrap();
 
-    assert_eq!(plan.nodes[0].status, NodeStatus::Planned);
+    assert_eq!(plan.nodes[0].status, NodeStatus::Blocked);
     assert_eq!(
-        plan.nodes[0].operation_payload["defaults"],
-        serde_json::json!([
-            {
-                "target": "audio",
-                "strategy": "preserve",
-                "selected_snapshot_stream_id": "stream-1"
-            },
-            {
-                "target": "audio",
-                "strategy": "preserve",
-                "selected_snapshot_stream_id": "stream-2"
-            }
-        ])
+        plan.diagnostics[0].code,
+        PlanningDiagnosticCode::UnsupportedMediaShape
+    );
+    assert!(
+        plan.nodes[0]
+            .status_reason
+            .contains("multiple explicit defaults operations target audio")
     );
 }
 

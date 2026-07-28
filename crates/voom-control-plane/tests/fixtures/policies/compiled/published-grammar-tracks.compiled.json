@@ -1,7 +1,7 @@
 {
   "policy_name": "published grammar tracks",
   "slug": "published-grammar-tracks",
-  "source_hash": "b3811e18a2360e22f4cd3c1920707a8319e9c4f45495154b00887a526bbe0e2a",
+  "source_hash": "5d198c9a887f409f4b15ecd14be20cde1e5220d6ce09cb97f658b5d6e8e7f3d5",
   "schema_version": 2,
   "metadata": {},
   "config": {
@@ -196,9 +196,19 @@
           "target": "audio",
           "strategy": "preserve",
           "filter": {
-            "type": "language_in",
-            "values": [
-              "eng"
+            "type": "and",
+            "filters": [
+              {
+                "type": "language_in",
+                "values": [
+                  "eng"
+                ]
+              },
+              {
+                "type": "channels",
+                "op": "gte",
+                "value": 6
+              }
             ]
           }
         },
@@ -246,9 +256,26 @@
         {
           "type": "conditional",
           "condition": {
-            "type": "exists",
-            "target": "subtitle",
-            "filter": null
+            "type": "and",
+            "conditions": [
+              {
+                "type": "exists",
+                "target": "subtitle",
+                "filter": null
+              },
+              {
+                "type": "field_comparison",
+                "path": [
+                  "video",
+                  "width"
+                ],
+                "op": "gte",
+                "value": {
+                  "type": "number",
+                  "value": "1280"
+                }
+              }
+            ]
           },
           "operations": [
             {

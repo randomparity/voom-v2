@@ -478,9 +478,10 @@ fn build_args_emits_forced_track_flags_for_set_and_clear() {
 }
 
 #[test]
-fn build_args_pins_complete_default_track_set() {
+fn build_args_emits_only_explicit_default_set_and_clear_flags() {
     let mut selection = base_selection(vec![stream(0), stream(1), stream(2)]);
     selection.default_streams = vec![stream(1)];
+    selection.clear_default_streams = vec![stream(0)];
     let request = remux_request(selection);
     let mapping = MkvmergeTrackMapping::from_pairs([(0, 7), (1, 12), (2, 14)]);
 
@@ -488,7 +489,11 @@ fn build_args_pins_complete_default_track_set() {
 
     assert!(flag_pair(&args, "--default-track-flag", "7:0"));
     assert!(flag_pair(&args, "--default-track-flag", "12:1"));
-    assert!(flag_pair(&args, "--default-track-flag", "14:0"));
+    assert!(
+        !args
+            .windows(2)
+            .any(|pair| { pair[0] == "--default-track-flag" && pair[1].starts_with("14:") })
+    );
 }
 
 #[test]

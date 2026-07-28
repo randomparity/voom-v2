@@ -32,7 +32,7 @@ policy "published grammar tracks" {
     depends_on: [forced_head]
     defaults audio first
     defaults subtitle best
-    defaults audio where language == "eng"
+    defaults audio where language == "eng" and channels >= 6
     defaults subtitle where forced
   }
 
@@ -41,7 +41,7 @@ policy "published grammar tracks" {
     when video.width < 640 {
       remove subtitle
     }
-    when exists subtitle {
+    when exists subtitle and video.width >= 1280 {
       defaults subtitle best
     }
     when video.width < 1280 and count subtitle >= 2 {

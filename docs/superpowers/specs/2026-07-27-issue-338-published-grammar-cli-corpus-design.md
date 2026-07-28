@@ -302,11 +302,21 @@ unreachable. Project those two existing facts into `duration_millis` and
 `bitrate`, rejecting malformed/negative/overflowing values. Focused tests cover
 present and malformed facts before the process corpus uses them.
 
-Beyond that projection, the intended change is test-only. Canonical policy
-source and compiled goldens are inputs and must remain byte-for-byte unchanged.
-No schema, durable payload, CLI envelope, error-code, or worker-protocol change
-is planned. The projection changes no durable or wire shape and rollback simply
-returns those optional planning fields to absent.
+Executing the track corpus also exposed two ambiguities in its acceptance
+fixture. The audio default filter matched both retained English tracks, and the
+subtitle `best` branch overlapped the narrow-screen `preserve` branch. The
+accepted defaults contract requires an explicit filter to match exactly one
+track and rejects `best` combined with another same-target strategy. Narrow the
+audio filter with the already-published `channels >= 6` predicate and gate the
+`best` branch to the large-screen variant. Regenerate only that fixture's
+source hash and compiled golden; do not broaden planner or payload semantics to
+make an invalid fixture executable.
+
+No schema, durable payload shape, CLI envelope, or error-code change is
+introduced. Worker disposition handling remains compatible with existing
+durable payloads: listed set/clear entries are applied, while an unlisted
+stream preserves its provider-observed value. Rollback returns the optional
+planning fields to absent and retains readable worker payloads.
 
 The coverage matrix is corrected to distinguish two acceptance layers without
 changing policy text: #338 owns the fresh real-CLI F1 execution witness; #330
