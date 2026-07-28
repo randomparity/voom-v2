@@ -11,7 +11,10 @@ use super::common::{
     i64_from_u64, iso8601, map_row_err, parse_iso8601, serialize_json, u32_from_i64, u64_from_i64,
 };
 use super::tickets::SqliteTicketRepo;
-use super::workers::{SqliteWorkerRepo, WorkerOperationEligibility, WorkerStatus};
+use super::workers::{
+    SqliteWorkerRepo, WorkerOperationCapacity, WorkerOperationEligibility, WorkerStatus,
+    normalized_worker_operation,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LeaseState {
@@ -219,7 +222,7 @@ impl SqliteLeaseRepo {
             .get_in_tx(tx, input.ticket_id)
             .await?
             .ok_or_else(|| VoomError::NotFound(format!("ticket {}", input.ticket_id)))?;
-        let operation = worker_operation_for_ticket(&ticket.kind)?;
+        let operation = normalized_worker_operation(&ticket.kind)?;
         let now_str = iso8601(input.now)?;
         let res = sqlx::query(
             "UPDATE tickets \
@@ -245,10 +248,15 @@ impl SqliteLeaseRepo {
                 input.ticket_id
             )));
         }
-        let eligibility = SqliteWorkerRepo::new(self.pool.clone())
+        let workers = SqliteWorkerRepo::new(self.pool.clone());
+        let eligibility = workers
             .operation_eligibility_in_tx(tx, input.worker_id, &operation)
             .await?;
         require_operation_eligibility(input.worker_id, &operation, &eligibility)?;
+        let capacity = workers
+            .operation_capacity_in_tx(tx, input.worker_id, &operation)
+            .await?;
+        require_operation_capacity(input.worker_id, &operation, capacity)?;
 
         let expires = input.now + input.ttl;
         let expires_str = iso8601(expires)?;
@@ -275,9 +283,9 @@ impl SqliteLeaseRepo {
     pub async fn acquire(&self, input: NewLease) -> Result<Lease, VoomError> {
         let mut tx = self
             .pool
-            .begin()
+            .begin_with("BEGIN IMMEDIATE")
             .await
-            .map_err(|e| VoomError::database_context("begin", e))?;
+            .map_err(|e| VoomError::database_context("lease acquire begin immediate", e))?;
         let out = self.acquire_in_tx(&mut tx, input).await?;
         tx.commit()
             .await
@@ -1041,15 +1049,19 @@ fn require_operation_eligibility(
     )))
 }
 
-fn worker_operation_for_ticket(
-    ticket_kind: &TicketOperation,
-) -> Result<TicketOperation, VoomError> {
-    const WORKFLOW_OPERATION_PREFIX: &str = "synthetic.workflow.operation.";
-
-    let Some(operation) = ticket_kind.as_str().strip_prefix(WORKFLOW_OPERATION_PREFIX) else {
-        return Ok(ticket_kind.clone());
-    };
-    TicketOperation::from_stored(operation, "tickets.kind workflow operation")
+fn require_operation_capacity(
+    worker_id: WorkerId,
+    operation: &TicketOperation,
+    capacity: WorkerOperationCapacity,
+) -> Result<(), VoomError> {
+    if capacity.has_capacity() {
+        return Ok(());
+    }
+    Err(VoomError::NoEligibleWorker(format!(
+        "acquire rejected: worker {worker_id} capacity full for {operation} \
+         (active {}, limit {})",
+        capacity.active_leases, capacity.max_parallel
+    )))
 }
 
 async fn get_lease_in_tx(

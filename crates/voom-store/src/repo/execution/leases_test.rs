@@ -109,7 +109,18 @@ async fn make_worker_eligible(
 
 #[tokio::test]
 async fn keyset_list_is_newest_first_filters_and_pages() {
-    let (pool, trepo, _wrepo, lrepo, tid, wid, _tmp) = setup().await;
+    let (pool, trepo, wrepo, lrepo, tid, wid, _tmp) = setup().await;
+    wrepo
+        .record_grant(NewGrant {
+            worker_id: wid,
+            can_execute: vec![ticket_op("noop")],
+            can_access_read: Vec::new(),
+            can_access_write: Vec::new(),
+            denies: Vec::new(),
+            max_parallel: json!({"noop": 2}),
+        })
+        .await
+        .unwrap();
     // `setup` seeds one ready ticket; add a second so two leases can coexist.
     let t2 = trepo
         .create(NewTicket {
