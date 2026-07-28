@@ -175,7 +175,7 @@ impl SqlitePolicyInputRepo {
         input: PolicyInputSetDraft,
     ) -> Result<PolicyInputSet, VoomError> {
         let input = ValidatedPolicyInputSetDraft::new(input)
-            .map_err(|e| VoomError::PolicyValidationError(format!("{e:?}")))?;
+            .map_err(|error| VoomError::PolicyValidationError(error.message()))?;
         let mut tx = self
             .pool
             .begin()

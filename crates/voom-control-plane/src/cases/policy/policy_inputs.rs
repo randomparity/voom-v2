@@ -80,7 +80,7 @@ impl ControlPlane {
         input: voom_policy::PolicyInputSetDraft,
     ) -> Result<PolicyInputSet, VoomError> {
         let input = ValidatedPolicyInputSetDraft::new(input)
-            .map_err(|e| VoomError::PolicyValidationError(format!("{e:?}")))?;
+            .map_err(|error| VoomError::PolicyValidationError(error.message()))?;
         let query = MediaSnapshotFileVersionQuery::new(
             input
                 .as_draft()
@@ -178,7 +178,7 @@ impl ControlPlane {
             issues: Vec::new(),
         };
         let draft = ValidatedPolicyInputSetDraft::new(draft)
-            .map_err(|e| VoomError::PolicyValidationError(format!("{e:?}")))?;
+            .map_err(|error| VoomError::PolicyValidationError(error.message()))?;
         let created = self
             .policy_inputs
             .create_input_set_in_tx(&mut tx, draft)

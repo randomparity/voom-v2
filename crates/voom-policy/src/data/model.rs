@@ -1,5 +1,10 @@
 use std::collections::{HashMap, HashSet};
 
+/// Maximum number of persisted child rows in one policy-input aggregate.
+pub const POLICY_INPUT_MAX_MEMBERS: usize = 10_000;
+/// Maximum serialized size of one complete policy-input draft.
+pub const POLICY_INPUT_MAX_SERIALIZED_BYTES: usize = 32 * 1024 * 1024;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PolicyInputSourceKind {
@@ -259,6 +264,36 @@ pub enum PolicyInputSetValidationError {
     EmptyQualityProfileName {
         ordinal: u32,
     },
+    AggregateMemberLimitExceeded {
+        actual: usize,
+        limit: usize,
+    },
+    AggregateSerializedSizeLimitExceeded {
+        actual: usize,
+        limit: usize,
+    },
+    AggregateSizeUnavailable {
+        reason: String,
+    },
+}
+
+impl PolicyInputSetValidationError {
+    /// Return the stable operator-facing validation message.
+    #[must_use]
+    pub fn message(&self) -> String {
+        match self {
+            Self::AggregateMemberLimitExceeded { actual, limit } => {
+                format!("policy input aggregate has {actual} members; maximum is {limit}")
+            }
+            Self::AggregateSerializedSizeLimitExceeded { actual, limit } => {
+                format!("policy input aggregate serializes to {actual} bytes; maximum is {limit}")
+            }
+            Self::AggregateSizeUnavailable { reason } => {
+                format!("policy input aggregate size could not be measured: {reason}")
+            }
+            _ => format!("{self:?}"),
+        }
+    }
 }
 
 pub fn validate_input_set(
@@ -288,7 +323,51 @@ pub fn validate_input_set(
     validate_child_targets(input, &synthetic_targets)?;
     validate_evidence(&input.identity_evidence)?;
     validate_quality_profiles(&input.quality_profiles)?;
+    validate_aggregate_budget(input)?;
 
+    Ok(())
+}
+
+fn validate_aggregate_budget(
+    input: &PolicyInputSetDraft,
+) -> Result<(), PolicyInputSetValidationError> {
+    let counts = [
+        input.fixture_labels.len(),
+        input.synthetic_targets.len(),
+        input.media_snapshots.len(),
+        input.identity_evidence.len(),
+        input.bundle_targets.len(),
+        input.quality_profiles.len(),
+        input.issues.len(),
+    ];
+    let mut member_count = 0usize;
+    for count in counts {
+        member_count = member_count.saturating_add(count);
+    }
+    if member_count > POLICY_INPUT_MAX_MEMBERS {
+        return Err(
+            PolicyInputSetValidationError::AggregateMemberLimitExceeded {
+                actual: member_count,
+                limit: POLICY_INPUT_MAX_MEMBERS,
+            },
+        );
+    }
+
+    let serialized_size = serde_json::to_vec(input)
+        .map_err(
+            |error| PolicyInputSetValidationError::AggregateSizeUnavailable {
+                reason: error.to_string(),
+            },
+        )?
+        .len();
+    if serialized_size > POLICY_INPUT_MAX_SERIALIZED_BYTES {
+        return Err(
+            PolicyInputSetValidationError::AggregateSerializedSizeLimitExceeded {
+                actual: serialized_size,
+                limit: POLICY_INPUT_MAX_SERIALIZED_BYTES,
+            },
+        );
+    }
     Ok(())
 }
 
