@@ -1478,8 +1478,20 @@ pub(crate) async fn execute_extract_audio_with_dispatchers(
 ) -> Result<ExecuteExtractAudioReport, VoomError> {
     let failure_input = input.clone();
     let mut context = ExtractAttemptContext::default();
-    match execute_extract_audio_inner(cp, input, extract, verify, result_probe, &mut context).await
-    {
+    let verify = verify.start_session();
+    let result_probe = result_probe.start_session();
+    let outcome = execute_extract_audio_inner(
+        cp,
+        input,
+        extract,
+        verify.as_ref(),
+        result_probe.as_ref(),
+        &mut context,
+    )
+    .await;
+    verify.shutdown().await;
+    result_probe.shutdown().await;
+    match outcome {
         Ok(report) => Ok(report),
         Err(error) => Err(finalize_extract_failure(cp, &failure_input, &context, error).await),
     }

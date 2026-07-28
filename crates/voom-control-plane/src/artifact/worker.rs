@@ -44,7 +44,7 @@ impl VerifyWorkerError {
     }
 
     #[must_use]
-    fn should_shutdown_worker(&self) -> bool {
+    pub(crate) const fn should_shutdown_worker(&self) -> bool {
         self.shutdown_worker
     }
 
