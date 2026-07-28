@@ -1,7 +1,7 @@
 {
   "policy_name": "published grammar tracks",
   "slug": "published-grammar-tracks",
-  "source_hash": "d3bdffa685ceb08baa8c860c97e5661edac72d6f171cd5c95a13fefbc685f50d",
+  "source_hash": "b3811e18a2360e22f4cd3c1920707a8319e9c4f45495154b00887a526bbe0e2a",
   "schema_version": 2,
   "metadata": {},
   "config": {
@@ -19,13 +19,6 @@
       "skip_if": null,
       "on_error": "abort",
       "operations": [
-        {
-          "type": "remove_tracks",
-          "target": "audio",
-          "filter": {
-            "type": "commentary"
-          }
-        },
         {
           "type": "keep_tracks",
           "target": "audio",
@@ -56,21 +49,9 @@
         },
         {
           "type": "remove_tracks",
-          "target": "subtitle",
+          "target": "audio",
           "filter": {
-            "type": "and",
-            "filters": [
-              {
-                "type": "title_contains",
-                "value": "Signs"
-              },
-              {
-                "type": "not",
-                "inner": {
-                  "type": "forced"
-                }
-              }
-            ]
+            "type": "commentary"
           }
         },
         {
@@ -94,12 +75,21 @@
         },
         {
           "type": "remove_tracks",
-          "target": "attachment",
+          "target": "subtitle",
           "filter": {
-            "type": "not",
-            "inner": {
-              "type": "font"
-            }
+            "type": "and",
+            "filters": [
+              {
+                "type": "title_contains",
+                "value": "Signs"
+              },
+              {
+                "type": "not",
+                "inner": {
+                  "type": "forced"
+                }
+              }
+            ]
           }
         },
         {
@@ -107,6 +97,16 @@
           "target": "attachment",
           "filter": {
             "type": "font"
+          }
+        },
+        {
+          "type": "remove_tracks",
+          "target": "attachment",
+          "filter": {
+            "type": "not",
+            "inner": {
+              "type": "font"
+            }
           }
         }
       ]

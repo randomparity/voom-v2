@@ -651,7 +651,7 @@ fn video_track(path: &Path) -> MkvTrack<'_> {
         path,
         language: "und",
         name: None,
-        default: true,
+        default: false,
         forced: false,
         commentary: false,
     }

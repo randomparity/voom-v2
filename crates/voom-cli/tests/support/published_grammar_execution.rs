@@ -14,7 +14,7 @@ use tempfile::NamedTempFile;
 use voom_test_support::worker::hide_stale_fake_ffprobe_sibling;
 
 use crate::local_worker::LocalWorker;
-use crate::media_inspect::ffprobe;
+use crate::media_inspect::{ffprobe, mkvmerge_identify};
 use crate::process::{BoundedOutput, build_worker_package, run_bounded};
 use crate::published_grammar_media::ScenarioMedia;
 
@@ -70,6 +70,57 @@ pub fn execute_core(media: &ScenarioMedia) -> io::Result<()> {
     assert_stored_matches(&execute, &stored)?;
     assert_core_inspections(&run, &execute, job_id)?;
     assert_core_output(&output)?;
+    run.shutdown()?;
+    Ok(())
+}
+
+pub fn execute_tracks(media: &ScenarioMedia) -> io::Result<()> {
+    let mut run = ScenarioRun::start(&media.root)?;
+    let scan = run.scan(&media.library)?;
+    require(scan["data"]["summary"]["ingested"] == 3, "T1 scan ingested")?;
+    require(scan["data"]["summary"]["failed"] == 0, "T1 scan failures")?;
+    let version_id =
+        run.create_policy("published-grammar-tracks", "published-grammar-tracks.voom")?;
+    let input_id = run.create_input("published-grammar-tracks-input", 3)?;
+    let preview = run.preview(version_id, input_id)?;
+    let nodes = array(&preview["data"]["plan"]["nodes"], "T1 preview nodes")?;
+    let phase_counts = nodes.iter().fold(
+        std::collections::BTreeMap::<&str, usize>::new(),
+        |mut counts, node| {
+            *counts
+                .entry(node["phase_name"].as_str().unwrap_or_default())
+                .or_default() += 1;
+            counts
+        },
+    );
+    require(
+        phase_counts
+            == std::collections::BTreeMap::from([
+                ("alternate_defaults", 3),
+                ("default_head", 3),
+                ("defaults", 3),
+                ("forced_head", 3),
+                ("group_order", 3),
+                ("select", 3),
+                ("verify", 3),
+            ])
+            && preview["data"]["plan"]["summary"]["executable_node_count"] == 21
+            && preview["data"]["plan"]["summary"]["blocked_node_count"] == 0,
+        format!("T1 preview shape: {preview}"),
+    )?;
+    let staging = media.root.join("stage");
+    let output = media.root.join("output");
+    let execute = run.execute(version_id, input_id, &staging, &output)?;
+    assert_tracks_execute(&execute)?;
+    let job_id = number(&execute["data"]["summary"]["job_id"], "T1 job id")?;
+    let stored = run.ok(
+        &["compliance", "report", "--job-id", &job_id.to_string()],
+        "compliance",
+        "T1 stored report",
+    )?;
+    assert_stored_matches(&execute, &stored)?;
+    assert_successful_job(&run, job_id, 20, "T1")?;
+    assert_tracks_output(&output)?;
     run.shutdown()?;
     Ok(())
 }
@@ -293,28 +344,7 @@ fn assert_stored_matches(execute: &Value, stored: &Value) -> io::Result<()> {
 }
 
 fn assert_core_inspections(run: &ScenarioRun, execute: &Value, job_id: u64) -> io::Result<()> {
-    let job = run.ok(
-        &["job", "show", "--job-id", &job_id.to_string()],
-        "job",
-        "job show",
-    )?;
-    require(
-        job["data"]["job"]["state"] == "succeeded",
-        format!("C1 job: {job}"),
-    )?;
-    let tickets = run.ok(&["ticket", "list"], "ticket", "ticket list")?;
-    let tickets = array(&tickets["data"]["tickets"], "C1 tickets")?;
-    let job_tickets = tickets
-        .iter()
-        .filter(|ticket| ticket["job_id"] == job_id)
-        .collect::<Vec<_>>();
-    require(
-        !job_tickets.is_empty()
-            && job_tickets
-                .iter()
-                .all(|ticket| ticket["state"] == "succeeded"),
-        "C1 durable tickets must all succeed",
-    )?;
+    assert_successful_job(run, job_id, 3, "C1")?;
     let handle_id = number(
         &execute["data"]["artifact_verifications"][0]["artifact_handle_id"],
         "C1 artifact handle id",
@@ -345,6 +375,190 @@ fn assert_core_inspections(run: &ScenarioRun, execute: &Value, job_id: u64) -> i
             .iter()
             .any(|event| event["payload"]["verification_id"] == verification_id),
         format!("C1 verification event: {events}"),
+    )
+}
+
+fn assert_successful_job(
+    run: &ScenarioRun,
+    job_id: u64,
+    expected_tickets: usize,
+    scenario: &str,
+) -> io::Result<()> {
+    let job = run.ok(
+        &["job", "show", "--job-id", &job_id.to_string()],
+        "job",
+        "job show",
+    )?;
+    require(
+        job["data"]["job"]["state"] == "succeeded",
+        format!("{scenario} job: {job}"),
+    )?;
+    let tickets = run.ok(&["ticket", "list"], "ticket", "ticket list")?;
+    let tickets = array(&tickets["data"]["tickets"], "successful job tickets")?;
+    let job_tickets = tickets
+        .iter()
+        .filter(|ticket| ticket["job_id"] == job_id)
+        .collect::<Vec<_>>();
+    require(
+        job_tickets.len() == expected_tickets
+            && job_tickets
+                .iter()
+                .all(|ticket| ticket["state"] == "succeeded"),
+        format!("{scenario} durable tickets: {job_tickets:?}"),
+    )
+}
+
+fn assert_tracks_execute(execute: &Value) -> io::Result<()> {
+    require(
+        execute["data"]["summary"]["failure_count"] == 0
+            && execute["data"]["summary"]["progress"]["completed"] == 3,
+        format!("T1 summary: {execute}"),
+    )?;
+    let phases = array(&execute["data"]["phases"], "T1 phases")?;
+    let phase_outcomes = phases
+        .iter()
+        .map(|phase| {
+            (
+                phase["phase_name"].as_str().unwrap_or_default(),
+                phase["outcome"].as_str().unwrap_or_default(),
+            )
+        })
+        .collect::<Vec<_>>();
+    require(
+        phase_outcomes
+            == [
+                ("select", "completed"),
+                ("group_order", "completed"),
+                ("default_head", "completed"),
+                ("forced_head", "completed"),
+                ("defaults", "completed"),
+                ("alternate_defaults", "partially-committed"),
+                ("verify", "completed"),
+            ],
+        format!("T1 phase outcomes: {phase_outcomes:?}"),
+    )?;
+    let file_phases = array(&execute["data"]["file_phases"], "T1 file phases")?;
+    require(
+        file_phases.len() == 21,
+        format!("T1 file phase count: {}", file_phases.len()),
+    )?;
+    for row in file_phases {
+        let phase = number(&row["phase_ordinal"], "T1 phase ordinal")?;
+        let branch = row["branch_id"].as_str().unwrap_or_default();
+        let expected = match phase {
+            5 if branch == "tracks-1920" => "skipped",
+            0..=5 => "committed",
+            6 => "verified",
+            _ => "",
+        };
+        require(
+            row["outcome"] == expected,
+            format!("T1 file phase {phase}/{branch}: {row}"),
+        )?;
+    }
+    let evidence = array(
+        &execute["data"]["artifact_verifications"],
+        "T1 verification evidence",
+    )?;
+    require(
+        evidence.len() == 3
+            && evidence.iter().all(|item| {
+                item["status"] == "succeeded"
+                    && item["expected_checksum"] == item["observed_checksum"]
+                    && item["expected_size_bytes"] == item["observed_size_bytes"]
+            }),
+        format!("T1 verification evidence: {evidence:?}"),
+    )
+}
+
+fn assert_tracks_output(output_dir: &Path) -> io::Result<()> {
+    let files = files_under(output_dir)?;
+    require(files.len() == 3, format!("T1 output files: {files:?}"))?;
+    for path in files {
+        let identified = mkvmerge_identify(&path)?;
+        let tracks = array(&identified["tracks"], "T1 output tracks")?;
+        let video = tracks
+            .iter()
+            .find(|track| track["type"] == "video")
+            .ok_or_else(|| {
+                io::Error::other(format!("T1 output missing video: {}", path.display()))
+            })?;
+        let dimensions = video["properties"]["pixel_dimensions"]
+            .as_str()
+            .unwrap_or_default();
+        match dimensions {
+            "1920x1080" => assert_track_signatures(
+                tracks,
+                &[
+                    ("subtitles", "eng", "Forced", true, true),
+                    ("audio", "eng", "Surround", true, false),
+                    ("video", "und", "", false, false),
+                    ("audio", "eng", "Main", true, false),
+                    ("subtitles", "und", "Untagged", false, false),
+                ],
+                "T1a",
+            )?,
+            "1024x576" => assert_track_signatures(
+                tracks,
+                &[
+                    ("subtitles", "eng", "Forced", true, true),
+                    ("audio", "eng", "Surround", false, false),
+                    ("video", "und", "", false, false),
+                    ("audio", "eng", "Main", false, false),
+                    ("subtitles", "und", "Untagged", false, false),
+                ],
+                "T1b",
+            )?,
+            "512x288" => assert_track_signatures(
+                tracks,
+                &[
+                    ("audio", "eng", "Surround", false, false),
+                    ("video", "und", "", false, false),
+                    ("audio", "eng", "Main", false, false),
+                ],
+                "T1c",
+            )?,
+            _ => {
+                return Err(io::Error::other(format!(
+                    "unexpected T1 dimensions {dimensions}"
+                )));
+            }
+        }
+        let attachments = array(&identified["attachments"], "T1 attachments")?;
+        require(
+            attachments.len() == 1 && attachments[0]["content_type"] == "font/ttf",
+            format!("T1 attachment oracle: {attachments:?}"),
+        )?;
+    }
+    Ok(())
+}
+
+fn assert_track_signatures(
+    tracks: &[Value],
+    expected: &[(&str, &str, &str, bool, bool)],
+    scenario: &str,
+) -> io::Result<()> {
+    let actual = tracks
+        .iter()
+        .map(|track| {
+            (
+                track["type"].as_str().unwrap_or_default(),
+                track["properties"]["language"].as_str().unwrap_or_default(),
+                track["properties"]["track_name"]
+                    .as_str()
+                    .unwrap_or_default(),
+                track["properties"]["default_track"]
+                    .as_bool()
+                    .unwrap_or(false),
+                track["properties"]["forced_track"]
+                    .as_bool()
+                    .unwrap_or(false),
+            )
+        })
+        .collect::<Vec<_>>();
+    require(
+        actual == expected,
+        format!("{scenario} track signatures: {actual:?}"),
     )
 }
 

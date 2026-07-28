@@ -22,4 +22,5 @@ fn published_grammar_corpus_is_executable() {
     let _workers = published_grammar_execution::prepare_worker_binaries().unwrap();
     let corpus = published_grammar_media::generate_and_validate_all().unwrap();
     published_grammar_execution::execute_core(&corpus.core).unwrap();
+    published_grammar_execution::execute_tracks(&corpus.tracks).unwrap();
 }
