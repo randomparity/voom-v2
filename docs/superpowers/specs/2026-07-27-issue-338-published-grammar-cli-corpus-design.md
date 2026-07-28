@@ -38,7 +38,9 @@ production library.
 ## Non-goals
 
 - Production canary or full-library execution; #339 owns that operator work.
-- New DSL productions, aliases, policy text, or compiled-wire changes.
+- New DSL productions, aliases, or compiled-wire shapes. Canonical fixture text
+  may change only to remove an ambiguity that violates an existing published
+  semantic rule.
 - New production worker, scheduler, artifact, or coordinator behavior unless
   execution reveals a campaign-owned defect.
 - A new public resume CLI. Repeated-resume equivalence is not a grammar
@@ -299,8 +301,8 @@ dimensions from the exact durable snapshot but drops its numeric
 creation therefore stores `None` for the published `media.duration_millis` and
 `video.bitrate` condition fields, making F1's duration and bitrate branches
 unreachable. Project those two existing facts into `duration_millis` and
-`bitrate`, rejecting malformed/negative/overflowing values. Focused tests cover
-present and malformed facts before the process corpus uses them.
+`bitrate`, omitting malformed, negative, or overflowing values. Focused tests
+cover present and malformed facts before the process corpus uses them.
 
 Executing the track corpus also exposed two ambiguities in its acceptance
 fixture. The audio default filter matched both retained English tracks, and the
@@ -318,11 +320,11 @@ durable payloads: listed set/clear entries are applied, while an unlisted
 stream preserves its provider-observed value. Rollback returns the optional
 planning fields to absent and retains readable worker payloads.
 
-The coverage matrix is corrected to distinguish two acceptance layers without
-changing policy text: #338 owns the fresh real-CLI F1 execution witness; #330
-continues to own repeated-resume equivalence through its focused coordinator
-tests. Adding a public resume command solely for this test would create an
-unrequested interface and is outside this issue.
+The coverage matrix is corrected to distinguish two acceptance layers: #338
+owns the fresh real-CLI F1 execution witness; #330 continues to own
+repeated-resume equivalence through its focused coordinator tests. Adding a
+public resume command solely for this test would create an unrequested
+interface and is outside this issue.
 
 If execution exposes a production defect, that change requires its own design
 decision within #338 only when it is necessary to execute the already-published
