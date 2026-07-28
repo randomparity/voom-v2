@@ -9,7 +9,7 @@ use crate::artifact::commit::{
     CommitArtifactHooks, CommitArtifactInstallContext, CommitArtifactPreparedContext,
     PreparedCommit, PromotionOutcome, same_file_facts,
 };
-use crate::artifact::fs::{copy_regular_file_checked, observe_regular_file};
+use crate::artifact::fs::{copy_regular_file_with_expected, observe_regular_file};
 
 pub(super) async fn promote_prepared(
     _cp: &ControlPlane,
@@ -28,19 +28,12 @@ pub(super) async fn promote_prepared(
         temp_path: &prepared.temp_path,
         staging_path: &prepared.staging_path,
     })?;
-    let staging_facts = observe_regular_file(&prepared.staging_path).await?;
-    if !same_file_facts(&staging_facts, &prepared.expected_facts) {
-        return Err(VoomError::ArtifactChecksumMismatch(
-            "staged artifact facts drifted after durable prepare".to_owned(),
-        ));
-    }
-    let temp_facts = copy_regular_file_checked(&prepared.staging_path, &prepared.temp_path).await?;
-    if !same_file_facts(&temp_facts, &prepared.expected_facts) {
-        let _cleanup = remove_file_if_exists(&prepared.temp_path).await;
-        return Err(VoomError::ArtifactChecksumMismatch(
-            "temporary artifact facts do not match verified staged artifact".to_owned(),
-        ));
-    }
+    copy_regular_file_with_expected(
+        &prepared.staging_path,
+        &prepared.temp_path,
+        &prepared.expected_facts,
+    )
+    .await?;
     hooks.before_install(CommitArtifactInstallContext {
         commit_record_id: prepared.record.id,
         target_path: &prepared.target_path,

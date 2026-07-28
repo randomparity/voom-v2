@@ -173,6 +173,50 @@ async fn target_created_after_prepare_is_not_overwritten_and_requires_recovery()
 }
 
 #[tokio::test]
+async fn temp_mutation_before_install_leaves_durable_recovery_evidence() {
+    let (cp, _db, dir) = fixture().await;
+    let staged = stage_and_verify_bytes(&cp, dir.path(), b"source bytes").await;
+    let target = dir.path().join("target.bin");
+
+    let error = commit_artifact_with_hooks(
+        &cp,
+        CommitArtifactInput {
+            artifact_handle_id: staged.artifact_handle_id,
+            target_path: target.clone(),
+        },
+        &MutateTempBeforeInstall,
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error.code(), ErrorCode::CommitFailure);
+    assert_eq!(std::fs::read(&target).unwrap(), b"mutated temp bytes");
+    let report = error.commit_report().unwrap();
+    assert_eq!(report.state, ArtifactCommitState::RecoveryRequired);
+    assert_eq!(report.result_file_version_id, None);
+    assert_eq!(report.result_file_location_id, None);
+    let recovery = report.recovery_required.as_ref().unwrap();
+    assert!(recovery.target_exists);
+    assert!(!recovery.temp_exists);
+    assert!(recovery.staging_exists);
+    assert_eq!(
+        count_events(&cp, EventKind::ArtifactCommitRecoveryRequired).await,
+        1
+    );
+
+    let recovery_error = cp
+        .recover_commit(staged.artifact_handle_id)
+        .await
+        .unwrap_err();
+    assert_eq!(recovery_error.error_code(), ErrorCode::Conflict);
+    assert_eq!(std::fs::read(&target).unwrap(), b"mutated temp bytes");
+    assert_eq!(
+        count_events(&cp, EventKind::ArtifactCommitRecoveryRequired).await,
+        1
+    );
+}
+
+#[tokio::test]
 async fn successful_commit_promotes_target_records_identity_retires_staging_and_emits_events() {
     let (cp, _db, dir) = fixture().await;
     let staged = stage_and_verify_bytes(&cp, dir.path(), b"source bytes").await;
@@ -804,6 +848,15 @@ struct CreateTargetBeforeInstall {
 impl CommitArtifactHooks for CreateTargetBeforeInstall {
     fn before_install(&self, context: CommitArtifactInstallContext<'_>) -> Result<(), VoomError> {
         std::fs::write(context.target_path, self.bytes).unwrap();
+        Ok(())
+    }
+}
+
+struct MutateTempBeforeInstall;
+
+impl CommitArtifactHooks for MutateTempBeforeInstall {
+    fn before_install(&self, context: CommitArtifactInstallContext<'_>) -> Result<(), VoomError> {
+        std::fs::write(context.temp_path, b"mutated temp bytes").unwrap();
         Ok(())
     }
 }

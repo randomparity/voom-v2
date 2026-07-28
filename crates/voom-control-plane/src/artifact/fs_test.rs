@@ -116,39 +116,88 @@ async fn unique_temp_sibling_path_stays_next_to_final_path() {
 }
 
 #[tokio::test]
-async fn copy_regular_file_checked_copies_to_new_leaf_and_verifies_hash() {
+async fn expected_aware_copy_validates_the_copy_stream_and_returns_source_facts() {
     let dir = artifact_tempdir();
     let source = dir.path().join("source.bin");
     let destination = dir.path().join("copy.bin");
-    std::fs::write(&source, b"copy me").unwrap();
+    std::fs::write(&source, b"expected copy").unwrap();
+    let expected = observe_regular_file(&source).await.unwrap();
 
-    let facts = copy_regular_file_checked(&source, &destination)
+    let facts = copy_regular_file_with_expected(&source, &destination, &expected)
         .await
         .unwrap();
 
-    assert_eq!(facts.path, destination.canonicalize().unwrap());
-    assert_eq!(facts.size_bytes, 7);
-    assert_eq!(
-        facts.content_hash,
-        format!("blake3:{}", blake3::hash(b"copy me").to_hex())
-    );
-    assert_eq!(std::fs::read(&destination).unwrap(), b"copy me");
+    assert_eq!(facts, expected);
+    assert_eq!(std::fs::read(&destination).unwrap(), b"expected copy");
 }
 
 #[tokio::test]
-async fn copy_error_before_destination_ownership_does_not_remove_concurrent_file() {
+async fn expected_aware_copy_removes_owned_destination_on_expected_fact_mismatch() {
+    let dir = artifact_tempdir();
+    let source = dir.path().join("source.bin");
+    let destination = dir.path().join("copy.bin");
+    std::fs::write(&source, b"unexpected copy").unwrap();
+    let mut expected = observe_regular_file(&source).await.unwrap();
+    expected.content_hash = blake3_checksum(b"different bytes");
+
+    let error = copy_regular_file_with_expected(&source, &destination, &expected)
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.error_code(), ErrorCode::ArtifactChecksumMismatch);
+    assert!(!destination.exists());
+}
+
+#[tokio::test]
+async fn expected_aware_copy_removes_owned_destination_on_expected_size_mismatch() {
+    let dir = artifact_tempdir();
+    let source = dir.path().join("source.bin");
+    let destination = dir.path().join("copy.bin");
+    std::fs::write(&source, b"unexpected size").unwrap();
+    let mut expected = observe_regular_file(&source).await.unwrap();
+    expected.size_bytes += 1;
+
+    let error = copy_regular_file_with_expected(&source, &destination, &expected)
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.error_code(), ErrorCode::ArtifactChecksumMismatch);
+    assert!(!destination.exists());
+}
+
+#[tokio::test]
+async fn expected_aware_copy_does_not_remove_preexisting_destination() {
     let dir = artifact_tempdir();
     let source = dir.path().join("source.bin");
     let destination = dir.path().join("copy.bin");
     std::fs::write(&source, b"copy me").unwrap();
+    let expected = observe_regular_file(&source).await.unwrap();
     std::fs::write(&destination, b"concurrent writer").unwrap();
 
-    let err = copy_regular_file_contents(&source, &destination)
+    let error = copy_regular_file_with_expected(&source, &destination, &expected)
         .await
         .unwrap_err();
 
-    assert!(matches!(err, CopyFileError::NotCreated(_)));
+    assert_eq!(error.error_code(), ErrorCode::ConfigInvalid);
     assert_eq!(std::fs::read(&destination).unwrap(), b"concurrent writer");
+}
+
+#[tokio::test]
+async fn expected_aware_copy_rejects_source_symlink_before_destination_creation() {
+    let dir = artifact_tempdir();
+    let source = dir.path().join("source.bin");
+    let source_link = dir.path().join("source-link.bin");
+    let destination = dir.path().join("copy.bin");
+    std::fs::write(&source, b"source bytes").unwrap();
+    make_file_symlink(&source, &source_link);
+    let expected = observe_regular_file(&source).await.unwrap();
+
+    let error = copy_regular_file_with_expected(&source_link, &destination, &expected)
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.error_code(), ErrorCode::ArtifactUnavailable);
+    assert!(!destination.exists());
 }
 
 #[tokio::test]
@@ -205,6 +254,23 @@ async fn promote_staged_add_only_uses_no_replace_install_when_target_appears_aft
 
     assert_eq!(err.error_code(), ErrorCode::CommitFailure);
     assert_eq!(std::fs::read(&target).unwrap(), b"concurrent writer");
+    assert_no_temp_siblings(dir.path());
+}
+
+#[tokio::test]
+async fn promote_staged_add_only_removes_mutated_temp_and_target_after_install() {
+    let dir = artifact_tempdir();
+    let staging = dir.path().join("staged.bin");
+    let target = dir.path().join("target.bin");
+    std::fs::write(&staging, b"staged bytes").unwrap();
+    let expected = observe_regular_file(&staging).await.unwrap();
+
+    let error = promote_staged_add_only(&staging, &target, &expected, &MutateTempBeforeInstall)
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.error_code(), ErrorCode::ArtifactChecksumMismatch);
+    assert!(!target.exists());
     assert_no_temp_siblings(dir.path());
 }
 
@@ -340,6 +406,15 @@ impl PromotionFailpoint for CreateTargetBeforeInstall {
     }
 }
 
+struct MutateTempBeforeInstall;
+
+impl PromotionFailpoint for MutateTempBeforeInstall {
+    fn before_install(&self, context: PromotionFailpointContext<'_>) -> Result<(), VoomError> {
+        std::fs::write(context.temp_path, b"mutated temp bytes").unwrap();
+        Ok(())
+    }
+}
+
 fn assert_no_temp_siblings(dir: &Path) {
     let temp_siblings = std::fs::read_dir(dir)
         .unwrap()
@@ -347,6 +422,10 @@ fn assert_no_temp_siblings(dir: &Path) {
         .filter(|name| name.contains(".voom-tmp."))
         .collect::<Vec<_>>();
     assert_eq!(temp_siblings, Vec::<String>::new());
+}
+
+fn blake3_checksum(bytes: &[u8]) -> String {
+    format!("blake3:{}", blake3::hash(bytes).to_hex())
 }
 
 fn artifact_tempdir() -> tempfile::TempDir {

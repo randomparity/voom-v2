@@ -1,5 +1,5 @@
 ---
-status: proposed
+status: accepted
 date: 2026-07-28
 issue: 368
 ---
@@ -130,10 +130,10 @@ No recovery state, commit point, or accepted collision changes.
 
 ### General copies
 
-`copy_regular_file_checked` remains the self-contained primitive for callers
-that do not have trusted expected facts. This change does not broaden the
-optimization to backup, workflow terminal-artifact placement, or unrelated
-filesystem copies.
+After the promotion call sites switch, `copy_regular_file_checked` has no
+production caller. Remove it instead of retaining dead duplicate behavior. This
+change does not alter backup, workflow terminal-artifact placement, or unrelated
+filesystem copies; they use separate implementations.
 
 ## Preserved invariants
 
@@ -163,7 +163,7 @@ This change neither widens nor claims to close that threat-model boundary.
 | destination write, flush, metadata, or fsync fails | commit/artifact error; owned temp cleanup attempted |
 | temp changes before install | checksum mismatch; no target |
 | target appears after preflight | no-replace failure; competing target untouched |
-| installed target changes or reads incorrectly | checksum mismatch; owned target cleanup attempted |
+| installed target changes or reads incorrectly | sidecar helper cleans its target; durable generic commit records recovery-required target evidence and publishes no identity |
 | crash with exact persisted temp | recovery revalidates and installs it |
 | crash with exact installed target | recovery revalidates it and removes exact temp alias |
 | recovery sees mismatched temp or target | conflict; bytes retained as evidence |
@@ -172,7 +172,8 @@ This change neither widens nor claims to close that threat-model boundary.
 
 Behavior tests will cover:
 
-- expected-aware copy returns exact source/destination facts;
+- expected-aware copy returns exact source facts and writes exact destination
+  bytes;
 - wrong expected size or hash removes the owned destination;
 - changed staging facts prevent temp or target creation;
 - temp mutation before install prevents publication;
@@ -196,4 +197,41 @@ just ci
 
 ## Benchmark results
 
-Pending prototype.
+The candidate passed the adoption gate.
+
+Environment:
+
+- baseline: merge `61e99cf9cfd59135c5c1c6356800ba6251b21b63`;
+- candidate: the expected-aware implementation on top of design commit
+  `afde65e`;
+- macOS 26.5.2 (25F84), Apple M5 Max, 128 GiB RAM;
+- APFS solid-state data volume, 356 GiB free;
+- Rust/Cargo 1.95.0;
+- optimized `release` profile; and
+- deterministic repeated non-zero byte pattern, with source creation and its
+  initial checksum outside the timed region.
+
+Each row contains seven samples after two warmups. Times are milliseconds.
+
+| Size | Baseline samples | Candidate samples | Baseline median | Candidate median | Improvement |
+|---:|---|---|---:|---:|---:|
+| 64 MiB | 405.723, 403.931, 403.161, 405.126, 404.038, 430.890, 702.581 | 194.091, 195.996, 193.309, 194.605, 194.332, 194.283, 194.502 | 405.126 | 194.332 | 52.0% |
+| 256 MiB | 1700.751, 1710.083, 1702.689, 1701.403, 1710.925, 1718.033, 1973.373 | 689.168, 697.661, 692.139, 689.977, 689.062, 692.069, 689.472 | 1710.083 | 689.977 | 59.7% |
+
+The temporary harness invoked the real `promote_staged_add_only` path, so each
+sample included expected validation, copy, file fsync, temp revalidation,
+no-replace install, both directory fsyncs, and target revalidation. It was
+removed after measurement.
+
+Exact invocation, with `64` replaced by `256` for the second size:
+
+```text
+VOOM_PROMOTION_BENCH_MIB=64 cargo test --release \
+  -p voom-control-plane \
+  artifact::fs::tests::benchmark_add_only_promotion \
+  --all-features -- --ignored --exact --nocapture --test-threads=1
+```
+
+Both improvements exceed the 20% gate, neither size regresses, and the
+candidate's samples remain below every baseline sample. Retain the candidate
+subject to the safety and full-CI gates.
