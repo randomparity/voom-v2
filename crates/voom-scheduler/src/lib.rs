@@ -6,13 +6,10 @@
         reason = "tests favor unwrap over plumbing Result<()> through every assertion"
     )
 )]
-//! Sprint 2 Phase 2: minimal `WorkerSelector` trait + a
-//! single-worker-per-operation default implementation. Sprint 4
-//! swaps in multi-worker scoring (capability + locality + cost)
-//! behind the same trait without changing supervisor or test code.
+//! Deterministic worker selection plus scheduler scoring primitives.
 
 use serde_json::{Value as JsonValue, json};
-use voom_core::{FailureClass, NodeId, TicketId, VoomError, WorkerId};
+use voom_core::{NodeId, TicketId, VoomError, WorkerId};
 use voom_core::{OperationKind, TicketOperation};
 
 pub const SCORING_VERSION: u32 = 1;
@@ -424,12 +421,9 @@ pub struct WorkerView {
 }
 
 pub trait WorkerSelector: Send + Sync + std::fmt::Debug {
-    /// Select exactly one eligible worker for `operation` from
-    /// `candidates`. Errors:
+    /// Select one eligible worker for `operation` from `candidates`. Errors:
     /// - `NoEligibleWorker` if zero candidates advertise the
     ///   operation (or all are at capacity).
-    /// - `AmbiguousWorkerSelection` if more than one candidate
-    ///   advertises the operation and no explicit override is set.
     fn select(
         &self,
         operation: OperationKind,
@@ -437,34 +431,50 @@ pub trait WorkerSelector: Send + Sync + std::fmt::Debug {
     ) -> Result<WorkerId, VoomError>;
 }
 
-/// Default Sprint 2 selector: requires exactly one candidate
-/// advertising the requested operation with capacity to spare.
+/// Select the eligible worker with the lowest capacity utilization.
+///
+/// Equal utilization is resolved by worker id so independent schedulers make
+/// the same choice from the same candidate snapshot.
 #[derive(Debug, Default, Clone, Copy)]
-pub struct SingleWorkerPerKindSelector;
+pub struct LeastLoadedWorkerSelector;
 
-impl WorkerSelector for SingleWorkerPerKindSelector {
+impl WorkerSelector for LeastLoadedWorkerSelector {
     fn select(
         &self,
         operation: OperationKind,
         candidates: &[WorkerView],
     ) -> Result<WorkerId, VoomError> {
-        let eligible: Vec<&WorkerView> = candidates
-            .iter()
-            .filter(|w| w.supports.contains(&operation) && w.active_leases < w.max_parallel)
-            .collect();
-        match eligible.len() {
-            0 => Err(VoomError::NoEligibleWorker(format!(
-                "no worker advertises {operation:?} with spare capacity"
-            ))),
-            1 => Ok(eligible[0].worker_id),
-            n => {
-                let _ = FailureClass::AmbiguousWorkerSelection;
-                Err(VoomError::AmbiguousWorkerSelection(format!(
-                    "{n} workers advertise {operation:?}; explicit override required"
-                )))
+        let mut selected: Option<&WorkerView> = None;
+        for candidate in candidates {
+            if !candidate.supports.contains(&operation)
+                || candidate.active_leases >= candidate.max_parallel
+            {
+                continue;
+            }
+            let replace = match selected {
+                None => true,
+                Some(current) => less_loaded(candidate, current),
+            };
+            if replace {
+                selected = Some(candidate);
             }
         }
+        selected.map_or_else(
+            || {
+                Err(VoomError::NoEligibleWorker(format!(
+                    "no worker advertises {operation:?} with spare capacity"
+                )))
+            },
+            |worker| Ok(worker.worker_id),
+        )
     }
+}
+
+fn less_loaded(candidate: &WorkerView, current: &WorkerView) -> bool {
+    let candidate_load = u64::from(candidate.active_leases) * u64::from(current.max_parallel);
+    let current_load = u64::from(current.active_leases) * u64::from(candidate.max_parallel);
+    candidate_load < current_load
+        || (candidate_load == current_load && candidate.worker_id.0 < current.worker_id.0)
 }
 
 #[cfg(test)]

@@ -385,47 +385,6 @@ async fn pre_lease_no_worker_retries_then_terminal_fails_without_dispatch() -> T
     Ok(())
 }
 
-#[tokio::test]
-async fn pre_lease_ambiguous_worker_terminal_fails_without_dispatch() -> TestResult<()> {
-    let fixture = DurableWorkflowFixture::without_fake_providers().await?;
-    fixture
-        .register_worker_without_runtime(
-            "scanner-a",
-            &[OperationKind::ScanLibrary],
-            1,
-            "ambiguous-a-secret",
-        )
-        .await?;
-    fixture
-        .register_worker_without_runtime(
-            "scanner-b",
-            &[OperationKind::ScanLibrary],
-            1,
-            "ambiguous-b-secret",
-        )
-        .await?;
-    let mut options = WorkflowExecutorOptions::for_tests();
-    options.queue.max_attempts = 2;
-
-    let err = fixture
-        .executor_with_options(options)
-        .submit_and_run(WorkflowPlan::default_ci())
-        .await
-        .unwrap_err();
-
-    assert_eq!(err.source.error_code(), ErrorCode::AmbiguousWorkerSelection);
-    assert_eq!(err.summary.dispatch_count, 0);
-    assert_eq!(err.summary.retry_count, 0);
-    assert_eq!(err.summary.failure_count, 1);
-    assert_eq!(err.summary.peak_active_workflow_leases, 0);
-    fixture.assert_job_failed(err.summary.job_id).await?;
-    fixture
-        .assert_ticket_state_counts(err.summary.job_id, 0, 0, 1)
-        .await?;
-    fixture.assert_lease_count(0).await?;
-    Ok(())
-}
-
 struct DurableWorkflowFixture {
     cp: ControlPlane,
     pool: SqlitePool,

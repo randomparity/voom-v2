@@ -65,6 +65,11 @@ impl WorkerRuntimeRegistry {
         self.runtimes.get(&worker_id).cloned()
     }
 
+    #[must_use]
+    pub(crate) fn contains(&self, worker_id: WorkerId) -> bool {
+        self.runtimes.contains_key(&worker_id)
+    }
+
     /// Iterate the registered `(worker_id, runtime)` pairs, e.g. to probe each
     /// worker's endpoint before dispatch.
     pub fn entries(&self) -> impl Iterator<Item = (WorkerId, &WorkerRuntime)> {

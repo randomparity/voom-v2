@@ -1193,7 +1193,6 @@ impl ControlPlane {
     ///
     /// # Errors
     /// Propagates database errors from [`Self::policy_runtime_registry`].
-    #[cfg(test)]
     pub(crate) async fn live_policy_runtime_registry(
         &self,
     ) -> Result<WorkerRuntimeRegistry, VoomError> {

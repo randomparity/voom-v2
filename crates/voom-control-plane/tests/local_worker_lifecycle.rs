@@ -37,13 +37,11 @@ async fn start_local_worker_registers_endpoint_then_retires_on_shutdown() {
     assert_eq!(running.handle().endpoint.ip().to_string(), "127.0.0.1");
     assert_ne!(running.handle().endpoint.port(), 0);
 
-    let live = live_worker_named(&cp, "local-ffmpeg").await;
-    assert!(
-        live.is_some(),
-        "a live local-ffmpeg worker must exist after start_local_worker"
+    assert_eq!(
+        live_worker_ids(&cp, "local-ffmpeg").await,
+        vec![worker_id.0],
+        "the started local-ffmpeg worker must be live"
     );
-    let live_id = live.unwrap();
-    assert_eq!(live_id, worker_id.0);
 
     let endpoint = recorded_endpoint(&url, worker_id.0).await;
     assert!(
@@ -59,7 +57,7 @@ async fn start_local_worker_registers_endpoint_then_retires_on_shutdown() {
     running.shutdown_and_retire(&cp).await.unwrap();
 
     assert!(
-        live_worker_named(&cp, "local-ffmpeg").await.is_none(),
+        live_worker_ids(&cp, "local-ffmpeg").await.is_empty(),
         "the worker must not be in the live set after shutdown_and_retire"
     );
     let inspection = cp.get_worker_inspection(worker_id).await.unwrap().unwrap();
@@ -96,29 +94,73 @@ async fn start_local_worker_self_heals_a_stale_same_name_worker() {
 
     // The prior same-name worker was self-healed (retired), so only the new one
     // is live.
-    let live = live_worker_named(&cp, "local-ffmpeg").await;
-    assert_eq!(live, Some(second_id.0));
+    assert_eq!(
+        live_worker_ids(&cp, "local-ffmpeg").await,
+        vec![second_id.0]
+    );
     let first_inspection = cp.get_worker_inspection(first_id).await.unwrap().unwrap();
     assert_eq!(first_inspection.worker.status, WorkerStatus::Retired);
 
     second.shutdown_and_retire(&cp).await.unwrap();
 }
 
-async fn live_worker_named(cp: &ControlPlane, base: &str) -> Option<u64> {
+#[tokio::test]
+async fn start_local_worker_preserves_reachable_same_kind_siblings() {
+    cargo_build_package("voom-ffmpeg-worker").unwrap();
+
+    let db = NamedTempFile::new().unwrap();
+    let url = format!("sqlite://{}", db.path().display());
+    voom_store::init(&url).await.unwrap();
+    let pool = voom_store::connect(&url).await.unwrap();
+    let cp = ControlPlane::open_with_pool(pool, std::sync::Arc::new(voom_core::SystemClock))
+        .await
+        .unwrap();
+
+    let first = cp
+        .start_local_worker(LocalWorkerKind::Ffmpeg)
+        .await
+        .unwrap();
+    let second = cp
+        .start_local_worker(LocalWorkerKind::Ffmpeg)
+        .await
+        .unwrap();
+    let first_id = first.handle().worker_id;
+    let second_id = second.handle().worker_id;
+
+    assert_eq!(
+        live_worker_ids(&cp, "local-ffmpeg").await,
+        vec![first_id.0, second_id.0],
+        "starting a reachable sibling must add capacity without retiring the first worker"
+    );
+
+    first.shutdown_and_retire(&cp).await.unwrap();
+    assert_eq!(
+        live_worker_ids(&cp, "local-ffmpeg").await,
+        vec![second_id.0]
+    );
+    second.shutdown_and_retire(&cp).await.unwrap();
+}
+
+async fn live_worker_ids(cp: &ControlPlane, base: &str) -> Vec<u64> {
     let prefix = format!("{base}-");
-    let inspections = cp.list_worker_inspections(None, 1000).await.unwrap();
-    inspections
+    let mut ids = cp
+        .list_worker_inspections(None, 1000)
+        .await
+        .unwrap()
         .into_iter()
         .filter(|inspection| {
             inspection.worker.name == base || inspection.worker.name.starts_with(&prefix)
         })
-        .find(|inspection| {
+        .filter(|inspection| {
             matches!(
                 inspection.worker.status,
                 WorkerStatus::Registered | WorkerStatus::Active
             )
         })
         .map(|inspection| inspection.worker.id.0)
+        .collect::<Vec<_>>();
+    ids.sort_unstable();
+    ids
 }
 
 async fn recorded_endpoint(url: &str, worker_id: u64) -> String {

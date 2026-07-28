@@ -489,15 +489,49 @@ async fn terminal_worker_ineligibility_never_enters_capacity_wait() {
 }
 
 #[tokio::test]
-async fn ambiguous_worker_selection_is_recorded_before_lease_dispatch() {
-    let fixture = ExecutorFixture::ambiguous_workers().await;
-    let err = fixture.run().await.unwrap_err();
+async fn equal_load_dispatches_to_lowest_worker_id() {
+    let fixture = ExecutorFixture::two_workers(1).await;
+    let first = fixture.worker_id();
+    let summary = fixture.run().await.unwrap();
 
-    assert_eq!(err.source.error_code(), ErrorCode::AmbiguousWorkerSelection);
-    assert_eq!(err.summary.dispatch_count, 0);
-    assert_eq!(err.summary.peak_active_workflow_leases, 0);
-    assert_eq!(err.summary.failure_count, 1);
-    assert_eq!(fixture.lease_count().await, 0);
+    assert_eq!(summary.dispatch_count, 1);
+    assert_eq!(summary.failure_count, 0);
+    assert_eq!(fixture.worker_dispatch_count(first), 1);
+    assert_eq!(
+        fixture
+            .clients
+            .iter()
+            .filter(|(worker_id, _)| **worker_id != first)
+            .map(|(_, client)| client.dispatch_count())
+            .sum::<u32>(),
+        0
+    );
+}
+
+#[tokio::test]
+async fn least_loaded_selection_uses_two_workers_concurrently() {
+    let fixture = ExecutorFixture::two_workers(4).await;
+    let summary = fixture
+        .run_with_policy(ConcurrencyPolicy {
+            max_in_flight_dispatches: 4,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(summary.peak_active_workflow_leases, 2);
+    assert_eq!(summary.dispatch_count, 4);
+    assert!(
+        fixture
+            .clients
+            .values()
+            .all(|client| client.dispatch_count() > 0)
+    );
+    assert!(
+        fixture
+            .clients
+            .keys()
+            .all(|worker_id| summary.max_active_for_worker(*worker_id) == 1)
+    );
 }
 
 #[tokio::test]
@@ -2362,8 +2396,8 @@ impl ExecutorFixture {
         fixture
     }
 
-    async fn ambiguous_workers() -> Self {
-        let mut fixture = Self::without_workers(1).await;
+    async fn two_workers(ticket_count: usize) -> Self {
+        let mut fixture = Self::without_workers(ticket_count).await;
         let first = fixture
             .register_worker(
                 "hash-worker-a",
@@ -2372,7 +2406,7 @@ impl ExecutorFixture {
                 FakeBehavior::Success,
             )
             .await;
-        let _second = fixture
+        fixture
             .register_worker(
                 "hash-worker-b",
                 OperationKind::HashFile,
