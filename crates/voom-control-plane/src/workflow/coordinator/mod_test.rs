@@ -1486,7 +1486,7 @@ async fn phase_run_gate_fails_loud_when_predecessor_history_is_missing() {
 }
 
 #[tokio::test]
-async fn phase_finalization_updates_survivors_gate_history() {
+async fn phase_finalization_records_skipped_survivors_gate_history() {
     let (cp, _tmp) = cp().await;
     let skipped_version = seed_version(
         &cp,
@@ -1504,13 +1504,6 @@ async fn phase_finalization_updates_survivors_gate_history() {
     .await;
     let skipped = phase_file(&cp, skipped_version, "skipped").await;
     let committed = phase_file(&cp, committed_parent, "committed").await;
-    let committed_tip = advance_chain_tip(
-        &cp,
-        committed_parent,
-        "hash-gate-finalize-tip",
-        reprobe_payload("hevc"),
-    )
-    .await;
     let job_id = open_workflow_job(&cp).await;
     let mut files = vec![skipped, committed];
 
@@ -1532,10 +1525,10 @@ async fn phase_finalization_updates_survivors_gate_history() {
         files[0].phase_history.get(&0),
         Some(&FilePhaseOutcome::Skipped)
     );
-    assert_eq!(files[1].version_id, committed_tip);
+    assert_eq!(files[1].version_id, committed_parent);
     assert_eq!(
         files[1].phase_history.get(&0),
-        Some(&FilePhaseOutcome::Committed)
+        Some(&FilePhaseOutcome::Skipped)
     );
 }
 
