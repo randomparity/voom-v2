@@ -16,7 +16,7 @@ use voom_policy::compiled::{
 use voom_policy::{
     ComparisonOp, CompiledCondition, CompiledOperation, CompiledPolicy, CompiledRule,
     CompiledValue, DiagnosticSeverity, MediaSnapshotInput, PolicyDiagnostic, PolicyInputSetDraft,
-    RuleMatchMode, TrackFilter, TrackTarget,
+    RuleMatchMode, TrackFilter, TrackTarget, validate_empty_scan_input,
 };
 
 use crate::{
@@ -123,7 +123,7 @@ pub fn plan_phase(
 }
 
 fn validate_input(input: &PolicyInputSetDraft) -> Result<(), PlanGenerationError> {
-    if input.media_snapshots.is_empty() {
+    if input.media_snapshots.is_empty() && validate_empty_scan_input(input).is_err() {
         return Err(PlanGenerationError {
             diagnostics: vec![PlanningDiagnostic::error(
                 PlanningDiagnosticCode::EmptyInputSet,

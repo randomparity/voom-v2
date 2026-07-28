@@ -2,7 +2,8 @@ use serde_json::json;
 use time::OffsetDateTime;
 use voom_core::{ErrorCode, FileVersionId, MediaSnapshotId, MediaWorkId, VoomError};
 use voom_policy::{
-    FixtureName, POLICY_INPUT_MAX_MEMBERS, PolicyInputSetDraft, TargetRef, load_fixture,
+    FixtureName, POLICY_INPUT_MAX_MEMBERS, PolicyInputSetDraft, PolicyInputSourceKind, TargetRef,
+    load_fixture,
 };
 use voom_store::repo::events::EventFilter;
 use voom_store::repo::identity::{DiscoveredFile, FileLocationKind, IngestOutcome};
@@ -654,6 +655,159 @@ async fn whole_scan_includes_video_and_skips_non_video() {
     );
 }
 
+#[tokio::test]
+async fn whole_scan_empty_database_creates_durable_zero_member_input() {
+    let (cp, _tmp) = cp().await;
+    let before_events = event_count(&cp).await;
+
+    let result = cp
+        .create_policy_input_set_from_whole_scan(WholeScanInput {
+            slug: "empty-library".to_owned(),
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(result.included_count, 0);
+    assert_eq!(result.skipped_count, 0);
+    let input = cp
+        .get_policy_input_set(result.input_set_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(input.source_kind, PolicyInputSourceKind::Imported);
+    assert_eq!(input.fixture_labels, ["whole-scan-empty-library"]);
+    assert!(input.media_snapshots.is_empty());
+    assert_eq!(
+        policy_input_aggregate_counts(&cp).await,
+        PolicyInputAggregateCounts {
+            input_sets: 1,
+            fixture_labels: 1,
+            ..PolicyInputAggregateCounts::default()
+        }
+    );
+    assert_eq!(event_count(&cp).await, before_events);
+}
+
+#[tokio::test]
+async fn whole_scan_all_non_video_creates_empty_input_and_counts_skip() {
+    let (cp, _tmp) = cp().await;
+    scanned_snapshot_with_payload(
+        &cp,
+        "/srv/song.m4a",
+        "hash-audio-only",
+        json!({
+            "container": "mp4",
+            "streams": [
+                {"id": "a-0", "index": 0, "kind": "audio", "codec_name": "aac"}
+            ]
+        }),
+    )
+    .await;
+
+    let result = cp
+        .create_policy_input_set_from_whole_scan(WholeScanInput {
+            slug: "audio-only-library".to_owned(),
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(result.included_count, 0);
+    assert_eq!(result.skipped_count, 1);
+    let input = cp
+        .get_policy_input_set(result.input_set_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(input.media_snapshots.is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn concurrent_empty_whole_scan_creation_commits_one_complete_aggregate() {
+    let (cp, _tmp) = cp().await;
+    let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+    let mut handles = Vec::new();
+    for _ in 0..2 {
+        let cp = cp.clone();
+        let barrier = barrier.clone();
+        handles.push(tokio::spawn(async move {
+            barrier.wait().await;
+            cp.create_policy_input_set_from_whole_scan(WholeScanInput {
+                slug: "concurrent-empty".to_owned(),
+            })
+            .await
+        }));
+    }
+
+    let mut successes = 0;
+    let mut failures = 0;
+    for handle in handles {
+        match handle.await.unwrap() {
+            Ok(_) => successes += 1,
+            Err(error) => {
+                assert_eq!(error.error_code(), ErrorCode::DbUnreachable);
+                failures += 1;
+            }
+        }
+    }
+
+    assert_eq!((successes, failures), (1, 1));
+    assert_eq!(
+        policy_input_aggregate_counts(&cp).await,
+        PolicyInputAggregateCounts {
+            input_sets: 1,
+            fixture_labels: 1,
+            ..PolicyInputAggregateCounts::default()
+        }
+    );
+}
+
+#[tokio::test]
+async fn empty_scan_fixture_insert_failure_rolls_back_parent_and_emits_no_event() {
+    let (cp, _tmp) = cp().await;
+    let before_events = event_count(&cp).await;
+    sqlx::query(
+        "CREATE TRIGGER fail_empty_scan_label \
+         BEFORE INSERT ON policy_input_set_fixture_labels \
+         BEGIN SELECT RAISE(ABORT, 'forced empty scan label failure'); END",
+    )
+    .execute(cp.pool_for_test())
+    .await
+    .unwrap();
+
+    let error = cp
+        .create_policy_input_set_from_whole_scan(WholeScanInput {
+            slug: "rollback-empty".to_owned(),
+        })
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.error_code(), ErrorCode::DbUnreachable);
+    assert_eq!(
+        policy_input_aggregate_counts(&cp).await,
+        PolicyInputAggregateCounts::default()
+    );
+    assert_eq!(event_count(&cp).await, before_events);
+}
+
+#[tokio::test]
+async fn generic_targetless_import_remains_invalid_without_durable_state() {
+    let (cp, _tmp) = cp().await;
+    let before_events = event_count(&cp).await;
+    let mut draft = load_fixture(FixtureName::SyntheticCompliantBaseline).unwrap();
+    draft.source_kind = PolicyInputSourceKind::Imported;
+    draft.synthetic_targets.clear();
+    draft.media_snapshots.clear();
+
+    let error = cp.create_policy_input_set(draft).await.unwrap_err();
+
+    assert_eq!(error.error_code(), ErrorCode::PolicyValidationError);
+    assert_eq!(
+        policy_input_aggregate_counts(&cp).await,
+        PolicyInputAggregateCounts::default()
+    );
+    assert_eq!(event_count(&cp).await, before_events);
+}
+
 async fn library_root_at(
     cp: &crate::ControlPlane,
     slug: &str,
@@ -731,6 +885,38 @@ async fn root_scoped_scan_includes_only_files_under_the_root() {
     assert_eq!(
         input_set.media_snapshots[0].target,
         PolicyInputTargetRef::FileVersion { id: under }
+    );
+}
+
+#[tokio::test]
+async fn root_scoped_scan_with_no_eligible_files_creates_durable_empty_input() {
+    let (cp, _tmp) = cp().await;
+    let root_id = library_root_at(&cp, "empty-root-library", "/media/empty").await;
+
+    let result = cp
+        .create_policy_input_set_from_root(RootScopedScanInput {
+            slug: "empty-root".to_owned(),
+            library_root_id: root_id,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(result.included_count, 0);
+    assert_eq!(result.skipped_count, 0);
+    let input = cp
+        .get_policy_input_set(result.input_set_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(input.fixture_labels, ["root-scan-empty-root"]);
+    assert!(input.media_snapshots.is_empty());
+    assert_eq!(
+        policy_input_aggregate_counts(&cp).await,
+        PolicyInputAggregateCounts {
+            input_sets: 1,
+            fixture_labels: 1,
+            ..PolicyInputAggregateCounts::default()
+        }
     );
 }
 

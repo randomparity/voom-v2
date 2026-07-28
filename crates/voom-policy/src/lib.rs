@@ -38,7 +38,7 @@ pub use model::{
     MediaSnapshotInput, POLICY_INPUT_MAX_MEMBERS, POLICY_INPUT_MAX_SERIALIZED_BYTES,
     PolicyInputSetDraft, PolicyInputSetValidationError, PolicyInputSourceKind,
     PolicySyntheticTarget, QualityProfileSelection, TargetKind, TargetRef,
-    ValidatedPolicyInputSetDraft, validate_input_set,
+    ValidatedPolicyInputSetDraft, validate_empty_scan_input, validate_input_set,
 };
 pub use parser::{ParseError, parse_policy_source};
 pub use pipeline::{

@@ -42,7 +42,8 @@ The existing policy-input repository transaction remains the sole persistence
 boundary. Parent, fixture-label, and member inserts commit together. An
 injected child-insert failure rolls the parent back. Concurrent creation of the
 same empty slug is serialized by SQLite and the unique slug constraint: one
-aggregate commits and the other returns `CONFLICT`, with no partial duplicate.
+aggregate commits and the other returns the repository's existing constraint
+error, with no partial duplicate.
 
 Empty execution creates the normal owning job and a succeeded workflow summary
 with zero planned, committed, failed, and skipped counts. It creates no phases,

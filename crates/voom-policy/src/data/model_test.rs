@@ -85,6 +85,34 @@ fn invalid_input_cannot_produce_validated_draft() {
 }
 
 #[test]
+fn empty_scan_draft_uses_explicit_validation_without_weakening_generic_validation() {
+    let mut input = minimal_input_set();
+    input.source_kind = PolicyInputSourceKind::Imported;
+    input.synthetic_targets.clear();
+    input.media_snapshots.clear();
+
+    assert!(matches!(
+        ValidatedPolicyInputSetDraft::new(input.clone()),
+        Err(super::PolicyInputSetValidationError::MissingSnapshotOrBundleTarget)
+    ));
+
+    let validated = ValidatedPolicyInputSetDraft::new_empty_scan(input.clone()).unwrap();
+    assert_eq!(validated.into_draft(), input);
+}
+
+#[test]
+fn empty_scan_validation_rejects_non_imported_or_member_bearing_drafts() {
+    let mut non_imported = minimal_input_set();
+    non_imported.synthetic_targets.clear();
+    non_imported.media_snapshots.clear();
+    assert!(ValidatedPolicyInputSetDraft::new_empty_scan(non_imported).is_err());
+
+    let mut member_bearing = minimal_input_set();
+    member_bearing.source_kind = PolicyInputSourceKind::Imported;
+    assert!(ValidatedPolicyInputSetDraft::new_empty_scan(member_bearing).is_err());
+}
+
+#[test]
 fn aggregate_member_budget_accepts_boundary_and_rejects_one_over() {
     let boundary = input_with_member_count(POLICY_INPUT_MAX_MEMBERS);
     assert!(validate_input_set(&boundary).is_ok());

@@ -81,6 +81,13 @@ impl ControlPlane {
     ) -> Result<PolicyInputSet, VoomError> {
         let input = ValidatedPolicyInputSetDraft::new(input)
             .map_err(|error| VoomError::PolicyValidationError(error.message()))?;
+        self.persist_policy_input_set(input).await
+    }
+
+    async fn persist_policy_input_set(
+        &self,
+        input: ValidatedPolicyInputSetDraft,
+    ) -> Result<PolicyInputSet, VoomError> {
         let query = MediaSnapshotFileVersionQuery::new(
             input
                 .as_draft()
@@ -102,6 +109,19 @@ impl ControlPlane {
             .await?;
         commit_tx(tx).await?;
         Ok(out)
+    }
+
+    async fn create_scan_policy_input_set(
+        &self,
+        input: PolicyInputSetDraft,
+    ) -> Result<PolicyInputSet, VoomError> {
+        let input = if input.media_snapshots.is_empty() && input.bundle_targets.is_empty() {
+            ValidatedPolicyInputSetDraft::new_empty_scan(input)
+        } else {
+            ValidatedPolicyInputSetDraft::new(input)
+        }
+        .map_err(|error| VoomError::PolicyValidationError(error.message()))?;
+        self.persist_policy_input_set(input).await
     }
 
     /// Create a durable policy input set from scan-created durable rows.
@@ -242,7 +262,7 @@ impl ControlPlane {
             quality_profiles: Vec::new(),
             issues: Vec::new(),
         };
-        let created = self.create_policy_input_set(draft).await?;
+        let created = self.create_scan_policy_input_set(draft).await?;
         Ok(WholeScanInputResult {
             input_set_id: created.id,
             slug: created.slug,
@@ -317,7 +337,7 @@ impl ControlPlane {
             quality_profiles: Vec::new(),
             issues: Vec::new(),
         };
-        let created = self.create_policy_input_set(draft).await?;
+        let created = self.create_scan_policy_input_set(draft).await?;
         Ok(RootScopedScanInputResult {
             input_set_id: created.id,
             slug: created.slug,

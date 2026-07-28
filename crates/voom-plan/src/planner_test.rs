@@ -113,6 +113,44 @@ fn input_with_snapshot(snapshot: MediaSnapshotInput) -> PolicyInputSetDraft {
     }
 }
 
+fn empty_scan_input() -> PolicyInputSetDraft {
+    let mut input = input(None);
+    input.source_kind = PolicyInputSourceKind::Imported;
+    input.synthetic_targets.clear();
+    input.media_snapshots.clear();
+    input
+}
+
+#[test]
+fn imported_empty_scan_plans_as_zero_work_but_generic_empty_input_remains_invalid() {
+    let policy = policy(CompiledOperation::SetContainer(
+        voom_policy::compiled::CompiledSetContainerOperation {
+            container: "mkv".to_owned(),
+        },
+    ));
+    let plan = generate_plan(PlanningRequest {
+        policy: policy.clone(),
+        input: empty_scan_input(),
+        context: PlanningContext::default(),
+    })
+    .unwrap();
+    assert_eq!(plan.summary, crate::PlanSummary::default());
+    assert!(plan.nodes.is_empty());
+
+    let mut generic_empty = empty_scan_input();
+    generic_empty.source_kind = PolicyInputSourceKind::Manual;
+    let error = generate_plan(PlanningRequest {
+        policy,
+        input: generic_empty,
+        context: PlanningContext::default(),
+    })
+    .unwrap_err();
+    assert_eq!(
+        error.diagnostics[0].code,
+        PlanningDiagnosticCode::EmptyInputSet
+    );
+}
+
 fn snapshot_with(
     container: Option<&str>,
     video_codec: Option<&str>,
