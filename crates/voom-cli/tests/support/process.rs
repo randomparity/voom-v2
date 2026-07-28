@@ -4,6 +4,7 @@
 )]
 
 use std::io::{self, Read};
+use std::os::unix::process::CommandExt;
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -23,6 +24,7 @@ pub struct BoundedOutput {
 pub fn run_bounded(command: &mut Command, timeout: Duration) -> io::Result<BoundedOutput> {
     let command_text = format!("{command:?}");
     let mut child = command
+        .process_group(0)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()?;
@@ -108,11 +110,25 @@ fn wait_until_deadline(child: &mut Child, timeout: Duration) -> io::Result<(Exit
         }
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
-            child.kill()?;
+            kill_process_group(child)?;
             return child.wait().map(|status| (status, true));
         }
         std::thread::sleep(remaining.min(Duration::from_millis(10)));
     }
+}
+
+fn kill_process_group(child: &mut Child) -> io::Result<()> {
+    let process_group = format!("-{}", child.id());
+    let status = Command::new("/bin/kill")
+        .args(["-KILL", &process_group])
+        .status()?;
+    if status.success() {
+        return Ok(());
+    }
+    if child.try_wait()?.is_none() {
+        child.kill()?;
+    }
+    Ok(())
 }
 
 fn join_drain(

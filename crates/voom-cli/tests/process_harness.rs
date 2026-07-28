@@ -36,7 +36,7 @@ fn bounded_process_preserves_nonzero_status_and_output() {
 
 #[test]
 fn bounded_process_kills_and_reaps_at_deadline() {
-    let mut command = shell("printf 'started'; exec sleep 2");
+    let mut command = shell("printf 'started'; sleep 2 & wait");
     let started = Instant::now();
 
     let output = run_bounded(&mut command, Duration::from_millis(100)).unwrap();
