@@ -20,7 +20,9 @@ The durable execution path already records stronger evidence:
   version, produced location, and reprobe snapshot;
 - the commit record binds the selected source and produced version/location to
   the artifact and verification;
-- the verification binds the artifact to the workflow ticket and lease;
+- policy-verification rows bind the artifact to the workflow ticket and lease;
+  generic staged-artifact verification rows predate that link and leave both
+  columns null;
 - the location and snapshot bind to the produced version.
 
 The finalizer discards this evidence and consults global lineage state instead.
@@ -49,9 +51,9 @@ No schema, DSL, compiled-policy, or ticket-result wire change is required.
 
 ## Production Evidence
 
-For one planned file and phase node, `ticket_ids_for_phase_node` supplies the
-only candidate tickets. A candidate is job-produced lineage only when all of
-these facts agree:
+For one planned file and phase node, candidate tickets are scoped by job,
+phase, node, and rendered source file version. A candidate is job-produced
+lineage only when all of these facts agree:
 
 1. The ticket belongs to the current job, is succeeded, and is one of the
    current phase-node ticket ids.
@@ -60,8 +62,10 @@ these facts agree:
 4. Its result commit record is `committed`.
 5. The commit record's source version, artifact handle, verification, produced
    version, and produced location equal the ticket result.
-6. The verification succeeded and its workflow ticket and lease equal the
-   result's ticket and lease.
+6. The result lease belongs to the result ticket. The verification succeeded,
+   and any workflow ticket/lease link it carries equals the result ticket and
+   lease. Generic staged-artifact verification requires both links to remain
+   null rather than accepting a partial link.
 7. The produced location belongs to the produced version.
 8. The reprobe snapshot belongs to the produced version.
 9. The produced version belongs to the selected file asset.
@@ -71,11 +75,13 @@ reprobe snapshot. The finalizer does not substitute the active tip or another
 live location. The exact location may since have been retired; its durable
 identity remains the correct attribution.
 
-Every succeeded scoped ticket result is inspected. A result that declares some
-but not all same-lineage commit fields, contains malformed identifiers, points
-at missing rows, or disagrees with durable evidence fails visibly. More than
-one matching same-lineage result for a phase node is a conflict rather than an
-ordering choice.
+Every succeeded ticket result in the job-owned phase invocation is inspected.
+A result that declares some but not all same-lineage commit fields, contains
+malformed identifiers, points at missing rows, or disagrees with durable
+evidence fails visibly. A phase may contain several mutating operations for one
+file; the greatest exact result file-version ID is the last serialized
+same-lineage commit and becomes the phase output. Two exact tickets claiming
+that same latest result version are a conflict rather than an ordering choice.
 
 ## Outcome Semantics
 

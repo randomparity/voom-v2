@@ -223,6 +223,7 @@ expression: json
         ],
         "produced_file_version_id": "[produced_file_version_id]",
         "produced_file_location_id": "[produced_file_location_id]",
+        "artifact_handle_id": 1,
         "reprobe_snapshot_id": "[reprobe_snapshot_id]"
       }
     ],
