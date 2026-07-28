@@ -26,6 +26,18 @@ pub(crate) struct PrimaryBundleResolution {
 }
 
 impl ControlPlane {
+    pub(crate) async fn find_primary_bundle_for_file_version(
+        &self,
+        file_version_id: FileVersionId,
+    ) -> Result<Option<BundleId>, VoomError> {
+        let mut tx = begin_tx(&self.pool).await?;
+        let (_, bundle_id) = self
+            .primary_bundle_for_file_version_in_tx(&mut tx, file_version_id)
+            .await?;
+        commit_tx(tx).await?;
+        Ok(bundle_id)
+    }
+
     pub(crate) async fn resolve_or_create_primary_bundle_in_tx(
         &self,
         tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
@@ -33,34 +45,19 @@ impl ControlPlane {
         source_path: &Path,
         observed_at: OffsetDateTime,
     ) -> Result<PrimaryBundleResolution, VoomError> {
-        let version = self
-            .identity
-            .get_file_version_in_tx(tx, file_version_id)
-            .await?
-            .ok_or_else(|| VoomError::NotFound(format!("file_version {file_version_id}")))?;
-        self.identity
-            .require_active_file_versions_in_tx(tx, &[(version.file_asset_id, file_version_id)])
+        let (file_asset_id, bundle_id) = self
+            .primary_bundle_for_file_version_in_tx(tx, file_version_id)
             .await?;
-        if let Some(member) = self
-            .bundles
-            .get_member_by_file_asset_in_tx(tx, version.file_asset_id)
-            .await?
-        {
-            if member.role != BundleMemberRole::PrimaryVideo {
-                return Err(VoomError::Conflict(format!(
-                    "primary asset {} is already a {:?} bundle member",
-                    version.file_asset_id, member.role
-                )));
-            }
+        if let Some(bundle_id) = bundle_id {
             return Ok(PrimaryBundleResolution {
-                bundle_id: member.bundle_id,
+                bundle_id,
                 created: false,
             });
         }
         let bundle_id = create_primary_bundle_identity_in_tx(
             self,
             tx,
-            version.file_asset_id,
+            file_asset_id,
             display_name_from_path(source_path),
             observed_at,
         )
@@ -69,6 +66,35 @@ impl ControlPlane {
             bundle_id,
             created: true,
         })
+    }
+
+    async fn primary_bundle_for_file_version_in_tx(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        file_version_id: FileVersionId,
+    ) -> Result<(FileAssetId, Option<BundleId>), VoomError> {
+        let version = self
+            .identity
+            .get_file_version_in_tx(tx, file_version_id)
+            .await?
+            .ok_or_else(|| VoomError::NotFound(format!("file_version {file_version_id}")))?;
+        self.identity
+            .require_active_file_versions_in_tx(tx, &[(version.file_asset_id, file_version_id)])
+            .await?;
+        let member = self
+            .bundles
+            .get_member_by_file_asset_in_tx(tx, version.file_asset_id)
+            .await?;
+        let Some(member) = member else {
+            return Ok((version.file_asset_id, None));
+        };
+        if member.role != BundleMemberRole::PrimaryVideo {
+            return Err(VoomError::Conflict(format!(
+                "primary asset {} is already a {:?} bundle member",
+                version.file_asset_id, member.role
+            )));
+        }
+        Ok((version.file_asset_id, Some(member.bundle_id)))
     }
 
     /// Create an `AssetBundle`. Emits `asset_bundle.created`.

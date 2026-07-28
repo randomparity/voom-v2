@@ -77,6 +77,14 @@ pub struct ExecuteExtractAudioInput {
     pub backup_root: Option<PathBuf>,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct FirstExtractPlanInput {
+    pub(crate) source_file_version_id: FileVersionId,
+    pub(crate) source_location_id: Option<FileLocationId>,
+    pub(crate) operation_payload: serde_json::Value,
+    pub(crate) target_dir: PathBuf,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ExecuteTranscodeAudioReport {
     pub job_id: JobId,
@@ -2039,32 +2047,14 @@ async fn prepare_extract_paths(
     result_probe: &dyn commit::AudioResultProbeDispatcher,
 ) -> Result<ExtractExecutionPaths, VoomError> {
     let targets = stage::extract_target_paths(&input.target_dir, source_path, selection).await?;
-    let operation_token = extract_operation_token(
+    let (new_operation, outputs) = new_extract_plan(
         input.source_file_version_id,
+        input.source_bundle_id,
         source_media_snapshot_id,
-        selection.operation_id.as_deref(),
+        selection,
         &targets,
     );
-    let outputs = selection
-        .outputs
-        .iter()
-        .zip(&targets)
-        .map(|(output, target)| NewAudioExtractOutput {
-            output_id: output.output_id.clone(),
-            source_snapshot_stream_id: output.stream.snapshot_stream_id.clone(),
-            source_provider_stream_index: output.stream.provider_stream_index,
-            bundle_role: commit::bundle_role(output.role).as_str().to_owned(),
-            target_path: target.display().to_string(),
-        })
-        .collect::<Vec<_>>();
     let repo = &cp.audio_extract_operations;
-    let new_operation = NewAudioExtractOperation {
-        operation_key: operation_token,
-        operation_id: selection.operation_id.clone(),
-        source_file_version_id: input.source_file_version_id,
-        source_bundle_id: input.source_bundle_id,
-        source_media_snapshot_id: MediaSnapshotId(source_media_snapshot_id),
-    };
     if let Some(operation) = repo.get_exact_by_key(&new_operation, &outputs).await? {
         return Ok(ExtractExecutionPaths { targets, operation });
     }
@@ -2086,6 +2076,85 @@ async fn prepare_extract_paths(
         .create_planned(new_operation, &outputs, cp.clock().now())
         .await?;
     Ok(ExtractExecutionPaths { targets, operation })
+}
+
+pub(crate) async fn plan_first_extract_with_bundle(
+    cp: &ControlPlane,
+    input: FirstExtractPlanInput,
+) -> Result<voom_core::BundleId, VoomError> {
+    let selected =
+        source::select_source(cp, input.source_file_version_id, input.source_location_id).await?;
+    let snapshot =
+        source::read_media_snapshot(cp, input.source_file_version_id, &input.operation_payload)
+            .await?;
+    let selection = selection::extract_selection_from_payload_and_snapshot(
+        &input.operation_payload,
+        &snapshot,
+    )?;
+    let source_path = Path::new(&selected.location.value);
+    let targets = stage::extract_target_paths(&input.target_dir, source_path, &selection).await?;
+    let mut tx = crate::cases::begin_immediate_tx(&cp.pool).await?;
+    let resolution = cp
+        .resolve_or_create_primary_bundle_in_tx(
+            &mut tx,
+            input.source_file_version_id,
+            source_path,
+            cp.clock().now(),
+        )
+        .await?;
+    let (operation, outputs) = new_extract_plan(
+        input.source_file_version_id,
+        resolution.bundle_id,
+        snapshot.id.0,
+        &selection,
+        &targets,
+    );
+    SqliteAudioExtractOperationRepo::create_planned_in_tx(
+        &mut tx,
+        &operation,
+        &outputs,
+        cp.clock().now(),
+    )
+    .await?;
+    crate::cases::commit_tx(tx).await?;
+    Ok(resolution.bundle_id)
+}
+
+fn new_extract_plan(
+    source_file_version_id: FileVersionId,
+    source_bundle_id: voom_core::BundleId,
+    source_media_snapshot_id: u64,
+    selection: &selection::ExtractAudioSelectionPlan,
+    targets: &[PathBuf],
+) -> (NewAudioExtractOperation, Vec<NewAudioExtractOutput>) {
+    let operation_key = extract_operation_token(
+        source_file_version_id,
+        source_media_snapshot_id,
+        selection.operation_id.as_deref(),
+        targets,
+    );
+    let outputs = selection
+        .outputs
+        .iter()
+        .zip(targets)
+        .map(|(output, target)| NewAudioExtractOutput {
+            output_id: output.output_id.clone(),
+            source_snapshot_stream_id: output.stream.snapshot_stream_id.clone(),
+            source_provider_stream_index: output.stream.provider_stream_index,
+            bundle_role: commit::bundle_role(output.role).as_str().to_owned(),
+            target_path: target.display().to_string(),
+        })
+        .collect();
+    (
+        NewAudioExtractOperation {
+            operation_key,
+            operation_id: selection.operation_id.clone(),
+            source_file_version_id,
+            source_bundle_id,
+            source_media_snapshot_id: MediaSnapshotId(source_media_snapshot_id),
+        },
+        outputs,
+    )
 }
 
 async fn claim_extract_dispatch(

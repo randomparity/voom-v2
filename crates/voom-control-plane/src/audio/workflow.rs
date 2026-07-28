@@ -1,6 +1,5 @@
 use serde_json::Value;
-use sqlx::Row;
-use voom_core::{BundleId, FileVersionId, VoomError};
+use voom_core::VoomError;
 use voom_worker_protocol::{
     ExtractAudioRequest, ExtractAudioResult, OperationKind, TranscodeAudioRequest,
     TranscodeAudioResult,
@@ -8,7 +7,7 @@ use voom_worker_protocol::{
 
 use crate::audio::{
     ExecuteExtractAudioInput, ExecuteTranscodeAudioInput, ExtractAudioDispatcher,
-    TranscodeAudioDispatcher, execute_extract_audio_with_dispatchers,
+    FirstExtractPlanInput, TranscodeAudioDispatcher, execute_extract_audio_with_dispatchers,
     execute_transcode_audio_with_dispatchers,
 };
 use crate::cases::policy::compliance::committed_source_dir;
@@ -130,20 +129,38 @@ async fn extract_audio_input_for_workflow_ticket(
 ) -> Result<ExecuteExtractAudioInput, VoomError> {
     let operation_payload = audio_payload(context.payload, "extract audio")?;
     let source_file_version_id = context.source_file_version_id()?;
+    let target_dir =
+        committed_source_dir(&context.artifact_roots.target_dir, source_file_version_id);
+    let source_location_id = context.source_location_id();
+    let source_bundle_id = context
+        .control
+        .find_primary_bundle_for_file_version(source_file_version_id)
+        .await?;
+    let source_bundle_id = match source_bundle_id {
+        Some(source_bundle_id) => source_bundle_id,
+        None => {
+            crate::audio::plan_first_extract_with_bundle(
+                context.control,
+                FirstExtractPlanInput {
+                    source_file_version_id,
+                    source_location_id,
+                    operation_payload: operation_payload.clone(),
+                    target_dir: target_dir.clone(),
+                },
+            )
+            .await?
+        }
+    };
     Ok(ExecuteExtractAudioInput {
         job_id: context.job_id("extract audio")?,
         ticket_id: context.ticket.id,
         lease_id: context.lease_id,
         source_file_version_id,
-        source_location_id: context.source_location_id(),
-        source_bundle_id: source_bundle_id_for_file_version(context, source_file_version_id)
-            .await?,
+        source_location_id,
+        source_bundle_id,
         operation_payload,
         staging_root: context.artifact_roots.staging_root.clone(),
-        target_dir: committed_source_dir(
-            &context.artifact_roots.target_dir,
-            source_file_version_id,
-        ),
+        target_dir,
         backup_root: context.backup_root.map(std::path::Path::to_path_buf),
     })
 }
@@ -153,31 +170,6 @@ fn audio_payload(payload: &Value, operation: &str) -> Result<Value, VoomError> {
         .get("audio")
         .cloned()
         .ok_or_else(|| VoomError::Config(format!("{operation} workflow payload missing `audio`")))
-}
-
-async fn source_bundle_id_for_file_version(
-    context: OperationAdapterContext<'_>,
-    source_file_version_id: FileVersionId,
-) -> Result<BundleId, VoomError> {
-    let row = sqlx::query(
-        "SELECT abm.bundle_id \
-         FROM file_versions fv \
-         JOIN asset_bundle_members abm ON abm.file_asset_id = fv.file_asset_id \
-         WHERE fv.id = ?",
-    )
-    .bind(i64::try_from(source_file_version_id.0).unwrap_or(i64::MAX))
-    .fetch_optional(&context.control.pool)
-    .await
-    .map_err(|e| VoomError::database_context("audio source bundle lookup", e))?;
-    let row = row.ok_or_else(|| {
-        VoomError::Config(format!(
-            "file_version {source_file_version_id} is not a bundle member"
-        ))
-    })?;
-    let bundle_id: i64 = row
-        .try_get("bundle_id")
-        .map_err(|e| VoomError::database_context("audio source bundle id", e))?;
-    Ok(BundleId(u64::try_from(bundle_id).unwrap_or(0)))
 }
 
 struct RuntimeTranscodeAudioDispatcher<'a> {

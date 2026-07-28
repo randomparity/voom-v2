@@ -13,13 +13,11 @@ use tokio::io::{AsyncWriteExt, DuplexStream};
 use voom_core::clock_test_support::ManualClock;
 use voom_core::rng_test_support::FrozenRng;
 use voom_core::{
-    BundleId, ErrorCode, FailureClass, FileAssetId, FileVersionId, JobId, LeaseId, MediaSnapshotId,
-    TicketId, TicketOperation, VoomError, WorkerId,
+    ErrorCode, FailureClass, FileAssetId, FileVersionId, JobId, LeaseId, MediaSnapshotId, TicketId,
+    TicketOperation, VoomError, WorkerId,
 };
-use voom_store::repo::bundles::{BundleMemberRole, NewAssetBundle};
 use voom_store::repo::identity::{
-    DiscoveredFile, FileLocationKind, IdentityRepo, IngestOutcome, MediaWorkKind, NewFileVersion,
-    NewMediaVariant, NewMediaWork, ProducedBy,
+    DiscoveredFile, FileLocationKind, IdentityRepo, IngestOutcome, NewFileVersion, ProducedBy,
 };
 use voom_store::repo::jobs::NewJob;
 use voom_store::repo::leases::NewLease;
@@ -1584,9 +1582,6 @@ async fn policy_extract_audio_dispatch_sends_worker_protocol_payload() {
         .seed_local_source_at_path(&source_path, b"movie-bytes")
         .await;
     let snapshot_id = fixture.record_source_snapshot(source_file_version_id).await;
-    fixture
-        .create_primary_bundle_for_file_version(source_file_version_id)
-        .await;
     fixture.plan = policy_extract_audio_plan_for_snapshot(
         TargetRef::FileVersion {
             id: source_file_version_id,
@@ -1625,6 +1620,84 @@ async fn policy_extract_audio_dispatch_sends_worker_protocol_payload() {
         result["outputs"][0]["source_snapshot_stream_id"],
         "stream-audio-1"
     );
+    for kind in [
+        "media_work.created",
+        "media_variant.created",
+        "asset_bundle.created",
+        "asset_bundle.member_added",
+    ] {
+        assert_eq!(fixture.event_count(kind).await, 1);
+    }
+}
+
+#[tokio::test]
+async fn first_extract_planning_failure_rolls_back_before_worker_dispatch() {
+    let mut fixture = ExecutorFixture::without_workers(0).await;
+    let dir = workflow_tempdir();
+    let source_path = dir.path().join("Movie.mkv");
+    let (source_file_version_id, _source_location_id) = fixture
+        .seed_local_source_at_path(&source_path, b"movie-bytes")
+        .await;
+    let snapshot_id = fixture.record_source_snapshot(source_file_version_id).await;
+    fixture.plan = policy_extract_audio_plan_for_snapshot(
+        TargetRef::FileVersion {
+            id: source_file_version_id,
+        },
+        snapshot_id,
+    );
+    fixture
+        .register_worker(
+            "audio-worker",
+            OperationKind::ExtractAudio,
+            1,
+            FakeBehavior::RejectUnexpectedDispatch,
+        )
+        .await;
+    sqlx::query(
+        "CREATE TRIGGER fail_first_extract_output \
+         BEFORE INSERT ON audio_extract_operation_outputs \
+         BEGIN SELECT RAISE(ABORT, 'injected first extract output failure'); END",
+    )
+    .execute(&fixture.cp.pool)
+    .await
+    .unwrap();
+    let mut options = WorkflowExecutorOptions::for_tests();
+    options.queue.max_attempts = 1;
+    options.artifact_roots.audio.staging_root = dir.path().join("audio-stage");
+    options.artifact_roots.audio.target_dir = dir.path().join("audio-out");
+
+    let error = fixture.run_with_options(options).await.unwrap_err();
+
+    assert_eq!(error.source.error_code(), ErrorCode::DbUnreachable);
+    assert!(
+        error
+            .source
+            .to_string()
+            .contains("injected first extract output failure")
+    );
+    for table in [
+        "media_works",
+        "media_variants",
+        "asset_bundles",
+        "asset_bundle_members",
+        "audio_extract_operations",
+        "audio_extract_operation_outputs",
+    ] {
+        assert_eq!(fixture.table_count(table).await, 0, "{table}");
+    }
+    for kind in [
+        "media_work.created",
+        "media_variant.created",
+        "asset_bundle.created",
+        "asset_bundle.member_added",
+        "artifact.audio_extract_failed",
+    ] {
+        assert_eq!(fixture.event_count(kind).await, 0, "{kind}");
+    }
+    assert_eq!(fixture.event_count("ticket.failed_terminal").await, 1);
+    assert_eq!(fixture.first_ticket_failed_class().await, "worker_crash");
+    assert_eq!(fixture.lease_count().await, 1);
+    assert_eq!(fixture.held_lease_count().await, 0);
 }
 
 fn workflow_tempdir() -> tempfile::TempDir {
@@ -2435,57 +2508,6 @@ impl ExecutorFixture {
             .id
     }
 
-    async fn create_primary_bundle_for_file_version(
-        &self,
-        file_version_id: FileVersionId,
-    ) -> BundleId {
-        let file_asset_id: i64 =
-            sqlx::query_scalar("SELECT file_asset_id FROM file_versions WHERE id = ?")
-                .bind(i64::try_from(file_version_id.0).unwrap())
-                .fetch_one(&self.cp.pool)
-                .await
-                .unwrap();
-        let work = self
-            .cp
-            .create_media_work(NewMediaWork {
-                kind: MediaWorkKind::Movie,
-                display_title: "Movie".to_owned(),
-                provisional: false,
-                created_at: T0,
-            })
-            .await
-            .unwrap();
-        let variant = self
-            .cp
-            .create_media_variant(NewMediaVariant {
-                media_work_id: work.id,
-                label: "primary".to_owned(),
-                provisional: false,
-                created_at: T0,
-            })
-            .await
-            .unwrap();
-        let bundle = self
-            .cp
-            .create_bundle(NewAssetBundle {
-                media_variant_id: variant.id,
-                display_name: "primary".to_owned(),
-                created_at: T0,
-            })
-            .await
-            .unwrap();
-        self.cp
-            .add_bundle_member(
-                bundle.id,
-                voom_core::FileAssetId(u64::try_from(file_asset_id).unwrap()),
-                BundleMemberRole::PrimaryVideo,
-                T0,
-            )
-            .await
-            .unwrap();
-        bundle.id
-    }
-
     async fn first_ticket_payload(&self) -> Value {
         let payload: String =
             sqlx::query_scalar("SELECT payload FROM tickets ORDER BY id ASC LIMIT 1")
@@ -2582,6 +2604,14 @@ impl ExecutorFixture {
             .unwrap()
     }
 
+    async fn table_count(&self, table: &str) -> i64 {
+        let query = format!("SELECT COUNT(*) FROM {table}");
+        sqlx::query_scalar(&query)
+            .fetch_one(&self.cp.pool)
+            .await
+            .unwrap()
+    }
+
     async fn ticket_state(&self, ticket_id: voom_core::TicketId) -> String {
         sqlx::query_scalar("SELECT state FROM tickets WHERE id = ?")
             .bind(i64::try_from(ticket_id.0).unwrap())
@@ -2631,6 +2661,7 @@ enum FakeBehavior {
     WrongTranscodeOutputFacts,
     RequireCorrelatedTranscodeAudioDispatch,
     RequireCorrelatedExtractAudioDispatch,
+    RejectUnexpectedDispatch,
 }
 
 #[async_trait]
@@ -2653,6 +2684,11 @@ impl ClientHandle for FakeClient {
         request: OperationRequest,
     ) -> Result<DispatchStream, ProtocolError> {
         assert_eq!(_creds.worker_id, self.worker_id);
+        if let FakeBehavior::RejectUnexpectedDispatch = self.behavior {
+            return Err(ProtocolError::InvalidPayload {
+                detail: "first extraction dispatched before planning committed".to_owned(),
+            });
+        }
         if matches!(self.behavior, FakeBehavior::DispatchError) {
             return Err(ProtocolError::InternalServerError);
         }
@@ -2833,7 +2869,9 @@ async fn write_behavior(
             }
             std::future::pending::<()>().await;
         }
-        FakeBehavior::Crash | FakeBehavior::DispatchError => {}
+        FakeBehavior::Crash
+        | FakeBehavior::DispatchError
+        | FakeBehavior::RejectUnexpectedDispatch => {}
         FakeBehavior::MalformedTranscodeResult => {
             write_frame(&mut writer, result_frame(&request, json!({"ok": true}))).await;
         }

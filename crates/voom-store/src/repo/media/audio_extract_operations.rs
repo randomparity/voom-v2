@@ -452,7 +452,6 @@ impl SqliteAudioExtractOperationRepo {
         outputs: &[NewAudioExtractOutput],
         now: OffsetDateTime,
     ) -> Result<AudioExtractOperationRecord, VoomError> {
-        validate_new_operation(&input, outputs)?;
         let mut tx = self
             .pool
             .begin_with("BEGIN IMMEDIATE")
@@ -460,18 +459,30 @@ impl SqliteAudioExtractOperationRepo {
             .map_err(|error| {
                 VoomError::database_context("audio_extract_operations begin immediate", error)
             })?;
-        if let Some(existing) = load_record_by_key(&mut tx, &input.operation_key).await? {
-            require_exact_replay(&existing, &input, outputs)?;
-            tx.commit().await.map_err(|error| {
-                VoomError::database_context("audio_extract_operations replay commit", error)
-            })?;
-            return Ok(existing);
-        }
-        let record = insert_planned(&mut tx, &input, outputs, now).await?;
+        let record = Self::create_planned_in_tx(&mut tx, &input, outputs, now).await?;
         tx.commit().await.map_err(|error| {
             VoomError::database_context("audio_extract_operations create commit", error)
         })?;
         Ok(record)
+    }
+
+    /// Create or exactly replay a planned extraction inside the caller's transaction.
+    ///
+    /// # Errors
+    /// Returns validation, replay-conflict, or database errors without committing
+    /// or rolling back the supplied transaction.
+    pub async fn create_planned_in_tx(
+        tx: &mut Transaction<'_, Sqlite>,
+        input: &NewAudioExtractOperation,
+        outputs: &[NewAudioExtractOutput],
+        now: OffsetDateTime,
+    ) -> Result<AudioExtractOperationRecord, VoomError> {
+        validate_new_operation(input, outputs)?;
+        if let Some(existing) = load_record_by_key(tx, &input.operation_key).await? {
+            require_exact_replay(&existing, input, outputs)?;
+            return Ok(existing);
+        }
+        insert_planned(tx, input, outputs, now).await
     }
 
     pub async fn acquire_claim(
