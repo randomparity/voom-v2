@@ -11,6 +11,10 @@ docs/superpowers/plans/
 **/*.rs.bk
 Cargo.lock.bak
 
+# Local scratch and Python bytecode
+/.tmp/
+__pycache__/
+
 # Coverage artifacts (cargo-llvm-cov)
 /lcov.info
 /target/llvm-cov/
