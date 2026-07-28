@@ -55,9 +55,11 @@ fn dispatch_timeout_maps_to_worker_crash_not_malformed() {
 }
 
 #[tokio::test]
-async fn launch_uses_caller_supplied_worker_id_and_dispatches_verify_artifact() {
+async fn launched_worker_dispatches_multiple_verifications_before_shutdown() {
     let dir = tempfile::tempdir().unwrap();
     let artifact_path = write_artifact_file(dir.path(), b"verified bytes");
+    let second_artifact_path = dir.path().join("second.bin");
+    std::fs::write(&second_artifact_path, b"second verified bytes").unwrap();
     let worker_id = WorkerId(144);
 
     let mut worker = BundledWorkerProcess::launch(worker_id, verify_worker_command())
@@ -78,6 +80,17 @@ async fn launch_uses_caller_supplied_worker_id_and_dispatches_verify_artifact() 
     assert_eq!(
         result.observed.content_hash,
         blake3_checksum(b"verified bytes")
+    );
+    let second = worker
+        .dispatch_verify_artifact(verify_request(
+            &second_artifact_path,
+            b"second verified bytes",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        second.observed.content_hash,
+        blake3_checksum(b"second verified bytes")
     );
     worker.shutdown(Duration::from_secs(5)).await.unwrap();
 }

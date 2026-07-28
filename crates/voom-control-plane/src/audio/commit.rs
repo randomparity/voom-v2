@@ -135,6 +135,50 @@ pub(crate) trait AudioResultProbeDispatcher: Send + Sync {
         cp: &ControlPlane,
         request: ProbeFileRequest,
     ) -> Result<ProbedAudioResult, VoomError>;
+
+    fn start_session(&self) -> Box<dyn AudioResultProbeSession + '_> {
+        Box::new(PerDispatchAudioResultProbeSession { dispatcher: self })
+    }
+}
+
+#[async_trait]
+pub(crate) trait AudioResultProbeSession: AudioResultProbeDispatcher {
+    async fn shutdown(self: Box<Self>);
+}
+
+struct PerDispatchAudioResultProbeSession<
+    'a,
+    D: AudioResultProbeDispatcher + ?Sized = dyn AudioResultProbeDispatcher + 'a,
+> {
+    dispatcher: &'a D,
+}
+
+#[async_trait]
+impl<D> AudioResultProbeDispatcher for PerDispatchAudioResultProbeSession<'_, D>
+where
+    D: AudioResultProbeDispatcher + ?Sized,
+{
+    async fn dispatch_result_probe(
+        &self,
+        cp: &ControlPlane,
+        request: ProbeFileRequest,
+    ) -> Result<ProbedAudioResult, VoomError> {
+        self.dispatcher.dispatch_result_probe(cp, request).await
+    }
+
+    fn start_session(&self) -> Box<dyn AudioResultProbeSession + '_> {
+        Box::new(Self {
+            dispatcher: self.dispatcher,
+        })
+    }
+}
+
+#[async_trait]
+impl<D> AudioResultProbeSession for PerDispatchAudioResultProbeSession<'_, D>
+where
+    D: AudioResultProbeDispatcher + ?Sized,
+{
+    async fn shutdown(self: Box<Self>) {}
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -158,6 +202,60 @@ impl AudioResultProbeDispatcher for BundledAudioResultProbeDispatcher {
             .map_err(|err| result_probe_worker_error(&err))?;
         let _shutdown = worker.shutdown(Duration::from_secs(5)).await;
         Ok(ProbedAudioResult { worker_id, result })
+    }
+
+    fn start_session(&self) -> Box<dyn AudioResultProbeSession + '_> {
+        Box::new(BundledAudioResultProbeSession::default())
+    }
+}
+
+#[derive(Debug, Default)]
+struct BundledAudioResultProbeSession {
+    worker: tokio::sync::Mutex<Option<(WorkerId, crate::scan::worker::BundledWorkerProcess)>>,
+}
+
+#[async_trait]
+impl AudioResultProbeDispatcher for BundledAudioResultProbeSession {
+    async fn dispatch_result_probe(
+        &self,
+        cp: &ControlPlane,
+        request: ProbeFileRequest,
+    ) -> Result<ProbedAudioResult, VoomError> {
+        let mut session_worker = self.worker.lock().await;
+        let (worker_id, result) = {
+            let (worker_id, worker) = if let Some((worker_id, worker)) = session_worker.as_mut() {
+                (*worker_id, worker)
+            } else {
+                let worker_id = ensure_result_probe_worker(cp).await?;
+                let launched =
+                    crate::scan::worker::BundledWorkerProcess::launch_bundled_ffprobe(worker_id)
+                        .await
+                        .map_err(|error| result_probe_worker_error(&error))?;
+                let (worker_id, worker) = session_worker.insert((worker_id, launched));
+                (*worker_id, worker)
+            };
+            (worker_id, worker.dispatch_probe_file(request).await)
+        };
+        if result
+            .as_ref()
+            .is_err_and(crate::scan::worker::ScanWorkerError::should_shutdown_worker)
+        {
+            *session_worker = None;
+        }
+        let result = result.map_err(|error| result_probe_worker_error(&error))?;
+        Ok(ProbedAudioResult { worker_id, result })
+    }
+}
+
+#[async_trait]
+impl AudioResultProbeSession for BundledAudioResultProbeSession {
+    async fn shutdown(self: Box<Self>) {
+        let Some((_worker_id, worker)) = self.worker.into_inner() else {
+            return;
+        };
+        if let Err(error) = worker.shutdown(Duration::from_secs(5)).await {
+            tracing::warn!(%error, "audio result probe worker session shutdown failed");
+        }
     }
 }
 

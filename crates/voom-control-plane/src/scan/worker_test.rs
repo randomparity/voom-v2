@@ -17,9 +17,11 @@ use voom_worker_protocol::{
 use super::*;
 
 #[tokio::test]
-async fn launch_uses_caller_supplied_worker_id_and_dispatches_probe_file() {
+async fn launched_worker_dispatches_multiple_probes_before_shutdown() {
     let dir = tempfile::tempdir().unwrap();
     let media_path = write_media_file(dir.path());
+    let second_media_path = dir.path().join("second.mkv");
+    std::fs::write(&second_media_path, b"second media bytes").unwrap();
     let ffprobe = write_fake_ffprobe(
         dir.path(),
         "printf '{\"format\":{\"format_name\":\"matroska\"},\"streams\":[]}\\n'\n",
@@ -46,6 +48,14 @@ async fn launch_uses_caller_supplied_worker_id_and_dispatches_probe_file() {
     assert_eq!(
         result.pre_probe.content_hash,
         result.post_probe.content_hash
+    );
+    let second = worker
+        .dispatch_probe_file(probe_file_request(&second_media_path))
+        .await
+        .unwrap();
+    assert_eq!(
+        second.pre_probe.content_hash,
+        second.post_probe.content_hash
     );
     worker.shutdown(Duration::from_secs(5)).await.unwrap();
 }

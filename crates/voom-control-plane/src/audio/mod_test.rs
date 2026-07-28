@@ -165,18 +165,26 @@ async fn extract_audio_plural_commits_every_output_and_lineage_atomically() {
             "bundle_role": "commentary_audio"
         }
     ]);
+    let verify = SessionTrackingVerifyDispatcher::default();
+    let probe = SessionTrackingProbeDispatcher::default();
     let report = execute_extract_audio_with_dispatchers(
         &cp,
         input,
         &WritingExtractDispatcher {
             output_bytes: b"extracted".to_vec(),
         },
-        &SuccessfulVerifyDispatcher,
-        &SucceedingProbeDispatcher,
+        &verify,
+        &probe,
     )
     .await
     .unwrap();
 
+    assert_eq!(verify.sessions.load(Ordering::Relaxed), 1);
+    assert_eq!(verify.dispatches.load(Ordering::Relaxed), 2);
+    assert_eq!(verify.shutdowns.load(Ordering::Relaxed), 1);
+    assert_eq!(probe.sessions.load(Ordering::Relaxed), 1);
+    assert_eq!(probe.dispatches.load(Ordering::Relaxed), 2);
+    assert_eq!(probe.shutdowns.load(Ordering::Relaxed), 1);
     assert_eq!(report.outputs.len(), 2);
     assert!(
         report.outputs[0]
@@ -1660,18 +1668,26 @@ async fn second_extract_verification_failure_never_promotes_or_registers_any_mem
     let first_target = input.target_dir.join("source.a-1.opus.ogg");
     let second_target = input.target_dir.join("source.a-2.opus.ogg");
 
+    let verify = FailSecondVerifyDispatcher::default();
+    let probe = SessionTrackingUncalledProbeDispatcher::default();
     let error = execute_extract_audio_with_dispatchers(
         &cp,
         input.clone(),
         &WritingExtractDispatcher {
             output_bytes: b"extracted".to_vec(),
         },
-        &FailSecondVerifyDispatcher::default(),
-        &UncalledProbeDispatcher,
+        &verify,
+        &probe,
     )
     .await
     .unwrap_err();
 
+    assert_eq!(verify.sessions.load(Ordering::Relaxed), 1);
+    assert_eq!(verify.calls.load(Ordering::Relaxed), 2);
+    assert_eq!(verify.shutdowns.load(Ordering::Relaxed), 1);
+    assert_eq!(probe.sessions.load(Ordering::Relaxed), 1);
+    assert_eq!(probe.dispatches.load(Ordering::Relaxed), 0);
+    assert_eq!(probe.shutdowns.load(Ordering::Relaxed), 1);
     assert_eq!(
         error.error_code(),
         voom_core::ErrorCode::VerificationFailure
@@ -1681,6 +1697,29 @@ async fn second_extract_verification_failure_never_promotes_or_registers_any_mem
     assert_table_count(&cp, "artifact_commit_records", 0).await;
     assert_table_count(&cp, "asset_bundle_members", 0).await;
     assert_table_count(&cp, "audio_extract_output_lineage", 0).await;
+    let verification_rows =
+        sqlx::query("SELECT status, error_code FROM artifact_verifications ORDER BY id ASC")
+            .fetch_all(cp.pool_for_test())
+            .await
+            .unwrap();
+    assert_eq!(verification_rows.len(), 2);
+    assert_eq!(
+        verification_rows[0].try_get::<String, _>("status").unwrap(),
+        "succeeded"
+    );
+    assert_eq!(
+        verification_rows[1].try_get::<String, _>("status").unwrap(),
+        "failed"
+    );
+    assert_eq!(
+        verification_rows[1]
+            .try_get::<String, _>("error_code")
+            .unwrap(),
+        "WORKER_CRASH"
+    );
+    assert_event_count(&cp, "artifact.verification_started", 2).await;
+    assert_event_count(&cp, "artifact.verification_succeeded", 1).await;
+    assert_event_count(&cp, "artifact.verification_failed", 1).await;
 
     let retry = execute_extract_audio_with_dispatchers(
         &cp,
@@ -2939,6 +2978,8 @@ struct SuccessfulVerifyDispatcher;
 #[derive(Default)]
 struct FailSecondVerifyDispatcher {
     calls: AtomicUsize,
+    sessions: AtomicUsize,
+    shutdowns: AtomicUsize,
 }
 
 #[async_trait]
@@ -2949,22 +2990,53 @@ impl VerifyArtifactDispatcher for FailSecondVerifyDispatcher {
         request: VerifyArtifactRequest,
     ) -> Result<VerifyArtifactResult, crate::artifact::worker::VerifyWorkerError> {
         let call = self.calls.fetch_add(1, Ordering::Relaxed);
-        let content_hash = if call == 1 {
-            "blake3:mismatch".to_owned()
-        } else {
-            request.expected.content_hash
-        };
+        if call == 1 {
+            return Err(crate::artifact::worker::VerifyWorkerError::terminal_error(
+                voom_core::FailureClass::WorkerCrash,
+                voom_core::ErrorCode::WorkerCrash,
+                "injected mid-set verifier crash",
+            ));
+        }
         Ok(VerifyArtifactResult {
             status: VerifyArtifactStatus::Verified,
             provider: "test-verify".to_owned(),
             provider_version: "test".to_owned(),
             observed: VerifyArtifactObservedFacts {
                 size_bytes: request.expected.size_bytes,
-                content_hash,
+                content_hash: request.expected.content_hash,
                 modified_at: None,
                 local_file_key: None,
             },
         })
+    }
+
+    fn start_session(&self) -> Box<dyn crate::artifact::verify::VerifyArtifactSession + '_> {
+        self.sessions.fetch_add(1, Ordering::Relaxed);
+        Box::new(FailSecondVerifySession { dispatcher: self })
+    }
+}
+
+struct FailSecondVerifySession<'a> {
+    dispatcher: &'a FailSecondVerifyDispatcher,
+}
+
+#[async_trait]
+impl VerifyArtifactDispatcher for FailSecondVerifySession<'_> {
+    async fn dispatch_verify_artifact(
+        &self,
+        worker_id: voom_core::WorkerId,
+        request: VerifyArtifactRequest,
+    ) -> Result<VerifyArtifactResult, crate::artifact::worker::VerifyWorkerError> {
+        self.dispatcher
+            .dispatch_verify_artifact(worker_id, request)
+            .await
+    }
+}
+
+#[async_trait]
+impl crate::artifact::verify::VerifyArtifactSession for FailSecondVerifySession<'_> {
+    async fn shutdown(self: Box<Self>) {
+        self.dispatcher.shutdowns.fetch_add(1, Ordering::Relaxed);
     }
 }
 
@@ -2986,6 +3058,64 @@ impl VerifyArtifactDispatcher for SuccessfulVerifyDispatcher {
                 local_file_key: None,
             },
         })
+    }
+}
+
+#[derive(Default)]
+struct SessionTrackingVerifyDispatcher {
+    sessions: AtomicUsize,
+    dispatches: AtomicUsize,
+    shutdowns: AtomicUsize,
+}
+
+#[async_trait]
+impl VerifyArtifactDispatcher for SessionTrackingVerifyDispatcher {
+    async fn dispatch_verify_artifact(
+        &self,
+        _worker_id: voom_core::WorkerId,
+        request: VerifyArtifactRequest,
+    ) -> Result<VerifyArtifactResult, crate::artifact::worker::VerifyWorkerError> {
+        self.dispatches.fetch_add(1, Ordering::Relaxed);
+        Ok(VerifyArtifactResult {
+            status: VerifyArtifactStatus::Verified,
+            provider: "test-verify".to_owned(),
+            provider_version: "test".to_owned(),
+            observed: VerifyArtifactObservedFacts {
+                size_bytes: request.expected.size_bytes,
+                content_hash: request.expected.content_hash,
+                modified_at: None,
+                local_file_key: None,
+            },
+        })
+    }
+
+    fn start_session(&self) -> Box<dyn crate::artifact::verify::VerifyArtifactSession + '_> {
+        self.sessions.fetch_add(1, Ordering::Relaxed);
+        Box::new(SessionTrackingVerifySession { dispatcher: self })
+    }
+}
+
+struct SessionTrackingVerifySession<'a> {
+    dispatcher: &'a SessionTrackingVerifyDispatcher,
+}
+
+#[async_trait]
+impl VerifyArtifactDispatcher for SessionTrackingVerifySession<'_> {
+    async fn dispatch_verify_artifact(
+        &self,
+        worker_id: voom_core::WorkerId,
+        request: VerifyArtifactRequest,
+    ) -> Result<VerifyArtifactResult, crate::artifact::worker::VerifyWorkerError> {
+        self.dispatcher
+            .dispatch_verify_artifact(worker_id, request)
+            .await
+    }
+}
+
+#[async_trait]
+impl crate::artifact::verify::VerifyArtifactSession for SessionTrackingVerifySession<'_> {
+    async fn shutdown(self: Box<Self>) {
+        self.dispatcher.shutdowns.fetch_add(1, Ordering::Relaxed);
     }
 }
 
@@ -3057,6 +3187,100 @@ impl commit::AudioResultProbeDispatcher for SucceedingProbeDispatcher {
                 }),
             },
         })
+    }
+}
+
+#[derive(Default)]
+struct SessionTrackingProbeDispatcher {
+    sessions: AtomicUsize,
+    dispatches: AtomicUsize,
+    shutdowns: AtomicUsize,
+}
+
+#[async_trait]
+impl commit::AudioResultProbeDispatcher for SessionTrackingProbeDispatcher {
+    async fn dispatch_result_probe(
+        &self,
+        cp: &crate::ControlPlane,
+        request: voom_worker_protocol::ProbeFileRequest,
+    ) -> Result<commit::ProbedAudioResult, VoomError> {
+        self.dispatches.fetch_add(1, Ordering::Relaxed);
+        SucceedingProbeDispatcher
+            .dispatch_result_probe(cp, request)
+            .await
+    }
+
+    fn start_session(&self) -> Box<dyn commit::AudioResultProbeSession + '_> {
+        self.sessions.fetch_add(1, Ordering::Relaxed);
+        Box::new(SessionTrackingProbeSession { dispatcher: self })
+    }
+}
+
+struct SessionTrackingProbeSession<'a> {
+    dispatcher: &'a SessionTrackingProbeDispatcher,
+}
+
+#[async_trait]
+impl commit::AudioResultProbeDispatcher for SessionTrackingProbeSession<'_> {
+    async fn dispatch_result_probe(
+        &self,
+        cp: &crate::ControlPlane,
+        request: voom_worker_protocol::ProbeFileRequest,
+    ) -> Result<commit::ProbedAudioResult, VoomError> {
+        self.dispatcher.dispatch_result_probe(cp, request).await
+    }
+}
+
+#[async_trait]
+impl commit::AudioResultProbeSession for SessionTrackingProbeSession<'_> {
+    async fn shutdown(self: Box<Self>) {
+        self.dispatcher.shutdowns.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+#[derive(Default)]
+struct SessionTrackingUncalledProbeDispatcher {
+    sessions: AtomicUsize,
+    dispatches: AtomicUsize,
+    shutdowns: AtomicUsize,
+}
+
+#[async_trait]
+impl commit::AudioResultProbeDispatcher for SessionTrackingUncalledProbeDispatcher {
+    async fn dispatch_result_probe(
+        &self,
+        _cp: &crate::ControlPlane,
+        _request: voom_worker_protocol::ProbeFileRequest,
+    ) -> Result<commit::ProbedAudioResult, VoomError> {
+        self.dispatches.fetch_add(1, Ordering::Relaxed);
+        panic!("probe dispatcher should not be called")
+    }
+
+    fn start_session(&self) -> Box<dyn commit::AudioResultProbeSession + '_> {
+        self.sessions.fetch_add(1, Ordering::Relaxed);
+        Box::new(SessionTrackingUncalledProbeSession { dispatcher: self })
+    }
+}
+
+struct SessionTrackingUncalledProbeSession<'a> {
+    dispatcher: &'a SessionTrackingUncalledProbeDispatcher,
+}
+
+#[async_trait]
+impl commit::AudioResultProbeDispatcher for SessionTrackingUncalledProbeSession<'_> {
+    async fn dispatch_result_probe(
+        &self,
+        cp: &crate::ControlPlane,
+        request: voom_worker_protocol::ProbeFileRequest,
+    ) -> Result<commit::ProbedAudioResult, VoomError> {
+        self.dispatcher.dispatch_result_probe(cp, request).await
+    }
+}
+
+#[async_trait]
+impl commit::AudioResultProbeSession for SessionTrackingUncalledProbeSession<'_> {
+    async fn shutdown(self: Box<Self>) {
+        self.dispatcher.shutdowns.fetch_add(1, Ordering::Relaxed);
     }
 }
 
