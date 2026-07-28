@@ -86,6 +86,31 @@ pub struct CommitAudioExtractSetInput {
     pub claim: NewAudioExtractClaim,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ExtractClaimFenceContext<'a> {
+    pub boundary_index: usize,
+    pub member_count: usize,
+    pub claim: &'a NewAudioExtractClaim,
+}
+
+#[async_trait]
+pub(crate) trait ExtractClaimFenceHooks: Send + Sync {
+    async fn before_assert(
+        &self,
+        _cp: &ControlPlane,
+        context: ExtractClaimFenceContext<'_>,
+    ) -> Result<(), VoomError> {
+        let _ = (context.boundary_index, context.member_count, context.claim);
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct NoExtractClaimFenceHooks;
+
+#[async_trait]
+impl ExtractClaimFenceHooks for NoExtractClaimFenceHooks {}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommittedAudioExtractOutput {
     pub operation_output_id: u64,
@@ -990,9 +1015,10 @@ fn malformed_synthesis(message: &str) -> VoomError {
     VoomError::MalformedWorkerResult(format!("synthesize_audio: {message}"))
 }
 
-pub async fn commit_audio_extract_set(
+pub(crate) async fn commit_audio_extract_set_with_hooks(
     cp: &ControlPlane,
     input: &CommitAudioExtractSetInput,
+    hooks: &dyn ExtractClaimFenceHooks,
 ) -> Result<Vec<CommittedAudioExtractOutput>, VoomError> {
     if input.outputs.is_empty() {
         return Err(VoomError::Config(
@@ -1000,7 +1026,7 @@ pub async fn commit_audio_extract_set(
         ));
     }
     let prepared = prepare_extract_set(cp, input).await?;
-    match commit_audio_extract_set_inner(cp, input, &prepared).await {
+    match commit_audio_extract_set_inner(cp, input, &prepared, hooks).await {
         Ok(outputs) => Ok(outputs),
         Err(error) => Err(record_extract_recovery_failure(cp, input, &prepared, error).await),
     }
@@ -1010,18 +1036,20 @@ async fn commit_audio_extract_set_inner(
     cp: &ControlPlane,
     input: &CommitAudioExtractSetInput,
     prepared: &[PreparedSidecarCommit],
+    hooks: &dyn ExtractClaimFenceHooks,
 ) -> Result<Vec<CommittedAudioExtractOutput>, VoomError> {
-    for member in prepared {
-        assert_extract_claim(cp, input).await?;
+    assert_extract_claim(cp, input, hooks, 0, prepared.len()).await?;
+    for (index, member) in prepared.iter().enumerate() {
         promote_sidecar(member).await?;
-        assert_extract_claim(cp, input).await?;
+        assert_extract_claim(cp, input, hooks, index + 1, prepared.len()).await?;
     }
     finalize_extract_set(cp, input, prepared).await
 }
 
-pub async fn recover_audio_extract_set(
+pub(crate) async fn recover_audio_extract_set_with_hooks(
     cp: &ControlPlane,
     input: &CommitAudioExtractSetInput,
+    hooks: &dyn ExtractClaimFenceHooks,
 ) -> Result<Vec<CommittedAudioExtractOutput>, VoomError> {
     let mut prepared = match load_recovery_extract_set(cp, input).await {
         Ok(prepared) => prepared,
@@ -1029,7 +1057,7 @@ pub async fn recover_audio_extract_set(
             return Err(record_extract_input_recovery_failure(cp, input, error).await);
         }
     };
-    match recover_audio_extract_set_inner(cp, input, &mut prepared).await {
+    match recover_audio_extract_set_inner(cp, input, &mut prepared, hooks).await {
         Ok(outputs) => Ok(outputs),
         Err(error) => Err(record_extract_recovery_failure(cp, input, &prepared, error).await),
     }
@@ -1101,15 +1129,16 @@ async fn recover_audio_extract_set_inner(
     cp: &ControlPlane,
     input: &CommitAudioExtractSetInput,
     prepared: &mut [PreparedSidecarCommit],
+    hooks: &dyn ExtractClaimFenceHooks,
 ) -> Result<Vec<CommittedAudioExtractOutput>, VoomError> {
     let evaluated = check_recovery_extract_gate(cp, input).await?;
     for member in &mut *prepared {
         member.gate_evaluated_lease_ids.clone_from(&evaluated);
     }
-    for member in &*prepared {
-        assert_extract_claim(cp, input).await?;
+    assert_extract_claim(cp, input, hooks, 0, prepared.len()).await?;
+    for (index, member) in prepared.iter().enumerate() {
         recover_promote_extract_member(member).await?;
-        assert_extract_claim(cp, input).await?;
+        assert_extract_claim(cp, input, hooks, index + 1, prepared.len()).await?;
     }
     finalize_extract_set(cp, input, prepared).await
 }
@@ -1362,7 +1391,20 @@ async fn create_extract_pending_in_tx(
 async fn assert_extract_claim(
     cp: &ControlPlane,
     input: &CommitAudioExtractSetInput,
+    hooks: &dyn ExtractClaimFenceHooks,
+    boundary_index: usize,
+    member_count: usize,
 ) -> Result<(), VoomError> {
+    hooks
+        .before_assert(
+            cp,
+            ExtractClaimFenceContext {
+                boundary_index,
+                member_count,
+                claim: &input.claim,
+            },
+        )
+        .await?;
     cp.audio_extract_operations
         .assert_live_claim(&input.claim, cp.clock().now())
         .await

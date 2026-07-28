@@ -180,9 +180,10 @@ and every active member before it resumes. A stale token is never authorized to
 transition state.
 
 Recovery acquires the operation claim, re-reads either the prepared or
-recovery-required ledger, and rechecks the source commit-safety gate. Before
-each filesystem mutation it renews/rechecks the claim. For each output in order
-it:
+recovery-required ledger, and rechecks the source commit-safety gate. It
+asserts the exact live claim once before the first filesystem mutation and
+again after every promoted member. Each post-member assertion fences the next
+promotion or finalization. For each output in order it:
 
 - accepts an existing target only when its size and content hash exactly match;
 - promotes from the verified staging file only when the target is absent; and

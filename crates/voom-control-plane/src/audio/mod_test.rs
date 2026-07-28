@@ -230,6 +230,95 @@ async fn extract_audio_plural_commits_every_output_and_lineage_atomically() {
 }
 
 #[tokio::test]
+async fn plural_extract_commit_uses_one_claim_assertion_per_boundary() {
+    let (cp, _db, dir) = fixture_with_dir().await;
+    let mut source = seed_audio_source(&cp, &dir, b"source").await;
+    source.snapshot = record_plural_audio_snapshot(&cp, source.version).await;
+    let bundle = seed_bundle(&cp).await;
+    let mut input = extract_input_for_source(&source, bundle.id, &dir);
+    set_plural_extract_outputs(&mut input, "claim_fence_count");
+    let fences = RecordingClaimFences::default();
+
+    execute_extract_audio_with_services(
+        &cp,
+        input,
+        ExtractAudioExecutionServices {
+            extract: &WritingExtractDispatcher {
+                output_bytes: b"extracted".to_vec(),
+            },
+            verify: &SuccessfulVerifyDispatcher,
+            result_probe: &SucceedingProbeDispatcher,
+            claim_fence_hooks: &fences,
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(fences.boundaries(), vec![0, 1, 2]);
+}
+
+#[tokio::test]
+async fn plural_extract_recovery_uses_one_claim_assertion_per_boundary() {
+    let (cp, _db, _dir, input) = plural_extract_fixture("recovery_fence_count").await;
+    sqlx::query(
+        "CREATE TRIGGER fail_audio_extract_finalize BEFORE INSERT ON file_assets \
+         BEGIN SELECT RAISE(ABORT, 'injected finalize failure'); END;",
+    )
+    .execute(cp.pool_for_test())
+    .await
+    .unwrap();
+    execute_extract_audio_with_dispatchers(
+        &cp,
+        input.clone(),
+        &WritingExtractDispatcher {
+            output_bytes: b"extracted".to_vec(),
+        },
+        &SuccessfulVerifyDispatcher,
+        &SucceedingProbeDispatcher,
+    )
+    .await
+    .unwrap_err();
+    sqlx::query("DROP TRIGGER fail_audio_extract_finalize")
+        .execute(cp.pool_for_test())
+        .await
+        .unwrap();
+    let fences = RecordingClaimFences::default();
+
+    execute_extract_audio_with_services(
+        &cp,
+        input,
+        ExtractAudioExecutionServices {
+            extract: &UncalledExtractDispatcher,
+            verify: &UncalledVerifyDispatcher,
+            result_probe: &UncalledProbeDispatcher,
+            claim_fence_hooks: &fences,
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(fences.boundaries(), vec![0, 1, 2]);
+}
+
+#[tokio::test]
+async fn fresh_commit_claim_loss_at_every_boundary_is_recoverable() {
+    for mode in ClaimLossMode::ALL {
+        for boundary_index in 0..=2 {
+            assert_fresh_claim_loss(mode, boundary_index).await;
+        }
+    }
+}
+
+#[tokio::test]
+async fn recovery_claim_loss_at_every_boundary_retains_evidence() {
+    for mode in ClaimLossMode::ALL {
+        for boundary_index in 0..=2 {
+            assert_recovery_claim_loss(mode, boundary_index).await;
+        }
+    }
+}
+
+#[tokio::test]
 async fn synthesis_commits_companion_lineage_once_and_replays_without_dispatch() {
     let (cp, _db, dir) = fixture_with_dir().await;
     let mut source = seed_audio_source(&cp, &dir, b"source").await;
@@ -2840,6 +2929,386 @@ fn extract_input_for_source(
         target_dir: dir.path().join("voom-audio-out"),
         backup_root: None,
     }
+}
+
+#[derive(Default)]
+struct RecordingClaimFences {
+    boundaries: std::sync::Mutex<Vec<usize>>,
+}
+
+impl RecordingClaimFences {
+    fn boundaries(&self) -> Vec<usize> {
+        self.boundaries.lock().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl commit::ExtractClaimFenceHooks for RecordingClaimFences {
+    async fn before_assert(
+        &self,
+        _cp: &ControlPlane,
+        context: commit::ExtractClaimFenceContext<'_>,
+    ) -> Result<(), VoomError> {
+        self.boundaries.lock().unwrap().push(context.boundary_index);
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ClaimLossMode {
+    Expiry,
+    Takeover,
+    GenerationAdvance,
+}
+
+impl ClaimLossMode {
+    const ALL: [Self; 3] = [Self::Expiry, Self::Takeover, Self::GenerationAdvance];
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Expiry => "expiry",
+            Self::Takeover => "takeover",
+            Self::GenerationAdvance => "generation",
+        }
+    }
+}
+
+struct MutatingClaimFence {
+    boundary_index: usize,
+    mode: ClaimLossMode,
+    injected: std::sync::atomic::AtomicBool,
+    boundaries: std::sync::Mutex<Vec<usize>>,
+}
+
+impl MutatingClaimFence {
+    fn new(boundary_index: usize, mode: ClaimLossMode) -> Self {
+        Self {
+            boundary_index,
+            mode,
+            injected: std::sync::atomic::AtomicBool::new(false),
+            boundaries: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+
+    fn boundaries(&self) -> Vec<usize> {
+        self.boundaries.lock().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl commit::ExtractClaimFenceHooks for MutatingClaimFence {
+    async fn before_assert(
+        &self,
+        cp: &ControlPlane,
+        context: commit::ExtractClaimFenceContext<'_>,
+    ) -> Result<(), VoomError> {
+        assert_eq!(context.member_count, 2);
+        self.boundaries.lock().unwrap().push(context.boundary_index);
+        if context.boundary_index != self.boundary_index
+            || self.injected.swap(true, Ordering::Relaxed)
+        {
+            return Ok(());
+        }
+        mutate_extract_claim(cp, context.claim, context.boundary_index, self.mode).await
+    }
+}
+
+async fn mutate_extract_claim(
+    cp: &ControlPlane,
+    claim: &NewAudioExtractClaim,
+    boundary_index: usize,
+    mode: ClaimLossMode,
+) -> Result<(), VoomError> {
+    let takeover_lease_id = if let ClaimLossMode::Takeover = mode {
+        Some(seed_takeover_lease(cp).await?)
+    } else {
+        None
+    };
+    let result = match mode {
+        ClaimLossMode::Expiry => {
+            sqlx::query(
+                "UPDATE audio_extract_operations SET claim_expires_at = ? \
+                 WHERE operation_key = ? AND dispatch_generation = ? \
+                 AND claim_lease_id = ? AND claim_token = ?",
+            )
+            .bind("1970-01-01T00:00:00Z")
+            .bind(&claim.operation_key)
+            .bind(i64::from(claim.expected_generation))
+            .bind(i64::try_from(claim.lease_id.0).unwrap())
+            .bind(&claim.claim_token)
+            .execute(cp.pool_for_test())
+            .await
+        }
+        ClaimLossMode::Takeover => {
+            let Some(takeover_lease_id) = takeover_lease_id else {
+                return Err(VoomError::Internal(
+                    "takeover mutation is missing its competing lease".to_owned(),
+                ));
+            };
+            sqlx::query(
+                "UPDATE audio_extract_operations SET claim_lease_id = ?, claim_token = ? \
+                 WHERE operation_key = ? AND dispatch_generation = ? \
+                 AND claim_lease_id = ? AND claim_token = ?",
+            )
+            .bind(i64::try_from(takeover_lease_id.0).unwrap())
+            .bind(format!("takeover-boundary-{boundary_index}"))
+            .bind(&claim.operation_key)
+            .bind(i64::from(claim.expected_generation))
+            .bind(i64::try_from(claim.lease_id.0).unwrap())
+            .bind(&claim.claim_token)
+            .execute(cp.pool_for_test())
+            .await
+        }
+        ClaimLossMode::GenerationAdvance => {
+            sqlx::query(
+                "UPDATE audio_extract_operations \
+                 SET dispatch_generation = dispatch_generation + 1, \
+                     claim_lease_id = NULL, claim_token = NULL, claim_expires_at = NULL \
+                 WHERE operation_key = ? AND dispatch_generation = ? \
+                 AND claim_lease_id = ? AND claim_token = ?",
+            )
+            .bind(&claim.operation_key)
+            .bind(i64::from(claim.expected_generation))
+            .bind(i64::try_from(claim.lease_id.0).unwrap())
+            .bind(&claim.claim_token)
+            .execute(cp.pool_for_test())
+            .await
+        }
+    }
+    .map_err(|error| VoomError::database_context("inject audio extract claim loss", error))?;
+    if result.rows_affected() != 1 {
+        return Err(VoomError::Internal(format!(
+            "claim-loss injection at boundary {boundary_index} changed {} rows",
+            result.rows_affected()
+        )));
+    }
+    Ok(())
+}
+
+async fn seed_takeover_lease(cp: &ControlPlane) -> Result<LeaseId, VoomError> {
+    let now = OffsetDateTime::now_utc();
+    let expires_at = now + time::Duration::hours(1);
+    sqlx::query(
+        "INSERT INTO tickets \
+         (id, job_id, kind, state, priority, payload, attempt, max_attempts, \
+          next_eligible_at, created_at, state_changed_at) \
+         VALUES (4, 1, 'audio-takeover-test', 'leased', 0, '{}', 1, 3, ?, ?, ?)",
+    )
+    .bind(now)
+    .bind(now)
+    .bind(now)
+    .execute(cp.pool_for_test())
+    .await
+    .map_err(|error| VoomError::database_context("seed takeover ticket", error))?;
+    sqlx::query(
+        "INSERT INTO leases \
+         (id, ticket_id, worker_id, state, acquired_at, expires_at, \
+          last_heartbeat_at, ttl_seconds) VALUES (5, 4, 1, 'held', ?, ?, ?, 3600)",
+    )
+    .bind(now)
+    .bind(expires_at)
+    .bind(now)
+    .execute(cp.pool_for_test())
+    .await
+    .map_err(|error| VoomError::database_context("seed takeover lease", error))?;
+    Ok(LeaseId(5))
+}
+
+async fn plural_extract_fixture(
+    operation_id: &str,
+) -> (
+    crate::ControlPlane,
+    tempfile::NamedTempFile,
+    tempfile::TempDir,
+    ExecuteExtractAudioInput,
+) {
+    let (cp, db, dir) = fixture_with_dir().await;
+    let mut source = seed_audio_source(&cp, &dir, b"source").await;
+    source.snapshot = record_plural_audio_snapshot(&cp, source.version).await;
+    let bundle = seed_bundle(&cp).await;
+    let mut input = extract_input_for_source(&source, bundle.id, &dir);
+    set_plural_extract_outputs(&mut input, operation_id);
+    (cp, db, dir, input)
+}
+
+async fn assert_fresh_claim_loss(mode: ClaimLossMode, boundary_index: usize) {
+    let operation_id = format!("fresh_{}_{}", mode.label(), boundary_index);
+    let (cp, _db, _dir, input) = plural_extract_fixture(&operation_id).await;
+    let fences = MutatingClaimFence::new(boundary_index, mode);
+    let error = execute_plural_extract_with_fences(&cp, input.clone(), &fences).await;
+
+    assert_eq!(error.error_code(), voom_core::ErrorCode::Conflict);
+    assert_eq!(
+        fences.boundaries(),
+        (0..=boundary_index).collect::<Vec<_>>()
+    );
+    assert_promoted_prefix(&input, &operation_id, boundary_index);
+    assert_extract_operation_state(&cp, "prepared").await;
+    assert_extract_generation(&cp, mode).await;
+    assert_artifact_commit_state(&cp, "pending", 2).await;
+    assert_unpublished_extract_state(&cp).await;
+    assert_event_count(&cp, "artifact.commit_recovery_required", 0).await;
+    assert_event_count(&cp, "artifact.audio_extract_failed", 1).await;
+
+    expire_current_extract_claim(&cp).await;
+    retry_plural_extract(&cp, input).await;
+    assert_extract_operation_state(&cp, "committed").await;
+    assert_artifact_commit_state(&cp, "committed", 2).await;
+    assert_event_count(&cp, "artifact.commit_recovery_required", 2).await;
+    assert_event_count(&cp, "artifact.audio_extract_failed", 1).await;
+}
+
+async fn assert_recovery_claim_loss(mode: ClaimLossMode, boundary_index: usize) {
+    let operation_id = format!("recovery_{}_{}", mode.label(), boundary_index);
+    let (cp, _db, _dir, input) = plural_extract_fixture(&operation_id).await;
+    let initial_loss = MutatingClaimFence::new(0, ClaimLossMode::Expiry);
+    let initial_error = execute_plural_extract_with_fences(&cp, input.clone(), &initial_loss).await;
+    assert_eq!(initial_error.error_code(), voom_core::ErrorCode::Conflict);
+    let fences = MutatingClaimFence::new(boundary_index, mode);
+    let error = execute_resume_with_fences(&cp, input.clone(), &fences).await;
+
+    assert_eq!(error.error_code(), voom_core::ErrorCode::Conflict);
+    assert_eq!(
+        fences.boundaries(),
+        (0..=boundary_index).collect::<Vec<_>>()
+    );
+    assert_promoted_prefix(&input, &operation_id, boundary_index);
+    assert_extract_operation_state(&cp, "recovery_required").await;
+    assert_extract_generation(&cp, mode).await;
+    assert_artifact_commit_state(&cp, "recovery_required", 2).await;
+    assert_unpublished_extract_state(&cp).await;
+    assert_event_count(&cp, "artifact.commit_recovery_required", 2).await;
+    assert_event_count(&cp, "artifact.audio_extract_failed", 2).await;
+
+    expire_current_extract_claim(&cp).await;
+    retry_plural_extract(&cp, input).await;
+    assert_extract_operation_state(&cp, "committed").await;
+    assert_artifact_commit_state(&cp, "committed", 2).await;
+    assert_event_count(&cp, "artifact.commit_recovery_required", 2).await;
+    assert_event_count(&cp, "artifact.audio_extract_failed", 2).await;
+}
+
+async fn execute_plural_extract_with_fences(
+    cp: &ControlPlane,
+    input: ExecuteExtractAudioInput,
+    fences: &dyn commit::ExtractClaimFenceHooks,
+) -> VoomError {
+    execute_extract_audio_with_services(
+        cp,
+        input,
+        ExtractAudioExecutionServices {
+            extract: &WritingExtractDispatcher {
+                output_bytes: b"extracted".to_vec(),
+            },
+            verify: &SuccessfulVerifyDispatcher,
+            result_probe: &SucceedingProbeDispatcher,
+            claim_fence_hooks: fences,
+        },
+    )
+    .await
+    .unwrap_err()
+}
+
+async fn execute_resume_with_fences(
+    cp: &ControlPlane,
+    input: ExecuteExtractAudioInput,
+    fences: &dyn commit::ExtractClaimFenceHooks,
+) -> VoomError {
+    execute_extract_audio_with_services(
+        cp,
+        input,
+        ExtractAudioExecutionServices {
+            extract: &UncalledExtractDispatcher,
+            verify: &UncalledVerifyDispatcher,
+            result_probe: &UncalledProbeDispatcher,
+            claim_fence_hooks: fences,
+        },
+    )
+    .await
+    .unwrap_err()
+}
+
+async fn retry_plural_extract(cp: &ControlPlane, input: ExecuteExtractAudioInput) {
+    let report = execute_extract_audio_with_dispatchers(
+        cp,
+        input,
+        &UncalledExtractDispatcher,
+        &UncalledVerifyDispatcher,
+        &UncalledProbeDispatcher,
+    )
+    .await
+    .unwrap();
+    assert_eq!(report.outputs.len(), 2);
+}
+
+fn assert_promoted_prefix(
+    input: &ExecuteExtractAudioInput,
+    operation_id: &str,
+    promoted_count: usize,
+) {
+    let target_dir = input.target_dir.join(format!("operation-{operation_id}"));
+    for (index, name) in ["source.a-1.opus.ogg", "source.a-2.opus.ogg"]
+        .iter()
+        .enumerate()
+    {
+        assert_eq!(
+            target_dir.join(name).is_file(),
+            index < promoted_count,
+            "unexpected target state for member {index} at boundary {promoted_count}"
+        );
+    }
+}
+
+async fn assert_extract_operation_state(cp: &ControlPlane, expected: &str) {
+    let states: Vec<String> =
+        sqlx::query_scalar("SELECT state FROM audio_extract_operations ORDER BY id")
+            .fetch_all(cp.pool_for_test())
+            .await
+            .unwrap();
+    assert_eq!(states, vec![expected]);
+}
+
+async fn assert_extract_generation(cp: &ControlPlane, mode: ClaimLossMode) {
+    let generation: i64 =
+        sqlx::query_scalar("SELECT dispatch_generation FROM audio_extract_operations")
+            .fetch_one(cp.pool_for_test())
+            .await
+            .unwrap();
+    let expected = match mode {
+        ClaimLossMode::Expiry | ClaimLossMode::Takeover => 0,
+        ClaimLossMode::GenerationAdvance => 1,
+    };
+    assert_eq!(generation, expected);
+}
+
+async fn assert_artifact_commit_state(cp: &ControlPlane, expected: &str, count: i64) {
+    let actual: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM artifact_commit_records WHERE state = ?")
+            .bind(expected)
+            .fetch_one(cp.pool_for_test())
+            .await
+            .unwrap();
+    assert_eq!(actual, count);
+    assert_table_count(cp, "artifact_commit_records", count).await;
+}
+
+async fn assert_unpublished_extract_state(cp: &ControlPlane) {
+    assert_table_count(cp, "file_versions", 1).await;
+    assert_table_count(cp, "file_locations", 1).await;
+    assert_table_count(cp, "media_snapshots", 2).await;
+    assert_table_count(cp, "asset_bundle_members", 0).await;
+    assert_table_count(cp, "audio_extract_output_lineage", 0).await;
+}
+
+async fn expire_current_extract_claim(cp: &ControlPlane) {
+    sqlx::query(
+        "UPDATE audio_extract_operations SET claim_expires_at = ? \
+         WHERE claim_token IS NOT NULL",
+    )
+    .bind("1970-01-01T00:00:00Z")
+    .execute(cp.pool_for_test())
+    .await
+    .unwrap();
 }
 
 async fn legacy_publication_counts(cp: &crate::ControlPlane) -> (i64, i64, i64, i64, i64) {
