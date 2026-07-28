@@ -6,7 +6,7 @@
 //! (`--kind ffmpeg` and `--kind mkvtoolnix`), each a separately spawned `voom`
 //! process that registers a bundled mutation worker and supervises it in the
 //! foreground, plus a `voom compliance execute` process that dispatches the
-//! `[Remux, TranscodeVideo]` plan to those workers. Every process shares ONE
+//! `[Remux]` then `[TranscodeVideo]` plan to those workers. Every process shares ONE
 //! on-disk `SQLite` database via `VOOM_DATABASE_URL`.
 //!
 //! Execution is the oracle: rather than asserting an assumed artifact shape, the
@@ -34,11 +34,11 @@ mod process;
 use local_worker::LocalWorker;
 use process::{BoundedOutput, build_worker_package, run_bounded};
 
-/// The Task 1 sample policy: a single `normalize` phase that remuxes to MKV and
-/// transcodes video to HEVC. For an h264/mp4 source this plans `[Remux,
-/// TranscodeVideo]`, exercising BOTH local workers in one phase.
+/// The sample policy remuxes to MKV, then transcodes video to HEVC in a dependent
+/// phase. For an h264/mp4 source this exercises both local mutation workers.
 const POLICY: &str = "policy \"remux-hevc\" {\n  \
-     phase normalize {\n    container mkv\n    transcode video to hevc\n  }\n}\n";
+     phase remux {\n    container mkv\n  }\n  \
+     phase transcode {\n    depends_on: [remux]\n    transcode video to hevc\n  }\n}\n";
 
 const READY_TIMEOUT: Duration = Duration::from_mins(1);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
@@ -228,13 +228,13 @@ fn run_execute_with_concurrent_reader(
 }
 
 /// Assert the execute run succeeded and inspect what it actually committed:
-/// exactly one completed `normalize` phase, one committed per-`(file, phase)` row
-/// for the lone video, and a single on-disk MKV in `--output-dir`.
+/// two completed phases, one committed per-`(file, phase)` row for each phase, and
+/// a single final MKV in `--output-dir`.
 fn assert_execute_committed(execute: &BoundedOutput, out_dir: &Path) {
     let execute_json = assert_ok(execute, "compliance execute");
     assert_eq!(execute_json["command"], "compliance");
 
-    // Both operations the [Remux, TranscodeVideo] plan dispatched succeeded.
+    // Both operations in the dependent [Remux] -> [TranscodeVideo] plan succeeded.
     let summary = &execute_json["data"]["summary"];
     assert_eq!(
         summary["failure_count"], 0,
@@ -251,39 +251,40 @@ fn assert_execute_committed(execute: &BoundedOutput, out_dir: &Path) {
     );
 
     let phases = execute_json["data"]["phases"].as_array().unwrap();
-    assert_eq!(phases.len(), 1, "one policy phase: {execute_json}");
-    assert_eq!(phases[0]["phase_name"], "normalize");
-    assert_eq!(
-        phases[0]["outcome"], "completed",
-        "the normalize phase must complete: {execute_json}"
+    assert_eq!(phases.len(), 2, "two policy phases: {execute_json}");
+    assert_eq!(phases[0]["phase_name"], "remux");
+    assert_eq!(phases[1]["phase_name"], "transcode");
+    assert!(
+        phases.iter().all(|phase| phase["outcome"] == "completed"),
+        "both policy phases must complete: {execute_json}"
     );
 
-    // Execution is the oracle: the remux+transcode chain commits a SINGLE
-    // per-`(file, phase)` row (one chained output, not two artifacts), carrying
-    // the produced version/location and a post-commit reprobe snapshot.
+    // Each mutation phase commits one per-`(file, phase)` row carrying the produced
+    // version/location and a post-commit reprobe snapshot.
     let file_phases = execute_json["data"]["file_phases"].as_array().unwrap();
     assert_eq!(
         file_phases.len(),
-        1,
-        "the [Remux, TranscodeVideo] chain commits a single per-file row: {execute_json}"
+        2,
+        "the mutation chain commits one per-file row per phase: {execute_json}"
     );
-    let committed = &file_phases[0];
-    assert_eq!(
-        committed["outcome"], "committed",
-        "the file phase must commit: {execute_json}"
-    );
-    assert!(
-        committed["produced_file_version_id"].as_u64().unwrap() > 0,
-        "a committed phase produces a new file version: {execute_json}"
-    );
-    assert!(
-        committed["produced_file_location_id"].as_u64().unwrap() > 0,
-        "a committed phase records the produced file location: {execute_json}"
-    );
-    assert!(
-        committed["reprobe_snapshot_id"].as_u64().unwrap() > 0,
-        "a committed phase records a post-commit reprobe snapshot: {execute_json}"
-    );
+    for committed in file_phases {
+        assert_eq!(
+            committed["outcome"], "committed",
+            "each file phase must commit: {execute_json}"
+        );
+        assert!(
+            committed["produced_file_version_id"].as_u64().unwrap() > 0,
+            "a committed phase produces a new file version: {execute_json}"
+        );
+        assert!(
+            committed["produced_file_location_id"].as_u64().unwrap() > 0,
+            "a committed phase records the produced file location: {execute_json}"
+        );
+        assert!(
+            committed["reprobe_snapshot_id"].as_u64().unwrap() > 0,
+            "a committed phase records a post-commit reprobe snapshot: {execute_json}"
+        );
+    }
 
     let outputs = list_dir(out_dir);
     let mkvs: Vec<&String> = outputs

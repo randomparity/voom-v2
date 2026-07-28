@@ -977,10 +977,8 @@ fn assert_audio_extract_lineage(execute: &Value) -> io::Result<()> {
         ("stream-2", 2, "external_audio"),
         ("stream-3", 3, "external_audio"),
         ("stream-4", 4, "commentary_audio"),
-        ("stream-5", 5, "external_audio"),
-        ("stream-6", 6, "external_audio"),
     ];
-    for (row, (stream_id, provider_index, role)) in rows.iter().take(7).zip(expected) {
+    for (row, (stream_id, provider_index, role)) in rows.iter().take(5).zip(expected) {
         require(
             row["source_snapshot_stream_id"] == stream_id
                 && row["source_provider_stream_index"] == provider_index
@@ -988,14 +986,16 @@ fn assert_audio_extract_lineage(execute: &Value) -> io::Result<()> {
             format!("A1 extraction source lineage: {rows:?}"),
         )?;
     }
-    require(
-        rows[7]["source_snapshot_stream_id"]
-            .as_str()
-            .is_some_and(|id| id.starts_with("synth_companion_"))
-            && rows[7]["source_provider_stream_index"] == 7
-            && rows[7]["role"] == "external_audio",
-        format!("A1 synthesized extraction lineage: {rows:?}"),
-    )?;
+    for (row, provider_index) in rows.iter().skip(5).zip([5_u64, 6, 7]) {
+        require(
+            row["source_snapshot_stream_id"]
+                .as_str()
+                .is_some_and(|id| id.starts_with("synth_companion_"))
+                && row["source_provider_stream_index"] == provider_index
+                && row["role"] == "external_audio",
+            format!("A1 synthesized extraction lineage: {rows:?}"),
+        )?;
+    }
     for field in [
         "operation_output_id",
         "output_id",

@@ -1,7 +1,9 @@
 use std::collections::BTreeSet;
 use std::fmt::{Display, Formatter};
+use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use time::OffsetDateTime;
 use voom_core::{ErrorCode, FailureClass, LeaseId};
@@ -16,6 +18,7 @@ use crate::observe::{ObserveError, observe_file_facts};
 use crate::preflight::{MkvmergeConfig, MkvtoolnixError};
 
 const PROVIDER: &str = "mkvtoolnix";
+const MAX_PROGRESS_INTERVAL: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MkvtoolnixWorkerError {
@@ -119,6 +122,7 @@ fn handle_operation_with_config(
 
         let lease_id = req.lease_id;
         let accepted_at = OffsetDateTime::now_utc();
+        let progress_idle_deadline_ms = req.progress_idle_deadline_ms;
         let payload = match serde_json::from_value::<RemuxRequest>(req.payload) {
             Ok(payload) => payload,
             Err(err) => {
@@ -142,11 +146,12 @@ fn handle_operation_with_config(
             );
         };
 
-        let started = progress_frame(lease_id, accepted_at);
-        match Box::pin(handle_remux(&payload, &config)).await {
-            Ok(result) => success_dispatch(lease_id, accepted_at, started, result),
-            Err(err) => error_dispatch_with_progress(lease_id, accepted_at, started, &err),
-        }
+        stream_operation(
+            lease_id,
+            accepted_at,
+            progress_idle_deadline_ms,
+            async move { handle_remux(&payload, &config).await },
+        )
     })
 }
 
@@ -713,28 +718,64 @@ fn expected_output_stream_order<'a>(
     ordered_keep_streams(&request.selection, input_mapping).map_err(MkvtoolnixWorkerError::from)
 }
 
-fn success_dispatch(
+fn stream_operation<F>(
     lease_id: LeaseId,
     accepted_at: OffsetDateTime,
-    progress: ProgressFrame,
-    result: RemuxResult,
-) -> Result<OperationDispatch, ProtocolError> {
-    let payload = serde_json::to_value(result).map_err(|err| ProtocolError::InvalidPayload {
-        detail: format!("remux result encode: {err}"),
-    })?;
-    let result = ProgressFrame::Result {
+    progress_idle_deadline_ms: u32,
+    operation: F,
+) -> Result<OperationDispatch, ProtocolError>
+where
+    F: Future<Output = Result<RemuxResult, MkvtoolnixWorkerError>> + Send + 'static,
+{
+    let (mut writer, dispatch) = OperationDispatch::streaming(OperationResponse {
         lease_id,
-        seq: 1,
-        emitted_at: OffsetDateTime::now_utc(),
-        payload,
-    };
-    Ok(OperationDispatch::buffered(
-        OperationResponse {
-            lease_id,
-            accepted_at,
-        },
-        body_from_frames(&[progress, result])?,
-    ))
+        accepted_at,
+    });
+    writer.write_frame(&progress_frame(lease_id, 0, accepted_at))?;
+    tokio::spawn(async move {
+        let interval = progress_interval(progress_idle_deadline_ms);
+        let mut ticker = tokio::time::interval(interval);
+        ticker.tick().await;
+        let mut operation = Box::pin(operation);
+        let mut seq = 1;
+        loop {
+            tokio::select! {
+                biased;
+                result = &mut operation => {
+                    let frame = match result {
+                        Ok(result) => match result_frame(lease_id, seq, result) {
+                            Ok(frame) => frame,
+                            Err(err) => error_frame(
+                                lease_id,
+                                &malformed_worker_result(
+                                    "encode_result",
+                                    format!("remux result encode: {err}"),
+                                ),
+                                seq,
+                            ),
+                        },
+                        Err(err) => error_frame(lease_id, &err, seq),
+                    };
+                    let _ = writer.write_frame(&frame);
+                    return;
+                }
+                _ = ticker.tick() => {
+                    if writer
+                        .write_frame(&progress_frame(
+                            lease_id,
+                            seq,
+                            OffsetDateTime::now_utc(),
+                        ))
+                        .is_err()
+                    {
+                        return;
+                    }
+                    seq += 1;
+                }
+            }
+        }
+    });
+    Ok(dispatch)
 }
 
 fn error_dispatch(
@@ -752,30 +793,42 @@ fn error_dispatch(
     ))
 }
 
-fn error_dispatch_with_progress(
+fn result_frame(
     lease_id: LeaseId,
-    accepted_at: OffsetDateTime,
-    progress: ProgressFrame,
-    err: &MkvtoolnixWorkerError,
-) -> Result<OperationDispatch, ProtocolError> {
-    Ok(OperationDispatch::buffered(
-        OperationResponse {
-            lease_id,
-            accepted_at,
-        },
-        body_from_frames(&[progress, error_frame(lease_id, err, 1)])?,
-    ))
+    seq: u64,
+    result: RemuxResult,
+) -> Result<ProgressFrame, ProtocolError> {
+    let payload = serde_json::to_value(result).map_err(|err| ProtocolError::InvalidPayload {
+        detail: format!("remux result encode: {err}"),
+    })?;
+    Ok(ProgressFrame::Result {
+        lease_id,
+        seq,
+        emitted_at: OffsetDateTime::now_utc(),
+        payload,
+    })
 }
 
-fn progress_frame(lease_id: LeaseId, emitted_at: OffsetDateTime) -> ProgressFrame {
+fn progress_frame(lease_id: LeaseId, seq: u64, emitted_at: OffsetDateTime) -> ProgressFrame {
     ProgressFrame::Progress {
         lease_id,
-        seq: 0,
+        seq,
         emitted_at,
         percent: None,
-        message: Some("remux started".to_owned()),
+        message: Some(if seq == 0 {
+            "remux started".to_owned()
+        } else {
+            "remux in progress".to_owned()
+        }),
         payload: Some(serde_json::json!({"provider": PROVIDER})),
     }
+}
+
+fn progress_interval(progress_idle_deadline_ms: u32) -> Duration {
+    let half_deadline_ms = u64::from(progress_idle_deadline_ms)
+        .saturating_div(2)
+        .max(1);
+    Duration::from_millis(half_deadline_ms).min(MAX_PROGRESS_INTERVAL)
 }
 
 fn error_frame(lease_id: LeaseId, err: &MkvtoolnixWorkerError, seq: u64) -> ProgressFrame {

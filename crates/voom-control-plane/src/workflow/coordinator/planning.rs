@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 use voom_core::{FileVersionId, JobId, VoomError};
-use voom_plan::{ExecutionPlan, NodeStatus, PlanningContext, PlanningRequest};
+use voom_plan::{ExecutionPlan, NodeStatus, PlanOperationKind, PlanningContext, PlanningRequest};
 use voom_policy::{PolicyInputSetDraft, TargetRef};
 use voom_store::repo::identity::MediaSnapshot;
 use voom_store::repo::workflow_summaries::{
@@ -19,24 +19,56 @@ use crate::cases::policy::plans::ResolvedFileInput;
 use crate::media_snapshot::planning_input;
 use crate::workflow::coordinator::{Disposition, PhaseFile};
 
-/// Classify each active file's node for a phase by `NodeStatus`. A file with no
-/// node (its target was skipped via `run_if`/`skip_if`) is `Skipped`.
-pub(super) fn classify_phase(files: &[PhaseFile], plan: &ExecutionPlan) -> Vec<Disposition> {
+/// Classify all of an active file's nodes for a phase by `NodeStatus`. A phase
+/// may contain several independent operations for one file, so any planned node
+/// makes the file planned even when an earlier sibling node is already a no-op.
+/// A file with no node (its target was skipped via `run_if`/`skip_if`) is
+/// `Skipped`.
+pub(super) fn classify_phase(
+    files: &[PhaseFile],
+    plan: &ExecutionPlan,
+) -> Result<Vec<Disposition>, VoomError> {
     files
         .iter()
         .map(|file| {
-            let node = plan.nodes.iter().find(|node| {
-                matches!(node.target, TargetRef::FileVersion { id } if id == file.version_id)
-            });
-            match node {
-                Some(node) => match node.status {
-                    NodeStatus::Blocked => Disposition::Blocked,
-                    NodeStatus::NoOp => Disposition::Skipped,
-                    NodeStatus::Planned => Disposition::Planned {
-                        node_id: node.node_id.clone(),
-                    },
-                },
-                None => Disposition::Skipped,
+            let mut node_ids = Vec::new();
+            let mut blocked = false;
+            let mut file_mutation_count = 0;
+            for node in &plan.nodes {
+                if !matches!(
+                    node.target,
+                    TargetRef::FileVersion { id } if id == file.version_id
+                ) {
+                    continue;
+                }
+                match node.status {
+                    NodeStatus::Planned => {
+                        node_ids.push(node.node_id.clone());
+                        if matches!(
+                            node.operation_kind,
+                            PlanOperationKind::Remux
+                                | PlanOperationKind::TranscodeVideo
+                                | PlanOperationKind::TranscodeAudio
+                        ) {
+                            file_mutation_count += 1;
+                        }
+                    }
+                    NodeStatus::Blocked => blocked = true,
+                    NodeStatus::NoOp => {}
+                }
+            }
+            if file_mutation_count > 1 {
+                Err(VoomError::PolicyExecution(format!(
+                    "phase planned {file_mutation_count} file mutations for branch `{}`; \
+                     split same-file mutations into dependent phases",
+                    file.branch_id
+                )))
+            } else if !node_ids.is_empty() {
+                Ok(Disposition::Planned { node_ids })
+            } else if blocked {
+                Ok(Disposition::Blocked)
+            } else {
+                Ok(Disposition::Skipped)
             }
         })
         .collect()

@@ -115,7 +115,7 @@ vocabulary; each has a planner-oracle test in
 |--------|--------------|
 | `container-normalize.voom` | Remux every file to mkv; already-mkv files are a no-op. |
 | `language-cleanup.voom` | Keep only the preferred-language audio/subtitles, then order tracks and set filter-addressed defaults. |
-| `reference-user.voom` | The whole-library flagship: mkv + HEVC video + E-AC-3 5.1 audio + a synthesized stereo downmix + language-filtered keep + filter-addressed defaults + `verify artifact`, run as a four-phase barrier chain. |
+| `reference-user.voom` | The whole-library flagship: mkv + HEVC video + E-AC-3 5.1 audio + a synthesized stereo downmix + language-filtered keep + filter-addressed defaults + `verify artifact`, run as a five-phase barrier chain. |
 | `verify-heavy.voom` | An artifact verification between each mutating phase. |
 
 For a real whole-library run, `reference-user.voom` is the closest to a

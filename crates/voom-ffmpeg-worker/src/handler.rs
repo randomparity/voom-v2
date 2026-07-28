@@ -1,6 +1,8 @@
 use std::fmt::{Display, Formatter};
+use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use serde::{Serialize, de::DeserializeOwned};
 use time::OffsetDateTime;
@@ -22,6 +24,16 @@ use crate::ffmpeg::{
 use crate::observe::{ObserveError, observe_file_facts};
 
 const PROVIDER: &str = "ffmpeg";
+const MAX_PROGRESS_INTERVAL: Duration = Duration::from_secs(5);
+
+#[derive(Clone, Copy)]
+struct StreamingOperation {
+    lease_id: LeaseId,
+    accepted_at: OffsetDateTime,
+    progress_idle_deadline_ms: u32,
+    started_message: &'static str,
+    active_message: &'static str,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TranscodeVideoError {
@@ -131,6 +143,7 @@ fn handle_operation_with_config(
     Box::pin(async move {
         let lease_id = req.lease_id;
         let accepted_at = OffsetDateTime::now_utc();
+        let progress_idle_deadline_ms = req.progress_idle_deadline_ms;
         let operation = req.operation;
         if !matches!(
             operation,
@@ -162,11 +175,16 @@ fn handle_operation_with_config(
                     Ok(payload) => payload,
                     Err(dispatch) => return Ok(dispatch),
                 };
-                let started = progress_frame(lease_id, accepted_at, "video transcode started");
-                match Box::pin(handle_transcode_video(&payload, &config)).await {
-                    Ok(result) => success_dispatch(lease_id, accepted_at, started, result),
-                    Err(err) => error_dispatch_with_progress(lease_id, accepted_at, started, &err),
-                }
+                stream_operation(
+                    StreamingOperation {
+                        lease_id,
+                        accepted_at,
+                        progress_idle_deadline_ms,
+                        started_message: "video transcode started",
+                        active_message: "video transcode in progress",
+                    },
+                    async move { handle_transcode_video(&payload, &config).await },
+                )
             }
             OperationKind::TranscodeAudio => {
                 let payload = match decode_payload::<TranscodeAudioRequest>(
@@ -178,11 +196,16 @@ fn handle_operation_with_config(
                     Ok(payload) => payload,
                     Err(dispatch) => return Ok(dispatch),
                 };
-                let started = progress_frame(lease_id, accepted_at, "audio transcode started");
-                match Box::pin(handle_transcode_audio(&payload, &config)).await {
-                    Ok(result) => success_dispatch(lease_id, accepted_at, started, result),
-                    Err(err) => error_dispatch_with_progress(lease_id, accepted_at, started, &err),
-                }
+                stream_operation(
+                    StreamingOperation {
+                        lease_id,
+                        accepted_at,
+                        progress_idle_deadline_ms,
+                        started_message: "audio transcode started",
+                        active_message: "audio transcode in progress",
+                    },
+                    async move { handle_transcode_audio(&payload, &config).await },
+                )
             }
             OperationKind::ExtractAudio => {
                 let payload = match decode_payload::<ExtractAudioRequest>(
@@ -194,11 +217,16 @@ fn handle_operation_with_config(
                     Ok(payload) => payload,
                     Err(dispatch) => return Ok(dispatch),
                 };
-                let started = progress_frame(lease_id, accepted_at, "audio extraction started");
-                match Box::pin(handle_extract_audio(&payload, &config)).await {
-                    Ok(result) => success_dispatch(lease_id, accepted_at, started, result),
-                    Err(err) => error_dispatch_with_progress(lease_id, accepted_at, started, &err),
-                }
+                stream_operation(
+                    StreamingOperation {
+                        lease_id,
+                        accepted_at,
+                        progress_idle_deadline_ms,
+                        started_message: "audio extraction started",
+                        active_message: "audio extraction in progress",
+                    },
+                    async move { handle_extract_audio(&payload, &config).await },
+                )
             }
             _ => unreachable!("unsupported operation returned before config validation"),
         }
@@ -889,28 +917,68 @@ async fn observe_audio_file_facts(path: &Path) -> Result<AudioObservedFacts, Tra
     })
 }
 
-fn success_dispatch<T: Serialize>(
-    lease_id: LeaseId,
-    accepted_at: OffsetDateTime,
-    progress: ProgressFrame,
-    result: T,
-) -> Result<OperationDispatch, ProtocolError> {
-    let payload = serde_json::to_value(result).map_err(|err| ProtocolError::InvalidPayload {
-        detail: format!("operation result encode: {err}"),
-    })?;
-    let result = ProgressFrame::Result {
-        lease_id,
-        seq: 1,
-        emitted_at: OffsetDateTime::now_utc(),
-        payload,
+fn stream_operation<T, F>(
+    context: StreamingOperation,
+    operation: F,
+) -> Result<OperationDispatch, ProtocolError>
+where
+    T: Serialize + Send + 'static,
+    F: Future<Output = Result<T, TranscodeVideoError>> + Send + 'static,
+{
+    let response = OperationResponse {
+        lease_id: context.lease_id,
+        accepted_at: context.accepted_at,
     };
-    Ok(OperationDispatch::buffered(
-        OperationResponse {
-            lease_id,
-            accepted_at,
-        },
-        body_from_frames(&[progress, result])?,
-    ))
+    let (mut writer, dispatch) = OperationDispatch::streaming(response);
+    writer.write_frame(&progress_frame(
+        context.lease_id,
+        0,
+        context.accepted_at,
+        context.started_message,
+    ))?;
+    tokio::spawn(async move {
+        let interval = progress_interval(context.progress_idle_deadline_ms);
+        let mut ticker = tokio::time::interval(interval);
+        ticker.tick().await;
+        let mut operation = Box::pin(operation);
+        let mut seq = 1;
+        loop {
+            tokio::select! {
+                biased;
+                result = &mut operation => {
+                    let frame = match result {
+                        Ok(result) => match result_frame(context.lease_id, seq, result) {
+                            Ok(frame) => frame,
+                            Err(err) => error_frame(
+                                context.lease_id,
+                                &malformed_worker_result(
+                                    "encode_result",
+                                    format!("operation result encode: {err}"),
+                                ),
+                                seq,
+                            ),
+                        },
+                        Err(err) => error_frame(context.lease_id, &err, seq),
+                    };
+                    let _ = writer.write_frame(&frame);
+                    return;
+                }
+                _ = ticker.tick() => {
+                    let frame = progress_frame(
+                        context.lease_id,
+                        seq,
+                        OffsetDateTime::now_utc(),
+                        context.active_message,
+                    );
+                    if writer.write_frame(&frame).is_err() {
+                        return;
+                    }
+                    seq += 1;
+                }
+            }
+        }
+    });
+    Ok(dispatch)
 }
 
 fn error_dispatch(
@@ -928,30 +996,43 @@ fn error_dispatch(
     ))
 }
 
-fn error_dispatch_with_progress(
+fn result_frame<T: Serialize>(
     lease_id: LeaseId,
-    accepted_at: OffsetDateTime,
-    progress: ProgressFrame,
-    err: &TranscodeVideoError,
-) -> Result<OperationDispatch, ProtocolError> {
-    Ok(OperationDispatch::buffered(
-        OperationResponse {
-            lease_id,
-            accepted_at,
-        },
-        body_from_frames(&[progress, error_frame(lease_id, err, 1)])?,
-    ))
+    seq: u64,
+    result: T,
+) -> Result<ProgressFrame, ProtocolError> {
+    let payload = serde_json::to_value(result).map_err(|err| ProtocolError::InvalidPayload {
+        detail: format!("operation result encode: {err}"),
+    })?;
+    Ok(ProgressFrame::Result {
+        lease_id,
+        seq,
+        emitted_at: OffsetDateTime::now_utc(),
+        payload,
+    })
 }
 
-fn progress_frame(lease_id: LeaseId, emitted_at: OffsetDateTime, message: &str) -> ProgressFrame {
+fn progress_frame(
+    lease_id: LeaseId,
+    seq: u64,
+    emitted_at: OffsetDateTime,
+    message: &str,
+) -> ProgressFrame {
     ProgressFrame::Progress {
         lease_id,
-        seq: 0,
+        seq,
         emitted_at,
         percent: None,
         message: Some(message.to_owned()),
         payload: Some(serde_json::json!({"provider": PROVIDER})),
     }
+}
+
+fn progress_interval(progress_idle_deadline_ms: u32) -> Duration {
+    let half_deadline_ms = u64::from(progress_idle_deadline_ms)
+        .saturating_div(2)
+        .max(1);
+    Duration::from_millis(half_deadline_ms).min(MAX_PROGRESS_INTERVAL)
 }
 
 fn decode_payload<T: DeserializeOwned>(

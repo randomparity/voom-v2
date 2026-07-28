@@ -986,9 +986,14 @@ async fn synthesize_audio_appends_downmixed_companion_stream() {
     // Every source stream is copied, and the source is re-mapped once more to
     // encode the appended companion at audio ordinal 2 (after the two sources).
     assert!(args.contains("-map\n0\n"));
+    assert!(args.contains("-map\n-0:t?\n"));
     assert!(args.contains("-c\ncopy\n"));
     assert!(args.contains("-map\n0:1\n"));
     assert!(args.contains("-c:a:2\naac\n"));
+    assert!(
+        args.find("-map\n0:1\n").unwrap() < args.rfind("-map\n0:t?\n").unwrap(),
+        "attachments must be mapped after appended companion tracks"
+    );
     // Downmix to stereo; aac default profile is 64 kbps/channel → 128k.
     assert!(args.contains("-ac:a:2\n2\n"));
     assert!(args.contains("-b:a:2\n128k\n"));

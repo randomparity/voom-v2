@@ -305,6 +305,123 @@ fn regenerated_phase_report_blocks_malformed_probe_container() {
 }
 
 #[tokio::test]
+async fn classify_phase_keeps_later_planned_operation_after_earlier_no_op() {
+    let (cp, _tmp) = crate::cases::cp().await;
+    let payload = json!({
+        "format": "sprint16-v1",
+        "probe": { "provider": "ffprobe", "provider_version": "7.0" },
+        "container": { "format_name": "mkv" },
+        "streams": [
+            {
+                "id": "stream-0",
+                "index": 0,
+                "kind": "video",
+                "codec_name": "hevc"
+            },
+            {
+                "id": "stream-1",
+                "index": 1,
+                "kind": "audio",
+                "codec_name": "eac3",
+                "channels": 6,
+                "language": "eng"
+            }
+        ]
+    });
+    let version = seed_version(&cp, "/srv/multi-operation.mkv", "multi-operation", payload).await;
+    let file = phase_file(&cp, version, "multi-operation").await;
+    let policy = voom_policy::compile_policy(
+        "policy \"multi operation\" { phase audio { \
+         transcode audio to eac3 where language in [\"eng\"] \
+         synthesize audio from channels >= 6 { codec aac channels 2 } \
+         } }",
+    )
+    .unwrap()
+    .policy;
+    let plan = voom_plan::plan_phase(
+        voom_plan::PlanningRequest {
+            policy,
+            input: file_draft("multi-operation", std::slice::from_ref(&file.snapshot)),
+            context: voom_plan::PlanningContext::default(),
+        },
+        "audio",
+    )
+    .unwrap();
+
+    let dispositions = super::classify_phase(std::slice::from_ref(&file), &plan).unwrap();
+
+    let super::Disposition::Planned { node_ids } = &dispositions[0] else {
+        panic!("a later planned operation must make the file planned");
+    };
+    assert_eq!(node_ids.len(), 1);
+    assert_eq!(
+        plan.nodes
+            .iter()
+            .find(|node| node.node_id == node_ids[0])
+            .unwrap()
+            .status,
+        voom_plan::NodeStatus::Planned
+    );
+}
+
+#[tokio::test]
+async fn phase_dispatch_rejects_multiple_same_file_mutations() {
+    let (cp, _tmp) = crate::cases::cp().await;
+    let payload = json!({
+        "format": "sprint16-v1",
+        "probe": { "provider": "ffprobe", "provider_version": "7.0" },
+        "container": { "format_name": "mkv" },
+        "streams": [
+            {
+                "id": "stream-0",
+                "index": 0,
+                "kind": "video",
+                "codec_name": "hevc"
+            },
+            {
+                "id": "stream-1",
+                "index": 1,
+                "kind": "audio",
+                "codec_name": "ac3",
+                "channels": 6,
+                "language": "eng"
+            }
+        ]
+    });
+    let version = seed_version(
+        &cp,
+        "/srv/multiple-mutations.mkv",
+        "multiple-mutations",
+        payload,
+    )
+    .await;
+    let file = phase_file(&cp, version, "multiple-mutations").await;
+    let policy = voom_policy::compile_policy(
+        "policy \"multiple mutations\" { phase audio { \
+         transcode audio to eac3 where language in [\"eng\"] \
+         synthesize audio from channels >= 6 { codec aac channels 2 } \
+         } }",
+    )
+    .unwrap()
+    .policy;
+    let plan = voom_plan::plan_phase(
+        voom_plan::PlanningRequest {
+            policy,
+            input: file_draft("multiple-mutations", std::slice::from_ref(&file.snapshot)),
+            context: voom_plan::PlanningContext::default(),
+        },
+        "audio",
+    )
+    .unwrap();
+
+    let error = super::classify_phase(std::slice::from_ref(&file), &plan).unwrap_err();
+
+    assert_eq!(error.code(), "POLICY_EXECUTION_ERROR");
+    assert!(error.to_string().contains("split same-file mutations"));
+    assert!(error.to_string().contains("multiple-mutations"));
+}
+
+#[tokio::test]
 async fn active_version_with_snapshot_picks_latest_committed_tip() {
     let (cp, _tmp) = crate::cases::cp().await;
     let v1 = seed_version(&cp, "/srv/b.mkv", "hash-b1", reprobe_payload("hevc")).await;
@@ -710,14 +827,17 @@ async fn superseded_prepared_fresh_phase_rejects_every_planned_file_before_dispa
     );
     assert!(error.source.to_string().contains(&second.to_string()));
     assert!(error.source.to_string().contains(&current.to_string()));
-    assert!(error.partial.is_none());
     let job_id = latest_job_id(&cp).await;
+    assert_eq!(error.partial.as_ref().unwrap().job_id, job_id);
+    let report = cp.read_compliance_run_report(job_id).await.unwrap();
+    assert!(report.phases.is_empty());
+    assert!(report.file_phases.is_empty());
     assert_eq!(job_state(&cp, job_id).await, "failed");
     assert_job_opened_then_failed_with_stale_reason(&cp, job_id).await;
     assert_eq!(job_ticket_count(&cp, job_id).await, 0);
     assert_eq!(job_lease_count(&cp, job_id).await, 0);
     assert_eq!(ticket_and_lease_event_count(&cp).await, 0);
-    assert_eq!(workflow_effect_counts(&cp, job_id).await, (0, 0, 0));
+    assert_eq!(workflow_effect_counts(&cp, job_id).await, (1, 0, 0));
     assert_eq!(artifact_count(&cp).await, 0);
     let starts = cp
         .workflow_summaries()
@@ -801,8 +921,11 @@ async fn superseded_prepared_resume_rejects_dispatch_without_mutating_prior_work
     assert_eq!(error.source.code(), "STALE_IDENTITY_EVIDENCE");
     assert!(error.source.to_string().contains(&selected.to_string()));
     assert!(error.source.to_string().contains(&current.to_string()));
-    assert!(error.partial.is_none());
     let job_id = latest_job_id(&cp).await;
+    assert_eq!(error.partial.as_ref().unwrap().job_id, job_id);
+    let report = cp.read_compliance_run_report(job_id).await.unwrap();
+    assert!(report.phases.is_empty());
+    assert!(report.file_phases.is_empty());
     assert_ne!(job_id, prior_job_id);
     assert_eq!(job_state(&cp, job_id).await, "failed");
     assert_job_opened_then_failed_with_stale_reason(&cp, job_id).await;
@@ -820,7 +943,7 @@ async fn superseded_prepared_resume_rejects_dispatch_without_mutating_prior_work
             .state,
         TicketState::Ready
     );
-    assert_eq!(workflow_effect_counts(&cp, job_id).await, (0, 0, 0));
+    assert_eq!(workflow_effect_counts(&cp, job_id).await, (1, 0, 0));
     assert_eq!(artifact_count(&cp).await, 0);
     let starts = cp
         .workflow_summaries()
@@ -979,14 +1102,14 @@ fn reject_unpublished_on_error_allows_published_strategies_and_unset() {
 fn continued_disposition_blocks_failed_nodes_and_preserves_successful_nodes() {
     let failed = super::continued_disposition(
         &super::Disposition::Planned {
-            node_id: "failed".to_owned(),
+            node_ids: vec!["failed".to_owned()],
         },
         &[TicketState::Failed],
     )
     .unwrap();
     let succeeded = super::continued_disposition(
         &super::Disposition::Planned {
-            node_id: "succeeded".to_owned(),
+            node_ids: vec!["succeeded".to_owned()],
         },
         &[TicketState::Succeeded],
     )
@@ -995,16 +1118,16 @@ fn continued_disposition_blocks_failed_nodes_and_preserves_successful_nodes() {
     let super::Disposition::Blocked = failed else {
         panic!("failed node must be blocked");
     };
-    let super::Disposition::Planned { node_id } = succeeded else {
+    let super::Disposition::Planned { node_ids } = succeeded else {
         panic!("successful node must remain planned");
     };
-    assert_eq!(node_id, "succeeded");
+    assert_eq!(node_ids, ["succeeded"]);
 }
 
 #[test]
 fn continued_disposition_rejects_missing_or_non_terminal_ticket_state() {
     let disposition = super::Disposition::Planned {
-        node_id: "node".to_owned(),
+        node_ids: vec!["node".to_owned()],
     };
 
     let missing = super::continued_disposition(&disposition, &[]).unwrap_err();
@@ -1514,7 +1637,7 @@ async fn phase_finalization_records_skipped_survivors_gate_history() {
         &[
             super::Disposition::Skipped,
             super::Disposition::Planned {
-                node_id: "committed-node".to_owned(),
+                node_ids: vec!["committed-node".to_owned()],
             },
         ],
     )

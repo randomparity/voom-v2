@@ -2,11 +2,12 @@
 // It exercises the full V1(+V1.1) vocabulary the DSL work landed:
 //   MKV container + language-filtered keep + filter-addressed defaults/order
 //   (normalize), HEVC video profile (video), E-AC-3 5.1 plus a synthesized
-//   stereo downmix (audio), and an artifact verification (verify). Each phase
-//   depends on the prior so the barrier coordinator runs them in order.
+//   stereo downmix (audio_companion), and an artifact verification (verify).
+//   Each phase depends on the prior so every mutation sees the committed output
+//   of the preceding operation.
 policy "reference user library normalize" {
   metadata {
-    version: "1"
+    version: "2"
     description: "mkv + hevc + eac3 5.1 + stereo downmix + language keep + verify"
   }
 
@@ -28,14 +29,18 @@ policy "reference user library normalize" {
     transcode video to hevc
   }
 
-  phase audio {
+  phase audio_transcode {
     depends_on: [video]
     transcode audio to eac3 where language in ["eng", "und"]
+  }
+
+  phase audio_companion {
+    depends_on: [audio_transcode]
     synthesize audio from channels >= 6 { codec aac  channels 2 }
   }
 
   phase verify {
-    depends_on: [audio]
+    depends_on: [audio_companion]
     verify artifact
   }
 }
