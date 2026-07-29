@@ -560,7 +560,21 @@ impl WorkflowExecutor {
                 .fail_job(&self.control_plane, job_id, source, started)
                 .await);
         }
-        tokio::time::sleep(interval).await;
+        let expiry = match self
+            .control_plane
+            .expire_due(self.control_plane.clock().now())
+            .await
+        {
+            Ok(expiry) => expiry,
+            Err(source) => {
+                return Err(state
+                    .fail_job(&self.control_plane, job_id, source, started)
+                    .await);
+            }
+        };
+        if expiry.expired_leases.is_empty() {
+            tokio::time::sleep(interval).await;
+        }
         Ok(())
     }
 

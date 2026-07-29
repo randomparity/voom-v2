@@ -5,9 +5,12 @@
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
-use tokio::io::AsyncReadExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use voom_core::{FileAssetId, FileLocationId, FileVersionId, VoomError};
+use voom_policy::{PolicyInputSetDraft, TargetRef};
 use voom_store::repo::identity::{FileLocationKind, IdentityRepo};
 use voom_store::repo::workflow_summaries::FilePhaseSummary;
 
@@ -15,6 +18,8 @@ use crate::ControlPlane;
 use crate::cases::policy::compliance::PromotionPlan;
 use crate::cases::{begin_tx, commit_tx};
 use crate::workflow::coordinator::finalize::WorkingDirArtifact;
+
+static PROMOTION_TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 /// Canonicalized `(working dir, output dir)` pairs for a run. A working dir is
 /// absent when its operation produced nothing this run, so it is dropped.
@@ -29,11 +34,15 @@ impl ResolvedPromotionDirs {
 
     /// The output dir for an artifact path, by longest working-dir prefix match.
     fn output_for(&self, path: &Path) -> Option<&Path> {
+        self.pair_for(path).map(|(_, output)| output)
+    }
+
+    fn pair_for(&self, path: &Path) -> Option<(&Path, &Path)> {
         self.working_to_output
             .iter()
             .filter(|(working, _)| path.starts_with(working))
             .max_by_key(|(working, _)| working.as_os_str().len())
-            .map(|(_, output)| output.as_path())
+            .map(|(working, output)| (working.as_path(), output.as_path()))
     }
 }
 
@@ -66,6 +75,32 @@ fn longest_common_dir(dirs: &[PathBuf]) -> PathBuf {
         common.truncate(shared);
     }
     common.iter().collect()
+}
+
+fn promotion_relative_dir(
+    source_dir: Option<&Path>,
+    source_root: &Path,
+    auxiliary_root: &Path,
+    working_root: &Path,
+) -> PathBuf {
+    let Some(source_dir) = source_dir else {
+        return PathBuf::new();
+    };
+    if source_dir.starts_with(working_root)
+        && !auxiliary_root.as_os_str().is_empty()
+        && let Ok(relative) = source_dir.strip_prefix(auxiliary_root)
+    {
+        return relative.to_path_buf();
+    }
+    if !source_root.as_os_str().is_empty()
+        && let Ok(relative) = source_dir.strip_prefix(source_root)
+    {
+        return relative.to_path_buf();
+    }
+    source_dir
+        .strip_prefix(working_root)
+        .map(Path::to_path_buf)
+        .unwrap_or_default()
 }
 
 pub(super) fn ensure_unique_selected_branch_ids(
@@ -123,11 +158,26 @@ async fn move_terminal_artifact(current: &Path, dest: &Path) -> Result<PathBuf, 
             )));
         }
     }
-    if tokio::fs::rename(current, dest).await.is_ok() {
-        return Ok(dest.to_path_buf());
+    match tokio::fs::hard_link(current, dest).await {
+        Ok(()) => {
+            remove_promoted_source(current).await;
+            return Ok(dest.to_path_buf());
+        }
+        Err(_) => match tokio::fs::symlink_metadata(dest).await {
+            Ok(dest_meta) => {
+                return resolve_existing_destination(current, dest, &dest_meta).await;
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => {
+                return Err(VoomError::Config(format!(
+                    "stat promotion destination {}: {err}",
+                    dest.display()
+                )));
+            }
+        },
     }
-    // A failed rename (typically a cross-filesystem EXDEV) falls back to an atomic
-    // copy-into-place: stream into a temp sibling, then rename it over dest.
+    // A failed hard link (typically cross-filesystem EXDEV) falls back to an
+    // atomic copy-into-place.
     copy_into_place(current, dest).await?;
     Ok(dest.to_path_buf())
 }
@@ -215,7 +265,14 @@ fn promotion_temp_path(dest: &Path) -> Result<PathBuf, VoomError> {
     })?;
     let mut temp_name = OsString::from(".voom-promote.");
     temp_name.push(file_name);
-    temp_name.push(".partial");
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_nanos());
+    let sequence = PROMOTION_TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    temp_name.push(format!(
+        ".{}.{timestamp:032x}.{sequence:016x}.partial",
+        std::process::id()
+    ));
     Ok(dest.with_file_name(temp_name))
 }
 
@@ -233,16 +290,23 @@ async fn remove_promoted_source(current: &Path) {
     }
 }
 
-/// Place a terminal artifact at `dest` across filesystems without ever leaving a
-/// partial `dest`: stream into a hidden temp sibling on `dest`'s filesystem, then
-/// atomically `rename` it into place (an intra-filesystem rename is atomic). The
-/// source is removed best-effort afterward. Used when a direct `rename` fails
-/// (typically a cross-filesystem `EXDEV`).
+/// Place a terminal artifact at `dest` across filesystems without exposing a
+/// partial file or replacing a concurrent destination.
 async fn copy_into_place(current: &Path, dest: &Path) -> Result<(), VoomError> {
     let temp = promotion_temp_path(dest)?;
-    if let Err(err) = tokio::fs::copy(current, &temp).await {
-        // A partial copy may already exist at temp; remove it so no stray
-        // `.partial` dotfile is left in the operator's output dir.
+    let copy_result = async {
+        let mut source = tokio::fs::File::open(current).await?;
+        let mut target = tokio::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&temp)
+            .await?;
+        tokio::io::copy(&mut source, &mut target).await?;
+        target.flush().await?;
+        target.sync_all().await
+    }
+    .await;
+    if let Err(err) = copy_result {
         let _ = tokio::fs::remove_file(&temp).await;
         return Err(VoomError::Config(format!(
             "copy terminal artifact {} -> {}: {err}",
@@ -250,16 +314,26 @@ async fn copy_into_place(current: &Path, dest: &Path) -> Result<(), VoomError> {
             temp.display()
         )));
     }
-    if let Err(err) = tokio::fs::rename(&temp, dest).await {
-        let _ = tokio::fs::remove_file(&temp).await;
-        return Err(VoomError::Config(format!(
-            "place terminal artifact {} -> {}: {err}",
-            temp.display(),
-            dest.display()
-        )));
+    match tokio::fs::hard_link(&temp, dest).await {
+        Ok(()) => {
+            let _ = tokio::fs::remove_file(&temp).await;
+            remove_promoted_source(current).await;
+            Ok(())
+        }
+        Err(error) => {
+            let _ = tokio::fs::remove_file(&temp).await;
+            match tokio::fs::symlink_metadata(dest).await {
+                Ok(dest_meta) => resolve_existing_destination(current, dest, &dest_meta)
+                    .await
+                    .map(|_| ()),
+                Err(_) => Err(VoomError::Config(format!(
+                    "place terminal artifact {} -> {} without replacement: {error}",
+                    temp.display(),
+                    dest.display()
+                ))),
+            }
+        }
     }
-    remove_promoted_source(current).await;
-    Ok(())
 }
 
 impl ControlPlane {
@@ -277,6 +351,7 @@ impl ControlPlane {
         &self,
         plan: &PromotionPlan,
         location_ids: &[FileLocationId],
+        source_root: &Path,
     ) -> Result<(), VoomError> {
         let dirs = resolve_promotion_dirs(plan).await;
         if dirs.is_empty() || location_ids.is_empty() {
@@ -300,7 +375,7 @@ impl ControlPlane {
             // the move rather than being silently skipped.
             let raw = PathBuf::from(&artifact.value);
             let current = tokio::fs::canonicalize(&raw).await.unwrap_or(raw);
-            let Some(output_dir) = dirs.output_for(&current) else {
+            let Some((working_dir, output_dir)) = dirs.pair_for(&current) else {
                 continue;
             };
             let source_dir = self
@@ -310,23 +385,67 @@ impl ControlPlane {
             if let Some(dir) = &source_dir {
                 source_dirs.push(dir.clone());
             }
-            candidates.push((artifact, current, output_dir.to_path_buf(), source_dir));
+            candidates.push((
+                artifact,
+                current,
+                working_dir.to_path_buf(),
+                output_dir.to_path_buf(),
+                source_dir,
+            ));
         }
-        let common_root = longest_common_dir(&source_dirs);
+        let common_root = if source_root.as_os_str().is_empty() {
+            longest_common_dir(&source_dirs)
+        } else {
+            source_root.to_path_buf()
+        };
+        let auxiliary_dirs = candidates
+            .iter()
+            .filter_map(|(_, _, working_dir, _, source_dir)| {
+                source_dir
+                    .as_ref()
+                    .filter(|source_dir| source_dir.starts_with(working_dir))
+                    .cloned()
+            })
+            .collect::<Vec<_>>();
+        let auxiliary_root = longest_common_dir(&auxiliary_dirs);
         // Pass 2: move each terminal artifact under its mirrored subtree. A
         // source dir under the common root contributes the relative subtree; an
         // unknown source (no local-path location) falls back to a flat promotion.
-        for (artifact, current, output_dir, source_dir) in candidates {
-            let relative = source_dir
-                .as_deref()
-                .and_then(|dir| dir.strip_prefix(&common_root).ok())
-                .map(Path::to_path_buf)
-                .unwrap_or_default();
+        for (artifact, current, working_dir, output_dir, source_dir) in candidates {
+            let relative = promotion_relative_dir(
+                source_dir.as_deref(),
+                &common_root,
+                &auxiliary_root,
+                &working_dir,
+            );
             let dest_dir = output_dir.join(&relative);
             self.promote_artifact(&artifact, &current, &dest_dir)
                 .await?;
         }
         Ok(())
+    }
+
+    pub(super) async fn promotion_source_root(
+        &self,
+        input: &PolicyInputSetDraft,
+    ) -> Result<PathBuf, VoomError> {
+        let mut source_dirs = Vec::new();
+        for snapshot in &input.media_snapshots {
+            let TargetRef::FileVersion { id } = snapshot.target else {
+                continue;
+            };
+            let version = self.identity.get_file_version(id).await?.ok_or_else(|| {
+                VoomError::NotFound(format!("promotion source file version {id}"))
+            })?;
+            let source_dir = self
+                .asset_source_path(version.file_asset_id)
+                .await?
+                .and_then(|path| path.parent().map(Path::to_path_buf));
+            if let Some(source_dir) = source_dir {
+                source_dirs.push(source_dir);
+            }
+        }
+        Ok(longest_common_dir(&source_dirs))
     }
 
     pub(super) async fn reclaim_superseded_intermediates(

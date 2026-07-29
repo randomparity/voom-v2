@@ -16,7 +16,10 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Instant;
+use tokio::sync::Mutex;
 use tokio::task::JoinSet;
 
 use voom_core::{FileAssetId, FileVersionId, JobId, PolicyInputSetId, PolicyVersionId, VoomError};
@@ -26,8 +29,8 @@ use voom_store::repo::identity::{IdentityRepo, MediaSnapshot};
 use voom_store::repo::jobs::{JobState, NewJob};
 use voom_store::repo::tickets::TicketState;
 use voom_store::repo::workflow_summaries::{
-    FilePhaseOutcome, FilePhaseSummary, NewFilePhaseEntry, NewFileProgress, NewFileRunHistory,
-    NewFileRunStart, NewPhaseSummary, PhaseSummary, WorkflowSummary,
+    FileAdmissionTier, FilePhaseOutcome, FilePhaseSummary, NewFilePhaseEntry, NewFileProgress,
+    NewFileRunHistory, NewFileRunStart, NewPhaseSummary, PhaseSummary, WorkflowSummary,
 };
 
 use crate::ControlPlane;
@@ -68,6 +71,7 @@ struct PhaseFile {
     pub(super) snapshot: MediaSnapshot,
     pub(super) branch_id: String,
     pub(super) ordinal: u32,
+    pub(super) admission_tier: FileAdmissionTier,
     /// First phase ordinal this file participates in (`0` for a fresh run; set by
     /// resume reconciliation). The loop passes a file through phases below this
     /// untouched (#165).
@@ -382,6 +386,68 @@ struct FilePipelineFailure {
     last_run: Option<crate::workflow::WorkflowRunSummary>,
 }
 
+#[derive(Clone)]
+struct FileAdmissionGate {
+    open: Arc<Mutex<bool>>,
+}
+
+impl FileAdmissionGate {
+    fn new() -> Self {
+        Self {
+            open: Arc::new(Mutex::new(true)),
+        }
+    }
+
+    async fn close(&self) {
+        *self.open.lock().await = false;
+    }
+
+    async fn admit_next_file(
+        &self,
+        control_plane: &ControlPlane,
+        job_id: JobId,
+    ) -> Result<Option<voom_store::repo::workflow_summaries::FileProgress>, VoomError> {
+        let open = self.open.lock().await;
+        if !*open {
+            return Ok(None);
+        }
+        control_plane
+            .workflow_summaries
+            .admit_next_file(job_id, control_plane.clock().now())
+            .await
+    }
+}
+
+struct FileWindowRefill<'a> {
+    pending: &'a mut BTreeMap<String, PhaseFile>,
+    seeds_by_branch: &'a mut BTreeMap<String, Vec<FilePhaseSummary>>,
+    active: &'a mut JoinSet<Result<FilePipelineOutcome, FilePipelineFailure>>,
+    promotion_source_root: &'a Path,
+    admission_gate: &'a FileAdmissionGate,
+}
+
+fn prepare_file_window_queues(
+    inputs: &mut PhaseLoopInputs,
+) -> (
+    BTreeMap<String, PhaseFile>,
+    BTreeMap<String, Vec<FilePhaseSummary>>,
+) {
+    let pending = inputs
+        .files
+        .iter()
+        .cloned()
+        .map(|file| (file.branch_id.clone(), file))
+        .collect();
+    let mut seeds_by_branch = BTreeMap::<String, Vec<FilePhaseSummary>>::new();
+    for row in std::mem::take(&mut inputs.seed_file_phases) {
+        seeds_by_branch
+            .entry(row.branch_id.clone())
+            .or_default()
+            .push(row);
+    }
+    (pending, seeds_by_branch)
+}
+
 fn file_pipeline_failure(
     source: VoomError,
     last_run: Option<&crate::workflow::WorkflowRunSummary>,
@@ -424,10 +490,15 @@ struct PhaseLoop<'a> {
     continued_error: Option<VoomError>,
     promotable_branches: BTreeSet<String>,
     branch_id: Option<String>,
+    promotion_source_root: PathBuf,
 }
 
 impl<'a> PhaseLoop<'a> {
-    fn new(control_plane: &'a ControlPlane, inputs: PhaseLoopInputs) -> Self {
+    fn new(
+        control_plane: &'a ControlPlane,
+        inputs: PhaseLoopInputs,
+        promotion_source_root: PathBuf,
+    ) -> Self {
         // Derive promotion pairs from the operator output dirs before the options
         // are converted (the conversion repoints commit targets to working dirs).
         let promotion = inputs.options.promotion_plan();
@@ -464,6 +535,7 @@ impl<'a> PhaseLoop<'a> {
             continued_error: None,
             promotable_branches,
             branch_id,
+            promotion_source_root,
         }
     }
 
@@ -510,6 +582,9 @@ impl<'a> PhaseLoop<'a> {
                 .map_err(|source| file_pipeline_failure(source, self.last_run.as_ref()))?;
             self.resolve_file_dispatch(phase_ordinal, &entry.entering, &mut planned)
                 .await?;
+            if matches!(planned.dispositions.as_slice(), [Disposition::Blocked]) {
+                self.promotable_branches.clear();
+            }
             let (rows, refreshed) = self
                 .control_plane
                 .finalize_phase(
@@ -660,7 +735,11 @@ impl<'a> PhaseLoop<'a> {
                 .await
                 .map_err(|source| file_pipeline_failure(source, self.last_run.as_ref()))?;
             self.control_plane
-                .promote_terminal_artifacts(&self.promotion, &location_ids)
+                .promote_terminal_artifacts(
+                    &self.promotion,
+                    &location_ids,
+                    &self.promotion_source_root,
+                )
                 .await
                 .map_err(|source| file_pipeline_failure(source, self.last_run.as_ref()))?;
             self.control_plane
@@ -1151,6 +1230,7 @@ impl ControlPlane {
             .map(|file| NewFileProgress {
                 branch_id: file.branch_id.clone(),
                 input_ordinal: file.ordinal,
+                admission_tier: file.admission_tier,
                 next_phase_ordinal: file.resume_ordinal,
             })
             .collect::<Vec<_>>();
@@ -1298,22 +1378,12 @@ impl ControlPlane {
         mut inputs: PhaseLoopInputs,
     ) -> Result<CoordinatorOutcome, CoordinatorError> {
         let started = Instant::now();
+        let promotion_source_root = self.promotion_source_root(&inputs.base_draft).await?;
         inputs.base_draft.media_snapshots.clear();
         let max_in_flight_files = inputs.options.file_window_limit()? as usize;
-        let mut pending = inputs
-            .files
-            .iter()
-            .cloned()
-            .map(|file| (file.branch_id.clone(), file))
-            .collect::<BTreeMap<_, _>>();
-        let mut seeds_by_branch = BTreeMap::<String, Vec<FilePhaseSummary>>::new();
-        for row in std::mem::take(&mut inputs.seed_file_phases) {
-            seeds_by_branch
-                .entry(row.branch_id.clone())
-                .or_default()
-                .push(row);
-        }
+        let (mut pending, mut seeds_by_branch) = prepare_file_window_queues(&mut inputs);
         let mut active = JoinSet::new();
+        let admission_gate = FileAdmissionGate::new();
         let mut last_run = None;
         let mut continued_error = None;
         let mut fatal_error = None;
@@ -1328,10 +1398,14 @@ impl ControlPlane {
                 && let Err(source) = self
                     .fill_file_window(
                         &inputs,
-                        &mut pending,
-                        &mut seeds_by_branch,
-                        &mut active,
                         max_in_flight_files,
+                        FileWindowRefill {
+                            pending: &mut pending,
+                            seeds_by_branch: &mut seeds_by_branch,
+                            active: &mut active,
+                            promotion_source_root: &promotion_source_root,
+                            admission_gate: &admission_gate,
+                        },
                     )
                     .await
             {
@@ -1417,42 +1491,47 @@ impl ControlPlane {
     async fn fill_file_window(
         &self,
         inputs: &PhaseLoopInputs,
-        pending: &mut BTreeMap<String, PhaseFile>,
-        seeds_by_branch: &mut BTreeMap<String, Vec<FilePhaseSummary>>,
-        active: &mut JoinSet<Result<FilePipelineOutcome, FilePipelineFailure>>,
         max_in_flight_files: usize,
+        refill: FileWindowRefill<'_>,
     ) -> Result<(), VoomError> {
-        while active.len() < max_in_flight_files {
-            let Some(progress) = self
-                .workflow_summaries
-                .admit_next_file(inputs.job_id, self.clock().now())
+        while refill.active.len() < max_in_flight_files {
+            let Some(progress) = refill
+                .admission_gate
+                .admit_next_file(self, inputs.job_id)
                 .await?
             else {
                 break;
             };
-            let file = pending.remove(&progress.branch_id).ok_or_else(|| {
+            let file = refill.pending.remove(&progress.branch_id).ok_or_else(|| {
                 VoomError::Conflict(format!(
                     "admitted branch {} has no prepared pipeline input",
                     progress.branch_id
                 ))
             })?;
             let control_plane = self.clone();
+            let promotion_source_root = refill.promotion_source_root.to_path_buf();
+            let pipeline_admission_gate = refill.admission_gate.clone();
             let file_inputs = PhaseLoopInputs {
                 job_id: inputs.job_id,
                 policy: inputs.policy.clone(),
                 context: inputs.context.clone(),
                 base_draft: inputs.base_draft.clone(),
                 files: vec![file],
-                seed_file_phases: seeds_by_branch
+                seed_file_phases: refill
+                    .seeds_by_branch
                     .remove(&progress.branch_id)
                     .unwrap_or_default(),
                 options: inputs.options.clone(),
                 runtimes: inputs.runtimes.clone(),
             };
-            active.spawn(async move {
-                PhaseLoop::new(&control_plane, file_inputs)
+            refill.active.spawn(async move {
+                let result = PhaseLoop::new(&control_plane, file_inputs, promotion_source_root)
                     .run_file_pipeline()
-                    .await
+                    .await;
+                if result.is_err() {
+                    pipeline_admission_gate.close().await;
+                }
+                result
             });
         }
         Ok(())

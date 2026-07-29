@@ -10,8 +10,8 @@ use std::collections::BTreeMap;
 use voom_core::{FileVersionId, JobId, TicketId, VoomError};
 use voom_store::repo::identity::{FileLocationKind, IdentityRepo};
 use voom_store::repo::workflow_summaries::{
-    FilePhaseOutcome, FilePhaseSummary, FileProgress, FileProgressState, FileRunHistory,
-    FileRunStart, NewFileProgress, NewFileRunHistory, NewFileRunStart,
+    FileAdmissionTier, FilePhaseOutcome, FilePhaseSummary, FileProgress, FileProgressState,
+    FileRunHistory, FileRunStart, NewFileProgress, NewFileRunHistory, NewFileRunStart,
 };
 
 use crate::ControlPlane;
@@ -284,6 +284,7 @@ impl ControlPlane {
         let terminal_progress = terminal_resume_progress(prior.progress, &file, phase_count);
         let survivor = (prior.progress.state != FileProgressState::Terminal).then(|| {
             file.ordinal = prior.progress.input_ordinal;
+            file.admission_tier = resume_admission_tier(prior.progress);
             file.resume_ordinal = if state.phase_complete {
                 phase_count
             } else {
@@ -355,6 +356,15 @@ impl ControlPlane {
     }
 }
 
+fn resume_admission_tier(progress: &FileProgress) -> FileAdmissionTier {
+    match progress.state {
+        FileProgressState::Active | FileProgressState::Terminalizing => {
+            FileAdmissionTier::Interrupted
+        }
+        FileProgressState::Pending | FileProgressState::Terminal => progress.admission_tier,
+    }
+}
+
 fn terminal_resume_progress(
     prior: &FileProgress,
     file: &PhaseFile,
@@ -363,6 +373,7 @@ fn terminal_resume_progress(
     (prior.state == FileProgressState::Terminal).then(|| NewFileProgress {
         branch_id: file.branch_id.clone(),
         input_ordinal: prior.input_ordinal,
+        admission_tier: prior.admission_tier,
         next_phase_ordinal: phase_count,
     })
 }

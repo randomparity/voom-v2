@@ -64,6 +64,7 @@ where
             options,
             runtimes,
         },
+        std::path::PathBuf::new(),
     )
     .run_file_pipeline_after_phase_plan(after_phase_plan)
     .await;
@@ -140,6 +141,7 @@ where
             options,
             runtimes,
         },
+        std::path::PathBuf::new(),
     )
     .run_file_pipeline_after_phase_plan(after_phase_plan)
     .await;
@@ -1325,6 +1327,8 @@ async fn record_run_starts(cp: &crate::ControlPlane, job_id: JobId, starts: Vec<
                 .map(|(input_ordinal, start)| NewFileProgress {
                     branch_id: start.branch_id.clone(),
                     input_ordinal: u32::try_from(input_ordinal).unwrap(),
+                    admission_tier:
+                        voom_store::repo::workflow_summaries::FileAdmissionTier::Pending,
                     next_phase_ordinal: start.starting_phase_ordinal,
                 })
                 .collect(),
@@ -1364,6 +1368,7 @@ async fn phase_file(
         snapshot,
         branch_id: branch_id.to_owned(),
         ordinal: 1,
+        admission_tier: voom_store::repo::workflow_summaries::FileAdmissionTier::Pending,
         resume_ordinal: 0,
         phase_history: BTreeMap::new(),
     }
@@ -1589,6 +1594,7 @@ async fn phase_planning_applies_each_files_modified_gate_decision() {
             options: ComplianceExecutionOptions::default(),
             runtimes: crate::workflow::WorkerRuntimeRegistry::new(),
         },
+        std::path::PathBuf::new(),
     );
 
     let planned = phase_loop
@@ -1638,6 +1644,7 @@ async fn phase_planning_reports_zero_checks_when_no_files_pass_the_gate() {
             options: ComplianceExecutionOptions::default(),
             runtimes: crate::workflow::WorkerRuntimeRegistry::new(),
         },
+        std::path::PathBuf::new(),
     );
 
     let planned = phase_loop
@@ -1832,6 +1839,58 @@ async fn admission_failure_drains_the_already_admitted_pipeline() {
         1
     );
     assert_eq!(job_state(&cp, job.id).await, "failed");
+}
+
+#[tokio::test]
+async fn closed_admission_gate_prevents_refill_before_failure_join() {
+    let (cp, _tmp) = cp().await;
+    let first = seed_version(
+        &cp,
+        "/lib/admission-gate/first.mkv",
+        "hash-admission-gate-first",
+        reprobe_payload("h264"),
+    )
+    .await;
+    let second = seed_version(
+        &cp,
+        "/lib/admission-gate/second.mkv",
+        "hash-admission-gate-second",
+        reprobe_payload("h264"),
+    )
+    .await;
+    let mut files = vec![
+        phase_file(&cp, first, "first").await,
+        phase_file(&cp, second, "second").await,
+    ];
+    files[0].ordinal = 0;
+    files[1].ordinal = 1;
+    let starts = super::run_starts_for_files(&files);
+    let (job, _) = cp
+        .open_sliding_file_job(&starts, Vec::new(), Vec::new(), &files, 1)
+        .await
+        .unwrap();
+    let gate = super::FileAdmissionGate::new();
+
+    let admitted = gate.admit_next_file(&cp, job.id).await.unwrap().unwrap();
+    gate.close().await;
+
+    assert_eq!(admitted.branch_id, "first");
+    assert!(
+        gate.admit_next_file(&cp, job.id).await.unwrap().is_none(),
+        "an abort latch must close before its task result is joined"
+    );
+    let progress = cp
+        .workflow_summaries()
+        .file_progress_for_job(job.id)
+        .await
+        .unwrap();
+    assert_eq!(
+        progress
+            .iter()
+            .map(|row| (row.branch_id.as_str(), row.state.as_str()))
+            .collect::<Vec<_>>(),
+        vec![("first", "active"), ("second", "pending")]
+    );
 }
 
 #[tokio::test]
@@ -3306,7 +3365,7 @@ async fn promote_terminal_artifacts_matches_through_symlinked_working_dir() {
     };
 
     let location_id = live_location_id(&cp, version).await;
-    cp.promote_terminal_artifacts(&plan, &[location_id])
+    cp.promote_terminal_artifacts(&plan, &[location_id], std::path::Path::new(""))
         .await
         .unwrap();
 
@@ -3466,9 +3525,11 @@ async fn promote_terminal_artifacts_mirrors_source_subtree_for_duplicate_basenam
     for (_, vid) in &tips {
         location_ids.push(live_location_id(&cp, *vid).await);
     }
-    cp.promote_terminal_artifacts(&plan, &location_ids)
-        .await
-        .unwrap();
+    for location_id in location_ids {
+        cp.promote_terminal_artifacts(&plan, &[location_id], std::path::Path::new("/library"))
+            .await
+            .unwrap();
+    }
 
     for (season, vid) in tips {
         let promoted = out_dir.join(season).join("episode.remux.mkv");
@@ -3516,7 +3577,7 @@ async fn promote_terminal_artifacts_ignores_unscoped_working_dir_artifacts() {
         }],
     };
 
-    cp.promote_terminal_artifacts(&plan, &[first.location_id])
+    cp.promote_terminal_artifacts(&plan, &[first.location_id], std::path::Path::new(""))
         .await
         .unwrap();
 
@@ -3598,9 +3659,13 @@ async fn promote_terminal_artifacts_skips_non_tip_scoped_locations() {
         }],
     };
 
-    cp.promote_terminal_artifacts(&plan, &[old_location_id, new_location.id])
-        .await
-        .unwrap();
+    cp.promote_terminal_artifacts(
+        &plan,
+        &[old_location_id, new_location.id],
+        std::path::Path::new(""),
+    )
+    .await
+    .unwrap();
 
     assert!(
         old_path.is_file(),

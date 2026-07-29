@@ -4,7 +4,7 @@
     reason = "integration test setup should fail loudly with direct assertions"
 )]
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use serde_json::json;
@@ -988,14 +988,12 @@ async fn phase_barrier_promotes_only_terminal_artifact_across_phases() {
     );
 }
 
-/// Post-run promotion is driven by each file's durable chain tip, NOT the last
-/// positional phase, so a file whose terminal artifact is produced by an EARLIER
-/// phase is still promoted. A no-audio file is remuxed in phase 0 (its terminal)
-/// and then blocks the final `transcode audio` phase (no audio to transcode), so
-/// its terminal is phase 0's remux output — exactly the case a position-based
-/// router would misplace. It is promoted to `--output-dir` regardless.
+/// A planning-blocked final phase withholds an earlier committed artifact. The
+/// no-audio file is remuxed in phase 0, then blocks the final `transcode audio`
+/// phase. Publishing phase 0's output would expose a file that did not complete
+/// the requested policy.
 #[tokio::test]
-async fn phase_barrier_promotes_terminal_artifact_from_earlier_phase() {
+async fn phase_barrier_withholds_intermediate_when_later_phase_blocks() {
     require_command("mkvmerge", &["--version"]);
     let _ffprobe_guard = hide_stale_fake_ffprobe_sibling("phase-barrier-flow").unwrap();
     cargo_build_package("voom-ffprobe-worker").unwrap();
@@ -1069,18 +1067,20 @@ async fn phase_barrier_promotes_terminal_artifact_from_earlier_phase() {
         .expect("phase 1 records a row");
     assert_eq!(phase1.outcome, FilePhaseOutcome::Blocked);
 
-    // The terminal artifact (phase 0's remux output) is promoted to --output-dir
-    // even though the final phase produced nothing.
+    // A planning-blocked terminal phase withholds the earlier intermediate.
+    // Publishing it would expose an artifact that did not complete the policy.
     let mkvs = mkvs_in(&out_dir);
-    assert_eq!(
-        mkvs,
-        vec!["Movie.remux.mkv".to_owned()],
-        "the earlier-phase terminal artifact is promoted to --output-dir"
+    assert!(mkvs.is_empty(), "blocked output must not be promoted");
+    let working_dir = staging_root.join(".committed").join("remux");
+    assert!(
+        file_exists_under(&working_dir, "Movie.remux.mkv"),
+        "blocked output must remain available for diagnosis and resume"
     );
+    let tip = PathBuf::from(tip_location_value(&url, scanned_version).await);
     assert_eq!(
-        tip_location_value(&url, scanned_version).await,
-        out_dir.join("Movie.remux.mkv").display().to_string(),
-        "the chain tip location must point at the promoted output path"
+        tip.parent().and_then(Path::parent),
+        Some(working_dir.as_path()),
+        "the chain tip must remain in the coordinator working directory"
     );
 }
 

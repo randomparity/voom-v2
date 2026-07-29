@@ -140,6 +140,7 @@ fn file_progress(branch_id: &str, input_ordinal: u32) -> NewFileProgress {
     NewFileProgress {
         branch_id: branch_id.to_owned(),
         input_ordinal,
+        admission_tier: FileAdmissionTier::Pending,
         next_phase_ordinal: 0,
     }
 }
@@ -206,6 +207,46 @@ async fn file_window_admission_is_bounded_and_refills_after_terminal() {
             .count(),
         2
     );
+}
+
+#[tokio::test]
+async fn interrupted_resume_files_are_admitted_before_untouched_inputs() {
+    let (repo, _tmp) = repo().await;
+    repo.insert_file_run_starts(
+        JOB,
+        vec![
+            file_run_start("untouched", 1, 0),
+            file_run_start("interrupted", 1, 0),
+        ],
+    )
+    .await
+    .unwrap();
+    repo.insert_file_window(
+        JOB,
+        1,
+        vec![
+            NewFileProgress {
+                branch_id: "untouched".to_owned(),
+                input_ordinal: 0,
+                admission_tier: FileAdmissionTier::Pending,
+                next_phase_ordinal: 0,
+            },
+            NewFileProgress {
+                branch_id: "interrupted".to_owned(),
+                input_ordinal: 4,
+                admission_tier: FileAdmissionTier::Interrupted,
+                next_phase_ordinal: 1,
+            },
+        ],
+        T0,
+    )
+    .await
+    .unwrap();
+
+    let admitted = repo.admit_next_file(JOB, T0).await.unwrap().unwrap();
+
+    assert_eq!(admitted.branch_id, "interrupted");
+    assert_eq!(admitted.input_ordinal, 4);
 }
 
 #[tokio::test]
@@ -299,6 +340,7 @@ async fn concurrent_file_admission_never_exceeds_durable_capacity() {
             .map(|(ordinal, branch)| NewFileProgress {
                 branch_id: (*branch).to_owned(),
                 input_ordinal: u32::try_from(ordinal).unwrap(),
+                admission_tier: FileAdmissionTier::Pending,
                 next_phase_ordinal: 0,
             })
             .collect(),

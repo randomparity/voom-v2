@@ -42,6 +42,42 @@ async fn equal_contents_true_for_empty_files() {
     assert!(files_have_equal_contents(&a, &b).await.unwrap());
 }
 
+#[test]
+fn promotion_layout_uses_input_root_for_primary_assets() {
+    let relative = promotion_relative_dir(
+        Some(Path::new("/library/show/S01")),
+        Path::new("/library"),
+        Path::new("/stage/.committed/audio"),
+        Path::new("/stage/.committed/audio"),
+    );
+
+    assert_eq!(relative, Path::new("show/S01"));
+}
+
+#[test]
+fn promotion_layout_flattens_a_single_sidecar_operation_dir() {
+    let relative = promotion_relative_dir(
+        Some(Path::new("/stage/.committed/audio/v8")),
+        Path::new("/library"),
+        Path::new("/stage/.committed/audio/v8"),
+        Path::new("/stage/.committed/audio"),
+    );
+
+    assert_eq!(relative, Path::new(""));
+}
+
+#[test]
+fn promotion_layout_preserves_multiple_sidecar_operation_dirs() {
+    let relative = promotion_relative_dir(
+        Some(Path::new("/stage/.committed/audio/v8")),
+        Path::new("/library"),
+        Path::new("/stage/.committed/audio"),
+        Path::new("/stage/.committed/audio"),
+    );
+
+    assert_eq!(relative, Path::new("v8"));
+}
+
 // --- copy_into_place ---
 
 #[tokio::test]
@@ -61,8 +97,17 @@ async fn copy_into_place_moves_bytes_and_cleans_up() {
 
     assert_eq!(tokio::fs::read(&dest).await.unwrap(), b"terminal-bytes");
     assert!(tokio::fs::symlink_metadata(&current).await.is_err());
-    let temp = dest.with_file_name(".voom-promote.Movie.hevc.mkv.partial");
-    assert!(tokio::fs::symlink_metadata(&temp).await.is_err());
+    let leftovers = std::fs::read_dir(dest.parent().unwrap())
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".voom-promote.")
+        })
+        .count();
+    assert_eq!(leftovers, 0);
 }
 
 // --- move_terminal_artifact ---
@@ -160,6 +205,28 @@ async fn normal_move_dest_absent_places_and_removes_source() {
     assert_eq!(returned, dest);
     assert!(tokio::fs::symlink_metadata(&current).await.is_err());
     assert_eq!(tokio::fs::read(&dest).await.unwrap(), b"terminal-bytes");
+}
+
+#[tokio::test]
+async fn concurrent_moves_never_replace_the_winning_destination() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let first = tmp.path().join("first.work.mkv");
+    let second = tmp.path().join("second.work.mkv");
+    let dest = tmp.path().join("Movie.mkv");
+    write(&first, b"first-terminal").await;
+    write(&second, b"second-output").await;
+
+    let (first_result, second_result) = tokio::join!(
+        move_terminal_artifact(&first, &dest),
+        move_terminal_artifact(&second, &dest)
+    );
+
+    assert_ne!(first_result.is_ok(), second_result.is_ok());
+    let bytes = tokio::fs::read(&dest).await.unwrap();
+    assert!(
+        bytes == b"first-terminal" || bytes == b"second-output",
+        "the destination must contain one complete contender"
+    );
 }
 
 #[tokio::test]

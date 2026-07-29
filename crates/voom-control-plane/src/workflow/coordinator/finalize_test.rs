@@ -505,6 +505,7 @@ async fn failed_phase_reports_only_exact_job_commit_evidence() {
         phase_file(&cp, unrelated_source, "unrelated").await,
     ];
     let job = open_policy_job(&cp).await;
+    activate_file_progress(&cp, job.id, &files[0]).await;
     let evidence = seed_committed_ticket_evidence(&cp, job.id, produced_source, "produced").await;
     let later_tip = advance_chain_tip(
         &cp,
@@ -549,6 +550,16 @@ async fn failed_phase_reports_only_exact_job_commit_evidence() {
         .await
         .unwrap();
     assert_eq!(durable, file_phases);
+    assert_eq!(
+        cp.workflow_summaries
+            .file_progress(job.id, "produced")
+            .await
+            .unwrap()
+            .unwrap()
+            .next_phase_ordinal,
+        1,
+        "abort-path commit evidence and the resume cursor advance atomically"
+    );
     assert_eq!(active_version_id(&cp, produced_source).await, later_tip);
     assert_eq!(
         active_version_id(&cp, unrelated_source).await,
@@ -649,6 +660,7 @@ async fn activate_file_progress(
             vec![NewFileProgress {
                 branch_id: file.branch_id.clone(),
                 input_ordinal: file.ordinal,
+                admission_tier: voom_store::repo::workflow_summaries::FileAdmissionTier::Pending,
                 next_phase_ordinal: 0,
             }],
             T0,
@@ -1088,6 +1100,7 @@ async fn phase_file(
         snapshot: latest_snapshot(cp, version_id).await,
         branch_id: branch_id.to_owned(),
         ordinal: 1,
+        admission_tier: voom_store::repo::workflow_summaries::FileAdmissionTier::Pending,
         resume_ordinal: 0,
         phase_history: BTreeMap::new(),
     }

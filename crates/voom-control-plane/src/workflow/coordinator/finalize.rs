@@ -721,7 +721,7 @@ impl ControlPlane {
             .await?;
         if let Some(verified) = self.verified_refs_for_tickets(file, &ticket_ids).await? {
             return self
-                .write_file_row(
+                .write_file_row_and_advance(
                     job_id,
                     phase_ordinal,
                     file,
@@ -739,7 +739,7 @@ impl ControlPlane {
         let Some(produced) = produced else {
             return Ok(None);
         };
-        self.write_file_row(
+        self.write_file_row_and_advance(
             job_id,
             phase_ordinal,
             file,
@@ -877,35 +877,6 @@ impl ControlPlane {
                 Ok((row, file.snapshot.clone(), Some(file)))
             }
         }
-    }
-
-    pub(super) async fn write_file_row(
-        &self,
-        job_id: JobId,
-        phase_ordinal: u32,
-        file: &PhaseFile,
-        outcome: FilePhaseOutcome,
-        ticket_ids: &[TicketId],
-        produced: Option<ProducedRefs>,
-    ) -> Result<FilePhaseSummary, VoomError> {
-        let produced = produced.unwrap_or_default();
-        self.workflow_summaries
-            .upsert_file_phase_summary(
-                NewFilePhaseSummary {
-                    job_id,
-                    phase_ordinal,
-                    branch_id: file.branch_id.clone(),
-                    ticket_ids: ticket_ids.to_vec(),
-                    produced_file_version_id: produced.file_version_id,
-                    produced_file_location_id: produced.file_location_id,
-                    artifact_handle_id: produced.artifact_handle_id,
-                    artifact_verification_id: produced.artifact_verification_id,
-                    reprobe_snapshot_id: produced.reprobe_snapshot_id,
-                    outcome,
-                },
-                self.clock().now(),
-            )
-            .await
     }
 
     async fn write_file_row_and_advance(

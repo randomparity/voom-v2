@@ -16,7 +16,7 @@ Primary surface:
 
 - `crates/voom-control-plane/src/workflow/coordinator/**`;
 - workflow-summary/progress persistence in `voom-store`;
-- migrations `0028` and `0029`;
+- migration `0028`;
 - the compliance execution option and its narrow CLI plumbing;
 - coordinator, repository, CLI, cancellation, resume, and integration tests;
 - the execution runbook.
@@ -89,11 +89,13 @@ still non-terminal.
 
 Migration 0028 adds `workflow_file_windows` keyed by job and
 `workflow_file_progress` keyed by job and branch. The former records the
-positive capacity; progress records stable ordinal, admission state, next
-phase, and transition times. Window/run-start/history/seed/progress creation is
-atomic.
+positive capacity; progress records stable ordinal, admission tier, admission
+state, next phase, and transition times. The interrupted tier is admitted
+before untouched pending work, with ordinal preserving deterministic order
+within a tier. Window/run-start/history/seed/progress creation is atomic.
 
-Migration 0029 permits `blocked` in inherited run history. Repeated resume
+Migration 0028 permits `blocked` in inherited run history and backfills legacy
+phase-barrier jobs into interrupted progress rows. Repeated resume
 preserves that outcome, and each new job projects terminal progress for already
 completed branches alongside pending progress for survivors. Every run start
 therefore still has exactly one progress row; resume does not weaken branch-set

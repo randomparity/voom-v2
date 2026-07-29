@@ -61,6 +61,7 @@ Migration 0028 adds three job-owned tables:
 - `workflow_file_progress`, one row for every `(job_id, branch_id)`, with:
 
   - stable input ordinal;
+  - admission tier (`interrupted` before untouched `pending`);
   - state `pending`, `active`, `terminalizing`, or `terminal`;
   - next phase ordinal;
   - admitted and terminal timestamps; and
@@ -70,12 +71,12 @@ Migration 0028 adds three job-owned tables:
 
 The row has a composite foreign key to `workflow_file_run_starts`. Job opening
 inserts run starts, inherited history, reconciliation seeds, and progress rows
-in one transaction. A transaction may move the next ordinal `pending` row to
-`active` only when the active count is below the job's durably recorded
-file-window limit. The primary key prevents duplicate admission, and the
-ordinal gives restart a deterministic refill order. Reads reject a missing,
-zero, or inconsistent job-level window record instead of substituting the
-current process's option.
+in one transaction. A transaction may move the next admission-tier/ordinal
+`pending` row to `active` only when the active count is below the job's durably
+recorded file-window limit. The primary key prevents duplicate admission.
+Admission tier prioritizes interrupted work, while ordinal gives each tier a
+deterministic refill order. Reads reject a missing, zero, or inconsistent
+job-level window record instead of substituting the current process's option.
 
 A file-phase row and the progress cursor advance in the same transaction.
 First-write-wins file-phase persistence plus the expected current cursor makes
@@ -86,7 +87,8 @@ option that differs from the durable prior capacity. It admits interrupted
 branches before untouched pending branches. Completed operations are seeded or
 inherited, not dispatched again.
 
-Migration 0029 extends inherited run-history outcomes to include `blocked`.
+Migration 0028 also extends inherited run-history outcomes to include `blocked`
+and projects legacy phase-barrier run starts into an interrupted admission tier.
 Resume carries that terminal outcome transitively so terminalization replay
 cannot make a withheld branch promotable again. A new resume job also projects
 one progress row for every prior run start: surviving branches retain their

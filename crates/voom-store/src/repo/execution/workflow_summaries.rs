@@ -274,10 +274,36 @@ impl FileProgressState {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileAdmissionTier {
+    Interrupted,
+    Pending,
+}
+
+impl FileAdmissionTier {
+    const fn as_i64(self) -> i64 {
+        match self {
+            Self::Interrupted => 0,
+            Self::Pending => 1,
+        }
+    }
+
+    fn parse(value: i64) -> Result<Self, VoomError> {
+        match value {
+            0 => Ok(Self::Interrupted),
+            1 => Ok(Self::Pending),
+            other => Err(VoomError::database(format!(
+                "workflow_file_progress.admission_tier {other} not in vocab"
+            ))),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewFileProgress {
     pub branch_id: String,
     pub input_ordinal: u32,
+    pub admission_tier: FileAdmissionTier,
     pub next_phase_ordinal: u32,
 }
 
@@ -286,6 +312,7 @@ pub struct FileProgress {
     pub job_id: JobId,
     pub branch_id: String,
     pub input_ordinal: u32,
+    pub admission_tier: FileAdmissionTier,
     pub state: FileProgressState,
     pub next_phase_ordinal: u32,
     pub admitted_at: Option<OffsetDateTime>,
@@ -357,12 +384,13 @@ impl SqliteWorkflowSummaryRepo {
         for input in progress {
             sqlx::query(
                 "INSERT INTO workflow_file_progress \
-                 (job_id, branch_id, input_ordinal, state, next_phase_ordinal) \
-                 VALUES (?, ?, ?, 'pending', ?)",
+                 (job_id, branch_id, input_ordinal, admission_tier, state, next_phase_ordinal) \
+                 VALUES (?, ?, ?, ?, 'pending', ?)",
             )
             .bind(i64_from_u64(job_id.0))
             .bind(&input.branch_id)
             .bind(i64::from(input.input_ordinal))
+            .bind(input.admission_tier.as_i64())
             .bind(i64::from(input.next_phase_ordinal))
             .execute(&mut **tx)
             .await
@@ -429,7 +457,7 @@ impl SqliteWorkflowSummaryRepo {
                         WHERE active.job_id = pending.job_id \
                           AND active.state IN ('active', 'terminalizing')) \
                        < window.max_in_flight_files \
-                 ORDER BY pending.input_ordinal LIMIT 1 \
+                 ORDER BY pending.admission_tier, pending.input_ordinal LIMIT 1 \
              ) \
              RETURNING {FILE_PROGRESS_COLUMNS}"
         );
@@ -752,6 +780,7 @@ type FileProgressRow = (
     i64,
     String,
     i64,
+    i64,
     String,
     i64,
     Option<String>,
@@ -763,10 +792,11 @@ fn decode_file_progress(row: FileProgressRow) -> Result<FileProgress, VoomError>
         job_id: JobId(u64_from_i64(row.0)),
         branch_id: row.1,
         input_ordinal: u32_from_i64(row.2)?,
-        state: FileProgressState::parse(&row.3)?,
-        next_phase_ordinal: u32_from_i64(row.4)?,
-        admitted_at: row.5.as_deref().map(parse_iso8601).transpose()?,
-        terminal_at: row.6.as_deref().map(parse_iso8601).transpose()?,
+        admission_tier: FileAdmissionTier::parse(row.3)?,
+        state: FileProgressState::parse(&row.4)?,
+        next_phase_ordinal: u32_from_i64(row.5)?,
+        admitted_at: row.6.as_deref().map(parse_iso8601).transpose()?,
+        terminal_at: row.7.as_deref().map(parse_iso8601).transpose()?,
     })
 }
 
@@ -783,8 +813,8 @@ fn decode_file_phase_entry(
     })
 }
 
-const FILE_PROGRESS_COLUMNS: &str =
-    "job_id, branch_id, input_ordinal, state, next_phase_ordinal, admitted_at, terminal_at";
+const FILE_PROGRESS_COLUMNS: &str = "job_id, branch_id, input_ordinal, admission_tier, state, next_phase_ordinal, \
+     admitted_at, terminal_at";
 
 const SUMMARY_COLS: &str = "job_id, branch_count, ticket_count, dispatch_count, retry_count, \
      failure_count, peak_active_workflow_leases, elapsed_ns, per_operation, created_at";
