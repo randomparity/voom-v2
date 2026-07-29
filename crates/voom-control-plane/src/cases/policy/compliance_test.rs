@@ -717,7 +717,7 @@ async fn compliance_execute_options_reach_policy_remux_ticket_payload() {
         .await
         .unwrap_err();
 
-    assert_eq!(err.source.code(), "CONFIG_INVALID");
+    assert_eq!(err.source.code(), "CONFIG_INVALID", "{err:?}");
     let ticket_payload: String =
         sqlx::query_scalar("SELECT payload FROM tickets WHERE kind = ? ORDER BY id ASC LIMIT 1")
             .bind("synthetic.workflow.operation.remux")
@@ -779,7 +779,7 @@ async fn compliance_execute_options_reach_policy_audio_ticket_payload() {
         .await
         .unwrap_err();
 
-    assert_eq!(err.source.code(), "CONFIG_INVALID");
+    assert_eq!(err.source.code(), "CONFIG_INVALID", "{err:?}");
     let ticket_payload: String =
         sqlx::query_scalar("SELECT payload FROM tickets WHERE kind = ? ORDER BY id ASC LIMIT 1")
             .bind("synthetic.workflow.operation.transcode_audio")
@@ -1301,7 +1301,7 @@ async fn resume_adopts_successful_evidence_missing_its_phase_row() {
             .unwrap();
     let prior_payload: serde_json::Value = serde_json::from_str(&prior_ticket.1).unwrap();
     assert_eq!(prior_ticket.0, "succeeded");
-    assert_eq!(prior_payload["workflow_id"], "workflow-1-phase-0");
+    assert_eq!(prior_payload["workflow_id"], "workflow-1-file-1-phase-0");
     assert_eq!(prior_payload["branch_id"], "root");
 
     Box::pin(assert_corrupted_verification_result_rejected(

@@ -977,6 +977,52 @@ async fn continued_invocation_dispatches_every_independent_branch_and_leaves_job
 }
 
 #[tokio::test]
+async fn continued_invocation_returns_isolated_error_with_blocked_descendant() {
+    let mut fixture = ExecutorFixture::without_workers(3).await;
+    fixture
+        .register_worker(
+            "hash-worker",
+            OperationKind::HashFile,
+            1,
+            FakeBehavior::Crash,
+        )
+        .await;
+    fixture
+        .register_worker(
+            "identify-worker",
+            OperationKind::IdentifyMedia,
+            1,
+            FakeBehavior::Success,
+        )
+        .await;
+    let job_id = fixture.open_workflow_job().await;
+    let mut blocked = simple_operation_node("blocked", OperationKind::ScoreQuality);
+    blocked.depends_on = vec!["hash".to_owned(), "identify".to_owned()];
+    let mut plan = independent_hash_plan(0);
+    plan.nodes = vec![
+        simple_operation_node("hash", OperationKind::HashFile),
+        simple_operation_node("identify", OperationKind::IdentifyMedia),
+        blocked,
+    ];
+    let executor = fixture.executor_with_options(WorkflowExecutorOptions::for_tests());
+
+    let error = executor
+        .submit_and_run_invocation_in_job(
+            job_id,
+            "continued-blocked",
+            plan,
+            super::RunFailureMode::ContinueIndependent,
+        )
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.source.error_code(), ErrorCode::WorkerCrash);
+    assert!(!error.job_failed);
+    assert_eq!(error.summary.dispatch_count, 2);
+    assert_eq!(fixture.job_state(job_id).await, "open");
+}
+
+#[tokio::test]
 async fn later_invocation_ignores_a_continued_prior_failure() {
     let mut fixture = ExecutorFixture::without_workers(1).await;
     fixture

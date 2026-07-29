@@ -17,9 +17,12 @@ use voom_store::repo::workflow_summaries::{
 };
 
 use crate::ControlPlane;
+#[cfg(test)]
 use crate::workflow::WorkflowRunSummary;
+#[cfg(test)]
+use crate::workflow::coordinator::CoordinatorError;
 use crate::workflow::coordinator::planning::{job_grain_summary, zero_phase_summary};
-use crate::workflow::coordinator::{CoordinatorError, CoordinatorOutcome, Disposition, PhaseFile};
+use crate::workflow::coordinator::{CoordinatorOutcome, Disposition, PhaseFile};
 use crate::workflow::ticket_results::PolicyVerificationTicketResult;
 
 type VerifiedEvidenceRow = (
@@ -61,6 +64,7 @@ struct SameLineageCommit {
     produced: JobProducedCommit,
 }
 
+#[cfg(test)]
 pub(super) struct FailedPhaseFinalization<'a> {
     pub(super) job_id: JobId,
     pub(super) phase_ordinal: u32,
@@ -583,6 +587,13 @@ pub(super) fn phase_ordinal(index: usize) -> Result<u32, VoomError> {
     u32::try_from(index).map_err(|e| VoomError::Internal(format!("phase ordinal overflow: {e}")))
 }
 
+fn phase_workflow_scope(job_id: JobId, phase_ordinal: u32) -> (String, String) {
+    (
+        format!("workflow-{}-phase-{phase_ordinal}", job_id.0),
+        format!("workflow-{}-file-*-phase-{phase_ordinal}", job_id.0),
+    )
+}
+
 pub(super) fn sqlite_u64(value: i64, field: &str) -> Result<u64, VoomError> {
     u64::try_from(value)
         .map_err(|e| VoomError::database_context(format!("{field} {value} does not fit u64"), e))
@@ -718,6 +729,7 @@ impl ControlPlane {
     /// dispatches, so their commits have landed), then return the partial
     /// outcome inside the error. No phase-grain row is written for the failed
     /// phase, and the job is already `failed`.
+    #[cfg(test)]
     pub(super) async fn finalize_failed_phase(
         &self,
         finalization: FailedPhaseFinalization<'_>,
@@ -788,6 +800,51 @@ impl ControlPlane {
                 file_phases,
             }),
         })
+    }
+
+    pub(super) async fn finalize_failed_file_phase(
+        &self,
+        job_id: JobId,
+        phase_ordinal: u32,
+        file: &PhaseFile,
+        disposition: &Disposition,
+    ) -> Result<Option<FilePhaseSummary>, VoomError> {
+        let Disposition::Planned { .. } = disposition else {
+            return Ok(None);
+        };
+        let ticket_ids = self
+            .ticket_ids_for_phase_file(job_id, phase_ordinal, file.version_id)
+            .await?;
+        if let Some(verified) = self.verified_refs_for_tickets(file, &ticket_ids).await? {
+            return self
+                .write_file_row(
+                    job_id,
+                    phase_ordinal,
+                    file,
+                    FilePhaseOutcome::Verified,
+                    &ticket_ids,
+                    Some(verified),
+                )
+                .await
+                .map(Some);
+        }
+        let phase_ticket_ids = self.ticket_ids_for_phase(job_id, phase_ordinal).await?;
+        let (produced, scoped_ticket_ids) = self
+            .committed_refs_for_tickets(job_id, file, &phase_ticket_ids, &ticket_ids)
+            .await?;
+        let Some(produced) = produced else {
+            return Ok(None);
+        };
+        self.write_file_row(
+            job_id,
+            phase_ordinal,
+            file,
+            FilePhaseOutcome::Committed,
+            &scoped_ticket_ids,
+            Some(produced.refs),
+        )
+        .await
+        .map(Some)
     }
 
     /// Write each active file's per-`(file, phase)` row and advance the working
@@ -1128,17 +1185,19 @@ impl ControlPlane {
         phase_ordinal: u32,
         file: &PhaseFile,
     ) -> Result<Option<ProducedRefs>, VoomError> {
-        let workflow_id = format!("workflow-{}-phase-{phase_ordinal}", job_id.0);
+        let (workflow_id, workflow_pattern) = phase_workflow_scope(job_id, phase_ordinal);
         let ticket_ids: Vec<TicketId> = sqlx::query_scalar(
             "SELECT id FROM tickets \
              WHERE job_id = ? AND state = 'succeeded' \
                AND kind = 'synthetic.workflow.operation.verify_artifact' \
-               AND json_extract(payload, '$.workflow_id') = ? \
+               AND (json_extract(payload, '$.workflow_id') = ? \
+                    OR json_extract(payload, '$.workflow_id') GLOB ?) \
                AND json_extract(payload, '$.rendered_payload.source_file_version_id') = ? \
              ORDER BY id",
         )
         .bind(sqlite_i64(job_id.0, "verification recovery job id")?)
         .bind(workflow_id)
+        .bind(workflow_pattern)
         .bind(sqlite_i64(
             file.version_id.0,
             "verification recovery file version id",
@@ -1246,14 +1305,16 @@ impl ControlPlane {
         job_id: JobId,
         phase_ordinal: u32,
     ) -> Result<Vec<TicketId>, VoomError> {
-        let workflow_id = format!("workflow-{}-phase-{phase_ordinal}", job_id.0);
+        let (workflow_id, workflow_pattern) = phase_workflow_scope(job_id, phase_ordinal);
         let rows: Vec<i64> = sqlx::query_scalar(
             "SELECT id FROM tickets \
-             WHERE job_id = ? AND json_extract(payload, '$.workflow_id') = ? \
+             WHERE job_id = ? AND (json_extract(payload, '$.workflow_id') = ? \
+               OR json_extract(payload, '$.workflow_id') GLOB ?) \
              ORDER BY id",
         )
         .bind(sqlite_i64(job_id.0, "phase ticket job id")?)
         .bind(workflow_id)
+        .bind(workflow_pattern)
         .fetch_all(&self.pool)
         .await
         .map_err(|error| VoomError::database_context("phase ticket ids", error))?;
@@ -1268,9 +1329,15 @@ impl ControlPlane {
         job_id: JobId,
         phase_ordinal: u32,
         workflow_node_id: &str,
+        file_version_id: FileVersionId,
     ) -> Result<Vec<TicketId>, VoomError> {
-        self.ticket_ids_for_phase_scope(job_id, phase_ordinal, workflow_node_id, None)
-            .await
+        self.ticket_ids_for_phase_scope(
+            job_id,
+            phase_ordinal,
+            workflow_node_id,
+            Some(file_version_id),
+        )
+        .await
     }
 
     async fn ticket_ids_for_phase_file(
@@ -1279,15 +1346,17 @@ impl ControlPlane {
         phase_ordinal: u32,
         file_version_id: FileVersionId,
     ) -> Result<Vec<TicketId>, VoomError> {
-        let workflow_id = format!("workflow-{}-phase-{phase_ordinal}", job_id.0);
+        let (workflow_id, workflow_pattern) = phase_workflow_scope(job_id, phase_ordinal);
         let rows: Vec<i64> = sqlx::query_scalar(
             "SELECT id FROM tickets \
-             WHERE job_id = ? AND json_extract(payload, '$.workflow_id') = ? \
+             WHERE job_id = ? AND (json_extract(payload, '$.workflow_id') = ? \
+               OR json_extract(payload, '$.workflow_id') GLOB ?) \
                AND json_extract(payload, '$.rendered_payload.source_file_version_id') = ? \
              ORDER BY id ASC",
         )
         .bind(sqlite_i64(job_id.0, "phase ticket job id")?)
         .bind(workflow_id)
+        .bind(workflow_pattern)
         .bind(sqlite_i64(
             file_version_id.0,
             "phase ticket source file version",
@@ -1300,20 +1369,21 @@ impl ControlPlane {
             .collect()
     }
 
-    async fn ticket_ids_for_phase_scope(
+    pub(super) async fn ticket_ids_for_phase_scope(
         &self,
         job_id: JobId,
         phase_ordinal: u32,
         workflow_node_id: &str,
         file_version_id: Option<FileVersionId>,
     ) -> Result<Vec<TicketId>, VoomError> {
-        let workflow_id = format!("workflow-{}-phase-{phase_ordinal}", job_id.0);
+        let (workflow_id, workflow_pattern) = phase_workflow_scope(job_id, phase_ordinal);
         let file_version_id = file_version_id
             .map(|id| sqlite_i64(id.0, "phase ticket source file version"))
             .transpose()?;
         let rows = sqlx::query(
             "SELECT id FROM tickets \
-             WHERE job_id = ? AND json_extract(payload, '$.workflow_id') = ? \
+             WHERE job_id = ? AND (json_extract(payload, '$.workflow_id') = ? \
+               OR json_extract(payload, '$.workflow_id') GLOB ?) \
                AND json_extract(payload, '$.node_id') = ? \
                AND (? IS NULL OR \
                     json_extract(payload, '$.rendered_payload.source_file_version_id') = ?) \
@@ -1324,6 +1394,7 @@ impl ControlPlane {
                 .map_err(|e| VoomError::Internal(format!("job id exceeds SQLite integer: {e}")))?,
         )
         .bind(workflow_id)
+        .bind(workflow_pattern)
         .bind(workflow_node_id)
         .bind(file_version_id)
         .bind(file_version_id)

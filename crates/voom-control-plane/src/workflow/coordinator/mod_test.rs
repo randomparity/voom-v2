@@ -2608,7 +2608,7 @@ async fn phase_ticket_lookup_ignores_matching_nodes_from_other_invocations() {
     }
 
     let found = cp
-        .ticket_ids_for_phase_node(job.id, 1, "policy-node-normalize")
+        .ticket_ids_for_phase_scope(job.id, 1, "policy-node-normalize", None)
         .await
         .unwrap();
 

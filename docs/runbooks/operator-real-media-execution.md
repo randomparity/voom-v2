@@ -166,16 +166,20 @@ voom policy input create-from-scan --root <library_root_id> --slug lib1-root1
 voom compliance execute \
   --policy-version-id <version_id> \
   --input-set-id <input_set_id> \
+  --max-in-flight-files 4 \
   --staging-root /var/lib/voom/staging \
   --output-dir   /mnt/pool0/test-video-out
 ```
 
 ## Output, re-runs, and partial failure
 
-- **Only final artifacts land in `--output-dir`.** Each phase commits to an
-  internal working area under the staging root; after the run, each file's
-  terminal (chain-tip) artifact is promoted into `--output-dir`. Intermediate
-  remux outputs stay in the working area, not the operator's output dir.
+- **Only final artifacts land in `--output-dir`.** Each admitted file advances
+  through its phases independently. Its terminal chain tip is promoted as soon
+  as that file finishes, then superseded intermediates are removed from staging
+  before the slot is refilled.
+- **The file window bounds staging residency.** `--max-in-flight-files` defaults
+  to 4. Worker capacity still controls operation concurrency; this option limits
+  how many file pipelines may retain staged artifacts at once.
 - **Add-only.** Promotion never overwrites. Source files are never modified. If a
   destination in `--output-dir` already exists, the run fails rather than
   overwrite.
@@ -197,9 +201,9 @@ voom compliance execute \
   outcome and produced IDs to confirm what committed.
 - **Empty / all-non-video scan:** the input set is empty and `execute` is a no-op
   reporting zero planned / zero committed.
-- **Scale:** the staging working area needs free disk on the order of the produced
-  output set (intermediate + final per in-flight file); transcodes are
-  long-running.
+- **Scale:** size staging for intermediate and terminal artifacts across at most
+  `--max-in-flight-files` active pipelines, plus temporary worker output.
+  Transcodes are long-running.
 
 ## Mid-run monitoring
 

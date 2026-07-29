@@ -165,6 +165,12 @@ struct DispatchReadyOutcome {
     capacity_deferred: bool,
 }
 
+fn no_dispatchable_work(job_id: JobId) -> VoomError {
+    VoomError::Internal(format!(
+        "workflow {job_id} has no dispatchable work but is not finished"
+    ))
+}
+
 enum CapacityWaitOutcome {
     RetryAfter(Duration),
     TimedOut,
@@ -743,9 +749,12 @@ impl WorkflowExecutor {
                         return Err(state.fail_job(control, job_id, source, started).await);
                     }
                 }
-                let source = VoomError::Internal(format!(
-                    "workflow {job_id} has no dispatchable work but is not finished"
-                ));
+                if let Some(source) = state.take_isolated_error() {
+                    return Err(state
+                        .finish_isolated_failure(control, job_id, source, started)
+                        .await);
+                }
+                let source = no_dispatchable_work(job_id);
                 return Err(state.fail_job(control, job_id, source, started).await);
             }
             state.reset_capacity_wait();

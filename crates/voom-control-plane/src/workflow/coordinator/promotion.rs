@@ -329,6 +329,59 @@ impl ControlPlane {
         Ok(())
     }
 
+    pub(super) async fn reclaim_superseded_intermediates(
+        &self,
+        plan: &PromotionPlan,
+        file_phases: &[FilePhaseSummary],
+    ) -> Result<(), VoomError> {
+        let dirs = resolve_promotion_dirs(plan).await;
+        let terminal_location = file_phases
+            .iter()
+            .rev()
+            .find_map(|row| row.produced_file_location_id);
+        let mut seen = HashSet::new();
+        for location_id in file_phases
+            .iter()
+            .filter_map(|row| row.produced_file_location_id)
+        {
+            if Some(location_id) == terminal_location || !seen.insert(location_id) {
+                continue;
+            }
+            let Some(location) = self.identity.get_file_location(location_id).await? else {
+                continue;
+            };
+            if location.retired_at.is_some() || location.kind != FileLocationKind::LocalPath {
+                continue;
+            }
+            let path = PathBuf::from(&location.value);
+            let canonical = tokio::fs::canonicalize(&path).await.unwrap_or(path.clone());
+            if dirs.output_for(&canonical).is_none() {
+                continue;
+            }
+            match tokio::fs::remove_file(&path).await {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(VoomError::Config(format!(
+                        "reclaim superseded intermediate {}: {error}",
+                        path.display()
+                    )));
+                }
+            }
+            let mut tx = begin_tx(&self.pool).await?;
+            self.identity
+                .retire_file_location_in_tx(
+                    &mut tx,
+                    location_id,
+                    self.clock().now(),
+                    location.epoch,
+                )
+                .await?;
+            commit_tx(tx).await?;
+        }
+        Ok(())
+    }
+
     pub(super) async fn promotion_location_ids(
         &self,
         job_ids: &[JobId],
