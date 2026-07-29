@@ -150,3 +150,18 @@ envelope.
 - **Add backup lifecycle events to `voom-events`.** Deferred: it widens the durable
   payload-contract surface (owned partly by #287) for observability the `backups`
   table already provides.
+
+## Later decision: owner-node backup
+
+ADR 0050 amends where the backup worker runs. For node-owned storage, source and
+backup roots must have the same logical owner, and that owner agent resolves
+their provider-relative locations and supervises the backup worker. The control
+plane authorizes the operation and persists its evidence but never opens,
+copies, hashes, or syncs the bytes.
+
+Backup-before-mutation, fail-closed failure, durable pending/verified/failed
+records, stable-storage evidence, and idempotency remain required. The current
+fully qualified local path request is replaced by root/location references with
+the node-agent worker contract in #423; no dual path protocol remains.
+Object-store archival backup is future work and is not implied by this
+amendment.

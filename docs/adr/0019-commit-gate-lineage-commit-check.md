@@ -95,3 +95,18 @@ locks block until terminal.
 - **Query `asset_use_leases` directly from the control-plane layer.** Rejected:
   voom-store owns that table; the control plane consults it through the
   store/gate API (crate layering).
+
+## Later decision: node-owned commit
+
+ADR 0050 amends the execution-host assumption without weakening this gate.
+For a node-owned root, the control plane still evaluates the affected durable
+scope, lease freshness, lineage evidence, and safety epochs. It then activates
+a durable commit-intent fence. The storage-owning node alone revalidates local
+byte facts and performs promotion under that exact fence.
+
+The current prepare-before-promote check remains the delivered co-located
+implementation until #422 replaces it. In the distributed protocol, a
+crash-durable node receipt and `recovery_required` state replace the assumption
+that one process can bracket the filesystem action with two local database
+transactions. The safety decision and catalog finalization remain
+control-plane authority.

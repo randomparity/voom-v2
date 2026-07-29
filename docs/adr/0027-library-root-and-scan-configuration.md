@@ -190,3 +190,18 @@ matched file belongs to exactly one root.
 - **Make `media_kind`/`root_kind`/… free TEXT.** Rejected: the codebase
   convention is `TEXT` + `CHECK` enums (backups, nodes, video_profiles); CHECK
   constraints catch typos at write time.
+
+## Later decision: node-owned roots and locations
+
+ADR 0050 supersedes the use of a globally canonical path as distributed root or
+location identity, the rejection of root-linked file locations, and
+canonical-path-prefix policy scoping. Issue #418 replaces those choices with
+one logical owner and provider locator per storage root, plus
+`(storage_root_id, provider_relative_locator)` file locations. The owner agent,
+not the control-plane filesystem, canonicalizes and resolves local paths.
+
+Library/root configuration, non-overlap within one owner/provider namespace,
+extension filtering, stored watcher policy, and fail-closed disabled-root
+behavior remain. Root-scoped policy input becomes a relational root/location
+join. This is a pre-release replacement; the implementation does not retain
+canonical-path prefix as a compatibility fallback.

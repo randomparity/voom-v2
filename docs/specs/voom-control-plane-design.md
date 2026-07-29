@@ -80,10 +80,10 @@ speaks the same versioned worker protocol.
 The core lifecycle is:
 
 ```text
-Policy -> Plan DAG -> Durable Tickets -> Scheduler Leases -> Worker Results -> Host Commit
-                                      |
-                                      v
-                              Append-only Events
+Policy -> Plan DAG -> Durable Tickets -> Scheduler Leases -> Worker Results
+                                      |                                |
+                                      v                                v
+                              Append-only Events              Owner-Node Commit
 ```
 
 Jobs and tickets are the source of execution truth. Events are append-only facts
@@ -93,6 +93,12 @@ do not claim, lease, or execute primary work.
 This architecture is intentionally more explicit than a pure event bus. It keeps
 CLI, daemon, API, web UI, local workers, remote nodes, synthetic workers, and
 future plugins on one execution path.
+
+For node-owned storage, the control plane is byte-blind (ADR 0050). It owns
+coordination, safety authorization, and durable catalog truth but does not open
+media, staging, output, backup, or recovery roots. One pull-based node agent per
+host owns local root resolution and supervises every byte-touching worker.
+Provider-relative locations are meaningful only inside their storage root.
 
 ## Design Principles
 
@@ -119,7 +125,10 @@ future plugins on one execution path.
 - Safety policies describe approval, backup, verification, and rollback rules.
 - Artifact handles abstract over local paths, shared mounts, object stores, and
   staged files.
-- The host owns final commit by default. Workers produce staged artifacts.
+- The storage-owning node performs final commit under a durable control-plane
+  intent and fence. Workers produce staged artifacts.
+- A byte-touching ticket is hard-gated to the owner of every referenced root;
+  network transfer is not an implicit fallback.
 - The first executable milestone proves the control plane without real media
   tools.
 
@@ -379,9 +388,10 @@ media policy.
 
 ### Artifact Resolver
 
-Workers receive logical `ArtifactHandle`s, not raw assumptions about where bytes
-live. The artifact resolver turns handles into access plans based on worker
-capabilities and system policy.
+Workers receive logical `ArtifactHandle`s and stable root/location references,
+not assumptions about a shared path namespace. The artifact resolver turns
+handles into access plans based on ownership, worker capabilities, and system
+policy.
 
 An artifact handle includes:
 
@@ -399,7 +409,14 @@ An artifact handle includes:
 - mutability
 - source lineage
 
-The resolver ranks viable placements using:
+For `local_filesystem` roots, one durable logical node owns each root. The
+resolver first hard-gates byte-touching work to the active incarnation of that
+owner. Source, staging, output, backup, verification, and commit roots for one
+operation must have the same owner. The node agent alone resolves a
+provider-relative locator to an absolute child-worker path. An owner mismatch
+or unavailable owner produces no dispatch.
+
+After hard eligibility, the resolver may rank viable placements using:
 
 - same-node locality
 - shared mount availability
@@ -416,10 +433,23 @@ The resolver ranks viable placements using:
 The fastest, closest, least expensive safe backing store should be selected.
 User policy may override the default optimizer.
 
+ADR 0050's delivery implements only owner-local access for local filesystems.
+Cross-node transfer, remote caching, object-store access, and archive/restore
+remain future access modes and are never synthesized as a fallback.
+
 ### Worker Runtime
 
 Every provider runs as an out-of-process worker. The worker protocol is
 network-capable from day one, even when workers run on the same machine.
+
+One pull-based node agent is the remote host boundary. A stable logical node
+owns roots; each authenticated agent process is a fenced node incarnation. The
+agent heartbeats, pulls leases, activates owned roots, resolves locations, and
+supervises version-matched scan, hash, probe, FFmpeg, MKVToolNix, backup,
+verification, and commit providers over node-local endpoints. Restart changes
+the incarnation ID without changing root ownership. The existing
+heartbeat-updated node row epoch remains optimistic concurrency state, not an
+incarnation fence.
 
 Workers:
 
@@ -437,7 +467,8 @@ Workers:
 The control protocol should optimize for human and agent inspectability:
 versioned HTTP plus JSON for commands and responses, with NDJSON or SSE for
 progress streams. Large media bytes move through artifact handles, not through
-the control protocol.
+the control protocol. Under ADR 0050, the control-plane process also never
+opens those bytes itself.
 
 ### Event Log
 
@@ -964,9 +995,9 @@ the file asset UID.
   identity — delete/recreate with identical bytes can produce the same
   value across distinct objects — and is recorded as `IdentityEvidence`
   (`hash_match`) rather than alias proof. The only path that adds a new
-  `FileVersion` to an existing `FileAsset` is a host-committed lineage
-  operation that produces new bytes from a prior `FileVersion` of the
-  same asset — for example transcode, remux, or a restore that yields
+  `FileVersion` to an existing `FileAsset` is a control-plane-authorized
+  lineage operation that produces new bytes from a prior `FileVersion`
+  of the same asset — for example transcode, remux, or a restore that yields
   content-different output. Operations that preserve bytes (rename,
   move, archive, storage-provider migration, immutable-generation
   alias attachment, and external rename/move reconciliation) operate
@@ -986,20 +1017,21 @@ the file asset UID.
   location of the same bytes.
 - Lineage continuity across a `FileAsset` (rename, move, remux, transcode,
   archive, restore, storage-provider migration) is only established through
-  a host-committed operation that produced the new path or bytes from a
-  prior `FileVersion` of the same asset.
-- External rename and move reconciliation is one such host-committed
-  operation, but it is a reconciliation of durable state to observed
-  reality, not a destructive commit the host is choosing to initiate.
-  When a watcher or rescan discovers a path that proves the same
+  a control-plane-authorized operation that produced the new location or bytes
+  from a prior `FileVersion` of the same asset. For node-owned storage, its
+  owner agent performs any byte or location mutation.
+- External rename and move reconciliation is one such control-plane-committed
+  catalog operation, but it reconciles durable state to observed reality; it is
+  not a destructive commit the system is choosing to initiate.
+  When a watcher or rescan discovers a locator that proves the same
   immutable physical-object identity as a specific `FileLocation` on an
   existing `FileVersion`, and that `FileLocation` is no longer live at
-  its recorded path, the host commits a rename/move event that retires
-  the missing `FileLocation` and records the new one on the same
+  its recorded locator, the control plane commits a rename/move event that
+  retires the missing `FileLocation` and records the new one on the same
   `FileAsset` and `FileVersion`. Other `FileLocation`s of the same
   `FileVersion` are unaffected. The `Commit Safety Gate` does not block
-  reconciliation: the physical move has already happened outside the
-  host's authority, and refusing to record it would only leave durable
+  reconciliation: the physical move has already happened outside agent
+  authority, and refusing to record it would only leave durable
   state stale. Inside the same commit transaction, blocking leases
   scoped to the retired `FileLocation` are re-anchored to the new
   `FileLocation` — preserving `lease_id`, `issuer`, `acquired_at`,
@@ -1039,8 +1071,9 @@ the file asset UID.
   asset.
 - Acting on duplicate or same-as evidence (archive, delete, replace)
   requires an accepted retention policy or explicit user confirmation, and
-  produces a host-committed event referencing the evidence used. The host
-  commit transaction revalidates that the pinned `FileVersion` IDs,
+  produces a control-plane-committed event referencing the evidence used. The
+  commit authorization and finalization transactions revalidate that the pinned
+  `FileVersion` IDs,
   hashes, and locations the evidence was accepted against still describe
   the current state; if any pinned attribute has changed, the action
   aborts with a stale-identity-evidence error and the evidence must be
@@ -1170,9 +1203,10 @@ artifact location or receive a resolved artifact transfer plan.
 
 `Library` and `LibraryRoot` records define what a future daemon is allowed to
 observe. They are durable operator configuration, not daemon-private state.
-Explicit CLI scans may operate on an arbitrary supplied path, but watcher and
-scheduled scan behavior reads only enabled library roots configured through the
-pre-daemon CLI/API surface.
+The delivered V1 CLI permits an arbitrary supplied path. ADR 0050 replaces that
+escape hatch in #421: every target scan names an active owned root and an
+optional provider-relative scope. Watcher and scheduled scans likewise read
+only enabled roots configured through the CLI/API surface.
 
 A `Library` records:
 
@@ -1185,9 +1219,10 @@ A `Library` records:
 
 A `LibraryRoot` records:
 
-- stable root ID and parent library ID;
-- root kind (`local_path`, `shared_mount`, or future storage provider);
-- canonical root URI/path and display path;
+- stable root ID, parent library ID, and owner logical node ID;
+- provider kind (`local_filesystem` in the first node-owned implementation);
+- node-scoped provider root locator and display locator;
+- activation state, current incarnation ID, and root fencing epoch;
 - include and exclude globs;
 - file extension allowlist for media and sidecar discovery;
 - scan mode (`explicit_only`, `manual_recursive`, `watch_enabled`);
@@ -1197,23 +1232,39 @@ A `LibraryRoot` records:
 - default output/staging/backup roots when not supplied by a command;
 - enabled/disabled state, created/updated timestamps, and last scan session ID.
 
-Library root canonicalization is conservative: local roots reject symlinked
-ancestors unless a later design explicitly permits a safe alias model, and scan
-selection stores canonical paths so a watcher cannot escape the configured root
-through path aliases. A daemon may not watch a path that lacks a live
-`LibraryRoot`; if a root is disabled or its safety/scheduling profile is missing
-or stale, the daemon records a blocked issue and does not synthesize defaults.
+The owner node agent validates and canonicalizes a local-filesystem root; the
+control plane stores its activation evidence but never opens the locator. File
+locations identify the root plus a provider-relative locator. Provider
+normalization must reject root escape. Scan and policy selection use durable
+root/location relationships rather than path-prefix comparison. A daemon may
+not watch a root that lacks current owner activation; if the root is disabled,
+unavailable, or missing required policy, the daemon records a blocked issue and
+does not synthesize defaults. A benign agent restart changes the incarnation ID
+but retains the root epoch when provider configuration and validated resolution
+identity are unchanged.
 
 The V1 CLI implementation of this model (durable `libraries`/`library_roots`
 tables, `voom library`/`voom library root` CRUD, `voom scan --root`, root-scoped
 policy input building, and the fail-closed disabled-root refusal) is ADR 0027.
-V1 stores the full field set but applies only `extension_allowlist` and canonical
-path scoping during a CLI scan; include/exclude globs, stability/debounce,
-symlink/hidden-file/max-depth policies are stored for the Sprint 18 watcher. The
-disabled-root block is surfaced as a fail-closed `BLOCKED` refusal (not a scan);
-the durable blocked-`Issue` record is deferred to Sprint 18. The library's
+That implementation stores globally canonical paths and applies path-prefix
+scoping. ADR 0050 supersedes those identity and scoping choices; #418 replaces
+them in a pre-release flag day rather than retaining dual contracts. V1 stores
+the remaining field set but applies only `extension_allowlist` during a CLI
+scan; include/exclude globs, stability/debounce, and
+symlink/hidden-file/max-depth policies are stored for the Sprint 18 watcher.
+The disabled-root block remains a fail-closed `BLOCKED` refusal. The library's
 default scheduling/safety policy (#281), quality-scoring profile (#285), and
 external-system links (#284) are added as columns by their owning issues.
+
+ADR 0050 manual scan sessions bind to one root epoch and owner incarnation ID.
+Ordered observation batches are idempotent by session and sequence. `running`
+may end as `succeeded`, `failed`, `cancelled`, or `stale`; deadline or owner
+heartbeat expiry produces `stale`. Only atomic acceptance of a complete
+`succeeded` traversal may retire an unseen location. Hash and probe enrichment
+runs independently after observations are durable and binds to the observed
+provider-local facts, root epoch, and incarnation ID. Primary media requires a
+current hash and media snapshot for policy use; non-probed sidecars require a
+current hash plus the classification and bundle evidence for their role.
 
 ## Issue Model
 
@@ -1369,6 +1420,40 @@ user is watching it.
 
 ### Commit Safety Gate
 
+ADR 0050 preserves the gate's control-plane authority but replaces co-located
+filesystem mutation for node-owned roots:
+
+1. The control plane records a `pending` idempotent intent that binds the live
+   workflow lease, operation generation, logical owner, incarnation ID,
+   root/location epochs, source/staged/target facts, lineage closure, and safety
+   evidence.
+2. The owner agent revalidates local facts and durably journals `not_started`.
+   It performs no mutation if the journal cannot sync.
+3. Authorization atomically recomputes the closure, revalidates safety, lease,
+   incarnation, and epochs, transitions `pending` to `authorized`, and
+   activates the fence before returning permission.
+4. Before touching bytes, the agent durably advances its receipt to `applying`.
+   It performs the filesystem action, records `applied` or `outcome_unknown`,
+   and reports post-mutation facts.
+5. The control plane verifies the receipt and target facts, then records
+   catalog state and `completed`. Lost responses, crashes, or lease expiry after
+   authorization enter `recovery_required`; the fence remains blocking.
+
+The intent reuses the existing transitions `pending -> authorized | aborted`,
+`authorized -> completed | recovery_required`, and `recovery_required ->
+completed | aborted`. `completed` and `aborted` are terminal; a retry uses a
+successor generation. Once authorized, `not_started` alone is not permission to
+abort: the owner must serialize against any in-flight handler and durably
+cancel the generation, or recovery must otherwise prove it cannot still apply.
+During healthy execution, the workflow heartbeat and its operation claims cover
+dispatch, validation, verification, commit, and terminal lease transition.
+Genuine expiry remains fail-closed and cannot resurrect a lease or claim.
+
+The following co-located gate details describe the implementation before #422.
+They remain the safety baseline, but references to one host transaction opening
+or mutating paths are superseded by the fenced control-plane/owner-agent
+protocol above:
+
 - Delete, archive, replace, and move commits perform their lease check
   inside the host-side transaction that records the commit. The check
   evaluates lease freshness against the control-plane clock immediately
@@ -1449,9 +1534,9 @@ Library watcher or CLI scan
   -> ComplianceReport + ExecutionPlan
   -> tickets become ready as dependencies unlock
   -> scheduler leases tickets to workers
-  -> workers produce staged artifacts and structured results
-  -> host verifies, records events, and advances the plan
-  -> host commits final artifact or records failure/rollback
+  -> owner agent supervises workers that produce staged artifacts and results
+  -> owner agent verifies bytes; control plane records facts and advances plan
+  -> control plane fences commit; owner agent mutates; control plane finalizes
 ```
 
 For a multi-phase policy like "containerize to MKV, transcode to x265, strip
@@ -1465,7 +1550,8 @@ replanning updates downstream tickets while preserving the audit trail.
 
 Plans, tickets, artifacts, and events reference stable IDs. Path strings and
 content hashes may appear in payloads, but they are never the only link between
-state records.
+state records. For node-owned storage, path strings are replaced at distributed
+boundaries by storage-root and provider-relative-location references.
 
 ## Synthetic Provider Suite
 
@@ -2070,6 +2156,10 @@ normalized shape expected for Sprint 3 onward.
   scheduler scoring, TLS production hardening, and real media workers.
 - Acceptance focus: nodes and remote-capable workers register durably
   with inspectable identity and health state.
+- ADR 0050 extension: the durable node ID is the stable logical storage owner;
+  each authenticated node-agent process has a fresh fenced incarnation ID.
+  Root ownership does not move with an incarnation, and the existing
+  heartbeat-updated row epoch is not used as that fence.
 - Verification expectations: migration/repository tests, registration
   integration tests, CLI/API inspection golden tests, documentation completeness
   scan, and `just ci`.
@@ -2089,6 +2179,9 @@ normalized shape expected for Sprint 3 onward.
 - Acceptance focus: remote synthetic workers execute leased tickets,
   lost workers/nodes recover cleanly, and each remote dispatch records
   how the worker is expected to access artifacts.
+- ADR 0050 extension: access plans for local filesystems authorize owner-local
+  root/location resolution. They carry no shared-path assumption or cross-node
+  transfer mode.
 - Verification expectations: remote lease integration tests, stale
   recovery tests, artifact-access fixture tests, documentation completeness
   scan, and `just ci`.
@@ -2110,6 +2203,9 @@ normalized shape expected for Sprint 3 onward.
   policy-configurable scoring weights.
 - Acceptance focus: scheduler choices are deterministic under fixtures,
   explainable to operators, and respect node/worker concurrency limits.
+- ADR 0050 extension: root ownership is a hard eligibility predicate before
+  scoring. Every byte-touching root for one operation must have the selected
+  node as its logical owner.
 - Verification expectations: scoring unit tests, concurrency integration
   tests, scheduler decision-log fixture tests, documentation completeness
   scan, and `just ci`.
@@ -2132,8 +2228,11 @@ normalized shape expected for Sprint 3 onward.
   Durable library roots, scheduled scans, watch loops, and policy-driven scan
   selection are deferred until after explicit ingest proves the identity and
   provider boundary. Media probing for this path is performed by the bundled
-  out-of-process `builtin.ffprobe` worker; the control plane may hash local
-  bytes but must not invoke `ffprobe` in-process.
+  out-of-process `builtin.ffprobe` worker. The delivered Sprint 10 path hashes
+  local bytes in the control plane but does not invoke `ffprobe` in-process.
+- ADR 0050 extension: #421 replaces that delivered scan boundary. The owner
+  agent supervises distinct scan, hash, and probe capabilities, while the
+  control plane receives only root-relative observations and bound evidence.
 - Explicitly out of scope: staged artifact mutation, transcoding,
   remuxing, backup, daemon watching, durable library roots, configured
   recurring scans, and remote media transfer.
@@ -2175,7 +2274,7 @@ normalized shape expected for Sprint 3 onward.
   editing, backup, daemon scheduling, and UI media controls.
 - Acceptance focus: a real policy plan containing `transcode video to
   hevc` executes through durable tickets, an out-of-process FFmpeg
-  worker, staged artifact verification, and host-owned commit.
+  worker, staged artifact verification, and storage-owner commit.
 - Verification expectations: policy/compiler tests, planner tests,
   worker conformance tests, transcode fixture-media integration tests,
   staged-commit integration tests, CLI golden-output tests,
@@ -2218,7 +2317,7 @@ normalized shape expected for Sprint 3 onward.
   controls.
 - Acceptance focus: policy-driven audio transcode and extract operations
   run through durable tickets, out-of-process workers, staged artifacts,
-  verification, and host-owned commit or bundle registration as
+  verification, and storage-owner commit or bundle registration as
   appropriate for the operation.
 - Verification expectations: grammar/diagnostic tests, planner tests,
   FFmpeg audio worker conformance tests, fixture-media integration tests,
@@ -2308,6 +2407,10 @@ normalized shape expected for Sprint 3 onward.
   sessions, reconciliation for adds/modifications/removals/renames, and
   daemon status API for scan activity. The watcher reads only durable library
   roots and scan configuration created through the Sprint 17 CLI/API surface.
+- ADR 0050 extraction: #419 delivers the manual durable scan-session and
+  complete-traversal reconciliation substrate before the watcher. Sessions bind
+  to root epochs and incarnation IDs; only successful complete traversal may
+  infer absence. Watchers and debounce loops remain Sprint 18 work.
 - Explicitly out of scope: background work scheduling, dynamic
   throttles, external sync loops, UI event streaming, and new configuration
   surfaces not already inspectable through CLI/API.

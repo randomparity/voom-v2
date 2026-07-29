@@ -55,3 +55,4 @@ are append-only — supersede an ADR with a new one rather than rewriting histor
 | [0047](0047-policy-verification-is-a-durable-read-only-phase.md) | Policy verification is a durable read-only phase |
 | [0048](0048-durable-sliding-file-window.md) | Coordinate policy execution through a durable sliding file window |
 | [0049](0049-accelerator-devices-are-worker-resources.md) | Accelerator devices are worker resources |
+| [0050](0050-node-owned-storage-and-byte-blind-control-plane.md) | Node-owned storage and a byte-blind control plane |
