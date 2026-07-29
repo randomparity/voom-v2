@@ -1931,9 +1931,11 @@ async fn fatal_latch_prevents_sibling_refill_while_recovery_is_pending() {
         let fatal_known = fatal_known.clone();
         let finish_recovery = finish_recovery.clone();
         tokio::spawn(async move {
-            gate.close();
-            fatal_known.notify_one();
-            finish_recovery.notified().await;
+            super::close_admission_during_recovery(&gate, async {
+                fatal_known.notify_one();
+                finish_recovery.notified().await;
+            })
+            .await;
         })
     };
     fatal_known.notified().await;
@@ -1949,6 +1951,22 @@ async fn fatal_latch_prevents_sibling_refill_while_recovery_is_pending() {
     assert!(
         gate.admit_next_file(&cp, job.id).await.unwrap().is_none(),
         "a sibling freeing a slot must not refill after fatal failure is known"
+    );
+    let progress = cp
+        .workflow_summaries()
+        .file_progress_for_job(job.id)
+        .await
+        .unwrap();
+    assert_eq!(
+        progress
+            .iter()
+            .map(|row| (row.branch_id.as_str(), row.state.as_str()))
+            .collect::<Vec<_>>(),
+        vec![
+            ("file-0", "terminal"),
+            ("file-1", "active"),
+            ("file-2", "pending")
+        ]
     );
     finish_recovery.notify_one();
     recovery_task.await.unwrap();
@@ -1975,15 +1993,11 @@ async fn admission_failure_guard_closes_gate_when_pipeline_panics() {
         .unwrap();
     let gate = super::FileAdmissionGate::new();
     gate.admit_next_file(&cp, job.id).await.unwrap().unwrap();
-    let task = {
-        let failure_guard = super::FileAdmissionFailureGuard::new(gate.clone());
-        tokio::spawn(async move {
-            let _failure_guard = failure_guard;
-            panic!("injected pipeline panic");
-        })
-    };
+    let task = tokio::spawn(super::run_guarded_file_pipeline(gate.clone(), async {
+        panic!("injected pipeline panic");
+    }));
 
-    assert!(task.await.unwrap_err().is_panic());
+    assert!(task.await.is_err_and(|error| error.is_panic()));
     assert!(
         gate.admit_next_file(&cp, job.id).await.unwrap().is_none(),
         "unwinding a pipeline must close admission synchronously"

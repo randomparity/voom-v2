@@ -110,6 +110,7 @@ async fn copy_into_place_moves_bytes_and_cleans_up() {
     write(&current, b"terminal-bytes").await;
 
     let temp = promotion_temp_path(&dest, FileLocationId(1)).unwrap();
+    let temp = PromotionTempOwnership::acquire(&temp).await.unwrap();
     copy_into_place(&current, &dest, &temp).await.unwrap();
 
     assert_eq!(tokio::fs::read(&dest).await.unwrap(), b"terminal-bytes");
@@ -275,6 +276,35 @@ async fn concurrent_moves_never_replace_the_winning_destination() {
         bytes == b"first-terminal" || bytes == b"second-output",
         "the destination must contain one complete contender"
     );
+}
+
+#[tokio::test]
+async fn same_location_contender_waits_for_temp_ownership() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let current = tmp.path().join("Movie.work.mkv");
+    let dest = tmp.path().join("Movie.mkv");
+    let location_id = FileLocationId(42);
+    let temp = promotion_temp_path(&dest, location_id).unwrap();
+    write(&current, b"terminal-bytes").await;
+    write(&temp, b"interrupted").await;
+    let owner = PromotionTempOwnership::acquire(&temp).await.unwrap();
+
+    let mut contender = tokio::spawn({
+        let current = current.clone();
+        let dest = dest.clone();
+        async move { move_terminal_artifact(&current, &dest, location_id).await }
+    });
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(50), &mut contender)
+            .await
+            .is_err(),
+        "a same-location contender must wait for exclusive temp ownership"
+    );
+
+    drop(owner);
+    assert_eq!(contender.await.unwrap().unwrap(), dest);
+    assert_eq!(tokio::fs::read(&dest).await.unwrap(), b"terminal-bytes");
+    assert!(tokio::fs::symlink_metadata(&temp).await.is_err());
 }
 
 #[tokio::test]

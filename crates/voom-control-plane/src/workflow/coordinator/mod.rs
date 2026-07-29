@@ -444,6 +444,26 @@ impl Drop for FileAdmissionFailureGuard {
     }
 }
 
+async fn run_guarded_file_pipeline(
+    gate: FileAdmissionGate,
+    pipeline: impl Future<Output = Result<FilePipelineOutcome, FilePipelineFailure>>,
+) -> Result<FilePipelineOutcome, FilePipelineFailure> {
+    let mut failure_guard = FileAdmissionFailureGuard::new(gate);
+    let result = pipeline.await;
+    if result.is_ok() {
+        failure_guard.disarm();
+    }
+    result
+}
+
+async fn close_admission_during_recovery<T>(
+    gate: &FileAdmissionGate,
+    recovery: impl Future<Output = T>,
+) -> T {
+    gate.close();
+    recovery.await
+}
+
 struct FileWindowRefill<'a> {
     pending: &'a mut BTreeMap<String, PhaseFile>,
     seeds_by_branch: &'a mut BTreeMap<String, Vec<FilePhaseSummary>>,
@@ -657,39 +677,42 @@ impl<'a> PhaseLoop<'a> {
             return Ok(());
         };
         if failure.job_failed || planned.error_strategy != voom_policy::ErrorStrategy::Continue {
-            self.admission_gate.close();
-            let phase_dispatched = failure.run_summary.is_some();
-            if let Some(run) = failure.run_summary.take() {
-                self.record_run(run);
-            }
-            if phase_dispatched {
-                let [file] = entering else {
-                    return Err(file_pipeline_failure(
-                        VoomError::Internal(format!(
-                            "failed file pipeline phase {phase_ordinal} had {} inputs",
-                            entering.len()
-                        )),
-                        self.last_run.as_ref(),
-                    ));
-                };
-                let [disposition] = planned.dispositions.as_slice() else {
-                    return Err(file_pipeline_failure(
-                        VoomError::Internal(format!(
-                            "failed file pipeline phase {phase_ordinal} had {} dispositions",
-                            planned.dispositions.len()
-                        )),
-                        self.last_run.as_ref(),
-                    ));
-                };
-                self.control_plane
-                    .finalize_failed_file_phase(self.job_id, phase_ordinal, file, disposition)
-                    .await
-                    .map_err(|source| file_pipeline_failure(source, self.last_run.as_ref()))?;
-            }
-            return Err(file_pipeline_failure(
-                failure.source,
-                self.last_run.as_ref(),
-            ));
+            let admission_gate = self.admission_gate.clone();
+            return close_admission_during_recovery(&admission_gate, async {
+                let phase_dispatched = failure.run_summary.is_some();
+                if let Some(run) = failure.run_summary.take() {
+                    self.record_run(run);
+                }
+                if phase_dispatched {
+                    let [file] = entering else {
+                        return Err(file_pipeline_failure(
+                            VoomError::Internal(format!(
+                                "failed file pipeline phase {phase_ordinal} had {} inputs",
+                                entering.len()
+                            )),
+                            self.last_run.as_ref(),
+                        ));
+                    };
+                    let [disposition] = planned.dispositions.as_slice() else {
+                        return Err(file_pipeline_failure(
+                            VoomError::Internal(format!(
+                                "failed file pipeline phase {phase_ordinal} had {} dispositions",
+                                planned.dispositions.len()
+                            )),
+                            self.last_run.as_ref(),
+                        ));
+                    };
+                    self.control_plane
+                        .finalize_failed_file_phase(self.job_id, phase_ordinal, file, disposition)
+                        .await
+                        .map_err(|source| file_pipeline_failure(source, self.last_run.as_ref()))?;
+                }
+                Err(file_pipeline_failure(
+                    failure.source,
+                    self.last_run.as_ref(),
+                ))
+            })
+            .await;
         }
         planned.dispositions = self
             .control_plane
@@ -1563,21 +1586,21 @@ impl ControlPlane {
                 runtimes: inputs.runtimes.clone(),
             };
             refill.active.spawn(async move {
-                let mut failure_guard =
-                    FileAdmissionFailureGuard::new(pipeline_admission_gate.clone());
-                let result = PhaseLoop::new(
-                    &control_plane,
-                    file_inputs,
-                    promotion_source_root,
-                    promotion_source_dir,
-                    pipeline_admission_gate,
+                run_guarded_file_pipeline(
+                    pipeline_admission_gate.clone(),
+                    Box::pin(async {
+                        PhaseLoop::new(
+                            &control_plane,
+                            file_inputs,
+                            promotion_source_root,
+                            promotion_source_dir,
+                            pipeline_admission_gate,
+                        )
+                        .run_file_pipeline()
+                        .await
+                    }),
                 )
-                .run_file_pipeline()
-                .await;
-                if result.is_ok() {
-                    failure_guard.disarm();
-                }
-                result
+                .await
             });
         }
         Ok(())

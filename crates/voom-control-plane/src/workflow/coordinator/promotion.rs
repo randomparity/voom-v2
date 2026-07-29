@@ -4,6 +4,9 @@
 
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
+use std::fs::File;
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt;
 use std::path::{Component, Path, PathBuf};
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -153,8 +156,33 @@ async fn move_terminal_artifact(
     dest: &Path,
     location_id: FileLocationId,
 ) -> Result<PathBuf, VoomError> {
-    let temp = promotion_temp_path(dest, location_id)?;
-    remove_promotion_temp(&temp).await?;
+    let temp_path = promotion_temp_path(dest, location_id)?;
+    let temp = PromotionTempOwnership::acquire(&temp_path).await?;
+    let result = move_owned_terminal_artifact(current, dest, &temp).await;
+    let cleanup = remove_promotion_temp(&temp_path).await;
+    match result {
+        Ok(destination) => {
+            cleanup?;
+            Ok(destination)
+        }
+        Err(source) => {
+            if let Err(cleanup_error) = cleanup {
+                tracing::warn!(
+                    temp = %temp_path.display(),
+                    error = %cleanup_error,
+                    "failed to remove a promotion temp after placement failed"
+                );
+            }
+            Err(source)
+        }
+    }
+}
+
+async fn move_owned_terminal_artifact(
+    current: &Path,
+    dest: &Path,
+    temp: &PromotionTempOwnership,
+) -> Result<PathBuf, VoomError> {
     match tokio::fs::symlink_metadata(dest).await {
         Ok(dest_meta) => return resolve_existing_destination(current, dest, &dest_meta).await,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
@@ -185,7 +213,7 @@ async fn move_terminal_artifact(
     }
     // A failed hard link (typically cross-filesystem EXDEV) falls back to an
     // atomic copy-into-place.
-    copy_into_place(current, dest, &temp).await?;
+    copy_into_place(current, dest, temp).await?;
     Ok(dest.to_path_buf())
 }
 
@@ -262,7 +290,9 @@ async fn files_have_equal_contents(a: &Path, b: &Path) -> Result<bool, VoomError
 
 /// Durable hidden temp sibling for the copy fallback. The location id makes the
 /// name stable across retries and distinct across artifacts, so resume reclaims
-/// an interrupted copy instead of allocating another full-size partial.
+/// an interrupted copy instead of allocating another full-size partial. The
+/// file also carries the exclusive lock that prevents concurrent resumes from
+/// unlinking or republishing each other's partial copy.
 fn promotion_temp_path(dest: &Path, location_id: FileLocationId) -> Result<PathBuf, VoomError> {
     let file_name = dest.file_name().ok_or_else(|| {
         VoomError::Internal(format!(
@@ -274,6 +304,85 @@ fn promotion_temp_path(dest: &Path, location_id: FileLocationId) -> Result<PathB
     temp_name.push(file_name);
     temp_name.push(format!(".location-{}.partial", location_id.0));
     Ok(dest.with_file_name(temp_name))
+}
+
+struct PromotionTempOwnership {
+    path: PathBuf,
+    file: File,
+}
+
+impl PromotionTempOwnership {
+    async fn acquire(path: &Path) -> Result<Self, VoomError> {
+        loop {
+            let owned_path = path.to_path_buf();
+            let file = tokio::task::spawn_blocking(move || {
+                let file = std::fs::OpenOptions::new()
+                    .create(true)
+                    .truncate(false)
+                    .read(true)
+                    .write(true)
+                    .open(&owned_path)?;
+                file.lock()?;
+                Ok::<File, std::io::Error>(file)
+            })
+            .await
+            .map_err(|error| {
+                VoomError::Internal(format!(
+                    "join promotion temp lock for {}: {error}",
+                    path.display()
+                ))
+            })?
+            .map_err(|error| {
+                VoomError::Config(format!("lock promotion temp {}: {error}", path.display()))
+            })?;
+            let path_metadata = match tokio::fs::symlink_metadata(path).await {
+                Ok(metadata) => metadata,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => {
+                    return Err(VoomError::Config(format!(
+                        "stat locked promotion temp {}: {error}",
+                        path.display()
+                    )));
+                }
+            };
+            if !path_metadata.file_type().is_file() {
+                return Err(VoomError::Config(format!(
+                    "promotion temp is not a regular file: {}",
+                    path.display()
+                )));
+            }
+            let file_metadata = file.metadata().map_err(|error| {
+                VoomError::Config(format!(
+                    "stat owned promotion temp {}: {error}",
+                    path.display()
+                ))
+            })?;
+            if metadata_identifies_same_file(&path_metadata, &file_metadata) {
+                return Ok(Self {
+                    path: path.to_path_buf(),
+                    file,
+                });
+            }
+        }
+    }
+
+    fn restart_file(&self) -> std::io::Result<tokio::fs::File> {
+        let file = self.file.try_clone()?;
+        file.set_len(0)?;
+        Ok(tokio::fs::File::from_std(file))
+    }
+}
+
+#[cfg(unix)]
+fn metadata_identifies_same_file(a: &std::fs::Metadata, b: &std::fs::Metadata) -> bool {
+    a.dev() == b.dev() && a.ino() == b.ino()
+}
+
+#[cfg(not(unix))]
+fn metadata_identifies_same_file(_: &std::fs::Metadata, _: &std::fs::Metadata) -> bool {
+    // Windows prevents deleting or replacing this path while the locked handle
+    // is open, so successful locking already preserves pathname ownership.
+    true
 }
 
 async fn remove_promotion_temp(temp: &Path) -> Result<(), VoomError> {
@@ -303,42 +412,42 @@ async fn remove_promoted_source(current: &Path) {
 
 /// Place a terminal artifact at `dest` across filesystems without exposing a
 /// partial file or replacing a concurrent destination.
-async fn copy_into_place(current: &Path, dest: &Path, temp: &Path) -> Result<(), VoomError> {
+async fn copy_into_place(
+    current: &Path,
+    dest: &Path,
+    temp: &PromotionTempOwnership,
+) -> Result<(), VoomError> {
     let copy_result = async {
         let mut source = tokio::fs::File::open(current).await?;
-        let mut target = tokio::fs::OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(temp)
-            .await?;
+        let mut target = temp.restart_file()?;
         tokio::io::copy(&mut source, &mut target).await?;
         target.flush().await?;
         target.sync_all().await
     }
     .await;
     if let Err(err) = copy_result {
-        let _ = tokio::fs::remove_file(temp).await;
+        let _ = tokio::fs::remove_file(&temp.path).await;
         return Err(VoomError::Config(format!(
             "copy terminal artifact {} -> {}: {err}",
             current.display(),
-            temp.display()
+            temp.path.display()
         )));
     }
-    match tokio::fs::hard_link(temp, dest).await {
+    match tokio::fs::hard_link(&temp.path, dest).await {
         Ok(()) => {
-            let _ = tokio::fs::remove_file(temp).await;
+            let _ = tokio::fs::remove_file(&temp.path).await;
             remove_promoted_source(current).await;
             Ok(())
         }
         Err(error) => {
-            let _ = tokio::fs::remove_file(temp).await;
+            let _ = tokio::fs::remove_file(&temp.path).await;
             match tokio::fs::symlink_metadata(dest).await {
                 Ok(dest_meta) => resolve_existing_destination(current, dest, &dest_meta)
                     .await
                     .map(|_| ()),
                 Err(_) => Err(VoomError::Config(format!(
                     "place terminal artifact {} -> {} without replacement: {error}",
-                    temp.display(),
+                    temp.path.display(),
                     dest.display()
                 ))),
             }
