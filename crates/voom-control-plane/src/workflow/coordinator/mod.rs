@@ -51,12 +51,13 @@ use finalize::phase_ordinal;
 use planning::{
     classify_phase, initial_phase_files, job_grain_summary, phase_draft, phase_outcome,
     regenerate_phase_report, reject_unpublished_on_error, resolved_phase_policy,
-    zero_phase_summary,
 };
 use resume::{PreparedResumeSeed, ResumePreparation};
 
 #[cfg(test)]
 use finalize::{sqlite_i64, sqlite_u64};
+#[cfg(test)]
+use planning::zero_phase_summary;
 
 /// A file the coordinator is advancing through phases. `version_id`/`snapshot`
 /// track the file's current chain tip and are refreshed after each commit.
@@ -336,7 +337,6 @@ pub(crate) struct PreparedResumeRunInputs {
 /// Everything the phase-loop runner owns once an in-job run starts.
 struct PhaseLoopInputs {
     job_id: JobId,
-    promotion_job_ids: Vec<JobId>,
     policy: voom_policy::CompiledPolicy,
     context: PlanningContext,
     base_draft: PolicyInputSetDraft,
@@ -419,7 +419,6 @@ struct PhaseLoop<'a> {
     executor: WorkflowExecutor,
     files: Vec<PhaseFile>,
     promotion: PromotionPlan,
-    promotion_job_ids: Vec<JobId>,
     file_phases: Vec<FilePhaseSummary>,
     last_run: Option<crate::workflow::WorkflowRunSummary>,
     continued_error: Option<VoomError>,
@@ -460,7 +459,6 @@ impl<'a> PhaseLoop<'a> {
             executor,
             files: inputs.files,
             promotion,
-            promotion_job_ids: inputs.promotion_job_ids,
             file_phases: inputs.seed_file_phases,
             last_run: None,
             continued_error: None,
@@ -662,11 +660,7 @@ impl<'a> PhaseLoop<'a> {
                 .await
                 .map_err(|source| file_pipeline_failure(source, self.last_run.as_ref()))?;
             self.control_plane
-                .reclaim_superseded_intermediates(
-                    &self.promotion,
-                    &self.promotion_job_ids,
-                    &self.file_phases,
-                )
+                .reclaim_superseded_intermediates(&self.promotion, &self.file_phases)
                 .await
                 .map_err(|source| file_pipeline_failure(source, self.last_run.as_ref()))?;
         }
@@ -943,8 +937,7 @@ impl ControlPlane {
         let prepared = self
             .prepare_resume_phase_barrier_run_inputs(prior_job_id, inputs)
             .await?;
-        Box::pin(self.run_prepared_resume_phase_barrier(prior_job_id, prepared, options, runtimes))
-            .await
+        Box::pin(self.run_prepared_resume_phase_barrier(prepared, options, runtimes)).await
     }
 
     pub(crate) async fn prepare_resume_phase_barrier_run_inputs(
@@ -967,7 +960,6 @@ impl ControlPlane {
 
     pub(crate) async fn run_prepared_resume_phase_barrier(
         &self,
-        prior_job_id: JobId,
         inputs: PreparedResumeRunInputs,
         options: ComplianceExecutionOptions,
         runtimes: WorkerRuntimeRegistry,
@@ -1004,7 +996,6 @@ impl ControlPlane {
                 base_draft,
                 files,
                 seed_file_phases,
-                promotion_job_ids: vec![job.id, prior_job_id],
                 options,
                 runtimes,
             })
@@ -1234,7 +1225,6 @@ impl ControlPlane {
             base_draft,
             files,
             seed_file_phases: Vec::new(),
-            promotion_job_ids: vec![job_id],
             options,
             runtimes,
         })
@@ -1254,38 +1244,8 @@ impl ControlPlane {
             let PhaseLoopInputs {
                 job_id,
                 seed_file_phases,
-                promotion_job_ids,
-                options,
                 ..
             } = inputs;
-            // No phase loop runs (e.g. a resume where every file already
-            // completed). Files that committed in a prior, failed job were never
-            // promoted, so promote any terminal artifacts still in a working dir
-            // now, before the job succeeds.
-            let promotion = options.promotion_plan();
-            let promotion_result = match self
-                .promotion_location_ids(&promotion_job_ids, &seed_file_phases)
-                .await
-            {
-                Ok(ids) => self.promote_terminal_artifacts(&promotion, &ids).await,
-                Err(source) => Err(source),
-            };
-            if let Err(source) = promotion_result {
-                let summary = self
-                    .workflow_summaries
-                    .insert_summary(zero_phase_summary(job_id), self.clock().now())
-                    .await
-                    .map_err(CoordinatorError::from)?;
-                return Err(CoordinatorError {
-                    source,
-                    partial: Some(CoordinatorOutcome {
-                        job_id,
-                        summary,
-                        phases: Vec::new(),
-                        file_phases: seed_file_phases,
-                    }),
-                });
-            }
             return Ok(self
                 .finalize_zero_phase_run(job_id, seed_file_phases)
                 .await?);
@@ -1439,7 +1399,6 @@ impl ControlPlane {
             let control_plane = self.clone();
             let file_inputs = PhaseLoopInputs {
                 job_id: inputs.job_id,
-                promotion_job_ids: inputs.promotion_job_ids.clone(),
                 policy: inputs.policy.clone(),
                 context: inputs.context.clone(),
                 base_draft: inputs.base_draft.clone(),

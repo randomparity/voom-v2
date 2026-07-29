@@ -68,8 +68,10 @@ After the last successful/verified phase:
   add-only, no-replace promotion path;
 - never overwrite a destination;
 - never modify or delete source media;
-- delete only superseded same-lineage locations produced by this run (or its
-  resumed predecessor), located under configured `.committed` working dirs;
+- delete only superseded same-lineage commit results referenced by the
+  branch's carried committed-row ticket ids, including earlier results from
+  one multi-operation phase, and located under configured `.committed` working
+  dirs;
 - retain durable file versions, snapshots, tickets, commit records,
   verification evidence, file-phase summaries, and retired location rows;
 - treat an already missing cleanup file as an idempotent interrupted cleanup;
@@ -100,6 +102,10 @@ Resume validates progress against prior run starts and phase rows. It:
 - terminalizes a completed-but-not-promoted branch without repeating a phase;
 - carries every prior branch row and its ticket provenance into a
   terminalization replay;
+- uses those exact carried ticket ids as transitive cleanup authority across
+  repeated resume jobs, rather than a current/direct-predecessor job scope;
+- treats a prior terminal branch as already finalized and never re-promotes
+  zero-survivor carried rows, including rows from a blocked branch;
 - rejects phase-complete chain-tip drift and accepts incomplete drift only when
   exact prior-job committed-ticket evidence proves the new tip;
 - rejects gaps, cursor disagreement, duplicate ordinals, lineage mismatch, or

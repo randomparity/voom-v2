@@ -78,12 +78,20 @@ async fn finalization_attributes_exact_job_commit_when_unrelated_tip_is_newer() 
 #[tokio::test]
 async fn finalization_uses_latest_exact_commit_from_multi_operation_phase() {
     let (cp, _tmp) = crate::cases::cp().await;
+    let tmp = tempfile::TempDir::new().unwrap();
+    let working = tmp.path().join("working");
+    let output = tmp.path().join("output");
+    tokio::fs::create_dir_all(&working).await.unwrap();
     let source = seed_version(&cp, "/library/multi-operation.mkv", "source").await;
     let mut files = vec![phase_file(&cp, source, "multi-operation").await];
     let job = open_policy_job(&cp).await;
     activate_file_progress(&cp, job.id, &files[0]).await;
     let first = seed_committed_ticket_evidence(&cp, job.id, source, "multi-operation").await;
     let terminal = seed_committed_ticket_evidence(&cp, job.id, source, "multi-operation").await;
+    let first_path = working.join("first.mkv");
+    let terminal_path = working.join("terminal.mkv");
+    repoint_location(&cp, first.location_id, &first_path).await;
+    repoint_location(&cp, terminal.location_id, &terminal_path).await;
     let unrelated =
         advance_chain_tip(&cp, terminal.version_id, "unrelated", ProducedBy::Transcode).await;
 
@@ -114,6 +122,81 @@ async fn finalization_uses_latest_exact_commit_from_multi_operation_phase() {
     );
     assert_eq!(files[0].version_id, terminal.version_id);
     assert_eq!(active_version_id(&cp, source).await, unrelated);
+
+    cp.reclaim_superseded_intermediates(
+        &crate::cases::policy::compliance::PromotionPlan {
+            pairs: vec![crate::cases::policy::compliance::PromotionPair {
+                working_dir: working,
+                output_dir: output,
+            }],
+        },
+        &rows,
+    )
+    .await
+    .unwrap();
+
+    assert!(
+        !first_path.exists(),
+        "cleanup must reclaim an earlier commit from the same phase"
+    );
+    assert!(
+        terminal_path.exists(),
+        "cleanup must preserve the phase's terminal commit"
+    );
+    assert!(
+        cp.identity()
+            .get_file_location(first.location_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .retired_at
+            .is_some(),
+        "cleanup must retire the earlier same-phase location"
+    );
+}
+
+#[tokio::test]
+async fn repeated_terminalization_cleanup_uses_carried_ticket_provenance() {
+    let (cp, _tmp) = crate::cases::cp().await;
+    let tmp = tempfile::TempDir::new().unwrap();
+    let working = tmp.path().join("working");
+    let output = tmp.path().join("output");
+    tokio::fs::create_dir_all(&working).await.unwrap();
+    let source = seed_version(&cp, "/library/repeated-resume.mkv", "source").await;
+    let first_job = open_policy_job(&cp).await;
+    let first = seed_committed_ticket_evidence(&cp, first_job.id, source, "repeated-resume").await;
+    let terminal =
+        seed_committed_ticket_evidence(&cp, first_job.id, first.version_id, "repeated-resume")
+            .await;
+    let first_path = working.join("first.mkv");
+    let terminal_path = working.join("terminal.mkv");
+    repoint_location(&cp, first.location_id, &first_path).await;
+    repoint_location(&cp, terminal.location_id, &terminal_path).await;
+    let second_job = open_policy_job(&cp).await;
+    let third_job = open_policy_job(&cp).await;
+    assert!(first_job.id < second_job.id && second_job.id < third_job.id);
+    let phases = vec![
+        phase_summary(first_job.id, 0, &first),
+        phase_summary(first_job.id, 1, &terminal),
+    ];
+
+    cp.reclaim_superseded_intermediates(
+        &crate::cases::policy::compliance::PromotionPlan {
+            pairs: vec![crate::cases::policy::compliance::PromotionPair {
+                working_dir: working,
+                output_dir: output,
+            }],
+        },
+        &phases,
+    )
+    .await
+    .unwrap();
+
+    assert!(
+        !first_path.exists(),
+        "a second resume must honor the carried first-job ticket provenance"
+    );
+    assert!(terminal_path.exists());
 }
 
 #[tokio::test]
@@ -276,6 +359,53 @@ struct CommittedEvidence {
     version_id: FileVersionId,
     location_id: FileLocationId,
     snapshot_id: MediaSnapshotId,
+}
+
+fn phase_summary(
+    job_id: voom_core::JobId,
+    phase_ordinal: u32,
+    evidence: &CommittedEvidence,
+) -> voom_store::repo::workflow_summaries::FilePhaseSummary {
+    voom_store::repo::workflow_summaries::FilePhaseSummary {
+        id: u64::from(phase_ordinal) + 1,
+        job_id,
+        phase_ordinal,
+        branch_id: "repeated-resume".to_owned(),
+        ticket_ids: vec![evidence.ticket_id],
+        produced_file_version_id: Some(evidence.version_id),
+        produced_file_location_id: Some(evidence.location_id),
+        artifact_handle_id: Some(evidence.artifact_handle_id),
+        artifact_verification_id: None,
+        reprobe_snapshot_id: Some(evidence.snapshot_id),
+        outcome: FilePhaseOutcome::Committed,
+        created_at: T0,
+    }
+}
+
+async fn repoint_location(
+    cp: &crate::ControlPlane,
+    location_id: FileLocationId,
+    path: &std::path::Path,
+) {
+    tokio::fs::write(path, b"committed-bytes").await.unwrap();
+    let location = cp
+        .identity()
+        .get_file_location(location_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let mut tx = crate::cases::begin_tx(&cp.pool).await.unwrap();
+    cp.identity()
+        .update_file_location_value_in_tx(
+            &mut tx,
+            location_id,
+            location.epoch,
+            path.display().to_string(),
+            T0,
+        )
+        .await
+        .unwrap();
+    crate::cases::commit_tx(tx).await.unwrap();
 }
 
 async fn open_policy_job(cp: &crate::ControlPlane) -> voom_store::repo::jobs::Job {

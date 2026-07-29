@@ -94,7 +94,7 @@ first:
 1. promotes every terminal main/sidecar artifact scoped to that file using the
    existing add-only promotion path;
 2. identifies earlier same-lineage produced locations under coordinator-owned
-   working directories;
+   working directories, including earlier commit results from the same phase;
 3. removes only those retired intermediate files, then retires their durable
    locations while retaining versions, snapshots, commit records, verification
    records, tickets, and file-phase rows as evidence; and
@@ -110,16 +110,21 @@ intermediate set after repeated interruption.
 
 Missing cleanup files are treated as an interrupted cleanup and completed
 idempotently. Source locations are never candidates because cleanup requires a
-`Committed` file-phase location, an exact committed ticket/commit-record match
-in the current or resumed job scope, and a configured committed working
-directory; the active chain-tip location is also excluded. Verified source
-locations are excluded from both promotion and cleanup. Promotion or cleanup
-failure leaves the row terminalizing, fails the run, and prevents slot refill.
+ticket id carried by a `Committed` file-phase row, an exact committed
+ticket/commit-record/result-location match, and a configured committed working
+directory; the active chain-tip location is also excluded. This exact carried
+ticket authority remains transitive across repeated resume jobs. Verified
+source locations are excluded from both promotion and cleanup. Promotion or
+cleanup failure leaves the row terminalizing, fails the run, and prevents slot
+refill.
 
 Blocked planning and continued per-file ticket failure terminalize without
-promotion. An abort-strategy failure stops further admission and drains the
-already admitted work. External cancellation likewise stops admission; the
-job remains cancelled and its committed file-phase rows remain resumable.
+promotion. A prior `terminal` branch is already proof that promotion/cleanup
+either completed or was intentionally withheld, so a zero-survivor resume does
+not promote its carried rows again. An abort-strategy failure stops further
+admission and drains the already admitted work. External cancellation likewise
+stops admission; the job remains cancelled and its committed file-phase rows
+remain resumable.
 
 Resume rejects every phase-complete branch whose active chain tip differs from
 its recorded row tail. For an incomplete branch, a changed tip advances the

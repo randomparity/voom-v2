@@ -7,7 +7,7 @@ use std::ffi::OsString;
 use std::path::{Component, Path, PathBuf};
 
 use tokio::io::AsyncReadExt;
-use voom_core::{FileAssetId, FileLocationId, FileVersionId, JobId, VoomError};
+use voom_core::{FileAssetId, FileLocationId, FileVersionId, VoomError};
 use voom_store::repo::identity::{FileLocationKind, IdentityRepo};
 use voom_store::repo::workflow_summaries::FilePhaseOutcome;
 use voom_store::repo::workflow_summaries::FilePhaseSummary;
@@ -333,18 +333,22 @@ impl ControlPlane {
     pub(super) async fn reclaim_superseded_intermediates(
         &self,
         plan: &PromotionPlan,
-        job_ids: &[JobId],
         file_phases: &[FilePhaseSummary],
     ) -> Result<(), VoomError> {
         let terminal_location = file_phases
             .iter()
             .rev()
             .find_map(|row| row.produced_file_location_id);
-        let mut seen = HashSet::new();
-        let candidates = file_phases
+        let ticket_ids = file_phases
             .iter()
             .filter(|row| row.outcome == FilePhaseOutcome::Committed)
-            .filter_map(|row| row.produced_file_location_id)
+            .flat_map(|row| row.ticket_ids.iter().copied())
+            .collect::<Vec<_>>();
+        let mut seen = HashSet::new();
+        let candidates = self
+            .committed_location_ids_for_tickets(&ticket_ids)
+            .await?
+            .into_iter()
             .filter(|location_id| {
                 Some(*location_id) != terminal_location && seen.insert(*location_id)
             })
@@ -354,12 +358,6 @@ impl ControlPlane {
         }
         let dirs = resolve_promotion_dirs(plan).await;
         for location_id in candidates {
-            if !self.is_job_committed_location(job_ids, location_id).await? {
-                return Err(VoomError::Conflict(format!(
-                    "cleanup location {location_id} has no committed ticket provenance \
-                     in jobs {job_ids:?}"
-                )));
-            }
             let Some(location) = self.identity.get_file_location(location_id).await? else {
                 continue;
             };
@@ -398,68 +396,46 @@ impl ControlPlane {
         commit_tx(tx).await
     }
 
-    async fn is_job_committed_location(
+    async fn committed_location_ids_for_tickets(
         &self,
-        job_ids: &[JobId],
-        location_id: FileLocationId,
-    ) -> Result<bool, VoomError> {
-        let job_ids = job_ids
+        ticket_ids: &[voom_core::TicketId],
+    ) -> Result<Vec<FileLocationId>, VoomError> {
+        if ticket_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let ticket_ids = ticket_ids
             .iter()
             .map(|id| {
                 i64::try_from(id.0)
-                    .map_err(|error| VoomError::Internal(format!("job id conversion: {error}")))
+                    .map_err(|error| VoomError::Internal(format!("ticket id conversion: {error}")))
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let job_ids = serde_json::to_string(&job_ids)
-            .map_err(|error| VoomError::Internal(format!("cleanup job ids encode: {error}")))?;
-        let location_id = i64::try_from(location_id.0).map_err(|error| {
-            VoomError::Internal(format!("cleanup location id conversion: {error}"))
-        })?;
-        let exists: i64 = sqlx::query_scalar(
-            "SELECT EXISTS( \
-                 SELECT 1 FROM artifact_commit_records AS commits \
-                 JOIN tickets \
-                   ON json_extract(tickets.result, '$.commit_record_id') = commits.id \
-                 WHERE commits.result_file_location_id = ? \
-                   AND commits.state = 'committed' \
-                   AND tickets.job_id IN (SELECT value FROM json_each(?)) \
-                   AND json_extract(tickets.result, '$.commit_record_id') = commits.id \
-             )",
+        let ticket_ids = serde_json::to_string(&ticket_ids)
+            .map_err(|error| VoomError::Internal(format!("cleanup ticket ids encode: {error}")))?;
+        let rows: Vec<(i64,)> = sqlx::query_as(
+            "SELECT commits.result_file_location_id \
+             FROM tickets \
+             JOIN artifact_commit_records AS commits \
+               ON json_extract(tickets.result, '$.commit_record_id') = commits.id \
+             WHERE tickets.id IN (SELECT value FROM json_each(?)) \
+               AND tickets.state = 'succeeded' \
+               AND commits.state = 'committed' \
+               AND commits.result_file_location_id IS NOT NULL \
+               AND json_extract(tickets.result, '$.result_file_location_id') = \
+                   commits.result_file_location_id \
+             ORDER BY tickets.id ASC",
         )
-        .bind(location_id)
-        .bind(job_ids)
-        .fetch_one(&self.pool)
+        .bind(ticket_ids)
+        .fetch_all(&self.pool)
         .await
         .map_err(|error| VoomError::database_context("cleanup commit provenance", error))?;
-        Ok(exists != 0)
-    }
-
-    pub(super) async fn promotion_location_ids(
-        &self,
-        job_ids: &[JobId],
-        file_phases: &[FilePhaseSummary],
-    ) -> Result<Vec<FileLocationId>, VoomError> {
-        let mut seen = HashSet::new();
-        let mut location_ids = Vec::new();
-        for row in file_phases {
-            if row.outcome != FilePhaseOutcome::Committed {
-                continue;
-            }
-            let Some(location_id) = row.produced_file_location_id else {
-                continue;
-            };
-            if seen.insert(location_id) {
-                location_ids.push(location_id);
-            }
-        }
-        for &job_id in job_ids {
-            for location_id in self.ticket_result_location_ids(job_id).await? {
-                if seen.insert(location_id) {
-                    location_ids.push(location_id);
-                }
-            }
-        }
-        Ok(location_ids)
+        rows.into_iter()
+            .map(|(id,)| {
+                u64::try_from(id).map(FileLocationId).map_err(|error| {
+                    VoomError::Internal(format!("cleanup location id conversion: {error}"))
+                })
+            })
+            .collect()
     }
 
     pub(super) async fn promotion_location_ids_for_branches(

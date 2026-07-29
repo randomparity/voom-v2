@@ -582,25 +582,6 @@ impl ControlPlane {
         })
     }
 
-    pub(super) async fn ticket_result_location_ids(
-        &self,
-        job_id: JobId,
-    ) -> Result<Vec<FileLocationId>, VoomError> {
-        let ticket_ids: Vec<(i64,)> =
-            sqlx::query_as("SELECT id FROM tickets WHERE job_id = ? ORDER BY id ASC")
-                .bind(sqlite_i64(job_id.0, "promotion job id")?)
-                .fetch_all(&self.pool)
-                .await
-                .map_err(|error| VoomError::database_context("promotion job tickets", error))?;
-        let ticket_ids = ticket_ids
-            .into_iter()
-            .map(|(id,)| sqlite_u64(id, "promotion ticket id"))
-            .map(|result| result.map(TicketId))
-            .collect::<Result<Vec<_>, _>>()?;
-        self.ticket_result_location_ids_for_tickets(&ticket_ids)
-            .await
-    }
-
     pub(super) async fn ticket_result_location_ids_for_tickets(
         &self,
         ticket_ids: &[TicketId],

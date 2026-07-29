@@ -56,7 +56,6 @@ where
         cp,
         super::PhaseLoopInputs {
             job_id: job.id,
-            promotion_job_ids: vec![job.id],
             policy,
             context,
             base_draft,
@@ -91,7 +90,6 @@ where
 
 async fn run_prepared_resume_after_phase_plan<F, Fut>(
     cp: &crate::ControlPlane,
-    prior_job_id: JobId,
     inputs: super::PreparedResumeRunInputs,
     options: ComplianceExecutionOptions,
     runtimes: crate::workflow::WorkerRuntimeRegistry,
@@ -131,7 +129,6 @@ where
             base_draft,
             files,
             seed_file_phases: seed_file_phases.clone(),
-            promotion_job_ids: vec![job.id, prior_job_id],
             options,
             runtimes,
         },
@@ -922,7 +919,6 @@ async fn superseded_prepared_resume_rejects_dispatch_without_mutating_prior_work
     let promotion_cp = cp.clone();
     let error = run_prepared_resume_after_phase_plan(
         &cp,
-        prior_job_id,
         prepared,
         ComplianceExecutionOptions::default(),
         crate::workflow::WorkerRuntimeRegistry::new(),
@@ -1571,7 +1567,6 @@ async fn phase_planning_applies_each_files_modified_gate_decision() {
         &cp,
         super::PhaseLoopInputs {
             job_id: JobId(1),
-            promotion_job_ids: Vec::new(),
             policy,
             context: voom_plan::PlanningContext::default(),
             base_draft: file_draft(
@@ -1627,7 +1622,6 @@ async fn phase_planning_reports_zero_checks_when_no_files_pass_the_gate() {
         &cp,
         super::PhaseLoopInputs {
             job_id: JobId(1),
-            promotion_job_ids: Vec::new(),
             policy,
             context: voom_plan::PlanningContext::default(),
             base_draft: file_draft("gate-planning-none", &[files[0].snapshot.clone()]),
@@ -1794,7 +1788,6 @@ async fn admission_failure_drains_the_already_admitted_pipeline() {
     let result = cp
         .run_sliding_file_window(super::PhaseLoopInputs {
             job_id: job.id,
-            promotion_job_ids: vec![job.id],
             policy: prepared.policy,
             context: prepared.context,
             base_draft: prepared.base_draft,
@@ -1876,7 +1869,6 @@ async fn cancelled_sliding_job_admits_no_pending_files() {
     let result = cp
         .run_sliding_file_window(super::PhaseLoopInputs {
             job_id: job.id,
-            promotion_job_ids: vec![job.id],
             policy: prepared.policy,
             context: prepared.context,
             base_draft: prepared.base_draft,
@@ -2168,7 +2160,6 @@ async fn terminalizing_committed_branch_replays_through_resume_runner() {
 
     let outcome = cp
         .run_prepared_resume_phase_barrier(
-            prior,
             super::PreparedResumeRunInputs {
                 policy,
                 context: voom_plan::PlanningContext::default(),
@@ -2324,7 +2315,6 @@ async fn phase_outcome_matches_completion_rows_to_entered_branches() {
     }
     let inputs = super::PhaseLoopInputs {
         job_id: job.id,
-        promotion_job_ids: vec![job.id],
         policy: policy_with_on_error(None),
         context: voom_plan::PlanningContext::default(),
         base_draft: file_draft(
@@ -2757,7 +2747,7 @@ async fn durable_resume_counts(cp: &crate::ControlPlane) -> (i64, i64, i64, i64,
 }
 
 #[tokio::test]
-async fn zero_phase_promotion_failure_preserves_seed_file_phases() {
+async fn zero_phase_run_preserves_seed_file_phases_without_repromotion() {
     use crate::cases::policy::compliance::ComplianceExecutionOptions;
     use crate::workflow::execution::WorkerRuntimeRegistry;
 
@@ -2805,13 +2795,12 @@ async fn zero_phase_promotion_failure_preserves_seed_file_phases() {
     };
     let runner = cp.clone();
 
-    let err = cp
+    let outcome = cp
         .with_phase_barrier_job(move |job_id| {
             Box::pin(async move {
                 runner
                     .drive_phase_loop(super::PhaseLoopInputs {
                         job_id,
-                        promotion_job_ids: vec![job_id],
                         policy,
                         context,
                         base_draft,
@@ -2824,22 +2813,99 @@ async fn zero_phase_promotion_failure_preserves_seed_file_phases() {
             })
         })
         .await
-        .unwrap_err();
+        .unwrap();
 
     assert!(
-        err.source
-            .to_string()
-            .contains("promotion destination already exists"),
-        "unexpected error: {}",
-        err.source
+        artifact_path.is_file(),
+        "a completed zero-phase path must not re-promote a prior artifact"
     );
-    let Some(partial) = err.partial else {
-        panic!("promotion failure should preserve zero-phase seed rows");
+    assert_eq!(outcome.file_phases.len(), 1);
+    assert_eq!(outcome.file_phases[0].branch_id, "Movie");
+    assert_eq!(outcome.file_phases[0].outcome, FilePhaseOutcome::Committed);
+    assert_eq!(job_state(&cp, outcome.job_id).await, "succeeded");
+}
+
+#[tokio::test]
+async fn zero_survivor_resume_does_not_promote_blocked_branch() {
+    use crate::workflow::execution::WorkerRuntimeRegistry;
+
+    let (cp, _db) = cp().await;
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    let staging_root = root.join("stage");
+    let working = staging_root.join(".committed").join("transcode");
+    let out_dir = root.join("out");
+    std::fs::create_dir_all(&working).unwrap();
+    std::fs::create_dir_all(&out_dir).unwrap();
+    let artifact_path = working.join("Movie.phase-zero.mkv");
+    std::fs::write(&artifact_path, b"incomplete-phase-zero").unwrap();
+
+    let version = seed_version(
+        &cp,
+        &artifact_path.display().to_string(),
+        "hash-blocked-zero-survivor",
+        reprobe_payload("h264"),
+    )
+    .await;
+    let prior = open_workflow_job(&cp).await;
+    record_run_start(&cp, prior, "Movie", version, 0).await;
+    record_file_phase(
+        &cp,
+        prior,
+        0,
+        "Movie",
+        FilePhaseOutcome::Committed,
+        Some(version),
+    )
+    .await;
+    record_file_phase(&cp, prior, 1, "Movie", FilePhaseOutcome::Blocked, None).await;
+    cp.workflow_summaries()
+        .begin_file_terminalization(prior, "Movie")
+        .await
+        .unwrap();
+    cp.workflow_summaries()
+        .mark_file_terminal(prior, "Movie", T0)
+        .await
+        .unwrap();
+    let seed_file_phases = cp
+        .workflow_summaries()
+        .file_phases_for_job(prior)
+        .await
+        .unwrap();
+    let options = ComplianceExecutionOptions {
+        transcode_staging_root: staging_root,
+        transcode_target_dir: out_dir.clone(),
+        ..ComplianceExecutionOptions::default()
     };
-    assert_eq!(partial.file_phases.len(), 1);
-    assert_eq!(partial.file_phases[0].branch_id, "Movie");
-    assert_eq!(partial.file_phases[0].outcome, FilePhaseOutcome::Committed);
-    assert_eq!(job_state(&cp, partial.job_id).await, "failed");
+    let runner = cp.clone();
+
+    cp.with_phase_barrier_job(move |job_id| {
+        Box::pin(async move {
+            runner
+                .drive_phase_loop(super::PhaseLoopInputs {
+                    job_id,
+                    policy: policy_with_on_error(None),
+                    context: voom_plan::PlanningContext::default(),
+                    base_draft: file_draft("blocked-zero-survivor", &[]),
+                    files: Vec::new(),
+                    seed_file_phases,
+                    options,
+                    runtimes: WorkerRuntimeRegistry::new(),
+                })
+                .await
+        })
+    })
+    .await
+    .unwrap();
+
+    assert!(
+        artifact_path.is_file(),
+        "a terminal blocked branch must keep its withheld intermediate"
+    );
+    assert!(
+        !out_dir.join("Movie.phase-zero.mkv").exists(),
+        "a zero-survivor resume must not publish a blocked branch"
+    );
 }
 
 #[tokio::test]
@@ -3131,7 +3197,10 @@ async fn promotion_location_ids_rejects_negative_ticket_result_location_id() {
     .await
     .unwrap();
 
-    let err = cp.promotion_location_ids(&[job.id], &[]).await.unwrap_err();
+    let err = cp
+        .ticket_result_location_ids_for_tickets(&[ticket.id])
+        .await
+        .unwrap_err();
 
     assert_eq!(err.code(), "DB_UNREACHABLE");
     assert!(
@@ -3424,37 +3493,7 @@ async fn promote_terminal_artifacts_skips_non_tip_scoped_locations() {
 }
 
 #[tokio::test]
-async fn promotion_location_ids_include_prior_job_ticket_results() {
-    let (cp, _db) = cp().await;
-    let current = cp
-        .open_job(NewJob {
-            kind: "synthetic.workflow".to_owned(),
-            priority: 0,
-            created_at: T0,
-        })
-        .await
-        .unwrap();
-    let prior = cp
-        .open_job(NewJob {
-            kind: "synthetic.workflow".to_owned(),
-            priority: 0,
-            created_at: T0,
-        })
-        .await
-        .unwrap();
-    seed_succeeded_result_ticket(&cp, prior.id, FileLocationId(101)).await;
-    seed_succeeded_result_ticket(&cp, current.id, FileLocationId(202)).await;
-
-    let location_ids = cp
-        .promotion_location_ids(&[current.id, prior.id], &[])
-        .await
-        .unwrap();
-
-    assert_eq!(location_ids, vec![FileLocationId(202), FileLocationId(101)]);
-}
-
-#[tokio::test]
-async fn promotion_location_ids_include_every_ordered_extract_output() {
+async fn branch_promotion_ids_include_every_ordered_extract_output() {
     let (cp, _db) = cp().await;
     let job = cp
         .open_job(NewJob {
@@ -3464,20 +3503,55 @@ async fn promotion_location_ids_include_every_ordered_extract_output() {
         })
         .await
         .unwrap();
-    seed_succeeded_result_ticket_value(
-        &cp,
-        job.id,
-        json!({
+    let ticket = cp
+        .create_ticket(NewTicket {
+            job_id: Some(job.id),
+            kind: TicketOperation::new("synthetic.workflow.operation.extract").unwrap(),
+            priority: 0,
+            payload: json!({}),
+            max_attempts: 1,
+            created_at: T0,
+        })
+        .await
+        .unwrap();
+    sqlx::query(
+        "UPDATE tickets SET state = 'succeeded', result = ?, state_changed_at = ?, \
+         epoch = epoch + 1 WHERE id = ?",
+    )
+    .bind(
+        serde_json::to_string(&json!({
             "result_file_location_id": 101,
             "outputs": [
                 {"result_file_location_id": 101},
                 {"result_file_location_id": 102}
             ]
-        }),
+        }))
+        .unwrap(),
     )
-    .await;
+    .bind(T0.format(&Iso8601::DEFAULT).unwrap())
+    .bind(i64::try_from(ticket.id.0).unwrap())
+    .execute(&cp.pool)
+    .await
+    .unwrap();
+    let rows = vec![voom_store::repo::workflow_summaries::FilePhaseSummary {
+        id: 1,
+        job_id: job.id,
+        phase_ordinal: 0,
+        branch_id: "movie".to_owned(),
+        ticket_ids: vec![ticket.id],
+        produced_file_version_id: Some(FileVersionId(1)),
+        produced_file_location_id: Some(FileLocationId(101)),
+        artifact_handle_id: None,
+        artifact_verification_id: None,
+        reprobe_snapshot_id: Some(voom_core::MediaSnapshotId(1)),
+        outcome: FilePhaseOutcome::Committed,
+        created_at: T0,
+    }];
 
-    let location_ids = cp.promotion_location_ids(&[job.id], &[]).await.unwrap();
+    let location_ids = cp
+        .promotion_location_ids_for_branches(&rows, &["movie".to_owned()])
+        .await
+        .unwrap();
 
     assert_eq!(location_ids, vec![FileLocationId(101), FileLocationId(102)]);
 }
@@ -3539,45 +3613,4 @@ async fn live_location_id(cp: &crate::ControlPlane, version: FileVersionId) -> F
         .next()
         .unwrap()
         .id
-}
-
-async fn seed_succeeded_result_ticket(
-    cp: &crate::ControlPlane,
-    job_id: JobId,
-    result_file_location_id: FileLocationId,
-) {
-    seed_succeeded_result_ticket_value(
-        cp,
-        job_id,
-        json!({"result_file_location_id": result_file_location_id.0}),
-    )
-    .await;
-}
-
-async fn seed_succeeded_result_ticket_value(
-    cp: &crate::ControlPlane,
-    job_id: JobId,
-    result: serde_json::Value,
-) {
-    let ticket = cp
-        .create_ticket(NewTicket {
-            job_id: Some(job_id),
-            kind: TicketOperation::new("synthetic.workflow.operation.test").unwrap(),
-            priority: 0,
-            payload: json!({}),
-            max_attempts: 1,
-            created_at: T0,
-        })
-        .await
-        .unwrap();
-    sqlx::query(
-        "UPDATE tickets SET state = 'succeeded', result = ?, state_changed_at = ?, \
-         epoch = epoch + 1 WHERE id = ?",
-    )
-    .bind(serde_json::to_string(&result).unwrap())
-    .bind(T0.format(&Iso8601::DEFAULT).unwrap())
-    .bind(i64::try_from(ticket.id.0).unwrap())
-    .execute(&cp.pool)
-    .await
-    .unwrap();
 }
