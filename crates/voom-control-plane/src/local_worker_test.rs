@@ -4,9 +4,10 @@
 //! `tests/local_worker_lifecycle.rs`.
 
 use super::{
-    LocalWorkerKind, NvidiaLocalWorkerConfig, is_full_nvidia_uuid, kill_and_wait,
-    process_group_has_members, validate_local_worker_config,
+    LocalWorkerKind, NvidiaLocalWorkerConfig, is_full_nvidia_uuid, validate_local_worker_config,
 };
+#[cfg(target_os = "linux")]
+use super::{kill_and_wait, process_group_has_members};
 use voom_core::TicketOperation;
 
 #[test]
