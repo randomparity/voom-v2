@@ -1,10 +1,10 @@
 use voom_core::{OperationKind, PROTOCOL_VERSION, TicketOperation, VoomError};
 use voom_policy::{CompiledOperation, CompiledPolicy, PolicyTool, VideoProfileRef};
 use voom_store::repo::workers::{Worker, WorkerKind, WorkerStatus};
-use voom_worker_protocol::NvidiaVideoAcceleratorDescriptor;
 
 use crate::ControlPlane;
 use crate::cases::{begin_immediate_tx, commit_tx};
+use crate::video_hardware::candidate_accelerator_descriptor;
 use crate::workflow::WorkerRuntimeRegistry;
 
 const FFMPEG_NAME: &str = "local-ffmpeg";
@@ -93,16 +93,16 @@ impl ControlPlane {
             if runtimes.get_optional(candidate.worker_id).is_none() {
                 continue;
             }
-            let descriptor = candidate.capability_extra.iter().find_map(|extra| {
-                extra
-                    .get("accelerator")
-                    .cloned()
-                    .and_then(|value| serde_json::from_value(value).ok())
-            });
+            let descriptor = candidate_accelerator_descriptor(&candidate)?;
             match descriptor {
                 Some(descriptor) => {
-                    let descriptor: NvidiaVideoAcceleratorDescriptor = descriptor;
-                    nvidia_available |= descriptor.encoders.contains(&"hevc_nvenc".to_owned());
+                    let has_encoder = descriptor
+                        .encoders
+                        .iter()
+                        .any(|encoder| encoder == "hevc_nvenc");
+                    let has_decoder =
+                        !requirements.nvidia_decode || !descriptor.decoders.is_empty();
+                    nvidia_available |= has_encoder && has_decoder;
                 }
                 None if candidate.hardware.is_empty() => software_available = true,
                 None => {}
@@ -117,12 +117,16 @@ impl ControlPlane {
             );
         }
         if requirements.nvidia && !nvidia_available {
-            missing.push(
-                "hevc_nvenc profiles require a live NVIDIA-bound ffmpeg worker; \
+            let decoder = if requirements.nvidia_decode {
+                " with at least one advertised CUVID decoder"
+            } else {
+                ""
+            };
+            missing.push(format!(
+                "hevc_nvenc profiles require a live NVIDIA-bound ffmpeg worker{decoder}; \
                  start one with: voom worker run-local --kind ffmpeg \
                  --nvidia-device GPU-<uuid>"
-                    .to_owned(),
-            );
+            ));
         }
         if missing.is_empty() {
             return Ok(());
@@ -283,6 +287,7 @@ impl ControlPlane {
 struct VideoBackendRequirements {
     software: bool,
     nvidia: bool,
+    nvidia_decode: bool,
 }
 
 fn policy_video_backend_requirements(
@@ -317,6 +322,21 @@ fn collect_video_backend_requirements(
                     })?;
                 if encoder == "hevc_nvenc" {
                     requirements.nvidia = true;
+                    let decode = operation
+                        .resolved_profile
+                        .as_ref()
+                        .map(|profile| &profile.decode)
+                        .or(match &operation.profile {
+                            VideoProfileRef::Inline(settings) => Some(&settings.decode),
+                            VideoProfileRef::Named(_) => None,
+                        })
+                        .ok_or_else(|| {
+                            VoomError::PolicyExecution(
+                                "video hardware preflight requires resolved named profiles"
+                                    .to_owned(),
+                            )
+                        })?;
+                    requirements.nvidia_decode |= decode.is_nvidia();
                 } else {
                     requirements.software = true;
                 }

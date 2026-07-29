@@ -135,9 +135,28 @@ const HEVC_NVENC: EncoderDescriptor = EncoderDescriptor {
 
 const DESCRIPTORS: &[EncoderDescriptor] = &[X265, SVTAV1, LIBAOM, HEVC_NVENC];
 
+pub const NVIDIA_VIDEO_DECODERS: &[(&str, &str)] = &[
+    ("h264", "h264_cuvid"),
+    ("hevc", "hevc_cuvid"),
+    ("av1", "av1_cuvid"),
+];
+
 #[must_use]
 pub fn encoder_descriptor(encoder: &str) -> Option<&'static EncoderDescriptor> {
     DESCRIPTORS.iter().find(|d| d.encoder == encoder)
+}
+
+#[must_use]
+pub fn nvidia_decoder_for_video_codec(codec: &str) -> Option<&'static str> {
+    let codec = if codec.eq_ignore_ascii_case("h265") {
+        "hevc"
+    } else {
+        codec
+    };
+    NVIDIA_VIDEO_DECODERS
+        .iter()
+        .find(|(candidate, _)| codec.eq_ignore_ascii_case(candidate))
+        .map(|(_, decoder)| *decoder)
 }
 
 impl EncoderDescriptor {

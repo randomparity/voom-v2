@@ -26,7 +26,8 @@ pub mod config {
 
 pub mod encoder_caps {
     pub use crate::media::encoder_caps::{
-        EncoderDescriptor, PresetDomain, QualityDomain, VideoEncoderBackend, encoder_descriptor,
+        EncoderDescriptor, NVIDIA_VIDEO_DECODERS, PresetDomain, QualityDomain, VideoEncoderBackend,
+        encoder_descriptor, nvidia_decoder_for_video_codec,
     };
 }
 
@@ -89,7 +90,8 @@ pub mod version {
 pub use clock::{Clock, SystemClock, format_iso8601};
 pub use config::{Config, EnvSource, LogFormat, MapEnv, ProcessEnv};
 pub use encoder_caps::{
-    EncoderDescriptor, PresetDomain, QualityDomain, VideoEncoderBackend, encoder_descriptor,
+    EncoderDescriptor, NVIDIA_VIDEO_DECODERS, PresetDomain, QualityDomain, VideoEncoderBackend,
+    encoder_descriptor, nvidia_decoder_for_video_codec,
 };
 pub use error::{ErrorCode, VoomError};
 pub use failure::{FailureClass, FailureRetryClass};

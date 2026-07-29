@@ -128,7 +128,6 @@ fn transcode_video_shape(
             "snapshot video codec is unknown".to_owned(),
         );
     };
-
     let needs_change = match transcode_video_needs_change(
         snapshot,
         resolved,
@@ -139,6 +138,14 @@ fn transcode_video_shape(
         Ok(needs_change) => needs_change,
         Err(shape) => return shape,
     };
+    if needs_change
+        && resolved.decode.is_nvidia()
+        && voom_core::nvidia_decoder_for_video_codec(video_codec).is_none()
+    {
+        return TranscodeVideoShape::UnsupportedShape(format!(
+            "NVIDIA decode does not support source video codec `{video_codec}`"
+        ));
+    }
 
     if target_container.eq_ignore_ascii_case(voom_core::TRANSCODE_VIDEO_CONTAINER_MP4)
         && let Some(shape) = mp4_gate_shape(snapshot)

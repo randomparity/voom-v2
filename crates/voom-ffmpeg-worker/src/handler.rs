@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use serde::{Serialize, de::DeserializeOwned};
 use time::OffsetDateTime;
-use voom_core::{ErrorCode, FailureClass, LeaseId};
+use voom_core::{ErrorCode, FailureClass, LeaseId, nvidia_decoder_for_video_codec};
 use voom_worker_protocol::{
     AudioExpectedFacts, AudioObservedFacts, ExtractAudioOutputDescriptor, ExtractAudioOutputResult,
     ExtractAudioRequest, ExtractAudioResult, ExtractAudioStatus, OperationDispatch,
@@ -757,10 +757,16 @@ fn validate_video_hardware_binding(
             ),
         ));
     }
-    let decoder = nvidia_decoder_for_source(source_codec);
-    if request.profile.decode.is_nvidia()
-        && !accelerator.decoders.iter().any(|item| item == decoder)
-    {
+    if !request.profile.decode.is_nvidia() {
+        return Ok(());
+    }
+    let Some(decoder) = nvidia_decoder_for_video_codec(source_codec) else {
+        return Err(config_invalid(
+            "transcode_video",
+            format!("NVIDIA decode does not support source codec `{source_codec}`"),
+        ));
+    };
+    if !accelerator.decoders.iter().any(|item| item == decoder) {
         return Err(config_invalid(
             "transcode_video",
             format!(
@@ -770,15 +776,6 @@ fn validate_video_hardware_binding(
         ));
     }
     Ok(())
-}
-
-fn nvidia_decoder_for_source(source_codec: &str) -> &str {
-    match source_codec {
-        "h264" => "h264_cuvid",
-        "hevc" | "h265" => "hevc_cuvid",
-        "av1" => "av1_cuvid",
-        _ => "<unsupported>",
-    }
 }
 
 fn validate_request_contract(request: &TranscodeVideoRequest) -> Result<(), TranscodeVideoError> {

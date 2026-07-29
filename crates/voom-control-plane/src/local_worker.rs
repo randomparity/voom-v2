@@ -175,12 +175,53 @@ impl ControlPlane {
             .await
         {
             Ok(running) => Ok(running),
-            Err(err) => {
-                let now = self.clock().now();
-                let _ = self.retire_worker(worker.id, worker.epoch, now).await;
-                Err(err)
+            Err(error) => Err(self
+                .retire_failed_worker(&worker, nvidia.as_ref(), error)
+                .await),
+        }
+    }
+
+    async fn retire_failed_worker(
+        &self,
+        worker: &voom_store::repo::workers::Worker,
+        nvidia: Option<&NvidiaLocalWorkerConfig>,
+        source: VoomError,
+    ) -> VoomError {
+        if let Some(config) = nvidia {
+            let token = format!("nvidia:{}", config.device_uuid);
+            let claims = SqliteAcceleratorClaimRepo::new(self.pool.clone());
+            let claim = match claims.get(&token).await {
+                Ok(claim) => claim,
+                Err(error) => {
+                    return cleanup_failure_with_retained_claim(&token, &source, &error);
+                }
+            };
+            if let Some(claim) = claim.filter(|claim| claim.worker_id == worker.id) {
+                match process_group_has_members(claim.process_group_id) {
+                    Ok(false) => {}
+                    Ok(true) => {
+                        let error = VoomError::WorkerCrash(format!(
+                            "process group {} still has live members",
+                            claim.process_group_id
+                        ));
+                        return cleanup_failure_with_retained_claim(&token, &source, &error);
+                    }
+                    Err(error) => {
+                        return cleanup_failure_with_retained_claim(&token, &source, &error);
+                    }
+                }
             }
         }
+        if let Err(error) = self
+            .retire_worker(worker.id, worker.epoch, self.clock().now())
+            .await
+        {
+            return VoomError::WorkerCrash(format!(
+                "{source}; retiring failed local worker {} also failed: {error}",
+                worker.id.0
+            ));
+        }
+        source
     }
 
     async fn recover_nvidia_claim(
@@ -311,24 +352,19 @@ impl ControlPlane {
             let claim = match claim {
                 Ok(claim) => claim,
                 Err(error) => {
-                    kill_and_wait(&mut child).await;
-                    return Err(error);
+                    return Err(kill_and_wait_on_error(&mut child, error).await);
                 }
             };
             let claim_result = SqliteAcceleratorClaimRepo::new(self.pool.clone())
                 .claim_in_tx(&mut tx, claim)
                 .await;
             if let Err(error) = claim_result {
-                kill_and_wait(&mut child).await;
-                return Err(error);
+                return Err(kill_and_wait_on_error(&mut child, error).await);
             }
         }
         if let Err(error) = tx.commit().await {
-            kill_and_wait(&mut child).await;
-            return Err(VoomError::database_context(
-                "commit local worker registration",
-                error,
-            ));
+            let error = VoomError::database_context("commit local worker registration", error);
+            return Err(kill_and_wait_on_error(&mut child, error).await);
         }
         Ok((worker, child))
     }
@@ -366,8 +402,7 @@ impl ControlPlane {
         let (stdin, bound) = match startup {
             Ok(startup) => startup,
             Err(error) => {
-                kill_and_wait(&mut child).await;
-                return Err(error);
+                return Err(kill_and_wait_on_error(&mut child, error).await);
             }
         };
 
@@ -718,9 +753,15 @@ fn process_group_for_pid(pid: u32) -> Result<Option<u32>, VoomError> {
     let (_, fields) = stat.rsplit_once(") ").ok_or_else(|| {
         VoomError::WorkerCrash(format!("malformed /proc/{pid}/stat process group"))
     })?;
+    let mut fields = fields.split_whitespace();
+    let state = fields
+        .next()
+        .ok_or_else(|| VoomError::WorkerCrash(format!("/proc/{pid}/stat omitted process state")))?;
+    if state == "Z" {
+        return Ok(None);
+    }
     fields
-        .split_whitespace()
-        .nth(2)
+        .nth(1)
         .ok_or_else(|| VoomError::WorkerCrash(format!("/proc/{pid}/stat omitted process group")))?
         .parse::<u32>()
         .map(Some)
@@ -729,9 +770,70 @@ fn process_group_for_pid(pid: u32) -> Result<Option<u32>, VoomError> {
         })
 }
 
-async fn kill_and_wait(child: &mut Child) {
-    let _kill = child.kill().await;
-    let _status = child.wait().await;
+async fn kill_and_wait_on_error(child: &mut Child, source: VoomError) -> VoomError {
+    match kill_and_wait(child).await {
+        Ok(()) => source,
+        Err(cleanup) => VoomError::WorkerCrash(format!(
+            "{source}; local worker process-group cleanup also failed: {cleanup}"
+        )),
+    }
+}
+
+async fn kill_and_wait(child: &mut Child) -> Result<(), VoomError> {
+    let process_group_id = child.id();
+    if let Some(process_group_id) = process_group_id {
+        let _ = signal_process_group(process_group_id, "TERM").await;
+    }
+    match timeout(SHUTDOWN_TIMEOUT, child.wait()).await {
+        Ok(Ok(_status)) => {}
+        Ok(Err(error)) => {
+            return Err(VoomError::WorkerCrash(format!(
+                "reaping terminated local worker: {error}"
+            )));
+        }
+        Err(_) => {
+            if let Some(process_group_id) = process_group_id {
+                if signal_process_group(process_group_id, "KILL")
+                    .await
+                    .is_err()
+                {
+                    child.kill().await.map_err(|error| {
+                        VoomError::WorkerCrash(format!("killing local worker: {error}"))
+                    })?;
+                }
+            } else {
+                child.kill().await.map_err(|error| {
+                    VoomError::WorkerCrash(format!("killing local worker: {error}"))
+                })?;
+            }
+            child.wait().await.map_err(|error| {
+                VoomError::WorkerCrash(format!("reaping killed local worker: {error}"))
+            })?;
+        }
+    }
+    let Some(process_group_id) = process_group_id else {
+        return Ok(());
+    };
+    if process_group_has_members(process_group_id)? {
+        signal_process_group(process_group_id, "KILL").await?;
+        if !wait_for_empty_process_group(process_group_id).await? {
+            return Err(VoomError::WorkerCrash(format!(
+                "process group {process_group_id} remained populated after worker cleanup"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn cleanup_failure_with_retained_claim(
+    token: &str,
+    source: &VoomError,
+    cleanup: &VoomError,
+) -> VoomError {
+    VoomError::WorkerCrash(format!(
+        "{source}; cleanup could not prove the prior process group dead: {cleanup}; \
+         accelerator claim `{token}` was retained"
+    ))
 }
 
 #[cfg(test)]

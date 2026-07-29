@@ -6,6 +6,7 @@ use std::{
     thread,
     time::Duration,
 };
+use voom_core::NVIDIA_VIDEO_DECODERS;
 
 const PROBE_TIMEOUT: Duration = Duration::from_secs(15);
 const IDENTITY_POLL_WINDOW: Duration = Duration::from_secs(2);
@@ -293,7 +294,6 @@ fn probe_nvidia_identity(
 fn require_nvidia_build_features(ffmpeg_path: &Path) -> Result<(), FFmpegPreflightError> {
     for (flag, required) in [
         ("-encoders", &["hevc_nvenc"][..]),
-        ("-decoders", &["h264_cuvid", "hevc_cuvid", "av1_cuvid"][..]),
         ("-filters", &["hwupload_cuda", "scale_cuda"][..]),
     ] {
         let text = command_text(
@@ -377,7 +377,14 @@ fn run_identity_attempt(
                 String::from_utf8_lossy(&output.stderr).trim()
             )));
         }
-        if let Some(uuid) = query_compute_uuid(config, pid)? {
+        let uuid = match query_compute_uuid(config, pid) {
+            Ok(uuid) => uuid,
+            Err(error) => {
+                kill_and_reap(&mut child);
+                return Err(error);
+            }
+        };
+        if let Some(uuid) = uuid {
             if uuid == config.device_uuid {
                 let output = wait_child_output(child, PROBE_TIMEOUT, "NVENC identity encode")?;
                 command_text("NVENC identity encode", Ok(output))?;
@@ -453,16 +460,23 @@ fn probe_nvidia_decoders(
     config: &NvidiaPreflightConfig,
 ) -> Result<(Vec<String>, Vec<String>), FFmpegPreflightError> {
     let probe_dir = DecoderProbeDir::new()?;
-    let fixtures = [
-        ("h264_cuvid", "libx264", probe_dir.path.join("h264.mkv")),
-        ("hevc_cuvid", "libx265", probe_dir.path.join("hevc.mkv")),
-        ("av1_cuvid", "libsvtav1", probe_dir.path.join("av1.mkv")),
-    ];
     let mut decoders = Vec::new();
     let mut diagnostics = Vec::new();
-    for (decoder, encoder, fixture) in &fixtures {
-        create_decoder_fixture(ffmpeg_path, encoder, fixture)?;
-        match run_decoder_smoke(ffmpeg_path, config, decoder, fixture) {
+    for (codec, decoder) in NVIDIA_VIDEO_DECODERS {
+        let encoder = if *codec == "h264" {
+            "libx264"
+        } else if *codec == "hevc" {
+            "libx265"
+        } else if *codec == "av1" {
+            "libsvtav1"
+        } else {
+            return Err(FFmpegPreflightError::Failed(format!(
+                "NVIDIA decoder probe has no fixture encoder for `{codec}`"
+            )));
+        };
+        let fixture = probe_dir.path.join(format!("{codec}.mkv"));
+        create_decoder_fixture(ffmpeg_path, encoder, &fixture)?;
+        match run_decoder_smoke(ffmpeg_path, config, decoder, &fixture) {
             Ok(()) => decoders.push((*decoder).to_owned()),
             Err(error) => diagnostics.push(format!("{decoder}: {error}")),
         }
@@ -567,15 +581,23 @@ fn prove_nvidia_capacity(
             "-",
         ]);
         command.stdout(Stdio::piped()).stderr(Stdio::piped());
-        children.push(command.spawn().map_err(|error| {
-            FFmpegPreflightError::Failed(format!(
-                "NVENC concurrency probe failed to start: {error}"
-            ))
-        })?);
+        match command.spawn() {
+            Ok(child) => children.push(child),
+            Err(error) => {
+                kill_and_reap_all(&mut children);
+                return Err(FFmpegPreflightError::Failed(format!(
+                    "NVENC concurrency probe failed to start: {error}"
+                )));
+            }
+        }
     }
-    for child in children {
-        let output = wait_child_output(child, PROBE_TIMEOUT, "NVENC concurrency probe")?;
-        command_text("NVENC concurrency probe", Ok(output))?;
+    while let Some(child) = children.pop() {
+        let result = wait_child_output(child, PROBE_TIMEOUT, "NVENC concurrency probe")
+            .and_then(|output| command_text("NVENC concurrency probe", Ok(output)));
+        if let Err(error) = result {
+            kill_and_reap_all(&mut children);
+            return Err(error);
+        }
     }
     Ok(())
 }
@@ -752,6 +774,13 @@ fn wait_child_output_io(mut child: Child, deadline: Duration, label: &str) -> io
 fn kill_and_reap(child: &mut Child) {
     let _ = child.kill();
     let _ = child.wait();
+}
+
+fn kill_and_reap_all(children: &mut Vec<Child>) {
+    for child in &mut *children {
+        kill_and_reap(child);
+    }
+    children.clear();
 }
 
 fn is_text_file_busy(err: &io::Error) -> bool {

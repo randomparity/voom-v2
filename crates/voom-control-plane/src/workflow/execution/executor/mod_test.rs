@@ -4360,9 +4360,12 @@ fn accelerator_unavailable_clocks_are_independent_and_reset_by_token() {
     dispatch
         .recovered_accelerators
         .insert("nvidia:GPU-a".to_owned());
+    dispatch
+        .recovered_accelerators
+        .insert("nvidia:GPU-b".to_owned());
     state.update_accelerator_waits(&dispatch);
 
     assert!(!state.accelerator_wait_started.contains_key("nvidia:GPU-a"));
-    assert!(state.accelerator_wait_started.contains_key("nvidia:GPU-b"));
+    assert!(!state.accelerator_wait_started.contains_key("nvidia:GPU-b"));
     assert_eq!(state.timed_out_accelerator(Duration::from_secs(10)), None);
 }

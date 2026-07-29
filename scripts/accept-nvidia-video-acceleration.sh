@@ -40,8 +40,11 @@ ffmpeg \
 	-pix_fmt yuv420p \
 	"$task_tmp/source-h264.mkv"
 
-for device_uuid in "$@"; do
+accept_device() {
+	local device_uuid=$1
+
 	nvidia-smi -i "$device_uuid" --query-gpu=uuid,name,driver_version --format=csv,noheader
+	local bound
 	bound=$(
 		env \
 			VOOM_WORKER_ID=1 \
@@ -106,6 +109,25 @@ for device_uuid in "$@"; do
 			exit 1
 		fi
 	done
+}
+
+device_uuids=("$@")
+acceptance_pids=()
+for device_uuid in "${device_uuids[@]}"; do
+	accept_device "$device_uuid" >"$task_tmp/$device_uuid.log" 2>&1 &
+	acceptance_pids+=("$!")
 done
+
+acceptance_failed=0
+for index in "${!acceptance_pids[@]}"; do
+	device_uuid=${device_uuids[$index]}
+	if ! wait "${acceptance_pids[$index]}"; then
+		acceptance_failed=1
+	fi
+	cat "$task_tmp/$device_uuid.log"
+done
+if ((acceptance_failed != 0)); then
+	exit 1
+fi
 
 echo "NVIDIA video acceleration acceptance passed for $# device(s)"

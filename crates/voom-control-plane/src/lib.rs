@@ -65,6 +65,7 @@ mod operation_source;
 mod remux;
 pub mod scan;
 mod transcode;
+mod video_hardware;
 pub(crate) mod worker_process;
 mod workflow;
 
@@ -82,8 +83,8 @@ pub mod policy {
         ComplianceApplyData, ComplianceAudioExtractOutput, ComplianceAudioSynthesisCompanion,
         ComplianceExecuteData, ComplianceExecuteError, ComplianceExecutionOptions,
         ComplianceLegacyAudioExtractOutput, ComplianceReportData, ComplianceRunReportData,
-        DEFAULT_MAX_IN_FLIGHT_FILES, FilePhaseSummaryView, IssueApplicationSummary,
-        PhaseSummaryView, WorkflowSummaryView,
+        DEFAULT_ACCELERATOR_UNAVAILABLE_TIMEOUT_SECONDS, DEFAULT_MAX_IN_FLIGHT_FILES,
+        FilePhaseSummaryView, IssueApplicationSummary, PhaseSummaryView, WorkflowSummaryView,
     };
     pub use crate::cases::policy::policies::PolicyMutationError;
     pub use crate::cases::policy::policy_inputs::{

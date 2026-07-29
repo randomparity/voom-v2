@@ -41,7 +41,7 @@ fn software_requirement_excludes_device_bound_workers() {
     let conflicts = HashSet::new();
 
     assert_eq!(
-        compatible_assignment(&software_candidate(1), Some(&requirement), &conflicts),
+        compatible_assignment(&software_candidate(1), Some(&requirement), &conflicts).unwrap(),
         CandidateCompatibility::Compatible(None)
     );
     assert_eq!(
@@ -49,7 +49,8 @@ fn software_requirement_excludes_device_bound_workers() {
             &nvidia_candidate(2, "nvidia:GPU-a", 2, &["h264_cuvid"]),
             Some(&requirement),
             &conflicts,
-        ),
+        )
+        .unwrap(),
         CandidateCompatibility::Incompatible
     );
 }
@@ -67,11 +68,11 @@ fn nvidia_requirement_requires_exact_encoder_and_decoder() {
     );
 
     assert_eq!(
-        compatible_assignment(&without_av1, Some(&requirement), &conflicts),
+        compatible_assignment(&without_av1, Some(&requirement), &conflicts).unwrap(),
         CandidateCompatibility::Incompatible
     );
     assert_eq!(
-        compatible_assignment(&with_av1, Some(&requirement), &conflicts),
+        compatible_assignment(&with_av1, Some(&requirement), &conflicts).unwrap(),
         CandidateCompatibility::Compatible(Some(VideoHardwareAssignment::nvidia(
             "nvidia:GPU-b",
             "GPU-b"
@@ -87,9 +88,29 @@ fn conflicting_capacity_declarations_quarantine_the_token() {
         nvidia_candidate(3, "nvidia:GPU-b", 2, &["h264_cuvid"]),
     ];
 
-    let conflicts = conflicting_accelerator_tokens(&candidates);
+    let conflicts = conflicting_accelerator_tokens(&candidates).unwrap();
 
     assert_eq!(conflicts, HashSet::from(["nvidia:GPU-a".to_owned()]));
+}
+
+#[test]
+fn malformed_accelerator_descriptor_fails_candidate_projection() {
+    let candidate = WorkerOperationCandidate {
+        worker_id: WorkerId(1),
+        active_leases: 0,
+        max_parallel: 1,
+        hardware: vec!["nvidia:GPU-a".to_owned()],
+        capability_extra: vec![serde_json::json!({"accelerator": {"hardware_token": 7}})],
+    };
+    let requirement = VideoHardwareRequirement::nvidia("hevc_nvenc", None);
+
+    let error = compatible_assignment(&candidate, Some(&requirement), &HashSet::new()).unwrap_err();
+
+    assert!(
+        error
+            .to_string()
+            .contains("malformed NVIDIA accelerator descriptor")
+    );
 }
 
 #[test]

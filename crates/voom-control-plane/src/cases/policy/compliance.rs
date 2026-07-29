@@ -20,9 +20,10 @@ use voom_worker_protocol::{HttpClient, WorkerCredentials};
 
 use crate::ControlPlane;
 use crate::cases::{append_event, begin_tx, commit_tx};
+use crate::local_worker::NVIDIA_STARTUP_TIMEOUT;
 use crate::workflow::WorkerRuntimeRegistry;
 use crate::workflow::execution::executor::{
-    OperationArtifactRoots, WorkflowArtifactRoots, WorkflowExecutorOptions,
+    OperationArtifactRoots, WorkflowArtifactRoots, WorkflowExecutorOptions, WorkflowQueueOptions,
 };
 use crate::workflow::ticket_results::{OrderedTicketResult, ordered_ticket_result};
 
@@ -572,12 +573,16 @@ impl From<voom_store::repo::artifacts::ArtifactVerification> for ArtifactVerific
 }
 
 pub const DEFAULT_MAX_IN_FLIGHT_FILES: usize = 4;
+pub const DEFAULT_ACCELERATOR_UNAVAILABLE_TIMEOUT_SECONDS: u64 = 15 * 60;
 
 #[derive(Debug, Clone)]
 pub struct ComplianceExecutionOptions {
     /// Maximum number of file pipelines admitted into the coordinator's
     /// staging-residency window at once.
     pub max_in_flight_files: usize,
+    /// Maximum time a ticket waits, without consuming an attempt, for a
+    /// previously advertised accelerator to become reachable again.
+    pub accelerator_unavailable_timeout: Duration,
     pub transcode_staging_root: PathBuf,
     pub transcode_target_dir: PathBuf,
     pub remux_staging_root: PathBuf,
@@ -600,6 +605,7 @@ impl Default for ComplianceExecutionOptions {
         let defaults = WorkflowExecutorOptions::default();
         Self {
             max_in_flight_files: DEFAULT_MAX_IN_FLIGHT_FILES,
+            accelerator_unavailable_timeout: defaults.queue.accelerator_unavailable_timeout,
             transcode_staging_root: defaults.artifact_roots.transcode.staging_root,
             transcode_target_dir: defaults.artifact_roots.transcode.target_dir,
             remux_staging_root: defaults.artifact_roots.remux.staging_root,
@@ -618,6 +624,12 @@ impl ComplianceExecutionOptions {
             return Err(VoomError::Config(
                 "max_in_flight_files must be positive".to_owned(),
             ));
+        }
+        if self.accelerator_unavailable_timeout <= NVIDIA_STARTUP_TIMEOUT {
+            return Err(VoomError::Config(format!(
+                "accelerator unavailable timeout must exceed the NVIDIA startup timeout of {} seconds",
+                NVIDIA_STARTUP_TIMEOUT.as_secs()
+            )));
         }
         u32::try_from(self.max_in_flight_files).map_err(|error| {
             VoomError::Config(format!(
@@ -712,6 +724,7 @@ impl From<ComplianceExecutionOptions> for WorkflowExecutorOptions {
         // error here rather than being silently dropped by `..default()`.
         let ComplianceExecutionOptions {
             max_in_flight_files,
+            accelerator_unavailable_timeout,
             transcode_staging_root,
             transcode_target_dir,
             remux_staging_root,
@@ -733,6 +746,10 @@ impl From<ComplianceExecutionOptions> for WorkflowExecutorOptions {
         // intermediates stay in the working dir.
         let _ = (&transcode_target_dir, &remux_target_dir, &audio_target_dir);
         Self {
+            queue: WorkflowQueueOptions {
+                accelerator_unavailable_timeout,
+                ..WorkflowQueueOptions::default()
+            },
             artifact_roots: WorkflowArtifactRoots {
                 transcode: OperationArtifactRoots::new(
                     transcode_staging_root.clone(),

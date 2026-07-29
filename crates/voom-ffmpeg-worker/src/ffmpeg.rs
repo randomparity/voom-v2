@@ -6,6 +6,7 @@ use serde_json::Value;
 use thiserror::Error;
 use tokio::process::Command;
 use tokio::time::{Duration, timeout};
+use voom_core::nvidia_decoder_for_video_codec;
 use voom_worker_protocol::{
     AudioDispositionFact, AudioOutputStreamFact, AudioStreamRef, ExtractAudioRequest,
     NvidiaVideoAcceleratorDescriptor, TranscodeAudioRequest, TranscodeVideoProfile,
@@ -490,7 +491,11 @@ fn append_nvidia_input_args(
     if profile.decode.is_software() {
         return Ok(());
     }
-    let decoder = nvidia_decoder(source_codec)?;
+    let decoder = nvidia_decoder_for_video_codec(source_codec).ok_or_else(|| {
+        FfmpegError::UnsupportedInput(format!(
+            "NVIDIA decode does not support source codec `{source_codec}`"
+        ))
+    })?;
     command
         .arg("-hwaccel")
         .arg("cuda")
@@ -501,17 +506,6 @@ fn append_nvidia_input_args(
         .arg("-c:v")
         .arg(decoder);
     Ok(())
-}
-
-fn nvidia_decoder(source_codec: &str) -> Result<&'static str, FfmpegError> {
-    match source_codec {
-        "h264" => Ok("h264_cuvid"),
-        "hevc" | "h265" => Ok("hevc_cuvid"),
-        "av1" => Ok("av1_cuvid"),
-        other => Err(FfmpegError::UnsupportedInput(format!(
-            "NVIDIA decode does not support source codec `{other}`"
-        ))),
-    }
 }
 
 fn video_filter_args(

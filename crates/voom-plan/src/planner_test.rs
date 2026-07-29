@@ -2067,6 +2067,28 @@ fn transcode_video_blocks_unknown_or_multi_video_snapshots() {
     assert_transcode_blocked(snapshot_with(Some("mkv"), Some("h264"), Some(2)));
 }
 
+#[test]
+fn transcode_video_blocks_unsupported_nvidia_decode_source_codec() {
+    let mut profile = voom_core::TranscodeVideoProfile::default_hevc();
+    profile.name = "hevc-nvenc".to_owned();
+    profile.encoder = "hevc_nvenc".to_owned();
+    profile.crf = None;
+    profile.cq = Some(22);
+    profile.preset = "p5".to_owned();
+    profile.decode = voom_core::VideoDecodeMode::nvidia();
+    let plan = plan_transcode_with_container(
+        profile,
+        snapshot_with(Some("mkv"), Some("vp9"), Some(1)),
+        "mkv",
+    );
+
+    assert_eq!(node_status(&plan), NodeStatus::Blocked);
+    assert_eq!(
+        blocked_reason(&plan),
+        "NVIDIA decode does not support source video codec `vp9`"
+    );
+}
+
 fn profile_hevc_1080p_mkv() -> voom_core::TranscodeVideoProfile {
     let mut profile = voom_core::TranscodeVideoProfile::default_hevc();
     profile.pixel_format = Some("yuv420p".to_owned());

@@ -4,7 +4,8 @@
 //! `tests/local_worker_lifecycle.rs`.
 
 use super::{
-    LocalWorkerKind, NvidiaLocalWorkerConfig, is_full_nvidia_uuid, validate_local_worker_config,
+    LocalWorkerKind, NvidiaLocalWorkerConfig, is_full_nvidia_uuid, kill_and_wait,
+    process_group_has_members, validate_local_worker_config,
 };
 use voom_core::TicketOperation;
 
@@ -64,4 +65,30 @@ fn every_operation_is_a_valid_ticket_operation() {
             );
         }
     }
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn failed_startup_cleanup_terminates_the_worker_process_group() {
+    use std::process::Stdio;
+    use std::time::Duration;
+
+    use tokio::process::Command;
+
+    let mut child = Command::new("sh");
+    child
+        .args(["-c", "sleep 30 & wait"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .process_group(0)
+        .kill_on_drop(true);
+    let mut child = child.spawn().unwrap();
+    let process_group_id = child.id().unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(process_group_has_members(process_group_id).unwrap());
+
+    kill_and_wait(&mut child).await.unwrap();
+
+    assert!(!process_group_has_members(process_group_id).unwrap());
 }

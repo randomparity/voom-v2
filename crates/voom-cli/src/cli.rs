@@ -1,7 +1,9 @@
 use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
-use voom_control_plane::policy::DEFAULT_MAX_IN_FLIGHT_FILES;
+use voom_control_plane::policy::{
+    DEFAULT_ACCELERATOR_UNAVAILABLE_TIMEOUT_SECONDS, DEFAULT_MAX_IN_FLIGHT_FILES,
+};
 
 #[derive(Parser, Debug)]
 #[command(name = "voom", version, about = "VOOM control plane CLI", long_about = None)]
@@ -842,6 +844,13 @@ pub enum ComplianceCommand {
         /// Maximum number of files allowed to retain in-progress artifacts.
         #[arg(long, default_value_t = DEFAULT_MAX_IN_FLIGHT_FILES)]
         max_in_flight_files: usize,
+        /// Seconds to wait for a previously advertised accelerator to return.
+        #[arg(
+            long,
+            default_value_t = DEFAULT_ACCELERATOR_UNAVAILABLE_TIMEOUT_SECONDS,
+            value_parser = clap::value_parser!(u64).range(301..)
+        )]
+        accelerator_unavailable_timeout_seconds: u64,
         #[arg(long)]
         staging_root: Option<std::path::PathBuf>,
         #[arg(long)]

@@ -7,7 +7,6 @@ use voom_core::{FileAssetId, FileVersionId, JobId, VoomError, WorkerId};
 use voom_store::repo::jobs::JobState;
 #[cfg(test)]
 use voom_store::repo::jobs::NewJob;
-use voom_store::repo::tickets::Ticket;
 
 use super::dispatch::DispatchOutcome;
 use super::runtime::WorkerRuntimeRegistry;
@@ -161,6 +160,7 @@ struct RunLoopState {
     dispatch_started: bool,
     capacity_wait_started: Option<Instant>,
     accelerator_wait_started: HashMap<String, Instant>,
+    accelerator_history: HashMap<String, Vec<String>>,
 }
 
 struct RunInvocation<'a> {
@@ -209,6 +209,7 @@ impl RunLoopState {
             dispatch_started: false,
             capacity_wait_started: None,
             accelerator_wait_started: HashMap::new(),
+            accelerator_history: HashMap::new(),
         }
     }
 
@@ -397,21 +398,6 @@ impl RunLoopState {
         }
     }
 
-    async fn try_spawn_dispatch(
-        &mut self,
-        executor: &WorkflowExecutor,
-        ticket: Ticket,
-    ) -> Result<SpawnOutcome, VoomError> {
-        executor
-            .try_spawn_dispatch(
-                &mut self.active,
-                &mut self.reservations,
-                &mut self.summary,
-                ticket,
-            )
-            .await
-    }
-
     async fn process_joined_dispatch(
         &mut self,
         executor: &WorkflowExecutor,
@@ -444,6 +430,7 @@ impl WorkflowExecutor {
         invocation: &RunInvocation<'_>,
     ) -> DispatchReadyOutcome {
         let mut outcome = DispatchReadyOutcome::default();
+        let mut accelerator_runtimes = None;
         let max_in_flight = invocation.plan.concurrency.max_in_flight_dispatches;
         while state.has_dispatch_capacity(max_in_flight) {
             let tickets = match self
@@ -463,7 +450,10 @@ impl WorkflowExecutor {
                 if !state.has_dispatch_capacity(max_in_flight) {
                     break;
                 }
-                match state.try_spawn_dispatch(self, ticket).await {
+                match self
+                    .try_spawn_dispatch(state, ticket, &mut accelerator_runtimes)
+                    .await
+                {
                     Ok(SpawnOutcome::PreLeaseTerminal(source)) => {
                         state.record_ticket_failure(invocation.failure_mode, source);
                         outcome.made_progress = true;
@@ -477,12 +467,10 @@ impl WorkflowExecutor {
                         outcome.made_progress = true;
                         return outcome;
                     }
-                    Ok(SpawnOutcome::Spawned(hardware_token)) => {
+                    Ok(SpawnOutcome::Spawned(hardware_tokens)) => {
                         outcome.made_progress = true;
                         batch_made_progress = true;
-                        if let Some(hardware_token) = hardware_token {
-                            outcome.recovered_accelerators.insert(hardware_token);
-                        }
+                        outcome.recovered_accelerators.extend(hardware_tokens);
                     }
                     Ok(SpawnOutcome::PreLeaseRetriable) => {
                         outcome.made_progress = true;
@@ -491,8 +479,8 @@ impl WorkflowExecutor {
                     Ok(SpawnOutcome::CapacityDeferred) => {
                         outcome.capacity_deferred = true;
                     }
-                    Ok(SpawnOutcome::AcceleratorUnavailable(hardware_token)) => {
-                        outcome.accelerator_unavailable.insert(hardware_token);
+                    Ok(SpawnOutcome::AcceleratorUnavailable(hardware_tokens)) => {
+                        outcome.accelerator_unavailable.extend(hardware_tokens);
                     }
                 }
             }

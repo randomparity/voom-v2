@@ -25,6 +25,14 @@ fn nvidia_descriptor_uses_cq_and_current_ffmpeg_vocabulary() {
 }
 
 #[test]
+fn nvidia_decoder_mapping_accepts_supported_codecs_and_hevc_alias() {
+    assert_eq!(nvidia_decoder_for_video_codec("h264"), Some("h264_cuvid"));
+    assert_eq!(nvidia_decoder_for_video_codec("H265"), Some("hevc_cuvid"));
+    assert_eq!(nvidia_decoder_for_video_codec("av1"), Some("av1_cuvid"));
+    assert_eq!(nvidia_decoder_for_video_codec("vp9"), None);
+}
+
+#[test]
 fn descriptor_crf_ranges_are_enforced() {
     let x265 = encoder_descriptor("libx265").unwrap();
     assert!(x265.accepts_crf(0));

@@ -99,6 +99,41 @@ fn compliance_execute_accepts_explicit_file_window() {
     assert_eq!(execute_file_window(&cli.command), Some(9));
 }
 
+#[test]
+fn compliance_execute_defaults_accelerator_recovery_to_fifteen_minutes() {
+    use clap::Parser;
+
+    let cli = crate::cli::Cli::try_parse_from([
+        "voom",
+        "compliance",
+        "execute",
+        "--policy-version-id",
+        "1",
+        "--input-set-id",
+        "2",
+    ])
+    .unwrap();
+    assert_eq!(execute_accelerator_timeout(&cli.command), Some(900));
+}
+
+#[test]
+fn compliance_execute_rejects_accelerator_recovery_at_startup_deadline() {
+    use clap::Parser;
+
+    let parsed = crate::cli::Cli::try_parse_from([
+        "voom",
+        "compliance",
+        "execute",
+        "--policy-version-id",
+        "1",
+        "--input-set-id",
+        "2",
+        "--accelerator-unavailable-timeout-seconds",
+        "300",
+    ]);
+    assert!(parsed.is_err());
+}
+
 fn execute_file_window(command: &Command) -> Option<usize> {
     if let Command::Compliance(ComplianceCommand::Execute {
         max_in_flight_files,
@@ -106,6 +141,18 @@ fn execute_file_window(command: &Command) -> Option<usize> {
     }) = command
     {
         Some(*max_in_flight_files)
+    } else {
+        None
+    }
+}
+
+fn execute_accelerator_timeout(command: &Command) -> Option<u64> {
+    if let Command::Compliance(ComplianceCommand::Execute {
+        accelerator_unavailable_timeout_seconds,
+        ..
+    }) = command
+    {
+        Some(*accelerator_unavailable_timeout_seconds)
     } else {
         None
     }
