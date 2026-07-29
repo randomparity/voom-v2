@@ -61,36 +61,15 @@ async fn run_local_emits_exactly_two_stdout_lines() {
     assert_ok(&init, "init");
 
     let mut worker = LocalWorker::spawn(&url, "ffmpeg");
-    let ready = worker.wait_for_ready(READY_TIMEOUT);
-    assert_ready_line(&ready, "ffmpeg");
-    let worker_id = ready["worker_id"].as_u64().unwrap();
+    worker.wait_for_ready(READY_TIMEOUT);
 
     let shutdown = worker.shutdown();
-
-    // The full stdout stream is exactly the readiness line then the retirement
-    // envelope — nothing before, between, or after.
-    assert_eq!(
-        worker.stdout_lines.len(),
-        2,
-        "run-local stdout must be exactly two lines; saw {:?}",
-        worker.stdout_lines
-    );
-    let first = &worker.stdout_lines[0];
-    let line_one: Value = serde_json::from_str(first)
-        .unwrap_or_else(|err| panic!("first stdout line must be valid JSON: {first:?}: {err}"));
-    assert_ready_line(&line_one, "ffmpeg");
-    assert_eq!(
-        line_one["worker_id"].as_u64().unwrap(),
-        worker_id,
-        "the collected first line is the same readiness line"
-    );
-
-    assert_retirement_envelope(&shutdown, worker_id);
+    let worker_id = assert_worker_stdout_contract(&worker, &shutdown);
 
     // The supervisor retired the worker it started; it is no longer live.
     let list = run_voom(&url, &["worker", "list"]);
     let list_json = assert_ok(&list, "worker list");
-    assert_no_live_worker(&list_json, worker_id);
+    assert_workers_retired(&list_json, &[worker_id]);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -115,21 +94,17 @@ fn run_concurrent_shutdown_cohort(url: &str) {
     let mut workers = Vec::new();
     for kind in CONCURRENT_WORKER_KINDS {
         let mut worker = LocalWorker::spawn(url, kind);
-        let ready = worker.wait_for_ready(READY_TIMEOUT);
-        assert_ready_line(&ready, kind);
+        worker.wait_for_ready(READY_TIMEOUT);
         workers.push(worker);
     }
-    let worker_ids = workers
-        .iter()
-        .map(LocalWorker::worker_id)
-        .collect::<Vec<_>>();
 
     for worker in &mut workers {
         worker.request_shutdown();
     }
+    let mut worker_ids = Vec::with_capacity(workers.len());
     for worker in &mut workers {
         let shutdown = worker.finish_shutdown();
-        assert_worker_stdout_contract(worker, &shutdown);
+        worker_ids.push(assert_worker_stdout_contract(worker, &shutdown));
     }
 
     let list = run_voom(url, &["worker", "list"]);
@@ -161,7 +136,7 @@ fn assert_ready_line(value: &Value, kind: &str) {
     );
 }
 
-fn assert_worker_stdout_contract(worker: &LocalWorker, shutdown: &Value) {
+fn assert_worker_stdout_contract(worker: &LocalWorker, shutdown: &Value) -> u64 {
     assert_eq!(
         worker.stdout_lines.len(),
         2,
@@ -175,7 +150,9 @@ fn assert_worker_stdout_contract(worker: &LocalWorker, shutdown: &Value) {
         )
     });
     assert_ready_line(&ready, worker.kind);
-    assert_retirement_envelope(shutdown, worker.worker_id());
+    let worker_id = ready["worker_id"].as_u64().unwrap();
+    assert_retirement_envelope(shutdown, worker_id);
+    worker_id
 }
 
 /// Assert the shutdown line is the standard retirement envelope for `worker_id`.
@@ -200,18 +177,6 @@ fn assert_retirement_envelope(value: &Value, worker_id: u64) {
         value["data"]["worker_id"].as_u64().unwrap(),
         worker_id,
         "retirement names the worker that started: {value}"
-    );
-}
-
-fn assert_no_live_worker(list_json: &Value, worker_id: u64) {
-    let workers = list_json["data"]["workers"].as_array().unwrap();
-    let live = workers.iter().find(|worker| {
-        worker["id"].as_u64() == Some(worker_id)
-            && matches!(worker["status"].as_str(), Some("registered" | "active"))
-    });
-    assert!(
-        live.is_none(),
-        "worker {worker_id} must not be live after shutdown: {list_json}"
     );
 }
 
@@ -327,12 +292,6 @@ impl LocalWorker {
                 ),
             }
         }
-    }
-
-    fn worker_id(&self) -> u64 {
-        serde_json::from_str::<Value>(&self.stdout_lines[0]).unwrap()["worker_id"]
-            .as_u64()
-            .unwrap()
     }
 
     /// Close stdin (the shutdown signal), drain remaining stdout into

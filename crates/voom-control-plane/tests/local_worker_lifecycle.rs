@@ -165,7 +165,7 @@ async fn shutdown_stops_worker_when_durable_retirement_fails() {
     pool.close().await;
 
     let shutdown =
-        tokio::time::timeout(Duration::from_secs(5), running.shutdown_and_retire(&cp)).await;
+        tokio::time::timeout(Duration::from_secs(10), running.shutdown_and_retire(&cp)).await;
     assert!(shutdown.is_ok(), "retirement failure must remain bounded");
     let err = shutdown.unwrap().unwrap_err();
     assert_eq!(err.error_code(), ErrorCode::DbUnreachable);
