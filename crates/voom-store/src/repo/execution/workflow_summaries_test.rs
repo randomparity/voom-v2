@@ -207,6 +207,59 @@ async fn file_window_admission_is_bounded_and_refills_after_terminal() {
 }
 
 #[tokio::test]
+async fn concurrent_file_admission_never_exceeds_durable_capacity() {
+    let (repo, _tmp) = repo().await;
+    let branches = ["alpha", "beta", "gamma", "delta"];
+    repo.insert_file_run_starts(
+        JOB,
+        branches
+            .iter()
+            .map(|branch| file_run_start(branch, 1, 0))
+            .collect(),
+    )
+    .await
+    .unwrap();
+    repo.insert_file_window(
+        JOB,
+        2,
+        branches
+            .iter()
+            .enumerate()
+            .map(|(ordinal, branch)| NewFileProgress {
+                branch_id: (*branch).to_owned(),
+                input_ordinal: u32::try_from(ordinal).unwrap(),
+                next_phase_ordinal: 0,
+            })
+            .collect(),
+        T0,
+    )
+    .await
+    .unwrap();
+    let attempts = (0..8)
+        .map(|_| {
+            let repo = repo.clone();
+            tokio::spawn(async move { repo.admit_next_file(JOB, T0).await.unwrap() })
+        })
+        .collect::<Vec<_>>();
+    let mut admitted = Vec::new();
+    for attempt in attempts {
+        if let Some(row) = attempt.await.unwrap() {
+            admitted.push(row.branch_id);
+        }
+    }
+
+    admitted.sort();
+    assert_eq!(admitted, vec!["alpha", "beta"]);
+    let rows = repo.file_progress_for_job(JOB).await.unwrap();
+    assert_eq!(
+        rows.iter()
+            .filter(|row| row.state == FileProgressState::Active)
+            .count(),
+        2
+    );
+}
+
+#[tokio::test]
 async fn file_progress_cursor_advances_once_from_expected_phase() {
     let (repo, _tmp) = repo().await;
     repo.insert_file_run_starts(JOB, vec![file_run_start("alpha", 1, 0)])
@@ -230,6 +283,69 @@ async fn file_progress_cursor_advances_once_from_expected_phase() {
     );
     assert_eq!(
         repo.file_progress_for_job(JOB).await.unwrap()[0].next_phase_ordinal,
+        1
+    );
+}
+
+#[tokio::test]
+async fn file_phase_and_cursor_checkpoint_commit_atomically_and_replay() {
+    let (repo, _tmp) = repo().await;
+    repo.insert_file_run_starts(JOB, vec![file_run_start("alpha", 1, 0)])
+        .await
+        .unwrap();
+    repo.insert_file_window(JOB, 1, vec![file_progress("alpha", 0)], T0)
+        .await
+        .unwrap();
+    repo.admit_next_file(JOB, T0).await.unwrap();
+    sqlx::query(
+        "CREATE TRIGGER fail_cursor_advance BEFORE UPDATE OF next_phase_ordinal \
+         ON workflow_file_progress BEGIN SELECT RAISE(ABORT, 'forced cursor failure'); END",
+    )
+    .execute(&repo.pool)
+    .await
+    .unwrap();
+
+    let error = repo
+        .upsert_file_phase_summary_and_advance(committed_file_phase("alpha"), 0, 1, T0)
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.code(), "DB_UNREACHABLE");
+    assert!(
+        repo.get_file_phase_summary(JOB, 0, "alpha")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        repo.file_progress(JOB, "alpha")
+            .await
+            .unwrap()
+            .unwrap()
+            .next_phase_ordinal,
+        0
+    );
+    sqlx::query("DROP TRIGGER fail_cursor_advance")
+        .execute(&repo.pool)
+        .await
+        .unwrap();
+
+    let first = repo
+        .upsert_file_phase_summary_and_advance(committed_file_phase("alpha"), 0, 1, T0)
+        .await
+        .unwrap();
+    let replayed = repo
+        .upsert_file_phase_summary_and_advance(committed_file_phase("alpha"), 0, 1, T0)
+        .await
+        .unwrap();
+
+    assert_eq!(first, replayed);
+    assert_eq!(
+        repo.file_progress(JOB, "alpha")
+            .await
+            .unwrap()
+            .unwrap()
+            .next_phase_ordinal,
         1
     );
 }

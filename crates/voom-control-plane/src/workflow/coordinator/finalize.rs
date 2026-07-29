@@ -17,10 +17,6 @@ use voom_store::repo::workflow_summaries::{
 };
 
 use crate::ControlPlane;
-#[cfg(test)]
-use crate::workflow::WorkflowRunSummary;
-#[cfg(test)]
-use crate::workflow::coordinator::CoordinatorError;
 use crate::workflow::coordinator::planning::{job_grain_summary, zero_phase_summary};
 use crate::workflow::coordinator::{CoordinatorOutcome, Disposition, PhaseFile};
 use crate::workflow::ticket_results::PolicyVerificationTicketResult;
@@ -62,19 +58,6 @@ struct JobProducedCommit {
 struct SameLineageCommit {
     ticket_id: TicketId,
     produced: JobProducedCommit,
-}
-
-#[cfg(test)]
-pub(super) struct FailedPhaseFinalization<'a> {
-    pub(super) job_id: JobId,
-    pub(super) phase_ordinal: u32,
-    pub(super) files: &'a [PhaseFile],
-    pub(super) dispositions: &'a [Disposition],
-    pub(super) phase_dispatched: bool,
-    pub(super) run_summary: Option<&'a WorkflowRunSummary>,
-    pub(super) source: VoomError,
-    pub(super) phases: Vec<PhaseSummary>,
-    pub(super) file_phases: Vec<FilePhaseSummary>,
 }
 
 enum CommitRelevance {
@@ -727,81 +710,6 @@ impl ControlPlane {
     /// Finalize a run whose phase failed during dispatch: record every file that
     /// committed inline before the failure (the executor drained in-flight
     /// dispatches, so their commits have landed), then return the partial
-    /// outcome inside the error. No phase-grain row is written for the failed
-    /// phase, and the job is already `failed`.
-    #[cfg(test)]
-    pub(super) async fn finalize_failed_phase(
-        &self,
-        finalization: FailedPhaseFinalization<'_>,
-    ) -> Result<CoordinatorOutcome, CoordinatorError> {
-        let FailedPhaseFinalization {
-            job_id,
-            phase_ordinal,
-            files,
-            dispositions,
-            phase_dispatched,
-            run_summary,
-            source,
-            phases,
-            mut file_phases,
-        } = finalization;
-        if phase_dispatched {
-            for (file, disposition) in files.iter().zip(dispositions) {
-                let Disposition::Planned { .. } = disposition else {
-                    continue;
-                };
-                let ticket_ids = self
-                    .ticket_ids_for_phase_file(job_id, phase_ordinal, file.version_id)
-                    .await?;
-                if let Some(verified) = self.verified_refs_for_tickets(file, &ticket_ids).await? {
-                    let row = self
-                        .write_file_row(
-                            job_id,
-                            phase_ordinal,
-                            file,
-                            FilePhaseOutcome::Verified,
-                            &ticket_ids,
-                            Some(verified),
-                        )
-                        .await?;
-                    file_phases.push(row);
-                    continue;
-                }
-                let phase_ticket_ids = self.ticket_ids_for_phase(job_id, phase_ordinal).await?;
-                let (produced, scoped_ticket_ids) = self
-                    .committed_refs_for_tickets(job_id, file, &phase_ticket_ids, &ticket_ids)
-                    .await?;
-                let Some(produced) = produced else {
-                    continue;
-                };
-                let row = self
-                    .write_file_row(
-                        job_id,
-                        phase_ordinal,
-                        file,
-                        FilePhaseOutcome::Committed,
-                        &scoped_ticket_ids,
-                        Some(produced.refs),
-                    )
-                    .await?;
-                file_phases.push(row);
-            }
-        }
-        let summary = self
-            .workflow_summaries
-            .insert_summary(job_grain_summary(job_id, run_summary), self.clock().now())
-            .await?;
-        Err(CoordinatorError {
-            source,
-            partial: Some(CoordinatorOutcome {
-                job_id,
-                summary,
-                phases,
-                file_phases,
-            }),
-        })
-    }
-
     pub(super) async fn finalize_failed_file_phase(
         &self,
         job_id: JobId,
@@ -891,7 +799,7 @@ impl ControlPlane {
         match disposition {
             Disposition::Blocked => {
                 let row = self
-                    .write_file_row(
+                    .write_file_row_and_advance(
                         job_id,
                         phase_ordinal,
                         &file,
@@ -904,7 +812,7 @@ impl ControlPlane {
             }
             Disposition::Skipped => {
                 let row = self
-                    .write_file_row(
+                    .write_file_row_and_advance(
                         job_id,
                         phase_ordinal,
                         &file,
@@ -923,7 +831,7 @@ impl ControlPlane {
                     .await?;
                 if let Some(verified) = self.verified_refs_for_tickets(&file, &ticket_ids).await? {
                     let row = self
-                        .write_file_row(
+                        .write_file_row_and_advance(
                             job_id,
                             phase_ordinal,
                             &file,
@@ -943,7 +851,7 @@ impl ControlPlane {
                 let Some(produced) = produced else {
                     self.require_selected_version_still_active(&file).await?;
                     let row = self
-                        .write_file_row(
+                        .write_file_row_and_advance(
                             job_id,
                             phase_ordinal,
                             &file,
@@ -957,7 +865,7 @@ impl ControlPlane {
                     return Ok((row, file.snapshot.clone(), Some(file)));
                 };
                 let row = self
-                    .write_file_row(
+                    .write_file_row_and_advance(
                         job_id,
                         phase_ordinal,
                         &file,
@@ -999,6 +907,37 @@ impl ControlPlane {
                     reprobe_snapshot_id: produced.reprobe_snapshot_id,
                     outcome,
                 },
+                self.clock().now(),
+            )
+            .await
+    }
+
+    async fn write_file_row_and_advance(
+        &self,
+        job_id: JobId,
+        phase_ordinal: u32,
+        file: &PhaseFile,
+        outcome: FilePhaseOutcome,
+        ticket_ids: &[TicketId],
+        produced: Option<ProducedRefs>,
+    ) -> Result<FilePhaseSummary, VoomError> {
+        let produced = produced.unwrap_or_default();
+        self.workflow_summaries
+            .upsert_file_phase_summary_and_advance(
+                NewFilePhaseSummary {
+                    job_id,
+                    phase_ordinal,
+                    branch_id: file.branch_id.clone(),
+                    ticket_ids: ticket_ids.to_vec(),
+                    produced_file_version_id: produced.file_version_id,
+                    produced_file_location_id: produced.file_location_id,
+                    artifact_handle_id: produced.artifact_handle_id,
+                    artifact_verification_id: produced.artifact_verification_id,
+                    reprobe_snapshot_id: produced.reprobe_snapshot_id,
+                    outcome,
+                },
+                phase_ordinal,
+                phase_ordinal + 1,
                 self.clock().now(),
             )
             .await

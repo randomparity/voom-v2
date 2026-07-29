@@ -82,7 +82,8 @@ pub mod policy {
         ComplianceApplyData, ComplianceAudioExtractOutput, ComplianceAudioSynthesisCompanion,
         ComplianceExecuteData, ComplianceExecuteError, ComplianceExecutionOptions,
         ComplianceLegacyAudioExtractOutput, ComplianceReportData, ComplianceRunReportData,
-        FilePhaseSummaryView, IssueApplicationSummary, PhaseSummaryView, WorkflowSummaryView,
+        DEFAULT_MAX_IN_FLIGHT_FILES, FilePhaseSummaryView, IssueApplicationSummary,
+        PhaseSummaryView, WorkflowSummaryView,
     };
     pub use crate::cases::policy::policies::PolicyMutationError;
     pub use crate::cases::policy::policy_inputs::{

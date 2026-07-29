@@ -334,19 +334,23 @@ impl ControlPlane {
         plan: &PromotionPlan,
         file_phases: &[FilePhaseSummary],
     ) -> Result<(), VoomError> {
-        let dirs = resolve_promotion_dirs(plan).await;
         let terminal_location = file_phases
             .iter()
             .rev()
             .find_map(|row| row.produced_file_location_id);
         let mut seen = HashSet::new();
-        for location_id in file_phases
+        let candidates = file_phases
             .iter()
             .filter_map(|row| row.produced_file_location_id)
-        {
-            if Some(location_id) == terminal_location || !seen.insert(location_id) {
-                continue;
-            }
+            .filter(|location_id| {
+                Some(*location_id) != terminal_location && seen.insert(*location_id)
+            })
+            .collect::<Vec<_>>();
+        if candidates.is_empty() {
+            return Ok(());
+        }
+        let dirs = resolve_promotion_dirs(plan).await;
+        for location_id in candidates {
             let Some(location) = self.identity.get_file_location(location_id).await? else {
                 continue;
             };

@@ -15,7 +15,7 @@ use voom_store::repo::jobs::NewJob;
 use voom_store::repo::leases::NewLease;
 use voom_store::repo::tickets::NewTicket;
 use voom_store::repo::workers::{NewCapability, NewGrant, NewWorker};
-use voom_store::repo::workflow_summaries::FilePhaseOutcome;
+use voom_store::repo::workflow_summaries::{FilePhaseOutcome, NewFileProgress, NewFileRunStart};
 
 use super::*;
 use crate::workflow::coordinator::{Disposition, PhaseFile};
@@ -36,6 +36,7 @@ async fn finalization_attributes_exact_job_commit_when_unrelated_tip_is_newer() 
         })
         .await
         .unwrap();
+    activate_file_progress(&cp, job.id, &files[0]).await;
     let evidence = seed_committed_ticket_evidence(&cp, job.id, source, "movie").await;
     let unrelated =
         advance_chain_tip(&cp, evidence.version_id, "unrelated", ProducedBy::Transcode).await;
@@ -80,6 +81,7 @@ async fn finalization_uses_latest_exact_commit_from_multi_operation_phase() {
     let source = seed_version(&cp, "/library/multi-operation.mkv", "source").await;
     let mut files = vec![phase_file(&cp, source, "multi-operation").await];
     let job = open_policy_job(&cp).await;
+    activate_file_progress(&cp, job.id, &files[0]).await;
     let first = seed_committed_ticket_evidence(&cp, job.id, source, "multi-operation").await;
     let terminal = seed_committed_ticket_evidence(&cp, job.id, source, "multi-operation").await;
     let unrelated =
@@ -228,40 +230,27 @@ async fn failed_phase_reports_only_exact_job_commit_evidence() {
         ProducedBy::Transcode,
     )
     .await;
-    let run_summary = crate::workflow::WorkflowRunSummary::empty(job.id, std::time::Duration::ZERO);
+    let disposition = Disposition::Planned {
+        node_ids: vec![NODE_ID.to_owned()],
+    };
+    let mut file_phases = Vec::new();
+    for file in &files {
+        if let Some(row) = cp
+            .finalize_failed_file_phase(job.id, 0, file, &disposition)
+            .await
+            .unwrap()
+        {
+            file_phases.push(row);
+        }
+    }
 
-    let error = cp
-        .finalize_failed_phase(FailedPhaseFinalization {
-            job_id: job.id,
-            phase_ordinal: 0,
-            files: &files,
-            dispositions: &[
-                Disposition::Planned {
-                    node_ids: vec![NODE_ID.to_owned()],
-                },
-                Disposition::Planned {
-                    node_ids: vec![NODE_ID.to_owned()],
-                },
-            ],
-            phase_dispatched: true,
-            run_summary: Some(&run_summary),
-            source: VoomError::PolicyExecution("forced phase failure".to_owned()),
-            phases: Vec::new(),
-            file_phases: Vec::new(),
-        })
-        .await
-        .unwrap_err();
-
-    assert!(matches!(error.source, VoomError::PolicyExecution(_)));
-    assert!(error.partial.is_some());
-    let partial = error.partial.unwrap();
-    assert_eq!(partial.file_phases.len(), 1);
+    assert_eq!(file_phases.len(), 1);
     assert_eq!(
-        partial.file_phases[0].produced_file_version_id,
+        file_phases[0].produced_file_version_id,
         Some(evidence.version_id)
     );
     assert_eq!(
-        partial.file_phases[0].artifact_handle_id,
+        file_phases[0].artifact_handle_id,
         Some(evidence.artifact_handle_id)
     );
     let durable = cp
@@ -269,7 +258,7 @@ async fn failed_phase_reports_only_exact_job_commit_evidence() {
         .file_phases_for_job(job.id)
         .await
         .unwrap();
-    assert_eq!(durable, partial.file_phases);
+    assert_eq!(durable, file_phases);
     assert_eq!(active_version_id(&cp, produced_source).await, later_tip);
     assert_eq!(
         active_version_id(&cp, unrelated_source).await,
@@ -297,6 +286,42 @@ async fn open_policy_job(cp: &crate::ControlPlane) -> voom_store::repo::jobs::Jo
     })
     .await
     .unwrap()
+}
+
+async fn activate_file_progress(
+    cp: &crate::ControlPlane,
+    job_id: voom_core::JobId,
+    file: &PhaseFile,
+) {
+    cp.workflow_summaries
+        .insert_file_run_starts(
+            job_id,
+            vec![NewFileRunStart {
+                branch_id: file.branch_id.clone(),
+                starting_file_version_id: file.version_id,
+                starting_phase_ordinal: 0,
+            }],
+        )
+        .await
+        .unwrap();
+    cp.workflow_summaries
+        .insert_file_window(
+            job_id,
+            1,
+            vec![NewFileProgress {
+                branch_id: file.branch_id.clone(),
+                input_ordinal: file.ordinal,
+                next_phase_ordinal: 0,
+            }],
+            T0,
+        )
+        .await
+        .unwrap();
+    cp.workflow_summaries
+        .admit_next_file(job_id, T0)
+        .await
+        .unwrap()
+        .unwrap();
 }
 
 async fn seed_succeeded_ticket_without_commit(

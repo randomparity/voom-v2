@@ -15,17 +15,14 @@
 //! - [`resume`] — resume reconciliation and chain-tip/snapshot projection.
 
 use std::collections::{BTreeMap, BTreeSet};
-#[cfg(test)]
 use std::future::Future;
-#[cfg(test)]
-use std::pin::Pin;
 use tokio::task::JoinSet;
 
 use voom_core::{FileAssetId, FileVersionId, JobId, PolicyInputSetId, PolicyVersionId, VoomError};
 use voom_plan::{ExecutionPlan, PlanningContext, PlanningRequest};
 use voom_policy::PolicyInputSetDraft;
-use voom_store::repo::identity::MediaSnapshot;
-use voom_store::repo::jobs::NewJob;
+use voom_store::repo::identity::{IdentityRepo, MediaSnapshot};
+use voom_store::repo::jobs::{JobState, NewJob};
 use voom_store::repo::tickets::TicketState;
 use voom_store::repo::workflow_summaries::{
     FilePhaseOutcome, FilePhaseSummary, NewFileProgress, NewFileRunHistory, NewFileRunStart,
@@ -49,8 +46,6 @@ mod planning;
 mod promotion;
 mod resume;
 
-#[cfg(test)]
-use finalize::FailedPhaseFinalization;
 use finalize::phase_ordinal;
 use planning::{
     classify_phase, initial_phase_files, job_grain_summary, phase_draft, phase_outcome,
@@ -297,6 +292,20 @@ impl From<VoomError> for CoordinatorError {
     }
 }
 
+fn coordinator_cleanup_error(
+    original: CoordinatorError,
+    job_id: JobId,
+    cleanup: &VoomError,
+) -> CoordinatorError {
+    CoordinatorError {
+        source: VoomError::Internal(format!(
+            "coordinator failed for job {job_id}: {}; finalizing the job also failed: {cleanup}",
+            original.source
+        )),
+        partial: original.partial,
+    }
+}
+
 /// A phase that failed during dispatch. `run_summary` is `Some` once the
 /// executor actually ran the workflow (and so some files may have committed
 /// inline before draining), `None` for a pre-dispatch bridge failure.
@@ -349,7 +358,6 @@ struct PlannedPhase {
     plan: ExecutionPlan,
     report: voom_plan::ComplianceReport,
     dispositions: Vec<Disposition>,
-    gate_admission: Vec<bool>,
     error_strategy: voom_policy::ErrorStrategy,
 }
 
@@ -363,25 +371,21 @@ struct FilePhaseObservation {
 }
 
 struct FilePipelineOutcome {
-    observations: Vec<FilePhaseObservation>,
     last_run: Option<crate::workflow::WorkflowRunSummary>,
     continued_error: Option<VoomError>,
 }
 
 struct FilePipelineFailure {
     source: VoomError,
-    observations: Vec<FilePhaseObservation>,
     last_run: Option<crate::workflow::WorkflowRunSummary>,
 }
 
 fn file_pipeline_failure(
     source: VoomError,
-    observations: &[FilePhaseObservation],
     last_run: Option<&crate::workflow::WorkflowRunSummary>,
 ) -> FilePipelineFailure {
     FilePipelineFailure {
         source,
-        observations: observations.to_vec(),
         last_run: last_run.cloned(),
     }
 }
@@ -400,10 +404,6 @@ fn merge_run_summary(
     }
 }
 
-#[cfg(test)]
-type CoordinatorFuture<'a> =
-    Pin<Box<dyn Future<Output = Result<CoordinatorOutcome, CoordinatorError>> + Send + 'a>>;
-
 /// State for the phase-barrier loop. The loop has to coordinate planning,
 /// dispatch, durable summaries, and resume handoff; keeping those transitions
 /// named here prevents the top-level coordinator from becoming a mixed
@@ -417,8 +417,6 @@ struct PhaseLoop<'a> {
     executor: WorkflowExecutor,
     files: Vec<PhaseFile>,
     promotion: PromotionPlan,
-    #[cfg(test)]
-    phases: Vec<PhaseSummary>,
     file_phases: Vec<FilePhaseSummary>,
     last_run: Option<crate::workflow::WorkflowRunSummary>,
     continued_error: Option<VoomError>,
@@ -430,6 +428,8 @@ impl<'a> PhaseLoop<'a> {
         // Derive promotion pairs from the operator output dirs before the options
         // are converted (the conversion repoints commit targets to working dirs).
         let promotion = inputs.options.promotion_plan();
+        let mut base_draft = inputs.base_draft;
+        base_draft.media_snapshots.clear();
         let executor = WorkflowExecutor::with_options(
             control_plane.clone(),
             inputs.runtimes,
@@ -445,12 +445,10 @@ impl<'a> PhaseLoop<'a> {
             job_id: inputs.job_id,
             policy: inputs.policy,
             context: inputs.context,
-            base_draft: inputs.base_draft,
+            base_draft,
             executor,
             files: inputs.files,
             promotion,
-            #[cfg(test)]
-            phases: Vec::new(),
             file_phases: inputs.seed_file_phases,
             last_run: None,
             continued_error: None,
@@ -458,11 +456,15 @@ impl<'a> PhaseLoop<'a> {
         }
     }
 
-    #[cfg(test)]
-    async fn run_after_phase_plan<F, Fut>(
+    async fn run_file_pipeline(self) -> Result<FilePipelineOutcome, FilePipelineFailure> {
+        self.run_file_pipeline_after_phase_plan(|_| std::future::ready(Ok(())))
+            .await
+    }
+
+    async fn run_file_pipeline_after_phase_plan<F, Fut>(
         mut self,
         mut after_phase_plan: F,
-    ) -> Result<CoordinatorOutcome, CoordinatorError>
+    ) -> Result<FilePipelineOutcome, FilePipelineFailure>
     where
         F: FnMut(u32) -> Fut,
         Fut: Future<Output = Result<(), VoomError>>,
@@ -472,87 +474,27 @@ impl<'a> PhaseLoop<'a> {
             if self.files.is_empty() {
                 break;
             }
-            let phase_ordinal = phase_ordinal(index)?;
+            let phase_ordinal = phase_ordinal(index)
+                .map_err(|source| file_pipeline_failure(source, self.last_run.as_ref()))?;
             let Some(mut entry) = self.enter_phase(phase_ordinal) else {
                 continue;
             };
-            let mut planned = self.plan_phase_for_files(phase_name, &entry.entering)?;
-            after_phase_plan(phase_ordinal).await?;
-            if let Err(failure) = self
-                .dispatch_phase_work(phase_ordinal, &entry.entering, &planned)
-                .await
-            {
-                if !failure.job_failed
-                    && planned.error_strategy == voom_policy::ErrorStrategy::Continue
-                {
-                    let before = planned.dispositions.clone();
-                    planned.dispositions = self
-                        .control_plane
-                        .continued_dispositions(
-                            self.job_id,
-                            phase_ordinal,
-                            &entry.entering,
-                            &planned.dispositions,
-                        )
-                        .await?;
-                    for ((file, before), after) in entry
-                        .entering
-                        .iter()
-                        .zip(&before)
-                        .zip(&planned.dispositions)
-                    {
-                        if let (Disposition::Planned { .. }, Disposition::Blocked) = (before, after)
-                        {
-                            self.promotable_branches.remove(&file.branch_id);
-                        }
-                    }
-                    if let Some(summary) = failure.run_summary {
-                        self.record_run(summary);
-                    }
-                    if self.continued_error.is_none() {
-                        self.continued_error = Some(failure.source);
-                    }
-                    self.persist_phase_outcome(phase_ordinal, phase_name, &planned, &mut entry)
-                        .await?;
-                    self.recombine_survivors(entry);
-                    continue;
-                }
-                return self
-                    .persist_failed_phase(
-                        phase_ordinal,
-                        &entry.entering,
-                        &planned.dispositions,
-                        failure,
-                    )
-                    .await;
+            if entry.entering.len() != 1 {
+                return Err(file_pipeline_failure(
+                    VoomError::Internal(format!(
+                        "file pipeline phase {phase_ordinal} entered {} files",
+                        entry.entering.len()
+                    )),
+                    self.last_run.as_ref(),
+                ));
             }
-            self.persist_phase_outcome(phase_ordinal, phase_name, &planned, &mut entry)
-                .await?;
-            self.recombine_survivors(entry);
-        }
-
-        self.finish().await
-    }
-
-    async fn run_file_pipeline(mut self) -> Result<FilePipelineOutcome, FilePipelineFailure> {
-        let phase_order = self.policy.phase_order.clone();
-        let mut observations = Vec::new();
-        for (index, phase_name) in phase_order.iter().enumerate() {
-            if self.files.is_empty() {
-                break;
-            }
-            let phase_ordinal = phase_ordinal(index).map_err(|source| {
-                file_pipeline_failure(source, &observations, self.last_run.as_ref())
-            })?;
-            let Some(mut entry) = self.enter_phase(phase_ordinal) else {
-                continue;
-            };
             let mut planned = self
                 .plan_phase_for_files(phase_name, &entry.entering)
-                .map_err(|source| {
-                    file_pipeline_failure(source, &observations, self.last_run.as_ref())
-                })?;
-            self.resolve_file_dispatch(phase_ordinal, &entry.entering, &mut planned, &observations)
+                .map_err(|source| file_pipeline_failure(source, self.last_run.as_ref()))?;
+            after_phase_plan(phase_ordinal)
+                .await
+                .map_err(|source| file_pipeline_failure(source, self.last_run.as_ref()))?;
+            self.resolve_file_dispatch(phase_ordinal, &entry.entering, &mut planned)
                 .await?;
             let (rows, refreshed) = self
                 .control_plane
@@ -563,41 +505,14 @@ impl<'a> PhaseLoop<'a> {
                     &planned.dispositions,
                 )
                 .await
-                .map_err(|source| {
-                    file_pipeline_failure(source, &observations, self.last_run.as_ref())
-                })?;
-            let Some((input_ordinal, snapshot)) = refreshed.into_iter().next() else {
+                .map_err(|source| file_pipeline_failure(source, self.last_run.as_ref()))?;
+            if refreshed.len() != 1 || rows.len() != 1 {
                 return Err(FilePipelineFailure {
                     source: VoomError::Internal(format!(
-                        "branch pipeline phase {phase_ordinal} produced no refreshed snapshot"
+                        "branch pipeline phase {phase_ordinal} produced {} rows and {} snapshots",
+                        rows.len(),
+                        refreshed.len()
                     )),
-                    observations,
-                    last_run: self.last_run,
-                });
-            };
-            observations.push(FilePhaseObservation {
-                phase_ordinal,
-                phase_name: phase_name.clone(),
-                input_ordinal,
-                snapshot,
-                gate_admitted: planned.gate_admission[0],
-            });
-            let branch_id = rows[0].branch_id.clone();
-            let advanced = self
-                .control_plane
-                .workflow_summaries
-                .advance_file_progress(self.job_id, &branch_id, phase_ordinal, phase_ordinal + 1)
-                .await
-                .map_err(|source| {
-                    file_pipeline_failure(source, &observations, self.last_run.as_ref())
-                })?;
-            if !advanced {
-                return Err(FilePipelineFailure {
-                    source: VoomError::Conflict(format!(
-                        "file progress cursor for branch {branch_id} did not advance from phase \
-                         {phase_ordinal}"
-                    )),
-                    observations,
                     last_run: self.last_run,
                 });
             }
@@ -605,7 +520,7 @@ impl<'a> PhaseLoop<'a> {
             self.recombine_survivors(entry);
         }
 
-        self.finish_file_pipeline(observations).await
+        self.finish_file_pipeline().await
     }
 
     async fn resolve_file_dispatch(
@@ -613,7 +528,6 @@ impl<'a> PhaseLoop<'a> {
         phase_ordinal: u32,
         entering: &[PhaseFile],
         planned: &mut PlannedPhase,
-        observations: &[FilePhaseObservation],
     ) -> Result<(), FilePipelineFailure> {
         let Err(mut failure) = self
             .dispatch_phase_work(phase_ordinal, entering, planned)
@@ -627,21 +541,31 @@ impl<'a> PhaseLoop<'a> {
                 self.record_run(run);
             }
             if phase_dispatched {
+                let [file] = entering else {
+                    return Err(file_pipeline_failure(
+                        VoomError::Internal(format!(
+                            "failed file pipeline phase {phase_ordinal} had {} inputs",
+                            entering.len()
+                        )),
+                        self.last_run.as_ref(),
+                    ));
+                };
+                let [disposition] = planned.dispositions.as_slice() else {
+                    return Err(file_pipeline_failure(
+                        VoomError::Internal(format!(
+                            "failed file pipeline phase {phase_ordinal} had {} dispositions",
+                            planned.dispositions.len()
+                        )),
+                        self.last_run.as_ref(),
+                    ));
+                };
                 self.control_plane
-                    .finalize_failed_file_phase(
-                        self.job_id,
-                        phase_ordinal,
-                        &entering[0],
-                        &planned.dispositions[0],
-                    )
+                    .finalize_failed_file_phase(self.job_id, phase_ordinal, file, disposition)
                     .await
-                    .map_err(|source| {
-                        file_pipeline_failure(source, observations, self.last_run.as_ref())
-                    })?;
+                    .map_err(|source| file_pipeline_failure(source, self.last_run.as_ref()))?;
             }
             return Err(file_pipeline_failure(
                 failure.source,
-                observations,
                 self.last_run.as_ref(),
             ));
         }
@@ -649,9 +573,7 @@ impl<'a> PhaseLoop<'a> {
             .control_plane
             .continued_dispositions(self.job_id, phase_ordinal, entering, &planned.dispositions)
             .await
-            .map_err(|source| {
-                file_pipeline_failure(source, observations, self.last_run.as_ref())
-            })?;
+            .map_err(|source| file_pipeline_failure(source, self.last_run.as_ref()))?;
         if matches!(planned.dispositions.first(), Some(Disposition::Blocked)) {
             self.promotable_branches.clear();
         }
@@ -664,10 +586,7 @@ impl<'a> PhaseLoop<'a> {
         Ok(())
     }
 
-    async fn finish_file_pipeline(
-        self,
-        observations: Vec<FilePhaseObservation>,
-    ) -> Result<FilePipelineOutcome, FilePipelineFailure> {
+    async fn finish_file_pipeline(self) -> Result<FilePipelineOutcome, FilePipelineFailure> {
         let branch_id = self
             .file_phases
             .first()
@@ -675,7 +594,6 @@ impl<'a> PhaseLoop<'a> {
             .ok_or_else(|| {
                 file_pipeline_failure(
                     VoomError::Internal("file pipeline lost its branch id".to_owned()),
-                    &observations,
                     self.last_run.as_ref(),
                 )
             })?;
@@ -687,31 +605,22 @@ impl<'a> PhaseLoop<'a> {
                     std::slice::from_ref(&branch_id),
                 )
                 .await
-                .map_err(|source| {
-                    file_pipeline_failure(source, &observations, self.last_run.as_ref())
-                })?;
+                .map_err(|source| file_pipeline_failure(source, self.last_run.as_ref()))?;
             self.control_plane
                 .promote_terminal_artifacts(&self.promotion, &location_ids)
                 .await
-                .map_err(|source| {
-                    file_pipeline_failure(source, &observations, self.last_run.as_ref())
-                })?;
+                .map_err(|source| file_pipeline_failure(source, self.last_run.as_ref()))?;
             self.control_plane
                 .reclaim_superseded_intermediates(&self.promotion, &self.file_phases)
                 .await
-                .map_err(|source| {
-                    file_pipeline_failure(source, &observations, self.last_run.as_ref())
-                })?;
+                .map_err(|source| file_pipeline_failure(source, self.last_run.as_ref()))?;
         }
         self.control_plane
             .workflow_summaries
             .mark_file_terminal(self.job_id, &branch_id, self.control_plane.clock().now())
             .await
-            .map_err(|source| {
-                file_pipeline_failure(source, &observations, self.last_run.as_ref())
-            })?;
+            .map_err(|source| file_pipeline_failure(source, self.last_run.as_ref()))?;
         Ok(FilePipelineOutcome {
-            observations,
             last_run: self.last_run,
             continued_error: self.continued_error,
         })
@@ -772,7 +681,6 @@ impl<'a> PhaseLoop<'a> {
             plan,
             report,
             dispositions,
-            gate_admission,
             error_strategy,
         })
     }
@@ -807,160 +715,9 @@ impl<'a> PhaseLoop<'a> {
         }
     }
 
-    #[cfg(test)]
-    async fn persist_phase_outcome(
-        &mut self,
-        phase_ordinal: u32,
-        phase_name: &str,
-        planned: &PlannedPhase,
-        entry: &mut PhaseEntry,
-    ) -> Result<(), VoomError> {
-        let (rows, refreshed) = self
-            .control_plane
-            .finalize_phase(
-                self.job_id,
-                phase_ordinal,
-                &mut entry.entering,
-                &planned.dispositions,
-            )
-            .await?;
-        let outcome = phase_outcome(&rows.iter().map(|row| row.outcome).collect::<Vec<_>>());
-        self.file_phases.extend(rows);
-        let report = regenerate_phase_report(
-            &self.policy,
-            &self.context,
-            &self.base_draft,
-            phase_name,
-            &refreshed,
-            &planned.gate_admission,
-        )?;
-        let phase_row = self
-            .control_plane
-            .workflow_summaries
-            .upsert_phase_summary(
-                NewPhaseSummary {
-                    job_id: self.job_id,
-                    phase_ordinal,
-                    phase_name: phase_name.to_owned(),
-                    report: Some(report),
-                    outcome,
-                },
-                self.control_plane.clock().now(),
-            )
-            .await?;
-        self.phases.push(phase_row);
-        Ok(())
-    }
-
-    #[cfg(test)]
-    async fn persist_failed_phase(
-        &mut self,
-        phase_ordinal: u32,
-        entering: &[PhaseFile],
-        dispositions: &[Disposition],
-        mut failure: PhaseDispatchFailure,
-    ) -> Result<CoordinatorOutcome, CoordinatorError> {
-        let phase_dispatched = failure.run_summary.is_some();
-        if let Some(run) = failure.run_summary.take() {
-            self.record_run(run);
-        }
-        let phases = std::mem::take(&mut self.phases);
-        let file_phases = std::mem::take(&mut self.file_phases);
-        self.control_plane
-            .finalize_failed_phase(FailedPhaseFinalization {
-                job_id: self.job_id,
-                phase_ordinal,
-                files: entering,
-                dispositions,
-                phase_dispatched,
-                run_summary: self.last_run.as_ref(),
-                source: failure.source,
-                phases,
-                file_phases,
-            })
-            .await
-    }
-
     fn recombine_survivors(&mut self, entry: PhaseEntry) {
         self.files = entry.entering;
         self.files.extend(entry.passthrough);
-    }
-
-    #[cfg(test)]
-    async fn finish(self) -> Result<CoordinatorOutcome, CoordinatorError> {
-        let Self {
-            control_plane,
-            job_id,
-            promotion,
-            phases,
-            file_phases,
-            last_run,
-            continued_error,
-            promotable_branches,
-            ..
-        } = self;
-        let survivor_branches = promotable_branches.into_iter().collect::<Vec<_>>();
-        // Promote each file's terminal artifact into --output-dir before the job
-        // succeeds: a promotion conflict must fail the run, not leave a job
-        // marked succeeded with finals stranded in the working dir. A promotion
-        // failure here happens after every phase already committed, so carry the
-        // accumulated phase/file rows in the error's partial outcome rather than
-        // discarding the operator's execution diagnostics.
-        let promotion_result = match control_plane
-            .promotion_location_ids_for_branches(&file_phases, &survivor_branches)
-            .await
-        {
-            Ok(ids) => {
-                control_plane
-                    .promote_terminal_artifacts(&promotion, &ids)
-                    .await
-            }
-            Err(source) => Err(source),
-        };
-        if let Err(source) = promotion_result {
-            let summary = control_plane
-                .workflow_summaries
-                .insert_summary(
-                    job_grain_summary(job_id, last_run.as_ref()),
-                    control_plane.clock().now(),
-                )
-                .await
-                .map_err(CoordinatorError::from)?;
-            return Err(CoordinatorError {
-                source,
-                partial: Some(CoordinatorOutcome {
-                    job_id,
-                    summary,
-                    phases,
-                    file_phases,
-                }),
-            });
-        }
-        if let Some(source) = continued_error {
-            let now = control_plane.clock().now();
-            let summary = control_plane
-                .workflow_summaries
-                .insert_summary(job_grain_summary(job_id, last_run.as_ref()), now)
-                .await
-                .map_err(CoordinatorError::from)?;
-            control_plane
-                .fail_job(job_id, source.to_string(), now)
-                .await
-                .map_err(CoordinatorError::from)?;
-            return Err(CoordinatorError {
-                source,
-                partial: Some(CoordinatorOutcome {
-                    job_id,
-                    summary,
-                    phases,
-                    file_phases,
-                }),
-            });
-        }
-        control_plane
-            .finalize_succeeded_run(job_id, last_run.as_ref(), phases, file_phases)
-            .await
-            .map_err(CoordinatorError::from)
     }
 }
 
@@ -1262,64 +1019,19 @@ impl ControlPlane {
     /// Open the owned workflow job, run the supplied in-job phase-barrier work,
     /// and fail the job on every error that escapes after opening.
     #[cfg(test)]
-    async fn with_phase_barrier_job<'a, F>(
-        &'a self,
+    async fn with_phase_barrier_job<F, Fut>(
+        &self,
         run: F,
     ) -> Result<CoordinatorOutcome, CoordinatorError>
     where
-        F: FnOnce(JobId) -> CoordinatorFuture<'a>,
+        F: FnOnce(JobId) -> Fut,
+        Fut: Future<Output = Result<CoordinatorOutcome, CoordinatorError>>,
     {
         let (job, _) = self
-            .open_phase_barrier_job(&[], Vec::new(), Vec::new())
+            .open_sliding_file_job(&[], Vec::new(), Vec::new(), &[], 1)
             .await?;
         let result = run(job.id).await;
         self.finish_phase_barrier_job(job.id, result).await
-    }
-
-    #[cfg(test)]
-    async fn open_phase_barrier_job(
-        &self,
-        run_starts: &[NewFileRunStart],
-        history: Vec<NewFileRunHistory>,
-        seeds: Vec<PreparedResumeSeed>,
-    ) -> Result<(voom_store::repo::jobs::Job, Vec<FilePhaseSummary>), VoomError> {
-        let now = self.clock().now();
-        let mut tx = begin_tx(&self.pool).await?;
-        let job = self
-            .open_job_in_tx(
-                &mut tx,
-                NewJob {
-                    kind: WORKFLOW_JOB_KIND.to_owned(),
-                    priority: 0,
-                    created_at: now,
-                },
-            )
-            .await?;
-        self.workflow_summaries
-            .insert_file_run_starts_in_tx(&mut tx, job.id, run_starts)
-            .await?;
-        self.workflow_summaries
-            .insert_file_run_history_in_tx(&mut tx, job.id, &history)
-            .await?;
-        let mut rows = Vec::with_capacity(seeds.len());
-        for seed in seeds {
-            rows.push(
-                self.workflow_summaries
-                    .upsert_file_phase_summary_in_tx(
-                        &mut tx,
-                        seed.produced.seed(
-                            job.id,
-                            seed.phase_ordinal,
-                            seed.branch_id,
-                            seed.outcome,
-                        ),
-                        now,
-                    )
-                    .await?,
-            );
-        }
-        commit_tx(tx).await?;
-        Ok((job, rows))
     }
 
     async fn open_sliding_file_job(
@@ -1394,12 +1106,44 @@ impl ControlPlane {
         // `file_phases_for_job` and carried in `partial`), satisfying ADR-0007.
         match result {
             Ok(outcome) => Ok(outcome),
-            Err(err) => {
-                let _ = self
+            Err(err) => self.finalize_failed_phase_barrier_job(job_id, err).await,
+        }
+    }
+
+    async fn finalize_failed_phase_barrier_job(
+        &self,
+        job_id: JobId,
+        err: CoordinatorError,
+    ) -> Result<CoordinatorOutcome, CoordinatorError> {
+        let state = match self.jobs.get(job_id).await {
+            Ok(Some(job)) => job.state,
+            Ok(None) => {
+                return Err(coordinator_cleanup_error(
+                    err,
+                    job_id,
+                    &VoomError::NotFound(format!("job {job_id}")),
+                ));
+            }
+            Err(cleanup) => return Err(coordinator_cleanup_error(err, job_id, &cleanup)),
+        };
+        match state {
+            JobState::Open => {
+                if let Err(cleanup) = self
                     .fail_job(job_id, err.source.to_string(), self.clock().now())
-                    .await;
+                    .await
+                {
+                    return Err(coordinator_cleanup_error(err, job_id, &cleanup));
+                }
                 Err(err)
             }
+            JobState::Failed | JobState::Cancelled => Err(err),
+            JobState::Succeeded => Err(coordinator_cleanup_error(
+                err,
+                job_id,
+                &VoomError::Conflict(format!(
+                    "coordinator error cannot finalize succeeded job {job_id}"
+                )),
+            )),
         }
     }
 
@@ -1487,8 +1231,9 @@ impl ControlPlane {
 
     async fn run_sliding_file_window(
         &self,
-        inputs: PhaseLoopInputs,
+        mut inputs: PhaseLoopInputs,
     ) -> Result<CoordinatorOutcome, CoordinatorError> {
+        inputs.base_draft.media_snapshots.clear();
         let max_in_flight_files = inputs.options.file_window_limit()? as usize;
         let mut pending = inputs
             .files
@@ -1496,29 +1241,48 @@ impl ControlPlane {
             .cloned()
             .map(|file| (file.branch_id.clone(), file))
             .collect::<BTreeMap<_, _>>();
+        let mut seeds_by_branch = BTreeMap::<String, Vec<FilePhaseSummary>>::new();
+        for row in std::mem::take(&mut inputs.seed_file_phases) {
+            seeds_by_branch
+                .entry(row.branch_id.clone())
+                .or_default()
+                .push(row);
+        }
         let mut active = JoinSet::new();
-        let mut observations = Vec::new();
         let mut last_run = None;
         let mut continued_error = None;
         let mut fatal_error = None;
         loop {
             if fatal_error.is_none() {
-                self.fill_file_window(&inputs, &mut pending, &mut active, max_in_flight_files)
-                    .await?;
+                match self.file_window_job_error(inputs.job_id).await {
+                    Ok(error) => fatal_error = error,
+                    Err(source) => fatal_error = Some(source),
+                }
+            }
+            if fatal_error.is_none()
+                && let Err(source) = self
+                    .fill_file_window(
+                        &inputs,
+                        &mut pending,
+                        &mut seeds_by_branch,
+                        &mut active,
+                        max_in_flight_files,
+                    )
+                    .await
+            {
+                fatal_error = Some(source);
             }
             let Some(joined) = active.join_next().await else {
                 break;
             };
             match joined {
                 Ok(Ok(outcome)) => {
-                    observations.extend(outcome.observations);
                     merge_run_summary(&mut last_run, outcome.last_run);
                     if continued_error.is_none() {
                         continued_error = outcome.continued_error;
                     }
                 }
                 Ok(Err(failure)) => {
-                    observations.extend(failure.observations);
                     merge_run_summary(&mut last_run, failure.last_run);
                     if fatal_error.is_none() {
                         fatal_error = Some(failure.source);
@@ -1540,9 +1304,7 @@ impl ControlPlane {
             ))
             .into());
         }
-        let (phases, file_phases) = self
-            .persist_sliding_phase_summaries(&inputs, observations)
-            .await?;
+        let (phases, file_phases) = self.persist_sliding_phase_summaries(&inputs).await?;
         let failure = fatal_error.or(continued_error);
         if let Some(source) = failure {
             return self
@@ -1560,10 +1322,31 @@ impl ControlPlane {
             .map_err(CoordinatorError::from)
     }
 
+    async fn file_window_job_error(&self, job_id: JobId) -> Result<Option<VoomError>, VoomError> {
+        let job = self
+            .jobs
+            .get(job_id)
+            .await?
+            .ok_or_else(|| VoomError::NotFound(format!("sliding-window job {job_id}")))?;
+        Ok(match job.state {
+            JobState::Open => None,
+            JobState::Cancelled => Some(VoomError::UserCancellation(format!(
+                "sliding-window job {job_id} was cancelled"
+            ))),
+            JobState::Failed => Some(VoomError::PolicyExecution(format!(
+                "sliding-window job {job_id} failed while pipelines were active"
+            ))),
+            JobState::Succeeded => Some(VoomError::Conflict(format!(
+                "sliding-window job {job_id} succeeded before its pipelines drained"
+            ))),
+        })
+    }
+
     async fn fill_file_window(
         &self,
         inputs: &PhaseLoopInputs,
         pending: &mut BTreeMap<String, PhaseFile>,
+        seeds_by_branch: &mut BTreeMap<String, Vec<FilePhaseSummary>>,
         active: &mut JoinSet<Result<FilePipelineOutcome, FilePipelineFailure>>,
         max_in_flight_files: usize,
     ) -> Result<(), VoomError> {
@@ -1589,12 +1372,9 @@ impl ControlPlane {
                 context: inputs.context.clone(),
                 base_draft: inputs.base_draft.clone(),
                 files: vec![file],
-                seed_file_phases: inputs
-                    .seed_file_phases
-                    .iter()
-                    .filter(|row| row.branch_id == progress.branch_id)
-                    .cloned()
-                    .collect(),
+                seed_file_phases: seeds_by_branch
+                    .remove(&progress.branch_id)
+                    .unwrap_or_default(),
                 options: inputs.options.clone(),
                 runtimes: inputs.runtimes.clone(),
             };
@@ -1610,11 +1390,13 @@ impl ControlPlane {
     async fn persist_sliding_phase_summaries(
         &self,
         inputs: &PhaseLoopInputs,
-        observations: Vec<FilePhaseObservation>,
     ) -> Result<(Vec<PhaseSummary>, Vec<FilePhaseSummary>), VoomError> {
         let file_phases = self
             .workflow_summaries
             .file_phases_for_job(inputs.job_id)
+            .await?;
+        let observations = self
+            .durable_phase_observations(inputs, &file_phases)
             .await?;
         let mut by_phase = BTreeMap::<u32, Vec<FilePhaseObservation>>::new();
         for observation in observations {
@@ -1623,10 +1405,25 @@ impl ControlPlane {
                 .or_default()
                 .push(observation);
         }
+        let mut outcomes_by_phase = BTreeMap::<u32, Vec<FilePhaseOutcome>>::new();
+        for row in &file_phases {
+            outcomes_by_phase
+                .entry(row.phase_ordinal)
+                .or_default()
+                .push(row.outcome);
+        }
         let mut phases = Vec::with_capacity(by_phase.len());
         for (phase_ordinal, mut phase_observations) in by_phase {
             phase_observations.sort_by_key(|observation| observation.input_ordinal);
-            let phase_name = phase_observations[0].phase_name.clone();
+            let phase_name = phase_observations
+                .first()
+                .ok_or_else(|| {
+                    VoomError::Internal(format!(
+                        "phase {phase_ordinal} has no durable observations"
+                    ))
+                })?
+                .phase_name
+                .clone();
             let refreshed = phase_observations
                 .iter()
                 .map(|observation| (observation.input_ordinal, observation.snapshot.clone()))
@@ -1643,11 +1440,7 @@ impl ControlPlane {
                 &refreshed,
                 &gate_admission,
             )?;
-            let outcomes = file_phases
-                .iter()
-                .filter(|row| row.phase_ordinal == phase_ordinal)
-                .map(|row| row.outcome)
-                .collect::<Vec<_>>();
+            let outcomes = outcomes_by_phase.remove(&phase_ordinal).unwrap_or_default();
             phases.push(
                 self.workflow_summaries
                     .upsert_phase_summary(
@@ -1666,6 +1459,163 @@ impl ControlPlane {
         Ok((phases, file_phases))
     }
 
+    async fn durable_phase_observations(
+        &self,
+        inputs: &PhaseLoopInputs,
+        file_phases: &[FilePhaseSummary],
+    ) -> Result<Vec<FilePhaseObservation>, VoomError> {
+        let starts = self
+            .workflow_summaries
+            .file_run_starts_for_job(inputs.job_id)
+            .await?
+            .into_iter()
+            .map(|start| (start.branch_id.clone(), start))
+            .collect::<BTreeMap<_, _>>();
+        let mut histories = BTreeMap::<String, BTreeMap<u32, FilePhaseOutcome>>::new();
+        for row in self
+            .workflow_summaries
+            .file_run_history_for_job(inputs.job_id)
+            .await?
+        {
+            histories
+                .entry(row.branch_id)
+                .or_default()
+                .insert(row.phase_ordinal, row.outcome);
+        }
+        let mut rows_by_branch = BTreeMap::<String, Vec<&FilePhaseSummary>>::new();
+        for row in file_phases {
+            rows_by_branch
+                .entry(row.branch_id.clone())
+                .or_default()
+                .push(row);
+        }
+        let mut observations = Vec::new();
+        for progress in self
+            .workflow_summaries
+            .file_progress_for_job(inputs.job_id)
+            .await?
+        {
+            let start = starts.get(&progress.branch_id).ok_or_else(|| {
+                VoomError::NotFound(format!(
+                    "workflow file run start {}/{}",
+                    inputs.job_id, progress.branch_id
+                ))
+            })?;
+            let history = histories.remove(&progress.branch_id).unwrap_or_default();
+            let rows = rows_by_branch
+                .remove(&progress.branch_id)
+                .unwrap_or_default();
+            observations.extend(
+                self.durable_branch_observations(
+                    inputs,
+                    start,
+                    progress.input_ordinal,
+                    history,
+                    rows,
+                )
+                .await?,
+            );
+        }
+        Ok(observations)
+    }
+
+    async fn durable_branch_observations(
+        &self,
+        inputs: &PhaseLoopInputs,
+        start: &voom_store::repo::workflow_summaries::FileRunStart,
+        input_ordinal: u32,
+        phase_history: BTreeMap<u32, FilePhaseOutcome>,
+        mut rows: Vec<&FilePhaseSummary>,
+    ) -> Result<Vec<FilePhaseObservation>, VoomError> {
+        let version = self
+            .identity
+            .get_file_version(start.starting_file_version_id)
+            .await?
+            .ok_or_else(|| {
+                VoomError::NotFound(format!(
+                    "file version {} for durable phase fold",
+                    start.starting_file_version_id
+                ))
+            })?;
+        let snapshot = self.latest_snapshot_for_version(version.id).await?;
+        let mut file = PhaseFile {
+            asset_id: version.file_asset_id,
+            version_id: version.id,
+            snapshot,
+            branch_id: start.branch_id.clone(),
+            ordinal: input_ordinal,
+            resume_ordinal: start.starting_phase_ordinal,
+            phase_history,
+        };
+        rows.sort_by_key(|row| row.phase_ordinal);
+        let mut observations = Vec::new();
+        for row in rows {
+            if row.phase_ordinal < start.starting_phase_ordinal {
+                continue;
+            }
+            let phase_name = inputs
+                .policy
+                .phase_order
+                .get(usize::try_from(row.phase_ordinal).map_err(|error| {
+                    VoomError::Internal(format!("phase ordinal conversion failed: {error}"))
+                })?)
+                .ok_or_else(|| {
+                    VoomError::Conflict(format!(
+                        "durable branch {} has out-of-range phase {}",
+                        row.branch_id, row.phase_ordinal
+                    ))
+                })?
+                .clone();
+            let gate_admitted =
+                phase_gate_admission(&inputs.policy, &phase_name, std::slice::from_ref(&file))?
+                    .into_iter()
+                    .next()
+                    .ok_or_else(|| {
+                        VoomError::Internal(format!(
+                            "phase {} produced no gate decision for branch {}",
+                            row.phase_ordinal, row.branch_id
+                        ))
+                    })?;
+            if let Some(snapshot_id) = row.reprobe_snapshot_id {
+                file.snapshot = self
+                    .identity
+                    .get_media_snapshot(snapshot_id)
+                    .await?
+                    .ok_or_else(|| {
+                        VoomError::NotFound(format!(
+                            "media snapshot {snapshot_id} for durable phase fold"
+                        ))
+                    })?;
+                file.version_id = file.snapshot.file_version_id;
+            }
+            observations.push(FilePhaseObservation {
+                phase_ordinal: row.phase_ordinal,
+                phase_name,
+                input_ordinal,
+                snapshot: file.snapshot.clone(),
+                gate_admitted,
+            });
+            file.phase_history.insert(row.phase_ordinal, row.outcome);
+        }
+        Ok(observations)
+    }
+
+    async fn latest_snapshot_for_version(
+        &self,
+        version_id: FileVersionId,
+    ) -> Result<MediaSnapshot, VoomError> {
+        self.identity
+            .list_media_snapshots_by_version(version_id)
+            .await?
+            .into_iter()
+            .max_by_key(|snapshot| snapshot.id.0)
+            .ok_or_else(|| {
+                VoomError::NotFound(format!(
+                    "media snapshot for file version {version_id} during durable phase fold"
+                ))
+            })
+    }
+
     async fn finish_sliding_failure(
         &self,
         job_id: JobId,
@@ -1679,7 +1629,6 @@ impl ControlPlane {
             .workflow_summaries
             .insert_summary(job_grain_summary(job_id, last_run), now)
             .await?;
-        let _ = self.fail_job(job_id, source.to_string(), now).await;
         Err(CoordinatorError {
             source,
             partial: Some(CoordinatorOutcome {

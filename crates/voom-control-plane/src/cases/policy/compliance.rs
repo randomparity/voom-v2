@@ -571,6 +571,8 @@ impl From<voom_store::repo::artifacts::ArtifactVerification> for ArtifactVerific
     }
 }
 
+pub const DEFAULT_MAX_IN_FLIGHT_FILES: usize = 4;
+
 #[derive(Debug, Clone)]
 pub struct ComplianceExecutionOptions {
     /// Maximum number of file pipelines admitted into the coordinator's
@@ -597,7 +599,7 @@ impl Default for ComplianceExecutionOptions {
     fn default() -> Self {
         let defaults = WorkflowExecutorOptions::default();
         Self {
-            max_in_flight_files: 4,
+            max_in_flight_files: DEFAULT_MAX_IN_FLIGHT_FILES,
             transcode_staging_root: defaults.artifact_roots.transcode.staging_root,
             transcode_target_dir: defaults.artifact_roots.transcode.target_dir,
             remux_staging_root: defaults.artifact_roots.remux.staging_root,

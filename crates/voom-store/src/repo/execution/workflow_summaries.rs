@@ -353,53 +353,42 @@ impl SqliteWorkflowSummaryRepo {
             .begin_with("BEGIN IMMEDIATE")
             .await
             .map_err(|error| VoomError::database_context("file admission begin", error))?;
-        let capacity: Option<i64> = sqlx::query_scalar(
-            "SELECT max_in_flight_files FROM workflow_file_windows WHERE job_id = ?",
-        )
-        .bind(i64_from_u64(job_id.0))
-        .fetch_optional(&mut *tx)
-        .await
-        .map_err(|error| VoomError::database_context("file window capacity", error))?;
-        let capacity = capacity
-            .ok_or_else(|| VoomError::NotFound(format!("workflow file window for job {job_id}")))?;
-        let active: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM workflow_file_progress \
-             WHERE job_id = ? AND state = 'active'",
-        )
-        .bind(i64_from_u64(job_id.0))
-        .fetch_one(&mut *tx)
-        .await
-        .map_err(|error| VoomError::database_context("active file count", error))?;
-        if active >= capacity {
-            commit(tx).await?;
-            return Ok(None);
-        }
-        let branch: Option<String> = sqlx::query_scalar(
-            "SELECT branch_id FROM workflow_file_progress \
-             WHERE job_id = ? AND state = 'pending' ORDER BY input_ordinal LIMIT 1",
-        )
-        .bind(i64_from_u64(job_id.0))
-        .fetch_optional(&mut *tx)
-        .await
-        .map_err(|error| VoomError::database_context("next pending file", error))?;
-        let Some(branch) = branch else {
-            commit(tx).await?;
-            return Ok(None);
-        };
         let timestamp = iso8601(now)?;
-        sqlx::query(
+        let sql = format!(
             "UPDATE workflow_file_progress SET state = 'active', admitted_at = ? \
-             WHERE job_id = ? AND branch_id = ? AND state = 'pending'",
-        )
-        .bind(timestamp)
-        .bind(i64_from_u64(job_id.0))
-        .bind(&branch)
-        .execute(&mut *tx)
-        .await
-        .map_err(|error| VoomError::database_context("file admission", error))?;
-        let row = fetch_file_progress(&mut *tx, job_id, &branch).await?;
+             WHERE (job_id, branch_id) = ( \
+                 SELECT pending.job_id, pending.branch_id \
+                 FROM workflow_file_progress AS pending \
+                 JOIN workflow_file_windows AS window ON window.job_id = pending.job_id \
+                 WHERE pending.job_id = ? AND pending.state = 'pending' \
+                   AND (SELECT COUNT(*) FROM workflow_file_progress AS active \
+                        WHERE active.job_id = pending.job_id AND active.state = 'active') \
+                       < window.max_in_flight_files \
+                 ORDER BY pending.input_ordinal LIMIT 1 \
+             ) \
+             RETURNING {FILE_PROGRESS_COLUMNS}"
+        );
+        let row: Option<FileProgressRow> = sqlx::query_as(&sql)
+            .bind(timestamp)
+            .bind(i64_from_u64(job_id.0))
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(|error| VoomError::database_context("file admission", error))?;
+        if row.is_none() {
+            let exists: Option<i64> =
+                sqlx::query_scalar("SELECT 1 FROM workflow_file_windows WHERE job_id = ?")
+                    .bind(i64_from_u64(job_id.0))
+                    .fetch_optional(&mut *tx)
+                    .await
+                    .map_err(|error| VoomError::database_context("file window existence", error))?;
+            if exists.is_none() {
+                return Err(VoomError::NotFound(format!(
+                    "workflow file window for job {job_id}"
+                )));
+            }
+        }
         commit(tx).await?;
-        Ok(row)
+        row.map(decode_file_progress).transpose()
     }
 
     pub async fn advance_file_progress(
@@ -409,19 +398,58 @@ impl SqliteWorkflowSummaryRepo {
         expected_phase_ordinal: u32,
         next_phase_ordinal: u32,
     ) -> Result<bool, VoomError> {
-        let result = sqlx::query(
-            "UPDATE workflow_file_progress SET next_phase_ordinal = ? \
-             WHERE job_id = ? AND branch_id = ? AND state = 'active' \
-               AND next_phase_ordinal = ?",
+        let mut tx = begin(&self.pool).await?;
+        let advanced = advance_file_progress_in_tx(
+            &mut tx,
+            job_id,
+            branch_id,
+            expected_phase_ordinal,
+            next_phase_ordinal,
         )
-        .bind(i64::from(next_phase_ordinal))
-        .bind(i64_from_u64(job_id.0))
-        .bind(branch_id)
-        .bind(i64::from(expected_phase_ordinal))
-        .execute(&self.pool)
-        .await
-        .map_err(|error| VoomError::database_context("file progress advance", error))?;
-        Ok(result.rows_affected() == 1)
+        .await?;
+        commit(tx).await?;
+        Ok(advanced)
+    }
+
+    pub async fn upsert_file_phase_summary_and_advance(
+        &self,
+        input: NewFilePhaseSummary,
+        expected_phase_ordinal: u32,
+        next_phase_ordinal: u32,
+        now: OffsetDateTime,
+    ) -> Result<FilePhaseSummary, VoomError> {
+        let mut tx = begin(&self.pool).await?;
+        let row = self
+            .upsert_file_phase_summary_in_tx(&mut tx, input, now)
+            .await?;
+        let advanced = advance_file_progress_in_tx(
+            &mut tx,
+            row.job_id,
+            &row.branch_id,
+            expected_phase_ordinal,
+            next_phase_ordinal,
+        )
+        .await?;
+        if !advanced {
+            let progress = fetch_file_progress(&mut *tx, row.job_id, &row.branch_id)
+                .await?
+                .ok_or_else(|| {
+                    VoomError::NotFound(format!("file progress {}/{}", row.job_id, row.branch_id))
+                })?;
+            if progress.next_phase_ordinal != next_phase_ordinal
+                || !matches!(
+                    progress.state,
+                    FileProgressState::Active | FileProgressState::Terminal
+                )
+            {
+                return Err(VoomError::Conflict(format!(
+                    "file progress cursor for branch {} did not advance from phase {}",
+                    row.branch_id, expected_phase_ordinal
+                )));
+            }
+        }
+        commit(tx).await?;
+        Ok(row)
     }
 
     pub async fn mark_file_terminal(
@@ -479,6 +507,28 @@ impl SqliteWorkflowSummaryRepo {
     pub fn new(pool: SqlitePool) -> Self {
         Self { pool }
     }
+}
+
+async fn advance_file_progress_in_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    job_id: JobId,
+    branch_id: &str,
+    expected_phase_ordinal: u32,
+    next_phase_ordinal: u32,
+) -> Result<bool, VoomError> {
+    let result = sqlx::query(
+        "UPDATE workflow_file_progress SET next_phase_ordinal = ? \
+             WHERE job_id = ? AND branch_id = ? AND state = 'active' \
+               AND next_phase_ordinal = ?",
+    )
+    .bind(i64::from(next_phase_ordinal))
+    .bind(i64_from_u64(job_id.0))
+    .bind(branch_id)
+    .bind(i64::from(expected_phase_ordinal))
+    .execute(&mut **tx)
+    .await
+    .map_err(|error| VoomError::database_context("file progress advance", error))?;
+    Ok(result.rows_affected() == 1)
 }
 
 impl Repository for SqliteWorkflowSummaryRepo {}

@@ -37,9 +37,14 @@ where
     Fut: Future<Output = Result<(), voom_core::VoomError>>,
 {
     let starts = super::run_starts_for_files(&inputs.files);
+    let limit = options.file_window_limit()?;
     let (job, _) = cp
-        .open_phase_barrier_job(&starts, Vec::new(), Vec::new())
+        .open_sliding_file_job(&starts, Vec::new(), Vec::new(), &inputs.files, limit)
         .await?;
+    cp.workflow_summaries()
+        .admit_next_file(job.id, cp.clock().now())
+        .await?
+        .ok_or_else(|| voom_core::VoomError::Internal("test file was not admitted".to_owned()))?;
     let super::PhaseBarrierRunInputs {
         policy,
         context,
@@ -60,8 +65,26 @@ where
             runtimes,
         },
     )
-    .run_after_phase_plan(after_phase_plan)
+    .run_file_pipeline_after_phase_plan(after_phase_plan)
     .await;
+    let result = match result {
+        Ok(_) => panic!("fault-injected pipeline unexpectedly succeeded"),
+        Err(failure) => {
+            let summary = cp
+                .workflow_summaries()
+                .insert_summary(super::zero_phase_summary(job.id), cp.clock().now())
+                .await?;
+            Err(super::CoordinatorError {
+                source: failure.source,
+                partial: Some(super::CoordinatorOutcome {
+                    job_id: job.id,
+                    summary,
+                    phases: Vec::new(),
+                    file_phases: Vec::new(),
+                }),
+            })
+        }
+    };
     cp.finish_phase_barrier_job(job.id, result).await
 }
 
@@ -89,9 +112,14 @@ where
                 seeds,
             },
     } = inputs;
+    let limit = options.file_window_limit()?;
     let (job, seed_file_phases) = cp
-        .open_phase_barrier_job(&run_starts, history, seeds)
+        .open_sliding_file_job(&run_starts, history, seeds, &files, limit)
         .await?;
+    cp.workflow_summaries()
+        .admit_next_file(job.id, cp.clock().now())
+        .await?
+        .ok_or_else(|| voom_core::VoomError::Internal("test file was not admitted".to_owned()))?;
     let result = super::PhaseLoop::new(
         cp,
         super::PhaseLoopInputs {
@@ -100,14 +128,32 @@ where
             context,
             base_draft,
             files,
-            seed_file_phases,
+            seed_file_phases: seed_file_phases.clone(),
             promotion_job_ids: vec![job.id, prior_job_id],
             options,
             runtimes,
         },
     )
-    .run_after_phase_plan(after_phase_plan)
+    .run_file_pipeline_after_phase_plan(after_phase_plan)
     .await;
+    let result = match result {
+        Ok(_) => panic!("fault-injected resume pipeline unexpectedly succeeded"),
+        Err(failure) => {
+            let summary = cp
+                .workflow_summaries()
+                .insert_summary(super::zero_phase_summary(job.id), cp.clock().now())
+                .await?;
+            Err(super::CoordinatorError {
+                source: failure.source,
+                partial: Some(super::CoordinatorOutcome {
+                    job_id: job.id,
+                    summary,
+                    phases: Vec::new(),
+                    file_phases: seed_file_phases,
+                }),
+            })
+        }
+    };
     cp.finish_phase_barrier_job(job.id, result).await
 }
 
@@ -764,35 +810,21 @@ async fn fresh_run_records_retained_active_version_at_phase_zero() {
 }
 
 #[tokio::test]
-async fn superseded_prepared_fresh_phase_rejects_every_planned_file_before_dispatch() {
+async fn superseded_prepared_fresh_pipeline_rejects_dispatch() {
     let (cp, _tmp) = cp().await;
-    let first = seed_version(
+    let selected = seed_version(
         &cp,
-        "/lib/superseded/first.mkv",
-        "hash-superseded-first",
+        "/lib/superseded/movie.mkv",
+        "hash-superseded-v1",
         reprobe_payload("h264"),
     )
     .await;
-    let second = seed_version(
-        &cp,
-        "/lib/superseded/second.mkv",
-        "hash-superseded-second-v1",
-        reprobe_payload("h264"),
-    )
-    .await;
-    let files = vec![
-        phase_file(&cp, first, "first").await,
-        phase_file(&cp, second, "second").await,
-    ];
-    let snapshots = files
-        .iter()
-        .map(|file| file.snapshot.clone())
-        .collect::<Vec<_>>();
+    let file = phase_file(&cp, selected, "movie").await;
     let prepared = super::PhaseBarrierRunInputs {
         policy: transcode_hevc_policy(),
         context: voom_plan::PlanningContext::default(),
-        base_draft: file_draft("superseded-fresh", &snapshots),
-        files,
+        base_draft: file_draft("superseded-fresh", std::slice::from_ref(&file.snapshot)),
+        files: vec![file],
     };
     let promotion_cp = cp.clone();
     let error = run_prepared_fresh_after_phase_plan(
@@ -804,20 +836,15 @@ async fn superseded_prepared_fresh_phase_rejects_every_planned_file_before_dispa
             let cp = promotion_cp.clone();
             async move {
                 assert_eq!(phase_ordinal, 0);
-                advance_chain_tip(
-                    &cp,
-                    second,
-                    "hash-superseded-second-v2",
-                    reprobe_payload("hevc"),
-                )
-                .await;
+                advance_chain_tip(&cp, selected, "hash-superseded-v2", reprobe_payload("hevc"))
+                    .await;
                 Ok(())
             }
         },
     )
     .await
     .unwrap_err();
-    let current = active_version_id(&cp, second).await;
+    let current = active_version_id(&cp, selected).await;
 
     assert_eq!(
         error.source.code(),
@@ -825,7 +852,7 @@ async fn superseded_prepared_fresh_phase_rejects_every_planned_file_before_dispa
         "{:?}",
         error.source
     );
-    assert!(error.source.to_string().contains(&second.to_string()));
+    assert!(error.source.to_string().contains(&selected.to_string()));
     assert!(error.source.to_string().contains(&current.to_string()));
     let job_id = latest_job_id(&cp).await;
     assert_eq!(error.partial.as_ref().unwrap().job_id, job_id);
@@ -844,11 +871,9 @@ async fn superseded_prepared_fresh_phase_rejects_every_planned_file_before_dispa
         .file_run_starts_for_job(job_id)
         .await
         .unwrap();
-    assert_eq!(starts.len(), 2);
-    assert_eq!(starts[0].starting_file_version_id, first);
-    assert_eq!(starts[1].starting_file_version_id, second);
-    assert_active_version(&cp, first, first).await;
-    assert_active_version(&cp, second, current).await;
+    assert_eq!(starts.len(), 1);
+    assert_eq!(starts[0].starting_file_version_id, selected);
+    assert_active_version(&cp, selected, current).await;
 }
 
 #[tokio::test]
@@ -1625,13 +1650,29 @@ async fn phase_finalization_records_skipped_survivors_gate_history() {
         reprobe_payload("h264"),
     )
     .await;
-    let skipped = phase_file(&cp, skipped_version, "skipped").await;
-    let committed = phase_file(&cp, committed_parent, "committed").await;
-    let job_id = open_workflow_job(&cp).await;
+    let mut skipped = phase_file(&cp, skipped_version, "skipped").await;
+    skipped.ordinal = 0;
+    let mut committed = phase_file(&cp, committed_parent, "committed").await;
+    committed.ordinal = 1;
     let mut files = vec![skipped, committed];
+    let starts = super::run_starts_for_files(&files);
+    let (job, _) = cp
+        .open_sliding_file_job(&starts, Vec::new(), Vec::new(), &files, 2)
+        .await
+        .unwrap();
+    cp.workflow_summaries()
+        .admit_next_file(job.id, T0)
+        .await
+        .unwrap()
+        .unwrap();
+    cp.workflow_summaries()
+        .admit_next_file(job.id, T0)
+        .await
+        .unwrap()
+        .unwrap();
 
     cp.finalize_phase(
-        job_id,
+        job.id,
         0,
         &mut files,
         &[
@@ -1652,6 +1693,178 @@ async fn phase_finalization_records_skipped_survivors_gate_history() {
     assert_eq!(
         files[1].phase_history.get(&0),
         Some(&FilePhaseOutcome::Skipped)
+    );
+}
+
+#[tokio::test]
+async fn admission_failure_drains_the_already_admitted_pipeline() {
+    let (cp, _tmp) = cp().await;
+    let policy = cp
+        .create_policy_document(
+            "admission-drain",
+            "policy \"admission drain\" {\n  phase inspect {}\n}\n",
+        )
+        .await
+        .unwrap();
+    let first = seed_version(
+        &cp,
+        "/lib/admission/first.mkv",
+        "hash-admission-first",
+        reprobe_payload("h264"),
+    )
+    .await;
+    let second = seed_version(
+        &cp,
+        "/lib/admission/second.mkv",
+        "hash-admission-second",
+        reprobe_payload("h264"),
+    )
+    .await;
+    let snapshots = vec![
+        latest_snapshot(&cp, first).await,
+        latest_snapshot(&cp, second).await,
+    ];
+    let input = cp
+        .create_policy_input_set(file_draft("admission-drain", &snapshots))
+        .await
+        .unwrap();
+    let runtimes = crate::workflow::WorkerRuntimeRegistry::new();
+    let (_, prepared) = cp
+        .prepare_phase_barrier_run_inputs(policy.version.id, input.id, &runtimes)
+        .await
+        .unwrap();
+    let starts = super::run_starts_for_files(&prepared.files);
+    let options = ComplianceExecutionOptions {
+        max_in_flight_files: 2,
+        ..ComplianceExecutionOptions::default()
+    };
+    let (job, _) = cp
+        .open_sliding_file_job(&starts, Vec::new(), Vec::new(), &prepared.files, 2)
+        .await
+        .unwrap();
+    sqlx::query(
+        "CREATE TRIGGER fail_second_admission BEFORE UPDATE ON workflow_file_progress \
+         WHEN OLD.input_ordinal = 2 \
+         BEGIN SELECT RAISE(ABORT, 'forced second admission failure'); END",
+    )
+    .execute(&cp.pool)
+    .await
+    .unwrap();
+
+    let result = cp
+        .run_sliding_file_window(super::PhaseLoopInputs {
+            job_id: job.id,
+            promotion_job_ids: vec![job.id],
+            policy: prepared.policy,
+            context: prepared.context,
+            base_draft: prepared.base_draft,
+            files: prepared.files,
+            seed_file_phases: Vec::new(),
+            options,
+            runtimes,
+        })
+        .await;
+    let error = cp
+        .finish_phase_barrier_job(job.id, result)
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.source.code(), "DB_UNREACHABLE");
+    let progress = cp
+        .workflow_summaries()
+        .file_progress_for_job(job.id)
+        .await
+        .unwrap();
+    assert_eq!(
+        progress
+            .iter()
+            .map(|row| (row.input_ordinal, row.state.as_str()))
+            .collect::<Vec<_>>(),
+        vec![(1, "terminal"), (2, "pending")]
+    );
+    assert_eq!(
+        cp.workflow_summaries()
+            .file_phases_for_job(job.id)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(job_state(&cp, job.id).await, "failed");
+}
+
+#[tokio::test]
+async fn cancelled_sliding_job_admits_no_pending_files() {
+    let (cp, _tmp) = cp().await;
+    let version = seed_version(
+        &cp,
+        "/lib/cancelled/movie.mkv",
+        "hash-cancelled",
+        reprobe_payload("h264"),
+    )
+    .await;
+    let file = phase_file(&cp, version, "movie").await;
+    let policy = cp
+        .create_policy_document(
+            "cancelled-window",
+            "policy \"cancelled window\" {\n  phase inspect {}\n}\n",
+        )
+        .await
+        .unwrap();
+    let input = cp
+        .create_policy_input_set(file_draft(
+            "cancelled-window",
+            std::slice::from_ref(&file.snapshot),
+        ))
+        .await
+        .unwrap();
+    let runtimes = crate::workflow::WorkerRuntimeRegistry::new();
+    let (_, prepared) = cp
+        .prepare_phase_barrier_run_inputs(policy.version.id, input.id, &runtimes)
+        .await
+        .unwrap();
+    let starts = super::run_starts_for_files(&prepared.files);
+    let options = ComplianceExecutionOptions::default();
+    let (job, _) = cp
+        .open_sliding_file_job(&starts, Vec::new(), Vec::new(), &prepared.files, 4)
+        .await
+        .unwrap();
+    cp.cancel_job(job.id, "operator cancelled sliding run".to_owned(), T0)
+        .await
+        .unwrap();
+
+    let result = cp
+        .run_sliding_file_window(super::PhaseLoopInputs {
+            job_id: job.id,
+            promotion_job_ids: vec![job.id],
+            policy: prepared.policy,
+            context: prepared.context,
+            base_draft: prepared.base_draft,
+            files: prepared.files,
+            seed_file_phases: Vec::new(),
+            options,
+            runtimes,
+        })
+        .await;
+    let error = cp
+        .finish_phase_barrier_job(job.id, result)
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.source.code(), "USER_CANCELLATION");
+    let progress = cp
+        .workflow_summaries()
+        .file_progress_for_job(job.id)
+        .await
+        .unwrap();
+    assert_eq!(progress[0].state.as_str(), "pending");
+    assert_eq!(job_state(&cp, job.id).await, "cancelled");
+    assert!(
+        cp.workflow_summaries()
+            .file_phases_for_job(job.id)
+            .await
+            .unwrap()
+            .is_empty()
     );
 }
 
@@ -1706,10 +1919,12 @@ async fn resume_carries_phase_history_across_repeated_new_jobs() {
     );
 
     let (next_job, _) = cp
-        .open_phase_barrier_job(
+        .open_sliding_file_job(
             &prepared.run_starts,
             prepared.history.clone(),
             prepared.seeds,
+            &prepared.files,
+            4,
         )
         .await
         .unwrap();
@@ -1801,7 +2016,13 @@ async fn reconcile_resume_backfills_committed_tip_without_row() {
     assert_eq!(prepared.seeds[0].phase_ordinal, 1);
     assert_eq!(prepared.run_starts[0].starting_phase_ordinal, 2);
     let (new_job, backfilled) = cp
-        .open_phase_barrier_job(&prepared.run_starts, prepared.history, prepared.seeds)
+        .open_sliding_file_job(
+            &prepared.run_starts,
+            prepared.history,
+            prepared.seeds,
+            &prepared.files,
+            4,
+        )
         .await
         .unwrap();
 
@@ -2151,7 +2372,13 @@ async fn phase_barrier_job_open_rolls_back_job_event_starts_and_seed() {
     let before = durable_resume_counts(&cp).await;
 
     let error = cp
-        .open_phase_barrier_job(&prepared.run_starts, prepared.history, prepared.seeds)
+        .open_sliding_file_job(
+            &prepared.run_starts,
+            prepared.history,
+            prepared.seeds,
+            &prepared.files,
+            4,
+        )
         .await
         .unwrap_err();
 
