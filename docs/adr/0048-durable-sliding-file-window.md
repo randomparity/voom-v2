@@ -50,20 +50,25 @@ reuse, chain-tip authority, and append-only failure consequences remain.
 
 ### Durable admission and cursor state
 
-Migration 0028 adds `workflow_file_progress`, one row for every
-`(job_id, branch_id)`, with:
+Migration 0028 adds two job-owned tables:
 
-- stable input ordinal;
-- state `pending`, `active`, or `terminal`;
-- next phase ordinal;
-- admitted and terminal timestamps.
+- `workflow_file_windows`, one row per job, records the positive configured
+  maximum and creation time; and
+- `workflow_file_progress`, one row for every `(job_id, branch_id)`, with:
+
+  - stable input ordinal;
+  - state `pending`, `active`, or `terminal`;
+  - next phase ordinal;
+  - admitted and terminal timestamps.
 
 The row has a composite foreign key to `workflow_file_run_starts`. Job opening
 inserts run starts, inherited history, reconciliation seeds, and progress rows
 in one transaction. A transaction may move the next ordinal `pending` row to
-`active` only when the active count is below the job's configured file-window
-limit. The primary key prevents duplicate admission, and the ordinal gives
-restart a deterministic refill order.
+`active` only when the active count is below the job's durably recorded
+file-window limit. The primary key prevents duplicate admission, and the
+ordinal gives restart a deterministic refill order. Reads reject a missing,
+zero, or inconsistent job-level window record instead of substituting the
+current process's option.
 
 A file-phase row and the progress cursor advance in the same transaction.
 First-write-wins file-phase persistence plus the expected current cursor makes
@@ -103,13 +108,16 @@ job remains cancelled and its committed file-phase rows remain resumable.
 
 ### Coherent summaries without barriers
 
-Per-file rows remain incremental and authoritative. The coordinator collects
-the refreshed snapshot and gate decision for every completed file phase. When
-the run drains—successfully, after cancellation, or after failure—it folds the
-available completions by phase ordinal into the existing phase summaries and
-reports. A phase report therefore contains every file that actually entered
-that phase, regardless of completion order. Job counters continue to come from
-job-scoped durable tickets and the merged invocation telemetry.
+Per-file rows remain incremental and authoritative. When the run drains—
+successfully, after cancellation, or after failure—the coordinator reconstructs
+each available phase solely from durable run starts, inherited history,
+file-phase rows, produced snapshots, and job-scoped tickets. It folds those
+facts by phase ordinal into the existing phase summaries and reports. A phase
+report therefore contains every file that actually entered that phase,
+regardless of completion order, and a resumed job can rebuild the same inputs
+without an in-memory completion log from the interrupted process. Job counters
+continue to come from job-scoped durable tickets and merged invocation
+telemetry.
 
 No CLI JSON envelope or compliance report type changes.
 
@@ -124,6 +132,8 @@ No CLI JSON envelope or compliance report type changes.
 - The progress table duplicates the next ordinal derivable from rows, but makes
   admission and cursor transitions atomic and inspectable. Resume validates
   both representations and fails closed on disagreement.
+- A second, job-level row persists the capacity used for every admission
+  transition; it is intentionally separate from worker-operation capacity.
 - Phase reports become drain-time folds rather than barrier-time writes.
   File-phase rows continue to expose partial progress while execution runs.
 
@@ -154,3 +164,9 @@ facts. Waiting to form a whole-input plan recreates the barrier.
 Rejected because it could delete sources or artifacts outside this run and
 would erase recovery inputs. Cleanup is limited to this run's earlier produced
 locations under coordinator-owned working directories.
+
+### Keep the existing barriers and increase staging capacity
+
+Rejected because retained intermediates scale with total input size and defer
+promotion until the slowest files complete. More storage postpones the failure
+point but does not bound it or unblock per-file progress.

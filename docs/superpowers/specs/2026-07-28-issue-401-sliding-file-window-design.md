@@ -32,10 +32,12 @@ envelope, and compliance report wire types are unchanged.
 `compliance execute --max-in-flight-files` accept a positive integer and
 default to four. Zero fails before a job opens.
 
-Job opening durably inserts one progress row for every input. At most the
-configured number may be `active`. Admission is stable input-ordinal order,
-except resume prioritizes branches that were active in the prior interrupted
-run before branches that were still pending.
+Job opening durably inserts one job-level window row containing the positive
+configured limit and one progress row for every input. At most that durable
+limit may be `active`; admission does not consult a mutable process default.
+Admission is stable input-ordinal order, except resume prioritizes branches that
+were active in the prior interrupted run before branches that were still
+pending.
 
 The coordinator fills empty slots while pending inputs remain. It refills one
 only after the prior occupant is durably terminal.
@@ -79,9 +81,11 @@ still non-terminal.
 
 ### Persistence and resume
 
-Migration 0028 adds `workflow_file_progress` keyed by job and branch. Progress
-records stable ordinal, admission state, next phase, and transition times.
-Run-start/history/seed/progress creation is atomic.
+Migration 0028 adds `workflow_file_windows` keyed by job and
+`workflow_file_progress` keyed by job and branch. The former records the
+positive capacity; progress records stable ordinal, admission state, next
+phase, and transition times. Window/run-start/history/seed/progress creation is
+atomic.
 
 File-phase insertion and next-phase advancement are atomic and conditional on
 the expected cursor. A duplicate completion returns the existing row without
@@ -103,9 +107,11 @@ Cancellation stops admission. Already durable per-file outcomes remain
 queryable and resumable. No cancelled job is rewritten as failed.
 
 The run keeps one job. File-phase rows persist as work completes. At drain, the
-coordinator folds available per-file completions by policy ordinal into one
-phase summary/report and merges invocation telemetry into one job summary.
-Existing report and envelope fields keep their meanings.
+coordinator reconstructs available per-file completions from durable run
+starts, history, rows, snapshots, and tickets, folds them by policy ordinal into
+one phase summary/report, and merges invocation telemetry into one job summary.
+The fold must not depend on an in-memory completion log lost on process
+interruption. Existing report and envelope fields keep their meanings.
 
 ## Failure modes
 
@@ -137,8 +143,9 @@ Existing report and envelope fields keep their meanings.
    durable evidence remain.
 6. Resume after partial execution does not create tickets for completed phases,
    does not admit a branch twice, and processes completed-but-unpromoted work.
-7. Repository tests reject zero limits, duplicate ordinals, cursor mismatch,
-   over-window admission, and invalid state/timestamp combinations.
+7. Repository tests reject missing/zero durable limits, duplicate ordinals,
+   cursor mismatch, over-window admission, and invalid state/timestamp
+   combinations.
 8. CLI tests prove default/explicit limit plumbing without changing the JSON
    envelope.
 9. Focused tests and `just ci` pass with zero warnings.
