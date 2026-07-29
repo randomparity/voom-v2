@@ -347,7 +347,7 @@ async fn sliding_window_migration_backfills_legacy_progress_and_accepts_blocked(
         migration_path.display()
     );
 
-    let tmp = NamedTempFile::new().unwrap();
+    let tmp = TempDatabase::new().unwrap();
     let url = sqlite_url_for(tmp.path());
     let pool = connect_or_create(&url).await.unwrap();
     migrator_through(27).run(&pool).await.unwrap();

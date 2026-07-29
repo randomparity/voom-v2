@@ -233,7 +233,7 @@ async fn duplicate_basename_sidecars_keep_their_source_subtrees() {
     std::fs::create_dir_all(second_path.parent().unwrap()).unwrap();
     generate_audio_extract_fixture(&first_path, CommentaryFixture::SingleMatch);
     generate_audio_extract_fixture(&second_path, CommentaryFixture::AlternateSingleMatch);
-    let db = NamedTempFile::new().unwrap();
+    let db = TempDatabase::new().unwrap();
     let url = format!("sqlite://{}", db.path().display());
     voom_store::init(&url).await.unwrap();
     let pool = voom_store::connect(&url).await.unwrap();

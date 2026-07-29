@@ -111,7 +111,7 @@ async fn sliding_window_advances_a_file_while_its_sibling_is_in_an_earlier_phase
     generate_h264_fixture(&second_path);
     generate_h264_fixture(&third_path);
 
-    let db = NamedTempFile::new().unwrap();
+    let db = TempDatabase::new().unwrap();
     let url = format!("sqlite://{}", db.path().display());
     voom_store::init(&url).await.unwrap();
     let pool = voom_store::connect(&url).await.unwrap();
