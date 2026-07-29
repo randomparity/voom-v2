@@ -187,6 +187,14 @@ enum CapacityWaitOutcome {
     Cancelled,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WorkflowIdleState {
+    Finished,
+    Ready,
+    Leased,
+    Blocked,
+}
+
 impl RunLoopState {
     fn new(job_id: JobId, elapsed: Duration) -> Self {
         Self {
@@ -618,21 +626,25 @@ impl WorkflowExecutor {
                 .wait_for_external_capacity(state, invocation.job_id, started)
                 .await;
         }
-        let externally_leased = match self
-            .workflow_has_leased_ticket(invocation.job_id, invocation.workflow_id)
+        let idle_state = match self
+            .workflow_idle_state(invocation.job_id, invocation.workflow_id)
             .await
         {
-            Ok(externally_leased) => externally_leased,
+            Ok(idle_state) => idle_state,
             Err(source) => {
                 return Err(state
                     .fail_job(&self.control_plane, invocation.job_id, source, started)
                     .await);
             }
         };
-        if externally_leased {
-            return self
-                .wait_for_externally_leased_work(state, invocation.job_id, started)
-                .await;
+        match idle_state {
+            WorkflowIdleState::Finished => return Ok(()),
+            WorkflowIdleState::Leased => {
+                return self
+                    .wait_for_externally_leased_work(state, invocation.job_id, started)
+                    .await;
+            }
+            WorkflowIdleState::Ready | WorkflowIdleState::Blocked => {}
         }
         match self
             .retry_delay(
@@ -652,6 +664,9 @@ impl WorkflowExecutor {
                     .fail_job(&self.control_plane, invocation.job_id, source, started)
                     .await);
             }
+        }
+        if idle_state == WorkflowIdleState::Ready {
+            return Ok(());
         }
         if let Some(source) = state.take_isolated_error() {
             return Err(state
