@@ -1,4 +1,5 @@
 use super::{ReportMode, parse_report_mode};
+use crate::cli::{Command, ComplianceCommand};
 
 #[test]
 fn compliance_report_command_requires_policy_version_and_input_set() {
@@ -60,4 +61,52 @@ fn parse_report_mode_rejects_none() {
 #[test]
 fn parse_report_mode_rejects_all_three() {
     assert!(parse_report_mode(Some(1), Some(2), Some(3)).is_err());
+}
+
+#[test]
+fn compliance_execute_defaults_file_window_to_four() {
+    use clap::Parser;
+
+    let cli = crate::cli::Cli::try_parse_from([
+        "voom",
+        "compliance",
+        "execute",
+        "--policy-version-id",
+        "1",
+        "--input-set-id",
+        "2",
+    ])
+    .unwrap();
+    assert_eq!(execute_file_window(&cli.command), Some(4));
+}
+
+#[test]
+fn compliance_execute_accepts_explicit_file_window() {
+    use clap::Parser;
+
+    let cli = crate::cli::Cli::try_parse_from([
+        "voom",
+        "compliance",
+        "execute",
+        "--policy-version-id",
+        "1",
+        "--input-set-id",
+        "2",
+        "--max-in-flight-files",
+        "9",
+    ])
+    .unwrap();
+    assert_eq!(execute_file_window(&cli.command), Some(9));
+}
+
+fn execute_file_window(command: &Command) -> Option<usize> {
+    if let Command::Compliance(ComplianceCommand::Execute {
+        max_in_flight_files,
+        ..
+    }) = command
+    {
+        Some(*max_in_flight_files)
+    } else {
+        None
+    }
 }

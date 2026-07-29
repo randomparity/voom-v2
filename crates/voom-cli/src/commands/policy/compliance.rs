@@ -147,6 +147,7 @@ pub async fn apply(
 pub struct ExecuteArgs {
     pub policy_version_id: u64,
     pub input_set_id: u64,
+    pub max_in_flight_files: usize,
     pub staging_root: Option<std::path::PathBuf>,
     pub output_dir: Option<std::path::PathBuf>,
     pub safety_policy: Option<String>,
@@ -159,6 +160,7 @@ pub async fn execute(database_url: &str, local: Local, args: ExecuteArgs) -> io:
         Err(code) => return Ok(code),
     };
     let mut options = ComplianceExecutionOptions {
+        max_in_flight_files: args.max_in_flight_files,
         safety_policy_slug: args.safety_policy,
         backup_root: args.backup_root,
         ..ComplianceExecutionOptions::default()

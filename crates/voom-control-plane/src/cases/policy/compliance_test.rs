@@ -89,6 +89,14 @@ fn compliance_execution_defaults_use_production_transcode_paths() {
 }
 
 #[test]
+fn compliance_execution_defaults_to_four_in_flight_files() {
+    assert_eq!(
+        super::ComplianceExecutionOptions::default().max_in_flight_files,
+        4
+    );
+}
+
+#[test]
 fn compliance_execution_defaults_use_production_remux_paths() {
     let workflow_defaults = WorkflowExecutorOptions::default();
     let compliance_defaults = super::ComplianceExecutionOptions::default();
@@ -121,6 +129,7 @@ fn compliance_execution_defaults_use_production_audio_paths() {
 #[test]
 fn compliance_options_convert_paths_into_workflow_options_leaving_rest_default() {
     let options = super::ComplianceExecutionOptions {
+        max_in_flight_files: 7,
         transcode_staging_root: PathBuf::from("/srv/transcode/staging"),
         transcode_target_dir: PathBuf::from("/srv/transcode/out"),
         remux_staging_root: PathBuf::from("/srv/remux/staging"),

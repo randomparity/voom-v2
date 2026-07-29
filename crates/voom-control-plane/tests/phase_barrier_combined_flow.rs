@@ -359,6 +359,7 @@ async fn scan_one(cp: &ControlPlane, source: &Path) -> ScannedFile {
 
 fn combined_execution_options(root: &Path) -> ComplianceExecutionOptions {
     ComplianceExecutionOptions {
+        max_in_flight_files: 4,
         transcode_staging_root: root.join("stage"),
         transcode_target_dir: root.join("out/transcode"),
         remux_staging_root: root.join("stage"),

@@ -573,6 +573,9 @@ impl From<voom_store::repo::artifacts::ArtifactVerification> for ArtifactVerific
 
 #[derive(Debug, Clone)]
 pub struct ComplianceExecutionOptions {
+    /// Maximum number of file pipelines admitted into the coordinator's
+    /// staging-residency window at once.
+    pub max_in_flight_files: usize,
     pub transcode_staging_root: PathBuf,
     pub transcode_target_dir: PathBuf,
     pub remux_staging_root: PathBuf,
@@ -594,6 +597,7 @@ impl Default for ComplianceExecutionOptions {
     fn default() -> Self {
         let defaults = WorkflowExecutorOptions::default();
         Self {
+            max_in_flight_files: 4,
             transcode_staging_root: defaults.artifact_roots.transcode.staging_root,
             transcode_target_dir: defaults.artifact_roots.transcode.target_dir,
             remux_staging_root: defaults.artifact_roots.remux.staging_root,
@@ -607,6 +611,19 @@ impl Default for ComplianceExecutionOptions {
 }
 
 impl ComplianceExecutionOptions {
+    pub(crate) fn file_window_limit(&self) -> Result<u32, VoomError> {
+        if self.max_in_flight_files == 0 {
+            return Err(VoomError::Config(
+                "max_in_flight_files must be positive".to_owned(),
+            ));
+        }
+        u32::try_from(self.max_in_flight_files).map_err(|error| {
+            VoomError::Config(format!(
+                "max_in_flight_files exceeds supported range: {error}"
+            ))
+        })
+    }
+
     /// Route a single staging-root override to every operation family.
     pub fn apply_staging_root(&mut self, root: PathBuf) {
         self.transcode_staging_root.clone_from(&root);
@@ -692,6 +709,7 @@ impl From<ComplianceExecutionOptions> for WorkflowExecutorOptions {
         // Destructure exhaustively so a new facade path field is a compile
         // error here rather than being silently dropped by `..default()`.
         let ComplianceExecutionOptions {
+            max_in_flight_files,
             transcode_staging_root,
             transcode_target_dir,
             remux_staging_root,
@@ -701,6 +719,7 @@ impl From<ComplianceExecutionOptions> for WorkflowExecutorOptions {
             backup_root,
             safety_policy_slug,
         } = options;
+        let _ = max_in_flight_files;
         // The safety policy slug is consumed by the pre-dispatch fail-closed gate
         // (see `execute_compliance_policy_with_options`), not by the workflow
         // executor; drop it here.

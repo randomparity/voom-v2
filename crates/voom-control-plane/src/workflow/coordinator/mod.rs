@@ -808,6 +808,7 @@ impl ControlPlane {
         options: ComplianceExecutionOptions,
         runtimes: WorkerRuntimeRegistry,
     ) -> Result<CoordinatorOutcome, CoordinatorError> {
+        options.file_window_limit()?;
         let starts = run_starts_for_files(&inputs.files);
         let (job, _) = self
             .open_phase_barrier_job(&starts, Vec::new(), Vec::new())
@@ -836,13 +837,13 @@ impl ControlPlane {
         options: ComplianceExecutionOptions,
     ) -> Result<CoordinatorOutcome, CoordinatorError> {
         let runtimes = self.policy_runtime_registry().await?;
-        self.resume_phase_barrier_with_runtimes(
+        Box::pin(self.resume_phase_barrier_with_runtimes(
             prior_job_id,
             policy_version_id,
             input_set_id,
             options,
             runtimes,
-        )
+        ))
         .await
     }
 
@@ -871,7 +872,7 @@ impl ControlPlane {
         let prepared = self
             .prepare_resume_phase_barrier_run_inputs(prior_job_id, inputs)
             .await?;
-        self.run_prepared_resume_phase_barrier(prior_job_id, prepared, options, runtimes)
+        Box::pin(self.run_prepared_resume_phase_barrier(prior_job_id, prepared, options, runtimes))
             .await
     }
 
@@ -900,6 +901,7 @@ impl ControlPlane {
         options: ComplianceExecutionOptions,
         runtimes: WorkerRuntimeRegistry,
     ) -> Result<CoordinatorOutcome, CoordinatorError> {
+        options.file_window_limit()?;
         let PreparedResumeRunInputs {
             policy,
             context,

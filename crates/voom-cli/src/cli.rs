@@ -838,6 +838,9 @@ pub enum ComplianceCommand {
         policy_version_id: u64,
         #[arg(long)]
         input_set_id: u64,
+        /// Maximum number of files allowed to retain in-progress artifacts.
+        #[arg(long, default_value_t = 4)]
+        max_in_flight_files: usize,
         #[arg(long)]
         staging_root: Option<std::path::PathBuf>,
         #[arg(long)]
