@@ -165,6 +165,64 @@ async fn worker_success_persists_verification_with_bootstrapped_worker_id() {
 }
 
 #[tokio::test]
+async fn verification_persistence_survives_a_concurrent_writer_attempt() {
+    let (cp, _db, dir) = fixture().await;
+    let source = dir.path().join("source.bin");
+    let staging = dir.path().join("staged.bin");
+    std::fs::write(&source, b"source bytes").unwrap();
+    let staged = stage_source(&cp, &source, &staging, b"source bytes").await;
+    let path = staged.staging_path.display().to_string();
+    let worker_id = record_verification_started(
+        &cp,
+        staged.artifact_handle_id,
+        staged.artifact_location_id,
+        &path,
+    )
+    .await
+    .unwrap();
+    let competing_writer = begin_immediate_tx(cp.pool_for_test()).await.unwrap();
+
+    let persistence = persist_verification_outcome(
+        &cp,
+        VerifyArtifactPersistContext {
+            artifact_handle_id: staged.artifact_handle_id,
+            artifact_location_id: staged.artifact_location_id,
+            worker_id,
+            path: &path,
+            location_kind: "staging",
+            require_only_live_kind: true,
+            workflow_ticket_id: None,
+            workflow_lease_id: None,
+        },
+        ExpectedArtifactFacts {
+            size_bytes: 12,
+            checksum: blake3_checksum(b"source bytes"),
+        },
+        VerifyOutcome::Succeeded(VerifyArtifactResult {
+            status: VerifyArtifactStatus::Verified,
+            provider: "test-dispatcher".to_owned(),
+            provider_version: "test".to_owned(),
+            observed: VerifyArtifactObservedFacts {
+                size_bytes: 12,
+                content_hash: blake3_checksum(b"source bytes"),
+                modified_at: None,
+                local_file_key: None,
+            },
+        }),
+        &NoVerifyArtifactHooks,
+    );
+    let release_writer = async move {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        commit_tx(competing_writer).await.unwrap();
+    };
+    let (report, ()) = tokio::join!(persistence, release_writer);
+    let report = report.unwrap();
+
+    assert_eq!(report.status, ArtifactVerificationStatus::Succeeded);
+    assert_eq!(count_verifications(&cp, staged.artifact_handle_id).await, 1);
+}
+
+#[tokio::test]
 async fn worker_terminal_failure_persists_failed_verification() {
     let (cp, _db, dir) = fixture().await;
     let source = dir.path().join("source.bin");

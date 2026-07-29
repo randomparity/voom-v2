@@ -170,25 +170,11 @@ async fn move_terminal_artifact(
             )));
         }
     }
-    match tokio::fs::hard_link(current, dest).await {
-        Ok(()) => {
-            remove_promoted_source(current).await;
-            let temp_path = promotion_temp_path(dest, location_id)?;
-            remove_existing_promotion_temp(&temp_path).await?;
-            return Ok(dest.to_path_buf());
-        }
-        Err(_) => match tokio::fs::symlink_metadata(dest).await {
-            Ok(dest_meta) => {
-                return resolve_existing_destination(current, dest, &dest_meta).await;
-            }
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
-            Err(err) => {
-                return Err(VoomError::Config(format!(
-                    "stat promotion destination {}: {err}",
-                    dest.display()
-                )));
-            }
-        },
+    if let Ok(()) = tokio::fs::hard_link(current, dest).await {
+        remove_promoted_source(current).await;
+        let temp_path = promotion_temp_path(dest, location_id)?;
+        remove_existing_promotion_temp(&temp_path).await?;
+        return Ok(dest.to_path_buf());
     }
     // A failed hard link (typically cross-filesystem EXDEV) falls back to an
     // atomic copy-into-place.

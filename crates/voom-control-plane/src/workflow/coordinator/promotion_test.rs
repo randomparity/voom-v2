@@ -129,6 +129,25 @@ async fn copy_terminal_artifact_moves_bytes_and_cleans_up() {
     assert_eq!(leftovers, 0);
 }
 
+#[tokio::test]
+async fn copy_fallback_reclaims_partial_when_destination_appears() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let current = tmp.path().join("Movie.work.mkv");
+    let dest = tmp.path().join("Movie.mkv");
+    let temp = promotion_temp_path(&dest, FileLocationId(44)).unwrap();
+    write(&current, b"terminal-bytes").await;
+    write(&dest, b"terminal-bytes").await;
+    write(&temp, b"stale-partial").await;
+
+    let returned = copy_terminal_artifact(&current, &dest, &temp)
+        .await
+        .unwrap();
+
+    assert_eq!(returned, dest);
+    assert!(tokio::fs::symlink_metadata(&current).await.is_err());
+    assert!(tokio::fs::symlink_metadata(&temp).await.is_err());
+}
+
 // --- move_terminal_artifact ---
 
 #[tokio::test]
