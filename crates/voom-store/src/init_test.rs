@@ -14,7 +14,7 @@ async fn init_in_memory_applies_every_embedded_migration() {
 
 #[tokio::test]
 async fn init_emits_schema_initialized_on_fresh_db() {
-    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let tmp = voom_test_support::TempDatabase::new().unwrap();
     let url = format!("sqlite://{}", tmp.path().display());
     let report = init(&url).await.unwrap();
     assert!(!report.already_initialized);
@@ -126,7 +126,7 @@ async fn concurrent_inits_never_double_write_schema_initialized() {
     // same file URL and assert exactly one row lands. Without the atomic
     // form, the SELECT-then-INSERT pair would let two tasks both see
     // "no row" and both insert.
-    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let tmp = voom_test_support::TempDatabase::new().unwrap();
     let url = format!("sqlite://{}", tmp.path().display());
     // Seed the schema once so the racing tasks all exercise the
     // recovery branch (already-initialized + missing event row). The
@@ -171,7 +171,7 @@ async fn concurrent_inits_never_double_write_schema_initialized() {
 
 #[tokio::test]
 async fn init_does_not_emit_when_already_initialized() {
-    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let tmp = voom_test_support::TempDatabase::new().unwrap();
     let url = format!("sqlite://{}", tmp.path().display());
     let _ = init(&url).await.unwrap();
     let report = init(&url).await.unwrap();

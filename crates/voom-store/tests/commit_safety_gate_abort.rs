@@ -19,7 +19,6 @@
 //! Disk-mode parity via the M1 harness (`fresh_initialized_pool_at`).
 
 use sqlx::SqlitePool;
-use tempfile::NamedTempFile;
 use time::Duration;
 use voom_core::{FileLocationId, FileVersionId, VoomError};
 use voom_events::EventKind;
@@ -33,6 +32,7 @@ use voom_store::repo::identity::{
     FileLocationKind, IdentityRepo, NewFileLocation, NewFileVersion, ProducedBy, SqliteIdentityRepo,
 };
 use voom_store::test_support::{FailingAliasResolver, T0, fresh_initialized_pool_at};
+use voom_test_support::TempDatabase;
 
 fn gate<'a>(
     pool: &'a SqlitePool,
@@ -48,8 +48,8 @@ fn gate<'a>(
     }
 }
 
-async fn open_pool() -> (SqlitePool, NamedTempFile) {
-    let tmp = NamedTempFile::new().unwrap();
+async fn open_pool() -> (SqlitePool, TempDatabase) {
+    let tmp = TempDatabase::new().unwrap();
     let pool = fresh_initialized_pool_at(tmp.path()).await.unwrap();
     (pool, tmp)
 }

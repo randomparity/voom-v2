@@ -8,13 +8,13 @@ use std::path::Path;
 use std::process::Command;
 
 use serde_json::{Value, json};
-use tempfile::NamedTempFile;
 use voom_control_plane::ControlPlane;
 use voom_control_plane::policy::{ComplianceExecutionOptions, PolicyInputFromScanInput};
 use voom_control_plane::scan::{ScanPathInput, ScanReportFileStatus};
 use voom_core::{FileLocationId, FileVersionId, MediaSnapshotId};
 use voom_plan::PlanOperationKind;
 use voom_store::repo::identity::{IdentityRepo, SqliteIdentityRepo};
+use voom_test_support::TempDatabase;
 use voom_test_support::worker::{
     TestWorkerConfig, TestWorkerLaunch, cargo_build_package, hide_stale_fake_ffprobe_sibling,
     target_debug_binary,
@@ -188,8 +188,8 @@ struct ScannedFixture {
     snapshot_id: MediaSnapshotId,
 }
 
-async fn control_plane() -> (ControlPlane, String, NamedTempFile) {
-    let db = NamedTempFile::new().unwrap();
+async fn control_plane() -> (ControlPlane, String, TempDatabase) {
+    let db = TempDatabase::new().unwrap();
     let url = format!("sqlite://{}", db.path().display());
     voom_store::init(&url).await.unwrap();
     let pool = voom_store::connect(&url).await.unwrap();

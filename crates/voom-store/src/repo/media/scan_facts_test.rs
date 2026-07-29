@@ -6,8 +6,12 @@ use crate::test_support::{T0, fresh_initialized_pool_at};
 use sqlx::SqlitePool;
 use voom_core::FileVersionId;
 
-async fn fresh() -> (SqliteIdentityRepo, SqlitePool, tempfile::NamedTempFile) {
-    let tmp = tempfile::NamedTempFile::new().unwrap();
+async fn fresh() -> (
+    SqliteIdentityRepo,
+    SqlitePool,
+    voom_test_support::TempDatabase,
+) {
+    let tmp = voom_test_support::TempDatabase::new().unwrap();
     let pool = fresh_initialized_pool_at(tmp.path()).await.unwrap();
     (SqliteIdentityRepo::new(pool.clone()), pool, tmp)
 }

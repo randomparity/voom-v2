@@ -16,7 +16,7 @@ use voom_test_support::worker::{TestWorkerConfig, TestWorkerLaunch, cargo_bin_or
 #[tokio::test]
 async fn compliance_execute_does_not_dispatch_synthetic_policy_targets()
 -> Result<(), Box<dyn std::error::Error>> {
-    let tmp = tempfile::NamedTempFile::new()?;
+    let tmp = voom_test_support::TempDatabase::new()?;
     let url = format!("sqlite://{}", tmp.path().display());
     voom_store::init(&url).await?;
     let pool = voom_store::connect(&url).await?;

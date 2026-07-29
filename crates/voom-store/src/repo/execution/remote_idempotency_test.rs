@@ -9,11 +9,11 @@ struct Fixture {
     repo: SqliteRemoteIdempotencyRepo,
     node_id: NodeId,
     worker_id: WorkerId,
-    _tmp: tempfile::NamedTempFile,
+    _tmp: voom_test_support::TempDatabase,
 }
 
 async fn fixture() -> Fixture {
-    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let tmp = voom_test_support::TempDatabase::new().unwrap();
     let pool = crate::test_support::fresh_initialized_pool_at(tmp.path())
         .await
         .unwrap();

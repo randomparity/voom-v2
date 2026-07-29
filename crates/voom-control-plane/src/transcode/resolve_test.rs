@@ -5,8 +5,8 @@ use voom_policy::TargetRef;
 
 use super::*;
 
-async fn seeded_repo() -> (SqliteVideoProfileRepo, tempfile::NamedTempFile) {
-    let tmp = tempfile::NamedTempFile::new().unwrap();
+async fn seeded_repo() -> (SqliteVideoProfileRepo, voom_test_support::TempDatabase) {
+    let tmp = voom_test_support::TempDatabase::new().unwrap();
     let url = format!("sqlite://{}", tmp.path().display());
     voom_store::init(&url).await.unwrap();
     let pool = voom_store::connect(&url).await.unwrap();
@@ -60,7 +60,7 @@ async fn unknown_named_profile_is_config_invalid() {
 
 #[tokio::test]
 async fn descriptor_invalid_named_profile_is_config_invalid() {
-    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let tmp = voom_test_support::TempDatabase::new().unwrap();
     let url = format!("sqlite://{}", tmp.path().display());
     voom_store::init(&url).await.unwrap();
     let pool = voom_store::connect(&url).await.unwrap();

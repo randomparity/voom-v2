@@ -27,7 +27,6 @@
 //!      pins the cross-feature interaction).
 
 use sqlx::SqlitePool;
-use tempfile::NamedTempFile;
 use time::Duration;
 use voom_core::{CommitId, FileLocationId};
 use voom_events::EventKind;
@@ -44,6 +43,7 @@ use voom_store::repo::use_leases::{
     BlockingMode, IssuerKind, LeaseScope, NewUseLease, SqliteUseLeaseRepo, UseLeaseKind,
 };
 use voom_store::test_support::{FailingAliasResolver, T0, fresh_initialized_pool_at};
+use voom_test_support::TempDatabase;
 
 fn gate<'a>(
     pool: &'a SqlitePool,
@@ -59,8 +59,8 @@ fn gate<'a>(
     }
 }
 
-async fn open_pool() -> (SqlitePool, NamedTempFile) {
-    let tmp = NamedTempFile::new().unwrap();
+async fn open_pool() -> (SqlitePool, TempDatabase) {
+    let tmp = TempDatabase::new().unwrap();
     let pool = fresh_initialized_pool_at(tmp.path()).await.unwrap();
     (pool, tmp)
 }

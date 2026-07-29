@@ -194,8 +194,8 @@ async fn library_schema_enforces_vocab_and_root_cascade() {
     assert_eq!(fk_count, 1);
 }
 
-async fn fresh_pool() -> (sqlx::SqlitePool, tempfile::NamedTempFile) {
-    let tmp = tempfile::NamedTempFile::new().unwrap();
+async fn fresh_pool() -> (sqlx::SqlitePool, voom_test_support::TempDatabase) {
+    let tmp = voom_test_support::TempDatabase::new().unwrap();
     let pool = fresh_initialized_pool_at(tmp.path()).await.unwrap();
     (pool, tmp)
 }
@@ -302,7 +302,7 @@ async fn backups_schema_enforces_status_vocab_and_verified_key() {
 
 #[tokio::test]
 async fn remote_execution_schema_contains_idempotency_and_artifact_access_tables() {
-    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let tmp = voom_test_support::TempDatabase::new().unwrap();
     let url = crate::test_support::sqlite_url_for(tmp.path());
     crate::init(&url).await.unwrap();
     let pool = crate::connect(&url).await.unwrap();

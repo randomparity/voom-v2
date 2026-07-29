@@ -407,8 +407,12 @@ struct SeededSource {
     file_location_id: FileLocationId,
 }
 
-async fn fixture() -> (ControlPlane, tempfile::NamedTempFile, tempfile::TempDir) {
-    let db = tempfile::NamedTempFile::new().unwrap();
+async fn fixture() -> (
+    ControlPlane,
+    voom_test_support::TempDatabase,
+    tempfile::TempDir,
+) {
+    let db = voom_test_support::TempDatabase::new().unwrap();
     let url = format!("sqlite://{}", db.path().display());
     voom_store::init(&url).await.unwrap();
     let pool = voom_store::connect(&url).await.unwrap();

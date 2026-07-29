@@ -7,12 +7,13 @@
 use std::process::Command;
 
 use serde_json::Value;
-use tempfile::{NamedTempFile, tempdir};
+use tempfile::tempdir;
 use voom_policy::{
     BundleTargetInput, BundleTargetState, FixtureName, PolicyInputSetDraft, PolicyInputSourceKind,
     PolicySyntheticTarget, TargetKind, TargetRef, load_fixture, load_policy_fixture,
 };
 use voom_store::test_support::sqlite_url_for;
+use voom_test_support::TempDatabase;
 
 #[test]
 fn dry_run_noncompliant_succeeds_without_database() {
@@ -58,7 +59,7 @@ fn dry_run_noncompliant_succeeds_without_database() {
 
 #[tokio::test]
 async fn show_noncompliant_reads_durable_policy_and_input() {
-    let tmp = NamedTempFile::new().unwrap();
+    let tmp = TempDatabase::new().unwrap();
     let url = sqlite_url_for(tmp.path());
     voom_store::init(&url).await.unwrap();
     let pool = voom_store::connect(&url).await.unwrap();
@@ -185,7 +186,7 @@ fn plan_dry_run_missing_required_arg_emits_bad_args_envelope() {
 
 #[tokio::test]
 async fn plan_generation_error_emits_plan_error_envelope() {
-    let tmp = NamedTempFile::new().unwrap();
+    let tmp = TempDatabase::new().unwrap();
     let url = sqlite_url_for(tmp.path());
     voom_store::init(&url).await.unwrap();
     let pool = voom_store::connect(&url).await.unwrap();
@@ -232,7 +233,7 @@ async fn plan_generation_error_emits_plan_error_envelope() {
 
 #[tokio::test]
 async fn missing_input_set_emits_plan_error_envelope() {
-    let tmp = NamedTempFile::new().unwrap();
+    let tmp = TempDatabase::new().unwrap();
     let url = sqlite_url_for(tmp.path());
     voom_store::init(&url).await.unwrap();
     let pool = voom_store::connect(&url).await.unwrap();

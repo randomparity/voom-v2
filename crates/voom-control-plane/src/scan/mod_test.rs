@@ -807,8 +807,8 @@ fn write_file(dir: &Path, name: &str, bytes: &[u8]) -> std::path::PathBuf {
 
 async fn cp_with_manual_clock(
     now: OffsetDateTime,
-) -> (crate::ControlPlane, tempfile::NamedTempFile) {
-    let tmp = tempfile::NamedTempFile::new().unwrap();
+) -> (crate::ControlPlane, voom_test_support::TempDatabase) {
+    let tmp = voom_test_support::TempDatabase::new().unwrap();
     let url = format!("sqlite://{}", tmp.path().display());
     voom_store::init(&url).await.unwrap();
     let pool = voom_store::connect(&url).await.unwrap();

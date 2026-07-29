@@ -10,8 +10,9 @@ use std::process::{Command, Output};
 use std::sync::OnceLock;
 
 use serde_json::Value;
-use tempfile::{NamedTempFile, TempDir};
+use tempfile::TempDir;
 use voom_store::test_support::sqlite_url_for;
+use voom_test_support::TempDatabase;
 use voom_test_support::worker::cargo_bin_or_build;
 
 const BASIC_FFPROBE_JSON: &str =
@@ -308,7 +309,7 @@ async fn artifact_failure_envelopes_are_actionable() {
 
 #[derive(Debug)]
 struct Seeded {
-    _tmp: NamedTempFile,
+    _tmp: TempDatabase,
     url: String,
 }
 
@@ -321,7 +322,7 @@ struct ArtifactFixture {
 }
 
 async fn seed() -> Seeded {
-    let tmp = NamedTempFile::new().unwrap();
+    let tmp = TempDatabase::new().unwrap();
     let url = sqlite_url_for(tmp.path());
     voom_store::init(&url).await.unwrap();
     Seeded { _tmp: tmp, url }

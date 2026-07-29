@@ -23,7 +23,7 @@ use voom_store::{connect, init};
 
 #[tokio::test]
 async fn m1_fixture_flow_persists_across_reconnect() {
-    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let tmp = voom_test_support::TempDatabase::new().unwrap();
     let url = sqlite_url_for(tmp.path());
 
     // Initial run: init + drive a ticket through to success via ControlPlane.

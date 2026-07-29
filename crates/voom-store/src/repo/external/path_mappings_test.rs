@@ -6,8 +6,8 @@ use super::*;
 use crate::repo::external::SqliteExternalSystemRepo;
 use crate::repo::external::systems::{ExternalSystemKind, NewExternalSystem};
 
-async fn repo() -> (SqliteExternalSystemRepo, tempfile::NamedTempFile) {
-    let tmp = tempfile::NamedTempFile::new().unwrap();
+async fn repo() -> (SqliteExternalSystemRepo, voom_test_support::TempDatabase) {
+    let tmp = voom_test_support::TempDatabase::new().unwrap();
     let pool = crate::test_support::fresh_initialized_pool_at(tmp.path())
         .await
         .unwrap();

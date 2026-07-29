@@ -12,8 +12,9 @@
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-use tempfile::{NamedTempFile, TempDir};
+use tempfile::TempDir;
 use time::{Duration, OffsetDateTime};
+use voom_test_support::TempDatabase;
 
 use voom_control_plane::scan::ScanPathInput;
 use voom_control_plane::{ControlPlane, StageCopyInput, VerifyArtifactInput};
@@ -179,7 +180,7 @@ async fn commit_completed_evaluated_lease_ids(url: &str, artifact_handle_id: u64
 
 #[derive(Debug)]
 struct Db {
-    _tmp: NamedTempFile,
+    _tmp: TempDatabase,
     url: String,
 }
 
@@ -195,7 +196,7 @@ struct StagedFixture {
 }
 
 async fn fixture() -> (ControlPlane, Db, TempDir) {
-    let tmp = NamedTempFile::new().unwrap();
+    let tmp = TempDatabase::new().unwrap();
     let url = format!("sqlite://{}", tmp.path().display());
     voom_store::init(&url).await.unwrap();
     let cp = ControlPlane::open(&url).await.unwrap();

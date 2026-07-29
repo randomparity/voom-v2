@@ -537,9 +537,9 @@ async fn cp_with_manual_clock(
 ) -> (
     crate::ControlPlane,
     Arc<ManualClock>,
-    tempfile::NamedTempFile,
+    voom_test_support::TempDatabase,
 ) {
-    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let tmp = voom_test_support::TempDatabase::new().unwrap();
     let url = format!("sqlite://{}", tmp.path().display());
     voom_store::init(&url).await.unwrap();
     let pool = voom_store::connect(&url).await.unwrap();

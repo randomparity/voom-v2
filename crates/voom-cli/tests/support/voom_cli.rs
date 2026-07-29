@@ -7,12 +7,12 @@ use std::io;
 use std::process::{Command, Output};
 
 use serde_json::Value;
-use tempfile::NamedTempFile;
 use voom_control_plane::ControlPlane;
+use voom_test_support::TempDatabase;
 use voom_test_support::worker::{TestWorkerConfig, TestWorkerLaunch, target_debug_binary};
 
 pub struct VoomTestDb {
-    _file: NamedTempFile,
+    _file: TempDatabase,
     pub url: String,
 }
 
@@ -28,7 +28,7 @@ pub struct TranscodeWorkerLaunch {
 
 impl VoomTestDb {
     pub async fn init() -> Result<Self, Box<dyn std::error::Error>> {
-        let file = NamedTempFile::new()?;
+        let file = TempDatabase::new()?;
         let url = voom_store::test_support::sqlite_url_for(file.path());
         voom_store::init(&url).await?;
         Ok(Self { _file: file, url })

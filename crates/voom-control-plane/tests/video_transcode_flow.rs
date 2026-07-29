@@ -8,7 +8,6 @@ use std::path::Path;
 use std::process::Command;
 
 use serde_json::json;
-use tempfile::NamedTempFile;
 use voom_control_plane::ControlPlane;
 use voom_control_plane::policy::{ComplianceExecutionOptions, PolicyInputFromScanInput};
 use voom_control_plane::scan::{ScanPathInput, ScanReportFileStatus};
@@ -18,6 +17,7 @@ use voom_policy::{
     MediaSnapshotInput, PolicyInputSetDraft, PolicyInputSourceKind, TargetRef, load_policy_fixture,
 };
 use voom_store::repo::identity::{IdentityRepo, SqliteIdentityRepo};
+use voom_test_support::TempDatabase;
 use voom_test_support::worker::{
     TestWorkerConfig, TestWorkerLaunch, cargo_build_package, hide_stale_fake_ffprobe_sibling,
     target_debug_binary,
@@ -37,7 +37,7 @@ async fn video_transcode_flow_verifies_commits_and_authoritative_replan() {
     let source = tmp.path().join("Movie.mp4");
     generate_h264_fixture(&source);
 
-    let db = NamedTempFile::new().unwrap();
+    let db = TempDatabase::new().unwrap();
     let url = format!("sqlite://{}", db.path().display());
     voom_store::init(&url).await.unwrap();
     let pool = voom_store::connect(&url).await.unwrap();

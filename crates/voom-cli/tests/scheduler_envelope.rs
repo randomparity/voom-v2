@@ -7,13 +7,13 @@
 use std::process::Command;
 
 use serde_json::{Value, json};
-use tempfile::NamedTempFile;
 use time::OffsetDateTime;
 use voom_core::{NodeId, TicketId, WorkerId};
 use voom_store::repo::scheduler_decisions::{
     NewSchedulerDecision, SchedulerDecisionKind, SchedulerDecisionOutcome, SchedulerReasonCode,
     SchedulerRequestSource, SqliteSchedulerDecisionRepo,
 };
+use voom_test_support::TempDatabase;
 
 mod scheduler_envelope {
     use super::*;
@@ -59,13 +59,13 @@ mod scheduler_envelope {
     }
 
     struct Fixture {
-        _tmp: NamedTempFile,
+        _tmp: TempDatabase,
         url: String,
         decision_id: u64,
     }
 
     async fn fixture() -> Fixture {
-        let tmp = NamedTempFile::new().unwrap();
+        let tmp = TempDatabase::new().unwrap();
         let url = voom_store::test_support::sqlite_url_for(tmp.path());
         voom_store::init(&url).await.unwrap();
         let pool = voom_store::connect(&url).await.unwrap();

@@ -8,8 +8,8 @@ use crate::repo::policy::policies::{NewPolicyDocumentVersion, SqlitePolicyRepo};
 use crate::repo::policy::policy_inputs::SqlitePolicyInputRepo;
 use crate::test_support::{T0, fresh_initialized_pool_at};
 
-async fn fresh() -> (SqliteIdentityRepo, tempfile::NamedTempFile) {
-    let tmp = tempfile::NamedTempFile::new().unwrap();
+async fn fresh() -> (SqliteIdentityRepo, voom_test_support::TempDatabase) {
+    let tmp = voom_test_support::TempDatabase::new().unwrap();
     let pool = fresh_initialized_pool_at(tmp.path()).await.unwrap();
     (SqliteIdentityRepo::new(pool), tmp)
 }
@@ -1289,8 +1289,11 @@ async fn list_live_file_locations_by_version_in_tx_excludes_retired() {
 
 // ---- retire_file_location_in_tx (M2 method; sibling-test gap plug) ------
 
-async fn fresh_with_one_live_location()
--> (SqliteIdentityRepo, FileLocation, tempfile::NamedTempFile) {
+async fn fresh_with_one_live_location() -> (
+    SqliteIdentityRepo,
+    FileLocation,
+    voom_test_support::TempDatabase,
+) {
     let (repo, tmp) = fresh().await;
     let asset = repo.create_file_asset(T0).await.unwrap();
     let version = repo
@@ -1472,8 +1475,11 @@ async fn update_file_location_value_on_retired_row_is_conflict() {
 
 // ---- retire_file_version_in_tx (M2 method; sibling-test gap plug) -------
 
-async fn fresh_with_one_live_version() -> (SqliteIdentityRepo, FileVersion, tempfile::NamedTempFile)
-{
+async fn fresh_with_one_live_version() -> (
+    SqliteIdentityRepo,
+    FileVersion,
+    voom_test_support::TempDatabase,
+) {
     let (repo, tmp) = fresh().await;
     let asset = repo.create_file_asset(T0).await.unwrap();
     let version = repo

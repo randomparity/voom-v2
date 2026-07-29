@@ -73,11 +73,11 @@ struct Fixture {
     cp: crate::ControlPlane,
     job_id: JobId,
     ticket_id: TicketId,
-    _db: tempfile::NamedTempFile,
+    _db: voom_test_support::TempDatabase,
 }
 
 async fn fixture() -> Fixture {
-    let db = tempfile::NamedTempFile::new().unwrap();
+    let db = voom_test_support::TempDatabase::new().unwrap();
     let url = format!("sqlite://{}", db.path().display());
     voom_store::init(&url).await.unwrap();
     let pool = voom_store::connect(&url).await.unwrap();

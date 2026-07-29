@@ -22,12 +22,11 @@
 //! either of the other two wires firing.
 //!
 //! Disk-mode parity is exercised through `fresh_initialized_pool_at`
-//! on a `NamedTempFile`, matching the existing
+//! on a `TempDatabase`, matching the existing
 //! `commit_safety_gate.rs` / `commit_safety_gate_after_rename.rs`
 //! M1 harness.
 
 use sqlx::SqlitePool;
-use tempfile::NamedTempFile;
 use time::Duration;
 use voom_core::{CommitId, FileLocationId, FileVersionId};
 use voom_events::EventKind;
@@ -42,6 +41,7 @@ use voom_store::repo::identity::{
     FileLocationKind, IdentityRepo, NewFileLocation, NewFileVersion, ProducedBy, SqliteIdentityRepo,
 };
 use voom_store::test_support::{FailingAliasResolver, T0, fresh_initialized_pool_at};
+use voom_test_support::TempDatabase;
 
 fn gate<'a>(
     pool: &'a SqlitePool,
@@ -57,8 +57,8 @@ fn gate<'a>(
     }
 }
 
-async fn open_pool() -> (SqlitePool, NamedTempFile) {
-    let tmp = NamedTempFile::new().unwrap();
+async fn open_pool() -> (SqlitePool, TempDatabase) {
+    let tmp = TempDatabase::new().unwrap();
     let pool = fresh_initialized_pool_at(tmp.path()).await.unwrap();
     (pool, tmp)
 }

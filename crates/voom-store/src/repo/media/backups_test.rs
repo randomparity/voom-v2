@@ -9,13 +9,13 @@ struct Fixture {
     file_version_id: FileVersionId,
     job_id: JobId,
     ticket_id: TicketId,
-    _tmp: tempfile::NamedTempFile,
+    _tmp: voom_test_support::TempDatabase,
 }
 
 const NOW: &str = "1970-01-01T00:00:00Z";
 
 async fn fixture() -> Fixture {
-    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let tmp = voom_test_support::TempDatabase::new().unwrap();
     let pool = crate::test_support::fresh_initialized_pool_at(tmp.path())
         .await
         .unwrap();

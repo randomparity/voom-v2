@@ -10,7 +10,7 @@ async fn connect_in_memory_succeeds() {
 
 #[tokio::test]
 async fn connect_on_existing_disk_db_succeeds() {
-    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let tmp = voom_test_support::TempDatabase::new().unwrap();
     let url = format!("sqlite://{}", tmp.path().display());
     connect_or_create(&url).await.unwrap();
 

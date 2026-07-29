@@ -7,7 +7,6 @@
 use std::process::Command;
 
 use serde_json::Value;
-use tempfile::NamedTempFile;
 use time::OffsetDateTime;
 use voom_control_plane::ControlPlane;
 use voom_store::repo::bundles::{BundleMemberRole, NewAssetBundle};
@@ -15,6 +14,7 @@ use voom_store::repo::identity::{
     FileLocationKind, MediaWorkKind, NewFileLocation, NewFileVersion, NewMediaVariant,
     NewMediaWork, ProducedBy,
 };
+use voom_test_support::TempDatabase;
 
 mod bundle_envelope {
     use super::*;
@@ -22,12 +22,12 @@ mod bundle_envelope {
     const T0: OffsetDateTime = OffsetDateTime::UNIX_EPOCH;
 
     struct Fixture {
-        _tmp: NamedTempFile,
+        _tmp: TempDatabase,
         url: String,
     }
 
     async fn fixture() -> Fixture {
-        let tmp = NamedTempFile::new().unwrap();
+        let tmp = TempDatabase::new().unwrap();
         let url = voom_store::test_support::sqlite_url_for(tmp.path());
         voom_store::init(&url).await.unwrap();
         let cp = ControlPlane::open(&url).await.unwrap();

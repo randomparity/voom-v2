@@ -9,6 +9,7 @@ use std::process::{Command, Output};
 use serde_json::Value;
 use tempfile::NamedTempFile;
 use voom_store::test_support::sqlite_url_for;
+use voom_test_support::TempDatabase;
 
 const MINIMAL_V1: &str = "policy \"minimal\" {\n  phase inspect {\n    container mkv\n  }\n}\n";
 const MINIMAL_V2: &str = "policy \"minimal\" {\n  phase inspect {\n    container mkv\n  }\n}\n\n";
@@ -152,12 +153,12 @@ async fn policy_show_missing_document_is_not_found() {
 }
 
 struct Seeded {
-    _tmp: NamedTempFile,
+    _tmp: TempDatabase,
     url: String,
 }
 
 async fn seed() -> Seeded {
-    let tmp = NamedTempFile::new().unwrap();
+    let tmp = TempDatabase::new().unwrap();
     let url = sqlite_url_for(tmp.path());
     voom_store::init(&url).await.unwrap();
     Seeded { _tmp: tmp, url }

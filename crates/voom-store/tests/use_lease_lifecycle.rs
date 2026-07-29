@@ -10,7 +10,6 @@
 //! expire / `force_release` / `recover_stale_issuer` / reanchor, plus
 //! the matching event journal. Runs against a tempfile-backed disk pool.
 
-use tempfile::NamedTempFile;
 use time::Duration;
 use voom_control_plane::ControlPlane;
 use voom_core::{FileLocationId, FileVersionId};
@@ -23,9 +22,10 @@ use voom_store::repo::use_leases::{
     UseLeaseReleaseReason,
 };
 use voom_store::test_support::{T0, sqlite_url_for};
+use voom_test_support::TempDatabase;
 
-async fn open_disk_plane() -> (ControlPlane, NamedTempFile) {
-    let tmp = NamedTempFile::new().unwrap();
+async fn open_disk_plane() -> (ControlPlane, TempDatabase) {
+    let tmp = TempDatabase::new().unwrap();
     let url = sqlite_url_for(tmp.path());
     init(&url).await.unwrap();
     let cp = ControlPlane::open(&url).await.unwrap();

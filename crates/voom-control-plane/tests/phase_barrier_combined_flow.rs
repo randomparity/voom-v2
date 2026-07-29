@@ -95,7 +95,7 @@ async fn phase_barrier_runs_transcode_remux_audio_chain_end_to_end() {
     let source = root.join("Movie.mkv");
     generate_combined_fixture(&source);
 
-    let db = tempfile::NamedTempFile::new().unwrap();
+    let db = voom_test_support::TempDatabase::new().unwrap();
     let url = format!("sqlite://{}", db.path().display());
     voom_store::init(&url).await.unwrap();
     let pool = voom_store::connect(&url).await.unwrap();
