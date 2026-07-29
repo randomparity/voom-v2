@@ -188,6 +188,8 @@ async fn file_window_admission_is_bounded_and_refills_after_terminal() {
     );
     assert!(repo.admit_next_file(JOB, T0).await.unwrap().is_none());
 
+    repo.begin_file_terminalization(JOB, "alpha").await.unwrap();
+    assert!(repo.admit_next_file(JOB, T0).await.unwrap().is_none());
     repo.mark_file_terminal(JOB, "alpha", T0).await.unwrap();
     assert_eq!(
         repo.admit_next_file(JOB, T0)
@@ -204,6 +206,75 @@ async fn file_window_admission_is_bounded_and_refills_after_terminal() {
             .count(),
         2
     );
+}
+
+#[tokio::test]
+async fn cancelled_job_cannot_admit_a_pending_file() {
+    let (repo, _tmp) = repo().await;
+    repo.insert_file_run_starts(JOB, vec![file_run_start("alpha", 1, 0)])
+        .await
+        .unwrap();
+    repo.insert_file_window(JOB, 1, vec![file_progress("alpha", 0)], T0)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE jobs SET state = 'cancelled' WHERE id = ?")
+        .bind(i64::try_from(JOB.0).unwrap())
+        .execute(&repo.pool)
+        .await
+        .unwrap();
+
+    let error = repo.admit_next_file(JOB, T0).await.unwrap_err();
+
+    assert!(matches!(error, voom_core::VoomError::UserCancellation(_)));
+    assert_eq!(
+        repo.file_progress(JOB, "alpha")
+            .await
+            .unwrap()
+            .unwrap()
+            .state,
+        FileProgressState::Pending
+    );
+}
+
+#[tokio::test]
+async fn phase_entry_is_durable_and_replay_must_match() {
+    let (repo, _tmp) = repo().await;
+    repo.insert_file_run_starts(JOB, vec![file_run_start("alpha", 1, 0)])
+        .await
+        .unwrap();
+    let input = NewFilePhaseEntry {
+        job_id: JOB,
+        phase_ordinal: 0,
+        branch_id: "alpha".to_owned(),
+        media_snapshot_id: MediaSnapshotId(1),
+        gate_admitted: true,
+    };
+
+    let first = repo
+        .upsert_file_phase_entry(input.clone(), T0)
+        .await
+        .unwrap();
+    let replay = repo.upsert_file_phase_entry(input, T0).await.unwrap();
+    assert_eq!(first, replay);
+    assert_eq!(
+        repo.file_phase_entries_for_job(JOB).await.unwrap(),
+        vec![first]
+    );
+
+    let error = repo
+        .upsert_file_phase_entry(
+            NewFilePhaseEntry {
+                job_id: JOB,
+                phase_ordinal: 0,
+                branch_id: "alpha".to_owned(),
+                media_snapshot_id: MediaSnapshotId(1),
+                gate_admitted: false,
+            },
+            T0,
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(error, voom_core::VoomError::Conflict(_)));
 }
 
 #[tokio::test]

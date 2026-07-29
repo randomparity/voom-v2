@@ -1044,6 +1044,65 @@ async fn compliance_execute_verifies_existing_active_artifact_through_bundled_wo
 }
 
 #[tokio::test]
+async fn verification_source_inside_committed_working_dir_is_never_moved_or_deleted() {
+    ensure_policy_verify_worker();
+    let (cp, _tmp) = cp().await;
+    let root = tempfile::tempdir().unwrap();
+    let staging_root = root.path().join("stage");
+    let source_dir = super::committed_working_dir(&staging_root, "transcode").join("source");
+    tokio::fs::create_dir_all(&source_dir).await.unwrap();
+    let media_path = source_dir.join("movie.mkv");
+    tokio::fs::write(&media_path, b"source bytes")
+        .await
+        .unwrap();
+    let policy = cp
+        .create_policy_document(
+            "verify-source-safety",
+            "policy \"verify source safety\" { phase verify { verify artifact } }",
+        )
+        .await
+        .unwrap();
+    let (file_version_id, media_snapshot_id) =
+        scanned_snapshot_for_existing_file(&cp, &media_path).await;
+    let input = cp
+        .create_policy_input_set_from_scan(PolicyInputFromScanInput {
+            slug: "verify-source-safety".to_owned(),
+            file_version_id,
+            media_snapshot_id,
+            container: "mkv".to_owned(),
+            video_codec: "h264".to_owned(),
+        })
+        .await
+        .unwrap();
+
+    cp.execute_compliance_policy_with_runtime_registry_and_options_for_test(
+        policy.version.id,
+        input.input_set_id,
+        WorkerRuntimeRegistry::new(),
+        super::ComplianceExecutionOptions {
+            transcode_staging_root: staging_root,
+            transcode_target_dir: root.path().join("out"),
+            ..super::ComplianceExecutionOptions::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        tokio::fs::read(&media_path).await.unwrap(),
+        b"source bytes",
+        "a verified source is not a produced artifact even under a working-dir prefix"
+    );
+    let location: (String, Option<String>) =
+        sqlx::query_as("SELECT value, retired_at FROM file_locations WHERE file_version_id = ?")
+            .bind(i64::try_from(file_version_id.0).unwrap())
+            .fetch_one(cp.pool_for_test())
+            .await
+            .unwrap();
+    assert_eq!(location, (media_path.display().to_string(), None));
+}
+
+#[tokio::test]
 async fn failed_policy_verification_persists_evidence_and_gates_downstream_phase() {
     ensure_policy_verify_worker();
     let (cp, _tmp) = cp().await;
@@ -1233,7 +1292,7 @@ async fn resume_carries_verified_phase_without_duplicate_verification() {
 }
 
 #[tokio::test]
-async fn resume_adopts_successful_evidence_missing_its_phase_row() {
+async fn resume_rejects_deleted_phase_row_even_with_successful_evidence() {
     ensure_policy_verify_worker();
     let (cp, _tmp) = cp().await;
     let media_dir = tempfile::tempdir().unwrap();
@@ -1304,16 +1363,7 @@ async fn resume_adopts_successful_evidence_missing_its_phase_row() {
     assert_eq!(prior_payload["workflow_id"], "workflow-1-file-1-phase-0");
     assert_eq!(prior_payload["branch_id"], "root");
 
-    Box::pin(assert_corrupted_verification_result_rejected(
-        &cp,
-        prior_job_id,
-        policy.version.id,
-        input.input_set_id,
-        &prior_ticket.2,
-    ))
-    .await;
-
-    let resumed = cp
+    let error = cp
         .resume_phase_barrier_with_runtimes(
             prior_job_id,
             policy.version.id,
@@ -1322,61 +1372,23 @@ async fn resume_adopts_successful_evidence_missing_its_phase_row() {
             WorkerRuntimeRegistry::new(),
         )
         .await
+        .unwrap_err();
+    assert!(
+        matches!(&error.source, voom_core::VoomError::PolicyExecution(_)),
+        "cursor/row disagreement must fail closed: {:?}",
+        error.source
+    );
+    let job_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM jobs")
+        .fetch_one(cp.pool_for_test())
+        .await
         .unwrap();
-
-    assert_eq!(resumed.file_phases.len(), 1);
-    assert_eq!(resumed.file_phases[0].outcome.as_str(), "verified");
-    assert!(resumed.file_phases[0].ticket_ids.is_empty());
+    assert_eq!(job_count, 1, "resume must fail before opening a new job");
     let evidence_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM artifact_verifications")
         .fetch_one(cp.pool_for_test())
         .await
         .unwrap();
     assert_eq!(evidence_count, 1);
     assert_eq!(count(&cp, EventKind::ArtifactVerificationStarted).await, 1);
-}
-
-async fn assert_corrupted_verification_result_rejected(
-    cp: &crate::ControlPlane,
-    prior_job_id: voom_core::JobId,
-    policy_version_id: voom_core::PolicyVersionId,
-    input_set_id: voom_core::PolicyInputSetId,
-    original_result: &str,
-) {
-    sqlx::query(
-        "UPDATE tickets SET result = json_set(result, '$.path', '/wrong') WHERE job_id = ?",
-    )
-    .bind(i64::try_from(prior_job_id.0).unwrap())
-    .execute(cp.pool_for_test())
-    .await
-    .unwrap();
-    let corrupted = cp
-        .resume_phase_barrier_with_runtimes(
-            prior_job_id,
-            policy_version_id,
-            input_set_id,
-            super::ComplianceExecutionOptions::default(),
-            WorkerRuntimeRegistry::new(),
-        )
-        .await
-        .unwrap_err();
-    assert!(matches!(
-        corrupted.source,
-        voom_core::VoomError::Conflict(_)
-    ));
-    let job_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM jobs")
-        .fetch_one(cp.pool_for_test())
-        .await
-        .unwrap();
-    assert_eq!(
-        job_count, 1,
-        "corrupt evidence must fail before opening a job"
-    );
-    sqlx::query("UPDATE tickets SET result = ? WHERE job_id = ?")
-        .bind(original_result)
-        .bind(i64::try_from(prior_job_id.0).unwrap())
-        .execute(cp.pool_for_test())
-        .await
-        .unwrap();
 }
 
 fn ensure_policy_verify_worker() {

@@ -50,16 +50,19 @@ reuse, chain-tip authority, and append-only failure consequences remain.
 
 ### Durable admission and cursor state
 
-Migration 0028 adds two job-owned tables:
+Migration 0028 adds three job-owned tables:
 
 - `workflow_file_windows`, one row per job, records the positive configured
   maximum and creation time; and
 - `workflow_file_progress`, one row for every `(job_id, branch_id)`, with:
 
   - stable input ordinal;
-  - state `pending`, `active`, or `terminal`;
+  - state `pending`, `active`, `terminalizing`, or `terminal`;
   - next phase ordinal;
-  - admitted and terminal timestamps.
+  - admitted and terminal timestamps; and
+- `workflow_file_phase_entries`, one row written before dispatch for every file
+  that enters a phase, records the exact input snapshot and gate decision used
+  for planning and reporting.
 
 The row has a composite foreign key to `workflow_file_run_starts`. Job opening
 inserts run starts, inherited history, reconciliation seeds, and progress rows
@@ -73,9 +76,11 @@ current process's option.
 A file-phase row and the progress cursor advance in the same transaction.
 First-write-wins file-phase persistence plus the expected current cursor makes
 replayed completion idempotent. Resume still opens a new job per ADR 0009 and
-ADR 0037, but it derives each new progress cursor from validated prior rows and
-admits interrupted branches before untouched pending branches. Completed
-operations are seeded or inherited, not dispatched again.
+ADR 0037, but it requires the prior window and one progress row per run start,
+validates each cursor against the contiguous file-phase tail, and rejects an
+option that differs from the durable prior capacity. It admits interrupted
+branches before untouched pending branches. Completed operations are seeded or
+inherited, not dispatched again.
 
 The configured `max_in_flight_files` is a positive execution option and CLI
 argument. It defaults to four. It bounds admitted file pipelines, not tickets,
@@ -95,11 +100,18 @@ first:
    records, tickets, and file-phase rows as evidence; and
 4. marks the progress row `terminal`.
 
+The progress row moves from `active` to `terminalizing` before step 1. Both
+states consume a window slot. A crash anywhere in steps 1–3 therefore leaves a
+durable terminalization-only branch: resume skips completed policy phases,
+replays promotion and cleanup, and only then marks the new row terminal.
+
 Missing cleanup files are treated as an interrupted cleanup and completed
 idempotently. Source locations are never candidates because cleanup requires a
-job-produced file-phase location under a configured committed working
-directory, and the active chain-tip location is excluded. Promotion or cleanup
-failure leaves the row active, fails the run, and prevents slot refill.
+`Committed` file-phase location, an exact committed ticket/commit-record match
+in the current or resumed job scope, and a configured committed working
+directory; the active chain-tip location is also excluded. Verified source
+locations are excluded from both promotion and cleanup. Promotion or cleanup
+failure leaves the row terminalizing, fails the run, and prevents slot refill.
 
 Blocked planning and continued per-file ticket failure terminalize without
 promotion. An abort-strategy failure stops further admission and drains the
@@ -108,16 +120,19 @@ job remains cancelled and its committed file-phase rows remain resumable.
 
 ### Coherent summaries without barriers
 
-Per-file rows remain incremental and authoritative. When the run drains—
+Per-file rows remain incremental and authoritative. Phase-entry rows make entry
+durable even when dispatch fails before a file-phase completion row. When the run drains—
 successfully, after cancellation, or after failure—the coordinator reconstructs
-each available phase solely from durable run starts, inherited history,
-file-phase rows, produced snapshots, and job-scoped tickets. It folds those
-facts by phase ordinal into the existing phase summaries and reports. A phase
-report therefore contains every file that actually entered that phase,
-regardless of completion order, and a resumed job can rebuild the same inputs
-without an in-memory completion log from the interrupted process. Job counters
-continue to come from job-scoped durable tickets and merged invocation
-telemetry.
+each available phase solely from durable phase entries, file-phase rows,
+produced snapshots, and job-scoped tickets. Completed files contribute their
+refreshed snapshot; entrants without a completion row contribute the exact
+entry snapshot. It folds those facts by phase ordinal into the existing phase
+summaries and reports. A phase report therefore contains every file that
+actually entered that phase, regardless of completion order, and a resumed job
+can rebuild the same inputs without an in-memory completion log from the
+interrupted process. Final job counters come from job-scoped durable tickets,
+elapsed time uses the coordinator's wall-clock interval, and peak concurrency
+is reconstructed from all job lease intervals.
 
 No CLI JSON envelope or compliance report type changes.
 

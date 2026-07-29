@@ -599,6 +599,7 @@ async fn phase_barrier_records_committed_sibling_when_a_file_fails() {
 
     let good_file = scan_one(&cp, &good).await;
     let doomed_file = scan_one(&cp, &doomed).await;
+    let doomed_version = doomed_file.file_version_id;
     // Corrupt the doomed source AFTER scanning so its transcode fails on the
     // source-facts check (size/hash no longer match the scanned file version),
     // while the good file transcodes and commits inline.
@@ -663,6 +664,23 @@ async fn phase_barrier_records_committed_sibling_when_a_file_fails() {
     let durable = repo.file_phases_for_job(partial.job_id).await.unwrap();
     assert_eq!(durable.len(), 1);
     assert_eq!(durable[0].branch_id, "Good");
+    assert_eq!(partial.phases.len(), 1);
+    assert_eq!(partial.phases[0].outcome, PhaseOutcome::PartiallyCommitted);
+    let checks = partial.phases[0].report.as_ref().unwrap().report["checks"]
+        .as_array()
+        .unwrap();
+    let targets = checks
+        .iter()
+        .map(|check| check["target"]["id"].as_u64().unwrap())
+        .collect::<std::collections::HashSet<_>>();
+    assert!(
+        targets.contains(&doomed_version.0),
+        "the durable report retains the failed file that entered the phase"
+    );
+    assert!(
+        targets.contains(&committed.produced_file_version_id.unwrap().0),
+        "the durable report retains the committed sibling's refreshed result"
+    );
     assert_eq!(job_state(&url, partial.job_id).await, "failed");
 }
 

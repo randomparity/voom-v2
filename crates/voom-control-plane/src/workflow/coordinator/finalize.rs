@@ -648,6 +648,7 @@ impl ControlPlane {
             "SELECT result FROM tickets \
              WHERE id IN (SELECT value FROM json_each(?)) \
                AND state = 'succeeded' AND result IS NOT NULL \
+               AND COALESCE(json_extract(result, '$.status'), '') != 'verified' \
              ORDER BY id ASC",
         )
         .bind(&ticket_ids)

@@ -161,3 +161,106 @@ async fn normal_move_dest_absent_places_and_removes_source() {
     assert!(tokio::fs::symlink_metadata(&current).await.is_err());
     assert_eq!(tokio::fs::read(&dest).await.unwrap(), b"terminal-bytes");
 }
+
+#[tokio::test]
+async fn interrupted_intermediate_cleanup_retires_a_location_after_file_is_already_gone() {
+    use voom_store::repo::identity::{
+        DiscoveredFile, FileLocationKind, IdentityRepo, IngestOutcome,
+    };
+
+    let (cp, _db) = crate::cases::cp().await;
+    let tmp = tempfile::TempDir::new().unwrap();
+    let path = tmp.path().join("intermediate.mkv");
+    write(&path, b"intermediate").await;
+    let IngestOutcome::NewFileAsset {
+        file_location_id, ..
+    } = cp
+        .record_discovered_file(
+            DiscoveredFile {
+                location_kind: FileLocationKind::LocalPath,
+                location_value: path.display().to_string(),
+                content_hash: "cleanup-replay".to_owned(),
+                size_bytes: 12,
+                observed_at: time::OffsetDateTime::UNIX_EPOCH,
+                proof: None,
+            },
+            None,
+        )
+        .await
+        .unwrap()
+    else {
+        panic!("cleanup fixture was not created");
+    };
+    let location = cp
+        .identity()
+        .get_file_location(file_location_id)
+        .await
+        .unwrap()
+        .unwrap();
+    tokio::fs::remove_file(&path).await.unwrap();
+
+    cp.reclaim_intermediate_location(&location).await.unwrap();
+
+    assert!(
+        cp.identity()
+            .get_file_location(location.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .retired_at
+            .is_some(),
+        "replay must retire the durable location after an interrupted delete"
+    );
+}
+
+#[tokio::test]
+async fn cleanup_failure_before_delete_keeps_location_live() {
+    use voom_store::repo::identity::{
+        DiscoveredFile, FileLocationKind, IdentityRepo, IngestOutcome,
+    };
+
+    let (cp, _db) = crate::cases::cp().await;
+    let tmp = tempfile::TempDir::new().unwrap();
+    let path = tmp.path().join("not-a-file");
+    tokio::fs::create_dir(&path).await.unwrap();
+    let IngestOutcome::NewFileAsset {
+        file_location_id, ..
+    } = cp
+        .record_discovered_file(
+            DiscoveredFile {
+                location_kind: FileLocationKind::LocalPath,
+                location_value: path.display().to_string(),
+                content_hash: "cleanup-failure".to_owned(),
+                size_bytes: 0,
+                observed_at: time::OffsetDateTime::UNIX_EPOCH,
+                proof: None,
+            },
+            None,
+        )
+        .await
+        .unwrap()
+    else {
+        panic!("cleanup fixture was not created");
+    };
+    let location = cp
+        .identity()
+        .get_file_location(file_location_id)
+        .await
+        .unwrap()
+        .unwrap();
+
+    cp.reclaim_intermediate_location(&location)
+        .await
+        .unwrap_err();
+
+    assert!(
+        cp.identity()
+            .get_file_location(location.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .retired_at
+            .is_none(),
+        "failed deletion must not retire a still-present location"
+    );
+}

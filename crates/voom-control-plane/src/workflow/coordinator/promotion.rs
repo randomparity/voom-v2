@@ -9,6 +9,7 @@ use std::path::{Component, Path, PathBuf};
 use tokio::io::AsyncReadExt;
 use voom_core::{FileAssetId, FileLocationId, FileVersionId, JobId, VoomError};
 use voom_store::repo::identity::{FileLocationKind, IdentityRepo};
+use voom_store::repo::workflow_summaries::FilePhaseOutcome;
 use voom_store::repo::workflow_summaries::FilePhaseSummary;
 
 use crate::ControlPlane;
@@ -332,6 +333,7 @@ impl ControlPlane {
     pub(super) async fn reclaim_superseded_intermediates(
         &self,
         plan: &PromotionPlan,
+        job_ids: &[JobId],
         file_phases: &[FilePhaseSummary],
     ) -> Result<(), VoomError> {
         let terminal_location = file_phases
@@ -341,6 +343,7 @@ impl ControlPlane {
         let mut seen = HashSet::new();
         let candidates = file_phases
             .iter()
+            .filter(|row| row.outcome == FilePhaseOutcome::Committed)
             .filter_map(|row| row.produced_file_location_id)
             .filter(|location_id| {
                 Some(*location_id) != terminal_location && seen.insert(*location_id)
@@ -351,6 +354,12 @@ impl ControlPlane {
         }
         let dirs = resolve_promotion_dirs(plan).await;
         for location_id in candidates {
+            if !self.is_job_committed_location(job_ids, location_id).await? {
+                return Err(VoomError::Conflict(format!(
+                    "cleanup location {location_id} has no committed ticket provenance \
+                     in jobs {job_ids:?}"
+                )));
+            }
             let Some(location) = self.identity.get_file_location(location_id).await? else {
                 continue;
             };
@@ -362,28 +371,67 @@ impl ControlPlane {
             if dirs.output_for(&canonical).is_none() {
                 continue;
             }
-            match tokio::fs::remove_file(&path).await {
-                Ok(()) => {}
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => {
-                    return Err(VoomError::Config(format!(
-                        "reclaim superseded intermediate {}: {error}",
-                        path.display()
-                    )));
-                }
-            }
-            let mut tx = begin_tx(&self.pool).await?;
-            self.identity
-                .retire_file_location_in_tx(
-                    &mut tx,
-                    location_id,
-                    self.clock().now(),
-                    location.epoch,
-                )
-                .await?;
-            commit_tx(tx).await?;
+            self.reclaim_intermediate_location(&location).await?;
         }
         Ok(())
+    }
+
+    async fn reclaim_intermediate_location(
+        &self,
+        location: &voom_store::repo::identity::FileLocation,
+    ) -> Result<(), VoomError> {
+        let path = PathBuf::from(&location.value);
+        match tokio::fs::remove_file(&path).await {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(VoomError::Config(format!(
+                    "reclaim superseded intermediate {}: {error}",
+                    path.display()
+                )));
+            }
+        }
+        let mut tx = begin_tx(&self.pool).await?;
+        self.identity
+            .retire_file_location_in_tx(&mut tx, location.id, self.clock().now(), location.epoch)
+            .await?;
+        commit_tx(tx).await
+    }
+
+    async fn is_job_committed_location(
+        &self,
+        job_ids: &[JobId],
+        location_id: FileLocationId,
+    ) -> Result<bool, VoomError> {
+        let job_ids = job_ids
+            .iter()
+            .map(|id| {
+                i64::try_from(id.0)
+                    .map_err(|error| VoomError::Internal(format!("job id conversion: {error}")))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let job_ids = serde_json::to_string(&job_ids)
+            .map_err(|error| VoomError::Internal(format!("cleanup job ids encode: {error}")))?;
+        let location_id = i64::try_from(location_id.0).map_err(|error| {
+            VoomError::Internal(format!("cleanup location id conversion: {error}"))
+        })?;
+        let exists: i64 = sqlx::query_scalar(
+            "SELECT EXISTS( \
+                 SELECT 1 FROM artifact_commit_records AS commits \
+                 JOIN tickets \
+                   ON json_extract(tickets.result, '$.commit_record_id') = commits.id \
+                 WHERE commits.result_file_location_id = ? \
+                   AND commits.state = 'committed' \
+                   AND tickets.job_id IN (SELECT value FROM json_each(?)) \
+                   AND json_extract(tickets.result, '$.commit_record_id') = commits.id \
+             )",
+        )
+        .bind(location_id)
+        .bind(job_ids)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|error| VoomError::database_context("cleanup commit provenance", error))?;
+        Ok(exists != 0)
     }
 
     pub(super) async fn promotion_location_ids(
@@ -394,6 +442,9 @@ impl ControlPlane {
         let mut seen = HashSet::new();
         let mut location_ids = Vec::new();
         for row in file_phases {
+            if row.outcome != FilePhaseOutcome::Committed {
+                continue;
+            }
             let Some(location_id) = row.produced_file_location_id else {
                 continue;
             };
@@ -425,7 +476,8 @@ impl ControlPlane {
                 continue;
             }
             ticket_ids.extend(row.ticket_ids.iter().copied());
-            if let Some(location_id) = row.produced_file_location_id
+            if row.outcome == FilePhaseOutcome::Committed
+                && let Some(location_id) = row.produced_file_location_id
                 && seen.insert(location_id)
             {
                 location_ids.push(location_id);

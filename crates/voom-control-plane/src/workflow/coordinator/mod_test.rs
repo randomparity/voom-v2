@@ -15,7 +15,8 @@ use voom_store::repo::identity::{
 use voom_store::repo::jobs::NewJob;
 use voom_store::repo::tickets::{NewTicket, TicketState};
 use voom_store::repo::workflow_summaries::{
-    FilePhaseOutcome, NewFilePhaseSummary, NewFileRunHistory, NewFileRunStart, NewWorkflowSummary,
+    FilePhaseOutcome, NewFilePhaseSummary, NewFileProgress, NewFileRunHistory, NewFileRunStart,
+    NewWorkflowSummary,
 };
 
 use crate::cases::cp;
@@ -110,6 +111,7 @@ where
                 run_starts,
                 history,
                 seeds,
+                max_in_flight_files: _,
             },
     } = inputs;
     let limit = options.file_window_limit()?;
@@ -1306,9 +1308,33 @@ async fn record_run_start(
 
 async fn record_run_starts(cp: &crate::ControlPlane, job_id: JobId, starts: Vec<NewFileRunStart>) {
     cp.workflow_summaries()
-        .insert_file_run_starts(job_id, starts)
+        .insert_file_run_starts(job_id, starts.clone())
         .await
         .unwrap();
+    cp.workflow_summaries()
+        .insert_file_window(
+            job_id,
+            4,
+            starts
+                .iter()
+                .enumerate()
+                .map(|(input_ordinal, start)| NewFileProgress {
+                    branch_id: start.branch_id.clone(),
+                    input_ordinal: u32::try_from(input_ordinal).unwrap(),
+                    next_phase_ordinal: start.starting_phase_ordinal,
+                })
+                .collect(),
+            T0,
+        )
+        .await
+        .unwrap();
+    for _ in &starts {
+        cp.workflow_summaries()
+            .admit_next_file(job_id, T0)
+            .await
+            .unwrap()
+            .unwrap();
+    }
 }
 
 async fn phase_file(
@@ -1383,6 +1409,19 @@ async fn record_file_phase(
         )
         .await
         .unwrap();
+    let progress = cp
+        .workflow_summaries()
+        .file_progress(job_id, branch_id)
+        .await
+        .unwrap();
+    if progress.is_some_and(|row| row.next_phase_ordinal == phase_ordinal) {
+        assert!(
+            cp.workflow_summaries()
+                .advance_file_progress(job_id, branch_id, phase_ordinal, phase_ordinal + 1)
+                .await
+                .unwrap()
+        );
+    }
 }
 
 /// Append a transcode-produced version to `parent`'s asset, give it a live
@@ -1946,7 +1985,7 @@ async fn resume_carries_phase_history_across_repeated_new_jobs() {
 }
 
 #[tokio::test]
-async fn reconcile_resume_excludes_blocked_file() {
+async fn reconcile_resume_keeps_blocked_file_until_terminalization_replays() {
     let (cp, _tmp) = cp().await;
     let prior = open_workflow_job(&cp).await;
     let v = seed_version(&cp, "/lib/b/movie.mkv", "hash-b1", reprobe_payload("h264")).await;
@@ -1958,13 +1997,16 @@ async fn reconcile_resume_excludes_blocked_file() {
         .await
         .unwrap();
 
-    assert!(prepared.files.is_empty(), "a blocked file is terminal");
+    assert_eq!(
+        prepared.files[0].resume_ordinal, 4,
+        "blocked phase work is complete but terminalization is not"
+    );
     assert!(prepared.seeds.is_empty());
     assert_eq!(prepared.run_starts[0].starting_phase_ordinal, 4);
 }
 
 #[tokio::test]
-async fn reconcile_resume_drops_fully_recorded_file() {
+async fn reconcile_resume_keeps_fully_recorded_file_until_terminalization_replays() {
     let (cp, _tmp) = cp().await;
     let prior = open_workflow_job(&cp).await;
     let v = seed_version(&cp, "/lib/c/movie.mkv", "hash-c1", reprobe_payload("h264")).await;
@@ -1984,11 +2026,112 @@ async fn reconcile_resume_drops_fully_recorded_file() {
         .prepare_resume(prior, vec![phase_file(&cp, v, "movie").await], 2)
         .await
         .unwrap();
-    assert!(
-        prepared.files.is_empty(),
-        "resume_ordinal (2) >= phase_count (2) => complete"
-    );
+    assert_eq!(prepared.files[0].resume_ordinal, 2);
     assert_eq!(prepared.run_starts[0].starting_phase_ordinal, 2);
+}
+
+#[tokio::test]
+async fn resume_validates_window_cursor_and_terminalization_state() {
+    let (cp, _tmp) = cp().await;
+    let version = seed_version(
+        &cp,
+        "/lib/cursor/missing.mkv",
+        "hash-cursor-missing",
+        reprobe_payload("h264"),
+    )
+    .await;
+    let prior = open_workflow_job(&cp).await;
+    record_run_start(&cp, prior, "missing", version, 0).await;
+    sqlx::query("DELETE FROM workflow_file_progress WHERE job_id = ?")
+        .bind(i64::try_from(prior.0).unwrap())
+        .execute(&cp.pool)
+        .await
+        .unwrap();
+    assert_resume_incomplete(
+        &cp.prepare_resume(prior, vec![phase_file(&cp, version, "missing").await], 2)
+            .await
+            .unwrap_err(),
+    );
+
+    let (cp, _tmp) = crate::cases::cp().await;
+    let version = seed_version(
+        &cp,
+        "/lib/cursor/disagree.mkv",
+        "hash-cursor-disagree",
+        reprobe_payload("h264"),
+    )
+    .await;
+    let prior = open_workflow_job(&cp).await;
+    record_run_start(&cp, prior, "disagree", version, 0).await;
+    sqlx::query("UPDATE workflow_file_progress SET next_phase_ordinal = 1 WHERE job_id = ?")
+        .bind(i64::try_from(prior.0).unwrap())
+        .execute(&cp.pool)
+        .await
+        .unwrap();
+    assert_resume_incomplete(
+        &cp.prepare_resume(prior, vec![phase_file(&cp, version, "disagree").await], 2)
+            .await
+            .unwrap_err(),
+    );
+
+    let (cp, _tmp) = crate::cases::cp().await;
+    let version = seed_version(
+        &cp,
+        "/lib/cursor/terminalizing.mkv",
+        "hash-cursor-terminalizing",
+        reprobe_payload("h264"),
+    )
+    .await;
+    let prior = open_workflow_job(&cp).await;
+    record_run_start(&cp, prior, "terminalizing", version, 0).await;
+    cp.workflow_summaries()
+        .begin_file_terminalization(prior, "terminalizing")
+        .await
+        .unwrap();
+    assert_resume_incomplete(
+        &cp.prepare_resume(
+            prior,
+            vec![phase_file(&cp, version, "terminalizing").await],
+            2,
+        )
+        .await
+        .unwrap_err(),
+    );
+}
+
+#[tokio::test]
+async fn terminalizing_completed_branch_replays_but_terminal_branch_does_not() {
+    let (cp, _tmp) = cp().await;
+    let version = seed_version(
+        &cp,
+        "/lib/terminalize/movie.mkv",
+        "hash-terminalize",
+        reprobe_payload("h264"),
+    )
+    .await;
+    let prior = open_workflow_job(&cp).await;
+    record_run_start(&cp, prior, "movie", version, 0).await;
+    record_file_phase(&cp, prior, 0, "movie", FilePhaseOutcome::Blocked, None).await;
+    cp.workflow_summaries()
+        .begin_file_terminalization(prior, "movie")
+        .await
+        .unwrap();
+
+    let replay = cp
+        .prepare_resume(prior, vec![phase_file(&cp, version, "movie").await], 2)
+        .await
+        .unwrap();
+    assert_eq!(replay.files[0].resume_ordinal, 2);
+
+    cp.workflow_summaries()
+        .mark_file_terminal(prior, "movie", T0)
+        .await
+        .unwrap();
+    let completed = cp
+        .prepare_resume(prior, vec![phase_file(&cp, version, "movie").await], 2)
+        .await
+        .unwrap();
+    assert!(completed.files.is_empty());
 }
 
 #[tokio::test]
@@ -2337,6 +2480,14 @@ async fn resume_rejects_cross_lineage_committed_row_and_changed_terminal_tip() {
     let prior = open_workflow_job(&cp).await;
     record_run_start(&cp, prior, "movie", v0, 0).await;
     record_file_phase(&cp, prior, 0, "movie", FilePhaseOutcome::Blocked, None).await;
+    cp.workflow_summaries()
+        .begin_file_terminalization(prior, "movie")
+        .await
+        .unwrap();
+    cp.workflow_summaries()
+        .mark_file_terminal(prior, "movie", T0)
+        .await
+        .unwrap();
     let _v1 = advance_chain_tip(&cp, v0, "hash-terminal-1", reprobe_payload("hevc")).await;
     let error = cp
         .prepare_resume(prior, vec![phase_file(&cp, v0, "movie").await], 4)

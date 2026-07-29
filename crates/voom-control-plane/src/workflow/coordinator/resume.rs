@@ -10,8 +10,8 @@ use std::collections::BTreeMap;
 use voom_core::{FileVersionId, JobId, VoomError};
 use voom_store::repo::identity::{FileLocationKind, IdentityRepo};
 use voom_store::repo::workflow_summaries::{
-    FilePhaseOutcome, FilePhaseSummary, FileRunHistory, FileRunStart, NewFileRunHistory,
-    NewFileRunStart,
+    FilePhaseOutcome, FilePhaseSummary, FileProgress, FileProgressState, FileRunHistory,
+    FileRunStart, NewFileRunHistory, NewFileRunStart,
 };
 
 use crate::ControlPlane;
@@ -34,10 +34,12 @@ pub(super) struct ResumePreparation {
     pub(super) run_starts: Vec<NewFileRunStart>,
     pub(super) history: Vec<NewFileRunHistory>,
     pub(super) seeds: Vec<PreparedResumeSeed>,
+    pub(super) max_in_flight_files: u32,
 }
 
 struct PriorBranch<'a> {
     start: &'a FileRunStart,
+    progress: &'a FileProgress,
     rows: &'a [&'a FilePhaseSummary],
     inherited: &'a [&'a FileRunHistory],
 }
@@ -116,11 +118,26 @@ impl ControlPlane {
             .workflow_summaries
             .file_run_history_for_job(prior_job_id)
             .await?;
-        validate_branch_sets(&files, &starts, &rows, &inherited)?;
+        let window = self
+            .workflow_summaries
+            .file_window(prior_job_id)
+            .await?
+            .ok_or_else(|| {
+                resume_incomplete(format!("missing file window for job {prior_job_id}"))
+            })?;
+        let progress = self
+            .workflow_summaries
+            .file_progress_for_job(prior_job_id)
+            .await?;
+        validate_branch_sets(&files, &starts, &rows, &inherited, &progress)?;
 
         let starts = starts
             .into_iter()
             .map(|start| (start.branch_id.clone(), start))
+            .collect::<BTreeMap<_, _>>();
+        let progress = progress
+            .into_iter()
+            .map(|row| (row.branch_id.clone(), row))
             .collect::<BTreeMap<_, _>>();
         let (rows_by_branch, inherited_by_branch) = index_prior_rows(&rows, &inherited);
         let mut survivors = Vec::with_capacity(files.len());
@@ -130,6 +147,9 @@ impl ControlPlane {
         for file in files {
             let start = starts.get(&file.branch_id).ok_or_else(|| {
                 resume_incomplete(format!("missing start for branch {}", file.branch_id))
+            })?;
+            let progress = progress.get(&file.branch_id).ok_or_else(|| {
+                resume_incomplete(format!("missing progress for branch {}", file.branch_id))
             })?;
             let branch_rows = rows_by_branch
                 .get(file.branch_id.as_str())
@@ -143,6 +163,7 @@ impl ControlPlane {
                     file,
                     PriorBranch {
                         start,
+                        progress,
                         rows: branch_rows,
                         inherited: inherited_rows,
                     },
@@ -166,6 +187,7 @@ impl ControlPlane {
             run_starts,
             history,
             seeds,
+            max_in_flight_files: window.max_in_flight_files,
         })
     }
 
@@ -179,6 +201,7 @@ impl ControlPlane {
         self.validate_resume_lineage(&file, prior.start, prior.rows)
             .await?;
         let state = validate_prior_row_shape(prior.start, prior.rows, phase_count)?;
+        validate_prior_progress(prior.start, prior.progress, &state)?;
         let mut phase_history = validate_prior_history(prior.start, prior.inherited, phase_count)?;
         merge_prior_rows(&file.branch_id, &mut phase_history, prior.rows)?;
         let mut seeds = Vec::new();
@@ -193,7 +216,7 @@ impl ControlPlane {
             }
         }
         let mut next_ordinal = state.next_ordinal;
-        if state.terminal {
+        if prior.progress.state == FileProgressState::Terminal {
             if file.version_id != state.recorded_tip {
                 return Err(resume_incomplete(format!(
                     "terminal branch {} changed from version {} to {}",
@@ -237,7 +260,11 @@ impl ControlPlane {
         let run_start = NewFileRunStart {
             branch_id: file.branch_id.clone(),
             starting_file_version_id: file.version_id,
-            starting_phase_ordinal: next_ordinal,
+            starting_phase_ordinal: if state.phase_complete {
+                phase_count
+            } else {
+                next_ordinal
+            },
         };
         let mut history = Vec::with_capacity(phase_history.len());
         for (&phase_ordinal, &outcome) in &phase_history {
@@ -247,8 +274,12 @@ impl ControlPlane {
                 outcome,
             });
         }
-        let survivor = (next_ordinal < phase_count && !state.terminal).then(|| {
-            file.resume_ordinal = next_ordinal;
+        let survivor = (prior.progress.state != FileProgressState::Terminal).then(|| {
+            file.resume_ordinal = if state.phase_complete {
+                phase_count
+            } else {
+                next_ordinal
+            };
             file.phase_history = phase_history;
             file
         });
@@ -317,7 +348,7 @@ impl ControlPlane {
 struct PriorBranchState {
     next_ordinal: u32,
     recorded_tip: FileVersionId,
-    terminal: bool,
+    phase_complete: bool,
 }
 
 type PhaseRowsByBranch<'a> = BTreeMap<&'a str, Vec<&'a FilePhaseSummary>>;
@@ -349,6 +380,7 @@ fn validate_branch_sets(
     starts: &[FileRunStart],
     rows: &[FilePhaseSummary],
     inherited: &[FileRunHistory],
+    progress: &[FileProgress],
 ) -> Result<(), VoomError> {
     let current = files
         .iter()
@@ -361,6 +393,15 @@ fn validate_branch_sets(
     if current != prior {
         return Err(resume_incomplete(format!(
             "current branches {current:?} do not match prior starts {prior:?}"
+        )));
+    }
+    let progress_branches = progress
+        .iter()
+        .map(|row| row.branch_id.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    if progress_branches != prior || progress.len() != starts.len() {
+        return Err(resume_incomplete(format!(
+            "progress branches {progress_branches:?} do not match prior starts {prior:?}"
         )));
     }
     if let Some(row) = rows
@@ -483,15 +524,56 @@ fn validate_prior_row_shape(
         .rev()
         .find_map(|row| row.produced_file_version_id)
         .unwrap_or(start.starting_file_version_id);
-    let terminal = rows
+    let phase_complete = rows
         .last()
         .is_some_and(|row| row.outcome == FilePhaseOutcome::Blocked)
         || next == phase_count;
     Ok(PriorBranchState {
         next_ordinal: next,
         recorded_tip,
-        terminal,
+        phase_complete,
     })
+}
+
+fn validate_prior_progress(
+    start: &FileRunStart,
+    progress: &FileProgress,
+    state: &PriorBranchState,
+) -> Result<(), VoomError> {
+    if progress.next_phase_ordinal != state.next_ordinal {
+        return Err(resume_incomplete(format!(
+            "branch {} cursor {} disagrees with phase-row tail {}",
+            start.branch_id, progress.next_phase_ordinal, state.next_ordinal
+        )));
+    }
+    match progress.state {
+        FileProgressState::Pending => {
+            if state.next_ordinal != start.starting_phase_ordinal || state.phase_complete {
+                return Err(resume_incomplete(format!(
+                    "pending branch {} already has completed phase work",
+                    start.branch_id
+                )));
+            }
+        }
+        FileProgressState::Active => {}
+        FileProgressState::Terminalizing => {
+            if !state.phase_complete {
+                return Err(resume_incomplete(format!(
+                    "terminalizing branch {} has incomplete phases",
+                    start.branch_id
+                )));
+            }
+        }
+        FileProgressState::Terminal => {
+            if !state.phase_complete {
+                return Err(resume_incomplete(format!(
+                    "terminal branch {} has incomplete phases",
+                    start.branch_id
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn validate_seed_row(start: &FileRunStart, row: &FilePhaseSummary) -> Result<(), VoomError> {
