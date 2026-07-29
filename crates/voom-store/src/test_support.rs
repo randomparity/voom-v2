@@ -12,14 +12,12 @@
 //! `#![cfg_attr(test, expect(...))]` to keep production code clean; the
 //! integration-test duplication is the load-bearing minimum.
 //!
-//! ### Why callers manage tempfile lifetime
+//! ### Why callers manage temporary database lifetime
 //!
-//! `tempfile::NamedTempFile` is intentionally not used inside these helpers
-//! — that would force `tempfile` into voom-store's production dependency
-//! graph (cargo unifies features across the workspace, so a dev-dep enabling
-//! `test` propagates the dep tree). Callers create the temp file in
-//! their own dev-deps and pass the path in. The boilerplate saved is the
-//! 4-line `format!` / `init` / `connect` ritual.
+//! `voom_test_support::TempDatabase` is intentionally not constructed inside
+//! these helpers. Callers own it so the private directory outlives every pool
+//! and `SQLite` sidecar. Keeping the fixture in the dev-only support crate also
+//! avoids adding `tempfile` to voom-store's production dependency graph.
 
 use std::path::Path;
 
@@ -50,8 +48,8 @@ pub fn sqlite_url_for(path: &Path) -> String {
 }
 
 /// Run `init` against `path` and return a connected pool. Callers own the
-/// path (typically backed by `tempfile::NamedTempFile`) so the temp file's
-/// lifetime is explicit at the test site.
+/// path (typically backed by `voom_test_support::TempDatabase`) so the temporary
+/// directory's lifetime is explicit at the test site.
 ///
 /// # Errors
 ///

@@ -9,9 +9,13 @@ repository.workspace = true
 
 [dependencies]
 serde_json = { workspace = true }
+tempfile = { workspace = true }
 voom-control-plane = { workspace = true }
 voom-core = { workspace = true }
 voom-store = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
 
 [lints]
 workspace = true

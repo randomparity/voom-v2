@@ -62,7 +62,7 @@ fn token_hint_handles_non_ascii_without_panicking() {
 
 #[tokio::test]
 async fn control_plane_generates_token_from_injected_rng() {
-    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let tmp = voom_test_support::TempDatabase::new().unwrap();
     let url = format!("sqlite://{}", tmp.path().display());
     voom_store::init(&url).await.unwrap();
     let pool = voom_store::connect(&url).await.unwrap();

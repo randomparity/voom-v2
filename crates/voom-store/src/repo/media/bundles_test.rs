@@ -13,9 +13,9 @@ async fn fresh() -> (
     voom_core::MediaVariantId,
     voom_core::FileAssetId,
     voom_core::FileAssetId,
-    tempfile::NamedTempFile,
+    voom_test_support::TempDatabase,
 ) {
-    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let tmp = voom_test_support::TempDatabase::new().unwrap();
     let pool = fresh_initialized_pool_at(tmp.path()).await.unwrap();
     let id_repo = SqliteIdentityRepo::new(pool.clone());
     let bun_repo = SqliteBundleRepo::new(pool.clone());

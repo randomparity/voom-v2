@@ -17,8 +17,9 @@ use std::process::Command;
 use std::sync::OnceLock;
 
 use serde_json::Value;
-use tempfile::{NamedTempFile, TempDir};
+use tempfile::TempDir;
 use voom_store::test_support::sqlite_url_for;
+use voom_test_support::TempDatabase;
 use voom_test_support::worker::cargo_bin_or_build;
 
 const BASIC_FFPROBE_JSON: &str =
@@ -26,7 +27,7 @@ const BASIC_FFPROBE_JSON: &str =
 
 #[tokio::test]
 async fn manual_lock_blocks_commit_and_force_release_unblocks_it() {
-    let tmp = NamedTempFile::new().unwrap();
+    let tmp = TempDatabase::new().unwrap();
     let url = sqlite_url_for(tmp.path());
     voom_store::init(&url).await.unwrap();
 

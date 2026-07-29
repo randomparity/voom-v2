@@ -6,9 +6,9 @@ use crate::test_support::fresh_initialized_pool_at;
 async fn repo() -> (
     SqliteQualityScoringProfileRepo,
     sqlx::SqlitePool,
-    tempfile::NamedTempFile,
+    voom_test_support::TempDatabase,
 ) {
-    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let tmp = voom_test_support::TempDatabase::new().unwrap();
     let pool = fresh_initialized_pool_at(tmp.path()).await.unwrap();
     (
         SqliteQualityScoringProfileRepo::new(pool.clone()),

@@ -110,8 +110,8 @@ pub(crate) async fn count(cp: &crate::ControlPlane, kind: EventKind) -> usize {
 }
 
 #[cfg(test)]
-pub(crate) async fn cp() -> (crate::ControlPlane, tempfile::NamedTempFile) {
-    let tmp = tempfile::NamedTempFile::new().unwrap();
+pub(crate) async fn cp() -> (crate::ControlPlane, voom_test_support::TempDatabase) {
+    let tmp = voom_test_support::TempDatabase::new().unwrap();
     let url = format!("sqlite://{}", tmp.path().display());
     let _ = voom_store::init(&url).await.unwrap();
     let pool = voom_store::connect(&url).await.unwrap();

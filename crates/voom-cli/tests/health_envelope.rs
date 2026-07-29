@@ -10,12 +10,12 @@ use std::process::{Command, Output, Stdio};
 
 use serde_json::Value;
 use sqlx::migrate::Migrator;
-use tempfile::NamedTempFile;
 use voom_cli::commands::health::{self, HealthData, HealthDb, HealthRuntime};
 use voom_cli::envelope::Local;
 use voom_control_plane::HealthPlane;
 use voom_store::test_support::{insert_synthetic_migration, sqlite_url_for};
 use voom_store::{MIGRATOR, connect_or_create};
+use voom_test_support::TempDatabase;
 
 const MIGRATION_ROLLBACK_RUNBOOK: &str =
     include_str!("../../../docs/runbooks/migration-rollback.md");
@@ -113,7 +113,7 @@ fn migrator_before_latest() -> Migrator {
 
 #[tokio::test]
 async fn health_against_uninitialized_db_returns_exit_code_2() {
-    let tmp = NamedTempFile::new().unwrap();
+    let tmp = TempDatabase::new().unwrap();
     let url = sqlite_url_for(tmp.path());
     voom_store::connect_or_create(&url).await.unwrap();
 
@@ -127,7 +127,7 @@ async fn health_against_uninitialized_db_returns_exit_code_2() {
 
 #[tokio::test]
 async fn health_against_initialized_db_returns_exit_code_0() {
-    let tmp = NamedTempFile::new().unwrap();
+    let tmp = TempDatabase::new().unwrap();
     let url = sqlite_url_for(tmp.path());
     voom_store::init(&url).await.unwrap();
 
@@ -155,7 +155,7 @@ async fn migration_rollback_runbook_predicates_match_real_health_contract() {
         "runbook must not direct partial-schema recovery toward older backups"
     );
 
-    let current = NamedTempFile::new().unwrap();
+    let current = TempDatabase::new().unwrap();
     let current_url = sqlite_url_for(current.path());
     voom_store::init(&current_url).await.unwrap();
     let current_output = run_health(&current_url);
@@ -164,7 +164,7 @@ async fn migration_rollback_runbook_predicates_match_real_health_contract() {
     assert_eq!(current_json["data"]["db"]["status"], "current");
     assert_jq_accepts(CURRENT_HEALTH_JQ, &current_stdout, None);
 
-    let too_new = NamedTempFile::new().unwrap();
+    let too_new = TempDatabase::new().unwrap();
     let too_new_url = sqlite_url_for(too_new.path());
     voom_store::init(&too_new_url).await.unwrap();
     let too_new_pool = voom_store::connect(&too_new_url).await.unwrap();
@@ -178,7 +178,7 @@ async fn migration_rollback_runbook_predicates_match_real_health_contract() {
         "Upgrade the server binary or roll the database back"
     );
 
-    let partial = NamedTempFile::new().unwrap();
+    let partial = TempDatabase::new().unwrap();
     let partial_url = sqlite_url_for(partial.path());
     let partial_pool = connect_or_create(&partial_url).await.unwrap();
     migrator_before_latest().run(&partial_pool).await.unwrap();
@@ -189,7 +189,7 @@ async fn migration_rollback_runbook_predicates_match_real_health_contract() {
         "Run `voom init` against the current binary"
     );
 
-    let dirty = NamedTempFile::new().unwrap();
+    let dirty = TempDatabase::new().unwrap();
     let dirty_url = sqlite_url_for(dirty.path());
     voom_store::init(&dirty_url).await.unwrap();
     let dirty_pool = voom_store::connect(&dirty_url).await.unwrap();
@@ -223,7 +223,7 @@ fn assert_health_error(url: &str, expected_code: &str) -> Value {
 /// same error).
 #[tokio::test]
 async fn health_against_corrupted_schema_meta_points_to_restore_not_init() {
-    let tmp = NamedTempFile::new().unwrap();
+    let tmp = TempDatabase::new().unwrap();
     let url = sqlite_url_for(tmp.path());
     voom_store::init(&url).await.unwrap();
     {

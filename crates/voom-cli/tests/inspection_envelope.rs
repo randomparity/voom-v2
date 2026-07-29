@@ -12,11 +12,11 @@
 use std::process::Command;
 
 use serde_json::Value;
-use tempfile::NamedTempFile;
 use time::{Duration, OffsetDateTime};
 use voom_events::{Event, EventEnvelope, SubjectType, payload::SchemaInitializedPayload};
 use voom_store::repo::events::{EventRepo, SqliteEventRepo};
 use voom_store::repo::jobs::{NewJob, SqliteJobRepo};
+use voom_test_support::TempDatabase;
 
 mod inspection_envelope {
     use super::*;
@@ -262,13 +262,13 @@ mod inspection_envelope {
     // ---- fixture ----------------------------------------------------------
 
     struct Fixture {
-        _tmp: NamedTempFile,
+        _tmp: TempDatabase,
         url: String,
         pool: sqlx::SqlitePool,
     }
 
     async fn fixture() -> Fixture {
-        let tmp = NamedTempFile::new().unwrap();
+        let tmp = TempDatabase::new().unwrap();
         let url = voom_store::test_support::sqlite_url_for(tmp.path());
         voom_store::init(&url).await.unwrap();
         let pool = voom_store::connect(&url).await.unwrap();

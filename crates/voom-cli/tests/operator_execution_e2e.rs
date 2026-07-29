@@ -171,7 +171,7 @@ fn prepare_operator_fixture() -> (
     std::fs::create_dir(&library).unwrap();
     generate_h264_fixture(&library.join("Movie.mp4"));
     std::fs::write(library.join("notes.txt"), b"just some notes, not a video\n").unwrap();
-    let db = tempfile::NamedTempFile::new_in(&root).unwrap();
+    let db = voom_test_support::TempDatabase::new_in(&root).unwrap();
     let url = format!("sqlite://{}", db.path().display());
     (tmp, root, library, url)
 }

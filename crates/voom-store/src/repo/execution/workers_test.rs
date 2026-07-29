@@ -7,8 +7,8 @@ use voom_core::{TicketOperation, VoomError};
 use crate::repo::execution::nodes::{NewNode, Node, NodeKind, SqliteNodeRepo};
 use crate::test_support::{T0, fresh_initialized_pool_at};
 
-async fn pool() -> (sqlx::SqlitePool, tempfile::NamedTempFile) {
-    let tmp = tempfile::NamedTempFile::new().unwrap();
+async fn pool() -> (sqlx::SqlitePool, voom_test_support::TempDatabase) {
+    let tmp = voom_test_support::TempDatabase::new().unwrap();
     let p = fresh_initialized_pool_at(tmp.path()).await.unwrap();
     (p, tmp)
 }
@@ -240,7 +240,7 @@ async fn worker_registered_with_node_id_projects_node_context() {
 
 #[tokio::test]
 async fn worker_inspection_rejects_missing_node_context_for_linked_worker() {
-    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let tmp = voom_test_support::TempDatabase::new().unwrap();
     let pool = crate::test_support::fresh_initialized_pool_at(tmp.path())
         .await
         .unwrap();
@@ -514,16 +514,17 @@ async fn node_owned_worker_in_tx_rejects_retired_worker() {
     assert!(matches!(err, VoomError::Conflict(_)), "got: {err:?}");
 }
 
-async fn worker_repo_with_current_schema() -> (tempfile::NamedTempFile, SqliteWorkerRepo) {
-    let tmp = tempfile::NamedTempFile::new().unwrap();
+async fn worker_repo_with_current_schema() -> (voom_test_support::TempDatabase, SqliteWorkerRepo) {
+    let tmp = voom_test_support::TempDatabase::new().unwrap();
     let pool = crate::test_support::fresh_initialized_pool_at(tmp.path())
         .await
         .unwrap();
     (tmp, SqliteWorkerRepo::new(pool))
 }
 
-async fn worker_repo_with_seeded_node() -> (tempfile::NamedTempFile, SqliteWorkerRepo, Node) {
-    let tmp = tempfile::NamedTempFile::new().unwrap();
+async fn worker_repo_with_seeded_node() -> (voom_test_support::TempDatabase, SqliteWorkerRepo, Node)
+{
+    let tmp = voom_test_support::TempDatabase::new().unwrap();
     let pool = crate::test_support::fresh_initialized_pool_at(tmp.path())
         .await
         .unwrap();
@@ -550,12 +551,12 @@ async fn worker_repo_with_seeded_node() -> (tempfile::NamedTempFile, SqliteWorke
 
 async fn worker_with_node_fixture() -> (
     sqlx::SqlitePool,
-    tempfile::NamedTempFile,
+    voom_test_support::TempDatabase,
     SqliteWorkerRepo,
     Node,
     Worker,
 ) {
-    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let tmp = voom_test_support::TempDatabase::new().unwrap();
     let pool = crate::test_support::fresh_initialized_pool_at(tmp.path())
         .await
         .unwrap();
@@ -596,7 +597,7 @@ async fn register_test_node(pool: &sqlx::SqlitePool, name: &str) -> Node {
 }
 
 struct WorkerFixture {
-    _tmp: tempfile::NamedTempFile,
+    _tmp: voom_test_support::TempDatabase,
     repo: SqliteWorkerRepo,
     worker_id: voom_core::WorkerId,
 }

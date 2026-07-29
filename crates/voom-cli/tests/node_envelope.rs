@@ -7,8 +7,8 @@
 use std::process::Command;
 
 use serde_json::Value;
-use tempfile::NamedTempFile;
 use voom_store::test_support::sqlite_url_for;
+use voom_test_support::TempDatabase;
 
 mod node_envelope {
     use super::*;
@@ -212,7 +212,7 @@ mod node_envelope {
     }
 
     struct Seeded {
-        _tmp: NamedTempFile,
+        _tmp: TempDatabase,
         url: String,
     }
 
@@ -222,7 +222,7 @@ mod node_envelope {
     }
 
     async fn seed() -> Seeded {
-        let tmp = NamedTempFile::new().unwrap();
+        let tmp = TempDatabase::new().unwrap();
         let url = sqlite_url_for(tmp.path());
         voom_store::init(&url).await.unwrap();
         Seeded { _tmp: tmp, url }

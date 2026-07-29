@@ -143,10 +143,10 @@ impl TranscodeResultProbeDispatcher for FakeResultProbeDispatcher {
 
 async fn fixture() -> (
     crate::ControlPlane,
-    tempfile::NamedTempFile,
+    voom_test_support::TempDatabase,
     tempfile::TempDir,
 ) {
-    let db = tempfile::NamedTempFile::new().unwrap();
+    let db = voom_test_support::TempDatabase::new().unwrap();
     let url = format!("sqlite://{}", db.path().display());
     voom_store::init(&url).await.unwrap();
     let pool = voom_store::connect(&url).await.unwrap();

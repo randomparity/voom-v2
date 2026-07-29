@@ -11,7 +11,6 @@
 //! `BlockedByClosureIncomplete`). Disk-mode parity via the M1 harness.
 
 use sqlx::SqlitePool;
-use tempfile::NamedTempFile;
 use time::{Duration, OffsetDateTime};
 use voom_core::{CommitId, FileLocationId, FileVersionId};
 use voom_events::{EventKind, SubjectType};
@@ -28,6 +27,7 @@ use voom_store::repo::use_leases::{
     BlockingMode, IssuerKind, LeaseScope, NewUseLease, SqliteUseLeaseRepo, UseLeaseKind,
 };
 use voom_store::test_support::{FailingAliasResolver, T0, fresh_initialized_pool_at};
+use voom_test_support::TempDatabase;
 
 fn gate<'a>(
     pool: &'a SqlitePool,
@@ -48,8 +48,8 @@ struct Seeded {
     location_id: FileLocationId,
 }
 
-async fn open_pool() -> (SqlitePool, NamedTempFile) {
-    let tmp = NamedTempFile::new().unwrap();
+async fn open_pool() -> (SqlitePool, TempDatabase) {
+    let tmp = TempDatabase::new().unwrap();
     let pool = fresh_initialized_pool_at(tmp.path()).await.unwrap();
     (pool, tmp)
 }
@@ -350,7 +350,7 @@ async fn phase_a_blocked_by_closure_incomplete_lands_aborted_intent_plus_event()
 async fn phase_a_disk_mode_parity_survives_reconnect() {
     // M1 disk-mode harness: open, drive Phase A success and abort, close
     // pool, reopen, assert both rows + events persist.
-    let tmp = NamedTempFile::new().unwrap();
+    let tmp = TempDatabase::new().unwrap();
     let pool = fresh_initialized_pool_at(tmp.path()).await.unwrap();
     let seeded_a = seed_location(&pool, "/srv/a").await;
     let seeded_b = seed_location(&pool, "/srv/b").await;

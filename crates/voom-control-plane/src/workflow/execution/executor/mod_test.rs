@@ -2327,7 +2327,7 @@ struct ExecutorFixture {
     cp: crate::ControlPlane,
     clock: Arc<ManualClock>,
     database_url: String,
-    _tmp: tempfile::NamedTempFile,
+    _tmp: voom_test_support::TempDatabase,
     plan: WorkflowPlan,
     registry: WorkerRuntimeRegistry,
     clients: HashMap<WorkerId, Arc<FakeClient>>,
@@ -2419,7 +2419,7 @@ impl ExecutorFixture {
     }
 
     async fn without_workers(ticket_count: usize) -> Self {
-        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let tmp = voom_test_support::TempDatabase::new().unwrap();
         let url = format!("sqlite://{}", tmp.path().display());
         let _ = voom_store::init(&url).await.unwrap();
         let pool = voom_store::connect(&url).await.unwrap();

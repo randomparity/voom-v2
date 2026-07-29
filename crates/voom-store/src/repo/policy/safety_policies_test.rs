@@ -6,9 +6,9 @@ use super::*;
 async fn repo() -> (
     SqliteSafetyPolicyRepo,
     sqlx::SqlitePool,
-    tempfile::NamedTempFile,
+    voom_test_support::TempDatabase,
 ) {
-    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let tmp = voom_test_support::TempDatabase::new().unwrap();
     let pool = crate::test_support::fresh_initialized_pool_at(tmp.path())
         .await
         .unwrap();

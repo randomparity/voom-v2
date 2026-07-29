@@ -8,7 +8,6 @@ use axum::http::{Request, Response, StatusCode};
 use http_body_util::BodyExt;
 use secrecy::ExposeSecret;
 use serde_json::{Value, json};
-use tempfile::NamedTempFile;
 use tower::ServiceExt;
 use voom_api::{router, router_with_control_plane};
 use voom_control_plane::workers::{
@@ -20,6 +19,7 @@ use voom_store::repo::nodes::NodeKind;
 use voom_store::repo::tickets::{NewTicket, SqliteTicketRepo, TicketState};
 use voom_store::repo::workers::WorkerKind;
 use voom_store::test_support::sqlite_url_for;
+use voom_test_support::TempDatabase;
 
 const OP: &str = "test.remote";
 
@@ -28,7 +28,7 @@ fn ticket_op(value: &str) -> TicketOperation {
 }
 
 struct ApiFixture {
-    _tmp: NamedTempFile,
+    _tmp: TempDatabase,
     url: String,
     app: axum::Router,
     cp: ControlPlane,
@@ -458,7 +458,7 @@ async fn malformed_path_ids_return_api_error_envelope() {
 
 #[tokio::test]
 async fn unconfigured_remote_execution_route_returns_api_error_envelope() {
-    let tmp = NamedTempFile::new().unwrap();
+    let tmp = TempDatabase::new().unwrap();
     let url = sqlite_url_for(tmp.path());
     voom_store::init(&url).await.unwrap();
     let app = router(HealthPlane::open(&url).await.unwrap());
@@ -484,7 +484,7 @@ async fn unconfigured_remote_execution_route_returns_api_error_envelope() {
 }
 
 async fn api_fixture() -> ApiFixture {
-    let tmp = NamedTempFile::new().unwrap();
+    let tmp = TempDatabase::new().unwrap();
     let url = sqlite_url_for(tmp.path());
     voom_store::init(&url).await.unwrap();
     let cp = ControlPlane::open(&url).await.unwrap();

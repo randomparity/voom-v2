@@ -66,7 +66,7 @@ async fn event_count(cp: &crate::ControlPlane) -> usize {
         .len()
 }
 
-async fn observer_for(tmp: &tempfile::NamedTempFile) -> crate::ControlPlane {
+async fn observer_for(tmp: &voom_test_support::TempDatabase) -> crate::ControlPlane {
     let url = format!("sqlite://{}", tmp.path().display());
     let pool = voom_store::connect(&url).await.unwrap();
     crate::ControlPlane::open_with_pool(pool, std::sync::Arc::new(voom_core::SystemClock))

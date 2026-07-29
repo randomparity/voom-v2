@@ -1,6 +1,5 @@
 use secrecy::ExposeSecret;
 use serde_json::json;
-use tempfile::NamedTempFile;
 use voom_api::router_with_control_plane;
 use voom_control_plane::workers::{
     NewWorkerCapabilityDraft, NewWorkerGrantDraft, RegisterNodeInput, RegisterWorkerForNodeInput,
@@ -11,6 +10,7 @@ use voom_store::repo::nodes::NodeKind;
 use voom_store::repo::tickets::{NewTicket, SqliteTicketRepo, TicketState};
 use voom_store::repo::workers::WorkerKind;
 use voom_store::test_support::sqlite_url_for;
+use voom_test_support::TempDatabase;
 
 use super::{RemoteRunnerConfig, RemoteSyntheticRunner};
 
@@ -146,7 +146,7 @@ async fn runner_fails_lease_when_configured_artifact_access_is_incompatible() {
 }
 
 struct RemoteRunnerFixture {
-    _tmp: NamedTempFile,
+    _tmp: TempDatabase,
     url: String,
     base_url: String,
     cp: ControlPlane,
@@ -158,7 +158,7 @@ struct RemoteRunnerFixture {
 
 impl RemoteRunnerFixture {
     async fn new() -> Self {
-        let tmp = NamedTempFile::new().unwrap();
+        let tmp = TempDatabase::new().unwrap();
         let url = sqlite_url_for(tmp.path());
         voom_store::init(&url).await.unwrap();
         let cp = ControlPlane::open(&url).await.unwrap();

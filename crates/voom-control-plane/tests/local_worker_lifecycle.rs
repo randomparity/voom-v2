@@ -11,11 +11,11 @@
 
 use sqlx::Row;
 use std::time::Duration;
-use tempfile::NamedTempFile;
 use tokio::net::TcpStream;
 use voom_control_plane::{ControlPlane, LocalWorkerKind};
 use voom_core::ErrorCode;
 use voom_store::repo::workers::WorkerStatus;
+use voom_test_support::TempDatabase;
 use voom_test_support::worker::cargo_build_package;
 
 #[tokio::test]
@@ -24,7 +24,7 @@ async fn start_local_worker_registers_endpoint_then_retires_on_shutdown() {
     // next to the running test binary; build it into the active profile dir.
     cargo_build_package("voom-ffmpeg-worker").unwrap();
 
-    let db = NamedTempFile::new().unwrap();
+    let db = TempDatabase::new().unwrap();
     let url = format!("sqlite://{}", db.path().display());
     voom_store::init(&url).await.unwrap();
     let pool = voom_store::connect(&url).await.unwrap();
@@ -71,7 +71,7 @@ async fn start_local_worker_registers_endpoint_then_retires_on_shutdown() {
 async fn start_local_worker_self_heals_a_stale_same_name_worker() {
     cargo_build_package("voom-ffmpeg-worker").unwrap();
 
-    let db = NamedTempFile::new().unwrap();
+    let db = TempDatabase::new().unwrap();
     let url = format!("sqlite://{}", db.path().display());
     voom_store::init(&url).await.unwrap();
     let pool = voom_store::connect(&url).await.unwrap();
@@ -111,7 +111,7 @@ async fn start_local_worker_self_heals_a_stale_same_name_worker() {
 async fn start_local_worker_preserves_reachable_same_kind_siblings() {
     cargo_build_package("voom-ffmpeg-worker").unwrap();
 
-    let db = NamedTempFile::new().unwrap();
+    let db = TempDatabase::new().unwrap();
     let url = format!("sqlite://{}", db.path().display());
     voom_store::init(&url).await.unwrap();
     let pool = voom_store::connect(&url).await.unwrap();
@@ -148,7 +148,7 @@ async fn start_local_worker_preserves_reachable_same_kind_siblings() {
 async fn shutdown_stops_worker_when_durable_retirement_fails() {
     cargo_build_package("voom-ffmpeg-worker").unwrap();
 
-    let db = NamedTempFile::new().unwrap();
+    let db = TempDatabase::new().unwrap();
     let url = format!("sqlite://{}", db.path().display());
     voom_store::init(&url).await.unwrap();
     let pool = voom_store::connect(&url).await.unwrap();

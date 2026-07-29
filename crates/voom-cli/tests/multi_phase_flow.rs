@@ -27,12 +27,12 @@ use std::path::Path;
 use std::process::Command;
 
 use serde_json::{Value, json};
-use tempfile::NamedTempFile;
 use voom_control_plane::ControlPlane;
 use voom_control_plane::scan::{ScanPathInput, ScanReportFileStatus};
 use voom_core::FileVersionId;
 use voom_policy::{MediaSnapshotInput, PolicyInputSetDraft, PolicyInputSourceKind, TargetRef};
 use voom_store::test_support::sqlite_url_for;
+use voom_test_support::TempDatabase;
 use voom_test_support::worker::{
     TestWorkerConfig, TestWorkerLaunch, hide_stale_fake_ffprobe_sibling, target_debug_binary,
 };
@@ -54,7 +54,7 @@ async fn multi_phase_execute_then_report_by_job_id() {
     let source = root.join("Movie.mp4");
     generate_h264_fixture(&source);
 
-    let db = NamedTempFile::new().unwrap();
+    let db = TempDatabase::new().unwrap();
     let url = sqlite_url_for(db.path());
     voom_store::init(&url).await.unwrap();
     let pool = voom_store::connect(&url).await.unwrap();

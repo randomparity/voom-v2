@@ -45,6 +45,11 @@ skip = [
     # blake3@1.8 still pins 0.4. Both are thin constant-time-equality helpers;
     # no behavior risk. Revisit when blake3 moves to constant_time_eq 0.5.
     { crate = "constant_time_eq", reason = "transitive duplication: blake3@1.8 pins 0.4, voom crates on 0.5" },
+    # tempfile's getrandom 0.4 and rand's getrandom 0.3 target different WASI
+    # adapter generations. Neither adapter is built for supported host targets;
+    # they cannot be unified until the upstream randomness crates realign.
+    { crate = "r-efi", reason = "target-only duplication: getrandom 0.3 and 0.4 use different WASI adapters" },
+    { crate = "wit-bindgen", reason = "target-only duplication: getrandom 0.3 and 0.4 use different WASI adapters" },
 ]
 skip-tree = []
 

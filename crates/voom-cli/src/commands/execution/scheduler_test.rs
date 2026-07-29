@@ -10,7 +10,7 @@ use super::*;
 
 #[tokio::test]
 async fn decision_data_maps_full_record() {
-    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let tmp = voom_test_support::TempDatabase::new().unwrap();
     let url = voom_store::test_support::sqlite_url_for(tmp.path());
     voom_store::init(&url).await.unwrap();
     let pool = voom_store::connect(&url).await.unwrap();

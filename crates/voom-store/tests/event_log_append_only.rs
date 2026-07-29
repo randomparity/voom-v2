@@ -19,7 +19,7 @@ use voom_store::test_support::fresh_initialized_pool_at;
 
 #[tokio::test]
 async fn update_on_events_row_is_rejected() {
-    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let tmp = voom_test_support::TempDatabase::new().unwrap();
     let pool = fresh_initialized_pool_at(tmp.path()).await.unwrap();
     let repo = SqliteEventRepo::new(pool.clone());
 
@@ -53,7 +53,7 @@ async fn update_on_events_row_is_rejected() {
 
 #[tokio::test]
 async fn delete_on_events_row_is_rejected() {
-    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let tmp = voom_test_support::TempDatabase::new().unwrap();
     let pool = fresh_initialized_pool_at(tmp.path()).await.unwrap();
     let repo = SqliteEventRepo::new(pool.clone());
 

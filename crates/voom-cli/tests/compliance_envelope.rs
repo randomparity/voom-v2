@@ -9,7 +9,7 @@ use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
 use serde_json::{Value, json};
-use tempfile::{NamedTempFile, TempDir};
+use tempfile::TempDir;
 use time::OffsetDateTime;
 use voom_control_plane::WorkflowTicketPayload;
 use voom_control_plane::policy::PolicyInputFromScanInput;
@@ -19,6 +19,7 @@ use voom_store::repo::identity::{DiscoveredFile, FileLocationKind, IngestOutcome
 use voom_store::repo::leases::NewLease;
 use voom_store::repo::tickets::NewTicket;
 use voom_store::test_support::sqlite_url_for;
+use voom_test_support::TempDatabase;
 use voom_test_support::worker::{TestWorkerConfig, TestWorkerLaunch, cargo_bin_or_build};
 
 #[tokio::test]
@@ -481,7 +482,7 @@ fn execute_unsupported_operation_uses_policy_execution_error() {
 }
 
 struct Seeded {
-    _tmp: NamedTempFile,
+    _tmp: TempDatabase,
     dir: TempDir,
     url: String,
     version_id: u64,
@@ -489,7 +490,7 @@ struct Seeded {
 }
 
 async fn seed(fixture: FixtureName) -> Seeded {
-    let tmp = NamedTempFile::new().unwrap();
+    let tmp = TempDatabase::new().unwrap();
     let url = sqlite_url_for(tmp.path());
     voom_store::init(&url).await.unwrap();
     let pool = voom_store::connect(&url).await.unwrap();
@@ -520,7 +521,7 @@ async fn seed(fixture: FixtureName) -> Seeded {
 }
 
 async fn seed_scanned_remux() -> Seeded {
-    let tmp = NamedTempFile::new().unwrap();
+    let tmp = TempDatabase::new().unwrap();
     let dir = TempDir::new().unwrap();
     let root = dir.path().canonicalize().unwrap();
     let url = sqlite_url_for(tmp.path());
@@ -611,7 +612,7 @@ async fn seed_scanned_remux() -> Seeded {
 }
 
 async fn seed_scanned_verify() -> Seeded {
-    let tmp = NamedTempFile::new().unwrap();
+    let tmp = TempDatabase::new().unwrap();
     let dir = TempDir::new().unwrap();
     let root = dir.path().canonicalize().unwrap();
     let url = sqlite_url_for(tmp.path());
@@ -690,7 +691,7 @@ async fn seed_scanned_verify() -> Seeded {
 }
 
 async fn seed_scanned_audio() -> Seeded {
-    let tmp = NamedTempFile::new().unwrap();
+    let tmp = TempDatabase::new().unwrap();
     let dir = TempDir::new().unwrap();
     let root = dir.path().canonicalize().unwrap();
     let url = sqlite_url_for(tmp.path());

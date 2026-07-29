@@ -13,13 +13,13 @@
 //! assumes.
 
 use serde_json::json;
-use tempfile::NamedTempFile;
 use voom_control_plane::ControlPlane;
 use voom_plan::{NodeStatus, PlanOperationKind};
 use voom_policy::{
     MediaSnapshotInput, PolicyInputSetDraft, PolicyInputSourceKind, PolicySyntheticTarget,
     TargetKind, TargetRef,
 };
+use voom_test_support::TempDatabase;
 
 const SAMPLE_POLICY_PATH: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -100,8 +100,8 @@ fn planned_operation_kinds(
         .collect()
 }
 
-async fn open_control_plane() -> (ControlPlane, NamedTempFile) {
-    let db = NamedTempFile::new().unwrap();
+async fn open_control_plane() -> (ControlPlane, TempDatabase) {
+    let db = TempDatabase::new().unwrap();
     let url = format!("sqlite://{}", db.path().display());
     voom_store::init(&url).await.unwrap();
     let pool = voom_store::connect(&url).await.unwrap();

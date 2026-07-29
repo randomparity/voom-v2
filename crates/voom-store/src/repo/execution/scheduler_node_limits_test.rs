@@ -5,8 +5,11 @@ use super::*;
 
 const T0: OffsetDateTime = OffsetDateTime::UNIX_EPOCH;
 
-async fn repo() -> (SqliteSchedulerNodeLimitRepo, tempfile::NamedTempFile) {
-    let tmp = tempfile::NamedTempFile::new().unwrap();
+async fn repo() -> (
+    SqliteSchedulerNodeLimitRepo,
+    voom_test_support::TempDatabase,
+) {
+    let tmp = voom_test_support::TempDatabase::new().unwrap();
     let pool = crate::test_support::fresh_initialized_pool_at(tmp.path())
         .await
         .unwrap();

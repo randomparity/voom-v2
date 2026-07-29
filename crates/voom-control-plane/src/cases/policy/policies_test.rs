@@ -47,7 +47,7 @@ async fn create_and_add_policy_versions() {
 
 #[tokio::test]
 async fn create_and_add_policy_versions_use_control_plane_clock() {
-    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let tmp = voom_test_support::TempDatabase::new().unwrap();
     let url = format!("sqlite://{}", tmp.path().display());
     let _ = voom_store::init(&url).await.unwrap();
     let pool = voom_store::connect(&url).await.unwrap();
