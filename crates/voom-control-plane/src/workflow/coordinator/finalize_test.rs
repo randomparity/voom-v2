@@ -5,7 +5,7 @@ use time::{Duration, OffsetDateTime};
 use voom_core::{FileLocationId, FileVersionId, MediaSnapshotId, TicketOperation, WorkerKind};
 use voom_store::repo::artifacts::{
     ArtifactVerificationStatus, NewArtifactCommitRecord, NewArtifactHandle, NewArtifactLocation,
-    NewArtifactVerification,
+    NewArtifactVerification, NewSidecarArtifactCommit,
 };
 use voom_store::repo::identity::{
     DiscoveredFile, FileLocationKind, IdentityRepo, IngestOutcome, NewFileLocation, NewFileVersion,
@@ -164,6 +164,17 @@ async fn repeated_terminalization_cleanup_uses_carried_ticket_provenance() {
     tokio::fs::create_dir_all(&working).await.unwrap();
     let source = seed_version(&cp, "/library/repeated-resume.mkv", "source").await;
     let first_job = open_policy_job(&cp).await;
+    cp.workflow_summaries()
+        .insert_file_run_starts(
+            first_job.id,
+            vec![NewFileRunStart {
+                branch_id: "repeated-resume".to_owned(),
+                starting_file_version_id: source,
+                starting_phase_ordinal: 0,
+            }],
+        )
+        .await
+        .unwrap();
     let first = seed_committed_ticket_evidence(&cp, first_job.id, source, "repeated-resume").await;
     let terminal = seed_committed_ticket_evidence_for_phase(
         &cp,
@@ -202,6 +213,145 @@ async fn repeated_terminalization_cleanup_uses_carried_ticket_provenance() {
         "a second resume must honor the carried first-job ticket provenance"
     );
     assert!(terminal_path.exists());
+}
+
+#[tokio::test]
+async fn ordered_sidecar_outputs_require_and_return_each_commit_location() {
+    let (cp, _tmp) = crate::cases::cp().await;
+    let fixture = seed_ordered_sidecar_ticket(&cp).await;
+    let validated = cp
+        .validated_committed_location_ids_for_rows(&fixture.rows)
+        .await
+        .unwrap();
+
+    assert_eq!(validated, fixture.locations);
+}
+
+#[tokio::test]
+async fn ordered_sidecar_output_rejects_foreign_snapshot() {
+    let (cp, _tmp) = crate::cases::cp().await;
+    let fixture = seed_ordered_sidecar_ticket(&cp).await;
+    let result: String = sqlx::query_scalar("SELECT result FROM tickets WHERE id = ?")
+        .bind(i64::try_from(fixture.ticket_id.0).unwrap())
+        .fetch_one(&cp.pool)
+        .await
+        .unwrap();
+    let mut result: Value = serde_json::from_str(&result).unwrap();
+    result["outputs"][1]["result_media_snapshot_id"] =
+        result["outputs"][0]["result_media_snapshot_id"].clone();
+    sqlx::query("UPDATE tickets SET result = ? WHERE id = ?")
+        .bind(serde_json::to_string(&result).unwrap())
+        .bind(i64::try_from(fixture.ticket_id.0).unwrap())
+        .execute(&cp.pool)
+        .await
+        .unwrap();
+
+    let error = cp
+        .validated_committed_location_ids_for_rows(&fixture.rows)
+        .await
+        .unwrap_err();
+
+    assert!(error.to_string().contains("snapshot version"));
+}
+
+struct OrderedSidecarFixture {
+    ticket_id: voom_core::TicketId,
+    rows: [voom_store::repo::workflow_summaries::FilePhaseSummary; 1],
+    locations: Vec<FileLocationId>,
+}
+
+async fn seed_ordered_sidecar_ticket(cp: &crate::ControlPlane) -> OrderedSidecarFixture {
+    let source = seed_version(cp, "/library/ordered-sidecars.mkv", "source").await;
+    let job = open_policy_job(cp).await;
+    cp.workflow_summaries()
+        .insert_file_run_starts(
+            job.id,
+            vec![NewFileRunStart {
+                branch_id: "ordered-sidecars".to_owned(),
+                starting_file_version_id: source,
+                starting_phase_ordinal: 0,
+            }],
+        )
+        .await
+        .unwrap();
+    let operation = TicketOperation::new("transcode_video").unwrap();
+    let worker = eligible_worker(cp, &operation).await;
+    let ticket = cp
+        .create_ticket(NewTicket {
+            job_id: Some(job.id),
+            kind: TicketOperation::new("synthetic.workflow.operation.transcode_video").unwrap(),
+            priority: 0,
+            payload: json!({
+                "workflow_id": format!("workflow-{}-phase-0", job.id.0),
+                "node_id": format!("policy-node_{NODE_ID}"),
+                "branch_id": "ordered-sidecars",
+                "rendered_payload": {"source_file_version_id": source.0},
+            }),
+            max_attempts: 1,
+            created_at: T0,
+        })
+        .await
+        .unwrap();
+    cp.mark_ready_if_unblocked(ticket.id, T0).await.unwrap();
+    let lease = cp
+        .acquire_lease(NewLease {
+            ticket_id: ticket.id,
+            worker_id: worker.id,
+            ttl: Duration::minutes(1),
+            now: T0,
+        })
+        .await
+        .unwrap();
+    let mut outputs = Vec::new();
+    let mut locations = Vec::new();
+    let context = SidecarTicketContext {
+        source,
+        worker_id: worker.id,
+    };
+    for ordinal in 0..2 {
+        let (output, location) = create_sidecar_commit_result(cp, context, ordinal).await;
+        outputs.push(output);
+        locations.push(location);
+    }
+    let first = outputs[0].clone();
+    cp.release_lease(
+        lease.id,
+        json!({
+            "job_id": job.id.0,
+            "ticket_id": ticket.id.0,
+            "lease_id": lease.id.0,
+            "source_file_version_id": first["source_file_version_id"],
+            "staged_artifact_handle_id": first["staged_artifact_handle_id"],
+            "staged_artifact_location_id": first["staged_artifact_location_id"],
+            "verification_id": first["verification_id"],
+            "commit_record_id": first["commit_record_id"],
+            "result_file_version_id": first["result_file_version_id"],
+            "result_file_location_id": first["result_file_location_id"],
+            "result_media_snapshot_id": first["result_media_snapshot_id"],
+            "outputs": outputs,
+        }),
+        T0,
+    )
+    .await
+    .unwrap();
+    OrderedSidecarFixture {
+        ticket_id: ticket.id,
+        rows: [voom_store::repo::workflow_summaries::FilePhaseSummary {
+            id: 1,
+            job_id: job.id,
+            phase_ordinal: 0,
+            branch_id: "ordered-sidecars".to_owned(),
+            ticket_ids: vec![ticket.id],
+            produced_file_version_id: None,
+            produced_file_location_id: None,
+            artifact_handle_id: None,
+            artifact_verification_id: None,
+            reprobe_snapshot_id: None,
+            outcome: FilePhaseOutcome::Skipped,
+            created_at: T0,
+        }],
+        locations,
+    }
 }
 
 #[tokio::test]
@@ -600,8 +750,13 @@ async fn seed_committed_ticket_evidence_for_phase(
         })
         .await
         .unwrap();
-    let staged =
-        create_verified_staging(cp, source_version_id, worker.id, ticket.id, lease.id).await;
+    let staged = create_verified_staging(
+        cp,
+        source_version_id,
+        worker.id,
+        Some((ticket.id, lease.id)),
+    )
+    .await;
     let commit = create_pending_commit(cp, source_version_id, &staged).await;
     let result_hash = format!("job-produced-{}", staged.handle_id.0);
     let version_id = advance_chain_tip(
@@ -653,12 +808,65 @@ struct VerifiedStaging {
     verification_id: voom_core::ids::ArtifactVerificationId,
 }
 
+#[derive(Clone, Copy)]
+struct SidecarTicketContext {
+    source: FileVersionId,
+    worker_id: voom_core::WorkerId,
+}
+
+async fn create_sidecar_commit_result(
+    cp: &crate::ControlPlane,
+    context: SidecarTicketContext,
+    ordinal: u32,
+) -> (Value, FileLocationId) {
+    let staged = create_verified_staging(cp, context.source, context.worker_id, None).await;
+    let commit = create_pending_commit(cp, context.source, &staged).await;
+    let mut tx = crate::cases::begin_tx(&cp.pool).await.unwrap();
+    let committed = cp
+        .artifacts()
+        .record_verified_sidecar_commit_rows_in_tx(
+            &mut tx,
+            NewSidecarArtifactCommit {
+                commit_record_id: commit.id,
+                target_path: commit.target_path.clone(),
+                content_hash: format!("sidecar-committed-{ordinal}"),
+                size_bytes: 2048,
+                observed_at: T0,
+                finished_at: T0,
+            },
+        )
+        .await
+        .unwrap();
+    crate::cases::commit_tx(tx).await.unwrap();
+    let snapshot = cp
+        .record_media_snapshot(
+            committed.file_version_id,
+            None,
+            snapshot_payload("sidecar"),
+            T0,
+        )
+        .await
+        .unwrap();
+    (
+        json!({
+            "source_file_version_id": context.source.0,
+            "staged_artifact_handle_id": staged.handle_id.0,
+            "staged_artifact_location_id": staged.location_id.0,
+            "verification_id": staged.verification_id.0,
+            "commit_record_id": commit.id.0,
+            "result_file_version_id": committed.file_version_id.0,
+            "result_file_location_id": committed.file_location_id.0,
+            "result_media_snapshot_id": snapshot.id.0,
+        }),
+        committed.file_location_id,
+    )
+}
+
 async fn create_verified_staging(
     cp: &crate::ControlPlane,
     source_version_id: FileVersionId,
     worker_id: voom_core::WorkerId,
-    ticket_id: voom_core::TicketId,
-    lease_id: voom_core::LeaseId,
+    owner: Option<(voom_core::TicketId, voom_core::LeaseId)>,
 ) -> VerifiedStaging {
     let handle = cp
         .create_artifact_handle(NewArtifactHandle {
@@ -678,7 +886,7 @@ async fn create_verified_staging(
         .record_artifact_location(NewArtifactLocation {
             artifact_handle_id: handle.id,
             kind: "staging".to_owned(),
-            value: format!("/staging/{}.mkv", ticket_id.0),
+            value: format!("/staging/{}.mkv", handle.id.0),
             observed_at: T0,
         })
         .await
@@ -693,8 +901,8 @@ async fn create_verified_staging(
                 artifact_location_id: location.id,
                 path: location.value.clone(),
                 worker_id,
-                workflow_ticket_id: Some(ticket_id),
-                workflow_lease_id: Some(lease_id),
+                workflow_ticket_id: owner.map(|(ticket_id, _)| ticket_id),
+                workflow_lease_id: owner.map(|(_, lease_id)| lease_id),
                 status: ArtifactVerificationStatus::Succeeded,
                 expected_size_bytes: 2048,
                 expected_checksum: "job-produced".to_owned(),

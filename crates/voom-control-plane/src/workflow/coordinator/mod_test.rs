@@ -2240,31 +2240,23 @@ async fn terminalizing_completed_branch_replays_but_terminal_branch_does_not() {
 }
 
 #[tokio::test]
-async fn terminalizing_committed_branch_replays_through_resume_runner() {
+async fn terminalizing_skipped_branch_replays_through_resume_runner() {
     let (cp, _tmp) = cp().await;
     let version = seed_version(
         &cp,
-        "/lib/terminalize/committed.mkv",
-        "hash-terminalize-committed",
+        "/lib/terminalize/skipped.mkv",
+        "hash-terminalize-skipped",
         reprobe_payload("h264"),
     )
     .await;
     let prior = open_workflow_job(&cp).await;
-    record_run_start(&cp, prior, "committed", version, 0).await;
-    record_file_phase(
-        &cp,
-        prior,
-        0,
-        "committed",
-        FilePhaseOutcome::Committed,
-        Some(version),
-    )
-    .await;
+    record_run_start(&cp, prior, "skipped", version, 0).await;
+    record_file_phase(&cp, prior, 0, "skipped", FilePhaseOutcome::Skipped, None).await;
     cp.workflow_summaries()
-        .begin_file_terminalization(prior, "committed")
+        .begin_file_terminalization(prior, "skipped")
         .await
         .unwrap();
-    let file = phase_file(&cp, version, "committed").await;
+    let file = phase_file(&cp, version, "skipped").await;
     let snapshot = file.snapshot.clone();
     let policy = policy_with_on_error(None);
     let preparation = cp.prepare_resume(prior, vec![file], 1).await.unwrap();
@@ -2284,10 +2276,10 @@ async fn terminalizing_committed_branch_replays_through_resume_runner() {
         .unwrap();
 
     assert_eq!(outcome.file_phases.len(), 1);
-    assert_eq!(outcome.file_phases[0].outcome, FilePhaseOutcome::Committed);
+    assert_eq!(outcome.file_phases[0].outcome, FilePhaseOutcome::Skipped);
     let progress = cp
         .workflow_summaries()
-        .file_progress(outcome.job_id, "committed")
+        .file_progress(outcome.job_id, "skipped")
         .await
         .unwrap()
         .unwrap();
@@ -3343,56 +3335,6 @@ async fn promote_terminal_artifacts_matches_through_symlinked_working_dir() {
 }
 
 #[tokio::test]
-async fn promotion_location_ids_rejects_negative_ticket_result_location_id() {
-    let (cp, _db) = cp().await;
-    let job = cp
-        .open_job(NewJob {
-            kind: "synthetic.workflow".to_owned(),
-            priority: 0,
-            created_at: T0,
-        })
-        .await
-        .unwrap();
-    let ticket = cp
-        .create_ticket(NewTicket {
-            job_id: Some(job.id),
-            kind: TicketOperation::new("synthetic.workflow.operation.test").unwrap(),
-            priority: 0,
-            payload: json!({}),
-            max_attempts: 1,
-            created_at: T0,
-        })
-        .await
-        .unwrap();
-    sqlx::query(
-        "UPDATE tickets SET state = 'succeeded', result = ?, state_changed_at = ?, \
-         epoch = epoch + 1 WHERE id = ?",
-    )
-    .bind(serde_json::to_string(&json!({"result_file_location_id": -7})).unwrap())
-    .bind(T0.format(&Iso8601::DEFAULT).unwrap())
-    .bind(i64::try_from(ticket.id.0).unwrap())
-    .execute(&cp.pool)
-    .await
-    .unwrap();
-
-    let err = cp
-        .ticket_result_location_ids_for_tickets(&[ticket.id])
-        .await
-        .unwrap_err();
-
-    assert_eq!(err.code(), "DB_UNREACHABLE");
-    assert!(
-        err.to_string()
-            .contains("promotion ticket result location id"),
-        "error should identify the corrupted column: {err}"
-    );
-    assert!(
-        err.to_string().contains("-7"),
-        "error should include the invalid persisted value: {err}"
-    );
-}
-
-#[tokio::test]
 async fn phase_ticket_lookup_ignores_matching_nodes_from_other_invocations() {
     let (cp, _db) = cp().await;
     let job = cp
@@ -3671,7 +3613,7 @@ async fn promote_terminal_artifacts_skips_non_tip_scoped_locations() {
 }
 
 #[tokio::test]
-async fn branch_promotion_ids_include_every_ordered_extract_output() {
+async fn branch_promotion_rejects_ordered_outputs_without_commit_evidence() {
     let (cp, _db) = cp().await;
     let job = cp
         .open_job(NewJob {
@@ -3681,6 +3623,16 @@ async fn branch_promotion_ids_include_every_ordered_extract_output() {
         })
         .await
         .unwrap();
+    let source_version = seed_version(
+        &cp,
+        "/library/Movie.mkv",
+        "hash-promotion-evidence",
+        reprobe_payload("h264"),
+    )
+    .await;
+    record_run_start(&cp, job.id, "movie", source_version, 0).await;
+    let source_location = live_location_id(&cp, source_version).await;
+    let source_snapshot = latest_snapshot(&cp, source_version).await;
     let ticket = cp
         .create_ticket(NewTicket {
             job_id: Some(job.id),
@@ -3717,21 +3669,24 @@ async fn branch_promotion_ids_include_every_ordered_extract_output() {
         phase_ordinal: 0,
         branch_id: "movie".to_owned(),
         ticket_ids: vec![ticket.id],
-        produced_file_version_id: Some(FileVersionId(1)),
-        produced_file_location_id: Some(FileLocationId(101)),
+        produced_file_version_id: Some(source_version),
+        produced_file_location_id: Some(source_location),
         artifact_handle_id: None,
         artifact_verification_id: None,
-        reprobe_snapshot_id: Some(voom_core::MediaSnapshotId(1)),
+        reprobe_snapshot_id: Some(source_snapshot.id),
         outcome: FilePhaseOutcome::Committed,
         created_at: T0,
     }];
 
-    let location_ids = cp
+    let error = cp
         .promotion_location_ids_for_branches(&rows, &["movie".to_owned()])
         .await
-        .unwrap();
+        .unwrap_err();
 
-    assert_eq!(location_ids, vec![FileLocationId(101), FileLocationId(102)]);
+    assert!(
+        error.to_string().contains("committed"),
+        "promotion must fail closed when output locations have no commit evidence: {error}"
+    );
 }
 
 struct TerminalArtifact {

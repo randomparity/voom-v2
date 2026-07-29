@@ -9,7 +9,6 @@ use std::path::{Component, Path, PathBuf};
 use tokio::io::AsyncReadExt;
 use voom_core::{FileAssetId, FileLocationId, FileVersionId, VoomError};
 use voom_store::repo::identity::{FileLocationKind, IdentityRepo};
-use voom_store::repo::workflow_summaries::FilePhaseOutcome;
 use voom_store::repo::workflow_summaries::FilePhaseSummary;
 
 use crate::ControlPlane;
@@ -397,27 +396,15 @@ impl ControlPlane {
         branches: &[String],
     ) -> Result<Vec<FileLocationId>, VoomError> {
         let branches = branches.iter().map(String::as_str).collect::<HashSet<_>>();
+        let selected_rows = file_phases
+            .iter()
+            .filter(|row| branches.contains(row.branch_id.as_str()))
+            .cloned()
+            .collect::<Vec<_>>();
         let mut seen = HashSet::new();
-        let mut ticket_ids = HashSet::new();
         let mut location_ids = Vec::new();
-        for row in file_phases {
-            if !branches.contains(row.branch_id.as_str()) {
-                continue;
-            }
-            ticket_ids.extend(row.ticket_ids.iter().copied());
-            if row.outcome == FilePhaseOutcome::Committed
-                && let Some(location_id) = row.produced_file_location_id
-                && seen.insert(location_id)
-            {
-                location_ids.push(location_id);
-            }
-        }
-        if ticket_ids.is_empty() {
-            return Ok(location_ids);
-        }
-        let ticket_ids = ticket_ids.into_iter().collect::<Vec<_>>();
         for location_id in self
-            .ticket_result_location_ids_for_tickets(&ticket_ids)
+            .validated_committed_location_ids_for_rows(&selected_rows)
             .await?
         {
             if seen.insert(location_id) {
