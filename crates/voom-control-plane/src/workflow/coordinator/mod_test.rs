@@ -1850,6 +1850,87 @@ async fn admission_failure_drains_the_already_admitted_pipeline() {
 }
 
 #[tokio::test]
+async fn pipeline_failure_outranks_supervisory_admission_failure() {
+    let (cp, _tmp) = cp().await;
+    let first = seed_version(
+        &cp,
+        "/lib/error-precedence/first.mkv",
+        "hash-error-precedence-first",
+        reprobe_payload("h264"),
+    )
+    .await;
+    let second = seed_version(
+        &cp,
+        "/lib/error-precedence/second.mkv",
+        "hash-error-precedence-second",
+        reprobe_payload("h264"),
+    )
+    .await;
+    let mut files = vec![
+        phase_file(&cp, first, "first").await,
+        phase_file(&cp, second, "second").await,
+    ];
+    files[0].ordinal = 1;
+    files[1].ordinal = 2;
+    let snapshots = files
+        .iter()
+        .map(|file| file.snapshot.clone())
+        .collect::<Vec<_>>();
+    let starts = super::run_starts_for_files(&files);
+    let (job, _) = cp
+        .open_sliding_file_job(&starts, Vec::new(), Vec::new(), &files, 2)
+        .await
+        .unwrap();
+    sqlx::query(
+        "CREATE TRIGGER fail_job_after_first_admission \
+         AFTER UPDATE OF state ON workflow_file_progress \
+         WHEN OLD.input_ordinal = 1 AND NEW.state = 'active' \
+         BEGIN UPDATE jobs SET state = 'failed' WHERE id = NEW.job_id; END",
+    )
+    .execute(&cp.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "CREATE TRIGGER fail_admitted_pipeline_phase_entry \
+         BEFORE INSERT ON workflow_file_phase_entries \
+         BEGIN SELECT RAISE(ABORT, 'forced pipeline phase-entry failure'); END",
+    )
+    .execute(&cp.pool)
+    .await
+    .unwrap();
+
+    let error = cp
+        .run_sliding_file_window(super::PhaseLoopInputs {
+            job_id: job.id,
+            policy: voom_policy::compile_policy(
+                "policy \"error precedence\" {\n  phase inspect {}\n}\n",
+            )
+            .unwrap()
+            .policy,
+            context: voom_plan::PlanningContext::default(),
+            base_draft: file_draft("error-precedence", &snapshots),
+            files,
+            seed_file_phases: Vec::new(),
+            options: ComplianceExecutionOptions {
+                max_in_flight_files: 2,
+                ..ComplianceExecutionOptions::default()
+            },
+            runtimes: crate::workflow::WorkerRuntimeRegistry::new(),
+        })
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.source.code(), "DB_UNREACHABLE", "{error:?}");
+    assert!(
+        error
+            .source
+            .to_string()
+            .contains("forced pipeline phase-entry failure")
+    );
+    assert_eq!(job_state(&cp, job.id).await, "failed");
+}
+
+#[tokio::test]
 async fn closed_admission_gate_prevents_refill_before_failure_join() {
     let (cp, _tmp) = cp().await;
     let first = seed_version(

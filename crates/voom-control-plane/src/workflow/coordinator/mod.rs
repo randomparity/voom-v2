@@ -1443,15 +1443,17 @@ impl ControlPlane {
         let admission_gate = FileAdmissionGate::new();
         let mut last_run = None;
         let mut continued_error = None;
-        let mut fatal_error = None;
+        let mut supervisor_error = None;
+        let mut pipeline_error = None;
         loop {
-            if fatal_error.is_none() {
+            if supervisor_error.is_none() && pipeline_error.is_none() {
                 match self.file_window_job_error(inputs.job_id).await {
-                    Ok(error) => fatal_error = error,
-                    Err(source) => fatal_error = Some(source),
+                    Ok(error) => supervisor_error = error,
+                    Err(source) => supervisor_error = Some(source),
                 }
             }
-            if fatal_error.is_none()
+            if supervisor_error.is_none()
+                && pipeline_error.is_none()
                 && let Err(source) = self
                     .fill_file_window(
                         &inputs,
@@ -1466,7 +1468,7 @@ impl ControlPlane {
                     )
                     .await
             {
-                fatal_error = Some(source);
+                supervisor_error = Some(source);
             }
             let Some(joined) = active.join_next().await else {
                 break;
@@ -1480,20 +1482,20 @@ impl ControlPlane {
                 }
                 Ok(Err(failure)) => {
                     merge_run_summary(&mut last_run, failure.last_run);
-                    if fatal_error.is_none() {
-                        fatal_error = Some(failure.source);
+                    if pipeline_error.is_none() {
+                        pipeline_error = Some(failure.source);
                     }
                 }
                 Err(error) => {
-                    if fatal_error.is_none() {
-                        fatal_error = Some(VoomError::Internal(format!(
+                    if pipeline_error.is_none() {
+                        pipeline_error = Some(VoomError::Internal(format!(
                             "file pipeline task failed to join: {error}"
                         )));
                     }
                 }
             }
         }
-        if !pending.is_empty() && fatal_error.is_none() {
+        if !pending.is_empty() && supervisor_error.is_none() && pipeline_error.is_none() {
             return Err(VoomError::Conflict(format!(
                 "{} file pipelines remain pending after the sliding window drained",
                 pending.len()
@@ -1508,7 +1510,7 @@ impl ControlPlane {
             .await;
         let last_run = Some(job_run);
         let (phases, file_phases) = self.persist_sliding_phase_summaries(&inputs).await?;
-        let failure = fatal_error.or(continued_error);
+        let failure = pipeline_error.or(supervisor_error).or(continued_error);
         if let Some(source) = failure {
             return self
                 .finish_sliding_failure(
