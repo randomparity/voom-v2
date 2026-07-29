@@ -232,4 +232,24 @@ impl WorkflowExecutor {
         })?;
         Ok(unfinished == 0)
     }
+
+    pub(super) async fn workflow_has_leased_ticket(
+        &self,
+        job_id: JobId,
+        workflow_id: &str,
+    ) -> Result<bool, VoomError> {
+        let (leased,): (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM tickets \
+             WHERE job_id = ? AND state = 'leased' \
+               AND json_extract(payload, '$.workflow_id') = ?",
+        )
+        .bind(sqlite_i64(job_id.0))
+        .bind(workflow_id)
+        .fetch_one(&self.control_plane.pool)
+        .await
+        .map_err(|e| {
+            VoomError::database_context(format!("workflow leased tickets for {job_id}"), e)
+        })?;
+        Ok(leased > 0)
+    }
 }

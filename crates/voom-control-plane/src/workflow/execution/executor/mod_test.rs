@@ -289,6 +289,153 @@ async fn external_capacity_timeout_fails_job_without_consuming_ticket() {
 }
 
 #[tokio::test]
+async fn externally_leased_workflow_ticket_does_not_trigger_no_dispatch_failure() {
+    let mut fixture = ExecutorFixture::without_workers(1).await;
+    let worker_id = fixture
+        .register_worker(
+            "shared-invocation-worker",
+            OperationKind::HashFile,
+            2,
+            FakeBehavior::Success,
+        )
+        .await;
+    let job_id = fixture.open_workflow_job().await;
+    let invocation_id = "shared-invocation";
+    let workflow_id = format!("workflow-{}-{invocation_id}", job_id.0);
+    let external_ticket = fixture
+        .cp
+        .create_ticket(NewTicket {
+            job_id: Some(job_id),
+            kind: workflow_ticket_op(OperationKind::HashFile),
+            priority: 0,
+            payload: WorkflowTicketPayload::new_for_test(
+                &workflow_id,
+                "external-plan",
+                "external-hash",
+                "external",
+                OperationKind::HashFile,
+                json!({
+                    "operation": "hash_file",
+                    "path": "/library/external.mkv"
+                }),
+            )
+            .to_ticket_payload()
+            .unwrap(),
+            max_attempts: 1,
+            created_at: T0,
+        })
+        .await
+        .unwrap();
+    fixture
+        .cp
+        .mark_ready_if_unblocked(external_ticket.id, T0)
+        .await
+        .unwrap();
+    let external_lease = fixture
+        .cp
+        .acquire_lease(NewLease {
+            ticket_id: external_ticket.id,
+            worker_id,
+            ttl: time::Duration::seconds(5),
+            now: T0,
+        })
+        .await
+        .unwrap();
+    let executor = fixture.executor_with_options(WorkflowExecutorOptions::for_tests());
+    let run = tokio::spawn(async move {
+        executor
+            .submit_and_run_invocation_in_job(
+                job_id,
+                invocation_id,
+                independent_hash_plan(1),
+                super::RunFailureMode::ContinueIndependent,
+            )
+            .await
+    });
+
+    for _ in 0..100 {
+        if fixture.worker_dispatch_count(worker_id) == 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(40)).await;
+    assert!(
+        !run.is_finished(),
+        "the invocation must wait while same-scope work is leased elsewhere"
+    );
+
+    fixture
+        .cp
+        .release_lease(external_lease.id, json!({"status": "released"}), T0)
+        .await
+        .unwrap();
+    let summary = tokio::time::timeout(Duration::from_secs(2), run)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(summary.dispatch_count, 1);
+    assert_eq!(fixture.worker_dispatch_count(worker_id), 1);
+}
+
+#[tokio::test]
+async fn pending_same_scope_ticket_still_reports_no_dispatch_failure() {
+    let mut fixture = ExecutorFixture::without_workers(1).await;
+    fixture
+        .register_worker(
+            "stalled-invocation-worker",
+            OperationKind::HashFile,
+            1,
+            FakeBehavior::Success,
+        )
+        .await;
+    let job_id = fixture.open_workflow_job().await;
+    let invocation_id = "stalled-invocation";
+    let workflow_id = format!("workflow-{}-{invocation_id}", job_id.0);
+    fixture
+        .cp
+        .create_ticket(NewTicket {
+            job_id: Some(job_id),
+            kind: workflow_ticket_op(OperationKind::HashFile),
+            priority: 0,
+            payload: WorkflowTicketPayload::new_for_test(
+                &workflow_id,
+                "stalled-plan",
+                "stalled-hash",
+                "stalled",
+                OperationKind::HashFile,
+                json!({
+                    "operation": "hash_file",
+                    "path": "/library/stalled.mkv"
+                }),
+            )
+            .to_ticket_payload()
+            .unwrap(),
+            max_attempts: 1,
+            created_at: T0,
+        })
+        .await
+        .unwrap();
+    let executor = fixture.executor_with_options(WorkflowExecutorOptions::for_tests());
+
+    let error = executor
+        .submit_and_run_invocation_in_job(
+            job_id,
+            invocation_id,
+            independent_hash_plan(1),
+            super::RunFailureMode::ContinueIndependent,
+        )
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.source.error_code(), ErrorCode::Internal);
+    assert!(error.source.to_string().contains("no dispatchable work"));
+    assert!(error.job_failed);
+}
+
+#[tokio::test]
 async fn cancelling_job_stops_external_capacity_wait_without_failure_events() {
     let mut fixture = ExecutorFixture::without_workers(1).await;
     let worker_id = fixture
