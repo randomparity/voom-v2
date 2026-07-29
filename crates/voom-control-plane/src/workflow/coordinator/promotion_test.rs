@@ -47,6 +47,7 @@ fn promotion_layout_uses_input_root_for_primary_assets() {
     let relative = promotion_relative_dir(
         Some(Path::new("/library/show/S01")),
         Path::new("/library"),
+        Some(Path::new("/library/show/S01")),
         Path::new("/stage/.committed/audio"),
         Path::new("/stage/.committed/audio"),
     );
@@ -58,7 +59,8 @@ fn promotion_layout_uses_input_root_for_primary_assets() {
 fn promotion_layout_flattens_a_single_sidecar_operation_dir() {
     let relative = promotion_relative_dir(
         Some(Path::new("/stage/.committed/audio/v8")),
-        Path::new("/library"),
+        Path::new("/library/show/S01"),
+        Some(Path::new("/library/show/S01")),
         Path::new("/stage/.committed/audio/v8"),
         Path::new("/stage/.committed/audio"),
     );
@@ -67,10 +69,24 @@ fn promotion_layout_flattens_a_single_sidecar_operation_dir() {
 }
 
 #[test]
-fn promotion_layout_preserves_multiple_sidecar_operation_dirs() {
+fn promotion_layout_scopes_sidecar_to_branch_source_subtree() {
     let relative = promotion_relative_dir(
         Some(Path::new("/stage/.committed/audio/v8")),
         Path::new("/library"),
+        Some(Path::new("/library/show/S01")),
+        Path::new("/stage/.committed/audio/v8"),
+        Path::new("/stage/.committed/audio"),
+    );
+
+    assert_eq!(relative, Path::new("show/S01"));
+}
+
+#[test]
+fn promotion_layout_preserves_multiple_sidecar_operation_dirs() {
+    let relative = promotion_relative_dir(
+        Some(Path::new("/stage/.committed/audio/v8")),
+        Path::new("/library/show/S01"),
+        Some(Path::new("/library/show/S01")),
         Path::new("/stage/.committed/audio"),
         Path::new("/stage/.committed/audio"),
     );
@@ -93,7 +109,8 @@ async fn copy_into_place_moves_bytes_and_cleans_up() {
         .unwrap();
     write(&current, b"terminal-bytes").await;
 
-    copy_into_place(&current, &dest).await.unwrap();
+    let temp = promotion_temp_path(&dest, FileLocationId(1)).unwrap();
+    copy_into_place(&current, &dest, &temp).await.unwrap();
 
     assert_eq!(tokio::fs::read(&dest).await.unwrap(), b"terminal-bytes");
     assert!(tokio::fs::symlink_metadata(&current).await.is_err());
@@ -120,7 +137,9 @@ async fn resumed_copy_recovers_and_removes_source() {
     write(&current, b"terminal-bytes").await;
     write(&dest, b"terminal-bytes").await; // copy-done, remove-failed
 
-    let returned = move_terminal_artifact(&current, &dest).await.unwrap();
+    let returned = move_terminal_artifact(&current, &dest, FileLocationId(2))
+        .await
+        .unwrap();
 
     assert_eq!(returned, dest);
     assert!(tokio::fs::symlink_metadata(&current).await.is_err());
@@ -135,7 +154,9 @@ async fn genuine_collision_same_size_fails() {
     write(&current, b"aaaaaaaaaaaaaa").await;
     write(&dest, b"bbbbbbbbbbbbbb").await;
 
-    let err = move_terminal_artifact(&current, &dest).await.unwrap_err();
+    let err = move_terminal_artifact(&current, &dest, FileLocationId(3))
+        .await
+        .unwrap_err();
 
     assert!(
         err.to_string()
@@ -154,7 +175,9 @@ async fn genuine_collision_different_size_fails() {
     write(&current, b"terminal-bytes").await;
     write(&dest, b"a-different-shorter").await;
 
-    let err = move_terminal_artifact(&current, &dest).await.unwrap_err();
+    let err = move_terminal_artifact(&current, &dest, FileLocationId(4))
+        .await
+        .unwrap_err();
 
     assert!(
         err.to_string()
@@ -171,7 +194,9 @@ async fn directory_destination_fails() {
     write(&current, b"terminal-bytes").await;
     tokio::fs::create_dir(&dest).await.unwrap();
 
-    let err = move_terminal_artifact(&current, &dest).await.unwrap_err();
+    let err = move_terminal_artifact(&current, &dest, FileLocationId(5))
+        .await
+        .unwrap_err();
 
     assert!(
         err.to_string()
@@ -187,7 +212,9 @@ async fn already_moved_source_gone_repoints() {
     let dest = tmp.path().join("Movie.mkv");
     write(&dest, b"terminal-bytes").await; // current absent
 
-    let returned = move_terminal_artifact(&current, &dest).await.unwrap();
+    let returned = move_terminal_artifact(&current, &dest, FileLocationId(6))
+        .await
+        .unwrap();
 
     assert_eq!(returned, dest);
     assert_eq!(tokio::fs::read(&dest).await.unwrap(), b"terminal-bytes");
@@ -200,11 +227,32 @@ async fn normal_move_dest_absent_places_and_removes_source() {
     let dest = tmp.path().join("Movie.mkv");
     write(&current, b"terminal-bytes").await;
 
-    let returned = move_terminal_artifact(&current, &dest).await.unwrap();
+    let returned = move_terminal_artifact(&current, &dest, FileLocationId(7))
+        .await
+        .unwrap();
 
     assert_eq!(returned, dest);
     assert!(tokio::fs::symlink_metadata(&current).await.is_err());
     assert_eq!(tokio::fs::read(&dest).await.unwrap(), b"terminal-bytes");
+}
+
+#[tokio::test]
+async fn interrupted_copy_temp_is_reclaimed_before_retry() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let current = tmp.path().join("Movie.work.mkv");
+    let dest = tmp.path().join("Movie.mkv");
+    let location_id = FileLocationId(41);
+    let temp = promotion_temp_path(&dest, location_id).unwrap();
+    write(&current, b"terminal-bytes").await;
+    write(&temp, b"interrupted").await;
+
+    let returned = move_terminal_artifact(&current, &dest, location_id)
+        .await
+        .unwrap();
+
+    assert_eq!(returned, dest);
+    assert_eq!(tokio::fs::read(&dest).await.unwrap(), b"terminal-bytes");
+    assert!(tokio::fs::symlink_metadata(&temp).await.is_err());
 }
 
 #[tokio::test]
@@ -217,8 +265,8 @@ async fn concurrent_moves_never_replace_the_winning_destination() {
     write(&second, b"second-output").await;
 
     let (first_result, second_result) = tokio::join!(
-        move_terminal_artifact(&first, &dest),
-        move_terminal_artifact(&second, &dest)
+        move_terminal_artifact(&first, &dest, FileLocationId(8)),
+        move_terminal_artifact(&second, &dest, FileLocationId(9))
     );
 
     assert_ne!(first_result.is_ok(), second_result.is_ok());

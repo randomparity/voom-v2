@@ -142,14 +142,20 @@ is expanded and each member is validated independently; promotion never
 accepts a location directly from unvalidated result JSON. A committed row with
 nullable or incomplete artifact evidence cannot bypass validation.
 Non-mutating and verification-only results contribute no promotion location.
+Primary and sidecar outputs both inherit the owning branch's path relative to
+the job-wide source root, so immediate per-branch publication preserves
+duplicate basenames from different source subtrees. Cross-filesystem copies use
+one deterministic, location-owned hidden partial path; resume removes that
+owned partial before retry instead of accumulating full-size orphan copies.
 
 Blocked planning and continued per-file ticket failure terminalize without
 promotion. A prior `terminal` branch is already proof that promotion/cleanup
 either completed or was intentionally withheld, so a zero-survivor resume does
 not promote its carried rows again. An abort-strategy failure stops further
-admission and drains the already admitted work. External cancellation likewise
-stops admission; the job remains cancelled and its committed file-phase rows
-remain resumable.
+admission synchronously when the failure is selected, before recovery awaits,
+and an unwind guard closes admission if a pipeline task panics. Already admitted
+work drains. External cancellation likewise stops admission; the job remains
+cancelled and its committed file-phase rows remain resumable.
 
 Resume rejects every phase-complete branch whose active chain tip differs from
 its recorded row tail. For an incomplete branch, a changed tip advances the

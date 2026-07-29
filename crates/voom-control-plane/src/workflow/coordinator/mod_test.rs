@@ -65,6 +65,8 @@ where
             runtimes,
         },
         std::path::PathBuf::new(),
+        None,
+        super::FileAdmissionGate::new(),
     )
     .run_file_pipeline_after_phase_plan(after_phase_plan)
     .await;
@@ -142,6 +144,8 @@ where
             runtimes,
         },
         std::path::PathBuf::new(),
+        None,
+        super::FileAdmissionGate::new(),
     )
     .run_file_pipeline_after_phase_plan(after_phase_plan)
     .await;
@@ -1595,6 +1599,8 @@ async fn phase_planning_applies_each_files_modified_gate_decision() {
             runtimes: crate::workflow::WorkerRuntimeRegistry::new(),
         },
         std::path::PathBuf::new(),
+        None,
+        super::FileAdmissionGate::new(),
     );
 
     let planned = phase_loop
@@ -1645,6 +1651,8 @@ async fn phase_planning_reports_zero_checks_when_no_files_pass_the_gate() {
             runtimes: crate::workflow::WorkerRuntimeRegistry::new(),
         },
         std::path::PathBuf::new(),
+        None,
+        super::FileAdmissionGate::new(),
     );
 
     let planned = phase_loop
@@ -1872,7 +1880,7 @@ async fn closed_admission_gate_prevents_refill_before_failure_join() {
     let gate = super::FileAdmissionGate::new();
 
     let admitted = gate.admit_next_file(&cp, job.id).await.unwrap().unwrap();
-    gate.close().await;
+    gate.close();
 
     assert_eq!(admitted.branch_id, "first");
     assert!(
@@ -1890,6 +1898,95 @@ async fn closed_admission_gate_prevents_refill_before_failure_join() {
             .map(|row| (row.branch_id.as_str(), row.state.as_str()))
             .collect::<Vec<_>>(),
         vec![("first", "active"), ("second", "pending")]
+    );
+}
+
+#[tokio::test]
+async fn fatal_latch_prevents_sibling_refill_while_recovery_is_pending() {
+    let (cp, _tmp) = cp().await;
+    let versions = [
+        ("/lib/fatal-latch/first.mkv", "hash-fatal-latch-first"),
+        ("/lib/fatal-latch/second.mkv", "hash-fatal-latch-second"),
+        ("/lib/fatal-latch/third.mkv", "hash-fatal-latch-third"),
+    ];
+    let mut files = Vec::new();
+    for (ordinal, (path, hash)) in versions.into_iter().enumerate() {
+        let version = seed_version(&cp, path, hash, reprobe_payload("h264")).await;
+        let mut file = phase_file(&cp, version, &format!("file-{ordinal}")).await;
+        file.ordinal = u32::try_from(ordinal).unwrap();
+        files.push(file);
+    }
+    let starts = super::run_starts_for_files(&files);
+    let (job, _) = cp
+        .open_sliding_file_job(&starts, Vec::new(), Vec::new(), &files, 2)
+        .await
+        .unwrap();
+    let gate = super::FileAdmissionGate::new();
+    let first = gate.admit_next_file(&cp, job.id).await.unwrap().unwrap();
+    gate.admit_next_file(&cp, job.id).await.unwrap().unwrap();
+    let fatal_known = std::sync::Arc::new(tokio::sync::Notify::new());
+    let finish_recovery = std::sync::Arc::new(tokio::sync::Notify::new());
+    let recovery_task = {
+        let gate = gate.clone();
+        let fatal_known = fatal_known.clone();
+        let finish_recovery = finish_recovery.clone();
+        tokio::spawn(async move {
+            gate.close();
+            fatal_known.notify_one();
+            finish_recovery.notified().await;
+        })
+    };
+    fatal_known.notified().await;
+    cp.workflow_summaries()
+        .begin_file_terminalization(job.id, &first.branch_id)
+        .await
+        .unwrap();
+    cp.workflow_summaries()
+        .mark_file_terminal(job.id, &first.branch_id, cp.clock().now())
+        .await
+        .unwrap();
+
+    assert!(
+        gate.admit_next_file(&cp, job.id).await.unwrap().is_none(),
+        "a sibling freeing a slot must not refill after fatal failure is known"
+    );
+    finish_recovery.notify_one();
+    recovery_task.await.unwrap();
+}
+
+#[tokio::test]
+async fn admission_failure_guard_closes_gate_when_pipeline_panics() {
+    let (cp, _tmp) = cp().await;
+    let versions = [
+        ("/lib/panic-latch/first.mkv", "hash-panic-latch-first"),
+        ("/lib/panic-latch/second.mkv", "hash-panic-latch-second"),
+    ];
+    let mut files = Vec::new();
+    for (ordinal, (path, hash)) in versions.into_iter().enumerate() {
+        let version = seed_version(&cp, path, hash, reprobe_payload("h264")).await;
+        let mut file = phase_file(&cp, version, &format!("file-{ordinal}")).await;
+        file.ordinal = u32::try_from(ordinal).unwrap();
+        files.push(file);
+    }
+    let starts = super::run_starts_for_files(&files);
+    let (job, _) = cp
+        .open_sliding_file_job(&starts, Vec::new(), Vec::new(), &files, 1)
+        .await
+        .unwrap();
+    let gate = super::FileAdmissionGate::new();
+    gate.admit_next_file(&cp, job.id).await.unwrap().unwrap();
+    let task = {
+        let failure_guard = super::FileAdmissionFailureGuard::new(gate.clone());
+        tokio::spawn(async move {
+            let _failure_guard = failure_guard;
+            panic!("injected pipeline panic");
+        })
+    };
+
+    assert!(task.await.unwrap_err().is_panic());
+    assert!(
+        gate.admit_next_file(&cp, job.id).await.unwrap().is_none(),
+        "unwinding a pipeline must close admission synchronously"
     );
 }
 
@@ -3365,7 +3462,7 @@ async fn promote_terminal_artifacts_matches_through_symlinked_working_dir() {
     };
 
     let location_id = live_location_id(&cp, version).await;
-    cp.promote_terminal_artifacts(&plan, &[location_id], std::path::Path::new(""))
+    cp.promote_terminal_artifacts(&plan, &[location_id], std::path::Path::new(""), None)
         .await
         .unwrap();
 
@@ -3525,10 +3622,16 @@ async fn promote_terminal_artifacts_mirrors_source_subtree_for_duplicate_basenam
     for (_, vid) in &tips {
         location_ids.push(live_location_id(&cp, *vid).await);
     }
-    for location_id in location_ids {
-        cp.promote_terminal_artifacts(&plan, &[location_id], std::path::Path::new("/library"))
-            .await
-            .unwrap();
+    for ((season, _), location_id) in tips.iter().zip(location_ids) {
+        let source_dir = std::path::Path::new("/library").join(season);
+        cp.promote_terminal_artifacts(
+            &plan,
+            &[location_id],
+            std::path::Path::new("/library"),
+            Some(&source_dir),
+        )
+        .await
+        .unwrap();
     }
 
     for (season, vid) in tips {
@@ -3577,7 +3680,7 @@ async fn promote_terminal_artifacts_ignores_unscoped_working_dir_artifacts() {
         }],
     };
 
-    cp.promote_terminal_artifacts(&plan, &[first.location_id], std::path::Path::new(""))
+    cp.promote_terminal_artifacts(&plan, &[first.location_id], std::path::Path::new(""), None)
         .await
         .unwrap();
 
@@ -3663,6 +3766,7 @@ async fn promote_terminal_artifacts_skips_non_tip_scoped_locations() {
         &plan,
         &[old_location_id, new_location.id],
         std::path::Path::new(""),
+        None,
     )
     .await
     .unwrap();

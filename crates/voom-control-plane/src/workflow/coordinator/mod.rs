@@ -18,6 +18,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 use tokio::sync::Mutex;
 use tokio::task::JoinSet;
@@ -388,18 +389,20 @@ struct FilePipelineFailure {
 
 #[derive(Clone)]
 struct FileAdmissionGate {
-    open: Arc<Mutex<bool>>,
+    open: Arc<AtomicBool>,
+    admission_lock: Arc<Mutex<()>>,
 }
 
 impl FileAdmissionGate {
     fn new() -> Self {
         Self {
-            open: Arc::new(Mutex::new(true)),
+            open: Arc::new(AtomicBool::new(true)),
+            admission_lock: Arc::new(Mutex::new(())),
         }
     }
 
-    async fn close(&self) {
-        *self.open.lock().await = false;
+    fn close(&self) {
+        self.open.store(false, Ordering::Release);
     }
 
     async fn admit_next_file(
@@ -407,14 +410,37 @@ impl FileAdmissionGate {
         control_plane: &ControlPlane,
         job_id: JobId,
     ) -> Result<Option<voom_store::repo::workflow_summaries::FileProgress>, VoomError> {
-        let open = self.open.lock().await;
-        if !*open {
+        let _admission = self.admission_lock.lock().await;
+        if !self.open.load(Ordering::Acquire) {
             return Ok(None);
         }
         control_plane
             .workflow_summaries
             .admit_next_file(job_id, control_plane.clock().now())
             .await
+    }
+}
+
+struct FileAdmissionFailureGuard {
+    gate: FileAdmissionGate,
+    armed: bool,
+}
+
+impl FileAdmissionFailureGuard {
+    fn new(gate: FileAdmissionGate) -> Self {
+        Self { gate, armed: true }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for FileAdmissionFailureGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            self.gate.close();
+        }
     }
 }
 
@@ -491,6 +517,8 @@ struct PhaseLoop<'a> {
     promotable_branches: BTreeSet<String>,
     branch_id: Option<String>,
     promotion_source_root: PathBuf,
+    promotion_source_dir: Option<PathBuf>,
+    admission_gate: FileAdmissionGate,
 }
 
 impl<'a> PhaseLoop<'a> {
@@ -498,6 +526,8 @@ impl<'a> PhaseLoop<'a> {
         control_plane: &'a ControlPlane,
         inputs: PhaseLoopInputs,
         promotion_source_root: PathBuf,
+        promotion_source_dir: Option<PathBuf>,
+        admission_gate: FileAdmissionGate,
     ) -> Self {
         // Derive promotion pairs from the operator output dirs before the options
         // are converted (the conversion repoints commit targets to working dirs).
@@ -536,6 +566,8 @@ impl<'a> PhaseLoop<'a> {
             promotable_branches,
             branch_id,
             promotion_source_root,
+            promotion_source_dir,
+            admission_gate,
         }
     }
 
@@ -625,6 +657,7 @@ impl<'a> PhaseLoop<'a> {
             return Ok(());
         };
         if failure.job_failed || planned.error_strategy != voom_policy::ErrorStrategy::Continue {
+            self.admission_gate.close();
             let phase_dispatched = failure.run_summary.is_some();
             if let Some(run) = failure.run_summary.take() {
                 self.record_run(run);
@@ -739,6 +772,7 @@ impl<'a> PhaseLoop<'a> {
                     &self.promotion,
                     &location_ids,
                     &self.promotion_source_root,
+                    self.promotion_source_dir.as_deref(),
                 )
                 .await
                 .map_err(|source| file_pipeline_failure(source, self.last_run.as_ref()))?;
@@ -1508,6 +1542,10 @@ impl ControlPlane {
                     progress.branch_id
                 ))
             })?;
+            let promotion_source_dir = self
+                .asset_source_path(file.asset_id)
+                .await?
+                .and_then(|path| path.parent().map(Path::to_path_buf));
             let control_plane = self.clone();
             let promotion_source_root = refill.promotion_source_root.to_path_buf();
             let pipeline_admission_gate = refill.admission_gate.clone();
@@ -1525,11 +1563,19 @@ impl ControlPlane {
                 runtimes: inputs.runtimes.clone(),
             };
             refill.active.spawn(async move {
-                let result = PhaseLoop::new(&control_plane, file_inputs, promotion_source_root)
-                    .run_file_pipeline()
-                    .await;
-                if result.is_err() {
-                    pipeline_admission_gate.close().await;
+                let mut failure_guard =
+                    FileAdmissionFailureGuard::new(pipeline_admission_gate.clone());
+                let result = PhaseLoop::new(
+                    &control_plane,
+                    file_inputs,
+                    promotion_source_root,
+                    promotion_source_dir,
+                    pipeline_admission_gate,
+                )
+                .run_file_pipeline()
+                .await;
+                if result.is_ok() {
+                    failure_guard.disarm();
                 }
                 result
             });

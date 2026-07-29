@@ -66,6 +66,9 @@ After the last successful/verified phase:
 
 - promote terminal main and sidecar locations immediately through the existing
   add-only, no-replace promotion path;
+- derive both primary and sidecar destinations from the owning branch's path
+  below the job-wide source root, and reuse one location-owned copy partial
+  across interrupted cross-filesystem promotion attempts;
 - never overwrite a destination;
 - never modify or delete source media;
 - delete only superseded same-lineage commit results referenced by the
