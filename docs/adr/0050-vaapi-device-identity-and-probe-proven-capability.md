@@ -72,9 +72,10 @@ The design detail is recorded in the [VAAPI video acceleration design][vaapi-des
    default meaning auto, so it is excluded from the operator vocabulary. `hevc_vaapi`
    exposes no `-preset` and no `-compression_level`, so `preset` becomes nullable and
    a migration `CHECK` forbids it for VAAPI while keeping it mandatory for every
-   other encoder. `codec_level` is rejected for VAAPI: `-level` is an integer
-   `general_level_idc` whose auto-derivation is correct, and a half-supported level
-   vocabulary would be phantom support.
+   other encoder. `codec_level` is not offered for VAAPI in this slice: FFmpeg derives
+   a correct `general_level_idc` automatically, no operator has asked for an explicit
+   level, and supporting it would need a normalization step plus per-level
+   verification (below). Deferring it is a scope choice, not a limitation of VAAPI.
 
 5. **Rate control is always explicit.** Generated commands pass `-rc_mode CQP -qp N`
    rather than relying on `auto`, so rate-control behavior cannot drift with an
@@ -177,9 +178,15 @@ The design detail is recorded in the [VAAPI video acceleration design][vaapi-des
   codec ADR 0049 proved for NVIDIA, so shipping it second makes the two backends
   directly comparable on one codec rather than leaving each backend proven on a
   different one. AV1 remains the natural next slice and needs no new hardware.
-- **Expose `codec_level` for VAAPI.** Rejected because `-level` takes an integer
-  `general_level_idc` and FFmpeg derives a correct value automatically; a partial
-  name-to-integer level table would be phantom support.
+- **Expose `codec_level` for VAAPI.** Rejected as scope, on an accurate reading of
+  what it would cost. `hevc_vaapi`'s `-level` is an int-typed AVOption but carries
+  named constants (`1`, `2`, `2.1`, `3`, `3.1`, `4`, `4.1`, `5`, `5.1`, `5.2`, `6`,
+  `6.1`, `6.2`), so no name-to-integer table is needed — an earlier draft of this
+  record claimed otherwise and was wrong. What it does need is normalizing VOOM's
+  existing level vocabulary, which spells the whole levels `4.0`/`5.0`/`6.0` where
+  FFmpeg spells them `4`/`5`/`6`, plus a verified encode per level. FFmpeg's
+  auto-derivation is correct and no operator has asked for an explicit level, so the
+  work buys nothing this slice needs.
 - **Expose `rc_mode` as a profile field.** Rejected as speculative. CQP is the mode
   this slice proves; other modes can be added when an operator needs one.
 - **Reuse the NVIDIA `max_sessions` probe strategy for capacity.** Rejected because
