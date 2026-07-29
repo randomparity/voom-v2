@@ -1259,7 +1259,6 @@ async fn resume_carries_verified_phase_without_duplicate_verification() {
             .iter()
             .all(|phase| phase.outcome == "verified")
     );
-
     let mut prior_job_id = voom_core::JobId(first.summary.job_id);
     for _attempt in 0..2 {
         let resumed = cp
@@ -1277,9 +1276,16 @@ async fn resume_carries_verified_phase_without_duplicate_verification() {
             .unwrap_or_else(|| panic!("resumed third phase must be partial: {}", resumed.source));
         assert_eq!(resumed.file_phases.len(), 2);
         assert!(
-            resumed.file_phases.iter().all(|phase| {
-                phase.outcome.as_str() == "verified" && phase.ticket_ids.is_empty()
-            })
+            resumed
+                .file_phases
+                .iter()
+                .all(|phase| phase.outcome.as_str() == "verified")
+        );
+        assert!(
+            resumed
+                .file_phases
+                .iter()
+                .all(|phase| !phase.ticket_ids.is_empty())
         );
         prior_job_id = resumed.summary.job_id;
     }

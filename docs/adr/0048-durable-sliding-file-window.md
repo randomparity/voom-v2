@@ -103,7 +103,10 @@ first:
 The progress row moves from `active` to `terminalizing` before step 1. Both
 states consume a window slot. A crash anywhere in steps 1–3 therefore leaves a
 durable terminalization-only branch: resume skips completed policy phases,
-replays promotion and cleanup, and only then marks the new row terminal.
+replays promotion and cleanup, and only then marks the new row terminal. The
+new job carries every prior branch row, including its original ticket ids and
+produced references, so terminalization has the same provenance and
+intermediate set after repeated interruption.
 
 Missing cleanup files are treated as an interrupted cleanup and completed
 idempotently. Source locations are never candidates because cleanup requires a
@@ -117,6 +120,12 @@ Blocked planning and continued per-file ticket failure terminalize without
 promotion. An abort-strategy failure stops further admission and drains the
 already admitted work. External cancellation likewise stops admission; the
 job remains cancelled and its committed file-phase rows remain resumable.
+
+Resume rejects every phase-complete branch whose active chain tip differs from
+its recorded row tail. For an incomplete branch, a changed tip advances the
+cursor only when a succeeded ticket from the expected prior-job phase proves
+the exact committed record, verification, result location, and reprobe
+snapshot. A newer same-lineage version without that provenance fails closed.
 
 ### Coherent summaries without barriers
 
@@ -133,6 +142,11 @@ can rebuild the same inputs without an in-memory completion log from the
 interrupted process. Final job counters come from job-scoped durable tickets,
 elapsed time uses the coordinator's wall-clock interval, and peak concurrency
 is reconstructed from all job lease intervals.
+
+The phase-outcome fold joins completion rows to entries by exact
+`(phase_ordinal, branch_id)`. A carried resume row without a phase-entry row is
+not an entrant in the new job and cannot numerically replace an entered branch
+that failed before writing its completion row.
 
 No CLI JSON envelope or compliance report type changes.
 

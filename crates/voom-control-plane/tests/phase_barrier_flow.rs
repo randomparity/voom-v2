@@ -863,19 +863,25 @@ async fn phase_barrier_resumes_failed_file_without_remutating_committed_sibling(
     assert_ne!(outcome.job_id, partial.job_id, "resume opens a new job");
     assert_eq!(job_state(&url, outcome.job_id).await, "succeeded");
 
-    // Good is complete (single-phase policy), so reconciliation drops it and it
-    // is never re-dispatched. Assert that durably: its asset's chain length is
-    // unchanged, so no new version was produced for Good on resume.
+    // Good is complete (single-phase policy), so reconciliation carries its
+    // durable row into the new job but never re-dispatches it. Assert that its
+    // asset's chain length is unchanged and the carried row keeps the original
+    // result and ticket provenance.
     assert_eq!(
         asset_version_count(&url, good_v1).await,
         good_chain_before,
         "Good's chain must not grow on resume (no re-mutation)"
     );
-    assert!(
-        outcome.file_phases.iter().all(|r| r.branch_id != "Good"),
-        "Good is complete and must not appear in the resumed job's rows: {:?}",
-        outcome.file_phases
+    let resumed_good = outcome
+        .file_phases
+        .iter()
+        .find(|row| row.branch_id == "Good")
+        .expect("Good's completed row is carried for terminalization recovery");
+    assert_eq!(
+        resumed_good.produced_file_version_id,
+        good_committed.produced_file_version_id
     );
+    assert_eq!(resumed_good.ticket_ids, good_committed.ticket_ids);
 
     // Doomed re-entered and committed under the new job.
     let doomed_committed = outcome

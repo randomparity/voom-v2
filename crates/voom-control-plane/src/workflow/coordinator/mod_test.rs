@@ -15,8 +15,8 @@ use voom_store::repo::identity::{
 use voom_store::repo::jobs::NewJob;
 use voom_store::repo::tickets::{NewTicket, TicketState};
 use voom_store::repo::workflow_summaries::{
-    FilePhaseOutcome, NewFilePhaseSummary, NewFileProgress, NewFileRunHistory, NewFileRunStart,
-    NewWorkflowSummary,
+    FilePhaseOutcome, NewFilePhaseEntry, NewFilePhaseSummary, NewFileProgress, NewFileRunHistory,
+    NewFileRunStart, NewWorkflowSummary, PhaseOutcome,
 };
 
 use crate::cases::cp;
@@ -1486,9 +1486,10 @@ async fn reconcile_resume_resumes_after_highest_recorded_phase() {
         prepared.files[0].resume_ordinal, 2,
         "highest recorded (1) + 1"
     );
-    assert!(
-        prepared.seeds.is_empty(),
-        "tip == recorded committed version, no backfill"
+    assert_eq!(
+        prepared.seeds.len(),
+        2,
+        "terminalization retains both committed phase rows"
     );
     assert_eq!(prepared.run_starts[0].starting_phase_ordinal, 2);
 }
@@ -2001,7 +2002,8 @@ async fn reconcile_resume_keeps_blocked_file_until_terminalization_replays() {
         prepared.files[0].resume_ordinal, 4,
         "blocked phase work is complete but terminalization is not"
     );
-    assert!(prepared.seeds.is_empty());
+    assert_eq!(prepared.seeds.len(), 1);
+    assert_eq!(prepared.seeds[0].outcome, FilePhaseOutcome::Blocked);
     assert_eq!(prepared.run_starts[0].starting_phase_ordinal, 4);
 }
 
@@ -2135,7 +2137,217 @@ async fn terminalizing_completed_branch_replays_but_terminal_branch_does_not() {
 }
 
 #[tokio::test]
-async fn reconcile_resume_backfills_committed_tip_without_row() {
+async fn terminalizing_committed_branch_replays_through_resume_runner() {
+    let (cp, _tmp) = cp().await;
+    let version = seed_version(
+        &cp,
+        "/lib/terminalize/committed.mkv",
+        "hash-terminalize-committed",
+        reprobe_payload("h264"),
+    )
+    .await;
+    let prior = open_workflow_job(&cp).await;
+    record_run_start(&cp, prior, "committed", version, 0).await;
+    record_file_phase(
+        &cp,
+        prior,
+        0,
+        "committed",
+        FilePhaseOutcome::Committed,
+        Some(version),
+    )
+    .await;
+    cp.workflow_summaries()
+        .begin_file_terminalization(prior, "committed")
+        .await
+        .unwrap();
+    let file = phase_file(&cp, version, "committed").await;
+    let snapshot = file.snapshot.clone();
+    let policy = policy_with_on_error(None);
+    let preparation = cp.prepare_resume(prior, vec![file], 1).await.unwrap();
+
+    let outcome = cp
+        .run_prepared_resume_phase_barrier(
+            prior,
+            super::PreparedResumeRunInputs {
+                policy,
+                context: voom_plan::PlanningContext::default(),
+                base_draft: file_draft("terminalization-replay", &[snapshot]),
+                preparation,
+            },
+            ComplianceExecutionOptions::default(),
+            crate::workflow::WorkerRuntimeRegistry::new(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(outcome.file_phases.len(), 1);
+    assert_eq!(outcome.file_phases[0].outcome, FilePhaseOutcome::Committed);
+    let progress = cp
+        .workflow_summaries()
+        .file_progress(outcome.job_id, "committed")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        progress.state,
+        voom_store::repo::workflow_summaries::FileProgressState::Terminal
+    );
+}
+
+#[tokio::test]
+async fn phase_complete_terminalizing_resume_rejects_unrelated_chain_tip() {
+    let (cp, _tmp) = cp().await;
+    let original = seed_version(
+        &cp,
+        "/lib/terminalize/unrelated.mkv",
+        "hash-terminalize-original",
+        reprobe_payload("h264"),
+    )
+    .await;
+    let prior = open_workflow_job(&cp).await;
+    record_run_start(&cp, prior, "unrelated", original, 0).await;
+    record_file_phase(
+        &cp,
+        prior,
+        0,
+        "unrelated",
+        FilePhaseOutcome::Committed,
+        Some(original),
+    )
+    .await;
+    cp.workflow_summaries()
+        .begin_file_terminalization(prior, "unrelated")
+        .await
+        .unwrap();
+    let unrelated = advance_chain_tip(
+        &cp,
+        original,
+        "hash-terminalize-unrelated",
+        reprobe_payload("av1"),
+    )
+    .await;
+
+    let error = cp
+        .prepare_resume(
+            prior,
+            vec![phase_file(&cp, unrelated, "unrelated").await],
+            1,
+        )
+        .await
+        .unwrap_err();
+
+    assert_resume_incomplete(&error);
+    assert!(
+        error
+            .to_string()
+            .contains("phase-complete branch unrelated")
+    );
+}
+
+#[tokio::test]
+async fn phase_outcome_matches_completion_rows_to_entered_branches() {
+    let (cp, _tmp) = cp().await;
+    let seeded_version = seed_version(
+        &cp,
+        "/lib/report/seed.mkv",
+        "hash-report-seed",
+        reprobe_payload("h264"),
+    )
+    .await;
+    let completed_version = seed_version(
+        &cp,
+        "/lib/report/completed.mkv",
+        "hash-report-completed",
+        reprobe_payload("h264"),
+    )
+    .await;
+    let failed_version = seed_version(
+        &cp,
+        "/lib/report/failed.mkv",
+        "hash-report-failed",
+        reprobe_payload("h264"),
+    )
+    .await;
+    let mut files = vec![
+        phase_file(&cp, seeded_version, "seed").await,
+        phase_file(&cp, completed_version, "completed").await,
+        phase_file(&cp, failed_version, "failed").await,
+    ];
+    for (ordinal, file) in files.iter_mut().enumerate() {
+        file.ordinal = u32::try_from(ordinal).unwrap();
+    }
+    let starts = super::run_starts_for_files(&files);
+    let (job, _) = cp
+        .open_sliding_file_job(&starts, Vec::new(), Vec::new(), &files, 4)
+        .await
+        .unwrap();
+    for _ in &files {
+        cp.workflow_summaries()
+            .admit_next_file(job.id, T0)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+    record_file_phase(
+        &cp,
+        job.id,
+        0,
+        "seed",
+        FilePhaseOutcome::Committed,
+        Some(seeded_version),
+    )
+    .await;
+    record_file_phase(
+        &cp,
+        job.id,
+        0,
+        "completed",
+        FilePhaseOutcome::Committed,
+        Some(completed_version),
+    )
+    .await;
+    for file in files.iter().filter(|file| file.branch_id != "seed") {
+        cp.workflow_summaries()
+            .upsert_file_phase_entry(
+                NewFilePhaseEntry {
+                    job_id: job.id,
+                    phase_ordinal: 0,
+                    branch_id: file.branch_id.clone(),
+                    media_snapshot_id: file.snapshot.id,
+                    gate_admitted: true,
+                },
+                T0,
+            )
+            .await
+            .unwrap();
+    }
+    let inputs = super::PhaseLoopInputs {
+        job_id: job.id,
+        promotion_job_ids: vec![job.id],
+        policy: policy_with_on_error(None),
+        context: voom_plan::PlanningContext::default(),
+        base_draft: file_draft(
+            "branch-keyed-outcomes",
+            &files
+                .iter()
+                .map(|file| file.snapshot.clone())
+                .collect::<Vec<_>>(),
+        ),
+        files,
+        seed_file_phases: Vec::new(),
+        options: ComplianceExecutionOptions::default(),
+        runtimes: crate::workflow::WorkerRuntimeRegistry::new(),
+    };
+
+    let (phases, _) = cp.persist_sliding_phase_summaries(&inputs).await.unwrap();
+
+    assert_eq!(phases.len(), 1);
+    assert_eq!(phases[0].outcome, PhaseOutcome::PartiallyCommitted);
+}
+
+#[tokio::test]
+async fn reconcile_resume_rejects_unproven_committed_tip_without_row() {
     let (cp, _tmp) = cp().await;
     let prior = open_workflow_job(&cp).await;
     let v0 = seed_version(&cp, "/lib/d/movie.mkv", "hash-d0", reprobe_payload("h264")).await;
@@ -2151,64 +2363,39 @@ async fn reconcile_resume_backfills_committed_tip_without_row() {
     .await;
     let v1 = advance_chain_tip(&cp, v0, "hash-d1", reprobe_payload("hevc")).await;
 
-    let prepared = cp
+    let error = cp
         .prepare_resume(prior, vec![phase_file(&cp, v0, "movie").await], 4)
         .await
-        .unwrap();
-    assert_eq!(prepared.seeds.len(), 1);
-    assert_eq!(prepared.seeds[0].phase_ordinal, 1);
-    assert_eq!(prepared.run_starts[0].starting_phase_ordinal, 2);
-    let (new_job, backfilled) = cp
-        .open_sliding_file_job(
-            &prepared.run_starts,
-            prepared.history,
-            prepared.seeds,
-            &prepared.files,
-            4,
-        )
-        .await
-        .unwrap();
+        .unwrap_err();
 
-    assert_eq!(
-        backfilled.len(),
-        1,
-        "the un-rowed phase-1 commit is backfilled"
+    assert_resume_incomplete(&error);
+    assert!(
+        error
+            .to_string()
+            .contains("without committed prior-job evidence")
     );
-    assert_eq!(backfilled[0].phase_ordinal, 1);
-    assert_eq!(backfilled[0].outcome, FilePhaseOutcome::Committed);
-    assert_eq!(backfilled[0].produced_file_version_id, Some(v1));
-    assert!(backfilled[0].ticket_ids.is_empty());
-    assert_eq!(
-        prepared.files[0].resume_ordinal, 2,
-        "resume past the backfilled phase"
-    );
-    let starts = cp
-        .workflow_summaries()
-        .file_run_starts_for_job(new_job.id)
-        .await
-        .unwrap();
-    assert_eq!(starts[0].starting_file_version_id, v1);
+    assert_eq!(active_version_id(&cp, v0).await, v1);
 }
 
 #[tokio::test]
-async fn reconcile_resume_zero_rows_backfills_advanced_tip() {
+async fn reconcile_resume_zero_rows_rejects_unproven_advanced_tip() {
     let (cp, _tmp) = cp().await;
     let prior = open_workflow_job(&cp).await; // no rows at all under this job
     let v0 = seed_version(&cp, "/lib/e/movie.mkv", "hash-e0", reprobe_payload("h264")).await;
     record_run_start(&cp, prior, "movie", v0, 0).await;
     let _v1 = advance_chain_tip(&cp, v0, "hash-e1", reprobe_payload("hevc")).await;
 
-    let prepared = cp
+    let error = cp
         .prepare_resume(prior, vec![phase_file(&cp, v0, "movie").await], 4)
         .await
-        .unwrap();
-    assert_eq!(
-        prepared.seeds.len(),
-        1,
-        "advanced-without-rows is backfilled at ordinal 0"
+        .unwrap_err();
+
+    assert_resume_incomplete(&error);
+    assert!(
+        error
+            .to_string()
+            .contains("without committed prior-job evidence")
     );
-    assert_eq!(prepared.seeds[0].phase_ordinal, 0);
-    assert_eq!(prepared.files[0].resume_ordinal, 1);
 }
 
 fn assert_resume_incomplete(error: &voom_core::VoomError) {
@@ -2508,7 +2695,15 @@ async fn phase_barrier_job_open_rolls_back_job_event_starts_and_seed() {
     .await;
     let prior = open_workflow_job(&cp).await;
     record_run_start(&cp, prior, "movie", v0, 0).await;
-    let _v1 = advance_chain_tip(&cp, v0, "hash-atomic-1", reprobe_payload("hevc")).await;
+    record_file_phase(
+        &cp,
+        prior,
+        0,
+        "movie",
+        FilePhaseOutcome::Committed,
+        Some(v0),
+    )
+    .await;
     let prepared = cp
         .prepare_resume(prior, vec![phase_file(&cp, v0, "movie").await], 4)
         .await
@@ -2663,10 +2858,8 @@ async fn reconcile_resume_resumes_after_skipped_phase() {
         prepared.files[0].resume_ordinal, 1,
         "skipped row at 0 => resume at 1"
     );
-    assert!(
-        prepared.seeds.is_empty(),
-        "a skipped phase did not advance the tip"
-    );
+    assert_eq!(prepared.seeds.len(), 1);
+    assert_eq!(prepared.seeds[0].outcome, FilePhaseOutcome::Skipped);
 }
 
 #[tokio::test]

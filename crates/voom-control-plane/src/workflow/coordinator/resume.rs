@@ -7,7 +7,7 @@
 
 use std::collections::BTreeMap;
 
-use voom_core::{FileVersionId, JobId, VoomError};
+use voom_core::{FileVersionId, JobId, TicketId, VoomError};
 use voom_store::repo::identity::{FileLocationKind, IdentityRepo};
 use voom_store::repo::workflow_summaries::{
     FilePhaseOutcome, FilePhaseSummary, FileProgress, FileProgressState, FileRunHistory,
@@ -24,6 +24,7 @@ use crate::workflow::plan::expansion::branch_ids_from_paths;
 pub(super) struct PreparedResumeSeed {
     pub(super) phase_ordinal: u32,
     pub(super) branch_id: String,
+    pub(super) ticket_ids: Vec<TicketId>,
     pub(super) produced: ProducedRefs,
     pub(super) outcome: FilePhaseOutcome,
 }
@@ -200,35 +201,35 @@ impl ControlPlane {
     ) -> Result<PreparedResumeBranch, VoomError> {
         self.validate_resume_lineage(&file, prior.start, prior.rows)
             .await?;
-        let state = validate_prior_row_shape(prior.start, prior.rows, phase_count)?;
-        validate_prior_progress(prior.start, prior.progress, &state)?;
         let mut phase_history = validate_prior_history(prior.start, prior.inherited, phase_count)?;
+        let state = validate_prior_row_shape(prior.start, prior.rows, &phase_history, phase_count)?;
+        validate_prior_progress(prior.start, prior.progress, &state)?;
         merge_prior_rows(&file.branch_id, &mut phase_history, prior.rows)?;
-        let mut seeds = Vec::new();
-        for row in prior.rows {
-            if row.outcome == FilePhaseOutcome::Verified {
-                seeds.push(PreparedResumeSeed {
-                    phase_ordinal: row.phase_ordinal,
-                    branch_id: file.branch_id.clone(),
-                    produced: ProducedRefs::verified_seed(row)?,
-                    outcome: FilePhaseOutcome::Verified,
-                });
-            }
-        }
+        let mut seeds = prior_row_seeds(&file.branch_id, prior.rows);
         let mut next_ordinal = state.next_ordinal;
+        if state.phase_complete && file.version_id != state.recorded_tip {
+            return Err(resume_incomplete(format!(
+                "phase-complete branch {} changed from version {} to {}",
+                file.branch_id, state.recorded_tip, file.version_id
+            )));
+        }
         if prior.progress.state == FileProgressState::Terminal {
-            if file.version_id != state.recorded_tip {
-                return Err(resume_incomplete(format!(
-                    "terminal branch {} changed from version {} to {}",
-                    file.branch_id, state.recorded_tip, file.version_id
-                )));
-            }
             next_ordinal = phase_count;
         } else if file.version_id != state.recorded_tip {
-            let produced = ProducedRefs::resolve(self, file.version_id, &file.snapshot).await?;
+            let (produced, ticket_ids) = self
+                .unfinalized_committed_refs(prior_job_id, next_ordinal, &file)
+                .await?
+                .ok_or_else(|| {
+                    resume_incomplete(format!(
+                        "branch {} changed from version {} to {} without committed \
+                         prior-job evidence for phase {next_ordinal}",
+                        file.branch_id, state.recorded_tip, file.version_id
+                    ))
+                })?;
             seeds.push(PreparedResumeSeed {
                 phase_ordinal: next_ordinal,
                 branch_id: file.branch_id.clone(),
+                ticket_ids,
                 produced,
                 outcome: FilePhaseOutcome::Committed,
             });
@@ -246,6 +247,7 @@ impl ControlPlane {
             seeds.push(PreparedResumeSeed {
                 phase_ordinal: next_ordinal,
                 branch_id: file.branch_id.clone(),
+                ticket_ids: Vec::new(),
                 produced,
                 outcome: FilePhaseOutcome::Verified,
             });
@@ -343,6 +345,18 @@ impl ControlPlane {
         }
         Ok(())
     }
+}
+
+fn prior_row_seeds(branch_id: &str, rows: &[&FilePhaseSummary]) -> Vec<PreparedResumeSeed> {
+    rows.iter()
+        .map(|row| PreparedResumeSeed {
+            phase_ordinal: row.phase_ordinal,
+            branch_id: branch_id.to_owned(),
+            ticket_ids: row.ticket_ids.clone(),
+            produced: ProducedRefs::resume_seed(row),
+            outcome: row.outcome,
+        })
+        .collect()
 }
 
 struct PriorBranchState {
@@ -487,6 +501,7 @@ fn merge_phase_outcome(
 fn validate_prior_row_shape(
     start: &FileRunStart,
     rows: &[&FilePhaseSummary],
+    inherited: &BTreeMap<u32, FilePhaseOutcome>,
     phase_count: u32,
 ) -> Result<PriorBranchState, VoomError> {
     if start.starting_phase_ordinal > phase_count {
@@ -501,7 +516,7 @@ fn validate_prior_row_shape(
         .get(index)
         .filter(|row| row.phase_ordinal < start.starting_phase_ordinal)
     {
-        validate_seed_row(start, seed)?;
+        validate_seed_row(start, seed, inherited, phase_count)?;
         index += 1;
     }
     for (tail_index, row) in rows[index..].iter().enumerate() {
@@ -576,15 +591,21 @@ fn validate_prior_progress(
     Ok(())
 }
 
-fn validate_seed_row(start: &FileRunStart, row: &FilePhaseSummary) -> Result<(), VoomError> {
-    if !matches!(
-        row.outcome,
-        FilePhaseOutcome::Committed | FilePhaseOutcome::Verified
-    ) || !row.ticket_ids.is_empty()
-    {
+fn validate_seed_row(
+    start: &FileRunStart,
+    row: &FilePhaseSummary,
+    inherited: &BTreeMap<u32, FilePhaseOutcome>,
+    phase_count: u32,
+) -> Result<(), VoomError> {
+    let valid = if row.outcome == FilePhaseOutcome::Blocked {
+        start.starting_phase_ordinal == phase_count
+    } else {
+        inherited.get(&row.phase_ordinal) == Some(&row.outcome)
+    };
+    if !valid {
         return Err(resume_incomplete(format!(
-            "branch {} phase {} is not an advancing empty-ticket reconciliation seed",
-            start.branch_id, row.phase_ordinal
+            "branch {} phase {} seed {:?} does not match inherited history",
+            start.branch_id, row.phase_ordinal, row.outcome
         )));
     }
     Ok(())

@@ -107,43 +107,19 @@ struct CommittedEvidenceRow {
 }
 
 impl ProducedRefs {
-    pub(super) async fn resolve(
-        control_plane: &ControlPlane,
-        file_version_id: FileVersionId,
-        snapshot: &MediaSnapshot,
-    ) -> Result<Self, VoomError> {
-        let location = control_plane
-            .identity
-            .list_live_file_locations_by_version(file_version_id)
-            .await?
-            .into_iter()
-            .next()
-            .ok_or_else(|| {
-                VoomError::Internal(format!(
-                    "committed version {file_version_id} has no live location"
-                ))
-            })?;
-        Ok(Self {
-            file_version_id: Some(file_version_id),
-            file_location_id: Some(location.id),
-            artifact_handle_id: None,
-            artifact_verification_id: None,
-            reprobe_snapshot_id: Some(snapshot.id),
-        })
-    }
-
     pub(super) fn seed(
         self,
         job_id: JobId,
         phase_ordinal: u32,
         branch_id: String,
+        ticket_ids: Vec<TicketId>,
         outcome: FilePhaseOutcome,
     ) -> NewFilePhaseSummary {
         NewFilePhaseSummary {
             job_id,
             phase_ordinal,
             branch_id,
-            ticket_ids: Vec::new(),
+            ticket_ids,
             produced_file_version_id: self.file_version_id,
             produced_file_location_id: self.file_location_id,
             artifact_handle_id: self.artifact_handle_id,
@@ -153,20 +129,14 @@ impl ProducedRefs {
         }
     }
 
-    pub(super) fn verified_seed(row: &FilePhaseSummary) -> Result<Self, VoomError> {
-        if row.outcome != FilePhaseOutcome::Verified {
-            return Err(VoomError::Internal(format!(
-                "phase row {} is not verified",
-                row.id
-            )));
-        }
-        Ok(Self {
+    pub(super) fn resume_seed(row: &FilePhaseSummary) -> Self {
+        Self {
             file_version_id: row.produced_file_version_id,
             file_location_id: row.produced_file_location_id,
             artifact_handle_id: row.artifact_handle_id,
             artifact_verification_id: row.artifact_verification_id,
             reprobe_snapshot_id: row.reprobe_snapshot_id,
-        })
+        }
     }
 
     fn verified(result: &PolicyVerificationTicketResult) -> Self {
@@ -1076,6 +1046,29 @@ impl ControlPlane {
         scoped_ticket_ids.sort_unstable_by_key(|id| id.0);
         scoped_ticket_ids.dedup();
         Ok((produced, scoped_ticket_ids))
+    }
+
+    pub(super) async fn unfinalized_committed_refs(
+        &self,
+        job_id: JobId,
+        phase_ordinal: u32,
+        file: &PhaseFile,
+    ) -> Result<Option<(ProducedRefs, Vec<TicketId>)>, VoomError> {
+        let ticket_ids = self.ticket_ids_for_phase(job_id, phase_ordinal).await?;
+        let (produced, scoped_ticket_ids) = self
+            .committed_refs_for_tickets(job_id, file, &ticket_ids, &[])
+            .await?;
+        let Some(produced) = produced else {
+            return Ok(None);
+        };
+        if produced.snapshot.file_version_id != file.version_id {
+            return Err(VoomError::Conflict(format!(
+                "prior job {job_id} phase {phase_ordinal} committed version {}, \
+                 but branch {} currently points at {}",
+                produced.snapshot.file_version_id, file.branch_id, file.version_id
+            )));
+        }
+        Ok(Some((produced.refs, scoped_ticket_ids)))
     }
 
     async fn job_produced_commit(

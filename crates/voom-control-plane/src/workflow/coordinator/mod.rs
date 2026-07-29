@@ -366,6 +366,7 @@ struct PlannedPhase {
 struct FilePhaseObservation {
     phase_ordinal: u32,
     phase_name: String,
+    branch_id: String,
     input_ordinal: u32,
     snapshot: MediaSnapshot,
     gate_admitted: bool,
@@ -423,6 +424,7 @@ struct PhaseLoop<'a> {
     last_run: Option<crate::workflow::WorkflowRunSummary>,
     continued_error: Option<VoomError>,
     promotable_branches: BTreeSet<String>,
+    branch_id: Option<String>,
 }
 
 impl<'a> PhaseLoop<'a> {
@@ -440,8 +442,15 @@ impl<'a> PhaseLoop<'a> {
         let promotable_branches = inputs
             .files
             .iter()
+            .filter(|file| {
+                !file
+                    .phase_history
+                    .values()
+                    .any(|outcome| *outcome == FilePhaseOutcome::Blocked)
+            })
             .map(|file| file.branch_id.clone())
             .collect();
+        let branch_id = inputs.files.first().map(|file| file.branch_id.clone());
         Self {
             control_plane,
             job_id: inputs.job_id,
@@ -456,6 +465,7 @@ impl<'a> PhaseLoop<'a> {
             last_run: None,
             continued_error: None,
             promotable_branches,
+            branch_id,
         }
     }
 
@@ -627,16 +637,12 @@ impl<'a> PhaseLoop<'a> {
     }
 
     async fn finish_file_pipeline(self) -> Result<FilePipelineOutcome, FilePipelineFailure> {
-        let branch_id = self
-            .file_phases
-            .first()
-            .map(|row| row.branch_id.clone())
-            .ok_or_else(|| {
-                file_pipeline_failure(
-                    VoomError::Internal("file pipeline lost its branch id".to_owned()),
-                    self.last_run.as_ref(),
-                )
-            })?;
+        let branch_id = self.branch_id.clone().ok_or_else(|| {
+            file_pipeline_failure(
+                VoomError::Internal("file pipeline lost its branch id".to_owned()),
+                self.last_run.as_ref(),
+            )
+        })?;
         self.control_plane
             .workflow_summaries
             .begin_file_terminalization(self.job_id, &branch_id)
@@ -1138,6 +1144,7 @@ impl ControlPlane {
                             job.id,
                             seed.phase_ordinal,
                             seed.branch_id,
+                            seed.ticket_ids,
                             seed.outcome,
                         ),
                         now,
@@ -1470,12 +1477,9 @@ impl ControlPlane {
                 .or_default()
                 .push(observation);
         }
-        let mut outcomes_by_phase = BTreeMap::<u32, Vec<FilePhaseOutcome>>::new();
+        let mut outcomes_by_branch = BTreeMap::<(u32, String), FilePhaseOutcome>::new();
         for row in &file_phases {
-            outcomes_by_phase
-                .entry(row.phase_ordinal)
-                .or_default()
-                .push(row.outcome);
+            outcomes_by_branch.insert((row.phase_ordinal, row.branch_id.clone()), row.outcome);
         }
         let mut phases = Vec::with_capacity(by_phase.len());
         for (phase_ordinal, mut phase_observations) in by_phase {
@@ -1505,8 +1509,15 @@ impl ControlPlane {
                 &refreshed,
                 &gate_admission,
             )?;
-            let mut outcomes = outcomes_by_phase.remove(&phase_ordinal).unwrap_or_default();
-            outcomes.resize(phase_observations.len(), FilePhaseOutcome::Blocked);
+            let outcomes = phase_observations
+                .iter()
+                .map(|observation| {
+                    outcomes_by_branch
+                        .get(&(phase_ordinal, observation.branch_id.clone()))
+                        .copied()
+                        .unwrap_or(FilePhaseOutcome::Blocked)
+                })
+                .collect::<Vec<_>>();
             phases.push(
                 self.workflow_summaries
                     .upsert_phase_summary(
@@ -1585,6 +1596,7 @@ impl ControlPlane {
             observations.push(FilePhaseObservation {
                 phase_ordinal: entry.phase_ordinal,
                 phase_name,
+                branch_id: entry.branch_id,
                 input_ordinal: *input_ordinal,
                 snapshot,
                 gate_admitted: entry.gate_admitted,

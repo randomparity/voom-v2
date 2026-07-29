@@ -98,6 +98,10 @@ Resume validates progress against prior run starts and phase rows. It:
 - resumes at each branch's first incomplete phase;
 - prioritizes previously active branches;
 - terminalizes a completed-but-not-promoted branch without repeating a phase;
+- carries every prior branch row and its ticket provenance into a
+  terminalization replay;
+- rejects phase-complete chain-tip drift and accepts incomplete drift only when
+  exact prior-job committed-ticket evidence proves the new tip;
 - rejects gaps, cursor disagreement, duplicate ordinals, lineage mismatch, or
   an input-set branch mismatch before opening the new job.
 
@@ -110,6 +114,9 @@ The run keeps one job. File-phase rows persist as work completes. At drain, the
 coordinator reconstructs available per-file completions from durable run
 starts, history, rows, snapshots, and tickets, folds them by policy ordinal into
 one phase summary/report, and merges invocation telemetry into one job summary.
+Phase outcomes join entries and completion rows by exact branch id; carried
+seed rows without entries cannot hide an entered branch that failed before its
+completion row.
 The fold must not depend on an in-memory completion log lost on process
 interruption. Existing report and envelope fields keep their meanings.
 
