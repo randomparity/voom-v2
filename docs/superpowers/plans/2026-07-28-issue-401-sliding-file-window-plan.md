@@ -135,11 +135,14 @@ advance without its matching row or lag behind an acknowledged row.
 
 `cargo test -p voom-control-plane workflow::coordinator`
 
-## Task 4: Run the bounded sliding coordinator and terminalize before refill
+## Task 4: Run, terminalize, report, and resume the sliding coordinator
 
 ### Fit
 
-Replace the barrier loop with the behavior visible to issue #401.
+Replace the barrier loop with the behavior visible to issue #401 without
+creating an intermediate commit that breaks existing reporting or resume
+guardrails. The driver, terminalization, durable summary fold, and resume
+adaptation are one logical implementation slice.
 
 ### Files
 
@@ -151,6 +154,9 @@ Replace the barrier loop with the behavior visible to issue #401.
 - `crates/voom-control-plane/src/workflow/coordinator/promotion_test.rs`
 - `crates/voom-control-plane/src/workflow/coordinator/resume.rs`
 - `crates/voom-control-plane/src/workflow/coordinator/mod_test.rs`
+- `crates/voom-control-plane/src/workflow/coordinator/finalize.rs`
+- directly related sibling tests
+- `crates/voom-control-plane/tests/phase_barrier_flow.rs`
 
 ### TDD
 
@@ -160,7 +166,12 @@ Replace the barrier loop with the behavior visible to issue #401.
    - a pending file is admitted only after its predecessor reaches terminal;
    - planning block releases one slot;
    - continue-on-error blocks only its file and refills;
-   - abort failure and cancellation stop refill and drain admitted work.
+   - abort failure and cancellation stop refill and drain admitted work;
+   - completed phases create no new tickets on resume;
+   - each branch is admitted at most once;
+   - prior active branches precede prior pending branches;
+   - a completed-but-unpromoted file terminalizes without re-execution;
+   - progress/phase-row disagreement fails before opening a new job.
 2. Implement a bounded `JoinSet` of per-file pipelines. Each pipeline plans and
    dispatches phases sequentially from refreshed facts. The parent admits in
    durable order, stops admission on fatal/cancelled job state, drains, and
@@ -175,59 +186,27 @@ Replace the barrier loop with the behavior visible to issue #401.
    - mark progress terminal, then admit a replacement.
 4. Blocked files terminalize without promotion. Promotion/cleanup errors leave
    the slot active and fail the run.
+5. Reconstruct each phase's refreshed planning input and gate decisions from
+   durable run starts/history/file-phase rows/snapshots/tickets. Fold one
+   phase/report row per ordinal at drain, including partial failure and
+   cancellation.
+6. Merge job telemetry without double-counting concurrent invocation snapshots.
+7. Keep cancelled jobs cancelled; do not rewrite them failed.
 
 ### Acceptance
 
 Cross-file overlap, strict window/refill, immediate promotion, immediate safe
 cleanup, success/block/continue/failure/cancellation all have behavior tests.
-Functions remain at most 100 lines and cyclomatic complexity at most eight.
-
-### Verify
-
-`cargo test -p voom-control-plane workflow::coordinator`
-`cargo test -p voom-control-plane --test phase_barrier_flow`
-
-## Task 5: Reconstruct summaries and resume without repeats
-
-### Fit
-
-Keep the existing durable reporting and restart contract after removing phase
-barriers.
-
-### Files
-
-- `crates/voom-control-plane/src/workflow/coordinator/resume.rs`
-- `crates/voom-control-plane/src/workflow/coordinator/planning.rs`
-- `crates/voom-control-plane/src/workflow/coordinator/finalize.rs`
-- their sibling test files
-- `crates/voom-control-plane/tests/phase_barrier_flow.rs`
-
-### TDD
-
-1. Add resume tests for:
-   - completed phases create no new tickets;
-   - each branch is admitted at most once;
-   - prior active branches precede prior pending branches;
-   - a completed-but-unpromoted file terminalizes without re-execution;
-   - progress/phase-row disagreement fails before opening a new job.
-2. Reconstruct each phase's refreshed planning input and gate decisions from
-   durable run starts/history/file-phase rows/snapshots/tickets. Fold one
-   phase/report row per ordinal at drain, including partial failure and
-   cancellation.
-3. Merge job telemetry without double-counting concurrent invocation snapshots.
-4. Keep cancelled jobs cancelled; do not rewrite them failed.
-
-### Acceptance
-
 Resume cannot repeat a completed operation or duplicate admission. Partial and
-successful job/phase/file-phase reports are coherent and ordered.
+successful job/phase/file-phase reports are coherent and ordered. Functions
+remain at most 100 lines and cyclomatic complexity at most eight.
 
 ### Verify
 
 `cargo test -p voom-control-plane workflow::coordinator`
 `cargo test -p voom-control-plane --test phase_barrier_flow`
 
-## Task 6: Operator documentation and complete verification
+## Task 5: Operator documentation and complete verification
 
 ### Files
 
