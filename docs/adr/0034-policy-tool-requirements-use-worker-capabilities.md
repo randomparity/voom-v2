@@ -198,3 +198,17 @@ The design is detailed in
   remains an ordinary, honestly reported execution failure.
 - **Add `verify` to the metadata vocabulary.** Rejected because it is not in the
   published grammar and would be an unpublished DSL extension.
+
+## Later decision: owner-scoped remote readiness
+
+ADR 0050 supersedes the blanket exclusion of remote workers from concrete tool
+readiness. Under the node-agent model, a byte-touching ticket first identifies
+its required storage owner. A concrete `ffmpeg`, `ffprobe`, or `mkvtoolnix`
+requirement may be satisfied by an authenticated, exact-version provider
+supervised by that owner's active node incarnation.
+
+Typed requirements, reserved supervisor authority, challenge-response identity,
+deny-wins effective grants, dependency startup proof, and fail-before-execution
+behavior remain. Readiness is owner-scoped; a healthy provider on another node
+does not satisfy the ticket. Issue #424 replaces the run-local-only selection
+without weakening those checks.
