@@ -22,7 +22,7 @@ use voom_store::repo::workers::{
 use crate::ControlPlane;
 use crate::node_auth::verify_node_token;
 
-use super::{append_event, begin_tx, commit_tx};
+use super::{append_event, begin_immediate_tx, begin_tx, commit_tx};
 
 const BUILTIN_FFPROBE_NAME: &str = "builtin.ffprobe";
 const LOCAL_FFMPEG_NAME: &str = "local-ffmpeg";
@@ -392,7 +392,7 @@ impl ControlPlane {
         expected_epoch: u64,
         now: OffsetDateTime,
     ) -> Result<Worker, VoomError> {
-        let mut tx = begin_tx(&self.pool).await?;
+        let mut tx = begin_immediate_tx(&self.pool).await?;
         let worker = self
             .workers
             .retire_in_tx(&mut tx, id, expected_epoch, now)
