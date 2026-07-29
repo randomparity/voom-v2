@@ -2124,8 +2124,8 @@ async fn test_extract_post_commit_succeeded_event_failure_returns_ok_with_contex
     assert_event_count(&cp, "artifact.commit_completed", 1).await;
 }
 
-async fn fixture() -> (crate::ControlPlane, tempfile::NamedTempFile) {
-    let db = tempfile::NamedTempFile::new().unwrap();
+async fn fixture() -> (crate::ControlPlane, voom_test_support::TempDatabase) {
+    let db = voom_test_support::TempDatabase::new().unwrap();
     let url = format!("sqlite://{}", db.path().display());
     voom_store::init(&url).await.unwrap();
     let pool = voom_store::connect(&url).await.unwrap();
@@ -2189,7 +2189,7 @@ async fn seed_extract_execution_lease(pool: &sqlx::SqlitePool) {
 
 async fn fixture_with_dir() -> (
     crate::ControlPlane,
-    tempfile::NamedTempFile,
+    voom_test_support::TempDatabase,
     tempfile::TempDir,
 ) {
     let (cp, db) = fixture().await;
@@ -3240,7 +3240,7 @@ async fn plural_extract_fixture(
     operation_id: &str,
 ) -> (
     crate::ControlPlane,
-    tempfile::NamedTempFile,
+    voom_test_support::TempDatabase,
     tempfile::TempDir,
     ExecuteExtractAudioInput,
 ) {

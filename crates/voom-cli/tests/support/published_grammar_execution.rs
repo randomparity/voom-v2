@@ -10,7 +10,7 @@ use std::process::Command;
 use std::time::Duration;
 
 use serde_json::Value;
-use tempfile::NamedTempFile;
+use voom_test_support::TempDatabase;
 use voom_test_support::worker::hide_stale_fake_ffprobe_sibling;
 
 use crate::local_worker::LocalWorker;
@@ -31,7 +31,7 @@ pub struct WorkerBinaryGuard {
 }
 
 struct ScenarioRun {
-    _db: NamedTempFile,
+    _db: TempDatabase,
     url: String,
     ffmpeg: LocalWorker,
     mkvtoolnix: LocalWorker,
@@ -208,7 +208,7 @@ pub fn execute_control_flow(media: &ScenarioMedia) -> io::Result<()> {
 
 impl ScenarioRun {
     fn start(root: &Path) -> io::Result<Self> {
-        let db = NamedTempFile::new_in(root)?;
+        let db = TempDatabase::new_in(root)?;
         let url = format!("sqlite://{}", db.path().display());
         let init = run_cli(&url, &["init"])?;
         assert_ok_envelope(&init, "init", "init")?;

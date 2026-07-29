@@ -46,9 +46,9 @@ async fn setup() -> (
     SqliteLeaseRepo,
     TicketId,
     WorkerId,
-    tempfile::NamedTempFile,
+    voom_test_support::TempDatabase,
 ) {
-    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let tmp = voom_test_support::TempDatabase::new().unwrap();
     let pool = fresh_initialized_pool_at(tmp.path()).await.unwrap();
     let trepo = SqliteTicketRepo::new(pool.clone());
     let wrepo = SqliteWorkerRepo::new(pool.clone());
@@ -846,7 +846,7 @@ async fn force_release_with_requeue_rejects_when_attempts_exhausted() {
     // leaving the lease/ticket/event log untouched. The operator must
     // explicitly retry with also_requeue=false if they intend a
     // terminal force-release.
-    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let tmp = voom_test_support::TempDatabase::new().unwrap();
     let pool = fresh_initialized_pool_at(tmp.path()).await.unwrap();
     let trepo = SqliteTicketRepo::new(pool.clone());
     let wrepo = SqliteWorkerRepo::new(pool.clone());
@@ -912,7 +912,7 @@ async fn force_release_with_requeue_rejects_when_attempts_exhausted() {
 async fn force_release_with_requeue_marks_ready_when_attempts_remain() {
     // max_attempts = 2, one consumed by acquire (attempt = 1 < 2) → requeue
     // succeeds, ticket returns to ready for the next attempt.
-    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let tmp = voom_test_support::TempDatabase::new().unwrap();
     let pool = fresh_initialized_pool_at(tmp.path()).await.unwrap();
     let trepo = SqliteTicketRepo::new(pool.clone());
     let wrepo = SqliteWorkerRepo::new(pool.clone());
@@ -1231,7 +1231,7 @@ async fn force_release_returns_conflict_when_ticket_no_longer_leased() {
 /// pinned at the SQL layer, not at the case handler.
 #[tokio::test]
 async fn expire_due_caps_at_lease_batch_limit_and_drains_remainder() {
-    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let tmp = voom_test_support::TempDatabase::new().unwrap();
     let pool = fresh_initialized_pool_at(tmp.path()).await.unwrap();
     let trepo = SqliteTicketRepo::new(pool.clone());
     let wrepo = SqliteWorkerRepo::new(pool.clone());

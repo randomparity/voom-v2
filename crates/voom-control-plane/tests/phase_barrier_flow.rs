@@ -8,7 +8,6 @@ use std::path::Path;
 use std::process::Command;
 
 use serde_json::json;
-use tempfile::NamedTempFile;
 use voom_control_plane::ControlPlane;
 use voom_control_plane::CoordinatorOutcome;
 use voom_control_plane::policy::ComplianceExecutionOptions;
@@ -20,6 +19,7 @@ use voom_policy::{
 use voom_store::repo::workflow_summaries::{
     FilePhaseOutcome, FilePhaseSummary, PhaseOutcome, SqliteWorkflowSummaryRepo,
 };
+use voom_test_support::TempDatabase;
 use voom_test_support::worker::{
     TestWorkerConfig, TestWorkerLaunch, cargo_build_package, hide_stale_fake_ffprobe_sibling,
     target_debug_binary,
@@ -49,7 +49,7 @@ async fn phase_barrier_commits_every_file_in_a_single_phase() {
     generate_h264_fixture(&source_one);
     generate_h264_fixture(&source_two);
 
-    let db = NamedTempFile::new().unwrap();
+    let db = TempDatabase::new().unwrap();
     let url = format!("sqlite://{}", db.path().display());
     voom_store::init(&url).await.unwrap();
     let pool = voom_store::connect(&url).await.unwrap();
@@ -238,7 +238,7 @@ async fn phase_barrier_chains_committed_artifact_into_the_next_phase() {
     let source = root.join("Chain.mp4");
     generate_h264_fixture(&source);
 
-    let db = NamedTempFile::new().unwrap();
+    let db = TempDatabase::new().unwrap();
     let url = format!("sqlite://{}", db.path().display());
     voom_store::init(&url).await.unwrap();
     let pool = voom_store::connect(&url).await.unwrap();
@@ -465,7 +465,7 @@ async fn phase_barrier_records_committed_sibling_when_a_file_fails() {
     generate_h264_fixture(&good);
     generate_h264_fixture(&doomed);
 
-    let db = NamedTempFile::new().unwrap();
+    let db = TempDatabase::new().unwrap();
     let url = format!("sqlite://{}", db.path().display());
     voom_store::init(&url).await.unwrap();
     let pool = voom_store::connect(&url).await.unwrap();
@@ -556,7 +556,7 @@ async fn phase_barrier_continue_blocks_failed_file_and_promotes_committed_siblin
     let doomed = root.join("Doomed.mp4");
     generate_h264_fixture(&good);
     generate_h264_fixture(&doomed);
-    let db = NamedTempFile::new().unwrap();
+    let db = TempDatabase::new().unwrap();
     let url = format!("sqlite://{}", db.path().display());
     voom_store::init(&url).await.unwrap();
     let pool = voom_store::connect(&url).await.unwrap();
@@ -650,7 +650,7 @@ async fn phase_barrier_resumes_failed_file_without_remutating_committed_sibling(
     generate_h264_fixture(&doomed);
     std::fs::copy(&doomed, &doomed_bak).unwrap();
 
-    let db = NamedTempFile::new().unwrap();
+    let db = TempDatabase::new().unwrap();
     let url = format!("sqlite://{}", db.path().display());
     voom_store::init(&url).await.unwrap();
     let pool = voom_store::connect(&url).await.unwrap();
@@ -766,7 +766,7 @@ async fn phase_barrier_promotes_only_terminal_artifact_across_phases() {
     let source = root.join("Movie.mp4");
     generate_h264_fixture(&source);
 
-    let db = NamedTempFile::new().unwrap();
+    let db = TempDatabase::new().unwrap();
     let url = format!("sqlite://{}", db.path().display());
     voom_store::init(&url).await.unwrap();
     let pool = voom_store::connect(&url).await.unwrap();
@@ -861,7 +861,7 @@ async fn phase_barrier_promotes_terminal_artifact_from_earlier_phase() {
     let source = root.join("Movie.mp4");
     generate_h264_fixture(&source); // testsrc has no audio stream
 
-    let db = NamedTempFile::new().unwrap();
+    let db = TempDatabase::new().unwrap();
     let url = format!("sqlite://{}", db.path().display());
     voom_store::init(&url).await.unwrap();
     let pool = voom_store::connect(&url).await.unwrap();

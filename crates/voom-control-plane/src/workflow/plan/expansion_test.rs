@@ -391,7 +391,7 @@ fn colliding_branch_ids_keep_full_relative_file_names() {
 
 struct WorkflowExpansionFixture {
     cp: ControlPlane,
-    _tmp: tempfile::NamedTempFile,
+    _tmp: voom_test_support::TempDatabase,
     plan: WorkflowPlan,
     workflow_id: String,
     plan_id: String,
@@ -401,7 +401,7 @@ struct WorkflowExpansionFixture {
 
 impl WorkflowExpansionFixture {
     async fn new() -> Self {
-        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let tmp = voom_test_support::TempDatabase::new().unwrap();
         let url = format!("sqlite://{}", tmp.path().display());
         let _ = voom_store::init(&url).await.unwrap();
         let pool = voom_store::connect(&url).await.unwrap();

@@ -11,7 +11,6 @@
 //! Disk-mode parity via the M1 harness mirrors the Phase A suite.
 
 use sqlx::SqlitePool;
-use tempfile::NamedTempFile;
 use time::Duration;
 use voom_core::{FileAssetId, FileLocationId, FileVersionId, VoomError};
 use voom_events::EventKind;
@@ -28,6 +27,7 @@ use voom_store::repo::use_leases::{
     BlockingMode, IssuerKind, LeaseScope, NewUseLease, SqliteUseLeaseRepo, UseLeaseKind,
 };
 use voom_store::test_support::{FailingAliasResolver, T0, fresh_initialized_pool_at};
+use voom_test_support::TempDatabase;
 
 fn gate<'a>(
     pool: &'a SqlitePool,
@@ -49,8 +49,8 @@ struct Seeded {
     location: FileLocationId,
 }
 
-async fn open_pool() -> (SqlitePool, NamedTempFile) {
-    let tmp = NamedTempFile::new().unwrap();
+async fn open_pool() -> (SqlitePool, TempDatabase) {
+    let tmp = TempDatabase::new().unwrap();
     let pool = fresh_initialized_pool_at(tmp.path()).await.unwrap();
     (pool, tmp)
 }
@@ -299,7 +299,7 @@ async fn reconcile_rename_proceeds_against_in_flight_commit_on_same_file_version
 
 #[tokio::test]
 async fn pending_lock_disk_mode_parity_survives_reconnect() {
-    let tmp = NamedTempFile::new().unwrap();
+    let tmp = TempDatabase::new().unwrap();
     let pool = fresh_initialized_pool_at(tmp.path()).await.unwrap();
     let seeded = seed_chain(&pool, "/srv/disk").await;
     land_pending_intent(&pool, seeded.location).await;

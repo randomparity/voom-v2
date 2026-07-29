@@ -54,7 +54,7 @@ async fn run_local_emits_exactly_two_stdout_lines() {
 
     let tmp = tempfile::TempDir::new().unwrap();
     let root = tmp.path().canonicalize().unwrap();
-    let db = tempfile::NamedTempFile::new_in(&root).unwrap();
+    let db = voom_test_support::TempDatabase::new_in(&root).unwrap();
     let url = format!("sqlite://{}", db.path().display());
 
     let init = run_voom(&url, &["init"]);
@@ -79,7 +79,7 @@ async fn concurrent_same_and_mixed_kind_shutdowns_retire_every_worker() {
 
     let tmp = tempfile::TempDir::new().unwrap();
     let root = tmp.path().canonicalize().unwrap();
-    let db = tempfile::NamedTempFile::new_in(&root).unwrap();
+    let db = voom_test_support::TempDatabase::new_in(&root).unwrap();
     let url = format!("sqlite://{}", db.path().display());
 
     let init = run_voom(&url, &["init"]);

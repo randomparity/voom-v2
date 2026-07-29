@@ -16,9 +16,9 @@ use std::path::Path;
 use std::path::PathBuf;
 
 use sqlx::migrate::Migrator;
-use tempfile::NamedTempFile;
 use voom_store::test_support::sqlite_url_for;
 use voom_store::{MIGRATOR, connect_or_create};
+use voom_test_support::TempDatabase;
 
 const EXPECTED_MIGRATION_FILES: &[&str] = &[
     "0001_init.sql",
@@ -132,7 +132,7 @@ async fn staged_artifact_commit_migration_preserves_seeded_file_version_links() 
         migration_path.display()
     );
 
-    let tmp = NamedTempFile::new().unwrap();
+    let tmp = TempDatabase::new().unwrap();
     let url = sqlite_url_for(tmp.path());
     let pool = connect_or_create(&url).await.unwrap();
 
@@ -226,7 +226,7 @@ async fn worker_grant_max_parallel_migration_rewrites_legacy_limit() {
         migration_path.display()
     );
 
-    let tmp = NamedTempFile::new().unwrap();
+    let tmp = TempDatabase::new().unwrap();
     let url = sqlite_url_for(tmp.path());
     let pool = connect_or_create(&url).await.unwrap();
 
@@ -293,7 +293,7 @@ async fn policy_verification_migration_preserves_workflow_progress() {
         migration_path.display()
     );
 
-    let tmp = NamedTempFile::new().unwrap();
+    let tmp = TempDatabase::new().unwrap();
     let url = sqlite_url_for(tmp.path());
     let pool = connect_or_create(&url).await.unwrap();
 
@@ -345,7 +345,7 @@ async fn audio_synthesis_lineage_migration_allows_sequential_versions_of_one_ass
         "{} must exist before the upgrade path can be exercised",
         migration_path.display()
     );
-    let tmp = NamedTempFile::new().unwrap();
+    let tmp = TempDatabase::new().unwrap();
     let url = sqlite_url_for(tmp.path());
     let pool = connect_or_create(&url).await.unwrap();
     migrator_through(26).run(&pool).await.unwrap();

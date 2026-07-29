@@ -6,8 +6,8 @@ use voom_store::repo::scheduler_decisions::{
     SchedulerReasonCode, SchedulerRequestSource,
 };
 
-fn fresh_url() -> (tempfile::NamedTempFile, String) {
-    let tmp = tempfile::NamedTempFile::new().unwrap();
+fn fresh_url() -> (voom_test_support::TempDatabase, String) {
+    let tmp = voom_test_support::TempDatabase::new().unwrap();
     let url = format!("sqlite://{}", tmp.path().display());
     (tmp, url)
 }

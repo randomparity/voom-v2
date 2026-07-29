@@ -8,17 +8,17 @@ use std::process::{Command, Output};
 
 use serde_json::Value;
 use sqlx::SqlitePool;
-use tempfile::NamedTempFile;
 use time::OffsetDateTime;
 use voom_control_plane::ControlPlane;
 use voom_core::{JobId, TicketId, TicketOperation};
 use voom_store::repo::jobs::{JobState, NewJob};
 use voom_store::repo::tickets::NewTicket;
+use voom_test_support::TempDatabase;
 
 const NOW: OffsetDateTime = OffsetDateTime::UNIX_EPOCH;
 
 struct Fixture {
-    _tmp: NamedTempFile,
+    _tmp: TempDatabase,
     url: String,
     pool: SqlitePool,
 }
@@ -35,7 +35,7 @@ struct DurableState {
 }
 
 async fn fixture() -> Fixture {
-    let tmp = NamedTempFile::new().unwrap();
+    let tmp = TempDatabase::new().unwrap();
     let url = voom_store::test_support::sqlite_url_for(tmp.path());
     voom_store::init(&url).await.unwrap();
     let pool = voom_store::connect(&url).await.unwrap();

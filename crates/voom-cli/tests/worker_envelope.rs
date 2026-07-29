@@ -7,10 +7,10 @@
 use std::process::Command;
 
 use serde_json::Value;
-use tempfile::NamedTempFile;
 use voom_control_plane::ControlPlane;
 use voom_store::repo::workers::{NewWorker, WorkerKind};
 use voom_store::test_support::sqlite_url_for;
+use voom_test_support::TempDatabase;
 
 mod worker_envelope {
     use super::*;
@@ -72,7 +72,7 @@ mod worker_envelope {
 
     #[tokio::test]
     async fn worker_list_uninitialized_db_uses_uninitialized_error_envelope() {
-        let tmp = NamedTempFile::new().unwrap();
+        let tmp = TempDatabase::new().unwrap();
         let url = sqlite_url_for(tmp.path());
         voom_store::connect_or_create(&url).await.unwrap();
 
@@ -216,7 +216,7 @@ mod worker_envelope {
     }
 
     struct Seeded {
-        _tmp: NamedTempFile,
+        _tmp: TempDatabase,
         url: String,
     }
 
@@ -226,7 +226,7 @@ mod worker_envelope {
     }
 
     async fn seed() -> Seeded {
-        let tmp = NamedTempFile::new().unwrap();
+        let tmp = TempDatabase::new().unwrap();
         let url = sqlite_url_for(tmp.path());
         voom_store::init(&url).await.unwrap();
         Seeded { _tmp: tmp, url }

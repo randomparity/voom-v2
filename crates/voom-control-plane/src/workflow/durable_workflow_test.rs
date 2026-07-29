@@ -388,7 +388,7 @@ async fn pre_lease_no_worker_retries_then_terminal_fails_without_dispatch() -> T
 struct DurableWorkflowFixture {
     cp: ControlPlane,
     pool: SqlitePool,
-    _tmp: tempfile::NamedTempFile,
+    _tmp: voom_test_support::TempDatabase,
     registry: WorkerRuntimeRegistry,
     launches: Vec<ProviderLaunch>,
     registered_workers: Vec<(WorkerId, u32)>,
@@ -528,7 +528,7 @@ impl DurableWorkflowFixture {
     }
 
     async fn without_fake_providers() -> TestResult<Self> {
-        let tmp = tempfile::NamedTempFile::new()?;
+        let tmp = voom_test_support::TempDatabase::new()?;
         let url = format!("sqlite://{}", tmp.path().display());
         voom_store::init(&url).await?;
         let pool = connect_single_connection_pool(&url).await?;

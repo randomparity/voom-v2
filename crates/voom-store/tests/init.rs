@@ -4,9 +4,9 @@
     reason = "integration tests favor unwrap/panic over plumbing Result<()> through every assertion"
 )]
 
-use tempfile::NamedTempFile;
 use voom_store::test_support::sqlite_url_for;
 use voom_store::{SchemaState, connect, expected_migrations, init, probe_schema};
+use voom_test_support::TempDatabase;
 
 // Integration tests use the disk-backed public `init(url)` exclusively.
 // The :memory: + init_on path is covered by Task 11's lib-internal unit tests.
@@ -14,7 +14,7 @@ use voom_store::{SchemaState, connect, expected_migrations, init, probe_schema};
 
 #[tokio::test]
 async fn init_on_disk_creates_schema_meta() {
-    let tmp = NamedTempFile::new().unwrap();
+    let tmp = TempDatabase::new().unwrap();
     let url = sqlite_url_for(tmp.path());
 
     let report = init(&url).await.unwrap();
@@ -33,7 +33,7 @@ async fn init_on_disk_creates_schema_meta() {
 
 #[tokio::test]
 async fn second_init_against_same_disk_db_is_noop() {
-    let tmp = NamedTempFile::new().unwrap();
+    let tmp = TempDatabase::new().unwrap();
     let url = sqlite_url_for(tmp.path());
 
     let first = init(&url).await.unwrap();
@@ -64,7 +64,7 @@ async fn second_init_against_same_disk_db_is_noop() {
 /// invariant is "exactly one row is in the DB."
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concurrent_init_on_same_disk_db_is_safe() {
-    let tmp = NamedTempFile::new().unwrap();
+    let tmp = TempDatabase::new().unwrap();
     let url = sqlite_url_for(tmp.path());
 
     // Pre-create the file so both spawned tasks race on migration application,
@@ -115,7 +115,7 @@ async fn concurrent_init_on_same_disk_db_is_safe() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn concurrent_init_stress() {
     for iteration in 0..20 {
-        let tmp = NamedTempFile::new().unwrap();
+        let tmp = TempDatabase::new().unwrap();
         let url = sqlite_url_for(tmp.path());
 
         // Pre-create the file so peers race on migration application, not

@@ -19,12 +19,13 @@
 use std::process::Command;
 
 use serde_json::{Value, json};
-use tempfile::{NamedTempFile, TempDir};
+use tempfile::TempDir;
 use time::OffsetDateTime;
 use voom_control_plane::ControlPlane;
 use voom_control_plane::policy::PolicyInputFromScanInput;
 use voom_store::repo::identity::{DiscoveredFile, FileLocationKind, IngestOutcome};
 use voom_store::test_support::sqlite_url_for;
+use voom_test_support::TempDatabase;
 
 const COMBINED_POLICY: &str = r#"
 policy "sprint 16 combined" {
@@ -86,7 +87,7 @@ async fn compliance_report_previews_combined_multi_phase_policy() {
 }
 
 struct Seeded {
-    _tmp: NamedTempFile,
+    _tmp: TempDatabase,
     _dir: TempDir,
     url: String,
     version_id: u64,
@@ -98,7 +99,7 @@ struct Seeded {
 /// title, channels, and commentary-disposition facts the audio planner needs).
 /// All facts and timestamps are constant, so the report is byte-stable.
 async fn seed_combined() -> Seeded {
-    let tmp = NamedTempFile::new().unwrap();
+    let tmp = TempDatabase::new().unwrap();
     let dir = TempDir::new().unwrap();
     let root = dir.path().canonicalize().unwrap();
     let url = sqlite_url_for(tmp.path());

@@ -538,8 +538,8 @@ use crate::test_support::fresh_initialized_pool_at;
 /// Helper: open a fresh pool against a temp DB with all migrations
 /// applied. Returns the pool and the tempfile so the test owns the
 /// lifetime.
-async fn fresh_pool_for_schema_check() -> (sqlx::SqlitePool, tempfile::NamedTempFile) {
-    let tmp = tempfile::NamedTempFile::new().unwrap();
+async fn fresh_pool_for_schema_check() -> (sqlx::SqlitePool, voom_test_support::TempDatabase) {
+    let tmp = voom_test_support::TempDatabase::new().unwrap();
     let pool = fresh_initialized_pool_at(tmp.path()).await.unwrap();
     (pool, tmp)
 }
@@ -619,9 +619,9 @@ use crate::repo::media::use_leases::{
 };
 use crate::test_support::T0;
 use sqlx::SqlitePool;
-use tempfile::NamedTempFile;
 use voom_core::ids::FileLocationId as CoreFileLocationId;
 use voom_events::EventKind;
+use voom_test_support::TempDatabase;
 
 /// One full M2 identity chain (asset → version → location), returned
 /// in raw IDs. Sufficient for a Phase A closure walk.
@@ -674,8 +674,8 @@ async fn seed_location(pool: &SqlitePool, value: &str) -> SeededLocation {
     }
 }
 
-async fn fresh_pool() -> (SqlitePool, NamedTempFile) {
-    let tmp = NamedTempFile::new().unwrap();
+async fn fresh_pool() -> (SqlitePool, TempDatabase) {
+    let tmp = TempDatabase::new().unwrap();
     let pool = fresh_initialized_pool_at(tmp.path()).await.unwrap();
     (pool, tmp)
 }

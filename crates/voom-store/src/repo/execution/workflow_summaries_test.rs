@@ -11,8 +11,8 @@ use super::*;
 const T0: OffsetDateTime = OffsetDateTime::UNIX_EPOCH;
 const JOB: JobId = JobId(1);
 
-async fn repo() -> (SqliteWorkflowSummaryRepo, tempfile::NamedTempFile) {
-    let tmp = tempfile::NamedTempFile::new().unwrap();
+async fn repo() -> (SqliteWorkflowSummaryRepo, voom_test_support::TempDatabase) {
+    let tmp = voom_test_support::TempDatabase::new().unwrap();
     let pool = crate::test_support::fresh_initialized_pool_at(tmp.path())
         .await
         .unwrap();

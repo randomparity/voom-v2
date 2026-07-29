@@ -9,9 +9,9 @@
 use super::*;
 
 use sqlx::SqlitePool;
-use tempfile::NamedTempFile;
 use time::Duration;
 use voom_core::ids::{FileAssetId, FileVersionId};
+use voom_test_support::TempDatabase;
 
 use crate::repo::media::bundles::{
     BundleMemberRole, NewAssetBundle, NewBundleMember, SqliteBundleRepo,
@@ -36,8 +36,8 @@ struct Seed {
     location_id: voom_core::FileLocationId,
 }
 
-async fn fresh_pool() -> (SqlitePool, NamedTempFile) {
-    let tmp = NamedTempFile::new().unwrap();
+async fn fresh_pool() -> (SqlitePool, TempDatabase) {
+    let tmp = TempDatabase::new().unwrap();
     let pool = fresh_initialized_pool_at(tmp.path()).await.unwrap();
     (pool, tmp)
 }

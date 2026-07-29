@@ -6,7 +6,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-use tempfile::{NamedTempFile, TempDir};
+use tempfile::TempDir;
 use voom_control_plane::scan::ScanPathInput;
 use voom_control_plane::{
     ArtifactInspectionState, ArtifactListInput, CommitArtifactInput, ControlPlane, StageCopyInput,
@@ -14,6 +14,7 @@ use voom_control_plane::{
 };
 use voom_core::ErrorCode;
 use voom_store::repo::artifacts::ArtifactCommitState;
+use voom_test_support::TempDatabase;
 use voom_test_support::worker::{
     FfprobeSiblingGuard, cargo_bin_or_build, install_fake_ffprobe_sibling, target_debug_binary,
     workspace_root,
@@ -127,7 +128,7 @@ async fn commit_rejections_and_recovery_visibility_are_inspectable() {
 
 #[derive(Debug)]
 struct Db {
-    _tmp: NamedTempFile,
+    _tmp: TempDatabase,
     url: String,
 }
 
@@ -140,7 +141,7 @@ struct StagedFixture {
 }
 
 async fn fixture() -> (ControlPlane, Db, TempDir) {
-    let tmp = NamedTempFile::new().unwrap();
+    let tmp = TempDatabase::new().unwrap();
     let url = format!("sqlite://{}", tmp.path().display());
     voom_store::init(&url).await.unwrap();
     let cp = ControlPlane::open(&url).await.unwrap();

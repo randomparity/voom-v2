@@ -7,19 +7,19 @@
 use std::process::Command;
 
 use serde_json::Value;
-use tempfile::NamedTempFile;
 use voom_store::test_support::sqlite_url_for;
+use voom_test_support::TempDatabase;
 
 mod scoring_profile_envelope {
     use super::*;
 
     struct Fixture {
-        _tmp: NamedTempFile,
+        _tmp: TempDatabase,
         url: String,
     }
 
     async fn fixture() -> Fixture {
-        let tmp = NamedTempFile::new().unwrap();
+        let tmp = TempDatabase::new().unwrap();
         let url = sqlite_url_for(tmp.path());
         voom_store::init(&url).await.unwrap();
         Fixture { _tmp: tmp, url }

@@ -7,10 +7,10 @@
 use std::process::Command;
 
 use serde_json::Value;
-use tempfile::NamedTempFile;
 use time::OffsetDateTime;
 use voom_core::{FileVersionId, JobId, TicketId};
 use voom_store::repo::backups::{BackupFailureDetail, NewBackup, SqliteBackupRepo};
+use voom_test_support::TempDatabase;
 
 mod backup_envelope {
     use super::*;
@@ -19,12 +19,12 @@ mod backup_envelope {
     const NOW: &str = "1970-01-01T00:00:00Z";
 
     struct Fixture {
-        _tmp: NamedTempFile,
+        _tmp: TempDatabase,
         url: String,
     }
 
     async fn fixture() -> Fixture {
-        let tmp = NamedTempFile::new().unwrap();
+        let tmp = TempDatabase::new().unwrap();
         let url = voom_store::test_support::sqlite_url_for(tmp.path());
         voom_store::init(&url).await.unwrap();
         let pool = voom_store::connect(&url).await.unwrap();

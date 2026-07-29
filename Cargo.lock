@@ -2449,6 +2449,7 @@ dependencies = [
  "voom-control-plane",
  "voom-core",
  "voom-store",
+ "voom-test-support",
 ]
 
 [[package]]
@@ -2609,6 +2610,7 @@ dependencies = [
  "voom-core",
  "voom-fake-support",
  "voom-store",
+ "voom-test-support",
  "voom-worker-protocol",
 ]
 
@@ -2710,6 +2712,7 @@ dependencies = [
  "voom-core",
  "voom-events",
  "voom-policy",
+ "voom-test-support",
 ]
 
 [[package]]
@@ -2717,6 +2720,8 @@ name = "voom-test-support"
 version = "0.1.0-dev"
 dependencies = [
  "serde_json",
+ "tempfile",
+ "tokio",
  "voom-control-plane",
  "voom-core",
  "voom-store",

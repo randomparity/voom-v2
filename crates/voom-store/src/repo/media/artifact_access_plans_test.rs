@@ -10,7 +10,7 @@ struct Fixture {
     ticket_id: TicketId,
     worker_id: WorkerId,
     node_id: NodeId,
-    _tmp: tempfile::NamedTempFile,
+    _tmp: voom_test_support::TempDatabase,
 }
 
 impl Fixture {
@@ -37,7 +37,7 @@ impl Fixture {
 }
 
 async fn fixture() -> Fixture {
-    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let tmp = voom_test_support::TempDatabase::new().unwrap();
     let pool = crate::test_support::fresh_initialized_pool_at(tmp.path())
         .await
         .unwrap();
@@ -392,7 +392,7 @@ async fn create_selected_with_null_worker_node_id_is_internal() {
     // has no node assigned is a data-integrity violation, not a "missing
     // worker" — the LEFT JOIN found the row, it just has a NULL node_id. The
     // coherence guard must surface Internal, not the misleading NotFound.
-    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let tmp = voom_test_support::TempDatabase::new().unwrap();
     let pool = crate::test_support::fresh_initialized_pool_at(tmp.path())
         .await
         .unwrap();

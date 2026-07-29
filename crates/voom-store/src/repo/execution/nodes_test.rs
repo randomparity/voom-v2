@@ -210,8 +210,8 @@ async fn nodes_retire_is_terminal_and_epoch_guarded() {
     assert_eq!(err.error_code(), ErrorCode::Conflict);
 }
 
-async fn fresh_pool() -> (sqlx::SqlitePool, tempfile::NamedTempFile) {
-    let tmp = tempfile::NamedTempFile::new().unwrap();
+async fn fresh_pool() -> (sqlx::SqlitePool, voom_test_support::TempDatabase) {
+    let tmp = voom_test_support::TempDatabase::new().unwrap();
     let pool = crate::test_support::fresh_initialized_pool_at(tmp.path())
         .await
         .unwrap();
@@ -264,7 +264,7 @@ async fn seeded_node(
     status: NodeStatus,
     last_seen_at: OffsetDateTime,
 ) -> (
-    tempfile::NamedTempFile,
+    voom_test_support::TempDatabase,
     sqlx::SqlitePool,
     SqliteNodeRepo,
     Node,

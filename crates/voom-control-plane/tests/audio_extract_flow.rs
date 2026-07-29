@@ -7,7 +7,6 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use tempfile::NamedTempFile;
 use voom_control_plane::ControlPlane;
 use voom_control_plane::policy::{ComplianceExecutionOptions, PolicyInputFromScanInput};
 use voom_control_plane::scan::{ScanPathInput, ScanReportFileStatus};
@@ -15,6 +14,7 @@ use voom_core::{FileAssetId, FileVersionId, JobId, MediaSnapshotId};
 use voom_plan::PlanOperationKind;
 use voom_store::repo::bundles::{BundleMemberRole, SqliteBundleRepo};
 use voom_store::repo::identity::{IdentityRepo, SqliteIdentityRepo};
+use voom_test_support::TempDatabase;
 use voom_test_support::worker::{
     TestWorkerConfig, TestWorkerLaunch, cargo_build_package, hide_stale_fake_ffprobe_sibling,
     target_debug_binary,
@@ -51,7 +51,7 @@ async fn audio_extract_flow_verifies_commits_and_adds_sidecar_to_source_bundle()
     let source = tmp.path().join("Movie.mkv");
     generate_audio_extract_fixture(&source, CommentaryFixture::SingleMatch);
 
-    let db = NamedTempFile::new().unwrap();
+    let db = TempDatabase::new().unwrap();
     let url = format!("sqlite://{}", db.path().display());
     voom_store::init(&url).await.unwrap();
     let pool = voom_store::connect(&url).await.unwrap();
@@ -129,7 +129,7 @@ async fn audio_extract_multi_match_publishes_ordered_media_and_lineage() {
     let source = tmp.path().join("Movie.mkv");
     generate_audio_extract_fixture(&source, CommentaryFixture::SingleMatch);
 
-    let db = NamedTempFile::new().unwrap();
+    let db = TempDatabase::new().unwrap();
     let url = format!("sqlite://{}", db.path().display());
     voom_store::init(&url).await.unwrap();
     let pool = voom_store::connect(&url).await.unwrap();

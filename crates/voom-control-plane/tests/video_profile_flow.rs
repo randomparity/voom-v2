@@ -16,7 +16,6 @@ use std::path::Path;
 use std::process::Command;
 
 use serde_json::json;
-use tempfile::NamedTempFile;
 use voom_control_plane::ControlPlane;
 use voom_control_plane::policy::{
     ComplianceExecuteData, ComplianceExecutionOptions, PolicyInputFromScanInput,
@@ -27,6 +26,7 @@ use voom_ffmpeg_worker::preflight_from_process_env;
 use voom_plan::PlanOperationKind;
 use voom_policy::{MediaSnapshotInput, PolicyInputSetDraft, PolicyInputSourceKind, TargetRef};
 use voom_store::repo::identity::{IdentityRepo, SqliteIdentityRepo};
+use voom_test_support::TempDatabase;
 use voom_test_support::worker::{
     FfprobeSiblingGuard, TestWorkerConfig, TestWorkerLaunch, cargo_build_package,
     hide_stale_fake_ffprobe_sibling, target_debug_binary,
@@ -149,7 +149,7 @@ struct CaseOutcome {
     output_width: u64,
     output_height: u64,
     _tmp: tempfile::TempDir,
-    _db: NamedTempFile,
+    _db: TempDatabase,
     _ffprobe_guard: FfprobeSiblingGuard,
 }
 
@@ -175,7 +175,7 @@ async fn run_case(case: &Case) -> CaseOutcome {
         case.source_height,
     );
 
-    let db = NamedTempFile::new().unwrap();
+    let db = TempDatabase::new().unwrap();
     let url = format!("sqlite://{}", db.path().display());
     voom_store::init(&url).await.unwrap();
     let pool = voom_store::connect(&url).await.unwrap();

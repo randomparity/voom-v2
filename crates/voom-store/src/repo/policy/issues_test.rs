@@ -4,8 +4,8 @@ use voom_core::FailureClass;
 
 use crate::test_support::fresh_initialized_pool_at;
 
-async fn pool() -> (sqlx::SqlitePool, tempfile::NamedTempFile) {
-    let tmp = tempfile::NamedTempFile::new().unwrap();
+async fn pool() -> (sqlx::SqlitePool, voom_test_support::TempDatabase) {
+    let tmp = voom_test_support::TempDatabase::new().unwrap();
     let pool = fresh_initialized_pool_at(tmp.path()).await.unwrap();
     (pool, tmp)
 }

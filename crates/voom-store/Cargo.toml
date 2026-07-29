@@ -53,3 +53,4 @@ voom-core = { workspace = true, features = ["test"] }
 # integration suite needs them to drive state changes that don't have a
 # dedicated case handler.
 voom-control-plane = { workspace = true, features = ["test"] }
+voom-test-support = { workspace = true }

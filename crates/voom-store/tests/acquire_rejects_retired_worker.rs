@@ -22,8 +22,12 @@ use voom_store::repo::tickets::{NewTicket, TicketState};
 use voom_store::repo::workers::{NewWorker, WorkerKind};
 use voom_store::test_support::T0;
 
-async fn cp() -> (ControlPlane, sqlx::SqlitePool, tempfile::NamedTempFile) {
-    let tmp = tempfile::NamedTempFile::new().unwrap();
+async fn cp() -> (
+    ControlPlane,
+    sqlx::SqlitePool,
+    voom_test_support::TempDatabase,
+) {
+    let tmp = voom_test_support::TempDatabase::new().unwrap();
     let url = format!("sqlite://{}", tmp.path().display());
     let _ = voom_store::init(&url).await.unwrap();
     let pool = voom_store::connect(&url).await.unwrap();

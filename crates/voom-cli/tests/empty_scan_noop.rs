@@ -18,7 +18,7 @@ const POLICY: &str = "policy \"empty tools\" {\n  \
 #[tokio::test]
 async fn empty_whole_scan_runs_end_to_end_as_zero_work_without_workers() {
     let dir = tempfile::tempdir().unwrap();
-    let database = tempfile::NamedTempFile::new_in(dir.path()).unwrap();
+    let database = voom_test_support::TempDatabase::new_in(dir.path()).unwrap();
     let database_url = sqlite_url_for(database.path());
     voom_store::init(&database_url).await.unwrap();
 
