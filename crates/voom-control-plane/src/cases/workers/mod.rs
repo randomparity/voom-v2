@@ -1,4 +1,4 @@
-use super::{append_event, begin_tx, commit_tx};
+use super::{append_event, begin_immediate_tx, begin_tx, commit_tx};
 
 pub(crate) mod nodes;
 mod registry;

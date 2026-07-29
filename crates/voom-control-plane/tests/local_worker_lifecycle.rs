@@ -10,8 +10,11 @@
 //! `tokio::time::pause`).
 
 use sqlx::Row;
+use std::time::Duration;
 use tempfile::NamedTempFile;
+use tokio::net::TcpStream;
 use voom_control_plane::{ControlPlane, LocalWorkerKind};
+use voom_core::ErrorCode;
 use voom_store::repo::workers::WorkerStatus;
 use voom_test_support::worker::cargo_build_package;
 
@@ -139,6 +142,41 @@ async fn start_local_worker_preserves_reachable_same_kind_siblings() {
         vec![second_id.0]
     );
     second.shutdown_and_retire(&cp).await.unwrap();
+}
+
+#[tokio::test]
+async fn shutdown_stops_worker_when_durable_retirement_fails() {
+    cargo_build_package("voom-ffmpeg-worker").unwrap();
+
+    let db = NamedTempFile::new().unwrap();
+    let url = format!("sqlite://{}", db.path().display());
+    voom_store::init(&url).await.unwrap();
+    let pool = voom_store::connect(&url).await.unwrap();
+    let cp =
+        ControlPlane::open_with_pool(pool.clone(), std::sync::Arc::new(voom_core::SystemClock))
+            .await
+            .unwrap();
+
+    let running = cp
+        .start_local_worker(LocalWorkerKind::Ffmpeg)
+        .await
+        .unwrap();
+    let endpoint = running.handle().endpoint;
+    pool.close().await;
+
+    let shutdown =
+        tokio::time::timeout(Duration::from_secs(5), running.shutdown_and_retire(&cp)).await;
+    assert!(shutdown.is_ok(), "retirement failure must remain bounded");
+    let err = shutdown.unwrap().unwrap_err();
+    assert_eq!(err.error_code(), ErrorCode::DbUnreachable);
+    assert!(
+        err.to_string().contains("workers inspection get"),
+        "retirement error must identify the failed database operation: {err}"
+    );
+    assert!(
+        TcpStream::connect(endpoint).await.is_err(),
+        "the child process must stop before retirement failure is returned"
+    );
 }
 
 async fn live_worker_ids(cp: &ControlPlane, base: &str) -> Vec<u64> {
