@@ -60,6 +60,7 @@ voom-mkvtoolnix-worker = { version = "0.1.0-dev", path = "crates/voom-mkvtoolnix
 base64 = "0.22.1"
 hex = "0.4.3"
 rand = { version = "0.9.4", default-features = false, features = ["os_rng", "std", "std_rng"] }
+same-file = "=1.0.6"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = { version = "1.0.150", features = ["preserve_order"] }
 sha2 = "0.10.9"

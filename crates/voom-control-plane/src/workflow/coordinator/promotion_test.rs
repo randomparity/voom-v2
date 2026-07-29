@@ -97,7 +97,7 @@ fn promotion_layout_preserves_multiple_sidecar_operation_dirs() {
 // --- copy_into_place ---
 
 #[tokio::test]
-async fn copy_into_place_moves_bytes_and_cleans_up() {
+async fn copy_terminal_artifact_moves_bytes_and_cleans_up() {
     let tmp = tempfile::TempDir::new().unwrap();
     let current = tmp.path().join("work").join("Movie.hevc.mkv");
     let dest = tmp.path().join("out").join("Movie.hevc.mkv");
@@ -110,8 +110,9 @@ async fn copy_into_place_moves_bytes_and_cleans_up() {
     write(&current, b"terminal-bytes").await;
 
     let temp = promotion_temp_path(&dest, FileLocationId(1)).unwrap();
-    let temp = PromotionTempOwnership::acquire(&temp).await.unwrap();
-    copy_into_place(&current, &dest, &temp).await.unwrap();
+    copy_terminal_artifact(&current, &dest, &temp)
+        .await
+        .unwrap();
 
     assert_eq!(tokio::fs::read(&dest).await.unwrap(), b"terminal-bytes");
     assert!(tokio::fs::symlink_metadata(&current).await.is_err());
@@ -292,7 +293,8 @@ async fn same_location_contender_waits_for_temp_ownership() {
     let mut contender = tokio::spawn({
         let current = current.clone();
         let dest = dest.clone();
-        async move { move_terminal_artifact(&current, &dest, location_id).await }
+        let contender_temp = temp.clone();
+        async move { copy_terminal_artifact(&current, &dest, &contender_temp).await }
     });
     assert!(
         tokio::time::timeout(std::time::Duration::from_millis(50), &mut contender)
@@ -305,6 +307,33 @@ async fn same_location_contender_waits_for_temp_ownership() {
     assert_eq!(contender.await.unwrap().unwrap(), dest);
     assert_eq!(tokio::fs::read(&dest).await.unwrap(), b"terminal-bytes");
     assert!(tokio::fs::symlink_metadata(&temp).await.is_err());
+}
+
+#[tokio::test]
+async fn stale_waiter_rejects_replaced_temp_path() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let dest = tmp.path().join("Movie.mkv");
+    let temp = promotion_temp_path(&dest, FileLocationId(43)).unwrap();
+    write(&temp, b"first-partial").await;
+    let owner = PromotionTempOwnership::acquire(&temp).await.unwrap();
+    let stale_file = open_promotion_temp(&temp).unwrap();
+
+    tokio::fs::remove_file(&temp).await.unwrap();
+    write(&temp, b"replacement-partial").await;
+    let validation = tokio::spawn({
+        let temp = temp.clone();
+        async move { PromotionTempOwnership::lock_and_validate(&temp, stale_file).await }
+    });
+    drop(owner);
+
+    assert!(
+        validation.await.unwrap().unwrap().is_none(),
+        "a waiter holding the detached inode must reopen the replacement path"
+    );
+    assert_eq!(
+        tokio::fs::read(&temp).await.unwrap(),
+        b"replacement-partial"
+    );
 }
 
 #[tokio::test]
