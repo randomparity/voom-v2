@@ -48,6 +48,7 @@ const EXPECTED_MIGRATION_FILES: &[&str] = &[
     "0025_recoverable_audio_synthesis.sql",
     "0026_policy_artifact_verification.sql",
     "0027_audio_synthesis_asset_lineage.sql",
+    "0028_sliding_file_window.sql",
 ];
 
 fn workspace_root() -> PathBuf {

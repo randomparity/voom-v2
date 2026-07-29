@@ -136,6 +136,104 @@ fn file_run_history(
     }
 }
 
+fn file_progress(branch_id: &str, input_ordinal: u32) -> NewFileProgress {
+    NewFileProgress {
+        branch_id: branch_id.to_owned(),
+        input_ordinal,
+        next_phase_ordinal: 0,
+    }
+}
+
+#[tokio::test]
+async fn file_window_admission_is_bounded_and_refills_after_terminal() {
+    let (repo, _tmp) = repo().await;
+    repo.insert_file_run_starts(
+        JOB,
+        vec![
+            file_run_start("alpha", 1, 0),
+            file_run_start("beta", 1, 0),
+            file_run_start("gamma", 1, 0),
+        ],
+    )
+    .await
+    .unwrap();
+    repo.insert_file_window(
+        JOB,
+        2,
+        vec![
+            file_progress("alpha", 0),
+            file_progress("beta", 1),
+            file_progress("gamma", 2),
+        ],
+        T0,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        repo.admit_next_file(JOB, T0)
+            .await
+            .unwrap()
+            .unwrap()
+            .branch_id,
+        "alpha"
+    );
+    assert_eq!(
+        repo.admit_next_file(JOB, T0)
+            .await
+            .unwrap()
+            .unwrap()
+            .branch_id,
+        "beta"
+    );
+    assert!(repo.admit_next_file(JOB, T0).await.unwrap().is_none());
+
+    repo.mark_file_terminal(JOB, "alpha", T0).await.unwrap();
+    assert_eq!(
+        repo.admit_next_file(JOB, T0)
+            .await
+            .unwrap()
+            .unwrap()
+            .branch_id,
+        "gamma"
+    );
+    let rows = repo.file_progress_for_job(JOB).await.unwrap();
+    assert_eq!(
+        rows.iter()
+            .filter(|row| row.state == FileProgressState::Active)
+            .count(),
+        2
+    );
+}
+
+#[tokio::test]
+async fn file_progress_cursor_advances_once_from_expected_phase() {
+    let (repo, _tmp) = repo().await;
+    repo.insert_file_run_starts(JOB, vec![file_run_start("alpha", 1, 0)])
+        .await
+        .unwrap();
+    repo.insert_file_window(JOB, 1, vec![file_progress("alpha", 0)], T0)
+        .await
+        .unwrap();
+    repo.admit_next_file(JOB, T0).await.unwrap();
+
+    assert!(
+        repo.advance_file_progress(JOB, "alpha", 0, 1)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !repo
+            .advance_file_progress(JOB, "alpha", 0, 1)
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        repo.file_progress_for_job(JOB).await.unwrap()[0].next_phase_ordinal,
+        1
+    );
+}
+
 #[tokio::test]
 async fn file_run_starts_insert_atomically_and_list_by_branch() {
     let (repo, _tmp) = repo().await;
