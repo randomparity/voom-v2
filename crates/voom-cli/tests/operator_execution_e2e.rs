@@ -382,6 +382,7 @@ fn generate_h264_fixture(path: &Path) {
             "-hide_banner",
             "-loglevel",
             "error",
+            "-nostdin",
             "-f",
             "lavfi",
             "-i",
