@@ -41,7 +41,7 @@ test:
     # concurrently-running test execs it (ETXTBSY). Same feature set as the test run.
     cargo build --workspace --all-features --all-targets
     # Guard test-target wiring without the workspace's --all-features override.
-    cargo test -p voom-control-plane
+    VOOM_TEST_PREBUILT_WORKERS=1 cargo test -p voom-control-plane
     VOOM_TEST_PREBUILT_WORKERS=1 cargo test --workspace --all-features
 
 doc:
