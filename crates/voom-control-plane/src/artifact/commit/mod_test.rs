@@ -297,6 +297,54 @@ async fn successful_commit_promotes_target_records_identity_retires_staging_and_
     );
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_independent_commits_all_complete() {
+    let (cp, _db, dir) = fixture().await;
+    let cp = std::sync::Arc::new(cp);
+    let inputs = [
+        b"concurrent source a".as_slice(),
+        b"concurrent source b".as_slice(),
+        b"concurrent source c".as_slice(),
+        b"concurrent source d".as_slice(),
+        b"concurrent source e".as_slice(),
+        b"concurrent source f".as_slice(),
+    ];
+    let mut commits = Vec::new();
+    for (index, bytes) in inputs.iter().enumerate() {
+        let staged = stage_and_verify_bytes(&cp, dir.path(), bytes).await;
+        commits.push((
+            staged.artifact_handle_id,
+            dir.path().join(format!("concurrent-target-{index}.bin")),
+        ));
+    }
+
+    let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(commits.len()));
+    let mut tasks = tokio::task::JoinSet::new();
+    for (artifact_handle_id, target_path) in commits {
+        let cp = cp.clone();
+        let barrier = barrier.clone();
+        tasks.spawn(async move {
+            barrier.wait().await;
+            cp.commit_artifact(CommitArtifactInput {
+                artifact_handle_id,
+                target_path,
+            })
+            .await
+        });
+    }
+
+    let mut reports = Vec::new();
+    while let Some(result) = tasks.join_next().await {
+        reports.push(result.unwrap().unwrap());
+    }
+    assert_eq!(reports.len(), inputs.len());
+    assert!(
+        reports
+            .iter()
+            .all(|report| report.state == ArtifactCommitState::Committed)
+    );
+}
+
 #[tokio::test]
 async fn injected_failure_after_prepare_marks_recovery_required() {
     let (cp, _db, dir) = fixture().await;
