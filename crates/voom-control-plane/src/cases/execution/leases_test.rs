@@ -87,6 +87,38 @@ async fn grant_capacity(
     .unwrap();
 }
 
+async fn nvidia_worker(
+    cp: &crate::ControlPlane,
+    name: &str,
+    operation: &TicketOperation,
+    hardware_token: &str,
+    max_sessions: u32,
+) -> Worker {
+    let worker = cp.register_worker(worker(name)).await.unwrap();
+    cp.record_capability(NewCapability {
+        worker_id: worker.id,
+        operation: operation.clone(),
+        codecs: Vec::new(),
+        hardware: vec![hardware_token.to_owned()],
+        artifact_access: Vec::new(),
+        extra: serde_json::json!({
+            "accelerator": {
+                "hardware_token": hardware_token,
+                "device_uuid": hardware_token.trim_start_matches("nvidia:"),
+                "device_name": "Test GPU",
+                "driver_version": "595.80",
+                "encoders": ["hevc_nvenc"],
+                "decoders": ["h264_cuvid", "hevc_cuvid"],
+                "max_sessions": max_sessions
+            }
+        }),
+    })
+    .await
+    .unwrap();
+    grant_capacity(cp, &worker, operation, max_sessions).await;
+    worker
+}
+
 #[tokio::test]
 async fn acquire_lease_emits_lease_acquired_and_ticket_leased() {
     let (cp, _tmp) = cp().await;
@@ -355,6 +387,71 @@ async fn acquire_lease_rechecks_stale_worker_capacity_without_side_effects() {
     assert_eq!(held, 1);
     assert_eq!(count(&cp, EventKind::LeaseAcquired).await, 1);
     assert_eq!(count(&cp, EventKind::TicketLeased).await, 1);
+}
+
+#[tokio::test]
+async fn accelerator_capacity_is_aggregated_by_hardware_token() {
+    let (cp, _tmp) = cp().await;
+    let operation = TicketOperation::new("transcode_video").unwrap();
+    let tickets = [
+        cp.create_ticket(ticket(operation.as_str(), 2))
+            .await
+            .unwrap(),
+        cp.create_ticket(ticket(operation.as_str(), 2))
+            .await
+            .unwrap(),
+        cp.create_ticket(ticket(operation.as_str(), 2))
+            .await
+            .unwrap(),
+    ];
+    for ticket in &tickets {
+        cp.mark_ready_if_unblocked(ticket.id, T0).await.unwrap();
+    }
+    let token = "nvidia:GPU-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+    let first = nvidia_worker(&cp, "gpu-a-1", &operation, token, 2).await;
+    let second = nvidia_worker(&cp, "gpu-a-2", &operation, token, 2).await;
+
+    for (ticket, worker) in [(&tickets[0], &first), (&tickets[1], &second)] {
+        cp.acquire_lease(NewLease {
+            ticket_id: ticket.id,
+            worker_id: worker.id,
+            ttl: TDuration::seconds(60),
+            now: T0,
+        })
+        .await
+        .unwrap();
+    }
+
+    let candidates = cp.workers.operation_candidates(&operation).await.unwrap();
+    assert_eq!(candidates.len(), 2);
+    assert!(
+        candidates
+            .iter()
+            .all(|candidate| candidate.active_leases == 2 && candidate.max_parallel == 2)
+    );
+    let before = cp.tickets().get(tickets[2].id).await.unwrap().unwrap();
+    let outcome = cp
+        .try_acquire_lease(NewLease {
+            ticket_id: tickets[2].id,
+            worker_id: first.id,
+            ttl: TDuration::seconds(60),
+            now: T0,
+        })
+        .await
+        .unwrap();
+    let saturation = match outcome {
+        LeaseAcquireOutcome::CapacityFull(saturation) => Some(saturation),
+        LeaseAcquireOutcome::Acquired(_) => None,
+    };
+    assert!(saturation.is_some());
+    let Some(saturation) = saturation else {
+        return;
+    };
+    assert_eq!(saturation.active_leases, 2);
+    assert_eq!(saturation.max_parallel, 2);
+    let after = cp.tickets().get(tickets[2].id).await.unwrap().unwrap();
+    assert_eq!(after.state, TicketState::Ready);
+    assert_eq!(after.attempt, before.attempt);
 }
 
 #[tokio::test]

@@ -5,7 +5,31 @@ fn descriptor_lookup_knows_supported_encoders() {
     assert!(encoder_descriptor("libx265").is_some());
     assert!(encoder_descriptor("libsvtav1").is_some());
     assert!(encoder_descriptor("libaom-av1").is_some());
+    assert!(encoder_descriptor("hevc_nvenc").is_some());
+    assert!(encoder_descriptor("av1_nvenc").is_none());
     assert!(encoder_descriptor("x264").is_none());
+}
+
+#[test]
+fn nvidia_descriptor_uses_cq_and_current_ffmpeg_vocabulary() {
+    let nvidia = encoder_descriptor("hevc_nvenc").unwrap();
+    assert_eq!(nvidia.quality_domain, QualityDomain::Cq { min: 1, max: 51 });
+    assert!(nvidia.accepts_preset("p1"));
+    assert!(nvidia.accepts_preset("p7"));
+    assert!(!nvidia.accepts_preset("slow"));
+    assert!(nvidia.accepts_tune("uhq"));
+    assert!(nvidia.accepts_codec_profile("main10"));
+    assert!(nvidia.accepts_codec_level("6.2"));
+    assert!(nvidia.accepts_pixel_format("yuv420p10le"));
+    assert!(!nvidia.accepts_pixel_format("yuv444p"));
+}
+
+#[test]
+fn nvidia_decoder_mapping_accepts_supported_codecs_and_hevc_alias() {
+    assert_eq!(nvidia_decoder_for_video_codec("h264"), Some("h264_cuvid"));
+    assert_eq!(nvidia_decoder_for_video_codec("H265"), Some("hevc_cuvid"));
+    assert_eq!(nvidia_decoder_for_video_codec("av1"), Some("av1_cuvid"));
+    assert_eq!(nvidia_decoder_for_video_codec("vp9"), None);
 }
 
 #[test]

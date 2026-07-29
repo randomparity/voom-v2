@@ -53,3 +53,5 @@ are append-only — supersede an ADR with a new one rather than rewriting histor
 | [0045](0045-linearize-lineage-validation-with-phase-ticket-creation.md) | Linearize lineage validation with phase ticket creation |
 | [0046](0046-cancel-jobs-without-dispatching-new-work.md) | Cancel jobs without dispatching new work |
 | [0047](0047-policy-verification-is-a-durable-read-only-phase.md) | Policy verification is a durable read-only phase |
+| [0048](0048-durable-sliding-file-window.md) | Coordinate policy execution through a durable sliding file window |
+| [0049](0049-accelerator-devices-are-worker-resources.md) | Accelerator devices are worker resources |

@@ -26,6 +26,7 @@
 
 use std::path::Path;
 use std::process::Command;
+use std::time::Duration;
 
 use voom_control_plane::ControlPlane;
 use voom_control_plane::CoordinatorOutcome;
@@ -360,6 +361,7 @@ async fn scan_one(cp: &ControlPlane, source: &Path) -> ScannedFile {
 fn combined_execution_options(root: &Path) -> ComplianceExecutionOptions {
     ComplianceExecutionOptions {
         max_in_flight_files: 4,
+        accelerator_unavailable_timeout: Duration::from_mins(15),
         transcode_staging_root: root.join("stage"),
         transcode_target_dir: root.join("out/transcode"),
         remux_staging_root: root.join("stage"),

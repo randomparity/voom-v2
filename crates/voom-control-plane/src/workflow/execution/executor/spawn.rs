@@ -3,47 +3,66 @@
 //! local reservation/capacity bookkeeping. Named `spawn` to avoid clashing with
 //! the sibling `workflow::execution::dispatch` module.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
-use tokio::task::JoinSet;
 use voom_core::OperationKind;
 use voom_core::{JobId, TicketId, TicketOperation, VoomError, WorkerId};
 use voom_scheduler::{LeastLoadedWorkerSelector, WorkerSelector, WorkerView};
 use voom_store::repo::leases::{LeaseAcquireOutcome, NewLease};
 use voom_store::repo::tickets::{Ticket, TicketState};
+use voom_store::repo::workers::WorkerOperationCandidate;
+use voom_worker_protocol::{
+    TranscodeVideoProfile, VideoHardwareAssignment, VideoHardwareRequirement,
+};
 
+use crate::video_hardware::{candidate_accelerator_descriptor, historical_accelerator_descriptor};
 use crate::workflow::execution::dispatch::{DispatchOutcome, DispatchTerminal, dispatch_ticket};
-use crate::workflow::execution::executor::RunFailureMode;
-use crate::workflow::execution::executor::WorkflowExecutor;
 use crate::workflow::execution::executor::errors::selector_failure_class;
 use crate::workflow::execution::executor::tickets::parse_payload;
+use crate::workflow::execution::executor::{RunFailureMode, RunLoopState, WorkflowExecutor};
 use crate::workflow::execution::leases::{
     acquire_lease_with_retry, failure_class_for_error, time_duration,
 };
 use crate::workflow::execution::operation_adapters::uses_bundled_policy_verification;
+use crate::workflow::execution::runtime::{WorkerRuntime, WorkerRuntimeRegistry};
 use crate::workflow::plan::model::WorkflowPlan;
 use crate::workflow::summary::WorkflowRunSummary;
 
 #[derive(Debug)]
 pub(super) enum SpawnOutcome {
-    Spawned,
+    Spawned(Vec<String>),
     PreLeaseRetriable,
     PreLeaseTerminal(VoomError),
     CapacityDeferred,
+    AcceleratorUnavailable(Vec<String>),
 }
 
 impl WorkflowExecutor {
     pub(super) async fn try_spawn_dispatch(
         &self,
-        active: &mut JoinSet<DispatchOutcome>,
-        reservations: &mut HashMap<WorkerId, u32>,
-        summary: &mut WorkflowRunSummary,
+        state: &mut RunLoopState,
         ticket: Ticket,
+        accelerator_runtimes: &mut Option<WorkerRuntimeRegistry>,
     ) -> Result<SpawnOutcome, VoomError> {
-        let workflow_payload = parse_payload(&ticket)?;
-        let candidates = self
-            .candidate_workers(workflow_payload.operation, reservations)
+        let mut workflow_payload = parse_payload(&ticket)?;
+        let projected = self
+            .candidate_workers(
+                workflow_payload.operation,
+                &workflow_payload.rendered_payload,
+                &state.reservations,
+                &mut state.accelerator_history,
+                accelerator_runtimes,
+            )
             .await?;
+        let ProjectedCandidates {
+            workers: candidates,
+            assignments,
+            unavailable_tokens,
+            mut recovery_tokens,
+        } = projected;
+        if candidates.is_empty() && !unavailable_tokens.is_empty() {
+            return Ok(SpawnOutcome::AcceleratorUnavailable(unavailable_tokens));
+        }
         let selector = LeastLoadedWorkerSelector;
         let worker_id = match selector.select(workflow_payload.operation, &candidates) {
             Ok(worker_id) => worker_id,
@@ -62,22 +81,29 @@ impl WorkflowExecutor {
                         self.control_plane.clock().now(),
                     )
                     .await?;
-                summary.failure_count += u64::from(outcome.terminal);
+                state.summary.failure_count += u64::from(outcome.terminal);
                 if outcome.terminal {
                     return Ok(SpawnOutcome::PreLeaseTerminal(source));
                 }
                 return Ok(SpawnOutcome::PreLeaseRetriable);
             }
         };
+        let selected_assignment = assignments.get(&worker_id);
+        let uses_accelerator = apply_hardware_assignment(
+            &mut workflow_payload.rendered_payload,
+            selected_assignment,
+            &mut recovery_tokens,
+        )?;
         let uses_bundled_verify = uses_bundled_policy_verification(
             workflow_payload.operation,
             &workflow_payload.rendered_payload,
         );
-        let runtime = if uses_bundled_verify {
-            None
-        } else {
-            Some(self.runtimes.get(worker_id)?)
-        };
+        let runtime = self.dispatch_runtime(
+            uses_bundled_verify,
+            uses_accelerator,
+            accelerator_runtimes.as_ref(),
+            worker_id,
+        )?;
         let acquisition = acquire_lease_with_retry(
             &self.control_plane,
             NewLease {
@@ -91,13 +117,15 @@ impl WorkflowExecutor {
         let LeaseAcquireOutcome::Acquired(lease) = acquisition else {
             return Ok(SpawnOutcome::CapacityDeferred);
         };
-        increment_reservation(reservations, worker_id);
-        summary.dispatch_count += 1;
-        summary.record_dispatch(workflow_payload.operation, worker_id, reservations);
+        increment_reservation(&mut state.reservations, worker_id);
+        state.summary.dispatch_count += 1;
+        state
+            .summary
+            .record_dispatch(workflow_payload.operation, worker_id, &state.reservations);
 
         let control = self.control_plane.clone();
         let options = self.options.dispatch_options();
-        active.spawn(async move {
+        state.active.spawn(async move {
             dispatch_ticket(
                 control,
                 worker_id,
@@ -109,7 +137,27 @@ impl WorkflowExecutor {
             )
             .await
         });
-        Ok(SpawnOutcome::Spawned)
+        Ok(SpawnOutcome::Spawned(recovery_tokens))
+    }
+
+    fn dispatch_runtime(
+        &self,
+        uses_bundled_verify: bool,
+        uses_accelerator: bool,
+        accelerator_runtimes: Option<&WorkerRuntimeRegistry>,
+        worker_id: WorkerId,
+    ) -> Result<Option<WorkerRuntime>, VoomError> {
+        if uses_bundled_verify {
+            return Ok(None);
+        }
+        let runtimes = if uses_accelerator {
+            accelerator_runtimes.ok_or_else(|| {
+                VoomError::Internal("NVIDIA candidate projection omitted live runtimes".to_owned())
+            })?
+        } else {
+            &self.runtimes
+        };
+        runtimes.get(worker_id).map(Some)
     }
 
     #[expect(
@@ -190,25 +238,254 @@ impl WorkflowExecutor {
     async fn candidate_workers(
         &self,
         operation: OperationKind,
+        payload: &serde_json::Value,
         reservations: &HashMap<WorkerId, u32>,
-    ) -> Result<Vec<WorkerView>, VoomError> {
+        history: &mut HashMap<String, Vec<String>>,
+        accelerator_runtimes: &mut Option<WorkerRuntimeRegistry>,
+    ) -> Result<ProjectedCandidates, VoomError> {
         let candidates = self
             .control_plane
             .workers
             .operation_candidates(&TicketOperation::from(operation))
             .await?;
-        Ok(candidates
-            .into_iter()
-            .map(|candidate| WorkerView {
+        let requirement = video_hardware_requirement(operation, payload)?;
+        if matches!(requirement, Some(VideoHardwareRequirement::Nvidia(_)))
+            && accelerator_runtimes.is_none()
+        {
+            *accelerator_runtimes = Some(self.control_plane.live_policy_runtime_registry().await?);
+        }
+        let conflicts = conflicting_accelerator_tokens(&candidates)?;
+        let mut workers = Vec::new();
+        let mut assignments = HashMap::new();
+        for candidate in candidates {
+            if matches!(requirement, Some(VideoHardwareRequirement::Nvidia(_)))
+                && !accelerator_runtimes
+                    .as_ref()
+                    .is_some_and(|runtimes| runtimes.contains(candidate.worker_id))
+            {
+                continue;
+            }
+            let assignment =
+                match compatible_assignment(&candidate, requirement.as_ref(), &conflicts)? {
+                    CandidateCompatibility::Incompatible => continue,
+                    CandidateCompatibility::Compatible(assignment) => assignment,
+                };
+            if let Some(assignment) = assignment {
+                assignments.insert(candidate.worker_id, assignment);
+            }
+            workers.push(WorkerView {
                 worker_id: candidate.worker_id,
                 supports: vec![operation],
                 active_leases: candidate
                     .active_leases
-                    .saturating_add(reservations.get(&candidate.worker_id).copied().unwrap_or(0)),
+                    .max(reservations.get(&candidate.worker_id).copied().unwrap_or(0)),
                 max_parallel: candidate.max_parallel,
-            })
-            .collect())
+            });
+        }
+        let recovery_tokens = self
+            .historical_accelerator_tokens(operation, requirement.as_ref(), history)
+            .await?
+            .into_iter()
+            .filter(|token| !conflicts.contains(token))
+            .collect::<Vec<_>>();
+        let unavailable_tokens = if workers.is_empty() {
+            recovery_tokens.clone()
+        } else {
+            Vec::new()
+        };
+        Ok(ProjectedCandidates {
+            workers,
+            assignments,
+            unavailable_tokens,
+            recovery_tokens,
+        })
     }
+
+    async fn historical_accelerator_tokens(
+        &self,
+        operation: OperationKind,
+        requirement: Option<&VideoHardwareRequirement>,
+        history: &mut HashMap<String, Vec<String>>,
+    ) -> Result<Vec<String>, VoomError> {
+        let Some(VideoHardwareRequirement::Nvidia(requirement)) = requirement else {
+            return Ok(Vec::new());
+        };
+        let cache_key = format!(
+            "{}:{}",
+            requirement.encoder,
+            requirement.decoder.as_deref().unwrap_or("")
+        );
+        if let Some(tokens) = history.get(&cache_key) {
+            return Ok(tokens.clone());
+        }
+        let capabilities = self
+            .control_plane
+            .workers
+            .operation_capability_history(&TicketOperation::from(operation))
+            .await?;
+        let mut tokens = Vec::new();
+        for capability in capabilities {
+            let Some(descriptor) = historical_accelerator_descriptor(&capability)? else {
+                continue;
+            };
+            if !descriptor.encoders.contains(&requirement.encoder)
+                || requirement
+                    .decoder
+                    .as_ref()
+                    .is_some_and(|decoder| !descriptor.decoders.contains(decoder))
+            {
+                continue;
+            }
+            tokens.push(descriptor.hardware_token);
+        }
+        tokens.sort();
+        tokens.dedup();
+        history.insert(cache_key, tokens.clone());
+        Ok(tokens)
+    }
+}
+
+fn apply_hardware_assignment(
+    payload: &mut serde_json::Value,
+    assignment: Option<&VideoHardwareAssignment>,
+    recovery_tokens: &mut Vec<String>,
+) -> Result<bool, VoomError> {
+    let Some(assignment) = assignment else {
+        return Ok(false);
+    };
+    let nvidia = match assignment {
+        VideoHardwareAssignment::Nvidia(nvidia) => nvidia,
+        VideoHardwareAssignment::Software(_) => {
+            return Err(VoomError::Internal(
+                "software dispatch unexpectedly carried a hardware assignment".to_owned(),
+            ));
+        }
+    };
+    recovery_tokens.push(nvidia.hardware_token.clone());
+    recovery_tokens.sort();
+    recovery_tokens.dedup();
+    payload["hardware_assignment"] = serde_json::to_value(assignment)
+        .map_err(|error| VoomError::Internal(format!("serialize hardware assignment: {error}")))?;
+    Ok(true)
+}
+
+struct ProjectedCandidates {
+    workers: Vec<WorkerView>,
+    assignments: HashMap<WorkerId, VideoHardwareAssignment>,
+    unavailable_tokens: Vec<String>,
+    recovery_tokens: Vec<String>,
+}
+
+fn video_hardware_requirement(
+    operation: OperationKind,
+    payload: &serde_json::Value,
+) -> Result<Option<VideoHardwareRequirement>, VoomError> {
+    if operation != OperationKind::TranscodeVideo {
+        return Ok(None);
+    }
+    let profile_value = payload
+        .get("resolved_profile")
+        .or_else(|| payload.get("profile"))
+        .ok_or_else(|| VoomError::Config("transcode payload missing profile".to_owned()))?;
+    let profile: TranscodeVideoProfile = serde_json::from_value(profile_value.clone())
+        .map_err(|error| VoomError::Config(format!("transcode profile malformed: {error}")))?;
+    if profile.encoder != "hevc_nvenc" {
+        return Ok(Some(VideoHardwareRequirement::software()));
+    }
+    let decoder = if profile.decode.is_nvidia() {
+        let codec = source_video_codec(payload).ok_or_else(|| {
+            VoomError::Config("NVIDIA decode requires a known source video codec".to_owned())
+        })?;
+        Some(
+            voom_core::nvidia_decoder_for_video_codec(codec)
+                .ok_or_else(|| {
+                    VoomError::Config(format!(
+                        "NVIDIA decode does not support source video codec `{codec}`"
+                    ))
+                })?
+                .to_owned(),
+        )
+    } else {
+        None
+    };
+    Ok(Some(VideoHardwareRequirement::nvidia(
+        "hevc_nvenc",
+        decoder,
+    )))
+}
+
+fn source_video_codec(payload: &serde_json::Value) -> Option<&str> {
+    payload
+        .get("source_video_codec")
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| {
+            payload
+                .get("input")
+                .and_then(|input| input.get("video_codec"))
+                .and_then(serde_json::Value::as_str)
+        })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CandidateCompatibility {
+    Incompatible,
+    Compatible(Option<VideoHardwareAssignment>),
+}
+
+fn compatible_assignment(
+    candidate: &WorkerOperationCandidate,
+    requirement: Option<&VideoHardwareRequirement>,
+    conflicts: &HashSet<String>,
+) -> Result<CandidateCompatibility, VoomError> {
+    match requirement {
+        None => Ok(CandidateCompatibility::Compatible(None)),
+        Some(VideoHardwareRequirement::Software(_)) => {
+            if candidate_accelerator_descriptor(candidate)?.is_none()
+                && candidate.hardware.is_empty()
+            {
+                Ok(CandidateCompatibility::Compatible(None))
+            } else {
+                Ok(CandidateCompatibility::Incompatible)
+            }
+        }
+        Some(VideoHardwareRequirement::Nvidia(required)) => {
+            let Some(descriptor) = candidate_accelerator_descriptor(candidate)? else {
+                return Ok(CandidateCompatibility::Incompatible);
+            };
+            if conflicts.contains(&descriptor.hardware_token)
+                || !candidate.hardware.contains(&descriptor.hardware_token)
+                || !descriptor.encoders.contains(&required.encoder)
+                || required
+                    .decoder
+                    .as_ref()
+                    .is_some_and(|decoder| !descriptor.decoders.contains(decoder))
+            {
+                return Ok(CandidateCompatibility::Incompatible);
+            }
+            Ok(CandidateCompatibility::Compatible(Some(
+                VideoHardwareAssignment::nvidia(descriptor.hardware_token, descriptor.device_uuid),
+            )))
+        }
+    }
+}
+
+fn conflicting_accelerator_tokens(
+    candidates: &[WorkerOperationCandidate],
+) -> Result<HashSet<String>, VoomError> {
+    let mut capacities = HashMap::new();
+    let mut conflicts = HashSet::new();
+    for candidate in candidates {
+        let Some(descriptor) = candidate_accelerator_descriptor(candidate)? else {
+            continue;
+        };
+        if let Some(capacity) =
+            capacities.insert(descriptor.hardware_token.clone(), descriptor.max_sessions)
+            && capacity != descriptor.max_sessions
+        {
+            conflicts.insert(descriptor.hardware_token);
+        }
+    }
+    Ok(conflicts)
 }
 
 fn increment_reservation(reservations: &mut HashMap<WorkerId, u32>, worker_id: WorkerId) {
@@ -230,3 +507,7 @@ fn all_candidates_at_capacity(candidates: &[WorkerView]) -> bool {
             .iter()
             .all(|candidate| candidate.active_leases >= candidate.max_parallel)
 }
+
+#[cfg(test)]
+#[path = "spawn_test.rs"]
+mod tests;

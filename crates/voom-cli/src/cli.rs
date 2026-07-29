@@ -1,7 +1,9 @@
 use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
-use voom_control_plane::policy::DEFAULT_MAX_IN_FLIGHT_FILES;
+use voom_control_plane::policy::{
+    DEFAULT_ACCELERATOR_UNAVAILABLE_TIMEOUT_SECONDS, DEFAULT_MAX_IN_FLIGHT_FILES,
+};
 
 #[derive(Parser, Debug)]
 #[command(name = "voom", version, about = "VOOM control plane CLI", long_about = None)]
@@ -842,6 +844,13 @@ pub enum ComplianceCommand {
         /// Maximum number of files allowed to retain in-progress artifacts.
         #[arg(long, default_value_t = DEFAULT_MAX_IN_FLIGHT_FILES)]
         max_in_flight_files: usize,
+        /// Seconds to wait for a previously advertised accelerator to return.
+        #[arg(
+            long,
+            default_value_t = DEFAULT_ACCELERATOR_UNAVAILABLE_TIMEOUT_SECONDS,
+            value_parser = clap::value_parser!(u64).range(301..)
+        )]
+        accelerator_unavailable_timeout_seconds: u64,
         #[arg(long)]
         staging_root: Option<std::path::PathBuf>,
         #[arg(long)]
@@ -925,8 +934,10 @@ pub struct VideoProfileFields {
     pub name: String,
     #[arg(long)]
     pub encoder: String,
-    #[arg(long)]
-    pub crf: u8,
+    #[arg(long, required_unless_present = "cq", conflicts_with = "cq")]
+    pub crf: Option<u8>,
+    #[arg(long, required_unless_present = "crf", conflicts_with = "crf")]
+    pub cq: Option<u8>,
     #[arg(long)]
     pub preset: String,
     #[arg(long)]
@@ -945,6 +956,24 @@ pub struct VideoProfileFields {
     pub output_container: String,
     #[arg(long)]
     pub copy_compatible: bool,
+    #[arg(long, value_enum, default_value_t = VideoDecodeBackendArg::Software)]
+    pub decode: VideoDecodeBackendArg,
+}
+
+#[derive(Copy, Clone, Debug, Default, ValueEnum, PartialEq, Eq)]
+pub enum VideoDecodeBackendArg {
+    #[default]
+    Software,
+    Nvidia,
+}
+
+impl From<VideoDecodeBackendArg> for voom_core::VideoDecodeMode {
+    fn from(value: VideoDecodeBackendArg) -> Self {
+        match value {
+            VideoDecodeBackendArg::Software => Self::default(),
+            VideoDecodeBackendArg::Nvidia => Self::nvidia(),
+        }
+    }
 }
 
 #[derive(Subcommand, Debug, Clone)]
@@ -1014,6 +1043,10 @@ pub enum WorkerCommand {
     RunLocal {
         #[arg(long)]
         kind: LocalWorkerKindArg,
+        #[arg(long)]
+        nvidia_device: Option<String>,
+        #[arg(long, requires = "nvidia_device")]
+        nvidia_max_sessions: Option<u32>,
     },
 }
 

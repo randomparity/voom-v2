@@ -3,7 +3,11 @@
 //! worker binary built as a sibling) lives in
 //! `tests/local_worker_lifecycle.rs`.
 
-use super::LocalWorkerKind;
+use super::{
+    LocalWorkerKind, NvidiaLocalWorkerConfig, is_full_nvidia_uuid, validate_local_worker_config,
+};
+#[cfg(target_os = "linux")]
+use super::{kill_and_wait, process_group_has_members};
 use voom_core::TicketOperation;
 
 #[test]
@@ -14,6 +18,32 @@ fn ffmpeg_maps_binary_name_and_operations() {
         LocalWorkerKind::Ffmpeg.operations(),
         &["transcode_video", "transcode_audio", "extract_audio"]
     );
+}
+
+#[test]
+fn nvidia_config_requires_ffmpeg_full_uuid_and_bounded_sessions() {
+    let valid = NvidiaLocalWorkerConfig {
+        device_uuid: "GPU-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".to_owned(),
+        max_sessions: 16,
+    };
+    assert!(validate_local_worker_config(LocalWorkerKind::Ffmpeg, Some(&valid)).is_ok());
+    assert!(is_full_nvidia_uuid(&valid.device_uuid));
+    assert!(validate_local_worker_config(LocalWorkerKind::Mkvtoolnix, Some(&valid)).is_err());
+
+    for device_uuid in ["0", "GPU-short", "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"] {
+        let invalid = NvidiaLocalWorkerConfig {
+            device_uuid: device_uuid.to_owned(),
+            max_sessions: 1,
+        };
+        assert!(validate_local_worker_config(LocalWorkerKind::Ffmpeg, Some(&invalid)).is_err());
+    }
+    for max_sessions in [0, 17] {
+        let invalid = NvidiaLocalWorkerConfig {
+            max_sessions,
+            ..valid.clone()
+        };
+        assert!(validate_local_worker_config(LocalWorkerKind::Ffmpeg, Some(&invalid)).is_err());
+    }
 }
 
 #[test]
@@ -36,4 +66,30 @@ fn every_operation_is_a_valid_ticket_operation() {
             );
         }
     }
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn failed_startup_cleanup_terminates_the_worker_process_group() {
+    use std::process::Stdio;
+    use std::time::Duration;
+
+    use tokio::process::Command;
+
+    let mut child = Command::new("sh");
+    child
+        .args(["-c", "sleep 30 & wait"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .process_group(0)
+        .kill_on_drop(true);
+    let mut child = child.spawn().unwrap();
+    let process_group_id = child.id().unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(process_group_has_members(process_group_id).unwrap());
+
+    kill_and_wait(&mut child).await.unwrap();
+
+    assert!(!process_group_has_members(process_group_id).unwrap());
 }

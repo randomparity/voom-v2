@@ -2,7 +2,7 @@ use std::io;
 
 use serde::Serialize;
 use voom_control_plane::ControlPlane;
-use voom_core::ErrorCode;
+use voom_core::{ErrorCode, VideoDecodeMode};
 use voom_store::repo::video_profiles::{NewVideoProfile, VideoProfile};
 
 use crate::cli::{ProfileCommand, VideoProfileFields};
@@ -27,7 +27,10 @@ struct ProfileData {
     name: String,
     target_codec: String,
     encoder: String,
-    crf: u8,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    crf: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cq: Option<u8>,
     preset: String,
     tune: Option<String>,
     codec_profile: Option<String>,
@@ -37,6 +40,8 @@ struct ProfileData {
     max_height: Option<u32>,
     output_container: String,
     copy_compatible: bool,
+    #[serde(skip_serializing_if = "VideoDecodeMode::is_software")]
+    decode: VideoDecodeMode,
     retired_at: Option<String>,
 }
 
@@ -132,6 +137,7 @@ impl From<VideoProfileFields> for NewVideoProfile {
             name: fields.name,
             encoder: fields.encoder,
             crf: fields.crf,
+            cq: fields.cq,
             preset: fields.preset,
             tune: fields.tune,
             codec_profile: fields.codec_profile,
@@ -141,6 +147,7 @@ impl From<VideoProfileFields> for NewVideoProfile {
             max_height: fields.max_height,
             output_container: fields.output_container,
             copy_compatible: fields.copy_compatible,
+            decode: fields.decode.into(),
         }
     }
 }
@@ -153,6 +160,7 @@ impl From<VideoProfile> for ProfileData {
             target_codec: profile.target_codec,
             encoder: profile.encoder,
             crf: profile.crf,
+            cq: profile.cq,
             preset: profile.preset,
             tune: profile.tune,
             codec_profile: profile.codec_profile,
@@ -162,6 +170,7 @@ impl From<VideoProfile> for ProfileData {
             max_height: profile.max_height,
             output_container: profile.output_container,
             copy_compatible: profile.copy_compatible,
+            decode: profile.decode,
             retired_at: profile.retired_at.map(voom_core::format_iso8601),
         }
     }

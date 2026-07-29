@@ -66,6 +66,7 @@ fn inline_to_worker_profile(s: &VideoProfileSettings) -> Result<TranscodeVideoPr
         target_codec: descriptor.target_codec.to_owned(),
         encoder: s.encoder.clone(),
         crf: s.crf,
+        cq: s.cq,
         preset: s.preset.clone(),
         tune: s.tune.clone(),
         codec_profile: s.codec_profile.clone(),
@@ -74,6 +75,7 @@ fn inline_to_worker_profile(s: &VideoProfileSettings) -> Result<TranscodeVideoPr
         max_width: s.max_width,
         max_height: s.max_height,
         copy_compatible: s.copy_compatible.unwrap_or(false),
+        decode: s.decode,
     })
 }
 

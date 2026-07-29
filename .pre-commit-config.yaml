@@ -56,6 +56,20 @@ repos:
         pass_filenames: false
         files: '\.rs$'
 
+      - id: check-adr-index
+        name: just check-adr-index
+        entry: just check-adr-index
+        language: system
+        pass_filenames: false
+        files: '^(docs/adr/.*\.md|scripts/check-adr-index.*\.sh)$'
+
+      - id: check-adr-index-selftest
+        name: just check-adr-index-selftest
+        entry: just check-adr-index-selftest
+        language: system
+        pass_filenames: false
+        files: '^(docs/adr/.*\.md|scripts/check-adr-index.*\.sh)$'
+
       - id: cargo-clippy
         name: just lint
         entry: just lint

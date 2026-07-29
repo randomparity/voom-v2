@@ -128,6 +128,155 @@ async fn live_reserved_provider_requires_effective_grant_and_matching_identity()
 }
 
 #[tokio::test]
+async fn gpu_bound_worker_does_not_satisfy_software_profile_preflight() {
+    let (cp, _tmp) = cp().await;
+    let worker = cp
+        .register_supervisor_worker(NewWorker {
+            name: "local-ffmpeg-gpu".to_owned(),
+            kind: WorkerKind::Local,
+            registered_at: cp.clock().now(),
+            node_id: None,
+        })
+        .await
+        .unwrap();
+    let operation = TicketOperation::from(OperationKind::TranscodeVideo);
+    let hardware_token = "nvidia:GPU-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+    cp.record_capability(NewCapability {
+        worker_id: worker.id,
+        operation: operation.clone(),
+        codecs: Vec::new(),
+        hardware: vec![hardware_token.to_owned()],
+        artifact_access: Vec::new(),
+        extra: json!({
+            "accelerator": {
+                "hardware_token": hardware_token,
+                "device_uuid": "GPU-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+                "device_name": "Test GPU",
+                "driver_version": "595.80",
+                "encoders": ["hevc_nvenc"],
+                "decoders": ["h264_cuvid"],
+                "max_sessions": 2
+            }
+        }),
+    })
+    .await
+    .unwrap();
+    cp.record_grant(NewGrant {
+        worker_id: worker.id,
+        can_execute: vec![operation],
+        can_access_read: Vec::new(),
+        can_access_write: Vec::new(),
+        denies: Vec::new(),
+        max_parallel: json!({"transcode_video": 2}),
+    })
+    .await
+    .unwrap();
+    let registry = WorkerRuntimeRegistry::new().with_in_process_runtime(
+        worker.id,
+        Arc::new(IdentityClient {
+            worker_id: worker.id,
+            worker_epoch: worker.epoch,
+            handshake_ok: true,
+        }),
+        credentials(worker.id, worker.epoch),
+    );
+    let mut policy = compile_policy(
+        "policy \"software\" { \
+         metadata { requires_tools: [ffmpeg] } \
+         phase encode { transcode video to hevc { \
+         encoder: libx265 crf: 23 preset: medium } } }",
+    )
+    .unwrap()
+    .policy;
+
+    let error = cp
+        .preflight_policy_tools(&mut policy, &registry)
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.code(), "POLICY_EXECUTION_ERROR");
+    assert!(
+        error
+            .to_string()
+            .contains("software transcode profiles require an unbound ffmpeg worker")
+    );
+}
+
+#[tokio::test]
+async fn nvidia_decode_profile_requires_an_advertised_cuvid_decoder() {
+    let (cp, _tmp) = cp().await;
+    let worker = cp
+        .register_supervisor_worker(NewWorker {
+            name: "local-ffmpeg-gpu".to_owned(),
+            kind: WorkerKind::Local,
+            registered_at: cp.clock().now(),
+            node_id: None,
+        })
+        .await
+        .unwrap();
+    let operation = TicketOperation::from(OperationKind::TranscodeVideo);
+    let hardware_token = "nvidia:GPU-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+    cp.record_capability(NewCapability {
+        worker_id: worker.id,
+        operation: operation.clone(),
+        codecs: Vec::new(),
+        hardware: vec![hardware_token.to_owned()],
+        artifact_access: Vec::new(),
+        extra: json!({
+            "accelerator": {
+                "hardware_token": hardware_token,
+                "device_uuid": "GPU-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+                "device_name": "Test GPU",
+                "driver_version": "595.80",
+                "encoders": ["hevc_nvenc"],
+                "decoders": [],
+                "max_sessions": 2
+            }
+        }),
+    })
+    .await
+    .unwrap();
+    cp.record_grant(NewGrant {
+        worker_id: worker.id,
+        can_execute: vec![operation],
+        can_access_read: Vec::new(),
+        can_access_write: Vec::new(),
+        denies: Vec::new(),
+        max_parallel: json!({"transcode_video": 2}),
+    })
+    .await
+    .unwrap();
+    let registry = WorkerRuntimeRegistry::new().with_in_process_runtime(
+        worker.id,
+        Arc::new(IdentityClient {
+            worker_id: worker.id,
+            worker_epoch: worker.epoch,
+            handshake_ok: true,
+        }),
+        credentials(worker.id, worker.epoch),
+    );
+    let mut policy = compile_policy(
+        "policy \"gpu-decode\" { \
+         metadata { requires_tools: [ffmpeg] } \
+         phase encode { transcode video to hevc { \
+         encoder: hevc_nvenc cq: 23 preset: p4 decode: nvidia } } }",
+    )
+    .unwrap()
+    .policy;
+
+    let error = cp
+        .preflight_policy_tools(&mut policy, &registry)
+        .await
+        .unwrap_err();
+
+    assert!(
+        error
+            .to_string()
+            .contains("with at least one advertised CUVID decoder")
+    );
+}
+
+#[tokio::test]
 async fn endpoint_tool_rejects_runtime_identity_for_another_worker() {
     let (cp, _tmp) = cp().await;
     let worker = cp

@@ -16,7 +16,8 @@ async fn seeded_repo() -> (SqliteVideoProfileRepo, voom_test_support::TempDataba
 fn inline_av1_settings() -> VideoProfileSettings {
     VideoProfileSettings {
         encoder: "libsvtav1".to_owned(),
-        crf: 28,
+        crf: Some(28),
+        cq: None,
         preset: "6".to_owned(),
         tune: None,
         codec_profile: None,
@@ -26,6 +27,7 @@ fn inline_av1_settings() -> VideoProfileSettings {
         max_height: None,
         output_container: Some("mp4".to_owned()),
         copy_compatible: None,
+        decode: voom_core::VideoDecodeMode::default(),
     }
 }
 
@@ -85,7 +87,7 @@ async fn descriptor_invalid_named_profile_is_config_invalid() {
     .unwrap_err();
 
     assert_eq!(err.code(), "CONFIG_INVALID");
-    assert!(err.to_string().contains("crf 60"));
+    assert!(err.to_string().contains("crf=Some(60)"));
 }
 
 #[tokio::test]
@@ -123,7 +125,8 @@ fn profile_hevc_mp4_copy_compatible() -> TranscodeVideoProfile {
         name: "hevc-1080p".to_owned(),
         target_codec: "hevc".to_owned(),
         encoder: "libx265".to_owned(),
-        crf: 23,
+        crf: Some(23),
+        cq: None,
         preset: "medium".to_owned(),
         tune: None,
         codec_profile: None,
@@ -132,6 +135,7 @@ fn profile_hevc_mp4_copy_compatible() -> TranscodeVideoProfile {
         max_width: Some(1920),
         max_height: Some(1080),
         copy_compatible: true,
+        decode: voom_core::VideoDecodeMode::default(),
     }
 }
 

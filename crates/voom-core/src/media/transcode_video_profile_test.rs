@@ -48,6 +48,84 @@ fn default_hevc_profile_serializes_minimal_superset() {
 }
 
 #[test]
+fn nvidia_hevc_profile_requires_cq_and_closed_vocabulary() {
+    let mut profile = TranscodeVideoProfile::default_hevc();
+    profile.encoder = "hevc_nvenc".to_owned();
+    profile.crf = None;
+    profile.cq = Some(23);
+    profile.preset = "p7".to_owned();
+    profile.tune = Some("uhq".to_owned());
+    profile.codec_profile = Some("main10".to_owned());
+    profile.codec_level = Some("6.2".to_owned());
+    profile.pixel_format = Some("yuv420p10le".to_owned());
+
+    assert!(validate_profile_against_descriptor(&profile).is_ok());
+
+    profile.cq = Some(0);
+    assert!(validate_profile_against_descriptor(&profile).is_err());
+    profile.cq = Some(52);
+    assert!(validate_profile_against_descriptor(&profile).is_err());
+    profile.cq = Some(23);
+
+    for (field, value) in [
+        ("preset", "slow"),
+        ("tune", "film"),
+        ("codec_profile", "rext"),
+        ("codec_level", "7.0"),
+        ("pixel_format", "yuv444p"),
+    ] {
+        let mut invalid = profile.clone();
+        match field {
+            "preset" => invalid.preset = value.to_owned(),
+            "tune" => invalid.tune = Some(value.to_owned()),
+            "codec_profile" => invalid.codec_profile = Some(value.to_owned()),
+            "codec_level" => invalid.codec_level = Some(value.to_owned()),
+            "pixel_format" => invalid.pixel_format = Some(value.to_owned()),
+            _ => unreachable!(),
+        }
+        assert!(validate_profile_against_descriptor(&invalid).is_err());
+    }
+}
+
+#[test]
+fn quality_and_decode_modes_are_mutually_compatible() {
+    let mut software = TranscodeVideoProfile::default_hevc();
+    software.cq = Some(23);
+    assert!(validate_profile_against_descriptor(&software).is_err());
+
+    software.cq = None;
+    software.decode = VideoDecodeMode::nvidia();
+    assert!(validate_profile_against_descriptor(&software).is_err());
+
+    let mut nvidia = TranscodeVideoProfile::default_hevc();
+    nvidia.encoder = "hevc_nvenc".to_owned();
+    nvidia.preset = "p4".to_owned();
+    nvidia.cq = Some(23);
+    assert!(validate_profile_against_descriptor(&nvidia).is_err());
+
+    nvidia.crf = None;
+    assert!(validate_profile_against_descriptor(&nvidia).is_ok());
+}
+
+#[test]
+fn nvidia_decode_serializes_as_strict_typed_mode() {
+    let mut profile = TranscodeVideoProfile::default_hevc();
+    profile.encoder = "hevc_nvenc".to_owned();
+    profile.crf = None;
+    profile.cq = Some(23);
+    profile.preset = "p4".to_owned();
+    profile.decode = VideoDecodeMode::nvidia();
+
+    let value = serde_json::to_value(&profile).unwrap();
+    assert_eq!(value["decode"]["backend"], "nvidia");
+    assert!(!value.as_object().unwrap().contains_key("crf"));
+
+    let mut invalid = value;
+    invalid["decode"]["device"] = serde_json::json!(0);
+    assert!(serde_json::from_value::<TranscodeVideoProfile>(invalid).is_err());
+}
+
+#[test]
 fn transcode_video_profile_rejects_unknown_durable_fields() {
     let mut value = serde_json::to_value(TranscodeVideoProfile::default_hevc()).unwrap();
     value["future_profile"] = serde_json::json!(true);
@@ -67,7 +145,7 @@ fn profile_validates_against_its_encoder_descriptor() {
     assert!(validate_profile_against_descriptor(&bad_codec).is_err());
 
     let mut bad_crf = TranscodeVideoProfile::default_hevc();
-    bad_crf.crf = 60;
+    bad_crf.crf = Some(60);
     assert!(validate_profile_against_descriptor(&bad_crf).is_err());
 
     let mut bad_combo = TranscodeVideoProfile::default_hevc();

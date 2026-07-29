@@ -645,7 +645,7 @@ fn lowers_inline_to_inline_settings() {
         panic!("expected inline");
     };
     assert_eq!(s.encoder, "libsvtav1");
-    assert_eq!(s.crf, 28);
+    assert_eq!(s.crf, Some(28));
     assert_eq!(s.output_container.as_deref(), Some("mp4"));
 }
 

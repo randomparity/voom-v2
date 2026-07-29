@@ -74,6 +74,15 @@ pub struct WorkerOperationCandidate {
     pub worker_id: WorkerId,
     pub active_leases: u32,
     pub max_parallel: u32,
+    pub hardware: Vec<String>,
+    pub capability_extra: Vec<JsonValue>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkerOperationCapability {
+    pub worker_id: WorkerId,
+    pub hardware: Vec<String>,
+    pub extra: JsonValue,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -291,6 +300,11 @@ impl SqliteWorkerRepo {
             )));
         }
         let ts = iso8601(now)?;
+        sqlx::query("DELETE FROM accelerator_claims WHERE worker_id = ?")
+            .bind(i64_from_u64(id.0))
+            .execute(&mut **tx)
+            .await
+            .map_err(|e| VoomError::database_context("accelerator_claims release", e))?;
         let res = sqlx::query(
             "UPDATE workers \
              SET status = 'retired', retired_at = ?, last_seen_at = ?, epoch = epoch + 1 \
@@ -564,6 +578,11 @@ impl SqliteWorkerRepo {
         operation: &TicketOperation,
     ) -> Result<WorkerOperationCapacity, VoomError> {
         let operation = normalized_worker_operation(operation)?;
+        if operation.as_str() == "transcode_video"
+            && let Some(capacity) = accelerator_operation_capacity(tx, worker_id).await?
+        {
+            return Ok(capacity);
+        }
         let workflow_operation = format!("{WORKFLOW_OPERATION_PREFIX}{}", operation.as_str());
         let active_leases = sqlx::query_scalar::<_, i64>(
             "SELECT COUNT(*) \
@@ -609,6 +628,43 @@ impl SqliteWorkerRepo {
         Ok(out)
     }
 
+    /// Lists every durable capability declaration for an operation, including
+    /// declarations owned by stale or retired workers.
+    pub async fn operation_capability_history(
+        &self,
+        operation: &TicketOperation,
+    ) -> Result<Vec<WorkerOperationCapability>, VoomError> {
+        let operation = normalized_worker_operation(operation)?;
+        let rows = sqlx::query(
+            "SELECT worker_id, hardware, extra FROM worker_capabilities \
+             WHERE operation = ? ORDER BY id ASC",
+        )
+        .bind(operation.as_str())
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|error| VoomError::database_context("worker capability history", error))?;
+        let mut capabilities = Vec::with_capacity(rows.len());
+        for row in rows {
+            let worker_id: i64 = row
+                .try_get("worker_id")
+                .map_err(|error| map_row_err("worker capability history worker", &error))?;
+            let hardware: String = row
+                .try_get("hardware")
+                .map_err(|error| map_row_err("worker capability history hardware", &error))?;
+            let extra: String = row
+                .try_get("extra")
+                .map_err(|error| map_row_err("worker capability history extra", &error))?;
+            capabilities.push(WorkerOperationCapability {
+                worker_id: WorkerId(u64_from_i64(worker_id)),
+                hardware: parse_string_array_json(&hardware, "hardware")?,
+                extra: serde_json::from_str(&extra).map_err(|error| {
+                    VoomError::database_context("parse worker capability history extra", error)
+                })?,
+            });
+        }
+        Ok(capabilities)
+    }
+
     async fn operation_candidates_in_tx(
         &self,
         tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
@@ -630,10 +686,14 @@ impl SqliteWorkerRepo {
             let capacity = self
                 .operation_capacity_in_tx(tx, worker_id, operation)
                 .await?;
+            let (hardware, capability_extra) =
+                operation_capability_details_in_tx(tx, worker_id, operation).await?;
             candidates.push(WorkerOperationCandidate {
                 worker_id,
                 active_leases: capacity.active_leases,
                 max_parallel: capacity.max_parallel,
+                hardware,
+                capability_extra,
             });
         }
         Ok(candidates)
@@ -660,6 +720,91 @@ impl SqliteWorkerRepo {
         }
         Ok(worker)
     }
+}
+
+async fn accelerator_operation_capacity(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    worker_id: WorkerId,
+) -> Result<Option<WorkerOperationCapacity>, VoomError> {
+    let row = sqlx::query(
+        "SELECT json_extract(extra, '$.accelerator.hardware_token') AS hardware_token \
+         FROM worker_capabilities \
+         WHERE worker_id = ? AND operation = 'transcode_video' \
+           AND json_type(extra, '$.accelerator') = 'object' \
+         ORDER BY id ASC LIMIT 1",
+    )
+    .bind(i64_from_u64(worker_id.0))
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(|error| VoomError::database_context("accelerator capacity descriptor", error))?;
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    let hardware_token: String = row
+        .try_get("hardware_token")
+        .map_err(|error| map_row_err("accelerator hardware token", &error))?;
+    let max_parallel = sqlx::query_scalar::<_, i64>(
+        "SELECT MIN(CAST(json_extract(extra, '$.accelerator.max_sessions') AS INTEGER)) \
+         FROM worker_capabilities \
+         JOIN workers ON workers.id = worker_capabilities.worker_id \
+         WHERE operation = 'transcode_video' AND workers.status != 'retired' \
+           AND json_extract(extra, '$.accelerator.hardware_token') = ?",
+    )
+    .bind(&hardware_token)
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(|error| VoomError::database_context("accelerator capacity limit", error))?;
+    let active_leases = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(DISTINCT leases.id) FROM leases \
+         JOIN tickets ON tickets.id = leases.ticket_id \
+         JOIN worker_capabilities ON worker_capabilities.worker_id = leases.worker_id \
+         WHERE leases.state = 'held' \
+           AND (tickets.kind = 'transcode_video' \
+                OR tickets.kind = 'synthetic.workflow.operation.transcode_video') \
+           AND worker_capabilities.operation = 'transcode_video' \
+           AND json_extract(worker_capabilities.extra, \
+                            '$.accelerator.hardware_token') = ?",
+    )
+    .bind(hardware_token)
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(|error| VoomError::database_context("accelerator active lease count", error))?;
+    Ok(Some(WorkerOperationCapacity {
+        active_leases: u32_from_i64(active_leases)?,
+        max_parallel: u32_from_i64(max_parallel)?,
+    }))
+}
+
+async fn operation_capability_details_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    worker_id: WorkerId,
+    operation: &TicketOperation,
+) -> Result<(Vec<String>, Vec<JsonValue>), VoomError> {
+    let operation = normalized_worker_operation(operation)?;
+    let rows = sqlx::query(
+        "SELECT hardware, extra FROM worker_capabilities \
+         WHERE worker_id = ? AND operation = ? ORDER BY id ASC",
+    )
+    .bind(i64_from_u64(worker_id.0))
+    .bind(operation.as_str())
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(|error| VoomError::database_context("worker capability details", error))?;
+    let mut hardware = Vec::new();
+    let mut extra = Vec::with_capacity(rows.len());
+    for row in rows {
+        let encoded_hardware: String = row
+            .try_get("hardware")
+            .map_err(|error| map_row_err("worker capability hardware", &error))?;
+        hardware.extend(parse_string_array_json(&encoded_hardware, "hardware")?);
+        let encoded_extra: String = row
+            .try_get("extra")
+            .map_err(|error| map_row_err("worker capability extra", &error))?;
+        extra.push(serde_json::from_str(&encoded_extra).map_err(|error| {
+            VoomError::database_context("parse worker capability extra", error)
+        })?);
+    }
+    Ok((hardware, extra))
 }
 
 fn worker_candidate_id(row: &sqlx::sqlite::SqliteRow) -> Result<WorkerId, VoomError> {

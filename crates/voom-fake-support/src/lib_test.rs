@@ -225,6 +225,7 @@ fn fake_transcoder_returns_typed_video_result_for_protocol_payload() {
                 modified_at: None,
                 local_file_key: Some("input-key".to_owned()),
             },
+            video_codec: Some("h264".to_owned()),
         },
         output: TranscodeVideoOutput {
             staging_root: output_path.parent().unwrap().to_string_lossy().into_owned(),
@@ -234,6 +235,7 @@ fn fake_transcoder_returns_typed_video_result_for_protocol_payload() {
             overwrite: true,
         },
         profile: TranscodeVideoProfile::default_hevc(),
+        hardware_assignment: None,
         copy_video: false,
     })
     .unwrap();

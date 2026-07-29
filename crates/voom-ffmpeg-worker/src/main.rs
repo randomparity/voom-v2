@@ -8,21 +8,32 @@ use voom_ffmpeg_worker::{
     preflight_from_process_env,
 };
 use voom_worker_protocol::{
-    HttpServer, WorkerStartupError, load_worker_bind_addr_from_env,
-    load_worker_credentials_from_env, serve_worker_http,
+    HttpServer, LocalWorkerBound, NvidiaVideoAcceleratorDescriptor, WorkerStartupError,
+    load_worker_bind_addr_from_env, load_worker_credentials_from_env, serve_worker_http,
 };
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 2)]
 async fn main() -> Result<(), WorkerStartupError> {
     let credentials = load_worker_credentials_from_env()?;
     let preflight = preflight_from_process_env().map_err(WorkerStartupError::dependency)?;
-    let config = ffmpeg_config_from_preflight(preflight);
+    let accelerator = preflight.nvidia.clone().map(accelerator_descriptor);
+    let config = ffmpeg_config_from_preflight(preflight, accelerator.clone());
     let bind = load_worker_bind_addr_from_env()?;
 
     let server = HttpServer::new(credentials, operation_handler(config));
     let running = serve_worker_http(&server, bind).await?;
 
-    println!("BOUND addr={}", running.bound);
+    match accelerator {
+        Some(accelerator) => {
+            let bound = LocalWorkerBound {
+                addr: running.bound,
+                accelerator: Some(accelerator),
+            };
+            let bound = serde_json::to_string(&bound).map_err(WorkerStartupError::dependency)?;
+            println!("BOUND {bound}");
+        }
+        None => println!("BOUND addr={}", running.bound),
+    }
 
     let shutdown_tx = running.shutdown;
     let joined = running.joined;
@@ -43,19 +54,38 @@ async fn main() -> Result<(), WorkerStartupError> {
     Ok(())
 }
 
-fn ffmpeg_config_from_preflight(preflight: preflight::FfmpegPreflight) -> FfmpegConfig {
+fn accelerator_descriptor(nvidia: preflight::NvidiaPreflight) -> NvidiaVideoAcceleratorDescriptor {
+    NvidiaVideoAcceleratorDescriptor {
+        hardware_token: format!("nvidia:{}", nvidia.device_uuid),
+        device_uuid: nvidia.device_uuid,
+        device_name: nvidia.device_name,
+        driver_version: nvidia.driver_version,
+        encoders: vec!["hevc_nvenc".to_owned()],
+        decoders: nvidia.decoders,
+        max_sessions: nvidia.max_sessions,
+    }
+}
+
+fn ffmpeg_config_from_preflight(
+    preflight: preflight::FfmpegPreflight,
+    accelerator: Option<NvidiaVideoAcceleratorDescriptor>,
+) -> FfmpegConfig {
     let available_video_encoders: Vec<String> = ALL_VIDEO_ENCODERS
         .iter()
         .filter(|encoder| preflight.has_encoder(encoder))
         .map(|encoder| (*encoder).to_owned())
         .collect();
-    FfmpegConfig::new(
+    let config = FfmpegConfig::new(
         preflight.ffmpeg_path,
         preflight.ffprobe_path,
         preflight.ffmpeg_version,
         DEFAULT_PROCESS_TIMEOUT,
     )
-    .with_available_video_encoders(available_video_encoders)
+    .with_available_video_encoders(available_video_encoders);
+    match accelerator {
+        Some(accelerator) => config.with_accelerator(accelerator),
+        None => config,
+    }
 }
 
 #[cfg(test)]

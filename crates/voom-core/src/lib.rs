@@ -25,7 +25,10 @@ pub mod config {
 }
 
 pub mod encoder_caps {
-    pub use crate::media::encoder_caps::{EncoderDescriptor, PresetDomain, encoder_descriptor};
+    pub use crate::media::encoder_caps::{
+        EncoderDescriptor, NVIDIA_VIDEO_DECODERS, PresetDomain, QualityDomain, VideoEncoderBackend,
+        encoder_descriptor, nvidia_decoder_for_video_codec,
+    };
 }
 
 pub mod error;
@@ -71,9 +74,10 @@ pub mod ticket_operation {
 
 pub mod transcode_video_profile {
     pub use crate::media::transcode_video_profile::{
-        TRANSCODE_VIDEO_CODEC, TRANSCODE_VIDEO_CODEC_ALIAS_H265, TRANSCODE_VIDEO_CODEC_AV1,
-        TRANSCODE_VIDEO_CONTAINER, TRANSCODE_VIDEO_CONTAINER_MP4, TRANSCODE_VIDEO_PROFILE,
-        TranscodeVideoProfile, canonical_video_codec, is_supported_transcode_video_codec,
+        NvidiaVideoDecode, SoftwareVideoDecode, TRANSCODE_VIDEO_CODEC,
+        TRANSCODE_VIDEO_CODEC_ALIAS_H265, TRANSCODE_VIDEO_CODEC_AV1, TRANSCODE_VIDEO_CONTAINER,
+        TRANSCODE_VIDEO_CONTAINER_MP4, TRANSCODE_VIDEO_PROFILE, TranscodeVideoProfile,
+        VideoDecodeMode, canonical_video_codec, is_supported_transcode_video_codec,
         is_supported_transcode_video_container, normalize_codec_token,
         validate_profile_against_descriptor,
     };
@@ -85,7 +89,10 @@ pub mod version {
 
 pub use clock::{Clock, SystemClock, format_iso8601};
 pub use config::{Config, EnvSource, LogFormat, MapEnv, ProcessEnv};
-pub use encoder_caps::{EncoderDescriptor, PresetDomain, encoder_descriptor};
+pub use encoder_caps::{
+    EncoderDescriptor, NVIDIA_VIDEO_DECODERS, PresetDomain, QualityDomain, VideoEncoderBackend,
+    encoder_descriptor, nvidia_decoder_for_video_codec,
+};
 pub use error::{ErrorCode, VoomError};
 pub use failure::{FailureClass, FailureRetryClass};
 pub use ids::{
@@ -104,9 +111,10 @@ pub use remux::{
 pub use taxonomy::execution_vocab::{NodeKind, NodeStatus, WorkerKind, WorkerStatus};
 pub use ticket_operation::TicketOperation;
 pub use transcode_video_profile::{
-    TRANSCODE_VIDEO_CODEC, TRANSCODE_VIDEO_CODEC_ALIAS_H265, TRANSCODE_VIDEO_CODEC_AV1,
-    TRANSCODE_VIDEO_CONTAINER, TRANSCODE_VIDEO_CONTAINER_MP4, TRANSCODE_VIDEO_PROFILE,
-    TranscodeVideoProfile, canonical_video_codec, is_supported_transcode_video_codec,
+    NvidiaVideoDecode, SoftwareVideoDecode, TRANSCODE_VIDEO_CODEC,
+    TRANSCODE_VIDEO_CODEC_ALIAS_H265, TRANSCODE_VIDEO_CODEC_AV1, TRANSCODE_VIDEO_CONTAINER,
+    TRANSCODE_VIDEO_CONTAINER_MP4, TRANSCODE_VIDEO_PROFILE, TranscodeVideoProfile, VideoDecodeMode,
+    canonical_video_codec, is_supported_transcode_video_codec,
     is_supported_transcode_video_container, normalize_codec_token,
     validate_profile_against_descriptor,
 };

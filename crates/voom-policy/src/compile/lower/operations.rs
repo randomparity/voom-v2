@@ -313,9 +313,8 @@ fn inline_settings_from(settings: &[crate::SettingAst]) -> crate::VideoProfileSe
     let u32_at = |key: &str| str_at(key).and_then(|value| value.parse::<u32>().ok());
     crate::VideoProfileSettings {
         encoder: str_at("encoder").unwrap_or_default(),
-        crf: str_at("crf")
-            .and_then(|value| value.parse::<u8>().ok())
-            .unwrap_or_default(),
+        crf: str_at("crf").and_then(|value| value.parse::<u8>().ok()),
+        cq: str_at("cq").and_then(|value| value.parse::<u8>().ok()),
         preset: str_at("preset").unwrap_or_default(),
         tune: str_at("tune"),
         codec_profile: str_at("codec_profile"),
@@ -328,6 +327,10 @@ fn inline_settings_from(settings: &[crate::SettingAst]) -> crate::VideoProfileSe
             ExprAst::Boolean(value) => Some(value.value),
             _ => None,
         }),
+        decode: match str_at("decode").as_deref() {
+            Some("nvidia") => voom_core::VideoDecodeMode::nvidia(),
+            _ => voom_core::VideoDecodeMode::default(),
+        },
     }
 }
 

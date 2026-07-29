@@ -220,6 +220,7 @@ fn fake_transcode_video_result(
             .pixel_format
             .clone()
             .unwrap_or_else(|| "yuv420p".to_owned()),
+        hardware_assignment: request.hardware_assignment.clone(),
         copied_video: request.copy_video,
     })
 }

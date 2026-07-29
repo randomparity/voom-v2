@@ -14,6 +14,14 @@ fn preflight_rejects_missing_ffmpeg() {
     assert!(preflight_with_paths(&temp.path().join("missing-ffmpeg"), &ffprobe).is_err());
 }
 
+#[test]
+fn nvidia_uuid_validation_rejects_ordinals_and_partial_tokens() {
+    assert!(validate_nvidia_uuid("GPU-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee").is_ok());
+    for invalid in ["0", "GPU-0", "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"] {
+        assert!(validate_nvidia_uuid(invalid).is_err(), "{invalid}");
+    }
+}
+
 #[cfg(unix)]
 #[test]
 fn preflight_rejects_non_executable_ffmpeg() {

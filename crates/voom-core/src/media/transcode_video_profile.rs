@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::encoder_caps::encoder_descriptor;
+use crate::encoder_caps::{QualityDomain, VideoEncoderBackend, encoder_descriptor};
 
 pub const TRANSCODE_VIDEO_CONTAINER: &str = "mkv";
 pub const TRANSCODE_VIDEO_CONTAINER_MP4: &str = "mp4";
@@ -64,10 +64,26 @@ pub fn validate_profile_against_descriptor(profile: &TranscodeVideoProfile) -> R
             profile.encoder, descriptor.target_codec, profile.target_codec
         ));
     }
-    if !descriptor.accepts_crf(profile.crf) {
+    match (descriptor.quality_domain, profile.crf, profile.cq) {
+        (QualityDomain::Crf { min, max }, Some(crf), None) if crf >= min && crf <= max => {}
+        (QualityDomain::Cq { min, max }, None, Some(cq)) if cq >= min && cq <= max => {}
+        (QualityDomain::Crf { min, max }, crf, cq) => {
+            return Err(format!(
+                "`{}` requires crf {min}..={max} and rejects cq; got crf={crf:?}, cq={cq:?}",
+                profile.encoder
+            ));
+        }
+        (QualityDomain::Cq { min, max }, crf, cq) => {
+            return Err(format!(
+                "`{}` requires cq {min}..={max} and rejects crf; got crf={crf:?}, cq={cq:?}",
+                profile.encoder
+            ));
+        }
+    }
+    if profile.decode.is_nvidia() && descriptor.backend != VideoEncoderBackend::Nvidia {
         return Err(format!(
-            "crf {} outside {}..={} for `{}`",
-            profile.crf, descriptor.crf_min, descriptor.crf_max, profile.encoder
+            "NVIDIA decode requires an NVIDIA encoder, not `{}`",
+            profile.encoder
         ));
     }
     if !descriptor.accepts_preset(&profile.preset) {
@@ -116,13 +132,78 @@ pub fn validate_profile_against_descriptor(profile: &TranscodeVideoProfile) -> R
     Ok(())
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SoftwareVideoDecode {}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NvidiaVideoDecode {}
+
+/// Where video frames are decoded before entering the encoder graph.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "backend", rename_all = "snake_case")]
+pub enum VideoDecodeMode {
+    Software(SoftwareVideoDecode),
+    Nvidia(NvidiaVideoDecode),
+}
+
+impl Default for VideoDecodeMode {
+    fn default() -> Self {
+        Self::Software(SoftwareVideoDecode {})
+    }
+}
+
+impl VideoDecodeMode {
+    #[must_use]
+    pub const fn nvidia() -> Self {
+        Self::Nvidia(NvidiaVideoDecode {})
+    }
+
+    #[must_use]
+    pub const fn is_software(&self) -> bool {
+        match self {
+            Self::Software(_) => true,
+            Self::Nvidia(_) => false,
+        }
+    }
+
+    #[must_use]
+    pub const fn is_nvidia(&self) -> bool {
+        !self.is_software()
+    }
+
+    #[must_use]
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Software(_) => "software",
+            Self::Nvidia(_) => "nvidia",
+        }
+    }
+
+    /// Parses the durable `SQLite` vocabulary.
+    ///
+    /// # Errors
+    /// Returns a descriptive error for a value outside the closed vocabulary.
+    pub fn parse(value: &str) -> Result<Self, String> {
+        match value {
+            "software" => Ok(Self::default()),
+            "nvidia" => Ok(Self::nvidia()),
+            _ => Err(format!("unknown video decode backend `{value}`")),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TranscodeVideoProfile {
     pub name: String,
     pub target_codec: String,
     pub encoder: String,
-    pub crf: u8,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub crf: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cq: Option<u8>,
     /// Encoder-specific speed token: named x265 preset, SVT-AV1 `-preset N`, or libaom-av1 `-cpu-used N`.
     pub preset: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -137,6 +218,8 @@ pub struct TranscodeVideoProfile {
     pub max_width: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_height: Option<u32>,
+    #[serde(default, skip_serializing_if = "VideoDecodeMode::is_software")]
+    pub decode: VideoDecodeMode,
     #[serde(default, skip_serializing_if = "is_false")]
     pub copy_compatible: bool,
 }
@@ -156,7 +239,8 @@ impl TranscodeVideoProfile {
             name: TRANSCODE_VIDEO_PROFILE.to_owned(),
             target_codec: TRANSCODE_VIDEO_CODEC.to_owned(),
             encoder: "libx265".to_owned(),
-            crf: 23,
+            crf: Some(23),
+            cq: None,
             preset: "medium".to_owned(),
             tune: None,
             codec_profile: None,
@@ -164,6 +248,7 @@ impl TranscodeVideoProfile {
             pixel_format: None,
             max_width: None,
             max_height: None,
+            decode: VideoDecodeMode::default(),
             copy_compatible: false,
         }
     }

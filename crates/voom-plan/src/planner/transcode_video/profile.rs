@@ -16,7 +16,12 @@ pub fn inline_profile_id(settings: &VideoProfileSettings) -> String {
 fn canonical_form(s: &VideoProfileSettings) -> String {
     let mut parts = Vec::new();
     parts.push(format!("encoder={}", s.encoder.to_ascii_lowercase()));
-    parts.push(format!("crf={}", s.crf));
+    if let Some(crf) = s.crf {
+        parts.push(format!("crf={crf}"));
+    }
+    if let Some(cq) = s.cq {
+        parts.push(format!("cq={cq}"));
+    }
     parts.push(format!("preset={}", s.preset.trim()));
     if let Some(v) = &s.tune {
         parts.push(format!("tune={}", v.to_ascii_lowercase()));
@@ -50,6 +55,9 @@ fn canonical_form(s: &VideoProfileSettings) -> String {
         "copy_compatible={}",
         s.copy_compatible.unwrap_or(false)
     ));
+    if s.decode.is_nvidia() {
+        parts.push("decode=nvidia".to_owned());
+    }
     parts.join(";")
 }
 

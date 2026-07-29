@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::time::Duration;
 
 use sqlx::Row;
 use time::OffsetDateTime;
@@ -97,6 +98,14 @@ fn compliance_execution_defaults_to_four_in_flight_files() {
 }
 
 #[test]
+fn compliance_execution_defaults_to_fifteen_minute_accelerator_recovery() {
+    assert_eq!(
+        super::ComplianceExecutionOptions::default().accelerator_unavailable_timeout,
+        Duration::from_secs(super::DEFAULT_ACCELERATOR_UNAVAILABLE_TIMEOUT_SECONDS)
+    );
+}
+
+#[test]
 fn compliance_execution_defaults_use_production_remux_paths() {
     let workflow_defaults = WorkflowExecutorOptions::default();
     let compliance_defaults = super::ComplianceExecutionOptions::default();
@@ -130,6 +139,7 @@ fn compliance_execution_defaults_use_production_audio_paths() {
 fn compliance_options_convert_paths_into_workflow_options_leaving_rest_default() {
     let options = super::ComplianceExecutionOptions {
         max_in_flight_files: 7,
+        accelerator_unavailable_timeout: Duration::from_secs(700),
         transcode_staging_root: PathBuf::from("/srv/transcode/staging"),
         transcode_target_dir: PathBuf::from("/srv/transcode/out"),
         remux_staging_root: PathBuf::from("/srv/remux/staging"),
@@ -178,6 +188,10 @@ fn compliance_options_convert_paths_into_workflow_options_leaving_rest_default()
     assert_eq!(
         converted.queue.max_attempts,
         workflow_defaults.queue.max_attempts
+    );
+    assert_eq!(
+        converted.queue.accelerator_unavailable_timeout,
+        Duration::from_secs(700)
     );
     assert_eq!(
         converted.timing.lease_ttl,

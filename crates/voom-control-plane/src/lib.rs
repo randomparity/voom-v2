@@ -65,6 +65,7 @@ mod operation_source;
 mod remux;
 pub mod scan;
 mod transcode;
+mod video_hardware;
 pub(crate) mod worker_process;
 mod workflow;
 
@@ -82,8 +83,8 @@ pub mod policy {
         ComplianceApplyData, ComplianceAudioExtractOutput, ComplianceAudioSynthesisCompanion,
         ComplianceExecuteData, ComplianceExecuteError, ComplianceExecutionOptions,
         ComplianceLegacyAudioExtractOutput, ComplianceReportData, ComplianceRunReportData,
-        DEFAULT_MAX_IN_FLIGHT_FILES, FilePhaseSummaryView, IssueApplicationSummary,
-        PhaseSummaryView, WorkflowSummaryView,
+        DEFAULT_ACCELERATOR_UNAVAILABLE_TIMEOUT_SECONDS, DEFAULT_MAX_IN_FLIGHT_FILES,
+        FilePhaseSummaryView, IssueApplicationSummary, PhaseSummaryView, WorkflowSummaryView,
     };
     pub use crate::cases::policy::policies::PolicyMutationError;
     pub use crate::cases::policy::policy_inputs::{
@@ -117,7 +118,9 @@ pub use audio::{
     TranscodeAudioDispatcher, TranscodePostCommitRecoveryReport,
 };
 pub use cases::policy::plans::{plan_compiled_policy_with_input, plan_policy_source_with_input};
-pub use local_worker::{LocalWorkerHandle, LocalWorkerKind, RunningLocalWorker};
+pub use local_worker::{
+    LocalWorkerHandle, LocalWorkerKind, NvidiaLocalWorkerConfig, RunningLocalWorker,
+};
 pub use remux::{ExecuteRemuxInput, ExecuteRemuxReport, RemuxDispatcher};
 pub use transcode::{
     ExecuteTranscodeVideoInput, ExecuteTranscodeVideoReport, TranscodeVideoDispatcher,

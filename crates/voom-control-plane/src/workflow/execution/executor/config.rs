@@ -15,6 +15,7 @@ const DEFAULT_READY_BATCH_SIZE: u32 = 64;
 const DEFAULT_MAX_ATTEMPTS: u32 = 1;
 const DEFAULT_CAPACITY_RETRY_INTERVAL: Duration = Duration::from_millis(250);
 const DEFAULT_CAPACITY_RETRY_TIMEOUT: Duration = Duration::from_mins(1);
+const DEFAULT_ACCELERATOR_UNAVAILABLE_TIMEOUT: Duration = Duration::from_mins(15);
 
 #[derive(Debug, Clone)]
 pub(crate) struct WorkflowTimingOptions {
@@ -30,6 +31,7 @@ pub(crate) struct WorkflowQueueOptions {
     pub max_attempts: u32,
     pub capacity_retry_interval: Duration,
     pub capacity_retry_timeout: Duration,
+    pub accelerator_unavailable_timeout: Duration,
 }
 
 #[derive(Debug, Clone)]
@@ -93,6 +95,7 @@ impl Default for WorkflowQueueOptions {
             max_attempts: DEFAULT_MAX_ATTEMPTS,
             capacity_retry_interval: DEFAULT_CAPACITY_RETRY_INTERVAL,
             capacity_retry_timeout: DEFAULT_CAPACITY_RETRY_TIMEOUT,
+            accelerator_unavailable_timeout: DEFAULT_ACCELERATOR_UNAVAILABLE_TIMEOUT,
         }
     }
 }
@@ -104,10 +107,15 @@ impl WorkflowQueueOptions {
         Self {
             capacity_retry_interval: Duration::from_millis(10),
             capacity_retry_timeout: Duration::from_millis(250),
+            accelerator_unavailable_timeout: Duration::from_millis(500),
             ..Self::default()
         }
     }
 }
+
+#[cfg(test)]
+#[path = "config_test.rs"]
+mod tests;
 
 impl OperationArtifactRoots {
     #[must_use]

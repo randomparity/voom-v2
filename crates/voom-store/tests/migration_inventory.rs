@@ -49,6 +49,7 @@ const EXPECTED_MIGRATION_FILES: &[&str] = &[
     "0026_policy_artifact_verification.sql",
     "0027_audio_synthesis_asset_lineage.sql",
     "0028_sliding_file_window.sql",
+    "0029_nvidia_video_acceleration.sql",
 ];
 
 fn workspace_root() -> PathBuf {
@@ -122,6 +123,62 @@ fn every_migrations_file_is_registered_in_migrator() {
         !file_versions.is_empty(),
         "no migrations found — sanity check that the test is reading the right path"
     );
+}
+
+#[tokio::test]
+async fn nvidia_profile_migration_preserves_every_existing_profile_field() {
+    let tmp = TempDatabase::new().unwrap();
+    let url = sqlite_url_for(tmp.path());
+    let pool = connect_or_create(&url).await.unwrap();
+    migrator_through(28).run(&pool).await.unwrap();
+
+    sqlx::query(
+        "UPDATE video_profiles SET retired_at = '2026-07-29T00:00:00Z' \
+         WHERE name = 'default-hevc'",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "UPDATE video_profiles SET preset = '9', tune = 'vq' \
+         WHERE name = 'default-av1'",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let before = legacy_video_profile_snapshot(&pool).await;
+    MIGRATOR.run(&pool).await.unwrap();
+    let after = legacy_video_profile_snapshot(&pool).await;
+
+    assert_eq!(after, before);
+    let retired: Option<String> =
+        sqlx::query_scalar("SELECT retired_at FROM video_profiles WHERE name = 'default-hevc'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(retired.as_deref(), Some("2026-07-29T00:00:00Z"));
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM video_profiles")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 6);
+}
+
+async fn legacy_video_profile_snapshot(pool: &sqlx::SqlitePool) -> String {
+    sqlx::query_scalar(
+        "SELECT json_group_array(json_object( \
+           'id', id, 'name', name, 'target_codec', target_codec, 'encoder', encoder, \
+           'crf', crf, 'preset', preset, 'tune', tune, 'codec_profile', codec_profile, \
+           'codec_level', codec_level, 'pixel_format', pixel_format, \
+           'max_width', max_width, 'max_height', max_height, \
+           'output_container', output_container, 'copy_compatible', copy_compatible, \
+           'retired_at', retired_at)) \
+         FROM (SELECT * FROM video_profiles ORDER BY id)",
+    )
+    .fetch_one(pool)
+    .await
+    .unwrap()
 }
 
 #[tokio::test]

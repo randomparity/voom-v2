@@ -1,9 +1,10 @@
 use voom_core::{OperationKind, PROTOCOL_VERSION, TicketOperation, VoomError};
-use voom_policy::{CompiledPolicy, PolicyTool};
+use voom_policy::{CompiledOperation, CompiledPolicy, PolicyTool, VideoProfileRef};
 use voom_store::repo::workers::{Worker, WorkerKind, WorkerStatus};
 
 use crate::ControlPlane;
 use crate::cases::{begin_immediate_tx, commit_tx};
+use crate::video_hardware::candidate_accelerator_descriptor;
 use crate::workflow::WorkerRuntimeRegistry;
 
 const FFMPEG_NAME: &str = "local-ffmpeg";
@@ -64,12 +65,76 @@ impl ControlPlane {
                 unavailable.push(UnavailableTool { tool, reason });
             }
         }
-        if unavailable.is_empty() {
+        if !unavailable.is_empty() {
+            return Err(VoomError::PolicyExecution(format_unavailable_tools(
+                &policy.slug,
+                &unavailable,
+            )));
+        }
+        self.preflight_video_hardware(policy, runtimes).await
+    }
+
+    async fn preflight_video_hardware(
+        &self,
+        policy: &CompiledPolicy,
+        runtimes: &WorkerRuntimeRegistry,
+    ) -> Result<(), VoomError> {
+        let requirements = policy_video_backend_requirements(policy)?;
+        if !requirements.software && !requirements.nvidia {
             return Ok(());
         }
-        Err(VoomError::PolicyExecution(format_unavailable_tools(
-            &policy.slug,
-            &unavailable,
+        let candidates = self
+            .workers
+            .operation_candidates(&TicketOperation::from(OperationKind::TranscodeVideo))
+            .await?;
+        let mut software_available = false;
+        let mut nvidia_available = false;
+        for candidate in candidates {
+            if runtimes.get_optional(candidate.worker_id).is_none() {
+                continue;
+            }
+            let descriptor = candidate_accelerator_descriptor(&candidate)?;
+            match descriptor {
+                Some(descriptor) => {
+                    let has_encoder = descriptor
+                        .encoders
+                        .iter()
+                        .any(|encoder| encoder == "hevc_nvenc");
+                    let has_decoder =
+                        !requirements.nvidia_decode || !descriptor.decoders.is_empty();
+                    nvidia_available |= has_encoder && has_decoder;
+                }
+                None if candidate.hardware.is_empty() => software_available = true,
+                None => {}
+            }
+        }
+        let mut missing = Vec::new();
+        if requirements.software && !software_available {
+            missing.push(
+                "software transcode profiles require an unbound ffmpeg worker; \
+                 start one with: voom worker run-local --kind ffmpeg"
+                    .to_owned(),
+            );
+        }
+        if requirements.nvidia && !nvidia_available {
+            let decoder = if requirements.nvidia_decode {
+                " with at least one advertised CUVID decoder"
+            } else {
+                ""
+            };
+            missing.push(format!(
+                "hevc_nvenc profiles require a live NVIDIA-bound ffmpeg worker{decoder}; \
+                 start one with: voom worker run-local --kind ffmpeg \
+                 --nvidia-device GPU-<uuid>"
+            ));
+        }
+        if missing.is_empty() {
+            return Ok(());
+        }
+        Err(VoomError::PolicyExecution(format!(
+            "video hardware preflight failed for policy `{}`:\n- {}",
+            policy.slug,
+            missing.join("\n- ")
         )))
     }
 
@@ -216,6 +281,78 @@ impl ControlPlane {
         commit_tx(tx).await?;
         Ok(None)
     }
+}
+
+#[derive(Default)]
+struct VideoBackendRequirements {
+    software: bool,
+    nvidia: bool,
+    nvidia_decode: bool,
+}
+
+fn policy_video_backend_requirements(
+    policy: &CompiledPolicy,
+) -> Result<VideoBackendRequirements, VoomError> {
+    let mut requirements = VideoBackendRequirements::default();
+    for phase in &policy.phases {
+        collect_video_backend_requirements(&phase.operations, &mut requirements)?;
+    }
+    Ok(requirements)
+}
+
+fn collect_video_backend_requirements(
+    operations: &[CompiledOperation],
+    requirements: &mut VideoBackendRequirements,
+) -> Result<(), VoomError> {
+    for operation in operations {
+        match operation {
+            CompiledOperation::TranscodeVideo(operation) => {
+                let encoder = operation
+                    .resolved_profile
+                    .as_ref()
+                    .map(|profile| profile.encoder.as_str())
+                    .or(match &operation.profile {
+                        VideoProfileRef::Inline(settings) => Some(settings.encoder.as_str()),
+                        VideoProfileRef::Named(_) => None,
+                    })
+                    .ok_or_else(|| {
+                        VoomError::PolicyExecution(
+                            "video hardware preflight requires resolved named profiles".to_owned(),
+                        )
+                    })?;
+                if encoder == "hevc_nvenc" {
+                    requirements.nvidia = true;
+                    let decode = operation
+                        .resolved_profile
+                        .as_ref()
+                        .map(|profile| &profile.decode)
+                        .or(match &operation.profile {
+                            VideoProfileRef::Inline(settings) => Some(&settings.decode),
+                            VideoProfileRef::Named(_) => None,
+                        })
+                        .ok_or_else(|| {
+                            VoomError::PolicyExecution(
+                                "video hardware preflight requires resolved named profiles"
+                                    .to_owned(),
+                            )
+                        })?;
+                    requirements.nvidia_decode |= decode.is_nvidia();
+                } else {
+                    requirements.software = true;
+                }
+            }
+            CompiledOperation::Conditional(conditional) => {
+                collect_video_backend_requirements(&conditional.operations, requirements)?;
+            }
+            CompiledOperation::Rules(rules) => {
+                for rule in &rules.rules {
+                    collect_video_backend_requirements(&rule.operations, requirements)?;
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 fn unavailable_eligibility_reason(findings: &[EligibilityFinding]) -> String {

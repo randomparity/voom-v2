@@ -164,6 +164,7 @@ fn basic_request(
                 modified_at: None,
                 local_file_key: None,
             },
+            video_codec: None,
         },
         output: TranscodeVideoOutput {
             staging_root: staging.to_string_lossy().into_owned(),
@@ -173,6 +174,7 @@ fn basic_request(
             overwrite: false,
         },
         profile,
+        hardware_assignment: None,
         copy_video: false,
     }
 }
@@ -239,7 +241,8 @@ async fn libsvtav1_av1_mkv_transcode_succeeds() {
         name: "default-av1".to_owned(),
         target_codec: "av1".to_owned(),
         encoder: "libsvtav1".to_owned(),
-        crf: 35,
+        crf: Some(35),
+        cq: None,
         preset: "10".to_owned(), // fast preset for tests
         tune: None,
         codec_profile: None,
@@ -248,6 +251,7 @@ async fn libsvtav1_av1_mkv_transcode_succeeds() {
         max_width: None,
         max_height: None,
         copy_compatible: false,
+        decode: voom_core::VideoDecodeMode::default(),
     };
     let request = with_real_expected(
         basic_request(&input, &output, dir.path(), "mkv", "av1", profile),
@@ -288,7 +292,8 @@ async fn libaom_av1_mkv_transcode_succeeds() {
         name: "av1-archive".to_owned(),
         target_codec: "av1".to_owned(),
         encoder: "libaom-av1".to_owned(),
-        crf: 35,
+        crf: Some(35),
+        cq: None,
         preset: "8".to_owned(), // cpu-used 8 = fastest, for test speed
         tune: None,
         codec_profile: None,
@@ -297,6 +302,7 @@ async fn libaom_av1_mkv_transcode_succeeds() {
         max_width: None,
         max_height: None,
         copy_compatible: false,
+        decode: voom_core::VideoDecodeMode::default(),
     };
     let request = with_real_expected(
         basic_request(&input, &output, dir.path(), "mkv", "av1", profile),
@@ -375,7 +381,8 @@ async fn av1_mp4_output_uses_av01_tag() {
         name: "av1-1080p".to_owned(),
         target_codec: "av1".to_owned(),
         encoder: "libsvtav1".to_owned(),
-        crf: 35,
+        crf: Some(35),
+        cq: None,
         preset: "10".to_owned(),
         tune: None,
         codec_profile: None,
@@ -384,6 +391,7 @@ async fn av1_mp4_output_uses_av01_tag() {
         max_width: None,
         max_height: None,
         copy_compatible: false,
+        decode: voom_core::VideoDecodeMode::default(),
     };
     let request = with_real_expected(
         basic_request(&input, &output, dir.path(), "mp4", "av1", profile),
@@ -414,7 +422,8 @@ async fn downscale_applied_when_source_exceeds_cap() {
         name: "hevc-tiny".to_owned(),
         target_codec: "hevc".to_owned(),
         encoder: "libx265".to_owned(),
-        crf: 28,
+        crf: Some(28),
+        cq: None,
         preset: "ultrafast".to_owned(),
         tune: None,
         codec_profile: None,
@@ -423,6 +432,7 @@ async fn downscale_applied_when_source_exceeds_cap() {
         max_width: Some(80),
         max_height: Some(45),
         copy_compatible: false,
+        decode: voom_core::VideoDecodeMode::default(),
     };
     let request = with_real_expected(
         basic_request(&input, &output, dir.path(), "mkv", "hevc", profile),
@@ -461,7 +471,8 @@ async fn copy_video_path_uses_stream_copy() {
         name: "default-hevc".to_owned(),
         target_codec: "hevc".to_owned(),
         encoder: "libx265".to_owned(),
-        crf: 23,
+        crf: Some(23),
+        cq: None,
         preset: "medium".to_owned(),
         tune: None,
         codec_profile: None,
@@ -470,6 +481,7 @@ async fn copy_video_path_uses_stream_copy() {
         max_width: None,
         max_height: None,
         copy_compatible: true,
+        decode: voom_core::VideoDecodeMode::default(),
     };
     let mut request = with_real_expected(
         basic_request(&input, &output, dir.path(), "mkv", "hevc", profile),
@@ -540,6 +552,7 @@ async fn missing_input_fails_with_artifact_unavailable() {
                 modified_at: None,
                 local_file_key: None,
             },
+            video_codec: None,
         },
         output: TranscodeVideoOutput {
             staging_root: dir.path().to_string_lossy().into_owned(),
@@ -549,6 +562,7 @@ async fn missing_input_fails_with_artifact_unavailable() {
             overwrite: false,
         },
         profile: TranscodeVideoProfile::default_hevc(),
+        hardware_assignment: None,
         copy_video: false,
     };
 
@@ -586,6 +600,7 @@ async fn wrong_expected_input_facts_is_checksum_mismatch() {
                 modified_at: None,
                 local_file_key: None,
             },
+            video_codec: None,
         },
         output: TranscodeVideoOutput {
             staging_root: dir.path().to_string_lossy().into_owned(),
@@ -595,6 +610,7 @@ async fn wrong_expected_input_facts_is_checksum_mismatch() {
             overwrite: false,
         },
         profile: TranscodeVideoProfile::default_hevc(),
+        hardware_assignment: None,
         copy_video: false,
     };
 
@@ -740,7 +756,8 @@ async fn pixel_format_constraint_is_honored_in_output() {
         name: "hevc-10bit".to_owned(),
         target_codec: "hevc".to_owned(),
         encoder: "libx265".to_owned(),
-        crf: 23,
+        crf: Some(23),
+        cq: None,
         preset: "ultrafast".to_owned(),
         tune: None,
         codec_profile: Some("main10".to_owned()),
@@ -749,6 +766,7 @@ async fn pixel_format_constraint_is_honored_in_output() {
         max_width: None,
         max_height: None,
         copy_compatible: false,
+        decode: voom_core::VideoDecodeMode::default(),
     };
     let request = with_real_expected(
         basic_request(&input, &output, dir.path(), "mkv", "hevc", profile),
@@ -782,7 +800,8 @@ async fn output_codec_mismatch_is_malformed_result() {
         name: "default-hevc".to_owned(),
         target_codec: "hevc".to_owned(),
         encoder: "libx265".to_owned(),
-        crf: 28,
+        crf: Some(28),
+        cq: None,
         preset: "ultrafast".to_owned(),
         tune: None,
         codec_profile: None,
@@ -791,6 +810,7 @@ async fn output_codec_mismatch_is_malformed_result() {
         max_width: None,
         max_height: None,
         copy_compatible: false,
+        decode: voom_core::VideoDecodeMode::default(),
     };
     let request = with_real_expected(
         basic_request(&input, &output, dir.path(), "mkv", "av1", profile),

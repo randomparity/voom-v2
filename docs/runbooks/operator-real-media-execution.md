@@ -52,6 +52,52 @@ operation kind. Reachable same-kind workers remain registered, and dispatch
 selects the eligible worker with the lowest capacity utilization (worker id
 breaks ties deterministically).
 
+For NVIDIA HEVC encoding, keep the software worker above and start one additional
+FFmpeg worker per physical GPU, using the full UUID reported by `nvidia-smi`:
+
+```
+# terminal C
+voom worker run-local \
+  --kind ffmpeg \
+  --nvidia-device GPU-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee \
+  --nvidia-max-sessions 2
+
+# terminal D
+voom worker run-local \
+  --kind ffmpeg \
+  --nvidia-device GPU-ffffffff-1111-2222-3333-444444444444 \
+  --nvidia-max-sessions 2
+```
+
+An NVIDIA-bound worker advertises only GPU video work; it does not replace the
+unbound worker needed by software profiles, audio transcoding, and extraction.
+The session declaration is per physical UUID and must be in `1..=16`. Startup
+pins CUDA visibility to that UUID, independently proves the FFmpeg PID-to-UUID
+mapping, executes HEVC NVENC and per-decoder smoke probes, and proves the declared
+concurrency before the worker becomes ready. A second live supervisor cannot
+claim the same UUID.
+
+If an advertised device disappears during a run, its tickets remain ready and
+do not consume attempts for 15 minutes. A replacement worker for the same UUID
+can resume them. Capacity saturation uses the shorter one-minute capacity wait.
+If the 15-minute device-recovery window expires, the job fails with the hardware
+token in the error while unrelated in-flight work is drained.
+
+To repeat the repository's real-device acceptance on every installed NVIDIA
+accelerator:
+
+```
+scripts/accept-nvidia-video-acceleration.sh \
+  GPU-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee \
+  GPU-ffffffff-1111-2222-3333-444444444444
+```
+
+The script runs the worker's identity/capability preflight and executes both
+supported graphs on each UUID: software decode plus `hwupload_cuda`, and H.264
+CUVID decode plus `scale_cuda`, each ending in HEVC NVENC. AV1 NVENC is not part
+of this slice; the worker may advertise AV1 CUVID decode only when that exact
+device passes its startup probe.
+
 Running `compliance execute` before both workers are ready races the registration
 and hits the missing-worker path. `run-local` is a foreground supervisor: it
 retires the worker on Ctrl-C (SIGINT), SIGTERM, or stdin EOF. Start it in a

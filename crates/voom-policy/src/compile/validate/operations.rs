@@ -441,6 +441,7 @@ impl Validator<'_> {
         const ALLOWED: &[&str] = &[
             "encoder",
             "crf",
+            "cq",
             "preset",
             "tune",
             "codec_profile",
@@ -450,6 +451,7 @@ impl Validator<'_> {
             "max_height",
             "output_container",
             "copy_compatible",
+            "decode",
         ];
         let mut seen = BTreeSet::new();
         let mut ok = true;
@@ -480,19 +482,7 @@ impl Validator<'_> {
         descriptor: &voom_core::EncoderDescriptor,
         by_key: &BTreeMap<&str, &ExprAst>,
     ) {
-        if let Some(crf) = self.inline_required_str(span, by_key, "crf") {
-            match crf.parse::<u8>() {
-                Ok(value) if descriptor.accepts_crf(value) => {}
-                _ => self.error(
-                    DiagnosticCode::InvalidVideoProfileSetting,
-                    span,
-                    format!(
-                        "crf `{crf}` outside {}..={} for `{}`",
-                        descriptor.crf_min, descriptor.crf_max, descriptor.encoder
-                    ),
-                ),
-            }
-        }
+        self.validate_inline_quality(span, descriptor, by_key);
         if let Some(preset) = self.inline_required_str(span, by_key, "preset")
             && !descriptor.accepts_preset(&preset)
         {
@@ -500,6 +490,42 @@ impl Validator<'_> {
                 DiagnosticCode::InvalidVideoProfileSetting,
                 span,
                 format!("preset `{preset}` invalid for `{}`", descriptor.encoder),
+            );
+        }
+    }
+
+    fn validate_inline_quality(
+        &mut self,
+        span: SourceSpan,
+        descriptor: &voom_core::EncoderDescriptor,
+        by_key: &BTreeMap<&str, &ExprAst>,
+    ) {
+        let crf = self.inline_optional_str(span, by_key, "crf");
+        let cq = self.inline_optional_str(span, by_key, "cq");
+        let valid = match descriptor.quality_domain {
+            voom_core::QualityDomain::Crf { min, max } => {
+                cq.is_none()
+                    && crf
+                        .as_deref()
+                        .and_then(|value| value.parse::<u8>().ok())
+                        .is_some_and(|value| value >= min && value <= max)
+            }
+            voom_core::QualityDomain::Cq { min, max } => {
+                crf.is_none()
+                    && cq
+                        .as_deref()
+                        .and_then(|value| value.parse::<u8>().ok())
+                        .is_some_and(|value| value >= min && value <= max)
+            }
+        };
+        if !valid {
+            self.error(
+                DiagnosticCode::InvalidVideoProfileSetting,
+                span,
+                format!(
+                    "quality fields invalid for `{}` ({:?})",
+                    descriptor.encoder, descriptor.quality_domain
+                ),
             );
         }
     }
@@ -554,6 +580,29 @@ impl Validator<'_> {
             codec_profile.as_deref(),
         );
         self.validate_inline_container_and_dimensions(span, by_key);
+        let decode = self.inline_optional_str(span, by_key, "decode");
+        if decode
+            .as_deref()
+            .is_some_and(|value| value != "software" && value != "nvidia")
+        {
+            self.error(
+                DiagnosticCode::InvalidVideoProfileSetting,
+                span,
+                "decode must be `software` or `nvidia`".to_owned(),
+            );
+        }
+        if decode.as_deref() == Some("nvidia")
+            && descriptor.backend != voom_core::VideoEncoderBackend::Nvidia
+        {
+            self.error(
+                DiagnosticCode::InvalidVideoProfileSetting,
+                span,
+                format!(
+                    "NVIDIA decode requires an NVIDIA encoder, not `{}`",
+                    descriptor.encoder
+                ),
+            );
+        }
     }
 
     fn validate_inline_pixel_format(

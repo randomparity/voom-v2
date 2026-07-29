@@ -3,7 +3,8 @@ use super::*;
 fn sample_settings() -> voom_policy::VideoProfileSettings {
     voom_policy::VideoProfileSettings {
         encoder: "libsvtav1".to_owned(),
-        crf: 30,
+        crf: Some(30),
+        cq: None,
         preset: "8".to_owned(),
         tune: None,
         codec_profile: None,
@@ -13,6 +14,7 @@ fn sample_settings() -> voom_policy::VideoProfileSettings {
         max_height: None,
         output_container: None,
         copy_compatible: None,
+        decode: voom_core::VideoDecodeMode::default(),
     }
 }
 
@@ -31,9 +33,9 @@ fn inline_hash_is_stable_across_serde_round_trip() {
 #[test]
 fn inline_hash_differs_for_near_identical_profiles() {
     let mut a = sample_settings();
-    a.crf = 22;
+    a.crf = Some(22);
     let mut b = sample_settings();
-    b.crf = 23;
+    b.crf = Some(23);
     assert_ne!(inline_profile_id(&a), inline_profile_id(&b));
 }
 

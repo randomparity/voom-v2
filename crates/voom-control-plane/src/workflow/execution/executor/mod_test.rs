@@ -4,7 +4,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use secrecy::SecretString;
@@ -34,7 +34,7 @@ use voom_worker_protocol::{
 };
 
 use super::super::leases::retry_on_database_locked;
-use super::CapacityDeferredTestSync;
+use super::{CapacityDeferredTestSync, DispatchReadyOutcome, RunLoopState};
 use crate::workflow::execution::executor::WorkflowExecutorOptions;
 use crate::workflow::execution::operation_adapters::{
     RuntimeDispatchContext, await_with_lease_heartbeats,
@@ -148,6 +148,21 @@ async fn local_reservations_prevent_worker_capacity_overrun() {
         .unwrap();
 
     assert_eq!(summary.max_active_for_worker(worker_id), 1);
+    assert_eq!(summary.dispatch_count, 4);
+}
+
+#[tokio::test]
+async fn local_reservations_do_not_double_count_held_leases() {
+    let fixture = ExecutorFixture::single_worker_max_parallel(2).await;
+    let worker_id = fixture.worker_id();
+    let summary = fixture
+        .run_with_policy(ConcurrencyPolicy {
+            max_in_flight_dispatches: 4,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(summary.max_active_for_worker(worker_id), 2);
     assert_eq!(summary.dispatch_count, 4);
 }
 
@@ -4323,4 +4338,34 @@ async fn expand_successful_ticket_join_node_waits_for_all_parents() {
     .await
     .unwrap();
     assert_eq!(ticket_total, 1);
+}
+#[test]
+fn accelerator_unavailable_clocks_are_independent_and_reset_by_token() {
+    let mut state = RunLoopState::new(JobId(1), Duration::ZERO);
+    let now = Instant::now();
+    state.accelerator_wait_started.insert(
+        "nvidia:GPU-a".to_owned(),
+        now.checked_sub(Duration::from_secs(20)).unwrap(),
+    );
+    state
+        .accelerator_wait_started
+        .insert("nvidia:GPU-b".to_owned(), now);
+
+    assert_eq!(
+        state.timed_out_accelerator(Duration::from_secs(10)),
+        Some("nvidia:GPU-a")
+    );
+
+    let mut dispatch = DispatchReadyOutcome::default();
+    dispatch
+        .recovered_accelerators
+        .insert("nvidia:GPU-a".to_owned());
+    dispatch
+        .recovered_accelerators
+        .insert("nvidia:GPU-b".to_owned());
+    state.update_accelerator_waits(&dispatch);
+
+    assert!(!state.accelerator_wait_started.contains_key("nvidia:GPU-a"));
+    assert!(!state.accelerator_wait_started.contains_key("nvidia:GPU-b"));
+    assert_eq!(state.timed_out_accelerator(Duration::from_secs(10)), None);
 }
