@@ -34,6 +34,7 @@ use voom_worker_protocol::{
 };
 
 use super::super::leases::retry_on_database_locked;
+use super::CapacityDeferredTestSync;
 use crate::workflow::execution::executor::WorkflowExecutorOptions;
 use crate::workflow::execution::operation_adapters::{
     RuntimeDispatchContext, await_with_lease_heartbeats,
@@ -185,12 +186,23 @@ async fn external_capacity_release_allows_eventual_dispatch_without_early_reques
     let external_lease = fixture
         .occupy_worker_capacity(&other, worker_id, OperationKind::HashFile)
         .await;
-    let executor = fixture.executor_with_options(WorkflowExecutorOptions::for_tests());
+    let capacity_deferred = CapacityDeferredTestSync {
+        observed: Arc::new(tokio::sync::Notify::new()),
+        resume: Arc::new(tokio::sync::Notify::new()),
+    };
+    let mut options = WorkflowExecutorOptions::for_tests();
+    options.capacity_deferred_sync = Some(capacity_deferred.clone());
+    let executor = fixture.executor_with_options(options);
     let plan = fixture.plan.clone();
     let run = tokio::spawn(async move { executor.submit_and_run(plan).await });
     let ticket = fixture.wait_for_workflow_ticket().await;
 
-    tokio::time::sleep(Duration::from_millis(40)).await;
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        capacity_deferred.observed.notified(),
+    )
+    .await
+    .unwrap();
     assert!(!run.is_finished());
     assert_eq!(fixture.worker_dispatch_count(worker_id), 0);
     assert_eq!(ticket.attempt, 0);
@@ -210,7 +222,8 @@ async fn external_capacity_release_allows_eventual_dispatch_without_early_reques
         .release_lease(external_lease, json!({"status": "released"}), T0)
         .await
         .unwrap();
-    let summary = tokio::time::timeout(Duration::from_secs(2), run)
+    capacity_deferred.resume.notify_one();
+    let summary = tokio::time::timeout(Duration::from_secs(5), run)
         .await
         .unwrap()
         .unwrap()

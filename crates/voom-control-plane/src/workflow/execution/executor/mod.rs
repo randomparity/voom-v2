@@ -83,6 +83,15 @@ pub struct WorkflowExecutorOptions {
     pub queue: WorkflowQueueOptions,
     pub artifact_roots: WorkflowArtifactRoots,
     pub chaos: WorkflowChaosOptions,
+    #[cfg(test)]
+    pub(crate) capacity_deferred_sync: Option<CapacityDeferredTestSync>,
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone)]
+pub(crate) struct CapacityDeferredTestSync {
+    pub(crate) observed: std::sync::Arc<tokio::sync::Notify>,
+    pub(crate) resume: std::sync::Arc<tokio::sync::Notify>,
 }
 
 impl WorkflowExecutorOptions {
@@ -103,6 +112,7 @@ impl WorkflowExecutorOptions {
             queue: WorkflowQueueOptions::for_tests(),
             artifact_roots: WorkflowArtifactRoots::for_tests(),
             chaos: WorkflowChaosOptions::default(),
+            capacity_deferred_sync: None,
         }
     }
 }
@@ -489,6 +499,11 @@ impl WorkflowExecutor {
         job_id: JobId,
         started: Instant,
     ) -> Result<(), WorkflowRunError> {
+        #[cfg(test)]
+        if let Some(sync) = &self.options.capacity_deferred_sync {
+            sync.observed.notify_one();
+            sync.resume.notified().await;
+        }
         let control = &self.control_plane;
         match self.capacity_wait_outcome(state, job_id).await {
             Ok(CapacityWaitOutcome::RetryAfter(delay)) => {
