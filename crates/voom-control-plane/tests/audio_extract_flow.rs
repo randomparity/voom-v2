@@ -12,6 +12,7 @@ use voom_control_plane::policy::{ComplianceExecutionOptions, PolicyInputFromScan
 use voom_control_plane::scan::{ScanPathInput, ScanReportFileStatus};
 use voom_core::{FileAssetId, FileVersionId, JobId, MediaSnapshotId};
 use voom_plan::PlanOperationKind;
+use voom_policy::{MediaSnapshotInput, PolicyInputSetDraft, PolicyInputSourceKind, TargetRef};
 use voom_store::repo::bundles::{BundleMemberRole, SqliteBundleRepo};
 use voom_store::repo::identity::{IdentityRepo, SqliteIdentityRepo};
 use voom_test_support::TempDatabase;
@@ -217,6 +218,65 @@ async fn audio_extract_multi_match_publishes_ordered_media_and_lineage() {
     .await;
 }
 
+#[tokio::test]
+async fn duplicate_basename_sidecars_keep_their_source_subtrees() {
+    let _guard = AUDIO_EXTRACT_FLOW_LOCK.lock().await;
+    require_command("ffmpeg", &["-version"]);
+    cargo_build_package("voom-ffprobe-worker").unwrap();
+    cargo_build_package("voom-verify-artifact-worker").unwrap();
+    cargo_build_package("voom-ffmpeg-worker").unwrap();
+    let _ffprobe_guard = hide_stale_fake_ffprobe_sibling("audio-extract-flow").unwrap();
+    let tmp = tempdir_in_repo();
+    let first_path = tmp.path().join("show-a").join("Movie.mkv");
+    let second_path = tmp.path().join("show-b").join("Movie.mkv");
+    std::fs::create_dir_all(first_path.parent().unwrap()).unwrap();
+    std::fs::create_dir_all(second_path.parent().unwrap()).unwrap();
+    generate_audio_extract_fixture(&first_path, CommentaryFixture::SingleMatch);
+    generate_audio_extract_fixture(&second_path, CommentaryFixture::AlternateSingleMatch);
+    let db = TempDatabase::new().unwrap();
+    let url = format!("sqlite://{}", db.path().display());
+    voom_store::init(&url).await.unwrap();
+    let pool = voom_store::connect(&url).await.unwrap();
+    let cp = ControlPlane::open_with_pool(pool, std::sync::Arc::new(voom_core::SystemClock))
+        .await
+        .unwrap();
+    let first =
+        enrich_audio_snapshot_for_extract(&cp, &url, scan_source(&cp, &first_path).await).await;
+    let second =
+        enrich_audio_snapshot_for_extract(&cp, &url, scan_source(&cp, &second_path).await).await;
+    let policy = cp
+        .create_policy_document("extract-commentary-audio", EXTRACT_COMMENTARY_POLICY)
+        .await
+        .unwrap();
+    let input = cp
+        .create_policy_input_set(two_audio_file_input(&[first, second]))
+        .await
+        .unwrap();
+    let mut worker = ExtractAudioWorkerLaunch::start(&cp).await.unwrap();
+    let out_dir = tmp.path().join("out");
+
+    cp.execute_compliance_policy_with_options(
+        policy.version.id,
+        input.id,
+        ComplianceExecutionOptions {
+            audio_staging_root: tmp.path().join("audio-stage"),
+            audio_target_dir: out_dir.clone(),
+            max_in_flight_files: 2,
+            ..ComplianceExecutionOptions::default()
+        },
+    )
+    .await
+    .unwrap();
+    worker.shutdown().unwrap();
+
+    for show in ["show-a", "show-b"] {
+        assert!(
+            out_dir.join(show).join("Movie.stream-2.opus.ogg").is_file(),
+            "{show} sidecar must retain its source-relative subtree"
+        );
+    }
+}
+
 fn tempdir_in_repo() -> tempfile::TempDir {
     tempfile::TempDir::new_in(std::env::current_dir().unwrap()).unwrap()
 }
@@ -224,6 +284,46 @@ fn tempdir_in_repo() -> tempfile::TempDir {
 struct ScannedSource {
     file_version_id: FileVersionId,
     snapshot_id: MediaSnapshotId,
+}
+
+fn two_audio_file_input(files: &[ScannedSource]) -> PolicyInputSetDraft {
+    let media_snapshots = files
+        .iter()
+        .enumerate()
+        .map(|(index, file)| MediaSnapshotInput {
+            ordinal: u32::try_from(index + 1).unwrap(),
+            target: TargetRef::FileVersion {
+                id: file.file_version_id,
+            },
+            container: Some("mkv".to_owned()),
+            stream_summary: serde_json::json!({}),
+            video_codec: Some("h264".to_owned()),
+            width: Some(32),
+            height: Some(32),
+            hdr: None,
+            bitrate: None,
+            duration_millis: Some(1000),
+            audio_languages: vec!["eng".to_owned()],
+            subtitle_languages: Vec::new(),
+            health_flags: Vec::new(),
+            existing_media_snapshot_id: Some(file.snapshot_id),
+        })
+        .collect();
+    PolicyInputSetDraft {
+        slug: "duplicate-basename-audio".to_owned(),
+        display_name: "duplicate-basename-audio".to_owned(),
+        schema_version: 1,
+        source_kind: PolicyInputSourceKind::Test,
+        created_at: time::OffsetDateTime::UNIX_EPOCH,
+        description: None,
+        fixture_labels: vec!["duplicate-basename-audio".to_owned()],
+        synthetic_targets: Vec::new(),
+        media_snapshots,
+        identity_evidence: Vec::new(),
+        bundle_targets: Vec::new(),
+        quality_profiles: Vec::new(),
+        issues: Vec::new(),
+    }
 }
 
 async fn scan_source(cp: &ControlPlane, source: &Path) -> ScannedSource {
@@ -586,11 +686,16 @@ fn require_command(program: &str, args: &[&str]) {
 #[derive(Debug, Clone, Copy)]
 enum CommentaryFixture {
     SingleMatch,
+    AlternateSingleMatch,
 }
 
 fn generate_audio_extract_fixture(path: &Path, fixture: CommentaryFixture) {
     let commentary_disposition = match fixture {
-        CommentaryFixture::SingleMatch => "comment",
+        CommentaryFixture::SingleMatch | CommentaryFixture::AlternateSingleMatch => "comment",
+    };
+    let commentary_tone = match fixture {
+        CommentaryFixture::SingleMatch => "sine=frequency=660:sample_rate=48000",
+        CommentaryFixture::AlternateSingleMatch => "sine=frequency=880:sample_rate=48000",
     };
     let status = Command::new("ffmpeg")
         .args([
@@ -609,7 +714,7 @@ fn generate_audio_extract_fixture(path: &Path, fixture: CommentaryFixture) {
             "-f",
             "lavfi",
             "-i",
-            "sine=frequency=660:sample_rate=48000",
+            commentary_tone,
             "-t",
             "1",
             "-map",

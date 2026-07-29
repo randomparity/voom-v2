@@ -27,7 +27,43 @@ async fn probe_returns_uninitialized_on_fresh_db() {
 #[tokio::test]
 async fn expected_migrations_matches_embedded_count() {
     // review whenever a migration is added/removed.
-    assert_eq!(expected_migrations(), 27);
+    assert_eq!(expected_migrations(), 28);
+}
+
+#[tokio::test]
+async fn workflow_file_window_schema_is_strict_and_job_owned() {
+    let (pool, _tmp) = fresh_pool().await;
+    let window_sql: String = sqlx::query_scalar(
+        "SELECT sql FROM sqlite_schema \
+         WHERE type = 'table' AND name = 'workflow_file_windows'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(window_sql.contains("CHECK (max_in_flight_files > 0)"));
+    assert!(window_sql.ends_with("STRICT"));
+
+    let progress_sql: String = sqlx::query_scalar(
+        "SELECT sql FROM sqlite_schema \
+         WHERE type = 'table' AND name = 'workflow_file_progress'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(progress_sql.contains("UNIQUE (job_id, input_ordinal)"));
+    assert!(progress_sql.contains("state IN ('pending', 'active', 'terminalizing', 'terminal')"));
+    assert!(progress_sql.ends_with("STRICT"));
+
+    let entry_sql: String = sqlx::query_scalar(
+        "SELECT sql FROM sqlite_schema \
+         WHERE type = 'table' AND name = 'workflow_file_phase_entries'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(entry_sql.contains("PRIMARY KEY (job_id, phase_ordinal, branch_id)"));
+    assert!(entry_sql.contains("gate_admitted IN (0, 1)"));
+    assert!(entry_sql.ends_with("STRICT"));
 }
 
 #[tokio::test]
@@ -82,7 +118,9 @@ async fn workflow_file_run_history_schema_is_strict_and_run_owned() {
     .unwrap();
     assert!(table_sql.contains("PRIMARY KEY (job_id, branch_id, phase_ordinal)"));
     assert!(table_sql.contains("CHECK (phase_ordinal >= 0)"));
-    assert!(table_sql.contains("CHECK (outcome IN ('committed', 'verified', 'skipped'))"));
+    assert!(
+        table_sql.contains("CHECK (outcome IN ('committed', 'verified', 'skipped', 'blocked'))")
+    );
     assert!(table_sql.ends_with("STRICT"));
 
     let run_fk_columns: Vec<(String, String, String)> = sqlx::query_as(

@@ -4,10 +4,13 @@
 
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
+use std::fs::File;
 use std::path::{Component, Path, PathBuf};
 
-use tokio::io::AsyncReadExt;
-use voom_core::{FileAssetId, FileLocationId, FileVersionId, JobId, VoomError};
+use same_file::Handle;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use voom_core::{FileAssetId, FileLocationId, FileVersionId, VoomError};
+use voom_policy::{PolicyInputSetDraft, TargetRef};
 use voom_store::repo::identity::{FileLocationKind, IdentityRepo};
 use voom_store::repo::workflow_summaries::FilePhaseSummary;
 
@@ -29,11 +32,15 @@ impl ResolvedPromotionDirs {
 
     /// The output dir for an artifact path, by longest working-dir prefix match.
     fn output_for(&self, path: &Path) -> Option<&Path> {
+        self.pair_for(path).map(|(_, output)| output)
+    }
+
+    fn pair_for(&self, path: &Path) -> Option<(&Path, &Path)> {
         self.working_to_output
             .iter()
             .filter(|(working, _)| path.starts_with(working))
             .max_by_key(|(working, _)| working.as_os_str().len())
-            .map(|(_, output)| output.as_path())
+            .map(|(working, output)| (working.as_path(), output.as_path()))
     }
 }
 
@@ -66,6 +73,37 @@ fn longest_common_dir(dirs: &[PathBuf]) -> PathBuf {
         common.truncate(shared);
     }
     common.iter().collect()
+}
+
+fn promotion_relative_dir(
+    source_dir: Option<&Path>,
+    source_root: &Path,
+    branch_source_dir: Option<&Path>,
+    auxiliary_root: &Path,
+    working_root: &Path,
+) -> PathBuf {
+    let branch_relative = branch_source_dir
+        .and_then(|dir| dir.strip_prefix(source_root).ok())
+        .map(Path::to_path_buf)
+        .unwrap_or_default();
+    let Some(source_dir) = source_dir else {
+        return branch_relative;
+    };
+    if source_dir.starts_with(working_root)
+        && !auxiliary_root.as_os_str().is_empty()
+        && let Ok(relative) = source_dir.strip_prefix(auxiliary_root)
+    {
+        return branch_relative.join(relative);
+    }
+    if !source_root.as_os_str().is_empty()
+        && let Ok(relative) = source_dir.strip_prefix(source_root)
+    {
+        return relative.to_path_buf();
+    }
+    source_dir
+        .strip_prefix(working_root)
+        .map(Path::to_path_buf)
+        .unwrap_or_default()
 }
 
 pub(super) fn ensure_unique_selected_branch_ids(
@@ -112,9 +150,18 @@ async fn ensure_output_dir(output_dir: &Path) -> Result<PathBuf, VoomError> {
 /// destination (a cross-filesystem copy whose source removal or DB repoint did not
 /// complete). Cross-filesystem placement goes through a temp sibling so the
 /// destination is never observed partial.
-async fn move_terminal_artifact(current: &Path, dest: &Path) -> Result<PathBuf, VoomError> {
+async fn move_terminal_artifact(
+    current: &Path,
+    dest: &Path,
+    location_id: FileLocationId,
+) -> Result<PathBuf, VoomError> {
     match tokio::fs::symlink_metadata(dest).await {
-        Ok(dest_meta) => return resolve_existing_destination(current, dest, &dest_meta).await,
+        Ok(dest_meta) => {
+            let destination = resolve_existing_destination(current, dest, &dest_meta).await?;
+            let temp_path = promotion_temp_path(dest, location_id)?;
+            remove_existing_promotion_temp(&temp_path).await?;
+            return Ok(destination);
+        }
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
         Err(err) => {
             return Err(VoomError::Config(format!(
@@ -123,13 +170,53 @@ async fn move_terminal_artifact(current: &Path, dest: &Path) -> Result<PathBuf, 
             )));
         }
     }
-    if tokio::fs::rename(current, dest).await.is_ok() {
+    if let Ok(()) = tokio::fs::hard_link(current, dest).await {
+        remove_promoted_source(current).await;
+        let temp_path = promotion_temp_path(dest, location_id)?;
+        remove_existing_promotion_temp(&temp_path).await?;
         return Ok(dest.to_path_buf());
     }
-    // A failed rename (typically a cross-filesystem EXDEV) falls back to an atomic
-    // copy-into-place: stream into a temp sibling, then rename it over dest.
-    copy_into_place(current, dest).await?;
-    Ok(dest.to_path_buf())
+    // A failed hard link (typically cross-filesystem EXDEV) falls back to an
+    // atomic copy-into-place.
+    let temp_path = promotion_temp_path(dest, location_id)?;
+    copy_terminal_artifact(current, dest, &temp_path).await
+}
+
+async fn copy_terminal_artifact(
+    current: &Path,
+    dest: &Path,
+    temp_path: &Path,
+) -> Result<PathBuf, VoomError> {
+    let temp = PromotionTempOwnership::acquire(temp_path).await?;
+    let result = match tokio::fs::symlink_metadata(dest).await {
+        Ok(dest_meta) => resolve_existing_destination(current, dest, &dest_meta).await,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            copy_into_place(current, dest, &temp)
+                .await
+                .map(|()| dest.to_path_buf())
+        }
+        Err(error) => Err(VoomError::Config(format!(
+            "stat promotion destination {}: {error}",
+            dest.display()
+        ))),
+    };
+    let cleanup = remove_promotion_temp(temp_path).await;
+    match result {
+        Ok(destination) => {
+            cleanup?;
+            Ok(destination)
+        }
+        Err(source) => {
+            if let Err(cleanup_error) = cleanup {
+                tracing::warn!(
+                    temp = %temp_path.display(),
+                    error = %cleanup_error,
+                    "failed to remove a promotion temp after placement failed"
+                );
+            }
+            Err(source)
+        }
+    }
 }
 
 /// Classify a pre-existing promotion destination: a resumed/interrupted promotion
@@ -203,10 +290,12 @@ async fn files_have_equal_contents(a: &Path, b: &Path) -> Result<bool, VoomError
     Ok(true)
 }
 
-/// Hidden temp sibling for the copy fallback. A dotfile prefixed/suffixed out of
-/// the plain-filename destination namespace, so it can never equal another
-/// artifact's promoted destination in a shared output dir.
-fn promotion_temp_path(dest: &Path) -> Result<PathBuf, VoomError> {
+/// Durable hidden temp sibling for the copy fallback. The location id makes the
+/// name stable across retries and distinct across artifacts, so resume reclaims
+/// an interrupted copy instead of allocating another full-size partial. The
+/// file also carries the exclusive lock that prevents concurrent resumes from
+/// unlinking or republishing each other's partial copy.
+fn promotion_temp_path(dest: &Path, location_id: FileLocationId) -> Result<PathBuf, VoomError> {
     let file_name = dest.file_name().ok_or_else(|| {
         VoomError::Internal(format!(
             "promotion destination has no file name: {}",
@@ -215,8 +304,126 @@ fn promotion_temp_path(dest: &Path) -> Result<PathBuf, VoomError> {
     })?;
     let mut temp_name = OsString::from(".voom-promote.");
     temp_name.push(file_name);
-    temp_name.push(".partial");
+    temp_name.push(format!(".location-{}.partial", location_id.0));
     Ok(dest.with_file_name(temp_name))
+}
+
+struct PromotionTempOwnership {
+    path: PathBuf,
+    file: File,
+}
+
+impl PromotionTempOwnership {
+    async fn acquire(path: &Path) -> Result<Self, VoomError> {
+        loop {
+            let file = open_promotion_temp(path)?;
+            if let Some(ownership) = Self::lock_and_validate(path, file).await? {
+                return Ok(ownership);
+            }
+        }
+    }
+
+    async fn lock_and_validate(path: &Path, file: File) -> Result<Option<Self>, VoomError> {
+        let display_path = path.to_path_buf();
+        let file = tokio::task::spawn_blocking(move || {
+            file.lock()?;
+            Ok::<File, std::io::Error>(file)
+        })
+        .await
+        .map_err(|error| {
+            VoomError::Internal(format!(
+                "join promotion temp lock for {}: {error}",
+                display_path.display()
+            ))
+        })?
+        .map_err(|error| {
+            VoomError::Config(format!(
+                "lock promotion temp {}: {error}",
+                display_path.display()
+            ))
+        })?;
+        let path_metadata = match tokio::fs::symlink_metadata(path).await {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => {
+                return Err(VoomError::Config(format!(
+                    "stat locked promotion temp {}: {error}",
+                    path.display()
+                )));
+            }
+        };
+        if !path_metadata.file_type().is_file() {
+            return Err(VoomError::Config(format!(
+                "promotion temp is not a regular file: {}",
+                path.display()
+            )));
+        }
+        let owned_file = file.try_clone().map_err(|error| {
+            VoomError::Config(format!(
+                "clone owned promotion temp {}: {error}",
+                path.display()
+            ))
+        })?;
+        let owned_handle = Handle::from_file(owned_file).map_err(|error| {
+            VoomError::Config(format!(
+                "identify owned promotion temp {}: {error}",
+                path.display()
+            ))
+        })?;
+        let path_handle = Handle::from_path(path).map_err(|error| {
+            VoomError::Config(format!(
+                "identify promotion temp path {}: {error}",
+                path.display()
+            ))
+        })?;
+        Ok((owned_handle == path_handle).then(|| Self {
+            path: path.to_path_buf(),
+            file,
+        }))
+    }
+
+    fn restart_file(&self) -> std::io::Result<tokio::fs::File> {
+        let file = self.file.try_clone()?;
+        file.set_len(0)?;
+        Ok(tokio::fs::File::from_std(file))
+    }
+}
+
+fn open_promotion_temp(path: &Path) -> Result<File, VoomError> {
+    std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(path)
+        .map_err(|error| {
+            VoomError::Config(format!("open promotion temp {}: {error}", path.display()))
+        })
+}
+
+async fn remove_promotion_temp(temp: &Path) -> Result<(), VoomError> {
+    match tokio::fs::remove_file(temp).await {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(VoomError::Config(format!(
+            "remove owned promotion temp {}: {error}",
+            temp.display()
+        ))),
+    }
+}
+
+async fn remove_existing_promotion_temp(temp: &Path) -> Result<(), VoomError> {
+    match tokio::fs::symlink_metadata(temp).await {
+        Ok(_) => {
+            let _ownership = PromotionTempOwnership::acquire(temp).await?;
+            remove_promotion_temp(temp).await
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(VoomError::Config(format!(
+            "stat promotion temp {}: {error}",
+            temp.display()
+        ))),
+    }
 }
 
 /// Remove a promoted artifact's source once its bytes are safe at the
@@ -233,33 +440,44 @@ async fn remove_promoted_source(current: &Path) {
     }
 }
 
-/// Place a terminal artifact at `dest` across filesystems without ever leaving a
-/// partial `dest`: stream into a hidden temp sibling on `dest`'s filesystem, then
-/// atomically `rename` it into place (an intra-filesystem rename is atomic). The
-/// source is removed best-effort afterward. Used when a direct `rename` fails
-/// (typically a cross-filesystem `EXDEV`).
-async fn copy_into_place(current: &Path, dest: &Path) -> Result<(), VoomError> {
-    let temp = promotion_temp_path(dest)?;
-    if let Err(err) = tokio::fs::copy(current, &temp).await {
-        // A partial copy may already exist at temp; remove it so no stray
-        // `.partial` dotfile is left in the operator's output dir.
-        let _ = tokio::fs::remove_file(&temp).await;
+/// Place a terminal artifact at `dest` across filesystems without exposing a
+/// partial file or replacing a concurrent destination.
+async fn copy_into_place(
+    current: &Path,
+    dest: &Path,
+    temp: &PromotionTempOwnership,
+) -> Result<(), VoomError> {
+    let copy_result = async {
+        let mut source = tokio::fs::File::open(current).await?;
+        let mut target = temp.restart_file()?;
+        tokio::io::copy(&mut source, &mut target).await?;
+        target.flush().await?;
+        target.sync_all().await
+    }
+    .await;
+    if let Err(err) = copy_result {
         return Err(VoomError::Config(format!(
             "copy terminal artifact {} -> {}: {err}",
             current.display(),
-            temp.display()
+            temp.path.display()
         )));
     }
-    if let Err(err) = tokio::fs::rename(&temp, dest).await {
-        let _ = tokio::fs::remove_file(&temp).await;
-        return Err(VoomError::Config(format!(
-            "place terminal artifact {} -> {}: {err}",
-            temp.display(),
-            dest.display()
-        )));
+    match tokio::fs::hard_link(&temp.path, dest).await {
+        Ok(()) => {
+            remove_promoted_source(current).await;
+            Ok(())
+        }
+        Err(error) => match tokio::fs::symlink_metadata(dest).await {
+            Ok(dest_meta) => resolve_existing_destination(current, dest, &dest_meta)
+                .await
+                .map(|_| ()),
+            Err(_) => Err(VoomError::Config(format!(
+                "place terminal artifact {} -> {} without replacement: {error}",
+                temp.path.display(),
+                dest.display()
+            ))),
+        },
     }
-    remove_promoted_source(current).await;
-    Ok(())
 }
 
 impl ControlPlane {
@@ -277,17 +495,17 @@ impl ControlPlane {
         &self,
         plan: &PromotionPlan,
         location_ids: &[FileLocationId],
+        source_root: &Path,
+        branch_source_dir: Option<&Path>,
     ) -> Result<(), VoomError> {
         let dirs = resolve_promotion_dirs(plan).await;
         if dirs.is_empty() || location_ids.is_empty() {
             return Ok(());
         }
-        // Pass 1: collect the terminal artifacts that will promote, each with the
-        // directory of its asset's original scanned source. The longest common
-        // ancestor of those source dirs anchors a subtree-mirroring layout under
-        // the output dir, so two sources sharing a basename across different
-        // subdirectories (issue #197) promote to distinct destinations instead of
-        // colliding after their transcodes already ran.
+        // Pass 1: collect terminal artifacts and their original source dirs.
+        // Primary outputs mirror the owning branch below the job-wide source
+        // root. Sidecars prepend the same branch subtree, then retain any
+        // operation-relative subtree needed to distinguish multiple outputs.
         let mut candidates = Vec::new();
         let mut source_dirs = Vec::new();
         for artifact in self.working_dir_artifacts(location_ids).await? {
@@ -300,7 +518,7 @@ impl ControlPlane {
             // the move rather than being silently skipped.
             let raw = PathBuf::from(&artifact.value);
             let current = tokio::fs::canonicalize(&raw).await.unwrap_or(raw);
-            let Some(output_dir) = dirs.output_for(&current) else {
+            let Some((working_dir, output_dir)) = dirs.pair_for(&current) else {
                 continue;
             };
             let source_dir = self
@@ -310,18 +528,39 @@ impl ControlPlane {
             if let Some(dir) = &source_dir {
                 source_dirs.push(dir.clone());
             }
-            candidates.push((artifact, current, output_dir.to_path_buf(), source_dir));
+            candidates.push((
+                artifact,
+                current,
+                working_dir.to_path_buf(),
+                output_dir.to_path_buf(),
+                source_dir,
+            ));
         }
-        let common_root = longest_common_dir(&source_dirs);
-        // Pass 2: move each terminal artifact under its mirrored subtree. A
-        // source dir under the common root contributes the relative subtree; an
-        // unknown source (no local-path location) falls back to a flat promotion.
-        for (artifact, current, output_dir, source_dir) in candidates {
-            let relative = source_dir
-                .as_deref()
-                .and_then(|dir| dir.strip_prefix(&common_root).ok())
-                .map(Path::to_path_buf)
-                .unwrap_or_default();
+        let common_root = if source_root.as_os_str().is_empty() {
+            longest_common_dir(&source_dirs)
+        } else {
+            source_root.to_path_buf()
+        };
+        let auxiliary_dirs = candidates
+            .iter()
+            .filter_map(|(_, _, working_dir, _, source_dir)| {
+                source_dir
+                    .as_ref()
+                    .filter(|source_dir| source_dir.starts_with(working_dir))
+                    .cloned()
+            })
+            .collect::<Vec<_>>();
+        let auxiliary_root = longest_common_dir(&auxiliary_dirs);
+        // Pass 2: move each terminal artifact under its branch-scoped mirrored
+        // subtree. An unknown artifact source still uses the branch subtree.
+        for (artifact, current, working_dir, output_dir, source_dir) in candidates {
+            let relative = promotion_relative_dir(
+                source_dir.as_deref(),
+                &common_root,
+                branch_source_dir,
+                &auxiliary_root,
+                &working_dir,
+            );
             let dest_dir = output_dir.join(&relative);
             self.promote_artifact(&artifact, &current, &dest_dir)
                 .await?;
@@ -329,29 +568,88 @@ impl ControlPlane {
         Ok(())
     }
 
-    pub(super) async fn promotion_location_ids(
+    pub(super) async fn promotion_source_root(
         &self,
-        job_ids: &[JobId],
-        file_phases: &[FilePhaseSummary],
-    ) -> Result<Vec<FileLocationId>, VoomError> {
-        let mut seen = HashSet::new();
-        let mut location_ids = Vec::new();
-        for row in file_phases {
-            let Some(location_id) = row.produced_file_location_id else {
+        input: &PolicyInputSetDraft,
+    ) -> Result<PathBuf, VoomError> {
+        let mut source_dirs = Vec::new();
+        for snapshot in &input.media_snapshots {
+            let TargetRef::FileVersion { id } = snapshot.target else {
                 continue;
             };
-            if seen.insert(location_id) {
-                location_ids.push(location_id);
+            let version = self.identity.get_file_version(id).await?.ok_or_else(|| {
+                VoomError::NotFound(format!("promotion source file version {id}"))
+            })?;
+            let source_dir = self
+                .asset_source_path(version.file_asset_id)
+                .await?
+                .and_then(|path| path.parent().map(Path::to_path_buf));
+            if let Some(source_dir) = source_dir {
+                source_dirs.push(source_dir);
             }
         }
-        for &job_id in job_ids {
-            for location_id in self.ticket_result_location_ids(job_id).await? {
-                if seen.insert(location_id) {
-                    location_ids.push(location_id);
-                }
+        Ok(longest_common_dir(&source_dirs))
+    }
+
+    pub(super) async fn reclaim_superseded_intermediates(
+        &self,
+        plan: &PromotionPlan,
+        file_phases: &[FilePhaseSummary],
+    ) -> Result<(), VoomError> {
+        let terminal_location = file_phases
+            .iter()
+            .rev()
+            .find_map(|row| row.produced_file_location_id);
+        let mut seen = HashSet::new();
+        let candidates = self
+            .validated_committed_location_ids_for_rows(file_phases)
+            .await?
+            .into_iter()
+            .filter(|location_id| {
+                Some(*location_id) != terminal_location && seen.insert(*location_id)
+            })
+            .collect::<Vec<_>>();
+        if candidates.is_empty() {
+            return Ok(());
+        }
+        let dirs = resolve_promotion_dirs(plan).await;
+        for location_id in candidates {
+            let Some(location) = self.identity.get_file_location(location_id).await? else {
+                continue;
+            };
+            if location.retired_at.is_some() || location.kind != FileLocationKind::LocalPath {
+                continue;
+            }
+            let path = PathBuf::from(&location.value);
+            let canonical = tokio::fs::canonicalize(&path).await.unwrap_or(path.clone());
+            if dirs.output_for(&canonical).is_none() {
+                continue;
+            }
+            self.reclaim_intermediate_location(&location).await?;
+        }
+        Ok(())
+    }
+
+    async fn reclaim_intermediate_location(
+        &self,
+        location: &voom_store::repo::identity::FileLocation,
+    ) -> Result<(), VoomError> {
+        let path = PathBuf::from(&location.value);
+        match tokio::fs::remove_file(&path).await {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(VoomError::Config(format!(
+                    "reclaim superseded intermediate {}: {error}",
+                    path.display()
+                )));
             }
         }
-        Ok(location_ids)
+        let mut tx = begin_tx(&self.pool).await?;
+        self.identity
+            .retire_file_location_in_tx(&mut tx, location.id, self.clock().now(), location.epoch)
+            .await?;
+        commit_tx(tx).await
     }
 
     pub(super) async fn promotion_location_ids_for_branches(
@@ -360,26 +658,15 @@ impl ControlPlane {
         branches: &[String],
     ) -> Result<Vec<FileLocationId>, VoomError> {
         let branches = branches.iter().map(String::as_str).collect::<HashSet<_>>();
+        let selected_rows = file_phases
+            .iter()
+            .filter(|row| branches.contains(row.branch_id.as_str()))
+            .cloned()
+            .collect::<Vec<_>>();
         let mut seen = HashSet::new();
-        let mut ticket_ids = HashSet::new();
         let mut location_ids = Vec::new();
-        for row in file_phases {
-            if !branches.contains(row.branch_id.as_str()) {
-                continue;
-            }
-            ticket_ids.extend(row.ticket_ids.iter().copied());
-            if let Some(location_id) = row.produced_file_location_id
-                && seen.insert(location_id)
-            {
-                location_ids.push(location_id);
-            }
-        }
-        if ticket_ids.is_empty() {
-            return Ok(location_ids);
-        }
-        let ticket_ids = ticket_ids.into_iter().collect::<Vec<_>>();
         for location_id in self
-            .ticket_result_location_ids_for_tickets(&ticket_ids)
+            .validated_committed_location_ids_for_rows(&selected_rows)
             .await?
         {
             if seen.insert(location_id) {
@@ -393,7 +680,10 @@ impl ControlPlane {
     /// `file_version`'s first local-path location. `None` when the asset has no
     /// such location (it then promotes flat). Add-only commits keep the earliest
     /// version pointing at the scanned source even after later versions chain on.
-    async fn asset_source_path(&self, asset_id: FileAssetId) -> Result<Option<PathBuf>, VoomError> {
+    pub(super) async fn asset_source_path(
+        &self,
+        asset_id: FileAssetId,
+    ) -> Result<Option<PathBuf>, VoomError> {
         let versions = self.identity.list_file_versions_by_asset(asset_id).await?;
         let Some(first) = versions.first() else {
             return Ok(None);
@@ -423,7 +713,7 @@ impl ControlPlane {
         })?;
         let dest_dir = ensure_output_dir(dest_dir).await?;
         let dest = dest_dir.join(file_name);
-        let dest = move_terminal_artifact(current, &dest).await?;
+        let dest = move_terminal_artifact(current, &dest, artifact.location_id).await?;
         let mut tx = begin_tx(&self.pool).await?;
         self.identity
             .update_file_location_value_in_tx(

@@ -631,6 +631,7 @@ async fn dispatch_compliance(cli: &Cli, command: ComplianceCommand) -> Result<Ex
         ComplianceCommand::Execute {
             policy_version_id,
             input_set_id,
+            max_in_flight_files,
             staging_root,
             output_dir,
             safety_policy,
@@ -642,6 +643,7 @@ async fn dispatch_compliance(cli: &Cli, command: ComplianceCommand) -> Result<Ex
                 compliance::ExecuteArgs {
                     policy_version_id,
                     input_set_id,
+                    max_in_flight_files,
                     staging_root,
                     output_dir,
                     safety_policy,

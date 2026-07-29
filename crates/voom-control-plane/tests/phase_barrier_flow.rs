@@ -4,7 +4,7 @@
     reason = "integration test setup should fail loudly with direct assertions"
 )]
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use serde_json::json;
@@ -93,6 +93,130 @@ async fn phase_barrier_commits_every_file_in_a_single_phase() {
 
     assert_phase_completed(&outcome, &out_dir);
     assert_rows_durable(&url, outcome.job_id).await;
+}
+
+#[tokio::test]
+async fn sliding_window_advances_a_file_while_its_sibling_is_in_an_earlier_phase() {
+    let _ffprobe_guard = hide_stale_fake_ffprobe_sibling("sliding-window-flow").unwrap();
+    cargo_build_package("voom-ffprobe-worker").unwrap();
+    cargo_build_package("voom-verify-artifact-worker").unwrap();
+    cargo_build_package("voom-ffmpeg-worker").unwrap();
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    let first_path = root.join("First.mp4");
+    let second_path = root.join("Second.mp4");
+    let third_path = root.join("Third.mp4");
+    generate_h264_fixture(&first_path);
+    generate_h264_fixture(&second_path);
+    generate_h264_fixture(&third_path);
+
+    let db = TempDatabase::new().unwrap();
+    let url = format!("sqlite://{}", db.path().display());
+    voom_store::init(&url).await.unwrap();
+    let pool = voom_store::connect(&url).await.unwrap();
+    let cp =
+        ControlPlane::open_with_pool(pool.clone(), std::sync::Arc::new(voom_core::SystemClock))
+            .await
+            .unwrap();
+    let first = scan_one(&cp, &first_path).await;
+    let second = scan_one(&cp, &second_path).await;
+    let third = scan_one(&cp, &third_path).await;
+    let policy = cp
+        .create_policy_document(
+            "sliding-window-order",
+            "policy \"sliding window order\" {\n  \
+               phase normalize { transcode video to hevc }\n  \
+               phase archive { depends_on: [normalize] \
+               transcode video to hevc using profile \"hevc-archive\" }\n}",
+        )
+        .await
+        .unwrap();
+    let input = cp
+        .create_policy_input_set(two_file_input(&[
+            ("first", first),
+            ("second", second),
+            ("third", third),
+        ]))
+        .await
+        .unwrap();
+
+    let mut worker = TranscodeWorkerLaunch::start(&cp).await.unwrap();
+    let outcome = cp
+        .run_phase_barrier(
+            policy.version.id,
+            input.id,
+            ComplianceExecutionOptions {
+                max_in_flight_files: 2,
+                transcode_staging_root: root.join("stage"),
+                transcode_target_dir: root.join("out"),
+                ..ComplianceExecutionOptions::default()
+            },
+        )
+        .await
+        .unwrap();
+    worker.shutdown().unwrap();
+
+    assert_sliding_order_and_refill(&pool, outcome.job_id).await;
+}
+
+async fn assert_sliding_order_and_refill(pool: &sqlx::SqlitePool, job_id: voom_core::JobId) {
+    let rows: Vec<(String, String, String)> = sqlx::query_as(
+        "SELECT json_extract(payload, '$.workflow_id'), created_at, state_changed_at \
+         FROM tickets WHERE job_id = ? \
+           AND kind = 'synthetic.workflow.operation.transcode_video' \
+         ORDER BY id",
+    )
+    .bind(i64::try_from(job_id.0).unwrap())
+    .fetch_all(pool)
+    .await
+    .unwrap();
+    let first_phase_zero = rows
+        .iter()
+        .filter(|(workflow_id, _, _)| {
+            workflow_id.ends_with("phase-0")
+                && (workflow_id.contains("file-1-") || workflow_id.contains("file-2-"))
+        })
+        .min_by_key(|(_, _, completed_at)| completed_at)
+        .unwrap();
+    let ordinal = first_phase_zero
+        .0
+        .split("-file-")
+        .nth(1)
+        .unwrap()
+        .split('-')
+        .next()
+        .unwrap();
+    let later_workflow = format!("file-{ordinal}-phase-1");
+    let later = rows
+        .iter()
+        .find(|(workflow_id, _, _)| workflow_id.contains(&later_workflow))
+        .unwrap();
+    let sibling_phase_zero = rows
+        .iter()
+        .find(|(workflow_id, _, _)| {
+            workflow_id.ends_with("phase-0")
+                && (workflow_id.contains("file-1-") || workflow_id.contains("file-2-"))
+                && workflow_id != &first_phase_zero.0
+        })
+        .unwrap();
+    assert!(
+        later.1 < sibling_phase_zero.2,
+        "a completed file must enter phase 1 before its slower sibling completes phase 0"
+    );
+    let progress = SqliteWorkflowSummaryRepo::new(pool.clone())
+        .file_progress_for_job(job_id)
+        .await
+        .unwrap();
+    assert_eq!(progress.len(), 3);
+    let released_at = progress[0]
+        .terminal_at
+        .unwrap()
+        .min(progress[1].terminal_at.unwrap());
+    assert!(
+        progress[2].admitted_at.unwrap() >= released_at,
+        "the third file must refill a slot only after an initial file is terminal"
+    );
 }
 
 /// Every active file committed in the one `normalize` phase: a `Committed`
@@ -293,13 +417,13 @@ async fn phase_barrier_chains_committed_artifact_into_the_next_phase() {
     let produced_version = phase0_commit
         .produced_file_version_id
         .expect("committed row records the produced version");
-    // Phase 0's artifact is now an intermediate (phase 1 re-transcodes it), so it
-    // commits to the working dir and is NOT promoted to --output-dir. Only the
-    // terminal (phase 1) artifact lands in --output-dir.
+    // Phase 0's artifact becomes a superseded intermediate after phase 1
+    // commits. The terminal artifact promotes and the intermediate is reclaimed
+    // before the file releases its window slot.
     let transcode_working = root.join("stage").join(".committed").join("transcode");
     assert!(
-        file_exists_under(&transcode_working, "Chain.default-hevc.hevc.mkv"),
-        "phase 0's intermediate stays in the working dir"
+        !file_exists_under(&transcode_working, "Chain.default-hevc.hevc.mkv"),
+        "phase 0's superseded intermediate is reclaimed"
     );
     assert!(
         !out_dir.join("Chain.default-hevc.hevc.mkv").exists(),
@@ -447,10 +571,10 @@ async fn assert_reprobe_and_lineage_chain(
 
 /// When one file's ticket fails mid-phase while a sibling commits inline, the
 /// coordinator records the committed file's `Committed` per-`(file, phase)` row
-/// before returning (ADR-0007): the executor drains every in-flight dispatch to
-/// a terminal state, so the survivor's commit has landed, and that durable
-/// record must survive the failed job. The failed file gets no row, the run
-/// returns a `partial` outcome, and the job is `failed`.
+/// before returning (ADR-0007): the sliding window drains every admitted file
+/// pipeline to a terminal state, so the survivor's commit and immediate
+/// promotion have landed. The failed file gets no row, the run returns a
+/// `partial` outcome, and the job is `failed`.
 #[tokio::test]
 async fn phase_barrier_records_committed_sibling_when_a_file_fails() {
     let _ffprobe_guard = hide_stale_fake_ffprobe_sibling("phase-barrier-flow").unwrap();
@@ -475,6 +599,7 @@ async fn phase_barrier_records_committed_sibling_when_a_file_fails() {
 
     let good_file = scan_one(&cp, &good).await;
     let doomed_file = scan_one(&cp, &doomed).await;
+    let doomed_version = doomed_file.file_version_id;
     // Corrupt the doomed source AFTER scanning so its transcode fails on the
     // source-facts check (size/hash no longer match the scanned file version),
     // while the good file transcodes and commits inline.
@@ -522,17 +647,16 @@ async fn phase_barrier_records_committed_sibling_when_a_file_fails() {
     assert_eq!(committed.outcome, FilePhaseOutcome::Committed);
     assert!(committed.produced_file_version_id.is_some());
     assert!(committed.reprobe_snapshot_id.is_some());
-    // The run failed, so promotion never ran: the committed sibling's artifact
-    // stays in the working dir and never reaches --output-dir. A later resume
-    // that succeeds would promote it.
+    // A terminal file promotes when its own pipeline completes; it does not wait
+    // for the unrelated doomed pipeline or the job-grain result.
     let transcode_working = root.join("stage").join(".committed").join("transcode");
     assert!(
-        file_exists_under(&transcode_working, "Good.default-hevc.hevc.mkv"),
-        "the committed sibling's artifact stays in the working dir on a failed run"
+        !file_exists_under(&transcode_working, "Good.default-hevc.hevc.mkv"),
+        "the promoted sibling leaves no terminal copy in the working dir"
     );
     assert!(
-        !out_dir.join("Good.default-hevc.hevc.mkv").exists(),
-        "a failed run promotes nothing to --output-dir"
+        out_dir.join("Good.default-hevc.hevc.mkv").exists(),
+        "the terminal sibling promotes before the unrelated pipeline failure"
     );
 
     // The committed row is durable and the job is failed.
@@ -540,6 +664,23 @@ async fn phase_barrier_records_committed_sibling_when_a_file_fails() {
     let durable = repo.file_phases_for_job(partial.job_id).await.unwrap();
     assert_eq!(durable.len(), 1);
     assert_eq!(durable[0].branch_id, "Good");
+    assert_eq!(partial.phases.len(), 1);
+    assert_eq!(partial.phases[0].outcome, PhaseOutcome::PartiallyCommitted);
+    let checks = partial.phases[0].report.as_ref().unwrap().report["checks"]
+        .as_array()
+        .unwrap();
+    let targets = checks
+        .iter()
+        .map(|check| check["target"]["id"].as_u64().unwrap())
+        .collect::<std::collections::HashSet<_>>();
+    assert!(
+        targets.contains(&doomed_version.0),
+        "the durable report retains the failed file that entered the phase"
+    );
+    assert!(
+        targets.contains(&committed.produced_file_version_id.unwrap().0),
+        "the durable report retains the committed sibling's refreshed result"
+    );
     assert_eq!(job_state(&url, partial.job_id).await, "failed");
 }
 
@@ -722,19 +863,25 @@ async fn phase_barrier_resumes_failed_file_without_remutating_committed_sibling(
     assert_ne!(outcome.job_id, partial.job_id, "resume opens a new job");
     assert_eq!(job_state(&url, outcome.job_id).await, "succeeded");
 
-    // Good is complete (single-phase policy), so reconciliation drops it and it
-    // is never re-dispatched. Assert that durably: its asset's chain length is
-    // unchanged, so no new version was produced for Good on resume.
+    // Good is complete (single-phase policy), so reconciliation carries its
+    // durable row into the new job but never re-dispatches it. Assert that its
+    // asset's chain length is unchanged and the carried row keeps the original
+    // result and ticket provenance.
     assert_eq!(
         asset_version_count(&url, good_v1).await,
         good_chain_before,
         "Good's chain must not grow on resume (no re-mutation)"
     );
-    assert!(
-        outcome.file_phases.iter().all(|r| r.branch_id != "Good"),
-        "Good is complete and must not appear in the resumed job's rows: {:?}",
-        outcome.file_phases
+    let resumed_good = outcome
+        .file_phases
+        .iter()
+        .find(|row| row.branch_id == "Good")
+        .expect("Good's completed row is carried for terminalization recovery");
+    assert_eq!(
+        resumed_good.produced_file_version_id,
+        good_committed.produced_file_version_id
     );
+    assert_eq!(resumed_good.ticket_ids, good_committed.ticket_ids);
 
     // Doomed re-entered and committed under the new job.
     let doomed_committed = outcome
@@ -813,12 +960,11 @@ async fn phase_barrier_promotes_only_terminal_artifact_across_phases() {
     assert_eq!(outcome.phases[0].outcome, PhaseOutcome::Completed);
     assert_eq!(outcome.phases[1].outcome, PhaseOutcome::Completed);
 
-    // The intermediate remux artifact stays in the remux working dir and is NOT
-    // promoted to --output-dir.
+    // The intermediate remux artifact is reclaimed and is not promoted.
     let remux_working = staging_root.join(".committed").join("remux");
     assert!(
-        file_exists_under(&remux_working, "Movie.remux.mkv"),
-        "the phase 0 remux intermediate stays in the working dir"
+        !file_exists_under(&remux_working, "Movie.remux.mkv"),
+        "the phase 0 remux intermediate is reclaimed"
     );
     assert!(
         !out_dir.join("Movie.remux.mkv").exists(),
@@ -842,14 +988,12 @@ async fn phase_barrier_promotes_only_terminal_artifact_across_phases() {
     );
 }
 
-/// Post-run promotion is driven by each file's durable chain tip, NOT the last
-/// positional phase, so a file whose terminal artifact is produced by an EARLIER
-/// phase is still promoted. A no-audio file is remuxed in phase 0 (its terminal)
-/// and then blocks the final `transcode audio` phase (no audio to transcode), so
-/// its terminal is phase 0's remux output — exactly the case a position-based
-/// router would misplace. It is promoted to `--output-dir` regardless.
+/// A planning-blocked final phase withholds an earlier committed artifact. The
+/// no-audio file is remuxed in phase 0, then blocks the final `transcode audio`
+/// phase. Publishing phase 0's output would expose a file that did not complete
+/// the requested policy.
 #[tokio::test]
-async fn phase_barrier_promotes_terminal_artifact_from_earlier_phase() {
+async fn phase_barrier_withholds_intermediate_when_later_phase_blocks() {
     require_command("mkvmerge", &["--version"]);
     let _ffprobe_guard = hide_stale_fake_ffprobe_sibling("phase-barrier-flow").unwrap();
     cargo_build_package("voom-ffprobe-worker").unwrap();
@@ -923,18 +1067,20 @@ async fn phase_barrier_promotes_terminal_artifact_from_earlier_phase() {
         .expect("phase 1 records a row");
     assert_eq!(phase1.outcome, FilePhaseOutcome::Blocked);
 
-    // The terminal artifact (phase 0's remux output) is promoted to --output-dir
-    // even though the final phase produced nothing.
+    // A planning-blocked terminal phase withholds the earlier intermediate.
+    // Publishing it would expose an artifact that did not complete the policy.
     let mkvs = mkvs_in(&out_dir);
-    assert_eq!(
-        mkvs,
-        vec!["Movie.remux.mkv".to_owned()],
-        "the earlier-phase terminal artifact is promoted to --output-dir"
+    assert!(mkvs.is_empty(), "blocked output must not be promoted");
+    let working_dir = staging_root.join(".committed").join("remux");
+    assert!(
+        file_exists_under(&working_dir, "Movie.remux.mkv"),
+        "blocked output must remain available for diagnosis and resume"
     );
+    let tip = PathBuf::from(tip_location_value(&url, scanned_version).await);
     assert_eq!(
-        tip_location_value(&url, scanned_version).await,
-        out_dir.join("Movie.remux.mkv").display().to_string(),
-        "the chain tip location must point at the promoted output path"
+        tip.parent().and_then(Path::parent),
+        Some(working_dir.as_path()),
+        "the chain tip must remain in the coordinator working directory"
     );
 }
 

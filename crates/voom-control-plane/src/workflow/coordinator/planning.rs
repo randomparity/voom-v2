@@ -12,7 +12,7 @@ use voom_plan::{ExecutionPlan, NodeStatus, PlanOperationKind, PlanningContext, P
 use voom_policy::{PolicyInputSetDraft, TargetRef};
 use voom_store::repo::identity::MediaSnapshot;
 use voom_store::repo::workflow_summaries::{
-    FilePhaseOutcome, NewWorkflowSummary, PhaseOutcome, PhaseReport,
+    FileAdmissionTier, FilePhaseOutcome, NewWorkflowSummary, PhaseOutcome, PhaseReport,
 };
 
 use crate::cases::policy::plans::ResolvedFileInput;
@@ -304,6 +304,7 @@ pub(super) fn initial_phase_files(
                 snapshot: resolved.active_snapshot,
                 branch_id,
                 ordinal: resolved.ordinal,
+                admission_tier: FileAdmissionTier::Pending,
                 resume_ordinal: 0,
                 phase_history: std::collections::BTreeMap::new(),
             })

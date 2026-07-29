@@ -48,6 +48,7 @@ const EXPECTED_MIGRATION_FILES: &[&str] = &[
     "0025_recoverable_audio_synthesis.sql",
     "0026_policy_artifact_verification.sql",
     "0027_audio_synthesis_asset_lineage.sql",
+    "0028_sliding_file_window.sql",
 ];
 
 fn workspace_root() -> PathBuf {
@@ -335,6 +336,74 @@ async fn policy_verification_migration_preserves_workflow_progress() {
     assert_eq!(history, "skipped");
     assert_eq!(verification_owner, (None, None));
     assert_eq!(violations, Vec::<(String, i64, String, i64)>::new());
+}
+
+#[tokio::test]
+async fn sliding_window_migration_backfills_legacy_progress_and_accepts_blocked() {
+    let migration_path = migrations_dir().join("0028_sliding_file_window.sql");
+    assert!(
+        migration_path.is_file(),
+        "{} must exist before the upgrade path can be exercised",
+        migration_path.display()
+    );
+
+    let tmp = TempDatabase::new().unwrap();
+    let url = sqlite_url_for(tmp.path());
+    let pool = connect_or_create(&url).await.unwrap();
+    migrator_through(27).run(&pool).await.unwrap();
+    let (_file_version_id, job_id) = seed_legacy_workflow_progress(&pool).await;
+
+    MIGRATOR.run(&pool).await.unwrap();
+
+    let preserved: String = sqlx::query_scalar(
+        "SELECT outcome FROM workflow_file_run_history \
+         WHERE job_id = ? AND branch_id = 'movie' AND phase_ordinal = 0",
+    )
+    .bind(job_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let window: i64 = sqlx::query_scalar(
+        "SELECT max_in_flight_files FROM workflow_file_windows WHERE job_id = ?",
+    )
+    .bind(job_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let progress: (String, i64, i64) = sqlx::query_as(
+        "SELECT state, next_phase_ordinal, admission_tier \
+         FROM workflow_file_progress WHERE job_id = ? AND branch_id = 'movie'",
+    )
+    .bind(job_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO workflow_file_run_history \
+         (job_id, branch_id, phase_ordinal, outcome) VALUES (?, 'movie', 1, 'blocked')",
+    )
+    .bind(job_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let outcomes: Vec<String> = sqlx::query_scalar(
+        "SELECT outcome FROM workflow_file_run_history \
+         WHERE job_id = ? AND branch_id = 'movie' ORDER BY phase_ordinal",
+    )
+    .bind(job_id)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+
+    assert_eq!(preserved, "skipped");
+    assert_eq!(window, 4);
+    assert_eq!(progress, ("active".to_owned(), 1, 0));
+    assert_eq!(outcomes, ["skipped", "blocked"]);
+    let violations: Vec<(String, i64, String, i64)> = sqlx::query_as("PRAGMA foreign_key_check")
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+    assert!(violations.is_empty());
 }
 
 #[tokio::test]

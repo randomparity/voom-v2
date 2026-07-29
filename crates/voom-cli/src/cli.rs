@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
+use voom_control_plane::policy::DEFAULT_MAX_IN_FLIGHT_FILES;
 
 #[derive(Parser, Debug)]
 #[command(name = "voom", version, about = "VOOM control plane CLI", long_about = None)]
@@ -838,6 +839,9 @@ pub enum ComplianceCommand {
         policy_version_id: u64,
         #[arg(long)]
         input_set_id: u64,
+        /// Maximum number of files allowed to retain in-progress artifacts.
+        #[arg(long, default_value_t = DEFAULT_MAX_IN_FLIGHT_FILES)]
+        max_in_flight_files: usize,
         #[arg(long)]
         staging_root: Option<std::path::PathBuf>,
         #[arg(long)]

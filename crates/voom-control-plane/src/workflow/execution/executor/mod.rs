@@ -83,6 +83,15 @@ pub struct WorkflowExecutorOptions {
     pub queue: WorkflowQueueOptions,
     pub artifact_roots: WorkflowArtifactRoots,
     pub chaos: WorkflowChaosOptions,
+    #[cfg(test)]
+    pub(crate) capacity_deferred_sync: Option<CapacityDeferredTestSync>,
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone)]
+pub(crate) struct CapacityDeferredTestSync {
+    pub(crate) observed: std::sync::Arc<tokio::sync::Notify>,
+    pub(crate) resume: std::sync::Arc<tokio::sync::Notify>,
 }
 
 impl WorkflowExecutorOptions {
@@ -103,6 +112,7 @@ impl WorkflowExecutorOptions {
             queue: WorkflowQueueOptions::for_tests(),
             artifact_roots: WorkflowArtifactRoots::for_tests(),
             chaos: WorkflowChaosOptions::default(),
+            capacity_deferred_sync: None,
         }
     }
 }
@@ -165,10 +175,24 @@ struct DispatchReadyOutcome {
     capacity_deferred: bool,
 }
 
+fn no_dispatchable_work(job_id: JobId) -> VoomError {
+    VoomError::Internal(format!(
+        "workflow {job_id} has no dispatchable work but is not finished"
+    ))
+}
+
 enum CapacityWaitOutcome {
     RetryAfter(Duration),
     TimedOut,
     Cancelled,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WorkflowIdleState {
+    Finished,
+    Ready,
+    Leased,
+    Blocked,
 }
 
 impl RunLoopState {
@@ -483,19 +507,101 @@ impl WorkflowExecutor {
         job_id: JobId,
         started: Instant,
     ) -> Result<(), WorkflowRunError> {
+        #[cfg(test)]
+        if let Some(sync) = &self.options.capacity_deferred_sync {
+            sync.observed.notify_one();
+            sync.resume.notified().await;
+        }
+        let timeout_source = VoomError::NoEligibleWorker(format!(
+            "workflow {job_id} worker capacity remained full for {:?}",
+            self.options.queue.capacity_retry_timeout
+        ));
+        self.wait_for_external_progress(state, job_id, started, timeout_source)
+            .await
+    }
+
+    async fn wait_for_externally_leased_work(
+        &self,
+        state: &mut RunLoopState,
+        job_id: JobId,
+        started: Instant,
+    ) -> Result<(), WorkflowRunError> {
+        let job = match self.control_plane.jobs.get(job_id).await {
+            Ok(Some(job)) => job,
+            Ok(None) => {
+                let source = VoomError::NotFound(format!("job {job_id}"));
+                return Err(state
+                    .fail_job(&self.control_plane, job_id, source, started)
+                    .await);
+            }
+            Err(source) => {
+                return Err(state
+                    .fail_job(&self.control_plane, job_id, source, started)
+                    .await);
+            }
+        };
+        match job.state {
+            JobState::Open => {}
+            JobState::Cancelled => {
+                let source = VoomError::UserCancellation(format!(
+                    "workflow {job_id} cancelled while waiting for externally leased work"
+                ));
+                return Err(state
+                    .finish_isolated_failure(&self.control_plane, job_id, source, started)
+                    .await);
+            }
+            JobState::Succeeded | JobState::Failed => {
+                let source = VoomError::Conflict(format!(
+                    "workflow external lease wait rejected: job {job_id} is {}",
+                    job.state.as_str()
+                ));
+                return Err(state
+                    .fail_job(&self.control_plane, job_id, source, started)
+                    .await);
+            }
+        }
+        let interval = self.options.queue.capacity_retry_interval;
+        if interval.is_zero() {
+            let source =
+                VoomError::Config("worker capacity retry interval must be positive".to_owned());
+            return Err(state
+                .fail_job(&self.control_plane, job_id, source, started)
+                .await);
+        }
+        let expiry = match self
+            .control_plane
+            .expire_due(self.control_plane.clock().now())
+            .await
+        {
+            Ok(expiry) => expiry,
+            Err(source) => {
+                return Err(state
+                    .fail_job(&self.control_plane, job_id, source, started)
+                    .await);
+            }
+        };
+        if expiry.expired_leases.is_empty() {
+            tokio::time::sleep(interval).await;
+        }
+        Ok(())
+    }
+
+    async fn wait_for_external_progress(
+        &self,
+        state: &mut RunLoopState,
+        job_id: JobId,
+        started: Instant,
+        timeout_source: VoomError,
+    ) -> Result<(), WorkflowRunError> {
         let control = &self.control_plane;
         match self.capacity_wait_outcome(state, job_id).await {
             Ok(CapacityWaitOutcome::RetryAfter(delay)) => {
                 tokio::time::sleep(delay).await;
                 Ok(())
             }
-            Ok(CapacityWaitOutcome::TimedOut) => {
-                let source = VoomError::NoEligibleWorker(format!(
-                    "workflow {job_id} worker capacity remained full for {:?}",
-                    self.options.queue.capacity_retry_timeout
-                ));
-                Err(state.fail_job(control, job_id, source, started).await)
-            }
+            Ok(CapacityWaitOutcome::TimedOut) => Err(state
+                .fail_job(control, job_id, timeout_source, started)
+                .await),
             Ok(CapacityWaitOutcome::Cancelled) => {
                 let source = VoomError::UserCancellation(format!(
                     "workflow {job_id} cancelled while waiting for worker capacity"
@@ -506,6 +612,71 @@ impl WorkflowExecutor {
             }
             Err(source) => Err(state.fail_job(control, job_id, source, started).await),
         }
+    }
+
+    async fn wait_or_fail_idle(
+        &self,
+        state: &mut RunLoopState,
+        invocation: &RunInvocation<'_>,
+        dispatch: DispatchReadyOutcome,
+        started: Instant,
+    ) -> Result<(), WorkflowRunError> {
+        if dispatch.capacity_deferred {
+            return self
+                .wait_for_external_capacity(state, invocation.job_id, started)
+                .await;
+        }
+        let idle_state = match self
+            .workflow_idle_state(invocation.job_id, invocation.workflow_id)
+            .await
+        {
+            Ok(idle_state) => idle_state,
+            Err(source) => {
+                return Err(state
+                    .fail_job(&self.control_plane, invocation.job_id, source, started)
+                    .await);
+            }
+        };
+        match idle_state {
+            WorkflowIdleState::Finished => return Ok(()),
+            WorkflowIdleState::Leased => {
+                return self
+                    .wait_for_externally_leased_work(state, invocation.job_id, started)
+                    .await;
+            }
+            WorkflowIdleState::Ready | WorkflowIdleState::Blocked => {}
+        }
+        match self
+            .retry_delay(
+                invocation.job_id,
+                invocation.workflow_id,
+                self.control_plane.clock().now(),
+            )
+            .await
+        {
+            Ok(Some(delay)) => {
+                tokio::time::sleep(delay).await;
+                return Ok(());
+            }
+            Ok(None) => {}
+            Err(source) => {
+                return Err(state
+                    .fail_job(&self.control_plane, invocation.job_id, source, started)
+                    .await);
+            }
+        }
+        if idle_state == WorkflowIdleState::Ready {
+            return Ok(());
+        }
+        if let Some(source) = state.take_isolated_error() {
+            return Err(state
+                .finish_isolated_failure(&self.control_plane, invocation.job_id, source, started)
+                .await);
+        }
+        let source = no_dispatchable_work(invocation.job_id);
+        Err(state
+            .fail_job(&self.control_plane, invocation.job_id, source, started)
+            .await)
     }
 
     #[must_use]
@@ -725,28 +896,9 @@ impl WorkflowExecutor {
             }
 
             if state.active_is_empty() {
-                if dispatch.capacity_deferred {
-                    self.wait_for_external_capacity(&mut state, job_id, started)
-                        .await?;
-                    continue;
-                }
-                match self
-                    .retry_delay(job_id, workflow_id, self.control_plane.clock().now())
-                    .await
-                {
-                    Ok(Some(delay)) => {
-                        tokio::time::sleep(delay).await;
-                        continue;
-                    }
-                    Ok(None) => {}
-                    Err(source) => {
-                        return Err(state.fail_job(control, job_id, source, started).await);
-                    }
-                }
-                let source = VoomError::Internal(format!(
-                    "workflow {job_id} has no dispatchable work but is not finished"
-                ));
-                return Err(state.fail_job(control, job_id, source, started).await);
+                self.wait_or_fail_idle(&mut state, &invocation, dispatch, started)
+                    .await?;
+                continue;
             }
             state.reset_capacity_wait();
             state

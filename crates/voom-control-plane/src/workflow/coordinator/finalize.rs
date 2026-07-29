@@ -5,6 +5,8 @@
 //! files that committed inline before a dispatch failure, and finalizes the owned
 //! job (succeeded or zero-phase) into a [`CoordinatorOutcome`].
 
+use std::collections::BTreeSet;
+
 use sqlx::Row;
 use voom_core::ids::ArtifactVerificationId;
 use voom_core::{
@@ -17,9 +19,8 @@ use voom_store::repo::workflow_summaries::{
 };
 
 use crate::ControlPlane;
-use crate::workflow::WorkflowRunSummary;
 use crate::workflow::coordinator::planning::{job_grain_summary, zero_phase_summary};
-use crate::workflow::coordinator::{CoordinatorError, CoordinatorOutcome, Disposition, PhaseFile};
+use crate::workflow::coordinator::{CoordinatorOutcome, Disposition, PhaseFile};
 use crate::workflow::ticket_results::PolicyVerificationTicketResult;
 
 type VerifiedEvidenceRow = (
@@ -61,18 +62,6 @@ struct SameLineageCommit {
     produced: JobProducedCommit,
 }
 
-pub(super) struct FailedPhaseFinalization<'a> {
-    pub(super) job_id: JobId,
-    pub(super) phase_ordinal: u32,
-    pub(super) files: &'a [PhaseFile],
-    pub(super) dispositions: &'a [Disposition],
-    pub(super) phase_dispatched: bool,
-    pub(super) run_summary: Option<&'a WorkflowRunSummary>,
-    pub(super) source: VoomError,
-    pub(super) phases: Vec<PhaseSummary>,
-    pub(super) file_phases: Vec<FilePhaseSummary>,
-}
-
 enum CommitRelevance {
     OtherLineage,
     Sidecar,
@@ -99,6 +88,7 @@ struct CommittedResultFields {
 struct CommittedEvidenceRow {
     ticket_id: i64,
     ticket_job_id: Option<i64>,
+    ticket_payload: String,
     result: String,
     commit_id: Option<i64>,
     commit_artifact_handle_id: Option<i64>,
@@ -120,43 +110,19 @@ struct CommittedEvidenceRow {
 }
 
 impl ProducedRefs {
-    pub(super) async fn resolve(
-        control_plane: &ControlPlane,
-        file_version_id: FileVersionId,
-        snapshot: &MediaSnapshot,
-    ) -> Result<Self, VoomError> {
-        let location = control_plane
-            .identity
-            .list_live_file_locations_by_version(file_version_id)
-            .await?
-            .into_iter()
-            .next()
-            .ok_or_else(|| {
-                VoomError::Internal(format!(
-                    "committed version {file_version_id} has no live location"
-                ))
-            })?;
-        Ok(Self {
-            file_version_id: Some(file_version_id),
-            file_location_id: Some(location.id),
-            artifact_handle_id: None,
-            artifact_verification_id: None,
-            reprobe_snapshot_id: Some(snapshot.id),
-        })
-    }
-
     pub(super) fn seed(
         self,
         job_id: JobId,
         phase_ordinal: u32,
         branch_id: String,
+        ticket_ids: Vec<TicketId>,
         outcome: FilePhaseOutcome,
     ) -> NewFilePhaseSummary {
         NewFilePhaseSummary {
             job_id,
             phase_ordinal,
             branch_id,
-            ticket_ids: Vec::new(),
+            ticket_ids,
             produced_file_version_id: self.file_version_id,
             produced_file_location_id: self.file_location_id,
             artifact_handle_id: self.artifact_handle_id,
@@ -166,20 +132,14 @@ impl ProducedRefs {
         }
     }
 
-    pub(super) fn verified_seed(row: &FilePhaseSummary) -> Result<Self, VoomError> {
-        if row.outcome != FilePhaseOutcome::Verified {
-            return Err(VoomError::Internal(format!(
-                "phase row {} is not verified",
-                row.id
-            )));
-        }
-        Ok(Self {
+    pub(super) fn resume_seed(row: &FilePhaseSummary) -> Self {
+        Self {
             file_version_id: row.produced_file_version_id,
             file_location_id: row.produced_file_location_id,
             artifact_handle_id: row.artifact_handle_id,
             artifact_verification_id: row.artifact_verification_id,
             reprobe_snapshot_id: row.reprobe_snapshot_id,
-        })
+        }
     }
 
     fn verified(result: &PolicyVerificationTicketResult) -> Self {
@@ -250,6 +210,7 @@ impl CommittedEvidenceRow {
         Ok(Self {
             ticket_id: evidence_column(row, "ticket_id")?,
             ticket_job_id: evidence_column(row, "ticket_job_id")?,
+            ticket_payload: evidence_column(row, "ticket_payload")?,
             result: evidence_column(row, "result")?,
             commit_id: evidence_column(row, "commit_id")?,
             commit_artifact_handle_id: evidence_column(row, "commit_artifact_handle_id")?,
@@ -277,7 +238,7 @@ impl CommittedEvidenceRow {
     fn validate(
         &self,
         job_id: JobId,
-        file: &PhaseFile,
+        expected_asset_id: FileAssetId,
         result: &CommittedResultFields,
     ) -> Result<CommitRelevance, VoomError> {
         let ticket_id = TicketId(sqlite_u64(self.ticket_id, "commit evidence ticket id")?);
@@ -293,7 +254,7 @@ impl CommittedEvidenceRow {
             required_evidence(self.source_file_asset_id, ticket_id, "source file asset")?,
             "commit evidence source file asset",
         )?;
-        if source_asset_id != file.asset_id.0 {
+        if source_asset_id != expected_asset_id.0 {
             return Ok(CommitRelevance::OtherLineage);
         }
         self.validate_commit(ticket_id, result)?;
@@ -301,21 +262,23 @@ impl CommittedEvidenceRow {
             required_evidence(self.result_file_asset_id, ticket_id, "result file asset")?,
             "commit evidence result file asset",
         )?;
-        if asset_id != file.asset_id.0 {
+        if result.result_media_snapshot_id.is_some() {
+            require_evidence(
+                self.snapshot_file_version_id,
+                Some(sqlite_i64(
+                    result.result_file_version_id,
+                    "commit evidence snapshot version",
+                )?),
+                ticket_id,
+                "snapshot version",
+            )?;
+        }
+        if asset_id != expected_asset_id.0 {
             return Ok(CommitRelevance::Sidecar);
         }
         result.result_media_snapshot_id.ok_or_else(|| {
             evidence_mismatch(ticket_id, "same-lineage result reprobe snapshot is missing")
         })?;
-        require_evidence(
-            self.snapshot_file_version_id,
-            Some(sqlite_i64(
-                result.result_file_version_id,
-                "commit evidence snapshot version",
-            )?),
-            ticket_id,
-            "snapshot version",
-        )?;
         Ok(CommitRelevance::SameLineage)
     }
 
@@ -583,6 +546,86 @@ pub(super) fn phase_ordinal(index: usize) -> Result<u32, VoomError> {
     u32::try_from(index).map_err(|e| VoomError::Internal(format!("phase ordinal overflow: {e}")))
 }
 
+fn phase_workflow_scope(job_id: JobId, phase_ordinal: u32) -> (String, String) {
+    (
+        format!("workflow-{}-phase-{phase_ordinal}", job_id.0),
+        format!("workflow-{}-file-*-phase-{phase_ordinal}", job_id.0),
+    )
+}
+
+async fn validate_carried_ticket_scope(
+    control_plane: &ControlPlane,
+    evidence: &CommittedEvidenceRow,
+    ticket_job_id: JobId,
+    row: &FilePhaseSummary,
+) -> Result<(), VoomError> {
+    let ticket_id = TicketId(sqlite_u64(evidence.ticket_id, "cleanup ticket id")?);
+    let payload: serde_json::Value =
+        serde_json::from_str(&evidence.ticket_payload).map_err(|error| {
+            VoomError::database_context(format!("cleanup ticket {ticket_id} payload decode"), error)
+        })?;
+    let payload_branch = payload
+        .get("branch_id")
+        .and_then(serde_json::Value::as_str)
+        .filter(|branch| !branch.is_empty())
+        .ok_or_else(|| evidence_mismatch(ticket_id, "payload branch is missing"))?;
+    let workflow_id = payload
+        .get("workflow_id")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| evidence_mismatch(ticket_id, "payload workflow id is missing"))?;
+    let exact = format!("workflow-{}-phase-{}", ticket_job_id.0, row.phase_ordinal);
+    let file_prefix = format!("workflow-{}-file-", ticket_job_id.0);
+    let phase_suffix = format!("-phase-{}", row.phase_ordinal);
+    if workflow_id == exact {
+        require_evidence(
+            payload_branch,
+            row.branch_id.as_str(),
+            ticket_id,
+            "payload branch",
+        )?;
+        return Ok(());
+    }
+    let input_ordinal = workflow_id
+        .strip_prefix(&file_prefix)
+        .and_then(|suffix| suffix.strip_suffix(&phase_suffix))
+        .and_then(|ordinal| ordinal.parse::<u32>().ok())
+        .ok_or_else(|| {
+            evidence_mismatch(
+                ticket_id,
+                "payload workflow phase does not match the carried row",
+            )
+        })?;
+    let durable_branch: Option<String> = sqlx::query_scalar(
+        "SELECT branch_id FROM workflow_file_progress \
+         WHERE job_id = ? AND input_ordinal = ?",
+    )
+    .bind(sqlite_i64(
+        ticket_job_id.0,
+        "cleanup workflow progress job id",
+    )?)
+    .bind(i64::from(input_ordinal))
+    .fetch_optional(&control_plane.pool)
+    .await
+    .map_err(|error| VoomError::database_context("cleanup workflow branch lookup", error))?;
+    if durable_branch.as_deref() != Some(row.branch_id.as_str()) {
+        return Err(evidence_mismatch(
+            ticket_id,
+            "workflow file ordinal does not belong to the carried row branch",
+        ));
+    }
+    Ok(())
+}
+
+fn committed_result_matches_row(result: &CommittedResultFields, row: &FilePhaseSummary) -> bool {
+    row.produced_file_version_id == Some(FileVersionId(result.result_file_version_id))
+        && row.produced_file_location_id == Some(FileLocationId(result.result_file_location_id))
+        && row.artifact_handle_id == Some(ArtifactHandleId(result.artifact_handle_id))
+        && row
+            .artifact_verification_id
+            .is_none_or(|id| id == ArtifactVerificationId(result.verification_id))
+        && row.reprobe_snapshot_id == result.result_media_snapshot_id.map(MediaSnapshotId)
+}
+
 pub(super) fn sqlite_u64(value: i64, field: &str) -> Result<u64, VoomError> {
     u64::try_from(value)
         .map_err(|e| VoomError::database_context(format!("{field} {value} does not fit u64"), e))
@@ -616,59 +659,6 @@ impl ControlPlane {
             phases,
             file_phases,
         })
-    }
-
-    pub(super) async fn ticket_result_location_ids(
-        &self,
-        job_id: JobId,
-    ) -> Result<Vec<FileLocationId>, VoomError> {
-        let ticket_ids: Vec<(i64,)> =
-            sqlx::query_as("SELECT id FROM tickets WHERE job_id = ? ORDER BY id ASC")
-                .bind(sqlite_i64(job_id.0, "promotion job id")?)
-                .fetch_all(&self.pool)
-                .await
-                .map_err(|error| VoomError::database_context("promotion job tickets", error))?;
-        let ticket_ids = ticket_ids
-            .into_iter()
-            .map(|(id,)| sqlite_u64(id, "promotion ticket id"))
-            .map(|result| result.map(TicketId))
-            .collect::<Result<Vec<_>, _>>()?;
-        self.ticket_result_location_ids_for_tickets(&ticket_ids)
-            .await
-    }
-
-    pub(super) async fn ticket_result_location_ids_for_tickets(
-        &self,
-        ticket_ids: &[TicketId],
-    ) -> Result<Vec<FileLocationId>, VoomError> {
-        if ticket_ids.is_empty() {
-            return Ok(Vec::new());
-        }
-        let ticket_ids = ticket_ids
-            .iter()
-            .map(|id| sqlite_i64(id.0, "promotion ticket id"))
-            .collect::<Result<Vec<_>, _>>()?;
-        let ticket_ids = serde_json::to_string(&ticket_ids)
-            .map_err(|error| VoomError::Internal(format!("promotion tickets encode: {error}")))?;
-        let rows: Vec<(String,)> = sqlx::query_as(
-            "SELECT result FROM tickets \
-             WHERE id IN (SELECT value FROM json_each(?)) \
-               AND state = 'succeeded' AND result IS NOT NULL \
-             ORDER BY id ASC",
-        )
-        .bind(&ticket_ids)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(|e| VoomError::database_context("promotion ticket results", e))?;
-        let mut ids = Vec::new();
-        for (result,) in rows {
-            ids.extend(
-                crate::workflow::ticket_results::result_location_ids(&result)?
-                    .into_iter()
-                    .map(FileLocationId),
-            );
-        }
-        Ok(ids)
     }
 
     /// Scoped live local-path chain-tip file locations, paired with their owning
@@ -716,78 +706,49 @@ impl ControlPlane {
     /// Finalize a run whose phase failed during dispatch: record every file that
     /// committed inline before the failure (the executor drained in-flight
     /// dispatches, so their commits have landed), then return the partial
-    /// outcome inside the error. No phase-grain row is written for the failed
-    /// phase, and the job is already `failed`.
-    pub(super) async fn finalize_failed_phase(
+    pub(super) async fn finalize_failed_file_phase(
         &self,
-        finalization: FailedPhaseFinalization<'_>,
-    ) -> Result<CoordinatorOutcome, CoordinatorError> {
-        let FailedPhaseFinalization {
+        job_id: JobId,
+        phase_ordinal: u32,
+        file: &PhaseFile,
+        disposition: &Disposition,
+    ) -> Result<Option<FilePhaseSummary>, VoomError> {
+        let Disposition::Planned { .. } = disposition else {
+            return Ok(None);
+        };
+        let ticket_ids = self
+            .ticket_ids_for_phase_file(job_id, phase_ordinal, file.version_id)
+            .await?;
+        if let Some(verified) = self.verified_refs_for_tickets(file, &ticket_ids).await? {
+            return self
+                .write_file_row_and_advance(
+                    job_id,
+                    phase_ordinal,
+                    file,
+                    FilePhaseOutcome::Verified,
+                    &ticket_ids,
+                    Some(verified),
+                )
+                .await
+                .map(Some);
+        }
+        let phase_ticket_ids = self.ticket_ids_for_phase(job_id, phase_ordinal).await?;
+        let (produced, scoped_ticket_ids) = self
+            .committed_refs_for_tickets(job_id, file, &phase_ticket_ids, &ticket_ids)
+            .await?;
+        let Some(produced) = produced else {
+            return Ok(None);
+        };
+        self.write_file_row_and_advance(
             job_id,
             phase_ordinal,
-            files,
-            dispositions,
-            phase_dispatched,
-            run_summary,
-            source,
-            phases,
-            mut file_phases,
-        } = finalization;
-        if phase_dispatched {
-            for (file, disposition) in files.iter().zip(dispositions) {
-                let Disposition::Planned { .. } = disposition else {
-                    continue;
-                };
-                let ticket_ids = self
-                    .ticket_ids_for_phase_file(job_id, phase_ordinal, file.version_id)
-                    .await?;
-                if let Some(verified) = self.verified_refs_for_tickets(file, &ticket_ids).await? {
-                    let row = self
-                        .write_file_row(
-                            job_id,
-                            phase_ordinal,
-                            file,
-                            FilePhaseOutcome::Verified,
-                            &ticket_ids,
-                            Some(verified),
-                        )
-                        .await?;
-                    file_phases.push(row);
-                    continue;
-                }
-                let phase_ticket_ids = self.ticket_ids_for_phase(job_id, phase_ordinal).await?;
-                let (produced, scoped_ticket_ids) = self
-                    .committed_refs_for_tickets(job_id, file, &phase_ticket_ids, &ticket_ids)
-                    .await?;
-                let Some(produced) = produced else {
-                    continue;
-                };
-                let row = self
-                    .write_file_row(
-                        job_id,
-                        phase_ordinal,
-                        file,
-                        FilePhaseOutcome::Committed,
-                        &scoped_ticket_ids,
-                        Some(produced.refs),
-                    )
-                    .await?;
-                file_phases.push(row);
-            }
-        }
-        let summary = self
-            .workflow_summaries
-            .insert_summary(job_grain_summary(job_id, run_summary), self.clock().now())
-            .await?;
-        Err(CoordinatorError {
-            source,
-            partial: Some(CoordinatorOutcome {
-                job_id,
-                summary,
-                phases,
-                file_phases,
-            }),
-        })
+            file,
+            FilePhaseOutcome::Committed,
+            &scoped_ticket_ids,
+            Some(produced.refs),
+        )
+        .await
+        .map(Some)
     }
 
     /// Write each active file's per-`(file, phase)` row and advance the working
@@ -834,7 +795,7 @@ impl ControlPlane {
         match disposition {
             Disposition::Blocked => {
                 let row = self
-                    .write_file_row(
+                    .write_file_row_and_advance(
                         job_id,
                         phase_ordinal,
                         &file,
@@ -847,7 +808,7 @@ impl ControlPlane {
             }
             Disposition::Skipped => {
                 let row = self
-                    .write_file_row(
+                    .write_file_row_and_advance(
                         job_id,
                         phase_ordinal,
                         &file,
@@ -866,7 +827,7 @@ impl ControlPlane {
                     .await?;
                 if let Some(verified) = self.verified_refs_for_tickets(&file, &ticket_ids).await? {
                     let row = self
-                        .write_file_row(
+                        .write_file_row_and_advance(
                             job_id,
                             phase_ordinal,
                             &file,
@@ -886,7 +847,7 @@ impl ControlPlane {
                 let Some(produced) = produced else {
                     self.require_selected_version_still_active(&file).await?;
                     let row = self
-                        .write_file_row(
+                        .write_file_row_and_advance(
                             job_id,
                             phase_ordinal,
                             &file,
@@ -900,7 +861,7 @@ impl ControlPlane {
                     return Ok((row, file.snapshot.clone(), Some(file)));
                 };
                 let row = self
-                    .write_file_row(
+                    .write_file_row_and_advance(
                         job_id,
                         phase_ordinal,
                         &file,
@@ -918,7 +879,7 @@ impl ControlPlane {
         }
     }
 
-    pub(super) async fn write_file_row(
+    async fn write_file_row_and_advance(
         &self,
         job_id: JobId,
         phase_ordinal: u32,
@@ -929,7 +890,7 @@ impl ControlPlane {
     ) -> Result<FilePhaseSummary, VoomError> {
         let produced = produced.unwrap_or_default();
         self.workflow_summaries
-            .upsert_file_phase_summary(
+            .upsert_file_phase_summary_and_advance(
                 NewFilePhaseSummary {
                     job_id,
                     phase_ordinal,
@@ -942,6 +903,8 @@ impl ControlPlane {
                     reprobe_snapshot_id: produced.reprobe_snapshot_id,
                     outcome,
                 },
+                phase_ordinal,
+                phase_ordinal + 1,
                 self.clock().now(),
             )
             .await
@@ -1003,62 +966,15 @@ impl ControlPlane {
         if ticket_ids.is_empty() {
             return Ok((None, seed_ticket_ids.to_vec()));
         }
-        let ticket_ids = ticket_ids
-            .iter()
-            .map(|id| sqlite_i64(id.0, "commit evidence ticket id"))
-            .collect::<Result<Vec<_>, _>>()?;
-        let ticket_ids = serde_json::to_string(&ticket_ids)
-            .map_err(|error| VoomError::Internal(format!("commit tickets encode: {error}")))?;
-        let rows = sqlx::query(
-            "SELECT t.id AS ticket_id, t.job_id AS ticket_job_id, t.result, \
-                    c.id AS commit_id, \
-                    c.artifact_handle_id AS commit_artifact_handle_id, \
-                    c.source_file_version_id AS commit_source_file_version_id, \
-                    c.verification_id AS commit_verification_id, \
-                    c.result_file_version_id AS commit_result_file_version_id, \
-                    c.result_file_location_id AS commit_result_file_location_id, \
-                    c.state AS commit_state, \
-                    v.artifact_handle_id AS verification_artifact_handle_id, \
-                    v.workflow_ticket_id AS verification_ticket_id, \
-                    v.workflow_lease_id AS verification_lease_id, \
-                    v.status AS verification_status, \
-                    rl.ticket_id AS result_lease_ticket_id, \
-                    rl.state AS result_lease_state, \
-                    sfv.file_asset_id AS source_file_asset_id, \
-                    fv.file_asset_id AS result_file_asset_id, \
-                    fl.file_version_id AS location_file_version_id, \
-                    ms.file_version_id AS snapshot_file_version_id \
-             FROM tickets t \
-             LEFT JOIN artifact_commit_records c \
-               ON c.id = json_extract(t.result, '$.commit_record_id') \
-             LEFT JOIN artifact_verifications v ON v.id = c.verification_id \
-             LEFT JOIN leases rl \
-               ON rl.id = json_extract(t.result, '$.lease_id') \
-             LEFT JOIN file_versions sfv \
-               ON sfv.id = json_extract(t.result, '$.source_file_version_id') \
-             LEFT JOIN file_versions fv \
-               ON fv.id = json_extract(t.result, '$.result_file_version_id') \
-             LEFT JOIN file_locations fl \
-               ON fl.id = json_extract(t.result, '$.result_file_location_id') \
-             LEFT JOIN media_snapshots ms \
-               ON ms.id = json_extract(t.result, '$.result_media_snapshot_id') \
-             WHERE t.id IN (SELECT value FROM json_each(?)) \
-               AND t.state = 'succeeded' AND t.result IS NOT NULL \
-             ORDER BY t.id",
-        )
-        .bind(&ticket_ids)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(|error| VoomError::database_context("committed ticket evidence", error))?;
+        let rows = self.committed_evidence_for_tickets(ticket_ids).await?;
         let mut scoped_ticket_ids = seed_ticket_ids.to_vec();
         let mut candidates = Vec::new();
-        for row in rows {
-            let evidence = CommittedEvidenceRow::decode(&row)?;
+        for evidence in rows {
             let ticket_id = TicketId(sqlite_u64(evidence.ticket_id, "commit evidence ticket id")?);
             let Some(result) = CommittedResultFields::decode(ticket_id, &evidence.result)? else {
                 continue;
             };
-            match evidence.validate(job_id, file, &result)? {
+            match evidence.validate(job_id, file.asset_id, &result)? {
                 CommitRelevance::OtherLineage => {}
                 CommitRelevance::Sidecar => scoped_ticket_ids.push(ticket_id),
                 CommitRelevance::SameLineage => {
@@ -1079,6 +995,228 @@ impl ControlPlane {
         scoped_ticket_ids.sort_unstable_by_key(|id| id.0);
         scoped_ticket_ids.dedup();
         Ok((produced, scoped_ticket_ids))
+    }
+
+    async fn committed_evidence_for_tickets(
+        &self,
+        ticket_ids: &[TicketId],
+    ) -> Result<Vec<CommittedEvidenceRow>, VoomError> {
+        let encoded_ids = ticket_ids
+            .iter()
+            .map(|id| sqlite_i64(id.0, "commit evidence ticket id"))
+            .collect::<Result<Vec<_>, _>>()?;
+        let encoded_ids = serde_json::to_string(&encoded_ids)
+            .map_err(|error| VoomError::Internal(format!("commit tickets encode: {error}")))?;
+        let rows = sqlx::query(
+            "WITH valid_results AS ( \
+                 SELECT t.id, t.job_id, t.payload, \
+                        CASE WHEN json_valid(t.result) THEN t.result ELSE '{}' END AS result \
+                 FROM tickets t \
+                 WHERE t.id IN (SELECT value FROM json_each(?)) \
+                   AND t.state = 'succeeded' AND t.result IS NOT NULL \
+             ), \
+             expanded_results AS ( \
+                 SELECT t.id, t.job_id, t.payload, \
+                        COALESCE(CAST(output.key AS INTEGER), 0) AS result_ordinal, \
+                        CASE \
+                            WHEN json_type(t.result, '$.outputs') = 'array' \
+                             AND json_array_length(t.result, '$.outputs') > 0 \
+                            THEN json_patch(t.result, output.value) \
+                            ELSE t.result \
+                        END AS result \
+                 FROM valid_results t \
+                 LEFT JOIN json_each(t.result, '$.outputs') AS output \
+                   ON json_type(t.result, '$.outputs') = 'array' \
+                  AND json_array_length(t.result, '$.outputs') > 0 \
+             ) \
+             SELECT t.id AS ticket_id, t.job_id AS ticket_job_id, \
+                    t.payload AS ticket_payload, t.result, \
+                    c.id AS commit_id, \
+                    c.artifact_handle_id AS commit_artifact_handle_id, \
+                    c.source_file_version_id AS commit_source_file_version_id, \
+                    c.verification_id AS commit_verification_id, \
+                    c.result_file_version_id AS commit_result_file_version_id, \
+                    c.result_file_location_id AS commit_result_file_location_id, \
+                    c.state AS commit_state, \
+                    v.artifact_handle_id AS verification_artifact_handle_id, \
+                    v.workflow_ticket_id AS verification_ticket_id, \
+                    v.workflow_lease_id AS verification_lease_id, \
+                    v.status AS verification_status, \
+                    rl.ticket_id AS result_lease_ticket_id, \
+                    rl.state AS result_lease_state, \
+                    sfv.file_asset_id AS source_file_asset_id, \
+                    fv.file_asset_id AS result_file_asset_id, \
+                    fl.file_version_id AS location_file_version_id, \
+                    ms.file_version_id AS snapshot_file_version_id \
+             FROM expanded_results t \
+             LEFT JOIN artifact_commit_records c \
+               ON c.id = json_extract(t.result, '$.commit_record_id') \
+             LEFT JOIN artifact_verifications v ON v.id = c.verification_id \
+             LEFT JOIN leases rl \
+               ON rl.id = json_extract(t.result, '$.lease_id') \
+             LEFT JOIN file_versions sfv \
+               ON sfv.id = json_extract(t.result, '$.source_file_version_id') \
+             LEFT JOIN file_versions fv \
+               ON fv.id = json_extract(t.result, '$.result_file_version_id') \
+             LEFT JOIN file_locations fl \
+               ON fl.id = json_extract(t.result, '$.result_file_location_id') \
+             LEFT JOIN media_snapshots ms \
+               ON ms.id = json_extract(t.result, '$.result_media_snapshot_id') \
+             ORDER BY t.id, t.result_ordinal",
+        )
+        .bind(&encoded_ids)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|error| VoomError::database_context("committed ticket evidence", error))?;
+        rows.iter().map(CommittedEvidenceRow::decode).collect()
+    }
+
+    pub(super) async fn validated_committed_location_ids_for_rows(
+        &self,
+        rows: &[FilePhaseSummary],
+    ) -> Result<Vec<FileLocationId>, VoomError> {
+        let mut locations = Vec::new();
+        for row in rows {
+            locations.extend(self.validated_committed_locations_for_row(row).await?);
+        }
+        Ok(locations)
+    }
+
+    async fn validated_committed_locations_for_row(
+        &self,
+        row: &FilePhaseSummary,
+    ) -> Result<Vec<FileLocationId>, VoomError> {
+        if row.ticket_ids.is_empty() {
+            if row.outcome == FilePhaseOutcome::Committed {
+                return Err(VoomError::Conflict(format!(
+                    "branch {} phase {} committed row has no ticket evidence",
+                    row.branch_id, row.phase_ordinal
+                )));
+            }
+            return Ok(Vec::new());
+        }
+        let expected_asset_id = self.file_run_asset_id(row).await?;
+        let evidence_rows = self.committed_evidence_for_tickets(&row.ticket_ids).await?;
+        let mut locations = Vec::new();
+        let mut matched_row = false;
+        for evidence in evidence_rows {
+            let ticket_id = TicketId(sqlite_u64(evidence.ticket_id, "cleanup ticket id")?);
+            let Some(result) = CommittedResultFields::decode(ticket_id, &evidence.result)? else {
+                continue;
+            };
+            let ticket_job_id = JobId(sqlite_u64(
+                required_evidence(evidence.ticket_job_id, ticket_id, "ticket job")?,
+                "cleanup ticket job id",
+            )?);
+            validate_carried_ticket_scope(self, &evidence, ticket_job_id, row).await?;
+            match evidence.validate(ticket_job_id, expected_asset_id, &result)? {
+                CommitRelevance::OtherLineage => {
+                    return Err(evidence_mismatch(
+                        ticket_id,
+                        "cleanup ticket belongs to another source lineage",
+                    ));
+                }
+                CommitRelevance::Sidecar => {
+                    locations.push(FileLocationId(result.result_file_location_id));
+                }
+                CommitRelevance::SameLineage => {
+                    let tip_id = row.produced_file_version_id.ok_or_else(|| {
+                        evidence_mismatch(
+                            ticket_id,
+                            "same-lineage commit is absent from the carried row",
+                        )
+                    })?;
+                    let source_id = FileVersionId(result.source_file_version_id);
+                    if !self.version_descends_from(tip_id, source_id).await? {
+                        return Err(evidence_mismatch(
+                            ticket_id,
+                            "cleanup source is outside the carried row chain",
+                        ));
+                    }
+                    matched_row |= committed_result_matches_row(&result, row);
+                    locations.push(FileLocationId(result.result_file_location_id));
+                }
+            }
+        }
+        if row.outcome == FilePhaseOutcome::Committed && !matched_row {
+            return Err(VoomError::Conflict(format!(
+                "branch {} phase {} ticket evidence does not produce the recorded row",
+                row.branch_id, row.phase_ordinal
+            )));
+        }
+        Ok(locations)
+    }
+
+    async fn file_run_asset_id(&self, row: &FilePhaseSummary) -> Result<FileAssetId, VoomError> {
+        let asset_id: Option<i64> = sqlx::query_scalar(
+            "SELECT fv.file_asset_id \
+             FROM workflow_file_run_starts start \
+             JOIN file_versions fv ON fv.id = start.starting_file_version_id \
+             WHERE start.job_id = ? AND start.branch_id = ?",
+        )
+        .bind(sqlite_i64(row.job_id.0, "cleanup run job id")?)
+        .bind(&row.branch_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|error| VoomError::database_context("cleanup run asset lookup", error))?;
+        let asset_id = asset_id.ok_or_else(|| {
+            VoomError::Conflict(format!(
+                "branch {} phase {} has no durable file-run start",
+                row.branch_id, row.phase_ordinal
+            ))
+        })?;
+        Ok(FileAssetId(sqlite_u64(
+            asset_id,
+            "cleanup run file asset id",
+        )?))
+    }
+
+    async fn version_descends_from(
+        &self,
+        mut tip_id: FileVersionId,
+        ancestor_id: FileVersionId,
+    ) -> Result<bool, VoomError> {
+        let mut visited = BTreeSet::new();
+        loop {
+            if tip_id == ancestor_id {
+                return Ok(true);
+            }
+            if !visited.insert(tip_id) {
+                return Err(VoomError::Conflict(format!(
+                    "file version lineage contains a cycle at {tip_id}"
+                )));
+            }
+            let Some(version) = self.identity.get_file_version(tip_id).await? else {
+                return Ok(false);
+            };
+            let Some(parent_id) = version.produced_from_version_id else {
+                return Ok(false);
+            };
+            tip_id = parent_id;
+        }
+    }
+
+    pub(super) async fn unfinalized_committed_refs(
+        &self,
+        job_id: JobId,
+        phase_ordinal: u32,
+        file: &PhaseFile,
+    ) -> Result<Option<(ProducedRefs, Vec<TicketId>)>, VoomError> {
+        let ticket_ids = self.ticket_ids_for_phase(job_id, phase_ordinal).await?;
+        let (produced, scoped_ticket_ids) = self
+            .committed_refs_for_tickets(job_id, file, &ticket_ids, &[])
+            .await?;
+        let Some(produced) = produced else {
+            return Ok(None);
+        };
+        if produced.snapshot.file_version_id != file.version_id {
+            return Err(VoomError::Conflict(format!(
+                "prior job {job_id} phase {phase_ordinal} committed version {}, \
+                 but branch {} currently points at {}",
+                produced.snapshot.file_version_id, file.branch_id, file.version_id
+            )));
+        }
+        Ok(Some((produced.refs, scoped_ticket_ids)))
     }
 
     async fn job_produced_commit(
@@ -1128,17 +1266,19 @@ impl ControlPlane {
         phase_ordinal: u32,
         file: &PhaseFile,
     ) -> Result<Option<ProducedRefs>, VoomError> {
-        let workflow_id = format!("workflow-{}-phase-{phase_ordinal}", job_id.0);
+        let (workflow_id, workflow_pattern) = phase_workflow_scope(job_id, phase_ordinal);
         let ticket_ids: Vec<TicketId> = sqlx::query_scalar(
             "SELECT id FROM tickets \
              WHERE job_id = ? AND state = 'succeeded' \
                AND kind = 'synthetic.workflow.operation.verify_artifact' \
-               AND json_extract(payload, '$.workflow_id') = ? \
+               AND (json_extract(payload, '$.workflow_id') = ? \
+                    OR json_extract(payload, '$.workflow_id') GLOB ?) \
                AND json_extract(payload, '$.rendered_payload.source_file_version_id') = ? \
              ORDER BY id",
         )
         .bind(sqlite_i64(job_id.0, "verification recovery job id")?)
         .bind(workflow_id)
+        .bind(workflow_pattern)
         .bind(sqlite_i64(
             file.version_id.0,
             "verification recovery file version id",
@@ -1246,14 +1386,16 @@ impl ControlPlane {
         job_id: JobId,
         phase_ordinal: u32,
     ) -> Result<Vec<TicketId>, VoomError> {
-        let workflow_id = format!("workflow-{}-phase-{phase_ordinal}", job_id.0);
+        let (workflow_id, workflow_pattern) = phase_workflow_scope(job_id, phase_ordinal);
         let rows: Vec<i64> = sqlx::query_scalar(
             "SELECT id FROM tickets \
-             WHERE job_id = ? AND json_extract(payload, '$.workflow_id') = ? \
+             WHERE job_id = ? AND (json_extract(payload, '$.workflow_id') = ? \
+               OR json_extract(payload, '$.workflow_id') GLOB ?) \
              ORDER BY id",
         )
         .bind(sqlite_i64(job_id.0, "phase ticket job id")?)
         .bind(workflow_id)
+        .bind(workflow_pattern)
         .fetch_all(&self.pool)
         .await
         .map_err(|error| VoomError::database_context("phase ticket ids", error))?;
@@ -1268,9 +1410,15 @@ impl ControlPlane {
         job_id: JobId,
         phase_ordinal: u32,
         workflow_node_id: &str,
+        file_version_id: FileVersionId,
     ) -> Result<Vec<TicketId>, VoomError> {
-        self.ticket_ids_for_phase_scope(job_id, phase_ordinal, workflow_node_id, None)
-            .await
+        self.ticket_ids_for_phase_scope(
+            job_id,
+            phase_ordinal,
+            workflow_node_id,
+            Some(file_version_id),
+        )
+        .await
     }
 
     async fn ticket_ids_for_phase_file(
@@ -1279,15 +1427,17 @@ impl ControlPlane {
         phase_ordinal: u32,
         file_version_id: FileVersionId,
     ) -> Result<Vec<TicketId>, VoomError> {
-        let workflow_id = format!("workflow-{}-phase-{phase_ordinal}", job_id.0);
+        let (workflow_id, workflow_pattern) = phase_workflow_scope(job_id, phase_ordinal);
         let rows: Vec<i64> = sqlx::query_scalar(
             "SELECT id FROM tickets \
-             WHERE job_id = ? AND json_extract(payload, '$.workflow_id') = ? \
+             WHERE job_id = ? AND (json_extract(payload, '$.workflow_id') = ? \
+               OR json_extract(payload, '$.workflow_id') GLOB ?) \
                AND json_extract(payload, '$.rendered_payload.source_file_version_id') = ? \
              ORDER BY id ASC",
         )
         .bind(sqlite_i64(job_id.0, "phase ticket job id")?)
         .bind(workflow_id)
+        .bind(workflow_pattern)
         .bind(sqlite_i64(
             file_version_id.0,
             "phase ticket source file version",
@@ -1300,20 +1450,21 @@ impl ControlPlane {
             .collect()
     }
 
-    async fn ticket_ids_for_phase_scope(
+    pub(super) async fn ticket_ids_for_phase_scope(
         &self,
         job_id: JobId,
         phase_ordinal: u32,
         workflow_node_id: &str,
         file_version_id: Option<FileVersionId>,
     ) -> Result<Vec<TicketId>, VoomError> {
-        let workflow_id = format!("workflow-{}-phase-{phase_ordinal}", job_id.0);
+        let (workflow_id, workflow_pattern) = phase_workflow_scope(job_id, phase_ordinal);
         let file_version_id = file_version_id
             .map(|id| sqlite_i64(id.0, "phase ticket source file version"))
             .transpose()?;
         let rows = sqlx::query(
             "SELECT id FROM tickets \
-             WHERE job_id = ? AND json_extract(payload, '$.workflow_id') = ? \
+             WHERE job_id = ? AND (json_extract(payload, '$.workflow_id') = ? \
+               OR json_extract(payload, '$.workflow_id') GLOB ?) \
                AND json_extract(payload, '$.node_id') = ? \
                AND (? IS NULL OR \
                     json_extract(payload, '$.rendered_payload.source_file_version_id') = ?) \
@@ -1324,6 +1475,7 @@ impl ControlPlane {
                 .map_err(|e| VoomError::Internal(format!("job id exceeds SQLite integer: {e}")))?,
         )
         .bind(workflow_id)
+        .bind(workflow_pattern)
         .bind(workflow_node_id)
         .bind(file_version_id)
         .bind(file_version_id)

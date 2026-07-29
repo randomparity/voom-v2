@@ -45,27 +45,6 @@ pub(crate) fn ordered_ticket_result(result: &str) -> Result<OrderedTicketResult,
     }
 }
 
-pub(crate) fn result_location_ids(result: &str) -> Result<Vec<u64>, VoomError> {
-    let members = match ordered_ticket_result(result)? {
-        OrderedTicketResult::Outputs(outputs) => outputs,
-        OrderedTicketResult::Scalar(value) => vec![value],
-    };
-    let mut ids = Vec::new();
-    for member in members {
-        let Some(value) = member.get("result_file_location_id") else {
-            continue;
-        };
-        if let Some(id) = value.as_u64() {
-            ids.push(id);
-        } else if value.as_i64().is_some() {
-            return Err(VoomError::database(format!(
-                "promotion ticket result location id is invalid: {value}"
-            )));
-        }
-    }
-    Ok(ids)
-}
-
 #[cfg(test)]
 #[path = "ticket_results_test.rs"]
 mod tests;

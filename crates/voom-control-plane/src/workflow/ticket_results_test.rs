@@ -25,7 +25,11 @@ fn ordered_result_prefers_non_empty_outputs_and_preserves_order() {
         ]
     }"#;
 
-    assert_eq!(result_location_ids(result).unwrap(), [2, 3]);
+    let OrderedTicketResult::Outputs(outputs) = ordered_ticket_result(result).unwrap() else {
+        panic!("non-empty outputs must be preserved");
+    };
+    assert_eq!(outputs[0]["result_file_location_id"], 2);
+    assert_eq!(outputs[1]["result_file_location_id"], 3);
 }
 
 #[test]
@@ -36,21 +40,17 @@ fn ordered_result_uses_scalar_fallback_for_absent_invalid_or_empty_outputs() {
         r#"{"result_file_location_id": 1, "outputs": {}}"#,
         r#"{"result_file_location_id": 1, "outputs": []}"#,
     ] {
-        assert_eq!(result_location_ids(result).unwrap(), [1]);
+        let OrderedTicketResult::Scalar(result) = ordered_ticket_result(result).unwrap() else {
+            panic!("absent or empty outputs must use the scalar result");
+        };
+        assert_eq!(result["result_file_location_id"], 1);
     }
 }
 
 #[test]
-fn ordered_result_rejects_malformed_json_and_negative_location_ids() {
+fn ordered_result_rejects_malformed_json() {
     let malformed = ordered_ticket_result("{").unwrap_err();
     assert!(malformed.to_string().contains("ticket result is malformed"));
-
-    let negative = result_location_ids(r#"{"result_file_location_id": -1}"#).unwrap_err();
-    assert!(
-        negative
-            .to_string()
-            .contains("promotion ticket result location id is invalid")
-    );
 }
 
 #[test]

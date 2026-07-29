@@ -28,19 +28,19 @@ pub struct WorkflowRunSummary {
 
 impl WorkflowRunSummary {
     pub(crate) fn merge_invocation(&mut self, next: Self) {
-        self.branch_count = next.branch_count;
-        self.ticket_count = next.ticket_count;
+        self.branch_count = self.branch_count.max(next.branch_count);
+        self.ticket_count = self.ticket_count.max(next.ticket_count);
         self.dispatch_count += next.dispatch_count;
-        self.retry_count = next.retry_count;
-        self.failure_count = next.failure_count;
+        self.retry_count = self.retry_count.max(next.retry_count);
+        self.failure_count = self.failure_count.max(next.failure_count);
         self.peak_active_workflow_leases = self
             .peak_active_workflow_leases
             .max(next.peak_active_workflow_leases);
-        self.elapsed += next.elapsed;
+        self.elapsed = self.elapsed.max(next.elapsed);
         self.throughput_per_second = throughput(self.dispatch_count, self.elapsed);
         for (operation, next) in next.per_operation {
             let summary = self.per_operation.entry(operation).or_default();
-            summary.ticket_count = next.ticket_count;
+            summary.ticket_count = summary.ticket_count.max(next.ticket_count);
             summary.dispatch_count += next.dispatch_count;
             summary.success_count += next.success_count;
             summary.retry_count += next.retry_count;
@@ -48,7 +48,7 @@ impl WorkflowRunSummary {
             if next.last_failure_class.is_some() {
                 summary.last_failure_class = next.last_failure_class;
             }
-            summary.elapsed += next.elapsed;
+            summary.elapsed = summary.elapsed.max(next.elapsed);
             summary.throughput_per_second = throughput(summary.dispatch_count, summary.elapsed);
         }
         for (worker_id, active) in next.max_active_by_worker {
@@ -203,6 +203,33 @@ impl WorkflowRunSummary {
                     throughput(operation_summary.dispatch_count, elapsed);
             }
         }
+        if let Ok(rows) = sqlx::query_as::<_, (String, Option<String>)>(
+            "SELECT leases.acquired_at, leases.released_at \
+             FROM leases JOIN tickets ON tickets.id = leases.ticket_id \
+             WHERE tickets.job_id = ?",
+        )
+        .bind(sqlite_i64(job_id.0))
+        .fetch_all(&control.pool)
+        .await
+        {
+            let mut transitions = Vec::with_capacity(rows.len() * 2);
+            for (acquired_at, released_at) in rows {
+                transitions.push((acquired_at, 1_i32));
+                if let Some(released_at) = released_at {
+                    transitions.push((released_at, -1_i32));
+                }
+            }
+            transitions.sort_by(|left, right| left.0.cmp(&right.0).then(left.1.cmp(&right.1)));
+            let mut active = 0_i32;
+            let mut peak = 0_i32;
+            for (_, delta) in transitions {
+                active += delta;
+                peak = peak.max(active);
+            }
+            self.peak_active_workflow_leases = self
+                .peak_active_workflow_leases
+                .max(u32::try_from(peak).unwrap_or(0));
+        }
     }
 }
 
@@ -239,3 +266,7 @@ fn sqlite_u64(value: i64) -> u64 {
 fn sqlite_u32(value: i64) -> u32 {
     u32::try_from(value).unwrap_or(0)
 }
+
+#[cfg(test)]
+#[path = "summary_test.rs"]
+mod tests;

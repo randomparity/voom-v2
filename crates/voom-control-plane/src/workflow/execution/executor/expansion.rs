@@ -8,11 +8,11 @@ use sqlx::Row;
 use voom_core::{JobId, TicketId, VoomError};
 use voom_store::repo::tickets::Ticket;
 
-use crate::workflow::execution::executor::WorkflowExecutor;
 use crate::workflow::execution::executor::errors::{format_time, sqlite_i64, sqlite_u64};
 use crate::workflow::execution::executor::tickets::{
     all_dependencies_succeeded, depends_on_node, parse_payload,
 };
+use crate::workflow::execution::executor::{WorkflowExecutor, WorkflowIdleState};
 use crate::workflow::plan::expansion::{
     ExpansionContext, expand_backup_completion, expand_probe_completion, expand_quality_completion,
     expand_scanner_completion, expand_transform_completion,
@@ -231,5 +231,34 @@ impl WorkflowExecutor {
             VoomError::database_context(format!("workflow unfinished tickets for {job_id}"), e)
         })?;
         Ok(unfinished == 0)
+    }
+
+    pub(super) async fn workflow_idle_state(
+        &self,
+        job_id: JobId,
+        workflow_id: &str,
+    ) -> Result<WorkflowIdleState, VoomError> {
+        let (unfinished, ready, leased): (i64, i64, i64) = sqlx::query_as(
+            "SELECT \
+               COALESCE(SUM(state IN ('pending', 'ready', 'leased')), 0), \
+               COALESCE(SUM(state = 'ready'), 0), \
+               COALESCE(SUM(state = 'leased'), 0) \
+             FROM tickets \
+             WHERE job_id = ? AND json_extract(payload, '$.workflow_id') = ?",
+        )
+        .bind(sqlite_i64(job_id.0))
+        .bind(workflow_id)
+        .fetch_one(&self.control_plane.pool)
+        .await
+        .map_err(|e| VoomError::database_context(format!("workflow idle state for {job_id}"), e))?;
+        if unfinished == 0 {
+            Ok(WorkflowIdleState::Finished)
+        } else if ready > 0 {
+            Ok(WorkflowIdleState::Ready)
+        } else if leased > 0 {
+            Ok(WorkflowIdleState::Leased)
+        } else {
+            Ok(WorkflowIdleState::Blocked)
+        }
     }
 }

@@ -117,6 +117,10 @@ const MIGRATION_0026_SQL: &str =
 const MIGRATION_0027_SQL: &str =
     include_str!("../../../migrations/0027_audio_synthesis_asset_lineage.sql");
 
+/// SQL for migration 0028 (durable sliding file window, #401), embedded at
+/// compile time.
+const MIGRATION_0028_SQL: &str = include_str!("../../../migrations/0028_sliding_file_window.sql");
+
 /// Embedded migration set, constructed without the `sqlx::migrate!` macro.
 ///
 /// We don't use sqlx's `macros` feature: it pulls `sqlx-macros-core`, which
@@ -319,6 +323,13 @@ pub static MIGRATOR: LazyLock<Migrator> = LazyLock::new(|| Migrator {
             Cow::Borrowed("audio_synthesis_asset_lineage"),
             MigrationType::Simple,
             Cow::Borrowed(MIGRATION_0027_SQL),
+            false,
+        ),
+        Migration::new(
+            28,
+            Cow::Borrowed("sliding_file_window"),
+            MigrationType::Simple,
+            Cow::Borrowed(MIGRATION_0028_SQL),
             false,
         ),
     ]),
