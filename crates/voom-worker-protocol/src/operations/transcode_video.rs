@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use crate::VideoHardwareAssignment;
+
 pub use voom_core::{
     TRANSCODE_VIDEO_CODEC, TRANSCODE_VIDEO_CODEC_ALIAS_H265, TRANSCODE_VIDEO_CODEC_AV1,
     TRANSCODE_VIDEO_CONTAINER, TRANSCODE_VIDEO_CONTAINER_MP4, TRANSCODE_VIDEO_PROFILE,
@@ -33,6 +35,8 @@ pub struct TranscodeVideoObservedFacts {
 pub struct TranscodeVideoInput {
     pub path: String,
     pub expected: TranscodeVideoExpectedFacts,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub video_codec: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -68,6 +72,8 @@ pub struct TranscodeVideoRequest {
     pub input: TranscodeVideoInput,
     pub output: TranscodeVideoOutput,
     pub profile: TranscodeVideoProfile,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hardware_assignment: Option<VideoHardwareAssignment>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub copy_video: bool,
 }
@@ -97,6 +103,8 @@ pub struct TranscodeVideoResult {
     pub output_width: u32,
     pub output_height: u32,
     pub output_pixel_format: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hardware_assignment: Option<VideoHardwareAssignment>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub copied_video: bool,
 }

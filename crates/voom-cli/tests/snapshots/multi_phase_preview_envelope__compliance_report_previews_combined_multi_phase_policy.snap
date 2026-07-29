@@ -9,8 +9,8 @@ expression: json
   "data": {
     "plan": {
       "schema_version": 1,
-      "plan_id": "plan_8b43e5ee02e61790",
-      "plan_hash": "blake3:8b43e5ee02e6179083e6de138f61f02f874fd1f4257a0416c0e06bc59ea73969",
+      "plan_id": "plan_6031ba7cc80f17cc",
+      "plan_hash": "blake3:6031ba7cc80f17cc8738e4549a75c629c71ba14b989fd20e854d71142dd59fe9",
       "policy": {
         "slug": "sprint-16-combined",
         "source_hash": "3d13f3722fe83bc37ada0f2cbcd9ca97e939810b0e78a4f63ea7cd078f427a1c",
@@ -123,7 +123,8 @@ expression: json
               "encoder": "libx265",
               "crf": 23,
               "preset": "medium"
-            }
+            },
+            "source_video_codec": "h264"
           },
           "observed_state": {
             "container": "mkv",
@@ -238,10 +239,10 @@ expression: json
     },
     "report": {
       "schema_version": 1,
-      "report_id": "report_fd77a4b3064e7ded",
-      "report_hash": "blake3:63c0c2eb5c4003bfd0d219f7a55b7dd01312b9e481e0c4c7f1d5003184a9f573",
-      "plan_id": "plan_8b43e5ee02e61790",
-      "plan_hash": "blake3:8b43e5ee02e6179083e6de138f61f02f874fd1f4257a0416c0e06bc59ea73969",
+      "report_id": "report_bc3009851ab7cc35",
+      "report_hash": "blake3:cc1f2683d7801ce450c8b2b7f551e6bc83dbde86e45aa3cee8f80c9786905024",
+      "plan_id": "plan_6031ba7cc80f17cc",
+      "plan_hash": "blake3:6031ba7cc80f17cc8738e4549a75c629c71ba14b989fd20e854d71142dd59fe9",
       "policy": {
         "slug": "sprint-16-combined",
         "source_hash": "3d13f3722fe83bc37ada0f2cbcd9ca97e939810b0e78a4f63ea7cd078f427a1c",
@@ -270,7 +271,7 @@ expression: json
       },
       "checks": [
         {
-          "check_id": "check_c935c41e3285746a",
+          "check_id": "check_9192dcff40d9764f",
           "node_id": "node_a7cad66e020f76f0",
           "target": {
             "type": "file_version",
@@ -316,7 +317,7 @@ expression: json
           "execution_eligibility": "no_op"
         },
         {
-          "check_id": "check_44ebf577bf0dee4f",
+          "check_id": "check_d5906eaa9718ecf6",
           "node_id": "node_24bd9fb668590f0d",
           "target": {
             "type": "file_version",
@@ -335,7 +336,8 @@ expression: json
               "encoder": "libx265",
               "crf": 23,
               "preset": "medium"
-            }
+            },
+            "source_video_codec": "h264"
           },
           "observed_state": {
             "container": "mkv",
@@ -348,7 +350,7 @@ expression: json
           "execution_eligibility": "supported"
         },
         {
-          "check_id": "check_c00585672536330f",
+          "check_id": "check_d873bbb279e96aa1",
           "node_id": "node_9f0612bab44b9308",
           "target": {
             "type": "file_version",

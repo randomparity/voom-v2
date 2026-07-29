@@ -163,6 +163,9 @@ fn artifact_transcode_succeeded_payload_carries_profile_and_observed_output_fact
         output_width: 1920,
         output_height: 1080,
         output_pixel_format: "yuv420p".to_owned(),
+        hardware_backend: Some("nvidia".to_owned()),
+        hardware_token: Some("nvidia:GPU-example".to_owned()),
+        hardware_device_uuid: Some("GPU-example".to_owned()),
         provider: "ffmpeg".to_owned(),
         provider_version: "6.1".to_owned(),
     };
@@ -179,6 +182,9 @@ fn artifact_transcode_succeeded_payload_carries_profile_and_observed_output_fact
     assert_eq!(json["payload"]["output_width"], 1920);
     assert_eq!(json["payload"]["output_height"], 1080);
     assert_eq!(json["payload"]["output_pixel_format"], "yuv420p");
+    assert_eq!(json["payload"]["hardware_backend"], "nvidia");
+    assert_eq!(json["payload"]["hardware_token"], "nvidia:GPU-example");
+    assert_eq!(json["payload"]["hardware_device_uuid"], "GPU-example");
 
     let back: Event = serde_json::from_value(json).unwrap();
     assert!(matches!(back, Event::ArtifactTranscodeSucceeded(q) if q == p));
@@ -259,6 +265,9 @@ fn legacy_artifact_transcode_succeeded_row_decodes_with_defaulted_fields() {
         output_width: 0,
         output_height: 0,
         output_pixel_format: String::new(),
+        hardware_backend: None,
+        hardware_token: None,
+        hardware_device_uuid: None,
         provider: "ffmpeg".to_owned(),
         provider_version: "6.1".to_owned(),
     };
@@ -1174,6 +1183,9 @@ fn artifact_transcode_succeeded_payload_rejects_unknown_field() {
         output_width: 1920,
         output_height: 1080,
         output_pixel_format: "yuv420p".to_owned(),
+        hardware_backend: None,
+        hardware_token: None,
+        hardware_device_uuid: None,
         provider: "ffmpeg".to_owned(),
         provider_version: "6.1".to_owned(),
     });

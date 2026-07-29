@@ -10,8 +10,8 @@ pub mod policy;
 
 pub use audit::{events, schema_meta};
 pub use execution::{
-    jobs, leases, nodes, remote_idempotency, scheduler_decisions, scheduler_node_limits, tickets,
-    workers, workflow_summaries,
+    accelerator_claims, jobs, leases, nodes, remote_idempotency, scheduler_decisions,
+    scheduler_node_limits, tickets, workers, workflow_summaries,
 };
 pub use external::SqliteExternalSystemRepo;
 pub use external::links::{ExternalLinkTargetType, ExternalSystemLink, NewExternalLink};
@@ -30,6 +30,7 @@ pub use policy::{
     scheduling_policies, video_profiles,
 };
 
+pub use accelerator_claims::{AcceleratorClaim, NewAcceleratorClaim, SqliteAcceleratorClaimRepo};
 pub use artifact_access_plans::{
     ArtifactAccessMode, ArtifactAccessPlan, ArtifactAccessPlanStatus, NewArtifactAccessPlan,
     SqliteArtifactAccessPlanRepo,

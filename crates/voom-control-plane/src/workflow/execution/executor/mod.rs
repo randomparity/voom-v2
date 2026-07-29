@@ -160,6 +160,7 @@ struct RunLoopState {
     isolated_error: Option<VoomError>,
     dispatch_started: bool,
     capacity_wait_started: Option<Instant>,
+    accelerator_wait_started: HashMap<String, Instant>,
 }
 
 struct RunInvocation<'a> {
@@ -173,6 +174,8 @@ struct RunInvocation<'a> {
 struct DispatchReadyOutcome {
     made_progress: bool,
     capacity_deferred: bool,
+    accelerator_unavailable: HashSet<String>,
+    recovered_accelerators: HashSet<String>,
 }
 
 fn no_dispatchable_work(job_id: JobId) -> VoomError {
@@ -205,6 +208,7 @@ impl RunLoopState {
             isolated_error: None,
             dispatch_started: false,
             capacity_wait_started: None,
+            accelerator_wait_started: HashMap::new(),
         }
     }
 
@@ -251,6 +255,32 @@ impl RunLoopState {
         self.capacity_wait_started
             .get_or_insert_with(Instant::now)
             .elapsed()
+    }
+
+    fn update_accelerator_waits(&mut self, dispatch: &DispatchReadyOutcome) {
+        for token in &dispatch.accelerator_unavailable {
+            self.accelerator_wait_started
+                .entry(token.clone())
+                .or_insert_with(Instant::now);
+        }
+        for token in &dispatch.recovered_accelerators {
+            self.accelerator_wait_started.remove(token);
+        }
+    }
+
+    fn timed_out_accelerator(&self, timeout: Duration) -> Option<&str> {
+        self.accelerator_wait_started
+            .iter()
+            .find(|(_, started)| started.elapsed() >= timeout)
+            .map(|(token, _)| token.as_str())
+    }
+
+    fn accelerator_wait_delay(&self, interval: Duration, timeout: Duration) -> Option<Duration> {
+        self.accelerator_wait_started
+            .values()
+            .map(|started| timeout.saturating_sub(started.elapsed()))
+            .min()
+            .map(|remaining| interval.min(remaining))
     }
 
     async fn refresh(&mut self, control: &ControlPlane, job_id: JobId, started: Instant) {
@@ -447,12 +477,22 @@ impl WorkflowExecutor {
                         outcome.made_progress = true;
                         return outcome;
                     }
-                    Ok(SpawnOutcome::Spawned | SpawnOutcome::PreLeaseRetriable) => {
+                    Ok(SpawnOutcome::Spawned(hardware_token)) => {
+                        outcome.made_progress = true;
+                        batch_made_progress = true;
+                        if let Some(hardware_token) = hardware_token {
+                            outcome.recovered_accelerators.insert(hardware_token);
+                        }
+                    }
+                    Ok(SpawnOutcome::PreLeaseRetriable) => {
                         outcome.made_progress = true;
                         batch_made_progress = true;
                     }
                     Ok(SpawnOutcome::CapacityDeferred) => {
                         outcome.capacity_deferred = true;
+                    }
+                    Ok(SpawnOutcome::AcceleratorUnavailable(hardware_token)) => {
+                        outcome.accelerator_unavailable.insert(hardware_token);
                     }
                 }
             }
@@ -614,6 +654,66 @@ impl WorkflowExecutor {
         }
     }
 
+    async fn wait_for_accelerator_recovery(
+        &self,
+        state: &mut RunLoopState,
+        job_id: JobId,
+        started: Instant,
+    ) -> Result<(), WorkflowRunError> {
+        let job = match self.control_plane.jobs.get(job_id).await {
+            Ok(Some(job)) => job,
+            Ok(None) => {
+                return Err(state
+                    .fail_job(
+                        &self.control_plane,
+                        job_id,
+                        VoomError::NotFound(format!("job {job_id}")),
+                        started,
+                    )
+                    .await);
+            }
+            Err(source) => {
+                return Err(state
+                    .fail_job(&self.control_plane, job_id, source, started)
+                    .await);
+            }
+        };
+        match job.state {
+            JobState::Open => {}
+            JobState::Cancelled => {
+                let source = VoomError::UserCancellation(format!(
+                    "workflow {job_id} cancelled while waiting for accelerator recovery"
+                ));
+                return Err(state
+                    .finish_isolated_failure(&self.control_plane, job_id, source, started)
+                    .await);
+            }
+            JobState::Succeeded | JobState::Failed => {
+                let source = VoomError::Conflict(format!(
+                    "accelerator recovery wait rejected: job {job_id} is {}",
+                    job.state.as_str()
+                ));
+                return Err(state
+                    .fail_job(&self.control_plane, job_id, source, started)
+                    .await);
+            }
+        }
+        let interval = self.options.queue.capacity_retry_interval;
+        let timeout = self.options.queue.accelerator_unavailable_timeout;
+        if interval.is_zero() || timeout.is_zero() {
+            let source = VoomError::Config(
+                "accelerator retry interval and unavailable timeout must be positive".to_owned(),
+            );
+            return Err(state
+                .fail_job(&self.control_plane, job_id, source, started)
+                .await);
+        }
+        if let Some(delay) = state.accelerator_wait_delay(interval, timeout) {
+            tokio::time::sleep(delay).await;
+        }
+        Ok(())
+    }
+
     async fn wait_or_fail_idle(
         &self,
         state: &mut RunLoopState,
@@ -621,6 +721,11 @@ impl WorkflowExecutor {
         dispatch: DispatchReadyOutcome,
         started: Instant,
     ) -> Result<(), WorkflowRunError> {
+        if !state.accelerator_wait_started.is_empty() {
+            return self
+                .wait_for_accelerator_recovery(state, invocation.job_id, started)
+                .await;
+        }
         if dispatch.capacity_deferred {
             return self
                 .wait_for_external_capacity(state, invocation.job_id, started)
@@ -890,6 +995,19 @@ impl WorkflowExecutor {
             }
 
             let dispatch = self.dispatch_ready_tickets(&mut state, &invocation).await;
+            state.update_accelerator_waits(&dispatch);
+            if let Some(hardware_token) = state
+                .timed_out_accelerator(self.options.queue.accelerator_unavailable_timeout)
+                .map(str::to_owned)
+            {
+                let source = VoomError::NoEligibleWorker(format!(
+                    "accelerator {hardware_token} remained unavailable for {:?}",
+                    self.options.queue.accelerator_unavailable_timeout
+                ));
+                return Err(state
+                    .fail_after_drain(self, &plan, workflow_id, job_id, source, started)
+                    .await);
+            }
             if dispatch.made_progress {
                 state.reset_capacity_wait();
                 continue;
@@ -901,6 +1019,11 @@ impl WorkflowExecutor {
                 continue;
             }
             state.reset_capacity_wait();
+            if !state.accelerator_wait_started.is_empty() {
+                self.wait_for_accelerator_recovery(&mut state, job_id, started)
+                    .await?;
+                continue;
+            }
             state
                 .wait_for_one(self, &plan, workflow_id, job_id, failure_mode)
                 .await;

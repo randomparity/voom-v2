@@ -3,7 +3,7 @@ use std::path::Path;
 use voom_core::{ArtifactHandleId, ArtifactLocationId, FileLocationId, VoomError};
 use voom_events::payload::{ArtifactTranscodeStartedPayload, ArtifactTranscodeSucceededPayload};
 use voom_events::{Event, SubjectType};
-use voom_worker_protocol::TranscodeVideoResult;
+use voom_worker_protocol::{TranscodeVideoResult, VideoHardwareAssignment};
 
 use super::ExecuteTranscodeVideoInput;
 use crate::ControlPlane;
@@ -51,6 +51,8 @@ pub async fn record_succeeded(
     staging_path: &Path,
     result: &TranscodeVideoResult,
 ) -> Result<(), VoomError> {
+    let (hardware_backend, hardware_token, hardware_device_uuid) =
+        hardware_evidence(result.hardware_assignment.as_ref());
     let mut tx = begin_tx(&cp.pool).await?;
     let now = cp.clock().now();
     append_event(
@@ -77,10 +79,26 @@ pub async fn record_succeeded(
             output_width: result.output_width,
             output_height: result.output_height,
             output_pixel_format: result.output_pixel_format.clone(),
+            hardware_backend,
+            hardware_token,
+            hardware_device_uuid,
             provider: result.provider.clone(),
             provider_version: result.provider_version.clone(),
         }),
     )
     .await?;
     commit_tx(tx).await
+}
+
+fn hardware_evidence(
+    assignment: Option<&VideoHardwareAssignment>,
+) -> (Option<String>, Option<String>, Option<String>) {
+    match assignment {
+        None | Some(VideoHardwareAssignment::Software(_)) => (None, None, None),
+        Some(VideoHardwareAssignment::Nvidia(assignment)) => (
+            Some("nvidia".to_owned()),
+            Some(assignment.hardware_token.clone()),
+            Some(assignment.device_uuid.clone()),
+        ),
+    }
 }

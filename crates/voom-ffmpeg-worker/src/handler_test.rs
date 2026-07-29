@@ -50,6 +50,24 @@ async fn missing_input_is_artifact_unavailable() {
 }
 
 #[tokio::test]
+async fn one_shot_nvenc_request_requires_configured_run_local_worker() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("input.mkv");
+    let mut request = request(dir.path(), &input).await;
+    request.profile.encoder = "hevc_nvenc".to_owned();
+    request.profile.crf = None;
+    request.profile.cq = Some(22);
+    request.profile.preset = "p5".to_owned();
+
+    let err = validate_video_hardware_binding(&request, &config(dir.path()), "h264").unwrap_err();
+
+    assert!(
+        err.to_string()
+            .contains("voom worker run-local --kind ffmpeg --nvidia-device GPU-<uuid>")
+    );
+}
+
+#[tokio::test]
 async fn output_path_escape_is_config_invalid() {
     let dir = tempfile::tempdir().unwrap();
     let input = dir.path().join("input.mkv");
@@ -166,7 +184,8 @@ async fn unavailable_encoder_is_config_invalid_before_ffmpeg() {
         name: "av1-archive".to_owned(),
         target_codec: "av1".to_owned(),
         encoder: "libaom-av1".to_owned(),
-        crf: 35,
+        crf: Some(35),
+        cq: None,
         preset: "8".to_owned(),
         tune: None,
         codec_profile: None,
@@ -175,6 +194,7 @@ async fn unavailable_encoder_is_config_invalid_before_ffmpeg() {
         max_width: None,
         max_height: None,
         copy_compatible: false,
+        decode: voom_core::VideoDecodeMode::default(),
     };
     request.output.video_codec = "av1".to_owned();
     let config = config(dir.path())
@@ -795,6 +815,7 @@ async fn request(root: &Path, input: &Path) -> TranscodeVideoRequest {
         input: TranscodeVideoInput {
             path: input.to_string_lossy().into_owned(),
             expected,
+            video_codec: None,
         },
         output: TranscodeVideoOutput {
             staging_root: stage.to_string_lossy().into_owned(),
@@ -804,6 +825,7 @@ async fn request(root: &Path, input: &Path) -> TranscodeVideoRequest {
             overwrite: false,
         },
         profile: TranscodeVideoProfile::default_hevc(),
+        hardware_assignment: None,
         copy_video: false,
     }
 }

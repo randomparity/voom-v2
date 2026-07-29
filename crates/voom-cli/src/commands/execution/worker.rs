@@ -5,7 +5,9 @@ use secrecy::SecretString;
 use serde::Serialize;
 use serde_json::json;
 use voom_control_plane::workers::{NewWorkerCapabilityDraft, RegisterWorkerForNodeInput};
-use voom_control_plane::{ControlPlane, LocalWorkerHandle, LocalWorkerKind};
+use voom_control_plane::{
+    ControlPlane, LocalWorkerHandle, LocalWorkerKind, NvidiaLocalWorkerConfig,
+};
 use voom_core::{ErrorCode, NodeId, TicketOperation, VoomError, WorkerId};
 use voom_store::repo::workers::{WorkerInspection, WorkerNodeContext};
 
@@ -77,7 +79,20 @@ pub async fn run(database_url: &str, local: Local, command: WorkerCommand) -> io
         }
         WorkerCommand::List { status } => list(database_url, local, status).await,
         WorkerCommand::Show { worker_id } => show(database_url, local, worker_id).await,
-        WorkerCommand::RunLocal { kind } => run_local(database_url, local, kind).await,
+        WorkerCommand::RunLocal {
+            kind,
+            nvidia_device,
+            nvidia_max_sessions,
+        } => {
+            run_local(
+                database_url,
+                local,
+                kind,
+                nvidia_device,
+                nvidia_max_sessions,
+            )
+            .await
+        }
     }
 }
 
@@ -121,12 +136,29 @@ fn emit_ready_line(handle: &LocalWorkerHandle) -> io::Result<()> {
     out.flush()
 }
 
-async fn run_local(database_url: &str, local: Local, kind: LocalWorkerKindArg) -> io::Result<i32> {
+async fn run_local(
+    database_url: &str,
+    local: Local,
+    kind: LocalWorkerKindArg,
+    nvidia_device: Option<String>,
+    nvidia_max_sessions: Option<u32>,
+) -> io::Result<i32> {
     let cp = match open_control_plane("worker", database_url, &local).await? {
         Ok(cp) => cp,
         Err(code) => return Ok(code),
     };
-    run_local_supervise(&cp, kind.to_control_plane(), shutdown_signal(), local).await
+    let nvidia = nvidia_device.map(|device_uuid| NvidiaLocalWorkerConfig {
+        device_uuid,
+        max_sessions: nvidia_max_sessions.unwrap_or(1),
+    });
+    run_local_supervise(
+        &cp,
+        kind.to_control_plane(),
+        nvidia,
+        shutdown_signal(),
+        local,
+    )
+    .await
 }
 
 /// Start the bundled worker, print the readiness line, then block on `shutdown`
@@ -136,10 +168,11 @@ async fn run_local(database_url: &str, local: Local, kind: LocalWorkerKindArg) -
 async fn run_local_supervise(
     cp: &ControlPlane,
     kind: LocalWorkerKind,
+    nvidia: Option<NvidiaLocalWorkerConfig>,
     shutdown: impl Future<Output = ()>,
     local: Local,
 ) -> io::Result<i32> {
-    let running = match cp.start_local_worker(kind).await {
+    let running = match cp.start_local_worker_configured(kind, nvidia).await {
         Ok(running) => running,
         Err(err) => {
             tracing::warn!(kind = kind_label(kind), error = %err, "local worker preflight failed");

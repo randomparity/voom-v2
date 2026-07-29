@@ -113,6 +113,56 @@ mod profile_envelope {
     }
 
     #[tokio::test]
+    async fn create_nvidia_profile_emits_cq_and_explicit_decode() {
+        let seeded = seed().await;
+        let out = profile_command(&seeded.url)
+            .args([
+                "create",
+                "--name",
+                "gpu-hevc",
+                "--encoder",
+                "hevc_nvenc",
+                "--cq",
+                "23",
+                "--preset",
+                "p4",
+                "--tune",
+                "uhq",
+                "--decode",
+                "nvidia",
+            ])
+            .output()
+            .unwrap();
+
+        assert_eq!(out.status.code(), Some(0));
+        let json = envelope(out.stdout);
+        assert_eq!(json["data"]["profile"]["cq"], 23);
+        assert!(json["data"]["profile"].get("crf").is_none());
+        assert_eq!(json["data"]["profile"]["decode"]["backend"], "nvidia");
+    }
+
+    #[tokio::test]
+    async fn create_requires_exactly_one_quality_flag() {
+        let seeded = seed().await;
+        for quality in [Vec::new(), vec!["--crf", "23", "--cq", "23"]] {
+            let mut args = vec![
+                "create",
+                "--name",
+                "bad-quality",
+                "--encoder",
+                "libx265",
+                "--preset",
+                "medium",
+            ];
+            args.extend(quality);
+            let out = profile_command(&seeded.url).args(args).output().unwrap();
+            assert_eq!(out.status.code(), Some(1));
+            let json = envelope(out.stdout);
+            assert_eq!(json["error"]["code"], "BAD_ARGS");
+        }
+    }
+
+    #[tokio::test]
     async fn update_replaces_fields() {
         let seeded = seed().await;
         create_home(&seeded.url);

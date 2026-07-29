@@ -9,7 +9,7 @@ use voom_core::{
 };
 use voom_store::repo::artifacts::ArtifactVerificationStatus;
 use voom_store::repo::identity::IdentityRepo;
-use voom_worker_protocol::TranscodeVideoResult;
+use voom_worker_protocol::{TranscodeVideoResult, VideoHardwareAssignment};
 
 use crate::ControlPlane;
 use crate::artifact::commit::CommitArtifactInput;
@@ -67,6 +67,7 @@ pub struct ExecuteTranscodeVideoReport {
     pub output_width: u32,
     pub output_height: u32,
     pub output_pixel_format: String,
+    pub hardware_assignment: Option<VideoHardwareAssignment>,
 }
 
 #[async_trait]
@@ -112,20 +113,24 @@ impl ControlPlane {
 ///
 /// # Errors
 /// Returns the underlying store error if the snapshot lookup fails.
-async fn decide_copy_video_for_source(
+async fn source_video_decision(
     cp: &ControlPlane,
     source_file_version_id: FileVersionId,
     resolved: &resolve::ResolvedProfile,
-) -> Result<bool, VoomError> {
+) -> Result<(bool, Option<String>), VoomError> {
     let snapshots = cp
         .identity
         .list_media_snapshots_by_version(source_file_version_id)
         .await?;
     let latest = snapshots.into_iter().max_by_key(|s| s.id);
-    Ok(latest.as_ref().is_some_and(|s| {
-        let snapshot_input = crate::media_snapshot::planning_input(1, s);
-        resolve::decide_copy_video(&resolved.profile, &snapshot_input)
-    }))
+    let Some(snapshot) = latest else {
+        return Ok((false, None));
+    };
+    let snapshot = crate::media_snapshot::planning_input(1, &snapshot);
+    Ok((
+        resolve::decide_copy_video(&resolved.profile, &snapshot),
+        snapshot.video_codec,
+    ))
 }
 
 pub(crate) async fn execute_transcode_video_with_dispatchers(
@@ -137,44 +142,24 @@ pub(crate) async fn execute_transcode_video_with_dispatchers(
 ) -> Result<ExecuteTranscodeVideoReport, VoomError> {
     let selected =
         source::select_source(cp, input.source_file_version_id, input.source_location_id).await?;
-
-    crate::backup::maybe_back_up_source(
-        cp,
-        input.backup_root.as_deref(),
-        &selected.canonical_path,
-        input.source_file_version_id,
-        input.job_id,
-        input.ticket_id,
-    )
-    .await?;
-
-    let copy_video =
-        decide_copy_video_for_source(cp, input.source_file_version_id, &input.resolved).await?;
-
-    let output_name = stage::OutputName {
-        source_path: &selected.location.value,
-        profile_id: &input.resolved.profile.name,
-        codec: &input.resolved.profile.target_codec,
-        container: &input.resolved.output_container,
-    };
-    let staging_path = stage::staging_path(
-        &input.staging_root,
-        input.ticket_id,
-        input.lease_id,
-        &output_name,
-    )
-    .await?;
-    let target_path = stage::target_path(&input.target_dir, &output_name).await?;
+    let prepared = prepare_transcode(cp, &input, &selected).await?;
+    let PreparedTranscode {
+        copy_video,
+        source_video_codec,
+        staging_path,
+        target_path,
+    } = prepared;
 
     events::record_started(cp, &input, selected.location.id, &staging_path).await?;
     dispatch::revalidate_source_file(&selected).await?;
-    let request = dispatch::transcode_video_request_for(
+    let mut request = dispatch::transcode_video_request_for(
         &selected,
         &input.resolved,
         copy_video,
         &input.staging_root,
         &staging_path,
     );
+    request.input.video_codec = source_video_codec;
     let result = transcode.dispatch_transcode_video(request.clone()).await?;
     dispatch::validate_result(&selected, &request, &result)?;
     dispatch::require_output_file_matches_result(&staging_path, &result).await?;
@@ -235,6 +220,52 @@ pub(crate) async fn execute_transcode_video_with_dispatchers(
         output_width: result.output_width,
         output_height: result.output_height,
         output_pixel_format: result.output_pixel_format.clone(),
+        hardware_assignment: result.hardware_assignment.clone(),
+    })
+}
+
+struct PreparedTranscode {
+    copy_video: bool,
+    source_video_codec: Option<String>,
+    staging_path: PathBuf,
+    target_path: PathBuf,
+}
+
+async fn prepare_transcode(
+    cp: &ControlPlane,
+    input: &ExecuteTranscodeVideoInput,
+    selected: &source::SelectedSource,
+) -> Result<PreparedTranscode, VoomError> {
+    crate::backup::maybe_back_up_source(
+        cp,
+        input.backup_root.as_deref(),
+        &selected.canonical_path,
+        input.source_file_version_id,
+        input.job_id,
+        input.ticket_id,
+    )
+    .await?;
+    let (copy_video, source_video_codec) =
+        source_video_decision(cp, input.source_file_version_id, &input.resolved).await?;
+    let output_name = stage::OutputName {
+        source_path: &selected.location.value,
+        profile_id: &input.resolved.profile.name,
+        codec: &input.resolved.profile.target_codec,
+        container: &input.resolved.output_container,
+    };
+    let staging_path = stage::staging_path(
+        &input.staging_root,
+        input.ticket_id,
+        input.lease_id,
+        &output_name,
+    )
+    .await?;
+    let target_path = stage::target_path(&input.target_dir, &output_name).await?;
+    Ok(PreparedTranscode {
+        copy_video,
+        source_video_codec,
+        staging_path,
+        target_path,
     })
 }
 

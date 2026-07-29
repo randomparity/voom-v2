@@ -65,6 +65,7 @@ pub fn transcode_video_request_for(
                 modified_at: None,
                 local_file_key: None,
             },
+            video_codec: None,
         },
         output: TranscodeVideoOutput {
             staging_root: staging_root.to_string_lossy().into_owned(),
@@ -74,6 +75,7 @@ pub fn transcode_video_request_for(
             overwrite: false,
         },
         profile: resolved.profile.clone(),
+        hardware_assignment: None,
         copy_video,
     }
 }
@@ -123,6 +125,12 @@ pub fn validate_result(
         )));
     }
     validate_output_facts(request, result)?;
+    if result.hardware_assignment != request.hardware_assignment {
+        return Err(VoomError::MalformedWorkerResult(format!(
+            "transcode_video result hardware assignment {:?} does not match request {:?}",
+            result.hardware_assignment, request.hardware_assignment
+        )));
+    }
     if result.input_pre != result.input_post {
         return Err(VoomError::ArtifactChecksumMismatch(
             "transcode_video source changed during worker execution".to_owned(),

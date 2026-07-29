@@ -8,11 +8,12 @@ use tokio::process::Command;
 use tokio::time::{Duration, timeout};
 use voom_worker_protocol::{
     AudioDispositionFact, AudioOutputStreamFact, AudioStreamRef, ExtractAudioRequest,
-    TranscodeAudioRequest, TranscodeVideoProfile, TranscodeVideoRequest,
+    NvidiaVideoAcceleratorDescriptor, TranscodeAudioRequest, TranscodeVideoProfile,
+    TranscodeVideoRequest,
 };
 
 /// The video encoders advertised by every ffmpeg build voom supports.
-pub const ALL_VIDEO_ENCODERS: [&str; 3] = ["libx265", "libsvtav1", "libaom-av1"];
+pub const ALL_VIDEO_ENCODERS: [&str; 4] = ["libx265", "libsvtav1", "libaom-av1", "hevc_nvenc"];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FfmpegConfig {
@@ -20,6 +21,7 @@ pub struct FfmpegConfig {
     pub ffprobe_path: PathBuf,
     pub provider_version: String,
     pub process_timeout: Duration,
+    pub accelerator: Option<NvidiaVideoAcceleratorDescriptor>,
     available_video_encoders: BTreeSet<String>,
 }
 
@@ -41,6 +43,7 @@ impl FfmpegConfig {
             ffprobe_path,
             provider_version,
             process_timeout,
+            accelerator: None,
             available_video_encoders: ALL_VIDEO_ENCODERS
                 .iter()
                 .map(|encoder| (*encoder).to_owned())
@@ -62,6 +65,13 @@ impl FfmpegConfig {
     #[must_use]
     pub fn has_video_encoder(&self, encoder: &str) -> bool {
         self.available_video_encoders.contains(encoder)
+    }
+
+    /// Binds this worker configuration to one NVIDIA device descriptor.
+    #[must_use]
+    pub fn with_accelerator(mut self, accelerator: NvidiaVideoAcceleratorDescriptor) -> Self {
+        self.accelerator = Some(accelerator);
+        self
     }
 }
 
@@ -138,6 +148,15 @@ pub struct InputProbe {
     pub forced_subtitle_ordinals: Vec<usize>,
 }
 
+/// Input facts needed to build a device-correct transcode command.
+#[derive(Debug, Clone, Copy)]
+pub struct VideoTranscodeInput<'a> {
+    pub width: u32,
+    pub height: u32,
+    pub codec: &'a str,
+    pub forced_subtitle_ordinals: &'a [usize],
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AudioOutputProbe {
     pub container: String,
@@ -179,21 +198,22 @@ pub fn video_codec_args(
         return Ok(vec![OsString::from("-c:v"), OsString::from("copy")]);
     }
     match profile.encoder.as_str() {
-        "libx265" => Ok(video_codec_args_x265(profile)),
-        "libsvtav1" => Ok(video_codec_args_svtav1(profile)),
-        "libaom-av1" => Ok(video_codec_args_libaom(profile)),
+        "libx265" => video_codec_args_x265(profile),
+        "libsvtav1" => video_codec_args_svtav1(profile),
+        "libaom-av1" => video_codec_args_libaom(profile),
+        "hevc_nvenc" => video_codec_args_nvenc(profile),
         other => Err(FfmpegError::OutputFactsMismatch(format!(
             "unknown video encoder `{other}`"
         ))),
     }
 }
 
-fn video_codec_args_x265(profile: &TranscodeVideoProfile) -> Vec<OsString> {
+fn video_codec_args_x265(profile: &TranscodeVideoProfile) -> Result<Vec<OsString>, FfmpegError> {
     let mut args = vec![
         OsString::from("-c:v"),
         OsString::from("libx265"),
         OsString::from("-crf"),
-        OsString::from(profile.crf.to_string()),
+        required_quality(profile.crf, "crf", &profile.encoder)?,
         OsString::from("-preset"),
         OsString::from(&profile.preset),
     ];
@@ -210,15 +230,15 @@ fn video_codec_args_x265(profile: &TranscodeVideoProfile) -> Vec<OsString> {
         args.push(OsString::from(level));
     }
     append_pixel_format_arg(&mut args, profile);
-    args
+    Ok(args)
 }
 
-fn video_codec_args_svtav1(profile: &TranscodeVideoProfile) -> Vec<OsString> {
+fn video_codec_args_svtav1(profile: &TranscodeVideoProfile) -> Result<Vec<OsString>, FfmpegError> {
     let mut args = vec![
         OsString::from("-c:v"),
         OsString::from("libsvtav1"),
         OsString::from("-crf"),
-        OsString::from(profile.crf.to_string()),
+        required_quality(profile.crf, "crf", &profile.encoder)?,
         OsString::from("-preset"),
         OsString::from(&profile.preset),
     ];
@@ -239,15 +259,15 @@ fn video_codec_args_svtav1(profile: &TranscodeVideoProfile) -> Vec<OsString> {
         args.push(OsString::from(svt_params.join(":")));
     }
     append_pixel_format_arg(&mut args, profile);
-    args
+    Ok(args)
 }
 
-fn video_codec_args_libaom(profile: &TranscodeVideoProfile) -> Vec<OsString> {
+fn video_codec_args_libaom(profile: &TranscodeVideoProfile) -> Result<Vec<OsString>, FfmpegError> {
     let mut args = vec![
         OsString::from("-c:v"),
         OsString::from("libaom-av1"),
         OsString::from("-crf"),
-        OsString::from(profile.crf.to_string()),
+        required_quality(profile.crf, "crf", &profile.encoder)?,
         OsString::from("-b:v"),
         OsString::from("0"),
         OsString::from("-cpu-used"),
@@ -262,7 +282,48 @@ fn video_codec_args_libaom(profile: &TranscodeVideoProfile) -> Vec<OsString> {
         args.push(OsString::from(codec_profile));
     }
     append_pixel_format_arg(&mut args, profile);
-    args
+    Ok(args)
+}
+
+fn video_codec_args_nvenc(profile: &TranscodeVideoProfile) -> Result<Vec<OsString>, FfmpegError> {
+    let mut args = vec![
+        OsString::from("-c:v"),
+        OsString::from("hevc_nvenc"),
+        OsString::from("-rc"),
+        OsString::from("vbr"),
+        OsString::from("-cq"),
+        required_quality(profile.cq, "cq", &profile.encoder)?,
+        OsString::from("-b:v"),
+        OsString::from("0"),
+        OsString::from("-preset"),
+        OsString::from(&profile.preset),
+    ];
+    if let Some(tune) = &profile.tune {
+        args.push(OsString::from("-tune"));
+        args.push(OsString::from(tune));
+    }
+    if let Some(codec_profile) = &profile.codec_profile {
+        args.push(OsString::from("-profile:v"));
+        args.push(OsString::from(codec_profile));
+    }
+    if let Some(level) = &profile.codec_level {
+        args.push(OsString::from("-level"));
+        args.push(OsString::from(level));
+    }
+    Ok(args)
+}
+
+fn required_quality(
+    value: Option<u8>,
+    field: &str,
+    encoder: &str,
+) -> Result<OsString, FfmpegError> {
+    let Some(value) = value else {
+        return Err(FfmpegError::OutputFactsMismatch(format!(
+            "encoder `{encoder}` requires `{field}`"
+        )));
+    };
+    Ok(OsString::from(value.to_string()))
 }
 
 fn append_pixel_format_arg(args: &mut Vec<OsString>, profile: &TranscodeVideoProfile) {
@@ -339,9 +400,7 @@ pub fn scale_args(profile: &TranscodeVideoProfile, src_w: u32, src_h: u32) -> Ve
 pub async fn run_ffmpeg_transcode(
     config: &FfmpegConfig,
     request: &TranscodeVideoRequest,
-    src_width: u32,
-    src_height: u32,
-    forced_subtitle_ordinals: &[usize],
+    source: VideoTranscodeInput<'_>,
 ) -> Result<OutputProbe, FfmpegError> {
     let input = Path::new(&request.input.path);
     let output = Path::new(&request.output.path);
@@ -350,10 +409,15 @@ pub async fn run_ffmpeg_transcode(
     let codec = &request.output.video_codec;
 
     let mut command = Command::new(&config.ffmpeg_path);
+    command.arg("-hide_banner").arg("-nostdin").arg("-n");
+    append_nvidia_input_args(
+        &mut command,
+        config,
+        profile,
+        source.codec,
+        request.copy_video,
+    )?;
     command
-        .arg("-hide_banner")
-        .arg("-nostdin")
-        .arg("-n")
         .arg("-i")
         .arg(input)
         .arg("-map")
@@ -368,7 +432,7 @@ pub async fn run_ffmpeg_transcode(
     for arg in video_codec_args(profile, request.copy_video)? {
         command.arg(arg);
     }
-    for arg in scale_args(profile, src_width, src_height) {
+    for arg in video_filter_args(profile, source.width, source.height, request.copy_video)? {
         command.arg(arg);
     }
     command
@@ -380,7 +444,7 @@ pub async fn run_ffmpeg_transcode(
         .arg("copy")
         .arg("-map_metadata")
         .arg("0");
-    for ordinal in forced_subtitle_ordinals {
+    for ordinal in source.forced_subtitle_ordinals {
         command
             .arg(format!("-disposition:s:{ordinal}"))
             .arg("+forced");
@@ -405,6 +469,101 @@ pub async fn run_ffmpeg_transcode(
     }
 
     probe_output(config, output, container, codec, profile).await
+}
+
+fn append_nvidia_input_args(
+    command: &mut Command,
+    config: &FfmpegConfig,
+    profile: &TranscodeVideoProfile,
+    source_codec: &str,
+    copy_video: bool,
+) -> Result<(), FfmpegError> {
+    if copy_video || profile.encoder != "hevc_nvenc" {
+        return Ok(());
+    }
+    let Some(accelerator) = &config.accelerator else {
+        return Err(FfmpegError::OutputFactsMismatch(
+            "hevc_nvenc request reached an unbound ffmpeg worker".to_owned(),
+        ));
+    };
+    command.env("CUDA_VISIBLE_DEVICES", &accelerator.device_uuid);
+    if profile.decode.is_software() {
+        return Ok(());
+    }
+    let decoder = nvidia_decoder(source_codec)?;
+    command
+        .arg("-hwaccel")
+        .arg("cuda")
+        .arg("-hwaccel_device")
+        .arg("0")
+        .arg("-hwaccel_output_format")
+        .arg("cuda")
+        .arg("-c:v")
+        .arg(decoder);
+    Ok(())
+}
+
+fn nvidia_decoder(source_codec: &str) -> Result<&'static str, FfmpegError> {
+    match source_codec {
+        "h264" => Ok("h264_cuvid"),
+        "hevc" | "h265" => Ok("hevc_cuvid"),
+        "av1" => Ok("av1_cuvid"),
+        other => Err(FfmpegError::UnsupportedInput(format!(
+            "NVIDIA decode does not support source codec `{other}`"
+        ))),
+    }
+}
+
+fn video_filter_args(
+    profile: &TranscodeVideoProfile,
+    src_width: u32,
+    src_height: u32,
+    copy_video: bool,
+) -> Result<Vec<OsString>, FfmpegError> {
+    if copy_video {
+        return Ok(Vec::new());
+    }
+    if profile.encoder != "hevc_nvenc" {
+        return Ok(scale_args(profile, src_width, src_height));
+    }
+    let pixel_format = match profile.pixel_format.as_deref() {
+        None | Some("yuv420p") => "nv12",
+        Some("yuv420p10le") => "p010le",
+        Some(other) => {
+            return Err(FfmpegError::OutputFactsMismatch(format!(
+                "unsupported NVENC pixel format `{other}`"
+            )));
+        }
+    };
+    let scaling = scale_filter(profile, src_width, src_height);
+    let filter = if profile.decode.is_nvidia() {
+        scaling.map_or_else(
+            || format!("scale_cuda=format={pixel_format}"),
+            |scale| format!("{scale}:format={pixel_format}"),
+        )
+    } else {
+        let upload = format!("format={pixel_format},hwupload_cuda=device=0");
+        scaling.map_or(upload.clone(), |scale| {
+            format!("{upload},{scale}:format={pixel_format}")
+        })
+    };
+    Ok(vec![OsString::from("-vf"), OsString::from(filter)])
+}
+
+fn scale_filter(
+    profile: &TranscodeVideoProfile,
+    src_width: u32,
+    src_height: u32,
+) -> Option<String> {
+    let cap_width = profile.max_width.unwrap_or(u32::MAX);
+    let cap_height = profile.max_height.unwrap_or(u32::MAX);
+    if src_width <= cap_width && src_height <= cap_height {
+        return None;
+    }
+    Some(format!(
+        "scale_cuda=w='min({cap_width},iw)':h='min({cap_height},ih)':\
+         force_original_aspect_ratio=decrease"
+    ))
 }
 
 pub async fn run_ffmpeg_transcode_audio(

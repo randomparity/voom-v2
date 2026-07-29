@@ -14,12 +14,12 @@ use voom_worker_protocol::{
     ProgressFrame, ProtocolError, TranscodeAudioRequest, TranscodeAudioResult,
     TranscodeAudioStatus, TranscodeVideoExpectedFacts, TranscodeVideoObservedFacts,
     TranscodeVideoProfile, TranscodeVideoRequest, TranscodeVideoResult, TranscodeVideoStatus,
-    validate_extract_audio_request, validate_extract_audio_result,
+    VideoHardwareAssignment, validate_extract_audio_request, validate_extract_audio_result,
 };
 
 use crate::ffmpeg::{
-    FfmpegConfig, FfmpegError, InputProbe, probe_input, run_ffmpeg_extract_audio,
-    run_ffmpeg_transcode, run_ffmpeg_transcode_audio,
+    FfmpegConfig, FfmpegError, InputProbe, VideoTranscodeInput, probe_input,
+    run_ffmpeg_extract_audio, run_ffmpeg_transcode, run_ffmpeg_transcode_audio,
 };
 use crate::observe::{ObserveError, observe_file_facts};
 
@@ -260,6 +260,17 @@ pub async fn handle_transcode_video(
     let input_probe = probe_input(config, &input_path)
         .await
         .map_err(TranscodeVideoError::from)?;
+    if let Some(expected_codec) = &request.input.video_codec
+        && !codec_tokens_match(&input_probe.codec, expected_codec)
+    {
+        return Err(malformed_worker_result(
+            "input.video_codec",
+            format!(
+                "source codec `{}` does not match expected `{expected_codec}`",
+                input_probe.codec
+            ),
+        ));
+    }
     if input_probe.video_stream_count > 1 {
         // The transcode maps only 0:v:0; a source with multiple video streams
         // would silently drop the rest. Fail loud rather than lose data.
@@ -274,13 +285,17 @@ pub async fn handle_transcode_video(
     if request.copy_video {
         validate_copy_video_preconditions(request, &input_probe)?;
     }
+    validate_video_hardware_binding(request, config, &input_probe.codec)?;
 
     let probe = run_ffmpeg_transcode(
         config,
         request,
-        input_probe.width,
-        input_probe.height,
-        &input_probe.forced_subtitle_ordinals,
+        VideoTranscodeInput {
+            width: input_probe.width,
+            height: input_probe.height,
+            codec: &input_probe.codec,
+            forced_subtitle_ordinals: &input_probe.forced_subtitle_ordinals,
+        },
     )
     .await
     .map_err(TranscodeVideoError::from)?;
@@ -299,6 +314,7 @@ pub async fn handle_transcode_video(
         output_width: probe.width,
         output_height: probe.height,
         output_pixel_format: probe.pixel_format,
+        hardware_assignment: request.hardware_assignment.clone(),
         copied_video: request.copy_video,
     })
 }
@@ -693,6 +709,76 @@ fn validate_encoder_available(
         "transcode_video",
         format!("encoder `{encoder}` is not available in this ffmpeg build"),
     ))
+}
+
+fn validate_video_hardware_binding(
+    request: &TranscodeVideoRequest,
+    config: &FfmpegConfig,
+    source_codec: &str,
+) -> Result<(), TranscodeVideoError> {
+    if request.profile.encoder != "hevc_nvenc" {
+        let software_assignment = match &request.hardware_assignment {
+            None | Some(VideoHardwareAssignment::Software(_)) => true,
+            Some(VideoHardwareAssignment::Nvidia(_)) => false,
+        };
+        if config.accelerator.is_none() && software_assignment {
+            return Ok(());
+        }
+        return Err(config_invalid(
+            "transcode_video",
+            "software video work requires an unbound software worker".to_owned(),
+        ));
+    }
+    let Some(VideoHardwareAssignment::Nvidia(assignment)) = &request.hardware_assignment else {
+        return Err(config_invalid(
+            "transcode_video",
+            "hevc_nvenc requires scheduler assignment; start a configured worker with: \
+             voom worker run-local --kind ffmpeg --nvidia-device GPU-<uuid>"
+                .to_owned(),
+        ));
+    };
+    let Some(accelerator) = &config.accelerator else {
+        return Err(config_invalid(
+            "transcode_video",
+            "assigned NVIDIA work reached an unbound worker".to_owned(),
+        ));
+    };
+    if assignment.hardware_token != accelerator.hardware_token
+        || assignment.device_uuid != accelerator.device_uuid
+    {
+        return Err(config_invalid(
+            "transcode_video",
+            format!(
+                "NVIDIA assignment {} ({}) does not match worker {} ({})",
+                assignment.hardware_token,
+                assignment.device_uuid,
+                accelerator.hardware_token,
+                accelerator.device_uuid
+            ),
+        ));
+    }
+    let decoder = nvidia_decoder_for_source(source_codec);
+    if request.profile.decode.is_nvidia()
+        && !accelerator.decoders.iter().any(|item| item == decoder)
+    {
+        return Err(config_invalid(
+            "transcode_video",
+            format!(
+                "NVIDIA device {} did not probe decoder `{decoder}`",
+                accelerator.device_uuid
+            ),
+        ));
+    }
+    Ok(())
+}
+
+fn nvidia_decoder_for_source(source_codec: &str) -> &str {
+    match source_codec {
+        "h264" => "h264_cuvid",
+        "hevc" | "h265" => "hevc_cuvid",
+        "av1" => "av1_cuvid",
+        _ => "<unsupported>",
+    }
 }
 
 fn validate_request_contract(request: &TranscodeVideoRequest) -> Result<(), TranscodeVideoError> {

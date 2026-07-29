@@ -120,6 +120,7 @@ fn render_default_transcode_video_payload(branch: &BranchContext) -> Result<Valu
                 modified_at: source_file_optional_string(branch, "modified_at")?,
                 local_file_key: source_file_optional_string(branch, "local_file_key")?,
             },
+            video_codec: branch.probe_codec.clone(),
         },
         output: TranscodeVideoOutput {
             staging_root: staging_root.to_owned(),
@@ -134,6 +135,7 @@ fn render_default_transcode_video_payload(branch: &BranchContext) -> Result<Valu
             overwrite: true,
         },
         profile,
+        hardware_assignment: None,
         copy_video: false,
     };
     serde_json::to_value(request)
@@ -185,6 +187,15 @@ pub fn render_policy_transcode_payload(
     let Some(object) = payload.as_object_mut() else {
         return Err(BindingError::new("rendered payload must be a JSON object"));
     };
+    if let Some(source_video_codec) = operation_payload
+        .get("source_video_codec")
+        .and_then(Value::as_str)
+    {
+        object.insert(
+            "source_video_codec".to_owned(),
+            Value::String(source_video_codec.to_owned()),
+        );
+    }
     insert_policy_file_source(object, source);
     Ok(payload)
 }

@@ -50,6 +50,7 @@ fn transcode_video_result_status_serializes_as_transcoded() {
         output_width: 1920,
         output_height: 1080,
         output_pixel_format: "yuv420p".to_owned(),
+        hardware_assignment: None,
         copied_video: false,
     };
 
@@ -160,6 +161,7 @@ fn sample_request() -> TranscodeVideoRequest {
                 modified_at: Some("2026-05-25T00:00:00Z".to_owned()),
                 local_file_key: None,
             },
+            video_codec: None,
         },
         output: TranscodeVideoOutput {
             staging_root: "/tmp/voom-stage".to_owned(),
@@ -169,6 +171,7 @@ fn sample_request() -> TranscodeVideoRequest {
             overwrite: false,
         },
         profile: TranscodeVideoProfile::default_hevc(),
+        hardware_assignment: None,
         copy_video: false,
     }
 }
@@ -229,7 +232,7 @@ fn profile_validates_against_its_encoder_descriptor() {
     assert!(validate_profile_against_descriptor(&bad_codec).is_err());
 
     let mut bad_crf = TranscodeVideoProfile::default_hevc();
-    bad_crf.crf = 60; // > 51 for libx265
+    bad_crf.crf = Some(60); // > 51 for libx265
     assert!(validate_profile_against_descriptor(&bad_crf).is_err());
 
     let mut bad_combo = TranscodeVideoProfile::default_hevc();

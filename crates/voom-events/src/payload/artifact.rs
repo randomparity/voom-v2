@@ -200,6 +200,12 @@ pub struct ArtifactTranscodeSucceededPayload {
     pub output_height: u32,
     #[serde(default)]
     pub output_pixel_format: String,
+    #[serde(default)]
+    pub hardware_backend: Option<String>,
+    #[serde(default)]
+    pub hardware_token: Option<String>,
+    #[serde(default)]
+    pub hardware_device_uuid: Option<String>,
     pub provider: String,
     pub provider_version: String,
 }

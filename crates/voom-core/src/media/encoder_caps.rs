@@ -10,12 +10,28 @@ pub enum PresetDomain {
     NumericRange { min: u8, max: u8 },
 }
 
+/// The encoder-specific constant-quality control accepted by a profile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QualityDomain {
+    /// `FFmpeg`'s codec-independent constant rate factor.
+    Crf { min: u8, max: u8 },
+    /// NVIDIA's constant-quality target in VBR rate-control mode.
+    Cq { min: u8, max: u8 },
+}
+
+/// Whether an encoder executes in software or on a named accelerator backend.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VideoEncoderBackend {
+    Software,
+    Nvidia,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EncoderDescriptor {
     pub encoder: &'static str,
     pub target_codec: &'static str,
-    pub crf_min: u8,
-    pub crf_max: u8,
+    pub quality_domain: QualityDomain,
+    pub backend: VideoEncoderBackend,
     pub preset_domain: PresetDomain,
     pub tunes: &'static [&'static str],
     pub codec_profiles: &'static [&'static str],
@@ -45,8 +61,8 @@ const X265_PRESETS: &[&str] = &[
 const X265: EncoderDescriptor = EncoderDescriptor {
     encoder: "libx265",
     target_codec: "hevc",
-    crf_min: 0,
-    crf_max: 51,
+    quality_domain: QualityDomain::Crf { min: 0, max: 51 },
+    backend: VideoEncoderBackend::Software,
     preset_domain: PresetDomain::Named(X265_PRESETS),
     tunes: &["psnr", "ssim", "grain", "fastdecode", "zerolatency"],
     // V1: profiles requiring wider chroma/bit-depth deferred until their pixel formats are added.
@@ -70,8 +86,8 @@ const X265: EncoderDescriptor = EncoderDescriptor {
 const SVTAV1: EncoderDescriptor = EncoderDescriptor {
     encoder: "libsvtav1",
     target_codec: "av1",
-    crf_min: 0,
-    crf_max: 63,
+    quality_domain: QualityDomain::Crf { min: 0, max: 63 },
+    backend: VideoEncoderBackend::Software,
     preset_domain: PresetDomain::NumericRange { min: 0, max: 13 },
     tunes: &["vq", "psnr"],
     codec_profiles: &["main"],
@@ -85,8 +101,8 @@ const SVTAV1: EncoderDescriptor = EncoderDescriptor {
 const LIBAOM: EncoderDescriptor = EncoderDescriptor {
     encoder: "libaom-av1",
     target_codec: "av1",
-    crf_min: 0,
-    crf_max: 63,
+    quality_domain: QualityDomain::Crf { min: 0, max: 63 },
+    backend: VideoEncoderBackend::Software,
     preset_domain: PresetDomain::NumericRange { min: 0, max: 8 },
     tunes: &["psnr", "ssim"],
     // V1: profiles requiring wider chroma/bit-depth deferred until their pixel formats are added.
@@ -98,7 +114,26 @@ const LIBAOM: EncoderDescriptor = EncoderDescriptor {
     requires_bitrate_zero: true,
 };
 
-const DESCRIPTORS: &[EncoderDescriptor] = &[X265, SVTAV1, LIBAOM];
+const NVIDIA_PRESETS: &[&str] = &["p1", "p2", "p3", "p4", "p5", "p6", "p7"];
+
+const HEVC_NVENC: EncoderDescriptor = EncoderDescriptor {
+    encoder: "hevc_nvenc",
+    target_codec: "hevc",
+    quality_domain: QualityDomain::Cq { min: 1, max: 51 },
+    backend: VideoEncoderBackend::Nvidia,
+    preset_domain: PresetDomain::Named(NVIDIA_PRESETS),
+    tunes: &["hq", "uhq", "ll", "ull", "lossless"],
+    codec_profiles: &["main", "main10"],
+    codec_levels: &[
+        "3.0", "3.1", "4.0", "4.1", "5.0", "5.1", "5.2", "6.0", "6.1", "6.2",
+    ],
+    pixel_formats: &["yuv420p", "yuv420p10le"],
+    ten_bit_pixel_formats: &["yuv420p10le"],
+    eight_bit_only_profiles: &["main"],
+    requires_bitrate_zero: true,
+};
+
+const DESCRIPTORS: &[EncoderDescriptor] = &[X265, SVTAV1, LIBAOM, HEVC_NVENC];
 
 #[must_use]
 pub fn encoder_descriptor(encoder: &str) -> Option<&'static EncoderDescriptor> {
@@ -108,7 +143,18 @@ pub fn encoder_descriptor(encoder: &str) -> Option<&'static EncoderDescriptor> {
 impl EncoderDescriptor {
     #[must_use]
     pub const fn accepts_crf(&self, crf: u8) -> bool {
-        crf >= self.crf_min && crf <= self.crf_max
+        let QualityDomain::Crf { min, max } = self.quality_domain else {
+            return false;
+        };
+        crf >= min && crf <= max
+    }
+
+    #[must_use]
+    pub const fn accepts_cq(&self, cq: u8) -> bool {
+        let QualityDomain::Cq { min, max } = self.quality_domain else {
+            return false;
+        };
+        cq >= min && cq <= max
     }
 
     #[must_use]

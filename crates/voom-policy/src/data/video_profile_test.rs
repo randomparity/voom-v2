@@ -19,12 +19,30 @@ fn deserializes_tagged_inline() {
     match r {
         VideoProfileRef::Inline(s) => {
             assert_eq!(s.encoder, "libsvtav1");
-            assert_eq!(s.crf, 28);
+            assert_eq!(s.crf, Some(28));
+            assert!(s.cq.is_none());
             assert_eq!(s.preset, "6");
             assert!(s.tune.is_none());
+            assert!(s.decode.is_software());
         }
         VideoProfileRef::Named(_) => panic!("expected inline"),
     }
+}
+
+#[test]
+fn deserializes_nvidia_inline_profile() {
+    let json = concat!(
+        r#"{"inline":{"encoder":"hevc_nvenc","cq":23,"preset":"p4","#,
+        r#""decode":{"backend":"nvidia"}}}"#
+    );
+    let profile: VideoProfileRef = serde_json::from_str(json).unwrap();
+
+    let VideoProfileRef::Inline(settings) = profile else {
+        panic!("expected inline profile");
+    };
+    assert_eq!(settings.cq, Some(23));
+    assert!(settings.crf.is_none());
+    assert!(settings.decode.is_nvidia());
 }
 
 #[test]

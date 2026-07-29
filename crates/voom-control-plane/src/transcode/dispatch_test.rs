@@ -7,7 +7,7 @@ use voom_core::{FileAssetId, FileLocationId, FileVersionId};
 use voom_store::repo::identity::{FileLocation, FileLocationKind, FileVersion, ProducedBy};
 use voom_worker_protocol::{
     TranscodeVideoExpectedFacts, TranscodeVideoInput, TranscodeVideoObservedFacts,
-    TranscodeVideoOutput, TranscodeVideoProfile, TranscodeVideoStatus,
+    TranscodeVideoOutput, TranscodeVideoProfile, TranscodeVideoStatus, VideoHardwareAssignment,
 };
 
 #[test]
@@ -21,6 +21,22 @@ fn default_ffmpeg_worker_command_prefers_current_exe_sibling() {
 
     assert_eq!(command.program, worker.as_os_str());
     assert_eq!(command.env, Vec::<(OsString, OsString)>::new());
+}
+
+#[test]
+fn validate_result_rejects_missing_hardware_assignment_evidence() {
+    let selected = selected_source();
+    let mut request = capped_request();
+    request.hardware_assignment = Some(VideoHardwareAssignment::nvidia(
+        "nvidia:GPU-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+        "GPU-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+    ));
+    let result = conforming_result();
+
+    let error = validate_result(&selected, &request, &result).unwrap_err();
+
+    assert_eq!(error.code(), "MALFORMED_WORKER_RESULT");
+    assert!(error.to_string().contains("hardware assignment"));
 }
 
 #[test]
@@ -58,7 +74,8 @@ fn resolved_av1_1080p_mp4() -> ResolvedProfile {
             name: "av1-1080p".to_owned(),
             target_codec: "av1".to_owned(),
             encoder: "libsvtav1".to_owned(),
-            crf: 32,
+            crf: Some(32),
+            cq: None,
             preset: "8".to_owned(),
             tune: None,
             codec_profile: None,
@@ -67,6 +84,7 @@ fn resolved_av1_1080p_mp4() -> ResolvedProfile {
             max_width: Some(1920),
             max_height: Some(1080),
             copy_compatible: true,
+            decode: voom_core::VideoDecodeMode::default(),
         },
         output_container: "mp4".to_owned(),
     }
@@ -133,6 +151,7 @@ fn capped_request() -> TranscodeVideoRequest {
                 modified_at: None,
                 local_file_key: None,
             },
+            video_codec: None,
         },
         output: TranscodeVideoOutput {
             staging_root: "/tmp/stage".to_owned(),
@@ -142,6 +161,7 @@ fn capped_request() -> TranscodeVideoRequest {
             overwrite: false,
         },
         profile: resolved.profile,
+        hardware_assignment: None,
         copy_video: false,
     }
 }
@@ -170,6 +190,7 @@ fn conforming_result() -> TranscodeVideoResult {
         output_width: 1920,
         output_height: 1080,
         output_pixel_format: "yuv420p".to_owned(),
+        hardware_assignment: None,
         copied_video: false,
     }
 }

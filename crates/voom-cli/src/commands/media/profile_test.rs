@@ -9,7 +9,8 @@ fn profile_data_maps_every_field_from_video_profile() {
         name: "hevc-archive".to_owned(),
         target_codec: "hevc".to_owned(),
         encoder: "libx265".to_owned(),
-        crf: 18,
+        crf: Some(18),
+        cq: None,
         preset: "slow".to_owned(),
         tune: Some("grain".to_owned()),
         codec_profile: Some("main10".to_owned()),
@@ -19,6 +20,7 @@ fn profile_data_maps_every_field_from_video_profile() {
         max_height: Some(1080),
         output_container: "mkv".to_owned(),
         copy_compatible: true,
+        decode: voom_core::VideoDecodeMode::default(),
         retired_at: Some(time::OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap()),
     };
 
@@ -28,7 +30,9 @@ fn profile_data_maps_every_field_from_video_profile() {
     assert_eq!(data.name, "hevc-archive");
     assert_eq!(data.target_codec, "hevc");
     assert_eq!(data.encoder, "libx265");
-    assert_eq!(data.crf, 18);
+    assert_eq!(data.crf, Some(18));
+    assert!(data.cq.is_none());
+    assert!(data.decode.is_software());
     assert_eq!(data.preset, "slow");
     assert_eq!(data.tune.as_deref(), Some("grain"));
     assert_eq!(data.codec_profile.as_deref(), Some("main10"));

@@ -1,6 +1,6 @@
 use serde_json::Value;
 use voom_core::{OperationKind, VoomError};
-use voom_worker_protocol::{TranscodeVideoRequest, TranscodeVideoResult};
+use voom_worker_protocol::{TranscodeVideoRequest, TranscodeVideoResult, VideoHardwareAssignment};
 
 use crate::cases::policy::compliance::committed_source_dir;
 use crate::transcode::{
@@ -48,6 +48,18 @@ pub(crate) async fn dispatch_control_plane_transcode(
         })?
         .to_owned();
     let source_file_version_id = context.source_file_version_id()?;
+    let hardware_assignment = context
+        .payload
+        .get("hardware_assignment")
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(|error| {
+            VoomError::Config(format!(
+                "transcode ticket {} hardware_assignment malformed: {error}",
+                context.ticket.id
+            ))
+        })?;
     let input = ExecuteTranscodeVideoInput {
         job_id: context.job_id("transcode")?,
         ticket_id: context.ticket.id,
@@ -70,6 +82,7 @@ pub(crate) async fn dispatch_control_plane_transcode(
         input,
         &RuntimeTranscodeDispatcher {
             context: context.runtime_dispatch_context(),
+            hardware_assignment,
         },
         &crate::artifact::verify::BundledVerifyArtifactDispatcher,
         &crate::transcode::commit::BundledTranscodeResultProbeDispatcher,
@@ -94,14 +107,16 @@ pub(crate) async fn dispatch_control_plane_transcode(
 
 struct RuntimeTranscodeDispatcher<'a> {
     context: RuntimeDispatchContext<'a>,
+    hardware_assignment: Option<VideoHardwareAssignment>,
 }
 
 #[async_trait::async_trait]
 impl TranscodeVideoDispatcher for RuntimeTranscodeDispatcher<'_> {
     async fn dispatch_transcode_video(
         &self,
-        request: TranscodeVideoRequest,
+        mut request: TranscodeVideoRequest,
     ) -> Result<TranscodeVideoResult, VoomError> {
+        request.hardware_assignment = self.hardware_assignment.clone();
         let idempotency_key =
             workflow_idempotency_key(self.context.ticket_id, self.context.lease_id);
         await_with_lease_heartbeats(

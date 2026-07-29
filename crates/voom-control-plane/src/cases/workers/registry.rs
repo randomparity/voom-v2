@@ -98,6 +98,7 @@ impl ControlPlane {
         Ok(worker)
     }
 
+    #[cfg(test)]
     pub(crate) async fn register_supervisor_worker(
         &self,
         input: NewWorker,

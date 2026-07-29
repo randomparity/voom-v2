@@ -26,7 +26,7 @@ pub(super) fn plan(
     container: &str,
 ) -> Result<OperationPlan, PlanGenerationError> {
     let target_codec = &resolved.target_codec;
-    let payload = transcode_video_payload(resolved, container)
+    let payload = transcode_video_payload(resolved, container, snapshot)
         .map_err(|error| serialization_error(&error))?;
     let observed_state = transcode_video_observed_state(snapshot);
     let mut notes = Vec::new();
@@ -313,6 +313,7 @@ pub fn video_stream_field<'a>(snapshot: &'a MediaSnapshotInput, key: &str) -> Op
 fn transcode_video_payload(
     resolved: &voom_core::TranscodeVideoProfile,
     container: &str,
+    snapshot: &MediaSnapshotInput,
 ) -> Result<serde_json::Value, serde_json::Error> {
     Ok(json!({
         "type": "transcode_video",
@@ -320,6 +321,7 @@ fn transcode_video_payload(
         "container": container,
         "profile": resolved.name,
         "resolved_profile": serde_json::to_value(resolved)?,
+        "source_video_codec": snapshot.video_codec,
     }))
 }
 
@@ -334,7 +336,10 @@ fn transcode_video_notes(
             "cpu_cost={}",
             profile::cpu_cost(&resolved.encoder, &resolved.preset)
         ),
-        format!("crf={}", resolved.crf),
+        resolved.crf.map_or_else(
+            || format!("cq={}", resolved.cq.unwrap_or_default()),
+            |crf| format!("crf={crf}"),
+        ),
     ];
     if let (Some(src_w), Some(src_h)) = (snapshot.width, snapshot.height) {
         let cap_w = resolved.max_width.unwrap_or(src_w);

@@ -124,6 +124,29 @@ fn rejects_invalid_inline_profiles() {
 }
 
 #[test]
+fn validates_nvidia_inline_quality_and_decode_mode() {
+    let valid = concat!(
+        "policy \"p\" { phase a { transcode video to hevc { ",
+        "encoder: hevc_nvenc cq: 23 preset: p4 tune: uhq decode: nvidia } } }"
+    );
+    assert!(codes(valid).is_empty());
+
+    for source in [
+        "policy \"p\" { phase a { transcode video to hevc { encoder: hevc_nvenc crf: 23 preset: p4 } } }",
+        "policy \"p\" { phase a { transcode video to hevc { encoder: hevc_nvenc cq: 0 preset: p4 } } }",
+        "policy \"p\" { phase a { transcode video to hevc { encoder: hevc_nvenc cq: 23 preset: slow } } }",
+        "policy \"p\" { phase a { transcode video to hevc { encoder: libx265 crf: 23 preset: medium decode: nvidia } } }",
+        "policy \"p\" { phase a { transcode video to hevc { encoder: hevc_nvenc cq: 23 preset: p4 decode: vaapi } } }",
+        "policy \"p\" { phase a { transcode video to av1 { encoder: av1_nvenc cq: 23 preset: p4 } } }",
+    ] {
+        assert!(
+            codes(source).contains(&"invalid_video_profile_setting".to_owned()),
+            "{source}"
+        );
+    }
+}
+
+#[test]
 fn rejects_using_profile_with_inline_body() {
     assert!(
         codes(

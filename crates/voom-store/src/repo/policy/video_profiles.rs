@@ -1,6 +1,6 @@
 use sqlx::{Row, SqlitePool};
 use time::OffsetDateTime;
-use voom_core::{TranscodeVideoProfile, VoomError, encoder_descriptor};
+use voom_core::{TranscodeVideoProfile, VideoDecodeMode, VoomError, encoder_descriptor};
 
 use super::Repository;
 use super::common::{iso8601, parse_iso8601};
@@ -11,7 +11,8 @@ pub struct VideoProfile {
     pub name: String,
     pub target_codec: String,
     pub encoder: String,
-    pub crf: u8,
+    pub crf: Option<u8>,
+    pub cq: Option<u8>,
     pub preset: String,
     pub tune: Option<String>,
     pub codec_profile: Option<String>,
@@ -21,6 +22,7 @@ pub struct VideoProfile {
     pub max_height: Option<u32>,
     pub output_container: String,
     pub copy_compatible: bool,
+    pub decode: VideoDecodeMode,
     /// Soft-retire marker (migration 0021). `None` for active profiles; a
     /// retired profile is hidden from `list` but still resolves by name.
     pub retired_at: Option<OffsetDateTime>,
@@ -34,7 +36,8 @@ pub struct VideoProfile {
 pub struct NewVideoProfile {
     pub name: String,
     pub encoder: String,
-    pub crf: u8,
+    pub crf: Option<u8>,
+    pub cq: Option<u8>,
     pub preset: String,
     pub tune: Option<String>,
     pub codec_profile: Option<String>,
@@ -44,6 +47,7 @@ pub struct NewVideoProfile {
     pub max_height: Option<u32>,
     pub output_container: String,
     pub copy_compatible: bool,
+    pub decode: VideoDecodeMode,
 }
 
 impl NewVideoProfile {
@@ -68,6 +72,7 @@ impl NewVideoProfile {
             target_codec: target_codec.to_owned(),
             encoder: self.encoder.clone(),
             crf: self.crf,
+            cq: self.cq,
             preset: self.preset.clone(),
             tune: self.tune.clone(),
             codec_profile: self.codec_profile.clone(),
@@ -76,6 +81,7 @@ impl NewVideoProfile {
             max_width: self.max_width,
             max_height: self.max_height,
             copy_compatible: self.copy_compatible,
+            decode: self.decode,
         };
         voom_core::validate_profile_against_descriptor(&typed).map_err(VoomError::Config)?;
         if !voom_core::is_supported_transcode_video_container(&self.output_container) {
@@ -106,6 +112,7 @@ impl VideoProfile {
             target_codec: self.target_codec.clone(),
             encoder: self.encoder.clone(),
             crf: self.crf,
+            cq: self.cq,
             preset: self.preset.clone(),
             tune: self.tune.clone(),
             codec_profile: self.codec_profile.clone(),
@@ -114,6 +121,7 @@ impl VideoProfile {
             max_width: self.max_width,
             max_height: self.max_height,
             copy_compatible: self.copy_compatible,
+            decode: self.decode,
         }
     }
 }
@@ -132,9 +140,9 @@ impl SqliteVideoProfileRepo {
 
 impl Repository for SqliteVideoProfileRepo {}
 
-const SELECT_COLUMNS: &str = "id, name, target_codec, encoder, crf, preset, tune, \
+const SELECT_COLUMNS: &str = "id, name, target_codec, encoder, crf, cq, preset, tune, \
     codec_profile, codec_level, pixel_format, max_width, max_height, output_container, \
-    copy_compatible, retired_at";
+    copy_compatible, retired_at, decode_backend";
 
 impl SqliteVideoProfileRepo {
     /// List active (non-retired) profiles ordered by name.
@@ -174,15 +182,17 @@ impl SqliteVideoProfileRepo {
         let id = format!("vp-{}", input.name);
         let res = sqlx::query(
             "INSERT INTO video_profiles \
-             (id, name, target_codec, encoder, crf, preset, tune, codec_profile, codec_level, \
-              pixel_format, max_width, max_height, output_container, copy_compatible) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             (id, name, target_codec, encoder, crf, cq, preset, tune, codec_profile, codec_level, \
+              pixel_format, max_width, max_height, output_container, copy_compatible, \
+              decode_backend) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&id)
         .bind(&input.name)
         .bind(target_codec)
         .bind(&input.encoder)
-        .bind(i64::from(input.crf))
+        .bind(input.crf.map(i64::from))
+        .bind(input.cq.map(i64::from))
         .bind(&input.preset)
         .bind(input.tune.as_deref())
         .bind(input.codec_profile.as_deref())
@@ -192,6 +202,7 @@ impl SqliteVideoProfileRepo {
         .bind(input.max_height.map(i64::from))
         .bind(&input.output_container)
         .bind(i64::from(input.copy_compatible))
+        .bind(input.decode.as_str())
         .execute(&self.pool)
         .await;
         match res {
@@ -201,6 +212,7 @@ impl SqliteVideoProfileRepo {
                 target_codec: target_codec.to_owned(),
                 encoder: input.encoder,
                 crf: input.crf,
+                cq: input.cq,
                 preset: input.preset,
                 tune: input.tune,
                 codec_profile: input.codec_profile,
@@ -210,6 +222,7 @@ impl SqliteVideoProfileRepo {
                 max_height: input.max_height,
                 output_container: input.output_container,
                 copy_compatible: input.copy_compatible,
+                decode: input.decode,
                 retired_at: None,
             }),
             Err(err) => Err(self.classify_insert_error(&input.name, err).await),
@@ -233,14 +246,15 @@ impl SqliteVideoProfileRepo {
         let target_codec = input.validate()?;
         let affected = sqlx::query(
             "UPDATE video_profiles SET \
-                 target_codec = ?, encoder = ?, crf = ?, preset = ?, tune = ?, \
+                 target_codec = ?, encoder = ?, crf = ?, cq = ?, preset = ?, tune = ?, \
                  codec_profile = ?, codec_level = ?, pixel_format = ?, max_width = ?, \
-                 max_height = ?, output_container = ?, copy_compatible = ? \
+                 max_height = ?, output_container = ?, copy_compatible = ?, decode_backend = ? \
              WHERE name = ?",
         )
         .bind(target_codec)
         .bind(&input.encoder)
-        .bind(i64::from(input.crf))
+        .bind(input.crf.map(i64::from))
+        .bind(input.cq.map(i64::from))
         .bind(&input.preset)
         .bind(input.tune.as_deref())
         .bind(input.codec_profile.as_deref())
@@ -250,6 +264,7 @@ impl SqliteVideoProfileRepo {
         .bind(input.max_height.map(i64::from))
         .bind(&input.output_container)
         .bind(i64::from(input.copy_compatible))
+        .bind(input.decode.as_str())
         .bind(&input.name)
         .execute(&self.pool)
         .await
@@ -289,13 +304,17 @@ fn row_to_video_profile(row: &sqlx::sqlite::SqliteRow) -> Result<VideoProfile, V
     let map = |field: &'static str| {
         move |e: sqlx::Error| VoomError::database_context(format!("video_profiles.{field}"), e)
     };
-    let crf: i64 = row.try_get("crf").map_err(map("crf"))?;
+    let crf: Option<i64> = row.try_get("crf").map_err(map("crf"))?;
+    let cq: Option<i64> = row.try_get("cq").map_err(map("cq"))?;
     let copy_compatible: i64 = row
         .try_get("copy_compatible")
         .map_err(map("copy_compatible"))?;
     let max_width: Option<i64> = row.try_get("max_width").map_err(map("max_width"))?;
     let max_height: Option<i64> = row.try_get("max_height").map_err(map("max_height"))?;
     let retired_at: Option<String> = row.try_get("retired_at").map_err(map("retired_at"))?;
+    let decode_backend: String = row
+        .try_get("decode_backend")
+        .map_err(map("decode_backend"))?;
     let to_u32 = |value: i64| {
         u32::try_from(value).map_err(|_| VoomError::database("video_profiles dimension overflow"))
     };
@@ -304,7 +323,14 @@ fn row_to_video_profile(row: &sqlx::sqlite::SqliteRow) -> Result<VideoProfile, V
         name: row.try_get("name").map_err(map("name"))?,
         target_codec: row.try_get("target_codec").map_err(map("target_codec"))?,
         encoder: row.try_get("encoder").map_err(map("encoder"))?,
-        crf: u8::try_from(crf).map_err(|_| VoomError::database("video_profiles.crf overflow"))?,
+        crf: crf
+            .map(u8::try_from)
+            .transpose()
+            .map_err(|_| VoomError::database("video_profiles.crf overflow"))?,
+        cq: cq
+            .map(u8::try_from)
+            .transpose()
+            .map_err(|_| VoomError::database("video_profiles.cq overflow"))?,
         preset: row.try_get("preset").map_err(map("preset"))?,
         tune: row.try_get("tune").map_err(map("tune"))?,
         codec_profile: row.try_get("codec_profile").map_err(map("codec_profile"))?,
@@ -317,6 +343,7 @@ fn row_to_video_profile(row: &sqlx::sqlite::SqliteRow) -> Result<VideoProfile, V
             .map_err(map("output_container"))?,
         copy_compatible: copy_compatible != 0,
         retired_at: retired_at.as_deref().map(parse_iso8601).transpose()?,
+        decode: VideoDecodeMode::parse(&decode_backend).map_err(VoomError::database)?,
     })
 }
 

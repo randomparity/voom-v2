@@ -117,7 +117,9 @@ pub use audio::{
     TranscodeAudioDispatcher, TranscodePostCommitRecoveryReport,
 };
 pub use cases::policy::plans::{plan_compiled_policy_with_input, plan_policy_source_with_input};
-pub use local_worker::{LocalWorkerHandle, LocalWorkerKind, RunningLocalWorker};
+pub use local_worker::{
+    LocalWorkerHandle, LocalWorkerKind, NvidiaLocalWorkerConfig, RunningLocalWorker,
+};
 pub use remux::{ExecuteRemuxInput, ExecuteRemuxReport, RemuxDispatcher};
 pub use transcode::{
     ExecuteTranscodeVideoInput, ExecuteTranscodeVideoReport, TranscodeVideoDispatcher,

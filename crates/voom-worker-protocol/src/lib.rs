@@ -19,6 +19,7 @@ pub mod low_level;
 mod operations;
 pub mod startup;
 pub mod transport;
+pub mod video_acceleration;
 mod wire;
 
 pub use encoder_caps::{EncoderDescriptor, PresetDomain, encoder_descriptor};
@@ -65,6 +66,11 @@ pub use startup::{
     serve_worker_http,
 };
 pub use transport::{ClientHandle, DispatchStream, NdjsonStream, ServerHandle, ServerRunning};
+pub use video_acceleration::{
+    LocalWorkerBound, NvidiaVideoAcceleratorDescriptor, NvidiaVideoHardwareAssignment,
+    NvidiaVideoHardwareRequirement, SoftwareVideoHardwareRequirement, VideoHardwareAssignment,
+    VideoHardwareRequirement,
+};
 pub use voom_core::OperationKind;
 pub use wire::credentials::{PresentedCredentials, WorkerCredentials, validate_credentials};
 pub use wire::envelope::{

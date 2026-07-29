@@ -417,6 +417,7 @@ fn transcode_result(request: TranscodeVideoRequest, codec: &str) -> TranscodeVid
         output_width: 1280,
         output_height: 720,
         output_pixel_format: "yuv420p".to_owned(),
+        hardware_assignment: None,
         copied_video: false,
     }
 }

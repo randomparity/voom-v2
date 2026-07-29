@@ -2,15 +2,19 @@ use std::fmt;
 
 use serde::de::{self, MapAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
+use voom_core::VideoDecodeMode;
 
-/// Typed inline encode settings. `encoder`, `crf`, `preset` are mandatory in an
-/// inline body; the remaining fields are optional. Validation against the
-/// per-encoder capability descriptors happens in the compiler.
+/// Typed inline encode settings. `encoder`, one quality field, and `preset` are
+/// mandatory in an inline body; the remaining fields are optional. Validation
+/// against per-encoder capability descriptors happens in the compiler.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct VideoProfileSettings {
     pub encoder: String,
-    pub crf: u8,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub crf: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cq: Option<u8>,
     pub preset: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tune: Option<String>,
@@ -28,6 +32,8 @@ pub struct VideoProfileSettings {
     pub output_container: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub copy_compatible: Option<bool>,
+    #[serde(default, skip_serializing_if = "VideoDecodeMode::is_software")]
+    pub decode: VideoDecodeMode,
 }
 
 /// A policy reference to a video encode profile: a registry name or inline
