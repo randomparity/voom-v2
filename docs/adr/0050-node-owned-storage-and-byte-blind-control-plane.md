@@ -52,8 +52,10 @@ One pull-based node agent runs on each storage host. It:
 
 A logical node is the stable storage authority. A node incarnation is one
 authenticated agent process lifetime, identified by the logical node ID and a
-monotonically fenced node epoch. Restarting an agent creates a new incarnation
-without changing root ownership. Messages from an older epoch are stale.
+fresh opaque incarnation ID. Restarting an agent creates a new incarnation
+without changing root ownership. Messages from a prior incarnation are stale.
+The existing heartbeat-updated `nodes.epoch` remains an optimistic row epoch;
+it is not the incarnation fence and must not be bound into work.
 
 Each storage root has exactly one logical owner. Ownership is immutable for the
 root's lifetime; changing hosts requires an explicit future migration that
@@ -62,11 +64,12 @@ retired node has no active incarnation, so its roots are unavailable rather
 than silently reassigned.
 
 A configured root becomes active only after its current owner incarnation
-validates it, which advances the root epoch. Loss of that incarnation or failed
-local validation makes the root unavailable and fences the prior epoch. Only a
-new validation by the same logical owner may reactivate it, with another epoch.
-Configured, active, or unavailable roots may be retired; retirement is
-terminal.
+validates it. Loss of that incarnation or failed local validation makes the
+root unavailable. A new incarnation of the same logical owner may reactivate
+the root without advancing its root epoch when the provider configuration and
+validated resolution identity are unchanged. The root epoch advances and
+fences prior work only when either of those facts changes. Configured, active,
+or unavailable roots may be retired; retirement is terminal.
 
 The node agent is the host trust boundary. Child FFprobe, FFmpeg, MKVToolNix,
 backup, verification, scan, and hash workers remain out of process but bind
@@ -81,7 +84,7 @@ A storage root is identified by:
 - its owner logical node ID;
 - a provider kind;
 - a node-scoped provider root locator; and
-- lifecycle and fencing epochs needed to reject stale activation.
+- a root fencing epoch for provider configuration and resolution identity.
 
 `local_filesystem` is the only provider implemented by this epic. The provider
 root locator is configuration for the owner agent, not a path the control plane
@@ -127,20 +130,26 @@ not merely by asserting that a particular helper was not called.
 
 Scan, hash, and probe are distinct node-agent capabilities. A manual scan
 session is durable and bound to one storage root, one root epoch, and the owner
-node incarnation that accepted it. The session lifecycle is:
+incarnation ID that accepted it. The session lifecycle is:
 
 - `running`: ordered observation batches may be accepted;
 - `succeeded`: the agent has submitted a complete traversal watermark and all
   required observations;
 - `failed`, `cancelled`, or `stale`: terminal without absence reconciliation.
+  A control-plane session deadline or owner-heartbeat expiry transitions
+  `running` to `stale`; there is no separate timed-out state.
 
 Observation batches carry a session-scoped monotonically increasing sequence
-and an idempotency key. Replaying an identical batch is a no-op; reusing its
-identity with different content fails closed. Each observation names a
-provider-relative locator and includes provider-local object identity/stat
-facts and stability evidence. Hash and probe results bind to the observed
-object facts so content drift cannot combine facts from different byte
-versions.
+whose `(session_id, sequence)` tuple is its idempotency identity. Replaying an
+identical batch is a no-op; reusing that identity with different content fails
+closed. Each observation names a provider-relative locator and includes
+provider-local object identity/stat facts and stability evidence.
+
+Successful session completion depends on accepting the complete ordered
+traversal, not on later hash or probe enrichment. Hash and probe work proceeds
+independently from durable observations and binds results to their object facts,
+root epoch, and incarnation ID so content drift or stale work cannot combine
+facts from different byte versions.
 
 A primary-media location becomes eligible for policy input only after its
 current content hash and media snapshot are durable. A sidecar that is not a
@@ -148,8 +157,8 @@ probe target instead requires its current hash and the classification and
 bundle evidence required by its role. Unsupported or incompletely evidenced
 observations remain inspectable but ineligible. The control plane infers a
 missing location only when it atomically accepts successful session completion
-for the complete traversal. A partial, failed, cancelled, timed-out,
-stale-incarnation, or root-epoch-mismatched session never retires an unseen
+for the complete traversal. A partial, failed, cancelled, stale,
+prior-incarnation, or root-epoch-mismatched session never retires an unseen
 location.
 
 This delivers the manual scan-session and reconciliation substrate from Sprint
@@ -183,91 +192,69 @@ The control plane remains the authority that decides whether a mutation may
 commit. The storage-owning node is the only authority that may perform the
 filesystem mutation.
 
-After worker output validation and the existing safety checks, the control
-plane creates one durable, idempotent commit intent. The intent binds:
+After worker output validation, the control plane creates one durable,
+idempotent commit intent using the existing commit-gate vocabulary. Its
+`pending` record binds:
 
 - job, ticket, lease, operation attempt, and artifact identities;
-- owner node, node epoch, storage roots, and root epochs;
+- owner node, incarnation ID, storage roots, and root epochs;
 - source, staged, and target location identities and epochs;
 - expected size, checksum, and provider-local object facts;
 - the evaluated lineage closure and safety epochs; and
 - a unique commit generation and fencing token.
 
-Authorizing the intent reserves the affected durable scope. While it remains
-authorized, conflicting blocking-lease acquisition and in-scope
-location/lineage mutation fail closed. The node agent accepts only the current
-owner, root epochs, operation generation, and fencing token. Immediately before
-mutation it revalidates the expected local facts. The agent owns a
-crash-durable local journal outside worker staging. It must durably write and
-sync an idempotent `not_started` receipt keyed by the commit-intent ID and
-generation before requesting permission to apply. Journal failure prevents the
-mutation.
+The agent owns a crash-durable local journal outside worker staging. For the
+pending intent, it revalidates local facts and durably writes and syncs an
+idempotent `not_started` receipt keyed by intent ID and generation. Journal
+failure prevents authorization and mutation.
 
-The durable control-plane lifecycle is:
+The agent then requests authorization. In one transaction, the control plane
+recomputes the affected closure, revalidates safety evidence, the live lease,
+the incarnation ID, and every bound epoch, transitions `pending` to
+`authorized`, and activates the fence before returning permission for that
+generation. This is the lease-freshness linearization point. While the intent
+is authorized or in recovery, conflicting blocking-lease acquisition and
+in-scope location/lineage mutation fail closed.
 
-- `prepared`: safety evidence captured, no node mutation authorized;
-- `authorized`: fence active and eligible for owner-node execution;
-- `applying`: the owner reported that the fenced mutation may have begun;
-- `committed`: node receipt and post-mutation facts finalized with catalog
-  lineage/location state;
-- `aborted`: mutation is proven not to have happened; or
-- `recovery_required`: the outcome cannot yet be proven.
+After receiving permission and before touching bytes, the agent must durably
+advance its receipt from `not_started` to `applying`. Only that local state may
+enter the provider mutation. It then durably records `applied` or
+`outcome_unknown` before reporting the receipt and post-mutation facts.
+Failure to sync any receipt transition fails closed.
 
-Allowed transitions are monotonic:
+The durable control-plane lifecycle reuses `pending`, `authorized`,
+`completed`, `aborted`, and `recovery_required`:
 
-- `prepared -> authorized | aborted`;
-- `authorized -> applying | aborted`;
-- `applying -> committed | recovery_required`; and
-- `recovery_required -> committed | aborted`.
+- `pending -> authorized | aborted`;
+- `authorized -> completed | recovery_required`; and
+- `recovery_required -> completed | aborted`.
 
-`committed` and `aborted` are terminal. A retry after an aborted generation
-creates a successor intent with a new generation and fence; no state transition
-reopens an old generation.
+`completed` and `aborted` are terminal. `authorized` means permission may have
+been delivered and mutation may have begun; it is not safe to infer otherwise
+from elapsed time. A response lost after authorization, agent crash, database
+failure, or genuine lease expiry therefore enters `recovery_required`.
 
-Application uses an explicit begin handshake:
+The local receipt distinguishes `not_started`, `applying`, `applied`,
+`outcome_unknown`, and `cancelled`. `not_started` proves only that mutation had
+not begun when that receipt was synced. Once the control plane is
+`authorized`, non-application is proven only when the owner serializes against
+any in-flight handler and durably advances the same generation to `cancelled`,
+or equivalent operator recovery proves that no process can still use the
+permission. A prior incarnation or stale generation cannot resume the action.
 
-1. the agent persists the `not_started` receipt and revalidates local facts;
-2. it requests begin-apply with the authorized intent and exact fencing token;
-3. the control plane atomically revalidates the lease and all bound epochs,
-   advances `authorized` to `applying`, and only then returns permission for
-   that generation; and
-4. the agent performs the mutation only after receiving that response, then
-   durably advances the receipt with its outcome before reporting completion.
-
-A response lost after step 3 is never treated as a pre-apply failure: the
-control plane enters `recovery_required` and reconciles the durable receipt and
-target facts. A response lost before the agent receives step 3 leaves its
-receipt `not_started`, which proves the mutation did not begin.
-
-The `authorized -> applying` transaction is the lease-freshness linearization
-point. Expiry before that transaction prevents permission and permits abort
-after `not_started` is proven. Expiry after it cannot revoke a mutation that
-may already have started; it forces `recovery_required`, while the intent fence
-prevents ticket takeover or other work from authorizing a conflicting commit.
-
-The node's receipt distinguishes `not_started`, `applied`, and an ambiguous
-local outcome. Replaying the same generation returns the same receipt or safely
-completes its provider-specific idempotent action. A different or stale
-generation cannot reuse the target. Loss or corruption of the local journal
-after `applying` is itself ambiguous and requires operator recovery; it never
-authorizes an automatic repeat.
-
-Failure before `applying` may abort or retry with a new generation after the
-old fence is terminal. Once mutation may have started, timeout, lost response,
-agent crash, or database failure enters `recovery_required`; the fence remains
-blocking. Recovery queries the same owner for its receipt and verifies actual
-target facts. It then finalizes `committed` if application is proven, returns
-the old generation to terminal `aborted` if non-application is proven, or stays
-blocked for operator recovery when neither fact is provable. A retry after
-`aborted` uses a new successor intent and generation. Recovery never repeats a
-destructive mutation merely because an HTTP response was lost.
+Recovery verifies the receipt and actual target facts. It finalizes
+`completed` when application is proven, transitions to `aborted` only when
+non-application is proven, or stays blocked when neither outcome is provable.
+Journal loss or corruption after authorization is ambiguous. A retry after
+`aborted` creates a successor intent and generation; recovery never repeats a
+possibly applied destructive mutation.
 
 During healthy execution, workflow leases remain live through worker dispatch,
 post-dispatch validation, verification, commit, and the terminal lease
 transition. Operation claims renewed by those heartbeats cover the same
 interval. A genuinely missed heartbeat or expiry follows the existing
-fail-closed lease rules and is never resurrected. If the intent may have
-started, the lease failure also leaves the intent `recovery_required`; its
+fail-closed lease rules and is never resurrected. If the intent is authorized,
+the lease failure also leaves the intent `recovery_required`; its
 independent fence continues blocking conflicting work until reconciliation.
 Issue #415 fixes the current narrower heartbeat independently. Commit fencing
 protects ambiguous distributed outcomes; it is not a workaround for claim

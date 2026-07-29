@@ -12,7 +12,8 @@ lets remote nodes operate on their own storage while the authoritative control
 plane coordinates the work without reading media bytes.
 
 ADR 0050 is the governing decision. This design maps that decision onto the
-existing VOOM domain and delivery sequence.
+existing VOOM domain and delivery sequence. It does not define a second
+normative state vocabulary; if wording conflicts, ADR 0050 controls.
 
 ## Existing invariants
 
@@ -35,7 +36,7 @@ unavailable.
 | Term | Meaning |
 |---|---|
 | Logical node | Stable durable identity that owns storage roots |
-| Node incarnation | One authenticated agent process lifetime, fenced by the logical node's epoch |
+| Node incarnation | One authenticated agent process lifetime with a fresh opaque incarnation ID |
 | Node agent | Pull-based host supervisor that resolves roots and manages node-local workers |
 | Storage root | Stable provider namespace owned by exactly one logical node |
 | Provider-relative locator | Provider-normalized identity within one storage root |
@@ -70,9 +71,11 @@ does not cross that boundary.
 ### Logical node and incarnation
 
 The existing durable node ID becomes the logical storage-owner identity. A
-successful agent start authenticates and advances or receives a fenced node
-epoch. All root activation, scan sessions, leases, observation batches, access
-plans, and commit requests bind to that epoch.
+successful agent start authenticates and receives a fresh opaque incarnation
+ID. Root activation, scan sessions, leases, observation batches, access plans,
+and commit requests bind to that ID. The existing `nodes.epoch` continues to
+serve optimistic row concurrency and may advance on heartbeats; it is not the
+incarnation fence.
 
 Node lifecycle remains registered, active, stale, and retired:
 
@@ -88,8 +91,8 @@ once valid.
 
 A root is configured before activation. The owner agent validates and
 canonicalizes its provider locator locally, then reports an activation result
-bound to the current node epoch. Activation advances the root epoch whenever
-previous local resolution evidence must be fenced.
+bound to the current incarnation ID. Activation advances the root epoch only
+when provider configuration or validated resolution identity changes.
 
 Operational root states are:
 
@@ -101,8 +104,8 @@ Operational root states are:
 Allowed transitions are `configured -> active | retired`, `active ->
 unavailable | retired`, and `unavailable -> active | retired`. Activation and
 reactivation require validation by the current incarnation of the same logical
-owner and advance the root epoch. Moving to `unavailable` fences the prior
-epoch. `retired` is terminal.
+owner. A benign agent restart may reactivate unchanged evidence without root
+epoch churn. `retired` is terminal.
 
 Root ownership never follows a path or an agent registration. A future host
 transfer needs a separate fenced migration protocol.
@@ -143,20 +146,22 @@ owned by the agent deployment, not root/location payload fields.
 1. The control plane creates a scan ticket for an active root.
 2. Owner-local scheduling leases it only to the root owner.
 3. The agent starts a scan session bound to root ID, root epoch, node ID, and
-   node epoch.
+   incarnation ID.
 4. The scan worker emits ordered, idempotent observation batches.
-5. Separate owner-local hash and probe capabilities produce evidence bound to
-   each observation's object facts.
-6. The control plane creates or advances file versions and snapshots only from
-   matching current evidence.
-7. The agent submits the complete traversal watermark.
-8. One transaction marks the session succeeded and reconciles previously live
+5. The agent submits the complete traversal watermark.
+6. One transaction marks the session succeeded and reconciles previously live
    locations not observed by that complete traversal.
+7. Separate owner-local hash and probe tickets enrich durable observations
+   independently, without delaying traversal completion.
+8. The control plane creates or advances file versions and snapshots only from
+   enrichment bound to current object facts, root epoch, and incarnation ID.
 
 Session state transitions are monotonic. Duplicate identical batches and
 completion requests return their original result. Conflicting replay,
-out-of-order gaps, stale epochs, content drift, and observations outside the
-root fail the session without inferring absence.
+out-of-order gaps, stale root/incarnation identity, content drift, and
+observations outside the root fail the session without inferring absence. A
+session deadline or owner-heartbeat expiry moves `running` to terminal `stale`;
+there is no separate timeout state.
 
 Policy input selection joins roots to live locations. Primary media that
 requires probing is eligible only with a current content hash and matching
@@ -215,74 +220,24 @@ must not be used to tolerate expired claims during ordinary healthy work.
 
 ## Commit protocol and recovery
 
-### Prepare and authorize
+ADR 0050 is the sole normative commit state machine and failure table. Issue
+#422 extends the existing `commit_intents` lifecycle rather than creating a
+parallel model:
 
-The control plane evaluates the existing commit safety gate and stores a
-`prepared` intent with exact source, staging, target, lineage, owner, root,
-location, lease, and generation evidence. Authorization atomically:
+- control-plane state remains `pending`, `authorized`, `completed`, `aborted`,
+  or `recovery_required`;
+- the owner journal records `not_started`, `applying`, `applied`,
+  `outcome_unknown`, or `cancelled` for one intent generation;
+- authorization is the one transaction that recomputes safety and activates the
+  fence while the lease is live;
+- the agent syncs `applying` after permission and before byte mutation; and
+- finalization verifies the receipt and target facts before catalog state and
+  the workflow lease become terminal.
 
-- proves all epochs and leases remain current;
-- transitions the intent to `authorized`;
-- activates the fence over affected location/lineage scope; and
-- prevents conflicting blocking leases or catalog changes.
-
-### Apply
-
-The agent maintains a crash-durable commit journal outside worker staging.
-For the exact intent and generation, apply proceeds in this order:
-
-1. The agent rechecks source, staged, and target facts. A fact mismatch returns
-   `not_started`; it never applies with revised assumptions.
-2. The agent durably writes and syncs a `not_started` receipt. A journal
-   write/sync failure prevents mutation.
-3. The agent requests begin-apply using the authorized intent and fence.
-4. The control plane atomically revalidates the live lease and bound epochs,
-   records `applying`, and then returns permission for that exact generation.
-5. Only after receiving permission does the agent perform the provider action.
-6. The agent durably advances the receipt to `applied` or an ambiguous outcome,
-   then reports the receipt and post-mutation facts.
-
-If the step 4 response is lost, the control plane treats the intent as
-`recovery_required`. A `not_started` receipt proves the agent did not receive
-permission and did not mutate. An `applied` receipt is final evidence for
-catalog finalization. A missing, corrupt, or ambiguous journal after
-`applying` remains operator-visible and blocking; it never authorizes an
-automatic repeat.
-
-The step 4 transaction is the lease-freshness linearization point. Lease expiry
-before it denies permission. Lease expiry after it cannot prove that mutation
-did not start; the old generation moves through `recovery_required` while its
-fence blocks a ticket takeover from authorizing conflicting work.
-
-### Finalize
-
-The control plane verifies receipt provenance and target facts, then finalizes
-catalog state, lineage, commit evidence, and `committed` state atomically. Only
-then does the workflow release the lease as succeeded.
-
-### Failure table
-
-| Failure point | Durable result | Recovery |
-|---|---|---|
-| Before authorization | `aborted` or unchanged `prepared` | Re-evaluate with current evidence |
-| Authorized, proven not started | `aborted` or new generation after old fence closes | Safe retry |
-| Applying, response lost | `recovery_required` | Query same owner's durable receipt and target facts |
-| Agent restarts after apply | `recovery_required` | New incarnation reads local receipt and reports it |
-| Local journal cannot sync before apply | Proven not started | Fail without mutation |
-| Local journal is lost after applying | `recovery_required` | Operator recovery; never automatic retry |
-| Owner becomes unavailable | Fence remains blocking | Wait for same logical owner or operator recovery |
-| Receipt proves applied | `committed` after catalog finalization | Never repeat mutation |
-| Receipt proves not applied | Old generation terminal | Re-authorize current evidence |
-| Receipt/facts ambiguous | `recovery_required` | Operator-visible, no automatic destructive retry |
-| Stale owner/root/location/generation | Request rejected | Re-plan from current durable state |
-
-An authorized or ambiguous intent cannot expire into permission for conflicting
-work. Recovery is a durable workflow, not cleanup based on elapsed wall time.
-Commit states move only `prepared -> authorized | aborted`, `authorized ->
-applying | aborted`, `applying -> committed | recovery_required`, and
-`recovery_required -> committed | aborted`. `committed` and `aborted` are
-terminal. A retry after proven non-application creates a successor intent and
-generation rather than reopening the old one.
+Code and tests must import those names from their owning domain types rather
+than duplicate string vocabularies. An authorized generation never becomes
+retryable based on time or `not_started` alone; recovery must prove that no
+process can still apply it.
 
 ## Compatibility, migration, and rollback
 

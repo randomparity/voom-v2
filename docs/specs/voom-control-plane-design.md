@@ -447,7 +447,9 @@ owns roots; each authenticated agent process is a fenced node incarnation. The
 agent heartbeats, pulls leases, activates owned roots, resolves locations, and
 supervises version-matched scan, hash, probe, FFmpeg, MKVToolNix, backup,
 verification, and commit providers over node-local endpoints. Restart changes
-the incarnation epoch without changing root ownership.
+the incarnation ID without changing root ownership. The existing
+heartbeat-updated node row epoch remains optimistic concurrency state, not an
+incarnation fence.
 
 Workers:
 
@@ -993,9 +995,9 @@ the file asset UID.
   identity — delete/recreate with identical bytes can produce the same
   value across distinct objects — and is recorded as `IdentityEvidence`
   (`hash_match`) rather than alias proof. The only path that adds a new
-  `FileVersion` to an existing `FileAsset` is a host-committed lineage
-  operation that produces new bytes from a prior `FileVersion` of the
-  same asset — for example transcode, remux, or a restore that yields
+  `FileVersion` to an existing `FileAsset` is a control-plane-authorized
+  lineage operation that produces new bytes from a prior `FileVersion`
+  of the same asset — for example transcode, remux, or a restore that yields
   content-different output. Operations that preserve bytes (rename,
   move, archive, storage-provider migration, immutable-generation
   alias attachment, and external rename/move reconciliation) operate
@@ -1015,20 +1017,21 @@ the file asset UID.
   location of the same bytes.
 - Lineage continuity across a `FileAsset` (rename, move, remux, transcode,
   archive, restore, storage-provider migration) is only established through
-  a host-committed operation that produced the new path or bytes from a
-  prior `FileVersion` of the same asset.
-- External rename and move reconciliation is one such host-committed
-  operation, but it is a reconciliation of durable state to observed
-  reality, not a destructive commit the host is choosing to initiate.
-  When a watcher or rescan discovers a path that proves the same
+  a control-plane-authorized operation that produced the new location or bytes
+  from a prior `FileVersion` of the same asset. For node-owned storage, its
+  owner agent performs any byte or location mutation.
+- External rename and move reconciliation is one such control-plane-committed
+  catalog operation, but it reconciles durable state to observed reality; it is
+  not a destructive commit the system is choosing to initiate.
+  When a watcher or rescan discovers a locator that proves the same
   immutable physical-object identity as a specific `FileLocation` on an
   existing `FileVersion`, and that `FileLocation` is no longer live at
-  its recorded path, the host commits a rename/move event that retires
-  the missing `FileLocation` and records the new one on the same
+  its recorded locator, the control plane commits a rename/move event that
+  retires the missing `FileLocation` and records the new one on the same
   `FileAsset` and `FileVersion`. Other `FileLocation`s of the same
   `FileVersion` are unaffected. The `Commit Safety Gate` does not block
-  reconciliation: the physical move has already happened outside the
-  host's authority, and refusing to record it would only leave durable
+  reconciliation: the physical move has already happened outside agent
+  authority, and refusing to record it would only leave durable
   state stale. Inside the same commit transaction, blocking leases
   scoped to the retired `FileLocation` are re-anchored to the new
   `FileLocation` — preserving `lease_id`, `issuer`, `acquired_at`,
@@ -1068,8 +1071,9 @@ the file asset UID.
   asset.
 - Acting on duplicate or same-as evidence (archive, delete, replace)
   requires an accepted retention policy or explicit user confirmation, and
-  produces a host-committed event referencing the evidence used. The host
-  commit transaction revalidates that the pinned `FileVersion` IDs,
+  produces a control-plane-committed event referencing the evidence used. The
+  commit authorization and finalization transactions revalidate that the pinned
+  `FileVersion` IDs,
   hashes, and locations the evidence was accepted against still describe
   the current state; if any pinned attribute has changed, the action
   aborts with a stale-identity-evidence error and the evidence must be
@@ -1199,9 +1203,10 @@ artifact location or receive a resolved artifact transfer plan.
 
 `Library` and `LibraryRoot` records define what a future daemon is allowed to
 observe. They are durable operator configuration, not daemon-private state.
-Explicit CLI scans may operate on an arbitrary supplied path, but watcher and
-scheduled scan behavior reads only enabled library roots configured through the
-pre-daemon CLI/API surface.
+The delivered V1 CLI permits an arbitrary supplied path. ADR 0050 replaces that
+escape hatch in #421: every target scan names an active owned root and an
+optional provider-relative scope. Watcher and scheduled scans likewise read
+only enabled roots configured through the CLI/API surface.
 
 A `Library` records:
 
@@ -1217,7 +1222,7 @@ A `LibraryRoot` records:
 - stable root ID, parent library ID, and owner logical node ID;
 - provider kind (`local_filesystem` in the first node-owned implementation);
 - node-scoped provider root locator and display locator;
-- activation state plus node and root fencing epochs;
+- activation state, current incarnation ID, and root fencing epoch;
 - include and exclude globs;
 - file extension allowlist for media and sidecar discovery;
 - scan mode (`explicit_only`, `manual_recursive`, `watch_enabled`);
@@ -1234,7 +1239,9 @@ normalization must reject root escape. Scan and policy selection use durable
 root/location relationships rather than path-prefix comparison. A daemon may
 not watch a root that lacks current owner activation; if the root is disabled,
 unavailable, or missing required policy, the daemon records a blocked issue and
-does not synthesize defaults.
+does not synthesize defaults. A benign agent restart changes the incarnation ID
+but retains the root epoch when provider configuration and validated resolution
+identity are unchanged.
 
 The V1 CLI implementation of this model (durable `libraries`/`library_roots`
 tables, `voom library`/`voom library root` CRUD, `voom scan --root`, root-scoped
@@ -1249,14 +1256,15 @@ The disabled-root block remains a fail-closed `BLOCKED` refusal. The library's
 default scheduling/safety policy (#281), quality-scoring profile (#285), and
 external-system links (#284) are added as columns by their owning issues.
 
-ADR 0050 manual scan sessions bind to one root epoch and owner-node
-incarnation. Ordered observation batches are idempotent. `running` may end as
-`succeeded`, `failed`, `cancelled`, or `stale`; only atomic acceptance of a
-complete `succeeded` traversal may retire an unseen location. Hash and probe
-evidence bind to the observed provider-local facts so content drift cannot join
-facts from different byte versions. Primary media requires a current hash and
-media snapshot for policy use; non-probed sidecars require a current hash plus
-the classification and bundle evidence for their role.
+ADR 0050 manual scan sessions bind to one root epoch and owner incarnation ID.
+Ordered observation batches are idempotent by session and sequence. `running`
+may end as `succeeded`, `failed`, `cancelled`, or `stale`; deadline or owner
+heartbeat expiry produces `stale`. Only atomic acceptance of a complete
+`succeeded` traversal may retire an unseen location. Hash and probe enrichment
+runs independently after observations are durable and binds to the observed
+provider-local facts, root epoch, and incarnation ID. Primary media requires a
+current hash and media snapshot for policy use; non-probed sidecars require a
+current hash plus the classification and bundle evidence for their role.
 
 ## Issue Model
 
@@ -1415,27 +1423,28 @@ user is watching it.
 ADR 0050 preserves the gate's control-plane authority but replaces co-located
 filesystem mutation for node-owned roots:
 
-1. The control plane prepares an idempotent intent that binds the live workflow
-   lease, operation generation, logical owner, node/root/location epochs,
-   source/staged/target facts, lineage closure, and safety evidence.
-2. Authorization atomically activates a fence over the affected durable scope.
-   Conflicting blocking leases and location/lineage changes fail closed until
-   the intent is terminal.
-3. The owner agent durably journals `not_started`, revalidates local facts, and
-   asks to begin. The control plane revalidates the live lease and epochs,
-   records `applying`, and only then returns permission for that exact fence.
-4. The owner agent performs the filesystem action, durably records its receipt,
-   and reports post-mutation facts. The control plane verifies that evidence and
-   atomically finalizes catalog state.
-5. Lost responses, agent crashes, or lease expiry after `applying` enter
-   `recovery_required`; the independent fence remains blocking. Recovery may
-   prove commit, prove non-application and abort the old generation, or remain
-   operator-blocked. It never retries a possibly applied mutation.
+1. The control plane records a `pending` idempotent intent that binds the live
+   workflow lease, operation generation, logical owner, incarnation ID,
+   root/location epochs, source/staged/target facts, lineage closure, and safety
+   evidence.
+2. The owner agent revalidates local facts and durably journals `not_started`.
+   It performs no mutation if the journal cannot sync.
+3. Authorization atomically recomputes the closure, revalidates safety, lease,
+   incarnation, and epochs, transitions `pending` to `authorized`, and
+   activates the fence before returning permission.
+4. Before touching bytes, the agent durably advances its receipt to `applying`.
+   It performs the filesystem action, records `applied` or `outcome_unknown`,
+   and reports post-mutation facts.
+5. The control plane verifies the receipt and target facts, then records
+   catalog state and `completed`. Lost responses, crashes, or lease expiry after
+   authorization enter `recovery_required`; the fence remains blocking.
 
-The intent states and transitions are `prepared -> authorized | aborted`,
-`authorized -> applying | aborted`, `applying -> committed |
-recovery_required`, and `recovery_required -> committed | aborted`.
-`committed` and `aborted` are terminal; a retry uses a successor generation.
+The intent reuses the existing transitions `pending -> authorized | aborted`,
+`authorized -> completed | recovery_required`, and `recovery_required ->
+completed | aborted`. `completed` and `aborted` are terminal; a retry uses a
+successor generation. Once authorized, `not_started` alone is not permission to
+abort: the owner must serialize against any in-flight handler and durably
+cancel the generation, or recovery must otherwise prove it cannot still apply.
 During healthy execution, the workflow heartbeat and its operation claims cover
 dispatch, validation, verification, commit, and terminal lease transition.
 Genuine expiry remains fail-closed and cannot resurrect a lease or claim.
@@ -2148,8 +2157,9 @@ normalized shape expected for Sprint 3 onward.
 - Acceptance focus: nodes and remote-capable workers register durably
   with inspectable identity and health state.
 - ADR 0050 extension: the durable node ID is the stable logical storage owner;
-  each authenticated node-agent process is a fenced incarnation whose epoch
-  changes on restart. Root ownership does not move with an incarnation.
+  each authenticated node-agent process has a fresh fenced incarnation ID.
+  Root ownership does not move with an incarnation, and the existing
+  heartbeat-updated row epoch is not used as that fence.
 - Verification expectations: migration/repository tests, registration
   integration tests, CLI/API inspection golden tests, documentation completeness
   scan, and `just ci`.
@@ -2399,8 +2409,8 @@ normalized shape expected for Sprint 3 onward.
   roots and scan configuration created through the Sprint 17 CLI/API surface.
 - ADR 0050 extraction: #419 delivers the manual durable scan-session and
   complete-traversal reconciliation substrate before the watcher. Sessions bind
-  to root and node epochs; only successful complete traversal may infer
-  absence. Watchers and debounce loops remain Sprint 18 work.
+  to root epochs and incarnation IDs; only successful complete traversal may
+  infer absence. Watchers and debounce loops remain Sprint 18 work.
 - Explicitly out of scope: background work scheduling, dynamic
   throttles, external sync loops, UI event streaming, and new configuration
   surfaces not already inspectable through CLI/API.
