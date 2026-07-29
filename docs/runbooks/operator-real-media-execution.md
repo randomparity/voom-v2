@@ -47,16 +47,21 @@ supervises it. **Wait for each to print its readiness line** before step 4:
 {"status":"ready","worker_id":12,"kind":"ffmpeg","endpoint":"127.0.0.1:53017"}
 ```
 
+Repeat either command in another foreground session to add capacity for that
+operation kind. Reachable same-kind workers remain registered, and dispatch
+selects the eligible worker with the lowest capacity utilization (worker id
+breaks ties deterministically).
+
 Running `compliance execute` before both workers are ready races the registration
 and hits the missing-worker path. `run-local` is a foreground supervisor: it
 retires the worker on Ctrl-C (SIGINT), SIGTERM, or stdin EOF. Start it in a
 terminal, PTY session, or service wrapper that keeps stdin open for as long as
 the worker should be live; a non-interactive launcher that closes stdin after
 startup will print `ready` and then immediately retire the worker. A hard
-`kill -9` skips the retire; the next `run-local --kind <same>` self-heals the
-stale row on startup, and `execute` liveness-checks each endpoint before dispatch
-and refuses to use a dead one (with an actionable error naming the `run-local`
-command to start).
+`kill -9` skips the retire; the next `run-local --kind <same>` probes same-kind
+siblings and retires only unreachable stale rows. `execute` also liveness-checks
+each endpoint before dispatch and refuses to use a dead one (with an actionable
+error naming the `run-local` command to start).
 
 `ffprobe` and the artifact-verify worker are *not* started this way — the control
 plane spawns them as managed subprocesses as needed.
@@ -115,7 +120,7 @@ vocabulary; each has a planner-oracle test in
 |--------|--------------|
 | `container-normalize.voom` | Remux every file to mkv; already-mkv files are a no-op. |
 | `language-cleanup.voom` | Keep only the preferred-language audio/subtitles, then order tracks and set filter-addressed defaults. |
-| `reference-user.voom` | The whole-library flagship: mkv + HEVC video + E-AC-3 5.1 audio + a synthesized stereo downmix + language-filtered keep + filter-addressed defaults + `verify artifact`, run as a four-phase barrier chain. |
+| `reference-user.voom` | The whole-library flagship: mkv + HEVC video + E-AC-3 5.1 audio + a synthesized stereo downmix + language-filtered keep + filter-addressed defaults + `verify artifact`, run as a five-phase barrier chain. |
 | `verify-heavy.voom` | An artifact verification between each mutating phase. |
 
 For a real whole-library run, `reference-user.voom` is the closest to a

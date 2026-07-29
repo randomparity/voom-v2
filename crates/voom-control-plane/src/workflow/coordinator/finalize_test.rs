@@ -46,7 +46,7 @@ async fn finalization_attributes_exact_job_commit_when_unrelated_tip_is_newer() 
             0,
             &mut files,
             &[Disposition::Planned {
-                node_id: NODE_ID.to_owned(),
+                node_ids: vec![NODE_ID.to_owned()],
             }],
         )
         .await
@@ -91,7 +91,7 @@ async fn finalization_uses_latest_exact_commit_from_multi_operation_phase() {
             0,
             &mut files,
             &[Disposition::Planned {
-                node_id: NODE_ID.to_owned(),
+                node_ids: vec![NODE_ID.to_owned()],
             }],
         )
         .await
@@ -129,7 +129,7 @@ async fn finalization_rejects_unrelated_tip_when_job_has_no_commit_evidence() {
             0,
             &mut files,
             &[Disposition::Planned {
-                node_id: NODE_ID.to_owned(),
+                node_ids: vec![NODE_ID.to_owned()],
             }],
         )
         .await
@@ -179,7 +179,7 @@ async fn finalization_rejects_every_mismatched_result_provenance_field() {
                 0,
                 &mut files,
                 &[Disposition::Planned {
-                    node_id: NODE_ID.to_owned(),
+                    node_ids: vec![NODE_ID.to_owned()],
                 }],
             )
             .await
@@ -228,32 +228,27 @@ async fn failed_phase_reports_only_exact_job_commit_evidence() {
         ProducedBy::Transcode,
     )
     .await;
-    let failure = PhaseDispatchFailure {
-        source: VoomError::PolicyExecution("forced phase failure".to_owned()),
-        run_summary: Some(crate::workflow::WorkflowRunSummary::empty(
-            job.id,
-            std::time::Duration::ZERO,
-        )),
-        job_failed: true,
-    };
+    let run_summary = crate::workflow::WorkflowRunSummary::empty(job.id, std::time::Duration::ZERO);
 
     let error = cp
-        .finalize_failed_phase(
-            job.id,
-            0,
-            &files,
-            &[
+        .finalize_failed_phase(FailedPhaseFinalization {
+            job_id: job.id,
+            phase_ordinal: 0,
+            files: &files,
+            dispositions: &[
                 Disposition::Planned {
-                    node_id: NODE_ID.to_owned(),
+                    node_ids: vec![NODE_ID.to_owned()],
                 },
                 Disposition::Planned {
-                    node_id: NODE_ID.to_owned(),
+                    node_ids: vec![NODE_ID.to_owned()],
                 },
             ],
-            failure,
-            Vec::new(),
-            Vec::new(),
-        )
+            phase_dispatched: true,
+            run_summary: Some(&run_summary),
+            source: VoomError::PolicyExecution("forced phase failure".to_owned()),
+            phases: Vec::new(),
+            file_phases: Vec::new(),
+        })
         .await
         .unwrap_err();
 

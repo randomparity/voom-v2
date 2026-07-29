@@ -24,13 +24,13 @@ use crate::artifact::fs::{
     ArtifactFileFacts, canonical_new_leaf_no_symlink, observe_regular_file,
     unique_temp_sibling_path,
 };
-use crate::cases::{begin_tx, commit_tx};
+use crate::cases::{begin_immediate_tx, commit_tx};
 
 pub(super) async fn prepare_commit(
     cp: &ControlPlane,
     input: CommitArtifactInput,
 ) -> Result<PreparedCommit, CommitArtifactCommandError> {
-    let mut tx = begin_tx(&cp.pool).await?;
+    let mut tx = begin_immediate_tx(&cp.pool).await?;
     let now = cp.clock().now();
     let prepared_result = prepare_commit_in_tx(cp, &mut tx, input, now).await;
     match prepared_result {

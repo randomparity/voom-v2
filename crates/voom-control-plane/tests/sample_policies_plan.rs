@@ -134,11 +134,12 @@ async fn reference_user_sample_plans_the_full_pipeline() {
         vec![(PlanOperationKind::TranscodeVideo, NodeStatus::Planned)],
     );
     assert_eq!(
-        phase_ops(&plan, "audio"),
-        vec![
-            (PlanOperationKind::TranscodeAudio, NodeStatus::Planned),
-            (PlanOperationKind::TranscodeAudio, NodeStatus::Planned),
-        ],
+        phase_ops(&plan, "audio_transcode"),
+        vec![(PlanOperationKind::TranscodeAudio, NodeStatus::Planned)],
+    );
+    assert_eq!(
+        phase_ops(&plan, "audio_companion"),
+        vec![(PlanOperationKind::TranscodeAudio, NodeStatus::Planned)],
     );
     assert_eq!(
         phase_ops(&plan, "verify"),
@@ -155,13 +156,13 @@ async fn reference_user_sample_plans_the_full_pipeline() {
     assert_eq!(video.operation_payload["target_codec"], "hevc");
     assert_eq!(video.operation_payload["container"], "mkv");
 
-    let eac3 = only_node(&plan, "audio", |node| {
+    let eac3 = only_node(&plan, "audio_transcode", |node| {
         node.operation_payload["type"] == "transcode_audio"
     });
     assert_eq!(eac3.operation_payload["target_codec"], "eac3");
     assert_eq!(eac3.operation_payload["container"], "mkv");
 
-    let downmix = only_node(&plan, "audio", |node| {
+    let downmix = only_node(&plan, "audio_companion", |node| {
         node.operation_payload["type"] == "synthesize_audio"
     });
     assert_eq!(downmix.operation_payload["target_codec"], "aac");
@@ -189,11 +190,12 @@ async fn reference_user_sample_plans_the_full_pipeline() {
         vec![(PlanOperationKind::TranscodeVideo, NodeStatus::NoOp)],
     );
     assert_eq!(
-        phase_ops(&plan, "audio"),
-        vec![
-            (PlanOperationKind::TranscodeAudio, NodeStatus::NoOp),
-            (PlanOperationKind::TranscodeAudio, NodeStatus::Planned),
-        ],
+        phase_ops(&plan, "audio_transcode"),
+        vec![(PlanOperationKind::TranscodeAudio, NodeStatus::NoOp)],
+    );
+    assert_eq!(
+        phase_ops(&plan, "audio_companion"),
+        vec![(PlanOperationKind::TranscodeAudio, NodeStatus::Planned)],
     );
     assert_eq!(
         phase_ops(&plan, "verify"),
@@ -301,22 +303,24 @@ async fn reference_user_over_mixed_library_isolates_untagged_and_no_match() {
     // The normal file: its kept English audio is transcoded to eac3 and a stereo
     // downmix is synthesized.
     assert_eq!(
-        target_phase_ops(&plan, normal, "audio"),
-        vec![
-            (PlanOperationKind::TranscodeAudio, NodeStatus::Planned),
-            (PlanOperationKind::TranscodeAudio, NodeStatus::Planned),
-        ],
+        target_phase_ops(&plan, normal, "audio_transcode"),
+        vec![(PlanOperationKind::TranscodeAudio, NodeStatus::Planned)],
+    );
+    assert_eq!(
+        target_phase_ops(&plan, normal, "audio_companion"),
+        vec![(PlanOperationKind::TranscodeAudio, NodeStatus::Planned)],
     );
 
     // The untagged file: the untagged track is matched as `und` (which the policy
     // keeps and transcodes), and the planner attaches a per-file warning that the
     // language was defaulted (ADR 0021 / #272). The file is not blocked.
     assert_eq!(
-        target_phase_ops(&plan, untagged, "audio"),
-        vec![
-            (PlanOperationKind::TranscodeAudio, NodeStatus::Planned),
-            (PlanOperationKind::TranscodeAudio, NodeStatus::Planned),
-        ],
+        target_phase_ops(&plan, untagged, "audio_transcode"),
+        vec![(PlanOperationKind::TranscodeAudio, NodeStatus::Planned)],
+    );
+    assert_eq!(
+        target_phase_ops(&plan, untagged, "audio_companion"),
+        vec![(PlanOperationKind::TranscodeAudio, NodeStatus::Planned)],
     );
     let untagged_warnings = plan
         .diagnostics
@@ -338,11 +342,12 @@ async fn reference_user_over_mixed_library_isolates_untagged_and_no_match() {
     // and the other files above are unaffected — the odd file is isolated, not a
     // library-wide block.
     assert_eq!(
-        target_phase_ops(&plan, no_match, "audio"),
-        vec![
-            (PlanOperationKind::TranscodeAudio, NodeStatus::Blocked),
-            (PlanOperationKind::TranscodeAudio, NodeStatus::Planned),
-        ],
+        target_phase_ops(&plan, no_match, "audio_transcode"),
+        vec![(PlanOperationKind::TranscodeAudio, NodeStatus::Blocked)],
+    );
+    assert_eq!(
+        target_phase_ops(&plan, no_match, "audio_companion"),
+        vec![(PlanOperationKind::TranscodeAudio, NodeStatus::Planned)],
     );
     assert!(
         plan.diagnostics.iter().any(|d| {

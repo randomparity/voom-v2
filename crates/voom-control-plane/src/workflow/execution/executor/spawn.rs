@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use tokio::task::JoinSet;
 use voom_core::OperationKind;
 use voom_core::{JobId, TicketId, TicketOperation, VoomError, WorkerId};
-use voom_scheduler::{SingleWorkerPerKindSelector, WorkerSelector, WorkerView};
+use voom_scheduler::{LeastLoadedWorkerSelector, WorkerSelector, WorkerView};
 use voom_store::repo::leases::{LeaseAcquireOutcome, NewLease};
 use voom_store::repo::tickets::{Ticket, TicketState};
 
@@ -44,7 +44,7 @@ impl WorkflowExecutor {
         let candidates = self
             .candidate_workers(workflow_payload.operation, reservations)
             .await?;
-        let selector = SingleWorkerPerKindSelector;
+        let selector = LeastLoadedWorkerSelector;
         let worker_id = match selector.select(workflow_payload.operation, &candidates) {
             Ok(worker_id) => worker_id,
             Err(source) => {

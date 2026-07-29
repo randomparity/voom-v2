@@ -17,11 +17,9 @@ use voom_store::repo::workflow_summaries::{
 };
 
 use crate::ControlPlane;
+use crate::workflow::WorkflowRunSummary;
 use crate::workflow::coordinator::planning::{job_grain_summary, zero_phase_summary};
-use crate::workflow::coordinator::{
-    CoordinatorError, CoordinatorOutcome, Disposition, PhaseDispatchFailure, PhaseFile,
-};
-use crate::workflow::plan::policy_bridge::policy_workflow_node_id;
+use crate::workflow::coordinator::{CoordinatorError, CoordinatorOutcome, Disposition, PhaseFile};
 use crate::workflow::ticket_results::PolicyVerificationTicketResult;
 
 type VerifiedEvidenceRow = (
@@ -61,6 +59,18 @@ struct JobProducedCommit {
 struct SameLineageCommit {
     ticket_id: TicketId,
     produced: JobProducedCommit,
+}
+
+pub(super) struct FailedPhaseFinalization<'a> {
+    pub(super) job_id: JobId,
+    pub(super) phase_ordinal: u32,
+    pub(super) files: &'a [PhaseFile],
+    pub(super) dispositions: &'a [Disposition],
+    pub(super) phase_dispatched: bool,
+    pub(super) run_summary: Option<&'a WorkflowRunSummary>,
+    pub(super) source: VoomError,
+    pub(super) phases: Vec<PhaseSummary>,
+    pub(super) file_phases: Vec<FilePhaseSummary>,
 }
 
 enum CommitRelevance {
@@ -708,79 +718,69 @@ impl ControlPlane {
     /// dispatches, so their commits have landed), then return the partial
     /// outcome inside the error. No phase-grain row is written for the failed
     /// phase, and the job is already `failed`.
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "threads the in-progress run's accumulated phase/file rows into the partial"
-    )]
     pub(super) async fn finalize_failed_phase(
         &self,
-        job_id: JobId,
-        phase_ordinal: u32,
-        files: &[PhaseFile],
-        dispositions: &[Disposition],
-        failure: PhaseDispatchFailure,
-        phases: Vec<PhaseSummary>,
-        mut file_phases: Vec<FilePhaseSummary>,
+        finalization: FailedPhaseFinalization<'_>,
     ) -> Result<CoordinatorOutcome, CoordinatorError> {
-        let Some(run_summary) = failure.run_summary else {
-            // A pre-dispatch bridge failure ran no tickets, so nothing committed.
-            return Err(failure.source.into());
-        };
-        for (file, disposition) in files.iter().zip(dispositions) {
-            let Disposition::Planned { node_id } = disposition else {
-                continue;
-            };
-            let workflow_node_id = policy_workflow_node_id(node_id);
-            let ticket_ids = self
-                .ticket_ids_for_phase_file_node(
-                    job_id,
-                    phase_ordinal,
-                    &workflow_node_id,
-                    file.version_id,
-                )
-                .await?;
-            if let Some(verified) = self.verified_refs_for_tickets(file, &ticket_ids).await? {
+        let FailedPhaseFinalization {
+            job_id,
+            phase_ordinal,
+            files,
+            dispositions,
+            phase_dispatched,
+            run_summary,
+            source,
+            phases,
+            mut file_phases,
+        } = finalization;
+        if phase_dispatched {
+            for (file, disposition) in files.iter().zip(dispositions) {
+                let Disposition::Planned { .. } = disposition else {
+                    continue;
+                };
+                let ticket_ids = self
+                    .ticket_ids_for_phase_file(job_id, phase_ordinal, file.version_id)
+                    .await?;
+                if let Some(verified) = self.verified_refs_for_tickets(file, &ticket_ids).await? {
+                    let row = self
+                        .write_file_row(
+                            job_id,
+                            phase_ordinal,
+                            file,
+                            FilePhaseOutcome::Verified,
+                            &ticket_ids,
+                            Some(verified),
+                        )
+                        .await?;
+                    file_phases.push(row);
+                    continue;
+                }
+                let phase_ticket_ids = self.ticket_ids_for_phase(job_id, phase_ordinal).await?;
+                let (produced, scoped_ticket_ids) = self
+                    .committed_refs_for_tickets(job_id, file, &phase_ticket_ids, &ticket_ids)
+                    .await?;
+                let Some(produced) = produced else {
+                    continue;
+                };
                 let row = self
                     .write_file_row(
                         job_id,
                         phase_ordinal,
                         file,
-                        FilePhaseOutcome::Verified,
-                        &ticket_ids,
-                        Some(verified),
+                        FilePhaseOutcome::Committed,
+                        &scoped_ticket_ids,
+                        Some(produced.refs),
                     )
                     .await?;
                 file_phases.push(row);
-                continue;
             }
-            let phase_ticket_ids = self.ticket_ids_for_phase(job_id, phase_ordinal).await?;
-            let (produced, scoped_ticket_ids) = self
-                .committed_refs_for_tickets(job_id, file, &phase_ticket_ids, &ticket_ids)
-                .await?;
-            let Some(produced) = produced else {
-                continue;
-            };
-            let row = self
-                .write_file_row(
-                    job_id,
-                    phase_ordinal,
-                    file,
-                    FilePhaseOutcome::Committed,
-                    &scoped_ticket_ids,
-                    Some(produced.refs),
-                )
-                .await?;
-            file_phases.push(row);
         }
         let summary = self
             .workflow_summaries
-            .insert_summary(
-                job_grain_summary(job_id, Some(&run_summary)),
-                self.clock().now(),
-            )
+            .insert_summary(job_grain_summary(job_id, run_summary), self.clock().now())
             .await?;
         Err(CoordinatorError {
-            source: failure.source,
+            source,
             partial: Some(CoordinatorOutcome {
                 job_id,
                 summary,
@@ -860,15 +860,9 @@ impl ControlPlane {
                     .insert(phase_ordinal, FilePhaseOutcome::Skipped);
                 Ok((row, file.snapshot.clone(), Some(file)))
             }
-            Disposition::Planned { node_id } => {
-                let workflow_node_id = policy_workflow_node_id(node_id);
+            Disposition::Planned { .. } => {
                 let ticket_ids = self
-                    .ticket_ids_for_phase_file_node(
-                        job_id,
-                        phase_ordinal,
-                        &workflow_node_id,
-                        file.version_id,
-                    )
+                    .ticket_ids_for_phase_file(job_id, phase_ordinal, file.version_id)
                     .await?;
                 if let Some(verified) = self.verified_refs_for_tickets(&file, &ticket_ids).await? {
                     let row = self
@@ -1279,20 +1273,31 @@ impl ControlPlane {
             .await
     }
 
-    async fn ticket_ids_for_phase_file_node(
+    async fn ticket_ids_for_phase_file(
         &self,
         job_id: JobId,
         phase_ordinal: u32,
-        workflow_node_id: &str,
         file_version_id: FileVersionId,
     ) -> Result<Vec<TicketId>, VoomError> {
-        self.ticket_ids_for_phase_scope(
-            job_id,
-            phase_ordinal,
-            workflow_node_id,
-            Some(file_version_id),
+        let workflow_id = format!("workflow-{}-phase-{phase_ordinal}", job_id.0);
+        let rows: Vec<i64> = sqlx::query_scalar(
+            "SELECT id FROM tickets \
+             WHERE job_id = ? AND json_extract(payload, '$.workflow_id') = ? \
+               AND json_extract(payload, '$.rendered_payload.source_file_version_id') = ? \
+             ORDER BY id ASC",
         )
+        .bind(sqlite_i64(job_id.0, "phase ticket job id")?)
+        .bind(workflow_id)
+        .bind(sqlite_i64(
+            file_version_id.0,
+            "phase ticket source file version",
+        )?)
+        .fetch_all(&self.pool)
         .await
+        .map_err(|error| VoomError::database_context("phase file ticket ids", error))?;
+        rows.into_iter()
+            .map(|id| sqlite_u64(id, "phase file ticket id").map(TicketId))
+            .collect()
     }
 
     async fn ticket_ids_for_phase_scope(

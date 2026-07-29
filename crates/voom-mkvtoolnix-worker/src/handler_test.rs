@@ -1,10 +1,14 @@
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::Duration;
 
-use voom_core::{ErrorCode, FailureClass, LeaseId};
+use time::OffsetDateTime;
+use voom_core::{ErrorCode, FailureClass, LeaseId, WorkerId};
+use voom_worker_protocol::http::{HttpClient, HttpServer};
 use voom_worker_protocol::{
-    OperationDispatch, OperationFuture, OperationKind, OperationRequest, ProgressFrame,
-    RemuxExpectedFacts, RemuxInput, RemuxOutput, RemuxRequest, RemuxSelection, RemuxStreamRef,
-    RemuxTrackGroup,
+    ClientHandle, NdjsonOutcome, OperationDispatch, OperationFuture, OperationKind,
+    OperationRequest, ProgressFrame, RemuxExpectedFacts, RemuxInput, RemuxOutput, RemuxRequest,
+    RemuxSelection, RemuxStreamRef, RemuxTrackGroup, ServerHandle, WorkerCredentials,
 };
 
 use crate::observe::observe_file_facts;
@@ -807,6 +811,62 @@ async fn malformed_request_payload_is_accepted_then_terminal_error() {
         FailureClass::MalformedWorkerResult,
         ErrorCode::MalformedWorkerResult,
     );
+}
+
+#[tokio::test]
+async fn streaming_operation_acknowledges_and_reports_progress_before_completion() {
+    let credentials = WorkerCredentials {
+        worker_id: WorkerId(8),
+        worker_epoch: 1,
+        secret: "secret".to_owned().into(),
+    };
+    let handler = Arc::new(|request: OperationRequest| {
+        Box::pin(async move {
+            stream_operation(request.lease_id, OffsetDateTime::now_utc(), 40, async {
+                tokio::time::sleep(Duration::from_millis(80)).await;
+                Err(config_invalid("test", "finished".to_owned()))
+            })
+        }) as OperationFuture
+    });
+    let running = HttpServer::new(credentials.clone(), handler)
+        .serve("127.0.0.1:0".parse().unwrap())
+        .await
+        .unwrap();
+    let client = HttpClient::with_timeouts(
+        running.bound,
+        Duration::from_secs(1),
+        Duration::from_millis(40),
+    );
+    let request = OperationRequest {
+        operation: OperationKind::Remux,
+        lease_id: LeaseId(42),
+        payload: serde_json::json!({}),
+        heartbeat_deadline_ms: 100,
+        progress_idle_deadline_ms: 40,
+    };
+
+    let mut dispatch = client
+        .dispatch(&credentials, "streaming-ack", request)
+        .await
+        .unwrap();
+
+    let mut progress_count = 0;
+    loop {
+        match dispatch.frames.next_frame().await.unwrap() {
+            NdjsonOutcome::Frame(ProgressFrame::Progress { .. }) => progress_count += 1,
+            NdjsonOutcome::Terminated(ProgressFrame::Error { .. }) => break,
+            other => {
+                assert!(matches!(
+                    other,
+                    NdjsonOutcome::Terminated(ProgressFrame::Error { .. })
+                ));
+                break;
+            }
+        }
+    }
+    assert!(progress_count >= 2);
+    let _ = running.shutdown.send(());
+    let _ = running.joined.await;
 }
 
 struct RemuxFixture {

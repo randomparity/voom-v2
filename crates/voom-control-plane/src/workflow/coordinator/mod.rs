@@ -49,7 +49,7 @@ mod planning;
 mod promotion;
 mod resume;
 
-use finalize::phase_ordinal;
+use finalize::{FailedPhaseFinalization, phase_ordinal};
 use planning::{
     classify_phase, initial_phase_files, job_grain_summary, phase_draft, phase_outcome,
     regenerate_phase_report, reject_unpublished_on_error, resolved_phase_policy,
@@ -165,13 +165,12 @@ fn phase_gate_admission(
         .collect()
 }
 
-/// How a single file's phase node resolved (ADR-0005: at most one node status
-/// per target when the phase runs).
+/// How all of a single file's nodes resolved for one phase.
 #[derive(Clone, Debug)]
 enum Disposition {
     Blocked,
     Skipped,
-    Planned { node_id: String },
+    Planned { node_ids: Vec<String> },
 }
 
 struct PhaseDispatchScope {
@@ -216,12 +215,13 @@ fn continued_disposition(
     disposition: &Disposition,
     ticket_states: &[TicketState],
 ) -> Result<Disposition, VoomError> {
-    let Disposition::Planned { node_id } = disposition else {
+    let Disposition::Planned { node_ids } = disposition else {
         return Ok(disposition.clone());
     };
     if ticket_states.is_empty() {
         return Err(VoomError::Internal(format!(
-            "continued phase node `{node_id}` has no tickets"
+            "continued phase has no tickets for planned nodes `{}`",
+            node_ids.join("`, `")
         )));
     }
     let mut failed = false;
@@ -231,7 +231,8 @@ fn continued_disposition(
             TicketState::Failed => failed = true,
             TicketState::Pending | TicketState::Ready | TicketState::Leased => {
                 return Err(VoomError::Internal(format!(
-                    "continued phase node `{node_id}` retained non-terminal ticket state `{}`",
+                    "continued phase nodes `{}` retained non-terminal ticket state `{}`",
+                    node_ids.join("`, `"),
                     state.as_str()
                 )));
             }
@@ -528,7 +529,7 @@ impl<'a> PhaseLoop<'a> {
         .map_err(voom_plan::PlanGenerationError::into_voom_error)?;
         let report = voom_plan::generate_compliance_report(&plan)
             .map_err(voom_plan::ComplianceReportError::into_voom_error)?;
-        let dispositions = classify_phase(entering, &plan);
+        let dispositions = classify_phase(entering, &plan)?;
         let error_strategy = phase_error_strategy(&self.policy, phase_name)?;
         Ok(PlannedPhase {
             plan,
@@ -618,20 +619,26 @@ impl<'a> PhaseLoop<'a> {
         phase_ordinal: u32,
         entering: &[PhaseFile],
         dispositions: &[Disposition],
-        failure: PhaseDispatchFailure,
+        mut failure: PhaseDispatchFailure,
     ) -> Result<CoordinatorOutcome, CoordinatorError> {
+        let phase_dispatched = failure.run_summary.is_some();
+        if let Some(run) = failure.run_summary.take() {
+            self.record_run(run);
+        }
         let phases = std::mem::take(&mut self.phases);
         let file_phases = std::mem::take(&mut self.file_phases);
         self.control_plane
-            .finalize_failed_phase(
-                self.job_id,
+            .finalize_failed_phase(FailedPhaseFinalization {
+                job_id: self.job_id,
                 phase_ordinal,
-                entering,
+                files: entering,
                 dispositions,
-                failure,
+                phase_dispatched,
+                run_summary: self.last_run.as_ref(),
+                source: failure.source,
                 phases,
                 file_phases,
-            )
+            })
             .await
     }
 
@@ -726,22 +733,24 @@ impl ControlPlane {
     ) -> Result<Vec<Disposition>, VoomError> {
         let mut resolved = Vec::with_capacity(dispositions.len());
         for disposition in dispositions {
-            let Disposition::Planned { node_id } = disposition else {
+            let Disposition::Planned { node_ids } = disposition else {
                 resolved.push(disposition.clone());
                 continue;
             };
-            let workflow_node_id = super::plan::policy_bridge::policy_workflow_node_id(node_id);
-            let ticket_ids = self
-                .ticket_ids_for_phase_node(job_id, phase_ordinal, &workflow_node_id)
-                .await?;
-            let mut states = Vec::with_capacity(ticket_ids.len());
-            for ticket_id in ticket_ids {
-                let ticket = self.tickets.get(ticket_id).await?.ok_or_else(|| {
-                    VoomError::NotFound(format!(
-                        "continued phase ticket {ticket_id} for node `{node_id}`"
-                    ))
-                })?;
-                states.push(ticket.state);
+            let mut states = Vec::with_capacity(node_ids.len());
+            for node_id in node_ids {
+                let workflow_node_id = super::plan::policy_bridge::policy_workflow_node_id(node_id);
+                let ticket_ids = self
+                    .ticket_ids_for_phase_node(job_id, phase_ordinal, &workflow_node_id)
+                    .await?;
+                for ticket_id in ticket_ids {
+                    let ticket = self.tickets.get(ticket_id).await?.ok_or_else(|| {
+                        VoomError::NotFound(format!(
+                            "continued phase ticket {ticket_id} for node `{node_id}`"
+                        ))
+                    })?;
+                    states.push(ticket.state);
+                }
             }
             resolved.push(continued_disposition(disposition, &states)?);
         }

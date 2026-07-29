@@ -16,14 +16,14 @@ use crate::ControlPlane;
 use crate::artifact::commit::{
     CommitArtifactReport, CommitRecoveryReport, PreparedCommit, PromotionOutcome,
 };
-use crate::cases::{begin_tx, commit_tx};
+use crate::cases::{begin_immediate_tx, commit_tx};
 
 pub(super) async fn finalize_commit(
     cp: &ControlPlane,
     prepared: &PreparedCommit,
     promotion: &PromotionOutcome,
 ) -> Result<CommitArtifactReport, VoomError> {
-    let mut tx = begin_tx(&cp.pool).await?;
+    let mut tx = begin_immediate_tx(&cp.pool).await?;
     let report = finalize_commit_in_tx(cp, &mut tx, prepared, promotion).await?;
     commit_tx(tx).await?;
     Ok(report)

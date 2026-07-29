@@ -43,13 +43,15 @@ fn synthesis_probe_preserves_source_and_binds_stable_companion_identity() {
 
     bind_synthesis_companions(&mut payload, &source, &selection, &result).unwrap();
 
-    assert_eq!(payload["streams"][1]["id"], "stream-1");
+    assert_eq!(payload["streams"][0]["id"], "video-0");
+    assert_eq!(payload["streams"][1]["id"], "audio-1");
     assert_eq!(
         payload["streams"][2]["id"],
         "synth_companion_26daba3dd2f8074c"
     );
     assert_eq!(payload["streams"][2]["channels"], 2);
     assert_eq!(payload["streams"][2]["language"], "eng");
+    assert_eq!(payload["streams"][3]["id"], "attachment-2");
 }
 
 #[test]
@@ -81,7 +83,7 @@ fn synthesis_probe_rejects_changed_source_media_facts() {
     let error = bind_synthesis_companions(&mut payload, &source, &selection, &result).unwrap_err();
 
     assert_eq!(error.error_code().as_str(), "MALFORMED_WORKER_RESULT");
-    assert!(error.to_string().contains("changed source provider stream"));
+    assert!(error.to_string().contains("changed source stream ordinal"));
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -214,6 +216,14 @@ fn synthesis_source_snapshot() -> MediaSnapshot {
                         "forced": false,
                         "commentary": false
                     }
+                },
+                {
+                    "id": "attachment-2",
+                    "index": 2,
+                    "kind": "attachment",
+                    "codec_name": "ttf",
+                    "filename": "font.ttf",
+                    "mime_type": "application/x-truetype-font"
                 }
             ]
         }),
@@ -328,6 +338,14 @@ fn synthesis_probe_payload() -> serde_json::Value {
                     "forced": false,
                     "commentary": false
                 }
+            },
+            {
+                "id": "stream-3",
+                "index": 3,
+                "kind": "attachment",
+                "codec_name": "ttf",
+                "filename": "font.ttf",
+                "mime_type": "application/x-truetype-font"
             }
         ]
     })

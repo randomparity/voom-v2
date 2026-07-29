@@ -517,6 +517,8 @@ async fn run_ffmpeg_synthesize_audio(
         .arg(input)
         .arg("-map")
         .arg("0")
+        .arg("-map")
+        .arg("-0:t?")
         .arg("-c")
         .arg("copy");
     for (offset, source) in selected.iter().enumerate() {
@@ -536,6 +538,8 @@ async fn run_ffmpeg_synthesize_audio(
         append_audio_metadata(&mut command, out_ordinal, source);
     }
     command
+        .arg("-map")
+        .arg("0:t?")
         .arg("-map_metadata")
         .arg("0")
         .arg("-f")

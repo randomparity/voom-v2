@@ -1,13 +1,18 @@
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::Duration;
 
-use voom_core::{ErrorCode, FailureClass, LeaseId};
+use time::OffsetDateTime;
+use voom_core::{ErrorCode, FailureClass, LeaseId, WorkerId};
+use voom_worker_protocol::http::{HttpClient, HttpServer};
 use voom_worker_protocol::{
-    AUDIO_PROFILE_DEFAULT, AudioExpectedFacts, AudioStreamRef, ExtractAudioInput,
-    ExtractAudioOutput, ExtractAudioOutputDescriptor, ExtractAudioRequest, OperationDispatch,
-    OperationFuture, OperationKind, OperationRequest, ProgressFrame, ProtocolError,
-    TranscodeAudioInput, TranscodeAudioOutput, TranscodeAudioRequest, TranscodeAudioSelection,
-    TranscodeAudioSettings, TranscodeVideoExpectedFacts, TranscodeVideoInput, TranscodeVideoOutput,
-    TranscodeVideoProfile, TranscodeVideoRequest,
+    AUDIO_PROFILE_DEFAULT, AudioExpectedFacts, AudioStreamRef, ClientHandle, ExtractAudioInput,
+    ExtractAudioOutput, ExtractAudioOutputDescriptor, ExtractAudioRequest, NdjsonOutcome,
+    OperationDispatch, OperationFuture, OperationKind, OperationRequest, ProgressFrame,
+    ProtocolError, ServerHandle, TranscodeAudioInput, TranscodeAudioOutput, TranscodeAudioRequest,
+    TranscodeAudioSelection, TranscodeAudioSettings, TranscodeVideoExpectedFacts,
+    TranscodeVideoInput, TranscodeVideoOutput, TranscodeVideoProfile, TranscodeVideoRequest,
+    WorkerCredentials,
 };
 
 use crate::DEFAULT_PROCESS_TIMEOUT;
@@ -222,6 +227,71 @@ async fn unsupported_operation_returns_unknown_operation_protocol_error() {
     let err = handle_operation(request).await.unwrap_err();
 
     assert!(matches!(err, ProtocolError::UnknownOperation { .. }));
+}
+
+#[tokio::test]
+async fn streaming_operation_acknowledges_and_reports_progress_before_completion() {
+    let credentials = WorkerCredentials {
+        worker_id: WorkerId(7),
+        worker_epoch: 1,
+        secret: "secret".to_owned().into(),
+    };
+    let handler = Arc::new(|request: OperationRequest| {
+        Box::pin(async move {
+            stream_operation(
+                StreamingOperation {
+                    lease_id: request.lease_id,
+                    accepted_at: OffsetDateTime::now_utc(),
+                    progress_idle_deadline_ms: 40,
+                    started_message: "started",
+                    active_message: "active",
+                },
+                async {
+                    tokio::time::sleep(Duration::from_millis(80)).await;
+                    Ok(serde_json::json!({"status": "done"}))
+                },
+            )
+        }) as OperationFuture
+    });
+    let running = HttpServer::new(credentials.clone(), handler)
+        .serve("127.0.0.1:0".parse().unwrap())
+        .await
+        .unwrap();
+    let client = HttpClient::with_timeouts(
+        running.bound,
+        Duration::from_secs(1),
+        Duration::from_millis(40),
+    );
+    let request = OperationRequest {
+        operation: OperationKind::TranscodeVideo,
+        lease_id: LeaseId(42),
+        payload: serde_json::json!({}),
+        heartbeat_deadline_ms: 100,
+        progress_idle_deadline_ms: 40,
+    };
+
+    let mut dispatch = client
+        .dispatch(&credentials, "streaming-ack", request)
+        .await
+        .unwrap();
+
+    let mut progress_count = 0;
+    loop {
+        match dispatch.frames.next_frame().await.unwrap() {
+            NdjsonOutcome::Frame(ProgressFrame::Progress { .. }) => progress_count += 1,
+            NdjsonOutcome::Terminated(ProgressFrame::Result { .. }) => break,
+            other => {
+                assert!(matches!(
+                    other,
+                    NdjsonOutcome::Terminated(ProgressFrame::Result { .. })
+                ));
+                break;
+            }
+        }
+    }
+    assert!(progress_count >= 2);
+    let _ = running.shutdown.send(());
+    let _ = running.joined.await;
 }
 
 #[tokio::test]

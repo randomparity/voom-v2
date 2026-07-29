@@ -1,13 +1,14 @@
 //! Production control-plane supervisor for a locally-launched mutation worker.
 //!
 //! [`ControlPlane::start_local_worker`] productizes the test-only
-//! `voom-test-support` launch helper: it self-heals any stale same-name worker,
-//! registers a node-less worker row, spawns the bundled mutation-worker binary
-//! (`voom-ffmpeg-worker` / `voom-mkvtoolnix-worker`) resolved as a sibling of
-//! the running executable, reads its bound endpoint from stdout, then records a
-//! capability carrying `{endpoint, secret}` and an execute grant so
-//! `compliance execute` can discover and dispatch to it. The child's stdin is
-//! kept piped; closing it triggers the worker's watchdog shutdown.
+//! `voom-test-support` launch helper: it self-heals unreachable same-kind
+//! workers, preserves reachable siblings, registers a node-less worker row,
+//! spawns the bundled mutation-worker binary (`voom-ffmpeg-worker` /
+//! `voom-mkvtoolnix-worker`) resolved as a sibling of the running executable,
+//! reads its bound endpoint from stdout, then records a capability carrying
+//! `{endpoint, secret}` and an execute grant so `compliance execute` can
+//! discover and dispatch to it. The child's stdin is kept piped; closing it
+//! triggers the worker's watchdog shutdown.
 
 use std::net::SocketAddr;
 use std::process::Stdio;
@@ -119,11 +120,11 @@ impl RunningLocalWorker {
 impl ControlPlane {
     /// Launch a bundled mutation worker locally and register it for discovery.
     ///
-    /// Self-heals any live same-name worker (a previous hard-kill that left a
-    /// stale endpoint), registers a node-less worker row, spawns the bundled
-    /// binary, reads its bound endpoint, then records the endpoint+secret
-    /// capability and an execute grant. On spawn or bind failure the
-    /// just-registered worker row is retired so no dangling worker is left
+    /// Self-heals unreachable same-kind workers left by a previous hard kill,
+    /// preserves reachable siblings, registers a node-less worker row, spawns
+    /// the bundled binary, reads its bound endpoint, then records the
+    /// endpoint+secret capability and an execute grant. On spawn or bind failure
+    /// the just-registered worker row is retired so no dangling worker is left
     /// behind.
     ///
     /// # Errors
@@ -157,6 +158,7 @@ impl ControlPlane {
     }
 
     async fn self_heal_stale_workers(&self, kind: LocalWorkerKind) -> Result<(), VoomError> {
+        let live_runtimes = self.live_policy_runtime_registry().await?;
         let inspections = self
             .list_worker_inspections(None, SELF_HEAL_SCAN_LIMIT)
             .await?;
@@ -171,6 +173,9 @@ impl ControlPlane {
                 worker.status,
                 WorkerStatus::Registered | WorkerStatus::Active
             ) {
+                continue;
+            }
+            if live_runtimes.contains(worker.id) {
                 continue;
             }
             self.retire_worker(worker.id, worker.epoch, now).await?;

@@ -819,13 +819,9 @@ fn bind_synthesis_companions(
         ));
     }
     validate_unique_provider_indexes(streams)?;
-    validate_preserved_source_streams(source_streams, streams)?;
-    bind_companion_streams(
-        streams,
-        source_streams,
-        selection,
-        &result.selected_output_streams,
-    )
+    let companion_indexes = companion_provider_indexes(&result.selected_output_streams)?;
+    bind_preserved_source_streams(source_streams, streams, &companion_indexes)?;
+    bind_companion_streams(streams, selection, &result.selected_output_streams)
 }
 
 fn snapshot_streams<'a>(
@@ -852,11 +848,26 @@ fn validate_unique_provider_indexes(streams: &[serde_json::Value]) -> Result<(),
     Ok(())
 }
 
-fn validate_preserved_source_streams(
+fn companion_provider_indexes(
+    facts: &[AudioOutputStreamFact],
+) -> Result<std::collections::BTreeSet<u32>, VoomError> {
+    let mut indexes = std::collections::BTreeSet::new();
+    for fact in facts {
+        if !indexes.insert(fact.output_provider_stream_index) {
+            return Err(malformed_synthesis(
+                "synthesis result contains duplicate companion provider stream indexes",
+            ));
+        }
+    }
+    Ok(indexes)
+}
+
+fn bind_preserved_source_streams(
     source_streams: &[serde_json::Value],
-    result_streams: &[serde_json::Value],
+    result_streams: &mut [serde_json::Value],
+    companion_indexes: &std::collections::BTreeSet<u32>,
 ) -> Result<(), VoomError> {
-    const PRESERVED_FIELDS: [&str; 9] = [
+    const PRESERVED_FIELDS: [&str; 11] = [
         "kind",
         "codec_name",
         "channels",
@@ -866,28 +877,35 @@ fn validate_preserved_source_streams(
         "width",
         "height",
         "pixel_format",
+        "filename",
+        "mime_type",
     ];
-    for source in source_streams {
-        let index = stream_index(source)?;
-        let result = stream_at_index(result_streams, index).ok_or_else(|| {
-            malformed_synthesis(&format!(
-                "probed result omitted source provider stream index {index}"
-            ))
+    let mut preserved = result_streams.iter_mut().filter(|stream| {
+        stream_index(stream).is_ok_and(|index| !companion_indexes.contains(&index))
+    });
+    for (ordinal, source) in source_streams.iter().enumerate() {
+        let result = preserved.next().ok_or_else(|| {
+            malformed_synthesis("probed result omitted a preserved source stream")
         })?;
         for field in PRESERVED_FIELDS {
             if source.get(field) != result.get(field) {
                 return Err(malformed_synthesis(&format!(
-                    "probed result changed source provider stream index {index} field {field}"
+                    "probed result changed source stream ordinal {ordinal} field {field}"
                 )));
             }
         }
+        result["id"] = source["id"].clone();
+    }
+    if preserved.next().is_some() {
+        return Err(malformed_synthesis(
+            "probed result contains an unexpected non-companion stream",
+        ));
     }
     Ok(())
 }
 
 fn bind_companion_streams(
     streams: &mut [serde_json::Value],
-    source_streams: &[serde_json::Value],
     selection: &TranscodeAudioSelectionPlan,
     facts: &[AudioOutputStreamFact],
 ) -> Result<(), VoomError> {
@@ -903,12 +921,6 @@ fn bind_companion_streams(
             ));
         }
         let planned_id = &selected.stream.snapshot_stream_id;
-        if stream_at_index(source_streams, fact.output_provider_stream_index).is_some() {
-            return Err(malformed_synthesis(&format!(
-                "companion provider stream index {} collides with a source stream",
-                fact.output_provider_stream_index
-            )));
-        }
         if streams.iter().any(|candidate| {
             candidate.get("id").and_then(serde_json::Value::as_str) == Some(planned_id)
         }) {
@@ -974,12 +986,6 @@ fn apply_audio_output_fact(stream: &mut serde_json::Value, fact: &AudioOutputStr
         stream["disposition"]["commentary"] =
             serde_json::Value::Bool(disposition.commentary.unwrap_or(false));
     }
-}
-
-fn stream_at_index(streams: &[serde_json::Value], index: u32) -> Option<&serde_json::Value> {
-    streams.iter().find(|stream| {
-        stream.get("index").and_then(serde_json::Value::as_u64) == Some(u64::from(index))
-    })
 }
 
 fn stream_at_index_mut(
