@@ -154,10 +154,16 @@ ordinal. Startup:
    A mismatch fails startup.
 3. Advertise `hardware` token `vaapi:pci-<addr>`.
 
-There is no UUID and no `nvidia-smi` analogue, so the readback in step 2 is the
-falsifiability mechanism. Because the PCI address cannot renumber while
-`renderD*` can, this satisfies issue #409's "identity remains stable across
-render-node enumeration changes" branch rather than its detect-and-reject fallback.
+Because the PCI address cannot renumber while `renderD*` can, this satisfies issue
+#409's "identity remains stable across render-node enumeration changes" branch rather
+than its detect-and-reject fallback.
+
+Binding strength comes from `-vaapi_device <node>` naming the device directly at open
+time, not from step 2. VAAPI has no equivalent of the `CUDA_VISIBLE_DEVICES`-plus-device-zero
+indirection that forces ADR 0049's PID-to-UUID readback, so step 2's narrower job is to
+catch a stale or incorrect `by-path` symlink — udev generates that symlink from the very
+address the check re-reads. Proof that an encode ran on the intended device comes from
+the §5 probe. See ADR 0050 §1.
 
 `sysfs unique_id` is deliberately not used: it exists only on discrete GPUs and is
 absent on this APU.
@@ -171,6 +177,13 @@ skip obviously-absent codecs before probing; they never substitute for a probe.
 
 The probe is not cached across restarts, because a host driver change can move
 advertised capability with no VOOM configuration change (§2.1).
+
+Probing is bounded by ADR 0049 §3's existing clocks, adopted unchanged: a per-probe
+encode timeout, the one-minute capacity clock for the concurrent probe, and the
+five-minute readiness deadline overall. Expiry fails startup naming the codec or
+capacity that did not prove, so a hung probe cannot leave a worker pending. The cost
+is real and paid per start — one encode per candidate codec plus `capacity`
+concurrent encodes — and is recorded in ADR 0050's Consequences.
 
 The advertised descriptor records: backend, PCI address, device name, usable
 encoders, usable decoders, driver string, and tested capacity.

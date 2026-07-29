@@ -40,11 +40,20 @@ The design detail is recorded in the [VAAPI video acceleration design][vaapi-des
 
 1. **A VAAPI worker is configured with a PCI address, never a render-node path or
    ordinal.** Startup resolves the address through
-   `/dev/dri/by-path/pci-<addr>-render` and reads the resolved node's PCI address
-   back before advertising anything, making the binding falsifiable. The hardware
-   token is `vaapi:pci-<addr>`. This is the direct analogue of ADR 0049 §2's
-   UUID-not-ordinal rule and satisfies issue #409's stability requirement rather
-   than its detect-and-reject fallback.
+   `/dev/dri/by-path/pci-<addr>-render`, reads the resolved node's PCI address back,
+   and fails startup on a mismatch. The hardware token is `vaapi:pci-<addr>`. This
+   shares ADR 0049 §2's UUID-not-ordinal *motive* and satisfies issue #409's
+   stability requirement rather than its detect-and-reject fallback.
+
+   The readback is a weaker check than its NVIDIA counterpart, and deliberately so.
+   ADR 0049 needs a PID-to-UUID readback because `CUDA_VISIBLE_DEVICES` plus "CUDA
+   device zero" is an indirection that can land FFmpeg on a device the scheduler did
+   not choose. VAAPI has no such indirection: `-vaapi_device <node>` opens exactly
+   that node, so binding strength comes from naming the device directly at open time,
+   not from the readback. The readback's job is narrower — catching a stale or
+   incorrect `by-path` symlink, since udev generates that symlink from the PCI address
+   the check re-reads. It is not, and is not relied on as, proof that the encode ran
+   on the intended device; §2's probe encode establishes that.
 
 2. **Advertised capability is proven by executing a claim-owned smoke encode on the
    bound device, per codec.** FFmpeg's encoder list and `vainfo`'s entrypoint list
@@ -75,10 +84,19 @@ The design detail is recorded in the [VAAPI video acceleration design][vaapi-des
    There is no software-encoder fallback.
 
 6. **Declared concurrency is operator-supplied, bounded `1..=16`, and proven by
-   concurrent smoke encodes.** VAAPI exposes no session enumeration, so ADR 0049 §3's
-   separation of external contention from a VOOM orphan has no VAAPI counterpart:
-   a failed capacity probe is always reported as diagnostic uncertainty. This is a
-   permanent property of the API, not a gap to be closed later.
+   concurrent smoke encodes.** The bound and its rationale are ADR 0049 §3's, adopted
+   unchanged: it stops startup creating unbounded probe processes. VAAPI exposes no
+   session enumeration, so ADR 0049 §3's separation of external contention from a VOOM
+   orphan has no VAAPI counterpart, and a failed capacity probe is always reported as
+   diagnostic uncertainty. No VA-API version specifies such a query today, so this
+   slice treats the absence as settled rather than as work in progress.
+
+7. **Probing is bounded by the same clocks as ADR 0049 §3.** Each probe encode carries
+   an individual timeout, the concurrent capacity probe reuses the one-minute capacity
+   clock, and overall readiness reuses the five-minute deadline; expiry fails startup
+   with the codec or capacity that did not prove, rather than leaving the worker
+   pending. Without this a hung probe would block readiness indefinitely, and §2
+   requires the probe to run on every start.
 
 ## Consequences
 
@@ -94,6 +112,12 @@ The design detail is recorded in the [VAAPI video acceleration design][vaapi-des
   driver change can move a worker's advertised codecs without any VOOM configuration
   change. The startup probe is the only thing that detects this, so it runs on every
   start and is not cached across restarts.
+- That uncached probe is a per-start cost paid on the GPU: one encode per candidate
+  codec, plus as many concurrent encodes as the declared capacity, so a worker
+  declaring 16 runs 16 at once before reporting ready. Worker startup is therefore
+  measurably slower than a software worker's and consumes device capacity while it
+  runs. §7's clocks bound the cost; they do not remove it. Operators restarting many
+  workers at once should expect contention during the probe window.
 - A failed VAAPI capacity probe cannot attribute the cause. Operators diagnosing
   contention on a shared GPU get less signal than on NVIDIA, by construction.
 - `LocalWorkerBound.accelerator` becomes a tagged enum rather than an
@@ -127,10 +151,32 @@ The design detail is recorded in the [VAAPI video acceleration design][vaapi-des
 - **Map the profile's preset onto `-async_depth`.** Rejected because `async_depth` is
   processing parallelism, not a speed/quality tradeoff, and it would overlap the
   per-device capacity model in ADR 0049 §3.
+- **Do nothing — defer VAAPI until a host with a vendor-supported driver stack and
+  more than one device exists.** Rejected, but it is the closest call in this record.
+  It would buy a stronger acceptance story: no RPM Fusion dependency, and a real
+  two-device capacity demonstration instead of the scheduler unit tests Consequences
+  records.
+  It loses more than it buys. The acceptance host proves every command shape and every
+  failure path this slice ships, and the device model it exercises is the one a later
+  Intel or multi-device AMD host would reuse — so deferring postpones working
+  acceleration on hardware in hand to obtain test-topology coverage that scheduler
+  unit tests already provide. The residual is recorded in Consequences rather than
+  hidden: this slice does not demonstrate real-media cross-device assignment, and
+  H.264/HEVC encode carries a third-party driver dependency.
 - **Include `h264_vaapi` and `av1_vaapi` encode in this slice.** Rejected as scope:
   all three encoders are proven, but each additional encoder multiplies the pinned
   command shapes and preflight permutations without proving anything new about the
   VAAPI device model. They are follow-up issues with hardware already in hand.
+- **Ship AV1 as the first slice instead of HEVC.** Rejected, though on a genuinely
+  finer margin than the entry above, which argues only against shipping all three.
+  AV1 is the only proven encoder needing no third-party driver, so an AV1-first slice
+  would carry no RPM Fusion dependency at all — a real advantage this record does not
+  dispute. HEVC wins on two grounds. It is the codec VOOM's existing `default-hevc`
+  profile and every current software profile target, so it exercises the
+  software-to-hardware substitution operators will actually make first; and it is the
+  codec ADR 0049 proved for NVIDIA, so shipping it second makes the two backends
+  directly comparable on one codec rather than leaving each backend proven on a
+  different one. AV1 remains the natural next slice and needs no new hardware.
 - **Expose `codec_level` for VAAPI.** Rejected because `-level` takes an integer
   `general_level_idc` and FFmpeg derives a correct value automatically; a partial
   name-to-integer level table would be phantom support.
@@ -139,6 +185,9 @@ The design detail is recorded in the [VAAPI video acceleration design][vaapi-des
 - **Reuse the NVIDIA `max_sessions` probe strategy for capacity.** Rejected because
   VAAPI has no session-count query at all, so the declaration cannot be
   cross-checked against an authoritative number the way NVML permits.
-- **Treat the absent session enumeration as a temporary gap.** Rejected because
-  VAAPI specifies no such query; recording it as permanent uncertainty is honest and
-  stops a later issue from chasing it.
+- **Treat the absent session enumeration as a temporary gap, pending a future
+  VA-API query.** Rejected because no VA-API version specifies one, so designing
+  around an anticipated query would be speculative. Recording the uncertainty as
+  settled stops a later issue from chasing a capability that does not exist; should
+  VA-API ever add such a query, that is a new decision superseding this one, not a
+  gap this record left open.
