@@ -49,6 +49,7 @@ const EXPECTED_MIGRATION_FILES: &[&str] = &[
     "0026_policy_artifact_verification.sql",
     "0027_audio_synthesis_asset_lineage.sql",
     "0028_sliding_file_window.sql",
+    "0029_blocked_file_run_history.sql",
 ];
 
 fn workspace_root() -> PathBuf {
@@ -336,6 +337,57 @@ async fn policy_verification_migration_preserves_workflow_progress() {
     assert_eq!(history, "skipped");
     assert_eq!(verification_owner, (None, None));
     assert_eq!(violations, Vec::<(String, i64, String, i64)>::new());
+}
+
+#[tokio::test]
+async fn blocked_history_migration_preserves_existing_rows_and_accepts_blocked() {
+    let migration_path = migrations_dir().join("0029_blocked_file_run_history.sql");
+    assert!(
+        migration_path.is_file(),
+        "{} must exist before the upgrade path can be exercised",
+        migration_path.display()
+    );
+
+    let tmp = NamedTempFile::new().unwrap();
+    let url = sqlite_url_for(tmp.path());
+    let pool = connect_or_create(&url).await.unwrap();
+    migrator_through(28).run(&pool).await.unwrap();
+    let (_file_version_id, job_id) = seed_legacy_workflow_progress(&pool).await;
+
+    MIGRATOR.run(&pool).await.unwrap();
+
+    let preserved: String = sqlx::query_scalar(
+        "SELECT outcome FROM workflow_file_run_history \
+         WHERE job_id = ? AND branch_id = 'movie' AND phase_ordinal = 0",
+    )
+    .bind(job_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO workflow_file_run_history \
+         (job_id, branch_id, phase_ordinal, outcome) VALUES (?, 'movie', 1, 'blocked')",
+    )
+    .bind(job_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let outcomes: Vec<String> = sqlx::query_scalar(
+        "SELECT outcome FROM workflow_file_run_history \
+         WHERE job_id = ? AND branch_id = 'movie' ORDER BY phase_ordinal",
+    )
+    .bind(job_id)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+
+    assert_eq!(preserved, "skipped");
+    assert_eq!(outcomes, ["skipped", "blocked"]);
+    let violations: Vec<(String, i64, String, i64)> = sqlx::query_as("PRAGMA foreign_key_check")
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+    assert!(violations.is_empty());
 }
 
 #[tokio::test]

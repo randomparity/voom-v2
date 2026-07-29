@@ -16,7 +16,7 @@ Primary surface:
 
 - `crates/voom-control-plane/src/workflow/coordinator/**`;
 - workflow-summary/progress persistence in `voom-store`;
-- migration `0028`;
+- migrations `0028` and `0029`;
 - the compliance execution option and its narrow CLI plumbing;
 - coordinator, repository, CLI, cancellation, resume, and integration tests;
 - the execution runbook.
@@ -72,6 +72,10 @@ After the last successful/verified phase:
   branch's carried committed-row ticket ids, including earlier results from
   one multi-operation phase, and located under configured `.committed` working
   dirs;
+- before promotion or cleanup, bind every carried commit ticket to its durable
+  job/workflow phase and file-ordinal progress branch, complete result/lease/
+  verification/commit evidence, source asset and on-chain source version,
+  result ownership, and the committed row's exact produced result;
 - retain durable file versions, snapshots, tickets, commit records,
   verification evidence, file-phase summaries, and retired location rows;
 - treat an already missing cleanup file as an idempotent interrupted cleanup;
@@ -88,6 +92,12 @@ Migration 0028 adds `workflow_file_windows` keyed by job and
 positive capacity; progress records stable ordinal, admission state, next
 phase, and transition times. Window/run-start/history/seed/progress creation is
 atomic.
+
+Migration 0029 permits `blocked` in inherited run history. Repeated resume
+preserves that outcome, and each new job projects terminal progress for already
+completed branches alongside pending progress for survivors. Every run start
+therefore still has exactly one progress row; resume does not weaken branch-set
+validation to accommodate mixed terminal/survivor inputs.
 
 File-phase insertion and next-phase advancement are atomic and conditional on
 the expected cursor. A duplicate completion returns the existing row without

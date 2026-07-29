@@ -109,12 +109,20 @@ where
                 run_starts,
                 history,
                 seeds,
+                terminal_progress,
                 max_in_flight_files: _,
             },
     } = inputs;
     let limit = options.file_window_limit()?;
     let (job, seed_file_phases) = cp
-        .open_sliding_file_job(&run_starts, history, seeds, &files, limit)
+        .open_sliding_file_job_with_terminal_progress(
+            &run_starts,
+            history,
+            seeds,
+            &files,
+            terminal_progress,
+            limit,
+        )
         .await?;
     cp.workflow_summaries()
         .admit_next_file(job.id, cp.clock().now())
@@ -1978,6 +1986,109 @@ async fn resume_carries_phase_history_across_repeated_new_jobs() {
 }
 
 #[tokio::test]
+async fn repeated_resume_preserves_completed_and_incomplete_branch_sets() {
+    let (cp, _tmp) = cp().await;
+    let completed = seed_version(
+        &cp,
+        "/lib/repeated/completed.mkv",
+        "hash-repeated-completed",
+        reprobe_payload("h264"),
+    )
+    .await;
+    let incomplete = seed_version(
+        &cp,
+        "/lib/repeated/incomplete.mkv",
+        "hash-repeated-incomplete",
+        reprobe_payload("h264"),
+    )
+    .await;
+    let first_job = open_workflow_job(&cp).await;
+    record_run_starts(
+        &cp,
+        first_job,
+        vec![
+            NewFileRunStart {
+                branch_id: "completed".to_owned(),
+                starting_file_version_id: completed,
+                starting_phase_ordinal: 0,
+            },
+            NewFileRunStart {
+                branch_id: "incomplete".to_owned(),
+                starting_file_version_id: incomplete,
+                starting_phase_ordinal: 0,
+            },
+        ],
+    )
+    .await;
+    record_file_phase(
+        &cp,
+        first_job,
+        0,
+        "completed",
+        FilePhaseOutcome::Blocked,
+        None,
+    )
+    .await;
+    cp.workflow_summaries()
+        .begin_file_terminalization(first_job, "completed")
+        .await
+        .unwrap();
+    cp.workflow_summaries()
+        .mark_file_terminal(first_job, "completed", T0)
+        .await
+        .unwrap();
+    record_file_phase(
+        &cp,
+        first_job,
+        0,
+        "incomplete",
+        FilePhaseOutcome::Committed,
+        Some(incomplete),
+    )
+    .await;
+    let first_preparation = cp
+        .prepare_resume(
+            first_job,
+            vec![
+                phase_file(&cp, completed, "completed").await,
+                phase_file(&cp, incomplete, "incomplete").await,
+            ],
+            2,
+        )
+        .await
+        .unwrap();
+    assert_eq!(first_preparation.run_starts.len(), 2);
+    assert_eq!(first_preparation.files.len(), 1);
+    let (second_job, _) = cp
+        .open_sliding_file_job_with_terminal_progress(
+            &first_preparation.run_starts,
+            first_preparation.history,
+            first_preparation.seeds,
+            &first_preparation.files,
+            first_preparation.terminal_progress,
+            4,
+        )
+        .await
+        .unwrap();
+
+    let repeated = cp
+        .prepare_resume(
+            second_job.id,
+            vec![
+                phase_file(&cp, completed, "completed").await,
+                phase_file(&cp, incomplete, "incomplete").await,
+            ],
+            2,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(repeated.run_starts.len(), 2);
+    assert_eq!(repeated.files.len(), 1);
+    assert_eq!(repeated.files[0].branch_id, "incomplete");
+}
+
+#[tokio::test]
 async fn reconcile_resume_keeps_blocked_file_until_terminalization_replays() {
     let (cp, _tmp) = cp().await;
     let prior = open_workflow_job(&cp).await;
@@ -2183,6 +2294,73 @@ async fn terminalizing_committed_branch_replays_through_resume_runner() {
     assert_eq!(
         progress.state,
         voom_store::repo::workflow_summaries::FileProgressState::Terminal
+    );
+}
+
+#[tokio::test]
+async fn terminalizing_blocked_resume_does_not_promote_committed_intermediate() {
+    let (cp, _db) = cp().await;
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    let staging_root = root.join("stage");
+    let working = staging_root.join(".committed").join("transcode");
+    let out_dir = root.join("out");
+    std::fs::create_dir_all(&working).unwrap();
+    std::fs::create_dir_all(&out_dir).unwrap();
+    let artifact_path = working.join("Movie.phase-zero.mkv");
+    std::fs::write(&artifact_path, b"withheld-blocked-output").unwrap();
+    let version = seed_version(
+        &cp,
+        &artifact_path.display().to_string(),
+        "hash-terminalizing-blocked",
+        reprobe_payload("h264"),
+    )
+    .await;
+    let prior = open_workflow_job(&cp).await;
+    record_run_start(&cp, prior, "Movie", version, 0).await;
+    record_file_phase(
+        &cp,
+        prior,
+        0,
+        "Movie",
+        FilePhaseOutcome::Committed,
+        Some(version),
+    )
+    .await;
+    record_file_phase(&cp, prior, 1, "Movie", FilePhaseOutcome::Blocked, None).await;
+    cp.workflow_summaries()
+        .begin_file_terminalization(prior, "Movie")
+        .await
+        .unwrap();
+    let file = phase_file(&cp, version, "Movie").await;
+    let snapshot = file.snapshot.clone();
+    let preparation = cp.prepare_resume(prior, vec![file], 2).await.unwrap();
+    let options = ComplianceExecutionOptions {
+        transcode_staging_root: staging_root,
+        transcode_target_dir: out_dir.clone(),
+        ..ComplianceExecutionOptions::default()
+    };
+
+    cp.run_prepared_resume_phase_barrier(
+        super::PreparedResumeRunInputs {
+            policy: policy_with_run_if(voom_policy::RunIfTrigger::Completed),
+            context: voom_plan::PlanningContext::default(),
+            base_draft: file_draft("terminalizing-blocked", &[snapshot]),
+            preparation,
+        },
+        options,
+        crate::workflow::WorkerRuntimeRegistry::new(),
+    )
+    .await
+    .unwrap();
+
+    assert!(
+        artifact_path.is_file(),
+        "terminalizing blocked output must remain withheld"
+    );
+    assert!(
+        !out_dir.join("Movie.phase-zero.mkv").exists(),
+        "terminalizing replay must not publish a blocked branch"
     );
 }
 

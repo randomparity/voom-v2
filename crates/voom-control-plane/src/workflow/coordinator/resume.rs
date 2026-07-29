@@ -11,7 +11,7 @@ use voom_core::{FileVersionId, JobId, TicketId, VoomError};
 use voom_store::repo::identity::{FileLocationKind, IdentityRepo};
 use voom_store::repo::workflow_summaries::{
     FilePhaseOutcome, FilePhaseSummary, FileProgress, FileProgressState, FileRunHistory,
-    FileRunStart, NewFileRunHistory, NewFileRunStart,
+    FileRunStart, NewFileProgress, NewFileRunHistory, NewFileRunStart,
 };
 
 use crate::ControlPlane;
@@ -35,6 +35,7 @@ pub(super) struct ResumePreparation {
     pub(super) run_starts: Vec<NewFileRunStart>,
     pub(super) history: Vec<NewFileRunHistory>,
     pub(super) seeds: Vec<PreparedResumeSeed>,
+    pub(super) terminal_progress: Vec<NewFileProgress>,
     pub(super) max_in_flight_files: u32,
 }
 
@@ -50,6 +51,7 @@ struct PreparedResumeBranch {
     run_start: NewFileRunStart,
     history: Vec<NewFileRunHistory>,
     seeds: Vec<PreparedResumeSeed>,
+    terminal_progress: Option<NewFileProgress>,
 }
 
 impl ControlPlane {
@@ -145,6 +147,7 @@ impl ControlPlane {
         let mut run_starts = Vec::with_capacity(files.len());
         let mut history = Vec::new();
         let mut seeds = Vec::new();
+        let mut terminal_progress = Vec::new();
         for file in files {
             let start = starts.get(&file.branch_id).ok_or_else(|| {
                 resume_incomplete(format!("missing start for branch {}", file.branch_id))
@@ -174,6 +177,7 @@ impl ControlPlane {
             run_starts.push(prepared.run_start);
             history.extend(prepared.history);
             seeds.extend(prepared.seeds);
+            terminal_progress.extend(prepared.terminal_progress);
             if let Some(file) = prepared.survivor {
                 survivors.push(file);
             }
@@ -188,6 +192,7 @@ impl ControlPlane {
             run_starts,
             history,
             seeds,
+            terminal_progress,
             max_in_flight_files: window.max_in_flight_files,
         })
     }
@@ -276,7 +281,9 @@ impl ControlPlane {
                 outcome,
             });
         }
+        let terminal_progress = terminal_resume_progress(prior.progress, &file, phase_count);
         let survivor = (prior.progress.state != FileProgressState::Terminal).then(|| {
+            file.ordinal = prior.progress.input_ordinal;
             file.resume_ordinal = if state.phase_complete {
                 phase_count
             } else {
@@ -290,6 +297,7 @@ impl ControlPlane {
             run_start,
             history,
             seeds,
+            terminal_progress,
         })
     }
 
@@ -345,6 +353,18 @@ impl ControlPlane {
         }
         Ok(())
     }
+}
+
+fn terminal_resume_progress(
+    prior: &FileProgress,
+    file: &PhaseFile,
+    phase_count: u32,
+) -> Option<NewFileProgress> {
+    (prior.state == FileProgressState::Terminal).then(|| NewFileProgress {
+        branch_id: file.branch_id.clone(),
+        input_ordinal: prior.input_ordinal,
+        next_phase_ordinal: phase_count,
+    })
 }
 
 fn prior_row_seeds(branch_id: &str, rows: &[&FilePhaseSummary]) -> Vec<PreparedResumeSeed> {
@@ -452,18 +472,22 @@ fn validate_prior_history(
                 start.branch_id, row.phase_ordinal, start.starting_phase_ordinal
             )));
         }
-        if row.outcome == FilePhaseOutcome::Blocked {
-            return Err(resume_incomplete(format!(
-                "branch {} inherited blocked phase {}",
-                start.branch_id, row.phase_ordinal
-            )));
-        }
         merge_phase_outcome(
             &start.branch_id,
             &mut history,
             row.phase_ordinal,
             row.outcome,
         )?;
+    }
+    if let Some((&blocked_ordinal, _)) = history
+        .iter()
+        .find(|(_, outcome)| **outcome == FilePhaseOutcome::Blocked)
+        && history.keys().any(|ordinal| *ordinal > blocked_ordinal)
+    {
+        return Err(resume_incomplete(format!(
+            "branch {} has inherited outcomes after blocked phase {blocked_ordinal}",
+            start.branch_id
+        )));
     }
     Ok(history)
 }
@@ -474,9 +498,6 @@ fn merge_prior_rows(
     rows: &[&FilePhaseSummary],
 ) -> Result<(), VoomError> {
     for row in rows {
-        if row.outcome == FilePhaseOutcome::Blocked {
-            continue;
-        }
         merge_phase_outcome(branch_id, history, row.phase_ordinal, row.outcome)?;
     }
     Ok(())

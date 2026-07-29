@@ -82,6 +82,15 @@ option that differs from the durable prior capacity. It admits interrupted
 branches before untouched pending branches. Completed operations are seeded or
 inherited, not dispatched again.
 
+Migration 0029 extends inherited run-history outcomes to include `blocked`.
+Resume carries that terminal outcome transitively so terminalization replay
+cannot make a withheld branch promotable again. A new resume job also projects
+one progress row for every prior run start: surviving branches retain their
+durable input ordinal and a previously terminal branch is inserted atomically
+as terminal at the completed cursor. Exact branch-set validation therefore
+continues to reject missing active progress while mixed terminal/survivor jobs
+remain resumable across repeated failures.
+
 The configured `max_in_flight_files` is a positive execution option and CLI
 argument. It defaults to four. It bounds admitted file pipelines, not tickets,
 leases, or operations.
@@ -110,13 +119,17 @@ intermediate set after repeated interruption.
 
 Missing cleanup files are treated as an interrupted cleanup and completed
 idempotently. Source locations are never candidates because cleanup requires a
-ticket id carried by a `Committed` file-phase row, an exact committed
-ticket/commit-record/result-location match, and a configured committed working
-directory; the active chain-tip location is also excluded. This exact carried
-ticket authority remains transitive across repeated resume jobs. Verified
-source locations are excluded from both promotion and cleanup. Promotion or
-cleanup failure leaves the row terminalizing, fails the run, and prevents slot
-refill.
+ticket id carried by a `Committed` file-phase row and validates it before any
+promotion or reclamation. Validation binds the ticket's job, workflow phase,
+file-scoped input ordinal through its durable progress branch, result
+job/ticket/lease, released lease, verification, committed record, source/result
+asset, location and snapshot ownership, on-chain source version, and the row's
+exact produced result. Only then may a matching location
+under a configured committed working directory be reclaimed; the active
+chain-tip location is also excluded. This exact carried ticket authority
+remains transitive across repeated resume jobs. Verified source locations are
+excluded from both promotion and cleanup. Promotion or cleanup failure leaves
+the row terminalizing, fails the run, and prevents slot refill.
 
 Blocked planning and continued per-file ticket failure terminalize without
 promotion. A prior `terminal` branch is already proof that promotion/cleanup

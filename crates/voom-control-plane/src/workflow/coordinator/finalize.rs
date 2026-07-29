@@ -5,6 +5,8 @@
 //! files that committed inline before a dispatch failure, and finalizes the owned
 //! job (succeeded or zero-phase) into a [`CoordinatorOutcome`].
 
+use std::collections::BTreeSet;
+
 use sqlx::Row;
 use voom_core::ids::ArtifactVerificationId;
 use voom_core::{
@@ -86,6 +88,7 @@ struct CommittedResultFields {
 struct CommittedEvidenceRow {
     ticket_id: i64,
     ticket_job_id: Option<i64>,
+    ticket_payload: String,
     result: String,
     commit_id: Option<i64>,
     commit_artifact_handle_id: Option<i64>,
@@ -207,6 +210,7 @@ impl CommittedEvidenceRow {
         Ok(Self {
             ticket_id: evidence_column(row, "ticket_id")?,
             ticket_job_id: evidence_column(row, "ticket_job_id")?,
+            ticket_payload: evidence_column(row, "ticket_payload")?,
             result: evidence_column(row, "result")?,
             commit_id: evidence_column(row, "commit_id")?,
             commit_artifact_handle_id: evidence_column(row, "commit_artifact_handle_id")?,
@@ -234,7 +238,7 @@ impl CommittedEvidenceRow {
     fn validate(
         &self,
         job_id: JobId,
-        file: &PhaseFile,
+        expected_asset_id: FileAssetId,
         result: &CommittedResultFields,
     ) -> Result<CommitRelevance, VoomError> {
         let ticket_id = TicketId(sqlite_u64(self.ticket_id, "commit evidence ticket id")?);
@@ -250,7 +254,7 @@ impl CommittedEvidenceRow {
             required_evidence(self.source_file_asset_id, ticket_id, "source file asset")?,
             "commit evidence source file asset",
         )?;
-        if source_asset_id != file.asset_id.0 {
+        if source_asset_id != expected_asset_id.0 {
             return Ok(CommitRelevance::OtherLineage);
         }
         self.validate_commit(ticket_id, result)?;
@@ -258,7 +262,7 @@ impl CommittedEvidenceRow {
             required_evidence(self.result_file_asset_id, ticket_id, "result file asset")?,
             "commit evidence result file asset",
         )?;
-        if asset_id != file.asset_id.0 {
+        if asset_id != expected_asset_id.0 {
             return Ok(CommitRelevance::Sidecar);
         }
         result.result_media_snapshot_id.ok_or_else(|| {
@@ -545,6 +549,79 @@ fn phase_workflow_scope(job_id: JobId, phase_ordinal: u32) -> (String, String) {
         format!("workflow-{}-phase-{phase_ordinal}", job_id.0),
         format!("workflow-{}-file-*-phase-{phase_ordinal}", job_id.0),
     )
+}
+
+async fn validate_carried_ticket_scope(
+    control_plane: &ControlPlane,
+    evidence: &CommittedEvidenceRow,
+    ticket_job_id: JobId,
+    row: &FilePhaseSummary,
+) -> Result<(), VoomError> {
+    let ticket_id = TicketId(sqlite_u64(evidence.ticket_id, "cleanup ticket id")?);
+    let payload: serde_json::Value =
+        serde_json::from_str(&evidence.ticket_payload).map_err(|error| {
+            VoomError::database_context(format!("cleanup ticket {ticket_id} payload decode"), error)
+        })?;
+    let payload_branch = payload
+        .get("branch_id")
+        .and_then(serde_json::Value::as_str)
+        .filter(|branch| !branch.is_empty())
+        .ok_or_else(|| evidence_mismatch(ticket_id, "payload branch is missing"))?;
+    let workflow_id = payload
+        .get("workflow_id")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| evidence_mismatch(ticket_id, "payload workflow id is missing"))?;
+    let exact = format!("workflow-{}-phase-{}", ticket_job_id.0, row.phase_ordinal);
+    let file_prefix = format!("workflow-{}-file-", ticket_job_id.0);
+    let phase_suffix = format!("-phase-{}", row.phase_ordinal);
+    if workflow_id == exact {
+        require_evidence(
+            payload_branch,
+            row.branch_id.as_str(),
+            ticket_id,
+            "payload branch",
+        )?;
+        return Ok(());
+    }
+    let input_ordinal = workflow_id
+        .strip_prefix(&file_prefix)
+        .and_then(|suffix| suffix.strip_suffix(&phase_suffix))
+        .and_then(|ordinal| ordinal.parse::<u32>().ok())
+        .ok_or_else(|| {
+            evidence_mismatch(
+                ticket_id,
+                "payload workflow phase does not match the carried row",
+            )
+        })?;
+    let durable_branch: Option<String> = sqlx::query_scalar(
+        "SELECT branch_id FROM workflow_file_progress \
+         WHERE job_id = ? AND input_ordinal = ?",
+    )
+    .bind(sqlite_i64(
+        ticket_job_id.0,
+        "cleanup workflow progress job id",
+    )?)
+    .bind(i64::from(input_ordinal))
+    .fetch_optional(&control_plane.pool)
+    .await
+    .map_err(|error| VoomError::database_context("cleanup workflow branch lookup", error))?;
+    if durable_branch.as_deref() != Some(row.branch_id.as_str()) {
+        return Err(evidence_mismatch(
+            ticket_id,
+            "workflow file ordinal does not belong to the carried row branch",
+        ));
+    }
+    Ok(())
+}
+
+fn committed_result_matches_row(result: &CommittedResultFields, row: &FilePhaseSummary) -> bool {
+    row.produced_file_version_id == Some(FileVersionId(result.result_file_version_id))
+        && row.produced_file_location_id == Some(FileLocationId(result.result_file_location_id))
+        && row.artifact_handle_id == Some(ArtifactHandleId(result.artifact_handle_id))
+        && row
+            .artifact_verification_id
+            .is_none_or(|id| id == ArtifactVerificationId(result.verification_id))
+        && row.reprobe_snapshot_id == result.result_media_snapshot_id.map(MediaSnapshotId)
 }
 
 pub(super) fn sqlite_u64(value: i64, field: &str) -> Result<u64, VoomError> {
@@ -951,14 +1028,50 @@ impl ControlPlane {
         if ticket_ids.is_empty() {
             return Ok((None, seed_ticket_ids.to_vec()));
         }
-        let ticket_ids = ticket_ids
+        let rows = self.committed_evidence_for_tickets(ticket_ids).await?;
+        let mut scoped_ticket_ids = seed_ticket_ids.to_vec();
+        let mut candidates = Vec::new();
+        for evidence in rows {
+            let ticket_id = TicketId(sqlite_u64(evidence.ticket_id, "commit evidence ticket id")?);
+            let Some(result) = CommittedResultFields::decode(ticket_id, &evidence.result)? else {
+                continue;
+            };
+            match evidence.validate(job_id, file.asset_id, &result)? {
+                CommitRelevance::OtherLineage => {}
+                CommitRelevance::Sidecar => scoped_ticket_ids.push(ticket_id),
+                CommitRelevance::SameLineage => {
+                    candidates.push(SameLineageCommit {
+                        ticket_id,
+                        produced: self.job_produced_commit(result).await?,
+                    });
+                }
+            }
+        }
+        scoped_ticket_ids.extend(candidates.iter().map(|candidate| candidate.ticket_id));
+        let produced = if candidates.is_empty() {
+            None
+        } else {
+            let index = latest_commit_index(&candidates, file)?;
+            Some(candidates.swap_remove(index).produced)
+        };
+        scoped_ticket_ids.sort_unstable_by_key(|id| id.0);
+        scoped_ticket_ids.dedup();
+        Ok((produced, scoped_ticket_ids))
+    }
+
+    async fn committed_evidence_for_tickets(
+        &self,
+        ticket_ids: &[TicketId],
+    ) -> Result<Vec<CommittedEvidenceRow>, VoomError> {
+        let encoded_ids = ticket_ids
             .iter()
             .map(|id| sqlite_i64(id.0, "commit evidence ticket id"))
             .collect::<Result<Vec<_>, _>>()?;
-        let ticket_ids = serde_json::to_string(&ticket_ids)
+        let encoded_ids = serde_json::to_string(&encoded_ids)
             .map_err(|error| VoomError::Internal(format!("commit tickets encode: {error}")))?;
         let rows = sqlx::query(
-            "SELECT t.id AS ticket_id, t.job_id AS ticket_job_id, t.result, \
+            "SELECT t.id AS ticket_id, t.job_id AS ticket_job_id, \
+                    t.payload AS ticket_payload, t.result, \
                     c.id AS commit_id, \
                     c.artifact_handle_id AS commit_artifact_handle_id, \
                     c.source_file_version_id AS commit_source_file_version_id, \
@@ -994,39 +1107,119 @@ impl ControlPlane {
                AND t.state = 'succeeded' AND t.result IS NOT NULL \
              ORDER BY t.id",
         )
-        .bind(&ticket_ids)
+        .bind(&encoded_ids)
         .fetch_all(&self.pool)
         .await
         .map_err(|error| VoomError::database_context("committed ticket evidence", error))?;
-        let mut scoped_ticket_ids = seed_ticket_ids.to_vec();
-        let mut candidates = Vec::new();
-        for row in rows {
-            let evidence = CommittedEvidenceRow::decode(&row)?;
-            let ticket_id = TicketId(sqlite_u64(evidence.ticket_id, "commit evidence ticket id")?);
-            let Some(result) = CommittedResultFields::decode(ticket_id, &evidence.result)? else {
-                continue;
-            };
-            match evidence.validate(job_id, file, &result)? {
-                CommitRelevance::OtherLineage => {}
-                CommitRelevance::Sidecar => scoped_ticket_ids.push(ticket_id),
-                CommitRelevance::SameLineage => {
-                    candidates.push(SameLineageCommit {
+        rows.iter().map(CommittedEvidenceRow::decode).collect()
+    }
+
+    pub(super) async fn validated_committed_location_ids_for_rows(
+        &self,
+        rows: &[FilePhaseSummary],
+    ) -> Result<Vec<FileLocationId>, VoomError> {
+        let mut locations = Vec::new();
+        for row in rows.iter().filter(|row| {
+            row.outcome == FilePhaseOutcome::Committed && row.artifact_handle_id.is_some()
+        }) {
+            locations.extend(self.validated_committed_locations_for_row(row).await?);
+        }
+        Ok(locations)
+    }
+
+    async fn validated_committed_locations_for_row(
+        &self,
+        row: &FilePhaseSummary,
+    ) -> Result<Vec<FileLocationId>, VoomError> {
+        let tip_id = row.produced_file_version_id.ok_or_else(|| {
+            VoomError::Conflict(format!(
+                "branch {} phase {} committed row has no produced version",
+                row.branch_id, row.phase_ordinal
+            ))
+        })?;
+        let tip = self
+            .identity
+            .get_file_version(tip_id)
+            .await?
+            .ok_or_else(|| {
+                VoomError::Conflict(format!(
+                    "branch {} phase {} produced version {tip_id} is missing",
+                    row.branch_id, row.phase_ordinal
+                ))
+            })?;
+        let evidence_rows = self.committed_evidence_for_tickets(&row.ticket_ids).await?;
+        if evidence_rows.len() != row.ticket_ids.len() {
+            return Err(VoomError::Conflict(format!(
+                "branch {} phase {} has incomplete committed ticket evidence",
+                row.branch_id, row.phase_ordinal
+            )));
+        }
+        let mut locations = Vec::new();
+        let mut matched_row = false;
+        for evidence in evidence_rows {
+            let ticket_id = TicketId(sqlite_u64(evidence.ticket_id, "cleanup ticket id")?);
+            let result =
+                CommittedResultFields::decode(ticket_id, &evidence.result)?.ok_or_else(|| {
+                    evidence_mismatch(ticket_id, "cleanup ticket has no committed result")
+                })?;
+            let ticket_job_id = JobId(sqlite_u64(
+                required_evidence(evidence.ticket_job_id, ticket_id, "ticket job")?,
+                "cleanup ticket job id",
+            )?);
+            validate_carried_ticket_scope(self, &evidence, ticket_job_id, row).await?;
+            match evidence.validate(ticket_job_id, tip.file_asset_id, &result)? {
+                CommitRelevance::OtherLineage => {
+                    return Err(evidence_mismatch(
                         ticket_id,
-                        produced: self.job_produced_commit(result).await?,
-                    });
+                        "cleanup ticket belongs to another source lineage",
+                    ));
+                }
+                CommitRelevance::Sidecar => {}
+                CommitRelevance::SameLineage => {
+                    let source_id = FileVersionId(result.source_file_version_id);
+                    if !self.version_descends_from(tip_id, source_id).await? {
+                        return Err(evidence_mismatch(
+                            ticket_id,
+                            "cleanup source is outside the carried row chain",
+                        ));
+                    }
+                    matched_row |= committed_result_matches_row(&result, row);
+                    locations.push(FileLocationId(result.result_file_location_id));
                 }
             }
         }
-        scoped_ticket_ids.extend(candidates.iter().map(|candidate| candidate.ticket_id));
-        let produced = if candidates.is_empty() {
-            None
-        } else {
-            let index = latest_commit_index(&candidates, file)?;
-            Some(candidates.swap_remove(index).produced)
-        };
-        scoped_ticket_ids.sort_unstable_by_key(|id| id.0);
-        scoped_ticket_ids.dedup();
-        Ok((produced, scoped_ticket_ids))
+        if !matched_row {
+            return Err(VoomError::Conflict(format!(
+                "branch {} phase {} ticket evidence does not produce the recorded row",
+                row.branch_id, row.phase_ordinal
+            )));
+        }
+        Ok(locations)
+    }
+
+    async fn version_descends_from(
+        &self,
+        mut tip_id: FileVersionId,
+        ancestor_id: FileVersionId,
+    ) -> Result<bool, VoomError> {
+        let mut visited = BTreeSet::new();
+        loop {
+            if tip_id == ancestor_id {
+                return Ok(true);
+            }
+            if !visited.insert(tip_id) {
+                return Err(VoomError::Conflict(format!(
+                    "file version lineage contains a cycle at {tip_id}"
+                )));
+            }
+            let Some(version) = self.identity.get_file_version(tip_id).await? else {
+                return Ok(false);
+            };
+            let Some(parent_id) = version.produced_from_version_id else {
+                return Ok(false);
+            };
+            tip_id = parent_id;
+        }
     }
 
     pub(super) async fn unfinalized_committed_refs(

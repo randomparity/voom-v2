@@ -503,13 +503,13 @@ async fn file_run_history_inserts_atomically_and_lists_by_branch_then_phase() {
 }
 
 #[tokio::test]
-async fn file_run_history_batch_rolls_back_on_invalid_outcome() {
+async fn file_run_history_accepts_blocked_terminal_outcome() {
     let (repo, _tmp) = repo().await;
     repo.insert_file_run_starts(JOB, vec![file_run_start("alpha", 1, 2)])
         .await
         .unwrap();
 
-    let error = repo
+    let inserted = repo
         .insert_file_run_history(
             JOB,
             vec![
@@ -518,13 +518,10 @@ async fn file_run_history_batch_rolls_back_on_invalid_outcome() {
             ],
         )
         .await
-        .unwrap_err();
+        .unwrap();
 
-    assert_eq!(error.code(), "DB_UNREACHABLE");
-    assert_eq!(
-        repo.file_run_history_for_job(JOB).await.unwrap(),
-        Vec::<FileRunHistory>::new()
-    );
+    assert_eq!(repo.file_run_history_for_job(JOB).await.unwrap(), inserted);
+    assert_eq!(inserted[1].outcome, FilePhaseOutcome::Blocked);
 }
 
 #[tokio::test]

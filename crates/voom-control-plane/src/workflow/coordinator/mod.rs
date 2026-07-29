@@ -647,6 +647,10 @@ impl<'a> PhaseLoop<'a> {
             .await
             .map_err(|source| file_pipeline_failure(source, self.last_run.as_ref()))?;
         if self.promotable_branches.contains(&branch_id) {
+            self.control_plane
+                .validated_committed_location_ids_for_rows(&self.file_phases)
+                .await
+                .map_err(|source| file_pipeline_failure(source, self.last_run.as_ref()))?;
             let location_ids = self
                 .control_plane
                 .promotion_location_ids_for_branches(
@@ -975,6 +979,7 @@ impl ControlPlane {
                     run_starts,
                     history,
                     seeds,
+                    terminal_progress,
                     max_in_flight_files: prior_max_in_flight_files,
                 },
         } = inputs;
@@ -986,7 +991,14 @@ impl ControlPlane {
             .into());
         }
         let (job, seed_file_phases) = self
-            .open_sliding_file_job(&run_starts, history, seeds, &files, max_in_flight_files)
+            .open_sliding_file_job_with_terminal_progress(
+                &run_starts,
+                history,
+                seeds,
+                &files,
+                terminal_progress,
+                max_in_flight_files,
+            )
             .await?;
         let result = self
             .drive_phase_loop(PhaseLoopInputs {
@@ -1096,6 +1108,26 @@ impl ControlPlane {
         files: &[PhaseFile],
         max_in_flight_files: u32,
     ) -> Result<(voom_store::repo::jobs::Job, Vec<FilePhaseSummary>), VoomError> {
+        self.open_sliding_file_job_with_terminal_progress(
+            run_starts,
+            history,
+            seeds,
+            files,
+            Vec::new(),
+            max_in_flight_files,
+        )
+        .await
+    }
+
+    async fn open_sliding_file_job_with_terminal_progress(
+        &self,
+        run_starts: &[NewFileRunStart],
+        history: Vec<NewFileRunHistory>,
+        seeds: Vec<PreparedResumeSeed>,
+        files: &[PhaseFile],
+        terminal_progress: Vec<NewFileProgress>,
+        max_in_flight_files: u32,
+    ) -> Result<(voom_store::repo::jobs::Job, Vec<FilePhaseSummary>), VoomError> {
         let now = self.clock().now();
         let mut tx = begin_tx(&self.pool).await?;
         let job = self
@@ -1114,7 +1146,7 @@ impl ControlPlane {
         self.workflow_summaries
             .insert_file_run_history_in_tx(&mut tx, job.id, &history)
             .await?;
-        let progress = files
+        let mut progress = files
             .iter()
             .map(|file| NewFileProgress {
                 branch_id: file.branch_id.clone(),
@@ -1122,8 +1154,16 @@ impl ControlPlane {
                 next_phase_ordinal: file.resume_ordinal,
             })
             .collect::<Vec<_>>();
+        let terminal_branches = terminal_progress
+            .iter()
+            .map(|row| row.branch_id.clone())
+            .collect::<Vec<_>>();
+        progress.extend(terminal_progress);
         self.workflow_summaries
             .insert_file_window_in_tx(&mut tx, job.id, max_in_flight_files, &progress, now)
+            .await?;
+        self.workflow_summaries
+            .mark_file_progress_terminal_in_tx(&mut tx, job.id, &terminal_branches, now)
             .await?;
         let mut rows = Vec::with_capacity(seeds.len());
         for seed in seeds {

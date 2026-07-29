@@ -371,6 +371,39 @@ impl SqliteWorkflowSummaryRepo {
         Ok(())
     }
 
+    /// Project already-completed branches as terminal in a newly opened resume job.
+    pub async fn mark_file_progress_terminal_in_tx(
+        &self,
+        tx: &mut Transaction<'_, Sqlite>,
+        job_id: JobId,
+        branches: &[String],
+        now: OffsetDateTime,
+    ) -> Result<(), VoomError> {
+        let timestamp = iso8601(now)?;
+        for branch_id in branches {
+            let result = sqlx::query(
+                "UPDATE workflow_file_progress \
+                 SET state = 'terminal', admitted_at = ?, terminal_at = ? \
+                 WHERE job_id = ? AND branch_id = ? AND state = 'pending'",
+            )
+            .bind(&timestamp)
+            .bind(&timestamp)
+            .bind(i64_from_u64(job_id.0))
+            .bind(branch_id)
+            .execute(&mut **tx)
+            .await
+            .map_err(|error| {
+                VoomError::database_context("resume terminal progress projection", error)
+            })?;
+            if result.rows_affected() != 1 {
+                return Err(VoomError::Conflict(format!(
+                    "resume terminal progress {job_id}/{branch_id} was not pending"
+                )));
+            }
+        }
+        Ok(())
+    }
+
     /// Admit the next pending file when the durable window has capacity.
     pub async fn admit_next_file(
         &self,

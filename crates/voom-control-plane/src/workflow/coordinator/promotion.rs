@@ -339,14 +339,9 @@ impl ControlPlane {
             .iter()
             .rev()
             .find_map(|row| row.produced_file_location_id);
-        let ticket_ids = file_phases
-            .iter()
-            .filter(|row| row.outcome == FilePhaseOutcome::Committed)
-            .flat_map(|row| row.ticket_ids.iter().copied())
-            .collect::<Vec<_>>();
         let mut seen = HashSet::new();
         let candidates = self
-            .committed_location_ids_for_tickets(&ticket_ids)
+            .validated_committed_location_ids_for_rows(file_phases)
             .await?
             .into_iter()
             .filter(|location_id| {
@@ -394,48 +389,6 @@ impl ControlPlane {
             .retire_file_location_in_tx(&mut tx, location.id, self.clock().now(), location.epoch)
             .await?;
         commit_tx(tx).await
-    }
-
-    async fn committed_location_ids_for_tickets(
-        &self,
-        ticket_ids: &[voom_core::TicketId],
-    ) -> Result<Vec<FileLocationId>, VoomError> {
-        if ticket_ids.is_empty() {
-            return Ok(Vec::new());
-        }
-        let ticket_ids = ticket_ids
-            .iter()
-            .map(|id| {
-                i64::try_from(id.0)
-                    .map_err(|error| VoomError::Internal(format!("ticket id conversion: {error}")))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        let ticket_ids = serde_json::to_string(&ticket_ids)
-            .map_err(|error| VoomError::Internal(format!("cleanup ticket ids encode: {error}")))?;
-        let rows: Vec<(i64,)> = sqlx::query_as(
-            "SELECT commits.result_file_location_id \
-             FROM tickets \
-             JOIN artifact_commit_records AS commits \
-               ON json_extract(tickets.result, '$.commit_record_id') = commits.id \
-             WHERE tickets.id IN (SELECT value FROM json_each(?)) \
-               AND tickets.state = 'succeeded' \
-               AND commits.state = 'committed' \
-               AND commits.result_file_location_id IS NOT NULL \
-               AND json_extract(tickets.result, '$.result_file_location_id') = \
-                   commits.result_file_location_id \
-             ORDER BY tickets.id ASC",
-        )
-        .bind(ticket_ids)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(|error| VoomError::database_context("cleanup commit provenance", error))?;
-        rows.into_iter()
-            .map(|(id,)| {
-                u64::try_from(id).map(FileLocationId).map_err(|error| {
-                    VoomError::Internal(format!("cleanup location id conversion: {error}"))
-                })
-            })
-            .collect()
     }
 
     pub(super) async fn promotion_location_ids_for_branches(

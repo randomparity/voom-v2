@@ -121,6 +121,10 @@ const MIGRATION_0027_SQL: &str =
 /// compile time.
 const MIGRATION_0028_SQL: &str = include_str!("../../../migrations/0028_sliding_file_window.sql");
 
+/// SQL for migration 0029 (blocked resume history, #401), embedded at compile time.
+const MIGRATION_0029_SQL: &str =
+    include_str!("../../../migrations/0029_blocked_file_run_history.sql");
+
 /// Embedded migration set, constructed without the `sqlx::migrate!` macro.
 ///
 /// We don't use sqlx's `macros` feature: it pulls `sqlx-macros-core`, which
@@ -330,6 +334,13 @@ pub static MIGRATOR: LazyLock<Migrator> = LazyLock::new(|| Migrator {
             Cow::Borrowed("sliding_file_window"),
             MigrationType::Simple,
             Cow::Borrowed(MIGRATION_0028_SQL),
+            false,
+        ),
+        Migration::new(
+            29,
+            Cow::Borrowed("blocked_file_run_history"),
+            MigrationType::Simple,
+            Cow::Borrowed(MIGRATION_0029_SQL),
             false,
         ),
     ]),
