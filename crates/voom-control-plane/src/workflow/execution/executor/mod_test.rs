@@ -341,7 +341,10 @@ async fn externally_leased_workflow_ticket_does_not_trigger_no_dispatch_failure(
         })
         .await
         .unwrap();
-    let executor = fixture.executor_with_options(WorkflowExecutorOptions::for_tests());
+    let mut options = WorkflowExecutorOptions::for_tests();
+    options.queue.capacity_retry_interval = Duration::from_millis(10);
+    options.queue.capacity_retry_timeout = Duration::from_millis(40);
+    let executor = fixture.executor_with_options(options);
     let run = tokio::spawn(async move {
         executor
             .submit_and_run_invocation_in_job(
@@ -359,10 +362,10 @@ async fn externally_leased_workflow_ticket_does_not_trigger_no_dispatch_failure(
         }
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
-    tokio::time::sleep(Duration::from_millis(40)).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
     assert!(
         !run.is_finished(),
-        "the invocation must wait while same-scope work is leased elsewhere"
+        "a healthy same-scope lease must not inherit the worker-capacity timeout"
     );
 
     fixture

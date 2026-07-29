@@ -43,6 +43,10 @@ Different admitted files may be in different phases. Each file uses a unique,
 deterministic workflow invocation identity derived from the job, input ordinal,
 and phase ordinal. Concurrent executor calls therefore cannot claim or inspect
 another file's tickets. Tickets and leases remain the only operation scheduler.
+When another executor already holds a ticket for the same invocation, the
+caller polls durable state until that lease completes, expires through normal
+lease recovery, or the job is cancelled. The worker-capacity retry timeout does
+not apply to healthy work that has already been leased.
 
 This supersedes ADR 0007 only where it requires one whole-input `plan_phase`
 call and a barrier between phases. ADR 0007's single-job ownership, executor
@@ -130,6 +134,12 @@ chain-tip location is also excluded. This exact carried ticket authority
 remains transitive across repeated resume jobs. Verified source locations are
 excluded from both promotion and cleanup. Promotion or cleanup failure leaves
 the row terminalizing, fails the run, and prevents slot refill.
+
+Promotion uses the same evidence gate. A ticket result with ordered `outputs`
+is expanded and each member is validated independently; promotion never
+accepts a location directly from unvalidated result JSON. A committed row with
+nullable or incomplete artifact evidence cannot bypass validation.
+Non-mutating and verification-only results contribute no promotion location.
 
 Blocked planning and continued per-file ticket failure terminalize without
 promotion. A prior `terminal` branch is already proof that promotion/cleanup

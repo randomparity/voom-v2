@@ -518,12 +518,50 @@ impl WorkflowExecutor {
         job_id: JobId,
         started: Instant,
     ) -> Result<(), WorkflowRunError> {
-        let timeout_source = VoomError::Internal(format!(
-            "workflow {job_id} externally leased work did not finish within {:?}",
-            self.options.queue.capacity_retry_timeout
-        ));
-        self.wait_for_external_progress(state, job_id, started, timeout_source)
-            .await
+        let job = match self.control_plane.jobs.get(job_id).await {
+            Ok(Some(job)) => job,
+            Ok(None) => {
+                let source = VoomError::NotFound(format!("job {job_id}"));
+                return Err(state
+                    .fail_job(&self.control_plane, job_id, source, started)
+                    .await);
+            }
+            Err(source) => {
+                return Err(state
+                    .fail_job(&self.control_plane, job_id, source, started)
+                    .await);
+            }
+        };
+        match job.state {
+            JobState::Open => {}
+            JobState::Cancelled => {
+                let source = VoomError::UserCancellation(format!(
+                    "workflow {job_id} cancelled while waiting for externally leased work"
+                ));
+                return Err(state
+                    .finish_isolated_failure(&self.control_plane, job_id, source, started)
+                    .await);
+            }
+            JobState::Succeeded | JobState::Failed => {
+                let source = VoomError::Conflict(format!(
+                    "workflow external lease wait rejected: job {job_id} is {}",
+                    job.state.as_str()
+                ));
+                return Err(state
+                    .fail_job(&self.control_plane, job_id, source, started)
+                    .await);
+            }
+        }
+        let interval = self.options.queue.capacity_retry_interval;
+        if interval.is_zero() {
+            let source =
+                VoomError::Config("worker capacity retry interval must be positive".to_owned());
+            return Err(state
+                .fail_job(&self.control_plane, job_id, source, started)
+                .await);
+        }
+        tokio::time::sleep(interval).await;
+        Ok(())
     }
 
     async fn wait_for_external_progress(
