@@ -1,6 +1,6 @@
 use std::{
     ffi::{OsStr, OsString},
-    io,
+    io::{self, Read},
     path::{Path, PathBuf},
     process::{Child, Command, Output, Stdio},
     thread,
@@ -754,20 +754,60 @@ fn wait_child_output(
     })
 }
 
+/// Waits for `child` under `deadline`, draining its piped output the whole time.
+///
+/// The drain threads are not an optimization: a child that writes more than the OS
+/// pipe capacity blocks in `write()` until someone reads, so polling `try_wait()`
+/// against an undrained pipe can never see it exit.
 fn wait_child_output_io(mut child: Child, deadline: Duration, label: &str) -> io::Result<Output> {
+    let stdout = drain_in_background(child.stdout.take());
+    let stderr = drain_in_background(child.stderr.take());
     let started = std::time::Instant::now();
     loop {
-        if child.try_wait()?.is_some() {
-            return child.wait_with_output();
+        if let Some(status) = child.try_wait()? {
+            return Ok(Output {
+                status,
+                stdout: join_drained(stdout)?,
+                stderr: join_drained(stderr)?,
+            });
         }
         if started.elapsed() >= deadline {
             kill_and_reap(&mut child);
+            // Deliberately detached, not joined. Killing the child does not close a
+            // pipe that a surviving grandchild still holds, so joining here would
+            // block for exactly as long as the deadline exists to prevent. The
+            // threads exit on their own once the last writer does.
+            drop(stdout);
+            drop(stderr);
             return Err(io::Error::new(
                 io::ErrorKind::TimedOut,
                 format!("{label} exceeded {} seconds", deadline.as_secs()),
             ));
         }
         thread::sleep(Duration::from_millis(10));
+    }
+}
+
+type DrainHandle = Option<thread::JoinHandle<io::Result<Vec<u8>>>>;
+
+fn drain_in_background<R>(stream: Option<R>) -> DrainHandle
+where
+    R: Read + Send + 'static,
+{
+    stream.map(|mut stream| {
+        thread::spawn(move || {
+            let mut buffer = Vec::new();
+            stream.read_to_end(&mut buffer).map(|_| buffer)
+        })
+    })
+}
+
+fn join_drained(handle: DrainHandle) -> io::Result<Vec<u8>> {
+    match handle {
+        None => Ok(Vec::new()),
+        Some(handle) => handle
+            .join()
+            .map_err(|_| io::Error::other("output drain thread panicked"))?,
     }
 }
 

@@ -180,6 +180,53 @@ fn ffmpeg_stub(dir: &Path, name: &str, version: &str, encoders: &str, muxers: &s
     )
 }
 
+/// `command_output` pipes stdout and stderr, so it must drain them while it waits.
+/// A child writing more than the OS pipe capacity blocks in `write()` until someone
+/// reads, so a waiter that only polls `try_wait()` can never observe it exit — the
+/// probe burns its full timeout and a healthy `ffmpeg -encoders` is reported as a
+/// preflight failure. Pipe capacity is host-dependent (64 KiB by default, but as
+/// little as 8 KiB under pipe-page pressure), so overshoot any plausible value.
+#[cfg(unix)]
+#[test]
+fn command_output_drains_a_child_that_outwrites_the_pipe_capacity() {
+    let temp = tempfile::tempdir().unwrap();
+    let chatty = stub_bin(
+        temp.path(),
+        "chatty",
+        "#!/bin/sh\nawk 'BEGIN { while (n++ < 8192) print \"0123456789abcdef0123456789abcde\" }'\n",
+    );
+
+    let output = command_output(&mut Command::new(&chatty)).unwrap();
+
+    assert!(output.status.success());
+    assert_eq!(output.stdout.len(), 8192 * 32);
+}
+
+/// Draining must not defeat the deadline. The stub leaves a `sleep` grandchild
+/// holding the same pipe, so killing the direct child does not close it — waiting on
+/// the drain would block for the grandchild's whole lifetime, which is precisely the
+/// startup hang the deadline exists to prevent. The elapsed assertion is the point of
+/// this test: returning `TimedOut` eventually is not the same as returning promptly.
+#[cfg(unix)]
+#[test]
+fn wait_child_output_times_out_promptly_when_a_grandchild_holds_the_pipe() {
+    let temp = tempfile::tempdir().unwrap();
+    let sleeper = stub_bin(temp.path(), "sleeper", "#!/bin/sh\nsleep 60\n");
+    let child = Command::new(&sleeper)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    let started = std::time::Instant::now();
+    let error = wait_child_output_io(child, Duration::from_millis(200), "stuck probe").unwrap_err();
+    let elapsed = started.elapsed();
+
+    assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+    assert!(error.to_string().contains("stuck probe exceeded"));
+    assert!(elapsed < Duration::from_secs(5), "took {elapsed:?}");
+}
+
 fn stub_bin(dir: &Path, name: &str, body: &str) -> PathBuf {
     let path = dir.join(name);
     std::fs::write(&path, body).unwrap();
