@@ -187,22 +187,34 @@ async fn vaapi_decode_requires_a_probe_proven_decoder_for_the_source_codec() {
 
 /// ADR 0049 §5, applied to the new backend: a device-bound worker does not run
 /// software video work, so it cannot occupy a GPU with an encode any worker could
-/// have done.
+/// have done. The software branch tests `config.accelerator()`, so a config that
+/// did not represent a bound VAAPI device would read as unaccelerated here and
+/// **accept** the assignment — the silent software fallback #409 forbids, with the
+/// GPU idle and the queue none the wiser.
+///
+/// The same software request must still be accepted by a genuinely unbound worker,
+/// with or without an explicit software assignment: refusing there would strand
+/// every software transcode.
 #[tokio::test]
 async fn a_vaapi_bound_worker_refuses_software_video_work() {
     let dir = tempfile::tempdir().unwrap();
     let input = dir.path().join("input.mkv");
-    let request = request(dir.path(), &input).await;
-    let config =
+    let mut request = request(dir.path(), &input).await;
+    let bound =
         config(dir.path()).with_vaapi_device(vaapi_binding(dir.path(), vec!["hevc".to_owned()]));
+    let unbound = config(dir.path());
 
-    let err = validate_video_hardware_binding(&request, &config, "hevc").unwrap_err();
+    let err = validate_video_hardware_binding(&request, &bound, "hevc").unwrap_err();
 
     assert!(
         err.to_string()
             .contains("software video work requires an unbound software worker"),
         "{err}"
     );
+    validate_video_hardware_binding(&request, &unbound, "hevc").unwrap();
+    request.hardware_assignment = Some(VideoHardwareAssignment::software());
+    validate_video_hardware_binding(&request, &unbound, "hevc").unwrap();
+    assert!(validate_video_hardware_binding(&request, &bound, "hevc").is_err());
 }
 
 #[tokio::test]
