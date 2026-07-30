@@ -8,8 +8,9 @@ use voom_ffmpeg_worker::{
     preflight_from_process_env,
 };
 use voom_worker_protocol::{
-    HttpServer, LocalWorkerBound, NvidiaVideoAcceleratorDescriptor, WorkerStartupError,
-    load_worker_bind_addr_from_env, load_worker_credentials_from_env, serve_worker_http,
+    HttpServer, LocalWorkerBound, NvidiaVideoAcceleratorDescriptor, VideoAcceleratorDescriptor,
+    WorkerStartupError, load_worker_bind_addr_from_env, load_worker_credentials_from_env,
+    serve_worker_http,
 };
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 2)]
@@ -27,7 +28,7 @@ async fn main() -> Result<(), WorkerStartupError> {
         Some(accelerator) => {
             let bound = LocalWorkerBound {
                 addr: running.bound,
-                accelerator: Some(accelerator),
+                accelerator: Some(VideoAcceleratorDescriptor::Nvidia(accelerator)),
             };
             let bound = serde_json::to_string(&bound).map_err(WorkerStartupError::dependency)?;
             println!("BOUND {bound}");

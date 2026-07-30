@@ -26,3 +26,7 @@ crates/voom-policy/src/data/video_profile.rs
 crates/voom-policy/src/diagnostic.rs
 crates/voom-policy/src/syntax/span.rs
 crates/voom-core/src/media/transcode_video_profile.rs
+# worker_capabilities.extra's `accelerator` object is read typed in
+# voom-control-plane/src/video_hardware.rs; this is its defining file. See the
+# "Non-durable coordinated retype" note in the inventory.
+crates/voom-worker-protocol/src/video_acceleration.rs

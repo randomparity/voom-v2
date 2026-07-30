@@ -46,6 +46,41 @@ the change introduces a *new* defining file.
 | `0030` (#409) | `video_profiles.qp` (new, nullable); `video_profiles.preset` (now nullable) | `TranscodeVideoProfile`, reachable from `policy_versions.compiled_json` via `VideoProfileRef` | `qp: Option<u8>` is additive — an older compiled payload without it reads as `None`. `preset: String` → `Option<String>` is a **retype**, so a payload written with `preset` absent is unreadable by a pre-#409 binary: binary-before-DB upgrade ordering applies (ADR 0013). Both fields are `skip_serializing_if = "Option::is_none"`, so every software and NVENC payload is byte-identical to before. | `crates/voom-core/src/media/transcode_video_profile.rs` (already in scope) |
 | `0029` (#400) | `video_profiles.cq`, `video_profiles.decode_backend` | same | `cq: Option<u8>` and `decode: VideoDecodeMode` are additive; `decode` defaults to `Software` and is skipped when software. | `crates/voom-core/src/media/transcode_video_profile.rs` (already in scope) |
 
+#### Non-durable coordinated retype: `LocalWorkerBound.accelerator` (#409)
+
+`LocalWorkerBound` is the local worker's stdout readiness handshake, not a
+durable column, so it gets no row above. It is recorded here because #409 changes
+it non-additively: `accelerator` goes from
+`Option<NvidiaVideoAcceleratorDescriptor>` to `Option<VideoAcceleratorDescriptor>`,
+a `backend`-tagged enum over the NVIDIA and VAAPI descriptor structs. An NVIDIA
+descriptor is therefore nested under `{"backend":"nvidia", …}` on the wire, so a
+control plane and a bundled worker binary on opposite sides of the change cannot
+exchange a bound payload. ADR 0013's binary-before-DB ordering applies: the pair
+is lock-stepped (ADR 0002/0016) and must be deployed together, never mixed.
+
+The durable side is deliberately unchanged. `worker_capabilities.extra`'s
+`accelerator` object still holds the **untagged** `NvidiaVideoAcceleratorDescriptor`
+— `local_worker.rs` serializes the inner struct, not the enum — so pre-#409 rows
+keep parsing and the store's capacity SQL
+(`json_extract(extra, '$.accelerator.max_sessions')` and `'$.accelerator.hardware_token'`
+in `repo/execution/workers.rs`) keeps resolving. Pinned by
+`local_worker_test.rs::nvidia_capability_records_the_untagged_descriptor_token_and_capacity`
+and by the byte-for-byte payload pin in
+`video_acceleration_test.rs::software_and_nvidia_payloads_are_byte_for_byte_unchanged`.
+
+**Open reconciliation (pre-existing, from #400):** `worker_capabilities.extra` is
+classified Class P below ("passthrough `JsonValue` — no typed read"), but
+`extra.accelerator` *is* read typed, at
+`crates/voom-control-plane/src/video_hardware.rs` (`from_value` →
+`NvidiaVideoAcceleratorDescriptor`). The defining file
+`crates/voom-worker-protocol/src/video_acceleration.rs` is therefore added to
+`scripts/payload-contract-scope.txt` so the guard covers the descriptor,
+requirement, and assignment structs. Promoting the column's own classification
+from P to T-upstream is left to whoever makes a VAAPI descriptor durable in
+`extra` — that change must first decide whether the stored object stays untagged
+(as today) or gains the `backend` tag, which the capacity SQL above would need to
+tolerate.
+
 ### Transitive typed closure (named-field `Deserialize` sub-structs)
 
 For each Class-T / T-upstream root, the reachable named-field `Deserialize`

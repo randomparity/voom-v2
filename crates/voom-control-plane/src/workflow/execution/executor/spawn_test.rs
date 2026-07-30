@@ -80,6 +80,38 @@ fn nvidia_requirement_requires_exact_encoder_and_decoder() {
     );
 }
 
+/// Device selection for the VAAPI backend is not wired yet, so a VAAPI
+/// requirement must abort projection rather than quietly match no device — a
+/// silent no-candidates outcome reads like a busy fleet, not a coding gap.
+#[test]
+fn vaapi_requirement_fails_candidate_projection_until_device_selection_exists() {
+    let requirement = VideoHardwareRequirement::vaapi("hevc_vaapi", None);
+
+    let error = compatible_assignment(&software_candidate(1), Some(&requirement), &HashSet::new())
+        .unwrap_err();
+
+    assert!(
+        error.to_string().contains("VAAPI hardware requirement"),
+        "the diagnostic must name the unwired backend: {error}"
+    );
+}
+
+/// Recovery tokens are how a dead worker's device is reclaimed, so the token has
+/// to be read from whichever backend the assignment carries.
+#[test]
+fn vaapi_assignment_contributes_its_recovery_token() {
+    let mut payload = serde_json::json!({});
+    let mut recovery_tokens = Vec::new();
+    let assignment = VideoHardwareAssignment::vaapi("vaapi:pci-0000:03:00.0", "0000:03:00.0");
+
+    let applied =
+        apply_hardware_assignment(&mut payload, Some(&assignment), &mut recovery_tokens).unwrap();
+
+    assert!(applied);
+    assert_eq!(recovery_tokens, vec!["vaapi:pci-0000:03:00.0".to_owned()]);
+    assert_eq!(payload["hardware_assignment"]["backend"], "vaapi");
+}
+
 #[test]
 fn conflicting_capacity_declarations_quarantine_the_token() {
     let candidates = vec![

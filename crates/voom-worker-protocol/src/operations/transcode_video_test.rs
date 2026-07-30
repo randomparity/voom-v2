@@ -118,6 +118,33 @@ fn transcode_video_payloads_reject_unknown_fields() {
     assert!(result_err.to_string().contains("unknown field"));
 }
 
+/// The request is the only channel that tells a worker which device to open, so
+/// a VAAPI assignment has to survive the strict outer envelope intact — a
+/// dropped `pci_address` would leave the worker guessing at a render node.
+#[test]
+fn transcode_video_request_carries_a_tagged_vaapi_assignment() {
+    let mut request = sample_request();
+    request.hardware_assignment = Some(VideoHardwareAssignment::vaapi(
+        "vaapi:pci-0000:03:00.0",
+        "0000:03:00.0",
+    ));
+
+    let json = serde_json::to_value(&request).unwrap();
+
+    assert_eq!(
+        json["hardware_assignment"],
+        serde_json::json!({
+            "backend": "vaapi",
+            "hardware_token": "vaapi:pci-0000:03:00.0",
+            "pci_address": "0000:03:00.0"
+        })
+    );
+    assert_eq!(
+        serde_json::from_value::<TranscodeVideoRequest>(json).unwrap(),
+        request
+    );
+}
+
 #[test]
 fn transcode_video_contract_helpers_pin_canonical_values_and_aliases() {
     assert_eq!(TRANSCODE_VIDEO_CONTAINER, "mkv");

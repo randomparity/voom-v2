@@ -20,7 +20,9 @@ use tokio::time::timeout;
 use voom_core::{TicketOperation, VoomError, WorkerId, WorkerKind, WorkerStatus};
 use voom_store::repo::accelerator_claims::{NewAcceleratorClaim, SqliteAcceleratorClaimRepo};
 use voom_store::repo::workers::{NewCapability, NewGrant, NewWorker};
-use voom_worker_protocol::{LocalWorkerBound, NvidiaVideoAcceleratorDescriptor};
+use voom_worker_protocol::{
+    LocalWorkerBound, NvidiaVideoAcceleratorDescriptor, VideoAcceleratorDescriptor,
+};
 
 use crate::ControlPlane;
 use crate::worker_process::{WorkerCommand, bundled_worker_command_from, random_hex_128};
@@ -387,15 +389,10 @@ impl ControlPlane {
                 STARTUP_TIMEOUT
             };
             let bound = read_bound(&mut child, startup_timeout).await?;
-            validate_bound_accelerator(bound.accelerator.as_ref(), nvidia)?;
-            self.record_local_worker_registry(
-                kind,
-                worker_id,
-                secret,
-                bound.addr,
-                bound.accelerator.as_ref(),
-            )
-            .await?;
+            let accelerator = bound_nvidia_accelerator(bound.accelerator.as_ref())?;
+            validate_bound_accelerator(accelerator, nvidia)?;
+            self.record_local_worker_registry(kind, worker_id, secret, bound.addr, accelerator)
+                .await?;
             Ok::<_, VoomError>((stdin, bound))
         }
         .await;
@@ -591,6 +588,24 @@ fn is_full_nvidia_uuid(device_uuid: &str) -> bool {
             8 | 13 | 18 | 23 => ch == '-',
             _ => ch.is_ascii_hexdigit(),
         })
+}
+
+/// Narrows a worker's advertised accelerator to the NVIDIA descriptor.
+///
+/// `start_local_worker` only ever configures an NVIDIA device, so a worker that
+/// advertised a VAAPI device bound itself to hardware the control plane never
+/// asked for. That is a startup failure, not something to record silently.
+fn bound_nvidia_accelerator(
+    accelerator: Option<&VideoAcceleratorDescriptor>,
+) -> Result<Option<&NvidiaVideoAcceleratorDescriptor>, VoomError> {
+    match accelerator {
+        None => Ok(None),
+        Some(VideoAcceleratorDescriptor::Nvidia(nvidia)) => Ok(Some(nvidia)),
+        Some(VideoAcceleratorDescriptor::Vaapi(vaapi)) => Err(VoomError::WorkerCrash(format!(
+            "local worker advertised an unconfigured VAAPI device at PCI {}",
+            vaapi.pci_address
+        ))),
+    }
 }
 
 fn validate_bound_accelerator(

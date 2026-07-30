@@ -353,15 +353,16 @@ fn apply_hardware_assignment(
     let Some(assignment) = assignment else {
         return Ok(false);
     };
-    let nvidia = match assignment {
-        VideoHardwareAssignment::Nvidia(nvidia) => nvidia,
+    let hardware_token = match assignment {
+        VideoHardwareAssignment::Nvidia(nvidia) => nvidia.hardware_token.clone(),
+        VideoHardwareAssignment::Vaapi(vaapi) => vaapi.hardware_token.clone(),
         VideoHardwareAssignment::Software(_) => {
             return Err(VoomError::Internal(
                 "software dispatch unexpectedly carried a hardware assignment".to_owned(),
             ));
         }
     };
-    recovery_tokens.push(nvidia.hardware_token.clone());
+    recovery_tokens.push(hardware_token);
     recovery_tokens.sort();
     recovery_tokens.dedup();
     payload["hardware_assignment"] = serde_json::to_value(assignment)
@@ -466,6 +467,14 @@ fn compatible_assignment(
                 VideoHardwareAssignment::nvidia(descriptor.hardware_token, descriptor.device_uuid),
             )))
         }
+        // `video_hardware_requirement` never derives a VAAPI requirement yet, so
+        // reaching here means a requirement was constructed without the matching
+        // device selection. Fail loudly instead of silently finding no device.
+        Some(VideoHardwareRequirement::Vaapi(_)) => Err(VoomError::Internal(
+            "VAAPI hardware requirement reached candidate projection before VAAPI device \
+             selection was wired"
+                .to_owned(),
+        )),
     }
 }
 
