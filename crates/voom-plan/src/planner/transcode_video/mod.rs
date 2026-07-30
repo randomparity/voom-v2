@@ -429,24 +429,26 @@ fn transcode_video_notes(
 /// The quality note names whichever parameter the profile actually carries.
 ///
 /// Exactly one is legal per encoder — the one its `QualityDomain` names — so the
-/// match is exhaustive over `(crf, cq, qp)` with no wildcard arm, and a new quality
-/// field cannot be added without deciding what it prints. An absent value yields no
-/// note rather than a zero standing in for it: notes are operator-facing plan and
-/// compliance-report output, and `cq=0` on a qp-domain profile was a false statement
-/// about the profile naming a knob `hevc_vaapi` has no flag for.
+/// note is driven off the descriptor's domain rather than off a tuple of the
+/// fields. A tuple match is only exhaustive over the fields that existed when it
+/// was written: the `(crf, cq, qp)` version silently reported *no* quality
+/// parameter for every bitrate-domain profile once that domain was added, which is
+/// exactly the drift the old comment claimed the match prevented. Adding a
+/// `QualityDomain` variant now fails to compile until it decides what it prints.
 ///
-/// A profile carrying more than one field is rejected by descriptor validation
-/// before planning, so those arms are unreachable; reporting nothing is still better
-/// than reporting a guess about which one the operator meant.
+/// An absent value yields no note rather than a zero standing in for it: notes are
+/// operator-facing plan and compliance-report output, and `cq=0` on a qp-domain
+/// profile was a false statement about the profile naming a knob `hevc_vaapi` has
+/// no flag for.
 fn quality_note(resolved: &voom_core::TranscodeVideoProfile) -> Option<String> {
-    match (resolved.crf, resolved.cq, resolved.qp) {
-        (Some(crf), None, None) => Some(format!("crf={crf}")),
-        (None, Some(cq), None) => Some(format!("cq={cq}")),
-        (None, None, Some(qp)) => Some(format!("qp={qp}")),
-        (None, None, None)
-        | (Some(_), Some(_), None | Some(_))
-        | (Some(_), None, Some(_))
-        | (None, Some(_), Some(_)) => None,
+    let descriptor = voom_core::encoder_descriptor(&resolved.encoder)?;
+    match descriptor.quality_domain {
+        voom_core::QualityDomain::Crf { .. } => resolved.crf.map(|crf| format!("crf={crf}")),
+        voom_core::QualityDomain::Cq { .. } => resolved.cq.map(|cq| format!("cq={cq}")),
+        voom_core::QualityDomain::Qp { .. } => resolved.qp.map(|qp| format!("qp={qp}")),
+        voom_core::QualityDomain::BitrateKbps { .. } => resolved
+            .bitrate_kbps
+            .map(|bitrate_kbps| format!("bitrate_kbps={bitrate_kbps}")),
     }
 }
 

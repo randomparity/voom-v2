@@ -2508,6 +2508,33 @@ fn a_cq_domain_profile_notes_its_cq() {
     assert!(!notes.iter().any(|note| note.starts_with("qp=")));
 }
 
+/// The bitrate domain arrived with a fourth backend and the tuple match did not
+/// grow an arm for it, so every `VideoToolbox` plan reported no quality parameter at
+/// all. Driving the note off the descriptor's `QualityDomain` is what makes the
+/// next domain a compile error instead of a silently empty note.
+#[test]
+fn a_bitrate_domain_profile_notes_its_bitrate() {
+    let mut profile = voom_core::TranscodeVideoProfile::default_hevc();
+    profile.name = "hevc-videotoolbox".to_owned();
+    profile.encoder = "hevc_videotoolbox".to_owned();
+    profile.crf = None;
+    profile.bitrate_kbps = Some(8000);
+    profile.preset = Some("default".to_owned());
+    // Differs from the source, so a transcode is actually planned and there are
+    // notes to assert on at all.
+    profile.pixel_format = Some("yuv420p10le".to_owned());
+    let plan = plan_transcode_with_container(profile, source_hevc_720_mkv(), "mkv");
+    let notes = resource_notes(&plan);
+
+    assert!(
+        notes.contains(&"bitrate_kbps=8000".to_owned()),
+        "notes: {notes:?}"
+    );
+    assert!(!notes.iter().any(|note| note.starts_with("crf=")));
+    assert!(!notes.iter().any(|note| note.starts_with("cq=")));
+    assert!(!notes.iter().any(|note| note.starts_with("qp=")));
+}
+
 /// PROBE — expected to fail if the surface-vs-file confusion reaches the planner.
 #[test]
 fn probe_conforming_vaapi_output_is_compliant() {
