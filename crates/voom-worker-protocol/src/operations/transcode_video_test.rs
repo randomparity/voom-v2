@@ -16,7 +16,9 @@ fn transcode_video_request_serializes_stable_snake_case_shape() {
                     "content_hash": "blake3:abc",
                     "modified_at": "2026-05-25T00:00:00Z",
                     "local_file_key": null
-                }
+                },
+                "video_codec": "hevc",
+                "video_pixel_format": "yuv420p10le"
             },
             "output": {
                 "staging_root": "/tmp/voom-stage",
@@ -161,7 +163,8 @@ fn sample_request() -> TranscodeVideoRequest {
                 modified_at: Some("2026-05-25T00:00:00Z".to_owned()),
                 local_file_key: None,
             },
-            video_codec: None,
+            video_codec: Some("hevc".to_owned()),
+            video_pixel_format: Some("yuv420p10le".to_owned()),
         },
         output: TranscodeVideoOutput {
             staging_root: "/tmp/voom-stage".to_owned(),
@@ -174,6 +177,19 @@ fn sample_request() -> TranscodeVideoRequest {
         hardware_assignment: None,
         copy_video: false,
     }
+}
+
+#[test]
+fn request_round_trip_preserves_expected_source_video_facts() {
+    let request = sample_request();
+
+    let value = serde_json::to_value(&request).unwrap();
+    assert_eq!(value["input"]["video_codec"], "hevc");
+    assert_eq!(value["input"]["video_pixel_format"], "yuv420p10le");
+    assert_eq!(
+        serde_json::from_value::<TranscodeVideoRequest>(value).unwrap(),
+        request
+    );
 }
 
 #[test]

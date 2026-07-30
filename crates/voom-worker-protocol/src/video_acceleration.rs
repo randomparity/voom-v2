@@ -43,6 +43,18 @@ pub enum VideoAcceleratorDescriptor {
     VideoToolbox(VideoToolboxVideoAcceleratorDescriptor),
 }
 
+impl From<NvidiaVideoAcceleratorDescriptor> for VideoAcceleratorDescriptor {
+    fn from(value: NvidiaVideoAcceleratorDescriptor) -> Self {
+        Self::Nvidia(value)
+    }
+}
+
+impl From<VideoToolboxVideoAcceleratorDescriptor> for VideoAcceleratorDescriptor {
+    fn from(value: VideoToolboxVideoAcceleratorDescriptor) -> Self {
+        Self::VideoToolbox(value)
+    }
+}
+
 impl VideoAcceleratorDescriptor {
     #[must_use]
     pub fn hardware_token(&self) -> &str {

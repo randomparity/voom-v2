@@ -153,6 +153,7 @@ fn capped_request() -> TranscodeVideoRequest {
                 local_file_key: None,
             },
             video_codec: None,
+            video_pixel_format: None,
         },
         output: TranscodeVideoOutput {
             staging_root: "/tmp/stage".to_owned(),

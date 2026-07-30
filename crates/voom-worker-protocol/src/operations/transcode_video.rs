@@ -37,6 +37,8 @@ pub struct TranscodeVideoInput {
     pub expected: TranscodeVideoExpectedFacts,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub video_codec: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub video_pixel_format: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

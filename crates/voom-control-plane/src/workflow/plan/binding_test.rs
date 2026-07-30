@@ -3,7 +3,7 @@ use crate::workflow::plan::binding::{
     PolicyFileSource, branch_context_with_probe_codec, render_default_payload,
     render_default_payload_with_fan_out, render_policy_extract_audio_payload,
     render_policy_remux_payload, render_policy_transcode_audio_payload,
-    render_policy_verify_artifact_payload,
+    render_policy_transcode_payload, render_policy_verify_artifact_payload,
 };
 use crate::workflow::plan::model::WorkflowPlan;
 use voom_core::OperationKind;
@@ -115,6 +115,34 @@ fn policy_verify_payload_pins_exact_file_identity_without_dsl_arguments() {
             "progress_interval_ms": 10,
         })
     );
+}
+
+#[test]
+fn policy_transcode_video_payload_preserves_expected_source_video_facts() {
+    let operation_payload = serde_json::json!({
+        "type": "transcode_video",
+        "target_codec": "hevc",
+        "container": "mkv",
+        "profile": "default-hevc",
+        "resolved_profile": voom_core::TranscodeVideoProfile::default_hevc(),
+        "source_video_codec": "h264",
+        "source_video_pixel_format": "yuv420p"
+    });
+
+    let rendered = render_policy_transcode_payload(
+        PolicyFileSource {
+            file_version_id: FileVersionId(42),
+            location_id: Some(FileLocationId(7)),
+        },
+        &operation_payload,
+        std::path::Path::new("/tmp/voom-stage"),
+        std::path::Path::new("/library/transcode"),
+        EffectiveTiming::for_test(25, 10),
+    )
+    .unwrap();
+
+    assert_eq!(rendered["source_video_codec"], "h264");
+    assert_eq!(rendered["source_video_pixel_format"], "yuv420p");
 }
 
 #[test]

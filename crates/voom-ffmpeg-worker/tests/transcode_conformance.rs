@@ -165,6 +165,7 @@ fn basic_request(
                 local_file_key: None,
             },
             video_codec: None,
+            video_pixel_format: None,
         },
         output: TranscodeVideoOutput {
             staging_root: staging.to_string_lossy().into_owned(),
@@ -558,6 +559,7 @@ async fn missing_input_fails_with_artifact_unavailable() {
                 local_file_key: None,
             },
             video_codec: None,
+            video_pixel_format: None,
         },
         output: TranscodeVideoOutput {
             staging_root: dir.path().to_string_lossy().into_owned(),
@@ -606,6 +608,7 @@ async fn wrong_expected_input_facts_is_checksum_mismatch() {
                 local_file_key: None,
             },
             video_codec: None,
+            video_pixel_format: None,
         },
         output: TranscodeVideoOutput {
             staging_root: dir.path().to_string_lossy().into_owned(),
