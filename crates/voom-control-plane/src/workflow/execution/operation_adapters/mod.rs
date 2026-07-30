@@ -194,25 +194,7 @@ where
             biased;
             result = &mut future => return result,
             _ = heartbeat.tick(), if !context.chaos.suppresses_heartbeats_for(operation) => {
-                #[cfg(test)]
-                if context.chaos.fails_heartbeat_for(operation) {
-                    let source = VoomError::Conflict(format!(
-                        "injected heartbeat failure for {operation:?}"
-                    ));
-                    return crate::workflow::execution::leases::fail_lease_and_return(
-                        context.control,
-                        context.lease_id,
-                        crate::workflow::execution::leases::failure_class_for_error(&source),
-                        source,
-                    )
-                    .await;
-                }
-                let result = crate::workflow::execution::leases::heartbeat_lease_with_retry(
-                    context.control,
-                    context.lease_id,
-                    crate::workflow::execution::leases::time_duration(context.timing.lease_ttl)?,
-                )
-                .await;
+                let result = heartbeat_lease(context, operation).await;
                 if let Err(source) = result {
                     return crate::workflow::execution::leases::fail_lease_and_return(
                         context.control,
@@ -225,6 +207,26 @@ where
             }
         }
     }
+}
+
+async fn heartbeat_lease(
+    context: LeaseHeartbeatContext<'_>,
+    operation: OperationKind,
+) -> Result<(), VoomError> {
+    #[cfg(not(test))]
+    let _ = operation;
+    #[cfg(test)]
+    if context.chaos.fails_heartbeat_for(operation) {
+        return Err(VoomError::Conflict(format!(
+            "injected heartbeat failure for {operation:?}"
+        )));
+    }
+    crate::workflow::execution::leases::heartbeat_lease_with_retry(
+        context.control,
+        context.lease_id,
+        crate::workflow::execution::leases::time_duration(context.timing.lease_ttl)?,
+    )
+    .await
 }
 
 pub(crate) fn workflow_idempotency_key(ticket_id: TicketId, lease_id: LeaseId) -> String {

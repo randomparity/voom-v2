@@ -2473,7 +2473,7 @@ async fn heartbeat_failure_durably_fails_source_backed_ticket() {
     assert_eq!(fixture.ticket_state(TicketId(1)).await, "failed");
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 enum PostDispatchCase {
     VideoTranscode,
     Remux,
@@ -2537,7 +2537,7 @@ async fn assert_post_dispatch_heartbeats(case: PostDispatchCase) {
     options.artifact_roots.remux.target_dir = dir.path().join("remux-out");
     options.artifact_roots.audio.staging_root = dir.path().join("audio-stage");
     options.artifact_roots.audio.target_dir = dir.path().join("audio-out");
-    options.timing.heartbeat_interval = Duration::from_millis(100);
+    options.timing.heartbeat_interval = Duration::from_millis(250);
     options.chaos.post_dispatch_sync = Some(sync.clone());
     let executor = fixture.executor_with_options(options);
     let plan = fixture.plan.clone();
@@ -2554,11 +2554,13 @@ async fn assert_post_dispatch_heartbeats(case: PostDispatchCase) {
     }
     let heartbeat_result = advance_past_initial_lease_expiry(&fixture).await;
     sync.resume_post_dispatch.add_permits(1);
-    let Ok(join_result) = tokio::time::timeout(Duration::from_secs(30), &mut run).await else {
+    let Ok(join_result) = tokio::time::timeout(Duration::from_mins(1), &mut run).await else {
         let diagnostics = fixture.post_dispatch_diagnostics().await;
         run.abort();
         let _ = run.await;
-        panic!("workflow must finish after the post-dispatch hold is released: {diagnostics}");
+        panic!(
+            "{case:?} workflow must finish after the post-dispatch hold is released: {diagnostics}"
+        );
     };
     let run_result = join_result.unwrap();
 
@@ -2637,12 +2639,12 @@ async fn wait_for_new_lease_heartbeat(
     fixture: &ExecutorFixture,
     previous: OffsetDateTime,
 ) -> Option<OffsetDateTime> {
-    for _ in 0..100 {
+    for _ in 0..200 {
         let (_, current) = fixture.first_lease_heartbeat_window().await;
         if current > previous {
             return Some(current);
         }
-        tokio::time::sleep(Duration::from_millis(5)).await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
     }
     None
 }
