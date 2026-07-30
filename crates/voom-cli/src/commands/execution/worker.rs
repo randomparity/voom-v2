@@ -6,7 +6,8 @@ use serde::Serialize;
 use serde_json::json;
 use voom_control_plane::workers::{NewWorkerCapabilityDraft, RegisterWorkerForNodeInput};
 use voom_control_plane::{
-    ControlPlane, LocalWorkerHandle, LocalWorkerKind, NvidiaLocalWorkerConfig,
+    ControlPlane, LocalVideoAcceleratorConfig, LocalWorkerHandle, LocalWorkerKind,
+    NvidiaLocalWorkerConfig, VideoToolboxLocalWorkerConfig,
 };
 use voom_core::{ErrorCode, NodeId, TicketOperation, VoomError, WorkerId};
 use voom_store::repo::workers::{WorkerInspection, WorkerNodeContext};
@@ -83,6 +84,8 @@ pub async fn run(database_url: &str, local: Local, command: WorkerCommand) -> io
             kind,
             nvidia_device,
             nvidia_max_sessions,
+            videotoolbox,
+            videotoolbox_max_sessions,
         } => {
             run_local(
                 database_url,
@@ -90,6 +93,8 @@ pub async fn run(database_url: &str, local: Local, command: WorkerCommand) -> io
                 kind,
                 nvidia_device,
                 nvidia_max_sessions,
+                videotoolbox,
+                videotoolbox_max_sessions,
             )
             .await
         }
@@ -142,19 +147,33 @@ async fn run_local(
     kind: LocalWorkerKindArg,
     nvidia_device: Option<String>,
     nvidia_max_sessions: Option<u32>,
+    videotoolbox: bool,
+    videotoolbox_max_sessions: Option<u32>,
 ) -> io::Result<i32> {
     let cp = match open_control_plane("worker", database_url, &local).await? {
         Ok(cp) => cp,
         Err(code) => return Ok(code),
     };
-    let nvidia = nvidia_device.map(|device_uuid| NvidiaLocalWorkerConfig {
-        device_uuid,
-        max_sessions: nvidia_max_sessions.unwrap_or(1),
-    });
+    let accelerator = if let Some(device_uuid) = nvidia_device {
+        Some(LocalVideoAcceleratorConfig::Nvidia(
+            NvidiaLocalWorkerConfig {
+                device_uuid,
+                max_sessions: nvidia_max_sessions.unwrap_or(1),
+            },
+        ))
+    } else if videotoolbox {
+        Some(LocalVideoAcceleratorConfig::VideoToolbox(
+            VideoToolboxLocalWorkerConfig {
+                max_sessions: videotoolbox_max_sessions.unwrap_or(1),
+            },
+        ))
+    } else {
+        None
+    };
     run_local_supervise(
         &cp,
         kind.to_control_plane(),
-        nvidia,
+        accelerator,
         shutdown_signal(),
         local,
     )
@@ -168,11 +187,11 @@ async fn run_local(
 async fn run_local_supervise(
     cp: &ControlPlane,
     kind: LocalWorkerKind,
-    nvidia: Option<NvidiaLocalWorkerConfig>,
+    accelerator: Option<LocalVideoAcceleratorConfig>,
     shutdown: impl Future<Output = ()>,
     local: Local,
 ) -> io::Result<i32> {
-    let running = match cp.start_local_worker_configured(kind, nvidia).await {
+    let running = match cp.start_local_worker_configured(kind, accelerator).await {
         Ok(running) => running,
         Err(err) => {
             tracing::warn!(kind = kind_label(kind), error = %err, "local worker preflight failed");

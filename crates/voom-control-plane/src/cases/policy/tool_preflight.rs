@@ -80,7 +80,10 @@ impl ControlPlane {
         runtimes: &WorkerRuntimeRegistry,
     ) -> Result<(), VoomError> {
         let requirements = policy_video_backend_requirements(policy)?;
-        if !requirements.software && !requirements.nvidia {
+        if !requirements.software
+            && requirements.nvidia.is_none()
+            && requirements.videotoolbox_encoders.is_empty()
+        {
             return Ok(());
         }
         let candidates = self
@@ -89,6 +92,7 @@ impl ControlPlane {
             .await?;
         let mut software_available = false;
         let mut nvidia_available = false;
+        let mut videotoolbox_available = false;
         for candidate in candidates {
             if runtimes.get_optional(candidate.worker_id).is_none() {
                 continue;
@@ -100,12 +104,23 @@ impl ControlPlane {
                         .encoders
                         .iter()
                         .any(|encoder| encoder == "hevc_nvenc");
-                    let has_decoder =
-                        !requirements.nvidia_decode || !descriptor.decoders.is_empty();
+                    let has_decoder = requirements.nvidia != Some(DecodeRequirement::Decoder)
+                        || !descriptor.decoders.is_empty();
                     nvidia_available |= has_encoder && has_decoder;
                 }
+                Some(voom_worker_protocol::VideoAcceleratorDescriptor::VideoToolbox(
+                    descriptor,
+                )) => {
+                    let has_encoders = requirements
+                        .videotoolbox_encoders
+                        .iter()
+                        .all(|required| descriptor.encoders.iter().any(|item| item == required));
+                    let has_decoder =
+                        !requirements.videotoolbox_decode || !descriptor.decoders.is_empty();
+                    videotoolbox_available |= has_encoders && has_decoder;
+                }
                 None if candidate.hardware.is_empty() => software_available = true,
-                Some(voom_worker_protocol::VideoAcceleratorDescriptor::VideoToolbox(_)) | None => {}
+                None => {}
             }
         }
         let mut missing = Vec::new();
@@ -116,8 +131,8 @@ impl ControlPlane {
                     .to_owned(),
             );
         }
-        if requirements.nvidia && !nvidia_available {
-            let decoder = if requirements.nvidia_decode {
+        if requirements.nvidia.is_some() && !nvidia_available {
+            let decoder = if requirements.nvidia == Some(DecodeRequirement::Decoder) {
                 " with at least one advertised CUVID decoder"
             } else {
                 ""
@@ -126,6 +141,24 @@ impl ControlPlane {
                 "hevc_nvenc profiles require a live NVIDIA-bound ffmpeg worker{decoder}; \
                  start one with: voom worker run-local --kind ffmpeg \
                  --nvidia-device GPU-<uuid>"
+            ));
+        }
+        if !requirements.videotoolbox_encoders.is_empty() && !videotoolbox_available {
+            let encoders = requirements
+                .videotoolbox_encoders
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ");
+            let decoder = if requirements.videotoolbox_decode {
+                " with at least one advertised VideoToolbox decoder"
+            } else {
+                ""
+            };
+            missing.push(format!(
+                "VideoToolbox profiles require a live host-bound ffmpeg worker advertising \
+                 [{encoders}]{decoder}; start one with: voom worker run-local --kind ffmpeg \
+                 --videotoolbox"
             ));
         }
         if missing.is_empty() {
@@ -286,8 +319,15 @@ impl ControlPlane {
 #[derive(Default)]
 struct VideoBackendRequirements {
     software: bool,
-    nvidia: bool,
-    nvidia_decode: bool,
+    nvidia: Option<DecodeRequirement>,
+    videotoolbox_encoders: BTreeSet<String>,
+    videotoolbox_decode: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DecodeRequirement {
+    EncoderOnly,
+    Decoder,
 }
 
 fn policy_video_backend_requirements(
@@ -321,7 +361,6 @@ fn collect_video_backend_requirements(
                         )
                     })?;
                 if encoder == "hevc_nvenc" {
-                    requirements.nvidia = true;
                     let decode = operation
                         .resolved_profile
                         .as_ref()
@@ -336,7 +375,33 @@ fn collect_video_backend_requirements(
                                     .to_owned(),
                             )
                         })?;
-                    requirements.nvidia_decode |= decode.is_nvidia();
+                    let decode = if decode.is_nvidia() {
+                        DecodeRequirement::Decoder
+                    } else {
+                        DecodeRequirement::EncoderOnly
+                    };
+                    if requirements.nvidia != Some(DecodeRequirement::Decoder) {
+                        requirements.nvidia = Some(decode);
+                    }
+                } else if matches!(encoder, "h264_videotoolbox" | "hevc_videotoolbox") {
+                    requirements
+                        .videotoolbox_encoders
+                        .insert(encoder.to_owned());
+                    let decode = operation
+                        .resolved_profile
+                        .as_ref()
+                        .map(|profile| &profile.decode)
+                        .or(match &operation.profile {
+                            VideoProfileRef::Inline(settings) => Some(&settings.decode),
+                            VideoProfileRef::Named(_) => None,
+                        })
+                        .ok_or_else(|| {
+                            VoomError::PolicyExecution(
+                                "video hardware preflight requires resolved named profiles"
+                                    .to_owned(),
+                            )
+                        })?;
+                    requirements.videotoolbox_decode |= decode.is_video_toolbox();
                 } else {
                     requirements.software = true;
                 }
@@ -428,3 +493,4 @@ const fn guidance(tool: PolicyTool) -> &'static str {
 #[cfg(test)]
 #[path = "tool_preflight_test.rs"]
 mod tests;
+use std::collections::BTreeSet;

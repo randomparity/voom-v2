@@ -8,15 +8,16 @@ use voom_ffmpeg_worker::{
     preflight_from_process_env,
 };
 use voom_worker_protocol::{
-    HttpServer, LocalWorkerBound, NvidiaVideoAcceleratorDescriptor, WorkerStartupError,
-    load_worker_bind_addr_from_env, load_worker_credentials_from_env, serve_worker_http,
+    HttpServer, LocalWorkerBound, NvidiaVideoAcceleratorDescriptor, VideoAcceleratorDescriptor,
+    VideoToolboxVideoAcceleratorDescriptor, WorkerStartupError, load_worker_bind_addr_from_env,
+    load_worker_credentials_from_env, serve_worker_http,
 };
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 2)]
 async fn main() -> Result<(), WorkerStartupError> {
     let credentials = load_worker_credentials_from_env()?;
     let preflight = preflight_from_process_env().map_err(WorkerStartupError::dependency)?;
-    let accelerator = preflight.nvidia.clone().map(accelerator_descriptor);
+    let accelerator = accelerator_descriptor(&preflight);
     let config = ffmpeg_config_from_preflight(preflight, accelerator.clone());
     let bind = load_worker_bind_addr_from_env()?;
 
@@ -27,9 +28,7 @@ async fn main() -> Result<(), WorkerStartupError> {
         Some(accelerator) => {
             let bound = LocalWorkerBound {
                 addr: running.bound,
-                accelerator: Some(voom_worker_protocol::VideoAcceleratorDescriptor::Nvidia(
-                    accelerator,
-                )),
+                accelerator: Some(accelerator),
             };
             let bound = serde_json::to_string(&bound).map_err(WorkerStartupError::dependency)?;
             println!("BOUND {bound}");
@@ -56,7 +55,30 @@ async fn main() -> Result<(), WorkerStartupError> {
     Ok(())
 }
 
-fn accelerator_descriptor(nvidia: preflight::NvidiaPreflight) -> NvidiaVideoAcceleratorDescriptor {
+fn accelerator_descriptor(
+    preflight: &preflight::FfmpegPreflight,
+) -> Option<VideoAcceleratorDescriptor> {
+    if let Some(nvidia) = preflight.nvidia.clone() {
+        return Some(VideoAcceleratorDescriptor::Nvidia(nvidia_descriptor(
+            nvidia,
+        )));
+    }
+    preflight.videotoolbox.clone().map(|videotoolbox| {
+        VideoAcceleratorDescriptor::VideoToolbox(VideoToolboxVideoAcceleratorDescriptor {
+            hardware_token: format!("videotoolbox:{}", videotoolbox.resource_id),
+            resource_id: videotoolbox.resource_id,
+            model_identifier: videotoolbox.model_identifier,
+            chip_name: videotoolbox.chip_name,
+            macos_version: videotoolbox.macos_version,
+            macos_build: videotoolbox.macos_build,
+            encoders: videotoolbox.encoders,
+            decoders: videotoolbox.decoders,
+            max_sessions: videotoolbox.max_sessions,
+        })
+    })
+}
+
+fn nvidia_descriptor(nvidia: preflight::NvidiaPreflight) -> NvidiaVideoAcceleratorDescriptor {
     NvidiaVideoAcceleratorDescriptor {
         hardware_token: format!("nvidia:{}", nvidia.device_uuid),
         device_uuid: nvidia.device_uuid,
@@ -70,7 +92,7 @@ fn accelerator_descriptor(nvidia: preflight::NvidiaPreflight) -> NvidiaVideoAcce
 
 fn ffmpeg_config_from_preflight(
     preflight: preflight::FfmpegPreflight,
-    accelerator: Option<NvidiaVideoAcceleratorDescriptor>,
+    accelerator: Option<VideoAcceleratorDescriptor>,
 ) -> FfmpegConfig {
     let available_video_encoders: Vec<String> = ALL_VIDEO_ENCODERS
         .iter()

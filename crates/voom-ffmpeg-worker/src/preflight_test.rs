@@ -22,6 +22,63 @@ fn nvidia_uuid_validation_rejects_ordinals_and_partial_tokens() {
     }
 }
 
+#[test]
+fn videotoolbox_stage_budget_matches_supervisor_deadline() {
+    assert_eq!(VIDEOTOOLBOX_PREFLIGHT_MAX_STAGES, 25);
+    assert_eq!(PROBE_TIMEOUT, Duration::from_secs(15));
+    assert_eq!(VIDEOTOOLBOX_PREFLIGHT_BUDGET, Duration::from_secs(405));
+}
+
+#[test]
+fn platform_identity_hash_is_normalized_and_errors_do_not_disclose_raw_uuid() {
+    let raw_uuid = "e4ad1c3f-8b4a-4e4e-a9ad-9a0123456789";
+    let ioreg = format!("\"IOPlatformUUID\" = \"{raw_uuid}\"");
+    let normalized = parse_ioreg_platform_uuid(&ioreg).unwrap();
+    let resource_id = platform_resource_id(&normalized).unwrap();
+
+    assert_eq!(normalized, raw_uuid.to_ascii_uppercase());
+    assert_eq!(resource_id.len(), 64);
+    assert!(!resource_id.contains(raw_uuid));
+
+    let malformed = "secret-platform-value";
+    let error = parse_ioreg_platform_uuid(&format!("\"IOPlatformUUID\" = \"{malformed}\""))
+        .unwrap_err()
+        .to_string();
+    assert!(!error.contains(malformed));
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[test]
+#[ignore = "requires the host FFmpeg VideoToolbox stack"]
+fn real_videotoolbox_preflight_proves_host_pipelines() {
+    let ffmpeg = resolve_binary(OsStr::new("ffmpeg"));
+    let ffprobe = resolve_binary(OsStr::new("ffprobe"));
+    let ioreg = command_text(
+        "ioreg platform identity",
+        command_output(Command::new("/usr/sbin/ioreg").args([
+            "-rd1",
+            "-c",
+            "IOPlatformExpertDevice",
+        ])),
+    )
+    .unwrap();
+    let resource_id = platform_resource_id(&parse_ioreg_platform_uuid(&ioreg).unwrap()).unwrap();
+
+    let report = preflight_with_videotoolbox(
+        &ffmpeg,
+        &ffprobe,
+        &VideoToolboxPreflightConfig {
+            resource_id,
+            max_sessions: 1,
+        },
+    )
+    .unwrap();
+
+    let report = report.videotoolbox.unwrap();
+    assert_eq!(report.encoders.len(), 2);
+    assert!(!report.decoders.is_empty());
+}
+
 #[cfg(unix)]
 #[test]
 fn preflight_rejects_non_executable_ffmpeg() {

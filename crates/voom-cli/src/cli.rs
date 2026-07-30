@@ -1059,10 +1059,22 @@ pub enum WorkerCommand {
     RunLocal {
         #[arg(long)]
         kind: LocalWorkerKindArg,
-        #[arg(long)]
+        #[arg(long, conflicts_with = "videotoolbox")]
         nvidia_device: Option<String>,
-        #[arg(long, requires = "nvidia_device")]
+        #[arg(
+            long,
+            requires = "nvidia_device",
+            value_parser = clap::value_parser!(u32).range(1..=16)
+        )]
         nvidia_max_sessions: Option<u32>,
+        #[arg(long, conflicts_with = "nvidia_device")]
+        videotoolbox: bool,
+        #[arg(
+            long,
+            requires = "videotoolbox",
+            value_parser = clap::value_parser!(u32).range(1..=16)
+        )]
+        videotoolbox_max_sessions: Option<u32>,
     },
 }
 

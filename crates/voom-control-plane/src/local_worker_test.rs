@@ -3,8 +3,12 @@
 //! worker binary built as a sibling) lives in
 //! `tests/local_worker_lifecycle.rs`.
 
+use std::time::Duration;
+
 use super::{
-    LocalWorkerKind, NvidiaLocalWorkerConfig, is_full_nvidia_uuid, validate_local_worker_config,
+    LocalVideoAcceleratorConfig, LocalWorkerKind, NvidiaLocalWorkerConfig,
+    VIDEOTOOLBOX_STARTUP_TIMEOUT, VideoToolboxLocalWorkerConfig, is_full_nvidia_uuid,
+    parse_ioreg_platform_uuid, platform_resource_id, validate_local_worker_config,
 };
 #[cfg(target_os = "linux")]
 use super::{kill_and_wait, process_group_has_members};
@@ -26,8 +30,12 @@ fn nvidia_config_requires_ffmpeg_full_uuid_and_bounded_sessions() {
         device_uuid: "GPU-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".to_owned(),
         max_sessions: 16,
     };
+    let valid = LocalVideoAcceleratorConfig::Nvidia(valid);
     assert!(validate_local_worker_config(LocalWorkerKind::Ffmpeg, Some(&valid)).is_ok());
-    assert!(is_full_nvidia_uuid(&valid.device_uuid));
+    let LocalVideoAcceleratorConfig::Nvidia(valid_nvidia) = &valid else {
+        panic!("expected NVIDIA config");
+    };
+    assert!(is_full_nvidia_uuid(&valid_nvidia.device_uuid));
     assert!(validate_local_worker_config(LocalWorkerKind::Mkvtoolnix, Some(&valid)).is_err());
 
     for device_uuid in ["0", "GPU-short", "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"] {
@@ -35,15 +43,59 @@ fn nvidia_config_requires_ffmpeg_full_uuid_and_bounded_sessions() {
             device_uuid: device_uuid.to_owned(),
             max_sessions: 1,
         };
+        let invalid = LocalVideoAcceleratorConfig::Nvidia(invalid);
         assert!(validate_local_worker_config(LocalWorkerKind::Ffmpeg, Some(&invalid)).is_err());
     }
     for max_sessions in [0, 17] {
         let invalid = NvidiaLocalWorkerConfig {
             max_sessions,
-            ..valid.clone()
+            ..valid_nvidia.clone()
         };
+        let invalid = LocalVideoAcceleratorConfig::Nvidia(invalid);
         assert!(validate_local_worker_config(LocalWorkerKind::Ffmpeg, Some(&invalid)).is_err());
     }
+}
+
+#[test]
+fn videotoolbox_config_requires_ffmpeg_and_bounded_sessions() {
+    for max_sessions in 1..=16 {
+        let config = LocalVideoAcceleratorConfig::VideoToolbox(VideoToolboxLocalWorkerConfig {
+            max_sessions,
+        });
+        assert!(validate_local_worker_config(LocalWorkerKind::Ffmpeg, Some(&config)).is_ok());
+        assert!(validate_local_worker_config(LocalWorkerKind::Mkvtoolnix, Some(&config)).is_err());
+    }
+    for max_sessions in [0, 17] {
+        let config = LocalVideoAcceleratorConfig::VideoToolbox(VideoToolboxLocalWorkerConfig {
+            max_sessions,
+        });
+        assert!(validate_local_worker_config(LocalWorkerKind::Ffmpeg, Some(&config)).is_err());
+    }
+}
+
+#[test]
+fn videotoolbox_startup_timeout_covers_the_preflight_budget() {
+    assert_eq!(VIDEOTOOLBOX_STARTUP_TIMEOUT, Duration::from_secs(405));
+}
+
+#[test]
+fn platform_uuid_is_normalized_and_hashed_without_disclosure() {
+    let raw_uuid = "e4ad1c3f-8b4a-4e4e-a9ad-9a0123456789";
+    let ioreg = format!(
+        "    |   \"IOPlatformUUID\" = \"{raw_uuid}\"\n    |   \"manufacturer\" = <\"Apple Inc.\">"
+    );
+
+    let normalized = parse_ioreg_platform_uuid(&ioreg).unwrap();
+    let resource_id = platform_resource_id(&normalized).unwrap();
+
+    assert_eq!(normalized, raw_uuid.to_ascii_uppercase());
+    assert_eq!(resource_id.len(), 64);
+    assert!(
+        resource_id
+            .chars()
+            .all(|character| character.is_ascii_hexdigit())
+    );
+    assert!(!resource_id.contains(raw_uuid));
 }
 
 #[test]

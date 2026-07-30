@@ -153,7 +153,9 @@ impl WorkflowExecutor {
         }
         let runtimes = if uses_accelerator {
             accelerator_runtimes.ok_or_else(|| {
-                VoomError::Internal("NVIDIA candidate projection omitted live runtimes".to_owned())
+                VoomError::Internal(
+                    "accelerator candidate projection omitted live runtimes".to_owned(),
+                )
             })?
         } else {
             &self.runtimes
