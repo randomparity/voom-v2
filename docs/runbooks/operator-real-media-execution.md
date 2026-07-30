@@ -260,6 +260,18 @@ Every VAAPI preflight failure names the PCI address and has one operator action:
 | `VAAPI capacity probe for N concurrent ... failed` | VAAPI exposes no session enumeration, so the cause cannot be attributed: lower `--vaapi-max-sessions` or retry when the device is idle. |
 | `VAAPI readiness deadline of 300 seconds expired before <stage>` | A probe hung; the named stage is where. Check for a wedged FFmpeg process on the node. |
 
+One VAAPI startup diagnostic is **not** a failure — the worker still binds and
+becomes ready:
+
+| Diagnostic | What to do |
+|---|---|
+| `VAAPI decode probe on PCI address ... did not prove <codec>: <reason>` | That codec was not proven on this driver build, so it is not advertised and sources in it will not be hardware-decoded — they still transcode with software decode. Expected on a build lacking the codec; if you expect it, read the quoted FFmpeg reason and check the driver build. |
+
+This is the signal to watch after a host driver change. ADR 0052 §2 probes on every
+start precisely because a driver swap moves capability with no VOOM configuration
+change, and a codec that stops proving otherwise shows up only as candidates
+disappearing.
+
 ##### Real-device acceptance
 
 ```

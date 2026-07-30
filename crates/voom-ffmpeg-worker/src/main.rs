@@ -1,6 +1,9 @@
 #![expect(
     clippy::print_stdout,
-    reason = "ffmpeg-worker advertises readiness with BOUND addr=..."
+    clippy::print_stderr,
+    reason = "ffmpeg-worker advertises readiness with BOUND addr=... on stdout, and \
+              reports unproven probe codecs on stderr; it initializes no tracing \
+              subscriber, so a log macro would be silently dropped"
 )]
 #![cfg_attr(
     test,
@@ -25,6 +28,7 @@ use voom_worker_protocol::{
 async fn main() -> Result<(), WorkerStartupError> {
     let credentials = load_worker_credentials_from_env()?;
     let preflight = preflight_from_process_env().map_err(WorkerStartupError::dependency)?;
+    report_unproven_vaapi_decoders(&preflight);
     let binding = bound_accelerator(&preflight)?;
     let accelerator = binding.as_ref().map(advertised_accelerator);
     let config = ffmpeg_config_from_preflight(preflight, binding);
@@ -62,6 +66,31 @@ async fn main() -> Result<(), WorkerStartupError> {
     let _ = watchdog.join();
     let _ = joined.await;
     Ok(())
+}
+
+/// Names every codec whose VAAPI decode probe failed, and why.
+///
+/// A driver-build change moves capability with no VOOM configuration change, and
+/// ADR 0052 §2's per-start probe is the only thing that detects it. When a decode
+/// probe fails the worker still becomes ready — the codec simply stops being
+/// advertised — so without this the operator sees candidates quietly disappear with
+/// no statement of which codec stopped proving or why.
+///
+/// The reasons go to stderr, which the run-local supervisor already inherits,
+/// rather than into the advertised descriptor: that descriptor is a durable
+/// `deny_unknown_fields` payload, and an unproven codec is an operator diagnostic,
+/// not a capability to persist.
+fn report_unproven_vaapi_decoders(preflight: &preflight::FfmpegPreflight) {
+    let Some(vaapi) = preflight.vaapi.as_ref() else {
+        return;
+    };
+    for diagnostic in &vaapi.decoder_diagnostics {
+        eprintln!(
+            "VAAPI decode probe on PCI address `{}` did not prove {diagnostic}; \
+             that codec is not advertised",
+            vaapi.pci_address
+        );
+    }
 }
 
 fn videotoolbox_descriptor(
