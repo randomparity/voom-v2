@@ -596,3 +596,32 @@ acceptance host recorded in spec §2.
 
 `just ci` exits 0 with no warnings, and the acceptance script's recorded evidence is
 attached to the PR.
+
+### Round 5 — 2 findings, 1 suppression, cap reached
+
+The last iteration cycle 1 allows. Focus was aimed away from the surface rounds
+1–4 had already swept four times, onto the acceptance criteria's own ground:
+per-device capacity accounting, the claim lifecycle across a restart, cross-device
+assignment safety, migration and rollback compatibility, and partial-failure paths.
+**That surface held.** The reviewer reported it could not break the claim insert
+inside the registration transaction, the `retire_in_tx` release, `recover_linux_claim`'s
+refusal to steal a live or PID-reused owner, capacity grouping on the device token,
+`vaapi_compatibility` in both directions, or migration 0032's rebuild. Both findings
+that survived are diagnostics defects on the startup path, not correctness defects —
+which is itself the round's most useful result.
+
+| # | Finding | Disposition |
+|---|---|---|
+| F39 | **The readiness deadline could never fire in the documented launch path.** `VAAPI_STARTUP_TIMEOUT` and the worker's `readiness_deadline` were both a bare `from_mins(5)`, but the supervisor starts timing at spawn and the worker inside its own preflight, so the supervisor's elapsed time always exceeds the worker's. The supervisor therefore always won, reporting a generic bound-address timeout, and the stage-naming expiry ADR 0052 §7 requires — plus the runbook row documenting it — was reachable only from a test with shortened clocks. The VideoToolbox sibling already had the fix in shape: budget = worker deadline + a coordination allowance. Both ends now derive from one constant, the ordering is asserted by a test, and ADR 0052 §7 records it as an invariant rather than a coincidence of two literals. NVIDIA has no worker-side readiness deadline, so there is no sibling instance to sweep. | `accepted-fixed` |
+| F40 | **`decoder_diagnostics` was captured expressly to retain a probe failure reason, then discarded.** `probe_vaapi_decoders`'s doc comment promised the reason is "retained rather than dropped"; nothing outside tests ever read the field. Because a failed decode probe still lets the worker become ready, the codec just vanishes from `decoders` and the operator sees candidates disappear with no statement of which codec stopped proving or why — and ADR 0052 §2 makes that probe the *only* detector of driver-build capability drift. Now emitted on worker stderr, which the supervisor already inherits, with a runbook row; deliberately not added to the durable `deny_unknown_fields` descriptor, since an unproven codec is a diagnostic, not a capability. | `accepted-fixed` |
+| F41 | **Rolling the control plane back below this branch is fleet-fatal, not worker-scoped.** Raised by the reviewer but *suppressed* as re-litigation of ADR 0013. The suppression does not hold: ADR 0013 settles that a cross-version read fails **loudly**, and says nothing about the blast radius of that loud failure — the argument rests on `main`'s `tool_preflight.rs:96` (`candidate_accelerator_descriptor(&candidate)?`), a code path outside the ADR's record, so by the disclosure rule it is new risk, not settled ground. Un-suppressed and evaluated on its merits, it still fails: `docs/release-process.md:62-65` already prescribes the remedy — a rollback across a payload change requires restoring the pre-upgrade snapshot, which leaves no VAAPI accelerator row to misread. The concern's own premise, "no rollback remedy documented", is false. | `rejected-with-evidence` |
+
+One reviewer claim was refuted rather than dispositioned: `next_steps[2]` asserted
+the working tree carried uncommitted changes to 11 reviewed files. `git status` was
+empty before and after the pass. The list is character-for-character the *stale*
+environment snapshot taken when the session began, ~20 commits earlier — the
+reviewer read its own harness context instead of running `git status`.
+
+**Cap reached.** Five iterations, verdict never `approve`. F39/F40 are fixed but no
+pass has reviewed the fixed state, so this is `blocked` under the loop's stop
+conditions, not `converged`. Advancing requires explicit authorization.
