@@ -71,6 +71,7 @@ pub use video_acceleration::{
     NvidiaVideoHardwareRequirement, SoftwareVideoHardwareRequirement,
     VaapiVideoAcceleratorDescriptor, VaapiVideoHardwareAssignment, VaapiVideoHardwareRequirement,
     VideoAcceleratorDescriptor, VideoHardwareAssignment, VideoHardwareRequirement,
+    vaapi_hardware_token,
 };
 pub use voom_core::OperationKind;
 pub use wire::credentials::{PresentedCredentials, WorkerCredentials, validate_credentials};

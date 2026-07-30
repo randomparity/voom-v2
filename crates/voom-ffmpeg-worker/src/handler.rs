@@ -14,11 +14,12 @@ use voom_worker_protocol::{
     ProgressFrame, ProtocolError, TranscodeAudioRequest, TranscodeAudioResult,
     TranscodeAudioStatus, TranscodeVideoExpectedFacts, TranscodeVideoObservedFacts,
     TranscodeVideoProfile, TranscodeVideoRequest, TranscodeVideoResult, TranscodeVideoStatus,
-    VideoHardwareAssignment, validate_extract_audio_request, validate_extract_audio_result,
+    VideoHardwareAssignment, vaapi_hardware_token, validate_extract_audio_request,
+    validate_extract_audio_result,
 };
 
 use crate::ffmpeg::{
-    FfmpegConfig, FfmpegError, InputProbe, VideoTranscodeInput, probe_input,
+    FfmpegConfig, FfmpegError, InputProbe, VaapiDeviceBinding, VideoTranscodeInput, probe_input,
     run_ffmpeg_extract_audio, run_ffmpeg_transcode, run_ffmpeg_transcode_audio,
 };
 use crate::observe::{ObserveError, observe_file_facts};
@@ -711,24 +712,110 @@ fn validate_encoder_available(
     ))
 }
 
+/// Each encoder must run on the device the scheduler assigned it, and nowhere else.
+/// Dispatch is on the encoder rather than on the assignment so an accelerated
+/// profile arriving with no assignment — or with another device's — is rejected
+/// instead of quietly treated as software work.
 fn validate_video_hardware_binding(
     request: &TranscodeVideoRequest,
     config: &FfmpegConfig,
     source_codec: &str,
 ) -> Result<(), TranscodeVideoError> {
-    if request.profile.encoder != "hevc_nvenc" {
-        let software_assignment = match &request.hardware_assignment {
-            None | Some(VideoHardwareAssignment::Software(_)) => true,
-            Some(VideoHardwareAssignment::Nvidia(_) | VideoHardwareAssignment::Vaapi(_)) => false,
-        };
-        if config.accelerator.is_none() && software_assignment {
-            return Ok(());
-        }
+    match request.profile.encoder.as_str() {
+        "hevc_nvenc" => validate_nvidia_binding(request, config, source_codec),
+        "hevc_vaapi" => validate_vaapi_binding(request, config, source_codec),
+        _ => validate_software_binding(request, config),
+    }
+}
+
+/// Software video work belongs on an unbound worker: a device-bound one would
+/// occupy the accelerator with an encode any worker could have run (ADR 0049 §5).
+fn validate_software_binding(
+    request: &TranscodeVideoRequest,
+    config: &FfmpegConfig,
+) -> Result<(), TranscodeVideoError> {
+    let software_assignment = match &request.hardware_assignment {
+        None | Some(VideoHardwareAssignment::Software(_)) => true,
+        Some(VideoHardwareAssignment::Nvidia(_) | VideoHardwareAssignment::Vaapi(_)) => false,
+    };
+    if config.accelerator().is_none() && software_assignment {
+        return Ok(());
+    }
+    Err(config_invalid(
+        "transcode_video",
+        "software video work requires an unbound software worker".to_owned(),
+    ))
+}
+
+/// A `hevc_vaapi` transcode must be assigned to the very device this worker bound,
+/// and a `vaapi`-decode profile must name a codec that actually decoded on it at
+/// startup (ADR 0051 §2). Every failure here is terminal: there is no software
+/// encoder to fall back to.
+fn validate_vaapi_binding(
+    request: &TranscodeVideoRequest,
+    config: &FfmpegConfig,
+    source_codec: &str,
+) -> Result<(), TranscodeVideoError> {
+    let Some(VideoHardwareAssignment::Vaapi(assignment)) = &request.hardware_assignment else {
         return Err(config_invalid(
             "transcode_video",
-            "software video work requires an unbound software worker".to_owned(),
+            "hevc_vaapi requires scheduler assignment; start a configured worker with: \
+             voom worker run-local --kind ffmpeg --vaapi-device <pci-address>"
+                .to_owned(),
+        ));
+    };
+    let Some(binding) = config.vaapi() else {
+        return Err(config_invalid(
+            "transcode_video",
+            "assigned VAAPI work reached an unbound worker".to_owned(),
+        ));
+    };
+    let bound_address = &binding.descriptor.pci_address;
+    if &assignment.pci_address != bound_address
+        || assignment.hardware_token != vaapi_hardware_token(bound_address)
+    {
+        return Err(config_invalid(
+            "transcode_video",
+            format!(
+                "VAAPI assignment {} ({}) does not match worker {} ({bound_address})",
+                assignment.hardware_token,
+                assignment.pci_address,
+                vaapi_hardware_token(bound_address),
+            ),
         ));
     }
+    if !request.profile.decode.is_vaapi() {
+        return Ok(());
+    }
+    validate_vaapi_decoder_probed(binding, source_codec)
+}
+
+fn validate_vaapi_decoder_probed(
+    binding: &VaapiDeviceBinding,
+    source_codec: &str,
+) -> Result<(), TranscodeVideoError> {
+    if binding
+        .descriptor
+        .decoders
+        .iter()
+        .any(|decoder| decoder == source_codec)
+    {
+        return Ok(());
+    }
+    Err(config_invalid(
+        "transcode_video",
+        format!(
+            "VAAPI device {} did not probe a decoder for source codec `{source_codec}`",
+            binding.descriptor.pci_address
+        ),
+    ))
+}
+
+fn validate_nvidia_binding(
+    request: &TranscodeVideoRequest,
+    config: &FfmpegConfig,
+    source_codec: &str,
+) -> Result<(), TranscodeVideoError> {
     let Some(VideoHardwareAssignment::Nvidia(assignment)) = &request.hardware_assignment else {
         return Err(config_invalid(
             "transcode_video",
@@ -737,7 +824,7 @@ fn validate_video_hardware_binding(
                 .to_owned(),
         ));
     };
-    let Some(accelerator) = &config.accelerator else {
+    let Some(accelerator) = config.nvidia() else {
         return Err(config_invalid(
             "transcode_video",
             "assigned NVIDIA work reached an unbound worker".to_owned(),

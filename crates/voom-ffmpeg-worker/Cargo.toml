@@ -20,6 +20,7 @@ time.workspace = true
 tokio = { workspace = true, features = ["fs", "io-util", "process", "rt-multi-thread", "macros", "net", "sync"] }
 
 [dev-dependencies]
+insta = "1.48.0"
 tempfile.workspace = true
 
 [lints]

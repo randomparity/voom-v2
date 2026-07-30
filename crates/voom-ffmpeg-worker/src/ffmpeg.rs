@@ -6,15 +6,49 @@ use serde_json::Value;
 use thiserror::Error;
 use tokio::process::Command;
 use tokio::time::{Duration, timeout};
-use voom_core::nvidia_decoder_for_video_codec;
+use voom_core::{VAAPI_VIDEO_DECODERS, nvidia_decoder_for_video_codec};
 use voom_worker_protocol::{
     AudioDispositionFact, AudioOutputStreamFact, AudioStreamRef, ExtractAudioRequest,
     NvidiaVideoAcceleratorDescriptor, TranscodeAudioRequest, TranscodeVideoProfile,
-    TranscodeVideoRequest,
+    TranscodeVideoRequest, VaapiVideoAcceleratorDescriptor,
 };
 
 /// The video encoders advertised by every ffmpeg build voom supports.
-pub const ALL_VIDEO_ENCODERS: [&str; 4] = ["libx265", "libsvtav1", "libaom-av1", "hevc_nvenc"];
+pub const ALL_VIDEO_ENCODERS: [&str; 5] = [
+    "libx265",
+    "libsvtav1",
+    "libaom-av1",
+    "hevc_nvenc",
+    "hevc_vaapi",
+];
+
+const VAAPI_HEVC_ENCODER: &str = "hevc_vaapi";
+const NVENC_HEVC_ENCODER: &str = "hevc_nvenc";
+
+/// The VAAPI device this worker bound itself to.
+///
+/// `render_node` is the node preflight resolved the configured PCI address to and
+/// then ran its capability probes on, carried here so command generation names the
+/// same device the probe proved. Re-resolving the address per command would
+/// duplicate that lookup and could disagree with it; a hardcoded
+/// `/dev/dri/renderD128` would be wrong on any host whose enumeration differs
+/// (ADR 0051 §1).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VaapiDeviceBinding {
+    pub render_node: PathBuf,
+    pub descriptor: VaapiVideoAcceleratorDescriptor,
+}
+
+/// The one accelerator a worker is bound to, if any.
+///
+/// One worker binds one device, so this is a single enum rather than one `Option`
+/// per backend: a config that could hold both would make "which device did this
+/// worker bind" ambiguous exactly where the argv builder must not guess.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AcceleratorBinding {
+    Nvidia(NvidiaVideoAcceleratorDescriptor),
+    Vaapi(VaapiDeviceBinding),
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FfmpegConfig {
@@ -22,7 +56,7 @@ pub struct FfmpegConfig {
     pub ffprobe_path: PathBuf,
     pub provider_version: String,
     pub process_timeout: Duration,
-    pub accelerator: Option<NvidiaVideoAcceleratorDescriptor>,
+    accelerator: Option<AcceleratorBinding>,
     available_video_encoders: BTreeSet<String>,
 }
 
@@ -71,8 +105,40 @@ impl FfmpegConfig {
     /// Binds this worker configuration to one NVIDIA device descriptor.
     #[must_use]
     pub fn with_accelerator(mut self, accelerator: NvidiaVideoAcceleratorDescriptor) -> Self {
-        self.accelerator = Some(accelerator);
+        self.accelerator = Some(AcceleratorBinding::Nvidia(accelerator));
         self
+    }
+
+    /// Binds this worker configuration to one VAAPI render node and its
+    /// probe-proven capability.
+    #[must_use]
+    pub fn with_vaapi_device(mut self, binding: VaapiDeviceBinding) -> Self {
+        self.accelerator = Some(AcceleratorBinding::Vaapi(binding));
+        self
+    }
+
+    /// The accelerator this worker bound, if any. `None` means a software worker.
+    #[must_use]
+    pub const fn accelerator(&self) -> Option<&AcceleratorBinding> {
+        self.accelerator.as_ref()
+    }
+
+    /// The bound NVIDIA device, or `None` on a software or VAAPI worker.
+    #[must_use]
+    pub const fn nvidia(&self) -> Option<&NvidiaVideoAcceleratorDescriptor> {
+        match &self.accelerator {
+            Some(AcceleratorBinding::Nvidia(descriptor)) => Some(descriptor),
+            Some(AcceleratorBinding::Vaapi(_)) | None => None,
+        }
+    }
+
+    /// The bound VAAPI device, or `None` on a software or NVIDIA worker.
+    #[must_use]
+    pub const fn vaapi(&self) -> Option<&VaapiDeviceBinding> {
+        match &self.accelerator {
+            Some(AcceleratorBinding::Vaapi(binding)) => Some(binding),
+            Some(AcceleratorBinding::Nvidia(_)) | None => None,
+        }
     }
 }
 
@@ -202,7 +268,8 @@ pub fn video_codec_args(
         "libx265" => video_codec_args_x265(profile),
         "libsvtav1" => video_codec_args_svtav1(profile),
         "libaom-av1" => video_codec_args_libaom(profile),
-        "hevc_nvenc" => video_codec_args_nvenc(profile),
+        NVENC_HEVC_ENCODER => video_codec_args_nvenc(profile),
+        VAAPI_HEVC_ENCODER => video_codec_args_vaapi(profile),
         other => Err(FfmpegError::OutputFactsMismatch(format!(
             "unknown video encoder `{other}`"
         ))),
@@ -310,6 +377,39 @@ fn video_codec_args_nvenc(profile: &TranscodeVideoProfile) -> Result<Vec<OsStrin
     if let Some(level) = &profile.codec_level {
         args.push(OsString::from("-level"));
         args.push(OsString::from(level));
+    }
+    Ok(args)
+}
+
+/// `hevc_vaapi` encoder arguments (spec §7).
+///
+/// `-rc_mode CQP` is always stated: `auto` is `FFmpeg`'s default, so relying on it
+/// would let rate control move with an `FFmpeg` or driver upgrade (ADR 0051 §5).
+/// `-profile:v` carries the operator's `codec_profile` **by name** — the option is
+/// int-typed but has named constants, so `FFmpeg` resolves `main10` and rejects an
+/// unknown name, which is exactly the behavior we want and needs no mapping table
+/// here. It is emitted only when set, because the uploaded surface format already
+/// selects the profile (spec §2.2) and inventing one would state a choice the
+/// operator did not make. There is no `-preset` (the encoder has none), no
+/// `-b:v 0` (CQP needs none), and no `-pix_fmt`: a VAAPI pixel format names a
+/// hardware surface and is carried by the upload filter.
+fn video_codec_args_vaapi(profile: &TranscodeVideoProfile) -> Result<Vec<OsString>, FfmpegError> {
+    if let Some(level) = &profile.codec_level {
+        return Err(FfmpegError::OutputFactsMismatch(format!(
+            "encoder `{VAAPI_HEVC_ENCODER}` accepts no codec_level; got `{level}`"
+        )));
+    }
+    let mut args = vec![
+        OsString::from("-c:v"),
+        OsString::from(VAAPI_HEVC_ENCODER),
+        OsString::from("-rc_mode"),
+        OsString::from("CQP"),
+        OsString::from("-qp"),
+        required_quality(profile.qp, "qp", &profile.encoder)?,
+    ];
+    if let Some(codec_profile) = &profile.codec_profile {
+        args.push(OsString::from("-profile:v"));
+        args.push(OsString::from(codec_profile));
     }
     Ok(args)
 }
@@ -423,7 +523,7 @@ pub async fn run_ffmpeg_transcode(
 
     let mut command = Command::new(&config.ffmpeg_path);
     command.arg("-hide_banner").arg("-nostdin").arg("-n");
-    append_nvidia_input_args(
+    append_hardware_input_args(
         &mut command,
         config,
         profile,
@@ -484,17 +584,71 @@ pub async fn run_ffmpeg_transcode(
     probe_output(config, output, container, codec, profile).await
 }
 
-fn append_nvidia_input_args(
+/// Pre-input arguments that bind the command to a device. A `copy_video` request
+/// emits `-c:v copy` and touches no encoder, so it needs no device at all.
+fn append_hardware_input_args(
     command: &mut Command,
     config: &FfmpegConfig,
     profile: &TranscodeVideoProfile,
     source_codec: &str,
     copy_video: bool,
 ) -> Result<(), FfmpegError> {
-    if copy_video || profile.encoder != "hevc_nvenc" {
+    if copy_video {
         return Ok(());
     }
-    let Some(accelerator) = &config.accelerator else {
+    match profile.encoder.as_str() {
+        NVENC_HEVC_ENCODER => append_nvidia_input_args(command, config, profile, source_codec),
+        VAAPI_HEVC_ENCODER => append_vaapi_input_args(command, config, profile, source_codec),
+        _ => Ok(()),
+    }
+}
+
+/// VAAPI pre-input arguments (spec §7).
+///
+/// The bound render node is named at open time either way — that naming, not the
+/// PCI readback, is where VAAPI binding strength comes from (ADR 0051 §1). A
+/// software-decoded source only needs the device (`-vaapi_device`); a VAAPI-decoded
+/// one additionally pins the decode hardware and demands hardware output frames,
+/// which makes `FFmpeg` error rather than silently decode in software (spec §2.2).
+/// Unlike `CUVID` there is no per-codec decoder name to select: `-hwaccel vaapi`
+/// plus the codec's own decoder is the whole selection (spec §3).
+fn append_vaapi_input_args(
+    command: &mut Command,
+    config: &FfmpegConfig,
+    profile: &TranscodeVideoProfile,
+    source_codec: &str,
+) -> Result<(), FfmpegError> {
+    let Some(binding) = config.vaapi() else {
+        return Err(FfmpegError::OutputFactsMismatch(format!(
+            "`{VAAPI_HEVC_ENCODER}` request reached an ffmpeg worker with no bound VAAPI device"
+        )));
+    };
+    if !profile.decode.is_vaapi() {
+        command.arg("-vaapi_device").arg(&binding.render_node);
+        return Ok(());
+    }
+    if !VAAPI_VIDEO_DECODERS.contains(&source_codec) {
+        return Err(FfmpegError::UnsupportedInput(format!(
+            "VAAPI decode does not support source codec `{source_codec}`"
+        )));
+    }
+    command
+        .arg("-hwaccel")
+        .arg("vaapi")
+        .arg("-hwaccel_device")
+        .arg(&binding.render_node)
+        .arg("-hwaccel_output_format")
+        .arg("vaapi");
+    Ok(())
+}
+
+fn append_nvidia_input_args(
+    command: &mut Command,
+    config: &FfmpegConfig,
+    profile: &TranscodeVideoProfile,
+    source_codec: &str,
+) -> Result<(), FfmpegError> {
+    let Some(accelerator) = config.nvidia() else {
         return Err(FfmpegError::OutputFactsMismatch(
             "hevc_nvenc request reached an unbound ffmpeg worker".to_owned(),
         ));
@@ -529,9 +683,61 @@ fn video_filter_args(
     if copy_video {
         return Ok(Vec::new());
     }
-    if profile.encoder != "hevc_nvenc" {
-        return Ok(scale_args(profile, src_width, src_height));
+    match profile.encoder.as_str() {
+        NVENC_HEVC_ENCODER => nvenc_filter_args(profile, src_width, src_height),
+        VAAPI_HEVC_ENCODER => vaapi_filter_args(profile, src_width, src_height),
+        _ => Ok(scale_args(profile, src_width, src_height)),
     }
+}
+
+/// VAAPI frame transfers are explicit in both directions (spec §7).
+///
+/// A software-decoded source uploads with `format=<surface>,hwupload`. A
+/// VAAPI-decoded source is already in hardware frames and takes **no** filter:
+/// inserting one would download and re-upload every frame, and restating the
+/// surface format the decoder chose is not this layer's call.
+fn vaapi_filter_args(
+    profile: &TranscodeVideoProfile,
+    src_width: u32,
+    src_height: u32,
+) -> Result<Vec<OsString>, FfmpegError> {
+    let surface_format = vaapi_surface_format(profile)?;
+    if exceeds_dimension_caps(profile, src_width, src_height) {
+        return Err(FfmpegError::OutputFactsMismatch(format!(
+            "profile `{}` caps output at {}x{} but the source is {src_width}x{src_height}, and \
+             `{VAAPI_HEVC_ENCODER}` has no verified scale filter in this slice",
+            profile.name,
+            profile.max_width.unwrap_or(u32::MAX),
+            profile.max_height.unwrap_or(u32::MAX),
+        )));
+    }
+    if profile.decode.is_vaapi() {
+        return Ok(Vec::new());
+    }
+    Ok(vec![
+        OsString::from("-vf"),
+        OsString::from(format!("format={surface_format},hwupload")),
+    ])
+}
+
+/// A VAAPI `pixel_format` names a hardware **surface** format, not the software
+/// format the other encoders take. `nv12` and `p010` are the two the `HEVC_VAAPI`
+/// descriptor allows and the two spec §2.2 verified end to end.
+fn vaapi_surface_format(profile: &TranscodeVideoProfile) -> Result<&str, FfmpegError> {
+    match profile.pixel_format.as_deref() {
+        None | Some("nv12") => Ok("nv12"),
+        Some("p010") => Ok("p010"),
+        Some(other) => Err(FfmpegError::OutputFactsMismatch(format!(
+            "unsupported VAAPI surface format `{other}` (nv12 or p010)"
+        ))),
+    }
+}
+
+fn nvenc_filter_args(
+    profile: &TranscodeVideoProfile,
+    src_width: u32,
+    src_height: u32,
+) -> Result<Vec<OsString>, FfmpegError> {
     let pixel_format = match profile.pixel_format.as_deref() {
         None | Some("yuv420p") => "nv12",
         Some("yuv420p10le") => "p010le",
@@ -556,6 +762,18 @@ fn video_filter_args(
     Ok(vec![OsString::from("-vf"), OsString::from(filter)])
 }
 
+/// True when the source exceeds either dimension cap the profile sets. A missing
+/// cap is unbounded, so a single-dimension cap is honored independently — matching
+/// `scale_args` and the planner.
+fn exceeds_dimension_caps(
+    profile: &TranscodeVideoProfile,
+    src_width: u32,
+    src_height: u32,
+) -> bool {
+    src_width > profile.max_width.unwrap_or(u32::MAX)
+        || src_height > profile.max_height.unwrap_or(u32::MAX)
+}
+
 fn scale_filter(
     profile: &TranscodeVideoProfile,
     src_width: u32,
@@ -563,7 +781,7 @@ fn scale_filter(
 ) -> Option<String> {
     let cap_width = profile.max_width.unwrap_or(u32::MAX);
     let cap_height = profile.max_height.unwrap_or(u32::MAX);
-    if src_width <= cap_width && src_height <= cap_height {
+    if !exceeds_dimension_caps(profile, src_width, src_height) {
         return None;
     }
     Some(format!(
@@ -861,6 +1079,31 @@ pub async fn probe_input(config: &FfmpegConfig, path: &Path) -> Result<InputProb
     })
 }
 
+/// The pixel format `ffprobe` must report for an output conforming to `profile`.
+///
+/// Software and NVENC profiles name a software format, which is what lands in the
+/// file. A VAAPI profile names the hardware *surface* format the encoder consumes,
+/// and spec §2.2 measured what each one writes: `nv12` → `yuv420p`, `p010` →
+/// `yuv420p10le`. Comparing the surface name against the file's format would
+/// reject every conforming VAAPI encode.
+fn expected_output_pixel_format(
+    profile: &TranscodeVideoProfile,
+) -> Result<Option<&str>, FfmpegError> {
+    if profile.encoder != VAAPI_HEVC_ENCODER {
+        return Ok(profile.pixel_format.as_deref());
+    }
+    if profile.pixel_format.is_none() {
+        return Ok(None);
+    }
+    match vaapi_surface_format(profile)? {
+        "nv12" => Ok(Some("yuv420p")),
+        "p010" => Ok(Some("yuv420p10le")),
+        other => Err(FfmpegError::OutputFactsMismatch(format!(
+            "no output pixel format is recorded for VAAPI surface format `{other}`"
+        ))),
+    }
+}
+
 async fn probe_output(
     config: &FfmpegConfig,
     path: &Path,
@@ -937,13 +1180,13 @@ async fn probe_output(
     // Validate pixel format when constrained. An unknown (empty) output
     // pixel_format under a constraint is non-conforming — fail fast, matching
     // validate_copy_video_preconditions.
-    if let Some(expected_pf) = &profile.pixel_format {
+    if let Some(expected_pf) = expected_output_pixel_format(profile)? {
         if pixel_format.is_empty() {
             return Err(FfmpegError::OutputFactsMismatch(format!(
                 "expected pixel_format {expected_pf}, but output pixel_format is unknown"
             )));
         }
-        if &pixel_format != expected_pf {
+        if pixel_format != expected_pf {
             return Err(FfmpegError::OutputFactsMismatch(format!(
                 "expected pixel_format {expected_pf}, got {pixel_format}"
             )));

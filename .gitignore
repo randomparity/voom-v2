@@ -11,6 +11,10 @@ docs/superpowers/plans/
 **/*.rs.bk
 Cargo.lock.bak
 
+# insta review artifacts (accepted snapshots are committed; pending ones are not)
+**/*.snap.new
+**/.*.pending-snap
+
 # Local scratch and Python bytecode
 /.tmp/
 __pycache__/

@@ -2629,6 +2629,7 @@ name = "voom-ffmpeg-worker"
 version = "0.1.0-dev"
 dependencies = [
  "blake3",
+ "insta",
  "libc",
  "serde",
  "serde_json",

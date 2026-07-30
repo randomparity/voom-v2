@@ -2,10 +2,17 @@
     clippy::print_stdout,
     reason = "ffmpeg-worker advertises readiness with BOUND addr=..."
 )]
+#![cfg_attr(
+    test,
+    expect(
+        clippy::unwrap_used,
+        reason = "tests use direct unwraps for assertion plumbing"
+    )
+)]
 
 use voom_ffmpeg_worker::{
-    ALL_VIDEO_ENCODERS, DEFAULT_PROCESS_TIMEOUT, FfmpegConfig, operation_handler, preflight,
-    preflight_from_process_env,
+    ALL_VIDEO_ENCODERS, AcceleratorBinding, DEFAULT_PROCESS_TIMEOUT, FfmpegConfig,
+    VaapiDeviceBinding, operation_handler, preflight, preflight_from_process_env,
 };
 use voom_worker_protocol::{
     HttpServer, LocalWorkerBound, NvidiaVideoAcceleratorDescriptor,
@@ -17,10 +24,9 @@ use voom_worker_protocol::{
 async fn main() -> Result<(), WorkerStartupError> {
     let credentials = load_worker_credentials_from_env()?;
     let preflight = preflight_from_process_env().map_err(WorkerStartupError::dependency)?;
-    let nvidia = preflight.nvidia.clone().map(accelerator_descriptor);
-    let vaapi = preflight.vaapi.clone().map(vaapi_accelerator_descriptor);
-    let accelerator = advertised_accelerator(nvidia.clone(), vaapi)?;
-    let config = ffmpeg_config_from_preflight(preflight, nvidia);
+    let binding = bound_accelerator(&preflight)?;
+    let accelerator = binding.as_ref().map(advertised_accelerator);
+    let config = ffmpeg_config_from_preflight(preflight, binding);
     let bind = load_worker_bind_addr_from_env()?;
 
     let server = HttpServer::new(credentials, operation_handler(config));
@@ -69,24 +75,50 @@ fn accelerator_descriptor(nvidia: preflight::NvidiaPreflight) -> NvidiaVideoAcce
     }
 }
 
-/// Tags the one device this worker bound, if any.
+/// The one device this worker bound, if any.
 ///
 /// One worker binds one accelerator, so both backends being configured is a
 /// configuration error rather than something to silently pick between. Preflight
-/// already refuses it; this keeps the invariant visible where the descriptor is
-/// built instead of leaving an unreachable arm.
-fn advertised_accelerator(
-    nvidia: Option<NvidiaVideoAcceleratorDescriptor>,
-    vaapi: Option<VaapiVideoAcceleratorDescriptor>,
-) -> Result<Option<VideoAcceleratorDescriptor>, WorkerStartupError> {
-    match (nvidia, vaapi) {
+/// already refuses it; deciding it once here means neither the advertised
+/// descriptor nor the command builder can later disagree about which device is
+/// bound.
+fn bound_accelerator(
+    preflight: &preflight::FfmpegPreflight,
+) -> Result<Option<AcceleratorBinding>, WorkerStartupError> {
+    match (&preflight.nvidia, &preflight.vaapi) {
         (None, None) => Ok(None),
-        (Some(nvidia), None) => Ok(Some(VideoAcceleratorDescriptor::Nvidia(nvidia))),
-        (None, Some(vaapi)) => Ok(Some(VideoAcceleratorDescriptor::Vaapi(vaapi))),
+        (Some(nvidia), None) => Ok(Some(AcceleratorBinding::Nvidia(accelerator_descriptor(
+            nvidia.clone(),
+        )))),
+        (None, Some(vaapi)) => Ok(Some(AcceleratorBinding::Vaapi(vaapi_device_binding(
+            vaapi.clone(),
+        )))),
         (Some(nvidia), Some(vaapi)) => Err(WorkerStartupError::dependency(format!(
             "worker bound both NVIDIA {} and VAAPI PCI {}; run one worker per device",
             nvidia.device_uuid, vaapi.pci_address
         ))),
+    }
+}
+
+/// Tags the bound device for the `BOUND` readiness line. The render node stays out
+/// of the advertised payload: the control plane schedules on the PCI address, and a
+/// node path is a local detail of the worker that resolved it.
+fn advertised_accelerator(binding: &AcceleratorBinding) -> VideoAcceleratorDescriptor {
+    match binding {
+        AcceleratorBinding::Nvidia(nvidia) => VideoAcceleratorDescriptor::Nvidia(nvidia.clone()),
+        AcceleratorBinding::Vaapi(vaapi) => {
+            VideoAcceleratorDescriptor::Vaapi(vaapi.descriptor.clone())
+        }
+    }
+}
+
+/// Pairs the probe-proven capability with the render node the probes ran on, so
+/// command generation can name that node for `-vaapi_device` / `-hwaccel_device`
+/// without re-resolving the PCI address.
+fn vaapi_device_binding(vaapi: preflight::VaapiPreflight) -> VaapiDeviceBinding {
+    VaapiDeviceBinding {
+        render_node: vaapi.render_node.clone(),
+        descriptor: vaapi_accelerator_descriptor(vaapi),
     }
 }
 
@@ -111,7 +143,7 @@ fn vaapi_accelerator_descriptor(
 
 fn ffmpeg_config_from_preflight(
     preflight: preflight::FfmpegPreflight,
-    accelerator: Option<NvidiaVideoAcceleratorDescriptor>,
+    binding: Option<AcceleratorBinding>,
 ) -> FfmpegConfig {
     let available_video_encoders: Vec<String> = ALL_VIDEO_ENCODERS
         .iter()
@@ -125,8 +157,9 @@ fn ffmpeg_config_from_preflight(
         DEFAULT_PROCESS_TIMEOUT,
     )
     .with_available_video_encoders(available_video_encoders);
-    match accelerator {
-        Some(accelerator) => config.with_accelerator(accelerator),
+    match binding {
+        Some(AcceleratorBinding::Nvidia(nvidia)) => config.with_accelerator(nvidia),
+        Some(AcceleratorBinding::Vaapi(vaapi)) => config.with_vaapi_device(vaapi),
         None => config,
     }
 }

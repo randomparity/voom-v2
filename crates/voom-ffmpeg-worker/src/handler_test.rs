@@ -67,6 +67,144 @@ async fn one_shot_nvenc_request_requires_configured_run_local_worker() {
     );
 }
 
+/// A `hevc_vaapi` profile with a VAAPI decode mode, as migration 0030 stores one.
+fn vaapi_profile(decode: voom_core::VideoDecodeMode) -> TranscodeVideoProfile {
+    TranscodeVideoProfile {
+        name: "hevc-vaapi".to_owned(),
+        target_codec: "hevc".to_owned(),
+        encoder: "hevc_vaapi".to_owned(),
+        crf: None,
+        cq: None,
+        qp: Some(24),
+        preset: None,
+        tune: None,
+        codec_profile: None,
+        codec_level: None,
+        pixel_format: Some("nv12".to_owned()),
+        max_width: None,
+        max_height: None,
+        decode,
+        copy_compatible: false,
+    }
+}
+
+fn vaapi_binding(root: &Path, decoders: Vec<String>) -> VaapiDeviceBinding {
+    VaapiDeviceBinding {
+        render_node: root.join("renderD129"),
+        descriptor: voom_worker_protocol::VaapiVideoAcceleratorDescriptor {
+            pci_address: "0000:f4:00.0".to_owned(),
+            device_name: "radeonsi".to_owned(),
+            driver_version: "Mesa Gallium 26.1.5 (radeonsi, strix_halo)".to_owned(),
+            encoders: vec!["hevc_vaapi".to_owned()],
+            decoders,
+            max_sessions: 1,
+        },
+    }
+}
+
+/// A VAAPI transcode is only legal on a worker the scheduler bound to a device.
+/// An unassigned one used to be treated as merely "non-software" and rejected with
+/// the software worker's message, which told the operator nothing about VAAPI.
+#[tokio::test]
+async fn one_shot_vaapi_request_requires_configured_run_local_worker() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("input.mkv");
+    let mut request = request(dir.path(), &input).await;
+    request.profile = vaapi_profile(voom_core::VideoDecodeMode::default());
+
+    let err = validate_video_hardware_binding(&request, &config(dir.path()), "h264").unwrap_err();
+
+    assert!(
+        err.to_string()
+            .contains("voom worker run-local --kind ffmpeg --vaapi-device"),
+        "{err}"
+    );
+}
+
+/// The assignment must name the device this worker actually bound. VAAPI identity
+/// is the PCI address (ADR 0051 §1), so both it and the derived token are checked:
+/// a mismatch means the scheduler leased a different device than the one
+/// `-vaapi_device` would open.
+#[tokio::test]
+async fn vaapi_assignment_for_another_device_is_rejected() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("input.mkv");
+    let mut request = request(dir.path(), &input).await;
+    request.profile = vaapi_profile(voom_core::VideoDecodeMode::default());
+    request.hardware_assignment = Some(VideoHardwareAssignment::vaapi(
+        "vaapi:pci-0000:03:00.0",
+        "0000:03:00.0",
+    ));
+    let config = config(dir.path()).with_vaapi_device(vaapi_binding(
+        dir.path(),
+        vec!["h264".to_owned(), "hevc".to_owned()],
+    ));
+
+    let err = validate_video_hardware_binding(&request, &config, "h264").unwrap_err();
+
+    assert!(err.to_string().contains("0000:03:00.0"), "{err}");
+    assert!(err.to_string().contains("0000:f4:00.0"), "{err}");
+}
+
+#[tokio::test]
+async fn assigned_vaapi_work_on_an_unbound_worker_is_rejected() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("input.mkv");
+    let mut request = request(dir.path(), &input).await;
+    request.profile = vaapi_profile(voom_core::VideoDecodeMode::default());
+    request.hardware_assignment = Some(VideoHardwareAssignment::vaapi(
+        "vaapi:pci-0000:f4:00.0",
+        "0000:f4:00.0",
+    ));
+
+    let err = validate_video_hardware_binding(&request, &config(dir.path()), "h264").unwrap_err();
+
+    assert!(err.to_string().contains("unbound"), "{err}");
+}
+
+/// Advertised decode capability is probe-proven per codec (ADR 0051 §2), so a
+/// `vaapi`-decode request for a codec this driver build never decoded must fail
+/// rather than let ffmpeg discover it mid-encode.
+#[tokio::test]
+async fn vaapi_decode_requires_a_probe_proven_decoder_for_the_source_codec() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("input.mkv");
+    let mut request = request(dir.path(), &input).await;
+    request.profile = vaapi_profile(voom_core::VideoDecodeMode::vaapi());
+    request.hardware_assignment = Some(VideoHardwareAssignment::vaapi(
+        "vaapi:pci-0000:f4:00.0",
+        "0000:f4:00.0",
+    ));
+    let config =
+        config(dir.path()).with_vaapi_device(vaapi_binding(dir.path(), vec!["hevc".to_owned()]));
+
+    validate_video_hardware_binding(&request, &config, "hevc").unwrap();
+    let err = validate_video_hardware_binding(&request, &config, "av1").unwrap_err();
+
+    assert!(err.to_string().contains("av1"), "{err}");
+    assert!(err.to_string().contains("0000:f4:00.0"), "{err}");
+}
+
+/// ADR 0049 §5, applied to the new backend: a device-bound worker does not run
+/// software video work, so it cannot occupy a GPU with an encode any worker could
+/// have done.
+#[tokio::test]
+async fn a_vaapi_bound_worker_refuses_software_video_work() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("input.mkv");
+    let request = request(dir.path(), &input).await;
+    let config =
+        config(dir.path()).with_vaapi_device(vaapi_binding(dir.path(), vec!["hevc".to_owned()]));
+
+    let err = validate_video_hardware_binding(&request, &config, "hevc").unwrap_err();
+
+    assert!(
+        err.to_string()
+            .contains("software video work requires an unbound software worker"),
+        "{err}"
+    );
+}
+
 #[tokio::test]
 async fn output_path_escape_is_config_invalid() {
     let dir = tempfile::tempdir().unwrap();

@@ -117,6 +117,18 @@ pub struct VaapiVideoHardwareAssignment {
     pub pci_address: String,
 }
 
+/// The hardware token naming the VAAPI device at `pci_address`.
+///
+/// The token is derived from the PCI address rather than stored on the descriptor,
+/// because the address is the identity and a render-node number is not (ADR 0051
+/// §1). Both the scheduler that leases the device and the worker that verifies an
+/// assignment against the device it bound must spell it identically, so the
+/// derivation lives here with the assignment type rather than at each call site.
+#[must_use]
+pub fn vaapi_hardware_token(pci_address: &str) -> String {
+    format!("vaapi:pci-{pci_address}")
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "backend", rename_all = "snake_case")]
 pub enum VideoHardwareAssignment {

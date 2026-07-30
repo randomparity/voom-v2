@@ -113,6 +113,10 @@ pub struct FfmpegPreflight {
 
 impl FfmpegPreflight {
     /// Returns true when the named video encoder was detected during preflight.
+    ///
+    /// `hevc_vaapi` is answered from the probe-proven encoder list rather than from
+    /// "a VAAPI device is bound": capability tracks the loaded driver build, so only
+    /// an encode that ran on this device in this process counts (ADR 0051 §2).
     #[must_use]
     pub fn has_encoder(&self, encoder: &str) -> bool {
         match encoder {
@@ -120,6 +124,12 @@ impl FfmpegPreflight {
             "libsvtav1" => !self.svtav1_encoder.is_empty(),
             "libaom-av1" => !self.libaom_encoder.is_empty(),
             "hevc_nvenc" => self.nvidia.is_some(),
+            VAAPI_HEVC_ENCODER => self.vaapi.as_ref().is_some_and(|vaapi| {
+                vaapi
+                    .encoders
+                    .iter()
+                    .any(|proven| proven == VAAPI_HEVC_ENCODER)
+            }),
             "aac" => !self.aac_encoder.is_empty(),
             "libopus" => !self.opus_encoder.is_empty(),
             _ => false,

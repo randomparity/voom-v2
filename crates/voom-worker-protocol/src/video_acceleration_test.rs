@@ -93,6 +93,22 @@ fn vaapi_requirement_and_assignment_are_tagged_vaapi_and_round_trip() {
     );
 }
 
+/// The scheduler leases a device by token and the worker verifies an assignment
+/// against the device it bound, so both must derive the token from the PCI address
+/// the same way. A drift here would look like every assignment naming the wrong
+/// device.
+#[test]
+fn vaapi_hardware_token_is_derived_from_the_pci_address() {
+    assert_eq!(
+        vaapi_hardware_token("0000:f4:00.0"),
+        "vaapi:pci-0000:f4:00.0"
+    );
+    assert_eq!(
+        VideoHardwareAssignment::vaapi(vaapi_hardware_token("0000:03:00.0"), "0000:03:00.0"),
+        VideoHardwareAssignment::vaapi("vaapi:pci-0000:03:00.0", "0000:03:00.0")
+    );
+}
+
 /// An unknown field on a VAAPI payload is a producer/consumer version skew, and
 /// silently dropping it would let a device-identity field go unnoticed.
 #[test]
