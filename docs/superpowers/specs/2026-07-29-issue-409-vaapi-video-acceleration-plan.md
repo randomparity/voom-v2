@@ -371,6 +371,8 @@ compatible device. Depends on Tasks 2–5.
 - `crates/voom-policy/src/compile/lower/operations.rs`
 - `crates/voom-policy/src/data/video_profile.rs` (+ its `_test.rs`)
 - `crates/voom-plan/src/planner/transcode_video/profile.rs` (+ its `_test.rs`)
+- `crates/voom-plan/src/planner/transcode_video/mod.rs` (+ `planner_test.rs`) — carries
+  the open finding below
 - `crates/voom-control-plane/src/cases/policy/tool_preflight.rs` (+ its `_test.rs`)
 - `crates/voom-control-plane/src/transcode/{dispatch,resolve,mod}.rs` (+ their `_test.rs`)
 - `crates/voom-control-plane/src/cases/execution/leases_test.rs`
@@ -392,6 +394,15 @@ compatible device. Depends on Tasks 2–5.
    cross-device assignment. These are unit tests — the acceptance host has one render
    node (spec §10), and that limit is recorded, not skipped.
 4. Assert dispatch repeats endpoint identity validation before acquiring the lease.
+5. **Open finding carried from Task 2 (review of `a983c196`) — must be fixed here.**
+   `transcode_video_notes` in `planner/transcode_video/mod.rs` derives its quality note
+   as `crf` else `cq`, with `cq.unwrap_or_default()`. A VAAPI profile has `crf: None`,
+   `cq: None`, `qp: Some(n)`, so it emits **`cq=0`** — a false statement about the
+   profile in operator-facing plan and compliance-report output. Task 2 correctly made
+   the *preset* note conditional in this same function but left the quality note with no
+   `qp` branch. Write a failing test asserting a qp-domain profile's notes contain
+   `qp=<n>` and no `cq=`, then make the quality note exhaustive over the three domains.
+   Do not reintroduce `unwrap_or_default()` as a stand-in for an absent value.
 
 ### Acceptance
 
