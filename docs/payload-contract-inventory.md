@@ -30,6 +30,7 @@ contract when the same value is a field of a typed root above — see the
 | commit_intents.target_row_epochs | T | repo/media/commit_safety_gate/finalize.rs:393 `decode_target_row_epochs` (`from_str::<Vec<TargetRowEpochTriple>>`) | `TargetRowEpochTriple` (tuple newtype, no named fields) | — | codecs.rs | safe by construction; NOT in scope |
 | commit_intents.accepted_evidence_ids | T | repo/media/commit_safety_gate/authorize.rs:362 / abort_list.rs:279 (`Vec<EvidenceId>`) | `EvidenceId` (id newtype) | — | n/a | safe by construction; NOT in scope |
 | worker_capabilities.{codecs,hardware,artifact_access}; worker_grants.{can_execute,can_access_read,can_access_write,denies}; workflow_file_phase_summaries.ticket_ids; policy_media_snapshot_inputs.{audio_languages,subtitle_languages,health_flags} | T | executor.rs:1403 `json_string_array_contains` (`Vec<String>`); workflow_summaries.rs:622 (`Vec<u64>`); policy_inputs.rs:813–815 `json_value` → `Vec<String>` | `Vec<String>` / `Vec<u64>` | — | n/a | scalar element types, no named-field surface; NOT in scope |
+| worker_capabilities.extra (`$.accelerator` only) | T-upstream | store: repo/execution/workers.rs (`JsonValue`); typed: video_hardware.rs `from_value` → `NvidiaVideoAcceleratorDescriptor` | `NvidiaVideoAcceleratorDescriptor`; `VideoAcceleratorDescriptor` (`backend`-tagged, VAAPI only) | `VaapiVideoAcceleratorDescriptor` | worker-protocol/src/video_acceleration.rs | complete: both descriptor structs reject unknown fields; NVIDIA is stored untagged so pre-#409 rows keep parsing, VAAPI is stored tagged (#409) |
 | tickets.payload | T-upstream | store: repo/execution/tickets.rs:532 (`JsonValue`); typed: ticket_payload.rs:83 `from_value` → `WorkflowTicketPayload` | `WorkflowTicketPayload` | `EffectiveTiming` (named struct); `OperationKind` (unit enum — no surface) | ticket_payload.rs, timing.rs | add attr+tests to `WorkflowTicketPayload` and `EffectiveTiming` (Task 4) |
 | tickets.result | T-upstream | store: repo/execution/tickets.rs (`JsonValue`); typed: compliance.rs `decode_compliance_extract_result`, workflow ticket-result normalization, and finalize.rs policy-verification adoption | `ExecuteExtractAudioOutputReport`; `ComplianceLegacyAudioExtractResult`; `PolicyVerificationTicketResult` | — (historical `commit_recovery_required` is intentionally opaque `JsonValue`; `PolicyVerificationTicketStatus` is a unit enum) | audio/mod.rs, cases/policy/compliance.rs, workflow/ticket_results.rs | complete: published and complete historical scalar wire forms reject unknown fields; pre-#337 audio serialization compatibility remains; policy-verification results retain their initial durable shape and reject unknown fields (#334) |
 | policy_versions.compiled_json | T-upstream | store: repo/policy/policies.rs:483 (`JsonValue`); typed: plans.rs:291 `deserialize_stored_compiled_policy` → `CompiledPolicy`, used by accepted-version planning and compliance execution | `CompiledPolicy` | all distinct content structs for `CompiledOperation`, `TrackFilter`, `CompiledCondition`, and `CompiledValue`; `CompiledConfig`; `CompiledPhase`; `CompiledRunIfWire`; `CompiledRule`; `PolicyProvenance`; diagnostic/span structs; `VideoProfileSettings`; `TranscodeVideoProfile` | compile/compiled.rs, data/video_profile.rs, diagnostic.rs, syntax/span.rs, voom-core/src/media/transcode_video_profile.rs | complete: all 41 tagged variants retain their exact wire shape and reject unknown fields; current and historical compiled versions remain readable (#344) |
@@ -58,28 +59,41 @@ control plane and a bundled worker binary on opposite sides of the change cannot
 exchange a bound payload. ADR 0013's binary-before-DB ordering applies: the pair
 is lock-stepped (ADR 0002/0016) and must be deployed together, never mixed.
 
-The durable side is deliberately unchanged. `worker_capabilities.extra`'s
+The NVIDIA durable side is deliberately unchanged. `worker_capabilities.extra`'s
 `accelerator` object still holds the **untagged** `NvidiaVideoAcceleratorDescriptor`
-— `local_worker.rs` serializes the inner struct, not the enum — so pre-#409 rows
-keep parsing and the store's capacity SQL
-(`json_extract(extra, '$.accelerator.max_sessions')` and `'$.accelerator.hardware_token'`
-in `repo/execution/workers.rs`) keeps resolving. Pinned by
+for NVIDIA — `local_worker.rs` serializes the inner struct, not the enum — so
+pre-#409 rows keep parsing byte-for-byte. Pinned by
 `local_worker_test.rs::nvidia_capability_records_the_untagged_descriptor_token_and_capacity`
 and by the byte-for-byte payload pin in
 `video_acceleration_test.rs::software_and_nvidia_payloads_are_byte_for_byte_unchanged`.
 
-**Open reconciliation (pre-existing, from #400):** `worker_capabilities.extra` is
-classified Class P below ("passthrough `JsonValue` — no typed read"), but
-`extra.accelerator` *is* read typed, at
-`crates/voom-control-plane/src/video_hardware.rs` (`from_value` →
-`NvidiaVideoAcceleratorDescriptor`). The defining file
-`crates/voom-worker-protocol/src/video_acceleration.rs` is therefore added to
-`scripts/payload-contract-scope.txt` so the guard covers the descriptor,
-requirement, and assignment structs. Promoting the column's own classification
-from P to T-upstream is left to whoever makes a VAAPI descriptor durable in
-`extra` — that change must first decide whether the stored object stays untagged
-(as today) or gains the `backend` tag, which the capacity SQL above would need to
-tolerate.
+**Reconciliation closed (#409).** `worker_capabilities.extra` was classified
+Class P ("passthrough `JsonValue` — no typed read") while `extra.accelerator` was
+in fact read typed at `crates/voom-control-plane/src/video_hardware.rs`
+(`from_value` → `NvidiaVideoAcceleratorDescriptor`). #409 makes a second
+descriptor durable there, so the column is **promoted P → T-upstream**: its typed
+surface is the accelerator descriptor structs in
+`crates/voom-worker-protocol/src/video_acceleration.rs`, which is in
+`scripts/payload-contract-scope.txt`. The rest of the column stays passthrough —
+`endpoint` and `secret` are read as untyped strings.
+
+The stored `accelerator` object is **untagged for NVIDIA and `backend`-tagged for
+VAAPI**, and a reader tells them apart by the presence of `backend`. The asymmetry
+is deliberate: pre-#409 NVIDIA rows are durable and untagged, so tagging NVIDIA
+retroactively would make them unreadable, while an untagged VAAPI object would be
+indistinguishable from a malformed NVIDIA one.
+
+The capacity SQL no longer needs to tolerate either shape. It read the grouping
+key from `json_extract(extra, '$.accelerator.hardware_token')`, a field only the
+NVIDIA descriptor carries, so a VAAPI descriptor silently produced no capacity row
+and the bound device never received work. #409 changes those three queries in
+`crates/voom-store/src/repo/execution/workers.rs` to group on
+`json_extract(hardware, '$[0]')` — the capability's own token column, which is
+where ADR 0049 §4 puts the stable token and what ADR 0049 §6 defines capacity
+across. `max_sessions` is still read from the descriptor, because both descriptors
+carry it. A capability with an accelerator descriptor and no `hardware` token is
+now a loud `CONFIG_INVALID` rather than a silent zero. Pinned by
+`local_worker_test.rs::vaapi_capability_records_the_tagged_descriptor_token_and_capacity`.
 
 ### Transitive typed closure (named-field `Deserialize` sub-structs)
 
@@ -155,7 +169,7 @@ Reconciliation result: [x] all discovered roots map to Tasks 3–5 (no new task 
 
 ## Class P (passthrough JsonValue — no typed read, no risk)
 
-worker_capabilities.extra; worker_grants.max_parallel;
+worker_grants.max_parallel;
 artifact_handles.{allowed_access_modes,source_lineage};
 artifact_commit_records.report; artifact_verifications.report;
 audio_extract_operation_outputs.{probe_payload,result_facts}

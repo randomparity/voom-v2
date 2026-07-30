@@ -1043,10 +1043,14 @@ pub enum WorkerCommand {
     RunLocal {
         #[arg(long)]
         kind: LocalWorkerKindArg,
-        #[arg(long)]
+        #[arg(long, conflicts_with = "vaapi_device")]
         nvidia_device: Option<String>,
         #[arg(long, requires = "nvidia_device")]
         nvidia_max_sessions: Option<u32>,
+        #[arg(long)]
+        vaapi_device: Option<String>,
+        #[arg(long, requires = "vaapi_device")]
+        vaapi_max_sessions: Option<u32>,
     },
 }
 

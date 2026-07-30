@@ -4,8 +4,8 @@
 //! `tests/local_worker_lifecycle.rs`.
 
 use super::{
-    LocalWorkerKind, NvidiaLocalWorkerConfig, bound_nvidia_accelerator, is_full_nvidia_uuid,
-    validate_local_worker_config,
+    LocalAcceleratorConfig, LocalWorkerKind, NvidiaLocalWorkerConfig, VaapiLocalWorkerConfig,
+    is_full_nvidia_uuid, validate_bound_accelerator, validate_local_worker_config,
 };
 #[cfg(target_os = "linux")]
 use super::{kill_and_wait, process_group_has_members};
@@ -24,30 +24,85 @@ fn ffmpeg_maps_binary_name_and_operations() {
     );
 }
 
+fn nvidia_config(device_uuid: &str, max_sessions: u32) -> LocalAcceleratorConfig {
+    LocalAcceleratorConfig::Nvidia(NvidiaLocalWorkerConfig {
+        device_uuid: device_uuid.to_owned(),
+        max_sessions,
+    })
+}
+
+fn vaapi_config(pci_address: &str, max_sessions: u32) -> LocalAcceleratorConfig {
+    LocalAcceleratorConfig::Vaapi(VaapiLocalWorkerConfig {
+        pci_address: pci_address.to_owned(),
+        max_sessions,
+    })
+}
+
 #[test]
 fn nvidia_config_requires_ffmpeg_full_uuid_and_bounded_sessions() {
-    let valid = NvidiaLocalWorkerConfig {
-        device_uuid: "GPU-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".to_owned(),
-        max_sessions: 16,
-    };
+    let valid = nvidia_config("GPU-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", 16);
     assert!(validate_local_worker_config(LocalWorkerKind::Ffmpeg, Some(&valid)).is_ok());
-    assert!(is_full_nvidia_uuid(&valid.device_uuid));
+    assert!(is_full_nvidia_uuid(
+        "GPU-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+    ));
     assert!(validate_local_worker_config(LocalWorkerKind::Mkvtoolnix, Some(&valid)).is_err());
 
     for device_uuid in ["0", "GPU-short", "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"] {
-        let invalid = NvidiaLocalWorkerConfig {
-            device_uuid: device_uuid.to_owned(),
-            max_sessions: 1,
-        };
+        let invalid = nvidia_config(device_uuid, 1);
         assert!(validate_local_worker_config(LocalWorkerKind::Ffmpeg, Some(&invalid)).is_err());
     }
     for max_sessions in [0, 17] {
-        let invalid = NvidiaLocalWorkerConfig {
-            max_sessions,
-            ..valid.clone()
-        };
+        let invalid = nvidia_config("GPU-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", max_sessions);
         assert!(validate_local_worker_config(LocalWorkerKind::Ffmpeg, Some(&invalid)).is_err());
     }
+}
+
+/// A VAAPI worker is configured with a PCI address, never a render-node path or
+/// ordinal (ADR 0051 §1): node numbers are enumeration order and renumber, so an
+/// accepted ordinal would give the worker an identity that cannot survive a
+/// reboot. The session bound is ADR 0049 §3's, adopted unchanged.
+#[test]
+fn vaapi_config_requires_ffmpeg_a_pci_address_and_bounded_sessions() {
+    let valid = vaapi_config("0000:f4:00.0", 16);
+    assert!(validate_local_worker_config(LocalWorkerKind::Ffmpeg, Some(&valid)).is_ok());
+    assert!(validate_local_worker_config(LocalWorkerKind::Mkvtoolnix, Some(&valid)).is_err());
+
+    for pci_address in [
+        "/dev/dri/renderD128",
+        "renderD128",
+        "0",
+        "f4:00.0",
+        "0000:F4:00.0",
+    ] {
+        let invalid = vaapi_config(pci_address, 1);
+        let error = validate_local_worker_config(LocalWorkerKind::Ffmpeg, Some(&invalid))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("PCI address"),
+            "`{pci_address}` must be rejected as not a PCI address: {error}"
+        );
+    }
+    for max_sessions in [0, 17] {
+        let invalid = vaapi_config("0000:f4:00.0", max_sessions);
+        assert!(validate_local_worker_config(LocalWorkerKind::Ffmpeg, Some(&invalid)).is_err());
+    }
+}
+
+/// The hardware token is the scheduler's device match key and the accelerator
+/// claim's primary key, so its shape is contract. The VAAPI descriptor carries no
+/// token field of its own, so it is derived here from the PCI address; keeping the
+/// `<backend>:<identity>` shape means one claim table serves both backends.
+#[test]
+fn accelerator_hardware_tokens_are_derived_per_backend() {
+    assert_eq!(
+        nvidia_config("GPU-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", 1).hardware_token(),
+        "nvidia:GPU-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+    );
+    assert_eq!(
+        vaapi_config("0000:f4:00.0", 1).hardware_token(),
+        "vaapi:pci-0000:f4:00.0"
+    );
 }
 
 fn nvidia_descriptor() -> NvidiaVideoAcceleratorDescriptor {
@@ -62,32 +117,45 @@ fn nvidia_descriptor() -> NvidiaVideoAcceleratorDescriptor {
     }
 }
 
-/// `start_local_worker` configures NVIDIA devices only, so a worker reporting a
-/// VAAPI device bound itself to hardware nobody asked for. Accepting it would
-/// register a capability the scheduler cannot honor, so startup must fail.
-#[test]
-fn bound_accelerator_narrows_to_nvidia_and_rejects_an_unconfigured_vaapi_device() {
-    assert!(bound_nvidia_accelerator(None).unwrap().is_none());
-
-    let nvidia = VideoAcceleratorDescriptor::Nvidia(nvidia_descriptor());
-    assert_eq!(
-        bound_nvidia_accelerator(Some(&nvidia)).unwrap(),
-        Some(&nvidia_descriptor())
-    );
-
-    let vaapi = VideoAcceleratorDescriptor::Vaapi(VaapiVideoAcceleratorDescriptor {
-        pci_address: "0000:03:00.0".to_owned(),
-        device_name: "AMD Radeon RX 7600".to_owned(),
-        driver_version: "Mesa Gallium driver 25.1.7".to_owned(),
+fn vaapi_descriptor() -> VaapiVideoAcceleratorDescriptor {
+    VaapiVideoAcceleratorDescriptor {
+        pci_address: "0000:f4:00.0".to_owned(),
+        device_name: "AMD Radeon 8060S Graphics".to_owned(),
+        driver_version: "Mesa Gallium driver 26.1.5".to_owned(),
         encoders: vec!["hevc_vaapi".to_owned()],
-        decoders: vec!["hevc".to_owned()],
+        decoders: vec!["h264".to_owned(), "hevc".to_owned(), "av1".to_owned()],
         max_sessions: 2,
-    });
-    let error = bound_nvidia_accelerator(Some(&vaapi)).unwrap_err();
+    }
+}
+
+/// A worker that bound a device the supervisor did not configure has bound
+/// hardware nobody asked for, whichever backend it is. Recording it would
+/// register a capability the scheduler cannot honor against a claim the
+/// supervisor does not hold, so startup must fail rather than absorb it.
+#[test]
+fn bound_accelerator_must_match_the_configured_device() {
+    let nvidia = VideoAcceleratorDescriptor::Nvidia(nvidia_descriptor());
+    let vaapi = VideoAcceleratorDescriptor::Vaapi(vaapi_descriptor());
+    let nvidia_configured = nvidia_config("GPU-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", 4);
+    let vaapi_configured = vaapi_config("0000:f4:00.0", 2);
+
+    assert!(validate_bound_accelerator(None, None).is_ok());
+    assert!(validate_bound_accelerator(Some(&nvidia), Some(&nvidia_configured)).is_ok());
+    assert!(validate_bound_accelerator(Some(&vaapi), Some(&vaapi_configured)).is_ok());
+
+    let error = validate_bound_accelerator(Some(&vaapi), Some(&nvidia_configured)).unwrap_err();
     assert!(
-        error.to_string().contains("0000:03:00.0"),
+        error.to_string().contains("0000:f4:00.0"),
         "the diagnostic must name the device the worker bound: {error}"
     );
+    assert!(validate_bound_accelerator(Some(&nvidia), Some(&vaapi_configured)).is_err());
+    assert!(validate_bound_accelerator(Some(&vaapi), None).is_err());
+    assert!(validate_bound_accelerator(None, Some(&vaapi_configured)).is_err());
+
+    let wrong_device = vaapi_config("0000:aa:00.0", 2);
+    assert!(validate_bound_accelerator(Some(&vaapi), Some(&wrong_device)).is_err());
+    let wrong_capacity = vaapi_config("0000:f4:00.0", 3);
+    assert!(validate_bound_accelerator(Some(&vaapi), Some(&wrong_capacity)).is_err());
 }
 
 /// Retyping `LocalWorkerBound.accelerator` must not disturb what the NVIDIA path
@@ -114,7 +182,7 @@ async fn nvidia_capability_records_the_untagged_descriptor_token_and_capacity() 
         worker.id,
         "s3cret",
         "127.0.0.1:9000".parse().unwrap(),
-        Some(&descriptor),
+        Some(&VideoAcceleratorDescriptor::Nvidia(descriptor.clone())),
     )
     .await
     .unwrap();
@@ -165,6 +233,76 @@ async fn nvidia_capability_records_the_untagged_descriptor_token_and_capacity() 
         .find(|candidate| candidate.worker_id == worker.id)
         .unwrap();
     assert_eq!(candidate.max_parallel, 4);
+}
+
+/// The VAAPI descriptor carries no `hardware_token` field, so a stored extras
+/// object cannot supply one. Per-device capacity must still resolve: a worker that
+/// binds a GPU and then gets a capacity of zero never receives work, and the
+/// device silently sits idle — the exact silent failure issue #409 forbids. So the
+/// token comes from the capability's own `hardware` column for both backends.
+///
+/// The stored descriptor is `backend`-tagged for VAAPI while NVIDIA's stays
+/// untagged, because pre-#409 NVIDIA rows are durable and untagged; a reader tells
+/// them apart by the presence of `backend`.
+#[tokio::test]
+async fn vaapi_capability_records_the_tagged_descriptor_token_and_capacity() {
+    let (cp, _tmp) = crate::cases::cp().await;
+    let worker = cp
+        .register_worker(voom_store::repo::workers::NewWorker {
+            name: "vaapi-descriptor-fixture".to_owned(),
+            kind: voom_core::WorkerKind::Local,
+            registered_at: time::OffsetDateTime::UNIX_EPOCH,
+            node_id: None,
+        })
+        .await
+        .unwrap();
+    let descriptor = VideoAcceleratorDescriptor::Vaapi(vaapi_descriptor());
+
+    cp.record_local_worker_registry(
+        LocalWorkerKind::Ffmpeg,
+        worker.id,
+        "s3cret",
+        "127.0.0.1:9001".parse().unwrap(),
+        Some(&descriptor),
+    )
+    .await
+    .unwrap();
+
+    let capabilities = cp
+        .workers
+        .operation_capability_history(&TicketOperation::new("transcode_video").unwrap())
+        .await
+        .unwrap();
+    let capability = capabilities
+        .iter()
+        .find(|capability| capability.worker_id == worker.id)
+        .unwrap();
+    assert_eq!(
+        capability.extra["accelerator"]["backend"], "vaapi",
+        "a VAAPI descriptor is stored tagged so a reader can tell it from NVIDIA"
+    );
+    assert_eq!(
+        capability.extra["accelerator"]["pci_address"],
+        "0000:f4:00.0"
+    );
+    assert_eq!(
+        capability.hardware,
+        vec!["vaapi:pci-0000:f4:00.0".to_owned()]
+    );
+
+    let candidates = cp
+        .workers
+        .operation_candidates(&TicketOperation::new("transcode_video").unwrap())
+        .await
+        .unwrap();
+    let candidate = candidates
+        .iter()
+        .find(|candidate| candidate.worker_id == worker.id)
+        .unwrap();
+    assert_eq!(
+        candidate.max_parallel, 2,
+        "a bound VAAPI worker must get the device's capacity, not zero"
+    );
 }
 
 #[test]

@@ -119,7 +119,8 @@ pub use audio::{
 };
 pub use cases::policy::plans::{plan_compiled_policy_with_input, plan_policy_source_with_input};
 pub use local_worker::{
-    LocalWorkerHandle, LocalWorkerKind, NvidiaLocalWorkerConfig, RunningLocalWorker,
+    LocalAcceleratorConfig, LocalWorkerHandle, LocalWorkerKind, NvidiaLocalWorkerConfig,
+    RunningLocalWorker, VaapiLocalWorkerConfig,
 };
 pub use remux::{ExecuteRemuxInput, ExecuteRemuxReport, RemuxDispatcher};
 pub use transcode::{

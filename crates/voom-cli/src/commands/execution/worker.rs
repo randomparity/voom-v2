@@ -6,7 +6,8 @@ use serde::Serialize;
 use serde_json::json;
 use voom_control_plane::workers::{NewWorkerCapabilityDraft, RegisterWorkerForNodeInput};
 use voom_control_plane::{
-    ControlPlane, LocalWorkerHandle, LocalWorkerKind, NvidiaLocalWorkerConfig,
+    ControlPlane, LocalAcceleratorConfig, LocalWorkerHandle, LocalWorkerKind,
+    NvidiaLocalWorkerConfig, VaapiLocalWorkerConfig,
 };
 use voom_core::{ErrorCode, NodeId, TicketOperation, VoomError, WorkerId};
 use voom_store::repo::workers::{WorkerInspection, WorkerNodeContext};
@@ -83,13 +84,19 @@ pub async fn run(database_url: &str, local: Local, command: WorkerCommand) -> io
             kind,
             nvidia_device,
             nvidia_max_sessions,
+            vaapi_device,
+            vaapi_max_sessions,
         } => {
             run_local(
                 database_url,
                 local,
                 kind,
-                nvidia_device,
-                nvidia_max_sessions,
+                RunLocalAcceleratorArgs {
+                    nvidia_device,
+                    nvidia_max_sessions,
+                    vaapi_device,
+                    vaapi_max_sessions,
+                },
             )
             .await
         }
@@ -136,25 +143,48 @@ fn emit_ready_line(handle: &LocalWorkerHandle) -> io::Result<()> {
     out.flush()
 }
 
+/// The device-binding flags `run-local` accepts. Grouped so the accelerator
+/// choice stays one argument rather than four parallel `Option`s.
+#[derive(Debug)]
+struct RunLocalAcceleratorArgs {
+    nvidia_device: Option<String>,
+    nvidia_max_sessions: Option<u32>,
+    vaapi_device: Option<String>,
+    vaapi_max_sessions: Option<u32>,
+}
+
+impl RunLocalAcceleratorArgs {
+    /// Clap already rejects both device flags together, so at most one arm hits.
+    fn into_control_plane(self) -> Option<LocalAcceleratorConfig> {
+        if let Some(device_uuid) = self.nvidia_device {
+            return Some(LocalAcceleratorConfig::Nvidia(NvidiaLocalWorkerConfig {
+                device_uuid,
+                max_sessions: self.nvidia_max_sessions.unwrap_or(1),
+            }));
+        }
+        self.vaapi_device.map(|pci_address| {
+            LocalAcceleratorConfig::Vaapi(VaapiLocalWorkerConfig {
+                pci_address,
+                max_sessions: self.vaapi_max_sessions.unwrap_or(1),
+            })
+        })
+    }
+}
+
 async fn run_local(
     database_url: &str,
     local: Local,
     kind: LocalWorkerKindArg,
-    nvidia_device: Option<String>,
-    nvidia_max_sessions: Option<u32>,
+    accelerator: RunLocalAcceleratorArgs,
 ) -> io::Result<i32> {
     let cp = match open_control_plane("worker", database_url, &local).await? {
         Ok(cp) => cp,
         Err(code) => return Ok(code),
     };
-    let nvidia = nvidia_device.map(|device_uuid| NvidiaLocalWorkerConfig {
-        device_uuid,
-        max_sessions: nvidia_max_sessions.unwrap_or(1),
-    });
     run_local_supervise(
         &cp,
         kind.to_control_plane(),
-        nvidia,
+        accelerator.into_control_plane(),
         shutdown_signal(),
         local,
     )
@@ -168,11 +198,11 @@ async fn run_local(
 async fn run_local_supervise(
     cp: &ControlPlane,
     kind: LocalWorkerKind,
-    nvidia: Option<NvidiaLocalWorkerConfig>,
+    accelerator: Option<LocalAcceleratorConfig>,
     shutdown: impl Future<Output = ()>,
     local: Local,
 ) -> io::Result<i32> {
-    let running = match cp.start_local_worker_configured(kind, nvidia).await {
+    let running = match cp.start_local_worker_configured(kind, accelerator).await {
         Ok(running) => running,
         Err(err) => {
             tracing::warn!(kind = kind_label(kind), error = %err, "local worker preflight failed");
