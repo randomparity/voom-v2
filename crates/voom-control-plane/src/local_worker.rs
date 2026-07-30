@@ -21,20 +21,16 @@ use tokio::time::timeout;
 use voom_core::{TicketOperation, VoomError, WorkerId, WorkerKind, WorkerStatus};
 use voom_store::repo::accelerator_claims::{NewAcceleratorClaim, SqliteAcceleratorClaimRepo};
 use voom_store::repo::workers::{NewCapability, NewGrant, NewWorker};
-use voom_worker_protocol::{LocalWorkerBound, VideoAcceleratorDescriptor};
+use voom_worker_protocol::{
+    LocalWorkerBound, VIDEOTOOLBOX_PREFLIGHT_BUDGET, VideoAcceleratorDescriptor,
+};
 
 use crate::ControlPlane;
 use crate::worker_process::{WorkerCommand, bundled_worker_command_from, random_hex_128};
 
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(10);
 pub(crate) const NVIDIA_STARTUP_TIMEOUT: Duration = Duration::from_mins(5);
-const VIDEOTOOLBOX_PREFLIGHT_MAX_STAGES: u64 = 25;
-const VIDEOTOOLBOX_PROBE_TIMEOUT_SECONDS: u64 = 15;
-const VIDEOTOOLBOX_PREFLIGHT_COORDINATION_SECONDS: u64 = 30;
-pub(crate) const VIDEOTOOLBOX_STARTUP_TIMEOUT: Duration = Duration::from_secs(
-    VIDEOTOOLBOX_PREFLIGHT_MAX_STAGES * VIDEOTOOLBOX_PROBE_TIMEOUT_SECONDS
-        + VIDEOTOOLBOX_PREFLIGHT_COORDINATION_SECONDS,
-);
+pub(crate) const VIDEOTOOLBOX_STARTUP_TIMEOUT: Duration = VIDEOTOOLBOX_PREFLIGHT_BUDGET;
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 const SELF_HEAL_SCAN_LIMIT: u32 = 1000;
 

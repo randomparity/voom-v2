@@ -35,6 +35,9 @@ pub struct ExecuteTranscodeVideoInput {
     pub source_location_id: Option<FileLocationId>,
     pub staging_root: PathBuf,
     pub target_dir: PathBuf,
+    /// Scheduler-selected accelerator binding carried into the worker request
+    /// and validated against the worker result.
+    pub hardware_assignment: Option<VideoHardwareAssignment>,
     /// The resolved video encode profile plus output container, threaded from
     /// the ticket payload (binding.rs embeds it from the planner node payload).
     pub resolved: resolve::ResolvedProfile,
@@ -166,6 +169,7 @@ pub(crate) async fn execute_transcode_video_with_dispatchers(
     );
     request.input.video_codec = source_video_codec;
     request.input.video_pixel_format = source_video_pixel_format;
+    request.hardware_assignment = input.hardware_assignment.clone();
     let result = transcode.dispatch_transcode_video(request.clone()).await?;
     dispatch::validate_result(&selected, &request, &result)?;
     dispatch::require_output_file_matches_result(&staging_path, &result).await?;

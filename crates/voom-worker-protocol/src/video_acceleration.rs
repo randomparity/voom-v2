@@ -2,6 +2,19 @@
 
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
+use std::time::Duration;
+
+/// Per-process deadline for one `VideoToolbox` preflight stage.
+pub const VIDEOTOOLBOX_PROBE_TIMEOUT: Duration = Duration::from_secs(15);
+/// Maximum sequential process stages in the `VideoToolbox` preflight graph.
+pub const VIDEOTOOLBOX_PREFLIGHT_MAX_STAGES: u64 = 4 + 4 + 3 + 5 + 5 + 3 + 5;
+/// Allowance for process coordination outside the sequential stage deadlines.
+pub const VIDEOTOOLBOX_PREFLIGHT_COORDINATION_SECONDS: u64 = 30;
+/// Supervisor deadline covering the complete `VideoToolbox` preflight graph.
+pub const VIDEOTOOLBOX_PREFLIGHT_BUDGET: Duration = Duration::from_secs(
+    VIDEOTOOLBOX_PREFLIGHT_MAX_STAGES * VIDEOTOOLBOX_PROBE_TIMEOUT.as_secs()
+        + VIDEOTOOLBOX_PREFLIGHT_COORDINATION_SECONDS,
+);
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

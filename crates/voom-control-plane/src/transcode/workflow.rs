@@ -2,7 +2,7 @@ use serde_json::Value;
 #[cfg(test)]
 use voom_core::OperationKind;
 use voom_core::VoomError;
-use voom_worker_protocol::{TranscodeVideoRequest, TranscodeVideoResult, VideoHardwareAssignment};
+use voom_worker_protocol::{TranscodeVideoRequest, TranscodeVideoResult};
 
 use crate::cases::policy::compliance::committed_source_dir;
 use crate::transcode::{
@@ -72,6 +72,7 @@ pub(crate) async fn dispatch_control_plane_transcode(
             &context.artifact_roots.target_dir,
             source_file_version_id,
         ),
+        hardware_assignment,
         resolved: crate::transcode::resolve::ResolvedProfile {
             profile: resolved_profile,
             output_container,
@@ -83,7 +84,6 @@ pub(crate) async fn dispatch_control_plane_transcode(
         input,
         &RuntimeTranscodeDispatcher {
             context: context.runtime_dispatch_context(),
-            hardware_assignment,
         },
         &crate::artifact::verify::BundledVerifyArtifactDispatcher,
         &crate::transcode::commit::BundledTranscodeResultProbeDispatcher,
@@ -108,16 +108,14 @@ pub(crate) async fn dispatch_control_plane_transcode(
 
 struct RuntimeTranscodeDispatcher<'a> {
     context: RuntimeDispatchContext<'a>,
-    hardware_assignment: Option<VideoHardwareAssignment>,
 }
 
 #[async_trait::async_trait]
 impl TranscodeVideoDispatcher for RuntimeTranscodeDispatcher<'_> {
     async fn dispatch_transcode_video(
         &self,
-        mut request: TranscodeVideoRequest,
+        request: TranscodeVideoRequest,
     ) -> Result<TranscodeVideoResult, VoomError> {
-        request.hardware_assignment = self.hardware_assignment.clone();
         let idempotency_key =
             workflow_idempotency_key(self.context.ticket_id, self.context.lease_id);
         let result = crate::transcode::dispatch::dispatch_transcode_video_with_client(

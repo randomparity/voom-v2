@@ -8,9 +8,9 @@ use std::{
     time::Duration,
 };
 use voom_core::NVIDIA_VIDEO_DECODERS;
-use voom_worker_protocol::VideoToolboxDecodeCapability;
+use voom_worker_protocol::{VIDEOTOOLBOX_PROBE_TIMEOUT, VideoToolboxDecodeCapability};
 
-const PROBE_TIMEOUT: Duration = Duration::from_secs(15);
+const PROBE_TIMEOUT: Duration = VIDEOTOOLBOX_PROBE_TIMEOUT;
 const IDENTITY_POLL_WINDOW: Duration = Duration::from_secs(2);
 const IDENTITY_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const NVIDIA_DEVICE_ENV: &str = "VOOM_NVIDIA_DEVICE";
@@ -19,12 +19,6 @@ const NVIDIA_SMI_BIN_ENV: &str = "VOOM_NVIDIA_SMI_BIN";
 const DEFAULT_NVIDIA_SMI_BIN: &str = "nvidia-smi";
 const VIDEOTOOLBOX_RESOURCE_ID_ENV: &str = "VOOM_VIDEOTOOLBOX_RESOURCE_ID";
 const VIDEOTOOLBOX_MAX_SESSIONS_ENV: &str = "VOOM_VIDEOTOOLBOX_MAX_SESSIONS";
-pub const VIDEOTOOLBOX_PREFLIGHT_MAX_STAGES: u64 = 25;
-pub const VIDEOTOOLBOX_PREFLIGHT_COORDINATION_SECONDS: u64 = 30;
-pub const VIDEOTOOLBOX_PREFLIGHT_BUDGET: Duration = Duration::from_secs(
-    VIDEOTOOLBOX_PREFLIGHT_MAX_STAGES * PROBE_TIMEOUT.as_secs()
-        + VIDEOTOOLBOX_PREFLIGHT_COORDINATION_SECONDS,
-);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NvidiaPreflightConfig {
@@ -390,7 +384,7 @@ struct VideoToolboxPlatform {
 fn probe_videotoolbox_platform(
     config: &VideoToolboxPreflightConfig,
 ) -> Result<VideoToolboxPlatform, FFmpegPreflightError> {
-    let ioreg = command_text(
+    let ioreg = redacted_command_text(
         "ioreg platform identity",
         command_output(Command::new("/usr/sbin/ioreg").args([
             "-rd1",
@@ -404,7 +398,7 @@ fn probe_videotoolbox_platform(
             "VideoToolbox platform resource does not match supervisor configuration".to_owned(),
         ));
     }
-    let hardware = command_text(
+    let hardware = redacted_command_text(
         "system_profiler hardware identity",
         command_output(Command::new("/usr/sbin/system_profiler").arg("SPHardwareDataType")),
     )?;
@@ -761,6 +755,7 @@ fn prove_videotoolbox_capacity_group(
     encoder: &str,
     pixel_format: &str,
 ) -> Result<(), FFmpegPreflightError> {
+    let deadline = std::time::Instant::now() + PROBE_TIMEOUT;
     let mut children = Vec::new();
     let mut progress_paths = Vec::new();
     for session in 0..max_sessions {
@@ -786,10 +781,33 @@ fn prove_videotoolbox_capacity_group(
             }
         }
     }
-    require_overlapping_first_frames(name, &mut children, &progress_paths)?;
-    while let Some(child) = children.pop() {
-        let output = wait_child_output(child, PROBE_TIMEOUT, name)?;
-        command_text(name, Ok(output))?;
+    require_overlapping_first_frames(name, &mut children, &progress_paths, deadline)?;
+    wait_videotoolbox_capacity_children(name, &mut children, deadline)
+}
+
+fn wait_videotoolbox_capacity_children(
+    name: &str,
+    children: &mut Vec<Child>,
+    deadline: std::time::Instant,
+) -> Result<(), FFmpegPreflightError> {
+    while !children.is_empty() {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            kill_and_reap_all(children);
+            return Err(FFmpegPreflightError::Failed(format!(
+                "VideoToolbox {name} capacity group exceeded {} seconds",
+                PROBE_TIMEOUT.as_secs()
+            )));
+        }
+        let Some(child) = children.pop() else {
+            break;
+        };
+        let result = wait_child_output(child, remaining, name)
+            .and_then(|output| command_text(name, Ok(output)));
+        if let Err(error) = result {
+            kill_and_reap_all(children);
+            return Err(error);
+        }
     }
     Ok(())
 }
@@ -842,15 +860,20 @@ fn require_overlapping_first_frames(
     name: &str,
     children: &mut Vec<Child>,
     progress_paths: &[PathBuf],
+    deadline: std::time::Instant,
 ) -> Result<(), FFmpegPreflightError> {
-    let started = std::time::Instant::now();
-    while started.elapsed() < PROBE_TIMEOUT {
-        for child in &mut *children {
-            if let Some(status) = child.try_wait().map_err(|error| {
-                FFmpegPreflightError::Failed(format!(
-                    "polling VideoToolbox {name} capacity process: {error}"
-                ))
-            })? {
+    while std::time::Instant::now() < deadline {
+        for index in 0..children.len() {
+            let status = match children[index].try_wait() {
+                Ok(status) => status,
+                Err(error) => {
+                    kill_and_reap_all(children);
+                    return Err(FFmpegPreflightError::Failed(format!(
+                        "polling VideoToolbox {name} capacity process: {error}"
+                    )));
+                }
+            };
+            if let Some(status) = status {
                 kill_and_reap_all(children);
                 return Err(FFmpegPreflightError::Failed(format!(
                     "VideoToolbox {name} capacity process exited {status} before overlap proof"
@@ -858,8 +881,7 @@ fn require_overlapping_first_frames(
             }
         }
         let all_started = progress_paths.iter().all(|path| {
-            std::fs::read_to_string(path)
-                .is_ok_and(|progress| progress.lines().any(|line| line.starts_with("frame=")))
+            std::fs::read_to_string(path).is_ok_and(|progress| progress_reports_frame(&progress))
         });
         if all_started {
             return Ok(());
@@ -870,6 +892,14 @@ fn require_overlapping_first_frames(
     Err(FFmpegPreflightError::Failed(format!(
         "VideoToolbox {name} capacity group did not report a first frame before deadline"
     )))
+}
+
+fn progress_reports_frame(progress: &str) -> bool {
+    progress.lines().any(|line| {
+        line.strip_prefix("frame=")
+            .and_then(|value| value.trim().parse::<u64>().ok())
+            .is_some_and(|frame| frame > 0)
+    })
 }
 
 struct VideoToolboxProbeDir {
@@ -1402,6 +1432,27 @@ fn command_text(
             text.trim()
         )))
     }
+}
+
+fn redacted_command_text(
+    command_name: &str,
+    output: std::io::Result<std::process::Output>,
+) -> Result<String, FFmpegPreflightError> {
+    let output = output.map_err(|err| {
+        FFmpegPreflightError::Failed(format!("{command_name} failed to start: {err}"))
+    })?;
+    if output.status.success() {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Ok(format!("{stdout}{stderr}"));
+    }
+    Err(FFmpegPreflightError::Failed(format!(
+        "{command_name} exited with status {}",
+        output
+            .status
+            .code()
+            .map_or_else(|| "signal".to_owned(), |code| code.to_string())
+    )))
 }
 
 fn command_output(command: &mut Command) -> io::Result<Output> {

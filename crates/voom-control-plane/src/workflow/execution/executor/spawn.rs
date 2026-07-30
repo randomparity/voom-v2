@@ -252,16 +252,15 @@ impl WorkflowExecutor {
             .operation_candidates(&TicketOperation::from(operation))
             .await?;
         let requirement = video_hardware_requirement(operation, payload)?;
-        if matches!(requirement, Some(VideoHardwareRequirement::Nvidia(_)))
-            && accelerator_runtimes.is_none()
-        {
+        let uses_accelerator = requirement_uses_accelerator(requirement.as_ref());
+        if uses_accelerator && accelerator_runtimes.is_none() {
             *accelerator_runtimes = Some(self.control_plane.live_policy_runtime_registry().await?);
         }
         let conflicts = conflicting_accelerator_tokens(&candidates)?;
         let mut workers = Vec::new();
         let mut assignments = HashMap::new();
         for candidate in candidates {
-            if matches!(requirement, Some(VideoHardwareRequirement::Nvidia(_)))
+            if uses_accelerator
                 && !accelerator_runtimes
                     .as_ref()
                     .is_some_and(|runtimes| runtimes.contains(candidate.worker_id))
@@ -363,6 +362,13 @@ impl WorkflowExecutor {
         history.insert(cache_key, tokens.clone());
         Ok(tokens)
     }
+}
+
+fn requirement_uses_accelerator(requirement: Option<&VideoHardwareRequirement>) -> bool {
+    matches!(
+        requirement,
+        Some(VideoHardwareRequirement::Nvidia(_) | VideoHardwareRequirement::VideoToolbox(_))
+    )
 }
 
 fn apply_hardware_assignment(

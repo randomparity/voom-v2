@@ -75,7 +75,7 @@ fn videotoolbox_config_requires_ffmpeg_and_bounded_sessions() {
 
 #[test]
 fn videotoolbox_startup_timeout_covers_the_preflight_budget() {
-    assert_eq!(VIDEOTOOLBOX_STARTUP_TIMEOUT, Duration::from_secs(405));
+    assert_eq!(VIDEOTOOLBOX_STARTUP_TIMEOUT, Duration::from_secs(465));
 }
 
 #[test]

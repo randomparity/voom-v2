@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use super::*;
+use voom_worker_protocol::{VIDEOTOOLBOX_PREFLIGHT_BUDGET, VIDEOTOOLBOX_PREFLIGHT_MAX_STAGES};
 
 #[test]
 fn preflight_rejects_missing_ffmpeg() {
@@ -24,9 +25,9 @@ fn nvidia_uuid_validation_rejects_ordinals_and_partial_tokens() {
 
 #[test]
 fn videotoolbox_stage_budget_matches_supervisor_deadline() {
-    assert_eq!(VIDEOTOOLBOX_PREFLIGHT_MAX_STAGES, 25);
+    assert_eq!(VIDEOTOOLBOX_PREFLIGHT_MAX_STAGES, 29);
     assert_eq!(PROBE_TIMEOUT, Duration::from_secs(15));
-    assert_eq!(VIDEOTOOLBOX_PREFLIGHT_BUDGET, Duration::from_secs(405));
+    assert_eq!(VIDEOTOOLBOX_PREFLIGHT_BUDGET, Duration::from_secs(465));
 }
 
 #[test]
@@ -45,6 +46,62 @@ fn platform_identity_hash_is_normalized_and_errors_do_not_disclose_raw_uuid() {
         .unwrap_err()
         .to_string();
     assert!(!error.contains(malformed));
+}
+
+#[cfg(unix)]
+#[test]
+fn failed_identity_command_redacts_partial_platform_output() {
+    let raw_uuid = "E4AD1C3F-8B4A-4E4E-A9AD-9A0123456789";
+    let output = Command::new("/bin/sh")
+        .args([
+            "-c",
+            &format!("printf '\"IOPlatformUUID\" = \"{raw_uuid}\"'; exit 1"),
+        ])
+        .output();
+
+    let error = redacted_command_text("ioreg platform identity", output)
+        .unwrap_err()
+        .to_string();
+
+    assert!(error.contains("ioreg platform identity exited with status 1"));
+    assert!(!error.contains(raw_uuid));
+}
+
+#[test]
+fn capacity_progress_requires_a_positive_frame() {
+    assert!(!progress_reports_frame("frame=0\nprogress=continue\n"));
+    assert!(progress_reports_frame("frame=1\nprogress=continue\n"));
+}
+
+#[cfg(unix)]
+#[test]
+fn capacity_failure_reaps_remaining_processes() {
+    let sleeper = Command::new("/bin/sh")
+        .args(["-c", "sleep 60"])
+        .spawn()
+        .unwrap();
+    let sleeper_pid = sleeper.id();
+    let failing = Command::new("/bin/sh")
+        .args(["-c", "exit 2"])
+        .spawn()
+        .unwrap();
+    let mut children = vec![sleeper, failing];
+
+    let result = wait_videotoolbox_capacity_children(
+        "test",
+        &mut children,
+        std::time::Instant::now() + Duration::from_secs(2),
+    );
+
+    assert!(result.is_err());
+    assert!(children.is_empty());
+    let status = Command::new("/bin/kill")
+        .args(["-0", &sleeper_pid.to_string()])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .unwrap();
+    assert!(!status.success());
 }
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]

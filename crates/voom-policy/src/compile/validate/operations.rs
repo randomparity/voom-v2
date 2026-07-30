@@ -380,13 +380,14 @@ impl Validator<'_> {
     ) -> Option<&'static str> {
         let codec = tokens.get(3).copied();
         match codec {
+            Some("h264") => Some("h264"),
             Some("hevc") => Some("hevc"),
             Some("av1") => Some("av1"),
             _ => {
                 self.error(
                     DiagnosticCode::UnsupportedTranscodeShape,
                     statement.span(),
-                    "transcode video target codec must be hevc or av1",
+                    "transcode video target codec must be h264, hevc, or av1",
                 );
                 None
             }

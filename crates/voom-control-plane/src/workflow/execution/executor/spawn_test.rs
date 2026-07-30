@@ -86,6 +86,18 @@ fn software_requirement_excludes_device_bound_workers() {
 }
 
 #[test]
+fn accelerator_runtime_loading_covers_nvidia_and_videotoolbox() {
+    let software = VideoHardwareRequirement::software();
+    let nvidia = VideoHardwareRequirement::nvidia("hevc_nvenc", None);
+    let videotoolbox = VideoHardwareRequirement::video_toolbox("hevc_videotoolbox", None);
+
+    assert!(!requirement_uses_accelerator(None));
+    assert!(!requirement_uses_accelerator(Some(&software)));
+    assert!(requirement_uses_accelerator(Some(&nvidia)));
+    assert!(requirement_uses_accelerator(Some(&videotoolbox)));
+}
+
+#[test]
 fn nvidia_requirement_requires_exact_encoder_and_decoder() {
     let requirement = VideoHardwareRequirement::nvidia("hevc_nvenc", Some("av1_cuvid".to_owned()));
     let conflicts = HashSet::new();

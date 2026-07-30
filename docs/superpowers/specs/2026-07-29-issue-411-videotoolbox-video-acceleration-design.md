@@ -323,15 +323,15 @@ inconclusive and also fails, because it did not prove overlap. Only
 first-frame evidence from every child, an all-live observation, and subsequent
 successful deadline-bounded exits prove the group.
 
-The complete plan has at most 25 sequential stages: four existing FFmpeg/
-FFprobe inventory stages, platform identity, hardware-accelerator inventory,
-filter inventory, five fixtures, five single decoder-format probes, three
-software-decode capacity groups, and five hardware-decode capacity groups.
+The complete plan has at most 29 sequential stages: four existing FFmpeg/
+FFprobe inventory stages, four platform probes, three VideoToolbox inventory
+probes, five fixtures, five single decoder-format probes, three software-decode
+capacity groups, and five hardware-decode capacity groups.
 With 15 seconds per stage plus 30 seconds of coordination, the supervisor
-deadline is 405 seconds:
+deadline is 465 seconds:
 
 ```text
-25 * 15 seconds + 30 seconds = 405 seconds
+29 * 15 seconds + 30 seconds = 465 seconds
 ```
 
 The stage count, deadline, and invariant live in code and remain below the

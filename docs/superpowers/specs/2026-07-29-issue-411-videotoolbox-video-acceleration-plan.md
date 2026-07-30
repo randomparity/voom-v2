@@ -196,7 +196,7 @@ Behavior:
 - Prove every advertised path at the declared capacity with realtime progress,
   first-frame evidence, an all-live observation, deadline-bounded success, and
   private temporary-fixture cleanup.
-- Derive the 405-second readiness deadline from 25 maximum sequential
+- Derive the 465-second readiness deadline from 29 maximum sequential
   15-second stages plus 30 seconds of coordination, and assert that the
   configured timeout covers that complete budget.
 - Recover same-boot claims only when both PID and process group are confirmed
@@ -213,7 +213,7 @@ Red tests and expected failure:
 - Inventory-only, missing encoder/filter, unusable codec/format, early-success,
   early-failure, non-overlap, timeout, and cleanup tests fail because current
   preflight has only NVIDIA probes.
-- A stage-budget assertion fails until the 25-stage maximum, per-stage
+- A stage-budget assertion fails until the 29-stage maximum, per-stage
   deadline, coordination allowance, and worker readiness timeout are connected
   in code.
 - Boot-change, live/reused PID, live orphan group, absent owner, and inspection
