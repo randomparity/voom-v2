@@ -103,7 +103,26 @@ impl ControlPlane {
             if runtimes.get_optional(candidate.worker_id).is_none() {
                 continue;
             }
-            match candidate_accelerator_descriptor(&candidate)? {
+            // ADR 0049 §6: a problem with one worker never escapes candidate
+            // projection as a job-fatal error. A descriptor this build cannot
+            // parse — a newer worker's backend tag, or a field added since —
+            // makes that one worker contribute no availability, which fails
+            // closed: dispatch still refuses it, and the operator gets
+            // "no worker advertises <backend>" instead of a repository error
+            // that blocks every policy on the fleet.
+            let descriptor = match candidate_accelerator_descriptor(&candidate) {
+                Ok(descriptor) => descriptor,
+                Err(error) => {
+                    tracing::warn!(
+                        worker_id = candidate.worker_id.0,
+                        %error,
+                        "skipping worker with an unreadable accelerator descriptor \
+                         during video hardware preflight"
+                    );
+                    continue;
+                }
+            };
+            match descriptor {
                 Some(VideoAcceleratorDescriptor::Nvidia(device)) => {
                     let has_encoder = device
                         .encoders

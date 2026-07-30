@@ -3,7 +3,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use secrecy::SecretString;
 use serde_json::json;
-use voom_core::{OperationKind, PROTOCOL_VERSION, TicketOperation, WorkerId};
+use voom_core::{OperationKind, PROTOCOL_VERSION, TicketOperation, VoomError, WorkerId};
 use voom_policy::{
     CompiledPolicy, DiagnosticSeverity, DiagnosticStage, PolicyDiagnostic, PolicyTool,
     SourceLocation, SourceSpan, compile_policy,
@@ -337,6 +337,53 @@ async fn a_vaapi_decode_policy_requires_at_least_one_probed_vaapi_decoder() {
     )
     .await;
     cp.preflight_policy_tools(&mut policy, &live_registry(&[&with_decoders]))
+        .await
+        .unwrap();
+}
+
+/// ADR 0049 §6 again, for the case a rolling upgrade actually produces: a worker
+/// advertising a backend tag this build has never heard of. Parsing it is an error,
+/// and letting that error escape would turn one unknown worker into a job-fatal
+/// failure for every policy on the fleet. It must instead contribute no
+/// availability, so a healthy sibling still satisfies the policy.
+#[tokio::test]
+async fn an_unreadable_descriptor_on_one_worker_does_not_fail_the_whole_fleet() {
+    let (cp, _tmp) = cp().await;
+    let operation = TicketOperation::from(OperationKind::TranscodeVideo);
+    let from_the_future = register_transcode_worker(
+        &cp,
+        "local-ffmpeg-unknown",
+        &operation,
+        vec!["qsv:pci-0000:00:02.0".to_owned()],
+        json!({ "accelerator": { "backend": "qsv", "device": "/dev/dri/renderD128" } }),
+        2,
+    )
+    .await;
+    let mut policy = vaapi_policy("");
+
+    // Alone, the unreadable worker leaves VAAPI unavailable — a clear preflight
+    // message, not a repository error.
+    let error = cp
+        .preflight_policy_tools(&mut policy, &live_registry(&[&from_the_future]))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error, VoomError::PolicyExecution(_)),
+        "expected a preflight failure, got: {error}"
+    );
+
+    // Beside a healthy VAAPI worker, the policy passes: the unknown worker did not
+    // poison the projection.
+    let healthy = register_transcode_worker(
+        &cp,
+        "local-ffmpeg-vaapi",
+        &operation,
+        vec!["vaapi:pci-0000:f4:00.0".to_owned()],
+        vaapi_accelerator_extra(&["hevc_vaapi"], &["h264", "hevc"]),
+        2,
+    )
+    .await;
+    cp.preflight_policy_tools(&mut policy, &live_registry(&[&from_the_future, &healthy]))
         .await
         .unwrap();
 }
