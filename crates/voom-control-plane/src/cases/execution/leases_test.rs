@@ -1,8 +1,9 @@
 use super::*;
 
 use time::{Duration as TDuration, OffsetDateTime};
-use voom_core::{FailureClass, JobId, TicketId, TicketOperation, VoomError};
+use voom_core::{FailureClass, JobId, TicketId, TicketOperation, VoomError, WorkerId};
 use voom_events::EventKind;
+use voom_store::repo::accelerator_claims::{NewAcceleratorClaim, SqliteAcceleratorClaimRepo};
 use voom_store::repo::events::{EventFilter, EventRepo, Page};
 use voom_store::repo::jobs::{JobState, NewJob};
 use voom_store::repo::leases::{LeaseAcquireOutcome, LeaseFilter, LeaseState};
@@ -117,6 +118,263 @@ async fn nvidia_worker(
     .unwrap();
     grant_capacity(cp, &worker, operation, max_sessions).await;
     worker
+}
+
+/// A VAAPI-bound worker as `local_worker.rs` records one: the token is derived from
+/// the PCI address, and the stored descriptor is `backend`-tagged and carries no
+/// `hardware_token` field of its own (ADR 0051 §1).
+async fn vaapi_worker(
+    cp: &crate::ControlPlane,
+    name: &str,
+    operation: &TicketOperation,
+    pci_address: &str,
+    max_sessions: u32,
+) -> Worker {
+    let worker = cp.register_worker(worker(name)).await.unwrap();
+    cp.record_capability(NewCapability {
+        worker_id: worker.id,
+        operation: operation.clone(),
+        codecs: Vec::new(),
+        hardware: vec![format!("vaapi:pci-{pci_address}")],
+        artifact_access: Vec::new(),
+        extra: serde_json::json!({
+            "accelerator": {
+                "backend": "vaapi",
+                "pci_address": pci_address,
+                "device_name": "AMD Radeon 8060S Graphics",
+                "driver_version": "Mesa Gallium 26.1.5 radeonsi",
+                "encoders": ["hevc_vaapi"],
+                "decoders": ["h264", "hevc", "av1"],
+                "max_sessions": max_sessions
+            }
+        }),
+    })
+    .await
+    .unwrap();
+    grant_capacity(cp, &worker, operation, max_sessions).await;
+    worker
+}
+
+async fn ready_transcode_tickets(cp: &crate::ControlPlane, count: usize) -> Vec<Ticket> {
+    let mut tickets = Vec::with_capacity(count);
+    for _ in 0..count {
+        let ticket = cp
+            .create_ticket(ticket("transcode_video", 2))
+            .await
+            .unwrap();
+        cp.mark_ready_if_unblocked(ticket.id, T0).await.unwrap();
+        tickets.push(ticket);
+    }
+    tickets
+}
+
+fn claim_for(
+    worker_id: WorkerId,
+    pci_address: &str,
+    pid: u32,
+    capacity: u32,
+) -> NewAcceleratorClaim {
+    NewAcceleratorClaim {
+        hardware_token: format!("vaapi:pci-{pci_address}"),
+        worker_id,
+        boot_id: "boot-id".to_owned(),
+        supervisor_pid: pid,
+        supervisor_start_ticks: u64::from(pid) * 10,
+        process_group_id: pid,
+        capacity,
+        claimed_at: T0,
+    }
+}
+
+/// Capacity is a property of the *device*, not of a worker process: two live workers
+/// bound to one render node must not each receive the declared limit (ADR 0049 §6).
+/// The VAAPI descriptor carries no `hardware_token` of its own, so this also proves
+/// the grouping key is the capability's own `hardware` column for both backends.
+#[tokio::test]
+async fn vaapi_capacity_is_exhausted_across_workers_sharing_one_device() {
+    let (cp, _tmp) = cp().await;
+    let operation = TicketOperation::new("transcode_video").unwrap();
+    let tickets = ready_transcode_tickets(&cp, 3).await;
+    let first = vaapi_worker(&cp, "vaapi-1", &operation, "0000:f4:00.0", 2).await;
+    let second = vaapi_worker(&cp, "vaapi-2", &operation, "0000:f4:00.0", 2).await;
+
+    for (ticket, holder) in [(&tickets[0], &first), (&tickets[1], &second)] {
+        cp.acquire_lease(NewLease {
+            ticket_id: ticket.id,
+            worker_id: holder.id,
+            ttl: TDuration::seconds(60),
+            now: T0,
+        })
+        .await
+        .unwrap();
+    }
+
+    let candidates = cp.workers.operation_candidates(&operation).await.unwrap();
+    assert_eq!(candidates.len(), 2);
+    assert!(
+        candidates
+            .iter()
+            .all(|candidate| candidate.active_leases == 2 && candidate.max_parallel == 2),
+        "both workers must observe the device's two held leases: {candidates:?}"
+    );
+
+    let before = cp.tickets().get(tickets[2].id).await.unwrap().unwrap();
+    let outcome = cp
+        .try_acquire_lease(NewLease {
+            ticket_id: tickets[2].id,
+            worker_id: first.id,
+            ttl: TDuration::seconds(60),
+            now: T0,
+        })
+        .await
+        .unwrap();
+
+    let LeaseAcquireOutcome::CapacityFull(saturation) = outcome else {
+        panic!("a saturated device must refuse a third lease");
+    };
+    assert_eq!(saturation.active_leases, 2);
+    assert_eq!(saturation.max_parallel, 2);
+    let after = cp.tickets().get(tickets[2].id).await.unwrap().unwrap();
+    assert_eq!(after.state, TicketState::Ready);
+    assert_eq!(
+        after.attempt, before.attempt,
+        "device saturation must not consume an attempt"
+    );
+}
+
+/// Two render nodes are two independent pools. The acceptance host has one node
+/// (spec §10), so this is unit-level rather than a real-media two-device run: a
+/// device saturated by its own leases must not make a sibling device unavailable.
+#[tokio::test]
+async fn vaapi_capacity_never_crosses_devices() {
+    let (cp, _tmp) = cp().await;
+    let operation = TicketOperation::new("transcode_video").unwrap();
+    let tickets = ready_transcode_tickets(&cp, 2).await;
+    let busy = vaapi_worker(&cp, "vaapi-busy", &operation, "0000:03:00.0", 1).await;
+    let idle = vaapi_worker(&cp, "vaapi-idle", &operation, "0000:f4:00.0", 1).await;
+
+    cp.acquire_lease(NewLease {
+        ticket_id: tickets[0].id,
+        worker_id: busy.id,
+        ttl: TDuration::seconds(60),
+        now: T0,
+    })
+    .await
+    .unwrap();
+
+    let candidates = cp.workers.operation_candidates(&operation).await.unwrap();
+    let busy_view = candidates
+        .iter()
+        .find(|candidate| candidate.worker_id == busy.id)
+        .unwrap();
+    let idle_view = candidates
+        .iter()
+        .find(|candidate| candidate.worker_id == idle.id)
+        .unwrap();
+    assert_eq!(busy_view.active_leases, 1);
+    assert_eq!(
+        idle_view.active_leases, 0,
+        "the other device holds no leases of its own"
+    );
+
+    cp.acquire_lease(NewLease {
+        ticket_id: tickets[1].id,
+        worker_id: idle.id,
+        ttl: TDuration::seconds(60),
+        now: T0,
+    })
+    .await
+    .unwrap();
+}
+
+/// After a supervisor's death is proven, recovery retires the old worker and the
+/// device must come back to the fleet, or a crashed supervisor would strand its GPU
+/// permanently. Recovery takes two durable steps, and this pins both: retiring the
+/// owner releases the device claim in the same transaction, so a replacement
+/// incarnation can take it immediately, while the dead worker's *held lease* still
+/// occupies the device until it is expired. Retirement deliberately does not cancel a
+/// lease — a lease is released by completion or by TTL expiry, so a worker that only
+/// looked dead cannot have work pulled out from under it.
+///
+/// Domain time is the explicit timestamp each call takes as `now`; the pool runs on
+/// real time, so nothing here pairs a paused tokio clock with `SqlitePool`.
+#[tokio::test]
+async fn a_retired_vaapi_owner_releases_its_device_to_a_replacement() {
+    let (cp, _tmp) = cp().await;
+    let operation = TicketOperation::new("transcode_video").unwrap();
+    let tickets = ready_transcode_tickets(&cp, 2).await;
+    let claims = SqliteAcceleratorClaimRepo::new(cp.pool_for_test().clone());
+    let dead = vaapi_worker(&cp, "vaapi-dead", &operation, "0000:f4:00.0", 1).await;
+    let mut tx = cp.pool_for_test().begin().await.unwrap();
+    claims
+        .claim_in_tx(&mut tx, claim_for(dead.id, "0000:f4:00.0", 4242, 1))
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    cp.acquire_lease(NewLease {
+        ticket_id: tickets[0].id,
+        worker_id: dead.id,
+        ttl: TDuration::seconds(60),
+        now: T0,
+    })
+    .await
+    .unwrap();
+
+    cp.retire_worker(dead.id, dead.epoch, T0).await.unwrap();
+
+    assert!(
+        claims
+            .get("vaapi:pci-0000:f4:00.0")
+            .await
+            .unwrap()
+            .is_none(),
+        "retiring the proven-dead owner must release its device claim"
+    );
+    let replacement = vaapi_worker(&cp, "vaapi-new", &operation, "0000:f4:00.0", 1).await;
+    let mut tx = cp.pool_for_test().begin().await.unwrap();
+    claims
+        .claim_in_tx(&mut tx, claim_for(replacement.id, "0000:f4:00.0", 5353, 1))
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+
+    let occupied = active_leases_for(&cp, &operation, replacement.id).await;
+    assert_eq!(
+        occupied, 1,
+        "the dead owner's held lease still occupies the device it was bound to"
+    );
+
+    let expired_at = T0 + TDuration::seconds(61);
+    cp.expire_due(expired_at).await.unwrap();
+
+    assert_eq!(
+        active_leases_for(&cp, &operation, replacement.id).await,
+        0,
+        "once the stale lease expires the device is free for the replacement"
+    );
+    cp.acquire_lease(NewLease {
+        ticket_id: tickets[1].id,
+        worker_id: replacement.id,
+        ttl: TDuration::seconds(60),
+        now: expired_at,
+    })
+    .await
+    .unwrap();
+}
+
+async fn active_leases_for(
+    cp: &crate::ControlPlane,
+    operation: &TicketOperation,
+    worker_id: WorkerId,
+) -> u32 {
+    cp.workers
+        .operation_candidates(operation)
+        .await
+        .unwrap()
+        .iter()
+        .find(|candidate| candidate.worker_id == worker_id)
+        .unwrap()
+        .active_leases
 }
 
 #[tokio::test]

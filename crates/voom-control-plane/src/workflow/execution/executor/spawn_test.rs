@@ -248,6 +248,55 @@ fn vaapi_requirement_requires_the_probed_encoder_and_decode_codec() {
     );
 }
 
+/// A source codec VAAPI *can* decode but no live device probed is not a per-file
+/// planning fact — another device could have it, and the same file is fine once one
+/// appears — so the transcode ticket alone absorbs the outcome and the job keeps
+/// running. Projection returns no candidates rather than an error (ADR 0049 §6), the
+/// selector reports `NoEligibleWorker`, and that class is one of exactly two
+/// `record_pre_lease_ticket_failure` accepts, so the failure lands on the ticket and
+/// consumes an attempt.
+///
+/// It is also distinguished from device saturation: an empty candidate slate is not
+/// "all candidates at capacity", so this does not silently become a capacity wait.
+///
+/// The spec §6 wording for this outcome is "a ticket-scoped `MissingCapability`". The
+/// class the pre-lease path actually records is `NoEligibleWorker` — what ADR 0049 §10
+/// specifies for a requirement no durable descriptor ever matched, and what the NVIDIA
+/// slice records in the same situation. Recording `MissingCapability` would need a
+/// class `pre_lease_failure_reason` rejects, and adding it would change NVIDIA
+/// behavior, which this slice must not do.
+#[test]
+fn a_decode_codec_no_live_device_probed_fails_only_its_own_ticket() {
+    let requirement = VideoHardwareRequirement::vaapi("hevc_vaapi", Some("av1".to_owned()));
+    let conflicts = HashSet::new();
+    let candidates = vec![
+        vaapi_candidate(1, "0000:03:00.0", 2, &["hevc_vaapi"], &["h264", "hevc"]),
+        vaapi_candidate(2, "0000:f4:00.0", 2, &["hevc_vaapi"], &["h264", "hevc"]),
+    ];
+
+    for candidate in &candidates {
+        assert_eq!(
+            compatible_assignment(candidate, Some(&requirement), &conflicts).unwrap(),
+            CandidateCompatibility::Incompatible,
+            "a codec gap is a mismatch, never a repository fault"
+        );
+    }
+
+    let projected: Vec<WorkerView> = Vec::new();
+    assert!(
+        !all_candidates_at_capacity(&projected),
+        "an empty slate is a capability gap, not a saturated device"
+    );
+    let error = LeastLoadedWorkerSelector
+        .select(OperationKind::TranscodeVideo, &projected)
+        .unwrap_err();
+
+    assert_eq!(
+        selector_failure_class(&error).unwrap(),
+        voom_core::FailureClass::NoEligibleWorker
+    );
+}
+
 /// The acceptance host has one render node (spec §10), so cross-device assignment
 /// is proven here rather than by a real-media two-device run: each candidate must
 /// be assigned its own device and never a sibling's, because the worker validates
@@ -387,6 +436,98 @@ fn malformed_accelerator_descriptor_fails_candidate_projection() {
             .to_string()
             .contains("malformed NVIDIA accelerator descriptor")
     );
+}
+
+/// Dispatch revalidates endpoint identity before acquiring the lease, not just at run
+/// preflight: `candidate_workers` rebuilds the *live* runtime registry for any
+/// device-bound requirement and drops every candidate missing from it, and that
+/// happens before `try_spawn_dispatch` reaches `acquire_lease_with_retry`. So a device
+/// whose supervisor died between preflight and dispatch is never leased — the stale
+/// row alone must not be enough.
+///
+/// `127.0.0.1:1` is a closed privileged port, standing in for the endpoint a
+/// hard-killed `run-local` leaves behind.
+#[tokio::test]
+async fn a_vaapi_candidate_with_a_dead_endpoint_is_dropped_before_any_lease() {
+    let (cp, _tmp) = crate::cases::cp().await;
+    let operation = TicketOperation::new("transcode_video").unwrap();
+    let worker = cp
+        .register_worker(voom_store::repo::workers::NewWorker {
+            name: "vaapi-dead-endpoint".to_owned(),
+            kind: voom_core::WorkerKind::Synthetic,
+            registered_at: cp.clock().now(),
+            node_id: None,
+        })
+        .await
+        .unwrap();
+    cp.record_capability(voom_store::repo::workers::NewCapability {
+        worker_id: worker.id,
+        operation: operation.clone(),
+        codecs: Vec::new(),
+        hardware: vec!["vaapi:pci-0000:f4:00.0".to_owned()],
+        artifact_access: Vec::new(),
+        extra: serde_json::json!({
+            "endpoint": "127.0.0.1:1",
+            "secret": "vaapi-dead-secret",
+            "accelerator": {
+                "backend": "vaapi",
+                "pci_address": "0000:f4:00.0",
+                "device_name": "AMD Radeon 8060S Graphics",
+                "driver_version": "Mesa Gallium 26.1.5 radeonsi",
+                "encoders": ["hevc_vaapi"],
+                "decoders": ["hevc"],
+                "max_sessions": 2
+            }
+        }),
+    })
+    .await
+    .unwrap();
+    cp.record_grant(voom_store::repo::workers::NewGrant {
+        worker_id: worker.id,
+        can_execute: vec![operation.clone()],
+        can_access_read: Vec::new(),
+        can_access_write: Vec::new(),
+        denies: Vec::new(),
+        max_parallel: serde_json::json!({"transcode_video": 2}),
+    })
+    .await
+    .unwrap();
+    let payload = serde_json::json!({
+        "resolved_profile": {
+            "name": "vaapi-hevc",
+            "target_codec": "hevc",
+            "encoder": "hevc_vaapi",
+            "qp": 24
+        },
+        "source_video_codec": "hevc"
+    });
+    let executor = WorkflowExecutor::with_options(
+        cp.clone(),
+        WorkerRuntimeRegistry::new(),
+        crate::workflow::execution::executor::WorkflowExecutorOptions::for_tests(),
+    );
+
+    let projected = executor
+        .candidate_workers(
+            OperationKind::TranscodeVideo,
+            &payload,
+            &HashMap::new(),
+            &mut HashMap::new(),
+            &mut None,
+        )
+        .await
+        .unwrap();
+
+    assert!(
+        projected.workers.is_empty(),
+        "a device whose endpoint fails the liveness probe must not be a candidate"
+    );
+    assert!(projected.assignments.is_empty());
+    let leases: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM leases")
+        .fetch_one(cp.pool_for_test())
+        .await
+        .unwrap();
+    assert_eq!(leases, 0, "projection must not have leased the device");
 }
 
 /// A profile's requirement comes from its encoder's `VideoEncoderBackend`, so an
