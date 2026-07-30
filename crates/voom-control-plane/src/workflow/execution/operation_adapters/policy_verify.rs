@@ -1,11 +1,10 @@
 use serde_json::to_value;
-use voom_core::{ErrorCode, FileLocationId, FileVersionId, OperationKind, VoomError};
+#[cfg(test)]
+use voom_core::OperationKind;
+use voom_core::{ErrorCode, FileLocationId, FileVersionId, VoomError};
 use voom_store::repo::artifacts::ArtifactVerificationStatus;
 
-use super::{
-    LeaseHeartbeatContext, TicketDispatchContext, await_with_lease_heartbeats_without_runtime,
-    optional_u64, required_u64,
-};
+use super::{TicketDispatchContext, optional_u64, required_u64};
 use crate::artifact::verify::{
     BundledVerifyArtifactDispatcher, NoVerifyArtifactHooks, PolicyVerifyArtifactInput,
     verify_policy_artifact_with_dispatcher,
@@ -34,22 +33,19 @@ pub(super) async fn dispatch_policy_verify_artifact(
         ticket_id: context.ticket.id,
         lease_id: context.lease_id,
     };
-    let report = await_with_lease_heartbeats_without_runtime(
-        LeaseHeartbeatContext {
-            control: context.control,
-            lease_id: context.lease_id,
-            timing: &context.options.timing,
-            chaos: &context.options.chaos,
-        },
-        OperationKind::VerifyArtifact,
-        verify_policy_artifact_with_dispatcher(
-            context.control,
-            &input,
-            &BundledVerifyArtifactDispatcher,
-            &NoVerifyArtifactHooks,
-        ),
+    let report = verify_policy_artifact_with_dispatcher(
+        context.control,
+        &input,
+        &BundledVerifyArtifactDispatcher,
+        &NoVerifyArtifactHooks,
     )
     .await?;
+    #[cfg(test)]
+    context
+        .options
+        .chaos
+        .hold_after_worker_result(OperationKind::VerifyArtifact)
+        .await;
     if report.status == ArtifactVerificationStatus::Succeeded {
         let result = PolicyVerificationTicketResult {
             source_file_version_id: input.target.file_version_id,

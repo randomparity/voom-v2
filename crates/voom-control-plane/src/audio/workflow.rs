@@ -1,8 +1,9 @@
 use serde_json::Value;
 use voom_core::VoomError;
+#[cfg(test)]
+use voom_worker_protocol::OperationKind;
 use voom_worker_protocol::{
-    ExtractAudioRequest, ExtractAudioResult, OperationKind, TranscodeAudioRequest,
-    TranscodeAudioResult,
+    ExtractAudioRequest, ExtractAudioResult, TranscodeAudioRequest, TranscodeAudioResult,
 };
 
 use crate::audio::{
@@ -16,7 +17,7 @@ use crate::workflow::execution::leases::{
 };
 
 use crate::workflow::execution::operation_adapters::{
-    OperationAdapterContext, RuntimeDispatchContext, await_with_lease_heartbeats,
+    OperationAdapterContext, RuntimeDispatchContext,
 };
 
 pub(crate) async fn dispatch_control_plane_transcode_audio(
@@ -184,18 +185,20 @@ impl TranscodeAudioDispatcher for RuntimeTranscodeAudioDispatcher<'_> {
         idempotency_key: &str,
         request: TranscodeAudioRequest,
     ) -> Result<TranscodeAudioResult, VoomError> {
-        await_with_lease_heartbeats(
-            self.context,
-            OperationKind::TranscodeAudio,
-            crate::audio::dispatch::dispatch_transcode_audio_with_client_context(
-                self.context.runtime.client.as_ref(),
-                &self.context.runtime.credentials,
-                dispatch_lease_id,
-                idempotency_key,
-                request,
-            ),
+        let result = crate::audio::dispatch::dispatch_transcode_audio_with_client_context(
+            self.context.runtime.client.as_ref(),
+            &self.context.runtime.credentials,
+            dispatch_lease_id,
+            idempotency_key,
+            request,
         )
-        .await
+        .await?;
+        #[cfg(test)]
+        self.context
+            .chaos
+            .hold_after_worker_result(OperationKind::TranscodeAudio)
+            .await;
+        Ok(result)
     }
 }
 
@@ -210,17 +213,19 @@ impl ExtractAudioDispatcher for RuntimeExtractAudioDispatcher<'_> {
         idempotency_key: &str,
         request: ExtractAudioRequest,
     ) -> Result<ExtractAudioResult, VoomError> {
-        await_with_lease_heartbeats(
-            self.context,
-            OperationKind::ExtractAudio,
-            crate::audio::dispatch::dispatch_extract_audio_with_client_context(
-                self.context.runtime.client.as_ref(),
-                &self.context.runtime.credentials,
-                self.context.lease_id,
-                idempotency_key,
-                request,
-            ),
+        let result = crate::audio::dispatch::dispatch_extract_audio_with_client_context(
+            self.context.runtime.client.as_ref(),
+            &self.context.runtime.credentials,
+            self.context.lease_id,
+            idempotency_key,
+            request,
         )
-        .await
+        .await?;
+        #[cfg(test)]
+        self.context
+            .chaos
+            .hold_after_worker_result(OperationKind::ExtractAudio)
+            .await;
+        Ok(result)
     }
 }

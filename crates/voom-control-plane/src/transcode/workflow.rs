@@ -1,5 +1,7 @@
 use serde_json::Value;
-use voom_core::{OperationKind, VoomError};
+#[cfg(test)]
+use voom_core::OperationKind;
+use voom_core::VoomError;
 use voom_worker_protocol::{TranscodeVideoRequest, TranscodeVideoResult, VideoHardwareAssignment};
 
 use crate::cases::policy::compliance::committed_source_dir;
@@ -11,8 +13,7 @@ use crate::workflow::execution::leases::{
 };
 
 use crate::workflow::execution::operation_adapters::{
-    OperationAdapterContext, RuntimeDispatchContext, await_with_lease_heartbeats,
-    workflow_idempotency_key,
+    OperationAdapterContext, RuntimeDispatchContext, workflow_idempotency_key,
 };
 
 pub(crate) async fn dispatch_control_plane_transcode(
@@ -119,16 +120,18 @@ impl TranscodeVideoDispatcher for RuntimeTranscodeDispatcher<'_> {
         request.hardware_assignment = self.hardware_assignment.clone();
         let idempotency_key =
             workflow_idempotency_key(self.context.ticket_id, self.context.lease_id);
-        await_with_lease_heartbeats(
-            self.context,
-            OperationKind::TranscodeVideo,
-            crate::transcode::dispatch::dispatch_transcode_video_with_client(
-                self.context.runtime.client.as_ref(),
-                &self.context.runtime.credentials,
-                &idempotency_key,
-                request,
-            ),
+        let result = crate::transcode::dispatch::dispatch_transcode_video_with_client(
+            self.context.runtime.client.as_ref(),
+            &self.context.runtime.credentials,
+            &idempotency_key,
+            request,
         )
-        .await
+        .await?;
+        #[cfg(test)]
+        self.context
+            .chaos
+            .hold_after_worker_result(OperationKind::TranscodeVideo)
+            .await;
+        Ok(result)
     }
 }
