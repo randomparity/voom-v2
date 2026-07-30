@@ -11,8 +11,13 @@ in `scripts/payload-contract-scope.txt`, which is the set of "defining file(s)"
 for every Class-T / T-upstream row below.
 
 Durable columns are surveyed across the SQLite migrations in `migrations/`
-(`0001`–`0026`). Read sites are in `crates/voom-store/src/repo/` (store layer)
+(`0001`–`0030`). Read sites are in `crates/voom-store/src/repo/` (store layer)
 and `crates/voom-control-plane/src/` (typed higher layer for T-upstream columns).
+
+Scalar typed columns (`INTEGER`/`TEXT` read into a Rust field, not JSON) carry no
+field-drop surface and so get no Class-T row of their own. They still reach this
+contract when the same value is a field of a typed root above — see the
+`TranscodeVideoProfile` note under "Durable typed column changes" below.
 
 ## Class T / T-upstream (contract applies)
 
@@ -28,6 +33,18 @@ and `crates/voom-control-plane/src/` (typed higher layer for T-upstream columns)
 | tickets.payload | T-upstream | store: repo/execution/tickets.rs:532 (`JsonValue`); typed: ticket_payload.rs:83 `from_value` → `WorkflowTicketPayload` | `WorkflowTicketPayload` | `EffectiveTiming` (named struct); `OperationKind` (unit enum — no surface) | ticket_payload.rs, timing.rs | add attr+tests to `WorkflowTicketPayload` and `EffectiveTiming` (Task 4) |
 | tickets.result | T-upstream | store: repo/execution/tickets.rs (`JsonValue`); typed: compliance.rs `decode_compliance_extract_result`, workflow ticket-result normalization, and finalize.rs policy-verification adoption | `ExecuteExtractAudioOutputReport`; `ComplianceLegacyAudioExtractResult`; `PolicyVerificationTicketResult` | — (historical `commit_recovery_required` is intentionally opaque `JsonValue`; `PolicyVerificationTicketStatus` is a unit enum) | audio/mod.rs, cases/policy/compliance.rs, workflow/ticket_results.rs | complete: published and complete historical scalar wire forms reject unknown fields; pre-#337 audio serialization compatibility remains; policy-verification results retain their initial durable shape and reject unknown fields (#334) |
 | policy_versions.compiled_json | T-upstream | store: repo/policy/policies.rs:483 (`JsonValue`); typed: plans.rs:291 `deserialize_stored_compiled_policy` → `CompiledPolicy`, used by accepted-version planning and compliance execution | `CompiledPolicy` | all distinct content structs for `CompiledOperation`, `TrackFilter`, `CompiledCondition`, and `CompiledValue`; `CompiledConfig`; `CompiledPhase`; `CompiledRunIfWire`; `CompiledRule`; `PolicyProvenance`; diagnostic/span structs; `VideoProfileSettings`; `TranscodeVideoProfile` | compile/compiled.rs, data/video_profile.rs, diagnostic.rs, syntax/span.rs, voom-core/src/media/transcode_video_profile.rs | complete: all 41 tagged variants retain their exact wire shape and reject unknown fields; current and historical compiled versions remain readable (#344) |
+
+### Durable typed column changes
+
+New or retyped durable columns whose value is also a field of a Class-T /
+T-upstream typed root, newest first. Each row names the migration, the columns,
+and the already-scoped defining file — the scope list needs a new line only when
+the change introduces a *new* defining file.
+
+| migration | durable columns | typed root | evolution | defining file |
+|---|---|---|---|---|
+| `0030` (#409) | `video_profiles.qp` (new, nullable); `video_profiles.preset` (now nullable) | `TranscodeVideoProfile`, reachable from `policy_versions.compiled_json` via `VideoProfileRef` | `qp: Option<u8>` is additive — an older compiled payload without it reads as `None`. `preset: String` → `Option<String>` is a **retype**, so a payload written with `preset` absent is unreadable by a pre-#409 binary: binary-before-DB upgrade ordering applies (ADR 0013). Both fields are `skip_serializing_if = "Option::is_none"`, so every software and NVENC payload is byte-identical to before. | `crates/voom-core/src/media/transcode_video_profile.rs` (already in scope) |
+| `0029` (#400) | `video_profiles.cq`, `video_profiles.decode_backend` | same | `cq: Option<u8>` and `decode: VideoDecodeMode` are additive; `decode` defaults to `Software` and is skipped when software. | `crates/voom-core/src/media/transcode_video_profile.rs` (already in scope) |
 
 ### Transitive typed closure (named-field `Deserialize` sub-structs)
 

@@ -1,6 +1,9 @@
 # In-scope source files for check-payload-deny-unknown.sh.
 # Derived from docs/payload-contract-inventory.md (Class-T / T-upstream rows).
-# Add a line here when a new durable column is typed into a struct.
+# Add a line here when a new durable column is typed into a struct whose
+# defining file is not already listed. Migration 0030's `video_profiles.qp` and
+# nullable `preset` land in TranscodeVideoProfile, already covered by the last
+# entry below; see the "Durable typed column changes" table in the inventory.
 crates/voom-events/src/payload/artifact.rs
 crates/voom-events/src/payload/commit.rs
 crates/voom-events/src/payload/execution.rs

@@ -50,6 +50,7 @@ const EXPECTED_MIGRATION_FILES: &[&str] = &[
     "0027_audio_synthesis_asset_lineage.sql",
     "0028_sliding_file_window.sql",
     "0029_nvidia_video_acceleration.sql",
+    "0030_vaapi_video_acceleration.sql",
 ];
 
 fn workspace_root() -> PathBuf {
@@ -165,6 +166,61 @@ async fn nvidia_profile_migration_preserves_every_existing_profile_field() {
     assert_eq!(count, 6);
 }
 
+/// Migration 0030 rebuilds `video_profiles` again, so every row an operator
+/// wrote under 0029 has to project straight through: `preset` retained, the new
+/// `qp` null, and the existing quality field and decode backend untouched. A row
+/// silently reset to a column default would change how an existing profile
+/// encodes without anyone editing it.
+#[tokio::test]
+async fn vaapi_profile_migration_preserves_existing_profile_rows() {
+    let tmp = TempDatabase::new().unwrap();
+    let url = sqlite_url_for(tmp.path());
+    let pool = connect_or_create(&url).await.unwrap();
+    migrator_through(29).run(&pool).await.unwrap();
+
+    sqlx::query(
+        "INSERT INTO video_profiles \
+         (id, name, target_codec, encoder, crf, preset, tune, output_container, \
+          copy_compatible, decode_backend) \
+         VALUES ('vp-legacy-x265', 'legacy-x265', 'hevc', 'libx265', 19, 'veryslow', \
+                 'grain', 'mp4', 1, 'software')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO video_profiles \
+         (id, name, target_codec, encoder, cq, preset, decode_backend) \
+         VALUES ('vp-legacy-nvenc', 'legacy-nvenc', 'hevc', 'hevc_nvenc', 21, 'p6', 'nvidia')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let before = accelerated_video_profile_snapshot(&pool).await;
+    MIGRATOR.run(&pool).await.unwrap();
+    let after = accelerated_video_profile_snapshot(&pool).await;
+
+    assert_eq!(after, before);
+    let null_qp: i64 = sqlx::query_scalar("SELECT count(*) FROM video_profiles WHERE qp IS NULL")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let total: i64 = sqlx::query_scalar("SELECT count(*) FROM video_profiles")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    // Six migration-0014 seeds plus the two rows above: nothing dropped, and no
+    // pre-existing row acquired a qp.
+    assert_eq!((total, null_qp), (8, 8));
+    let presets: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM video_profiles WHERE preset IS NOT NULL")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(presets, 8, "every pre-0030 row keeps its preset");
+}
+
 async fn legacy_video_profile_snapshot(pool: &sqlx::SqlitePool) -> String {
     sqlx::query_scalar(
         "SELECT json_group_array(json_object( \
@@ -174,6 +230,25 @@ async fn legacy_video_profile_snapshot(pool: &sqlx::SqlitePool) -> String {
            'max_width', max_width, 'max_height', max_height, \
            'output_container', output_container, 'copy_compatible', copy_compatible, \
            'retired_at', retired_at)) \
+         FROM (SELECT * FROM video_profiles ORDER BY id)",
+    )
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
+/// The 0029 shape: every column that exists on both sides of migration 0030, so
+/// the comparison is a projection check rather than a restatement of the new
+/// table's columns.
+async fn accelerated_video_profile_snapshot(pool: &sqlx::SqlitePool) -> String {
+    sqlx::query_scalar(
+        "SELECT json_group_array(json_object( \
+           'id', id, 'name', name, 'target_codec', target_codec, 'encoder', encoder, \
+           'crf', crf, 'cq', cq, 'preset', preset, 'tune', tune, \
+           'codec_profile', codec_profile, 'codec_level', codec_level, \
+           'pixel_format', pixel_format, 'max_width', max_width, 'max_height', max_height, \
+           'output_container', output_container, 'copy_compatible', copy_compatible, \
+           'retired_at', retired_at, 'decode_backend', decode_backend)) \
          FROM (SELECT * FROM video_profiles ORDER BY id)",
     )
     .fetch_one(pool)

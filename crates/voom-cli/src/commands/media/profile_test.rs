@@ -11,7 +11,8 @@ fn profile_data_maps_every_field_from_video_profile() {
         encoder: "libx265".to_owned(),
         crf: Some(18),
         cq: None,
-        preset: "slow".to_owned(),
+        qp: None,
+        preset: Some("slow".to_owned()),
         tune: Some("grain".to_owned()),
         codec_profile: Some("main10".to_owned()),
         codec_level: Some("5.1".to_owned()),
@@ -33,7 +34,8 @@ fn profile_data_maps_every_field_from_video_profile() {
     assert_eq!(data.crf, Some(18));
     assert!(data.cq.is_none());
     assert!(data.decode.is_software());
-    assert_eq!(data.preset, "slow");
+    assert_eq!(data.preset.as_deref(), Some("slow"));
+    assert!(data.qp.is_none());
     assert_eq!(data.tune.as_deref(), Some("grain"));
     assert_eq!(data.codec_profile.as_deref(), Some("main10"));
     assert_eq!(data.codec_level.as_deref(), Some("5.1"));

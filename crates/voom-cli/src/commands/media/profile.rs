@@ -31,7 +31,12 @@ struct ProfileData {
     crf: Option<u8>,
     #[serde(skip_serializing_if = "Option::is_none")]
     cq: Option<u8>,
-    preset: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    qp: Option<u8>,
+    /// Absent for an encoder with no speed knob, so an operator never sees a
+    /// preset a VAAPI encode cannot honor.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    preset: Option<String>,
     tune: Option<String>,
     codec_profile: Option<String>,
     codec_level: Option<String>,
@@ -138,7 +143,8 @@ impl From<VideoProfileFields> for NewVideoProfile {
             encoder: fields.encoder,
             crf: fields.crf,
             cq: fields.cq,
-            preset: fields.preset,
+            qp: None,
+            preset: Some(fields.preset),
             tune: fields.tune,
             codec_profile: fields.codec_profile,
             codec_level: fields.codec_level,
@@ -161,6 +167,7 @@ impl From<VideoProfile> for ProfileData {
             encoder: profile.encoder,
             crf: profile.crf,
             cq: profile.cq,
+            qp: profile.qp,
             preset: profile.preset,
             tune: profile.tune,
             codec_profile: profile.codec_profile,
