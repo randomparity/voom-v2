@@ -126,6 +126,16 @@ const MIGRATION_0028_SQL: &str = include_str!("../../../migrations/0028_sliding_
 const MIGRATION_0029_SQL: &str =
     include_str!("../../../migrations/0029_nvidia_video_acceleration.sql");
 
+/// SQL for migration 0030 (`VideoToolbox` profile vocabulary, #411), embedded at
+/// compile time.
+const MIGRATION_0030_SQL: &str =
+    include_str!("../../../migrations/0030_videotoolbox_video_profiles.sql");
+
+/// SQL for migration 0031 (backend-neutral accelerator claims, #411), embedded
+/// at compile time.
+const MIGRATION_0031_SQL: &str =
+    include_str!("../../../migrations/0031_backend_neutral_accelerator_claims.sql");
+
 /// Embedded migration set, constructed without the `sqlx::migrate!` macro.
 ///
 /// We don't use sqlx's `macros` feature: it pulls `sqlx-macros-core`, which
@@ -342,6 +352,20 @@ pub static MIGRATOR: LazyLock<Migrator> = LazyLock::new(|| Migrator {
             Cow::Borrowed("nvidia_video_acceleration"),
             MigrationType::Simple,
             Cow::Borrowed(MIGRATION_0029_SQL),
+            false,
+        ),
+        Migration::new(
+            30,
+            Cow::Borrowed("videotoolbox_video_profiles"),
+            MigrationType::Simple,
+            Cow::Borrowed(MIGRATION_0030_SQL),
+            false,
+        ),
+        Migration::new(
+            31,
+            Cow::Borrowed("backend_neutral_accelerator_claims"),
+            MigrationType::Simple,
+            Cow::Borrowed(MIGRATION_0031_SQL),
             false,
         ),
     ]),

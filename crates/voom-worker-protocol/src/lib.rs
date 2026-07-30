@@ -68,8 +68,12 @@ pub use startup::{
 pub use transport::{ClientHandle, DispatchStream, NdjsonStream, ServerHandle, ServerRunning};
 pub use video_acceleration::{
     LocalWorkerBound, NvidiaVideoAcceleratorDescriptor, NvidiaVideoHardwareAssignment,
-    NvidiaVideoHardwareRequirement, SoftwareVideoHardwareRequirement, VideoHardwareAssignment,
-    VideoHardwareRequirement,
+    NvidiaVideoHardwareRequirement, SoftwareVideoHardwareRequirement,
+    VIDEOTOOLBOX_PREFLIGHT_BUDGET, VIDEOTOOLBOX_PREFLIGHT_COORDINATION_SECONDS,
+    VIDEOTOOLBOX_PREFLIGHT_MAX_STAGES, VIDEOTOOLBOX_PROBE_TIMEOUT, VideoAcceleratorDescriptor,
+    VideoHardwareAssignment, VideoHardwareRequirement, VideoToolboxDecodeCapability,
+    VideoToolboxDecodeRequirement, VideoToolboxVideoAcceleratorDescriptor,
+    VideoToolboxVideoHardwareAssignment, VideoToolboxVideoHardwareRequirement,
 };
 pub use voom_core::OperationKind;
 pub use wire::credentials::{PresentedCredentials, WorkerCredentials, validate_credentials};

@@ -59,7 +59,17 @@ async fn one_shot_nvenc_request_requires_configured_run_local_worker() {
     request.profile.cq = Some(22);
     request.profile.preset = "p5".to_owned();
 
-    let err = validate_video_hardware_binding(&request, &config(dir.path()), "h264").unwrap_err();
+    let source = InputProbe {
+        width: 1920,
+        height: 1080,
+        codec: "h264".to_owned(),
+        pixel_format: "yuv420p".to_owned(),
+        codec_profile: None,
+        codec_level: None,
+        video_stream_count: 1,
+        forced_subtitle_ordinals: Vec::new(),
+    };
+    let err = validate_video_hardware_binding(&request, &config(dir.path()), &source).unwrap_err();
 
     assert!(
         err.to_string()
@@ -186,6 +196,7 @@ async fn unavailable_encoder_is_config_invalid_before_ffmpeg() {
         encoder: "libaom-av1".to_owned(),
         crf: Some(35),
         cq: None,
+        bitrate_kbps: None,
         preset: "8".to_owned(),
         tune: None,
         codec_profile: None,
@@ -709,6 +720,26 @@ async fn output_dims_and_pixfmt_populated_from_probe() {
 }
 
 #[tokio::test]
+async fn expected_source_pixel_format_mismatch_fails_before_ffmpeg() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("input.mkv");
+    tokio::fs::write(&input, b"input").await.unwrap();
+    let mut request = request(dir.path(), &input).await;
+    request.input.video_pixel_format = Some("yuv420p10le".to_owned());
+
+    let error = handle_transcode_video(&request, &config(dir.path()))
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        TranscodeVideoError::MalformedWorkerResult { .. }
+    ));
+    assert!(error.to_string().contains("source pixel format"));
+    assert!(!Path::new(&request.output.path).exists());
+}
+
+#[tokio::test]
 async fn copy_video_sets_copied_video_flag() {
     let dir = tempfile::tempdir().unwrap();
     let input = dir.path().join("input.mkv");
@@ -816,6 +847,7 @@ async fn request(root: &Path, input: &Path) -> TranscodeVideoRequest {
             path: input.to_string_lossy().into_owned(),
             expected,
             video_codec: None,
+            video_pixel_format: None,
         },
         output: TranscodeVideoOutput {
             staging_root: stage.to_string_lossy().into_owned(),

@@ -7,6 +7,7 @@ pub const TRANSCODE_VIDEO_CONTAINER_MP4: &str = "mp4";
 pub const TRANSCODE_VIDEO_CODEC: &str = "hevc";
 pub const TRANSCODE_VIDEO_CODEC_ALIAS_H265: &str = "h265";
 pub const TRANSCODE_VIDEO_CODEC_AV1: &str = "av1";
+pub const TRANSCODE_VIDEO_CODEC_H264: &str = "h264";
 pub const TRANSCODE_VIDEO_PROFILE: &str = "default-hevc";
 
 #[must_use]
@@ -19,6 +20,7 @@ pub fn is_supported_transcode_video_codec(codec: &str) -> bool {
     codec.eq_ignore_ascii_case(TRANSCODE_VIDEO_CODEC)
         || codec.eq_ignore_ascii_case(TRANSCODE_VIDEO_CODEC_ALIAS_H265)
         || codec.eq_ignore_ascii_case(TRANSCODE_VIDEO_CODEC_AV1)
+        || codec.eq_ignore_ascii_case(TRANSCODE_VIDEO_CODEC_H264)
 }
 
 /// Normalizes codec profile/level tokens for comparison. ffprobe reports e.g.
@@ -43,6 +45,8 @@ pub fn canonical_video_codec(codec: &str) -> Option<&'static str> {
         Some(TRANSCODE_VIDEO_CODEC)
     } else if codec.eq_ignore_ascii_case(TRANSCODE_VIDEO_CODEC_AV1) {
         Some(TRANSCODE_VIDEO_CODEC_AV1)
+    } else if codec.eq_ignore_ascii_case(TRANSCODE_VIDEO_CODEC_H264) {
+        Some(TRANSCODE_VIDEO_CODEC_H264)
     } else {
         None
     }
@@ -64,18 +68,34 @@ pub fn validate_profile_against_descriptor(profile: &TranscodeVideoProfile) -> R
             profile.encoder, descriptor.target_codec, profile.target_codec
         ));
     }
-    match (descriptor.quality_domain, profile.crf, profile.cq) {
-        (QualityDomain::Crf { min, max }, Some(crf), None) if crf >= min && crf <= max => {}
-        (QualityDomain::Cq { min, max }, None, Some(cq)) if cq >= min && cq <= max => {}
-        (QualityDomain::Crf { min, max }, crf, cq) => {
+    match (
+        descriptor.quality_domain,
+        profile.crf,
+        profile.cq,
+        profile.bitrate_kbps,
+    ) {
+        (QualityDomain::Crf { min, max }, Some(crf), None, None) if crf >= min && crf <= max => {}
+        (QualityDomain::Cq { min, max }, None, Some(cq), None) if cq >= min && cq <= max => {}
+        (QualityDomain::BitrateKbps { min, max }, None, None, Some(bitrate))
+            if bitrate >= min && bitrate <= max => {}
+        (QualityDomain::Crf { min, max }, crf, cq, bitrate) => {
             return Err(format!(
-                "`{}` requires crf {min}..={max} and rejects cq; got crf={crf:?}, cq={cq:?}",
+                "`{}` requires crf {min}..={max} and rejects cq/bitrate; got \
+                 crf={crf:?}, cq={cq:?}, bitrate_kbps={bitrate:?}",
                 profile.encoder
             ));
         }
-        (QualityDomain::Cq { min, max }, crf, cq) => {
+        (QualityDomain::Cq { min, max }, crf, cq, bitrate) => {
             return Err(format!(
-                "`{}` requires cq {min}..={max} and rejects crf; got crf={crf:?}, cq={cq:?}",
+                "`{}` requires cq {min}..={max} and rejects crf/bitrate; got \
+                 crf={crf:?}, cq={cq:?}, bitrate_kbps={bitrate:?}",
+                profile.encoder
+            ));
+        }
+        (QualityDomain::BitrateKbps { min, max }, crf, cq, bitrate) => {
+            return Err(format!(
+                "`{}` requires bitrate_kbps {min}..={max} and rejects crf/cq; got \
+                 crf={crf:?}, cq={cq:?}, bitrate_kbps={bitrate:?}",
                 profile.encoder
             ));
         }
@@ -83,6 +103,13 @@ pub fn validate_profile_against_descriptor(profile: &TranscodeVideoProfile) -> R
     if profile.decode.is_nvidia() && descriptor.backend != VideoEncoderBackend::Nvidia {
         return Err(format!(
             "NVIDIA decode requires an NVIDIA encoder, not `{}`",
+            profile.encoder
+        ));
+    }
+    if profile.decode.is_video_toolbox() && descriptor.backend != VideoEncoderBackend::VideoToolbox
+    {
+        return Err(format!(
+            "VideoToolbox decode requires a VideoToolbox encoder, not `{}`",
             profile.encoder
         ));
     }
@@ -129,7 +156,46 @@ pub fn validate_profile_against_descriptor(profile: &TranscodeVideoProfile) -> R
             ));
         }
     }
+    validate_videotoolbox_tuple(profile, descriptor.backend)?;
     Ok(())
+}
+
+fn validate_videotoolbox_tuple(
+    profile: &TranscodeVideoProfile,
+    backend: VideoEncoderBackend,
+) -> Result<(), String> {
+    if backend != VideoEncoderBackend::VideoToolbox {
+        return Ok(());
+    }
+    let tuple = (
+        profile.encoder.as_str(),
+        profile.codec_profile.as_deref(),
+        profile.codec_level.as_deref(),
+        profile.pixel_format.as_deref(),
+    );
+    let valid = tuple
+        == (
+            "h264_videotoolbox",
+            Some("high"),
+            Some("4.1"),
+            Some("yuv420p"),
+        )
+        || tuple == ("hevc_videotoolbox", Some("main"), None, Some("yuv420p"))
+        || tuple
+            == (
+                "hevc_videotoolbox",
+                Some("main10"),
+                None,
+                Some("yuv420p10le"),
+            );
+    if valid {
+        Ok(())
+    } else {
+        Err(format!(
+            "incomplete or incompatible VideoToolbox output tuple for `{}`",
+            profile.encoder
+        ))
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -140,12 +206,17 @@ pub struct SoftwareVideoDecode {}
 #[serde(deny_unknown_fields)]
 pub struct NvidiaVideoDecode {}
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VideoToolboxVideoDecode {}
+
 /// Where video frames are decoded before entering the encoder graph.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "backend", rename_all = "snake_case")]
 pub enum VideoDecodeMode {
     Software(SoftwareVideoDecode),
     Nvidia(NvidiaVideoDecode),
+    VideoToolbox(VideoToolboxVideoDecode),
 }
 
 impl Default for VideoDecodeMode {
@@ -161,16 +232,26 @@ impl VideoDecodeMode {
     }
 
     #[must_use]
+    pub const fn video_toolbox() -> Self {
+        Self::VideoToolbox(VideoToolboxVideoDecode {})
+    }
+
+    #[must_use]
     pub const fn is_software(&self) -> bool {
         match self {
             Self::Software(_) => true,
-            Self::Nvidia(_) => false,
+            Self::Nvidia(_) | Self::VideoToolbox(_) => false,
         }
     }
 
     #[must_use]
     pub const fn is_nvidia(&self) -> bool {
-        !self.is_software()
+        matches!(self, Self::Nvidia(_))
+    }
+
+    #[must_use]
+    pub const fn is_video_toolbox(&self) -> bool {
+        matches!(self, Self::VideoToolbox(_))
     }
 
     #[must_use]
@@ -178,6 +259,7 @@ impl VideoDecodeMode {
         match self {
             Self::Software(_) => "software",
             Self::Nvidia(_) => "nvidia",
+            Self::VideoToolbox(_) => "video_toolbox",
         }
     }
 
@@ -189,6 +271,7 @@ impl VideoDecodeMode {
         match value {
             "software" => Ok(Self::default()),
             "nvidia" => Ok(Self::nvidia()),
+            "video_toolbox" => Ok(Self::video_toolbox()),
             _ => Err(format!("unknown video decode backend `{value}`")),
         }
     }
@@ -204,6 +287,8 @@ pub struct TranscodeVideoProfile {
     pub crf: Option<u8>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cq: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bitrate_kbps: Option<u32>,
     /// Encoder-specific speed token: named x265 preset, SVT-AV1 `-preset N`, or libaom-av1 `-cpu-used N`.
     pub preset: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -241,6 +326,7 @@ impl TranscodeVideoProfile {
             encoder: "libx265".to_owned(),
             crf: Some(23),
             cq: None,
+            bitrate_kbps: None,
             preset: "medium".to_owned(),
             tune: None,
             codec_profile: None,

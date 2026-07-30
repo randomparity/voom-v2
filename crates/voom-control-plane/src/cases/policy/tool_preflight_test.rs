@@ -14,7 +14,7 @@ use voom_worker_protocol::{
     WorkerCredentials, WorkerIdentityResponse,
 };
 
-use super::{UnavailableTool, format_unavailable_tools};
+use super::{UnavailableTool, format_unavailable_tools, policy_video_backend_requirements};
 use crate::cases::cp;
 use crate::workflow::WorkerRuntimeRegistry;
 
@@ -39,6 +39,29 @@ fn unavailable_tools_are_reported_in_observation_order_with_guidance() {
         "tool requirement preflight failed for policy `published`:\n\
          - mkvtoolnix: denied; start one with: voom worker run-local --kind mkvtoolnix\n\
          - ffmpeg: stale; start one with: voom worker run-local --kind ffmpeg"
+    );
+}
+
+#[test]
+fn videotoolbox_profiles_do_not_require_a_software_worker() {
+    let policy = compile_policy(
+        "policy \"videotoolbox\" { \
+         phase encode { transcode video to hevc { \
+         encoder: hevc_videotoolbox bitrate_kbps: 8000 preset: default \
+         codec_profile: main pixel_format: yuv420p decode: video_toolbox } } }",
+    )
+    .unwrap()
+    .policy;
+
+    let requirements = policy_video_backend_requirements(&policy).unwrap();
+
+    assert!(!requirements.software);
+    assert!(requirements.nvidia.is_none());
+    assert!(requirements.videotoolbox_decode);
+    assert!(
+        requirements
+            .videotoolbox_encoders
+            .contains("hevc_videotoolbox")
     );
 }
 
@@ -149,6 +172,7 @@ async fn gpu_bound_worker_does_not_satisfy_software_profile_preflight() {
         artifact_access: Vec::new(),
         extra: json!({
             "accelerator": {
+                "backend": "nvidia",
                 "hardware_token": hardware_token,
                 "device_uuid": "GPU-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
                 "device_name": "Test GPU",
@@ -224,6 +248,7 @@ async fn nvidia_decode_profile_requires_an_advertised_cuvid_decoder() {
         artifact_access: Vec::new(),
         extra: json!({
             "accelerator": {
+                "backend": "nvidia",
                 "hardware_token": hardware_token,
                 "device_uuid": "GPU-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
                 "device_name": "Test GPU",

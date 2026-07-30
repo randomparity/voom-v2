@@ -103,6 +103,7 @@ async fn nvidia_worker(
         artifact_access: Vec::new(),
         extra: serde_json::json!({
             "accelerator": {
+                "backend": "nvidia",
                 "hardware_token": hardware_token,
                 "device_uuid": hardware_token.trim_start_matches("nvidia:"),
                 "device_name": "Test GPU",

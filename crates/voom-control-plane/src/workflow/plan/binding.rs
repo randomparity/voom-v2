@@ -121,6 +121,7 @@ fn render_default_transcode_video_payload(branch: &BranchContext) -> Result<Valu
                 local_file_key: source_file_optional_string(branch, "local_file_key")?,
             },
             video_codec: branch.probe_codec.clone(),
+            video_pixel_format: None,
         },
         output: TranscodeVideoOutput {
             staging_root: staging_root.to_owned(),
@@ -194,6 +195,15 @@ pub fn render_policy_transcode_payload(
         object.insert(
             "source_video_codec".to_owned(),
             Value::String(source_video_codec.to_owned()),
+        );
+    }
+    if let Some(source_video_pixel_format) = operation_payload
+        .get("source_video_pixel_format")
+        .and_then(Value::as_str)
+    {
+        object.insert(
+            "source_video_pixel_format".to_owned(),
+            Value::String(source_video_pixel_format.to_owned()),
         );
     }
     insert_policy_file_source(object, source);

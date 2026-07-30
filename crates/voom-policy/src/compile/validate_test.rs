@@ -61,9 +61,14 @@ fn rejects_depends_on_with_extra_tokens_after_list() {
 }
 
 #[test]
-fn accepts_hevc_and_av1_named_and_inline() {
+fn accepts_h264_hevc_and_av1_named_and_inline() {
+    assert!(codes("policy \"p\" { phase a { transcode video to h264 } }").is_empty());
     assert!(codes("policy \"p\" { phase a { transcode video to hevc } }").is_empty());
     assert!(codes("policy \"p\" { phase a { transcode video to av1 } }").is_empty());
+    assert!(
+        codes("policy \"p\" { phase a { transcode video to h264 using profile \"h264-home\" } }")
+            .is_empty()
+    );
     assert!(
         codes(
             "policy \"p\" { phase a { transcode video to hevc using profile \"hevc-archive\" } }"

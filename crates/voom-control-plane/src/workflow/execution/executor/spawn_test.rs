@@ -23,11 +23,41 @@ fn nvidia_candidate(
         hardware: vec![token.to_owned()],
         capability_extra: vec![serde_json::json!({
             "accelerator": {
+                "backend": "nvidia",
                 "hardware_token": token,
                 "device_uuid": token.trim_start_matches("nvidia:"),
                 "device_name": "Test GPU",
                 "driver_version": "595.80",
                 "encoders": ["hevc_nvenc"],
+                "decoders": decoders,
+                "max_sessions": max_sessions
+            }
+        })],
+    }
+}
+
+fn videotoolbox_candidate(
+    worker_id: u64,
+    token: &str,
+    max_sessions: u32,
+    encoders: &[&str],
+    decoders: &serde_json::Value,
+) -> WorkerOperationCandidate {
+    WorkerOperationCandidate {
+        worker_id: WorkerId(worker_id),
+        active_leases: 0,
+        max_parallel: max_sessions,
+        hardware: vec![token.to_owned()],
+        capability_extra: vec![serde_json::json!({
+            "accelerator": {
+                "backend": "video_toolbox",
+                "hardware_token": token,
+                "resource_id": token.trim_start_matches("videotoolbox:"),
+                "model_identifier": "Mac17,6",
+                "chip_name": "Apple M5 Max",
+                "macos_version": "26.5.2",
+                "macos_build": "25F84",
+                "encoders": encoders,
                 "decoders": decoders,
                 "max_sessions": max_sessions
             }
@@ -56,6 +86,18 @@ fn software_requirement_excludes_device_bound_workers() {
 }
 
 #[test]
+fn accelerator_runtime_loading_covers_nvidia_and_videotoolbox() {
+    let software = VideoHardwareRequirement::software();
+    let nvidia = VideoHardwareRequirement::nvidia("hevc_nvenc", None);
+    let videotoolbox = VideoHardwareRequirement::video_toolbox("hevc_videotoolbox", None);
+
+    assert!(!requirement_uses_accelerator(None));
+    assert!(!requirement_uses_accelerator(Some(&software)));
+    assert!(requirement_uses_accelerator(Some(&nvidia)));
+    assert!(requirement_uses_accelerator(Some(&videotoolbox)));
+}
+
+#[test]
 fn nvidia_requirement_requires_exact_encoder_and_decoder() {
     let requirement = VideoHardwareRequirement::nvidia("hevc_nvenc", Some("av1_cuvid".to_owned()));
     let conflicts = HashSet::new();
@@ -77,6 +119,54 @@ fn nvidia_requirement_requires_exact_encoder_and_decoder() {
             "nvidia:GPU-b",
             "GPU-b"
         )))
+    );
+}
+
+#[test]
+fn videotoolbox_requirement_requires_exact_encoder_codec_and_pixel_format() {
+    let requirement = VideoHardwareRequirement::video_toolbox(
+        "hevc_videotoolbox",
+        Some(VideoToolboxDecodeRequirement {
+            codec: "hevc".to_owned(),
+            pixel_format: "yuv420p10le".to_owned(),
+        }),
+    );
+    let candidate = videotoolbox_candidate(
+        1,
+        "videotoolbox:host-a",
+        4,
+        &["h264_videotoolbox", "hevc_videotoolbox"],
+        &serde_json::json!([
+            {"codec": "hevc", "pixel_formats": ["yuv420p", "yuv420p10le"]}
+        ]),
+    );
+    let wrong_format = VideoHardwareRequirement::video_toolbox(
+        "hevc_videotoolbox",
+        Some(VideoToolboxDecodeRequirement {
+            codec: "hevc".to_owned(),
+            pixel_format: "p010le".to_owned(),
+        }),
+    );
+
+    assert_eq!(
+        compatible_assignment(&candidate, Some(&requirement), &HashSet::new()).unwrap(),
+        CandidateCompatibility::Compatible(Some(VideoHardwareAssignment::video_toolbox(
+            "videotoolbox:host-a",
+            "host-a"
+        )))
+    );
+    assert_eq!(
+        compatible_assignment(&candidate, Some(&wrong_format), &HashSet::new()).unwrap(),
+        CandidateCompatibility::Incompatible
+    );
+    assert_eq!(
+        compatible_assignment(
+            &nvidia_candidate(2, "nvidia:GPU-a", 2, &["hevc_cuvid"]),
+            Some(&requirement),
+            &HashSet::new(),
+        )
+        .unwrap(),
+        CandidateCompatibility::Incompatible
     );
 }
 
@@ -109,7 +199,7 @@ fn malformed_accelerator_descriptor_fails_candidate_projection() {
     assert!(
         error
             .to_string()
-            .contains("malformed NVIDIA accelerator descriptor")
+            .contains("malformed video accelerator descriptor")
     );
 }
 
@@ -134,5 +224,38 @@ fn hardware_requirement_uses_profile_and_source_codec() {
     assert_eq!(
         requirement,
         VideoHardwareRequirement::nvidia("hevc_nvenc", Some("h264_cuvid".to_owned()))
+    );
+}
+
+#[test]
+fn videotoolbox_requirement_uses_source_codec_and_pixel_format() {
+    let payload = serde_json::json!({
+        "resolved_profile": {
+            "name": "hevc-videotoolbox",
+            "target_codec": "hevc",
+            "encoder": "hevc_videotoolbox",
+            "bitrate_kbps": 8000,
+            "preset": "default",
+            "codec_profile": "main10",
+            "pixel_format": "yuv420p10le",
+            "decode": {"backend": "video_toolbox"}
+        },
+        "source_video_codec": "hevc",
+        "source_video_pixel_format": "yuv420p10le"
+    });
+
+    let requirement = video_hardware_requirement(OperationKind::TranscodeVideo, &payload)
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(
+        requirement,
+        VideoHardwareRequirement::video_toolbox(
+            "hevc_videotoolbox",
+            Some(VideoToolboxDecodeRequirement {
+                codec: "hevc".to_owned(),
+                pixel_format: "yuv420p10le".to_owned(),
+            })
+        )
     );
 }

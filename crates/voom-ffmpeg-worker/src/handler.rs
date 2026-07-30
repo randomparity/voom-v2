@@ -271,6 +271,17 @@ pub async fn handle_transcode_video(
             ),
         ));
     }
+    if let Some(expected_pixel_format) = &request.input.video_pixel_format
+        && input_probe.pixel_format != *expected_pixel_format
+    {
+        return Err(malformed_worker_result(
+            "input.video_pixel_format",
+            format!(
+                "source pixel format `{}` does not match expected `{expected_pixel_format}`",
+                input_probe.pixel_format
+            ),
+        ));
+    }
     if input_probe.video_stream_count > 1 {
         // The transcode maps only 0:v:0; a source with multiple video streams
         // would silently drop the rest. Fail loud rather than lose data.
@@ -285,7 +296,7 @@ pub async fn handle_transcode_video(
     if request.copy_video {
         validate_copy_video_preconditions(request, &input_probe)?;
     }
-    validate_video_hardware_binding(request, config, &input_probe.codec)?;
+    validate_video_hardware_binding(request, config, &input_probe)?;
 
     let probe = run_ffmpeg_transcode(
         config,
@@ -714,21 +725,39 @@ fn validate_encoder_available(
 fn validate_video_hardware_binding(
     request: &TranscodeVideoRequest,
     config: &FfmpegConfig,
+    source: &InputProbe,
+) -> Result<(), TranscodeVideoError> {
+    match request.profile.encoder.as_str() {
+        "hevc_nvenc" => validate_nvidia_binding(request, config, &source.codec),
+        "h264_videotoolbox" | "hevc_videotoolbox" => {
+            validate_videotoolbox_binding(request, config, source)
+        }
+        _ => validate_software_binding(request, config),
+    }
+}
+
+fn validate_software_binding(
+    request: &TranscodeVideoRequest,
+    config: &FfmpegConfig,
+) -> Result<(), TranscodeVideoError> {
+    let software_assignment = matches!(
+        request.hardware_assignment,
+        None | Some(VideoHardwareAssignment::Software(_))
+    );
+    if config.accelerator.is_none() && software_assignment {
+        return Ok(());
+    }
+    Err(config_invalid(
+        "transcode_video",
+        "software video work requires an unbound software worker".to_owned(),
+    ))
+}
+
+fn validate_nvidia_binding(
+    request: &TranscodeVideoRequest,
+    config: &FfmpegConfig,
     source_codec: &str,
 ) -> Result<(), TranscodeVideoError> {
-    if request.profile.encoder != "hevc_nvenc" {
-        let software_assignment = match &request.hardware_assignment {
-            None | Some(VideoHardwareAssignment::Software(_)) => true,
-            Some(VideoHardwareAssignment::Nvidia(_)) => false,
-        };
-        if config.accelerator.is_none() && software_assignment {
-            return Ok(());
-        }
-        return Err(config_invalid(
-            "transcode_video",
-            "software video work requires an unbound software worker".to_owned(),
-        ));
-    }
     let Some(VideoHardwareAssignment::Nvidia(assignment)) = &request.hardware_assignment else {
         return Err(config_invalid(
             "transcode_video",
@@ -737,7 +766,9 @@ fn validate_video_hardware_binding(
                 .to_owned(),
         ));
     };
-    let Some(accelerator) = &config.accelerator else {
+    let Some(voom_worker_protocol::VideoAcceleratorDescriptor::Nvidia(accelerator)) =
+        &config.accelerator
+    else {
         return Err(config_invalid(
             "transcode_video",
             "assigned NVIDIA work reached an unbound worker".to_owned(),
@@ -776,6 +807,103 @@ fn validate_video_hardware_binding(
         ));
     }
     Ok(())
+}
+
+fn validate_videotoolbox_binding(
+    request: &TranscodeVideoRequest,
+    config: &FfmpegConfig,
+    source: &InputProbe,
+) -> Result<(), TranscodeVideoError> {
+    let Some(VideoHardwareAssignment::VideoToolbox(assignment)) = &request.hardware_assignment
+    else {
+        return Err(config_invalid(
+            "transcode_video",
+            format!(
+                "{} requires a VideoToolbox scheduler assignment",
+                request.profile.encoder
+            ),
+        ));
+    };
+    let Some(voom_worker_protocol::VideoAcceleratorDescriptor::VideoToolbox(accelerator)) =
+        &config.accelerator
+    else {
+        return Err(config_invalid(
+            "transcode_video",
+            "assigned VideoToolbox work reached an unbound worker".to_owned(),
+        ));
+    };
+    if assignment.hardware_token != accelerator.hardware_token
+        || assignment.resource_id != accelerator.resource_id
+    {
+        return Err(config_invalid(
+            "transcode_video",
+            "VideoToolbox assignment does not match the bound host resource".to_owned(),
+        ));
+    }
+    if !accelerator
+        .encoders
+        .iter()
+        .any(|encoder| encoder == &request.profile.encoder)
+    {
+        return Err(config_invalid(
+            "transcode_video",
+            format!(
+                "VideoToolbox host did not prove encoder `{}`",
+                request.profile.encoder
+            ),
+        ));
+    }
+    if !request.profile.decode.is_video_toolbox() {
+        return Ok(());
+    }
+    let decoder_matches = accelerator.decoders.iter().any(|decoder| {
+        codec_tokens_match(&decoder.codec, &source.codec)
+            && decoder
+                .pixel_formats
+                .iter()
+                .any(|pixel_format| pixel_format == &source.pixel_format)
+    });
+    if !decoder_matches {
+        return Err(config_invalid(
+            "transcode_video",
+            format!(
+                "VideoToolbox host did not prove decoder `{}/{}`",
+                source.codec, source.pixel_format
+            ),
+        ));
+    }
+    validate_videotoolbox_bit_depth(request, &source.pixel_format)
+}
+
+fn validate_videotoolbox_bit_depth(
+    request: &TranscodeVideoRequest,
+    source_pixel_format: &str,
+) -> Result<(), TranscodeVideoError> {
+    let source_depth = video_pixel_format_depth(source_pixel_format);
+    let output_depth = request
+        .profile
+        .pixel_format
+        .as_deref()
+        .and_then(video_pixel_format_depth);
+    if source_depth.is_some() && source_depth == output_depth {
+        return Ok(());
+    }
+    Err(config_invalid(
+        "transcode_video",
+        format!(
+            "VideoToolbox decode source pixel format `{source_pixel_format}` is incompatible \
+             with output pixel format `{}`",
+            request.profile.pixel_format.as_deref().unwrap_or("unknown")
+        ),
+    ))
+}
+
+fn video_pixel_format_depth(pixel_format: &str) -> Option<u8> {
+    match pixel_format {
+        "yuv420p" | "nv12" => Some(8),
+        "yuv420p10le" | "p010le" => Some(10),
+        _ => None,
+    }
 }
 
 fn validate_request_contract(request: &TranscodeVideoRequest) -> Result<(), TranscodeVideoError> {

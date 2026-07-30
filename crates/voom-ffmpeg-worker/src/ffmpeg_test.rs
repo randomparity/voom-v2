@@ -4,7 +4,8 @@ use voom_worker_protocol::{
     AudioStreamRef, ExtractAudioOutput, ExtractAudioRequest, NvidiaVideoAcceleratorDescriptor,
     TranscodeAudioOutput, TranscodeAudioRequest, TranscodeAudioSelection, TranscodeAudioSettings,
     TranscodeVideoExpectedFacts, TranscodeVideoInput, TranscodeVideoOutput, TranscodeVideoProfile,
-    TranscodeVideoRequest, VideoHardwareAssignment,
+    TranscodeVideoRequest, VideoHardwareAssignment, VideoToolboxDecodeCapability,
+    VideoToolboxVideoAcceleratorDescriptor,
 };
 
 use super::*;
@@ -72,6 +73,7 @@ fn basic_request(
                 local_file_key: None,
             },
             video_codec: None,
+            video_pixel_format: None,
         },
         output: TranscodeVideoOutput {
             staging_root: dir.to_string_lossy().into_owned(),
@@ -106,6 +108,7 @@ fn profile_x265_main10() -> TranscodeVideoProfile {
         encoder: "libx265".to_owned(),
         crf: Some(18),
         cq: None,
+        bitrate_kbps: None,
         preset: "slow".to_owned(),
         tune: None,
         codec_profile: Some("main10".to_owned()),
@@ -125,6 +128,7 @@ fn profile_svtav1() -> TranscodeVideoProfile {
         encoder: "libsvtav1".to_owned(),
         crf: Some(32),
         cq: None,
+        bitrate_kbps: None,
         preset: "8".to_owned(),
         tune: None,
         codec_profile: None,
@@ -144,6 +148,7 @@ fn profile_libaom() -> TranscodeVideoProfile {
         encoder: "libaom-av1".to_owned(),
         crf: Some(20),
         cq: None,
+        bitrate_kbps: None,
         preset: "4".to_owned(),
         tune: None,
         codec_profile: None,
@@ -163,6 +168,7 @@ fn profile_1080p() -> TranscodeVideoProfile {
         encoder: "libx265".to_owned(),
         crf: Some(23),
         cq: None,
+        bitrate_kbps: None,
         preset: "medium".to_owned(),
         tune: None,
         codec_profile: None,
@@ -186,6 +192,7 @@ fn profile_nvenc(decode: voom_core::VideoDecodeMode) -> TranscodeVideoProfile {
         encoder: "hevc_nvenc".to_owned(),
         crf: None,
         cq: Some(22),
+        bitrate_kbps: None,
         preset: "p5".to_owned(),
         tune: Some("hq".to_owned()),
         codec_profile: Some("main".to_owned()),
@@ -220,6 +227,70 @@ fn nvidia_request(dir: &Path, decode: voom_core::VideoDecodeMode) -> TranscodeVi
     request.hardware_assignment = Some(VideoHardwareAssignment::nvidia(
         descriptor.hardware_token,
         descriptor.device_uuid,
+    ));
+    request
+}
+
+fn videotoolbox_descriptor() -> VideoToolboxVideoAcceleratorDescriptor {
+    VideoToolboxVideoAcceleratorDescriptor {
+        hardware_token: "videotoolbox:0123456789abcdef".to_owned(),
+        resource_id: "0123456789abcdef".to_owned(),
+        model_identifier: "Mac17,6".to_owned(),
+        chip_name: "Apple M5 Max".to_owned(),
+        macos_version: "26.5.2".to_owned(),
+        macos_build: "25F90".to_owned(),
+        encoders: vec![
+            "h264_videotoolbox".to_owned(),
+            "hevc_videotoolbox".to_owned(),
+        ],
+        decoders: vec![
+            VideoToolboxDecodeCapability {
+                codec: "h264".to_owned(),
+                pixel_formats: vec!["yuv420p".to_owned()],
+            },
+            VideoToolboxDecodeCapability {
+                codec: "hevc".to_owned(),
+                pixel_formats: vec!["yuv420p".to_owned(), "yuv420p10le".to_owned()],
+            },
+        ],
+        max_sessions: 4,
+    }
+}
+
+fn profile_videotoolbox(
+    encoder: &str,
+    target_codec: &str,
+    codec_profile: &str,
+    codec_level: Option<&str>,
+    pixel_format: &str,
+    decode: voom_core::VideoDecodeMode,
+) -> TranscodeVideoProfile {
+    TranscodeVideoProfile {
+        name: format!("{target_codec}-videotoolbox"),
+        target_codec: target_codec.to_owned(),
+        encoder: encoder.to_owned(),
+        crf: None,
+        cq: None,
+        bitrate_kbps: Some(8_000),
+        preset: "default".to_owned(),
+        tune: None,
+        codec_profile: Some(codec_profile.to_owned()),
+        codec_level: codec_level.map(str::to_owned),
+        pixel_format: Some(pixel_format.to_owned()),
+        max_width: None,
+        max_height: None,
+        copy_compatible: false,
+        decode,
+    }
+}
+
+fn videotoolbox_request(dir: &Path, profile: TranscodeVideoProfile) -> TranscodeVideoRequest {
+    let target_codec = profile.target_codec.clone();
+    let mut request = basic_request(dir, "mkv", &target_codec, profile);
+    let descriptor = videotoolbox_descriptor();
+    request.hardware_assignment = Some(VideoHardwareAssignment::video_toolbox(
+        descriptor.hardware_token,
+        descriptor.resource_id,
     ));
     request
 }
@@ -330,6 +401,116 @@ async fn nvenc_cuda_decode_command_pins_decoder_and_zero_copy_filter() {
     assert!(args.contains("-vf\nscale_cuda=format=nv12\n"), "{args}");
     assert!(args.contains("-c:v\nhevc_nvenc\n"), "{args}");
     assert!(!args.lines().any(|arg| arg == "-gpu"), "{args}");
+}
+
+#[tokio::test]
+async fn videotoolbox_software_decode_uses_explicit_format_and_hardware_only_encode() {
+    let dir = tempfile::tempdir().unwrap();
+    let (ffmpeg, args_path) = arg_capture_ffmpeg(dir.path());
+    let ffprobe = hevc_mkv_ffprobe(dir.path());
+    tokio::fs::write(dir.path().join("input.mkv"), b"input")
+        .await
+        .unwrap();
+    let profile = profile_videotoolbox(
+        "hevc_videotoolbox",
+        "hevc",
+        "main",
+        None,
+        "yuv420p",
+        voom_core::VideoDecodeMode::default(),
+    );
+    let request = videotoolbox_request(dir.path(), profile);
+    let config = FfmpegConfig::new(ffmpeg, ffprobe, "test".to_owned(), DEFAULT_PROCESS_TIMEOUT)
+        .with_accelerator(videotoolbox_descriptor());
+
+    run_ffmpeg_transcode(&config, &request, video_source(1920, 1080, &[]))
+        .await
+        .unwrap();
+
+    let args = std::fs::read_to_string(args_path).unwrap();
+    assert!(args.contains("-vf\nformat=nv12\n"), "{args}");
+    assert!(
+        args.contains("-c:v\nhevc_videotoolbox\n-allow_sw\n0\n-b:v\n8000k\n"),
+        "{args}"
+    );
+    assert!(!args.contains("-hwaccel\n"), "{args}");
+    assert!(!args.contains("allow_sw\n1"), "{args}");
+}
+
+#[tokio::test]
+async fn videotoolbox_decode_without_scaling_keeps_hardware_frames() {
+    let dir = tempfile::tempdir().unwrap();
+    let (ffmpeg, args_path) = arg_capture_ffmpeg(dir.path());
+    let ffprobe = hevc_mkv_ffprobe_10bit(dir.path());
+    tokio::fs::write(dir.path().join("input.mkv"), b"input")
+        .await
+        .unwrap();
+    let profile = profile_videotoolbox(
+        "hevc_videotoolbox",
+        "hevc",
+        "main10",
+        None,
+        "yuv420p10le",
+        voom_core::VideoDecodeMode::video_toolbox(),
+    );
+    let request = videotoolbox_request(dir.path(), profile);
+    let config = FfmpegConfig::new(ffmpeg, ffprobe, "test".to_owned(), DEFAULT_PROCESS_TIMEOUT)
+        .with_accelerator(videotoolbox_descriptor());
+
+    run_ffmpeg_transcode(&config, &request, video_source(1920, 1080, &[]))
+        .await
+        .unwrap();
+
+    let args = std::fs::read_to_string(args_path).unwrap();
+    assert!(
+        args.contains("-hwaccel\nvideotoolbox\n-hwaccel_output_format\nvideotoolbox_vld\n-i\n"),
+        "{args}"
+    );
+    assert!(!args.contains("-vf\n"), "{args}");
+    for forbidden in ["hwdownload", "hwupload", "format=", "scale="] {
+        assert!(!args.contains(forbidden), "{args}");
+    }
+}
+
+#[tokio::test]
+async fn videotoolbox_decode_downscale_uses_scale_vt_only() {
+    let dir = tempfile::tempdir().unwrap();
+    let (ffmpeg, args_path) = arg_capture_ffmpeg(dir.path());
+    let ffprobe = hevc_mkv_ffprobe(dir.path());
+    tokio::fs::write(dir.path().join("input.mkv"), b"input")
+        .await
+        .unwrap();
+    let mut profile = profile_videotoolbox(
+        "hevc_videotoolbox",
+        "hevc",
+        "main",
+        None,
+        "yuv420p",
+        voom_core::VideoDecodeMode::video_toolbox(),
+    );
+    profile.max_width = Some(1920);
+    profile.max_height = Some(1080);
+    let request = videotoolbox_request(dir.path(), profile);
+    let config = FfmpegConfig::new(ffmpeg, ffprobe, "test".to_owned(), DEFAULT_PROCESS_TIMEOUT)
+        .with_accelerator(videotoolbox_descriptor());
+
+    run_ffmpeg_transcode(&config, &request, video_source(3840, 2160, &[]))
+        .await
+        .unwrap();
+
+    let args = std::fs::read_to_string(args_path).unwrap();
+    assert!(args.contains("-vf\nscale_vt=w=1920:h=1080\n"), "{args}");
+    for forbidden in ["hwdownload", "hwupload", "format=", "scale="] {
+        assert!(!args.contains(forbidden), "{args}");
+    }
+}
+
+#[test]
+fn h264_mp4_uses_avc1_tag() {
+    assert_eq!(
+        container_args("mp4", "h264").unwrap(),
+        ["-f", "mp4", "-tag:v", "avc1"].map(OsString::from)
+    );
 }
 
 #[test]
@@ -761,6 +942,7 @@ async fn ffmpeg_non_zero_exit_is_error() {
                 local_file_key: None,
             },
             video_codec: None,
+            video_pixel_format: None,
         },
         output: TranscodeVideoOutput {
             staging_root: dir.path().to_string_lossy().into_owned(),
@@ -812,6 +994,7 @@ async fn ffmpeg_success_requires_hevc_matroska_probe() {
                 local_file_key: None,
             },
             video_codec: None,
+            video_pixel_format: None,
         },
         output: TranscodeVideoOutput {
             staging_root: dir.path().to_string_lossy().into_owned(),

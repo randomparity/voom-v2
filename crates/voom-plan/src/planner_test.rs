@@ -2089,12 +2089,59 @@ fn transcode_video_blocks_unsupported_nvidia_decode_source_codec() {
     );
 }
 
+#[test]
+fn videotoolbox_decode_blocks_source_output_bit_depth_mismatch() {
+    let profile = profile_videotoolbox_main10();
+    let plan = plan_transcode_with_container(profile, source_hevc_8bit(), "mkv");
+
+    assert_eq!(node_status(&plan), NodeStatus::Blocked);
+    assert_eq!(
+        blocked_reason(&plan),
+        "VideoToolbox decode source pixel format `yuv420p` is incompatible with output \
+         pixel format `yuv420p10le`"
+    );
+}
+
+#[test]
+fn videotoolbox_decode_plans_matching_ten_bit_downscale() {
+    let mut profile = profile_videotoolbox_main10();
+    profile.max_width = Some(1920);
+    profile.max_height = Some(1080);
+    let mut source = source_hevc_2160_mkv();
+    source.stream_summary["streams"][0]["pixel_format"] = serde_json::json!("yuv420p10le");
+    source.stream_summary["streams"][0]["profile"] = serde_json::json!("Main 10");
+
+    let plan = plan_transcode_with_container(profile, source, "mkv");
+
+    assert_eq!(node_status(&plan), NodeStatus::Planned);
+}
+
 fn profile_hevc_1080p_mkv() -> voom_core::TranscodeVideoProfile {
     let mut profile = voom_core::TranscodeVideoProfile::default_hevc();
     profile.pixel_format = Some("yuv420p".to_owned());
     profile.max_width = Some(1920);
     profile.max_height = Some(1080);
     profile
+}
+
+fn profile_videotoolbox_main10() -> voom_core::TranscodeVideoProfile {
+    voom_core::TranscodeVideoProfile {
+        name: "hevc-videotoolbox-main10".to_owned(),
+        target_codec: "hevc".to_owned(),
+        encoder: "hevc_videotoolbox".to_owned(),
+        crf: None,
+        cq: None,
+        bitrate_kbps: Some(8_000),
+        preset: "default".to_owned(),
+        tune: None,
+        codec_profile: Some("main10".to_owned()),
+        codec_level: None,
+        pixel_format: Some("yuv420p10le".to_owned()),
+        max_width: None,
+        max_height: None,
+        copy_compatible: false,
+        decode: voom_core::VideoDecodeMode::video_toolbox(),
+    }
 }
 
 fn profile_hevc_mp4() -> voom_core::TranscodeVideoProfile {
@@ -2348,6 +2395,8 @@ fn transcode_video_node_payload_carries_profile_and_resolved_profile() {
     let plan = plan_transcode_with_container(profile_hevc_mp4(), source_hevc_720_mkv(), "mp4");
     let payload = &plan.nodes[0].operation_payload;
     assert_eq!(payload["profile"], "default-hevc");
+    assert_eq!(payload["source_video_codec"], "hevc");
+    assert_eq!(payload["source_video_pixel_format"], "yuv420p");
     assert!(payload["resolved_profile"].is_object());
     assert_eq!(payload["resolved_profile"]["encoder"], "libx265");
     assert_eq!(payload["resolved_profile"]["crf"], 23);

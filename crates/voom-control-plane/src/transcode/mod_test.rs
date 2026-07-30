@@ -9,7 +9,7 @@ use voom_store::repo::identity::{DiscoveredFile, FileLocationKind, IngestOutcome
 use voom_worker_protocol::{
     TranscodeVideoObservedFacts, TranscodeVideoProfile, TranscodeVideoRequest,
     TranscodeVideoResult, TranscodeVideoStatus, VerifyArtifactObservedFacts, VerifyArtifactRequest,
-    VerifyArtifactResult, VerifyArtifactStatus,
+    VerifyArtifactResult, VerifyArtifactStatus, VideoHardwareAssignment,
 };
 
 use crate::transcode::resolve::ResolvedProfile;
@@ -27,6 +27,7 @@ async fn execute_records_verified_committed_transcode_result_and_events() {
     let source = dir.path().join("Movie.mp4");
     std::fs::write(&source, b"source bytes").unwrap();
     let seeded = seed_source(&cp, &source, b"source bytes").await;
+    let hardware_assignment = VideoHardwareAssignment::video_toolbox("videotoolbox:test", "test");
 
     let report = execute_transcode_video_with_dispatchers(
         &cp,
@@ -38,6 +39,7 @@ async fn execute_records_verified_committed_transcode_result_and_events() {
             source_location_id: Some(seeded.1),
             staging_root: dir.path().join("stage"),
             target_dir: dir.path().join("out"),
+            hardware_assignment: Some(hardware_assignment.clone()),
             resolved: default_resolved(),
             backup_root: None,
         },
@@ -72,6 +74,10 @@ async fn execute_records_verified_committed_transcode_result_and_events() {
     assert_eq!(report.output_width, 1280);
     assert_eq!(report.output_height, 720);
     assert_eq!(report.output_pixel_format, "yuv420p");
+    assert_eq!(
+        report.hardware_assignment.as_ref(),
+        Some(&hardware_assignment)
+    );
 
     let succeeded = succeeded_payload(&cp).await;
     assert_eq!(succeeded.profile_name, "default-hevc");
@@ -82,6 +88,13 @@ async fn execute_records_verified_committed_transcode_result_and_events() {
     assert_eq!(succeeded.output_width, 1280);
     assert_eq!(succeeded.output_height, 720);
     assert_eq!(succeeded.output_pixel_format, "yuv420p");
+    assert_eq!(succeeded.hardware_backend.as_deref(), Some("video_toolbox"));
+    assert_eq!(
+        succeeded.hardware_token.as_deref(),
+        Some("videotoolbox:test")
+    );
+    assert_eq!(succeeded.hardware_resource_id.as_deref(), Some("test"));
+    assert_eq!(succeeded.hardware_device_uuid, None);
     assert!(
         succeeded
             .staging_path
@@ -112,6 +125,7 @@ async fn execute_rejects_non_hevc_worker_result_before_commit() {
             source_location_id: Some(seeded.1),
             staging_root: dir.path().join("stage"),
             target_dir: dir.path().join("out"),
+            hardware_assignment: None,
             resolved: default_resolved(),
             backup_root: None,
         },
@@ -142,6 +156,7 @@ async fn execute_rejects_worker_result_for_wrong_input_facts_before_commit() {
             source_location_id: Some(seeded.1),
             staging_root: dir.path().join("stage"),
             target_dir: dir.path().join("out"),
+            hardware_assignment: None,
             resolved: default_resolved(),
             backup_root: None,
         },
@@ -176,6 +191,7 @@ async fn execute_rejects_copied_video_disagreement_before_commit() {
             source_location_id: Some(seeded.1),
             staging_root: dir.path().join("stage"),
             target_dir: dir.path().join("out"),
+            hardware_assignment: None,
             resolved: default_resolved(),
             backup_root: None,
         },
@@ -212,6 +228,7 @@ async fn execute_does_not_commit_when_staged_result_probe_fails() {
             source_location_id: Some(seeded.1),
             staging_root: dir.path().join("stage"),
             target_dir: dir.path().join("out"),
+            hardware_assignment: None,
             resolved: default_resolved(),
             backup_root: None,
         },
@@ -394,6 +411,7 @@ impl crate::artifact::verify::VerifyArtifactDispatcher for FakeVerifyDispatcher 
 
 fn transcode_result(request: TranscodeVideoRequest, codec: &str) -> TranscodeVideoResult {
     let output_hash = blake3_checksum(b"hevc bytes");
+    let hardware_assignment = request.hardware_assignment.clone();
     let input = TranscodeVideoObservedFacts {
         size_bytes: request.input.expected.size_bytes,
         content_hash: request.input.expected.content_hash,
@@ -417,7 +435,7 @@ fn transcode_result(request: TranscodeVideoRequest, codec: &str) -> TranscodeVid
         output_width: 1280,
         output_height: 720,
         output_pixel_format: "yuv420p".to_owned(),
-        hardware_assignment: None,
+        hardware_assignment,
         copied_video: false,
     }
 }

@@ -16,7 +16,9 @@ fn transcode_video_request_serializes_stable_snake_case_shape() {
                     "content_hash": "blake3:abc",
                     "modified_at": "2026-05-25T00:00:00Z",
                     "local_file_key": null
-                }
+                },
+                "video_codec": "hevc",
+                "video_pixel_format": "yuv420p10le"
             },
             "output": {
                 "staging_root": "/tmp/voom-stage",
@@ -131,7 +133,7 @@ fn transcode_video_contract_helpers_pin_canonical_values_and_aliases() {
     assert!(is_supported_transcode_video_codec("HEVC"));
     assert!(is_supported_transcode_video_codec("H265"));
     assert!(!is_supported_transcode_video_container("avi"));
-    assert!(!is_supported_transcode_video_codec("h264"));
+    assert!(is_supported_transcode_video_codec("h264"));
 }
 
 #[test]
@@ -161,7 +163,8 @@ fn sample_request() -> TranscodeVideoRequest {
                 modified_at: Some("2026-05-25T00:00:00Z".to_owned()),
                 local_file_key: None,
             },
-            video_codec: None,
+            video_codec: Some("hevc".to_owned()),
+            video_pixel_format: Some("yuv420p10le".to_owned()),
         },
         output: TranscodeVideoOutput {
             staging_root: "/tmp/voom-stage".to_owned(),
@@ -177,12 +180,25 @@ fn sample_request() -> TranscodeVideoRequest {
 }
 
 #[test]
+fn request_round_trip_preserves_expected_source_video_facts() {
+    let request = sample_request();
+
+    let value = serde_json::to_value(&request).unwrap();
+    assert_eq!(value["input"]["video_codec"], "hevc");
+    assert_eq!(value["input"]["video_pixel_format"], "yuv420p10le");
+    assert_eq!(
+        serde_json::from_value::<TranscodeVideoRequest>(value).unwrap(),
+        request
+    );
+}
+
+#[test]
 fn supported_codecs_and_containers_are_recognized() {
     assert!(is_supported_transcode_video_codec("hevc"));
     assert!(is_supported_transcode_video_codec("H265")); // alias, case-insensitive
     assert!(is_supported_transcode_video_codec("av1"));
     assert!(is_supported_transcode_video_codec("AV1"));
-    assert!(!is_supported_transcode_video_codec("h264"));
+    assert!(is_supported_transcode_video_codec("h264"));
     assert!(is_supported_transcode_video_container("mkv"));
     assert!(is_supported_transcode_video_container("mp4"));
     assert!(!is_supported_transcode_video_container("avi"));

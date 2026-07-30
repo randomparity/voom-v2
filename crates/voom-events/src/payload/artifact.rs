@@ -206,6 +206,8 @@ pub struct ArtifactTranscodeSucceededPayload {
     pub hardware_token: Option<String>,
     #[serde(default)]
     pub hardware_device_uuid: Option<String>,
+    #[serde(default)]
+    pub hardware_resource_id: Option<String>,
     pub provider: String,
     pub provider_version: String,
 }

@@ -407,6 +407,7 @@ fn event_kind_matches_serde_tag() {
             hardware_backend: None,
             hardware_token: None,
             hardware_device_uuid: None,
+            hardware_resource_id: None,
             provider: "ffmpeg".to_owned(),
             provider_version: "1".to_owned(),
         }),

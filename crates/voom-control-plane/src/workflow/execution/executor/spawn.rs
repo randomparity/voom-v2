@@ -12,7 +12,8 @@ use voom_store::repo::leases::{LeaseAcquireOutcome, NewLease};
 use voom_store::repo::tickets::{Ticket, TicketState};
 use voom_store::repo::workers::WorkerOperationCandidate;
 use voom_worker_protocol::{
-    TranscodeVideoProfile, VideoHardwareAssignment, VideoHardwareRequirement,
+    TranscodeVideoProfile, VideoAcceleratorDescriptor, VideoHardwareAssignment,
+    VideoHardwareRequirement, VideoToolboxDecodeRequirement,
 };
 
 use crate::video_hardware::{candidate_accelerator_descriptor, historical_accelerator_descriptor};
@@ -152,7 +153,9 @@ impl WorkflowExecutor {
         }
         let runtimes = if uses_accelerator {
             accelerator_runtimes.ok_or_else(|| {
-                VoomError::Internal("NVIDIA candidate projection omitted live runtimes".to_owned())
+                VoomError::Internal(
+                    "accelerator candidate projection omitted live runtimes".to_owned(),
+                )
             })?
         } else {
             &self.runtimes
@@ -249,16 +252,15 @@ impl WorkflowExecutor {
             .operation_candidates(&TicketOperation::from(operation))
             .await?;
         let requirement = video_hardware_requirement(operation, payload)?;
-        if matches!(requirement, Some(VideoHardwareRequirement::Nvidia(_)))
-            && accelerator_runtimes.is_none()
-        {
+        let uses_accelerator = requirement_uses_accelerator(requirement.as_ref());
+        if uses_accelerator && accelerator_runtimes.is_none() {
             *accelerator_runtimes = Some(self.control_plane.live_policy_runtime_registry().await?);
         }
         let conflicts = conflicting_accelerator_tokens(&candidates)?;
         let mut workers = Vec::new();
         let mut assignments = HashMap::new();
         for candidate in candidates {
-            if matches!(requirement, Some(VideoHardwareRequirement::Nvidia(_)))
+            if uses_accelerator
                 && !accelerator_runtimes
                     .as_ref()
                     .is_some_and(|runtimes| runtimes.contains(candidate.worker_id))
@@ -307,14 +309,14 @@ impl WorkflowExecutor {
         requirement: Option<&VideoHardwareRequirement>,
         history: &mut HashMap<String, Vec<String>>,
     ) -> Result<Vec<String>, VoomError> {
-        let Some(VideoHardwareRequirement::Nvidia(requirement)) = requirement else {
+        let Some(requirement) = requirement else {
             return Ok(Vec::new());
         };
-        let cache_key = format!(
-            "{}:{}",
-            requirement.encoder,
-            requirement.decoder.as_deref().unwrap_or("")
-        );
+        if matches!(requirement, VideoHardwareRequirement::Software(_)) {
+            return Ok(Vec::new());
+        }
+        let cache_key = serde_json::to_string(requirement)
+            .map_err(|error| VoomError::Internal(format!("serialize requirement: {error}")))?;
         if let Some(tokens) = history.get(&cache_key) {
             return Ok(tokens.clone());
         }
@@ -328,21 +330,45 @@ impl WorkflowExecutor {
             let Some(descriptor) = historical_accelerator_descriptor(&capability)? else {
                 continue;
             };
-            if !descriptor.encoders.contains(&requirement.encoder)
-                || requirement
-                    .decoder
-                    .as_ref()
-                    .is_some_and(|decoder| !descriptor.decoders.contains(decoder))
-            {
-                continue;
+            let hardware_token = descriptor.hardware_token().to_owned();
+            let compatible = match (requirement, descriptor) {
+                (
+                    VideoHardwareRequirement::Nvidia(required),
+                    VideoAcceleratorDescriptor::Nvidia(descriptor),
+                ) => {
+                    descriptor.encoders.contains(&required.encoder)
+                        && required
+                            .decoder
+                            .as_ref()
+                            .is_none_or(|decoder| descriptor.decoders.contains(decoder))
+                }
+                (
+                    VideoHardwareRequirement::VideoToolbox(required),
+                    VideoAcceleratorDescriptor::VideoToolbox(descriptor),
+                ) => {
+                    descriptor.encoders.contains(&required.encoder)
+                        && required.decoder.as_ref().is_none_or(|decoder| {
+                            videotoolbox_decoder_matches(&descriptor.decoders, decoder)
+                        })
+                }
+                _ => false,
+            };
+            if compatible {
+                tokens.push(hardware_token);
             }
-            tokens.push(descriptor.hardware_token);
         }
         tokens.sort();
         tokens.dedup();
         history.insert(cache_key, tokens.clone());
         Ok(tokens)
     }
+}
+
+fn requirement_uses_accelerator(requirement: Option<&VideoHardwareRequirement>) -> bool {
+    matches!(
+        requirement,
+        Some(VideoHardwareRequirement::Nvidia(_) | VideoHardwareRequirement::VideoToolbox(_))
+    )
 }
 
 fn apply_hardware_assignment(
@@ -353,15 +379,16 @@ fn apply_hardware_assignment(
     let Some(assignment) = assignment else {
         return Ok(false);
     };
-    let nvidia = match assignment {
-        VideoHardwareAssignment::Nvidia(nvidia) => nvidia,
+    let hardware_token = match assignment {
+        VideoHardwareAssignment::Nvidia(value) => &value.hardware_token,
+        VideoHardwareAssignment::VideoToolbox(value) => &value.hardware_token,
         VideoHardwareAssignment::Software(_) => {
             return Err(VoomError::Internal(
                 "software dispatch unexpectedly carried a hardware assignment".to_owned(),
             ));
         }
     };
-    recovery_tokens.push(nvidia.hardware_token.clone());
+    recovery_tokens.push(hardware_token.clone());
     recovery_tokens.sort();
     recovery_tokens.dedup();
     payload["hardware_assignment"] = serde_json::to_value(assignment)
@@ -389,6 +416,30 @@ fn video_hardware_requirement(
         .ok_or_else(|| VoomError::Config("transcode payload missing profile".to_owned()))?;
     let profile: TranscodeVideoProfile = serde_json::from_value(profile_value.clone())
         .map_err(|error| VoomError::Config(format!("transcode profile malformed: {error}")))?;
+    if profile.encoder == "h264_videotoolbox" || profile.encoder == "hevc_videotoolbox" {
+        let decoder = if profile.decode.is_video_toolbox() {
+            let codec = source_video_codec(payload).ok_or_else(|| {
+                VoomError::Config(
+                    "VideoToolbox decode requires a known source video codec".to_owned(),
+                )
+            })?;
+            let pixel_format = source_video_pixel_format(payload).ok_or_else(|| {
+                VoomError::Config(
+                    "VideoToolbox decode requires a known source video pixel format".to_owned(),
+                )
+            })?;
+            Some(VideoToolboxDecodeRequirement {
+                codec: codec.to_owned(),
+                pixel_format: pixel_format.to_owned(),
+            })
+        } else {
+            None
+        };
+        return Ok(Some(VideoHardwareRequirement::video_toolbox(
+            profile.encoder,
+            decoder,
+        )));
+    }
     if profile.encoder != "hevc_nvenc" {
         return Ok(Some(VideoHardwareRequirement::software()));
     }
@@ -412,6 +463,18 @@ fn video_hardware_requirement(
         "hevc_nvenc",
         decoder,
     )))
+}
+
+fn source_video_pixel_format(payload: &serde_json::Value) -> Option<&str> {
+    payload
+        .get("source_video_pixel_format")
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| {
+            payload
+                .get("input")
+                .and_then(|input| input.get("video_pixel_format"))
+                .and_then(serde_json::Value::as_str)
+        })
 }
 
 fn source_video_codec(payload: &serde_json::Value) -> Option<&str> {
@@ -452,6 +515,9 @@ fn compatible_assignment(
             let Some(descriptor) = candidate_accelerator_descriptor(candidate)? else {
                 return Ok(CandidateCompatibility::Incompatible);
             };
+            let VideoAcceleratorDescriptor::Nvidia(descriptor) = descriptor else {
+                return Ok(CandidateCompatibility::Incompatible);
+            };
             if conflicts.contains(&descriptor.hardware_token)
                 || !candidate.hardware.contains(&descriptor.hardware_token)
                 || !descriptor.encoders.contains(&required.encoder)
@@ -466,6 +532,28 @@ fn compatible_assignment(
                 VideoHardwareAssignment::nvidia(descriptor.hardware_token, descriptor.device_uuid),
             )))
         }
+        Some(VideoHardwareRequirement::VideoToolbox(required)) => {
+            let Some(VideoAcceleratorDescriptor::VideoToolbox(descriptor)) =
+                candidate_accelerator_descriptor(candidate)?
+            else {
+                return Ok(CandidateCompatibility::Incompatible);
+            };
+            if conflicts.contains(&descriptor.hardware_token)
+                || !candidate.hardware.contains(&descriptor.hardware_token)
+                || !descriptor.encoders.contains(&required.encoder)
+                || required.decoder.as_ref().is_some_and(|decoder| {
+                    !videotoolbox_decoder_matches(&descriptor.decoders, decoder)
+                })
+            {
+                return Ok(CandidateCompatibility::Incompatible);
+            }
+            Ok(CandidateCompatibility::Compatible(Some(
+                VideoHardwareAssignment::video_toolbox(
+                    descriptor.hardware_token,
+                    descriptor.resource_id,
+                ),
+            )))
+        }
     }
 }
 
@@ -478,14 +566,25 @@ fn conflicting_accelerator_tokens(
         let Some(descriptor) = candidate_accelerator_descriptor(candidate)? else {
             continue;
         };
-        if let Some(capacity) =
-            capacities.insert(descriptor.hardware_token.clone(), descriptor.max_sessions)
-            && capacity != descriptor.max_sessions
+        let hardware_token = descriptor.hardware_token().to_owned();
+        let max_sessions = descriptor.max_sessions();
+        if let Some(capacity) = capacities.insert(hardware_token.clone(), max_sessions)
+            && capacity != max_sessions
         {
-            conflicts.insert(descriptor.hardware_token);
+            conflicts.insert(hardware_token);
         }
     }
     Ok(conflicts)
+}
+
+fn videotoolbox_decoder_matches(
+    capabilities: &[voom_worker_protocol::VideoToolboxDecodeCapability],
+    required: &VideoToolboxDecodeRequirement,
+) -> bool {
+    capabilities.iter().any(|capability| {
+        capability.codec == required.codec
+            && capability.pixel_formats.contains(&required.pixel_format)
+    })
 }
 
 fn increment_reservation(reservations: &mut HashMap<WorkerId, u32>, worker_id: WorkerId) {

@@ -6,8 +6,33 @@ fn descriptor_lookup_knows_supported_encoders() {
     assert!(encoder_descriptor("libsvtav1").is_some());
     assert!(encoder_descriptor("libaom-av1").is_some());
     assert!(encoder_descriptor("hevc_nvenc").is_some());
+    assert!(encoder_descriptor("h264_videotoolbox").is_some());
+    assert!(encoder_descriptor("hevc_videotoolbox").is_some());
     assert!(encoder_descriptor("av1_nvenc").is_none());
     assert!(encoder_descriptor("x264").is_none());
+}
+
+#[test]
+fn videotoolbox_descriptors_use_bitrate_and_closed_tuples() {
+    let h264 = encoder_descriptor("h264_videotoolbox").unwrap();
+    assert_eq!(
+        h264.quality_domain,
+        QualityDomain::BitrateKbps {
+            min: 1,
+            max: u32::MAX,
+        }
+    );
+    assert_eq!(h264.backend, VideoEncoderBackend::VideoToolbox);
+    assert!(h264.accepts_preset("default"));
+    assert!(h264.accepts_codec_profile("high"));
+    assert!(h264.accepts_codec_level("4.1"));
+    assert!(h264.accepts_pixel_format("yuv420p"));
+
+    let hevc = encoder_descriptor("hevc_videotoolbox").unwrap();
+    assert_eq!(hevc.backend, VideoEncoderBackend::VideoToolbox);
+    assert!(hevc.accepts_codec_profile("main10"));
+    assert!(hevc.accepts_pixel_format("yuv420p10le"));
+    assert!(!hevc.accepts_codec_level("4.1"));
 }
 
 #[test]

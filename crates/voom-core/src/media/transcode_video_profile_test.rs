@@ -14,8 +14,44 @@ fn contract_helpers_pin_canonical_values_and_aliases() {
     assert!(is_supported_transcode_video_codec("H265"));
     assert!(is_supported_transcode_video_codec("av1"));
     assert!(is_supported_transcode_video_codec("AV1"));
+    assert!(is_supported_transcode_video_codec("h264"));
     assert!(!is_supported_transcode_video_container("avi"));
-    assert!(!is_supported_transcode_video_codec("h264"));
+}
+
+#[test]
+fn videotoolbox_profile_requires_bitrate_and_complete_output_tuple() {
+    let mut profile = TranscodeVideoProfile::default_hevc();
+    profile.encoder = "hevc_videotoolbox".to_owned();
+    profile.crf = None;
+    profile.bitrate_kbps = Some(8_000);
+    profile.preset = "default".to_owned();
+    profile.codec_profile = Some("main10".to_owned());
+    profile.pixel_format = Some("yuv420p10le".to_owned());
+    profile.decode = VideoDecodeMode::video_toolbox();
+
+    assert!(validate_profile_against_descriptor(&profile).is_ok());
+
+    profile.bitrate_kbps = None;
+    assert!(validate_profile_against_descriptor(&profile).is_err());
+    profile.bitrate_kbps = Some(8_000);
+    profile.pixel_format = Some("yuv420p".to_owned());
+    assert!(validate_profile_against_descriptor(&profile).is_err());
+    profile.pixel_format = Some("yuv420p10le".to_owned());
+    profile.codec_profile = None;
+    assert!(validate_profile_against_descriptor(&profile).is_err());
+}
+
+#[test]
+fn videotoolbox_decode_serializes_as_strict_typed_mode() {
+    let mode = VideoDecodeMode::video_toolbox();
+    assert_eq!(
+        serde_json::to_value(mode).unwrap(),
+        serde_json::json!({"backend": "video_toolbox"})
+    );
+    assert_eq!(VideoDecodeMode::parse("video_toolbox").unwrap(), mode);
+
+    let invalid = serde_json::json!({"backend": "video_toolbox", "device": 0});
+    assert!(serde_json::from_value::<VideoDecodeMode>(invalid).is_err());
 }
 
 #[test]
