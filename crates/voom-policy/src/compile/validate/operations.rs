@@ -517,6 +517,9 @@ impl Validator<'_> {
                         .and_then(|value| value.parse::<u8>().ok())
                         .is_some_and(|value| value >= min && value <= max)
             }
+            // The inline DSL has no `qp` setting, so a `qp`-domain encoder cannot state a
+            // quality target inline and is rejected rather than defaulted.
+            voom_core::QualityDomain::Qp { .. } => false,
         };
         if !valid {
             self.error(

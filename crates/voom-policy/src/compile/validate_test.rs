@@ -146,6 +146,26 @@ fn validates_nvidia_inline_quality_and_decode_mode() {
     }
 }
 
+/// The inline DSL has no `qp` setting and treats `preset` as mandatory, so it cannot
+/// express a `hevc_vaapi` profile at all. Every spelling must be rejected rather than
+/// compiled into a profile with no quality parameter or a preset the encoder has no flag
+/// for — an inline VAAPI body must not become reachable by accident, only by a deliberate
+/// change that adds `qp` and nullable `preset` to the grammar.
+#[test]
+fn no_inline_body_can_express_a_vaapi_profile() {
+    for source in [
+        "policy \"p\" { phase a { transcode video to hevc { encoder: hevc_vaapi } } }",
+        "policy \"p\" { phase a { transcode video to hevc { encoder: hevc_vaapi qp: 23 } } }",
+        "policy \"p\" { phase a { transcode video to hevc { encoder: hevc_vaapi crf: 23 } } }",
+        "policy \"p\" { phase a { transcode video to hevc { encoder: hevc_vaapi preset: medium } } }",
+    ] {
+        assert!(
+            codes(source).contains(&"invalid_video_profile_setting".to_owned()),
+            "{source}"
+        );
+    }
+}
+
 #[test]
 fn rejects_using_profile_with_inline_body() {
     assert!(

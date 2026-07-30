@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 
-use crate::encoder_caps::{QualityDomain, VideoEncoderBackend, encoder_descriptor};
+use crate::encoder_caps::{
+    EncoderDescriptor, PresetDomain, QualityDomain, VideoEncoderBackend, encoder_descriptor,
+};
 
 pub const TRANSCODE_VIDEO_CONTAINER: &str = "mkv";
 pub const TRANSCODE_VIDEO_CONTAINER_MP4: &str = "mp4";
@@ -64,34 +66,9 @@ pub fn validate_profile_against_descriptor(profile: &TranscodeVideoProfile) -> R
             profile.encoder, descriptor.target_codec, profile.target_codec
         ));
     }
-    match (descriptor.quality_domain, profile.crf, profile.cq) {
-        (QualityDomain::Crf { min, max }, Some(crf), None) if crf >= min && crf <= max => {}
-        (QualityDomain::Cq { min, max }, None, Some(cq)) if cq >= min && cq <= max => {}
-        (QualityDomain::Crf { min, max }, crf, cq) => {
-            return Err(format!(
-                "`{}` requires crf {min}..={max} and rejects cq; got crf={crf:?}, cq={cq:?}",
-                profile.encoder
-            ));
-        }
-        (QualityDomain::Cq { min, max }, crf, cq) => {
-            return Err(format!(
-                "`{}` requires cq {min}..={max} and rejects crf; got crf={crf:?}, cq={cq:?}",
-                profile.encoder
-            ));
-        }
-    }
-    if profile.decode.is_nvidia() && descriptor.backend != VideoEncoderBackend::Nvidia {
-        return Err(format!(
-            "NVIDIA decode requires an NVIDIA encoder, not `{}`",
-            profile.encoder
-        ));
-    }
-    if !descriptor.accepts_preset(&profile.preset) {
-        return Err(format!(
-            "preset `{}` invalid for `{}`",
-            profile.preset, profile.encoder
-        ));
-    }
+    validate_quality_domain(descriptor, profile)?;
+    validate_decode_pairing(descriptor, profile)?;
+    validate_preset(descriptor, profile)?;
     if let Some(tune) = &profile.tune
         && !descriptor.accepts_tune(tune)
     {
@@ -130,6 +107,90 @@ pub fn validate_profile_against_descriptor(profile: &TranscodeVideoProfile) -> R
         }
     }
     Ok(())
+}
+
+/// Exactly one quality field is legal per encoder — the one its `QualityDomain` names.
+/// The match is exhaustive over `(quality_domain, crf, cq, qp)` with no wildcard arm, so
+/// a new domain or a new quality field cannot be added without deciding this rule.
+fn validate_quality_domain(
+    descriptor: &EncoderDescriptor,
+    profile: &TranscodeVideoProfile,
+) -> Result<(), String> {
+    match (
+        descriptor.quality_domain,
+        profile.crf,
+        profile.cq,
+        profile.qp,
+    ) {
+        (QualityDomain::Crf { min, max }, Some(crf), None, None) if crf >= min && crf <= max => {
+            Ok(())
+        }
+        (QualityDomain::Cq { min, max }, None, Some(cq), None) if cq >= min && cq <= max => Ok(()),
+        (QualityDomain::Qp { min, max }, None, None, Some(qp)) if qp >= min && qp <= max => Ok(()),
+        (QualityDomain::Crf { min, max }, crf, cq, qp) => Err(format!(
+            "`{}` requires only crf {min}..={max}; got crf={crf:?}, cq={cq:?}, qp={qp:?}",
+            profile.encoder
+        )),
+        (QualityDomain::Cq { min, max }, crf, cq, qp) => Err(format!(
+            "`{}` requires only cq {min}..={max}; got crf={crf:?}, cq={cq:?}, qp={qp:?}",
+            profile.encoder
+        )),
+        (QualityDomain::Qp { min, max }, crf, cq, qp) => Err(format!(
+            "`{}` requires only qp {min}..={max}; got crf={crf:?}, cq={cq:?}, qp={qp:?}",
+            profile.encoder
+        )),
+    }
+}
+
+/// A hardware decode backend and the encoder must name the same accelerator: hardware
+/// frames produced by one backend cannot enter the other's encoder. Software decode into
+/// a hardware encoder stays legal — that is the explicit upload path.
+fn validate_decode_pairing(
+    descriptor: &EncoderDescriptor,
+    profile: &TranscodeVideoProfile,
+) -> Result<(), String> {
+    if profile.decode.is_nvidia() && descriptor.backend != VideoEncoderBackend::Nvidia {
+        return Err(format!(
+            "NVIDIA decode requires an NVIDIA encoder, not `{}`",
+            profile.encoder
+        ));
+    }
+    if profile.decode.is_vaapi() && descriptor.backend != VideoEncoderBackend::Vaapi {
+        return Err(format!(
+            "VAAPI decode requires a VAAPI encoder, not `{}`",
+            profile.encoder
+        ));
+    }
+    Ok(())
+}
+
+/// Preset presence is driven by the encoder's `PresetDomain`. `None` means the encoder
+/// has no speed knob at all, so a preset would be an operator setting mapping to no
+/// `FFmpeg` flag; every other domain still requires one.
+fn validate_preset(
+    descriptor: &EncoderDescriptor,
+    profile: &TranscodeVideoProfile,
+) -> Result<(), String> {
+    match (descriptor.preset_domain, profile.preset.as_deref()) {
+        (PresetDomain::None, None) => Ok(()),
+        (PresetDomain::None, Some(preset)) => Err(format!(
+            "`{}` accepts no preset; got `{preset}`",
+            profile.encoder
+        )),
+        (PresetDomain::Named(_) | PresetDomain::NumericRange { .. }, None) => {
+            Err(format!("`{}` requires a preset", profile.encoder))
+        }
+        (PresetDomain::Named(_) | PresetDomain::NumericRange { .. }, Some(preset)) => {
+            if descriptor.accepts_preset(preset) {
+                Ok(())
+            } else {
+                Err(format!(
+                    "preset `{preset}` invalid for `{}`",
+                    profile.encoder
+                ))
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -227,8 +288,13 @@ pub struct TranscodeVideoProfile {
     pub crf: Option<u8>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cq: Option<u8>,
+    /// VAAPI's constant quantization parameter, used with `-rc_mode CQP`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub qp: Option<u8>,
     /// Encoder-specific speed token: named x265 preset, SVT-AV1 `-preset N`, or libaom-av1 `-cpu-used N`.
-    pub preset: String,
+    /// `None` for an encoder with no speed knob, e.g. `hevc_vaapi`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preset: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tune: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -264,7 +330,8 @@ impl TranscodeVideoProfile {
             encoder: "libx265".to_owned(),
             crf: Some(23),
             cq: None,
-            preset: "medium".to_owned(),
+            qp: None,
+            preset: Some("medium".to_owned()),
             tune: None,
             codec_profile: None,
             codec_level: None,

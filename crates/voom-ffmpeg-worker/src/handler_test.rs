@@ -57,7 +57,7 @@ async fn one_shot_nvenc_request_requires_configured_run_local_worker() {
     request.profile.encoder = "hevc_nvenc".to_owned();
     request.profile.crf = None;
     request.profile.cq = Some(22);
-    request.profile.preset = "p5".to_owned();
+    request.profile.preset = Some("p5".to_owned());
 
     let err = validate_video_hardware_binding(&request, &config(dir.path()), "h264").unwrap_err();
 
@@ -186,7 +186,8 @@ async fn unavailable_encoder_is_config_invalid_before_ffmpeg() {
         encoder: "libaom-av1".to_owned(),
         crf: Some(35),
         cq: None,
-        preset: "8".to_owned(),
+        qp: None,
+        preset: Some("8".to_owned()),
         tune: None,
         codec_profile: None,
         codec_level: None,

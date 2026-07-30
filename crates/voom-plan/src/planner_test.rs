@@ -2074,7 +2074,7 @@ fn transcode_video_blocks_unsupported_nvidia_decode_source_codec() {
     profile.encoder = "hevc_nvenc".to_owned();
     profile.crf = None;
     profile.cq = Some(22);
-    profile.preset = "p5".to_owned();
+    profile.preset = Some("p5".to_owned());
     profile.decode = voom_core::VideoDecodeMode::nvidia();
     let plan = plan_transcode_with_container(
         profile,

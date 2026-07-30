@@ -216,7 +216,7 @@ fn video_codec_args_x265(profile: &TranscodeVideoProfile) -> Result<Vec<OsString
         OsString::from("-crf"),
         required_quality(profile.crf, "crf", &profile.encoder)?,
         OsString::from("-preset"),
-        OsString::from(&profile.preset),
+        required_preset(profile)?,
     ];
     if let Some(tune) = &profile.tune {
         args.push(OsString::from("-tune"));
@@ -241,7 +241,7 @@ fn video_codec_args_svtav1(profile: &TranscodeVideoProfile) -> Result<Vec<OsStri
         OsString::from("-crf"),
         required_quality(profile.crf, "crf", &profile.encoder)?,
         OsString::from("-preset"),
-        OsString::from(&profile.preset),
+        required_preset(profile)?,
     ];
     if let Some(codec_profile) = &profile.codec_profile {
         args.push(OsString::from("-profile:v"));
@@ -272,7 +272,7 @@ fn video_codec_args_libaom(profile: &TranscodeVideoProfile) -> Result<Vec<OsStri
         OsString::from("-b:v"),
         OsString::from("0"),
         OsString::from("-cpu-used"),
-        OsString::from(&profile.preset),
+        required_preset(profile)?,
     ];
     if let Some(tune) = &profile.tune {
         args.push(OsString::from("-tune"));
@@ -297,7 +297,7 @@ fn video_codec_args_nvenc(profile: &TranscodeVideoProfile) -> Result<Vec<OsStrin
         OsString::from("-b:v"),
         OsString::from("0"),
         OsString::from("-preset"),
-        OsString::from(&profile.preset),
+        required_preset(profile)?,
     ];
     if let Some(tune) = &profile.tune {
         args.push(OsString::from("-tune"));
@@ -312,6 +312,18 @@ fn video_codec_args_nvenc(profile: &TranscodeVideoProfile) -> Result<Vec<OsStrin
         args.push(OsString::from(level));
     }
     Ok(args)
+}
+
+/// Every encoder reaching this module has a speed knob, so a missing `preset` is a
+/// contract violation to report — never a value to substitute.
+fn required_preset(profile: &TranscodeVideoProfile) -> Result<OsString, FfmpegError> {
+    let Some(preset) = &profile.preset else {
+        return Err(FfmpegError::OutputFactsMismatch(format!(
+            "encoder `{}` requires `preset`",
+            profile.encoder
+        )));
+    };
+    Ok(OsString::from(preset))
 }
 
 fn required_quality(

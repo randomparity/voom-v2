@@ -8,6 +8,9 @@ pub enum PresetDomain {
     Named(&'static [&'static str]),
     /// An inclusive numeric range, e.g. SVT-AV1 `-preset 0..=13`.
     NumericRange { min: u8, max: u8 },
+    /// The encoder has no speed knob at all, e.g. `hevc_vaapi` exposes neither
+    /// `-preset` nor `-compression_level`.
+    None,
 }
 
 /// The encoder-specific constant-quality control accepted by a profile.
@@ -17,6 +20,8 @@ pub enum QualityDomain {
     Crf { min: u8, max: u8 },
     /// NVIDIA's constant-quality target in VBR rate-control mode.
     Cq { min: u8, max: u8 },
+    /// VAAPI's constant quantization parameter, used with `-rc_mode CQP`.
+    Qp { min: u8, max: u8 },
 }
 
 /// Whether an encoder executes in software or on a named accelerator backend.
@@ -24,6 +29,7 @@ pub enum QualityDomain {
 pub enum VideoEncoderBackend {
     Software,
     Nvidia,
+    Vaapi,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -133,13 +139,37 @@ const HEVC_NVENC: EncoderDescriptor = EncoderDescriptor {
     requires_bitrate_zero: true,
 };
 
-const DESCRIPTORS: &[EncoderDescriptor] = &[X265, SVTAV1, LIBAOM, HEVC_NVENC];
+/// `-qp` is `0..52` on this encoder and 0 means auto, so the operator range starts at 1.
+/// `-preset` and `-compression_level` do not exist, and `-level` is not offered in this
+/// slice. Surfaces are hardware formats only. Measured on the acceptance host recorded
+/// in the issue #409 design §2.
+const HEVC_VAAPI: EncoderDescriptor = EncoderDescriptor {
+    encoder: "hevc_vaapi",
+    target_codec: "hevc",
+    quality_domain: QualityDomain::Qp { min: 1, max: 52 },
+    backend: VideoEncoderBackend::Vaapi,
+    preset_domain: PresetDomain::None,
+    tunes: &[],
+    codec_profiles: &["main", "main10"],
+    codec_levels: &[],
+    pixel_formats: &["nv12", "p010"],
+    ten_bit_pixel_formats: &["p010"],
+    eight_bit_only_profiles: &["main"],
+    requires_bitrate_zero: false,
+};
+
+const DESCRIPTORS: &[EncoderDescriptor] = &[X265, SVTAV1, LIBAOM, HEVC_NVENC, HEVC_VAAPI];
 
 pub const NVIDIA_VIDEO_DECODERS: &[(&str, &str)] = &[
     ("h264", "h264_cuvid"),
     ("hevc", "hevc_cuvid"),
     ("av1", "av1_cuvid"),
 ];
+
+/// Codecs VAAPI can decode in hardware. A flat list, not `NVIDIA_VIDEO_DECODERS`'
+/// `(codec, decoder)` pairs: VAAPI decode is selected by `-hwaccel vaapi` and the
+/// codec's own decoder, so there is no per-codec decoder name to carry.
+pub const VAAPI_VIDEO_DECODERS: &[&str] = &["h264", "hevc", "av1"];
 
 #[must_use]
 pub fn encoder_descriptor(encoder: &str) -> Option<&'static EncoderDescriptor> {
@@ -177,12 +207,21 @@ impl EncoderDescriptor {
     }
 
     #[must_use]
+    pub const fn accepts_qp(&self, qp: u8) -> bool {
+        let QualityDomain::Qp { min, max } = self.quality_domain else {
+            return false;
+        };
+        qp >= min && qp <= max
+    }
+
+    #[must_use]
     pub fn accepts_preset(&self, preset: &str) -> bool {
         match self.preset_domain {
             PresetDomain::Named(set) => set.contains(&preset),
             PresetDomain::NumericRange { min, max } => preset
                 .parse::<u8>()
                 .is_ok_and(|value| value >= min && value <= max),
+            PresetDomain::None => false,
         }
     }
 

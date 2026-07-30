@@ -245,7 +245,7 @@ fn profile_validates_against_its_encoder_descriptor() {
     assert!(validate_profile_against_descriptor(&unknown_encoder).is_err());
 
     let mut bad_preset = TranscodeVideoProfile::default_hevc();
-    bad_preset.preset = "turbofast".to_owned(); // not an x265 preset
+    bad_preset.preset = Some("turbofast".to_owned()); // not an x265 preset
     assert!(validate_profile_against_descriptor(&bad_preset).is_err());
 
     let mut bad_tune = TranscodeVideoProfile::default_hevc();

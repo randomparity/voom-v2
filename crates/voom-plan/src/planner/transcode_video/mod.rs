@@ -336,18 +336,20 @@ fn transcode_video_notes(
     resolved: &voom_core::TranscodeVideoProfile,
     snapshot: &MediaSnapshotInput,
 ) -> Vec<String> {
-    let mut notes = vec![
-        format!("encoder={}", resolved.encoder),
-        format!("speed={}", resolved.preset),
-        format!(
+    let mut notes = vec![format!("encoder={}", resolved.encoder)];
+    // An encoder with no speed knob contributes no speed note and no speed-derived
+    // cpu-cost note rather than a placeholder.
+    if let Some(preset) = &resolved.preset {
+        notes.push(format!("speed={preset}"));
+        notes.push(format!(
             "cpu_cost={}",
-            profile::cpu_cost(&resolved.encoder, &resolved.preset)
-        ),
-        resolved.crf.map_or_else(
-            || format!("cq={}", resolved.cq.unwrap_or_default()),
-            |crf| format!("crf={crf}"),
-        ),
-    ];
+            profile::cpu_cost(&resolved.encoder, preset)
+        ));
+    }
+    notes.push(resolved.crf.map_or_else(
+        || format!("cq={}", resolved.cq.unwrap_or_default()),
+        |crf| format!("crf={crf}"),
+    ));
     if let (Some(src_w), Some(src_h)) = (snapshot.width, snapshot.height) {
         let cap_w = resolved.max_width.unwrap_or(src_w);
         let cap_h = resolved.max_height.unwrap_or(src_h);
