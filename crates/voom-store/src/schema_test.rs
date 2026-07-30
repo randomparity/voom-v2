@@ -146,7 +146,23 @@ async fn video_profiles_bind_preset_presence_to_the_encoder() {
 async fn video_profiles_pin_the_vaapi_qp_range_to_the_rust_descriptor() {
     let (pool, _tmp) = fresh_pool().await;
 
-    for (name, qp) in [("vaapi-qp-min", 1), ("vaapi-qp-max", 52)] {
+    // Read both ends off the descriptor rather than restating them: hardcoding
+    // them here would let the Rust range move while this test — the thing named
+    // for catching that drift — kept passing against the old SQL.
+    let voom_core::QualityDomain::Qp { min, max } = voom_core::encoder_descriptor("hevc_vaapi")
+        .expect("hevc_vaapi has an encoder descriptor")
+        .quality_domain
+    else {
+        panic!("hevc_vaapi must carry a Qp quality domain");
+    };
+    let below = min
+        .checked_sub(1)
+        .expect("qp min must leave room for a below-range probe");
+    let above = max
+        .checked_add(1)
+        .expect("qp max must leave room for an above-range probe");
+
+    for (name, qp) in [("vaapi-qp-min", min), ("vaapi-qp-max", max)] {
         assert_profile_accepted(
             &pool,
             &video_profile_insert(
@@ -157,7 +173,7 @@ async fn video_profiles_pin_the_vaapi_qp_range_to_the_rust_descriptor() {
         )
         .await;
     }
-    for (name, qp) in [("vaapi-qp-auto", "0"), ("vaapi-qp-over", "53")] {
+    for (name, qp) in [("vaapi-qp-auto", below), ("vaapi-qp-over", above)] {
         assert_profile_check_rejected(
             &pool,
             &video_profile_insert(
