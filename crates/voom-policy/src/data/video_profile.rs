@@ -4,9 +4,11 @@ use serde::de::{self, MapAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
 use voom_core::VideoDecodeMode;
 
-/// Typed inline encode settings. `encoder`, one quality field, and `preset` are
-/// mandatory in an inline body; the remaining fields are optional. Validation
-/// against per-encoder capability descriptors happens in the compiler.
+/// Typed inline encode settings. `encoder` and exactly one quality field are
+/// mandatory in an inline body; `preset` is mandatory for every encoder whose
+/// `PresetDomain` has one and absent for an encoder with no speed knob at all
+/// (`hevc_vaapi`). The remaining fields are optional. Validation against per-encoder
+/// capability descriptors happens in the compiler.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct VideoProfileSettings {
@@ -15,7 +17,11 @@ pub struct VideoProfileSettings {
     pub crf: Option<u8>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cq: Option<u8>,
-    pub preset: String,
+    /// VAAPI's constant quantization parameter, used with `-rc_mode CQP`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub qp: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preset: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tune: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

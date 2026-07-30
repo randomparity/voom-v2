@@ -123,6 +123,11 @@ fn rejects_invalid_inline_profiles() {
     );
 }
 
+/// The `decode: vaapi` case rejects for a *different reason* than it once did: it
+/// used to fail because `vaapi` was outside the decode vocabulary, and now fails the
+/// decode/encoder pairing rule, because hardware frames from one backend cannot enter
+/// the other's encoder. It stays here, on the NVIDIA encoder, rather than being
+/// duplicated into the VAAPI test.
 #[test]
 fn validates_nvidia_inline_quality_and_decode_mode() {
     let valid = concat!(
@@ -146,18 +151,73 @@ fn validates_nvidia_inline_quality_and_decode_mode() {
     }
 }
 
-/// The inline DSL has no `qp` setting and treats `preset` as mandatory, so it cannot
-/// express a `hevc_vaapi` profile at all. Every spelling must be rejected rather than
-/// compiled into a profile with no quality parameter or a preset the encoder has no flag
-/// for — an inline VAAPI body must not become reachable by accident, only by a deliberate
-/// change that adds `qp` and nullable `preset` to the grammar.
+/// The deliberate change the previous revision of this test named as the only way an
+/// inline VAAPI body may become reachable: `qp` joins the grammar and `preset` becomes
+/// per-encoder. Every other spelling it pinned stays rejected — a body with no quality
+/// parameter, one naming the wrong quality field, and one carrying a preset the encoder
+/// has no flag for.
 #[test]
-fn no_inline_body_can_express_a_vaapi_profile() {
+fn an_inline_vaapi_body_needs_qp_and_no_preset() {
+    let valid = concat!(
+        "policy \"p\" { phase a { transcode video to hevc { ",
+        "encoder: hevc_vaapi qp: 23 } } }"
+    );
+    assert!(codes(valid).is_empty(), "{:?}", codes(valid));
+
     for source in [
         "policy \"p\" { phase a { transcode video to hevc { encoder: hevc_vaapi } } }",
-        "policy \"p\" { phase a { transcode video to hevc { encoder: hevc_vaapi qp: 23 } } }",
         "policy \"p\" { phase a { transcode video to hevc { encoder: hevc_vaapi crf: 23 } } }",
+        "policy \"p\" { phase a { transcode video to hevc { encoder: hevc_vaapi cq: 23 } } }",
         "policy \"p\" { phase a { transcode video to hevc { encoder: hevc_vaapi preset: medium } } }",
+        "policy \"p\" { phase a { transcode video to hevc { encoder: hevc_vaapi qp: 23 preset: medium } } }",
+    ] {
+        assert!(
+            codes(source).contains(&"invalid_video_profile_setting".to_owned()),
+            "{source}"
+        );
+    }
+}
+
+/// `qp` is `1..=52`: `FFmpeg` accepts `0..52` and rejects 53, and 0 is the default
+/// meaning auto, so it is excluded from the operator vocabulary (ADR 0051 §4). A
+/// profile that says `qp: 0` means "let the driver choose", which is not a quality
+/// target an operator declared.
+#[test]
+fn an_inline_vaapi_qp_is_bounded_to_the_operator_range() {
+    for qp in ["1", "23", "52"] {
+        let source = format!(
+            "policy \"p\" {{ phase a {{ transcode video to hevc {{ encoder: hevc_vaapi qp: {qp} }} }} }}"
+        );
+        assert!(codes(&source).is_empty(), "qp {qp} must be accepted");
+    }
+    for qp in ["0", "53", "255"] {
+        let source = format!(
+            "policy \"p\" {{ phase a {{ transcode video to hevc {{ encoder: hevc_vaapi qp: {qp} }} }} }}"
+        );
+        assert!(
+            codes(&source).contains(&"invalid_video_profile_setting".to_owned()),
+            "qp {qp} must be rejected"
+        );
+    }
+}
+
+/// A `decode: vaapi` clause is only meaningful with a VAAPI encoder: VAAPI hardware
+/// frames cannot enter a software or NVENC encoder, so the pairing is validated here
+/// rather than deferred to a run-time `FFmpeg` failure. `preset` stays mandatory for
+/// every encoder that has one, so widening it for VAAPI did not make it optional.
+#[test]
+fn an_inline_vaapi_decode_clause_requires_a_vaapi_encoder() {
+    let valid = concat!(
+        "policy \"p\" { phase a { transcode video to hevc { ",
+        "encoder: hevc_vaapi qp: 23 decode: vaapi } } }"
+    );
+    assert!(codes(valid).is_empty(), "{:?}", codes(valid));
+
+    for source in [
+        "policy \"p\" { phase a { transcode video to hevc { encoder: libx265 crf: 23 preset: medium decode: vaapi } } }",
+        "policy \"p\" { phase a { transcode video to hevc { encoder: hevc_vaapi qp: 23 decode: nvidia } } }",
+        "policy \"p\" { phase a { transcode video to hevc { encoder: hevc_vaapi qp: 23 decode: bogus } } }",
+        "policy \"p\" { phase a { transcode video to hevc { encoder: libx265 crf: 23 decode: software } } }",
     ] {
         assert!(
             codes(source).contains(&"invalid_video_profile_setting".to_owned()),

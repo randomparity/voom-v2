@@ -2,6 +2,7 @@
 //! identity for inline encode settings and a fixed encoder/speed → cpu-cost
 //! lookup used to annotate `transcode_video` resource notes.
 
+use voom_core::VideoDecodeMode;
 use voom_policy::VideoProfileSettings;
 
 /// Deterministic `inline-<hash>` identity for an inline profile, computed over a
@@ -22,7 +23,15 @@ fn canonical_form(s: &VideoProfileSettings) -> String {
     if let Some(cq) = s.cq {
         parts.push(format!("cq={cq}"));
     }
-    parts.push(format!("preset={}", s.preset.trim()));
+    if let Some(qp) = s.qp {
+        parts.push(format!("qp={qp}"));
+    }
+    // An encoder with no speed knob contributes no `preset=` part at all. Every
+    // pre-#409 profile carries one, so their canonical form — and therefore their
+    // `inline-<hash>` identity — is byte-identical to before `preset` became optional.
+    if let Some(preset) = &s.preset {
+        parts.push(format!("preset={}", preset.trim()));
+    }
     if let Some(v) = &s.tune {
         parts.push(format!("tune={}", v.to_ascii_lowercase()));
     }
@@ -55,8 +64,14 @@ fn canonical_form(s: &VideoProfileSettings) -> String {
         "copy_compatible={}",
         s.copy_compatible.unwrap_or(false)
     ));
-    if s.decode.is_nvidia() {
-        parts.push("decode=nvidia".to_owned());
+    // Explicit over the vocabulary: software decode is the omitted default and
+    // contributes nothing, so a pre-#409 id is unchanged, while a new backend has to
+    // decide rather than silently hash as software.
+    match s.decode {
+        VideoDecodeMode::Software(_) => {}
+        VideoDecodeMode::Nvidia(_) | VideoDecodeMode::Vaapi(_) => {
+            parts.push(format!("decode={}", s.decode.as_str()));
+        }
     }
     parts.join(";")
 }

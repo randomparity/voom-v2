@@ -18,7 +18,8 @@ fn inline_av1_settings() -> VideoProfileSettings {
         encoder: "libsvtav1".to_owned(),
         crf: Some(28),
         cq: None,
-        preset: "6".to_owned(),
+        qp: None,
+        preset: Some("6".to_owned()),
         tune: None,
         codec_profile: None,
         codec_level: None,
@@ -242,4 +243,42 @@ fn h265_alias_is_recognized_as_hevc() {
     // ffprobe may report "h265" alias
     let h265_source = snapshot_with_video("h265", 1280, 720, "mkv");
     assert!(decide_copy_video(&profile, &h265_source));
+}
+
+/// An inline VAAPI body resolves to a typed profile carrying `qp` and no `preset`, and
+/// the resolver's descriptor validation accepts it. Before `qp` and a nullable `preset`
+/// reached the settings type, resolution silently dropped the quality parameter and
+/// invented a preset, so the resolver rejected every inline VAAPI profile.
+#[tokio::test]
+async fn resolves_inline_vaapi_settings_to_a_qp_profile_with_no_preset() {
+    let (repo, _tmp) = seeded_repo().await;
+    let settings = VideoProfileSettings {
+        encoder: "hevc_vaapi".to_owned(),
+        crf: None,
+        cq: None,
+        qp: Some(24),
+        preset: None,
+        tune: None,
+        codec_profile: Some("main10".to_owned()),
+        codec_level: None,
+        pixel_format: Some("p010".to_owned()),
+        max_width: None,
+        max_height: None,
+        output_container: None,
+        copy_compatible: None,
+        decode: voom_core::VideoDecodeMode::vaapi(),
+    };
+
+    let resolved =
+        resolve_video_profile_ref(&repo, &voom_policy::VideoProfileRef::Inline(settings))
+            .await
+            .unwrap();
+
+    assert_eq!(resolved.profile.encoder, "hevc_vaapi");
+    assert_eq!(resolved.profile.qp, Some(24));
+    assert!(resolved.profile.preset.is_none());
+    assert!(resolved.profile.crf.is_none());
+    assert!(resolved.profile.cq.is_none());
+    assert!(resolved.profile.decode.is_vaapi());
+    assert_eq!(resolved.output_container, "mkv");
 }

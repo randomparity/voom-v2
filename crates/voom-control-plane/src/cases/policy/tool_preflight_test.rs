@@ -202,6 +202,121 @@ async fn gpu_bound_worker_does_not_satisfy_software_profile_preflight() {
     );
 }
 
+/// A VAAPI profile needs a live, identity-verified device that probed `hevc_vaapi`.
+/// A software worker cannot substitute — that is the fallback issue #409 forbids —
+/// and neither can a VAAPI device whose driver build never proved the encoder, which
+/// on the acceptance host is what stock `mesa-dri-drivers` looks like (ADR 0051 §2).
+#[tokio::test]
+async fn a_vaapi_transcode_requires_an_identity_verified_hevc_vaapi_descriptor() {
+    let (cp, _tmp) = cp().await;
+    let operation = TicketOperation::from(OperationKind::TranscodeVideo);
+    let software = register_transcode_worker(
+        &cp,
+        "local-ffmpeg-software",
+        &operation,
+        Vec::new(),
+        json!({}),
+        1,
+    )
+    .await;
+    // Proven for AV1 only, exactly what the stock Mesa driver build advertises.
+    let av1_only = register_transcode_worker(
+        &cp,
+        "local-ffmpeg-vaapi",
+        &operation,
+        vec!["vaapi:pci-0000:f4:00.0".to_owned()],
+        vaapi_accelerator_extra(&["av1_vaapi"], &["hevc"]),
+        2,
+    )
+    .await;
+    let mut policy = vaapi_policy("");
+
+    let error = cp
+        .preflight_policy_tools(&mut policy, &live_registry(&[&software, &av1_only]))
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.code(), "POLICY_EXECUTION_ERROR");
+    assert!(
+        error
+            .to_string()
+            .contains("hevc_vaapi profiles require a live VAAPI-bound ffmpeg worker"),
+        "{error}"
+    );
+
+    let proven = register_transcode_worker(
+        &cp,
+        "local-ffmpeg-vaapi-hevc",
+        &operation,
+        vec!["vaapi:pci-0000:f4:00.0".to_owned()],
+        vaapi_accelerator_extra(&["hevc_vaapi"], &["hevc"]),
+        2,
+    )
+    .await;
+    cp.preflight_policy_tools(&mut policy, &live_registry(&[&software, &proven]))
+        .await
+        .unwrap();
+
+    // The very same durable descriptor, with no live endpoint to verify identity
+    // against, must not satisfy preflight.
+    let error = cp
+        .preflight_policy_tools(&mut policy, &live_registry(&[&software]))
+        .await
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("hevc_vaapi profiles require a live VAAPI-bound ffmpeg worker"),
+        "{error}"
+    );
+}
+
+/// A `vaapi`-decode profile needs the device to have probed a decoder as well as the
+/// encoder. Exact source-codec compatibility stays per-file; preflight only refuses a
+/// device that proved no decoder at all.
+#[tokio::test]
+async fn a_vaapi_decode_policy_requires_at_least_one_probed_vaapi_decoder() {
+    let (cp, _tmp) = cp().await;
+    let operation = TicketOperation::from(OperationKind::TranscodeVideo);
+    let no_decoders = register_transcode_worker(
+        &cp,
+        "local-ffmpeg-vaapi",
+        &operation,
+        vec!["vaapi:pci-0000:f4:00.0".to_owned()],
+        vaapi_accelerator_extra(&["hevc_vaapi"], &[]),
+        2,
+    )
+    .await;
+    let mut policy = vaapi_policy(" decode: vaapi");
+
+    let error = cp
+        .preflight_policy_tools(&mut policy, &live_registry(&[&no_decoders]))
+        .await
+        .unwrap_err();
+
+    assert!(
+        error
+            .to_string()
+            .contains("with at least one probed VAAPI decoder"),
+        "{error}"
+    );
+
+    // The same policy passes once a device has proven a decoder, so the gate is the
+    // decoder list and not the decode clause itself.
+    let with_decoders = register_transcode_worker(
+        &cp,
+        "local-ffmpeg-vaapi-decode",
+        &operation,
+        vec!["vaapi:pci-0000:f4:00.0".to_owned()],
+        vaapi_accelerator_extra(&["hevc_vaapi"], &["h264", "hevc", "av1"]),
+        2,
+    )
+    .await;
+    cp.preflight_policy_tools(&mut policy, &live_registry(&[&with_decoders]))
+        .await
+        .unwrap();
+}
+
 /// A host may run a software worker beside a VAAPI-bound one. ADR 0049 §6 forbids
 /// an error escaping candidate projection, so the VAAPI worker's descriptor must
 /// not decide whether a software profile can be scheduled: preflight has to keep
@@ -465,6 +580,17 @@ async fn denied_ffprobe_is_aggregated_with_later_missing_tool() {
     assert!(message.contains("- ffprobe: live built-in provider"));
     assert!(message.contains("denied probe_file"));
     assert!(message.find("- ffprobe:").unwrap() < message.find("- ffmpeg:").unwrap());
+}
+
+fn vaapi_policy(extra_settings: &str) -> CompiledPolicy {
+    compile_policy(&format!(
+        "policy \"vaapi\" {{ \
+         metadata {{ requires_tools: [ffmpeg] }} \
+         phase encode {{ transcode video to hevc {{ \
+         encoder: hevc_vaapi qp: 24{extra_settings} }} }} }}"
+    ))
+    .unwrap()
+    .policy
 }
 
 /// Registers one live `transcode_video` provider with the reserved local naming

@@ -5,7 +5,8 @@ fn sample_settings() -> voom_policy::VideoProfileSettings {
         encoder: "libsvtav1".to_owned(),
         crf: Some(30),
         cq: None,
-        preset: "8".to_owned(),
+        qp: None,
+        preset: Some("8".to_owned()),
         tune: None,
         codec_profile: None,
         codec_level: None,
@@ -59,6 +60,46 @@ fn inline_hash_stable_across_omitted_vs_default_optionals() {
         inline_profile_id(&defaulted),
         "omitted optionals must resolve to the same inline id as the explicit defaults"
     );
+}
+
+/// The `inline-<hash>` id is a durable identity: it names staged artifacts and appears
+/// in plan output, so making `preset` optional and adding `qp` must not move it for any
+/// pre-#409 profile. The expected value is derived here from the canonical string the
+/// pre-#409 code produced, written out independently of the current implementation so
+/// the assertion is not a tautology over it.
+#[test]
+fn inline_hash_is_unchanged_for_a_pre_409_software_profile() {
+    let canonical = "encoder=libsvtav1;crf=30;preset=8;output_container=mkv;copy_compatible=false";
+    let expected = format!(
+        "inline-{}",
+        &blake3::hash(canonical.as_bytes()).to_hex()[..12]
+    );
+
+    assert_eq!(inline_profile_id(&sample_settings()), expected);
+}
+
+/// A qp-domain profile contributes a `qp=` part and no `preset=` part at all, rather
+/// than a placeholder for the speed knob `hevc_vaapi` does not have.
+#[test]
+fn inline_hash_covers_qp_and_omits_an_absent_preset() {
+    let mut vaapi = sample_settings();
+    vaapi.encoder = "hevc_vaapi".to_owned();
+    vaapi.crf = None;
+    vaapi.qp = Some(24);
+    vaapi.preset = None;
+    vaapi.decode = voom_core::VideoDecodeMode::vaapi();
+    let canonical =
+        "encoder=hevc_vaapi;qp=24;output_container=mkv;copy_compatible=false;decode=vaapi";
+    let expected = format!(
+        "inline-{}",
+        &blake3::hash(canonical.as_bytes()).to_hex()[..12]
+    );
+
+    assert_eq!(inline_profile_id(&vaapi), expected);
+
+    let mut other_qp = vaapi.clone();
+    other_qp.qp = Some(25);
+    assert_ne!(inline_profile_id(&vaapi), inline_profile_id(&other_qp));
 }
 
 #[test]

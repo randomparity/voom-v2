@@ -10,6 +10,14 @@ use crate::{DiagnosticCode, ExprAst, SourceSpan, StatementAst};
 
 use super::{TagEffects, Validator};
 
+/// An inline quality setting is a scalar token, so it counts only when it parses as a
+/// `u8` inside the encoder's declared range.
+fn inline_quality_in_range(value: Option<&str>, min: u8, max: u8) -> bool {
+    value
+        .and_then(|value| value.parse::<u8>().ok())
+        .is_some_and(|value| value >= min && value <= max)
+}
+
 impl Validator<'_> {
     pub(super) fn validate_nested_operation(
         &mut self,
@@ -442,6 +450,7 @@ impl Validator<'_> {
             "encoder",
             "crf",
             "cq",
+            "qp",
             "preset",
             "tune",
             "codec_profile",
@@ -483,17 +492,13 @@ impl Validator<'_> {
         by_key: &BTreeMap<&str, &ExprAst>,
     ) {
         self.validate_inline_quality(span, descriptor, by_key);
-        if let Some(preset) = self.inline_required_str(span, by_key, "preset")
-            && !descriptor.accepts_preset(&preset)
-        {
-            self.error(
-                DiagnosticCode::InvalidVideoProfileSetting,
-                span,
-                format!("preset `{preset}` invalid for `{}`", descriptor.encoder),
-            );
-        }
+        self.validate_inline_preset(span, descriptor, by_key);
     }
 
+    /// Exactly one quality field is legal per encoder — the one its `QualityDomain`
+    /// names. The match is exhaustive over the three domains, and each arm requires the
+    /// other two fields absent, so an inline body cannot carry a quality parameter its
+    /// encoder has no flag for.
     fn validate_inline_quality(
         &mut self,
         span: SourceSpan,
@@ -502,24 +507,17 @@ impl Validator<'_> {
     ) {
         let crf = self.inline_optional_str(span, by_key, "crf");
         let cq = self.inline_optional_str(span, by_key, "cq");
+        let qp = self.inline_optional_str(span, by_key, "qp");
         let valid = match descriptor.quality_domain {
             voom_core::QualityDomain::Crf { min, max } => {
-                cq.is_none()
-                    && crf
-                        .as_deref()
-                        .and_then(|value| value.parse::<u8>().ok())
-                        .is_some_and(|value| value >= min && value <= max)
+                cq.is_none() && qp.is_none() && inline_quality_in_range(crf.as_deref(), min, max)
             }
             voom_core::QualityDomain::Cq { min, max } => {
-                crf.is_none()
-                    && cq
-                        .as_deref()
-                        .and_then(|value| value.parse::<u8>().ok())
-                        .is_some_and(|value| value >= min && value <= max)
+                crf.is_none() && qp.is_none() && inline_quality_in_range(cq.as_deref(), min, max)
             }
-            // The inline DSL has no `qp` setting, so a `qp`-domain encoder cannot state a
-            // quality target inline and is rejected rather than defaulted.
-            voom_core::QualityDomain::Qp { .. } => false,
+            voom_core::QualityDomain::Qp { min, max } => {
+                crf.is_none() && cq.is_none() && inline_quality_in_range(qp.as_deref(), min, max)
+            }
         };
         if !valid {
             self.error(
@@ -530,6 +528,47 @@ impl Validator<'_> {
                     descriptor.encoder, descriptor.quality_domain
                 ),
             );
+        }
+    }
+
+    /// Preset presence is driven by the encoder's `PresetDomain`, mirroring
+    /// `voom_core::validate_profile_against_descriptor`. `None` means the encoder has no
+    /// speed knob at all, so accepting a preset would put an operator setting in the
+    /// vocabulary that maps to no `FFmpeg` flag; every other domain still requires one.
+    fn validate_inline_preset(
+        &mut self,
+        span: SourceSpan,
+        descriptor: &voom_core::EncoderDescriptor,
+        by_key: &BTreeMap<&str, &ExprAst>,
+    ) {
+        let preset = self.inline_optional_str(span, by_key, "preset");
+        match (descriptor.preset_domain, preset.as_deref()) {
+            (voom_core::PresetDomain::None, None) => {}
+            (voom_core::PresetDomain::None, Some(preset)) => self.error(
+                DiagnosticCode::InvalidVideoProfileSetting,
+                span,
+                format!("`{}` accepts no preset; got `{preset}`", descriptor.encoder),
+            ),
+            (
+                voom_core::PresetDomain::Named(_) | voom_core::PresetDomain::NumericRange { .. },
+                None,
+            ) => self.error(
+                DiagnosticCode::InvalidVideoProfileSetting,
+                span,
+                "inline profile is missing mandatory `preset`",
+            ),
+            (
+                voom_core::PresetDomain::Named(_) | voom_core::PresetDomain::NumericRange { .. },
+                Some(preset),
+            ) => {
+                if !descriptor.accepts_preset(preset) {
+                    self.error(
+                        DiagnosticCode::InvalidVideoProfileSetting,
+                        span,
+                        format!("preset `{preset}` invalid for `{}`", descriptor.encoder),
+                    );
+                }
+            }
         }
     }
 
@@ -583,25 +622,45 @@ impl Validator<'_> {
             codec_profile.as_deref(),
         );
         self.validate_inline_container_and_dimensions(span, by_key);
-        let decode = self.inline_optional_str(span, by_key, "decode");
-        if decode
-            .as_deref()
-            .is_some_and(|value| value != "software" && value != "nvidia")
-        {
+        if let Some(decode) = self.inline_optional_str(span, by_key, "decode") {
+            self.validate_inline_decode(span, descriptor, &decode);
+        }
+    }
+
+    /// The decode vocabulary is closed, and a hardware decode backend must name the
+    /// same accelerator as the encoder: hardware frames produced by one backend cannot
+    /// enter the other's encoder. Mirrors `voom_core::validate_profile_against_descriptor`
+    /// so an inline body and a stored profile are rejected for the same reasons.
+    fn validate_inline_decode(
+        &mut self,
+        span: SourceSpan,
+        descriptor: &voom_core::EncoderDescriptor,
+        decode: &str,
+    ) {
+        let Ok(mode) = voom_core::VideoDecodeMode::parse(decode) else {
             self.error(
                 DiagnosticCode::InvalidVideoProfileSetting,
                 span,
-                "decode must be `software` or `nvidia`".to_owned(),
+                "decode must be `software`, `nvidia`, or `vaapi`",
             );
-        }
-        if decode.as_deref() == Some("nvidia")
-            && descriptor.backend != voom_core::VideoEncoderBackend::Nvidia
-        {
+            return;
+        };
+        if mode.is_nvidia() && descriptor.backend != voom_core::VideoEncoderBackend::Nvidia {
             self.error(
                 DiagnosticCode::InvalidVideoProfileSetting,
                 span,
                 format!(
                     "NVIDIA decode requires an NVIDIA encoder, not `{}`",
+                    descriptor.encoder
+                ),
+            );
+        }
+        if mode.is_vaapi() && descriptor.backend != voom_core::VideoEncoderBackend::Vaapi {
+            self.error(
+                DiagnosticCode::InvalidVideoProfileSetting,
+                span,
+                format!(
+                    "VAAPI decode requires a VAAPI encoder, not `{}`",
                     descriptor.encoder
                 ),
             );

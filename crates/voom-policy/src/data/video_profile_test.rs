@@ -21,7 +21,8 @@ fn deserializes_tagged_inline() {
             assert_eq!(s.encoder, "libsvtav1");
             assert_eq!(s.crf, Some(28));
             assert!(s.cq.is_none());
-            assert_eq!(s.preset, "6");
+            assert!(s.qp.is_none());
+            assert_eq!(s.preset.as_deref(), Some("6"));
             assert!(s.tune.is_none());
             assert!(s.decode.is_software());
         }
@@ -77,4 +78,32 @@ fn rejects_unknown_inline_field() {
     let json = r#"{"inline":{"encoder":"libsvtav1","crf":30,"preset":"6","bogus":1}}"#;
     let err = serde_json::from_str::<VideoProfileRef>(json);
     assert!(err.is_err());
+}
+
+/// A stored inline VAAPI profile round-trips with `qp` set and `preset` absent, and
+/// neither field disturbs the software shape above: `qp` and `preset` both default so
+/// a pre-#409 `compiled_json` row keeps deserializing.
+#[test]
+fn deserializes_vaapi_inline_profile() {
+    let json = concat!(
+        r#"{"inline":{"encoder":"hevc_vaapi","qp":23,"#,
+        r#""decode":{"backend":"vaapi"}}}"#
+    );
+    let profile: VideoProfileRef = serde_json::from_str(json).unwrap();
+
+    let VideoProfileRef::Inline(settings) = profile else {
+        panic!("expected inline profile");
+    };
+    assert_eq!(settings.qp, Some(23));
+    assert!(settings.crf.is_none());
+    assert!(settings.cq.is_none());
+    assert!(settings.preset.is_none());
+    assert!(settings.decode.is_vaapi());
+
+    let reserialized = serde_json::to_value(&settings).unwrap();
+    assert!(
+        reserialized.get("preset").is_none(),
+        "an absent preset is omitted rather than written as null: {reserialized}"
+    );
+    assert_eq!(reserialized["qp"], 23);
 }
