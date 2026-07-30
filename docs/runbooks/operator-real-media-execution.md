@@ -129,11 +129,18 @@ ls -l /dev/dri/by-path/pci-0000:f4:00.0-render
 
 The declared session count is per physical device and must be in `1..=16`
 (default 1). Startup binds the node, probes an HEVC encode and one decode per
-candidate codec on that node, and proves the declared concurrency before the
-worker becomes ready. A VAAPI-bound worker advertises only VAAPI video work; it
-does not replace the unbound worker needed by software profiles, audio
-transcoding, and extraction. The advertised hardware token is
-`vaapi:pci-<addr>`.
+candidate codec on that node, and runs the declared number of encodes on it
+before the worker becomes ready. Read that last step precisely: it spawns every
+session before reaping any and fails startup if any of them fails, but each probe
+encodes a single frame, so it does not *prove* that two sessions were ever open
+at the same instant. A device that cannot sustain the declared count can
+therefore still pass startup and degrade later under load — declare a count the
+device is known to support rather than treating readiness as a guarantee of it
+(`docs/debt/0002-vaapi-capacity-probe-does-not-prove-sessions-overlap.md`).
+
+A VAAPI-bound worker advertises only VAAPI video work; it does not replace the
+unbound worker needed by software profiles, audio transcoding, and extraction.
+The advertised hardware token is `vaapi:pci-<addr>`.
 
 Running the bundled worker binary directly — as the acceptance script and the
 tests do — uses these environment seams instead of the CLI flags:
