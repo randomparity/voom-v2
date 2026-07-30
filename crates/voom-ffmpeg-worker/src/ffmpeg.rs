@@ -25,7 +25,6 @@ pub const ALL_VIDEO_ENCODERS: [&str; 7] = [
 ];
 
 const VAAPI_HEVC_ENCODER: &str = "hevc_vaapi";
-const NVENC_HEVC_ENCODER: &str = "hevc_nvenc";
 
 /// The VAAPI device this worker bound itself to.
 ///
@@ -274,13 +273,19 @@ pub const DEFAULT_PROCESS_TIMEOUT: Duration = Duration::from_hours(2);
 
 /// Returns the video codec arguments for the given profile.
 ///
-/// When `copy_video` is true, emits `-c:v copy` regardless of encoder.
-/// Otherwise branches on `profile.encoder` to emit the per-encoder flags.
+/// When `copy_video` is true, emits `-c:v copy` regardless of encoder. Otherwise
+/// it dispatches on the encoder's declared backend, like every other hardware
+/// branch in this file, so adding a backend fails to compile here rather than
+/// falling into a catch-all. The encoder *name* still discriminates inside the
+/// software arm, because three software encoders share one backend and take
+/// different flags — but that arm's fallthrough can now only be reached by a
+/// software encoder, which needs no device arguments at all.
 ///
 /// # Errors
-/// Returns `FfmpegError::OutputFactsMismatch` for an unrecognized encoder.
-/// The contract validation in the handler rejects unknown encoders before
-/// reaching here; this arm is defensive and must never silently pass through.
+/// Returns `FfmpegError::OutputFactsMismatch` for an encoder with no descriptor,
+/// and for a software encoder this function has no flags for. Both are defensive:
+/// the handler's contract validation rejects unknown encoders first, and neither
+/// may silently pass through.
 pub fn video_codec_args(
     profile: &TranscodeVideoProfile,
     copy_video: bool,
@@ -288,16 +293,21 @@ pub fn video_codec_args(
     if copy_video {
         return Ok(vec![OsString::from("-c:v"), OsString::from("copy")]);
     }
-    match profile.encoder.as_str() {
-        "libx265" => video_codec_args_x265(profile),
-        "libsvtav1" => video_codec_args_svtav1(profile),
-        "libaom-av1" => video_codec_args_libaom(profile),
-        NVENC_HEVC_ENCODER => video_codec_args_nvenc(profile),
-        VAAPI_HEVC_ENCODER => video_codec_args_vaapi(profile),
-        "h264_videotoolbox" | "hevc_videotoolbox" => video_codec_args_videotoolbox(profile),
-        other => Err(FfmpegError::OutputFactsMismatch(format!(
-            "unknown video encoder `{other}`"
-        ))),
+    let descriptor = voom_core::encoder_descriptor(&profile.encoder).ok_or_else(|| {
+        FfmpegError::OutputFactsMismatch(format!("unknown video encoder `{}`", profile.encoder))
+    })?;
+    match descriptor.backend {
+        VideoEncoderBackend::Nvidia => video_codec_args_nvenc(profile),
+        VideoEncoderBackend::Vaapi => video_codec_args_vaapi(profile),
+        VideoEncoderBackend::VideoToolbox => video_codec_args_videotoolbox(profile),
+        VideoEncoderBackend::Software => match profile.encoder.as_str() {
+            "libx265" => video_codec_args_x265(profile),
+            "libsvtav1" => video_codec_args_svtav1(profile),
+            "libaom-av1" => video_codec_args_libaom(profile),
+            other => Err(FfmpegError::OutputFactsMismatch(format!(
+                "unknown video encoder `{other}`"
+            ))),
+        },
     }
 }
 
