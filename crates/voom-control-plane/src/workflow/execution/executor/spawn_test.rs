@@ -107,33 +107,31 @@ fn a_live_vaapi_worker_does_not_poison_projection_for_other_backends() {
     let conflicts = HashSet::new();
 
     assert!(
-        conflicting_accelerator_tokens(&candidates)
-            .unwrap()
-            .is_empty(),
+        conflicting_accelerator_tokens(&candidates).is_empty(),
         "three distinct devices declare no conflicting capacity"
     );
 
     let software = VideoHardwareRequirement::software();
     assert_eq!(
-        compatible_assignment(&candidates[0], Some(&software), &conflicts).unwrap(),
+        compatible_assignment(&candidates[0], Some(&software), &conflicts),
         CandidateCompatibility::Compatible(None)
     );
     assert_eq!(
-        compatible_assignment(&candidates[2], Some(&software), &conflicts).unwrap(),
+        compatible_assignment(&candidates[2], Some(&software), &conflicts),
         CandidateCompatibility::Incompatible,
         "a device-bound VAAPI worker must not satisfy a software profile"
     );
 
     let nvidia = VideoHardwareRequirement::nvidia("hevc_nvenc", Some("hevc_cuvid".to_owned()));
     assert_eq!(
-        compatible_assignment(&candidates[1], Some(&nvidia), &conflicts).unwrap(),
+        compatible_assignment(&candidates[1], Some(&nvidia), &conflicts),
         CandidateCompatibility::Compatible(Some(VideoHardwareAssignment::nvidia(
             "nvidia:GPU-a",
             "GPU-a"
         )))
     );
     assert_eq!(
-        compatible_assignment(&candidates[2], Some(&nvidia), &conflicts).unwrap(),
+        compatible_assignment(&candidates[2], Some(&nvidia), &conflicts),
         CandidateCompatibility::Incompatible,
         "a VAAPI device cannot satisfy an NVENC requirement"
     );
@@ -145,7 +143,7 @@ fn software_requirement_excludes_device_bound_workers() {
     let conflicts = HashSet::new();
 
     assert_eq!(
-        compatible_assignment(&software_candidate(1), Some(&requirement), &conflicts).unwrap(),
+        compatible_assignment(&software_candidate(1), Some(&requirement), &conflicts),
         CandidateCompatibility::Compatible(None)
     );
     assert_eq!(
@@ -153,8 +151,7 @@ fn software_requirement_excludes_device_bound_workers() {
             &nvidia_candidate(2, "nvidia:GPU-a", 2, &["h264_cuvid"]),
             Some(&requirement),
             &conflicts,
-        )
-        .unwrap(),
+        ),
         CandidateCompatibility::Incompatible
     );
 }
@@ -184,11 +181,11 @@ fn nvidia_requirement_requires_exact_encoder_and_decoder() {
     );
 
     assert_eq!(
-        compatible_assignment(&without_av1, Some(&requirement), &conflicts).unwrap(),
+        compatible_assignment(&without_av1, Some(&requirement), &conflicts),
         CandidateCompatibility::Incompatible
     );
     assert_eq!(
-        compatible_assignment(&with_av1, Some(&requirement), &conflicts).unwrap(),
+        compatible_assignment(&with_av1, Some(&requirement), &conflicts),
         CandidateCompatibility::Compatible(Some(VideoHardwareAssignment::nvidia(
             "nvidia:GPU-b",
             "GPU-b"
@@ -211,14 +208,14 @@ fn vaapi_requirement_matches_only_a_verified_same_device_descriptor() {
     let bound = vaapi_candidate(1, "0000:f4:00.0", 2, &["hevc_vaapi"], &["hevc"]);
 
     assert_eq!(
-        compatible_assignment(&bound, Some(&requirement), &conflicts).unwrap(),
+        compatible_assignment(&bound, Some(&requirement), &conflicts),
         CandidateCompatibility::Compatible(Some(VideoHardwareAssignment::vaapi(
             "vaapi:pci-0000:f4:00.0",
             "0000:f4:00.0"
         )))
     );
     assert_eq!(
-        compatible_assignment(&software_candidate(2), Some(&requirement), &conflicts).unwrap(),
+        compatible_assignment(&software_candidate(2), Some(&requirement), &conflicts),
         CandidateCompatibility::Incompatible
     );
     assert_eq!(
@@ -226,8 +223,7 @@ fn vaapi_requirement_matches_only_a_verified_same_device_descriptor() {
             &nvidia_candidate(3, "nvidia:GPU-a", 2, &["hevc_cuvid"]),
             Some(&requirement),
             &conflicts,
-        )
-        .unwrap(),
+        ),
         CandidateCompatibility::Incompatible
     );
 }
@@ -242,7 +238,7 @@ fn vaapi_requirement_rejects_a_device_the_candidate_no_longer_advertises() {
     stale.hardware.clear();
 
     assert_eq!(
-        compatible_assignment(&stale, Some(&requirement), &HashSet::new()).unwrap(),
+        compatible_assignment(&stale, Some(&requirement), &HashSet::new()),
         CandidateCompatibility::Incompatible
     );
 }
@@ -261,8 +257,7 @@ fn vaapi_requirement_requires_the_probed_encoder_and_decode_codec() {
             &vaapi_candidate(1, "0000:f4:00.0", 2, &["av1_vaapi"], &["hevc"]),
             Some(&VideoHardwareRequirement::vaapi("hevc_vaapi", None)),
             &conflicts,
-        )
-        .unwrap(),
+        ),
         CandidateCompatibility::Incompatible,
         "an unproven encoder must not be scheduled"
     );
@@ -271,8 +266,7 @@ fn vaapi_requirement_requires_the_probed_encoder_and_decode_codec() {
             &vaapi_candidate(2, "0000:f4:00.0", 2, &["hevc_vaapi"], &["h264", "av1"]),
             Some(&decode_hevc),
             &conflicts,
-        )
-        .unwrap(),
+        ),
         CandidateCompatibility::Incompatible,
         "an unproven decode codec must not be scheduled"
     );
@@ -281,8 +275,7 @@ fn vaapi_requirement_requires_the_probed_encoder_and_decode_codec() {
             &vaapi_candidate(3, "0000:f4:00.0", 2, &["hevc_vaapi"], &["h264", "hevc"]),
             Some(&decode_hevc),
             &conflicts,
-        )
-        .unwrap(),
+        ),
         CandidateCompatibility::Compatible(Some(VideoHardwareAssignment::vaapi(
             "vaapi:pci-0000:f4:00.0",
             "0000:f4:00.0"
@@ -318,7 +311,7 @@ fn a_decode_codec_no_live_device_probed_fails_only_its_own_ticket() {
 
     for candidate in &candidates {
         assert_eq!(
-            compatible_assignment(candidate, Some(&requirement), &conflicts).unwrap(),
+            compatible_assignment(candidate, Some(&requirement), &conflicts),
             CandidateCompatibility::Incompatible,
             "a codec gap is a mismatch, never a repository fault"
         );
@@ -352,7 +345,7 @@ fn a_vaapi_assignment_never_names_another_devices_address() {
     for (index, address) in devices.iter().enumerate() {
         let candidate = vaapi_candidate(index as u64 + 1, address, 2, &["hevc_vaapi"], &["hevc"]);
         assert_eq!(
-            compatible_assignment(&candidate, Some(&requirement), &conflicts).unwrap(),
+            compatible_assignment(&candidate, Some(&requirement), &conflicts),
             CandidateCompatibility::Compatible(Some(VideoHardwareAssignment::vaapi(
                 format!("vaapi:pci-{address}"),
                 (*address).to_owned()
@@ -374,7 +367,7 @@ fn conflicting_vaapi_capacity_declarations_quarantine_the_device() {
         vaapi_candidate(3, "0000:03:00.0", 2, &["hevc_vaapi"], &["hevc"]),
     ];
 
-    let conflicts = conflicting_accelerator_tokens(&candidates).unwrap();
+    let conflicts = conflicting_accelerator_tokens(&candidates);
 
     assert_eq!(
         conflicts,
@@ -385,8 +378,7 @@ fn conflicting_vaapi_capacity_declarations_quarantine_the_device() {
             &candidates[0],
             Some(&VideoHardwareRequirement::vaapi("hevc_vaapi", None)),
             &conflicts,
-        )
-        .unwrap(),
+        ),
         CandidateCompatibility::Incompatible,
         "a quarantined device receives no work"
     );
@@ -404,7 +396,7 @@ fn equal_vaapi_load_selects_the_lowest_worker_id_and_its_own_device() {
     for (worker_id, address) in [(7_u64, "0000:03:00.0"), (4, "0000:f4:00.0")] {
         let candidate = vaapi_candidate(worker_id, address, 2, &["hevc_vaapi"], &["hevc"]);
         let CandidateCompatibility::Compatible(Some(assignment)) =
-            compatible_assignment(&candidate, Some(&requirement), &conflicts).unwrap()
+            compatible_assignment(&candidate, Some(&requirement), &conflicts)
         else {
             panic!("both devices are eligible");
         };
@@ -474,14 +466,14 @@ fn videotoolbox_requirement_requires_exact_encoder_codec_and_pixel_format() {
     );
 
     assert_eq!(
-        compatible_assignment(&candidate, Some(&requirement), &HashSet::new()).unwrap(),
+        compatible_assignment(&candidate, Some(&requirement), &HashSet::new()),
         CandidateCompatibility::Compatible(Some(VideoHardwareAssignment::video_toolbox(
             "videotoolbox:host-a",
             "host-a"
         )))
     );
     assert_eq!(
-        compatible_assignment(&candidate, Some(&wrong_format), &HashSet::new()).unwrap(),
+        compatible_assignment(&candidate, Some(&wrong_format), &HashSet::new()),
         CandidateCompatibility::Incompatible
     );
     assert_eq!(
@@ -489,8 +481,7 @@ fn videotoolbox_requirement_requires_exact_encoder_codec_and_pixel_format() {
             &nvidia_candidate(2, "nvidia:GPU-a", 2, &["hevc_cuvid"]),
             Some(&requirement),
             &HashSet::new(),
-        )
-        .unwrap(),
+        ),
         CandidateCompatibility::Incompatible
     );
 }
@@ -503,14 +494,20 @@ fn conflicting_capacity_declarations_quarantine_the_token() {
         nvidia_candidate(3, "nvidia:GPU-b", 2, &["h264_cuvid"]),
     ];
 
-    let conflicts = conflicting_accelerator_tokens(&candidates).unwrap();
+    let conflicts = conflicting_accelerator_tokens(&candidates);
 
     assert_eq!(conflicts, HashSet::from(["nvidia:GPU-a".to_owned()]));
 }
 
+/// ADR 0049 §6: one worker's descriptor never breaks projection for the fleet.
+/// A descriptor this build cannot read — a rolling upgrade meeting a backend tag
+/// from a newer worker, which `deny_unknown_fields` makes the ordinary case —
+/// excludes that candidate and nothing else. It must be `Incompatible` rather than
+/// an error, and equally must not read as "no accelerator": a device-bound worker
+/// passing as unaccelerated is the ADR 0049 §5 hazard this sits between.
 #[test]
-fn malformed_accelerator_descriptor_fails_candidate_projection() {
-    let candidate = WorkerOperationCandidate {
+fn an_unreadable_accelerator_descriptor_excludes_only_that_candidate() {
+    let unreadable = WorkerOperationCandidate {
         worker_id: WorkerId(1),
         active_leases: 0,
         max_parallel: 1,
@@ -519,13 +516,39 @@ fn malformed_accelerator_descriptor_fails_candidate_projection() {
     };
     let requirement = VideoHardwareRequirement::nvidia("hevc_nvenc", None);
 
-    let error = compatible_assignment(&candidate, Some(&requirement), &HashSet::new()).unwrap_err();
+    let compatibility = compatible_assignment(&unreadable, Some(&requirement), &HashSet::new());
 
-    assert!(
-        error
-            .to_string()
-            .contains("malformed video accelerator descriptor")
-    );
+    assert!(matches!(
+        compatibility,
+        CandidateCompatibility::Incompatible
+    ));
+
+    // And it is excluded from the conflict survey rather than failing it, so a
+    // healthy sibling on the same token is still surveyed.
+    let conflicts = conflicting_accelerator_tokens(&[unreadable]);
+    assert!(conflicts.is_empty());
+}
+
+/// The exclusion is not a blanket pass: a software requirement must still not be
+/// satisfied by a worker whose descriptor could not be read, or an unreadable
+/// device-bound worker would pick up software work.
+#[test]
+fn an_unreadable_descriptor_does_not_satisfy_a_software_requirement() {
+    let unreadable = WorkerOperationCandidate {
+        worker_id: WorkerId(1),
+        active_leases: 0,
+        max_parallel: 1,
+        hardware: vec!["nvidia:GPU-a".to_owned()],
+        capability_extra: vec![serde_json::json!({"accelerator": {"hardware_token": 7}})],
+    };
+    let requirement = VideoHardwareRequirement::software();
+
+    let compatibility = compatible_assignment(&unreadable, Some(&requirement), &HashSet::new());
+
+    assert!(matches!(
+        compatibility,
+        CandidateCompatibility::Incompatible
+    ));
 }
 
 /// Dispatch revalidates endpoint identity before acquiring the lease, not just at run

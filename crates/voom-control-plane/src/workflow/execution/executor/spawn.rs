@@ -259,7 +259,7 @@ impl WorkflowExecutor {
         if device_bound && accelerator_runtimes.is_none() {
             *accelerator_runtimes = Some(self.control_plane.live_policy_runtime_registry().await?);
         }
-        let conflicts = conflicting_accelerator_tokens(&candidates)?;
+        let conflicts = conflicting_accelerator_tokens(&candidates);
         let mut workers = Vec::new();
         let mut assignments = HashMap::new();
         for candidate in candidates {
@@ -271,7 +271,7 @@ impl WorkflowExecutor {
                 continue;
             }
             let assignment =
-                match compatible_assignment(&candidate, requirement.as_ref(), &conflicts)? {
+                match compatible_assignment(&candidate, requirement.as_ref(), &conflicts) {
                     CandidateCompatibility::Incompatible => continue,
                     CandidateCompatibility::Compatible(assignment) => assignment,
                 };
@@ -330,8 +330,18 @@ impl WorkflowExecutor {
             .await?;
         let mut tokens = Vec::new();
         for capability in capabilities {
-            let Some(descriptor) = historical_accelerator_descriptor(&capability)? else {
-                continue;
+            // A historical row written by a build that knew a backend this one does
+            // not must not make the whole token lookup fail.
+            let descriptor = match historical_accelerator_descriptor(&capability) {
+                Ok(Some(descriptor)) => descriptor,
+                Ok(None) => continue,
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        "skipping historical capability with an unreadable accelerator descriptor"
+                    );
+                    continue;
+                }
             };
             let hardware_token = descriptor.hardware_token();
             let compatible = match (requirement, &descriptor) {
@@ -572,12 +582,27 @@ fn compatible_assignment(
     candidate: &WorkerOperationCandidate,
     requirement: Option<&VideoHardwareRequirement>,
     conflicts: &HashSet<String>,
-) -> Result<CandidateCompatibility, VoomError> {
+) -> CandidateCompatibility {
     let Some(requirement) = requirement else {
-        return Ok(CandidateCompatibility::Compatible(None));
+        return CandidateCompatibility::Compatible(None);
     };
-    let descriptor = candidate_accelerator_descriptor(candidate)?;
-    Ok(match (requirement, &descriptor) {
+    // A descriptor this build cannot read excludes the candidate outright. It must
+    // not become an error — that is what ADR 0049 §6 forbids and what the comment
+    // above promises — and it must not read as "no accelerator" either, which is
+    // why this returns `Incompatible` rather than falling through with `None`: a
+    // device-bound worker passing as unaccelerated is the ADR 0049 §5 hazard.
+    let descriptor = match candidate_accelerator_descriptor(candidate) {
+        Ok(descriptor) => descriptor,
+        Err(error) => {
+            tracing::warn!(
+                worker_id = candidate.worker_id.0,
+                %error,
+                "excluding candidate with an unreadable accelerator descriptor"
+            );
+            return CandidateCompatibility::Incompatible;
+        }
+    };
+    match (requirement, &descriptor) {
         (VideoHardwareRequirement::Software(_), None) if candidate.hardware.is_empty() => {
             CandidateCompatibility::Compatible(None)
         }
@@ -616,7 +641,7 @@ fn compatible_assignment(
             VideoHardwareRequirement::VideoToolbox(required),
             Some(VideoAcceleratorDescriptor::VideoToolbox(device)),
         ) => videotoolbox_compatibility(candidate, conflicts, required, device),
-    })
+    }
 }
 
 fn nvidia_compatibility(
@@ -695,14 +720,23 @@ fn videotoolbox_compatibility(
     )))
 }
 
-fn conflicting_accelerator_tokens(
-    candidates: &[WorkerOperationCandidate],
-) -> Result<HashSet<String>, VoomError> {
+fn conflicting_accelerator_tokens(candidates: &[WorkerOperationCandidate]) -> HashSet<String> {
     let mut capacities = HashMap::new();
     let mut conflicts = HashSet::new();
     for candidate in candidates {
-        let Some(descriptor) = candidate_accelerator_descriptor(candidate)? else {
-            continue;
+        // Same rule as `compatible_assignment`: an unreadable descriptor drops that
+        // one candidate out of the conflict survey rather than failing the survey.
+        let descriptor = match candidate_accelerator_descriptor(candidate) {
+            Ok(Some(descriptor)) => descriptor,
+            Ok(None) => continue,
+            Err(error) => {
+                tracing::warn!(
+                    worker_id = candidate.worker_id.0,
+                    %error,
+                    "skipping candidate with an unreadable accelerator descriptor"
+                );
+                continue;
+            }
         };
         let token = descriptor.hardware_token();
         if let Some(capacity) = capacities.insert(token.clone(), descriptor.max_sessions())
@@ -711,7 +745,7 @@ fn conflicting_accelerator_tokens(
             conflicts.insert(token);
         }
     }
-    Ok(conflicts)
+    conflicts
 }
 
 fn videotoolbox_decoder_matches(
