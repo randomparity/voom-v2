@@ -143,6 +143,19 @@ and cited — the exclusion list working as intended.
 | F33 | **Dispatch still failed fleet-wide on an unreadable descriptor.** F21 fixed preflight; all three `spawn.rs` sites still propagated the error, under a comment citing ADR 0049 §6 to say they did not. The round-1 reasoning for leaving them strict conflated "must not be treated as software" with "must abort the projection" — returning `Incompatible` satisfies both. Both functions became infallible, which clippy caught. | `accepted-fixed` |
 | F34 | **The capacity probe does not prove sessions overlap.** It spawns every session before reaping any and fails if any encode fails, but each probe encodes one 256x256 frame, so nothing establishes simultaneity — weaker than the VideoToolbox first-frame/all-live proof the operator docs described it in the same terms as. Making it a real proof is a timing-sensitive startup change against F14's known flake surface. Owned by `docs/debt/0002-vaapi-capacity-probe-does-not-prove-sessions-overlap.md`; the runbook now states what the probe establishes. | `deferred-tracked` |
 
+### Round 4 — 4 findings, all fixed
+
+Every one landed on the planner/worker consistency surface, and two were verified
+against the device before being accepted.
+
+| # | Finding | Disposition |
+|---|---|---|
+| F35 | **No plan-time dimension-cap gate, and a `downscale=` note that lied.** F11 records that a VAAPI profile with `max_width`/`max_height` fails per file; the worker refuses it, the planner did not, so every oversized source became a ticket per attempt — annotated with `downscale=<src>-><cap>`, promising precisely the work about to be refused. Exactly the gap F32 closed for decode depth, left open one field over. Keyed on the encoder backend, not the decode mode: the missing filter is the encoder's, so it holds for a software-decoded source too. | `accepted-fixed` |
+| F36 | **A ten-bit `codec_profile` over an eight-bit surface was accepted.** The eight-bit direction was enforced (`main` + `p010` rejected); its mirror was not, so `main10` + `nv12` — and `main10` with no `pixel_format`, which resolves to the eight-bit default — passed validation. Both were run on the acceptance device and both answer `No usable encoding profile found`, so an operator could author a profile that always fails. This is F13's rule ("do not leave a profile an operator can author that always fails") applied to the direction F13 missed. Scoped to encoders declaring ten-bit-only profiles, so software profiles are untouched. | `accepted-fixed` |
+| F37 | **The worker compared the source codec more strictly than the planner.** Both worker-side checks tested exact equality while the planner and scheduler route the same value through `vaapi_video_decode_codec`, which folds the `h265` alias onto `hevc` and is case-insensitive. A source spelled that way was planned, dispatched, then refused for a decoder the device had genuinely probed — the inverse of F32/F35, where the worker was stricter than the planner rather than the planner stricter than reality. | `accepted-fixed` |
+| F38 | **`vaapi:pci-<addr>` is the only host-scoped accelerator token.** NVIDIA carries a globally unique GPU UUID, VideoToolbox a hash of the platform UUID; a PCI address repeats across machines. Capacity groups on the token and boot-id claim recovery would let a second host read the first's live claim as abandoned, so the token silently assumes one Linux host per control plane. Host-qualifying it rewrites every stored token and belongs to whichever change first needs multi-host accelerators. Recorded in ADR 0052 §1 and on `vaapi_hardware_token` — a precondition made checkable rather than a defect fixed. | `accepted-fixed` (assumption recorded) |
+
+
 ---
 
 ## Task 1: Add the VAAPI decode variant and make backend predicates explicit
