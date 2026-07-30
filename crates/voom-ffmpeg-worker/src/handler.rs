@@ -719,7 +719,9 @@ fn validate_video_hardware_binding(
     if request.profile.encoder != "hevc_nvenc" {
         let software_assignment = match &request.hardware_assignment {
             None | Some(VideoHardwareAssignment::Software(_)) => true,
-            Some(VideoHardwareAssignment::Nvidia(_)) => false,
+            Some(VideoHardwareAssignment::Nvidia(_) | VideoHardwareAssignment::VideoToolbox(_)) => {
+                false
+            }
         };
         if config.accelerator.is_none() && software_assignment {
             return Ok(());

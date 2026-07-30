@@ -186,6 +186,7 @@ async fn unavailable_encoder_is_config_invalid_before_ffmpeg() {
         encoder: "libaom-av1".to_owned(),
         crf: Some(35),
         cq: None,
+        bitrate_kbps: None,
         preset: "8".to_owned(),
         tune: None,
         codec_profile: None,

@@ -11,6 +11,7 @@ fn profile_data_maps_every_field_from_video_profile() {
         encoder: "libx265".to_owned(),
         crf: Some(18),
         cq: None,
+        bitrate_kbps: None,
         preset: "slow".to_owned(),
         tune: Some("grain".to_owned()),
         codec_profile: Some("main10".to_owned()),

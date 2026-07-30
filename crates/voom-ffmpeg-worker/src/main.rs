@@ -27,7 +27,9 @@ async fn main() -> Result<(), WorkerStartupError> {
         Some(accelerator) => {
             let bound = LocalWorkerBound {
                 addr: running.bound,
-                accelerator: Some(accelerator),
+                accelerator: Some(voom_worker_protocol::VideoAcceleratorDescriptor::Nvidia(
+                    accelerator,
+                )),
             };
             let bound = serde_json::to_string(&bound).map_err(WorkerStartupError::dependency)?;
             println!("BOUND {bound}");

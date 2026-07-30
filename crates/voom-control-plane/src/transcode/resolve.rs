@@ -67,6 +67,7 @@ fn inline_to_worker_profile(s: &VideoProfileSettings) -> Result<TranscodeVideoPr
         encoder: s.encoder.clone(),
         crf: s.crf,
         cq: s.cq,
+        bitrate_kbps: s.bitrate_kbps,
         preset: s.preset.clone(),
         tune: s.tune.clone(),
         codec_profile: s.codec_profile.clone(),

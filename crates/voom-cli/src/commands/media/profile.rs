@@ -31,6 +31,8 @@ struct ProfileData {
     crf: Option<u8>,
     #[serde(skip_serializing_if = "Option::is_none")]
     cq: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    bitrate_kbps: Option<u32>,
     preset: String,
     tune: Option<String>,
     codec_profile: Option<String>,
@@ -138,6 +140,7 @@ impl From<VideoProfileFields> for NewVideoProfile {
             encoder: fields.encoder,
             crf: fields.crf,
             cq: fields.cq,
+            bitrate_kbps: fields.bitrate_kbps,
             preset: fields.preset,
             tune: fields.tune,
             codec_profile: fields.codec_profile,
@@ -161,6 +164,7 @@ impl From<VideoProfile> for ProfileData {
             encoder: profile.encoder,
             crf: profile.crf,
             cq: profile.cq,
+            bitrate_kbps: profile.bitrate_kbps,
             preset: profile.preset,
             tune: profile.tune,
             codec_profile: profile.codec_profile,

@@ -934,10 +934,24 @@ pub struct VideoProfileFields {
     pub name: String,
     #[arg(long)]
     pub encoder: String,
-    #[arg(long, required_unless_present = "cq", conflicts_with = "cq")]
+    #[arg(
+        long,
+        required_unless_present_any = ["cq", "bitrate_kbps"],
+        conflicts_with_all = ["cq", "bitrate_kbps"]
+    )]
     pub crf: Option<u8>,
-    #[arg(long, required_unless_present = "crf", conflicts_with = "crf")]
+    #[arg(
+        long,
+        required_unless_present_any = ["crf", "bitrate_kbps"],
+        conflicts_with_all = ["crf", "bitrate_kbps"]
+    )]
     pub cq: Option<u8>,
+    #[arg(
+        long,
+        required_unless_present_any = ["crf", "cq"],
+        conflicts_with_all = ["crf", "cq"]
+    )]
+    pub bitrate_kbps: Option<u32>,
     #[arg(long)]
     pub preset: String,
     #[arg(long)]
@@ -965,6 +979,7 @@ pub enum VideoDecodeBackendArg {
     #[default]
     Software,
     Nvidia,
+    VideoToolbox,
 }
 
 impl From<VideoDecodeBackendArg> for voom_core::VideoDecodeMode {
@@ -972,6 +987,7 @@ impl From<VideoDecodeBackendArg> for voom_core::VideoDecodeMode {
         match value {
             VideoDecodeBackendArg::Software => Self::default(),
             VideoDecodeBackendArg::Nvidia => Self::nvidia(),
+            VideoDecodeBackendArg::VideoToolbox => Self::video_toolbox(),
         }
     }
 }

@@ -95,7 +95,7 @@ impl ControlPlane {
             }
             let descriptor = candidate_accelerator_descriptor(&candidate)?;
             match descriptor {
-                Some(descriptor) => {
+                Some(voom_worker_protocol::VideoAcceleratorDescriptor::Nvidia(descriptor)) => {
                     let has_encoder = descriptor
                         .encoders
                         .iter()
@@ -105,7 +105,7 @@ impl ControlPlane {
                     nvidia_available |= has_encoder && has_decoder;
                 }
                 None if candidate.hardware.is_empty() => software_available = true,
-                None => {}
+                Some(voom_worker_protocol::VideoAcceleratorDescriptor::VideoToolbox(_)) | None => {}
             }
         }
         let mut missing = Vec::new();

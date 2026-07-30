@@ -15,6 +15,8 @@ pub struct VideoProfileSettings {
     pub crf: Option<u8>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cq: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bitrate_kbps: Option<u32>,
     pub preset: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tune: Option<String>,

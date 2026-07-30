@@ -46,6 +46,24 @@ fn deserializes_nvidia_inline_profile() {
 }
 
 #[test]
+fn deserializes_videotoolbox_inline_profile() {
+    let json = concat!(
+        r#"{"inline":{"encoder":"hevc_videotoolbox","bitrate_kbps":8000,"#,
+        r#""preset":"default","codec_profile":"main","pixel_format":"yuv420p","#,
+        r#""decode":{"backend":"video_toolbox"}}}"#
+    );
+    let profile: VideoProfileRef = serde_json::from_str(json).unwrap();
+
+    let VideoProfileRef::Inline(settings) = profile else {
+        panic!("expected inline profile");
+    };
+    assert_eq!(settings.bitrate_kbps, Some(8_000));
+    assert!(settings.crf.is_none());
+    assert!(settings.cq.is_none());
+    assert!(settings.decode.is_video_toolbox());
+}
+
+#[test]
 fn new_named_serializes_tagged_and_round_trips() {
     let r = VideoProfileRef::Named("default-av1".to_owned());
     let json = serde_json::to_string(&r).unwrap();

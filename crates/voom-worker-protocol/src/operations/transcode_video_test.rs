@@ -131,7 +131,7 @@ fn transcode_video_contract_helpers_pin_canonical_values_and_aliases() {
     assert!(is_supported_transcode_video_codec("HEVC"));
     assert!(is_supported_transcode_video_codec("H265"));
     assert!(!is_supported_transcode_video_container("avi"));
-    assert!(!is_supported_transcode_video_codec("h264"));
+    assert!(is_supported_transcode_video_codec("h264"));
 }
 
 #[test]
@@ -182,7 +182,7 @@ fn supported_codecs_and_containers_are_recognized() {
     assert!(is_supported_transcode_video_codec("H265")); // alias, case-insensitive
     assert!(is_supported_transcode_video_codec("av1"));
     assert!(is_supported_transcode_video_codec("AV1"));
-    assert!(!is_supported_transcode_video_codec("h264"));
+    assert!(is_supported_transcode_video_codec("h264"));
     assert!(is_supported_transcode_video_container("mkv"));
     assert!(is_supported_transcode_video_container("mp4"));
     assert!(!is_supported_transcode_video_container("avi"));

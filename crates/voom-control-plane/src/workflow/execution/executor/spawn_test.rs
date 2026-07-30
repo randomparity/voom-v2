@@ -23,6 +23,7 @@ fn nvidia_candidate(
         hardware: vec![token.to_owned()],
         capability_extra: vec![serde_json::json!({
             "accelerator": {
+                "backend": "nvidia",
                 "hardware_token": token,
                 "device_uuid": token.trim_start_matches("nvidia:"),
                 "device_name": "Test GPU",
@@ -109,7 +110,7 @@ fn malformed_accelerator_descriptor_fails_candidate_projection() {
     assert!(
         error
             .to_string()
-            .contains("malformed NVIDIA accelerator descriptor")
+            .contains("malformed video accelerator descriptor")
     );
 }
 

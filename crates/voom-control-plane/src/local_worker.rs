@@ -20,7 +20,7 @@ use tokio::time::timeout;
 use voom_core::{TicketOperation, VoomError, WorkerId, WorkerKind, WorkerStatus};
 use voom_store::repo::accelerator_claims::{NewAcceleratorClaim, SqliteAcceleratorClaimRepo};
 use voom_store::repo::workers::{NewCapability, NewGrant, NewWorker};
-use voom_worker_protocol::{LocalWorkerBound, NvidiaVideoAcceleratorDescriptor};
+use voom_worker_protocol::{LocalWorkerBound, VideoAcceleratorDescriptor};
 
 use crate::ControlPlane;
 use crate::worker_process::{WorkerCommand, bundled_worker_command_from, random_hex_128};
@@ -237,8 +237,17 @@ impl ControlPlane {
         if claim.boot_id != boot_id {
             return self.retire_claim_owner(&claim).await;
         }
+        if claim.backend != "nvidia" {
+            return Err(VoomError::Conflict(format!(
+                "accelerator `{token}` claim has unexpected backend `{}`",
+                claim.backend
+            )));
+        }
         match linux_process_start_ticks_if_present(claim.supervisor_pid)? {
-            Some(start_ticks) if start_ticks == claim.supervisor_start_ticks => {
+            Some(start_ticks)
+                if claim.supervisor_start_identity.as_deref()
+                    == Some(format!("linux-proc-ticks:{start_ticks}").as_str()) =>
+            {
                 return Err(VoomError::Conflict(format!(
                     "accelerator `{token}` is owned by live supervisor PID {}",
                     claim.supervisor_pid
@@ -340,10 +349,14 @@ impl ControlPlane {
                 })?;
                 Ok::<_, VoomError>(NewAcceleratorClaim {
                     hardware_token: format!("nvidia:{}", nvidia.device_uuid),
+                    backend: "nvidia".to_owned(),
                     worker_id: worker.id,
                     boot_id: linux_boot_id()?,
                     supervisor_pid: process_id,
-                    supervisor_start_ticks: linux_process_start_ticks(process_id)?,
+                    supervisor_start_identity: Some(format!(
+                        "linux-proc-ticks:{}",
+                        linux_process_start_ticks(process_id)?
+                    )),
                     process_group_id: process_id,
                     capacity: nvidia.max_sessions,
                     claimed_at: self.clock().now(),
@@ -423,7 +436,7 @@ impl ControlPlane {
         worker_id: WorkerId,
         secret: &str,
         endpoint: SocketAddr,
-        accelerator: Option<&NvidiaVideoAcceleratorDescriptor>,
+        accelerator: Option<&VideoAcceleratorDescriptor>,
     ) -> Result<(), VoomError> {
         let mut grant_ops = Vec::with_capacity(kind.operations().len());
         let mut max_parallel = serde_json::Map::new();
@@ -443,14 +456,14 @@ impl ControlPlane {
                 operation: operation.clone(),
                 codecs: Vec::new(),
                 hardware: accelerator
-                    .map(|descriptor| vec![descriptor.hardware_token.clone()])
+                    .map(|descriptor| vec![descriptor.hardware_token().to_owned()])
                     .unwrap_or_default(),
                 artifact_access: Vec::new(),
                 extra,
             })
             .await?;
             let operation_capacity = if *op == "transcode_video" {
-                accelerator.map_or(1, |descriptor| descriptor.max_sessions)
+                accelerator.map_or(1, VideoAcceleratorDescriptor::max_sessions)
             } else {
                 1
             };
@@ -594,26 +607,33 @@ fn is_full_nvidia_uuid(device_uuid: &str) -> bool {
 }
 
 fn validate_bound_accelerator(
-    actual: Option<&NvidiaVideoAcceleratorDescriptor>,
+    actual: Option<&VideoAcceleratorDescriptor>,
     configured: Option<&NvidiaLocalWorkerConfig>,
 ) -> Result<(), VoomError> {
     match (actual, configured) {
         (None, None) => Ok(()),
-        (Some(actual), Some(configured))
+        (Some(VideoAcceleratorDescriptor::Nvidia(actual)), Some(configured))
             if actual.device_uuid == configured.device_uuid
                 && actual.hardware_token == format!("nvidia:{}", configured.device_uuid)
                 && actual.max_sessions == configured.max_sessions =>
         {
             Ok(())
         }
-        (Some(actual), Some(configured)) => Err(VoomError::WorkerCrash(format!(
-            "NVIDIA readiness metadata did not match configuration: expected {} sessions={} \
+        (Some(VideoAcceleratorDescriptor::Nvidia(actual)), Some(configured)) => {
+            Err(VoomError::WorkerCrash(format!(
+                "NVIDIA readiness metadata did not match configuration: expected {} sessions={} \
              but worker reported {} sessions={}",
-            configured.device_uuid,
-            configured.max_sessions,
-            actual.device_uuid,
-            actual.max_sessions
-        ))),
+                configured.device_uuid,
+                configured.max_sessions,
+                actual.device_uuid,
+                actual.max_sessions
+            )))
+        }
+        (Some(VideoAcceleratorDescriptor::VideoToolbox(_)), Some(_)) => {
+            Err(VoomError::WorkerCrash(
+                "NVIDIA worker advertised VideoToolbox readiness metadata".to_owned(),
+            ))
+        }
         (Some(_), None) => Err(VoomError::WorkerCrash(
             "software worker unexpectedly advertised an accelerator".to_owned(),
         )),

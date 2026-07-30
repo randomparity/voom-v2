@@ -149,6 +149,7 @@ async fn gpu_bound_worker_does_not_satisfy_software_profile_preflight() {
         artifact_access: Vec::new(),
         extra: json!({
             "accelerator": {
+                "backend": "nvidia",
                 "hardware_token": hardware_token,
                 "device_uuid": "GPU-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
                 "device_name": "Test GPU",
@@ -224,6 +225,7 @@ async fn nvidia_decode_profile_requires_an_advertised_cuvid_decoder() {
         artifact_access: Vec::new(),
         extra: json!({
             "accelerator": {
+                "backend": "nvidia",
                 "hardware_token": hardware_token,
                 "device_uuid": "GPU-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
                 "device_name": "Test GPU",

@@ -50,6 +50,8 @@ const EXPECTED_MIGRATION_FILES: &[&str] = &[
     "0027_audio_synthesis_asset_lineage.sql",
     "0028_sliding_file_window.sql",
     "0029_nvidia_video_acceleration.sql",
+    "0030_videotoolbox_video_profiles.sql",
+    "0031_backend_neutral_accelerator_claims.sql",
 ];
 
 fn workspace_root() -> PathBuf {
@@ -179,6 +181,73 @@ async fn legacy_video_profile_snapshot(pool: &sqlx::SqlitePool) -> String {
     .fetch_one(pool)
     .await
     .unwrap()
+}
+
+#[tokio::test]
+async fn backend_neutral_migration_tags_nvidia_capability_and_preserves_claim() {
+    let tmp = TempDatabase::new().unwrap();
+    let url = sqlite_url_for(tmp.path());
+    let pool = connect_or_create(&url).await.unwrap();
+    migrator_through(30).run(&pool).await.unwrap();
+
+    sqlx::query(
+        "INSERT INTO workers \
+         (id, name, kind, status, registered_at, last_seen_at, epoch) \
+         VALUES (411, 'gpu-worker', 'local', 'active', '2026-07-29T00:00:00Z', \
+                 '2026-07-29T00:00:00Z', 1)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let descriptor = serde_json::json!({
+        "accelerator": {
+            "hardware_token": "nvidia:GPU-example",
+            "device_uuid": "GPU-example",
+            "device_name": "Example GPU",
+            "driver_version": "1",
+            "encoders": ["hevc_nvenc"],
+            "decoders": ["h264_cuvid"],
+            "max_sessions": 4
+        }
+    });
+    sqlx::query(
+        "INSERT INTO worker_capabilities \
+         (worker_id, operation, codecs, hardware, artifact_access, extra) \
+         VALUES (411, 'transcode_video', '[]', '[\"nvidia:GPU-example\"]', '[]', ?)",
+    )
+    .bind(descriptor.to_string())
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO accelerator_claims \
+         (hardware_token, backend, worker_id, boot_id, supervisor_pid, \
+          supervisor_start_ticks, process_group_id, capacity, claimed_at) \
+         VALUES ('nvidia:GPU-example', 'nvidia', 411, 'boot', 100, 12345, 100, 4, \
+                 '2026-07-29T00:00:00Z')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    MIGRATOR.run(&pool).await.unwrap();
+
+    let backend: String = sqlx::query_scalar(
+        "SELECT json_extract(extra, '$.accelerator.backend') \
+         FROM worker_capabilities WHERE worker_id = 411",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(backend, "nvidia");
+    let identity: Option<String> = sqlx::query_scalar(
+        "SELECT supervisor_start_identity FROM accelerator_claims \
+         WHERE hardware_token = 'nvidia:GPU-example'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(identity.as_deref(), Some("linux-proc-ticks:12345"));
 }
 
 #[tokio::test]

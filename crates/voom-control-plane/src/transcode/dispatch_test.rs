@@ -76,6 +76,7 @@ fn resolved_av1_1080p_mp4() -> ResolvedProfile {
             encoder: "libsvtav1".to_owned(),
             crf: Some(32),
             cq: None,
+            bitrate_kbps: None,
             preset: "8".to_owned(),
             tune: None,
             codec_profile: None,

@@ -17,6 +17,8 @@ pub enum QualityDomain {
     Crf { min: u8, max: u8 },
     /// NVIDIA's constant-quality target in VBR rate-control mode.
     Cq { min: u8, max: u8 },
+    /// `VideoToolbox`'s target bitrate in kilobits per second.
+    BitrateKbps { min: u32, max: u32 },
 }
 
 /// Whether an encoder executes in software or on a named accelerator backend.
@@ -24,6 +26,7 @@ pub enum QualityDomain {
 pub enum VideoEncoderBackend {
     Software,
     Nvidia,
+    VideoToolbox,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -133,7 +136,50 @@ const HEVC_NVENC: EncoderDescriptor = EncoderDescriptor {
     requires_bitrate_zero: true,
 };
 
-const DESCRIPTORS: &[EncoderDescriptor] = &[X265, SVTAV1, LIBAOM, HEVC_NVENC];
+const H264_VIDEOTOOLBOX: EncoderDescriptor = EncoderDescriptor {
+    encoder: "h264_videotoolbox",
+    target_codec: "h264",
+    quality_domain: QualityDomain::BitrateKbps {
+        min: 1,
+        max: u32::MAX,
+    },
+    backend: VideoEncoderBackend::VideoToolbox,
+    preset_domain: PresetDomain::Named(&["default"]),
+    tunes: &[],
+    codec_profiles: &["high"],
+    codec_levels: &["4.1"],
+    pixel_formats: &["yuv420p"],
+    ten_bit_pixel_formats: &[],
+    eight_bit_only_profiles: &["high"],
+    requires_bitrate_zero: false,
+};
+
+const HEVC_VIDEOTOOLBOX: EncoderDescriptor = EncoderDescriptor {
+    encoder: "hevc_videotoolbox",
+    target_codec: "hevc",
+    quality_domain: QualityDomain::BitrateKbps {
+        min: 1,
+        max: u32::MAX,
+    },
+    backend: VideoEncoderBackend::VideoToolbox,
+    preset_domain: PresetDomain::Named(&["default"]),
+    tunes: &[],
+    codec_profiles: &["main", "main10"],
+    codec_levels: &[],
+    pixel_formats: &["yuv420p", "yuv420p10le"],
+    ten_bit_pixel_formats: &["yuv420p10le"],
+    eight_bit_only_profiles: &["main"],
+    requires_bitrate_zero: false,
+};
+
+const DESCRIPTORS: &[EncoderDescriptor] = &[
+    X265,
+    SVTAV1,
+    LIBAOM,
+    HEVC_NVENC,
+    H264_VIDEOTOOLBOX,
+    HEVC_VIDEOTOOLBOX,
+];
 
 pub const NVIDIA_VIDEO_DECODERS: &[(&str, &str)] = &[
     ("h264", "h264_cuvid"),
@@ -174,6 +220,14 @@ impl EncoderDescriptor {
             return false;
         };
         cq >= min && cq <= max
+    }
+
+    #[must_use]
+    pub const fn accepts_bitrate_kbps(&self, bitrate_kbps: u32) -> bool {
+        let QualityDomain::BitrateKbps { min, max } = self.quality_domain else {
+            return false;
+        };
+        bitrate_kbps >= min && bitrate_kbps <= max
     }
 
     #[must_use]

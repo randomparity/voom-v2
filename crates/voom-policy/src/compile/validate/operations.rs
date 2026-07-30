@@ -442,6 +442,7 @@ impl Validator<'_> {
             "encoder",
             "crf",
             "cq",
+            "bitrate_kbps",
             "preset",
             "tune",
             "codec_profile",
@@ -502,9 +503,11 @@ impl Validator<'_> {
     ) {
         let crf = self.inline_optional_str(span, by_key, "crf");
         let cq = self.inline_optional_str(span, by_key, "cq");
+        let bitrate = self.inline_optional_str(span, by_key, "bitrate_kbps");
         let valid = match descriptor.quality_domain {
             voom_core::QualityDomain::Crf { min, max } => {
                 cq.is_none()
+                    && bitrate.is_none()
                     && crf
                         .as_deref()
                         .and_then(|value| value.parse::<u8>().ok())
@@ -512,9 +515,18 @@ impl Validator<'_> {
             }
             voom_core::QualityDomain::Cq { min, max } => {
                 crf.is_none()
+                    && bitrate.is_none()
                     && cq
                         .as_deref()
                         .and_then(|value| value.parse::<u8>().ok())
+                        .is_some_and(|value| value >= min && value <= max)
+            }
+            voom_core::QualityDomain::BitrateKbps { min, max } => {
+                crf.is_none()
+                    && cq.is_none()
+                    && bitrate
+                        .as_deref()
+                        .and_then(|value| value.parse::<u32>().ok())
                         .is_some_and(|value| value >= min && value <= max)
             }
         };
@@ -581,14 +593,13 @@ impl Validator<'_> {
         );
         self.validate_inline_container_and_dimensions(span, by_key);
         let decode = self.inline_optional_str(span, by_key, "decode");
-        if decode
-            .as_deref()
-            .is_some_and(|value| value != "software" && value != "nvidia")
-        {
+        if decode.as_deref().is_some_and(|value| {
+            value != "software" && value != "nvidia" && value != "video_toolbox"
+        }) {
             self.error(
                 DiagnosticCode::InvalidVideoProfileSetting,
                 span,
-                "decode must be `software` or `nvidia`".to_owned(),
+                "decode must be `software`, `nvidia`, or `video_toolbox`".to_owned(),
             );
         }
         if decode.as_deref() == Some("nvidia")
@@ -599,6 +610,18 @@ impl Validator<'_> {
                 span,
                 format!(
                     "NVIDIA decode requires an NVIDIA encoder, not `{}`",
+                    descriptor.encoder
+                ),
+            );
+        }
+        if decode.as_deref() == Some("video_toolbox")
+            && descriptor.backend != voom_core::VideoEncoderBackend::VideoToolbox
+        {
+            self.error(
+                DiagnosticCode::InvalidVideoProfileSetting,
+                span,
+                format!(
+                    "VideoToolbox decode requires a VideoToolbox encoder, not `{}`",
                     descriptor.encoder
                 ),
             );

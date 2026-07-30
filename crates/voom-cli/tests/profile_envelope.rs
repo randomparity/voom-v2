@@ -142,9 +142,47 @@ mod profile_envelope {
     }
 
     #[tokio::test]
+    async fn create_videotoolbox_profile_emits_bitrate_and_explicit_decode() {
+        let seeded = seed().await;
+        let out = profile_command(&seeded.url)
+            .args([
+                "create",
+                "--name",
+                "mac-hevc",
+                "--encoder",
+                "hevc_videotoolbox",
+                "--bitrate-kbps",
+                "8000",
+                "--preset",
+                "default",
+                "--codec-profile",
+                "main10",
+                "--pixel-format",
+                "yuv420p10le",
+                "--decode",
+                "video-toolbox",
+            ])
+            .output()
+            .unwrap();
+
+        assert_eq!(out.status.code(), Some(0));
+        let json = envelope(out.stdout);
+        assert_eq!(json["data"]["profile"]["target_codec"], "hevc");
+        assert_eq!(json["data"]["profile"]["bitrate_kbps"], 8_000);
+        assert_eq!(
+            json["data"]["profile"]["decode"]["backend"],
+            "video_toolbox"
+        );
+    }
+
+    #[tokio::test]
     async fn create_requires_exactly_one_quality_flag() {
         let seeded = seed().await;
-        for quality in [Vec::new(), vec!["--crf", "23", "--cq", "23"]] {
+        for quality in [
+            Vec::new(),
+            vec!["--crf", "23", "--cq", "23"],
+            vec!["--cq", "23", "--bitrate-kbps", "8000"],
+        ] {
             let mut args = vec![
                 "create",
                 "--name",

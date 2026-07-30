@@ -46,6 +46,7 @@ fn sample_new(name: &str) -> NewVideoProfile {
         encoder: "libx265".to_owned(),
         crf: Some(22),
         cq: None,
+        bitrate_kbps: None,
         preset: "slow".to_owned(),
         tune: None,
         codec_profile: Some("main10".to_owned()),
@@ -132,6 +133,26 @@ async fn create_persists_nvidia_quality_and_decode_mode() {
         repo.get_by_name("nvidia-hevc").await.unwrap(),
         Some(created)
     );
+}
+
+#[tokio::test]
+async fn create_persists_videotoolbox_bitrate_and_decode_mode() {
+    let (repo, _pool, _tmp) = repo().await;
+    let mut profile = sample_new("videotoolbox-hevc");
+    profile.encoder = "hevc_videotoolbox".to_owned();
+    profile.crf = None;
+    profile.bitrate_kbps = Some(8_000);
+    profile.preset = "default".to_owned();
+    profile.codec_profile = Some("main10".to_owned());
+    profile.pixel_format = Some("yuv420p10le".to_owned());
+    profile.decode = voom_core::VideoDecodeMode::video_toolbox();
+
+    let created = repo.create(profile).await.unwrap();
+
+    assert_eq!(created.bitrate_kbps, Some(8_000));
+    assert!(created.crf.is_none());
+    assert!(created.cq.is_none());
+    assert!(created.decode.is_video_toolbox());
 }
 
 #[tokio::test]

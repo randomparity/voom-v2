@@ -5,6 +5,7 @@ fn sample_settings() -> voom_policy::VideoProfileSettings {
         encoder: "libsvtav1".to_owned(),
         crf: Some(30),
         cq: None,
+        bitrate_kbps: None,
         preset: "8".to_owned(),
         tune: None,
         codec_profile: None,

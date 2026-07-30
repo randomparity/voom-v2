@@ -100,5 +100,10 @@ fn hardware_evidence(
             Some(assignment.hardware_token.clone()),
             Some(assignment.device_uuid.clone()),
         ),
+        Some(VideoHardwareAssignment::VideoToolbox(assignment)) => (
+            Some("video_toolbox".to_owned()),
+            Some(assignment.hardware_token.clone()),
+            None,
+        ),
     }
 }

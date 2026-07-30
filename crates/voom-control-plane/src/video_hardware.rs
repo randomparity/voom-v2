@@ -1,10 +1,10 @@
 use voom_core::VoomError;
 use voom_store::repo::workers::{WorkerOperationCandidate, WorkerOperationCapability};
-use voom_worker_protocol::NvidiaVideoAcceleratorDescriptor;
+use voom_worker_protocol::VideoAcceleratorDescriptor;
 
 pub(crate) fn candidate_accelerator_descriptor(
     candidate: &WorkerOperationCandidate,
-) -> Result<Option<NvidiaVideoAcceleratorDescriptor>, VoomError> {
+) -> Result<Option<VideoAcceleratorDescriptor>, VoomError> {
     let mut descriptors = Vec::new();
     for extra in &candidate.capability_extra {
         let Some(value) = extra.get("accelerator") else {
@@ -27,7 +27,7 @@ pub(crate) fn candidate_accelerator_descriptor(
 
 pub(crate) fn historical_accelerator_descriptor(
     capability: &WorkerOperationCapability,
-) -> Result<Option<NvidiaVideoAcceleratorDescriptor>, VoomError> {
+) -> Result<Option<VideoAcceleratorDescriptor>, VoomError> {
     let Some(value) = capability.extra.get("accelerator") else {
         return Ok(None);
     };
@@ -37,10 +37,10 @@ pub(crate) fn historical_accelerator_descriptor(
 fn parse_descriptor(
     value: &serde_json::Value,
     context: &str,
-) -> Result<NvidiaVideoAcceleratorDescriptor, VoomError> {
+) -> Result<VideoAcceleratorDescriptor, VoomError> {
     serde_json::from_value(value.clone()).map_err(|error| {
         VoomError::Config(format!(
-            "{context} has a malformed NVIDIA accelerator descriptor: {error}"
+            "{context} has a malformed video accelerator descriptor: {error}"
         ))
     })
 }
