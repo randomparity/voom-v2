@@ -236,8 +236,22 @@ requirement matches only a live, identity-verified VAAPI descriptor.
 profile additionally requires at least one usable VAAPI decoder. Per-file source
 codec compatibility stays per-file. The existing split is reused unchanged: an
 unsupported source codec becomes a planner-blocked file, while a recognized codec
-absent from every live descriptor becomes a ticket-scoped `MissingCapability`.
+absent from every live descriptor fails only its own ticket.
 Dispatch repeats identity validation before acquiring the lease.
+
+> **Correction (post-implementation).** An earlier draft of this paragraph — and
+> ADR 0049 §5, from which it was inherited — described that ticket-scoped failure as
+> `MissingCapability`. The code records **`NoEligibleWorker`**. `FailureClass::MissingCapability`
+> exists and carries its own `ErrorCode`, but `cases/execution/tickets.rs::pre_lease_failure_reason`
+> accepts only `NoEligibleWorker` and `AmbiguousWorkerSelection`, and ADR 0049 §10 assigns
+> `NO_ELIGIBLE_WORKER` to a requirement no durable descriptor ever matched. The NVIDIA slice
+> (#400) shipped with that behavior, so the discrepancy predates #409.
+>
+> This slice implements the VAAPI path **identically to NVIDIA** rather than diverging: widening
+> `pre_lease_failure_reason` would change NVIDIA's observable failure class, which #409 must not
+> do. Aligning both backends onto `MissingCapability` is follow-up work spanning the scheduler and
+> the ticket-failure path — not a VAAPI concern. ADR 0049's text is left unedited because an ADR
+> is an immutable record of a decision, not a description of current code.
 
 Actionable preflight failures, each with a distinct diagnostic message:
 
