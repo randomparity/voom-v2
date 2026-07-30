@@ -138,6 +138,22 @@ create_profile() {
   jq -e '.status == "ok"' "$task_tmp/profile-$name.json" >/dev/null
 }
 
+assert_production_execution() {
+  local case_name=$1
+  local execute_json=$2
+
+  if ! jq -e \
+    '.status == "ok"
+      and .data.summary.dispatch_count == 1
+      and .data.summary.failure_count == 0
+      and .data.file_phases[0].outcome == "committed"' \
+    "$execute_json" >/dev/null; then
+    echo "production workflow assertions failed for $case_name" >&2
+    cat "$execute_json" >&2
+    return 1
+  fi
+}
+
 execute_case() {
   local spec=$1
   local case_name profile_name source_name source_codec source_container
@@ -180,16 +196,7 @@ execute_case() {
     --max-in-flight-files 1 \
     --staging-root "$task_tmp/staging-$case_name" \
     --output-dir "$task_tmp/output-$case_name"
-  if ! jq -e \
-    '.status == "ok"
-      and .data.summary.dispatch_count == 1
-      and .data.summary.failure_count == 0
-      and .data.file_phases[0].outcome == "committed"' \
-    "$execute_json" >/dev/null; then
-    echo "production workflow assertions failed for $case_name" >&2
-    cat "$execute_json" >&2
-    return 1
-  fi
+  assert_production_execution "$case_name" "$execute_json"
 
   local job_id location_id output_path
   job_id=$(jq -er '.data.summary.job_id' "$execute_json")

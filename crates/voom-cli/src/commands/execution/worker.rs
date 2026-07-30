@@ -87,16 +87,13 @@ pub async fn run(database_url: &str, local: Local, command: WorkerCommand) -> io
             videotoolbox,
             videotoolbox_max_sessions,
         } => {
-            run_local(
-                database_url,
-                local,
-                kind,
+            let accelerator = local_accelerator_config(
                 nvidia_device,
                 nvidia_max_sessions,
                 videotoolbox,
                 videotoolbox_max_sessions,
-            )
-            .await
+            );
+            run_local(database_url, local, kind, accelerator).await
         }
     }
 }
@@ -145,16 +142,29 @@ async fn run_local(
     database_url: &str,
     local: Local,
     kind: LocalWorkerKindArg,
-    nvidia_device: Option<String>,
-    nvidia_max_sessions: Option<u32>,
-    videotoolbox: bool,
-    videotoolbox_max_sessions: Option<u32>,
+    accelerator: Option<LocalVideoAcceleratorConfig>,
 ) -> io::Result<i32> {
     let cp = match open_control_plane("worker", database_url, &local).await? {
         Ok(cp) => cp,
         Err(code) => return Ok(code),
     };
-    let accelerator = if let Some(device_uuid) = nvidia_device {
+    run_local_supervise(
+        &cp,
+        kind.to_control_plane(),
+        accelerator,
+        shutdown_signal(),
+        local,
+    )
+    .await
+}
+
+fn local_accelerator_config(
+    nvidia_device: Option<String>,
+    nvidia_max_sessions: Option<u32>,
+    videotoolbox: bool,
+    videotoolbox_max_sessions: Option<u32>,
+) -> Option<LocalVideoAcceleratorConfig> {
+    if let Some(device_uuid) = nvidia_device {
         Some(LocalVideoAcceleratorConfig::Nvidia(
             NvidiaLocalWorkerConfig {
                 device_uuid,
@@ -169,15 +179,7 @@ async fn run_local(
         ))
     } else {
         None
-    };
-    run_local_supervise(
-        &cp,
-        kind.to_control_plane(),
-        accelerator,
-        shutdown_signal(),
-        local,
-    )
-    .await
+    }
 }
 
 /// Start the bundled worker, print the readiness line, then block on `shutdown`
