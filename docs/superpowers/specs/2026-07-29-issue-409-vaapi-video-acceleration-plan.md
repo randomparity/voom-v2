@@ -5,7 +5,8 @@
 - Branch: `feat/vaapi-video-acceleration-409`
 - Base: `main`
 - Worktree: none — single-session run in the primary working directory
-- Assigned ADR: `0050` (index row already committed)
+- Assigned ADR: `0051` (index row already committed; renumbered from 0050, which
+  issue #414 took on `main` in PR #426)
 - Assigned migration: `0030`
 - Full guardrail: `just ci`
 - Individual guardrails: `just fmt-check`, `just lint`, `just check-test-layout`,
@@ -13,7 +14,7 @@
   `just test`, `just doc`, `just deny`, `just audit`
 - Hosted gates: Ubuntu `just ci`, macOS `just ci`, coverage/SonarCloud
 - Spec: `docs/superpowers/specs/2026-07-29-issue-409-vaapi-video-acceleration-design.md`
-- ADR: `docs/adr/0050-vaapi-device-identity-and-probe-proven-capability.md`
+- ADR: `docs/adr/0051-vaapi-device-identity-and-probe-proven-capability.md`
 - Hardware evidence for command shapes and option ranges is in the spec §2; do not
   re-derive it, and do not invent a command shape the spec does not record.
 
@@ -239,7 +240,7 @@ mixed pair; ADR 0013's binary-before-DB ordering applies.
 
 ### Fit
 
-The heart of ADR 0050: resolve a PCI address to a render node, verify it, and prove
+The heart of ADR 0051: resolve a PCI address to a render node, verify it, and prove
 capability by executing encodes. Depends on Task 4.
 
 ### Files
@@ -288,7 +289,7 @@ tests writable.
    explicit `-pix_fmt yuv420p` — spec §2.3 explains why the obvious
    `testsrc`-to-`libx265` recipe yields undecodable `gbrp`.
 4. Implement the concurrent capacity probe bounded `1..=16`, defaulting to 1, and wire
-   ADR 0050 §7's clocks (per-probe timeout, one-minute capacity clock, five-minute
+   ADR 0051 §7's clocks (per-probe timeout, one-minute capacity clock, five-minute
    readiness deadline). Reuse ADR 0049's existing clock plumbing rather than adding new
    configuration.
 5. Advertise the `vaapi:pci-<addr>` hardware token and the typed descriptor in `extra`.
@@ -299,7 +300,7 @@ tests writable.
 - No code path advertises a codec that has not encoded on the bound device in this
   process.
 - A capacity-probe failure reports diagnostic uncertainty and never attributes the cause
-  to external contention (ADR 0050 §6 — VAAPI has no session enumeration).
+  to external contention (ADR 0051 §6 — VAAPI has no session enumeration).
 - `run-local`'s two-line stdout contract is unchanged.
 - Tests do not require a GPU: every probe and device lookup routes through the seams
   above, and the real-hardware path is exercised by Task 8's acceptance script.

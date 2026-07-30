@@ -3,7 +3,7 @@
 Status: accepted
 Date: 2026-07-29
 Issue: #409
-ADR: [0050 — VAAPI device identity is the PCI address, and capability is probe-proven](../../adr/0050-vaapi-device-identity-and-probe-proven-capability.md)
+ADR: [0051 — VAAPI device identity is the PCI address, and capability is probe-proven](../../adr/0051-vaapi-device-identity-and-probe-proven-capability.md)
 Builds on: [ADR 0049](../../adr/0049-accelerator-devices-are-worker-resources.md), issue #400
 
 ## 1. Scope
@@ -133,7 +133,7 @@ Extends `crates/voom-core/src/media/encoder_caps.rs`:
 | `preset_domain` | `None` |
 | `tunes` | `&[]` |
 | `codec_profiles` | `&["main", "main10"]` |
-| `codec_levels` | `&[]` (rejected — see ADR 0050 §4) |
+| `codec_levels` | `&[]` (rejected — see ADR 0051 §4) |
 | `pixel_formats` | `&["nv12", "p010"]` |
 | `ten_bit_pixel_formats` | `&["p010"]` |
 | `eight_bit_only_profiles` | `&["main"]` |
@@ -184,7 +184,7 @@ time, not from step 2. VAAPI has no equivalent of the `CUDA_VISIBLE_DEVICES`-plu
 indirection that forces ADR 0049's PID-to-UUID readback, so step 2's narrower job is to
 catch a stale or incorrect `by-path` symlink — udev generates that symlink from the very
 address the check re-reads. Proof that an encode ran on the intended device comes from
-the §5 probe. See ADR 0050 §1.
+the §5 probe. See ADR 0051 §1.
 
 `sysfs unique_id` is deliberately not used: it exists only on discrete GPUs and is
 absent on this APU.
@@ -215,7 +215,7 @@ encode timeout, the one-minute capacity clock for the concurrent probe, and the
 five-minute readiness deadline overall. Expiry fails startup naming the codec or
 capacity that did not prove, so a hung probe cannot leave a worker pending. The cost
 is real and paid per start — one encode per candidate codec plus `capacity`
-concurrent encodes — and is recorded in ADR 0050's Consequences.
+concurrent encodes — and is recorded in ADR 0051's Consequences.
 
 The advertised descriptor records: backend, PCI address, device name, usable
 encoders, usable decoders, driver string, and tested capacity.
@@ -370,6 +370,6 @@ completion check — the slice is done when every row is satisfied.
 `just ci` — `fmt-check`, `lint`, `check-test-layout`, `check-paused-time-db`(+selftest),
 `check-payload-deny-unknown`(+selftest), `check-adr-index`(+selftest), `test`, `doc`,
 `deny`, `audit`. CI runs the umbrella recipe on ubuntu-latest and macos-latest, so
-`check-adr-index` hard-gates this PR and ADR 0050's index row ships with it.
+`check-adr-index` hard-gates this PR and ADR 0051's index row ships with it.
 
 Branch: `feat/vaapi-video-acceleration-409`. Base: `main`.

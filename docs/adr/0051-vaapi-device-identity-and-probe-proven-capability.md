@@ -4,7 +4,7 @@ date: 2026-07-29
 deciders: [VOOM core]
 ---
 
-# 0050 — VAAPI device identity is the PCI address, and capability is probe-proven
+# 0051 — VAAPI device identity is the PCI address, and capability is probe-proven
 
 Issue: #409
 
