@@ -140,12 +140,17 @@ pub struct SoftwareVideoDecode {}
 #[serde(deny_unknown_fields)]
 pub struct NvidiaVideoDecode {}
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VaapiVideoDecode {}
+
 /// Where video frames are decoded before entering the encoder graph.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "backend", rename_all = "snake_case")]
 pub enum VideoDecodeMode {
     Software(SoftwareVideoDecode),
     Nvidia(NvidiaVideoDecode),
+    Vaapi(VaapiVideoDecode),
 }
 
 impl Default for VideoDecodeMode {
@@ -161,16 +166,32 @@ impl VideoDecodeMode {
     }
 
     #[must_use]
+    pub const fn vaapi() -> Self {
+        Self::Vaapi(VaapiVideoDecode {})
+    }
+
+    #[must_use]
     pub const fn is_software(&self) -> bool {
         match self {
             Self::Software(_) => true,
-            Self::Nvidia(_) => false,
+            Self::Nvidia(_) | Self::Vaapi(_) => false,
         }
     }
 
     #[must_use]
     pub const fn is_nvidia(&self) -> bool {
-        !self.is_software()
+        match self {
+            Self::Nvidia(_) => true,
+            Self::Software(_) | Self::Vaapi(_) => false,
+        }
+    }
+
+    #[must_use]
+    pub const fn is_vaapi(&self) -> bool {
+        match self {
+            Self::Vaapi(_) => true,
+            Self::Software(_) | Self::Nvidia(_) => false,
+        }
     }
 
     #[must_use]
@@ -178,6 +199,7 @@ impl VideoDecodeMode {
         match self {
             Self::Software(_) => "software",
             Self::Nvidia(_) => "nvidia",
+            Self::Vaapi(_) => "vaapi",
         }
     }
 
@@ -189,6 +211,7 @@ impl VideoDecodeMode {
         match value {
             "software" => Ok(Self::default()),
             "nvidia" => Ok(Self::nvidia()),
+            "vaapi" => Ok(Self::vaapi()),
             _ => Err(format!("unknown video decode backend `{value}`")),
         }
     }

@@ -77,9 +77,9 @@ pub mod transcode_video_profile {
         NvidiaVideoDecode, SoftwareVideoDecode, TRANSCODE_VIDEO_CODEC,
         TRANSCODE_VIDEO_CODEC_ALIAS_H265, TRANSCODE_VIDEO_CODEC_AV1, TRANSCODE_VIDEO_CONTAINER,
         TRANSCODE_VIDEO_CONTAINER_MP4, TRANSCODE_VIDEO_PROFILE, TranscodeVideoProfile,
-        VideoDecodeMode, canonical_video_codec, is_supported_transcode_video_codec,
-        is_supported_transcode_video_container, normalize_codec_token,
-        validate_profile_against_descriptor,
+        VaapiVideoDecode, VideoDecodeMode, canonical_video_codec,
+        is_supported_transcode_video_codec, is_supported_transcode_video_container,
+        normalize_codec_token, validate_profile_against_descriptor,
     };
 }
 
@@ -113,8 +113,8 @@ pub use ticket_operation::TicketOperation;
 pub use transcode_video_profile::{
     NvidiaVideoDecode, SoftwareVideoDecode, TRANSCODE_VIDEO_CODEC,
     TRANSCODE_VIDEO_CODEC_ALIAS_H265, TRANSCODE_VIDEO_CODEC_AV1, TRANSCODE_VIDEO_CONTAINER,
-    TRANSCODE_VIDEO_CONTAINER_MP4, TRANSCODE_VIDEO_PROFILE, TranscodeVideoProfile, VideoDecodeMode,
-    canonical_video_codec, is_supported_transcode_video_codec,
+    TRANSCODE_VIDEO_CONTAINER_MP4, TRANSCODE_VIDEO_PROFILE, TranscodeVideoProfile,
+    VaapiVideoDecode, VideoDecodeMode, canonical_video_codec, is_supported_transcode_video_codec,
     is_supported_transcode_video_container, normalize_codec_token,
     validate_profile_against_descriptor,
 };

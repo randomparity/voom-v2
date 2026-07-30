@@ -125,6 +125,44 @@ fn nvidia_decode_serializes_as_strict_typed_mode() {
     assert!(serde_json::from_value::<TranscodeVideoProfile>(invalid).is_err());
 }
 
+/// Each decode-backend predicate must answer for exactly its own backend. No
+/// predicate may be defined as the negation of another: `is_nvidia()` gates NVENC
+/// profile validation, so a VAAPI profile answering `true` there would be validated
+/// against — and dispatched to — the wrong hardware backend.
+#[test]
+fn decode_predicates_answer_only_for_their_own_backend() {
+    let vaapi = VideoDecodeMode::vaapi();
+    assert!(!vaapi.is_software());
+    assert!(!vaapi.is_nvidia());
+    assert!(vaapi.is_vaapi());
+
+    let nvidia = VideoDecodeMode::nvidia();
+    assert!(nvidia.is_nvidia());
+    assert!(!nvidia.is_software());
+    assert!(!nvidia.is_vaapi());
+
+    let software = VideoDecodeMode::default();
+    assert!(software.is_software());
+    assert!(!software.is_nvidia());
+    assert!(!software.is_vaapi());
+}
+
+/// `vaapi` is durable `SQLite` vocabulary from migration 0030 onward, so the parse
+/// side and the stored token must agree for every backend, and unknown tokens must
+/// stay rejected rather than silently degrading to software.
+#[test]
+fn decode_backend_tokens_round_trip_through_the_durable_vocabulary() {
+    for mode in [
+        VideoDecodeMode::default(),
+        VideoDecodeMode::nvidia(),
+        VideoDecodeMode::vaapi(),
+    ] {
+        assert_eq!(VideoDecodeMode::parse(mode.as_str()), Ok(mode));
+    }
+    assert_eq!(VideoDecodeMode::vaapi().as_str(), "vaapi");
+    assert!(VideoDecodeMode::parse("qsv").is_err());
+}
+
 #[test]
 fn transcode_video_profile_rejects_unknown_durable_fields() {
     let mut value = serde_json::to_value(TranscodeVideoProfile::default_hevc()).unwrap();
