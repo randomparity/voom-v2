@@ -211,6 +211,27 @@ encoded file reports a **file** format:
 
 `main` with `p010` is rejected: an 8-bit profile cannot carry a 10-bit surface.
 
+##### With `decode: vaapi`, the surface must match the source's bit depth
+
+A hardware-decoded source stays in GPU frames all the way to the encoder — that
+is the point of the mode, and it is why the command carries no filter at all. So
+nothing can convert the frame in flight, and the profile's surface must already
+match the source's depth:
+
+| Source | Profile |
+|---|---|
+| 8-bit (`yuv420p`) | `nv12` + `main` |
+| 10-bit (`yuv420p10le`) | `p010` + `main10` |
+
+A mismatch is refused before FFmpeg runs, naming both formats. Left to FFmpeg it
+reports only `No usable encoding profile found`, which reaches the operator as a
+worker crash wrapping an FFmpeg dump.
+
+This constraint is specific to `decode: vaapi`. A software-decoded source uploads
+through `format=<surface>,hwupload`, which converts the frame on the way to the
+device, so a mixed-depth library transcodes to a single output depth — use
+software decode when that is what you want.
+
 ##### Startup diagnostics
 
 Every VAAPI preflight failure names the PCI address and has one operator action:

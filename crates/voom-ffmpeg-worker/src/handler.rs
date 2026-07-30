@@ -754,9 +754,7 @@ fn validate_video_hardware_binding(
         voom_core::VideoEncoderBackend::Nvidia => {
             validate_nvidia_binding(request, config, &source.codec)
         }
-        voom_core::VideoEncoderBackend::Vaapi => {
-            validate_vaapi_binding(request, config, &source.codec)
-        }
+        voom_core::VideoEncoderBackend::Vaapi => validate_vaapi_binding(request, config, source),
         voom_core::VideoEncoderBackend::VideoToolbox => {
             validate_videotoolbox_binding(request, config, source)
         }
@@ -792,7 +790,7 @@ fn validate_software_binding(
 fn validate_vaapi_binding(
     request: &TranscodeVideoRequest,
     config: &FfmpegConfig,
-    source_codec: &str,
+    source: &InputProbe,
 ) -> Result<(), TranscodeVideoError> {
     let Some(VideoHardwareAssignment::Vaapi(assignment)) = &request.hardware_assignment else {
         return Err(config_invalid(
@@ -825,7 +823,42 @@ fn validate_vaapi_binding(
     if !request.profile.decode.is_vaapi() {
         return Ok(());
     }
-    validate_vaapi_decoder_probed(binding, source_codec)
+    validate_vaapi_decoder_probed(binding, &source.codec)?;
+    validate_vaapi_bit_depth(request, &source.pixel_format)
+}
+
+/// VAAPI hardware decode is the one path that carries the *decoder's* surface
+/// format straight into the encoder: `vaapi_filter_args` emits no `-vf` there, on
+/// purpose, so that frames never leave the GPU. Nothing downstream can therefore
+/// reconcile a source bit depth the profile disagrees with — `hevc_vaapi` reports
+/// only `No usable encoding profile found`, which reaches the operator as an
+/// opaque worker crash carrying an `FFmpeg` dump.
+///
+/// Software decode needs no such check: its `format=<surface>,hwupload` filter
+/// converts the frame to the profile's surface before upload, so a depth change
+/// there is the operator asking for exactly that.
+fn validate_vaapi_bit_depth(
+    request: &TranscodeVideoRequest,
+    source_pixel_format: &str,
+) -> Result<(), TranscodeVideoError> {
+    // `vaapi_surface_format` defaults an absent `pixel_format` to nv12, so this
+    // must default identically: reading it as "no declared depth" would reject
+    // every profile that leaves the field unset.
+    let surface_format = request.profile.pixel_format.as_deref().unwrap_or("nv12");
+    let source_depth = video_pixel_format_depth(source_pixel_format);
+    if source_depth.is_some() && source_depth == video_pixel_format_depth(surface_format) {
+        return Ok(());
+    }
+    Err(config_invalid(
+        "transcode_video",
+        format!(
+            "VAAPI decode source pixel format `{source_pixel_format}` is incompatible with \
+             profile surface format `{surface_format}`; a hardware-decoded source reaches the \
+             encoder at its own bit depth, so pair a 10-bit source with `p010`/`main10` and an \
+             8-bit source with `nv12`/`main`, or set the profile to software decode to convert \
+             the frame on upload"
+        ),
+    ))
 }
 
 fn validate_vaapi_decoder_probed(
@@ -990,10 +1023,13 @@ fn validate_videotoolbox_bit_depth(
     ))
 }
 
+/// Maps both the *file* formats a probe reports and the *surface* formats a
+/// hardware profile names onto a bit depth, which is the only property the two
+/// vocabularies share. `p010` is VAAPI's spelling of the surface `p010le` names.
 fn video_pixel_format_depth(pixel_format: &str) -> Option<u8> {
     match pixel_format {
         "yuv420p" | "nv12" => Some(8),
-        "yuv420p10le" | "p010le" => Some(10),
+        "yuv420p10le" | "p010le" | "p010" => Some(10),
         _ => None,
     }
 }

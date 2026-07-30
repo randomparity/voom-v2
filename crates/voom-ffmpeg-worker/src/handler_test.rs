@@ -208,6 +208,87 @@ async fn vaapi_decode_requires_a_probe_proven_decoder_for_the_source_codec() {
     assert!(err.to_string().contains("0000:f4:00.0"), "{err}");
 }
 
+/// A VAAPI-decoded source reaches the encoder as hardware frames at the depth the
+/// *decoder* chose, because `vaapi_filter_args` deliberately emits no `-vf` on
+/// that path. Pairing a 10-bit source with an 8-bit surface therefore cannot be
+/// reconciled anywhere downstream: on real hardware `hevc_vaapi` answers
+/// `No usable encoding profile found`, which reaches the operator as a worker
+/// crash wrapping an `FFmpeg` dump instead of a typed, actionable config error.
+#[tokio::test]
+async fn vaapi_decode_rejects_a_source_whose_bit_depth_the_surface_cannot_carry() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("input.mkv");
+    let mut request = request(dir.path(), &input).await;
+    request.profile = vaapi_profile(voom_core::VideoDecodeMode::vaapi());
+    request.hardware_assignment = Some(VideoHardwareAssignment::vaapi(
+        "vaapi:pci-0000:f4:00.0",
+        "0000:f4:00.0",
+    ));
+    let config =
+        config(dir.path()).with_vaapi_device(vaapi_binding(dir.path(), vec!["hevc".to_owned()]));
+    let mut ten_bit = input_probe_with_codec("hevc");
+    ten_bit.pixel_format = "yuv420p10le".to_owned();
+
+    let err = validate_video_hardware_binding(&request, &config, &ten_bit).unwrap_err();
+
+    assert!(
+        matches!(err, TranscodeVideoError::ConfigInvalid { .. }),
+        "expected ConfigInvalid, got: {err}"
+    );
+    assert!(err.to_string().contains("yuv420p10le"), "{err}");
+    assert!(err.to_string().contains("nv12"), "{err}");
+}
+
+/// The check pins depth, not format spelling: `p010` surfaces carry the 10-bit
+/// source the previous test rejects, and an absent `pixel_format` must default to
+/// nv12 exactly as `vaapi_surface_format` does — reading it as "no declared
+/// depth" would reject every profile that omits the field.
+#[tokio::test]
+async fn vaapi_decode_accepts_each_surface_that_matches_the_source_bit_depth() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("input.mkv");
+    let mut request = request(dir.path(), &input).await;
+    request.profile = vaapi_profile(voom_core::VideoDecodeMode::vaapi());
+    request.hardware_assignment = Some(VideoHardwareAssignment::vaapi(
+        "vaapi:pci-0000:f4:00.0",
+        "0000:f4:00.0",
+    ));
+    let config =
+        config(dir.path()).with_vaapi_device(vaapi_binding(dir.path(), vec!["hevc".to_owned()]));
+    let eight_bit = input_probe_with_codec("hevc");
+    let mut ten_bit = input_probe_with_codec("hevc");
+    ten_bit.pixel_format = "yuv420p10le".to_owned();
+
+    validate_video_hardware_binding(&request, &config, &eight_bit).unwrap();
+
+    request.profile.pixel_format = Some("p010".to_owned());
+    validate_video_hardware_binding(&request, &config, &ten_bit).unwrap();
+
+    request.profile.pixel_format = None;
+    validate_video_hardware_binding(&request, &config, &eight_bit).unwrap();
+}
+
+/// Software decode uploads through `format=<surface>,hwupload`, which converts the
+/// frame before it reaches the device. A depth change there is the operator asking
+/// for exactly that conversion, so the check must not fire.
+#[tokio::test]
+async fn software_decode_into_a_vaapi_encoder_still_allows_a_depth_change() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("input.mkv");
+    let mut request = request(dir.path(), &input).await;
+    request.profile = vaapi_profile(voom_core::VideoDecodeMode::default());
+    request.hardware_assignment = Some(VideoHardwareAssignment::vaapi(
+        "vaapi:pci-0000:f4:00.0",
+        "0000:f4:00.0",
+    ));
+    let config =
+        config(dir.path()).with_vaapi_device(vaapi_binding(dir.path(), vec!["hevc".to_owned()]));
+    let mut ten_bit = input_probe_with_codec("hevc");
+    ten_bit.pixel_format = "yuv420p10le".to_owned();
+
+    validate_video_hardware_binding(&request, &config, &ten_bit).unwrap();
+}
+
 /// ADR 0049 §5, applied to the new backend: a device-bound worker does not run
 /// software video work, so it cannot occupy a GPU with an encode any worker could
 /// have done. The software branch tests `config.accelerator()`, so a config that
