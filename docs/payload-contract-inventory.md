@@ -11,7 +11,7 @@ in `scripts/payload-contract-scope.txt`, which is the set of "defining file(s)"
 for every Class-T / T-upstream row below.
 
 Durable columns are surveyed across the SQLite migrations in `migrations/`
-(`0001`–`0030`). Read sites are in `crates/voom-store/src/repo/` (store layer)
+(`0001`–`0032`). Read sites are in `crates/voom-store/src/repo/` (store layer)
 and `crates/voom-control-plane/src/` (typed higher layer for T-upstream columns).
 
 Scalar typed columns (`INTEGER`/`TEXT` read into a Rust field, not JSON) carry no
@@ -30,7 +30,7 @@ contract when the same value is a field of a typed root above — see the
 | commit_intents.target_row_epochs | T | repo/media/commit_safety_gate/finalize.rs:393 `decode_target_row_epochs` (`from_str::<Vec<TargetRowEpochTriple>>`) | `TargetRowEpochTriple` (tuple newtype, no named fields) | — | codecs.rs | safe by construction; NOT in scope |
 | commit_intents.accepted_evidence_ids | T | repo/media/commit_safety_gate/authorize.rs:362 / abort_list.rs:279 (`Vec<EvidenceId>`) | `EvidenceId` (id newtype) | — | n/a | safe by construction; NOT in scope |
 | worker_capabilities.{codecs,hardware,artifact_access}; worker_grants.{can_execute,can_access_read,can_access_write,denies}; workflow_file_phase_summaries.ticket_ids; policy_media_snapshot_inputs.{audio_languages,subtitle_languages,health_flags} | T | executor.rs:1403 `json_string_array_contains` (`Vec<String>`); workflow_summaries.rs:622 (`Vec<u64>`); policy_inputs.rs:813–815 `json_value` → `Vec<String>` | `Vec<String>` / `Vec<u64>` | — | n/a | scalar element types, no named-field surface; NOT in scope |
-| worker_capabilities.extra (`$.accelerator` only) | T-upstream | store: repo/execution/workers.rs (`JsonValue`); typed: video_hardware.rs `from_value` → `NvidiaVideoAcceleratorDescriptor` | `NvidiaVideoAcceleratorDescriptor`; `VideoAcceleratorDescriptor` (`backend`-tagged, VAAPI only) | `VaapiVideoAcceleratorDescriptor` | worker-protocol/src/video_acceleration.rs | complete: both descriptor structs reject unknown fields; NVIDIA is stored untagged so pre-#409 rows keep parsing, VAAPI is stored tagged (#409) |
+| worker_capabilities.extra (`$.accelerator` only) | T-upstream | store: repo/execution/workers.rs (`JsonValue`); typed: video_hardware.rs `from_value` → `VideoAcceleratorDescriptor` | `VideoAcceleratorDescriptor` (`backend`-tagged, every backend) | `NvidiaVideoAcceleratorDescriptor`; `VaapiVideoAcceleratorDescriptor`; `VideoToolboxVideoAcceleratorDescriptor`; `VideoToolboxDecodeCapability` | worker-protocol/src/video_acceleration.rs | complete: every descriptor struct rejects unknown fields; all rows are `backend`-tagged, pre-#411 NVIDIA rows by migration 0031's backfill |
 | tickets.payload | T-upstream | store: repo/execution/tickets.rs:532 (`JsonValue`); typed: ticket_payload.rs:83 `from_value` → `WorkflowTicketPayload` | `WorkflowTicketPayload` | `EffectiveTiming` (named struct); `OperationKind` (unit enum — no surface) | ticket_payload.rs, timing.rs | add attr+tests to `WorkflowTicketPayload` and `EffectiveTiming` (Task 4) |
 | tickets.result | T-upstream | store: repo/execution/tickets.rs (`JsonValue`); typed: compliance.rs `decode_compliance_extract_result`, workflow ticket-result normalization, and finalize.rs policy-verification adoption | `ExecuteExtractAudioOutputReport`; `ComplianceLegacyAudioExtractResult`; `PolicyVerificationTicketResult` | — (historical `commit_recovery_required` is intentionally opaque `JsonValue`; `PolicyVerificationTicketStatus` is a unit enum) | audio/mod.rs, cases/policy/compliance.rs, workflow/ticket_results.rs | complete: published and complete historical scalar wire forms reject unknown fields; pre-#337 audio serialization compatibility remains; policy-verification results retain their initial durable shape and reject unknown fields (#334) |
 | policy_versions.compiled_json | T-upstream | store: repo/policy/policies.rs:483 (`JsonValue`); typed: plans.rs:291 `deserialize_stored_compiled_policy` → `CompiledPolicy`, used by accepted-version planning and compliance execution | `CompiledPolicy` | all distinct content structs for `CompiledOperation`, `TrackFilter`, `CompiledCondition`, and `CompiledValue`; `CompiledConfig`; `CompiledPhase`; `CompiledRunIfWire`; `CompiledRule`; `PolicyProvenance`; diagnostic/span structs; `VideoProfileSettings`; `TranscodeVideoProfile` | compile/compiled.rs, data/video_profile.rs, diagnostic.rs, syntax/span.rs, voom-core/src/media/transcode_video_profile.rs | complete: all 41 tagged variants retain their exact wire shape and reject unknown fields; current and historical compiled versions remain readable (#344) |
@@ -44,7 +44,8 @@ the change introduces a *new* defining file.
 
 | migration | durable columns | typed root | evolution | defining file |
 |---|---|---|---|---|
-| `0030` (#409) | `video_profiles.qp` (new, nullable); `video_profiles.preset` (now nullable) | `TranscodeVideoProfile` **and** `VideoProfileSettings`, both reachable from `policy_versions.compiled_json` via `VideoProfileRef` (`Named` resolves to the former, `Inline` is the latter) | `qp: Option<u8>` is additive — an older compiled payload without it reads as `None`. `preset: String` → `Option<String>` is a **retype**, so a payload written with `preset` absent is unreadable by a pre-#409 binary: binary-before-DB upgrade ordering applies (ADR 0013). Both fields are `skip_serializing_if = "Option::is_none"`, so every software and NVENC payload is byte-identical to before, and `inline_profile_id`'s canonical form omits an absent `preset` rather than substituting one, keeping pre-#409 `inline-<hash>` identities stable. | `crates/voom-core/src/media/transcode_video_profile.rs` and `crates/voom-policy/src/data/video_profile.rs` (both already in scope) |
+| `0032` (#409) | `video_profiles.qp` (new, nullable); `video_profiles.preset` (now nullable) | `TranscodeVideoProfile` **and** `VideoProfileSettings`, both reachable from `policy_versions.compiled_json` via `VideoProfileRef` (`Named` resolves to the former, `Inline` is the latter) | `qp: Option<u8>` is additive — an older compiled payload without it reads as `None`. `preset: String` → `Option<String>` is a **retype**, so a payload written with `preset` absent is unreadable by a pre-#409 binary: binary-before-DB upgrade ordering applies (ADR 0013). Both fields are `skip_serializing_if = "Option::is_none"`, so every software and NVENC payload is byte-identical to before, and `inline_profile_id`'s canonical form omits an absent `preset` rather than substituting one, keeping pre-#409 `inline-<hash>` identities stable. | `crates/voom-core/src/media/transcode_video_profile.rs` and `crates/voom-policy/src/data/video_profile.rs` (both already in scope) |
+| `0030` (#411) | `video_profiles.bitrate_kbps` (new, nullable); `accelerator_claims` gains `backend` | `TranscodeVideoProfile` **and** `VideoProfileSettings`, same two roots as the row above | `bitrate_kbps: Option<u32>` is additive and `skip_serializing_if = "Option::is_none"`, so every pre-#411 payload is byte-identical. `inline_profile_id`'s canonical form contributes a `bitrate_kbps=` part only when the field is present, so pre-#411 `inline-<hash>` identities are unchanged while two profiles differing only in bitrate now hash differently. | `crates/voom-core/src/media/transcode_video_profile.rs` and `crates/voom-policy/src/data/video_profile.rs` (both already in scope) |
 | `0029` (#400) | `video_profiles.cq`, `video_profiles.decode_backend` | same | `cq: Option<u8>` and `decode: VideoDecodeMode` are additive; `decode` defaults to `Software` and is skipped when software. | `crates/voom-core/src/media/transcode_video_profile.rs` (already in scope) |
 
 #### Non-durable coordinated retype: `LocalWorkerBound.accelerator` (#409)
@@ -59,13 +60,12 @@ control plane and a bundled worker binary on opposite sides of the change cannot
 exchange a bound payload. ADR 0013's binary-before-DB ordering applies: the pair
 is lock-stepped (ADR 0002/0016) and must be deployed together, never mixed.
 
-The NVIDIA durable side is deliberately unchanged. `worker_capabilities.extra`'s
-`accelerator` object still holds the **untagged** `NvidiaVideoAcceleratorDescriptor`
-for NVIDIA — `local_worker.rs` serializes the inner struct, not the enum — so
-pre-#409 rows keep parsing byte-for-byte. Pinned by
-`local_worker_test.rs::nvidia_capability_records_the_untagged_descriptor_token_and_capacity`
-and by the byte-for-byte payload pin in
-`video_acceleration_test.rs::software_and_nvidia_payloads_are_byte_for_byte_unchanged`.
+The NVIDIA durable side **is** changed, by issue #411 rather than by #409.
+Migration 0031 backfills `"backend":"nvidia"` onto every pre-existing
+`worker_capabilities.extra.accelerator` object with a `json_set` update, so there
+is no untagged shape left in the database and no reader has to sniff for one.
+`local_worker.rs` serializes the tagged enum for every backend. Pinned by
+`local_worker_test.rs::nvidia_capability_records_the_tagged_descriptor_token_and_capacity`.
 
 **Reconciliation closed (#409).** `worker_capabilities.extra` was classified
 Class P ("passthrough `JsonValue` — no typed read") while `extra.accelerator` was
@@ -77,11 +77,15 @@ surface is the accelerator descriptor structs in
 `scripts/payload-contract-scope.txt`. The rest of the column stays passthrough —
 `endpoint` and `secret` are read as untyped strings.
 
-The stored `accelerator` object is **untagged for NVIDIA and `backend`-tagged for
-VAAPI**, and a reader tells them apart by the presence of `backend`. The asymmetry
-is deliberate: pre-#409 NVIDIA rows are durable and untagged, so tagging NVIDIA
-retroactively would make them unreadable, while an untagged VAAPI object would be
-indistinguishable from a malformed NVIDIA one.
+The stored `accelerator` object is **`backend`-tagged for every backend**, and is
+read by unconditional `VideoAcceleratorDescriptor` deserialization — there is no
+untagged branch and no presence-of-`backend` sniffing. Migration 0031 is what
+makes that safe: it tagged the pre-existing NVIDIA rows in place, so the
+asymmetric scheme #409 originally designed against (untagged NVIDIA beside tagged
+VAAPI) was overtaken before either shipped. A backend tag this build cannot parse
+is an error for that one worker; video preflight treats such a worker as
+contributing no availability rather than letting the error escape candidate
+projection (ADR 0049 §6).
 
 The capacity SQL no longer needs to tolerate either shape. It read the grouping
 key from `json_extract(extra, '$.accelerator.hardware_token')`, a field only the
