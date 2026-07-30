@@ -1081,7 +1081,11 @@ pub enum WorkerCommand {
         nvidia_max_sessions: Option<u32>,
         #[arg(long, conflicts_with_all = ["nvidia_device", "videotoolbox"])]
         vaapi_device: Option<String>,
-        #[arg(long, requires = "vaapi_device")]
+        #[arg(
+            long,
+            requires = "vaapi_device",
+            value_parser = clap::value_parser!(u32).range(1..=16)
+        )]
         vaapi_max_sessions: Option<u32>,
         #[arg(long, conflicts_with_all = ["nvidia_device", "vaapi_device"])]
         videotoolbox: bool,
