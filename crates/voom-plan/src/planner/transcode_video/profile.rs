@@ -26,6 +26,13 @@ fn canonical_form(s: &VideoProfileSettings) -> String {
     if let Some(qp) = s.qp {
         parts.push(format!("qp={qp}"));
     }
+    // Omitted when absent for the same reason `preset` is: every profile predating
+    // the bitrate domain carries `None`, so their canonical form — and therefore
+    // their `inline-<hash>` identity — stays byte-identical. Leaving it out
+    // entirely made two profiles differing only in bitrate hash the same.
+    if let Some(bitrate_kbps) = s.bitrate_kbps {
+        parts.push(format!("bitrate_kbps={bitrate_kbps}"));
+    }
     // An encoder with no speed knob contributes no `preset=` part at all. Every
     // pre-#409 profile carries one, so their canonical form — and therefore their
     // `inline-<hash>` identity — is byte-identical to before `preset` became optional.

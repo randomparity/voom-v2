@@ -41,6 +41,22 @@ fn inline_hash_differs_for_near_identical_profiles() {
     assert_ne!(inline_profile_id(&a), inline_profile_id(&b));
 }
 
+/// `bitrate_kbps` is a quality knob like `crf` and `qp`, so two profiles differing
+/// only in it are different profiles. Omitting it from the canonical form made them
+/// share one `inline-<hash>` — a durable identity that names staged artifacts.
+#[test]
+fn inline_hash_differs_for_profiles_differing_only_in_bitrate() {
+    let mut a = sample_settings();
+    a.encoder = "hevc_videotoolbox".to_owned();
+    a.crf = None;
+    a.preset = Some("default".to_owned());
+    a.bitrate_kbps = Some(6000);
+    let mut b = a.clone();
+    b.bitrate_kbps = Some(12000);
+
+    assert_ne!(inline_profile_id(&a), inline_profile_id(&b));
+}
+
 #[test]
 fn inline_hash_normalizes_codec_level_case_and_whitespace() {
     let mut a = sample_settings();
