@@ -231,6 +231,20 @@ pub struct VaapiVideoHardwareAssignment {
 /// assignment against the device it bound must spell it identically, so the
 /// derivation lives here with the assignment type rather than at each call site.
 #[must_use]
+/// **Host-scoped, unlike its siblings.** An NVIDIA token carries a globally unique
+/// GPU UUID and a `VideoToolbox` token a hash of the host's platform UUID, but a PCI
+/// address is only unique *within* a machine — `0000:03:00.0` is an ordinary slot,
+/// so two Linux hosts can each hold a different device behind the same token.
+///
+/// Everything keyed on the token therefore assumes one Linux host per control
+/// plane: accelerator capacity groups on it, and `recover_linux_claim` reads a
+/// differing boot id as proof the previous owner's processes are gone. Under two
+/// hosts sharing a control plane, capacity for two physically distinct devices
+/// would be pooled as one and either host could reclaim the other's live claim.
+///
+/// Qualifying the token with a boot-invariant host identity (`/etc/machine-id`) is
+/// what would lift the assumption; until then it is a real precondition, recorded
+/// here and in ADR 0052 §1 rather than left implicit.
 pub fn vaapi_hardware_token(pci_address: &str) -> String {
     format!("vaapi:pci-{pci_address}")
 }

@@ -55,6 +55,19 @@ The design detail is recorded in the [VAAPI video acceleration design][vaapi-des
    the check re-reads. It is not, and is not relied on as, proof that the encode ran
    on the intended device; §2's probe encode establishes that.
 
+   **The token is host-scoped, and that is a precondition rather than a property.**
+   ADR 0049's `nvidia:GPU-<uuid>` is globally unique and ADR 0051's
+   `videotoolbox:<hash>` identifies a machine by construction; a PCI address is
+   unique only within one machine, and `0000:03:00.0` is an ordinary slot. So
+   `vaapi:pci-<addr>` assumes **one Linux host per control plane**. Two hosts sharing
+   one would pool the capacity of two physically distinct devices under a single
+   token, and the boot-id claim recovery in §5 would let either host read the other's
+   live claim as abandoned. Lifting the assumption means qualifying the token with a
+   boot-invariant host identity such as `/etc/machine-id`, which changes every stored
+   token and so belongs to whichever change first needs multi-host accelerators — not
+   to this one, which has no such requirement. Recorded here, and on
+   `vaapi_hardware_token`, so it is checkable rather than implicit.
+
 2. **Advertised capability is proven by executing a claim-owned smoke encode on the
    bound device, per codec.** FFmpeg's encoder list and `vainfo`'s entrypoint list
    are necessary but never sufficient, because neither distinguishes the two driver
