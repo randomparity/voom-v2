@@ -50,9 +50,12 @@ mutation completes, that future is ready and must win over a simultaneously
 ready heartbeat tick. This prevents a late heartbeat from observing the
 released lease and replacing a successful result with a conflict.
 
-Heartbeat errors before terminal completion remain fatal. Chaos heartbeat
-suppression remains on the same operation key and therefore still exercises
-the genuine missed-heartbeat path.
+Heartbeat errors before terminal completion remain fatal. The outer owner
+durably fails the lease before returning the heartbeat error, preserving the
+failure handling previously performed by each adapter around its inner loop.
+If expiry or takeover has already made the lease non-held, that terminal
+conflict is returned instead. Chaos heartbeat suppression remains on the same
+operation key and therefore still exercises the genuine missed-heartbeat path.
 
 ## Deterministic regression seam
 
@@ -119,6 +122,7 @@ the existing synthesis tests cover successful probing, commit, and lineage.
 - heartbeats continue after the worker terminal result through durable lease
   terminalization;
 - completion wins a simultaneous terminal heartbeat tick;
+- heartbeat-write failure does not leave a lease held;
 - audio claim renewal continues through post-dispatch work;
 - genuine missed heartbeats and stale claims remain fail-closed;
 - focused tests and `just ci` pass without warnings.

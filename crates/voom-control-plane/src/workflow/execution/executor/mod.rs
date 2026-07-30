@@ -132,6 +132,8 @@ pub struct WorkflowChaosOptions {
     pub payload_modes: BTreeMap<OperationKind, String>,
     #[cfg(test)]
     pub(crate) post_dispatch_sync: Option<PostDispatchTestSync>,
+    #[cfg(test)]
+    pub(crate) fail_heartbeat_operation: Option<OperationKind>,
 }
 
 impl WorkflowChaosOptions {
@@ -178,6 +180,11 @@ impl WorkflowChaosOptions {
             panic!("post-dispatch test semaphore must remain open");
         };
         permit.forget();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fails_heartbeat_for(&self, operation: OperationKind) -> bool {
+        self.fail_heartbeat_operation == Some(operation)
     }
 }
 

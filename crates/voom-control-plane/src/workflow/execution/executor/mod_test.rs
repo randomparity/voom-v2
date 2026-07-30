@@ -37,7 +37,7 @@ use super::super::leases::retry_on_database_locked;
 use super::{CapacityDeferredTestSync, DispatchReadyOutcome, PostDispatchTestSync, RunLoopState};
 use crate::workflow::execution::executor::WorkflowExecutorOptions;
 use crate::workflow::execution::operation_adapters::{
-    LeaseHeartbeatContext, await_with_lease_heartbeats_without_runtime,
+    LeaseHeartbeatContext, await_with_lease_heartbeats,
 };
 use crate::workflow::execution::runtime::WorkerRuntimeRegistry;
 use crate::workflow::execution::timing::EffectiveTiming;
@@ -2405,11 +2405,10 @@ async fn await_with_lease_heartbeats_refreshes_workflow_lease_while_future_runs(
     // interval against the 80ms future keeps a wide ordering margin, so at least one
     // heartbeat still fires before the future completes under load.
     fixture.clock.advance(time::Duration::milliseconds(80));
-    let heartbeat =
-        await_with_lease_heartbeats_without_runtime(context, OperationKind::HashFile, async {
-            tokio::time::sleep(Duration::from_millis(80)).await;
-            Ok::<_, VoomError>(())
-        });
+    let heartbeat = await_with_lease_heartbeats(context, OperationKind::HashFile, async {
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        Ok::<_, VoomError>(())
+    });
     tokio::pin!(heartbeat);
     tokio::select! {
         result = &mut heartbeat => panic!("heartbeat future finished early: {result:?}"),
@@ -2436,6 +2435,42 @@ async fn source_backed_adapter_heartbeat_covers_terminal_post_dispatch_work() {
     ] {
         assert_post_dispatch_heartbeats(case).await;
     }
+}
+
+#[tokio::test]
+async fn heartbeat_failure_durably_fails_source_backed_ticket() {
+    let mut fixture = ExecutorFixture::without_workers(0).await;
+    let dir = workflow_tempdir();
+    let source_path = dir.path().join("Movie.mkv");
+    let (source_file_version_id, _) = fixture
+        .seed_local_source_at_path(&source_path, b"movie-bytes")
+        .await;
+    fixture.plan = policy_transcode_plan(TargetRef::FileVersion {
+        id: source_file_version_id,
+    });
+    fixture
+        .register_worker(
+            "transcode-worker",
+            OperationKind::TranscodeVideo,
+            1,
+            FakeBehavior::Hang,
+        )
+        .await;
+    let mut options = WorkflowExecutorOptions::for_tests();
+    options.artifact_roots.transcode.staging_root = dir.path().join("stage");
+    options.artifact_roots.transcode.target_dir = dir.path().join("out");
+    options.timing.heartbeat_interval = Duration::from_millis(10);
+    options.chaos.fail_heartbeat_operation = Some(OperationKind::TranscodeVideo);
+    let Ok(result) =
+        tokio::time::timeout(Duration::from_secs(5), fixture.run_with_options(options)).await
+    else {
+        panic!("injected heartbeat failure must terminate the workflow");
+    };
+    let error = result.unwrap_err();
+
+    assert_eq!(error.source.error_code(), ErrorCode::Conflict);
+    assert_eq!(fixture.held_lease_count().await, 0);
+    assert_eq!(fixture.ticket_state(TicketId(1)).await, "failed");
 }
 
 #[derive(Clone, Copy)]
@@ -2494,12 +2529,7 @@ async fn assert_post_dispatch_heartbeats(case: PostDispatchCase) {
             .register_worker("operation-worker", case.operation(), 1, case.behavior())
             .await;
     }
-    let sync = PostDispatchTestSync {
-        operation: case.operation(),
-        worker_result_observed: Arc::new(tokio::sync::Notify::new()),
-        resume_post_dispatch: Arc::new(tokio::sync::Semaphore::new(0)),
-        held: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-    };
+    let sync = post_dispatch_test_sync(case.operation());
     let mut options = WorkflowExecutorOptions::for_tests();
     options.artifact_roots.transcode.staging_root = dir.path().join("video-stage");
     options.artifact_roots.transcode.target_dir = dir.path().join("video-out");
@@ -2542,6 +2572,15 @@ async fn assert_post_dispatch_heartbeats(case: PostDispatchCase) {
         );
     }
     assert_eq!(fixture.held_lease_count().await, 0);
+}
+
+fn post_dispatch_test_sync(operation: OperationKind) -> PostDispatchTestSync {
+    PostDispatchTestSync {
+        operation,
+        worker_result_observed: Arc::new(tokio::sync::Notify::new()),
+        resume_post_dispatch: Arc::new(tokio::sync::Semaphore::new(0)),
+        held: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    }
 }
 
 async fn post_dispatch_summary(
@@ -4360,7 +4399,7 @@ fn policy_transcode_audio_plan_for_snapshot(
     target: TargetRef,
     source_media_snapshot_id: MediaSnapshotId,
 ) -> WorkflowPlan {
-    policy_audio_plan(
+    single_policy_operation_plan(
         "policy-transcode-audio-test",
         "policy-node_transcode_audio",
         OperationKind::TranscodeAudio,
@@ -4387,7 +4426,7 @@ fn policy_extract_audio_plan_for_snapshot(
     source_media_snapshot_id: MediaSnapshotId,
 ) -> WorkflowPlan {
     let operation_id = "node_extract_audio_test";
-    policy_audio_plan(
+    single_policy_operation_plan(
         "policy-extract-audio-test",
         "policy-node_extract_audio",
         OperationKind::ExtractAudio,
@@ -4415,7 +4454,7 @@ fn policy_extract_audio_plan_for_snapshot(
     )
 }
 
-fn policy_audio_plan(
+fn single_policy_operation_plan(
     id: &str,
     node_id: &str,
     operation: OperationKind,
@@ -4472,7 +4511,7 @@ fn policy_synthesize_audio_plan(
 ) -> WorkflowPlan {
     let operation_id = "node_synthesis_test";
     let companion_id = voom_plan::audio::synthesis_companion_id(operation_id, "stream-audio-1");
-    policy_audio_plan(
+    single_policy_operation_plan(
         "policy-synthesize-audio-test",
         "policy-node_synthesize_audio",
         OperationKind::TranscodeAudio,
@@ -4496,27 +4535,13 @@ fn policy_synthesize_audio_plan(
 }
 
 fn policy_verify_plan(target: TargetRef) -> WorkflowPlan {
-    WorkflowPlan {
-        id: "policy-verify-test".to_owned(),
-        seed: 12,
-        nodes: vec![OperationNode {
-            id: "policy-node_verify".to_owned(),
-            operation: OperationKind::VerifyArtifact,
-            policy_target: Some(target),
-            operation_payload: Value::Null,
-            depends_on: Vec::new(),
-            depends_on_selected: Vec::new(),
-            provides_selected: None,
-        }],
-        fan_out: crate::workflow::plan::model::FanOutPolicy { max_files: 1 },
-        concurrency: ConcurrencyPolicy {
-            max_in_flight_dispatches: 1,
-        },
-        timing: crate::workflow::plan::model::TimingPolicy {
-            base_duration_ms: 10,
-            jitter_ms: 0,
-        },
-    }
+    single_policy_operation_plan(
+        "policy-verify-test",
+        "policy-node_verify",
+        OperationKind::VerifyArtifact,
+        target,
+        Value::Null,
+    )
 }
 
 fn non_policy_remux_plan() -> WorkflowPlan {
