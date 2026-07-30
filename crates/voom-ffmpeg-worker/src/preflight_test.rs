@@ -212,11 +212,7 @@ fn command_output_drains_a_child_that_outwrites_the_pipe_capacity() {
 fn wait_child_output_times_out_promptly_when_a_grandchild_holds_the_pipe() {
     let temp = tempfile::tempdir().unwrap();
     let sleeper = stub_bin(temp.path(), "sleeper", "#!/bin/sh\nsleep 60\n");
-    let child = Command::new(&sleeper)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
+    let child = spawn_piped_retrying_text_file_busy(&sleeper).unwrap();
 
     let started = std::time::Instant::now();
     let error = wait_child_output_io(child, Duration::from_millis(200), "stuck probe").unwrap_err();
@@ -225,6 +221,28 @@ fn wait_child_output_times_out_promptly_when_a_grandchild_holds_the_pipe() {
     assert_eq!(error.kind(), io::ErrorKind::TimedOut);
     assert!(error.to_string().contains("stuck probe exceeded"));
     assert!(elapsed < Duration::from_secs(5), "took {elapsed:?}");
+}
+
+/// Spawns with the same `ETXTBSY` tolerance `command_output` already has. A stub
+/// written moments ago can still be reported busy when exec'd, and this test spawns
+/// directly rather than through `command_output`, so it needs the retry too —
+/// otherwise it fails spuriously when another build holds the file.
+#[cfg(unix)]
+fn spawn_piped_retrying_text_file_busy(program: &Path) -> io::Result<Child> {
+    let mut attempts_remaining = 3;
+    loop {
+        attempts_remaining -= 1;
+        let result = Command::new(program)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn();
+        match result {
+            Err(error) if is_text_file_busy(&error) && attempts_remaining > 0 => {
+                thread::sleep(Duration::from_millis(10));
+            }
+            other => return other,
+        }
+    }
 }
 
 fn stub_bin(dir: &Path, name: &str, body: &str) -> PathBuf {

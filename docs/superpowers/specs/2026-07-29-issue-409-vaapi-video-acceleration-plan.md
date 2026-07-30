@@ -44,6 +44,24 @@ unchanged. No silent software fallback anywhere.
 
 ---
 
+## Open findings carried between tasks
+
+Found while reviewing completed tasks. Each is verified against the code, names its
+owning task, and **must be closed by that task**. Do not treat any of these as
+pre-existing noise: every one is reachable the moment a VAAPI profile exists.
+
+| # | Finding | Owner |
+|---|---|---|
+| F1 | `spawn.rs::video_hardware_requirement` reads `if profile.encoder != "hevc_nvenc" { return software() }`, so a migration-0030 `hevc_vaapi` profile is given a **software** requirement and dispatched to a software worker. This is the silent software fallback issue #409 explicitly forbids. | Task 7 |
+| F2 | `repo/execution/workers.rs::accelerator_operation_capacity` groups on `json_extract(extra,'$.accelerator.hardware_token')` and reads `'$.accelerator.max_sessions'` (three queries, lines ~730-768). `VaapiVideoAcceleratorDescriptor` has **no `hardware_token` field** — only the assignment does — so a VAAPI descriptor written to `extra` silently yields no capacity row and the device never receives work. Task 5 must either write a `hardware_token` into the stored extras or change these keys, and must decide whether stored extras stay untagged (`video_hardware.rs` currently parses them as NVIDIA-only). | Task 5 |
+| F3 | The VAAPI descriptor carries no `hardware_token`, so the `vaapi:pci-<addr>` token must be derived at the binding site rather than read off the descriptor. | Task 5 |
+| F4 | `transcode/events.rs::hardware_evidence` returns `("vaapi", token, None)` for the VAAPI arm — `hardware_device_uuid` absent, which is correct — but the arm has **no test** and no `events_test.rs` sibling exists. | Task 8 |
+| F5 | `handler.rs` currently treats a VAAPI assignment as merely "non-software"; `spawn.rs::compatible_assignment` returns `VoomError::Internal` for a VAAPI requirement. Both are deliberate fail-loud placeholders to be replaced, not kept. | Task 6 / Task 7 |
+| F6 | `transcode_video_notes` in `planner/transcode_video/mod.rs` emits `cq=0` for a qp-domain profile (`cq.unwrap_or_default()` with `crf`/`cq` both `None`). See Task 7 step 5. | Task 7 |
+| F7 | Pre-existing (#400), documented not fixed: `worker_capabilities.extra` is Class P ("no typed read") in the payload-contract inventory, but `video_hardware.rs` does read it typed. Promoting the column P→T belongs to whoever makes VAAPI descriptors durable. | Task 5 (decide), else defer |
+
+---
+
 ## Task 1: Add the VAAPI decode variant and make backend predicates explicit
 
 ### Fit
