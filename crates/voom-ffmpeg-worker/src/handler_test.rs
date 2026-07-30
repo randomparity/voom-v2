@@ -208,6 +208,32 @@ async fn vaapi_decode_requires_a_probe_proven_decoder_for_the_source_codec() {
     assert!(err.to_string().contains("0000:f4:00.0"), "{err}");
 }
 
+/// `h265` is the alias `vaapi_video_decode_codec` folds onto `hevc`, and the planner
+/// and scheduler both compare through it. An exact string test here accepted a
+/// narrower set than they did, so a source ffprobe spells that way was planned,
+/// scheduled, and then refused by the worker for a decoder the device had proven.
+#[tokio::test]
+async fn vaapi_decode_accepts_the_source_codec_alias_the_planner_accepts() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("input.mkv");
+    let mut request = request(dir.path(), &input).await;
+    request.profile = vaapi_profile(voom_core::VideoDecodeMode::vaapi());
+    request.hardware_assignment = Some(VideoHardwareAssignment::vaapi(
+        "vaapi:pci-0000:f4:00.0",
+        "0000:f4:00.0",
+    ));
+    let config =
+        config(dir.path()).with_vaapi_device(vaapi_binding(dir.path(), vec!["hevc".to_owned()]));
+
+    validate_video_hardware_binding(&request, &config, &input_probe_with_codec("h265")).unwrap();
+    validate_video_hardware_binding(&request, &config, &input_probe_with_codec("HEVC")).unwrap();
+
+    // Still refuses a codec the device genuinely never probed.
+    let err = validate_video_hardware_binding(&request, &config, &input_probe_with_codec("av1"))
+        .unwrap_err();
+    assert!(err.to_string().contains("av1"), "{err}");
+}
+
 /// A VAAPI-decoded source reaches the encoder as hardware frames at the depth the
 /// *decoder* chose, because `vaapi_filter_args` deliberately emits no `-vf` on
 /// that path. Pairing a 10-bit source with an 8-bit surface therefore cannot be

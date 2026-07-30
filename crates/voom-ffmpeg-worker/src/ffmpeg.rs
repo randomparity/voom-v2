@@ -6,7 +6,7 @@ use serde_json::Value;
 use thiserror::Error;
 use tokio::process::Command;
 use tokio::time::{Duration, timeout};
-use voom_core::{VAAPI_VIDEO_DECODERS, VideoEncoderBackend, nvidia_decoder_for_video_codec};
+use voom_core::{VideoEncoderBackend, nvidia_decoder_for_video_codec};
 use voom_worker_protocol::{
     AudioDispositionFact, AudioOutputStreamFact, AudioStreamRef, ExtractAudioRequest,
     NvidiaVideoAcceleratorDescriptor, TranscodeAudioRequest, TranscodeVideoProfile,
@@ -714,7 +714,10 @@ fn append_vaapi_input_args(
         command.arg("-vaapi_device").arg(&binding.render_node);
         return Ok(());
     }
-    if !VAAPI_VIDEO_DECODERS.contains(&source_codec) {
+    // Through the shared helper, not a raw membership test: it folds the `h265`
+    // alias onto `hevc` and compares case-insensitively, which is what the planner
+    // and the scheduler already do for the same source codec.
+    if voom_core::vaapi_video_decode_codec(source_codec).is_none() {
         return Err(FfmpegError::UnsupportedInput(format!(
             "VAAPI decode does not support source codec `{source_codec}`"
         )));

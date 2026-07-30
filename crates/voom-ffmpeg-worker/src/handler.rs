@@ -861,15 +861,21 @@ fn validate_vaapi_bit_depth(
     ))
 }
 
+/// Compares through `vaapi_video_decode_codec`, which is what the planner and the
+/// scheduler compare through. An exact string test here accepted a narrower set
+/// than they did: a source ffprobe spells `h265` — the alias the helper folds onto
+/// `hevc` — passed both of them and was refused here, blocking work the device had
+/// genuinely probed a decoder for.
 fn validate_vaapi_decoder_probed(
     binding: &VaapiDeviceBinding,
     source_codec: &str,
 ) -> Result<(), TranscodeVideoError> {
-    if binding
-        .descriptor
-        .decoders
-        .iter()
-        .any(|decoder| decoder == source_codec)
+    if let Some(canonical) = voom_core::vaapi_video_decode_codec(source_codec)
+        && binding
+            .descriptor
+            .decoders
+            .iter()
+            .any(|decoder| decoder.eq_ignore_ascii_case(canonical))
     {
         return Ok(());
     }
