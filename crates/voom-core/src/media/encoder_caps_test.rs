@@ -222,3 +222,41 @@ fn surface_formats_translate_only_for_hardware_encoders() {
     assert_eq!(vaapi.output_pixel_format("p010"), Some("yuv420p10le"));
     assert_eq!(vaapi.output_pixel_format("yuv420p"), None);
 }
+
+/// The planner and the worker both gate a hardware decode on this answer, and each
+/// used to hold its own copy of the table. A format known to one but not the other
+/// would put them back into disagreement — the planner emitting tickets the worker
+/// refuses — so the mapping is asserted here, at the single definition.
+#[test]
+fn pixel_format_depth_maps_both_file_and_surface_vocabularies() {
+    for file_format in ["yuv420p", "yuv420p10le"] {
+        assert!(
+            video_pixel_format_depth(file_format).is_some(),
+            "file format `{file_format}` must map"
+        );
+    }
+    for surface in ["nv12", "p010", "p010le"] {
+        assert!(
+            video_pixel_format_depth(surface).is_some(),
+            "surface format `{surface}` must map"
+        );
+    }
+
+    assert_eq!(video_pixel_format_depth("yuv420p"), Some(8));
+    assert_eq!(video_pixel_format_depth("nv12"), Some(8));
+    assert_eq!(video_pixel_format_depth("yuv420p10le"), Some(10));
+    assert_eq!(video_pixel_format_depth("p010"), Some(10));
+    assert_eq!(video_pixel_format_depth("p010le"), Some(10));
+
+    // Every surface `hevc_vaapi` declares must map, or a gate silently stops comparing.
+    let vaapi = encoder_descriptor("hevc_vaapi").unwrap();
+    for surface in vaapi.pixel_formats {
+        assert!(
+            video_pixel_format_depth(surface).is_some(),
+            "declared surface `{surface}` has no depth"
+        );
+    }
+
+    assert_eq!(video_pixel_format_depth("yuv444p"), None);
+    assert_eq!(video_pixel_format_depth(""), None);
+}

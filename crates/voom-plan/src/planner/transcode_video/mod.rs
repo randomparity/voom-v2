@@ -3,6 +3,7 @@ pub mod profile;
 pub use profile::{cpu_cost, inline_profile_id};
 
 use serde_json::json;
+use voom_core::video_pixel_format_depth;
 use voom_policy::MediaSnapshotInput;
 
 use crate::{
@@ -286,17 +287,6 @@ fn vaapi_dimension_shape(
 fn encoder_is_vaapi(resolved: &voom_core::TranscodeVideoProfile) -> bool {
     voom_core::encoder_descriptor(&resolved.encoder)
         .is_some_and(|descriptor| descriptor.backend == voom_core::VideoEncoderBackend::Vaapi)
-}
-
-/// Maps both the file formats a snapshot reports and the surface formats a hardware
-/// profile names onto a bit depth, the only property the two vocabularies share.
-/// `p010` is VAAPI's spelling of the surface `p010le` names.
-fn video_pixel_format_depth(pixel_format: &str) -> Option<u8> {
-    match pixel_format {
-        "yuv420p" | "nv12" => Some(8),
-        "yuv420p10le" | "p010le" | "p010" => Some(10),
-        _ => None,
-    }
 }
 
 fn transcode_video_needs_change(

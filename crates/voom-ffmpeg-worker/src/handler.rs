@@ -8,6 +8,7 @@ use serde::{Serialize, de::DeserializeOwned};
 use time::OffsetDateTime;
 use voom_core::{
     ErrorCode, FailureClass, LeaseId, expected_output_pixel_format, nvidia_decoder_for_video_codec,
+    video_pixel_format_depth,
 };
 use voom_worker_protocol::{
     AudioExpectedFacts, AudioObservedFacts, ExtractAudioOutputDescriptor, ExtractAudioOutputResult,
@@ -1027,17 +1028,6 @@ fn validate_videotoolbox_bit_depth(
             request.profile.pixel_format.as_deref().unwrap_or("unknown")
         ),
     ))
-}
-
-/// Maps both the *file* formats a probe reports and the *surface* formats a
-/// hardware profile names onto a bit depth, which is the only property the two
-/// vocabularies share. `p010` is VAAPI's spelling of the surface `p010le` names.
-fn video_pixel_format_depth(pixel_format: &str) -> Option<u8> {
-    match pixel_format {
-        "yuv420p" | "nv12" => Some(8),
-        "yuv420p10le" | "p010le" | "p010" => Some(10),
-        _ => None,
-    }
 }
 
 fn validate_request_contract(request: &TranscodeVideoRequest) -> Result<(), TranscodeVideoError> {

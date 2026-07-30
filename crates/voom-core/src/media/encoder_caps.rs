@@ -286,6 +286,27 @@ pub fn vaapi_video_decode_codec(codec: &str) -> Option<&'static str> {
         .find(|candidate| codec.eq_ignore_ascii_case(candidate))
 }
 
+/// The bit depth a pixel format carries, or `None` for one this slice does not map.
+///
+/// Deliberately maps **both** vocabularies: the file formats a probe reports
+/// (`yuv420p`, `yuv420p10le`) and the surface formats a hardware profile names
+/// (`nv12`, `p010`). Depth is the only property the two share, which is what lets a
+/// surface be compared against a source at all. `p010` is VAAPI's spelling of the
+/// surface `p010le` names.
+///
+/// It lives here because the planner and the worker must answer this identically.
+/// Each held its own copy of this table, and a format added to one but not the other
+/// would have put them back into exactly the disagreement that gate ordering already
+/// had to be fixed for twice.
+#[must_use]
+pub const fn video_pixel_format_depth(pixel_format: &str) -> Option<u8> {
+    match pixel_format.as_bytes() {
+        b"yuv420p" | b"nv12" => Some(8),
+        b"yuv420p10le" | b"p010le" | b"p010" => Some(10),
+        _ => None,
+    }
+}
+
 impl EncoderDescriptor {
     #[must_use]
     pub const fn accepts_crf(&self, crf: u8) -> bool {
