@@ -2584,6 +2584,60 @@ fn a_bitrate_domain_profile_notes_its_bitrate() {
     assert!(!notes.iter().any(|note| note.starts_with("qp=")));
 }
 
+/// `hevc_vaapi` has no verified scale filter, so a dimension cap on a VAAPI profile
+/// is refused by the worker on every oversized source. Both are ordinary policy
+/// fields, so without a plan-time gate the file became a ticket per attempt that no
+/// device could satisfy — and the plan annotated it with a `downscale=` note
+/// promising the very work the worker refuses.
+#[test]
+fn vaapi_blocks_a_dimension_cap_and_never_notes_a_downscale() {
+    let mut profile = profile_hevc_vaapi();
+    profile.max_width = Some(1280);
+    profile.max_height = Some(720);
+    let mut source = vaapi_decode_source("h264");
+    source.width = Some(1920);
+    source.height = Some(1080);
+
+    let plan = plan_transcode_with_container(profile, source, "mkv");
+
+    assert_eq!(node_status(&plan), NodeStatus::Blocked);
+    assert!(
+        blocked_reason(&plan).contains("no verified scale filter"),
+        "{}",
+        blocked_reason(&plan)
+    );
+    assert!(
+        !resource_notes(&plan)
+            .iter()
+            .any(|note| note.starts_with("downscale=")),
+        "a blocked VAAPI node must not promise a downscale: {:?}",
+        resource_notes(&plan)
+    );
+}
+
+/// The gate is VAAPI-only: a software profile still downscales and still says so.
+#[test]
+fn a_software_profile_keeps_its_downscale_note() {
+    let mut profile = voom_core::TranscodeVideoProfile::default_hevc();
+    profile.encoder = "libx265".to_owned();
+    profile.crf = Some(23);
+    profile.preset = Some("medium".to_owned());
+    profile.max_width = Some(1280);
+    profile.max_height = Some(720);
+    let mut source = vaapi_decode_source("h264");
+    source.width = Some(1920);
+    source.height = Some(1080);
+
+    let plan = plan_transcode_with_container(profile, source, "mkv");
+
+    assert_eq!(node_status(&plan), NodeStatus::Planned);
+    assert!(
+        resource_notes(&plan).contains(&"downscale=1920x1080->1280x720".to_owned()),
+        "notes: {:?}",
+        resource_notes(&plan)
+    );
+}
+
 /// PROBE — expected to fail if the surface-vs-file confusion reaches the planner.
 #[test]
 fn probe_conforming_vaapi_output_is_compliant() {

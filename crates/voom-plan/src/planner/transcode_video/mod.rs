@@ -153,6 +153,9 @@ fn transcode_video_shape(
     {
         return shape;
     }
+    if needs_change && let Some(shape) = vaapi_dimension_shape(snapshot, resolved) {
+        return shape;
+    }
 
     if target_container.eq_ignore_ascii_case(voom_core::TRANSCODE_VIDEO_CONTAINER_MP4)
         && let Some(shape) = mp4_gate_shape(snapshot)
@@ -246,6 +249,43 @@ fn vaapi_decode_shape(
         "VAAPI decode source pixel format `{source_pixel_format}` is incompatible with profile \
          surface format `{surface_format}`"
     )))
+}
+
+/// `hevc_vaapi` has no verified scale filter in this slice, so a VAAPI profile
+/// carrying a dimension cap fails at the worker on every source that exceeds it.
+/// Both are ordinary policy fields, so the pairing is easy to author by accident —
+/// and without this gate the planner would emit a ticket per attempt for a file no
+/// device can ever satisfy, the same per-file-fact rule `vaapi_decode_shape` and
+/// `unsupported_hardware_decode_shape` already apply (ADR 0049 §5).
+///
+/// This keys on the *encoder* backend rather than the decode mode: the refusal is
+/// the encoder's missing filter, so it holds for a software-decoded source too.
+fn vaapi_dimension_shape(
+    snapshot: &MediaSnapshotInput,
+    resolved: &voom_core::TranscodeVideoProfile,
+) -> Option<TranscodeVideoShape> {
+    if !encoder_is_vaapi(resolved) {
+        return None;
+    }
+    let (Some(source_width), Some(source_height)) = (snapshot.width, snapshot.height) else {
+        return None;
+    };
+    let capped_width = resolved.max_width.unwrap_or(source_width);
+    let capped_height = resolved.max_height.unwrap_or(source_height);
+    if source_width <= capped_width && source_height <= capped_height {
+        return None;
+    }
+    Some(TranscodeVideoShape::UnsupportedShape(format!(
+        "profile `{}` caps output at {capped_width}x{capped_height} but the source is \
+         {source_width}x{source_height}, and `hevc_vaapi` has no verified scale filter in this \
+         slice",
+        resolved.name
+    )))
+}
+
+fn encoder_is_vaapi(resolved: &voom_core::TranscodeVideoProfile) -> bool {
+    voom_core::encoder_descriptor(&resolved.encoder)
+        .is_some_and(|descriptor| descriptor.backend == voom_core::VideoEncoderBackend::Vaapi)
 }
 
 /// Maps both the file formats a snapshot reports and the surface formats a hardware
@@ -458,7 +498,11 @@ fn transcode_video_notes(
         ));
     }
     notes.extend(quality_note(resolved));
-    if let (Some(src_w), Some(src_h)) = (snapshot.width, snapshot.height) {
+    // Never on a VAAPI profile: that combination is blocked at planning, so a
+    // `downscale=` note there would describe work no device will perform.
+    if !encoder_is_vaapi(resolved)
+        && let (Some(src_w), Some(src_h)) = (snapshot.width, snapshot.height)
+    {
         let cap_w = resolved.max_width.unwrap_or(src_w);
         let cap_h = resolved.max_height.unwrap_or(src_h);
         if src_w > cap_w || src_h > cap_h {
