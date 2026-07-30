@@ -69,7 +69,9 @@ fn canonical_form(s: &VideoProfileSettings) -> String {
     // decide rather than silently hash as software.
     match s.decode {
         VideoDecodeMode::Software(_) => {}
-        VideoDecodeMode::Nvidia(_) | VideoDecodeMode::Vaapi(_) => {
+        VideoDecodeMode::Nvidia(_)
+        | VideoDecodeMode::Vaapi(_)
+        | VideoDecodeMode::VideoToolbox(_) => {
             parts.push(format!("decode={}", s.decode.as_str()));
         }
     }

@@ -6,20 +6,22 @@ use serde_json::Value;
 use thiserror::Error;
 use tokio::process::Command;
 use tokio::time::{Duration, timeout};
-use voom_core::{VAAPI_VIDEO_DECODERS, nvidia_decoder_for_video_codec};
+use voom_core::{VAAPI_VIDEO_DECODERS, VideoEncoderBackend, nvidia_decoder_for_video_codec};
 use voom_worker_protocol::{
     AudioDispositionFact, AudioOutputStreamFact, AudioStreamRef, ExtractAudioRequest,
     NvidiaVideoAcceleratorDescriptor, TranscodeAudioRequest, TranscodeVideoProfile,
-    TranscodeVideoRequest, VaapiVideoAcceleratorDescriptor,
+    TranscodeVideoRequest, VaapiVideoAcceleratorDescriptor, VideoToolboxVideoAcceleratorDescriptor,
 };
 
 /// The video encoders advertised by every ffmpeg build voom supports.
-pub const ALL_VIDEO_ENCODERS: [&str; 5] = [
+pub const ALL_VIDEO_ENCODERS: [&str; 7] = [
     "libx265",
     "libsvtav1",
     "libaom-av1",
     "hevc_nvenc",
     "hevc_vaapi",
+    "h264_videotoolbox",
+    "hevc_videotoolbox",
 ];
 
 const VAAPI_HEVC_ENCODER: &str = "hevc_vaapi";
@@ -32,7 +34,7 @@ const NVENC_HEVC_ENCODER: &str = "hevc_nvenc";
 /// same device the probe proved. Re-resolving the address per command would
 /// duplicate that lookup and could disagree with it; a hardcoded
 /// `/dev/dri/renderD128` would be wrong on any host whose enumeration differs
-/// (ADR 0051 §1).
+/// (ADR 0052 §1).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VaapiDeviceBinding {
     pub render_node: PathBuf,
@@ -48,6 +50,7 @@ pub struct VaapiDeviceBinding {
 pub enum AcceleratorBinding {
     Nvidia(NvidiaVideoAcceleratorDescriptor),
     Vaapi(VaapiDeviceBinding),
+    VideoToolbox(VideoToolboxVideoAcceleratorDescriptor),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -102,7 +105,7 @@ impl FfmpegConfig {
         self.available_video_encoders.contains(encoder)
     }
 
-    /// Binds this worker configuration to one NVIDIA device descriptor.
+    /// Binds this worker configuration to one accelerator descriptor.
     #[must_use]
     pub fn with_accelerator(mut self, accelerator: NvidiaVideoAcceleratorDescriptor) -> Self {
         self.accelerator = Some(AcceleratorBinding::Nvidia(accelerator));
@@ -117,27 +120,48 @@ impl FfmpegConfig {
         self
     }
 
+    /// Binds the config to the `VideoToolbox` host this worker proved at startup.
+    #[must_use]
+    pub fn with_videotoolbox_device(
+        mut self,
+        descriptor: VideoToolboxVideoAcceleratorDescriptor,
+    ) -> Self {
+        self.accelerator = Some(AcceleratorBinding::VideoToolbox(descriptor));
+        self
+    }
+
     /// The accelerator this worker bound, if any. `None` means a software worker.
     #[must_use]
     pub const fn accelerator(&self) -> Option<&AcceleratorBinding> {
         self.accelerator.as_ref()
     }
 
-    /// The bound NVIDIA device, or `None` on a software or VAAPI worker.
+    /// The bound NVIDIA device, or `None` on any other worker.
     #[must_use]
     pub const fn nvidia(&self) -> Option<&NvidiaVideoAcceleratorDescriptor> {
         match &self.accelerator {
             Some(AcceleratorBinding::Nvidia(descriptor)) => Some(descriptor),
-            Some(AcceleratorBinding::Vaapi(_)) | None => None,
+            Some(AcceleratorBinding::Vaapi(_) | AcceleratorBinding::VideoToolbox(_)) | None => None,
         }
     }
 
-    /// The bound VAAPI device, or `None` on a software or NVIDIA worker.
+    /// The bound VAAPI device, or `None` on any other worker.
     #[must_use]
     pub const fn vaapi(&self) -> Option<&VaapiDeviceBinding> {
         match &self.accelerator {
             Some(AcceleratorBinding::Vaapi(binding)) => Some(binding),
-            Some(AcceleratorBinding::Nvidia(_)) | None => None,
+            Some(AcceleratorBinding::Nvidia(_) | AcceleratorBinding::VideoToolbox(_)) | None => {
+                None
+            }
+        }
+    }
+
+    /// The bound `VideoToolbox` host, or `None` on any other worker.
+    #[must_use]
+    pub const fn videotoolbox(&self) -> Option<&VideoToolboxVideoAcceleratorDescriptor> {
+        match &self.accelerator {
+            Some(AcceleratorBinding::VideoToolbox(descriptor)) => Some(descriptor),
+            Some(AcceleratorBinding::Nvidia(_) | AcceleratorBinding::Vaapi(_)) | None => None,
         }
     }
 }
@@ -270,6 +294,7 @@ pub fn video_codec_args(
         "libaom-av1" => video_codec_args_libaom(profile),
         NVENC_HEVC_ENCODER => video_codec_args_nvenc(profile),
         VAAPI_HEVC_ENCODER => video_codec_args_vaapi(profile),
+        "h264_videotoolbox" | "hevc_videotoolbox" => video_codec_args_videotoolbox(profile),
         other => Err(FfmpegError::OutputFactsMismatch(format!(
             "unknown video encoder `{other}`"
         ))),
@@ -384,7 +409,7 @@ fn video_codec_args_nvenc(profile: &TranscodeVideoProfile) -> Result<Vec<OsStrin
 /// `hevc_vaapi` encoder arguments (spec §7).
 ///
 /// `-rc_mode CQP` is always stated: `auto` is `FFmpeg`'s default, so relying on it
-/// would let rate control move with an `FFmpeg` or driver upgrade (ADR 0051 §5).
+/// would let rate control move with an `FFmpeg` or driver upgrade (ADR 0052 §5).
 /// `-profile:v` carries the operator's `codec_profile` **by name** — the option is
 /// int-typed but has named constants, so `FFmpeg` resolves `main10` and rejects an
 /// unknown name, which is exactly the behavior we want and needs no mapping table
@@ -410,6 +435,34 @@ fn video_codec_args_vaapi(profile: &TranscodeVideoProfile) -> Result<Vec<OsStrin
     if let Some(codec_profile) = &profile.codec_profile {
         args.push(OsString::from("-profile:v"));
         args.push(OsString::from(codec_profile));
+    }
+    Ok(args)
+}
+
+fn video_codec_args_videotoolbox(
+    profile: &TranscodeVideoProfile,
+) -> Result<Vec<OsString>, FfmpegError> {
+    let bitrate_kbps = profile.bitrate_kbps.ok_or_else(|| {
+        FfmpegError::OutputFactsMismatch(format!(
+            "encoder `{}` requires `bitrate_kbps`",
+            profile.encoder
+        ))
+    })?;
+    let mut args = vec![
+        OsString::from("-c:v"),
+        OsString::from(&profile.encoder),
+        OsString::from("-allow_sw"),
+        OsString::from("0"),
+        OsString::from("-b:v"),
+        OsString::from(format!("{bitrate_kbps}k")),
+    ];
+    if let Some(codec_profile) = &profile.codec_profile {
+        args.push(OsString::from("-profile:v"));
+        args.push(OsString::from(codec_profile));
+    }
+    if let Some(level) = &profile.codec_level {
+        args.push(OsString::from("-level"));
+        args.push(OsString::from(level));
     }
     Ok(args)
 }
@@ -449,6 +502,7 @@ fn append_pixel_format_arg(args: &mut Vec<OsString>, profile: &TranscodeVideoPro
 /// Returns container/format arguments for the given container and video codec.
 ///
 /// - `mkv` → `-f matroska`
+/// - `mp4` + `h264` → `-f mp4 -tag:v avc1`
 /// - `mp4` + `hevc` → `-f mp4 -tag:v hvc1`
 /// - `mp4` + `av1` → `-f mp4 -tag:v av01`
 ///
@@ -463,6 +517,7 @@ pub fn container_args(container: &str, codec: &str) -> Result<Vec<OsString>, Ffm
         "mkv" => Ok(vec![OsString::from("-f"), OsString::from("matroska")]),
         "mp4" => {
             let tag = match codec {
+                "h264" => "avc1",
                 "hevc" => "hvc1",
                 "av1" => "av01",
                 other => {
@@ -493,21 +548,30 @@ pub fn container_args(container: &str, codec: &str) -> Result<Vec<OsString>, Ffm
 /// dimensions (required by most codecs).
 #[must_use]
 pub fn scale_args(profile: &TranscodeVideoProfile, src_w: u32, src_h: u32) -> Vec<OsString> {
+    software_scale_filter(profile, src_w, src_h)
+        .map(|filter| vec![OsString::from("-vf"), OsString::from(filter)])
+        .unwrap_or_default()
+}
+
+fn software_scale_filter(
+    profile: &TranscodeVideoProfile,
+    src_w: u32,
+    src_h: u32,
+) -> Option<String> {
     if profile.max_width.is_none() && profile.max_height.is_none() {
-        return Vec::new();
+        return None;
     }
     let cap_w = profile.max_width.unwrap_or(u32::MAX);
     let cap_h = profile.max_height.unwrap_or(u32::MAX);
     if src_w <= cap_w && src_h <= cap_h {
-        return Vec::new();
+        return None;
     }
     // Downscale-only, preserve aspect, force even dims.
     // See also: voom-plan/src/planner.rs for the dimension-cap logic.
-    let vf = format!(
+    Some(format!(
         "scale='min({cap_w},iw)':'min({cap_h},ih)':force_original_aspect_ratio=decrease,\
          scale=trunc(iw/2)*2:trunc(ih/2)*2"
-    );
-    vec![OsString::from("-vf"), OsString::from(vf)]
+    ))
 }
 
 pub async fn run_ffmpeg_transcode(
@@ -596,17 +660,30 @@ fn append_hardware_input_args(
     if copy_video {
         return Ok(());
     }
-    match profile.encoder.as_str() {
-        NVENC_HEVC_ENCODER => append_nvidia_input_args(command, config, profile, source_codec),
-        VAAPI_HEVC_ENCODER => append_vaapi_input_args(command, config, profile, source_codec),
-        _ => Ok(()),
+    // Dispatch on the encoder's declared backend, never on its name: a name match
+    // needs a wildcard the compiler cannot check, and a new hardware encoder falling
+    // into it would silently get no device arguments at all.
+    let descriptor = voom_core::encoder_descriptor(&profile.encoder).ok_or_else(|| {
+        FfmpegError::OutputFactsMismatch(format!("unknown video encoder `{}`", profile.encoder))
+    })?;
+    match descriptor.backend {
+        VideoEncoderBackend::Software => Ok(()),
+        VideoEncoderBackend::Nvidia => {
+            append_nvidia_input_args(command, config, profile, source_codec)
+        }
+        VideoEncoderBackend::Vaapi => {
+            append_vaapi_input_args(command, config, profile, source_codec)
+        }
+        VideoEncoderBackend::VideoToolbox => {
+            append_videotoolbox_input_args(command, config, profile)
+        }
     }
 }
 
 /// VAAPI pre-input arguments (spec §7).
 ///
 /// The bound render node is named at open time either way — that naming, not the
-/// PCI readback, is where VAAPI binding strength comes from (ADR 0051 §1). A
+/// PCI readback, is where VAAPI binding strength comes from (ADR 0052 §1). A
 /// software-decoded source only needs the device (`-vaapi_device`); a VAAPI-decoded
 /// one additionally pins the decode hardware and demands hardware output frames,
 /// which makes `FFmpeg` error rather than silently decode in software (spec §2.2).
@@ -674,6 +751,27 @@ fn append_nvidia_input_args(
     Ok(())
 }
 
+fn append_videotoolbox_input_args(
+    command: &mut Command,
+    config: &FfmpegConfig,
+    profile: &TranscodeVideoProfile,
+) -> Result<(), FfmpegError> {
+    if config.videotoolbox().is_none() {
+        return Err(FfmpegError::OutputFactsMismatch(format!(
+            "{} request reached an unbound ffmpeg worker",
+            profile.encoder
+        )));
+    }
+    if profile.decode.is_video_toolbox() {
+        command
+            .arg("-hwaccel")
+            .arg("videotoolbox")
+            .arg("-hwaccel_output_format")
+            .arg("videotoolbox_vld");
+    }
+    Ok(())
+}
+
 fn video_filter_args(
     profile: &TranscodeVideoProfile,
     src_width: u32,
@@ -683,10 +781,16 @@ fn video_filter_args(
     if copy_video {
         return Ok(Vec::new());
     }
-    match profile.encoder.as_str() {
-        NVENC_HEVC_ENCODER => nvenc_filter_args(profile, src_width, src_height),
-        VAAPI_HEVC_ENCODER => vaapi_filter_args(profile, src_width, src_height),
-        _ => Ok(scale_args(profile, src_width, src_height)),
+    let descriptor = voom_core::encoder_descriptor(&profile.encoder).ok_or_else(|| {
+        FfmpegError::OutputFactsMismatch(format!("unknown video encoder `{}`", profile.encoder))
+    })?;
+    match descriptor.backend {
+        VideoEncoderBackend::Software => Ok(scale_args(profile, src_width, src_height)),
+        VideoEncoderBackend::Nvidia => nvenc_filter_args(profile, src_width, src_height),
+        VideoEncoderBackend::Vaapi => vaapi_filter_args(profile, src_width, src_height),
+        VideoEncoderBackend::VideoToolbox => {
+            videotoolbox_filter_args(profile, src_width, src_height)
+        }
     }
 }
 
@@ -772,6 +876,67 @@ fn exceeds_dimension_caps(
 ) -> bool {
     src_width > profile.max_width.unwrap_or(u32::MAX)
         || src_height > profile.max_height.unwrap_or(u32::MAX)
+}
+
+fn videotoolbox_filter_args(
+    profile: &TranscodeVideoProfile,
+    src_width: u32,
+    src_height: u32,
+) -> Result<Vec<OsString>, FfmpegError> {
+    if profile.decode.is_video_toolbox() {
+        let Some((width, height)) = downscale_dimensions(profile, src_width, src_height) else {
+            return Ok(Vec::new());
+        };
+        return Ok(vec![
+            OsString::from("-vf"),
+            OsString::from(format!("scale_vt=w={width}:h={height}")),
+        ]);
+    }
+    let format = match profile.pixel_format.as_deref() {
+        Some("yuv420p") => "nv12",
+        Some("yuv420p10le") => "p010le",
+        Some(other) => {
+            return Err(FfmpegError::OutputFactsMismatch(format!(
+                "unsupported VideoToolbox pixel format `{other}`"
+            )));
+        }
+        None => {
+            return Err(FfmpegError::OutputFactsMismatch(
+                "VideoToolbox profile omitted pixel format".to_owned(),
+            ));
+        }
+    };
+    let filter = software_scale_filter(profile, src_width, src_height).map_or_else(
+        || format!("format={format}"),
+        |scale| format!("{scale},format={format}"),
+    );
+    Ok(vec![OsString::from("-vf"), OsString::from(filter)])
+}
+
+fn downscale_dimensions(
+    profile: &TranscodeVideoProfile,
+    src_width: u32,
+    src_height: u32,
+) -> Option<(u32, u32)> {
+    let cap_width = profile.max_width.unwrap_or(u32::MAX);
+    let cap_height = profile.max_height.unwrap_or(u32::MAX);
+    if src_width <= cap_width && src_height <= cap_height {
+        return None;
+    }
+    let width_limited = u64::from(cap_width) * u64::from(src_height)
+        <= u64::from(cap_height) * u64::from(src_width);
+    let (width, height) = if width_limited {
+        let height = u64::from(src_height) * u64::from(cap_width) / u64::from(src_width);
+        (cap_width, u32::try_from(height).unwrap_or(cap_height))
+    } else {
+        let width = u64::from(src_width) * u64::from(cap_height) / u64::from(src_height);
+        (u32::try_from(width).unwrap_or(cap_width), cap_height)
+    };
+    Some((even_dimension(width), even_dimension(height)))
+}
+
+fn even_dimension(value: u32) -> u32 {
+    (value & !1).max(2)
 }
 
 fn scale_filter(

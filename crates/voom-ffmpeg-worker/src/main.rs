@@ -16,8 +16,9 @@ use voom_ffmpeg_worker::{
 };
 use voom_worker_protocol::{
     HttpServer, LocalWorkerBound, NvidiaVideoAcceleratorDescriptor,
-    VaapiVideoAcceleratorDescriptor, VideoAcceleratorDescriptor, WorkerStartupError,
-    load_worker_bind_addr_from_env, load_worker_credentials_from_env, serve_worker_http,
+    VaapiVideoAcceleratorDescriptor, VideoAcceleratorDescriptor,
+    VideoToolboxVideoAcceleratorDescriptor, WorkerStartupError, load_worker_bind_addr_from_env,
+    load_worker_credentials_from_env, serve_worker_http,
 };
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 2)]
@@ -63,7 +64,23 @@ async fn main() -> Result<(), WorkerStartupError> {
     Ok(())
 }
 
-fn accelerator_descriptor(nvidia: preflight::NvidiaPreflight) -> NvidiaVideoAcceleratorDescriptor {
+fn videotoolbox_descriptor(
+    videotoolbox: preflight::VideoToolboxPreflight,
+) -> VideoToolboxVideoAcceleratorDescriptor {
+    VideoToolboxVideoAcceleratorDescriptor {
+        hardware_token: format!("videotoolbox:{}", videotoolbox.resource_id),
+        resource_id: videotoolbox.resource_id,
+        model_identifier: videotoolbox.model_identifier,
+        chip_name: videotoolbox.chip_name,
+        macos_version: videotoolbox.macos_version,
+        macos_build: videotoolbox.macos_build,
+        encoders: videotoolbox.encoders,
+        decoders: videotoolbox.decoders,
+        max_sessions: videotoolbox.max_sessions,
+    }
+}
+
+fn nvidia_descriptor(nvidia: preflight::NvidiaPreflight) -> NvidiaVideoAcceleratorDescriptor {
     NvidiaVideoAcceleratorDescriptor {
         hardware_token: format!("nvidia:{}", nvidia.device_uuid),
         device_uuid: nvidia.device_uuid,
@@ -85,18 +102,20 @@ fn accelerator_descriptor(nvidia: preflight::NvidiaPreflight) -> NvidiaVideoAcce
 fn bound_accelerator(
     preflight: &preflight::FfmpegPreflight,
 ) -> Result<Option<AcceleratorBinding>, WorkerStartupError> {
-    match (&preflight.nvidia, &preflight.vaapi) {
-        (None, None) => Ok(None),
-        (Some(nvidia), None) => Ok(Some(AcceleratorBinding::Nvidia(accelerator_descriptor(
+    match (&preflight.nvidia, &preflight.vaapi, &preflight.videotoolbox) {
+        (None, None, None) => Ok(None),
+        (Some(nvidia), None, None) => Ok(Some(AcceleratorBinding::Nvidia(nvidia_descriptor(
             nvidia.clone(),
         )))),
-        (None, Some(vaapi)) => Ok(Some(AcceleratorBinding::Vaapi(vaapi_device_binding(
+        (None, Some(vaapi), None) => Ok(Some(AcceleratorBinding::Vaapi(vaapi_device_binding(
             vaapi.clone(),
         )))),
-        (Some(nvidia), Some(vaapi)) => Err(WorkerStartupError::dependency(format!(
-            "worker bound both NVIDIA {} and VAAPI PCI {}; run one worker per device",
-            nvidia.device_uuid, vaapi.pci_address
+        (None, None, Some(videotoolbox)) => Ok(Some(AcceleratorBinding::VideoToolbox(
+            videotoolbox_descriptor(videotoolbox.clone()),
         ))),
+        _ => Err(WorkerStartupError::dependency(
+            "worker bound more than one accelerator; run one worker per device".to_owned(),
+        )),
     }
 }
 
@@ -108,6 +127,9 @@ fn advertised_accelerator(binding: &AcceleratorBinding) -> VideoAcceleratorDescr
         AcceleratorBinding::Nvidia(nvidia) => VideoAcceleratorDescriptor::Nvidia(nvidia.clone()),
         AcceleratorBinding::Vaapi(vaapi) => {
             VideoAcceleratorDescriptor::Vaapi(vaapi.descriptor.clone())
+        }
+        AcceleratorBinding::VideoToolbox(videotoolbox) => {
+            VideoAcceleratorDescriptor::VideoToolbox(videotoolbox.clone())
         }
     }
 }
@@ -124,7 +146,7 @@ fn vaapi_device_binding(vaapi: preflight::VaapiPreflight) -> VaapiDeviceBinding 
 
 /// The VAAPI capability the worker advertises.
 ///
-/// Every field comes from a probe that ran on the bound node (ADR 0051 §2), so
+/// Every field comes from a probe that ran on the bound node (ADR 0052 §2), so
 /// `encoders` and `decoders` are what this driver build actually did, not what
 /// `FFmpeg` or `vainfo` listed. There is no `hardware_token` field: the token is
 /// derived from the PCI address at the binding site.
@@ -160,6 +182,9 @@ fn ffmpeg_config_from_preflight(
     match binding {
         Some(AcceleratorBinding::Nvidia(nvidia)) => config.with_accelerator(nvidia),
         Some(AcceleratorBinding::Vaapi(vaapi)) => config.with_vaapi_device(vaapi),
+        Some(AcceleratorBinding::VideoToolbox(videotoolbox)) => {
+            config.with_videotoolbox_device(videotoolbox)
+        }
         None => config,
     }
 }

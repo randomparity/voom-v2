@@ -66,6 +66,7 @@ pub fn transcode_video_request_for(
                 local_file_key: None,
             },
             video_codec: None,
+            video_pixel_format: None,
         },
         output: TranscodeVideoOutput {
             staging_root: staging_root.to_string_lossy().into_owned(),

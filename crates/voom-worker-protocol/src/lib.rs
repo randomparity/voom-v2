@@ -69,8 +69,12 @@ pub use transport::{ClientHandle, DispatchStream, NdjsonStream, ServerHandle, Se
 pub use video_acceleration::{
     LocalWorkerBound, NvidiaVideoAcceleratorDescriptor, NvidiaVideoHardwareAssignment,
     NvidiaVideoHardwareRequirement, SoftwareVideoHardwareRequirement,
-    VaapiVideoAcceleratorDescriptor, VaapiVideoHardwareAssignment, VaapiVideoHardwareRequirement,
-    VideoAcceleratorDescriptor, VideoHardwareAssignment, VideoHardwareRequirement,
+    VIDEOTOOLBOX_PREFLIGHT_BUDGET, VIDEOTOOLBOX_PREFLIGHT_COORDINATION_SECONDS,
+    VIDEOTOOLBOX_PREFLIGHT_MAX_STAGES, VIDEOTOOLBOX_PROBE_TIMEOUT, VaapiVideoAcceleratorDescriptor,
+    VaapiVideoHardwareAssignment, VaapiVideoHardwareRequirement, VideoAcceleratorDescriptor,
+    VideoHardwareAssignment, VideoHardwareRequirement, VideoToolboxDecodeCapability,
+    VideoToolboxDecodeRequirement, VideoToolboxVideoAcceleratorDescriptor,
+    VideoToolboxVideoHardwareAssignment, VideoToolboxVideoHardwareRequirement,
     vaapi_hardware_token,
 };
 pub use voom_core::OperationKind;

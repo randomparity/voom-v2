@@ -3,12 +3,12 @@ use voom_worker_protocol::{
     vaapi_hardware_token,
 };
 
-use super::hardware_evidence;
+use super::*;
 
 const PCI_ADDRESS: &str = "0000:f4:00.0";
 
 /// Issue #409 requires durable evidence of which device produced an artifact, and a
-/// VAAPI device's identity *is* its PCI address (ADR 0051 §1) — there is no UUID to
+/// VAAPI device's identity *is* its PCI address (ADR 0052 §1) — there is no UUID to
 /// record. So the succeeded event must carry the backend and the same
 /// `vaapi:pci-<addr>` token the scheduler leased, and must leave
 /// `hardware_device_uuid` absent rather than smuggle a non-UUID into that column,
@@ -20,7 +20,7 @@ fn a_vaapi_assignment_records_the_backend_and_token_but_no_uuid() {
         pci_address: PCI_ADDRESS.to_owned(),
     });
 
-    let (backend, token, uuid) = hardware_evidence(Some(&assignment));
+    let (backend, token, uuid, resource_id) = hardware_evidence(Some(&assignment));
 
     assert_eq!(backend.as_deref(), Some("vaapi"));
     assert_eq!(token.as_deref(), Some("vaapi:pci-0000:f4:00.0"));
@@ -29,6 +29,10 @@ fn a_vaapi_assignment_records_the_backend_and_token_but_no_uuid() {
         Some(vaapi_hardware_token(PCI_ADDRESS).as_str()),
         "the recorded token must be the one formatter every other site uses, or the \
          evidence names a device the scheduler never leased"
+    );
+    assert!(
+        resource_id.is_none(),
+        "VAAPI has no resource id; the PCI address is already carried by the token"
     );
     assert!(
         uuid.is_none(),
@@ -46,7 +50,7 @@ fn an_nvidia_assignment_still_records_its_device_uuid() {
         device_uuid: "GPU-11111111-2222-3333-4444-555555555555".to_owned(),
     });
 
-    let (backend, token, uuid) = hardware_evidence(Some(&assignment));
+    let (backend, token, uuid, resource_id) = hardware_evidence(Some(&assignment));
 
     assert_eq!(backend.as_deref(), Some("nvidia"));
     assert_eq!(
@@ -57,6 +61,7 @@ fn an_nvidia_assignment_still_records_its_device_uuid() {
         uuid.as_deref(),
         Some("GPU-11111111-2222-3333-4444-555555555555")
     );
+    assert!(resource_id.is_none());
 }
 
 /// Software work records no hardware evidence at all, and neither does a transcode
@@ -66,10 +71,24 @@ fn an_nvidia_assignment_still_records_its_device_uuid() {
 #[test]
 fn software_and_unassigned_transcodes_record_no_hardware_evidence() {
     for assignment in [None, Some(VideoHardwareAssignment::software())] {
-        let (backend, token, uuid) = hardware_evidence(assignment.as_ref());
+        let (backend, token, uuid, resource_id) = hardware_evidence(assignment.as_ref());
 
         assert!(backend.is_none(), "{assignment:?}");
         assert!(token.is_none(), "{assignment:?}");
         assert!(uuid.is_none(), "{assignment:?}");
+        assert!(resource_id.is_none(), "{assignment:?}");
     }
+}
+
+#[test]
+fn videotoolbox_evidence_uses_generic_resource_id_without_device_uuid() {
+    let assignment =
+        VideoHardwareAssignment::video_toolbox("videotoolbox:0123456789abcdef", "0123456789abcdef");
+
+    let (backend, token, device_uuid, resource_id) = hardware_evidence(Some(&assignment));
+
+    assert_eq!(backend.as_deref(), Some("video_toolbox"));
+    assert_eq!(token.as_deref(), Some("videotoolbox:0123456789abcdef"));
+    assert_eq!(device_uuid, None);
+    assert_eq!(resource_id.as_deref(), Some("0123456789abcdef"));
 }

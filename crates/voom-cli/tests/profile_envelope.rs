@@ -143,7 +143,7 @@ mod profile_envelope {
 
     /// A VAAPI profile is only authorable from the CLI if `--qp` exists and
     /// `--preset` is omissible: `hevc_vaapi` exposes no `-preset` flag at all, so a
-    /// preset an operator could pass is a knob the encode cannot honor (ADR 0051 §4).
+    /// preset an operator could pass is a knob the encode cannot honor (ADR 0052 §4).
     /// The emitted envelope must therefore carry `qp`, omit `preset` entirely rather
     /// than emit `null`, and name the explicit `vaapi` decode backend.
     #[tokio::test]
@@ -232,7 +232,7 @@ mod profile_envelope {
 
     /// Making `--preset` optional for VAAPI must not make it optional for an encoder
     /// that has one. `libx265`'s `PresetDomain` is populated, so a profile with no
-    /// preset is rejected — the same rule migration 0030's `CHECK` enforces durably.
+    /// preset is rejected — the same rule migration 0032's `CHECK` enforces durably.
     #[tokio::test]
     async fn create_rejects_a_missing_preset_for_a_preset_domain_encoder() {
         let seeded = seed().await;
@@ -260,6 +260,40 @@ mod profile_envelope {
     }
 
     #[tokio::test]
+    async fn create_videotoolbox_profile_emits_bitrate_and_explicit_decode() {
+        let seeded = seed().await;
+        let out = profile_command(&seeded.url)
+            .args([
+                "create",
+                "--name",
+                "mac-hevc",
+                "--encoder",
+                "hevc_videotoolbox",
+                "--bitrate-kbps",
+                "8000",
+                "--preset",
+                "default",
+                "--codec-profile",
+                "main10",
+                "--pixel-format",
+                "yuv420p10le",
+                "--decode",
+                "video-toolbox",
+            ])
+            .output()
+            .unwrap();
+
+        assert_eq!(out.status.code(), Some(0));
+        let json = envelope(out.stdout);
+        assert_eq!(json["data"]["profile"]["target_codec"], "hevc");
+        assert_eq!(json["data"]["profile"]["bitrate_kbps"], 8_000);
+        assert_eq!(
+            json["data"]["profile"]["decode"]["backend"],
+            "video_toolbox"
+        );
+    }
+
+    #[tokio::test]
     async fn create_requires_exactly_one_quality_flag() {
         let seeded = seed().await;
         for quality in [
@@ -267,6 +301,7 @@ mod profile_envelope {
             vec!["--crf", "23", "--cq", "23"],
             vec!["--crf", "23", "--qp", "23"],
             vec!["--cq", "23", "--qp", "23"],
+            vec!["--cq", "23", "--bitrate-kbps", "8000"],
         ] {
             let mut args = vec![
                 "create",

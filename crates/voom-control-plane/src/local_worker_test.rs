@@ -3,9 +3,13 @@
 //! worker binary built as a sibling) lives in
 //! `tests/local_worker_lifecycle.rs`.
 
+use std::time::Duration;
+
 use super::{
-    LocalAcceleratorConfig, LocalWorkerKind, NvidiaLocalWorkerConfig, VaapiLocalWorkerConfig,
-    is_full_nvidia_uuid, validate_bound_accelerator, validate_local_worker_config,
+    LocalVideoAcceleratorConfig, LocalWorkerKind, NvidiaLocalWorkerConfig,
+    ResolvedLocalVideoAcceleratorConfig, VIDEOTOOLBOX_STARTUP_TIMEOUT, VaapiLocalWorkerConfig,
+    VideoToolboxLocalWorkerConfig, is_full_nvidia_uuid, parse_ioreg_platform_uuid,
+    platform_resource_id, validate_bound_accelerator, validate_local_worker_config,
 };
 #[cfg(target_os = "linux")]
 use super::{kill_and_wait, process_group_has_members};
@@ -24,15 +28,31 @@ fn ffmpeg_maps_binary_name_and_operations() {
     );
 }
 
-fn nvidia_config(device_uuid: &str, max_sessions: u32) -> LocalAcceleratorConfig {
-    LocalAcceleratorConfig::Nvidia(NvidiaLocalWorkerConfig {
+fn nvidia_config(device_uuid: &str, max_sessions: u32) -> LocalVideoAcceleratorConfig {
+    LocalVideoAcceleratorConfig::Nvidia(NvidiaLocalWorkerConfig {
         device_uuid: device_uuid.to_owned(),
         max_sessions,
     })
 }
 
-fn vaapi_config(pci_address: &str, max_sessions: u32) -> LocalAcceleratorConfig {
-    LocalAcceleratorConfig::Vaapi(VaapiLocalWorkerConfig {
+fn vaapi_config(pci_address: &str, max_sessions: u32) -> LocalVideoAcceleratorConfig {
+    LocalVideoAcceleratorConfig::Vaapi(VaapiLocalWorkerConfig {
+        pci_address: pci_address.to_owned(),
+        max_sessions,
+    })
+}
+
+/// The token is derived from the *resolved* config, because `VideoToolbox` cannot
+/// produce one until it has queried the platform for its resource id.
+fn resolved_nvidia(device_uuid: &str, max_sessions: u32) -> ResolvedLocalVideoAcceleratorConfig {
+    ResolvedLocalVideoAcceleratorConfig::Nvidia(NvidiaLocalWorkerConfig {
+        device_uuid: device_uuid.to_owned(),
+        max_sessions,
+    })
+}
+
+fn resolved_vaapi(pci_address: &str, max_sessions: u32) -> ResolvedLocalVideoAcceleratorConfig {
+    ResolvedLocalVideoAcceleratorConfig::Vaapi(VaapiLocalWorkerConfig {
         pci_address: pci_address.to_owned(),
         max_sessions,
     })
@@ -58,7 +78,7 @@ fn nvidia_config_requires_ffmpeg_full_uuid_and_bounded_sessions() {
 }
 
 /// A VAAPI worker is configured with a PCI address, never a render-node path or
-/// ordinal (ADR 0051 §1): node numbers are enumeration order and renumber, so an
+/// ordinal (ADR 0052 §1): node numbers are enumeration order and renumber, so an
 /// accepted ordinal would give the worker an identity that cannot survive a
 /// reboot. The session bound is ADR 0049 §3's, adopted unchanged.
 #[test]
@@ -96,11 +116,11 @@ fn vaapi_config_requires_ffmpeg_a_pci_address_and_bounded_sessions() {
 #[test]
 fn accelerator_hardware_tokens_are_derived_per_backend() {
     assert_eq!(
-        nvidia_config("GPU-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", 1).hardware_token(),
+        resolved_nvidia("GPU-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", 1).hardware_token(),
         "nvidia:GPU-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
     );
     assert_eq!(
-        vaapi_config("0000:f4:00.0", 1).hardware_token(),
+        resolved_vaapi("0000:f4:00.0", 1).hardware_token(),
         "vaapi:pci-0000:f4:00.0"
     );
 }
@@ -116,7 +136,7 @@ fn accelerator_hardware_tokens_are_derived_per_backend() {
 fn every_party_derives_one_identical_vaapi_device_token() {
     let pci_address = "0000:f4:00.0";
 
-    let supervisor = vaapi_config(pci_address, 1).hardware_token();
+    let supervisor = resolved_vaapi(pci_address, 1).hardware_token();
     let scheduler = VideoAcceleratorDescriptor::Vaapi(vaapi_descriptor()).hardware_token();
     let worker = voom_worker_protocol::vaapi_hardware_token(pci_address);
 
@@ -161,8 +181,8 @@ fn vaapi_descriptor() -> VaapiVideoAcceleratorDescriptor {
 fn bound_accelerator_must_match_the_configured_device() {
     let nvidia = VideoAcceleratorDescriptor::Nvidia(nvidia_descriptor());
     let vaapi = VideoAcceleratorDescriptor::Vaapi(vaapi_descriptor());
-    let nvidia_configured = nvidia_config("GPU-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", 4);
-    let vaapi_configured = vaapi_config("0000:f4:00.0", 2);
+    let nvidia_configured = resolved_nvidia("GPU-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", 4);
+    let vaapi_configured = resolved_vaapi("0000:f4:00.0", 2);
 
     assert!(validate_bound_accelerator(None, None).is_ok());
     assert!(validate_bound_accelerator(Some(&nvidia), Some(&nvidia_configured)).is_ok());
@@ -177,19 +197,19 @@ fn bound_accelerator_must_match_the_configured_device() {
     assert!(validate_bound_accelerator(Some(&vaapi), None).is_err());
     assert!(validate_bound_accelerator(None, Some(&vaapi_configured)).is_err());
 
-    let wrong_device = vaapi_config("0000:aa:00.0", 2);
+    let wrong_device = resolved_vaapi("0000:aa:00.0", 2);
     assert!(validate_bound_accelerator(Some(&vaapi), Some(&wrong_device)).is_err());
-    let wrong_capacity = vaapi_config("0000:f4:00.0", 3);
+    let wrong_capacity = resolved_vaapi("0000:f4:00.0", 3);
     assert!(validate_bound_accelerator(Some(&vaapi), Some(&wrong_capacity)).is_err());
 }
 
 /// Retyping `LocalWorkerBound.accelerator` must not disturb what the NVIDIA path
-/// writes durably: the capability's `extra.accelerator` stays the untagged NVIDIA
-/// descriptor that `video_hardware::historical_accelerator_descriptor` reads, the
+/// writes durably: the capability's `extra.accelerator` stays the NVIDIA descriptor
+/// that `video_hardware::historical_accelerator_descriptor` reads, the
 /// hardware token stays the scheduler's match key, and `max_parallel` for
 /// `transcode_video` stays the device's `max_sessions`.
 #[tokio::test]
-async fn nvidia_capability_records_the_untagged_descriptor_token_and_capacity() {
+async fn nvidia_capability_records_the_tagged_descriptor_token_and_capacity() {
     let (cp, _tmp) = crate::cases::cp().await;
     let worker = cp
         .register_worker(voom_store::repo::workers::NewWorker {
@@ -223,11 +243,13 @@ async fn nvidia_capability_records_the_untagged_descriptor_token_and_capacity() 
         .unwrap();
     assert_eq!(
         capability.extra.get("accelerator").unwrap(),
-        &serde_json::to_value(&descriptor).unwrap()
+        &serde_json::to_value(VideoAcceleratorDescriptor::Nvidia(descriptor.clone())).unwrap(),
+        "the stored value is the tagged enum, not the bare NVIDIA struct"
     );
-    assert!(
-        capability.extra["accelerator"].get("backend").is_none(),
-        "the durable descriptor stays untagged so pre-#409 rows keep parsing"
+    assert_eq!(
+        capability.extra["accelerator"]["backend"], "nvidia",
+        "every durable descriptor carries its backend tag; migration 0031 backfilled \
+         the pre-#411 rows, so the reader no longer guesses NVIDIA from an absent tag"
     );
     assert_eq!(
         capability.hardware,
@@ -236,7 +258,7 @@ async fn nvidia_capability_records_the_untagged_descriptor_token_and_capacity() 
     assert_eq!(
         crate::video_hardware::historical_accelerator_descriptor(capability).unwrap(),
         Some(VideoAcceleratorDescriptor::Nvidia(descriptor)),
-        "an untagged stored descriptor still reads back as the NVIDIA variant"
+        "a stored NVIDIA descriptor reads back as the NVIDIA variant"
     );
 
     let granted: String =
@@ -267,9 +289,9 @@ async fn nvidia_capability_records_the_untagged_descriptor_token_and_capacity() 
 /// device silently sits idle — the exact silent failure issue #409 forbids. So the
 /// token comes from the capability's own `hardware` column for both backends.
 ///
-/// The stored descriptor is `backend`-tagged for VAAPI while NVIDIA's stays
-/// untagged, because pre-#409 NVIDIA rows are durable and untagged; a reader tells
-/// them apart by the presence of `backend`.
+/// The stored descriptor is `backend`-tagged for every backend: migration 0031
+/// backfilled `nvidia` onto the pre-#411 rows, so a reader dispatches on the tag
+/// rather than inferring NVIDIA from its absence.
 #[tokio::test]
 async fn vaapi_capability_records_the_tagged_descriptor_token_and_capacity() {
     let (cp, _tmp) = crate::cases::cp().await;
@@ -329,6 +351,48 @@ async fn vaapi_capability_records_the_tagged_descriptor_token_and_capacity() {
         candidate.max_parallel, 2,
         "a bound VAAPI worker must get the device's capacity, not zero"
     );
+}
+
+#[test]
+fn videotoolbox_config_requires_ffmpeg_and_bounded_sessions() {
+    for max_sessions in 1..=16 {
+        let config = LocalVideoAcceleratorConfig::VideoToolbox(VideoToolboxLocalWorkerConfig {
+            max_sessions,
+        });
+        assert!(validate_local_worker_config(LocalWorkerKind::Ffmpeg, Some(&config)).is_ok());
+        assert!(validate_local_worker_config(LocalWorkerKind::Mkvtoolnix, Some(&config)).is_err());
+    }
+    for max_sessions in [0, 17] {
+        let config = LocalVideoAcceleratorConfig::VideoToolbox(VideoToolboxLocalWorkerConfig {
+            max_sessions,
+        });
+        assert!(validate_local_worker_config(LocalWorkerKind::Ffmpeg, Some(&config)).is_err());
+    }
+}
+
+#[test]
+fn videotoolbox_startup_timeout_covers_the_preflight_budget() {
+    assert_eq!(VIDEOTOOLBOX_STARTUP_TIMEOUT, Duration::from_secs(465));
+}
+
+#[test]
+fn platform_uuid_is_normalized_and_hashed_without_disclosure() {
+    let raw_uuid = "e4ad1c3f-8b4a-4e4e-a9ad-9a0123456789";
+    let ioreg = format!(
+        "    |   \"IOPlatformUUID\" = \"{raw_uuid}\"\n    |   \"manufacturer\" = <\"Apple Inc.\">"
+    );
+
+    let normalized = parse_ioreg_platform_uuid(&ioreg).unwrap();
+    let resource_id = platform_resource_id(&normalized).unwrap();
+
+    assert_eq!(normalized, raw_uuid.to_ascii_uppercase());
+    assert_eq!(resource_id.len(), 64);
+    assert!(
+        resource_id
+            .chars()
+            .all(|character| character.is_ascii_hexdigit())
+    );
+    assert!(!resource_id.contains(raw_uuid));
 }
 
 #[test]

@@ -47,6 +47,7 @@ fn sample_new(name: &str) -> NewVideoProfile {
         crf: Some(22),
         cq: None,
         qp: None,
+        bitrate_kbps: None,
         preset: Some("slow".to_owned()),
         tune: None,
         codec_profile: Some("main10".to_owned()),
@@ -211,7 +212,7 @@ async fn create_leaves_software_profile_round_trip_unchanged() {
     voom_core::validate_profile_against_descriptor(&typed).unwrap();
 }
 
-/// Every seeded builtin predates `qp`, so migration 0030 must leave each one
+/// Every seeded builtin predates `qp`, so migration 0032 must leave each one
 /// with its preset and a null `qp` — the read path sees exactly what 0029
 /// wrote.
 #[tokio::test]
@@ -225,6 +226,26 @@ async fn seeded_builtins_keep_their_preset_and_carry_no_qp() {
         );
         assert!(profile.qp.is_none(), "seed `{}` gained a qp", profile.name);
     }
+}
+
+#[tokio::test]
+async fn create_persists_videotoolbox_bitrate_and_decode_mode() {
+    let (repo, _pool, _tmp) = repo().await;
+    let mut profile = sample_new("videotoolbox-hevc");
+    profile.encoder = "hevc_videotoolbox".to_owned();
+    profile.crf = None;
+    profile.bitrate_kbps = Some(8_000);
+    profile.preset = Some("default".to_owned());
+    profile.codec_profile = Some("main10".to_owned());
+    profile.pixel_format = Some("yuv420p10le".to_owned());
+    profile.decode = voom_core::VideoDecodeMode::video_toolbox();
+
+    let created = repo.create(profile).await.unwrap();
+
+    assert_eq!(created.bitrate_kbps, Some(8_000));
+    assert!(created.crf.is_none());
+    assert!(created.cq.is_none());
+    assert!(created.decode.is_video_toolbox());
 }
 
 #[tokio::test]

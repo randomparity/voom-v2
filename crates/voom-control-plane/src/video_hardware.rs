@@ -1,6 +1,6 @@
 use voom_core::VoomError;
 use voom_store::repo::workers::{WorkerOperationCandidate, WorkerOperationCapability};
-use voom_worker_protocol::{NvidiaVideoAcceleratorDescriptor, VideoAcceleratorDescriptor};
+use voom_worker_protocol::VideoAcceleratorDescriptor;
 
 pub(crate) fn candidate_accelerator_descriptor(
     candidate: &WorkerOperationCandidate,
@@ -34,30 +34,19 @@ pub(crate) fn historical_accelerator_descriptor(
     parse_descriptor(value, "historical worker capability").map(Some)
 }
 
-/// A stored descriptor is the untagged NVIDIA struct (pre-#409 rows are durable and
-/// carry no tag) or a `backend`-tagged struct for any later backend, so the tag's
-/// presence is what tells them apart.
+/// Every stored descriptor is `backend`-tagged: migration 0031 backfilled `nvidia`
+/// onto the pre-#411 rows, so there is no untagged shape left to sniff for.
 ///
-/// Both shapes yield the same tagged type. A backend this build does not know is a
-/// malformed-descriptor error for that one worker; returning `Ok(None)` instead
-/// would let a device-bound worker pass as unaccelerated and pick up software work
-/// (ADR 0049 §5).
+/// A backend this build does not know is a malformed-descriptor error for that one
+/// worker; returning `Ok(None)` instead would let a device-bound worker pass as
+/// unaccelerated and pick up software work (ADR 0049 §5).
 fn parse_descriptor(
     value: &serde_json::Value,
     context: &str,
 ) -> Result<VideoAcceleratorDescriptor, VoomError> {
-    if value.get("backend").is_some() {
-        return serde_json::from_value(value.clone()).map_err(|error| {
-            VoomError::Config(format!(
-                "{context} has a malformed tagged accelerator descriptor: {error}"
-            ))
-        });
-    }
-    serde_json::from_value::<NvidiaVideoAcceleratorDescriptor>(value.clone())
-        .map(VideoAcceleratorDescriptor::Nvidia)
-        .map_err(|error| {
-            VoomError::Config(format!(
-                "{context} has a malformed NVIDIA accelerator descriptor: {error}"
-            ))
-        })
+    serde_json::from_value(value.clone()).map_err(|error| {
+        VoomError::Config(format!(
+            "{context} has a malformed video accelerator descriptor: {error}"
+        ))
+    })
 }

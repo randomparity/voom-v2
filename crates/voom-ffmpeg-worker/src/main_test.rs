@@ -19,7 +19,7 @@ fn vaapi_preflight() -> VaapiPreflight {
 
 /// The advertised descriptor is the probe's result, not the candidate list: a
 /// decoder whose probe failed must not appear, or the scheduler would dispatch
-/// work the device cannot do (ADR 0051 §2).
+/// work the device cannot do (ADR 0052 §2).
 #[test]
 fn vaapi_descriptor_advertises_only_what_the_probe_proved() {
     let descriptor = vaapi_accelerator_descriptor(vaapi_preflight());
@@ -66,6 +66,7 @@ fn preflight_with(
         ogg_muxer: "ogg".to_owned(),
         nvidia,
         vaapi,
+        videotoolbox: None,
     }
 }
 
@@ -96,7 +97,7 @@ fn advertising_two_backends_at_once_is_a_startup_failure() {
 
 /// The advertised payload is the descriptor alone. The render node is a local
 /// detail of the worker that resolved it — the control plane schedules on the PCI
-/// address (ADR 0051 §1), so leaking a node path into the wire contract would
+/// address (ADR 0052 §1), so leaking a node path into the wire contract would
 /// invite scheduling against an enumeration-order artifact.
 #[test]
 fn advertised_descriptor_tags_the_backend_and_omits_the_render_node() {
@@ -109,7 +110,7 @@ fn advertised_descriptor_tags_the_backend_and_omits_the_render_node() {
     assert_eq!(value["pci_address"], "0000:f4:00.0");
     assert!(value.get("render_node").is_none(), "{value}");
 
-    let nvidia = advertised_accelerator(&AcceleratorBinding::Nvidia(accelerator_descriptor(
+    let nvidia = advertised_accelerator(&AcceleratorBinding::Nvidia(nvidia_descriptor(
         nvidia_preflight(),
     )));
     assert!(matches!(nvidia, VideoAcceleratorDescriptor::Nvidia(_)));
@@ -133,7 +134,7 @@ fn the_bound_render_node_reaches_the_ffmpeg_config() {
 }
 
 /// Capability tracks the loaded driver build, so a bound device whose probe encode
-/// never proved `hevc_vaapi` must not advertise it (ADR 0051 §2).
+/// never proved `hevc_vaapi` must not advertise it (ADR 0052 §2).
 #[test]
 fn a_bound_device_with_no_proven_encoder_does_not_advertise_hevc_vaapi() {
     let mut vaapi = vaapi_preflight();
@@ -158,4 +159,53 @@ fn ffmpeg_config_from_preflight_advertises_only_detected_video_encoders() {
     assert!(!config.has_video_encoder("libsvtav1"));
     assert!(config.has_video_encoder("libaom-av1"));
     assert!(!config.has_video_encoder("hevc_vaapi"));
+}
+
+#[test]
+fn videotoolbox_preflight_becomes_tagged_readiness_descriptor() {
+    let mut preflight = FfmpegPreflight {
+        ffmpeg_path: PathBuf::from("/bin/ffmpeg-test"),
+        ffprobe_path: PathBuf::from("/bin/ffprobe-test"),
+        ffmpeg_version: "ffmpeg 8.1".to_owned(),
+        ffprobe_version: "ffprobe 8.1".to_owned(),
+        hevc_encoder: "libx265".to_owned(),
+        svtav1_encoder: "libsvtav1".to_owned(),
+        libaom_encoder: "libaom-av1".to_owned(),
+        aac_encoder: "aac".to_owned(),
+        opus_encoder: "libopus".to_owned(),
+        matroska_muxer: "matroska".to_owned(),
+        mp4_muxer: "mp4".to_owned(),
+        ogg_muxer: "ogg".to_owned(),
+        nvidia: None,
+        vaapi: None,
+        videotoolbox: None,
+    };
+    preflight.videotoolbox = Some(preflight::VideoToolboxPreflight {
+        resource_id: "0123456789abcdef".to_owned(),
+        model_identifier: "Mac17,6".to_owned(),
+        chip_name: "Apple M5 Max".to_owned(),
+        macos_version: "26.5.2".to_owned(),
+        macos_build: "25F90".to_owned(),
+        max_sessions: 4,
+        encoders: vec![
+            "h264_videotoolbox".to_owned(),
+            "hevc_videotoolbox".to_owned(),
+        ],
+        decoders: Vec::new(),
+        decoder_diagnostics: Vec::new(),
+    });
+
+    let descriptor = bound_accelerator(&preflight)
+        .unwrap()
+        .as_ref()
+        .map(advertised_accelerator);
+    assert!(matches!(
+        descriptor,
+        Some(VideoAcceleratorDescriptor::VideoToolbox(_))
+    ));
+    if let Some(VideoAcceleratorDescriptor::VideoToolbox(descriptor)) = descriptor {
+        assert_eq!(descriptor.hardware_token, "videotoolbox:0123456789abcdef");
+        assert_eq!(descriptor.resource_id, "0123456789abcdef");
+        assert_eq!(descriptor.max_sessions, 4);
+    }
 }

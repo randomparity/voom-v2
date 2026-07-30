@@ -61,9 +61,14 @@ fn rejects_depends_on_with_extra_tokens_after_list() {
 }
 
 #[test]
-fn accepts_hevc_and_av1_named_and_inline() {
+fn accepts_h264_hevc_and_av1_named_and_inline() {
+    assert!(codes("policy \"p\" { phase a { transcode video to h264 } }").is_empty());
     assert!(codes("policy \"p\" { phase a { transcode video to hevc } }").is_empty());
     assert!(codes("policy \"p\" { phase a { transcode video to av1 } }").is_empty());
+    assert!(
+        codes("policy \"p\" { phase a { transcode video to h264 using profile \"h264-home\" } }")
+            .is_empty()
+    );
     assert!(
         codes(
             "policy \"p\" { phase a { transcode video to hevc using profile \"hevc-archive\" } }"
@@ -179,7 +184,7 @@ fn an_inline_vaapi_body_needs_qp_and_no_preset() {
 }
 
 /// `qp` is `1..=52`: `FFmpeg` accepts `0..52` and rejects 53, and 0 is the default
-/// meaning auto, so it is excluded from the operator vocabulary (ADR 0051 §4). A
+/// meaning auto, so it is excluded from the operator vocabulary (ADR 0052 §4). A
 /// profile that says `qp: 0` means "let the driver choose", which is not a quality
 /// target an operator declared.
 #[test]

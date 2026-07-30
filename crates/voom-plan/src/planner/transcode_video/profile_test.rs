@@ -6,6 +6,7 @@ fn sample_settings() -> voom_policy::VideoProfileSettings {
         crf: Some(30),
         cq: None,
         qp: None,
+        bitrate_kbps: None,
         preset: Some("8".to_owned()),
         tune: None,
         codec_profile: None,

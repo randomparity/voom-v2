@@ -7,10 +7,35 @@ fn descriptor_lookup_knows_supported_encoders() {
     assert!(encoder_descriptor("libaom-av1").is_some());
     assert!(encoder_descriptor("hevc_nvenc").is_some());
     assert!(encoder_descriptor("hevc_vaapi").is_some());
+    assert!(encoder_descriptor("h264_videotoolbox").is_some());
+    assert!(encoder_descriptor("hevc_videotoolbox").is_some());
     assert!(encoder_descriptor("av1_nvenc").is_none());
     assert!(encoder_descriptor("av1_vaapi").is_none());
     assert!(encoder_descriptor("h264_vaapi").is_none());
     assert!(encoder_descriptor("x264").is_none());
+}
+
+#[test]
+fn videotoolbox_descriptors_use_bitrate_and_closed_tuples() {
+    let h264 = encoder_descriptor("h264_videotoolbox").unwrap();
+    assert_eq!(
+        h264.quality_domain,
+        QualityDomain::BitrateKbps {
+            min: 1,
+            max: u32::MAX,
+        }
+    );
+    assert_eq!(h264.backend, VideoEncoderBackend::VideoToolbox);
+    assert!(h264.accepts_preset("default"));
+    assert!(h264.accepts_codec_profile("high"));
+    assert!(h264.accepts_codec_level("4.1"));
+    assert!(h264.accepts_pixel_format("yuv420p"));
+
+    let hevc = encoder_descriptor("hevc_videotoolbox").unwrap();
+    assert_eq!(hevc.backend, VideoEncoderBackend::VideoToolbox);
+    assert!(hevc.accepts_codec_profile("main10"));
+    assert!(hevc.accepts_pixel_format("yuv420p10le"));
+    assert!(!hevc.accepts_codec_level("4.1"));
 }
 
 #[test]
@@ -31,7 +56,7 @@ fn nvidia_descriptor_uses_cq_and_current_ffmpeg_vocabulary() {
 /// `FFmpeg` invocation, so it must spell `hevc_vaapi`'s vocabulary exactly as the
 /// acceptance host reported it (design §2.2): `-qp 0..52` where 0 means auto, so the
 /// operator range starts at 1; no `-preset` and no `-compression_level` exist on this
-/// encoder; `-level` is deliberately not offered in this slice (ADR 0051 §4); and the
+/// encoder; `-level` is deliberately not offered in this slice (ADR 0052 §4); and the
 /// only surface formats are the hardware ones, `nv12` and `p010`. Any widening here
 /// lets validation admit a profile the encoder then rejects mid-run.
 #[test]

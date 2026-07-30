@@ -14,6 +14,7 @@ use std::net::SocketAddr;
 use std::process::Stdio;
 use std::time::Duration;
 
+use sha2::{Digest, Sha256};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, ChildStdin, Command};
 use tokio::time::timeout;
@@ -21,16 +22,18 @@ use voom_core::{TicketOperation, VoomError, WorkerId, WorkerKind, WorkerStatus};
 use voom_store::repo::accelerator_claims::{NewAcceleratorClaim, SqliteAcceleratorClaimRepo};
 use voom_store::repo::workers::{NewCapability, NewGrant, NewWorker};
 use voom_worker_protocol::{
-    LocalWorkerBound, NvidiaVideoAcceleratorDescriptor, VaapiVideoAcceleratorDescriptor,
-    VideoAcceleratorDescriptor, vaapi_hardware_token,
+    LocalWorkerBound, VIDEOTOOLBOX_PREFLIGHT_BUDGET, VideoAcceleratorDescriptor,
+    vaapi_hardware_token,
 };
 
 use crate::ControlPlane;
 use crate::worker_process::{WorkerCommand, bundled_worker_command_from, random_hex_128};
 
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(10);
-/// ADR 0049 §9's readiness bound, adopted unchanged for VAAPI by ADR 0051 §7.
-pub(crate) const ACCELERATOR_STARTUP_TIMEOUT: Duration = Duration::from_mins(5);
+pub(crate) const NVIDIA_STARTUP_TIMEOUT: Duration = Duration::from_mins(5);
+/// ADR 0049 §9's readiness bound, adopted unchanged for VAAPI by ADR 0052 §7.
+pub(crate) const VAAPI_STARTUP_TIMEOUT: Duration = Duration::from_mins(5);
+pub(crate) const VIDEOTOOLBOX_STARTUP_TIMEOUT: Duration = VIDEOTOOLBOX_PREFLIGHT_BUDGET;
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 const SELF_HEAL_SCAN_LIMIT: u32 = 1000;
 
@@ -47,47 +50,71 @@ pub struct NvidiaLocalWorkerConfig {
     pub max_sessions: u32,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VideoToolboxLocalWorkerConfig {
+    pub max_sessions: u32,
+}
+
 /// A VAAPI device to bind a local ffmpeg worker to.
 ///
 /// `pci_address` is the identity (`0000:f4:00.0`), never a render-node path or
 /// ordinal: node numbers are assigned by enumeration order and renumber, while the
-/// address behind them cannot (ADR 0051 §1).
+/// address behind them cannot (ADR 0052 §1).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VaapiLocalWorkerConfig {
     pub pci_address: String,
     pub max_sessions: u32,
 }
 
-/// The accelerator device a local worker is configured to bind, if any.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum LocalAcceleratorConfig {
+pub enum LocalVideoAcceleratorConfig {
     Nvidia(NvidiaLocalWorkerConfig),
     Vaapi(VaapiLocalWorkerConfig),
+    VideoToolbox(VideoToolboxLocalWorkerConfig),
 }
 
-impl LocalAcceleratorConfig {
-    /// The stable device token used as the accelerator claim's key, the
-    /// capability's `hardware` entry, and the scheduler's per-device match key.
-    ///
-    /// Derived rather than read off a descriptor: the VAAPI descriptor carries no
-    /// token field, so the binding site is the one place that can produce it
-    /// consistently with the NVIDIA shape. The VAAPI spelling comes from
-    /// `vaapi_hardware_token` rather than being formatted here, because the scheduler
-    /// and the worker derive the same token independently and the capacity SQL groups
-    /// on that exact string — a divergence would silently stop the device matching.
-    #[must_use]
-    pub fn hardware_token(&self) -> String {
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ResolvedVideoToolboxLocalWorkerConfig {
+    resource_id: String,
+    boot_id: String,
+    max_sessions: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum ResolvedLocalVideoAcceleratorConfig {
+    Nvidia(NvidiaLocalWorkerConfig),
+    /// VAAPI needs no resolution step: the PCI address the operator supplied *is*
+    /// the identity, where `VideoToolbox` must query the platform for a resource id.
+    Vaapi(VaapiLocalWorkerConfig),
+    VideoToolbox(ResolvedVideoToolboxLocalWorkerConfig),
+}
+
+impl ResolvedLocalVideoAcceleratorConfig {
+    /// The VAAPI spelling comes from `vaapi_hardware_token` rather than being
+    /// formatted here: the scheduler and the worker derive the same token
+    /// independently and the capacity SQL groups on that exact string, so a
+    /// divergence would silently stop the device matching.
+    fn hardware_token(&self) -> String {
         match self {
             Self::Nvidia(config) => format!("nvidia:{}", config.device_uuid),
             Self::Vaapi(config) => vaapi_hardware_token(&config.pci_address),
+            Self::VideoToolbox(config) => format!("videotoolbox:{}", config.resource_id),
         }
     }
 
-    #[must_use]
-    pub const fn max_sessions(&self) -> u32 {
+    const fn backend(&self) -> &'static str {
+        match self {
+            Self::Nvidia(_) => "nvidia",
+            Self::Vaapi(_) => "vaapi",
+            Self::VideoToolbox(_) => "video_toolbox",
+        }
+    }
+
+    const fn max_sessions(&self) -> u32 {
         match self {
             Self::Nvidia(config) => config.max_sessions,
             Self::Vaapi(config) => config.max_sessions,
+            Self::VideoToolbox(config) => config.max_sessions,
         }
     }
 }
@@ -196,18 +223,19 @@ impl ControlPlane {
         self.start_local_worker_configured(kind, None).await
     }
 
-    /// Launch a local worker with an optional exact accelerator device binding.
+    /// Launch a local worker with an optional exact NVIDIA device binding.
     ///
     /// # Errors
-    /// Returns `CONFIG_INVALID` for an invalid kind/configuration pairing, an
-    /// unusable device identity, or an out-of-range session declaration, and
-    /// otherwise propagates startup and registry failures.
+    /// Returns `CONFIG_INVALID` for an invalid kind/configuration pairing or
+    /// session declaration, and otherwise propagates startup and registry
+    /// failures.
     pub async fn start_local_worker_configured(
         &self,
         kind: LocalWorkerKind,
-        accelerator: Option<LocalAcceleratorConfig>,
+        accelerator: Option<LocalVideoAcceleratorConfig>,
     ) -> Result<RunningLocalWorker, VoomError> {
         validate_local_worker_config(kind, accelerator.as_ref())?;
+        let accelerator = resolve_local_accelerator(accelerator).await?;
         if let Some(accelerator) = &accelerator {
             self.recover_accelerator_claim(accelerator).await?;
         } else {
@@ -233,7 +261,7 @@ impl ControlPlane {
     async fn retire_failed_worker(
         &self,
         worker: &voom_store::repo::workers::Worker,
-        accelerator: Option<&LocalAcceleratorConfig>,
+        accelerator: Option<&ResolvedLocalVideoAcceleratorConfig>,
         source: VoomError,
     ) -> VoomError {
         if let Some(config) = accelerator {
@@ -246,7 +274,7 @@ impl ControlPlane {
                 }
             };
             if let Some(claim) = claim.filter(|claim| claim.worker_id == worker.id) {
-                match process_group_has_members(claim.process_group_id) {
+                match accelerator_process_group_has_members(config, claim.process_group_id).await {
                     Ok(false) => {}
                     Ok(true) => {
                         let error = VoomError::WorkerCrash(format!(
@@ -275,19 +303,47 @@ impl ControlPlane {
 
     async fn recover_accelerator_claim(
         &self,
-        config: &LocalAcceleratorConfig,
+        config: &ResolvedLocalVideoAcceleratorConfig,
     ) -> Result<(), VoomError> {
         let token = config.hardware_token();
         let claims = SqliteAcceleratorClaimRepo::new(self.pool.clone());
         let Some(claim) = claims.get(&token).await? else {
             return Ok(());
         };
+        if claim.backend != config.backend() {
+            return Err(VoomError::Conflict(format!(
+                "accelerator `{token}` claim has unexpected backend `{}`",
+                claim.backend
+            )));
+        }
+        match config {
+            // VAAPI is a Linux supervisor like NVIDIA, so it recovers by the same
+            // boot id + process-start-identity evidence.
+            ResolvedLocalVideoAcceleratorConfig::Nvidia(_)
+            | ResolvedLocalVideoAcceleratorConfig::Vaapi(_) => {
+                self.recover_linux_claim(&claim, &token).await
+            }
+            ResolvedLocalVideoAcceleratorConfig::VideoToolbox(config) => {
+                self.recover_videotoolbox_claim(&claim, &token, config)
+                    .await
+            }
+        }
+    }
+
+    async fn recover_linux_claim(
+        &self,
+        claim: &voom_store::repo::accelerator_claims::AcceleratorClaim,
+        token: &str,
+    ) -> Result<(), VoomError> {
         let boot_id = linux_boot_id()?;
         if claim.boot_id != boot_id {
-            return self.retire_claim_owner(&claim).await;
+            return self.retire_claim_owner(claim).await;
         }
         match linux_process_start_ticks_if_present(claim.supervisor_pid)? {
-            Some(start_ticks) if start_ticks == claim.supervisor_start_ticks => {
+            Some(start_ticks)
+                if claim.supervisor_start_identity.as_deref()
+                    == Some(format!("linux-proc-ticks:{start_ticks}").as_str()) =>
+            {
                 return Err(VoomError::Conflict(format!(
                     "accelerator `{token}` is owned by live supervisor PID {}",
                     claim.supervisor_pid
@@ -308,7 +364,31 @@ impl ControlPlane {
             )));
         }
         terminate_process_group(claim.process_group_id).await?;
-        self.retire_claim_owner(&claim).await
+        self.retire_claim_owner(claim).await
+    }
+
+    async fn recover_videotoolbox_claim(
+        &self,
+        claim: &voom_store::repo::accelerator_claims::AcceleratorClaim,
+        token: &str,
+        config: &ResolvedVideoToolboxLocalWorkerConfig,
+    ) -> Result<(), VoomError> {
+        if claim.boot_id != config.boot_id {
+            return self.retire_claim_owner(claim).await;
+        }
+        if macos_process_exists(claim.supervisor_pid).await? {
+            return Err(VoomError::Conflict(format!(
+                "accelerator `{token}` is owned by live supervisor PID {}",
+                claim.supervisor_pid
+            )));
+        }
+        if macos_process_group_has_members(claim.process_group_id).await? {
+            return Err(VoomError::Conflict(format!(
+                "accelerator `{token}` process group {} still has live members; refusing recovery",
+                claim.process_group_id
+            )));
+        }
+        self.retire_claim_owner(claim).await
     }
 
     async fn retire_claim_owner(
@@ -359,7 +439,7 @@ impl ControlPlane {
         &self,
         kind: LocalWorkerKind,
         secret: &str,
-        accelerator: Option<&LocalAcceleratorConfig>,
+        accelerator: Option<&ResolvedLocalVideoAcceleratorConfig>,
     ) -> Result<(voom_store::repo::workers::Worker, Child), VoomError> {
         let mut tx = self.pool.begin().await.map_err(|error| {
             VoomError::database_context("begin local worker registration", error)
@@ -386,19 +466,10 @@ impl ControlPlane {
             let claim = (|| {
                 let process_id = child.id().ok_or_else(|| {
                     VoomError::WorkerCrash(
-                        "accelerator worker process has no process id".to_owned(),
+                        "accelerated worker process has no process id".to_owned(),
                     )
                 })?;
-                Ok::<_, VoomError>(NewAcceleratorClaim {
-                    hardware_token: accelerator.hardware_token(),
-                    worker_id: worker.id,
-                    boot_id: linux_boot_id()?,
-                    supervisor_pid: process_id,
-                    supervisor_start_ticks: linux_process_start_ticks(process_id)?,
-                    process_group_id: process_id,
-                    capacity: accelerator.max_sessions(),
-                    claimed_at: self.clock().now(),
-                })
+                new_accelerator_claim(accelerator, worker.id, process_id, self.clock().now())
             })();
             let claim = match claim {
                 Ok(claim) => claim,
@@ -426,26 +497,30 @@ impl ControlPlane {
         worker_id: WorkerId,
         secret: &str,
         mut child: Child,
-        accelerator: Option<&LocalAcceleratorConfig>,
+        accelerator: Option<&ResolvedLocalVideoAcceleratorConfig>,
     ) -> Result<RunningLocalWorker, VoomError> {
         let startup = async {
             let stdin = child.stdin.take().ok_or_else(|| {
                 VoomError::WorkerCrash("local worker missing stdin pipe".to_owned())
             })?;
-            let startup_timeout = if accelerator.is_some() {
-                ACCELERATOR_STARTUP_TIMEOUT
-            } else {
-                STARTUP_TIMEOUT
+            // Per backend, not "accelerated vs not": VideoToolbox's readiness graph
+            // is a different length from the Linux backends' fixed ADR 0049 §9 bound.
+            let startup_timeout = match accelerator {
+                Some(ResolvedLocalVideoAcceleratorConfig::VideoToolbox(_)) => {
+                    VIDEOTOOLBOX_STARTUP_TIMEOUT
+                }
+                Some(ResolvedLocalVideoAcceleratorConfig::Nvidia(_)) => NVIDIA_STARTUP_TIMEOUT,
+                Some(ResolvedLocalVideoAcceleratorConfig::Vaapi(_)) => VAAPI_STARTUP_TIMEOUT,
+                None => STARTUP_TIMEOUT,
             };
             let bound = read_bound(&mut child, startup_timeout).await?;
-            let bound_accelerator = bound.accelerator.as_ref();
-            validate_bound_accelerator(bound_accelerator, accelerator)?;
+            validate_bound_accelerator(bound.accelerator.as_ref(), accelerator)?;
             self.record_local_worker_registry(
                 kind,
                 worker_id,
                 secret,
                 bound.addr,
-                bound_accelerator,
+                bound.accelerator.as_ref(),
             )
             .await?;
             Ok::<_, VoomError>((stdin, bound))
@@ -477,7 +552,6 @@ impl ControlPlane {
         endpoint: SocketAddr,
         accelerator: Option<&VideoAcceleratorDescriptor>,
     ) -> Result<(), VoomError> {
-        let accelerator = accelerator.map(AcceleratorCapability::of).transpose()?;
         let mut grant_ops = Vec::with_capacity(kind.operations().len());
         let mut max_parallel = serde_json::Map::new();
         for op in kind.operations() {
@@ -486,25 +560,24 @@ impl ControlPlane {
                 "endpoint": endpoint.to_string(),
                 "secret": secret,
             });
-            if let Some(accelerator) = &accelerator {
-                extra["accelerator"] = accelerator.descriptor.clone();
+            if let Some(accelerator) = accelerator {
+                extra["accelerator"] = serde_json::to_value(accelerator).map_err(|error| {
+                    VoomError::Internal(format!("serialize local accelerator descriptor: {error}"))
+                })?;
             }
             self.record_capability(NewCapability {
                 worker_id,
                 operation: operation.clone(),
                 codecs: Vec::new(),
                 hardware: accelerator
-                    .as_ref()
-                    .map(|accelerator| vec![accelerator.hardware_token.clone()])
+                    .map(|descriptor| vec![descriptor.hardware_token()])
                     .unwrap_or_default(),
                 artifact_access: Vec::new(),
                 extra,
             })
             .await?;
             let operation_capacity = if *op == "transcode_video" {
-                accelerator
-                    .as_ref()
-                    .map_or(1, |accelerator| accelerator.max_sessions)
+                accelerator.map_or(1, VideoAcceleratorDescriptor::max_sessions)
             } else {
                 1
             };
@@ -536,7 +609,7 @@ fn spawn_worker(
     command: WorkerCommand,
     worker_id: WorkerId,
     secret: &str,
-    accelerator: Option<&LocalAcceleratorConfig>,
+    accelerator: Option<&ResolvedLocalVideoAcceleratorConfig>,
 ) -> Result<Child, VoomError> {
     let mut spawn = Command::new(command.program);
     spawn
@@ -551,18 +624,27 @@ fn spawn_worker(
         .kill_on_drop(true);
     #[cfg(unix)]
     spawn.process_group(0);
-    match accelerator {
-        None => {}
-        Some(LocalAcceleratorConfig::Nvidia(nvidia)) => {
-            spawn
-                .env("VOOM_NVIDIA_DEVICE", &nvidia.device_uuid)
-                .env("VOOM_NVIDIA_MAX_SESSIONS", nvidia.max_sessions.to_string())
-                .env("CUDA_VISIBLE_DEVICES", &nvidia.device_uuid);
-        }
-        Some(LocalAcceleratorConfig::Vaapi(vaapi)) => {
-            spawn
-                .env("VOOM_VAAPI_DEVICE", &vaapi.pci_address)
-                .env("VOOM_VAAPI_MAX_SESSIONS", vaapi.max_sessions.to_string());
+    if let Some(accelerator) = accelerator {
+        match accelerator {
+            ResolvedLocalVideoAcceleratorConfig::Nvidia(nvidia) => {
+                spawn
+                    .env("VOOM_NVIDIA_DEVICE", &nvidia.device_uuid)
+                    .env("VOOM_NVIDIA_MAX_SESSIONS", nvidia.max_sessions.to_string())
+                    .env("CUDA_VISIBLE_DEVICES", &nvidia.device_uuid);
+            }
+            ResolvedLocalVideoAcceleratorConfig::Vaapi(vaapi) => {
+                spawn
+                    .env("VOOM_VAAPI_DEVICE", &vaapi.pci_address)
+                    .env("VOOM_VAAPI_MAX_SESSIONS", vaapi.max_sessions.to_string());
+            }
+            ResolvedLocalVideoAcceleratorConfig::VideoToolbox(videotoolbox) => {
+                spawn
+                    .env("VOOM_VIDEOTOOLBOX_RESOURCE_ID", &videotoolbox.resource_id)
+                    .env(
+                        "VOOM_VIDEOTOOLBOX_MAX_SESSIONS",
+                        videotoolbox.max_sessions.to_string(),
+                    );
+            }
         }
     }
     for (key, value) in command.env {
@@ -621,39 +703,58 @@ async fn read_bound(child: &mut Child, deadline: Duration) -> Result<LocalWorker
 
 fn validate_local_worker_config(
     kind: LocalWorkerKind,
-    accelerator: Option<&LocalAcceleratorConfig>,
+    accelerator: Option<&LocalVideoAcceleratorConfig>,
 ) -> Result<(), VoomError> {
     let Some(accelerator) = accelerator else {
         return Ok(());
     };
     if kind != LocalWorkerKind::Ffmpeg {
         return Err(VoomError::Config(
-            "accelerator device configuration is valid only for an ffmpeg worker".to_owned(),
-        ));
-    }
-    if !(1..=16).contains(&accelerator.max_sessions()) {
-        return Err(VoomError::Config(
-            "accelerator max sessions must be in 1..=16".to_owned(),
+            "video accelerator configuration is valid only for an ffmpeg worker".to_owned(),
         ));
     }
     match accelerator {
-        LocalAcceleratorConfig::Nvidia(nvidia) if !is_full_nvidia_uuid(&nvidia.device_uuid) => Err(
-            VoomError::Config("NVIDIA device must be a full GPU- UUID".to_owned()),
-        ),
-        LocalAcceleratorConfig::Vaapi(vaapi) if !is_pci_address(&vaapi.pci_address) => {
-            Err(VoomError::Config(format!(
-                "VAAPI device must be a PCI address like `0000:f4:00.0`, not \
-                 `{}`: render-node paths and ordinals renumber, so they are not accepted",
-                vaapi.pci_address
-            )))
+        LocalVideoAcceleratorConfig::Nvidia(nvidia) => {
+            if !(1..=16).contains(&nvidia.max_sessions) {
+                return Err(VoomError::Config(
+                    "NVIDIA max sessions must be in 1..=16".to_owned(),
+                ));
+            }
+            if !is_full_nvidia_uuid(&nvidia.device_uuid) {
+                return Err(VoomError::Config(
+                    "NVIDIA device must be a full GPU- UUID".to_owned(),
+                ));
+            }
         }
-        LocalAcceleratorConfig::Nvidia(_) | LocalAcceleratorConfig::Vaapi(_) => Ok(()),
+        LocalVideoAcceleratorConfig::Vaapi(vaapi) => {
+            if !(1..=16).contains(&vaapi.max_sessions) {
+                return Err(VoomError::Config(
+                    "VAAPI max sessions must be in 1..=16".to_owned(),
+                ));
+            }
+            if !is_pci_address(&vaapi.pci_address) {
+                return Err(VoomError::Config(format!(
+                    "VAAPI device must be a PCI address like `0000:f4:00.0`, not \
+                     `{}`: render-node paths and ordinals renumber, so they are \
+                     not a stable device identity",
+                    vaapi.pci_address
+                )));
+            }
+        }
+        LocalVideoAcceleratorConfig::VideoToolbox(videotoolbox)
+            if !(1..=16).contains(&videotoolbox.max_sessions) =>
+        {
+            return Err(VoomError::Config(
+                "VideoToolbox max sessions must be in 1..=16".to_owned(),
+            ));
+        }
+        LocalVideoAcceleratorConfig::VideoToolbox(_) => {}
     }
+    Ok(())
 }
 
-/// Mirrors the worker's own PCI-address rule (ADR 0051 §1) so a bad address is
-/// rejected before a process is spawned. The worker binary owns the authoritative
-/// check; duplicating the shape test here is the same split the NVIDIA UUID takes.
+/// A PCI address is `dddd:bb:dd.f`, lowercase hex. Render-node paths and ordinals
+/// are rejected on purpose: they renumber across boots, so they are not an identity.
 fn is_pci_address(pci_address: &str) -> bool {
     let Some((domain, rest)) = pci_address.split_once(':') else {
         return false;
@@ -685,128 +786,296 @@ fn is_full_nvidia_uuid(device_uuid: &str) -> bool {
         })
 }
 
-/// The durable facts a bound accelerator contributes to a worker capability.
-///
-/// `descriptor` is what lands in `extra.accelerator`. NVIDIA's stays the
-/// **untagged** inner struct because pre-#409 rows are durable and untagged, and
-/// `video_hardware` reads them; VAAPI's is `backend`-tagged, so a reader tells the
-/// two apart by the presence of `backend`. The token is not read out of either —
-/// the VAAPI descriptor has no token field — so it lives in the capability's own
-/// `hardware` column, which is where the capacity SQL reads it from.
-struct AcceleratorCapability {
-    hardware_token: String,
-    max_sessions: u32,
-    descriptor: serde_json::Value,
-}
-
-impl AcceleratorCapability {
-    fn of(descriptor: &VideoAcceleratorDescriptor) -> Result<Self, VoomError> {
-        // The token comes from the descriptor's own accessor, which the scheduler also
-        // uses, so the string written to `hardware` cannot drift from the string the
-        // scheduler matches on. Only the serialized *shape* differs per backend.
-        let hardware_token = descriptor.hardware_token();
-        let (max_sessions, descriptor) = match descriptor {
-            VideoAcceleratorDescriptor::Nvidia(nvidia) => {
-                (nvidia.max_sessions, serde_json::to_value(nvidia))
-            }
-            VideoAcceleratorDescriptor::Vaapi(vaapi) => {
-                (vaapi.max_sessions, serde_json::to_value(descriptor))
-            }
-        };
-        Ok(Self {
-            hardware_token,
-            max_sessions,
-            descriptor: descriptor.map_err(|error| {
-                VoomError::Internal(format!("serialize local accelerator descriptor: {error}"))
-            })?,
-        })
-    }
-}
-
-/// Requires the device the worker bound to be the device the supervisor
-/// configured.
-///
-/// A mismatch — wrong backend, wrong device, or a different declared capacity —
-/// means the worker is advertising hardware the supervisor holds no claim on, so
-/// recording it would give the scheduler a capability it cannot honor.
 fn validate_bound_accelerator(
     actual: Option<&VideoAcceleratorDescriptor>,
-    configured: Option<&LocalAcceleratorConfig>,
+    configured: Option<&ResolvedLocalVideoAcceleratorConfig>,
 ) -> Result<(), VoomError> {
     match (actual, configured) {
         (None, None) => Ok(()),
-        (Some(actual), Some(configured)) => match (actual, configured) {
-            (
-                VideoAcceleratorDescriptor::Nvidia(actual),
-                LocalAcceleratorConfig::Nvidia(configured),
-            ) => validate_bound_nvidia(actual, configured),
-            (
-                VideoAcceleratorDescriptor::Vaapi(actual),
-                LocalAcceleratorConfig::Vaapi(configured),
-            ) => validate_bound_vaapi(actual, configured),
-            (VideoAcceleratorDescriptor::Nvidia(actual), LocalAcceleratorConfig::Vaapi(_)) => {
-                Err(VoomError::WorkerCrash(format!(
-                    "worker bound NVIDIA device {} but a VAAPI device was configured",
-                    actual.device_uuid
-                )))
-            }
-            (VideoAcceleratorDescriptor::Vaapi(actual), LocalAcceleratorConfig::Nvidia(_)) => {
-                Err(VoomError::WorkerCrash(format!(
-                    "worker bound VAAPI device at PCI {} but an NVIDIA device was configured",
-                    actual.pci_address
-                )))
-            }
-        },
-        (Some(VideoAcceleratorDescriptor::Nvidia(actual)), None) => {
-            Err(VoomError::WorkerCrash(format!(
-                "software worker unexpectedly advertised NVIDIA device {}",
-                actual.device_uuid
-            )))
+        (
+            Some(VideoAcceleratorDescriptor::Nvidia(actual)),
+            Some(ResolvedLocalVideoAcceleratorConfig::Nvidia(configured)),
+        ) if actual.device_uuid == configured.device_uuid
+            && actual.hardware_token == format!("nvidia:{}", configured.device_uuid)
+            && actual.max_sessions == configured.max_sessions =>
+        {
+            Ok(())
         }
-        (Some(VideoAcceleratorDescriptor::Vaapi(actual)), None) => {
-            Err(VoomError::WorkerCrash(format!(
-                "software worker unexpectedly advertised a VAAPI device at PCI {}",
-                actual.pci_address
-            )))
+        (
+            Some(VideoAcceleratorDescriptor::Nvidia(actual)),
+            Some(ResolvedLocalVideoAcceleratorConfig::Nvidia(configured)),
+        ) => Err(VoomError::WorkerCrash(format!(
+            "NVIDIA readiness metadata did not match configuration: expected {} sessions={} \
+             but worker reported {} sessions={}",
+            configured.device_uuid,
+            configured.max_sessions,
+            actual.device_uuid,
+            actual.max_sessions
+        ))),
+        (
+            Some(VideoAcceleratorDescriptor::VideoToolbox(actual)),
+            Some(ResolvedLocalVideoAcceleratorConfig::VideoToolbox(configured)),
+        ) if actual.resource_id == configured.resource_id
+            && actual.hardware_token == format!("videotoolbox:{}", configured.resource_id)
+            && actual.max_sessions == configured.max_sessions =>
+        {
+            Ok(())
         }
+        (
+            Some(VideoAcceleratorDescriptor::VideoToolbox(_)),
+            Some(ResolvedLocalVideoAcceleratorConfig::Nvidia(_)),
+        ) => Err(VoomError::WorkerCrash(
+            "NVIDIA worker advertised VideoToolbox readiness metadata".to_owned(),
+        )),
+        (
+            Some(VideoAcceleratorDescriptor::Nvidia(_)),
+            Some(ResolvedLocalVideoAcceleratorConfig::VideoToolbox(_)),
+        ) => Err(VoomError::WorkerCrash(
+            "VideoToolbox worker advertised NVIDIA readiness metadata".to_owned(),
+        )),
+        (
+            Some(VideoAcceleratorDescriptor::VideoToolbox(_)),
+            Some(ResolvedLocalVideoAcceleratorConfig::VideoToolbox(_)),
+        ) => Err(VoomError::WorkerCrash(
+            "VideoToolbox readiness metadata did not match configuration".to_owned(),
+        )),
+        (
+            Some(VideoAcceleratorDescriptor::Vaapi(actual)),
+            Some(ResolvedLocalVideoAcceleratorConfig::Vaapi(configured)),
+        ) if actual.pci_address == configured.pci_address
+            && actual.max_sessions == configured.max_sessions =>
+        {
+            Ok(())
+        }
+        (
+            Some(VideoAcceleratorDescriptor::Vaapi(actual)),
+            Some(ResolvedLocalVideoAcceleratorConfig::Vaapi(configured)),
+        ) => Err(VoomError::WorkerCrash(format!(
+            "VAAPI readiness metadata did not match configuration: expected PCI {} sessions={} \
+             but worker reported PCI {} sessions={}",
+            configured.pci_address,
+            configured.max_sessions,
+            actual.pci_address,
+            actual.max_sessions
+        ))),
+        (
+            Some(VideoAcceleratorDescriptor::Vaapi(actual)),
+            Some(
+                configured @ (ResolvedLocalVideoAcceleratorConfig::Nvidia(_)
+                | ResolvedLocalVideoAcceleratorConfig::VideoToolbox(_)),
+            ),
+        ) => Err(VoomError::WorkerCrash(format!(
+            "worker bound VAAPI device at PCI {} but a {} device was configured",
+            actual.pci_address,
+            configured.backend()
+        ))),
+        (
+            Some(
+                VideoAcceleratorDescriptor::Nvidia(_) | VideoAcceleratorDescriptor::VideoToolbox(_),
+            ),
+            Some(ResolvedLocalVideoAcceleratorConfig::Vaapi(configured)),
+        ) => Err(VoomError::WorkerCrash(format!(
+            "VAAPI device at PCI {} was configured but the worker advertised another backend",
+            configured.pci_address
+        ))),
+        (Some(_), None) => Err(VoomError::WorkerCrash(
+            "software worker unexpectedly advertised an accelerator".to_owned(),
+        )),
         (None, Some(configured)) => Err(VoomError::WorkerCrash(format!(
-            "worker omitted readiness metadata for accelerator `{}`",
-            configured.hardware_token()
+            "worker omitted {} readiness metadata",
+            configured.backend()
         ))),
     }
 }
 
-fn validate_bound_nvidia(
-    actual: &NvidiaVideoAcceleratorDescriptor,
-    configured: &NvidiaLocalWorkerConfig,
-) -> Result<(), VoomError> {
-    if actual.device_uuid == configured.device_uuid
-        && actual.hardware_token == format!("nvidia:{}", configured.device_uuid)
-        && actual.max_sessions == configured.max_sessions
-    {
-        return Ok(());
+async fn resolve_local_accelerator(
+    config: Option<LocalVideoAcceleratorConfig>,
+) -> Result<Option<ResolvedLocalVideoAcceleratorConfig>, VoomError> {
+    match config {
+        None => Ok(None),
+        Some(LocalVideoAcceleratorConfig::Nvidia(config)) => {
+            Ok(Some(ResolvedLocalVideoAcceleratorConfig::Nvidia(config)))
+        }
+        Some(LocalVideoAcceleratorConfig::Vaapi(config)) => {
+            Ok(Some(ResolvedLocalVideoAcceleratorConfig::Vaapi(config)))
+        }
+        Some(LocalVideoAcceleratorConfig::VideoToolbox(config)) => {
+            if !cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+                return Err(VoomError::Config(
+                    "VideoToolbox workers require Apple silicon macOS".to_owned(),
+                ));
+            }
+            let resource_id = read_platform_resource_id().await?;
+            let boot_id = read_macos_boot_session_id().await?;
+            Ok(Some(ResolvedLocalVideoAcceleratorConfig::VideoToolbox(
+                ResolvedVideoToolboxLocalWorkerConfig {
+                    resource_id,
+                    boot_id,
+                    max_sessions: config.max_sessions,
+                },
+            )))
+        }
     }
-    Err(VoomError::WorkerCrash(format!(
-        "NVIDIA readiness metadata did not match configuration: expected {} sessions={} \
-         but worker reported {} sessions={}",
-        configured.device_uuid, configured.max_sessions, actual.device_uuid, actual.max_sessions
-    )))
 }
 
-fn validate_bound_vaapi(
-    actual: &VaapiVideoAcceleratorDescriptor,
-    configured: &VaapiLocalWorkerConfig,
-) -> Result<(), VoomError> {
-    if actual.pci_address == configured.pci_address
-        && actual.max_sessions == configured.max_sessions
-    {
+fn parse_ioreg_platform_uuid(output: &str) -> Result<String, VoomError> {
+    let line = output
+        .lines()
+        .find(|line| line.contains("\"IOPlatformUUID\""))
+        .ok_or_else(|| VoomError::WorkerCrash("ioreg omitted IOPlatformUUID".to_owned()))?;
+    let value = line
+        .split('=')
+        .nth(1)
+        .map(str::trim)
+        .and_then(|value| value.strip_prefix('"'))
+        .and_then(|value| value.strip_suffix('"'))
+        .ok_or_else(|| {
+            VoomError::WorkerCrash("ioreg returned malformed IOPlatformUUID".to_owned())
+        })?;
+    let normalized = value.to_ascii_uppercase();
+    validate_platform_uuid(&normalized)?;
+    Ok(normalized)
+}
+
+fn validate_platform_uuid(value: &str) -> Result<(), VoomError> {
+    let valid = value.len() == 36
+        && value.char_indices().all(|(index, character)| match index {
+            8 | 13 | 18 | 23 => character == '-',
+            _ => character.is_ascii_hexdigit(),
+        });
+    if valid {
         return Ok(());
     }
-    Err(VoomError::WorkerCrash(format!(
-        "VAAPI readiness metadata did not match configuration: expected PCI {} sessions={} \
-         but worker reported PCI {} sessions={}",
-        configured.pci_address, configured.max_sessions, actual.pci_address, actual.max_sessions
-    )))
+    Err(VoomError::WorkerCrash(
+        "platform identity was not a canonical UUID".to_owned(),
+    ))
+}
+
+fn platform_resource_id(normalized_uuid: &str) -> Result<String, VoomError> {
+    validate_platform_uuid(normalized_uuid)?;
+    Ok(hex::encode(Sha256::digest(normalized_uuid.as_bytes())))
+}
+
+async fn read_platform_resource_id() -> Result<String, VoomError> {
+    let output = Command::new("/usr/sbin/ioreg")
+        .args(["-rd1", "-c", "IOPlatformExpertDevice"])
+        .output()
+        .await
+        .map_err(|error| VoomError::WorkerCrash(format!("starting ioreg: {error}")))?;
+    if !output.status.success() {
+        return Err(VoomError::WorkerCrash(format!(
+            "ioreg platform identity exited {}",
+            output.status
+        )));
+    }
+    let output = String::from_utf8(output.stdout)
+        .map_err(|error| VoomError::WorkerCrash(format!("decoding ioreg output: {error}")))?;
+    platform_resource_id(&parse_ioreg_platform_uuid(&output)?)
+}
+
+async fn read_macos_boot_session_id() -> Result<String, VoomError> {
+    let output = Command::new("/usr/sbin/sysctl")
+        .args(["-n", "kern.bootsessionuuid"])
+        .output()
+        .await
+        .map_err(|error| VoomError::WorkerCrash(format!("starting sysctl: {error}")))?;
+    if !output.status.success() {
+        return Err(VoomError::WorkerCrash(format!(
+            "reading macOS boot session UUID exited {}",
+            output.status
+        )));
+    }
+    let boot_id = String::from_utf8(output.stdout)
+        .map_err(|error| VoomError::WorkerCrash(format!("decoding boot session UUID: {error}")))?
+        .trim()
+        .to_owned();
+    validate_platform_uuid(&boot_id)?;
+    Ok(boot_id)
+}
+
+fn new_accelerator_claim(
+    accelerator: &ResolvedLocalVideoAcceleratorConfig,
+    worker_id: WorkerId,
+    process_id: u32,
+    claimed_at: time::OffsetDateTime,
+) -> Result<NewAcceleratorClaim, VoomError> {
+    let (boot_id, supervisor_start_identity) = match accelerator {
+        ResolvedLocalVideoAcceleratorConfig::Nvidia(_)
+        | ResolvedLocalVideoAcceleratorConfig::Vaapi(_) => (
+            linux_boot_id()?,
+            Some(format!(
+                "linux-proc-ticks:{}",
+                linux_process_start_ticks(process_id)?
+            )),
+        ),
+        ResolvedLocalVideoAcceleratorConfig::VideoToolbox(config) => (config.boot_id.clone(), None),
+    };
+    Ok(NewAcceleratorClaim {
+        hardware_token: accelerator.hardware_token(),
+        backend: accelerator.backend().to_owned(),
+        worker_id,
+        boot_id,
+        supervisor_pid: process_id,
+        supervisor_start_identity,
+        process_group_id: process_id,
+        capacity: accelerator.max_sessions(),
+        claimed_at,
+    })
+}
+
+async fn accelerator_process_group_has_members(
+    accelerator: &ResolvedLocalVideoAcceleratorConfig,
+    process_group_id: u32,
+) -> Result<bool, VoomError> {
+    match accelerator {
+        ResolvedLocalVideoAcceleratorConfig::Nvidia(_)
+        | ResolvedLocalVideoAcceleratorConfig::Vaapi(_) => {
+            process_group_has_members(process_group_id)
+        }
+        ResolvedLocalVideoAcceleratorConfig::VideoToolbox(_) => {
+            macos_process_group_has_members(process_group_id).await
+        }
+    }
+}
+
+async fn macos_process_exists(process_id: u32) -> Result<bool, VoomError> {
+    let output = Command::new("/bin/ps")
+        .args(["-p", &process_id.to_string(), "-o", "pid="])
+        .output()
+        .await
+        .map_err(|error| {
+            VoomError::WorkerCrash(format!("inspecting macOS PID {process_id}: {error}"))
+        })?;
+    match output.status.code() {
+        Some(0) => Ok(!output.stdout.is_empty()),
+        Some(1) => Ok(false),
+        _ => Err(VoomError::WorkerCrash(format!(
+            "inspecting macOS PID {process_id} exited {}",
+            output.status
+        ))),
+    }
+}
+
+async fn macos_process_group_has_members(process_group_id: u32) -> Result<bool, VoomError> {
+    let output = Command::new("/bin/ps")
+        .args(["-axo", "pgid="])
+        .output()
+        .await
+        .map_err(|error| {
+            VoomError::WorkerCrash(format!(
+                "inspecting macOS process group {process_group_id}: {error}"
+            ))
+        })?;
+    if !output.status.success() {
+        return Err(VoomError::WorkerCrash(format!(
+            "inspecting macOS process groups exited {}",
+            output.status
+        )));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| line.trim().parse::<u32>().ok())
+        .any(|group_id| group_id == process_group_id))
 }
 
 fn linux_boot_id() -> Result<String, VoomError> {
@@ -999,15 +1268,33 @@ async fn kill_and_wait(child: &mut Child) -> Result<(), VoomError> {
     let Some(process_group_id) = process_group_id else {
         return Ok(());
     };
-    if process_group_has_members(process_group_id)? {
+    if local_process_group_has_members(process_group_id).await? {
         signal_process_group(process_group_id, "KILL").await?;
-        if !wait_for_empty_process_group(process_group_id).await? {
+        if !wait_for_empty_local_process_group(process_group_id).await? {
             return Err(VoomError::WorkerCrash(format!(
                 "process group {process_group_id} remained populated after worker cleanup"
             )));
         }
     }
     Ok(())
+}
+
+async fn local_process_group_has_members(process_group_id: u32) -> Result<bool, VoomError> {
+    if cfg!(target_os = "macos") {
+        macos_process_group_has_members(process_group_id).await
+    } else {
+        process_group_has_members(process_group_id)
+    }
+}
+
+async fn wait_for_empty_local_process_group(process_group_id: u32) -> Result<bool, VoomError> {
+    for _attempt in 0..50 {
+        if !local_process_group_has_members(process_group_id).await? {
+            return Ok(true);
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    Ok(false)
 }
 
 fn cleanup_failure_with_retained_claim(

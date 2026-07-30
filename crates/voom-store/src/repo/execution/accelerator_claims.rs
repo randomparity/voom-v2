@@ -9,10 +9,11 @@ use super::super::common::{i64_from_u64, iso8601, parse_iso8601, u32_from_i64, u
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewAcceleratorClaim {
     pub hardware_token: String,
+    pub backend: String,
     pub worker_id: WorkerId,
     pub boot_id: String,
     pub supervisor_pid: u32,
-    pub supervisor_start_ticks: u64,
+    pub supervisor_start_identity: Option<String>,
     pub process_group_id: u32,
     pub capacity: u32,
     pub claimed_at: OffsetDateTime,
@@ -21,10 +22,11 @@ pub struct NewAcceleratorClaim {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AcceleratorClaim {
     pub hardware_token: String,
+    pub backend: String,
     pub worker_id: WorkerId,
     pub boot_id: String,
     pub supervisor_pid: u32,
-    pub supervisor_start_ticks: u64,
+    pub supervisor_start_identity: Option<String>,
     pub process_group_id: u32,
     pub capacity: u32,
     pub claimed_at: OffsetDateTime,
@@ -56,14 +58,15 @@ impl SqliteAcceleratorClaimRepo {
         let result = sqlx::query(
             "INSERT INTO accelerator_claims \
              (hardware_token, backend, worker_id, boot_id, supervisor_pid, \
-              supervisor_start_ticks, process_group_id, capacity, claimed_at) \
-             VALUES (?, 'nvidia', ?, ?, ?, ?, ?, ?, ?)",
+              supervisor_start_identity, process_group_id, capacity, claimed_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&input.hardware_token)
+        .bind(&input.backend)
         .bind(i64_from_u64(input.worker_id.0))
         .bind(&input.boot_id)
         .bind(i64::from(input.supervisor_pid))
-        .bind(i64_from_u64(input.supervisor_start_ticks))
+        .bind(input.supervisor_start_identity.as_deref())
         .bind(i64::from(input.process_group_id))
         .bind(i64::from(input.capacity))
         .bind(claimed_at)
@@ -83,10 +86,11 @@ impl SqliteAcceleratorClaimRepo {
         }
         Ok(AcceleratorClaim {
             hardware_token: input.hardware_token,
+            backend: input.backend,
             worker_id: input.worker_id,
             boot_id: input.boot_id,
             supervisor_pid: input.supervisor_pid,
-            supervisor_start_ticks: input.supervisor_start_ticks,
+            supervisor_start_identity: input.supervisor_start_identity,
             process_group_id: input.process_group_id,
             capacity: input.capacity,
             claimed_at: input.claimed_at,
@@ -95,8 +99,8 @@ impl SqliteAcceleratorClaimRepo {
 
     pub async fn get(&self, hardware_token: &str) -> Result<Option<AcceleratorClaim>, VoomError> {
         let row = sqlx::query(
-            "SELECT hardware_token, worker_id, boot_id, supervisor_pid, \
-             supervisor_start_ticks, process_group_id, capacity, claimed_at \
+            "SELECT hardware_token, backend, worker_id, boot_id, supervisor_pid, \
+             supervisor_start_identity, process_group_id, capacity, claimed_at \
              FROM accelerator_claims WHERE hardware_token = ?",
         )
         .bind(hardware_token)
@@ -112,8 +116,8 @@ impl SqliteAcceleratorClaimRepo {
         hardware_token: &str,
     ) -> Result<Option<AcceleratorClaim>, VoomError> {
         let row = sqlx::query(
-            "SELECT hardware_token, worker_id, boot_id, supervisor_pid, \
-             supervisor_start_ticks, process_group_id, capacity, claimed_at \
+            "SELECT hardware_token, backend, worker_id, boot_id, supervisor_pid, \
+             supervisor_start_identity, process_group_id, capacity, claimed_at \
              FROM accelerator_claims WHERE hardware_token = ?",
         )
         .bind(hardware_token)
@@ -134,9 +138,10 @@ fn row_to_claim(row: &sqlx::sqlite::SqliteRow) -> Result<AcceleratorClaim, VoomE
     let supervisor_pid: i64 = row
         .try_get("supervisor_pid")
         .map_err(|error| VoomError::database_context("accelerator_claims.supervisor_pid", error))?;
-    let start_ticks: i64 = row.try_get("supervisor_start_ticks").map_err(|error| {
-        VoomError::database_context("accelerator_claims.supervisor_start_ticks", error)
-    })?;
+    let supervisor_start_identity: Option<String> =
+        row.try_get("supervisor_start_identity").map_err(|error| {
+            VoomError::database_context("accelerator_claims.supervisor_start_identity", error)
+        })?;
     let process_group_id: i64 = row.try_get("process_group_id").map_err(|error| {
         VoomError::database_context("accelerator_claims.process_group_id", error)
     })?;
@@ -147,12 +152,15 @@ fn row_to_claim(row: &sqlx::sqlite::SqliteRow) -> Result<AcceleratorClaim, VoomE
         hardware_token: row.try_get("hardware_token").map_err(|error| {
             VoomError::database_context("accelerator_claims.hardware_token", error)
         })?,
+        backend: row
+            .try_get("backend")
+            .map_err(|error| VoomError::database_context("accelerator_claims.backend", error))?,
         worker_id: WorkerId(u64_from_i64(worker_id)),
         boot_id: row
             .try_get("boot_id")
             .map_err(|error| VoomError::database_context("accelerator_claims.boot_id", error))?,
         supervisor_pid: u32_from_i64(supervisor_pid)?,
-        supervisor_start_ticks: u64_from_i64(start_ticks),
+        supervisor_start_identity,
         process_group_id: u32_from_i64(process_group_id)?,
         capacity: u32_from_i64(capacity)?,
         claimed_at: parse_iso8601(&claimed_at)?,

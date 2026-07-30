@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 use voom_core::{
     OperationKind, PROTOCOL_VERSION, TicketOperation, VideoDecodeMode, VideoEncoderBackend,
     VoomError,
@@ -85,16 +87,18 @@ impl ControlPlane {
         runtimes: &WorkerRuntimeRegistry,
     ) -> Result<(), VoomError> {
         let requirements = policy_video_backend_requirements(policy)?;
-        if !requirements.software && !requirements.nvidia.required && !requirements.vaapi.required {
+        if !requirements.software
+            && !requirements.nvidia.required
+            && !requirements.vaapi.required
+            && !requirements.videotoolbox.required
+        {
             return Ok(());
         }
         let candidates = self
             .workers
             .operation_candidates(&TicketOperation::from(OperationKind::TranscodeVideo))
             .await?;
-        let mut software_available = false;
-        let mut nvidia_available = false;
-        let mut vaapi_available = false;
+        let mut availability = BackendAvailability::new();
         for candidate in candidates {
             if runtimes.get_optional(candidate.worker_id).is_none() {
                 continue;
@@ -107,7 +111,9 @@ impl ControlPlane {
                         .any(|encoder| encoder == "hevc_nvenc");
                     let has_decoder =
                         !requirements.nvidia.hardware_decode || !device.decoders.is_empty();
-                    nvidia_available |= has_encoder && has_decoder;
+                    if has_encoder && has_decoder {
+                        availability.insert(VideoEncoderBackend::Nvidia);
+                    }
                 }
                 Some(VideoAcceleratorDescriptor::Vaapi(device)) => {
                     let has_encoder = device
@@ -116,44 +122,28 @@ impl ControlPlane {
                         .any(|encoder| encoder == "hevc_vaapi");
                     let has_decoder =
                         !requirements.vaapi.hardware_decode || !device.decoders.is_empty();
-                    vaapi_available |= has_encoder && has_decoder;
+                    if has_encoder && has_decoder {
+                        availability.insert(VideoEncoderBackend::Vaapi);
+                    }
                 }
-                None if candidate.hardware.is_empty() => software_available = true,
+                Some(VideoAcceleratorDescriptor::VideoToolbox(device)) => {
+                    let has_encoders = requirements
+                        .videotoolbox_encoders
+                        .iter()
+                        .all(|required| device.encoders.iter().any(|item| item == required));
+                    let has_decoder =
+                        !requirements.videotoolbox.hardware_decode || !device.decoders.is_empty();
+                    if has_encoders && has_decoder {
+                        availability.insert(VideoEncoderBackend::VideoToolbox);
+                    }
+                }
+                None if candidate.hardware.is_empty() => {
+                    availability.insert(VideoEncoderBackend::Software);
+                }
                 None => {}
             }
         }
-        let mut missing = Vec::new();
-        if requirements.software && !software_available {
-            missing.push(
-                "software transcode profiles require an unbound ffmpeg worker; \
-                 start one with: voom worker run-local --kind ffmpeg"
-                    .to_owned(),
-            );
-        }
-        if requirements.nvidia.required && !nvidia_available {
-            let decoder = if requirements.nvidia.hardware_decode {
-                " with at least one advertised CUVID decoder"
-            } else {
-                ""
-            };
-            missing.push(format!(
-                "hevc_nvenc profiles require a live NVIDIA-bound ffmpeg worker{decoder}; \
-                 start one with: voom worker run-local --kind ffmpeg \
-                 --nvidia-device GPU-<uuid>"
-            ));
-        }
-        if requirements.vaapi.required && !vaapi_available {
-            let decoder = if requirements.vaapi.hardware_decode {
-                " with at least one probed VAAPI decoder"
-            } else {
-                ""
-            };
-            missing.push(format!(
-                "hevc_vaapi profiles require a live VAAPI-bound ffmpeg worker{decoder}; \
-                 start one with: voom worker run-local --kind ffmpeg \
-                 --vaapi-device <pci-address>"
-            ));
-        }
+        let missing = missing_backend_workers(&requirements, &availability);
         if missing.is_empty() {
             return Ok(());
         }
@@ -309,6 +299,70 @@ impl ControlPlane {
     }
 }
 
+/// The backends that currently have a live, capable worker. A set rather than one
+/// flag per backend so adding a backend needs no new field here.
+type BackendAvailability = BTreeSet<VideoEncoderBackend>;
+
+/// One operator-actionable line per required backend that has no live worker.
+fn missing_backend_workers(
+    requirements: &VideoBackendRequirements,
+    availability: &BackendAvailability,
+) -> Vec<String> {
+    let mut missing = Vec::new();
+    if requirements.software && !availability.contains(&VideoEncoderBackend::Software) {
+        missing.push(
+            "software transcode profiles require an unbound ffmpeg worker; \
+             start one with: voom worker run-local --kind ffmpeg"
+                .to_owned(),
+        );
+    }
+    if requirements.nvidia.required && !availability.contains(&VideoEncoderBackend::Nvidia) {
+        let decoder = if requirements.nvidia.hardware_decode {
+            " with at least one advertised CUVID decoder"
+        } else {
+            ""
+        };
+        missing.push(format!(
+            "hevc_nvenc profiles require a live NVIDIA-bound ffmpeg worker{decoder}; \
+             start one with: voom worker run-local --kind ffmpeg \
+             --nvidia-device GPU-<uuid>"
+        ));
+    }
+    if requirements.vaapi.required && !availability.contains(&VideoEncoderBackend::Vaapi) {
+        let decoder = if requirements.vaapi.hardware_decode {
+            " with at least one probed VAAPI decoder"
+        } else {
+            ""
+        };
+        missing.push(format!(
+            "hevc_vaapi profiles require a live VAAPI-bound ffmpeg worker{decoder}; \
+             start one with: voom worker run-local --kind ffmpeg \
+             --vaapi-device <pci-address>"
+        ));
+    }
+    if requirements.videotoolbox.required
+        && !availability.contains(&VideoEncoderBackend::VideoToolbox)
+    {
+        let encoders = requirements
+            .videotoolbox_encoders
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(", ");
+        let decoder = if requirements.videotoolbox.hardware_decode {
+            " with at least one advertised VideoToolbox decoder"
+        } else {
+            ""
+        };
+        missing.push(format!(
+            "VideoToolbox profiles require a live host-bound ffmpeg worker advertising \
+             [{encoders}]{decoder}; start one with: voom worker run-local --kind ffmpeg \
+             --videotoolbox"
+        ));
+    }
+    missing
+}
+
 /// What one accelerator backend's profiles need from the fleet: whether any profile
 /// targets it at all, and whether any of those also selects hardware decode, which
 /// needs a device that probed a decoder as well as an encoder.
@@ -325,6 +379,11 @@ struct VideoBackendRequirements {
     software: bool,
     nvidia: BackendRequirement,
     vaapi: BackendRequirement,
+    videotoolbox: BackendRequirement,
+    /// `VideoToolbox` is the one backend with more than one encoder, so preflight
+    /// must check the device advertises the specific encoders the policy names
+    /// rather than only that some `VideoToolbox` device is bound.
+    videotoolbox_encoders: BTreeSet<String>,
 }
 
 fn policy_video_backend_requirements(
@@ -385,6 +444,13 @@ fn record_transcode_video_requirement(
         VideoEncoderBackend::Vaapi => {
             requirements.vaapi.required = true;
             requirements.vaapi.hardware_decode |= decode.is_vaapi();
+        }
+        VideoEncoderBackend::VideoToolbox => {
+            requirements.videotoolbox.required = true;
+            requirements.videotoolbox.hardware_decode |= decode.is_video_toolbox();
+            requirements
+                .videotoolbox_encoders
+                .insert(encoder.to_owned());
         }
     }
     Ok(())

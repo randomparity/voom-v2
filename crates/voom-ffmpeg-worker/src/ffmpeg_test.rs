@@ -5,6 +5,7 @@ use voom_worker_protocol::{
     TranscodeAudioOutput, TranscodeAudioRequest, TranscodeAudioSelection, TranscodeAudioSettings,
     TranscodeVideoExpectedFacts, TranscodeVideoInput, TranscodeVideoOutput, TranscodeVideoProfile,
     TranscodeVideoRequest, VaapiVideoAcceleratorDescriptor, VideoHardwareAssignment,
+    VideoToolboxDecodeCapability, VideoToolboxVideoAcceleratorDescriptor,
 };
 
 use super::*;
@@ -72,6 +73,7 @@ fn basic_request(
                 local_file_key: None,
             },
             video_codec: None,
+            video_pixel_format: None,
         },
         output: TranscodeVideoOutput {
             staging_root: dir.to_string_lossy().into_owned(),
@@ -107,6 +109,7 @@ fn profile_x265_main10() -> TranscodeVideoProfile {
         crf: Some(18),
         cq: None,
         qp: None,
+        bitrate_kbps: None,
         preset: Some("slow".to_owned()),
         tune: None,
         codec_profile: Some("main10".to_owned()),
@@ -127,6 +130,7 @@ fn profile_svtav1() -> TranscodeVideoProfile {
         crf: Some(32),
         cq: None,
         qp: None,
+        bitrate_kbps: None,
         preset: Some("8".to_owned()),
         tune: None,
         codec_profile: None,
@@ -147,6 +151,7 @@ fn profile_libaom() -> TranscodeVideoProfile {
         crf: Some(20),
         cq: None,
         qp: None,
+        bitrate_kbps: None,
         preset: Some("4".to_owned()),
         tune: None,
         codec_profile: None,
@@ -167,6 +172,7 @@ fn profile_1080p() -> TranscodeVideoProfile {
         crf: Some(23),
         cq: None,
         qp: None,
+        bitrate_kbps: None,
         preset: Some("medium".to_owned()),
         tune: None,
         codec_profile: None,
@@ -191,6 +197,7 @@ fn profile_nvenc(decode: voom_core::VideoDecodeMode) -> TranscodeVideoProfile {
         crf: None,
         cq: Some(22),
         qp: None,
+        bitrate_kbps: None,
         preset: Some("p5".to_owned()),
         tune: Some("hq".to_owned()),
         codec_profile: Some("main".to_owned()),
@@ -229,67 +236,69 @@ fn nvidia_request(dir: &Path, decode: voom_core::VideoDecodeMode) -> TranscodeVi
     request
 }
 
-/// A `hevc_vaapi` profile: `qp` quality domain, no preset (spec §3), and a
-/// hardware *surface* pixel format rather than a software one.
-fn profile_vaapi(
+fn videotoolbox_descriptor() -> VideoToolboxVideoAcceleratorDescriptor {
+    VideoToolboxVideoAcceleratorDescriptor {
+        hardware_token: "videotoolbox:0123456789abcdef".to_owned(),
+        resource_id: "0123456789abcdef".to_owned(),
+        model_identifier: "Mac17,6".to_owned(),
+        chip_name: "Apple M5 Max".to_owned(),
+        macos_version: "26.5.2".to_owned(),
+        macos_build: "25F90".to_owned(),
+        encoders: vec![
+            "h264_videotoolbox".to_owned(),
+            "hevc_videotoolbox".to_owned(),
+        ],
+        decoders: vec![
+            VideoToolboxDecodeCapability {
+                codec: "h264".to_owned(),
+                pixel_formats: vec!["yuv420p".to_owned()],
+            },
+            VideoToolboxDecodeCapability {
+                codec: "hevc".to_owned(),
+                pixel_formats: vec!["yuv420p".to_owned(), "yuv420p10le".to_owned()],
+            },
+        ],
+        max_sessions: 4,
+    }
+}
+
+fn profile_videotoolbox(
+    encoder: &str,
+    target_codec: &str,
+    codec_profile: &str,
+    codec_level: Option<&str>,
+    pixel_format: &str,
     decode: voom_core::VideoDecodeMode,
-    pixel_format: Option<&str>,
-    codec_profile: Option<&str>,
 ) -> TranscodeVideoProfile {
     TranscodeVideoProfile {
-        name: "hevc-vaapi".to_owned(),
-        target_codec: "hevc".to_owned(),
-        encoder: "hevc_vaapi".to_owned(),
+        name: format!("{target_codec}-videotoolbox"),
+        target_codec: target_codec.to_owned(),
+        encoder: encoder.to_owned(),
         crf: None,
         cq: None,
-        qp: Some(24),
-        preset: None,
+        qp: None,
+        bitrate_kbps: Some(8_000),
+        preset: Some("default".to_owned()),
         tune: None,
-        codec_profile: codec_profile.map(str::to_owned),
-        codec_level: None,
-        pixel_format: pixel_format.map(str::to_owned),
+        codec_profile: Some(codec_profile.to_owned()),
+        codec_level: codec_level.map(str::to_owned),
+        pixel_format: Some(pixel_format.to_owned()),
         max_width: None,
         max_height: None,
-        decode,
         copy_compatible: false,
+        decode,
     }
 }
 
-/// A bound VAAPI device whose render node is deliberately **not**
-/// `/dev/dri/renderD128`: the argv must name the node preflight resolved for the
-/// configured PCI address, so an implementation that hardcoded the common default
-/// fails these tests instead of passing by coincidence.
-fn vaapi_binding(dir: &Path) -> VaapiDeviceBinding {
-    VaapiDeviceBinding {
-        render_node: dir.join("renderD129"),
-        descriptor: VaapiVideoAcceleratorDescriptor {
-            pci_address: "0000:f4:00.0".to_owned(),
-            device_name: "radeonsi".to_owned(),
-            driver_version: "Mesa Gallium 26.1.5 (radeonsi, strix_halo)".to_owned(),
-            encoders: vec!["hevc_vaapi".to_owned()],
-            decoders: vec!["h264".to_owned(), "hevc".to_owned(), "av1".to_owned()],
-            max_sessions: 1,
-        },
-    }
-}
-
-fn vaapi_request(dir: &Path, profile: TranscodeVideoProfile) -> TranscodeVideoRequest {
-    let mut request = basic_request(dir, "mkv", "hevc", profile);
-    request.hardware_assignment = Some(VideoHardwareAssignment::vaapi(
-        "vaapi:pci-0000:f4:00.0",
-        "0000:f4:00.0",
+fn videotoolbox_request(dir: &Path, profile: TranscodeVideoProfile) -> TranscodeVideoRequest {
+    let target_codec = profile.target_codec.clone();
+    let mut request = basic_request(dir, "mkv", &target_codec, profile);
+    let descriptor = videotoolbox_descriptor();
+    request.hardware_assignment = Some(VideoHardwareAssignment::video_toolbox(
+        descriptor.hardware_token,
+        descriptor.resource_id,
     ));
     request
-}
-
-/// The captured argv with the tempdir prefix elided, so a snapshot can pin the
-/// **whole** command line. Pinning all of it is what makes the spec's negative
-/// rules — no `-level`, no `-vf` on the hardware-decode path, no software encoder
-/// anywhere — falsifiable, which a handful of substring assertions cannot do.
-fn captured_argv(args_path: &Path, dir: &Path) -> String {
-    std::fs::read_to_string(args_path)
-        .unwrap()
-        .replace(&format!("{}/", dir.display()), "<DIR>/")
 }
 
 fn output_mkv() -> (&'static str, &'static str) {
@@ -400,517 +409,114 @@ async fn nvenc_cuda_decode_command_pins_decoder_and_zero_copy_filter() {
     assert!(!args.lines().any(|arg| arg == "-gpu"), "{args}");
 }
 
-// ---------------------------------------------------------------------------
-// VAAPI conformance: the three command shapes spec §7 executed on real hardware
-// ---------------------------------------------------------------------------
-
-/// Spec §7 row 1, 8-bit. `-vaapi_device` names the bound node at open time, which
-/// is where VAAPI binding strength comes from (ADR 0051 §1), and the software
-/// frames are uploaded explicitly — no implicit transfer, and `-rc_mode CQP` is
-/// stated rather than left to the encoder's `auto` default.
 #[tokio::test]
-async fn vaapi_software_decode_uploads_nv12_to_the_bound_render_node() {
+async fn videotoolbox_software_decode_uses_explicit_format_and_hardware_only_encode() {
     let dir = tempfile::tempdir().unwrap();
     let (ffmpeg, args_path) = arg_capture_ffmpeg(dir.path());
     let ffprobe = hevc_mkv_ffprobe(dir.path());
     tokio::fs::write(dir.path().join("input.mkv"), b"input")
         .await
         .unwrap();
-    let profile = profile_vaapi(voom_core::VideoDecodeMode::default(), Some("nv12"), None);
-    let request = vaapi_request(dir.path(), profile);
+    let profile = profile_videotoolbox(
+        "hevc_videotoolbox",
+        "hevc",
+        "main",
+        None,
+        "yuv420p",
+        voom_core::VideoDecodeMode::default(),
+    );
+    let request = videotoolbox_request(dir.path(), profile);
     let config = FfmpegConfig::new(ffmpeg, ffprobe, "test".to_owned(), DEFAULT_PROCESS_TIMEOUT)
-        .with_vaapi_device(vaapi_binding(dir.path()));
+        .with_videotoolbox_device(videotoolbox_descriptor());
 
     run_ffmpeg_transcode(&config, &request, video_source(1920, 1080, &[]))
         .await
         .unwrap();
 
-    insta::assert_snapshot!(captured_argv(&args_path, dir.path()), @r"
-    -hide_banner
-    -nostdin
-    -n
-    -vaapi_device
-    <DIR>/renderD129
-    -i
-    <DIR>/input.mkv
-    -map
-    0:v:0
-    -map
-    0:a?
-    -map
-    0:s?
-    -map
-    0:t?
-    -c:v
-    hevc_vaapi
-    -rc_mode
-    CQP
-    -qp
-    24
-    -vf
-    format=nv12,hwupload
-    -c:a
-    copy
-    -c:s
-    copy
-    -c:t
-    copy
-    -map_metadata
-    0
-    -f
-    matroska
-    <DIR>/out.mkv
-    ");
+    let args = std::fs::read_to_string(args_path).unwrap();
+    assert!(args.contains("-vf\nformat=nv12\n"), "{args}");
+    assert!(
+        args.contains("-c:v\nhevc_videotoolbox\n-allow_sw\n0\n-b:v\n8000k\n"),
+        "{args}"
+    );
+    assert!(!args.contains("-hwaccel\n"), "{args}");
+    assert!(!args.contains("allow_sw\n1"), "{args}");
 }
 
-/// Spec §7 row 3 over row 1: Main10 differs from Main only in the uploaded surface
-/// format and the named profile. `-profile:v main10` is passed **by name** because
-/// `hevc_vaapi`'s `-profile` carries named constants (spec §2.2), so there is no
-/// name-to-integer mapping layer to get wrong.
 #[tokio::test]
-async fn vaapi_software_decode_uploads_p010_and_names_main10_profile() {
+async fn videotoolbox_decode_without_scaling_keeps_hardware_frames() {
     let dir = tempfile::tempdir().unwrap();
     let (ffmpeg, args_path) = arg_capture_ffmpeg(dir.path());
     let ffprobe = hevc_mkv_ffprobe_10bit(dir.path());
     tokio::fs::write(dir.path().join("input.mkv"), b"input")
         .await
         .unwrap();
-    let profile = profile_vaapi(
-        voom_core::VideoDecodeMode::default(),
-        Some("p010"),
-        Some("main10"),
+    let profile = profile_videotoolbox(
+        "hevc_videotoolbox",
+        "hevc",
+        "main10",
+        None,
+        "yuv420p10le",
+        voom_core::VideoDecodeMode::video_toolbox(),
     );
-    let request = vaapi_request(dir.path(), profile);
+    let request = videotoolbox_request(dir.path(), profile);
     let config = FfmpegConfig::new(ffmpeg, ffprobe, "test".to_owned(), DEFAULT_PROCESS_TIMEOUT)
-        .with_vaapi_device(vaapi_binding(dir.path()));
+        .with_videotoolbox_device(videotoolbox_descriptor());
 
     run_ffmpeg_transcode(&config, &request, video_source(1920, 1080, &[]))
         .await
         .unwrap();
 
-    insta::assert_snapshot!(captured_argv(&args_path, dir.path()), @r"
-    -hide_banner
-    -nostdin
-    -n
-    -vaapi_device
-    <DIR>/renderD129
-    -i
-    <DIR>/input.mkv
-    -map
-    0:v:0
-    -map
-    0:a?
-    -map
-    0:s?
-    -map
-    0:t?
-    -c:v
-    hevc_vaapi
-    -rc_mode
-    CQP
-    -qp
-    24
-    -profile:v
-    main10
-    -vf
-    format=p010,hwupload
-    -c:a
-    copy
-    -c:s
-    copy
-    -c:t
-    copy
-    -map_metadata
-    0
-    -f
-    matroska
-    <DIR>/out.mkv
-    ");
-}
-
-/// Spec §7 row 2, 8-bit. A VAAPI-decoded source is already in hardware frames, so
-/// **no** filter is inserted: a `format=...,hwupload` here would download and
-/// re-upload every frame. `-hwaccel_output_format vaapi` is what makes a silent
-/// software-decode fallback impossible — `FFmpeg` errors instead (spec §2.2).
-#[tokio::test]
-async fn vaapi_hardware_decode_stays_in_hardware_frames_with_no_filter() {
-    let dir = tempfile::tempdir().unwrap();
-    let (ffmpeg, args_path) = arg_capture_ffmpeg(dir.path());
-    let ffprobe = hevc_mkv_ffprobe(dir.path());
-    tokio::fs::write(dir.path().join("input.mkv"), b"input")
-        .await
-        .unwrap();
-    let profile = profile_vaapi(voom_core::VideoDecodeMode::vaapi(), Some("nv12"), None);
-    let request = vaapi_request(dir.path(), profile);
-    let config = FfmpegConfig::new(ffmpeg, ffprobe, "test".to_owned(), DEFAULT_PROCESS_TIMEOUT)
-        .with_vaapi_device(vaapi_binding(dir.path()));
-
-    run_ffmpeg_transcode(&config, &request, video_source(1920, 1080, &[]))
-        .await
-        .unwrap();
-
-    insta::assert_snapshot!(captured_argv(&args_path, dir.path()), @r"
-    -hide_banner
-    -nostdin
-    -n
-    -hwaccel
-    vaapi
-    -hwaccel_device
-    <DIR>/renderD129
-    -hwaccel_output_format
-    vaapi
-    -i
-    <DIR>/input.mkv
-    -map
-    0:v:0
-    -map
-    0:a?
-    -map
-    0:s?
-    -map
-    0:t?
-    -c:v
-    hevc_vaapi
-    -rc_mode
-    CQP
-    -qp
-    24
-    -c:a
-    copy
-    -c:s
-    copy
-    -c:t
-    copy
-    -map_metadata
-    0
-    -f
-    matroska
-    <DIR>/out.mkv
-    ");
-}
-
-/// Spec §7 row 3 over row 2. The decoder already produced 10-bit surfaces, so
-/// Main10 hardware-decode adds only `-profile:v main10` and still inserts no
-/// filter: the surface format is not ours to restate here.
-#[tokio::test]
-async fn vaapi_hardware_decode_main10_names_profile_without_a_filter() {
-    let dir = tempfile::tempdir().unwrap();
-    let (ffmpeg, args_path) = arg_capture_ffmpeg(dir.path());
-    let ffprobe = hevc_mkv_ffprobe_10bit(dir.path());
-    tokio::fs::write(dir.path().join("input.mkv"), b"input")
-        .await
-        .unwrap();
-    let profile = profile_vaapi(
-        voom_core::VideoDecodeMode::vaapi(),
-        Some("p010"),
-        Some("main10"),
+    let args = std::fs::read_to_string(args_path).unwrap();
+    assert!(
+        args.contains("-hwaccel\nvideotoolbox\n-hwaccel_output_format\nvideotoolbox_vld\n-i\n"),
+        "{args}"
     );
-    let request = vaapi_request(dir.path(), profile);
-    let config = FfmpegConfig::new(ffmpeg, ffprobe, "test".to_owned(), DEFAULT_PROCESS_TIMEOUT)
-        .with_vaapi_device(vaapi_binding(dir.path()));
-
-    run_ffmpeg_transcode(&config, &request, video_source(1920, 1080, &[]))
-        .await
-        .unwrap();
-
-    insta::assert_snapshot!(captured_argv(&args_path, dir.path()), @r"
-    -hide_banner
-    -nostdin
-    -n
-    -hwaccel
-    vaapi
-    -hwaccel_device
-    <DIR>/renderD129
-    -hwaccel_output_format
-    vaapi
-    -i
-    <DIR>/input.mkv
-    -map
-    0:v:0
-    -map
-    0:a?
-    -map
-    0:s?
-    -map
-    0:t?
-    -c:v
-    hevc_vaapi
-    -rc_mode
-    CQP
-    -qp
-    24
-    -profile:v
-    main10
-    -c:a
-    copy
-    -c:s
-    copy
-    -c:t
-    copy
-    -map_metadata
-    0
-    -f
-    matroska
-    <DIR>/out.mkv
-    ");
-}
-
-/// Rate control is stated on every VAAPI shape, never inherited. `auto` is
-/// `-rc_mode`'s `FFmpeg` default, so relying on it would let rate-control behavior
-/// move with an `FFmpeg` or driver upgrade (ADR 0051 §5).
-#[test]
-fn vaapi_always_states_rc_mode_cqp_and_never_relies_on_auto() {
-    for decode in [
-        voom_core::VideoDecodeMode::default(),
-        voom_core::VideoDecodeMode::vaapi(),
-    ] {
-        for codec_profile in [None, Some("main"), Some("main10")] {
-            let profile = profile_vaapi(decode, Some("nv12"), codec_profile);
-            let args = video_codec_args(&profile, false).unwrap();
-            let rc_mode = args.iter().position(|arg| arg == "-rc_mode").unwrap();
-            assert_eq!(args[rc_mode + 1], "CQP");
-            assert!(!args.iter().any(|arg| arg == "auto"), "{args:?}");
-        }
+    assert!(!args.contains("-vf\n"), "{args}");
+    for forbidden in ["hwdownload", "hwupload", "format=", "scale="] {
+        assert!(!args.contains(forbidden), "{args}");
     }
 }
 
-/// `codec_profile` reaches `-profile:v` verbatim. `hevc_vaapi`'s `-profile` is an
-/// int-typed `AVOption` carrying named constants, so `FFmpeg` resolves `main10`
-/// itself and rejects an unknown name — which is the behavior we want. A
-/// name-to-integer table here would be a second place to keep correct.
-#[test]
-fn vaapi_passes_codec_profile_by_name_with_no_integer_mapping() {
-    for (codec_profile, integer) in [("main", "1"), ("main10", "2")] {
-        let profile = profile_vaapi(
-            voom_core::VideoDecodeMode::default(),
-            Some("nv12"),
-            Some(codec_profile),
-        );
-        let args = video_codec_args(&profile, false).unwrap();
-        let at = args.iter().position(|arg| arg == "-profile:v").unwrap();
-        assert_eq!(args[at + 1], codec_profile);
-        assert!(!args.iter().any(|arg| arg == integer), "{args:?}");
-    }
-}
-
-/// The uploaded surface format already selects Main or Main10 (spec §2.2), so an
-/// unconditional `-profile:v` would invent a value the operator never chose.
-#[test]
-fn vaapi_omits_profile_when_the_operator_set_none() {
-    let profile = profile_vaapi(voom_core::VideoDecodeMode::default(), Some("p010"), None);
-
-    let args = video_codec_args(&profile, false).unwrap();
-
-    assert!(!args.iter().any(|arg| arg == "-profile:v"), "{args:?}");
-}
-
-/// `codec_level` is outside the VAAPI vocabulary: `HEVC_VAAPI`'s `codec_levels` is
-/// empty, so descriptor validation rejects it first. Reaching the builder with one
-/// set means validation was bypassed — drop it silently and the operator's stated
-/// level would vanish from a command that claims to honor the profile.
-#[test]
-fn vaapi_never_emits_level_and_refuses_a_profile_that_sets_one() {
-    let clean = profile_vaapi(voom_core::VideoDecodeMode::default(), Some("nv12"), None);
-    let args = video_codec_args(&clean, false).unwrap();
-    assert!(!args.iter().any(|arg| arg == "-level"), "{args:?}");
-
-    let mut leveled = clean;
-    leveled.codec_level = Some("5.1".to_owned());
-
-    let err = video_codec_args(&leveled, false).unwrap_err();
-
-    assert!(err.to_string().contains("codec_level"), "{err}");
-    assert!(err.to_string().contains("5.1"), "{err}");
-}
-
-/// Issue #409's hard rule: a VAAPI failure is a failure. No error path may fall
-/// back to a software encoder, so every rejected VAAPI request must name no
-/// encoder at all rather than a substituted one.
-#[test]
-fn no_vaapi_failure_path_substitutes_a_software_encoder() {
-    let software_encoders = ["libx265", "libsvtav1", "libaom-av1"];
-    let mut no_quality = profile_vaapi(voom_core::VideoDecodeMode::default(), Some("nv12"), None);
-    no_quality.qp = None;
-    let mut leveled = profile_vaapi(voom_core::VideoDecodeMode::default(), Some("nv12"), None);
-    leveled.codec_level = Some("5.1".to_owned());
-
-    for profile in [no_quality, leveled] {
-        let err = video_codec_args(&profile, false).unwrap_err();
-        for encoder in software_encoders {
-            assert!(!err.to_string().contains(encoder), "{err}");
-        }
-    }
-    for pixel_format in [Some("nv12"), Some("p010"), None] {
-        let profile = profile_vaapi(voom_core::VideoDecodeMode::default(), pixel_format, None);
-        let args = video_codec_args(&profile, false).unwrap();
-        for encoder in software_encoders {
-            assert!(!args.iter().any(|arg| arg == encoder), "{args:?}");
-        }
-    }
-}
-
-/// A `hevc_vaapi` request that reached a worker with no bound device must fail
-/// before ffmpeg runs. The alternative — opening whatever VAAPI device happens to
-/// be default — would encode on a device the scheduler never leased.
 #[tokio::test]
-async fn vaapi_request_on_an_unbound_worker_fails_before_ffmpeg_runs() {
+async fn videotoolbox_decode_downscale_uses_scale_vt_only() {
     let dir = tempfile::tempdir().unwrap();
     let (ffmpeg, args_path) = arg_capture_ffmpeg(dir.path());
     let ffprobe = hevc_mkv_ffprobe(dir.path());
     tokio::fs::write(dir.path().join("input.mkv"), b"input")
         .await
         .unwrap();
-    let profile = profile_vaapi(voom_core::VideoDecodeMode::default(), Some("nv12"), None);
-    let request = vaapi_request(dir.path(), profile);
-    let config = FfmpegConfig::new(ffmpeg, ffprobe, "test".to_owned(), DEFAULT_PROCESS_TIMEOUT);
+    let mut profile = profile_videotoolbox(
+        "hevc_videotoolbox",
+        "hevc",
+        "main",
+        None,
+        "yuv420p",
+        voom_core::VideoDecodeMode::video_toolbox(),
+    );
+    profile.max_width = Some(1920);
+    profile.max_height = Some(1080);
+    let request = videotoolbox_request(dir.path(), profile);
+    let config = FfmpegConfig::new(ffmpeg, ffprobe, "test".to_owned(), DEFAULT_PROCESS_TIMEOUT)
+        .with_videotoolbox_device(videotoolbox_descriptor());
 
-    let err = run_ffmpeg_transcode(&config, &request, video_source(1920, 1080, &[]))
-        .await
-        .unwrap_err();
-
-    assert!(err.to_string().contains("hevc_vaapi"), "{err}");
-    assert!(!args_path.exists(), "ffmpeg must not have been invoked");
-}
-
-/// VAAPI decode covers `h264`/`hevc`/`av1` only. An unsupported source codec is
-/// reported against the codec, not silently decoded in software into the hardware
-/// encoder — that would be the implicit fallback #409 forbids.
-#[tokio::test]
-async fn vaapi_hardware_decode_rejects_an_unsupported_source_codec() {
-    let dir = tempfile::tempdir().unwrap();
-    let (ffmpeg, args_path) = arg_capture_ffmpeg(dir.path());
-    let ffprobe = hevc_mkv_ffprobe(dir.path());
-    tokio::fs::write(dir.path().join("input.mkv"), b"input")
+    run_ffmpeg_transcode(&config, &request, video_source(3840, 2160, &[]))
         .await
         .unwrap();
-    let profile = profile_vaapi(voom_core::VideoDecodeMode::vaapi(), Some("nv12"), None);
-    let request = vaapi_request(dir.path(), profile);
-    let config = FfmpegConfig::new(ffmpeg, ffprobe, "test".to_owned(), DEFAULT_PROCESS_TIMEOUT)
-        .with_vaapi_device(vaapi_binding(dir.path()));
-    let source = VideoTranscodeInput {
-        width: 1920,
-        height: 1080,
-        codec: "vp9",
-        forced_subtitle_ordinals: &[],
-    };
 
-    let err = run_ffmpeg_transcode(&config, &request, source)
-        .await
-        .unwrap_err();
-
-    assert!(err.to_string().contains("vp9"), "{err}");
-    assert!(!args_path.exists(), "ffmpeg must not have been invoked");
+    let args = std::fs::read_to_string(args_path).unwrap();
+    assert!(args.contains("-vf\nscale_vt=w=1920:h=1080\n"), "{args}");
+    for forbidden in ["hwdownload", "hwupload", "format=", "scale="] {
+        assert!(!args.contains(forbidden), "{args}");
+    }
 }
 
-/// An unknown surface format must not reach ffmpeg. `nv12` and `p010` are the two
-/// the descriptor allows and the two spec §2.2 verified; a software format name
-/// like `yuv420p` here would silently produce a filter VAAPI cannot upload.
 #[test]
-fn vaapi_rejects_a_pixel_format_outside_the_surface_vocabulary() {
-    let profile = profile_vaapi(voom_core::VideoDecodeMode::default(), Some("yuv420p"), None);
-
-    let err = video_filter_args(&profile, 1920, 1080, false).unwrap_err();
-
-    assert!(err.to_string().contains("yuv420p"), "{err}");
-}
-
-/// This slice generates no VAAPI scale filter (spec §7 records none), so a profile
-/// whose dimension cap the source exceeds is refused up front. Ignoring the cap
-/// would emit an over-cap output, and picking a filter shape the spec never
-/// verified on hardware would be inventing one.
-#[test]
-fn vaapi_refuses_a_downscale_it_has_no_verified_filter_for() {
-    let mut profile = profile_vaapi(voom_core::VideoDecodeMode::default(), Some("nv12"), None);
-    profile.max_width = Some(1280);
-    profile.max_height = Some(720);
-
-    let within = video_filter_args(&profile, 1280, 720, false).unwrap();
-    let err = video_filter_args(&profile, 1920, 1080, false).unwrap_err();
-
+fn h264_mp4_uses_avc1_tag() {
     assert_eq!(
-        within,
-        vec![
-            OsString::from("-vf"),
-            OsString::from("format=nv12,hwupload")
-        ]
+        container_args("mp4", "h264").unwrap(),
+        ["-f", "mp4", "-tag:v", "avc1"].map(OsString::from)
     );
-    assert!(err.to_string().contains("1920x1080"), "{err}");
-    assert!(err.to_string().contains("hevc_vaapi"), "{err}");
-}
-
-/// A VAAPI profile names a hardware surface format, but the file ffmpeg writes
-/// carries the software format that surface decodes to — spec §2.2 measured
-/// `nv12` → `yuv420p` and `p010` → `yuv420p10le`. Comparing the surface name to
-/// the file's format would reject every conforming VAAPI encode.
-#[tokio::test]
-async fn vaapi_output_verification_expects_the_file_format_not_the_surface_format() {
-    let dir = tempfile::tempdir().unwrap();
-    let (ffmpeg, _args_path) = arg_capture_ffmpeg(dir.path());
-    tokio::fs::write(dir.path().join("input.mkv"), b"input")
-        .await
-        .unwrap();
-    let eight_bit = profile_vaapi(voom_core::VideoDecodeMode::default(), Some("nv12"), None);
-    let ten_bit = profile_vaapi(
-        voom_core::VideoDecodeMode::default(),
-        Some("p010"),
-        Some("main10"),
-    );
-    let binding = vaapi_binding(dir.path());
-
-    let eight = FfmpegConfig::new(
-        ffmpeg.clone(),
-        hevc_mkv_ffprobe(dir.path()),
-        "test".to_owned(),
-        DEFAULT_PROCESS_TIMEOUT,
-    )
-    .with_vaapi_device(binding.clone());
-    let probe = run_ffmpeg_transcode(
-        &eight,
-        &vaapi_request(dir.path(), eight_bit.clone()),
-        video_source(1920, 1080, &[]),
-    )
-    .await
-    .unwrap();
-    assert_eq!(probe.pixel_format, "yuv420p");
-
-    tokio::fs::remove_file(dir.path().join("out.mkv"))
-        .await
-        .unwrap();
-    let ten = FfmpegConfig::new(
-        ffmpeg.clone(),
-        hevc_mkv_ffprobe_10bit(dir.path()),
-        "test".to_owned(),
-        DEFAULT_PROCESS_TIMEOUT,
-    )
-    .with_vaapi_device(binding.clone());
-    let probe = run_ffmpeg_transcode(
-        &ten,
-        &vaapi_request(dir.path(), ten_bit),
-        video_source(1920, 1080, &[]),
-    )
-    .await
-    .unwrap();
-    assert_eq!(probe.pixel_format, "yuv420p10le");
-
-    // A 10-bit file under an 8-bit surface format is still a mismatch to report.
-    tokio::fs::remove_file(dir.path().join("out.mkv"))
-        .await
-        .unwrap();
-    let mismatched = FfmpegConfig::new(
-        ffmpeg,
-        hevc_mkv_ffprobe_10bit(dir.path()),
-        "test".to_owned(),
-        DEFAULT_PROCESS_TIMEOUT,
-    )
-    .with_vaapi_device(binding);
-    let err = run_ffmpeg_transcode(
-        &mismatched,
-        &vaapi_request(dir.path(), eight_bit),
-        video_source(1920, 1080, &[]),
-    )
-    .await
-    .unwrap_err();
-    assert!(err.to_string().contains("yuv420p"), "{err}");
 }
 
 #[test]
@@ -1342,6 +948,7 @@ async fn ffmpeg_non_zero_exit_is_error() {
                 local_file_key: None,
             },
             video_codec: None,
+            video_pixel_format: None,
         },
         output: TranscodeVideoOutput {
             staging_root: dir.path().to_string_lossy().into_owned(),
@@ -1393,6 +1000,7 @@ async fn ffmpeg_success_requires_hevc_matroska_probe() {
                 local_file_key: None,
             },
             video_codec: None,
+            video_pixel_format: None,
         },
         output: TranscodeVideoOutput {
             staging_root: dir.path().to_string_lossy().into_owned(),
@@ -1836,3 +1444,576 @@ fn make_executable(path: &Path) {
 
 #[cfg(not(unix))]
 fn make_executable(_path: &Path) {}
+
+/// A `hevc_vaapi` profile: `qp` quality domain, no preset (spec §3), and a
+/// hardware *surface* pixel format rather than a software one.
+fn profile_vaapi(
+    decode: voom_core::VideoDecodeMode,
+    pixel_format: Option<&str>,
+    codec_profile: Option<&str>,
+) -> TranscodeVideoProfile {
+    TranscodeVideoProfile {
+        name: "hevc-vaapi".to_owned(),
+        target_codec: "hevc".to_owned(),
+        encoder: "hevc_vaapi".to_owned(),
+        crf: None,
+        cq: None,
+        qp: Some(24),
+        bitrate_kbps: None,
+        preset: None,
+        tune: None,
+        codec_profile: codec_profile.map(str::to_owned),
+        codec_level: None,
+        pixel_format: pixel_format.map(str::to_owned),
+        max_width: None,
+        max_height: None,
+        decode,
+        copy_compatible: false,
+    }
+}
+
+/// A bound VAAPI device whose render node is deliberately **not**
+/// `/dev/dri/renderD128`: the argv must name the node preflight resolved for the
+/// configured PCI address, so an implementation that hardcoded the common default
+/// fails these tests instead of passing by coincidence.
+fn vaapi_binding(dir: &Path) -> VaapiDeviceBinding {
+    VaapiDeviceBinding {
+        render_node: dir.join("renderD129"),
+        descriptor: VaapiVideoAcceleratorDescriptor {
+            pci_address: "0000:f4:00.0".to_owned(),
+            device_name: "radeonsi".to_owned(),
+            driver_version: "Mesa Gallium 26.1.5 (radeonsi, strix_halo)".to_owned(),
+            encoders: vec!["hevc_vaapi".to_owned()],
+            decoders: vec!["h264".to_owned(), "hevc".to_owned(), "av1".to_owned()],
+            max_sessions: 1,
+        },
+    }
+}
+
+fn vaapi_request(dir: &Path, profile: TranscodeVideoProfile) -> TranscodeVideoRequest {
+    let mut request = basic_request(dir, "mkv", "hevc", profile);
+    request.hardware_assignment = Some(VideoHardwareAssignment::vaapi(
+        "vaapi:pci-0000:f4:00.0",
+        "0000:f4:00.0",
+    ));
+    request
+}
+
+/// The captured argv with the tempdir prefix elided, so a snapshot can pin the
+/// **whole** command line. Pinning all of it is what makes the spec's negative
+/// rules — no `-level`, no `-vf` on the hardware-decode path, no software encoder
+/// anywhere — falsifiable, which a handful of substring assertions cannot do.
+fn captured_argv(args_path: &Path, dir: &Path) -> String {
+    std::fs::read_to_string(args_path)
+        .unwrap()
+        .replace(&format!("{}/", dir.display()), "<DIR>/")
+}
+
+/// Spec §7 row 1, 8-bit. `-vaapi_device` names the bound node at open time, which
+/// is where VAAPI binding strength comes from (ADR 0052 §1), and the software
+/// frames are uploaded explicitly — no implicit transfer, and `-rc_mode CQP` is
+/// stated rather than left to the encoder's `auto` default.
+#[tokio::test]
+async fn vaapi_software_decode_uploads_nv12_to_the_bound_render_node() {
+    let dir = tempfile::tempdir().unwrap();
+    let (ffmpeg, args_path) = arg_capture_ffmpeg(dir.path());
+    let ffprobe = hevc_mkv_ffprobe(dir.path());
+    tokio::fs::write(dir.path().join("input.mkv"), b"input")
+        .await
+        .unwrap();
+    let profile = profile_vaapi(voom_core::VideoDecodeMode::default(), Some("nv12"), None);
+    let request = vaapi_request(dir.path(), profile);
+    let config = FfmpegConfig::new(ffmpeg, ffprobe, "test".to_owned(), DEFAULT_PROCESS_TIMEOUT)
+        .with_vaapi_device(vaapi_binding(dir.path()));
+
+    run_ffmpeg_transcode(&config, &request, video_source(1920, 1080, &[]))
+        .await
+        .unwrap();
+
+    insta::assert_snapshot!(captured_argv(&args_path, dir.path()), @r"
+    -hide_banner
+    -nostdin
+    -n
+    -vaapi_device
+    <DIR>/renderD129
+    -i
+    <DIR>/input.mkv
+    -map
+    0:v:0
+    -map
+    0:a?
+    -map
+    0:s?
+    -map
+    0:t?
+    -c:v
+    hevc_vaapi
+    -rc_mode
+    CQP
+    -qp
+    24
+    -vf
+    format=nv12,hwupload
+    -c:a
+    copy
+    -c:s
+    copy
+    -c:t
+    copy
+    -map_metadata
+    0
+    -f
+    matroska
+    <DIR>/out.mkv
+    ");
+}
+
+/// Spec §7 row 3 over row 1: Main10 differs from Main only in the uploaded surface
+/// format and the named profile. `-profile:v main10` is passed **by name** because
+/// `hevc_vaapi`'s `-profile` carries named constants (spec §2.2), so there is no
+/// name-to-integer mapping layer to get wrong.
+#[tokio::test]
+async fn vaapi_software_decode_uploads_p010_and_names_main10_profile() {
+    let dir = tempfile::tempdir().unwrap();
+    let (ffmpeg, args_path) = arg_capture_ffmpeg(dir.path());
+    let ffprobe = hevc_mkv_ffprobe_10bit(dir.path());
+    tokio::fs::write(dir.path().join("input.mkv"), b"input")
+        .await
+        .unwrap();
+    let profile = profile_vaapi(
+        voom_core::VideoDecodeMode::default(),
+        Some("p010"),
+        Some("main10"),
+    );
+    let request = vaapi_request(dir.path(), profile);
+    let config = FfmpegConfig::new(ffmpeg, ffprobe, "test".to_owned(), DEFAULT_PROCESS_TIMEOUT)
+        .with_vaapi_device(vaapi_binding(dir.path()));
+
+    run_ffmpeg_transcode(&config, &request, video_source(1920, 1080, &[]))
+        .await
+        .unwrap();
+
+    insta::assert_snapshot!(captured_argv(&args_path, dir.path()), @r"
+    -hide_banner
+    -nostdin
+    -n
+    -vaapi_device
+    <DIR>/renderD129
+    -i
+    <DIR>/input.mkv
+    -map
+    0:v:0
+    -map
+    0:a?
+    -map
+    0:s?
+    -map
+    0:t?
+    -c:v
+    hevc_vaapi
+    -rc_mode
+    CQP
+    -qp
+    24
+    -profile:v
+    main10
+    -vf
+    format=p010,hwupload
+    -c:a
+    copy
+    -c:s
+    copy
+    -c:t
+    copy
+    -map_metadata
+    0
+    -f
+    matroska
+    <DIR>/out.mkv
+    ");
+}
+
+/// Spec §7 row 2, 8-bit. A VAAPI-decoded source is already in hardware frames, so
+/// **no** filter is inserted: a `format=...,hwupload` here would download and
+/// re-upload every frame. `-hwaccel_output_format vaapi` is what makes a silent
+/// software-decode fallback impossible — `FFmpeg` errors instead (spec §2.2).
+#[tokio::test]
+async fn vaapi_hardware_decode_stays_in_hardware_frames_with_no_filter() {
+    let dir = tempfile::tempdir().unwrap();
+    let (ffmpeg, args_path) = arg_capture_ffmpeg(dir.path());
+    let ffprobe = hevc_mkv_ffprobe(dir.path());
+    tokio::fs::write(dir.path().join("input.mkv"), b"input")
+        .await
+        .unwrap();
+    let profile = profile_vaapi(voom_core::VideoDecodeMode::vaapi(), Some("nv12"), None);
+    let request = vaapi_request(dir.path(), profile);
+    let config = FfmpegConfig::new(ffmpeg, ffprobe, "test".to_owned(), DEFAULT_PROCESS_TIMEOUT)
+        .with_vaapi_device(vaapi_binding(dir.path()));
+
+    run_ffmpeg_transcode(&config, &request, video_source(1920, 1080, &[]))
+        .await
+        .unwrap();
+
+    insta::assert_snapshot!(captured_argv(&args_path, dir.path()), @r"
+    -hide_banner
+    -nostdin
+    -n
+    -hwaccel
+    vaapi
+    -hwaccel_device
+    <DIR>/renderD129
+    -hwaccel_output_format
+    vaapi
+    -i
+    <DIR>/input.mkv
+    -map
+    0:v:0
+    -map
+    0:a?
+    -map
+    0:s?
+    -map
+    0:t?
+    -c:v
+    hevc_vaapi
+    -rc_mode
+    CQP
+    -qp
+    24
+    -c:a
+    copy
+    -c:s
+    copy
+    -c:t
+    copy
+    -map_metadata
+    0
+    -f
+    matroska
+    <DIR>/out.mkv
+    ");
+}
+
+/// Spec §7 row 3 over row 2. The decoder already produced 10-bit surfaces, so
+/// Main10 hardware-decode adds only `-profile:v main10` and still inserts no
+/// filter: the surface format is not ours to restate here.
+#[tokio::test]
+async fn vaapi_hardware_decode_main10_names_profile_without_a_filter() {
+    let dir = tempfile::tempdir().unwrap();
+    let (ffmpeg, args_path) = arg_capture_ffmpeg(dir.path());
+    let ffprobe = hevc_mkv_ffprobe_10bit(dir.path());
+    tokio::fs::write(dir.path().join("input.mkv"), b"input")
+        .await
+        .unwrap();
+    let profile = profile_vaapi(
+        voom_core::VideoDecodeMode::vaapi(),
+        Some("p010"),
+        Some("main10"),
+    );
+    let request = vaapi_request(dir.path(), profile);
+    let config = FfmpegConfig::new(ffmpeg, ffprobe, "test".to_owned(), DEFAULT_PROCESS_TIMEOUT)
+        .with_vaapi_device(vaapi_binding(dir.path()));
+
+    run_ffmpeg_transcode(&config, &request, video_source(1920, 1080, &[]))
+        .await
+        .unwrap();
+
+    insta::assert_snapshot!(captured_argv(&args_path, dir.path()), @r"
+    -hide_banner
+    -nostdin
+    -n
+    -hwaccel
+    vaapi
+    -hwaccel_device
+    <DIR>/renderD129
+    -hwaccel_output_format
+    vaapi
+    -i
+    <DIR>/input.mkv
+    -map
+    0:v:0
+    -map
+    0:a?
+    -map
+    0:s?
+    -map
+    0:t?
+    -c:v
+    hevc_vaapi
+    -rc_mode
+    CQP
+    -qp
+    24
+    -profile:v
+    main10
+    -c:a
+    copy
+    -c:s
+    copy
+    -c:t
+    copy
+    -map_metadata
+    0
+    -f
+    matroska
+    <DIR>/out.mkv
+    ");
+}
+
+/// Rate control is stated on every VAAPI shape, never inherited. `auto` is
+/// `-rc_mode`'s `FFmpeg` default, so relying on it would let rate-control behavior
+/// move with an `FFmpeg` or driver upgrade (ADR 0052 §5).
+#[test]
+fn vaapi_always_states_rc_mode_cqp_and_never_relies_on_auto() {
+    for decode in [
+        voom_core::VideoDecodeMode::default(),
+        voom_core::VideoDecodeMode::vaapi(),
+    ] {
+        for codec_profile in [None, Some("main"), Some("main10")] {
+            let profile = profile_vaapi(decode, Some("nv12"), codec_profile);
+            let args = video_codec_args(&profile, false).unwrap();
+            let rc_mode = args.iter().position(|arg| arg == "-rc_mode").unwrap();
+            assert_eq!(args[rc_mode + 1], "CQP");
+            assert!(!args.iter().any(|arg| arg == "auto"), "{args:?}");
+        }
+    }
+}
+
+/// `codec_profile` reaches `-profile:v` verbatim. `hevc_vaapi`'s `-profile` is an
+/// int-typed `AVOption` carrying named constants, so `FFmpeg` resolves `main10`
+/// itself and rejects an unknown name — which is the behavior we want. A
+/// name-to-integer table here would be a second place to keep correct.
+#[test]
+fn vaapi_passes_codec_profile_by_name_with_no_integer_mapping() {
+    for (codec_profile, integer) in [("main", "1"), ("main10", "2")] {
+        let profile = profile_vaapi(
+            voom_core::VideoDecodeMode::default(),
+            Some("nv12"),
+            Some(codec_profile),
+        );
+        let args = video_codec_args(&profile, false).unwrap();
+        let at = args.iter().position(|arg| arg == "-profile:v").unwrap();
+        assert_eq!(args[at + 1], codec_profile);
+        assert!(!args.iter().any(|arg| arg == integer), "{args:?}");
+    }
+}
+
+/// The uploaded surface format already selects Main or Main10 (spec §2.2), so an
+/// unconditional `-profile:v` would invent a value the operator never chose.
+#[test]
+fn vaapi_omits_profile_when_the_operator_set_none() {
+    let profile = profile_vaapi(voom_core::VideoDecodeMode::default(), Some("p010"), None);
+
+    let args = video_codec_args(&profile, false).unwrap();
+
+    assert!(!args.iter().any(|arg| arg == "-profile:v"), "{args:?}");
+}
+
+/// `codec_level` is outside the VAAPI vocabulary: `HEVC_VAAPI`'s `codec_levels` is
+/// empty, so descriptor validation rejects it first. Reaching the builder with one
+/// set means validation was bypassed — drop it silently and the operator's stated
+/// level would vanish from a command that claims to honor the profile.
+#[test]
+fn vaapi_never_emits_level_and_refuses_a_profile_that_sets_one() {
+    let clean = profile_vaapi(voom_core::VideoDecodeMode::default(), Some("nv12"), None);
+    let args = video_codec_args(&clean, false).unwrap();
+    assert!(!args.iter().any(|arg| arg == "-level"), "{args:?}");
+
+    let mut leveled = clean;
+    leveled.codec_level = Some("5.1".to_owned());
+
+    let err = video_codec_args(&leveled, false).unwrap_err();
+
+    assert!(err.to_string().contains("codec_level"), "{err}");
+    assert!(err.to_string().contains("5.1"), "{err}");
+}
+
+/// Issue #409's hard rule: a VAAPI failure is a failure. No error path may fall
+/// back to a software encoder, so every rejected VAAPI request must name no
+/// encoder at all rather than a substituted one.
+#[test]
+fn no_vaapi_failure_path_substitutes_a_software_encoder() {
+    let software_encoders = ["libx265", "libsvtav1", "libaom-av1"];
+    let mut no_quality = profile_vaapi(voom_core::VideoDecodeMode::default(), Some("nv12"), None);
+    no_quality.qp = None;
+    let mut leveled = profile_vaapi(voom_core::VideoDecodeMode::default(), Some("nv12"), None);
+    leveled.codec_level = Some("5.1".to_owned());
+
+    for profile in [no_quality, leveled] {
+        let err = video_codec_args(&profile, false).unwrap_err();
+        for encoder in software_encoders {
+            assert!(!err.to_string().contains(encoder), "{err}");
+        }
+    }
+    for pixel_format in [Some("nv12"), Some("p010"), None] {
+        let profile = profile_vaapi(voom_core::VideoDecodeMode::default(), pixel_format, None);
+        let args = video_codec_args(&profile, false).unwrap();
+        for encoder in software_encoders {
+            assert!(!args.iter().any(|arg| arg == encoder), "{args:?}");
+        }
+    }
+}
+
+/// A `hevc_vaapi` request that reached a worker with no bound device must fail
+/// before ffmpeg runs. The alternative — opening whatever VAAPI device happens to
+/// be default — would encode on a device the scheduler never leased.
+#[tokio::test]
+async fn vaapi_request_on_an_unbound_worker_fails_before_ffmpeg_runs() {
+    let dir = tempfile::tempdir().unwrap();
+    let (ffmpeg, args_path) = arg_capture_ffmpeg(dir.path());
+    let ffprobe = hevc_mkv_ffprobe(dir.path());
+    tokio::fs::write(dir.path().join("input.mkv"), b"input")
+        .await
+        .unwrap();
+    let profile = profile_vaapi(voom_core::VideoDecodeMode::default(), Some("nv12"), None);
+    let request = vaapi_request(dir.path(), profile);
+    let config = FfmpegConfig::new(ffmpeg, ffprobe, "test".to_owned(), DEFAULT_PROCESS_TIMEOUT);
+
+    let err = run_ffmpeg_transcode(&config, &request, video_source(1920, 1080, &[]))
+        .await
+        .unwrap_err();
+
+    assert!(err.to_string().contains("hevc_vaapi"), "{err}");
+    assert!(!args_path.exists(), "ffmpeg must not have been invoked");
+}
+
+/// VAAPI decode covers `h264`/`hevc`/`av1` only. An unsupported source codec is
+/// reported against the codec, not silently decoded in software into the hardware
+/// encoder — that would be the implicit fallback #409 forbids.
+#[tokio::test]
+async fn vaapi_hardware_decode_rejects_an_unsupported_source_codec() {
+    let dir = tempfile::tempdir().unwrap();
+    let (ffmpeg, args_path) = arg_capture_ffmpeg(dir.path());
+    let ffprobe = hevc_mkv_ffprobe(dir.path());
+    tokio::fs::write(dir.path().join("input.mkv"), b"input")
+        .await
+        .unwrap();
+    let profile = profile_vaapi(voom_core::VideoDecodeMode::vaapi(), Some("nv12"), None);
+    let request = vaapi_request(dir.path(), profile);
+    let config = FfmpegConfig::new(ffmpeg, ffprobe, "test".to_owned(), DEFAULT_PROCESS_TIMEOUT)
+        .with_vaapi_device(vaapi_binding(dir.path()));
+    let source = VideoTranscodeInput {
+        width: 1920,
+        height: 1080,
+        codec: "vp9",
+        forced_subtitle_ordinals: &[],
+    };
+
+    let err = run_ffmpeg_transcode(&config, &request, source)
+        .await
+        .unwrap_err();
+
+    assert!(err.to_string().contains("vp9"), "{err}");
+    assert!(!args_path.exists(), "ffmpeg must not have been invoked");
+}
+
+/// An unknown surface format must not reach ffmpeg. `nv12` and `p010` are the two
+/// the descriptor allows and the two spec §2.2 verified; a software format name
+/// like `yuv420p` here would silently produce a filter VAAPI cannot upload.
+#[test]
+fn vaapi_rejects_a_pixel_format_outside_the_surface_vocabulary() {
+    let profile = profile_vaapi(voom_core::VideoDecodeMode::default(), Some("yuv420p"), None);
+
+    let err = video_filter_args(&profile, 1920, 1080, false).unwrap_err();
+
+    assert!(err.to_string().contains("yuv420p"), "{err}");
+}
+
+/// This slice generates no VAAPI scale filter (spec §7 records none), so a profile
+/// whose dimension cap the source exceeds is refused up front. Ignoring the cap
+/// would emit an over-cap output, and picking a filter shape the spec never
+/// verified on hardware would be inventing one.
+#[test]
+fn vaapi_refuses_a_downscale_it_has_no_verified_filter_for() {
+    let mut profile = profile_vaapi(voom_core::VideoDecodeMode::default(), Some("nv12"), None);
+    profile.max_width = Some(1280);
+    profile.max_height = Some(720);
+
+    let within = video_filter_args(&profile, 1280, 720, false).unwrap();
+    let err = video_filter_args(&profile, 1920, 1080, false).unwrap_err();
+
+    assert_eq!(
+        within,
+        vec![
+            OsString::from("-vf"),
+            OsString::from("format=nv12,hwupload")
+        ]
+    );
+    assert!(err.to_string().contains("1920x1080"), "{err}");
+    assert!(err.to_string().contains("hevc_vaapi"), "{err}");
+}
+
+/// A VAAPI profile names a hardware surface format, but the file ffmpeg writes
+/// carries the software format that surface decodes to — spec §2.2 measured
+/// `nv12` → `yuv420p` and `p010` → `yuv420p10le`. Comparing the surface name to
+/// the file's format would reject every conforming VAAPI encode.
+#[tokio::test]
+async fn vaapi_output_verification_expects_the_file_format_not_the_surface_format() {
+    let dir = tempfile::tempdir().unwrap();
+    let (ffmpeg, _args_path) = arg_capture_ffmpeg(dir.path());
+    tokio::fs::write(dir.path().join("input.mkv"), b"input")
+        .await
+        .unwrap();
+    let eight_bit = profile_vaapi(voom_core::VideoDecodeMode::default(), Some("nv12"), None);
+    let ten_bit = profile_vaapi(
+        voom_core::VideoDecodeMode::default(),
+        Some("p010"),
+        Some("main10"),
+    );
+    let binding = vaapi_binding(dir.path());
+
+    let eight = FfmpegConfig::new(
+        ffmpeg.clone(),
+        hevc_mkv_ffprobe(dir.path()),
+        "test".to_owned(),
+        DEFAULT_PROCESS_TIMEOUT,
+    )
+    .with_vaapi_device(binding.clone());
+    let probe = run_ffmpeg_transcode(
+        &eight,
+        &vaapi_request(dir.path(), eight_bit.clone()),
+        video_source(1920, 1080, &[]),
+    )
+    .await
+    .unwrap();
+    assert_eq!(probe.pixel_format, "yuv420p");
+
+    tokio::fs::remove_file(dir.path().join("out.mkv"))
+        .await
+        .unwrap();
+    let ten = FfmpegConfig::new(
+        ffmpeg.clone(),
+        hevc_mkv_ffprobe_10bit(dir.path()),
+        "test".to_owned(),
+        DEFAULT_PROCESS_TIMEOUT,
+    )
+    .with_vaapi_device(binding.clone());
+    let probe = run_ffmpeg_transcode(
+        &ten,
+        &vaapi_request(dir.path(), ten_bit),
+        video_source(1920, 1080, &[]),
+    )
+    .await
+    .unwrap();
+    assert_eq!(probe.pixel_format, "yuv420p10le");
+
+    // A 10-bit file under an 8-bit surface format is still a mismatch to report.
+    tokio::fs::remove_file(dir.path().join("out.mkv"))
+        .await
+        .unwrap();
+    let mismatched = FfmpegConfig::new(
+        ffmpeg,
+        hevc_mkv_ffprobe_10bit(dir.path()),
+        "test".to_owned(),
+        DEFAULT_PROCESS_TIMEOUT,
+    )
+    .with_vaapi_device(binding);
+    let err = run_ffmpeg_transcode(
+        &mismatched,
+        &vaapi_request(dir.path(), eight_bit),
+        video_source(1920, 1080, &[]),
+    )
+    .await
+    .unwrap_err();
+    assert!(err.to_string().contains("yuv420p"), "{err}");
+}

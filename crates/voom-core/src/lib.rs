@@ -76,11 +76,12 @@ pub mod ticket_operation {
 pub mod transcode_video_profile {
     pub use crate::media::transcode_video_profile::{
         NvidiaVideoDecode, SoftwareVideoDecode, TRANSCODE_VIDEO_CODEC,
-        TRANSCODE_VIDEO_CODEC_ALIAS_H265, TRANSCODE_VIDEO_CODEC_AV1, TRANSCODE_VIDEO_CONTAINER,
-        TRANSCODE_VIDEO_CONTAINER_MP4, TRANSCODE_VIDEO_PROFILE, TranscodeVideoProfile,
-        VaapiVideoDecode, VideoDecodeMode, canonical_video_codec, expected_output_pixel_format,
-        is_supported_transcode_video_codec, is_supported_transcode_video_container,
-        normalize_codec_token, validate_profile_against_descriptor,
+        TRANSCODE_VIDEO_CODEC_ALIAS_H265, TRANSCODE_VIDEO_CODEC_AV1, TRANSCODE_VIDEO_CODEC_H264,
+        TRANSCODE_VIDEO_CONTAINER, TRANSCODE_VIDEO_CONTAINER_MP4, TRANSCODE_VIDEO_PROFILE,
+        TranscodeVideoProfile, VaapiVideoDecode, VideoDecodeMode, VideoToolboxVideoDecode,
+        canonical_video_codec, expected_output_pixel_format, is_supported_transcode_video_codec,
+        is_supported_transcode_video_container, normalize_codec_token,
+        validate_profile_against_descriptor,
     };
 }
 
@@ -114,11 +115,12 @@ pub use taxonomy::execution_vocab::{NodeKind, NodeStatus, WorkerKind, WorkerStat
 pub use ticket_operation::TicketOperation;
 pub use transcode_video_profile::{
     NvidiaVideoDecode, SoftwareVideoDecode, TRANSCODE_VIDEO_CODEC,
-    TRANSCODE_VIDEO_CODEC_ALIAS_H265, TRANSCODE_VIDEO_CODEC_AV1, TRANSCODE_VIDEO_CONTAINER,
-    TRANSCODE_VIDEO_CONTAINER_MP4, TRANSCODE_VIDEO_PROFILE, TranscodeVideoProfile,
-    VaapiVideoDecode, VideoDecodeMode, canonical_video_codec, expected_output_pixel_format,
-    is_supported_transcode_video_codec, is_supported_transcode_video_container,
-    normalize_codec_token, validate_profile_against_descriptor,
+    TRANSCODE_VIDEO_CODEC_ALIAS_H265, TRANSCODE_VIDEO_CODEC_AV1, TRANSCODE_VIDEO_CODEC_H264,
+    TRANSCODE_VIDEO_CONTAINER, TRANSCODE_VIDEO_CONTAINER_MP4, TRANSCODE_VIDEO_PROFILE,
+    TranscodeVideoProfile, VaapiVideoDecode, VideoDecodeMode, VideoToolboxVideoDecode,
+    canonical_video_codec, expected_output_pixel_format, is_supported_transcode_video_codec,
+    is_supported_transcode_video_container, normalize_codec_token,
+    validate_profile_against_descriptor,
 };
 pub use version::VersionInfo;
 

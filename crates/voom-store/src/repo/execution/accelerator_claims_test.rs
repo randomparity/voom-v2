@@ -33,10 +33,11 @@ async fn worker(repo: &SqliteWorkerRepo, name: &str) -> WorkerId {
 fn claim(worker_id: WorkerId) -> NewAcceleratorClaim {
     NewAcceleratorClaim {
         hardware_token: "nvidia:GPU-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".to_owned(),
+        backend: "nvidia".to_owned(),
         worker_id,
         boot_id: "boot-id".to_owned(),
         supervisor_pid: 123,
-        supervisor_start_ticks: 456,
+        supervisor_start_identity: Some("linux-proc-ticks:456".to_owned()),
         process_group_id: 123,
         capacity: 4,
         claimed_at: NOW,

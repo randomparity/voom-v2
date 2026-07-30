@@ -14,7 +14,7 @@ use voom_worker_protocol::{
     WorkerCredentials, WorkerIdentityResponse,
 };
 
-use super::{UnavailableTool, format_unavailable_tools};
+use super::{UnavailableTool, format_unavailable_tools, policy_video_backend_requirements};
 use crate::cases::cp;
 use crate::workflow::WorkerRuntimeRegistry;
 
@@ -39,6 +39,29 @@ fn unavailable_tools_are_reported_in_observation_order_with_guidance() {
         "tool requirement preflight failed for policy `published`:\n\
          - mkvtoolnix: denied; start one with: voom worker run-local --kind mkvtoolnix\n\
          - ffmpeg: stale; start one with: voom worker run-local --kind ffmpeg"
+    );
+}
+
+#[test]
+fn videotoolbox_profiles_do_not_require_a_software_worker() {
+    let policy = compile_policy(
+        "policy \"videotoolbox\" { \
+         phase encode { transcode video to hevc { \
+         encoder: hevc_videotoolbox bitrate_kbps: 8000 preset: default \
+         codec_profile: main pixel_format: yuv420p decode: video_toolbox } } }",
+    )
+    .unwrap()
+    .policy;
+
+    let requirements = policy_video_backend_requirements(&policy).unwrap();
+
+    assert!(!requirements.software);
+    assert!(!requirements.nvidia.required);
+    assert!(requirements.videotoolbox.hardware_decode);
+    assert!(
+        requirements
+            .videotoolbox_encoders
+            .contains("hevc_videotoolbox")
     );
 }
 
@@ -149,6 +172,7 @@ async fn gpu_bound_worker_does_not_satisfy_software_profile_preflight() {
         artifact_access: Vec::new(),
         extra: json!({
             "accelerator": {
+                "backend": "nvidia",
                 "hardware_token": hardware_token,
                 "device_uuid": "GPU-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
                 "device_name": "Test GPU",
@@ -205,7 +229,7 @@ async fn gpu_bound_worker_does_not_satisfy_software_profile_preflight() {
 /// A VAAPI profile needs a live, identity-verified device that probed `hevc_vaapi`.
 /// A software worker cannot substitute — that is the fallback issue #409 forbids —
 /// and neither can a VAAPI device whose driver build never proved the encoder, which
-/// on the acceptance host is what stock `mesa-dri-drivers` looks like (ADR 0051 §2).
+/// on the acceptance host is what stock `mesa-dri-drivers` looks like (ADR 0052 §2).
 #[tokio::test]
 async fn a_vaapi_transcode_requires_an_identity_verified_hevc_vaapi_descriptor() {
     let (cp, _tmp) = cp().await;
@@ -380,6 +404,7 @@ async fn nvidia_decode_profile_requires_an_advertised_cuvid_decoder() {
         artifact_access: Vec::new(),
         extra: json!({
             "accelerator": {
+                "backend": "nvidia",
                 "hardware_token": hardware_token,
                 "device_uuid": "GPU-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
                 "device_name": "Test GPU",
@@ -635,7 +660,7 @@ async fn register_transcode_worker(
     worker
 }
 
-/// The `backend`-tagged extras a VAAPI-bound worker stores, per ADR 0051 §1: the
+/// The `backend`-tagged extras a VAAPI-bound worker stores, per ADR 0052 §1: the
 /// device is named by PCI address and carries no `hardware_token` field.
 fn vaapi_accelerator_extra(encoders: &[&str], decoders: &[&str]) -> serde_json::Value {
     json!({

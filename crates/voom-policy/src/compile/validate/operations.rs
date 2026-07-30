@@ -388,13 +388,14 @@ impl Validator<'_> {
     ) -> Option<&'static str> {
         let codec = tokens.get(3).copied();
         match codec {
+            Some("h264") => Some("h264"),
             Some("hevc") => Some("hevc"),
             Some("av1") => Some("av1"),
             _ => {
                 self.error(
                     DiagnosticCode::UnsupportedTranscodeShape,
                     statement.span(),
-                    "transcode video target codec must be hevc or av1",
+                    "transcode video target codec must be h264, hevc, or av1",
                 );
                 None
             }
@@ -451,6 +452,7 @@ impl Validator<'_> {
             "crf",
             "cq",
             "qp",
+            "bitrate_kbps",
             "preset",
             "tune",
             "codec_profile",
@@ -508,15 +510,34 @@ impl Validator<'_> {
         let crf = self.inline_optional_str(span, by_key, "crf");
         let cq = self.inline_optional_str(span, by_key, "cq");
         let qp = self.inline_optional_str(span, by_key, "qp");
+        let bitrate = self.inline_optional_str(span, by_key, "bitrate_kbps");
         let valid = match descriptor.quality_domain {
             voom_core::QualityDomain::Crf { min, max } => {
-                cq.is_none() && qp.is_none() && inline_quality_in_range(crf.as_deref(), min, max)
+                cq.is_none()
+                    && qp.is_none()
+                    && bitrate.is_none()
+                    && inline_quality_in_range(crf.as_deref(), min, max)
             }
             voom_core::QualityDomain::Cq { min, max } => {
-                crf.is_none() && qp.is_none() && inline_quality_in_range(cq.as_deref(), min, max)
+                crf.is_none()
+                    && qp.is_none()
+                    && bitrate.is_none()
+                    && inline_quality_in_range(cq.as_deref(), min, max)
             }
             voom_core::QualityDomain::Qp { min, max } => {
-                crf.is_none() && cq.is_none() && inline_quality_in_range(qp.as_deref(), min, max)
+                crf.is_none()
+                    && cq.is_none()
+                    && bitrate.is_none()
+                    && inline_quality_in_range(qp.as_deref(), min, max)
+            }
+            voom_core::QualityDomain::BitrateKbps { min, max } => {
+                crf.is_none()
+                    && cq.is_none()
+                    && qp.is_none()
+                    && bitrate
+                        .as_deref()
+                        .and_then(|value| value.parse::<u32>().ok())
+                        .is_some_and(|value| value >= min && value <= max)
             }
         };
         if !valid {
@@ -641,7 +662,7 @@ impl Validator<'_> {
             self.error(
                 DiagnosticCode::InvalidVideoProfileSetting,
                 span,
-                "decode must be `software`, `nvidia`, or `vaapi`",
+                "decode must be `software`, `nvidia`, `vaapi`, or `video_toolbox`",
             );
             return;
         };
@@ -661,6 +682,18 @@ impl Validator<'_> {
                 span,
                 format!(
                     "VAAPI decode requires a VAAPI encoder, not `{}`",
+                    descriptor.encoder
+                ),
+            );
+        }
+        if mode.is_video_toolbox()
+            && descriptor.backend != voom_core::VideoEncoderBackend::VideoToolbox
+        {
+            self.error(
+                DiagnosticCode::InvalidVideoProfileSetting,
+                span,
+                format!(
+                    "VideoToolbox decode requires a VideoToolbox encoder, not `{}`",
                     descriptor.encoder
                 ),
             );

@@ -93,6 +93,15 @@ pub(crate) struct CapacityDeferredTestSync {
     pub(crate) resume: std::sync::Arc<tokio::sync::Notify>,
 }
 
+#[cfg(test)]
+#[derive(Debug, Clone)]
+pub(crate) struct PostDispatchTestSync {
+    pub(crate) operation: OperationKind,
+    pub(crate) worker_result_observed: std::sync::Arc<tokio::sync::Notify>,
+    pub(crate) resume_post_dispatch: std::sync::Arc<tokio::sync::Semaphore>,
+    pub(crate) held: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
 impl WorkflowExecutorOptions {
     #[must_use]
     pub(crate) fn dispatch_options(&self) -> WorkflowDispatchOptions {
@@ -121,6 +130,10 @@ pub struct WorkflowChaosOptions {
     pub disable_heartbeat_ticks: bool,
     pub suppress_heartbeat_operation: Option<OperationKind>,
     pub payload_modes: BTreeMap<OperationKind, String>,
+    #[cfg(test)]
+    pub(crate) post_dispatch_sync: Option<PostDispatchTestSync>,
+    #[cfg(test)]
+    pub(crate) fail_heartbeat_operation: Option<OperationKind>,
 }
 
 impl WorkflowChaosOptions {
@@ -148,6 +161,30 @@ impl WorkflowChaosOptions {
 
     pub(super) fn payload_mode_for(&self, operation: OperationKind) -> Option<&str> {
         self.payload_modes.get(&operation).map(String::as_str)
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn hold_after_worker_result(&self, operation: OperationKind) {
+        let Some(sync) = self
+            .post_dispatch_sync
+            .as_ref()
+            .filter(|sync| sync.operation == operation)
+        else {
+            return;
+        };
+        if sync.held.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            return;
+        }
+        sync.worker_result_observed.notify_one();
+        let Ok(permit) = sync.resume_post_dispatch.acquire().await else {
+            panic!("post-dispatch test semaphore must remain open");
+        };
+        permit.forget();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fails_heartbeat_for(&self, operation: OperationKind) -> bool {
+        self.fail_heartbeat_operation == Some(operation)
     }
 }
 

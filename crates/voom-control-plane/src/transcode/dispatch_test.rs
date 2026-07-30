@@ -77,6 +77,7 @@ fn resolved_av1_1080p_mp4() -> ResolvedProfile {
             crf: Some(32),
             cq: None,
             qp: None,
+            bitrate_kbps: None,
             preset: Some("8".to_owned()),
             tune: None,
             codec_profile: None,
@@ -153,6 +154,7 @@ fn capped_request() -> TranscodeVideoRequest {
                 local_file_key: None,
             },
             video_codec: None,
+            video_pixel_format: None,
         },
         output: TranscodeVideoOutput {
             staging_root: "/tmp/stage".to_owned(),
@@ -248,6 +250,7 @@ fn vaapi_main10_profile() -> TranscodeVideoProfile {
         crf: None,
         cq: None,
         qp: Some(24),
+        bitrate_kbps: None,
         preset: None,
         tune: None,
         codec_profile: Some("main10".to_owned()),

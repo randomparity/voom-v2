@@ -5,16 +5,18 @@
 - Branch: `feat/vaapi-video-acceleration-409`
 - Base: `main`
 - Worktree: none — single-session run in the primary working directory
-- Assigned ADR: `0051` (index row already committed; renumbered from 0050, which
-  issue #414 took on `main` in PR #426)
-- Assigned migration: `0030`
+- Assigned ADR: `0052` (renumbered twice: 0050 was taken by issue #414 in PR #426,
+  then 0051 by issue #411's VideoToolbox ADR in PR #428)
+- Assigned migration: `0032` (renumbered from 0030: issue #411 landed both 0030 and
+  0031 on `main`)
+- Integrated with `main` by **merge**, not rebase — see "Merging VideoToolbox" below
 - Full guardrail: `just ci`
 - Individual guardrails: `just fmt-check`, `just lint`, `just check-test-layout`,
   `just check-paused-time-db`, `just check-payload-deny-unknown`, `just check-adr-index`,
   `just test`, `just doc`, `just deny`, `just audit`
 - Hosted gates: Ubuntu `just ci`, macOS `just ci`, coverage/SonarCloud
 - Spec: `docs/superpowers/specs/2026-07-29-issue-409-vaapi-video-acceleration-design.md`
-- ADR: `docs/adr/0051-vaapi-device-identity-and-probe-proven-capability.md`
+- ADR: `docs/adr/0052-vaapi-device-identity-and-probe-proven-capability.md`
 - Hardware evidence for command shapes and option ranges is in the spec §2; do not
   re-derive it, and do not invent a command shape the spec does not record.
 
@@ -44,6 +46,38 @@ unchanged. No silent software fallback anywhere.
 
 ---
 
+## Merging VideoToolbox (issue #411, PR #428)
+
+`main` gained a fourth accelerator backend while this branch was in review. The two
+branches independently performed the *same* generalizing refactor — binary → tagged
+enum, a `backend` column, backend-neutral accelerator claims — so 58 of our 76 files
+collided. Integration was a **merge**, not a rebase: a 35-commit replay would have
+reconciled our intermediate refactors against main's rewritten final state 26 more
+times with no compilable checkpoint in between.
+
+Decisions the merge forced, each kept because it extends to a fourth backend:
+
+| Area | Kept | Why |
+|---|---|---|
+| Decode/encode predicates | ours (exhaustive `match`) | main used `matches!`; a new backend must fail to compile, not fall through |
+| Policy `decode` lowering | ours (`VideoDecodeMode::parse`) | main's `match` on strings would silently lower `vaapi` to software |
+| Preflight requirement model | ours (`BackendRequirement`) | extends per backend; VideoToolbox adds its encoder set alongside |
+| Local worker config | **main's** two-stage `Local…`→`Resolved…` | `VideoToolbox` needs an async platform lookup; VAAPI resolves to itself |
+| Historical token matching | **main's** typed `(requirement, descriptor)` pairs | `VideoToolbox` decoders are `(codec, pixel_format)`, not names |
+| Stored descriptor parsing | **main's** tagged-only reader | migration 0031 backfilled `backend` onto every pre-#411 row |
+
+Two defects in main's slice were closed as a side effect, because this branch rewrites
+the same code:
+
+- **`migrations/0030` admits a `VideoToolbox` profile with no quality field.** Its arm
+  reads `bitrate_kbps BETWEEN 1 AND …` with no `IS NOT NULL` guard, so a NULL makes the
+  arm — and therefore the whole `CHECK` — evaluate to NULL, which SQLite treats as
+  satisfied. `0032` rebuilds that table with all four arms guarded.
+- **`accelerator_claims` had no `vaapi` arm.** 0031 closed `backend` to
+  `('nvidia','video_toolbox')` and paired it with an exclusive `supervisor_start_identity`
+  CHECK; every VAAPI claim insert would have been rejected. `0032` extends both.
+
+
 ## Open findings carried between tasks
 
 Found while reviewing completed tasks. Each is verified against the code, names its
@@ -60,16 +94,16 @@ pre-existing noise: every one is reachable the moment a VAAPI profile exists.
 | F6 | `transcode_video_notes` in `planner/transcode_video/mod.rs` emits `cq=0` for a qp-domain profile (`cq.unwrap_or_default()` with `crf`/`cq` both `None`). See Task 7 step 5. | Task 7 |
 | F7 | ~~Pre-existing (#400): `worker_capabilities.extra` classified Class P but read typed.~~ **Closed by Task 5** — promoted P→T-upstream with a Class-T row, recording why NVIDIA extras stay untagged and VAAPI's are tagged. | done |
 | F8 | **Regression on a mixed host, created deliberately by Task 5 (`2c13aa31`) and left for Task 7.** `video_hardware.rs::candidate_accelerator_descriptor` still returns the NVIDIA struct, and is called per candidate from `spawn.rs` (3 sites) plus `tool_preflight.rs`. A live VAAPI worker now makes it return `Err(Config)`, which **poisons `transcode_video` candidate projection for software and NVIDIA jobs too** — ADR 0049 §6 forbids an error escaping projection. Task 5 chose a loud error over `Ok(None)` because `Ok(None)` would let a VAAPI worker satisfy software preflight (the forbidden fallback), and only corrected the message so a well-formed VAAPI descriptor is no longer called "malformed NVIDIA". **Task 7 must retype it to the tagged `VideoAcceleratorDescriptor` and update all four call sites.** Until then, a host running both a VAAPI worker and any other worker cannot project `transcode_video` candidates. | Task 7 |
-| F9 | **Main10 is never probed.** ADR 0051 says one encode per candidate codec, and the descriptor has nowhere to record "Main10 proven", so probing it could only be a hard startup requirement — which would refuse an 8-bit-only device, something the spec does not sanction. The probe is nv12/8-bit only. Issue #409 requires Main **and** Main10, so Main10 rests on the Task 8 acceptance script and hand verification, not on a startup guarantee. Record this limitation in the PR body; do not silently claim Main10 is probe-proven. | Task 8 (verify), Task 9 (disclose) |
+| F9 | **Main10 is never probed.** ADR 0052 says one encode per candidate codec, and the descriptor has nowhere to record "Main10 proven", so probing it could only be a hard startup requirement — which would refuse an 8-bit-only device, something the spec does not sanction. The probe is nv12/8-bit only. Issue #409 requires Main **and** Main10, so Main10 rests on the Task 8 acceptance script and hand verification, not on a startup guarantee. Record this limitation in the PR body; do not silently claim Main10 is probe-proven. | Task 8 (verify), Task 9 (disclose) |
 | F11 | **VAAPI cannot downscale — a real capability gap, not a bug.** Task 6 (`1f386652`) makes `video_filter_args` return an error when a VAAPI profile sets `max_width`/`max_height` and the source exceeds the cap (`vaapi_refuses_a_downscale_it_has_no_verified_filter_for`). This is the correct call: spec §7 records no `scale_vaapi` shape, so downscaling would mean inventing an unverified command, and silently ignoring the cap would emit output violating the profile. But `max_width`/`max_height` are ordinary policy fields (`voom-policy/src/data/video_profile.rs:28,30`), so **any policy pairing a dimension cap with a VAAPI profile fails per-file on oversized sources** — while the equivalent software profile downscales. Disclose in the PR body and the Task 8 runbook: a VAAPI profile must either omit the caps or be paired with sources already within them. A verified `scale_vaapi` shape is follow-up work, not this slice. | Task 8 (document), Task 9 (disclose) |
 | F19 | **F18's NVIDIA re-verification cannot be done on this host — for hardware reasons, not tooling.** `nvidia-smi` is absent (this is an AMD APU host), so `accept-nvidia-video-acceleration.sh` cannot run here regardless. A report during Task 8 claimed the blocker was a missing `rg`; that is **false** — `rg` is installed (ripgrep 14.1.1) and the NVIDIA script's `require_command` list (`cargo ffmpeg ffprobe nvidia-smi rg`) is satisfied except for `nvidia-smi`. Do not repeat the `rg` claim in the PR body. **What the PR must ask for:** because F18 broke `hevc_nvenc` end-to-end since #400, someone with an NVIDIA host should exercise a transcode through `compliance execute` — not merely `accept-nvidia-video-acceleration.sh`, which drives `ffmpeg` directly, never crosses the control plane, and therefore did not and still would not catch F18. | Task 9 (disclose + request) |
-| F17 | **The worker still dispatches on encoder *name strings*, so a future backend silently falls into the software arm.** Three wildcard arms introduced on this branch, all matching `profile.encoder.as_str()`: `ffmpeg.rs:602` (`_ => Ok(())` — a new hardware encoder would get **no** input args, so no `-vaapi_device` / `-hwaccel`), `ffmpeg.rs:689` (`_ => Ok(scale_args(..))` — it silently gets the **software** scale filter), and `handler.rs:738` (`_ => validate_software_binding(..)` — it is validated as **software** and accepted on an unbound worker). Because the match subject is a `&str`, the compiler *requires* the wildcard — it cannot warn. **Not a live bug:** all five current encoders are handled explicitly and the software ones belong in that arm. But this is F1's exact failure mode one layer down, and Task 7 fixed the same pattern in the control plane by dispatching on `encoder_descriptor(&profile.encoder).backend`, so the two layers now use different idioms for one decision. **Recommendation: convert all three to match on `VideoEncoderBackend`,** making them exhaustive so a fifth backend fails to compile instead of quietly becoming software work. Small, mechanical, and directly prevents a recurrence of the bug this slice already had. Task 9's step 5 is exactly this check — decide fix-now vs follow-up issue. | Task 9 |
+| F17 | **Closed by the VideoToolbox merge.** The three wildcard arms matching `profile.encoder.as_str()` are gone: `append_hardware_input_args`, `video_filter_args` and `validate_video_hardware_binding` now dispatch on `encoder_descriptor(..).backend` with an exhaustive `match`, so a fifth backend fails to compile instead of silently becoming software work. Deferring was rejected on evidence: the arms were surface this branch itself added (so `deferred-tracked` never applied), main's one remaining encoder-name match uses `other => Err(..)` documented as "must never silently pass through", and a fourth backend landed in parallel the same week. | **Resolved** |
 | F16 | **The surface-vs-file pixel-format confusion appeared in FIVE places, four of them fatal to the VAAPI happy path.** A VAAPI profile's `pixel_format` is a GPU *surface* format (`nv12`/`p010`); the encoded file reports `yuv420p`/`yuv420p10le`. Comparing the two is always false for a conforming encode. Found and fixed across Tasks 6-7: `probe_output` (Task 6); `planner::pixel_format_needs_change` — **a conforming output was replanned for transcode forever, so compliance never converged**; `dispatch::validate_output_facts` — **every conforming VAAPI result rejected as malformed, which alone made the backend unusable with device, argv and scheduling all correct**; `resolve::decide_copy_video` — a `copy_compatible` profile silently re-encoded; `handler::validate_copy_pixel_format` (F13). Resolved by moving the measured §2.2 pairings onto `EncoderDescriptor::surface_output_pixel_formats` (empty for software/NVENC, where `pixel_formats` are already file formats and the mapping is the identity) behind one accessor, `voom_core::expected_output_pixel_format`, which all five sites now call — including the worker's, which delegates rather than keeping a second table. `every_declared_pixel_format_has_a_recorded_output_format` asserts the mapping is **total** over every descriptor, so adding a surface without recording what it writes fails loudly instead of silently turning a conforming encode into a hard failure. **Lesson for review: every one of these passed unit tests before the fix, because no unit test compares a requested surface against a real encoded file.** | resolved — disclose in PR body |
 | F15 | **Pre-existing spec/code disagreement, corrected in the spec not the code.** Spec §6 (inherited from ADR 0049 §5) said a recognized codec absent from every live descriptor becomes a ticket-scoped `MissingCapability`; the code records `NoEligibleWorker`. The class exists with its own `ErrorCode`, but `cases/execution/tickets.rs::pre_lease_failure_reason` accepts only `NoEligibleWorker` and `AmbiguousWorkerSelection`, and ADR 0049 §10 assigns `NO_ELIGIBLE_WORKER` to this case. #400 shipped that way, so it predates #409. Task 7 correctly implemented VAAPI identically to NVIDIA; widening the path would change NVIDIA's observable failure class. Spec §6 now carries a correction note; ADR 0049 is left unedited (an ADR records a decision, not current code). **Aligning both backends is a follow-up issue, not this slice.** | resolved — disclose in PR body, file follow-up |
 | F12 | **Hardware token formatted in three places.** Task 6 added `voom_worker_protocol::vaapi_hardware_token()`, but `local_worker.rs` still formats `vaapi:pci-{}` inline at ~79 and ~708. If the scheduler's token ever disagrees with the worker's, dispatch silently stops matching — the capacity SQL groups on exactly that string (`json_extract(hardware,'$[0]')`). Adopt the helper at both sites and pin scheduler-token == worker-token for the same PCI address. | Task 7 |
 | F13 | **Open decision: may a VAAPI profile be `copy_compatible`?** `handler.rs::validate_copy_pixel_format` compares the source's *file* format (`yuv420p`) against the profile's *surface* format (`nv12`), so `copy_compatible: true` on a VAAPI profile always fails at the worker. `-c:v copy` runs no encoder, so a stream copy is not a hardware operation and arguably should succeed. Same surface-vs-file category error Task 6 fixed in `probe_output` (which would otherwise have failed *every* conforming VAAPI encode). Either reject `copy_compatible` on VAAPI profiles at policy-compile time, or compare against `expected_output_pixel_format`. Do not leave a profile an operator can author that always fails. | Task 7 |
 | F14 | Two timing-sensitive tests flaked once each under heavy parallel load and passed on re-run: `preflight::tests::vaapi_capacity_clock_expiry_names_the_declaration` (Task 5, seen by Task 6) and previously `wait_child_output_times_out_promptly_when_a_grandchild_holds_the_pipe` (fixed via ETXTBSY retry). Clock-expiry tests asserting *prompt* return are inherently load-sensitive. Confirm against the hosted gates; if either flakes in CI, widen the elapsed bound rather than deleting the assertion — the bound is the point of the test. | Task 9 |
-| F18 | **Pre-existing on `main`: every accelerated transcode was rejected as malformed, NVIDIA included.** `transcode/mod.rs` built the `TranscodeVideoRequest` with `hardware_assignment: None` and kept it for `dispatch::validate_result`, while `workflow.rs::RuntimeTranscodeDispatcher` applied the leased accelerator to the *clone* it sent. The worker echoed an assignment the control plane had never asked for, so `validate_result` failed with `MALFORMED_WORKER_RESULT` on a run whose device, argv, scheduling, and output file were all correct. Both lines came from #400's `000c0634`, so `hevc_nvenc` is affected identically and has been since that slice shipped — the NVIDIA acceptance script drives `ffmpeg` directly and never crosses the control plane, so nothing caught it. Fixed by moving the assignment onto `ExecuteTranscodeVideoInput` so one request is built, dispatched, and validated (`execute_threads_the_leased_accelerator_into_the_validated_request`). No test could fail before, because `mod_test.rs::transcode_result` hardcoded `hardware_assignment: None` instead of echoing the request as the real worker does. Found by running the Task 8 acceptance script. | resolved — disclose in PR body |
+| F18 | **Fixed on `main` independently** (issue #411 threaded `hardware_assignment` onto `ExecuteTranscodeVideoInput` too); our identical fix merged cleanly and the duplicate struct field was deduped. The PR no longer claims this fix, but must still request NVIDIA re-verification through `compliance execute`: the bug was live on `main` and neither slice's acceptance script crosses the control plane. | **Resolved upstream** |
 | F10 | Two test-environment assumptions to confirm against the hosted gates, which cannot be reproduced locally: diagnostic 4's permission-denied test needs a **non-root** user (`EACCES` is unobservable as root), and the "not a character device" test plus the fake DRI tree need to behave on **macOS**, which is a hosted `just ci` gate. Neither is exercised by the local Linux run. | Task 9 |
 
 ---
@@ -180,7 +214,7 @@ nullable `preset`.
 
 ### Files
 
-- `migrations/0030_vaapi_video_acceleration.sql`
+- `migrations/0032_vaapi_video_acceleration.sql`
 - `crates/voom-store/src/repo/policy/video_profiles.rs` (+ its `_test.rs`)
 - `crates/voom-store/src/schema_test.rs`
 - `crates/voom-store/src/migrator.rs` if embedded-migration assertions require it
@@ -195,7 +229,7 @@ nullable `preset`.
    non-`hevc_vaapi` encoder; `decode_backend` outside the three-value vocabulary.
 2. Failing repository round-trip tests for a VAAPI profile (null `preset`, set `qp`,
    `decode_backend = 'vaapi'`) and for an unchanged software profile.
-3. Write migration 0030 as a table rebuild following
+3. Write migration 0032 as a table rebuild following
    `0029_nvidia_video_acceleration.sql`'s exact pattern (`video_profiles_new` → INSERT
    projection → DROP → RENAME), per spec §8. Existing rows project straight through with
    `NULL AS qp`.
@@ -270,7 +304,7 @@ mixed pair; ADR 0013's binary-before-DB ordering applies.
 
 ### Fit
 
-The heart of ADR 0051: resolve a PCI address to a render node, verify it, and prove
+The heart of ADR 0052: resolve a PCI address to a render node, verify it, and prove
 capability by executing encodes. Depends on Task 4.
 
 ### Files
@@ -319,7 +353,7 @@ tests writable.
    explicit `-pix_fmt yuv420p` — spec §2.3 explains why the obvious
    `testsrc`-to-`libx265` recipe yields undecodable `gbrp`.
 4. Implement the concurrent capacity probe bounded `1..=16`, defaulting to 1, and wire
-   ADR 0051 §7's clocks (per-probe timeout, one-minute capacity clock, five-minute
+   ADR 0052 §7's clocks (per-probe timeout, one-minute capacity clock, five-minute
    readiness deadline). Reuse ADR 0049's existing clock plumbing rather than adding new
    configuration.
 5. Advertise the `vaapi:pci-<addr>` hardware token and the typed descriptor in `extra`.
@@ -330,7 +364,7 @@ tests writable.
 - No code path advertises a codec that has not encoded on the bound device in this
   process.
 - A capacity-probe failure reports diagnostic uncertainty and never attributes the cause
-  to external contention (ADR 0051 §6 — VAAPI has no session enumeration).
+  to external contention (ADR 0052 §6 — VAAPI has no session enumeration).
 - `run-local`'s two-line stdout contract is unchanged.
 - Tests do not require a GPU: every probe and device lookup routes through the seams
   above, and the real-hardware path is exercised by Task 8's acceptance script.

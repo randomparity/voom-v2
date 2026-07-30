@@ -6,8 +6,8 @@ use serde::Serialize;
 use serde_json::json;
 use voom_control_plane::workers::{NewWorkerCapabilityDraft, RegisterWorkerForNodeInput};
 use voom_control_plane::{
-    ControlPlane, LocalAcceleratorConfig, LocalWorkerHandle, LocalWorkerKind,
-    NvidiaLocalWorkerConfig, VaapiLocalWorkerConfig,
+    ControlPlane, LocalVideoAcceleratorConfig, LocalWorkerHandle, LocalWorkerKind,
+    NvidiaLocalWorkerConfig, VaapiLocalWorkerConfig, VideoToolboxLocalWorkerConfig,
 };
 use voom_core::{ErrorCode, NodeId, TicketOperation, VoomError, WorkerId};
 use voom_store::repo::workers::{WorkerInspection, WorkerNodeContext};
@@ -86,6 +86,8 @@ pub async fn run(database_url: &str, local: Local, command: WorkerCommand) -> io
             nvidia_max_sessions,
             vaapi_device,
             vaapi_max_sessions,
+            videotoolbox,
+            videotoolbox_max_sessions,
         } => {
             run_local(
                 database_url,
@@ -96,6 +98,8 @@ pub async fn run(database_url: &str, local: Local, command: WorkerCommand) -> io
                     nvidia_max_sessions,
                     vaapi_device,
                     vaapi_max_sessions,
+                    videotoolbox,
+                    videotoolbox_max_sessions,
                 },
             )
             .await
@@ -151,21 +155,30 @@ struct RunLocalAcceleratorArgs {
     nvidia_max_sessions: Option<u32>,
     vaapi_device: Option<String>,
     vaapi_max_sessions: Option<u32>,
+    videotoolbox: bool,
+    videotoolbox_max_sessions: Option<u32>,
 }
 
 impl RunLocalAcceleratorArgs {
-    /// Clap already rejects both device flags together, so at most one arm hits.
-    fn into_control_plane(self) -> Option<LocalAcceleratorConfig> {
+    /// Clap already rejects more than one device flag together, so at most one arm hits.
+    fn into_control_plane(self) -> Option<LocalVideoAcceleratorConfig> {
         if let Some(device_uuid) = self.nvidia_device {
-            return Some(LocalAcceleratorConfig::Nvidia(NvidiaLocalWorkerConfig {
-                device_uuid,
-                max_sessions: self.nvidia_max_sessions.unwrap_or(1),
-            }));
+            return Some(LocalVideoAcceleratorConfig::Nvidia(
+                NvidiaLocalWorkerConfig {
+                    device_uuid,
+                    max_sessions: self.nvidia_max_sessions.unwrap_or(1),
+                },
+            ));
         }
-        self.vaapi_device.map(|pci_address| {
-            LocalAcceleratorConfig::Vaapi(VaapiLocalWorkerConfig {
+        if let Some(pci_address) = self.vaapi_device {
+            return Some(LocalVideoAcceleratorConfig::Vaapi(VaapiLocalWorkerConfig {
                 pci_address,
                 max_sessions: self.vaapi_max_sessions.unwrap_or(1),
+            }));
+        }
+        self.videotoolbox.then(|| {
+            LocalVideoAcceleratorConfig::VideoToolbox(VideoToolboxLocalWorkerConfig {
+                max_sessions: self.videotoolbox_max_sessions.unwrap_or(1),
             })
         })
     }
@@ -198,7 +211,7 @@ async fn run_local(
 async fn run_local_supervise(
     cp: &ControlPlane,
     kind: LocalWorkerKind,
-    accelerator: Option<LocalAcceleratorConfig>,
+    accelerator: Option<LocalVideoAcceleratorConfig>,
     shutdown: impl Future<Output = ()>,
     local: Local,
 ) -> io::Result<i32> {

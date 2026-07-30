@@ -14,8 +14,44 @@ fn contract_helpers_pin_canonical_values_and_aliases() {
     assert!(is_supported_transcode_video_codec("H265"));
     assert!(is_supported_transcode_video_codec("av1"));
     assert!(is_supported_transcode_video_codec("AV1"));
+    assert!(is_supported_transcode_video_codec("h264"));
     assert!(!is_supported_transcode_video_container("avi"));
-    assert!(!is_supported_transcode_video_codec("h264"));
+}
+
+#[test]
+fn videotoolbox_profile_requires_bitrate_and_complete_output_tuple() {
+    let mut profile = TranscodeVideoProfile::default_hevc();
+    profile.encoder = "hevc_videotoolbox".to_owned();
+    profile.crf = None;
+    profile.bitrate_kbps = Some(8_000);
+    profile.preset = Some("default".to_owned());
+    profile.codec_profile = Some("main10".to_owned());
+    profile.pixel_format = Some("yuv420p10le".to_owned());
+    profile.decode = VideoDecodeMode::video_toolbox();
+
+    assert!(validate_profile_against_descriptor(&profile).is_ok());
+
+    profile.bitrate_kbps = None;
+    assert!(validate_profile_against_descriptor(&profile).is_err());
+    profile.bitrate_kbps = Some(8_000);
+    profile.pixel_format = Some("yuv420p".to_owned());
+    assert!(validate_profile_against_descriptor(&profile).is_err());
+    profile.pixel_format = Some("yuv420p10le".to_owned());
+    profile.codec_profile = None;
+    assert!(validate_profile_against_descriptor(&profile).is_err());
+}
+
+#[test]
+fn videotoolbox_decode_serializes_as_strict_typed_mode() {
+    let mode = VideoDecodeMode::video_toolbox();
+    assert_eq!(
+        serde_json::to_value(mode).unwrap(),
+        serde_json::json!({"backend": "video_toolbox"})
+    );
+    assert_eq!(VideoDecodeMode::parse("video_toolbox").unwrap(), mode);
+
+    let invalid = serde_json::json!({"backend": "video_toolbox", "device": 0});
+    assert!(serde_json::from_value::<VideoDecodeMode>(invalid).is_err());
 }
 
 #[test]
@@ -147,7 +183,7 @@ fn decode_predicates_answer_only_for_their_own_backend() {
     assert!(!software.is_vaapi());
 }
 
-/// `vaapi` is durable `SQLite` vocabulary from migration 0030 onward, so the parse
+/// `vaapi` is durable `SQLite` vocabulary from migration 0032 onward, so the parse
 /// side and the stored token must agree for every backend, and unknown tokens must
 /// stay rejected rather than silently degrading to software.
 #[test]
@@ -172,6 +208,7 @@ fn vaapi_hevc_profile() -> TranscodeVideoProfile {
         crf: None,
         cq: None,
         qp: Some(23),
+        bitrate_kbps: None,
         preset: None,
         tune: None,
         codec_profile: None,
@@ -254,7 +291,7 @@ fn preset_presence_follows_the_encoders_preset_domain() {
     assert!(validate_profile_against_descriptor(&nvidia).is_err());
 }
 
-/// `codec_level` is not offered for VAAPI in this slice (ADR 0051 §4): `FFmpeg` derives
+/// `codec_level` is not offered for VAAPI in this slice (ADR 0052 §4): `FFmpeg` derives
 /// `general_level_idc` itself, and VOOM spells the whole levels `4.0`/`5.0`/`6.0` where
 /// `FFmpeg` spells them `4`/`5`/`6`. Storing a level VOOM never normalizes would emit a
 /// token the encoder does not know, so the empty `codec_levels` list must reject every

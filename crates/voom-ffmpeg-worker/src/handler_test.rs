@@ -59,7 +59,17 @@ async fn one_shot_nvenc_request_requires_configured_run_local_worker() {
     request.profile.cq = Some(22);
     request.profile.preset = Some("p5".to_owned());
 
-    let err = validate_video_hardware_binding(&request, &config(dir.path()), "h264").unwrap_err();
+    let source = InputProbe {
+        width: 1920,
+        height: 1080,
+        codec: "h264".to_owned(),
+        pixel_format: "yuv420p".to_owned(),
+        codec_profile: None,
+        codec_level: None,
+        video_stream_count: 1,
+        forced_subtitle_ordinals: Vec::new(),
+    };
+    let err = validate_video_hardware_binding(&request, &config(dir.path()), &source).unwrap_err();
 
     assert!(
         err.to_string()
@@ -67,7 +77,7 @@ async fn one_shot_nvenc_request_requires_configured_run_local_worker() {
     );
 }
 
-/// A `hevc_vaapi` profile with a VAAPI decode mode, as migration 0030 stores one.
+/// A `hevc_vaapi` profile with a VAAPI decode mode, as migration 0032 stores one.
 fn vaapi_profile(decode: voom_core::VideoDecodeMode) -> TranscodeVideoProfile {
     TranscodeVideoProfile {
         name: "hevc-vaapi".to_owned(),
@@ -76,6 +86,7 @@ fn vaapi_profile(decode: voom_core::VideoDecodeMode) -> TranscodeVideoProfile {
         crf: None,
         cq: None,
         qp: Some(24),
+        bitrate_kbps: None,
         preset: None,
         tune: None,
         codec_profile: None,
@@ -112,7 +123,12 @@ async fn one_shot_vaapi_request_requires_configured_run_local_worker() {
     let mut request = request(dir.path(), &input).await;
     request.profile = vaapi_profile(voom_core::VideoDecodeMode::default());
 
-    let err = validate_video_hardware_binding(&request, &config(dir.path()), "h264").unwrap_err();
+    let err = validate_video_hardware_binding(
+        &request,
+        &config(dir.path()),
+        &input_probe_with_codec("h264"),
+    )
+    .unwrap_err();
 
     assert!(
         err.to_string()
@@ -122,7 +138,7 @@ async fn one_shot_vaapi_request_requires_configured_run_local_worker() {
 }
 
 /// The assignment must name the device this worker actually bound. VAAPI identity
-/// is the PCI address (ADR 0051 §1), so both it and the derived token are checked:
+/// is the PCI address (ADR 0052 §1), so both it and the derived token are checked:
 /// a mismatch means the scheduler leased a different device than the one
 /// `-vaapi_device` would open.
 #[tokio::test]
@@ -140,7 +156,8 @@ async fn vaapi_assignment_for_another_device_is_rejected() {
         vec!["h264".to_owned(), "hevc".to_owned()],
     ));
 
-    let err = validate_video_hardware_binding(&request, &config, "h264").unwrap_err();
+    let err = validate_video_hardware_binding(&request, &config, &input_probe_with_codec("h264"))
+        .unwrap_err();
 
     assert!(err.to_string().contains("0000:03:00.0"), "{err}");
     assert!(err.to_string().contains("0000:f4:00.0"), "{err}");
@@ -157,12 +174,17 @@ async fn assigned_vaapi_work_on_an_unbound_worker_is_rejected() {
         "0000:f4:00.0",
     ));
 
-    let err = validate_video_hardware_binding(&request, &config(dir.path()), "h264").unwrap_err();
+    let err = validate_video_hardware_binding(
+        &request,
+        &config(dir.path()),
+        &input_probe_with_codec("h264"),
+    )
+    .unwrap_err();
 
     assert!(err.to_string().contains("unbound"), "{err}");
 }
 
-/// Advertised decode capability is probe-proven per codec (ADR 0051 §2), so a
+/// Advertised decode capability is probe-proven per codec (ADR 0052 §2), so a
 /// `vaapi`-decode request for a codec this driver build never decoded must fail
 /// rather than let ffmpeg discover it mid-encode.
 #[tokio::test]
@@ -178,8 +200,9 @@ async fn vaapi_decode_requires_a_probe_proven_decoder_for_the_source_codec() {
     let config =
         config(dir.path()).with_vaapi_device(vaapi_binding(dir.path(), vec!["hevc".to_owned()]));
 
-    validate_video_hardware_binding(&request, &config, "hevc").unwrap();
-    let err = validate_video_hardware_binding(&request, &config, "av1").unwrap_err();
+    validate_video_hardware_binding(&request, &config, &input_probe_with_codec("hevc")).unwrap();
+    let err = validate_video_hardware_binding(&request, &config, &input_probe_with_codec("av1"))
+        .unwrap_err();
 
     assert!(err.to_string().contains("av1"), "{err}");
     assert!(err.to_string().contains("0000:f4:00.0"), "{err}");
@@ -204,17 +227,20 @@ async fn a_vaapi_bound_worker_refuses_software_video_work() {
         config(dir.path()).with_vaapi_device(vaapi_binding(dir.path(), vec!["hevc".to_owned()]));
     let unbound = config(dir.path());
 
-    let err = validate_video_hardware_binding(&request, &bound, "hevc").unwrap_err();
+    let err = validate_video_hardware_binding(&request, &bound, &input_probe_with_codec("hevc"))
+        .unwrap_err();
 
     assert!(
         err.to_string()
             .contains("software video work requires an unbound software worker"),
         "{err}"
     );
-    validate_video_hardware_binding(&request, &unbound, "hevc").unwrap();
+    validate_video_hardware_binding(&request, &unbound, &input_probe_with_codec("hevc")).unwrap();
     request.hardware_assignment = Some(VideoHardwareAssignment::software());
-    validate_video_hardware_binding(&request, &unbound, "hevc").unwrap();
-    assert!(validate_video_hardware_binding(&request, &bound, "hevc").is_err());
+    validate_video_hardware_binding(&request, &unbound, &input_probe_with_codec("hevc")).unwrap();
+    assert!(
+        validate_video_hardware_binding(&request, &bound, &input_probe_with_codec("hevc")).is_err()
+    );
 }
 
 #[tokio::test]
@@ -337,6 +363,7 @@ async fn unavailable_encoder_is_config_invalid_before_ffmpeg() {
         crf: Some(35),
         cq: None,
         qp: None,
+        bitrate_kbps: None,
         preset: Some("8".to_owned()),
         tune: None,
         codec_profile: None,
@@ -860,6 +887,26 @@ async fn output_dims_and_pixfmt_populated_from_probe() {
 }
 
 #[tokio::test]
+async fn expected_source_pixel_format_mismatch_fails_before_ffmpeg() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("input.mkv");
+    tokio::fs::write(&input, b"input").await.unwrap();
+    let mut request = request(dir.path(), &input).await;
+    request.input.video_pixel_format = Some("yuv420p10le".to_owned());
+
+    let error = handle_transcode_video(&request, &config(dir.path()))
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        TranscodeVideoError::MalformedWorkerResult { .. }
+    ));
+    assert!(error.to_string().contains("source pixel format"));
+    assert!(!Path::new(&request.output.path).exists());
+}
+
+#[tokio::test]
 async fn copy_video_sets_copied_video_flag() {
     let dir = tempfile::tempdir().unwrap();
     let input = dir.path().join("input.mkv");
@@ -1037,6 +1084,7 @@ async fn request(root: &Path, input: &Path) -> TranscodeVideoRequest {
             path: input.to_string_lossy().into_owned(),
             expected,
             video_codec: None,
+            video_pixel_format: None,
         },
         output: TranscodeVideoOutput {
             staging_root: stage.to_string_lossy().into_owned(),

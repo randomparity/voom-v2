@@ -9,6 +9,7 @@ pub const TRANSCODE_VIDEO_CONTAINER_MP4: &str = "mp4";
 pub const TRANSCODE_VIDEO_CODEC: &str = "hevc";
 pub const TRANSCODE_VIDEO_CODEC_ALIAS_H265: &str = "h265";
 pub const TRANSCODE_VIDEO_CODEC_AV1: &str = "av1";
+pub const TRANSCODE_VIDEO_CODEC_H264: &str = "h264";
 pub const TRANSCODE_VIDEO_PROFILE: &str = "default-hevc";
 
 #[must_use]
@@ -21,6 +22,7 @@ pub fn is_supported_transcode_video_codec(codec: &str) -> bool {
     codec.eq_ignore_ascii_case(TRANSCODE_VIDEO_CODEC)
         || codec.eq_ignore_ascii_case(TRANSCODE_VIDEO_CODEC_ALIAS_H265)
         || codec.eq_ignore_ascii_case(TRANSCODE_VIDEO_CODEC_AV1)
+        || codec.eq_ignore_ascii_case(TRANSCODE_VIDEO_CODEC_H264)
 }
 
 /// Normalizes codec profile/level tokens for comparison. ffprobe reports e.g.
@@ -45,6 +47,8 @@ pub fn canonical_video_codec(codec: &str) -> Option<&'static str> {
         Some(TRANSCODE_VIDEO_CODEC)
     } else if codec.eq_ignore_ascii_case(TRANSCODE_VIDEO_CODEC_AV1) {
         Some(TRANSCODE_VIDEO_CODEC_AV1)
+    } else if codec.eq_ignore_ascii_case(TRANSCODE_VIDEO_CODEC_H264) {
+        Some(TRANSCODE_VIDEO_CODEC_H264)
     } else {
         None
     }
@@ -106,6 +110,7 @@ pub fn validate_profile_against_descriptor(profile: &TranscodeVideoProfile) -> R
             ));
         }
     }
+    validate_videotoolbox_tuple(profile, descriptor.backend)?;
     Ok(())
 }
 
@@ -144,8 +149,9 @@ pub fn expected_output_pixel_format(
 }
 
 /// Exactly one quality field is legal per encoder — the one its `QualityDomain` names.
-/// The match is exhaustive over `(quality_domain, crf, cq, qp)` with no wildcard arm, so
-/// a new domain or a new quality field cannot be added without deciding this rule.
+/// The match is exhaustive over `(quality_domain, crf, cq, qp, bitrate_kbps)` with no
+/// wildcard arm, so a new domain or a new quality field cannot be added without deciding
+/// this rule.
 fn validate_quality_domain(
     descriptor: &EncoderDescriptor,
     profile: &TranscodeVideoProfile,
@@ -155,22 +161,42 @@ fn validate_quality_domain(
         profile.crf,
         profile.cq,
         profile.qp,
+        profile.bitrate_kbps,
     ) {
-        (QualityDomain::Crf { min, max }, Some(crf), None, None) if crf >= min && crf <= max => {
+        (QualityDomain::Crf { min, max }, Some(crf), None, None, None)
+            if crf >= min && crf <= max =>
+        {
             Ok(())
         }
-        (QualityDomain::Cq { min, max }, None, Some(cq), None) if cq >= min && cq <= max => Ok(()),
-        (QualityDomain::Qp { min, max }, None, None, Some(qp)) if qp >= min && qp <= max => Ok(()),
-        (QualityDomain::Crf { min, max }, crf, cq, qp) => Err(format!(
-            "`{}` requires only crf {min}..={max}; got crf={crf:?}, cq={cq:?}, qp={qp:?}",
+        (QualityDomain::Cq { min, max }, None, Some(cq), None, None) if cq >= min && cq <= max => {
+            Ok(())
+        }
+        (QualityDomain::Qp { min, max }, None, None, Some(qp), None) if qp >= min && qp <= max => {
+            Ok(())
+        }
+        (QualityDomain::BitrateKbps { min, max }, None, None, None, Some(bitrate))
+            if bitrate >= min && bitrate <= max =>
+        {
+            Ok(())
+        }
+        (QualityDomain::Crf { min, max }, crf, cq, qp, bitrate) => Err(format!(
+            "`{}` requires only crf {min}..={max}; got crf={crf:?}, cq={cq:?}, qp={qp:?}, \
+             bitrate_kbps={bitrate:?}",
             profile.encoder
         )),
-        (QualityDomain::Cq { min, max }, crf, cq, qp) => Err(format!(
-            "`{}` requires only cq {min}..={max}; got crf={crf:?}, cq={cq:?}, qp={qp:?}",
+        (QualityDomain::Cq { min, max }, crf, cq, qp, bitrate) => Err(format!(
+            "`{}` requires only cq {min}..={max}; got crf={crf:?}, cq={cq:?}, qp={qp:?}, \
+             bitrate_kbps={bitrate:?}",
             profile.encoder
         )),
-        (QualityDomain::Qp { min, max }, crf, cq, qp) => Err(format!(
-            "`{}` requires only qp {min}..={max}; got crf={crf:?}, cq={cq:?}, qp={qp:?}",
+        (QualityDomain::Qp { min, max }, crf, cq, qp, bitrate) => Err(format!(
+            "`{}` requires only qp {min}..={max}; got crf={crf:?}, cq={cq:?}, qp={qp:?}, \
+             bitrate_kbps={bitrate:?}",
+            profile.encoder
+        )),
+        (QualityDomain::BitrateKbps { min, max }, crf, cq, qp, bitrate) => Err(format!(
+            "`{}` requires only bitrate_kbps {min}..={max}; got crf={crf:?}, cq={cq:?}, \
+             qp={qp:?}, bitrate_kbps={bitrate:?}",
             profile.encoder
         )),
     }
@@ -192,6 +218,13 @@ fn validate_decode_pairing(
     if profile.decode.is_vaapi() && descriptor.backend != VideoEncoderBackend::Vaapi {
         return Err(format!(
             "VAAPI decode requires a VAAPI encoder, not `{}`",
+            profile.encoder
+        ));
+    }
+    if profile.decode.is_video_toolbox() && descriptor.backend != VideoEncoderBackend::VideoToolbox
+    {
+        return Err(format!(
+            "VideoToolbox decode requires a VideoToolbox encoder, not `{}`",
             profile.encoder
         ));
     }
@@ -227,6 +260,44 @@ fn validate_preset(
     }
 }
 
+fn validate_videotoolbox_tuple(
+    profile: &TranscodeVideoProfile,
+    backend: VideoEncoderBackend,
+) -> Result<(), String> {
+    if backend != VideoEncoderBackend::VideoToolbox {
+        return Ok(());
+    }
+    let tuple = (
+        profile.encoder.as_str(),
+        profile.codec_profile.as_deref(),
+        profile.codec_level.as_deref(),
+        profile.pixel_format.as_deref(),
+    );
+    let valid = tuple
+        == (
+            "h264_videotoolbox",
+            Some("high"),
+            Some("4.1"),
+            Some("yuv420p"),
+        )
+        || tuple == ("hevc_videotoolbox", Some("main"), None, Some("yuv420p"))
+        || tuple
+            == (
+                "hevc_videotoolbox",
+                Some("main10"),
+                None,
+                Some("yuv420p10le"),
+            );
+    if valid {
+        Ok(())
+    } else {
+        Err(format!(
+            "incomplete or incompatible VideoToolbox output tuple for `{}`",
+            profile.encoder
+        ))
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SoftwareVideoDecode {}
@@ -239,6 +310,10 @@ pub struct NvidiaVideoDecode {}
 #[serde(deny_unknown_fields)]
 pub struct VaapiVideoDecode {}
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VideoToolboxVideoDecode {}
+
 /// Where video frames are decoded before entering the encoder graph.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "backend", rename_all = "snake_case")]
@@ -246,6 +321,7 @@ pub enum VideoDecodeMode {
     Software(SoftwareVideoDecode),
     Nvidia(NvidiaVideoDecode),
     Vaapi(VaapiVideoDecode),
+    VideoToolbox(VideoToolboxVideoDecode),
 }
 
 impl Default for VideoDecodeMode {
@@ -266,10 +342,15 @@ impl VideoDecodeMode {
     }
 
     #[must_use]
+    pub const fn video_toolbox() -> Self {
+        Self::VideoToolbox(VideoToolboxVideoDecode {})
+    }
+
+    #[must_use]
     pub const fn is_software(&self) -> bool {
         match self {
             Self::Software(_) => true,
-            Self::Nvidia(_) | Self::Vaapi(_) => false,
+            Self::Nvidia(_) | Self::Vaapi(_) | Self::VideoToolbox(_) => false,
         }
     }
 
@@ -277,7 +358,7 @@ impl VideoDecodeMode {
     pub const fn is_nvidia(&self) -> bool {
         match self {
             Self::Nvidia(_) => true,
-            Self::Software(_) | Self::Vaapi(_) => false,
+            Self::Software(_) | Self::Vaapi(_) | Self::VideoToolbox(_) => false,
         }
     }
 
@@ -285,7 +366,15 @@ impl VideoDecodeMode {
     pub const fn is_vaapi(&self) -> bool {
         match self {
             Self::Vaapi(_) => true,
-            Self::Software(_) | Self::Nvidia(_) => false,
+            Self::Software(_) | Self::Nvidia(_) | Self::VideoToolbox(_) => false,
+        }
+    }
+
+    #[must_use]
+    pub const fn is_video_toolbox(&self) -> bool {
+        match self {
+            Self::VideoToolbox(_) => true,
+            Self::Software(_) | Self::Nvidia(_) | Self::Vaapi(_) => false,
         }
     }
 
@@ -295,6 +384,7 @@ impl VideoDecodeMode {
             Self::Software(_) => "software",
             Self::Nvidia(_) => "nvidia",
             Self::Vaapi(_) => "vaapi",
+            Self::VideoToolbox(_) => "video_toolbox",
         }
     }
 
@@ -307,6 +397,7 @@ impl VideoDecodeMode {
             "software" => Ok(Self::default()),
             "nvidia" => Ok(Self::nvidia()),
             "vaapi" => Ok(Self::vaapi()),
+            "video_toolbox" => Ok(Self::video_toolbox()),
             _ => Err(format!("unknown video decode backend `{value}`")),
         }
     }
@@ -325,6 +416,9 @@ pub struct TranscodeVideoProfile {
     /// VAAPI's constant quantization parameter, used with `-rc_mode CQP`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub qp: Option<u8>,
+    /// `VideoToolbox`'s target bitrate in kilobits per second.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bitrate_kbps: Option<u32>,
     /// Encoder-specific speed token: named x265 preset, SVT-AV1 `-preset N`, or libaom-av1 `-cpu-used N`.
     /// `None` for an encoder with no speed knob, e.g. `hevc_vaapi`.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -365,6 +459,7 @@ impl TranscodeVideoProfile {
             crf: Some(23),
             cq: None,
             qp: None,
+            bitrate_kbps: None,
             preset: Some("medium".to_owned()),
             tune: None,
             codec_profile: None,

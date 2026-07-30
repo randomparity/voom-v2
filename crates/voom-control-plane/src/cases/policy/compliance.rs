@@ -20,7 +20,7 @@ use voom_worker_protocol::{HttpClient, WorkerCredentials};
 
 use crate::ControlPlane;
 use crate::cases::{append_event, begin_tx, commit_tx};
-use crate::local_worker::ACCELERATOR_STARTUP_TIMEOUT;
+use crate::local_worker::NVIDIA_STARTUP_TIMEOUT;
 use crate::workflow::WorkerRuntimeRegistry;
 use crate::workflow::execution::executor::{
     OperationArtifactRoots, WorkflowArtifactRoots, WorkflowExecutorOptions, WorkflowQueueOptions,
@@ -625,10 +625,10 @@ impl ComplianceExecutionOptions {
                 "max_in_flight_files must be positive".to_owned(),
             ));
         }
-        if self.accelerator_unavailable_timeout <= ACCELERATOR_STARTUP_TIMEOUT {
+        if self.accelerator_unavailable_timeout <= NVIDIA_STARTUP_TIMEOUT {
             return Err(VoomError::Config(format!(
                 "accelerator unavailable timeout must exceed the NVIDIA startup timeout of {} seconds",
-                ACCELERATOR_STARTUP_TIMEOUT.as_secs()
+                NVIDIA_STARTUP_TIMEOUT.as_secs()
             )));
         }
         u32::try_from(self.max_in_flight_files).map_err(|error| {

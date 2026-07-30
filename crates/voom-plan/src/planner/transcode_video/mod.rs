@@ -141,6 +141,12 @@ fn transcode_video_shape(
     if needs_change && let Some(shape) = unsupported_hardware_decode_shape(resolved, video_codec) {
         return shape;
     }
+    if needs_change
+        && resolved.decode.is_video_toolbox()
+        && let Some(shape) = videotoolbox_decode_shape(snapshot, resolved)
+    {
+        return shape;
+    }
 
     if target_container.eq_ignore_ascii_case(voom_core::TRANSCODE_VIDEO_CONTAINER_MP4)
         && let Some(shape) = mp4_gate_shape(snapshot)
@@ -177,6 +183,38 @@ fn unsupported_hardware_decode_shape(
         )));
     }
     None
+}
+
+fn videotoolbox_decode_shape(
+    snapshot: &MediaSnapshotInput,
+    resolved: &voom_core::TranscodeVideoProfile,
+) -> Option<TranscodeVideoShape> {
+    let Some(source_pixel_format) = video_stream_field(snapshot, "pixel_format") else {
+        return Some(TranscodeVideoShape::InsufficientFacts(
+            "snapshot video pixel_format is unknown".to_owned(),
+        ));
+    };
+    let Some(source_depth) = video_pixel_format_depth(source_pixel_format) else {
+        return Some(TranscodeVideoShape::UnsupportedShape(format!(
+            "VideoToolbox decode does not support source pixel format `{source_pixel_format}`"
+        )));
+    };
+    let output_pixel_format = resolved.pixel_format.as_deref().unwrap_or("unknown");
+    if video_pixel_format_depth(output_pixel_format) == Some(source_depth) {
+        return None;
+    }
+    Some(TranscodeVideoShape::UnsupportedShape(format!(
+        "VideoToolbox decode source pixel format `{source_pixel_format}` is incompatible with \
+         output pixel format `{output_pixel_format}`"
+    )))
+}
+
+fn video_pixel_format_depth(pixel_format: &str) -> Option<u8> {
+    match pixel_format {
+        "yuv420p" | "nv12" => Some(8),
+        "yuv420p10le" | "p010le" => Some(10),
+        _ => None,
+    }
 }
 
 fn transcode_video_needs_change(
@@ -348,14 +386,19 @@ fn transcode_video_payload(
     container: &str,
     snapshot: &MediaSnapshotInput,
 ) -> Result<serde_json::Value, serde_json::Error> {
-    Ok(json!({
+    let source_video_pixel_format = video_stream_field(snapshot, "pixel_format");
+    let mut payload = json!({
         "type": "transcode_video",
         "target_codec": resolved.target_codec,
         "container": container,
         "profile": resolved.name,
         "resolved_profile": serde_json::to_value(resolved)?,
         "source_video_codec": snapshot.video_codec,
-    }))
+    });
+    if let Some(source_video_pixel_format) = source_video_pixel_format {
+        payload["source_video_pixel_format"] = json!(source_video_pixel_format);
+    }
+    Ok(payload)
 }
 
 fn transcode_video_notes(

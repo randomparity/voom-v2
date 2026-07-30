@@ -104,6 +104,7 @@ async fn nvidia_worker(
         artifact_access: Vec::new(),
         extra: serde_json::json!({
             "accelerator": {
+                "backend": "nvidia",
                 "hardware_token": hardware_token,
                 "device_uuid": hardware_token.trim_start_matches("nvidia:"),
                 "device_name": "Test GPU",
@@ -122,7 +123,7 @@ async fn nvidia_worker(
 
 /// A VAAPI-bound worker as `local_worker.rs` records one: the token is derived from
 /// the PCI address, and the stored descriptor is `backend`-tagged and carries no
-/// `hardware_token` field of its own (ADR 0051 §1).
+/// `hardware_token` field of its own (ADR 0052 §1).
 async fn vaapi_worker(
     cp: &crate::ControlPlane,
     name: &str,
@@ -176,10 +177,11 @@ fn claim_for(
 ) -> NewAcceleratorClaim {
     NewAcceleratorClaim {
         hardware_token: format!("vaapi:pci-{pci_address}"),
+        backend: "vaapi".to_owned(),
         worker_id,
         boot_id: "boot-id".to_owned(),
         supervisor_pid: pid,
-        supervisor_start_ticks: u64::from(pid) * 10,
+        supervisor_start_identity: Some(format!("linux-proc-ticks:{}", u64::from(pid) * 10)),
         process_group_id: pid,
         capacity,
         claimed_at: T0,

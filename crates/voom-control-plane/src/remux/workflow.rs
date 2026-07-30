@@ -1,5 +1,7 @@
 use serde_json::Value;
-use voom_core::{OperationKind, VoomError};
+#[cfg(test)]
+use voom_core::OperationKind;
+use voom_core::VoomError;
 use voom_worker_protocol::{RemuxRequest, RemuxResult};
 
 use crate::cases::policy::compliance::committed_source_dir;
@@ -15,8 +17,7 @@ use crate::workflow::execution::leases::{
 };
 
 use crate::workflow::execution::operation_adapters::{
-    OperationAdapterContext, RuntimeDispatchContext, await_with_lease_heartbeats,
-    workflow_idempotency_key,
+    OperationAdapterContext, RuntimeDispatchContext, workflow_idempotency_key,
 };
 
 pub(crate) async fn dispatch_control_plane_remux_context(
@@ -95,7 +96,6 @@ pub(crate) async fn dispatch_control_plane_remux(
         payload,
         artifact_roots: &options.artifact_roots.remux,
         backup_root: options.artifact_roots.backup_root.as_deref(),
-        timing: &options.timing,
         chaos: &options.chaos,
     })
     .await
@@ -138,19 +138,21 @@ impl RemuxDispatcher for RuntimeRemuxDispatcher<'_> {
     ) -> Result<RemuxResult, VoomError> {
         let idempotency_key =
             workflow_idempotency_key(self.context.ticket_id, self.context.lease_id);
-        await_with_lease_heartbeats(
-            self.context,
-            OperationKind::Remux,
-            crate::remux::dispatch::dispatch_remux_with_client_context_and_progress(
-                self.context.runtime.client.as_ref(),
-                &self.context.runtime.credentials,
-                &idempotency_key,
-                self.context.lease_id,
-                request,
-                progress,
-            ),
+        let result = crate::remux::dispatch::dispatch_remux_with_client_context_and_progress(
+            self.context.runtime.client.as_ref(),
+            &self.context.runtime.credentials,
+            &idempotency_key,
+            self.context.lease_id,
+            request,
+            progress,
         )
-        .await
+        .await?;
+        #[cfg(test)]
+        self.context
+            .chaos
+            .hold_after_worker_result(OperationKind::Remux)
+            .await;
+        Ok(result)
     }
 }
 

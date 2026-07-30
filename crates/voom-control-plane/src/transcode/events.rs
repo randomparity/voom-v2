@@ -51,7 +51,7 @@ pub async fn record_succeeded(
     staging_path: &Path,
     result: &TranscodeVideoResult,
 ) -> Result<(), VoomError> {
-    let (hardware_backend, hardware_token, hardware_device_uuid) =
+    let (hardware_backend, hardware_token, hardware_device_uuid, hardware_resource_id) =
         hardware_evidence(result.hardware_assignment.as_ref());
     let mut tx = begin_tx(&cp.pool).await?;
     let now = cp.clock().now();
@@ -82,6 +82,7 @@ pub async fn record_succeeded(
             hardware_backend,
             hardware_token,
             hardware_device_uuid,
+            hardware_resource_id,
             provider: result.provider.clone(),
             provider_version: result.provider_version.clone(),
         }),
@@ -92,13 +93,25 @@ pub async fn record_succeeded(
 
 fn hardware_evidence(
     assignment: Option<&VideoHardwareAssignment>,
-) -> (Option<String>, Option<String>, Option<String>) {
+) -> (
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+) {
     match assignment {
-        None | Some(VideoHardwareAssignment::Software(_)) => (None, None, None),
+        None | Some(VideoHardwareAssignment::Software(_)) => (None, None, None, None),
         Some(VideoHardwareAssignment::Nvidia(assignment)) => (
             Some("nvidia".to_owned()),
             Some(assignment.hardware_token.clone()),
             Some(assignment.device_uuid.clone()),
+            None,
+        ),
+        Some(VideoHardwareAssignment::VideoToolbox(assignment)) => (
+            Some("video_toolbox".to_owned()),
+            Some(assignment.hardware_token.clone()),
+            None,
+            Some(assignment.resource_id.clone()),
         ),
         // A VAAPI device is identified by PCI address, which the token already
         // carries; `hardware_device_uuid` stays absent rather than holding a
@@ -106,6 +119,7 @@ fn hardware_evidence(
         Some(VideoHardwareAssignment::Vaapi(assignment)) => (
             Some("vaapi".to_owned()),
             Some(assignment.hardware_token.clone()),
+            None,
             None,
         ),
     }

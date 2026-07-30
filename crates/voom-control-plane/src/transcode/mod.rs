@@ -35,18 +35,18 @@ pub struct ExecuteTranscodeVideoInput {
     pub source_location_id: Option<FileLocationId>,
     pub staging_root: PathBuf,
     pub target_dir: PathBuf,
-    /// The resolved video encode profile plus output container, threaded from
-    /// the ticket payload (binding.rs embeds it from the planner node payload).
-    pub resolved: resolve::ResolvedProfile,
-    /// Opt-in backup-before-mutation destination root; `Some` backs up the
-    /// source before dispatch (ADR 0025).
-    pub backup_root: Option<PathBuf>,
     /// The accelerator the scheduler leased for this ticket, threaded from the
     /// ticket payload. It belongs to the operation, not to the transport: the
     /// request the worker answers and the request `validate_result` checks the
     /// answer against must be the same one, or every accelerated transcode is
     /// rejected as malformed.
     pub hardware_assignment: Option<VideoHardwareAssignment>,
+    /// The resolved video encode profile plus output container, threaded from
+    /// the ticket payload (binding.rs embeds it from the planner node payload).
+    pub resolved: resolve::ResolvedProfile,
+    /// Opt-in backup-before-mutation destination root; `Some` backs up the
+    /// source before dispatch (ADR 0025).
+    pub backup_root: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -123,19 +123,23 @@ async fn source_video_decision(
     cp: &ControlPlane,
     source_file_version_id: FileVersionId,
     resolved: &resolve::ResolvedProfile,
-) -> Result<(bool, Option<String>), VoomError> {
+) -> Result<(bool, Option<String>, Option<String>), VoomError> {
     let snapshots = cp
         .identity
         .list_media_snapshots_by_version(source_file_version_id)
         .await?;
     let latest = snapshots.into_iter().max_by_key(|s| s.id);
     let Some(snapshot) = latest else {
-        return Ok((false, None));
+        return Ok((false, None, None));
     };
     let snapshot = crate::media_snapshot::planning_input(1, &snapshot);
+    let video_pixel_format =
+        voom_plan::planner::transcode_video::video_stream_field(&snapshot, "pixel_format")
+            .map(str::to_owned);
     Ok((
         resolve::decide_copy_video(&resolved.profile, &snapshot),
         snapshot.video_codec,
+        video_pixel_format,
     ))
 }
 
@@ -152,6 +156,7 @@ pub(crate) async fn execute_transcode_video_with_dispatchers(
     let PreparedTranscode {
         copy_video,
         source_video_codec,
+        source_video_pixel_format,
         staging_path,
         target_path,
     } = prepared;
@@ -166,6 +171,7 @@ pub(crate) async fn execute_transcode_video_with_dispatchers(
         &staging_path,
     );
     request.input.video_codec = source_video_codec;
+    request.input.video_pixel_format = source_video_pixel_format;
     request.hardware_assignment = input.hardware_assignment.clone();
     let result = transcode.dispatch_transcode_video(request.clone()).await?;
     dispatch::validate_result(&selected, &request, &result)?;
@@ -234,6 +240,7 @@ pub(crate) async fn execute_transcode_video_with_dispatchers(
 struct PreparedTranscode {
     copy_video: bool,
     source_video_codec: Option<String>,
+    source_video_pixel_format: Option<String>,
     staging_path: PathBuf,
     target_path: PathBuf,
 }
@@ -252,7 +259,7 @@ async fn prepare_transcode(
         input.ticket_id,
     )
     .await?;
-    let (copy_video, source_video_codec) =
+    let (copy_video, source_video_codec, source_video_pixel_format) =
         source_video_decision(cp, input.source_file_version_id, &input.resolved).await?;
     let output_name = stage::OutputName {
         source_path: &selected.location.value,
@@ -271,6 +278,7 @@ async fn prepare_transcode(
     Ok(PreparedTranscode {
         copy_video,
         source_video_codec,
+        source_video_pixel_format,
         staging_path,
         target_path,
     })

@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use super::*;
+use voom_worker_protocol::{VIDEOTOOLBOX_PREFLIGHT_BUDGET, VIDEOTOOLBOX_PREFLIGHT_MAX_STAGES};
 
 #[test]
 fn preflight_rejects_missing_ffmpeg() {
@@ -20,6 +21,119 @@ fn nvidia_uuid_validation_rejects_ordinals_and_partial_tokens() {
     for invalid in ["0", "GPU-0", "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"] {
         assert!(validate_nvidia_uuid(invalid).is_err(), "{invalid}");
     }
+}
+
+#[test]
+fn videotoolbox_stage_budget_matches_supervisor_deadline() {
+    assert_eq!(VIDEOTOOLBOX_PREFLIGHT_MAX_STAGES, 29);
+    assert_eq!(PROBE_TIMEOUT, Duration::from_secs(15));
+    assert_eq!(VIDEOTOOLBOX_PREFLIGHT_BUDGET, Duration::from_secs(465));
+}
+
+#[test]
+fn platform_identity_hash_is_normalized_and_errors_do_not_disclose_raw_uuid() {
+    let raw_uuid = "e4ad1c3f-8b4a-4e4e-a9ad-9a0123456789";
+    let ioreg = format!("\"IOPlatformUUID\" = \"{raw_uuid}\"");
+    let normalized = parse_ioreg_platform_uuid(&ioreg).unwrap();
+    let resource_id = platform_resource_id(&normalized).unwrap();
+
+    assert_eq!(normalized, raw_uuid.to_ascii_uppercase());
+    assert_eq!(resource_id.len(), 64);
+    assert!(!resource_id.contains(raw_uuid));
+
+    let malformed = "secret-platform-value";
+    let error = parse_ioreg_platform_uuid(&format!("\"IOPlatformUUID\" = \"{malformed}\""))
+        .unwrap_err()
+        .to_string();
+    assert!(!error.contains(malformed));
+}
+
+#[cfg(unix)]
+#[test]
+fn failed_identity_command_redacts_partial_platform_output() {
+    let raw_uuid = "E4AD1C3F-8B4A-4E4E-A9AD-9A0123456789";
+    let output = Command::new("/bin/sh")
+        .args([
+            "-c",
+            &format!("printf '\"IOPlatformUUID\" = \"{raw_uuid}\"'; exit 1"),
+        ])
+        .output();
+
+    let error = redacted_command_text("ioreg platform identity", output)
+        .unwrap_err()
+        .to_string();
+
+    assert!(error.contains("ioreg platform identity exited with status 1"));
+    assert!(!error.contains(raw_uuid));
+}
+
+#[test]
+fn capacity_progress_requires_a_positive_frame() {
+    assert!(!progress_reports_frame("frame=0\nprogress=continue\n"));
+    assert!(progress_reports_frame("frame=1\nprogress=continue\n"));
+}
+
+#[cfg(unix)]
+#[test]
+fn capacity_failure_reaps_remaining_processes() {
+    let sleeper = Command::new("/bin/sh")
+        .args(["-c", "sleep 60"])
+        .spawn()
+        .unwrap();
+    let sleeper_pid = sleeper.id();
+    let failing = Command::new("/bin/sh")
+        .args(["-c", "exit 2"])
+        .spawn()
+        .unwrap();
+    let mut children = vec![sleeper, failing];
+
+    let result = wait_videotoolbox_capacity_children(
+        "test",
+        &mut children,
+        std::time::Instant::now() + Duration::from_secs(2),
+    );
+
+    assert!(result.is_err());
+    assert!(children.is_empty());
+    let status = Command::new("/bin/kill")
+        .args(["-0", &sleeper_pid.to_string()])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .unwrap();
+    assert!(!status.success());
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[test]
+#[ignore = "requires the host FFmpeg VideoToolbox stack"]
+fn real_videotoolbox_preflight_proves_host_pipelines() {
+    let ffmpeg = resolve_binary(OsStr::new("ffmpeg"));
+    let ffprobe = resolve_binary(OsStr::new("ffprobe"));
+    let ioreg = command_text(
+        "ioreg platform identity",
+        command_output(Command::new("/usr/sbin/ioreg").args([
+            "-rd1",
+            "-c",
+            "IOPlatformExpertDevice",
+        ])),
+    )
+    .unwrap();
+    let resource_id = platform_resource_id(&parse_ioreg_platform_uuid(&ioreg).unwrap()).unwrap();
+
+    let report = preflight_with_videotoolbox(
+        &ffmpeg,
+        &ffprobe,
+        &VideoToolboxPreflightConfig {
+            resource_id,
+            max_sessions: 1,
+        },
+    )
+    .unwrap();
+
+    let report = report.videotoolbox.unwrap();
+    assert_eq!(report.encoders.len(), 2);
+    assert!(!report.decoders.is_empty());
 }
 
 #[cfg(unix)]
@@ -245,7 +359,7 @@ fn spawn_piped_retrying_text_file_busy(program: &Path) -> io::Result<Child> {
     }
 }
 
-// ---- VAAPI device identity (spec §6 diagnostics 1-5, ADR 0051 §1) ----
+// ---- VAAPI device identity (spec §6 diagnostics 1-5, ADR 0052 §1) ----
 //
 // Every one of these runs against a fake `/dev/dri` and a fake `/sys/class/drm`
 // built in a tempdir, because the acceptance host's real device disagrees with
@@ -462,11 +576,11 @@ fn vaapi_resolution_accepts_a_node_whose_readback_matches() {
     assert_eq!(node, Path::new(FAKE_RENDER_NODE));
 }
 
-// ---- VAAPI probe-proven capability (spec §6 diagnostics 6-9, ADR 0051 §2/§6/§7) ----
+// ---- VAAPI probe-proven capability (spec §6 diagnostics 6-9, ADR 0052 §2/§6/§7) ----
 
 /// A fake `ffmpeg` whose `hevc_vaapi` encode and `-hwaccel` decode arms are
 /// supplied per test. Probes are the only thing that can prove capability
-/// (ADR 0051 §2), so faking the binary is the only way to exercise their failure
+/// (ADR 0052 §2), so faking the binary is the only way to exercise their failure
 /// modes on a host whose real driver succeeds.
 #[cfg(unix)]
 fn vaapi_ffmpeg_stub(dir: &Path, encode_arm: &str, decode_arm: &str) -> PathBuf {
@@ -503,7 +617,7 @@ fn proven_device(root: &Path) -> (FakeDri, VaapiPreflightConfig) {
 }
 
 /// A codec that has encoded on the bound device is advertised; the device name and
-/// driver build come from the VAAPI connection, because ADR 0051 §2 makes the
+/// driver build come from the VAAPI connection, because ADR 0052 §2 makes the
 /// loaded driver build — not the hardware — the thing capability tracks.
 #[cfg(unix)]
 #[test]
@@ -533,7 +647,7 @@ fn vaapi_preflight_advertises_only_probe_proven_codecs() {
 
 /// A decoder that fails its probe is not advertised, but the reason is kept: a
 /// silently shortened decoder list would look like a driver that never had the
-/// codec (ADR 0051 §2).
+/// codec (ADR 0052 §2).
 #[cfg(unix)]
 #[test]
 fn vaapi_preflight_drops_unproven_decoders_and_keeps_the_reason() {
@@ -638,7 +752,7 @@ fn vaapi_preflight_rejects_a_probe_encode_that_produced_no_output() {
     );
 }
 
-/// Diagnostic 8: VAAPI has no encoder-session enumeration (ADR 0051 §6), so the
+/// Diagnostic 8: VAAPI has no encoder-session enumeration (ADR 0052 §6), so the
 /// message must state the uncertainty and must never claim external contention —
 /// there is nothing on the device that could tell it apart.
 #[cfg(unix)]
@@ -669,7 +783,7 @@ fn vaapi_capacity_probe_failure_reports_diagnostic_uncertainty() {
     );
     assert!(
         error.contains("cannot be attributed"),
-        "ADR 0051 §6 forbids attributing a VAAPI capacity failure: {error}"
+        "ADR 0052 §6 forbids attributing a VAAPI capacity failure: {error}"
     );
     assert!(
         !error.contains("contention"),
@@ -679,7 +793,7 @@ fn vaapi_capacity_probe_failure_reports_diagnostic_uncertainty() {
 
 /// Diagnostic 9a: a hung probe encode expires the per-probe clock and names the
 /// codec, so a wedged driver fails startup instead of leaving the worker pending
-/// (ADR 0051 §7).
+/// (ADR 0052 §7).
 #[cfg(unix)]
 #[test]
 fn vaapi_probe_encode_expiry_names_the_codec_that_did_not_prove() {
@@ -742,7 +856,7 @@ fn vaapi_capacity_clock_expiry_names_the_declaration() {
     );
 }
 
-/// Diagnostic 9c: the overall readiness deadline. ADR 0051 §7 requires expiry to
+/// Diagnostic 9c: the overall readiness deadline. ADR 0052 §7 requires expiry to
 /// fail startup naming the stage that did not prove, so a worker cannot sit
 /// pending forever while probes crawl.
 #[cfg(unix)]

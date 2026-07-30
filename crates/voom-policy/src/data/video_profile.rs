@@ -20,6 +20,9 @@ pub struct VideoProfileSettings {
     /// VAAPI's constant quantization parameter, used with `-rc_mode CQP`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub qp: Option<u8>,
+    /// `VideoToolbox`'s target bitrate in kilobits per second.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bitrate_kbps: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preset: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

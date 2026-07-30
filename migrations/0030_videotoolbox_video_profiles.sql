@@ -1,8 +1,4 @@
--- Issue #409: typed VAAPI video profiles.
---
--- Table rebuild rather than ALTER: `preset` drops NOT NULL (`hevc_vaapi` has no
--- `-preset`) and the quality CHECK has to name three mutually exclusive columns,
--- neither of which SQLite can express with ALTER TABLE.
+-- Issue #411: typed VideoToolbox video profiles.
 
 CREATE TABLE video_profiles_new (
   id               TEXT PRIMARY KEY,
@@ -11,8 +7,8 @@ CREATE TABLE video_profiles_new (
   encoder          TEXT NOT NULL,
   crf              INTEGER,
   cq               INTEGER,
-  qp               INTEGER,
-  preset           TEXT,
+  bitrate_kbps     INTEGER,
+  preset           TEXT NOT NULL,
   tune             TEXT,
   codec_profile    TEXT,
   codec_level      TEXT,
@@ -24,42 +20,49 @@ CREATE TABLE video_profiles_new (
   retired_at       TEXT,
   decode_backend   TEXT NOT NULL DEFAULT 'software',
   CHECK (length(trim(name)) > 0),
-  CHECK (target_codec IN ('hevc', 'av1')),
-  CHECK (encoder IN ('libx265', 'libsvtav1', 'libaom-av1', 'hevc_nvenc', 'hevc_vaapi')),
-  -- Exactly one quality field per encoder, the one its QualityDomain names in
-  -- voom-core. `qp` excludes 0 because hevc_vaapi reads 0 as "auto", which is
-  -- not an operator quality target.
-  --
-  -- Each arm asserts its own field IS NOT NULL before the range test: SQLite
-  -- treats a CHECK that evaluates to NULL as satisfied, so a bare
-  -- `cq BETWEEN 1 AND 51` admits a row with no quality field at all.
+  CHECK (target_codec IN ('h264', 'hevc', 'av1')),
   CHECK (
-    (encoder = 'hevc_nvenc'
-      AND crf IS NULL AND qp IS NULL
-      AND cq IS NOT NULL AND cq BETWEEN 1 AND 51)
-    OR
-    (encoder = 'hevc_vaapi'
-      AND crf IS NULL AND cq IS NULL
-      AND qp IS NOT NULL AND qp BETWEEN 1 AND 52)
-    OR
-    (encoder NOT IN ('hevc_nvenc', 'hevc_vaapi')
-      AND cq IS NULL AND qp IS NULL
-      AND crf IS NOT NULL AND crf >= 0)
+    encoder IN (
+      'libx265',
+      'libsvtav1',
+      'libaom-av1',
+      'hevc_nvenc',
+      'h264_videotoolbox',
+      'hevc_videotoolbox'
+    )
   ),
   CHECK (
-    (encoder = 'hevc_vaapi' AND preset IS NULL)
-    OR
-    (encoder != 'hevc_vaapi' AND preset IS NOT NULL)
+    (
+      encoder IN ('h264_videotoolbox', 'hevc_videotoolbox')
+      AND crf IS NULL
+      AND cq IS NULL
+      AND bitrate_kbps BETWEEN 1 AND 4294967295
+    )
+    OR (
+      encoder = 'hevc_nvenc'
+      AND crf IS NULL
+      AND cq BETWEEN 1 AND 51
+      AND bitrate_kbps IS NULL
+    )
+    OR (
+      encoder NOT IN ('hevc_nvenc', 'h264_videotoolbox', 'hevc_videotoolbox')
+      AND crf >= 0
+      AND cq IS NULL
+      AND bitrate_kbps IS NULL
+    )
   ),
   CHECK (max_width IS NULL OR max_width > 0),
   CHECK (max_height IS NULL OR max_height > 0),
   CHECK (output_container IN ('mkv', 'mp4')),
   CHECK (copy_compatible IN (0, 1)),
-  CHECK (decode_backend IN ('software', 'nvidia', 'vaapi')),
+  CHECK (decode_backend IN ('software', 'nvidia', 'video_toolbox')),
   CHECK (
     decode_backend = 'software'
     OR (decode_backend = 'nvidia' AND encoder = 'hevc_nvenc')
-    OR (decode_backend = 'vaapi' AND encoder = 'hevc_vaapi')
+    OR (
+      decode_backend = 'video_toolbox'
+      AND encoder IN ('h264_videotoolbox', 'hevc_videotoolbox')
+    )
   )
 ) STRICT;
 
@@ -70,7 +73,7 @@ INSERT INTO video_profiles_new (
   encoder,
   crf,
   cq,
-  qp,
+  bitrate_kbps,
   preset,
   tune,
   codec_profile,
