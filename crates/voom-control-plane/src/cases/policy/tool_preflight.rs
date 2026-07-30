@@ -1,6 +1,11 @@
-use voom_core::{OperationKind, PROTOCOL_VERSION, TicketOperation, VoomError};
+use voom_core::{
+    OperationKind, PROTOCOL_VERSION, TicketOperation, VideoDecodeMode, VideoEncoderBackend,
+    VoomError,
+};
+use voom_policy::compiled::CompiledTranscodeVideoOperation;
 use voom_policy::{CompiledOperation, CompiledPolicy, PolicyTool, VideoProfileRef};
 use voom_store::repo::workers::{Worker, WorkerKind, WorkerStatus};
+use voom_worker_protocol::VideoAcceleratorDescriptor;
 
 use crate::ControlPlane;
 use crate::cases::{begin_immediate_tx, commit_tx};
@@ -80,7 +85,7 @@ impl ControlPlane {
         runtimes: &WorkerRuntimeRegistry,
     ) -> Result<(), VoomError> {
         let requirements = policy_video_backend_requirements(policy)?;
-        if !requirements.software && !requirements.nvidia {
+        if !requirements.software && !requirements.nvidia.required && !requirements.vaapi.required {
             return Ok(());
         }
         let candidates = self
@@ -89,20 +94,29 @@ impl ControlPlane {
             .await?;
         let mut software_available = false;
         let mut nvidia_available = false;
+        let mut vaapi_available = false;
         for candidate in candidates {
             if runtimes.get_optional(candidate.worker_id).is_none() {
                 continue;
             }
-            let descriptor = candidate_accelerator_descriptor(&candidate)?;
-            match descriptor {
-                Some(descriptor) => {
-                    let has_encoder = descriptor
+            match candidate_accelerator_descriptor(&candidate)? {
+                Some(VideoAcceleratorDescriptor::Nvidia(device)) => {
+                    let has_encoder = device
                         .encoders
                         .iter()
                         .any(|encoder| encoder == "hevc_nvenc");
                     let has_decoder =
-                        !requirements.nvidia_decode || !descriptor.decoders.is_empty();
+                        !requirements.nvidia.hardware_decode || !device.decoders.is_empty();
                     nvidia_available |= has_encoder && has_decoder;
+                }
+                Some(VideoAcceleratorDescriptor::Vaapi(device)) => {
+                    let has_encoder = device
+                        .encoders
+                        .iter()
+                        .any(|encoder| encoder == "hevc_vaapi");
+                    let has_decoder =
+                        !requirements.vaapi.hardware_decode || !device.decoders.is_empty();
+                    vaapi_available |= has_encoder && has_decoder;
                 }
                 None if candidate.hardware.is_empty() => software_available = true,
                 None => {}
@@ -116,8 +130,8 @@ impl ControlPlane {
                     .to_owned(),
             );
         }
-        if requirements.nvidia && !nvidia_available {
-            let decoder = if requirements.nvidia_decode {
+        if requirements.nvidia.required && !nvidia_available {
+            let decoder = if requirements.nvidia.hardware_decode {
                 " with at least one advertised CUVID decoder"
             } else {
                 ""
@@ -126,6 +140,18 @@ impl ControlPlane {
                 "hevc_nvenc profiles require a live NVIDIA-bound ffmpeg worker{decoder}; \
                  start one with: voom worker run-local --kind ffmpeg \
                  --nvidia-device GPU-<uuid>"
+            ));
+        }
+        if requirements.vaapi.required && !vaapi_available {
+            let decoder = if requirements.vaapi.hardware_decode {
+                " with at least one probed VAAPI decoder"
+            } else {
+                ""
+            };
+            missing.push(format!(
+                "hevc_vaapi profiles require a live VAAPI-bound ffmpeg worker{decoder}; \
+                 start one with: voom worker run-local --kind ffmpeg \
+                 --vaapi-device <pci-address>"
             ));
         }
         if missing.is_empty() {
@@ -283,11 +309,22 @@ impl ControlPlane {
     }
 }
 
+/// What one accelerator backend's profiles need from the fleet: whether any profile
+/// targets it at all, and whether any of those also selects hardware decode, which
+/// needs a device that probed a decoder as well as an encoder.
+#[derive(Default)]
+struct BackendRequirement {
+    required: bool,
+    hardware_decode: bool,
+}
+
+/// Software has no decode variant to track: software decode is the omitted default
+/// and needs nothing from a device.
 #[derive(Default)]
 struct VideoBackendRequirements {
     software: bool,
-    nvidia: bool,
-    nvidia_decode: bool,
+    nvidia: BackendRequirement,
+    vaapi: BackendRequirement,
 }
 
 fn policy_video_backend_requirements(
@@ -307,39 +344,7 @@ fn collect_video_backend_requirements(
     for operation in operations {
         match operation {
             CompiledOperation::TranscodeVideo(operation) => {
-                let encoder = operation
-                    .resolved_profile
-                    .as_ref()
-                    .map(|profile| profile.encoder.as_str())
-                    .or(match &operation.profile {
-                        VideoProfileRef::Inline(settings) => Some(settings.encoder.as_str()),
-                        VideoProfileRef::Named(_) => None,
-                    })
-                    .ok_or_else(|| {
-                        VoomError::PolicyExecution(
-                            "video hardware preflight requires resolved named profiles".to_owned(),
-                        )
-                    })?;
-                if encoder == "hevc_nvenc" {
-                    requirements.nvidia = true;
-                    let decode = operation
-                        .resolved_profile
-                        .as_ref()
-                        .map(|profile| &profile.decode)
-                        .or(match &operation.profile {
-                            VideoProfileRef::Inline(settings) => Some(&settings.decode),
-                            VideoProfileRef::Named(_) => None,
-                        })
-                        .ok_or_else(|| {
-                            VoomError::PolicyExecution(
-                                "video hardware preflight requires resolved named profiles"
-                                    .to_owned(),
-                            )
-                        })?;
-                    requirements.nvidia_decode |= decode.is_nvidia();
-                } else {
-                    requirements.software = true;
-                }
+                record_transcode_video_requirement(operation, requirements)?;
             }
             CompiledOperation::Conditional(conditional) => {
                 collect_video_backend_requirements(&conditional.operations, requirements)?;
@@ -353,6 +358,50 @@ fn collect_video_backend_requirements(
         }
     }
     Ok(())
+}
+
+/// Which backend a profile needs is its encoder descriptor's `backend`, never a
+/// string comparison against one encoder name. Classifying by name gives every
+/// unrecognized hardware encoder a *software* requirement, so it would be
+/// preflighted and dispatched against a CPU worker — the silent software fallback
+/// issue #409 forbids. An encoder with no descriptor cannot be classified at all
+/// and fails loud.
+fn record_transcode_video_requirement(
+    operation: &CompiledTranscodeVideoOperation,
+    requirements: &mut VideoBackendRequirements,
+) -> Result<(), VoomError> {
+    let (encoder, decode) = transcode_video_encoder_and_decode(operation)?;
+    let descriptor = voom_core::encoder_descriptor(encoder).ok_or_else(|| {
+        VoomError::PolicyExecution(format!(
+            "video hardware preflight cannot classify unknown encoder `{encoder}`"
+        ))
+    })?;
+    match descriptor.backend {
+        VideoEncoderBackend::Software => requirements.software = true,
+        VideoEncoderBackend::Nvidia => {
+            requirements.nvidia.required = true;
+            requirements.nvidia.hardware_decode |= decode.is_nvidia();
+        }
+        VideoEncoderBackend::Vaapi => {
+            requirements.vaapi.required = true;
+            requirements.vaapi.hardware_decode |= decode.is_vaapi();
+        }
+    }
+    Ok(())
+}
+
+fn transcode_video_encoder_and_decode(
+    operation: &CompiledTranscodeVideoOperation,
+) -> Result<(&str, &VideoDecodeMode), VoomError> {
+    if let Some(profile) = &operation.resolved_profile {
+        return Ok((profile.encoder.as_str(), &profile.decode));
+    }
+    match &operation.profile {
+        VideoProfileRef::Inline(settings) => Ok((settings.encoder.as_str(), &settings.decode)),
+        VideoProfileRef::Named(_) => Err(VoomError::PolicyExecution(
+            "video hardware preflight requires resolved named profiles".to_owned(),
+        )),
+    }
 }
 
 fn unavailable_eligibility_reason(findings: &[EligibilityFinding]) -> String {

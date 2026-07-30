@@ -202,6 +202,47 @@ async fn gpu_bound_worker_does_not_satisfy_software_profile_preflight() {
     );
 }
 
+/// A host may run a software worker beside a VAAPI-bound one. ADR 0049 §6 forbids
+/// an error escaping candidate projection, so the VAAPI worker's descriptor must
+/// not decide whether a software profile can be scheduled: preflight has to keep
+/// observing the software worker and pass.
+#[tokio::test]
+async fn a_live_vaapi_worker_does_not_break_software_profile_preflight() {
+    let (cp, _tmp) = cp().await;
+    let operation = TicketOperation::from(OperationKind::TranscodeVideo);
+    let software = register_transcode_worker(
+        &cp,
+        "local-ffmpeg-software",
+        &operation,
+        Vec::new(),
+        json!({}),
+        1,
+    )
+    .await;
+    let vaapi = register_transcode_worker(
+        &cp,
+        "local-ffmpeg-vaapi",
+        &operation,
+        vec!["vaapi:pci-0000:f4:00.0".to_owned()],
+        vaapi_accelerator_extra(&["hevc_vaapi"], &["hevc"]),
+        2,
+    )
+    .await;
+    let registry = live_registry(&[&software, &vaapi]);
+    let mut policy = compile_policy(
+        "policy \"software\" { \
+         metadata { requires_tools: [ffmpeg] } \
+         phase encode { transcode video to hevc { \
+         encoder: libx265 crf: 23 preset: medium } } }",
+    )
+    .unwrap()
+    .policy;
+
+    cp.preflight_policy_tools(&mut policy, &registry)
+        .await
+        .unwrap();
+}
+
 #[tokio::test]
 async fn nvidia_decode_profile_requires_an_advertised_cuvid_decoder() {
     let (cp, _tmp) = cp().await;
@@ -424,6 +465,80 @@ async fn denied_ffprobe_is_aggregated_with_later_missing_tool() {
     assert!(message.contains("- ffprobe: live built-in provider"));
     assert!(message.contains("denied probe_file"));
     assert!(message.find("- ffprobe:").unwrap() < message.find("- ffmpeg:").unwrap());
+}
+
+/// Registers one live `transcode_video` provider with the reserved local naming
+/// preflight looks for, so a test can describe a whole host by listing workers.
+async fn register_transcode_worker(
+    cp: &crate::ControlPlane,
+    name: &str,
+    operation: &TicketOperation,
+    hardware: Vec<String>,
+    extra: serde_json::Value,
+    max_parallel: u32,
+) -> voom_store::repo::workers::Worker {
+    let worker = cp
+        .register_supervisor_worker(NewWorker {
+            name: name.to_owned(),
+            kind: WorkerKind::Local,
+            registered_at: cp.clock().now(),
+            node_id: None,
+        })
+        .await
+        .unwrap();
+    cp.record_capability(NewCapability {
+        worker_id: worker.id,
+        operation: operation.clone(),
+        codecs: Vec::new(),
+        hardware,
+        artifact_access: Vec::new(),
+        extra,
+    })
+    .await
+    .unwrap();
+    cp.record_grant(NewGrant {
+        worker_id: worker.id,
+        can_execute: vec![operation.clone()],
+        can_access_read: Vec::new(),
+        can_access_write: Vec::new(),
+        denies: Vec::new(),
+        max_parallel: json!({operation.as_str(): max_parallel}),
+    })
+    .await
+    .unwrap();
+    worker
+}
+
+/// The `backend`-tagged extras a VAAPI-bound worker stores, per ADR 0051 §1: the
+/// device is named by PCI address and carries no `hardware_token` field.
+fn vaapi_accelerator_extra(encoders: &[&str], decoders: &[&str]) -> serde_json::Value {
+    json!({
+        "accelerator": {
+            "backend": "vaapi",
+            "pci_address": "0000:f4:00.0",
+            "device_name": "AMD Radeon 8060S Graphics",
+            "driver_version": "Mesa Gallium 26.1.5 radeonsi",
+            "encoders": encoders,
+            "decoders": decoders,
+            "max_sessions": 2
+        }
+    })
+}
+
+fn live_registry(workers: &[&voom_store::repo::workers::Worker]) -> WorkerRuntimeRegistry {
+    let mut registry = WorkerRuntimeRegistry::new();
+    for worker in workers {
+        registry = registry.with_in_process_runtime(
+            worker.id,
+            Arc::new(IdentityClient {
+                worker_id: worker.id,
+                worker_epoch: worker.epoch,
+                handshake_ok: true,
+            }),
+            credentials(worker.id, worker.epoch),
+        );
+    }
+    registry
 }
 
 fn policy_requiring(tools: &[&str]) -> CompiledPolicy {

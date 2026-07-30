@@ -210,7 +210,8 @@ async fn nvidia_capability_records_the_untagged_descriptor_token_and_capacity() 
     );
     assert_eq!(
         crate::video_hardware::historical_accelerator_descriptor(capability).unwrap(),
-        Some(descriptor)
+        Some(VideoAcceleratorDescriptor::Nvidia(descriptor)),
+        "an untagged stored descriptor still reads back as the NVIDIA variant"
     );
 
     let granted: String =

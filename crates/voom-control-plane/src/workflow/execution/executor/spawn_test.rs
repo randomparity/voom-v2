@@ -35,6 +35,80 @@ fn nvidia_candidate(
     }
 }
 
+fn vaapi_candidate(
+    worker_id: u64,
+    pci_address: &str,
+    max_sessions: u32,
+    encoders: &[&str],
+    decoders: &[&str],
+) -> WorkerOperationCandidate {
+    WorkerOperationCandidate {
+        worker_id: WorkerId(worker_id),
+        active_leases: 0,
+        max_parallel: max_sessions,
+        hardware: vec![format!("vaapi:pci-{pci_address}")],
+        capability_extra: vec![serde_json::json!({
+            "accelerator": {
+                "backend": "vaapi",
+                "pci_address": pci_address,
+                "device_name": "AMD Radeon 8060S Graphics",
+                "driver_version": "Mesa Gallium 26.1.5 radeonsi",
+                "encoders": encoders,
+                "decoders": decoders,
+                "max_sessions": max_sessions
+            }
+        })],
+    }
+}
+
+/// ADR 0049 §6 forbids an error escaping candidate projection: one worker's
+/// descriptor must never decide whether some other backend's job can be scheduled
+/// at all. A live VAAPI worker beside a software or NVIDIA worker is an ordinary
+/// mixed host, so every backend must still project candidates on it — and the
+/// VAAPI worker must still be refused a software profile (ADR 0049 §5) rather than
+/// being made invisible.
+#[test]
+fn a_live_vaapi_worker_does_not_poison_projection_for_other_backends() {
+    let candidates = vec![
+        software_candidate(1),
+        nvidia_candidate(2, "nvidia:GPU-a", 2, &["hevc_cuvid"]),
+        vaapi_candidate(3, "0000:f4:00.0", 2, &["hevc_vaapi"], &["hevc"]),
+    ];
+    let conflicts = HashSet::new();
+
+    assert!(
+        conflicting_accelerator_tokens(&candidates)
+            .unwrap()
+            .is_empty(),
+        "three distinct devices declare no conflicting capacity"
+    );
+
+    let software = VideoHardwareRequirement::software();
+    assert_eq!(
+        compatible_assignment(&candidates[0], Some(&software), &conflicts).unwrap(),
+        CandidateCompatibility::Compatible(None)
+    );
+    assert_eq!(
+        compatible_assignment(&candidates[2], Some(&software), &conflicts).unwrap(),
+        CandidateCompatibility::Incompatible,
+        "a device-bound VAAPI worker must not satisfy a software profile"
+    );
+
+    let nvidia = VideoHardwareRequirement::nvidia("hevc_nvenc", Some("hevc_cuvid".to_owned()));
+    assert_eq!(
+        compatible_assignment(&candidates[1], Some(&nvidia), &conflicts).unwrap(),
+        CandidateCompatibility::Compatible(Some(VideoHardwareAssignment::nvidia(
+            "nvidia:GPU-a",
+            "GPU-a"
+        )))
+    );
+    assert_eq!(
+        compatible_assignment(&candidates[2], Some(&nvidia), &conflicts).unwrap(),
+        CandidateCompatibility::Incompatible,
+        "a VAAPI device cannot satisfy an NVENC requirement"
+    );
+}
+
 #[test]
 fn software_requirement_excludes_device_bound_workers() {
     let requirement = VideoHardwareRequirement::software();
@@ -80,19 +154,189 @@ fn nvidia_requirement_requires_exact_encoder_and_decoder() {
     );
 }
 
-/// Device selection for the VAAPI backend is not wired yet, so a VAAPI
-/// requirement must abort projection rather than quietly match no device — a
-/// silent no-candidates outcome reads like a busy fleet, not a coding gap.
+/// Replaces Task 5's fail-loud placeholder, which errored on any VAAPI
+/// requirement because device selection did not exist yet.
+///
+/// A VAAPI requirement matches only a live, identity-verified VAAPI device: the
+/// token derived from the descriptor's PCI address must still be advertised in the
+/// candidate's `hardware`, and the assignment must name that same address so the
+/// worker can refuse work aimed at another device (ADR 0051 §1). A software or
+/// NVIDIA worker is incompatible, never an error.
 #[test]
-fn vaapi_requirement_fails_candidate_projection_until_device_selection_exists() {
+fn vaapi_requirement_matches_only_a_verified_same_device_descriptor() {
     let requirement = VideoHardwareRequirement::vaapi("hevc_vaapi", None);
+    let conflicts = HashSet::new();
+    let bound = vaapi_candidate(1, "0000:f4:00.0", 2, &["hevc_vaapi"], &["hevc"]);
 
-    let error = compatible_assignment(&software_candidate(1), Some(&requirement), &HashSet::new())
-        .unwrap_err();
+    assert_eq!(
+        compatible_assignment(&bound, Some(&requirement), &conflicts).unwrap(),
+        CandidateCompatibility::Compatible(Some(VideoHardwareAssignment::vaapi(
+            "vaapi:pci-0000:f4:00.0",
+            "0000:f4:00.0"
+        )))
+    );
+    assert_eq!(
+        compatible_assignment(&software_candidate(2), Some(&requirement), &conflicts).unwrap(),
+        CandidateCompatibility::Incompatible
+    );
+    assert_eq!(
+        compatible_assignment(
+            &nvidia_candidate(3, "nvidia:GPU-a", 2, &["hevc_cuvid"]),
+            Some(&requirement),
+            &conflicts,
+        )
+        .unwrap(),
+        CandidateCompatibility::Incompatible
+    );
+}
 
-    assert!(
-        error.to_string().contains("VAAPI hardware requirement"),
-        "the diagnostic must name the unwired backend: {error}"
+/// The capability's `hardware` column is the live token. A descriptor still present
+/// in `extra` while the token has gone means the worker no longer holds that
+/// device, so honoring the descriptor would assign a device nothing verifies.
+#[test]
+fn vaapi_requirement_rejects_a_device_the_candidate_no_longer_advertises() {
+    let requirement = VideoHardwareRequirement::vaapi("hevc_vaapi", None);
+    let mut stale = vaapi_candidate(1, "0000:f4:00.0", 2, &["hevc_vaapi"], &["hevc"]);
+    stale.hardware.clear();
+
+    assert_eq!(
+        compatible_assignment(&stale, Some(&requirement), &HashSet::new()).unwrap(),
+        CandidateCompatibility::Incompatible
+    );
+}
+
+/// Capability is probe-proven per codec (ADR 0051 §2), so an encoder or a decode
+/// codec the device never proved must not be scheduled onto it. The VAAPI
+/// descriptor lists decode *codecs*, not decoder names, because `-hwaccel vaapi`
+/// has none.
+#[test]
+fn vaapi_requirement_requires_the_probed_encoder_and_decode_codec() {
+    let conflicts = HashSet::new();
+    let decode_hevc = VideoHardwareRequirement::vaapi("hevc_vaapi", Some("hevc".to_owned()));
+
+    assert_eq!(
+        compatible_assignment(
+            &vaapi_candidate(1, "0000:f4:00.0", 2, &["av1_vaapi"], &["hevc"]),
+            Some(&VideoHardwareRequirement::vaapi("hevc_vaapi", None)),
+            &conflicts,
+        )
+        .unwrap(),
+        CandidateCompatibility::Incompatible,
+        "an unproven encoder must not be scheduled"
+    );
+    assert_eq!(
+        compatible_assignment(
+            &vaapi_candidate(2, "0000:f4:00.0", 2, &["hevc_vaapi"], &["h264", "av1"]),
+            Some(&decode_hevc),
+            &conflicts,
+        )
+        .unwrap(),
+        CandidateCompatibility::Incompatible,
+        "an unproven decode codec must not be scheduled"
+    );
+    assert_eq!(
+        compatible_assignment(
+            &vaapi_candidate(3, "0000:f4:00.0", 2, &["hevc_vaapi"], &["h264", "hevc"]),
+            Some(&decode_hevc),
+            &conflicts,
+        )
+        .unwrap(),
+        CandidateCompatibility::Compatible(Some(VideoHardwareAssignment::vaapi(
+            "vaapi:pci-0000:f4:00.0",
+            "0000:f4:00.0"
+        )))
+    );
+}
+
+/// The acceptance host has one render node (spec §10), so cross-device assignment
+/// is proven here rather than by a real-media two-device run: each candidate must
+/// be assigned its own device and never a sibling's, because the worker validates
+/// the assignment against the device it bound and would reject a foreign one.
+#[test]
+fn a_vaapi_assignment_never_names_another_devices_address() {
+    let requirement = VideoHardwareRequirement::vaapi("hevc_vaapi", None);
+    let conflicts = HashSet::new();
+    let devices = ["0000:03:00.0", "0000:f4:00.0"];
+
+    for (index, address) in devices.iter().enumerate() {
+        let candidate = vaapi_candidate(index as u64 + 1, address, 2, &["hevc_vaapi"], &["hevc"]);
+        assert_eq!(
+            compatible_assignment(&candidate, Some(&requirement), &conflicts).unwrap(),
+            CandidateCompatibility::Compatible(Some(VideoHardwareAssignment::vaapi(
+                format!("vaapi:pci-{address}"),
+                (*address).to_owned()
+            ))),
+            "worker {} must be assigned {address} and nothing else",
+            index + 1
+        );
+    }
+}
+
+/// Duplicate live workers for one device cannot multiply capacity (ADR 0049 §6),
+/// and a disagreement about the declaration quarantines the device rather than
+/// letting the scheduler pick a number.
+#[test]
+fn conflicting_vaapi_capacity_declarations_quarantine_the_device() {
+    let candidates = vec![
+        vaapi_candidate(1, "0000:f4:00.0", 2, &["hevc_vaapi"], &["hevc"]),
+        vaapi_candidate(2, "0000:f4:00.0", 3, &["hevc_vaapi"], &["hevc"]),
+        vaapi_candidate(3, "0000:03:00.0", 2, &["hevc_vaapi"], &["hevc"]),
+    ];
+
+    let conflicts = conflicting_accelerator_tokens(&candidates).unwrap();
+
+    assert_eq!(
+        conflicts,
+        HashSet::from(["vaapi:pci-0000:f4:00.0".to_owned()])
+    );
+    assert_eq!(
+        compatible_assignment(
+            &candidates[0],
+            Some(&VideoHardwareRequirement::vaapi("hevc_vaapi", None)),
+            &conflicts,
+        )
+        .unwrap(),
+        CandidateCompatibility::Incompatible,
+        "a quarantined device receives no work"
+    );
+}
+
+/// Equal load resolves by worker id so independent schedulers make the same choice
+/// from the same snapshot, and the assignment map must follow the chosen worker to
+/// its own device.
+#[test]
+fn equal_vaapi_load_selects_the_lowest_worker_id_and_its_own_device() {
+    let requirement = VideoHardwareRequirement::vaapi("hevc_vaapi", None);
+    let conflicts = HashSet::new();
+    let mut workers = Vec::new();
+    let mut assignments = HashMap::new();
+    for (worker_id, address) in [(7_u64, "0000:03:00.0"), (4, "0000:f4:00.0")] {
+        let candidate = vaapi_candidate(worker_id, address, 2, &["hevc_vaapi"], &["hevc"]);
+        let CandidateCompatibility::Compatible(Some(assignment)) =
+            compatible_assignment(&candidate, Some(&requirement), &conflicts).unwrap()
+        else {
+            panic!("both devices are eligible");
+        };
+        assignments.insert(candidate.worker_id, assignment);
+        workers.push(WorkerView {
+            worker_id: candidate.worker_id,
+            supports: vec![OperationKind::TranscodeVideo],
+            active_leases: 0,
+            max_parallel: candidate.max_parallel,
+        });
+    }
+
+    let selected = LeastLoadedWorkerSelector
+        .select(OperationKind::TranscodeVideo, &workers)
+        .unwrap();
+
+    assert_eq!(selected, WorkerId(4));
+    assert_eq!(
+        assignments.get(&selected),
+        Some(&VideoHardwareAssignment::vaapi(
+            "vaapi:pci-0000:f4:00.0",
+            "0000:f4:00.0"
+        ))
     );
 }
 
@@ -143,6 +387,108 @@ fn malformed_accelerator_descriptor_fails_candidate_projection() {
             .to_string()
             .contains("malformed NVIDIA accelerator descriptor")
     );
+}
+
+/// A profile's requirement comes from its encoder's `VideoEncoderBackend`, so an
+/// accelerated encoder can never be handed a software requirement and dispatched to
+/// a CPU worker. Deriving it from a string comparison against one encoder name gave
+/// `hevc_vaapi` a *software* requirement — the silent software fallback issue #409
+/// forbids — and would do the same to a fifth backend.
+#[test]
+fn a_vaapi_profile_requires_its_own_backend_not_software() {
+    let payload = serde_json::json!({
+        "resolved_profile": {
+            "name": "vaapi-hevc",
+            "target_codec": "hevc",
+            "encoder": "hevc_vaapi",
+            "qp": 24
+        },
+        "source_video_codec": "h264"
+    });
+
+    let requirement = video_hardware_requirement(OperationKind::TranscodeVideo, &payload)
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(
+        requirement,
+        VideoHardwareRequirement::vaapi("hevc_vaapi", None)
+    );
+}
+
+/// A `vaapi`-decode profile must carry the decode requirement too, so projection
+/// can refuse a device that never proved a decoder for the source codec. The
+/// requirement names the canonical source codec, because a VAAPI descriptor lists
+/// codecs rather than decoder names.
+#[test]
+fn a_vaapi_decode_profile_requires_the_source_codec_as_its_decoder() {
+    let payload = serde_json::json!({
+        "resolved_profile": {
+            "name": "vaapi-hevc",
+            "target_codec": "hevc",
+            "encoder": "hevc_vaapi",
+            "qp": 24,
+            "decode": {"backend": "vaapi"}
+        },
+        "source_video_codec": "H265"
+    });
+
+    let requirement = video_hardware_requirement(OperationKind::TranscodeVideo, &payload)
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(
+        requirement,
+        VideoHardwareRequirement::vaapi("hevc_vaapi", Some("hevc".to_owned()))
+    );
+}
+
+/// VAAPI decodes only `h264`, `hevc`, and `av1`. A source codec outside that set
+/// must fail loud at requirement derivation rather than produce a requirement no
+/// device can satisfy, which would read as a busy fleet.
+#[test]
+fn a_vaapi_decode_profile_rejects_a_source_codec_vaapi_cannot_decode() {
+    let payload = serde_json::json!({
+        "resolved_profile": {
+            "name": "vaapi-hevc",
+            "target_codec": "hevc",
+            "encoder": "hevc_vaapi",
+            "qp": 24,
+            "decode": {"backend": "vaapi"}
+        },
+        "source_video_codec": "vp9"
+    });
+
+    let error = video_hardware_requirement(OperationKind::TranscodeVideo, &payload).unwrap_err();
+
+    assert!(
+        error
+            .to_string()
+            .contains("VAAPI decode does not support source video codec `vp9`"),
+        "the diagnostic must name the codec: {error}"
+    );
+}
+
+/// A software profile keeps requiring an unaccelerated worker, unchanged by the
+/// backend-derived rule.
+#[test]
+fn a_software_profile_still_requires_an_unaccelerated_worker() {
+    let payload = serde_json::json!({
+        "resolved_profile": {
+            "name": "default-hevc",
+            "target_codec": "hevc",
+            "encoder": "libx265",
+            "crf": 23,
+            "preset": "medium"
+        },
+        "source_video_codec": "h264"
+    });
+
+    let requirement = video_hardware_requirement(OperationKind::TranscodeVideo, &payload)
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(requirement, VideoHardwareRequirement::software());
 }
 
 #[test]

@@ -189,6 +189,26 @@ pub fn nvidia_decoder_for_video_codec(codec: &str) -> Option<&'static str> {
         .map(|(_, decoder)| *decoder)
 }
 
+/// The canonical `VAAPI_VIDEO_DECODERS` codec a source codec name decodes as, or
+/// `None` when VAAPI cannot decode it.
+///
+/// The counterpart of [`nvidia_decoder_for_video_codec`], and it normalizes the same
+/// `h265` alias. It returns a codec rather than a decoder name because VAAPI decode
+/// is selected by `-hwaccel vaapi` plus the codec's own decoder, so there is no
+/// per-codec decoder name to return.
+#[must_use]
+pub fn vaapi_video_decode_codec(codec: &str) -> Option<&'static str> {
+    let codec = if codec.eq_ignore_ascii_case("h265") {
+        "hevc"
+    } else {
+        codec
+    };
+    VAAPI_VIDEO_DECODERS
+        .iter()
+        .copied()
+        .find(|candidate| codec.eq_ignore_ascii_case(candidate))
+}
+
 impl EncoderDescriptor {
     #[must_use]
     pub const fn accepts_crf(&self, crf: u8) -> bool {

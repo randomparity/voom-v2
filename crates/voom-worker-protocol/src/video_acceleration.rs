@@ -40,6 +40,51 @@ pub enum VideoAcceleratorDescriptor {
     Vaapi(VaapiVideoAcceleratorDescriptor),
 }
 
+impl VideoAcceleratorDescriptor {
+    /// The stable device token the scheduler leases and counts capacity against.
+    ///
+    /// NVIDIA stores the token on the descriptor because pre-#409 rows are durable
+    /// and carry it; VAAPI derives it from the PCI address, which is the identity
+    /// (ADR 0051 §1). Reading it through one accessor is what lets the scheduler
+    /// treat the two backends alike without a per-backend match at every call site.
+    #[must_use]
+    pub fn hardware_token(&self) -> String {
+        match self {
+            Self::Nvidia(nvidia) => nvidia.hardware_token.clone(),
+            Self::Vaapi(vaapi) => vaapi_hardware_token(&vaapi.pci_address),
+        }
+    }
+
+    /// Encoders proven usable on the bound device.
+    #[must_use]
+    pub fn encoders(&self) -> &[String] {
+        match self {
+            Self::Nvidia(nvidia) => &nvidia.encoders,
+            Self::Vaapi(vaapi) => &vaapi.encoders,
+        }
+    }
+
+    /// Decoders proven usable on the bound device. NVIDIA lists `FFmpeg` decoder
+    /// names (`hevc_cuvid`); VAAPI lists source codecs, because `-hwaccel vaapi`
+    /// has no per-codec decoder name to carry.
+    #[must_use]
+    pub fn decoders(&self) -> &[String] {
+        match self {
+            Self::Nvidia(nvidia) => &nvidia.decoders,
+            Self::Vaapi(vaapi) => &vaapi.decoders,
+        }
+    }
+
+    /// The device's declared and probe-proven concurrent session capacity.
+    #[must_use]
+    pub const fn max_sessions(&self) -> u32 {
+        match self {
+            Self::Nvidia(nvidia) => nvidia.max_sessions,
+            Self::Vaapi(vaapi) => vaapi.max_sessions,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LocalWorkerBound {

@@ -1,10 +1,10 @@
 use voom_core::VoomError;
 use voom_store::repo::workers::{WorkerOperationCandidate, WorkerOperationCapability};
-use voom_worker_protocol::NvidiaVideoAcceleratorDescriptor;
+use voom_worker_protocol::{NvidiaVideoAcceleratorDescriptor, VideoAcceleratorDescriptor};
 
 pub(crate) fn candidate_accelerator_descriptor(
     candidate: &WorkerOperationCandidate,
-) -> Result<Option<NvidiaVideoAcceleratorDescriptor>, VoomError> {
+) -> Result<Option<VideoAcceleratorDescriptor>, VoomError> {
     let mut descriptors = Vec::new();
     for extra in &candidate.capability_extra {
         let Some(value) = extra.get("accelerator") else {
@@ -27,7 +27,7 @@ pub(crate) fn candidate_accelerator_descriptor(
 
 pub(crate) fn historical_accelerator_descriptor(
     capability: &WorkerOperationCapability,
-) -> Result<Option<NvidiaVideoAcceleratorDescriptor>, VoomError> {
+) -> Result<Option<VideoAcceleratorDescriptor>, VoomError> {
     let Some(value) = capability.extra.get("accelerator") else {
         return Ok(None);
     };
@@ -38,21 +38,26 @@ pub(crate) fn historical_accelerator_descriptor(
 /// carry no tag) or a `backend`-tagged struct for any later backend, so the tag's
 /// presence is what tells them apart.
 ///
-/// A tagged descriptor is well-formed but not NVIDIA, and saying it is malformed
-/// would send an operator looking for corruption that is not there.
+/// Both shapes yield the same tagged type. A backend this build does not know is a
+/// malformed-descriptor error for that one worker; returning `Ok(None)` instead
+/// would let a device-bound worker pass as unaccelerated and pick up software work
+/// (ADR 0049 §5).
 fn parse_descriptor(
     value: &serde_json::Value,
     context: &str,
-) -> Result<NvidiaVideoAcceleratorDescriptor, VoomError> {
-    if let Some(backend) = value.get("backend").and_then(serde_json::Value::as_str) {
-        return Err(VoomError::Config(format!(
-            "{context} advertises a `{backend}` accelerator descriptor, which this code path \
-             cannot consume; only NVIDIA descriptors are wired into scheduling"
-        )));
+) -> Result<VideoAcceleratorDescriptor, VoomError> {
+    if value.get("backend").is_some() {
+        return serde_json::from_value(value.clone()).map_err(|error| {
+            VoomError::Config(format!(
+                "{context} has a malformed tagged accelerator descriptor: {error}"
+            ))
+        });
     }
-    serde_json::from_value(value.clone()).map_err(|error| {
-        VoomError::Config(format!(
-            "{context} has a malformed NVIDIA accelerator descriptor: {error}"
-        ))
-    })
+    serde_json::from_value::<NvidiaVideoAcceleratorDescriptor>(value.clone())
+        .map(VideoAcceleratorDescriptor::Nvidia)
+        .map_err(|error| {
+            VoomError::Config(format!(
+                "{context} has a malformed NVIDIA accelerator descriptor: {error}"
+            ))
+        })
 }

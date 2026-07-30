@@ -6,13 +6,15 @@
 use std::collections::{HashMap, HashSet};
 
 use voom_core::OperationKind;
-use voom_core::{JobId, TicketId, TicketOperation, VoomError, WorkerId};
+use voom_core::{JobId, TicketId, TicketOperation, VideoEncoderBackend, VoomError, WorkerId};
 use voom_scheduler::{LeastLoadedWorkerSelector, WorkerSelector, WorkerView};
 use voom_store::repo::leases::{LeaseAcquireOutcome, NewLease};
 use voom_store::repo::tickets::{Ticket, TicketState};
 use voom_store::repo::workers::WorkerOperationCandidate;
 use voom_worker_protocol::{
-    TranscodeVideoProfile, VideoHardwareAssignment, VideoHardwareRequirement,
+    NvidiaVideoAcceleratorDescriptor, NvidiaVideoHardwareRequirement, TranscodeVideoProfile,
+    VaapiVideoAcceleratorDescriptor, VaapiVideoHardwareRequirement, VideoAcceleratorDescriptor,
+    VideoHardwareAssignment, VideoHardwareRequirement, vaapi_hardware_token,
 };
 
 use crate::video_hardware::{candidate_accelerator_descriptor, historical_accelerator_descriptor};
@@ -152,7 +154,9 @@ impl WorkflowExecutor {
         }
         let runtimes = if uses_accelerator {
             accelerator_runtimes.ok_or_else(|| {
-                VoomError::Internal("NVIDIA candidate projection omitted live runtimes".to_owned())
+                VoomError::Internal(
+                    "accelerator candidate projection omitted live runtimes".to_owned(),
+                )
             })?
         } else {
             &self.runtimes
@@ -249,16 +253,15 @@ impl WorkflowExecutor {
             .operation_candidates(&TicketOperation::from(operation))
             .await?;
         let requirement = video_hardware_requirement(operation, payload)?;
-        if matches!(requirement, Some(VideoHardwareRequirement::Nvidia(_)))
-            && accelerator_runtimes.is_none()
-        {
+        let device_bound = requires_accelerator(requirement.as_ref());
+        if device_bound && accelerator_runtimes.is_none() {
             *accelerator_runtimes = Some(self.control_plane.live_policy_runtime_registry().await?);
         }
         let conflicts = conflicting_accelerator_tokens(&candidates)?;
         let mut workers = Vec::new();
         let mut assignments = HashMap::new();
         for candidate in candidates {
-            if matches!(requirement, Some(VideoHardwareRequirement::Nvidia(_)))
+            if device_bound
                 && !accelerator_runtimes
                     .as_ref()
                     .is_some_and(|runtimes| runtimes.contains(candidate.worker_id))
@@ -307,14 +310,16 @@ impl WorkflowExecutor {
         requirement: Option<&VideoHardwareRequirement>,
         history: &mut HashMap<String, Vec<String>>,
     ) -> Result<Vec<String>, VoomError> {
-        let Some(VideoHardwareRequirement::Nvidia(requirement)) = requirement else {
-            return Ok(Vec::new());
+        let (encoder, decoder) = match requirement {
+            Some(VideoHardwareRequirement::Nvidia(required)) => {
+                (&required.encoder, required.decoder.as_ref())
+            }
+            Some(VideoHardwareRequirement::Vaapi(required)) => {
+                (&required.encoder, required.decoder.as_ref())
+            }
+            Some(VideoHardwareRequirement::Software(_)) | None => return Ok(Vec::new()),
         };
-        let cache_key = format!(
-            "{}:{}",
-            requirement.encoder,
-            requirement.decoder.as_deref().unwrap_or("")
-        );
+        let cache_key = format!("{encoder}:{}", decoder.map_or("", String::as_str));
         if let Some(tokens) = history.get(&cache_key) {
             return Ok(tokens.clone());
         }
@@ -328,15 +333,12 @@ impl WorkflowExecutor {
             let Some(descriptor) = historical_accelerator_descriptor(&capability)? else {
                 continue;
             };
-            if !descriptor.encoders.contains(&requirement.encoder)
-                || requirement
-                    .decoder
-                    .as_ref()
-                    .is_some_and(|decoder| !descriptor.decoders.contains(decoder))
+            if !descriptor.encoders().contains(encoder)
+                || decoder.is_some_and(|decoder| !descriptor.decoders().contains(decoder))
             {
                 continue;
             }
-            tokens.push(descriptor.hardware_token);
+            tokens.push(descriptor.hardware_token());
         }
         tokens.sort();
         tokens.dedup();
@@ -390,29 +392,73 @@ fn video_hardware_requirement(
         .ok_or_else(|| VoomError::Config("transcode payload missing profile".to_owned()))?;
     let profile: TranscodeVideoProfile = serde_json::from_value(profile_value.clone())
         .map_err(|error| VoomError::Config(format!("transcode profile malformed: {error}")))?;
-    if profile.encoder != "hevc_nvenc" {
-        return Ok(Some(VideoHardwareRequirement::software()));
+    let descriptor = voom_core::encoder_descriptor(&profile.encoder).ok_or_else(|| {
+        VoomError::Config(format!(
+            "transcode profile names unknown encoder `{}`",
+            profile.encoder
+        ))
+    })?;
+    match descriptor.backend {
+        VideoEncoderBackend::Software => Ok(Some(VideoHardwareRequirement::software())),
+        VideoEncoderBackend::Nvidia => Ok(Some(VideoHardwareRequirement::nvidia(
+            &profile.encoder,
+            nvidia_decode_requirement(&profile, payload)?,
+        ))),
+        VideoEncoderBackend::Vaapi => Ok(Some(VideoHardwareRequirement::vaapi(
+            &profile.encoder,
+            vaapi_decode_requirement(&profile, payload)?,
+        ))),
     }
-    let decoder = if profile.decode.is_nvidia() {
-        let codec = source_video_codec(payload).ok_or_else(|| {
-            VoomError::Config("NVIDIA decode requires a known source video codec".to_owned())
-        })?;
-        Some(
-            voom_core::nvidia_decoder_for_video_codec(codec)
-                .ok_or_else(|| {
-                    VoomError::Config(format!(
-                        "NVIDIA decode does not support source video codec `{codec}`"
-                    ))
-                })?
-                .to_owned(),
-        )
-    } else {
-        None
-    };
-    Ok(Some(VideoHardwareRequirement::nvidia(
-        "hevc_nvenc",
-        decoder,
-    )))
+}
+
+fn nvidia_decode_requirement(
+    profile: &TranscodeVideoProfile,
+    payload: &serde_json::Value,
+) -> Result<Option<String>, VoomError> {
+    if !profile.decode.is_nvidia() {
+        return Ok(None);
+    }
+    let codec = source_video_codec(payload).ok_or_else(|| {
+        VoomError::Config("NVIDIA decode requires a known source video codec".to_owned())
+    })?;
+    let decoder = voom_core::nvidia_decoder_for_video_codec(codec).ok_or_else(|| {
+        VoomError::Config(format!(
+            "NVIDIA decode does not support source video codec `{codec}`"
+        ))
+    })?;
+    Ok(Some(decoder.to_owned()))
+}
+
+/// A VAAPI decode requirement names the canonical *source codec*, not a decoder:
+/// `-hwaccel vaapi` uses the codec's own decoder, so the descriptor's `decoders`
+/// list holds codecs and the requirement must be spelled the same way to match.
+fn vaapi_decode_requirement(
+    profile: &TranscodeVideoProfile,
+    payload: &serde_json::Value,
+) -> Result<Option<String>, VoomError> {
+    if !profile.decode.is_vaapi() {
+        return Ok(None);
+    }
+    let codec = source_video_codec(payload).ok_or_else(|| {
+        VoomError::Config("VAAPI decode requires a known source video codec".to_owned())
+    })?;
+    let decode_codec = voom_core::vaapi_video_decode_codec(codec).ok_or_else(|| {
+        VoomError::Config(format!(
+            "VAAPI decode does not support source video codec `{codec}`"
+        ))
+    })?;
+    Ok(Some(decode_codec.to_owned()))
+}
+
+/// A device-bound requirement can only be satisfied by a worker with a live
+/// endpoint, because dispatch re-verifies the device's identity before acquiring the
+/// lease. Written as an exhaustive match so a fifth backend cannot default to the
+/// software path and skip that verification.
+const fn requires_accelerator(requirement: Option<&VideoHardwareRequirement>) -> bool {
+    match requirement {
+        Some(VideoHardwareRequirement::Nvidia(_) | VideoHardwareRequirement::Vaapi(_)) => true,
+        Some(VideoHardwareRequirement::Software(_)) | None => false,
+    }
 }
 
 fn source_video_codec(payload: &serde_json::Value) -> Option<&str> {
@@ -433,49 +479,93 @@ enum CandidateCompatibility {
     Compatible(Option<VideoHardwareAssignment>),
 }
 
+/// Pairs a profile-derived requirement with the device a candidate advertises.
+///
+/// The match is exhaustive over both the requirement and the descriptor
+/// vocabularies with no wildcard arm, so a fifth backend on either side fails to
+/// compile rather than inheriting whichever default happened to sit last. A
+/// requirement and a descriptor naming different backends are incompatible, never
+/// an error: ADR 0049 §6 forbids one worker's hardware from breaking projection for
+/// the rest of the fleet.
 fn compatible_assignment(
     candidate: &WorkerOperationCandidate,
     requirement: Option<&VideoHardwareRequirement>,
     conflicts: &HashSet<String>,
 ) -> Result<CandidateCompatibility, VoomError> {
-    match requirement {
-        None => Ok(CandidateCompatibility::Compatible(None)),
-        Some(VideoHardwareRequirement::Software(_)) => {
-            if candidate_accelerator_descriptor(candidate)?.is_none()
-                && candidate.hardware.is_empty()
-            {
-                Ok(CandidateCompatibility::Compatible(None))
-            } else {
-                Ok(CandidateCompatibility::Incompatible)
-            }
+    let Some(requirement) = requirement else {
+        return Ok(CandidateCompatibility::Compatible(None));
+    };
+    let descriptor = candidate_accelerator_descriptor(candidate)?;
+    Ok(match (requirement, &descriptor) {
+        (VideoHardwareRequirement::Software(_), None) if candidate.hardware.is_empty() => {
+            CandidateCompatibility::Compatible(None)
         }
-        Some(VideoHardwareRequirement::Nvidia(required)) => {
-            let Some(descriptor) = candidate_accelerator_descriptor(candidate)? else {
-                return Ok(CandidateCompatibility::Incompatible);
-            };
-            if conflicts.contains(&descriptor.hardware_token)
-                || !candidate.hardware.contains(&descriptor.hardware_token)
-                || !descriptor.encoders.contains(&required.encoder)
-                || required
-                    .decoder
-                    .as_ref()
-                    .is_some_and(|decoder| !descriptor.decoders.contains(decoder))
-            {
-                return Ok(CandidateCompatibility::Incompatible);
-            }
-            Ok(CandidateCompatibility::Compatible(Some(
-                VideoHardwareAssignment::nvidia(descriptor.hardware_token, descriptor.device_uuid),
-            )))
+        (VideoHardwareRequirement::Software(_), None | Some(_))
+        | (VideoHardwareRequirement::Nvidia(_) | VideoHardwareRequirement::Vaapi(_), None)
+        | (VideoHardwareRequirement::Nvidia(_), Some(VideoAcceleratorDescriptor::Vaapi(_)))
+        | (VideoHardwareRequirement::Vaapi(_), Some(VideoAcceleratorDescriptor::Nvidia(_))) => {
+            CandidateCompatibility::Incompatible
         }
-        // `video_hardware_requirement` never derives a VAAPI requirement yet, so
-        // reaching here means a requirement was constructed without the matching
-        // device selection. Fail loudly instead of silently finding no device.
-        Some(VideoHardwareRequirement::Vaapi(_)) => Err(VoomError::Internal(
-            "VAAPI hardware requirement reached candidate projection before VAAPI device \
-             selection was wired"
-                .to_owned(),
-        )),
+        (
+            VideoHardwareRequirement::Nvidia(required),
+            Some(VideoAcceleratorDescriptor::Nvidia(device)),
+        ) => nvidia_compatibility(candidate, conflicts, required, device),
+        (
+            VideoHardwareRequirement::Vaapi(required),
+            Some(VideoAcceleratorDescriptor::Vaapi(device)),
+        ) => vaapi_compatibility(candidate, conflicts, required, device),
+    })
+}
+
+fn nvidia_compatibility(
+    candidate: &WorkerOperationCandidate,
+    conflicts: &HashSet<String>,
+    required: &NvidiaVideoHardwareRequirement,
+    device: &NvidiaVideoAcceleratorDescriptor,
+) -> CandidateCompatibility {
+    if conflicts.contains(&device.hardware_token)
+        || !candidate.hardware.contains(&device.hardware_token)
+        || !device.encoders.contains(&required.encoder)
+        || required
+            .decoder
+            .as_ref()
+            .is_some_and(|decoder| !device.decoders.contains(decoder))
+    {
+        return CandidateCompatibility::Incompatible;
     }
+    CandidateCompatibility::Compatible(Some(VideoHardwareAssignment::nvidia(
+        device.hardware_token.clone(),
+        device.device_uuid.clone(),
+    )))
+}
+
+/// A VAAPI requirement matches only a live, identity-verified VAAPI descriptor on
+/// the same device: the token derived from the descriptor's PCI address must be one
+/// the candidate still advertises in `hardware`, so the assignment names the device
+/// the worker actually bound (ADR 0051 §1). A VAAPI-decode requirement additionally
+/// needs the source codec to have decoded on that device at startup — the
+/// descriptor lists codecs, not decoder names, because `-hwaccel vaapi` has none.
+fn vaapi_compatibility(
+    candidate: &WorkerOperationCandidate,
+    conflicts: &HashSet<String>,
+    required: &VaapiVideoHardwareRequirement,
+    device: &VaapiVideoAcceleratorDescriptor,
+) -> CandidateCompatibility {
+    let token = vaapi_hardware_token(&device.pci_address);
+    if conflicts.contains(&token)
+        || !candidate.hardware.contains(&token)
+        || !device.encoders.contains(&required.encoder)
+        || required
+            .decoder
+            .as_ref()
+            .is_some_and(|codec| !device.decoders.contains(codec))
+    {
+        return CandidateCompatibility::Incompatible;
+    }
+    CandidateCompatibility::Compatible(Some(VideoHardwareAssignment::vaapi(
+        token,
+        device.pci_address.clone(),
+    )))
 }
 
 fn conflicting_accelerator_tokens(
@@ -487,11 +577,11 @@ fn conflicting_accelerator_tokens(
         let Some(descriptor) = candidate_accelerator_descriptor(candidate)? else {
             continue;
         };
-        if let Some(capacity) =
-            capacities.insert(descriptor.hardware_token.clone(), descriptor.max_sessions)
-            && capacity != descriptor.max_sessions
+        let token = descriptor.hardware_token();
+        if let Some(capacity) = capacities.insert(token.clone(), descriptor.max_sessions())
+            && capacity != descriptor.max_sessions()
         {
-            conflicts.insert(descriptor.hardware_token);
+            conflicts.insert(token);
         }
     }
     Ok(conflicts)
