@@ -138,13 +138,8 @@ fn transcode_video_shape(
         Ok(needs_change) => needs_change,
         Err(shape) => return shape,
     };
-    if needs_change
-        && resolved.decode.is_nvidia()
-        && voom_core::nvidia_decoder_for_video_codec(video_codec).is_none()
-    {
-        return TranscodeVideoShape::UnsupportedShape(format!(
-            "NVIDIA decode does not support source video codec `{video_codec}`"
-        ));
+    if needs_change && let Some(shape) = unsupported_hardware_decode_shape(resolved, video_codec) {
+        return shape;
     }
 
     if target_container.eq_ignore_ascii_case(voom_core::TRANSCODE_VIDEO_CONTAINER_MP4)
@@ -158,6 +153,30 @@ fn transcode_video_shape(
     } else {
         TranscodeVideoShape::Compliant
     }
+}
+
+/// A hardware-decode backend that cannot decode this source codec at all is a
+/// per-file fact, so it blocks the file at planning with an actionable reason rather
+/// than producing a ticket no device can ever satisfy (ADR 0049 §5). Whether the
+/// *bound device* probed a decoder for a codec the backend does support stays a
+/// scheduling concern.
+fn unsupported_hardware_decode_shape(
+    resolved: &voom_core::TranscodeVideoProfile,
+    video_codec: &str,
+) -> Option<TranscodeVideoShape> {
+    if resolved.decode.is_nvidia()
+        && voom_core::nvidia_decoder_for_video_codec(video_codec).is_none()
+    {
+        return Some(TranscodeVideoShape::UnsupportedShape(format!(
+            "NVIDIA decode does not support source video codec `{video_codec}`"
+        )));
+    }
+    if resolved.decode.is_vaapi() && voom_core::vaapi_video_decode_codec(video_codec).is_none() {
+        return Some(TranscodeVideoShape::UnsupportedShape(format!(
+            "VAAPI decode does not support source video codec `{video_codec}`"
+        )));
+    }
+    None
 }
 
 fn transcode_video_needs_change(
@@ -346,10 +365,7 @@ fn transcode_video_notes(
             profile::cpu_cost(&resolved.encoder, preset)
         ));
     }
-    notes.push(resolved.crf.map_or_else(
-        || format!("cq={}", resolved.cq.unwrap_or_default()),
-        |crf| format!("crf={crf}"),
-    ));
+    notes.extend(quality_note(resolved));
     if let (Some(src_w), Some(src_h)) = (snapshot.width, snapshot.height) {
         let cap_w = resolved.max_width.unwrap_or(src_w);
         let cap_h = resolved.max_height.unwrap_or(src_h);
@@ -358,6 +374,30 @@ fn transcode_video_notes(
         }
     }
     notes
+}
+
+/// The quality note names whichever parameter the profile actually carries.
+///
+/// Exactly one is legal per encoder — the one its `QualityDomain` names — so the
+/// match is exhaustive over `(crf, cq, qp)` with no wildcard arm, and a new quality
+/// field cannot be added without deciding what it prints. An absent value yields no
+/// note rather than a zero standing in for it: notes are operator-facing plan and
+/// compliance-report output, and `cq=0` on a qp-domain profile was a false statement
+/// about the profile naming a knob `hevc_vaapi` has no flag for.
+///
+/// A profile carrying more than one field is rejected by descriptor validation
+/// before planning, so those arms are unreachable; reporting nothing is still better
+/// than reporting a guess about which one the operator meant.
+fn quality_note(resolved: &voom_core::TranscodeVideoProfile) -> Option<String> {
+    match (resolved.crf, resolved.cq, resolved.qp) {
+        (Some(crf), None, None) => Some(format!("crf={crf}")),
+        (None, Some(cq), None) => Some(format!("cq={cq}")),
+        (None, None, Some(qp)) => Some(format!("qp={qp}")),
+        (None, None, None)
+        | (Some(_), Some(_), None | Some(_))
+        | (Some(_), None, Some(_))
+        | (None, Some(_), Some(_)) => None,
+    }
 }
 
 fn transcode_video_observed_state(snapshot: &MediaSnapshotInput) -> Option<serde_json::Value> {

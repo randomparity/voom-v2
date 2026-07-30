@@ -2089,6 +2089,75 @@ fn transcode_video_blocks_unsupported_nvidia_decode_source_codec() {
     );
 }
 
+/// A one-video-stream `mkv` source of a named codec carrying the `yuv420p` pixel
+/// format a software decode produces. A VAAPI profile targets the hardware surface
+/// format `nv12`, so this source always needs a transcode whatever its codec — the
+/// shape that lets a decode-codec gate be observed instead of masked by a compliant
+/// no-op.
+fn vaapi_decode_source(codec: &str) -> MediaSnapshotInput {
+    let mut snapshot = snapshot_with(Some("mkv"), Some(codec), Some(1));
+    snapshot.width = Some(1280);
+    snapshot.height = Some(720);
+    snapshot.stream_summary = serde_json::json!({
+        "video_stream_count": 1,
+        "streams": [{
+            "id": "stream-0",
+            "index": 0,
+            "kind": "video",
+            "codec_name": codec,
+            "width": 1280,
+            "height": 720,
+            "pixel_format": "yuv420p"
+        }],
+    });
+    snapshot
+}
+
+/// `hevc_vaapi` is the qp domain with no speed knob: `preset` is `None` and `qp` is
+/// the only quality field the descriptor accepts (ADR 0051 §4).
+fn profile_hevc_vaapi() -> voom_core::TranscodeVideoProfile {
+    let mut profile = voom_core::TranscodeVideoProfile::default_hevc();
+    profile.name = "hevc-vaapi".to_owned();
+    profile.encoder = "hevc_vaapi".to_owned();
+    profile.crf = None;
+    profile.qp = Some(24);
+    profile.preset = None;
+    // A hardware surface format the source does not already carry, so the node needs
+    // a transcode and therefore reports resource notes at all.
+    profile.pixel_format = Some("nv12".to_owned());
+    profile
+}
+
+/// A source codec VAAPI cannot decode is a per-file fact, so it blocks that file at
+/// planning with an actionable reason rather than becoming a ticket that no device
+/// can ever satisfy. Mirrors the NVIDIA split (ADR 0049 §5), which this slice reuses
+/// unchanged.
+#[test]
+fn transcode_video_blocks_unsupported_vaapi_decode_source_codec() {
+    let mut profile = profile_hevc_vaapi();
+    profile.decode = voom_core::VideoDecodeMode::vaapi();
+    let plan = plan_transcode_with_container(profile, vaapi_decode_source("vp9"), "mkv");
+
+    assert_eq!(node_status(&plan), NodeStatus::Blocked);
+    assert_eq!(
+        blocked_reason(&plan),
+        "VAAPI decode does not support source video codec `vp9`"
+    );
+}
+
+/// The three codecs the acceptance host probed stay plannable, so the block above is
+/// a codec gate and not a blanket refusal of VAAPI decode.
+#[test]
+fn transcode_video_plans_every_vaapi_decodable_source_codec() {
+    for codec in ["h264", "hevc", "av1"] {
+        let mut profile = profile_hevc_vaapi();
+        profile.decode = voom_core::VideoDecodeMode::vaapi();
+        let plan = plan_transcode_with_container(profile, vaapi_decode_source(codec), "mkv");
+
+        assert_eq!(node_status(&plan), NodeStatus::Planned, "codec {codec}");
+    }
+}
+
 fn profile_hevc_1080p_mkv() -> voom_core::TranscodeVideoProfile {
     let mut profile = voom_core::TranscodeVideoProfile::default_hevc();
     profile.pixel_format = Some("yuv420p".to_owned());
@@ -2331,6 +2400,47 @@ fn resource_notes_are_format_stable() {
     assert!(notes.contains(&"cpu_cost=medium".to_owned()));
     assert!(notes.contains(&"crf=23".to_owned()));
     assert!(notes.contains(&"downscale=3840x2160->1920x1080".to_owned()));
+}
+
+/// Resource notes are operator-facing plan and compliance-report output, so a note
+/// must state the quality parameter the profile actually carries. Deriving it as
+/// `crf` else `cq.unwrap_or_default()` printed `cq=0` for a qp-domain profile — a
+/// false statement about the profile, and one that names a knob `hevc_vaapi` has no
+/// flag for. An absent value is never a stand-in for a present one.
+#[test]
+fn a_qp_domain_profile_notes_its_qp_and_never_a_zero_cq() {
+    let plan = plan_transcode_with_container(profile_hevc_vaapi(), source_hevc_720_mkv(), "mkv");
+    let notes = resource_notes(&plan);
+
+    assert!(notes.contains(&"encoder=hevc_vaapi".to_owned()));
+    assert!(notes.contains(&"qp=24".to_owned()), "notes: {notes:?}");
+    assert!(
+        !notes.iter().any(|note| note.starts_with("cq=")),
+        "a qp-domain profile has no cq to report: {notes:?}"
+    );
+    assert!(
+        !notes.iter().any(|note| note.starts_with("crf=")),
+        "a qp-domain profile has no crf to report: {notes:?}"
+    );
+}
+
+/// A cq-domain profile keeps reporting its own `cq`, so the exhaustive quality note
+/// did not just move the defect to the NVIDIA backend.
+#[test]
+fn a_cq_domain_profile_notes_its_cq() {
+    let mut profile = voom_core::TranscodeVideoProfile::default_hevc();
+    profile.name = "hevc-nvenc".to_owned();
+    profile.encoder = "hevc_nvenc".to_owned();
+    profile.crf = None;
+    profile.cq = Some(22);
+    profile.preset = Some("p5".to_owned());
+    profile.pixel_format = Some("yuv420p10le".to_owned());
+    let plan = plan_transcode_with_container(profile, source_hevc_720_mkv(), "mkv");
+    let notes = resource_notes(&plan);
+
+    assert!(notes.contains(&"cq=22".to_owned()), "notes: {notes:?}");
+    assert!(!notes.iter().any(|note| note.starts_with("crf=")));
+    assert!(!notes.iter().any(|note| note.starts_with("qp=")));
 }
 
 #[test]
