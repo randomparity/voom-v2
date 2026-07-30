@@ -105,6 +105,31 @@ fn accelerator_hardware_tokens_are_derived_per_backend() {
     );
 }
 
+/// Every party that spells the VAAPI device token must spell it identically, and
+/// nothing else pins that. The supervisor writes it into the accelerator claim and the
+/// capability's `hardware` column; the scheduler derives it from the stored descriptor
+/// to match a candidate and to build the assignment; the worker derives it again to
+/// check the assignment names the device it bound. The capacity SQL groups on that
+/// exact string (`json_extract(hardware,'$[0]')`), so a one-character divergence does
+/// not fail loudly — the device silently stops matching and never receives work.
+#[test]
+fn every_party_derives_one_identical_vaapi_device_token() {
+    let pci_address = "0000:f4:00.0";
+
+    let supervisor = vaapi_config(pci_address, 1).hardware_token();
+    let scheduler = VideoAcceleratorDescriptor::Vaapi(vaapi_descriptor()).hardware_token();
+    let worker = voom_worker_protocol::vaapi_hardware_token(pci_address);
+
+    assert_eq!(supervisor, worker, "supervisor claim key vs worker check");
+    assert_eq!(scheduler, worker, "scheduler match key vs worker check");
+    assert_eq!(worker, "vaapi:pci-0000:f4:00.0");
+    assert_eq!(
+        vaapi_descriptor().pci_address,
+        pci_address,
+        "the fixtures must describe the same device for the equality to mean anything"
+    );
+}
+
 fn nvidia_descriptor() -> NvidiaVideoAcceleratorDescriptor {
     NvidiaVideoAcceleratorDescriptor {
         hardware_token: "nvidia:GPU-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".to_owned(),

@@ -22,7 +22,7 @@ use voom_store::repo::accelerator_claims::{NewAcceleratorClaim, SqliteAccelerato
 use voom_store::repo::workers::{NewCapability, NewGrant, NewWorker};
 use voom_worker_protocol::{
     LocalWorkerBound, NvidiaVideoAcceleratorDescriptor, VaapiVideoAcceleratorDescriptor,
-    VideoAcceleratorDescriptor,
+    VideoAcceleratorDescriptor, vaapi_hardware_token,
 };
 
 use crate::ControlPlane;
@@ -71,12 +71,15 @@ impl LocalAcceleratorConfig {
     ///
     /// Derived rather than read off a descriptor: the VAAPI descriptor carries no
     /// token field, so the binding site is the one place that can produce it
-    /// consistently with the NVIDIA shape.
+    /// consistently with the NVIDIA shape. The VAAPI spelling comes from
+    /// `vaapi_hardware_token` rather than being formatted here, because the scheduler
+    /// and the worker derive the same token independently and the capacity SQL groups
+    /// on that exact string — a divergence would silently stop the device matching.
     #[must_use]
     pub fn hardware_token(&self) -> String {
         match self {
             Self::Nvidia(config) => format!("nvidia:{}", config.device_uuid),
-            Self::Vaapi(config) => format!("vaapi:pci-{}", config.pci_address),
+            Self::Vaapi(config) => vaapi_hardware_token(&config.pci_address),
         }
     }
 
@@ -698,17 +701,17 @@ struct AcceleratorCapability {
 
 impl AcceleratorCapability {
     fn of(descriptor: &VideoAcceleratorDescriptor) -> Result<Self, VoomError> {
-        let (hardware_token, max_sessions, descriptor) = match descriptor {
-            VideoAcceleratorDescriptor::Nvidia(nvidia) => (
-                nvidia.hardware_token.clone(),
-                nvidia.max_sessions,
-                serde_json::to_value(nvidia),
-            ),
-            VideoAcceleratorDescriptor::Vaapi(vaapi) => (
-                format!("vaapi:pci-{}", vaapi.pci_address),
-                vaapi.max_sessions,
-                serde_json::to_value(descriptor),
-            ),
+        // The token comes from the descriptor's own accessor, which the scheduler also
+        // uses, so the string written to `hardware` cannot drift from the string the
+        // scheduler matches on. Only the serialized *shape* differs per backend.
+        let hardware_token = descriptor.hardware_token();
+        let (max_sessions, descriptor) = match descriptor {
+            VideoAcceleratorDescriptor::Nvidia(nvidia) => {
+                (nvidia.max_sessions, serde_json::to_value(nvidia))
+            }
+            VideoAcceleratorDescriptor::Vaapi(vaapi) => {
+                (vaapi.max_sessions, serde_json::to_value(descriptor))
+            }
         };
         Ok(Self {
             hardware_token,
