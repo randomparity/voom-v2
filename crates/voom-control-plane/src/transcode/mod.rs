@@ -41,6 +41,12 @@ pub struct ExecuteTranscodeVideoInput {
     /// Opt-in backup-before-mutation destination root; `Some` backs up the
     /// source before dispatch (ADR 0025).
     pub backup_root: Option<PathBuf>,
+    /// The accelerator the scheduler leased for this ticket, threaded from the
+    /// ticket payload. It belongs to the operation, not to the transport: the
+    /// request the worker answers and the request `validate_result` checks the
+    /// answer against must be the same one, or every accelerated transcode is
+    /// rejected as malformed.
+    pub hardware_assignment: Option<VideoHardwareAssignment>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -160,6 +166,7 @@ pub(crate) async fn execute_transcode_video_with_dispatchers(
         &staging_path,
     );
     request.input.video_codec = source_video_codec;
+    request.hardware_assignment = input.hardware_assignment.clone();
     let result = transcode.dispatch_transcode_video(request.clone()).await?;
     dispatch::validate_result(&selected, &request, &result)?;
     dispatch::require_output_file_matches_result(&staging_path, &result).await?;
