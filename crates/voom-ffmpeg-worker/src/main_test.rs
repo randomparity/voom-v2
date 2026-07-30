@@ -21,6 +21,7 @@ fn ffmpeg_config_from_preflight_advertises_only_detected_video_encoders() {
             mp4_muxer: "mp4".to_owned(),
             ogg_muxer: "ogg".to_owned(),
             nvidia: None,
+            vaapi: None,
         },
         None,
     );
