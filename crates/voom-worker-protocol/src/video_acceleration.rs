@@ -16,6 +16,22 @@ pub const VIDEOTOOLBOX_PREFLIGHT_BUDGET: Duration = Duration::from_secs(
         + VIDEOTOOLBOX_PREFLIGHT_COORDINATION_SECONDS,
 );
 
+/// Worker-side deadline covering the complete VAAPI preflight graph (ADR 0052 §7).
+pub const VAAPI_READINESS_DEADLINE: Duration = Duration::from_mins(5);
+/// Allowance for process coordination outside the worker's readiness deadline.
+pub const VAAPI_PREFLIGHT_COORDINATION_SECONDS: u64 = 30;
+/// Supervisor deadline covering the complete VAAPI preflight graph.
+///
+/// Strictly greater than [`VAAPI_READINESS_DEADLINE`], and that ordering is the
+/// point. The supervisor starts timing when the child is spawned; the worker starts
+/// timing inside its own preflight, after process start and binary resolution, so
+/// the supervisor's elapsed time always exceeds the worker's. Were the two deadlines
+/// equal, the supervisor would abandon the child first and report a generic
+/// "timed out waiting for local worker bound address", and the worker's expiry —
+/// which names the stage that did not prove — could never be observed.
+pub const VAAPI_PREFLIGHT_BUDGET: Duration =
+    Duration::from_secs(VAAPI_READINESS_DEADLINE.as_secs() + VAAPI_PREFLIGHT_COORDINATION_SECONDS);
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NvidiaVideoAcceleratorDescriptor {

@@ -22,8 +22,8 @@ use voom_core::{TicketOperation, VoomError, WorkerId, WorkerKind, WorkerStatus};
 use voom_store::repo::accelerator_claims::{NewAcceleratorClaim, SqliteAcceleratorClaimRepo};
 use voom_store::repo::workers::{NewCapability, NewGrant, NewWorker};
 use voom_worker_protocol::{
-    LocalWorkerBound, VIDEOTOOLBOX_PREFLIGHT_BUDGET, VideoAcceleratorDescriptor,
-    vaapi_hardware_token,
+    LocalWorkerBound, VAAPI_PREFLIGHT_BUDGET, VIDEOTOOLBOX_PREFLIGHT_BUDGET,
+    VideoAcceleratorDescriptor, vaapi_hardware_token,
 };
 
 use crate::ControlPlane;
@@ -31,8 +31,9 @@ use crate::worker_process::{WorkerCommand, bundled_worker_command_from, random_h
 
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(10);
 pub(crate) const NVIDIA_STARTUP_TIMEOUT: Duration = Duration::from_mins(5);
-/// ADR 0049 §9's readiness bound, adopted unchanged for VAAPI by ADR 0052 §7.
-pub(crate) const VAAPI_STARTUP_TIMEOUT: Duration = Duration::from_mins(5);
+/// ADR 0049 §9's readiness bound, plus the allowance that lets the worker's own
+/// stage-naming expiry be reached before this one (ADR 0052 §7).
+pub(crate) const VAAPI_STARTUP_TIMEOUT: Duration = VAAPI_PREFLIGHT_BUDGET;
 pub(crate) const VIDEOTOOLBOX_STARTUP_TIMEOUT: Duration = VIDEOTOOLBOX_PREFLIGHT_BUDGET;
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 const SELF_HEAL_SCAN_LIMIT: u32 = 1000;

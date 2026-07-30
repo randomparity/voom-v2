@@ -9,7 +9,9 @@ use std::{
     time::Duration,
 };
 use voom_core::{NVIDIA_VIDEO_DECODERS, VAAPI_VIDEO_DECODERS};
-use voom_worker_protocol::{VIDEOTOOLBOX_PROBE_TIMEOUT, VideoToolboxDecodeCapability};
+use voom_worker_protocol::{
+    VAAPI_READINESS_DEADLINE, VIDEOTOOLBOX_PROBE_TIMEOUT, VideoToolboxDecodeCapability,
+};
 
 const PROBE_TIMEOUT: Duration = VIDEOTOOLBOX_PROBE_TIMEOUT;
 const IDENTITY_POLL_WINDOW: Duration = Duration::from_secs(2);
@@ -1473,10 +1475,12 @@ const DEFAULT_DRM_SYSFS_ROOT: &str = "/sys/class/drm";
 /// The three clocks ADR 0052 §7 adopts unchanged from ADR 0049 §3.
 ///
 /// They are constants rather than operator configuration: ADR 0052 §7 reuses ADR
-/// 0049's bounds deliberately, and the run-local supervisor's five-minute
-/// readiness deadline already derives from the same number. Tests construct a
-/// [`VaapiPreflightConfig`] with short clocks so expiry is reachable without
-/// waiting them out.
+/// 0049's bounds deliberately. `readiness_deadline` is
+/// [`VAAPI_READINESS_DEADLINE`], the same constant the run-local supervisor adds
+/// its coordination allowance to, so this expiry — which names the stage that did
+/// not prove — is always reached before the supervisor abandons the process. Tests
+/// construct a [`VaapiPreflightConfig`] with short clocks so expiry is reachable
+/// without waiting them out.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VaapiProbeClocks {
     /// Deadline for one probe encode or decode.
@@ -1492,7 +1496,7 @@ impl Default for VaapiProbeClocks {
         Self {
             probe_timeout: PROBE_TIMEOUT,
             capacity_clock: Duration::from_mins(1),
-            readiness_deadline: Duration::from_mins(5),
+            readiness_deadline: VAAPI_READINESS_DEADLINE,
         }
     }
 }

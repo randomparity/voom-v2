@@ -112,6 +112,16 @@ The design detail is recorded in the [VAAPI video acceleration design][vaapi-des
    pending. Without this a hung probe would block readiness indefinitely, and §2
    requires the probe to run on every start.
 
+   The run-local supervisor's own deadline is that five-minute bound **plus a
+   coordination allowance**, not the same number. The supervisor starts timing when it
+   spawns the child; the worker starts timing inside its preflight, after process
+   start and binary resolution, so the supervisor's elapsed time always exceeds the
+   worker's. Equal deadlines would therefore let the supervisor abandon the child
+   first and report a generic bound-address timeout, making the stage-naming expiry
+   this section requires unreachable in the only launch path the runbook documents.
+   The ordering is an invariant, not a coincidence of the two literals, so it is
+   derived from one constant and asserted by a test.
+
 ## Consequences
 
 - Existing software and NVIDIA profile JSON and FFmpeg arguments remain

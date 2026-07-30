@@ -300,3 +300,22 @@ fn videotoolbox_requirement_carries_exact_source_capability() {
     assert_eq!(value["decoder"]["codec"], "av1");
     assert_eq!(value["decoder"]["pixel_format"], "p010le");
 }
+
+#[test]
+fn vaapi_supervisor_budget_outlasts_the_worker_readiness_deadline() {
+    // The supervisor starts timing at spawn and the worker inside its own
+    // preflight, so the supervisor's elapsed time always exceeds the worker's. If
+    // these two ever became equal the supervisor would abandon the child first and
+    // report a generic bound-address timeout, and the worker's expiry — the only
+    // message naming the stage that did not prove — would be unreachable through
+    // `voom worker run-local --vaapi-device`.
+    assert!(
+        VAAPI_PREFLIGHT_BUDGET > VAAPI_READINESS_DEADLINE,
+        "supervisor budget {VAAPI_PREFLIGHT_BUDGET:?} must exceed worker deadline \
+         {VAAPI_READINESS_DEADLINE:?}"
+    );
+    assert_eq!(
+        VAAPI_PREFLIGHT_BUDGET.checked_sub(VAAPI_READINESS_DEADLINE),
+        Some(Duration::from_secs(VAAPI_PREFLIGHT_COORDINATION_SECONDS))
+    );
+}

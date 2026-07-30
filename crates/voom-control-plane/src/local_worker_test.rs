@@ -7,9 +7,10 @@ use std::time::Duration;
 
 use super::{
     LocalVideoAcceleratorConfig, LocalWorkerKind, NvidiaLocalWorkerConfig,
-    ResolvedLocalVideoAcceleratorConfig, VIDEOTOOLBOX_STARTUP_TIMEOUT, VaapiLocalWorkerConfig,
-    VideoToolboxLocalWorkerConfig, is_full_nvidia_uuid, parse_ioreg_platform_uuid,
-    platform_resource_id, validate_bound_accelerator, validate_local_worker_config,
+    ResolvedLocalVideoAcceleratorConfig, VAAPI_STARTUP_TIMEOUT, VIDEOTOOLBOX_STARTUP_TIMEOUT,
+    VaapiLocalWorkerConfig, VideoToolboxLocalWorkerConfig, is_full_nvidia_uuid,
+    parse_ioreg_platform_uuid, platform_resource_id, validate_bound_accelerator,
+    validate_local_worker_config,
 };
 #[cfg(target_os = "linux")]
 use super::{kill_and_wait, process_group_has_members};
@@ -373,6 +374,14 @@ fn videotoolbox_config_requires_ffmpeg_and_bounded_sessions() {
 #[test]
 fn videotoolbox_startup_timeout_covers_the_preflight_budget() {
     assert_eq!(VIDEOTOOLBOX_STARTUP_TIMEOUT, Duration::from_secs(465));
+}
+
+/// The supervisor must outlast the worker's own five-minute readiness deadline, or
+/// it abandons the child first and the worker's stage-naming expiry (ADR 0052 §7)
+/// is never observed through `voom worker run-local --vaapi-device`.
+#[test]
+fn vaapi_startup_timeout_outlasts_the_worker_readiness_deadline() {
+    assert_eq!(VAAPI_STARTUP_TIMEOUT, Duration::from_secs(330));
 }
 
 #[test]
