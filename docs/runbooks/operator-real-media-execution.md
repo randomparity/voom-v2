@@ -98,6 +98,152 @@ CUVID decode plus `scale_cuda`, each ending in HEVC NVENC. AV1 NVENC is not part
 of this slice; the worker may advertise AV1 CUVID decode only when that exact
 device passes its startup probe.
 
+#### AMD VAAPI HEVC encoding
+
+Keep the software worker above and start one additional FFmpeg worker per render
+node, naming the device by its **PCI address**:
+
+```
+# terminal E
+voom worker run-local \
+  --kind ffmpeg \
+  --vaapi-device 0000:f4:00.0 \
+  --vaapi-max-sessions 1
+```
+
+Read the address off `lspci -D` (`0000:f4:00.0` is domain:bus:device.function,
+lowercase hex). Configuration accepts that and nothing else — **not**
+`/dev/dri/renderD128` and not an ordinal. Render-node numbers are assigned by
+enumeration order and renumber across a reboot or a driver change; the PCI
+address behind them cannot. Startup resolves
+`/dev/dri/by-path/pci-<addr>-render`, reads the resolved node's own address back,
+and refuses to start on a disagreement.
+
+The worker's user must be able to open the render node. On Fedora that means
+membership in `render`; some hosts own the node through `video` instead:
+
+```
+sudo usermod -aG render "$USER"   # log out and back in, or use `newgrp render`
+ls -l /dev/dri/by-path/pci-0000:f4:00.0-render
+```
+
+The declared session count is per physical device and must be in `1..=16`
+(default 1). Startup binds the node, probes an HEVC encode and one decode per
+candidate codec on that node, and proves the declared concurrency before the
+worker becomes ready. A VAAPI-bound worker advertises only VAAPI video work; it
+does not replace the unbound worker needed by software profiles, audio
+transcoding, and extraction. The advertised hardware token is
+`vaapi:pci-<addr>`.
+
+Running the bundled worker binary directly — as the acceptance script and the
+tests do — uses these environment seams instead of the CLI flags:
+
+| Variable | Meaning |
+|---|---|
+| `VOOM_VAAPI_DEVICE` | PCI address to bind, e.g. `0000:f4:00.0`. Required. |
+| `VOOM_VAAPI_MAX_SESSIONS` | Declared concurrent sessions, `1..=16`, default 1. |
+| `VOOM_DRI_ROOT` | Render-node root, default `/dev/dri`. |
+| `VOOM_DRM_SYSFS_ROOT` | Sysfs DRM root for the address readback, default `/sys/class/drm`. |
+| `VOOM_FFMPEG_BIN` / `VOOM_FFPROBE_BIN` | Override the tools the worker executes. |
+
+##### HEVC encode needs a non-stock VA driver
+
+Stock Fedora's `mesa-dri-drivers` advertises exactly **one** VAAPI encode
+entrypoint: AV1. It cannot encode HEVC or H.264. HEVC encode requires RPM
+Fusion's `mesa-va-drivers-freeworld`:
+
+```
+sudo dnf install mesa-va-drivers-freeworld
+```
+
+Do not assume a stock Fedora install can drive a `hevc_vaapi` profile — it
+cannot, and the failure surfaces as `No usable encoding profile found`. AV1
+encode and **all** hardware decode (`h264`, `hevc`, `av1`) work on stock Mesa.
+
+Installing the freeworld package puts `/usr/lib64/dri-freeworld` on the global
+library path and makes it the system-wide default; reverting needs an explicit
+`LIBVA_DRIVERS_PATH=/usr/lib64/dri`. Advertised capability therefore tracks the
+*loaded driver build*, which is invisible from the render node and from FFmpeg's
+encoder list. That is why the worker proves each codec with a real encode at
+startup and never caches the result across restarts: a host driver change can
+move capability with no voom configuration change.
+
+##### Main10 is proven by acceptance, not by the startup probe
+
+The startup probe encodes 8-bit (`nv12`) only. The descriptor has nowhere to
+record "Main10 proven", so probing 10-bit could only be a hard startup
+requirement, which would refuse an otherwise usable 8-bit device. A worker that
+became ready therefore guarantees `hevc_vaapi` 8-bit on that device and **does
+not** guarantee Main10. Main10 is verified end-to-end by
+`scripts/accept-vaapi-video-acceleration.sh` (below); run it before relying on a
+`p010` profile on a host whose driver build you have not previously exercised.
+
+##### A VAAPI profile cannot downscale
+
+There is no verified `scale_vaapi` command shape in this slice, so a VAAPI
+profile that sets `max_width`/`max_height` **fails, per file, on every source
+that exceeds the cap** — where the equivalent software profile would downscale.
+Both are ordinary policy fields, so this combination is easy to author by
+accident. Either omit the dimension caps from a VAAPI profile, or scope it to
+sources already within them. Silently ignoring the cap would emit output that
+violates the profile, so the failure is deliberate.
+
+##### `copy_compatible` genuinely stream-copies, and still needs the device
+
+A `copy_compatible` VAAPI profile does perform a real `-c:v copy` when the source
+already conforms: the worker compares the source's *file* pixel format against
+the format the profile's surface would write, not against the surface name. The
+worker still requires the VAAPI assignment for that copy, because the scheduler
+leased that device for that ticket. Do not expect a copy-only VAAPI profile to
+run on an unbound worker.
+
+##### `pixel_format` is load-bearing on a VAAPI profile
+
+`pixel_format` is how 10-bit is requested (`p010`; `nv12` is 8-bit) and it is
+what decides whether a produced artifact is judged compliant on the next run.
+Treat it as required, not optional. It names a GPU **surface** format, while the
+encoded file reports a **file** format:
+
+| Profile `pixel_format` | `codec_profile` | The file ffprobe reports |
+|---|---|---|
+| `nv12` | `main` (or unset) | `hevc` / `Main` / `yuv420p` |
+| `p010` | `main10` (or unset) | `hevc` / `Main 10` / `yuv420p10le` |
+
+`main` with `p010` is rejected: an 8-bit profile cannot carry a 10-bit surface.
+
+##### Startup diagnostics
+
+Every VAAPI preflight failure names the PCI address and has one operator action:
+
+| Diagnostic | What to do |
+|---|---|
+| `VAAPI device must be a PCI address like 0000:f4:00.0` | Replace a node path or ordinal with the lowercase `lspci -D` address. |
+| `PCI address ... has no VAAPI render node: ... does not exist` | Confirm the address with `lspci -D` and that a DRM driver bound the device. |
+| `VAAPI render node is absent for PCI address ...` | The device was removed or its driver unbound; re-check `lspci -D`. |
+| `... is not a character device` | Something other than a DRM render node occupies that path. |
+| `permission denied opening VAAPI render node ...` | Add the worker's user to `render` (or `video` on hosts that own the node that way). |
+| `... reports PCI address X but configuration names Y` | The `by-path` symlink is stale: `udevadm trigger`, or correct the configured address. |
+| `the loaded VA driver build cannot encode hevc_vaapi ...` | Install a driver build carrying HEVC encode — on Fedora, `mesa-va-drivers-freeworld`. |
+| `hevc_vaapi probe encode ... failed: <ffmpeg error>` | Read FFmpeg's own message; the driver has HEVC but the encode did not run. |
+| `VAAPI capacity probe for N concurrent ... failed` | VAAPI exposes no session enumeration, so the cause cannot be attributed: lower `--vaapi-max-sessions` or retry when the device is idle. |
+| `VAAPI readiness deadline of 300 seconds expired before <stage>` | A probe hung; the named stage is where. Check for a wedged FFmpeg process on the node. |
+
+##### Real-device acceptance
+
+```
+scripts/accept-vaapi-video-acceleration.sh 0000:f4:00.0
+```
+
+Per device, this binds a worker and asserts the readiness line names the
+configured address, then runs three real `compliance execute` pipelines on that
+device — 8-bit `nv12`/Main, 10-bit `p010`/Main10, and a VAAPI-decoded source —
+reading each produced file back with ffprobe. It then plans the same policy over
+each produced artifact in a database that never saw the source and requires the
+planner to want nothing, and checks that no software encoder appears in any argv
+the worker executed. It prints one `PASS`/`FAIL` line per check, exits non-zero
+on any failure, and leaves its evidence directory in place. It is not part of
+`just ci`: it needs the hardware.
+
 Running `compliance execute` before both workers are ready races the registration
 and hits the missing-worker path. `run-local` is a foreground supervisor: it
 retires the worker on Ctrl-C (SIGINT), SIGTERM, or stdin EOF. Start it in a
