@@ -81,7 +81,7 @@ impl WorkflowTimingOptions {
     pub fn for_tests() -> Self {
         Self {
             lease_ttl: Duration::from_secs(5),
-            heartbeat_interval: Duration::from_millis(10),
+            heartbeat_interval: Duration::from_secs(1),
             heartbeat_timeout: Duration::from_secs(5),
             progress_idle_timeout: Duration::from_secs(5),
         }

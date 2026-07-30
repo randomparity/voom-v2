@@ -23,7 +23,7 @@ worker-only wrappers.
 Focused verification:
 
 ```text
-cargo test -p voom-control-plane post_worker -- --nocapture
+cargo test -p voom-control-plane source_backed_adapter_heartbeat --lib
 ```
 
 ## Step 2: Move heartbeat ownership to the adapter boundary
@@ -43,7 +43,7 @@ runtime and verification wrappers.
 Focused verification:
 
 ```text
-cargo test -p voom-control-plane post_worker -- --nocapture
+cargo test -p voom-control-plane source_backed_adapter_heartbeat --lib
 cargo test -p voom-control-plane chaos_missed_heartbeat_uses_executor_watchdog
 cargo test -p voom-store lease_heartbeat_cannot_resurrect_an_expired_operation_claim
 cargo test -p voom-store terminal_dispatch_advance_fences_stale_generation_completion

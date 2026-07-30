@@ -22,7 +22,14 @@ pub(super) async fn dispatch_control_plane_ticket(
 ) -> Option<Result<(), VoomError>> {
     context.payload.get("source_file_version_id")?;
     if uses_bundled_policy_verification(context.operation, context.payload) {
-        return Some(policy_verify::dispatch_policy_verify_artifact(context).await);
+        return Some(
+            await_with_lease_heartbeats_without_runtime(
+                context.lease_heartbeat_context(),
+                context.operation,
+                Box::pin(policy_verify::dispatch_policy_verify_artifact(context)),
+            )
+            .await,
+        );
     }
     let Some(runtime) = context.runtime else {
         return Some(Err(VoomError::Config(format!(
@@ -38,32 +45,56 @@ pub(super) async fn dispatch_control_plane_ticket(
         payload: context.payload,
         artifact_roots,
         backup_root: context.options.artifact_roots.backup_root.as_deref(),
-        timing: &context.options.timing,
+        #[cfg(test)]
         chaos: &context.options.chaos,
     };
     match context.operation {
         OperationKind::TranscodeVideo => Some(
-            crate::transcode::workflow::dispatch_control_plane_transcode(adapter_context(
-                &context.options.artifact_roots.transcode,
-            ))
+            await_with_lease_heartbeats_without_runtime(
+                context.lease_heartbeat_context(),
+                context.operation,
+                Box::pin(
+                    crate::transcode::workflow::dispatch_control_plane_transcode(adapter_context(
+                        &context.options.artifact_roots.transcode,
+                    )),
+                ),
+            )
             .await,
         ),
         OperationKind::Remux => Some(
-            crate::remux::workflow::dispatch_control_plane_remux_context(adapter_context(
-                &context.options.artifact_roots.remux,
-            ))
+            await_with_lease_heartbeats_without_runtime(
+                context.lease_heartbeat_context(),
+                context.operation,
+                Box::pin(
+                    crate::remux::workflow::dispatch_control_plane_remux_context(adapter_context(
+                        &context.options.artifact_roots.remux,
+                    )),
+                ),
+            )
             .await,
         ),
         OperationKind::TranscodeAudio => Some(
-            crate::audio::workflow::dispatch_control_plane_transcode_audio(adapter_context(
-                &context.options.artifact_roots.audio,
-            ))
+            await_with_lease_heartbeats_without_runtime(
+                context.lease_heartbeat_context(),
+                context.operation,
+                Box::pin(
+                    crate::audio::workflow::dispatch_control_plane_transcode_audio(
+                        adapter_context(&context.options.artifact_roots.audio),
+                    ),
+                ),
+            )
             .await,
         ),
         OperationKind::ExtractAudio => Some(
-            crate::audio::workflow::dispatch_control_plane_extract_audio(adapter_context(
-                &context.options.artifact_roots.audio,
-            ))
+            await_with_lease_heartbeats_without_runtime(
+                context.lease_heartbeat_context(),
+                context.operation,
+                Box::pin(
+                    crate::audio::workflow::dispatch_control_plane_extract_audio(adapter_context(
+                        &context.options.artifact_roots.audio,
+                    )),
+                ),
+            )
             .await,
         ),
         _ => None,
@@ -86,6 +117,17 @@ pub(super) struct TicketDispatchContext<'a> {
     pub(super) options: &'a WorkflowDispatchOptions,
 }
 
+impl<'a> TicketDispatchContext<'a> {
+    fn lease_heartbeat_context(self) -> LeaseHeartbeatContext<'a> {
+        LeaseHeartbeatContext {
+            control: self.control,
+            lease_id: self.lease_id,
+            timing: &self.options.timing,
+            chaos: &self.options.chaos,
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 pub(crate) struct OperationAdapterContext<'a> {
     pub(crate) control: &'a ControlPlane,
@@ -95,18 +137,17 @@ pub(crate) struct OperationAdapterContext<'a> {
     pub(crate) payload: &'a Value,
     pub(crate) artifact_roots: &'a OperationArtifactRoots,
     pub(crate) backup_root: Option<&'a Path>,
-    pub(crate) timing: &'a WorkflowTimingOptions,
+    #[cfg(test)]
     pub(crate) chaos: &'a WorkflowChaosOptions,
 }
 
 impl<'a> OperationAdapterContext<'a> {
     pub(crate) fn runtime_dispatch_context(self) -> RuntimeDispatchContext<'a> {
         RuntimeDispatchContext {
-            control: self.control,
             runtime: self.runtime,
             ticket_id: self.ticket.id,
             lease_id: self.lease_id,
-            timing: self.timing,
+            #[cfg(test)]
             chaos: self.chaos,
         }
     }
@@ -134,33 +175,11 @@ impl<'a> OperationAdapterContext<'a> {
 
 #[derive(Clone, Copy)]
 pub(crate) struct RuntimeDispatchContext<'a> {
-    pub(crate) control: &'a ControlPlane,
     pub(crate) runtime: &'a WorkerRuntime,
     pub(crate) ticket_id: TicketId,
     pub(crate) lease_id: LeaseId,
-    pub(crate) timing: &'a WorkflowTimingOptions,
+    #[cfg(test)]
     pub(crate) chaos: &'a WorkflowChaosOptions,
-}
-
-pub(crate) async fn await_with_lease_heartbeats<F, T>(
-    context: RuntimeDispatchContext<'_>,
-    operation: OperationKind,
-    future: F,
-) -> Result<T, VoomError>
-where
-    F: Future<Output = Result<T, VoomError>>,
-{
-    await_with_lease_heartbeats_without_runtime(
-        LeaseHeartbeatContext {
-            control: context.control,
-            lease_id: context.lease_id,
-            timing: context.timing,
-            chaos: context.chaos,
-        },
-        operation,
-        future,
-    )
-    .await
 }
 
 #[derive(Clone, Copy)]
@@ -187,6 +206,7 @@ where
     tokio::pin!(future);
     loop {
         tokio::select! {
+            biased;
             result = &mut future => return result,
             _ = heartbeat.tick(), if !context.chaos.suppresses_heartbeats_for(operation) => {
                 crate::workflow::execution::leases::heartbeat_lease_with_retry(

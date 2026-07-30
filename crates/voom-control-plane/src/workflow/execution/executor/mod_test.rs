@@ -34,10 +34,10 @@ use voom_worker_protocol::{
 };
 
 use super::super::leases::retry_on_database_locked;
-use super::{CapacityDeferredTestSync, DispatchReadyOutcome, RunLoopState};
+use super::{CapacityDeferredTestSync, DispatchReadyOutcome, PostDispatchTestSync, RunLoopState};
 use crate::workflow::execution::executor::WorkflowExecutorOptions;
 use crate::workflow::execution::operation_adapters::{
-    RuntimeDispatchContext, await_with_lease_heartbeats,
+    LeaseHeartbeatContext, await_with_lease_heartbeats_without_runtime,
 };
 use crate::workflow::execution::runtime::WorkerRuntimeRegistry;
 use crate::workflow::execution::timing::EffectiveTiming;
@@ -371,7 +371,7 @@ async fn externally_leased_workflow_ticket_does_not_trigger_no_dispatch_failure(
             .await
     });
 
-    for _ in 0..100 {
+    for _ in 0..400 {
         if fixture.worker_dispatch_count(worker_id) == 1 {
             break;
         }
@@ -2386,14 +2386,11 @@ async fn policy_transcode_success_result_includes_generated_staging_path() {
 async fn await_with_lease_heartbeats_refreshes_workflow_lease_while_future_runs() {
     let fixture = ExecutorFixture::with_ready_tickets(1).await;
     let worker_id = fixture.worker_id();
-    let (ticket_id, lease_id) = fixture.create_heartbeat_test_lease(worker_id).await;
-    let runtime = fixture.registry.get(worker_id).unwrap();
+    let (_ticket_id, lease_id) = fixture.create_heartbeat_test_lease(worker_id).await;
     let mut options = WorkflowExecutorOptions::for_tests();
     options.timing.heartbeat_interval = Duration::from_millis(10);
-    let context = RuntimeDispatchContext {
+    let context = LeaseHeartbeatContext {
         control: &fixture.cp,
-        runtime: &runtime,
-        ticket_id,
         lease_id,
         timing: &options.timing,
         chaos: &options.chaos,
@@ -2408,10 +2405,11 @@ async fn await_with_lease_heartbeats_refreshes_workflow_lease_while_future_runs(
     // interval against the 80ms future keeps a wide ordering margin, so at least one
     // heartbeat still fires before the future completes under load.
     fixture.clock.advance(time::Duration::milliseconds(80));
-    let heartbeat = await_with_lease_heartbeats(context, OperationKind::HashFile, async {
-        tokio::time::sleep(Duration::from_millis(80)).await;
-        Ok::<_, VoomError>(())
-    });
+    let heartbeat =
+        await_with_lease_heartbeats_without_runtime(context, OperationKind::HashFile, async {
+            tokio::time::sleep(Duration::from_millis(80)).await;
+            Ok::<_, VoomError>(())
+        });
     tokio::pin!(heartbeat);
     tokio::select! {
         result = &mut heartbeat => panic!("heartbeat future finished early: {result:?}"),
@@ -2425,6 +2423,189 @@ async fn await_with_lease_heartbeats_refreshes_workflow_lease_while_future_runs(
         "heartbeat wrapper must keep the outer workflow lease fresh: \
          acquired_at={acquired_at}, last_heartbeat_at={last_heartbeat_at}"
     );
+}
+
+#[tokio::test]
+async fn source_backed_adapter_heartbeat_covers_terminal_post_dispatch_work() {
+    for case in [
+        PostDispatchCase::VideoTranscode,
+        PostDispatchCase::Remux,
+        PostDispatchCase::AudioSynthesis,
+        PostDispatchCase::AudioExtraction,
+        PostDispatchCase::PolicyVerification,
+    ] {
+        assert_post_dispatch_heartbeats(case).await;
+    }
+}
+
+#[derive(Clone, Copy)]
+enum PostDispatchCase {
+    VideoTranscode,
+    Remux,
+    AudioSynthesis,
+    AudioExtraction,
+    PolicyVerification,
+}
+
+impl PostDispatchCase {
+    const fn operation(self) -> OperationKind {
+        match self {
+            Self::VideoTranscode => OperationKind::TranscodeVideo,
+            Self::Remux => OperationKind::Remux,
+            Self::AudioSynthesis => OperationKind::TranscodeAudio,
+            Self::AudioExtraction => OperationKind::ExtractAudio,
+            Self::PolicyVerification => OperationKind::VerifyArtifact,
+        }
+    }
+
+    const fn behavior(self) -> FakeBehavior {
+        match self {
+            Self::VideoTranscode => FakeBehavior::RequireTranscodeProtocolPayload,
+            Self::Remux => FakeBehavior::RequireCorrelatedRemuxDispatch,
+            Self::AudioSynthesis => FakeBehavior::Success,
+            Self::AudioExtraction => FakeBehavior::RequireCorrelatedExtractAudioDispatch,
+            Self::PolicyVerification => FakeBehavior::RejectUnexpectedDispatch,
+        }
+    }
+}
+
+async fn assert_post_dispatch_heartbeats(case: PostDispatchCase) {
+    let mut fixture = ExecutorFixture::without_workers(0).await;
+    let dir = workflow_tempdir();
+    let source_path = dir.path().join("Movie.mkv");
+    let (source_file_version_id, _) = fixture
+        .seed_local_source_at_path(&source_path, b"movie-bytes")
+        .await;
+    let audio_channels = if matches!(case, PostDispatchCase::AudioSynthesis) {
+        6
+    } else {
+        2
+    };
+    let snapshot_id = fixture
+        .record_source_snapshot_with_audio_channels(source_file_version_id, audio_channels)
+        .await;
+    fixture.plan = post_dispatch_plan(case, source_file_version_id, snapshot_id);
+    if matches!(case, PostDispatchCase::PolicyVerification) {
+        fixture
+            .register_worker_without_runtime("verify-worker", case.operation(), 1)
+            .await;
+    } else {
+        fixture
+            .register_worker("operation-worker", case.operation(), 1, case.behavior())
+            .await;
+    }
+    let sync = PostDispatchTestSync {
+        operation: case.operation(),
+        worker_result_observed: Arc::new(tokio::sync::Notify::new()),
+        resume_post_dispatch: Arc::new(tokio::sync::Semaphore::new(0)),
+        held: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    };
+    let mut options = WorkflowExecutorOptions::for_tests();
+    options.artifact_roots.transcode.staging_root = dir.path().join("video-stage");
+    options.artifact_roots.transcode.target_dir = dir.path().join("video-out");
+    options.artifact_roots.remux.staging_root = dir.path().join("remux-stage");
+    options.artifact_roots.remux.target_dir = dir.path().join("remux-out");
+    options.artifact_roots.audio.staging_root = dir.path().join("audio-stage");
+    options.artifact_roots.audio.target_dir = dir.path().join("audio-out");
+    options.timing.heartbeat_interval = Duration::from_millis(100);
+    options.chaos.post_dispatch_sync = Some(sync.clone());
+    let executor = fixture.executor_with_options(options);
+    let plan = fixture.plan.clone();
+    let mut run = tokio::spawn(async move { executor.submit_and_run(plan).await });
+
+    let observed = tokio::time::timeout(
+        Duration::from_secs(5),
+        sync.worker_result_observed.notified(),
+    )
+    .await;
+    if observed.is_err() {
+        let early_result = tokio::time::timeout(Duration::from_secs(1), &mut run).await;
+        panic!("worker result did not reach the post-dispatch hold: {early_result:?}");
+    }
+    let heartbeat_result = advance_past_initial_lease_expiry(&fixture).await;
+    sync.resume_post_dispatch.add_permits(1);
+    let Ok(join_result) = tokio::time::timeout(Duration::from_secs(30), &mut run).await else {
+        let diagnostics = fixture.post_dispatch_diagnostics().await;
+        run.abort();
+        let _ = run.await;
+        panic!("workflow must finish after the post-dispatch hold is released: {diagnostics}");
+    };
+    let run_result = join_result.unwrap();
+
+    heartbeat_result.unwrap();
+    let summary = post_dispatch_summary(case, &fixture, run_result).await;
+    if !matches!(case, PostDispatchCase::AudioSynthesis) {
+        assert_eq!(
+            summary.operation_count(case.operation()),
+            1,
+            "post-dispatch workflow summary: {summary:?}"
+        );
+    }
+    assert_eq!(fixture.held_lease_count().await, 0);
+}
+
+async fn post_dispatch_summary(
+    case: PostDispatchCase,
+    fixture: &ExecutorFixture,
+    result: Result<WorkflowRunSummary, crate::workflow::execution::executor::WorkflowRunError>,
+) -> WorkflowRunSummary {
+    if matches!(case, PostDispatchCase::AudioSynthesis) {
+        let Err(error) = result else {
+            panic!("the minimal video fixture cannot satisfy synthesis probing");
+        };
+        assert_eq!(error.source.error_code(), ErrorCode::MalformedWorkerResult);
+        let (state, claim_lease_id, attempt_status, claim_expires_at) =
+            fixture.audio_synthesis_liveness_state().await;
+        assert_eq!(
+            (state, claim_lease_id, attempt_status),
+            ("staged".to_owned(), Some(1), "terminal".to_owned()),
+            "staging and a terminal dispatch attempt prove the live claim was accepted"
+        );
+        assert!(
+            parse_test_time(&claim_expires_at) > T0 + time::Duration::seconds(6),
+            "the synthesis claim must remain live after the original expiry"
+        );
+        return error.summary;
+    }
+    match result {
+        Ok(summary) => summary,
+        Err(error) => {
+            panic!(
+                "post-dispatch workflow failed: {error:?}; verification={:?}",
+                fixture.latest_artifact_verification().await
+            );
+        }
+    }
+}
+
+async fn advance_past_initial_lease_expiry(fixture: &ExecutorFixture) -> Result<(), String> {
+    let (acquired_at, mut last_heartbeat_at) = fixture.first_lease_heartbeat_window().await;
+    for _ in 0..3 {
+        fixture.clock.advance(time::Duration::seconds(2));
+        last_heartbeat_at = wait_for_new_lease_heartbeat(fixture, last_heartbeat_at)
+            .await
+            .ok_or_else(|| {
+                format!(
+                    "lease heartbeat stopped during terminal post-dispatch work: \
+                     acquired_at={acquired_at}, last_heartbeat_at={last_heartbeat_at}"
+                )
+            })?;
+    }
+    Ok(())
+}
+
+async fn wait_for_new_lease_heartbeat(
+    fixture: &ExecutorFixture,
+    previous: OffsetDateTime,
+) -> Option<OffsetDateTime> {
+    for _ in 0..100 {
+        let (_, current) = fixture.first_lease_heartbeat_window().await;
+        if current > previous {
+            return Some(current);
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    None
 }
 
 #[tokio::test]
@@ -3307,6 +3488,15 @@ impl ExecutorFixture {
     }
 
     async fn record_source_snapshot(&self, file_version_id: FileVersionId) -> MediaSnapshotId {
+        self.record_source_snapshot_with_audio_channels(file_version_id, 2)
+            .await
+    }
+
+    async fn record_source_snapshot_with_audio_channels(
+        &self,
+        file_version_id: FileVersionId,
+        audio_channels: u32,
+    ) -> MediaSnapshotId {
         self.cp
             .record_media_snapshot(
                 file_version_id,
@@ -3329,7 +3519,7 @@ impl ExecutorFixture {
                             "codec_name": "aac",
                             "language": "eng",
                             "title": "Commentary",
-                            "channels": 2,
+                            "channels": audio_channels,
                             "disposition": {
                                 "default": false,
                                 "forced": false,
@@ -3361,6 +3551,63 @@ impl ExecutorFixture {
                 .await
                 .unwrap();
         serde_json::from_str(&result).unwrap()
+    }
+
+    async fn latest_artifact_verification(
+        &self,
+    ) -> Option<(String, Option<String>, Option<String>)> {
+        sqlx::query_as(
+            "SELECT status, error_code, message \
+             FROM artifact_verifications ORDER BY id DESC LIMIT 1",
+        )
+        .fetch_optional(&self.cp.pool)
+        .await
+        .unwrap()
+    }
+
+    async fn audio_synthesis_liveness_state(&self) -> (String, Option<i64>, String, String) {
+        sqlx::query_as(
+            "SELECT operation.state, operation.claim_lease_id, attempt.status, \
+                    operation.claim_expires_at \
+             FROM audio_synthesis_operations operation \
+             JOIN audio_synthesis_dispatch_attempts attempt \
+               ON attempt.operation_id = operation.id \
+             ORDER BY operation.id ASC LIMIT 1",
+        )
+        .fetch_one(&self.cp.pool)
+        .await
+        .unwrap()
+    }
+
+    async fn post_dispatch_diagnostics(&self) -> Value {
+        let ticket_state: Option<String> =
+            sqlx::query_scalar("SELECT state FROM tickets ORDER BY id ASC LIMIT 1")
+                .fetch_optional(&self.cp.pool)
+                .await
+                .unwrap();
+        let lease_state: Option<String> =
+            sqlx::query_scalar("SELECT state FROM leases ORDER BY id ASC LIMIT 1")
+                .fetch_optional(&self.cp.pool)
+                .await
+                .unwrap();
+        let verification_status: Option<String> = sqlx::query_scalar(
+            "SELECT status FROM artifact_verifications ORDER BY id DESC LIMIT 1",
+        )
+        .fetch_optional(&self.cp.pool)
+        .await
+        .unwrap();
+        let extract_state: Option<String> = sqlx::query_scalar(
+            "SELECT state FROM audio_extract_operations ORDER BY id ASC LIMIT 1",
+        )
+        .fetch_optional(&self.cp.pool)
+        .await
+        .unwrap();
+        json!({
+            "ticket_state": ticket_state,
+            "lease_state": lease_state,
+            "verification_status": verification_status,
+            "extract_state": extract_state,
+        })
     }
 
     async fn acquire_policy_remux_ticket(
@@ -4183,6 +4430,80 @@ fn policy_audio_plan(
             operation,
             policy_target: Some(target),
             operation_payload,
+            depends_on: Vec::new(),
+            depends_on_selected: Vec::new(),
+            provides_selected: None,
+        }],
+        fan_out: crate::workflow::plan::model::FanOutPolicy { max_files: 1 },
+        concurrency: ConcurrencyPolicy {
+            max_in_flight_dispatches: 1,
+        },
+        timing: crate::workflow::plan::model::TimingPolicy {
+            base_duration_ms: 10,
+            jitter_ms: 0,
+        },
+    }
+}
+
+fn post_dispatch_plan(
+    case: PostDispatchCase,
+    source_file_version_id: FileVersionId,
+    source_media_snapshot_id: MediaSnapshotId,
+) -> WorkflowPlan {
+    let target = TargetRef::FileVersion {
+        id: source_file_version_id,
+    };
+    match case {
+        PostDispatchCase::VideoTranscode => policy_transcode_plan(target),
+        PostDispatchCase::Remux => policy_remux_plan_for_snapshot(target, source_media_snapshot_id),
+        PostDispatchCase::AudioSynthesis => {
+            policy_synthesize_audio_plan(target, source_media_snapshot_id)
+        }
+        PostDispatchCase::AudioExtraction => {
+            policy_extract_audio_plan_for_snapshot(target, source_media_snapshot_id)
+        }
+        PostDispatchCase::PolicyVerification => policy_verify_plan(target),
+    }
+}
+
+fn policy_synthesize_audio_plan(
+    target: TargetRef,
+    source_media_snapshot_id: MediaSnapshotId,
+) -> WorkflowPlan {
+    let operation_id = "node_synthesis_test";
+    let companion_id = voom_plan::audio::synthesis_companion_id(operation_id, "stream-audio-1");
+    policy_audio_plan(
+        "policy-synthesize-audio-test",
+        "policy-node_synthesize_audio",
+        OperationKind::TranscodeAudio,
+        target,
+        json!({
+            "type": "synthesize_audio",
+            "operation_id": operation_id,
+            "target_codec": "aac",
+            "target_channels": 2,
+            "container": "mkv",
+            "source_media_snapshot_id": source_media_snapshot_id.0,
+            "filter": {"type": "channels", "op": "gte", "value": 6},
+            "companions": [{
+                "companion_id": companion_id,
+                "source_snapshot_stream_id": "stream-audio-1",
+                "source_provider_stream_index": 1,
+                "result_snapshot_stream_id": companion_id
+            }]
+        }),
+    )
+}
+
+fn policy_verify_plan(target: TargetRef) -> WorkflowPlan {
+    WorkflowPlan {
+        id: "policy-verify-test".to_owned(),
+        seed: 12,
+        nodes: vec![OperationNode {
+            id: "policy-node_verify".to_owned(),
+            operation: OperationKind::VerifyArtifact,
+            policy_target: Some(target),
+            operation_payload: Value::Null,
             depends_on: Vec::new(),
             depends_on_selected: Vec::new(),
             provides_selected: None,

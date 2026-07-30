@@ -79,25 +79,31 @@ original TTL:
 - before the fix, no post-worker heartbeat is written and the regression test
   times out or an audio claim expires;
 - after the fix, each heartbeat renews the lease and audio claims, and the
-  operation reaches its normal terminal state.
+  operation crosses the claim-sensitive terminal boundary.
 
 This seam is test-only and does not alter production configuration or public
 contracts.
 
 ## Test matrix
 
-The executor regression matrix runs a successful source-backed workflow for:
+The executor regression matrix drives each source-backed workflow beyond the
+worker result:
 
 | Operation | Required assertion |
 |---|---|
 | video transcode | post-worker lease heartbeat and successful release |
 | remux | post-worker lease heartbeat and successful release |
-| audio synthesis | post-worker heartbeat, live synthesis claim, success |
+| audio synthesis | post-worker heartbeat, terminal dispatch evidence, staged operation, and a claim expiry beyond the original TTL |
 | audio extraction | post-worker heartbeat, live extraction claim, success |
 | policy verification | post-worker heartbeat, persisted verification, success |
 
 Existing tests remain the fail-closed proof for expired-claim resurrection,
 competing claim generations, and chaos-suppressed heartbeats.
+
+The repository's only checked-in video fixture has no audio streams, so the
+synthesis case cannot satisfy its later bundled result-probe shape check. It
+asserts the claim-sensitive terminal dispatch and staging boundaries instead;
+the existing synthesis tests cover successful probing, commit, and lineage.
 
 ## Non-goals
 
