@@ -98,6 +98,54 @@ CUVID decode plus `scale_cuda`, each ending in HEVC NVENC. AV1 NVENC is not part
 of this slice; the worker may advertise AV1 CUVID decode only when that exact
 device passes its startup probe.
 
+On Apple silicon macOS, start a host-scoped VideoToolbox worker explicitly:
+
+```
+voom worker run-local \
+  --kind ffmpeg \
+  --videotoolbox \
+  --videotoolbox-max-sessions 4
+```
+
+The session declaration must be in `1..=16` and defaults to one. Startup
+requires FFmpeg's `videotoolbox` accelerator, `h264_videotoolbox` and
+`hevc_videotoolbox` encoders, and `scale_vt`. It executes H.264, HEVC, and AV1
+decode pipelines for the supported eight- and ten-bit formats, then proves
+every declared homogeneous concurrency group with first-frame and all-live
+evidence. Inventory text alone never establishes readiness.
+
+The supervisor and worker independently hash the normalized
+`IOPlatformUUID`. Only the lowercase SHA-256 resource ID and
+`videotoolbox:<resource-id>` token are persisted or logged. Raw platform UUID,
+serial number, hardware UUID, and user name are not part of the contract.
+
+Run host acceptance with an optional declared capacity:
+
+```
+scripts/accept-videotoolbox-video-acceleration.sh 4
+```
+
+The acceptance command checks real hardware pipelines, the run-local
+readiness/retirement stdout contract, the durable host claim, descriptor
+capabilities, identity non-disclosure, and clean claim removal.
+
+VideoToolbox profiles use `bitrate_kbps`, the `default` preset, and an accepted
+profile/pixel-format pair. `decode: video_toolbox` is explicit; no failure path
+falls back to software encode or decode. Hardware decode rejects source/output
+bit-depth mismatches and uses `scale_vt` only when downscaling.
+
+On the same boot, claim recovery is conservative: any process at the recorded
+PID, any member of the recorded process group, or any inspection failure
+preserves the claim for manual investigation. A different boot session proves
+the old processes are gone. The supervisor never signals an ambiguous macOS
+process group.
+
+Common startup failures include an Intel Mac or non-macOS host, a missing or
+incompatible FFmpeg/FFprobe binary, a failed encoder/decoder/format pipeline,
+an unprovable declared capacity, a supervisor/worker resource mismatch, or an
+existing claim whose prior owner cannot be proven absent. Each fails before
+readiness.
+
 Running `compliance execute` before both workers are ready races the registration
 and hits the missing-worker path. `run-local` is a foreground supervisor: it
 retires the worker on Ctrl-C (SIGINT), SIGTERM, or stdin EOF. Start it in a
