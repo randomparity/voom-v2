@@ -229,11 +229,18 @@ fn dimensions_need_change(
     Ok(needs_change)
 }
 
+/// Compares the snapshot's pixel format against the format a conforming output *file*
+/// carries, not against the profile's `pixel_format`. For a hardware profile those
+/// differ: `pixel_format` names the surface the encoder consumes, which no file records,
+/// so comparing it directly would mark a conforming output non-compliant and re-plan the
+/// same transcode on every run — a plan that never converges.
 fn pixel_format_needs_change(
     snapshot: &MediaSnapshotInput,
     resolved: &voom_core::TranscodeVideoProfile,
 ) -> Result<bool, TranscodeVideoShape> {
-    let Some(target) = resolved.pixel_format.as_deref() else {
+    let target = voom_core::expected_output_pixel_format(resolved)
+        .map_err(TranscodeVideoShape::UnsupportedShape)?;
+    let Some(target) = target else {
         return Ok(false);
     };
     let Some(observed) = video_stream_field(snapshot, "pixel_format") else {

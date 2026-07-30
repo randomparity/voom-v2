@@ -180,13 +180,22 @@ pub fn decide_copy_video(profile: &TranscodeVideoProfile, snapshot: &MediaSnapsh
         }
     }
 
-    // Pixel format must match if constrained.
-    if let Some(target_pf) = profile.pixel_format.as_deref() {
-        let Some(observed_pf) = voom_plan::video_stream_field(snapshot, "pixel_format") else {
-            return false;
-        };
-        if !observed_pf.eq_ignore_ascii_case(target_pf) {
-            return false;
+    // Pixel format must match if constrained. `-c:v copy` runs no encoder, so the
+    // comparison is against the format a conforming output *file* carries, never the
+    // hardware surface the profile names: comparing the surface would refuse every
+    // legitimate copy under a hardware profile, and a copy is not a hardware operation.
+    // An unmappable surface means we cannot verify conformance, so we refuse to copy —
+    // the same rule this function applies to every unknown observable.
+    match voom_core::expected_output_pixel_format(profile) {
+        Err(_) => return false,
+        Ok(None) => {}
+        Ok(Some(target_pf)) => {
+            let Some(observed_pf) = voom_plan::video_stream_field(snapshot, "pixel_format") else {
+                return false;
+            };
+            if !observed_pf.eq_ignore_ascii_case(target_pf) {
+                return false;
+            }
         }
     }
 

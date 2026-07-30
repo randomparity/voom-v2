@@ -196,6 +196,70 @@ fn conforming_result() -> TranscodeVideoResult {
     }
 }
 
+/// A VAAPI profile's `pixel_format` names the hardware *surface* the encoder consumes,
+/// and spec §2.2 measured what each surface writes to the file: `nv12` → `yuv420p`,
+/// `p010` → `yuv420p10le`. The worker reports the *file* format it probed, so comparing
+/// it against the surface name rejects every conforming VAAPI encode as a malformed
+/// worker result — the whole backend would be unusable even with the device, argv, and
+/// scheduling all correct.
+#[test]
+fn validate_output_facts_accepts_a_conforming_vaapi_result() {
+    let mut request = capped_request();
+    request.profile = vaapi_main10_profile();
+    request.output.video_codec = "hevc".to_owned();
+    request.profile.max_width = None;
+    request.profile.max_height = None;
+    let mut result = conforming_result();
+    result.output_video_codec = "hevc".to_owned();
+    result.output_pixel_format = "yuv420p10le".to_owned();
+
+    assert!(
+        validate_output_facts(&request, &result).is_ok(),
+        "{:?}",
+        validate_output_facts(&request, &result)
+    );
+}
+
+/// The mapping is not a blanket exemption: a VAAPI output whose file format is not what
+/// the requested surface writes is still a malformed result.
+#[test]
+fn validate_output_facts_rejects_a_vaapi_result_with_the_wrong_bit_depth() {
+    let mut request = capped_request();
+    request.profile = vaapi_main10_profile();
+    request.output.video_codec = "hevc".to_owned();
+    request.profile.max_width = None;
+    request.profile.max_height = None;
+    let mut result = conforming_result();
+    result.output_video_codec = "hevc".to_owned();
+    // 8-bit output under a p010 surface: the encode did not honor the profile.
+    result.output_pixel_format = "yuv420p".to_owned();
+
+    let error = validate_output_facts(&request, &result).unwrap_err();
+
+    assert_eq!(error.code(), "MALFORMED_WORKER_RESULT");
+    assert!(error.to_string().contains("yuv420p10le"), "{error}");
+}
+
+fn vaapi_main10_profile() -> TranscodeVideoProfile {
+    TranscodeVideoProfile {
+        name: "hevc-vaapi-main10".to_owned(),
+        target_codec: "hevc".to_owned(),
+        encoder: "hevc_vaapi".to_owned(),
+        crf: None,
+        cq: None,
+        qp: Some(24),
+        preset: None,
+        tune: None,
+        codec_profile: Some("main10".to_owned()),
+        codec_level: None,
+        pixel_format: Some("p010".to_owned()),
+        max_width: None,
+        max_height: None,
+        decode: voom_core::VideoDecodeMode::vaapi(),
+        copy_compatible: false,
+    }
+}
+
 #[test]
 fn validate_output_facts_accepts_conforming_result() {
     assert!(validate_output_facts(&capped_request(), &conforming_result()).is_ok());

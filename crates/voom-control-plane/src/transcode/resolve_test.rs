@@ -282,3 +282,69 @@ async fn resolves_inline_vaapi_settings_to_a_qp_profile_with_no_preset() {
     assert!(resolved.profile.decode.is_vaapi());
     assert_eq!(resolved.output_container, "mkv");
 }
+
+/// `-c:v copy` runs no encoder, so a stream copy under a VAAPI profile is not a hardware
+/// operation and must be decided on whether the source already matches the output a
+/// conforming encode would write. The profile names the `nv12` surface; the snapshot
+/// reports the file's `yuv420p`. Comparing those two refused every legitimate copy, so a
+/// `copy_compatible` VAAPI profile silently re-encoded instead of copying.
+#[test]
+fn decide_copy_video_accepts_a_conforming_source_under_a_vaapi_profile() {
+    let mut profile = voom_core::TranscodeVideoProfile::default_hevc();
+    profile.encoder = "hevc_vaapi".to_owned();
+    profile.crf = None;
+    profile.qp = Some(24);
+    profile.preset = None;
+    profile.pixel_format = Some("nv12".to_owned());
+    profile.copy_compatible = true;
+
+    assert!(decide_copy_video(&profile, &hevc_yuv420p_snapshot()));
+}
+
+/// The mapping is not a blanket exemption: a 10-bit surface writes `yuv420p10le`, which
+/// an 8-bit source does not carry, so that source must still be re-encoded.
+#[test]
+fn decide_copy_video_refuses_an_eight_bit_source_under_a_ten_bit_vaapi_profile() {
+    let mut profile = voom_core::TranscodeVideoProfile::default_hevc();
+    profile.encoder = "hevc_vaapi".to_owned();
+    profile.crf = None;
+    profile.qp = Some(24);
+    profile.preset = None;
+    profile.pixel_format = Some("p010".to_owned());
+    profile.copy_compatible = true;
+
+    assert!(!decide_copy_video(&profile, &hevc_yuv420p_snapshot()));
+}
+
+fn hevc_yuv420p_snapshot() -> MediaSnapshotInput {
+    MediaSnapshotInput {
+        ordinal: 0,
+        target: TargetRef::Synthetic {
+            key: "variant-1".to_owned(),
+            kind: voom_policy::TargetKind::MediaVariant,
+        },
+        container: Some("mkv".to_owned()),
+        stream_summary: json!({
+            "video_stream_count": 1,
+            "streams": [{
+                "id": "stream-0",
+                "index": 0,
+                "kind": "video",
+                "codec_name": "hevc",
+                "width": 1280,
+                "height": 720,
+                "pixel_format": "yuv420p"
+            }],
+        }),
+        video_codec: Some("hevc".to_owned()),
+        width: Some(1280),
+        height: Some(720),
+        hdr: None,
+        bitrate: None,
+        duration_millis: None,
+        audio_languages: Vec::new(),
+        subtitle_languages: Vec::new(),
+        health_flags: Vec::new(),
+        existing_media_snapshot_id: None,
+    }
+}

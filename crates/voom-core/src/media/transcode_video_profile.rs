@@ -109,6 +109,40 @@ pub fn validate_profile_against_descriptor(profile: &TranscodeVideoProfile) -> R
     Ok(())
 }
 
+/// The pixel format an output file conforming to `profile` must carry, or `None` when
+/// the profile constrains no pixel format.
+///
+/// Every comparison of a profile's `pixel_format` against an *observed file* format —
+/// planner compliance, the stream-copy decision, worker output-fact verification, and
+/// worker copy preconditions — must go through this. A hardware profile's
+/// `pixel_format` names the surface its encoder consumes, which the file never records
+/// (issue #409 design §2.2), so comparing the two directly reports every conforming
+/// hardware encode as non-conforming and never converges.
+///
+/// # Errors
+/// Returns `Err` when the encoder is unknown, or when its `pixel_format` has no
+/// recorded output format. Both are impossible for a profile that passed
+/// [`validate_profile_against_descriptor`], so either is a loud signal that a surface
+/// format was added without recording what it writes.
+pub fn expected_output_pixel_format(
+    profile: &TranscodeVideoProfile,
+) -> Result<Option<&str>, String> {
+    let Some(pixel_format) = profile.pixel_format.as_deref() else {
+        return Ok(None);
+    };
+    let descriptor = encoder_descriptor(&profile.encoder)
+        .ok_or_else(|| format!("unknown encoder `{}`", profile.encoder))?;
+    descriptor
+        .output_pixel_format(pixel_format)
+        .map(Some)
+        .ok_or_else(|| {
+            format!(
+                "`{}` records no output pixel format for `{pixel_format}`",
+                profile.encoder
+            )
+        })
+}
+
 /// Exactly one quality field is legal per encoder — the one its `QualityDomain` names.
 /// The match is exhaustive over `(quality_domain, crf, cq, qp)` with no wildcard arm, so
 /// a new domain or a new quality field cannot be added without deciding this rule.

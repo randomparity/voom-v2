@@ -6,7 +6,9 @@ use std::time::Duration;
 
 use serde::{Serialize, de::DeserializeOwned};
 use time::OffsetDateTime;
-use voom_core::{ErrorCode, FailureClass, LeaseId, nvidia_decoder_for_video_codec};
+use voom_core::{
+    ErrorCode, FailureClass, LeaseId, expected_output_pixel_format, nvidia_decoder_for_video_codec,
+};
 use voom_worker_protocol::{
     AudioExpectedFacts, AudioObservedFacts, ExtractAudioOutputDescriptor, ExtractAudioOutputResult,
     ExtractAudioRequest, ExtractAudioResult, ExtractAudioStatus, OperationDispatch,
@@ -434,11 +436,20 @@ fn validate_copy_dimensions(
 
 /// An unknown (empty) probe value under a constraint is non-conforming — we
 /// cannot prove the stream matches, so fail loudly.
+/// `-c:v copy` runs no encoder, so a stream copy under a hardware profile is not a
+/// hardware operation and must be allowed when the source already conforms. The source's
+/// pixel format is a *file* format, so it is compared against the format a conforming
+/// output file carries — not the profile's `pixel_format`, which for a hardware profile
+/// names the surface the encoder would have consumed. Comparing the surface refused every
+/// legitimate copy under a VAAPI profile.
 fn validate_copy_pixel_format(
     profile: &TranscodeVideoProfile,
     probe: &InputProbe,
 ) -> Result<(), TranscodeVideoError> {
-    let Some(required_pf) = &profile.pixel_format else {
+    let required_pf = expected_output_pixel_format(profile).map_err(|error| {
+        malformed_worker_result("copy_video", format!("copy_video precondition: {error}"))
+    })?;
+    let Some(required_pf) = required_pf else {
         return Ok(());
     };
     if probe.pixel_format.is_empty() {
@@ -449,7 +460,7 @@ fn validate_copy_pixel_format(
             ),
         ));
     }
-    if &probe.pixel_format != required_pf {
+    if probe.pixel_format != required_pf {
         return Err(malformed_worker_result(
             "copy_video",
             format!(

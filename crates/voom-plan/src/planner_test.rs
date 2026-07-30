@@ -2122,9 +2122,17 @@ fn profile_hevc_vaapi() -> voom_core::TranscodeVideoProfile {
     profile.crf = None;
     profile.qp = Some(24);
     profile.preset = None;
-    // A hardware surface format the source does not already carry, so the node needs
-    // a transcode and therefore reports resource notes at all.
     profile.pixel_format = Some("nv12".to_owned());
+    profile
+}
+
+/// The 10-bit variant. A `p010` surface writes `yuv420p10le`, which an 8-bit source does
+/// not carry, so the node needs a transcode — the shape a test needs to observe resource
+/// notes or a decode-codec gate at all. `codec_profile` is deliberately left unset:
+/// constraining it would block on the snapshot's missing `profile` field instead.
+fn profile_hevc_vaapi_p010() -> voom_core::TranscodeVideoProfile {
+    let mut profile = profile_hevc_vaapi();
+    profile.pixel_format = Some("p010".to_owned());
     profile
 }
 
@@ -2147,10 +2155,15 @@ fn transcode_video_blocks_unsupported_vaapi_decode_source_codec() {
 
 /// The three codecs the acceptance host probed stay plannable, so the block above is
 /// a codec gate and not a blanket refusal of VAAPI decode.
+///
+/// The profile targets 10-bit so every codec — including an `hevc` source that already
+/// matches the target codec — genuinely needs a transcode. An earlier revision relied on
+/// the surface-vs-file confusion to force that, which stopped being true once a
+/// conforming output became compliant.
 #[test]
 fn transcode_video_plans_every_vaapi_decodable_source_codec() {
     for codec in ["h264", "hevc", "av1"] {
-        let mut profile = profile_hevc_vaapi();
+        let mut profile = profile_hevc_vaapi_p010();
         profile.decode = voom_core::VideoDecodeMode::vaapi();
         let plan = plan_transcode_with_container(profile, vaapi_decode_source(codec), "mkv");
 
@@ -2409,7 +2422,11 @@ fn resource_notes_are_format_stable() {
 /// flag for. An absent value is never a stand-in for a present one.
 #[test]
 fn a_qp_domain_profile_notes_its_qp_and_never_a_zero_cq() {
-    let plan = plan_transcode_with_container(profile_hevc_vaapi(), source_hevc_720_mkv(), "mkv");
+    let plan = plan_transcode_with_container(
+        profile_hevc_vaapi_p010(),
+        vaapi_decode_source("hevc"),
+        "mkv",
+    );
     let notes = resource_notes(&plan);
 
     assert!(notes.contains(&"encoder=hevc_vaapi".to_owned()));
@@ -2441,6 +2458,19 @@ fn a_cq_domain_profile_notes_its_cq() {
     assert!(notes.contains(&"cq=22".to_owned()), "notes: {notes:?}");
     assert!(!notes.iter().any(|note| note.starts_with("crf=")));
     assert!(!notes.iter().any(|note| note.starts_with("qp=")));
+}
+
+/// PROBE — expected to fail if the surface-vs-file confusion reaches the planner.
+#[test]
+fn probe_conforming_vaapi_output_is_compliant() {
+    let plan =
+        plan_transcode_with_container(profile_hevc_vaapi(), vaapi_decode_source("hevc"), "mkv");
+    assert_eq!(
+        node_status(&plan),
+        NodeStatus::NoOp,
+        "reason: {}",
+        plan.nodes[0].status_reason
+    );
 }
 
 #[test]

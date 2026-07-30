@@ -155,3 +155,45 @@ fn av1_profiles_allow_declared_ten_bit_formats() {
     assert!(aom.pixel_format_compatible_with_profile("yuv420p10le", Some("main")));
     assert!(svt.pixel_format_compatible_with_profile("yuv420p10le", Some("main")));
 }
+
+/// `expected_output_pixel_format` may only fail when a surface format was added without
+/// recording what it writes, so every encoder's declared `pixel_formats` must be mapped.
+/// Without this, adding a surface would turn a conforming encode into a hard failure at
+/// the worker and a never-converging plan.
+#[test]
+fn every_declared_pixel_format_has_a_recorded_output_format() {
+    for encoder in [
+        "libx265",
+        "libsvtav1",
+        "libaom-av1",
+        "hevc_nvenc",
+        "hevc_vaapi",
+    ] {
+        let descriptor = encoder_descriptor(encoder).unwrap();
+        for pixel_format in descriptor.pixel_formats {
+            assert!(
+                descriptor.output_pixel_format(pixel_format).is_some(),
+                "`{encoder}` records no output format for surface `{pixel_format}`"
+            );
+        }
+        for (surface, _) in descriptor.surface_output_pixel_formats {
+            assert!(
+                descriptor.pixel_formats.contains(surface),
+                "`{encoder}` maps `{surface}`, which it does not accept"
+            );
+        }
+    }
+}
+
+/// A software encoder's `pixel_formats` are already file formats, so the mapping is the
+/// identity; a hardware encoder's are surfaces and must translate (design §2.2).
+#[test]
+fn surface_formats_translate_only_for_hardware_encoders() {
+    let x265 = encoder_descriptor("libx265").unwrap();
+    assert_eq!(x265.output_pixel_format("yuv420p10le"), Some("yuv420p10le"));
+
+    let vaapi = encoder_descriptor("hevc_vaapi").unwrap();
+    assert_eq!(vaapi.output_pixel_format("nv12"), Some("yuv420p"));
+    assert_eq!(vaapi.output_pixel_format("p010"), Some("yuv420p10le"));
+    assert_eq!(vaapi.output_pixel_format("yuv420p"), None);
+}

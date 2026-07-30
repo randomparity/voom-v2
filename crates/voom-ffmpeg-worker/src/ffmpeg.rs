@@ -1081,27 +1081,14 @@ pub async fn probe_input(config: &FfmpegConfig, path: &Path) -> Result<InputProb
 
 /// The pixel format `ffprobe` must report for an output conforming to `profile`.
 ///
-/// Software and NVENC profiles name a software format, which is what lands in the
-/// file. A VAAPI profile names the hardware *surface* format the encoder consumes,
-/// and spec §2.2 measured what each one writes: `nv12` → `yuv420p`, `p010` →
-/// `yuv420p10le`. Comparing the surface name against the file's format would
-/// reject every conforming VAAPI encode.
+/// Delegates to the encoder descriptor, which is where the measured surface-to-file
+/// pairings live. The mapping is deliberately not duplicated here: the control plane
+/// verifies the same fact about the same result, and two tables would let the worker and
+/// the control plane disagree about whether an encode conformed.
 fn expected_output_pixel_format(
     profile: &TranscodeVideoProfile,
 ) -> Result<Option<&str>, FfmpegError> {
-    if profile.encoder != VAAPI_HEVC_ENCODER {
-        return Ok(profile.pixel_format.as_deref());
-    }
-    if profile.pixel_format.is_none() {
-        return Ok(None);
-    }
-    match vaapi_surface_format(profile)? {
-        "nv12" => Ok(Some("yuv420p")),
-        "p010" => Ok(Some("yuv420p10le")),
-        other => Err(FfmpegError::OutputFactsMismatch(format!(
-            "no output pixel format is recorded for VAAPI surface format `{other}`"
-        ))),
-    }
+    voom_core::expected_output_pixel_format(profile).map_err(FfmpegError::OutputFactsMismatch)
 }
 
 async fn probe_output(

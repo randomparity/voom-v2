@@ -873,6 +873,76 @@ async fn copy_video_sets_copied_video_flag() {
     assert!(result.copied_video);
 }
 
+/// `-c:v copy` runs no encoder, so a stream copy under a VAAPI profile is not a hardware
+/// operation and must be allowed when the source already conforms. The source's pixel
+/// format is a *file* format (`yuv420p`), while the profile names the `nv12` surface the
+/// encoder would have consumed; comparing those two refused every legitimate copy.
+///
+/// The worker still requires the VAAPI assignment even for a copy — the scheduler leased
+/// this device for this ticket, and accepting work for another device would break the
+/// per-device model regardless of whether an encoder runs.
+#[tokio::test]
+async fn copy_video_is_allowed_under_a_vaapi_profile_when_the_source_conforms() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("input.mkv");
+    tokio::fs::write(&input, b"input").await.unwrap();
+    let mut req = request(dir.path(), &input).await;
+    req.copy_video = true;
+    req.profile = vaapi_copy_profile();
+    req.hardware_assignment = Some(VideoHardwareAssignment::vaapi(
+        vaapi_hardware_token("0000:f4:00.0"),
+        "0000:f4:00.0",
+    ));
+    let config =
+        config(dir.path()).with_vaapi_device(vaapi_binding(dir.path(), vec!["hevc".to_owned()]));
+
+    let result = handle_transcode_video(&req, &config).await.unwrap();
+
+    assert!(result.copied_video);
+    assert_eq!(result.output_pixel_format, "yuv420p");
+}
+
+/// The mapping is not a blanket exemption: a source whose file format is not what the
+/// requested surface writes still cannot be copied.
+#[tokio::test]
+async fn copy_video_is_refused_under_a_vaapi_profile_when_the_source_bit_depth_differs() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("input.mkv");
+    tokio::fs::write(&input, b"input").await.unwrap();
+    let mut req = request(dir.path(), &input).await;
+    req.copy_video = true;
+    let mut profile = vaapi_copy_profile();
+    // A p010 surface writes yuv420p10le; the stubbed source is yuv420p.
+    profile.pixel_format = Some("p010".to_owned());
+    req.profile = profile;
+    req.hardware_assignment = Some(VideoHardwareAssignment::vaapi(
+        vaapi_hardware_token("0000:f4:00.0"),
+        "0000:f4:00.0",
+    ));
+    let config =
+        config(dir.path()).with_vaapi_device(vaapi_binding(dir.path(), vec!["hevc".to_owned()]));
+
+    let err = handle_transcode_video(&req, &config).await.unwrap_err();
+
+    assert!(
+        matches!(err, TranscodeVideoError::MalformedWorkerResult { .. }),
+        "expected MalformedWorkerResult, got: {err}"
+    );
+    assert!(err.to_string().contains("yuv420p10le"), "{err}");
+}
+
+fn vaapi_copy_profile() -> TranscodeVideoProfile {
+    let mut profile = TranscodeVideoProfile::default_hevc();
+    profile.name = "hevc-vaapi-copy".to_owned();
+    profile.encoder = "hevc_vaapi".to_owned();
+    profile.crf = None;
+    profile.qp = Some(24);
+    profile.preset = None;
+    profile.pixel_format = Some("nv12".to_owned());
+    profile.copy_compatible = true;
+    profile
+}
+
 #[tokio::test]
 async fn copy_video_with_constrained_profile_but_unknown_source_profile_fails_loudly() {
     // Profile constrains codec_profile=main10, but the source probe reports no
