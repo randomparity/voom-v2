@@ -1211,3 +1211,53 @@ fn artifact_transcode_failed_payload_rejects_unknown_field() {
         provider_version: None,
     });
 }
+
+/// A VAAPI transcode's durable evidence is the backend plus the PCI-address token;
+/// there is no device UUID to record, and `null` is recorded rather than the field
+/// being dropped. Issue #409 asks for durable assignment evidence, so a reader
+/// auditing which device produced an artifact must be able to tell "VAAPI, no UUID
+/// by construction" from "no hardware was involved" — which is `hardware_backend`
+/// being absent, not `hardware_device_uuid` being absent.
+#[test]
+fn artifact_transcode_succeeded_payload_records_vaapi_evidence_without_a_uuid() {
+    let p = ArtifactTranscodeSucceededPayload {
+        job_id: 1,
+        ticket_id: 2,
+        lease_id: Some(3),
+        source_file_version_id: 4,
+        source_file_location_id: 5,
+        artifact_handle_id: 6,
+        artifact_location_id: 7,
+        staging_path: "/tmp/voom-stage/2/3/out.mkv".to_owned(),
+        profile_name: "gpu-vaapi-hevc".to_owned(),
+        encoder: "hevc_vaapi".to_owned(),
+        target_codec: "hevc".to_owned(),
+        output_container: "mkv".to_owned(),
+        output_video_codec: "hevc".to_owned(),
+        copied_video: false,
+        output_width: 1920,
+        output_height: 1080,
+        output_pixel_format: "yuv420p".to_owned(),
+        hardware_backend: Some("vaapi".to_owned()),
+        hardware_token: Some("vaapi:pci-0000:f4:00.0".to_owned()),
+        hardware_device_uuid: None,
+        provider: "ffmpeg".to_owned(),
+        provider_version: "8.1.2".to_owned(),
+    };
+
+    let json = serde_json::to_value(Event::ArtifactTranscodeSucceeded(p.clone())).unwrap();
+
+    assert_eq!(json["payload"]["encoder"], "hevc_vaapi");
+    assert_eq!(json["payload"]["hardware_backend"], "vaapi");
+    assert_eq!(json["payload"]["hardware_token"], "vaapi:pci-0000:f4:00.0");
+    assert_eq!(
+        json["payload"].get("hardware_device_uuid"),
+        Some(&serde_json::Value::Null),
+        "an absent UUID must be recorded as null, not omitted: {json}"
+    );
+    // The GPU surface is `nv12`; a conforming file reports `yuv420p` (design §2.2).
+    assert_eq!(json["payload"]["output_pixel_format"], "yuv420p");
+
+    let back: Event = serde_json::from_value(json).unwrap();
+    assert!(matches!(back, Event::ArtifactTranscodeSucceeded(q) if q == p));
+}
