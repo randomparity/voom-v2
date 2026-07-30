@@ -2163,12 +2163,61 @@ fn transcode_video_blocks_unsupported_vaapi_decode_source_codec() {
 #[test]
 fn transcode_video_plans_every_vaapi_decodable_source_codec() {
     for codec in ["h264", "hevc", "av1"] {
-        let mut profile = profile_hevc_vaapi_p010();
+        // An 8-bit surface against the 8-bit source, because that is the only
+        // pairing the device accepts under hardware decode — the `p010` profile
+        // this once used forced a transcode by disagreeing about depth, which is
+        // a combination `hevc_vaapi` refuses with "No usable encoding profile
+        // found". The container difference is what needs the transcode instead.
+        let mut profile = profile_hevc_vaapi();
         profile.decode = voom_core::VideoDecodeMode::vaapi();
-        let plan = plan_transcode_with_container(profile, vaapi_decode_source(codec), "mkv");
+        let mut source = vaapi_decode_source(codec);
+        source.container = Some("avi".to_owned());
+        let plan = plan_transcode_with_container(profile, source, "mkv");
 
         assert_eq!(node_status(&plan), NodeStatus::Planned, "codec {codec}");
     }
+}
+
+/// A VAAPI-decoded source reaches the encoder at the depth the decoder chose,
+/// because the command carries no filter to convert it. Both directions of a
+/// mismatch fail on real hardware, so the planner blocks the file rather than
+/// emitting a ticket the worker can only refuse.
+#[test]
+fn vaapi_decode_blocks_either_direction_of_a_bit_depth_mismatch() {
+    let mut ten_bit_profile = profile_hevc_vaapi_p010();
+    ten_bit_profile.decode = voom_core::VideoDecodeMode::vaapi();
+    let plan = plan_transcode_with_container(ten_bit_profile, vaapi_decode_source("h264"), "mkv");
+
+    assert_eq!(node_status(&plan), NodeStatus::Blocked);
+    assert_eq!(
+        blocked_reason(&plan),
+        "VAAPI decode source pixel format `yuv420p` is incompatible with profile surface \
+         format `p010`"
+    );
+
+    let mut eight_bit_profile = profile_hevc_vaapi();
+    eight_bit_profile.decode = voom_core::VideoDecodeMode::vaapi();
+    let mut ten_bit_source = vaapi_decode_source("hevc");
+    ten_bit_source.stream_summary = serde_json::json!({
+        "video_stream_count": 1,
+        "streams": [{
+            "id": "stream-0",
+            "index": 0,
+            "kind": "video",
+            "codec_name": "hevc",
+            "width": 1280,
+            "height": 720,
+            "pixel_format": "yuv420p10le"
+        }],
+    });
+    let plan = plan_transcode_with_container(eight_bit_profile, ten_bit_source, "mkv");
+
+    assert_eq!(node_status(&plan), NodeStatus::Blocked);
+    assert_eq!(
+        blocked_reason(&plan),
+        "VAAPI decode source pixel format `yuv420p10le` is incompatible with profile surface \
+         format `nv12`"
+    );
 }
 
 #[test]

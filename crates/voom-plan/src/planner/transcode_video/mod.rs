@@ -147,6 +147,12 @@ fn transcode_video_shape(
     {
         return shape;
     }
+    if needs_change
+        && resolved.decode.is_vaapi()
+        && let Some(shape) = vaapi_decode_shape(snapshot, resolved)
+    {
+        return shape;
+    }
 
     if target_container.eq_ignore_ascii_case(voom_core::TRANSCODE_VIDEO_CONTAINER_MP4)
         && let Some(shape) = mp4_gate_shape(snapshot)
@@ -209,10 +215,46 @@ fn videotoolbox_decode_shape(
     )))
 }
 
+/// The VAAPI counterpart of [`videotoolbox_decode_shape`], and blocking here is the
+/// whole point: a hardware-decoded VAAPI source reaches the encoder at the depth the
+/// decoder chose, because the command carries no filter to convert it. The worker
+/// refuses the pairing, so without this gate the planner would keep producing tickets
+/// that can only fail — a per-file fact turned into a dispatch loop (ADR 0049 §5).
+///
+/// An absent `pixel_format` means nv12, exactly as the worker's
+/// `vaapi_surface_format` reads it; the two must agree or the planner blocks work the
+/// worker would have run.
+fn vaapi_decode_shape(
+    snapshot: &MediaSnapshotInput,
+    resolved: &voom_core::TranscodeVideoProfile,
+) -> Option<TranscodeVideoShape> {
+    let Some(source_pixel_format) = video_stream_field(snapshot, "pixel_format") else {
+        return Some(TranscodeVideoShape::InsufficientFacts(
+            "snapshot video pixel_format is unknown".to_owned(),
+        ));
+    };
+    let Some(source_depth) = video_pixel_format_depth(source_pixel_format) else {
+        return Some(TranscodeVideoShape::UnsupportedShape(format!(
+            "VAAPI decode does not support source pixel format `{source_pixel_format}`"
+        )));
+    };
+    let surface_format = resolved.pixel_format.as_deref().unwrap_or("nv12");
+    if video_pixel_format_depth(surface_format) == Some(source_depth) {
+        return None;
+    }
+    Some(TranscodeVideoShape::UnsupportedShape(format!(
+        "VAAPI decode source pixel format `{source_pixel_format}` is incompatible with profile \
+         surface format `{surface_format}`"
+    )))
+}
+
+/// Maps both the file formats a snapshot reports and the surface formats a hardware
+/// profile names onto a bit depth, the only property the two vocabularies share.
+/// `p010` is VAAPI's spelling of the surface `p010le` names.
 fn video_pixel_format_depth(pixel_format: &str) -> Option<u8> {
     match pixel_format {
         "yuv420p" | "nv12" => Some(8),
-        "yuv420p10le" | "p010le" => Some(10),
+        "yuv420p10le" | "p010le" | "p010" => Some(10),
         _ => None,
     }
 }
