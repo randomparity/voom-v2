@@ -216,7 +216,11 @@ encoded file reports a **file** format:
 | `nv12` | `main` (or unset) | `hevc` / `Main` / `yuv420p` |
 | `p010` | `main10` (or unset) | `hevc` / `Main 10` / `yuv420p10le` |
 
-`main` with `p010` is rejected: an 8-bit profile cannot carry a 10-bit surface.
+Both mismatched pairings are rejected when the profile is created, not at encode
+time: `main` with `p010` (an 8-bit profile cannot carry a 10-bit surface) and
+`main10` with `nv12` — including `main10` with no `pixel_format` at all, since
+absent means `nv12`. Left to FFmpeg, each of them reports only `No usable
+encoding profile found`.
 
 ##### With `decode: vaapi`, the surface must match the source's bit depth
 

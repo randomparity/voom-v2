@@ -50,6 +50,11 @@ pub struct EncoderDescriptor {
     pub ten_bit_pixel_formats: &'static [&'static str],
     /// Codec profiles that only allow 8-bit pixel formats.
     pub eight_bit_only_profiles: &'static [&'static str],
+    /// Codec profiles that *require* a ten-bit pixel format. Empty for every
+    /// encoder whose `pixel_format` names a software format, where `FFmpeg` derives
+    /// a workable depth itself; populated only where the field names a hardware
+    /// **surface** the encoder receives and cannot convert.
+    pub ten_bit_only_profiles: &'static [&'static str],
     /// Pairs each hardware *surface* format in `pixel_formats` with the pixel format a
     /// conforming output file actually carries.
     ///
@@ -98,6 +103,7 @@ const X265: EncoderDescriptor = EncoderDescriptor {
     ],
     ten_bit_pixel_formats: &["yuv420p10le", "yuv422p10le", "yuv444p10le"],
     eight_bit_only_profiles: &["main"],
+    ten_bit_only_profiles: &[],
     surface_output_pixel_formats: &[],
     requires_bitrate_zero: false,
 };
@@ -114,6 +120,7 @@ const SVTAV1: EncoderDescriptor = EncoderDescriptor {
     pixel_formats: &["yuv420p", "yuv420p10le"],
     ten_bit_pixel_formats: &["yuv420p10le"],
     eight_bit_only_profiles: &[],
+    ten_bit_only_profiles: &[],
     surface_output_pixel_formats: &[],
     requires_bitrate_zero: false,
 };
@@ -131,6 +138,7 @@ const LIBAOM: EncoderDescriptor = EncoderDescriptor {
     pixel_formats: &["yuv420p", "yuv420p10le"],
     ten_bit_pixel_formats: &["yuv420p10le"],
     eight_bit_only_profiles: &[],
+    ten_bit_only_profiles: &[],
     surface_output_pixel_formats: &[],
     requires_bitrate_zero: true,
 };
@@ -151,6 +159,7 @@ const HEVC_NVENC: EncoderDescriptor = EncoderDescriptor {
     pixel_formats: &["yuv420p", "yuv420p10le"],
     ten_bit_pixel_formats: &["yuv420p10le"],
     eight_bit_only_profiles: &["main"],
+    ten_bit_only_profiles: &[],
     surface_output_pixel_formats: &[],
     requires_bitrate_zero: true,
 };
@@ -171,6 +180,7 @@ const HEVC_VAAPI: EncoderDescriptor = EncoderDescriptor {
     pixel_formats: &["nv12", "p010"],
     ten_bit_pixel_formats: &["p010"],
     eight_bit_only_profiles: &["main"],
+    ten_bit_only_profiles: &["main10"],
     surface_output_pixel_formats: &[("nv12", "yuv420p"), ("p010", "yuv420p10le")],
     requires_bitrate_zero: false,
 };
@@ -192,6 +202,7 @@ const H264_VIDEOTOOLBOX: EncoderDescriptor = EncoderDescriptor {
     pixel_formats: &["yuv420p"],
     ten_bit_pixel_formats: &[],
     eight_bit_only_profiles: &["high"],
+    ten_bit_only_profiles: &[],
     surface_output_pixel_formats: &[],
     requires_bitrate_zero: false,
 };
@@ -211,6 +222,7 @@ const HEVC_VIDEOTOOLBOX: EncoderDescriptor = EncoderDescriptor {
     pixel_formats: &["yuv420p", "yuv420p10le"],
     ten_bit_pixel_formats: &["yuv420p10le"],
     eight_bit_only_profiles: &["main"],
+    ten_bit_only_profiles: &[],
     surface_output_pixel_formats: &[],
     requires_bitrate_zero: false,
 };
@@ -371,6 +383,30 @@ impl EncoderDescriptor {
             return true;
         }
         !self.ten_bit_pixel_formats.contains(&pixel_format)
+    }
+
+    /// The ten-bit direction of [`Self::pixel_format_compatible_with_profile`].
+    ///
+    /// Where `pixel_format` names a hardware surface it is the depth the encoder
+    /// receives and cannot convert, so a ten-bit-only `codec_profile` over an
+    /// eight-bit surface always fails at execution — as does one over *no* surface,
+    /// which resolves to the eight-bit default. `hevc_vaapi` answers both with
+    /// `No usable encoding profile found`, verified on the acceptance device.
+    ///
+    /// Encoders declaring no ten-bit-only profiles are unaffected.
+    #[must_use]
+    pub fn profile_requires_ten_bit_pixel_format(
+        &self,
+        codec_profile: Option<&str>,
+        pixel_format: Option<&str>,
+    ) -> bool {
+        let Some(profile) = codec_profile else {
+            return true;
+        };
+        if !self.ten_bit_only_profiles.contains(&profile) {
+            return true;
+        }
+        pixel_format.is_some_and(|format| self.ten_bit_pixel_formats.contains(&format))
     }
 }
 

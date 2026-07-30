@@ -332,6 +332,43 @@ fn vaapi_profile_enforces_surface_formats_and_profile_bit_depth() {
     assert!(validate_profile_against_descriptor(&profile).is_err());
 }
 
+/// The other direction of the same rule, and it failed exactly as loudly on the
+/// device: `main10` over an `nv12` surface answers `No usable encoding profile
+/// found`. Absent counts as `nv12`, because that is what `vaapi_surface_format`
+/// resolves it to — so leaving `pixel_format` off a `main10` profile is the same
+/// always-failing profile written a shorter way.
+#[test]
+fn vaapi_profile_rejects_a_ten_bit_codec_profile_over_an_eight_bit_surface() {
+    let mut profile = vaapi_hevc_profile();
+    profile.codec_profile = Some("main10".to_owned());
+
+    profile.pixel_format = Some("nv12".to_owned());
+    let error = validate_profile_against_descriptor(&profile).unwrap_err();
+    assert!(error.contains("main10"), "{error}");
+    assert!(error.contains("nv12"), "{error}");
+
+    profile.pixel_format = None;
+    assert!(validate_profile_against_descriptor(&profile).is_err());
+
+    profile.pixel_format = Some("p010".to_owned());
+    assert!(validate_profile_against_descriptor(&profile).is_ok());
+}
+
+/// The rule is scoped to encoders whose `pixel_format` names a hardware surface.
+/// A software encoder derives a workable depth itself, so `main10` without a pixel
+/// format stays legal there and this must not have widened into a general rule.
+#[test]
+fn a_software_profile_may_still_name_main10_without_a_pixel_format() {
+    let mut profile = TranscodeVideoProfile::default_hevc();
+    profile.encoder = "libx265".to_owned();
+    profile.crf = Some(23);
+    profile.preset = Some("medium".to_owned());
+    profile.codec_profile = Some("main10".to_owned());
+    profile.pixel_format = None;
+
+    assert!(validate_profile_against_descriptor(&profile).is_ok());
+}
+
 /// A hardware decode backend and the encoder must be the same accelerator: hardware
 /// frames produced by one backend cannot enter the other's encoder, and dispatch routes
 /// a ticket on that pairing, so a mismatched profile would be scheduled onto a device

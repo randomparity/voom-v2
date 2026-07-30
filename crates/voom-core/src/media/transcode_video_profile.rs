@@ -110,6 +110,21 @@ pub fn validate_profile_against_descriptor(profile: &TranscodeVideoProfile) -> R
             ));
         }
     }
+    // Outside the `if let` above, deliberately: the ten-bit direction has to reject
+    // an absent `pixel_format` too, because on a surface encoder absent resolves to
+    // the eight-bit default and the profile then fails at execution rather than here.
+    if !descriptor.profile_requires_ten_bit_pixel_format(
+        profile.codec_profile.as_deref(),
+        profile.pixel_format.as_deref(),
+    ) {
+        return Err(format!(
+            "codec_profile `{}` requires a ten-bit pixel_format on `{}`, but the profile names \
+             `{}`",
+            profile.codec_profile.as_deref().unwrap_or("<none>"),
+            profile.encoder,
+            profile.pixel_format.as_deref().unwrap_or("<none>")
+        ));
+    }
     validate_videotoolbox_tuple(profile, descriptor.backend)?;
     Ok(())
 }
