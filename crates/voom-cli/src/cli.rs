@@ -934,12 +934,18 @@ pub struct VideoProfileFields {
     pub name: String,
     #[arg(long)]
     pub encoder: String,
-    #[arg(long, required_unless_present = "cq", conflicts_with = "cq")]
+    #[arg(long, required_unless_present_any = ["cq", "qp"], conflicts_with_all = ["cq", "qp"])]
     pub crf: Option<u8>,
-    #[arg(long, required_unless_present = "crf", conflicts_with = "crf")]
+    #[arg(long, required_unless_present_any = ["crf", "qp"], conflicts_with_all = ["crf", "qp"])]
     pub cq: Option<u8>,
+    /// Constant quantization parameter, the quality knob of a VAAPI encoder.
+    #[arg(long, required_unless_present_any = ["crf", "cq"], conflicts_with_all = ["crf", "cq"])]
+    pub qp: Option<u8>,
+    /// Speed/quality preset. Required by every encoder that has one and rejected
+    /// for an encoder that has none, so it is optional here and validated against
+    /// the encoder's capability descriptor.
     #[arg(long)]
-    pub preset: String,
+    pub preset: Option<String>,
     #[arg(long)]
     pub tune: Option<String>,
     #[arg(long)]
@@ -965,6 +971,7 @@ pub enum VideoDecodeBackendArg {
     #[default]
     Software,
     Nvidia,
+    Vaapi,
 }
 
 impl From<VideoDecodeBackendArg> for voom_core::VideoDecodeMode {
@@ -972,6 +979,7 @@ impl From<VideoDecodeBackendArg> for voom_core::VideoDecodeMode {
         match value {
             VideoDecodeBackendArg::Software => Self::default(),
             VideoDecodeBackendArg::Nvidia => Self::nvidia(),
+            VideoDecodeBackendArg::Vaapi => Self::vaapi(),
         }
     }
 }
