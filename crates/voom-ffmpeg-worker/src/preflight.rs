@@ -365,7 +365,7 @@ pub fn preflight_with_videotoolbox(
     let mut preflight = preflight_with_paths(ffmpeg_path, ffprobe_path)?;
     let platform = probe_videotoolbox_platform(config)?;
     require_videotoolbox_build_features(ffmpeg_path)?;
-    let probe_dir = VideoToolboxProbeDir::new()?;
+    let probe_dir = ProbeDir::new("videotoolbox-probe")?;
     let fixtures = create_videotoolbox_fixtures(ffmpeg_path, &probe_dir)?;
     let (decoders, decoder_diagnostics) = probe_videotoolbox_decoders(ffmpeg_path, &fixtures);
     if decoders.is_empty() {
@@ -557,7 +557,7 @@ struct VideoToolboxFixture {
 
 fn create_videotoolbox_fixtures(
     ffmpeg_path: &Path,
-    probe_dir: &VideoToolboxProbeDir,
+    probe_dir: &ProbeDir,
 ) -> Result<Vec<VideoToolboxFixture>, FFmpegPreflightError> {
     let mut fixtures = Vec::with_capacity(VIDEOTOOLBOX_FIXTURE_SPECS.len());
     for spec in VIDEOTOOLBOX_FIXTURE_SPECS {
@@ -704,7 +704,7 @@ fn run_videotoolbox_decoder_smoke(
 fn prove_videotoolbox_capacity(
     ffmpeg_path: &Path,
     config: &VideoToolboxPreflightConfig,
-    probe_dir: &VideoToolboxProbeDir,
+    probe_dir: &ProbeDir,
     fixtures: &[VideoToolboxFixture],
     decoders: &[VideoToolboxDecodeCapability],
 ) -> Result<(), FFmpegPreflightError> {
@@ -767,7 +767,7 @@ enum CapacityInput<'a> {
 fn prove_videotoolbox_capacity_group(
     ffmpeg_path: &Path,
     max_sessions: u32,
-    probe_dir: &VideoToolboxProbeDir,
+    probe_dir: &ProbeDir,
     input: CapacityInput<'_>,
     name: &str,
     encoder: &str,
@@ -918,59 +918,6 @@ fn progress_reports_frame(progress: &str) -> bool {
             .and_then(|value| value.trim().parse::<u64>().ok())
             .is_some_and(|frame| frame > 0)
     })
-}
-
-struct VideoToolboxProbeDir {
-    path: PathBuf,
-}
-
-impl VideoToolboxProbeDir {
-    fn new() -> Result<Self, FFmpegPreflightError> {
-        let nonce = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_err(|error| {
-                FFmpegPreflightError::Failed(format!(
-                    "system clock before Unix epoch during VideoToolbox preflight: {error}"
-                ))
-            })?
-            .as_nanos();
-        let path = std::env::temp_dir().join(format!(
-            "voom-videotoolbox-probe-{}-{nonce}",
-            std::process::id(),
-        ));
-        std::fs::create_dir(&path).map_err(|error| {
-            FFmpegPreflightError::Failed(format!(
-                "create VideoToolbox probe directory {}: {error}",
-                path.display()
-            ))
-        })?;
-        set_private_directory_permissions(&path)?;
-        Ok(Self { path })
-    }
-}
-
-#[cfg(unix)]
-fn set_private_directory_permissions(path: &Path) -> Result<(), FFmpegPreflightError> {
-    use std::os::unix::fs::PermissionsExt;
-
-    let permissions = std::fs::Permissions::from_mode(0o700);
-    std::fs::set_permissions(path, permissions).map_err(|error| {
-        FFmpegPreflightError::Failed(format!(
-            "secure VideoToolbox probe directory {}: {error}",
-            path.display()
-        ))
-    })
-}
-
-#[cfg(not(unix))]
-fn set_private_directory_permissions(_path: &Path) -> Result<(), FFmpegPreflightError> {
-    Ok(())
-}
-
-impl Drop for VideoToolboxProbeDir {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.path);
-    }
 }
 
 fn validate_nvidia_uuid(device_uuid: &str) -> Result<(), FFmpegPreflightError> {
@@ -2168,8 +2115,30 @@ impl ProbeDir {
                 path.display()
             ))
         })?;
+        set_private_directory_permissions(&path, label)?;
         Ok(Self { path })
     }
+}
+
+#[cfg(unix)]
+fn set_private_directory_permissions(path: &Path, label: &str) -> Result<(), FFmpegPreflightError> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let permissions = std::fs::Permissions::from_mode(0o700);
+    std::fs::set_permissions(path, permissions).map_err(|error| {
+        FFmpegPreflightError::Failed(format!(
+            "secure {label} directory {}: {error}",
+            path.display()
+        ))
+    })
+}
+
+#[cfg(not(unix))]
+fn set_private_directory_permissions(
+    _path: &Path,
+    _label: &str,
+) -> Result<(), FFmpegPreflightError> {
+    Ok(())
 }
 
 impl Drop for ProbeDir {
