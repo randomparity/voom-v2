@@ -120,7 +120,28 @@ acceptance device.
 | F22 | `--vaapi-max-sessions` was the only capacity flag without clap's `1..=16` range, so an out-of-range value reached a deeper, worse diagnostic than its NVIDIA and VideoToolbox siblings. | `accepted-fixed` |
 | F23 | The test named `video_profiles_pin_the_vaapi_qp_range_to_the_rust_descriptor` hardcoded both ends of the range instead of reading them off the descriptor — so the drift it exists to catch would not have failed it. It now derives `min`/`max` from `QualityDomain::Qp`. | `accepted-fixed` |
 | F24 | **Main10 is advertised but probe-proven on no host.** The startup probe encodes `nv12` only, so a ready worker advertises `hevc_vaapi` unqualified while ADR 0052 §2 requires probe-proven capability. Recording the result needs a descriptor field that does not exist (`encoders` is a bare `Vec<String>`, on a `deny_unknown_fields` type whose JSON is persisted and read by older builds) — a worker-protocol change plus a migration, outside this charter. Owned by `docs/debt/0001-vaapi-main10-is-advertised-but-never-probe-proven.md`. This is F9, now with a record instead of only a PR-body note. F20's fix tightens the non-regression boundary: a 10-bit source against an 8-bit surface now fails fast and typed. | `deferred-tracked` |
-| F25 | `video_codec_args` was reported as the last encoder-name dispatch with a wildcard arm. Rejected: `libx265`, `libsvtav1` and `libaom-av1` all carry `VideoEncoderBackend::Software` and need different flags, so the backend is not a sufficient discriminator and the encoder name genuinely is. The arm returns an error rather than silently passing through, which is the failure mode F17 was about — a new encoder fails loudly here, it does not become software work. | `rejected-with-evidence` |
+| F25 | `video_codec_args` was reported as the last encoder-name dispatch with a wildcard arm. Rejected on this pass, then **reversed in round 2** — see F31. | `rejected-with-evidence`, superseded |
+
+### Round 2 — 5 findings, all fixed
+
+| # | Finding | Disposition |
+|---|---|---|
+| F26 | **`canonical_form` omitted `bitrate_kbps`**, so two profiles differing only in bitrate produced the same `inline-<hash>` — a durable identity naming staged artifacts. `main` carries this defect today; fixed here because this branch already rewrites the function. Emitted only when present, so identities without a bitrate stay byte-stable. | `accepted-fixed` |
+| F27 | **`quality_note` had no bitrate arm**, so every VideoToolbox plan reported no quality parameter, while its comment claimed the tuple match made that impossible. A tuple is exhaustive only over the fields that existed when it was written. Now driven off the descriptor's `QualityDomain`, which makes the claimed guarantee real. | `accepted-fixed` |
+| F28 | **`docs/payload-contract-inventory.md` described a storage shape the code does not write** — untagged NVIDIA beside tagged VAAPI, distinguished by sniffing — which #411's migration 0031 overtook by tagging every row in place. It also cited a test under a name this merge renamed, numbered this branch's migration 0030, and had no row for #411's own 0030. | `accepted-fixed` |
+| F29 | **Probe temp directories were world-readable on the Linux backends.** The merge left two byte-identical types; `VideoToolboxProbeDir` chmod'd 0700 and `ProbeDir` — used by VAAPI and NVIDIA — did not, while documenting itself as private. Hardening folded into `ProbeDir::new`, duplicate deleted. | `accepted-fixed` |
+| F31 | **`video_codec_args` reversal.** Round 1 rejected this on the grounds that three software encoders share one backend, so the name must discriminate. Round 2 supplied the refutation: dispatch on backend *first*, match names only inside the `Software` arm. Hardware backends become compiler-checked and the fallthrough is reachable only by a software encoder. The round-1 rejection was wrong. | `accepted-fixed` |
+
+### Round 3 — 3 findings, 1 suppression
+
+The suppression was this branch's own Main10 deferral record, correctly identified
+and cited — the exclusion list working as intended.
+
+| # | Finding | Disposition |
+|---|---|---|
+| F32 | **No plan-time VAAPI bit-depth gate.** F20 fixed the worker; the planner still had only the VideoToolbox gate, so a mismatched file was planned into a ticket that could only be refused, once per attempt. Adding the counterpart exposed that `transcode_video_plans_every_vaapi_decodable_source_codec` asserted an 8-bit source with a `p010` profile *plans* — checked on the device, that pairing fails exactly like its reverse, so the test pinned a combination the hardware refuses. It keeps its real subject, codec coverage. | `accepted-fixed` |
+| F33 | **Dispatch still failed fleet-wide on an unreadable descriptor.** F21 fixed preflight; all three `spawn.rs` sites still propagated the error, under a comment citing ADR 0049 §6 to say they did not. The round-1 reasoning for leaving them strict conflated "must not be treated as software" with "must abort the projection" — returning `Incompatible` satisfies both. Both functions became infallible, which clippy caught. | `accepted-fixed` |
+| F34 | **The capacity probe does not prove sessions overlap.** It spawns every session before reaping any and fails if any encode fails, but each probe encodes one 256x256 frame, so nothing establishes simultaneity — weaker than the VideoToolbox first-frame/all-live proof the operator docs described it in the same terms as. Making it a real proof is a timing-sensitive startup change against F14's known flake surface. Owned by `docs/debt/0002-vaapi-capacity-probe-does-not-prove-sessions-overlap.md`; the runbook now states what the probe establishes. | `deferred-tracked` |
 
 ---
 
