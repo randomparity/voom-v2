@@ -1,7 +1,7 @@
 //! FFprobe-backed worker operations for media metadata inspection.
 //!
 //! The crate runs ffprobe, normalizes its JSON output, observes input file
-//! facts, and exposes worker-protocol handlers for identify-media dispatch.
+//! facts, and exposes worker-protocol handlers for probe-file dispatch.
 
 pub mod ffprobe;
 pub mod normalize;
