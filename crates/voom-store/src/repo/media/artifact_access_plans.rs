@@ -3,42 +3,13 @@
 use serde_json::Value as JsonValue;
 use sqlx::{Row, SqlitePool};
 use time::OffsetDateTime;
+pub use voom_core::ArtifactAccessMode;
 use voom_core::{LeaseId, NodeId, TicketId, VoomError, WorkerId};
 
 use super::Repository;
 use super::common::{
     i64_from_u64, iso8601, map_row_err, parse_iso8601, serialize_json, u64_from_i64,
 };
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ArtifactAccessMode {
-    SharedMount,
-    ControlPlanePlaceholder,
-    StagedOutputPlaceholder,
-}
-
-impl ArtifactAccessMode {
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::SharedMount => "shared_mount",
-            Self::ControlPlanePlaceholder => "control_plane_placeholder",
-            Self::StagedOutputPlaceholder => "staged_output_placeholder",
-        }
-    }
-
-    fn parse(s: &str) -> Result<Self, VoomError> {
-        match s {
-            "shared_mount" => Ok(Self::SharedMount),
-            "control_plane_placeholder" => Ok(Self::ControlPlanePlaceholder),
-            "staged_output_placeholder" => Ok(Self::StagedOutputPlaceholder),
-            other => Err(VoomError::database(format!(
-                "artifact_access_plans.selected_access_mode {other:?} not in vocab"
-            ))),
-        }
-    }
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -521,7 +492,10 @@ fn row_to_plan(row: &sqlx::sqlite::SqliteRow) -> Result<ArtifactAccessPlan, Voom
             .map_err(|e| VoomError::database_context("artifact_access_plans input_handles", e))?,
         output_handles: serde_json::from_str(&output_handles)
             .map_err(|e| VoomError::database_context("artifact_access_plans output_handles", e))?,
-        selected_access_mode: ArtifactAccessMode::parse(&mode)?,
+        selected_access_mode: ArtifactAccessMode::parse_database(
+            "artifact_access_plans.selected_access_mode",
+            &mode,
+        )?,
         status: ArtifactAccessPlanStatus::parse(&status)?,
         reason,
         evidence: serde_json::from_str(&evidence)
