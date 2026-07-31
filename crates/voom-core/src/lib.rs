@@ -15,6 +15,10 @@ pub mod clock {
     pub use crate::runtime::clock::{Clock, SystemClock, format_iso8601};
 }
 
+pub mod artifact_access_mode {
+    pub use crate::taxonomy::artifact_access_mode::ArtifactAccessMode;
+}
+
 #[cfg(any(test, feature = "test"))]
 pub mod clock_test_support {
     pub use crate::runtime::clock_test_support::{FrozenClock, ManualClock};
@@ -89,6 +93,7 @@ pub mod version {
     pub use crate::runtime::version::VersionInfo;
 }
 
+pub use artifact_access_mode::ArtifactAccessMode;
 pub use clock::{Clock, SystemClock, format_iso8601};
 pub use config::{Config, EnvSource, LogFormat, MapEnv, ProcessEnv};
 pub use encoder_caps::{
