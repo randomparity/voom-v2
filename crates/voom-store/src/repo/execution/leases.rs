@@ -4,7 +4,7 @@ use rand::RngCore;
 use serde_json::Value as JsonValue;
 use sqlx::{Acquire, Row, SqlitePool};
 use time::{Duration, OffsetDateTime};
-use voom_core::{Clock, FailureClass, LeaseId, TicketId, TicketOperation, VoomError, WorkerId};
+use voom_core::{FailureClass, LeaseId, TicketId, TicketOperation, VoomError, WorkerId};
 
 use super::Repository;
 use super::common::{
@@ -568,7 +568,6 @@ impl SqliteLeaseRepo {
         lease_id: LeaseId,
         class: FailureClass,
         now: OffsetDateTime,
-        clock: &dyn Clock,
         rng: &mut (dyn RngCore + Send),
     ) -> Result<Lease, VoomError> {
         // Single JOIN read: ticket attempts gated on the lease being held.
@@ -628,7 +627,7 @@ impl SqliteLeaseRepo {
             // attempt is already incremented to reflect "this dispatch"; backoff
             // factor is the current attempt number per §7.5.
             let attempt_u32 = u32_from_i64(attempt)?;
-            let next_eligible = now + SqliteTicketRepo::default_backoff(attempt_u32, clock, rng);
+            let next_eligible = now + SqliteTicketRepo::default_backoff(attempt_u32, rng);
             let ticket_res = sqlx::query(
                 "UPDATE tickets SET state = 'ready', state_changed_at = ?, \
                  next_eligible_at = ?, epoch = epoch + 1 \
@@ -685,7 +684,6 @@ impl SqliteLeaseRepo {
         lease_id: LeaseId,
         class: FailureClass,
         now: OffsetDateTime,
-        clock: &dyn Clock,
         rng: &mut (dyn RngCore + Send),
     ) -> Result<Lease, VoomError> {
         let mut tx = self
@@ -693,9 +691,7 @@ impl SqliteLeaseRepo {
             .begin()
             .await
             .map_err(|e| VoomError::database_context("begin", e))?;
-        let out = self
-            .fail_in_tx(&mut tx, lease_id, class, now, clock, rng)
-            .await?;
+        let out = self.fail_in_tx(&mut tx, lease_id, class, now, rng).await?;
         tx.commit()
             .await
             .map_err(|e| VoomError::database_context("commit", e))?;

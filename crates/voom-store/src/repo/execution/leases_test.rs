@@ -2,7 +2,6 @@ use super::*;
 
 use serde_json::json;
 use time::Duration;
-use voom_core::clock_test_support::FrozenClock;
 use voom_core::rng_test_support::FrozenRng;
 use voom_core::{FailureClass, LeaseId, TicketId, TicketOperation, VoomError, WorkerId};
 
@@ -11,13 +10,6 @@ use crate::repo::execution::workers::{
     NewCapability, NewGrant, NewWorker, SqliteWorkerRepo, WorkerKind,
 };
 use crate::test_support::{T0, fresh_initialized_pool_at};
-
-/// Helper: build a (clock, rng) pair pinned to `T0` and the jitter
-/// floor. Pinning jitter to 0 (`FrozenRng::new(0)`) makes the
-/// `next_eligible_at` math exact: `now + 0`.
-fn test_clock() -> FrozenClock {
-    FrozenClock::new(T0)
-}
 
 /// Jitter floor — `FrozenRng::new(0)` makes `default_backoff` return
 /// `Duration::seconds(0)`, so `next_eligible_at == now`.
@@ -575,7 +567,6 @@ async fn fail_retriable_requeues_ticket_and_sets_backoff() {
             l.id,
             FailureClass::WorkerTimeout,
             T0 + Duration::seconds(10),
-            &test_clock(),
             &mut ceiling_rng(),
         )
         .await
@@ -607,7 +598,6 @@ async fn fail_retriable_with_floor_rng_sets_next_eligible_to_now() {
             l.id,
             FailureClass::WorkerTimeout,
             T0 + Duration::seconds(10),
-            &test_clock(),
             &mut floor_rng(),
         )
         .await
@@ -638,7 +628,6 @@ async fn fail_with_non_retriable_class_skips_requeue_even_when_attempts_remain()
             l.id,
             FailureClass::MalformedWorkerResult,
             T0 + Duration::seconds(5),
-            &test_clock(),
             &mut floor_rng(),
         )
         .await
@@ -667,7 +656,6 @@ async fn fail_terminal_marks_ticket_failed() {
                 l.id,
                 FailureClass::WorkerTimeout,
                 T0 + Duration::seconds(60 * i + 1),
-                &test_clock(),
                 &mut floor_rng(),
             )
             .await
@@ -729,7 +717,6 @@ async fn expire_due_requeue_resets_next_eligible_at() {
             l1.id,
             FailureClass::WorkerTimeout,
             T0 + Duration::seconds(10),
-            &test_clock(),
             &mut ceiling_rng(),
         )
         .await
@@ -988,11 +975,11 @@ fn default_backoff_floor_is_zero_and_ceiling_caps_at_window() {
     // Floor (FrozenRng(0)) — always 0 seconds.
     let mut rng_floor = FrozenRng::new(0);
     assert_eq!(
-        SqliteTicketRepo::default_backoff(0, &test_clock(), &mut rng_floor),
+        SqliteTicketRepo::default_backoff(0, &mut rng_floor),
         Duration::seconds(0)
     );
     assert_eq!(
-        SqliteTicketRepo::default_backoff(5, &test_clock(), &mut rng_floor),
+        SqliteTicketRepo::default_backoff(5, &mut rng_floor),
         Duration::seconds(0)
     );
 
@@ -1000,22 +987,22 @@ fn default_backoff_floor_is_zero_and_ceiling_caps_at_window() {
     let mut rng_ceil = FrozenRng::new(u32::MAX);
     // attempt=0: base*2^0 = 5s, < cap → 5s.
     assert_eq!(
-        SqliteTicketRepo::default_backoff(0, &test_clock(), &mut rng_ceil),
+        SqliteTicketRepo::default_backoff(0, &mut rng_ceil),
         Duration::seconds(5)
     );
     // attempt=1: 10s.
     assert_eq!(
-        SqliteTicketRepo::default_backoff(1, &test_clock(), &mut rng_ceil),
+        SqliteTicketRepo::default_backoff(1, &mut rng_ceil),
         Duration::seconds(10)
     );
     // attempt=2: 20s.
     assert_eq!(
-        SqliteTicketRepo::default_backoff(2, &test_clock(), &mut rng_ceil),
+        SqliteTicketRepo::default_backoff(2, &mut rng_ceil),
         Duration::seconds(20)
     );
     // attempt=20: base*2^20 = ~5M s, clamps to cap=300s.
     assert_eq!(
-        SqliteTicketRepo::default_backoff(20, &test_clock(), &mut rng_ceil),
+        SqliteTicketRepo::default_backoff(20, &mut rng_ceil),
         Duration::seconds(300)
     );
 }
@@ -1078,7 +1065,6 @@ async fn fail_retriable_returns_conflict_when_ticket_no_longer_leased() {
             l.id,
             FailureClass::WorkerTimeout,
             T0 + Duration::seconds(1),
-            &test_clock(),
             &mut floor_rng(),
         )
         .await
@@ -1106,7 +1092,6 @@ async fn fail_terminal_returns_conflict_when_ticket_no_longer_leased() {
             l1.id,
             FailureClass::WorkerTimeout,
             T0 + Duration::seconds(1),
-            &test_clock(),
             &mut floor_rng(),
         )
         .await
@@ -1126,7 +1111,6 @@ async fn fail_terminal_returns_conflict_when_ticket_no_longer_leased() {
             l2.id,
             FailureClass::WorkerTimeout,
             now2 + Duration::seconds(1),
-            &test_clock(),
             &mut floor_rng(),
         )
         .await
@@ -1153,7 +1137,6 @@ async fn fail_terminal_returns_conflict_when_ticket_no_longer_leased() {
             l3.id,
             FailureClass::WorkerTimeout,
             now3 + Duration::seconds(2),
-            &test_clock(),
             &mut floor_rng(),
         )
         .await

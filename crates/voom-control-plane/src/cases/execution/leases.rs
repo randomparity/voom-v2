@@ -293,7 +293,7 @@ impl ControlPlane {
         let mut shot = self.snapshot_rng();
         let lease = self
             .leases
-            .fail_in_tx(tx, lease_id, class, now, &*self.clock, &mut shot)
+            .fail_in_tx(tx, lease_id, class, now, &mut shot)
             .await?;
         append_event(
             &self.events,

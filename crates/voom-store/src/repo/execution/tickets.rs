@@ -4,17 +4,14 @@ use rand::RngCore;
 use serde_json::Value as JsonValue;
 use sqlx::{QueryBuilder, Row, SqlitePool};
 use time::{Duration, OffsetDateTime};
-use voom_core::{Clock, JobId, TicketId, TicketOperation, VoomError};
+use voom_core::{JobId, TicketId, TicketOperation, VoomError};
 
 use super::Repository;
 use super::common::{
     i64_from_u64, iso8601, map_row_err, parse_iso8601, serialize_json, u32_from_i64, u64_from_i64,
 };
 
-/// Sprint 1 default backoff window — capped exponential with full
-/// jitter, matching the architectural spec's Error Handling And
-/// Recovery → Retry policy. Sprint 4+'s scheduling policy will replace
-/// these constants with policy-driven values.
+/// Default backoff window: capped exponential with full jitter.
 const DEFAULT_BACKOFF_BASE_SECS: u64 = 5;
 const DEFAULT_BACKOFF_CAP_SECS: u64 = 300;
 
@@ -98,26 +95,11 @@ impl SqliteTicketRepo {
     }
 
     /// Default backoff window after a retriable failure: capped
-    /// exponential with full jitter, per the architectural spec's
-    /// Error Handling And Recovery → Retry policy.
+    /// exponential with full jitter.
     ///
     /// The current value is `random_between(0, min(cap, base * 2^attempt))`
-    /// with `base = 5s` and `cap = 300s`. Sprint 4+ replaces the
-    /// constants with scheduling-policy values; the signature stays
-    /// stable so call sites don't move.
-    ///
-    /// `clock` is currently unused — it stays in the signature so
-    /// Sprint 4 can introduce time-of-day-aware backoff windows
-    /// without forcing every caller to change.
-    #[expect(
-        unused_variables,
-        reason = "clock reserved for Sprint 4 time-of-day-aware backoff windows"
-    )]
-    pub fn default_backoff(
-        attempt: u32,
-        clock: &dyn Clock,
-        rng: &mut (dyn RngCore + Send),
-    ) -> Duration {
+    /// with `base = 5s` and `cap = 300s`.
+    pub fn default_backoff(attempt: u32, rng: &mut (dyn RngCore + Send)) -> Duration {
         let exp_secs =
             DEFAULT_BACKOFF_BASE_SECS.saturating_mul(1u64.checked_shl(attempt).unwrap_or(u64::MAX));
         let cap_secs = exp_secs.min(DEFAULT_BACKOFF_CAP_SECS);

@@ -170,7 +170,6 @@ impl ControlPlane {
             let mut shot = self.snapshot_rng();
             let backoff = voom_store::repo::tickets::SqliteTicketRepo::default_backoff(
                 next_attempt,
-                &*self.clock,
                 &mut shot,
             );
             requeue_ready_ticket(
