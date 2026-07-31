@@ -5,10 +5,10 @@ use super::{
     Acquire, AffectedScopeClosure, AliasResolver, BTreeSet, ClosureMemberDelta,
     CommitAbortedPostMutationPayload, CommitAbortedPreMutationPayload, CommitCompletedPayload,
     CommitGateContext, CommitGateOutcome, CommitGateResult, CommitId, CommitPermit,
-    CommitRecoveryRequiredPayload, CommitTarget, Event, EventEnvelope, EventRepo, IdentityRepo,
-    LeaseScope, MutationOutcome, OffsetDateTime, Row, Sqlite, SubjectType, TargetEpochDrift,
-    TargetEpochDriftWire, TargetMemberKind, Transaction, UseLeaseId, VoomError, begin_gate_tx,
-    i64_from_u64, iso8601, u64_from_i64,
+    CommitRecoveryRequiredPayload, CommitTarget, Event, EventEnvelope, EventRepo, FileLocationRepo,
+    FileVersionRepo, LeaseScope, MutationOutcome, OffsetDateTime, Row, Sqlite, SubjectType,
+    TargetEpochDrift, TargetEpochDriftWire, TargetMemberKind, Transaction, UseLeaseId, VoomError,
+    begin_gate_tx, i64_from_u64, iso8601, u64_from_i64,
 };
 use crate::repo::media::identity::NewFileLocation;
 
@@ -48,7 +48,7 @@ pub enum FinalizeOutcome {
 ///
 /// `alias_resolver` covers **external** (non-DB) alias sources only;
 /// DB-internal alias enumeration goes through
-/// `IdentityRepo::list_live_file_locations_by_version_in_tx` on the
+/// `FileLocationRepo::list_live_file_locations_by_version_in_tx` on the
 /// gate's tx handle, preserving the gate snapshot and avoiding nested
 /// connection waits.
 ///
@@ -70,7 +70,7 @@ pub enum FinalizeOutcome {
 /// On the silent path, each target member's snapshotted `expected_epoch`
 /// is sourced from the `commit_intents.target_row_epochs` JSON
 /// snapshot Phase B wrote, decoded inside this same tx, and passed to
-/// the matching `IdentityRepo` mutation:
+/// the matching `FileLocationRepo` mutation:
 /// `DeleteFileLocation` → `retire_file_location_in_tx`,
 /// `ReplaceFileLocation` / `MoveFileLocation` →
 /// `replace_file_location_in_tx`. The conversion of
@@ -159,16 +159,19 @@ pub async fn finalize_destructive_commit(
     clippy::too_many_arguments,
     reason = "Phase C recovery boundary needs the full execution context; splitting would scatter the savepoint contract across multiple helpers"
 )]
-async fn finalize_applied_with_recovery_boundary(
+async fn finalize_applied_with_recovery_boundary<R>(
     mut tx: Transaction<'_, Sqlite>,
-    identity_repo: &dyn IdentityRepo,
+    identity_repo: &R,
     event_repo: &dyn EventRepo,
     alias_resolver: &dyn AliasResolver,
     permit: CommitPermit,
     row: AuthorizedIntentRow,
     observed: Option<AffectedScopeClosure>,
     now: OffsetDateTime,
-) -> Result<FinalizeOutcome, VoomError> {
+) -> Result<FinalizeOutcome, VoomError>
+where
+    R: FileVersionRepo + FileLocationRepo + ?Sized,
+{
     let result = {
         let mut sp = tx.begin().await.map_err(|e| {
             VoomError::database_context("finalize: applied recovery savepoint begin", e)
@@ -245,16 +248,19 @@ async fn finalize_applied_with_recovery_boundary(
     clippy::too_many_arguments,
     reason = "Phase C recovery boundary needs the full execution context; splitting would scatter the savepoint contract across multiple helpers"
 )]
-async fn finalize_applied_inner(
+async fn finalize_applied_inner<R>(
     sp: &mut Transaction<'_, Sqlite>,
-    identity_repo: &dyn IdentityRepo,
+    identity_repo: &R,
     event_repo: &dyn EventRepo,
     alias_resolver: &dyn AliasResolver,
     permit: &CommitPermit,
     row: &AuthorizedIntentRow,
     observed: Option<&AffectedScopeClosure>,
     now: OffsetDateTime,
-) -> Result<FinalizeOutcome, VoomError> {
+) -> Result<FinalizeOutcome, VoomError>
+where
+    R: FileVersionRepo + FileLocationRepo + ?Sized,
+{
     // Decode the durable per-member epoch snapshot Phase B wrote.
     // Decode failures must route through the recovery boundary rather
     // than propagate out of finalize without a recovery transition.
@@ -516,7 +522,7 @@ impl PhaseCTripWireReason {
 ///    because the durable mutation has already happened on the FS but
 ///    the snapshotted target row has been mutated underneath us, so
 ///    the silent dispatch would either fail the epoch guard inside
-///    the `IdentityRepo` mutation (best case) or silently apply the
+///    the `FileLocationRepo` mutation (best case) or silently apply the
 ///    update to a row the operator did not authorize against (worst
 ///    case). The trip-wire fires regardless of whether the other
 ///    two wires also fired.
@@ -532,16 +538,19 @@ impl PhaseCTripWireReason {
     clippy::too_many_arguments,
     reason = "Phase C recheck needs the full execution context plus the clock for TTL-aware lease evaluation; splitting would scatter the trip-wire contract"
 )]
-async fn run_phase_c_trip_wires_in_tx(
+async fn run_phase_c_trip_wires_in_tx<R>(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-    identity_repo: &dyn IdentityRepo,
+    identity_repo: &R,
     alias_resolver: &dyn AliasResolver,
     row: &AuthorizedIntentRow,
     closure_authorized: &AffectedScopeClosure,
     snapshot: &[TargetRowEpochTriple],
     observed: Option<&AffectedScopeClosure>,
     now: OffsetDateTime,
-) -> Result<PhaseCRecheck, VoomError> {
+) -> Result<PhaseCRecheck, VoomError>
+where
+    R: FileVersionRepo + FileLocationRepo + ?Sized,
+{
     // Step 1: recompute closure. A retired target now appears as
     // closure drift (Phase B walker semantics). The force-path bypass
     // is NOT piped through Phase C: the persisted token was consumed
@@ -758,16 +767,19 @@ async fn push_drift_if_mismatch(
     clippy::too_many_arguments,
     reason = "Phase C silent path keeps mutation and completion invariants together"
 )]
-async fn finalize_silent_path_in_tx(
+async fn finalize_silent_path_in_tx<R>(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-    identity_repo: &dyn IdentityRepo,
+    identity_repo: &R,
     event_repo: &dyn EventRepo,
     permit: &CommitPermit,
     row: &AuthorizedIntentRow,
     snapshot: &[TargetRowEpochTriple],
     closure_final: AffectedScopeClosure,
     now: OffsetDateTime,
-) -> Result<CommitGateOutcome, VoomError> {
+) -> Result<CommitGateOutcome, VoomError>
+where
+    R: FileLocationRepo + ?Sized,
+{
     dispatch_durable_mutation_in_tx(tx, identity_repo, &row.target, snapshot, now).await?;
     let new_epoch = row.epoch + 1;
     let finalized_iso = iso8601(now)?;
@@ -870,13 +882,16 @@ async fn finalize_mutation_failed_in_tx(
 /// the retired row's `file_version_id` inside the tx. Version- and
 /// bundle-level dispatch paths are absent because their safe cascade
 /// semantics are not part of the current `CommitTarget` contract.
-async fn dispatch_durable_mutation_in_tx(
+async fn dispatch_durable_mutation_in_tx<R>(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-    identity_repo: &dyn IdentityRepo,
+    identity_repo: &R,
     target: &CommitTarget,
     snapshot: &[TargetRowEpochTriple],
     now: OffsetDateTime,
-) -> Result<(), VoomError> {
+) -> Result<(), VoomError>
+where
+    R: FileLocationRepo + ?Sized,
+{
     match target {
         CommitTarget::DeleteFileLocation(location_id) => {
             let expected =

@@ -9,7 +9,7 @@
 //! Sequence covered:
 //!   1. `prepare_destructive_commit` against a `FileVersion` carrying a
 //!      single live `FileLocation` (the rename will retire it).
-//!   2. An external rename lands via `IdentityRepo::reconcile_rename_in_tx`.
+//!   2. An external rename lands via `IngestRepo::reconcile_rename_in_tx`.
 //!      Renames are deliberately exempt from the pending-commit lock
 //!      (arch spec lines 697-708; sprint spec §8.7, §9.2) so this step
 //!      proceeds even though a commit-intent is in flight on the
@@ -36,8 +36,8 @@ use voom_store::repo::commit_safety_gate::{
 };
 use voom_store::repo::events::{EventFilter, EventRepo, Page, SqliteEventRepo};
 use voom_store::repo::identity::{
-    DiscoveredFile, FileLocationKind, IdentityRepo, IngestOutcome, LocationProof, ObservedBytes,
-    RenameProof, SqliteIdentityRepo,
+    CommitGateIdentityRepo, DiscoveredFile, FileLocationKind, IngestOutcome, IngestRepo,
+    LocationProof, ObservedBytes, RenameProof, SqliteIdentityRepo,
 };
 use voom_store::repo::use_leases::{
     BlockingMode, IssuerKind, LeaseScope, NewUseLease, SqliteUseLeaseRepo, UseLeaseKind,
@@ -47,7 +47,7 @@ use voom_test_support::TempDatabase;
 
 fn gate<'a>(
     pool: &'a SqlitePool,
-    identity_repo: &'a dyn IdentityRepo,
+    identity_repo: &'a dyn CommitGateIdentityRepo,
     event_repo: &'a dyn EventRepo,
     alias_resolver: &'a dyn AliasResolver,
 ) -> CommitGateContext<'a> {

@@ -7,7 +7,8 @@ use voom_events::Event;
 use voom_events::payload::ArtifactCommitCompletedPayload;
 use voom_store::repo::artifacts::ArtifactCommitRecord;
 use voom_store::repo::identity::{
-    FileLocationKind, IdentityRepo, NewFileLocation, NewFileVersion, ProducedBy,
+    FileLocationKind, FileLocationRepo, FileVersionRepo, NewFileLocation, NewFileVersion,
+    ProducedBy,
 };
 
 use voom_artifact::commit_pipeline::append_commit_event_in_tx;

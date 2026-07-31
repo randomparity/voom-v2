@@ -14,7 +14,7 @@ use voom_core::{FileAssetId, FileVersionId, JobId, MediaSnapshotId};
 use voom_plan::PlanOperationKind;
 use voom_policy::{MediaSnapshotInput, PolicyInputSetDraft, PolicyInputSourceKind, TargetRef};
 use voom_store::repo::bundles::{BundleMemberRole, SqliteBundleRepo};
-use voom_store::repo::identity::{IdentityRepo, SqliteIdentityRepo};
+use voom_store::repo::identity::{MediaSnapshotRepo, SqliteIdentityRepo};
 use voom_test_support::TempDatabase;
 use voom_test_support::worker::{
     TestWorkerConfig, TestWorkerLaunch, cargo_build_package, hide_stale_fake_ffprobe_sibling,

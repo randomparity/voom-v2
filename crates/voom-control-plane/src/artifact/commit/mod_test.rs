@@ -15,8 +15,8 @@ use voom_store::repo::artifacts::{
 };
 use voom_store::repo::events::{EventFilter, EventRepo, Page};
 use voom_store::repo::identity::{
-    DiscoveredFile, FileLocationKind, IdentityRepo, IngestOutcome, NewFileLocation, NewFileVersion,
-    ProducedBy,
+    DiscoveredFile, FileLocationKind, FileLocationRepo, FileVersionRepo, IngestOutcome,
+    NewFileLocation, NewFileVersion, ProducedBy,
 };
 
 use crate::ControlPlane;

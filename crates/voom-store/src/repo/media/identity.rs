@@ -1,4 +1,4 @@
-//! `IdentityRepo` — owns `media_works`, `media_variants`, `file_assets`,
+//! Identity repository capabilities — own `media_works`, `media_variants`, `file_assets`,
 //! `file_versions`, `file_locations`, `identity_evidence`, and
 //! `media_snapshots`. The ingest entry point is
 //! `record_discovered_file_in_tx`; rename reconciliation is
@@ -516,7 +516,7 @@ impl MediaSnapshotFileVersionQuery {
 // ---------- trait ----------------------------------------------------------
 
 #[async_trait]
-pub trait IdentityRepo: Repository {
+pub trait IngestRepo: Repository {
     // Ingest / rename.
     async fn record_discovered_file_in_tx<'tx>(
         &self,
@@ -559,8 +559,10 @@ pub trait IdentityRepo: Repository {
         observed: ObservedBytes,
         observed_at: OffsetDateTime,
     ) -> Result<RenameReconciledOutcome, VoomError>;
+}
 
-    // media_works CRUD.
+#[async_trait]
+pub trait MediaWorkRepo: Repository {
     async fn create_media_work_in_tx<'tx>(
         &self,
         tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
@@ -576,8 +578,10 @@ pub trait IdentityRepo: Repository {
         provisional: bool,
         expected_epoch: u64,
     ) -> Result<MediaWork, VoomError>;
+}
 
-    // media_variants CRUD.
+#[async_trait]
+pub trait MediaVariantRepo: Repository {
     async fn create_media_variant_in_tx<'tx>(
         &self,
         tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
@@ -600,8 +604,11 @@ pub trait IdentityRepo: Repository {
         provisional: bool,
         expected_epoch: u64,
     ) -> Result<MediaVariant, VoomError>;
+}
 
-    // file_assets CRUD (creation is implicit in record_discovered_file; this
+#[async_trait]
+pub trait FileAssetRepo: Repository {
+    // Creation is implicit in record_discovered_file; this
     // is the explicit handle for the rare case where a caller wants to seed
     // an asset directly, e.g. tests).
     async fn create_file_asset_in_tx<'tx>(
@@ -618,8 +625,10 @@ pub trait IdentityRepo: Repository {
         retired_at: OffsetDateTime,
         expected_epoch: u64,
     ) -> Result<FileAsset, VoomError>;
+}
 
-    // file_versions CRUD.
+#[async_trait]
+pub trait FileVersionRepo: Repository {
     async fn create_file_version_in_tx<'tx>(
         &self,
         tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
@@ -665,8 +674,10 @@ pub trait IdentityRepo: Repository {
         retired_at: OffsetDateTime,
         expected_epoch: u64,
     ) -> Result<FileVersion, VoomError>;
+}
 
-    // file_locations CRUD.
+#[async_trait]
+pub trait FileLocationRepo: Repository {
     async fn create_file_location_in_tx<'tx>(
         &self,
         tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
@@ -758,8 +769,10 @@ pub trait IdentityRepo: Repository {
         value: String,
         observed_at: OffsetDateTime,
     ) -> Result<FileLocation, VoomError>;
+}
 
-    // identity_evidence CRUD.
+#[async_trait]
+pub trait IdentityEvidenceRepo: Repository {
     async fn record_identity_evidence_in_tx<'tx>(
         &self,
         tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
@@ -810,8 +823,10 @@ pub trait IdentityRepo: Repository {
         new_input: NewIdentityEvidence,
         superseded_at: OffsetDateTime,
     ) -> Result<IdentityEvidence, VoomError>;
+}
 
-    // media_snapshots CRUD.
+#[async_trait]
+pub trait MediaSnapshotRepo: Repository {
     async fn record_media_snapshot_in_tx<'tx>(
         &self,
         tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
@@ -839,6 +854,16 @@ pub trait IdentityRepo: Repository {
     ) -> Result<Vec<MediaSnapshot>, VoomError>;
 }
 
+pub trait CommitGateIdentityRepo:
+    FileVersionRepo + FileLocationRepo + IdentityEvidenceRepo
+{
+}
+
+impl<T> CommitGateIdentityRepo for T where
+    T: FileVersionRepo + FileLocationRepo + IdentityEvidenceRepo + ?Sized
+{
+}
+
 // ---------- SqliteIdentityRepo impl ---------------------------------------
 
 #[derive(Debug, Clone)]
@@ -856,7 +881,7 @@ impl SqliteIdentityRepo {
 impl Repository for SqliteIdentityRepo {}
 
 #[async_trait]
-impl IdentityRepo for SqliteIdentityRepo {
+impl IngestRepo for SqliteIdentityRepo {
     async fn record_discovered_file_in_tx<'tx>(
         &self,
         tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
@@ -1007,7 +1032,10 @@ impl IdentityRepo for SqliteIdentityRepo {
             .map_err(|e| VoomError::database_context("commit", e))?;
         Ok(out)
     }
+}
 
+#[async_trait]
+impl MediaWorkRepo for SqliteIdentityRepo {
     async fn create_media_work_in_tx<'tx>(
         &self,
         tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
@@ -1091,7 +1119,10 @@ impl IdentityRepo for SqliteIdentityRepo {
             VoomError::Internal(format!("media_works post-update get vanished: {id}"))
         })
     }
+}
 
+#[async_trait]
+impl MediaVariantRepo for SqliteIdentityRepo {
     async fn create_media_variant_in_tx<'tx>(
         &self,
         tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
@@ -1184,7 +1215,10 @@ impl IdentityRepo for SqliteIdentityRepo {
             VoomError::Internal(format!("media_variants post-update get vanished: {id}"))
         })
     }
+}
 
+#[async_trait]
+impl FileAssetRepo for SqliteIdentityRepo {
     async fn create_file_asset_in_tx<'tx>(
         &self,
         tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
@@ -1251,7 +1285,10 @@ impl IdentityRepo for SqliteIdentityRepo {
             VoomError::Internal(format!("file_assets post-retire get vanished: {id}"))
         })
     }
+}
 
+#[async_trait]
+impl FileVersionRepo for SqliteIdentityRepo {
     async fn create_file_version_in_tx<'tx>(
         &self,
         tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
@@ -1459,7 +1496,10 @@ impl IdentityRepo for SqliteIdentityRepo {
             VoomError::Internal(format!("file_versions post-retire get vanished: {id}"))
         })
     }
+}
 
+#[async_trait]
+impl FileLocationRepo for SqliteIdentityRepo {
     async fn create_file_location_in_tx<'tx>(
         &self,
         tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
@@ -1592,7 +1632,7 @@ impl IdentityRepo for SqliteIdentityRepo {
         retired_at: OffsetDateTime,
     ) -> Result<FileLocationId, VoomError> {
         // Cross-version pre-check inside identity: this public
-        // IdentityRepo trait method cannot rely on Phase C being the
+        // FileLocationRepo trait method cannot rely on Phase C being the
         // only caller. Fetch the retired row in-tx and reject
         // mismatches before the retire UPDATE runs.
         let retired_row = get_file_location_in_tx(tx, retired_id)
@@ -1683,7 +1723,10 @@ impl IdentityRepo for SqliteIdentityRepo {
             VoomError::Internal(format!("file_locations post-update get vanished: {id}"))
         })
     }
+}
 
+#[async_trait]
+impl IdentityEvidenceRepo for SqliteIdentityRepo {
     async fn record_identity_evidence_in_tx<'tx>(
         &self,
         tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
@@ -1870,7 +1913,10 @@ impl IdentityRepo for SqliteIdentityRepo {
                 ))
             })
     }
+}
 
+#[async_trait]
+impl MediaSnapshotRepo for SqliteIdentityRepo {
     async fn record_media_snapshot_in_tx<'tx>(
         &self,
         tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,

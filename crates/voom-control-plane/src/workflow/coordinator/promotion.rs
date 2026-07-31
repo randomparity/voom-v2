@@ -11,7 +11,7 @@ use same_file::Handle;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use voom_core::{FileAssetId, FileLocationId, FileVersionId, VoomError};
 use voom_policy::{PolicyInputSetDraft, TargetRef};
-use voom_store::repo::identity::{FileLocationKind, IdentityRepo};
+use voom_store::repo::identity::{FileLocationKind, FileLocationRepo, FileVersionRepo};
 use voom_store::repo::workflow_summaries::FilePhaseSummary;
 
 use crate::ControlPlane;

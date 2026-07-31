@@ -12,7 +12,7 @@
 use std::process::Command;
 
 use serde_json::Value;
-use voom_store::repo::identity::{IdentityRepo, SqliteIdentityRepo};
+use voom_store::repo::identity::{FileAssetRepo, SqliteIdentityRepo};
 use voom_test_support::TempDatabase;
 
 struct Fixture {

@@ -12,7 +12,7 @@ use voom_control_plane::policy::{ComplianceExecutionOptions, PolicyInputFromScan
 use voom_control_plane::scan::{ScanPathInput, ScanReportFileStatus};
 use voom_core::{FileLocationId, FileVersionId, MediaSnapshotId};
 use voom_plan::PlanOperationKind;
-use voom_store::repo::identity::{IdentityRepo, SqliteIdentityRepo};
+use voom_store::repo::identity::{MediaSnapshotRepo, SqliteIdentityRepo};
 use voom_test_support::TempDatabase;
 use voom_test_support::worker::{
     TestWorkerConfig, TestWorkerLaunch, cargo_build_package, hide_stale_fake_ffprobe_sibling,

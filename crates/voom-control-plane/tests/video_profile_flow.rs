@@ -25,7 +25,7 @@ use voom_core::{FileVersionId, MediaSnapshotId, PolicyVersionId};
 use voom_ffmpeg_worker::preflight_from_process_env;
 use voom_plan::PlanOperationKind;
 use voom_policy::{MediaSnapshotInput, PolicyInputSetDraft, PolicyInputSourceKind, TargetRef};
-use voom_store::repo::identity::{IdentityRepo, SqliteIdentityRepo};
+use voom_store::repo::identity::{MediaSnapshotRepo, SqliteIdentityRepo};
 use voom_test_support::TempDatabase;
 use voom_test_support::worker::{
     FfprobeSiblingGuard, TestWorkerConfig, TestWorkerLaunch, cargo_build_package,

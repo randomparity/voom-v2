@@ -5,7 +5,7 @@ use voom_core::VoomError;
 use voom_events::payload::MediaSnapshotRecordedPayload;
 use voom_events::{Event, SubjectType};
 use voom_policy::{MediaSnapshotInput, TargetRef};
-use voom_store::repo::identity::{IdentityRepo, MediaSnapshot, NewMediaSnapshot};
+use voom_store::repo::identity::{MediaSnapshot, MediaSnapshotRepo, NewMediaSnapshot};
 
 use crate::ControlPlane;
 use crate::cases::append_event;

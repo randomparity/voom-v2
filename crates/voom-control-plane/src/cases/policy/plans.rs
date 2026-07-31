@@ -5,7 +5,7 @@ use voom_policy::{
     BundleTargetInput, IdentityEvidenceInput, IssueInput, MediaSnapshotInput, PolicyInputSetDraft,
     PolicySyntheticTarget, QualityProfileSelection, TargetRef,
 };
-use voom_store::repo::identity::{FileVersion, IdentityRepo, MediaSnapshot};
+use voom_store::repo::identity::{FileVersion, FileVersionRepo, MediaSnapshot, MediaSnapshotRepo};
 use voom_store::repo::policy_inputs::{PolicyInputSet, PolicyInputTargetRef};
 
 use crate::ControlPlane;

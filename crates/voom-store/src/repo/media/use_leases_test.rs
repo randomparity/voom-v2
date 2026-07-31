@@ -4,7 +4,9 @@ use voom_core::{FileAssetId, FileLocationId, FileVersionId, UseLeaseId};
 use voom_test_support::TempDatabase;
 
 use super::*;
-use crate::repo::media::identity::{IdentityRepo, SqliteIdentityRepo};
+use crate::repo::media::identity::{
+    FileAssetRepo, FileLocationRepo, FileVersionRepo, SqliteIdentityRepo,
+};
 use crate::test_support::{T0, fresh_initialized_pool_at};
 
 /// Spin up a fresh pool with migration 0004 applied, plus a single
@@ -996,7 +998,7 @@ async fn seed_pool_with_location() -> (
     FileVersionId,
     FileLocationId,
 ) {
-    use crate::repo::media::identity::{FileLocationKind, IdentityRepo};
+    use crate::repo::media::identity::FileLocationKind;
     let tmp = TempDatabase::new().unwrap();
     let pool = fresh_initialized_pool_at(tmp.path()).await.unwrap();
     let identity = SqliteIdentityRepo::new(pool.clone());

@@ -20,8 +20,9 @@ use voom_store::repo::commit_safety_gate::{
 };
 use voom_store::repo::events::{EventFilter, EventRepo, Page, SqliteEventRepo};
 use voom_store::repo::identity::{
-    AcceptedPin, FileLocationKind, IdentityEvidenceTarget, IdentityRepo, NewFileLocation,
-    NewFileVersion, NewIdentityEvidence, ProducedBy, SqliteIdentityRepo,
+    AcceptedPin, CommitGateIdentityRepo, FileAssetRepo, FileLocationKind, FileLocationRepo,
+    FileVersionRepo, IdentityEvidenceRepo, IdentityEvidenceTarget, NewFileLocation, NewFileVersion,
+    NewIdentityEvidence, ProducedBy, SqliteIdentityRepo,
 };
 use voom_store::repo::use_leases::{
     BlockingMode, IssuerKind, LeaseScope, NewUseLease, SqliteUseLeaseRepo, UseLeaseKind,
@@ -31,7 +32,7 @@ use voom_test_support::TempDatabase;
 
 fn gate<'a>(
     pool: &'a SqlitePool,
-    identity_repo: &'a dyn IdentityRepo,
+    identity_repo: &'a dyn CommitGateIdentityRepo,
     event_repo: &'a dyn EventRepo,
     alias_resolver: &'a dyn AliasResolver,
 ) -> CommitGateContext<'a> {

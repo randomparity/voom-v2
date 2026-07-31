@@ -2,8 +2,9 @@ use super::prepare::{GatePhase, PhaseAAbort};
 use super::{
     AffectedScopeClosure, AliasResolutionError, AliasResolver, BTreeSet, BundleId, BypassKind,
     ClosureWarning, CommitId, CommitTarget, EvidenceDrift, EvidenceId, EvidenceRevalidationResult,
-    FileAssetId, FileLocationId, FileVersionId, IdentityEvidenceTarget, IdentityRepo, JsonValue,
-    LeaseScope, OffsetDateTime, Row, UseLeaseId, VoomError, i64_from_u64, iso8601, u64_from_i64,
+    FileAssetId, FileLocationId, FileLocationRepo, FileVersionId, FileVersionRepo,
+    IdentityEvidenceRepo, IdentityEvidenceTarget, JsonValue, LeaseScope, OffsetDateTime, Row,
+    UseLeaseId, VoomError, i64_from_u64, iso8601, u64_from_i64,
 };
 
 /// Resolve the destructive target into the set of `FileLocation` rows
@@ -22,14 +23,17 @@ use super::{
 /// the closure walker only surfaces `Unreachable` when a fresh
 /// `AliasResolutionError::Unreachable` fires — see `run_phase_c_trip_wires_in_tx`'s
 /// internal-error escape on closure-incomplete at finalize).
-pub(super) async fn build_closure(
+pub(super) async fn build_closure<R>(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-    identity_repo: &dyn IdentityRepo,
+    identity_repo: &R,
     alias_resolver: &dyn AliasResolver,
     target: &CommitTarget,
     phase: GatePhase,
     bypass: &BTreeSet<BypassKind>,
-) -> Result<Result<(AffectedScopeClosure, Vec<FileLocationId>), PhaseAAbort>, VoomError> {
+) -> Result<Result<(AffectedScopeClosure, Vec<FileLocationId>), PhaseAAbort>, VoomError>
+where
+    R: FileVersionRepo + FileLocationRepo + ?Sized,
+{
     let retired_location_id = match target {
         CommitTarget::DeleteFileLocation(id) => *id,
         CommitTarget::ReplaceFileLocation { retired, .. }
@@ -287,11 +291,14 @@ async fn blocking_lease_rows_in_tx(
 /// each `evidence_id`, look up the row inside the gate's tx, decode the
 /// pinned columns, and compare against current state. Returns one
 /// result per id (`drift = None` for pins that still match).
-pub(super) async fn revalidate_evidence_in_tx(
+pub(super) async fn revalidate_evidence_in_tx<R>(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-    identity_repo: &dyn IdentityRepo,
+    identity_repo: &R,
     ids: &[EvidenceId],
-) -> Result<Vec<EvidenceRevalidationResult>, VoomError> {
+) -> Result<Vec<EvidenceRevalidationResult>, VoomError>
+where
+    R: IdentityEvidenceRepo + ?Sized,
+{
     let mut out = Vec::with_capacity(ids.len());
     for id in ids {
         let evidence = identity_repo

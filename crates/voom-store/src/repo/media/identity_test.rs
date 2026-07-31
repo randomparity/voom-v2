@@ -14,6 +14,29 @@ async fn fresh() -> (SqliteIdentityRepo, voom_test_support::TempDatabase) {
     (SqliteIdentityRepo::new(pool), tmp)
 }
 
+#[tokio::test]
+async fn repository_capabilities_are_object_safe_and_commit_gate_composable() {
+    fn require_commit_gate<T>(repo: &T)
+    where
+        T: FileVersionRepo + FileLocationRepo + IdentityEvidenceRepo + ?Sized,
+    {
+        fn require_composite<R: CommitGateIdentityRepo + ?Sized>(_repo: &R) {}
+        require_composite(repo);
+    }
+
+    let (repo, _tmp) = fresh().await;
+    let _: &dyn IngestRepo = &repo;
+    let _: &dyn MediaWorkRepo = &repo;
+    let _: &dyn MediaVariantRepo = &repo;
+    let _: &dyn FileAssetRepo = &repo;
+    let _: &dyn FileVersionRepo = &repo;
+    let _: &dyn FileLocationRepo = &repo;
+    let _: &dyn IdentityEvidenceRepo = &repo;
+    let _: &dyn MediaSnapshotRepo = &repo;
+    let _: &dyn CommitGateIdentityRepo = &repo;
+    require_commit_gate(&repo);
+}
+
 // ---- media_works ---------------------------------------------------------
 
 #[tokio::test]

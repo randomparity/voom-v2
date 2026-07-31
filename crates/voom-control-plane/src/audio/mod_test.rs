@@ -12,8 +12,8 @@ use voom_store::repo::artifacts::{
     NewArtifactCommitRecord, NewArtifactHandle, NewArtifactLocation, NewSidecarArtifactCommit,
 };
 use voom_store::repo::bundles::{BundleMemberRole, NewAssetBundle, NewBundleMember};
-use voom_store::repo::identity::{DiscoveredFile, FileLocationKind, IdentityRepo, IngestOutcome};
-use voom_store::repo::identity::{MediaWorkKind, NewMediaVariant, NewMediaWork};
+use voom_store::repo::identity::{DiscoveredFile, FileLocationKind, IngestOutcome};
+use voom_store::repo::identity::{MediaSnapshotRepo, MediaWorkKind, NewMediaVariant, NewMediaWork};
 use voom_store::repo::{
     BlockingMode, IssuerKind, LeaseScope, NewUseLease, UseLeaseKind, UseLeaseReleaseReason,
 };

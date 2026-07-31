@@ -9,8 +9,8 @@ use voom_core::{FileLocationId, FileVersionId, JobId, TicketOperation};
 use voom_policy::{FixtureName, TargetRef, load_fixture, load_policy_fixture};
 use voom_store::repo::identity::NewFileLocation;
 use voom_store::repo::identity::{
-    DiscoveredFile, FileLocationKind, IdentityRepo, IngestOutcome, MediaSnapshot, NewFileVersion,
-    ProducedBy,
+    DiscoveredFile, FileLocationKind, FileLocationRepo, FileVersionRepo, IngestOutcome,
+    MediaSnapshot, MediaSnapshotRepo, NewFileVersion, ProducedBy,
 };
 use voom_store::repo::jobs::NewJob;
 use voom_store::repo::tickets::{NewTicket, TicketState};

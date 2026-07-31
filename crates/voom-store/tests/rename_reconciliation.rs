@@ -17,8 +17,8 @@ use voom_core::{SystemClock, VoomError};
 use voom_events::EventKind;
 use voom_store::repo::events::{EventFilter, EventRepo, Page};
 use voom_store::repo::identity::{
-    DiscoveredFile, FileLocationKind, IdentityRepo, IngestOutcome, LocationProof, ObservedBytes,
-    RenameProof,
+    DiscoveredFile, FileLocationKind, FileLocationRepo, IngestOutcome, LocationProof,
+    ObservedBytes, RenameProof,
 };
 use voom_store::repo::use_leases::{
     BlockingMode, IssuerKind, LeaseScope, NewUseLease, UseLeaseKind,

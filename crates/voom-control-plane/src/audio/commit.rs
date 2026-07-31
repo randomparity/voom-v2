@@ -30,7 +30,7 @@ use voom_store::repo::audio_extract_operations::{
     NewStagedAudioExtractOutput, SqliteAudioExtractOperationRepo, StageAudioExtractOperation,
 };
 use voom_store::repo::bundles::{BundleMemberRole, NewBundleMember};
-use voom_store::repo::identity::{IdentityRepo, MediaSnapshot, NewMediaSnapshot};
+use voom_store::repo::identity::{FileVersionRepo, MediaSnapshot, NewMediaSnapshot};
 use voom_store::repo::media::audio_synthesis_operations::{
     BindAudioSynthesisOperation, NewAudioSynthesisClaim, SqliteAudioSynthesisOperationRepo,
     StagedAudioSynthesisCompanion,

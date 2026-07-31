@@ -1,5 +1,6 @@
 use super::super::identity::{
-    DiscoveredFile, FileLocationKind, IdentityRepo, IngestOutcome, SqliteIdentityRepo,
+    DiscoveredFile, FileLocationKind, FileLocationRepo, IngestOutcome, IngestRepo,
+    SqliteIdentityRepo,
 };
 use super::*;
 use crate::test_support::{T0, fresh_initialized_pool_at};

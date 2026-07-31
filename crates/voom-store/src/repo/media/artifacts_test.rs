@@ -6,7 +6,8 @@ use voom_core::{FileAssetId, FileLocationId, FileVersionId, LeaseId, TicketId};
 
 use crate::repo::execution::workers::{NewWorker, SqliteWorkerRepo, WorkerKind};
 use crate::repo::media::identity::{
-    FileLocationKind, IdentityRepo, NewFileLocation, NewFileVersion, ProducedBy, SqliteIdentityRepo,
+    FileAssetRepo, FileLocationKind, FileLocationRepo, FileVersionRepo, NewFileLocation,
+    NewFileVersion, ProducedBy, SqliteIdentityRepo,
 };
 
 use crate::test_support::fresh_initialized_pool_at;

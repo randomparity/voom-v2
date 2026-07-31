@@ -128,7 +128,7 @@ pub struct LineageCommitLeaseCheck {
 
 pub async fn check_lineage_commit_leases_in_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-    identity_repo: &dyn IdentityRepo,
+    identity_repo: &dyn FileLocationRepo,
     file_asset_id: FileAssetId,
     file_version_id: FileVersionId,
     now: OffsetDateTime,
@@ -136,7 +136,7 @@ pub async fn check_lineage_commit_leases_in_tx(
 ```
 
 It runs entirely on the caller's transaction (host prepare tx), reuses
-`IdentityRepo::list_live_file_locations_by_version_in_tx` for the location
+`FileLocationRepo::list_live_file_locations_by_version_in_tx` for the location
 closure and an `asset_bundle_members` query for bundles, and runs a single
 clock-aware overlap query for the leases. It does **not** open a gate
 `BEGIN IMMEDIATE` transaction (that would nest against the host tx).

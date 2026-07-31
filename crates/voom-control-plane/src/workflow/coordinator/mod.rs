@@ -26,7 +26,7 @@ use tokio::task::JoinSet;
 use voom_core::{FileAssetId, FileVersionId, JobId, PolicyInputSetId, PolicyVersionId, VoomError};
 use voom_plan::{ExecutionPlan, PlanningContext, PlanningRequest};
 use voom_policy::PolicyInputSetDraft;
-use voom_store::repo::identity::{IdentityRepo, MediaSnapshot};
+use voom_store::repo::identity::{MediaSnapshot, MediaSnapshotRepo};
 use voom_store::repo::jobs::{JobState, NewJob};
 use voom_store::repo::tickets::TicketState;
 use voom_store::repo::workflow_summaries::{

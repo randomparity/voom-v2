@@ -1,5 +1,5 @@
 //! Identity-layer use cases. Each method composes one or more
-//! `IdentityRepo` `_in_tx` writes with the matching event appends in
+//! identity repository `_in_tx` writes with the matching event appends in
 //! the same transaction so a successful return means both the durable
 //! row and its event have committed.
 
@@ -17,11 +17,12 @@ use voom_events::payload::{
 };
 use voom_events::{Event, SubjectType};
 use voom_store::repo::identity::{
-    AcceptedPin, AliasProof, DiscoveredFile, FileAsset, FileLocation, FileVersion,
-    IdentityEvidence, IdentityEvidenceTarget, IdentityRepo, IngestOutcome, MediaSnapshot,
-    MediaVariant, MediaWork, NewFileLocation, NewFileVersion, NewIdentityEvidence,
-    NewMediaSnapshot, NewMediaVariant, NewMediaWork, ObservedBytes, RenameProof,
-    RenameReconciledOutcome,
+    AcceptedPin, AliasProof, DiscoveredFile, FileAsset, FileAssetRepo, FileLocation,
+    FileLocationRepo, FileVersion, FileVersionRepo, IdentityEvidence, IdentityEvidenceRepo,
+    IdentityEvidenceTarget, IngestOutcome, IngestRepo, MediaSnapshot, MediaVariant,
+    MediaVariantRepo, MediaWork, MediaWorkRepo, NewFileLocation, NewFileVersion,
+    NewIdentityEvidence, NewMediaSnapshot, NewMediaVariant, NewMediaWork, ObservedBytes,
+    RenameProof, RenameReconciledOutcome,
 };
 
 use crate::ControlPlane;
@@ -30,7 +31,7 @@ use super::{append_event, begin_tx, commit_tx};
 
 impl ControlPlane {
     /// Watcher-side ingest entry point. Composes
-    /// `IdentityRepo::record_discovered_file_in_tx` with the matching
+    /// `IngestRepo::record_discovered_file_in_tx` with the matching
     /// `file_asset.created` / `file_version.created` /
     /// `file_location.recorded` / `file_location.aliased` events plus
     /// any auto-recorded `identity_evidence.recorded` rows.
@@ -194,7 +195,7 @@ impl ControlPlane {
     }
 
     /// Reconcile a same-physical-object rename. Composes
-    /// `IdentityRepo::reconcile_rename_in_tx` with the matching
+    /// `IngestRepo::reconcile_rename_in_tx` with the matching
     /// `file_location.retired_by_move`, `file_location.recorded_by_move`,
     /// and `identity_evidence.recorded` (`path_rule_match`) events.
     /// Any live `Location`-scoped use leases on the retired location
@@ -609,7 +610,7 @@ impl ControlPlane {
     /// Get a media work by id.
     ///
     /// # Errors
-    /// Propagates `IdentityRepo::get_media_work` errors.
+    /// Propagates `MediaWorkRepo::get_media_work` errors.
     pub async fn get_media_work(&self, id: MediaWorkId) -> Result<Option<MediaWork>, VoomError> {
         self.identity.get_media_work(id).await
     }
@@ -617,7 +618,7 @@ impl ControlPlane {
     /// Get a media variant by id.
     ///
     /// # Errors
-    /// Propagates `IdentityRepo::get_media_variant` errors.
+    /// Propagates `MediaVariantRepo::get_media_variant` errors.
     pub async fn get_media_variant(
         &self,
         id: MediaVariantId,
@@ -628,7 +629,7 @@ impl ControlPlane {
     /// List every file version of an asset (live and retired), id order.
     ///
     /// # Errors
-    /// Propagates `IdentityRepo::list_file_versions_by_asset` errors.
+    /// Propagates `FileVersionRepo::list_file_versions_by_asset` errors.
     pub async fn list_file_versions_by_asset(
         &self,
         asset_id: FileAssetId,
@@ -639,7 +640,7 @@ impl ControlPlane {
     /// List the live file locations of a file version.
     ///
     /// # Errors
-    /// Propagates `IdentityRepo::list_live_file_locations_by_version` errors.
+    /// Propagates `FileLocationRepo::list_live_file_locations_by_version` errors.
     pub async fn list_live_file_locations_by_version(
         &self,
         version_id: FileVersionId,

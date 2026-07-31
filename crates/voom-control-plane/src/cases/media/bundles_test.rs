@@ -4,8 +4,8 @@ use voom_events::{Event, EventKind};
 use voom_store::repo::bundles::{BundleMemberRole, NewAssetBundle};
 use voom_store::repo::events::{EventFilter, EventRepo, Page};
 use voom_store::repo::identity::{
-    DiscoveredFile, FileLocationKind, IdentityRepo, IngestOutcome, MediaWorkKind, NewFileVersion,
-    NewMediaVariant, NewMediaWork, ProducedBy,
+    DiscoveredFile, FileLocationKind, FileVersionRepo, IngestOutcome, MediaWorkKind,
+    NewFileVersion, NewMediaVariant, NewMediaWork, ProducedBy,
 };
 
 use crate::cases::{begin_immediate_tx, commit_tx, count, cp};

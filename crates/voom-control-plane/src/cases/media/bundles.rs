@@ -13,7 +13,9 @@ use voom_events::{Event, SubjectType};
 use voom_store::repo::bundles::{
     AssetBundle, BundleMember, BundleMemberRole, NewAssetBundle, NewBundleMember,
 };
-use voom_store::repo::identity::{IdentityRepo, MediaWorkKind, NewMediaVariant, NewMediaWork};
+use voom_store::repo::identity::{
+    FileVersionRepo, MediaVariantRepo, MediaWorkKind, MediaWorkRepo, NewMediaVariant, NewMediaWork,
+};
 
 use crate::ControlPlane;
 

@@ -8,7 +8,7 @@
 use std::collections::BTreeMap;
 
 use voom_core::{FileVersionId, JobId, TicketId, VoomError};
-use voom_store::repo::identity::{FileLocationKind, IdentityRepo};
+use voom_store::repo::identity::{FileLocationKind, FileLocationRepo, FileVersionRepo};
 use voom_store::repo::workflow_summaries::{
     FileAdmissionTier, FilePhaseOutcome, FilePhaseSummary, FileProgress, FileProgressState,
     FileRunHistory, FileRunStart, NewFileProgress, NewFileRunHistory, NewFileRunStart,

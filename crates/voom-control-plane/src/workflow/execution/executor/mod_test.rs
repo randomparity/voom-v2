@@ -18,7 +18,8 @@ use voom_core::{
     TicketOperation, VoomError, WorkerId,
 };
 use voom_store::repo::identity::{
-    DiscoveredFile, FileLocationKind, IdentityRepo, IngestOutcome, NewFileVersion, ProducedBy,
+    DiscoveredFile, FileAssetRepo, FileLocationKind, FileVersionRepo, IngestOutcome,
+    NewFileVersion, ProducedBy,
 };
 use voom_store::repo::jobs::NewJob;
 use voom_store::repo::leases::NewLease;

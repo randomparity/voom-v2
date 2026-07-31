@@ -9,7 +9,9 @@ use voom_core::{
 use voom_events::payload::ArtifactStagedPayload;
 use voom_events::{Event, SubjectType};
 use voom_store::repo::artifacts::{NewArtifactHandle, NewArtifactLocation};
-use voom_store::repo::identity::{FileLocation, FileLocationKind, FileVersion, IdentityRepo};
+use voom_store::repo::identity::{
+    FileLocation, FileLocationKind, FileLocationRepo, FileVersion, FileVersionRepo,
+};
 
 use crate::ControlPlane;
 use crate::artifact::fs::{

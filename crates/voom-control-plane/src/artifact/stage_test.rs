@@ -8,7 +8,8 @@ use voom_core::{ErrorCode, FileLocationId, FileVersionId, VoomError, rng_test_su
 use voom_events::EventKind;
 use voom_store::repo::events::{EventFilter, EventRepo, Page};
 use voom_store::repo::identity::{
-    DiscoveredFile, FileLocationKind, IdentityRepo, IngestOutcome, NewFileLocation, ProducedBy,
+    DiscoveredFile, FileAssetRepo, FileLocationKind, FileLocationRepo, FileVersionRepo,
+    IngestOutcome, NewFileLocation, ProducedBy,
 };
 
 use crate::ControlPlane;

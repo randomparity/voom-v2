@@ -15,7 +15,7 @@ use voom_events::payload::{
 };
 use voom_events::{Event, SubjectType};
 use voom_store::repo::artifacts::{ArtifactCommitState, ArtifactVerificationStatus};
-use voom_store::repo::identity::IdentityRepo;
+use voom_store::repo::identity::FileVersionRepo;
 use voom_store::repo::media::audio_extract_operations::{
     AudioExtractDispatchAttemptStatus, AudioExtractOperationRecord, AudioExtractOperationState,
     AudioExtractQuiescenceAcknowledgement, NewAudioExtractClaim, NewAudioExtractDispatchAttempt,

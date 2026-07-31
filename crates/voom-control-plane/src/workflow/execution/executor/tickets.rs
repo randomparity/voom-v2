@@ -8,7 +8,7 @@ use serde_json::Value;
 use time::OffsetDateTime;
 use voom_core::OperationKind;
 use voom_core::{JobId, TicketOperation, VoomError};
-use voom_store::repo::identity::IdentityRepo;
+use voom_store::repo::identity::{FileLocationRepo, FileVersionRepo};
 use voom_store::repo::tickets::{NewTicket, Ticket};
 
 use crate::cases::{begin_immediate_tx, commit_tx};

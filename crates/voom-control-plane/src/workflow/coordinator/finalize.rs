@@ -13,7 +13,7 @@ use voom_core::{
     ArtifactHandleId, FileAssetId, FileLocationId, FileVersionId, JobId, MediaSnapshotId, TicketId,
     VoomError,
 };
-use voom_store::repo::identity::{IdentityRepo, MediaSnapshot};
+use voom_store::repo::identity::{FileVersionRepo, MediaSnapshot, MediaSnapshotRepo};
 use voom_store::repo::workflow_summaries::{
     FilePhaseOutcome, FilePhaseSummary, NewFilePhaseSummary, PhaseSummary,
 };

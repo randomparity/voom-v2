@@ -8,7 +8,7 @@ use voom_core::{
     MediaSnapshotId, TicketId, VoomError,
 };
 use voom_store::repo::artifacts::ArtifactVerificationStatus;
-use voom_store::repo::identity::IdentityRepo;
+use voom_store::repo::identity::MediaSnapshotRepo;
 use voom_worker_protocol::{TranscodeVideoResult, VideoHardwareAssignment};
 
 use crate::ControlPlane;

@@ -29,14 +29,15 @@ use voom_store::repo::commit_safety_gate::{
 };
 use voom_store::repo::events::{EventFilter, EventRepo, Page, SqliteEventRepo};
 use voom_store::repo::identity::{
-    FileLocationKind, IdentityRepo, NewFileLocation, NewFileVersion, ProducedBy, SqliteIdentityRepo,
+    CommitGateIdentityRepo, FileAssetRepo, FileLocationKind, FileLocationRepo, FileVersionRepo,
+    NewFileLocation, NewFileVersion, ProducedBy, SqliteIdentityRepo,
 };
 use voom_store::test_support::{FailingAliasResolver, T0, fresh_initialized_pool_at};
 use voom_test_support::TempDatabase;
 
 fn gate<'a>(
     pool: &'a SqlitePool,
-    identity_repo: &'a dyn IdentityRepo,
+    identity_repo: &'a dyn CommitGateIdentityRepo,
     event_repo: &'a dyn EventRepo,
     alias_resolver: &'a dyn AliasResolver,
 ) -> CommitGateContext<'a> {

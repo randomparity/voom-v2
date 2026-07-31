@@ -11,10 +11,10 @@ use super::{
     AffectedScopeClosure, AliasResolver, BTreeSet, BypassKind, ClosureFailure, ClosureMemberDelta,
     ClosureWarning, CommitAbortedByClosureGrewPayload, CommitAbortedByClosureIncompletePayload,
     CommitAbortedByStaleEvidencePayload, CommitAbortedByUseLeasePayload, CommitAuthorizedPayload,
-    CommitGateContext, CommitGateResult, CommitId, CommitPermit, CommitTarget, Event,
-    EventEnvelope, EventRepo, EvidenceDrift, EvidenceId, EvidenceRevalidationResult,
-    ForcePathToken, IdentityRepo, LeaseScope, OffsetDateTime, Row, SubjectType, TargetMemberKind,
-    UseLeaseId, VoomError, begin_gate_tx, i64_from_u64, iso8601, u64_from_i64,
+    CommitGateContext, CommitGateIdentityRepo, CommitGateResult, CommitId, CommitPermit,
+    CommitTarget, Event, EventEnvelope, EventRepo, EvidenceDrift, EvidenceId,
+    EvidenceRevalidationResult, ForcePathToken, LeaseScope, OffsetDateTime, Row, SubjectType,
+    TargetMemberKind, UseLeaseId, VoomError, begin_gate_tx, i64_from_u64, iso8601, u64_from_i64,
 };
 
 // ============================================================================
@@ -50,7 +50,7 @@ pub enum AuthorizeOutcome {
 ///
 /// `alias_resolver` covers **external** (non-DB) alias sources only.
 /// DB-internal alias enumeration goes through
-/// `IdentityRepo::list_live_file_locations_by_version_in_tx` on the
+/// `FileLocationRepo::list_live_file_locations_by_version_in_tx` on the
 /// gate's tx handle, preserving the gate snapshot and avoiding nested
 /// connection waits.
 ///
@@ -145,7 +145,7 @@ struct PhaseBGatePass {
 /// caller commits the tx); `Err(_)` on a genuine storage failure.
 async fn run_phase_b_gate_in_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-    identity_repo: &dyn IdentityRepo,
+    identity_repo: &dyn CommitGateIdentityRepo,
     event_repo: &dyn EventRepo,
     alias_resolver: &dyn AliasResolver,
     row: &PendingIntentRow,

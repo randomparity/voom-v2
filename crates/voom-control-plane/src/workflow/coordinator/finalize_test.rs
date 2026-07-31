@@ -8,8 +8,8 @@ use voom_store::repo::artifacts::{
     NewArtifactVerification, NewSidecarArtifactCommit,
 };
 use voom_store::repo::identity::{
-    DiscoveredFile, FileLocationKind, IdentityRepo, IngestOutcome, NewFileLocation, NewFileVersion,
-    ProducedBy,
+    DiscoveredFile, FileLocationKind, FileLocationRepo, FileVersionRepo, IngestOutcome,
+    MediaSnapshotRepo, NewFileLocation, NewFileVersion, ProducedBy,
 };
 use voom_store::repo::jobs::NewJob;
 use voom_store::repo::leases::NewLease;

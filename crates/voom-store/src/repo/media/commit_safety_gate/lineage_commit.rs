@@ -19,7 +19,7 @@ use voom_core::VoomError;
 use voom_core::ids::{BundleId, FileAssetId, FileLocationId, FileVersionId, UseLeaseId};
 
 use crate::repo::common::{i64_from_u64, iso8601, u64_from_i64};
-use crate::repo::media::identity::IdentityRepo;
+use crate::repo::media::identity::FileLocationRepo;
 use crate::repo::media::use_leases::LeaseScope;
 
 use super::AffectedScopeClosure;
@@ -55,7 +55,7 @@ pub struct LineageCommitLeaseCheck {
 /// query). Callers treat an error as fail-closed — the commit must not proceed.
 pub async fn check_lineage_commit_leases_in_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-    identity_repo: &dyn IdentityRepo,
+    identity_repo: &dyn FileLocationRepo,
     file_asset_id: FileAssetId,
     file_version_id: FileVersionId,
     now: OffsetDateTime,
@@ -78,7 +78,7 @@ pub async fn check_lineage_commit_leases_in_tx(
 /// resolver (none is registered in production).
 async fn build_lineage_closure(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-    identity_repo: &dyn IdentityRepo,
+    identity_repo: &dyn FileLocationRepo,
     file_asset_id: FileAssetId,
     file_version_id: FileVersionId,
 ) -> Result<AffectedScopeClosure, VoomError> {

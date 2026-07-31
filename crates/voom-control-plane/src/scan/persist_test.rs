@@ -12,7 +12,7 @@ use voom_core::clock_test_support::ManualClock;
 use voom_core::rng_test_support::FrozenRng;
 use voom_core::{ErrorCode, FailureClass, VoomError, WorkerId};
 use voom_events::EventKind;
-use voom_store::repo::identity::IdentityRepo;
+use voom_store::repo::identity::MediaSnapshotRepo;
 use voom_store::repo::workers::{NewWorker, WorkerKind};
 use voom_worker_protocol::ProbeFileStatus;
 

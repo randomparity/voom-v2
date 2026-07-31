@@ -185,7 +185,7 @@ pub struct TargetEpochDriftWire {
 }
 
 /// `commit.completed` — Phase C success. The durable identity mutation
-/// has been applied to the matching `IdentityRepo` in the same tx the
+/// has been applied through the matching identity repository capability in the same tx the
 /// `commit_intents` row transitioned to `completed`. Carries the
 /// granularity-bucketed member counts of `closure_final` so an audit
 /// reader can size the silent-path closure without re-deserializing

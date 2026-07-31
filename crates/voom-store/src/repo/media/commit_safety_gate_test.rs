@@ -11,7 +11,7 @@ use voom_core::ids::{FileLocationId, FileVersionId};
 
 fn gate<'a>(
     pool: &'a SqlitePool,
-    identity_repo: &'a dyn IdentityRepo,
+    identity_repo: &'a dyn CommitGateIdentityRepo,
     event_repo: &'a dyn EventRepo,
     alias_resolver: &'a dyn AliasResolver,
 ) -> CommitGateContext<'a> {
@@ -312,9 +312,9 @@ async fn commit_intents_check_rejects_recovery_required_with_null_closure_author
 
 use crate::repo::audit::events::{EventFilter, EventRepo, Page, SqliteEventRepo};
 use crate::repo::media::identity::{
-    AcceptedPin, FileLocationKind as IdentityFileLocationKind, IdentityRepo,
-    NewFileLocation as IdentityNewFileLocation, NewFileVersion, NewIdentityEvidence, ProducedBy,
-    SqliteIdentityRepo,
+    AcceptedPin, FileAssetRepo, FileLocationKind as IdentityFileLocationKind, FileLocationRepo,
+    FileVersionRepo, IdentityEvidenceRepo, NewFileLocation as IdentityNewFileLocation,
+    NewFileVersion, NewIdentityEvidence, ProducedBy, SqliteIdentityRepo,
 };
 use crate::repo::media::use_leases::{
     BlockingMode, IssuerKind, NewUseLease, SqliteUseLeaseRepo, UseLeaseKind,

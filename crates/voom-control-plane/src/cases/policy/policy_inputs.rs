@@ -7,7 +7,10 @@ use voom_policy::{
     ValidatedPolicyInputSetDraft,
 };
 use voom_store::repo::{
-    identity::{FileLocationKind, IdentityRepo, MediaSnapshotFileVersionQuery},
+    identity::{
+        FileLocationKind, FileLocationRepo, FileVersionRepo, MediaSnapshotFileVersionQuery,
+        MediaSnapshotRepo,
+    },
     policy_inputs::{PolicyInputSet, PolicyInputSetSummary},
 };
 
