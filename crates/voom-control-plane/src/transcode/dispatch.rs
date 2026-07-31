@@ -180,7 +180,18 @@ pub fn validate_output_facts(
             result.output_height, cap_h
         )));
     }
-    if let Some(target_pf) = request.profile.pixel_format.as_deref()
+    // The worker reports the pixel format of the output *file*, so it is compared
+    // against the format a conforming output carries — not the profile's
+    // `pixel_format`, which for a hardware profile names the encoder's surface and
+    // never appears in a file. Comparing the surface rejected every conforming
+    // hardware encode as a malformed result.
+    let target_pf =
+        voom_core::expected_output_pixel_format(&request.profile).map_err(|reason| {
+            VoomError::MalformedWorkerResult(format!(
+                "transcode_video cannot verify the output pixel format: {reason}"
+            ))
+        })?;
+    if let Some(target_pf) = target_pf
         && !result.output_pixel_format.eq_ignore_ascii_case(target_pf)
     {
         return Err(VoomError::MalformedWorkerResult(format!(

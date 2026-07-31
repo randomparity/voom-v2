@@ -22,7 +22,8 @@ use voom_core::{TicketOperation, VoomError, WorkerId, WorkerKind, WorkerStatus};
 use voom_store::repo::accelerator_claims::{NewAcceleratorClaim, SqliteAcceleratorClaimRepo};
 use voom_store::repo::workers::{NewCapability, NewGrant, NewWorker};
 use voom_worker_protocol::{
-    LocalWorkerBound, VIDEOTOOLBOX_PREFLIGHT_BUDGET, VideoAcceleratorDescriptor,
+    LocalWorkerBound, VAAPI_PREFLIGHT_BUDGET, VIDEOTOOLBOX_PREFLIGHT_BUDGET,
+    VideoAcceleratorDescriptor, vaapi_hardware_token,
 };
 
 use crate::ControlPlane;
@@ -30,6 +31,9 @@ use crate::worker_process::{WorkerCommand, bundled_worker_command_from, random_h
 
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(10);
 pub(crate) const NVIDIA_STARTUP_TIMEOUT: Duration = Duration::from_mins(5);
+/// ADR 0049 §9's readiness bound, plus the allowance that lets the worker's own
+/// stage-naming expiry be reached before this one (ADR 0052 §7).
+pub(crate) const VAAPI_STARTUP_TIMEOUT: Duration = VAAPI_PREFLIGHT_BUDGET;
 pub(crate) const VIDEOTOOLBOX_STARTUP_TIMEOUT: Duration = VIDEOTOOLBOX_PREFLIGHT_BUDGET;
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 const SELF_HEAL_SCAN_LIMIT: u32 = 1000;
@@ -52,9 +56,21 @@ pub struct VideoToolboxLocalWorkerConfig {
     pub max_sessions: u32,
 }
 
+/// A VAAPI device to bind a local ffmpeg worker to.
+///
+/// `pci_address` is the identity (`0000:f4:00.0`), never a render-node path or
+/// ordinal: node numbers are assigned by enumeration order and renumber, while the
+/// address behind them cannot (ADR 0052 §1).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VaapiLocalWorkerConfig {
+    pub pci_address: String,
+    pub max_sessions: u32,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LocalVideoAcceleratorConfig {
     Nvidia(NvidiaLocalWorkerConfig),
+    Vaapi(VaapiLocalWorkerConfig),
     VideoToolbox(VideoToolboxLocalWorkerConfig),
 }
 
@@ -68,13 +84,21 @@ struct ResolvedVideoToolboxLocalWorkerConfig {
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum ResolvedLocalVideoAcceleratorConfig {
     Nvidia(NvidiaLocalWorkerConfig),
+    /// VAAPI needs no resolution step: the PCI address the operator supplied *is*
+    /// the identity, where `VideoToolbox` must query the platform for a resource id.
+    Vaapi(VaapiLocalWorkerConfig),
     VideoToolbox(ResolvedVideoToolboxLocalWorkerConfig),
 }
 
 impl ResolvedLocalVideoAcceleratorConfig {
+    /// The VAAPI spelling comes from `vaapi_hardware_token` rather than being
+    /// formatted here: the scheduler and the worker derive the same token
+    /// independently and the capacity SQL groups on that exact string, so a
+    /// divergence would silently stop the device matching.
     fn hardware_token(&self) -> String {
         match self {
             Self::Nvidia(config) => format!("nvidia:{}", config.device_uuid),
+            Self::Vaapi(config) => vaapi_hardware_token(&config.pci_address),
             Self::VideoToolbox(config) => format!("videotoolbox:{}", config.resource_id),
         }
     }
@@ -82,6 +106,7 @@ impl ResolvedLocalVideoAcceleratorConfig {
     const fn backend(&self) -> &'static str {
         match self {
             Self::Nvidia(_) => "nvidia",
+            Self::Vaapi(_) => "vaapi",
             Self::VideoToolbox(_) => "video_toolbox",
         }
     }
@@ -89,6 +114,7 @@ impl ResolvedLocalVideoAcceleratorConfig {
     const fn max_sessions(&self) -> u32 {
         match self {
             Self::Nvidia(config) => config.max_sessions,
+            Self::Vaapi(config) => config.max_sessions,
             Self::VideoToolbox(config) => config.max_sessions,
         }
     }
@@ -292,8 +318,11 @@ impl ControlPlane {
             )));
         }
         match config {
-            ResolvedLocalVideoAcceleratorConfig::Nvidia(_) => {
-                self.recover_nvidia_claim(&claim, &token).await
+            // VAAPI is a Linux supervisor like NVIDIA, so it recovers by the same
+            // boot id + process-start-identity evidence.
+            ResolvedLocalVideoAcceleratorConfig::Nvidia(_)
+            | ResolvedLocalVideoAcceleratorConfig::Vaapi(_) => {
+                self.recover_linux_claim(&claim, &token).await
             }
             ResolvedLocalVideoAcceleratorConfig::VideoToolbox(config) => {
                 self.recover_videotoolbox_claim(&claim, &token, config)
@@ -302,7 +331,7 @@ impl ControlPlane {
         }
     }
 
-    async fn recover_nvidia_claim(
+    async fn recover_linux_claim(
         &self,
         claim: &voom_store::repo::accelerator_claims::AcceleratorClaim,
         token: &str,
@@ -475,15 +504,15 @@ impl ControlPlane {
             let stdin = child.stdin.take().ok_or_else(|| {
                 VoomError::WorkerCrash("local worker missing stdin pipe".to_owned())
             })?;
-            let startup_timeout = if matches!(
-                accelerator,
-                Some(ResolvedLocalVideoAcceleratorConfig::VideoToolbox(_))
-            ) {
-                VIDEOTOOLBOX_STARTUP_TIMEOUT
-            } else if accelerator.is_some() {
-                NVIDIA_STARTUP_TIMEOUT
-            } else {
-                STARTUP_TIMEOUT
+            // Per backend, not "accelerated vs not": VideoToolbox's readiness graph
+            // is a different length from the Linux backends' fixed ADR 0049 §9 bound.
+            let startup_timeout = match accelerator {
+                Some(ResolvedLocalVideoAcceleratorConfig::VideoToolbox(_)) => {
+                    VIDEOTOOLBOX_STARTUP_TIMEOUT
+                }
+                Some(ResolvedLocalVideoAcceleratorConfig::Nvidia(_)) => NVIDIA_STARTUP_TIMEOUT,
+                Some(ResolvedLocalVideoAcceleratorConfig::Vaapi(_)) => VAAPI_STARTUP_TIMEOUT,
+                None => STARTUP_TIMEOUT,
             };
             let bound = read_bound(&mut child, startup_timeout).await?;
             validate_bound_accelerator(bound.accelerator.as_ref(), accelerator)?;
@@ -542,7 +571,7 @@ impl ControlPlane {
                 operation: operation.clone(),
                 codecs: Vec::new(),
                 hardware: accelerator
-                    .map(|descriptor| vec![descriptor.hardware_token().to_owned()])
+                    .map(|descriptor| vec![descriptor.hardware_token()])
                     .unwrap_or_default(),
                 artifact_access: Vec::new(),
                 extra,
@@ -603,6 +632,11 @@ fn spawn_worker(
                     .env("VOOM_NVIDIA_DEVICE", &nvidia.device_uuid)
                     .env("VOOM_NVIDIA_MAX_SESSIONS", nvidia.max_sessions.to_string())
                     .env("CUDA_VISIBLE_DEVICES", &nvidia.device_uuid);
+            }
+            ResolvedLocalVideoAcceleratorConfig::Vaapi(vaapi) => {
+                spawn
+                    .env("VOOM_VAAPI_DEVICE", &vaapi.pci_address)
+                    .env("VOOM_VAAPI_MAX_SESSIONS", vaapi.max_sessions.to_string());
             }
             ResolvedLocalVideoAcceleratorConfig::VideoToolbox(videotoolbox) => {
                 spawn
@@ -693,6 +727,21 @@ fn validate_local_worker_config(
                 ));
             }
         }
+        LocalVideoAcceleratorConfig::Vaapi(vaapi) => {
+            if !(1..=16).contains(&vaapi.max_sessions) {
+                return Err(VoomError::Config(
+                    "VAAPI max sessions must be in 1..=16".to_owned(),
+                ));
+            }
+            if !is_pci_address(&vaapi.pci_address) {
+                return Err(VoomError::Config(format!(
+                    "VAAPI device must be a PCI address like `0000:f4:00.0`, not \
+                     `{}`: render-node paths and ordinals renumber, so they are \
+                     not a stable device identity",
+                    vaapi.pci_address
+                )));
+            }
+        }
         LocalVideoAcceleratorConfig::VideoToolbox(videotoolbox)
             if !(1..=16).contains(&videotoolbox.max_sessions) =>
         {
@@ -703,6 +752,28 @@ fn validate_local_worker_config(
         LocalVideoAcceleratorConfig::VideoToolbox(_) => {}
     }
     Ok(())
+}
+
+/// A PCI address is `dddd:bb:dd.f`, lowercase hex. Render-node paths and ordinals
+/// are rejected on purpose: they renumber across boots, so they are not an identity.
+fn is_pci_address(pci_address: &str) -> bool {
+    let Some((domain, rest)) = pci_address.split_once(':') else {
+        return false;
+    };
+    let Some((bus, device_function)) = rest.split_once(':') else {
+        return false;
+    };
+    let Some((device, function)) = device_function.split_once('.') else {
+        return false;
+    };
+    let hex = |text: &str, width: usize| {
+        text.len() == width && text.bytes().all(|byte| byte.is_ascii_hexdigit())
+    };
+    hex(domain, 4)
+        && hex(bus, 2)
+        && hex(device, 2)
+        && hex(function, 1)
+        && !pci_address.bytes().any(|byte| byte.is_ascii_uppercase())
 }
 
 fn is_full_nvidia_uuid(device_uuid: &str) -> bool {
@@ -769,6 +840,45 @@ fn validate_bound_accelerator(
         ) => Err(VoomError::WorkerCrash(
             "VideoToolbox readiness metadata did not match configuration".to_owned(),
         )),
+        (
+            Some(VideoAcceleratorDescriptor::Vaapi(actual)),
+            Some(ResolvedLocalVideoAcceleratorConfig::Vaapi(configured)),
+        ) if actual.pci_address == configured.pci_address
+            && actual.max_sessions == configured.max_sessions =>
+        {
+            Ok(())
+        }
+        (
+            Some(VideoAcceleratorDescriptor::Vaapi(actual)),
+            Some(ResolvedLocalVideoAcceleratorConfig::Vaapi(configured)),
+        ) => Err(VoomError::WorkerCrash(format!(
+            "VAAPI readiness metadata did not match configuration: expected PCI {} sessions={} \
+             but worker reported PCI {} sessions={}",
+            configured.pci_address,
+            configured.max_sessions,
+            actual.pci_address,
+            actual.max_sessions
+        ))),
+        (
+            Some(VideoAcceleratorDescriptor::Vaapi(actual)),
+            Some(
+                configured @ (ResolvedLocalVideoAcceleratorConfig::Nvidia(_)
+                | ResolvedLocalVideoAcceleratorConfig::VideoToolbox(_)),
+            ),
+        ) => Err(VoomError::WorkerCrash(format!(
+            "worker bound VAAPI device at PCI {} but a {} device was configured",
+            actual.pci_address,
+            configured.backend()
+        ))),
+        (
+            Some(
+                VideoAcceleratorDescriptor::Nvidia(_) | VideoAcceleratorDescriptor::VideoToolbox(_),
+            ),
+            Some(ResolvedLocalVideoAcceleratorConfig::Vaapi(configured)),
+        ) => Err(VoomError::WorkerCrash(format!(
+            "VAAPI device at PCI {} was configured but the worker advertised another backend",
+            configured.pci_address
+        ))),
         (Some(_), None) => Err(VoomError::WorkerCrash(
             "software worker unexpectedly advertised an accelerator".to_owned(),
         )),
@@ -786,6 +896,9 @@ async fn resolve_local_accelerator(
         None => Ok(None),
         Some(LocalVideoAcceleratorConfig::Nvidia(config)) => {
             Ok(Some(ResolvedLocalVideoAcceleratorConfig::Nvidia(config)))
+        }
+        Some(LocalVideoAcceleratorConfig::Vaapi(config)) => {
+            Ok(Some(ResolvedLocalVideoAcceleratorConfig::Vaapi(config)))
         }
         Some(LocalVideoAcceleratorConfig::VideoToolbox(config)) => {
             if !cfg!(all(target_os = "macos", target_arch = "aarch64")) {
@@ -888,7 +1001,8 @@ fn new_accelerator_claim(
     claimed_at: time::OffsetDateTime,
 ) -> Result<NewAcceleratorClaim, VoomError> {
     let (boot_id, supervisor_start_identity) = match accelerator {
-        ResolvedLocalVideoAcceleratorConfig::Nvidia(_) => (
+        ResolvedLocalVideoAcceleratorConfig::Nvidia(_)
+        | ResolvedLocalVideoAcceleratorConfig::Vaapi(_) => (
             linux_boot_id()?,
             Some(format!(
                 "linux-proc-ticks:{}",
@@ -915,7 +1029,8 @@ async fn accelerator_process_group_has_members(
     process_group_id: u32,
 ) -> Result<bool, VoomError> {
     match accelerator {
-        ResolvedLocalVideoAcceleratorConfig::Nvidia(_) => {
+        ResolvedLocalVideoAcceleratorConfig::Nvidia(_)
+        | ResolvedLocalVideoAcceleratorConfig::Vaapi(_) => {
             process_group_has_members(process_group_id)
         }
         ResolvedLocalVideoAcceleratorConfig::VideoToolbox(_) => {

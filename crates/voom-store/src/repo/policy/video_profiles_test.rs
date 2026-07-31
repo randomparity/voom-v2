@@ -46,8 +46,9 @@ fn sample_new(name: &str) -> NewVideoProfile {
         encoder: "libx265".to_owned(),
         crf: Some(22),
         cq: None,
+        qp: None,
         bitrate_kbps: None,
-        preset: "slow".to_owned(),
+        preset: Some("slow".to_owned()),
         tune: None,
         codec_profile: Some("main10".to_owned()),
         codec_level: None,
@@ -104,7 +105,7 @@ async fn update_replaces_fields_and_missing_name_is_none() {
     let mut changed = sample_new("editme");
     changed.crf = Some(30);
     changed.encoder = "libsvtav1".to_owned();
-    changed.preset = "8".to_owned();
+    changed.preset = Some("8".to_owned());
     changed.codec_profile = Some("main".to_owned());
     changed.pixel_format = Some("yuv420p10le".to_owned());
     let updated = repo.update(changed).await.unwrap().unwrap();
@@ -120,7 +121,7 @@ async fn create_persists_nvidia_quality_and_decode_mode() {
     profile.encoder = "hevc_nvenc".to_owned();
     profile.crf = None;
     profile.cq = Some(23);
-    profile.preset = "p4".to_owned();
+    profile.preset = Some("p4".to_owned());
     profile.tune = Some("uhq".to_owned());
     profile.decode = voom_core::VideoDecodeMode::nvidia();
 
@@ -135,6 +136,98 @@ async fn create_persists_nvidia_quality_and_decode_mode() {
     );
 }
 
+/// A VAAPI profile's durable shape is the inverse of a software one: `qp`
+/// instead of `crf`, and no `preset` at all. The round-trip has to preserve
+/// both the presence of `qp` and the *absence* of a preset — a repository that
+/// substituted a default preset would produce a row the encoder descriptor
+/// rejects, and one that dropped `qp` would leave the encode's quality
+/// unspecified.
+#[tokio::test]
+async fn create_persists_vaapi_qp_and_absent_preset() {
+    let (repo, _pool, _tmp) = repo().await;
+    let mut profile = sample_new("vaapi-hevc");
+    profile.encoder = "hevc_vaapi".to_owned();
+    profile.crf = None;
+    profile.qp = Some(23);
+    profile.preset = None;
+    profile.codec_profile = Some("main10".to_owned());
+    profile.pixel_format = Some("p010".to_owned());
+    profile.decode = voom_core::VideoDecodeMode::vaapi();
+
+    let created = repo.create(profile).await.unwrap();
+
+    assert_eq!(created.qp, Some(23));
+    assert!(created.preset.is_none());
+    assert!(created.crf.is_none() && created.cq.is_none());
+    assert!(created.decode.is_vaapi());
+    assert_eq!(repo.get_by_name("vaapi-hevc").await.unwrap(), Some(created));
+
+    let fetched = repo.get_by_name("vaapi-hevc").await.unwrap().unwrap();
+    let typed = fetched.to_worker_profile();
+    assert_eq!(typed.qp, Some(23));
+    assert!(typed.preset.is_none());
+    voom_core::validate_profile_against_descriptor(&typed).unwrap();
+}
+
+/// `update` must bind `qp` too, or an operator's re-tune of a VAAPI profile
+/// would silently keep the old quality target.
+#[tokio::test]
+async fn update_replaces_vaapi_qp() {
+    let (repo, _pool, _tmp) = repo().await;
+    let mut profile = sample_new("vaapi-tune");
+    profile.encoder = "hevc_vaapi".to_owned();
+    profile.crf = None;
+    profile.qp = Some(23);
+    profile.preset = None;
+    profile.codec_profile = None;
+    profile.pixel_format = Some("nv12".to_owned());
+    profile.decode = voom_core::VideoDecodeMode::vaapi();
+    repo.create(profile.clone()).await.unwrap();
+
+    profile.qp = Some(30);
+    let updated = repo.update(profile).await.unwrap().unwrap();
+
+    assert_eq!(updated.qp, Some(30));
+    assert!(updated.preset.is_none());
+}
+
+/// The software path is unchanged by the nullable `preset` and the new `qp`
+/// column: a `libx265` row still round-trips its preset and carries no `qp`.
+/// This is the byte-for-byte-unchanged guarantee at the storage layer.
+#[tokio::test]
+async fn create_leaves_software_profile_round_trip_unchanged() {
+    let (repo, _pool, _tmp) = repo().await;
+    let created = repo.create(sample_new("software-hevc")).await.unwrap();
+
+    assert_eq!(created.preset.as_deref(), Some("slow"));
+    assert_eq!(created.crf, Some(22));
+    assert!(created.qp.is_none());
+    assert!(created.decode.is_software());
+
+    let fetched = repo.get_by_name("software-hevc").await.unwrap().unwrap();
+    assert_eq!(fetched, created);
+    let typed = fetched.to_worker_profile();
+    assert_eq!(typed.preset.as_deref(), Some("slow"));
+    assert!(typed.qp.is_none());
+    voom_core::validate_profile_against_descriptor(&typed).unwrap();
+}
+
+/// Every seeded builtin predates `qp`, so migration 0032 must leave each one
+/// with its preset and a null `qp` — the read path sees exactly what 0029
+/// wrote.
+#[tokio::test]
+async fn seeded_builtins_keep_their_preset_and_carry_no_qp() {
+    let (repo, _pool, _tmp) = repo().await;
+    for profile in repo.list().await.unwrap() {
+        assert!(
+            profile.preset.is_some(),
+            "seed `{}` lost its preset",
+            profile.name
+        );
+        assert!(profile.qp.is_none(), "seed `{}` gained a qp", profile.name);
+    }
+}
+
 #[tokio::test]
 async fn create_persists_videotoolbox_bitrate_and_decode_mode() {
     let (repo, _pool, _tmp) = repo().await;
@@ -142,7 +235,7 @@ async fn create_persists_videotoolbox_bitrate_and_decode_mode() {
     profile.encoder = "hevc_videotoolbox".to_owned();
     profile.crf = None;
     profile.bitrate_kbps = Some(8_000);
-    profile.preset = "default".to_owned();
+    profile.preset = Some("default".to_owned());
     profile.codec_profile = Some("main10".to_owned());
     profile.pixel_format = Some("yuv420p10le".to_owned());
     profile.decode = voom_core::VideoDecodeMode::video_toolbox();

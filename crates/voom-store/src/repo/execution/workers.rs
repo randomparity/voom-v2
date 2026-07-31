@@ -722,12 +722,21 @@ impl SqliteWorkerRepo {
     }
 }
 
+/// Per-device `transcode_video` capacity for an accelerator-bound worker.
+///
+/// The device is keyed off the capability's own `hardware` token rather than a
+/// token repeated inside `extra.accelerator`. Only the NVIDIA descriptor carries a
+/// `hardware_token` field; reading the key from the descriptor would silently yield
+/// no capacity row for any other backend, so the bound device would never receive
+/// work. `hardware` is where ADR 0049 §4 puts the stable token, and ADR 0049 §6
+/// defines capacity across "every worker advertising the same stable hardware
+/// token", so it is also the correct grouping key.
 async fn accelerator_operation_capacity(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     worker_id: WorkerId,
 ) -> Result<Option<WorkerOperationCapacity>, VoomError> {
     let row = sqlx::query(
-        "SELECT json_extract(extra, '$.accelerator.hardware_token') AS hardware_token \
+        "SELECT json_extract(hardware, '$[0]') AS hardware_token \
          FROM worker_capabilities \
          WHERE worker_id = ? AND operation = 'transcode_video' \
            AND json_type(extra, '$.accelerator') = 'object' \
@@ -740,15 +749,22 @@ async fn accelerator_operation_capacity(
     let Some(row) = row else {
         return Ok(None);
     };
-    let hardware_token: String = row
+    let hardware_token: Option<String> = row
         .try_get("hardware_token")
         .map_err(|error| map_row_err("accelerator hardware token", &error))?;
+    let hardware_token = hardware_token.ok_or_else(|| {
+        VoomError::Config(format!(
+            "worker {worker_id} advertises a transcode_video accelerator descriptor but no \
+             hardware token; the capability must carry the device token so per-device capacity \
+             can be counted"
+        ))
+    })?;
     let max_parallel = sqlx::query_scalar::<_, i64>(
         "SELECT MIN(CAST(json_extract(extra, '$.accelerator.max_sessions') AS INTEGER)) \
          FROM worker_capabilities \
          JOIN workers ON workers.id = worker_capabilities.worker_id \
          WHERE operation = 'transcode_video' AND workers.status != 'retired' \
-           AND json_extract(extra, '$.accelerator.hardware_token') = ?",
+           AND json_extract(hardware, '$[0]') = ?",
     )
     .bind(&hardware_token)
     .fetch_one(&mut **tx)
@@ -762,8 +778,7 @@ async fn accelerator_operation_capacity(
            AND (tickets.kind = 'transcode_video' \
                 OR tickets.kind = 'synthetic.workflow.operation.transcode_video') \
            AND worker_capabilities.operation = 'transcode_video' \
-           AND json_extract(worker_capabilities.extra, \
-                            '$.accelerator.hardware_token') = ?",
+           AND json_extract(worker_capabilities.hardware, '$[0]') = ?",
     )
     .bind(hardware_token)
     .fetch_one(&mut **tx)

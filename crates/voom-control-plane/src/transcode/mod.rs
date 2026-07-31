@@ -35,8 +35,11 @@ pub struct ExecuteTranscodeVideoInput {
     pub source_location_id: Option<FileLocationId>,
     pub staging_root: PathBuf,
     pub target_dir: PathBuf,
-    /// Scheduler-selected accelerator binding carried into the worker request
-    /// and validated against the worker result.
+    /// The accelerator the scheduler leased for this ticket, threaded from the
+    /// ticket payload. It belongs to the operation, not to the transport: the
+    /// request the worker answers and the request `validate_result` checks the
+    /// answer against must be the same one, or every accelerated transcode is
+    /// rejected as malformed.
     pub hardware_assignment: Option<VideoHardwareAssignment>,
     /// The resolved video encode profile plus output container, threaded from
     /// the ticket payload (binding.rs embeds it from the planner node payload).

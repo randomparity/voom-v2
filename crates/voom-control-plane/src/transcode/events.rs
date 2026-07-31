@@ -113,6 +113,15 @@ fn hardware_evidence(
             None,
             Some(assignment.resource_id.clone()),
         ),
+        // A VAAPI device is identified by PCI address, which the token already
+        // carries; `hardware_device_uuid` stays absent rather than holding a
+        // value that is not a UUID.
+        Some(VideoHardwareAssignment::Vaapi(assignment)) => (
+            Some("vaapi".to_owned()),
+            Some(assignment.hardware_token.clone()),
+            None,
+            None,
+        ),
     }
 }
 

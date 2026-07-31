@@ -3,7 +3,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use secrecy::SecretString;
 use serde_json::json;
-use voom_core::{OperationKind, PROTOCOL_VERSION, TicketOperation, WorkerId};
+use voom_core::{OperationKind, PROTOCOL_VERSION, TicketOperation, VoomError, WorkerId};
 use voom_policy::{
     CompiledPolicy, DiagnosticSeverity, DiagnosticStage, PolicyDiagnostic, PolicyTool,
     SourceLocation, SourceSpan, compile_policy,
@@ -56,8 +56,8 @@ fn videotoolbox_profiles_do_not_require_a_software_worker() {
     let requirements = policy_video_backend_requirements(&policy).unwrap();
 
     assert!(!requirements.software);
-    assert!(requirements.nvidia.is_none());
-    assert!(requirements.videotoolbox_decode);
+    assert!(!requirements.nvidia.required);
+    assert!(requirements.videotoolbox.hardware_decode);
     assert!(
         requirements
             .videotoolbox_encoders
@@ -224,6 +224,209 @@ async fn gpu_bound_worker_does_not_satisfy_software_profile_preflight() {
             .to_string()
             .contains("software transcode profiles require an unbound ffmpeg worker")
     );
+}
+
+/// A VAAPI profile needs a live, identity-verified device that probed `hevc_vaapi`.
+/// A software worker cannot substitute — that is the fallback issue #409 forbids —
+/// and neither can a VAAPI device whose driver build never proved the encoder, which
+/// on the acceptance host is what stock `mesa-dri-drivers` looks like (ADR 0052 §2).
+#[tokio::test]
+async fn a_vaapi_transcode_requires_an_identity_verified_hevc_vaapi_descriptor() {
+    let (cp, _tmp) = cp().await;
+    let operation = TicketOperation::from(OperationKind::TranscodeVideo);
+    let software = register_transcode_worker(
+        &cp,
+        "local-ffmpeg-software",
+        &operation,
+        Vec::new(),
+        json!({}),
+        1,
+    )
+    .await;
+    // Proven for AV1 only, exactly what the stock Mesa driver build advertises.
+    let av1_only = register_transcode_worker(
+        &cp,
+        "local-ffmpeg-vaapi",
+        &operation,
+        vec!["vaapi:pci-0000:f4:00.0".to_owned()],
+        vaapi_accelerator_extra(&["av1_vaapi"], &["hevc"]),
+        2,
+    )
+    .await;
+    let mut policy = vaapi_policy("");
+
+    let error = cp
+        .preflight_policy_tools(&mut policy, &live_registry(&[&software, &av1_only]))
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.code(), "POLICY_EXECUTION_ERROR");
+    assert!(
+        error
+            .to_string()
+            .contains("hevc_vaapi profiles require a live VAAPI-bound ffmpeg worker"),
+        "{error}"
+    );
+
+    let proven = register_transcode_worker(
+        &cp,
+        "local-ffmpeg-vaapi-hevc",
+        &operation,
+        vec!["vaapi:pci-0000:f4:00.0".to_owned()],
+        vaapi_accelerator_extra(&["hevc_vaapi"], &["hevc"]),
+        2,
+    )
+    .await;
+    cp.preflight_policy_tools(&mut policy, &live_registry(&[&software, &proven]))
+        .await
+        .unwrap();
+
+    // The very same durable descriptor, with no live endpoint to verify identity
+    // against, must not satisfy preflight.
+    let error = cp
+        .preflight_policy_tools(&mut policy, &live_registry(&[&software]))
+        .await
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("hevc_vaapi profiles require a live VAAPI-bound ffmpeg worker"),
+        "{error}"
+    );
+}
+
+/// A `vaapi`-decode profile needs the device to have probed a decoder as well as the
+/// encoder. Exact source-codec compatibility stays per-file; preflight only refuses a
+/// device that proved no decoder at all.
+#[tokio::test]
+async fn a_vaapi_decode_policy_requires_at_least_one_probed_vaapi_decoder() {
+    let (cp, _tmp) = cp().await;
+    let operation = TicketOperation::from(OperationKind::TranscodeVideo);
+    let no_decoders = register_transcode_worker(
+        &cp,
+        "local-ffmpeg-vaapi",
+        &operation,
+        vec!["vaapi:pci-0000:f4:00.0".to_owned()],
+        vaapi_accelerator_extra(&["hevc_vaapi"], &[]),
+        2,
+    )
+    .await;
+    let mut policy = vaapi_policy(" decode: vaapi");
+
+    let error = cp
+        .preflight_policy_tools(&mut policy, &live_registry(&[&no_decoders]))
+        .await
+        .unwrap_err();
+
+    assert!(
+        error
+            .to_string()
+            .contains("with at least one probed VAAPI decoder"),
+        "{error}"
+    );
+
+    // The same policy passes once a device has proven a decoder, so the gate is the
+    // decoder list and not the decode clause itself.
+    let with_decoders = register_transcode_worker(
+        &cp,
+        "local-ffmpeg-vaapi-decode",
+        &operation,
+        vec!["vaapi:pci-0000:f4:00.0".to_owned()],
+        vaapi_accelerator_extra(&["hevc_vaapi"], &["h264", "hevc", "av1"]),
+        2,
+    )
+    .await;
+    cp.preflight_policy_tools(&mut policy, &live_registry(&[&with_decoders]))
+        .await
+        .unwrap();
+}
+
+/// ADR 0049 §6 again, for the case a rolling upgrade actually produces: a worker
+/// advertising a backend tag this build has never heard of. Parsing it is an error,
+/// and letting that error escape would turn one unknown worker into a job-fatal
+/// failure for every policy on the fleet. It must instead contribute no
+/// availability, so a healthy sibling still satisfies the policy.
+#[tokio::test]
+async fn an_unreadable_descriptor_on_one_worker_does_not_fail_the_whole_fleet() {
+    let (cp, _tmp) = cp().await;
+    let operation = TicketOperation::from(OperationKind::TranscodeVideo);
+    let from_the_future = register_transcode_worker(
+        &cp,
+        "local-ffmpeg-unknown",
+        &operation,
+        vec!["qsv:pci-0000:00:02.0".to_owned()],
+        json!({ "accelerator": { "backend": "qsv", "device": "/dev/dri/renderD128" } }),
+        2,
+    )
+    .await;
+    let mut policy = vaapi_policy("");
+
+    // Alone, the unreadable worker leaves VAAPI unavailable — a clear preflight
+    // message, not a repository error.
+    let error = cp
+        .preflight_policy_tools(&mut policy, &live_registry(&[&from_the_future]))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error, VoomError::PolicyExecution(_)),
+        "expected a preflight failure, got: {error}"
+    );
+
+    // Beside a healthy VAAPI worker, the policy passes: the unknown worker did not
+    // poison the projection.
+    let healthy = register_transcode_worker(
+        &cp,
+        "local-ffmpeg-vaapi",
+        &operation,
+        vec!["vaapi:pci-0000:f4:00.0".to_owned()],
+        vaapi_accelerator_extra(&["hevc_vaapi"], &["h264", "hevc"]),
+        2,
+    )
+    .await;
+    cp.preflight_policy_tools(&mut policy, &live_registry(&[&from_the_future, &healthy]))
+        .await
+        .unwrap();
+}
+
+/// A host may run a software worker beside a VAAPI-bound one. ADR 0049 §6 forbids
+/// an error escaping candidate projection, so the VAAPI worker's descriptor must
+/// not decide whether a software profile can be scheduled: preflight has to keep
+/// observing the software worker and pass.
+#[tokio::test]
+async fn a_live_vaapi_worker_does_not_break_software_profile_preflight() {
+    let (cp, _tmp) = cp().await;
+    let operation = TicketOperation::from(OperationKind::TranscodeVideo);
+    let software = register_transcode_worker(
+        &cp,
+        "local-ffmpeg-software",
+        &operation,
+        Vec::new(),
+        json!({}),
+        1,
+    )
+    .await;
+    let vaapi = register_transcode_worker(
+        &cp,
+        "local-ffmpeg-vaapi",
+        &operation,
+        vec!["vaapi:pci-0000:f4:00.0".to_owned()],
+        vaapi_accelerator_extra(&["hevc_vaapi"], &["hevc"]),
+        2,
+    )
+    .await;
+    let registry = live_registry(&[&software, &vaapi]);
+    let mut policy = compile_policy(
+        "policy \"software\" { \
+         metadata { requires_tools: [ffmpeg] } \
+         phase encode { transcode video to hevc { \
+         encoder: libx265 crf: 23 preset: medium } } }",
+    )
+    .unwrap()
+    .policy;
+
+    cp.preflight_policy_tools(&mut policy, &registry)
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
@@ -449,6 +652,91 @@ async fn denied_ffprobe_is_aggregated_with_later_missing_tool() {
     assert!(message.contains("- ffprobe: live built-in provider"));
     assert!(message.contains("denied probe_file"));
     assert!(message.find("- ffprobe:").unwrap() < message.find("- ffmpeg:").unwrap());
+}
+
+fn vaapi_policy(extra_settings: &str) -> CompiledPolicy {
+    compile_policy(&format!(
+        "policy \"vaapi\" {{ \
+         metadata {{ requires_tools: [ffmpeg] }} \
+         phase encode {{ transcode video to hevc {{ \
+         encoder: hevc_vaapi qp: 24{extra_settings} }} }} }}"
+    ))
+    .unwrap()
+    .policy
+}
+
+/// Registers one live `transcode_video` provider with the reserved local naming
+/// preflight looks for, so a test can describe a whole host by listing workers.
+async fn register_transcode_worker(
+    cp: &crate::ControlPlane,
+    name: &str,
+    operation: &TicketOperation,
+    hardware: Vec<String>,
+    extra: serde_json::Value,
+    max_parallel: u32,
+) -> voom_store::repo::workers::Worker {
+    let worker = cp
+        .register_supervisor_worker(NewWorker {
+            name: name.to_owned(),
+            kind: WorkerKind::Local,
+            registered_at: cp.clock().now(),
+            node_id: None,
+        })
+        .await
+        .unwrap();
+    cp.record_capability(NewCapability {
+        worker_id: worker.id,
+        operation: operation.clone(),
+        codecs: Vec::new(),
+        hardware,
+        artifact_access: Vec::new(),
+        extra,
+    })
+    .await
+    .unwrap();
+    cp.record_grant(NewGrant {
+        worker_id: worker.id,
+        can_execute: vec![operation.clone()],
+        can_access_read: Vec::new(),
+        can_access_write: Vec::new(),
+        denies: Vec::new(),
+        max_parallel: json!({operation.as_str(): max_parallel}),
+    })
+    .await
+    .unwrap();
+    worker
+}
+
+/// The `backend`-tagged extras a VAAPI-bound worker stores, per ADR 0052 §1: the
+/// device is named by PCI address and carries no `hardware_token` field.
+fn vaapi_accelerator_extra(encoders: &[&str], decoders: &[&str]) -> serde_json::Value {
+    json!({
+        "accelerator": {
+            "backend": "vaapi",
+            "pci_address": "0000:f4:00.0",
+            "device_name": "AMD Radeon 8060S Graphics",
+            "driver_version": "Mesa Gallium 26.1.5 radeonsi",
+            "encoders": encoders,
+            "decoders": decoders,
+            "max_sessions": 2
+        }
+    })
+}
+
+fn live_registry(workers: &[&voom_store::repo::workers::Worker]) -> WorkerRuntimeRegistry {
+    let mut registry = WorkerRuntimeRegistry::new();
+    for worker in workers {
+        registry = registry.with_in_process_runtime(
+            worker.id,
+            Arc::new(IdentityClient {
+                worker_id: worker.id,
+                worker_epoch: worker.epoch,
+                handshake_ok: true,
+            }),
+            credentials(worker.id, worker.epoch),
+        );
+    }
+    registry
 }
 
 fn policy_requiring(tools: &[&str]) -> CompiledPolicy {

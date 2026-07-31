@@ -27,7 +27,259 @@ async fn probe_returns_uninitialized_on_fresh_db() {
 #[tokio::test]
 async fn expected_migrations_matches_embedded_count() {
     // review whenever a migration is added/removed.
-    assert_eq!(expected_migrations(), 31);
+    assert_eq!(expected_migrations(), 32);
+}
+
+/// Column list every video-profile fixture below shares, so each test spells
+/// only the columns it is actually exercising.
+fn video_profile_insert(name: &str, columns: &str, values: &str) -> String {
+    format!(
+        "INSERT INTO video_profiles (id, name, target_codec, {columns}) \
+         VALUES ('vp-{name}', '{name}', 'hevc', {values})"
+    )
+}
+
+async fn assert_profile_accepted(pool: &sqlx::SqlitePool, sql: &str) {
+    sqlx::query(sql)
+        .execute(pool)
+        .await
+        .unwrap_or_else(|e| panic!("row must be accepted: {e}\n{sql}"));
+}
+
+/// Asserts the row is refused **by a CHECK constraint** specifically. The
+/// mechanism is load-bearing: a `preset` still declared `NOT NULL` would also
+/// refuse a null preset, but for the wrong reason and for every encoder — so
+/// matching on the message is what proves the column became nullable and the
+/// per-encoder CHECK is what protects it.
+async fn assert_profile_check_rejected(pool: &sqlx::SqlitePool, sql: &str) {
+    let err = sqlx::query(sql).execute(pool).await.unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("CHECK constraint failed"),
+        "expected a CHECK constraint to refuse the row, got {msg}\n{sql}"
+    );
+}
+
+/// A VAAPI profile is a legal durable row only in the exact shape spec §8
+/// describes: null `preset` (`hevc_vaapi` has no speed knob), `qp` as the sole
+/// quality field, and `vaapi` decode. `STRICT` must survive the rebuild —
+/// without it `SQLite` would silently coerce a text `qp` into the column and the
+/// range CHECK would be comparing the wrong type.
+#[tokio::test]
+async fn video_profiles_admit_a_vaapi_profile_and_stay_strict() {
+    let (pool, _tmp) = fresh_pool().await;
+
+    let table_sql: String = sqlx::query_scalar(
+        "SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = 'video_profiles'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(
+        table_sql.ends_with("STRICT"),
+        "rebuilt video_profiles must stay STRICT: {table_sql}"
+    );
+
+    assert_profile_accepted(
+        &pool,
+        &video_profile_insert(
+            "vaapi-main10",
+            "encoder, preset, qp, codec_profile, pixel_format, decode_backend",
+            "'hevc_vaapi', NULL, 23, 'main10', 'p010', 'vaapi'",
+        ),
+    )
+    .await;
+}
+
+/// `preset` presence is per-encoder, not global: `hevc_vaapi` exposes no
+/// `-preset`, so carrying one would mean the durable row disagrees with the
+/// argv the worker can actually build. Every other encoder still requires one,
+/// which is why the column can be nullable without weakening them.
+#[tokio::test]
+async fn video_profiles_bind_preset_presence_to_the_encoder() {
+    let (pool, _tmp) = fresh_pool().await;
+
+    assert_profile_check_rejected(
+        &pool,
+        &video_profile_insert(
+            "vaapi-with-preset",
+            "encoder, preset, qp, decode_backend",
+            "'hevc_vaapi', 'p4', 23, 'vaapi'",
+        ),
+    )
+    .await;
+    assert_profile_check_rejected(
+        &pool,
+        &video_profile_insert(
+            "x265-without-preset",
+            "encoder, preset, crf",
+            "'libx265', NULL, 23",
+        ),
+    )
+    .await;
+    assert_profile_check_rejected(
+        &pool,
+        &video_profile_insert(
+            "nvenc-without-preset",
+            "encoder, preset, cq, decode_backend",
+            "'hevc_nvenc', NULL, 23, 'nvidia'",
+        ),
+    )
+    .await;
+    assert_profile_accepted(
+        &pool,
+        &video_profile_insert(
+            "x265-with-preset",
+            "encoder, preset, crf",
+            "'libx265', 'medium', 23",
+        ),
+    )
+    .await;
+}
+
+/// The SQL range must agree with `QualityDomain::Qp { min: 1, max: 52 }` in
+/// `voom-core`, inclusive at both ends. `qp = 0` is `hevc_vaapi`'s "auto", not
+/// an operator quality target (spec §2.2), and 53 is rejected by ffmpeg itself.
+/// Pinning both boundaries here is what keeps the two layers from drifting into
+/// a range only one of them enforces.
+#[tokio::test]
+async fn video_profiles_pin_the_vaapi_qp_range_to_the_rust_descriptor() {
+    let (pool, _tmp) = fresh_pool().await;
+
+    // Read both ends off the descriptor rather than restating them: hardcoding
+    // them here would let the Rust range move while this test — the thing named
+    // for catching that drift — kept passing against the old SQL.
+    let voom_core::QualityDomain::Qp { min, max } = voom_core::encoder_descriptor("hevc_vaapi")
+        .expect("hevc_vaapi has an encoder descriptor")
+        .quality_domain
+    else {
+        panic!("hevc_vaapi must carry a Qp quality domain");
+    };
+    let below = min
+        .checked_sub(1)
+        .expect("qp min must leave room for a below-range probe");
+    let above = max
+        .checked_add(1)
+        .expect("qp max must leave room for an above-range probe");
+
+    for (name, qp) in [("vaapi-qp-min", min), ("vaapi-qp-max", max)] {
+        assert_profile_accepted(
+            &pool,
+            &video_profile_insert(
+                name,
+                "encoder, preset, qp, decode_backend",
+                &format!("'hevc_vaapi', NULL, {qp}, 'vaapi'"),
+            ),
+        )
+        .await;
+    }
+    for (name, qp) in [("vaapi-qp-auto", below), ("vaapi-qp-over", above)] {
+        assert_profile_check_rejected(
+            &pool,
+            &video_profile_insert(
+                name,
+                "encoder, preset, qp, decode_backend",
+                &format!("'hevc_vaapi', NULL, {qp}, 'vaapi'"),
+            ),
+        )
+        .await;
+    }
+}
+
+/// Exactly one quality field is legal per encoder — the one its `QualityDomain`
+/// names. A VAAPI row carrying `crf` or `cq` would make the durable row
+/// ambiguous about which knob the worker should emit, and a row carrying none
+/// would leave the encode's quality unspecified.
+#[tokio::test]
+async fn video_profiles_allow_exactly_one_quality_field_per_encoder() {
+    let (pool, _tmp) = fresh_pool().await;
+
+    for (name, columns, values) in [
+        (
+            "vaapi-and-crf",
+            "encoder, preset, qp, crf, decode_backend",
+            "'hevc_vaapi', NULL, 23, 23, 'vaapi'",
+        ),
+        (
+            "vaapi-and-cq",
+            "encoder, preset, qp, cq, decode_backend",
+            "'hevc_vaapi', NULL, 23, 23, 'vaapi'",
+        ),
+        (
+            "vaapi-no-quality",
+            "encoder, preset, decode_backend",
+            "'hevc_vaapi', NULL, 'vaapi'",
+        ),
+        (
+            "x265-and-qp",
+            "encoder, preset, crf, qp",
+            "'libx265', 'medium', 23, 23",
+        ),
+        (
+            "nvenc-and-qp",
+            "encoder, preset, cq, qp, decode_backend",
+            "'hevc_nvenc', 'p4', 23, 23, 'nvidia'",
+        ),
+    ] {
+        assert_profile_check_rejected(&pool, &video_profile_insert(name, columns, values)).await;
+    }
+}
+
+/// Hardware decode is only reachable through the matching hardware encoder: a
+/// `vaapi`-decoded frame lands in a VAAPI surface that only `hevc_vaapi` can
+/// consume, and the NVIDIA pairing is the same rule from migration 0029. A row
+/// that paired them wrongly would dispatch to a worker that cannot run it.
+#[tokio::test]
+async fn video_profiles_pair_each_decode_backend_with_its_encoder() {
+    let (pool, _tmp) = fresh_pool().await;
+
+    for (name, encoder, backend) in [
+        ("vaapi-decode-x265", "libx265", "vaapi"),
+        ("vaapi-decode-nvenc", "hevc_nvenc", "vaapi"),
+        ("nvidia-decode-vaapi", "hevc_vaapi", "nvidia"),
+        ("qsv-decode", "hevc_vaapi", "qsv"),
+    ] {
+        let quality = if encoder == "libx265" {
+            "crf"
+        } else if encoder == "hevc_nvenc" {
+            "cq"
+        } else {
+            "qp"
+        };
+        let preset = if encoder == "hevc_vaapi" {
+            "NULL"
+        } else {
+            "'medium'"
+        };
+        assert_profile_check_rejected(
+            &pool,
+            &video_profile_insert(
+                name,
+                &format!("encoder, preset, {quality}, decode_backend"),
+                &format!("'{encoder}', {preset}, 23, '{backend}'"),
+            ),
+        )
+        .await;
+    }
+
+    assert_profile_accepted(
+        &pool,
+        &video_profile_insert(
+            "vaapi-decode-vaapi",
+            "encoder, preset, qp, decode_backend",
+            "'hevc_vaapi', NULL, 23, 'vaapi'",
+        ),
+    )
+    .await;
+    assert_profile_accepted(
+        &pool,
+        &video_profile_insert(
+            "nvidia-decode-nvenc",
+            "encoder, preset, cq, decode_backend",
+            "'hevc_nvenc', 'p4', 23, 'nvidia'",
+        ),
+    )
+    .await;
 }
 
 #[tokio::test]

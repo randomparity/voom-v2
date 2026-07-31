@@ -6,9 +6,12 @@ fn descriptor_lookup_knows_supported_encoders() {
     assert!(encoder_descriptor("libsvtav1").is_some());
     assert!(encoder_descriptor("libaom-av1").is_some());
     assert!(encoder_descriptor("hevc_nvenc").is_some());
+    assert!(encoder_descriptor("hevc_vaapi").is_some());
     assert!(encoder_descriptor("h264_videotoolbox").is_some());
     assert!(encoder_descriptor("hevc_videotoolbox").is_some());
     assert!(encoder_descriptor("av1_nvenc").is_none());
+    assert!(encoder_descriptor("av1_vaapi").is_none());
+    assert!(encoder_descriptor("h264_vaapi").is_none());
     assert!(encoder_descriptor("x264").is_none());
 }
 
@@ -47,6 +50,69 @@ fn nvidia_descriptor_uses_cq_and_current_ffmpeg_vocabulary() {
     assert!(nvidia.accepts_codec_level("6.2"));
     assert!(nvidia.accepts_pixel_format("yuv420p10le"));
     assert!(!nvidia.accepts_pixel_format("yuv444p"));
+}
+
+/// The descriptor is the only thing standing between an operator profile and an
+/// `FFmpeg` invocation, so it must spell `hevc_vaapi`'s vocabulary exactly as the
+/// acceptance host reported it (design §2.2): `-qp 0..52` where 0 means auto, so the
+/// operator range starts at 1; no `-preset` and no `-compression_level` exist on this
+/// encoder; `-level` is deliberately not offered in this slice (ADR 0052 §4); and the
+/// only surface formats are the hardware ones, `nv12` and `p010`. Any widening here
+/// lets validation admit a profile the encoder then rejects mid-run.
+#[test]
+fn vaapi_descriptor_matches_the_probed_encoder_vocabulary() {
+    let vaapi = encoder_descriptor("hevc_vaapi").unwrap();
+
+    assert_eq!(vaapi.target_codec, "hevc");
+    assert_eq!(vaapi.backend, VideoEncoderBackend::Vaapi);
+    assert_eq!(vaapi.quality_domain, QualityDomain::Qp { min: 1, max: 52 });
+    assert_eq!(vaapi.preset_domain, PresetDomain::None);
+    assert_eq!(vaapi.tunes, &[] as &[&str]);
+    assert_eq!(vaapi.codec_profiles, &["main", "main10"]);
+    assert_eq!(vaapi.codec_levels, &[] as &[&str]);
+    assert_eq!(vaapi.pixel_formats, &["nv12", "p010"]);
+    assert_eq!(vaapi.ten_bit_pixel_formats, &["p010"]);
+    assert_eq!(vaapi.eight_bit_only_profiles, &["main"]);
+    assert!(!vaapi.requires_bitrate_zero);
+}
+
+/// Each encoder answers only for its own quality knob. `qp` is not `crf` and not `cq`,
+/// so a profile cannot smuggle a quality target past the descriptor by spelling it with
+/// a field the encoder does not have.
+#[test]
+fn quality_domains_do_not_answer_for_each_other() {
+    let vaapi = encoder_descriptor("hevc_vaapi").unwrap();
+    assert!(!vaapi.accepts_qp(0));
+    assert!(vaapi.accepts_qp(1));
+    assert!(vaapi.accepts_qp(52));
+    assert!(!vaapi.accepts_qp(53));
+    assert!(!vaapi.accepts_crf(23));
+    assert!(!vaapi.accepts_cq(23));
+
+    let x265 = encoder_descriptor("libx265").unwrap();
+    assert!(!x265.accepts_qp(23));
+    let nvidia = encoder_descriptor("hevc_nvenc").unwrap();
+    assert!(!nvidia.accepts_qp(23));
+}
+
+/// `PresetDomain::None` is not "any preset is fine" — it is "this encoder has no speed
+/// knob at all", so every token must be refused rather than passed through to a flag
+/// `hevc_vaapi` does not accept.
+#[test]
+fn preset_domain_none_accepts_no_token() {
+    let vaapi = encoder_descriptor("hevc_vaapi").unwrap();
+    assert!(!vaapi.accepts_preset("medium"));
+    assert!(!vaapi.accepts_preset("0"));
+    assert!(!vaapi.accepts_preset(""));
+}
+
+/// VAAPI decode is selected by `-hwaccel vaapi` plus the codec's own decoder, so the
+/// supported set is a flat codec list. CUVID needs `NVIDIA_VIDEO_DECODERS`' pairs only
+/// because it has a distinct decoder name per codec; a VAAPI pair would repeat the same
+/// string twice (design §3).
+#[test]
+fn vaapi_decoders_are_a_flat_codec_list() {
+    assert_eq!(VAAPI_VIDEO_DECODERS, &["h264", "hevc", "av1"]);
 }
 
 #[test]
@@ -113,4 +179,84 @@ fn av1_profiles_allow_declared_ten_bit_formats() {
 
     assert!(aom.pixel_format_compatible_with_profile("yuv420p10le", Some("main")));
     assert!(svt.pixel_format_compatible_with_profile("yuv420p10le", Some("main")));
+}
+
+/// `expected_output_pixel_format` may only fail when a surface format was added without
+/// recording what it writes, so every encoder's declared `pixel_formats` must be mapped.
+/// Without this, adding a surface would turn a conforming encode into a hard failure at
+/// the worker and a never-converging plan.
+#[test]
+fn every_declared_pixel_format_has_a_recorded_output_format() {
+    for encoder in [
+        "libx265",
+        "libsvtav1",
+        "libaom-av1",
+        "hevc_nvenc",
+        "hevc_vaapi",
+    ] {
+        let descriptor = encoder_descriptor(encoder).unwrap();
+        for pixel_format in descriptor.pixel_formats {
+            assert!(
+                descriptor.output_pixel_format(pixel_format).is_some(),
+                "`{encoder}` records no output format for surface `{pixel_format}`"
+            );
+        }
+        for (surface, _) in descriptor.surface_output_pixel_formats {
+            assert!(
+                descriptor.pixel_formats.contains(surface),
+                "`{encoder}` maps `{surface}`, which it does not accept"
+            );
+        }
+    }
+}
+
+/// A software encoder's `pixel_formats` are already file formats, so the mapping is the
+/// identity; a hardware encoder's are surfaces and must translate (design §2.2).
+#[test]
+fn surface_formats_translate_only_for_hardware_encoders() {
+    let x265 = encoder_descriptor("libx265").unwrap();
+    assert_eq!(x265.output_pixel_format("yuv420p10le"), Some("yuv420p10le"));
+
+    let vaapi = encoder_descriptor("hevc_vaapi").unwrap();
+    assert_eq!(vaapi.output_pixel_format("nv12"), Some("yuv420p"));
+    assert_eq!(vaapi.output_pixel_format("p010"), Some("yuv420p10le"));
+    assert_eq!(vaapi.output_pixel_format("yuv420p"), None);
+}
+
+/// The planner and the worker both gate a hardware decode on this answer, and each
+/// used to hold its own copy of the table. A format known to one but not the other
+/// would put them back into disagreement — the planner emitting tickets the worker
+/// refuses — so the mapping is asserted here, at the single definition.
+#[test]
+fn pixel_format_depth_maps_both_file_and_surface_vocabularies() {
+    for file_format in ["yuv420p", "yuv420p10le"] {
+        assert!(
+            video_pixel_format_depth(file_format).is_some(),
+            "file format `{file_format}` must map"
+        );
+    }
+    for surface in ["nv12", "p010", "p010le"] {
+        assert!(
+            video_pixel_format_depth(surface).is_some(),
+            "surface format `{surface}` must map"
+        );
+    }
+
+    assert_eq!(video_pixel_format_depth("yuv420p"), Some(8));
+    assert_eq!(video_pixel_format_depth("nv12"), Some(8));
+    assert_eq!(video_pixel_format_depth("yuv420p10le"), Some(10));
+    assert_eq!(video_pixel_format_depth("p010"), Some(10));
+    assert_eq!(video_pixel_format_depth("p010le"), Some(10));
+
+    // Every surface `hevc_vaapi` declares must map, or a gate silently stops comparing.
+    let vaapi = encoder_descriptor("hevc_vaapi").unwrap();
+    for surface in vaapi.pixel_formats {
+        assert!(
+            video_pixel_format_depth(surface).is_some(),
+            "declared surface `{surface}` has no depth"
+        );
+    }
+
+    assert_eq!(video_pixel_format_depth("yuv444p"), None);
+    assert_eq!(video_pixel_format_depth(""), None);
 }

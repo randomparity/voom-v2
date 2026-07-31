@@ -108,6 +108,46 @@ async fn execute_records_verified_committed_transcode_result_and_events() {
     );
 }
 
+/// The leased accelerator must reach the worker on the very request
+/// `validate_result` checks the answer against. When the assignment was applied
+/// to the dispatcher's private copy instead, the worker echoed a device the
+/// control plane had never asked for and rejected every accelerated transcode as
+/// malformed — with the device, the argv, and the scheduling all correct.
+#[tokio::test]
+async fn execute_threads_the_leased_accelerator_into_the_validated_request() {
+    let (cp, _db, dir) = fixture().await;
+    let source = dir.path().join("Movie.mp4");
+    std::fs::write(&source, b"source bytes").unwrap();
+    let seeded = seed_source(&cp, &source, b"source bytes").await;
+    let assignment = VideoHardwareAssignment::vaapi(
+        "vaapi:pci-0000:f4:00.0".to_owned(),
+        "0000:f4:00.0".to_owned(),
+    );
+
+    let report = execute_transcode_video_with_dispatchers(
+        &cp,
+        ExecuteTranscodeVideoInput {
+            job_id: JobId(1),
+            ticket_id: TicketId(2),
+            lease_id: LeaseId(3),
+            source_file_version_id: seeded.0,
+            source_location_id: Some(seeded.1),
+            staging_root: dir.path().join("stage"),
+            target_dir: dir.path().join("out"),
+            resolved: default_resolved(),
+            backup_root: None,
+            hardware_assignment: Some(assignment.clone()),
+        },
+        &FakeTranscodeDispatcher,
+        &FakeVerifyDispatcher,
+        &FakeResultProbeDispatcher,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(report.hardware_assignment, Some(assignment));
+}
+
 #[tokio::test]
 async fn execute_rejects_non_hevc_worker_result_before_commit() {
     let (cp, _db, dir) = fixture().await;
@@ -411,7 +451,6 @@ impl crate::artifact::verify::VerifyArtifactDispatcher for FakeVerifyDispatcher 
 
 fn transcode_result(request: TranscodeVideoRequest, codec: &str) -> TranscodeVideoResult {
     let output_hash = blake3_checksum(b"hevc bytes");
-    let hardware_assignment = request.hardware_assignment.clone();
     let input = TranscodeVideoObservedFacts {
         size_bytes: request.input.expected.size_bytes,
         content_hash: request.input.expected.content_hash,
@@ -435,7 +474,7 @@ fn transcode_result(request: TranscodeVideoRequest, codec: &str) -> TranscodeVid
         output_width: 1280,
         output_height: 720,
         output_pixel_format: "yuv420p".to_owned(),
-        hardware_assignment,
+        hardware_assignment: request.hardware_assignment,
         copied_video: false,
     }
 }

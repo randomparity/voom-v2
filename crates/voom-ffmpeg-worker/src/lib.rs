@@ -18,7 +18,8 @@ pub mod observe;
 pub mod preflight;
 
 pub use ffmpeg::{
-    ALL_VIDEO_ENCODERS, DEFAULT_PROCESS_TIMEOUT, FfmpegConfig, FfmpegError, run_ffmpeg_transcode,
+    ALL_VIDEO_ENCODERS, AcceleratorBinding, DEFAULT_PROCESS_TIMEOUT, FfmpegConfig, FfmpegError,
+    VaapiDeviceBinding, run_ffmpeg_transcode,
 };
 pub use handler::{
     TranscodeVideoError, handle_operation, handle_transcode_video, operation_handler,

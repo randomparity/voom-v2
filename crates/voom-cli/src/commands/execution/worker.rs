@@ -7,7 +7,7 @@ use serde_json::json;
 use voom_control_plane::workers::{NewWorkerCapabilityDraft, RegisterWorkerForNodeInput};
 use voom_control_plane::{
     ControlPlane, LocalVideoAcceleratorConfig, LocalWorkerHandle, LocalWorkerKind,
-    NvidiaLocalWorkerConfig, VideoToolboxLocalWorkerConfig,
+    NvidiaLocalWorkerConfig, VaapiLocalWorkerConfig, VideoToolboxLocalWorkerConfig,
 };
 use voom_core::{ErrorCode, NodeId, TicketOperation, VoomError, WorkerId};
 use voom_store::repo::workers::{WorkerInspection, WorkerNodeContext};
@@ -84,16 +84,25 @@ pub async fn run(database_url: &str, local: Local, command: WorkerCommand) -> io
             kind,
             nvidia_device,
             nvidia_max_sessions,
+            vaapi_device,
+            vaapi_max_sessions,
             videotoolbox,
             videotoolbox_max_sessions,
         } => {
-            let accelerator = local_accelerator_config(
-                nvidia_device,
-                nvidia_max_sessions,
-                videotoolbox,
-                videotoolbox_max_sessions,
-            );
-            run_local(database_url, local, kind, accelerator).await
+            run_local(
+                database_url,
+                local,
+                kind,
+                RunLocalAcceleratorArgs {
+                    nvidia_device,
+                    nvidia_max_sessions,
+                    vaapi_device,
+                    vaapi_max_sessions,
+                    videotoolbox,
+                    videotoolbox_max_sessions,
+                },
+            )
+            .await
         }
     }
 }
@@ -138,11 +147,48 @@ fn emit_ready_line(handle: &LocalWorkerHandle) -> io::Result<()> {
     out.flush()
 }
 
+/// The device-binding flags `run-local` accepts. Grouped so the accelerator
+/// choice stays one argument rather than four parallel `Option`s.
+#[derive(Debug)]
+struct RunLocalAcceleratorArgs {
+    nvidia_device: Option<String>,
+    nvidia_max_sessions: Option<u32>,
+    vaapi_device: Option<String>,
+    vaapi_max_sessions: Option<u32>,
+    videotoolbox: bool,
+    videotoolbox_max_sessions: Option<u32>,
+}
+
+impl RunLocalAcceleratorArgs {
+    /// Clap already rejects more than one device flag together, so at most one arm hits.
+    fn into_control_plane(self) -> Option<LocalVideoAcceleratorConfig> {
+        if let Some(device_uuid) = self.nvidia_device {
+            return Some(LocalVideoAcceleratorConfig::Nvidia(
+                NvidiaLocalWorkerConfig {
+                    device_uuid,
+                    max_sessions: self.nvidia_max_sessions.unwrap_or(1),
+                },
+            ));
+        }
+        if let Some(pci_address) = self.vaapi_device {
+            return Some(LocalVideoAcceleratorConfig::Vaapi(VaapiLocalWorkerConfig {
+                pci_address,
+                max_sessions: self.vaapi_max_sessions.unwrap_or(1),
+            }));
+        }
+        self.videotoolbox.then(|| {
+            LocalVideoAcceleratorConfig::VideoToolbox(VideoToolboxLocalWorkerConfig {
+                max_sessions: self.videotoolbox_max_sessions.unwrap_or(1),
+            })
+        })
+    }
+}
+
 async fn run_local(
     database_url: &str,
     local: Local,
     kind: LocalWorkerKindArg,
-    accelerator: Option<LocalVideoAcceleratorConfig>,
+    accelerator: RunLocalAcceleratorArgs,
 ) -> io::Result<i32> {
     let cp = match open_control_plane("worker", database_url, &local).await? {
         Ok(cp) => cp,
@@ -151,35 +197,11 @@ async fn run_local(
     run_local_supervise(
         &cp,
         kind.to_control_plane(),
-        accelerator,
+        accelerator.into_control_plane(),
         shutdown_signal(),
         local,
     )
     .await
-}
-
-fn local_accelerator_config(
-    nvidia_device: Option<String>,
-    nvidia_max_sessions: Option<u32>,
-    videotoolbox: bool,
-    videotoolbox_max_sessions: Option<u32>,
-) -> Option<LocalVideoAcceleratorConfig> {
-    if let Some(device_uuid) = nvidia_device {
-        Some(LocalVideoAcceleratorConfig::Nvidia(
-            NvidiaLocalWorkerConfig {
-                device_uuid,
-                max_sessions: nvidia_max_sessions.unwrap_or(1),
-            },
-        ))
-    } else if videotoolbox {
-        Some(LocalVideoAcceleratorConfig::VideoToolbox(
-            VideoToolboxLocalWorkerConfig {
-                max_sessions: videotoolbox_max_sessions.unwrap_or(1),
-            },
-        ))
-    } else {
-        None
-    }
 }
 
 /// Start the bundled worker, print the readiness line, then block on `shutdown`

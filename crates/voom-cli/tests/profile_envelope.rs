@@ -141,6 +141,124 @@ mod profile_envelope {
         assert_eq!(json["data"]["profile"]["decode"]["backend"], "nvidia");
     }
 
+    /// A VAAPI profile is only authorable from the CLI if `--qp` exists and
+    /// `--preset` is omissible: `hevc_vaapi` exposes no `-preset` flag at all, so a
+    /// preset an operator could pass is a knob the encode cannot honor (ADR 0052 §4).
+    /// The emitted envelope must therefore carry `qp`, omit `preset` entirely rather
+    /// than emit `null`, and name the explicit `vaapi` decode backend.
+    #[tokio::test]
+    async fn create_vaapi_profile_emits_qp_without_a_preset() {
+        let seeded = seed().await;
+        let out = profile_command(&seeded.url)
+            .args([
+                "create",
+                "--name",
+                "gpu-vaapi-hevc",
+                "--encoder",
+                "hevc_vaapi",
+                "--qp",
+                "23",
+                "--pixel-format",
+                "nv12",
+                "--decode",
+                "vaapi",
+            ])
+            .output()
+            .unwrap();
+
+        assert_eq!(out.status.code(), Some(0));
+        let stdout = String::from_utf8(out.stdout).unwrap();
+        assert_eq!(
+            stdout.trim().lines().count(),
+            1,
+            "the VAAPI create path must keep the one-envelope stdout contract: {stdout:?}"
+        );
+        let json: Value = serde_json::from_str(stdout.trim()).unwrap();
+        let profile = &json["data"]["profile"];
+        assert_eq!(json["status"], "ok");
+        assert_eq!(profile["target_codec"], "hevc");
+        assert_eq!(profile["qp"], 23);
+        assert!(
+            profile.get("preset").is_none(),
+            "`hevc_vaapi` has no preset flag, so the field must be absent: {json}"
+        );
+        assert!(profile.get("crf").is_none(), "{json}");
+        assert!(profile.get("cq").is_none(), "{json}");
+        assert_eq!(profile["decode"]["backend"], "vaapi");
+
+        let shown = profile_command(&seeded.url)
+            .args(["show", "--name", "gpu-vaapi-hevc"])
+            .output()
+            .unwrap();
+        assert_eq!(shown.status.code(), Some(0));
+        let shown = envelope(shown.stdout);
+        assert_eq!(
+            shown["data"]["profile"], *profile,
+            "a stored VAAPI profile must read back exactly as created"
+        );
+    }
+
+    /// `--qp` widens the quality vocabulary without widening it per encoder: the
+    /// encoder's `QualityDomain` still admits exactly one quality field, so a `qp`
+    /// aimed at a CRF-domain encoder is rejected with the domain named rather than
+    /// silently stored.
+    #[tokio::test]
+    async fn create_rejects_qp_for_an_encoder_with_no_qp_domain() {
+        let seeded = seed().await;
+        let out = profile_command(&seeded.url)
+            .args([
+                "create",
+                "--name",
+                "bad-qp",
+                "--encoder",
+                "libx265",
+                "--qp",
+                "23",
+                "--preset",
+                "slow",
+            ])
+            .output()
+            .unwrap();
+
+        assert_eq!(out.status.code(), Some(2));
+        let json = envelope(out.stdout);
+        assert_eq!(json["error"]["code"], "CONFIG_INVALID");
+        let message = json["error"]["message"].as_str().unwrap();
+        assert!(
+            message.contains("requires only crf"),
+            "the message must name the domain the encoder does accept: {message}"
+        );
+    }
+
+    /// Making `--preset` optional for VAAPI must not make it optional for an encoder
+    /// that has one. `libx265`'s `PresetDomain` is populated, so a profile with no
+    /// preset is rejected — the same rule migration 0032's `CHECK` enforces durably.
+    #[tokio::test]
+    async fn create_rejects_a_missing_preset_for_a_preset_domain_encoder() {
+        let seeded = seed().await;
+        let out = profile_command(&seeded.url)
+            .args([
+                "create",
+                "--name",
+                "no-preset",
+                "--encoder",
+                "libx265",
+                "--crf",
+                "20",
+            ])
+            .output()
+            .unwrap();
+
+        assert_eq!(out.status.code(), Some(2));
+        let json = envelope(out.stdout);
+        assert_eq!(json["error"]["code"], "CONFIG_INVALID");
+        let message = json["error"]["message"].as_str().unwrap();
+        assert!(
+            message.contains("requires a preset"),
+            "the message must say a preset is required: {message}"
+        );
+    }
+
     #[tokio::test]
     async fn create_videotoolbox_profile_emits_bitrate_and_explicit_decode() {
         let seeded = seed().await;
@@ -181,6 +299,8 @@ mod profile_envelope {
         for quality in [
             Vec::new(),
             vec!["--crf", "23", "--cq", "23"],
+            vec!["--crf", "23", "--qp", "23"],
+            vec!["--cq", "23", "--qp", "23"],
             vec!["--cq", "23", "--bitrate-kbps", "8000"],
         ] {
             let mut args = vec![

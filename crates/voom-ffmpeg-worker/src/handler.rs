@@ -6,7 +6,10 @@ use std::time::Duration;
 
 use serde::{Serialize, de::DeserializeOwned};
 use time::OffsetDateTime;
-use voom_core::{ErrorCode, FailureClass, LeaseId, nvidia_decoder_for_video_codec};
+use voom_core::{
+    ErrorCode, FailureClass, LeaseId, expected_output_pixel_format, nvidia_decoder_for_video_codec,
+    video_pixel_format_depth,
+};
 use voom_worker_protocol::{
     AudioExpectedFacts, AudioObservedFacts, ExtractAudioOutputDescriptor, ExtractAudioOutputResult,
     ExtractAudioRequest, ExtractAudioResult, ExtractAudioStatus, OperationDispatch,
@@ -14,11 +17,12 @@ use voom_worker_protocol::{
     ProgressFrame, ProtocolError, TranscodeAudioRequest, TranscodeAudioResult,
     TranscodeAudioStatus, TranscodeVideoExpectedFacts, TranscodeVideoObservedFacts,
     TranscodeVideoProfile, TranscodeVideoRequest, TranscodeVideoResult, TranscodeVideoStatus,
-    VideoHardwareAssignment, validate_extract_audio_request, validate_extract_audio_result,
+    VideoHardwareAssignment, vaapi_hardware_token, validate_extract_audio_request,
+    validate_extract_audio_result,
 };
 
 use crate::ffmpeg::{
-    FfmpegConfig, FfmpegError, InputProbe, VideoTranscodeInput, probe_input,
+    FfmpegConfig, FfmpegError, InputProbe, VaapiDeviceBinding, VideoTranscodeInput, probe_input,
     run_ffmpeg_extract_audio, run_ffmpeg_transcode, run_ffmpeg_transcode_audio,
 };
 use crate::observe::{ObserveError, observe_file_facts};
@@ -444,11 +448,20 @@ fn validate_copy_dimensions(
 
 /// An unknown (empty) probe value under a constraint is non-conforming — we
 /// cannot prove the stream matches, so fail loudly.
+/// `-c:v copy` runs no encoder, so a stream copy under a hardware profile is not a
+/// hardware operation and must be allowed when the source already conforms. The source's
+/// pixel format is a *file* format, so it is compared against the format a conforming
+/// output file carries — not the profile's `pixel_format`, which for a hardware profile
+/// names the surface the encoder would have consumed. Comparing the surface refused every
+/// legitimate copy under a VAAPI profile.
 fn validate_copy_pixel_format(
     profile: &TranscodeVideoProfile,
     probe: &InputProbe,
 ) -> Result<(), TranscodeVideoError> {
-    let Some(required_pf) = &profile.pixel_format else {
+    let required_pf = expected_output_pixel_format(profile).map_err(|error| {
+        malformed_worker_result("copy_video", format!("copy_video precondition: {error}"))
+    })?;
+    let Some(required_pf) = required_pf else {
         return Ok(());
     };
     if probe.pixel_format.is_empty() {
@@ -459,7 +472,7 @@ fn validate_copy_pixel_format(
             ),
         ));
     }
-    if &probe.pixel_format != required_pf {
+    if probe.pixel_format != required_pf {
         return Err(malformed_worker_result(
             "copy_video",
             format!(
@@ -722,34 +735,157 @@ fn validate_encoder_available(
     ))
 }
 
+/// Each encoder must run on the device the scheduler assigned it, and nowhere else.
+/// Dispatch is on the encoder's declared backend rather than on its name so a new
+/// hardware encoder cannot fall into a wildcard arm and be validated as software
+/// work on an unbound worker — the silent software fallback issue #409 forbids.
 fn validate_video_hardware_binding(
     request: &TranscodeVideoRequest,
     config: &FfmpegConfig,
     source: &InputProbe,
 ) -> Result<(), TranscodeVideoError> {
-    match request.profile.encoder.as_str() {
-        "hevc_nvenc" => validate_nvidia_binding(request, config, &source.codec),
-        "h264_videotoolbox" | "hevc_videotoolbox" => {
+    let descriptor = voom_core::encoder_descriptor(&request.profile.encoder).ok_or_else(|| {
+        config_invalid(
+            "transcode_video",
+            format!("unknown video encoder `{}`", request.profile.encoder),
+        )
+    })?;
+    match descriptor.backend {
+        voom_core::VideoEncoderBackend::Software => validate_software_binding(request, config),
+        voom_core::VideoEncoderBackend::Nvidia => {
+            validate_nvidia_binding(request, config, &source.codec)
+        }
+        voom_core::VideoEncoderBackend::Vaapi => validate_vaapi_binding(request, config, source),
+        voom_core::VideoEncoderBackend::VideoToolbox => {
             validate_videotoolbox_binding(request, config, source)
         }
-        _ => validate_software_binding(request, config),
     }
 }
 
+/// Software video work belongs on an unbound worker: a device-bound one would
+/// occupy the accelerator with an encode any worker could have run (ADR 0049 §5).
 fn validate_software_binding(
     request: &TranscodeVideoRequest,
     config: &FfmpegConfig,
 ) -> Result<(), TranscodeVideoError> {
-    let software_assignment = matches!(
-        request.hardware_assignment,
-        None | Some(VideoHardwareAssignment::Software(_))
-    );
-    if config.accelerator.is_none() && software_assignment {
+    let software_assignment = match &request.hardware_assignment {
+        None | Some(VideoHardwareAssignment::Software(_)) => true,
+        Some(
+            VideoHardwareAssignment::Nvidia(_)
+            | VideoHardwareAssignment::Vaapi(_)
+            | VideoHardwareAssignment::VideoToolbox(_),
+        ) => false,
+    };
+    if config.accelerator().is_none() && software_assignment {
         return Ok(());
     }
     Err(config_invalid(
         "transcode_video",
         "software video work requires an unbound software worker".to_owned(),
+    ))
+}
+
+/// and a `vaapi`-decode profile must name a codec that actually decoded on it at
+/// startup (ADR 0052 §2). Every failure here is terminal: there is no software
+/// encoder to fall back to.
+fn validate_vaapi_binding(
+    request: &TranscodeVideoRequest,
+    config: &FfmpegConfig,
+    source: &InputProbe,
+) -> Result<(), TranscodeVideoError> {
+    let Some(VideoHardwareAssignment::Vaapi(assignment)) = &request.hardware_assignment else {
+        return Err(config_invalid(
+            "transcode_video",
+            "hevc_vaapi requires scheduler assignment; start a configured worker with: \
+             voom worker run-local --kind ffmpeg --vaapi-device <pci-address>"
+                .to_owned(),
+        ));
+    };
+    let Some(binding) = config.vaapi() else {
+        return Err(config_invalid(
+            "transcode_video",
+            "assigned VAAPI work reached an unbound worker".to_owned(),
+        ));
+    };
+    let bound_address = &binding.descriptor.pci_address;
+    if &assignment.pci_address != bound_address
+        || assignment.hardware_token != vaapi_hardware_token(bound_address)
+    {
+        return Err(config_invalid(
+            "transcode_video",
+            format!(
+                "VAAPI assignment {} ({}) does not match worker {} ({bound_address})",
+                assignment.hardware_token,
+                assignment.pci_address,
+                vaapi_hardware_token(bound_address),
+            ),
+        ));
+    }
+    if !request.profile.decode.is_vaapi() {
+        return Ok(());
+    }
+    validate_vaapi_decoder_probed(binding, &source.codec)?;
+    validate_vaapi_bit_depth(request, &source.pixel_format)
+}
+
+/// VAAPI hardware decode is the one path that carries the *decoder's* surface
+/// format straight into the encoder: `vaapi_filter_args` emits no `-vf` there, on
+/// purpose, so that frames never leave the GPU. Nothing downstream can therefore
+/// reconcile a source bit depth the profile disagrees with — `hevc_vaapi` reports
+/// only `No usable encoding profile found`, which reaches the operator as an
+/// opaque worker crash carrying an `FFmpeg` dump.
+///
+/// Software decode needs no such check: its `format=<surface>,hwupload` filter
+/// converts the frame to the profile's surface before upload, so a depth change
+/// there is the operator asking for exactly that.
+fn validate_vaapi_bit_depth(
+    request: &TranscodeVideoRequest,
+    source_pixel_format: &str,
+) -> Result<(), TranscodeVideoError> {
+    // `vaapi_surface_format` defaults an absent `pixel_format` to nv12, so this
+    // must default identically: reading it as "no declared depth" would reject
+    // every profile that leaves the field unset.
+    let surface_format = request.profile.pixel_format.as_deref().unwrap_or("nv12");
+    let source_depth = video_pixel_format_depth(source_pixel_format);
+    if source_depth.is_some() && source_depth == video_pixel_format_depth(surface_format) {
+        return Ok(());
+    }
+    Err(config_invalid(
+        "transcode_video",
+        format!(
+            "VAAPI decode source pixel format `{source_pixel_format}` is incompatible with \
+             profile surface format `{surface_format}`; a hardware-decoded source reaches the \
+             encoder at its own bit depth, so pair a 10-bit source with `p010`/`main10` and an \
+             8-bit source with `nv12`/`main`, or set the profile to software decode to convert \
+             the frame on upload"
+        ),
+    ))
+}
+
+/// Compares through `vaapi_video_decode_codec`, which is what the planner and the
+/// scheduler compare through. An exact string test here accepted a narrower set
+/// than they did: a source ffprobe spells `h265` — the alias the helper folds onto
+/// `hevc` — passed both of them and was refused here, blocking work the device had
+/// genuinely probed a decoder for.
+fn validate_vaapi_decoder_probed(
+    binding: &VaapiDeviceBinding,
+    source_codec: &str,
+) -> Result<(), TranscodeVideoError> {
+    if let Some(canonical) = voom_core::vaapi_video_decode_codec(source_codec)
+        && binding
+            .descriptor
+            .decoders
+            .iter()
+            .any(|decoder| decoder.eq_ignore_ascii_case(canonical))
+    {
+        return Ok(());
+    }
+    Err(config_invalid(
+        "transcode_video",
+        format!(
+            "VAAPI device {} did not probe a decoder for source codec `{source_codec}`",
+            binding.descriptor.pci_address
+        ),
     ))
 }
 
@@ -766,9 +902,7 @@ fn validate_nvidia_binding(
                 .to_owned(),
         ));
     };
-    let Some(voom_worker_protocol::VideoAcceleratorDescriptor::Nvidia(accelerator)) =
-        &config.accelerator
-    else {
+    let Some(accelerator) = config.nvidia() else {
         return Err(config_invalid(
             "transcode_video",
             "assigned NVIDIA work reached an unbound worker".to_owned(),
@@ -824,9 +958,7 @@ fn validate_videotoolbox_binding(
             ),
         ));
     };
-    let Some(voom_worker_protocol::VideoAcceleratorDescriptor::VideoToolbox(accelerator)) =
-        &config.accelerator
-    else {
+    let Some(accelerator) = config.videotoolbox() else {
         return Err(config_invalid(
             "transcode_video",
             "assigned VideoToolbox work reached an unbound worker".to_owned(),
@@ -896,14 +1028,6 @@ fn validate_videotoolbox_bit_depth(
             request.profile.pixel_format.as_deref().unwrap_or("unknown")
         ),
     ))
-}
-
-fn video_pixel_format_depth(pixel_format: &str) -> Option<u8> {
-    match pixel_format {
-        "yuv420p" | "nv12" => Some(8),
-        "yuv420p10le" | "p010le" => Some(10),
-        _ => None,
-    }
 }
 
 fn validate_request_contract(request: &TranscodeVideoRequest) -> Result<(), TranscodeVideoError> {

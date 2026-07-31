@@ -2630,6 +2630,7 @@ version = "0.1.0-dev"
 dependencies = [
  "blake3",
  "hex",
+ "insta",
  "libc",
  "serde",
  "serde_json",

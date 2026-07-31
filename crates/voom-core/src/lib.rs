@@ -26,8 +26,9 @@ pub mod config {
 
 pub mod encoder_caps {
     pub use crate::media::encoder_caps::{
-        EncoderDescriptor, NVIDIA_VIDEO_DECODERS, PresetDomain, QualityDomain, VideoEncoderBackend,
-        encoder_descriptor, nvidia_decoder_for_video_codec,
+        EncoderDescriptor, NVIDIA_VIDEO_DECODERS, PresetDomain, QualityDomain,
+        VAAPI_VIDEO_DECODERS, VideoEncoderBackend, encoder_descriptor,
+        nvidia_decoder_for_video_codec, vaapi_video_decode_codec, video_pixel_format_depth,
     };
 }
 
@@ -77,9 +78,10 @@ pub mod transcode_video_profile {
         NvidiaVideoDecode, SoftwareVideoDecode, TRANSCODE_VIDEO_CODEC,
         TRANSCODE_VIDEO_CODEC_ALIAS_H265, TRANSCODE_VIDEO_CODEC_AV1, TRANSCODE_VIDEO_CODEC_H264,
         TRANSCODE_VIDEO_CONTAINER, TRANSCODE_VIDEO_CONTAINER_MP4, TRANSCODE_VIDEO_PROFILE,
-        TranscodeVideoProfile, VideoDecodeMode, VideoToolboxVideoDecode, canonical_video_codec,
-        is_supported_transcode_video_codec, is_supported_transcode_video_container,
-        normalize_codec_token, validate_profile_against_descriptor,
+        TranscodeVideoProfile, VaapiVideoDecode, VideoDecodeMode, VideoToolboxVideoDecode,
+        canonical_video_codec, expected_output_pixel_format, is_supported_transcode_video_codec,
+        is_supported_transcode_video_container, normalize_codec_token,
+        validate_profile_against_descriptor,
     };
 }
 
@@ -90,8 +92,9 @@ pub mod version {
 pub use clock::{Clock, SystemClock, format_iso8601};
 pub use config::{Config, EnvSource, LogFormat, MapEnv, ProcessEnv};
 pub use encoder_caps::{
-    EncoderDescriptor, NVIDIA_VIDEO_DECODERS, PresetDomain, QualityDomain, VideoEncoderBackend,
-    encoder_descriptor, nvidia_decoder_for_video_codec,
+    EncoderDescriptor, NVIDIA_VIDEO_DECODERS, PresetDomain, QualityDomain, VAAPI_VIDEO_DECODERS,
+    VideoEncoderBackend, encoder_descriptor, nvidia_decoder_for_video_codec,
+    vaapi_video_decode_codec, video_pixel_format_depth,
 };
 pub use error::{ErrorCode, VoomError};
 pub use failure::{FailureClass, FailureRetryClass};
@@ -114,9 +117,10 @@ pub use transcode_video_profile::{
     NvidiaVideoDecode, SoftwareVideoDecode, TRANSCODE_VIDEO_CODEC,
     TRANSCODE_VIDEO_CODEC_ALIAS_H265, TRANSCODE_VIDEO_CODEC_AV1, TRANSCODE_VIDEO_CODEC_H264,
     TRANSCODE_VIDEO_CONTAINER, TRANSCODE_VIDEO_CONTAINER_MP4, TRANSCODE_VIDEO_PROFILE,
-    TranscodeVideoProfile, VideoDecodeMode, VideoToolboxVideoDecode, canonical_video_codec,
-    is_supported_transcode_video_codec, is_supported_transcode_video_container,
-    normalize_codec_token, validate_profile_against_descriptor,
+    TranscodeVideoProfile, VaapiVideoDecode, VideoDecodeMode, VideoToolboxVideoDecode,
+    canonical_video_codec, expected_output_pixel_format, is_supported_transcode_video_codec,
+    is_supported_transcode_video_container, normalize_codec_token,
+    validate_profile_against_descriptor,
 };
 pub use version::VersionInfo;
 

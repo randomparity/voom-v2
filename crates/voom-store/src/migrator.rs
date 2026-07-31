@@ -136,6 +136,11 @@ const MIGRATION_0030_SQL: &str =
 const MIGRATION_0031_SQL: &str =
     include_str!("../../../migrations/0031_backend_neutral_accelerator_claims.sql");
 
+/// SQL for migration 0032 (VAAPI video acceleration, #409), embedded at
+/// compile time.
+const MIGRATION_0032_SQL: &str =
+    include_str!("../../../migrations/0032_vaapi_video_acceleration.sql");
+
 /// Embedded migration set, constructed without the `sqlx::migrate!` macro.
 ///
 /// We don't use sqlx's `macros` feature: it pulls `sqlx-macros-core`, which
@@ -366,6 +371,13 @@ pub static MIGRATOR: LazyLock<Migrator> = LazyLock::new(|| Migrator {
             Cow::Borrowed("backend_neutral_accelerator_claims"),
             MigrationType::Simple,
             Cow::Borrowed(MIGRATION_0031_SQL),
+            false,
+        ),
+        Migration::new(
+            32,
+            Cow::Borrowed("vaapi_video_acceleration"),
+            MigrationType::Simple,
+            Cow::Borrowed(MIGRATION_0032_SQL),
             false,
         ),
     ]),

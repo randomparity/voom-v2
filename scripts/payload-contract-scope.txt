@@ -1,6 +1,9 @@
 # In-scope source files for check-payload-deny-unknown.sh.
 # Derived from docs/payload-contract-inventory.md (Class-T / T-upstream rows).
-# Add a line here when a new durable column is typed into a struct.
+# Add a line here when a new durable column is typed into a struct whose
+# defining file is not already listed. Migration 0032's `video_profiles.qp` and
+# nullable `preset` land in TranscodeVideoProfile, already covered by the last
+# entry below; see the "Durable typed column changes" table in the inventory.
 crates/voom-events/src/payload/artifact.rs
 crates/voom-events/src/payload/commit.rs
 crates/voom-events/src/payload/execution.rs
@@ -23,3 +26,7 @@ crates/voom-policy/src/data/video_profile.rs
 crates/voom-policy/src/diagnostic.rs
 crates/voom-policy/src/syntax/span.rs
 crates/voom-core/src/media/transcode_video_profile.rs
+# worker_capabilities.extra's `accelerator` object is read typed in
+# voom-control-plane/src/video_hardware.rs; this is its defining file. See the
+# "Non-durable coordinated retype" note in the inventory.
+crates/voom-worker-protocol/src/video_acceleration.rs

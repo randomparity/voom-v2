@@ -34,6 +34,12 @@ pub(crate) fn historical_accelerator_descriptor(
     parse_descriptor(value, "historical worker capability").map(Some)
 }
 
+/// Every stored descriptor is `backend`-tagged: migration 0031 backfilled `nvidia`
+/// onto the pre-#411 rows, so there is no untagged shape left to sniff for.
+///
+/// A backend this build does not know is a malformed-descriptor error for that one
+/// worker; returning `Ok(None)` instead would let a device-bound worker pass as
+/// unaccelerated and pick up software work (ADR 0049 §5).
 fn parse_descriptor(
     value: &serde_json::Value,
     context: &str,

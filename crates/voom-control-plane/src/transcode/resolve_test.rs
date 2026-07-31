@@ -18,8 +18,9 @@ fn inline_av1_settings() -> VideoProfileSettings {
         encoder: "libsvtav1".to_owned(),
         crf: Some(28),
         cq: None,
+        qp: None,
         bitrate_kbps: None,
-        preset: "6".to_owned(),
+        preset: Some("6".to_owned()),
         tune: None,
         codec_profile: None,
         codec_level: None,
@@ -128,8 +129,9 @@ fn profile_hevc_mp4_copy_compatible() -> TranscodeVideoProfile {
         encoder: "libx265".to_owned(),
         crf: Some(23),
         cq: None,
+        qp: None,
         bitrate_kbps: None,
-        preset: "medium".to_owned(),
+        preset: Some("medium".to_owned()),
         tune: None,
         codec_profile: None,
         codec_level: None,
@@ -243,4 +245,109 @@ fn h265_alias_is_recognized_as_hevc() {
     // ffprobe may report "h265" alias
     let h265_source = snapshot_with_video("h265", 1280, 720, "mkv");
     assert!(decide_copy_video(&profile, &h265_source));
+}
+
+/// An inline VAAPI body resolves to a typed profile carrying `qp` and no `preset`, and
+/// the resolver's descriptor validation accepts it. Before `qp` and a nullable `preset`
+/// reached the settings type, resolution silently dropped the quality parameter and
+/// invented a preset, so the resolver rejected every inline VAAPI profile.
+#[tokio::test]
+async fn resolves_inline_vaapi_settings_to_a_qp_profile_with_no_preset() {
+    let (repo, _tmp) = seeded_repo().await;
+    let settings = VideoProfileSettings {
+        encoder: "hevc_vaapi".to_owned(),
+        crf: None,
+        cq: None,
+        qp: Some(24),
+        bitrate_kbps: None,
+        preset: None,
+        tune: None,
+        codec_profile: Some("main10".to_owned()),
+        codec_level: None,
+        pixel_format: Some("p010".to_owned()),
+        max_width: None,
+        max_height: None,
+        output_container: None,
+        copy_compatible: None,
+        decode: voom_core::VideoDecodeMode::vaapi(),
+    };
+
+    let resolved =
+        resolve_video_profile_ref(&repo, &voom_policy::VideoProfileRef::Inline(settings))
+            .await
+            .unwrap();
+
+    assert_eq!(resolved.profile.encoder, "hevc_vaapi");
+    assert_eq!(resolved.profile.qp, Some(24));
+    assert!(resolved.profile.preset.is_none());
+    assert!(resolved.profile.crf.is_none());
+    assert!(resolved.profile.cq.is_none());
+    assert!(resolved.profile.decode.is_vaapi());
+    assert_eq!(resolved.output_container, "mkv");
+}
+
+/// `-c:v copy` runs no encoder, so a stream copy under a VAAPI profile is not a hardware
+/// operation and must be decided on whether the source already matches the output a
+/// conforming encode would write. The profile names the `nv12` surface; the snapshot
+/// reports the file's `yuv420p`. Comparing those two refused every legitimate copy, so a
+/// `copy_compatible` VAAPI profile silently re-encoded instead of copying.
+#[test]
+fn decide_copy_video_accepts_a_conforming_source_under_a_vaapi_profile() {
+    let mut profile = voom_core::TranscodeVideoProfile::default_hevc();
+    profile.encoder = "hevc_vaapi".to_owned();
+    profile.crf = None;
+    profile.qp = Some(24);
+    profile.preset = None;
+    profile.pixel_format = Some("nv12".to_owned());
+    profile.copy_compatible = true;
+
+    assert!(decide_copy_video(&profile, &hevc_yuv420p_snapshot()));
+}
+
+/// The mapping is not a blanket exemption: a 10-bit surface writes `yuv420p10le`, which
+/// an 8-bit source does not carry, so that source must still be re-encoded.
+#[test]
+fn decide_copy_video_refuses_an_eight_bit_source_under_a_ten_bit_vaapi_profile() {
+    let mut profile = voom_core::TranscodeVideoProfile::default_hevc();
+    profile.encoder = "hevc_vaapi".to_owned();
+    profile.crf = None;
+    profile.qp = Some(24);
+    profile.preset = None;
+    profile.pixel_format = Some("p010".to_owned());
+    profile.copy_compatible = true;
+
+    assert!(!decide_copy_video(&profile, &hevc_yuv420p_snapshot()));
+}
+
+fn hevc_yuv420p_snapshot() -> MediaSnapshotInput {
+    MediaSnapshotInput {
+        ordinal: 0,
+        target: TargetRef::Synthetic {
+            key: "variant-1".to_owned(),
+            kind: voom_policy::TargetKind::MediaVariant,
+        },
+        container: Some("mkv".to_owned()),
+        stream_summary: json!({
+            "video_stream_count": 1,
+            "streams": [{
+                "id": "stream-0",
+                "index": 0,
+                "kind": "video",
+                "codec_name": "hevc",
+                "width": 1280,
+                "height": 720,
+                "pixel_format": "yuv420p"
+            }],
+        }),
+        video_codec: Some("hevc".to_owned()),
+        width: Some(1280),
+        height: Some(720),
+        hdr: None,
+        bitrate: None,
+        duration_millis: None,
+        audio_languages: Vec::new(),
+        subtitle_languages: Vec::new(),
+        health_flags: Vec::new(),
+        existing_media_snapshot_id: None,
+    }
 }

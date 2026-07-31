@@ -3,6 +3,7 @@ pub mod profile;
 pub use profile::{cpu_cost, inline_profile_id};
 
 use serde_json::json;
+use voom_core::video_pixel_format_depth;
 use voom_policy::MediaSnapshotInput;
 
 use crate::{
@@ -138,18 +139,22 @@ fn transcode_video_shape(
         Ok(needs_change) => needs_change,
         Err(shape) => return shape,
     };
-    if needs_change
-        && resolved.decode.is_nvidia()
-        && voom_core::nvidia_decoder_for_video_codec(video_codec).is_none()
-    {
-        return TranscodeVideoShape::UnsupportedShape(format!(
-            "NVIDIA decode does not support source video codec `{video_codec}`"
-        ));
+    if needs_change && let Some(shape) = unsupported_hardware_decode_shape(resolved, video_codec) {
+        return shape;
     }
     if needs_change
         && resolved.decode.is_video_toolbox()
         && let Some(shape) = videotoolbox_decode_shape(snapshot, resolved)
     {
+        return shape;
+    }
+    if needs_change
+        && resolved.decode.is_vaapi()
+        && let Some(shape) = vaapi_decode_shape(snapshot, resolved)
+    {
+        return shape;
+    }
+    if needs_change && let Some(shape) = vaapi_dimension_shape(snapshot, resolved) {
         return shape;
     }
 
@@ -164,6 +169,30 @@ fn transcode_video_shape(
     } else {
         TranscodeVideoShape::Compliant
     }
+}
+
+/// A hardware-decode backend that cannot decode this source codec at all is a
+/// per-file fact, so it blocks the file at planning with an actionable reason rather
+/// than producing a ticket no device can ever satisfy (ADR 0049 §5). Whether the
+/// *bound device* probed a decoder for a codec the backend does support stays a
+/// scheduling concern.
+fn unsupported_hardware_decode_shape(
+    resolved: &voom_core::TranscodeVideoProfile,
+    video_codec: &str,
+) -> Option<TranscodeVideoShape> {
+    if resolved.decode.is_nvidia()
+        && voom_core::nvidia_decoder_for_video_codec(video_codec).is_none()
+    {
+        return Some(TranscodeVideoShape::UnsupportedShape(format!(
+            "NVIDIA decode does not support source video codec `{video_codec}`"
+        )));
+    }
+    if resolved.decode.is_vaapi() && voom_core::vaapi_video_decode_codec(video_codec).is_none() {
+        return Some(TranscodeVideoShape::UnsupportedShape(format!(
+            "VAAPI decode does not support source video codec `{video_codec}`"
+        )));
+    }
+    None
 }
 
 fn videotoolbox_decode_shape(
@@ -190,12 +219,74 @@ fn videotoolbox_decode_shape(
     )))
 }
 
-fn video_pixel_format_depth(pixel_format: &str) -> Option<u8> {
-    match pixel_format {
-        "yuv420p" | "nv12" => Some(8),
-        "yuv420p10le" | "p010le" => Some(10),
-        _ => None,
+/// The VAAPI counterpart of [`videotoolbox_decode_shape`], and blocking here is the
+/// whole point: a hardware-decoded VAAPI source reaches the encoder at the depth the
+/// decoder chose, because the command carries no filter to convert it. The worker
+/// refuses the pairing, so without this gate the planner would keep producing tickets
+/// that can only fail — a per-file fact turned into a dispatch loop (ADR 0049 §5).
+///
+/// An absent `pixel_format` means nv12, exactly as the worker's
+/// `vaapi_surface_format` reads it; the two must agree or the planner blocks work the
+/// worker would have run.
+fn vaapi_decode_shape(
+    snapshot: &MediaSnapshotInput,
+    resolved: &voom_core::TranscodeVideoProfile,
+) -> Option<TranscodeVideoShape> {
+    let Some(source_pixel_format) = video_stream_field(snapshot, "pixel_format") else {
+        return Some(TranscodeVideoShape::InsufficientFacts(
+            "snapshot video pixel_format is unknown".to_owned(),
+        ));
+    };
+    let Some(source_depth) = video_pixel_format_depth(source_pixel_format) else {
+        return Some(TranscodeVideoShape::UnsupportedShape(format!(
+            "VAAPI decode does not support source pixel format `{source_pixel_format}`"
+        )));
+    };
+    let surface_format = resolved.pixel_format.as_deref().unwrap_or("nv12");
+    if video_pixel_format_depth(surface_format) == Some(source_depth) {
+        return None;
     }
+    Some(TranscodeVideoShape::UnsupportedShape(format!(
+        "VAAPI decode source pixel format `{source_pixel_format}` is incompatible with profile \
+         surface format `{surface_format}`"
+    )))
+}
+
+/// `hevc_vaapi` has no verified scale filter in this slice, so a VAAPI profile
+/// carrying a dimension cap fails at the worker on every source that exceeds it.
+/// Both are ordinary policy fields, so the pairing is easy to author by accident —
+/// and without this gate the planner would emit a ticket per attempt for a file no
+/// device can ever satisfy, the same per-file-fact rule `vaapi_decode_shape` and
+/// `unsupported_hardware_decode_shape` already apply (ADR 0049 §5).
+///
+/// This keys on the *encoder* backend rather than the decode mode: the refusal is
+/// the encoder's missing filter, so it holds for a software-decoded source too.
+fn vaapi_dimension_shape(
+    snapshot: &MediaSnapshotInput,
+    resolved: &voom_core::TranscodeVideoProfile,
+) -> Option<TranscodeVideoShape> {
+    if !encoder_is_vaapi(resolved) {
+        return None;
+    }
+    let (Some(source_width), Some(source_height)) = (snapshot.width, snapshot.height) else {
+        return None;
+    };
+    let capped_width = resolved.max_width.unwrap_or(source_width);
+    let capped_height = resolved.max_height.unwrap_or(source_height);
+    if source_width <= capped_width && source_height <= capped_height {
+        return None;
+    }
+    Some(TranscodeVideoShape::UnsupportedShape(format!(
+        "profile `{}` caps output at {capped_width}x{capped_height} but the source is \
+         {source_width}x{source_height}, and `hevc_vaapi` has no verified scale filter in this \
+         slice",
+        resolved.name
+    )))
+}
+
+fn encoder_is_vaapi(resolved: &voom_core::TranscodeVideoProfile) -> bool {
+    voom_core::encoder_descriptor(&resolved.encoder)
+        .is_some_and(|descriptor| descriptor.backend == voom_core::VideoEncoderBackend::Vaapi)
 }
 
 fn transcode_video_needs_change(
@@ -248,11 +339,18 @@ fn dimensions_need_change(
     Ok(needs_change)
 }
 
+/// Compares the snapshot's pixel format against the format a conforming output *file*
+/// carries, not against the profile's `pixel_format`. For a hardware profile those
+/// differ: `pixel_format` names the surface the encoder consumes, which no file records,
+/// so comparing it directly would mark a conforming output non-compliant and re-plan the
+/// same transcode on every run — a plan that never converges.
 fn pixel_format_needs_change(
     snapshot: &MediaSnapshotInput,
     resolved: &voom_core::TranscodeVideoProfile,
 ) -> Result<bool, TranscodeVideoShape> {
-    let Some(target) = resolved.pixel_format.as_deref() else {
+    let target = voom_core::expected_output_pixel_format(resolved)
+        .map_err(TranscodeVideoShape::UnsupportedShape)?;
+    let Some(target) = target else {
         return Ok(false);
     };
     let Some(observed) = video_stream_field(snapshot, "pixel_format") else {
@@ -379,19 +477,22 @@ fn transcode_video_notes(
     resolved: &voom_core::TranscodeVideoProfile,
     snapshot: &MediaSnapshotInput,
 ) -> Vec<String> {
-    let mut notes = vec![
-        format!("encoder={}", resolved.encoder),
-        format!("speed={}", resolved.preset),
-        format!(
+    let mut notes = vec![format!("encoder={}", resolved.encoder)];
+    // An encoder with no speed knob contributes no speed note and no speed-derived
+    // cpu-cost note rather than a placeholder.
+    if let Some(preset) = &resolved.preset {
+        notes.push(format!("speed={preset}"));
+        notes.push(format!(
             "cpu_cost={}",
-            profile::cpu_cost(&resolved.encoder, &resolved.preset)
-        ),
-        resolved.crf.map_or_else(
-            || format!("cq={}", resolved.cq.unwrap_or_default()),
-            |crf| format!("crf={crf}"),
-        ),
-    ];
-    if let (Some(src_w), Some(src_h)) = (snapshot.width, snapshot.height) {
+            profile::cpu_cost(&resolved.encoder, preset)
+        ));
+    }
+    notes.extend(quality_note(resolved));
+    // Never on a VAAPI profile: that combination is blocked at planning, so a
+    // `downscale=` note there would describe work no device will perform.
+    if !encoder_is_vaapi(resolved)
+        && let (Some(src_w), Some(src_h)) = (snapshot.width, snapshot.height)
+    {
         let cap_w = resolved.max_width.unwrap_or(src_w);
         let cap_h = resolved.max_height.unwrap_or(src_h);
         if src_w > cap_w || src_h > cap_h {
@@ -399,6 +500,32 @@ fn transcode_video_notes(
         }
     }
     notes
+}
+
+/// The quality note names whichever parameter the profile actually carries.
+///
+/// Exactly one is legal per encoder — the one its `QualityDomain` names — so the
+/// note is driven off the descriptor's domain rather than off a tuple of the
+/// fields. A tuple match is only exhaustive over the fields that existed when it
+/// was written: the `(crf, cq, qp)` version silently reported *no* quality
+/// parameter for every bitrate-domain profile once that domain was added, which is
+/// exactly the drift the old comment claimed the match prevented. Adding a
+/// `QualityDomain` variant now fails to compile until it decides what it prints.
+///
+/// An absent value yields no note rather than a zero standing in for it: notes are
+/// operator-facing plan and compliance-report output, and `cq=0` on a qp-domain
+/// profile was a false statement about the profile naming a knob `hevc_vaapi` has
+/// no flag for.
+fn quality_note(resolved: &voom_core::TranscodeVideoProfile) -> Option<String> {
+    let descriptor = voom_core::encoder_descriptor(&resolved.encoder)?;
+    match descriptor.quality_domain {
+        voom_core::QualityDomain::Crf { .. } => resolved.crf.map(|crf| format!("crf={crf}")),
+        voom_core::QualityDomain::Cq { .. } => resolved.cq.map(|cq| format!("cq={cq}")),
+        voom_core::QualityDomain::Qp { .. } => resolved.qp.map(|qp| format!("qp={qp}")),
+        voom_core::QualityDomain::BitrateKbps { .. } => resolved
+            .bitrate_kbps
+            .map(|bitrate_kbps| format!("bitrate_kbps={bitrate_kbps}")),
+    }
 }
 
 fn transcode_video_observed_state(snapshot: &MediaSnapshotInput) -> Option<serde_json::Value> {

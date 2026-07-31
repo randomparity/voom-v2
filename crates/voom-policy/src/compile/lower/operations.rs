@@ -315,8 +315,9 @@ fn inline_settings_from(settings: &[crate::SettingAst]) -> crate::VideoProfileSe
         encoder: str_at("encoder").unwrap_or_default(),
         crf: str_at("crf").and_then(|value| value.parse::<u8>().ok()),
         cq: str_at("cq").and_then(|value| value.parse::<u8>().ok()),
+        qp: str_at("qp").and_then(|value| value.parse::<u8>().ok()),
         bitrate_kbps: u32_at("bitrate_kbps"),
-        preset: str_at("preset").unwrap_or_default(),
+        preset: str_at("preset"),
         tune: str_at("tune"),
         codec_profile: str_at("codec_profile"),
         codec_level: str_at("codec_level"),
@@ -328,11 +329,13 @@ fn inline_settings_from(settings: &[crate::SettingAst]) -> crate::VideoProfileSe
             ExprAst::Boolean(value) => Some(value.value),
             _ => None,
         }),
-        decode: match str_at("decode").as_deref() {
-            Some("nvidia") => voom_core::VideoDecodeMode::nvidia(),
-            Some("video_toolbox") => voom_core::VideoDecodeMode::video_toolbox(),
-            _ => voom_core::VideoDecodeMode::default(),
-        },
+        // Validation has already rejected a value outside the closed vocabulary, so
+        // an unparseable one lowers to the omitted default rather than being invented.
+        // Parsing beats a per-backend match here: a match arm omitted for a new backend
+        // would silently lower that backend's decode mode to software.
+        decode: str_at("decode")
+            .and_then(|value| voom_core::VideoDecodeMode::parse(&value).ok())
+            .unwrap_or_default(),
     }
 }
 

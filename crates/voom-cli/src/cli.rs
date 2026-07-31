@@ -936,24 +936,34 @@ pub struct VideoProfileFields {
     pub encoder: String,
     #[arg(
         long,
-        required_unless_present_any = ["cq", "bitrate_kbps"],
-        conflicts_with_all = ["cq", "bitrate_kbps"]
+        required_unless_present_any = ["cq", "qp", "bitrate_kbps"],
+        conflicts_with_all = ["cq", "qp", "bitrate_kbps"]
     )]
     pub crf: Option<u8>,
     #[arg(
         long,
-        required_unless_present_any = ["crf", "bitrate_kbps"],
-        conflicts_with_all = ["crf", "bitrate_kbps"]
+        required_unless_present_any = ["crf", "qp", "bitrate_kbps"],
+        conflicts_with_all = ["crf", "qp", "bitrate_kbps"]
     )]
     pub cq: Option<u8>,
+    /// Constant quantization parameter, the quality knob of a VAAPI encoder.
     #[arg(
         long,
-        required_unless_present_any = ["crf", "cq"],
-        conflicts_with_all = ["crf", "cq"]
+        required_unless_present_any = ["crf", "cq", "bitrate_kbps"],
+        conflicts_with_all = ["crf", "cq", "bitrate_kbps"]
+    )]
+    pub qp: Option<u8>,
+    #[arg(
+        long,
+        required_unless_present_any = ["crf", "cq", "qp"],
+        conflicts_with_all = ["crf", "cq", "qp"]
     )]
     pub bitrate_kbps: Option<u32>,
+    /// Speed/quality preset. Required by every encoder that has one and rejected
+    /// for an encoder that has none, so it is optional here and validated against
+    /// the encoder's capability descriptor.
     #[arg(long)]
-    pub preset: String,
+    pub preset: Option<String>,
     #[arg(long)]
     pub tune: Option<String>,
     #[arg(long)]
@@ -979,6 +989,7 @@ pub enum VideoDecodeBackendArg {
     #[default]
     Software,
     Nvidia,
+    Vaapi,
     VideoToolbox,
 }
 
@@ -987,6 +998,7 @@ impl From<VideoDecodeBackendArg> for voom_core::VideoDecodeMode {
         match value {
             VideoDecodeBackendArg::Software => Self::default(),
             VideoDecodeBackendArg::Nvidia => Self::nvidia(),
+            VideoDecodeBackendArg::Vaapi => Self::vaapi(),
             VideoDecodeBackendArg::VideoToolbox => Self::video_toolbox(),
         }
     }
@@ -1059,7 +1071,7 @@ pub enum WorkerCommand {
     RunLocal {
         #[arg(long)]
         kind: LocalWorkerKindArg,
-        #[arg(long, conflicts_with = "videotoolbox")]
+        #[arg(long, conflicts_with_all = ["vaapi_device", "videotoolbox"])]
         nvidia_device: Option<String>,
         #[arg(
             long,
@@ -1067,7 +1079,15 @@ pub enum WorkerCommand {
             value_parser = clap::value_parser!(u32).range(1..=16)
         )]
         nvidia_max_sessions: Option<u32>,
-        #[arg(long, conflicts_with = "nvidia_device")]
+        #[arg(long, conflicts_with_all = ["nvidia_device", "videotoolbox"])]
+        vaapi_device: Option<String>,
+        #[arg(
+            long,
+            requires = "vaapi_device",
+            value_parser = clap::value_parser!(u32).range(1..=16)
+        )]
+        vaapi_max_sessions: Option<u32>,
+        #[arg(long, conflicts_with_all = ["nvidia_device", "vaapi_device"])]
         videotoolbox: bool,
         #[arg(
             long,

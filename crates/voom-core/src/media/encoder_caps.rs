@@ -8,6 +8,9 @@ pub enum PresetDomain {
     Named(&'static [&'static str]),
     /// An inclusive numeric range, e.g. SVT-AV1 `-preset 0..=13`.
     NumericRange { min: u8, max: u8 },
+    /// The encoder has no speed knob at all, e.g. `hevc_vaapi` exposes neither
+    /// `-preset` nor `-compression_level`.
+    None,
 }
 
 /// The encoder-specific constant-quality control accepted by a profile.
@@ -17,15 +20,18 @@ pub enum QualityDomain {
     Crf { min: u8, max: u8 },
     /// NVIDIA's constant-quality target in VBR rate-control mode.
     Cq { min: u8, max: u8 },
+    /// VAAPI's constant quantization parameter, used with `-rc_mode CQP`.
+    Qp { min: u8, max: u8 },
     /// `VideoToolbox`'s target bitrate in kilobits per second.
     BitrateKbps { min: u32, max: u32 },
 }
 
 /// Whether an encoder executes in software or on a named accelerator backend.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum VideoEncoderBackend {
     Software,
     Nvidia,
+    Vaapi,
     VideoToolbox,
 }
 
@@ -44,6 +50,20 @@ pub struct EncoderDescriptor {
     pub ten_bit_pixel_formats: &'static [&'static str],
     /// Codec profiles that only allow 8-bit pixel formats.
     pub eight_bit_only_profiles: &'static [&'static str],
+    /// Codec profiles that *require* a ten-bit pixel format. Empty for every
+    /// encoder whose `pixel_format` names a software format, where `FFmpeg` derives
+    /// a workable depth itself; populated only where the field names a hardware
+    /// **surface** the encoder receives and cannot convert.
+    pub ten_bit_only_profiles: &'static [&'static str],
+    /// Pairs each hardware *surface* format in `pixel_formats` with the pixel format a
+    /// conforming output file actually carries.
+    ///
+    /// Empty for a software or NVENC encoder, whose `pixel_formats` already name file
+    /// formats. A hardware encoder consumes a surface the file never records: `nv12`
+    /// writes `yuv420p` and `p010` writes `yuv420p10le` (issue #409 design §2.2,
+    /// measured). Every comparison of a profile's `pixel_format` against an observed
+    /// file format must go through this, or a conforming encode looks non-conforming.
+    pub surface_output_pixel_formats: &'static [(&'static str, &'static str)],
     /// `libaom-av1` constant-quality mode requires `-b:v 0`.
     pub requires_bitrate_zero: bool,
 }
@@ -83,6 +103,8 @@ const X265: EncoderDescriptor = EncoderDescriptor {
     ],
     ten_bit_pixel_formats: &["yuv420p10le", "yuv422p10le", "yuv444p10le"],
     eight_bit_only_profiles: &["main"],
+    ten_bit_only_profiles: &[],
+    surface_output_pixel_formats: &[],
     requires_bitrate_zero: false,
 };
 
@@ -98,6 +120,8 @@ const SVTAV1: EncoderDescriptor = EncoderDescriptor {
     pixel_formats: &["yuv420p", "yuv420p10le"],
     ten_bit_pixel_formats: &["yuv420p10le"],
     eight_bit_only_profiles: &[],
+    ten_bit_only_profiles: &[],
+    surface_output_pixel_formats: &[],
     requires_bitrate_zero: false,
 };
 
@@ -114,6 +138,8 @@ const LIBAOM: EncoderDescriptor = EncoderDescriptor {
     pixel_formats: &["yuv420p", "yuv420p10le"],
     ten_bit_pixel_formats: &["yuv420p10le"],
     eight_bit_only_profiles: &[],
+    ten_bit_only_profiles: &[],
+    surface_output_pixel_formats: &[],
     requires_bitrate_zero: true,
 };
 
@@ -133,9 +159,34 @@ const HEVC_NVENC: EncoderDescriptor = EncoderDescriptor {
     pixel_formats: &["yuv420p", "yuv420p10le"],
     ten_bit_pixel_formats: &["yuv420p10le"],
     eight_bit_only_profiles: &["main"],
+    ten_bit_only_profiles: &[],
+    surface_output_pixel_formats: &[],
     requires_bitrate_zero: true,
 };
 
+/// `-qp` is `0..52` on this encoder and 0 means auto, so the operator range starts at 1.
+/// `-preset` and `-compression_level` do not exist, and `-level` is not offered in this
+/// slice. Surfaces are hardware formats only. Measured on the acceptance host recorded
+/// in the issue #409 design §2.
+const HEVC_VAAPI: EncoderDescriptor = EncoderDescriptor {
+    encoder: "hevc_vaapi",
+    target_codec: "hevc",
+    quality_domain: QualityDomain::Qp { min: 1, max: 52 },
+    backend: VideoEncoderBackend::Vaapi,
+    preset_domain: PresetDomain::None,
+    tunes: &[],
+    codec_profiles: &["main", "main10"],
+    codec_levels: &[],
+    pixel_formats: &["nv12", "p010"],
+    ten_bit_pixel_formats: &["p010"],
+    eight_bit_only_profiles: &["main"],
+    ten_bit_only_profiles: &["main10"],
+    surface_output_pixel_formats: &[("nv12", "yuv420p"), ("p010", "yuv420p10le")],
+    requires_bitrate_zero: false,
+};
+
+/// `VideoToolbox` consumes and records the same file formats, so it declares no
+/// surface pairing: `pixel_formats` above are already what the output file carries.
 const H264_VIDEOTOOLBOX: EncoderDescriptor = EncoderDescriptor {
     encoder: "h264_videotoolbox",
     target_codec: "h264",
@@ -151,6 +202,8 @@ const H264_VIDEOTOOLBOX: EncoderDescriptor = EncoderDescriptor {
     pixel_formats: &["yuv420p"],
     ten_bit_pixel_formats: &[],
     eight_bit_only_profiles: &["high"],
+    ten_bit_only_profiles: &[],
+    surface_output_pixel_formats: &[],
     requires_bitrate_zero: false,
 };
 
@@ -169,6 +222,8 @@ const HEVC_VIDEOTOOLBOX: EncoderDescriptor = EncoderDescriptor {
     pixel_formats: &["yuv420p", "yuv420p10le"],
     ten_bit_pixel_formats: &["yuv420p10le"],
     eight_bit_only_profiles: &["main"],
+    ten_bit_only_profiles: &[],
+    surface_output_pixel_formats: &[],
     requires_bitrate_zero: false,
 };
 
@@ -177,6 +232,7 @@ const DESCRIPTORS: &[EncoderDescriptor] = &[
     SVTAV1,
     LIBAOM,
     HEVC_NVENC,
+    HEVC_VAAPI,
     H264_VIDEOTOOLBOX,
     HEVC_VIDEOTOOLBOX,
 ];
@@ -186,6 +242,11 @@ pub const NVIDIA_VIDEO_DECODERS: &[(&str, &str)] = &[
     ("hevc", "hevc_cuvid"),
     ("av1", "av1_cuvid"),
 ];
+
+/// Codecs VAAPI can decode in hardware. A flat list, not `NVIDIA_VIDEO_DECODERS`'
+/// `(codec, decoder)` pairs: VAAPI decode is selected by `-hwaccel vaapi` and the
+/// codec's own decoder, so there is no per-codec decoder name to carry.
+pub const VAAPI_VIDEO_DECODERS: &[&str] = &["h264", "hevc", "av1"];
 
 #[must_use]
 pub fn encoder_descriptor(encoder: &str) -> Option<&'static EncoderDescriptor> {
@@ -203,6 +264,47 @@ pub fn nvidia_decoder_for_video_codec(codec: &str) -> Option<&'static str> {
         .iter()
         .find(|(candidate, _)| codec.eq_ignore_ascii_case(candidate))
         .map(|(_, decoder)| *decoder)
+}
+
+/// The canonical `VAAPI_VIDEO_DECODERS` codec a source codec name decodes as, or
+/// `None` when VAAPI cannot decode it.
+///
+/// The counterpart of [`nvidia_decoder_for_video_codec`], and it normalizes the same
+/// `h265` alias. It returns a codec rather than a decoder name because VAAPI decode
+/// is selected by `-hwaccel vaapi` plus the codec's own decoder, so there is no
+/// per-codec decoder name to return.
+#[must_use]
+pub fn vaapi_video_decode_codec(codec: &str) -> Option<&'static str> {
+    let codec = if codec.eq_ignore_ascii_case("h265") {
+        "hevc"
+    } else {
+        codec
+    };
+    VAAPI_VIDEO_DECODERS
+        .iter()
+        .copied()
+        .find(|candidate| codec.eq_ignore_ascii_case(candidate))
+}
+
+/// The bit depth a pixel format carries, or `None` for one this slice does not map.
+///
+/// Deliberately maps **both** vocabularies: the file formats a probe reports
+/// (`yuv420p`, `yuv420p10le`) and the surface formats a hardware profile names
+/// (`nv12`, `p010`). Depth is the only property the two share, which is what lets a
+/// surface be compared against a source at all. `p010` is VAAPI's spelling of the
+/// surface `p010le` names.
+///
+/// It lives here because the planner and the worker must answer this identically.
+/// Each held its own copy of this table, and a format added to one but not the other
+/// would have put them back into exactly the disagreement that gate ordering already
+/// had to be fixed for twice.
+#[must_use]
+pub const fn video_pixel_format_depth(pixel_format: &str) -> Option<u8> {
+    match pixel_format.as_bytes() {
+        b"yuv420p" | b"nv12" => Some(8),
+        b"yuv420p10le" | b"p010le" | b"p010" => Some(10),
+        _ => None,
+    }
 }
 
 impl EncoderDescriptor {
@@ -223,6 +325,14 @@ impl EncoderDescriptor {
     }
 
     #[must_use]
+    pub const fn accepts_qp(&self, qp: u8) -> bool {
+        let QualityDomain::Qp { min, max } = self.quality_domain else {
+            return false;
+        };
+        qp >= min && qp <= max
+    }
+
+    #[must_use]
     pub const fn accepts_bitrate_kbps(&self, bitrate_kbps: u32) -> bool {
         let QualityDomain::BitrateKbps { min, max } = self.quality_domain else {
             return false;
@@ -237,6 +347,7 @@ impl EncoderDescriptor {
             PresetDomain::NumericRange { min, max } => preset
                 .parse::<u8>()
                 .is_ok_and(|value| value >= min && value <= max),
+            PresetDomain::None => false,
         }
     }
 
@@ -260,6 +371,25 @@ impl EncoderDescriptor {
         self.pixel_formats.contains(&pixel_format)
     }
 
+    /// The pixel format a conforming output file carries for `pixel_format`.
+    ///
+    /// For a software or NVENC encoder this is `pixel_format` itself. For a hardware
+    /// encoder it is the file format the named surface writes, and `None` means the
+    /// surface has no recorded output format — which cannot happen for a
+    /// descriptor-validated profile, because every entry in `pixel_formats` is mapped
+    /// (enforced by test), so it is a loud signal that a surface was added without
+    /// recording what it writes.
+    #[must_use]
+    pub fn output_pixel_format<'a>(&self, pixel_format: &'a str) -> Option<&'a str> {
+        if self.surface_output_pixel_formats.is_empty() {
+            return Some(pixel_format);
+        }
+        self.surface_output_pixel_formats
+            .iter()
+            .find(|(surface, _)| *surface == pixel_format)
+            .map(|(_, output)| *output)
+    }
+
     /// A 10-bit pixel format is incompatible with an 8-bit-only codec profile.
     #[must_use]
     pub fn pixel_format_compatible_with_profile(
@@ -274,6 +404,30 @@ impl EncoderDescriptor {
             return true;
         }
         !self.ten_bit_pixel_formats.contains(&pixel_format)
+    }
+
+    /// The ten-bit direction of [`Self::pixel_format_compatible_with_profile`].
+    ///
+    /// Where `pixel_format` names a hardware surface it is the depth the encoder
+    /// receives and cannot convert, so a ten-bit-only `codec_profile` over an
+    /// eight-bit surface always fails at execution — as does one over *no* surface,
+    /// which resolves to the eight-bit default. `hevc_vaapi` answers both with
+    /// `No usable encoding profile found`, verified on the acceptance device.
+    ///
+    /// Encoders declaring no ten-bit-only profiles are unaffected.
+    #[must_use]
+    pub fn profile_requires_ten_bit_pixel_format(
+        &self,
+        codec_profile: Option<&str>,
+        pixel_format: Option<&str>,
+    ) -> bool {
+        let Some(profile) = codec_profile else {
+            return true;
+        };
+        if !self.ten_bit_only_profiles.contains(&profile) {
+            return true;
+        }
+        pixel_format.is_some_and(|format| self.ten_bit_pixel_formats.contains(&format))
     }
 }
 
