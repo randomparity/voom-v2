@@ -4,12 +4,13 @@
 //! facts, and exposes worker-protocol handlers for probe-file dispatch.
 
 pub mod ffprobe;
+pub mod handler;
 pub mod normalize;
 pub mod observe;
 
 pub use ffprobe::{
-    FFPROBE_BIN_ENV, FfprobeConfig, FfprobeConfigError, FfprobeError,
-    operation_handler_with_config, run_ffprobe_json,
+    FFPROBE_BIN_ENV, FfprobeConfig, FfprobeConfigError, FfprobeError, run_ffprobe_json,
 };
+pub use handler::operation_handler;
 pub use normalize::{WorkerError, normalize_ffprobe_json};
 pub use observe::observe_file_facts;
