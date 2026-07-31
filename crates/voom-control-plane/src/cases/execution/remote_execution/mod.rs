@@ -307,9 +307,7 @@ impl ReplayRoute for RemoteFailInput {
 }
 
 pub(super) fn decode_acquire_replay(data: JsonValue) -> Result<RemoteAcquireOutcome, VoomError> {
-    let data = acquire_replay_with_legacy_decision_id(data);
-    serde_json::from_value(data)
-        .map_err(|e| VoomError::Internal(format!("remote acquire replay decode: {e}")))
+    decode_replay(data, "remote acquire")
 }
 
 pub(super) fn decode_replay<T>(data: JsonValue, label: &str) -> Result<T, VoomError>
@@ -318,22 +316,6 @@ where
 {
     serde_json::from_value(data)
         .map_err(|e| VoomError::Internal(format!("{label} replay decode: {e}")))
-}
-
-fn acquire_replay_with_legacy_decision_id(mut data: JsonValue) -> JsonValue {
-    let Some(outcome) = data.get("outcome").and_then(JsonValue::as_str) else {
-        return data;
-    };
-    if !matches!(outcome, "idle" | "no_candidate" | "leased") {
-        return data;
-    }
-    let Some(object) = data.as_object_mut() else {
-        return data;
-    };
-    object
-        .entry("scheduler_decision_id")
-        .or_insert(JsonValue::from(0_u64));
-    data
 }
 
 fn replay_error(code: &str, message: String) -> VoomError {

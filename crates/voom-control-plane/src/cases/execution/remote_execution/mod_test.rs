@@ -639,108 +639,60 @@ async fn remote_acquire_replays_new_idle_decision_without_duplicate_log() {
 }
 
 #[tokio::test]
-async fn remote_acquire_replays_legacy_idle_without_decision_id() {
+async fn remote_acquire_repoints_noncanonical_replays_terminal() {
     let fixture = remote_fixture(&[(OP, vec!["shared_mount"])], &[OP], &[]).await;
-    seed_legacy_acquire_replay(
-        &fixture,
-        "legacy-idle",
-        "hash-legacy-idle",
-        json!({
-            "outcome": "idle",
-            "worker_id": fixture.worker_id,
-        }),
-    )
-    .await;
+    let cases = [
+        (
+            "missing-decision-id",
+            json!({
+                "outcome": "idle",
+                "worker_id": fixture.worker_id,
+            }),
+        ),
+        (
+            "null-decision-id",
+            json!({
+                "outcome": "idle",
+                "worker_id": fixture.worker_id,
+                "scheduler_decision_id": null,
+            }),
+        ),
+        (
+            "wrong-decision-id-type",
+            json!({
+                "outcome": "idle",
+                "worker_id": fixture.worker_id,
+                "scheduler_decision_id": "42",
+            }),
+        ),
+        ("non-object-data", json!("idle")),
+        (
+            "unknown-outcome",
+            json!({ "outcome": "unrecognized_future_variant" }),
+        ),
+    ];
 
-    let replay = fixture
-        .cp
-        .remote_acquire(fixture.acquire_input("legacy-idle", "hash-legacy-idle"))
-        .await
-        .unwrap();
+    for (name, data) in cases {
+        let key = format!("poison-{name}");
+        let request_hash = format!("hash-{name}");
+        seed_legacy_acquire_replay(&fixture, &key, &request_hash, data).await;
 
-    assert_eq!(
-        replay,
-        RemoteAcquireOutcome::Idle {
-            worker_id: fixture.worker_id,
-            scheduler_decision_id: 0,
-        }
-    );
-}
+        let err = fixture
+            .cp
+            .remote_acquire(fixture.acquire_input(&key, &request_hash))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, VoomError::Internal(_)),
+            "{name} replay should surface a decode error, got: {err:?}"
+        );
 
-#[tokio::test]
-async fn remote_acquire_poisoned_replay_is_rewritten_terminal() {
-    // M7 regression: a completed idempotency row whose stored Ok{data} no
-    // longer decodes into RemoteAcquireOutcome (e.g. after the outcome struct
-    // changed) must be rewritten to a terminal Error replay in the same
-    // transaction that observes the decode failure. Otherwise every future
-    // call with the same key re-runs the identical decode failure forever.
-    // The original mutation already executed, so it must NOT be re-run — only
-    // the stored result is repointed.
-    let fixture = remote_fixture(&[(OP, vec!["shared_mount"])], &[OP], &[]).await;
-    seed_legacy_acquire_replay(
-        &fixture,
-        "poisoned",
-        "hash-poisoned",
-        json!({ "outcome": "unrecognized_future_variant" }),
-    )
-    .await;
-
-    let err = fixture
-        .cp
-        .remote_acquire(fixture.acquire_input("poisoned", "hash-poisoned"))
-        .await
-        .unwrap_err();
-    assert!(
-        matches!(err, VoomError::Internal(_)),
-        "poisoned replay should surface a decode error, got: {err:?}"
-    );
-
-    // The stored row must now be a terminal Error replay, not the original
-    // un-decodable Ok{data} that would re-fail decode on every future call.
-    let stored = stored_replay(&fixture, "poisoned").await;
-    assert!(
-        matches!(stored, RemoteMutationReplay::Error { .. }),
-        "poisoned replay must be rewritten terminal, still: {stored:?}"
-    );
-}
-
-#[tokio::test]
-async fn remote_acquire_replays_legacy_lease_without_decision_id() {
-    let fixture = remote_fixture(&[(OP, vec!["shared_mount"])], &[OP], &[]).await;
-    seed_legacy_acquire_replay(
-        &fixture,
-        "legacy-leased",
-        "hash-legacy-leased",
-        json!({
-            "outcome": "leased",
-            "lease_id": 91,
-            "ticket_id": 92,
-            "worker_id": fixture.worker_id,
-            "operation": OP,
-            "dispatch_payload": {"dispatch": {"kind": OP}},
-            "lease_ttl_seconds": 60,
-            "heartbeat_after_seconds": 30,
-            "artifact_access_plan": {
-                "id": 93,
-                "input_handles": ["handle:input:test"],
-                "output_handles": ["handle:output:test"],
-                "selected_access_mode": "shared_mount"
-            }
-        }),
-    )
-    .await;
-
-    let replay = fixture
-        .cp
-        .remote_acquire(fixture.acquire_input("legacy-leased", "hash-legacy-leased"))
-        .await
-        .unwrap();
-
-    let RemoteAcquireOutcome::Leased(dispatch) = replay else {
-        panic!("expected legacy leased replay");
-    };
-    assert_eq!(dispatch.scheduler_decision_id, 0);
-    assert_eq!(dispatch.worker_id, fixture.worker_id);
+        let stored = stored_replay(&fixture, &key).await;
+        assert!(
+            matches!(stored, RemoteMutationReplay::Error { .. }),
+            "{name} replay must be rewritten terminal, still: {stored:?}"
+        );
+    }
 }
 
 #[tokio::test]
