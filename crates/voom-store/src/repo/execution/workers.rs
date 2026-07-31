@@ -147,6 +147,12 @@ impl SqliteWorkerRepo {
 impl Repository for SqliteWorkerRepo {}
 
 impl SqliteWorkerRepo {
+    /// Register a worker in the caller's transaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VoomError::Database`] if the row cannot be inserted, and
+    /// [`VoomError::Internal`] if the registration timestamp cannot be encoded.
     pub async fn register_in_tx(
         &self,
         tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
@@ -178,6 +184,12 @@ impl SqliteWorkerRepo {
         })
     }
 
+    /// Register and commit a worker.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors documented by [`Self::register_in_tx`], or
+    /// [`VoomError::Database`] if the transaction cannot begin or commit.
     pub async fn register(&self, input: NewWorker) -> Result<Worker, VoomError> {
         let mut tx = self
             .pool
@@ -191,6 +203,12 @@ impl SqliteWorkerRepo {
         Ok(out)
     }
 
+    /// Record a worker capability in the caller's transaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VoomError::Database`] if the row cannot be inserted, and
+    /// [`VoomError::Internal`] if capability fields cannot be serialized.
     pub async fn record_capability_in_tx(
         &self,
         tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
@@ -221,6 +239,12 @@ impl SqliteWorkerRepo {
         })
     }
 
+    /// Record and commit a worker capability.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors documented by [`Self::record_capability_in_tx`], or
+    /// [`VoomError::Database`] if the transaction cannot begin or commit.
     pub async fn record_capability(&self, input: NewCapability) -> Result<Capability, VoomError> {
         let mut tx = self
             .pool
@@ -234,6 +258,12 @@ impl SqliteWorkerRepo {
         Ok(out)
     }
 
+    /// Record worker grants in the caller's transaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VoomError::Database`] if the row cannot be inserted, and
+    /// [`VoomError::Internal`] if grant fields cannot be serialized.
     pub async fn record_grant_in_tx(
         &self,
         tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
@@ -264,6 +294,12 @@ impl SqliteWorkerRepo {
         })
     }
 
+    /// Record and commit worker grants.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors documented by [`Self::record_grant_in_tx`], or
+    /// [`VoomError::Database`] if the transaction cannot begin or commit.
     pub async fn record_grant(&self, input: NewGrant) -> Result<Grant, VoomError> {
         let mut tx = self
             .pool
@@ -277,6 +313,14 @@ impl SqliteWorkerRepo {
         Ok(out)
     }
 
+    /// Retire a worker when its epoch still matches the caller's observation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VoomError::NotFound`] when the worker does not exist,
+    /// [`VoomError::Conflict`] when it is retired or its epoch changes,
+    /// [`VoomError::Database`] for storage failures, and [`VoomError::Internal`]
+    /// if the updated row cannot be encoded or re-read.
     pub async fn retire_in_tx(
         &self,
         tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
@@ -331,6 +375,12 @@ impl SqliteWorkerRepo {
         })
     }
 
+    /// Retire and commit a worker at an expected epoch.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors documented by [`Self::retire_in_tx`], or
+    /// [`VoomError::Database`] if the transaction cannot begin or commit.
     pub async fn retire(
         &self,
         id: WorkerId,
@@ -349,6 +399,11 @@ impl SqliteWorkerRepo {
         Ok(out)
     }
 
+    /// Look up a worker by id.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VoomError::Database`] if the query or row decoding fails.
     pub async fn get(&self, id: WorkerId) -> Result<Option<Worker>, VoomError> {
         let row = sqlx::query(
             "SELECT id, node_id, name, kind, status, registered_at, last_seen_at, retired_at, epoch \
@@ -361,6 +416,11 @@ impl SqliteWorkerRepo {
         row.as_ref().map(row_to_worker).transpose()
     }
 
+    /// Look up a worker by name in the caller's transaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VoomError::Database`] if the query or row decoding fails.
     pub async fn get_by_name_in_tx(
         &self,
         tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
@@ -369,6 +429,12 @@ impl SqliteWorkerRepo {
         get_by_name_in_tx(tx, name).await
     }
 
+    /// Look up and commit a worker-by-name read.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VoomError::Database`] if the transaction, query, or row
+    /// decoding fails.
     pub async fn get_by_name(&self, name: &str) -> Result<Option<Worker>, VoomError> {
         let mut tx = self
             .pool
@@ -382,6 +448,11 @@ impl SqliteWorkerRepo {
         Ok(out)
     }
 
+    /// List live workers in an exact legacy-name or incarnation namespace.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VoomError::Database`] if the query or row decoding fails.
     pub async fn list_live_by_name_namespace_in_tx(
         &self,
         tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
@@ -407,7 +478,8 @@ impl SqliteWorkerRepo {
     /// List every worker in an exact legacy-name or incarnation-prefix namespace.
     ///
     /// # Errors
-    /// Returns a database error when the namespace query or row decoding fails.
+    ///
+    /// Returns [`VoomError::Database`] when the query or row decoding fails.
     pub async fn list_by_name_namespace(
         &self,
         legacy_name: &str,
@@ -428,6 +500,12 @@ impl SqliteWorkerRepo {
         rows.iter().map(row_to_worker).collect()
     }
 
+    /// Read a worker together with its optional node context.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VoomError::Database`] if the query or row decoding fails,
+    /// including when a worker references a missing node.
     pub async fn get_inspection(
         &self,
         id: WorkerId,
@@ -448,6 +526,11 @@ impl SqliteWorkerRepo {
         row.as_ref().map(row_to_inspection).transpose()
     }
 
+    /// List workers in one status.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VoomError::Database`] if the query or row decoding fails.
     pub async fn list_by_status(
         &self,
         status: WorkerStatus,
@@ -466,6 +549,12 @@ impl SqliteWorkerRepo {
         rows.iter().map(row_to_worker).collect()
     }
 
+    /// List workers and their optional node context.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VoomError::Database`] if the query or row decoding fails,
+    /// including when a worker references a missing node.
     pub async fn list_inspections(
         &self,
         status: Option<WorkerStatus>,
@@ -491,6 +580,12 @@ impl SqliteWorkerRepo {
         rows.iter().map(row_to_inspection).collect()
     }
 
+    /// Evaluate whether a worker may execute an operation in this transaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VoomError::Database`] if worker, capability, or grant rows
+    /// cannot be queried or decoded.
     pub async fn operation_eligibility_in_tx(
         &self,
         tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
@@ -550,6 +645,12 @@ impl SqliteWorkerRepo {
         })
     }
 
+    /// Evaluate whether a worker may execute an operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors documented by [`Self::operation_eligibility_in_tx`],
+    /// or [`VoomError::Database`] if the transaction cannot begin or commit.
     pub async fn operation_eligibility(
         &self,
         worker_id: WorkerId,
@@ -571,6 +672,12 @@ impl SqliteWorkerRepo {
 
     /// Read the effective held-lease count and grant limit for one worker
     /// operation in the caller's transaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VoomError::Database`] if operation, capability, grant, or lease
+    /// state cannot be queried or decoded, and [`VoomError::Config`] when an
+    /// accelerator capability omits its required hardware token.
     pub async fn operation_capacity_in_tx(
         &self,
         tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
@@ -610,8 +717,9 @@ impl SqliteWorkerRepo {
     ///
     /// # Errors
     ///
-    /// Returns a database error when worker, lease, or grant rows cannot be
-    /// read or decoded.
+    /// Returns [`VoomError::Database`] when worker, lease, capability, or grant
+    /// rows cannot be read or decoded, and [`VoomError::Config`] when an
+    /// accelerator capability omits its required hardware token.
     pub async fn operation_candidates(
         &self,
         operation: &TicketOperation,
@@ -630,6 +738,11 @@ impl SqliteWorkerRepo {
 
     /// Lists every durable capability declaration for an operation, including
     /// declarations owned by stale or retired workers.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VoomError::Database`] if capability rows cannot be queried or
+    /// decoded.
     pub async fn operation_capability_history(
         &self,
         operation: &TicketOperation,
@@ -699,6 +812,13 @@ impl SqliteWorkerRepo {
         Ok(candidates)
     }
 
+    /// Return a non-retired worker owned by the supplied node.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VoomError::NotFound`] when the worker does not exist,
+    /// [`VoomError::Conflict`] when another node owns it or it is retired, and
+    /// [`VoomError::Database`] if the row cannot be queried or decoded.
     pub async fn node_owned_worker_in_tx(
         &self,
         tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,

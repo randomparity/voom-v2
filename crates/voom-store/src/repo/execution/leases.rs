@@ -228,8 +228,11 @@ impl SqliteLeaseRepo {
     ///
     /// # Errors
     ///
-    /// Returns configuration, database, ticket-state, or worker-eligibility
-    /// errors encountered before a lease can be committed.
+    /// Returns [`VoomError::Config`] for a non-positive TTL,
+    /// [`VoomError::NotFound`] when the ticket or worker is missing,
+    /// [`VoomError::Conflict`] when ticket state or worker eligibility rejects
+    /// acquisition, [`VoomError::Database`] for storage failures, and
+    /// [`VoomError::Internal`] when required state cannot be encoded or re-read.
     pub async fn try_acquire_in_tx(
         &self,
         tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
@@ -273,6 +276,12 @@ impl SqliteLeaseRepo {
         }
     }
 
+    /// Acquire a lease, mapping capacity saturation to `NoEligibleWorker`.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors documented by [`Self::try_acquire_in_tx`], and
+    /// [`VoomError::NoEligibleWorker`] when the worker is at capacity.
     pub async fn acquire_in_tx(
         &self,
         tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
@@ -359,6 +368,12 @@ impl SqliteLeaseRepo {
         Ok(LeaseAcquireOutcome::Acquired(lease))
     }
 
+    /// Acquire and commit a lease.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors documented by [`Self::acquire_in_tx`], or
+    /// [`VoomError::Database`] if the transaction cannot begin or commit.
     pub async fn acquire(&self, input: NewLease) -> Result<Lease, VoomError> {
         let mut tx = self
             .pool
@@ -372,6 +387,14 @@ impl SqliteLeaseRepo {
         Ok(out)
     }
 
+    /// Extend a held lease without shortening its existing deadline.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VoomError::Conflict`] when the lease is missing or not held,
+    /// [`VoomError::Database`] for query or row-decoding failures, and
+    /// [`VoomError::Internal`] if timestamps cannot be encoded or the updated
+    /// row cannot be re-read.
     pub async fn heartbeat_in_tx(
         &self,
         tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
@@ -409,6 +432,12 @@ impl SqliteLeaseRepo {
             .ok_or_else(|| VoomError::Internal("heartbeat: post-update get vanished".to_owned()))
     }
 
+    /// Extend and commit a held lease heartbeat.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors documented by [`Self::heartbeat_in_tx`], or
+    /// [`VoomError::Database`] if the transaction cannot begin or commit.
     pub async fn heartbeat(
         &self,
         lease_id: LeaseId,
@@ -434,6 +463,13 @@ impl SqliteLeaseRepo {
     /// the lease was already absent or in a non-`held` state — both
     /// outcomes surface as `VoomError::Conflict`. Callers that need to
     /// distinguish "missing" from "wrong state" should `get` first.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VoomError::Conflict`] when the lease or ticket is not in its
+    /// expected state, [`VoomError::Database`] for storage or row-decoding
+    /// failures, and [`VoomError::Internal`] if the result or timestamp cannot
+    /// be encoded.
     pub async fn release_in_tx(
         &self,
         tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
@@ -489,6 +525,12 @@ impl SqliteLeaseRepo {
         Ok(lease)
     }
 
+    /// Release and commit a held lease as succeeded.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors documented by [`Self::release_in_tx`], or
+    /// [`VoomError::Database`] if the transaction cannot begin or commit.
     pub async fn release(
         &self,
         lease_id: LeaseId,
@@ -514,6 +556,12 @@ impl SqliteLeaseRepo {
     /// `state = 'held'` (replaces the previous wide `get_lease_in_tx`).
     /// On a missing lease, on a non-`held` lease, or on a lost race the
     /// caller sees `VoomError::Conflict`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VoomError::Conflict`] when lease or ticket state prevents the
+    /// transition, [`VoomError::Database`] for storage or row-decoding failures,
+    /// and [`VoomError::Internal`] if timestamps cannot be encoded.
     pub async fn fail_in_tx(
         &self,
         tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
@@ -626,6 +674,12 @@ impl SqliteLeaseRepo {
         Ok(lease)
     }
 
+    /// Fail and commit a held lease, requeuing it when retries remain.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors documented by [`Self::fail_in_tx`], or
+    /// [`VoomError::Database`] if the transaction cannot begin or commit.
     pub async fn fail(
         &self,
         lease_id: LeaseId,
@@ -648,6 +702,13 @@ impl SqliteLeaseRepo {
         Ok(out)
     }
 
+    /// Expire one bounded batch of overdue leases in the caller's transaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VoomError::Conflict`] when a lease or ticket changes during
+    /// expiry, [`VoomError::Database`] for storage or row-decoding failures, and
+    /// [`VoomError::Internal`] if the timestamp cannot be encoded.
     pub async fn expire_due_in_tx(
         &self,
         tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
@@ -687,6 +748,12 @@ impl SqliteLeaseRepo {
         Ok(report)
     }
 
+    /// Expire and commit one bounded batch of overdue leases.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors documented by [`Self::expire_due_in_tx`], or
+    /// [`VoomError::Database`] if the transaction cannot begin or commit.
     pub async fn expire_due(&self, now: OffsetDateTime) -> Result<ExpireReport, VoomError> {
         let mut tx = self
             .pool
@@ -700,6 +767,14 @@ impl SqliteLeaseRepo {
         Ok(out)
     }
 
+    /// Force-release a held lease and either requeue or fail its ticket.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VoomError::Conflict`] when the lease or ticket is not in its
+    /// expected state, or when requeue was requested after retry exhaustion;
+    /// returns [`VoomError::Database`] for storage or row-decoding failures and
+    /// [`VoomError::Internal`] if the timestamp cannot be encoded.
     pub async fn force_release_in_tx(
         &self,
         tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
@@ -809,6 +884,12 @@ impl SqliteLeaseRepo {
         })
     }
 
+    /// Force-release and commit a held lease.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors documented by [`Self::force_release_in_tx`], or
+    /// [`VoomError::Database`] if the transaction cannot begin or commit.
     pub async fn force_release(
         &self,
         lease_id: LeaseId,
@@ -829,6 +910,13 @@ impl SqliteLeaseRepo {
         Ok(out)
     }
 
+    /// Return a held lease only when it belongs to the supplied worker.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VoomError::NotFound`] when the lease does not exist,
+    /// [`VoomError::Conflict`] when another worker holds it or it is not held,
+    /// and [`VoomError::Database`] if the row cannot be queried or decoded.
     pub async fn get_held_for_worker_in_tx(
         &self,
         tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
@@ -853,6 +941,12 @@ impl SqliteLeaseRepo {
         Ok(lease)
     }
 
+    /// Return and commit a held-lease ownership check.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors documented by [`Self::get_held_for_worker_in_tx`], or
+    /// [`VoomError::Database`] if the transaction cannot begin or commit.
     pub async fn get_held_for_worker(
         &self,
         lease_id: LeaseId,
@@ -872,6 +966,11 @@ impl SqliteLeaseRepo {
         Ok(out)
     }
 
+    /// Look up a lease by id.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VoomError::Database`] if the query or row decoding fails.
     pub async fn get(&self, id: LeaseId) -> Result<Option<Lease>, VoomError> {
         let row = sqlx::query(SELECT_LEASE_COLS)
             .bind(i64_from_u64(id.0))
@@ -885,6 +984,10 @@ impl SqliteLeaseRepo {
     /// (ADR 0031). Orders strictly by `id` descending (newest first);
     /// `after_id` is an exclusive continuation token returning rows with
     /// `id < after_id`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VoomError::Database`] if the query or row decoding fails.
     pub async fn list(
         &self,
         filter: LeaseFilter,

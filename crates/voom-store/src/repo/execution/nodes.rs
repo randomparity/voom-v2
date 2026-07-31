@@ -91,6 +91,12 @@ impl SqliteNodeRepo {
 impl Repository for SqliteNodeRepo {}
 
 impl SqliteNodeRepo {
+    /// Register a node in the caller's transaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VoomError::Database`] if the row cannot be inserted and
+    /// [`VoomError::Internal`] if the timestamp or metadata cannot be encoded.
     pub async fn register_in_tx(
         &self,
         tx: &mut Transaction<'_, Sqlite>,
@@ -130,6 +136,11 @@ impl SqliteNodeRepo {
         })
     }
 
+    /// Look up a node by id.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VoomError::Database`] if the query or row decoding fails.
     pub async fn get(&self, id: NodeId) -> Result<Option<Node>, VoomError> {
         let row = sqlx::query(
             "SELECT id, name, kind, status, registered_at, last_seen_at, retired_at, \
@@ -143,6 +154,11 @@ impl SqliteNodeRepo {
         row.as_ref().map(row_to_node).transpose()
     }
 
+    /// List nodes, optionally filtered by status.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VoomError::Database`] if the query or row decoding fails.
     pub async fn list(
         &self,
         status: Option<NodeStatus>,
@@ -164,6 +180,11 @@ impl SqliteNodeRepo {
         rows.iter().map(row_to_node).collect()
     }
 
+    /// Read the authentication fields for a node in the caller's transaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VoomError::Database`] if the query or row decoding fails.
     pub async fn auth_record_in_tx(
         &self,
         tx: &mut Transaction<'_, Sqlite>,
@@ -180,6 +201,14 @@ impl SqliteNodeRepo {
         row.as_ref().map(row_to_auth_record).transpose()
     }
 
+    /// Record a heartbeat and activate the node in the caller's transaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VoomError::NotFound`] when the node does not exist,
+    /// [`VoomError::Conflict`] when it is retired or changes concurrently,
+    /// [`VoomError::Database`] for storage failures, and [`VoomError::Internal`]
+    /// if the updated row cannot be encoded or re-read.
     pub async fn heartbeat_in_tx(
         &self,
         tx: &mut Transaction<'_, Sqlite>,
@@ -215,6 +244,12 @@ impl SqliteNodeRepo {
         })
     }
 
+    /// Mark every node whose heartbeat deadline has elapsed as stale.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VoomError::Database`] if candidates cannot be queried, decoded,
+    /// or updated, and [`VoomError::Internal`] if an updated row vanishes.
     pub async fn mark_stale_in_tx(
         &self,
         tx: &mut Transaction<'_, Sqlite>,
@@ -239,6 +274,14 @@ impl SqliteNodeRepo {
         Ok(changed)
     }
 
+    /// Retire a node when its epoch still matches the caller's observation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VoomError::NotFound`] when the node does not exist,
+    /// [`VoomError::Conflict`] when it is already retired or its epoch changes,
+    /// [`VoomError::Database`] for storage failures, and [`VoomError::Internal`]
+    /// if the updated row cannot be encoded or re-read.
     pub async fn retire_in_tx(
         &self,
         tx: &mut Transaction<'_, Sqlite>,

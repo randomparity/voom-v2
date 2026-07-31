@@ -139,6 +139,13 @@ impl SqliteTicketRepo {
 impl Repository for SqliteTicketRepo {}
 
 impl SqliteTicketRepo {
+    /// Create a pending ticket in the caller's transaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VoomError::Database`] if the row cannot be inserted or decoded,
+    /// and [`VoomError::Internal`] if the payload or timestamp cannot be encoded
+    /// or the inserted row cannot be re-read.
     pub async fn create_in_tx(
         &self,
         tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
@@ -170,6 +177,12 @@ impl SqliteTicketRepo {
             .ok_or_else(|| VoomError::Internal(format!("tickets create: row vanished id={id}")))
     }
 
+    /// Create and commit a pending ticket.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors documented by [`Self::create_in_tx`], or
+    /// [`VoomError::Database`] if the transaction cannot begin or commit.
     pub async fn create(&self, input: NewTicket) -> Result<Ticket, VoomError> {
         let mut tx = self
             .pool
@@ -183,6 +196,14 @@ impl SqliteTicketRepo {
         Ok(out)
     }
 
+    /// Add a dependency to a pending ticket in the caller's transaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VoomError::NotFound`] when the dependent ticket is missing,
+    /// [`VoomError::Conflict`] when it is no longer pending,
+    /// [`VoomError::DependencyCycle`] for a self-edge or transitive cycle, and
+    /// [`VoomError::Database`] for query or constraint failures.
     pub async fn add_dependency_in_tx(
         &self,
         tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
@@ -247,6 +268,12 @@ impl SqliteTicketRepo {
         Ok(())
     }
 
+    /// Add and commit a dependency to a pending ticket.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors documented by [`Self::add_dependency_in_tx`], or
+    /// [`VoomError::Database`] if the transaction cannot begin or commit.
     pub async fn add_dependency(
         &self,
         ticket_id: TicketId,
@@ -265,6 +292,14 @@ impl SqliteTicketRepo {
         Ok(())
     }
 
+    /// Promote a pending ticket when all dependencies have succeeded.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VoomError::NotFound`] when the ticket does not exist,
+    /// [`VoomError::Conflict`] when it changes during promotion,
+    /// [`VoomError::Database`] for query or row-decoding failures, and
+    /// [`VoomError::Internal`] if the timestamp cannot be encoded.
     pub async fn mark_ready_if_unblocked_in_tx(
         &self,
         tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
@@ -321,6 +356,12 @@ impl SqliteTicketRepo {
         Ok(vec![promoted])
     }
 
+    /// Promote and commit a pending ticket when all dependencies have succeeded.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors documented by [`Self::mark_ready_if_unblocked_in_tx`],
+    /// or [`VoomError::Database`] if the transaction cannot begin or commit.
     pub async fn mark_ready_if_unblocked(
         &self,
         ticket_id: TicketId,
@@ -340,6 +381,11 @@ impl SqliteTicketRepo {
         Ok(out)
     }
 
+    /// Look up a ticket by id.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VoomError::Database`] if the query or row decoding fails.
     pub async fn get(&self, id: TicketId) -> Result<Option<Ticket>, VoomError> {
         let row = sqlx::query(SELECT_TICKET_BY_ID)
             .bind(i64_from_u64(id.0))
@@ -349,6 +395,11 @@ impl SqliteTicketRepo {
         row.as_ref().map(row_to_ticket).transpose()
     }
 
+    /// Look up a ticket by id in the caller's transaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VoomError::Database`] if the query or row decoding fails.
     pub async fn get_in_tx(
         &self,
         tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
@@ -360,6 +411,10 @@ impl SqliteTicketRepo {
     /// Keyset-paginated inspection read for `voom ticket list` (ADR 0031).
     /// Orders strictly by `id` descending (newest first); `after_id` is an
     /// exclusive continuation token returning rows with `id < after_id`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VoomError::Database`] if the query or row decoding fails.
     pub async fn list(
         &self,
         filter: TicketFilter,
@@ -381,6 +436,11 @@ impl SqliteTicketRepo {
         rows.iter().map(row_to_ticket).collect()
     }
 
+    /// List tickets in one state using scheduling order.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VoomError::Database`] if the query or row decoding fails.
     pub async fn list_by_state(
         &self,
         state: TicketState,
@@ -400,6 +460,12 @@ impl SqliteTicketRepo {
         rows.iter().map(row_to_ticket).collect()
     }
 
+    /// Return the highest-priority eligible ticket for the requested operations.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VoomError::Database`] if the query or row decoding fails, and
+    /// [`VoomError::Internal`] if the supplied timestamp cannot be encoded.
     pub async fn next_ready_for_operations_in_tx(
         &self,
         tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
@@ -413,6 +479,12 @@ impl SqliteTicketRepo {
             .next())
     }
 
+    /// List eligible tickets for the requested operations in scheduling order.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VoomError::Database`] if the query or row decoding fails, and
+    /// [`VoomError::Internal`] if the supplied timestamp cannot be encoded.
     pub async fn ready_for_operations_in_tx(
         &self,
         tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
@@ -455,6 +527,12 @@ impl SqliteTicketRepo {
         rows.iter().map(row_to_ticket).collect()
     }
 
+    /// Return the highest-priority eligible ticket for the requested operations.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors documented by [`Self::next_ready_for_operations_in_tx`],
+    /// or [`VoomError::Database`] if the transaction cannot begin or commit.
     pub async fn next_ready_for_operations(
         &self,
         operations: &[TicketOperation],
@@ -474,6 +552,11 @@ impl SqliteTicketRepo {
         Ok(out)
     }
 
+    /// List tickets that directly depend on the supplied ticket.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VoomError::Database`] if the query or row decoding fails.
     pub async fn list_dependents(&self, depends_on: TicketId) -> Result<Vec<Ticket>, VoomError> {
         let rows = sqlx::query(SELECT_DEPENDENTS_OF)
             .bind(i64_from_u64(depends_on.0))
@@ -483,6 +566,11 @@ impl SqliteTicketRepo {
         rows.iter().map(row_to_ticket).collect()
     }
 
+    /// List direct dependents in the caller's transaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VoomError::Database`] if the query or row decoding fails.
     pub async fn list_dependents_in_tx(
         &self,
         tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
