@@ -842,6 +842,39 @@ async fn remote_acquire_requires_worker_node_ownership_capability_grant_and_no_d
 }
 
 #[tokio::test]
+async fn remote_acquire_ignores_unknown_artifact_access_when_known_mode_is_advertised() {
+    let fixture = remote_fixture(
+        &[(OP, vec!["future_transport", "shared_mount"])],
+        &[OP],
+        &[],
+    )
+    .await;
+    fixture.ready_ticket(OP).await;
+
+    let outcome = fixture
+        .cp
+        .remote_acquire(fixture.acquire_input("mixed-access", "hash-mixed-access"))
+        .await
+        .unwrap();
+    let RemoteAcquireOutcome::Leased(dispatch) = outcome else {
+        panic!("expected known artifact access mode to remain selectable");
+    };
+    let plan = fixture
+        .cp
+        .artifact_access_plans()
+        .get_by_lease(dispatch.lease_id)
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(
+        dispatch.artifact_access_plan.selected_access_mode,
+        ArtifactAccessMode::SharedMount
+    );
+    assert_eq!(plan.selected_access_mode, ArtifactAccessMode::SharedMount);
+}
+
+#[tokio::test]
 async fn remote_acquire_replays_unsupported_artifact_access_no_candidate_without_leasing() {
     let fixture = remote_fixture(&[(OP, vec!["local_path"])], &[OP], &[]).await;
     let ticket_id = fixture.ready_ticket(OP).await;
