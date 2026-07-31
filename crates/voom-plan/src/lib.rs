@@ -5,7 +5,7 @@
         reason = "planner tests assert deterministic JSON fixtures directly"
     )
 )]
-//! Pure Sprint 5 execution-plan projection.
+//! Deterministic execution-plan and compliance-report projection from compiled policy inputs.
 
 pub mod audio;
 pub mod compliance;

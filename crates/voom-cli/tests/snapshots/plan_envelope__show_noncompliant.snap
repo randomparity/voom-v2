@@ -9,8 +9,8 @@ expression: json
   "data": {
     "plan": {
       "schema_version": 1,
-      "plan_id": "plan_d3221cffe1d55f8d",
-      "plan_hash": "blake3:d3221cffe1d55f8d38bddae40db33d327bd9563df7d3de1de4690e0bec1dba54",
+      "plan_id": "plan_9b91a8a65c1b844e",
+      "plan_hash": "blake3:9b91a8a65c1b844e83af1f0d2756cd29f996efa7b4d5d3c977df5dd2d3c1a32c",
       "policy": {
         "slug": "container-metadata",
         "source_hash": "efc80d0415953f5ed3fa23a052d98561c4153bbfb346f579ccf9270281c1f89b",
@@ -101,7 +101,7 @@ expression: json
             "type": "clear_tags"
           },
           "status": "blocked",
-          "status_reason": "operation is not supported by Sprint 5 planner",
+          "status_reason": "operation is not supported by the planner",
           "capability_hints": {
             "operation_capability": null
           },
@@ -147,7 +147,7 @@ expression: json
             }
           },
           "status": "blocked",
-          "status_reason": "operation is not supported by Sprint 5 planner",
+          "status_reason": "operation is not supported by the planner",
           "capability_hints": {
             "operation_capability": null
           },
@@ -186,7 +186,7 @@ expression: json
             "key": "encoder"
           },
           "status": "blocked",
-          "status_reason": "operation is not supported by Sprint 5 planner",
+          "status_reason": "operation is not supported by the planner",
           "capability_hints": {
             "operation_capability": null
           },
@@ -216,8 +216,8 @@ expression: json
       "diagnostics": [
         {
           "severity": "error",
-          "code": "unsupported_operation_for_sprint5",
-          "message": "operation is not supported by Sprint 5 planner",
+          "code": "unsupported_operation",
+          "message": "operation is not supported by the planner",
           "target": {
             "type": "synthetic",
             "key": "variant-1",
@@ -228,8 +228,8 @@ expression: json
         },
         {
           "severity": "error",
-          "code": "unsupported_operation_for_sprint5",
-          "message": "operation is not supported by Sprint 5 planner",
+          "code": "unsupported_operation",
+          "message": "operation is not supported by the planner",
           "target": {
             "type": "synthetic",
             "key": "variant-1",
@@ -240,8 +240,8 @@ expression: json
         },
         {
           "severity": "error",
-          "code": "unsupported_operation_for_sprint5",
-          "message": "operation is not supported by Sprint 5 planner",
+          "code": "unsupported_operation",
+          "message": "operation is not supported by the planner",
           "target": {
             "type": "synthetic",
             "key": "variant-1",

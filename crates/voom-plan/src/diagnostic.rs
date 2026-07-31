@@ -9,7 +9,7 @@ pub enum PlanningDiagnosticSeverity {
 #[serde(rename_all = "snake_case")]
 pub enum PlanningDiagnosticCode {
     MissingPolicyInputTarget,
-    UnsupportedOperationForSprint5,
+    UnsupportedOperation,
     InsufficientSnapshotFacts,
     UnsupportedMediaShape,
     AmbiguousTargetSelection,
@@ -27,7 +27,7 @@ impl PlanningDiagnosticCode {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::MissingPolicyInputTarget => "missing_policy_input_target",
-            Self::UnsupportedOperationForSprint5 => "unsupported_operation_for_sprint5",
+            Self::UnsupportedOperation => "unsupported_operation",
             Self::InsufficientSnapshotFacts => "insufficient_snapshot_facts",
             Self::UnsupportedMediaShape => "unsupported_media_shape",
             Self::AmbiguousTargetSelection => "ambiguous_target_selection",

@@ -500,7 +500,7 @@ impl<'a> PlanBuilder<'a> {
                     snapshot,
                     operation_kind,
                     operation_payload(unsupported),
-                    "operation is not supported by Sprint 5 planner",
+                    "operation is not supported by the planner",
                 );
             }
         }
@@ -610,13 +610,10 @@ impl<'a> PlanBuilder<'a> {
         message: &str,
     ) {
         self.diagnostics.push(
-            PlanningDiagnostic::error(
-                PlanningDiagnosticCode::UnsupportedOperationForSprint5,
-                message,
-            )
-            .with_phase(phase_name)
-            .with_operation_kind(operation_kind.as_str())
-            .with_target(snapshot.target.clone()),
+            PlanningDiagnostic::error(PlanningDiagnosticCode::UnsupportedOperation, message)
+                .with_phase(phase_name)
+                .with_operation_kind(operation_kind.as_str())
+                .with_target(snapshot.target.clone()),
         );
         self.nodes.push(make_node(
             phase_name,

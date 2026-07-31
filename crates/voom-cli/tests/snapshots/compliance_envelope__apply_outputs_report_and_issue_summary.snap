@@ -9,10 +9,10 @@ expression: json
   "data": {
     "report": {
       "schema_version": 1,
-      "report_id": "report_8f639ac8edfd19a1",
-      "report_hash": "blake3:1400c3a38ef22a61b104ed5fcee3359015f6da8548d8cc77dc99c065afc3992f",
-      "plan_id": "plan_d3221cffe1d55f8d",
-      "plan_hash": "blake3:d3221cffe1d55f8d38bddae40db33d327bd9563df7d3de1de4690e0bec1dba54",
+      "report_id": "report_c8e42ce3c8beb771",
+      "report_hash": "blake3:4e187202a261f10c22bf2ea013a55347610812d84bcff6d0f0034acd6d06a486",
+      "plan_id": "plan_9b91a8a65c1b844e",
+      "plan_hash": "blake3:9b91a8a65c1b844e83af1f0d2756cd29f996efa7b4d5d3c977df5dd2d3c1a32c",
       "policy": {
         "slug": "container-metadata",
         "source_hash": "efc80d0415953f5ed3fa23a052d98561c4153bbfb346f579ccf9270281c1f89b",
@@ -42,7 +42,7 @@ expression: json
       },
       "checks": [
         {
-          "check_id": "check_b830334e72bb02d8",
+          "check_id": "check_9a6709fa2dc176ea",
           "node_id": "node_a2985ff8ff45d281",
           "target": {
             "type": "synthetic",
@@ -71,7 +71,7 @@ expression: json
           "execution_eligibility": "supported"
         },
         {
-          "check_id": "check_ce84ac6156bcae92",
+          "check_id": "check_69cdf105645c9fea",
           "node_id": "node_810a976b823236df",
           "target": {
             "type": "synthetic",
@@ -84,12 +84,12 @@ expression: json
             "type": "clear_tags"
           },
           "check_status": "blocked",
-          "reason": "operation is not supported by Sprint 5 planner",
+          "reason": "operation is not supported by the planner",
           "issue_action_hint": "none",
           "execution_eligibility": "unsupported"
         },
         {
-          "check_id": "check_8f93566e9c16fa26",
+          "check_id": "check_0578b4a26491852a",
           "node_id": "node_49b773aa85d91815",
           "target": {
             "type": "synthetic",
@@ -110,12 +110,12 @@ expression: json
             }
           },
           "check_status": "blocked",
-          "reason": "operation is not supported by Sprint 5 planner",
+          "reason": "operation is not supported by the planner",
           "issue_action_hint": "none",
           "execution_eligibility": "unsupported"
         },
         {
-          "check_id": "check_cc7004cdb8356067",
+          "check_id": "check_43cefe8656099322",
           "node_id": "node_41195a59cc88f9d4",
           "target": {
             "type": "synthetic",
@@ -129,7 +129,7 @@ expression: json
             "key": "encoder"
           },
           "check_status": "blocked",
-          "reason": "operation is not supported by Sprint 5 planner",
+          "reason": "operation is not supported by the planner",
           "issue_action_hint": "none",
           "execution_eligibility": "unsupported"
         }
@@ -139,9 +139,9 @@ expression: json
           "severity": "warning",
           "code": "unsupported_compliance_operation",
           "message": "operation clear_tags is not supported by compliance reports",
-          "plan_id": "plan_d3221cffe1d55f8d",
+          "plan_id": "plan_9b91a8a65c1b844e",
           "node_id": "node_810a976b823236df",
-          "check_id": "check_ce84ac6156bcae92",
+          "check_id": "check_69cdf105645c9fea",
           "target": {
             "type": "synthetic",
             "key": "variant-1",
@@ -152,9 +152,9 @@ expression: json
           "severity": "warning",
           "code": "unsupported_compliance_operation",
           "message": "operation set_tag is not supported by compliance reports",
-          "plan_id": "plan_d3221cffe1d55f8d",
+          "plan_id": "plan_9b91a8a65c1b844e",
           "node_id": "node_49b773aa85d91815",
-          "check_id": "check_8f93566e9c16fa26",
+          "check_id": "check_0578b4a26491852a",
           "target": {
             "type": "synthetic",
             "key": "variant-1",
@@ -165,9 +165,9 @@ expression: json
           "severity": "warning",
           "code": "unsupported_compliance_operation",
           "message": "operation delete_tag is not supported by compliance reports",
-          "plan_id": "plan_d3221cffe1d55f8d",
+          "plan_id": "plan_9b91a8a65c1b844e",
           "node_id": "node_41195a59cc88f9d4",
-          "check_id": "check_cc7004cdb8356067",
+          "check_id": "check_43cefe8656099322",
           "target": {
             "type": "synthetic",
             "key": "variant-1",
