@@ -166,6 +166,42 @@ fn scorer_preserves_artifact_access_priority_and_scores() {
 }
 
 #[test]
+fn scorer_prefers_the_best_mode_within_one_advertisement() {
+    let cases = [
+        (
+            vec![
+                ArtifactAccessMode::StagedOutputPlaceholder,
+                ArtifactAccessMode::ControlPlanePlaceholder,
+                ArtifactAccessMode::SharedMount,
+            ],
+            ArtifactAccessMode::SharedMount,
+            "shared_mount",
+        ),
+        (
+            vec![
+                ArtifactAccessMode::StagedOutputPlaceholder,
+                ArtifactAccessMode::ControlPlanePlaceholder,
+            ],
+            ArtifactAccessMode::ControlPlanePlaceholder,
+            "control_plane_placeholder",
+        ),
+    ];
+
+    for (modes, expected, expected_token) in cases {
+        let mut candidate = scored_candidate(1, 2, 3, "probe_file");
+        candidate.worker.artifact_access = modes;
+
+        let out = SchedulerScorer::default().score(&[candidate]).unwrap();
+
+        assert_eq!(out.selected.unwrap().access_mode, expected);
+        assert_eq!(
+            out.explanation["candidates"][0]["selected_access_mode"],
+            expected_token
+        );
+    }
+}
+
+#[test]
 fn scorer_rejects_hard_gate_failures_with_reason_codes() {
     let scorer = SchedulerScorer::default();
     let mut missing_grant = scored_candidate(1, 2, 3, "probe_file");
