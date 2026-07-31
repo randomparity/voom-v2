@@ -9,7 +9,7 @@
 //! Deterministic worker selection plus scheduler scoring primitives.
 
 use serde_json::{Value as JsonValue, json};
-use voom_core::{NodeId, TicketId, VoomError, WorkerId};
+use voom_core::{ArtifactAccessMode, NodeId, TicketId, VoomError, WorkerId};
 use voom_core::{OperationKind, TicketOperation};
 
 pub const SCORING_VERSION: u32 = 1;
@@ -36,7 +36,7 @@ pub struct WorkerCandidate {
     pub denied: bool,
     pub active_leases: u32,
     pub max_parallel: u32,
-    pub artifact_access: Vec<String>,
+    pub artifact_access: Vec<ArtifactAccessMode>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -60,7 +60,7 @@ pub struct SelectedCandidate {
     pub ticket_id: TicketId,
     pub worker_id: WorkerId,
     pub node_id: NodeId,
-    pub access_mode: String,
+    pub access_mode: ArtifactAccessMode,
     pub score: i64,
 }
 
@@ -190,7 +190,7 @@ impl SchedulerScorer {
             });
         }
 
-        let mut best: Option<(usize, i64, String)> = None;
+        let mut best: Option<(usize, i64, ArtifactAccessMode)> = None;
         let mut explanation_candidates = Vec::with_capacity(candidates.len());
         let operation = &candidates[0].ticket.operation;
 
@@ -224,13 +224,13 @@ impl SchedulerScorer {
 
             if let (true, Some(mode)) = (eligible, access_mode) {
                 match best {
-                    None => best = Some((index, score, mode.to_owned())),
+                    None => best = Some((index, score, mode)),
                     Some((best_index, best_score, _)) => {
                         if score > best_score
                             || (score == best_score
                                 && tie_key(candidate) < tie_key(&candidates[best_index]))
                         {
-                            best = Some((index, score, mode.to_owned()));
+                            best = Some((index, score, mode));
                         }
                     }
                 }
@@ -298,7 +298,7 @@ fn weights_json() -> JsonValue {
 
 fn hard_gate_reasons(
     candidate: &SchedulerCandidate,
-    access_mode: Option<&str>,
+    access_mode: Option<ArtifactAccessMode>,
 ) -> Vec<ScoreReasonCode> {
     let mut reasons = Vec::new();
     if !candidate.worker.has_capability {
@@ -331,24 +331,23 @@ fn hard_gate_reasons(
     reasons
 }
 
-fn select_access_mode(modes: &[String]) -> Option<&'static str> {
-    if modes.iter().any(|mode| mode == "shared_mount") {
-        Some("shared_mount")
-    } else if modes.iter().any(|mode| mode == "control_plane_placeholder") {
-        Some("control_plane_placeholder")
-    } else if modes.iter().any(|mode| mode == "staged_output_placeholder") {
-        Some("staged_output_placeholder")
+fn select_access_mode(modes: &[ArtifactAccessMode]) -> Option<ArtifactAccessMode> {
+    if modes.contains(&ArtifactAccessMode::SharedMount) {
+        Some(ArtifactAccessMode::SharedMount)
+    } else if modes.contains(&ArtifactAccessMode::ControlPlanePlaceholder) {
+        Some(ArtifactAccessMode::ControlPlanePlaceholder)
+    } else if modes.contains(&ArtifactAccessMode::StagedOutputPlaceholder) {
+        Some(ArtifactAccessMode::StagedOutputPlaceholder)
     } else {
         None
     }
 }
 
-fn score_candidate(candidate: &SchedulerCandidate, access_mode: &str) -> i64 {
+fn score_candidate(candidate: &SchedulerCandidate, access_mode: ArtifactAccessMode) -> i64 {
     let artifact_access_score = match access_mode {
-        "shared_mount" => 100,
-        "control_plane_placeholder" => 50,
-        "staged_output_placeholder" => 25,
-        _ => 0,
+        ArtifactAccessMode::SharedMount => 100,
+        ArtifactAccessMode::ControlPlanePlaceholder => 50,
+        ArtifactAccessMode::StagedOutputPlaceholder => 25,
     };
     let worker_remaining = i64::from(
         candidate
@@ -366,7 +365,11 @@ fn score_candidate(candidate: &SchedulerCandidate, access_mode: &str) -> i64 {
     1000 + 500 + artifact_access_score + (worker_remaining * 50) + (node_remaining * 20)
 }
 
-fn factor_json(candidate: &SchedulerCandidate, access_mode: Option<&str>, score: i64) -> JsonValue {
+fn factor_json(
+    candidate: &SchedulerCandidate,
+    access_mode: Option<ArtifactAccessMode>,
+    score: i64,
+) -> JsonValue {
     json!({
         "capability": if candidate.worker.has_capability && candidate.worker.has_grant && !candidate.worker.denied { 1000 } else { 0 },
         "health": if candidate.node.executable && candidate.node.heartbeat_fresh { 500 } else { 0 },
@@ -379,10 +382,9 @@ fn factor_json(candidate: &SchedulerCandidate, access_mode: Option<&str>, score:
             .max_parallel_leases
             .saturating_sub(candidate.node.active_leases)) * 20,
         "artifact_access": access_mode.map_or(0, |mode| match mode {
-            "shared_mount" => 100,
-            "control_plane_placeholder" => 50,
-            "staged_output_placeholder" => 25,
-            _ => 0,
+            ArtifactAccessMode::SharedMount => 100,
+            ArtifactAccessMode::ControlPlanePlaceholder => 50,
+            ArtifactAccessMode::StagedOutputPlaceholder => 25,
         }),
         "tie_breaker": 0,
         "total": score

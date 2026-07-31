@@ -5,14 +5,14 @@ use std::collections::HashMap;
 use serde_json::{Value as JsonValue, json};
 use sqlx::{Sqlite, Transaction};
 use time::{Duration, OffsetDateTime};
-use voom_core::{LeaseId, NodeId, TicketId, TicketOperation, VoomError, WorkerId};
+use voom_core::{
+    ArtifactAccessMode, LeaseId, NodeId, TicketId, TicketOperation, VoomError, WorkerId,
+};
 use voom_scheduler::{
     NodeCandidate, SCORING_VERSION, SchedulerCandidate, SchedulerScorer, ScoreDecision,
     ScoreOutcome, ScoreReasonCode, TicketCandidate, WorkerCandidate,
 };
-use voom_store::repo::artifact_access_plans::{
-    ArtifactAccessMode, ArtifactAccessPlan, NewArtifactAccessPlan,
-};
+use voom_store::repo::artifact_access_plans::{ArtifactAccessPlan, NewArtifactAccessPlan};
 use voom_store::repo::leases::NewLease;
 use voom_store::repo::remote_idempotency::{IdempotencyOutcome, RemoteIdempotencyInput};
 use voom_store::repo::scheduler_decisions::{
@@ -256,7 +256,7 @@ impl ControlPlane {
             return Ok(RemoteAcquirePrepared::NoCandidate(outcome));
         }
 
-        let selected_access_mode = artifact_access_mode_from_scheduler(&selected.access_mode)?;
+        let selected_access_mode = selected.access_mode;
         let scheduler_decision = self
             .scheduler_decisions
             .create_in_tx(
@@ -573,7 +573,11 @@ fn candidate_from_ticket(
             denied: eligibility.is_denied,
             active_leases: worker_active,
             max_parallel: worker_limit,
-            artifact_access: eligibility.artifact_access.clone(),
+            artifact_access: eligibility
+                .artifact_access
+                .iter()
+                .filter_map(|mode| ArtifactAccessMode::from_wire(mode))
+                .collect(),
         },
         node: NodeCandidate {
             node_id: input.node_id,
@@ -794,17 +798,6 @@ fn sqlite_id(id: u64, label: &'static str) -> Result<i64, VoomError> {
 
 fn count_to_u32(count: i64, label: &'static str) -> Result<u32, VoomError> {
     u32::try_from(count).map_err(|_| VoomError::database(format!("{label} does not fit u32")))
-}
-
-fn artifact_access_mode_from_scheduler(mode: &str) -> Result<ArtifactAccessMode, VoomError> {
-    match mode {
-        "shared_mount" => Ok(ArtifactAccessMode::SharedMount),
-        "control_plane_placeholder" => Ok(ArtifactAccessMode::ControlPlanePlaceholder),
-        "staged_output_placeholder" => Ok(ArtifactAccessMode::StagedOutputPlaceholder),
-        other => Err(VoomError::Internal(format!(
-            "scheduler selected unsupported artifact access mode {other:?}"
-        ))),
-    }
 }
 
 fn decision_from_score(

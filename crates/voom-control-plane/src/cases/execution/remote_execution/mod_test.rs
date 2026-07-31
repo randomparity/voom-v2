@@ -3,7 +3,7 @@ use super::*;
 use serde_json::json;
 use time::{Duration, OffsetDateTime};
 use voom_core::{
-    ErrorCode, FailureClass, LeaseId, NodeId, TicketId, TicketOperation,
+    ArtifactAccessMode, ErrorCode, FailureClass, LeaseId, NodeId, TicketId, TicketOperation,
     clock_test_support::FrozenClock,
 };
 use voom_events::EventKind;
@@ -11,7 +11,7 @@ use voom_scheduler::{
     NodeCandidate, SCORING_VERSION, SchedulerCandidate, ScoreDecision, ScoreOutcome,
     ScoreReasonCode, TicketCandidate, WorkerCandidate,
 };
-use voom_store::repo::artifact_access_plans::{ArtifactAccessMode, ArtifactAccessPlanStatus};
+use voom_store::repo::artifact_access_plans::ArtifactAccessPlanStatus;
 use voom_store::repo::nodes::NodeKind;
 use voom_store::repo::remote_idempotency::RemoteMutationReplay;
 use voom_store::repo::scheduler_decisions::{
@@ -344,7 +344,7 @@ fn score_remote_candidates_uses_global_no_candidate_reason_priority() {
             denied: false,
             active_leases: 0,
             max_parallel: 1,
-            artifact_access: vec!["shared_mount".to_owned()],
+            artifact_access: vec![ArtifactAccessMode::SharedMount],
         },
         node: NodeCandidate {
             node_id: NodeId(1),
@@ -609,7 +609,7 @@ fn scheduler_candidate(operation: &str, ticket_id: TicketId) -> SchedulerCandida
             denied: false,
             active_leases: 0,
             max_parallel: 1,
-            artifact_access: vec!["local_path".to_owned()],
+            artifact_access: Vec::new(),
         },
         node: NodeCandidate {
             node_id: NodeId(1),
