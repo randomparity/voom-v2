@@ -8,6 +8,7 @@ use axum::routing::post;
 use secrecy::SecretString;
 use serde::Deserialize;
 use serde::Serialize;
+use serde::de::DeserializeOwned;
 use serde_json::Value as JsonValue;
 use voom_control_plane::ControlPlane;
 use voom_control_plane::execution::{
@@ -25,6 +26,7 @@ const COMPLETE_COMMAND: &str = "execution.complete";
 const FAIL_COMMAND: &str = "execution.fail";
 
 #[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 struct AcquireRequest {
     node_id: u64,
     worker_id: u64,
@@ -37,6 +39,7 @@ struct AcquireRequest {
 struct NodeHeartbeatRequest {}
 
 #[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 struct LeaseHeartbeatRequest {
     node_id: u64,
     worker_id: u64,
@@ -45,6 +48,7 @@ struct LeaseHeartbeatRequest {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 struct CompleteRequest {
     node_id: u64,
     worker_id: u64,
@@ -52,6 +56,7 @@ struct CompleteRequest {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 struct FailRequest {
     node_id: u64,
     worker_id: u64,
@@ -92,13 +97,13 @@ async fn acquire(
         Ok(body) => body,
         Err(message) => return bad_args_response(ACQUIRE_COMMAND, message),
     };
+    let request: AcquireRequest = match parse_request_body(&body) {
+        Ok(request) => request,
+        Err(message) => return bad_args_response(ACQUIRE_COMMAND, message),
+    };
     let request_hash = match stable_request_hash("POST", "/v1/execution/lease/acquire", &body) {
         Ok(hash) => hash,
         Err(message) => return bad_args_response(ACQUIRE_COMMAND, message),
-    };
-    let request: AcquireRequest = match serde_json::from_value(body) {
-        Ok(request) => request,
-        Err(err) => return bad_args_response(ACQUIRE_COMMAND, format!("invalid JSON body: {err}")),
     };
 
     match control_plane
@@ -138,14 +143,12 @@ async fn node_heartbeat(
         Ok(body) => body,
         Err(message) => return bad_args_response(NODE_HEARTBEAT_COMMAND, message),
     };
-    let request: NodeHeartbeatRequest = match serde_json::from_value(body) {
+    let _request: NodeHeartbeatRequest = match parse_request_body(&body) {
         Ok(request) => request,
-        Err(err) => {
-            return bad_args_response(NODE_HEARTBEAT_COMMAND, format!("invalid JSON body: {err}"));
-        }
+        Err(message) => return bad_args_response(NODE_HEARTBEAT_COMMAND, message),
     };
     let route_instance = format!("/v1/execution/node/{node_id}/heartbeat");
-    let request_hash = match stable_request_hash("POST", &route_instance, &request) {
+    let request_hash = match stable_request_hash("POST", &route_instance, &body) {
         Ok(hash) => hash,
         Err(message) => return bad_args_response(NODE_HEARTBEAT_COMMAND, message),
     };
@@ -185,16 +188,14 @@ async fn lease_heartbeat(
         Ok(body) => body,
         Err(message) => return bad_args_response(LEASE_HEARTBEAT_COMMAND, message),
     };
+    let request: LeaseHeartbeatRequest = match parse_request_body(&body) {
+        Ok(request) => request,
+        Err(message) => return bad_args_response(LEASE_HEARTBEAT_COMMAND, message),
+    };
     let route_instance = format!("/v1/execution/lease/{lease_id}/heartbeat");
     let request_hash = match stable_request_hash("POST", &route_instance, &body) {
         Ok(hash) => hash,
         Err(message) => return bad_args_response(LEASE_HEARTBEAT_COMMAND, message),
-    };
-    let request: LeaseHeartbeatRequest = match serde_json::from_value(body) {
-        Ok(request) => request,
-        Err(err) => {
-            return bad_args_response(LEASE_HEARTBEAT_COMMAND, format!("invalid JSON body: {err}"));
-        }
     };
 
     match control_plane
@@ -235,16 +236,14 @@ async fn complete(
         Ok(body) => body,
         Err(message) => return bad_args_response(COMPLETE_COMMAND, message),
     };
+    let request: CompleteRequest = match parse_request_body(&body) {
+        Ok(request) => request,
+        Err(message) => return bad_args_response(COMPLETE_COMMAND, message),
+    };
     let route_instance = format!("/v1/execution/lease/{lease_id}/complete");
     let request_hash = match stable_request_hash("POST", &route_instance, &body) {
         Ok(hash) => hash,
         Err(message) => return bad_args_response(COMPLETE_COMMAND, message),
-    };
-    let request: CompleteRequest = match serde_json::from_value(body) {
-        Ok(request) => request,
-        Err(err) => {
-            return bad_args_response(COMPLETE_COMMAND, format!("invalid JSON body: {err}"));
-        }
     };
 
     match control_plane
@@ -285,14 +284,14 @@ async fn fail(
         Ok(body) => body,
         Err(message) => return bad_args_response(FAIL_COMMAND, message),
     };
+    let request: FailRequest = match parse_request_body(&body) {
+        Ok(request) => request,
+        Err(message) => return bad_args_response(FAIL_COMMAND, message),
+    };
     let route_instance = format!("/v1/execution/lease/{lease_id}/fail");
     let request_hash = match stable_request_hash("POST", &route_instance, &body) {
         Ok(hash) => hash,
         Err(message) => return bad_args_response(FAIL_COMMAND, message),
-    };
-    let request: FailRequest = match serde_json::from_value(body) {
-        Ok(request) => request,
-        Err(err) => return bad_args_response(FAIL_COMMAND, format!("invalid JSON body: {err}")),
     };
 
     match control_plane
@@ -334,9 +333,13 @@ fn not_configured_response(command: &'static str) -> axum::response::Response {
     )
 }
 
-fn json_body(body: Result<Json<JsonValue>, JsonRejection>) -> Result<JsonValue, String> {
+fn json_body<T>(body: Result<Json<T>, JsonRejection>) -> Result<T, String> {
     body.map(|Json(value)| value)
         .map_err(|err| format!("invalid JSON body: {err}"))
+}
+
+fn parse_request_body<T: DeserializeOwned>(body: &JsonValue) -> Result<T, String> {
+    serde_json::from_value(body.clone()).map_err(|err| format!("invalid JSON body: {err}"))
 }
 
 fn path_id(path: Result<Path<u64>, PathRejection>) -> Result<u64, String> {

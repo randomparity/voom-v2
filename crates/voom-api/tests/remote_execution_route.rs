@@ -195,7 +195,11 @@ async fn acquire_same_key_replays_and_different_body_conflicts() {
         .post_json(
             "/v1/execution/lease/acquire",
             "same-key",
-            json!({"node_id": fixture.node_id.0, "worker_id": fixture.worker_id.0, "extra": true}),
+            json!({
+                "node_id": fixture.node_id.0,
+                "worker_id": fixture.worker_id.0,
+                "lease_ttl_seconds": 61
+            }),
         )
         .await;
 
@@ -256,18 +260,65 @@ async fn node_and_lease_heartbeat_routes_are_idempotent() {
 }
 
 #[tokio::test]
-async fn node_heartbeat_rejects_unknown_body_fields() {
+async fn execution_routes_reject_unknown_body_fields() {
     let fixture = api_fixture().await;
 
-    let res = fixture
-        .post_json(
-            &format!("/v1/execution/node/{}/heartbeat", fixture.node_id.0),
+    let cases = [
+        (
+            "/v1/execution/lease/acquire".to_owned(),
+            "acquire-unknown-body",
+            "execution.acquire",
+            json!({
+                "node_id": fixture.node_id.0,
+                "worker_id": fixture.worker_id.0,
+                "unknown": true
+            }),
+        ),
+        (
+            format!("/v1/execution/node/{}/heartbeat", fixture.node_id.0),
             "node-heartbeat-unknown-body",
-            json!({"node_id": fixture.node_id.0}),
-        )
-        .await;
+            "execution.node_heartbeat",
+            json!({"unknown": true}),
+        ),
+        (
+            "/v1/execution/lease/1/heartbeat".to_owned(),
+            "lease-heartbeat-unknown-body",
+            "execution.lease_heartbeat",
+            json!({
+                "node_id": fixture.node_id.0,
+                "worker_id": fixture.worker_id.0,
+                "unknown": true
+            }),
+        ),
+        (
+            "/v1/execution/lease/1/complete".to_owned(),
+            "complete-unknown-body",
+            "execution.complete",
+            json!({
+                "node_id": fixture.node_id.0,
+                "worker_id": fixture.worker_id.0,
+                "result": {},
+                "unknown": true
+            }),
+        ),
+        (
+            "/v1/execution/lease/1/fail".to_owned(),
+            "fail-unknown-body",
+            "execution.fail",
+            json!({
+                "node_id": fixture.node_id.0,
+                "worker_id": fixture.worker_id.0,
+                "reason": "timed out",
+                "class": FailureClass::WorkerTimeout,
+                "unknown": true
+            }),
+        ),
+    ];
 
-    assert_bad_args_envelope(res, "execution.node_heartbeat").await;
+    for (path, key, command, body) in cases {
+        let response = fixture.post_json(&path, key, body).await;
+        assert_bad_args_envelope(response, command).await;
+    }
 }
 
 #[tokio::test]
