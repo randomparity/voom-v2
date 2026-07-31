@@ -31,6 +31,31 @@ fn videotoolbox_stage_budget_matches_supervisor_deadline() {
 }
 
 #[test]
+fn probe_directories_are_unique_when_created_concurrently() {
+    const THREADS: usize = 64;
+
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(THREADS));
+    let handles = (0..THREADS)
+        .map(|_| {
+            let barrier = barrier.clone();
+            std::thread::spawn(move || {
+                barrier.wait();
+                ProbeDir::new("concurrent-probe").map(|probe| probe.path.clone())
+            })
+        })
+        .collect::<Vec<_>>();
+
+    let mut paths = handles
+        .into_iter()
+        .map(|handle| handle.join().unwrap().unwrap())
+        .collect::<Vec<_>>();
+    paths.sort_unstable();
+    paths.dedup();
+
+    assert_eq!(paths.len(), THREADS);
+}
+
+#[test]
 fn platform_identity_hash_is_normalized_and_errors_do_not_disclose_raw_uuid() {
     let raw_uuid = "e4ad1c3f-8b4a-4e4e-a9ad-9a0123456789";
     let ioreg = format!("\"IOPlatformUUID\" = \"{raw_uuid}\"");

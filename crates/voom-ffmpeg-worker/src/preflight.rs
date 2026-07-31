@@ -5,6 +5,7 @@ use std::{
     io::Read,
     path::{Path, PathBuf},
     process::{Child, Command, Output, Stdio},
+    sync::atomic::{AtomicU64, Ordering},
     thread,
     time::Duration,
 };
@@ -2101,6 +2102,8 @@ struct ProbeDir {
     path: PathBuf,
 }
 
+static PROBE_DIR_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
 impl ProbeDir {
     fn new(label: &str) -> Result<Self, FFmpegPreflightError> {
         let nonce = std::time::SystemTime::now()
@@ -2111,8 +2114,11 @@ impl ProbeDir {
                 ))
             })?
             .as_nanos();
-        let path =
-            std::env::temp_dir().join(format!("voom-{label}-{}-{nonce}", std::process::id()));
+        let sequence = PROBE_DIR_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "voom-{label}-{}-{nonce}-{sequence}",
+            std::process::id()
+        ));
         std::fs::create_dir(&path).map_err(|error| {
             FFmpegPreflightError::Failed(format!(
                 "create {label} directory {}: {error}",
