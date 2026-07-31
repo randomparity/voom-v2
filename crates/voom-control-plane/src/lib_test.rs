@@ -77,7 +77,9 @@ async fn open_refuses_missing_database() {
 #[tokio::test]
 async fn health_on_existing_but_uninitialized_db_is_uninitialized() {
     let (_keep, url) = fresh_url();
-    voom_store::connect_or_create(&url).await.unwrap();
+    voom_store::test_support::create_uninitialized_pool(&url)
+        .await
+        .unwrap();
 
     let hp = HealthPlane::open(&url).await.unwrap();
     let snap = hp.health().await.unwrap();
@@ -139,7 +141,9 @@ async fn scheduler_decision_reads_are_exposed_without_exposing_repo_writes() {
 #[tokio::test]
 async fn control_plane_open_rejects_uninitialized_db() {
     let (_keep, url) = fresh_url();
-    voom_store::connect_or_create(&url).await.unwrap();
+    voom_store::test_support::create_uninitialized_pool(&url)
+        .await
+        .unwrap();
     let err = ControlPlane::open(&url).await.unwrap_err();
     assert_eq!(err.error_code(), ErrorCode::DbUninitialized);
 }
@@ -185,7 +189,9 @@ async fn control_plane_open_rejects_dirty_schema() {
 #[tokio::test]
 async fn health_plane_open_succeeds_on_uninitialized_db() {
     let (_keep, url) = fresh_url();
-    voom_store::connect_or_create(&url).await.unwrap();
+    voom_store::test_support::create_uninitialized_pool(&url)
+        .await
+        .unwrap();
     let hp = HealthPlane::open(&url).await.unwrap();
     let snap = hp.health().await.unwrap();
     assert!(

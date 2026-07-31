@@ -17,8 +17,8 @@ use std::path::PathBuf;
 
 use serde_json::{Value as JsonValue, json};
 use sqlx::migrate::Migrator;
-use voom_store::test_support::sqlite_url_for;
-use voom_store::{MIGRATOR, connect_or_create};
+use voom_store::MIGRATOR;
+use voom_store::test_support::{create_uninitialized_pool, sqlite_url_for};
 use voom_test_support::TempDatabase;
 
 const EXPECTED_MIGRATION_FILES: &[&str] = &[
@@ -134,7 +134,7 @@ fn every_migrations_file_is_registered_in_migrator() {
 async fn remote_acquire_replay_shape_migration_canonicalizes_only_missing_decision_ids() {
     let tmp = TempDatabase::new().unwrap();
     let url = sqlite_url_for(tmp.path());
-    let pool = connect_or_create(&url).await.unwrap();
+    let pool = create_uninitialized_pool(&url).await.unwrap();
     migrator_through(32).run(&pool).await.unwrap();
     let (node_id, worker_id) = seed_remote_execution_owner(&pool).await;
     let unchanged = seed_remote_acquire_replays(&pool, node_id, worker_id).await;
@@ -326,7 +326,7 @@ async fn remote_replay_json(pool: &sqlx::SqlitePool, key: &str) -> JsonValue {
 async fn nvidia_profile_migration_preserves_every_existing_profile_field() {
     let tmp = TempDatabase::new().unwrap();
     let url = sqlite_url_for(tmp.path());
-    let pool = connect_or_create(&url).await.unwrap();
+    let pool = create_uninitialized_pool(&url).await.unwrap();
     migrator_through(28).run(&pool).await.unwrap();
 
     sqlx::query(
@@ -371,7 +371,7 @@ async fn nvidia_profile_migration_preserves_every_existing_profile_field() {
 async fn vaapi_profile_migration_preserves_existing_profile_rows() {
     let tmp = TempDatabase::new().unwrap();
     let url = sqlite_url_for(tmp.path());
-    let pool = connect_or_create(&url).await.unwrap();
+    let pool = create_uninitialized_pool(&url).await.unwrap();
     migrator_through(29).run(&pool).await.unwrap();
 
     sqlx::query(
@@ -456,7 +456,7 @@ async fn accelerated_video_profile_snapshot(pool: &sqlx::SqlitePool) -> String {
 async fn backend_neutral_migration_tags_nvidia_capability_and_preserves_claim() {
     let tmp = TempDatabase::new().unwrap();
     let url = sqlite_url_for(tmp.path());
-    let pool = connect_or_create(&url).await.unwrap();
+    let pool = create_uninitialized_pool(&url).await.unwrap();
     migrator_through(30).run(&pool).await.unwrap();
 
     sqlx::query(
@@ -530,7 +530,7 @@ async fn staged_artifact_commit_migration_preserves_seeded_file_version_links() 
 
     let tmp = TempDatabase::new().unwrap();
     let url = sqlite_url_for(tmp.path());
-    let pool = connect_or_create(&url).await.unwrap();
+    let pool = create_uninitialized_pool(&url).await.unwrap();
 
     migrator_through(11).run(&pool).await.unwrap();
 
@@ -624,7 +624,7 @@ async fn worker_grant_max_parallel_migration_rewrites_legacy_limit() {
 
     let tmp = TempDatabase::new().unwrap();
     let url = sqlite_url_for(tmp.path());
-    let pool = connect_or_create(&url).await.unwrap();
+    let pool = create_uninitialized_pool(&url).await.unwrap();
 
     migrator_through(15).run(&pool).await.unwrap();
 
@@ -691,7 +691,7 @@ async fn policy_verification_migration_preserves_workflow_progress() {
 
     let tmp = TempDatabase::new().unwrap();
     let url = sqlite_url_for(tmp.path());
-    let pool = connect_or_create(&url).await.unwrap();
+    let pool = create_uninitialized_pool(&url).await.unwrap();
 
     migrator_through(25).run(&pool).await.unwrap();
 
@@ -744,7 +744,7 @@ async fn sliding_window_migration_backfills_legacy_progress_and_accepts_blocked(
 
     let tmp = TempDatabase::new().unwrap();
     let url = sqlite_url_for(tmp.path());
-    let pool = connect_or_create(&url).await.unwrap();
+    let pool = create_uninitialized_pool(&url).await.unwrap();
     migrator_through(27).run(&pool).await.unwrap();
     let (_file_version_id, job_id) = seed_legacy_workflow_progress(&pool).await;
 
@@ -811,7 +811,7 @@ async fn audio_synthesis_lineage_migration_allows_sequential_versions_of_one_ass
     );
     let tmp = TempDatabase::new().unwrap();
     let url = sqlite_url_for(tmp.path());
-    let pool = connect_or_create(&url).await.unwrap();
+    let pool = create_uninitialized_pool(&url).await.unwrap();
     migrator_through(26).run(&pool).await.unwrap();
 
     let (asset_id, versions, locations, snapshots) = seed_synthesis_versions(&pool).await;

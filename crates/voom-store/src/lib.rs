@@ -22,5 +22,5 @@ pub mod test_support;
 
 pub use init::{InitReport, init};
 pub use migrator::MIGRATOR;
-pub use pool::{connect, connect_or_create};
+pub use pool::connect;
 pub use schema::{SchemaState, expected_migrations, probe_schema};

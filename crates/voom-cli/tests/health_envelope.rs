@@ -13,8 +13,10 @@ use sqlx::migrate::Migrator;
 use voom_cli::commands::health::{self, HealthData, HealthDb, HealthRuntime};
 use voom_cli::envelope::Local;
 use voom_control_plane::HealthPlane;
-use voom_store::test_support::{insert_synthetic_migration, sqlite_url_for};
-use voom_store::{MIGRATOR, connect_or_create};
+use voom_store::MIGRATOR;
+use voom_store::test_support::{
+    create_uninitialized_pool, insert_synthetic_migration, sqlite_url_for,
+};
 use voom_test_support::TempDatabase;
 
 const MIGRATION_ROLLBACK_RUNBOOK: &str =
@@ -115,7 +117,9 @@ fn migrator_before_latest() -> Migrator {
 async fn health_against_uninitialized_db_returns_exit_code_2() {
     let tmp = TempDatabase::new().unwrap();
     let url = sqlite_url_for(tmp.path());
-    voom_store::connect_or_create(&url).await.unwrap();
+    voom_store::test_support::create_uninitialized_pool(&url)
+        .await
+        .unwrap();
 
     let hp = HealthPlane::open(&url).await.unwrap();
     let code = health::run(&hp, local_for(&url)).await.unwrap();
@@ -180,7 +184,7 @@ async fn migration_rollback_runbook_predicates_match_real_health_contract() {
 
     let partial = TempDatabase::new().unwrap();
     let partial_url = sqlite_url_for(partial.path());
-    let partial_pool = connect_or_create(&partial_url).await.unwrap();
+    let partial_pool = create_uninitialized_pool(&partial_url).await.unwrap();
     migrator_before_latest().run(&partial_pool).await.unwrap();
     drop(partial_pool);
     let partial_json = assert_health_error(&partial_url, "DB_PARTIAL_SCHEMA");

@@ -16,7 +16,9 @@ use voom_test_support::TempDatabase;
 async fn fixture_uninit() -> (TempDatabase, axum::Router) {
     let tmp = TempDatabase::new().unwrap();
     let url = sqlite_url_for(tmp.path());
-    voom_store::connect_or_create(&url).await.unwrap();
+    voom_store::test_support::create_uninitialized_pool(&url)
+        .await
+        .unwrap();
     let hp = HealthPlane::open(&url).await.unwrap();
     (tmp, router(hp))
 }

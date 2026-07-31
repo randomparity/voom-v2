@@ -26,7 +26,8 @@ voom-policy = { workspace = true }
 
 [features]
 # Test-only public surface: enables init_on(pool), the test_support module
-# (sqlite_url_for, fresh_initialized_pool_at, insert_synthetic_migration),
+# (sqlite_url_for, create_uninitialized_pool, fresh_initialized_pool_at,
+# insert_synthetic_migration),
 # and any other pool-injection helpers needed by tests that want to seed
 # pre-init state. Production crates MUST NOT enable this.
 #

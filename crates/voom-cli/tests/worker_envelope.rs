@@ -74,7 +74,9 @@ mod worker_envelope {
     async fn worker_list_uninitialized_db_uses_uninitialized_error_envelope() {
         let tmp = TempDatabase::new().unwrap();
         let url = sqlite_url_for(tmp.path());
-        voom_store::connect_or_create(&url).await.unwrap();
+        voom_store::test_support::create_uninitialized_pool(&url)
+            .await
+            .unwrap();
 
         let output = worker_command(&url).args(["list"]).output().unwrap();
 

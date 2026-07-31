@@ -27,7 +27,7 @@ use time::OffsetDateTime;
 use voom_core::{JobId, TicketOperation, VoomError, WorkerId};
 
 use crate::init::init;
-use crate::pool::connect;
+use crate::pool::{connect, connect_or_create};
 use crate::repo::execution::tickets::{NewTicket, SqliteTicketRepo, Ticket};
 use crate::repo::execution::workers::{
     NewCapability, NewGrant, NewWorker, SqliteWorkerRepo, Worker, WorkerKind,
@@ -45,6 +45,17 @@ pub const T0: OffsetDateTime = OffsetDateTime::UNIX_EPOCH;
 #[must_use]
 pub fn sqlite_url_for(path: &Path) -> String {
     format!("sqlite://{}", path.display())
+}
+
+/// Create a database without applying migrations so tests can seed partial or
+/// invalid schema states. Production callers must use [`crate::init`] instead.
+///
+/// # Errors
+///
+/// Returns a `VoomError` if the database or its parent directory cannot be
+/// created.
+pub async fn create_uninitialized_pool(url: &str) -> Result<SqlitePool, VoomError> {
+    connect_or_create(url).await
 }
 
 /// Run `init` against `path` and return a connected pool. Callers own the
