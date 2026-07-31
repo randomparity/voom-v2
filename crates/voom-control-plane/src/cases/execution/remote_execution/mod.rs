@@ -34,6 +34,7 @@ pub struct RemoteNodeHeartbeatInput {
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RemoteNodeHeartbeatOutcome {
     pub node_id: NodeId,
     pub status: String,
@@ -49,8 +50,7 @@ pub struct RemoteAcquireInput {
     pub lease_ttl_seconds: i64,
 }
 
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-#[serde(tag = "outcome", rename_all = "snake_case")]
+#[derive(Debug, Clone, PartialEq)]
 pub enum RemoteAcquireOutcome {
     Idle {
         worker_id: WorkerId,
@@ -64,6 +64,93 @@ pub enum RemoteAcquireOutcome {
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "outcome", rename_all = "snake_case")]
+enum RemoteAcquireOutcomeWire {
+    Idle(RemoteAcquireIdleWire),
+    NoCandidate(RemoteAcquireNoCandidateWire),
+    Leased(RemoteLeaseDispatch),
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RemoteAcquireIdleWire {
+    worker_id: WorkerId,
+    scheduler_decision_id: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RemoteAcquireNoCandidateWire {
+    worker_id: WorkerId,
+    scheduler_decision_id: u64,
+}
+
+impl serde::Serialize for RemoteAcquireOutcome {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let wire = RemoteAcquireOutcomeWire::from(self.clone());
+        serde::Serialize::serialize(&wire, serializer)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for RemoteAcquireOutcome {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let wire = <RemoteAcquireOutcomeWire as serde::Deserialize>::deserialize(deserializer)?;
+        Ok(Self::from(wire))
+    }
+}
+
+impl From<RemoteAcquireOutcome> for RemoteAcquireOutcomeWire {
+    fn from(outcome: RemoteAcquireOutcome) -> Self {
+        match outcome {
+            RemoteAcquireOutcome::Idle {
+                worker_id,
+                scheduler_decision_id,
+            } => Self::Idle(RemoteAcquireIdleWire {
+                worker_id,
+                scheduler_decision_id,
+            }),
+            RemoteAcquireOutcome::NoCandidate {
+                worker_id,
+                scheduler_decision_id,
+            } => Self::NoCandidate(RemoteAcquireNoCandidateWire {
+                worker_id,
+                scheduler_decision_id,
+            }),
+            RemoteAcquireOutcome::Leased(dispatch) => Self::Leased(dispatch),
+        }
+    }
+}
+
+impl From<RemoteAcquireOutcomeWire> for RemoteAcquireOutcome {
+    fn from(wire: RemoteAcquireOutcomeWire) -> Self {
+        match wire {
+            RemoteAcquireOutcomeWire::Idle(RemoteAcquireIdleWire {
+                worker_id,
+                scheduler_decision_id,
+            }) => Self::Idle {
+                worker_id,
+                scheduler_decision_id,
+            },
+            RemoteAcquireOutcomeWire::NoCandidate(RemoteAcquireNoCandidateWire {
+                worker_id,
+                scheduler_decision_id,
+            }) => Self::NoCandidate {
+                worker_id,
+                scheduler_decision_id,
+            },
+            RemoteAcquireOutcomeWire::Leased(dispatch) => Self::Leased(dispatch),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RemoteLeaseDispatch {
     pub lease_id: LeaseId,
     pub scheduler_decision_id: u64,
@@ -77,6 +164,7 @@ pub struct RemoteLeaseDispatch {
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RemoteArtifactAccessPlan {
     pub id: u64,
     pub input_handles: Vec<String>,
@@ -96,6 +184,7 @@ pub struct RemoteLeaseHeartbeatInput {
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RemoteLeaseHeartbeatOutcome {
     pub lease_id: LeaseId,
     pub worker_id: WorkerId,
@@ -114,6 +203,7 @@ pub struct RemoteCompleteInput {
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RemoteCompleteOutcome {
     pub lease_id: LeaseId,
     pub ticket_id: TicketId,
@@ -135,6 +225,7 @@ pub struct RemoteFailInput {
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RemoteFailOutcome {
     pub lease_id: LeaseId,
     pub ticket_id: TicketId,

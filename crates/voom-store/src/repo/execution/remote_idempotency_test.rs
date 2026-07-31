@@ -4,6 +4,30 @@ use voom_core::{NodeId, WorkerId};
 
 use super::*;
 
+#[test]
+fn replay_envelope_rejects_unknown_fields() {
+    let ok = json!({"status": "ok", "data": {"outcome": "idle"}});
+    let ok_replay = RemoteMutationReplay::Ok {
+        data: json!({"outcome": "idle"}),
+    };
+    assert_eq!(serde_json::to_value(&ok_replay).unwrap(), ok);
+    assert!(serde_json::from_value::<RemoteMutationReplay>(ok.clone()).is_ok());
+    let mut unknown_ok = ok;
+    unknown_ok["unexpected"] = json!(true);
+    assert!(serde_json::from_value::<RemoteMutationReplay>(unknown_ok).is_err());
+
+    let error = json!({"status": "error", "code": "CONFLICT", "message": "busy"});
+    let error_replay = RemoteMutationReplay::Error {
+        code: "CONFLICT".to_owned(),
+        message: "busy".to_owned(),
+    };
+    assert_eq!(serde_json::to_value(&error_replay).unwrap(), error);
+    assert!(serde_json::from_value::<RemoteMutationReplay>(error.clone()).is_ok());
+    let mut unknown_error = error;
+    unknown_error["unexpected"] = json!(true);
+    assert!(serde_json::from_value::<RemoteMutationReplay>(unknown_error).is_err());
+}
+
 struct Fixture {
     pool: sqlx::SqlitePool,
     repo: SqliteRemoteIdempotencyRepo,

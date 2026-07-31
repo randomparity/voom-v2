@@ -24,11 +24,72 @@ pub enum IdempotencyOutcome {
     Replay(RemoteMutationReplay),
 }
 
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-#[serde(tag = "status", rename_all = "snake_case")]
+#[derive(Debug, Clone, PartialEq)]
 pub enum RemoteMutationReplay {
     Ok { data: JsonValue },
     Error { code: String, message: String },
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+enum RemoteMutationReplayWire {
+    Ok(RemoteMutationSuccessWire),
+    Error(RemoteMutationErrorWire),
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RemoteMutationSuccessWire {
+    data: JsonValue,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RemoteMutationErrorWire {
+    code: String,
+    message: String,
+}
+
+impl serde::Serialize for RemoteMutationReplay {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let wire = RemoteMutationReplayWire::from(self.clone());
+        serde::Serialize::serialize(&wire, serializer)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for RemoteMutationReplay {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let wire = <RemoteMutationReplayWire as serde::Deserialize>::deserialize(deserializer)?;
+        Ok(Self::from(wire))
+    }
+}
+
+impl From<RemoteMutationReplay> for RemoteMutationReplayWire {
+    fn from(replay: RemoteMutationReplay) -> Self {
+        match replay {
+            RemoteMutationReplay::Ok { data } => Self::Ok(RemoteMutationSuccessWire { data }),
+            RemoteMutationReplay::Error { code, message } => {
+                Self::Error(RemoteMutationErrorWire { code, message })
+            }
+        }
+    }
+}
+
+impl From<RemoteMutationReplayWire> for RemoteMutationReplay {
+    fn from(wire: RemoteMutationReplayWire) -> Self {
+        match wire {
+            RemoteMutationReplayWire::Ok(RemoteMutationSuccessWire { data }) => Self::Ok { data },
+            RemoteMutationReplayWire::Error(RemoteMutationErrorWire { code, message }) => {
+                Self::Error { code, message }
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone)]

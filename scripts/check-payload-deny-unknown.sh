@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Guard the durable-payload schema-evolution contract (audit M4, ADR 0013).
+# Guard the durable-payload schema-evolution contract defined by ADR 0013.
 #
 # For every source file listed in the scope file (default
 # scripts/payload-contract-scope.txt), fail when:

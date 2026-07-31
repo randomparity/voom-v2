@@ -29,6 +29,128 @@ use crate::cases::workers::{
 const T0: OffsetDateTime = OffsetDateTime::UNIX_EPOCH;
 const OP: &str = "test.remote";
 
+#[test]
+fn remote_replay_outcomes_reject_unknown_fields() {
+    assert_unknown_rejected::<RemoteNodeHeartbeatOutcome>(json!({
+        "node_id": 1,
+        "status": "active"
+    }));
+    assert_unknown_rejected::<RemoteAcquireOutcome>(json!({
+        "outcome": "idle",
+        "worker_id": 1,
+        "scheduler_decision_id": 2
+    }));
+    assert_unknown_rejected::<RemoteAcquireOutcome>(json!({
+        "outcome": "no_candidate",
+        "worker_id": 1,
+        "scheduler_decision_id": 2
+    }));
+    let mut leased = remote_lease_dispatch_json();
+    leased["outcome"] = json!("leased");
+    assert_unknown_rejected::<RemoteAcquireOutcome>(leased);
+    assert_unknown_rejected::<RemoteLeaseDispatch>(remote_lease_dispatch_json());
+    assert_unknown_rejected::<RemoteLeaseHeartbeatOutcome>(json!({
+        "lease_id": 1,
+        "worker_id": 2,
+        "ttl_seconds": 60
+    }));
+    assert_unknown_rejected::<RemoteCompleteOutcome>(json!({
+        "lease_id": 1,
+        "ticket_id": 2,
+        "worker_id": 3,
+        "artifact_access_plan": remote_artifact_access_plan_json()
+    }));
+    assert_unknown_rejected::<RemoteFailOutcome>(json!({
+        "lease_id": 1,
+        "ticket_id": 2,
+        "worker_id": 3,
+        "artifact_access_plan": remote_artifact_access_plan_json()
+    }));
+    assert_unknown_rejected::<RemoteArtifactAccessPlan>(remote_artifact_access_plan_json());
+}
+
+#[test]
+fn remote_acquire_outcomes_preserve_durable_wire_shapes() {
+    let idle = RemoteAcquireOutcome::Idle {
+        worker_id: voom_core::WorkerId(1),
+        scheduler_decision_id: 2,
+    };
+    assert_eq!(
+        serde_json::to_value(idle).unwrap(),
+        json!({
+            "outcome": "idle",
+            "worker_id": 1,
+            "scheduler_decision_id": 2
+        })
+    );
+
+    let no_candidate = RemoteAcquireOutcome::NoCandidate {
+        worker_id: voom_core::WorkerId(1),
+        scheduler_decision_id: 2,
+    };
+    assert_eq!(
+        serde_json::to_value(no_candidate).unwrap(),
+        json!({
+            "outcome": "no_candidate",
+            "worker_id": 1,
+            "scheduler_decision_id": 2
+        })
+    );
+
+    let leased = RemoteAcquireOutcome::Leased(RemoteLeaseDispatch {
+        lease_id: LeaseId(1),
+        scheduler_decision_id: 2,
+        ticket_id: TicketId(3),
+        worker_id: voom_core::WorkerId(4),
+        operation: "test.remote".to_owned(),
+        dispatch_payload: json!({}),
+        lease_ttl_seconds: 60,
+        heartbeat_after_seconds: 20,
+        artifact_access_plan: RemoteArtifactAccessPlan {
+            id: 1,
+            input_handles: vec!["input".to_owned()],
+            output_handles: vec!["output".to_owned()],
+            selected_access_mode: ArtifactAccessMode::SharedMount,
+        },
+    });
+    let mut expected = remote_lease_dispatch_json();
+    expected["outcome"] = json!("leased");
+    assert_eq!(serde_json::to_value(leased).unwrap(), expected);
+}
+
+fn assert_unknown_rejected<T>(value: serde_json::Value)
+where
+    T: serde::de::DeserializeOwned,
+{
+    assert!(serde_json::from_value::<T>(value.clone()).is_ok());
+    let mut value = value;
+    value["unexpected"] = json!(true);
+    assert!(serde_json::from_value::<T>(value).is_err());
+}
+
+fn remote_lease_dispatch_json() -> serde_json::Value {
+    json!({
+        "lease_id": 1,
+        "scheduler_decision_id": 2,
+        "ticket_id": 3,
+        "worker_id": 4,
+        "operation": "test.remote",
+        "dispatch_payload": {},
+        "lease_ttl_seconds": 60,
+        "heartbeat_after_seconds": 20,
+        "artifact_access_plan": remote_artifact_access_plan_json()
+    })
+}
+
+fn remote_artifact_access_plan_json() -> serde_json::Value {
+    json!({
+        "id": 1,
+        "input_handles": ["input"],
+        "output_handles": ["output"],
+        "selected_access_mode": "shared_mount"
+    })
+}
+
 fn ticket_op(value: &str) -> TicketOperation {
     TicketOperation::new(value).unwrap()
 }
