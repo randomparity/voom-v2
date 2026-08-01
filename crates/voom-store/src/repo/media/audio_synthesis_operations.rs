@@ -161,6 +161,38 @@ pub struct FinalizeAudioSynthesisOperation {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AudioSynthesisDispatchAttemptStatus {
+    Active,
+    Terminal,
+    Quarantined,
+    Quiesced,
+}
+
+impl AudioSynthesisDispatchAttemptStatus {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Terminal => "terminal",
+            Self::Quarantined => "quarantined",
+            Self::Quiesced => "quiesced",
+        }
+    }
+
+    fn parse(value: &str) -> Result<Self, VoomError> {
+        match value {
+            "active" => Ok(Self::Active),
+            "terminal" => Ok(Self::Terminal),
+            "quarantined" => Ok(Self::Quarantined),
+            "quiesced" => Ok(Self::Quiesced),
+            other => Err(VoomError::database(format!(
+                "audio_synthesis_dispatch_attempts.status {other:?} not in vocab"
+            ))),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AudioSynthesisDispatchAttempt {
     pub id: u64,
     pub operation_id: u64,
@@ -171,7 +203,7 @@ pub struct AudioSynthesisDispatchAttempt {
     pub idempotency_key: String,
     pub attempt_directory: String,
     pub staging_path: String,
-    pub status: String,
+    pub status: AudioSynthesisDispatchAttemptStatus,
 }
 
 #[derive(Debug, Clone)]
@@ -553,7 +585,7 @@ impl SqliteAudioSynthesisOperationRepo {
             "INSERT INTO audio_synthesis_dispatch_attempts \
              (operation_id, generation, dispatch_lease_id, worker_id, worker_epoch, idempotency_key, \
               attempt_directory, staging_path, status, created_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', ?)",
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(i64_from_u64(operation_id))
         .bind(i64::from(claim.expected_generation))
@@ -563,6 +595,7 @@ impl SqliteAudioSynthesisOperationRepo {
         .bind(&attempt.idempotency_key)
         .bind(&attempt.attempt_directory)
         .bind(&attempt.staging_path)
+        .bind(AudioSynthesisDispatchAttemptStatus::Active.as_str())
         .bind(iso8601(now)?)
         .execute(&mut *tx)
         .await
@@ -614,14 +647,16 @@ impl SqliteAudioSynthesisOperationRepo {
         let now = iso8601(now)?;
         let result = sqlx::query(
             "UPDATE audio_synthesis_dispatch_attempts \
-             SET status = 'terminal', evidence_kind = 'terminal_response', evidence_at = ? \
-             WHERE id = ? AND status = 'active' AND operation_id = \
+             SET status = ?, evidence_kind = 'terminal_response', evidence_at = ? \
+             WHERE id = ? AND status = ? AND operation_id = \
              (SELECT id FROM audio_synthesis_operations WHERE operation_key = ? \
               AND dispatch_generation = ? AND claim_lease_id = ? AND claim_token = ? \
               AND claim_expires_at > ?)",
         )
+        .bind(AudioSynthesisDispatchAttemptStatus::Terminal.as_str())
         .bind(&now)
         .bind(i64_from_u64(attempt_id))
+        .bind(AudioSynthesisDispatchAttemptStatus::Active.as_str())
         .bind(&claim.operation_key)
         .bind(i64::from(claim.expected_generation))
         .bind(i64_from_u64(claim.lease_id.0))
@@ -651,13 +686,15 @@ impl SqliteAudioSynthesisOperationRepo {
             })?;
         let now = iso8601(now)?;
         let quarantined = sqlx::query(
-            "UPDATE audio_synthesis_dispatch_attempts SET status = 'quarantined' \
-             WHERE id = ? AND status = 'active' AND generation = ? \
+            "UPDATE audio_synthesis_dispatch_attempts SET status = ? \
+             WHERE id = ? AND status = ? AND generation = ? \
              AND operation_id = (SELECT id FROM audio_synthesis_operations \
                  WHERE operation_key = ? AND state = 'planned' AND dispatch_generation = ? \
                  AND claim_lease_id = ? AND claim_token = ? AND claim_expires_at > ?)",
         )
+        .bind(AudioSynthesisDispatchAttemptStatus::Quarantined.as_str())
         .bind(i64_from_u64(attempt_id))
+        .bind(AudioSynthesisDispatchAttemptStatus::Active.as_str())
         .bind(i64::from(claim.expected_generation))
         .bind(&claim.operation_key)
         .bind(i64::from(claim.expected_generation))
@@ -1160,7 +1197,10 @@ async fn load_dispatch_attempt(
             .try_get("attempt_directory")
             .map_err(synthesis_row_err)?,
         staging_path: row.try_get("staging_path").map_err(synthesis_row_err)?,
-        status: row.try_get("status").map_err(synthesis_row_err)?,
+        status: AudioSynthesisDispatchAttemptStatus::parse(
+            &row.try_get::<String, _>("status")
+                .map_err(synthesis_row_err)?,
+        )?,
     })
 }
 

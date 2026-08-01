@@ -21,10 +21,10 @@ use voom_store::repo::media::audio_extract_operations::{
     NewAudioExtractOperation, NewAudioExtractOutput, SqliteAudioExtractOperationRepo,
 };
 use voom_store::repo::media::audio_synthesis_operations::{
-    AudioSynthesisDispatchAttempt, AudioSynthesisOperationRecord, AudioSynthesisOperationState,
-    FinalizeAudioSynthesisOperation, NewAudioSynthesisClaim, NewAudioSynthesisCompanion,
-    NewAudioSynthesisDispatchAttempt, NewAudioSynthesisOperation,
-    SqliteAudioSynthesisOperationRepo, StagedAudioSynthesisCompanion,
+    AudioSynthesisDispatchAttempt, AudioSynthesisDispatchAttemptStatus,
+    AudioSynthesisOperationRecord, AudioSynthesisOperationState, FinalizeAudioSynthesisOperation,
+    NewAudioSynthesisClaim, NewAudioSynthesisCompanion, NewAudioSynthesisDispatchAttempt,
+    NewAudioSynthesisOperation, SqliteAudioSynthesisOperationRepo, StagedAudioSynthesisCompanion,
     ValidateAudioSynthesisOperation,
 };
 use voom_store::repo::media::identity::FileVersionRepo;
@@ -796,43 +796,49 @@ async fn reconcile_synthesis_dispatch(
     staging: stage::PreparedStagingPath,
     now: time::OffsetDateTime,
 ) -> Result<ClaimedSynthesisDispatch, VoomError> {
-    if attempt.status == "active"
-        && attempt.worker_id == worker_id.0
-        && attempt.worker_epoch == worker_epoch
-    {
-        let attempt_directory = staging.path.parent().ok_or_else(|| {
-            VoomError::Internal("audio synthesis staging path has no parent".to_owned())
-        })?;
-        if attempt.attempt_directory != attempt_directory.display().to_string()
-            || attempt.staging_path != staging.path.display().to_string()
+    match attempt.status {
+        AudioSynthesisDispatchAttemptStatus::Active
+            if attempt.worker_id == worker_id.0 && attempt.worker_epoch == worker_epoch =>
         {
+            let attempt_directory = staging.path.parent().ok_or_else(|| {
+                VoomError::Internal("audio synthesis staging path has no parent".to_owned())
+            })?;
+            if attempt.attempt_directory != attempt_directory.display().to_string()
+                || attempt.staging_path != staging.path.display().to_string()
+            {
+                repo.quarantine_and_advance_generation(&claim, attempt.id, now)
+                    .await?;
+                return Err(VoomError::Conflict(format!(
+                    "audio synthesis attempt {} does not match its deterministic staging path",
+                    attempt.id
+                )));
+            }
+            Ok(ClaimedSynthesisDispatch {
+                claim,
+                attempt,
+                staging,
+            })
+        }
+        AudioSynthesisDispatchAttemptStatus::Active => {
             repo.quarantine_and_advance_generation(&claim, attempt.id, now)
                 .await?;
-            return Err(VoomError::Conflict(format!(
-                "audio synthesis attempt {} does not match its deterministic staging path",
-                attempt.id
-            )));
+            Err(VoomError::Conflict(format!(
+                "audio synthesis attempt {} belongs to worker {} epoch {}; generation advanced \
+                 before retry",
+                attempt.id, attempt.worker_id, attempt.worker_epoch
+            )))
         }
-        return Ok(ClaimedSynthesisDispatch {
-            claim,
-            attempt,
-            staging,
-        });
+        AudioSynthesisDispatchAttemptStatus::Terminal
+        | AudioSynthesisDispatchAttemptStatus::Quarantined
+        | AudioSynthesisDispatchAttemptStatus::Quiesced => {
+            repo.abandon_planned_generation(&claim, now).await?;
+            Err(VoomError::Conflict(format!(
+                "audio synthesis attempt {} is {}; generation advanced before retry",
+                attempt.id,
+                attempt.status.as_str()
+            )))
+        }
     }
-    if attempt.status == "active" {
-        repo.quarantine_and_advance_generation(&claim, attempt.id, now)
-            .await?;
-        return Err(VoomError::Conflict(format!(
-            "audio synthesis attempt {} belongs to worker {} epoch {}; generation advanced \
-             before retry",
-            attempt.id, attempt.worker_id, attempt.worker_epoch
-        )));
-    }
-    repo.abandon_planned_generation(&claim, now).await?;
-    Err(VoomError::Conflict(format!(
-        "audio synthesis attempt {} is {}; generation advanced before retry",
-        attempt.id, attempt.status
-    )))
 }
 
 fn staged_synthesis_companions(

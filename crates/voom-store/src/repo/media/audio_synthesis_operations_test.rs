@@ -299,7 +299,7 @@ async fn claim_and_generation_fence_dispatch_paths() {
         .await
         .unwrap();
 
-    assert_eq!(attempt.status, "active");
+    assert_eq!(attempt.status, AudioSynthesisDispatchAttemptStatus::Active);
     assert_eq!(second.generation, 1);
     assert_ne!(attempt.staging_path, second.staging_path);
     assert!(
@@ -316,4 +316,134 @@ async fn claim_and_generation_fence_dispatch_paths() {
             .await
             .unwrap();
     assert_eq!(quarantined, "quarantined");
+}
+
+#[tokio::test]
+async fn audio_synthesis_dispatch_attempt_status_round_trips_durable_vocabulary() {
+    let fixture = fixture().await;
+    let now = OffsetDateTime::UNIX_EPOCH;
+    fixture
+        .repo
+        .create_planned(fixture.operation(), &companions(), now)
+        .await
+        .unwrap();
+    let claim = fixture.claim(0, "status-vocabulary");
+    fixture.repo.acquire_claim(&claim, now).await.unwrap();
+    let attempt = fixture
+        .repo
+        .record_dispatch_attempt(
+            &claim,
+            &NewAudioSynthesisDispatchAttempt {
+                dispatch_lease_id: fixture.lease_id,
+                worker_id: fixture.worker_id,
+                worker_epoch: 7,
+                idempotency_key: "synthesis:status:0".to_owned(),
+                attempt_directory: "/staging/op/g0".to_owned(),
+                staging_path: "/staging/op/g0/result.mkv".to_owned(),
+            },
+            now,
+        )
+        .await
+        .unwrap();
+
+    for (stored, expected) in [
+        ("active", AudioSynthesisDispatchAttemptStatus::Active),
+        ("terminal", AudioSynthesisDispatchAttemptStatus::Terminal),
+        (
+            "quarantined",
+            AudioSynthesisDispatchAttemptStatus::Quarantined,
+        ),
+        ("quiesced", AudioSynthesisDispatchAttemptStatus::Quiesced),
+    ] {
+        let (evidence_kind, evidence_at, acknowledged_by) = match expected {
+            AudioSynthesisDispatchAttemptStatus::Active
+            | AudioSynthesisDispatchAttemptStatus::Quarantined => (None, None, None),
+            AudioSynthesisDispatchAttemptStatus::Terminal => {
+                (Some("terminal_response"), Some(NOW), None)
+            }
+            AudioSynthesisDispatchAttemptStatus::Quiesced => (
+                Some("operator_acknowledgement"),
+                Some(NOW),
+                Some("operator"),
+            ),
+        };
+        sqlx::query(
+            "UPDATE audio_synthesis_dispatch_attempts \
+             SET status = ?, evidence_kind = ?, evidence_at = ?, acknowledged_by = ? \
+             WHERE id = ?",
+        )
+        .bind(stored)
+        .bind(evidence_kind)
+        .bind(evidence_at)
+        .bind(acknowledged_by)
+        .bind(i64::try_from(attempt.id).unwrap())
+        .execute(&fixture.pool)
+        .await
+        .unwrap();
+
+        let loaded = fixture
+            .repo
+            .get_dispatch_attempt(attempt.operation_id, attempt.generation)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(loaded.status, expected);
+    }
+}
+
+#[tokio::test]
+async fn audio_synthesis_dispatch_attempt_status_rejects_unknown_durable_value() {
+    let fixture = fixture().await;
+    let now = OffsetDateTime::UNIX_EPOCH;
+    fixture
+        .repo
+        .create_planned(fixture.operation(), &companions(), now)
+        .await
+        .unwrap();
+    let claim = fixture.claim(0, "invalid-status");
+    fixture.repo.acquire_claim(&claim, now).await.unwrap();
+    let attempt = fixture
+        .repo
+        .record_dispatch_attempt(
+            &claim,
+            &NewAudioSynthesisDispatchAttempt {
+                dispatch_lease_id: fixture.lease_id,
+                worker_id: fixture.worker_id,
+                worker_epoch: 7,
+                idempotency_key: "synthesis:invalid-status:0".to_owned(),
+                attempt_directory: "/staging/op/g0".to_owned(),
+                staging_path: "/staging/op/g0/result.mkv".to_owned(),
+            },
+            now,
+        )
+        .await
+        .unwrap();
+    let mut connection = fixture.pool.acquire().await.unwrap();
+    sqlx::query("PRAGMA ignore_check_constraints = TRUE")
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE audio_synthesis_dispatch_attempts SET status = ? WHERE id = ?")
+        .bind("impossible")
+        .bind(i64::try_from(attempt.id).unwrap())
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+    sqlx::query("PRAGMA ignore_check_constraints = FALSE")
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+    drop(connection);
+
+    let error = fixture
+        .repo
+        .get_dispatch_attempt(attempt.operation_id, attempt.generation)
+        .await
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("audio_synthesis_dispatch_attempts.status")
+    );
+    assert!(error.to_string().contains("impossible"));
 }

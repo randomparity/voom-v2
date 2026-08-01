@@ -667,6 +667,104 @@ async fn active_synthesis_attempt_replays_same_worker_key_and_path_after_restart
 }
 
 #[tokio::test]
+async fn non_active_synthesis_attempt_is_not_reconciled_as_active() {
+    let (cp, _db, dir) = fixture_with_dir().await;
+    let source = seed_audio_source(&cp, &dir, b"source").await;
+    let now = cp.clock().now();
+    let operation = cp
+        .audio_synthesis_operations
+        .create_planned(
+            NewAudioSynthesisOperation {
+                operation_key: "synthesis:terminal-attempt".to_owned(),
+                planned_operation_id: "terminal-attempt".to_owned(),
+                source_file_version_id: source.version,
+                source_media_snapshot_id: voom_core::MediaSnapshotId(source.snapshot),
+                target_codec: "aac".to_owned(),
+                target_channels: 2,
+                container: "mkv".to_owned(),
+                target_path: dir.path().join("output.mkv").display().to_string(),
+            },
+            &[NewAudioSynthesisCompanion {
+                companion_id: "companion".to_owned(),
+                source_snapshot_stream_id: "stream".to_owned(),
+                source_provider_stream_index: 1,
+                result_snapshot_stream_id: "companion".to_owned(),
+            }],
+            now,
+        )
+        .await
+        .unwrap();
+    let claim = NewAudioSynthesisClaim {
+        operation_key: operation.operation.operation_key.clone(),
+        expected_generation: 0,
+        lease_id: LeaseId(3),
+        claim_token: "terminal-attempt".to_owned(),
+        expires_at: now + time::Duration::minutes(1),
+    };
+    cp.audio_synthesis_operations
+        .acquire_claim(&claim, now)
+        .await
+        .unwrap();
+    let staging = stage::PreparedStagingPath {
+        canonical_root: dir.path().to_path_buf(),
+        path: dir.path().join("staging/result.mkv"),
+    };
+    let attempt = cp
+        .audio_synthesis_operations
+        .record_dispatch_attempt(
+            &claim,
+            &NewAudioSynthesisDispatchAttempt {
+                dispatch_lease_id: LeaseId(3),
+                worker_id: 1,
+                worker_epoch: 0,
+                idempotency_key: format!("audio-synthesis:{}:0", operation.operation.operation_key),
+                attempt_directory: staging.path.parent().unwrap().display().to_string(),
+                staging_path: staging.path.display().to_string(),
+            },
+            now,
+        )
+        .await
+        .unwrap();
+    sqlx::query(
+        "UPDATE audio_synthesis_dispatch_attempts \
+         SET status = 'terminal', evidence_kind = 'terminal_response', evidence_at = ? \
+         WHERE id = ?",
+    )
+    .bind("1970-01-01T00:00:00Z")
+    .bind(i64::try_from(attempt.id).unwrap())
+    .execute(cp.pool_for_test())
+    .await
+    .unwrap();
+    let terminal_attempt = cp
+        .audio_synthesis_operations
+        .get_dispatch_attempt(attempt.operation_id, attempt.generation)
+        .await
+        .unwrap()
+        .unwrap();
+    let Err(error) = reconcile_synthesis_dispatch(
+        &cp.audio_synthesis_operations,
+        claim,
+        terminal_attempt,
+        voom_core::WorkerId(1),
+        0,
+        staging,
+        now,
+    )
+    .await
+    else {
+        panic!("terminal attempt must not be reconciled as active");
+    };
+    assert_eq!(error.error_code(), voom_core::ErrorCode::Conflict);
+    assert!(error.to_string().contains("is terminal"));
+    let generation: i64 =
+        sqlx::query_scalar("SELECT dispatch_generation FROM audio_synthesis_operations")
+            .fetch_one(cp.pool_for_test())
+            .await
+            .unwrap();
+    assert_eq!(generation, 1);
+}
+
+#[tokio::test]
 async fn staged_synthesis_probe_failure_reuses_bound_artifact_on_retry() {
     let (cp, _db, dir) = fixture_with_dir().await;
     let mut source = seed_audio_source(&cp, &dir, b"source").await;
