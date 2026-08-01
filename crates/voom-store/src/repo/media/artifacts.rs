@@ -717,6 +717,9 @@ impl SqliteArtifactRepo {
                 "artifact_handle {handle_id} missing expected size_bytes"
             ))
         })?;
+        let size_bytes = u64::try_from(size_bytes).map_err(|error| {
+            VoomError::database_context("artifact_handles.size_bytes negative", error)
+        })?;
         let checksum = checksum.ok_or_else(|| {
             VoomError::Config(format!(
                 "artifact_handle {handle_id} missing expected checksum"
@@ -733,9 +736,7 @@ impl SqliteArtifactRepo {
                     })
                 })
                 .transpose()?,
-            size_bytes: u64::try_from(size_bytes).map_err(|error| {
-                VoomError::database_context("artifact_handles.size_bytes negative", error)
-            })?,
+            size_bytes,
             checksum,
         })
     }
@@ -2072,8 +2073,18 @@ fn row_to_handle(row: &sqlx::sqlite::SqliteRow) -> Result<ArtifactHandle, VoomEr
         .try_get("created_at")
         .map_err(|e| map_row_err("artifacts", &e))?;
     Ok(ArtifactHandle {
-        id: ArtifactHandleId(u64_from_i64(id)),
-        file_version_id: file_version_id.map(|v| FileVersionId(u64_from_i64(v))),
+        id: ArtifactHandleId(
+            u64::try_from(id).map_err(|error| {
+                VoomError::database_context("artifact_handles.id negative", error)
+            })?,
+        ),
+        file_version_id: file_version_id
+            .map(|value| {
+                u64::try_from(value).map(FileVersionId).map_err(|error| {
+                    VoomError::database_context("artifact_handles.file_version_id negative", error)
+                })
+            })
+            .transpose()?,
         privacy_class,
         durability_class,
         mutability,

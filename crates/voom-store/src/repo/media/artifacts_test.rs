@@ -522,6 +522,33 @@ async fn handle_facts_preserves_optional_inspection_values() {
 }
 
 #[tokio::test]
+async fn handle_facts_rejects_negative_persisted_source_version_id() {
+    let (pool, _tmp) = pool().await;
+    let repo = SqliteArtifactRepo::new(pool.clone());
+    let handle = repo.create_handle(sample_new_handle()).await.unwrap();
+    let mut connection = pool.acquire().await.unwrap();
+    sqlx::query("PRAGMA foreign_keys = OFF")
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE artifact_handles SET file_version_id = -1 WHERE id = ?")
+        .bind(i64::try_from(handle.id.0).unwrap())
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+    sqlx::query("PRAGMA foreign_keys = ON")
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+    drop(connection);
+
+    let error = repo.handle_facts(handle.id).await.unwrap_err();
+
+    assert!(matches!(error, VoomError::Database { .. }));
+    assert!(error.to_string().contains("file_version_id"));
+}
+
+#[tokio::test]
 async fn require_expected_facts_returns_typed_values_inside_and_outside_transaction() {
     let (pool, _tmp) = pool().await;
     let repo = SqliteArtifactRepo::new(pool.clone());
@@ -554,6 +581,7 @@ async fn require_expected_facts_rejects_missing_size_and_checksum_with_context()
     for (size_bytes, checksum, missing_field) in [
         (None, Some("abc".to_owned()), "size_bytes"),
         (Some(1024), None, "checksum"),
+        (None, None, "size_bytes"),
     ] {
         let mut input = sample_new_handle();
         input.size_bytes = size_bytes;
@@ -574,6 +602,23 @@ async fn require_expected_facts_rejects_negative_persisted_size_as_database_erro
     let repo = SqliteArtifactRepo::new(pool.clone());
     let handle = repo.create_handle(sample_new_handle()).await.unwrap();
     sqlx::query("UPDATE artifact_handles SET size_bytes = -1 WHERE id = ?")
+        .bind(i64::try_from(handle.id.0).unwrap())
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let error = repo.require_expected_facts(handle.id).await.unwrap_err();
+
+    assert!(matches!(error, VoomError::Database { .. }));
+    assert!(error.to_string().contains("size_bytes"));
+}
+
+#[tokio::test]
+async fn require_expected_facts_rejects_negative_size_before_missing_checksum() {
+    let (pool, _tmp) = pool().await;
+    let repo = SqliteArtifactRepo::new(pool.clone());
+    let handle = repo.create_handle(sample_new_handle()).await.unwrap();
+    sqlx::query("UPDATE artifact_handles SET size_bytes = -1, checksum = NULL WHERE id = ?")
         .bind(i64::try_from(handle.id.0).unwrap())
         .execute(&pool)
         .await
