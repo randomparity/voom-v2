@@ -6,7 +6,7 @@ use sqlx::{Sqlite, Transaction};
 use voom_core::{
     ArtifactAccessMode, ErrorCode, FailureClass, LeaseId, NodeId, TicketId, VoomError, WorkerId,
 };
-use voom_store::repo::remote_idempotency::RemoteMutationReplay;
+use voom_store::repo::execution::remote_idempotency::RemoteMutationReplay;
 
 use crate::ControlPlane;
 

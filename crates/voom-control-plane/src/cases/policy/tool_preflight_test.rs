@@ -8,7 +8,7 @@ use voom_policy::{
     CompiledPolicy, DiagnosticSeverity, DiagnosticStage, PolicyDiagnostic, PolicyTool,
     SourceLocation, SourceSpan, compile_policy,
 };
-use voom_store::repo::workers::{NewCapability, NewGrant, NewWorker, WorkerKind};
+use voom_store::repo::execution::workers::{NewCapability, NewGrant, NewWorker, WorkerKind};
 use voom_worker_protocol::{
     ClientHandle, DispatchStream, HandshakeResponse, OperationRequest, ProtocolError,
     WorkerCredentials, WorkerIdentityResponse,
@@ -674,7 +674,7 @@ async fn register_transcode_worker(
     hardware: Vec<String>,
     extra: serde_json::Value,
     max_parallel: u32,
-) -> voom_store::repo::workers::Worker {
+) -> voom_store::repo::execution::workers::Worker {
     let worker = cp
         .register_supervisor_worker(NewWorker {
             name: name.to_owned(),
@@ -723,7 +723,9 @@ fn vaapi_accelerator_extra(encoders: &[&str], decoders: &[&str]) -> serde_json::
     })
 }
 
-fn live_registry(workers: &[&voom_store::repo::workers::Worker]) -> WorkerRuntimeRegistry {
+fn live_registry(
+    workers: &[&voom_store::repo::execution::workers::Worker],
+) -> WorkerRuntimeRegistry {
     let mut registry = WorkerRuntimeRegistry::new();
     for worker in workers {
         registry = registry.with_in_process_runtime(

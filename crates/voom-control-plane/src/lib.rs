@@ -29,53 +29,55 @@ use time::OffsetDateTime;
 use voom_core::{Clock, ErrorCode, JobId, LeaseId, SystemClock, TicketId, VoomError};
 use voom_events::EventId;
 use voom_store::repo::{
-    artifact_access_plans::SqliteArtifactAccessPlanRepo,
-    artifacts::SqliteArtifactRepo,
-    audio_extract_operations::SqliteAudioExtractOperationRepo,
-    backups::SqliteBackupRepo,
-    bundles::SqliteBundleRepo,
-    events::{EventFilter, EventRepo, EventRow, Page, SqliteEventRepo},
-    external::SqliteExternalSystemRepo,
-    identity::SqliteIdentityRepo,
-    issues::SqliteIssueRepo,
-    jobs::{Job, JobFilter, SqliteJobRepo},
-    leases::{Lease, LeaseFilter, SqliteLeaseRepo},
-    library::SqliteLibraryRepo,
-    media::audio_synthesis_operations::SqliteAudioSynthesisOperationRepo,
-    nodes::SqliteNodeRepo,
-    policies::SqlitePolicyRepo,
-    policy_inputs::SqlitePolicyInputRepo,
-    quality_scoring_profiles::SqliteQualityScoringProfileRepo,
-    remote_idempotency::SqliteRemoteIdempotencyRepo,
-    safety_policies::SqliteSafetyPolicyRepo,
-    scheduler_decisions::{
-        SchedulerDecision, SchedulerDecisionFilter, SqliteSchedulerDecisionRepo,
+    audit::events::{EventFilter, EventRepo, EventRow, Page, SqliteEventRepo},
+    execution::{
+        jobs::{Job, JobFilter, SqliteJobRepo},
+        leases::{Lease, LeaseFilter, SqliteLeaseRepo},
+        nodes::SqliteNodeRepo,
+        remote_idempotency::SqliteRemoteIdempotencyRepo,
+        scheduler_decisions::{
+            SchedulerDecision, SchedulerDecisionFilter, SqliteSchedulerDecisionRepo,
+        },
+        scheduler_node_limits::SqliteSchedulerNodeLimitRepo,
+        tickets::{SqliteTicketRepo, Ticket, TicketFilter},
+        workers::SqliteWorkerRepo,
+        workflow_progress::SqliteWorkflowProgressRepo,
+        workflow_summaries::SqliteWorkflowSummaryRepo,
     },
-    scheduler_node_limits::SqliteSchedulerNodeLimitRepo,
-    scheduling_policies::SqliteSchedulingPolicyRepo,
-    tickets::{SqliteTicketRepo, Ticket, TicketFilter},
-    use_leases::SqliteUseLeaseRepo,
-    video_profiles::{NewVideoProfile, SqliteVideoProfileRepo, VideoProfile},
-    workers::SqliteWorkerRepo,
-    workflow_progress::SqliteWorkflowProgressRepo,
-    workflow_summaries::SqliteWorkflowSummaryRepo,
+    external::SqliteExternalSystemRepo,
+    library::SqliteLibraryRepo,
+    media::{
+        artifact_access_plans::SqliteArtifactAccessPlanRepo, artifacts::SqliteArtifactRepo,
+        audio_extract_operations::SqliteAudioExtractOperationRepo,
+        audio_synthesis_operations::SqliteAudioSynthesisOperationRepo, backups::SqliteBackupRepo,
+        bundles::SqliteBundleRepo, identity::SqliteIdentityRepo, use_leases::SqliteUseLeaseRepo,
+    },
+    policy::{
+        issues::SqliteIssueRepo,
+        policies::SqlitePolicyRepo,
+        policy_inputs::SqlitePolicyInputRepo,
+        quality_scoring_profiles::SqliteQualityScoringProfileRepo,
+        safety_policies::SqliteSafetyPolicyRepo,
+        scheduling_policies::SqliteSchedulingPolicyRepo,
+        video_profiles::{NewVideoProfile, SqliteVideoProfileRepo, VideoProfile},
+    },
 };
 use voom_store::{SchemaState, connect, probe_schema};
 
-mod artifact;
-mod audio;
+pub mod artifact;
+pub mod audio;
 mod backup;
 mod cases;
 mod local_worker;
 mod media_snapshot;
-pub mod node_auth;
+mod node_auth;
 mod operation_source;
-mod remux;
+pub mod remux;
 pub mod scan;
-mod transcode;
+pub mod transcode;
 mod video_hardware;
 pub(crate) mod worker_process;
-mod workflow;
+pub mod workflow;
 
 pub mod execution {
     pub use crate::cases::execution::remote_execution::{
@@ -84,15 +86,21 @@ pub mod execution {
         RemoteLeaseHeartbeatInput, RemoteLeaseHeartbeatOutcome, RemoteNodeHeartbeatInput,
         RemoteNodeHeartbeatOutcome, RemoteRecoverReport,
     };
+    pub use crate::cases::execution::tickets::PreLeaseFailureOutcome;
 }
 
 pub mod policy {
     pub use crate::cases::policy::compliance::{
-        ComplianceApplyData, ComplianceAudioExtractOutput, ComplianceAudioSynthesisCompanion,
-        ComplianceExecuteData, ComplianceExecuteError, ComplianceExecutionOptions,
-        ComplianceLegacyAudioExtractOutput, ComplianceReportData, ComplianceRunReportData,
+        ArtifactVerificationView, BackupEvidence, ComplianceApplyData,
+        ComplianceAudioExtractOutput, ComplianceAudioSynthesisCompanion, ComplianceExecuteData,
+        ComplianceExecuteError, ComplianceExecutionOptions, ComplianceLegacyAudioExtractOutput,
+        ComplianceReportData, ComplianceRunReportData,
         DEFAULT_ACCELERATOR_UNAVAILABLE_TIMEOUT_SECONDS, DEFAULT_MAX_IN_FLIGHT_FILES,
-        FilePhaseSummaryView, IssueApplicationSummary, PhaseSummaryView, WorkflowSummaryView,
+        FilePhaseSummaryView, IssueApplicationSummary, PhaseSummaryView, ProgressCountsView,
+        WorkflowSummaryView,
+    };
+    pub use crate::cases::policy::plans::{
+        plan_compiled_policy_with_input, plan_policy_source_with_input,
     };
     pub use crate::cases::policy::policies::PolicyMutationError;
     pub use crate::cases::policy::policy_inputs::{
@@ -106,36 +114,19 @@ pub mod workers {
     pub use crate::cases::workers::{
         NewWorkerCapabilityDraft, NewWorkerGrantDraft, RegisterWorkerForNodeInput,
     };
+    pub use crate::local_worker::{
+        LocalVideoAcceleratorConfig, LocalWorkerHandle, LocalWorkerKind, NvidiaLocalWorkerConfig,
+        RunningLocalWorker, VaapiLocalWorkerConfig, VideoToolboxLocalWorkerConfig,
+    };
+    pub use crate::node_auth::{
+        GeneratedNodeToken, NodeTokenGenerator, NodeTokenService, SharedRngNodeTokenGenerator,
+        hash_node_token, token_hint, verify_node_token,
+    };
 }
 
 pub mod external {
     pub use crate::cases::external::sync::ExternalSyncReport;
 }
-
-pub use artifact::{
-    ArtifactDetail, ArtifactInspectionState, ArtifactListInput, ArtifactListPage, ArtifactSummary,
-    CommitArtifactCommandError, CommitArtifactInput, CommitArtifactPreMutationReport,
-    CommitArtifactReport, CommitRecoveryReport, CommitSummary, PathFacts, PathObservation,
-    RecoverySummary, StageCopyCommandError, StageCopyInput, StageCopyReport, VerificationSummary,
-    VerifyArtifactInput, VerifyArtifactReport,
-};
-pub use audio::{
-    AcknowledgeExtractDispatchQuiescenceInput, ExecuteExtractAudioInput,
-    ExecuteExtractAudioOutputReport, ExecuteExtractAudioReport, ExecuteSynthesisCompanionReport,
-    ExecuteTranscodeAudioInput, ExecuteTranscodeAudioReport, ExtractAudioDispatcher,
-    TranscodeAudioDispatcher, TranscodePostCommitRecoveryReport,
-};
-pub use cases::policy::plans::{plan_compiled_policy_with_input, plan_policy_source_with_input};
-pub use local_worker::{
-    LocalVideoAcceleratorConfig, LocalWorkerHandle, LocalWorkerKind, NvidiaLocalWorkerConfig,
-    RunningLocalWorker, VaapiLocalWorkerConfig, VideoToolboxLocalWorkerConfig,
-};
-pub use remux::{ExecuteRemuxInput, ExecuteRemuxReport, RemuxDispatcher};
-pub use transcode::{
-    ExecuteTranscodeVideoInput, ExecuteTranscodeVideoReport, TranscodeVideoDispatcher,
-};
-pub use workflow::coordinator::{CoordinatorError, CoordinatorOutcome};
-pub use workflow::plan::ticket_payload::WorkflowTicketPayload;
 
 /// Type alias for the boxed, shared, interior-mutable RNG passed to
 /// `SqliteLeaseRepo::fail` (and any future caller that needs full-jitter

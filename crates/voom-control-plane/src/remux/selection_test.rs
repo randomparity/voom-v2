@@ -5,7 +5,7 @@ use std::collections::BTreeSet;
 use serde_json::json;
 use time::OffsetDateTime;
 use voom_core::{ErrorCode, FileVersionId, MediaSnapshotId};
-use voom_store::repo::identity::MediaSnapshot;
+use voom_store::repo::media::identity::MediaSnapshot;
 
 #[test]
 fn selection_preserves_video_and_applies_audio_keep() {

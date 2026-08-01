@@ -8,14 +8,14 @@
 use std::collections::BTreeMap;
 
 use voom_core::{FileVersionId, JobId, TicketId, VoomError};
-use voom_store::repo::identity::{FileLocationKind, FileLocationRepo, FileVersionRepo};
-use voom_store::repo::workflow_progress::{
+use voom_store::repo::execution::workflow_progress::{
     FileAdmissionTier, FileProgress, FileProgressState, NewFileProgress,
 };
-use voom_store::repo::workflow_summaries::{
+use voom_store::repo::execution::workflow_summaries::{
     FilePhaseOutcome, FilePhaseSummary, FileRunHistory, FileRunStart, NewFileRunHistory,
     NewFileRunStart,
 };
+use voom_store::repo::media::identity::{FileLocationKind, FileLocationRepo, FileVersionRepo};
 
 use crate::ControlPlane;
 use crate::workflow::coordinator::PhaseFile;

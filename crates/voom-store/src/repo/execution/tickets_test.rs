@@ -3,7 +3,7 @@ use super::*;
 use time::{Duration, OffsetDateTime};
 use voom_core::{JobId, TicketOperation, VoomError};
 
-use crate::repo::jobs::{NewJob, SqliteJobRepo};
+use crate::repo::execution::jobs::{NewJob, SqliteJobRepo};
 use crate::test_support::fresh_initialized_pool_at;
 
 async fn pool() -> (sqlx::SqlitePool, voom_test_support::TempDatabase) {

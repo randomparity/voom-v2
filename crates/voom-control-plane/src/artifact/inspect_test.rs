@@ -9,10 +9,10 @@ use voom_core::{
     ArtifactHandleId, ErrorCode, FailureClass, FileLocationId, FileVersionId, VoomError,
     rng_test_support::FrozenRng,
 };
-use voom_store::repo::artifacts::{
+use voom_store::repo::media::artifacts::{
     ArtifactCommitFailure, ArtifactCommitState, ArtifactVerificationStatus, NewArtifactCommitRecord,
 };
-use voom_store::repo::identity::{DiscoveredFile, FileLocationKind, IngestOutcome};
+use voom_store::repo::media::identity::{DiscoveredFile, FileLocationKind, IngestOutcome};
 use voom_worker_protocol::{
     VerifyArtifactObservedFacts, VerifyArtifactRequest, VerifyArtifactResult, VerifyArtifactStatus,
 };
@@ -510,7 +510,7 @@ async fn create_pending_commit(
     staged: &VerifiedStage,
     verification_id: ArtifactVerificationId,
     target_path: &str,
-) -> voom_store::repo::artifacts::ArtifactCommitRecord {
+) -> voom_store::repo::media::artifacts::ArtifactCommitRecord {
     let mut tx = cp.pool_for_test().begin().await.unwrap();
     let record = cp
         .artifacts()

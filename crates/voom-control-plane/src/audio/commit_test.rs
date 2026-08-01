@@ -5,7 +5,9 @@ use sqlx::Row;
 use time::OffsetDateTime;
 use voom_core::rng_test_support::FrozenRng;
 use voom_plan::audio::{AudioDispositionFact, SnapshotAudioStreamFact};
-use voom_store::repo::identity::{DiscoveredFile, FileLocationKind, IngestOutcome, MediaSnapshot};
+use voom_store::repo::media::identity::{
+    DiscoveredFile, FileLocationKind, IngestOutcome, MediaSnapshot,
+};
 use voom_worker_protocol::{
     AudioDispositionFact as WorkerAudioDispositionFact, AudioOutputStreamFact, AudioStreamRef,
     TranscodeAudioResult, TranscodeAudioSelection, TranscodeAudioStatus,

@@ -3,12 +3,16 @@ use super::*;
 use time::{Duration as TDuration, OffsetDateTime};
 use voom_core::{FailureClass, JobId, TicketId, TicketOperation, VoomError, WorkerId};
 use voom_events::EventKind;
-use voom_store::repo::accelerator_claims::{NewAcceleratorClaim, SqliteAcceleratorClaimRepo};
-use voom_store::repo::events::{EventFilter, EventRepo, Page};
-use voom_store::repo::jobs::{JobState, NewJob};
-use voom_store::repo::leases::{LeaseAcquireOutcome, LeaseFilter, LeaseState};
-use voom_store::repo::tickets::{NewTicket, Ticket, TicketState};
-use voom_store::repo::workers::{NewCapability, NewGrant, NewWorker, Worker, WorkerKind};
+use voom_store::repo::audit::events::{EventFilter, EventRepo, Page};
+use voom_store::repo::execution::accelerator_claims::{
+    NewAcceleratorClaim, SqliteAcceleratorClaimRepo,
+};
+use voom_store::repo::execution::jobs::{JobState, NewJob};
+use voom_store::repo::execution::leases::{LeaseAcquireOutcome, LeaseFilter, LeaseState};
+use voom_store::repo::execution::tickets::{NewTicket, Ticket, TicketState};
+use voom_store::repo::execution::workers::{
+    NewCapability, NewGrant, NewWorker, Worker, WorkerKind,
+};
 
 use crate::cases::{count, cp, issue_link_targets, terminal_failure_issues};
 
@@ -1152,7 +1156,7 @@ async fn force_release_with_requeue_rejects_when_attempts_exhausted() {
     let lease_after = cp.leases().get(lease.id).await.unwrap().unwrap();
     assert_eq!(
         lease_after.state,
-        voom_store::repo::leases::LeaseState::Held,
+        voom_store::repo::execution::leases::LeaseState::Held,
         "rejected force_release must leave the lease held"
     );
     let ticket_after = cp.tickets().get(t.id).await.unwrap().unwrap();
@@ -1406,7 +1410,10 @@ async fn force_release_lease_rejects_empty_actor() {
     // no audit event row must have been written.
     assert_eq!(count(&cp, EventKind::LeaseForceReleased).await, before);
     let still = cp.leases().get(lease.id).await.unwrap().unwrap();
-    assert_eq!(still.state, voom_store::repo::leases::LeaseState::Held);
+    assert_eq!(
+        still.state,
+        voom_store::repo::execution::leases::LeaseState::Held
+    );
 }
 
 #[tokio::test]
@@ -1438,7 +1445,10 @@ async fn force_release_lease_rejects_whitespace_reason() {
     assert!(matches!(err, VoomError::Config(_)), "got {err:?}");
     assert_eq!(count(&cp, EventKind::LeaseForceReleased).await, before);
     let still = cp.leases().get(lease.id).await.unwrap().unwrap();
-    assert_eq!(still.state, voom_store::repo::leases::LeaseState::Held);
+    assert_eq!(
+        still.state,
+        voom_store::repo::execution::leases::LeaseState::Held
+    );
 }
 
 // --- terminal_failure issue auto-open (Issue Model + Failure taxonomy) -------

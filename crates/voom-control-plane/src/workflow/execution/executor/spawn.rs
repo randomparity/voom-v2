@@ -8,9 +8,9 @@ use std::collections::{HashMap, HashSet};
 use voom_core::OperationKind;
 use voom_core::{JobId, TicketId, TicketOperation, VideoEncoderBackend, VoomError, WorkerId};
 use voom_scheduler::{LeastLoadedWorkerSelector, WorkerSelector, WorkerView};
-use voom_store::repo::leases::{LeaseAcquireOutcome, NewLease};
-use voom_store::repo::tickets::{Ticket, TicketState};
-use voom_store::repo::workers::WorkerOperationCandidate;
+use voom_store::repo::execution::leases::{LeaseAcquireOutcome, NewLease};
+use voom_store::repo::execution::tickets::{Ticket, TicketState};
+use voom_store::repo::execution::workers::WorkerOperationCandidate;
 use voom_worker_protocol::{
     NvidiaVideoAcceleratorDescriptor, NvidiaVideoHardwareRequirement, TranscodeVideoProfile,
     VaapiVideoAcceleratorDescriptor, VaapiVideoHardwareRequirement, VideoAcceleratorDescriptor,

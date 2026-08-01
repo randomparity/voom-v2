@@ -2,7 +2,7 @@ use super::*;
 
 use std::path::PathBuf;
 
-use voom_store::repo::identity::{FileLocation, FileLocationKind, FileVersion, ProducedBy};
+use voom_store::repo::media::identity::{FileLocation, FileLocationKind, FileVersion, ProducedBy};
 use voom_worker_protocol::{
     RemuxObservedFacts, RemuxResult, RemuxSelection, RemuxStatus, RemuxStreamRef, RemuxTrackGroup,
 };

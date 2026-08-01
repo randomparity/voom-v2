@@ -11,7 +11,7 @@ use time::OffsetDateTime;
 use voom_core::{ExternalSystemId, VoomError};
 use voom_events::payload::ExternalSystemSyncedPayload;
 use voom_events::{Event, EventKind, SubjectType};
-use voom_store::repo::events::{EventFilter, EventRepo, Page};
+use voom_store::repo::audit::events::{EventFilter, EventRepo, Page};
 
 use crate::ControlPlane;
 

@@ -16,7 +16,7 @@ use voom_events::payload::{
     UseLeaseReanchoredByMovePayload,
 };
 use voom_events::{Event, SubjectType};
-use voom_store::repo::identity::{
+use voom_store::repo::media::identity::{
     AcceptedPin, AliasProof, DiscoveredFile, FileAsset, FileAssetRepo, FileLocation,
     FileLocationRepo, FileVersion, FileVersionRepo, IdentityEvidence, IdentityEvidenceRepo,
     IdentityEvidenceTarget, IngestOutcome, IngestRepo, MediaSnapshot, MediaVariant,
@@ -579,7 +579,7 @@ impl ControlPlane {
     pub async fn create_file_location(
         &self,
         input: NewFileLocation,
-    ) -> Result<voom_store::repo::identity::FileLocation, VoomError> {
+    ) -> Result<voom_store::repo::media::identity::FileLocation, VoomError> {
         let observed_at = input.observed_at;
         let mut tx = begin_tx(&self.pool).await?;
         let loc = self

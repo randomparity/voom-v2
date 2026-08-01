@@ -9,7 +9,7 @@ use voom_events::payload::{
     NodeHeartbeatRecordedPayload, NodeMarkedStalePayload, NodeRegisteredPayload, NodeRetiredPayload,
 };
 use voom_events::{Event, SubjectType};
-use voom_store::repo::nodes::{NewNode, Node, NodeKind, NodeStatus};
+use voom_store::repo::execution::nodes::{NewNode, Node, NodeKind, NodeStatus};
 
 use crate::ControlPlane;
 use crate::node_auth::verify_node_token;

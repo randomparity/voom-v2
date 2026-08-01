@@ -7,7 +7,7 @@ use voom_core::{
 };
 
 use super::*;
-use crate::repo::workflow_progress::{
+use crate::repo::execution::workflow_progress::{
     FileAdmissionTier, FileProgressState, NewFilePhaseEntry, NewFileProgress,
     SqliteWorkflowProgressRepo,
 };

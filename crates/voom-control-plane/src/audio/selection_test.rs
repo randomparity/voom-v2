@@ -3,7 +3,7 @@ use super::*;
 use serde_json::{Value, json};
 use time::OffsetDateTime;
 use voom_core::{ErrorCode, FileVersionId, MediaSnapshotId};
-use voom_store::repo::identity::MediaSnapshot;
+use voom_store::repo::media::identity::MediaSnapshot;
 
 #[test]
 fn transcode_selection_returns_selected_audio_refs_in_request_order() {

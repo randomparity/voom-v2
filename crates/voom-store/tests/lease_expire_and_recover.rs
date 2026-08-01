@@ -18,10 +18,10 @@ use time::Duration;
 use voom_control_plane::ControlPlane;
 use voom_core::{SystemClock, TicketOperation};
 use voom_events::EventKind;
-use voom_store::repo::events::{EventFilter, EventRepo, Page};
-use voom_store::repo::leases::{LEASE_BATCH_LIMIT, NewLease};
-use voom_store::repo::tickets::NewTicket;
-use voom_store::repo::workers::{NewWorker, WorkerKind};
+use voom_store::repo::audit::events::{EventFilter, EventRepo, Page};
+use voom_store::repo::execution::leases::{LEASE_BATCH_LIMIT, NewLease};
+use voom_store::repo::execution::tickets::NewTicket;
+use voom_store::repo::execution::workers::{NewWorker, WorkerKind};
 use voom_store::test_support::{T0, record_worker_eligibility};
 
 const N: usize = 500;

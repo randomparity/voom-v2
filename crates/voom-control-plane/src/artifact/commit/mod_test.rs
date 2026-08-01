@@ -10,11 +10,11 @@ use voom_core::{
     rng_test_support::FrozenRng,
 };
 use voom_events::EventKind;
-use voom_store::repo::artifacts::{
+use voom_store::repo::audit::events::{EventFilter, EventRepo, Page};
+use voom_store::repo::media::artifacts::{
     ArtifactCommitFailure, ArtifactCommitState, NewArtifactCommitRecord, NewArtifactLocation,
 };
-use voom_store::repo::events::{EventFilter, EventRepo, Page};
-use voom_store::repo::identity::{
+use voom_store::repo::media::identity::{
     DiscoveredFile, FileLocationKind, FileLocationRepo, FileVersionRepo, IngestOutcome,
     NewFileLocation, NewFileVersion, ProducedBy,
 };
@@ -705,7 +705,7 @@ async fn create_pending_commit(
     staged: &VerifiedStage,
     verification_id: ArtifactVerificationId,
     target_path: &str,
-) -> voom_store::repo::artifacts::ArtifactCommitRecord {
+) -> voom_store::repo::media::artifacts::ArtifactCommitRecord {
     create_pending_commit_result(cp, staged, verification_id, target_path)
         .await
         .unwrap()
@@ -716,7 +716,7 @@ async fn create_pending_commit_result(
     staged: &VerifiedStage,
     verification_id: ArtifactVerificationId,
     target_path: &str,
-) -> Result<voom_store::repo::artifacts::ArtifactCommitRecord, VoomError> {
+) -> Result<voom_store::repo::media::artifacts::ArtifactCommitRecord, VoomError> {
     let mut tx = cp.pool_for_test().begin().await.unwrap();
     let result = cp
         .artifacts()

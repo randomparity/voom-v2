@@ -10,11 +10,11 @@ use serde_json::{Value, json};
 use voom_core::{FileVersionId, JobId, VoomError};
 use voom_plan::{ExecutionPlan, NodeStatus, PlanOperationKind, PlanningContext, PlanningRequest};
 use voom_policy::{PolicyInputSetDraft, TargetRef};
-use voom_store::repo::identity::MediaSnapshot;
-use voom_store::repo::workflow_progress::FileAdmissionTier;
-use voom_store::repo::workflow_summaries::{
+use voom_store::repo::execution::workflow_progress::FileAdmissionTier;
+use voom_store::repo::execution::workflow_summaries::{
     FilePhaseOutcome, NewWorkflowSummary, PhaseOutcome, PhaseReport,
 };
+use voom_store::repo::media::identity::MediaSnapshot;
 
 use crate::cases::policy::plans::ResolvedFileInput;
 use crate::media_snapshot::planning_input;

@@ -7,9 +7,9 @@ use voom_core::{OperationKind, TicketOperation};
 use voom_events::EventKind;
 use voom_plan::PlanOperationKind;
 use voom_policy::{FixtureName, load_fixture, load_policy_fixture};
-use voom_store::repo::identity::{DiscoveredFile, FileLocationKind, IngestOutcome};
-use voom_store::repo::tickets::NewTicket;
-use voom_store::repo::workers::{NewCapability, NewGrant, NewWorker, WorkerKind};
+use voom_store::repo::execution::tickets::NewTicket;
+use voom_store::repo::execution::workers::{NewCapability, NewGrant, NewWorker, WorkerKind};
+use voom_store::repo::media::identity::{DiscoveredFile, FileLocationKind, IngestOutcome};
 use voom_test_support::worker::cargo_bin_or_build;
 
 use crate::cases::policy::policy_inputs::{PolicyInputFromScanInput, WholeScanInput};
@@ -1864,7 +1864,7 @@ async fn read_compliance_run_report_unknown_job_is_not_found() {
 async fn compliance_audio_extract_outputs_preserve_ticket_and_descriptor_order() {
     let (cp, _tmp) = cp().await;
     let job = cp
-        .open_job(voom_store::repo::jobs::NewJob {
+        .open_job(voom_store::repo::execution::jobs::NewJob {
             kind: "synthetic.workflow".to_owned(),
             priority: 0,
             created_at: T0,
@@ -2054,7 +2054,7 @@ fn compliance_audio_extract_outputs_reject_unknown_legacy_fields() {
 async fn compliance_audio_synthesis_companions_preserve_ticket_and_descriptor_order() {
     let (cp, _tmp) = cp().await;
     let job = cp
-        .open_job(voom_store::repo::jobs::NewJob {
+        .open_job(voom_store::repo::execution::jobs::NewJob {
             kind: "synthetic.workflow".to_owned(),
             priority: 0,
             created_at: T0,
@@ -2127,7 +2127,7 @@ fn compliance_audio_synthesis_companions_reject_incomplete_or_unknown_fields() {
 async fn create_transcode_audio_ticket(
     cp: &crate::ControlPlane,
     job_id: voom_core::JobId,
-) -> voom_store::repo::tickets::Ticket {
+) -> voom_store::repo::execution::tickets::Ticket {
     cp.create_ticket(NewTicket {
         job_id: Some(job_id),
         kind: TicketOperation::new("synthetic.workflow.operation.transcode_audio").unwrap(),
@@ -2195,7 +2195,7 @@ async fn read_compliance_run_report_in_flight_job_has_no_summary() {
     // A job that opened but never finalized a workflow summary row: the read must
     // distinguish "still running / not a workflow job" from an unknown job id.
     let job = cp
-        .open_job(voom_store::repo::jobs::NewJob {
+        .open_job(voom_store::repo::execution::jobs::NewJob {
             kind: "synthetic.workflow".to_owned(),
             priority: 0,
             created_at: T0,
@@ -2249,13 +2249,13 @@ async fn read_compliance_run_report_zero_phase_job_is_ok_and_empty() {
 
 #[tokio::test]
 async fn read_compliance_run_report_orders_phases_and_points_at_latest() {
-    use voom_store::repo::workflow_summaries::{
+    use voom_store::repo::execution::workflow_summaries::{
         NewPhaseSummary, NewWorkflowSummary, PhaseOutcome, PhaseReport,
     };
 
     let (cp, _tmp) = cp().await;
     let job = cp
-        .open_job(voom_store::repo::jobs::NewJob {
+        .open_job(voom_store::repo::execution::jobs::NewJob {
             kind: "synthetic.workflow".to_owned(),
             priority: 0,
             created_at: T0,
@@ -2455,7 +2455,7 @@ async fn backup_evidence_for_plan_surfaces_seeded_backups() {
     let backup = cp
         .backups
         .insert_pending(
-            voom_store::repo::backups::NewBackup {
+            voom_store::repo::media::backups::NewBackup {
                 source_file_version_id: file_version_id,
                 job_id,
                 ticket_id,

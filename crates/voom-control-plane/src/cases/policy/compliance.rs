@@ -13,7 +13,7 @@ use voom_core::{
 };
 use voom_events::{Event, SubjectType, payload::IssueLifecyclePayload};
 use voom_plan::PlanOperationKind;
-use voom_store::repo::{
+use voom_store::repo::policy::issues::{
     PolicyIssueDraft, PolicyIssueMutation, PolicyIssueMutationKind, PolicyIssueStatus,
 };
 use voom_worker_protocol::{HttpClient, WorkerCredentials};
@@ -56,8 +56,8 @@ pub struct BackupEvidence {
     pub created_at: String,
 }
 
-impl From<voom_store::repo::backups::Backup> for BackupEvidence {
-    fn from(backup: voom_store::repo::backups::Backup) -> Self {
+impl From<voom_store::repo::media::backups::Backup> for BackupEvidence {
+    fn from(backup: voom_store::repo::media::backups::Backup) -> Self {
         Self {
             id: backup.id.0,
             source_file_version_id: backup.source_file_version_id.0,
@@ -406,7 +406,7 @@ pub struct WorkflowSummaryView {
 
 impl WorkflowSummaryView {
     fn from_summary(
-        summary: &voom_store::repo::workflow_summaries::WorkflowSummary,
+        summary: &voom_store::repo::execution::workflow_summaries::WorkflowSummary,
         file_phases: &[FilePhaseSummaryView],
     ) -> Self {
         Self {
@@ -484,8 +484,8 @@ pub struct PhaseSummaryView {
     pub report: Option<serde_json::Value>,
 }
 
-impl From<&voom_store::repo::workflow_summaries::PhaseSummary> for PhaseSummaryView {
-    fn from(phase: &voom_store::repo::workflow_summaries::PhaseSummary) -> Self {
+impl From<&voom_store::repo::execution::workflow_summaries::PhaseSummary> for PhaseSummaryView {
+    fn from(phase: &voom_store::repo::execution::workflow_summaries::PhaseSummary) -> Self {
         Self {
             phase_ordinal: phase.phase_ordinal,
             phase_name: phase.phase_name.clone(),
@@ -515,8 +515,12 @@ pub struct FilePhaseSummaryView {
     pub reprobe_snapshot_id: Option<u64>,
 }
 
-impl From<&voom_store::repo::workflow_summaries::FilePhaseSummary> for FilePhaseSummaryView {
-    fn from(file_phase: &voom_store::repo::workflow_summaries::FilePhaseSummary) -> Self {
+impl From<&voom_store::repo::execution::workflow_summaries::FilePhaseSummary>
+    for FilePhaseSummaryView
+{
+    fn from(
+        file_phase: &voom_store::repo::execution::workflow_summaries::FilePhaseSummary,
+    ) -> Self {
         Self {
             phase_ordinal: file_phase.phase_ordinal,
             branch_id: file_phase.branch_id.clone(),
@@ -550,8 +554,8 @@ pub struct ArtifactVerificationView {
     pub message: Option<String>,
 }
 
-impl From<voom_store::repo::artifacts::ArtifactVerification> for ArtifactVerificationView {
-    fn from(value: voom_store::repo::artifacts::ArtifactVerification) -> Self {
+impl From<voom_store::repo::media::artifacts::ArtifactVerification> for ArtifactVerificationView {
+    fn from(value: voom_store::repo::media::artifacts::ArtifactVerification) -> Self {
         Self {
             verification_id: value.id.0,
             ticket_id: value.workflow_ticket_id.map(|id| id.0),
@@ -797,8 +801,8 @@ pub struct ComplianceExecuteError {
 }
 
 pub(crate) struct DurableComplianceInputs {
-    pub(crate) version: voom_store::repo::PolicyVersion,
-    pub(crate) input: voom_store::repo::PolicyInputSet,
+    pub(crate) version: voom_store::repo::policy::policies::PolicyVersion,
+    pub(crate) input: voom_store::repo::policy::policy_inputs::PolicyInputSet,
 }
 
 impl ControlPlane {
@@ -1383,7 +1387,7 @@ impl ControlPlane {
     /// coordinator so both plan against the same compiled policy.
     pub(crate) async fn compiled_policy_for_version(
         &self,
-        version: &voom_store::repo::PolicyVersion,
+        version: &voom_store::repo::policy::policies::PolicyVersion,
     ) -> Result<voom_policy::CompiledPolicy, VoomError> {
         let mut policy = super::plans::deserialize_stored_compiled_policy(version)?;
         // Resolve after the stored-identity check so the mutation cannot affect

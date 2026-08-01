@@ -14,8 +14,7 @@ use voom_events::payload::{
     ArtifactAudioStreamPayload, ArtifactAudioSynthesisCompanionPayload,
 };
 use voom_events::{Event, SubjectType};
-use voom_store::repo::artifacts::{ArtifactCommitState, ArtifactVerificationStatus};
-use voom_store::repo::identity::FileVersionRepo;
+use voom_store::repo::media::artifacts::{ArtifactCommitState, ArtifactVerificationStatus};
 use voom_store::repo::media::audio_extract_operations::{
     AudioExtractDispatchAttemptStatus, AudioExtractOperationRecord, AudioExtractOperationState,
     AudioExtractQuiescenceAcknowledgement, NewAudioExtractClaim, NewAudioExtractDispatchAttempt,
@@ -28,6 +27,7 @@ use voom_store::repo::media::audio_synthesis_operations::{
     SqliteAudioSynthesisOperationRepo, StagedAudioSynthesisCompanion,
     ValidateAudioSynthesisOperation,
 };
+use voom_store::repo::media::identity::FileVersionRepo;
 use voom_worker_protocol::{ExtractAudioResult, TranscodeAudioResult};
 
 use crate::ControlPlane;
@@ -37,12 +37,12 @@ use crate::artifact::verify::{
     verify_artifact_with_dispatcher,
 };
 
-pub mod commit;
-pub mod dispatch;
-pub mod events;
-pub mod selection;
-pub mod source;
-pub mod stage;
+pub(crate) mod commit;
+pub(crate) mod dispatch;
+pub(crate) mod events;
+pub(crate) mod selection;
+pub(crate) mod source;
+pub(crate) mod stage;
 mod worker_contract;
 pub(crate) mod workflow;
 
@@ -419,7 +419,7 @@ fn record_transcode_selection_context(
 struct ResolvedTranscodeAudio {
     input: ExecuteTranscodeAudioInput,
     selected: source::SelectedSource,
-    snapshot: voom_store::repo::identity::MediaSnapshot,
+    snapshot: voom_store::repo::media::identity::MediaSnapshot,
     selection: selection::TranscodeAudioSelectionPlan,
 }
 
@@ -640,7 +640,7 @@ async fn dispatch_synthesis_result(
 async fn resolve_synthesis_operation(
     cp: &ControlPlane,
     input: &ExecuteTranscodeAudioInput,
-    snapshot: &voom_store::repo::identity::MediaSnapshot,
+    snapshot: &voom_store::repo::media::identity::MediaSnapshot,
     selection: &selection::TranscodeAudioSelectionPlan,
     target_path: &Path,
 ) -> Result<AudioSynthesisOperationRecord, VoomError> {
@@ -878,7 +878,7 @@ fn staged_synthesis_companions(
 async fn validate_staged_synthesis_operation(
     cp: &ControlPlane,
     operation: AudioSynthesisOperationRecord,
-    snapshot: &voom_store::repo::identity::MediaSnapshot,
+    snapshot: &voom_store::repo::media::identity::MediaSnapshot,
     selection: &selection::TranscodeAudioSelectionPlan,
     dispatchers: &TranscodeAudioDispatchers<'_>,
 ) -> Result<AudioSynthesisOperationRecord, VoomError> {
@@ -1032,7 +1032,7 @@ async fn finalize_synthesis_lineage(
     let snapshot = crate::media_snapshot::record_with_event_in_tx(
         cp,
         &mut tx,
-        voom_store::repo::identity::NewMediaSnapshot {
+        voom_store::repo::media::identity::NewMediaSnapshot {
             file_version_id: result_file_version_id,
             probed_by: Some(probe_worker_id),
             probed_at: cp.clock().now(),
@@ -1775,7 +1775,7 @@ async fn dispatch_extract_worker(
 ) -> Result<
     (
         ExtractAudioResult,
-        voom_store::repo::audio_extract_operations::AudioExtractDispatchAttempt,
+        voom_store::repo::media::audio_extract_operations::AudioExtractDispatchAttempt,
     ),
     VoomError,
 > {
@@ -1855,7 +1855,7 @@ async fn validate_and_cleanup_extract_result(
 
 struct PreparedExtractExecution {
     selected: source::SelectedSource,
-    snapshot: voom_store::repo::identity::MediaSnapshot,
+    snapshot: voom_store::repo::media::identity::MediaSnapshot,
     selection: selection::ExtractAudioSelectionPlan,
     paths: ExtractExecutionPaths,
 }
@@ -2017,7 +2017,8 @@ struct ClaimedExtractDispatch {
     worker_epoch: u32,
     idempotency_key: String,
     staging: stage::PreparedStagingPaths,
-    replay_attempt: Option<voom_store::repo::audio_extract_operations::AudioExtractDispatchAttempt>,
+    replay_attempt:
+        Option<voom_store::repo::media::audio_extract_operations::AudioExtractDispatchAttempt>,
 }
 
 fn extract_attempt_members(
@@ -2488,7 +2489,7 @@ async fn recover_extract_report(
 }
 
 fn recovery_output_input(
-    stored: &voom_store::repo::audio_extract_operations::AudioExtractOperationOutput,
+    stored: &voom_store::repo::media::audio_extract_operations::AudioExtractOperationOutput,
     selected: &selection::ExtractAudioSelectionOutput,
 ) -> Result<commit::CommitAudioExtractOutputInput, VoomError> {
     let missing = |field: &str| {
@@ -2583,7 +2584,7 @@ fn execution_report_from_outputs(
 }
 
 fn committed_output_report(
-    stored: &voom_store::repo::audio_extract_operations::AudioExtractOperationOutput,
+    stored: &voom_store::repo::media::audio_extract_operations::AudioExtractOperationOutput,
     selected: &selection::ExtractAudioSelectionOutput,
     source_file_version_id: FileVersionId,
     source_media_snapshot_id: MediaSnapshotId,
@@ -2782,7 +2783,7 @@ fn prepare_resumed_extract_members(
 
 #[derive(Clone, Copy)]
 struct StagedExtractMemberInput<'a> {
-    operation: &'a voom_store::repo::audio_extract_operations::AudioExtractOperationOutput,
+    operation: &'a voom_store::repo::media::audio_extract_operations::AudioExtractOperationOutput,
     artifact: &'a commit::StagedAudioArtifact,
     selected: &'a selection::ExtractAudioSelectionOutput,
     staging_path: &'a Path,

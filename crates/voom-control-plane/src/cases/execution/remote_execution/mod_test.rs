@@ -11,14 +11,14 @@ use voom_scheduler::{
     NodeCandidate, SCORING_VERSION, SchedulerCandidate, ScoreDecision, ScoreOutcome,
     ScoreReasonCode, TicketCandidate, WorkerCandidate,
 };
-use voom_store::repo::artifact_access_plans::ArtifactAccessPlanStatus;
-use voom_store::repo::nodes::NodeKind;
-use voom_store::repo::remote_idempotency::RemoteMutationReplay;
-use voom_store::repo::scheduler_decisions::{
+use voom_store::repo::execution::nodes::NodeKind;
+use voom_store::repo::execution::remote_idempotency::RemoteMutationReplay;
+use voom_store::repo::execution::scheduler_decisions::{
     SchedulerDecisionFilter, SchedulerDecisionOutcome, SchedulerReasonCode,
 };
-use voom_store::repo::tickets::{NewTicket, TicketState};
-use voom_store::repo::workers::WorkerKind;
+use voom_store::repo::execution::tickets::{NewTicket, TicketState};
+use voom_store::repo::execution::workers::WorkerKind;
+use voom_store::repo::media::artifact_access_plans::ArtifactAccessPlanStatus;
 
 use crate::cases::count;
 use crate::cases::workers::nodes::RegisterNodeInput;

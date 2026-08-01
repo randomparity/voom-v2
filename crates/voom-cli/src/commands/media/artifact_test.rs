@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use clap::{CommandFactory, Parser};
 use serde_json::json;
-use voom_control_plane::{
+use voom_control_plane::artifact::{
     ArtifactDetail, ArtifactInspectionState, ArtifactSummary, CommitArtifactReport,
     CommitRecoveryReport, CommitSummary, PathFacts, PathObservation, RecoverySummary,
     StageCopyReport, VerificationSummary, VerifyArtifactReport,
@@ -11,7 +11,7 @@ use voom_core::ids::{ArtifactCommitRecordId, ArtifactVerificationId};
 use voom_core::{
     ArtifactHandleId, ArtifactLocationId, ErrorCode, FileLocationId, FileVersionId, WorkerId,
 };
-use voom_store::repo::artifacts::{ArtifactCommitState, ArtifactVerificationStatus};
+use voom_store::repo::media::artifacts::{ArtifactCommitState, ArtifactVerificationStatus};
 
 use super::{
     ArtifactDetailData, ArtifactEnvelopeData, ArtifactSummaryData, CommitArtifactData,

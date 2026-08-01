@@ -8,7 +8,7 @@ use voom_events::payload::{
     JobCancelledPayload, JobFailedPayload, JobOpenedPayload, JobSucceededPayload,
 };
 use voom_events::{Event, SubjectType};
-use voom_store::repo::jobs::{Job, NewJob};
+use voom_store::repo::execution::jobs::{Job, NewJob};
 
 use crate::ControlPlane;
 

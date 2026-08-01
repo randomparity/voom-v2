@@ -208,8 +208,8 @@ pub enum IssueStatusArg {
 
 impl IssueStatusArg {
     #[must_use]
-    pub const fn to_store(self) -> voom_store::repo::issues::IssueStatus {
-        use voom_store::repo::issues::IssueStatus;
+    pub const fn to_store(self) -> voom_store::repo::policy::issues::IssueStatus {
+        use voom_store::repo::policy::issues::IssueStatus;
         match self {
             Self::Open => IssueStatus::Open,
             Self::Planned => IssueStatus::Planned,
@@ -280,9 +280,9 @@ pub enum LeaseScopeTypeArg {
 impl LeaseScopeTypeArg {
     /// Pair the scope-type discriminant with a raw id into a `LeaseScope`.
     #[must_use]
-    pub fn to_scope(self, id: u64) -> voom_store::repo::LeaseScope {
+    pub fn to_scope(self, id: u64) -> voom_store::repo::media::use_leases::LeaseScope {
         use voom_core::{BundleId, FileAssetId, FileLocationId, FileVersionId};
-        use voom_store::repo::LeaseScope;
+        use voom_store::repo::media::use_leases::LeaseScope;
         match self {
             Self::Asset => LeaseScope::Asset(FileAssetId(id)),
             Self::Bundle => LeaseScope::Bundle(BundleId(id)),
@@ -402,8 +402,8 @@ pub enum SchedulePriorityArg {
 
 impl SchedulePriorityArg {
     #[must_use]
-    pub const fn to_store(self) -> voom_store::repo::scheduling_policies::SchedulePriority {
-        use voom_store::repo::scheduling_policies::SchedulePriority;
+    pub const fn to_store(self) -> voom_store::repo::policy::scheduling_policies::SchedulePriority {
+        use voom_store::repo::policy::scheduling_policies::SchedulePriority;
         match self {
             Self::NewestFirst => SchedulePriority::NewestFirst,
             Self::OldestFirst => SchedulePriority::OldestFirst,
@@ -424,8 +424,8 @@ pub enum CommitModeArg {
 
 impl CommitModeArg {
     #[must_use]
-    pub const fn to_store(self) -> voom_store::repo::safety_policies::CommitMode {
-        use voom_store::repo::safety_policies::CommitMode;
+    pub const fn to_store(self) -> voom_store::repo::policy::safety_policies::CommitMode {
+        use voom_store::repo::policy::safety_policies::CommitMode;
         match self {
             Self::AddOnly => CommitMode::AddOnly,
             Self::Replace => CommitMode::Replace,
@@ -445,8 +445,8 @@ pub enum VerificationLevelArg {
 
 impl VerificationLevelArg {
     #[must_use]
-    pub const fn to_store(self) -> voom_store::repo::safety_policies::VerificationLevel {
-        use voom_store::repo::safety_policies::VerificationLevel;
+    pub const fn to_store(self) -> voom_store::repo::policy::safety_policies::VerificationLevel {
+        use voom_store::repo::policy::safety_policies::VerificationLevel;
         match self {
             Self::None => VerificationLevel::None,
             Self::QuickDecode => VerificationLevel::QuickDecode,
@@ -710,11 +710,11 @@ pub enum BackupStatusArg {
 
 impl BackupStatusArg {
     #[must_use]
-    pub const fn to_store(self) -> voom_store::repo::backups::BackupStatus {
+    pub const fn to_store(self) -> voom_store::repo::media::backups::BackupStatus {
         match self {
-            Self::Pending => voom_store::repo::backups::BackupStatus::Pending,
-            Self::Verified => voom_store::repo::backups::BackupStatus::Verified,
-            Self::Failed => voom_store::repo::backups::BackupStatus::Failed,
+            Self::Pending => voom_store::repo::media::backups::BackupStatus::Pending,
+            Self::Verified => voom_store::repo::media::backups::BackupStatus::Verified,
+            Self::Failed => voom_store::repo::media::backups::BackupStatus::Failed,
         }
     }
 }
@@ -1107,10 +1107,10 @@ pub enum LocalWorkerKindArg {
 
 impl LocalWorkerKindArg {
     #[must_use]
-    pub const fn to_control_plane(self) -> voom_control_plane::LocalWorkerKind {
+    pub const fn to_control_plane(self) -> voom_control_plane::workers::LocalWorkerKind {
         match self {
-            Self::Ffmpeg => voom_control_plane::LocalWorkerKind::Ffmpeg,
-            Self::Mkvtoolnix => voom_control_plane::LocalWorkerKind::Mkvtoolnix,
+            Self::Ffmpeg => voom_control_plane::workers::LocalWorkerKind::Ffmpeg,
+            Self::Mkvtoolnix => voom_control_plane::workers::LocalWorkerKind::Mkvtoolnix,
         }
     }
 }
@@ -1157,8 +1157,8 @@ pub enum LeaseStateArg {
 
 impl LeaseStateArg {
     #[must_use]
-    pub const fn to_store(self) -> voom_store::repo::leases::LeaseState {
-        use voom_store::repo::leases::LeaseState;
+    pub const fn to_store(self) -> voom_store::repo::execution::leases::LeaseState {
+        use voom_store::repo::execution::leases::LeaseState;
         match self {
             Self::Held => LeaseState::Held,
             Self::Released => LeaseState::Released,
@@ -1241,8 +1241,8 @@ pub enum JobStateArg {
 
 impl JobStateArg {
     #[must_use]
-    pub const fn to_store(self) -> voom_store::repo::jobs::JobState {
-        use voom_store::repo::jobs::JobState;
+    pub const fn to_store(self) -> voom_store::repo::execution::jobs::JobState {
+        use voom_store::repo::execution::jobs::JobState;
         match self {
             Self::Open => JobState::Open,
             Self::Succeeded => JobState::Succeeded,
@@ -1284,8 +1284,8 @@ pub enum TicketStateArg {
 
 impl TicketStateArg {
     #[must_use]
-    pub const fn to_store(self) -> voom_store::repo::tickets::TicketState {
-        use voom_store::repo::tickets::TicketState;
+    pub const fn to_store(self) -> voom_store::repo::execution::tickets::TicketState {
+        use voom_store::repo::execution::tickets::TicketState;
         match self {
             Self::Pending => TicketState::Pending,
             Self::Ready => TicketState::Ready,
@@ -1418,11 +1418,11 @@ pub enum NodeKindArg {
 
 impl NodeKindArg {
     #[must_use]
-    pub const fn to_store(self) -> voom_store::repo::nodes::NodeKind {
+    pub const fn to_store(self) -> voom_store::repo::execution::nodes::NodeKind {
         match self {
-            Self::Local => voom_store::repo::nodes::NodeKind::Local,
-            Self::Remote => voom_store::repo::nodes::NodeKind::Remote,
-            Self::Synthetic => voom_store::repo::nodes::NodeKind::Synthetic,
+            Self::Local => voom_store::repo::execution::nodes::NodeKind::Local,
+            Self::Remote => voom_store::repo::execution::nodes::NodeKind::Remote,
+            Self::Synthetic => voom_store::repo::execution::nodes::NodeKind::Synthetic,
         }
     }
 }
@@ -1438,12 +1438,12 @@ pub enum NodeStatusArg {
 
 impl NodeStatusArg {
     #[must_use]
-    pub const fn to_store(self) -> voom_store::repo::nodes::NodeStatus {
+    pub const fn to_store(self) -> voom_store::repo::execution::nodes::NodeStatus {
         match self {
-            Self::Registered => voom_store::repo::nodes::NodeStatus::Registered,
-            Self::Active => voom_store::repo::nodes::NodeStatus::Active,
-            Self::Stale => voom_store::repo::nodes::NodeStatus::Stale,
-            Self::Retired => voom_store::repo::nodes::NodeStatus::Retired,
+            Self::Registered => voom_store::repo::execution::nodes::NodeStatus::Registered,
+            Self::Active => voom_store::repo::execution::nodes::NodeStatus::Active,
+            Self::Stale => voom_store::repo::execution::nodes::NodeStatus::Stale,
+            Self::Retired => voom_store::repo::execution::nodes::NodeStatus::Retired,
         }
     }
 }
@@ -1458,11 +1458,11 @@ pub enum WorkerKindArg {
 
 impl WorkerKindArg {
     #[must_use]
-    pub const fn to_store(self) -> voom_store::repo::workers::WorkerKind {
+    pub const fn to_store(self) -> voom_store::repo::execution::workers::WorkerKind {
         match self {
-            Self::Local => voom_store::repo::workers::WorkerKind::Local,
-            Self::Remote => voom_store::repo::workers::WorkerKind::Remote,
-            Self::Synthetic => voom_store::repo::workers::WorkerKind::Synthetic,
+            Self::Local => voom_store::repo::execution::workers::WorkerKind::Local,
+            Self::Remote => voom_store::repo::execution::workers::WorkerKind::Remote,
+            Self::Synthetic => voom_store::repo::execution::workers::WorkerKind::Synthetic,
         }
     }
 }
@@ -1478,12 +1478,12 @@ pub enum WorkerStatusArg {
 
 impl WorkerStatusArg {
     #[must_use]
-    pub const fn to_store(self) -> voom_store::repo::workers::WorkerStatus {
+    pub const fn to_store(self) -> voom_store::repo::execution::workers::WorkerStatus {
         match self {
-            Self::Registered => voom_store::repo::workers::WorkerStatus::Registered,
-            Self::Active => voom_store::repo::workers::WorkerStatus::Active,
-            Self::Stale => voom_store::repo::workers::WorkerStatus::Stale,
-            Self::Retired => voom_store::repo::workers::WorkerStatus::Retired,
+            Self::Registered => voom_store::repo::execution::workers::WorkerStatus::Registered,
+            Self::Active => voom_store::repo::execution::workers::WorkerStatus::Active,
+            Self::Stale => voom_store::repo::execution::workers::WorkerStatus::Stale,
+            Self::Retired => voom_store::repo::execution::workers::WorkerStatus::Retired,
         }
     }
 }

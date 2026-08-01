@@ -11,8 +11,8 @@ use sqlx::SqlitePool;
 use time::OffsetDateTime;
 use voom_control_plane::ControlPlane;
 use voom_core::{JobId, TicketId, TicketOperation};
-use voom_store::repo::jobs::{JobState, NewJob};
-use voom_store::repo::tickets::NewTicket;
+use voom_store::repo::execution::jobs::{JobState, NewJob};
+use voom_store::repo::execution::tickets::NewTicket;
 use voom_test_support::TempDatabase;
 
 const NOW: OffsetDateTime = OffsetDateTime::UNIX_EPOCH;

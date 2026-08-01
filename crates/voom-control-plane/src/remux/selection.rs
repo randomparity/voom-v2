@@ -7,7 +7,7 @@ use voom_plan::remux::{
     resolve_track_keep_ids, stream_facts,
 };
 use voom_policy::{DefaultStrategy, TrackTarget};
-use voom_store::repo::identity::MediaSnapshot;
+use voom_store::repo::media::identity::MediaSnapshot;
 use voom_worker_protocol::{RemuxSelection, RemuxStreamRef};
 
 pub fn selection_from_payload_and_snapshot(

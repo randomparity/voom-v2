@@ -7,11 +7,11 @@ use voom_policy::{
     ValidatedPolicyInputSetDraft,
 };
 use voom_store::repo::{
-    identity::{
+    media::identity::{
         FileLocationKind, FileLocationRepo, FileVersionRepo, MediaSnapshotFileVersionQuery,
         MediaSnapshotRepo,
     },
-    policy_inputs::{PolicyInputSet, PolicyInputSetSummary},
+    policy::policy_inputs::{PolicyInputSet, PolicyInputSetSummary},
 };
 
 use crate::ControlPlane;

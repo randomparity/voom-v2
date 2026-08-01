@@ -1,6 +1,6 @@
 use serde_json::Value;
 use voom_core::{FileLocationId, FileVersionId, VoomError};
-use voom_store::repo::identity::MediaSnapshot;
+use voom_store::repo::media::identity::MediaSnapshot;
 
 use crate::ControlPlane;
 

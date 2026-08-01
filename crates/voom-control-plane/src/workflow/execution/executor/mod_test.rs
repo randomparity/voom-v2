@@ -17,14 +17,14 @@ use voom_core::{
     ErrorCode, FailureClass, FileAssetId, FileVersionId, JobId, LeaseId, MediaSnapshotId, TicketId,
     TicketOperation, VoomError, WorkerId,
 };
-use voom_store::repo::identity::{
+use voom_store::repo::execution::jobs::NewJob;
+use voom_store::repo::execution::leases::NewLease;
+use voom_store::repo::execution::tickets::{NewTicket, Ticket};
+use voom_store::repo::execution::workers::{NewCapability, NewGrant, NewWorker, WorkerKind};
+use voom_store::repo::media::identity::{
     DiscoveredFile, FileAssetRepo, FileLocationKind, FileVersionRepo, IngestOutcome,
     NewFileVersion, ProducedBy,
 };
-use voom_store::repo::jobs::NewJob;
-use voom_store::repo::leases::NewLease;
-use voom_store::repo::tickets::{NewTicket, Ticket};
-use voom_store::repo::workers::{NewCapability, NewGrant, NewWorker, WorkerKind};
 use voom_worker_protocol::{
     AudioObservedFacts, AudioOutputStreamFact, ClientHandle, DispatchStream,
     ExtractAudioOutputResult, ExtractAudioRequest, ExtractAudioResult, ExtractAudioStatus,
@@ -3660,9 +3660,9 @@ impl ExecutorFixture {
         source_media_snapshot_id: MediaSnapshotId,
         max_attempts: u32,
     ) -> (
-        voom_store::repo::tickets::Ticket,
+        voom_store::repo::execution::tickets::Ticket,
         WorkflowTicketPayload,
-        voom_store::repo::leases::Lease,
+        voom_store::repo::execution::leases::Lease,
     ) {
         let job = self
             .cp

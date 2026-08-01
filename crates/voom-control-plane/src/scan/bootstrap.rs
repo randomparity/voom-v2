@@ -1,5 +1,5 @@
 use voom_core::{OperationKind, TicketOperation, VoomError};
-use voom_store::repo::workers::{
+use voom_store::repo::execution::workers::{
     NewCapability, NewGrant, NewWorker, Worker, WorkerKind, WorkerStatus,
 };
 

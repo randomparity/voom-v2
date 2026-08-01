@@ -12,15 +12,15 @@ use voom_scheduler::{
     NodeCandidate, SCORING_VERSION, SchedulerCandidate, SchedulerScorer, ScoreDecision,
     ScoreOutcome, ScoreReasonCode, TicketCandidate, WorkerCandidate,
 };
-use voom_store::repo::artifact_access_plans::{ArtifactAccessPlan, NewArtifactAccessPlan};
-use voom_store::repo::leases::NewLease;
-use voom_store::repo::remote_idempotency::{IdempotencyOutcome, RemoteIdempotencyInput};
-use voom_store::repo::scheduler_decisions::{
+use voom_store::repo::execution::leases::NewLease;
+use voom_store::repo::execution::remote_idempotency::{IdempotencyOutcome, RemoteIdempotencyInput};
+use voom_store::repo::execution::scheduler_decisions::{
     NewSchedulerDecision, SchedulerDecision, SchedulerDecisionKind, SchedulerDecisionOutcome,
     SchedulerReasonCode as StoreSchedulerReasonCode, SchedulerRequestSource,
 };
-use voom_store::repo::tickets::Ticket;
-use voom_store::repo::workers::WorkerOperationEligibility;
+use voom_store::repo::execution::tickets::Ticket;
+use voom_store::repo::execution::workers::WorkerOperationEligibility;
+use voom_store::repo::media::artifact_access_plans::{ArtifactAccessPlan, NewArtifactAccessPlan};
 
 use crate::ControlPlane;
 use crate::cases::execution::remote_execution::{

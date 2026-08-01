@@ -4,8 +4,8 @@ use secrecy::{ExposeSecret, SecretString};
 use sqlx::{Sqlite, Transaction};
 use time::Duration;
 use voom_core::{NodeId, VoomError};
-use voom_store::repo::nodes::{NodeAuthRecord, NodeKind, NodeStatus};
-use voom_store::repo::workers::{Worker, WorkerKind};
+use voom_store::repo::execution::nodes::{NodeAuthRecord, NodeKind, NodeStatus};
+use voom_store::repo::execution::workers::{Worker, WorkerKind};
 
 use crate::ControlPlane;
 use crate::cases::execution::remote_execution::RemoteRecoverReport;

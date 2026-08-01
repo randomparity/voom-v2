@@ -3,8 +3,8 @@ use std::io;
 use serde::Serialize;
 use serde_json::Value as JsonValue;
 use voom_core::{NodeId, TicketId, WorkerId};
-use voom_store::repo::leases::{Lease, LeaseFilter};
-use voom_store::repo::scheduler_decisions::{
+use voom_store::repo::execution::leases::{Lease, LeaseFilter};
+use voom_store::repo::execution::scheduler_decisions::{
     SchedulerDecision, SchedulerDecisionFilter, SchedulerDecisionOutcome,
 };
 
@@ -229,7 +229,7 @@ impl From<Lease> for LeaseData {
             ttl_seconds: lease.ttl_seconds,
             release_reason: lease
                 .release_reason
-                .map(voom_store::repo::leases::ReleaseReason::as_str),
+                .map(voom_store::repo::execution::leases::ReleaseReason::as_str),
             released_at: lease.released_at.map(|t| t.to_string()),
             epoch: lease.epoch,
         }

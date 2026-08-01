@@ -2,7 +2,7 @@ use serde_json::to_value;
 #[cfg(test)]
 use voom_core::OperationKind;
 use voom_core::{ErrorCode, FileLocationId, FileVersionId, VoomError};
-use voom_store::repo::artifacts::ArtifactVerificationStatus;
+use voom_store::repo::media::artifacts::ArtifactVerificationStatus;
 
 use super::{TicketDispatchContext, optional_u64, required_u64};
 use crate::artifact::verify::{

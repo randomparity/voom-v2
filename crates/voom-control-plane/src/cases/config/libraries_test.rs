@@ -98,7 +98,7 @@ async fn disable_then_enable_library() {
 
 #[tokio::test]
 async fn set_default_scoring_profile_validates_existence_and_retire() {
-    use voom_store::repo::quality_scoring_profiles::NewQualityScoringProfile;
+    use voom_store::repo::policy::quality_scoring_profiles::NewQualityScoringProfile;
 
     let (cp, _tmp) = cp().await;
     let lib = cp.create_library(new_library("films")).await.unwrap();

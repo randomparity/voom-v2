@@ -2,10 +2,10 @@ use time::OffsetDateTime;
 use voom_core::ids::ArtifactCommitRecordId;
 use voom_core::{ArtifactHandleId, VoomError};
 use voom_events::{Event, EventEnvelope, SubjectType};
-use voom_store::repo::artifacts::{
+use voom_store::repo::audit::events::{EventRepo, SqliteEventRepo};
+use voom_store::repo::media::artifacts::{
     ArtifactCommitFailure, ArtifactCommitRecord, ArtifactCommitRepo, NewArtifactCommitRecord,
 };
-use voom_store::repo::events::{EventRepo, SqliteEventRepo};
 
 #[derive(Debug)]
 pub enum PendingCommitRecordError {

@@ -15,10 +15,11 @@ use tempfile::TempDir;
 use time::{Duration, OffsetDateTime};
 use voom_test_support::TempDatabase;
 
+use voom_control_plane::ControlPlane;
+use voom_control_plane::artifact::{CommitArtifactInput, StageCopyInput, VerifyArtifactInput};
 use voom_control_plane::scan::ScanPathInput;
-use voom_control_plane::{CommitArtifactInput, ControlPlane, StageCopyInput, VerifyArtifactInput};
 use voom_core::ErrorCode;
-use voom_store::repo::{
+use voom_store::repo::media::use_leases::{
     BlockingMode, IssuerKind, LeaseScope, NewUseLease, UseLeaseKind, UseLeaseReleaseReason,
 };
 use voom_test_support::worker::{
@@ -93,7 +94,7 @@ async fn released_lease_does_not_block_commit() {
         .unwrap();
     assert_eq!(
         committed.state,
-        voom_store::repo::artifacts::ArtifactCommitState::Committed
+        voom_store::repo::media::artifacts::ArtifactCommitState::Committed
     );
 }
 
@@ -127,7 +128,7 @@ async fn ttl_expired_lease_does_not_block_commit() {
         .unwrap();
     assert_eq!(
         committed.state,
-        voom_store::repo::artifacts::ArtifactCommitState::Committed
+        voom_store::repo::media::artifacts::ArtifactCommitState::Committed
     );
 }
 

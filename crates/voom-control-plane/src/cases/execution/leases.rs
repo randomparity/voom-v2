@@ -13,12 +13,12 @@ use voom_events::payload::{
     TicketSucceededPayload,
 };
 use voom_events::{Event, SubjectType};
-use voom_store::repo::audio_extract_operations::SqliteAudioExtractOperationRepo;
-use voom_store::repo::leases::{
+use voom_store::repo::execution::leases::{
     ExpireReport, ForceReleaseOutcome, Lease, LeaseAcquireOutcome, NewLease,
 };
+use voom_store::repo::execution::tickets::TicketState;
+use voom_store::repo::media::audio_extract_operations::SqliteAudioExtractOperationRepo;
 use voom_store::repo::media::audio_synthesis_operations::SqliteAudioSynthesisOperationRepo;
-use voom_store::repo::tickets::TicketState;
 
 use crate::ControlPlane;
 use crate::cases::begin_immediate_tx;
@@ -432,7 +432,7 @@ impl ControlPlane {
         } else {
             // Read attempt/max_attempts straight from the report — the repo
             // already had them in scope when it decided the ticket's fate
-            // (see `FailedExpiry` in `voom_store::repo::leases`).
+            // (see `FailedExpiry` in `voom_store::repo::execution::leases`).
             let failed = report
                 .failed_expiries
                 .iter()

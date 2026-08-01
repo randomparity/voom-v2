@@ -6,11 +6,11 @@ Base: `refactor/2026-07-31` at `13f7d3954cd1`
 
 ## Context
 
-`voom_store::repo::identity::IdentityRepo` currently exposes ingest and rename
-orchestration plus persistence for media works, media variants, file assets,
-file versions, file locations, identity evidence, and media snapshots. A caller
-that needs one table family must depend on all 50 methods, and a second concrete
-implementation would have to implement unrelated domains.
+`voom_store::repo::media::identity::IdentityRepo` currently exposes ingest and
+rename orchestration plus persistence for media works, media variants, file
+assets, file versions, file locations, identity evidence, and media snapshots.
+A caller that needs one table family must depend on all 50 methods, and a second
+concrete implementation would have to implement unrelated domains.
 
 `SqliteIdentityRepo` remains the single shared concrete implementation. This
 change narrows abstract dependencies without moving tables, changing SQL, or

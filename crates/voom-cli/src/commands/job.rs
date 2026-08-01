@@ -5,7 +5,7 @@ use std::io;
 
 use serde::Serialize;
 use voom_core::JobId;
-use voom_store::repo::jobs::{Job, JobFilter};
+use voom_store::repo::execution::jobs::{Job, JobFilter};
 
 use crate::cli::{JobCommand, JobStateArg};
 use crate::commands::common::{emit_voom_error, next_cursor, open_control_plane};

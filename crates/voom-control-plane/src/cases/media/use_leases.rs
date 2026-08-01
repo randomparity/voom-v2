@@ -13,7 +13,7 @@ use voom_events::payload::{
     UseLeaseReanchoredByMovePayload, UseLeaseRecoveredStaleIssuerPayload, UseLeaseReleasedPayload,
 };
 use voom_events::{Event, SubjectType};
-use voom_store::repo::use_leases::{
+use voom_store::repo::media::use_leases::{
     ExpireReport, NewUseLease, ReanchorReport, UseLease, UseLeaseReleaseReason,
 };
 

@@ -2,7 +2,7 @@ use super::*;
 
 use time::OffsetDateTime;
 use voom_events::EventKind;
-use voom_store::repo::events::{EventFilter, EventRepo, Page};
+use voom_store::repo::audit::events::{EventFilter, EventRepo, Page};
 
 use crate::cases::{count, cp};
 

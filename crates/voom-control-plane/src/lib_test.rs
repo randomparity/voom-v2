@@ -1,7 +1,7 @@
 use super::*;
 use serde_json::json;
 use voom_core::{NodeId, TicketId, WorkerId};
-use voom_store::repo::scheduler_decisions::{
+use voom_store::repo::execution::scheduler_decisions::{
     NewSchedulerDecision, SchedulerDecisionFilter, SchedulerDecisionKind, SchedulerDecisionOutcome,
     SchedulerReasonCode, SchedulerRequestSource,
 };
@@ -120,7 +120,8 @@ async fn scheduler_decision_reads_are_exposed_without_exposing_repo_writes() {
     voom_store::init(&url).await.unwrap();
     let pool = voom_store::connect(&url).await.unwrap();
     seed_scheduler_decision_refs(&pool).await;
-    let repo = voom_store::repo::scheduler_decisions::SqliteSchedulerDecisionRepo::new(pool);
+    let repo =
+        voom_store::repo::execution::scheduler_decisions::SqliteSchedulerDecisionRepo::new(pool);
     let inserted = repo.create(test_scheduler_decision()).await.unwrap();
     let cp = ControlPlane::open(&url).await.unwrap();
 

@@ -8,8 +8,8 @@ use voom_core::{
 };
 use voom_events::payload::ArtifactStagedPayload;
 use voom_events::{Event, SubjectType};
-use voom_store::repo::artifacts::{NewArtifactHandle, NewArtifactLocation};
-use voom_store::repo::identity::{
+use voom_store::repo::media::artifacts::{NewArtifactHandle, NewArtifactLocation};
+use voom_store::repo::media::identity::{
     FileLocation, FileLocationKind, FileLocationRepo, FileVersion, FileVersionRepo,
 };
 

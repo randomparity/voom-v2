@@ -14,17 +14,17 @@ use sqlx::SqlitePool;
 use time::Duration;
 use voom_core::{FileAssetId, FileLocationId, FileVersionId, VoomError};
 use voom_events::EventKind;
-use voom_store::repo::commit_safety_gate::{
+use voom_store::repo::audit::events::{EventFilter, EventRepo, Page, SqliteEventRepo};
+use voom_store::repo::media::commit_safety_gate::{
     AliasResolver, CommitGateContext, CommitGateResult, CommitTarget, DestructiveCommit,
     PrepareOutcome, prepare_destructive_commit,
 };
-use voom_store::repo::events::{EventFilter, EventRepo, Page, SqliteEventRepo};
-use voom_store::repo::identity::{
+use voom_store::repo::media::identity::{
     AliasProof, CommitGateIdentityRepo, DiscoveredFile, FileAssetRepo, FileLocationKind,
     FileLocationRepo, FileVersionRepo, IngestOutcome, IngestRepo, LocationProof, NewFileLocation,
     NewFileVersion, ObservedBytes, ProducedBy, RenameProof, SqliteIdentityRepo,
 };
-use voom_store::repo::use_leases::{
+use voom_store::repo::media::use_leases::{
     BlockingMode, IssuerKind, LeaseScope, NewUseLease, SqliteUseLeaseRepo, UseLeaseKind,
 };
 use voom_store::test_support::{FailingAliasResolver, T0, fresh_initialized_pool_at};

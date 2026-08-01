@@ -6,8 +6,8 @@ use sqlx::Row;
 use time::{Duration, OffsetDateTime};
 use voom_core::{ErrorCode, NodeId, clock_test_support::FrozenClock};
 use voom_events::{Event, EventKind, SubjectType};
-use voom_store::repo::events::{EventFilter, EventRepo, Page};
-use voom_store::repo::nodes::{Node, NodeKind, NodeStatus};
+use voom_store::repo::audit::events::{EventFilter, EventRepo, Page};
+use voom_store::repo::execution::nodes::{Node, NodeKind, NodeStatus};
 
 use crate::node_auth::hash_node_token;
 
@@ -263,7 +263,10 @@ async fn force_node_state(
         .unwrap();
 }
 
-async fn events(cp: &crate::ControlPlane, kind: EventKind) -> Vec<voom_store::repo::EventRow> {
+async fn events(
+    cp: &crate::ControlPlane,
+    kind: EventKind,
+) -> Vec<voom_store::repo::audit::events::EventRow> {
     cp.events()
         .list(
             EventFilter {

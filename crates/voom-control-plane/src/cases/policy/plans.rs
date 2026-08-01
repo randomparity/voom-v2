@@ -5,8 +5,10 @@ use voom_policy::{
     BundleTargetInput, IdentityEvidenceInput, IssueInput, MediaSnapshotInput, PolicyInputSetDraft,
     PolicySyntheticTarget, QualityProfileSelection, TargetRef,
 };
-use voom_store::repo::identity::{FileVersion, FileVersionRepo, MediaSnapshot, MediaSnapshotRepo};
-use voom_store::repo::policy_inputs::{PolicyInputSet, PolicyInputTargetRef};
+use voom_store::repo::media::identity::{
+    FileVersion, FileVersionRepo, MediaSnapshot, MediaSnapshotRepo,
+};
+use voom_store::repo::policy::policy_inputs::{PolicyInputSet, PolicyInputTargetRef};
 
 use crate::ControlPlane;
 
@@ -300,7 +302,7 @@ fn stored_stream_facts_error(detail: impl std::fmt::Display) -> VoomError {
 }
 
 pub(crate) fn deserialize_stored_compiled_policy(
-    version: &voom_store::repo::PolicyVersion,
+    version: &voom_store::repo::policy::policies::PolicyVersion,
 ) -> Result<voom_policy::CompiledPolicy, VoomError> {
     validate_stored_stream_condition_shapes(&version.compiled_json)?;
     let mut policy: voom_policy::CompiledPolicy =

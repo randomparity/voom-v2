@@ -13,10 +13,10 @@ use voom_core::{
     ArtifactHandleId, FileAssetId, FileLocationId, FileVersionId, JobId, MediaSnapshotId, TicketId,
     VoomError,
 };
-use voom_store::repo::identity::{FileVersionRepo, MediaSnapshot, MediaSnapshotRepo};
-use voom_store::repo::workflow_summaries::{
+use voom_store::repo::execution::workflow_summaries::{
     FilePhaseOutcome, FilePhaseSummary, NewFilePhaseSummary, PhaseSummary,
 };
+use voom_store::repo::media::identity::{FileVersionRepo, MediaSnapshot, MediaSnapshotRepo};
 
 use crate::ControlPlane;
 use crate::workflow::coordinator::planning::{job_grain_summary, zero_phase_summary};

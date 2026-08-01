@@ -3,10 +3,10 @@ use super::*;
 use time::{Duration as TDuration, OffsetDateTime};
 use voom_core::{FailureClass, TicketOperation, VoomError};
 use voom_events::EventKind;
-use voom_store::repo::events::{EventFilter, EventPage, EventRepo, Page};
-use voom_store::repo::leases::NewLease;
-use voom_store::repo::tickets::TicketState;
-use voom_store::repo::workers::{NewCapability, NewGrant, NewWorker, WorkerKind};
+use voom_store::repo::audit::events::{EventFilter, EventPage, EventRepo, Page};
+use voom_store::repo::execution::leases::NewLease;
+use voom_store::repo::execution::tickets::TicketState;
+use voom_store::repo::execution::workers::{NewCapability, NewGrant, NewWorker, WorkerKind};
 
 use crate::cases::{cp, issue_link_targets, terminal_failure_issues};
 

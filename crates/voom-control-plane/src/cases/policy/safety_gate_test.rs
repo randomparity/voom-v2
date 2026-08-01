@@ -1,8 +1,8 @@
 use time::OffsetDateTime;
 use voom_core::{FileVersionId, JobId, OperationKind, PolicyInputSetId, PolicyVersionId, TicketId};
 use voom_plan::{ExecutionPlan, NodeStatus, PlanOperationKind, TargetRef};
-use voom_store::repo::backups::{BackupFailureDetail, NewBackup};
-use voom_store::repo::safety_policies::{CommitMode, NewSafetyPolicy, VerificationLevel};
+use voom_store::repo::media::backups::{BackupFailureDetail, NewBackup};
+use voom_store::repo::policy::safety_policies::{CommitMode, NewSafetyPolicy, VerificationLevel};
 
 use super::*;
 use crate::cases::cp;

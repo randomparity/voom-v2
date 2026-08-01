@@ -24,7 +24,7 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, ChildStdin};
 use voom_core::rng_test_support::FrozenRng;
 use voom_core::{ErrorCode, FailureClass, JobId, SystemClock, TicketOperation, WorkerId};
-use voom_store::repo::workers::{NewCapability, NewGrant, NewWorker, WorkerKind};
+use voom_store::repo::execution::workers::{NewCapability, NewGrant, NewWorker, WorkerKind};
 use voom_worker_protocol::http::OperationBody;
 use voom_worker_protocol::{
     ClientHandle, DispatchStream, HandshakeResponse, HttpClient, NdjsonReader, OperationKind,

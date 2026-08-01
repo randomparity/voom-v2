@@ -13,7 +13,7 @@ use time::{Duration, OffsetDateTime};
 use voom_core::{IssueId, IssuePriority, VoomError};
 use voom_events::payload::IssueLifecyclePayload;
 use voom_events::{Event, SubjectType};
-use voom_store::repo::issues::{IssueFilter, IssueListPage, IssueRecord};
+use voom_store::repo::policy::issues::{IssueFilter, IssueListPage, IssueRecord};
 
 use crate::ControlPlane;
 use crate::cases::{append_event, begin_tx, commit_tx};

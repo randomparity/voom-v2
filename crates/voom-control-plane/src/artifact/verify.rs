@@ -12,7 +12,7 @@ use voom_events::payload::{
     ArtifactVerificationSucceededPayload,
 };
 use voom_events::{Event, SubjectType};
-use voom_store::repo::artifacts::{
+use voom_store::repo::media::artifacts::{
     ArtifactLocation, ArtifactVerification, ArtifactVerificationStatus, NewArtifactVerification,
     PolicyArtifactTarget,
 };
@@ -733,7 +733,7 @@ fn new_verification_input(
 async fn append_terminal_event(
     cp: &ControlPlane,
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-    verification: &voom_store::repo::artifacts::ArtifactVerification,
+    verification: &voom_store::repo::media::artifacts::ArtifactVerification,
     outcome: &VerifyOutcome,
     occurred_at: time::OffsetDateTime,
     context: VerifyArtifactPersistContext<'_>,

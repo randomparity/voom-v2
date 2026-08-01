@@ -5,9 +5,9 @@ use serde_json::json;
 use time::OffsetDateTime;
 use voom_core::{ErrorCode, JobId, LeaseId, TicketId, rng_test_support::FrozenRng};
 use voom_events::EventKind;
-use voom_store::repo::artifacts::ArtifactCommitState;
-use voom_store::repo::events::{EventFilter, EventRepo, Page};
-use voom_store::repo::identity::{DiscoveredFile, FileLocationKind, IngestOutcome};
+use voom_store::repo::audit::events::{EventFilter, EventRepo, Page};
+use voom_store::repo::media::artifacts::ArtifactCommitState;
+use voom_store::repo::media::identity::{DiscoveredFile, FileLocationKind, IngestOutcome};
 use voom_worker_protocol::{
     ObservedFileFacts, ProbeFileRequest, ProbeFileResult, ProbeFileStatus, RemuxObservedFacts,
     RemuxRequest, RemuxResult, RemuxStatus, VerifyArtifactObservedFacts, VerifyArtifactRequest,
@@ -974,7 +974,7 @@ async fn single_failed_remux_payload(
 async fn single_event(
     cp: &crate::ControlPlane,
     kind: EventKind,
-) -> voom_store::repo::events::EventRow {
+) -> voom_store::repo::audit::events::EventRow {
     cp.events()
         .list(
             EventFilter {

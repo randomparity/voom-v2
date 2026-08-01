@@ -12,3 +12,7 @@ pub(crate) use execution::{WorkflowChaosOptions, WorkflowExecutor, WorkflowExecu
 #[cfg(test)]
 pub(crate) use plan::WorkflowPlan;
 pub(crate) use summary::WorkflowRunSummary;
+
+pub use coordinator::{CoordinatorError, CoordinatorOutcome};
+pub use execution::timing::EffectiveTiming;
+pub use plan::ticket_payload::{WorkflowTicketPayload, WorkflowTicketPayloadError};

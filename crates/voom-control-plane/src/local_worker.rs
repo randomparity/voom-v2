@@ -19,8 +19,10 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, ChildStdin, Command};
 use tokio::time::timeout;
 use voom_core::{TicketOperation, VoomError, WorkerId, WorkerKind, WorkerStatus};
-use voom_store::repo::accelerator_claims::{NewAcceleratorClaim, SqliteAcceleratorClaimRepo};
-use voom_store::repo::workers::{NewCapability, NewGrant, NewWorker};
+use voom_store::repo::execution::accelerator_claims::{
+    NewAcceleratorClaim, SqliteAcceleratorClaimRepo,
+};
+use voom_store::repo::execution::workers::{NewCapability, NewGrant, NewWorker};
 use voom_worker_protocol::{
     LocalWorkerBound, VAAPI_PREFLIGHT_BUDGET, VIDEOTOOLBOX_PREFLIGHT_BUDGET,
     VideoAcceleratorDescriptor, vaapi_hardware_token,
@@ -261,7 +263,7 @@ impl ControlPlane {
 
     async fn retire_failed_worker(
         &self,
-        worker: &voom_store::repo::workers::Worker,
+        worker: &voom_store::repo::execution::workers::Worker,
         accelerator: Option<&ResolvedLocalVideoAcceleratorConfig>,
         source: VoomError,
     ) -> VoomError {
@@ -333,7 +335,7 @@ impl ControlPlane {
 
     async fn recover_linux_claim(
         &self,
-        claim: &voom_store::repo::accelerator_claims::AcceleratorClaim,
+        claim: &voom_store::repo::execution::accelerator_claims::AcceleratorClaim,
         token: &str,
     ) -> Result<(), VoomError> {
         let boot_id = linux_boot_id()?;
@@ -370,7 +372,7 @@ impl ControlPlane {
 
     async fn recover_videotoolbox_claim(
         &self,
-        claim: &voom_store::repo::accelerator_claims::AcceleratorClaim,
+        claim: &voom_store::repo::execution::accelerator_claims::AcceleratorClaim,
         token: &str,
         config: &ResolvedVideoToolboxLocalWorkerConfig,
     ) -> Result<(), VoomError> {
@@ -394,7 +396,7 @@ impl ControlPlane {
 
     async fn retire_claim_owner(
         &self,
-        claim: &voom_store::repo::accelerator_claims::AcceleratorClaim,
+        claim: &voom_store::repo::execution::accelerator_claims::AcceleratorClaim,
     ) -> Result<(), VoomError> {
         let inspection = self
             .get_worker_inspection(claim.worker_id)
@@ -441,7 +443,7 @@ impl ControlPlane {
         kind: LocalWorkerKind,
         secret: &str,
         accelerator: Option<&ResolvedLocalVideoAcceleratorConfig>,
-    ) -> Result<(voom_store::repo::workers::Worker, Child), VoomError> {
+    ) -> Result<(voom_store::repo::execution::workers::Worker, Child), VoomError> {
         let mut tx = self.pool.begin().await.map_err(|error| {
             VoomError::database_context("begin local worker registration", error)
         })?;

@@ -2,15 +2,16 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
-use voom_control_plane::{
-    AcknowledgeExtractDispatchQuiescenceInput, ArtifactDetail, ArtifactInspectionState,
-    ArtifactListInput, ArtifactSummary, CommitArtifactInput, CommitArtifactPreMutationReport,
-    CommitArtifactReport, CommitRecoveryReport, CommitSummary, PathFacts, PathObservation,
-    RecoverySummary, StageCopyInput, StageCopyReport, VerificationSummary, VerifyArtifactInput,
+use voom_control_plane::artifact::{
+    ArtifactDetail, ArtifactInspectionState, ArtifactListInput, ArtifactSummary,
+    CommitArtifactInput, CommitArtifactPreMutationReport, CommitArtifactReport,
+    CommitRecoveryReport, CommitSummary, PathFacts, PathObservation, RecoverySummary,
+    StageCopyInput, StageCopyReport, VerificationSummary, VerifyArtifactInput,
     VerifyArtifactReport,
 };
+use voom_control_plane::audio::AcknowledgeExtractDispatchQuiescenceInput;
 use voom_core::{ArtifactHandleId, ErrorCode, FileLocationId, FileVersionId, WorkerId};
-use voom_store::repo::artifacts::{ArtifactCommitState, ArtifactVerificationStatus};
+use voom_store::repo::media::artifacts::{ArtifactCommitState, ArtifactVerificationStatus};
 
 use crate::cli::{ArtifactCommand, ArtifactStateArg};
 use crate::commands::common::{emit_voom_error, open_control_plane};

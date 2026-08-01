@@ -7,9 +7,9 @@ use time::Duration;
 use time::OffsetDateTime;
 use voom_core::{Clock, ErrorCode, clock_test_support::ManualClock, rng_test_support::FrozenRng};
 use voom_events::{Event, EventKind, SubjectType};
-use voom_store::repo::events::{EventFilter, EventRepo, Page};
-use voom_store::repo::nodes::{NodeKind, NodeStatus};
-use voom_store::repo::workers::WorkerKind;
+use voom_store::repo::audit::events::{EventFilter, EventRepo, Page};
+use voom_store::repo::execution::nodes::{NodeKind, NodeStatus};
+use voom_store::repo::execution::workers::WorkerKind;
 
 use crate::cases::cp;
 use crate::cases::workers::nodes::RegisterNodeInput;
@@ -554,7 +554,7 @@ async fn cp_with_manual_clock(
     (cp, clock, tmp)
 }
 
-async fn worker_events(cp: &crate::ControlPlane) -> Vec<voom_store::repo::EventRow> {
+async fn worker_events(cp: &crate::ControlPlane) -> Vec<voom_store::repo::audit::events::EventRow> {
     cp.events()
         .list(
             EventFilter {

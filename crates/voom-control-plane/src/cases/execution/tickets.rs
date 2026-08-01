@@ -9,7 +9,7 @@ use voom_events::payload::{
     TicketReadyPayload,
 };
 use voom_events::{Event, SubjectType};
-use voom_store::repo::tickets::{NewTicket, Ticket, TicketState};
+use voom_store::repo::execution::tickets::{NewTicket, Ticket, TicketState};
 
 use crate::ControlPlane;
 
@@ -168,7 +168,7 @@ impl ControlPlane {
                 .await?
         } else {
             let mut shot = self.snapshot_rng();
-            let backoff = voom_store::repo::tickets::SqliteTicketRepo::default_backoff(
+            let backoff = voom_store::repo::execution::tickets::SqliteTicketRepo::default_backoff(
                 next_attempt,
                 &mut shot,
             );

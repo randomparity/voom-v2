@@ -8,7 +8,7 @@ use voom_core::OperationKind;
 use voom_core::{JobId, TicketId, TicketOperation, VoomError};
 use voom_events::payload::TicketCreatedPayload;
 use voom_events::{Event, SubjectType};
-use voom_store::repo::tickets::{NewTicket, SqliteTicketRepo, Ticket, TicketState};
+use voom_store::repo::execution::tickets::{NewTicket, SqliteTicketRepo, Ticket, TicketState};
 
 use super::binding::{BranchContext, render_default_payload};
 use super::model::{OperationNode, WorkflowPlan};

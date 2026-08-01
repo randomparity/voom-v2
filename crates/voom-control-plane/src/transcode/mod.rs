@@ -7,8 +7,8 @@ use voom_core::{
     ArtifactHandleId, ArtifactLocationId, FileLocationId, FileVersionId, JobId, LeaseId,
     MediaSnapshotId, TicketId, VoomError,
 };
-use voom_store::repo::artifacts::ArtifactVerificationStatus;
-use voom_store::repo::identity::MediaSnapshotRepo;
+use voom_store::repo::media::artifacts::ArtifactVerificationStatus;
+use voom_store::repo::media::identity::MediaSnapshotRepo;
 use voom_worker_protocol::{TranscodeVideoResult, VideoHardwareAssignment};
 
 use crate::ControlPlane;
@@ -18,13 +18,15 @@ use crate::artifact::verify::{
     verify_artifact_with_dispatcher,
 };
 
-pub mod commit;
-pub mod dispatch;
-pub mod events;
-pub mod resolve;
-pub mod source;
-pub mod stage;
+pub(crate) mod commit;
+pub(crate) mod dispatch;
+pub(crate) mod events;
+pub(crate) mod resolve;
+pub(crate) mod source;
+pub(crate) mod stage;
 pub(crate) mod workflow;
+
+pub use resolve::ResolvedProfile;
 
 #[derive(Debug, Clone)]
 pub struct ExecuteTranscodeVideoInput {
@@ -43,7 +45,7 @@ pub struct ExecuteTranscodeVideoInput {
     pub hardware_assignment: Option<VideoHardwareAssignment>,
     /// The resolved video encode profile plus output container, threaded from
     /// the ticket payload (binding.rs embeds it from the planner node payload).
-    pub resolved: resolve::ResolvedProfile,
+    pub resolved: ResolvedProfile,
     /// Opt-in backup-before-mutation destination root; `Some` backs up the
     /// source before dispatch (ADR 0025).
     pub backup_root: Option<PathBuf>,
@@ -288,7 +290,7 @@ struct CommittedTranscodeResult {
     commit_record_id: ArtifactCommitRecordId,
     result_file_version_id: FileVersionId,
     result_file_location_id: FileLocationId,
-    snapshot: voom_store::repo::identity::MediaSnapshot,
+    snapshot: voom_store::repo::media::identity::MediaSnapshot,
 }
 
 struct CommitTranscodePaths<'a> {

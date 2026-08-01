@@ -17,9 +17,9 @@ use time::Duration;
 
 use voom_control_plane::ControlPlane;
 use voom_core::{SystemClock, TicketOperation, VoomError};
-use voom_store::repo::leases::NewLease;
-use voom_store::repo::tickets::{NewTicket, TicketState};
-use voom_store::repo::workers::{NewWorker, WorkerKind};
+use voom_store::repo::execution::leases::NewLease;
+use voom_store::repo::execution::tickets::{NewTicket, TicketState};
+use voom_store::repo::execution::workers::{NewWorker, WorkerKind};
 use voom_store::test_support::T0;
 
 async fn cp() -> (

@@ -1,7 +1,7 @@
 use std::net::SocketAddr;
 
 use clap::Parser;
-use voom_control_plane::{
+use voom_control_plane::workers::{
     LocalVideoAcceleratorConfig, LocalWorkerHandle, LocalWorkerKind, NvidiaLocalWorkerConfig,
     VaapiLocalWorkerConfig, VideoToolboxLocalWorkerConfig,
 };

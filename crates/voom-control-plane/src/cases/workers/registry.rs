@@ -13,8 +13,8 @@ use voom_events::payload::{
     WorkerRegisteredPayload, WorkerRetiredPayload,
 };
 use voom_events::{Event, SubjectType};
-use voom_store::repo::nodes::NodeStatus;
-use voom_store::repo::workers::{
+use voom_store::repo::execution::nodes::NodeStatus;
+use voom_store::repo::execution::workers::{
     Capability, Grant, NewCapability, NewGrant, NewWorker, Worker, WorkerInspection, WorkerKind,
     WorkerStatus,
 };

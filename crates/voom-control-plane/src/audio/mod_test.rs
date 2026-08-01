@@ -8,13 +8,15 @@ use time::OffsetDateTime;
 use voom_core::ids::BundleId;
 use voom_core::rng_test_support::FrozenRng;
 use voom_core::{JobId, LeaseId, TicketId};
-use voom_store::repo::artifacts::{
+use voom_store::repo::media::artifacts::{
     NewArtifactCommitRecord, NewArtifactHandle, NewArtifactLocation, NewSidecarArtifactCommit,
 };
-use voom_store::repo::bundles::{BundleMemberRole, NewAssetBundle, NewBundleMember};
-use voom_store::repo::identity::{DiscoveredFile, FileLocationKind, IngestOutcome};
-use voom_store::repo::identity::{MediaSnapshotRepo, MediaWorkKind, NewMediaVariant, NewMediaWork};
-use voom_store::repo::{
+use voom_store::repo::media::bundles::{BundleMemberRole, NewAssetBundle, NewBundleMember};
+use voom_store::repo::media::identity::{DiscoveredFile, FileLocationKind, IngestOutcome};
+use voom_store::repo::media::identity::{
+    MediaSnapshotRepo, MediaWorkKind, NewMediaVariant, NewMediaWork,
+};
+use voom_store::repo::media::use_leases::{
     BlockingMode, IssuerKind, LeaseScope, NewUseLease, UseLeaseKind, UseLeaseReleaseReason,
 };
 use voom_worker_protocol::{
@@ -2264,7 +2266,7 @@ struct HistoricalStagedArtifact {
 }
 
 struct SeededActiveExtractAttempt {
-    attempt: voom_store::repo::audio_extract_operations::AudioExtractDispatchAttempt,
+    attempt: voom_store::repo::media::audio_extract_operations::AudioExtractDispatchAttempt,
     staging: stage::PreparedStagingPaths,
 }
 
@@ -2500,7 +2502,7 @@ async fn commit_historical_sidecar(
     staged: &HistoricalStagedArtifact,
     target: &std::path::Path,
     output: &AudioObservedFacts,
-) -> voom_store::repo::artifacts::SidecarArtifactCommit {
+) -> voom_store::repo::media::artifacts::SidecarArtifactCommit {
     let mut tx = cp.pool_for_test().begin().await.unwrap();
     let pending = cp
         .artifacts()
@@ -2815,7 +2817,7 @@ async fn record_plural_surround_audio_snapshot(
     .0
 }
 
-async fn seed_bundle(cp: &crate::ControlPlane) -> voom_store::repo::bundles::AssetBundle {
+async fn seed_bundle(cp: &crate::ControlPlane) -> voom_store::repo::media::bundles::AssetBundle {
     let work = cp
         .create_media_work(NewMediaWork {
             kind: MediaWorkKind::Movie,

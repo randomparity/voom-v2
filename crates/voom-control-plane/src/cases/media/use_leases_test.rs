@@ -1,9 +1,11 @@
 use time::{Duration, OffsetDateTime};
 use voom_core::VoomError;
 use voom_events::EventKind;
-use voom_store::repo::events::{EventFilter, EventRepo, Page};
-use voom_store::repo::identity::{FileLocationKind, NewFileLocation, NewFileVersion, ProducedBy};
-use voom_store::repo::use_leases::{
+use voom_store::repo::audit::events::{EventFilter, EventRepo, Page};
+use voom_store::repo::media::identity::{
+    FileLocationKind, NewFileLocation, NewFileVersion, ProducedBy,
+};
+use voom_store::repo::media::use_leases::{
     BlockingMode, IssuerKind, LeaseScope, NewUseLease, UseLeaseKind, UseLeaseReleaseReason,
 };
 

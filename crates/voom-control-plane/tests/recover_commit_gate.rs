@@ -16,12 +16,15 @@ use tempfile::TempDir;
 use time::{Duration, OffsetDateTime};
 use voom_test_support::TempDatabase;
 
+use voom_control_plane::ControlPlane;
+use voom_control_plane::artifact::{StageCopyInput, VerifyArtifactInput};
 use voom_control_plane::scan::ScanPathInput;
-use voom_control_plane::{ControlPlane, StageCopyInput, VerifyArtifactInput};
 use voom_core::ErrorCode;
 use voom_core::ids::ArtifactVerificationId;
-use voom_store::repo::artifacts::ArtifactCommitState;
-use voom_store::repo::{BlockingMode, IssuerKind, LeaseScope, NewUseLease, UseLeaseKind};
+use voom_store::repo::media::artifacts::ArtifactCommitState;
+use voom_store::repo::media::use_leases::{
+    BlockingMode, IssuerKind, LeaseScope, NewUseLease, UseLeaseKind,
+};
 use voom_test_support::worker::{
     FfprobeSiblingGuard, cargo_bin_or_build, install_fake_ffprobe_sibling, target_debug_binary,
     workspace_root,

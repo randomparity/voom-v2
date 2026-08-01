@@ -6,7 +6,7 @@ use voom_plan::audio::{
     extract_audio_outputs, extraction_role, selected_audio_streams, synthesize_audio_companions,
     synthesize_audio_shape,
 };
-use voom_store::repo::identity::MediaSnapshot;
+use voom_store::repo::media::identity::MediaSnapshot;
 use voom_worker_protocol::{AudioStreamRef, TranscodeAudioSelection};
 
 #[derive(Debug, Clone, PartialEq, Eq)]

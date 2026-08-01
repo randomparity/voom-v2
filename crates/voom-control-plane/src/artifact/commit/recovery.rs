@@ -4,7 +4,7 @@ use tokio::fs;
 use voom_core::{FailureClass, VoomError};
 use voom_events::Event;
 use voom_events::payload::ArtifactCommitRecoveryRequiredPayload;
-use voom_store::repo::artifacts::{ArtifactCommitFailure, ArtifactCommitState};
+use voom_store::repo::media::artifacts::{ArtifactCommitFailure, ArtifactCommitState};
 
 use voom_artifact::commit_pipeline::{
     RecoveryRequiredCommit, mark_recovery_required_with_event_in_tx,

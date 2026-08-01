@@ -15,9 +15,11 @@ use voom_control_plane::ControlPlane;
 use voom_core::{FileLocationId, FileVersionId};
 use voom_events::{EventKind, SubjectType};
 use voom_store::init;
-use voom_store::repo::events::{EventFilter, EventRepo, Page};
-use voom_store::repo::identity::{DiscoveredFile, FileAssetRepo, FileLocationKind, IngestOutcome};
-use voom_store::repo::use_leases::{
+use voom_store::repo::audit::events::{EventFilter, EventRepo, Page};
+use voom_store::repo::media::identity::{
+    DiscoveredFile, FileAssetRepo, FileLocationKind, IngestOutcome,
+};
+use voom_store::repo::media::use_leases::{
     BlockingMode, IssuerKind, LeaseScope, NewUseLease, USE_LEASE_BATCH_LIMIT, UseLeaseKind,
     UseLeaseReleaseReason,
 };
@@ -66,7 +68,7 @@ async fn events_for(
     subject_type: SubjectType,
     subject_id: u64,
     limit: u32,
-) -> Vec<voom_store::repo::events::EventRow> {
+) -> Vec<voom_store::repo::audit::events::EventRow> {
     cp.events()
         .list(
             EventFilter {

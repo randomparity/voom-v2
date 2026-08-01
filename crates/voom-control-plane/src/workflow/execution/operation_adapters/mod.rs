@@ -5,7 +5,7 @@ use std::pin::Pin;
 use serde_json::Value;
 use voom_core::OperationKind;
 use voom_core::{FileLocationId, FileVersionId, JobId, LeaseId, TicketId, VoomError};
-use voom_store::repo::tickets::Ticket;
+use voom_store::repo::execution::tickets::Ticket;
 
 use crate::ControlPlane;
 use crate::workflow::execution::executor::{

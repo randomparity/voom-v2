@@ -3,20 +3,20 @@ use std::collections::BTreeMap;
 use serde_json::{Value, json};
 use time::{Duration, OffsetDateTime};
 use voom_core::{FileLocationId, FileVersionId, MediaSnapshotId, TicketOperation, WorkerKind};
-use voom_store::repo::artifacts::{
+use voom_store::repo::execution::jobs::NewJob;
+use voom_store::repo::execution::leases::NewLease;
+use voom_store::repo::execution::tickets::NewTicket;
+use voom_store::repo::execution::workers::{NewCapability, NewGrant, NewWorker};
+use voom_store::repo::execution::workflow_progress::{FileAdmissionTier, NewFileProgress};
+use voom_store::repo::execution::workflow_summaries::{FilePhaseOutcome, NewFileRunStart};
+use voom_store::repo::media::artifacts::{
     ArtifactVerificationStatus, NewArtifactCommitRecord, NewArtifactHandle, NewArtifactLocation,
     NewArtifactVerification, NewSidecarArtifactCommit,
 };
-use voom_store::repo::identity::{
+use voom_store::repo::media::identity::{
     DiscoveredFile, FileLocationKind, FileLocationRepo, FileVersionRepo, IngestOutcome,
     MediaSnapshotRepo, NewFileLocation, NewFileVersion, ProducedBy,
 };
-use voom_store::repo::jobs::NewJob;
-use voom_store::repo::leases::NewLease;
-use voom_store::repo::tickets::NewTicket;
-use voom_store::repo::workers::{NewCapability, NewGrant, NewWorker};
-use voom_store::repo::workflow_progress::{FileAdmissionTier, NewFileProgress};
-use voom_store::repo::workflow_summaries::{FilePhaseOutcome, NewFileRunStart};
 
 use super::*;
 use crate::workflow::coordinator::{Disposition, PhaseFile};
@@ -257,7 +257,7 @@ async fn ordered_sidecar_output_rejects_foreign_snapshot() {
 
 struct OrderedSidecarFixture {
     ticket_id: voom_core::TicketId,
-    rows: [voom_store::repo::workflow_summaries::FilePhaseSummary; 1],
+    rows: [voom_store::repo::execution::workflow_summaries::FilePhaseSummary; 1],
     locations: Vec<FileLocationId>,
 }
 
@@ -337,20 +337,22 @@ async fn seed_ordered_sidecar_ticket(cp: &crate::ControlPlane) -> OrderedSidecar
     .unwrap();
     OrderedSidecarFixture {
         ticket_id: ticket.id,
-        rows: [voom_store::repo::workflow_summaries::FilePhaseSummary {
-            id: 1,
-            job_id: job.id,
-            phase_ordinal: 0,
-            branch_id: "ordered-sidecars".to_owned(),
-            ticket_ids: vec![ticket.id],
-            produced_file_version_id: None,
-            produced_file_location_id: None,
-            artifact_handle_id: None,
-            artifact_verification_id: None,
-            reprobe_snapshot_id: None,
-            outcome: FilePhaseOutcome::Skipped,
-            created_at: T0,
-        }],
+        rows: [
+            voom_store::repo::execution::workflow_summaries::FilePhaseSummary {
+                id: 1,
+                job_id: job.id,
+                phase_ordinal: 0,
+                branch_id: "ordered-sidecars".to_owned(),
+                ticket_ids: vec![ticket.id],
+                produced_file_version_id: None,
+                produced_file_location_id: None,
+                artifact_handle_id: None,
+                artifact_verification_id: None,
+                reprobe_snapshot_id: None,
+                outcome: FilePhaseOutcome::Skipped,
+                created_at: T0,
+            },
+        ],
         locations,
     }
 }
@@ -585,8 +587,8 @@ fn phase_summary(
     job_id: voom_core::JobId,
     phase_ordinal: u32,
     evidence: &CommittedEvidence,
-) -> voom_store::repo::workflow_summaries::FilePhaseSummary {
-    voom_store::repo::workflow_summaries::FilePhaseSummary {
+) -> voom_store::repo::execution::workflow_summaries::FilePhaseSummary {
+    voom_store::repo::execution::workflow_summaries::FilePhaseSummary {
         id: u64::from(phase_ordinal) + 1,
         job_id,
         phase_ordinal,
@@ -628,7 +630,7 @@ async fn repoint_location(
     crate::cases::commit_tx(tx).await.unwrap();
 }
 
-async fn open_policy_job(cp: &crate::ControlPlane) -> voom_store::repo::jobs::Job {
+async fn open_policy_job(cp: &crate::ControlPlane) -> voom_store::repo::execution::jobs::Job {
     cp.open_job(NewJob {
         kind: "policy_phase_barrier".to_owned(),
         priority: 0,
@@ -943,7 +945,7 @@ async fn create_pending_commit(
     cp: &crate::ControlPlane,
     source_version_id: FileVersionId,
     staged: &VerifiedStaging,
-) -> voom_store::repo::artifacts::ArtifactCommitRecord {
+) -> voom_store::repo::media::artifacts::ArtifactCommitRecord {
     let mut tx = crate::cases::begin_tx(&cp.pool).await.unwrap();
     let record = cp
         .artifacts()
@@ -982,7 +984,7 @@ async fn mark_commit_committed(
 async fn eligible_worker(
     cp: &crate::ControlPlane,
     operation: &TicketOperation,
-) -> voom_store::repo::workers::Worker {
+) -> voom_store::repo::execution::workers::Worker {
     let ordinal: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM workers")
         .fetch_one(&cp.pool)
         .await

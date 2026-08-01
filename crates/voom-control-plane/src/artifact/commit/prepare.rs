@@ -6,9 +6,9 @@ use voom_core::ids::ArtifactVerificationId;
 use voom_core::{ArtifactHandleId, ArtifactLocationId, FileAssetId, FileVersionId, VoomError};
 use voom_events::Event;
 use voom_events::payload::{ArtifactCommitFailedPreMutationPayload, ArtifactCommitStartedPayload};
-use voom_store::repo::artifacts::{ArtifactVerification, NewArtifactCommitRecord};
-use voom_store::repo::check_lineage_commit_leases_in_tx;
-use voom_store::repo::identity::FileVersionRepo;
+use voom_store::repo::media::artifacts::{ArtifactVerification, NewArtifactCommitRecord};
+use voom_store::repo::media::commit_safety_gate::check_lineage_commit_leases_in_tx;
+use voom_store::repo::media::identity::FileVersionRepo;
 
 use voom_artifact::commit_pipeline::{
     PendingCommitRecordError, append_commit_event_in_tx,

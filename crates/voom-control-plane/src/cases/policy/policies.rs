@@ -1,5 +1,5 @@
 use voom_core::{PolicyDocumentId, PolicyVersionId, VoomError};
-use voom_store::repo::policies::{
+use voom_store::repo::policy::policies::{
     CreatedPolicyVersion, NewPolicyDocumentVersion, PolicyDocument, PolicyDocumentSummary,
     PolicyVersion,
 };

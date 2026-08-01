@@ -213,7 +213,7 @@ fn bound_accelerator_must_match_the_configured_device() {
 async fn nvidia_capability_records_the_tagged_descriptor_token_and_capacity() {
     let (cp, _tmp) = crate::cases::cp().await;
     let worker = cp
-        .register_worker(voom_store::repo::workers::NewWorker {
+        .register_worker(voom_store::repo::execution::workers::NewWorker {
             name: "accelerator-descriptor-fixture".to_owned(),
             kind: voom_core::WorkerKind::Local,
             registered_at: time::OffsetDateTime::UNIX_EPOCH,
@@ -297,7 +297,7 @@ async fn nvidia_capability_records_the_tagged_descriptor_token_and_capacity() {
 async fn vaapi_capability_records_the_tagged_descriptor_token_and_capacity() {
     let (cp, _tmp) = crate::cases::cp().await;
     let worker = cp
-        .register_worker(voom_store::repo::workers::NewWorker {
+        .register_worker(voom_store::repo::execution::workers::NewWorker {
             name: "vaapi-descriptor-fixture".to_owned(),
             kind: voom_core::WorkerKind::Local,
             registered_at: time::OffsetDateTime::UNIX_EPOCH,

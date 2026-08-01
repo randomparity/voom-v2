@@ -26,16 +26,16 @@ use tokio::task::JoinSet;
 use voom_core::{FileAssetId, FileVersionId, JobId, PolicyInputSetId, PolicyVersionId, VoomError};
 use voom_plan::{ExecutionPlan, PlanningContext, PlanningRequest};
 use voom_policy::PolicyInputSetDraft;
-use voom_store::repo::identity::{MediaSnapshot, MediaSnapshotRepo};
-use voom_store::repo::jobs::{JobState, NewJob};
-use voom_store::repo::tickets::TicketState;
-use voom_store::repo::workflow_progress::{
+use voom_store::repo::execution::jobs::{JobState, NewJob};
+use voom_store::repo::execution::tickets::TicketState;
+use voom_store::repo::execution::workflow_progress::{
     FileAdmissionTier, FileProgress, NewFilePhaseEntry, NewFileProgress,
 };
-use voom_store::repo::workflow_summaries::{
+use voom_store::repo::execution::workflow_summaries::{
     FilePhaseOutcome, FilePhaseSummary, NewFileRunHistory, NewFileRunStart, NewPhaseSummary,
     PhaseSummary, WorkflowSummary,
 };
+use voom_store::repo::media::identity::{MediaSnapshot, MediaSnapshotRepo};
 
 use crate::ControlPlane;
 use crate::cases::policy::compliance::{ComplianceExecutionOptions, PromotionPlan};
@@ -1246,7 +1246,13 @@ impl ControlPlane {
         seeds: Vec<PreparedResumeSeed>,
         files: &[PhaseFile],
         max_in_flight_files: u32,
-    ) -> Result<(voom_store::repo::jobs::Job, Vec<FilePhaseSummary>), VoomError> {
+    ) -> Result<
+        (
+            voom_store::repo::execution::jobs::Job,
+            Vec<FilePhaseSummary>,
+        ),
+        VoomError,
+    > {
         self.open_sliding_file_job_with_terminal_progress(
             run_starts,
             history,
@@ -1266,7 +1272,13 @@ impl ControlPlane {
         files: &[PhaseFile],
         terminal_progress: Vec<NewFileProgress>,
         max_in_flight_files: u32,
-    ) -> Result<(voom_store::repo::jobs::Job, Vec<FilePhaseSummary>), VoomError> {
+    ) -> Result<
+        (
+            voom_store::repo::execution::jobs::Job,
+            Vec<FilePhaseSummary>,
+        ),
+        VoomError,
+    > {
         let now = self.clock().now();
         let mut tx = begin_tx(&self.pool).await?;
         let job = self

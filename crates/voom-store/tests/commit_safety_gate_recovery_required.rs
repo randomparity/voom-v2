@@ -30,14 +30,14 @@ use sqlx::SqlitePool;
 use time::Duration;
 use voom_core::{CommitId, FileLocationId, FileVersionId};
 use voom_events::EventKind;
-use voom_store::repo::commit_safety_gate::{
+use voom_store::repo::audit::events::{EventFilter, EventRepo, Page, SqliteEventRepo};
+use voom_store::repo::media::commit_safety_gate::{
     AffectedScopeClosure, AliasResolver, AuthorizeOutcome, BypassKind, CommitGateContext,
     CommitGateResult, CommitPermit, CommitTarget, DestructiveCommit, FinalizeOutcome,
     ForcePathToken, MutationOutcome, PrepareOutcome, authorize_destructive_commit,
     finalize_destructive_commit, prepare_destructive_commit,
 };
-use voom_store::repo::events::{EventFilter, EventRepo, Page, SqliteEventRepo};
-use voom_store::repo::identity::{
+use voom_store::repo::media::identity::{
     CommitGateIdentityRepo, FileAssetRepo, FileLocationKind, FileLocationRepo, FileVersionRepo,
     NewFileLocation, NewFileVersion, ProducedBy, SqliteIdentityRepo,
 };

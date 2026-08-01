@@ -9,7 +9,7 @@ use std::process::Command;
 use serde_json::{Value, json};
 use time::OffsetDateTime;
 use voom_core::{NodeId, TicketId, WorkerId};
-use voom_store::repo::scheduler_decisions::{
+use voom_store::repo::execution::scheduler_decisions::{
     NewSchedulerDecision, SchedulerDecisionKind, SchedulerDecisionOutcome, SchedulerReasonCode,
     SchedulerRequestSource, SqliteSchedulerDecisionRepo,
 };

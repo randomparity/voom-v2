@@ -17,8 +17,8 @@ use voom_control_plane::ControlPlane;
 use voom_core::SystemClock;
 use voom_core::rng_test_support::FrozenRng;
 use voom_events::EventKind;
-use voom_store::repo::events::{EventFilter, EventRepo, Page};
-use voom_store::repo::identity::{
+use voom_store::repo::audit::events::{EventFilter, EventRepo, Page};
+use voom_store::repo::media::identity::{
     AliasProof, DiscoveredFile, FileLocationKind, FileLocationRepo, IdentityEvidenceRepo,
     IdentityEvidenceTarget, IngestOutcome, LocationProof,
 };

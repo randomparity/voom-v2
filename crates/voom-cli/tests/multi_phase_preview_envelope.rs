@@ -23,7 +23,7 @@ use tempfile::TempDir;
 use time::OffsetDateTime;
 use voom_control_plane::ControlPlane;
 use voom_control_plane::policy::PolicyInputFromScanInput;
-use voom_store::repo::identity::{DiscoveredFile, FileLocationKind, IngestOutcome};
+use voom_store::repo::media::identity::{DiscoveredFile, FileLocationKind, IngestOutcome};
 use voom_store::test_support::sqlite_url_for;
 use voom_test_support::TempDatabase;
 

@@ -9,7 +9,7 @@ use voom_events::payload::{
     ArtifactLocationRetiredPayload,
 };
 use voom_events::{Event, SubjectType};
-use voom_store::repo::artifacts::{
+use voom_store::repo::media::artifacts::{
     ArtifactHandle, ArtifactLineage, ArtifactLocation, NewArtifactHandle, NewArtifactLineage,
     NewArtifactLocation,
 };

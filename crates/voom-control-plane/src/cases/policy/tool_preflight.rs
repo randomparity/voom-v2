@@ -6,7 +6,7 @@ use voom_core::{
 };
 use voom_policy::compiled::CompiledTranscodeVideoOperation;
 use voom_policy::{CompiledOperation, CompiledPolicy, PolicyTool, VideoProfileRef};
-use voom_store::repo::workers::{Worker, WorkerKind, WorkerStatus};
+use voom_store::repo::execution::workers::{Worker, WorkerKind, WorkerStatus};
 use voom_worker_protocol::VideoAcceleratorDescriptor;
 
 use crate::ControlPlane;

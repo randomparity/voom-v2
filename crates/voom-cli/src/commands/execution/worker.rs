@@ -4,13 +4,14 @@ use std::io::{self, Write};
 use secrecy::SecretString;
 use serde::Serialize;
 use serde_json::json;
-use voom_control_plane::workers::{NewWorkerCapabilityDraft, RegisterWorkerForNodeInput};
-use voom_control_plane::{
-    ControlPlane, LocalVideoAcceleratorConfig, LocalWorkerHandle, LocalWorkerKind,
-    NvidiaLocalWorkerConfig, VaapiLocalWorkerConfig, VideoToolboxLocalWorkerConfig,
+use voom_control_plane::ControlPlane;
+use voom_control_plane::workers::{
+    LocalVideoAcceleratorConfig, LocalWorkerHandle, LocalWorkerKind, NewWorkerCapabilityDraft,
+    NvidiaLocalWorkerConfig, RegisterWorkerForNodeInput, VaapiLocalWorkerConfig,
+    VideoToolboxLocalWorkerConfig,
 };
 use voom_core::{ErrorCode, NodeId, TicketOperation, VoomError, WorkerId};
-use voom_store::repo::workers::{WorkerInspection, WorkerNodeContext};
+use voom_store::repo::execution::workers::{WorkerInspection, WorkerNodeContext};
 
 use crate::cli::{LocalWorkerKindArg, WorkerCommand};
 use crate::commands::common::{emit_voom_error, open_control_plane};

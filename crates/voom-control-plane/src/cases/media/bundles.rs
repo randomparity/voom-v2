@@ -10,10 +10,10 @@ use voom_events::payload::{
     MediaVariantCreatedPayload, MediaWorkCreatedPayload,
 };
 use voom_events::{Event, SubjectType};
-use voom_store::repo::bundles::{
+use voom_store::repo::media::bundles::{
     AssetBundle, BundleMember, BundleMemberRole, NewAssetBundle, NewBundleMember,
 };
-use voom_store::repo::identity::{
+use voom_store::repo::media::identity::{
     FileVersionRepo, MediaVariantRepo, MediaWorkKind, MediaWorkRepo, NewMediaVariant, NewMediaWork,
 };
 

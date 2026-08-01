@@ -5,8 +5,8 @@ use voom_core::VoomError;
 use voom_core::ids::ArtifactCommitRecordId;
 use voom_events::Event;
 use voom_events::payload::ArtifactCommitCompletedPayload;
-use voom_store::repo::artifacts::ArtifactCommitRecord;
-use voom_store::repo::identity::{
+use voom_store::repo::media::artifacts::ArtifactCommitRecord;
+use voom_store::repo::media::identity::{
     FileLocationKind, FileLocationRepo, FileVersionRepo, NewFileLocation, NewFileVersion,
     ProducedBy,
 };

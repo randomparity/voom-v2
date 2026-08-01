@@ -13,8 +13,8 @@ use voom_control_plane::scan::{ScanPathInput, ScanReportFileStatus};
 use voom_core::{FileAssetId, FileVersionId, JobId, MediaSnapshotId};
 use voom_plan::PlanOperationKind;
 use voom_policy::{MediaSnapshotInput, PolicyInputSetDraft, PolicyInputSourceKind, TargetRef};
-use voom_store::repo::bundles::{BundleMemberRole, SqliteBundleRepo};
-use voom_store::repo::identity::{MediaSnapshotRepo, SqliteIdentityRepo};
+use voom_store::repo::media::bundles::{BundleMemberRole, SqliteBundleRepo};
+use voom_store::repo::media::identity::{MediaSnapshotRepo, SqliteIdentityRepo};
 use voom_test_support::TempDatabase;
 use voom_test_support::worker::{
     TestWorkerConfig, TestWorkerLaunch, cargo_build_package, hide_stale_fake_ffprobe_sibling,

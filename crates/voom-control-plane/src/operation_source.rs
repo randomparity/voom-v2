@@ -8,7 +8,7 @@ use std::path::PathBuf;
 
 use serde_json::Value;
 use voom_core::{FileLocationId, FileVersionId, MediaSnapshotId, VoomError};
-use voom_store::repo::identity::{
+use voom_store::repo::media::identity::{
     FileLocation, FileLocationKind, FileLocationRepo, FileVersion, FileVersionRepo, MediaSnapshot,
     MediaSnapshotRepo,
 };

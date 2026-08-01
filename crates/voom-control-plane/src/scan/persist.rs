@@ -14,12 +14,12 @@ use voom_events::payload::{
 };
 use voom_events::{Event, SubjectType};
 use voom_store::repo::{
-    bundles::{BundleMemberRole, NewBundleMember},
-    identity::{
+    media::bundles::{BundleMemberRole, NewBundleMember},
+    media::identity::{
         DiscoveredFile, FileLocationKind, FileLocationRepo, FileVersionRepo, IdentityEvidenceRepo,
         IngestOutcome, IngestRepo, NewMediaSnapshot,
     },
-    scan_facts::{find_live_hardlink_location_in_tx, record_scan_fact_in_tx},
+    media::scan_facts::{find_live_hardlink_location_in_tx, record_scan_fact_in_tx},
 };
 use voom_worker_protocol::ProbeFileResult;
 

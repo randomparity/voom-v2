@@ -1,5 +1,5 @@
 use voom_core::VoomError;
-use voom_store::repo::workers::{WorkerOperationCandidate, WorkerOperationCapability};
+use voom_store::repo::execution::workers::{WorkerOperationCandidate, WorkerOperationCapability};
 use voom_worker_protocol::VideoAcceleratorDescriptor;
 
 pub(crate) fn candidate_accelerator_descriptor(

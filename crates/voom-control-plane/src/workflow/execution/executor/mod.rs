@@ -4,9 +4,9 @@ use std::time::{Duration, Instant};
 use tokio::task::JoinSet;
 use voom_core::OperationKind;
 use voom_core::{FileAssetId, FileVersionId, JobId, VoomError, WorkerId};
-use voom_store::repo::jobs::JobState;
+use voom_store::repo::execution::jobs::JobState;
 #[cfg(test)]
-use voom_store::repo::jobs::NewJob;
+use voom_store::repo::execution::jobs::NewJob;
 
 use super::dispatch::DispatchOutcome;
 use super::runtime::WorkerRuntimeRegistry;

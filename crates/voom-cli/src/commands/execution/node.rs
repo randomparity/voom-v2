@@ -5,7 +5,7 @@ use serde::Serialize;
 use serde_json::json;
 use voom_control_plane::workers::RegisterNodeInput;
 use voom_core::{ErrorCode, NodeId};
-use voom_store::repo::nodes::Node;
+use voom_store::repo::execution::nodes::Node;
 
 use crate::cli::NodeCommand;
 use crate::commands::common::{emit_voom_error, open_control_plane};

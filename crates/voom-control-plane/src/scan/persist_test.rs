@@ -12,8 +12,8 @@ use voom_core::clock_test_support::ManualClock;
 use voom_core::rng_test_support::FrozenRng;
 use voom_core::{ErrorCode, FailureClass, VoomError, WorkerId};
 use voom_events::EventKind;
-use voom_store::repo::identity::MediaSnapshotRepo;
-use voom_store::repo::workers::{NewWorker, WorkerKind};
+use voom_store::repo::execution::workers::{NewWorker, WorkerKind};
+use voom_store::repo::media::identity::MediaSnapshotRepo;
 use voom_worker_protocol::ProbeFileStatus;
 
 const T0: OffsetDateTime = OffsetDateTime::UNIX_EPOCH;
@@ -580,7 +580,7 @@ fn matching_probe_result(
 async fn register_local_worker(
     cp: &crate::ControlPlane,
     name: &str,
-) -> voom_store::repo::workers::Worker {
+) -> voom_store::repo::execution::workers::Worker {
     cp.workers()
         .register(NewWorker {
             name: name.to_owned(),

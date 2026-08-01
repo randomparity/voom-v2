@@ -6,8 +6,8 @@ use sqlx::Row;
 use time::OffsetDateTime;
 use voom_core::{ErrorCode, FileLocationId, FileVersionId, VoomError, rng_test_support::FrozenRng};
 use voom_events::EventKind;
-use voom_store::repo::events::{EventFilter, EventRepo, Page};
-use voom_store::repo::identity::{
+use voom_store::repo::audit::events::{EventFilter, EventRepo, Page};
+use voom_store::repo::media::identity::{
     DiscoveredFile, FileAssetRepo, FileLocationKind, FileLocationRepo, FileVersionRepo,
     IngestOutcome, NewFileLocation, ProducedBy,
 };
@@ -506,7 +506,7 @@ async fn create_version_without_locations(cp: &ControlPlane) -> FileVersionId {
         .identity()
         .create_file_version_in_tx(
             &mut tx,
-            voom_store::repo::identity::NewFileVersion {
+            voom_store::repo::media::identity::NewFileVersion {
                 file_asset_id: asset.id,
                 content_hash: blake3_checksum(b"unused"),
                 size_bytes: 6,

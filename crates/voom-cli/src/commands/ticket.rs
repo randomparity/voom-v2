@@ -5,7 +5,7 @@ use std::io;
 
 use serde::Serialize;
 use serde_json::Value as JsonValue;
-use voom_store::repo::tickets::{Ticket, TicketFilter};
+use voom_store::repo::execution::tickets::{Ticket, TicketFilter};
 
 use crate::cli::{TicketCommand, TicketStateArg};
 use crate::commands::common::{emit_voom_error, next_cursor, open_control_plane};

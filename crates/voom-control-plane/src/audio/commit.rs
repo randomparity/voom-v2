@@ -19,22 +19,22 @@ use voom_events::payload::{
 };
 use voom_events::{Event, SubjectType};
 use voom_plan::audio::AudioBundleRole;
-use voom_store::repo::artifacts::{
+use voom_store::repo::media::artifacts::{
     ArtifactCommitFailure, ArtifactCommitRecord, ArtifactCommitState, NewArtifactCommitRecord,
     NewArtifactHandle, NewArtifactLocation, NewSidecarArtifactCommit, SidecarArtifactCommit,
 };
-use voom_store::repo::audio_extract_operations::{
+use voom_store::repo::media::audio_extract_operations::{
     AudioExtractOperationRecord, AudioExtractRecoveryFailure, LegacyAudioExtractOwner,
     NewAudioExtractClaim, NewAudioExtractOperation, NewAudioExtractOutput,
     NewFinalizedAudioExtractOutput, NewLegacyAudioExtractAdoption, NewPreparedAudioExtractOutput,
     NewStagedAudioExtractOutput, SqliteAudioExtractOperationRepo, StageAudioExtractOperation,
 };
-use voom_store::repo::bundles::{BundleMemberRole, NewBundleMember};
-use voom_store::repo::identity::{FileVersionRepo, MediaSnapshot, NewMediaSnapshot};
 use voom_store::repo::media::audio_synthesis_operations::{
     BindAudioSynthesisOperation, NewAudioSynthesisClaim, SqliteAudioSynthesisOperationRepo,
     StagedAudioSynthesisCompanion,
 };
+use voom_store::repo::media::bundles::{BundleMemberRole, NewBundleMember};
+use voom_store::repo::media::identity::{FileVersionRepo, MediaSnapshot, NewMediaSnapshot};
 use voom_worker_protocol::{
     AudioObservedFacts, AudioOutputStreamFact, ExpectedFileFacts, ExtractAudioResult,
     ProbeFileRequest, ProbeFileResult, TranscodeAudioResult,

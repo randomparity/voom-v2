@@ -6,7 +6,7 @@ use std::collections::HashSet;
 
 use sqlx::Row;
 use voom_core::{JobId, TicketId, VoomError};
-use voom_store::repo::tickets::Ticket;
+use voom_store::repo::execution::tickets::Ticket;
 
 use crate::workflow::execution::executor::errors::{format_time, sqlite_i64, sqlite_u64};
 use crate::workflow::execution::executor::tickets::{

@@ -8,7 +8,7 @@ use std::process::Command;
 
 use serde_json::Value;
 use voom_control_plane::ControlPlane;
-use voom_store::repo::workers::{NewWorker, WorkerKind};
+use voom_store::repo::execution::workers::{NewWorker, WorkerKind};
 use voom_store::test_support::sqlite_url_for;
 use voom_test_support::TempDatabase;
 

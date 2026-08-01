@@ -565,7 +565,7 @@ async fn a_vaapi_candidate_with_a_dead_endpoint_is_dropped_before_any_lease() {
     let (cp, _tmp) = crate::cases::cp().await;
     let operation = TicketOperation::new("transcode_video").unwrap();
     let worker = cp
-        .register_worker(voom_store::repo::workers::NewWorker {
+        .register_worker(voom_store::repo::execution::workers::NewWorker {
             name: "vaapi-dead-endpoint".to_owned(),
             kind: voom_core::WorkerKind::Synthetic,
             registered_at: cp.clock().now(),
@@ -573,7 +573,7 @@ async fn a_vaapi_candidate_with_a_dead_endpoint_is_dropped_before_any_lease() {
         })
         .await
         .unwrap();
-    cp.record_capability(voom_store::repo::workers::NewCapability {
+    cp.record_capability(voom_store::repo::execution::workers::NewCapability {
         worker_id: worker.id,
         operation: operation.clone(),
         codecs: Vec::new(),
@@ -595,7 +595,7 @@ async fn a_vaapi_candidate_with_a_dead_endpoint_is_dropped_before_any_lease() {
     })
     .await
     .unwrap();
-    cp.record_grant(voom_store::repo::workers::NewGrant {
+    cp.record_grant(voom_store::repo::execution::workers::NewGrant {
         worker_id: worker.id,
         can_execute: vec![operation.clone()],
         can_access_read: Vec::new(),

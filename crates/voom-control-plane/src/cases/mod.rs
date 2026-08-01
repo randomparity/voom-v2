@@ -11,12 +11,12 @@ use sqlx::{Sqlite, SqlitePool, Transaction};
 use time::OffsetDateTime;
 use voom_core::VoomError;
 use voom_events::{Event, EventEnvelope, SubjectType};
-use voom_store::repo::events::{EventRepo, SqliteEventRepo};
+use voom_store::repo::audit::events::{EventRepo, SqliteEventRepo};
 
 #[cfg(test)]
 use voom_events::EventKind;
 #[cfg(test)]
-use voom_store::repo::events::{EventFilter, Page};
+use voom_store::repo::audit::events::{EventFilter, Page};
 
 pub(crate) mod config;
 pub(crate) mod execution;

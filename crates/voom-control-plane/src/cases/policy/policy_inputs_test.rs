@@ -5,9 +5,9 @@ use voom_policy::{
     FixtureName, POLICY_INPUT_MAX_MEMBERS, PolicyInputSetDraft, PolicyInputSourceKind, TargetRef,
     load_fixture,
 };
-use voom_store::repo::events::EventFilter;
-use voom_store::repo::identity::{DiscoveredFile, FileLocationKind, IngestOutcome};
-use voom_store::repo::policy_inputs::PolicyInputTargetRef;
+use voom_store::repo::audit::events::EventFilter;
+use voom_store::repo::media::identity::{DiscoveredFile, FileLocationKind, IngestOutcome};
+use voom_store::repo::policy::policy_inputs::PolicyInputTargetRef;
 
 use voom_store::repo::library::libraries::{LibraryMediaKind, NewLibrary};
 use voom_store::repo::library::library_roots::{

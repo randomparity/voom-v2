@@ -357,7 +357,7 @@ async fn stale_waiter_rejects_replaced_temp_path() {
 
 #[tokio::test]
 async fn interrupted_intermediate_cleanup_retires_a_location_after_file_is_already_gone() {
-    use voom_store::repo::identity::{
+    use voom_store::repo::media::identity::{
         DiscoveredFile, FileLocationKind, FileLocationRepo, IngestOutcome,
     };
 
@@ -408,7 +408,7 @@ async fn interrupted_intermediate_cleanup_retires_a_location_after_file_is_alrea
 
 #[tokio::test]
 async fn cleanup_failure_before_delete_keeps_location_live() {
-    use voom_store::repo::identity::{
+    use voom_store::repo::media::identity::{
         DiscoveredFile, FileLocationKind, FileLocationRepo, IngestOutcome,
     };
 

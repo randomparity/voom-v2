@@ -15,7 +15,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use voom_core::{FailureClass, FileVersionId, JobId, LeaseId, TicketId, VoomError, WorkerId};
-use voom_store::repo::backups::{BackupFailureDetail, NewBackup};
+use voom_store::repo::media::backups::{BackupFailureDetail, NewBackup};
 use voom_worker_protocol::{
     BackUpFileRequest, BackUpFileResult, ClientHandle, OperationKind, WorkerCredentials,
 };

@@ -15,12 +15,12 @@ use voom_control_plane::ControlPlane;
 use voom_core::rng_test_support::FrozenRng;
 use voom_core::{SystemClock, VoomError};
 use voom_events::EventKind;
-use voom_store::repo::events::{EventFilter, EventRepo, Page};
-use voom_store::repo::identity::{
+use voom_store::repo::audit::events::{EventFilter, EventRepo, Page};
+use voom_store::repo::media::identity::{
     DiscoveredFile, FileLocationKind, FileLocationRepo, IngestOutcome, LocationProof,
     ObservedBytes, RenameProof,
 };
-use voom_store::repo::use_leases::{
+use voom_store::repo::media::use_leases::{
     BlockingMode, IssuerKind, LeaseScope, NewUseLease, UseLeaseKind,
 };
 use voom_store::test_support::T0;

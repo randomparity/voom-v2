@@ -14,7 +14,7 @@ use time::OffsetDateTime;
 
 use voom_events::payload::SchemaInitializedPayload;
 use voom_events::{Event, EventEnvelope, SubjectType};
-use voom_store::repo::events::{EventRepo, SqliteEventRepo};
+use voom_store::repo::audit::events::{EventRepo, SqliteEventRepo};
 use voom_store::test_support::fresh_initialized_pool_at;
 
 #[tokio::test]

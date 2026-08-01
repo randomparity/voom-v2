@@ -4,7 +4,7 @@ use std::time::Duration;
 use serde_json::Value;
 use tokio::time::Instant;
 use voom_core::{ErrorCode, FailureClass, LeaseId, TicketId, VoomError, WorkerId};
-use voom_store::repo::tickets::Ticket;
+use voom_store::repo::execution::tickets::Ticket;
 use voom_worker_protocol::{
     DispatchStream, NdjsonOutcome, OperationKind, OperationRequest, ProgressFrame, ProtocolError,
 };

@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use serde_json::json;
 use time::OffsetDateTime;
 use voom_core::{ErrorCode, FileVersionId, WorkerId};
-use voom_store::repo::identity::{
+use voom_store::repo::media::identity::{
     DiscoveredFile, FileLocationKind, IngestOutcome, MediaSnapshotRepo,
 };
 use voom_worker_protocol::{

@@ -1,7 +1,7 @@
 use voom_core::{FileLocationId, FileVersionId, VoomError};
 use voom_events::payload::{ArtifactHandleCreatedPayload, ArtifactLocationRecordedPayload};
 use voom_events::{Event, SubjectType};
-use voom_store::repo::artifacts::PolicyArtifactTarget;
+use voom_store::repo::media::artifacts::PolicyArtifactTarget;
 
 use crate::ControlPlane;
 use crate::cases::{append_event, begin_immediate_tx, commit_tx};

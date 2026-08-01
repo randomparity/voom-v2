@@ -5,7 +5,7 @@ use voom_core::ids::{ArtifactCommitRecordId, ArtifactVerificationId};
 use voom_core::{
     ArtifactHandleId, ArtifactLocationId, FileLocationId, FileVersionId, VoomError, WorkerId,
 };
-use voom_store::repo::artifacts::{
+use voom_store::repo::media::artifacts::{
     ArtifactCommitRecord, ArtifactCommitState, ArtifactLocation, ArtifactVerification,
     ArtifactVerificationStatus,
 };
