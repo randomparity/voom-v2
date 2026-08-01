@@ -2636,6 +2636,70 @@ async fn verified_ticket_evidence_rejects_negative_persisted_handle_id() {
 }
 
 #[tokio::test]
+async fn verified_ticket_evidence_rejects_lease_owned_by_different_ticket() {
+    let (pool, _tmp) = pool().await;
+    seed_workflow_evidence(&pool).await;
+    sqlx::query(
+        "INSERT INTO tickets \
+         (id, job_id, kind, state, priority, payload, result, max_attempts, next_eligible_at, \
+          created_at, state_changed_at) \
+         SELECT 2, job_id, kind, state, priority, payload, result, max_attempts, next_eligible_at, \
+                created_at, state_changed_at FROM tickets WHERE id = 1",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query("UPDATE leases SET ticket_id = 2 WHERE id = 1")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let repo = SqliteArtifactRepo::new(pool);
+
+    let error = repo
+        .verified_ticket_evidence(
+            TicketId(1),
+            voom_core::ids::ArtifactVerificationId(1),
+            voom_core::ArtifactHandleId(1),
+            FileLocationId(1),
+        )
+        .await
+        .unwrap_err();
+
+    assert!(matches!(error, VoomError::Database { .. }));
+    assert!(error.to_string().contains("workflow lease ticket mismatch"));
+}
+
+#[tokio::test]
+async fn verified_ticket_evidence_rejects_missing_workflow_lease() {
+    let (pool, _tmp) = pool().await;
+    seed_workflow_evidence(&pool).await;
+    let mut connection = pool.acquire().await.unwrap();
+    sqlx::query("PRAGMA foreign_keys = OFF")
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE artifact_verifications SET workflow_lease_id = 999 WHERE id = 1")
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+    drop(connection);
+    let repo = SqliteArtifactRepo::new(pool);
+
+    let error = repo
+        .verified_ticket_evidence(
+            TicketId(1),
+            voom_core::ids::ArtifactVerificationId(1),
+            voom_core::ArtifactHandleId(1),
+            FileLocationId(1),
+        )
+        .await
+        .unwrap_err();
+
+    assert!(matches!(error, VoomError::Database { .. }));
+    assert!(error.to_string().contains("workflow lease ticket mismatch"));
+}
+
+#[tokio::test]
 async fn committed_ticket_evidence_expands_outputs_and_preserves_sidecar_assets() {
     let (pool, _tmp) = pool().await;
     seed_workflow_evidence(&pool).await;
