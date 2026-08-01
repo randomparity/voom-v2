@@ -391,6 +391,13 @@ async fn audio_synthesis_dispatch_attempt_status_round_trips_durable_vocabulary(
     }
 }
 
+#[test]
+fn audio_synthesis_dispatch_attempt_status_is_copy() {
+    fn assert_copy<T: Copy>() {}
+
+    assert_copy::<AudioSynthesisDispatchAttemptStatus>();
+}
+
 #[tokio::test]
 async fn audio_synthesis_dispatch_attempt_status_rejects_unknown_durable_value() {
     let fixture = fixture().await;
