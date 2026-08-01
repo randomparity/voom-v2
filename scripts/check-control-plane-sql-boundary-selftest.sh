@@ -225,6 +225,173 @@ expect_violations crate_aliases "$violations/crate_aliases" 9 \
 	'sqlx::query_as_unchecked!' 'sqlx::QueryBuilder::new' \
 	'sqlx::query_as_with' 'sqlx::query_file_unchecked!'
 
+mkdir -p "$violations/visibility"
+cat >"$violations/visibility/pub_crate_item.rs" <<'RUST'
+pub(crate) use sqlx::query as db_query;
+
+fn pub_crate_item() {
+    let _ = db_query("SELECT 1");
+}
+RUST
+cat >"$violations/visibility/pub_item.rs" <<'RUST'
+pub use sqlx::query_as;
+
+fn pub_item() {
+    let _ = query_as::<_, Row>("SELECT 1");
+}
+RUST
+cat >"$violations/visibility/restricted.rs" <<'RUST'
+mod nested {
+    pub(super) use sqlx::query_scalar;
+    pub(self) use sqlx::query_with as query_with_args;
+    pub(in crate) use sqlx::query_scalar_with;
+
+    fn restricted() {
+        let _ = query_scalar::<_, i64>("SELECT 1");
+        let _ = query_with_args::<Sqlite, _>("SELECT 1", args());
+        let _ = query_scalar_with::<Sqlite, i64, _>("SELECT 1", args());
+    }
+}
+RUST
+cat >"$violations/visibility/pub_crate_alias.rs" <<'RUST'
+pub(crate) use sqlx as db;
+
+fn pub_crate_alias() {
+    let _ = db::query("SELECT 1");
+}
+RUST
+cat >"$violations/visibility/pub_extern_crate.rs" <<'RUST'
+pub extern crate sqlx as legacy_db;
+
+fn pub_extern_crate() {
+    let _ = legacy_db::query_as::<_, Row>("SELECT 1");
+}
+RUST
+expect_violations visibility "$violations/visibility" 7 \
+	'sqlx::query' 'sqlx::query_as' 'sqlx::query_scalar' \
+	'sqlx::query_with' 'sqlx::query_scalar_with'
+
+mkdir -p "$violations/wildcards"
+cat >"$violations/wildcards/crate.rs" <<'RUST'
+use sqlx::*;
+
+fn crate_wildcard() {
+    let _ = query("SELECT 1");
+    let _ = query_unchecked! { "SELECT 1" };
+    let _ = QueryBuilder::<Sqlite>::new("SELECT 1");
+}
+RUST
+cat >"$violations/wildcards/query_builder.rs" <<'RUST'
+use sqlx::query_builder::*;
+
+fn query_builder_wildcard() {
+    let _ = QueryBuilder::<Sqlite>::new("SELECT 1");
+    let _ = QueryBuilder::<Sqlite>::with_arguments("SELECT 1", args());
+}
+RUST
+expect_violations wildcards "$violations/wildcards" 2 \
+	'sqlx::*' 'sqlx::query_builder::*'
+
+mkdir -p "$violations/raw_aliases"
+cat >"$violations/raw_aliases/item.rs" <<'RUST'
+use sqlx::query as r#type;
+
+fn raw_item_alias() {
+    let _ = r#type("SELECT 1");
+}
+RUST
+cat >"$violations/raw_aliases/crate.rs" <<'RUST'
+use sqlx as r#match;
+
+fn raw_crate_alias() {
+    let _ = r#match::query("SELECT 1");
+    let _ = r#match::query_unchecked! { "SELECT 1" };
+    let _ = r#match::query_builder::QueryBuilder::<Sqlite>::new("SELECT 1");
+}
+RUST
+cat >"$violations/raw_aliases/module.rs" <<'RUST'
+use sqlx::query_builder as r#type;
+
+fn raw_module_alias() {
+    let _ = r#type::QueryBuilder::<Sqlite>::new("SELECT 1");
+    let _ = r#type::QueryBuilder::<Sqlite>::with_arguments("SELECT 1", args());
+}
+RUST
+expect_violations raw_aliases "$violations/raw_aliases" 6 \
+	'sqlx::query' 'sqlx::query_unchecked!' \
+	'sqlx::QueryBuilder::new' 'sqlx::QueryBuilder::with_arguments'
+
+mkdir -p "$violations/query_builder_paths"
+cat >"$violations/query_builder_paths/direct.rs" <<'RUST'
+fn direct_module_path() {
+    let _ = sqlx::query_builder::QueryBuilder::new("SELECT 1");
+    let _ = sqlx::query_builder::QueryBuilder::<Sqlite>::with_arguments(
+        "SELECT 1",
+        args(),
+    );
+    let _ = ::sqlx::query_builder::QueryBuilder::with_arguments("SELECT 1", args());
+    let _ = ::sqlx::query_builder::QueryBuilder::<Sqlite>::new("SELECT 1");
+}
+RUST
+cat >"$violations/query_builder_paths/crate_alias.rs" <<'RUST'
+use sqlx as db;
+
+fn crate_alias_module_path() {
+    let _ = db::query_builder::QueryBuilder::new("SELECT 1");
+    let _ = db::query_builder::QueryBuilder::<Sqlite>::with_arguments("SELECT 1", args());
+}
+RUST
+cat >"$violations/query_builder_paths/module_import.rs" <<'RUST'
+use sqlx::query_builder;
+
+fn module_import() {
+    let _ = query_builder::QueryBuilder::new("SELECT 1");
+    let _ = query_builder::QueryBuilder::<Sqlite>::with_arguments("SELECT 1", args());
+}
+RUST
+cat >"$violations/query_builder_paths/grouped_module_import.rs" <<'RUST'
+use sqlx::{query_builder};
+
+fn grouped_module_import() {
+    let _ = query_builder::QueryBuilder::new("SELECT 1");
+    let _ = query_builder::QueryBuilder::<Sqlite>::with_arguments("SELECT 1", args());
+}
+RUST
+cat >"$violations/query_builder_paths/module_alias.rs" <<'RUST'
+use sqlx::query_builder as qb;
+
+fn module_alias() {
+    let _ = qb::QueryBuilder::new("SELECT 1");
+    let _ = qb::QueryBuilder::<Sqlite>::with_arguments("SELECT 1", args());
+}
+RUST
+cat >"$violations/query_builder_paths/grouped_module_alias.rs" <<'RUST'
+use sqlx::{query_builder as qb};
+
+fn grouped_module_alias() {
+    let _ = qb::QueryBuilder::new("SELECT 1");
+    let _ = qb::QueryBuilder::<Sqlite>::with_arguments("SELECT 1", args());
+}
+RUST
+cat >"$violations/query_builder_paths/item_import.rs" <<'RUST'
+use sqlx::QueryBuilder;
+
+fn item_import() {
+    let _ = QueryBuilder::new("SELECT 1");
+    let _ = QueryBuilder::<Sqlite>::with_arguments("SELECT 1", args());
+}
+RUST
+cat >"$violations/query_builder_paths/item_alias.rs" <<'RUST'
+use sqlx::QueryBuilder as DbBuilder;
+
+fn item_alias() {
+    let _ = DbBuilder::new("SELECT 1");
+    let _ = DbBuilder::<Sqlite>::with_arguments("SELECT 1", args());
+}
+RUST
+expect_violations query_builder_paths "$violations/query_builder_paths" 18 \
+	'sqlx::QueryBuilder::new' 'sqlx::QueryBuilder::with_arguments'
+
 aggregate_output=""
 aggregate_status=0
 run_guard "$violations" aggregate_output aggregate_status
@@ -240,6 +407,7 @@ mkdir -p "$work/cross_file"
 cat >"$work/cross_file/imports.rs" <<'RUST'
 use sqlx::query as db_query;
 use sqlx::query_as;
+use sqlx::query_builder as qb;
 use sqlx as db;
 RUST
 cat >"$work/cross_file/other.rs" <<'RUST'
@@ -247,6 +415,7 @@ fn names_do_not_leak_between_files() {
     let _ = db_query("not imported here");
     let _ = query_as("not imported here");
     let _ = db::query("not imported here");
+    let _ = qb::QueryBuilder::new("not imported here");
 }
 RUST
 expect_clean cross_file "$work/cross_file"
@@ -258,6 +427,9 @@ fn near_misses() {
     let _ = query_with("not sqlx", args());
     let _ = other::query_unchecked! { "not sqlx" };
     let _ = other::QueryBuilder::with_arguments("not sqlx", args());
+    let _ = other::query_builder::QueryBuilder::new("not sqlx");
+    let _ = query_builder::QueryBuilder::new("not imported");
+    let _ = r#type::QueryBuilder::new("raw alias not imported");
     let _ = sqlx_query("not sqlx");
 }
 RUST

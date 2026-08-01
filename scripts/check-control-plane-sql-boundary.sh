@@ -50,7 +50,7 @@ import_names=(
 	query_file query_file_unchecked
 	query_file_as query_file_as_unchecked
 	query_file_scalar query_file_scalar_unchecked
-	raw_sql QueryBuilder
+	raw_sql query_builder QueryBuilder
 )
 
 violations=()
@@ -175,6 +175,7 @@ collect_namespace() {
 		collect_macro "$namespace::$name" "sqlx::$name!" "$@"
 	done
 	collect_builder "$namespace::QueryBuilder" "sqlx::QueryBuilder" "$@"
+	collect_builder "$namespace::query_builder::QueryBuilder" "sqlx::QueryBuilder" "$@"
 }
 
 collect_imported_item() {
@@ -182,6 +183,10 @@ collect_imported_item() {
 	local original="$2"
 	local file="$3"
 	local name
+	if [[ "$original" == "query_builder" ]]; then
+		collect_builder "$local_name::QueryBuilder" "sqlx::QueryBuilder" "$file"
+		return
+	fi
 	if [[ "$original" == "QueryBuilder" ]]; then
 		collect_builder "$local_name" "sqlx::QueryBuilder" "$file"
 		return
@@ -213,7 +218,7 @@ for import_name in "${import_names[@]}"; do
 	import_rule+="$import_name"
 	import_rule+='$"'
 	import_rule+=$'\n    - inside:\n        kind: use_declaration'
-	import_rule+=$'\n        regex: "(?s)^use\\\\s+(?:::)?sqlx\\\\s*::"'
+	import_rule+=$'\n        regex: "(?s)\\\\buse\\\\s+(?:::)?sqlx\\\\s*::"'
 	import_rule+=$'\n        stopBy: end\n    - not:\n        inside:'
 	import_rule+=$'\n          kind: use_as_clause\n          stopBy: end\n'
 	import_output=""
@@ -230,13 +235,14 @@ import_regex="${import_names[*]}"
 unset IFS
 alias_rule=''
 alias_rule+='id: sqlx-item-alias'
-alias_rule+=$'\nlanguage: rust\nseverity: error\nrule:\n  kind: use_as_clause'
-alias_rule+=$'\n  regex: "^(?:(?:::)?sqlx::)?('
+alias_rule+=$'\nlanguage: rust\nseverity: error\nrule:\n  all:'
+alias_rule+=$'\n    - kind: use_as_clause\n    - regex: "^(?:(?:::)?sqlx::)?('
 alias_rule+="$import_regex"
-alias_rule+=')\\s+as\\s+[A-Za-z_][A-Za-z0-9_]*$"'
-alias_rule+=$'\n  inside:\n    kind: use_declaration'
-alias_rule+=$'\n    regex: "(?s)^use\\\\s+(?:::)?sqlx(?:\\\\s+as|\\\\s*::)"'
-alias_rule+=$'\n    stopBy: end\n'
+alias_rule+=')\\s+as\\s+"'
+alias_rule+=$'\n    - has:\n        field: alias\n        kind: identifier'
+alias_rule+=$'\n    - inside:\n        kind: use_declaration'
+alias_rule+=$'\n        regex: "(?s)\\\\buse\\\\s+(?:::)?sqlx(?:\\\\s+as|\\\\s*::)"'
+alias_rule+=$'\n        stopBy: end\n'
 alias_output=""
 scan_inline_rule alias_output "$alias_rule" "${source_files[@]}"
 while IFS= read -r alias_match; do
@@ -255,12 +261,16 @@ id: sqlx-crate-alias
 language: rust
 severity: error
 rule:
-  kind: use_as_clause
-  regex: "^(?:(?:::)?sqlx|self)\\s+as\\s+[A-Za-z_][A-Za-z0-9_]*$"
-  inside:
-    kind: use_declaration
-    regex: "(?s)^use\\s+(?:::)?sqlx(?:\\s+as|\\s*::)"
-    stopBy: end
+  all:
+    - kind: use_as_clause
+    - regex: "^(?:(?:::)?sqlx|self)\\s+as\\s+"
+    - has:
+        field: alias
+        kind: identifier
+    - inside:
+        kind: use_declaration
+        regex: "(?s)\\buse\\s+(?:::)?sqlx(?:\\s+as|\\s*::)"
+        stopBy: end
 '
 crate_alias_output=""
 scan_inline_rule crate_alias_output "$crate_alias_rule" "${source_files[@]}"
@@ -276,8 +286,12 @@ id: sqlx-extern-crate-alias
 language: rust
 severity: error
 rule:
-  kind: extern_crate_declaration
-  regex: "^extern\\s+crate\\s+sqlx\\s+as\\s+[A-Za-z_][A-Za-z0-9_]*;$"
+  all:
+    - kind: extern_crate_declaration
+    - regex: "(?s)\\bextern\\s+crate\\s+sqlx\\s+as\\s+"
+    - has:
+        field: alias
+        kind: identifier
 '
 extern_alias_output=""
 scan_inline_rule extern_alias_output "$extern_alias_rule" "${source_files[@]}"
@@ -288,6 +302,31 @@ while IFS= read -r extern_alias_match; do
 	extern_alias=${extern_alias##* as }
 	collect_namespace "$extern_alias" "$match_file"
 done <<<"$extern_alias_output"
+
+# Reject SQLx-rooted wildcards at the import node because a wildcard obscures
+# which SQL constructors enter local scope.
+wildcard_rule='
+id: sqlx-wildcard-import
+language: rust
+severity: error
+rule:
+  kind: use_wildcard
+  inside:
+    kind: use_declaration
+    regex: "(?s)\\buse\\s+(?:::)?sqlx\\s*::"
+    stopBy: end
+'
+wildcard_output=""
+scan_inline_rule wildcard_output "$wildcard_rule" "${source_files[@]}"
+while IFS= read -r wildcard_match; do
+	[[ -z "$wildcard_match" ]] && continue
+	parse_json_match "$wildcard_match"
+	wildcard_api="sqlx::*"
+	if [[ "$match_text" == *query_builder* ]]; then
+		wildcard_api="sqlx::query_builder::*"
+	fi
+	record_json_matches "$wildcard_api" "$wildcard_match"
+done <<<"$wildcard_output"
 
 if [[ "${#violations[@]}" -gt 0 ]]; then
 	sorted_violations=$(printf '%s\n' "${violations[@]}" | sort -t '|' -k1,1 -k2,2n -k3,3 -u)
