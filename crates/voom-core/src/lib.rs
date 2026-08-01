@@ -129,8 +129,8 @@ pub use transcode_video_profile::{
 };
 pub use version::VersionInfo;
 
-/// Worker-protocol wire version (Sprint 2). Consumed by
-/// `voom-worker-protocol`'s handshake and middleware.
+/// Worker-protocol wire version consumed by `voom-worker-protocol`'s handshake
+/// and middleware.
 ///
 /// Workers are bundled, co-deployed, and version-locked with the
 /// control-plane build (ADR-0002), so the contract is an **exact match**:

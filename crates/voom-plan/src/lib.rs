@@ -5,7 +5,12 @@
         reason = "planner tests assert deterministic JSON fixtures directly"
     )
 )]
-//! Deterministic execution-plan and compliance-report projection from compiled policy inputs.
+//! Deterministic execution-plan and compliance-report projection.
+//!
+//! This crate turns compiled policies plus observed media facts into deterministic
+//! execution plans, phase plans, eligibility diagnostics, and compliance reports.
+//! It performs no persistence, worker dispatch, or workflow coordination; callers
+//! can reproduce every result from the same policy, input, and planning context.
 
 pub mod audio;
 pub mod compliance;

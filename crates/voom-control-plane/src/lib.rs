@@ -6,12 +6,19 @@
         reason = "tests favor unwrap/panic over plumbing Result<()> through every assertion"
     )
 )]
-//! App-services layer: wraps voom-store and exposes commands consumed by API/CLI.
+//! Application services and orchestration over Voom's durable repositories.
 //!
-//! The `cases` submodule hosts the M1 use-case methods. Every method that
-//! mutates durable state composes the matching repo `_in_tx` call with
-//! `EventRepo::append_in_tx` inside one `pool.begin()` so the row write
-//! and its event row share a transaction.
+//! Responsibility boundaries:
+//! - `cases` contains request-scoped CRUD and use cases. Audited mutations compose
+//!   repository writes and event appends in one transaction.
+//! - operation modules such as `artifact`, `audio`, `remux`, and `transcode` run
+//!   worker-backed pipelines, validate results, and coordinate commit or recovery.
+//! - `workflow` coordinates deterministic plans across files, including durable
+//!   progress, bounded admission, resume, and reporting.
+//!
+//! `voom-store` owns schema access and reusable repositories; this crate owns
+//! orchestration-scoped transactions. Policy compilation and deterministic plan
+//! projection stay in `voom-policy` and `voom-plan`.
 
 use std::sync::{Arc, Mutex};
 
@@ -224,7 +231,7 @@ impl ControlPlane {
     /// `voom_store::init(url)` directly without going through `ControlPlane`.
     ///
     /// Requires the schema to be at [`SchemaState::Current`] because the
-    /// returned plane exposes the M1 writable use cases. Diagnostic flows
+    /// returned plane exposes writable application use cases. Diagnostic flows
     /// (`/health` on a non-Current DB) must use [`HealthPlane::open`] instead.
     ///
     /// # Errors
@@ -240,7 +247,7 @@ impl ControlPlane {
     /// Wrap an already-connected pool with the supplied clock. The DB MUST
     /// already be at the current schema (use `voom_store::init` on first boot);
     /// any other state is rejected. Use-case methods on `ControlPlane` assume
-    /// the full M1 schema is present.
+    /// the full current schema is present.
     ///
     /// # Errors
     /// If the schema probe is not `Current`, returns the variant matching the

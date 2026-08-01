@@ -65,11 +65,10 @@ pub fn generate_plan(request: PlanningRequest) -> Result<ExecutionPlan, PlanGene
 
 /// Plans exactly one named phase against the supplied planning input.
 ///
-/// Sprint 16's multi-phase coordinator drives the executor one phase at a time
-/// (`docs/superpowers/specs/2026-05-29-voom-sprint-16-design.md` §5,
+/// The multi-phase coordinator drives the executor one phase at a time (see
 /// `docs/adr/0005-plan-phase-entry-point.md`): it projects each file's current
-/// snapshot into `request.input` and re-invokes the planner per phase so
-/// `skip_if` re-evaluates against the artifact the prior phase produced.
+/// snapshot into `request.input` and re-invokes the planner per phase so `skip_if`
+/// re-evaluates against the artifact the prior phase produced.
 /// The coordinator resolves per-file `run_if` gates from durable phase outcomes
 /// and clears the resolved gate before calling this entry point.
 ///

@@ -1,6 +1,6 @@
-//! `ControlPlane` use cases. Each method composes a repo `_in_tx` write
-//! with `EventRepo::append_in_tx` inside one transaction so every M1
-//! state transition produces exactly one event row.
+//! Request-scoped `ControlPlane` use cases. Each audited mutation composes a
+//! repository `_in_tx` write with `EventRepo::append_in_tx` inside one
+//! transaction so the state transition and its event remain atomic.
 //!
 //! `begin_tx`, `commit_tx`, and `append_event` are the shared
 //! transaction-and-event boilerplate used by every case file. They live

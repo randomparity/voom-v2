@@ -213,7 +213,7 @@ fn voom_error_response(err: &VoomError) -> axum::response::Response {
         | ErrorCode::BlockedByClosureGrew
         | ErrorCode::StaleIdentityEvidence
         | ErrorCode::ClosureResolutionIncomplete
-        // Worker-protocol codes (Sprint 2) — not on the health path.
+        // Worker-protocol codes — not on the health path.
         | ErrorCode::WorkerRetired
         | ErrorCode::WorkerIncarnationStale
         | ErrorCode::AmbiguousWorkerSelection
