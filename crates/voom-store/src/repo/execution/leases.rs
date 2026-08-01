@@ -4,7 +4,7 @@ use rand::RngCore;
 use serde_json::Value as JsonValue;
 use sqlx::{Acquire, Row, SqlitePool};
 use time::{Duration, OffsetDateTime};
-use voom_core::{FailureClass, LeaseId, TicketId, TicketOperation, VoomError, WorkerId};
+use voom_core::{FailureClass, LeaseId, NodeId, TicketId, TicketOperation, VoomError, WorkerId};
 
 use super::Repository;
 use super::common::{
@@ -960,6 +960,48 @@ impl SqliteLeaseRepo {
             .await
             .map_err(|e| VoomError::database_context("commit", e))?;
         Ok(out)
+    }
+
+    /// Return whether a ticket currently has a held lease.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VoomError::Database`] if the lease state cannot be queried.
+    pub async fn has_held_for_ticket_in_tx(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        ticket_id: TicketId,
+    ) -> Result<bool, VoomError> {
+        let held: Option<i64> = sqlx::query_scalar(
+            "SELECT 1 FROM leases WHERE ticket_id = ? AND state = 'held' LIMIT 1",
+        )
+        .bind(i64_from_u64(ticket_id.0))
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(|e| VoomError::database_context("held lease for ticket", e))?;
+        Ok(held.is_some())
+    }
+
+    /// Count held leases whose workers belong to one node.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VoomError::Database`] if the count cannot be queried or decoded.
+    pub async fn active_count_for_node_in_tx(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        node_id: NodeId,
+    ) -> Result<u32, VoomError> {
+        let count = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM leases \
+             JOIN workers ON workers.id = leases.worker_id \
+             WHERE leases.state = 'held' AND workers.node_id = ?",
+        )
+        .bind(i64_from_u64(node_id.0))
+        .fetch_one(&mut **tx)
+        .await
+        .map_err(|e| VoomError::database_context("node active lease count", e))?;
+        u32_from_i64(count)
     }
 
     /// Look up a lease by id.

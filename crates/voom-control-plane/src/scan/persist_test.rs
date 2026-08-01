@@ -163,7 +163,7 @@ async fn missing_or_retired_worker_id_is_rejected_without_replacement_worker() {
     )
     .await
     .unwrap_err();
-    assert_store_conflict(missing_err);
+    assert_store_not_found(missing_err);
     assert_eq!(table_count(&cp, "workers").await, 0);
     assert_eq!(table_count(&cp, "file_assets").await, 0);
     assert_eq!(table_count(&cp, "media_snapshots").await, 0);
@@ -189,6 +189,34 @@ async fn missing_or_retired_worker_id_is_rejected_without_replacement_worker() {
     assert_eq!(table_count(&cp, "file_assets").await, 0);
     assert_eq!(table_count(&cp, "media_snapshots").await, 0);
     assert!(state_transition_event_kinds(&cp).await.is_empty());
+}
+
+#[tokio::test]
+async fn stale_worker_is_rejected_before_scan_persistence() {
+    let (cp, _tmp) = cp_with_manual_clock(T0).await;
+    let worker = register_local_worker(&cp, "stale-scan-worker").await;
+    let candidate = candidate_facts(123, "blake3:abc");
+    let result = matching_probe_result(&candidate);
+    sqlx::query("UPDATE workers SET status = 'stale' WHERE id = ?")
+        .bind(i64::try_from(worker.id.0).unwrap())
+        .execute(cp.pool_for_test())
+        .await
+        .unwrap();
+
+    let err = persist_scanned_media_snapshot(
+        &cp,
+        worker.id,
+        Path::new("/library/movie.mkv"),
+        &[],
+        &candidate,
+        &result,
+    )
+    .await
+    .unwrap_err();
+
+    assert_store_conflict(err);
+    assert_eq!(table_count(&cp, "file_assets").await, 0);
+    assert_eq!(table_count(&cp, "media_snapshots").await, 0);
 }
 
 #[tokio::test]
@@ -613,6 +641,13 @@ fn assert_store_conflict(err: ScanPersistError) {
         panic!("expected store error");
     };
     assert!(matches!(err, VoomError::Conflict(_)), "got: {err:?}");
+}
+
+fn assert_store_not_found(err: ScanPersistError) {
+    let ScanPersistError::Store(err) = err else {
+        panic!("expected store error");
+    };
+    assert!(matches!(err, VoomError::NotFound(_)), "got: {err:?}");
 }
 
 async fn cp_with_manual_clock(

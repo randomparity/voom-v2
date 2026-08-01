@@ -3,8 +3,9 @@ use super::*;
 use serde_json::json;
 use time::Duration;
 use voom_core::rng_test_support::FrozenRng;
-use voom_core::{FailureClass, LeaseId, TicketId, TicketOperation, VoomError, WorkerId};
+use voom_core::{FailureClass, LeaseId, NodeId, TicketId, TicketOperation, VoomError, WorkerId};
 
+use crate::repo::execution::nodes::{NewNode, NodeKind, SqliteNodeRepo};
 use crate::repo::execution::tickets::{NewTicket, SqliteTicketRepo, TicketState};
 use crate::repo::execution::workers::{
     NewCapability, NewGrant, NewWorker, SqliteWorkerRepo, WorkerKind,
@@ -1301,4 +1302,110 @@ async fn expire_due_caps_at_lease_batch_limit_and_drains_remainder() {
         third.expired_leases.is_empty(),
         "no candidates remain after the drain"
     );
+}
+
+#[tokio::test]
+async fn held_lease_probe_only_matches_the_requested_ticket() {
+    let (pool, _trepo, _wrepo, lrepo, ticket_id, worker_id, _tmp) = setup().await;
+    let lease = lrepo
+        .acquire(NewLease {
+            ticket_id,
+            worker_id,
+            ttl: Duration::seconds(60),
+            now: T0,
+        })
+        .await
+        .unwrap();
+    let mut tx = pool.begin().await.unwrap();
+
+    assert!(
+        lrepo
+            .has_held_for_ticket_in_tx(&mut tx, ticket_id)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !lrepo
+            .has_held_for_ticket_in_tx(&mut tx, TicketId(ticket_id.0 + 1))
+            .await
+            .unwrap()
+    );
+    lrepo
+        .release_in_tx(&mut tx, lease.id, json!({}), T0 + Duration::seconds(1))
+        .await
+        .unwrap();
+    assert!(
+        !lrepo
+            .has_held_for_ticket_in_tx(&mut tx, ticket_id)
+            .await
+            .unwrap()
+    );
+    tx.rollback().await.unwrap();
+}
+
+#[tokio::test]
+async fn active_count_for_node_counts_only_held_leases_for_that_node() {
+    let (pool, _trepo, _wrepo, lrepo, ticket_id, worker_id, _tmp) = setup().await;
+    let nodes = SqliteNodeRepo::new(pool.clone());
+    let mut tx = pool.begin().await.unwrap();
+    let node = nodes
+        .register_in_tx(
+            &mut tx,
+            NewNode {
+                name: "lease-node".to_owned(),
+                kind: NodeKind::Synthetic,
+                registered_at: T0,
+                heartbeat_ttl_seconds: 60,
+                auth_token_hash: "voom-node-token-sha256-v1:lease-node".to_owned(),
+                auth_token_hint: "lease-node".to_owned(),
+                metadata: json!({}),
+            },
+        )
+        .await
+        .unwrap();
+    sqlx::query("UPDATE workers SET node_id = ? WHERE id = ?")
+        .bind(i64::try_from(node.id.0).unwrap())
+        .bind(i64::try_from(worker_id.0).unwrap())
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    let lease = lrepo
+        .acquire_in_tx(
+            &mut tx,
+            NewLease {
+                ticket_id,
+                worker_id,
+                ttl: Duration::seconds(60),
+                now: T0,
+            },
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        lrepo
+            .active_count_for_node_in_tx(&mut tx, node.id)
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        lrepo
+            .active_count_for_node_in_tx(&mut tx, NodeId(node.id.0 + 1))
+            .await
+            .unwrap(),
+        0
+    );
+    lrepo
+        .release_in_tx(&mut tx, lease.id, json!({}), T0 + Duration::seconds(1))
+        .await
+        .unwrap();
+    assert_eq!(
+        lrepo
+            .active_count_for_node_in_tx(&mut tx, node.id)
+            .await
+            .unwrap(),
+        0
+    );
+    tx.rollback().await.unwrap();
 }

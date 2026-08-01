@@ -446,3 +446,70 @@ async fn list_dependents_returns_tickets_that_depend_on_this_one() {
     assert!(ids.contains(&a.id));
     assert!(ids.contains(&b.id));
 }
+
+#[tokio::test]
+async fn pre_lease_failure_transition_returns_terminal_and_retry_ticket_rows() {
+    let fixture = ticket_fixture().await;
+    let terminal_source = fixture.ready_ticket("terminal", 0, 0).await;
+    let retry_source = fixture.ready_ticket("retry", 0, 0).await;
+    let terminal_at = fixture.now + Duration::seconds(1);
+    let retry_at = fixture.now + Duration::seconds(30);
+    let mut tx = fixture.repo.pool.begin().await.unwrap();
+
+    let terminal = fixture
+        .repo
+        .transition_ready_before_lease_failure_in_tx(
+            &mut tx,
+            terminal_source.id,
+            terminal_source.attempt,
+            1,
+            PreLeaseFailureTransition::Terminal,
+            terminal_at,
+        )
+        .await
+        .unwrap();
+    let retry = fixture
+        .repo
+        .transition_ready_before_lease_failure_in_tx(
+            &mut tx,
+            retry_source.id,
+            retry_source.attempt,
+            1,
+            PreLeaseFailureTransition::RetryAt(retry_at),
+            terminal_at,
+        )
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+
+    assert_eq!(terminal.state, TicketState::Failed);
+    assert_eq!(terminal.attempt, 1);
+    assert_eq!(terminal.state_changed_at, terminal_at);
+    assert_eq!(retry.state, TicketState::Ready);
+    assert_eq!(retry.attempt, 1);
+    assert_eq!(retry.next_eligible_at, retry_at);
+    assert_eq!(retry.state_changed_at, terminal_at);
+}
+
+#[tokio::test]
+async fn pre_lease_failure_transition_rejects_a_changed_previous_attempt() {
+    let fixture = ticket_fixture().await;
+    let ticket = fixture.ready_ticket("stale-attempt", 0, 0).await;
+    let mut tx = fixture.repo.pool.begin().await.unwrap();
+
+    let err = fixture
+        .repo
+        .transition_ready_before_lease_failure_in_tx(
+            &mut tx,
+            ticket.id,
+            ticket.attempt + 1,
+            1,
+            PreLeaseFailureTransition::Terminal,
+            fixture.now,
+        )
+        .await
+        .unwrap_err();
+    tx.rollback().await.unwrap();
+
+    assert!(matches!(err, VoomError::Conflict(_)));
+}

@@ -202,7 +202,10 @@ pub async fn persist_scanned_media_snapshot(
         .await
         .map_err(|e| VoomError::database_context("begin", e))?;
 
-    ensure_worker_live_in_tx(&mut tx, worker_id).await?;
+    control_plane
+        .workers
+        .require_live_in_tx(&mut tx, worker_id)
+        .await?;
 
     // Resolve identity. A candidate whose (dev, ino) matches a live prior local
     // location at a different path — and whose content matches that version — is
@@ -743,28 +746,6 @@ async fn emit_ingest_events(
             ))
         }
     }
-}
-
-async fn ensure_worker_live_in_tx(
-    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-    worker_id: WorkerId,
-) -> Result<(), VoomError> {
-    let status: Option<String> = sqlx::query_scalar("SELECT status FROM workers WHERE id = ?")
-        .bind(worker_id_as_i64(worker_id)?)
-        .fetch_optional(&mut **tx)
-        .await
-        .map_err(|e| VoomError::database_context("scan persist worker reload", e))?;
-    match status.as_deref() {
-        Some("retired") | None => Err(VoomError::Conflict(format!(
-            "scan persist rejected worker {worker_id}: missing or retired"
-        ))),
-        Some(_) => Ok(()),
-    }
-}
-
-fn worker_id_as_i64(worker_id: WorkerId) -> Result<i64, VoomError> {
-    i64::try_from(worker_id.0)
-        .map_err(|_| VoomError::Internal(format!("worker id out of sqlite range: {worker_id}")))
 }
 
 fn canonical_path_value(path: &Path) -> Result<String, VoomError> {

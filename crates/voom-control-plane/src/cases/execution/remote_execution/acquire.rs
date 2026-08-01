@@ -154,7 +154,10 @@ impl ControlPlane {
             .node_owned_worker_in_tx(tx, input.worker_id, input.node_id)
             .await?;
         super::recover::require_remote_worker(&worker)?;
-        let operations = worker_candidate_operations_in_tx(tx, input.worker_id).await?;
+        let operations = self
+            .workers
+            .candidate_operations_in_tx(tx, input.worker_id)
+            .await?;
         let tickets = self
             .tickets
             .ready_for_operations_in_tx(tx, &operations, now)
@@ -289,7 +292,10 @@ impl ControlPlane {
             .scheduler_node_limits
             .node_limit_in_tx(tx, input.node_id)
             .await?;
-        let node_active_leases = active_lease_count_for_node_in_tx(tx, input.node_id).await?;
+        let node_active_leases = self
+            .leases
+            .active_count_for_node_in_tx(tx, input.node_id)
+            .await?;
         let mut candidates = Vec::with_capacity(tickets.len());
 
         for ticket in &tickets {
@@ -365,7 +371,10 @@ impl ControlPlane {
                 .map(Some);
         }
 
-        let node_active = active_lease_count_for_node_in_tx(tx, input.node_id).await?;
+        let node_active = self
+            .leases
+            .active_count_for_node_in_tx(tx, input.node_id)
+            .await?;
         let node_limit = self
             .scheduler_node_limits
             .node_limit_in_tx(tx, input.node_id)
@@ -513,34 +522,6 @@ struct SelectedCapacityFull<'a> {
     selected_candidate: &'a SchedulerCandidate,
     observed_active: u32,
     observed_limit: u32,
-}
-
-async fn worker_candidate_operations_in_tx(
-    tx: &mut Transaction<'_, Sqlite>,
-    worker_id: WorkerId,
-) -> Result<Vec<TicketOperation>, VoomError> {
-    let operations = sqlx::query_scalar::<_, String>(
-        "SELECT operation FROM worker_capabilities WHERE worker_id = ? \
-         UNION \
-         SELECT value AS operation FROM worker_grants, json_each(worker_grants.can_execute) \
-         WHERE worker_id = ? \
-         ORDER BY operation ASC",
-    )
-    .bind(i64::try_from(worker_id.0).map_err(|_| {
-        VoomError::Config(format!("worker id {} does not fit sqlite i64", worker_id.0))
-    })?)
-    .bind(i64::try_from(worker_id.0).map_err(|_| {
-        VoomError::Config(format!("worker id {} does not fit sqlite i64", worker_id.0))
-    })?)
-    .fetch_all(&mut **tx)
-    .await
-    .map_err(|e| VoomError::database_context("worker candidate operations", e))?;
-    operations
-        .into_iter()
-        .map(|operation| {
-            TicketOperation::from_stored(operation, "worker candidate operations.operation")
-        })
-        .collect()
 }
 
 fn candidate_from_ticket(
@@ -772,32 +753,6 @@ fn selected_candidate_key(
         candidate.worker.worker_id.0,
         candidate.ticket.ticket_id.0,
     )
-}
-
-async fn active_lease_count_for_node_in_tx(
-    tx: &mut Transaction<'_, Sqlite>,
-    node_id: NodeId,
-) -> Result<u32, VoomError> {
-    let count = sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*) \
-         FROM leases \
-         JOIN workers ON workers.id = leases.worker_id \
-         WHERE leases.state = 'held' AND workers.node_id = ?",
-    )
-    .bind(sqlite_id(node_id.0, "node id")?)
-    .fetch_one(&mut **tx)
-    .await
-    .map_err(|e| VoomError::database_context("node active lease count", e))?;
-    count_to_u32(count, "node active lease count")
-}
-
-fn sqlite_id(id: u64, label: &'static str) -> Result<i64, VoomError> {
-    i64::try_from(id)
-        .map_err(|_| VoomError::Config(format!("{label} {id} does not fit sqlite i64")))
-}
-
-fn count_to_u32(count: i64, label: &'static str) -> Result<u32, VoomError> {
-    u32::try_from(count).map_err(|_| VoomError::database(format!("{label} does not fit u32")))
 }
 
 fn decision_from_score(

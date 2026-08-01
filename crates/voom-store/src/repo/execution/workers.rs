@@ -670,6 +670,70 @@ impl SqliteWorkerRepo {
         Ok(out)
     }
 
+    /// Return this worker's candidate operations from capabilities and grants.
+    ///
+    /// Denials override either source. The decoded result is sorted and unique.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VoomError::Database`] if durable rows cannot be queried and
+    /// [`VoomError::Database`] when an operation is outside the stored vocabulary.
+    pub async fn candidate_operations_in_tx(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        worker_id: WorkerId,
+    ) -> Result<Vec<TicketOperation>, VoomError> {
+        let rows = sqlx::query_scalar::<_, String>(
+            "SELECT operation FROM worker_capabilities WHERE worker_id = ? \
+             UNION \
+             SELECT grants.value AS operation \
+             FROM worker_grants, json_each(worker_grants.can_execute) AS grants \
+             WHERE worker_grants.worker_id = ? \
+             EXCEPT \
+             SELECT denied.value AS operation \
+             FROM worker_grants, json_each(worker_grants.denies) AS denied \
+             WHERE worker_grants.worker_id = ?",
+        )
+        .bind(i64_from_u64(worker_id.0))
+        .bind(i64_from_u64(worker_id.0))
+        .bind(i64_from_u64(worker_id.0))
+        .fetch_all(&mut **tx)
+        .await
+        .map_err(|e| VoomError::database_context("worker candidate operations", e))?;
+        let mut operations = rows
+            .into_iter()
+            .map(|operation| {
+                TicketOperation::from_stored(operation, "worker candidate operations.operation")
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        operations.sort_by(|left, right| left.as_str().cmp(right.as_str()));
+        operations.dedup();
+        Ok(operations)
+    }
+
+    /// Return a worker only if its lifecycle state permits new work.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VoomError::NotFound`] for a missing worker, [`VoomError::Conflict`]
+    /// for stale or retired workers, and [`VoomError::Database`] if it cannot be read.
+    pub async fn require_live_in_tx(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        worker_id: WorkerId,
+    ) -> Result<Worker, VoomError> {
+        let worker = get_in_tx(tx, worker_id)
+            .await?
+            .ok_or_else(|| VoomError::NotFound(format!("worker {worker_id}")))?;
+        match worker.status {
+            WorkerStatus::Registered | WorkerStatus::Active => Ok(worker),
+            WorkerStatus::Stale | WorkerStatus::Retired => Err(VoomError::Conflict(format!(
+                "worker {worker_id} is {:?}, not live",
+                worker.status
+            ))),
+        }
+    }
+
     /// Read the effective held-lease count and grant limit for one worker
     /// operation in the caller's transaction.
     ///

@@ -414,6 +414,100 @@ async fn worker_operation_eligibility_rejects_stale_and_retired_lifecycle_states
 }
 
 #[tokio::test]
+async fn candidate_operations_unite_this_workers_rows_and_exclude_denials() {
+    let fixture = worker_fixture().await;
+    fixture.insert_capability("capability_only", &[]).await;
+    fixture.insert_capability("probe_media", &[]).await;
+    fixture.insert_capability("transcode_video", &[]).await;
+    fixture
+        .insert_grant(&["grant_only", "transcode_video"], &["probe_media"])
+        .await;
+    let other = fixture
+        .repo
+        .register(sample_new_worker("other-worker"))
+        .await
+        .unwrap();
+    fixture
+        .repo
+        .record_capability(NewCapability {
+            worker_id: other.id,
+            operation: worker_op("other_worker_operation"),
+            codecs: Vec::new(),
+            hardware: Vec::new(),
+            artifact_access: Vec::new(),
+            extra: serde_json::json!({}),
+        })
+        .await
+        .unwrap();
+    let mut tx = fixture.repo.pool.begin().await.unwrap();
+
+    let operations = fixture
+        .repo
+        .candidate_operations_in_tx(&mut tx, fixture.worker_id)
+        .await
+        .unwrap();
+    tx.rollback().await.unwrap();
+
+    assert_eq!(
+        operations,
+        vec![
+            worker_op("capability_only"),
+            worker_op("grant_only"),
+            worker_op("transcode_video"),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn require_live_accepts_registered_and_active_but_distinguishes_rejections() {
+    let fixture = worker_fixture().await;
+    let mut tx = fixture.repo.pool.begin().await.unwrap();
+    let registered = fixture
+        .repo
+        .require_live_in_tx(&mut tx, fixture.worker_id)
+        .await
+        .unwrap();
+    assert_eq!(registered.status, WorkerStatus::Registered);
+    tx.rollback().await.unwrap();
+
+    fixture.set_status("active").await;
+    let mut tx = fixture.repo.pool.begin().await.unwrap();
+    let active = fixture
+        .repo
+        .require_live_in_tx(&mut tx, fixture.worker_id)
+        .await
+        .unwrap();
+    assert_eq!(active.status, WorkerStatus::Active);
+    tx.rollback().await.unwrap();
+
+    fixture.set_status("stale").await;
+    let mut tx = fixture.repo.pool.begin().await.unwrap();
+    let stale = fixture
+        .repo
+        .require_live_in_tx(&mut tx, fixture.worker_id)
+        .await
+        .unwrap_err();
+    tx.rollback().await.unwrap();
+    assert!(matches!(stale, VoomError::Conflict(message) if message.contains("Stale")));
+
+    fixture.set_retired().await;
+    let mut tx = fixture.repo.pool.begin().await.unwrap();
+    let retired = fixture
+        .repo
+        .require_live_in_tx(&mut tx, fixture.worker_id)
+        .await
+        .unwrap_err();
+    let missing = fixture
+        .repo
+        .require_live_in_tx(&mut tx, voom_core::WorkerId(99_999))
+        .await
+        .unwrap_err();
+    tx.rollback().await.unwrap();
+    assert!(matches!(retired, VoomError::Conflict(message) if message.contains("Retired")));
+    assert!(matches!(missing, VoomError::NotFound(_)));
+}
+
+#[tokio::test]
 async fn operation_candidates_returns_each_effective_worker_once() {
     let fixture = worker_fixture().await;
     fixture

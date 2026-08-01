@@ -83,6 +83,12 @@ pub struct Ticket {
     pub epoch: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PreLeaseFailureTransition {
+    Terminal,
+    RetryAt(OffsetDateTime),
+}
+
 #[derive(Debug, Clone)]
 pub struct SqliteTicketRepo {
     pool: SqlitePool,
@@ -388,6 +394,52 @@ impl SqliteTicketRepo {
         id: TicketId,
     ) -> Result<Option<Ticket>, VoomError> {
         get_in_tx_inner(tx, id).await
+    }
+
+    /// Transition a ready ticket after failure before any lease exists.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VoomError::Conflict`] when the ready-state, prior-attempt, or
+    /// eligibility predicate no longer holds, and [`VoomError::Database`] or
+    /// [`VoomError::Internal`] when the mutation cannot be completed or decoded.
+    pub async fn transition_ready_before_lease_failure_in_tx(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        ticket_id: TicketId,
+        previous_attempt: u32,
+        next_attempt: u32,
+        transition: PreLeaseFailureTransition,
+        now: OffsetDateTime,
+    ) -> Result<Ticket, VoomError> {
+        let now = iso8601(now)?;
+        let (state, next_eligible_at) = match transition {
+            PreLeaseFailureTransition::Terminal => (TicketState::Failed.as_str(), None),
+            PreLeaseFailureTransition::RetryAt(at) => {
+                (TicketState::Ready.as_str(), Some(iso8601(at)?))
+            }
+        };
+        let row = sqlx::query(&format!(
+            "UPDATE tickets SET state = ?, state_changed_at = ?, attempt = ?, \
+             next_eligible_at = COALESCE(?, next_eligible_at), epoch = epoch + 1 \
+             WHERE id = ? AND state = 'ready' AND attempt = ? AND next_eligible_at <= ? \
+             RETURNING {TICKET_RETURNING_COLS}"
+        ))
+        .bind(state)
+        .bind(&now)
+        .bind(i64::from(next_attempt))
+        .bind(next_eligible_at)
+        .bind(i64_from_u64(ticket_id.0))
+        .bind(i64::from(previous_attempt))
+        .bind(&now)
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(|e| VoomError::database_context("pre-lease ticket transition", e))?;
+        row.as_ref().map(row_to_ticket).transpose()?.ok_or_else(|| {
+            VoomError::Conflict(format!(
+                "pre-lease failure rejected: ticket {ticket_id} changed concurrently"
+            ))
+        })
     }
 
     /// Keyset-paginated inspection read for `voom ticket list` (ADR 0031).

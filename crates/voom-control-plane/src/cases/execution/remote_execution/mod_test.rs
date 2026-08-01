@@ -919,12 +919,12 @@ async fn remote_acquire_requires_worker_node_ownership_capability_grant_and_no_d
         .remote_acquire(denied.acquire_input("denied", "hash-denied"))
         .await
         .unwrap();
-    let RemoteAcquireOutcome::NoCandidate {
+    let RemoteAcquireOutcome::Idle {
         scheduler_decision_id,
         ..
     } = outcome
     else {
-        panic!("expected denied no-candidate");
+        panic!("expected denied idle result");
     };
     let decision = denied
         .cp
@@ -932,7 +932,7 @@ async fn remote_acquire_requires_worker_node_ownership_capability_grant_and_no_d
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(decision.reason_code.as_str(), "operation_denied");
+    assert_eq!(decision.outcome, SchedulerDecisionOutcome::Idle);
     assert_eq!(
         denied
             .cp
