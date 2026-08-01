@@ -973,7 +973,13 @@ async fn legacy_adoption_rejects_ambiguous_or_different_source_snapshot() {
     let mut input = seeded.input;
     input.operation_payload["source_media_snapshot_id"] = serde_json::json!(second.id.0);
 
-    assert_legacy_adoption_rejected_without_mutation(&cp, input, &seeded.target).await;
+    assert_legacy_adoption_rejected_without_mutation(
+        &cp,
+        input,
+        &seeded.target,
+        "artifact source snapshot evidence is not unique",
+    )
+    .await;
 }
 
 #[tokio::test]
@@ -1024,6 +1030,17 @@ enum LegacyEvidenceMutation {
     RetiredResultLocation,
 }
 
+impl LegacyEvidenceMutation {
+    const fn expected_message(self) -> &'static str {
+        match self {
+            Self::WrongStream => "lineage stream id differs",
+            Self::MissingLineage => "is missing source lineage",
+            Self::MismatchedVerification => "artifact checksum evidence is inconsistent",
+            Self::RetiredResultLocation => "result location is retired",
+        }
+    }
+}
+
 #[tokio::test]
 async fn legacy_adoption_rejects_mismatched_or_incomplete_evidence() {
     for mutation in [
@@ -1036,7 +1053,13 @@ async fn legacy_adoption_rejects_mismatched_or_incomplete_evidence() {
         let seeded = seed_legacy_singleton(&cp, &dir).await;
         mutate_legacy_evidence(&cp, mutation).await;
 
-        assert_legacy_adoption_rejected_without_mutation(&cp, seeded.input, &seeded.target).await;
+        assert_legacy_adoption_rejected_without_mutation(
+            &cp,
+            seeded.input,
+            &seeded.target,
+            mutation.expected_message(),
+        )
+        .await;
     }
 }
 
@@ -1069,7 +1092,13 @@ async fn legacy_adoption_rejects_unowned_existing_target() {
     .remove(0);
     tokio::fs::write(&target, b"unowned").await.unwrap();
 
-    assert_legacy_adoption_rejected_without_mutation(&cp, input, &target).await;
+    assert_legacy_adoption_rejected_without_mutation(
+        &cp,
+        input,
+        &target,
+        "exists without a committed artifact owner",
+    )
+    .await;
 }
 
 #[tokio::test]
@@ -2578,6 +2607,7 @@ async fn assert_legacy_adoption_rejected_without_mutation(
     cp: &crate::ControlPlane,
     input: ExecuteExtractAudioInput,
     target: &std::path::Path,
+    expected_message: &str,
 ) {
     let publication_counts = legacy_publication_counts(cp).await;
     let media_snapshot_count = table_count(cp, "media_snapshots").await;
@@ -2594,6 +2624,10 @@ async fn assert_legacy_adoption_rejected_without_mutation(
     .unwrap_err();
 
     assert_eq!(error.error_code(), voom_core::ErrorCode::Conflict);
+    assert!(
+        error.to_string().contains(expected_message),
+        "expected `{expected_message}` in `{error}`"
+    );
     assert_eq!(legacy_publication_counts(cp).await, publication_counts);
     assert_eq!(
         table_count(cp, "media_snapshots").await,
