@@ -199,6 +199,42 @@ async fn runtime_capabilities_for_operations_returns_empty_without_operations() 
 }
 
 #[tokio::test]
+async fn runtime_capabilities_for_operations_rejects_negative_worker_epoch() {
+    let (pool, _tmp) = pool().await;
+    let repo = SqliteWorkerRepo::new(pool.clone());
+    let worker = repo
+        .register(sample_new_worker("negative-epoch"))
+        .await
+        .unwrap();
+    let operation = worker_op("transcode_video");
+    repo.record_capability(NewCapability {
+        worker_id: worker.id,
+        operation: operation.clone(),
+        codecs: Vec::new(),
+        hardware: Vec::new(),
+        artifact_access: Vec::new(),
+        extra: serde_json::json!({}),
+    })
+    .await
+    .unwrap();
+    sqlx::query("UPDATE workers SET epoch = -1 WHERE id = ?")
+        .bind(i64::try_from(worker.id.0).unwrap())
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let error = repo
+        .runtime_capabilities_for_operations(std::slice::from_ref(&operation))
+        .await
+        .unwrap_err();
+
+    assert!(
+        matches!(error, VoomError::Database { ref message, .. } if message.contains("runtime worker capability worker epoch was negative: -1")),
+        "expected a database error naming the corrupt epoch, got {error:?}"
+    );
+}
+
+#[tokio::test]
 async fn retire_transitions_status_and_sets_retired_at() {
     let (pool, _tmp) = pool().await;
     let repo = SqliteWorkerRepo::new(pool.clone());

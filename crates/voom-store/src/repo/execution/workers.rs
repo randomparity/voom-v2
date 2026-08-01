@@ -198,9 +198,19 @@ impl SqliteWorkerRepo {
             let extra: String = row
                 .try_get("extra")
                 .map_err(|error| map_row_err("runtime worker capability extra", &error))?;
+            let worker_id = u64::try_from(worker_id).map_err(|_| {
+                VoomError::database(format!(
+                    "runtime worker capability worker id was negative: {worker_id}"
+                ))
+            })?;
+            let worker_epoch = u64::try_from(worker_epoch).map_err(|_| {
+                VoomError::database(format!(
+                    "runtime worker capability worker epoch was negative: {worker_epoch}"
+                ))
+            })?;
             capabilities.push(RuntimeWorkerCapability {
-                worker_id: WorkerId(u64_from_i64(worker_id)),
-                worker_epoch: u64_from_i64(worker_epoch),
+                worker_id: WorkerId(worker_id),
+                worker_epoch,
                 operation: TicketOperation::from_stored(
                     operation,
                     "runtime worker capability operation",
