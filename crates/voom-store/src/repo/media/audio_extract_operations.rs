@@ -600,7 +600,14 @@ impl SqliteAudioExtractOperationRepo {
         )))
     }
 
-    pub async fn release_claim(&self, claim: &NewAudioExtractClaim) -> Result<(), VoomError> {
+    /// Releases this claim when it is still current.
+    ///
+    /// Cleanup is idempotent because a stale, replaced, released, or committed claim must not
+    /// hide the operation error that triggered cleanup.
+    pub async fn release_claim_if_current(
+        &self,
+        claim: &NewAudioExtractClaim,
+    ) -> Result<(), VoomError> {
         let result = sqlx::query(
             "UPDATE audio_extract_operations \
              SET claim_lease_id = NULL, claim_token = NULL, claim_expires_at = NULL \

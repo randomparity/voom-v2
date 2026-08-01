@@ -168,6 +168,16 @@ impl Fixture {
             source_media_snapshot_id: self.source_media_snapshot_id,
         }
     }
+
+    fn claim(&self, generation: u32, token: &str) -> NewAudioExtractClaim {
+        NewAudioExtractClaim {
+            operation_key: "extract:v1:key".to_owned(),
+            expected_generation: generation,
+            lease_id: self.lease_id,
+            claim_token: token.to_owned(),
+            expires_at: OffsetDateTime::from_unix_timestamp(10).unwrap(),
+        }
+    }
 }
 
 fn outputs() -> Vec<NewAudioExtractOutput> {
@@ -273,6 +283,121 @@ async fn claim_fences_competing_tokens_until_expiry() {
     fixture
         .repo
         .acquire_claim(&competing, OffsetDateTime::from_unix_timestamp(11).unwrap())
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn release_claim_contract_releases_the_current_extract_claim() {
+    let fixture = fixture().await;
+    let now = OffsetDateTime::UNIX_EPOCH;
+    fixture
+        .repo
+        .create_planned(fixture.operation(), &outputs(), now)
+        .await
+        .unwrap();
+    let claim = fixture.claim(0, "current");
+    fixture.repo.acquire_claim(&claim, now).await.unwrap();
+
+    fixture.repo.release_claim_if_current(&claim).await.unwrap();
+
+    let claim_token: Option<String> = sqlx::query_scalar(
+        "SELECT claim_token FROM audio_extract_operations WHERE operation_key = ?",
+    )
+    .bind(&claim.operation_key)
+    .fetch_one(&fixture.pool)
+    .await
+    .unwrap();
+    assert_eq!(claim_token, None);
+}
+
+#[tokio::test]
+async fn release_claim_contract_ignores_stale_and_replaced_extract_claims() {
+    let fixture = fixture().await;
+    let now = OffsetDateTime::UNIX_EPOCH;
+    fixture
+        .repo
+        .create_planned(fixture.operation(), &outputs(), now)
+        .await
+        .unwrap();
+    let first = fixture.claim(0, "first");
+    fixture.repo.acquire_claim(&first, now).await.unwrap();
+    let stale_generation = fixture.claim(1, "first");
+
+    fixture
+        .repo
+        .release_claim_if_current(&stale_generation)
+        .await
+        .unwrap();
+
+    let claim_token: Option<String> = sqlx::query_scalar(
+        "SELECT claim_token FROM audio_extract_operations WHERE operation_key = ?",
+    )
+    .bind(&first.operation_key)
+    .fetch_one(&fixture.pool)
+    .await
+    .unwrap();
+    assert_eq!(claim_token.as_deref(), Some("first"));
+
+    let mut replacement = fixture.claim(0, "replacement");
+    replacement.expires_at = OffsetDateTime::from_unix_timestamp(20).unwrap();
+    fixture
+        .repo
+        .acquire_claim(
+            &replacement,
+            OffsetDateTime::from_unix_timestamp(11).unwrap(),
+        )
+        .await
+        .unwrap();
+    fixture.repo.release_claim_if_current(&first).await.unwrap();
+
+    let claim_token: Option<String> = sqlx::query_scalar(
+        "SELECT claim_token FROM audio_extract_operations WHERE operation_key = ?",
+    )
+    .bind(&first.operation_key)
+    .fetch_one(&fixture.pool)
+    .await
+    .unwrap();
+    assert_eq!(claim_token.as_deref(), Some("replacement"));
+}
+
+#[tokio::test]
+async fn release_claim_contract_ignores_released_and_committed_extract_claims() {
+    let fixture = fixture().await;
+    let now = OffsetDateTime::UNIX_EPOCH;
+    fixture
+        .repo
+        .create_planned(fixture.operation(), &outputs(), now)
+        .await
+        .unwrap();
+    let released = fixture.claim(0, "released");
+    fixture.repo.acquire_claim(&released, now).await.unwrap();
+    fixture
+        .repo
+        .release_claim_if_current(&released)
+        .await
+        .unwrap();
+    fixture
+        .repo
+        .release_claim_if_current(&released)
+        .await
+        .unwrap();
+
+    let committed = fixture.claim(0, "committed");
+    fixture.repo.acquire_claim(&committed, now).await.unwrap();
+    sqlx::query(
+        "UPDATE audio_extract_operations SET state = 'committed', finished_at = ? \
+         WHERE operation_key = ?",
+    )
+    .bind(NOW)
+    .bind(&committed.operation_key)
+    .execute(&fixture.pool)
+    .await
+    .unwrap();
+
+    fixture
+        .repo
+        .release_claim_if_current(&committed)
         .await
         .unwrap();
 }

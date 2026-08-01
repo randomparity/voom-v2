@@ -629,7 +629,7 @@ async fn dispatch_synthesis_result(
         }
         Err(error) => {
             cp.audio_synthesis_operations
-                .release_claim(&dispatch.claim)
+                .release_claim_exact(&dispatch.claim)
                 .await?;
             context.synthesis_claim = None;
             Err(error)
@@ -1553,7 +1553,10 @@ async fn finalize_extract_failure(
     error: VoomError,
 ) -> VoomError {
     if let Some(claim) = &context.claim
-        && let Err(release_error) = cp.audio_extract_operations.release_claim(claim).await
+        && let Err(release_error) = cp
+            .audio_extract_operations
+            .release_claim_if_current(claim)
+            .await
     {
         tracing::warn!(
             primary_error_code = error.error_code().as_str(),
@@ -2309,7 +2312,7 @@ async fn reconcile_prior_dispatch_attempt(
                 Ok(staging) => staging,
                 Err(error) => {
                     repo.quarantine_dispatch(claim, attempt.id, now).await?;
-                    repo.release_claim(claim).await?;
+                    repo.release_claim_if_current(claim).await?;
                     return Err(error);
                 }
             };
@@ -2324,12 +2327,12 @@ async fn reconcile_prior_dispatch_attempt(
         }
         AudioExtractDispatchAttemptStatus::Active => {
             repo.quarantine_dispatch(claim, attempt.id, now).await?;
-            repo.release_claim(claim).await?;
+            repo.release_claim_if_current(claim).await?;
             attempt.status = AudioExtractDispatchAttemptStatus::Quarantined;
             Err(dispatch_quiescence_required(&attempt))
         }
         AudioExtractDispatchAttemptStatus::Quarantined => {
-            repo.release_claim(claim).await?;
+            repo.release_claim_if_current(claim).await?;
             Err(dispatch_quiescence_required(&attempt))
         }
     }

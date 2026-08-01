@@ -510,7 +510,11 @@ impl SqliteAudioSynthesisOperationRepo {
         )))
     }
 
-    pub async fn release_claim(&self, claim: &NewAudioSynthesisClaim) -> Result<(), VoomError> {
+    /// Releases exactly one current planned claim.
+    pub async fn release_claim_exact(
+        &self,
+        claim: &NewAudioSynthesisClaim,
+    ) -> Result<(), VoomError> {
         let result = sqlx::query(
             "UPDATE audio_synthesis_operations \
              SET claim_lease_id = NULL, claim_token = NULL, claim_expires_at = NULL \
