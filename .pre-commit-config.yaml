@@ -42,6 +42,22 @@ repos:
         pass_filenames: false
         files: '\.rs$'
 
+      - id: check-control-plane-sql-boundary
+        name: just check-control-plane-sql-boundary
+        entry: just check-control-plane-sql-boundary
+        language: system
+        pass_filenames: false
+        files: "^(crates/voom-control-plane/src/.*\\.rs|\
+          scripts/check-control-plane-sql-boundary.*\\.sh|justfile)$"
+
+      - id: check-control-plane-sql-boundary-selftest
+        name: just check-control-plane-sql-boundary-selftest
+        entry: just check-control-plane-sql-boundary-selftest
+        language: system
+        pass_filenames: false
+        files: "^(crates/voom-control-plane/src/.*\\.rs|\
+          scripts/check-control-plane-sql-boundary.*\\.sh|justfile)$"
+
       - id: check-payload-deny-unknown
         name: just check-payload-deny-unknown
         entry: just check-payload-deny-unknown
