@@ -14,9 +14,12 @@ use voom_store::repo::identity::{
 };
 use voom_store::repo::jobs::NewJob;
 use voom_store::repo::tickets::{NewTicket, TicketState};
+use voom_store::repo::workflow_progress::{
+    FileAdmissionTier, FileProgressState, NewFilePhaseEntry, NewFileProgress,
+};
 use voom_store::repo::workflow_summaries::{
-    FilePhaseOutcome, NewFilePhaseEntry, NewFilePhaseSummary, NewFileProgress, NewFileRunHistory,
-    NewFileRunStart, NewWorkflowSummary, PhaseOutcome,
+    FilePhaseOutcome, NewFilePhaseSummary, NewFileRunHistory, NewFileRunStart, NewWorkflowSummary,
+    PhaseOutcome,
 };
 
 use crate::cases::cp;
@@ -42,7 +45,7 @@ where
     let (job, _) = cp
         .open_sliding_file_job(&starts, Vec::new(), Vec::new(), &inputs.files, limit)
         .await?;
-    cp.workflow_summaries()
+    cp.workflow_progress()
         .admit_next_file(job.id, cp.clock().now())
         .await?
         .ok_or_else(|| voom_core::VoomError::Internal("test file was not admitted".to_owned()))?;
@@ -127,7 +130,7 @@ where
             limit,
         )
         .await?;
-    cp.workflow_summaries()
+    cp.workflow_progress()
         .admit_next_file(job.id, cp.clock().now())
         .await?
         .ok_or_else(|| voom_core::VoomError::Internal("test file was not admitted".to_owned()))?;
@@ -1321,7 +1324,7 @@ async fn record_run_starts(cp: &crate::ControlPlane, job_id: JobId, starts: Vec<
         .insert_file_run_starts(job_id, starts.clone())
         .await
         .unwrap();
-    cp.workflow_summaries()
+    cp.workflow_progress()
         .insert_file_window(
             job_id,
             4,
@@ -1331,8 +1334,7 @@ async fn record_run_starts(cp: &crate::ControlPlane, job_id: JobId, starts: Vec<
                 .map(|(input_ordinal, start)| NewFileProgress {
                     branch_id: start.branch_id.clone(),
                     input_ordinal: u32::try_from(input_ordinal).unwrap(),
-                    admission_tier:
-                        voom_store::repo::workflow_summaries::FileAdmissionTier::Pending,
+                    admission_tier: FileAdmissionTier::Pending,
                     next_phase_ordinal: start.starting_phase_ordinal,
                 })
                 .collect(),
@@ -1341,7 +1343,7 @@ async fn record_run_starts(cp: &crate::ControlPlane, job_id: JobId, starts: Vec<
         .await
         .unwrap();
     for _ in &starts {
-        cp.workflow_summaries()
+        cp.workflow_progress()
             .admit_next_file(job_id, T0)
             .await
             .unwrap()
@@ -1372,7 +1374,7 @@ async fn phase_file(
         snapshot,
         branch_id: branch_id.to_owned(),
         ordinal: 1,
-        admission_tier: voom_store::repo::workflow_summaries::FileAdmissionTier::Pending,
+        admission_tier: FileAdmissionTier::Pending,
         resume_ordinal: 0,
         phase_history: BTreeMap::new(),
     }
@@ -1423,13 +1425,13 @@ async fn record_file_phase(
         .await
         .unwrap();
     let progress = cp
-        .workflow_summaries()
+        .workflow_progress()
         .file_progress(job_id, branch_id)
         .await
         .unwrap();
     if progress.is_some_and(|row| row.next_phase_ordinal == phase_ordinal) {
         assert!(
-            cp.workflow_summaries()
+            cp.workflow_progress()
                 .advance_file_progress(job_id, branch_id, phase_ordinal, phase_ordinal + 1)
                 .await
                 .unwrap()
@@ -1717,12 +1719,12 @@ async fn phase_finalization_records_skipped_survivors_gate_history() {
         .open_sliding_file_job(&starts, Vec::new(), Vec::new(), &files, 2)
         .await
         .unwrap();
-    cp.workflow_summaries()
+    cp.workflow_progress()
         .admit_next_file(job.id, T0)
         .await
         .unwrap()
         .unwrap();
-    cp.workflow_summaries()
+    cp.workflow_progress()
         .admit_next_file(job.id, T0)
         .await
         .unwrap()
@@ -1827,7 +1829,7 @@ async fn admission_failure_drains_the_already_admitted_pipeline() {
 
     assert_eq!(error.source.code(), "DB_UNREACHABLE");
     let progress = cp
-        .workflow_summaries()
+        .workflow_progress()
         .file_progress_for_job(job.id)
         .await
         .unwrap();
@@ -1969,7 +1971,7 @@ async fn closed_admission_gate_prevents_refill_before_failure_join() {
         "an abort latch must close before its task result is joined"
     );
     let progress = cp
-        .workflow_summaries()
+        .workflow_progress()
         .file_progress_for_job(job.id)
         .await
         .unwrap();
@@ -2020,11 +2022,11 @@ async fn fatal_latch_prevents_sibling_refill_while_recovery_is_pending() {
         })
     };
     fatal_known.notified().await;
-    cp.workflow_summaries()
+    cp.workflow_progress()
         .begin_file_terminalization(job.id, &first.branch_id)
         .await
         .unwrap();
-    cp.workflow_summaries()
+    cp.workflow_progress()
         .mark_file_terminal(job.id, &first.branch_id, cp.clock().now())
         .await
         .unwrap();
@@ -2034,7 +2036,7 @@ async fn fatal_latch_prevents_sibling_refill_while_recovery_is_pending() {
         "a sibling freeing a slot must not refill after fatal failure is known"
     );
     let progress = cp
-        .workflow_summaries()
+        .workflow_progress()
         .file_progress_for_job(job.id)
         .await
         .unwrap();
@@ -2144,7 +2146,7 @@ async fn cancelled_sliding_job_admits_no_pending_files() {
 
     assert_eq!(error.source.code(), "USER_CANCELLATION");
     let progress = cp
-        .workflow_summaries()
+        .workflow_progress()
         .file_progress_for_job(job.id)
         .await
         .unwrap();
@@ -2280,11 +2282,11 @@ async fn repeated_resume_preserves_completed_and_incomplete_branch_sets() {
         None,
     )
     .await;
-    cp.workflow_summaries()
+    cp.workflow_progress()
         .begin_file_terminalization(first_job, "completed")
         .await
         .unwrap();
-    cp.workflow_summaries()
+    cp.workflow_progress()
         .mark_file_terminal(first_job, "completed", T0)
         .await
         .unwrap();
@@ -2440,7 +2442,7 @@ async fn resume_validates_window_cursor_and_terminalization_state() {
     .await;
     let prior = open_workflow_job(&cp).await;
     record_run_start(&cp, prior, "terminalizing", version, 0).await;
-    cp.workflow_summaries()
+    cp.workflow_progress()
         .begin_file_terminalization(prior, "terminalizing")
         .await
         .unwrap();
@@ -2468,7 +2470,7 @@ async fn terminalizing_completed_branch_replays_but_terminal_branch_does_not() {
     let prior = open_workflow_job(&cp).await;
     record_run_start(&cp, prior, "movie", version, 0).await;
     record_file_phase(&cp, prior, 0, "movie", FilePhaseOutcome::Blocked, None).await;
-    cp.workflow_summaries()
+    cp.workflow_progress()
         .begin_file_terminalization(prior, "movie")
         .await
         .unwrap();
@@ -2479,7 +2481,7 @@ async fn terminalizing_completed_branch_replays_but_terminal_branch_does_not() {
         .unwrap();
     assert_eq!(replay.files[0].resume_ordinal, 2);
 
-    cp.workflow_summaries()
+    cp.workflow_progress()
         .mark_file_terminal(prior, "movie", T0)
         .await
         .unwrap();
@@ -2503,7 +2505,7 @@ async fn terminalizing_skipped_branch_replays_through_resume_runner() {
     let prior = open_workflow_job(&cp).await;
     record_run_start(&cp, prior, "skipped", version, 0).await;
     record_file_phase(&cp, prior, 0, "skipped", FilePhaseOutcome::Skipped, None).await;
-    cp.workflow_summaries()
+    cp.workflow_progress()
         .begin_file_terminalization(prior, "skipped")
         .await
         .unwrap();
@@ -2529,15 +2531,12 @@ async fn terminalizing_skipped_branch_replays_through_resume_runner() {
     assert_eq!(outcome.file_phases.len(), 1);
     assert_eq!(outcome.file_phases[0].outcome, FilePhaseOutcome::Skipped);
     let progress = cp
-        .workflow_summaries()
+        .workflow_progress()
         .file_progress(outcome.job_id, "skipped")
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(
-        progress.state,
-        voom_store::repo::workflow_summaries::FileProgressState::Terminal
-    );
+    assert_eq!(progress.state, FileProgressState::Terminal);
 }
 
 #[tokio::test]
@@ -2571,7 +2570,7 @@ async fn terminalizing_blocked_resume_does_not_promote_committed_intermediate() 
     )
     .await;
     record_file_phase(&cp, prior, 1, "Movie", FilePhaseOutcome::Blocked, None).await;
-    cp.workflow_summaries()
+    cp.workflow_progress()
         .begin_file_terminalization(prior, "Movie")
         .await
         .unwrap();
@@ -2628,7 +2627,7 @@ async fn phase_complete_terminalizing_resume_rejects_unrelated_chain_tip() {
         Some(original),
     )
     .await;
-    cp.workflow_summaries()
+    cp.workflow_progress()
         .begin_file_terminalization(prior, "unrelated")
         .await
         .unwrap();
@@ -2695,7 +2694,7 @@ async fn phase_outcome_matches_completion_rows_to_entered_branches() {
         .await
         .unwrap();
     for _ in &files {
-        cp.workflow_summaries()
+        cp.workflow_progress()
             .admit_next_file(job.id, T0)
             .await
             .unwrap()
@@ -2720,7 +2719,7 @@ async fn phase_outcome_matches_completion_rows_to_entered_branches() {
     )
     .await;
     for file in files.iter().filter(|file| file.branch_id != "seed") {
-        cp.workflow_summaries()
+        cp.workflow_progress()
             .upsert_file_phase_entry(
                 NewFilePhaseEntry {
                     job_id: job.id,
@@ -3078,11 +3077,11 @@ async fn resume_rejects_cross_lineage_committed_row_and_changed_terminal_tip() {
     let prior = open_workflow_job(&cp).await;
     record_run_start(&cp, prior, "movie", v0, 0).await;
     record_file_phase(&cp, prior, 0, "movie", FilePhaseOutcome::Blocked, None).await;
-    cp.workflow_summaries()
+    cp.workflow_progress()
         .begin_file_terminalization(prior, "movie")
         .await
         .unwrap();
-    cp.workflow_summaries()
+    cp.workflow_progress()
         .mark_file_terminal(prior, "movie", T0)
         .await
         .unwrap();
@@ -3280,11 +3279,11 @@ async fn zero_survivor_resume_does_not_promote_blocked_branch() {
     )
     .await;
     record_file_phase(&cp, prior, 1, "Movie", FilePhaseOutcome::Blocked, None).await;
-    cp.workflow_summaries()
+    cp.workflow_progress()
         .begin_file_terminalization(prior, "Movie")
         .await
         .unwrap();
-    cp.workflow_summaries()
+    cp.workflow_progress()
         .mark_file_terminal(prior, "Movie", T0)
         .await
         .unwrap();

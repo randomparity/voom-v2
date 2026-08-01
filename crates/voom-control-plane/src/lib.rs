@@ -50,6 +50,7 @@ use voom_store::repo::{
     use_leases::SqliteUseLeaseRepo,
     video_profiles::{NewVideoProfile, SqliteVideoProfileRepo, VideoProfile},
     workers::SqliteWorkerRepo,
+    workflow_progress::SqliteWorkflowProgressRepo,
     workflow_summaries::SqliteWorkflowSummaryRepo,
 };
 use voom_store::{SchemaState, connect, probe_schema};
@@ -161,6 +162,7 @@ pub struct ControlPlane {
     pub(crate) video_profiles: SqliteVideoProfileRepo,
     pub(crate) scheduler_decisions: SqliteSchedulerDecisionRepo,
     pub(crate) scheduler_node_limits: SqliteSchedulerNodeLimitRepo,
+    pub(crate) workflow_progress: SqliteWorkflowProgressRepo,
     pub(crate) workflow_summaries: SqliteWorkflowSummaryRepo,
     pub(crate) backups: SqliteBackupRepo,
     pub(crate) libraries: SqliteLibraryRepo,
@@ -203,6 +205,7 @@ impl std::fmt::Debug for ControlPlane {
             .field("video_profiles", &self.video_profiles)
             .field("scheduler_decisions", &self.scheduler_decisions)
             .field("scheduler_node_limits", &self.scheduler_node_limits)
+            .field("workflow_progress", &self.workflow_progress)
             .field("workflow_summaries", &self.workflow_summaries)
             .field("backups", &self.backups)
             .field("libraries", &self.libraries)
@@ -315,6 +318,7 @@ impl ControlPlane {
             video_profiles: SqliteVideoProfileRepo::new(pool.clone()),
             scheduler_decisions: SqliteSchedulerDecisionRepo::new(pool.clone()),
             scheduler_node_limits: SqliteSchedulerNodeLimitRepo::new(pool.clone()),
+            workflow_progress: SqliteWorkflowProgressRepo::new(pool.clone()),
             workflow_summaries: SqliteWorkflowSummaryRepo::new(pool.clone()),
             backups: SqliteBackupRepo::new(pool.clone()),
             libraries: SqliteLibraryRepo::new(pool.clone()),
@@ -584,6 +588,12 @@ impl ControlPlane {
     #[must_use]
     pub fn workflow_summaries(&self) -> &SqliteWorkflowSummaryRepo {
         &self.workflow_summaries
+    }
+
+    #[cfg(any(test, feature = "test"))]
+    #[must_use]
+    pub fn workflow_progress(&self) -> &SqliteWorkflowProgressRepo {
+        &self.workflow_progress
     }
 
     #[cfg(any(test, feature = "test"))]

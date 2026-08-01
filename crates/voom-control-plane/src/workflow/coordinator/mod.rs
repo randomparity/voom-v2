@@ -29,9 +29,12 @@ use voom_policy::PolicyInputSetDraft;
 use voom_store::repo::identity::{MediaSnapshot, MediaSnapshotRepo};
 use voom_store::repo::jobs::{JobState, NewJob};
 use voom_store::repo::tickets::TicketState;
+use voom_store::repo::workflow_progress::{
+    FileAdmissionTier, FileProgress, NewFilePhaseEntry, NewFileProgress,
+};
 use voom_store::repo::workflow_summaries::{
-    FileAdmissionTier, FilePhaseOutcome, FilePhaseSummary, NewFilePhaseEntry, NewFileProgress,
-    NewFileRunHistory, NewFileRunStart, NewPhaseSummary, PhaseSummary, WorkflowSummary,
+    FilePhaseOutcome, FilePhaseSummary, NewFileRunHistory, NewFileRunStart, NewPhaseSummary,
+    PhaseSummary, WorkflowSummary,
 };
 
 use crate::ControlPlane;
@@ -409,13 +412,13 @@ impl FileAdmissionGate {
         &self,
         control_plane: &ControlPlane,
         job_id: JobId,
-    ) -> Result<Option<voom_store::repo::workflow_summaries::FileProgress>, VoomError> {
+    ) -> Result<Option<FileProgress>, VoomError> {
         let _admission = self.admission_lock.lock().await;
         if !self.open.load(Ordering::Acquire) {
             return Ok(None);
         }
         control_plane
-            .workflow_summaries
+            .workflow_progress
             .admit_next_file(job_id, control_plane.clock().now())
             .await
     }
@@ -750,7 +753,7 @@ impl<'a> PhaseLoop<'a> {
             )));
         };
         self.control_plane
-            .workflow_summaries
+            .workflow_progress
             .upsert_file_phase_entry(
                 NewFilePhaseEntry {
                     job_id: self.job_id,
@@ -773,7 +776,7 @@ impl<'a> PhaseLoop<'a> {
             )
         })?;
         self.control_plane
-            .workflow_summaries
+            .workflow_progress
             .begin_file_terminalization(self.job_id, &branch_id)
             .await
             .map_err(|source| file_pipeline_failure(source, self.last_run.as_ref()))?;
@@ -805,7 +808,7 @@ impl<'a> PhaseLoop<'a> {
                 .map_err(|source| file_pipeline_failure(source, self.last_run.as_ref()))?;
         }
         self.control_plane
-            .workflow_summaries
+            .workflow_progress
             .mark_file_terminal(self.job_id, &branch_id, self.control_plane.clock().now())
             .await
             .map_err(|source| file_pipeline_failure(source, self.last_run.as_ref()))?;
@@ -1296,10 +1299,10 @@ impl ControlPlane {
             .map(|row| row.branch_id.clone())
             .collect::<Vec<_>>();
         progress.extend(terminal_progress);
-        self.workflow_summaries
+        self.workflow_progress
             .insert_file_window_in_tx(&mut tx, job.id, max_in_flight_files, &progress, now)
             .await?;
-        self.workflow_summaries
+        self.workflow_progress
             .mark_file_progress_terminal_in_tx(&mut tx, job.id, &terminal_branches, now)
             .await?;
         let mut rows = Vec::with_capacity(seeds.len());
@@ -1691,14 +1694,14 @@ impl ControlPlane {
         file_phases: &[FilePhaseSummary],
     ) -> Result<Vec<FilePhaseObservation>, VoomError> {
         let progress = self
-            .workflow_summaries
+            .workflow_progress
             .file_progress_for_job(inputs.job_id)
             .await?
             .into_iter()
             .map(|row| (row.branch_id, row.input_ordinal))
             .collect::<BTreeMap<_, _>>();
         let entries = self
-            .workflow_summaries
+            .workflow_progress
             .file_phase_entries_for_job(inputs.job_id)
             .await?;
         let completed_snapshots = file_phases

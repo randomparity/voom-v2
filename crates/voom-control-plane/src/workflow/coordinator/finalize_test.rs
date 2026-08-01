@@ -15,7 +15,8 @@ use voom_store::repo::jobs::NewJob;
 use voom_store::repo::leases::NewLease;
 use voom_store::repo::tickets::NewTicket;
 use voom_store::repo::workers::{NewCapability, NewGrant, NewWorker};
-use voom_store::repo::workflow_summaries::{FilePhaseOutcome, NewFileProgress, NewFileRunStart};
+use voom_store::repo::workflow_progress::{FileAdmissionTier, NewFileProgress};
+use voom_store::repo::workflow_summaries::{FilePhaseOutcome, NewFileRunStart};
 
 use super::*;
 use crate::workflow::coordinator::{Disposition, PhaseFile};
@@ -551,7 +552,7 @@ async fn failed_phase_reports_only_exact_job_commit_evidence() {
         .unwrap();
     assert_eq!(durable, file_phases);
     assert_eq!(
-        cp.workflow_summaries
+        cp.workflow_progress
             .file_progress(job.id, "produced")
             .await
             .unwrap()
@@ -653,21 +654,21 @@ async fn activate_file_progress(
         )
         .await
         .unwrap();
-    cp.workflow_summaries
+    cp.workflow_progress
         .insert_file_window(
             job_id,
             1,
             vec![NewFileProgress {
                 branch_id: file.branch_id.clone(),
                 input_ordinal: file.ordinal,
-                admission_tier: voom_store::repo::workflow_summaries::FileAdmissionTier::Pending,
+                admission_tier: FileAdmissionTier::Pending,
                 next_phase_ordinal: 0,
             }],
             T0,
         )
         .await
         .unwrap();
-    cp.workflow_summaries
+    cp.workflow_progress
         .admit_next_file(job_id, T0)
         .await
         .unwrap()
@@ -1100,7 +1101,7 @@ async fn phase_file(
         snapshot: latest_snapshot(cp, version_id).await,
         branch_id: branch_id.to_owned(),
         ordinal: 1,
-        admission_tier: voom_store::repo::workflow_summaries::FileAdmissionTier::Pending,
+        admission_tier: FileAdmissionTier::Pending,
         resume_ordinal: 0,
         phase_history: BTreeMap::new(),
     }

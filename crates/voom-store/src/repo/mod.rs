@@ -11,7 +11,7 @@ pub mod policy;
 pub use audit::{events, schema_meta};
 pub use execution::{
     accelerator_claims, jobs, leases, nodes, remote_idempotency, scheduler_decisions,
-    scheduler_node_limits, tickets, workers, workflow_summaries,
+    scheduler_node_limits, tickets, workers, workflow_progress, workflow_summaries,
 };
 pub use external::SqliteExternalSystemRepo;
 pub use external::links::{ExternalLinkTargetType, ExternalSystemLink, NewExternalLink};
@@ -109,11 +109,14 @@ pub use workers::{
     WorkerInspection, WorkerKind, WorkerNodeContext, WorkerOperationCandidate,
     WorkerOperationEligibility, WorkerStatus,
 };
+pub use workflow_progress::{
+    FileAdmissionTier, FilePhaseEntry, FileProgress, FileProgressState, FileWindow,
+    NewFilePhaseEntry, NewFileProgress, SqliteWorkflowProgressRepo,
+};
 pub use workflow_summaries::{
-    FilePhaseOutcome, FilePhaseSummary, FileProgress, FileProgressState, FileRunHistory,
-    FileRunStart, NewFilePhaseSummary, NewFileProgress, NewFileRunHistory, NewFileRunStart,
-    NewPhaseSummary, NewWorkflowSummary, PhaseOutcome, PhaseReport, PhaseSummary,
-    SqliteWorkflowSummaryRepo, WorkflowSummary,
+    FilePhaseOutcome, FilePhaseSummary, FileRunHistory, FileRunStart, NewFilePhaseSummary,
+    NewFileRunHistory, NewFileRunStart, NewPhaseSummary, NewWorkflowSummary, PhaseOutcome,
+    PhaseReport, PhaseSummary, SqliteWorkflowSummaryRepo, WorkflowSummary,
 };
 
 /// Marker trait so future repository traits compose uniformly.

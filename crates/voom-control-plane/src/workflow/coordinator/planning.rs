@@ -11,8 +11,9 @@ use voom_core::{FileVersionId, JobId, VoomError};
 use voom_plan::{ExecutionPlan, NodeStatus, PlanOperationKind, PlanningContext, PlanningRequest};
 use voom_policy::{PolicyInputSetDraft, TargetRef};
 use voom_store::repo::identity::MediaSnapshot;
+use voom_store::repo::workflow_progress::FileAdmissionTier;
 use voom_store::repo::workflow_summaries::{
-    FileAdmissionTier, FilePhaseOutcome, NewWorkflowSummary, PhaseOutcome, PhaseReport,
+    FilePhaseOutcome, NewWorkflowSummary, PhaseOutcome, PhaseReport,
 };
 
 use crate::cases::policy::plans::ResolvedFileInput;

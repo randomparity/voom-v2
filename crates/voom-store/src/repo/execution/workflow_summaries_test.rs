@@ -7,6 +7,10 @@ use voom_core::{
 };
 
 use super::*;
+use crate::repo::workflow_progress::{
+    FileAdmissionTier, FileProgressState, NewFilePhaseEntry, NewFileProgress,
+    SqliteWorkflowProgressRepo,
+};
 
 const T0: OffsetDateTime = OffsetDateTime::UNIX_EPOCH;
 const JOB: JobId = JobId(1);
@@ -18,6 +22,23 @@ async fn repo() -> (SqliteWorkflowSummaryRepo, voom_test_support::TempDatabase) 
         .unwrap();
     seed_refs(&pool).await;
     (SqliteWorkflowSummaryRepo::new(pool), tmp)
+}
+
+async fn progress_repos() -> (
+    SqliteWorkflowProgressRepo,
+    SqliteWorkflowSummaryRepo,
+    voom_test_support::TempDatabase,
+) {
+    let tmp = voom_test_support::TempDatabase::new().unwrap();
+    let pool = crate::test_support::fresh_initialized_pool_at(tmp.path())
+        .await
+        .unwrap();
+    seed_refs(&pool).await;
+    (
+        SqliteWorkflowProgressRepo::new(pool.clone()),
+        SqliteWorkflowSummaryRepo::new(pool),
+        tmp,
+    )
 }
 
 /// Seed the FK targets a committed per-`(file, phase)` row links: one job, one
@@ -147,17 +168,18 @@ fn file_progress(branch_id: &str, input_ordinal: u32) -> NewFileProgress {
 
 #[tokio::test]
 async fn file_window_admission_is_bounded_and_refills_after_terminal() {
-    let (repo, _tmp) = repo().await;
-    repo.insert_file_run_starts(
-        JOB,
-        vec![
-            file_run_start("alpha", 1, 0),
-            file_run_start("beta", 1, 0),
-            file_run_start("gamma", 1, 0),
-        ],
-    )
-    .await
-    .unwrap();
+    let (repo, summaries, _tmp) = progress_repos().await;
+    summaries
+        .insert_file_run_starts(
+            JOB,
+            vec![
+                file_run_start("alpha", 1, 0),
+                file_run_start("beta", 1, 0),
+                file_run_start("gamma", 1, 0),
+            ],
+        )
+        .await
+        .unwrap();
     repo.insert_file_window(
         JOB,
         2,
@@ -211,16 +233,17 @@ async fn file_window_admission_is_bounded_and_refills_after_terminal() {
 
 #[tokio::test]
 async fn interrupted_resume_files_are_admitted_before_untouched_inputs() {
-    let (repo, _tmp) = repo().await;
-    repo.insert_file_run_starts(
-        JOB,
-        vec![
-            file_run_start("untouched", 1, 0),
-            file_run_start("interrupted", 1, 0),
-        ],
-    )
-    .await
-    .unwrap();
+    let (repo, summaries, _tmp) = progress_repos().await;
+    summaries
+        .insert_file_run_starts(
+            JOB,
+            vec![
+                file_run_start("untouched", 1, 0),
+                file_run_start("interrupted", 1, 0),
+            ],
+        )
+        .await
+        .unwrap();
     repo.insert_file_window(
         JOB,
         1,
@@ -251,8 +274,9 @@ async fn interrupted_resume_files_are_admitted_before_untouched_inputs() {
 
 #[tokio::test]
 async fn cancelled_job_cannot_admit_a_pending_file() {
-    let (repo, _tmp) = repo().await;
-    repo.insert_file_run_starts(JOB, vec![file_run_start("alpha", 1, 0)])
+    let (repo, summaries, _tmp) = progress_repos().await;
+    summaries
+        .insert_file_run_starts(JOB, vec![file_run_start("alpha", 1, 0)])
         .await
         .unwrap();
     repo.insert_file_window(JOB, 1, vec![file_progress("alpha", 0)], T0)
@@ -260,7 +284,7 @@ async fn cancelled_job_cannot_admit_a_pending_file() {
         .unwrap();
     sqlx::query("UPDATE jobs SET state = 'cancelled' WHERE id = ?")
         .bind(i64::try_from(JOB.0).unwrap())
-        .execute(&repo.pool)
+        .execute(&summaries.pool)
         .await
         .unwrap();
 
@@ -279,8 +303,9 @@ async fn cancelled_job_cannot_admit_a_pending_file() {
 
 #[tokio::test]
 async fn phase_entry_is_durable_and_replay_must_match() {
-    let (repo, _tmp) = repo().await;
-    repo.insert_file_run_starts(JOB, vec![file_run_start("alpha", 1, 0)])
+    let (repo, summaries, _tmp) = progress_repos().await;
+    summaries
+        .insert_file_run_starts(JOB, vec![file_run_start("alpha", 1, 0)])
         .await
         .unwrap();
     let input = NewFilePhaseEntry {
@@ -320,17 +345,18 @@ async fn phase_entry_is_durable_and_replay_must_match() {
 
 #[tokio::test]
 async fn concurrent_file_admission_never_exceeds_durable_capacity() {
-    let (repo, _tmp) = repo().await;
+    let (repo, summaries, _tmp) = progress_repos().await;
     let branches = ["alpha", "beta", "gamma", "delta"];
-    repo.insert_file_run_starts(
-        JOB,
-        branches
-            .iter()
-            .map(|branch| file_run_start(branch, 1, 0))
-            .collect(),
-    )
-    .await
-    .unwrap();
+    summaries
+        .insert_file_run_starts(
+            JOB,
+            branches
+                .iter()
+                .map(|branch| file_run_start(branch, 1, 0))
+                .collect(),
+        )
+        .await
+        .unwrap();
     repo.insert_file_window(
         JOB,
         2,
@@ -374,8 +400,9 @@ async fn concurrent_file_admission_never_exceeds_durable_capacity() {
 
 #[tokio::test]
 async fn file_progress_cursor_advances_once_from_expected_phase() {
-    let (repo, _tmp) = repo().await;
-    repo.insert_file_run_starts(JOB, vec![file_run_start("alpha", 1, 0)])
+    let (repo, summaries, _tmp) = progress_repos().await;
+    summaries
+        .insert_file_run_starts(JOB, vec![file_run_start("alpha", 1, 0)])
         .await
         .unwrap();
     repo.insert_file_window(JOB, 1, vec![file_progress("alpha", 0)], T0)
@@ -402,8 +429,9 @@ async fn file_progress_cursor_advances_once_from_expected_phase() {
 
 #[tokio::test]
 async fn file_phase_and_cursor_checkpoint_commit_atomically_and_replay() {
-    let (repo, _tmp) = repo().await;
-    repo.insert_file_run_starts(JOB, vec![file_run_start("alpha", 1, 0)])
+    let (repo, summaries, _tmp) = progress_repos().await;
+    summaries
+        .insert_file_run_starts(JOB, vec![file_run_start("alpha", 1, 0)])
         .await
         .unwrap();
     repo.insert_file_window(JOB, 1, vec![file_progress("alpha", 0)], T0)
@@ -414,7 +442,7 @@ async fn file_phase_and_cursor_checkpoint_commit_atomically_and_replay() {
         "CREATE TRIGGER fail_cursor_advance BEFORE UPDATE OF next_phase_ordinal \
          ON workflow_file_progress BEGIN SELECT RAISE(ABORT, 'forced cursor failure'); END",
     )
-    .execute(&repo.pool)
+    .execute(&summaries.pool)
     .await
     .unwrap();
 
@@ -425,7 +453,8 @@ async fn file_phase_and_cursor_checkpoint_commit_atomically_and_replay() {
 
     assert_eq!(error.code(), "DB_UNREACHABLE");
     assert!(
-        repo.get_file_phase_summary(JOB, 0, "alpha")
+        summaries
+            .get_file_phase_summary(JOB, 0, "alpha")
             .await
             .unwrap()
             .is_none()
@@ -439,7 +468,7 @@ async fn file_phase_and_cursor_checkpoint_commit_atomically_and_replay() {
         0
     );
     sqlx::query("DROP TRIGGER fail_cursor_advance")
-        .execute(&repo.pool)
+        .execute(&summaries.pool)
         .await
         .unwrap();
 

@@ -889,7 +889,7 @@ impl ControlPlane {
         produced: Option<ProducedRefs>,
     ) -> Result<FilePhaseSummary, VoomError> {
         let produced = produced.unwrap_or_default();
-        self.workflow_summaries
+        self.workflow_progress
             .upsert_file_phase_summary_and_advance(
                 NewFilePhaseSummary {
                     job_id,
