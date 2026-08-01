@@ -32,7 +32,7 @@ pub use policy::{
 
 pub use accelerator_claims::{AcceleratorClaim, NewAcceleratorClaim, SqliteAcceleratorClaimRepo};
 pub use artifact_access_plans::{
-    ArtifactAccessMode, ArtifactAccessPlan, ArtifactAccessPlanStatus, NewArtifactAccessPlan,
+    ArtifactAccessPlan, ArtifactAccessPlanStatus, NewArtifactAccessPlan,
     SqliteArtifactAccessPlanRepo,
 };
 pub use artifacts::{

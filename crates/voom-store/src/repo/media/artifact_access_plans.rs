@@ -3,8 +3,7 @@
 use serde_json::Value as JsonValue;
 use sqlx::{Row, SqlitePool};
 use time::OffsetDateTime;
-pub use voom_core::ArtifactAccessMode;
-use voom_core::{LeaseId, NodeId, TicketId, VoomError, WorkerId};
+use voom_core::{ArtifactAccessMode, LeaseId, NodeId, TicketId, VoomError, WorkerId};
 
 use super::Repository;
 use super::common::{
