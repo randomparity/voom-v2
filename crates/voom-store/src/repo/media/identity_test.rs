@@ -114,6 +114,94 @@ async fn live_local_chain_tips_filters_scope_and_orders_locations() {
     assert!(repo.live_local_chain_tips(&[]).await.unwrap().is_empty());
 }
 
+#[tokio::test]
+async fn live_local_chain_tips_excludes_retired_candidate_versions() {
+    let (repo, _tmp) = fresh().await;
+    let asset = repo.create_file_asset(T0).await.unwrap();
+    let version = create_version(&repo, asset.id, "retired", None).await;
+    let location = create_location(
+        &repo,
+        version.id,
+        FileLocationKind::LocalPath,
+        "/retired-tip",
+    )
+    .await;
+    let mut tx = repo.pool.begin().await.unwrap();
+    repo.retire_file_version_in_tx(&mut tx, version.id, T0 + Duration::seconds(1), 0)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+
+    let rows = repo.live_local_chain_tips(&[location.id]).await.unwrap();
+
+    assert!(rows.is_empty());
+}
+
+#[tokio::test]
+async fn live_local_chain_tips_returns_older_active_tip_when_newer_version_is_retired() {
+    let (repo, _tmp) = fresh().await;
+    let asset = repo.create_file_asset(T0).await.unwrap();
+    let older = create_version(&repo, asset.id, "older", None).await;
+    let older_location =
+        create_location(&repo, older.id, FileLocationKind::LocalPath, "/older").await;
+    let newer = create_version(&repo, asset.id, "newer", Some(older.id)).await;
+    let newer_location =
+        create_location(&repo, newer.id, FileLocationKind::LocalPath, "/newer").await;
+    let mut tx = repo.pool.begin().await.unwrap();
+    repo.retire_file_version_in_tx(&mut tx, newer.id, T0 + Duration::seconds(1), 0)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+
+    let rows = repo
+        .live_local_chain_tips(&[newer_location.id, older_location.id])
+        .await
+        .unwrap();
+
+    assert_eq!(
+        rows,
+        vec![LiveChainTipLocation {
+            location_id: older_location.id,
+            file_asset_id: asset.id,
+            value: "/older".to_owned(),
+            epoch: 0,
+        }]
+    );
+}
+
+#[tokio::test]
+async fn live_local_chain_tips_orders_multiple_returned_locations_by_id() {
+    let (repo, _tmp) = fresh().await;
+    let first_asset = repo.create_file_asset(T0).await.unwrap();
+    let first_version = create_version(&repo, first_asset.id, "first-ordered", None).await;
+    let first = create_location(
+        &repo,
+        first_version.id,
+        FileLocationKind::LocalPath,
+        "/first-ordered",
+    )
+    .await;
+    let second_asset = repo.create_file_asset(T0).await.unwrap();
+    let second_version = create_version(&repo, second_asset.id, "second-ordered", None).await;
+    let second = create_location(
+        &repo,
+        second_version.id,
+        FileLocationKind::LocalPath,
+        "/second-ordered",
+    )
+    .await;
+
+    let rows = repo
+        .live_local_chain_tips(&[second.id, first.id])
+        .await
+        .unwrap();
+
+    assert_eq!(
+        rows.iter().map(|row| row.location_id).collect::<Vec<_>>(),
+        vec![first.id, second.id]
+    );
+}
+
 async fn create_location(
     repo: &SqliteIdentityRepo,
     version_id: FileVersionId,
@@ -136,6 +224,28 @@ async fn create_location(
         .unwrap();
     tx.commit().await.unwrap();
     location
+}
+
+async fn create_version(
+    repo: &SqliteIdentityRepo,
+    asset_id: FileAssetId,
+    hash: &str,
+    parent: Option<FileVersionId>,
+) -> FileVersion {
+    repo.create_file_version(NewFileVersion {
+        file_asset_id: asset_id,
+        content_hash: hash.to_owned(),
+        size_bytes: 1,
+        produced_by: if parent.is_some() {
+            ProducedBy::Transcode
+        } else {
+            ProducedBy::Ingest
+        },
+        produced_from_version_id: parent,
+        created_at: T0,
+    })
+    .await
+    .unwrap()
 }
 
 // ---- media_works ---------------------------------------------------------

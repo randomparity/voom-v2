@@ -2517,6 +2517,122 @@ async fn verified_ticket_evidence_decodes_verification_and_optional_location() {
     );
     assert_eq!(evidence.file_version_id, Some(FileVersionId(2)));
     assert_eq!(evidence.location_value.as_deref(), Some("/output.mkv"));
+
+    let without_location = repo
+        .verified_ticket_evidence(
+            TicketId(1),
+            voom_core::ids::ArtifactVerificationId(1),
+            voom_core::ArtifactHandleId(1),
+            FileLocationId(999),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(without_location.file_version_id, None);
+    assert_eq!(without_location.location_value, None);
+}
+
+#[tokio::test]
+async fn verified_ticket_evidence_exposes_mismatched_ticket_for_caller_validation() {
+    let (pool, _tmp) = pool().await;
+    seed_workflow_evidence(&pool).await;
+    let repo = SqliteArtifactRepo::new(pool);
+
+    let evidence = repo
+        .verified_ticket_evidence(
+            TicketId(999),
+            voom_core::ids::ArtifactVerificationId(1),
+            voom_core::ArtifactHandleId(1),
+            FileLocationId(1),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(evidence.verification.workflow_ticket_id, Some(TicketId(1)));
+}
+
+#[tokio::test]
+async fn verified_ticket_evidence_exposes_mismatched_handle_for_caller_validation() {
+    let (pool, _tmp) = pool().await;
+    seed_workflow_evidence(&pool).await;
+    let repo = SqliteArtifactRepo::new(pool);
+
+    let evidence = repo
+        .verified_ticket_evidence(
+            TicketId(1),
+            voom_core::ids::ArtifactVerificationId(1),
+            voom_core::ArtifactHandleId(2),
+            FileLocationId(1),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(
+        evidence.verification.artifact_handle_id,
+        voom_core::ArtifactHandleId(1)
+    );
+}
+
+#[tokio::test]
+async fn verified_ticket_evidence_rejects_negative_persisted_ticket_id() {
+    let (pool, _tmp) = pool().await;
+    seed_workflow_evidence(&pool).await;
+    let mut connection = pool.acquire().await.unwrap();
+    sqlx::query("PRAGMA foreign_keys = OFF")
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE artifact_verifications SET workflow_ticket_id = -1 WHERE id = 1")
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+    drop(connection);
+    let repo = SqliteArtifactRepo::new(pool);
+
+    let error = repo
+        .verified_ticket_evidence(
+            TicketId(1),
+            voom_core::ids::ArtifactVerificationId(1),
+            voom_core::ArtifactHandleId(1),
+            FileLocationId(1),
+        )
+        .await
+        .unwrap_err();
+
+    assert!(matches!(error, VoomError::Database { .. }));
+    assert!(error.to_string().contains("workflow_ticket_id"));
+}
+
+#[tokio::test]
+async fn verified_ticket_evidence_rejects_negative_persisted_handle_id() {
+    let (pool, _tmp) = pool().await;
+    seed_workflow_evidence(&pool).await;
+    let mut connection = pool.acquire().await.unwrap();
+    sqlx::query("PRAGMA foreign_keys = OFF")
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE artifact_verifications SET artifact_handle_id = -1 WHERE id = 1")
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+    drop(connection);
+    let repo = SqliteArtifactRepo::new(pool);
+
+    let error = repo
+        .verified_ticket_evidence(
+            TicketId(1),
+            voom_core::ids::ArtifactVerificationId(1),
+            voom_core::ArtifactHandleId(1),
+            FileLocationId(1),
+        )
+        .await
+        .unwrap_err();
+
+    assert!(matches!(error, VoomError::Database { .. }));
+    assert!(error.to_string().contains("artifact_handle_id"));
 }
 
 #[tokio::test]

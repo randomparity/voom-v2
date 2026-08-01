@@ -1605,6 +1605,7 @@ impl FileLocationRepo for SqliteIdentityRepo {
              FROM file_locations fl JOIN file_versions fv ON fv.id = fl.file_version_id \
              WHERE fl.id IN (SELECT value FROM json_each(?)) \
                AND fl.retired_at IS NULL AND fl.kind = 'local_path' \
+               AND fv.retired_at IS NULL \
                AND NOT EXISTS (SELECT 1 FROM file_versions newer \
                    WHERE newer.file_asset_id = fv.file_asset_id \
                      AND newer.retired_at IS NULL AND newer.id > fv.id) \

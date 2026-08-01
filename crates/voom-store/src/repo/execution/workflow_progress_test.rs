@@ -66,6 +66,19 @@ async fn branch_for_input_ordinal_is_job_scoped_and_optional() {
 }
 
 #[tokio::test]
+async fn branch_for_input_ordinal_rejects_job_id_above_sqlite_range() {
+    let (repo, _pool, _tmp) = fixture().await;
+
+    let error = repo
+        .branch_for_input_ordinal(JobId(u64::MAX), 7)
+        .await
+        .unwrap_err();
+
+    assert!(matches!(error, VoomError::Database { .. }));
+    assert!(error.to_string().contains("workflow branch job id"));
+}
+
+#[tokio::test]
 async fn rollback_leaves_branch_projection_unchanged() {
     let (repo, pool, _tmp) = fixture().await;
     let mut tx = pool.begin().await.unwrap();

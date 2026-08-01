@@ -922,6 +922,19 @@ async fn file_run_asset_id_resolves_through_starting_version() {
 }
 
 #[tokio::test]
+async fn file_run_asset_id_rejects_job_id_above_sqlite_range() {
+    let (repo, _tmp) = repo().await;
+
+    let error = repo
+        .file_run_asset_id(JobId(u64::MAX), "alpha")
+        .await
+        .unwrap_err();
+
+    assert!(matches!(error, VoomError::Database { .. }));
+    assert!(error.to_string().contains("workflow file run job id"));
+}
+
+#[tokio::test]
 async fn rollback_leaves_file_run_asset_projection_unchanged() {
     let (repo, _tmp) = repo().await;
     repo.insert_file_run_starts(JOB, vec![file_run_start("alpha", 1, 0)])

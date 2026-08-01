@@ -360,19 +360,20 @@ impl SqliteArtifactRepo {
 
     pub async fn verified_ticket_evidence(
         &self,
-        ticket_id: TicketId,
+        _ticket_id: TicketId,
         verification_id: ArtifactVerificationId,
-        handle_id: ArtifactHandleId,
+        _handle_id: ArtifactHandleId,
         location_id: FileLocationId,
     ) -> Result<Option<VerifiedTicketEvidence>, VoomError> {
         let sql = format!(
             "{SELECT_ARTIFACT_VERIFICATION_COLS}, \
              fl.file_version_id AS selected_file_version_id, \
-             fl.value AS selected_location_value \
+             fl.value AS selected_location_value, \
+             l.ticket_id AS selected_lease_ticket_id \
              FROM artifact_verifications v \
-             JOIN leases l ON l.id = v.workflow_lease_id AND l.ticket_id = v.workflow_ticket_id \
+             LEFT JOIN leases l ON l.id = v.workflow_lease_id \
              LEFT JOIN file_locations fl ON fl.id = ? AND fl.retired_at IS NULL \
-             WHERE v.workflow_ticket_id = ? AND v.id = ? AND v.artifact_handle_id = ?"
+             WHERE v.id = ?"
         );
         let row = sqlx::query(&sql)
             .bind(checked_sqlite_id(
@@ -380,16 +381,8 @@ impl SqliteArtifactRepo {
                 "verified file location id",
             )?)
             .bind(checked_sqlite_id(
-                ticket_id.0,
-                "verified workflow ticket id",
-            )?)
-            .bind(checked_sqlite_id(
                 verification_id.0,
                 "verified artifact verification id",
-            )?)
-            .bind(checked_sqlite_id(
-                handle_id.0,
-                "verified artifact handle id",
             )?)
             .fetch_optional(&self.pool)
             .await
@@ -2332,11 +2325,32 @@ fn decode_verified_ticket_evidence(
     row: &sqlx::sqlite::SqliteRow,
 ) -> Result<VerifiedTicketEvidence, VoomError> {
     validate_verification_integer_fields(row)?;
+    let verification = row_to_verification(row)?;
+    validate_verification_lease_ticket(row, &verification)?;
     Ok(VerifiedTicketEvidence {
-        verification: row_to_verification(row)?,
+        verification,
         file_version_id: evidence_optional_id(row, "selected_file_version_id", FileVersionId)?,
         location_value: evidence_value(row, "selected_location_value")?,
     })
+}
+
+fn validate_verification_lease_ticket(
+    row: &sqlx::sqlite::SqliteRow,
+    verification: &ArtifactVerification,
+) -> Result<(), VoomError> {
+    let lease_ticket_id = evidence_optional_id(row, "selected_lease_ticket_id", TicketId)?;
+    match (
+        verification.workflow_ticket_id,
+        verification.workflow_lease_id,
+        lease_ticket_id,
+    ) {
+        (None, None, None) => Ok(()),
+        (Some(ticket_id), Some(_), Some(lease_ticket_id)) if ticket_id == lease_ticket_id => Ok(()),
+        _ => Err(VoomError::database(format!(
+            "artifact verification {} workflow lease ticket mismatch",
+            verification.id
+        ))),
+    }
 }
 
 fn validate_verification_integer_fields(row: &sqlx::sqlite::SqliteRow) -> Result<(), VoomError> {

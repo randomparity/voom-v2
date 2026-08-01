@@ -447,11 +447,14 @@ impl SqliteWorkflowProgressRepo {
         job_id: JobId,
         input_ordinal: u32,
     ) -> Result<Option<String>, VoomError> {
+        let job_id = i64::try_from(job_id.0).map_err(|error| {
+            VoomError::database_context("workflow branch job id exceeds SQLite i64", error)
+        })?;
         sqlx::query_scalar(
             "SELECT branch_id FROM workflow_file_progress \
              WHERE job_id = ? AND input_ordinal = ?",
         )
-        .bind(i64_from_u64(job_id.0))
+        .bind(job_id)
         .bind(i64::from(input_ordinal))
         .fetch_optional(&self.pool)
         .await

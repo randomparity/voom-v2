@@ -623,13 +623,16 @@ impl SqliteWorkflowSummaryRepo {
         job_id: JobId,
         branch_id: &str,
     ) -> Result<Option<FileAssetId>, VoomError> {
+        let job_id = i64::try_from(job_id.0).map_err(|error| {
+            VoomError::database_context("workflow file run job id exceeds SQLite i64", error)
+        })?;
         let asset_id: Option<i64> = sqlx::query_scalar(
             "SELECT fv.file_asset_id \
              FROM workflow_file_run_starts start \
              JOIN file_versions fv ON fv.id = start.starting_file_version_id \
              WHERE start.job_id = ? AND start.branch_id = ?",
         )
-        .bind(i64_from_u64(job_id.0))
+        .bind(job_id)
         .bind(branch_id)
         .fetch_optional(&self.pool)
         .await
