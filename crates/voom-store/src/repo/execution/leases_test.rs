@@ -212,6 +212,101 @@ async fn acquire_promotes_ticket_to_leased_and_bumps_attempt() {
 }
 
 #[tokio::test]
+async fn dispatch_context_projects_held_lease_worker_epoch_and_expiry() {
+    let (pool, _trepo, _wrepo, lrepo, ticket_id, worker_id, _tmp) = setup().await;
+    sqlx::query("UPDATE workers SET epoch = 7 WHERE id = ?")
+        .bind(i64::try_from(worker_id.0).unwrap())
+        .execute(&pool)
+        .await
+        .unwrap();
+    let lease = lrepo
+        .acquire(NewLease {
+            ticket_id,
+            worker_id,
+            ttl: Duration::seconds(60),
+            now: T0,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(
+        lrepo.dispatch_context(lease.id).await.unwrap(),
+        Some(LeaseDispatchContext {
+            worker_id,
+            worker_epoch: 7,
+            expires_at: T0 + Duration::seconds(60),
+        })
+    );
+
+    lrepo
+        .release(lease.id, json!({}), T0 + Duration::seconds(1))
+        .await
+        .unwrap();
+    assert_eq!(lrepo.dispatch_context(lease.id).await.unwrap(), None);
+}
+
+#[tokio::test]
+async fn dispatch_context_returns_none_when_the_worker_row_is_missing() {
+    let (pool, _trepo, _wrepo, lrepo, ticket_id, worker_id, _tmp) = setup().await;
+    let lease = lrepo
+        .acquire(NewLease {
+            ticket_id,
+            worker_id,
+            ttl: Duration::seconds(60),
+            now: T0,
+        })
+        .await
+        .unwrap();
+    let mut connection = pool.acquire().await.unwrap();
+    sqlx::query("PRAGMA foreign_keys = OFF")
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM workers WHERE id = ?")
+        .bind(i64::try_from(worker_id.0).unwrap())
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+    drop(connection);
+
+    assert_eq!(lrepo.dispatch_context(lease.id).await.unwrap(), None);
+}
+
+#[tokio::test]
+async fn dispatch_context_rejects_negative_worker_epoch_as_database_error() {
+    let (pool, _trepo, _wrepo, lrepo, ticket_id, worker_id, _tmp) = setup().await;
+    let lease = lrepo
+        .acquire(NewLease {
+            ticket_id,
+            worker_id,
+            ttl: Duration::seconds(60),
+            now: T0,
+        })
+        .await
+        .unwrap();
+    sqlx::query("UPDATE workers SET epoch = -1 WHERE id = ?")
+        .bind(i64::try_from(worker_id.0).unwrap())
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let error = lrepo.dispatch_context(lease.id).await.unwrap_err();
+
+    assert!(matches!(error, VoomError::Database { .. }));
+    assert!(error.to_string().contains("epoch"));
+}
+
+#[tokio::test]
+async fn dispatch_context_rejects_lease_id_above_sqlite_integer_range() {
+    let (_pool, _trepo, _wrepo, lrepo, _ticket_id, _worker_id, _tmp) = setup().await;
+
+    let error = lrepo.dispatch_context(LeaseId(u64::MAX)).await.unwrap_err();
+
+    assert!(matches!(error, VoomError::Config(_)));
+    assert!(error.to_string().contains("lease id"));
+}
+
+#[tokio::test]
 async fn acquire_resolves_namespaced_workflow_ticket_kind_to_worker_operation() {
     let (pool, _trepo, _wrepo, lrepo, ticket_id, worker_id, _tmp) = setup().await;
     sqlx::query("UPDATE tickets SET kind = 'synthetic.workflow.operation.noop' WHERE id = ?")

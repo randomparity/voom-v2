@@ -1,13 +1,12 @@
 use std::path::{Path, PathBuf};
 
-use sqlx::Row;
 use voom_core::ids::{ArtifactCommitRecordId, ArtifactVerificationId};
 use voom_core::{
     ArtifactHandleId, ArtifactLocationId, FileLocationId, FileVersionId, VoomError, WorkerId,
 };
 use voom_store::repo::media::artifacts::{
-    ArtifactCommitRecord, ArtifactCommitState, ArtifactLocation, ArtifactVerification,
-    ArtifactVerificationStatus,
+    ArtifactCommitRecord, ArtifactCommitState, ArtifactHandleFacts, ArtifactLocation,
+    ArtifactVerification, ArtifactVerificationStatus,
 };
 
 use crate::ControlPlane;
@@ -137,14 +136,6 @@ pub struct PathFacts {
     pub local_file_key: Option<String>,
 }
 
-#[derive(Debug, Clone)]
-struct HandleFacts {
-    id: ArtifactHandleId,
-    source_file_version_id: Option<FileVersionId>,
-    size_bytes: Option<u64>,
-    checksum: Option<String>,
-}
-
 impl ControlPlane {
     pub async fn list_artifacts(
         &self,
@@ -161,8 +152,10 @@ impl ControlPlane {
         // stable handle id. The derived `state` filter drops non-matching rows
         // from the result, but the cursor advances by the scan window so paging
         // stays bounded and never re-scans (ADR 0031).
-        let handle_ids =
-            list_handle_ids_newest_first(self, Some(input.limit), input.after_id).await?;
+        let handle_ids = self
+            .artifacts
+            .list_handle_ids(input.after_id, Some(input.limit))
+            .await?;
         let scanned = handle_ids.len();
         let mut artifacts = Vec::new();
         let mut last_scanned = None;
@@ -211,16 +204,19 @@ async fn build_artifact_detail(
     handle_id: ArtifactHandleId,
 ) -> Result<ArtifactDetail, VoomError> {
     let facts = read_handle_facts(cp, handle_id).await?;
-    let locations = cp.artifacts.list_locations_for_handle(facts.id).await?;
+    let locations = cp
+        .artifacts
+        .list_locations_for_handle(facts.handle.id)
+        .await?;
     let live_staging = one_live_staging_location(&locations);
     let verifications = cp
         .artifacts
-        .list_verifications(facts.id)
+        .list_verifications(facts.handle.id)
         .await?
         .into_iter()
         .map(VerificationSummary::from)
         .collect::<Vec<_>>();
-    let raw_commits = cp.artifacts.list_commit_records(facts.id).await?;
+    let raw_commits = cp.artifacts.list_commit_records(facts.handle.id).await?;
     let state = derive_state(live_staging, &verifications, &raw_commits);
     let staging_path = live_staging.map(|location| PathBuf::from(&location.value));
     let latest_verification = verifications.last().cloned();
@@ -231,9 +227,9 @@ async fn build_artifact_detail(
         .map(|commit| commit.target_path.clone());
 
     Ok(ArtifactDetail {
-        artifact_handle_id: facts.id,
+        artifact_handle_id: facts.handle.id,
         state,
-        source_file_version_id: facts.source_file_version_id,
+        source_file_version_id: facts.handle.file_version_id,
         staging_path,
         target_path,
         size_bytes: facts.size_bytes,
@@ -398,93 +394,11 @@ async fn observe_path(path: impl AsRef<Path>) -> Result<PathObservation, VoomErr
     }
 }
 
-async fn list_handle_ids_newest_first(
-    cp: &ControlPlane,
-    limit: Option<u32>,
-    after_id: Option<u64>,
-) -> Result<Vec<ArtifactHandleId>, VoomError> {
-    let after = after_id
-        .map(|id| i64_from_u64(id, "after_id"))
-        .transpose()?;
-    let rows = match limit {
-        Some(limit) => {
-            sqlx::query(
-                "SELECT id FROM artifact_handles \
-                 WHERE (?1 IS NULL OR id < ?1) ORDER BY id DESC LIMIT ?2",
-            )
-            .bind(after)
-            .bind(i64::from(limit))
-            .fetch_all(&cp.pool)
-            .await
-        }
-        None => {
-            sqlx::query(
-                "SELECT id FROM artifact_handles \
-                 WHERE (?1 IS NULL OR id < ?1) ORDER BY id DESC",
-            )
-            .bind(after)
-            .fetch_all(&cp.pool)
-            .await
-        }
-    }
-    .map_err(|err| VoomError::database_context("artifact_handles list", err))?;
-    rows.iter()
-        .map(|row| {
-            let id: i64 = row
-                .try_get("id")
-                .map_err(|err| VoomError::database_context("artifact_handles.id", err))?;
-            Ok(ArtifactHandleId(u64_from_i64(id, "artifact_handles.id")?))
-        })
-        .collect()
-}
-
 async fn read_handle_facts(
     cp: &ControlPlane,
     handle_id: ArtifactHandleId,
-) -> Result<HandleFacts, VoomError> {
-    let row = sqlx::query(
-        "SELECT id, file_version_id, size_bytes, checksum \
-         FROM artifact_handles WHERE id = ?",
-    )
-    .bind(i64_from_u64(handle_id.0, "artifact_handles.id")?)
-    .fetch_optional(&cp.pool)
-    .await
-    .map_err(|err| VoomError::database_context("artifact_handles facts", err))?
-    .ok_or_else(|| VoomError::NotFound(format!("artifact_handles {handle_id} missing")))?;
-    let id: i64 = row
-        .try_get("id")
-        .map_err(|err| VoomError::database_context("artifact_handles.id", err))?;
-    let file_version_id: Option<i64> = row
-        .try_get("file_version_id")
-        .map_err(|err| VoomError::database_context("artifact_handles.file_version_id", err))?;
-    let size_bytes: Option<i64> = row
-        .try_get("size_bytes")
-        .map_err(|err| VoomError::database_context("artifact_handles.size_bytes", err))?;
-    let checksum: Option<String> = row
-        .try_get("checksum")
-        .map_err(|err| VoomError::database_context("artifact_handles.checksum", err))?;
-
-    Ok(HandleFacts {
-        id: ArtifactHandleId(u64_from_i64(id, "artifact_handles.id")?),
-        source_file_version_id: file_version_id
-            .map(|value| u64_from_i64(value, "artifact_handles.file_version_id"))
-            .transpose()?
-            .map(FileVersionId),
-        size_bytes: size_bytes
-            .map(|value| u64_from_i64(value, "artifact_handles.size_bytes"))
-            .transpose()?,
-        checksum,
-    })
-}
-
-fn i64_from_u64(value: u64, name: &str) -> Result<i64, VoomError> {
-    i64::try_from(value)
-        .map_err(|err| VoomError::Internal(format!("{name} exceeds SQLite integer: {err}")))
-}
-
-fn u64_from_i64(value: i64, name: &str) -> Result<u64, VoomError> {
-    u64::try_from(value)
-        .map_err(|err| VoomError::database_context(format!("{name} is negative"), err))
+) -> Result<ArtifactHandleFacts, VoomError> {
+    cp.artifacts.handle_facts(handle_id).await
 }
 
 #[cfg(test)]

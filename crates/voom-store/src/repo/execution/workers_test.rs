@@ -47,6 +47,62 @@ async fn register_with_duplicate_name_fails() {
 }
 
 #[tokio::test]
+async fn register_builtin_if_missing_inserts_and_returns_the_worker() {
+    let (pool, _tmp) = pool().await;
+    let repo = SqliteWorkerRepo::new(pool.clone());
+    let input = NewWorker {
+        name: "builtin.verify_artifact".to_owned(),
+        kind: WorkerKind::Local,
+        registered_at: T0,
+        node_id: None,
+    };
+    let mut tx = pool.begin().await.unwrap();
+
+    let worker = repo
+        .register_builtin_if_missing_in_tx(&mut tx, input)
+        .await
+        .unwrap();
+
+    assert_eq!(worker.name, "builtin.verify_artifact");
+    assert_eq!(worker.kind, WorkerKind::Local);
+    assert_eq!(worker.status, WorkerStatus::Registered);
+    assert_eq!(worker.registered_at, T0);
+    tx.rollback().await.unwrap();
+}
+
+#[tokio::test]
+async fn register_builtin_if_missing_returns_existing_identity_without_mutation() {
+    let (pool, _tmp) = pool().await;
+    let repo = SqliteWorkerRepo::new(pool.clone());
+    let existing = repo
+        .register(sample_new_worker("builtin.worker"))
+        .await
+        .unwrap();
+    let mut tx = pool.begin().await.unwrap();
+
+    let returned = repo
+        .register_builtin_if_missing_in_tx(
+            &mut tx,
+            NewWorker {
+                name: existing.name.clone(),
+                kind: WorkerKind::Local,
+                registered_at: T0 + time::Duration::hours(1),
+                node_id: Some(voom_core::NodeId(42)),
+            },
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(returned.id, existing.id);
+    assert_eq!(returned.name, existing.name);
+    assert_eq!(returned.kind, existing.kind);
+    assert_eq!(returned.registered_at, existing.registered_at);
+    assert_eq!(returned.node_id, existing.node_id);
+    assert_eq!(returned.epoch, existing.epoch);
+    tx.rollback().await.unwrap();
+}
+
+#[tokio::test]
 async fn get_by_name_returns_seeded_worker() {
     let (pool, _tmp) = pool().await;
     let repo = SqliteWorkerRepo::new(pool.clone());

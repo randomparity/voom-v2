@@ -120,6 +120,13 @@ pub struct LeaseInterval {
     pub released_at: Option<OffsetDateTime>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LeaseDispatchContext {
+    pub worker_id: WorkerId,
+    pub worker_epoch: u64,
+    pub expires_at: OffsetDateTime,
+}
+
 /// Durable operation-capacity observation that rejected a lease acquisition.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkerCapacitySaturation {
@@ -1025,6 +1032,40 @@ impl SqliteLeaseRepo {
             .await
             .map_err(|e| VoomError::database_context("leases get", e))?;
         row.as_ref().map(row_to_lease).transpose()
+    }
+
+    /// Return the worker context for a currently held lease.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VoomError::Database`] if the row or timestamp cannot be decoded.
+    pub async fn dispatch_context(
+        &self,
+        lease_id: LeaseId,
+    ) -> Result<Option<LeaseDispatchContext>, VoomError> {
+        let row: Option<(i64, i64, String)> = sqlx::query_as(
+            "SELECT workers.id, workers.epoch, leases.expires_at \
+             FROM leases JOIN workers ON workers.id = leases.worker_id \
+             WHERE leases.id = ? AND leases.state = 'held'",
+        )
+        .bind(i64::try_from(lease_id.0).map_err(|error| {
+            VoomError::Config(format!("lease id exceeds SQLite integer: {error}"))
+        })?)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|error| VoomError::database_context("lease dispatch context", error))?;
+        row.map(|(worker_id, worker_epoch, expires_at)| {
+            Ok(LeaseDispatchContext {
+                worker_id: WorkerId(u64::try_from(worker_id).map_err(|error| {
+                    VoomError::database_context("lease dispatch worker id negative", error)
+                })?),
+                worker_epoch: u64::try_from(worker_epoch).map_err(|error| {
+                    VoomError::database_context("lease dispatch worker epoch negative", error)
+                })?,
+                expires_at: parse_iso8601(&expires_at)?,
+            })
+        })
+        .transpose()
     }
 
     /// Return every lease interval for tickets in one job in deterministic order.

@@ -3,7 +3,6 @@ use std::path::{Path, PathBuf};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use sqlx::Row;
 use voom_core::ids::{ArtifactCommitRecordId, ArtifactVerificationId};
 use voom_core::{
     ArtifactHandleId, ArtifactLocationId, FileLocationId, FileVersionId, JobId, LeaseId,
@@ -2245,43 +2244,14 @@ async fn audio_dispatch_lease(
     cp: &ControlPlane,
     lease_id: LeaseId,
 ) -> Result<(voom_core::WorkerId, u32, time::OffsetDateTime), VoomError> {
-    let row = sqlx::query(
-        "SELECT leases.expires_at, workers.id AS worker_id, workers.epoch AS worker_epoch \
-         FROM leases JOIN workers ON workers.id = leases.worker_id \
-         WHERE leases.id = ? AND leases.state = 'held'",
-    )
-    .bind(i64::try_from(lease_id.0).map_err(|error| {
-        VoomError::Config(format!("audio dispatch lease id is invalid: {error}"))
-    })?)
-    .fetch_optional(&cp.pool)
-    .await
-    .map_err(|error| VoomError::database_context("audio dispatch lease", error))?
-    .ok_or_else(|| {
+    let context = cp.leases.dispatch_context(lease_id).await?.ok_or_else(|| {
         VoomError::Conflict(format!("audio dispatch lease {} is not held", lease_id.0))
     })?;
-    let expires_at: String = row.try_get("expires_at").map_err(|error| {
-        VoomError::database_context("audio dispatch lease expiry decode", error)
-    })?;
-    let expires_at =
-        time::OffsetDateTime::parse(&expires_at, &time::format_description::well_known::Rfc3339)
-            .map_err(|error| {
-                VoomError::database(format!("audio dispatch lease expiry: {error}"))
-            })?;
-    let worker_epoch: i64 = row
-        .try_get("worker_epoch")
-        .map_err(|error| VoomError::database_context("audio worker epoch decode", error))?;
     Ok((
-        voom_core::WorkerId(
-            u64::try_from(
-                row.try_get::<i64, _>("worker_id").map_err(|error| {
-                    VoomError::database_context("audio worker id decode", error)
-                })?,
-            )
-            .map_err(|error| VoomError::database(format!("audio worker id: {error}")))?,
-        ),
-        u32::try_from(worker_epoch)
+        context.worker_id,
+        u32::try_from(context.worker_epoch)
             .map_err(|error| VoomError::database(format!("audio worker epoch: {error}")))?,
-        expires_at,
+        context.expires_at,
     ))
 }
 

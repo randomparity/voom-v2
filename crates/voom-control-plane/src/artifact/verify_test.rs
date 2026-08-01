@@ -194,7 +194,8 @@ async fn verification_persistence_survives_a_concurrent_writer_attempt() {
             workflow_ticket_id: None,
             workflow_lease_id: None,
         },
-        ExpectedArtifactFacts {
+        ArtifactExpectedFacts {
+            source_file_version_id: Some(staged.source_file_version_id),
             size_bytes: 12,
             checksum: blake3_checksum(b"source bytes"),
         },

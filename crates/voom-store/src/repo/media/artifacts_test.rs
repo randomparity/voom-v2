@@ -101,6 +101,53 @@ async fn create_staged_handle(
     repo.create_handle(input).await.unwrap()
 }
 
+async fn pending_record_fixture(
+    pool: &sqlx::SqlitePool,
+    repo: &SqliteArtifactRepo,
+) -> ArtifactCommitRecord {
+    let worker_id = verification_worker(pool).await;
+    let (source_version_id, _) = source_version_and_location(pool).await;
+    let handle = create_staged_handle(repo, source_version_id).await;
+    let location = repo
+        .record_location(NewArtifactLocation {
+            artifact_handle_id: handle.id,
+            kind: "staging".to_owned(),
+            value: "/staging/report.mkv".to_owned(),
+            observed_at: OffsetDateTime::UNIX_EPOCH,
+        })
+        .await
+        .unwrap();
+    let mut tx = pool.begin().await.unwrap();
+    let verification = repo
+        .record_verification_in_tx(
+            &mut tx,
+            successful_verification(
+                handle.id,
+                location.id,
+                worker_id,
+                &location.value,
+                "report",
+                1,
+            ),
+        )
+        .await
+        .unwrap();
+    let pending = repo
+        .create_pending_commit_in_tx(
+            &mut tx,
+            pending_commit(
+                handle.id,
+                source_version_id,
+                verification.id,
+                "/media/report.mkv",
+            ),
+        )
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    pending
+}
+
 async fn source_asset_id(
     identity: &SqliteIdentityRepo,
     source_version_id: FileVersionId,
@@ -433,6 +480,294 @@ async fn create_handle_returns_id() {
     let repo = SqliteArtifactRepo::new(pool.clone());
     let h = repo.create_handle(sample_new_handle()).await.unwrap();
     assert!(h.id.0 > 0);
+}
+
+#[tokio::test]
+async fn list_handle_ids_pages_newest_first_by_exclusive_id() {
+    let (pool, _tmp) = pool().await;
+    let repo = SqliteArtifactRepo::new(pool);
+    let first = repo.create_handle(sample_new_handle()).await.unwrap();
+    let second = repo.create_handle(sample_new_handle()).await.unwrap();
+    let third = repo.create_handle(sample_new_handle()).await.unwrap();
+
+    assert_eq!(
+        repo.list_handle_ids(None, Some(2)).await.unwrap(),
+        vec![third.id, second.id]
+    );
+    assert_eq!(
+        repo.list_handle_ids(Some(second.id.0), None).await.unwrap(),
+        vec![first.id]
+    );
+}
+
+#[tokio::test]
+async fn handle_facts_preserves_optional_inspection_values() {
+    let (pool, _tmp) = pool().await;
+    let repo = SqliteArtifactRepo::new(pool);
+    let mut input = sample_new_handle();
+    input.size_bytes = None;
+    input.checksum = None;
+    let handle = repo.create_handle(input).await.unwrap();
+
+    let facts = repo.handle_facts(handle.id).await.unwrap();
+
+    assert_eq!(
+        facts,
+        ArtifactHandleFacts {
+            handle,
+            size_bytes: None,
+            checksum: None,
+        }
+    );
+}
+
+#[tokio::test]
+async fn require_expected_facts_returns_typed_values_inside_and_outside_transaction() {
+    let (pool, _tmp) = pool().await;
+    let repo = SqliteArtifactRepo::new(pool.clone());
+    let (source_version_id, _) = source_version_and_location(&pool).await;
+    let handle = create_staged_handle(&repo, source_version_id).await;
+    let expected = ArtifactExpectedFacts {
+        source_file_version_id: Some(source_version_id),
+        size_bytes: 1024,
+        checksum: "abc".to_owned(),
+    };
+
+    assert_eq!(
+        repo.require_expected_facts(handle.id).await.unwrap(),
+        expected
+    );
+    let mut tx = pool.begin().await.unwrap();
+    assert_eq!(
+        repo.require_expected_facts_in_tx(&mut tx, handle.id)
+            .await
+            .unwrap(),
+        expected
+    );
+    tx.rollback().await.unwrap();
+}
+
+#[tokio::test]
+async fn require_expected_facts_rejects_missing_size_and_checksum_with_context() {
+    let (pool, _tmp) = pool().await;
+    let repo = SqliteArtifactRepo::new(pool);
+    for (size_bytes, checksum, missing_field) in [
+        (None, Some("abc".to_owned()), "size_bytes"),
+        (Some(1024), None, "checksum"),
+    ] {
+        let mut input = sample_new_handle();
+        input.size_bytes = size_bytes;
+        input.checksum = checksum;
+        let handle = repo.create_handle(input).await.unwrap();
+
+        let error = repo.require_expected_facts(handle.id).await.unwrap_err();
+
+        assert!(matches!(error, VoomError::Config(_)));
+        assert!(error.to_string().contains(&handle.id.to_string()));
+        assert!(error.to_string().contains(missing_field));
+    }
+}
+
+#[tokio::test]
+async fn require_expected_facts_rejects_negative_persisted_size_as_database_error() {
+    let (pool, _tmp) = pool().await;
+    let repo = SqliteArtifactRepo::new(pool.clone());
+    let handle = repo.create_handle(sample_new_handle()).await.unwrap();
+    sqlx::query("UPDATE artifact_handles SET size_bytes = -1 WHERE id = ?")
+        .bind(i64::try_from(handle.id.0).unwrap())
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let error = repo.require_expected_facts(handle.id).await.unwrap_err();
+
+    assert!(matches!(error, VoomError::Database { .. }));
+    assert!(error.to_string().contains("size_bytes"));
+}
+
+#[tokio::test]
+async fn artifact_projections_reject_ids_above_sqlite_integer_range() {
+    let (pool, _tmp) = pool().await;
+    let repo = SqliteArtifactRepo::new(pool.clone());
+    let invalid_handle_id = ArtifactHandleId(u64::MAX);
+    let invalid_location_id = ArtifactLocationId(u64::MAX);
+
+    assert!(matches!(
+        repo.handle_facts(invalid_handle_id).await.unwrap_err(),
+        VoomError::Internal(_)
+    ));
+    assert!(matches!(
+        repo.require_expected_facts(invalid_handle_id)
+            .await
+            .unwrap_err(),
+        VoomError::Internal(_)
+    ));
+    let mut tx = pool.begin().await.unwrap();
+    assert!(matches!(
+        repo.live_location_of_kind_in_tx(&mut tx, invalid_handle_id, "staging")
+            .await
+            .unwrap_err(),
+        VoomError::Internal(_)
+    ));
+    assert!(matches!(
+        repo.require_live_location_in_tx(
+            &mut tx,
+            ArtifactHandleId(1),
+            invalid_location_id,
+            "staging",
+            "/staging/invalid.mkv",
+        )
+        .await
+        .unwrap_err(),
+        VoomError::Internal(_)
+    ));
+    tx.rollback().await.unwrap();
+}
+
+#[tokio::test]
+async fn live_location_of_kind_selects_the_exact_single_live_location() {
+    let (pool, _tmp) = pool().await;
+    let repo = SqliteArtifactRepo::new(pool.clone());
+    let handle = repo.create_handle(sample_new_handle()).await.unwrap();
+    let location = repo
+        .record_location(NewArtifactLocation {
+            artifact_handle_id: handle.id,
+            kind: "staging".to_owned(),
+            value: "/staging/exact.mkv".to_owned(),
+            observed_at: OffsetDateTime::UNIX_EPOCH,
+        })
+        .await
+        .unwrap();
+    let mut tx = pool.begin().await.unwrap();
+
+    assert_eq!(
+        repo.live_location_of_kind_in_tx(&mut tx, handle.id, "staging")
+            .await
+            .unwrap(),
+        Some(LiveArtifactLocation {
+            id: location.id,
+            kind: "staging".to_owned(),
+            value: location.value,
+        })
+    );
+    tx.rollback().await.unwrap();
+}
+
+#[tokio::test]
+async fn live_location_of_kind_conflicts_when_multiple_locations_are_live() {
+    let (pool, _tmp) = pool().await;
+    let repo = SqliteArtifactRepo::new(pool.clone());
+    let handle = repo.create_handle(sample_new_handle()).await.unwrap();
+    for value in ["/staging/first.mkv", "/staging/second.mkv"] {
+        repo.record_location(NewArtifactLocation {
+            artifact_handle_id: handle.id,
+            kind: "staging".to_owned(),
+            value: value.to_owned(),
+            observed_at: OffsetDateTime::UNIX_EPOCH,
+        })
+        .await
+        .unwrap();
+    }
+    let mut tx = pool.begin().await.unwrap();
+
+    let error = repo
+        .live_location_of_kind_in_tx(&mut tx, handle.id, "staging")
+        .await
+        .unwrap_err();
+
+    assert!(matches!(error, VoomError::Conflict(_)));
+    assert!(error.to_string().contains("found 2"));
+    tx.rollback().await.unwrap();
+}
+
+#[tokio::test]
+async fn require_live_location_rejects_retired_or_replaced_rows() {
+    let (pool, _tmp) = pool().await;
+    let repo = SqliteArtifactRepo::new(pool.clone());
+    let handle = repo.create_handle(sample_new_handle()).await.unwrap();
+    let old = repo
+        .record_location(NewArtifactLocation {
+            artifact_handle_id: handle.id,
+            kind: "staging".to_owned(),
+            value: "/staging/old.mkv".to_owned(),
+            observed_at: OffsetDateTime::UNIX_EPOCH,
+        })
+        .await
+        .unwrap();
+    repo.retire_location(old.id, OffsetDateTime::UNIX_EPOCH)
+        .await
+        .unwrap();
+    repo.record_location(NewArtifactLocation {
+        artifact_handle_id: handle.id,
+        kind: "staging".to_owned(),
+        value: "/staging/replacement.mkv".to_owned(),
+        observed_at: OffsetDateTime::UNIX_EPOCH,
+    })
+    .await
+    .unwrap();
+    let mut tx = pool.begin().await.unwrap();
+
+    let error = repo
+        .require_live_location_in_tx(&mut tx, handle.id, old.id, "staging", "/staging/old.mkv")
+        .await
+        .unwrap_err();
+
+    assert!(matches!(error, VoomError::Config(_)));
+    tx.rollback().await.unwrap();
+}
+
+#[tokio::test]
+async fn require_live_location_rejects_wrong_owner_kind_and_value() {
+    let (pool, _tmp) = pool().await;
+    let repo = SqliteArtifactRepo::new(pool.clone());
+    let handle = repo.create_handle(sample_new_handle()).await.unwrap();
+    let other = repo.create_handle(sample_new_handle()).await.unwrap();
+    let location = repo
+        .record_location(NewArtifactLocation {
+            artifact_handle_id: handle.id,
+            kind: "staging".to_owned(),
+            value: "/staging/exact.mkv".to_owned(),
+            observed_at: OffsetDateTime::UNIX_EPOCH,
+        })
+        .await
+        .unwrap();
+    let mut tx = pool.begin().await.unwrap();
+
+    for (owner, kind, value) in [
+        (other.id, "staging", "/staging/exact.mkv"),
+        (handle.id, "local_path", "/staging/exact.mkv"),
+        (handle.id, "staging", "/staging/wrong.mkv"),
+    ] {
+        let error = repo
+            .require_live_location_in_tx(&mut tx, owner, location.id, kind, value)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, VoomError::Conflict(_)));
+    }
+    tx.rollback().await.unwrap();
+}
+
+#[tokio::test]
+async fn pending_commit_report_update_participates_in_caller_transaction() {
+    let (pool, _tmp) = pool().await;
+    let repo = SqliteArtifactRepo::new(pool.clone());
+    let pending = pending_record_fixture(&pool, &repo).await;
+    let mut tx = pool.begin().await.unwrap();
+    repo.update_pending_commit_report_in_tx(&mut tx, pending.id, &json!({"phase": "changed"}))
+        .await
+        .unwrap();
+    tx.rollback().await.unwrap();
+
+    let reloaded = repo.get_commit_record(pending.id).await.unwrap().unwrap();
+    assert_eq!(reloaded.report, pending.report);
+
+    let mut tx = pool.begin().await.unwrap();
+    repo.update_pending_commit_report_in_tx(&mut tx, pending.id, &json!({"phase": "saved"}))
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    let reloaded = repo.get_commit_record(pending.id).await.unwrap().unwrap();
+    assert_eq!(reloaded.report, json!({"phase": "saved"}));
 }
 
 #[tokio::test]

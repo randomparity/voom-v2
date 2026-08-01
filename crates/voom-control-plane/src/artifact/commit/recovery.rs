@@ -187,7 +187,7 @@ pub(super) async fn transition_recovery(
     let mut tx = begin_tx(&cp.pool).await?;
     let now = cp.clock().now();
     let recovery = observe_recovery(prepared, recovery_reason(&err)).await;
-    update_commit_report_in_tx(&mut tx, prepared.record.id, &recovery)
+    update_commit_report_in_tx(&cp.artifacts, &mut tx, prepared.record.id, &recovery)
         .await
         .map_err(CommitArtifactCommandError::from)?;
     let error_code = err.error_code().as_str().to_owned();

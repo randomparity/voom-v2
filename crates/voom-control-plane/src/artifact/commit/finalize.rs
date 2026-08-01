@@ -5,7 +5,7 @@ use voom_core::VoomError;
 use voom_core::ids::ArtifactCommitRecordId;
 use voom_events::Event;
 use voom_events::payload::ArtifactCommitCompletedPayload;
-use voom_store::repo::media::artifacts::ArtifactCommitRecord;
+use voom_store::repo::media::artifacts::{ArtifactCommitRecord, SqliteArtifactRepo};
 use voom_store::repo::media::identity::{
     FileLocationKind, FileLocationRepo, FileVersionRepo, NewFileLocation, NewFileVersion,
     ProducedBy,
@@ -101,11 +101,12 @@ pub(crate) async fn finalize_commit_in_tx(
 }
 
 pub(super) async fn update_commit_report_in_tx(
+    artifacts: &SqliteArtifactRepo,
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     id: ArtifactCommitRecordId,
     recovery: &CommitRecoveryReport,
 ) -> Result<(), VoomError> {
-    let report = serde_json::to_string(&json!({
+    let report = json!({
         "phase": "recovery_required",
         "recovery_reason": recovery.recovery_reason,
         "target_path": recovery.target_path.display().to_string(),
@@ -116,17 +117,10 @@ pub(super) async fn update_commit_report_in_tx(
         "staging_exists": recovery.staging_exists,
         "result_file_version_id": recovery.result_file_version_id.map(|id| id.0),
         "result_file_location_id": recovery.result_file_location_id.map(|id| id.0),
-    }))
-    .map_err(|err| VoomError::Internal(format!("commit recovery report encode: {err}")))?;
-    sqlx::query("UPDATE artifact_commit_records SET report = ? WHERE id = ? AND state = 'pending'")
-        .bind(report)
-        .bind(i64::try_from(id.0).map_err(|err| {
-            VoomError::Internal(format!("artifact commit id exceeds SQLite integer: {err}"))
-        })?)
-        .execute(&mut **tx)
+    });
+    artifacts
+        .update_pending_commit_report_in_tx(tx, id, &report)
         .await
-        .map_err(|err| VoomError::database_context("artifact_commit_records report update", err))?;
-    Ok(())
 }
 
 pub(super) fn report_from_record(

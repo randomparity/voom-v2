@@ -28,7 +28,7 @@ pub struct NewArtifactHandle {
     pub created_at: OffsetDateTime,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ArtifactHandle {
     pub id: ArtifactHandleId,
     pub file_version_id: Option<FileVersionId>,
@@ -36,6 +36,20 @@ pub struct ArtifactHandle {
     pub durability_class: String,
     pub mutability: String,
     pub created_at: OffsetDateTime,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArtifactHandleFacts {
+    pub handle: ArtifactHandle,
+    pub size_bytes: Option<u64>,
+    pub checksum: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArtifactExpectedFacts {
+    pub source_file_version_id: Option<FileVersionId>,
+    pub size_bytes: u64,
+    pub checksum: String,
 }
 
 #[derive(Debug, Clone)]
@@ -54,6 +68,13 @@ pub struct ArtifactLocation {
     pub value: String,
     pub observed_at: OffsetDateTime,
     pub retired_at: Option<OffsetDateTime>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LiveArtifactLocation {
+    pub id: ArtifactLocationId,
+    pub kind: String,
+    pub value: String,
 }
 
 #[derive(Debug, Clone)]
@@ -579,6 +600,217 @@ impl SqliteArtifactRepo {
         row.as_ref().map(row_to_handle).transpose()
     }
 
+    /// List handle ids newest first using an exclusive keyset cursor.
+    pub async fn list_handle_ids(
+        &self,
+        after_id: Option<u64>,
+        limit: Option<u32>,
+    ) -> Result<Vec<ArtifactHandleId>, VoomError> {
+        let after_id = after_id
+            .map(|id| checked_sqlite_id(id, "artifact_handles after_id"))
+            .transpose()?;
+        let rows: Vec<i64> = match limit {
+            Some(limit) => {
+                sqlx::query_scalar(
+                    "SELECT id FROM artifact_handles \
+                     WHERE (?1 IS NULL OR id < ?1) ORDER BY id DESC LIMIT ?2",
+                )
+                .bind(after_id)
+                .bind(i64::from(limit))
+                .fetch_all(&self.pool)
+                .await
+            }
+            None => {
+                sqlx::query_scalar(
+                    "SELECT id FROM artifact_handles \
+                     WHERE (?1 IS NULL OR id < ?1) ORDER BY id DESC",
+                )
+                .bind(after_id)
+                .fetch_all(&self.pool)
+                .await
+            }
+        }
+        .map_err(|error| VoomError::database_context("artifact_handles list", error))?;
+        rows.into_iter()
+            .map(|id| {
+                u64::try_from(id).map(ArtifactHandleId).map_err(|error| {
+                    VoomError::database_context("artifact_handles.id negative", error)
+                })
+            })
+            .collect()
+    }
+
+    /// Return handle metadata while preserving optional inspection facts.
+    pub async fn handle_facts(
+        &self,
+        handle_id: ArtifactHandleId,
+    ) -> Result<ArtifactHandleFacts, VoomError> {
+        let row = sqlx::query(
+            "SELECT id, file_version_id, privacy_class, durability_class, mutability, \
+                    created_at, size_bytes, checksum \
+             FROM artifact_handles WHERE id = ?",
+        )
+        .bind(checked_sqlite_id(handle_id.0, "artifact handle id")?)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|error| VoomError::database_context("artifact_handles facts", error))?
+        .ok_or_else(|| VoomError::NotFound(format!("artifact_handles {handle_id} missing")))?;
+        let size_bytes: Option<i64> = row
+            .try_get("size_bytes")
+            .map_err(|error| map_row_err("artifact_handles.size_bytes", &error))?;
+        let checksum = row
+            .try_get("checksum")
+            .map_err(|error| map_row_err("artifact_handles.checksum", &error))?;
+        Ok(ArtifactHandleFacts {
+            handle: row_to_handle(&row)?,
+            size_bytes: size_bytes
+                .map(|size| {
+                    u64::try_from(size).map_err(|error| {
+                        VoomError::database_context("artifact_handles.size_bytes negative", error)
+                    })
+                })
+                .transpose()?,
+            checksum,
+        })
+    }
+
+    /// Return the complete expected artifact facts required for verification.
+    pub async fn require_expected_facts(
+        &self,
+        handle_id: ArtifactHandleId,
+    ) -> Result<ArtifactExpectedFacts, VoomError> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|error| VoomError::database_context("begin", error))?;
+        let facts = self
+            .require_expected_facts_in_tx(&mut tx, handle_id)
+            .await?;
+        tx.commit()
+            .await
+            .map_err(|error| VoomError::database_context("commit", error))?;
+        Ok(facts)
+    }
+
+    /// Return complete expected artifact facts in the caller's transaction.
+    pub async fn require_expected_facts_in_tx(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        handle_id: ArtifactHandleId,
+    ) -> Result<ArtifactExpectedFacts, VoomError> {
+        let row: Option<(Option<i64>, Option<i64>, Option<String>)> = sqlx::query_as(
+            "SELECT file_version_id, size_bytes, checksum \
+             FROM artifact_handles WHERE id = ?",
+        )
+        .bind(checked_sqlite_id(handle_id.0, "artifact handle id")?)
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(|error| VoomError::database_context("artifact_handles expected facts", error))?;
+        let Some((source_file_version_id, size_bytes, checksum)) = row else {
+            return Err(VoomError::NotFound(format!(
+                "artifact_handles {handle_id} missing"
+            )));
+        };
+        let size_bytes = size_bytes.ok_or_else(|| {
+            VoomError::Config(format!(
+                "artifact_handle {handle_id} missing expected size_bytes"
+            ))
+        })?;
+        let checksum = checksum.ok_or_else(|| {
+            VoomError::Config(format!(
+                "artifact_handle {handle_id} missing expected checksum"
+            ))
+        })?;
+        Ok(ArtifactExpectedFacts {
+            source_file_version_id: source_file_version_id
+                .map(|id| {
+                    u64::try_from(id).map(FileVersionId).map_err(|error| {
+                        VoomError::database_context(
+                            "artifact_handles.file_version_id negative",
+                            error,
+                        )
+                    })
+                })
+                .transpose()?,
+            size_bytes: u64::try_from(size_bytes).map_err(|error| {
+                VoomError::database_context("artifact_handles.size_bytes negative", error)
+            })?,
+            checksum,
+        })
+    }
+
+    /// Return the sole live location of `kind`, conflicting on ambiguity.
+    pub async fn live_location_of_kind_in_tx(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        handle_id: ArtifactHandleId,
+        kind: &str,
+    ) -> Result<Option<LiveArtifactLocation>, VoomError> {
+        let rows: Vec<(i64, String, String)> = sqlx::query_as(
+            "SELECT id, kind, value FROM artifact_locations \
+             WHERE artifact_handle_id = ? AND kind = ? AND retired_at IS NULL \
+             ORDER BY id ASC",
+        )
+        .bind(checked_sqlite_id(handle_id.0, "artifact handle id")?)
+        .bind(kind)
+        .fetch_all(&mut **tx)
+        .await
+        .map_err(|error| VoomError::database_context("artifact_locations live kind", error))?;
+        match rows.as_slice() {
+            [] => Ok(None),
+            [(id, kind, value)] => Ok(Some(LiveArtifactLocation {
+                id: ArtifactLocationId(u64::try_from(*id).map_err(|error| {
+                    VoomError::database_context("artifact_locations.id negative", error)
+                })?),
+                kind: kind.clone(),
+                value: value.clone(),
+            })),
+            _ => Err(VoomError::Conflict(format!(
+                "artifact_handle {handle_id} must have at most one live {kind} location; found {}",
+                rows.len()
+            ))),
+        }
+    }
+
+    /// Require one selected location to retain its exact live identity.
+    pub async fn require_live_location_in_tx(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        handle_id: ArtifactHandleId,
+        location_id: ArtifactLocationId,
+        kind: &str,
+        value: &str,
+    ) -> Result<(), VoomError> {
+        let selected: Option<(i64, String, String, Option<String>)> = sqlx::query_as(
+            "SELECT artifact_handle_id, kind, value, retired_at \
+             FROM artifact_locations WHERE id = ?",
+        )
+        .bind(checked_sqlite_id(location_id.0, "artifact location id")?)
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(|error| VoomError::database_context("artifact_locations require live", error))?;
+        let Some((owner_id, stored_kind, stored_value, retired_at)) = selected else {
+            return Err(VoomError::NotFound(format!(
+                "artifact_locations {location_id} missing"
+            )));
+        };
+        let owner_id = u64::try_from(owner_id).map_err(|error| {
+            VoomError::database_context("artifact_locations.artifact_handle_id negative", error)
+        })?;
+        if owner_id != handle_id.0 || stored_kind != kind || stored_value != value {
+            return Err(VoomError::Conflict(format!(
+                "artifact_locations {location_id} no longer matches artifact_handle {handle_id}"
+            )));
+        }
+        if retired_at.is_some() {
+            return Err(VoomError::Config(format!(
+                "artifact_location {location_id} is no longer live {kind}"
+            )));
+        }
+        Ok(())
+    }
+
     pub async fn list_locations_for_handle(
         &self,
         handle_id: ArtifactHandleId,
@@ -1016,6 +1248,32 @@ impl SqliteArtifactRepo {
         .await
         .map_err(|e| VoomError::database_context("artifact_commit_records recovery_required", e))?;
         changed_commit_record(tx, id, res.rows_affected(), "recovery_required").await
+    }
+
+    /// Replace a pending commit report in the caller's transaction.
+    pub async fn update_pending_commit_report_in_tx(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        id: ArtifactCommitRecordId,
+        report: &JsonValue,
+    ) -> Result<(), VoomError> {
+        let report = serialize_json(report, "artifact_commit_records.report")?;
+        let result = sqlx::query(
+            "UPDATE artifact_commit_records SET report = ? WHERE id = ? AND state = 'pending'",
+        )
+        .bind(report)
+        .bind(checked_sqlite_id(id.0, "artifact commit id")?)
+        .execute(&mut **tx)
+        .await
+        .map_err(|error| {
+            VoomError::database_context("artifact_commit_records report update", error)
+        })?;
+        if result.rows_affected() != 1 {
+            return Err(VoomError::Conflict(format!(
+                "artifact_commit_records report update: id={id} not pending"
+            )));
+        }
+        Ok(())
     }
 
     pub async fn get_commit_record(
@@ -1580,6 +1838,11 @@ fn is_unique_violation(err: &sqlx::Error) -> bool {
         sqlx::Error::Database(db_err) => db_err.is_unique_violation(),
         _ => false,
     }
+}
+
+fn checked_sqlite_id(value: u64, context: &str) -> Result<i64, VoomError> {
+    i64::try_from(value)
+        .map_err(|error| VoomError::Internal(format!("{context} exceeds SQLite integer: {error}")))
 }
 
 #[derive(Debug)]

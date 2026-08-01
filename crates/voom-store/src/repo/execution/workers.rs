@@ -264,6 +264,39 @@ impl SqliteWorkerRepo {
         })
     }
 
+    /// Register a built-in worker without changing an existing identity.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VoomError::Database`] if the worker cannot be inserted or read,
+    /// and [`VoomError::Internal`] if the timestamp cannot be encoded.
+    pub async fn register_builtin_if_missing_in_tx(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        input: NewWorker,
+    ) -> Result<Worker, VoomError> {
+        let registered_at = iso8601(input.registered_at)?;
+        sqlx::query(
+            "INSERT OR IGNORE INTO workers \
+             (name, kind, status, registered_at, last_seen_at, node_id) \
+             VALUES (?, ?, 'registered', ?, ?, ?)",
+        )
+        .bind(&input.name)
+        .bind(input.kind.as_str())
+        .bind(&registered_at)
+        .bind(&registered_at)
+        .bind(input.node_id.map(|id| i64_from_u64(id.0)))
+        .execute(&mut **tx)
+        .await
+        .map_err(|error| VoomError::database_context("workers insert built-in", error))?;
+        get_by_name_in_tx(tx, &input.name).await?.ok_or_else(|| {
+            VoomError::Internal(format!(
+                "built-in worker {} missing after insert",
+                input.name
+            ))
+        })
+    }
+
     /// Register and commit a worker.
     ///
     /// # Errors

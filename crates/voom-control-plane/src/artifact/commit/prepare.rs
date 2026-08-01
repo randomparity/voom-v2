@@ -1,12 +1,13 @@
 use std::path::{Path, PathBuf};
 
 use serde_json::json;
-use sqlx::Row;
 use voom_core::ids::ArtifactVerificationId;
-use voom_core::{ArtifactHandleId, ArtifactLocationId, FileAssetId, FileVersionId, VoomError};
+use voom_core::{ArtifactHandleId, FileAssetId, FileVersionId, VoomError};
 use voom_events::Event;
 use voom_events::payload::{ArtifactCommitFailedPreMutationPayload, ArtifactCommitStartedPayload};
-use voom_store::repo::media::artifacts::{ArtifactVerification, NewArtifactCommitRecord};
+use voom_store::repo::media::artifacts::{
+    ArtifactExpectedFacts, ArtifactVerification, LiveArtifactLocation, NewArtifactCommitRecord,
+};
 use voom_store::repo::media::commit_safety_gate::check_lineage_commit_leases_in_tx;
 use voom_store::repo::media::identity::FileVersionRepo;
 
@@ -193,14 +194,14 @@ pub(crate) async fn evaluate_commit_safety_gate(
 
 #[derive(Debug)]
 pub(super) struct CommitSourceFacts {
-    pub(super) handle: HandleFacts,
+    pub(super) handle: ArtifactExpectedFacts,
     pub(super) source_file_version_id: FileVersionId,
     pub(super) source_file_asset_id: FileAssetId,
 }
 
 #[derive(Debug)]
 pub(super) struct VerifiedStagingFacts {
-    pub(super) staging: LiveStagingLocation,
+    pub(super) staging: LiveArtifactLocation,
     pub(super) verification: ArtifactVerification,
     pub(super) context: PreMutationContext,
 }
@@ -219,7 +220,9 @@ pub(super) async fn read_commit_source_facts(
     artifact_handle_id: ArtifactHandleId,
     context: &PreMutationContext,
 ) -> Result<CommitSourceFacts, PrepareCommitError> {
-    let handle = read_handle_facts_in_tx(tx, artifact_handle_id)
+    let handle = cp
+        .artifacts
+        .require_expected_facts_in_tx(tx, artifact_handle_id)
         .await
         .map_err(|err| pre_mutation_error(context, &err))?;
     let Some(source_file_version_id) = handle.source_file_version_id else {
@@ -262,9 +265,20 @@ pub(super) async fn read_verified_staging_facts(
     target_path: &Path,
     context: &PreMutationContext,
 ) -> Result<VerifiedStagingFacts, PrepareCommitError> {
-    let staging = live_staging_location_in_tx(tx, artifact_handle_id)
+    let staging = cp
+        .artifacts
+        .live_location_of_kind_in_tx(tx, artifact_handle_id, "staging")
         .await
-        .map_err(|err| pre_mutation_error(context, &err))?;
+        .map_err(|err| pre_mutation_error(context, &err))?
+        .ok_or_else(|| {
+            pre_mutation_error(
+                context,
+                &VoomError::Config(format!(
+                    "artifact_handle {artifact_handle_id} must have exactly one live staging \
+                     location; found 0"
+                )),
+            )
+        })?;
     let Some(verification) = cp
         .artifacts
         .latest_successful_verification_for_live_staging_in_tx(tx, artifact_handle_id)
@@ -302,7 +316,7 @@ pub(super) async fn read_verified_staging_facts(
 
 async fn prepare_commit_paths(
     target_path: &Path,
-    handle: &HandleFacts,
+    handle: &ArtifactExpectedFacts,
     verified_staging: &VerifiedStagingFacts,
 ) -> Result<CommitPreparedPaths, PrepareCommitError> {
     let context = &verified_staging.context;
@@ -337,100 +351,8 @@ pub(super) struct PreMutationContext {
     pub(super) target_path: PathBuf,
 }
 
-#[derive(Debug)]
-pub(super) struct HandleFacts {
-    source_file_version_id: Option<FileVersionId>,
-    size_bytes: u64,
-    checksum: String,
-}
-
-#[derive(Debug)]
-pub(super) struct LiveStagingLocation {
-    pub(super) id: ArtifactLocationId,
-    pub(super) value: String,
-}
-
-async fn read_handle_facts_in_tx(
-    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-    id: ArtifactHandleId,
-) -> Result<HandleFacts, VoomError> {
-    let row = sqlx::query(
-        "SELECT file_version_id, size_bytes, checksum FROM artifact_handles WHERE id = ?",
-    )
-    .bind(i64::try_from(id.0).map_err(|err| {
-        VoomError::Internal(format!("artifact handle id exceeds SQLite integer: {err}"))
-    })?)
-    .fetch_optional(&mut **tx)
-    .await
-    .map_err(|err| VoomError::database_context("artifact_handles commit lookup", err))?;
-    let Some(row) = row else {
-        return Err(VoomError::NotFound(format!(
-            "artifact_handles {id} missing"
-        )));
-    };
-    let file_version_id: Option<i64> = row
-        .try_get("file_version_id")
-        .map_err(|err| VoomError::database_context("artifact_handles.file_version_id", err))?;
-    let size_bytes: Option<i64> = row
-        .try_get("size_bytes")
-        .map_err(|err| VoomError::database_context("artifact_handles.size_bytes", err))?;
-    let checksum: Option<String> = row
-        .try_get("checksum")
-        .map_err(|err| VoomError::database_context("artifact_handles.checksum", err))?;
-    let source_file_version_id = file_version_id
-        .map(|v| {
-            u64::try_from(v).map(FileVersionId).map_err(|err| {
-                VoomError::database_context("artifact_handles.file_version_id negative", err)
-            })
-        })
-        .transpose()?;
-    Ok(HandleFacts {
-        source_file_version_id,
-        size_bytes: u64::try_from(size_bytes.ok_or_else(|| {
-            VoomError::Config(format!("artifact_handle {id} missing expected size_bytes"))
-        })?)
-        .map_err(|err| VoomError::database_context("artifact_handles.size_bytes negative", err))?,
-        checksum: checksum.ok_or_else(|| {
-            VoomError::Config(format!("artifact_handle {id} missing expected checksum"))
-        })?,
-    })
-}
-
-async fn live_staging_location_in_tx(
-    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-    handle_id: ArtifactHandleId,
-) -> Result<LiveStagingLocation, VoomError> {
-    let rows = sqlx::query(
-        "SELECT id, value FROM artifact_locations \
-         WHERE artifact_handle_id = ? AND kind = 'staging' AND retired_at IS NULL \
-         ORDER BY id ASC",
-    )
-    .bind(i64::try_from(handle_id.0).map_err(|err| {
-        VoomError::Internal(format!("artifact handle id exceeds SQLite integer: {err}"))
-    })?)
-    .fetch_all(&mut **tx)
-    .await
-    .map_err(|err| VoomError::database_context("artifact_locations commit live staging", err))?;
-    let [row] = rows.as_slice() else {
-        return Err(VoomError::Config(format!(
-            "artifact_handle {handle_id} must have exactly one live staging location; found {}",
-            rows.len()
-        )));
-    };
-    let id: i64 = row
-        .try_get("id")
-        .map_err(|err| VoomError::database_context("artifact_locations.id", err))?;
-    let value = row
-        .try_get("value")
-        .map_err(|err| VoomError::database_context("artifact_locations.value", err))?;
-    let id = u64::try_from(id)
-        .map(ArtifactLocationId)
-        .map_err(|err| VoomError::database_context("artifact_locations.id negative", err))?;
-    Ok(LiveStagingLocation { id, value })
-}
-
 pub(super) fn require_expected_facts(
-    handle: &HandleFacts,
+    handle: &ArtifactExpectedFacts,
     verification: &ArtifactVerification,
     staged: &ArtifactFileFacts,
 ) -> Result<(), VoomError> {
