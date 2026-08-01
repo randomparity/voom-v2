@@ -3,8 +3,8 @@ use serde_json::{Value, json};
 use std::path::Path;
 use voom_core::OperationKind;
 use voom_core::{FileLocationId, FileVersionId};
-use voom_plan::audio::{AudioOperationPayload, AudioOperationType};
-use voom_plan::remux::RemuxOperationPayload;
+use voom_plan::planner::audio::{AudioOperationPayload, AudioOperationType};
+use voom_plan::planner::remux::RemuxOperationPayload;
 use voom_worker_protocol::{
     TranscodeVideoExpectedFacts, TranscodeVideoInput, TranscodeVideoOutput, TranscodeVideoProfile,
     TranscodeVideoRequest,

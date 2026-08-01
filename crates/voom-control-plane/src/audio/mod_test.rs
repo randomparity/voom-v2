@@ -249,14 +249,14 @@ async fn extract_audio_plural_commits_every_output_and_lineage_atomically() {
     input.operation_payload["operation_id"] = serde_json::json!(operation_id);
     input.operation_payload["outputs"] = serde_json::json!([
         {
-            "output_id": voom_plan::audio::extract_output_id(operation_id, "a-1"),
+            "output_id": voom_plan::planner::audio::extract_output_id(operation_id, "a-1"),
             "source_snapshot_stream_id": "a-1",
             "source_provider_stream_index": 1,
             "name_suffix": "a-1.opus.ogg",
             "bundle_role": "external_audio"
         },
         {
-            "output_id": voom_plan::audio::extract_output_id(operation_id, "a-2"),
+            "output_id": voom_plan::planner::audio::extract_output_id(operation_id, "a-2"),
             "source_snapshot_stream_id": "a-2",
             "source_provider_stream_index": 2,
             "name_suffix": "a-2.opus.ogg",
@@ -314,7 +314,7 @@ async fn extract_audio_plural_commits_every_output_and_lineage_atomically() {
     assert_eq!(event["outputs"].as_array().unwrap().len(), 2);
     assert_eq!(
         event["outputs"][0]["output_id"],
-        voom_plan::audio::extract_output_id(operation_id, "a-1")
+        voom_plan::planner::audio::extract_output_id(operation_id, "a-1")
     );
     assert_eq!(event["outputs"][1]["source_snapshot_stream_id"], "a-2");
     assert_eq!(
@@ -984,7 +984,7 @@ async fn published_operation_isolated_from_legacy_singleton() {
     let operation_id = "different-published-operation";
     input.operation_payload["operation_id"] = serde_json::json!(operation_id);
     input.operation_payload["outputs"] = serde_json::json!([{
-        "output_id": voom_plan::audio::extract_output_id(operation_id, "a-1"),
+        "output_id": voom_plan::planner::audio::extract_output_id(operation_id, "a-1"),
         "source_snapshot_stream_id": "a-1",
         "source_provider_stream_index": 1,
         "name_suffix": "a-1.opus.ogg",
@@ -1337,14 +1337,14 @@ async fn committed_plural_extract_retry_returns_same_ordered_identities_without_
     input.operation_payload["operation_id"] = serde_json::json!(operation_id);
     input.operation_payload["outputs"] = serde_json::json!([
         {
-            "output_id": voom_plan::audio::extract_output_id(operation_id, "a-1"),
+            "output_id": voom_plan::planner::audio::extract_output_id(operation_id, "a-1"),
             "source_snapshot_stream_id": "a-1",
             "source_provider_stream_index": 1,
             "name_suffix": "a-1.opus.ogg",
             "bundle_role": "external_audio"
         },
         {
-            "output_id": voom_plan::audio::extract_output_id(operation_id, "a-2"),
+            "output_id": voom_plan::planner::audio::extract_output_id(operation_id, "a-2"),
             "source_snapshot_stream_id": "a-2",
             "source_provider_stream_index": 2,
             "name_suffix": "a-2.opus.ogg",
@@ -1449,14 +1449,14 @@ async fn prepared_extract_resume_failure_persists_diagnostics_then_recovers_with
     input.operation_payload["operation_id"] = serde_json::json!(operation_id);
     input.operation_payload["outputs"] = serde_json::json!([
         {
-            "output_id": voom_plan::audio::extract_output_id(operation_id, "a-1"),
+            "output_id": voom_plan::planner::audio::extract_output_id(operation_id, "a-1"),
             "source_snapshot_stream_id": "a-1",
             "source_provider_stream_index": 1,
             "name_suffix": "a-1.opus.ogg",
             "bundle_role": "external_audio"
         },
         {
-            "output_id": voom_plan::audio::extract_output_id(operation_id, "a-2"),
+            "output_id": voom_plan::planner::audio::extract_output_id(operation_id, "a-2"),
             "source_snapshot_stream_id": "a-2",
             "source_provider_stream_index": 2,
             "name_suffix": "a-2.opus.ogg",
@@ -1776,14 +1776,14 @@ async fn partial_extract_result_cleans_terminal_staging_and_retries_without_dupl
     input.operation_payload["operation_id"] = serde_json::json!(operation_id);
     input.operation_payload["outputs"] = serde_json::json!([
         {
-            "output_id": voom_plan::audio::extract_output_id(operation_id, "a-1"),
+            "output_id": voom_plan::planner::audio::extract_output_id(operation_id, "a-1"),
             "source_snapshot_stream_id": "a-1",
             "source_provider_stream_index": 1,
             "name_suffix": "a-1.opus.ogg",
             "bundle_role": "external_audio"
         },
         {
-            "output_id": voom_plan::audio::extract_output_id(operation_id, "a-2"),
+            "output_id": voom_plan::planner::audio::extract_output_id(operation_id, "a-2"),
             "source_snapshot_stream_id": "a-2",
             "source_provider_stream_index": 2,
             "name_suffix": "a-2.opus.ogg",
@@ -1838,14 +1838,14 @@ async fn second_extract_verification_failure_never_promotes_or_registers_any_mem
     input.operation_payload["operation_id"] = serde_json::json!(operation_id);
     input.operation_payload["outputs"] = serde_json::json!([
         {
-            "output_id": voom_plan::audio::extract_output_id(operation_id, "a-1"),
+            "output_id": voom_plan::planner::audio::extract_output_id(operation_id, "a-1"),
             "source_snapshot_stream_id": "a-1",
             "source_provider_stream_index": 1,
             "name_suffix": "a-1.opus.ogg",
             "bundle_role": "external_audio"
         },
         {
-            "output_id": voom_plan::audio::extract_output_id(operation_id, "a-2"),
+            "output_id": voom_plan::planner::audio::extract_output_id(operation_id, "a-2"),
             "source_snapshot_stream_id": "a-2",
             "source_provider_stream_index": 2,
             "name_suffix": "a-2.opus.ogg",
@@ -2374,14 +2374,14 @@ fn set_plural_extract_outputs(input: &mut ExecuteExtractAudioInput, operation_id
     input.operation_payload["operation_id"] = serde_json::json!(operation_id);
     input.operation_payload["outputs"] = serde_json::json!([
         {
-            "output_id": voom_plan::audio::extract_output_id(operation_id, "a-1"),
+            "output_id": voom_plan::planner::audio::extract_output_id(operation_id, "a-1"),
             "source_snapshot_stream_id": "a-1",
             "source_provider_stream_index": 1,
             "name_suffix": "a-1.opus.ogg",
             "bundle_role": "external_audio"
         },
         {
-            "output_id": voom_plan::audio::extract_output_id(operation_id, "a-2"),
+            "output_id": voom_plan::planner::audio::extract_output_id(operation_id, "a-2"),
             "source_snapshot_stream_id": "a-2",
             "source_provider_stream_index": 2,
             "name_suffix": "a-2.opus.ogg",
@@ -2893,7 +2893,7 @@ fn synthesis_input_for_source(
     dir: &tempfile::TempDir,
 ) -> ExecuteTranscodeAudioInput {
     let operation_id = "node_synthesis_test";
-    let companion_id = voom_plan::audio::synthesis_companion_id(operation_id, "a-1");
+    let companion_id = voom_plan::planner::audio::synthesis_companion_id(operation_id, "a-1");
     ExecuteTranscodeAudioInput {
         job_id: JobId(1),
         ticket_id: TicketId(2),
@@ -2926,8 +2926,8 @@ fn plural_synthesis_input_for_source(
     dir: &tempfile::TempDir,
 ) -> ExecuteTranscodeAudioInput {
     let operation_id = "node_plural_synthesis_test";
-    let first = voom_plan::audio::synthesis_companion_id(operation_id, "a-1");
-    let second = voom_plan::audio::synthesis_companion_id(operation_id, "a-2");
+    let first = voom_plan::planner::audio::synthesis_companion_id(operation_id, "a-1");
+    let second = voom_plan::planner::audio::synthesis_companion_id(operation_id, "a-2");
     let mut input = synthesis_input_for_source(source, dir);
     input.operation_payload["operation_id"] = serde_json::json!(operation_id);
     input.operation_payload["filter"] =
@@ -3016,7 +3016,7 @@ fn extract_input_for_source(
             "snapshot_stream_id": "a-1",
             "filter": null,
             "outputs": [{
-                "output_id": voom_plan::audio::extract_output_id(operation_id, "a-1"),
+                "output_id": voom_plan::planner::audio::extract_output_id(operation_id, "a-1"),
                 "source_snapshot_stream_id": "a-1",
                 "source_provider_stream_index": 1,
                 "name_suffix": "a-1.opus.ogg",

@@ -1651,7 +1651,7 @@ async fn policy_extract_audio_root_ticket_carries_source_ids_audio_payload_and_r
     );
     assert_eq!(
         workflow_payload.rendered_payload["audio"]["outputs"][0]["output_id"],
-        voom_plan::audio::extract_output_id("node_extract_audio_test", "stream-audio-1")
+        voom_plan::planner::audio::extract_output_id("node_extract_audio_test", "stream-audio-1")
     );
     assert_eq!(
         workflow_payload.rendered_payload["audio"]["outputs"][0]["name_suffix"],
@@ -4444,7 +4444,7 @@ fn policy_extract_audio_plan_for_snapshot(
                 "type": "commentary"
             },
             "outputs": [{
-                "output_id": voom_plan::audio::extract_output_id(
+                "output_id": voom_plan::planner::audio::extract_output_id(
                     operation_id,
                     "stream-audio-1"
                 ),
@@ -4513,7 +4513,8 @@ fn policy_synthesize_audio_plan(
     source_media_snapshot_id: MediaSnapshotId,
 ) -> WorkflowPlan {
     let operation_id = "node_synthesis_test";
-    let companion_id = voom_plan::audio::synthesis_companion_id(operation_id, "stream-audio-1");
+    let companion_id =
+        voom_plan::planner::audio::synthesis_companion_id(operation_id, "stream-audio-1");
     single_policy_operation_plan(
         "policy-synthesize-audio-test",
         "policy-node_synthesize_audio",

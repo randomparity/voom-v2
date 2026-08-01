@@ -18,7 +18,7 @@ use voom_events::payload::{
     ArtifactCommitStartedPayload, ArtifactStagedPayload,
 };
 use voom_events::{Event, SubjectType};
-use voom_plan::audio::AudioBundleRole;
+use voom_plan::planner::audio::AudioBundleRole;
 use voom_store::repo::media::artifacts::{
     ArtifactCommitFailure, ArtifactCommitRecord, ArtifactCommitState, NewArtifactCommitRecord,
     NewArtifactHandle, NewArtifactLocation, NewSidecarArtifactCommit, SidecarArtifactCommit,

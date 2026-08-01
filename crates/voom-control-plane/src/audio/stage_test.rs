@@ -3,7 +3,7 @@ use super::*;
 use std::path::Path;
 
 use voom_core::{ErrorCode, LeaseId, TicketId};
-use voom_plan::audio::{AudioBundleRole, AudioDispositionFact, SnapshotAudioStreamFact};
+use voom_plan::planner::audio::{AudioBundleRole, AudioDispositionFact, SnapshotAudioStreamFact};
 
 use super::super::selection::{ExtractAudioSelectionOutput, ExtractAudioSelectionPlan};
 

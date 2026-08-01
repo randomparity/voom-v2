@@ -151,7 +151,7 @@ fn extraction_rejects_zero_legacy_multiple_or_unknown_commentary_state() {
 #[test]
 fn extraction_validates_ordered_planned_outputs_against_pinned_snapshot() {
     let operation_id = "node_extract_audio_1";
-    let first_output_id = voom_plan::audio::extract_output_id(operation_id, "main");
+    let first_output_id = voom_plan::planner::audio::extract_output_id(operation_id, "main");
     let snapshot = snapshot_with_streams(vec![
         audio("main", 1, "aac", Some("eng"), Some("Main"), Some(false)),
         audio("alt", 2, "aac", Some("jpn"), Some("Alt"), Some(false)),
@@ -167,7 +167,7 @@ fn extraction_validates_ordered_planned_outputs_against_pinned_snapshot() {
             "bundle_role": "external_audio"
         },
         {
-            "output_id": voom_plan::audio::extract_output_id(operation_id, "alt"),
+            "output_id": voom_plan::planner::audio::extract_output_id(operation_id, "alt"),
             "source_snapshot_stream_id": "alt",
             "source_provider_stream_index": 2,
             "name_suffix": "alt.opus.ogg",

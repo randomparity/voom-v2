@@ -4,7 +4,7 @@ use serde_json::json;
 use sqlx::Row;
 use time::OffsetDateTime;
 use voom_core::rng_test_support::FrozenRng;
-use voom_plan::audio::{AudioDispositionFact, SnapshotAudioStreamFact};
+use voom_plan::planner::audio::{AudioDispositionFact, SnapshotAudioStreamFact};
 use voom_store::repo::media::identity::{
     DiscoveredFile, FileLocationKind, IngestOutcome, MediaSnapshot,
 };

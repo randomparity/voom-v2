@@ -12,7 +12,6 @@
 //! It performs no persistence, worker dispatch, or workflow coordination; callers
 //! can reproduce every result from the same policy, input, and planning context.
 
-pub mod audio;
 pub mod compliance;
 pub mod diagnostic;
 pub mod eligibility;
@@ -20,8 +19,6 @@ pub mod fixtures;
 pub mod hash;
 pub mod model;
 pub mod planner;
-pub mod remux;
-pub mod transcode_video_profile;
 
 pub use compliance::model::{
     CheckStatus, ComplianceCheck, ComplianceDiagnostic, ComplianceDiagnosticCode,
@@ -43,5 +40,4 @@ pub use model::{
     PlanningContext, PlanningRequest, PolicyIdentity, ResourceEstimates, SafetyHints,
     SchedulingHints, TargetRef,
 };
-pub use planner::{PlanGenerationError, generate_plan, plan_phase, video_stream_field};
-pub use transcode_video_profile::{cpu_cost, inline_profile_id};
+pub use planner::{PlanGenerationError, generate_plan, plan_phase};

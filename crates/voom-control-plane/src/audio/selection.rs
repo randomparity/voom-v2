@@ -1,6 +1,6 @@
 use serde_json::Value;
 use voom_core::VoomError;
-use voom_plan::audio::{
+use voom_plan::planner::audio::{
     AUDIO_EXTRACT_CODEC, AUDIO_EXTRACT_CONTAINER, AUDIO_TRANSCODE_CONTAINER, AudioBundleRole,
     AudioOperationPayload, AudioOperationType, AudioPlanningBlock, SnapshotAudioStreamFact,
     extract_audio_outputs, extraction_role, selected_audio_streams, synthesize_audio_companions,
@@ -114,7 +114,7 @@ fn synthesis_selection(
             "synthesize_audio target_channels is required".to_owned(),
         ));
     };
-    if let voom_plan::audio::AudioPlanShape::Blocked(block) =
+    if let voom_plan::planner::audio::AudioPlanShape::Blocked(block) =
         synthesize_audio_shape(snapshot, target_channels, payload.filter.as_ref())
     {
         return Err(audio_block_error(block));
@@ -144,7 +144,7 @@ fn synthesis_selection(
 }
 
 fn resolve_synthesis_streams(
-    descriptors: &[voom_plan::audio::SynthesizeAudioCompanionDescriptor],
+    descriptors: &[voom_plan::planner::audio::SynthesizeAudioCompanionDescriptor],
     selected: &[SnapshotAudioStreamFact],
 ) -> Result<Vec<SelectedAudioStream>, VoomError> {
     descriptors

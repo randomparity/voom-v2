@@ -2688,7 +2688,7 @@ async fn verify_staged_extract(
 struct StagedExtractMember {
     operation_output_id: u64,
     artifact: commit::StagedAudioArtifact,
-    role: voom_plan::audio::AudioBundleRole,
+    role: voom_plan::planner::audio::AudioBundleRole,
     source_snapshot_stream_id: String,
     source_provider_stream_index: u32,
     staging_path: PathBuf,
@@ -2981,7 +2981,7 @@ async fn complete_extract_report(
 async fn extract_set_post_commit_recovery(
     request: &ExtractCommitRequest,
     committed: &commit::CommittedAudioExtractOutput,
-    role: voom_plan::audio::AudioBundleRole,
+    role: voom_plan::planner::audio::AudioBundleRole,
     error: &VoomError,
 ) -> commit::AudioExtractRecoveryReport {
     commit::AudioExtractRecoveryReport {
