@@ -228,9 +228,12 @@ async fn runtime_capabilities_for_operations_rejects_negative_worker_epoch() {
         .await
         .unwrap_err();
 
+    let VoomError::Database { message, .. } = error else {
+        panic!("expected a database error naming the corrupt epoch, got {error:?}");
+    };
     assert!(
-        matches!(error, VoomError::Database { ref message, .. } if message.contains("runtime worker capability worker epoch was negative: -1")),
-        "expected a database error naming the corrupt epoch, got {error:?}"
+        message.contains("runtime worker capability worker epoch was negative: -1"),
+        "expected the error to name the corrupt epoch, got {message:?}"
     );
 }
 
