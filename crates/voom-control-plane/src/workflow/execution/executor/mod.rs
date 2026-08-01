@@ -321,10 +321,15 @@ impl RunLoopState {
             .map(|remaining| interval.min(remaining))
     }
 
-    async fn refresh(&mut self, control: &ControlPlane, job_id: JobId, started: Instant) {
+    async fn refresh(
+        &mut self,
+        control: &ControlPlane,
+        job_id: JobId,
+        started: Instant,
+    ) -> Result<(), VoomError> {
         self.summary
-            .refresh_counts(control, job_id, started.elapsed())
-            .await;
+            .refresh_counts(&control.tickets, &control.leases, job_id, started.elapsed())
+            .await
     }
 
     async fn finish_success(
@@ -332,22 +337,24 @@ impl RunLoopState {
         control: &ControlPlane,
         job_id: JobId,
         started: Instant,
-    ) -> WorkflowRunSummary {
-        self.refresh(control, job_id, started).await;
-        self.summary.clone()
+    ) -> Result<WorkflowRunSummary, VoomError> {
+        self.refresh(control, job_id, started).await?;
+        Ok(self.summary.clone())
     }
 
     async fn fail_job(
         &mut self,
         control: &ControlPlane,
         job_id: JobId,
-        source: VoomError,
+        mut source: VoomError,
         started: Instant,
     ) -> WorkflowRunError {
         let _ = control
             .fail_job(job_id, source.to_string(), control.clock().now())
             .await;
-        self.refresh(control, job_id, started).await;
+        if let Err(refresh_error) = self.refresh(control, job_id, started).await {
+            source = refresh_error;
+        }
         WorkflowRunError {
             summary: self.summary.clone(),
             source,
@@ -360,10 +367,12 @@ impl RunLoopState {
         &mut self,
         control: &ControlPlane,
         job_id: JobId,
-        source: VoomError,
+        mut source: VoomError,
         started: Instant,
     ) -> WorkflowRunError {
-        self.refresh(control, job_id, started).await;
+        if let Err(refresh_error) = self.refresh(control, job_id, started).await {
+            source = refresh_error;
+        }
         WorkflowRunError {
             summary: self.summary.clone(),
             source,
@@ -985,7 +994,9 @@ impl WorkflowExecutor {
                 .process_completed_dispatches(self, &plan, workflow_id, job_id, failure_mode)
                 .await;
 
-            state.refresh(control, job_id, started).await;
+            if let Err(source) = state.refresh(control, job_id, started).await {
+                return Err(state.fail_job(control, job_id, source, started).await);
+            }
             if let Some(source) = state.take_fatal_error() {
                 return Err(state
                     .fail_after_drain(self, &plan, workflow_id, job_id, source, started)
@@ -999,9 +1010,12 @@ impl WorkflowExecutor {
             };
             if state.active_is_empty() && finished {
                 match self.first_failed_ticket_error(job_id, workflow_id).await {
-                    Ok(None) => {
-                        return Ok(state.finish_success(control, job_id, started).await);
-                    }
+                    Ok(None) => match state.finish_success(control, job_id, started).await {
+                        Ok(summary) => return Ok(summary),
+                        Err(source) => {
+                            return Err(state.fail_job(control, job_id, source, started).await);
+                        }
+                    },
                     Ok(Some(source)) => {
                         let source = state.take_isolated_error().unwrap_or(source);
                         return match failure_mode {

@@ -468,3 +468,66 @@ async fn append_then_get_round_trips_every_m1_kind() {
         );
     }
 }
+
+#[tokio::test]
+async fn latest_ticket_failure_returns_the_latest_typed_failure_event() {
+    use voom_core::{FailureClass, TicketId};
+    use voom_events::payload::{TicketFailedRetriablePayload, TicketFailedTerminalPayload};
+
+    let (pool, _tmp) = pool().await;
+    let repo = SqliteEventRepo::new(pool.clone());
+    let mut tx = pool.begin().await.unwrap();
+    repo.append_in_tx(
+        &mut tx,
+        EventEnvelope {
+            occurred_at: OffsetDateTime::UNIX_EPOCH,
+            subject_type: SubjectType::Ticket,
+            subject_id: Some(17),
+            trace_id: None,
+            payload: Event::TicketFailedRetriable(TicketFailedRetriablePayload {
+                ticket_id: 17,
+                attempt: 1,
+                max_attempts: 3,
+                reason: "retry".to_owned(),
+                class: FailureClass::WorkerTimeout,
+                next_eligible_at: OffsetDateTime::UNIX_EPOCH,
+            }),
+        },
+    )
+    .await
+    .unwrap();
+    repo.append_in_tx(
+        &mut tx,
+        EventEnvelope {
+            occurred_at: OffsetDateTime::UNIX_EPOCH,
+            subject_type: SubjectType::Ticket,
+            subject_id: Some(17),
+            trace_id: None,
+            payload: Event::TicketFailedTerminal(TicketFailedTerminalPayload {
+                ticket_id: 17,
+                attempt: 2,
+                max_attempts: 3,
+                reason: "terminal".to_owned(),
+                class: FailureClass::MalformedWorkerResult,
+                issue_id: None,
+            }),
+        },
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+
+    let latest = repo
+        .latest_ticket_failure(TicketId(17))
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert!(matches!(
+        latest.payload,
+        Event::TicketFailedTerminal(TicketFailedTerminalPayload {
+            class: FailureClass::MalformedWorkerResult,
+            ..
+        })
+    ));
+}

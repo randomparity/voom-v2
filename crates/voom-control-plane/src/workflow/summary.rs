@@ -1,13 +1,12 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::time::Duration;
 
-use serde_json::Value;
-use sqlx::Row;
 use voom_core::OperationKind;
-use voom_core::{FailureClass, JobId, WorkerId};
+use voom_core::{FailureClass, JobId, VoomError, WorkerId};
+use voom_store::repo::execution::leases::{LeaseInterval, SqliteLeaseRepo};
+use voom_store::repo::execution::tickets::{SqliteTicketRepo, TicketState};
 
 use super::plan::ticket_payload::WorkflowTicketPayload;
-use crate::ControlPlane;
 
 #[derive(Debug, Clone)]
 pub struct WorkflowRunSummary {
@@ -149,87 +148,73 @@ impl WorkflowRunSummary {
 
     pub(super) async fn refresh_counts(
         &mut self,
-        control: &ControlPlane,
+        tickets: &SqliteTicketRepo,
+        leases: &SqliteLeaseRepo,
         job_id: JobId,
         elapsed: Duration,
-    ) {
+    ) -> Result<(), VoomError> {
         self.elapsed = elapsed;
         self.throughput_per_second = throughput(self.dispatch_count, elapsed);
-        if let Ok((ticket_count, retry_count, failure_count)) = sqlx::query_as::<_, (i64, i64, i64)>(
-            "SELECT COUNT(*), COALESCE(SUM(CASE WHEN attempt > 1 THEN attempt - 1 ELSE 0 END), 0), \
-                    SUM(CASE WHEN state = 'failed' THEN 1 ELSE 0 END) \
-             FROM tickets WHERE job_id = ?",
-        )
-        .bind(sqlite_i64(job_id.0))
-        .fetch_one(&control.pool)
-        .await
-        {
-            self.ticket_count = sqlite_u32(ticket_count);
-            self.retry_count = sqlite_u64(retry_count);
-            self.failure_count = self.failure_count.max(sqlite_u64(failure_count));
+        let tickets = tickets.list_for_job(job_id).await?;
+        self.ticket_count = u32::try_from(tickets.len()).unwrap_or(u32::MAX);
+        let retry_count = tickets.iter().fold(0_u64, |total, ticket| {
+            total.saturating_add(u64::from(ticket.attempt.saturating_sub(1)))
+        });
+        let failure_count = tickets
+            .iter()
+            .filter(|ticket| ticket.state == TicketState::Failed)
+            .count();
+        self.retry_count = retry_count;
+        self.failure_count = self
+            .failure_count
+            .max(u64::try_from(failure_count).unwrap_or(u64::MAX));
+
+        let mut branches = HashSet::new();
+        let mut ticket_counts: BTreeMap<OperationKind, u64> = BTreeMap::new();
+        for ticket in tickets {
+            let Ok(workflow_payload) =
+                WorkflowTicketPayload::parse_ticket(ticket.kind.as_str(), ticket.payload)
+            else {
+                continue;
+            };
+            if !is_synthetic_root_ticket(&workflow_payload) {
+                branches.insert(workflow_payload.branch_id);
+            }
+            *ticket_counts.entry(workflow_payload.operation).or_default() += 1;
         }
-        if let Ok(rows) = sqlx::query("SELECT kind, payload, state FROM tickets WHERE job_id = ?")
-            .bind(sqlite_i64(job_id.0))
-            .fetch_all(&control.pool)
-            .await
+        self.branch_count = u32::try_from(branches.len()).unwrap_or(u32::MAX);
+        for (operation, count) in ticket_counts {
+            let operation_summary = self.per_operation.entry(operation).or_default();
+            operation_summary.ticket_count = count;
+            operation_summary.elapsed = elapsed;
+            operation_summary.throughput_per_second =
+                throughput(operation_summary.dispatch_count, elapsed);
+        }
+
+        let intervals = leases.timeline_for_job(job_id).await?;
+        let mut transitions = Vec::with_capacity(intervals.len() * 2);
+        for LeaseInterval {
+            acquired_at,
+            released_at,
+            ..
+        } in intervals
         {
-            let mut branches = HashSet::new();
-            let mut ticket_counts: BTreeMap<OperationKind, u64> = BTreeMap::new();
-            for row in rows {
-                let Ok(kind) = row.try_get::<String, _>("kind") else {
-                    continue;
-                };
-                let Ok(payload_json) = row.try_get::<String, _>("payload") else {
-                    continue;
-                };
-                let Ok(payload) = serde_json::from_str::<Value>(&payload_json) else {
-                    continue;
-                };
-                let Ok(workflow_payload) = WorkflowTicketPayload::parse_ticket(&kind, payload)
-                else {
-                    continue;
-                };
-                if !is_synthetic_root_ticket(&workflow_payload) {
-                    branches.insert(workflow_payload.branch_id);
-                }
-                *ticket_counts.entry(workflow_payload.operation).or_default() += 1;
-            }
-            self.branch_count = u32::try_from(branches.len()).unwrap_or(u32::MAX);
-            for (operation, count) in ticket_counts {
-                let operation_summary = self.per_operation.entry(operation).or_default();
-                operation_summary.ticket_count = count;
-                operation_summary.elapsed = elapsed;
-                operation_summary.throughput_per_second =
-                    throughput(operation_summary.dispatch_count, elapsed);
+            transitions.push((acquired_at, 1_i32));
+            if let Some(released_at) = released_at {
+                transitions.push((released_at, -1_i32));
             }
         }
-        if let Ok(rows) = sqlx::query_as::<_, (String, Option<String>)>(
-            "SELECT leases.acquired_at, leases.released_at \
-             FROM leases JOIN tickets ON tickets.id = leases.ticket_id \
-             WHERE tickets.job_id = ?",
-        )
-        .bind(sqlite_i64(job_id.0))
-        .fetch_all(&control.pool)
-        .await
-        {
-            let mut transitions = Vec::with_capacity(rows.len() * 2);
-            for (acquired_at, released_at) in rows {
-                transitions.push((acquired_at, 1_i32));
-                if let Some(released_at) = released_at {
-                    transitions.push((released_at, -1_i32));
-                }
-            }
-            transitions.sort_by(|left, right| left.0.cmp(&right.0).then(left.1.cmp(&right.1)));
-            let mut active = 0_i32;
-            let mut peak = 0_i32;
-            for (_, delta) in transitions {
-                active += delta;
-                peak = peak.max(active);
-            }
-            self.peak_active_workflow_leases = self
-                .peak_active_workflow_leases
-                .max(u32::try_from(peak).unwrap_or(0));
+        transitions.sort_by(|left, right| left.0.cmp(&right.0).then(left.1.cmp(&right.1)));
+        let mut active = 0_i32;
+        let mut peak = 0_i32;
+        for (_, delta) in transitions {
+            active += delta;
+            peak = peak.max(active);
         }
+        self.peak_active_workflow_leases = self
+            .peak_active_workflow_leases
+            .max(u32::try_from(peak).unwrap_or(0));
+        Ok(())
     }
 }
 
@@ -253,18 +238,6 @@ fn throughput(count: u64, elapsed: Duration) -> f64 {
     } else {
         0.0
     }
-}
-
-fn sqlite_i64(value: u64) -> i64 {
-    i64::try_from(value).unwrap_or(i64::MAX)
-}
-
-fn sqlite_u64(value: i64) -> u64 {
-    u64::try_from(value).unwrap_or(0)
-}
-
-fn sqlite_u32(value: i64) -> u32 {
-    u32::try_from(value).unwrap_or(0)
 }
 
 #[cfg(test)]

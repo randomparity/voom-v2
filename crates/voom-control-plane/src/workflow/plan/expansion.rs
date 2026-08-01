@@ -5,10 +5,12 @@ use serde_json::Value;
 use sqlx::{Sqlite, Transaction};
 use time::OffsetDateTime;
 use voom_core::OperationKind;
-use voom_core::{JobId, TicketId, TicketOperation, VoomError};
+use voom_core::{FileVersionId, JobId, TicketId, TicketOperation, VoomError};
 use voom_events::payload::TicketCreatedPayload;
 use voom_events::{Event, SubjectType};
-use voom_store::repo::execution::tickets::{NewTicket, SqliteTicketRepo, Ticket, TicketState};
+use voom_store::repo::execution::tickets::{
+    NewTicket, SqliteTicketRepo, Ticket, TicketState, WorkflowTicketIdentity,
+};
 
 use super::binding::{BranchContext, render_default_payload};
 use super::model::{OperationNode, WorkflowPlan};
@@ -188,6 +190,7 @@ struct TicketSpec {
     priority: i64,
     max_attempts: u32,
     depends_on: TicketId,
+    source_file_version_id: Option<FileVersionId>,
 }
 
 fn spec_for_branch(
@@ -201,6 +204,10 @@ fn spec_for_branch(
     let timing = timing(ctx, node_id, &branch.branch_id);
     let rendered_payload = render_default_payload(operation, branch, timing)
         .map_err(|e| VoomError::Config(format!("workflow payload binding: {e}")))?;
+    let source_file_version_id = rendered_payload
+        .get("source_file_version_id")
+        .and_then(Value::as_u64)
+        .map(FileVersionId);
     let payload = WorkflowTicketPayload {
         workflow_id: ctx.workflow_id.to_owned(),
         plan_id: ctx.plan_id.to_owned(),
@@ -222,6 +229,7 @@ fn spec_for_branch(
         priority: parent_ticket.priority,
         max_attempts: parent_ticket.max_attempts,
         depends_on,
+        source_file_version_id,
     })
 }
 
@@ -235,14 +243,20 @@ async fn create_missing_tickets(
     let mut expected_ids = Vec::new();
     let mut created_ids = Vec::new();
     for spec in specs {
-        if let Some(ticket_id) = find_existing_ticket_id_in_tx(
-            &mut tx,
-            ctx.job_id,
-            &spec.kind,
-            &spec.branch_id,
-            &spec.node_id,
-        )
-        .await?
+        if let Some(ticket_id) = ctx
+            .control
+            .tickets
+            .find_workflow_ticket_id_in_tx(
+                &mut tx,
+                WorkflowTicketIdentity {
+                    job_id: ctx.job_id,
+                    workflow_id: ctx.workflow_id,
+                    branch_id: &spec.branch_id,
+                    node_id: &spec.node_id,
+                    source_file_version_id: spec.source_file_version_id,
+                },
+            )
+            .await?
         {
             ensure_dependency_in_tx(&mut tx, &ctx.control.tickets, ticket_id, spec.depends_on)
                 .await?;
@@ -319,73 +333,29 @@ fn dedupe_specs(specs: Vec<TicketSpec>) -> Vec<TicketSpec> {
     out
 }
 
-async fn find_existing_ticket_id_in_tx(
-    tx: &mut Transaction<'_, Sqlite>,
-    job_id: JobId,
-    kind: &TicketOperation,
-    branch_id: &str,
-    node_id: &str,
-) -> Result<Option<TicketId>, VoomError> {
-    let rows: Vec<(i64,)> = sqlx::query_as(
-        "SELECT id FROM tickets \
-         WHERE job_id = ? \
-           AND kind = ? \
-           AND json_extract(payload, '$.branch_id') = ? \
-           AND json_extract(payload, '$.node_id') = ? \
-         ORDER BY id ASC \
-         LIMIT 2",
-    )
-    .bind(sqlite_i64(job_id.0, "job id")?)
-    .bind(kind.as_str())
-    .bind(branch_id)
-    .bind(node_id)
-    .fetch_all(&mut **tx)
-    .await
-    .map_err(|e| VoomError::database_context("workflow ticket lookup", e))?;
-
-    match rows.as_slice() {
-        [] => Ok(None),
-        [(id,)] => Ok(Some(TicketId(sqlite_u64(*id, "ticket id")?))),
-        [(first,), (second,)] => Err(VoomError::Conflict(format!(
-            "duplicate workflow tickets for job {job_id} kind `{kind}` branch `{branch_id}` node `{node_id}`: ids {first}, {second}"
-        ))),
-        _ => unreachable!("lookup query is limited to two rows"),
-    }
-}
-
 async fn ensure_dependency_in_tx(
     tx: &mut Transaction<'_, Sqlite>,
     tickets: &SqliteTicketRepo,
     ticket_id: TicketId,
     depends_on: TicketId,
 ) -> Result<(), VoomError> {
-    let exists: Option<i64> = sqlx::query_scalar(
-        "SELECT 1 FROM ticket_dependencies \
-         WHERE ticket_id = ? AND depends_on_ticket_id = ? \
-         LIMIT 1",
-    )
-    .bind(sqlite_i64(ticket_id.0, "ticket id")?)
-    .bind(sqlite_i64(depends_on.0, "dependency ticket id")?)
-    .fetch_optional(&mut **tx)
-    .await
-    .map_err(|e| VoomError::database_context("workflow dependency lookup", e))?;
-    if exists.is_some() {
+    if tickets
+        .dependency_exists_in_tx(tx, ticket_id, depends_on)
+        .await?
+    {
         return Ok(());
     }
 
-    let state: Option<String> = sqlx::query_scalar("SELECT state FROM tickets WHERE id = ?")
-        .bind(sqlite_i64(ticket_id.0, "ticket id")?)
-        .fetch_optional(&mut **tx)
-        .await
-        .map_err(|e| VoomError::database_context("workflow ticket state lookup", e))?;
-    match state.as_deref() {
-        Some(state) if state == TicketState::Pending.as_str() => {
+    let ticket = tickets.get_in_tx(tx, ticket_id).await?;
+    match ticket {
+        Some(ticket) if ticket.state == TicketState::Pending => {
             tickets
                 .add_dependency_in_tx(tx, ticket_id, depends_on)
                 .await
         }
-        Some(state) => Err(VoomError::Conflict(format!(
-            "workflow ticket {ticket_id} is {state}; missing dependency on {depends_on} cannot be repaired"
+        Some(ticket) => Err(VoomError::Conflict(format!(
+            "workflow ticket {ticket_id} is {}; missing dependency on {depends_on} cannot be repaired",
+            ticket.state.as_str()
         ))),
         None => Err(VoomError::NotFound(format!("ticket {ticket_id}"))),
     }
@@ -643,17 +613,6 @@ fn ticket_kind(operation: OperationKind) -> Result<TicketOperation, VoomError> {
         "synthetic.workflow.operation.{}",
         operation.as_str()
     ))
-}
-
-fn sqlite_i64(value: u64, field: &str) -> Result<i64, VoomError> {
-    i64::try_from(value).map_err(|e| {
-        VoomError::database_context(format!("{field} {value} does not fit SQLite i64"), e)
-    })
-}
-
-fn sqlite_u64(value: i64, field: &str) -> Result<u64, VoomError> {
-    u64::try_from(value)
-        .map_err(|e| VoomError::database_context(format!("{field} {value} does not fit u64"), e))
 }
 
 #[cfg(test)]

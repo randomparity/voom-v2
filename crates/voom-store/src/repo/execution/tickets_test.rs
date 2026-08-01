@@ -1,7 +1,7 @@
 use super::*;
 
 use time::{Duration, OffsetDateTime};
-use voom_core::{JobId, TicketOperation, VoomError};
+use voom_core::{FileVersionId, JobId, TicketOperation, VoomError};
 
 use crate::repo::execution::jobs::{NewJob, SqliteJobRepo};
 use crate::test_support::fresh_initialized_pool_at;
@@ -512,4 +512,380 @@ async fn pre_lease_failure_transition_rejects_a_changed_previous_attempt() {
     tx.rollback().await.unwrap();
 
     assert!(matches!(err, VoomError::Conflict(_)));
+}
+
+#[tokio::test]
+async fn succeeded_workflow_node_ids_are_ordered_and_deduplicated() {
+    let (pool, _tmp) = pool().await;
+    let repo = SqliteTicketRepo::new(pool.clone());
+    let job = SqliteJobRepo::new(pool).create(sample_job()).await.unwrap();
+    create_workflow_ticket(&repo, job.id, "wf", "root", "zeta", TicketState::Succeeded).await;
+    create_workflow_ticket(&repo, job.id, "wf", "root", "alpha", TicketState::Succeeded).await;
+    create_workflow_ticket(
+        &repo,
+        job.id,
+        "wf",
+        "other",
+        "alpha",
+        TicketState::Succeeded,
+    )
+    .await;
+    create_workflow_ticket(
+        &repo,
+        job.id,
+        "other",
+        "root",
+        "ignored",
+        TicketState::Succeeded,
+    )
+    .await;
+
+    let node_ids = repo
+        .succeeded_workflow_node_ids(job.id, "wf")
+        .await
+        .unwrap();
+
+    assert_eq!(node_ids, vec!["alpha", "zeta"]);
+}
+
+#[tokio::test]
+async fn workflow_ticket_exists_in_tx_uses_full_node_identity() {
+    let (pool, _tmp) = pool().await;
+    let repo = SqliteTicketRepo::new(pool.clone());
+    let jobs = SqliteJobRepo::new(pool.clone());
+    let job = jobs.create(sample_job()).await.unwrap();
+    let other_job = jobs.create(sample_job()).await.unwrap();
+    create_workflow_ticket(&repo, job.id, "wf", "branch", "node", TicketState::Pending).await;
+    create_workflow_ticket(
+        &repo,
+        other_job.id,
+        "wf",
+        "branch",
+        "node",
+        TicketState::Pending,
+    )
+    .await;
+    let mut tx = pool.begin().await.unwrap();
+
+    assert!(
+        repo.workflow_ticket_exists_in_tx(&mut tx, job.id, "wf", "branch", "node")
+            .await
+            .unwrap()
+    );
+    assert!(
+        !repo
+            .workflow_ticket_exists_in_tx(&mut tx, job.id, "other", "branch", "node")
+            .await
+            .unwrap()
+    );
+    assert!(
+        !repo
+            .workflow_ticket_exists_in_tx(&mut tx, job.id, "wf", "other", "node")
+            .await
+            .unwrap()
+    );
+    assert!(
+        !repo
+            .workflow_ticket_exists_in_tx(&mut tx, job.id, "wf", "branch", "other")
+            .await
+            .unwrap()
+    );
+    assert!(
+        !repo
+            .workflow_ticket_exists_in_tx(
+                &mut tx,
+                JobId(other_job.id.0 + 1),
+                "wf",
+                "branch",
+                "node",
+            )
+            .await
+            .unwrap()
+    );
+    tx.commit().await.unwrap();
+}
+
+#[tokio::test]
+async fn ready_workflow_tickets_are_typed_and_use_scheduling_order() {
+    let (pool, _tmp) = pool().await;
+    let repo = SqliteTicketRepo::new(pool.clone());
+    let job = SqliteJobRepo::new(pool).create(sample_job()).await.unwrap();
+    let first = create_workflow_ticket(&repo, job.id, "wf", "a", "first", TicketState::Ready).await;
+    let second =
+        create_workflow_ticket(&repo, job.id, "wf", "b", "second", TicketState::Ready).await;
+    let third = create_workflow_ticket(&repo, job.id, "wf", "c", "third", TicketState::Ready).await;
+    create_workflow_ticket(&repo, job.id, "other", "d", "ignored", TicketState::Ready).await;
+    set_ticket_schedule(&repo, first.id, 5, 10).await;
+    set_ticket_schedule(&repo, second.id, 5, 5).await;
+    set_ticket_schedule(&repo, third.id, 10, 10).await;
+
+    let ready = repo
+        .ready_workflow_tickets(
+            job.id,
+            "wf",
+            OffsetDateTime::UNIX_EPOCH + Duration::seconds(20),
+            10,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        ready.iter().map(|ticket| ticket.id).collect::<Vec<_>>(),
+        vec![third.id, second.id, first.id]
+    );
+}
+
+#[tokio::test]
+async fn workflow_ticket_facts_distinguish_each_execution_state() {
+    let (pool, _tmp) = pool().await;
+    let repo = SqliteTicketRepo::new(pool.clone());
+    let job = SqliteJobRepo::new(pool).create(sample_job()).await.unwrap();
+    for (node_id, state) in [
+        ("pending", TicketState::Pending),
+        ("ready", TicketState::Ready),
+        ("leased", TicketState::Leased),
+        ("failed", TicketState::Failed),
+        ("succeeded", TicketState::Succeeded),
+    ] {
+        create_workflow_ticket(&repo, job.id, "wf", "branch", node_id, state).await;
+    }
+    create_workflow_ticket(
+        &repo,
+        job.id,
+        "other",
+        "branch",
+        "ready",
+        TicketState::Ready,
+    )
+    .await;
+
+    let facts = repo.workflow_ticket_facts(job.id, "wf").await.unwrap();
+
+    assert_eq!(
+        facts,
+        WorkflowTicketFacts {
+            unfinished: 3,
+            ready: 1,
+            leased: 1,
+            failed: 1,
+        }
+    );
+}
+
+#[tokio::test]
+async fn first_failed_workflow_ticket_uses_lowest_ticket_id() {
+    let (pool, _tmp) = pool().await;
+    let repo = SqliteTicketRepo::new(pool.clone());
+    let job = SqliteJobRepo::new(pool).create(sample_job()).await.unwrap();
+    let first =
+        create_workflow_ticket(&repo, job.id, "wf", "a", "first", TicketState::Failed).await;
+    create_workflow_ticket(&repo, job.id, "other", "b", "ignored", TicketState::Failed).await;
+    create_workflow_ticket(&repo, job.id, "wf", "c", "second", TicketState::Failed).await;
+
+    let failed = repo
+        .first_failed_workflow_ticket(job.id, "wf")
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(failed.id, first.id);
+    assert_eq!(failed.state, TicketState::Failed);
+}
+
+#[tokio::test]
+async fn retry_eligible_at_returns_earliest_future_ready_timestamp() {
+    let (pool, _tmp) = pool().await;
+    let repo = SqliteTicketRepo::new(pool.clone());
+    let job = SqliteJobRepo::new(pool).create(sample_job()).await.unwrap();
+    let past = create_workflow_ticket(&repo, job.id, "wf", "a", "past", TicketState::Ready).await;
+    let later = create_workflow_ticket(&repo, job.id, "wf", "b", "later", TicketState::Ready).await;
+    let earlier =
+        create_workflow_ticket(&repo, job.id, "wf", "c", "earlier", TicketState::Ready).await;
+    let failed =
+        create_workflow_ticket(&repo, job.id, "wf", "d", "failed", TicketState::Failed).await;
+    set_ticket_schedule(&repo, past.id, 0, 5).await;
+    set_ticket_schedule(&repo, later.id, 0, 30).await;
+    set_ticket_schedule(&repo, earlier.id, 0, 20).await;
+    set_ticket_schedule(&repo, failed.id, 0, 15).await;
+
+    let eligible_at = repo
+        .retry_eligible_at(
+            job.id,
+            "wf",
+            OffsetDateTime::UNIX_EPOCH + Duration::seconds(10),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        eligible_at,
+        Some(OffsetDateTime::UNIX_EPOCH + Duration::seconds(20))
+    );
+}
+
+#[tokio::test]
+async fn find_workflow_ticket_id_in_tx_uses_full_phase_identity() {
+    let (pool, _tmp) = pool().await;
+    let repo = SqliteTicketRepo::new(pool.clone());
+    let jobs = SqliteJobRepo::new(pool.clone());
+    let job = jobs.create(sample_job()).await.unwrap();
+    let other_job = jobs.create(sample_job()).await.unwrap();
+    let target = create_identity_ticket(&repo, job.id, "wf", "branch", "node", Some(7)).await;
+    create_identity_ticket(&repo, other_job.id, "wf", "branch", "node", Some(7)).await;
+    create_identity_ticket(&repo, job.id, "other", "branch", "node", Some(7)).await;
+    create_identity_ticket(&repo, job.id, "wf", "other", "node", Some(7)).await;
+    create_identity_ticket(&repo, job.id, "wf", "branch", "other", Some(7)).await;
+    create_identity_ticket(&repo, job.id, "wf", "branch", "node", Some(8)).await;
+    let mut tx = pool.begin().await.unwrap();
+
+    let found = repo
+        .find_workflow_ticket_id_in_tx(
+            &mut tx,
+            WorkflowTicketIdentity {
+                job_id: job.id,
+                workflow_id: "wf",
+                branch_id: "branch",
+                node_id: "node",
+                source_file_version_id: Some(FileVersionId(7)),
+            },
+        )
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+
+    assert_eq!(found, Some(target.id));
+}
+
+#[tokio::test]
+async fn dependency_exists_in_tx_matches_both_ticket_ids() {
+    let (pool, _tmp) = pool().await;
+    let repo = SqliteTicketRepo::new(pool.clone());
+    let dependent = repo.create(sample_new_ticket()).await.unwrap();
+    let dependency = repo.create(sample_new_ticket()).await.unwrap();
+    let other = repo.create(sample_new_ticket()).await.unwrap();
+    repo.add_dependency(dependent.id, dependency.id)
+        .await
+        .unwrap();
+    let mut tx = pool.begin().await.unwrap();
+
+    assert!(
+        repo.dependency_exists_in_tx(&mut tx, dependent.id, dependency.id)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !repo
+            .dependency_exists_in_tx(&mut tx, dependent.id, other.id)
+            .await
+            .unwrap()
+    );
+    tx.commit().await.unwrap();
+}
+
+#[tokio::test]
+async fn list_for_job_returns_all_typed_tickets_in_id_order() {
+    let (pool, _tmp) = pool().await;
+    let repo = SqliteTicketRepo::new(pool.clone());
+    let jobs = SqliteJobRepo::new(pool);
+    let job = jobs.create(sample_job()).await.unwrap();
+    let other_job = jobs.create(sample_job()).await.unwrap();
+    let first =
+        create_workflow_ticket(&repo, job.id, "wf", "a", "first", TicketState::Pending).await;
+    create_workflow_ticket(
+        &repo,
+        other_job.id,
+        "wf",
+        "ignored",
+        "ignored",
+        TicketState::Pending,
+    )
+    .await;
+    let second =
+        create_workflow_ticket(&repo, job.id, "wf", "b", "second", TicketState::Succeeded).await;
+
+    let tickets = repo.list_for_job(job.id).await.unwrap();
+
+    assert_eq!(
+        tickets.iter().map(|ticket| ticket.id).collect::<Vec<_>>(),
+        vec![first.id, second.id]
+    );
+    assert_eq!(tickets[1].state, TicketState::Succeeded);
+}
+
+async fn create_identity_ticket(
+    repo: &SqliteTicketRepo,
+    job_id: JobId,
+    workflow_id: &str,
+    branch_id: &str,
+    node_id: &str,
+    source_file_version_id: Option<u64>,
+) -> Ticket {
+    let mut rendered_payload = serde_json::json!({"operation": "test"});
+    if let Some(source_file_version_id) = source_file_version_id {
+        rendered_payload["source_file_version_id"] = serde_json::json!(source_file_version_id);
+    }
+    repo.create(NewTicket {
+        job_id: Some(job_id),
+        kind: ticket_op("synthetic.workflow.operation.test"),
+        priority: 0,
+        payload: serde_json::json!({
+            "workflow_id": workflow_id,
+            "branch_id": branch_id,
+            "node_id": node_id,
+            "rendered_payload": rendered_payload
+        }),
+        max_attempts: 1,
+        created_at: OffsetDateTime::UNIX_EPOCH,
+    })
+    .await
+    .unwrap()
+}
+
+async fn set_ticket_schedule(
+    repo: &SqliteTicketRepo,
+    ticket_id: voom_core::TicketId,
+    priority: i64,
+    eligible_at_seconds: i64,
+) {
+    let eligible_at = OffsetDateTime::UNIX_EPOCH + Duration::seconds(eligible_at_seconds);
+    sqlx::query("UPDATE tickets SET priority = ?, next_eligible_at = ? WHERE id = ?")
+        .bind(priority)
+        .bind(iso8601(eligible_at).unwrap())
+        .bind(i64::try_from(ticket_id.0).unwrap())
+        .execute(&repo.pool)
+        .await
+        .unwrap();
+}
+
+async fn create_workflow_ticket(
+    repo: &SqliteTicketRepo,
+    job_id: JobId,
+    workflow_id: &str,
+    branch_id: &str,
+    node_id: &str,
+    state: TicketState,
+) -> Ticket {
+    let ticket = repo
+        .create(NewTicket {
+            job_id: Some(job_id),
+            kind: ticket_op("synthetic.workflow.operation.test"),
+            priority: 0,
+            payload: serde_json::json!({
+                "workflow_id": workflow_id,
+                "branch_id": branch_id,
+                "node_id": node_id,
+                "rendered_payload": {"operation": "test"}
+            }),
+            max_attempts: 3,
+            created_at: OffsetDateTime::UNIX_EPOCH,
+        })
+        .await
+        .unwrap();
+    sqlx::query("UPDATE tickets SET state = ? WHERE id = ?")
+        .bind(state.as_str())
+        .bind(i64::try_from(ticket.id.0).unwrap())
+        .execute(&repo.pool)
+        .await
+        .unwrap();
+    repo.get(ticket.id).await.unwrap().unwrap()
 }

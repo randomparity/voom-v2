@@ -1521,8 +1521,13 @@ impl ControlPlane {
             crate::workflow::WorkflowRunSummary::empty(inputs.job_id, started.elapsed())
         });
         job_run
-            .refresh_counts(self, inputs.job_id, started.elapsed())
-            .await;
+            .refresh_counts(
+                &self.tickets,
+                &self.leases,
+                inputs.job_id,
+                started.elapsed(),
+            )
+            .await?;
         let last_run = Some(job_run);
         let (phases, file_phases) = self.persist_sliding_phase_summaries(&inputs).await?;
         let failure = pipeline_error.or(supervisor_error).or(continued_error);

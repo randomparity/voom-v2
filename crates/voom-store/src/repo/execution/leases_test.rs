@@ -5,6 +5,7 @@ use time::Duration;
 use voom_core::rng_test_support::FrozenRng;
 use voom_core::{FailureClass, LeaseId, NodeId, TicketId, TicketOperation, VoomError, WorkerId};
 
+use crate::repo::execution::jobs::{NewJob, SqliteJobRepo};
 use crate::repo::execution::nodes::{NewNode, NodeKind, SqliteNodeRepo};
 use crate::repo::execution::tickets::{NewTicket, SqliteTicketRepo, TicketState};
 use crate::repo::execution::workers::{
@@ -1408,4 +1409,88 @@ async fn active_count_for_node_counts_only_held_leases_for_that_node() {
         0
     );
     tx.rollback().await.unwrap();
+}
+
+#[tokio::test]
+async fn timeline_for_job_returns_held_and_released_worker_intervals_in_order() {
+    let (pool, trepo, wrepo, lrepo, first_ticket_id, first_worker_id, _tmp) = setup().await;
+    let job = SqliteJobRepo::new(pool.clone())
+        .create(NewJob {
+            kind: "workflow".to_owned(),
+            priority: 0,
+            created_at: T0,
+        })
+        .await
+        .unwrap();
+    sqlx::query("UPDATE tickets SET job_id = ? WHERE id = ?")
+        .bind(i64::try_from(job.id.0).unwrap())
+        .bind(i64::try_from(first_ticket_id.0).unwrap())
+        .execute(&pool)
+        .await
+        .unwrap();
+    let second_ticket = trepo
+        .create(NewTicket {
+            job_id: Some(job.id),
+            kind: ticket_op("noop"),
+            priority: 0,
+            payload: json!({}),
+            max_attempts: 1,
+            created_at: T0,
+        })
+        .await
+        .unwrap();
+    trepo
+        .mark_ready_if_unblocked(second_ticket.id, T0)
+        .await
+        .unwrap();
+    let second_worker = wrepo
+        .register(NewWorker {
+            name: "w-2".to_owned(),
+            kind: WorkerKind::Synthetic,
+            registered_at: T0,
+            node_id: None,
+        })
+        .await
+        .unwrap();
+    make_worker_eligible(&wrepo, second_worker.id, ticket_op("noop")).await;
+    let first_lease = lrepo
+        .acquire(NewLease {
+            ticket_id: first_ticket_id,
+            worker_id: first_worker_id,
+            ttl: Duration::seconds(60),
+            now: T0,
+        })
+        .await
+        .unwrap();
+    lrepo
+        .release(first_lease.id, json!({}), T0 + Duration::seconds(10))
+        .await
+        .unwrap();
+    lrepo
+        .acquire(NewLease {
+            ticket_id: second_ticket.id,
+            worker_id: second_worker.id,
+            ttl: Duration::seconds(60),
+            now: T0 + Duration::seconds(5),
+        })
+        .await
+        .unwrap();
+
+    let timeline = lrepo.timeline_for_job(job.id).await.unwrap();
+
+    assert_eq!(
+        timeline,
+        vec![
+            LeaseInterval {
+                worker_id: first_worker_id,
+                acquired_at: T0,
+                released_at: Some(T0 + Duration::seconds(10)),
+            },
+            LeaseInterval {
+                worker_id: second_worker.id,
+                acquired_at: T0 + Duration::seconds(5),
+                released_at: None,
+            },
+        ]
+    );
 }

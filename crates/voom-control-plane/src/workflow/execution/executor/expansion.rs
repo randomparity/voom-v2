@@ -4,11 +4,10 @@
 
 use std::collections::HashSet;
 
-use sqlx::Row;
 use voom_core::{JobId, TicketId, VoomError};
 use voom_store::repo::execution::tickets::Ticket;
 
-use crate::workflow::execution::executor::errors::{format_time, sqlite_i64, sqlite_u64};
+use crate::cases::{begin_tx, commit_tx};
 use crate::workflow::execution::executor::tickets::{
     all_dependencies_succeeded, depends_on_node, parse_payload,
 };
@@ -111,27 +110,13 @@ impl WorkflowExecutor {
         job_id: JobId,
         workflow_id: &str,
     ) -> Result<HashSet<String>, VoomError> {
-        let rows = sqlx::query(
-            "SELECT json_extract(payload, '$.node_id') AS node_id FROM tickets \
-             WHERE job_id = ? \
-               AND state = 'succeeded' \
-               AND json_extract(payload, '$.workflow_id') = ?",
-        )
-        .bind(sqlite_i64(job_id.0))
-        .bind(workflow_id)
-        .fetch_all(&self.control_plane.pool)
-        .await
-        .map_err(|e| VoomError::database_context("workflow succeeded node ids", e))?;
-        let mut node_ids = HashSet::new();
-        for row in rows {
-            let node_id: Option<String> = row
-                .try_get("node_id")
-                .map_err(|e| VoomError::database_context("succeeded node id row", e))?;
-            if let Some(node_id) = node_id {
-                node_ids.insert(node_id);
-            }
-        }
-        Ok(node_ids)
+        Ok(self
+            .control_plane
+            .tickets
+            .succeeded_workflow_node_ids(job_id, workflow_id)
+            .await?
+            .into_iter()
+            .collect())
     }
 
     /// Reports whether a ticket already exists for the given node id in this
@@ -143,19 +128,14 @@ impl WorkflowExecutor {
         workflow_id: &str,
         node_id: &str,
     ) -> Result<bool, VoomError> {
-        let (count,): (i64,) = sqlx::query_as(
-            "SELECT COUNT(*) FROM tickets \
-             WHERE job_id = ? \
-               AND json_extract(payload, '$.workflow_id') = ? \
-               AND json_extract(payload, '$.node_id') = ?",
-        )
-        .bind(sqlite_i64(job_id.0))
-        .bind(workflow_id)
-        .bind(node_id)
-        .fetch_one(&self.control_plane.pool)
-        .await
-        .map_err(|e| VoomError::database_context("workflow node ticket exists", e))?;
-        Ok(count > 0)
+        let mut tx = begin_tx(&self.control_plane.pool).await?;
+        let exists = self
+            .control_plane
+            .tickets
+            .workflow_ticket_exists_in_tx(&mut tx, job_id, workflow_id, "root", node_id)
+            .await?;
+        commit_tx(tx).await?;
+        Ok(exists)
     }
 
     pub(super) async fn ready_workflow_tickets(
@@ -163,44 +143,17 @@ impl WorkflowExecutor {
         job_id: JobId,
         workflow_id: &str,
     ) -> Result<Vec<Ticket>, VoomError> {
-        let now = format_time(self.control_plane.clock().now())?;
-        let rows = sqlx::query(
-            "SELECT id FROM tickets \
-             WHERE job_id = ? \
-               AND state = 'ready' \
-               AND next_eligible_at <= ? \
-               AND json_extract(payload, '$.workflow_id') = ? \
-             ORDER BY priority DESC, next_eligible_at ASC, id ASC \
-             LIMIT ?",
-        )
-        .bind(sqlite_i64(job_id.0))
-        .bind(now)
-        .bind(workflow_id)
-        .bind(i64::from(self.options.queue.ready_batch_size))
-        .fetch_all(&self.control_plane.pool)
-        .await
-        .map_err(|e| {
-            VoomError::database_context(format!("workflow ready tickets for {job_id}"), e)
-        })?;
-        let mut tickets = Vec::with_capacity(rows.len());
-        for row in rows {
-            let id: i64 = row
-                .try_get("id")
-                .map_err(|e| VoomError::database_context("workflow ready ticket id", e))?;
-            let ticket_id = TicketId(sqlite_u64(id));
-            let ticket = self
-                .control_plane
-                .tickets
-                .get(ticket_id)
-                .await
-                .map_err(|e| {
-                    VoomError::database(format!(
-                        "load workflow ready ticket {ticket_id} for {job_id}: {e}"
-                    ))
-                })?
-                .ok_or_else(|| {
-                    VoomError::NotFound(format!("workflow ready ticket {ticket_id} for {job_id}"))
-                })?;
+        let tickets = self
+            .control_plane
+            .tickets
+            .ready_workflow_tickets(
+                job_id,
+                workflow_id,
+                self.control_plane.clock().now(),
+                self.options.queue.ready_batch_size,
+            )
+            .await?;
+        for ticket in &tickets {
             WorkflowTicketPayload::parse_ticket(ticket.kind.as_str(), ticket.payload.clone())
                 .map_err(|e| {
                     VoomError::Internal(format!(
@@ -208,7 +161,6 @@ impl WorkflowExecutor {
                         ticket.id
                     ))
                 })?;
-            tickets.push(ticket);
         }
         Ok(tickets)
     }
@@ -218,19 +170,12 @@ impl WorkflowExecutor {
         job_id: JobId,
         workflow_id: &str,
     ) -> Result<bool, VoomError> {
-        let (unfinished,): (i64,) = sqlx::query_as(
-            "SELECT COUNT(*) FROM tickets \
-             WHERE job_id = ? AND state IN ('pending', 'ready', 'leased') \
-               AND json_extract(payload, '$.workflow_id') = ?",
-        )
-        .bind(sqlite_i64(job_id.0))
-        .bind(workflow_id)
-        .fetch_one(&self.control_plane.pool)
-        .await
-        .map_err(|e| {
-            VoomError::database_context(format!("workflow unfinished tickets for {job_id}"), e)
-        })?;
-        Ok(unfinished == 0)
+        let facts = self
+            .control_plane
+            .tickets
+            .workflow_ticket_facts(job_id, workflow_id)
+            .await?;
+        Ok(facts.unfinished == 0)
     }
 
     pub(super) async fn workflow_idle_state(
@@ -238,24 +183,16 @@ impl WorkflowExecutor {
         job_id: JobId,
         workflow_id: &str,
     ) -> Result<WorkflowIdleState, VoomError> {
-        let (unfinished, ready, leased): (i64, i64, i64) = sqlx::query_as(
-            "SELECT \
-               COALESCE(SUM(state IN ('pending', 'ready', 'leased')), 0), \
-               COALESCE(SUM(state = 'ready'), 0), \
-               COALESCE(SUM(state = 'leased'), 0) \
-             FROM tickets \
-             WHERE job_id = ? AND json_extract(payload, '$.workflow_id') = ?",
-        )
-        .bind(sqlite_i64(job_id.0))
-        .bind(workflow_id)
-        .fetch_one(&self.control_plane.pool)
-        .await
-        .map_err(|e| VoomError::database_context(format!("workflow idle state for {job_id}"), e))?;
-        if unfinished == 0 {
+        let facts = self
+            .control_plane
+            .tickets
+            .workflow_ticket_facts(job_id, workflow_id)
+            .await?;
+        if facts.unfinished == 0 {
             Ok(WorkflowIdleState::Finished)
-        } else if ready > 0 {
+        } else if facts.ready > 0 {
             Ok(WorkflowIdleState::Ready)
-        } else if leased > 0 {
+        } else if facts.leased > 0 {
             Ok(WorkflowIdleState::Leased)
         } else {
             Ok(WorkflowIdleState::Blocked)

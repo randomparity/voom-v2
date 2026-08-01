@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use serde_json::Value as JsonValue;
 use sqlx::{Row, SqlitePool};
 use time::OffsetDateTime;
-use voom_core::VoomError;
+use voom_core::{TicketId, VoomError};
 use voom_events::{Event, EventEnvelope, EventId, EventKind, SubjectType, TraceId};
 
 use super::Repository;
@@ -64,6 +64,45 @@ impl SqliteEventRepo {
     #[must_use]
     pub fn new(pool: SqlitePool) -> Self {
         Self { pool }
+    }
+
+    /// Return the latest typed terminal or retriable failure event for a ticket.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VoomError::Database`] if the event cannot be queried, or
+    /// [`VoomError::Internal`] if its durable payload cannot be decoded.
+    pub async fn latest_ticket_failure(
+        &self,
+        ticket_id: TicketId,
+    ) -> Result<Option<EventEnvelope>, VoomError> {
+        let row = sqlx::query(
+            "SELECT event_id, occurred_at, kind, subject_type, subject_id, trace_id, payload \
+             FROM events \
+             WHERE kind IN ('ticket.failed_terminal', 'ticket.failed_retriable') \
+               AND subject_type = 'ticket' \
+               AND subject_id = ? \
+             ORDER BY event_id DESC LIMIT 1",
+        )
+        .bind(i64_from_u64(ticket_id.0))
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| VoomError::database_context("latest ticket failure event", e))?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let event_id = event_row_id(&row)?;
+        let payload: String = row.try_get("payload").map_err(|error| {
+            VoomError::Internal(format!(
+                "workflow failure event {event_id} payload: {error}"
+            ))
+        })?;
+        let event = row_to_event(&row).map_err(|error| {
+            VoomError::Internal(format!(
+                "workflow failure event {event_id}: {error}; payload: {payload}"
+            ))
+        })?;
+        Ok(event.map(|event| event.envelope))
     }
 }
 

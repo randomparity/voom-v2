@@ -4,7 +4,9 @@ use rand::RngCore;
 use serde_json::Value as JsonValue;
 use sqlx::{Acquire, Row, SqlitePool};
 use time::{Duration, OffsetDateTime};
-use voom_core::{FailureClass, LeaseId, NodeId, TicketId, TicketOperation, VoomError, WorkerId};
+use voom_core::{
+    FailureClass, JobId, LeaseId, NodeId, TicketId, TicketOperation, VoomError, WorkerId,
+};
 
 use super::Repository;
 use super::common::{
@@ -109,6 +111,13 @@ pub struct Lease {
     pub release_reason: Option<ReleaseReason>,
     pub released_at: Option<OffsetDateTime>,
     pub epoch: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LeaseInterval {
+    pub worker_id: WorkerId,
+    pub acquired_at: OffsetDateTime,
+    pub released_at: Option<OffsetDateTime>,
 }
 
 /// Durable operation-capacity observation that rejected a lease acquisition.
@@ -1016,6 +1025,34 @@ impl SqliteLeaseRepo {
             .await
             .map_err(|e| VoomError::database_context("leases get", e))?;
         row.as_ref().map(row_to_lease).transpose()
+    }
+
+    /// Return every lease interval for tickets in one job in deterministic order.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VoomError::Database`] if the query or typed timestamp decoding fails.
+    pub async fn timeline_for_job(&self, job_id: JobId) -> Result<Vec<LeaseInterval>, VoomError> {
+        let rows: Vec<(i64, String, Option<String>)> = sqlx::query_as(
+            "SELECT leases.worker_id, leases.acquired_at, leases.released_at \
+             FROM leases \
+             JOIN tickets ON tickets.id = leases.ticket_id \
+             WHERE tickets.job_id = ? \
+             ORDER BY leases.acquired_at ASC, leases.worker_id ASC, leases.id ASC",
+        )
+        .bind(i64_from_u64(job_id.0))
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| VoomError::database_context("lease timeline for job", e))?;
+        rows.into_iter()
+            .map(|(worker_id, acquired_at, released_at)| {
+                Ok(LeaseInterval {
+                    worker_id: WorkerId(u64_from_i64(worker_id)),
+                    acquired_at: parse_iso8601(&acquired_at)?,
+                    released_at: released_at.as_deref().map(parse_iso8601).transpose()?,
+                })
+            })
+            .collect()
     }
 
     /// Keyset-paginated inspection read for `voom scheduler leases list`

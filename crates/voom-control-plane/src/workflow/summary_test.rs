@@ -49,9 +49,30 @@ async fn refresh_counts_uses_job_wall_time_and_overlapping_durable_leases() {
     let elapsed = Duration::from_secs(20);
     let mut summary = WorkflowRunSummary::empty(JobId(71), Duration::from_secs(3));
 
-    summary.refresh_counts(&control, JobId(71), elapsed).await;
+    summary
+        .refresh_counts(&control.tickets, &control.leases, JobId(71), elapsed)
+        .await
+        .unwrap();
 
     assert_eq!(summary.elapsed, elapsed);
     assert_eq!(summary.ticket_count, 2);
     assert_eq!(summary.peak_active_workflow_leases, 2);
+}
+
+#[tokio::test]
+async fn refresh_counts_fails_loudly_when_the_pool_is_closed() {
+    let (control, _db) = crate::cases::cp().await;
+    let mut summary = WorkflowRunSummary::empty(JobId(71), Duration::from_secs(3));
+    control.pool.close().await;
+
+    let result = summary
+        .refresh_counts(
+            &control.tickets,
+            &control.leases,
+            JobId(71),
+            Duration::from_secs(20),
+        )
+        .await;
+
+    assert!(result.is_err());
 }
