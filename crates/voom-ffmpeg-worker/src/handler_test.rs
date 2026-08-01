@@ -536,23 +536,28 @@ async fn unsupported_operation_returns_unknown_operation_protocol_error() {
 
 #[tokio::test]
 async fn streaming_operation_acknowledges_and_reports_progress_before_completion() {
+    const PROGRESS_IDLE_DEADLINE_MS: u32 = 40;
+
     let credentials = WorkerCredentials {
         worker_id: WorkerId(7),
         worker_epoch: 1,
         secret: "secret".to_owned().into(),
     };
-    let handler = Arc::new(|request: OperationRequest| {
+    let operation_release = Arc::new(tokio::sync::Notify::new());
+    let handler_release = Arc::clone(&operation_release);
+    let handler = Arc::new(move |request: OperationRequest| {
+        let operation_release = Arc::clone(&handler_release);
         Box::pin(async move {
             stream_operation(
                 StreamingOperation {
                     lease_id: request.lease_id,
                     accepted_at: OffsetDateTime::now_utc(),
-                    progress_idle_deadline_ms: 40,
+                    progress_idle_deadline_ms: PROGRESS_IDLE_DEADLINE_MS,
                     started_message: "started",
                     active_message: "active",
                 },
-                async {
-                    tokio::time::sleep(Duration::from_millis(80)).await;
+                async move {
+                    operation_release.notified().await;
                     Ok(serde_json::json!({"status": "done"}))
                 },
             )
@@ -565,14 +570,14 @@ async fn streaming_operation_acknowledges_and_reports_progress_before_completion
     let client = HttpClient::with_timeouts(
         running.bound,
         Duration::from_secs(1),
-        Duration::from_millis(40),
+        Duration::from_secs(1),
     );
     let request = OperationRequest {
         operation: OperationKind::TranscodeVideo,
         lease_id: LeaseId(42),
         payload: serde_json::json!({}),
         heartbeat_deadline_ms: 100,
-        progress_idle_deadline_ms: 40,
+        progress_idle_deadline_ms: PROGRESS_IDLE_DEADLINE_MS,
     };
 
     let mut dispatch = client
@@ -582,8 +587,17 @@ async fn streaming_operation_acknowledges_and_reports_progress_before_completion
 
     let mut progress_count = 0;
     loop {
-        match dispatch.frames.next_frame().await.unwrap() {
-            NdjsonOutcome::Frame(ProgressFrame::Progress { .. }) => progress_count += 1,
+        let outcome = tokio::time::timeout(Duration::from_secs(1), dispatch.frames.next_frame())
+            .await
+            .unwrap()
+            .unwrap();
+        match outcome {
+            NdjsonOutcome::Frame(ProgressFrame::Progress { .. }) => {
+                progress_count += 1;
+                if progress_count == 2 {
+                    operation_release.notify_one();
+                }
+            }
             NdjsonOutcome::Terminated(ProgressFrame::Result { .. }) => break,
             other => {
                 assert!(matches!(

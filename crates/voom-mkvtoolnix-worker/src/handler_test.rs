@@ -815,17 +815,27 @@ async fn malformed_request_payload_is_accepted_then_terminal_error() {
 
 #[tokio::test]
 async fn streaming_operation_acknowledges_and_reports_progress_before_completion() {
+    const PROGRESS_IDLE_DEADLINE_MS: u32 = 40;
+
     let credentials = WorkerCredentials {
         worker_id: WorkerId(8),
         worker_epoch: 1,
         secret: "secret".to_owned().into(),
     };
-    let handler = Arc::new(|request: OperationRequest| {
+    let operation_release = Arc::new(tokio::sync::Notify::new());
+    let handler_release = Arc::clone(&operation_release);
+    let handler = Arc::new(move |request: OperationRequest| {
+        let operation_release = Arc::clone(&handler_release);
         Box::pin(async move {
-            stream_operation(request.lease_id, OffsetDateTime::now_utc(), 40, async {
-                tokio::time::sleep(Duration::from_millis(80)).await;
-                Err(config_invalid("test", "finished".to_owned()))
-            })
+            stream_operation(
+                request.lease_id,
+                OffsetDateTime::now_utc(),
+                PROGRESS_IDLE_DEADLINE_MS,
+                async move {
+                    operation_release.notified().await;
+                    Err(config_invalid("test", "finished".to_owned()))
+                },
+            )
         }) as OperationFuture
     });
     let running = HttpServer::new(credentials.clone(), handler)
@@ -835,14 +845,14 @@ async fn streaming_operation_acknowledges_and_reports_progress_before_completion
     let client = HttpClient::with_timeouts(
         running.bound,
         Duration::from_secs(1),
-        Duration::from_millis(40),
+        Duration::from_secs(1),
     );
     let request = OperationRequest {
         operation: OperationKind::Remux,
         lease_id: LeaseId(42),
         payload: serde_json::json!({}),
         heartbeat_deadline_ms: 100,
-        progress_idle_deadline_ms: 40,
+        progress_idle_deadline_ms: PROGRESS_IDLE_DEADLINE_MS,
     };
 
     let mut dispatch = client
@@ -852,8 +862,17 @@ async fn streaming_operation_acknowledges_and_reports_progress_before_completion
 
     let mut progress_count = 0;
     loop {
-        match dispatch.frames.next_frame().await.unwrap() {
-            NdjsonOutcome::Frame(ProgressFrame::Progress { .. }) => progress_count += 1,
+        let outcome = tokio::time::timeout(Duration::from_secs(1), dispatch.frames.next_frame())
+            .await
+            .unwrap()
+            .unwrap();
+        match outcome {
+            NdjsonOutcome::Frame(ProgressFrame::Progress { .. }) => {
+                progress_count += 1;
+                if progress_count == 2 {
+                    operation_release.notify_one();
+                }
+            }
             NdjsonOutcome::Terminated(ProgressFrame::Error { .. }) => break,
             other => {
                 assert!(matches!(
