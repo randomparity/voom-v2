@@ -67,6 +67,100 @@ fn ticket_op(value: &str) -> TicketOperation {
 }
 
 #[tokio::test]
+async fn succeeded_results_for_job_and_operation_selects_succeeded_rows_in_ticket_order() {
+    let (pool, _tmp) = pool().await;
+    let jobs = SqliteJobRepo::new(pool.clone());
+    let repo = SqliteTicketRepo::new(pool.clone());
+    let job = jobs.create(sample_job()).await.unwrap();
+    let other_job = jobs.create(sample_job()).await.unwrap();
+    let operation = ticket_op("synthetic.workflow.operation.extract_audio");
+    let first = create_ticket_for_job(&repo, job.id, operation.clone()).await;
+    let second = create_ticket_for_job(&repo, job.id, operation.clone()).await;
+    let wrong_operation = create_ticket_for_job(&repo, job.id, ticket_op("other")).await;
+    let wrong_job = create_ticket_for_job(&repo, other_job.id, operation.clone()).await;
+    let failed = create_ticket_for_job(&repo, job.id, operation.clone()).await;
+
+    for (ticket, state, result) in [
+        (&first, "succeeded", serde_json::json!({"sequence": 1})),
+        (&second, "succeeded", serde_json::json!({"sequence": 2})),
+        (
+            &wrong_operation,
+            "succeeded",
+            serde_json::json!({"sequence": 3}),
+        ),
+        (&wrong_job, "succeeded", serde_json::json!({"sequence": 4})),
+        (&failed, "failed", serde_json::json!({"sequence": 5})),
+    ] {
+        sqlx::query("UPDATE tickets SET state = ?, result = ? WHERE id = ?")
+            .bind(state)
+            .bind(result.to_string())
+            .bind(i64::try_from(ticket.id.0).unwrap())
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+
+    let results = repo
+        .succeeded_results_for_job_and_operation(job.id, operation)
+        .await
+        .unwrap();
+
+    assert_eq!(results.len(), 2);
+    assert_eq!(results[0].ticket_id, first.id);
+    assert_eq!(results[0].result, serde_json::json!({"sequence": 1}));
+    assert_eq!(results[1].ticket_id, second.id);
+    assert_eq!(results[1].result, serde_json::json!({"sequence": 2}));
+}
+
+#[tokio::test]
+async fn succeeded_results_for_job_and_operation_rejects_malformed_result_json() {
+    let (pool, _tmp) = pool().await;
+    let jobs = SqliteJobRepo::new(pool.clone());
+    let repo = SqliteTicketRepo::new(pool.clone());
+    let job = jobs.create(sample_job()).await.unwrap();
+    let operation = ticket_op("synthetic.workflow.operation.extract_audio");
+    let ticket = create_ticket_for_job(&repo, job.id, operation.clone()).await;
+    let mut connection = pool.acquire().await.unwrap();
+    sqlx::query("PRAGMA ignore_check_constraints = TRUE")
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE tickets SET state = 'succeeded', result = '{' WHERE id = ?")
+        .bind(i64::try_from(ticket.id.0).unwrap())
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+    sqlx::query("PRAGMA ignore_check_constraints = FALSE")
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+
+    let error = repo
+        .succeeded_results_for_job_and_operation(job.id, operation)
+        .await
+        .unwrap_err();
+
+    assert!(error.to_string().contains("succeeded ticket result"));
+}
+
+async fn create_ticket_for_job(
+    repo: &SqliteTicketRepo,
+    job_id: JobId,
+    kind: TicketOperation,
+) -> Ticket {
+    repo.create(NewTicket {
+        job_id: Some(job_id),
+        kind,
+        priority: 0,
+        payload: serde_json::json!({}),
+        max_attempts: 1,
+        created_at: OffsetDateTime::UNIX_EPOCH,
+    })
+    .await
+    .unwrap()
+}
+
+#[tokio::test]
 async fn keyset_list_is_newest_first_and_pages_by_after_id() {
     let (pool, _tmp) = pool().await;
     let repo = SqliteTicketRepo::new(pool.clone());

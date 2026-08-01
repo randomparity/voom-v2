@@ -6,10 +6,9 @@ use std::time::Duration;
 
 use secrecy::SecretString;
 use serde_json::json;
-use sqlx::Row;
 use voom_core::{
-    FileVersionId, OperationKind, PROTOCOL_VERSION, PolicyInputSetId, PolicyVersionId, VoomError,
-    WorkerId,
+    FileVersionId, OperationKind, PROTOCOL_VERSION, PolicyInputSetId, PolicyVersionId, TicketId,
+    TicketOperation, VoomError, WorkerId,
 };
 use voom_events::{Event, SubjectType, payload::IssueLifecyclePayload};
 use voom_plan::PlanOperationKind;
@@ -237,10 +236,15 @@ pub struct ComplianceAudioSynthesisCompanion {
 }
 
 fn decode_compliance_extract_result(
-    ticket_id: i64,
-    result: &str,
+    ticket_id: TicketId,
+    result: &serde_json::Value,
 ) -> Result<Vec<ComplianceAudioExtractOutput>, VoomError> {
-    match ordered_ticket_result(result)? {
+    let encoded = serde_json::to_string(result).map_err(|error| {
+        VoomError::Internal(format!(
+            "serialize audio extraction ticket {ticket_id} result: {error}"
+        ))
+    })?;
+    match ordered_ticket_result(&encoded)? {
         OrderedTicketResult::Outputs(outputs) => outputs
             .into_iter()
             .map(|output| {
@@ -267,15 +271,10 @@ fn decode_compliance_extract_result(
 }
 
 fn decode_compliance_synthesis_result(
-    ticket_id: i64,
-    result: &str,
+    ticket_id: TicketId,
+    result: &serde_json::Value,
 ) -> Result<Vec<ComplianceAudioSynthesisCompanion>, VoomError> {
-    let value: serde_json::Value = serde_json::from_str(result).map_err(|error| {
-        VoomError::database(format!(
-            "audio synthesis ticket {ticket_id} result is malformed: {error}"
-        ))
-    })?;
-    let object = value.as_object().ok_or_else(|| {
+    let object = result.as_object().ok_or_else(|| {
         VoomError::database(format!(
             "audio synthesis ticket {ticket_id} result must be an object"
         ))
@@ -317,7 +316,7 @@ fn decode_compliance_synthesis_result(
         .collect()
 }
 
-fn malformed_synthesis_report(ticket_id: i64) -> VoomError {
+fn malformed_synthesis_report(ticket_id: TicketId) -> VoomError {
     VoomError::database(format!(
         "audio synthesis ticket {ticket_id} must contain operation id, operation key, and \
          non-empty ordered companions together"
@@ -1183,43 +1182,26 @@ impl ControlPlane {
 
     pub(crate) async fn policy_runtime_registry(&self) -> Result<WorkerRuntimeRegistry, VoomError> {
         let mut registry = WorkerRuntimeRegistry::new();
-        let rows = sqlx::query(
-            "SELECT w.id, w.epoch, wc.extra \
-             FROM workers w \
-             JOIN worker_capabilities wc ON wc.worker_id = w.id \
-             WHERE w.status IN ('registered', 'active') \
-               AND wc.operation IN (?, ?, ?, ?) \
-             ORDER BY w.id ASC",
-        )
-        .bind(OperationKind::Remux.as_str())
-        .bind(OperationKind::TranscodeVideo.as_str())
-        .bind(OperationKind::TranscodeAudio.as_str())
-        .bind(OperationKind::ExtractAudio.as_str())
-        .fetch_all(&self.pool)
-        .await
-        .map_err(|e| VoomError::database_context("policy runtime registry", e))?;
-
-        for row in rows {
-            let worker_id_raw = row
-                .try_get::<i64, _>("id")
-                .map_err(|e| VoomError::database_context("policy runtime worker id", e))?;
-            let worker_epoch_raw = row
-                .try_get::<i64, _>("epoch")
-                .map_err(|e| VoomError::database_context("policy runtime worker epoch", e))?;
-            let worker_id = WorkerId(sqlite_u64(worker_id_raw, "worker id")?);
-            let worker_epoch = sqlite_u64(worker_epoch_raw, "worker epoch")?;
-            let extra: String = row
-                .try_get("extra")
-                .map_err(|e| VoomError::database_context("policy runtime registry extra", e))?;
-            let Some((endpoint, secret)) = runtime_metadata(&extra)? else {
+        let operations = [
+            TicketOperation::from(OperationKind::Remux),
+            TicketOperation::from(OperationKind::TranscodeVideo),
+            TicketOperation::from(OperationKind::TranscodeAudio),
+            TicketOperation::from(OperationKind::ExtractAudio),
+        ];
+        for capability in self
+            .workers
+            .runtime_capabilities_for_operations(&operations)
+            .await?
+        {
+            let Some((endpoint, secret)) = runtime_metadata(&capability.extra)? else {
                 continue;
             };
             registry.register_in_process_runtime(
-                worker_id,
+                capability.worker_id,
                 Arc::new(HttpClient::new(endpoint)),
                 WorkerCredentials {
-                    worker_id,
-                    worker_epoch,
+                    worker_id: capability.worker_id,
+                    worker_epoch: capability.worker_epoch,
                     secret,
                 },
             );
@@ -1310,35 +1292,24 @@ impl ControlPlane {
         if registered_ids.is_empty() {
             return Ok(HashSet::new());
         }
-        let rows = sqlx::query(
-            "SELECT w.id, wc.operation \
-             FROM workers w \
-             JOIN worker_capabilities wc ON wc.worker_id = w.id \
-             WHERE w.status IN ('registered', 'active') \
-               AND wc.operation IN (?, ?, ?, ?)",
-        )
-        .bind(OperationKind::Remux.as_str())
-        .bind(OperationKind::TranscodeVideo.as_str())
-        .bind(OperationKind::TranscodeAudio.as_str())
-        .bind(OperationKind::ExtractAudio.as_str())
-        .fetch_all(&self.pool)
-        .await
-        .map_err(|e| VoomError::database_context("dead endpoint operations", e))?;
+        let operations = [
+            TicketOperation::from(OperationKind::Remux),
+            TicketOperation::from(OperationKind::TranscodeVideo),
+            TicketOperation::from(OperationKind::TranscodeAudio),
+            TicketOperation::from(OperationKind::ExtractAudio),
+        ];
+        let capabilities = self
+            .workers
+            .runtime_capabilities_for_operations(&operations)
+            .await?;
 
         let mut registered_operations = HashSet::new();
         let mut live_operations = HashSet::new();
-        for row in rows {
-            let worker_id_raw = row
-                .try_get::<i64, _>("id")
-                .map_err(|e| VoomError::database_context("dead endpoint worker id", e))?;
-            let worker_id = WorkerId(sqlite_u64(worker_id_raw, "worker id")?);
-            let operation: String = row
-                .try_get("operation")
-                .map_err(|e| VoomError::database_context("dead endpoint operation", e))?;
-            if live_ids.contains(&worker_id) {
-                live_operations.insert(operation);
-            } else if registered_ids.contains(&worker_id) {
-                registered_operations.insert(operation);
+        for capability in capabilities {
+            if live_ids.contains(&capability.worker_id) {
+                live_operations.insert(capability.operation.into_string());
+            } else if registered_ids.contains(&capability.worker_id) {
+                registered_operations.insert(capability.operation.into_string());
             }
         }
         Ok(&registered_operations - &live_operations)
@@ -1469,24 +1440,19 @@ impl ControlPlane {
         &self,
         job_id: voom_core::JobId,
     ) -> Result<Vec<ComplianceAudioExtractOutput>, VoomError> {
-        let job_id = i64::try_from(job_id.0).map_err(|error| {
-            VoomError::Internal(format!("audio extract report job id overflow: {error}"))
-        })?;
-        let rows: Vec<(i64, String)> = sqlx::query_as(
-            "SELECT id, result FROM tickets \
-             WHERE job_id = ? AND state = 'succeeded' AND result IS NOT NULL \
-               AND kind = 'synthetic.workflow.operation.extract_audio' \
-             ORDER BY id ASC",
-        )
-        .bind(job_id)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(|error| {
-            VoomError::database_context("compliance audio extract output report", error)
-        })?;
+        let rows = self
+            .tickets
+            .succeeded_results_for_job_and_operation(
+                job_id,
+                TicketOperation::new("synthetic.workflow.operation.extract_audio")?,
+            )
+            .await?;
         let mut outputs = Vec::new();
-        for (ticket_id, result) in rows {
-            outputs.extend(decode_compliance_extract_result(ticket_id, &result)?);
+        for row in rows {
+            outputs.extend(decode_compliance_extract_result(
+                row.ticket_id,
+                &row.result,
+            )?);
         }
         Ok(outputs)
     }
@@ -1495,24 +1461,19 @@ impl ControlPlane {
         &self,
         job_id: voom_core::JobId,
     ) -> Result<Vec<ComplianceAudioSynthesisCompanion>, VoomError> {
-        let job_id = i64::try_from(job_id.0).map_err(|error| {
-            VoomError::Internal(format!("audio synthesis report job id overflow: {error}"))
-        })?;
-        let rows: Vec<(i64, String)> = sqlx::query_as(
-            "SELECT id, result FROM tickets \
-             WHERE job_id = ? AND state = 'succeeded' AND result IS NOT NULL \
-               AND kind = 'synthetic.workflow.operation.transcode_audio' \
-             ORDER BY id ASC",
-        )
-        .bind(job_id)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(|error| {
-            VoomError::database_context("compliance audio synthesis companion report", error)
-        })?;
+        let rows = self
+            .tickets
+            .succeeded_results_for_job_and_operation(
+                job_id,
+                TicketOperation::new("synthetic.workflow.operation.transcode_audio")?,
+            )
+            .await?;
         let mut companions = Vec::new();
-        for (ticket_id, result) in rows {
-            companions.extend(decode_compliance_synthesis_result(ticket_id, &result)?);
+        for row in rows {
+            companions.extend(decode_compliance_synthesis_result(
+                row.ticket_id,
+                &row.result,
+            )?);
         }
         Ok(companions)
     }
@@ -1558,14 +1519,14 @@ fn policy_worker_requirement(kind: PlanOperationKind) -> Option<(&'static str, &
     }
 }
 
-fn runtime_metadata(extra: &str) -> Result<Option<(SocketAddr, SecretString)>, VoomError> {
-    let value: serde_json::Value = serde_json::from_str(extra)
-        .map_err(|e| VoomError::database_context("worker capability extra JSON", e))?;
-    let endpoint = value
+fn runtime_metadata(
+    extra: &serde_json::Value,
+) -> Result<Option<(SocketAddr, SecretString)>, VoomError> {
+    let endpoint = extra
         .get("endpoint")
         .and_then(serde_json::Value::as_str)
         .ok_or_else(|| VoomError::Config("worker runtime endpoint is missing".to_owned()))?;
-    let secret = value
+    let secret = extra
         .get("secret")
         .and_then(serde_json::Value::as_str)
         .ok_or_else(|| VoomError::Config("worker runtime secret is missing".to_owned()))?;
@@ -1573,10 +1534,6 @@ fn runtime_metadata(extra: &str) -> Result<Option<(SocketAddr, SecretString)>, V
         .parse::<SocketAddr>()
         .map_err(|e| VoomError::Config(format!("worker endpoint {endpoint:?}: {e}")))?;
     Ok(Some((endpoint, SecretString::from(secret.to_owned()))))
-}
-
-fn sqlite_u64(value: i64, label: &str) -> Result<u64, VoomError> {
-    u64::try_from(value).map_err(|_| VoomError::database(format!("{label} was negative: {value}")))
 }
 
 fn issue_draft(dedupe_key: &str, check: &voom_plan::ComplianceCheck) -> PolicyIssueDraft {

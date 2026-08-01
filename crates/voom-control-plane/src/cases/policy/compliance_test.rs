@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use sqlx::Row;
 use time::OffsetDateTime;
-use voom_core::{OperationKind, TicketOperation};
+use voom_core::{OperationKind, TicketId, TicketOperation};
 use voom_events::EventKind;
 use voom_plan::PlanOperationKind;
 use voom_policy::{FixtureName, load_fixture, load_policy_fixture};
@@ -2012,7 +2012,7 @@ fn compliance_audio_extract_outputs_reject_incomplete_published_members() {
         }]
     });
 
-    let error = super::decode_compliance_extract_result(42, &result.to_string()).unwrap_err();
+    let error = super::decode_compliance_extract_result(TicketId(42), &result).unwrap_err();
 
     assert!(
         error
@@ -2027,7 +2027,7 @@ fn compliance_audio_extract_outputs_reject_unknown_published_fields() {
     output["unexpected"] = serde_json::json!(true);
     let result = serde_json::json!({ "outputs": [output] });
 
-    let error = super::decode_compliance_extract_result(42, &result.to_string()).unwrap_err();
+    let error = super::decode_compliance_extract_result(TicketId(42), &result).unwrap_err();
 
     assert!(
         error
@@ -2041,7 +2041,7 @@ fn compliance_audio_extract_outputs_reject_unknown_legacy_fields() {
     let mut result = historical_extract_result();
     result["unexpected"] = serde_json::json!(true);
 
-    let error = super::decode_compliance_extract_result(42, &result.to_string()).unwrap_err();
+    let error = super::decode_compliance_extract_result(TicketId(42), &result).unwrap_err();
 
     assert!(
         error
@@ -2104,7 +2104,7 @@ fn compliance_audio_synthesis_companions_reject_incomplete_or_unknown_fields() {
             published_synthesis_companion("companion-a", "a-1", 1, 3, 1)
         ]
     });
-    let error = super::decode_compliance_synthesis_result(42, &incomplete.to_string()).unwrap_err();
+    let error = super::decode_compliance_synthesis_result(TicketId(42), &incomplete).unwrap_err();
     assert!(error.to_string().contains(
         "audio synthesis ticket 42 must contain operation id, operation key, and non-empty"
     ));
@@ -2116,7 +2116,7 @@ fn compliance_audio_synthesis_companions_reject_incomplete_or_unknown_fields() {
         "synthesis_operation_key": "synthesize:7:node-synthesis",
         "synthesized_companions": [companion]
     });
-    let error = super::decode_compliance_synthesis_result(42, &malformed.to_string()).unwrap_err();
+    let error = super::decode_compliance_synthesis_result(TicketId(42), &malformed).unwrap_err();
     assert!(
         error
             .to_string()

@@ -137,6 +137,68 @@ async fn record_grant_stores_max_parallel_as_json_object() {
 }
 
 #[tokio::test]
+async fn runtime_capabilities_for_operations_projects_live_workers_epoch_operation_and_extra() {
+    let (pool, _tmp) = pool().await;
+    let repo = SqliteWorkerRepo::new(pool.clone());
+    let registered = repo
+        .register(sample_new_worker("registered"))
+        .await
+        .unwrap();
+    let active = repo.register(sample_new_worker("active")).await.unwrap();
+    let stale = repo.register(sample_new_worker("stale")).await.unwrap();
+    let retired = repo.register(sample_new_worker("retired")).await.unwrap();
+    let operation = worker_op("transcode_video");
+    let extra = serde_json::json!({"endpoint": "127.0.0.1:8080", "secret": "token"});
+
+    for worker_id in [registered.id, active.id, stale.id, retired.id] {
+        repo.record_capability(NewCapability {
+            worker_id,
+            operation: operation.clone(),
+            codecs: Vec::new(),
+            hardware: Vec::new(),
+            artifact_access: Vec::new(),
+            extra: extra.clone(),
+        })
+        .await
+        .unwrap();
+    }
+    sqlx::query("UPDATE workers SET status = 'active', epoch = 4 WHERE id = ?")
+        .bind(i64::try_from(active.id.0).unwrap())
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE workers SET status = 'stale' WHERE id = ?")
+        .bind(i64::try_from(stale.id.0).unwrap())
+        .execute(&pool)
+        .await
+        .unwrap();
+    repo.retire(retired.id, retired.epoch, T0).await.unwrap();
+
+    let capabilities = repo
+        .runtime_capabilities_for_operations(std::slice::from_ref(&operation))
+        .await
+        .unwrap();
+
+    assert_eq!(capabilities.len(), 2);
+    assert_eq!(capabilities[0].worker_id, registered.id);
+    assert_eq!(capabilities[0].worker_epoch, registered.epoch);
+    assert_eq!(capabilities[0].operation, operation);
+    assert_eq!(capabilities[0].extra, extra);
+    assert_eq!(capabilities[1].worker_id, active.id);
+    assert_eq!(capabilities[1].worker_epoch, 4);
+}
+
+#[tokio::test]
+async fn runtime_capabilities_for_operations_returns_empty_without_operations() {
+    let (pool, _tmp) = pool().await;
+    let repo = SqliteWorkerRepo::new(pool);
+
+    let capabilities = repo.runtime_capabilities_for_operations(&[]).await.unwrap();
+
+    assert!(capabilities.is_empty());
+}
+
+#[tokio::test]
 async fn retire_transitions_status_and_sets_retired_at() {
     let (pool, _tmp) = pool().await;
     let repo = SqliteWorkerRepo::new(pool.clone());

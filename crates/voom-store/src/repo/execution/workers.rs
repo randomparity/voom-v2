@@ -1,7 +1,7 @@
 //! `SqliteWorkerRepo` — owns workers + `worker_capabilities` + `worker_grants`.
 
 use serde_json::Value as JsonValue;
-use sqlx::{Row, SqlitePool};
+use sqlx::{QueryBuilder, Row, SqlitePool};
 use time::OffsetDateTime;
 use voom_core::{NodeId, TicketOperation, VoomError, WorkerId};
 pub use voom_core::{WorkerKind, WorkerStatus};
@@ -85,6 +85,14 @@ pub struct WorkerOperationCapability {
     pub extra: JsonValue,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct RuntimeWorkerCapability {
+    pub worker_id: WorkerId,
+    pub worker_epoch: u64,
+    pub operation: TicketOperation,
+    pub extra: JsonValue,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WorkerOperationCapacity {
     pub active_leases: u32,
@@ -141,6 +149,68 @@ impl SqliteWorkerRepo {
     #[must_use]
     pub fn new(pool: SqlitePool) -> Self {
         Self { pool }
+    }
+
+    /// Return runtime metadata for live workers declaring one of the operations.
+    ///
+    /// A worker is live when its durable status is `registered` or `active`.
+    /// Results are ordered by worker id and then capability id.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VoomError::Database`] if the rows, stored operation, or JSON
+    /// metadata cannot be read or decoded.
+    pub async fn runtime_capabilities_for_operations(
+        &self,
+        operations: &[TicketOperation],
+    ) -> Result<Vec<RuntimeWorkerCapability>, VoomError> {
+        if operations.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut query = QueryBuilder::new(
+            "SELECT w.id AS worker_id, w.epoch AS worker_epoch, wc.operation, wc.extra \
+             FROM workers w \
+             JOIN worker_capabilities wc ON wc.worker_id = w.id \
+             WHERE w.status IN ('registered', 'active') AND wc.operation IN (",
+        );
+        let mut separated = query.separated(", ");
+        for operation in operations {
+            separated.push_bind(operation.as_str());
+        }
+        separated.push_unseparated(") ORDER BY w.id ASC, wc.id ASC");
+        let rows =
+            query.build().fetch_all(&self.pool).await.map_err(|error| {
+                VoomError::database_context("runtime worker capabilities", error)
+            })?;
+
+        let mut capabilities = Vec::with_capacity(rows.len());
+        for row in rows {
+            let worker_id: i64 = row
+                .try_get("worker_id")
+                .map_err(|error| map_row_err("runtime worker capability worker id", &error))?;
+            let worker_epoch: i64 = row
+                .try_get("worker_epoch")
+                .map_err(|error| map_row_err("runtime worker capability worker epoch", &error))?;
+            let operation: String = row
+                .try_get("operation")
+                .map_err(|error| map_row_err("runtime worker capability operation", &error))?;
+            let extra: String = row
+                .try_get("extra")
+                .map_err(|error| map_row_err("runtime worker capability extra", &error))?;
+            capabilities.push(RuntimeWorkerCapability {
+                worker_id: WorkerId(u64_from_i64(worker_id)),
+                worker_epoch: u64_from_i64(worker_epoch),
+                operation: TicketOperation::from_stored(
+                    operation,
+                    "runtime worker capability operation",
+                )?,
+                extra: serde_json::from_str(&extra).map_err(|error| {
+                    VoomError::database_context("parse runtime worker capability extra", error)
+                })?,
+            });
+        }
+        Ok(capabilities)
     }
 }
 

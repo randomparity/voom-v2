@@ -83,6 +83,12 @@ pub struct Ticket {
     pub epoch: u64,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct SucceededTicketResult {
+    pub ticket_id: TicketId,
+    pub result: JsonValue,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WorkflowTicketFacts {
     pub unfinished: u32,
@@ -199,6 +205,49 @@ impl SqliteTicketRepo {
             .await
             .map_err(|e| VoomError::database_context("commit", e))?;
         Ok(out)
+    }
+
+    /// Return succeeded, result-bearing tickets for one job and operation.
+    ///
+    /// Results are ordered by ticket id so consumers preserve durable ticket
+    /// order when a result contains multiple projected records.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VoomError::Database`] if rows or persisted JSON cannot be
+    /// read or decoded.
+    pub async fn succeeded_results_for_job_and_operation(
+        &self,
+        job_id: JobId,
+        operation: TicketOperation,
+    ) -> Result<Vec<SucceededTicketResult>, VoomError> {
+        let rows = sqlx::query(
+            "SELECT id, result FROM tickets \
+             WHERE job_id = ? AND kind = ? AND state = 'succeeded' AND result IS NOT NULL \
+             ORDER BY id ASC",
+        )
+        .bind(i64_from_u64(job_id.0))
+        .bind(operation.as_str())
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|error| VoomError::database_context("succeeded ticket results", error))?;
+
+        let mut results = Vec::with_capacity(rows.len());
+        for row in rows {
+            let ticket_id: i64 = row
+                .try_get("id")
+                .map_err(|error| map_row_err("succeeded ticket result ticket id", &error))?;
+            let result: String = row
+                .try_get("result")
+                .map_err(|error| map_row_err("succeeded ticket result", &error))?;
+            results.push(SucceededTicketResult {
+                ticket_id: TicketId(u64_from_i64(ticket_id)),
+                result: serde_json::from_str(&result).map_err(|error| {
+                    VoomError::database_context("parse succeeded ticket result", error)
+                })?,
+            });
+        }
+        Ok(results)
     }
 
     /// Add a dependency to a pending ticket in the caller's transaction.
