@@ -1,14 +1,22 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum ScenarioError {
-    #[error("read: {0}")]
-    Read(String),
-    #[error("decode: {0}")]
-    Decode(String),
+    #[error("failed to read scenario {path:?}: {source}")]
+    Read {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("failed to decode scenario {path:?}: {source}")]
+    Decode {
+        path: PathBuf,
+        #[source]
+        source: serde_json::Error,
+    },
 }
 
 /// One scripted event a fake's operation handler consumes.
@@ -36,8 +44,15 @@ pub struct Scenario {
 }
 
 pub fn load_scenario(path: impl AsRef<Path>) -> Result<Scenario, ScenarioError> {
-    let bytes = std::fs::read(path.as_ref()).map_err(|e| ScenarioError::Read(e.to_string()))?;
-    serde_json::from_slice(&bytes).map_err(|e| ScenarioError::Decode(e.to_string()))
+    let path = path.as_ref();
+    let bytes = std::fs::read(path).map_err(|source| ScenarioError::Read {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    serde_json::from_slice(&bytes).map_err(|source| ScenarioError::Decode {
+        path: path.to_path_buf(),
+        source,
+    })
 }
 
 #[derive(Debug, Clone)]
@@ -57,3 +72,7 @@ impl ScenarioPlayer {
         self.events.next()
     }
 }
+
+#[cfg(test)]
+#[path = "scenario_test.rs"]
+mod tests;
