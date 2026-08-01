@@ -14,6 +14,7 @@ use super::Repository;
 use super::common::{
     i64_from_u64, iso8601, map_row_err, parse_iso8601, serialize_json, u64_from_i64,
 };
+use crate::repo::execution::leases::LeaseState;
 
 #[derive(Debug, Clone)]
 pub struct NewArtifactHandle {
@@ -243,6 +244,64 @@ pub struct ArtifactCommitRecord {
 }
 
 #[derive(Debug, Clone)]
+pub struct ArtifactCommitEvidence {
+    pub id: ArtifactCommitRecordId,
+    pub artifact_handle_id: ArtifactHandleId,
+    pub source_file_version_id: FileVersionId,
+    pub verification_id: ArtifactVerificationId,
+    pub result_file_version_id: Option<FileVersionId>,
+    pub result_file_location_id: Option<FileLocationId>,
+    pub state: ArtifactCommitState,
+    pub report: JsonValue,
+    pub started_at: OffsetDateTime,
+    pub promotion_started_at: Option<OffsetDateTime>,
+    pub finished_at: Option<OffsetDateTime>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ArtifactVerificationEvidence {
+    pub artifact_handle_id: ArtifactHandleId,
+    pub workflow_ticket_id: Option<TicketId>,
+    pub workflow_lease_id: Option<LeaseId>,
+    pub status: ArtifactVerificationStatus,
+    pub report: JsonValue,
+    pub started_at: OffsetDateTime,
+    pub finished_at: OffsetDateTime,
+}
+
+#[derive(Debug, Clone)]
+pub struct ResultLeaseEvidence {
+    pub ticket_id: TicketId,
+    pub state: LeaseState,
+    pub acquired_at: OffsetDateTime,
+    pub expires_at: OffsetDateTime,
+    pub last_heartbeat_at: OffsetDateTime,
+    pub released_at: Option<OffsetDateTime>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CommittedTicketEvidence {
+    pub ticket_id: TicketId,
+    pub ticket_job_id: Option<JobId>,
+    pub ticket_payload: JsonValue,
+    pub result: JsonValue,
+    pub commit: Option<ArtifactCommitEvidence>,
+    pub verification: Option<ArtifactVerificationEvidence>,
+    pub result_lease: Option<ResultLeaseEvidence>,
+    pub source_file_asset_id: Option<FileAssetId>,
+    pub result_file_asset_id: Option<FileAssetId>,
+    pub location_file_version_id: Option<FileVersionId>,
+    pub snapshot_file_version_id: Option<FileVersionId>,
+}
+
+#[derive(Debug, Clone)]
+pub struct VerifiedTicketEvidence {
+    pub verification: ArtifactVerification,
+    pub file_version_id: Option<FileVersionId>,
+    pub location_value: Option<String>,
+}
+
+#[derive(Debug, Clone)]
 pub struct ArtifactCommitFailure {
     pub failure_class: String,
     pub error_code: String,
@@ -277,6 +336,67 @@ impl SqliteArtifactRepo {
     #[must_use]
     pub fn new(pool: SqlitePool) -> Self {
         Self { pool }
+    }
+
+    pub async fn committed_ticket_evidence(
+        &self,
+        ticket_ids: &[TicketId],
+    ) -> Result<Vec<CommittedTicketEvidence>, VoomError> {
+        if ticket_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let ids = ticket_ids
+            .iter()
+            .map(|id| checked_sqlite_id(id.0, "committed evidence ticket id"))
+            .collect::<Result<Vec<_>, _>>()?;
+        let ids = serialize_json(&ids, "committed evidence ticket ids")?;
+        let rows = sqlx::query(COMMITTED_TICKET_EVIDENCE_SQL)
+            .bind(ids)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|error| VoomError::database_context("committed ticket evidence", error))?;
+        rows.iter().map(decode_committed_ticket_evidence).collect()
+    }
+
+    pub async fn verified_ticket_evidence(
+        &self,
+        ticket_id: TicketId,
+        verification_id: ArtifactVerificationId,
+        handle_id: ArtifactHandleId,
+        location_id: FileLocationId,
+    ) -> Result<Option<VerifiedTicketEvidence>, VoomError> {
+        let sql = format!(
+            "{SELECT_ARTIFACT_VERIFICATION_COLS}, \
+             fl.file_version_id AS selected_file_version_id, \
+             fl.value AS selected_location_value \
+             FROM artifact_verifications v \
+             JOIN leases l ON l.id = v.workflow_lease_id AND l.ticket_id = v.workflow_ticket_id \
+             LEFT JOIN file_locations fl ON fl.id = ? AND fl.retired_at IS NULL \
+             WHERE v.workflow_ticket_id = ? AND v.id = ? AND v.artifact_handle_id = ?"
+        );
+        let row = sqlx::query(&sql)
+            .bind(checked_sqlite_id(
+                location_id.0,
+                "verified file location id",
+            )?)
+            .bind(checked_sqlite_id(
+                ticket_id.0,
+                "verified workflow ticket id",
+            )?)
+            .bind(checked_sqlite_id(
+                verification_id.0,
+                "verified artifact verification id",
+            )?)
+            .bind(checked_sqlite_id(
+                handle_id.0,
+                "verified artifact handle id",
+            )?)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|error| VoomError::database_context("verified ticket evidence", error))?;
+        row.as_ref()
+            .map(decode_verified_ticket_evidence)
+            .transpose()
     }
 }
 
@@ -1643,6 +1763,61 @@ const SELECT_ARTIFACT_COMMIT_RECORD_COLS: &str = "SELECT c.id, c.artifact_handle
     c.recovery_reason, c.temp_path, c.report, c.started_at, c.promotion_started_at, \
     c.finished_at";
 
+const COMMITTED_TICKET_EVIDENCE_SQL: &str = "WITH ticket_results AS ( \
+         SELECT t.id, t.job_id, t.payload, t.result AS raw_result, \
+                CASE WHEN json_valid(t.result) THEN t.result ELSE '{}' END AS safe_result \
+         FROM tickets t WHERE t.id IN (SELECT value FROM json_each(?)) \
+           AND t.state = 'succeeded' AND t.result IS NOT NULL \
+     ), expanded_results AS ( \
+         SELECT t.id, t.job_id, t.payload, t.raw_result, \
+                COALESCE(CAST(output.key AS INTEGER), 0) AS result_ordinal, \
+                CASE WHEN json_type(t.safe_result, '$.outputs') = 'array' \
+                           AND json_array_length(t.safe_result, '$.outputs') > 0 \
+                     THEN json_patch(t.safe_result, output.value) ELSE t.safe_result END AS result \
+         FROM ticket_results t LEFT JOIN json_each(t.safe_result, '$.outputs') AS output \
+           ON json_type(t.safe_result, '$.outputs') = 'array' \
+          AND json_array_length(t.safe_result, '$.outputs') > 0 \
+     ) SELECT t.id AS ticket_id, t.job_id AS ticket_job_id, \
+              t.payload AS ticket_payload, t.raw_result, t.result, \
+              c.id AS commit_id, c.artifact_handle_id AS commit_artifact_handle_id, \
+              c.source_file_version_id AS commit_source_file_version_id, \
+              c.verification_id AS commit_verification_id, \
+              c.result_file_version_id AS commit_result_file_version_id, \
+              c.result_file_location_id AS commit_result_file_location_id, \
+              c.state AS commit_state, c.report AS commit_report, \
+              c.started_at AS commit_started_at, \
+              c.promotion_started_at AS commit_promotion_started_at, \
+              c.finished_at AS commit_finished_at, \
+              v.artifact_handle_id AS verification_artifact_handle_id, \
+              v.workflow_ticket_id AS verification_ticket_id, \
+              v.workflow_lease_id AS verification_lease_id, \
+              v.status AS verification_status, v.report AS verification_report, \
+              v.started_at AS verification_started_at, \
+              v.finished_at AS verification_finished_at, \
+              rl.ticket_id AS result_lease_ticket_id, rl.state AS result_lease_state, \
+              rl.acquired_at AS result_lease_acquired_at, \
+              rl.expires_at AS result_lease_expires_at, \
+              rl.last_heartbeat_at AS result_lease_last_heartbeat_at, \
+              rl.released_at AS result_lease_released_at, \
+              sfv.file_asset_id AS source_file_asset_id, \
+              fv.file_asset_id AS result_file_asset_id, \
+              fl.file_version_id AS location_file_version_id, \
+              ms.file_version_id AS snapshot_file_version_id \
+       FROM expanded_results t \
+       LEFT JOIN artifact_commit_records c \
+         ON c.id = json_extract(t.result, '$.commit_record_id') \
+       LEFT JOIN artifact_verifications v ON v.id = c.verification_id \
+       LEFT JOIN leases rl ON rl.id = json_extract(t.result, '$.lease_id') \
+       LEFT JOIN file_versions sfv \
+         ON sfv.id = json_extract(t.result, '$.source_file_version_id') \
+       LEFT JOIN file_versions fv \
+         ON fv.id = json_extract(t.result, '$.result_file_version_id') \
+       LEFT JOIN file_locations fl \
+         ON fl.id = json_extract(t.result, '$.result_file_location_id') \
+       LEFT JOIN media_snapshots ms \
+         ON ms.id = json_extract(t.result, '$.result_media_snapshot_id') \
+       ORDER BY t.id, t.result_ordinal";
+
 type CommitVerificationRow = (
     i64,
     i64,
@@ -2051,6 +2226,211 @@ fn policy_handle_facts_conflict(
     VoomError::Conflict(format!(
         "artifact_handle {handle_id} facts do not match file_version {version_id}"
     ))
+}
+
+fn decode_committed_ticket_evidence(
+    row: &sqlx::sqlite::SqliteRow,
+) -> Result<CommittedTicketEvidence, VoomError> {
+    let ticket_id = TicketId(evidence_u64(row, "ticket_id")?);
+    let ticket_payload = evidence_json(row, "ticket_payload", ticket_id)?;
+    let raw_result: String = evidence_value(row, "raw_result")?;
+    serde_json::from_str::<JsonValue>(&raw_result).map_err(|error| {
+        VoomError::database_context(format!("committed ticket {ticket_id} ticket result"), error)
+    })?;
+    let result = evidence_json(row, "result", ticket_id)?;
+    Ok(CommittedTicketEvidence {
+        ticket_id,
+        ticket_job_id: evidence_optional_id(row, "ticket_job_id", JobId)?,
+        ticket_payload,
+        result,
+        commit: decode_artifact_commit_evidence(row)?,
+        verification: decode_artifact_verification_evidence(row)?,
+        result_lease: decode_result_lease_evidence(row)?,
+        source_file_asset_id: evidence_optional_id(row, "source_file_asset_id", FileAssetId)?,
+        result_file_asset_id: evidence_optional_id(row, "result_file_asset_id", FileAssetId)?,
+        location_file_version_id: evidence_optional_id(
+            row,
+            "location_file_version_id",
+            FileVersionId,
+        )?,
+        snapshot_file_version_id: evidence_optional_id(
+            row,
+            "snapshot_file_version_id",
+            FileVersionId,
+        )?,
+    })
+}
+
+fn decode_artifact_commit_evidence(
+    row: &sqlx::sqlite::SqliteRow,
+) -> Result<Option<ArtifactCommitEvidence>, VoomError> {
+    let Some(id) = evidence_optional_id(row, "commit_id", ArtifactCommitRecordId)? else {
+        return Ok(None);
+    };
+    let state: String = evidence_value(row, "commit_state")?;
+    Ok(Some(ArtifactCommitEvidence {
+        id,
+        artifact_handle_id: ArtifactHandleId(evidence_u64(row, "commit_artifact_handle_id")?),
+        source_file_version_id: FileVersionId(evidence_u64(row, "commit_source_file_version_id")?),
+        verification_id: ArtifactVerificationId(evidence_u64(row, "commit_verification_id")?),
+        result_file_version_id: evidence_optional_id(
+            row,
+            "commit_result_file_version_id",
+            FileVersionId,
+        )?,
+        result_file_location_id: evidence_optional_id(
+            row,
+            "commit_result_file_location_id",
+            FileLocationId,
+        )?,
+        state: ArtifactCommitState::parse(&state)?,
+        report: evidence_json_without_ticket(row, "commit_report")?,
+        started_at: evidence_timestamp(row, "commit_started_at")?,
+        promotion_started_at: evidence_optional_timestamp(row, "commit_promotion_started_at")?,
+        finished_at: evidence_optional_timestamp(row, "commit_finished_at")?,
+    }))
+}
+
+fn decode_artifact_verification_evidence(
+    row: &sqlx::sqlite::SqliteRow,
+) -> Result<Option<ArtifactVerificationEvidence>, VoomError> {
+    let Some(artifact_handle_id) =
+        evidence_optional_id(row, "verification_artifact_handle_id", ArtifactHandleId)?
+    else {
+        return Ok(None);
+    };
+    let status: String = evidence_value(row, "verification_status")?;
+    Ok(Some(ArtifactVerificationEvidence {
+        artifact_handle_id,
+        workflow_ticket_id: evidence_optional_id(row, "verification_ticket_id", TicketId)?,
+        workflow_lease_id: evidence_optional_id(row, "verification_lease_id", LeaseId)?,
+        status: ArtifactVerificationStatus::parse(&status)?,
+        report: evidence_json_without_ticket(row, "verification_report")?,
+        started_at: evidence_timestamp(row, "verification_started_at")?,
+        finished_at: evidence_timestamp(row, "verification_finished_at")?,
+    }))
+}
+
+fn decode_result_lease_evidence(
+    row: &sqlx::sqlite::SqliteRow,
+) -> Result<Option<ResultLeaseEvidence>, VoomError> {
+    let Some(ticket_id) = evidence_optional_id(row, "result_lease_ticket_id", TicketId)? else {
+        return Ok(None);
+    };
+    let state: String = evidence_value(row, "result_lease_state")?;
+    Ok(Some(ResultLeaseEvidence {
+        ticket_id,
+        state: LeaseState::parse(&state)?,
+        acquired_at: evidence_timestamp(row, "result_lease_acquired_at")?,
+        expires_at: evidence_timestamp(row, "result_lease_expires_at")?,
+        last_heartbeat_at: evidence_timestamp(row, "result_lease_last_heartbeat_at")?,
+        released_at: evidence_optional_timestamp(row, "result_lease_released_at")?,
+    }))
+}
+
+fn decode_verified_ticket_evidence(
+    row: &sqlx::sqlite::SqliteRow,
+) -> Result<VerifiedTicketEvidence, VoomError> {
+    validate_verification_integer_fields(row)?;
+    Ok(VerifiedTicketEvidence {
+        verification: row_to_verification(row)?,
+        file_version_id: evidence_optional_id(row, "selected_file_version_id", FileVersionId)?,
+        location_value: evidence_value(row, "selected_location_value")?,
+    })
+}
+
+fn validate_verification_integer_fields(row: &sqlx::sqlite::SqliteRow) -> Result<(), VoomError> {
+    for field in [
+        "id",
+        "artifact_handle_id",
+        "artifact_location_id",
+        "worker_id",
+        "expected_size_bytes",
+    ] {
+        evidence_u64(row, field)?;
+    }
+    for field in [
+        "workflow_ticket_id",
+        "workflow_lease_id",
+        "observed_size_bytes",
+    ] {
+        let value: Option<i64> = evidence_value(row, field)?;
+        if let Some(value) = value {
+            u64::try_from(value).map_err(|error| {
+                VoomError::database_context(format!("workflow evidence {field} is negative"), error)
+            })?;
+        }
+    }
+    Ok(())
+}
+
+fn evidence_value<T>(row: &sqlx::sqlite::SqliteRow, field: &str) -> Result<T, VoomError>
+where
+    for<'decode> T: sqlx::Decode<'decode, sqlx::Sqlite> + sqlx::Type<sqlx::Sqlite>,
+{
+    row.try_get(field)
+        .map_err(|error| VoomError::database_context(format!("workflow evidence {field}"), error))
+}
+
+fn evidence_u64(row: &sqlx::sqlite::SqliteRow, field: &str) -> Result<u64, VoomError> {
+    let value: i64 = evidence_value(row, field)?;
+    u64::try_from(value).map_err(|error| {
+        VoomError::database_context(format!("workflow evidence {field} is negative"), error)
+    })
+}
+
+fn evidence_optional_id<T>(
+    row: &sqlx::sqlite::SqliteRow,
+    field: &str,
+    wrap: fn(u64) -> T,
+) -> Result<Option<T>, VoomError> {
+    let value: Option<i64> = evidence_value(row, field)?;
+    value
+        .map(|value| {
+            u64::try_from(value).map(wrap).map_err(|error| {
+                VoomError::database_context(format!("workflow evidence {field} is negative"), error)
+            })
+        })
+        .transpose()
+}
+
+fn evidence_json(
+    row: &sqlx::sqlite::SqliteRow,
+    field: &str,
+    ticket_id: TicketId,
+) -> Result<JsonValue, VoomError> {
+    let value: String = evidence_value(row, field)?;
+    serde_json::from_str(&value).map_err(|error| {
+        VoomError::database_context(
+            format!("committed ticket {ticket_id} {field} decode"),
+            error,
+        )
+    })
+}
+
+fn evidence_json_without_ticket(
+    row: &sqlx::sqlite::SqliteRow,
+    field: &str,
+) -> Result<JsonValue, VoomError> {
+    let value: String = evidence_value(row, field)?;
+    serde_json::from_str(&value)
+        .map_err(|error| VoomError::database_context(format!("workflow evidence {field}"), error))
+}
+
+fn evidence_timestamp(
+    row: &sqlx::sqlite::SqliteRow,
+    field: &str,
+) -> Result<OffsetDateTime, VoomError> {
+    let value: String = evidence_value(row, field)?;
+    parse_iso8601(&value)
+}
+
+fn evidence_optional_timestamp(
+    row: &sqlx::sqlite::SqliteRow,
+    field: &str,
+) -> Result<Option<OffsetDateTime>, VoomError> {
+    let value: Option<String> = evidence_value(row, field)?;
+    value.as_deref().map(parse_iso8601).transpose()
 }
 
 fn row_to_handle(row: &sqlx::sqlite::SqliteRow) -> Result<ArtifactHandle, VoomError> {

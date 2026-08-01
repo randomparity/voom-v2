@@ -983,3 +983,131 @@ async fn create_workflow_ticket(
         .unwrap();
     repo.get(ticket.id).await.unwrap().unwrap()
 }
+
+#[tokio::test]
+async fn workflow_phase_ticket_projections_preserve_each_scope() {
+    let (pool, _tmp) = pool().await;
+    let jobs = SqliteJobRepo::new(pool.clone());
+    let repo = SqliteTicketRepo::new(pool);
+    let job = jobs.create(sample_job()).await.unwrap();
+    let other_job = jobs.create(sample_job()).await.unwrap();
+    let exact = create_identity_ticket(
+        &repo,
+        job.id,
+        "workflow-1-phase-2",
+        "alpha",
+        "verify",
+        Some(10),
+    )
+    .await;
+    let file = create_identity_ticket(
+        &repo,
+        job.id,
+        "workflow-1-file-7-phase-2",
+        "alpha",
+        "verify",
+        Some(10),
+    )
+    .await;
+    create_identity_ticket(
+        &repo,
+        job.id,
+        "workflow-1-file-8-phase-3",
+        "alpha",
+        "verify",
+        Some(10),
+    )
+    .await;
+    create_identity_ticket(
+        &repo,
+        other_job.id,
+        "workflow-1-phase-2",
+        "alpha",
+        "verify",
+        Some(10),
+    )
+    .await;
+    let scope = WorkflowPhaseScope {
+        job_id: job.id,
+        exact_workflow_id: "workflow-1-phase-2",
+        file_workflow_pattern: "workflow-1-file-*-phase-2",
+    };
+
+    assert_eq!(
+        repo.ticket_ids_for_workflow_phase(&scope).await.unwrap(),
+        vec![exact.id, file.id]
+    );
+    assert_eq!(
+        repo.ticket_ids_for_workflow_phase_file(&scope, FileVersionId(10))
+            .await
+            .unwrap(),
+        vec![exact.id, file.id]
+    );
+    assert_eq!(
+        repo.ticket_ids_for_workflow_phase_scope(&scope, "verify", Some(FileVersionId(10)))
+            .await
+            .unwrap(),
+        vec![exact.id, file.id]
+    );
+    assert!(
+        repo.ticket_ids_for_workflow_phase_scope(&scope, "other", None)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn succeeded_workflow_phase_file_operation_projection_filters_state_and_kind() {
+    let (pool, _tmp) = pool().await;
+    let jobs = SqliteJobRepo::new(pool.clone());
+    let repo = SqliteTicketRepo::new(pool);
+    let job = jobs.create(sample_job()).await.unwrap();
+    let operation = ticket_op("synthetic.workflow.operation.verify_artifact");
+    let succeeded = create_identity_ticket(
+        &repo,
+        job.id,
+        "workflow-1-file-0-phase-4",
+        "alpha",
+        "verify",
+        Some(21),
+    )
+    .await;
+    let pending = create_identity_ticket(
+        &repo,
+        job.id,
+        "workflow-1-file-1-phase-4",
+        "alpha",
+        "verify",
+        Some(21),
+    )
+    .await;
+    sqlx::query("UPDATE tickets SET kind = ?, state = 'succeeded' WHERE id = ?")
+        .bind(operation.as_str())
+        .bind(i64::try_from(succeeded.id.0).unwrap())
+        .execute(&repo.pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE tickets SET kind = ? WHERE id = ?")
+        .bind(operation.as_str())
+        .bind(i64::try_from(pending.id.0).unwrap())
+        .execute(&repo.pool)
+        .await
+        .unwrap();
+    let scope = WorkflowPhaseScope {
+        job_id: job.id,
+        exact_workflow_id: "workflow-1-phase-4",
+        file_workflow_pattern: "workflow-1-file-*-phase-4",
+    };
+
+    assert_eq!(
+        repo.succeeded_ticket_ids_for_workflow_phase_file_and_operation(
+            &scope,
+            FileVersionId(21),
+            operation,
+        )
+        .await
+        .unwrap(),
+        vec![succeeded.id]
+    );
+}

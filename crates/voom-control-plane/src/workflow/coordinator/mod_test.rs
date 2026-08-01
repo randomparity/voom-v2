@@ -3625,23 +3625,6 @@ async fn phase_ticket_lookup_ignores_matching_nodes_from_other_invocations() {
     assert_eq!(found, vec![tickets[1].id]);
 }
 
-#[test]
-fn promotion_sqlite_conversions_reject_out_of_range_values() {
-    let read_err = super::sqlite_u64(-1, "promotion location id").unwrap_err();
-    assert_eq!(read_err.code(), "DB_UNREACHABLE");
-    assert!(
-        read_err.to_string().contains("promotion location id -1"),
-        "read error should identify the invalid value: {read_err}"
-    );
-
-    let bind_err = super::sqlite_i64(u64::MAX, "promotion asset id").unwrap_err();
-    assert_eq!(bind_err.code(), "DB_UNREACHABLE");
-    assert!(
-        bind_err.to_string().contains("does not fit SQLite i64"),
-        "bind error should identify SQLite's integer boundary: {bind_err}"
-    );
-}
-
 /// A whole-library run over two sources that share a basename across
 /// subdirectories must not collide at promotion (issue #197): each terminal
 /// artifact lands under `--output-dir` mirroring its source's path relative to

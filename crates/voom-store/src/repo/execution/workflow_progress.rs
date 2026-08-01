@@ -441,6 +441,23 @@ impl SqliteWorkflowProgressRepo {
         rows.into_iter().map(decode_file_progress).collect()
     }
 
+    /// Resolve the durable branch assigned to one job-owned input ordinal.
+    pub async fn branch_for_input_ordinal(
+        &self,
+        job_id: JobId,
+        input_ordinal: u32,
+    ) -> Result<Option<String>, VoomError> {
+        sqlx::query_scalar(
+            "SELECT branch_id FROM workflow_file_progress \
+             WHERE job_id = ? AND input_ordinal = ?",
+        )
+        .bind(i64_from_u64(job_id.0))
+        .bind(i64::from(input_ordinal))
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|error| VoomError::database_context("workflow branch by input ordinal", error))
+    }
+
     pub async fn file_window(&self, job_id: JobId) -> Result<Option<FileWindow>, VoomError> {
         let row: Option<(i64, i64, String)> = sqlx::query_as(
             "SELECT job_id, max_in_flight_files, created_at \
@@ -634,3 +651,7 @@ where
 
 const FILE_PROGRESS_COLUMNS: &str = "job_id, branch_id, input_ordinal, admission_tier, state, next_phase_ordinal, \
      admitted_at, terminal_at";
+
+#[cfg(test)]
+#[path = "workflow_progress_test.rs"]
+mod tests;

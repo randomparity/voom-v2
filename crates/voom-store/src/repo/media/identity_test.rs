@@ -37,6 +37,107 @@ async fn repository_capabilities_are_object_safe_and_commit_gate_composable() {
     require_commit_gate(&repo);
 }
 
+#[tokio::test]
+async fn live_local_chain_tips_filters_scope_and_orders_locations() {
+    let (repo, _tmp) = fresh().await;
+    let first_asset = repo.create_file_asset(T0).await.unwrap();
+    let first_version = repo
+        .create_file_version(NewFileVersion {
+            file_asset_id: first_asset.id,
+            content_hash: "first".to_owned(),
+            size_bytes: 1,
+            produced_by: ProducedBy::Ingest,
+            produced_from_version_id: None,
+            created_at: T0,
+        })
+        .await
+        .unwrap();
+    let first = create_location(&repo, first_version.id, FileLocationKind::LocalPath, "/one").await;
+    let shared = create_location(
+        &repo,
+        first_version.id,
+        FileLocationKind::SharedMount,
+        "/shared",
+    )
+    .await;
+    let newer = repo
+        .create_file_version(NewFileVersion {
+            file_asset_id: first_asset.id,
+            content_hash: "newer".to_owned(),
+            size_bytes: 2,
+            produced_by: ProducedBy::Transcode,
+            produced_from_version_id: Some(first_version.id),
+            created_at: T0,
+        })
+        .await
+        .unwrap();
+    let tip = create_location(&repo, newer.id, FileLocationKind::LocalPath, "/tip").await;
+    let second_asset = repo.create_file_asset(T0).await.unwrap();
+    let second_version = repo
+        .create_file_version(NewFileVersion {
+            file_asset_id: second_asset.id,
+            content_hash: "second".to_owned(),
+            size_bytes: 3,
+            produced_by: ProducedBy::Ingest,
+            produced_from_version_id: None,
+            created_at: T0,
+        })
+        .await
+        .unwrap();
+    let retired = create_location(
+        &repo,
+        second_version.id,
+        FileLocationKind::LocalPath,
+        "/retired",
+    )
+    .await;
+    let mut tx = repo.pool.begin().await.unwrap();
+    repo.retire_file_location_in_tx(&mut tx, retired.id, T0, retired.epoch)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+
+    let rows = repo
+        .live_local_chain_tips(&[tip.id, retired.id, first.id, shared.id])
+        .await
+        .unwrap();
+
+    assert_eq!(
+        rows,
+        vec![LiveChainTipLocation {
+            location_id: tip.id,
+            file_asset_id: first_asset.id,
+            value: "/tip".to_owned(),
+            epoch: 0,
+        }]
+    );
+    assert!(repo.live_local_chain_tips(&[]).await.unwrap().is_empty());
+}
+
+async fn create_location(
+    repo: &SqliteIdentityRepo,
+    version_id: FileVersionId,
+    kind: FileLocationKind,
+    value: &str,
+) -> FileLocation {
+    let mut tx = repo.pool.begin().await.unwrap();
+    let location = repo
+        .create_file_location_in_tx(
+            &mut tx,
+            NewFileLocation {
+                file_version_id: version_id,
+                kind,
+                value: value.to_owned(),
+                proof: None,
+                observed_at: T0,
+            },
+        )
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    location
+}
+
 // ---- media_works ---------------------------------------------------------
 
 #[tokio::test]

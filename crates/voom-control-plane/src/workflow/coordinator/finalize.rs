@@ -7,35 +7,27 @@
 
 use std::collections::BTreeSet;
 
-use sqlx::Row;
 use voom_core::ids::ArtifactVerificationId;
 use voom_core::{
     ArtifactHandleId, FileAssetId, FileLocationId, FileVersionId, JobId, MediaSnapshotId, TicketId,
-    VoomError,
+    TicketOperation, VoomError,
 };
+use voom_store::repo::execution::leases::LeaseState;
+use voom_store::repo::execution::tickets::{TicketState, WorkflowPhaseScope};
 use voom_store::repo::execution::workflow_summaries::{
     FilePhaseOutcome, FilePhaseSummary, NewFilePhaseSummary, PhaseSummary,
 };
-use voom_store::repo::media::identity::{FileVersionRepo, MediaSnapshot, MediaSnapshotRepo};
+use voom_store::repo::media::artifacts::{
+    ArtifactCommitState, ArtifactVerificationStatus, CommittedTicketEvidence,
+};
+use voom_store::repo::media::identity::{
+    FileLocationRepo, FileVersionRepo, MediaSnapshot, MediaSnapshotRepo,
+};
 
 use crate::ControlPlane;
 use crate::workflow::coordinator::planning::{job_grain_summary, zero_phase_summary};
 use crate::workflow::coordinator::{CoordinatorOutcome, Disposition, PhaseFile};
 use crate::workflow::ticket_results::PolicyVerificationTicketResult;
-
-type VerifiedEvidenceRow = (
-    i64,
-    i64,
-    String,
-    String,
-    i64,
-    i64,
-    String,
-    Option<i64>,
-    Option<String>,
-    Option<i64>,
-    Option<String>,
-);
 
 /// The durable references a committed file-phase row requires (NOT NULL by DB
 /// CHECK): the produced version, its live location, and its reprobe snapshot.
@@ -85,30 +77,6 @@ struct CommittedResultFields {
     result_media_snapshot_id: Option<u64>,
 }
 
-struct CommittedEvidenceRow {
-    ticket_id: i64,
-    ticket_job_id: Option<i64>,
-    ticket_payload: String,
-    result: String,
-    commit_id: Option<i64>,
-    commit_artifact_handle_id: Option<i64>,
-    commit_source_file_version_id: Option<i64>,
-    commit_verification_id: Option<i64>,
-    commit_result_file_version_id: Option<i64>,
-    commit_result_file_location_id: Option<i64>,
-    commit_state: Option<String>,
-    verification_artifact_handle_id: Option<i64>,
-    verification_ticket_id: Option<i64>,
-    verification_lease_id: Option<i64>,
-    verification_status: Option<String>,
-    result_lease_ticket_id: Option<i64>,
-    result_lease_state: Option<String>,
-    source_file_asset_id: Option<i64>,
-    result_file_asset_id: Option<i64>,
-    location_file_version_id: Option<i64>,
-    snapshot_file_version_id: Option<i64>,
-}
-
 impl ProducedRefs {
     pub(super) fn seed(
         self,
@@ -154,13 +122,7 @@ impl ProducedRefs {
 }
 
 impl CommittedResultFields {
-    fn decode(ticket_id: TicketId, result: &str) -> Result<Option<Self>, VoomError> {
-        let value: serde_json::Value = serde_json::from_str(result).map_err(|error| {
-            VoomError::database_context(
-                format!("committed ticket {ticket_id} result decode"),
-                error,
-            )
-        })?;
+    fn decode(ticket_id: TicketId, value: &serde_json::Value) -> Result<Option<Self>, VoomError> {
         let marker_fields = [
             "commit_record_id",
             "result_file_version_id",
@@ -171,33 +133,29 @@ impl CommittedResultFields {
             return Ok(None);
         }
         Ok(Some(Self {
-            job_id: required_result_u64(&value, ticket_id, "job_id")?,
-            ticket_id: required_result_u64(&value, ticket_id, "ticket_id")?,
-            lease_id: required_result_u64(&value, ticket_id, "lease_id")?,
+            job_id: required_result_u64(value, ticket_id, "job_id")?,
+            ticket_id: required_result_u64(value, ticket_id, "ticket_id")?,
+            lease_id: required_result_u64(value, ticket_id, "lease_id")?,
             source_file_version_id: required_result_u64(
-                &value,
+                value,
                 ticket_id,
                 "source_file_version_id",
             )?,
-            artifact_handle_id: required_result_u64(
-                &value,
-                ticket_id,
-                "staged_artifact_handle_id",
-            )?,
-            verification_id: required_result_u64(&value, ticket_id, "verification_id")?,
-            commit_record_id: required_result_u64(&value, ticket_id, "commit_record_id")?,
+            artifact_handle_id: required_result_u64(value, ticket_id, "staged_artifact_handle_id")?,
+            verification_id: required_result_u64(value, ticket_id, "verification_id")?,
+            commit_record_id: required_result_u64(value, ticket_id, "commit_record_id")?,
             result_file_version_id: required_result_u64(
-                &value,
+                value,
                 ticket_id,
                 "result_file_version_id",
             )?,
             result_file_location_id: required_result_u64(
-                &value,
+                value,
                 ticket_id,
                 "result_file_location_id",
             )?,
             result_media_snapshot_id: optional_result_u64(
-                &value,
+                value,
                 ticket_id,
                 "result_media_snapshot_id",
             )?,
@@ -205,75 +163,43 @@ impl CommittedResultFields {
     }
 }
 
-impl CommittedEvidenceRow {
-    fn decode(row: &sqlx::sqlite::SqliteRow) -> Result<Self, VoomError> {
-        Ok(Self {
-            ticket_id: evidence_column(row, "ticket_id")?,
-            ticket_job_id: evidence_column(row, "ticket_job_id")?,
-            ticket_payload: evidence_column(row, "ticket_payload")?,
-            result: evidence_column(row, "result")?,
-            commit_id: evidence_column(row, "commit_id")?,
-            commit_artifact_handle_id: evidence_column(row, "commit_artifact_handle_id")?,
-            commit_source_file_version_id: evidence_column(row, "commit_source_file_version_id")?,
-            commit_verification_id: evidence_column(row, "commit_verification_id")?,
-            commit_result_file_version_id: evidence_column(row, "commit_result_file_version_id")?,
-            commit_result_file_location_id: evidence_column(row, "commit_result_file_location_id")?,
-            commit_state: evidence_column(row, "commit_state")?,
-            verification_artifact_handle_id: evidence_column(
-                row,
-                "verification_artifact_handle_id",
-            )?,
-            verification_ticket_id: evidence_column(row, "verification_ticket_id")?,
-            verification_lease_id: evidence_column(row, "verification_lease_id")?,
-            verification_status: evidence_column(row, "verification_status")?,
-            result_lease_ticket_id: evidence_column(row, "result_lease_ticket_id")?,
-            result_lease_state: evidence_column(row, "result_lease_state")?,
-            source_file_asset_id: evidence_column(row, "source_file_asset_id")?,
-            result_file_asset_id: evidence_column(row, "result_file_asset_id")?,
-            location_file_version_id: evidence_column(row, "location_file_version_id")?,
-            snapshot_file_version_id: evidence_column(row, "snapshot_file_version_id")?,
-        })
-    }
+trait CommittedEvidenceValidation {
+    fn validate(
+        &self,
+        job_id: JobId,
+        expected_asset_id: FileAssetId,
+        result: &CommittedResultFields,
+    ) -> Result<CommitRelevance, VoomError>;
+}
 
+impl CommittedEvidenceValidation for CommittedTicketEvidence {
     fn validate(
         &self,
         job_id: JobId,
         expected_asset_id: FileAssetId,
         result: &CommittedResultFields,
     ) -> Result<CommitRelevance, VoomError> {
-        let ticket_id = TicketId(sqlite_u64(self.ticket_id, "commit evidence ticket id")?);
-        require_evidence(
-            self.ticket_job_id,
-            Some(sqlite_i64(job_id.0, "commit evidence job id")?),
-            ticket_id,
-            "ticket job",
-        )?;
+        let ticket_id = self.ticket_id;
+        require_evidence(self.ticket_job_id, Some(job_id), ticket_id, "ticket job")?;
         require_evidence(result.job_id, job_id.0, ticket_id, "result job")?;
         require_evidence(result.ticket_id, ticket_id.0, ticket_id, "result ticket")?;
-        let source_asset_id = sqlite_u64(
-            required_evidence(self.source_file_asset_id, ticket_id, "source file asset")?,
-            "commit evidence source file asset",
-        )?;
-        if source_asset_id != expected_asset_id.0 {
+        let source_asset_id =
+            required_evidence(self.source_file_asset_id, ticket_id, "source file asset")?;
+        if source_asset_id != expected_asset_id {
             return Ok(CommitRelevance::OtherLineage);
         }
-        self.validate_commit(ticket_id, result)?;
-        let asset_id = sqlite_u64(
-            required_evidence(self.result_file_asset_id, ticket_id, "result file asset")?,
-            "commit evidence result file asset",
-        )?;
+        validate_commit_evidence(self, ticket_id, result)?;
+        let asset_id =
+            required_evidence(self.result_file_asset_id, ticket_id, "result file asset")?;
         if result.result_media_snapshot_id.is_some() {
             require_evidence(
                 self.snapshot_file_version_id,
-                Some(sqlite_i64(
-                    result.result_file_version_id,
-                    "commit evidence snapshot version",
-                )?),
+                Some(FileVersionId(result.result_file_version_id)),
                 ticket_id,
                 "snapshot version",
             )?;
         }
-        if asset_id != expected_asset_id.0 {
+        if asset_id != expected_asset_id {
             return Ok(CommitRelevance::Sidecar);
         }
         result.result_media_snapshot_id.ok_or_else(|| {
@@ -281,136 +207,117 @@ impl CommittedEvidenceRow {
         })?;
         Ok(CommitRelevance::SameLineage)
     }
+}
 
-    fn validate_commit(
-        &self,
-        ticket_id: TicketId,
-        result: &CommittedResultFields,
-    ) -> Result<(), VoomError> {
-        require_evidence(
-            self.commit_id,
-            Some(sqlite_i64(
-                result.commit_record_id,
-                "commit evidence record id",
-            )?),
-            ticket_id,
-            "commit record",
-        )?;
-        require_evidence(
-            self.commit_artifact_handle_id,
-            Some(sqlite_i64(
-                result.artifact_handle_id,
-                "commit evidence artifact handle",
-            )?),
-            ticket_id,
-            "commit artifact",
-        )?;
-        require_evidence(
-            self.commit_source_file_version_id,
-            Some(sqlite_i64(
-                result.source_file_version_id,
-                "commit evidence source version",
-            )?),
-            ticket_id,
-            "commit source version",
-        )?;
-        require_evidence(
-            self.commit_verification_id,
-            Some(sqlite_i64(
-                result.verification_id,
-                "commit evidence verification",
-            )?),
-            ticket_id,
-            "commit verification",
-        )?;
-        require_evidence(
-            self.commit_result_file_version_id,
-            Some(sqlite_i64(
-                result.result_file_version_id,
-                "commit evidence result version",
-            )?),
-            ticket_id,
-            "commit result version",
-        )?;
-        require_evidence(
-            self.commit_result_file_location_id,
-            Some(sqlite_i64(
-                result.result_file_location_id,
-                "commit evidence result location",
-            )?),
-            ticket_id,
-            "commit result location",
-        )?;
-        require_evidence(
-            self.commit_state.as_deref(),
-            Some("committed"),
-            ticket_id,
-            "commit state",
-        )?;
-        self.validate_verification(ticket_id, result)
-    }
+fn validate_commit_evidence(
+    evidence: &CommittedTicketEvidence,
+    ticket_id: TicketId,
+    result: &CommittedResultFields,
+) -> Result<(), VoomError> {
+    let commit = required_evidence(evidence.commit.as_ref(), ticket_id, "commit record")?;
+    require_evidence(
+        commit.id.0,
+        result.commit_record_id,
+        ticket_id,
+        "commit record",
+    )?;
+    require_evidence(
+        commit.artifact_handle_id.0,
+        result.artifact_handle_id,
+        ticket_id,
+        "commit artifact",
+    )?;
+    require_evidence(
+        commit.source_file_version_id.0,
+        result.source_file_version_id,
+        ticket_id,
+        "commit source version",
+    )?;
+    require_evidence(
+        commit.verification_id.0,
+        result.verification_id,
+        ticket_id,
+        "commit verification",
+    )?;
+    require_evidence(
+        commit.result_file_version_id,
+        Some(FileVersionId(result.result_file_version_id)),
+        ticket_id,
+        "commit result version",
+    )?;
+    require_evidence(
+        commit.result_file_location_id,
+        Some(FileLocationId(result.result_file_location_id)),
+        ticket_id,
+        "commit result location",
+    )?;
+    require_evidence(
+        commit.state,
+        ArtifactCommitState::Committed,
+        ticket_id,
+        "commit state",
+    )?;
+    validate_verification_evidence(evidence, ticket_id, result)
+}
 
-    fn validate_verification(
-        &self,
-        ticket_id: TicketId,
-        result: &CommittedResultFields,
-    ) -> Result<(), VoomError> {
-        require_evidence(
-            self.verification_artifact_handle_id,
-            Some(sqlite_i64(
-                result.artifact_handle_id,
-                "commit verification artifact",
-            )?),
-            ticket_id,
-            "verification artifact",
-        )?;
-        let result_ticket_id = sqlite_i64(result.ticket_id, "commit result ticket")?;
-        let result_lease_id = sqlite_i64(result.lease_id, "commit result lease")?;
-        require_evidence(
-            self.result_lease_ticket_id,
-            Some(result_ticket_id),
-            ticket_id,
-            "result lease ticket",
-        )?;
-        require_evidence(
-            self.result_lease_state.as_deref(),
-            Some("released"),
-            ticket_id,
-            "result lease state",
-        )?;
-        match (self.verification_ticket_id, self.verification_lease_id) {
-            (None, None) => {}
-            (verification_ticket_id, verification_lease_id) => {
-                require_evidence(
-                    verification_ticket_id,
-                    Some(result_ticket_id),
-                    ticket_id,
-                    "verification ticket",
-                )?;
-                require_evidence(
-                    verification_lease_id,
-                    Some(result_lease_id),
-                    ticket_id,
-                    "verification lease",
-                )?;
-            }
+fn validate_verification_evidence(
+    evidence: &CommittedTicketEvidence,
+    ticket_id: TicketId,
+    result: &CommittedResultFields,
+) -> Result<(), VoomError> {
+    let verification =
+        required_evidence(evidence.verification.as_ref(), ticket_id, "verification")?;
+    require_evidence(
+        verification.artifact_handle_id.0,
+        result.artifact_handle_id,
+        ticket_id,
+        "verification artifact",
+    )?;
+    let lease = required_evidence(evidence.result_lease.as_ref(), ticket_id, "result lease")?;
+    require_evidence(
+        lease.ticket_id.0,
+        result.ticket_id,
+        ticket_id,
+        "result lease ticket",
+    )?;
+    require_evidence(
+        lease.state,
+        LeaseState::Released,
+        ticket_id,
+        "result lease state",
+    )?;
+    match (
+        verification.workflow_ticket_id,
+        verification.workflow_lease_id,
+    ) {
+        (None, None) => {}
+        (verification_ticket_id, verification_lease_id) => {
+            require_evidence(
+                verification_ticket_id,
+                Some(TicketId(result.ticket_id)),
+                ticket_id,
+                "verification ticket",
+            )?;
+            require_evidence(
+                verification_lease_id,
+                Some(voom_core::LeaseId(result.lease_id)),
+                ticket_id,
+                "verification lease",
+            )?;
         }
-        require_evidence(
-            self.verification_status.as_deref(),
-            Some("succeeded"),
-            ticket_id,
-            "verification status",
-        )?;
-        require_evidence(
-            self.location_file_version_id,
-            Some(sqlite_i64(
-                result.result_file_version_id,
-                "commit location version",
-            )?),
-            ticket_id,
-            "location version",
-        )
     }
+    require_evidence(
+        verification.status,
+        ArtifactVerificationStatus::Succeeded,
+        ticket_id,
+        "verification status",
+    )?;
+    require_evidence(
+        evidence.location_file_version_id,
+        Some(FileVersionId(result.result_file_version_id)),
+        ticket_id,
+        "location version",
+    )
 }
 
 fn required_evidence<T: Copy>(
@@ -477,14 +384,6 @@ fn optional_result_u64(
         })
 }
 
-fn evidence_column<T>(row: &sqlx::sqlite::SqliteRow, field: &str) -> Result<T, VoomError>
-where
-    for<'decode> T: sqlx::Decode<'decode, sqlx::Sqlite> + sqlx::Type<sqlx::Sqlite>,
-{
-    row.try_get(field)
-        .map_err(|error| VoomError::database_context(format!("commit evidence {field}"), error))
-}
-
 fn latest_commit_index(
     candidates: &[SameLineageCommit],
     file: &PhaseFile,
@@ -519,29 +418,6 @@ pub(super) struct WorkingDirArtifact {
     pub(super) epoch: u64,
 }
 
-impl WorkingDirArtifact {
-    fn from_row(row: &sqlx::sqlite::SqliteRow) -> Result<Self, VoomError> {
-        let location_id: i64 = row
-            .try_get("id")
-            .map_err(|e| VoomError::database_context("promotion location id", e))?;
-        let asset_id: i64 = row
-            .try_get("file_asset_id")
-            .map_err(|e| VoomError::database_context("promotion location asset", e))?;
-        let value: String = row
-            .try_get("value")
-            .map_err(|e| VoomError::database_context("promotion location value", e))?;
-        let epoch: i64 = row
-            .try_get("epoch")
-            .map_err(|e| VoomError::database_context("promotion location epoch", e))?;
-        Ok(Self {
-            location_id: FileLocationId(sqlite_u64(location_id, "promotion location id")?),
-            asset_id: FileAssetId(sqlite_u64(asset_id, "promotion location asset id")?),
-            value,
-            epoch: sqlite_u64(epoch, "promotion location epoch")?,
-        })
-    }
-}
-
 pub(super) fn phase_ordinal(index: usize) -> Result<u32, VoomError> {
     u32::try_from(index).map_err(|e| VoomError::Internal(format!("phase ordinal overflow: {e}")))
 }
@@ -555,21 +431,19 @@ fn phase_workflow_scope(job_id: JobId, phase_ordinal: u32) -> (String, String) {
 
 async fn validate_carried_ticket_scope(
     control_plane: &ControlPlane,
-    evidence: &CommittedEvidenceRow,
+    evidence: &CommittedTicketEvidence,
     ticket_job_id: JobId,
     row: &FilePhaseSummary,
 ) -> Result<(), VoomError> {
-    let ticket_id = TicketId(sqlite_u64(evidence.ticket_id, "cleanup ticket id")?);
-    let payload: serde_json::Value =
-        serde_json::from_str(&evidence.ticket_payload).map_err(|error| {
-            VoomError::database_context(format!("cleanup ticket {ticket_id} payload decode"), error)
-        })?;
-    let payload_branch = payload
+    let ticket_id = evidence.ticket_id;
+    let payload_branch = evidence
+        .ticket_payload
         .get("branch_id")
         .and_then(serde_json::Value::as_str)
         .filter(|branch| !branch.is_empty())
         .ok_or_else(|| evidence_mismatch(ticket_id, "payload branch is missing"))?;
-    let workflow_id = payload
+    let workflow_id = evidence
+        .ticket_payload
         .get("workflow_id")
         .and_then(serde_json::Value::as_str)
         .ok_or_else(|| evidence_mismatch(ticket_id, "payload workflow id is missing"))?;
@@ -595,18 +469,10 @@ async fn validate_carried_ticket_scope(
                 "payload workflow phase does not match the carried row",
             )
         })?;
-    let durable_branch: Option<String> = sqlx::query_scalar(
-        "SELECT branch_id FROM workflow_file_progress \
-         WHERE job_id = ? AND input_ordinal = ?",
-    )
-    .bind(sqlite_i64(
-        ticket_job_id.0,
-        "cleanup workflow progress job id",
-    )?)
-    .bind(i64::from(input_ordinal))
-    .fetch_optional(&control_plane.pool)
-    .await
-    .map_err(|error| VoomError::database_context("cleanup workflow branch lookup", error))?;
+    let durable_branch = control_plane
+        .workflow_progress
+        .branch_for_input_ordinal(ticket_job_id, input_ordinal)
+        .await?;
     if durable_branch.as_deref() != Some(row.branch_id.as_str()) {
         return Err(evidence_mismatch(
             ticket_id,
@@ -624,17 +490,6 @@ fn committed_result_matches_row(result: &CommittedResultFields, row: &FilePhaseS
             .artifact_verification_id
             .is_none_or(|id| id == ArtifactVerificationId(result.verification_id))
         && row.reprobe_snapshot_id == result.result_media_snapshot_id.map(MediaSnapshotId)
-}
-
-pub(super) fn sqlite_u64(value: i64, field: &str) -> Result<u64, VoomError> {
-    u64::try_from(value)
-        .map_err(|e| VoomError::database_context(format!("{field} {value} does not fit u64"), e))
-}
-
-pub(super) fn sqlite_i64(value: u64, field: &str) -> Result<i64, VoomError> {
-    i64::try_from(value).map_err(|e| {
-        VoomError::database_context(format!("{field} {value} does not fit SQLite i64"), e)
-    })
 }
 
 impl ControlPlane {
@@ -668,39 +523,20 @@ impl ControlPlane {
         &self,
         location_ids: &[FileLocationId],
     ) -> Result<Vec<WorkingDirArtifact>, VoomError> {
-        if location_ids.is_empty() {
-            return Ok(Vec::new());
-        }
-        let ids = location_ids
-            .iter()
-            .map(|id| sqlite_i64(id.0, "promotion location id"))
-            .collect::<Result<Vec<_>, _>>()?;
-        let ids_json = serde_json::to_string(&ids)
-            .map_err(|e| VoomError::Internal(format!("promotion location ids encode: {e}")))?;
-        let rows = sqlx::query(
-            "SELECT fl.id, fv.file_asset_id, fl.value, fl.epoch \
-             FROM file_locations fl \
-             JOIN file_versions fv ON fv.id = fl.file_version_id \
-             WHERE fl.id IN (SELECT value FROM json_each(?)) \
-               AND fl.retired_at IS NULL \
-               AND fl.kind = 'local_path' \
-               AND NOT EXISTS ( \
-                   SELECT 1 FROM file_versions newer \
-                   WHERE newer.file_asset_id = fv.file_asset_id \
-                     AND newer.retired_at IS NULL \
-                     AND newer.id > fv.id \
-               ) \
-             ORDER BY fl.id ASC",
-        )
-        .bind(ids_json)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(|e| VoomError::database_context("promotion scoped locations", e))?;
-        let mut artifacts = Vec::with_capacity(rows.len());
-        for row in rows {
-            artifacts.push(WorkingDirArtifact::from_row(&row)?);
-        }
-        Ok(artifacts)
+        self.identity
+            .live_local_chain_tips(location_ids)
+            .await
+            .map(|locations| {
+                locations
+                    .into_iter()
+                    .map(|location| WorkingDirArtifact {
+                        location_id: location.location_id,
+                        asset_id: location.file_asset_id,
+                        value: location.value,
+                        epoch: location.epoch,
+                    })
+                    .collect()
+            })
     }
 
     /// Finalize a run whose phase failed during dispatch: record every file that
@@ -918,24 +754,25 @@ impl ControlPlane {
         if ticket_ids.is_empty() {
             return Ok(None);
         }
-        let ticket_ids = ticket_ids
-            .iter()
-            .map(|id| sqlite_i64(id.0, "verification ticket id"))
-            .collect::<Result<Vec<_>, _>>()?;
-        let ids = serde_json::to_string(&ticket_ids).map_err(|error| {
-            VoomError::Internal(format!("verification tickets encode: {error}"))
-        })?;
-        let results: Vec<(i64, String)> = sqlx::query_as(
-            "SELECT id, result FROM tickets \
-             WHERE id IN (SELECT value FROM json_each(?)) \
-               AND state = 'succeeded' \
-               AND json_extract(result, '$.status') = 'verified' \
-             ORDER BY id",
-        )
-        .bind(ids)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(|error| VoomError::database_context("verified ticket results", error))?;
+        let mut results = Vec::new();
+        for ticket_id in ticket_ids {
+            let Some(ticket) = self.tickets.get(*ticket_id).await? else {
+                continue;
+            };
+            if ticket.state == TicketState::Succeeded
+                && ticket
+                    .result
+                    .as_ref()
+                    .and_then(|result| result.get("status"))
+                    .and_then(serde_json::Value::as_str)
+                    == Some("verified")
+            {
+                let result = ticket.result.ok_or_else(|| {
+                    VoomError::Internal("verified ticket lost its selected result".to_owned())
+                })?;
+                results.push((ticket.id, result));
+            }
+        }
         let [(ticket_id, result)] = results.as_slice() else {
             if results.is_empty() {
                 return Ok(None);
@@ -946,12 +783,11 @@ impl ControlPlane {
                 results.len()
             )));
         };
-        let ticket_id = TicketId(sqlite_u64(*ticket_id, "verification result ticket id")?);
-        let result: PolicyVerificationTicketResult =
-            serde_json::from_str(result).map_err(|error| {
+        let result: PolicyVerificationTicketResult = serde_json::from_value(result.clone())
+            .map_err(|error| {
                 VoomError::database_context("verified workflow ticket result", error)
             })?;
-        self.validate_verified_ticket_result(file, ticket_id, &result)
+        self.validate_verified_ticket_result(file, *ticket_id, &result)
             .await?;
         Ok(Some(ProducedRefs::verified(&result)))
     }
@@ -970,7 +806,7 @@ impl ControlPlane {
         let mut scoped_ticket_ids = seed_ticket_ids.to_vec();
         let mut candidates = Vec::new();
         for evidence in rows {
-            let ticket_id = TicketId(sqlite_u64(evidence.ticket_id, "commit evidence ticket id")?);
+            let ticket_id = evidence.ticket_id;
             let Some(result) = CommittedResultFields::decode(ticket_id, &evidence.result)? else {
                 continue;
             };
@@ -1000,75 +836,8 @@ impl ControlPlane {
     async fn committed_evidence_for_tickets(
         &self,
         ticket_ids: &[TicketId],
-    ) -> Result<Vec<CommittedEvidenceRow>, VoomError> {
-        let encoded_ids = ticket_ids
-            .iter()
-            .map(|id| sqlite_i64(id.0, "commit evidence ticket id"))
-            .collect::<Result<Vec<_>, _>>()?;
-        let encoded_ids = serde_json::to_string(&encoded_ids)
-            .map_err(|error| VoomError::Internal(format!("commit tickets encode: {error}")))?;
-        let rows = sqlx::query(
-            "WITH valid_results AS ( \
-                 SELECT t.id, t.job_id, t.payload, \
-                        CASE WHEN json_valid(t.result) THEN t.result ELSE '{}' END AS result \
-                 FROM tickets t \
-                 WHERE t.id IN (SELECT value FROM json_each(?)) \
-                   AND t.state = 'succeeded' AND t.result IS NOT NULL \
-             ), \
-             expanded_results AS ( \
-                 SELECT t.id, t.job_id, t.payload, \
-                        COALESCE(CAST(output.key AS INTEGER), 0) AS result_ordinal, \
-                        CASE \
-                            WHEN json_type(t.result, '$.outputs') = 'array' \
-                             AND json_array_length(t.result, '$.outputs') > 0 \
-                            THEN json_patch(t.result, output.value) \
-                            ELSE t.result \
-                        END AS result \
-                 FROM valid_results t \
-                 LEFT JOIN json_each(t.result, '$.outputs') AS output \
-                   ON json_type(t.result, '$.outputs') = 'array' \
-                  AND json_array_length(t.result, '$.outputs') > 0 \
-             ) \
-             SELECT t.id AS ticket_id, t.job_id AS ticket_job_id, \
-                    t.payload AS ticket_payload, t.result, \
-                    c.id AS commit_id, \
-                    c.artifact_handle_id AS commit_artifact_handle_id, \
-                    c.source_file_version_id AS commit_source_file_version_id, \
-                    c.verification_id AS commit_verification_id, \
-                    c.result_file_version_id AS commit_result_file_version_id, \
-                    c.result_file_location_id AS commit_result_file_location_id, \
-                    c.state AS commit_state, \
-                    v.artifact_handle_id AS verification_artifact_handle_id, \
-                    v.workflow_ticket_id AS verification_ticket_id, \
-                    v.workflow_lease_id AS verification_lease_id, \
-                    v.status AS verification_status, \
-                    rl.ticket_id AS result_lease_ticket_id, \
-                    rl.state AS result_lease_state, \
-                    sfv.file_asset_id AS source_file_asset_id, \
-                    fv.file_asset_id AS result_file_asset_id, \
-                    fl.file_version_id AS location_file_version_id, \
-                    ms.file_version_id AS snapshot_file_version_id \
-             FROM expanded_results t \
-             LEFT JOIN artifact_commit_records c \
-               ON c.id = json_extract(t.result, '$.commit_record_id') \
-             LEFT JOIN artifact_verifications v ON v.id = c.verification_id \
-             LEFT JOIN leases rl \
-               ON rl.id = json_extract(t.result, '$.lease_id') \
-             LEFT JOIN file_versions sfv \
-               ON sfv.id = json_extract(t.result, '$.source_file_version_id') \
-             LEFT JOIN file_versions fv \
-               ON fv.id = json_extract(t.result, '$.result_file_version_id') \
-             LEFT JOIN file_locations fl \
-               ON fl.id = json_extract(t.result, '$.result_file_location_id') \
-             LEFT JOIN media_snapshots ms \
-               ON ms.id = json_extract(t.result, '$.result_media_snapshot_id') \
-             ORDER BY t.id, t.result_ordinal",
-        )
-        .bind(&encoded_ids)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(|error| VoomError::database_context("committed ticket evidence", error))?;
-        rows.iter().map(CommittedEvidenceRow::decode).collect()
+    ) -> Result<Vec<CommittedTicketEvidence>, VoomError> {
+        self.artifacts.committed_ticket_evidence(ticket_ids).await
     }
 
     pub(super) async fn validated_committed_location_ids_for_rows(
@@ -1100,14 +869,11 @@ impl ControlPlane {
         let mut locations = Vec::new();
         let mut matched_row = false;
         for evidence in evidence_rows {
-            let ticket_id = TicketId(sqlite_u64(evidence.ticket_id, "cleanup ticket id")?);
+            let ticket_id = evidence.ticket_id;
             let Some(result) = CommittedResultFields::decode(ticket_id, &evidence.result)? else {
                 continue;
             };
-            let ticket_job_id = JobId(sqlite_u64(
-                required_evidence(evidence.ticket_job_id, ticket_id, "ticket job")?,
-                "cleanup ticket job id",
-            )?);
+            let ticket_job_id = required_evidence(evidence.ticket_job_id, ticket_id, "ticket job")?;
             validate_carried_ticket_scope(self, &evidence, ticket_job_id, row).await?;
             match evidence.validate(ticket_job_id, expected_asset_id, &result)? {
                 CommitRelevance::OtherLineage => {
@@ -1148,27 +914,15 @@ impl ControlPlane {
     }
 
     async fn file_run_asset_id(&self, row: &FilePhaseSummary) -> Result<FileAssetId, VoomError> {
-        let asset_id: Option<i64> = sqlx::query_scalar(
-            "SELECT fv.file_asset_id \
-             FROM workflow_file_run_starts start \
-             JOIN file_versions fv ON fv.id = start.starting_file_version_id \
-             WHERE start.job_id = ? AND start.branch_id = ?",
-        )
-        .bind(sqlite_i64(row.job_id.0, "cleanup run job id")?)
-        .bind(&row.branch_id)
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(|error| VoomError::database_context("cleanup run asset lookup", error))?;
-        let asset_id = asset_id.ok_or_else(|| {
-            VoomError::Conflict(format!(
-                "branch {} phase {} has no durable file-run start",
-                row.branch_id, row.phase_ordinal
-            ))
-        })?;
-        Ok(FileAssetId(sqlite_u64(
-            asset_id,
-            "cleanup run file asset id",
-        )?))
+        self.workflow_summaries
+            .file_run_asset_id(row.job_id, &row.branch_id)
+            .await?
+            .ok_or_else(|| {
+                VoomError::Conflict(format!(
+                    "branch {} phase {} has no durable file-run start",
+                    row.branch_id, row.phase_ordinal
+                ))
+            })
     }
 
     async fn version_descends_from(
@@ -1267,30 +1021,19 @@ impl ControlPlane {
         file: &PhaseFile,
     ) -> Result<Option<ProducedRefs>, VoomError> {
         let (workflow_id, workflow_pattern) = phase_workflow_scope(job_id, phase_ordinal);
-        let ticket_ids: Vec<TicketId> = sqlx::query_scalar(
-            "SELECT id FROM tickets \
-             WHERE job_id = ? AND state = 'succeeded' \
-               AND kind = 'synthetic.workflow.operation.verify_artifact' \
-               AND (json_extract(payload, '$.workflow_id') = ? \
-                    OR json_extract(payload, '$.workflow_id') GLOB ?) \
-               AND json_extract(payload, '$.rendered_payload.source_file_version_id') = ? \
-             ORDER BY id",
-        )
-        .bind(sqlite_i64(job_id.0, "verification recovery job id")?)
-        .bind(workflow_id)
-        .bind(workflow_pattern)
-        .bind(sqlite_i64(
-            file.version_id.0,
-            "verification recovery file version id",
-        )?)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(|error| {
-            VoomError::database_context("unfinalized verification ticket lookup", error)
-        })?
-        .into_iter()
-        .map(|id: i64| sqlite_u64(id, "unfinalized verification ticket id").map(TicketId))
-        .collect::<Result<Vec<_>, _>>()?;
+        let scope = WorkflowPhaseScope {
+            job_id,
+            exact_workflow_id: &workflow_id,
+            file_workflow_pattern: &workflow_pattern,
+        };
+        let ticket_ids = self
+            .tickets
+            .succeeded_ticket_ids_for_workflow_phase_file_and_operation(
+                &scope,
+                file.version_id,
+                TicketOperation::new("synthetic.workflow.operation.verify_artifact")?,
+            )
+            .await?;
         self.verified_refs_for_tickets(file, &ticket_ids).await
     }
 
@@ -1310,67 +1053,34 @@ impl ControlPlane {
                 file.branch_id
             )));
         }
-        let evidence: Option<VerifiedEvidenceRow> = sqlx::query_as(
-            "SELECT v.artifact_handle_id, v.artifact_location_id, v.status, v.path, \
-                    v.workflow_ticket_id, v.expected_size_bytes, v.expected_checksum, \
-                    v.observed_size_bytes, v.observed_checksum, \
-                    fl.file_version_id, fl.value \
-             FROM artifact_verifications v \
-             JOIN leases l \
-               ON l.id = v.workflow_lease_id AND l.ticket_id = v.workflow_ticket_id \
-             LEFT JOIN file_locations fl \
-               ON fl.id = ? AND fl.retired_at IS NULL \
-             WHERE v.id = ?",
-        )
-        .bind(sqlite_i64(
-            result.source_location_id.0,
-            "verified file location id",
-        )?)
-        .bind(sqlite_i64(
-            result.artifact_verification_id.0,
-            "artifact verification id",
-        )?)
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(|error| VoomError::database_context("verified evidence lookup", error))?;
-        let Some((
-            handle_id,
-            artifact_location_id,
-            status,
-            evidence_path,
-            evidence_ticket_id,
-            expected_size_bytes,
-            expected_checksum,
-            observed_size_bytes,
-            observed_checksum,
-            source_version_id,
-            source_path,
-        )) = evidence
-        else {
+        let evidence = self
+            .artifacts
+            .verified_ticket_evidence(
+                ticket_id,
+                result.artifact_verification_id,
+                result.artifact_handle_id,
+                result.source_location_id,
+            )
+            .await?;
+        let Some(evidence) = evidence else {
             return Err(VoomError::NotFound(format!(
                 "artifact_verification {}",
                 result.artifact_verification_id
             )));
         };
-        if sqlite_u64(handle_id, "verification artifact handle")? != result.artifact_handle_id.0
-            || sqlite_u64(artifact_location_id, "verification artifact location")?
-                != result.artifact_location_id.0
-            || sqlite_u64(evidence_ticket_id, "verification workflow ticket")? != ticket_id.0
-            || status != "succeeded"
-            || evidence_path != result.path
-            || sqlite_u64(expected_size_bytes, "verification expected size")?
-                != result.expected_size_bytes
-            || expected_checksum != result.expected_checksum
-            || observed_size_bytes
-                .map(|size| sqlite_u64(size, "verification observed size"))
-                .transpose()?
-                != result.observed_size_bytes
-            || observed_checksum != result.observed_checksum
-            || source_version_id
-                .map(|id| sqlite_u64(id, "verified location version"))
-                .transpose()?
-                != Some(file.version_id.0)
-            || source_path.as_deref() != Some(result.path.as_str())
+        let verification = evidence.verification;
+        if verification.id != result.artifact_verification_id
+            || verification.artifact_handle_id != result.artifact_handle_id
+            || verification.artifact_location_id != result.artifact_location_id
+            || verification.workflow_ticket_id != Some(ticket_id)
+            || verification.status != ArtifactVerificationStatus::Succeeded
+            || verification.path != result.path
+            || verification.expected_size_bytes != result.expected_size_bytes
+            || verification.expected_checksum != result.expected_checksum
+            || verification.observed_size_bytes != result.observed_size_bytes
+            || verification.observed_checksum != result.observed_checksum
+            || evidence.file_version_id != Some(file.version_id)
+            || evidence.location_value.as_deref() != Some(result.path.as_str())
         {
             return Err(VoomError::Conflict(format!(
                 "artifact_verification {} does not match verified ticket result",
@@ -1387,21 +1097,13 @@ impl ControlPlane {
         phase_ordinal: u32,
     ) -> Result<Vec<TicketId>, VoomError> {
         let (workflow_id, workflow_pattern) = phase_workflow_scope(job_id, phase_ordinal);
-        let rows: Vec<i64> = sqlx::query_scalar(
-            "SELECT id FROM tickets \
-             WHERE job_id = ? AND (json_extract(payload, '$.workflow_id') = ? \
-               OR json_extract(payload, '$.workflow_id') GLOB ?) \
-             ORDER BY id",
-        )
-        .bind(sqlite_i64(job_id.0, "phase ticket job id")?)
-        .bind(workflow_id)
-        .bind(workflow_pattern)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(|error| VoomError::database_context("phase ticket ids", error))?;
-        rows.into_iter()
-            .map(|id| sqlite_u64(id, "phase ticket id").map(TicketId))
-            .collect()
+        self.tickets
+            .ticket_ids_for_workflow_phase(&WorkflowPhaseScope {
+                job_id,
+                exact_workflow_id: &workflow_id,
+                file_workflow_pattern: &workflow_pattern,
+            })
+            .await
     }
 
     /// Ticket ids whose invocation and payload `node_id` match a phase node.
@@ -1428,26 +1130,16 @@ impl ControlPlane {
         file_version_id: FileVersionId,
     ) -> Result<Vec<TicketId>, VoomError> {
         let (workflow_id, workflow_pattern) = phase_workflow_scope(job_id, phase_ordinal);
-        let rows: Vec<i64> = sqlx::query_scalar(
-            "SELECT id FROM tickets \
-             WHERE job_id = ? AND (json_extract(payload, '$.workflow_id') = ? \
-               OR json_extract(payload, '$.workflow_id') GLOB ?) \
-               AND json_extract(payload, '$.rendered_payload.source_file_version_id') = ? \
-             ORDER BY id ASC",
-        )
-        .bind(sqlite_i64(job_id.0, "phase ticket job id")?)
-        .bind(workflow_id)
-        .bind(workflow_pattern)
-        .bind(sqlite_i64(
-            file_version_id.0,
-            "phase ticket source file version",
-        )?)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(|error| VoomError::database_context("phase file ticket ids", error))?;
-        rows.into_iter()
-            .map(|id| sqlite_u64(id, "phase file ticket id").map(TicketId))
-            .collect()
+        self.tickets
+            .ticket_ids_for_workflow_phase_file(
+                &WorkflowPhaseScope {
+                    job_id,
+                    exact_workflow_id: &workflow_id,
+                    file_workflow_pattern: &workflow_pattern,
+                },
+                file_version_id,
+            )
+            .await
     }
 
     pub(super) async fn ticket_ids_for_phase_scope(
@@ -1458,40 +1150,17 @@ impl ControlPlane {
         file_version_id: Option<FileVersionId>,
     ) -> Result<Vec<TicketId>, VoomError> {
         let (workflow_id, workflow_pattern) = phase_workflow_scope(job_id, phase_ordinal);
-        let file_version_id = file_version_id
-            .map(|id| sqlite_i64(id.0, "phase ticket source file version"))
-            .transpose()?;
-        let rows = sqlx::query(
-            "SELECT id FROM tickets \
-             WHERE job_id = ? AND (json_extract(payload, '$.workflow_id') = ? \
-               OR json_extract(payload, '$.workflow_id') GLOB ?) \
-               AND json_extract(payload, '$.node_id') = ? \
-               AND (? IS NULL OR \
-                    json_extract(payload, '$.rendered_payload.source_file_version_id') = ?) \
-             ORDER BY id ASC",
-        )
-        .bind(
-            i64::try_from(job_id.0)
-                .map_err(|e| VoomError::Internal(format!("job id exceeds SQLite integer: {e}")))?,
-        )
-        .bind(workflow_id)
-        .bind(workflow_pattern)
-        .bind(workflow_node_id)
-        .bind(file_version_id)
-        .bind(file_version_id)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(|e| VoomError::database_context("phase ticket ids", e))?;
-        rows.into_iter()
-            .map(|row| {
-                let id: i64 = row
-                    .try_get("id")
-                    .map_err(|e| VoomError::database_context("phase ticket id", e))?;
-                u64::try_from(id)
-                    .map(TicketId)
-                    .map_err(|e| VoomError::database_context("phase ticket id negative", e))
-            })
-            .collect()
+        self.tickets
+            .ticket_ids_for_workflow_phase_scope(
+                &WorkflowPhaseScope {
+                    job_id,
+                    exact_workflow_id: &workflow_id,
+                    file_workflow_pattern: &workflow_pattern,
+                },
+                workflow_node_id,
+                file_version_id,
+            )
+            .await
     }
 
     /// Succeed the job and write a zero-count job-grain summary for a run with no

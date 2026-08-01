@@ -15,7 +15,8 @@ use sqlx::{Row, Sqlite, SqlitePool, Transaction};
 use time::OffsetDateTime;
 use voom_core::ids::ArtifactVerificationId;
 use voom_core::{
-    ArtifactHandleId, FileLocationId, FileVersionId, JobId, MediaSnapshotId, TicketId, VoomError,
+    ArtifactHandleId, FileAssetId, FileLocationId, FileVersionId, JobId, MediaSnapshotId, TicketId,
+    VoomError,
 };
 
 use super::Repository;
@@ -614,6 +615,32 @@ impl SqliteWorkflowSummaryRepo {
         .await
         .map_err(|error| VoomError::database_context("workflow_file_run_starts list", error))?;
         rows.iter().map(row_to_file_run_start).collect()
+    }
+
+    /// Resolve a job branch's starting asset through its immutable run version.
+    pub async fn file_run_asset_id(
+        &self,
+        job_id: JobId,
+        branch_id: &str,
+    ) -> Result<Option<FileAssetId>, VoomError> {
+        let asset_id: Option<i64> = sqlx::query_scalar(
+            "SELECT fv.file_asset_id \
+             FROM workflow_file_run_starts start \
+             JOIN file_versions fv ON fv.id = start.starting_file_version_id \
+             WHERE start.job_id = ? AND start.branch_id = ?",
+        )
+        .bind(i64_from_u64(job_id.0))
+        .bind(branch_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|error| VoomError::database_context("workflow file run asset lookup", error))?;
+        asset_id
+            .map(|id| {
+                u64::try_from(id).map(FileAssetId).map_err(|error| {
+                    VoomError::database_context("workflow file run asset id", error)
+                })
+            })
+            .transpose()
     }
 
     /// Inspect one job's inherited per-file phase outcomes.

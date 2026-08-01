@@ -36,7 +36,7 @@ impl LeaseState {
         }
     }
 
-    fn parse(s: &str) -> Result<Self, VoomError> {
+    pub(crate) fn parse(s: &str) -> Result<Self, VoomError> {
         match s {
             "held" => Ok(Self::Held),
             "released" => Ok(Self::Released),

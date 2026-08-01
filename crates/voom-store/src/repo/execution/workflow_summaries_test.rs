@@ -902,3 +902,43 @@ async fn phase_upsert_is_first_write_wins() {
     assert_eq!(second, first);
     assert_eq!(repo.phases_for_job(JOB).await.unwrap(), vec![first]);
 }
+
+#[tokio::test]
+async fn file_run_asset_id_resolves_through_starting_version() {
+    let (repo, _tmp) = repo().await;
+    repo.insert_file_run_starts(JOB, vec![file_run_start("alpha", 1, 0)])
+        .await
+        .unwrap();
+
+    assert_eq!(
+        repo.file_run_asset_id(JOB, "alpha").await.unwrap(),
+        Some(voom_core::FileAssetId(1))
+    );
+    assert_eq!(repo.file_run_asset_id(JOB, "missing").await.unwrap(), None);
+    assert_eq!(
+        repo.file_run_asset_id(JobId(2), "alpha").await.unwrap(),
+        None
+    );
+}
+
+#[tokio::test]
+async fn rollback_leaves_file_run_asset_projection_unchanged() {
+    let (repo, _tmp) = repo().await;
+    repo.insert_file_run_starts(JOB, vec![file_run_start("alpha", 1, 0)])
+        .await
+        .unwrap();
+    let mut tx = repo.pool.begin().await.unwrap();
+    sqlx::query(
+        "UPDATE workflow_file_run_starts SET branch_id = 'changed' \
+         WHERE job_id = 1 AND branch_id = 'alpha'",
+    )
+    .execute(&mut *tx)
+    .await
+    .unwrap();
+    tx.rollback().await.unwrap();
+
+    assert_eq!(
+        repo.file_run_asset_id(JOB, "alpha").await.unwrap(),
+        Some(voom_core::FileAssetId(1))
+    );
+}

@@ -2423,3 +2423,265 @@ async fn record_lineage_rejects_self_edge() {
     // CHECK constraint rejects self-references; surfaces as Database.
     assert!(matches!(err, voom_core::VoomError::Database { .. }));
 }
+
+#[tokio::test]
+async fn committed_ticket_evidence_decodes_typed_joined_facts() {
+    let (pool, _tmp) = pool().await;
+    seed_workflow_evidence(&pool).await;
+    let repo = SqliteArtifactRepo::new(pool);
+
+    let rows = repo
+        .committed_ticket_evidence(&[TicketId(1)])
+        .await
+        .unwrap();
+
+    assert_eq!(rows.len(), 1);
+    let row = &rows[0];
+    assert_eq!(row.ticket_id, TicketId(1));
+    assert_eq!(row.ticket_job_id, Some(voom_core::JobId(1)));
+    assert_eq!(row.ticket_payload["branch_id"], "alpha");
+    assert_eq!(row.result["commit_record_id"], 1);
+    assert_eq!(
+        row.commit.as_ref().unwrap().state,
+        ArtifactCommitState::Committed
+    );
+    assert_eq!(
+        row.verification.as_ref().unwrap().status,
+        ArtifactVerificationStatus::Succeeded
+    );
+    assert_eq!(
+        row.result_lease.as_ref().unwrap().state,
+        crate::repo::execution::leases::LeaseState::Released
+    );
+    assert_eq!(row.source_file_asset_id, Some(FileAssetId(1)));
+    assert_eq!(row.result_file_asset_id, Some(FileAssetId(1)));
+    assert_eq!(row.location_file_version_id, Some(FileVersionId(2)));
+    assert_eq!(row.snapshot_file_version_id, Some(FileVersionId(2)));
+}
+
+#[tokio::test]
+async fn committed_ticket_evidence_preserves_absent_joins_and_rejects_corruption() {
+    let (pool, _tmp) = pool().await;
+    seed_workflow_evidence(&pool).await;
+    let repo = SqliteArtifactRepo::new(pool.clone());
+    sqlx::query(
+        "UPDATE tickets SET result = json_set(result, '$.commit_record_id', 999) WHERE id = 1",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let row = repo
+        .committed_ticket_evidence(&[TicketId(1)])
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    assert!(row.commit.is_none());
+
+    let mut connection = pool.acquire().await.unwrap();
+    sqlx::query("PRAGMA ignore_check_constraints = TRUE")
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE tickets SET result = '{' WHERE id = 1")
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+    let error = repo
+        .committed_ticket_evidence(&[TicketId(1)])
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("ticket result"));
+}
+
+#[tokio::test]
+async fn verified_ticket_evidence_decodes_verification_and_optional_location() {
+    let (pool, _tmp) = pool().await;
+    seed_workflow_evidence(&pool).await;
+    let repo = SqliteArtifactRepo::new(pool);
+
+    let evidence = repo
+        .verified_ticket_evidence(
+            TicketId(1),
+            voom_core::ids::ArtifactVerificationId(1),
+            voom_core::ArtifactHandleId(1),
+            FileLocationId(1),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(
+        evidence.verification.id,
+        voom_core::ids::ArtifactVerificationId(1)
+    );
+    assert_eq!(evidence.file_version_id, Some(FileVersionId(2)));
+    assert_eq!(evidence.location_value.as_deref(), Some("/output.mkv"));
+}
+
+#[tokio::test]
+async fn committed_ticket_evidence_expands_outputs_and_preserves_sidecar_assets() {
+    let (pool, _tmp) = pool().await;
+    seed_workflow_evidence(&pool).await;
+    sqlx::query("UPDATE tickets SET result = ? WHERE id = 1")
+        .bind(
+            json!({
+                "job_id": 1,
+                "ticket_id": 1,
+                "lease_id": 1,
+                "outputs": [
+                    {
+                        "source_file_version_id": 1,
+                        "staged_artifact_handle_id": 1,
+                        "verification_id": 1,
+                        "commit_record_id": 1,
+                        "result_file_version_id": 2,
+                        "result_file_location_id": 1,
+                        "result_media_snapshot_id": 1
+                    },
+                    {
+                        "source_file_version_id": 1,
+                        "staged_artifact_handle_id": 2,
+                        "verification_id": 2,
+                        "commit_record_id": 2,
+                        "result_file_version_id": 3,
+                        "result_file_location_id": 2,
+                        "result_media_snapshot_id": 2
+                    }
+                ]
+            })
+            .to_string(),
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+    let repo = SqliteArtifactRepo::new(pool);
+
+    let rows = repo
+        .committed_ticket_evidence(&[TicketId(1)])
+        .await
+        .unwrap();
+
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].result_file_asset_id, Some(FileAssetId(1)));
+    assert_eq!(rows[1].result_file_asset_id, Some(FileAssetId(2)));
+    assert_eq!(rows[0].commit.as_ref().unwrap().id.0, 1);
+    assert_eq!(rows[1].commit.as_ref().unwrap().id.0, 2);
+}
+
+#[tokio::test]
+async fn committed_ticket_evidence_rejects_each_corrupt_durable_kind() {
+    for (statement, expected) in [
+        (
+            "UPDATE tickets SET payload = '{' WHERE id = 1",
+            "ticket_payload",
+        ),
+        (
+            "UPDATE artifact_commit_records SET state = 'unknown' WHERE id = 1",
+            "artifact_commit_records.state",
+        ),
+        (
+            "UPDATE artifact_verifications SET status = 'unknown' WHERE id = 1",
+            "artifact_verifications.status",
+        ),
+        (
+            "UPDATE leases SET state = 'unknown' WHERE id = 1",
+            "leases.state",
+        ),
+        (
+            "UPDATE artifact_commit_records SET started_at = 'bad' WHERE id = 1",
+            "parse iso8601",
+        ),
+    ] {
+        let (pool, _tmp) = pool().await;
+        seed_workflow_evidence(&pool).await;
+        let mut connection = pool.acquire().await.unwrap();
+        sqlx::query("PRAGMA ignore_check_constraints = TRUE")
+            .execute(&mut *connection)
+            .await
+            .unwrap();
+        sqlx::query(statement)
+            .execute(&mut *connection)
+            .await
+            .unwrap();
+        drop(connection);
+        let error = SqliteArtifactRepo::new(pool)
+            .committed_ticket_evidence(&[TicketId(1)])
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains(expected), "got: {error}");
+    }
+}
+
+async fn seed_workflow_evidence(pool: &sqlx::SqlitePool) {
+    for statement in [
+        "INSERT INTO jobs (id, kind, state, priority, created_at, updated_at) VALUES \
+         (1, 'workflow', 'open', 0, '1970-01-01T00:00:00Z', '1970-01-01T00:00:00Z')",
+        "INSERT INTO tickets (id, job_id, kind, state, priority, payload, result, max_attempts, \
+         next_eligible_at, created_at, state_changed_at) VALUES \
+         (1, 1, 'synthetic.workflow.operation.test', 'succeeded', 0, \
+          '{\"workflow_id\":\"workflow-1-phase-0\",\"branch_id\":\"alpha\"}', \
+          '{\"job_id\":1,\"ticket_id\":1,\"lease_id\":1,\"source_file_version_id\":1,\
+           \"staged_artifact_handle_id\":1,\"verification_id\":1,\"commit_record_id\":1,\
+           \"result_file_version_id\":2,\"result_file_location_id\":1,\
+           \"result_media_snapshot_id\":1}', 1, '1970-01-01T00:00:00Z', \
+          '1970-01-01T00:00:00Z', '1970-01-01T00:00:00Z')",
+        "INSERT INTO workers (id, name, kind, status, registered_at, last_seen_at) VALUES \
+         (1, 'worker', 'synthetic', 'active', '1970-01-01T00:00:00Z', \
+          '1970-01-01T00:00:00Z')",
+        "INSERT INTO leases (id, ticket_id, worker_id, state, acquired_at, expires_at, \
+         last_heartbeat_at, ttl_seconds, release_reason, released_at) VALUES \
+         (1, 1, 1, 'released', '1970-01-01T00:00:00Z', '1970-01-01T00:01:00Z', \
+          '1970-01-01T00:00:00Z', 60, 'released', '1970-01-01T00:00:00Z')",
+        "INSERT INTO file_assets (id, created_at) VALUES (1, '1970-01-01T00:00:00Z')",
+        "INSERT INTO file_assets (id, created_at) VALUES (2, '1970-01-01T00:00:00Z')",
+        "INSERT INTO file_versions (id, file_asset_id, content_hash, size_bytes, produced_by, \
+         created_at) VALUES (1, 1, 'source', 10, 'ingest', '1970-01-01T00:00:00Z')",
+        "INSERT INTO file_versions (id, file_asset_id, content_hash, size_bytes, produced_by, \
+         produced_from_version_id, created_at) VALUES \
+         (2, 1, 'result', 10, 'staged_commit', 1, '1970-01-01T00:00:00Z')",
+        "INSERT INTO file_locations (id, file_version_id, kind, value, observed_at) VALUES \
+         (1, 2, 'local_path', '/output.mkv', '1970-01-01T00:00:00Z')",
+        "INSERT INTO file_versions (id, file_asset_id, content_hash, size_bytes, produced_by, \
+         produced_from_version_id, created_at) VALUES \
+         (3, 2, 'sidecar', 2, 'staged_commit', 1, '1970-01-01T00:00:00Z')",
+        "INSERT INTO file_locations (id, file_version_id, kind, value, observed_at) VALUES \
+         (2, 3, 'local_path', '/sidecar.srt', '1970-01-01T00:00:00Z')",
+        "INSERT INTO media_snapshots (id, file_version_id, probed_at, payload) VALUES \
+         (1, 2, '1970-01-01T00:00:00Z', '{}')",
+        "INSERT INTO media_snapshots (id, file_version_id, probed_at, payload) VALUES \
+         (2, 3, '1970-01-01T00:00:00Z', '{}')",
+        "INSERT INTO artifact_handles (id, privacy_class, durability_class, allowed_access_modes, \
+         mutability, file_version_id, created_at) VALUES \
+         (1, 'internal', 'staging', '[]', 'immutable', 1, '1970-01-01T00:00:00Z')",
+        "INSERT INTO artifact_handles (id, privacy_class, durability_class, allowed_access_modes, \
+         mutability, file_version_id, created_at) VALUES \
+         (2, 'internal', 'staging', '[]', 'immutable', 1, '1970-01-01T00:00:00Z')",
+        "INSERT INTO artifact_locations (id, artifact_handle_id, kind, value, observed_at) VALUES \
+         (1, 1, 'staging', '/staging.mkv', '1970-01-01T00:00:00Z')",
+        "INSERT INTO artifact_locations (id, artifact_handle_id, kind, value, observed_at) VALUES \
+         (2, 2, 'staging', '/staging.srt', '1970-01-01T00:00:00Z')",
+        "INSERT INTO artifact_verifications (id, artifact_handle_id, artifact_location_id, path, \
+         worker_id, workflow_ticket_id, workflow_lease_id, status, expected_size_bytes, \
+         expected_checksum, observed_size_bytes, observed_checksum, report, started_at, \
+         finished_at) VALUES (1, 1, 1, '/staging.mkv', 1, 1, 1, 'succeeded', 10, 'sum', \
+         10, 'sum', '{}', '1970-01-01T00:00:00Z', '1970-01-01T00:00:00Z')",
+        "INSERT INTO artifact_verifications (id, artifact_handle_id, artifact_location_id, path, \
+         worker_id, status, expected_size_bytes, expected_checksum, observed_size_bytes, \
+         observed_checksum, report, started_at, finished_at) VALUES \
+         (2, 2, 2, '/staging.srt', 1, 'succeeded', 2, 'sidecar', 2, 'sidecar', '{}', \
+          '1970-01-01T00:00:00Z', '1970-01-01T00:00:00Z')",
+        "INSERT INTO artifact_commit_records (id, artifact_handle_id, source_file_version_id, \
+         verification_id, target_path, result_file_version_id, result_file_location_id, state, \
+         report, started_at, promotion_started_at, finished_at) VALUES \
+         (1, 1, 1, 1, '/output.mkv', 2, 1, 'committed', '{}', '1970-01-01T00:00:00Z', \
+          '1970-01-01T00:00:00Z', '1970-01-01T00:00:00Z')",
+        "INSERT INTO artifact_commit_records (id, artifact_handle_id, source_file_version_id, \
+         verification_id, target_path, result_file_version_id, result_file_location_id, state, \
+         report, started_at, promotion_started_at, finished_at) VALUES \
+         (2, 2, 1, 2, '/sidecar.srt', 3, 2, 'committed', '{}', '1970-01-01T00:00:00Z', \
+          '1970-01-01T00:00:00Z', '1970-01-01T00:00:00Z')",
+    ] {
+        sqlx::query(statement).execute(pool).await.unwrap();
+    }
+}

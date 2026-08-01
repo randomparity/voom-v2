@@ -62,8 +62,6 @@ use planning::{
 use resume::{PreparedResumeSeed, ResumePreparation};
 
 #[cfg(test)]
-use finalize::{sqlite_i64, sqlite_u64};
-#[cfg(test)]
 use planning::zero_phase_summary;
 
 /// A file the coordinator is advancing through phases. `version_id`/`snapshot`

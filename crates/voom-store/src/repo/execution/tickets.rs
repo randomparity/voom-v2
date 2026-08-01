@@ -106,6 +106,13 @@ pub struct WorkflowTicketIdentity<'a> {
     pub source_file_version_id: Option<FileVersionId>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkflowPhaseScope<'a> {
+    pub job_id: JobId,
+    pub exact_workflow_id: &'a str,
+    pub file_workflow_pattern: &'a str,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PreLeaseFailureTransition {
     Terminal,
@@ -248,6 +255,108 @@ impl SqliteTicketRepo {
             });
         }
         Ok(results)
+    }
+
+    pub async fn ticket_ids_for_workflow_phase(
+        &self,
+        scope: &WorkflowPhaseScope<'_>,
+    ) -> Result<Vec<TicketId>, VoomError> {
+        let rows: Vec<i64> = sqlx::query_scalar(
+            "SELECT id FROM tickets WHERE job_id = ? \
+             AND (json_extract(payload, '$.workflow_id') = ? \
+                  OR json_extract(payload, '$.workflow_id') GLOB ?) ORDER BY id ASC",
+        )
+        .bind(workflow_sqlite_id(scope.job_id.0, "workflow phase job id")?)
+        .bind(scope.exact_workflow_id)
+        .bind(scope.file_workflow_pattern)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|error| VoomError::database_context("workflow phase ticket ids", error))?;
+        decode_ticket_ids(rows, "workflow phase ticket id")
+    }
+
+    pub async fn ticket_ids_for_workflow_phase_file(
+        &self,
+        scope: &WorkflowPhaseScope<'_>,
+        file_version_id: FileVersionId,
+    ) -> Result<Vec<TicketId>, VoomError> {
+        let rows: Vec<i64> = sqlx::query_scalar(
+            "SELECT id FROM tickets WHERE job_id = ? \
+             AND (json_extract(payload, '$.workflow_id') = ? \
+                  OR json_extract(payload, '$.workflow_id') GLOB ?) \
+             AND json_extract(payload, '$.rendered_payload.source_file_version_id') = ? \
+             ORDER BY id ASC",
+        )
+        .bind(workflow_sqlite_id(scope.job_id.0, "workflow phase job id")?)
+        .bind(scope.exact_workflow_id)
+        .bind(scope.file_workflow_pattern)
+        .bind(workflow_sqlite_id(
+            file_version_id.0,
+            "workflow phase source version id",
+        )?)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|error| VoomError::database_context("workflow phase file ticket ids", error))?;
+        decode_ticket_ids(rows, "workflow phase file ticket id")
+    }
+
+    pub async fn ticket_ids_for_workflow_phase_scope(
+        &self,
+        scope: &WorkflowPhaseScope<'_>,
+        workflow_node_id: &str,
+        file_version_id: Option<FileVersionId>,
+    ) -> Result<Vec<TicketId>, VoomError> {
+        let file_version_id = file_version_id
+            .map(|id| workflow_sqlite_id(id.0, "workflow phase source version id"))
+            .transpose()?;
+        let rows: Vec<i64> = sqlx::query_scalar(
+            "SELECT id FROM tickets WHERE job_id = ? \
+             AND (json_extract(payload, '$.workflow_id') = ? \
+                  OR json_extract(payload, '$.workflow_id') GLOB ?) \
+             AND json_extract(payload, '$.node_id') = ? \
+             AND (? IS NULL OR \
+                  json_extract(payload, '$.rendered_payload.source_file_version_id') = ?) \
+             ORDER BY id ASC",
+        )
+        .bind(workflow_sqlite_id(scope.job_id.0, "workflow phase job id")?)
+        .bind(scope.exact_workflow_id)
+        .bind(scope.file_workflow_pattern)
+        .bind(workflow_node_id)
+        .bind(file_version_id)
+        .bind(file_version_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|error| VoomError::database_context("workflow phase scope ticket ids", error))?;
+        decode_ticket_ids(rows, "workflow phase scope ticket id")
+    }
+
+    pub async fn succeeded_ticket_ids_for_workflow_phase_file_and_operation(
+        &self,
+        scope: &WorkflowPhaseScope<'_>,
+        file_version_id: FileVersionId,
+        operation: TicketOperation,
+    ) -> Result<Vec<TicketId>, VoomError> {
+        let rows: Vec<i64> = sqlx::query_scalar(
+            "SELECT id FROM tickets WHERE job_id = ? AND state = 'succeeded' AND kind = ? \
+             AND (json_extract(payload, '$.workflow_id') = ? \
+                  OR json_extract(payload, '$.workflow_id') GLOB ?) \
+             AND json_extract(payload, '$.rendered_payload.source_file_version_id') = ? \
+             ORDER BY id ASC",
+        )
+        .bind(workflow_sqlite_id(scope.job_id.0, "workflow phase job id")?)
+        .bind(operation.as_str())
+        .bind(scope.exact_workflow_id)
+        .bind(scope.file_workflow_pattern)
+        .bind(workflow_sqlite_id(
+            file_version_id.0,
+            "workflow phase source version id",
+        )?)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|error| {
+            VoomError::database_context("succeeded workflow phase file ticket ids", error)
+        })?;
+        decode_ticket_ids(rows, "succeeded workflow phase file ticket id")
     }
 
     /// Add a dependency to a pending ticket in the caller's transaction.
@@ -1039,6 +1148,21 @@ fn row_to_ticket(row: &sqlx::sqlite::SqliteRow) -> Result<Ticket, VoomError> {
         state_changed_at: parse_iso8601(&state_changed)?,
         epoch: u64_from_i64(epoch),
     })
+}
+
+fn workflow_sqlite_id(value: u64, field: &str) -> Result<i64, VoomError> {
+    i64::try_from(value)
+        .map_err(|error| VoomError::database_context(format!("{field} exceeds SQLite i64"), error))
+}
+
+fn decode_ticket_ids(rows: Vec<i64>, field: &str) -> Result<Vec<TicketId>, VoomError> {
+    rows.into_iter()
+        .map(|id| {
+            u64::try_from(id)
+                .map(TicketId)
+                .map_err(|error| VoomError::database_context(field, error))
+        })
+        .collect()
 }
 
 #[cfg(test)]

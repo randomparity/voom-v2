@@ -414,6 +414,14 @@ pub struct FileLocation {
     pub epoch: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LiveChainTipLocation {
+    pub location_id: FileLocationId,
+    pub file_asset_id: FileAssetId,
+    pub value: String,
+    pub epoch: u64,
+}
+
 #[derive(Debug, Clone)]
 pub struct NewIdentityEvidence {
     pub target_type: IdentityEvidenceTarget,
@@ -701,6 +709,10 @@ pub trait FileLocationRepo: Repository {
         &self,
         version_id: FileVersionId,
     ) -> Result<Vec<FileLocation>, VoomError>;
+    async fn live_local_chain_tips(
+        &self,
+        location_ids: &[FileLocationId],
+    ) -> Result<Vec<LiveChainTipLocation>, VoomError>;
     /// In-tx variant of `list_live_file_locations_by_version`.
     /// Required by the commit-safety-gate closure walker (commit 4 /
     /// Phase A): the walker runs inside an IMMEDIATE tx and must see
@@ -1572,6 +1584,54 @@ impl FileLocationRepo for SqliteIdentityRepo {
         rows.iter().map(row_to_file_location).collect()
     }
 
+    async fn live_local_chain_tips(
+        &self,
+        location_ids: &[FileLocationId],
+    ) -> Result<Vec<LiveChainTipLocation>, VoomError> {
+        if location_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let ids = location_ids
+            .iter()
+            .map(|id| {
+                i64::try_from(id.0).map_err(|error| {
+                    VoomError::database_context("live chain tip location id", error)
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let ids = serialize_json(&ids, "live chain tip location ids")?;
+        let rows: Vec<(i64, i64, String, i64)> = sqlx::query_as(
+            "SELECT fl.id, fv.file_asset_id, fl.value, fl.epoch \
+             FROM file_locations fl JOIN file_versions fv ON fv.id = fl.file_version_id \
+             WHERE fl.id IN (SELECT value FROM json_each(?)) \
+               AND fl.retired_at IS NULL AND fl.kind = 'local_path' \
+               AND NOT EXISTS (SELECT 1 FROM file_versions newer \
+                   WHERE newer.file_asset_id = fv.file_asset_id \
+                     AND newer.retired_at IS NULL AND newer.id > fv.id) \
+             ORDER BY fl.id ASC",
+        )
+        .bind(ids)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|error| VoomError::database_context("live local chain tip locations", error))?;
+        rows.into_iter()
+            .map(|(location_id, file_asset_id, value, epoch)| {
+                Ok(LiveChainTipLocation {
+                    location_id: FileLocationId(checked_identity_u64(
+                        location_id,
+                        "live chain tip location id",
+                    )?),
+                    file_asset_id: FileAssetId(checked_identity_u64(
+                        file_asset_id,
+                        "live chain tip file asset id",
+                    )?),
+                    value,
+                    epoch: checked_identity_u64(epoch, "live chain tip location epoch")?,
+                })
+            })
+            .collect()
+    }
+
     async fn list_live_file_locations_by_version_in_tx<'tx>(
         &self,
         tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
@@ -2007,6 +2067,11 @@ impl MediaSnapshotRepo for SqliteIdentityRepo {
 }
 
 // ---------- inner helpers --------------------------------------------------
+
+fn checked_identity_u64(value: i64, field: &str) -> Result<u64, VoomError> {
+    u64::try_from(value)
+        .map_err(|error| VoomError::database_context(format!("{field} is negative"), error))
+}
 
 /// Outcome of validating an alias proof against the prior live
 /// location / version. Either everything lines up (caller proceeds to
