@@ -488,7 +488,7 @@ async fn compliance_apply_resolves_matching_issue_after_compliance() {
         .report
         .checks
         .iter()
-        .find(|check| check.compliance_kind == "container")
+        .find(|check| check.compliance_kind == voom_plan::ComplianceKind::Container)
         .unwrap();
     let key = test_dedupe_key(document_id, input_set_id, check);
     sqlx::query(

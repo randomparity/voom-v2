@@ -22,9 +22,9 @@ pub mod planner;
 
 pub use compliance::model::{
     CheckStatus, ComplianceCheck, ComplianceDiagnostic, ComplianceDiagnosticCode,
-    ComplianceDiagnosticSeverity, ComplianceInputIdentity, CompliancePolicyIdentity,
-    ComplianceProvenance, ComplianceReport, ComplianceSummary, ExecutionEligibility,
-    IssueActionHint, ReportStatus,
+    ComplianceDiagnosticSeverity, ComplianceInputIdentity, ComplianceKind,
+    CompliancePolicyIdentity, ComplianceProvenance, ComplianceReport, ComplianceSummary,
+    ExecutionEligibility, IssueActionHint, ReportStatus,
 };
 pub use compliance::report::{ComplianceReportError, generate_compliance_report};
 pub use compliance::{
