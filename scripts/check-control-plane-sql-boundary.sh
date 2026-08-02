@@ -55,14 +55,8 @@ import_names=(
 violations=()
 normal_imports=()
 wildcard_imports=()
-call_candidates=()
-macro_candidates=()
-reference_candidates=()
 type_relations=()
-resolved_by_file=()
-function_qualifiers=()
-macro_qualifiers=()
-builder_qualifiers=()
+resolved_crates=()
 use_list_nodes=()
 use_alias_nodes=()
 use_leaf_nodes=()
@@ -164,9 +158,10 @@ append_normal_import() {
 	local file="$1"
 	local source="$2"
 	local target="$3"
+	local line="$4"
 	normalize_source "$source"
 	trim_value "$target"
-	normal_imports+=("$file|$normalized_source|$trimmed_value")
+	normal_imports+=("$file|$normalized_source|$trimmed_value|$line")
 }
 
 parse_flat_use_match() {
@@ -183,9 +178,9 @@ parse_flat_use_match() {
 		normalize_source "${text%::*}"
 		wildcard_imports+=("$file|$normalized_source|$line")
 	elif [[ "$text" == *" as "* ]]; then
-		append_normal_import "$file" "${text%% as *}" "${text##* as }"
+		append_normal_import "$file" "${text%% as *}" "${text##* as }" "$line"
 	else
-		append_normal_import "$file" "$text" "${text##*::}"
+		append_normal_import "$file" "$text" "${text##*::}" "$line"
 	fi
 }
 
@@ -370,7 +365,7 @@ process_nested_use_aliases() {
 		else
 			source="$containing_prefix::$source"
 		fi
-		append_normal_import "$file" "$source" "$target"
+		append_normal_import "$file" "$source" "$target" "$line"
 	done
 }
 
@@ -391,9 +386,11 @@ process_nested_use_leaves() {
 			[[ "$text" != "*" ]] && source="$containing_prefix::${text%::*}"
 			wildcard_imports+=("$file|$source|$line")
 		elif [[ "$text" == self ]]; then
-			append_normal_import "$file" "$containing_prefix" "${containing_prefix##*::}"
+			append_normal_import \
+				"$file" "$containing_prefix" "${containing_prefix##*::}" "$line"
 		else
-			append_normal_import "$file" "$containing_prefix::$text" "${text##*::}"
+			append_normal_import \
+				"$file" "$containing_prefix::$text" "${text##*::}" "$line"
 		fi
 	done
 }
@@ -417,7 +414,7 @@ load_import_inventory() {
 		parse_json_match "$json_line"
 		normalize_ast_text "$match_text"
 		if [[ "$normalized_text" =~ crate[[:space:]]+sqlx[[:space:]]+as[[:space:]]+([^\;]+) ]]; then
-			append_normal_import "$match_file" sqlx "${BASH_REMATCH[1]}"
+			append_normal_import "$match_file" sqlx "${BASH_REMATCH[1]}" "$match_line"
 		else
 			parse_flat_use_match "$match_file" "$match_line" "$match_text"
 		fi
@@ -425,94 +422,89 @@ load_import_inventory() {
 	load_nested_use_inventory "$@"
 }
 
-load_call_candidates() {
-	local old_ifs="$IFS"
-	IFS='|'
-	local function_regex="${function_qualifiers[*]}"
-	local builder_regex="${builder_qualifiers[*]}"
-	IFS="$old_ifs"
-	local function_rule builder_rule function_output="" builder_output=""
-	function_rule=$'id: sqlx-function-call\nlanguage: rust\nseverity: error\nrule:\n  all:'
-	function_rule+=$'\n    - kind: call_expression\n    - regex: "^(?:'
-	function_rule+="$function_regex"
-	function_rule+=')(?:::\\s*<[^()]*>)?\\s*\\("'
-	scan_inline_rule function_output "$function_rule" "${source_files[@]}"
-	builder_rule=$'id: sqlx-builder-call\nlanguage: rust\nseverity: error\nrule:\n  all:'
-	builder_rule+=$'\n    - kind: call_expression\n    - regex: "^(?:'
-	builder_rule+="$builder_regex"
-	builder_rule+=')(?:::\\s*<[^()]*>)?::(?:new|with_arguments)\\s*\\("'
-	scan_inline_rule builder_output "$builder_rule" "${source_files[@]}"
-	local output="$function_output"
-	[[ -n "$output" && -n "$builder_output" ]] && output+=$'\n'
-	output+="$builder_output"
-	local json_line callee method builder
+file_has_resolved_crate() {
+	local file="$1"
+	local crate_name="$2"
+	local entry
+	[[ "${#resolved_crates[@]}" -gt 0 ]] || return 1
+	for entry in "${resolved_crates[@]}"; do
+		[[ "$entry" == "$file|$crate_name" ]] && return 0
+	done
+	return 1
+}
+
+record_structural_paths() {
+	local output="$1"
+	local kind="$2"
+	local json_line crate_name terminal api
 	while IFS= read -r json_line; do
 		[[ -z "$json_line" ]] && continue
 		parse_json_match "$json_line"
-		normalize_ast_text "$match_text"
-		callee=${normalized_text%%(*}
-		trim_value "$callee"
-		callee="$trimmed_value"
-		method=${callee##*::}
-		if [[ "$method" == "new" || "$method" == "with_arguments" ]]; then
-			builder=${callee%::"$method"}
-			builder=${builder%%::<*}
-			trim_value "$builder"
-			call_candidates+=("$match_file|$match_line|builder|$trimmed_value|$method")
-		else
-			callee=${callee%%::<*}
-			trim_value "$callee"
-			call_candidates+=("$match_file|$match_line|function|$trimmed_value|")
+		parse_json_meta "$json_line" CRATE
+		crate_name="$meta_text"
+		[[ "$crate_name" == ::* ]] && crate_name="::sqlx"
+		file_has_resolved_crate "$match_file" "$crate_name" || continue
+		if [[ ! "$match_text" =~ ([A-Za-z_][A-Za-z0-9_]*)$ ]]; then
+			echo "check-control-plane-sql-boundary: could not identify SQLx path" >&2
+			exit 2
 		fi
+		terminal=${BASH_REMATCH[1]}
+		if [[ "$kind" == macro ]]; then
+			api="sqlx::$terminal!"
+		else
+			api="sqlx::$terminal"
+		fi
+		violations+=("$match_file|$match_line|$api")
 	done <<<"$output"
 }
 
-load_macro_candidates() {
-	local old_ifs="$IFS"
-	IFS='|'
-	local macro_regex="${macro_qualifiers[*]}"
-	IFS="$old_ifs"
-	local rule=$'id: sqlx-macro\nlanguage: rust\nseverity: error\nrule:\n  all:'
-	rule+=$'\n    - kind: macro_invocation\n    - regex: "^(?:'
-	rule+="$macro_regex"
-	rule+=')\\s*!"'
-	local output=""
+load_surface_path_violations() {
+	local rule output="" name
+	rule=$'id: sqlx-surface-path\nlanguage: rust\nseverity: error\nrule:\n  all:'
+	rule+=$'\n    - any:'
+	for name in "${function_names[@]}" query_builder; do
+		rule+=$'\n        - pattern:\n            context: $CRATE::'
+		rule+="$name"
+		rule+=$'\n            selector: scoped_identifier'
+	done
+	rule+=$'\n    - not:\n        inside:\n          kind: scoped_identifier'
+	rule+=$'\n          stopBy: end\n    - not:\n        inside:'
+	rule+=$'\n          kind: macro_invocation\n          stopBy: end'
+	rule+=$'\n    - not:\n        inside:\n          kind: use_wildcard'
+	rule+=$'\n          stopBy: end'
+	rule+=$'\nconstraints:\n  CRATE:\n    any:\n      - kind: identifier'
+	rule+=$'\n      - pattern: ::sqlx'
 	scan_inline_rule output "$rule" "${source_files[@]}"
-	local json_line name
-	while IFS= read -r json_line; do
-		[[ -z "$json_line" ]] && continue
-		parse_json_match "$json_line"
-		name=${match_text%%!*}
-		trim_value "$name"
-		macro_candidates+=("$match_file|$match_line|$trimmed_value")
-	done <<<"$output"
+	record_structural_paths "$output" surface
 }
 
-load_reference_candidates() {
-	local old_ifs="$IFS"
-	IFS='|'
-	local function_regex="${function_qualifiers[*]}"
-	IFS="$old_ifs"
-	local rule=$'id: sqlx-function-reference\nlanguage: rust\nseverity: error'
-	rule+=$'\nrule:\n  all:\n    - any:'
-	rule+=$'\n        - kind: let_declaration\n        - kind: const_item'
-	rule+=$'\n        - kind: static_item\n    - regex: "(?s)=\\\\s*(?:'
-	rule+="$function_regex"
-	rule+=')(?:::\\s*<[^;]*>)?\\s*;$"'
-	local output=""
+load_builder_path_violations() {
+	local rule output=""
+	rule=$'id: sqlx-builder-path\nlanguage: rust\nseverity: error\nrule:\n  any:'
+	rule+=$'\n    - pattern:\n        context: $CRATE::query_builder::QueryBuilder'
+	rule+=$'\n        selector: scoped_identifier\n    - pattern:'
+	rule+=$'\n        context: $CRATE::QueryBuilder'
+	rule+=$'\n        selector: scoped_identifier'
+	rule+=$'\nconstraints:\n  CRATE:\n    any:\n      - kind: identifier'
+	rule+=$'\n      - pattern: ::sqlx'
 	scan_inline_rule output "$rule" "${source_files[@]}"
-	local json_line reference
-	while IFS= read -r json_line; do
-		[[ -z "$json_line" ]] && continue
-		parse_json_match "$json_line"
-		normalize_ast_text "$match_text"
-		reference=${normalized_text#*=}
-		reference=${reference%;}
-		trim_value "$reference"
-		reference=${trimmed_value%%::<*}
-		trim_value "$reference"
-		reference_candidates+=("$match_file|$match_line|$trimmed_value")
-	done <<<"$output"
+	record_structural_paths "$output" builder
+}
+
+load_macro_path_violations() {
+	local rule output="" name
+	rule=$'id: sqlx-macro-path\nlanguage: rust\nseverity: error\nrule:\n  all:'
+	rule+=$'\n    - any:'
+	for name in "${macro_names[@]}"; do
+		rule+=$'\n        - pattern:\n            context: $CRATE::'
+		rule+="$name"
+		rule+=$'\n            selector: scoped_identifier'
+	done
+	rule+=$'\n    - inside:\n        kind: macro_invocation\n        stopBy: end'
+	rule+=$'\nconstraints:\n  CRATE:\n    any:\n      - kind: identifier'
+	rule+=$'\n      - pattern: ::sqlx'
+	scan_inline_rule output "$rule" "${source_files[@]}"
+	record_structural_paths "$output" macro
 }
 
 load_type_relations() {
@@ -547,81 +539,20 @@ array_contains() {
 	return 1
 }
 
-add_qualifier() {
+set_import_api() {
 	local category="$1"
 	local canonical="$2"
-	local local_name="$3"
-	local qualifier seen
-	if [[ "$category" == item ]] && array_contains "$canonical" "${function_names[@]}"; then
-		seen=false
-		if [[ "${#function_qualifiers[@]}" -gt 0 ]]; then
-			for qualifier in "${function_qualifiers[@]}"; do
-				[[ "$qualifier" == "$local_name" ]] && seen=true
-			done
+	case "$category" in
+	item)
+		import_api="sqlx::$canonical"
+		if ! array_contains "$canonical" "${function_names[@]}"; then
+			import_api+="!"
 		fi
-		[[ "$seen" == true ]] || function_qualifiers+=("$local_name")
-	fi
-	if [[ "$category" == item ]] && array_contains "$canonical" "${macro_names[@]}"; then
-		seen=false
-		if [[ "${#macro_qualifiers[@]}" -gt 0 ]]; then
-			for qualifier in "${macro_qualifiers[@]}"; do
-				[[ "$qualifier" == "$local_name" ]] && seen=true
-			done
-		fi
-		[[ "$seen" == true ]] || macro_qualifiers+=("$local_name")
-	fi
-	if [[ "$category" == builder ]]; then
-		seen=false
-		if [[ "${#builder_qualifiers[@]}" -gt 0 ]]; then
-			for qualifier in "${builder_qualifiers[@]}"; do
-				[[ "$qualifier" == "$local_name" ]] && seen=true
-			done
-		fi
-		[[ "$seen" == true ]] || builder_qualifiers+=("$local_name")
-	fi
-}
-
-record_item_uses() {
-	local canonical="$1"
-	local local_name="$2"
-	local entry line kind name
-	if array_contains "$canonical" "${function_names[@]}"; then
-		if [[ "${#current_calls[@]}" -gt 0 ]]; then
-			for entry in "${current_calls[@]}"; do
-				IFS='|' read -r line kind name _ <<<"$entry"
-				[[ "$kind" == function ]] || continue
-				[[ "$name" == "$local_name" ]] || continue
-				violations+=("$current_file|$line|sqlx::$canonical")
-			done
-		fi
-		if [[ "${#current_references[@]}" -gt 0 ]]; then
-			for entry in "${current_references[@]}"; do
-				IFS='|' read -r line name <<<"$entry"
-				[[ "$name" == "$local_name" ]] || continue
-				violations+=("$current_file|$line|sqlx::$canonical")
-			done
-		fi
-	fi
-	if array_contains "$canonical" "${macro_names[@]}" &&
-		[[ "${#current_macros[@]}" -gt 0 ]]; then
-		for entry in "${current_macros[@]}"; do
-			IFS='|' read -r line name <<<"$entry"
-			[[ "$name" == "$local_name" ]] || continue
-			violations+=("$current_file|$line|sqlx::$canonical!")
-		done
-	fi
-}
-
-record_builder_uses() {
-	local local_name="$1"
-	local entry line kind name method
-	[[ "${#current_calls[@]}" -gt 0 ]] || return 0
-	for entry in "${current_calls[@]}"; do
-		IFS='|' read -r line kind name method <<<"$entry"
-		[[ "$kind" == builder ]] || continue
-		[[ "$name" == "$local_name" ]] || continue
-		violations+=("$current_file|$line|sqlx::QueryBuilder::$method")
-	done
+		;;
+	module) import_api='sqlx::query_builder' ;;
+	builder) import_api='sqlx::QueryBuilder' ;;
+	crate) import_api="" ;;
+	esac
 }
 
 add_resolved() {
@@ -636,8 +567,13 @@ add_resolved() {
 		done
 	fi
 	resolved_entries+=("$entry")
-	resolved_by_file+=("$current_file|$entry")
-	add_qualifier "$category" "$canonical" "$local_name"
+	if [[ "$category" == crate ]]; then
+		local crate_entry="$current_file|$local_name"
+		if [[ "${#resolved_crates[@]}" -eq 0 ]] ||
+			! array_contains "$crate_entry" "${resolved_crates[@]}"; then
+			resolved_crates+=("$crate_entry")
+		fi
+	fi
 	case "$category" in
 	crate)
 		for name in "${import_names[@]}"; do
@@ -660,8 +596,10 @@ process_import_relations() {
 	local entry source target line api
 	if [[ "${#current_imports[@]}" -gt 0 ]]; then
 		for entry in "${current_imports[@]}"; do
-			IFS='|' read -r source target <<<"$entry"
+			IFS='|' read -r source target line <<<"$entry"
 			[[ "$source" == "$local_name" ]] || continue
+			set_import_api "$category" "$canonical"
+			[[ -n "$import_api" ]] && violations+=("$current_file|$line|$import_api")
 			add_resolved "$category" "$canonical" "$target"
 		done
 	fi
@@ -706,9 +644,9 @@ load_current_relations() {
 	current_types=()
 	while [[ "$import_index" -lt "${#normal_imports[@]}" ]]; do
 		entry=${normal_imports[$import_index]}
-		IFS='|' read -r file first second <<<"$entry"
+		IFS='|' read -r file first second third <<<"$entry"
 		[[ "$file" == "$file_filter" ]] || break
-		current_imports+=("$first|$second")
+		current_imports+=("$first|$second|$third")
 		import_index=$((import_index + 1))
 	done
 	while [[ "$wildcard_index" -lt "${#wildcard_imports[@]}" ]]; do
@@ -727,35 +665,6 @@ load_current_relations() {
 	done
 }
 
-load_current_candidates() {
-	local file_filter="$1"
-	local entry file first second third fourth
-	current_calls=()
-	current_macros=()
-	current_references=()
-	while [[ "$call_index" -lt "${#call_candidates[@]}" ]]; do
-		entry=${call_candidates[$call_index]}
-		IFS='|' read -r file first second third fourth <<<"$entry"
-		[[ "$file" == "$file_filter" ]] || break
-		current_calls+=("$first|$second|$third|$fourth")
-		call_index=$((call_index + 1))
-	done
-	while [[ "$macro_index" -lt "${#macro_candidates[@]}" ]]; do
-		entry=${macro_candidates[$macro_index]}
-		IFS='|' read -r file first second <<<"$entry"
-		[[ "$file" == "$file_filter" ]] || break
-		current_macros+=("$first|$second")
-		macro_index=$((macro_index + 1))
-	done
-	while [[ "$reference_index" -lt "${#reference_candidates[@]}" ]]; do
-		entry=${reference_candidates[$reference_index]}
-		IFS='|' read -r file first second <<<"$entry"
-		[[ "$file" == "$file_filter" ]] || break
-		current_references+=("$first|$second")
-		reference_index=$((reference_index + 1))
-	done
-}
-
 resolve_file() {
 	current_file="$1"
 	load_current_relations "$current_file"
@@ -769,22 +678,6 @@ resolve_file() {
 		process_import_relations "$category" "$canonical" "$local_name"
 		process_type_relations "$category" "$local_name"
 		index=$((index + 1))
-	done
-}
-
-record_resolved_file() {
-	current_file="$1"
-	load_current_candidates "$current_file"
-	local entry file category canonical local_name
-	while [[ "$resolved_record_index" -lt "${#resolved_by_file[@]}" ]]; do
-		entry=${resolved_by_file[$resolved_record_index]}
-		IFS='|' read -r file category canonical local_name <<<"$entry"
-		[[ "$file" == "$current_file" ]] || break
-		case "$category" in
-		item) record_item_uses "$canonical" "$local_name" ;;
-		builder) record_builder_uses "$local_name" ;;
-		esac
-		resolved_record_index=$((resolved_record_index + 1))
 	done
 }
 
@@ -810,29 +703,9 @@ for source_file in "${source_files[@]}"; do
 	resolve_file "$source_file"
 done
 
-load_call_candidates
-load_macro_candidates
-load_reference_candidates
-if [[ "${#call_candidates[@]}" -gt 0 ]]; then
-	sort_inventory "${call_candidates[@]}"
-	call_candidates=("${sorted_inventory[@]}")
-fi
-if [[ "${#macro_candidates[@]}" -gt 0 ]]; then
-	sort_inventory "${macro_candidates[@]}"
-	macro_candidates=("${sorted_inventory[@]}")
-fi
-if [[ "${#reference_candidates[@]}" -gt 0 ]]; then
-	sort_inventory "${reference_candidates[@]}"
-	reference_candidates=("${sorted_inventory[@]}")
-fi
-call_index=0
-macro_index=0
-reference_index=0
-resolved_record_index=0
-
-for source_file in "${source_files[@]}"; do
-	record_resolved_file "$source_file"
-done
+load_surface_path_violations
+load_builder_path_violations
+load_macro_path_violations
 
 if [[ "${#violations[@]}" -gt 0 ]]; then
 	sorted_violations=$(printf '%s\n' "${violations[@]}" | sort -t '|' -k1,1 -k2,2n -k3,3 -u)

@@ -127,7 +127,7 @@ fn builders() {
 }
 RUST
 expect_violations builders "$violations/builders" 4 \
-	'sqlx::QueryBuilder::new' 'sqlx::QueryBuilder::with_arguments'
+	'sqlx::QueryBuilder'
 
 mkdir -p "$violations/root_paths"
 cat >"$violations/root_paths/forbidden.rs" <<'RUST'
@@ -141,7 +141,7 @@ fn root_paths() {
 RUST
 expect_violations root_paths "$violations/root_paths" 5 \
 	'sqlx::query' 'sqlx::query_scalar_with' 'sqlx::query_as_unchecked!' \
-	'sqlx::QueryBuilder::new' 'sqlx::QueryBuilder::with_arguments'
+	'sqlx::QueryBuilder'
 
 mkdir -p "$violations/imports"
 cat >"$violations/imports/simple.rs" <<'RUST'
@@ -162,7 +162,7 @@ fn grouped_imports() {
 RUST
 expect_violations imports "$violations/imports" 4 \
 	'sqlx::query' 'sqlx::query_as' 'sqlx::query_scalar_unchecked!' \
-	'sqlx::QueryBuilder::new'
+	'sqlx::QueryBuilder'
 
 mkdir -p "$violations/item_aliases"
 cat >"$violations/item_aliases/simple.rs" <<'RUST'
@@ -189,7 +189,7 @@ fn grouped_aliases() {
 RUST
 expect_violations item_aliases "$violations/item_aliases" 5 \
 	'sqlx::query' 'sqlx::query_as_with' 'sqlx::query_unchecked!' \
-	'sqlx::query_file_scalar_unchecked!' 'sqlx::QueryBuilder::with_arguments'
+	'sqlx::query_file_scalar_unchecked!' 'sqlx::QueryBuilder'
 
 mkdir -p "$violations/crate_aliases"
 cat >"$violations/crate_aliases/simple.rs" <<'RUST'
@@ -221,8 +221,8 @@ fn extern_crate_alias() {
 RUST
 expect_violations crate_aliases "$violations/crate_aliases" 9 \
 	'sqlx::query_with' 'sqlx::query_unchecked!' \
-	'sqlx::QueryBuilder::with_arguments' 'sqlx::query_scalar' \
-	'sqlx::query_as_unchecked!' 'sqlx::QueryBuilder::new' \
+	'sqlx::QueryBuilder' 'sqlx::query_scalar' \
+	'sqlx::query_as_unchecked!' \
 	'sqlx::query_as_with' 'sqlx::query_file_unchecked!'
 
 mkdir -p "$violations/visibility"
@@ -317,9 +317,9 @@ fn raw_module_alias() {
     let _ = r#type::QueryBuilder::<Sqlite>::with_arguments("SELECT 1", args());
 }
 RUST
-expect_violations raw_aliases "$violations/raw_aliases" 6 \
+expect_violations raw_aliases "$violations/raw_aliases" 5 \
 	'sqlx::query' 'sqlx::query_unchecked!' \
-	'sqlx::QueryBuilder::new' 'sqlx::QueryBuilder::with_arguments'
+	'sqlx::QueryBuilder'
 
 mkdir -p "$violations/query_builder_paths"
 cat >"$violations/query_builder_paths/direct.rs" <<'RUST'
@@ -389,8 +389,8 @@ fn item_alias() {
     let _ = DbBuilder::<Sqlite>::with_arguments("SELECT 1", args());
 }
 RUST
-expect_violations query_builder_paths "$violations/query_builder_paths" 18 \
-	'sqlx::QueryBuilder::new' 'sqlx::QueryBuilder::with_arguments'
+expect_violations query_builder_paths "$violations/query_builder_paths" 12 \
+	'sqlx::query_builder' 'sqlx::QueryBuilder'
 
 mkdir -p "$violations/reviewer_forms"
 cat >"$violations/reviewer_forms/crate_wildcard.rs" <<'RUST'
@@ -430,9 +430,9 @@ fn builder_type_alias() {
     let _ = DbBuilder::new("SELECT 1");
 }
 RUST
-expect_violations reviewer_forms "$violations/reviewer_forms" 6 \
+expect_violations reviewer_forms "$violations/reviewer_forms" 7 \
 	'sqlx::*' 'sqlx::query_builder::*' 'sqlx::query' \
-	'sqlx::QueryBuilder' 'sqlx::QueryBuilder::new'
+	'sqlx::QueryBuilder'
 
 mkdir -p "$violations/chained_aliases"
 cat >"$violations/chained_aliases/crate_to_item.rs" <<'RUST'
@@ -508,9 +508,9 @@ fn chained_module_wildcard() {
     let _ = QueryBuilder::<Sqlite>::new("SELECT 1");
 }
 RUST
-expect_violations chained_aliases "$violations/chained_aliases" 8 \
+expect_violations chained_aliases "$violations/chained_aliases" 17 \
 	'sqlx::query' 'sqlx::query_as' 'sqlx::query_scalar' \
-	'sqlx::QueryBuilder::new' 'sqlx::QueryBuilder::with_arguments' \
+	'sqlx::query_builder' 'sqlx::QueryBuilder' \
 	'sqlx::*' 'sqlx::query_builder::*'
 
 mkdir -p "$violations/function_references"
@@ -613,9 +613,8 @@ fn raw_item_builder_alias() {
     let _ = RawBuilder::with_arguments("SELECT 1", args());
 }
 RUST
-expect_violations builder_type_aliases "$violations/builder_type_aliases" 17 \
-	'sqlx::QueryBuilder' 'sqlx::QueryBuilder::new' \
-	'sqlx::QueryBuilder::with_arguments'
+expect_violations builder_type_aliases "$violations/builder_type_aliases" 13 \
+	'sqlx::query_builder' 'sqlx::QueryBuilder'
 
 mkdir -p "$violations/nested_reviewer_forms"
 cat >"$violations/nested_reviewer_forms/aliased_builder.rs" <<'RUST'
@@ -647,7 +646,7 @@ fn nested_module_self() {
 }
 RUST
 expect_violations nested_reviewer_forms "$violations/nested_reviewer_forms" 4 \
-	'sqlx::QueryBuilder::new' 'sqlx::QueryBuilder::with_arguments' \
+	'sqlx::QueryBuilder' \
 	'sqlx::query_builder::*'
 
 mkdir -p "$violations/nested_recursive"
@@ -722,10 +721,124 @@ fn nested_alias_wildcard() {
     let _ = QueryBuilder::<Sqlite>::new("SELECT 1");
 }
 RUST
-expect_violations nested_recursive "$violations/nested_recursive" 10 \
+expect_violations nested_recursive "$violations/nested_recursive" 14 \
 	'sqlx::query' 'sqlx::query_as' 'sqlx::query_scalar' \
-	'sqlx::QueryBuilder::new' 'sqlx::QueryBuilder::with_arguments' \
+	'sqlx::query_builder' 'sqlx::QueryBuilder' \
 	'sqlx::query_builder::*'
+
+mkdir -p "$violations/complex_type_paths"
+cat >"$violations/complex_type_paths/direct.rs" <<'RUST'
+fn direct_complex_type_paths() {
+    let _ = sqlx::query_as::<sqlx::Sqlite, (i64,)>("SELECT 1");
+    let _ = ::sqlx::query_as::<sqlx::Sqlite, Option<(i64, String)>>("SELECT 1");
+    let _ = sqlx::query_as_with::<
+        sqlx::Sqlite,
+        ([u8; 4], Option<(i64,)>),
+        _,
+    >("SELECT 1", args());
+    let _ = sqlx::query_scalar_with::<
+        sqlx::Sqlite,
+        [u8; { 2 + 2 }],
+        _,
+    >("SELECT 1", args());
+}
+RUST
+cat >"$violations/complex_type_paths/imported.rs" <<'RUST'
+use sqlx::query_as as load;
+use sqlx::{query_as_with as load_with};
+
+fn imported_complex_type_paths() {
+    let _ = load::<sqlx::Sqlite, (i64,)>("SELECT 1");
+    let _ = load_with::<sqlx::Sqlite, Option<(i64, String)>, _>("SELECT 1", args());
+}
+RUST
+expect_violations complex_type_paths "$violations/complex_type_paths" 6 \
+	'sqlx::query_as' 'sqlx::query_as_with' 'sqlx::query_scalar_with'
+
+mkdir -p "$violations/trivia_paths"
+cat >"$violations/trivia_paths/direct.rs" <<'RUST'
+fn direct_trivia_paths() {
+    let _ = sqlx /* crate */ :: /* item */ query("SELECT 1");
+    let _ = :: /* root */ sqlx /* crate */ :: /* item */ query_as::<
+        sqlx::Sqlite,
+        (i64,),
+    >("SELECT 1");
+    let _ = sqlx /* crate */ :: query_builder /* module */ ::
+        QueryBuilder::<sqlx::Sqlite>::new("SELECT 1");
+    let _ = :: /* root */ sqlx /* crate */ :: /* item */ QueryBuilder::<
+        sqlx::Sqlite,
+    >::with_arguments("SELECT 1", args());
+}
+RUST
+cat >"$violations/trivia_paths/crate_alias.rs" <<'RUST'
+use sqlx as db;
+
+fn crate_alias_trivia_paths() {
+    let _ = db /* crate */ :: /* item */ query_scalar::<sqlx::Sqlite, i64>("SELECT 1");
+    let _ = db /* crate */ :: query_builder /* module */ ::
+        QueryBuilder::<sqlx::Sqlite>::with_arguments("SELECT 1", args());
+    let _ = db /* crate */ :: /* item */ QueryBuilder::<sqlx::Sqlite>::new("SELECT 1");
+}
+RUST
+expect_violations trivia_paths "$violations/trivia_paths" 7 \
+	'sqlx::query' 'sqlx::query_as' 'sqlx::query_scalar' \
+	'sqlx::QueryBuilder'
+
+mkdir -p "$violations/reexport_surfaces"
+cat >"$violations/reexport_surfaces/facades.rs" <<'RUST'
+mod facade {
+    pub(crate) use sqlx::query as run;
+}
+
+mod builder_facade {
+    pub(crate) use sqlx::{query_builder::{QueryBuilder as Builder}};
+}
+
+mod outer {
+    pub(crate) mod inner {
+        pub(crate) use sqlx::query_as as load;
+    }
+}
+
+mod raw_facade {
+    pub(crate) use sqlx::query_scalar as r#type;
+}
+
+fn lexical_module_reexports() {
+    let _ = facade::run::<sqlx::Sqlite>("SELECT 1");
+    let _ = builder_facade::Builder::<sqlx::Sqlite>::new("SELECT 1");
+    let _ = outer::inner::load::<sqlx::Sqlite, (i64,)>("SELECT 1");
+    let _ = raw_facade::r#type::<sqlx::Sqlite, i64>("SELECT 1");
+}
+RUST
+cat >"$violations/reexport_surfaces/resolved_aliases.rs" <<'RUST'
+use sqlx as db;
+pub(crate) use db::query_with as execute;
+pub(crate) use db::query_builder as builders;
+
+use sqlx as nested_db;
+pub(crate) use nested_db::{
+    query_scalar as scalar,
+    query_builder::{QueryBuilder as Builder},
+};
+RUST
+expect_violations reexport_surfaces "$violations/reexport_surfaces" 8 \
+	'sqlx::query' 'sqlx::query_as' 'sqlx::query_scalar' 'sqlx::query_with' \
+	'sqlx::query_builder' 'sqlx::QueryBuilder'
+
+mkdir -p "$violations/reexport_cross_file"
+cat >"$violations/reexport_cross_file/imports.rs" <<'RUST'
+use sqlx as db;
+pub(crate) use db::{query as run, query_builder::{QueryBuilder as Builder}};
+RUST
+cat >"$violations/reexport_cross_file/other.rs" <<'RUST'
+fn reexported_names_do_not_leak() {
+    let _ = run::<other::Db, (i64,)>("not imported here");
+    let _ = Builder::<other::Db>::new("not imported here");
+}
+RUST
+expect_violations reexport_cross_file "$violations/reexport_cross_file" 2 \
+	'sqlx::query' 'sqlx::QueryBuilder'
 
 aggregate_output=""
 aggregate_status=0
@@ -762,12 +875,24 @@ fn names_do_not_leak_between_files() {
     let _ = NestedBuilder::new("not imported here");
 }
 RUST
-expect_violations cross_file "$work/cross_file" 1 'sqlx::QueryBuilder'
+expect_violations cross_file "$work/cross_file" 7 \
+	'sqlx::query' 'sqlx::query_as' 'sqlx::query_builder' 'sqlx::QueryBuilder'
 
 mkdir -p "$work/clean/tests"
 cat >"$work/clean/clean.rs" <<'RUST'
 use sqlx::{types::{Json}, Transaction};
 use other::{query as other_query, query_builder::{QueryBuilder as OtherNestedBuilder}};
+
+mod safe_sqlx_facade {
+    pub(crate) use sqlx::{types::{Json}, Sqlite, Transaction};
+}
+
+mod other_facade {
+    pub(crate) use other::{
+        query_as as run,
+        query_builder::{QueryBuilder as Builder},
+    };
+}
 
 fn near_misses() {
     let _ = query("not sqlx");
@@ -782,6 +907,8 @@ fn near_misses() {
     let _ = other_query("not sqlx");
     let _ = other_query("nested non-sqlx import");
     let _ = OtherNestedBuilder::new("nested non-sqlx import");
+    let _ = other_facade::run::<other::Db, (i64, Option<(String,)>)>("not sqlx");
+    let _ = other_facade::Builder::<other::Db>::new("not sqlx");
 }
 
 type OtherBuilder<'query> = other::QueryBuilder<'query, Sqlite>;
