@@ -12,6 +12,7 @@ pub struct PlanningRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PlanningContext {
     pub schema_version: u32,
     pub policy_document_id: Option<voom_core::PolicyDocumentId>,
