@@ -753,7 +753,7 @@ async fn assert_unauthorized_envelope(res: Response<Body>, command: &str) {
     assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
     assert_eq!(
         res.headers().get(WWW_AUTHENTICATE),
-        Some(&HeaderValue::from_static("Bearer"))
+        Some(&HeaderValue::from_static("Bearer realm=\"voom\""))
     );
     let json = response_json(res).await;
     assert_eq!(json["schema_version"], "0");

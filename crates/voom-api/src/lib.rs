@@ -307,9 +307,10 @@ fn err_response(
     };
     let mut response = (status, Json(env)).into_response();
     if status == StatusCode::UNAUTHORIZED {
-        response
-            .headers_mut()
-            .insert(WWW_AUTHENTICATE, HeaderValue::from_static("Bearer"));
+        response.headers_mut().insert(
+            WWW_AUTHENTICATE,
+            HeaderValue::from_static("Bearer realm=\"voom\""),
+        );
     }
     response
 }
