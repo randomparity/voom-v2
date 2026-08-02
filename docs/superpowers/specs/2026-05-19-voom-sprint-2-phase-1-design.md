@@ -253,9 +253,9 @@ pub enum OperationKind {
     BackUpFile,
     Remux,                  // remux/containerize
     TranscodeVideo,
+    TranscodeAudio,
     EditTracks,
     ExtractAudio,
-    TranscribeAudio,
     VerifyArtifact,
     CommitArtifact,
     DeleteArtifact,

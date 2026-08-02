@@ -53,7 +53,6 @@ pub fn render_default_payload_with_fan_out(
         | OperationKind::VerifyArtifact
         | OperationKind::ExtractAudio
         | OperationKind::TranscodeAudio
-        | OperationKind::TranscribeAudio
         | OperationKind::DeleteArtifact => json!({ "path": branch.path }),
         OperationKind::ScoreQuality => {
             let codec = branch.probe_codec.as_ref().ok_or_else(|| {

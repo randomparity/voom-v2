@@ -1135,8 +1135,8 @@ fn provider_specs() -> Vec<ProviderSpec> {
             name: "fake-transcoder",
             operations: &[
                 OperationKind::TranscodeVideo,
+                OperationKind::TranscodeAudio,
                 OperationKind::ExtractAudio,
-                OperationKind::TranscribeAudio,
             ],
         },
         ProviderSpec {

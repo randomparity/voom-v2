@@ -204,14 +204,24 @@ fn operation_coverage_reports_missing_operation() {
 }
 
 #[test]
-fn operation_coverage_allows_operation_without_typed_fake() {
-    let operations = OperationKind::ALL
+fn operation_coverage_reports_every_missing_operation() {
+    let manifest =
+        Manifest::parse_str(&manifest_with_operations(&[OperationKind::ProbeFile])).unwrap();
+    let err = validate_operation_coverage(&manifest).unwrap_err();
+    let expected = OperationKind::ALL
         .iter()
         .copied()
-        .filter(|operation| *operation != OperationKind::TranscribeAudio)
+        .filter(|operation| *operation != OperationKind::ProbeFile)
         .collect::<Vec<_>>();
-    let manifest = Manifest::parse_str(&manifest_with_operations(&operations)).unwrap();
-    validate_operation_coverage(&manifest).unwrap();
+    let reported = match &err {
+        ManifestError::MissingOperationCoverage { missing } => Some(missing),
+        _ => None,
+    };
+    assert_eq!(
+        reported,
+        Some(&expected),
+        "coverage validation did not report every missing operation: {err}"
+    );
 }
 
 fn operation_name(operation: OperationKind) -> String {

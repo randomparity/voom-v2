@@ -194,9 +194,9 @@ DAG. V1 uses a small fixed operation vocabulary:
 - back up file
 - remux/containerize
 - transcode video
+- transcode audio
 - edit tracks
 - extract audio
-- transcribe audio
 - verify artifact
 - commit artifact
 - delete artifact
