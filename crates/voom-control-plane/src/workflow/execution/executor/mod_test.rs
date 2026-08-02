@@ -626,7 +626,13 @@ async fn stopped_capacity_wait_leaves_restartable_durable_state() {
         .occupy_worker_capacity(&other, worker_id, OperationKind::HashFile)
         .await;
     let job_id = fixture.open_workflow_job().await;
-    let executor = fixture.executor_with_options(WorkflowExecutorOptions::for_tests());
+    let sync = CapacityDeferredTestSync {
+        observed: Arc::new(tokio::sync::Notify::new()),
+        resume: Arc::new(tokio::sync::Notify::new()),
+    };
+    let mut options = WorkflowExecutorOptions::for_tests();
+    options.capacity_deferred_sync = Some(sync.clone());
+    let executor = fixture.executor_with_options(options);
     let plan = fixture.plan.clone();
     let run = tokio::spawn(async move {
         executor
@@ -639,7 +645,10 @@ async fn stopped_capacity_wait_leaves_restartable_durable_state() {
             .await
     });
     let ticket_before = fixture.wait_for_workflow_ticket().await;
-    tokio::time::sleep(Duration::from_millis(30)).await;
+    tokio::time::timeout(Duration::from_secs(5), sync.observed.notified())
+        .await
+        .unwrap();
+    assert!(!run.is_finished());
 
     run.abort();
     assert!(run.await.unwrap_err().is_cancelled());
