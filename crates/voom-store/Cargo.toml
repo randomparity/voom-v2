@@ -18,7 +18,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 sqlx = { workspace = true, features = ["migrate", "time"] }
 time = { workspace = true, features = ["serde", "parsing"] }
-tokio = { workspace = true, features = ["sync"] }
+tokio = { workspace = true, features = ["sync", "time"] }
 tracing = { workspace = true }
 voom-core = { workspace = true }
 voom-events = { workspace = true }
@@ -39,7 +39,7 @@ test = []
 [dev-dependencies]
 sqlx = { workspace = true }
 tempfile = { workspace = true }
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 # Test-only voom-core surface: FrozenClock/ManualClock from
 # `clock_test_support` and FrozenRng/SeededRng from `rng_test_support`
 # are gated behind voom-core's `test` feature. Enabling it on

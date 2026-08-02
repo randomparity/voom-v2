@@ -25,6 +25,6 @@ sqlx = { workspace = true }
 tempfile = { workspace = true }
 voom-test-support = { workspace = true }
 time = { workspace = true }
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 tower = { version = "0.5.3", features = ["util"] }
 voom-store = { workspace = true, features = ["test"] }
