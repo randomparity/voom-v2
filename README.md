@@ -44,6 +44,7 @@ just smoke
 | `voom-ffmpeg-worker` | Local ffmpeg-backed video transcode and audio extraction/transcode worker. |
 | `voom-mkvtoolnix-worker` | Local mkvtoolnix-backed remux worker. |
 | `voom-verify-artifact-worker` | Local artifact verification worker. |
+| `voom-backup-worker` | Local artifact backup worker. |
 
 Artifact-domain crate:
 
