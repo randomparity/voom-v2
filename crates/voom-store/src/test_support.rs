@@ -48,7 +48,7 @@ pub fn sqlite_url_for(path: &Path) -> String {
 }
 
 /// Create a database without applying migrations so tests can seed partial or
-/// invalid schema states. Production callers must use [`crate::init`] instead.
+/// invalid schema states. Production callers must use [`crate::init()`] instead.
 ///
 /// # Errors
 ///
