@@ -47,34 +47,30 @@ fn view(id: u64, supports: &[OperationKind]) -> WorkerView {
 
 #[test]
 fn single_eligible_worker_succeeds() {
-    let s = LeastLoadedWorkerSelector;
     let workers = [view(1, &[OperationKind::ProbeFile])];
-    let pick = s.select(OperationKind::ProbeFile, &workers).unwrap();
+    let pick = select_least_loaded_worker(OperationKind::ProbeFile, &workers).unwrap();
     assert_eq!(pick, WorkerId(1));
 }
 
 #[test]
 fn zero_eligible_rejects_no_eligible_worker() {
-    let s = LeastLoadedWorkerSelector;
     let workers = [view(1, &[OperationKind::HashFile])];
-    let err = s.select(OperationKind::ProbeFile, &workers).unwrap_err();
+    let err = select_least_loaded_worker(OperationKind::ProbeFile, &workers).unwrap_err();
     assert_eq!(err.error_code(), voom_core::ErrorCode::NoEligibleWorker);
 }
 
 #[test]
 fn equal_load_uses_lowest_worker_id_regardless_of_input_order() {
-    let s = LeastLoadedWorkerSelector;
     let workers = [
         view(2, &[OperationKind::ProbeFile]),
         view(1, &[OperationKind::ProbeFile]),
     ];
-    let pick = s.select(OperationKind::ProbeFile, &workers).unwrap();
+    let pick = select_least_loaded_worker(OperationKind::ProbeFile, &workers).unwrap();
     assert_eq!(pick, WorkerId(1));
 }
 
 #[test]
 fn lowest_capacity_utilization_wins() {
-    let s = LeastLoadedWorkerSelector;
     let workers = [
         WorkerView {
             worker_id: WorkerId(1),
@@ -89,20 +85,19 @@ fn lowest_capacity_utilization_wins() {
             max_parallel: 8,
         },
     ];
-    let pick = s.select(OperationKind::ProbeFile, &workers).unwrap();
+    let pick = select_least_loaded_worker(OperationKind::ProbeFile, &workers).unwrap();
     assert_eq!(pick, WorkerId(2));
 }
 
 #[test]
 fn at_capacity_filtered_out() {
-    let s = LeastLoadedWorkerSelector;
     let workers = [WorkerView {
         worker_id: WorkerId(1),
         supports: vec![OperationKind::ProbeFile],
         active_leases: 4,
         max_parallel: 4,
     }];
-    let err = s.select(OperationKind::ProbeFile, &workers).unwrap_err();
+    let err = select_least_loaded_worker(OperationKind::ProbeFile, &workers).unwrap_err();
     assert_eq!(err.error_code(), voom_core::ErrorCode::NoEligibleWorker);
 }
 

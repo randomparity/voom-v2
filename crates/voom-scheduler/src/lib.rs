@@ -411,9 +411,9 @@ fn first_rejection_reason(rows: &[JsonValue]) -> ScoreReasonCode {
         .unwrap_or(ScoreReasonCode::NoEligibleCandidate)
 }
 
-/// Lightweight worker projection the supervisor passes to
-/// `WorkerSelector::select`. Pulls the few fields the selector
-/// needs without leaking the full `voom-store` worker row type.
+/// Lightweight worker projection used by [`select_least_loaded_worker`].
+/// Pulls the few fields selection needs without leaking the full
+/// `voom-store` worker row type.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkerView {
     pub worker_id: WorkerId,
@@ -422,54 +422,42 @@ pub struct WorkerView {
     pub max_parallel: u32,
 }
 
-pub trait WorkerSelector: Send + Sync + std::fmt::Debug {
-    /// Select one eligible worker for `operation` from `candidates`. Errors:
-    /// - `NoEligibleWorker` if zero candidates advertise the
-    ///   operation (or all are at capacity).
-    fn select(
-        &self,
-        operation: OperationKind,
-        candidates: &[WorkerView],
-    ) -> Result<WorkerId, VoomError>;
-}
-
 /// Select the eligible worker with the lowest capacity utilization.
 ///
 /// Equal utilization is resolved by worker id so independent schedulers make
 /// the same choice from the same candidate snapshot.
-#[derive(Debug, Default, Clone, Copy)]
-pub struct LeastLoadedWorkerSelector;
-
-impl WorkerSelector for LeastLoadedWorkerSelector {
-    fn select(
-        &self,
-        operation: OperationKind,
-        candidates: &[WorkerView],
-    ) -> Result<WorkerId, VoomError> {
-        let mut selected: Option<&WorkerView> = None;
-        for candidate in candidates {
-            if !candidate.supports.contains(&operation)
-                || candidate.active_leases >= candidate.max_parallel
-            {
-                continue;
-            }
-            let replace = match selected {
-                None => true,
-                Some(current) => less_loaded(candidate, current),
-            };
-            if replace {
-                selected = Some(candidate);
-            }
+///
+/// # Errors
+///
+/// Returns [`VoomError::NoEligibleWorker`] when no candidate both supports the
+/// operation and has spare capacity.
+pub fn select_least_loaded_worker(
+    operation: OperationKind,
+    candidates: &[WorkerView],
+) -> Result<WorkerId, VoomError> {
+    let mut selected: Option<&WorkerView> = None;
+    for candidate in candidates {
+        if !candidate.supports.contains(&operation)
+            || candidate.active_leases >= candidate.max_parallel
+        {
+            continue;
         }
-        selected.map_or_else(
-            || {
-                Err(VoomError::NoEligibleWorker(format!(
-                    "no worker advertises {operation:?} with spare capacity"
-                )))
-            },
-            |worker| Ok(worker.worker_id),
-        )
+        let replace = match selected {
+            None => true,
+            Some(current) => less_loaded(candidate, current),
+        };
+        if replace {
+            selected = Some(candidate);
+        }
     }
+    selected.map_or_else(
+        || {
+            Err(VoomError::NoEligibleWorker(format!(
+                "no worker advertises {operation:?} with spare capacity"
+            )))
+        },
+        |worker| Ok(worker.worker_id),
+    )
 }
 
 fn less_loaded(candidate: &WorkerView, current: &WorkerView) -> bool {

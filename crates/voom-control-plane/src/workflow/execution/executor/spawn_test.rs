@@ -322,9 +322,7 @@ fn a_decode_codec_no_live_device_probed_fails_only_its_own_ticket() {
         !all_candidates_at_capacity(&projected),
         "an empty slate is a capability gap, not a saturated device"
     );
-    let error = LeastLoadedWorkerSelector
-        .select(OperationKind::TranscodeVideo, &projected)
-        .unwrap_err();
+    let error = select_least_loaded_worker(OperationKind::TranscodeVideo, &projected).unwrap_err();
 
     assert_eq!(
         selector_failure_class(&error).unwrap(),
@@ -409,9 +407,7 @@ fn equal_vaapi_load_selects_the_lowest_worker_id_and_its_own_device() {
         });
     }
 
-    let selected = LeastLoadedWorkerSelector
-        .select(OperationKind::TranscodeVideo, &workers)
-        .unwrap();
+    let selected = select_least_loaded_worker(OperationKind::TranscodeVideo, &workers).unwrap();
 
     assert_eq!(selected, WorkerId(4));
     assert_eq!(

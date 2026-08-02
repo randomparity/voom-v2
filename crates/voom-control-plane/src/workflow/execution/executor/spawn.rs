@@ -7,7 +7,7 @@ use std::collections::{HashMap, HashSet};
 
 use voom_core::OperationKind;
 use voom_core::{JobId, TicketId, TicketOperation, VideoEncoderBackend, VoomError, WorkerId};
-use voom_scheduler::{LeastLoadedWorkerSelector, WorkerSelector, WorkerView};
+use voom_scheduler::{WorkerView, select_least_loaded_worker};
 use voom_store::repo::execution::leases::{LeaseAcquireOutcome, NewLease};
 use voom_store::repo::execution::tickets::{Ticket, TicketState};
 use voom_store::repo::execution::workers::WorkerOperationCandidate;
@@ -67,8 +67,7 @@ impl WorkflowExecutor {
         if candidates.is_empty() && !unavailable_tokens.is_empty() {
             return Ok(SpawnOutcome::AcceleratorUnavailable(unavailable_tokens));
         }
-        let selector = LeastLoadedWorkerSelector;
-        let worker_id = match selector.select(workflow_payload.operation, &candidates) {
+        let worker_id = match select_least_loaded_worker(workflow_payload.operation, &candidates) {
             Ok(worker_id) => worker_id,
             Err(source) => {
                 if matches!(source, VoomError::NoEligibleWorker(_))

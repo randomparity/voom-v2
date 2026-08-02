@@ -53,9 +53,7 @@ pub enum FailureClass {
     // Sprint 2 Phase 2 — supervisor-introduced classes. A worker that
     // keeps heartbeating but stops emitting progress for the lease's
     // progress_idle_deadline is `ProgressTimeout` (distinct from
-    // `WorkerTimeout`, which fires on missed heartbeats). A dispatch
-    // for which the `WorkerSelector` finds more than one eligible
-    // worker and no override is set is `AmbiguousWorkerSelection`.
+    // `WorkerTimeout`, which fires on missed heartbeats).
     ProgressTimeout,
     AmbiguousWorkerSelection,
 }
