@@ -1,6 +1,11 @@
 # Sprint 2 Phase 6 Fake Providers And Conformance Foundation Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **Status: Archived historical plan. Do not execute.**
+>
+> This records completed preimplementation work and may contain superseded paths or types.
+> Use the current source together with the
+> [main control-plane design](../../specs/voom-control-plane-design.md) and the Phase 6
+> fake-providers conformance closeout design.
 
 **Goal:** Implement all eleven fake-provider workers and promote them into manifest-driven conformance as the foundation for Phase 7's simulated scheduler workflow.
 
