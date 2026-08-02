@@ -1,6 +1,29 @@
 use super::*;
 
 #[test]
+fn default_planning_context_serializes_remaining_public_fields() {
+    let json = serde_json::to_value(PlanningContext::default()).unwrap();
+    let keys = json
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        keys,
+        [
+            "schema_version",
+            "policy_document_id",
+            "policy_version_id",
+            "policy_input_set_id",
+            "input_source_label",
+            "generated_at",
+        ]
+    );
+}
+
+#[test]
 fn execution_plan_serializes_public_shape() {
     let plan = ExecutionPlan {
         schema_version: 1,

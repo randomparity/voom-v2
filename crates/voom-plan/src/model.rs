@@ -19,7 +19,6 @@ pub struct PlanningContext {
     pub policy_input_set_id: Option<voom_core::PolicyInputSetId>,
     pub input_source_label: Option<String>,
     pub generated_at: Option<OffsetDateTime>,
-    pub feature_flags: BTreeMap<String, bool>,
 }
 
 impl Default for PlanningContext {
@@ -31,7 +30,6 @@ impl Default for PlanningContext {
             policy_input_set_id: None,
             input_source_label: None,
             generated_at: None,
-            feature_flags: BTreeMap::new(),
         }
     }
 }
