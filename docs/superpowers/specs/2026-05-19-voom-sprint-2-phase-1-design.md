@@ -427,9 +427,10 @@ pub type NdjsonStream = NdjsonReader<Pin<Box<dyn tokio::io::AsyncRead + Send>>>;
 #[async_trait::async_trait]
 pub trait ClientHandle: Send + Sync {
     async fn handshake(&self, offered: u32) -> Result<HandshakeResponse, ProtocolError>;
-    /// Caller supplies a fresh `idempotency_key` (ULID) per dispatch.
-    /// The same key on a retry MUST yield the same outcome via
-    /// worker-side dedupe.
+    /// `idempotency_key` is an opaque, non-empty identifier for one logical dispatch attempt.
+    /// A retry must reuse the same key and identical serialized request bytes so worker replay
+    /// deduplication returns the same outcome. A new logical attempt must use a distinct key.
+    /// The transport does not prescribe ULID or any other concrete syntax.
     async fn dispatch(
         &self,
         creds: &WorkerCredentials,
