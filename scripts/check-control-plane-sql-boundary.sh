@@ -63,6 +63,13 @@ resolved_by_file=()
 function_qualifiers=()
 macro_qualifiers=()
 builder_qualifiers=()
+use_list_nodes=()
+use_alias_nodes=()
+use_leaf_nodes=()
+resolved_use_lists=()
+current_use_list_file=""
+current_file_use_lists=()
+use_list_load_index=0
 
 scan_inline_rule() {
 	local output_var="$1"
@@ -104,6 +111,36 @@ parse_json_match() {
 	fi
 }
 
+parse_json_range() {
+	local json="$1"
+	if [[ "$json" =~ \"byteOffset\":\{\"start\":([0-9]+),\"end\":([0-9]+) ]]; then
+		match_start=${BASH_REMATCH[1]}
+		match_end=${BASH_REMATCH[2]}
+	else
+		echo "check-control-plane-sql-boundary: could not parse ast-grep range" >&2
+		exit 2
+	fi
+}
+
+parse_json_meta() {
+	local json="$1"
+	local name="$2"
+	local marker="\"$name\":"
+	local tail=${json#*"$marker"}
+	if [[ "$tail" == "$json" || ! "$tail" =~ \"text\":\"([^\"]*)\" ]]; then
+		echo "check-control-plane-sql-boundary: missing ast-grep metavariable $name" >&2
+		exit 2
+	fi
+	meta_text=${BASH_REMATCH[1]}
+	if [[ "$tail" =~ \"byteOffset\":\{\"start\":([0-9]+),\"end\":([0-9]+) ]]; then
+		meta_start=${BASH_REMATCH[1]}
+		meta_end=${BASH_REMATCH[2]}
+	else
+		echo "check-control-plane-sql-boundary: missing ast-grep metavariable range" >&2
+		exit 2
+	fi
+}
+
 normalize_ast_text() {
 	normalized_text=${1//\\n/ }
 	normalized_text=${normalized_text//\\t/ }
@@ -132,30 +169,7 @@ append_normal_import() {
 	normal_imports+=("$file|$normalized_source|$trimmed_value")
 }
 
-parse_use_entry() {
-	local file="$1"
-	local line="$2"
-	local prefix="$3"
-	local entry="$4"
-	trim_value "$entry"
-	entry="$trimmed_value"
-	if [[ "$entry" == "*" ]]; then
-		normalize_source "$prefix"
-		wildcard_imports+=("$file|$normalized_source|$line")
-	elif [[ "$entry" == *" as "* ]]; then
-		local source=${entry%% as *}
-		local target=${entry##* as }
-		[[ "$source" == "self" ]] && source="$prefix"
-		[[ "$source" != "$prefix" ]] && source="$prefix::$source"
-		append_normal_import "$file" "$source" "$target"
-	elif [[ "$entry" == "self" ]]; then
-		append_normal_import "$file" "$prefix" "${prefix##*::}"
-	else
-		append_normal_import "$file" "$prefix::$entry" "${entry##*::}"
-	fi
-}
-
-parse_use_match() {
+parse_flat_use_match() {
 	local file="$1"
 	local line="$2"
 	local text="$3"
@@ -164,18 +178,8 @@ parse_use_match() {
 	text=${text#*use }
 	trim_value "$text"
 	text="$trimmed_value"
-	if [[ "$text" == *"{"* && "$text" == *"}" ]]; then
-		local prefix=${text%::*}
-		local entries=${text#*\{}
-		entries=${entries%\}}
-		local entry
-		local old_ifs="$IFS"
-		IFS=','
-		for entry in $entries; do
-			parse_use_entry "$file" "$line" "$prefix" "$entry"
-		done
-		IFS="$old_ifs"
-	elif [[ "$text" == *"::*" ]]; then
+	[[ "$text" == *"{"* ]] && return 0
+	if [[ "$text" == *"::*" ]]; then
 		normalize_source "${text%::*}"
 		wildcard_imports+=("$file|$normalized_source|$line")
 	elif [[ "$text" == *" as "* ]]; then
@@ -183,6 +187,223 @@ parse_use_match() {
 	else
 		append_normal_import "$file" "$text" "${text##*::}"
 	fi
+}
+
+load_use_tree_nodes() {
+	local list_rule alias_rule leaf_rule output="" json_line
+	list_rule=$'id: nested-use-list\nlanguage: rust\nseverity: error\nrule:\n  pattern:'
+	list_rule+=$'\n    context: use $PATH::{$$$ITEMS};\n    selector: scoped_use_list'
+	scan_inline_rule output "$list_rule" "$@"
+	while IFS= read -r json_line; do
+		[[ -z "$json_line" ]] && continue
+		parse_json_match "$json_line"
+		parse_json_range "$json_line"
+		parse_json_meta "$json_line" PATH
+		use_list_nodes+=(
+			"$match_file|$match_start|$match_end|$meta_start|$meta_end|$meta_text|$match_line"
+		)
+	done <<<"$output"
+	alias_rule=$'id: nested-use-alias\nlanguage: rust\nseverity: error\nrule:\n  all:'
+	alias_rule+=$'\n    - pattern:\n        context: use $SOURCE as $ALIAS;'
+	alias_rule+=$'\n        selector: use_as_clause\n    - inside:'
+	alias_rule+=$'\n        kind: scoped_use_list\n        stopBy: end'
+	output=""
+	scan_inline_rule output "$alias_rule" "$@"
+	while IFS= read -r json_line; do
+		[[ -z "$json_line" ]] && continue
+		parse_json_match "$json_line"
+		parse_json_range "$json_line"
+		parse_json_meta "$json_line" SOURCE
+		local source="$meta_text"
+		parse_json_meta "$json_line" ALIAS
+		use_alias_nodes+=(
+			"$match_file|$match_start|$match_end|$match_line|$source|$meta_text"
+		)
+	done <<<"$output"
+	load_use_tree_leaves "$@"
+}
+
+load_use_tree_leaves() {
+	local leaf_rule output="" json_line
+	leaf_rule=$'id: nested-use-leaf\nlanguage: rust\nseverity: error\nrule:\n  all:\n    - any:'
+	leaf_rule+=$'\n        - kind: use_wildcard\n        - all:\n            - kind: self'
+	leaf_rule+=$'\n            - not:\n                inside:\n                  kind: use_as_clause'
+	leaf_rule+=$'\n        - all:\n            - kind: scoped_identifier\n            - not:'
+	leaf_rule+=$'\n                inside:\n                  kind: scoped_identifier'
+	leaf_rule+=$'\n            - not:\n                inside:\n                  kind: use_wildcard'
+	leaf_rule+=$'\n        - all:\n            - kind: identifier\n            - not:'
+	leaf_rule+=$'\n                inside:\n                  kind: scoped_identifier'
+	leaf_rule+=$'\n            - not:\n                inside:\n                  kind: use_as_clause'
+	leaf_rule+=$'\n            - not:\n                inside:\n                  kind: use_wildcard'
+	leaf_rule+=$'\n    - inside:\n        kind: scoped_use_list\n        stopBy: end'
+	scan_inline_rule output "$leaf_rule" "$@"
+	while IFS= read -r json_line; do
+		[[ -z "$json_line" ]] && continue
+		parse_json_match "$json_line"
+		parse_json_range "$json_line"
+		use_leaf_nodes+=("$match_file|$match_start|$match_end|$match_line|$match_text")
+	done <<<"$output"
+}
+
+sort_use_list_nodes() {
+	local entry
+	local sorted_nodes=()
+	local sorted_aliases=()
+	local sorted_leaves=()
+	if [[ "${#use_list_nodes[@]}" -gt 0 ]]; then
+		while IFS= read -r entry; do
+			[[ -n "$entry" ]] && sorted_nodes+=("$entry")
+		done < <(printf '%s\n' "${use_list_nodes[@]}" | sort -t '|' -k1,1 -k2,2n -k3,3nr)
+		use_list_nodes=("${sorted_nodes[@]}")
+	fi
+	if [[ "${#use_alias_nodes[@]}" -gt 0 ]]; then
+		while IFS= read -r entry; do
+			[[ -n "$entry" ]] && sorted_aliases+=("$entry")
+		done < <(printf '%s\n' "${use_alias_nodes[@]}" | sort -t '|' -k1,1 -k2,2n)
+		use_alias_nodes=("${sorted_aliases[@]}")
+	fi
+	if [[ "${#use_leaf_nodes[@]}" -gt 0 ]]; then
+		while IFS= read -r entry; do
+			[[ -n "$entry" ]] && sorted_leaves+=("$entry")
+		done < <(printf '%s\n' "${use_leaf_nodes[@]}" | sort -t '|' -k1,1 -k2,2n)
+		use_leaf_nodes=("${sorted_leaves[@]}")
+	fi
+}
+
+resolve_use_list_paths() {
+	local node file start end path_start path_end path line
+	local parent_file parent_start parent_end parent_path
+	local full_path parent_node index
+	[[ "${#use_list_nodes[@]}" -gt 0 ]] || return 0
+	for node in "${use_list_nodes[@]}"; do
+		IFS='|' read -r file start end path_start path_end path line <<<"$node"
+		parent_path=""
+		for ((index = ${#resolved_use_lists[@]} - 1; index >= 0; index--)); do
+			parent_node=${resolved_use_lists[$index]}
+			IFS='|' read -r parent_file parent_start parent_end _ _ _ _ \
+				parent_path_candidate <<<"$parent_node"
+			[[ "$parent_file" == "$file" ]] || break
+			[[ "$parent_start" -le "$start" && "$parent_end" -ge "$end" ]] || continue
+			parent_path="$parent_path_candidate"
+			break
+		done
+		full_path="$path"
+		[[ -n "$parent_path" ]] && full_path="$parent_path::$path"
+		resolved_use_lists+=(
+			"$file|$start|$end|$path_start|$path_end|$path|$line|$full_path"
+		)
+	done
+}
+
+reset_file_use_list_cache() {
+	current_use_list_file=""
+	current_file_use_lists=()
+	use_list_load_index=0
+}
+
+load_file_use_lists() {
+	local file="$1"
+	local node node_file
+	[[ "$current_use_list_file" == "$file" ]] && return 0
+	current_use_list_file="$file"
+	current_file_use_lists=()
+	[[ "${#resolved_use_lists[@]}" -gt 0 ]] || return 0
+	while [[ "$use_list_load_index" -lt "${#resolved_use_lists[@]}" ]]; do
+		node=${resolved_use_lists[$use_list_load_index]}
+		IFS='|' read -r node_file _ <<<"$node"
+		if [[ "$node_file" == "$file" ]]; then
+			current_file_use_lists+=("$node")
+		elif [[ "${#current_file_use_lists[@]}" -gt 0 ]]; then
+			break
+		fi
+		use_list_load_index=$((use_list_load_index + 1))
+	done
+	return 0
+}
+
+find_containing_use_list() {
+	local file="$1"
+	local start="$2"
+	local end="$3"
+	local node node_start node_end path_start path_end prefix index
+	containing_prefix=""
+	containing_path_start=""
+	containing_path_end=""
+	load_file_use_lists "$file"
+	[[ "${#current_file_use_lists[@]}" -gt 0 ]] || return 0
+	for ((index = ${#current_file_use_lists[@]} - 1; index >= 0; index--)); do
+		node=${current_file_use_lists[$index]}
+		IFS='|' read -r _ node_start node_end path_start path_end _ _ prefix \
+			<<<"$node"
+		[[ "$node_start" -le "$start" && "$node_end" -ge "$end" ]] || continue
+		containing_prefix="$prefix"
+		containing_path_start="$path_start"
+		containing_path_end="$path_end"
+		return 0
+	done
+}
+
+range_is_use_alias() {
+	local file="$1"
+	local start="$2"
+	local end="$3"
+	local node node_file alias_start alias_end
+	[[ "${#use_alias_nodes[@]}" -gt 0 ]] || return 1
+	for node in "${use_alias_nodes[@]}"; do
+		IFS='|' read -r node_file alias_start alias_end _ <<<"$node"
+		[[ "$node_file" == "$file" ]] || continue
+		[[ "$start" -ge "$alias_start" && "$end" -le "$alias_end" ]] && return 0
+	done
+	return 1
+}
+
+process_nested_use_aliases() {
+	local node file start end line source target
+	[[ "${#use_alias_nodes[@]}" -gt 0 ]] || return 0
+	reset_file_use_list_cache
+	for node in "${use_alias_nodes[@]}"; do
+		IFS='|' read -r file start end line source target <<<"$node"
+		find_containing_use_list "$file" "$start" "$end"
+		[[ -n "$containing_prefix" ]] || continue
+		if [[ "$source" == self ]]; then
+			source="$containing_prefix"
+		else
+			source="$containing_prefix::$source"
+		fi
+		append_normal_import "$file" "$source" "$target"
+	done
+}
+
+process_nested_use_leaves() {
+	local node file start end line text source
+	[[ "${#use_leaf_nodes[@]}" -gt 0 ]] || return 0
+	reset_file_use_list_cache
+	for node in "${use_leaf_nodes[@]}"; do
+		IFS='|' read -r file start end line text <<<"$node"
+		find_containing_use_list "$file" "$start" "$end"
+		[[ -n "$containing_prefix" ]] || continue
+		if [[ "$start" -ge "$containing_path_start" && "$end" -le "$containing_path_end" ]]; then
+			continue
+		fi
+		range_is_use_alias "$file" "$start" "$end" && continue
+		if [[ "$text" == *"*"* ]]; then
+			source="$containing_prefix"
+			[[ "$text" != "*" ]] && source="$containing_prefix::${text%::*}"
+			wildcard_imports+=("$file|$source|$line")
+		elif [[ "$text" == self ]]; then
+			append_normal_import "$file" "$containing_prefix" "${containing_prefix##*::}"
+		else
+			append_normal_import "$file" "$containing_prefix::$text" "${text##*::}"
+		fi
+	done
+}
+
+load_nested_use_inventory() {
+	load_use_tree_nodes "$@"
+	sort_use_list_nodes
+	resolve_use_list_paths
+	process_nested_use_aliases
+	process_nested_use_leaves
 }
 
 load_import_inventory() {
@@ -198,9 +419,10 @@ load_import_inventory() {
 		if [[ "$normalized_text" =~ crate[[:space:]]+sqlx[[:space:]]+as[[:space:]]+([^\;]+) ]]; then
 			append_normal_import "$match_file" sqlx "${BASH_REMATCH[1]}"
 		else
-			parse_use_match "$match_file" "$match_line" "$match_text"
+			parse_flat_use_match "$match_file" "$match_line" "$match_text"
 		fi
 	done <<<"$output"
+	load_nested_use_inventory "$@"
 }
 
 load_call_candidates() {

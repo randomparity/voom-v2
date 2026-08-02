@@ -617,6 +617,116 @@ expect_violations builder_type_aliases "$violations/builder_type_aliases" 17 \
 	'sqlx::QueryBuilder' 'sqlx::QueryBuilder::new' \
 	'sqlx::QueryBuilder::with_arguments'
 
+mkdir -p "$violations/nested_reviewer_forms"
+cat >"$violations/nested_reviewer_forms/aliased_builder.rs" <<'RUST'
+use sqlx::{query_builder::{QueryBuilder as DbBuilder}};
+
+fn nested_aliased_builder() {
+    let _ = DbBuilder::<Sqlite>::new("SELECT 1");
+}
+RUST
+cat >"$violations/nested_reviewer_forms/unaliased_builder.rs" <<'RUST'
+use sqlx::{query_builder::{QueryBuilder}};
+
+fn nested_unaliased_builder() {
+    let _ = QueryBuilder::<Sqlite>::with_arguments("SELECT 1", args());
+}
+RUST
+cat >"$violations/nested_reviewer_forms/wildcard.rs" <<'RUST'
+use sqlx::{query_builder::*};
+
+fn nested_wildcard() {
+    let _ = QueryBuilder::<Sqlite>::new("SELECT 1");
+}
+RUST
+cat >"$violations/nested_reviewer_forms/module_self.rs" <<'RUST'
+use sqlx::{query_builder::{self}};
+
+fn nested_module_self() {
+    let _ = query_builder::QueryBuilder::<Sqlite>::with_arguments("SELECT 1", args());
+}
+RUST
+expect_violations nested_reviewer_forms "$violations/nested_reviewer_forms" 4 \
+	'sqlx::QueryBuilder::new' 'sqlx::QueryBuilder::with_arguments' \
+	'sqlx::query_builder::*'
+
+mkdir -p "$violations/nested_recursive"
+cat >"$violations/nested_recursive/multiline_siblings.rs" <<'RUST'
+use sqlx::{
+    types::Json,
+    query_builder::{QueryBuilder as DbBuilder},
+    Transaction,
+};
+
+fn multiline_siblings() {
+    let _ = DbBuilder::<Sqlite>::new("SELECT 1");
+}
+RUST
+cat >"$violations/nested_recursive/crate_alias.rs" <<'RUST'
+use sqlx as db;
+use db::{query_builder::{QueryBuilder as Builder}};
+
+fn crate_alias_nested_tree() {
+    let _ = Builder::<Sqlite>::with_arguments("SELECT 1", args());
+}
+RUST
+cat >"$violations/nested_recursive/module_self_alias.rs" <<'RUST'
+use sqlx::{query_builder::{self as qb}};
+use qb::QueryBuilder as FirstBuilder;
+use FirstBuilder as SecondBuilder;
+
+fn nested_module_self_alias() {
+    let _ = SecondBuilder::<Sqlite>::new("SELECT 1");
+}
+RUST
+cat >"$violations/nested_recursive/raw_visibility.rs" <<'RUST'
+pub(crate) use sqlx::{
+    query_builder::{QueryBuilder as r#type},
+};
+
+fn nested_raw_visibility() {
+    let _ = r#type::<Sqlite>::with_arguments("SELECT 1", args());
+}
+RUST
+cat >"$violations/nested_recursive/multiple_leaves.rs" <<'RUST'
+use sqlx::{
+    query as first_query,
+    query_as as load,
+    query_scalar,
+    query_builder::{QueryBuilder as Builder},
+};
+
+fn nested_multiple_leaves() {
+    let _ = first_query::<Sqlite>("SELECT 1");
+    let _ = load::<_, Row>("SELECT 1");
+    let _ = query_scalar::<_, i64>("SELECT 1");
+    let _ = Builder::<Sqlite>::new("SELECT 1");
+}
+RUST
+cat >"$violations/nested_recursive/arbitrary_depth.rs" <<'RUST'
+use sqlx as first;
+use first::{self as second};
+use second::{query_builder::{self as third}};
+use third::{QueryBuilder as FirstBuilder};
+use FirstBuilder as DeepBuilder;
+
+fn arbitrary_declaration_depth() {
+    let _ = DeepBuilder::<Sqlite>::new("SELECT 1");
+}
+RUST
+cat >"$violations/nested_recursive/alias_wildcard.rs" <<'RUST'
+use sqlx as db;
+use db::{query_builder::*};
+
+fn nested_alias_wildcard() {
+    let _ = QueryBuilder::<Sqlite>::new("SELECT 1");
+}
+RUST
+expect_violations nested_recursive "$violations/nested_recursive" 10 \
+	'sqlx::query' 'sqlx::query_as' 'sqlx::query_scalar' \
+	'sqlx::QueryBuilder::new' 'sqlx::QueryBuilder::with_arguments' \
+	'sqlx::query_builder::*'
+
 aggregate_output=""
 aggregate_status=0
 run_guard "$violations" aggregate_output aggregate_status
@@ -637,6 +747,7 @@ use sqlx as db;
 use db as chained_db;
 use qb as chained_qb;
 type DbBuilder<'query> = qb::QueryBuilder<'query, Sqlite>;
+use sqlx::{query as nested_query, query_builder::{QueryBuilder as NestedBuilder}};
 RUST
 cat >"$work/cross_file/other.rs" <<'RUST'
 fn names_do_not_leak_between_files() {
@@ -647,12 +758,17 @@ fn names_do_not_leak_between_files() {
     let _ = chained_db::query("not imported here");
     let _ = chained_qb::QueryBuilder::new("not imported here");
     let _ = DbBuilder::new("not imported here");
+    let _ = nested_query("not imported here");
+    let _ = NestedBuilder::new("not imported here");
 }
 RUST
 expect_violations cross_file "$work/cross_file" 1 'sqlx::QueryBuilder'
 
 mkdir -p "$work/clean/tests"
 cat >"$work/clean/clean.rs" <<'RUST'
+use sqlx::{types::{Json}, Transaction};
+use other::{query as other_query, query_builder::{QueryBuilder as OtherNestedBuilder}};
+
 fn near_misses() {
     let _ = query("not sqlx");
     let _ = query_with("not sqlx", args());
@@ -664,6 +780,8 @@ fn near_misses() {
     let _ = sqlx_query("not sqlx");
     let other_query = other::query::<Sqlite>;
     let _ = other_query("not sqlx");
+    let _ = other_query("nested non-sqlx import");
+    let _ = OtherNestedBuilder::new("nested non-sqlx import");
 }
 
 type OtherBuilder<'query> = other::QueryBuilder<'query, Sqlite>;
