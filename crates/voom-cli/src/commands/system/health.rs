@@ -75,6 +75,7 @@ pub fn voom_error_hint(err: &VoomError) -> Option<String> {
         | ErrorCode::BadArgs
         | ErrorCode::DependencyCycle
         | ErrorCode::Conflict
+        | ErrorCode::Unauthorized
         // FailureClass-derived codes belong to lease/ticket flows the
         // health command never reaches.
         | ErrorCode::WorkerTimeout

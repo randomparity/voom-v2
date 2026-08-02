@@ -11,6 +11,8 @@ use crate::ControlPlane;
 use crate::cases::execution::remote_execution::RemoteRecoverReport;
 use crate::node_auth::verify_node_token;
 
+const REMOTE_NODE_AUTH_FAILURE: &str = "remote node authentication failed";
+
 impl ControlPlane {
     /// Run remote recovery primitives for stale nodes and expired leases.
     ///
@@ -44,16 +46,12 @@ impl ControlPlane {
             .nodes
             .auth_record_in_tx(tx, node_id)
             .await?
-            .ok_or_else(|| VoomError::NotFound(format!("remote node {node_id} not found")))?;
+            .ok_or_else(|| VoomError::Unauthorized(REMOTE_NODE_AUTH_FAILURE.to_owned()))?;
         if auth.kind != NodeKind::Remote {
-            return Err(VoomError::Conflict(format!(
-                "remote node {node_id} is not a remote node"
-            )));
+            return Err(VoomError::Unauthorized(REMOTE_NODE_AUTH_FAILURE.to_owned()));
         }
         if !verify_node_token(token.expose_secret(), &auth.auth_token_hash) {
-            return Err(VoomError::Conflict(format!(
-                "remote node {node_id} token mismatch"
-            )));
+            return Err(VoomError::Unauthorized(REMOTE_NODE_AUTH_FAILURE.to_owned()));
         }
         Ok(auth)
     }

@@ -3,7 +3,8 @@
 
 use axum::Json;
 use axum::extract::State;
-use axum::http::StatusCode;
+use axum::http::header::WWW_AUTHENTICATE;
+use axum::http::{HeaderValue, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::get;
 use serde::Serialize;
@@ -182,6 +183,7 @@ fn voom_error_response(err: &VoomError) -> axum::response::Response {
         | ErrorCode::BadArgs
         | ErrorCode::DependencyCycle
         | ErrorCode::Conflict
+        | ErrorCode::Unauthorized
         // FailureClass-derived codes don't surface from `connect` /
         // `probe_schema` — they belong to lease/ticket use cases that
         // are not on this response path yet. Classify as internal if
@@ -230,6 +232,7 @@ pub(crate) fn voom_route_error_response(
     let status = match err.error_code() {
         ErrorCode::NotFound => StatusCode::NOT_FOUND,
         ErrorCode::Conflict => StatusCode::CONFLICT,
+        ErrorCode::Unauthorized => StatusCode::UNAUTHORIZED,
         // On execution routes `ConfigInvalid` is a bad-argument signal (400),
         // unlike the health path where it is the foreign-database guard (503).
         ErrorCode::ConfigInvalid | ErrorCode::BadArgs => StatusCode::BAD_REQUEST,
@@ -243,6 +246,16 @@ pub(crate) fn voom_route_error_response(
         _ => StatusCode::INTERNAL_SERVER_ERROR,
     };
     err_response(status, command, err.code(), err.to_string(), None)
+}
+
+pub(crate) fn unauthorized_response(command: &'static str) -> axum::response::Response {
+    err_response(
+        StatusCode::UNAUTHORIZED,
+        command,
+        ErrorCode::Unauthorized.as_str(),
+        "unauthorized: remote node authentication failed".to_owned(),
+        None,
+    )
 }
 
 pub(crate) fn bad_args_response(
@@ -292,5 +305,11 @@ fn err_response(
             hint,
         }),
     };
-    (status, Json(env)).into_response()
+    let mut response = (status, Json(env)).into_response();
+    if status == StatusCode::UNAUTHORIZED {
+        response
+            .headers_mut()
+            .insert(WWW_AUTHENTICATE, HeaderValue::from_static("Bearer"));
+    }
+    response
 }

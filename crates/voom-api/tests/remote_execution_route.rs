@@ -4,7 +4,8 @@
 )]
 
 use axum::body::Body;
-use axum::http::{Request, Response, StatusCode};
+use axum::http::header::{AUTHORIZATION, WWW_AUTHENTICATE};
+use axum::http::{HeaderValue, Request, Response, StatusCode};
 use http_body_util::BodyExt;
 use secrecy::ExposeSecret;
 use serde_json::{Value, json};
@@ -50,18 +51,31 @@ impl ApiFixture {
         token: &str,
         body: Value,
     ) -> Response<Body> {
-        self.app
-            .clone()
-            .oneshot(
-                Request::post(path)
-                    .header("content-type", "application/json")
-                    .header("authorization", format!("Bearer {token}"))
-                    .header("x-voom-idempotency-key", idempotency_key)
-                    .body(Body::from(body.to_string()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap()
+        self.post_json_with_authorization(
+            path,
+            idempotency_key,
+            Some(HeaderValue::from_str(&format!("Bearer {token}")).unwrap()),
+            body,
+        )
+        .await
+    }
+
+    async fn post_json_with_authorization(
+        &self,
+        path: &str,
+        idempotency_key: &str,
+        authorization: Option<HeaderValue>,
+        body: Value,
+    ) -> Response<Body> {
+        let mut request = Request::post(path)
+            .header("content-type", "application/json")
+            .header("x-voom-idempotency-key", idempotency_key)
+            .body(Body::from(body.to_string()))
+            .unwrap();
+        if let Some(authorization) = authorization {
+            request.headers_mut().insert(AUTHORIZATION, authorization);
+        }
+        self.app.clone().oneshot(request).await.unwrap()
     }
 
     async fn post_raw(&self, path: &str, idempotency_key: &str, body: &str) -> Response<Body> {
@@ -136,7 +150,7 @@ impl ApiFixture {
 }
 
 #[tokio::test]
-async fn acquire_requires_bearer_token_and_idempotency_key() {
+async fn acquire_requires_idempotency_key() {
     let fixture = api_fixture().await;
 
     let res = fixture
@@ -145,6 +159,7 @@ async fn acquire_requires_bearer_token_and_idempotency_key() {
         .oneshot(
             Request::post("/v1/execution/lease/acquire")
                 .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {}", fixture.token))
                 .body(Body::from(r#"{"node_id":1,"worker_id":1}"#))
                 .unwrap(),
         )
@@ -155,6 +170,74 @@ async fn acquire_requires_bearer_token_and_idempotency_key() {
     let json = response_json(res).await;
     assert_eq!(json["status"], "error");
     assert_eq!(json["error"]["code"], "BAD_ARGS");
+}
+
+#[tokio::test]
+async fn execution_routes_use_one_unauthorized_bearer_response() {
+    let fixture = api_fixture().await;
+    let routes = [
+        (
+            "/v1/execution/lease/acquire".to_owned(),
+            "execution.acquire",
+            json!({"node_id": fixture.node_id.0, "worker_id": fixture.worker_id.0}),
+        ),
+        (
+            format!("/v1/execution/node/{}/heartbeat", fixture.node_id.0),
+            "execution.node_heartbeat",
+            json!({}),
+        ),
+        (
+            "/v1/execution/lease/1/heartbeat".to_owned(),
+            "execution.lease_heartbeat",
+            json!({"node_id": fixture.node_id.0, "worker_id": fixture.worker_id.0}),
+        ),
+        (
+            "/v1/execution/lease/1/complete".to_owned(),
+            "execution.complete",
+            json!({
+                "node_id": fixture.node_id.0,
+                "worker_id": fixture.worker_id.0,
+                "result": {}
+            }),
+        ),
+        (
+            "/v1/execution/lease/1/fail".to_owned(),
+            "execution.fail",
+            json!({
+                "node_id": fixture.node_id.0,
+                "worker_id": fixture.worker_id.0,
+                "reason": "timed out",
+                "class": FailureClass::WorkerTimeout
+            }),
+        ),
+    ];
+    let authorization_cases = [
+        ("missing", None),
+        ("non-utf8", Some(HeaderValue::from_bytes(&[0xff]).unwrap())),
+        (
+            "wrong-scheme",
+            Some(HeaderValue::from_static("Basic token")),
+        ),
+        ("empty", Some(HeaderValue::from_static("Bearer "))),
+        (
+            "incorrect",
+            Some(HeaderValue::from_static("Bearer incorrect-token")),
+        ),
+    ];
+
+    for (authorization_name, authorization) in authorization_cases {
+        for (path, command, body) in &routes {
+            let response = fixture
+                .post_json_with_authorization(
+                    path,
+                    &format!("{authorization_name}-{command}"),
+                    authorization.clone(),
+                    body.clone(),
+                )
+                .await;
+            assert_unauthorized_envelope(response, command).await;
+        }
+    }
 }
 
 #[tokio::test]
@@ -596,4 +679,21 @@ async fn assert_bad_args_envelope(res: Response<Body>, command: &str) {
     assert_eq!(json["command"], command);
     assert_eq!(json["status"], "error");
     assert_eq!(json["error"]["code"], "BAD_ARGS");
+}
+
+async fn assert_unauthorized_envelope(res: Response<Body>, command: &str) {
+    assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        res.headers().get(WWW_AUTHENTICATE),
+        Some(&HeaderValue::from_static("Bearer"))
+    );
+    let json = response_json(res).await;
+    assert_eq!(json["schema_version"], "0");
+    assert_eq!(json["command"], command);
+    assert_eq!(json["status"], "error");
+    assert_eq!(json["error"]["code"], "UNAUTHORIZED");
+    assert_eq!(
+        json["error"]["message"],
+        "unauthorized: remote node authentication failed"
+    );
 }

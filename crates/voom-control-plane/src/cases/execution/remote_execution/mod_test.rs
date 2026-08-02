@@ -1042,6 +1042,49 @@ async fn remote_acquire_replays_unsupported_artifact_access_no_candidate_without
 }
 
 #[tokio::test]
+async fn remote_authentication_failures_share_unauthorized_error() {
+    let missing_node = remote_fixture(&[(OP, vec!["shared_mount"])], &[OP], &[]).await;
+    let mut missing_node_input = missing_node.acquire_input("missing-node", "hash-missing-node");
+    missing_node_input.node_id = NodeId(u64::MAX);
+    let missing_node_error = missing_node
+        .cp
+        .remote_acquire(missing_node_input)
+        .await
+        .unwrap_err();
+
+    let local_node = fixture_with_options(
+        NodeKind::Local,
+        WorkerKind::Remote,
+        &[(OP, vec!["shared_mount"])],
+        &[OP],
+        &[],
+    )
+    .await;
+    let local_node_error = local_node
+        .cp
+        .remote_acquire(local_node.acquire_input("local-node-auth", "hash-local-node-auth"))
+        .await
+        .unwrap_err();
+
+    let wrong_token = remote_fixture(&[(OP, vec!["shared_mount"])], &[OP], &[]).await;
+    let mut wrong_token_input = wrong_token.acquire_input("wrong-token", "hash-wrong-token");
+    wrong_token_input.token = secrecy::SecretString::from("incorrect-token");
+    let wrong_token_error = wrong_token
+        .cp
+        .remote_acquire(wrong_token_input)
+        .await
+        .unwrap_err();
+
+    for error in [&missing_node_error, &local_node_error, &wrong_token_error] {
+        assert_eq!(error.error_code(), ErrorCode::Unauthorized);
+        assert_eq!(
+            error.to_string(),
+            "unauthorized: remote node authentication failed"
+        );
+    }
+}
+
+#[tokio::test]
 async fn remote_acquire_requires_remote_node_and_worker_kind() {
     let local_node = fixture_with_options(
         NodeKind::Local,
@@ -1057,7 +1100,7 @@ async fn remote_acquire_requires_remote_node_and_worker_kind() {
         .remote_acquire(local_node.acquire_input("local-node", "hash-local-node"))
         .await
         .unwrap_err();
-    assert_eq!(err.error_code(), ErrorCode::Conflict);
+    assert_eq!(err.error_code(), ErrorCode::Unauthorized);
 
     let local_worker = fixture_with_options(
         NodeKind::Remote,

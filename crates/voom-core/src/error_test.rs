@@ -90,6 +90,13 @@ fn conflict_error_code_string() {
 }
 
 #[test]
+fn unauthorized_error_code_string() {
+    let e = VoomError::Unauthorized("remote node authentication failed".to_owned());
+    assert_eq!(e.code(), "UNAUTHORIZED");
+    assert_eq!(e.error_code(), ErrorCode::Unauthorized);
+}
+
+#[test]
 fn blocked_by_use_lease_error_code_string() {
     let e = VoomError::BlockedByUseLease("lease 17 owns scope".to_owned());
     assert_eq!(e.code(), "BLOCKED_BY_USE_LEASE");
@@ -186,6 +193,7 @@ fn every_error_code_has_a_wire_string() {
         ErrorCode::BadArgs,
         ErrorCode::DependencyCycle,
         ErrorCode::Conflict,
+        ErrorCode::Unauthorized,
         ErrorCode::BlockedByUseLease,
         ErrorCode::BlockedByPendingCommit,
         ErrorCode::BlockedByClosureGrew,

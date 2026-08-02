@@ -17,7 +17,9 @@ use voom_control_plane::execution::{
 };
 use voom_core::{ErrorCode, FailureClass, LeaseId, NodeId, WorkerId};
 
-use crate::{AppState, bad_args_response, ok_response, voom_route_error_response};
+use crate::{
+    AppState, bad_args_response, ok_response, unauthorized_response, voom_route_error_response,
+};
 
 const ACQUIRE_COMMAND: &str = "execution.acquire";
 const NODE_HEARTBEAT_COMMAND: &str = "execution.node_heartbeat";
@@ -91,7 +93,7 @@ async fn acquire(
     };
     let (token, idempotency_key) = match request_credentials(&headers) {
         Ok(credentials) => credentials,
-        Err(message) => return bad_args_response(ACQUIRE_COMMAND, message),
+        Err(error) => return credentials_error_response(ACQUIRE_COMMAND, error),
     };
     let body = match json_body(body) {
         Ok(body) => body,
@@ -133,7 +135,7 @@ async fn node_heartbeat(
     };
     let (token, idempotency_key) = match request_credentials(&headers) {
         Ok(credentials) => credentials,
-        Err(message) => return bad_args_response(NODE_HEARTBEAT_COMMAND, message),
+        Err(error) => return credentials_error_response(NODE_HEARTBEAT_COMMAND, error),
     };
     let node_id = match path_id(path) {
         Ok(id) => id,
@@ -178,7 +180,7 @@ async fn lease_heartbeat(
     };
     let (token, idempotency_key) = match request_credentials(&headers) {
         Ok(credentials) => credentials,
-        Err(message) => return bad_args_response(LEASE_HEARTBEAT_COMMAND, message),
+        Err(error) => return credentials_error_response(LEASE_HEARTBEAT_COMMAND, error),
     };
     let lease_id = match path_id(path) {
         Ok(id) => id,
@@ -226,7 +228,7 @@ async fn complete(
     };
     let (token, idempotency_key) = match request_credentials(&headers) {
         Ok(credentials) => credentials,
-        Err(message) => return bad_args_response(COMPLETE_COMMAND, message),
+        Err(error) => return credentials_error_response(COMPLETE_COMMAND, error),
     };
     let lease_id = match path_id(path) {
         Ok(id) => id,
@@ -274,7 +276,7 @@ async fn fail(
     };
     let (token, idempotency_key) = match request_credentials(&headers) {
         Ok(credentials) => credentials,
-        Err(message) => return bad_args_response(FAIL_COMMAND, message),
+        Err(error) => return credentials_error_response(FAIL_COMMAND, error),
     };
     let lease_id = match path_id(path) {
         Ok(id) => id,
@@ -317,10 +319,27 @@ fn configured_control_plane(state: AppState) -> Option<ControlPlane> {
     state.control_plane
 }
 
-fn request_credentials(headers: &HeaderMap) -> Result<(SecretString, String), String> {
-    let token = bearer(headers)?;
-    let key = idempotency_key(headers)?;
+enum RequestCredentialsError {
+    Unauthorized,
+    BadArgs(String),
+}
+
+fn request_credentials(
+    headers: &HeaderMap,
+) -> Result<(SecretString, String), RequestCredentialsError> {
+    let token = bearer(headers).map_err(|_| RequestCredentialsError::Unauthorized)?;
+    let key = idempotency_key(headers).map_err(RequestCredentialsError::BadArgs)?;
     Ok((token, key))
+}
+
+fn credentials_error_response(
+    command: &'static str,
+    error: RequestCredentialsError,
+) -> axum::response::Response {
+    match error {
+        RequestCredentialsError::Unauthorized => unauthorized_response(command),
+        RequestCredentialsError::BadArgs(message) => bad_args_response(command, message),
+    }
 }
 
 fn not_configured_response(command: &'static str) -> axum::response::Response {
