@@ -17,7 +17,8 @@ use time::Duration;
 
 use voom_control_plane::ControlPlane;
 use voom_control_plane::workers::RegisterWorkerInput;
-use voom_core::{SystemClock, TicketOperation, VoomError, WorkerKind};
+use voom_core::clock_test_support::ManualClock;
+use voom_core::{TicketOperation, VoomError, WorkerKind};
 use voom_store::repo::execution::leases::NewLease;
 use voom_store::repo::execution::tickets::{NewTicket, TicketState};
 use voom_store::test_support::T0;
@@ -31,7 +32,7 @@ async fn cp() -> (
     let url = format!("sqlite://{}", tmp.path().display());
     let _ = voom_store::init(&url).await.unwrap();
     let pool = voom_store::connect(&url).await.unwrap();
-    let cp = ControlPlane::open_with_pool(pool.clone(), Arc::new(SystemClock))
+    let cp = ControlPlane::open_with_pool(pool.clone(), Arc::new(ManualClock::new(T0)))
         .await
         .unwrap();
     (cp, pool, tmp)
@@ -65,9 +66,13 @@ async fn acquire_rejects_retired_worker_and_leaves_ticket_ready() {
     let promoted = cp.mark_ready_if_unblocked(ticket.id, T0).await.unwrap();
     assert_eq!(promoted.len(), 1);
 
-    cp.retire_worker(worker.id, worker.epoch, T0 + Duration::seconds(1))
+    let retired_at = T0 + Duration::seconds(1);
+    let retired = cp
+        .retire_worker(worker.id, worker.epoch, retired_at)
         .await
         .unwrap();
+    assert!(worker.registered_at < retired_at);
+    assert_eq!(retired.retired_at, Some(retired_at));
 
     let err = cp
         .leases()

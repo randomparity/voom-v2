@@ -1,8 +1,14 @@
 use super::*;
 
+use std::sync::{Arc, Mutex};
+
 use time::{Duration as TDuration, OffsetDateTime};
-use voom_core::{FailureClass, JobId, TicketId, TicketOperation, VoomError, WorkerId, WorkerKind};
-use voom_events::EventKind;
+use voom_core::clock_test_support::ManualClock;
+use voom_core::rng_test_support::FrozenRng;
+use voom_core::{
+    Clock, FailureClass, JobId, TicketId, TicketOperation, VoomError, WorkerId, WorkerKind,
+};
+use voom_events::{EventKind, SubjectType};
 use voom_store::repo::audit::events::{EventFilter, EventRepo, Page};
 use voom_store::repo::execution::accelerator_claims::{
     NewAcceleratorClaim, SqliteAcceleratorClaimRepo,
@@ -170,6 +176,26 @@ async fn ready_transcode_tickets(cp: &crate::ControlPlane, count: usize) -> Vec<
     tickets
 }
 
+async fn cp_at_t0() -> (
+    crate::ControlPlane,
+    Arc<ManualClock>,
+    voom_test_support::TempDatabase,
+) {
+    let tmp = voom_test_support::TempDatabase::new().unwrap();
+    let url = format!("sqlite://{}", tmp.path().display());
+    voom_store::init(&url).await.unwrap();
+    let pool = voom_store::connect(&url).await.unwrap();
+    let clock = Arc::new(ManualClock::new(T0));
+    let cp = crate::ControlPlane::open_with_pool_and_rng(
+        pool,
+        clock.clone(),
+        Arc::new(Mutex::new(FrozenRng::new(u32::MAX))),
+    )
+    .await
+    .unwrap();
+    (cp, clock, tmp)
+}
+
 fn claim_for(
     worker_id: WorkerId,
     pci_address: &str,
@@ -299,11 +325,11 @@ async fn vaapi_capacity_never_crosses_devices() {
 /// lease — a lease is released by completion or by TTL expiry, so a worker that only
 /// looked dead cannot have work pulled out from under it.
 ///
-/// Domain time is the explicit timestamp each call takes as `now`; the pool runs on
-/// real time, so nothing here pairs a paused tokio clock with `SqlitePool`.
+/// Control-plane-owned timestamps use a `ManualClock` starting at `T0`, while lifecycle
+/// calls take explicit domain times. The pool runs on real time, so this does not pause tokio.
 #[tokio::test]
 async fn a_retired_vaapi_owner_releases_its_device_to_a_replacement() {
-    let (cp, _tmp) = cp().await;
+    let (cp, clock, _tmp) = cp_at_t0().await;
     let operation = TicketOperation::new("transcode_video").unwrap();
     let tickets = ready_transcode_tickets(&cp, 2).await;
     let claims = SqliteAcceleratorClaimRepo::new(cp.pool_for_test().clone());
@@ -323,7 +349,14 @@ async fn a_retired_vaapi_owner_releases_its_device_to_a_replacement() {
     .await
     .unwrap();
 
-    cp.retire_worker(dead.id, dead.epoch, T0).await.unwrap();
+    clock.advance(TDuration::seconds(1));
+    let retired_at = clock.now();
+    let retired = cp
+        .retire_worker(dead.id, dead.epoch, retired_at)
+        .await
+        .unwrap();
+    assert!(dead.registered_at < retired_at);
+    assert_eq!(retired.retired_at, Some(retired_at));
 
     assert!(
         claims
@@ -334,6 +367,29 @@ async fn a_retired_vaapi_owner_releases_its_device_to_a_replacement() {
         "retiring the proven-dead owner must release its device claim"
     );
     let replacement = vaapi_worker(&cp, "vaapi-new", &operation, "0000:f4:00.0", 1).await;
+    assert!(retired_at <= replacement.registered_at);
+
+    let worker_events = cp
+        .events()
+        .list(
+            EventFilter {
+                subject_type: Some(SubjectType::Worker),
+                ..EventFilter::default()
+            },
+            Page {
+                limit: 20,
+                cursor: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(
+        worker_events
+            .items
+            .windows(2)
+            .all(|events| events[0].envelope.occurred_at <= events[1].envelope.occurred_at)
+    );
+
     let mut tx = cp.pool_for_test().begin().await.unwrap();
     claims
         .claim_in_tx(&mut tx, claim_for(replacement.id, "0000:f4:00.0", 5353, 1))

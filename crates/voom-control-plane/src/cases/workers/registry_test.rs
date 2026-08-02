@@ -250,18 +250,28 @@ async fn record_grant_emits_worker_grant_recorded() {
 
 #[tokio::test]
 async fn retire_worker_emits_worker_retired() {
-    let (cp, _tmp) = cp().await;
+    let (cp, _clock, _tmp) = cp_with_manual_clock(T0).await;
     let w = cp
         .register_worker(register_worker_input("alpha"))
         .await
         .unwrap();
-    cp.retire_worker(
-        w.id,
-        w.epoch,
-        OffsetDateTime::UNIX_EPOCH + time::Duration::seconds(1),
-    )
-    .await
-    .unwrap();
+    let retired_at = T0 + Duration::seconds(1);
+    let retired = cp.retire_worker(w.id, w.epoch, retired_at).await.unwrap();
+    assert!(w.registered_at < retired_at);
+    assert_eq!(retired.retired_at, Some(retired_at));
+
+    let worker_events = worker_events(&cp).await;
+    assert_eq!(worker_events.len(), 2);
+    assert_eq!(
+        worker_events[0].envelope.payload.kind(),
+        EventKind::WorkerRegistered
+    );
+    assert_eq!(
+        worker_events[1].envelope.payload.kind(),
+        EventKind::WorkerRetired
+    );
+    assert!(worker_events[0].envelope.occurred_at < worker_events[1].envelope.occurred_at);
+
     let page = cp
         .events()
         .list(
