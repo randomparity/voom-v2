@@ -48,7 +48,8 @@ test:
     VOOM_TEST_PREBUILT_WORKERS=1 cargo test --workspace --all-features
 
 doc:
-    RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --document-private-items
+    RUSTDOCFLAGS="-D warnings" cargo doc \
+        --workspace --all-features --no-deps --document-private-items
 
 audit:
     cargo audit --deny warnings
