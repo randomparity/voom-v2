@@ -56,7 +56,9 @@ violations=()
 normal_imports=()
 wildcard_imports=()
 type_relations=()
-resolved_crates=()
+module_nodes=()
+reserved_module_nodes=()
+reserved_module_scopes=()
 use_list_nodes=()
 use_alias_nodes=()
 use_leaf_nodes=()
@@ -152,6 +154,15 @@ normalize_source() {
 	while [[ "$normalized_source" == self::* ]]; do
 		normalized_source=${normalized_source#self::}
 	done
+	if [[ "$normalized_source" =~ ^((::|crate::|(super::)+)?(r#)?sqlx)(::.*)?$ ]]; then
+		local sqlx_root=${BASH_REMATCH[1]}
+		local suffix=${normalized_source#"$sqlx_root"}
+		local name
+		for name in "${import_names[@]}"; do
+			suffix=${suffix//::r#$name/::$name}
+		done
+		normalized_source="sqlx$suffix"
+	fi
 }
 
 append_normal_import() {
@@ -406,52 +417,156 @@ load_nested_use_inventory() {
 load_import_inventory() {
 	local import_rule=$'id: rust-import\nlanguage: rust\nseverity: error\nrule:\n  any:'
 	import_rule+=$'\n    - kind: use_declaration\n    - kind: extern_crate_declaration'
-	local output=""
+	import_rule+=$'\n---\nid: rust-module\nlanguage: rust\nseverity: error'
+	import_rule+=$'\nrule:\n  kind: mod_item'
+	import_rule+=$'\n---\nid: reserved-sqlx-module\nlanguage: rust\nseverity: error'
+	import_rule+=$'\nrule:\n  all:\n    - kind: mod_item\n    - has:'
+	import_rule+=$'\n        field: name\n        regex: ^(r#)?sqlx$'
+	local output="" import_output="" module_output="" reserved_output=""
 	scan_inline_rule output "$import_rule" "$@"
 	local json_line
 	while IFS= read -r json_line; do
 		[[ -z "$json_line" ]] && continue
+		if [[ "$json_line" == *'"ruleId":"reserved-sqlx-module"'* ]]; then
+			reserved_output+="$json_line"$'\n'
+		elif [[ "$json_line" == *'"ruleId":"rust-module"'* ]]; then
+			module_output+="$json_line"$'\n'
+		else
+			import_output+="$json_line"$'\n'
+		fi
+	done <<<"$output"
+	while IFS= read -r json_line; do
+		[[ -z "$json_line" ]] && continue
 		parse_json_match "$json_line"
 		normalize_ast_text "$match_text"
-		if [[ "$normalized_text" =~ crate[[:space:]]+sqlx[[:space:]]+as[[:space:]]+([^\;]+) ]]; then
-			append_normal_import "$match_file" sqlx "${BASH_REMATCH[1]}" "$match_line"
+		if [[ "$normalized_text" =~ crate[[:space:]]+(r#)?sqlx[[:space:]]+as[[:space:]]+([^\;]+) ]]; then
+			append_normal_import "$match_file" sqlx "${BASH_REMATCH[2]}" "$match_line"
 		else
 			parse_flat_use_match "$match_file" "$match_line" "$match_text"
 		fi
-	done <<<"$output"
+	done <<<"$import_output"
+	load_module_nodes "$module_output" "$reserved_output"
 	load_nested_use_inventory "$@"
 }
 
-file_has_resolved_crate() {
+load_module_nodes() {
+	local module_output="$1"
+	local reserved_output="$2"
+	local json_line
+	while IFS= read -r json_line; do
+		[[ -z "$json_line" ]] && continue
+		parse_json_match "$json_line"
+		parse_json_range "$json_line"
+		module_nodes+=("$match_file|$match_start|$match_end")
+	done <<<"$module_output"
+	while IFS= read -r json_line; do
+		[[ -z "$json_line" ]] && continue
+		parse_json_match "$json_line"
+		parse_json_range "$json_line"
+		reserved_module_nodes+=("$match_file|$match_start|$match_end|$match_line")
+		violations+=("$match_file|$match_line|sqlx module namespace")
+	done <<<"$reserved_output"
+	resolve_reserved_module_scopes
+}
+
+resolve_reserved_module_scopes() {
+	[[ "${#reserved_module_nodes[@]}" -gt 0 ]] || return 0
+	local reserved node file start end line node_file node_start node_end span
+	local parent_start parent_end parent_span
+	for reserved in "${reserved_module_nodes[@]}"; do
+		IFS='|' read -r file start end line <<<"$reserved"
+		parent_start=0
+		parent_end=-1
+		parent_span=-1
+		for node in "${module_nodes[@]}"; do
+			IFS='|' read -r node_file node_start node_end <<<"$node"
+			[[ "$node_file" == "$file" ]] || continue
+			[[ "$node_start" -le "$start" && "$node_end" -ge "$end" ]] || continue
+			[[ "$node_start" == "$start" && "$node_end" == "$end" ]] && continue
+			span=$((node_end - node_start))
+			[[ "$parent_span" -lt 0 || "$span" -lt "$parent_span" ]] || continue
+			parent_start="$node_start"
+			parent_end="$node_end"
+			parent_span="$span"
+		done
+		reserved_module_scopes+=("$file|$parent_start|$parent_end")
+	done
+}
+
+path_is_in_reserved_scope() {
 	local file="$1"
-	local crate_name="$2"
-	local entry
-	[[ "${#resolved_crates[@]}" -gt 0 ]] || return 1
-	for entry in "${resolved_crates[@]}"; do
-		[[ "$entry" == "$file|$crate_name" ]] && return 0
+	local start="$2"
+	local scope scope_file scope_start scope_end
+	[[ "${#reserved_module_scopes[@]}" -gt 0 ]] || return 1
+	for scope in "${reserved_module_scopes[@]}"; do
+		IFS='|' read -r scope_file scope_start scope_end <<<"$scope"
+		[[ "$scope_file" == "$file" && "$start" -ge "$scope_start" ]] || continue
+		[[ "$scope_end" -lt 0 || "$start" -le "$scope_end" ]] && return 0
 	done
 	return 1
+}
+
+strip_path_trivia() {
+	stripped_path="$1"
+	local before remainder
+	while [[ "$stripped_path" == *"/*"* ]]; do
+		before=${stripped_path%%"/*"*}
+		remainder=${stripped_path#*"/*"}
+		[[ "$remainder" == *"*/"* ]] || return 1
+		stripped_path="$before${remainder#*"*/"}"
+	done
+	stripped_path=${stripped_path//\\n/}
+	stripped_path=${stripped_path//\\t/}
+	stripped_path=${stripped_path//[[:space:]]/}
+}
+
+is_direct_sqlx_root() {
+	strip_path_trivia "$1" || return 1
+	[[ "$stripped_path" =~ ^(::|self::|crate::|(super::)+)?(r#)?sqlx$ ]]
+}
+
+normalize_identifier() {
+	normalized_identifier=${1#r#}
+}
+
+build_identifier_regex() {
+	identifier_regex='^(r#)?('
+	local separator="" name
+	for name in "$@"; do
+		identifier_regex+="$separator$name"
+		separator='|'
+	done
+	identifier_regex+=')$'
 }
 
 record_structural_paths() {
 	local output="$1"
 	local kind="$2"
-	local json_line crate_name terminal api
+	local json_line root terminal api
 	while IFS= read -r json_line; do
 		[[ -z "$json_line" ]] && continue
 		parse_json_match "$json_line"
-		parse_json_meta "$json_line" CRATE
-		crate_name="$meta_text"
-		[[ "$crate_name" == ::* ]] && crate_name="::sqlx"
-		file_has_resolved_crate "$match_file" "$crate_name" || continue
-		if [[ ! "$match_text" =~ ([A-Za-z_][A-Za-z0-9_]*)$ ]]; then
-			echo "check-control-plane-sql-boundary: could not identify SQLx path" >&2
-			exit 2
+		parse_json_range "$json_line"
+		parse_json_meta "$json_line" ROOT
+		root="$meta_text"
+		is_direct_sqlx_root "$root" || continue
+		if [[ "$root" != ::* ]] && path_is_in_reserved_scope "$match_file" "$match_start"; then
+			continue
 		fi
-		terminal=${BASH_REMATCH[1]}
+		parse_json_meta "$json_line" ITEM
+		normalize_identifier "$meta_text"
+		terminal="$normalized_identifier"
 		if [[ "$kind" == macro ]]; then
+			array_contains "$terminal" "${macro_names[@]}" || continue
 			api="sqlx::$terminal!"
+		elif [[ "$kind" == builder ]]; then
+			[[ "$terminal" == QueryBuilder ]] || continue
+			api='sqlx::QueryBuilder'
 		else
+			if ! array_contains "$terminal" "${function_names[@]}" &&
+				[[ "$terminal" != query_builder ]]; then
+				continue
+			fi
 			api="sqlx::$terminal"
 		fi
 		violations+=("$match_file|$match_line|$api")
@@ -459,21 +574,18 @@ record_structural_paths() {
 }
 
 load_surface_path_violations() {
-	local rule output="" name
+	local rule output=""
+	build_identifier_regex "${function_names[@]}" query_builder
 	rule=$'id: sqlx-surface-path\nlanguage: rust\nseverity: error\nrule:\n  all:'
-	rule+=$'\n    - any:'
-	for name in "${function_names[@]}" query_builder; do
-		rule+=$'\n        - pattern:\n            context: $CRATE::'
-		rule+="$name"
-		rule+=$'\n            selector: scoped_identifier'
-	done
+	rule+=$'\n    - pattern:\n        context: $ROOT::$ITEM'
+	rule+=$'\n        selector: scoped_identifier'
 	rule+=$'\n    - not:\n        inside:\n          kind: scoped_identifier'
 	rule+=$'\n          stopBy: end\n    - not:\n        inside:'
 	rule+=$'\n          kind: macro_invocation\n          stopBy: end'
 	rule+=$'\n    - not:\n        inside:\n          kind: use_wildcard'
 	rule+=$'\n          stopBy: end'
-	rule+=$'\nconstraints:\n  CRATE:\n    any:\n      - kind: identifier'
-	rule+=$'\n      - pattern: ::sqlx'
+	rule+=$'\nconstraints:\n  ITEM:\n    kind: identifier\n    regex: '
+	rule+="$identifier_regex"
 	scan_inline_rule output "$rule" "${source_files[@]}"
 	record_structural_paths "$output" surface
 }
@@ -481,30 +593,51 @@ load_surface_path_violations() {
 load_builder_path_violations() {
 	local rule output=""
 	rule=$'id: sqlx-builder-path\nlanguage: rust\nseverity: error\nrule:\n  any:'
-	rule+=$'\n    - pattern:\n        context: $CRATE::query_builder::QueryBuilder'
+	rule+=$'\n    - pattern:\n        context: $ROOT::query_builder::$ITEM'
 	rule+=$'\n        selector: scoped_identifier\n    - pattern:'
-	rule+=$'\n        context: $CRATE::QueryBuilder'
+	rule+=$'\n        context: $ROOT::r#query_builder::$ITEM'
+	rule+=$'\n        selector: scoped_identifier\n    - pattern:'
+	rule+=$'\n        context: $ROOT::$ITEM'
 	rule+=$'\n        selector: scoped_identifier'
-	rule+=$'\nconstraints:\n  CRATE:\n    any:\n      - kind: identifier'
-	rule+=$'\n      - pattern: ::sqlx'
+	rule+=$'\nconstraints:\n  ITEM:\n    kind: identifier'
+	rule+=$'\n    regex: ^(r#)?QueryBuilder$'
 	scan_inline_rule output "$rule" "${source_files[@]}"
 	record_structural_paths "$output" builder
 }
 
 load_macro_path_violations() {
-	local rule output="" name
+	local rule output="" structural_output="" token_output="" json_line
+	build_identifier_regex "${macro_names[@]}"
 	rule=$'id: sqlx-macro-path\nlanguage: rust\nseverity: error\nrule:\n  all:'
-	rule+=$'\n    - any:'
-	for name in "${macro_names[@]}"; do
-		rule+=$'\n        - pattern:\n            context: $CRATE::'
-		rule+="$name"
-		rule+=$'\n            selector: scoped_identifier'
-	done
+	rule+=$'\n    - pattern:\n        context: $ROOT::$ITEM'
+	rule+=$'\n        selector: scoped_identifier'
 	rule+=$'\n    - inside:\n        kind: macro_invocation\n        stopBy: end'
-	rule+=$'\nconstraints:\n  CRATE:\n    any:\n      - kind: identifier'
-	rule+=$'\n      - pattern: ::sqlx'
+	rule+=$'\nconstraints:\n  ITEM:\n    kind: identifier\n    regex: '
+	rule+="$identifier_regex"
+	rule+=$'\n---\nid: macro-token-identifier\nlanguage: rust\nseverity: error'
+	rule+=$'\nrule:\n  all:\n    - kind: identifier\n    - inside:'
+	rule+=$'\n        kind: token_tree\n        stopBy: end\n  regex: ^(r#)?sqlx$'
 	scan_inline_rule output "$rule" "${source_files[@]}"
-	record_structural_paths "$output" macro
+	while IFS= read -r json_line; do
+		[[ -z "$json_line" ]] && continue
+		if [[ "$json_line" == *'"ruleId":"macro-token-identifier"'* ]]; then
+			token_output+="$json_line"$'\n'
+		else
+			structural_output+="$json_line"$'\n'
+		fi
+	done <<<"$output"
+	record_structural_paths "$structural_output" macro
+	record_token_tree_identifiers "$token_output"
+}
+
+record_token_tree_identifiers() {
+	local output="$1"
+	local json_line
+	while IFS= read -r json_line; do
+		[[ -z "$json_line" ]] && continue
+		parse_json_match "$json_line"
+		violations+=("$match_file|$match_line|sqlx macro token")
+	done <<<"$output"
 }
 
 load_type_relations() {
@@ -567,13 +700,6 @@ add_resolved() {
 		done
 	fi
 	resolved_entries+=("$entry")
-	if [[ "$category" == crate ]]; then
-		local crate_entry="$current_file|$local_name"
-		if [[ "${#resolved_crates[@]}" -eq 0 ]] ||
-			! array_contains "$crate_entry" "${resolved_crates[@]}"; then
-			resolved_crates+=("$crate_entry")
-		fi
-	fi
 	case "$category" in
 	crate)
 		for name in "${import_names[@]}"; do
@@ -598,6 +724,10 @@ process_import_relations() {
 		for entry in "${current_imports[@]}"; do
 			IFS='|' read -r source target line <<<"$entry"
 			[[ "$source" == "$local_name" ]] || continue
+			if [[ "$category" == crate && "$target" != "$local_name" ]]; then
+				violations+=("$current_file|$line|sqlx crate alias")
+				continue
+			fi
 			set_import_api "$category" "$canonical"
 			[[ -n "$import_api" ]] && violations+=("$current_file|$line|$import_api")
 			add_resolved "$category" "$canonical" "$target"
