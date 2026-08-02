@@ -496,9 +496,9 @@ async fn append_verification_started_event(
         Some(handle_id.0),
         now,
         Event::ArtifactVerificationStarted(ArtifactVerificationStartedPayload {
-            artifact_handle_id: handle_id.0,
-            artifact_location_id: location_id.0,
-            worker_id: worker_id.0,
+            artifact_handle_id: handle_id,
+            artifact_location_id: location_id,
+            worker_id,
             path: path.to_owned(),
         }),
     )
@@ -672,20 +672,20 @@ async fn append_terminal_event(
     let payload = match outcome {
         VerifyOutcome::Succeeded(result) => {
             Event::ArtifactVerificationSucceeded(ArtifactVerificationSucceededPayload {
-                verification_id: verification.id.0,
-                artifact_handle_id: context.artifact_handle_id.0,
-                artifact_location_id: context.artifact_location_id.0,
-                worker_id: context.worker_id.0,
+                verification_id: verification.id,
+                artifact_handle_id: context.artifact_handle_id,
+                artifact_location_id: context.artifact_location_id,
+                worker_id: context.worker_id,
                 observed_size_bytes: result.observed.size_bytes,
                 observed_checksum: result.observed.content_hash.clone(),
             })
         }
         VerifyOutcome::Failed(err) => {
             Event::ArtifactVerificationFailed(ArtifactVerificationFailedPayload {
-                verification_id: verification.id.0,
-                artifact_handle_id: context.artifact_handle_id.0,
-                artifact_location_id: context.artifact_location_id.0,
-                worker_id: context.worker_id.0,
+                verification_id: verification.id,
+                artifact_handle_id: context.artifact_handle_id,
+                artifact_location_id: context.artifact_location_id,
+                worker_id: context.worker_id,
                 error_code: err.error_code().as_str().to_owned(),
             })
         }

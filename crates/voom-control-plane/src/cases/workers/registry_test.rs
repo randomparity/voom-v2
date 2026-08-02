@@ -316,7 +316,7 @@ async fn register_worker_for_node_links_worker_and_emits_required_event_sequence
     assert!(matches!(
         &events[1].envelope.payload,
         Event::WorkerLinkedToNode(payload)
-            if payload.worker_id == worker.id.0 && payload.node_id == registered.node.id.0
+            if payload.worker_id == worker.id && payload.node_id == registered.node.id
     ));
 }
 

@@ -207,8 +207,8 @@ pub(super) async fn transition_recovery(
             },
             recovery_reason: recovery.recovery_reason.clone(),
             event: Event::ArtifactCommitRecoveryRequired(ArtifactCommitRecoveryRequiredPayload {
-                commit_record_id: prepared.record.id.0,
-                artifact_handle_id: prepared.artifact_handle_id.0,
+                commit_record_id: prepared.record.id,
+                artifact_handle_id: prepared.artifact_handle_id,
                 target_path: prepared.target_path.display().to_string(),
                 temp_path: prepared.temp_path.display().to_string(),
                 recovery_reason: recovery.recovery_reason.clone(),

@@ -37,7 +37,7 @@ impl ControlPlane {
             Some(lease.id.0),
             acquired_at,
             Event::UseLeaseAcquired(UseLeaseAcquiredPayload {
-                lease_id: lease.id.0,
+                lease_id: lease.id,
                 kind: lease.kind.as_str().to_owned(),
                 scope_type: lease.scope.type_str().to_owned(),
                 scope_id: lease.scope.id_u64(),
@@ -107,7 +107,7 @@ impl ControlPlane {
             Some(lease.id.0),
             now,
             Event::UseLeaseReleased(UseLeaseReleasedPayload {
-                lease_id: lease.id.0,
+                lease_id: lease.id,
                 release_reason: reason.as_str().to_owned(),
                 released_at,
             }),
@@ -144,7 +144,7 @@ impl ControlPlane {
             Some(lease.id.0),
             now,
             Event::UseLeaseForceReleased(UseLeaseForceReleasedPayload {
-                lease_id: lease.id.0,
+                lease_id: lease.id,
                 actor,
                 reason,
                 released_at,
@@ -176,7 +176,7 @@ impl ControlPlane {
                 Some(lease_id.0),
                 now,
                 Event::UseLeaseExpired(UseLeaseExpiredPayload {
-                    lease_id: lease_id.0,
+                    lease_id,
                     released_at: now,
                 }),
             )
@@ -213,7 +213,7 @@ impl ControlPlane {
             Some(lease.id.0),
             now,
             Event::UseLeaseRecoveredStaleIssuer(UseLeaseRecoveredStaleIssuerPayload {
-                lease_id: lease.id.0,
+                lease_id: lease.id,
                 actor,
                 reason,
                 released_at,
@@ -264,9 +264,9 @@ impl ControlPlane {
                     Some(lease_id.0),
                     now,
                     Event::UseLeaseReanchoredByMove(UseLeaseReanchoredByMovePayload {
-                        lease_id: lease_id.0,
-                        retired_location_id: retired.0,
-                        new_location_id: new.0,
+                        lease_id,
+                        retired_location_id: retired,
+                        new_location_id: new,
                         reanchored_at: now,
                     }),
                 )

@@ -151,7 +151,7 @@ async fn cancel_job_persists_state_and_reason_in_one_event() {
     let voom_events::Event::JobCancelled(payload) = &page.items[0].envelope.payload else {
         panic!("expected JobCancelled payload");
     };
-    assert_eq!(payload.job_id, job.id.0);
+    assert_eq!(payload.job_id, job.id);
     assert_eq!(payload.reason, "operator cancel");
 }
 

@@ -44,14 +44,23 @@ fn transcode_succeeded_payload_carries_result_and_source_ids() {
         &result,
     );
 
-    assert_eq!(payload.job_id, 1);
-    assert_eq!(payload.ticket_id, 2);
-    assert_eq!(payload.lease_id, Some(3));
-    assert_eq!(payload.source_file_version_id, 4);
-    assert_eq!(payload.source_file_location_id, 5);
-    assert_eq!(payload.source_media_snapshot_id, 6);
-    assert_eq!(payload.artifact_handle_id, 8);
-    assert_eq!(payload.artifact_location_id, 9);
+    assert_eq!(payload.job_id, voom_core::JobId(1));
+    assert_eq!(payload.ticket_id, voom_core::TicketId(2));
+    assert_eq!(payload.lease_id, Some(voom_core::LeaseId(3)));
+    assert_eq!(payload.source_file_version_id, voom_core::FileVersionId(4));
+    assert_eq!(
+        payload.source_file_location_id,
+        voom_core::FileLocationId(5)
+    );
+    assert_eq!(
+        payload.source_media_snapshot_id,
+        voom_core::MediaSnapshotId(6)
+    );
+    assert_eq!(payload.artifact_handle_id, voom_core::ArtifactHandleId(8));
+    assert_eq!(
+        payload.artifact_location_id,
+        voom_core::ArtifactLocationId(9)
+    );
     assert_eq!(payload.selected_streams[0].provider_stream_index, 7);
     assert_eq!(payload.selected_snapshot_stream_ids, ["audio-1"]);
     assert_eq!(
@@ -99,10 +108,22 @@ fn transcode_failed_payload_carries_worker_output_streams_when_result_exists() {
         synthesized_companions: Vec::new(),
     });
 
-    assert_eq!(payload.source_file_location_id, Some(5));
-    assert_eq!(payload.source_media_snapshot_id, Some(6));
-    assert_eq!(payload.artifact_handle_id, Some(8));
-    assert_eq!(payload.artifact_location_id, Some(9));
+    assert_eq!(
+        payload.source_file_location_id,
+        Some(voom_core::FileLocationId(5))
+    );
+    assert_eq!(
+        payload.source_media_snapshot_id,
+        Some(voom_core::MediaSnapshotId(6))
+    );
+    assert_eq!(
+        payload.artifact_handle_id,
+        Some(voom_core::ArtifactHandleId(8))
+    );
+    assert_eq!(
+        payload.artifact_location_id,
+        Some(voom_core::ArtifactLocationId(9))
+    );
     assert_eq!(
         payload.staging_path.as_deref(),
         Some("/tmp/voom-stage/2/3/out.mkv")
@@ -143,10 +164,22 @@ fn extract_failed_payload_uses_public_error_code_and_known_ids() {
     });
 
     assert_eq!(payload.error_code, "CONFIG_INVALID");
-    assert_eq!(payload.source_file_location_id, Some(5));
-    assert_eq!(payload.source_media_snapshot_id, Some(6));
-    assert_eq!(payload.artifact_handle_id, Some(8));
-    assert_eq!(payload.artifact_location_id, Some(9));
+    assert_eq!(
+        payload.source_file_location_id,
+        Some(voom_core::FileLocationId(5))
+    );
+    assert_eq!(
+        payload.source_media_snapshot_id,
+        Some(voom_core::MediaSnapshotId(6))
+    );
+    assert_eq!(
+        payload.artifact_handle_id,
+        Some(voom_core::ArtifactHandleId(8))
+    );
+    assert_eq!(
+        payload.artifact_location_id,
+        Some(voom_core::ArtifactLocationId(9))
+    );
     assert_eq!(payload.provider.as_deref(), Some("ffmpeg"));
     assert_eq!(payload.provider_version.as_deref(), Some("6.1"));
 }

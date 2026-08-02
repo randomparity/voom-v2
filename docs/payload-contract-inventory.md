@@ -57,6 +57,35 @@ The enforced families are:
 The enum itself is adjacently tagged. Strictness belongs on each newtype variant's content struct,
 where serde enforces it, rather than on the tagged enum.
 
+#### Event payload domain typing
+
+Event payloads carry the existing `voom-core` ID newtypes wherever the field identifies one
+durable entity. The serde-transparent IDs preserve the historical JSON number representation:
+
+- execution events use `JobId`, `TicketId`, `LeaseId`, and `WorkerId`;
+- worker events use `NodeId` and `WorkerId`;
+- media-identity events use the matching work, variant, bundle, file, evidence, snapshot, and
+  worker IDs;
+- artifact events use the matching execution, file, snapshot, bundle, handle, location,
+  verification, commit-record, worker, and use-lease IDs;
+- use-lease events use `UseLeaseId` and `FileLocationId`;
+- external-system events use `ExternalSystemId` and `ExternalSystemLinkId`.
+
+`IdentityEvidenceRecordedPayload.assertion_type` uses `AssertionKind`. Its canonical JSON remains
+the existing snake-case token, and deserialization now rejects tokens outside that complete
+vocabulary.
+
+The following event fields intentionally remain primitive:
+
+- `target_id` and `scope_id` are polymorphic; their companion type field determines the entity;
+- capability, grant, artifact-lineage, bundle-member, lineage, and dispatch-attempt IDs have no
+  matching `voom-core` newtype;
+- provider names and versions, external references, reason and error text, job kinds, artifact
+  lineage operations, and status values without a shared complete enum remain open strings.
+
+These source-level type changes require no historical-data migration: canonical serialization is
+unchanged, and the strict content structs continue to reject unknown fields.
+
 ### Commit-gate payloads
 
 The commit gate persists the proposed target, affected-scope closure, authorization closure,

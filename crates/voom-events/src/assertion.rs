@@ -1,14 +1,15 @@
 //! `AssertionKind` — vocabulary for `identity_evidence.assertion_type`.
 //! Spec §8.5.
 //!
-//! Like `EventKind`/`SubjectType`, this enum does NOT derive serde: the
-//! wire format is the `snake_case` string returned by `as_str()`, and we
-//! keep parsing explicit so it cannot silently diverge from the on-disk
-//! column.
+//! Its serde wire format and explicit parser both use the `snake_case`
+//! string returned by `as_str()`. Tests cover every variant so the durable
+//! event representation cannot drift from the identity-evidence column.
 
+use serde::{Deserialize, Serialize};
 use voom_core::VoomError;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum AssertionKind {
     BelongsToWork,
     BelongsToVariant,

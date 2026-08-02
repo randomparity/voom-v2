@@ -24,9 +24,28 @@ fn assert_rejects_unknown<T: Serialize + DeserializeOwned>(valid: &T) {
 }
 
 #[test]
+fn use_lease_ids_preserve_numeric_wire_representation() {
+    let payload = UseLeaseReanchoredByMovePayload {
+        lease_id: voom_core::UseLeaseId(41),
+        retired_location_id: voom_core::FileLocationId(42),
+        new_location_id: voom_core::FileLocationId(43),
+        reanchored_at: OffsetDateTime::UNIX_EPOCH,
+    };
+
+    let json = serde_json::to_value(&payload).unwrap();
+    assert_eq!(json["lease_id"], 41);
+    assert_eq!(json["retired_location_id"], 42);
+    assert_eq!(json["new_location_id"], 43);
+    assert_eq!(
+        serde_json::from_value::<UseLeaseReanchoredByMovePayload>(json).unwrap(),
+        payload
+    );
+}
+
+#[test]
 fn use_lease_acquired_round_trip() {
     let p = UseLeaseAcquiredPayload {
-        lease_id: 42,
+        lease_id: voom_core::UseLeaseId(42),
         kind: "playback".to_owned(),
         scope_type: "asset".to_owned(),
         scope_id: 9,
@@ -49,7 +68,7 @@ fn use_lease_acquired_round_trip() {
 #[test]
 fn use_lease_released_round_trip() {
     let p = UseLeaseReleasedPayload {
-        lease_id: 7,
+        lease_id: voom_core::UseLeaseId(7),
         release_reason: "released".to_owned(),
         released_at: OffsetDateTime::UNIX_EPOCH,
     };
@@ -65,7 +84,7 @@ fn use_lease_released_round_trip() {
 #[test]
 fn use_lease_expired_round_trip() {
     let p = UseLeaseExpiredPayload {
-        lease_id: 7,
+        lease_id: voom_core::UseLeaseId(7),
         released_at: OffsetDateTime::UNIX_EPOCH,
     };
     let json = serde_json::to_value(Event::UseLeaseExpired(p.clone())).unwrap();
@@ -77,7 +96,7 @@ fn use_lease_expired_round_trip() {
 #[test]
 fn use_lease_force_released_round_trip() {
     let p = UseLeaseForceReleasedPayload {
-        lease_id: 7,
+        lease_id: voom_core::UseLeaseId(7),
         actor: "operator-jane".to_owned(),
         reason: "stuck blocking commit".to_owned(),
         released_at: OffsetDateTime::UNIX_EPOCH,
@@ -94,7 +113,7 @@ fn use_lease_force_released_round_trip() {
 #[test]
 fn use_lease_recovered_stale_issuer_round_trip() {
     let p = UseLeaseRecoveredStaleIssuerPayload {
-        lease_id: 7,
+        lease_id: voom_core::UseLeaseId(7),
         actor: "operator-jane".to_owned(),
         reason: "worker host gone".to_owned(),
         released_at: OffsetDateTime::UNIX_EPOCH,
@@ -111,9 +130,9 @@ fn use_lease_recovered_stale_issuer_round_trip() {
 #[test]
 fn use_lease_reanchored_by_move_round_trip() {
     let p = UseLeaseReanchoredByMovePayload {
-        lease_id: 7,
-        retired_location_id: 99,
-        new_location_id: 100,
+        lease_id: voom_core::UseLeaseId(7),
+        retired_location_id: voom_core::FileLocationId(99),
+        new_location_id: voom_core::FileLocationId(100),
         reanchored_at: OffsetDateTime::UNIX_EPOCH,
     };
     let json = serde_json::to_value(Event::UseLeaseReanchoredByMove(p.clone())).unwrap();
@@ -128,7 +147,7 @@ fn use_lease_reanchored_by_move_round_trip() {
 #[test]
 fn use_lease_acquired_payload_rejects_unknown_field() {
     assert_rejects_unknown(&UseLeaseAcquiredPayload {
-        lease_id: 42,
+        lease_id: voom_core::UseLeaseId(42),
         kind: "playback".to_owned(),
         scope_type: "asset".to_owned(),
         scope_id: 9,
@@ -144,7 +163,7 @@ fn use_lease_acquired_payload_rejects_unknown_field() {
 #[test]
 fn use_lease_released_payload_rejects_unknown_field() {
     assert_rejects_unknown(&UseLeaseReleasedPayload {
-        lease_id: 7,
+        lease_id: voom_core::UseLeaseId(7),
         release_reason: "released".to_owned(),
         released_at: OffsetDateTime::UNIX_EPOCH,
     });
@@ -153,7 +172,7 @@ fn use_lease_released_payload_rejects_unknown_field() {
 #[test]
 fn use_lease_expired_payload_rejects_unknown_field() {
     assert_rejects_unknown(&UseLeaseExpiredPayload {
-        lease_id: 7,
+        lease_id: voom_core::UseLeaseId(7),
         released_at: OffsetDateTime::UNIX_EPOCH,
     });
 }
@@ -161,7 +180,7 @@ fn use_lease_expired_payload_rejects_unknown_field() {
 #[test]
 fn use_lease_force_released_payload_rejects_unknown_field() {
     assert_rejects_unknown(&UseLeaseForceReleasedPayload {
-        lease_id: 7,
+        lease_id: voom_core::UseLeaseId(7),
         actor: "operator-jane".to_owned(),
         reason: "stuck blocking commit".to_owned(),
         released_at: OffsetDateTime::UNIX_EPOCH,
@@ -171,7 +190,7 @@ fn use_lease_force_released_payload_rejects_unknown_field() {
 #[test]
 fn use_lease_recovered_stale_issuer_payload_rejects_unknown_field() {
     assert_rejects_unknown(&UseLeaseRecoveredStaleIssuerPayload {
-        lease_id: 7,
+        lease_id: voom_core::UseLeaseId(7),
         actor: "operator-jane".to_owned(),
         reason: "worker host gone".to_owned(),
         released_at: OffsetDateTime::UNIX_EPOCH,
@@ -181,9 +200,9 @@ fn use_lease_recovered_stale_issuer_payload_rejects_unknown_field() {
 #[test]
 fn use_lease_reanchored_by_move_payload_rejects_unknown_field() {
     assert_rejects_unknown(&UseLeaseReanchoredByMovePayload {
-        lease_id: 7,
-        retired_location_id: 99,
-        new_location_id: 100,
+        lease_id: voom_core::UseLeaseId(7),
+        retired_location_id: voom_core::FileLocationId(99),
+        new_location_id: voom_core::FileLocationId(100),
         reanchored_at: OffsetDateTime::UNIX_EPOCH,
     });
 }

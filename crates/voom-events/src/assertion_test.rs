@@ -1,7 +1,7 @@
 use super::*;
 
 #[test]
-fn as_str_round_trips_for_every_variant() {
+fn wire_forms_round_trip_for_every_variant() {
     for kind in [
         AssertionKind::BelongsToWork,
         AssertionKind::BelongsToVariant,
@@ -19,6 +19,9 @@ fn as_str_round_trips_for_every_variant() {
         let s = kind.as_str();
         let back = AssertionKind::from_str(s).unwrap();
         assert_eq!(kind, back, "round-trip failed for {s}");
+        let json = serde_json::to_value(kind).unwrap();
+        assert_eq!(json, s);
+        assert_eq!(serde_json::from_value::<AssertionKind>(json).unwrap(), kind);
     }
 }
 

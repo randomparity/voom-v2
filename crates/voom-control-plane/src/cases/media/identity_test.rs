@@ -251,9 +251,9 @@ async fn reconcile_rename_reanchors_location_scoped_use_lease_in_same_tx() {
     else {
         panic!("expected UseLeaseReanchoredByMove payload");
     };
-    assert_eq!(payload.lease_id, lease.id.0);
-    assert_eq!(payload.retired_location_id, file_location_id.0);
-    assert_eq!(payload.new_location_id, result.new_file_location_id.0);
+    assert_eq!(payload.lease_id, lease.id);
+    assert_eq!(payload.retired_location_id, file_location_id);
+    assert_eq!(payload.new_location_id, result.new_file_location_id);
 }
 
 #[tokio::test]

@@ -69,7 +69,7 @@ impl ControlPlane {
                     Some(file_asset_id.0),
                     observed_at,
                     Event::FileAssetCreated(FileAssetCreatedPayload {
-                        file_asset_id: file_asset_id.0,
+                        file_asset_id: voom_core::FileAssetId(file_asset_id.0),
                     }),
                 )
                 .await?;
@@ -89,12 +89,12 @@ impl ControlPlane {
                     Some(version.id.0),
                     observed_at,
                     Event::FileVersionCreated(FileVersionCreatedPayload {
-                        file_version_id: version.id.0,
-                        file_asset_id: version.file_asset_id.0,
+                        file_version_id: version.id,
+                        file_asset_id: version.file_asset_id,
                         content_hash: version.content_hash,
                         size_bytes: version.size_bytes,
                         produced_by: version.produced_by.as_str().to_owned(),
-                        produced_from_version_id: version.produced_from_version_id.map(|v| v.0),
+                        produced_from_version_id: version.produced_from_version_id,
                     }),
                 )
                 .await?;
@@ -114,8 +114,8 @@ impl ControlPlane {
                     Some(location.id.0),
                     observed_at,
                     Event::FileLocationRecorded(FileLocationRecordedPayload {
-                        file_location_id: location.id.0,
-                        file_version_id: location.file_version_id.0,
+                        file_location_id: location.id,
+                        file_version_id: location.file_version_id,
                         kind: location.kind.as_str().to_owned(),
                         value: location.value,
                     }),
@@ -148,10 +148,10 @@ impl ControlPlane {
                         Some(e.id.0),
                         e.observed_at,
                         Event::IdentityEvidenceRecorded(IdentityEvidenceRecordedPayload {
-                            evidence_id: e.id.0,
+                            evidence_id: e.id,
                             target_type: e.target_type.as_str().to_owned(),
                             target_id: e.target_id,
-                            assertion_type: e.assertion_type.as_str().to_owned(),
+                            assertion_type: e.assertion_type,
                             provider: e.provider,
                             provider_version: e.provider_version,
                             confidence: e.confidence,
@@ -181,8 +181,8 @@ impl ControlPlane {
                     Some(location.id.0),
                     observed_at,
                     Event::FileLocationAliased(FileLocationAliasedPayload {
-                        file_location_id: location.id.0,
-                        file_version_id: file_version_id.0,
+                        file_location_id: location.id,
+                        file_version_id: voom_core::FileVersionId(file_version_id.0),
                         kind: location.kind.as_str().to_owned(),
                         value: location.value,
                     }),
@@ -237,8 +237,8 @@ impl ControlPlane {
             Some(outcome.retired_location_id.0),
             observed_at,
             Event::FileLocationRetiredByMove(FileLocationRetiredByMovePayload {
-                file_location_id: outcome.retired_location_id.0,
-                file_version_id: outcome.file_version_id.0,
+                file_location_id: outcome.retired_location_id,
+                file_version_id: outcome.file_version_id,
                 retired_at: observed_at,
             }),
         )
@@ -250,9 +250,9 @@ impl ControlPlane {
             Some(new_location.id.0),
             observed_at,
             Event::FileLocationRecordedByMove(FileLocationRecordedByMovePayload {
-                retired_file_location_id: outcome.retired_location_id.0,
-                new_file_location_id: new_location.id.0,
-                file_version_id: outcome.file_version_id.0,
+                retired_file_location_id: outcome.retired_location_id,
+                new_file_location_id: new_location.id,
+                file_version_id: outcome.file_version_id,
                 kind: new_location.kind.as_str().to_owned(),
                 value: new_location.value,
                 observed_at,
@@ -277,10 +277,10 @@ impl ControlPlane {
                 Some(e.id.0),
                 e.observed_at,
                 Event::IdentityEvidenceRecorded(IdentityEvidenceRecordedPayload {
-                    evidence_id: e.id.0,
+                    evidence_id: e.id,
                     target_type: e.target_type.as_str().to_owned(),
                     target_id: e.target_id,
-                    assertion_type: e.assertion_type.as_str().to_owned(),
+                    assertion_type: e.assertion_type,
                     provider: e.provider.clone(),
                     provider_version: e.provider_version.clone(),
                     confidence: e.confidence,
@@ -318,9 +318,9 @@ impl ControlPlane {
                     Some(lease_id.0),
                     observed_at,
                     Event::UseLeaseReanchoredByMove(UseLeaseReanchoredByMovePayload {
-                        lease_id: lease_id.0,
-                        retired_location_id: outcome.retired_location_id.0,
-                        new_location_id: outcome.new_file_location_id.0,
+                        lease_id,
+                        retired_location_id: outcome.retired_location_id,
+                        new_location_id: outcome.new_file_location_id,
                         reanchored_at: observed_at,
                     }),
                 )
@@ -355,7 +355,7 @@ impl ControlPlane {
             Some(updated.id.0),
             accepted_at,
             Event::IdentityEvidenceAccepted(IdentityEvidenceAcceptedPayload {
-                evidence_id: updated.id.0,
+                evidence_id: updated.id,
                 target_type: updated.target_type.as_str().to_owned(),
                 target_id: updated.target_id,
                 accepted_user_id: updated.accepted_user_id.clone(),
@@ -391,10 +391,10 @@ impl ControlPlane {
             Some(new.id.0),
             new.observed_at,
             Event::IdentityEvidenceRecorded(IdentityEvidenceRecordedPayload {
-                evidence_id: new.id.0,
+                evidence_id: new.id,
                 target_type: new.target_type.as_str().to_owned(),
                 target_id: new.target_id,
-                assertion_type: new.assertion_type.as_str().to_owned(),
+                assertion_type: new.assertion_type,
                 provider: new.provider.clone(),
                 provider_version: new.provider_version.clone(),
                 confidence: new.confidence,
@@ -409,8 +409,8 @@ impl ControlPlane {
             Some(old_id.0),
             superseded_at,
             Event::IdentityEvidenceSuperseded(IdentityEvidenceSupersededPayload {
-                superseded_evidence_id: old_id.0,
-                superseded_by_evidence_id: new.id.0,
+                superseded_evidence_id: old_id,
+                superseded_by_evidence_id: new.id,
                 target_type: new.target_type.as_str().to_owned(),
                 target_id: new.target_id,
                 superseded_at,
@@ -466,7 +466,7 @@ impl ControlPlane {
             Some(mw.id.0),
             created_at,
             Event::MediaWorkCreated(MediaWorkCreatedPayload {
-                media_work_id: mw.id.0,
+                media_work_id: mw.id,
                 kind: mw.kind.as_str().to_owned(),
                 display_title: mw.display_title.clone(),
                 provisional: mw.provisional,
@@ -498,8 +498,8 @@ impl ControlPlane {
             Some(mv.id.0),
             created_at,
             Event::MediaVariantCreated(MediaVariantCreatedPayload {
-                media_variant_id: mv.id.0,
-                media_work_id: mv.media_work_id.0,
+                media_variant_id: mv.id,
+                media_work_id: mv.media_work_id,
                 label: mv.label.clone(),
                 provisional: mv.provisional,
             }),
@@ -530,7 +530,7 @@ impl ControlPlane {
             Some(asset.id.0),
             created_at,
             Event::FileAssetCreated(FileAssetCreatedPayload {
-                file_asset_id: asset.id.0,
+                file_asset_id: asset.id,
             }),
         )
         .await?;
@@ -559,12 +559,12 @@ impl ControlPlane {
             Some(v.id.0),
             observed_at,
             Event::FileVersionCreated(FileVersionCreatedPayload {
-                file_version_id: v.id.0,
-                file_asset_id: v.file_asset_id.0,
+                file_version_id: v.id,
+                file_asset_id: v.file_asset_id,
                 content_hash: v.content_hash.clone(),
                 size_bytes: v.size_bytes,
                 produced_by: v.produced_by.as_str().to_owned(),
-                produced_from_version_id: v.produced_from_version_id.map(|p| p.0),
+                produced_from_version_id: v.produced_from_version_id,
             }),
         )
         .await?;
@@ -593,8 +593,8 @@ impl ControlPlane {
             Some(loc.id.0),
             observed_at,
             Event::FileLocationRecorded(FileLocationRecordedPayload {
-                file_location_id: loc.id.0,
-                file_version_id: loc.file_version_id.0,
+                file_location_id: loc.id,
+                file_version_id: loc.file_version_id,
                 kind: loc.kind.as_str().to_owned(),
                 value: loc.value.clone(),
             }),

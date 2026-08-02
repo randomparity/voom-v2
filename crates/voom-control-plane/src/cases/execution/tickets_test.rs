@@ -187,7 +187,7 @@ async fn pre_lease_no_eligible_worker_requeues_without_creating_lease() {
     let voom_events::Event::TicketFailedRetriable(payload) = &page.items[0].envelope.payload else {
         panic!("expected TicketFailedRetriable payload");
     };
-    assert_eq!(payload.ticket_id, t.id.0);
+    assert_eq!(payload.ticket_id, t.id);
     assert_eq!(payload.attempt, 1);
     assert_eq!(payload.max_attempts, 3);
     assert_eq!(payload.class, FailureClass::NoEligibleWorker);
@@ -258,7 +258,7 @@ async fn pre_lease_ambiguous_worker_selection_terminal_fails_immediately() {
     let voom_events::Event::TicketFailedTerminal(payload) = &page.items[0].envelope.payload else {
         panic!("expected TicketFailedTerminal payload");
     };
-    assert_eq!(payload.ticket_id, t.id.0);
+    assert_eq!(payload.ticket_id, t.id);
     assert_eq!(payload.attempt, 1);
     assert_eq!(payload.max_attempts, 3);
     assert_eq!(payload.class, FailureClass::AmbiguousWorkerSelection);
@@ -319,7 +319,7 @@ async fn pre_lease_no_eligible_worker_terminal_fails_when_attempts_exhausted() {
     let voom_events::Event::TicketFailedTerminal(payload) = &page.items[0].envelope.payload else {
         panic!("expected TicketFailedTerminal payload");
     };
-    assert_eq!(payload.ticket_id, t.id.0);
+    assert_eq!(payload.ticket_id, t.id);
     assert_eq!(payload.attempt, 1);
     assert_eq!(payload.max_attempts, 1);
     assert_eq!(payload.class, FailureClass::NoEligibleWorker);

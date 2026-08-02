@@ -123,9 +123,9 @@ async fn retire_artifact_location_payload_handle_matches_recorded_location() {
     else {
         panic!("expected ArtifactLocationRetired payload");
     };
-    assert_eq!(payload.artifact_location_id, loc.id.0);
+    assert_eq!(payload.artifact_location_id, loc.id);
     assert_eq!(
-        payload.artifact_handle_id, handle_a.id.0,
+        payload.artifact_handle_id, handle_a.id,
         "event payload's handle id must match the location's recorded handle"
     );
 }

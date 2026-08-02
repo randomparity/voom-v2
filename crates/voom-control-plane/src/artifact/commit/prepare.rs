@@ -108,10 +108,10 @@ async fn prepare_commit_in_tx(
         pending_input,
         |commit_record_id| {
             Event::ArtifactCommitStarted(ArtifactCommitStartedPayload {
-                commit_record_id: commit_record_id.0,
-                artifact_handle_id: input.artifact_handle_id.0,
-                source_file_version_id: source.source_file_version_id.0,
-                verification_id: verified_staging.verification.id.0,
+                commit_record_id,
+                artifact_handle_id: input.artifact_handle_id,
+                source_file_version_id: source.source_file_version_id,
+                verification_id: verified_staging.verification.id,
                 target_path: paths.target_path.display().to_string(),
                 temp_path: paths.temp_path.display().to_string(),
             })
@@ -392,7 +392,7 @@ async fn append_failed_pre_mutation(
         failure.artifact_handle_id,
         occurred_at,
         Event::ArtifactCommitFailedPreMutation(ArtifactCommitFailedPreMutationPayload {
-            artifact_handle_id: failure.artifact_handle_id.0,
+            artifact_handle_id: failure.artifact_handle_id,
             commit_record_id: None,
             target_path: failure.target_path.display().to_string(),
             error_code: failure.error_code.as_str().to_owned(),

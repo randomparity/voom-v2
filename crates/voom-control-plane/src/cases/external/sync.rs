@@ -67,7 +67,7 @@ impl ControlPlane {
             Some(id.0),
             finished_at,
             Event::ExternalSystemSynced(ExternalSystemSyncedPayload {
-                external_system_id: id.0,
+                external_system_id: id,
                 outcome: outcome.clone(),
                 links_recorded: 0,
                 links_retired: 0,

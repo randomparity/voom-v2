@@ -65,7 +65,7 @@ async fn acquire_use_lease_emits_acquired_event() {
     let voom_events::Event::UseLeaseAcquired(payload) = &page.items[0].envelope.payload else {
         panic!("expected UseLeaseAcquired payload");
     };
-    assert_eq!(payload.lease_id, lease.id.0);
+    assert_eq!(payload.lease_id, lease.id);
     assert_eq!(payload.scope_type, "asset");
     assert_eq!(payload.scope_id, asset.id.0);
     assert!(payload.ttl_bound);
@@ -121,7 +121,7 @@ async fn release_use_lease_emits_released_event() {
     let voom_events::Event::UseLeaseReleased(payload) = &page.items[0].envelope.payload else {
         panic!("expected UseLeaseReleased payload");
     };
-    assert_eq!(payload.lease_id, lease.id.0);
+    assert_eq!(payload.lease_id, lease.id);
     assert_eq!(payload.release_reason, "released");
 }
 
@@ -160,7 +160,7 @@ async fn force_release_use_lease_emits_force_released_with_actor() {
     let voom_events::Event::UseLeaseForceReleased(payload) = &page.items[0].envelope.payload else {
         panic!("expected UseLeaseForceReleased payload");
     };
-    assert_eq!(payload.lease_id, lease.id.0);
+    assert_eq!(payload.lease_id, lease.id);
     assert_eq!(payload.actor, "admin");
     assert_eq!(payload.reason, "maintenance");
 }
@@ -339,7 +339,7 @@ async fn recover_use_lease_stale_issuer_emits_recovered_event() {
     else {
         panic!("expected UseLeaseRecoveredStaleIssuer payload");
     };
-    assert_eq!(payload.lease_id, lease.id.0);
+    assert_eq!(payload.lease_id, lease.id);
     assert_eq!(payload.actor, "ops-bot");
 }
 
@@ -434,7 +434,7 @@ async fn reanchor_use_leases_on_move_emits_one_event_per_lease() {
         let voom_events::Event::UseLeaseReanchoredByMove(p) = &item.envelope.payload else {
             panic!("expected UseLeaseReanchoredByMove payload");
         };
-        assert_eq!(p.retired_location_id, loc_retired.id.0);
-        assert_eq!(p.new_location_id, loc_new.id.0);
+        assert_eq!(p.retired_location_id, loc_retired.id);
+        assert_eq!(p.new_location_id, loc_new.id);
     }
 }

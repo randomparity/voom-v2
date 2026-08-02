@@ -22,13 +22,32 @@ fn assert_rejects_unknown<T: Serialize + DeserializeOwned>(valid: &T) {
         "unknown top-level field must be rejected"
     );
 }
+
+#[test]
+fn artifact_ids_preserve_numeric_wire_representation() {
+    let payload = ArtifactVerificationStartedPayload {
+        artifact_handle_id: voom_core::ArtifactHandleId(61),
+        artifact_location_id: voom_core::ArtifactLocationId(62),
+        worker_id: voom_core::WorkerId(63),
+        path: "/staging/1".to_owned(),
+    };
+
+    let json = serde_json::to_value(&payload).unwrap();
+    assert_eq!(json["artifact_handle_id"], 61);
+    assert_eq!(json["artifact_location_id"], 62);
+    assert_eq!(json["worker_id"], 63);
+    assert_eq!(
+        serde_json::from_value::<ArtifactVerificationStartedPayload>(json).unwrap(),
+        payload
+    );
+}
 #[test]
 fn artifact_staged_payload_round_trip() {
     let p = ArtifactStagedPayload {
-        artifact_handle_id: 10,
-        artifact_location_id: 11,
-        source_file_version_id: 12,
-        source_file_location_id: Some(13),
+        artifact_handle_id: voom_core::ArtifactHandleId(10),
+        artifact_location_id: voom_core::ArtifactLocationId(11),
+        source_file_version_id: voom_core::FileVersionId(12),
+        source_file_location_id: Some(voom_core::FileLocationId(13)),
         staging_path: "/var/lib/voom/staging/10".to_owned(),
         size_bytes: 4096,
         checksum: "blake3:abc123".to_owned(),
@@ -43,9 +62,9 @@ fn artifact_staged_payload_round_trip() {
 #[test]
 fn artifact_verification_started_payload_round_trip() {
     let p = ArtifactVerificationStartedPayload {
-        artifact_handle_id: 10,
-        artifact_location_id: 11,
-        worker_id: 12,
+        artifact_handle_id: voom_core::ArtifactHandleId(10),
+        artifact_location_id: voom_core::ArtifactLocationId(11),
+        worker_id: voom_core::WorkerId(12),
         path: "/var/lib/voom/staging/10".to_owned(),
     };
     let json = serde_json::to_value(Event::ArtifactVerificationStarted(p.clone())).unwrap();
@@ -61,10 +80,10 @@ fn artifact_verification_started_payload_round_trip() {
 #[test]
 fn artifact_verification_succeeded_payload_round_trip() {
     let p = ArtifactVerificationSucceededPayload {
-        verification_id: 20,
-        artifact_handle_id: 10,
-        artifact_location_id: 11,
-        worker_id: 12,
+        verification_id: voom_core::ids::ArtifactVerificationId(20),
+        artifact_handle_id: voom_core::ArtifactHandleId(10),
+        artifact_location_id: voom_core::ArtifactLocationId(11),
+        worker_id: voom_core::WorkerId(12),
         observed_size_bytes: 4096,
         observed_checksum: "blake3:abc123".to_owned(),
     };
@@ -82,10 +101,10 @@ fn artifact_verification_succeeded_payload_round_trip() {
 #[test]
 fn artifact_verification_failed_payload_round_trip() {
     let p = ArtifactVerificationFailedPayload {
-        verification_id: 20,
-        artifact_handle_id: 10,
-        artifact_location_id: 11,
-        worker_id: 12,
+        verification_id: voom_core::ids::ArtifactVerificationId(20),
+        artifact_handle_id: voom_core::ArtifactHandleId(10),
+        artifact_location_id: voom_core::ArtifactLocationId(11),
+        worker_id: voom_core::WorkerId(12),
         error_code: "ARTIFACT_CHECKSUM_MISMATCH".to_owned(),
     };
     let json = serde_json::to_value(Event::ArtifactVerificationFailed(p.clone())).unwrap();
@@ -102,11 +121,11 @@ fn artifact_verification_failed_payload_round_trip() {
 #[test]
 fn artifact_transcode_started_payload_serializes_correlation_fields() {
     let p = ArtifactTranscodeStartedPayload {
-        job_id: 1,
-        ticket_id: 2,
-        lease_id: Some(3),
-        source_file_version_id: 4,
-        source_file_location_id: 5,
+        job_id: voom_core::JobId(1),
+        ticket_id: voom_core::TicketId(2),
+        lease_id: Some(voom_core::LeaseId(3)),
+        source_file_version_id: voom_core::FileVersionId(4),
+        source_file_location_id: voom_core::FileLocationId(5),
         staging_path: "/tmp/voom-stage/2/3/out.mkv".to_owned(),
         profile_name: "default-hevc".to_owned(),
         encoder: "libx265".to_owned(),
@@ -146,13 +165,13 @@ fn artifact_transcode_started_payload_serializes_correlation_fields() {
 #[test]
 fn artifact_transcode_succeeded_payload_carries_profile_and_observed_output_facts() {
     let p = ArtifactTranscodeSucceededPayload {
-        job_id: 1,
-        ticket_id: 2,
-        lease_id: Some(3),
-        source_file_version_id: 4,
-        source_file_location_id: 5,
-        artifact_handle_id: 6,
-        artifact_location_id: 7,
+        job_id: voom_core::JobId(1),
+        ticket_id: voom_core::TicketId(2),
+        lease_id: Some(voom_core::LeaseId(3)),
+        source_file_version_id: voom_core::FileVersionId(4),
+        source_file_location_id: voom_core::FileLocationId(5),
+        artifact_handle_id: voom_core::ArtifactHandleId(6),
+        artifact_location_id: voom_core::ArtifactLocationId(7),
         staging_path: "/tmp/voom-stage/2/3/out.mp4".to_owned(),
         profile_name: "av1-1080p".to_owned(),
         encoder: "libsvtav1".to_owned(),
@@ -210,11 +229,11 @@ fn legacy_artifact_transcode_started_row_decodes_with_defaulted_fields() {
     let back: Event = serde_json::from_value(json).unwrap();
 
     let expected = ArtifactTranscodeStartedPayload {
-        job_id: 1,
-        ticket_id: 2,
-        lease_id: Some(3),
-        source_file_version_id: 4,
-        source_file_location_id: 5,
+        job_id: voom_core::JobId(1),
+        ticket_id: voom_core::TicketId(2),
+        lease_id: Some(voom_core::LeaseId(3)),
+        source_file_version_id: voom_core::FileVersionId(4),
+        source_file_location_id: voom_core::FileLocationId(5),
         staging_path: "/tmp/voom-stage/2/3/out.mkv".to_owned(),
         profile_name: String::new(),
         encoder: String::new(),
@@ -249,13 +268,13 @@ fn legacy_artifact_transcode_succeeded_row_decodes_with_defaulted_fields() {
     let back: Event = serde_json::from_value(json).unwrap();
 
     let expected = ArtifactTranscodeSucceededPayload {
-        job_id: 1,
-        ticket_id: 2,
-        lease_id: Some(3),
-        source_file_version_id: 4,
-        source_file_location_id: 5,
-        artifact_handle_id: 6,
-        artifact_location_id: 7,
+        job_id: voom_core::JobId(1),
+        ticket_id: voom_core::TicketId(2),
+        lease_id: Some(voom_core::LeaseId(3)),
+        source_file_version_id: voom_core::FileVersionId(4),
+        source_file_location_id: voom_core::FileLocationId(5),
+        artifact_handle_id: voom_core::ArtifactHandleId(6),
+        artifact_location_id: voom_core::ArtifactLocationId(7),
         staging_path: "/tmp/voom-stage/2/3/out.mkv".to_owned(),
         profile_name: String::new(),
         encoder: String::new(),
@@ -279,11 +298,11 @@ fn legacy_artifact_transcode_succeeded_row_decodes_with_defaulted_fields() {
 #[test]
 fn artifact_transcode_failed_payload_carries_profile_facts() {
     let p = ArtifactTranscodeFailedPayload {
-        job_id: 1,
-        ticket_id: 2,
-        lease_id: Some(3),
-        source_file_version_id: 4,
-        source_file_location_id: Some(5),
+        job_id: voom_core::JobId(1),
+        ticket_id: voom_core::TicketId(2),
+        lease_id: Some(voom_core::LeaseId(3)),
+        source_file_version_id: voom_core::FileVersionId(4),
+        source_file_location_id: Some(voom_core::FileLocationId(5)),
         staging_path: Some("/tmp/voom-stage/2/3/out.mkv".to_owned()),
         profile_name: "default-av1".to_owned(),
         encoder: "libsvtav1".to_owned(),
@@ -311,11 +330,11 @@ fn artifact_transcode_failed_payload_carries_profile_facts() {
 #[test]
 fn artifact_remux_started_payload_serializes_selection_correlation_fields() {
     let p = ArtifactRemuxStartedPayload {
-        job_id: 1,
-        ticket_id: 2,
-        lease_id: Some(3),
-        source_file_version_id: 4,
-        source_file_location_id: 5,
+        job_id: voom_core::JobId(1),
+        ticket_id: voom_core::TicketId(2),
+        lease_id: Some(voom_core::LeaseId(3)),
+        source_file_version_id: voom_core::FileVersionId(4),
+        source_file_location_id: voom_core::FileLocationId(5),
         staging_path: "/tmp/voom-stage/2/3/out.mkv".to_owned(),
         selected_streams: vec![
             ArtifactRemuxStreamPayload {
@@ -465,12 +484,12 @@ fn old_remux_event_payloads_default_absent_head_streams() {
 #[test]
 fn artifact_audio_transcode_started_payload_serializes_audit_correlation_fields() {
     let p = ArtifactAudioTranscodeStartedPayload {
-        job_id: 1,
-        ticket_id: 2,
-        lease_id: Some(3),
-        source_file_version_id: 4,
-        source_file_location_id: 5,
-        source_media_snapshot_id: 6,
+        job_id: voom_core::JobId(1),
+        ticket_id: voom_core::TicketId(2),
+        lease_id: Some(voom_core::LeaseId(3)),
+        source_file_version_id: voom_core::FileVersionId(4),
+        source_file_location_id: voom_core::FileLocationId(5),
+        source_media_snapshot_id: voom_core::MediaSnapshotId(6),
         staging_path: "/tmp/voom-stage/2/3/out.mkv".to_owned(),
         selected_streams: vec![ArtifactAudioStreamPayload {
             snapshot_stream_id: "audio-1".to_owned(),
@@ -516,12 +535,12 @@ fn artifact_audio_transcode_started_payload_serializes_audit_correlation_fields(
 #[test]
 fn artifact_audio_transcode_progress_payload_serializes_progress_and_selection() {
     let p = ArtifactAudioTranscodeProgressPayload {
-        job_id: 1,
-        ticket_id: 2,
-        lease_id: Some(3),
-        source_file_version_id: 4,
-        source_file_location_id: 5,
-        source_media_snapshot_id: 6,
+        job_id: voom_core::JobId(1),
+        ticket_id: voom_core::TicketId(2),
+        lease_id: Some(voom_core::LeaseId(3)),
+        source_file_version_id: voom_core::FileVersionId(4),
+        source_file_location_id: voom_core::FileLocationId(5),
+        source_media_snapshot_id: voom_core::MediaSnapshotId(6),
         staging_path: "/tmp/voom-stage/2/3/out.mkv".to_owned(),
         selected_streams: vec![ArtifactAudioStreamPayload {
             snapshot_stream_id: "audio-1".to_owned(),
@@ -550,14 +569,14 @@ fn artifact_audio_transcode_progress_payload_serializes_progress_and_selection()
 #[test]
 fn artifact_audio_transcode_succeeded_payload_carries_artifact_result_and_provider() {
     let p = ArtifactAudioTranscodeSucceededPayload {
-        job_id: 1,
-        ticket_id: 2,
-        lease_id: Some(3),
-        source_file_version_id: 4,
-        source_file_location_id: 5,
-        source_media_snapshot_id: 6,
-        artifact_handle_id: 8,
-        artifact_location_id: 9,
+        job_id: voom_core::JobId(1),
+        ticket_id: voom_core::TicketId(2),
+        lease_id: Some(voom_core::LeaseId(3)),
+        source_file_version_id: voom_core::FileVersionId(4),
+        source_file_location_id: voom_core::FileLocationId(5),
+        source_media_snapshot_id: voom_core::MediaSnapshotId(6),
+        artifact_handle_id: voom_core::ArtifactHandleId(8),
+        artifact_location_id: voom_core::ArtifactLocationId(9),
         staging_path: "/tmp/voom-stage/2/3/out.mkv".to_owned(),
         selected_streams: vec![ArtifactAudioStreamPayload {
             snapshot_stream_id: "audio-1".to_owned(),
@@ -616,14 +635,14 @@ fn artifact_audio_transcode_succeeded_payload_carries_artifact_result_and_provid
 #[test]
 fn artifact_audio_transcode_failed_payload_carries_public_error_code_and_known_ids() {
     let p = ArtifactAudioTranscodeFailedPayload {
-        job_id: 1,
-        ticket_id: 2,
-        lease_id: Some(3),
-        source_file_version_id: 4,
-        source_file_location_id: Some(5),
-        source_media_snapshot_id: Some(6),
-        artifact_handle_id: Some(8),
-        artifact_location_id: Some(9),
+        job_id: voom_core::JobId(1),
+        ticket_id: voom_core::TicketId(2),
+        lease_id: Some(voom_core::LeaseId(3)),
+        source_file_version_id: voom_core::FileVersionId(4),
+        source_file_location_id: Some(voom_core::FileLocationId(5)),
+        source_media_snapshot_id: Some(voom_core::MediaSnapshotId(6)),
+        artifact_handle_id: Some(voom_core::ArtifactHandleId(8)),
+        artifact_location_id: Some(voom_core::ArtifactLocationId(9)),
         staging_path: Some("/tmp/voom-stage/2/3/out.mkv".to_owned()),
         selected_streams: vec![ArtifactAudioStreamPayload {
             snapshot_stream_id: "audio-1".to_owned(),
@@ -671,13 +690,13 @@ fn artifact_audio_extract_started_and_progress_payloads_round_trip() {
         provider_stream_index: 11,
     };
     let started = ArtifactAudioExtractStartedPayload {
-        job_id: 10,
-        ticket_id: 20,
-        lease_id: Some(30),
-        source_file_version_id: 40,
-        source_file_location_id: 50,
-        source_media_snapshot_id: 60,
-        source_bundle_id: 70,
+        job_id: voom_core::JobId(10),
+        ticket_id: voom_core::TicketId(20),
+        lease_id: Some(voom_core::LeaseId(30)),
+        source_file_version_id: voom_core::FileVersionId(40),
+        source_file_location_id: voom_core::FileLocationId(50),
+        source_media_snapshot_id: voom_core::MediaSnapshotId(60),
+        source_bundle_id: voom_core::BundleId(70),
         staging_path: "/tmp/voom-stage/20/30/out.ogg".to_owned(),
         selected_stream: selected_stream.clone(),
         role: "external_audio".to_owned(),
@@ -688,13 +707,13 @@ fn artifact_audio_extract_started_and_progress_payloads_round_trip() {
         outputs: Vec::new(),
     };
     let progress = ArtifactAudioExtractProgressPayload {
-        job_id: 10,
-        ticket_id: 20,
-        lease_id: Some(30),
-        source_file_version_id: 40,
-        source_file_location_id: 50,
-        source_media_snapshot_id: 60,
-        source_bundle_id: 70,
+        job_id: voom_core::JobId(10),
+        ticket_id: voom_core::TicketId(20),
+        lease_id: Some(voom_core::LeaseId(30)),
+        source_file_version_id: voom_core::FileVersionId(40),
+        source_file_location_id: voom_core::FileLocationId(50),
+        source_media_snapshot_id: voom_core::MediaSnapshotId(60),
+        source_bundle_id: voom_core::BundleId(70),
         staging_path: "/tmp/voom-stage/20/30/out.ogg".to_owned(),
         selected_stream: selected_stream.clone(),
         percent_bps: Some(5000),
@@ -731,15 +750,15 @@ fn artifact_audio_extract_succeeded_and_failed_payloads_round_trip() {
         provider_stream_index: 11,
     };
     let succeeded = ArtifactAudioExtractSucceededPayload {
-        job_id: 10,
-        ticket_id: 20,
-        lease_id: Some(30),
-        source_file_version_id: 40,
-        source_file_location_id: 50,
-        source_media_snapshot_id: 60,
-        source_bundle_id: 70,
-        artifact_handle_id: 80,
-        artifact_location_id: 90,
+        job_id: voom_core::JobId(10),
+        ticket_id: voom_core::TicketId(20),
+        lease_id: Some(voom_core::LeaseId(30)),
+        source_file_version_id: voom_core::FileVersionId(40),
+        source_file_location_id: voom_core::FileLocationId(50),
+        source_media_snapshot_id: voom_core::MediaSnapshotId(60),
+        source_bundle_id: voom_core::BundleId(70),
+        artifact_handle_id: voom_core::ArtifactHandleId(80),
+        artifact_location_id: voom_core::ArtifactLocationId(90),
         staging_path: "/tmp/voom-stage/20/30/out.ogg".to_owned(),
         selected_stream: selected_stream.clone(),
         selected_snapshot_stream_id: "audio-2".to_owned(),
@@ -751,15 +770,15 @@ fn artifact_audio_extract_succeeded_and_failed_payloads_round_trip() {
         outputs: Vec::new(),
     };
     let failed = ArtifactAudioExtractFailedPayload {
-        job_id: 10,
-        ticket_id: 20,
-        lease_id: Some(30),
-        source_file_version_id: 40,
-        source_file_location_id: Some(50),
-        source_media_snapshot_id: Some(60),
-        source_bundle_id: 70,
-        artifact_handle_id: Some(80),
-        artifact_location_id: Some(90),
+        job_id: voom_core::JobId(10),
+        ticket_id: voom_core::TicketId(20),
+        lease_id: Some(voom_core::LeaseId(30)),
+        source_file_version_id: voom_core::FileVersionId(40),
+        source_file_location_id: Some(voom_core::FileLocationId(50)),
+        source_media_snapshot_id: Some(voom_core::MediaSnapshotId(60)),
+        source_bundle_id: voom_core::BundleId(70),
+        artifact_handle_id: Some(voom_core::ArtifactHandleId(80)),
+        artifact_location_id: Some(voom_core::ArtifactLocationId(90)),
         staging_path: Some("/tmp/voom-stage/20/30/out.ogg".to_owned()),
         selected_stream: Some(selected_stream),
         role: Some("external_audio".to_owned()),
@@ -805,13 +824,13 @@ fn artifact_audio_extract_succeeded_and_failed_payloads_round_trip() {
 #[test]
 fn artifact_remux_failed_payload_serializes_public_error_code() {
     let p = ArtifactRemuxFailedPayload {
-        job_id: 1,
-        ticket_id: 2,
-        lease_id: Some(3),
-        source_file_version_id: 4,
-        source_file_location_id: Some(5),
-        artifact_handle_id: Some(6),
-        artifact_location_id: Some(7),
+        job_id: voom_core::JobId(1),
+        ticket_id: voom_core::TicketId(2),
+        lease_id: Some(voom_core::LeaseId(3)),
+        source_file_version_id: voom_core::FileVersionId(4),
+        source_file_location_id: Some(voom_core::FileLocationId(5)),
+        artifact_handle_id: Some(voom_core::ArtifactHandleId(6)),
+        artifact_location_id: Some(voom_core::ArtifactLocationId(7)),
         staging_path: Some("/tmp/voom-stage/2/3/out.mkv".to_owned()),
         selected_streams: Vec::new(),
         default_streams: Vec::new(),
@@ -896,10 +915,10 @@ fn artifact_verification_succeeded_rejects_failure_shape() {
 #[test]
 fn artifact_commit_started_payload_round_trip() {
     let p = ArtifactCommitStartedPayload {
-        commit_record_id: 30,
-        artifact_handle_id: 10,
-        source_file_version_id: 12,
-        verification_id: 20,
+        commit_record_id: voom_core::ids::ArtifactCommitRecordId(30),
+        artifact_handle_id: voom_core::ArtifactHandleId(10),
+        source_file_version_id: voom_core::FileVersionId(12),
+        verification_id: voom_core::ids::ArtifactVerificationId(20),
         target_path: "/media/final.bin".to_owned(),
         temp_path: "/media/.final.bin.tmp".to_owned(),
     };
@@ -916,12 +935,12 @@ fn artifact_commit_started_payload_round_trip() {
 #[test]
 fn artifact_commit_completed_payload_round_trip() {
     let p = ArtifactCommitCompletedPayload {
-        commit_record_id: 30,
-        artifact_handle_id: 10,
-        result_file_version_id: 31,
-        result_file_location_id: 32,
+        commit_record_id: voom_core::ids::ArtifactCommitRecordId(30),
+        artifact_handle_id: voom_core::ArtifactHandleId(10),
+        result_file_version_id: voom_core::FileVersionId(31),
+        result_file_location_id: voom_core::FileLocationId(32),
         target_path: "/media/final.bin".to_owned(),
-        gate_evaluated_lease_ids: vec![7, 9],
+        gate_evaluated_lease_ids: vec![voom_core::UseLeaseId(7), voom_core::UseLeaseId(9)],
     };
     let json = serde_json::to_value(Event::ArtifactCommitCompleted(p.clone())).unwrap();
     assert_eq!(json["kind"], "artifact.commit_completed");
@@ -939,12 +958,12 @@ fn artifact_commit_completed_payload_defaults_missing_gate_lease_ids() {
     // `#[serde(default)]` contract decodes them to an empty vec. Drop the key
     // from a serialized payload and confirm it round-trips to empty.
     let mut value = serde_json::to_value(ArtifactCommitCompletedPayload {
-        commit_record_id: 30,
-        artifact_handle_id: 10,
-        result_file_version_id: 31,
-        result_file_location_id: 32,
+        commit_record_id: voom_core::ids::ArtifactCommitRecordId(30),
+        artifact_handle_id: voom_core::ArtifactHandleId(10),
+        result_file_version_id: voom_core::FileVersionId(31),
+        result_file_location_id: voom_core::FileLocationId(32),
         target_path: "/media/final.bin".to_owned(),
-        gate_evaluated_lease_ids: vec![1, 2],
+        gate_evaluated_lease_ids: vec![voom_core::UseLeaseId(1), voom_core::UseLeaseId(2)],
     })
     .unwrap();
     value
@@ -958,7 +977,7 @@ fn artifact_commit_completed_payload_defaults_missing_gate_lease_ids() {
 #[test]
 fn artifact_commit_failed_pre_mutation_payload_round_trip() {
     let p = ArtifactCommitFailedPreMutationPayload {
-        artifact_handle_id: 10,
+        artifact_handle_id: voom_core::ArtifactHandleId(10),
         commit_record_id: None,
         target_path: "/media/final.bin".to_owned(),
         error_code: "ARTIFACT_NOT_VERIFIED".to_owned(),
@@ -978,8 +997,8 @@ fn artifact_commit_failed_pre_mutation_payload_round_trip() {
 #[test]
 fn artifact_commit_recovery_required_payload_round_trip() {
     let p = ArtifactCommitRecoveryRequiredPayload {
-        commit_record_id: 30,
-        artifact_handle_id: 10,
+        commit_record_id: voom_core::ids::ArtifactCommitRecordId(30),
+        artifact_handle_id: voom_core::ArtifactHandleId(10),
         target_path: "/media/final.bin".to_owned(),
         temp_path: "/media/.final.bin.tmp".to_owned(),
         recovery_reason: "target_appeared_after_prepare".to_owned(),
@@ -999,7 +1018,7 @@ fn artifact_commit_recovery_required_payload_round_trip() {
 #[test]
 fn artifact_handle_created_payload_rejects_unknown_field() {
     assert_rejects_unknown(&ArtifactHandleCreatedPayload {
-        artifact_handle_id: 1,
+        artifact_handle_id: voom_core::ArtifactHandleId(1),
         privacy_class: "internal".to_owned(),
         durability_class: "durable".to_owned(),
         mutability: "immutable".to_owned(),
@@ -1009,8 +1028,8 @@ fn artifact_handle_created_payload_rejects_unknown_field() {
 #[test]
 fn artifact_location_recorded_payload_rejects_unknown_field() {
     assert_rejects_unknown(&ArtifactLocationRecordedPayload {
-        artifact_location_id: 1,
-        artifact_handle_id: 2,
+        artifact_location_id: voom_core::ArtifactLocationId(1),
+        artifact_handle_id: voom_core::ArtifactHandleId(2),
         kind: "filesystem".to_owned(),
         value: "/media/x".to_owned(),
     });
@@ -1019,8 +1038,8 @@ fn artifact_location_recorded_payload_rejects_unknown_field() {
 #[test]
 fn artifact_location_retired_payload_rejects_unknown_field() {
     assert_rejects_unknown(&ArtifactLocationRetiredPayload {
-        artifact_location_id: 1,
-        artifact_handle_id: 2,
+        artifact_location_id: voom_core::ArtifactLocationId(1),
+        artifact_handle_id: voom_core::ArtifactHandleId(2),
     });
 }
 
@@ -1028,8 +1047,8 @@ fn artifact_location_retired_payload_rejects_unknown_field() {
 fn artifact_lineage_recorded_payload_rejects_unknown_field() {
     assert_rejects_unknown(&ArtifactLineageRecordedPayload {
         artifact_lineage_id: 1,
-        parent_artifact_id: 2,
-        child_artifact_id: 3,
+        parent_artifact_id: voom_core::ArtifactHandleId(2),
+        child_artifact_id: voom_core::ArtifactHandleId(3),
         operation: "transcode".to_owned(),
     });
 }
@@ -1037,10 +1056,10 @@ fn artifact_lineage_recorded_payload_rejects_unknown_field() {
 #[test]
 fn artifact_staged_payload_rejects_unknown_field() {
     assert_rejects_unknown(&ArtifactStagedPayload {
-        artifact_handle_id: 10,
-        artifact_location_id: 11,
-        source_file_version_id: 12,
-        source_file_location_id: Some(13),
+        artifact_handle_id: voom_core::ArtifactHandleId(10),
+        artifact_location_id: voom_core::ArtifactLocationId(11),
+        source_file_version_id: voom_core::FileVersionId(12),
+        source_file_location_id: Some(voom_core::FileLocationId(13)),
         staging_path: "/var/lib/voom/staging/10".to_owned(),
         size_bytes: 4096,
         checksum: "blake3:abc123".to_owned(),
@@ -1050,9 +1069,9 @@ fn artifact_staged_payload_rejects_unknown_field() {
 #[test]
 fn artifact_verification_started_payload_rejects_unknown_field() {
     assert_rejects_unknown(&ArtifactVerificationStartedPayload {
-        artifact_handle_id: 10,
-        artifact_location_id: 11,
-        worker_id: 12,
+        artifact_handle_id: voom_core::ArtifactHandleId(10),
+        artifact_location_id: voom_core::ArtifactLocationId(11),
+        worker_id: voom_core::WorkerId(12),
         path: "/var/lib/voom/staging/10".to_owned(),
     });
 }
@@ -1060,10 +1079,10 @@ fn artifact_verification_started_payload_rejects_unknown_field() {
 #[test]
 fn artifact_verification_succeeded_payload_rejects_unknown_field() {
     assert_rejects_unknown(&ArtifactVerificationSucceededPayload {
-        verification_id: 20,
-        artifact_handle_id: 10,
-        artifact_location_id: 11,
-        worker_id: 12,
+        verification_id: voom_core::ids::ArtifactVerificationId(20),
+        artifact_handle_id: voom_core::ArtifactHandleId(10),
+        artifact_location_id: voom_core::ArtifactLocationId(11),
+        worker_id: voom_core::WorkerId(12),
         observed_size_bytes: 4096,
         observed_checksum: "blake3:abc123".to_owned(),
     });
@@ -1072,10 +1091,10 @@ fn artifact_verification_succeeded_payload_rejects_unknown_field() {
 #[test]
 fn artifact_verification_failed_payload_rejects_unknown_field() {
     assert_rejects_unknown(&ArtifactVerificationFailedPayload {
-        verification_id: 20,
-        artifact_handle_id: 10,
-        artifact_location_id: 11,
-        worker_id: 12,
+        verification_id: voom_core::ids::ArtifactVerificationId(20),
+        artifact_handle_id: voom_core::ArtifactHandleId(10),
+        artifact_location_id: voom_core::ArtifactLocationId(11),
+        worker_id: voom_core::WorkerId(12),
         error_code: "ARTIFACT_CHECKSUM_MISMATCH".to_owned(),
     });
 }
@@ -1083,10 +1102,10 @@ fn artifact_verification_failed_payload_rejects_unknown_field() {
 #[test]
 fn artifact_commit_started_payload_rejects_unknown_field() {
     assert_rejects_unknown(&ArtifactCommitStartedPayload {
-        commit_record_id: 30,
-        artifact_handle_id: 10,
-        source_file_version_id: 12,
-        verification_id: 20,
+        commit_record_id: voom_core::ids::ArtifactCommitRecordId(30),
+        artifact_handle_id: voom_core::ArtifactHandleId(10),
+        source_file_version_id: voom_core::FileVersionId(12),
+        verification_id: voom_core::ids::ArtifactVerificationId(20),
         target_path: "/media/final.bin".to_owned(),
         temp_path: "/media/.final.bin.tmp".to_owned(),
     });
@@ -1095,10 +1114,10 @@ fn artifact_commit_started_payload_rejects_unknown_field() {
 #[test]
 fn artifact_commit_completed_payload_rejects_unknown_field() {
     assert_rejects_unknown(&ArtifactCommitCompletedPayload {
-        commit_record_id: 30,
-        artifact_handle_id: 10,
-        result_file_version_id: 31,
-        result_file_location_id: 32,
+        commit_record_id: voom_core::ids::ArtifactCommitRecordId(30),
+        artifact_handle_id: voom_core::ArtifactHandleId(10),
+        result_file_version_id: voom_core::FileVersionId(31),
+        result_file_location_id: voom_core::FileLocationId(32),
         target_path: "/media/final.bin".to_owned(),
         gate_evaluated_lease_ids: Vec::new(),
     });
@@ -1107,7 +1126,7 @@ fn artifact_commit_completed_payload_rejects_unknown_field() {
 #[test]
 fn artifact_commit_failed_pre_mutation_payload_rejects_unknown_field() {
     assert_rejects_unknown(&ArtifactCommitFailedPreMutationPayload {
-        artifact_handle_id: 10,
+        artifact_handle_id: voom_core::ArtifactHandleId(10),
         commit_record_id: None,
         target_path: "/media/final.bin".to_owned(),
         error_code: "ARTIFACT_NOT_VERIFIED".to_owned(),
@@ -1118,8 +1137,8 @@ fn artifact_commit_failed_pre_mutation_payload_rejects_unknown_field() {
 #[test]
 fn artifact_commit_recovery_required_payload_rejects_unknown_field() {
     assert_rejects_unknown(&ArtifactCommitRecoveryRequiredPayload {
-        commit_record_id: 30,
-        artifact_handle_id: 10,
+        commit_record_id: voom_core::ids::ArtifactCommitRecordId(30),
+        artifact_handle_id: voom_core::ArtifactHandleId(10),
         target_path: "/media/final.bin".to_owned(),
         temp_path: "/media/.final.bin.tmp".to_owned(),
         recovery_reason: "target_appeared_after_prepare".to_owned(),
@@ -1131,11 +1150,11 @@ fn artifact_commit_recovery_required_payload_rejects_unknown_field() {
 #[test]
 fn artifact_transcode_started_payload_rejects_unknown_field() {
     assert_rejects_unknown(&ArtifactTranscodeStartedPayload {
-        job_id: 1,
-        ticket_id: 2,
-        lease_id: Some(3),
-        source_file_version_id: 4,
-        source_file_location_id: 5,
+        job_id: voom_core::JobId(1),
+        ticket_id: voom_core::TicketId(2),
+        lease_id: Some(voom_core::LeaseId(3)),
+        source_file_version_id: voom_core::FileVersionId(4),
+        source_file_location_id: voom_core::FileLocationId(5),
         staging_path: "/tmp/voom-stage/2/3/out.mkv".to_owned(),
         profile_name: "default-hevc".to_owned(),
         encoder: "libx265".to_owned(),
@@ -1149,10 +1168,10 @@ fn artifact_transcode_started_payload_rejects_unknown_field() {
 #[test]
 fn artifact_transcode_progress_payload_rejects_unknown_field() {
     assert_rejects_unknown(&ArtifactTranscodeProgressPayload {
-        job_id: 1,
-        ticket_id: 2,
-        lease_id: Some(3),
-        source_file_version_id: 4,
+        job_id: voom_core::JobId(1),
+        ticket_id: voom_core::TicketId(2),
+        lease_id: Some(voom_core::LeaseId(3)),
+        source_file_version_id: voom_core::FileVersionId(4),
         staging_path: "/tmp/voom-stage/2/3/out.mkv".to_owned(),
         profile_name: "default-hevc".to_owned(),
         encoder: "libx265".to_owned(),
@@ -1168,13 +1187,13 @@ fn artifact_transcode_progress_payload_rejects_unknown_field() {
 #[test]
 fn artifact_transcode_succeeded_payload_rejects_unknown_field() {
     assert_rejects_unknown(&ArtifactTranscodeSucceededPayload {
-        job_id: 1,
-        ticket_id: 2,
-        lease_id: Some(3),
-        source_file_version_id: 4,
-        source_file_location_id: 5,
-        artifact_handle_id: 6,
-        artifact_location_id: 7,
+        job_id: voom_core::JobId(1),
+        ticket_id: voom_core::TicketId(2),
+        lease_id: Some(voom_core::LeaseId(3)),
+        source_file_version_id: voom_core::FileVersionId(4),
+        source_file_location_id: voom_core::FileLocationId(5),
+        artifact_handle_id: voom_core::ArtifactHandleId(6),
+        artifact_location_id: voom_core::ArtifactLocationId(7),
         staging_path: "/tmp/voom-stage/2/3/out.mp4".to_owned(),
         profile_name: "av1-1080p".to_owned(),
         encoder: "libsvtav1".to_owned(),
@@ -1197,11 +1216,11 @@ fn artifact_transcode_succeeded_payload_rejects_unknown_field() {
 #[test]
 fn artifact_transcode_failed_payload_rejects_unknown_field() {
     assert_rejects_unknown(&ArtifactTranscodeFailedPayload {
-        job_id: 1,
-        ticket_id: 2,
-        lease_id: Some(3),
-        source_file_version_id: 4,
-        source_file_location_id: Some(5),
+        job_id: voom_core::JobId(1),
+        ticket_id: voom_core::TicketId(2),
+        lease_id: Some(voom_core::LeaseId(3)),
+        source_file_version_id: voom_core::FileVersionId(4),
+        source_file_location_id: Some(voom_core::FileLocationId(5)),
         staging_path: Some("/tmp/voom-stage/2/3/out.mkv".to_owned()),
         profile_name: "default-av1".to_owned(),
         encoder: "libsvtav1".to_owned(),
@@ -1224,13 +1243,13 @@ fn artifact_transcode_failed_payload_rejects_unknown_field() {
 #[test]
 fn artifact_transcode_succeeded_payload_records_vaapi_evidence_without_a_uuid() {
     let p = ArtifactTranscodeSucceededPayload {
-        job_id: 1,
-        ticket_id: 2,
-        lease_id: Some(3),
-        source_file_version_id: 4,
-        source_file_location_id: 5,
-        artifact_handle_id: 6,
-        artifact_location_id: 7,
+        job_id: voom_core::JobId(1),
+        ticket_id: voom_core::TicketId(2),
+        lease_id: Some(voom_core::LeaseId(3)),
+        source_file_version_id: voom_core::FileVersionId(4),
+        source_file_location_id: voom_core::FileLocationId(5),
+        artifact_handle_id: voom_core::ArtifactHandleId(6),
+        artifact_location_id: voom_core::ArtifactLocationId(7),
         staging_path: "/tmp/voom-stage/2/3/out.mkv".to_owned(),
         profile_name: "gpu-vaapi-hevc".to_owned(),
         encoder: "hevc_vaapi".to_owned(),

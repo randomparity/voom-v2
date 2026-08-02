@@ -335,8 +335,8 @@ async fn resolve_hardlink(
         Some(new_location_id.0),
         now,
         Event::FileLocationAliased(FileLocationAliasedPayload {
-            file_location_id: new_location_id.0,
-            file_version_id: matched.file_version_id.0,
+            file_location_id: new_location_id,
+            file_version_id: matched.file_version_id,
             kind: FileLocationKind::LocalPath.as_str().to_owned(),
             value: location_value.to_owned(),
         }),
@@ -580,8 +580,8 @@ async fn add_bundle_member_event(
         Some(bundle_id.0),
         observed_at,
         Event::AssetBundleMemberAdded(AssetBundleMemberAddedPayload {
-            bundle_id: bundle_id.0,
-            file_asset_id: file_asset_id.0,
+            bundle_id,
+            file_asset_id,
             role: role.as_str().to_owned(),
         }),
     )
@@ -615,7 +615,7 @@ async fn emit_ingest_events(
                 Some(file_asset_id.0),
                 observed_at,
                 Event::FileAssetCreated(FileAssetCreatedPayload {
-                    file_asset_id: file_asset_id.0,
+                    file_asset_id: voom_core::FileAssetId(file_asset_id.0),
                 }),
             )
             .await?;
@@ -635,12 +635,12 @@ async fn emit_ingest_events(
                 Some(version.id.0),
                 observed_at,
                 Event::FileVersionCreated(FileVersionCreatedPayload {
-                    file_version_id: version.id.0,
-                    file_asset_id: version.file_asset_id.0,
+                    file_version_id: version.id,
+                    file_asset_id: version.file_asset_id,
                     content_hash: version.content_hash.clone(),
                     size_bytes: version.size_bytes,
                     produced_by: version.produced_by.as_str().to_owned(),
-                    produced_from_version_id: version.produced_from_version_id.map(|id| id.0),
+                    produced_from_version_id: version.produced_from_version_id,
                 }),
             )
             .await?;
@@ -660,8 +660,8 @@ async fn emit_ingest_events(
                 Some(location.id.0),
                 observed_at,
                 Event::FileLocationRecorded(FileLocationRecordedPayload {
-                    file_location_id: location.id.0,
-                    file_version_id: location.file_version_id.0,
+                    file_location_id: location.id,
+                    file_version_id: location.file_version_id,
                     kind: location.kind.as_str().to_owned(),
                     value: location.value,
                 }),
@@ -685,10 +685,10 @@ async fn emit_ingest_events(
                     Some(evidence.id.0),
                     evidence.observed_at,
                     Event::IdentityEvidenceRecorded(IdentityEvidenceRecordedPayload {
-                        evidence_id: evidence.id.0,
+                        evidence_id: evidence.id,
                         target_type: evidence.target_type.as_str().to_owned(),
                         target_id: evidence.target_id,
-                        assertion_type: evidence.assertion_type.as_str().to_owned(),
+                        assertion_type: evidence.assertion_type,
                         provider: evidence.provider,
                         provider_version: evidence.provider_version,
                         confidence: evidence.confidence,
@@ -723,8 +723,8 @@ async fn emit_ingest_events(
                 Some(location.id.0),
                 observed_at,
                 Event::FileLocationAliased(FileLocationAliasedPayload {
-                    file_location_id: location.id.0,
-                    file_version_id: file_version_id.0,
+                    file_location_id: location.id,
+                    file_version_id: voom_core::FileVersionId(file_version_id.0),
                     kind: location.kind.as_str().to_owned(),
                     value: location.value,
                 }),

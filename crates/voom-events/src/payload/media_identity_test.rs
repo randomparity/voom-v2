@@ -24,9 +24,44 @@ fn assert_rejects_unknown<T: Serialize + DeserializeOwned>(valid: &T) {
 }
 
 #[test]
+fn identity_evidence_uses_typed_ids_and_assertion_vocabulary() {
+    let payload = IdentityEvidenceRecordedPayload {
+        evidence_id: voom_core::EvidenceId(31),
+        target_type: "file_version".to_owned(),
+        target_id: 32,
+        assertion_type: crate::AssertionKind::HashMatch,
+        provider: "ingest".to_owned(),
+        provider_version: "1.0".to_owned(),
+        confidence: 0.9,
+        observed_at: OffsetDateTime::UNIX_EPOCH,
+    };
+
+    let json = serde_json::to_value(&payload).unwrap();
+    assert_eq!(json["evidence_id"], 31);
+    assert_eq!(json["assertion_type"], "hash_match");
+    assert_eq!(
+        serde_json::from_value::<IdentityEvidenceRecordedPayload>(json).unwrap(),
+        payload
+    );
+    assert!(
+        serde_json::from_value::<IdentityEvidenceRecordedPayload>(serde_json::json!({
+            "evidence_id": 31,
+            "target_type": "file_version",
+            "target_id": 32,
+            "assertion_type": "not_an_assertion",
+            "provider": "ingest",
+            "provider_version": "1.0",
+            "confidence": 0.9,
+            "observed_at": "1970-01-01T00:00:00Z"
+        }))
+        .is_err()
+    );
+}
+
+#[test]
 fn media_work_created_round_trips() {
     let p = MediaWorkCreatedPayload {
-        media_work_id: 9,
+        media_work_id: voom_core::MediaWorkId(9),
         kind: "movie".to_owned(),
         display_title: "Solaris".to_owned(),
         provisional: true,
@@ -39,9 +74,9 @@ fn media_work_created_round_trips() {
 #[test]
 fn file_location_recorded_by_move_round_trips() {
     let p = FileLocationRecordedByMovePayload {
-        retired_file_location_id: 1,
-        new_file_location_id: 2,
-        file_version_id: 3,
+        retired_file_location_id: voom_core::FileLocationId(1),
+        new_file_location_id: voom_core::FileLocationId(2),
+        file_version_id: voom_core::FileVersionId(3),
         kind: "local_path".to_owned(),
         value: "/srv/new".to_owned(),
         observed_at: OffsetDateTime::UNIX_EPOCH,
@@ -53,11 +88,13 @@ fn file_location_recorded_by_move_round_trips() {
 
 #[test]
 fn event_kind_matches_payload_for_identity_variants() {
-    let e = Event::FileAssetCreated(FileAssetCreatedPayload { file_asset_id: 1 });
+    let e = Event::FileAssetCreated(FileAssetCreatedPayload {
+        file_asset_id: voom_core::FileAssetId(1),
+    });
     assert_eq!(e.kind(), EventKind::FileAssetCreated);
 
     let e = Event::IdentityEvidenceAccepted(IdentityEvidenceAcceptedPayload {
-        evidence_id: 99,
+        evidence_id: voom_core::EvidenceId(99),
         target_type: "file_asset".to_owned(),
         target_id: 1,
         accepted_user_id: Some("alice".to_owned()),
@@ -71,7 +108,7 @@ fn event_dotted_tag_matches_event_kind_as_str_for_identity_variants() {
     let cases = [
         (
             Event::MediaWorkCreated(MediaWorkCreatedPayload {
-                media_work_id: 1,
+                media_work_id: voom_core::MediaWorkId(1),
                 kind: "movie".to_owned(),
                 display_title: "X".to_owned(),
                 provisional: true,
@@ -80,8 +117,8 @@ fn event_dotted_tag_matches_event_kind_as_str_for_identity_variants() {
         ),
         (
             Event::FileLocationAliased(FileLocationAliasedPayload {
-                file_location_id: 1,
-                file_version_id: 1,
+                file_location_id: voom_core::FileLocationId(1),
+                file_version_id: voom_core::FileVersionId(1),
                 kind: "local_path".to_owned(),
                 value: "/x".to_owned(),
             }),
@@ -97,7 +134,7 @@ fn event_dotted_tag_matches_event_kind_as_str_for_identity_variants() {
 #[test]
 fn media_work_created_payload_rejects_unknown_field() {
     assert_rejects_unknown(&MediaWorkCreatedPayload {
-        media_work_id: 1,
+        media_work_id: voom_core::MediaWorkId(1),
         kind: "movie".to_owned(),
         display_title: "Example".to_owned(),
         provisional: false,
@@ -107,8 +144,8 @@ fn media_work_created_payload_rejects_unknown_field() {
 #[test]
 fn media_variant_created_payload_rejects_unknown_field() {
     assert_rejects_unknown(&MediaVariantCreatedPayload {
-        media_variant_id: 1,
-        media_work_id: 2,
+        media_variant_id: voom_core::MediaVariantId(1),
+        media_work_id: voom_core::MediaWorkId(2),
         label: "1080p".to_owned(),
         provisional: false,
     });
@@ -117,8 +154,8 @@ fn media_variant_created_payload_rejects_unknown_field() {
 #[test]
 fn asset_bundle_created_payload_rejects_unknown_field() {
     assert_rejects_unknown(&AssetBundleCreatedPayload {
-        bundle_id: 1,
-        media_variant_id: 2,
+        bundle_id: voom_core::BundleId(1),
+        media_variant_id: voom_core::MediaVariantId(2),
         display_name: "Main".to_owned(),
     });
 }
@@ -126,8 +163,8 @@ fn asset_bundle_created_payload_rejects_unknown_field() {
 #[test]
 fn asset_bundle_member_added_payload_rejects_unknown_field() {
     assert_rejects_unknown(&AssetBundleMemberAddedPayload {
-        bundle_id: 1,
-        file_asset_id: 2,
+        bundle_id: voom_core::BundleId(1),
+        file_asset_id: voom_core::FileAssetId(2),
         role: "video".to_owned(),
     });
 }
@@ -135,22 +172,24 @@ fn asset_bundle_member_added_payload_rejects_unknown_field() {
 #[test]
 fn asset_bundle_member_removed_payload_rejects_unknown_field() {
     assert_rejects_unknown(&AssetBundleMemberRemovedPayload {
-        bundle_id: 1,
-        file_asset_id: 2,
+        bundle_id: voom_core::BundleId(1),
+        file_asset_id: voom_core::FileAssetId(2),
         role: "video".to_owned(),
     });
 }
 
 #[test]
 fn file_asset_created_payload_rejects_unknown_field() {
-    assert_rejects_unknown(&FileAssetCreatedPayload { file_asset_id: 1 });
+    assert_rejects_unknown(&FileAssetCreatedPayload {
+        file_asset_id: voom_core::FileAssetId(1),
+    });
 }
 
 #[test]
 fn file_version_created_payload_rejects_unknown_field() {
     assert_rejects_unknown(&FileVersionCreatedPayload {
-        file_version_id: 1,
-        file_asset_id: 2,
+        file_version_id: voom_core::FileVersionId(1),
+        file_asset_id: voom_core::FileAssetId(2),
         content_hash: "blake3:abc".to_owned(),
         size_bytes: 4096,
         produced_by: "ingest".to_owned(),
@@ -161,8 +200,8 @@ fn file_version_created_payload_rejects_unknown_field() {
 #[test]
 fn file_location_recorded_payload_rejects_unknown_field() {
     assert_rejects_unknown(&FileLocationRecordedPayload {
-        file_location_id: 1,
-        file_version_id: 2,
+        file_location_id: voom_core::FileLocationId(1),
+        file_version_id: voom_core::FileVersionId(2),
         kind: "filesystem".to_owned(),
         value: "/media/x".to_owned(),
     });
@@ -171,8 +210,8 @@ fn file_location_recorded_payload_rejects_unknown_field() {
 #[test]
 fn file_location_aliased_payload_rejects_unknown_field() {
     assert_rejects_unknown(&FileLocationAliasedPayload {
-        file_location_id: 1,
-        file_version_id: 2,
+        file_location_id: voom_core::FileLocationId(1),
+        file_version_id: voom_core::FileVersionId(2),
         kind: "filesystem".to_owned(),
         value: "/media/y".to_owned(),
     });
@@ -181,8 +220,8 @@ fn file_location_aliased_payload_rejects_unknown_field() {
 #[test]
 fn file_location_retired_by_move_payload_rejects_unknown_field() {
     assert_rejects_unknown(&FileLocationRetiredByMovePayload {
-        file_location_id: 1,
-        file_version_id: 2,
+        file_location_id: voom_core::FileLocationId(1),
+        file_version_id: voom_core::FileVersionId(2),
         retired_at: OffsetDateTime::UNIX_EPOCH,
     });
 }
@@ -190,9 +229,9 @@ fn file_location_retired_by_move_payload_rejects_unknown_field() {
 #[test]
 fn file_location_recorded_by_move_payload_rejects_unknown_field() {
     assert_rejects_unknown(&FileLocationRecordedByMovePayload {
-        retired_file_location_id: 1,
-        new_file_location_id: 2,
-        file_version_id: 3,
+        retired_file_location_id: voom_core::FileLocationId(1),
+        new_file_location_id: voom_core::FileLocationId(2),
+        file_version_id: voom_core::FileVersionId(3),
         kind: "filesystem".to_owned(),
         value: "/media/z".to_owned(),
         observed_at: OffsetDateTime::UNIX_EPOCH,
@@ -202,10 +241,10 @@ fn file_location_recorded_by_move_payload_rejects_unknown_field() {
 #[test]
 fn identity_evidence_recorded_payload_rejects_unknown_field() {
     assert_rejects_unknown(&IdentityEvidenceRecordedPayload {
-        evidence_id: 1,
+        evidence_id: voom_core::EvidenceId(1),
         target_type: "file_version".to_owned(),
         target_id: 2,
-        assertion_type: "checksum".to_owned(),
+        assertion_type: crate::AssertionKind::HashMatch,
         provider: "ingest".to_owned(),
         provider_version: "1.0".to_owned(),
         confidence: 0.9,
@@ -216,7 +255,7 @@ fn identity_evidence_recorded_payload_rejects_unknown_field() {
 #[test]
 fn identity_evidence_accepted_payload_rejects_unknown_field() {
     assert_rejects_unknown(&IdentityEvidenceAcceptedPayload {
-        evidence_id: 1,
+        evidence_id: voom_core::EvidenceId(1),
         target_type: "file_version".to_owned(),
         target_id: 2,
         accepted_user_id: Some("alice".to_owned()),
@@ -227,8 +266,8 @@ fn identity_evidence_accepted_payload_rejects_unknown_field() {
 #[test]
 fn identity_evidence_superseded_payload_rejects_unknown_field() {
     assert_rejects_unknown(&IdentityEvidenceSupersededPayload {
-        superseded_evidence_id: 1,
-        superseded_by_evidence_id: 2,
+        superseded_evidence_id: voom_core::EvidenceId(1),
+        superseded_by_evidence_id: voom_core::EvidenceId(2),
         target_type: "file_version".to_owned(),
         target_id: 3,
         superseded_at: OffsetDateTime::UNIX_EPOCH,
@@ -238,9 +277,9 @@ fn identity_evidence_superseded_payload_rejects_unknown_field() {
 #[test]
 fn media_snapshot_recorded_payload_rejects_unknown_field() {
     assert_rejects_unknown(&MediaSnapshotRecordedPayload {
-        media_snapshot_id: 1,
-        file_version_id: 2,
-        probed_by_worker_id: Some(3),
+        media_snapshot_id: voom_core::MediaSnapshotId(1),
+        file_version_id: voom_core::FileVersionId(2),
+        probed_by_worker_id: Some(voom_core::WorkerId(3)),
         probed_at: OffsetDateTime::UNIX_EPOCH,
     });
 }

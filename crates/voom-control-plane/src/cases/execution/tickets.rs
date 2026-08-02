@@ -48,8 +48,8 @@ impl ControlPlane {
             Some(ticket.id.0),
             input.created_at,
             Event::TicketCreated(TicketCreatedPayload {
-                ticket_id: ticket.id.0,
-                job_id: input.job_id.map(|j| j.0),
+                ticket_id: ticket.id,
+                job_id: input.job_id,
                 kind: input.kind.clone(),
                 priority: input.priority,
                 max_attempts: input.max_attempts,
@@ -96,7 +96,7 @@ impl ControlPlane {
                 SubjectType::Ticket,
                 Some(t.id.0),
                 now,
-                Event::TicketReady(TicketReadyPayload { ticket_id: t.id.0 }),
+                Event::TicketReady(TicketReadyPayload { ticket_id: t.id }),
             )
             .await?;
         }
@@ -206,7 +206,7 @@ impl ControlPlane {
                 Some(ticket.id.0),
                 now,
                 Event::TicketFailedTerminal(TicketFailedTerminalPayload {
-                    ticket_id: ticket.id.0,
+                    ticket_id: ticket.id,
                     attempt: ticket.attempt,
                     max_attempts: ticket.max_attempts,
                     reason: reason.to_owned(),
@@ -223,7 +223,7 @@ impl ControlPlane {
                 Some(ticket.id.0),
                 now,
                 Event::TicketFailedRetriable(TicketFailedRetriablePayload {
-                    ticket_id: ticket.id.0,
+                    ticket_id: ticket.id,
                     attempt: ticket.attempt,
                     max_attempts: ticket.max_attempts,
                     reason: reason.to_owned(),

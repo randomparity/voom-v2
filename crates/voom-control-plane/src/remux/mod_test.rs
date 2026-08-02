@@ -140,7 +140,7 @@ async fn execute_rejects_source_media_snapshot_for_other_file_version() {
     assert!(err.to_string().contains("does not belong"));
     let failed = single_failed_remux_payload(&cp).await;
     assert_eq!(failed.error_code, "CONFIG_INVALID");
-    assert_eq!(failed.source_file_location_id, Some(seeded.1.0));
+    assert_eq!(failed.source_file_location_id, Some(seeded.1));
     assert_eq!(failed.staging_path, None);
     assert!(failed.selected_streams.is_empty());
 }
@@ -197,8 +197,14 @@ async fn verification_failure_event_includes_staged_artifact_ids() {
     assert_eq!(err.error_code(), ErrorCode::VerificationFailure);
     let failed = single_failed_remux_payload(&cp).await;
     assert_eq!(failed.error_code, "VERIFICATION_FAILURE");
-    assert_eq!(failed.artifact_handle_id, Some(1));
-    assert_eq!(failed.artifact_location_id, Some(1));
+    assert_eq!(
+        failed.artifact_handle_id,
+        Some(voom_core::ArtifactHandleId(1))
+    );
+    assert_eq!(
+        failed.artifact_location_id,
+        Some(voom_core::ArtifactLocationId(1))
+    );
 }
 
 #[tokio::test]

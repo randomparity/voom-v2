@@ -114,8 +114,8 @@ impl ControlPlane {
             Some(bundle.id.0),
             created_at,
             Event::AssetBundleCreated(AssetBundleCreatedPayload {
-                bundle_id: bundle.id.0,
-                media_variant_id: bundle.media_variant_id.0,
+                bundle_id: bundle.id,
+                media_variant_id: bundle.media_variant_id,
                 display_name: bundle.display_name.clone(),
             }),
         )
@@ -157,8 +157,8 @@ impl ControlPlane {
             Some(bundle_id.0),
             observed_at,
             Event::AssetBundleMemberAdded(AssetBundleMemberAddedPayload {
-                bundle_id: bundle_id.0,
-                file_asset_id: file_asset_id.0,
+                bundle_id,
+                file_asset_id,
                 role: role.as_str().to_owned(),
             }),
         )
@@ -194,8 +194,8 @@ impl ControlPlane {
             Some(bundle_id.0),
             observed_at,
             Event::AssetBundleMemberRemoved(AssetBundleMemberRemovedPayload {
-                bundle_id: bundle_id.0,
-                file_asset_id: file_asset_id.0,
+                bundle_id,
+                file_asset_id,
                 role: removed.role.as_str().to_owned(),
             }),
         )
@@ -282,8 +282,8 @@ async fn create_primary_bundle_identity_in_tx(
         Some(bundle.id.0),
         observed_at,
         Event::AssetBundleCreated(AssetBundleCreatedPayload {
-            bundle_id: bundle.id.0,
-            media_variant_id: bundle.media_variant_id.0,
+            bundle_id: bundle.id,
+            media_variant_id: bundle.media_variant_id,
             display_name: bundle.display_name,
         }),
     )
@@ -317,7 +317,7 @@ async fn create_provisional_media_work_in_tx(
         Some(work.id.0),
         observed_at,
         Event::MediaWorkCreated(MediaWorkCreatedPayload {
-            media_work_id: work.id.0,
+            media_work_id: work.id,
             kind: work.kind.as_str().to_owned(),
             display_title: work.display_title,
             provisional: work.provisional,
@@ -352,8 +352,8 @@ async fn create_provisional_media_variant_in_tx(
         Some(variant.id.0),
         observed_at,
         Event::MediaVariantCreated(MediaVariantCreatedPayload {
-            media_variant_id: variant.id.0,
-            media_work_id: variant.media_work_id.0,
+            media_variant_id: variant.id,
+            media_work_id: variant.media_work_id,
             label: variant.label,
             provisional: variant.provisional,
         }),
@@ -388,8 +388,8 @@ async fn add_primary_member_in_tx(
         Some(bundle_id.0),
         observed_at,
         Event::AssetBundleMemberAdded(AssetBundleMemberAddedPayload {
-            bundle_id: bundle_id.0,
-            file_asset_id: file_asset_id.0,
+            bundle_id,
+            file_asset_id,
             role: role.as_str().to_owned(),
         }),
     )

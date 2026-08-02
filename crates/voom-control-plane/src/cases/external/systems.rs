@@ -44,7 +44,7 @@ impl ControlPlane {
             Some(system.id.0),
             now,
             Event::ExternalSystemRegistered(ExternalSystemRegisteredPayload {
-                external_system_id: system.id.0,
+                external_system_id: system.id,
                 kind: system.kind.as_str().to_owned(),
                 display_name: system.display_name.clone(),
                 health_status: system.health_status.as_str().to_owned(),
@@ -132,7 +132,7 @@ impl ControlPlane {
                 Some(id.0),
                 now,
                 Event::ExternalSystemHealthChanged(ExternalSystemHealthChangedPayload {
-                    external_system_id: id.0,
+                    external_system_id: id,
                     previous: current.health_status.as_str().to_owned(),
                     current: probed.as_str().to_owned(),
                 }),
@@ -256,8 +256,8 @@ impl ControlPlane {
             Some(link.external_system_id.0),
             now,
             Event::ExternalSystemLinked(ExternalSystemLinkedPayload {
-                external_system_id: link.external_system_id.0,
-                link_id: link.id.0,
+                external_system_id: link.external_system_id,
+                link_id: link.id,
                 target_type: link.target_type.as_str().to_owned(),
                 target_id: link.target_id,
                 external_ref: link.external_ref.clone(),
@@ -294,8 +294,8 @@ impl ControlPlane {
             Some(link.external_system_id.0),
             now,
             Event::ExternalSystemUnlinked(ExternalSystemUnlinkedPayload {
-                external_system_id: link.external_system_id.0,
-                link_id: link.id.0,
+                external_system_id: link.external_system_id,
+                link_id: link.id,
                 target_type: link.target_type.as_str().to_owned(),
                 target_id: link.target_id,
                 external_ref: link.external_ref.clone(),

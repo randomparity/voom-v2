@@ -1,12 +1,13 @@
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
+use voom_core::{FileLocationId, UseLeaseId};
 
 // --- M3 — asset use leases (Phase 1) -----------------------------------------
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct UseLeaseAcquiredPayload {
-    pub lease_id: u64,
+    pub lease_id: UseLeaseId,
     /// One of: `"playback" | "scan" | "copy" | "manual_lock" | "external_lock" | "worker_operation"`.
     pub kind: String,
     /// One of: `"asset" | "bundle" | "version" | "location"`.
@@ -27,7 +28,7 @@ pub struct UseLeaseAcquiredPayload {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct UseLeaseReleasedPayload {
-    pub lease_id: u64,
+    pub lease_id: UseLeaseId,
     /// One of: `"released" | "superseded"` (the issuer-driven release reasons).
     /// `expired`, `force_released`, and `issuer_lost` are emitted by their
     /// dedicated event variants.
@@ -39,7 +40,7 @@ pub struct UseLeaseReleasedPayload {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct UseLeaseExpiredPayload {
-    pub lease_id: u64,
+    pub lease_id: UseLeaseId,
     #[serde(with = "time::serde::iso8601")]
     pub released_at: OffsetDateTime,
 }
@@ -47,7 +48,7 @@ pub struct UseLeaseExpiredPayload {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct UseLeaseForceReleasedPayload {
-    pub lease_id: u64,
+    pub lease_id: UseLeaseId,
     pub actor: String,
     pub reason: String,
     #[serde(with = "time::serde::iso8601")]
@@ -57,7 +58,7 @@ pub struct UseLeaseForceReleasedPayload {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct UseLeaseRecoveredStaleIssuerPayload {
-    pub lease_id: u64,
+    pub lease_id: UseLeaseId,
     pub actor: String,
     pub reason: String,
     #[serde(with = "time::serde::iso8601")]
@@ -67,9 +68,9 @@ pub struct UseLeaseRecoveredStaleIssuerPayload {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct UseLeaseReanchoredByMovePayload {
-    pub lease_id: u64,
-    pub retired_location_id: u64,
-    pub new_location_id: u64,
+    pub lease_id: UseLeaseId,
+    pub retired_location_id: FileLocationId,
+    pub new_location_id: FileLocationId,
     #[serde(with = "time::serde::iso8601")]
     pub reanchored_at: OffsetDateTime,
 }

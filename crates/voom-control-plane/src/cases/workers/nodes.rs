@@ -71,7 +71,7 @@ impl ControlPlane {
             Some(node.id.0),
             now,
             Event::NodeRegistered(NodeRegisteredPayload {
-                node_id: node.id.0,
+                node_id: node.id,
                 name: node.name.clone(),
                 kind: node.kind,
                 status: node.status,
@@ -136,7 +136,7 @@ impl ControlPlane {
             Some(node.id.0),
             now,
             Event::NodeHeartbeatRecorded(NodeHeartbeatRecordedPayload {
-                node_id: node.id.0,
+                node_id: node.id,
                 status: node.status,
                 last_seen_at: node.last_seen_at,
                 epoch: node.epoch,
@@ -161,7 +161,7 @@ impl ControlPlane {
                 Some(node.id.0),
                 now,
                 Event::NodeMarkedStale(NodeMarkedStalePayload {
-                    node_id: node.id.0,
+                    node_id: node.id,
                     marked_stale_at: now,
                     epoch: node.epoch,
                 }),
@@ -194,7 +194,7 @@ impl ControlPlane {
             Some(node.id.0),
             now,
             Event::NodeRetired(NodeRetiredPayload {
-                node_id: node.id.0,
+                node_id: node.id,
                 retired_at: now,
                 epoch: node.epoch,
             }),

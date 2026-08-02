@@ -283,8 +283,8 @@ async fn create_missing_tickets(
             Some(ticket.id.0),
             input.created_at,
             Event::TicketCreated(TicketCreatedPayload {
-                ticket_id: ticket.id.0,
-                job_id: input.job_id.map(|job_id| job_id.0),
+                ticket_id: ticket.id,
+                job_id: input.job_id,
                 kind: input.kind.clone(),
                 priority: input.priority,
                 max_attempts: input.max_attempts,

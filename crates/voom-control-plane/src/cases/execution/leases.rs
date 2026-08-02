@@ -82,9 +82,9 @@ impl ControlPlane {
             Some(lease.id.0),
             now,
             Event::LeaseAcquired(LeaseAcquiredPayload {
-                lease_id: lease.id.0,
-                ticket_id: lease.ticket_id.0,
-                worker_id: lease.worker_id.0,
+                lease_id: lease.id,
+                ticket_id: lease.ticket_id,
+                worker_id: lease.worker_id,
                 ttl_seconds: lease.ttl_seconds,
                 expires_at: lease.expires_at,
             }),
@@ -104,9 +104,9 @@ impl ControlPlane {
             Some(ticket.id.0),
             now,
             Event::TicketLeased(TicketLeasedPayload {
-                ticket_id: ticket.id.0,
-                lease_id: lease.id.0,
-                worker_id: lease.worker_id.0,
+                ticket_id: ticket.id,
+                lease_id: lease.id,
+                worker_id: lease.worker_id,
                 attempt: ticket.attempt,
             }),
         )
@@ -206,8 +206,8 @@ impl ControlPlane {
             Some(lease.id.0),
             now,
             Event::LeaseReleased(LeaseReleasedPayload {
-                lease_id: lease.id.0,
-                ticket_id: lease.ticket_id.0,
+                lease_id: lease.id,
+                ticket_id: lease.ticket_id,
                 release_reason: lease
                     .release_reason
                     .map(|r| r.as_str().to_owned())
@@ -222,8 +222,8 @@ impl ControlPlane {
             Some(lease.ticket_id.0),
             now,
             Event::TicketSucceeded(TicketSucceededPayload {
-                ticket_id: lease.ticket_id.0,
-                lease_id: lease.id.0,
+                ticket_id: lease.ticket_id,
+                lease_id: lease.id,
             }),
         )
         .await?;
@@ -243,7 +243,7 @@ impl ControlPlane {
                     SubjectType::Ticket,
                     Some(t.id.0),
                     now,
-                    Event::TicketReady(TicketReadyPayload { ticket_id: t.id.0 }),
+                    Event::TicketReady(TicketReadyPayload { ticket_id: t.id }),
                 )
                 .await?;
             }
@@ -302,8 +302,8 @@ impl ControlPlane {
             Some(lease.id.0),
             now,
             Event::LeaseReleased(LeaseReleasedPayload {
-                lease_id: lease.id.0,
-                ticket_id: lease.ticket_id.0,
+                lease_id: lease.id,
+                ticket_id: lease.ticket_id,
                 release_reason: lease
                     .release_reason
                     .map(|r| r.as_str().to_owned())
@@ -325,7 +325,7 @@ impl ControlPlane {
                     Some(ticket.id.0),
                     now,
                     Event::TicketFailedRetriable(TicketFailedRetriablePayload {
-                        ticket_id: ticket.id.0,
+                        ticket_id: ticket.id,
                         attempt: ticket.attempt,
                         max_attempts: ticket.max_attempts,
                         reason,
@@ -353,7 +353,7 @@ impl ControlPlane {
                     Some(ticket.id.0),
                     now,
                     Event::TicketFailedTerminal(TicketFailedTerminalPayload {
-                        ticket_id: ticket.id.0,
+                        ticket_id: ticket.id,
                         attempt: ticket.attempt,
                         max_attempts: ticket.max_attempts,
                         reason,
@@ -411,8 +411,8 @@ impl ControlPlane {
             Some(lease_id.0),
             now,
             Event::LeaseExpired(LeaseExpiredPayload {
-                lease_id: lease_id.0,
-                ticket_id: ticket_id.0,
+                lease_id,
+                ticket_id,
             }),
         )
         .await?;
@@ -424,8 +424,8 @@ impl ControlPlane {
                 Some(ticket_id.0),
                 now,
                 Event::TicketRequeuedAfterLeaseExpiry(TicketRequeuedAfterLeaseExpiryPayload {
-                    ticket_id: ticket_id.0,
-                    lease_id: lease_id.0,
+                    ticket_id,
+                    lease_id,
                 }),
             )
             .await?;
@@ -462,7 +462,7 @@ impl ControlPlane {
                 Some(ticket_id.0),
                 now,
                 Event::TicketFailedTerminal(TicketFailedTerminalPayload {
-                    ticket_id: ticket_id.0,
+                    ticket_id,
                     attempt: failed.attempt,
                     max_attempts: failed.max_attempts,
                     reason: reason.to_owned(),
@@ -511,8 +511,8 @@ impl ControlPlane {
             Some(outcome.lease.id.0),
             now,
             Event::LeaseForceReleased(LeaseForceReleasedPayload {
-                lease_id: outcome.lease.id.0,
-                ticket_id: outcome.lease.ticket_id.0,
+                lease_id: outcome.lease.id,
+                ticket_id: outcome.lease.ticket_id,
                 actor: actor.clone(),
                 reason: reason.clone(),
                 also_requeue,
@@ -527,8 +527,8 @@ impl ControlPlane {
                 Some(outcome.lease.ticket_id.0),
                 now,
                 Event::TicketRequeuedAfterForceRelease(TicketRequeuedAfterForceReleasePayload {
-                    ticket_id: outcome.lease.ticket_id.0,
-                    lease_id: outcome.lease.id.0,
+                    ticket_id: outcome.lease.ticket_id,
+                    lease_id: outcome.lease.id,
                     actor,
                     reason,
                 }),
@@ -555,7 +555,7 @@ impl ControlPlane {
                 Some(outcome.lease.ticket_id.0),
                 now,
                 Event::TicketFailedTerminal(TicketFailedTerminalPayload {
-                    ticket_id: outcome.lease.ticket_id.0,
+                    ticket_id: outcome.lease.ticket_id,
                     attempt: outcome.attempt,
                     max_attempts: outcome.max_attempts,
                     reason: reason.to_owned(),

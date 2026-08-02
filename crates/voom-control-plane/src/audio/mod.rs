@@ -259,7 +259,7 @@ impl ControlPlane {
                 operation_key: acknowledgement.operation_key,
                 generation: acknowledgement.generation,
                 attempt_id: acknowledgement.attempt_id,
-                worker_id: acknowledgement.worker_id.0,
+                worker_id: acknowledgement.worker_id,
                 worker_epoch: acknowledgement.worker_epoch,
                 idempotency_key: acknowledgement.idempotency_key,
                 acknowledged_by: acknowledgement.acknowledged_by,
@@ -1769,8 +1769,8 @@ fn hydrate_extract_artifact_context(
     context.artifact_handle_id = staged.first().map(|item| item.artifact_handle_id);
     context.artifact_location_id = staged.first().map(|item| item.artifact_location_id);
     for (member, artifact) in context.outputs.iter_mut().zip(staged) {
-        member.artifact_handle_id = Some(artifact.artifact_handle_id.0);
-        member.artifact_location_id = Some(artifact.artifact_location_id.0);
+        member.artifact_handle_id = Some(artifact.artifact_handle_id);
+        member.artifact_location_id = Some(artifact.artifact_location_id);
     }
 }
 
@@ -2041,8 +2041,8 @@ fn extract_attempt_members(
         .collect();
     let mut members = events::extract_member_payloads(selection, &staging_paths, &paths.targets);
     for (member, output) in members.iter_mut().zip(&paths.operation.outputs) {
-        member.artifact_handle_id = output.artifact_handle_id.map(|id| id.0);
-        member.artifact_location_id = output.artifact_location_id.map(|id| id.0);
+        member.artifact_handle_id = output.artifact_handle_id;
+        member.artifact_location_id = output.artifact_location_id;
     }
     members
 }

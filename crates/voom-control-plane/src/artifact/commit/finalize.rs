@@ -84,16 +84,12 @@ pub(crate) async fn finalize_commit_in_tx(
         prepared.artifact_handle_id,
         now,
         Event::ArtifactCommitCompleted(ArtifactCommitCompletedPayload {
-            commit_record_id: committed.id.0,
-            artifact_handle_id: prepared.artifact_handle_id.0,
-            result_file_version_id: result_version.id.0,
-            result_file_location_id: result_location.id.0,
+            commit_record_id: committed.id,
+            artifact_handle_id: prepared.artifact_handle_id,
+            result_file_version_id: result_version.id,
+            result_file_location_id: result_location.id,
             target_path: prepared.target_path.display().to_string(),
-            gate_evaluated_lease_ids: prepared
-                .gate_evaluated_lease_ids
-                .iter()
-                .map(|id| id.0)
-                .collect(),
+            gate_evaluated_lease_ids: prepared.gate_evaluated_lease_ids.clone(),
         }),
     )
     .await?;

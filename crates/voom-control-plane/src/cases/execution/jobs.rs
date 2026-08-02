@@ -32,7 +32,7 @@ impl ControlPlane {
             Some(job.id.0),
             input.created_at,
             Event::JobOpened(JobOpenedPayload {
-                job_id: job.id.0,
+                job_id: job.id,
                 kind: input.kind,
                 priority: input.priority,
             }),
@@ -65,7 +65,7 @@ impl ControlPlane {
             SubjectType::Job,
             Some(id.0),
             now,
-            Event::JobSucceeded(JobSucceededPayload { job_id: id.0 }),
+            Event::JobSucceeded(JobSucceededPayload { job_id: id }),
         )
         .await?;
         commit_tx(tx).await?;
@@ -90,10 +90,7 @@ impl ControlPlane {
             SubjectType::Job,
             Some(id.0),
             now,
-            Event::JobFailed(JobFailedPayload {
-                job_id: id.0,
-                reason,
-            }),
+            Event::JobFailed(JobFailedPayload { job_id: id, reason }),
         )
         .await?;
         commit_tx(tx).await?;
@@ -119,10 +116,7 @@ impl ControlPlane {
             SubjectType::Job,
             Some(id.0),
             now,
-            Event::JobCancelled(JobCancelledPayload {
-                job_id: id.0,
-                reason,
-            }),
+            Event::JobCancelled(JobCancelledPayload { job_id: id, reason }),
         )
         .await?;
         commit_tx(tx).await?;

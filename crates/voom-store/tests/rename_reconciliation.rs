@@ -283,9 +283,9 @@ async fn reconcile_rename_reanchors_location_scoped_use_lease() {
     else {
         panic!("expected UseLeaseReanchoredByMove payload");
     };
-    assert_eq!(payload.lease_id, lease.id.0);
-    assert_eq!(payload.retired_location_id, prior_loc.0);
-    assert_eq!(payload.new_location_id, outcome.new_file_location_id.0);
+    assert_eq!(payload.lease_id, lease.id);
+    assert_eq!(payload.retired_location_id, prior_loc);
+    assert_eq!(payload.new_location_id, outcome.new_file_location_id);
 }
 
 // --- Conflict paths: every one asserts no side effects -------------------

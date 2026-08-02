@@ -418,7 +418,7 @@ async fn acquire_lease_emits_lease_acquired_and_ticket_leased() {
         panic!("expected TicketLeased payload");
     };
     assert_eq!(payload.attempt, 1, "first dispatch bumps attempt to 1");
-    assert_eq!(payload.lease_id, lease.id.0);
+    assert_eq!(payload.lease_id, lease.id);
 }
 
 #[tokio::test]
@@ -1265,7 +1265,7 @@ async fn release_lease_promotes_dependent_and_emits_ticket_ready() {
     let voom_events::Event::TicketReady(payload) = &page.items[0].envelope.payload else {
         panic!("expected TicketReady payload");
     };
-    assert_eq!(payload.ticket_id, child.id.0);
+    assert_eq!(payload.ticket_id, child.id);
 }
 
 #[tokio::test]

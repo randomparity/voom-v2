@@ -227,7 +227,7 @@ async fn force_release_then_recovery_audit_event_carries_actor_and_reason() {
         voom_events::Event::UseLeaseForceReleased(p) => {
             assert_eq!(p.actor, "operator-jane");
             assert_eq!(p.reason, "clearing for destructive commit");
-            assert_eq!(p.lease_id, lease.id.0);
+            assert_eq!(p.lease_id, lease.id);
         }
         other => panic!("expected UseLeaseForceReleased, got {other:?}"),
     }
@@ -267,9 +267,9 @@ async fn reanchor_on_move_emits_one_event_per_lease() {
 
     match &reanchored_row.envelope.payload {
         voom_events::Event::UseLeaseReanchoredByMove(p) => {
-            assert_eq!(p.retired_location_id, loc_old.0);
-            assert_eq!(p.new_location_id, loc_new.0);
-            assert_eq!(p.lease_id, lease.id.0);
+            assert_eq!(p.retired_location_id, loc_old);
+            assert_eq!(p.new_location_id, loc_new);
+            assert_eq!(p.lease_id, lease.id);
         }
         other => panic!("expected UseLeaseReanchoredByMove, got {other:?}"),
     }

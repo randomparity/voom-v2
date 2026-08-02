@@ -1532,10 +1532,10 @@ async fn create_extract_pending_in_tx(
         pending_input,
         |commit_record_id| {
             Event::ArtifactCommitStarted(ArtifactCommitStartedPayload {
-                commit_record_id: commit_record_id.0,
-                artifact_handle_id: output.artifact_handle_id.0,
-                source_file_version_id: set.source_file_version_id.0,
-                verification_id: output.verification_id.0,
+                commit_record_id,
+                artifact_handle_id: output.artifact_handle_id,
+                source_file_version_id: set.source_file_version_id,
+                verification_id: output.verification_id,
                 target_path: inspected.target_path.display().to_string(),
                 temp_path: inspected.temp_path.display().to_string(),
             })
@@ -1649,10 +1649,10 @@ async fn record_staged_audio_in_tx(
         Some(handle.id.0),
         now,
         Event::ArtifactStaged(ArtifactStagedPayload {
-            artifact_handle_id: handle.id.0,
-            artifact_location_id: location.id.0,
-            source_file_version_id: input.source_file_version_id.0,
-            source_file_location_id: Some(input.source_file_location_id.0),
+            artifact_handle_id: handle.id,
+            artifact_location_id: location.id,
+            source_file_version_id: input.source_file_version_id,
+            source_file_location_id: Some(input.source_file_location_id),
             staging_path: location.value.clone(),
             size_bytes: input.size_bytes,
             checksum: input.checksum.to_owned(),
@@ -1832,16 +1832,12 @@ async fn append_extract_commit_completed_event(
         output.artifact_handle_id,
         now,
         Event::ArtifactCommitCompleted(ArtifactCommitCompletedPayload {
-            commit_record_id: sidecar.commit_record.id.0,
-            artifact_handle_id: output.artifact_handle_id.0,
-            result_file_version_id: sidecar.file_version_id.0,
-            result_file_location_id: sidecar.file_location_id.0,
+            commit_record_id: sidecar.commit_record.id,
+            artifact_handle_id: output.artifact_handle_id,
+            result_file_version_id: sidecar.file_version_id,
+            result_file_location_id: sidecar.file_location_id,
             target_path: member.target_path.display().to_string(),
-            gate_evaluated_lease_ids: member
-                .gate_evaluated_lease_ids
-                .iter()
-                .map(|id| id.0)
-                .collect(),
+            gate_evaluated_lease_ids: member.gate_evaluated_lease_ids.clone(),
         }),
     )
     .await
@@ -1951,8 +1947,8 @@ async fn mark_extract_recovery_members(
                 recovery_reason: recovery_reason.clone(),
                 event: Event::ArtifactCommitRecoveryRequired(
                     ArtifactCommitRecoveryRequiredPayload {
-                        commit_record_id: member.commit_record_id.0,
-                        artifact_handle_id: member.artifact_handle_id.0,
+                        commit_record_id: member.commit_record_id,
+                        artifact_handle_id: member.artifact_handle_id,
                         target_path: member.target_path.display().to_string(),
                         temp_path: member.temp_path.display().to_string(),
                         recovery_reason,

@@ -422,12 +422,12 @@ async fn success_copies_bytes_records_rows_and_emits_artifact_staged() {
     let voom_events::Event::ArtifactStaged(payload) = &events.items[0].envelope.payload else {
         panic!("expected artifact.staged payload");
     };
-    assert_eq!(payload.artifact_handle_id, report.artifact_handle_id.0);
-    assert_eq!(payload.artifact_location_id, report.artifact_location_id.0);
-    assert_eq!(payload.source_file_version_id, seeded.file_version_id.0);
+    assert_eq!(payload.artifact_handle_id, report.artifact_handle_id);
+    assert_eq!(payload.artifact_location_id, report.artifact_location_id);
+    assert_eq!(payload.source_file_version_id, seeded.file_version_id);
     assert_eq!(
         payload.source_file_location_id,
-        Some(seeded.file_location_id.0)
+        Some(seeded.file_location_id)
     );
     assert_eq!(
         payload.staging_path,

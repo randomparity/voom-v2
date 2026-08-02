@@ -25,9 +25,25 @@ fn assert_rejects_unknown<T: Serialize + DeserializeOwned>(valid: &T) {
 }
 
 #[test]
+fn worker_ids_preserve_numeric_wire_representation() {
+    let payload = WorkerLinkedToNodePayload {
+        worker_id: voom_core::WorkerId(21),
+        node_id: voom_core::NodeId(22),
+    };
+
+    let json = serde_json::to_value(&payload).unwrap();
+    assert_eq!(json["worker_id"], 21);
+    assert_eq!(json["node_id"], 22);
+    assert_eq!(
+        serde_json::from_value::<WorkerLinkedToNodePayload>(json).unwrap(),
+        payload
+    );
+}
+
+#[test]
 fn node_registered_payload_round_trip() {
     let p = NodeRegisteredPayload {
-        node_id: 42,
+        node_id: voom_core::NodeId(42),
         name: "node-a".to_owned(),
         kind: NodeKind::Local,
         status: NodeStatus::Active,
@@ -43,7 +59,7 @@ fn node_registered_payload_round_trip() {
 #[test]
 fn node_heartbeat_recorded_payload_round_trip() {
     let p = NodeHeartbeatRecordedPayload {
-        node_id: 42,
+        node_id: voom_core::NodeId(42),
         status: NodeStatus::Active,
         last_seen_at: OffsetDateTime::UNIX_EPOCH,
         epoch: 7,
@@ -61,7 +77,7 @@ fn node_heartbeat_recorded_payload_round_trip() {
 #[test]
 fn node_marked_stale_payload_round_trip() {
     let p = NodeMarkedStalePayload {
-        node_id: 42,
+        node_id: voom_core::NodeId(42),
         marked_stale_at: OffsetDateTime::UNIX_EPOCH,
         epoch: 8,
     };
@@ -75,7 +91,7 @@ fn node_marked_stale_payload_round_trip() {
 #[test]
 fn node_retired_payload_round_trip() {
     let p = NodeRetiredPayload {
-        node_id: 42,
+        node_id: voom_core::NodeId(42),
         retired_at: OffsetDateTime::UNIX_EPOCH,
         epoch: 9,
     };
@@ -89,8 +105,8 @@ fn node_retired_payload_round_trip() {
 #[test]
 fn worker_linked_to_node_payload_round_trip() {
     let p = WorkerLinkedToNodePayload {
-        worker_id: 7,
-        node_id: 42,
+        worker_id: voom_core::WorkerId(7),
+        node_id: voom_core::NodeId(42),
     };
     let json = serde_json::to_value(Event::WorkerLinkedToNode(p.clone())).unwrap();
     assert_eq!(json["kind"], "worker.linked_to_node");
@@ -105,7 +121,7 @@ fn worker_linked_to_node_payload_round_trip() {
 #[test]
 fn node_registered_payload_rejects_unknown_field() {
     assert_rejects_unknown(&NodeRegisteredPayload {
-        node_id: 42,
+        node_id: voom_core::NodeId(42),
         name: "node-a".to_owned(),
         kind: NodeKind::Local,
         status: NodeStatus::Active,
@@ -116,7 +132,7 @@ fn node_registered_payload_rejects_unknown_field() {
 #[test]
 fn node_heartbeat_recorded_payload_rejects_unknown_field() {
     assert_rejects_unknown(&NodeHeartbeatRecordedPayload {
-        node_id: 42,
+        node_id: voom_core::NodeId(42),
         status: NodeStatus::Active,
         last_seen_at: OffsetDateTime::UNIX_EPOCH,
         epoch: 7,
@@ -126,7 +142,7 @@ fn node_heartbeat_recorded_payload_rejects_unknown_field() {
 #[test]
 fn node_marked_stale_payload_rejects_unknown_field() {
     assert_rejects_unknown(&NodeMarkedStalePayload {
-        node_id: 42,
+        node_id: voom_core::NodeId(42),
         marked_stale_at: OffsetDateTime::UNIX_EPOCH,
         epoch: 8,
     });
@@ -135,7 +151,7 @@ fn node_marked_stale_payload_rejects_unknown_field() {
 #[test]
 fn node_retired_payload_rejects_unknown_field() {
     assert_rejects_unknown(&NodeRetiredPayload {
-        node_id: 42,
+        node_id: voom_core::NodeId(42),
         retired_at: OffsetDateTime::UNIX_EPOCH,
         epoch: 9,
     });
@@ -144,7 +160,7 @@ fn node_retired_payload_rejects_unknown_field() {
 #[test]
 fn worker_registered_payload_rejects_unknown_field() {
     assert_rejects_unknown(&WorkerRegisteredPayload {
-        worker_id: 7,
+        worker_id: voom_core::WorkerId(7),
         name: "worker-a".to_owned(),
         kind: WorkerKind::Local,
     });
@@ -153,15 +169,15 @@ fn worker_registered_payload_rejects_unknown_field() {
 #[test]
 fn worker_linked_to_node_payload_rejects_unknown_field() {
     assert_rejects_unknown(&WorkerLinkedToNodePayload {
-        worker_id: 7,
-        node_id: 42,
+        worker_id: voom_core::WorkerId(7),
+        node_id: voom_core::NodeId(42),
     });
 }
 
 #[test]
 fn worker_capability_recorded_payload_rejects_unknown_field() {
     assert_rejects_unknown(&WorkerCapabilityRecordedPayload {
-        worker_id: 7,
+        worker_id: voom_core::WorkerId(7),
         capability_id: 3,
         operation: TicketOperation::new("synthetic.workflow.operation.hash_file").unwrap(),
     });
@@ -170,12 +186,14 @@ fn worker_capability_recorded_payload_rejects_unknown_field() {
 #[test]
 fn worker_grant_recorded_payload_rejects_unknown_field() {
     assert_rejects_unknown(&WorkerGrantRecordedPayload {
-        worker_id: 7,
+        worker_id: voom_core::WorkerId(7),
         grant_id: 5,
     });
 }
 
 #[test]
 fn worker_retired_payload_rejects_unknown_field() {
-    assert_rejects_unknown(&WorkerRetiredPayload { worker_id: 7 });
+    assert_rejects_unknown(&WorkerRetiredPayload {
+        worker_id: voom_core::WorkerId(7),
+    });
 }
