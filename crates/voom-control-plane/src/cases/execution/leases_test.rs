@@ -201,6 +201,7 @@ fn claim_for(
     pci_address: &str,
     pid: u32,
     capacity: u32,
+    claimed_at: OffsetDateTime,
 ) -> NewAcceleratorClaim {
     NewAcceleratorClaim {
         hardware_token: format!("vaapi:pci-{pci_address}"),
@@ -211,7 +212,7 @@ fn claim_for(
         supervisor_start_identity: Some(format!("linux-proc-ticks:{}", u64::from(pid) * 10)),
         process_group_id: pid,
         capacity,
-        claimed_at: T0,
+        claimed_at,
     }
 }
 
@@ -334,11 +335,9 @@ async fn a_retired_vaapi_owner_releases_its_device_to_a_replacement() {
     let tickets = ready_transcode_tickets(&cp, 2).await;
     let claims = SqliteAcceleratorClaimRepo::new(cp.pool_for_test().clone());
     let dead = vaapi_worker(&cp, "vaapi-dead", &operation, "0000:f4:00.0", 1).await;
+    let dead_claim = claim_for(dead.id, "0000:f4:00.0", 4242, 1, dead.registered_at);
     let mut tx = cp.pool_for_test().begin().await.unwrap();
-    claims
-        .claim_in_tx(&mut tx, claim_for(dead.id, "0000:f4:00.0", 4242, 1))
-        .await
-        .unwrap();
+    claims.claim_in_tx(&mut tx, dead_claim).await.unwrap();
     tx.commit().await.unwrap();
     cp.acquire_lease(NewLease {
         ticket_id: tickets[0].id,
@@ -390,12 +389,16 @@ async fn a_retired_vaapi_owner_releases_its_device_to_a_replacement() {
             .all(|events| events[0].envelope.occurred_at <= events[1].envelope.occurred_at)
     );
 
+    let replacement_claim_input = claim_for(replacement.id, "0000:f4:00.0", 5353, 1, clock.now());
     let mut tx = cp.pool_for_test().begin().await.unwrap();
     claims
-        .claim_in_tx(&mut tx, claim_for(replacement.id, "0000:f4:00.0", 5353, 1))
+        .claim_in_tx(&mut tx, replacement_claim_input)
         .await
         .unwrap();
     tx.commit().await.unwrap();
+    let replacement_claim = claims.get("vaapi:pci-0000:f4:00.0").await.unwrap().unwrap();
+    assert!(replacement_claim.claimed_at >= replacement.registered_at);
+    assert!(replacement_claim.claimed_at >= retired_at);
 
     let occupied = active_leases_for(&cp, &operation, replacement.id).await;
     assert_eq!(
