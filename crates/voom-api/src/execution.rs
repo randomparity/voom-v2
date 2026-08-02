@@ -88,12 +88,12 @@ async fn acquire(
     headers: HeaderMap,
     body: Result<Json<JsonValue>, JsonRejection>,
 ) -> axum::response::Response {
-    let Some(control_plane) = configured_control_plane(state) else {
-        return not_configured_response(ACQUIRE_COMMAND);
-    };
     let (token, idempotency_key) = match request_credentials(&headers) {
         Ok(credentials) => credentials,
         Err(error) => return credentials_error_response(ACQUIRE_COMMAND, error),
+    };
+    let Some(control_plane) = configured_control_plane(state) else {
+        return not_configured_response(ACQUIRE_COMMAND);
     };
     let body = match json_body(body) {
         Ok(body) => body,
@@ -130,12 +130,12 @@ async fn node_heartbeat(
     headers: HeaderMap,
     body: Result<Json<JsonValue>, JsonRejection>,
 ) -> axum::response::Response {
-    let Some(control_plane) = configured_control_plane(state) else {
-        return not_configured_response(NODE_HEARTBEAT_COMMAND);
-    };
     let (token, idempotency_key) = match request_credentials(&headers) {
         Ok(credentials) => credentials,
         Err(error) => return credentials_error_response(NODE_HEARTBEAT_COMMAND, error),
+    };
+    let Some(control_plane) = configured_control_plane(state) else {
+        return not_configured_response(NODE_HEARTBEAT_COMMAND);
     };
     let node_id = match path_id(path) {
         Ok(id) => id,
@@ -175,12 +175,12 @@ async fn lease_heartbeat(
     headers: HeaderMap,
     body: Result<Json<JsonValue>, JsonRejection>,
 ) -> axum::response::Response {
-    let Some(control_plane) = configured_control_plane(state) else {
-        return not_configured_response(LEASE_HEARTBEAT_COMMAND);
-    };
     let (token, idempotency_key) = match request_credentials(&headers) {
         Ok(credentials) => credentials,
         Err(error) => return credentials_error_response(LEASE_HEARTBEAT_COMMAND, error),
+    };
+    let Some(control_plane) = configured_control_plane(state) else {
+        return not_configured_response(LEASE_HEARTBEAT_COMMAND);
     };
     let lease_id = match path_id(path) {
         Ok(id) => id,
@@ -223,12 +223,12 @@ async fn complete(
     headers: HeaderMap,
     body: Result<Json<JsonValue>, JsonRejection>,
 ) -> axum::response::Response {
-    let Some(control_plane) = configured_control_plane(state) else {
-        return not_configured_response(COMPLETE_COMMAND);
-    };
     let (token, idempotency_key) = match request_credentials(&headers) {
         Ok(credentials) => credentials,
         Err(error) => return credentials_error_response(COMPLETE_COMMAND, error),
+    };
+    let Some(control_plane) = configured_control_plane(state) else {
+        return not_configured_response(COMPLETE_COMMAND);
     };
     let lease_id = match path_id(path) {
         Ok(id) => id,
@@ -271,12 +271,12 @@ async fn fail(
     headers: HeaderMap,
     body: Result<Json<JsonValue>, JsonRejection>,
 ) -> axum::response::Response {
-    let Some(control_plane) = configured_control_plane(state) else {
-        return not_configured_response(FAIL_COMMAND);
-    };
     let (token, idempotency_key) = match request_credentials(&headers) {
         Ok(credentials) => credentials,
         Err(error) => return credentials_error_response(FAIL_COMMAND, error),
+    };
+    let Some(control_plane) = configured_control_plane(state) else {
+        return not_configured_response(FAIL_COMMAND);
     };
     let lease_id = match path_id(path) {
         Ok(id) => id,

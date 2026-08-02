@@ -241,6 +241,74 @@ async fn execution_routes_use_one_unauthorized_bearer_response() {
 }
 
 #[tokio::test]
+async fn unconfigured_execution_routes_reject_invalid_bearer_syntax() {
+    let tmp = TempDatabase::new().unwrap();
+    let url = sqlite_url_for(tmp.path());
+    voom_store::init(&url).await.unwrap();
+    let app = router(HealthPlane::open(&url).await.unwrap());
+    let routes = [
+        (
+            "/v1/execution/lease/acquire",
+            "execution.acquire",
+            json!({"node_id": 1, "worker_id": 1}),
+        ),
+        (
+            "/v1/execution/node/1/heartbeat",
+            "execution.node_heartbeat",
+            json!({}),
+        ),
+        (
+            "/v1/execution/lease/1/heartbeat",
+            "execution.lease_heartbeat",
+            json!({"node_id": 1, "worker_id": 1}),
+        ),
+        (
+            "/v1/execution/lease/1/complete",
+            "execution.complete",
+            json!({"node_id": 1, "worker_id": 1, "result": {}}),
+        ),
+        (
+            "/v1/execution/lease/1/fail",
+            "execution.fail",
+            json!({
+                "node_id": 1,
+                "worker_id": 1,
+                "reason": "timed out",
+                "class": FailureClass::WorkerTimeout
+            }),
+        ),
+    ];
+    let authorization_cases = [
+        ("missing", None),
+        ("non-utf8", Some(HeaderValue::from_bytes(&[0xff]).unwrap())),
+        (
+            "wrong-scheme",
+            Some(HeaderValue::from_static("Basic token")),
+        ),
+        ("empty", Some(HeaderValue::from_static("Bearer "))),
+    ];
+
+    for (authorization_name, authorization) in authorization_cases {
+        for (path, command, body) in &routes {
+            let mut request = Request::post(*path)
+                .header("content-type", "application/json")
+                .header(
+                    "x-voom-idempotency-key",
+                    format!("unconfigured-{authorization_name}-{command}"),
+                )
+                .body(Body::from(body.to_string()))
+                .unwrap();
+            if let Some(authorization) = authorization.clone() {
+                request.headers_mut().insert(AUTHORIZATION, authorization);
+            }
+
+            let response = app.clone().oneshot(request).await.unwrap();
+            assert_unauthorized_envelope(response, command).await;
+        }
+    }
+}
+
+#[tokio::test]
 async fn acquire_returns_idle_as_success() {
     let fixture = api_fixture().await;
 
