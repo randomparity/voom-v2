@@ -27,25 +27,21 @@ multiple-versions = "deny"
 wildcards = "deny"
 deny = []
 skip = [
-    # sqlx-core pulls hashlink (hashbrown 0.15) and indexmap (hashbrown 0.17)
-    # simultaneously; the 0.15 → 0.17 API break prevents unification until
-    # upstream realigns. Revisit on sqlx bumps.
-    { crate = "hashbrown", reason = "transitive duplication via sqlx-core" },
-    # `directories` (transitively via redox_users → dirs-sys) pulls
-    # `getrandom 0.2`, while `rand 0.9 → rand_core` pulls `getrandom 0.3`.
-    # Both upstreams have not yet realigned; the duplication is two thin
-    # OS-randomness wrappers, not a security exposure. Revisit when
-    # `directories` bumps its `dirs-sys` dep.
-    { crate = "getrandom", reason = "transitive duplication: directories@6 still on getrandom 0.2, rand@0.9 on 0.3" },
-    # sqlx-core's sha2 stack still on cpufeatures 0.2 while blake3 (Sprint 2
-    # idempotency replay hash) pulls 0.3. Both are thin CPU-feature probes;
-    # no behavior risk. Revisit on sqlx bump.
-    { crate = "cpufeatures", reason = "transitive duplication: sqlx@0.8 still on cpufeatures 0.2, blake3@1 on 0.3" },
-    # tempfile's getrandom 0.4 and rand's getrandom 0.3 target different WASI
-    # adapter generations. Neither adapter is built for supported host targets;
-    # they cannot be unified until the upstream randomness crates realign.
-    { crate = "r-efi", reason = "target-only duplication: getrandom 0.3 and 0.4 use different WASI adapters" },
-    { crate = "wit-bindgen", reason = "target-only duplication: getrandom 0.3 and 0.4 use different WASI adapters" },
+    # sqlx-core pulls hashbrown 0.15.5 through hashlink. Tolerate only 0.15.5;
+    # the hashbrown 0.17.1 baseline remains unskipped.
+    { crate = "hashbrown@0.15.5", reason = "tolerated 0.15.5; baseline 0.17.1" },
+    # directories pulls getrandom 0.2.17 and rand pulls 0.3.4. Tolerate those
+    # two versions only; the getrandom 0.4.2 baseline remains unskipped.
+    { crate = "getrandom@0.2.17", reason = "tolerated 0.2.17, 0.3.4; baseline 0.4.2" },
+    { crate = "getrandom@0.3.4", reason = "tolerated 0.2.17, 0.3.4; baseline 0.4.2" },
+    # sqlx-core's sha2 stack uses cpufeatures 0.2.17. Tolerate only 0.2.17;
+    # the cpufeatures 0.3.0 baseline from blake3 remains unskipped.
+    { crate = "cpufeatures@0.2.17", reason = "tolerated 0.2.17; baseline 0.3.0" },
+    # getrandom 0.3.4 and 0.4.2 use different WASI adapter generations.
+    # Tolerate r-efi 5.3.0; the r-efi 6.0.0 baseline remains unskipped.
+    { crate = "r-efi@5.3.0", reason = "tolerated 5.3.0; baseline 6.0.0" },
+    # Tolerate wit-bindgen 0.51.0; the wit-bindgen 0.57.1 baseline remains unskipped.
+    { crate = "wit-bindgen@0.51.0", reason = "tolerated 0.51.0; baseline 0.57.1" },
 ]
 skip-tree = []
 
