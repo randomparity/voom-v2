@@ -96,6 +96,7 @@ pub(crate) async fn dispatch_control_plane_remux(
         payload,
         artifact_roots: &options.artifact_roots.remux,
         backup_root: options.artifact_roots.backup_root.as_deref(),
+        #[cfg(test)]
         chaos: &options.chaos,
     })
     .await

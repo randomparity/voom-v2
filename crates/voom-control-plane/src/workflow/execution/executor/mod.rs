@@ -1,7 +1,10 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
+#[cfg(test)]
+use std::collections::BTreeMap;
+use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 use tokio::task::JoinSet;
+#[cfg(test)]
 use voom_core::OperationKind;
 use voom_core::{FileAssetId, FileVersionId, JobId, VoomError, WorkerId};
 use voom_store::repo::execution::jobs::JobState;
@@ -81,6 +84,7 @@ pub struct WorkflowExecutorOptions {
     pub timing: WorkflowTimingOptions,
     pub queue: WorkflowQueueOptions,
     pub artifact_roots: WorkflowArtifactRoots,
+    #[cfg(test)]
     pub chaos: WorkflowChaosOptions,
     #[cfg(test)]
     pub(crate) capacity_deferred_sync: Option<CapacityDeferredTestSync>,
@@ -108,6 +112,7 @@ impl WorkflowExecutorOptions {
         WorkflowDispatchOptions {
             timing: self.timing.clone(),
             artifact_roots: self.artifact_roots.clone(),
+            #[cfg(test)]
             chaos: self.chaos.clone(),
         }
     }
@@ -125,6 +130,7 @@ impl WorkflowExecutorOptions {
     }
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, Default)]
 pub struct WorkflowChaosOptions {
     pub disable_heartbeat_ticks: bool,
@@ -136,6 +142,7 @@ pub struct WorkflowChaosOptions {
     pub(crate) fail_heartbeat_operation: Option<OperationKind>,
 }
 
+#[cfg(test)]
 impl WorkflowChaosOptions {
     #[cfg(test)]
     #[must_use]

@@ -8,8 +8,10 @@ use voom_core::{FileLocationId, FileVersionId, JobId, LeaseId, TicketId, VoomErr
 use voom_store::repo::execution::tickets::Ticket;
 
 use crate::ControlPlane;
+#[cfg(test)]
+use crate::workflow::execution::executor::WorkflowChaosOptions;
 use crate::workflow::execution::executor::{
-    OperationArtifactRoots, WorkflowChaosOptions, WorkflowDispatchOptions, WorkflowTimingOptions,
+    OperationArtifactRoots, WorkflowDispatchOptions, WorkflowTimingOptions,
 };
 use crate::workflow::execution::runtime::WorkerRuntime;
 
@@ -108,6 +110,7 @@ impl<'a> TicketDispatchContext<'a> {
             control: self.control,
             lease_id: self.lease_id,
             timing: &self.options.timing,
+            #[cfg(test)]
             chaos: &self.options.chaos,
         }
     }
@@ -172,6 +175,7 @@ pub(crate) struct LeaseHeartbeatContext<'a> {
     pub(crate) control: &'a ControlPlane,
     pub(crate) lease_id: LeaseId,
     pub(crate) timing: &'a WorkflowTimingOptions,
+    #[cfg(test)]
     pub(crate) chaos: &'a WorkflowChaosOptions,
 }
 
@@ -190,10 +194,20 @@ where
     heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     tokio::pin!(future);
     loop {
+        #[cfg(test)]
+        let heartbeat_tick = async {
+            if context.chaos.suppresses_heartbeats_for(operation) {
+                std::future::pending().await
+            } else {
+                heartbeat.tick().await
+            }
+        };
+        #[cfg(not(test))]
+        let heartbeat_tick = heartbeat.tick();
         tokio::select! {
             biased;
             result = &mut future => return result,
-            _ = heartbeat.tick(), if !context.chaos.suppresses_heartbeats_for(operation) => {
+            _ = heartbeat_tick => {
                 let result = tokio::select! {
                     biased;
                     result = &mut future => return result,
