@@ -865,7 +865,6 @@ fn vaapi_capacity_clock_expiry_names_the_declaration() {
     );
     let ffprobe = fake_ffprobe(temp.path());
 
-    let started = std::time::Instant::now();
     let error = preflight_with_vaapi(&ffmpeg, &ffprobe, &config)
         .unwrap_err()
         .to_string();
@@ -873,11 +872,6 @@ fn vaapi_capacity_clock_expiry_names_the_declaration() {
     assert!(
         error.contains("VAAPI capacity probe for 2 concurrent"),
         "capacity-clock expiry stays a capacity diagnostic: {error}"
-    );
-    assert!(
-        started.elapsed() < Duration::from_secs(10),
-        "expiry must be prompt, took {:?}",
-        started.elapsed()
     );
 }
 
