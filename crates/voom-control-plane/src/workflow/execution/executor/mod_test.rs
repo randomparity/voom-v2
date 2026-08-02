@@ -15,12 +15,12 @@ use voom_core::clock_test_support::ManualClock;
 use voom_core::rng_test_support::FrozenRng;
 use voom_core::{
     ErrorCode, FailureClass, FileAssetId, FileVersionId, JobId, LeaseId, MediaSnapshotId, TicketId,
-    TicketOperation, VoomError, WorkerId,
+    TicketOperation, VoomError, WorkerId, WorkerKind,
 };
 use voom_store::repo::execution::jobs::NewJob;
 use voom_store::repo::execution::leases::NewLease;
 use voom_store::repo::execution::tickets::{NewTicket, Ticket};
-use voom_store::repo::execution::workers::{NewCapability, NewGrant, NewWorker, WorkerKind};
+use voom_store::repo::execution::workers::{NewCapability, NewGrant};
 use voom_store::repo::media::identity::{
     DiscoveredFile, FileAssetRepo, FileLocationKind, FileVersionRepo, IngestOutcome,
     NewFileVersion, ProducedBy,
@@ -2845,11 +2845,9 @@ async fn seed_terminally_ineligible_worker(
 ) {
     let worker = fixture
         .cp
-        .register_worker(NewWorker {
+        .register_worker(crate::cases::workers::RegisterWorkerInput {
             name: format!("{}-worker", ineligibility.label()),
             kind: WorkerKind::Synthetic,
-            registered_at: T0,
-            node_id: None,
         })
         .await
         .unwrap();
@@ -3060,11 +3058,9 @@ impl ExecutorFixture {
     ) -> WorkerId {
         let worker = self
             .cp
-            .register_worker(NewWorker {
+            .register_worker(crate::cases::workers::RegisterWorkerInput {
                 name: name.to_owned(),
                 kind: WorkerKind::Synthetic,
-                registered_at: T0,
-                node_id: None,
             })
             .await
             .unwrap();

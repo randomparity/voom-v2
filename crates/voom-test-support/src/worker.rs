@@ -6,8 +6,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use voom_control_plane::ControlPlane;
-use voom_core::TicketOperation;
-use voom_store::repo::execution::workers::{NewCapability, NewGrant, NewWorker, WorkerKind};
+use voom_control_plane::workers::RegisterWorkerInput;
+use voom_core::{TicketOperation, WorkerKind};
+use voom_store::repo::execution::workers::{NewCapability, NewGrant};
 
 const FFPROBE_TEST_HELPER_MARKER: &[u8] = b"ffprobe version test-helper";
 const PREBUILT_WORKERS_ENV: &str = "VOOM_TEST_PREBUILT_WORKERS";
@@ -54,11 +55,9 @@ impl TestWorkerLaunch {
         config: TestWorkerConfig,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let worker = cp
-            .register_worker(NewWorker {
+            .register_worker(RegisterWorkerInput {
                 name: config.worker_name,
                 kind: config.worker_kind,
-                registered_at: cp.clock().now(),
-                node_id: None,
             })
             .await?;
         let mut child = Command::new(&config.binary_path)

@@ -6,7 +6,7 @@ use voom_core::{FileLocationId, FileVersionId, MediaSnapshotId, TicketOperation,
 use voom_store::repo::execution::jobs::NewJob;
 use voom_store::repo::execution::leases::NewLease;
 use voom_store::repo::execution::tickets::NewTicket;
-use voom_store::repo::execution::workers::{NewCapability, NewGrant, NewWorker};
+use voom_store::repo::execution::workers::{NewCapability, NewGrant};
 use voom_store::repo::execution::workflow_progress::{FileAdmissionTier, NewFileProgress};
 use voom_store::repo::execution::workflow_summaries::{FilePhaseOutcome, NewFileRunStart};
 use voom_store::repo::media::artifacts::{
@@ -990,11 +990,9 @@ async fn eligible_worker(
         .await
         .unwrap();
     let worker = cp
-        .register_worker(NewWorker {
+        .register_worker(crate::cases::workers::RegisterWorkerInput {
             name: format!("lineage-worker-{ordinal}"),
             kind: WorkerKind::Synthetic,
-            registered_at: T0,
-            node_id: None,
         })
         .await
         .unwrap();

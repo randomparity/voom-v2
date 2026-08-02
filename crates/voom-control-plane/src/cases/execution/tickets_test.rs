@@ -1,13 +1,14 @@
 use super::*;
 
 use time::{Duration as TDuration, OffsetDateTime};
-use voom_core::{FailureClass, TicketOperation, VoomError};
+use voom_core::{FailureClass, TicketOperation, VoomError, WorkerKind};
 use voom_events::EventKind;
 use voom_store::repo::audit::events::{EventFilter, EventPage, EventRepo, Page};
 use voom_store::repo::execution::leases::NewLease;
 use voom_store::repo::execution::tickets::TicketState;
-use voom_store::repo::execution::workers::{NewCapability, NewGrant, NewWorker, WorkerKind};
+use voom_store::repo::execution::workers::{NewCapability, NewGrant};
 
+use crate::cases::workers::RegisterWorkerInput;
 use crate::cases::{cp, issue_link_targets, terminal_failure_issues};
 
 const T0: OffsetDateTime = OffsetDateTime::UNIX_EPOCH;
@@ -27,12 +28,10 @@ fn ticket(kind: &str) -> NewTicket {
     ticket_with_max_attempts(kind, 1)
 }
 
-fn worker(name: &str) -> NewWorker {
-    NewWorker {
+fn worker(name: &str) -> RegisterWorkerInput {
+    RegisterWorkerInput {
         name: name.to_owned(),
         kind: WorkerKind::Synthetic,
-        registered_at: T0,
-        node_id: None,
     }
 }
 

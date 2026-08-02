@@ -16,10 +16,10 @@ use sqlx::Row;
 use time::Duration;
 
 use voom_control_plane::ControlPlane;
-use voom_core::{SystemClock, TicketOperation, VoomError};
+use voom_control_plane::workers::RegisterWorkerInput;
+use voom_core::{SystemClock, TicketOperation, VoomError, WorkerKind};
 use voom_store::repo::execution::leases::NewLease;
 use voom_store::repo::execution::tickets::{NewTicket, TicketState};
-use voom_store::repo::execution::workers::{NewWorker, WorkerKind};
 use voom_store::test_support::T0;
 
 async fn cp() -> (
@@ -45,11 +45,9 @@ fn ticket_op(value: &str) -> TicketOperation {
 async fn acquire_rejects_retired_worker_and_leaves_ticket_ready() {
     let (cp, pool, _tmp) = cp().await;
     let worker = cp
-        .register_worker(NewWorker {
+        .register_worker(RegisterWorkerInput {
             name: "w".to_owned(),
             kind: WorkerKind::Synthetic,
-            registered_at: T0,
-            node_id: None,
         })
         .await
         .unwrap();

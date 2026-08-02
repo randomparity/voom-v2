@@ -23,8 +23,10 @@ use tokio::io::AsyncWriteExt;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, ChildStdin};
 use voom_core::rng_test_support::FrozenRng;
-use voom_core::{ErrorCode, FailureClass, JobId, SystemClock, TicketOperation, WorkerId};
-use voom_store::repo::execution::workers::{NewCapability, NewGrant, NewWorker, WorkerKind};
+use voom_core::{
+    ErrorCode, FailureClass, JobId, SystemClock, TicketOperation, WorkerId, WorkerKind,
+};
+use voom_store::repo::execution::workers::{NewCapability, NewGrant};
 use voom_worker_protocol::http::OperationBody;
 use voom_worker_protocol::{
     ClientHandle, DispatchStream, HandshakeResponse, HttpClient, NdjsonReader, OperationKind,
@@ -749,11 +751,9 @@ impl DurableWorkflowFixture {
     ) -> TestResult<WorkerId> {
         let worker = self
             .cp
-            .register_worker(NewWorker {
+            .register_worker(crate::cases::workers::RegisterWorkerInput {
                 name: name.to_owned(),
                 kind: WorkerKind::Synthetic,
-                registered_at: T0,
-                node_id: None,
             })
             .await?;
         let operation_names: Vec<String> = operations.iter().copied().map(operation_name).collect();

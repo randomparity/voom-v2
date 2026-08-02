@@ -3,16 +3,17 @@ use std::time::Duration;
 
 use sqlx::Row;
 use time::OffsetDateTime;
-use voom_core::{OperationKind, TicketId, TicketOperation};
+use voom_core::{OperationKind, TicketId, TicketOperation, WorkerKind};
 use voom_events::EventKind;
 use voom_plan::PlanOperationKind;
 use voom_policy::{FixtureName, load_fixture, load_policy_fixture};
 use voom_store::repo::execution::tickets::NewTicket;
-use voom_store::repo::execution::workers::{NewCapability, NewGrant, NewWorker, WorkerKind};
+use voom_store::repo::execution::workers::{NewCapability, NewGrant};
 use voom_store::repo::media::identity::{DiscoveredFile, FileLocationKind, IngestOutcome};
 use voom_test_support::worker::cargo_bin_or_build;
 
 use crate::cases::policy::policy_inputs::{PolicyInputFromScanInput, WholeScanInput};
+use crate::cases::workers::RegisterWorkerInput;
 use crate::cases::{count, cp, transcodable_input};
 use crate::workflow::WorkerRuntimeRegistry;
 use crate::workflow::execution::executor::WorkflowExecutorOptions;
@@ -1744,11 +1745,9 @@ async fn register_policy_worker_with_extra(
     extra: serde_json::Value,
 ) -> voom_core::WorkerId {
     let worker = cp
-        .register_worker(NewWorker {
+        .register_worker(RegisterWorkerInput {
             name: name.to_owned(),
             kind: WorkerKind::Synthetic,
-            registered_at: cp.clock().now(),
-            node_id: None,
         })
         .await
         .unwrap();

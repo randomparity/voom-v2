@@ -16,12 +16,12 @@ use serde_json::json;
 use time::Duration;
 
 use voom_control_plane::ControlPlane;
-use voom_core::{SystemClock, TicketOperation};
+use voom_control_plane::workers::RegisterWorkerInput;
+use voom_core::{SystemClock, TicketOperation, WorkerKind};
 use voom_events::EventKind;
 use voom_store::repo::audit::events::{EventFilter, EventRepo, Page};
 use voom_store::repo::execution::leases::{LEASE_BATCH_LIMIT, NewLease};
 use voom_store::repo::execution::tickets::NewTicket;
-use voom_store::repo::execution::workers::{NewWorker, WorkerKind};
 use voom_store::test_support::{T0, record_worker_eligibility};
 
 const N: usize = 500;
@@ -45,11 +45,9 @@ fn ticket_op(value: &str) -> TicketOperation {
 async fn expire_due_handles_bulk_overdue_leases() {
     let (cp, _tmp) = cp().await;
     let w = cp
-        .register_worker(NewWorker {
+        .register_worker(RegisterWorkerInput {
             name: "w-bulk".to_owned(),
             kind: WorkerKind::Synthetic,
-            registered_at: T0,
-            node_id: None,
         })
         .await
         .unwrap();
@@ -144,11 +142,9 @@ const N_BACKLOG: usize = 501;
 async fn expire_due_handles_backlog_above_chunk_size() {
     let (cp, _tmp) = cp().await;
     let w = cp
-        .register_worker(NewWorker {
+        .register_worker(RegisterWorkerInput {
             name: "w-backlog".to_owned(),
             kind: WorkerKind::Synthetic,
-            registered_at: T0,
-            node_id: None,
         })
         .await
         .unwrap();
@@ -203,11 +199,9 @@ async fn expire_due_handles_backlog_above_chunk_size() {
 async fn expire_due_drains_backlog_above_batch_limit() {
     let (cp, _tmp) = cp().await;
     let w = cp
-        .register_worker(NewWorker {
+        .register_worker(RegisterWorkerInput {
             name: "w-drain".to_owned(),
             kind: WorkerKind::Synthetic,
-            registered_at: T0,
-            node_id: None,
         })
         .await
         .unwrap();

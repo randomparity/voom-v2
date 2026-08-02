@@ -14,10 +14,10 @@ use serde_json::json;
 use time::Duration;
 
 use voom_control_plane::ControlPlane;
-use voom_core::{SystemClock, TicketOperation};
+use voom_control_plane::workers::RegisterWorkerInput;
+use voom_core::{SystemClock, TicketOperation, WorkerKind};
 use voom_store::repo::execution::leases::{NewLease, ReleaseReason};
 use voom_store::repo::execution::tickets::{NewTicket, TicketState};
-use voom_store::repo::execution::workers::{NewWorker, WorkerKind};
 use voom_store::test_support::{T0, record_worker_eligibility, sqlite_url_for};
 use voom_store::{connect, init};
 
@@ -45,11 +45,9 @@ async fn m1_fixture_flow_persists_across_reconnect() {
             .await
             .unwrap();
         let w = cp
-            .register_worker(NewWorker {
+            .register_worker(RegisterWorkerInput {
                 name: "w-disk".to_owned(),
                 kind: WorkerKind::Synthetic,
-                registered_at: T0,
-                node_id: None,
             })
             .await
             .unwrap();

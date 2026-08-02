@@ -1,7 +1,7 @@
 use super::*;
 
 use time::{Duration as TDuration, OffsetDateTime};
-use voom_core::{FailureClass, JobId, TicketId, TicketOperation, VoomError, WorkerId};
+use voom_core::{FailureClass, JobId, TicketId, TicketOperation, VoomError, WorkerId, WorkerKind};
 use voom_events::EventKind;
 use voom_store::repo::audit::events::{EventFilter, EventRepo, Page};
 use voom_store::repo::execution::accelerator_claims::{
@@ -10,10 +10,9 @@ use voom_store::repo::execution::accelerator_claims::{
 use voom_store::repo::execution::jobs::{JobState, NewJob};
 use voom_store::repo::execution::leases::{LeaseAcquireOutcome, LeaseFilter, LeaseState};
 use voom_store::repo::execution::tickets::{NewTicket, Ticket, TicketState};
-use voom_store::repo::execution::workers::{
-    NewCapability, NewGrant, NewWorker, Worker, WorkerKind,
-};
+use voom_store::repo::execution::workers::{NewCapability, NewGrant, Worker};
 
+use crate::cases::workers::RegisterWorkerInput;
 use crate::cases::{count, cp, issue_link_targets, terminal_failure_issues};
 
 const T0: OffsetDateTime = OffsetDateTime::UNIX_EPOCH;
@@ -36,12 +35,10 @@ fn ticket_for_job(kind: &str, max_attempts: u32, job_id: JobId) -> NewTicket {
     }
 }
 
-fn worker(name: &str) -> NewWorker {
-    NewWorker {
+fn worker(name: &str) -> RegisterWorkerInput {
+    RegisterWorkerInput {
         name: name.to_owned(),
         kind: WorkerKind::Synthetic,
-        registered_at: T0,
-        node_id: None,
     }
 }
 

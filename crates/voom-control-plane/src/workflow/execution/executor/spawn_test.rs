@@ -561,11 +561,9 @@ async fn a_vaapi_candidate_with_a_dead_endpoint_is_dropped_before_any_lease() {
     let (cp, _tmp) = crate::cases::cp().await;
     let operation = TicketOperation::new("transcode_video").unwrap();
     let worker = cp
-        .register_worker(voom_store::repo::execution::workers::NewWorker {
+        .register_worker(crate::cases::workers::RegisterWorkerInput {
             name: "vaapi-dead-endpoint".to_owned(),
             kind: voom_core::WorkerKind::Synthetic,
-            registered_at: cp.clock().now(),
-            node_id: None,
         })
         .await
         .unwrap();

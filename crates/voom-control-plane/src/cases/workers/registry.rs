@@ -7,7 +7,7 @@ use serde_json::Value as JsonValue;
 use sqlx::{Sqlite, Transaction};
 use time::Duration;
 use time::OffsetDateTime;
-use voom_core::{NodeId, TicketOperation, VoomError, WorkerId};
+use voom_core::{NodeId, TicketOperation, VoomError, WorkerId, WorkerKind};
 use voom_events::payload::{
     WorkerCapabilityRecordedPayload, WorkerGrantRecordedPayload, WorkerLinkedToNodePayload,
     WorkerRegisteredPayload, WorkerRetiredPayload,
@@ -15,8 +15,7 @@ use voom_events::payload::{
 use voom_events::{Event, SubjectType};
 use voom_store::repo::execution::nodes::NodeStatus;
 use voom_store::repo::execution::workers::{
-    Capability, Grant, NewCapability, NewGrant, NewWorker, Worker, WorkerInspection, WorkerKind,
-    WorkerStatus,
+    Capability, Grant, NewCapability, NewGrant, NewWorker, Worker, WorkerInspection, WorkerStatus,
 };
 
 use crate::ControlPlane;
@@ -55,6 +54,13 @@ fn is_name_or_incarnation(name: &str, base: &str) -> bool {
             .is_some_and(|suffix| suffix.starts_with('-'))
 }
 
+/// Caller-supplied fields for generic, node-less worker registration.
+#[derive(Debug)]
+pub struct RegisterWorkerInput {
+    pub name: String,
+    pub kind: WorkerKind,
+}
+
 #[derive(Debug)]
 pub struct RegisterWorkerForNodeInput {
     pub node_id: NodeId,
@@ -88,11 +94,20 @@ impl ControlPlane {
     ///
     /// # Errors
     /// Propagates `SqliteWorkerRepo::register_in_tx` and event-append errors.
-    pub async fn register_worker(&self, input: NewWorker) -> Result<Worker, VoomError> {
+    pub async fn register_worker(&self, input: RegisterWorkerInput) -> Result<Worker, VoomError> {
         reject_reserved_provider(&input.name)?;
+        let registered_at = self.clock().now();
         let mut tx = begin_tx(&self.pool).await?;
         let worker = self
-            .register_worker_with_event_in_tx(&mut tx, input)
+            .register_worker_with_event_in_tx(
+                &mut tx,
+                NewWorker {
+                    name: input.name,
+                    kind: input.kind,
+                    registered_at,
+                    node_id: None,
+                },
+            )
             .await?;
         commit_tx(tx).await?;
         Ok(worker)

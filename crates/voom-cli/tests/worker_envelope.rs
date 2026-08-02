@@ -8,7 +8,8 @@ use std::process::Command;
 
 use serde_json::Value;
 use voom_control_plane::ControlPlane;
-use voom_store::repo::execution::workers::{NewWorker, WorkerKind};
+use voom_control_plane::workers::RegisterWorkerInput;
+use voom_core::WorkerKind;
 use voom_store::test_support::sqlite_url_for;
 use voom_test_support::TempDatabase;
 
@@ -236,11 +237,9 @@ mod worker_envelope {
 
     async fn seed_legacy_worker(url: &str) {
         let cp = ControlPlane::open(url).await.unwrap();
-        cp.register_worker(NewWorker {
+        cp.register_worker(RegisterWorkerInput {
             name: "legacy".to_owned(),
             kind: WorkerKind::Synthetic,
-            registered_at: cp.clock().now(),
-            node_id: None,
         })
         .await
         .unwrap();

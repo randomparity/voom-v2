@@ -113,6 +113,7 @@ pub mod workers {
     pub use crate::cases::workers::nodes::{RegisterNodeInput, RegisteredNode};
     pub use crate::cases::workers::{
         NewWorkerCapabilityDraft, NewWorkerGrantDraft, RegisterWorkerForNodeInput,
+        RegisterWorkerInput,
     };
     pub use crate::local_worker::{
         LocalVideoAcceleratorConfig, LocalWorkerHandle, LocalWorkerKind, NvidiaLocalWorkerConfig,
