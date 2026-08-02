@@ -57,6 +57,28 @@ If you think a convention is harmful, surface it. Don't fork silently.
 "Tests pass" is wrong if any were skipped.
 Default to surfacing uncertainty, not hiding it.
 
+## Refactoring guardrails
+
+- Preserve domain newtypes across repository, orchestration, and event-construction
+  boundaries. Do not flatten distinct IDs or durable vocabulary to primitives in an
+  intermediate struct and reconstruct the types later; that removes compile-time swap
+  protection while leaving the final API looking typed.
+- Treat every value read from SQLite as untrusted persisted data. Perform checked numeric
+  conversions and structural validation before applying business classification such as
+  missing, conflict, or invalid configuration. Corrupt storage is a database error, not a
+  domain absence or configuration error.
+- Removing a serialized field removes the accepted input too. Put
+  `#[serde(deny_unknown_fields)]` on the concrete deserialized struct and add a regression
+  that rejects the former field; an output-shape assertion alone does not prove removal.
+- Architecture prose is a summary, not an authority. Check workspace manifests or
+  `cargo metadata` before changing dependency guidance, distinguish normal dependencies
+  from dev-only edges, and describe transitional ownership as transitional rather than
+  extending it by precedent.
+- When a refactor moves behavior across crate boundaries, compare the old and new failure
+  ordering as well as the happy-path result. Preserve transaction ownership, mutation/event
+  ordering, deterministic query ordering, and corruption diagnostics unless the governing
+  design explicitly changes them.
+
 ## Commands
 
 All routine actions go through `just` (see `justfile`):
