@@ -1,4 +1,6 @@
-//! `voom` CLI entrypoint. Tests live in the sibling `voom_cli` library crate.
+//! `voom` CLI entrypoint.
+//!
+//! Binary-owned unit tests live in `main_test.rs`; end-to-end tests live in `tests/`.
 use std::process::ExitCode;
 
 use anyhow::Result;
