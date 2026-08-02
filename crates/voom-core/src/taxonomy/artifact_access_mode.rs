@@ -28,6 +28,12 @@ impl ArtifactAccessMode {
         }
     }
 
+    /// Parses a stored value from the artifact-access-mode vocabulary.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VoomError::Database`] when `value` is outside the artifact-access-mode
+    /// vocabulary. The error message includes the supplied `field` and `value`.
     pub fn parse_database(field: &str, value: &str) -> Result<Self, VoomError> {
         Self::from_wire(value).ok_or_else(|| {
             VoomError::database(format!(

@@ -28,6 +28,12 @@ impl NodeKind {
         }
     }
 
+    /// Parses a stored value from the node-kind vocabulary.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VoomError::Database`] when `value` is outside the node-kind vocabulary.
+    /// The error message includes the supplied `field` and `value`.
     pub fn parse_database(field: &str, value: &str) -> Result<Self, VoomError> {
         Self::from_wire(value)
             .ok_or_else(|| VoomError::database(format!("{field} {value:?} not in node kind vocab")))
@@ -65,6 +71,12 @@ impl NodeStatus {
         }
     }
 
+    /// Parses a stored value from the node-status vocabulary.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VoomError::Database`] when `value` is outside the node-status vocabulary.
+    /// The error message includes the supplied `field` and `value`.
     pub fn parse_database(field: &str, value: &str) -> Result<Self, VoomError> {
         Self::from_wire(value).ok_or_else(|| {
             VoomError::database(format!("{field} {value:?} not in node status vocab"))
@@ -100,6 +112,12 @@ impl WorkerKind {
         }
     }
 
+    /// Parses a stored value from the worker-kind vocabulary.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VoomError::Database`] when `value` is outside the worker-kind vocabulary.
+    /// The error message includes the supplied `field` and `value`.
     pub fn parse_database(field: &str, value: &str) -> Result<Self, VoomError> {
         Self::from_wire(value).ok_or_else(|| {
             VoomError::database(format!("{field} {value:?} not in worker kind vocab"))
@@ -138,6 +156,12 @@ impl WorkerStatus {
         }
     }
 
+    /// Parses a stored value from the worker-status vocabulary.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VoomError::Database`] when `value` is outside the worker-status vocabulary.
+    /// The error message includes the supplied `field` and `value`.
     pub fn parse_database(field: &str, value: &str) -> Result<Self, VoomError> {
         Self::from_wire(value).ok_or_else(|| {
             VoomError::database(format!("{field} {value:?} not in worker status vocab"))
