@@ -1127,7 +1127,7 @@ async fn emit_aborted_post_mutation_event(
         removed_version_count: u32::try_from(trip.delta.removed_versions.len()).unwrap_or(u32::MAX),
         removed_location_count: u32::try_from(trip.delta.removed_locations.len())
             .unwrap_or(u32::MAX),
-        fresh_lease_ids: trip.fresh_lease_ids.iter().map(|l| l.0).collect(),
+        fresh_lease_ids: trip.fresh_lease_ids.clone(),
         target_epoch_drift: target_epoch_drift_wire(&trip.target_epoch_drift),
         aborted_at,
     });
@@ -1165,7 +1165,7 @@ async fn emit_recovery_required_event(
         removed_version_count: u32::try_from(trip.delta.removed_versions.len()).unwrap_or(u32::MAX),
         removed_location_count: u32::try_from(trip.delta.removed_locations.len())
             .unwrap_or(u32::MAX),
-        fresh_lease_ids: trip.fresh_lease_ids.iter().map(|l| l.0).collect(),
+        fresh_lease_ids: trip.fresh_lease_ids.clone(),
         target_epoch_drift: target_epoch_drift_wire(&trip.target_epoch_drift),
         recorded_at,
     });

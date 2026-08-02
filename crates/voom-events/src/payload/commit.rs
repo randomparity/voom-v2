@@ -253,9 +253,9 @@ pub struct CommitAbortedPostMutationPayload {
     pub removed_bundle_count: u32,
     pub removed_version_count: u32,
     pub removed_location_count: u32,
-    /// `UseLeaseId.0` values for every fresh blocking lease the Phase C
-    /// recheck saw against `closure_final`. Possibly empty.
-    pub fresh_lease_ids: Vec<u64>,
+    /// Every fresh blocking lease the Phase C recheck saw against
+    /// `closure_final`. Possibly empty.
+    pub fresh_lease_ids: Vec<UseLeaseId>,
     /// Drifted `(kind, id, expected, observed)` triples from the
     /// `stale_target_epoch` recheck. Possibly empty (only populated
     /// when `reason='stale_target_epoch'`).
@@ -309,7 +309,7 @@ pub struct CommitRecoveryRequiredPayload {
     pub removed_bundle_count: u32,
     pub removed_version_count: u32,
     pub removed_location_count: u32,
-    pub fresh_lease_ids: Vec<u64>,
+    pub fresh_lease_ids: Vec<UseLeaseId>,
     pub target_epoch_drift: Vec<TargetEpochDriftWire>,
     #[serde(with = "time::serde::iso8601")]
     pub recorded_at: OffsetDateTime,

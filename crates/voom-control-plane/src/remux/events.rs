@@ -1,6 +1,9 @@
 use std::path::Path;
 
-use voom_core::{ArtifactHandleId, ArtifactLocationId, FailureClass, FileLocationId, VoomError};
+use voom_core::{
+    ArtifactHandleId, ArtifactLocationId, FailureClass, FileLocationId, FileVersionId, JobId,
+    LeaseId, TicketId, VoomError,
+};
 use voom_events::payload::{
     ArtifactRemuxFailedPayload, ArtifactRemuxProgressPayload, ArtifactRemuxStartedPayload,
     ArtifactRemuxStreamPayload, ArtifactRemuxSucceededPayload,
@@ -112,13 +115,13 @@ pub struct RemuxSucceededEventInput<'a> {
 
 #[derive(Debug, Clone)]
 pub(crate) struct RemuxSucceededEvent {
-    pub job_id: u64,
-    pub ticket_id: u64,
-    pub lease_id: Option<u64>,
-    pub source_file_version_id: u64,
-    pub source_file_location_id: u64,
-    pub artifact_handle_id: u64,
-    pub artifact_location_id: u64,
+    pub job_id: JobId,
+    pub ticket_id: TicketId,
+    pub lease_id: Option<LeaseId>,
+    pub source_file_version_id: FileVersionId,
+    pub source_file_location_id: FileLocationId,
+    pub artifact_handle_id: ArtifactHandleId,
+    pub artifact_location_id: ArtifactLocationId,
     pub staging_path: String,
     pub selected_streams: Vec<ArtifactRemuxStreamPayload>,
     pub default_streams: Vec<ArtifactRemuxStreamPayload>,
@@ -134,13 +137,13 @@ pub(crate) struct RemuxSucceededEvent {
 impl RemuxSucceededEvent {
     pub(crate) fn from_input(event: &RemuxSucceededEventInput<'_>) -> Self {
         Self {
-            job_id: event.input.job_id.0,
-            ticket_id: event.input.ticket_id.0,
-            lease_id: Some(event.input.lease_id.0),
-            source_file_version_id: event.input.source_file_version_id.0,
-            source_file_location_id: event.source_location_id.0,
-            artifact_handle_id: event.artifact_handle_id.0,
-            artifact_location_id: event.artifact_location_id.0,
+            job_id: event.input.job_id,
+            ticket_id: event.input.ticket_id,
+            lease_id: Some(event.input.lease_id),
+            source_file_version_id: event.input.source_file_version_id,
+            source_file_location_id: event.source_location_id,
+            artifact_handle_id: event.artifact_handle_id,
+            artifact_location_id: event.artifact_location_id,
             staging_path: event.staging_path.display().to_string(),
             selected_streams: stream_payloads(&event.selection.keep_streams),
             default_streams: stream_payloads(&event.selection.default_streams),
@@ -151,6 +154,28 @@ impl RemuxSucceededEvent {
             output_container: event.result.output_container.clone(),
             provider: event.result.provider.clone(),
             provider_version: event.result.provider_version.clone(),
+        }
+    }
+
+    fn payload(&self) -> ArtifactRemuxSucceededPayload {
+        ArtifactRemuxSucceededPayload {
+            job_id: self.job_id,
+            ticket_id: self.ticket_id,
+            lease_id: self.lease_id,
+            source_file_version_id: self.source_file_version_id,
+            source_file_location_id: self.source_file_location_id,
+            artifact_handle_id: self.artifact_handle_id,
+            artifact_location_id: self.artifact_location_id,
+            staging_path: self.staging_path.clone(),
+            selected_streams: self.selected_streams.clone(),
+            default_streams: self.default_streams.clone(),
+            clear_default_streams: self.clear_default_streams.clone(),
+            head_streams: self.head_streams.clone(),
+            kept_snapshot_stream_ids: self.kept_snapshot_stream_ids.clone(),
+            default_snapshot_stream_ids: self.default_snapshot_stream_ids.clone(),
+            output_container: self.output_container.clone(),
+            provider: self.provider.clone(),
+            provider_version: self.provider_version.clone(),
         }
     }
 }
@@ -176,27 +201,9 @@ pub(crate) async fn append_succeeded_in_tx(
         &cp.events,
         tx,
         SubjectType::ArtifactHandle,
-        Some(event.artifact_handle_id),
+        Some(event.artifact_handle_id.0),
         now,
-        Event::ArtifactRemuxSucceeded(ArtifactRemuxSucceededPayload {
-            job_id: voom_core::JobId(event.job_id),
-            ticket_id: voom_core::TicketId(event.ticket_id),
-            lease_id: event.lease_id.map(voom_core::LeaseId),
-            source_file_version_id: voom_core::FileVersionId(event.source_file_version_id),
-            source_file_location_id: voom_core::FileLocationId(event.source_file_location_id),
-            artifact_handle_id: voom_core::ArtifactHandleId(event.artifact_handle_id),
-            artifact_location_id: voom_core::ArtifactLocationId(event.artifact_location_id),
-            staging_path: event.staging_path.clone(),
-            selected_streams: event.selected_streams.clone(),
-            default_streams: event.default_streams.clone(),
-            clear_default_streams: event.clear_default_streams.clone(),
-            head_streams: event.head_streams.clone(),
-            kept_snapshot_stream_ids: event.kept_snapshot_stream_ids.clone(),
-            default_snapshot_stream_ids: event.default_snapshot_stream_ids.clone(),
-            output_container: event.output_container.clone(),
-            provider: event.provider.clone(),
-            provider_version: event.provider_version.clone(),
-        }),
+        Event::ArtifactRemuxSucceeded(event.payload()),
     )
     .await
 }

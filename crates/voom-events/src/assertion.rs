@@ -51,8 +51,8 @@ impl AssertionKind {
     /// known `snake_case` wire-format values.
     #[expect(
         clippy::should_implement_trait,
-        reason = "explicit inherent fn keeps the wire format the single source of truth; \
-                  std::str::FromStr would mask the dedicated VoomError-bearing API"
+        reason = "the dedicated database parser returns contextual VoomError values; \
+                  std::str::FromStr would hide that boundary-specific error contract"
     )]
     pub fn from_str(s: &str) -> Result<Self, VoomError> {
         Ok(match s {

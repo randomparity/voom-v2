@@ -615,7 +615,7 @@ async fn emit_ingest_events(
                 Some(file_asset_id.0),
                 observed_at,
                 Event::FileAssetCreated(FileAssetCreatedPayload {
-                    file_asset_id: voom_core::FileAssetId(file_asset_id.0),
+                    file_asset_id: *file_asset_id,
                 }),
             )
             .await?;
@@ -724,7 +724,7 @@ async fn emit_ingest_events(
                 observed_at,
                 Event::FileLocationAliased(FileLocationAliasedPayload {
                     file_location_id: location.id,
-                    file_version_id: voom_core::FileVersionId(file_version_id.0),
+                    file_version_id: *file_version_id,
                     kind: location.kind.as_str().to_owned(),
                     value: location.value,
                 }),

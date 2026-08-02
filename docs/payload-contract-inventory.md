@@ -64,6 +64,8 @@ durable entity. The serde-transparent IDs preserve the historical JSON number re
 
 - execution events use `JobId`, `TicketId`, `LeaseId`, and `WorkerId`;
 - worker events use `NodeId` and `WorkerId`;
+- commit events use `CommitId`, `EvidenceId`, and `UseLeaseId`, including typed
+  `fresh_lease_ids` vectors on post-mutation and recovery-required events;
 - media-identity events use the matching work, variant, bundle, file, evidence, snapshot, and
   worker IDs;
 - artifact events use the matching execution, file, snapshot, bundle, handle, location,
