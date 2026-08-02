@@ -2426,6 +2426,43 @@ async fn await_with_lease_heartbeats_refreshes_workflow_lease_while_future_runs(
 }
 
 #[tokio::test]
+async fn heartbeat_write_does_not_block_operation_holding_sqlite_writer_lock() {
+    let fixture = ExecutorFixture::with_ready_tickets(1).await;
+    let worker_id = fixture.worker_id();
+    let (_ticket_id, lease_id) = fixture.create_heartbeat_test_lease(worker_id).await;
+    let mut options = WorkflowExecutorOptions::for_tests();
+    options.timing.heartbeat_interval = Duration::from_millis(10);
+    let context = LeaseHeartbeatContext {
+        control: &fixture.cp,
+        lease_id,
+        timing: &options.timing,
+        chaos: &options.chaos,
+    };
+    let operation = async {
+        let mut transaction = fixture.cp.pool_for_test().begin().await.unwrap();
+        sqlx::query("UPDATE leases SET last_heartbeat_at = last_heartbeat_at WHERE id = ?")
+            .bind(i64::try_from(lease_id.0).unwrap())
+            .execute(&mut *transaction)
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        transaction.commit().await.unwrap();
+        Ok::<_, VoomError>(())
+    };
+
+    let result = tokio::time::timeout(
+        Duration::from_secs(2),
+        await_with_lease_heartbeats(context, OperationKind::HashFile, operation),
+    )
+    .await;
+
+    assert!(
+        matches!(result, Ok(Ok(()))),
+        "operation stalled: {result:?}"
+    );
+}
+
+#[tokio::test]
 async fn source_backed_adapter_heartbeat_covers_terminal_post_dispatch_work() {
     for case in [
         PostDispatchCase::VideoTranscode,

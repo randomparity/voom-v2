@@ -194,7 +194,11 @@ where
             biased;
             result = &mut future => return result,
             _ = heartbeat.tick(), if !context.chaos.suppresses_heartbeats_for(operation) => {
-                let result = heartbeat_lease(context, operation).await;
+                let result = tokio::select! {
+                    biased;
+                    result = &mut future => return result,
+                    result = heartbeat_lease(context, operation) => result,
+                };
                 if let Err(source) = result {
                     return crate::workflow::execution::leases::fail_lease_and_return(
                         context.control,
