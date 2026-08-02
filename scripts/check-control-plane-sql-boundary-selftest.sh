@@ -392,6 +392,231 @@ RUST
 expect_violations query_builder_paths "$violations/query_builder_paths" 18 \
 	'sqlx::QueryBuilder::new' 'sqlx::QueryBuilder::with_arguments'
 
+mkdir -p "$violations/reviewer_forms"
+cat >"$violations/reviewer_forms/crate_wildcard.rs" <<'RUST'
+use sqlx as db;
+use db::*;
+
+fn crate_alias_wildcard() {
+    let _ = query::<Sqlite>("SELECT 1");
+}
+RUST
+cat >"$violations/reviewer_forms/module_wildcard.rs" <<'RUST'
+use sqlx::query_builder as qb;
+use qb::*;
+
+fn module_alias_wildcard() {
+    let _ = QueryBuilder::<Sqlite>::new("SELECT 1");
+}
+RUST
+cat >"$violations/reviewer_forms/grouped_module_wildcard.rs" <<'RUST'
+use sqlx::query_builder::{self};
+use query_builder::*;
+
+fn grouped_module_wildcard() {
+    let _ = QueryBuilder::<Sqlite>::with_arguments("SELECT 1", args());
+}
+RUST
+cat >"$violations/reviewer_forms/function_binding.rs" <<'RUST'
+fn function_binding() {
+    let db_query = sqlx::query::<Sqlite>;
+    let _ = db_query("SELECT 1");
+}
+RUST
+cat >"$violations/reviewer_forms/builder_type_alias.rs" <<'RUST'
+type DbBuilder<'query> = sqlx::QueryBuilder<'query, Sqlite>;
+
+fn builder_type_alias() {
+    let _ = DbBuilder::new("SELECT 1");
+}
+RUST
+expect_violations reviewer_forms "$violations/reviewer_forms" 6 \
+	'sqlx::*' 'sqlx::query_builder::*' 'sqlx::query' \
+	'sqlx::QueryBuilder' 'sqlx::QueryBuilder::new'
+
+mkdir -p "$violations/chained_aliases"
+cat >"$violations/chained_aliases/crate_to_item.rs" <<'RUST'
+use sqlx as first;
+use first as second;
+use second::query as chained_query;
+
+fn crate_to_item() {
+    let _ = chained_query("SELECT 1");
+}
+RUST
+cat >"$violations/chained_aliases/crate_to_module.rs" <<'RUST'
+use sqlx as first;
+use first as second;
+use second::query_builder as qb;
+use qb as chained_qb;
+
+fn crate_to_module() {
+    let _ = chained_qb::QueryBuilder::<Sqlite>::new("SELECT 1");
+}
+RUST
+cat >"$violations/chained_aliases/module_to_item.rs" <<'RUST'
+use sqlx::query_builder as first;
+use first as second;
+use second::QueryBuilder as Builder;
+
+fn module_to_item() {
+    let _ = Builder::<Sqlite>::with_arguments("SELECT 1", args());
+}
+RUST
+cat >"$violations/chained_aliases/item.rs" <<'RUST'
+use sqlx::query_as as first;
+use first as second;
+use second as third;
+
+fn item_alias_chain() {
+    let _ = third::<_, Row>("SELECT 1");
+}
+RUST
+cat >"$violations/chained_aliases/grouped_raw_crate.rs" <<'RUST'
+use sqlx::{self as first};
+use first::{self as r#type};
+use r#type::query_scalar as r#match;
+
+fn grouped_raw_crate_chain() {
+    let _ = r#match::<_, i64>("SELECT 1");
+}
+RUST
+cat >"$violations/chained_aliases/grouped_raw_module.rs" <<'RUST'
+use sqlx::query_builder::{self as first};
+use first::{self as r#type};
+use r#type::QueryBuilder as DbBuilder;
+
+fn grouped_raw_module_chain() {
+    let _ = DbBuilder::<Sqlite>::new("SELECT 1");
+}
+RUST
+cat >"$violations/chained_aliases/crate_wildcard.rs" <<'RUST'
+use sqlx as first;
+use first as second;
+use second::*;
+
+fn chained_crate_wildcard() {
+    let _ = query("SELECT 1");
+}
+RUST
+cat >"$violations/chained_aliases/module_wildcard.rs" <<'RUST'
+use sqlx::query_builder as first;
+use first as second;
+use second::*;
+
+fn chained_module_wildcard() {
+    let _ = QueryBuilder::<Sqlite>::new("SELECT 1");
+}
+RUST
+expect_violations chained_aliases "$violations/chained_aliases" 8 \
+	'sqlx::query' 'sqlx::query_as' 'sqlx::query_scalar' \
+	'sqlx::QueryBuilder::new' 'sqlx::QueryBuilder::with_arguments' \
+	'sqlx::*' 'sqlx::query_builder::*'
+
+mkdir -p "$violations/function_references"
+cat >"$violations/function_references/references.rs" <<'RUST'
+use sqlx as db;
+use sqlx::query_as_with as load_with;
+use sqlx::query_scalar_with as scalar_with;
+
+const RAW_SQL: for<'query> fn(&'query str) -> sqlx::RawSql<'query> = sqlx::raw_sql;
+static ROOT_RAW_SQL: for<'query> fn(&'query str) -> sqlx::RawSql<'query> =
+    ::sqlx::raw_sql;
+
+fn function_references() {
+    let query = sqlx::query::<Sqlite>;
+    let query_with = ::sqlx::query_with::<Sqlite, SqliteArguments<'static>>;
+    let query_as = db::query_as::<Sqlite, Row>;
+    let query_as_with = load_with::<Sqlite, Row, SqliteArguments<'static>>;
+    let query_scalar = db::query_scalar::<Sqlite, i64>;
+    let query_scalar_with = scalar_with::<Sqlite, i64, SqliteArguments<'static>>;
+    let _ = (
+        query,
+        query_with,
+        query_as,
+        query_as_with,
+        query_scalar,
+        query_scalar_with,
+        RAW_SQL,
+        ROOT_RAW_SQL,
+    );
+}
+RUST
+expect_violations function_references "$violations/function_references" 8 \
+	'sqlx::query' 'sqlx::query_with' 'sqlx::query_as' \
+	'sqlx::query_as_with' 'sqlx::query_scalar' \
+	'sqlx::query_scalar_with' 'sqlx::raw_sql'
+
+mkdir -p "$violations/builder_type_aliases"
+cat >"$violations/builder_type_aliases/direct.rs" <<'RUST'
+type DirectBuilder<'query> = sqlx::QueryBuilder<'query, Sqlite>;
+
+fn direct_builder_alias() {
+    let _ = DirectBuilder::new("SELECT 1");
+}
+RUST
+cat >"$violations/builder_type_aliases/root.rs" <<'RUST'
+type RootBuilder<'query> = ::sqlx::QueryBuilder<'query, Sqlite>;
+
+fn root_builder_alias() {
+    let _ = RootBuilder::with_arguments("SELECT 1", args());
+}
+RUST
+cat >"$violations/builder_type_aliases/crate_alias.rs" <<'RUST'
+use sqlx as db;
+
+type CrateBuilder<'query> = db::QueryBuilder<'query, Sqlite>;
+
+fn crate_builder_alias() {
+    let _ = CrateBuilder::new("SELECT 1");
+}
+RUST
+cat >"$violations/builder_type_aliases/public_module.rs" <<'RUST'
+type ModuleBuilder<'query> = sqlx::query_builder::QueryBuilder<'query, Sqlite>;
+
+fn public_module_builder_alias() {
+    let _ = ModuleBuilder::with_arguments("SELECT 1", args());
+}
+RUST
+cat >"$violations/builder_type_aliases/module_alias.rs" <<'RUST'
+use sqlx::query_builder as qb;
+
+type ModuleAliasBuilder<'query> = qb::QueryBuilder<'query, Sqlite>;
+
+fn module_alias_builder() {
+    let _ = ModuleAliasBuilder::new("SELECT 1");
+}
+RUST
+cat >"$violations/builder_type_aliases/imported_item.rs" <<'RUST'
+use sqlx::QueryBuilder as Builder;
+
+type ImportedBuilder<'query> = Builder<'query, Sqlite>;
+
+fn imported_item_builder_alias() {
+    let _ = ImportedBuilder::with_arguments("SELECT 1", args());
+}
+RUST
+cat >"$violations/builder_type_aliases/chained.rs" <<'RUST'
+type FirstBuilder<'query> = sqlx::QueryBuilder<'query, Sqlite>;
+type SecondBuilder<'query> = FirstBuilder<'query>;
+
+fn chained_builder_type_alias() {
+    let _ = SecondBuilder::new("SELECT 1");
+}
+RUST
+cat >"$violations/builder_type_aliases/raw_item.rs" <<'RUST'
+use sqlx::QueryBuilder as r#type;
+
+type RawBuilder<'query> = r#type<'query, Sqlite>;
+
+fn raw_item_builder_alias() {
+    let _ = RawBuilder::with_arguments("SELECT 1", args());
+}
+RUST
+expect_violations builder_type_aliases "$violations/builder_type_aliases" 17 \
+	'sqlx::QueryBuilder' 'sqlx::QueryBuilder::new' \
+	'sqlx::QueryBuilder::with_arguments'
+
 aggregate_output=""
 aggregate_status=0
 run_guard "$violations" aggregate_output aggregate_status
@@ -409,6 +634,9 @@ use sqlx::query as db_query;
 use sqlx::query_as;
 use sqlx::query_builder as qb;
 use sqlx as db;
+use db as chained_db;
+use qb as chained_qb;
+type DbBuilder<'query> = qb::QueryBuilder<'query, Sqlite>;
 RUST
 cat >"$work/cross_file/other.rs" <<'RUST'
 fn names_do_not_leak_between_files() {
@@ -416,9 +644,12 @@ fn names_do_not_leak_between_files() {
     let _ = query_as("not imported here");
     let _ = db::query("not imported here");
     let _ = qb::QueryBuilder::new("not imported here");
+    let _ = chained_db::query("not imported here");
+    let _ = chained_qb::QueryBuilder::new("not imported here");
+    let _ = DbBuilder::new("not imported here");
 }
 RUST
-expect_clean cross_file "$work/cross_file"
+expect_violations cross_file "$work/cross_file" 1 'sqlx::QueryBuilder'
 
 mkdir -p "$work/clean/tests"
 cat >"$work/clean/clean.rs" <<'RUST'
@@ -431,6 +662,14 @@ fn near_misses() {
     let _ = query_builder::QueryBuilder::new("not imported");
     let _ = r#type::QueryBuilder::new("raw alias not imported");
     let _ = sqlx_query("not sqlx");
+    let other_query = other::query::<Sqlite>;
+    let _ = other_query("not sqlx");
+}
+
+type OtherBuilder<'query> = other::QueryBuilder<'query, Sqlite>;
+
+fn non_sqlx_type_alias() {
+    let _ = OtherBuilder::new("not sqlx");
 }
 RUST
 cat >"$work/clean/fixture_test.rs" <<'RUST'
