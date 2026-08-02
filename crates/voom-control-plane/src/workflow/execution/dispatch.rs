@@ -199,10 +199,7 @@ async fn consume_dispatch_stream(
                             continue;
                         }
                         heartbeat_workflow_lease(
-                            control,
-                            lease_id,
-                            &mut last_heartbeat,
-                            &options.timing,
+                            control, lease_id, &mut last_heartbeat, &options.timing,
                         )
                         .await?;
                     }
@@ -250,10 +247,7 @@ async fn consume_dispatch_stream(
             }
             _ = heartbeat_tick => {
                 heartbeat_workflow_lease(
-                    control,
-                    lease_id,
-                    &mut last_heartbeat,
-                    &options.timing,
+                    control, lease_id, &mut last_heartbeat, &options.timing,
                 )
                 .await?;
             }
