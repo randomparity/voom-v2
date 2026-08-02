@@ -50,7 +50,12 @@ Artifact-domain crate:
 
 | Crate | Purpose |
 |---|---|
-| `voom-artifact` | Artifact-domain helpers shared outside the control-plane shell (`commit_pipeline` — pending-commit record + event glue and recovery-required commit data). Filesystem promotion, worker dispatch, and use-case assembly stay in `voom-control-plane::artifact`. |
+| `voom-artifact` | Pending-commit records, event glue, and commit-recovery data. |
+
+ADR 0050 assigns every byte read and mutation to the storage-owner node agent. The
+control plane retains durable commit authorization and workflow orchestration. Filesystem
+promotion remains in `voom-control-plane::artifact` only as a transitional implementation
+pending issues #416 through #425; do not extend that byte-owning boundary.
 
 ## Design and decisions
 

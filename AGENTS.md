@@ -97,7 +97,7 @@ Production crate responsibilities:
 - `voom-worker-protocol`: versioned worker contracts, payloads, progress, and transport.
 - `voom-store`: SQLite connections, migrations, schema probes, and repositories.
 - `voom-artifact`: pending-commit records, event glue, and commit-recovery data.
-- `voom-control-plane`: app services, workflow orchestration, promotion, and dispatch.
+- `voom-control-plane`: durable authority, commit authorization, and orchestration.
 - `voom-api`: axum router and application-state wiring; there is no server binary yet.
 - `voom-cli`: agent-facing commands, JSON envelopes, initialization, and presentation.
 - `voom-ffprobe-worker`: local media probing through ffprobe.
@@ -105,6 +105,11 @@ Production crate responsibilities:
 - `voom-mkvtoolnix-worker`: local remux operations through mkvtoolnix.
 - `voom-verify-artifact-worker`: local artifact verification.
 - `voom-backup-worker`: local artifact backup and checksum verification.
+
+ADR 0050 defines target byte ownership: storage-owner node agents perform or supervise
+every byte read and mutation. The control plane retains durable authority, commit
+authorization, and orchestration. Its current filesystem-promotion path is transitional
+pending issues #416 through #425; do not extend it as control-plane-owned behavior.
 
 Internal normal edges that define the production layering and its exceptions:
 
