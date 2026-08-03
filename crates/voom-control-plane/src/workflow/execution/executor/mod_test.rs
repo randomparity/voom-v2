@@ -2889,41 +2889,67 @@ async fn policy_transcode_success_result_includes_generated_staging_path() {
 async fn await_with_lease_heartbeats_refreshes_workflow_lease_while_future_runs() {
     let fixture = ExecutorFixture::with_ready_tickets(1).await;
     let worker_id = fixture.worker_id();
+    let (_unrelated_ticket_id, unrelated_lease_id) =
+        fixture.create_heartbeat_test_lease(worker_id).await;
     let (_ticket_id, lease_id) = fixture.create_heartbeat_test_lease(worker_id).await;
     let mut options = WorkflowExecutorOptions::for_tests();
     options.timing.heartbeat_interval = Duration::from_millis(10);
-    let context = LeaseHeartbeatContext {
-        control: &fixture.cp,
-        lease_id,
-        timing: &options.timing,
-        chaos: &options.chaos,
-    };
-
-    // The freshness assertion is driven by the injected ManualClock: advancing it
-    // sets last_heartbeat_at to T0+80ms independent of tokio's clock. Run the
-    // heartbeat loop in real time rather than under tokio's paused, auto-advancing
-    // clock: pausing makes the runtime auto-advance past the pool's acquire_timeout
-    // while a heartbeat write waits on the blocking DB thread, which spuriously
-    // failed the write with "pool timed out" on loaded runners. The 10ms heartbeat
-    // interval against the 80ms future keeps a wide ordering margin, so at least one
-    // heartbeat still fires before the future completes under load.
-    fixture.clock.advance(time::Duration::milliseconds(80));
-    let heartbeat = await_with_lease_heartbeats(context, OperationKind::HashFile, async {
-        tokio::time::sleep(Duration::from_millis(80)).await;
-        Ok::<_, VoomError>(())
+    let operation_gate = Arc::new(tokio::sync::Notify::new());
+    let operation_gate_in_task = operation_gate.clone();
+    let control = fixture.cp.clone();
+    let timing = options.timing.clone();
+    let chaos = options.chaos.clone();
+    let mut heartbeat_task = tokio::spawn(async move {
+        let context = LeaseHeartbeatContext {
+            control: &control,
+            lease_id,
+            timing: &timing,
+            chaos: &chaos,
+        };
+        await_with_lease_heartbeats(context, OperationKind::HashFile, async move {
+            operation_gate_in_task.notified().await;
+            Ok::<_, VoomError>(())
+        })
+        .await
     });
-    tokio::pin!(heartbeat);
-    tokio::select! {
-        result = &mut heartbeat => panic!("heartbeat future finished early: {result:?}"),
-        () = tokio::task::yield_now() => {}
-    }
-    heartbeat.await.unwrap();
+    let (acquired_at, initial_heartbeat_at) = fixture.lease_heartbeat_window(lease_id).await;
+    assert_eq!(initial_heartbeat_at, acquired_at);
+    fixture.clock.advance(time::Duration::milliseconds(80));
+    let observed_heartbeat_at =
+        match wait_for_lease_heartbeat(&fixture, lease_id, acquired_at, Duration::from_secs(5))
+            .await
+        {
+            Ok(observed) => observed,
+            Err(diagnostic) => {
+                operation_gate.notify_one();
+                let cleanup =
+                    tokio::time::timeout(Duration::from_secs(5), &mut heartbeat_task).await;
+                if cleanup.is_err() {
+                    heartbeat_task.abort();
+                    let _ = heartbeat_task.await;
+                }
+                panic!("{diagnostic}; wrapper cleanup result: {cleanup:?}");
+            }
+        };
 
-    let (acquired_at, last_heartbeat_at) = fixture.first_lease_heartbeat_window().await;
+    operation_gate.notify_one();
+    let Ok(joined) = tokio::time::timeout(Duration::from_secs(5), &mut heartbeat_task).await else {
+        heartbeat_task.abort();
+        let cleanup = heartbeat_task.await;
+        panic!("heartbeat wrapper did not finish after release: {cleanup:?}");
+    };
+    joined.unwrap().unwrap();
+
+    let (final_acquired_at, final_heartbeat_at) = fixture.lease_heartbeat_window(lease_id).await;
+    let (unrelated_acquired_at, unrelated_heartbeat_at) =
+        fixture.lease_heartbeat_window(unrelated_lease_id).await;
+    assert_eq!(final_acquired_at, acquired_at);
+    assert_eq!(unrelated_heartbeat_at, unrelated_acquired_at);
     assert!(
-        last_heartbeat_at > acquired_at,
+        final_heartbeat_at >= observed_heartbeat_at && final_heartbeat_at > acquired_at,
         "heartbeat wrapper must keep the outer workflow lease fresh: \
-         acquired_at={acquired_at}, last_heartbeat_at={last_heartbeat_at}"
+         acquired_at={acquired_at}, observed_heartbeat_at={observed_heartbeat_at}, \
+         final_heartbeat_at={final_heartbeat_at}"
     );
 }
 
@@ -3187,6 +3213,38 @@ async fn wait_for_new_lease_heartbeat(
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     None
+}
+
+async fn wait_for_lease_heartbeat(
+    fixture: &ExecutorFixture,
+    lease_id: LeaseId,
+    acquired_at: OffsetDateTime,
+    timeout: Duration,
+) -> Result<OffsetDateTime, String> {
+    let observation = async {
+        loop {
+            let (current_acquired_at, last_heartbeat_at) =
+                fixture.lease_heartbeat_window(lease_id).await;
+            if current_acquired_at != acquired_at {
+                return Err(format!(
+                    "lease {lease_id} acquired_at changed while observing heartbeats: \
+                     expected={acquired_at}, actual={current_acquired_at}"
+                ));
+            }
+            if last_heartbeat_at > acquired_at {
+                return Ok(last_heartbeat_at);
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    };
+    let Ok(result) = tokio::time::timeout(timeout, observation).await else {
+        let (_, last_heartbeat_at) = fixture.lease_heartbeat_window(lease_id).await;
+        return Err(format!(
+            "timed out after {timeout:?} waiting for lease {lease_id} heartbeat: \
+             acquired_at={acquired_at}, last_heartbeat_at={last_heartbeat_at}"
+        ));
+    };
+    result
 }
 
 #[tokio::test]
@@ -3891,6 +3949,19 @@ impl ExecutorFixture {
         .fetch_one(&self.cp.pool)
         .await
         .unwrap();
+        (
+            parse_test_time(&acquired_at),
+            parse_test_time(&last_heartbeat_at),
+        )
+    }
+
+    async fn lease_heartbeat_window(&self, lease_id: LeaseId) -> (OffsetDateTime, OffsetDateTime) {
+        let (acquired_at, last_heartbeat_at): (String, String) =
+            sqlx::query_as("SELECT acquired_at, last_heartbeat_at FROM leases WHERE id = ?")
+                .bind(i64::try_from(lease_id.0).unwrap())
+                .fetch_one(&self.cp.pool)
+                .await
+                .unwrap();
         (
             parse_test_time(&acquired_at),
             parse_test_time(&last_heartbeat_at),
