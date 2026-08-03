@@ -208,8 +208,8 @@ pub enum IssueStatusArg {
 
 impl IssueStatusArg {
     #[must_use]
-    pub const fn to_store(self) -> voom_store::repo::policy::issues::IssueStatus {
-        use voom_store::repo::policy::issues::IssueStatus;
+    pub const fn to_store(self) -> voom_store::repo::issues::IssueStatus {
+        use voom_store::repo::issues::IssueStatus;
         match self {
             Self::Open => IssueStatus::Open,
             Self::Planned => IssueStatus::Planned,

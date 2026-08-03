@@ -10,10 +10,10 @@
 use voom_core::{OperationKind, PolicyInputSetId, PolicyVersionId, VoomError};
 use voom_events::{Event, SubjectType, payload::IssueLifecyclePayload};
 use voom_plan::{ExecutionPlan, PlanOperationKind};
-use voom_store::repo::media::backups::BackupStatus;
-use voom_store::repo::policy::issues::{
+use voom_store::repo::issues::{
     PolicyIssueDraft, PolicyIssueMutation, PolicyIssueMutationKind, PolicyIssueStatus,
 };
+use voom_store::repo::media::backups::BackupStatus;
 use voom_store::repo::policy::safety_policies::{
     CommitMode, SAFETY_POLICY_SCHEMA_VERSION, SafetyPolicy, VerificationLevel,
 };

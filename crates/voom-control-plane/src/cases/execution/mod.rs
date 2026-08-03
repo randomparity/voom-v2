@@ -1,7 +1,7 @@
 use sqlx::{Sqlite, Transaction};
 use time::OffsetDateTime;
 use voom_core::{FailureClass, IssueId, LeaseId, TicketId, VoomError};
-use voom_store::repo::policy::issues::TerminalFailureIssueDraft;
+use voom_store::repo::issues::TerminalFailureIssueDraft;
 
 use crate::ControlPlane;
 

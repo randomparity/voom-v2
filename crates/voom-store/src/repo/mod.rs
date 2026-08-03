@@ -4,6 +4,7 @@ pub mod audit;
 pub(crate) mod common;
 pub mod execution;
 pub mod external;
+pub mod issues;
 pub mod library;
 pub mod media;
 pub mod policy;

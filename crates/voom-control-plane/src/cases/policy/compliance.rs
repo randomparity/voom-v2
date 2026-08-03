@@ -12,7 +12,7 @@ use voom_core::{
 };
 use voom_events::{Event, SubjectType, payload::IssueLifecyclePayload};
 use voom_plan::PlanOperationKind;
-use voom_store::repo::policy::issues::{
+use voom_store::repo::issues::{
     PolicyIssueDraft, PolicyIssueMutation, PolicyIssueMutationKind, PolicyIssueStatus,
 };
 use voom_worker_protocol::{HttpClient, WorkerCredentials};

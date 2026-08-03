@@ -1,6 +1,6 @@
 use voom_core::{IssueId, IssuePriority, IssueSeverity};
 use voom_events::EventKind;
-use voom_store::repo::policy::issues::{IssueFilter, IssueStatus};
+use voom_store::repo::issues::{IssueFilter, IssueStatus};
 
 use crate::ControlPlane;
 use crate::cases::{count, cp};

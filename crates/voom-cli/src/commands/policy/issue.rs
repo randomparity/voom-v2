@@ -3,7 +3,7 @@ use std::io;
 use serde::Serialize;
 use voom_control_plane::ControlPlane;
 use voom_core::IssueId;
-use voom_store::repo::policy::issues::{IssueFilter, IssueRecord};
+use voom_store::repo::issues::{IssueFilter, IssueRecord};
 
 use crate::cli::{IssueCommand, IssuePriorityArg, IssueSeverityArg, IssueStatusArg};
 use crate::commands::common::{emit_voom_error, open_control_plane};

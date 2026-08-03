@@ -45,6 +45,7 @@ use voom_store::repo::{
         workflow_summaries::SqliteWorkflowSummaryRepo,
     },
     external::SqliteExternalSystemRepo,
+    issues::SqliteIssueRepo,
     library::SqliteLibraryRepo,
     media::{
         artifact_access_plans::SqliteArtifactAccessPlanRepo, artifacts::SqliteArtifactRepo,
@@ -53,7 +54,6 @@ use voom_store::repo::{
         bundles::SqliteBundleRepo, identity::SqliteIdentityRepo, use_leases::SqliteUseLeaseRepo,
     },
     policy::{
-        issues::SqliteIssueRepo,
         policies::SqlitePolicyRepo,
         policy_inputs::SqlitePolicyInputRepo,
         quality_scoring_profiles::SqliteQualityScoringProfileRepo,
