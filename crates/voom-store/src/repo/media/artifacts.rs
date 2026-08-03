@@ -1695,8 +1695,8 @@ async fn validate_sidecar_commit_input(
     let pending = get_active_commit_record_in_tx(tx, input.commit_record_id).await?;
     if pending.target_path != input.target_path {
         return Err(VoomError::Conflict(format!(
-            "artifact_commit_records sidecar commit: target_path {:?} does not match pending target \
-             {:?}",
+            "artifact_commit_records sidecar commit: \
+             target_path {:?} does not match pending target {:?}",
             input.target_path, pending.target_path
         )));
     }

@@ -676,8 +676,18 @@ impl SqliteAudioSynthesisOperationRepo {
         )
         .bind(i64_from_u64(operation_id, concat!(module_path!(), ": ", stringify!(operation_id)))?)
         .bind(i64::from(claim.expected_generation))
-        .bind(i64_from_u64(attempt.dispatch_lease_id.0, concat!(module_path!(), ": ", stringify!(attempt.dispatch_lease_id.0)))?)
-        .bind(i64_from_u64(attempt.worker_id, concat!(module_path!(), ": ", stringify!(attempt.worker_id)))?)
+        .bind(i64_from_u64(
+            attempt.dispatch_lease_id.0,
+            concat!(
+                module_path!(),
+                ": ",
+                stringify!(attempt.dispatch_lease_id.0)
+            ),
+        )?)
+        .bind(i64_from_u64(
+            attempt.worker_id,
+            concat!(module_path!(), ": ", stringify!(attempt.worker_id)),
+        )?)
         .bind(i64::from(attempt.worker_epoch))
         .bind(&attempt.idempotency_key)
         .bind(&attempt.attempt_directory)

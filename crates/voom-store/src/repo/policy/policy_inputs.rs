@@ -283,12 +283,46 @@ impl SqlitePolicyInputRepo {
             .bind(snapshot.width.map(i64::from))
             .bind(snapshot.height.map(i64::from))
             .bind(&snapshot.hdr)
-            .bind(snapshot.bitrate.map(|value| i64_from_u64(value, concat!(module_path!(), ": ", stringify!(snapshot.bitrate)))).transpose()?)
-            .bind(snapshot.duration_millis.map(|value| i64_from_u64(value, concat!(module_path!(), ": ", stringify!(snapshot.duration_millis)))).transpose()?)
+            .bind(
+                snapshot
+                    .bitrate
+                    .map(|value| {
+                        i64_from_u64(
+                            value,
+                            concat!(module_path!(), ": ", stringify!(snapshot.bitrate)),
+                        )
+                    })
+                    .transpose()?,
+            )
+            .bind(
+                snapshot
+                    .duration_millis
+                    .map(|value| {
+                        i64_from_u64(
+                            value,
+                            concat!(
+                                module_path!(),
+                                ": ",
+                                stringify!(snapshot.duration_millis)
+                            ),
+                        )
+                    })
+                    .transpose()?,
+            )
             .bind(json_string(&snapshot.audio_languages, "audio_languages")?)
             .bind(json_string(&snapshot.subtitle_languages, "subtitle_languages")?)
             .bind(json_string(&snapshot.health_flags, "health_flags")?)
-            .bind(snapshot.existing_media_snapshot_id.map(|id| i64_from_u64(id.0, concat!(module_path!(), ": ", stringify!(id.0)))).transpose()?)
+            .bind(
+                snapshot
+                    .existing_media_snapshot_id
+                    .map(|id| {
+                        i64_from_u64(
+                            id.0,
+                            concat!(module_path!(), ": ", stringify!(id.0)),
+                        )
+                    })
+                    .transpose()?,
+            )
             .execute(&mut **tx)
             .await
             .map_err(|e| VoomError::database_context("policy_media_snapshot_inputs insert", e))?;
@@ -318,7 +352,17 @@ impl SqlitePolicyInputRepo {
             .bind(evidence.confidence)
             .bind(serialize_json(&evidence.provenance, "provenance")?)
             .bind(iso8601(evidence.observed_at)?)
-            .bind(evidence.existing_evidence_id.map(|id| i64_from_u64(id.0, concat!(module_path!(), ": ", stringify!(id.0)))).transpose()?)
+            .bind(
+                evidence
+                    .existing_evidence_id
+                    .map(|id| {
+                        i64_from_u64(
+                            id.0,
+                            concat!(module_path!(), ": ", stringify!(id.0)),
+                        )
+                    })
+                    .transpose()?,
+            )
             .execute(&mut **tx)
             .await
             .map_err(|e| VoomError::database_context("policy_identity_evidence_inputs insert", e))?;
