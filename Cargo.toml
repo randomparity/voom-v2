@@ -85,7 +85,6 @@ reqwest = { version = "0.13.3", default-features = false, features = ["json"] }
 secrecy = "0.10"
 thiserror = "2"
 toml = "1.1"
-tokio-util = { version = "0.7.13", features = ["io"] }
 trybuild = "1.0.108"
 
 [workspace.lints.clippy]
