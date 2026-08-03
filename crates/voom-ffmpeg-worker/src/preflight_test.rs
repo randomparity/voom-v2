@@ -96,7 +96,14 @@ fn preflight_rejects_non_executable_ffmpeg() {
     assert!(preflight_with_paths(&ffmpeg, &ffprobe).is_err());
 }
 
-const ALL_ENCODERS: &str = "Encoders:\n V..... libx265 H.265 / HEVC\n V..... libsvtav1 SVT-AV1\n V..... libaom-av1 libaom AV1\n A..... aac AAC\n A..... libopus Opus\n";
+const ALL_ENCODERS: &str = concat!(
+    "Encoders:\n",
+    " V..... libx265 H.265 / HEVC\n",
+    " V..... libsvtav1 SVT-AV1\n",
+    " V..... libaom-av1 libaom AV1\n",
+    " A..... aac AAC\n",
+    " A..... libopus Opus\n",
+);
 const ALL_MUXERS: &str = "Muxers:\n E matroska Matroska\n E mp4 MP4\n E ogg Ogg\n";
 
 fn fake_ffmpeg_all_encoders(dir: &Path) -> PathBuf {
@@ -235,7 +242,22 @@ fn ffmpeg_stub(dir: &Path, name: &str, version: &str, encoders: &str, muxers: &s
         dir,
         name,
         &format!(
-            "#!/bin/sh\ncase \"$*\" in\n  *-version*) echo '{version}' ;;\n  *-encoders*) cat <<'EOF'\n{encoders}EOF\n    ;;\n  *-muxers*) cat <<'EOF'\n{muxers}EOF\n    ;;\n  *) exit 2 ;;\nesac\n"
+            concat!(
+                "#!/bin/sh\n",
+                "case \"$*\" in\n",
+                "  *-version*) echo '{version}' ;;\n",
+                "  *-encoders*) cat <<'EOF'\n",
+                "{encoders}EOF\n",
+                "    ;;\n",
+                "  *-muxers*) cat <<'EOF'\n",
+                "{muxers}EOF\n",
+                "    ;;\n",
+                "  *) exit 2 ;;\n",
+                "esac\n",
+            ),
+            version = version,
+            encoders = encoders,
+            muxers = muxers
         ),
     )
 }
