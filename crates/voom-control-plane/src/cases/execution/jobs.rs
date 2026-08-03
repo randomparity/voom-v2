@@ -75,13 +75,15 @@ impl ControlPlane {
     /// Mark a job failed and emit `job.failed` carrying `reason`.
     ///
     /// # Errors
-    /// Propagates `SqliteJobRepo::fail_in_tx` and event-append errors.
+    /// Returns [`VoomError::Config`] when `reason` is blank. Propagates
+    /// `SqliteJobRepo::fail_in_tx` and event-append errors.
     pub async fn fail_job(
         &self,
         id: JobId,
         reason: String,
         now: OffsetDateTime,
     ) -> Result<Job, VoomError> {
+        require_audit_field("reason", &reason)?;
         let mut tx = begin_tx(&self.pool).await?;
         let job = self.jobs.fail_in_tx(&mut tx, id, now).await?;
         append_event(
