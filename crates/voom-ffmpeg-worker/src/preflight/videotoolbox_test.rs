@@ -1,5 +1,7 @@
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 use std::ffi::OsStr;
 
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 use super::super::process::resolve_binary;
 use super::*;
 use voom_worker_protocol::{VIDEOTOOLBOX_PREFLIGHT_BUDGET, VIDEOTOOLBOX_PREFLIGHT_MAX_STAGES};

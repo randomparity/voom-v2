@@ -82,6 +82,7 @@ fn process_env_probe_child() {
     std::fs::write(path, error.to_string()).unwrap();
 }
 
+#[cfg(unix)]
 #[test]
 fn preflight_rejects_non_executable_ffmpeg() {
     let temp = tempfile::tempdir().unwrap();
@@ -245,7 +246,6 @@ fn ffmpeg_stub(dir: &Path, name: &str, version: &str, encoders: &str, muxers: &s
 /// probe burns its full timeout and a healthy `ffmpeg -encoders` is reported as a
 /// preflight failure. Pipe capacity is host-dependent (64 KiB by default, but as
 /// little as 8 KiB under pipe-page pressure), so overshoot any plausible value.
-#[cfg(unix)]
 fn stub_bin(dir: &Path, name: &str, body: &str) -> PathBuf {
     let path = dir.join(name);
     std::fs::write(&path, body).unwrap();

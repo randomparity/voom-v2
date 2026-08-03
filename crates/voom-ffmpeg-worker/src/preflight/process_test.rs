@@ -1,3 +1,4 @@
+#[cfg(unix)]
 use std::{
     io,
     process::{Command, Stdio},
@@ -31,6 +32,7 @@ fn probe_directories_are_unique_when_created_concurrently() {
     assert_eq!(paths.len(), THREADS);
 }
 
+#[cfg(unix)]
 #[test]
 fn command_output_drains_a_child_that_outwrites_the_pipe_capacity() {
     let mut chatty = Command::new("/bin/sh");

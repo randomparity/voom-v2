@@ -1,4 +1,6 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(unix)]
+use std::path::PathBuf;
 
 use super::*;
 
@@ -575,6 +577,7 @@ fn no_vaapi_device_configured_yields_no_vaapi_preflight() {
     );
 }
 
+#[cfg(unix)]
 const ALL_ENCODERS: &str = concat!(
     "Encoders:\n",
     " V..... libx265 H.265 / HEVC\n",
@@ -583,12 +586,15 @@ const ALL_ENCODERS: &str = concat!(
     " A..... aac AAC\n",
     " A..... libopus Opus\n",
 );
+#[cfg(unix)]
 const ALL_MUXERS: &str = "Muxers:\n E matroska Matroska\n E mp4 MP4\n E ogg Ogg\n";
 
+#[cfg(unix)]
 fn fake_ffprobe(dir: &Path) -> PathBuf {
     stub_bin(dir, "ffprobe", "#!/bin/sh\necho 'ffprobe version 7.0'\n")
 }
 
+#[cfg(unix)]
 fn stub_bin(dir: &Path, name: &str, body: &str) -> PathBuf {
     let path = dir.join(name);
     std::fs::write(&path, body).unwrap();
@@ -604,6 +610,3 @@ fn make_executable(path: &Path) {
     permissions.set_mode(0o755);
     std::fs::set_permissions(path, permissions).unwrap();
 }
-
-#[cfg(not(unix))]
-fn make_executable(_path: &Path) {}
