@@ -640,28 +640,7 @@ impl SqliteLeaseRepo {
         } else {
             ReleaseReason::FailedTerminal
         };
-        let lease_row = sqlx::query(&format!(
-            "UPDATE leases \
-              SET state = 'released', release_reason = ?, released_at = ?, \
-                  epoch = epoch + 1 \
-              WHERE id = ? AND state = 'held' \
-            RETURNING {LEASE_RETURNING_COLS}"
-        ))
-        .bind(release_reason.as_str())
-        .bind(&now_str)
-        .bind(i64_from_u64(
-            lease_id.0,
-            concat!(module_path!(), ": ", stringify!(lease_id.0)),
-        )?)
-        .fetch_optional(&mut **tx)
-        .await
-        .map_err(|e| VoomError::database_context("leases release on fail", e))?;
-        let Some(lease) = lease_row.as_ref().map(row_to_lease).transpose()? else {
-            tracing::warn!(lease_id = lease_id.0, "fail aborting: lease no longer held");
-            return Err(VoomError::Conflict(format!(
-                "fail rejected: lease {lease_id} no longer held"
-            )));
-        };
+        let lease = release_lease_for_failure_in_tx(tx, lease_id, release_reason, &now_str).await?;
         // Transition ticket: ready (with backoff) or failed.
         if retriable && attempts_remain {
             // attempt is already incremented to reflect "this dispatch"; backoff
@@ -861,31 +840,7 @@ impl SqliteLeaseRepo {
         }
         let ticket_requeued = also_requeue;
         let now_str = iso8601(now)?;
-        let lease_row = sqlx::query(&format!(
-            "UPDATE leases \
-              SET state = 'force_released', release_reason = ?, \
-                  released_at = ?, epoch = epoch + 1 \
-              WHERE id = ? AND state = 'held' \
-            RETURNING {LEASE_RETURNING_COLS}"
-        ))
-        .bind(ReleaseReason::ForceReleased.as_str())
-        .bind(&now_str)
-        .bind(i64_from_u64(
-            lease_id.0,
-            concat!(module_path!(), ": ", stringify!(lease_id.0)),
-        )?)
-        .fetch_optional(&mut **tx)
-        .await
-        .map_err(|e| VoomError::database_context("lease force_release", e))?;
-        let Some(lease) = lease_row.as_ref().map(row_to_lease).transpose()? else {
-            tracing::warn!(
-                lease_id = lease_id.0,
-                "force_release aborting: lease no longer held"
-            );
-            return Err(VoomError::Conflict(format!(
-                "force_release rejected: lease {lease_id} no longer held"
-            )));
-        };
+        let lease = force_release_lease_in_tx(tx, lease_id, &now_str).await?;
         // On requeue, set next_eligible_at = now (operator-driven, no
         // backoff). On terminal, the column is irrelevant.
         let ticket_res = if ticket_requeued {
@@ -1178,6 +1133,70 @@ impl SqliteLeaseRepo {
         .map_err(|e| VoomError::database_context("leases list", e))?;
         rows.iter().map(row_to_lease).collect()
     }
+}
+
+async fn release_lease_for_failure_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    lease_id: LeaseId,
+    release_reason: ReleaseReason,
+    now_str: &str,
+) -> Result<Lease, VoomError> {
+    let lease_row = sqlx::query(&format!(
+        "UPDATE leases \
+          SET state = 'released', release_reason = ?, released_at = ?, \
+              epoch = epoch + 1 \
+          WHERE id = ? AND state = 'held' \
+        RETURNING {LEASE_RETURNING_COLS}"
+    ))
+    .bind(release_reason.as_str())
+    .bind(now_str)
+    .bind(i64_from_u64(
+        lease_id.0,
+        concat!(module_path!(), ": ", stringify!(lease_id.0)),
+    )?)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(|e| VoomError::database_context("leases release on fail", e))?;
+    let Some(lease) = lease_row.as_ref().map(row_to_lease).transpose()? else {
+        tracing::warn!(lease_id = lease_id.0, "fail aborting: lease no longer held");
+        return Err(VoomError::Conflict(format!(
+            "fail rejected: lease {lease_id} no longer held"
+        )));
+    };
+    Ok(lease)
+}
+
+async fn force_release_lease_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    lease_id: LeaseId,
+    now_str: &str,
+) -> Result<Lease, VoomError> {
+    let lease_row = sqlx::query(&format!(
+        "UPDATE leases \
+          SET state = 'force_released', release_reason = ?, \
+              released_at = ?, epoch = epoch + 1 \
+          WHERE id = ? AND state = 'held' \
+        RETURNING {LEASE_RETURNING_COLS}"
+    ))
+    .bind(ReleaseReason::ForceReleased.as_str())
+    .bind(now_str)
+    .bind(i64_from_u64(
+        lease_id.0,
+        concat!(module_path!(), ": ", stringify!(lease_id.0)),
+    )?)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(|e| VoomError::database_context("lease force_release", e))?;
+    let Some(lease) = lease_row.as_ref().map(row_to_lease).transpose()? else {
+        tracing::warn!(
+            lease_id = lease_id.0,
+            "force_release aborting: lease no longer held"
+        );
+        return Err(VoomError::Conflict(format!(
+            "force_release rejected: lease {lease_id} no longer held"
+        )));
+    };
+    Ok(lease)
 }
 
 const SELECT_LEASE_COLS: &str = "SELECT id, ticket_id, worker_id, state, acquired_at, expires_at, \

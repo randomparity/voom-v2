@@ -2241,6 +2241,14 @@ async fn sidecar_commit_helper_requires_target_path_from_commit_path() {
         )
         .await
         .unwrap();
+    let before: (i64, i64, i64) = sqlx::query_as(
+        "SELECT (SELECT COUNT(*) FROM file_assets), \
+                (SELECT COUNT(*) FROM file_versions), \
+                (SELECT COUNT(*) FROM file_locations)",
+    )
+    .fetch_one(&mut *tx)
+    .await
+    .unwrap();
 
     let err = repo
         .record_verified_sidecar_commit_rows_in_tx(
@@ -2259,6 +2267,15 @@ async fn sidecar_commit_helper_requires_target_path_from_commit_path() {
     tx.commit().await.unwrap();
 
     assert!(matches!(err, VoomError::Conflict(_)), "got: {err:?}");
+    let after: (i64, i64, i64) = sqlx::query_as(
+        "SELECT (SELECT COUNT(*) FROM file_assets), \
+                (SELECT COUNT(*) FROM file_versions), \
+                (SELECT COUNT(*) FROM file_locations)",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(after, before, "validation must precede sidecar inserts");
 }
 
 fn successful_verification(

@@ -1614,34 +1614,12 @@ impl SqliteArtifactRepo {
             "file_locations.id",
         )?);
 
-        let res = sqlx::query(
-            "UPDATE artifact_commit_records \
-             SET state = 'committed', result_file_version_id = ?, result_file_location_id = ?, \
-                 promotion_started_at = NULL, finished_at = ?, failure_class = NULL, \
-                 error_code = NULL, message = NULL, recovery_reason = NULL \
-             WHERE id = ? AND state IN ('pending', 'recovery_required')",
-        )
-        .bind(i64_from_u64(
-            file_version_id.0,
-            "artifact_commit_records.result_file_version_id",
-        )?)
-        .bind(i64_from_u64(
-            file_location_id.0,
-            "artifact_commit_records.result_file_location_id",
-        )?)
-        .bind(&finished_at)
-        .bind(i64_from_u64(
-            input.commit_record_id.0,
-            "artifact_commit_records.id",
-        )?)
-        .execute(&mut **tx)
-        .await
-        .map_err(|e| VoomError::database_context("artifact_commit_records sidecar commit", e))?;
-        let commit_record = changed_commit_record(
+        let commit_record = finalize_sidecar_commit_record_in_tx(
             tx,
             input.commit_record_id,
-            res.rows_affected(),
-            "sidecar_commit",
+            file_version_id,
+            file_location_id,
+            &finished_at,
         )
         .await?;
 
@@ -1652,6 +1630,39 @@ impl SqliteArtifactRepo {
             file_location_id,
         })
     }
+}
+
+async fn finalize_sidecar_commit_record_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    commit_record_id: ArtifactCommitRecordId,
+    file_version_id: FileVersionId,
+    file_location_id: FileLocationId,
+    finished_at: &str,
+) -> Result<ArtifactCommitRecord, VoomError> {
+    let res = sqlx::query(
+        "UPDATE artifact_commit_records \
+         SET state = 'committed', result_file_version_id = ?, result_file_location_id = ?, \
+             promotion_started_at = NULL, finished_at = ?, failure_class = NULL, \
+             error_code = NULL, message = NULL, recovery_reason = NULL \
+         WHERE id = ? AND state IN ('pending', 'recovery_required')",
+    )
+    .bind(i64_from_u64(
+        file_version_id.0,
+        "artifact_commit_records.result_file_version_id",
+    )?)
+    .bind(i64_from_u64(
+        file_location_id.0,
+        "artifact_commit_records.result_file_location_id",
+    )?)
+    .bind(finished_at)
+    .bind(i64_from_u64(
+        commit_record_id.0,
+        "artifact_commit_records.id",
+    )?)
+    .execute(&mut **tx)
+    .await
+    .map_err(|e| VoomError::database_context("artifact_commit_records sidecar commit", e))?;
+    changed_commit_record(tx, commit_record_id, res.rows_affected(), "sidecar_commit").await
 }
 
 async fn validate_verification_location(

@@ -573,27 +573,7 @@ impl SqliteUseLeaseRepo {
         tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
         input: NewUseLease,
     ) -> Result<UseLease, VoomError> {
-        // 1) Validate TTL vs manual-lock invariant. (§9.2 acquire step 1.)
-        let is_manual = matches!(input.kind, UseLeaseKind::ManualLock);
-        match (is_manual, input.ttl) {
-            (true, Some(_)) => {
-                return Err(VoomError::Config(
-                    "manual locks must not carry a TTL".to_owned(),
-                ));
-            }
-            (false, None) => {
-                return Err(VoomError::Config(format!(
-                    "TTL-bound lease kind {:?} requires a positive TTL",
-                    input.kind
-                )));
-            }
-            (false, Some(ttl)) if ttl <= Duration::ZERO => {
-                return Err(VoomError::Config(format!(
-                    "TTL must be positive; got {ttl}"
-                )));
-            }
-            _ => {}
-        }
+        validate_acquire_input(&input)?;
 
         // 2) Single-probe scope liveness check (see `probe_scope_liveness`).
         match probe_scope_liveness(tx, input.scope).await? {
@@ -633,58 +613,7 @@ impl SqliteUseLeaseRepo {
             )));
         }
 
-        // 3) Insert. `clock_source = 'control_plane'` is the only Sprint 1
-        //    value. Manual locks have NULL `expires_at`.
-        let (sa, sb, sv, sl) = scope_bind_columns(input.scope)?;
-        let acquired_iso = iso8601(input.acquired_at)?;
-        let expires_iso = input
-            .ttl
-            .map(|ttl| iso8601(input.acquired_at + ttl))
-            .transpose()?;
-        let ttl_bound_int: i64 = i64::from(!is_manual);
-
-        let res = sqlx::query(
-            "INSERT INTO asset_use_leases ( \
-                kind, scope_asset_id, scope_bundle_id, scope_version_id, scope_location_id, \
-                issuer_kind, issuer_ref, blocking_mode, ttl_bound, acquired_at, expires_at, \
-                clock_source \
-             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'control_plane')",
-        )
-        .bind(input.kind.as_str())
-        .bind(sa)
-        .bind(sb)
-        .bind(sv)
-        .bind(sl)
-        .bind(input.issuer_kind.as_str())
-        .bind(&input.issuer_ref)
-        .bind(input.blocking_mode.as_str())
-        .bind(ttl_bound_int)
-        .bind(&acquired_iso)
-        .bind(&expires_iso)
-        .execute(&mut **tx)
-        .await
-        .map_err(|e| VoomError::database_context("asset_use_leases insert", e))?;
-
-        // 4) Construct the return value directly (no post-write re-read needed —
-        //    every field is deterministic from input + the rowid).
-        Ok(UseLease {
-            id: UseLeaseId(u64_from_i64(
-                res.last_insert_rowid(),
-                concat!(module_path!(), ": ", stringify!(res.last_insert_rowid())),
-            )?),
-            kind: input.kind,
-            scope: input.scope,
-            issuer_kind: input.issuer_kind,
-            issuer_ref: input.issuer_ref,
-            blocking_mode: input.blocking_mode,
-            ttl_bound: !is_manual,
-            acquired_at: input.acquired_at,
-            expires_at: input.ttl.map(|ttl| input.acquired_at + ttl),
-            last_heartbeat_at: None,
-            release_reason: None,
-            released_at: None,
-            epoch: 0,
-        })
+        insert_use_lease_in_tx(tx, input).await
     }
 
     pub async fn acquire(&self, input: NewUseLease) -> Result<UseLease, VoomError> {
@@ -1082,6 +1011,76 @@ impl SqliteUseLeaseRepo {
         commit_tx(tx).await?;
         Ok(out)
     }
+}
+
+fn validate_acquire_input(input: &NewUseLease) -> Result<(), VoomError> {
+    let is_manual = matches!(input.kind, UseLeaseKind::ManualLock);
+    match (is_manual, input.ttl) {
+        (true, Some(_)) => Err(VoomError::Config(
+            "manual locks must not carry a TTL".to_owned(),
+        )),
+        (false, None) => Err(VoomError::Config(format!(
+            "TTL-bound lease kind {:?} requires a positive TTL",
+            input.kind
+        ))),
+        (false, Some(ttl)) if ttl <= Duration::ZERO => Err(VoomError::Config(format!(
+            "TTL must be positive; got {ttl}"
+        ))),
+        _ => Ok(()),
+    }
+}
+
+async fn insert_use_lease_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    input: NewUseLease,
+) -> Result<UseLease, VoomError> {
+    let is_manual = matches!(input.kind, UseLeaseKind::ManualLock);
+    let (sa, sb, sv, sl) = scope_bind_columns(input.scope)?;
+    let acquired_iso = iso8601(input.acquired_at)?;
+    let expires_iso = input
+        .ttl
+        .map(|ttl| iso8601(input.acquired_at + ttl))
+        .transpose()?;
+    let ttl_bound_int: i64 = i64::from(!is_manual);
+    let res = sqlx::query(
+        "INSERT INTO asset_use_leases ( \
+            kind, scope_asset_id, scope_bundle_id, scope_version_id, scope_location_id, \
+            issuer_kind, issuer_ref, blocking_mode, ttl_bound, acquired_at, expires_at, \
+            clock_source \
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'control_plane')",
+    )
+    .bind(input.kind.as_str())
+    .bind(sa)
+    .bind(sb)
+    .bind(sv)
+    .bind(sl)
+    .bind(input.issuer_kind.as_str())
+    .bind(&input.issuer_ref)
+    .bind(input.blocking_mode.as_str())
+    .bind(ttl_bound_int)
+    .bind(&acquired_iso)
+    .bind(&expires_iso)
+    .execute(&mut **tx)
+    .await
+    .map_err(|e| VoomError::database_context("asset_use_leases insert", e))?;
+    Ok(UseLease {
+        id: UseLeaseId(u64_from_i64(
+            res.last_insert_rowid(),
+            concat!(module_path!(), ": ", stringify!(res.last_insert_rowid())),
+        )?),
+        kind: input.kind,
+        scope: input.scope,
+        issuer_kind: input.issuer_kind,
+        issuer_ref: input.issuer_ref,
+        blocking_mode: input.blocking_mode,
+        ttl_bound: !is_manual,
+        acquired_at: input.acquired_at,
+        expires_at: input.ttl.map(|ttl| input.acquired_at + ttl),
+        last_heartbeat_at: None,
+        release_reason: None,
+        released_at: None,
+        epoch: 0,
+    })
 }
 
 #[cfg(test)]
