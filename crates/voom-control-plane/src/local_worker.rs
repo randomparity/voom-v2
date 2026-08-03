@@ -18,7 +18,7 @@ use sha2::{Digest, Sha256};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, ChildStdin, Command};
 use tokio::time::timeout;
-use voom_core::{TicketOperation, VoomError, WorkerId, WorkerKind, WorkerStatus};
+use voom_core::{OperationKind, TicketOperation, VoomError, WorkerId, WorkerKind, WorkerStatus};
 use voom_store::repo::execution::accelerator_claims::{
     NewAcceleratorClaim, SqliteAcceleratorClaimRepo,
 };
@@ -141,10 +141,14 @@ impl LocalWorkerKind {
         }
     }
 
-    const fn operations(self) -> &'static [&'static str] {
+    const fn operations(self) -> &'static [OperationKind] {
         match self {
-            Self::Ffmpeg => &["transcode_video", "transcode_audio", "extract_audio"],
-            Self::Mkvtoolnix => &["remux"],
+            Self::Ffmpeg => &[
+                OperationKind::TranscodeVideo,
+                OperationKind::TranscodeAudio,
+                OperationKind::ExtractAudio,
+            ],
+            Self::Mkvtoolnix => &[OperationKind::Remux],
         }
     }
 }
@@ -557,8 +561,8 @@ impl ControlPlane {
     ) -> Result<(), VoomError> {
         let mut grant_ops = Vec::with_capacity(kind.operations().len());
         let mut max_parallel = serde_json::Map::new();
-        for op in kind.operations() {
-            let operation = TicketOperation::new(*op)?;
+        for op in kind.operations().iter().copied() {
+            let operation = TicketOperation::from(op);
             let mut extra = serde_json::json!({
                 "endpoint": endpoint.to_string(),
                 "secret": secret,
@@ -579,12 +583,15 @@ impl ControlPlane {
                 extra,
             })
             .await?;
-            let operation_capacity = if *op == "transcode_video" {
+            let operation_capacity = if op == OperationKind::TranscodeVideo {
                 accelerator.map_or(1, VideoAcceleratorDescriptor::max_sessions)
             } else {
                 1
             };
-            max_parallel.insert((*op).to_owned(), serde_json::json!(operation_capacity));
+            max_parallel.insert(
+                op.as_str().to_owned(),
+                serde_json::json!(operation_capacity),
+            );
             grant_ops.push(operation);
         }
         self.record_grant(NewGrant {

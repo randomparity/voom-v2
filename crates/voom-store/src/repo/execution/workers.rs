@@ -3,7 +3,7 @@
 use serde_json::Value as JsonValue;
 use sqlx::{QueryBuilder, Row, SqlitePool};
 use time::OffsetDateTime;
-use voom_core::{NodeId, TicketOperation, VoomError, WorkerId};
+use voom_core::{NodeId, OperationKind, TicketOperation, VoomError, WorkerId};
 pub use voom_core::{WorkerKind, WorkerStatus};
 
 use super::Repository;
@@ -914,7 +914,7 @@ impl SqliteWorkerRepo {
         operation: &TicketOperation,
     ) -> Result<WorkerOperationCapacity, VoomError> {
         let operation = normalized_worker_operation(operation)?;
-        if operation.as_str() == "transcode_video"
+        if operation == TicketOperation::from(OperationKind::TranscodeVideo)
             && let Some(capacity) = accelerator_operation_capacity(tx, worker_id).await?
         {
             return Ok(capacity);

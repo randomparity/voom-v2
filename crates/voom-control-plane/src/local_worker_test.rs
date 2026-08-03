@@ -14,7 +14,7 @@ use super::{
 };
 #[cfg(target_os = "linux")]
 use super::{kill_and_wait, process_group_has_members};
-use voom_core::TicketOperation;
+use voom_core::{OperationKind, TicketOperation};
 use voom_worker_protocol::{
     NvidiaVideoAcceleratorDescriptor, VaapiVideoAcceleratorDescriptor, VideoAcceleratorDescriptor,
 };
@@ -25,8 +25,76 @@ fn ffmpeg_maps_binary_name_and_operations() {
     assert_eq!(LocalWorkerKind::Ffmpeg.base_name(), "local-ffmpeg");
     assert_eq!(
         LocalWorkerKind::Ffmpeg.operations(),
-        &["transcode_video", "transcode_audio", "extract_audio"]
+        &[
+            OperationKind::TranscodeVideo,
+            OperationKind::TranscodeAudio,
+            OperationKind::ExtractAudio,
+        ]
     );
+}
+
+#[tokio::test]
+async fn bundled_kinds_record_exact_operation_capabilities_and_grants() {
+    let (cp, _tmp) = crate::cases::cp().await;
+    let cases: [(LocalWorkerKind, &str, &[&str]); 2] = [
+        (
+            LocalWorkerKind::Ffmpeg,
+            "durable-ffmpeg-operations",
+            &["transcode_video", "transcode_audio", "extract_audio"],
+        ),
+        (
+            LocalWorkerKind::Mkvtoolnix,
+            "durable-mkvtoolnix-operations",
+            &["remux"],
+        ),
+    ];
+
+    for (kind, name, expected_operations) in cases {
+        let worker = cp
+            .register_worker(crate::cases::workers::RegisterWorkerInput {
+                name: name.to_owned(),
+                kind: voom_core::WorkerKind::Local,
+            })
+            .await
+            .unwrap();
+        cp.record_local_worker_registry(
+            kind,
+            worker.id,
+            "s3cret",
+            "127.0.0.1:9000".parse().unwrap(),
+            None,
+        )
+        .await
+        .unwrap();
+
+        let capability_operations: Vec<String> = sqlx::query_scalar(
+            "SELECT operation FROM worker_capabilities WHERE worker_id = ? ORDER BY id",
+        )
+        .bind(i64::try_from(worker.id.0).unwrap())
+        .fetch_all(&cp.pool)
+        .await
+        .unwrap();
+        let (can_execute, max_parallel): (String, String) = sqlx::query_as(
+            "SELECT can_execute, max_parallel FROM worker_grants WHERE worker_id = ?",
+        )
+        .bind(i64::try_from(worker.id.0).unwrap())
+        .fetch_one(&cp.pool)
+        .await
+        .unwrap();
+        let can_execute: serde_json::Value = serde_json::from_str(&can_execute).unwrap();
+        let max_parallel: serde_json::Value = serde_json::from_str(&max_parallel).unwrap();
+        let expected_max_parallel = expected_operations
+            .iter()
+            .map(|operation| ((*operation).to_owned(), serde_json::json!(1)))
+            .collect::<serde_json::Map<_, _>>();
+
+        assert_eq!(capability_operations, expected_operations);
+        assert_eq!(can_execute, serde_json::json!(expected_operations));
+        assert_eq!(
+            max_parallel,
+            serde_json::Value::Object(expected_max_parallel)
+        );
+    }
 }
 
 fn nvidia_config(device_uuid: &str, max_sessions: u32) -> LocalVideoAcceleratorConfig {
@@ -407,19 +475,10 @@ fn mkvtoolnix_maps_binary_name_and_operations() {
         "voom-mkvtoolnix-worker"
     );
     assert_eq!(LocalWorkerKind::Mkvtoolnix.base_name(), "local-mkvtoolnix");
-    assert_eq!(LocalWorkerKind::Mkvtoolnix.operations(), &["remux"]);
-}
-
-#[test]
-fn every_operation_is_a_valid_ticket_operation() {
-    for kind in [LocalWorkerKind::Ffmpeg, LocalWorkerKind::Mkvtoolnix] {
-        for op in kind.operations() {
-            assert!(
-                TicketOperation::new(*op).is_ok(),
-                "operation {op} must be a valid ticket operation token"
-            );
-        }
-    }
+    assert_eq!(
+        LocalWorkerKind::Mkvtoolnix.operations(),
+        &[OperationKind::Remux]
+    );
 }
 
 #[cfg(target_os = "linux")]

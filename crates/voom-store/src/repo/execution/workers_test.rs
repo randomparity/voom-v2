@@ -694,6 +694,30 @@ async fn operation_candidates_returns_each_effective_worker_once() {
 }
 
 #[tokio::test]
+async fn operation_capacity_honors_custom_ticket_operation_limit() {
+    let fixture = worker_fixture().await;
+    let operation = worker_op("plugin.custom.noop");
+    fixture
+        .insert_grant_with_limit(
+            &[operation.as_str()],
+            &[],
+            serde_json::json!({"plugin.custom.noop": 7}),
+        )
+        .await;
+    let mut tx = fixture.repo.pool.begin().await.unwrap();
+
+    let capacity = fixture
+        .repo
+        .operation_capacity_in_tx(&mut tx, fixture.worker_id, &operation)
+        .await
+        .unwrap();
+
+    assert_eq!(capacity.active_leases, 0);
+    assert_eq!(capacity.max_parallel, 7);
+    tx.rollback().await.unwrap();
+}
+
+#[tokio::test]
 async fn node_owned_worker_in_tx_returns_matching_worker() {
     let (pool, _tmp, repo, node, worker) = worker_with_node_fixture().await;
     let mut tx = pool.begin().await.unwrap();
