@@ -337,6 +337,7 @@ async fn nvidia_capability_records_the_tagged_descriptor_token_and_capacity() {
     let granted: serde_json::Value = serde_json::from_str(&granted).unwrap();
     assert_eq!(granted["transcode_video"], 4);
     assert_eq!(granted["transcode_audio"], 1);
+    assert_eq!(granted["extract_audio"], 1);
 
     let candidates = cp
         .workers
