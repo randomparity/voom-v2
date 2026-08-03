@@ -2080,28 +2080,16 @@ fn output_matches(stored: &AudioExtractOperationOutput, requested: &NewAudioExtr
         && stored.target_path == requested.target_path
 }
 
-#[expect(
-    clippy::needless_pass_by_value,
-    reason = "Result::map_err supplies the owned sqlx error; the shared decoder only borrows it"
-)]
 fn operation_row_err(error: sqlx::Error) -> VoomError {
-    map_row_err("audio_extract_operations", &error)
+    map_row_err("audio_extract_operations", error)
 }
 
-#[expect(
-    clippy::needless_pass_by_value,
-    reason = "Result::map_err supplies the owned sqlx error; the shared decoder only borrows it"
-)]
 fn output_row_err(error: sqlx::Error) -> VoomError {
-    map_row_err("audio_extract_operation_outputs", &error)
+    map_row_err("audio_extract_operation_outputs", error)
 }
 
-#[expect(
-    clippy::needless_pass_by_value,
-    reason = "Result::map_err supplies the owned sqlx error; the shared decoder only borrows it"
-)]
 fn dispatch_row_err(error: sqlx::Error) -> VoomError {
-    map_row_err("audio_extract_dispatch_attempts", &error)
+    map_row_err("audio_extract_dispatch_attempts", error)
 }
 
 impl AudioExtractOperationState {

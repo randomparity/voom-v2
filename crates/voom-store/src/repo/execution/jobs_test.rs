@@ -1,3 +1,5 @@
+use std::error::Error;
+
 use super::*;
 
 use time::OffsetDateTime;
@@ -37,6 +39,26 @@ async fn get_returns_created_row() {
     let job = repo.create(sample_new_job()).await.unwrap();
     let fetched = repo.get(job.id).await.unwrap().expect("present");
     assert_eq!(fetched.id, job.id);
+}
+
+#[tokio::test]
+async fn row_decode_preserves_sqlx_source() {
+    let (pool, _tmp) = pool().await;
+    let row = sqlx::query("SELECT x'00' AS id")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+    let error = row_to_job(&row).unwrap_err();
+    assert_eq!(error.code(), "DB_UNREACHABLE");
+    let display = error.to_string();
+    let source = error.source().expect("sqlx source");
+    let sqlx_error = source.downcast_ref::<sqlx::Error>().unwrap();
+    assert!(matches!(sqlx_error, sqlx::Error::ColumnDecode { .. }));
+    assert_eq!(
+        display,
+        format!("database error: jobs row decode: {sqlx_error}")
+    );
 }
 
 #[tokio::test]

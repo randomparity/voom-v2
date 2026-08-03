@@ -297,19 +297,17 @@ pub(super) fn is_unique_violation(err: &sqlx::Error) -> bool {
 
 fn row_to_library(row: &SqliteRow) -> Result<Library, VoomError> {
     let t = "libraries";
-    let id: i64 = row.try_get("id").map_err(|e| map_row_err(t, &e))?;
-    let slug: String = row.try_get("slug").map_err(|e| map_row_err(t, &e))?;
-    let display_name: String = row
-        .try_get("display_name")
-        .map_err(|e| map_row_err(t, &e))?;
-    let media_kind: String = row.try_get("media_kind").map_err(|e| map_row_err(t, &e))?;
-    let description: Option<String> = row.try_get("description").map_err(|e| map_row_err(t, &e))?;
-    let enabled: i64 = row.try_get("enabled").map_err(|e| map_row_err(t, &e))?;
+    let id: i64 = row.try_get("id").map_err(|e| map_row_err(t, e))?;
+    let slug: String = row.try_get("slug").map_err(|e| map_row_err(t, e))?;
+    let display_name: String = row.try_get("display_name").map_err(|e| map_row_err(t, e))?;
+    let media_kind: String = row.try_get("media_kind").map_err(|e| map_row_err(t, e))?;
+    let description: Option<String> = row.try_get("description").map_err(|e| map_row_err(t, e))?;
+    let enabled: i64 = row.try_get("enabled").map_err(|e| map_row_err(t, e))?;
     let default_scoring_profile_name: Option<String> = row
         .try_get("default_scoring_profile_name")
-        .map_err(|e| map_row_err(t, &e))?;
-    let created_at: String = row.try_get("created_at").map_err(|e| map_row_err(t, &e))?;
-    let updated_at: String = row.try_get("updated_at").map_err(|e| map_row_err(t, &e))?;
+        .map_err(|e| map_row_err(t, e))?;
+    let created_at: String = row.try_get("created_at").map_err(|e| map_row_err(t, e))?;
+    let updated_at: String = row.try_get("updated_at").map_err(|e| map_row_err(t, e))?;
     Ok(Library {
         id: LibraryId(u64_from_i64(
             id,

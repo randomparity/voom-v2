@@ -1,3 +1,5 @@
+use std::error::Error;
+
 use serde_json::json;
 use time::OffsetDateTime;
 
@@ -42,6 +44,39 @@ async fn register_then_get_round_trips_every_field() {
     assert_eq!(fetched.kind, ExternalSystemKind::Filesystem);
     assert_eq!(fetched.connection_profile, json!({ "root": "/srv/media" }));
     assert_eq!(fetched.created_at, now());
+}
+
+#[tokio::test]
+async fn malformed_connection_profile_preserves_serde_source() {
+    let (repo, _tmp) = repo().await;
+    let mut tx = repo.pool.begin().await.unwrap();
+    let created = repo.register_in_tx(&mut tx, sample(), now()).await.unwrap();
+    tx.commit().await.unwrap();
+    let mut connection = repo.pool.acquire().await.unwrap();
+    sqlx::query("PRAGMA ignore_check_constraints = TRUE")
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE external_systems SET connection_profile = 'not-json' WHERE id = ?")
+        .bind(i64::try_from(created.id.0).unwrap())
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+    sqlx::query("PRAGMA ignore_check_constraints = FALSE")
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+    drop(connection);
+
+    let error = repo.get(created.id).await.unwrap_err();
+    assert_eq!(error.code(), "DB_UNREACHABLE");
+    let display = error.to_string();
+    let source = error.source().expect("serde source");
+    let serde_error = source.downcast_ref::<serde_json::Error>().unwrap();
+    assert_eq!(
+        display,
+        format!("database error: external_systems.connection_profile decode: {serde_error}")
+    );
 }
 
 #[tokio::test]

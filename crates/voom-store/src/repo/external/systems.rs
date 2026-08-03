@@ -220,7 +220,7 @@ fn encode_json(value: &JsonValue, field: &str) -> Result<String, VoomError> {
 
 fn decode_json(json: &str, field: &str) -> Result<JsonValue, VoomError> {
     serde_json::from_str(json)
-        .map_err(|e| VoomError::database(format!("external_systems.{field} decode: {e}")))
+        .map_err(|e| VoomError::database_context(format!("external_systems.{field} decode"), e))
 }
 
 fn row_to_system(row: &SqliteRow) -> Result<ExternalSystem, VoomError> {

@@ -674,7 +674,10 @@ impl SqliteAudioSynthesisOperationRepo {
               attempt_directory, staging_path, status, created_at) \
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
-        .bind(i64_from_u64(operation_id, concat!(module_path!(), ": ", stringify!(operation_id)))?)
+        .bind(i64_from_u64(
+            operation_id,
+            concat!(module_path!(), ": ", stringify!(operation_id)),
+        )?)
         .bind(i64::from(claim.expected_generation))
         .bind(i64_from_u64(
             attempt.dispatch_lease_id.0,
@@ -1146,7 +1149,10 @@ fn optional_json(row: &SqliteRow, field: &str) -> Result<Option<Value>, VoomErro
         .map_err(synthesis_row_err)?
         .map(|value| {
             serde_json::from_str(&value).map_err(|error| {
-                VoomError::database(format!("audio synthesis {field} is invalid JSON: {error}"))
+                VoomError::database_context(
+                    format!("audio synthesis {field} is invalid JSON"),
+                    error,
+                )
             })
         })
         .transpose()
@@ -1465,12 +1471,8 @@ fn require_one_update(rows_affected: u64, target: &str) -> Result<(), VoomError>
     )))
 }
 
-#[expect(
-    clippy::needless_pass_by_value,
-    reason = "Result::map_err supplies the owned sqlx error; the shared decoder only borrows it"
-)]
 fn synthesis_row_err(error: sqlx::Error) -> VoomError {
-    map_row_err("audio synthesis", &error)
+    map_row_err("audio synthesis", error)
 }
 
 impl AudioSynthesisOperationState {

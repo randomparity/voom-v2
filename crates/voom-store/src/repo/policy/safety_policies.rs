@@ -314,9 +314,7 @@ fn encode_commit_modes(modes: &[CommitMode]) -> Result<String, VoomError> {
 
 fn decode_operations(json: &str) -> Result<Vec<OperationKind>, VoomError> {
     let tokens: Vec<String> = serde_json::from_str(json).map_err(|e| {
-        VoomError::database(format!(
-            "safety_policies.auto_execute_operations decode: {e}"
-        ))
+        VoomError::database_context("safety_policies.auto_execute_operations decode", e)
     })?;
     tokens
         .iter()
@@ -332,7 +330,7 @@ fn decode_operations(json: &str) -> Result<Vec<OperationKind>, VoomError> {
 
 fn decode_commit_modes(json: &str) -> Result<Vec<CommitMode>, VoomError> {
     let tokens: Vec<String> = serde_json::from_str(json).map_err(|e| {
-        VoomError::database(format!("safety_policies.allowed_commit_modes decode: {e}"))
+        VoomError::database_context("safety_policies.allowed_commit_modes decode", e)
     })?;
     tokens
         .iter()

@@ -805,10 +805,10 @@ impl SqliteArtifactRepo {
         .ok_or_else(|| VoomError::NotFound(format!("artifact_handles {handle_id} missing")))?;
         let size_bytes: Option<i64> = row
             .try_get("size_bytes")
-            .map_err(|error| map_row_err("artifact_handles.size_bytes", &error))?;
+            .map_err(|error| map_row_err("artifact_handles.size_bytes", error))?;
         let checksum = row
             .try_get("checksum")
-            .map_err(|error| map_row_err("artifact_handles.checksum", &error))?;
+            .map_err(|error| map_row_err("artifact_handles.checksum", error))?;
         Ok(ArtifactHandleFacts {
             handle: row_to_handle(&row)?,
             size_bytes: size_bytes
@@ -2739,24 +2739,22 @@ fn evidence_optional_timestamp(
 }
 
 fn row_to_handle(row: &sqlx::sqlite::SqliteRow) -> Result<ArtifactHandle, VoomError> {
-    let id: i64 = row
-        .try_get("id")
-        .map_err(|e| map_row_err("artifacts", &e))?;
+    let id: i64 = row.try_get("id").map_err(|e| map_row_err("artifacts", e))?;
     let file_version_id: Option<i64> = row
         .try_get("file_version_id")
-        .map_err(|e| map_row_err("artifacts", &e))?;
+        .map_err(|e| map_row_err("artifacts", e))?;
     let privacy_class: String = row
         .try_get("privacy_class")
-        .map_err(|e| map_row_err("artifacts", &e))?;
+        .map_err(|e| map_row_err("artifacts", e))?;
     let durability_class: String = row
         .try_get("durability_class")
-        .map_err(|e| map_row_err("artifacts", &e))?;
+        .map_err(|e| map_row_err("artifacts", e))?;
     let mutability: String = row
         .try_get("mutability")
-        .map_err(|e| map_row_err("artifacts", &e))?;
+        .map_err(|e| map_row_err("artifacts", e))?;
     let created: String = row
         .try_get("created_at")
-        .map_err(|e| map_row_err("artifacts", &e))?;
+        .map_err(|e| map_row_err("artifacts", e))?;
     Ok(ArtifactHandle {
         id: ArtifactHandleId(
             u64::try_from(id).map_err(|error| {
@@ -2780,58 +2778,58 @@ fn row_to_handle(row: &sqlx::sqlite::SqliteRow) -> Result<ArtifactHandle, VoomEr
 fn row_to_verification(row: &sqlx::sqlite::SqliteRow) -> Result<ArtifactVerification, VoomError> {
     let id: i64 = row
         .try_get("id")
-        .map_err(|e| map_row_err("artifact_verifications", &e))?;
+        .map_err(|e| map_row_err("artifact_verifications", e))?;
     let artifact_handle_id: i64 = row
         .try_get("artifact_handle_id")
-        .map_err(|e| map_row_err("artifact_verifications", &e))?;
+        .map_err(|e| map_row_err("artifact_verifications", e))?;
     let artifact_location_id: i64 = row
         .try_get("artifact_location_id")
-        .map_err(|e| map_row_err("artifact_verifications", &e))?;
+        .map_err(|e| map_row_err("artifact_verifications", e))?;
     let path: String = row
         .try_get("path")
-        .map_err(|e| map_row_err("artifact_verifications", &e))?;
+        .map_err(|e| map_row_err("artifact_verifications", e))?;
     let worker_id: i64 = row
         .try_get("worker_id")
-        .map_err(|e| map_row_err("artifact_verifications", &e))?;
+        .map_err(|e| map_row_err("artifact_verifications", e))?;
     let workflow_ticket_id: Option<i64> = row
         .try_get("workflow_ticket_id")
-        .map_err(|e| map_row_err("artifact_verifications", &e))?;
+        .map_err(|e| map_row_err("artifact_verifications", e))?;
     let workflow_lease_id: Option<i64> = row
         .try_get("workflow_lease_id")
-        .map_err(|e| map_row_err("artifact_verifications", &e))?;
+        .map_err(|e| map_row_err("artifact_verifications", e))?;
     let status: String = row
         .try_get("status")
-        .map_err(|e| map_row_err("artifact_verifications", &e))?;
+        .map_err(|e| map_row_err("artifact_verifications", e))?;
     let expected_size_bytes: i64 = row
         .try_get("expected_size_bytes")
-        .map_err(|e| map_row_err("artifact_verifications", &e))?;
+        .map_err(|e| map_row_err("artifact_verifications", e))?;
     let expected_checksum: String = row
         .try_get("expected_checksum")
-        .map_err(|e| map_row_err("artifact_verifications", &e))?;
+        .map_err(|e| map_row_err("artifact_verifications", e))?;
     let observed_size_bytes: Option<i64> = row
         .try_get("observed_size_bytes")
-        .map_err(|e| map_row_err("artifact_verifications", &e))?;
+        .map_err(|e| map_row_err("artifact_verifications", e))?;
     let observed_checksum: Option<String> = row
         .try_get("observed_checksum")
-        .map_err(|e| map_row_err("artifact_verifications", &e))?;
+        .map_err(|e| map_row_err("artifact_verifications", e))?;
     let failure_class: Option<String> = row
         .try_get("failure_class")
-        .map_err(|e| map_row_err("artifact_verifications", &e))?;
+        .map_err(|e| map_row_err("artifact_verifications", e))?;
     let error_code: Option<String> = row
         .try_get("error_code")
-        .map_err(|e| map_row_err("artifact_verifications", &e))?;
+        .map_err(|e| map_row_err("artifact_verifications", e))?;
     let message: Option<String> = row
         .try_get("message")
-        .map_err(|e| map_row_err("artifact_verifications", &e))?;
+        .map_err(|e| map_row_err("artifact_verifications", e))?;
     let report: String = row
         .try_get("report")
-        .map_err(|e| map_row_err("artifact_verifications", &e))?;
+        .map_err(|e| map_row_err("artifact_verifications", e))?;
     let started_at: String = row
         .try_get("started_at")
-        .map_err(|e| map_row_err("artifact_verifications", &e))?;
+        .map_err(|e| map_row_err("artifact_verifications", e))?;
     let finished_at: String = row
         .try_get("finished_at")
-        .map_err(|e| map_row_err("artifact_verifications", &e))?;
+        .map_err(|e| map_row_err("artifact_verifications", e))?;
 
     Ok(ArtifactVerification {
         id: ArtifactVerificationId(u64_from_i64(id, "artifact_verifications.id")?),
@@ -2909,55 +2907,55 @@ async fn get_commit_record_in_tx(
 fn row_to_commit_record(row: &sqlx::sqlite::SqliteRow) -> Result<ArtifactCommitRecord, VoomError> {
     let id: i64 = row
         .try_get("id")
-        .map_err(|e| map_row_err("artifact_commit_records", &e))?;
+        .map_err(|e| map_row_err("artifact_commit_records", e))?;
     let artifact_handle_id: i64 = row
         .try_get("artifact_handle_id")
-        .map_err(|e| map_row_err("artifact_commit_records", &e))?;
+        .map_err(|e| map_row_err("artifact_commit_records", e))?;
     let source_file_version_id: i64 = row
         .try_get("source_file_version_id")
-        .map_err(|e| map_row_err("artifact_commit_records", &e))?;
+        .map_err(|e| map_row_err("artifact_commit_records", e))?;
     let verification_id: i64 = row
         .try_get("verification_id")
-        .map_err(|e| map_row_err("artifact_commit_records", &e))?;
+        .map_err(|e| map_row_err("artifact_commit_records", e))?;
     let target_path: String = row
         .try_get("target_path")
-        .map_err(|e| map_row_err("artifact_commit_records", &e))?;
+        .map_err(|e| map_row_err("artifact_commit_records", e))?;
     let result_file_version_id: Option<i64> = row
         .try_get("result_file_version_id")
-        .map_err(|e| map_row_err("artifact_commit_records", &e))?;
+        .map_err(|e| map_row_err("artifact_commit_records", e))?;
     let result_file_location_id: Option<i64> = row
         .try_get("result_file_location_id")
-        .map_err(|e| map_row_err("artifact_commit_records", &e))?;
+        .map_err(|e| map_row_err("artifact_commit_records", e))?;
     let state: String = row
         .try_get("state")
-        .map_err(|e| map_row_err("artifact_commit_records", &e))?;
+        .map_err(|e| map_row_err("artifact_commit_records", e))?;
     let failure_class: Option<String> = row
         .try_get("failure_class")
-        .map_err(|e| map_row_err("artifact_commit_records", &e))?;
+        .map_err(|e| map_row_err("artifact_commit_records", e))?;
     let error_code: Option<String> = row
         .try_get("error_code")
-        .map_err(|e| map_row_err("artifact_commit_records", &e))?;
+        .map_err(|e| map_row_err("artifact_commit_records", e))?;
     let message: Option<String> = row
         .try_get("message")
-        .map_err(|e| map_row_err("artifact_commit_records", &e))?;
+        .map_err(|e| map_row_err("artifact_commit_records", e))?;
     let recovery_reason: Option<String> = row
         .try_get("recovery_reason")
-        .map_err(|e| map_row_err("artifact_commit_records", &e))?;
+        .map_err(|e| map_row_err("artifact_commit_records", e))?;
     let temp_path: Option<String> = row
         .try_get("temp_path")
-        .map_err(|e| map_row_err("artifact_commit_records", &e))?;
+        .map_err(|e| map_row_err("artifact_commit_records", e))?;
     let report: String = row
         .try_get("report")
-        .map_err(|e| map_row_err("artifact_commit_records", &e))?;
+        .map_err(|e| map_row_err("artifact_commit_records", e))?;
     let started_at: String = row
         .try_get("started_at")
-        .map_err(|e| map_row_err("artifact_commit_records", &e))?;
+        .map_err(|e| map_row_err("artifact_commit_records", e))?;
     let promotion_started_at: Option<String> = row
         .try_get("promotion_started_at")
-        .map_err(|e| map_row_err("artifact_commit_records", &e))?;
+        .map_err(|e| map_row_err("artifact_commit_records", e))?;
     let finished_at: Option<String> = row
         .try_get("finished_at")
-        .map_err(|e| map_row_err("artifact_commit_records", &e))?;
+        .map_err(|e| map_row_err("artifact_commit_records", e))?;
 
     Ok(ArtifactCommitRecord {
         id: ArtifactCommitRecordId(u64_from_i64(
@@ -3004,24 +3002,22 @@ fn row_to_commit_record(row: &sqlx::sqlite::SqliteRow) -> Result<ArtifactCommitR
 }
 
 fn row_to_location(row: &sqlx::sqlite::SqliteRow) -> Result<ArtifactLocation, VoomError> {
-    let id: i64 = row
-        .try_get("id")
-        .map_err(|e| map_row_err("artifacts", &e))?;
+    let id: i64 = row.try_get("id").map_err(|e| map_row_err("artifacts", e))?;
     let handle_id: i64 = row
         .try_get("artifact_handle_id")
-        .map_err(|e| map_row_err("artifacts", &e))?;
+        .map_err(|e| map_row_err("artifacts", e))?;
     let kind: String = row
         .try_get("kind")
-        .map_err(|e| map_row_err("artifacts", &e))?;
+        .map_err(|e| map_row_err("artifacts", e))?;
     let value: String = row
         .try_get("value")
-        .map_err(|e| map_row_err("artifacts", &e))?;
+        .map_err(|e| map_row_err("artifacts", e))?;
     let observed: String = row
         .try_get("observed_at")
-        .map_err(|e| map_row_err("artifacts", &e))?;
+        .map_err(|e| map_row_err("artifacts", e))?;
     let retired: Option<String> = row
         .try_get("retired_at")
-        .map_err(|e| map_row_err("artifacts", &e))?;
+        .map_err(|e| map_row_err("artifacts", e))?;
     Ok(ArtifactLocation {
         id: ArtifactLocationId(u64_from_i64(
             id,

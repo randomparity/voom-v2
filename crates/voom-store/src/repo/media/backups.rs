@@ -413,27 +413,27 @@ async fn commit(tx: Transaction<'_, Sqlite>) -> Result<(), VoomError> {
 
 fn row_to_backup(row: &SqliteRow) -> Result<Backup, VoomError> {
     let t = "backups";
-    let id: i64 = row.try_get("id").map_err(|e| map_row_err(t, &e))?;
+    let id: i64 = row.try_get("id").map_err(|e| map_row_err(t, e))?;
     let source_file_version_id: i64 = row
         .try_get("source_file_version_id")
-        .map_err(|e| map_row_err(t, &e))?;
-    let job_id: i64 = row.try_get("job_id").map_err(|e| map_row_err(t, &e))?;
-    let ticket_id: i64 = row.try_get("ticket_id").map_err(|e| map_row_err(t, &e))?;
-    let provider: String = row.try_get("provider").map_err(|e| map_row_err(t, &e))?;
+        .map_err(|e| map_row_err(t, e))?;
+    let job_id: i64 = row.try_get("job_id").map_err(|e| map_row_err(t, e))?;
+    let ticket_id: i64 = row.try_get("ticket_id").map_err(|e| map_row_err(t, e))?;
+    let provider: String = row.try_get("provider").map_err(|e| map_row_err(t, e))?;
     let destination_path: String = row
         .try_get("destination_path")
-        .map_err(|e| map_row_err(t, &e))?;
-    let size_bytes: Option<i64> = row.try_get("size_bytes").map_err(|e| map_row_err(t, &e))?;
-    let checksum: Option<String> = row.try_get("checksum").map_err(|e| map_row_err(t, &e))?;
-    let status: String = row.try_get("status").map_err(|e| map_row_err(t, &e))?;
+        .map_err(|e| map_row_err(t, e))?;
+    let size_bytes: Option<i64> = row.try_get("size_bytes").map_err(|e| map_row_err(t, e))?;
+    let checksum: Option<String> = row.try_get("checksum").map_err(|e| map_row_err(t, e))?;
+    let status: String = row.try_get("status").map_err(|e| map_row_err(t, e))?;
     let failure_class: Option<String> = row
         .try_get("failure_class")
-        .map_err(|e| map_row_err(t, &e))?;
-    let error_code: Option<String> = row.try_get("error_code").map_err(|e| map_row_err(t, &e))?;
-    let message: Option<String> = row.try_get("message").map_err(|e| map_row_err(t, &e))?;
-    let started_at: String = row.try_get("started_at").map_err(|e| map_row_err(t, &e))?;
-    let finished_at: Option<String> = row.try_get("finished_at").map_err(|e| map_row_err(t, &e))?;
-    let created_at: String = row.try_get("created_at").map_err(|e| map_row_err(t, &e))?;
+        .map_err(|e| map_row_err(t, e))?;
+    let error_code: Option<String> = row.try_get("error_code").map_err(|e| map_row_err(t, e))?;
+    let message: Option<String> = row.try_get("message").map_err(|e| map_row_err(t, e))?;
+    let started_at: String = row.try_get("started_at").map_err(|e| map_row_err(t, e))?;
+    let finished_at: Option<String> = row.try_get("finished_at").map_err(|e| map_row_err(t, e))?;
+    let created_at: String = row.try_get("created_at").map_err(|e| map_row_err(t, e))?;
     Ok(Backup {
         id: BackupId(u64_from_i64(
             id,

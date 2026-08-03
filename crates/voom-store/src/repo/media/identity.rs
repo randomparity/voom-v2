@@ -2188,10 +2188,10 @@ impl MediaSnapshotRepo for SqliteIdentityRepo {
             .map(|row| {
                 let snapshot_id: i64 = row
                     .try_get("id")
-                    .map_err(|e| map_row_err("media snapshot provenance lookup", &e))?;
+                    .map_err(|e| map_row_err("media snapshot provenance lookup", e))?;
                 let file_version_id: i64 = row
                     .try_get("file_version_id")
-                    .map_err(|e| map_row_err("media snapshot provenance lookup", &e))?;
+                    .map_err(|e| map_row_err("media snapshot provenance lookup", e))?;
                 Ok((
                     MediaSnapshotId(u64_from_i64(
                         snapshot_id,
@@ -2808,22 +2808,22 @@ async fn get_media_work_in_tx(
 fn row_to_media_work(row: &sqlx::sqlite::SqliteRow) -> Result<MediaWork, VoomError> {
     let id: i64 = row
         .try_get("id")
-        .map_err(|e| map_row_err("media_works", &e))?;
+        .map_err(|e| map_row_err("media_works", e))?;
     let kind: String = row
         .try_get("kind")
-        .map_err(|e| map_row_err("media_works", &e))?;
+        .map_err(|e| map_row_err("media_works", e))?;
     let display_title: String = row
         .try_get("display_title")
-        .map_err(|e| map_row_err("media_works", &e))?;
+        .map_err(|e| map_row_err("media_works", e))?;
     let provisional: i64 = row
         .try_get("provisional")
-        .map_err(|e| map_row_err("media_works", &e))?;
+        .map_err(|e| map_row_err("media_works", e))?;
     let created_at: String = row
         .try_get("created_at")
-        .map_err(|e| map_row_err("media_works", &e))?;
+        .map_err(|e| map_row_err("media_works", e))?;
     let epoch: i64 = row
         .try_get("epoch")
-        .map_err(|e| map_row_err("media_works", &e))?;
+        .map_err(|e| map_row_err("media_works", e))?;
     Ok(MediaWork {
         id: MediaWorkId(u64_from_i64(
             id,
@@ -2858,22 +2858,22 @@ async fn get_media_variant_in_tx(
 fn row_to_media_variant(row: &sqlx::sqlite::SqliteRow) -> Result<MediaVariant, VoomError> {
     let id: i64 = row
         .try_get("id")
-        .map_err(|e| map_row_err("media_variants", &e))?;
+        .map_err(|e| map_row_err("media_variants", e))?;
     let media_work_id: i64 = row
         .try_get("media_work_id")
-        .map_err(|e| map_row_err("media_variants", &e))?;
+        .map_err(|e| map_row_err("media_variants", e))?;
     let label: String = row
         .try_get("label")
-        .map_err(|e| map_row_err("media_variants", &e))?;
+        .map_err(|e| map_row_err("media_variants", e))?;
     let provisional: i64 = row
         .try_get("provisional")
-        .map_err(|e| map_row_err("media_variants", &e))?;
+        .map_err(|e| map_row_err("media_variants", e))?;
     let created_at: String = row
         .try_get("created_at")
-        .map_err(|e| map_row_err("media_variants", &e))?;
+        .map_err(|e| map_row_err("media_variants", e))?;
     let epoch: i64 = row
         .try_get("epoch")
-        .map_err(|e| map_row_err("media_variants", &e))?;
+        .map_err(|e| map_row_err("media_variants", e))?;
     Ok(MediaVariant {
         id: MediaVariantId(u64_from_i64(
             id,
@@ -2911,16 +2911,16 @@ async fn get_file_asset_in_tx(
 fn row_to_file_asset(row: &sqlx::sqlite::SqliteRow) -> Result<FileAsset, VoomError> {
     let id: i64 = row
         .try_get("id")
-        .map_err(|e| map_row_err("file_assets", &e))?;
+        .map_err(|e| map_row_err("file_assets", e))?;
     let created_at: String = row
         .try_get("created_at")
-        .map_err(|e| map_row_err("file_assets", &e))?;
+        .map_err(|e| map_row_err("file_assets", e))?;
     let retired_at: Option<String> = row
         .try_get("retired_at")
-        .map_err(|e| map_row_err("file_assets", &e))?;
+        .map_err(|e| map_row_err("file_assets", e))?;
     let epoch: i64 = row
         .try_get("epoch")
-        .map_err(|e| map_row_err("file_assets", &e))?;
+        .map_err(|e| map_row_err("file_assets", e))?;
     Ok(FileAsset {
         id: FileAssetId(u64_from_i64(
             id,
@@ -2954,31 +2954,31 @@ async fn get_file_version_in_tx(
 fn row_to_file_version(row: &sqlx::sqlite::SqliteRow) -> Result<FileVersion, VoomError> {
     let id: i64 = row
         .try_get("id")
-        .map_err(|e| map_row_err("file_versions", &e))?;
+        .map_err(|e| map_row_err("file_versions", e))?;
     let file_asset_id: i64 = row
         .try_get("file_asset_id")
-        .map_err(|e| map_row_err("file_versions", &e))?;
+        .map_err(|e| map_row_err("file_versions", e))?;
     let content_hash: String = row
         .try_get("content_hash")
-        .map_err(|e| map_row_err("file_versions", &e))?;
+        .map_err(|e| map_row_err("file_versions", e))?;
     let size_bytes: i64 = row
         .try_get("size_bytes")
-        .map_err(|e| map_row_err("file_versions", &e))?;
+        .map_err(|e| map_row_err("file_versions", e))?;
     let produced_by: String = row
         .try_get("produced_by")
-        .map_err(|e| map_row_err("file_versions", &e))?;
+        .map_err(|e| map_row_err("file_versions", e))?;
     let produced_from: Option<i64> = row
         .try_get("produced_from_version_id")
-        .map_err(|e| map_row_err("file_versions", &e))?;
+        .map_err(|e| map_row_err("file_versions", e))?;
     let created_at: String = row
         .try_get("created_at")
-        .map_err(|e| map_row_err("file_versions", &e))?;
+        .map_err(|e| map_row_err("file_versions", e))?;
     let retired_at: Option<String> = row
         .try_get("retired_at")
-        .map_err(|e| map_row_err("file_versions", &e))?;
+        .map_err(|e| map_row_err("file_versions", e))?;
     let epoch: i64 = row
         .try_get("epoch")
-        .map_err(|e| map_row_err("file_versions", &e))?;
+        .map_err(|e| map_row_err("file_versions", e))?;
     let size = u64::try_from(size_bytes).map_err(|_| {
         VoomError::database(format!("file_versions.size_bytes negative ({size_bytes})"))
     })?;
@@ -3027,31 +3027,31 @@ async fn get_file_location_in_tx(
 fn row_to_file_location(row: &sqlx::sqlite::SqliteRow) -> Result<FileLocation, VoomError> {
     let id: i64 = row
         .try_get("id")
-        .map_err(|e| map_row_err("file_locations", &e))?;
+        .map_err(|e| map_row_err("file_locations", e))?;
     let file_version_id: i64 = row
         .try_get("file_version_id")
-        .map_err(|e| map_row_err("file_locations", &e))?;
+        .map_err(|e| map_row_err("file_locations", e))?;
     let kind: String = row
         .try_get("kind")
-        .map_err(|e| map_row_err("file_locations", &e))?;
+        .map_err(|e| map_row_err("file_locations", e))?;
     let value: String = row
         .try_get("value")
-        .map_err(|e| map_row_err("file_locations", &e))?;
+        .map_err(|e| map_row_err("file_locations", e))?;
     let proof_kind: Option<String> = row
         .try_get("proof_kind")
-        .map_err(|e| map_row_err("file_locations", &e))?;
+        .map_err(|e| map_row_err("file_locations", e))?;
     let proof_value: Option<String> = row
         .try_get("proof_value")
-        .map_err(|e| map_row_err("file_locations", &e))?;
+        .map_err(|e| map_row_err("file_locations", e))?;
     let observed_at: String = row
         .try_get("observed_at")
-        .map_err(|e| map_row_err("file_locations", &e))?;
+        .map_err(|e| map_row_err("file_locations", e))?;
     let retired_at: Option<String> = row
         .try_get("retired_at")
-        .map_err(|e| map_row_err("file_locations", &e))?;
+        .map_err(|e| map_row_err("file_locations", e))?;
     let epoch: i64 = row
         .try_get("epoch")
-        .map_err(|e| map_row_err("file_locations", &e))?;
+        .map_err(|e| map_row_err("file_locations", e))?;
     // Validate kind round-trips.
     let _ = FileLocationKind::parse(&kind)?;
     Ok(FileLocation {
@@ -3117,61 +3117,61 @@ async fn ensure_policy_version_exists(
 fn row_to_identity_evidence(row: &sqlx::sqlite::SqliteRow) -> Result<IdentityEvidence, VoomError> {
     let id: i64 = row
         .try_get("id")
-        .map_err(|e| map_row_err("identity_evidence", &e))?;
+        .map_err(|e| map_row_err("identity_evidence", e))?;
     let target_type: String = row
         .try_get("target_type")
-        .map_err(|e| map_row_err("identity_evidence", &e))?;
+        .map_err(|e| map_row_err("identity_evidence", e))?;
     let target_id: i64 = row
         .try_get("target_id")
-        .map_err(|e| map_row_err("identity_evidence", &e))?;
+        .map_err(|e| map_row_err("identity_evidence", e))?;
     let assertion_type: String = row
         .try_get("assertion_type")
-        .map_err(|e| map_row_err("identity_evidence", &e))?;
+        .map_err(|e| map_row_err("identity_evidence", e))?;
     let candidate_id: Option<i64> = row
         .try_get("candidate_id")
-        .map_err(|e| map_row_err("identity_evidence", &e))?;
+        .map_err(|e| map_row_err("identity_evidence", e))?;
     let candidate_value: Option<String> = row
         .try_get("candidate_value")
-        .map_err(|e| map_row_err("identity_evidence", &e))?;
+        .map_err(|e| map_row_err("identity_evidence", e))?;
     let provider: String = row
         .try_get("provider")
-        .map_err(|e| map_row_err("identity_evidence", &e))?;
+        .map_err(|e| map_row_err("identity_evidence", e))?;
     let provider_version: String = row
         .try_get("provider_version")
-        .map_err(|e| map_row_err("identity_evidence", &e))?;
+        .map_err(|e| map_row_err("identity_evidence", e))?;
     let confidence: f64 = row
         .try_get("confidence")
-        .map_err(|e| map_row_err("identity_evidence", &e))?;
+        .map_err(|e| map_row_err("identity_evidence", e))?;
     let provenance: String = row
         .try_get("provenance")
-        .map_err(|e| map_row_err("identity_evidence", &e))?;
+        .map_err(|e| map_row_err("identity_evidence", e))?;
     let observed_at: String = row
         .try_get("observed_at")
-        .map_err(|e| map_row_err("identity_evidence", &e))?;
+        .map_err(|e| map_row_err("identity_evidence", e))?;
     let superseded_at: Option<String> = row
         .try_get("superseded_at")
-        .map_err(|e| map_row_err("identity_evidence", &e))?;
+        .map_err(|e| map_row_err("identity_evidence", e))?;
     let superseded_by_id: Option<i64> = row
         .try_get("superseded_by_id")
-        .map_err(|e| map_row_err("identity_evidence", &e))?;
+        .map_err(|e| map_row_err("identity_evidence", e))?;
     let accepted_at: Option<String> = row
         .try_get("accepted_at")
-        .map_err(|e| map_row_err("identity_evidence", &e))?;
+        .map_err(|e| map_row_err("identity_evidence", e))?;
     let accepted_user_id: Option<String> = row
         .try_get("accepted_user_id")
-        .map_err(|e| map_row_err("identity_evidence", &e))?;
+        .map_err(|e| map_row_err("identity_evidence", e))?;
     let accepted_policy_id: Option<i64> = row
         .try_get("accepted_policy_id")
-        .map_err(|e| map_row_err("identity_evidence", &e))?;
+        .map_err(|e| map_row_err("identity_evidence", e))?;
     let pinned_fv: Option<String> = row
         .try_get("pinned_file_version_ids")
-        .map_err(|e| map_row_err("identity_evidence", &e))?;
+        .map_err(|e| map_row_err("identity_evidence", e))?;
     let pinned_hashes: Option<String> = row
         .try_get("pinned_hashes")
-        .map_err(|e| map_row_err("identity_evidence", &e))?;
+        .map_err(|e| map_row_err("identity_evidence", e))?;
     let pinned_locations: Option<String> = row
         .try_get("pinned_locations")
-        .map_err(|e| map_row_err("identity_evidence", &e))?;
+        .map_err(|e| map_row_err("identity_evidence", e))?;
     let provenance_v: JsonValue = serde_json::from_str(&provenance)
         .map_err(|e| VoomError::database_context("parse provenance", e))?;
     let parse_opt =
@@ -3232,19 +3232,19 @@ async fn get_media_snapshot_in_tx(
 fn row_to_media_snapshot(row: &sqlx::sqlite::SqliteRow) -> Result<MediaSnapshot, VoomError> {
     let id: i64 = row
         .try_get("id")
-        .map_err(|e| map_row_err("media_snapshots", &e))?;
+        .map_err(|e| map_row_err("media_snapshots", e))?;
     let file_version_id: i64 = row
         .try_get("file_version_id")
-        .map_err(|e| map_row_err("media_snapshots", &e))?;
+        .map_err(|e| map_row_err("media_snapshots", e))?;
     let probed_by: Option<i64> = row
         .try_get("probed_by")
-        .map_err(|e| map_row_err("media_snapshots", &e))?;
+        .map_err(|e| map_row_err("media_snapshots", e))?;
     let probed_at: String = row
         .try_get("probed_at")
-        .map_err(|e| map_row_err("media_snapshots", &e))?;
+        .map_err(|e| map_row_err("media_snapshots", e))?;
     let payload: String = row
         .try_get("payload")
-        .map_err(|e| map_row_err("media_snapshots", &e))?;
+        .map_err(|e| map_row_err("media_snapshots", e))?;
     let payload_v: JsonValue = serde_json::from_str(&payload)
         .map_err(|e| VoomError::database_context("parse media_snapshots.payload", e))?;
     Ok(MediaSnapshot {
@@ -3267,19 +3267,19 @@ fn row_to_media_snapshot(row: &sqlx::sqlite::SqliteRow) -> Result<MediaSnapshot,
 fn row_to_active_snapshot(row: &sqlx::sqlite::SqliteRow) -> Result<MediaSnapshot, VoomError> {
     let id: i64 = row
         .try_get("snapshot_id")
-        .map_err(|e| map_row_err("media_snapshots", &e))?;
+        .map_err(|e| map_row_err("media_snapshots", e))?;
     let file_version_id: i64 = row
         .try_get("snapshot_file_version_id")
-        .map_err(|e| map_row_err("media_snapshots", &e))?;
+        .map_err(|e| map_row_err("media_snapshots", e))?;
     let probed_by: Option<i64> = row
         .try_get("snapshot_probed_by")
-        .map_err(|e| map_row_err("media_snapshots", &e))?;
+        .map_err(|e| map_row_err("media_snapshots", e))?;
     let probed_at: String = row
         .try_get("snapshot_probed_at")
-        .map_err(|e| map_row_err("media_snapshots", &e))?;
+        .map_err(|e| map_row_err("media_snapshots", e))?;
     let payload: String = row
         .try_get("snapshot_payload")
-        .map_err(|e| map_row_err("media_snapshots", &e))?;
+        .map_err(|e| map_row_err("media_snapshots", e))?;
     let payload = serde_json::from_str(&payload)
         .map_err(|e| VoomError::database_context("parse media_snapshots.payload", e))?;
     Ok(MediaSnapshot {

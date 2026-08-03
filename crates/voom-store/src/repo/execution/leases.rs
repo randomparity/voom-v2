@@ -1192,7 +1192,7 @@ const LEASE_RETURNING_COLS: &str = "id, ticket_id, worker_id, state, acquired_at
 
 fn extract_ticket_id_i(row: &sqlx::sqlite::SqliteRow) -> Result<i64, VoomError> {
     row.try_get("ticket_id")
-        .map_err(|e| map_row_err("leases", &e))
+        .map_err(|e| map_row_err("leases", e))
 }
 
 /// Chunk size for the `IN (?, …, ?)` clause built by
@@ -1245,13 +1245,13 @@ where
             .await
             .map_err(|e| VoomError::database_context("ticket attempts batch", e))?;
         for row in &rows {
-            let id: i64 = row.try_get("id").map_err(|e| map_row_err("tickets", &e))?;
+            let id: i64 = row.try_get("id").map_err(|e| map_row_err("tickets", e))?;
             let attempt: i64 = row
                 .try_get("attempt")
-                .map_err(|e| map_row_err("tickets", &e))?;
+                .map_err(|e| map_row_err("tickets", e))?;
             let max_attempts: i64 = row
                 .try_get("max_attempts")
-                .map_err(|e| map_row_err("tickets", &e))?;
+                .map_err(|e| map_row_err("tickets", e))?;
             out.insert(id, (attempt, max_attempts));
         }
     }
@@ -1357,10 +1357,10 @@ async fn process_expired_lease(
 fn decode_expired_lease_row(
     row: &sqlx::sqlite::SqliteRow,
 ) -> Result<(i64, i64, LeaseId, TicketId), VoomError> {
-    let lease_id_raw = row.try_get("id").map_err(|e| map_row_err("leases", &e))?;
+    let lease_id_raw = row.try_get("id").map_err(|e| map_row_err("leases", e))?;
     let ticket_id_raw = row
         .try_get("ticket_id")
-        .map_err(|e| map_row_err("leases", &e))?;
+        .map_err(|e| map_row_err("leases", e))?;
     let lease_id = LeaseId(u64_from_i64(lease_id_raw, "leases.id")?);
     let ticket_id = TicketId(u64_from_i64(ticket_id_raw, "leases.ticket_id")?);
     Ok((lease_id_raw, ticket_id_raw, lease_id, ticket_id))
@@ -1424,37 +1424,33 @@ async fn get_lease_in_tx(
 }
 
 fn row_to_lease(row: &sqlx::sqlite::SqliteRow) -> Result<Lease, VoomError> {
-    let id: i64 = row.try_get("id").map_err(|e| map_row_err("leases", &e))?;
+    let id: i64 = row.try_get("id").map_err(|e| map_row_err("leases", e))?;
     let ticket_id: i64 = row
         .try_get("ticket_id")
-        .map_err(|e| map_row_err("leases", &e))?;
+        .map_err(|e| map_row_err("leases", e))?;
     let worker_id: i64 = row
         .try_get("worker_id")
-        .map_err(|e| map_row_err("leases", &e))?;
-    let state: String = row
-        .try_get("state")
-        .map_err(|e| map_row_err("leases", &e))?;
+        .map_err(|e| map_row_err("leases", e))?;
+    let state: String = row.try_get("state").map_err(|e| map_row_err("leases", e))?;
     let acquired: String = row
         .try_get("acquired_at")
-        .map_err(|e| map_row_err("leases", &e))?;
+        .map_err(|e| map_row_err("leases", e))?;
     let expires: String = row
         .try_get("expires_at")
-        .map_err(|e| map_row_err("leases", &e))?;
+        .map_err(|e| map_row_err("leases", e))?;
     let last_hb: String = row
         .try_get("last_heartbeat_at")
-        .map_err(|e| map_row_err("leases", &e))?;
+        .map_err(|e| map_row_err("leases", e))?;
     let ttl: i64 = row
         .try_get("ttl_seconds")
-        .map_err(|e| map_row_err("leases", &e))?;
+        .map_err(|e| map_row_err("leases", e))?;
     let reason: Option<String> = row
         .try_get("release_reason")
-        .map_err(|e| map_row_err("leases", &e))?;
+        .map_err(|e| map_row_err("leases", e))?;
     let released: Option<String> = row
         .try_get("released_at")
-        .map_err(|e| map_row_err("leases", &e))?;
-    let epoch: i64 = row
-        .try_get("epoch")
-        .map_err(|e| map_row_err("leases", &e))?;
+        .map_err(|e| map_row_err("leases", e))?;
+    let epoch: i64 = row.try_get("epoch").map_err(|e| map_row_err("leases", e))?;
     Ok(Lease {
         id: LeaseId(u64_from_i64(
             id,

@@ -1,3 +1,5 @@
+use std::error::Error;
+
 use time::OffsetDateTime;
 use voom_core::{FileVersionId, LeaseId, MediaSnapshotId};
 
@@ -203,6 +205,52 @@ async fn create_planned_replays_the_exact_ordered_companion_set() {
             .map(|companion| companion.companion_id.as_str())
             .collect::<Vec<_>>(),
         vec!["companion-1", "companion-3"]
+    );
+}
+
+#[tokio::test]
+async fn malformed_worker_result_preserves_serde_source() {
+    let fixture = fixture().await;
+    fixture
+        .repo
+        .create_planned(
+            fixture.operation(),
+            &companions(),
+            OffsetDateTime::UNIX_EPOCH,
+        )
+        .await
+        .unwrap();
+    let mut connection = fixture.pool.acquire().await.unwrap();
+    sqlx::query("PRAGMA ignore_check_constraints = TRUE")
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+    sqlx::query(
+        "UPDATE audio_synthesis_operations SET worker_result = 'not-json' \
+         WHERE operation_key = ?",
+    )
+    .bind(&fixture.operation().operation_key)
+    .execute(&mut *connection)
+    .await
+    .unwrap();
+    sqlx::query("PRAGMA ignore_check_constraints = FALSE")
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+    drop(connection);
+
+    let error = fixture
+        .repo
+        .get_by_key("synthesis:v1:key")
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), "DB_UNREACHABLE");
+    let display = error.to_string();
+    let source = error.source().expect("serde source");
+    let serde_error = source.downcast_ref::<serde_json::Error>().unwrap();
+    assert_eq!(
+        display,
+        format!("database error: audio synthesis worker_result is invalid JSON: {serde_error}")
     );
 }
 

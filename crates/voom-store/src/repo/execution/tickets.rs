@@ -254,10 +254,10 @@ impl SqliteTicketRepo {
         for row in rows {
             let ticket_id: i64 = row
                 .try_get("id")
-                .map_err(|error| map_row_err("succeeded ticket result ticket id", &error))?;
+                .map_err(|error| map_row_err("succeeded ticket result ticket id", error))?;
             let result: String = row
                 .try_get("result")
-                .map_err(|error| map_row_err("succeeded ticket result", &error))?;
+                .map_err(|error| map_row_err("succeeded ticket result", error))?;
             results.push(SucceededTicketResult {
                 ticket_id: TicketId(u64_from_i64(
                     ticket_id,
@@ -1188,43 +1188,41 @@ async fn get_in_tx_inner(
 }
 
 fn row_to_ticket(row: &sqlx::sqlite::SqliteRow) -> Result<Ticket, VoomError> {
-    let id: i64 = row.try_get("id").map_err(|e| map_row_err("tickets", &e))?;
+    let id: i64 = row.try_get("id").map_err(|e| map_row_err("tickets", e))?;
     let job_id: Option<i64> = row
         .try_get("job_id")
-        .map_err(|e| map_row_err("tickets", &e))?;
-    let kind: String = row
-        .try_get("kind")
-        .map_err(|e| map_row_err("tickets", &e))?;
+        .map_err(|e| map_row_err("tickets", e))?;
+    let kind: String = row.try_get("kind").map_err(|e| map_row_err("tickets", e))?;
     let state: String = row
         .try_get("state")
-        .map_err(|e| map_row_err("tickets", &e))?;
+        .map_err(|e| map_row_err("tickets", e))?;
     let priority: i64 = row
         .try_get("priority")
-        .map_err(|e| map_row_err("tickets", &e))?;
+        .map_err(|e| map_row_err("tickets", e))?;
     let payload: String = row
         .try_get("payload")
-        .map_err(|e| map_row_err("tickets", &e))?;
+        .map_err(|e| map_row_err("tickets", e))?;
     let result: Option<String> = row
         .try_get("result")
-        .map_err(|e| map_row_err("tickets", &e))?;
+        .map_err(|e| map_row_err("tickets", e))?;
     let attempt: i64 = row
         .try_get("attempt")
-        .map_err(|e| map_row_err("tickets", &e))?;
+        .map_err(|e| map_row_err("tickets", e))?;
     let max_attempts: i64 = row
         .try_get("max_attempts")
-        .map_err(|e| map_row_err("tickets", &e))?;
+        .map_err(|e| map_row_err("tickets", e))?;
     let next_eligible: String = row
         .try_get("next_eligible_at")
-        .map_err(|e| map_row_err("tickets", &e))?;
+        .map_err(|e| map_row_err("tickets", e))?;
     let created: String = row
         .try_get("created_at")
-        .map_err(|e| map_row_err("tickets", &e))?;
+        .map_err(|e| map_row_err("tickets", e))?;
     let state_changed: String = row
         .try_get("state_changed_at")
-        .map_err(|e| map_row_err("tickets", &e))?;
+        .map_err(|e| map_row_err("tickets", e))?;
     let epoch: i64 = row
         .try_get("epoch")
-        .map_err(|e| map_row_err("tickets", &e))?;
+        .map_err(|e| map_row_err("tickets", e))?;
     let payload_v: JsonValue = serde_json::from_str(&payload)
         .map_err(|e| VoomError::database_context("parse payload", e))?;
     let result_v = result

@@ -50,7 +50,7 @@ impl SqliteSchedulerNodeLimitRepo {
         };
         let max_parallel_leases: i64 = row
             .try_get("max_parallel_leases")
-            .map_err(|e| map_row_err("scheduler_node_limits", &e))?;
+            .map_err(|e| map_row_err("scheduler_node_limits", e))?;
         u32_from_i64(max_parallel_leases)
     }
 
@@ -93,16 +93,16 @@ impl SqliteSchedulerNodeLimitRepo {
 fn row_to_node_limit(row: &sqlx::sqlite::SqliteRow) -> Result<SchedulerNodeLimit, VoomError> {
     let node_id: i64 = row
         .try_get("node_id")
-        .map_err(|e| map_row_err("scheduler_node_limits", &e))?;
+        .map_err(|e| map_row_err("scheduler_node_limits", e))?;
     let max_parallel_leases: i64 = row
         .try_get("max_parallel_leases")
-        .map_err(|e| map_row_err("scheduler_node_limits", &e))?;
+        .map_err(|e| map_row_err("scheduler_node_limits", e))?;
     let created_at: String = row
         .try_get("created_at")
-        .map_err(|e| map_row_err("scheduler_node_limits", &e))?;
+        .map_err(|e| map_row_err("scheduler_node_limits", e))?;
     let updated_at: String = row
         .try_get("updated_at")
-        .map_err(|e| map_row_err("scheduler_node_limits", &e))?;
+        .map_err(|e| map_row_err("scheduler_node_limits", e))?;
     Ok(SchedulerNodeLimit {
         node_id: NodeId(u64::try_from(node_id).map_err(|e| {
             VoomError::database_context("scheduler_node_limits.node_id out of range", e)

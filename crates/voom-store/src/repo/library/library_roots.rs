@@ -411,48 +411,46 @@ fn is_foreign_key_violation(err: &sqlx::Error) -> bool {
 fn json_list(row: &SqliteRow, column: &'static str) -> Result<Vec<String>, VoomError> {
     let raw: String = row
         .try_get(column)
-        .map_err(|e| map_row_err("library_roots", &e))?;
+        .map_err(|e| map_row_err("library_roots", e))?;
     serde_json::from_str(&raw)
-        .map_err(|e| VoomError::database(format!("library_roots.{column} decode: {e}")))
+        .map_err(|e| VoomError::database_context(format!("library_roots.{column} decode"), e))
 }
 
 fn row_to_root(row: &SqliteRow) -> Result<LibraryRoot, VoomError> {
     let t = "library_roots";
-    let id: i64 = row.try_get("id").map_err(|e| map_row_err(t, &e))?;
-    let library_id: i64 = row.try_get("library_id").map_err(|e| map_row_err(t, &e))?;
-    let root_kind: String = row.try_get("root_kind").map_err(|e| map_row_err(t, &e))?;
+    let id: i64 = row.try_get("id").map_err(|e| map_row_err(t, e))?;
+    let library_id: i64 = row.try_get("library_id").map_err(|e| map_row_err(t, e))?;
+    let root_kind: String = row.try_get("root_kind").map_err(|e| map_row_err(t, e))?;
     let canonical_path: String = row
         .try_get("canonical_path")
-        .map_err(|e| map_row_err(t, &e))?;
-    let display_path: String = row
-        .try_get("display_path")
-        .map_err(|e| map_row_err(t, &e))?;
-    let scan_mode: String = row.try_get("scan_mode").map_err(|e| map_row_err(t, &e))?;
+        .map_err(|e| map_row_err(t, e))?;
+    let display_path: String = row.try_get("display_path").map_err(|e| map_row_err(t, e))?;
+    let scan_mode: String = row.try_get("scan_mode").map_err(|e| map_row_err(t, e))?;
     let symlink_policy: String = row
         .try_get("symlink_policy")
-        .map_err(|e| map_row_err(t, &e))?;
+        .map_err(|e| map_row_err(t, e))?;
     let hidden_file_policy: String = row
         .try_get("hidden_file_policy")
-        .map_err(|e| map_row_err(t, &e))?;
-    let max_depth: Option<i64> = row.try_get("max_depth").map_err(|e| map_row_err(t, &e))?;
+        .map_err(|e| map_row_err(t, e))?;
+    let max_depth: Option<i64> = row.try_get("max_depth").map_err(|e| map_row_err(t, e))?;
     let stability_seconds: i64 = row
         .try_get("stability_seconds")
-        .map_err(|e| map_row_err(t, &e))?;
+        .map_err(|e| map_row_err(t, e))?;
     let debounce_seconds: i64 = row
         .try_get("debounce_seconds")
-        .map_err(|e| map_row_err(t, &e))?;
+        .map_err(|e| map_row_err(t, e))?;
     let default_output_root: Option<String> = row
         .try_get("default_output_root")
-        .map_err(|e| map_row_err(t, &e))?;
+        .map_err(|e| map_row_err(t, e))?;
     let default_staging_root: Option<String> = row
         .try_get("default_staging_root")
-        .map_err(|e| map_row_err(t, &e))?;
+        .map_err(|e| map_row_err(t, e))?;
     let default_backup_root: Option<String> = row
         .try_get("default_backup_root")
-        .map_err(|e| map_row_err(t, &e))?;
-    let enabled: i64 = row.try_get("enabled").map_err(|e| map_row_err(t, &e))?;
-    let created_at: String = row.try_get("created_at").map_err(|e| map_row_err(t, &e))?;
-    let updated_at: String = row.try_get("updated_at").map_err(|e| map_row_err(t, &e))?;
+        .map_err(|e| map_row_err(t, e))?;
+    let enabled: i64 = row.try_get("enabled").map_err(|e| map_row_err(t, e))?;
+    let created_at: String = row.try_get("created_at").map_err(|e| map_row_err(t, e))?;
+    let updated_at: String = row.try_get("updated_at").map_err(|e| map_row_err(t, e))?;
     Ok(LibraryRoot {
         id: LibraryRootId(u64_from_i64(
             id,

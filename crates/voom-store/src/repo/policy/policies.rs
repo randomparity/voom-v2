@@ -474,16 +474,16 @@ fn is_unique_violation(err: &sqlx::Error) -> bool {
 fn row_to_document(row: &sqlx::sqlite::SqliteRow) -> Result<PolicyDocument, VoomError> {
     let id: i64 = row
         .try_get("id")
-        .map_err(|e| map_row_err("policy_documents", &e))?;
+        .map_err(|e| map_row_err("policy_documents", e))?;
     let current_accepted_version_id: Option<i64> = row
         .try_get("current_accepted_version_id")
-        .map_err(|e| map_row_err("policy_documents", &e))?;
+        .map_err(|e| map_row_err("policy_documents", e))?;
     let created_at: String = row
         .try_get("created_at")
-        .map_err(|e| map_row_err("policy_documents", &e))?;
+        .map_err(|e| map_row_err("policy_documents", e))?;
     let epoch: i64 = row
         .try_get("epoch")
-        .map_err(|e| map_row_err("policy_documents", &e))?;
+        .map_err(|e| map_row_err("policy_documents", e))?;
 
     Ok(PolicyDocument {
         id: PolicyDocumentId(u64_from_i64(
@@ -492,10 +492,10 @@ fn row_to_document(row: &sqlx::sqlite::SqliteRow) -> Result<PolicyDocument, Voom
         )?),
         slug: row
             .try_get("slug")
-            .map_err(|e| map_row_err("policy_documents", &e))?,
+            .map_err(|e| map_row_err("policy_documents", e))?,
         display_name: row
             .try_get("display_name")
-            .map_err(|e| map_row_err("policy_documents", &e))?,
+            .map_err(|e| map_row_err("policy_documents", e))?,
         created_at: parse_iso8601(&created_at)?,
         current_accepted_version_id: current_accepted_version_id
             .map(|value| {
@@ -531,24 +531,24 @@ fn row_to_document_summary(
 fn row_to_version(row: &sqlx::sqlite::SqliteRow) -> Result<PolicyVersion, VoomError> {
     let id: i64 = row
         .try_get("id")
-        .map_err(|e| map_row_err("policy_versions", &e))?;
+        .map_err(|e| map_row_err("policy_versions", e))?;
     let document_id: i64 = row
         .try_get("policy_document_id")
-        .map_err(|e| map_row_err("policy_versions", &e))?;
+        .map_err(|e| map_row_err("policy_versions", e))?;
     let version_number: i64 = row
         .try_get("version_number")
-        .map_err(|e| map_row_err("policy_versions", &e))?;
+        .map_err(|e| map_row_err("policy_versions", e))?;
     let schema_version: i64 = row
         .try_get("schema_version")
-        .map_err(|e| map_row_err("policy_versions", &e))?;
+        .map_err(|e| map_row_err("policy_versions", e))?;
     let compiled_json_text: String = row
         .try_get("compiled_json")
-        .map_err(|e| map_row_err("policy_versions", &e))?;
+        .map_err(|e| map_row_err("policy_versions", e))?;
     let compiled_json = serde_json::from_str(&compiled_json_text)
         .map_err(|e| VoomError::database_context("policy_versions.compiled_json parse", e))?;
     let created_at: String = row
         .try_get("created_at")
-        .map_err(|e| map_row_err("policy_versions", &e))?;
+        .map_err(|e| map_row_err("policy_versions", e))?;
 
     Ok(PolicyVersion {
         id: PolicyVersionId(u64_from_i64(
@@ -565,10 +565,10 @@ fn row_to_version(row: &sqlx::sqlite::SqliteRow) -> Result<PolicyVersion, VoomEr
         )?,
         source_text: row
             .try_get("source_text")
-            .map_err(|e| map_row_err("policy_versions", &e))?,
+            .map_err(|e| map_row_err("policy_versions", e))?,
         source_hash: row
             .try_get("source_hash")
-            .map_err(|e| map_row_err("policy_versions", &e))?,
+            .map_err(|e| map_row_err("policy_versions", e))?,
         schema_version: u32_from_i64(schema_version)?,
         compiled_json,
         created_at: parse_iso8601(&created_at)?,

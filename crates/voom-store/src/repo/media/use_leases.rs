@@ -325,22 +325,22 @@ pub const USE_LEASE_BATCH_LIMIT: i64 = 1000;
 fn row_to_use_lease(row: &sqlx::sqlite::SqliteRow) -> Result<UseLease, VoomError> {
     let id: i64 = row
         .try_get("id")
-        .map_err(|e| map_row_err("asset_use_leases", &e))?;
+        .map_err(|e| map_row_err("asset_use_leases", e))?;
     let kind: String = row
         .try_get("kind")
-        .map_err(|e| map_row_err("asset_use_leases", &e))?;
+        .map_err(|e| map_row_err("asset_use_leases", e))?;
     let scope_asset: Option<i64> = row
         .try_get("scope_asset_id")
-        .map_err(|e| map_row_err("asset_use_leases", &e))?;
+        .map_err(|e| map_row_err("asset_use_leases", e))?;
     let scope_bundle: Option<i64> = row
         .try_get("scope_bundle_id")
-        .map_err(|e| map_row_err("asset_use_leases", &e))?;
+        .map_err(|e| map_row_err("asset_use_leases", e))?;
     let scope_version: Option<i64> = row
         .try_get("scope_version_id")
-        .map_err(|e| map_row_err("asset_use_leases", &e))?;
+        .map_err(|e| map_row_err("asset_use_leases", e))?;
     let scope_location: Option<i64> = row
         .try_get("scope_location_id")
-        .map_err(|e| map_row_err("asset_use_leases", &e))?;
+        .map_err(|e| map_row_err("asset_use_leases", e))?;
     let scope = match (scope_asset, scope_bundle, scope_version, scope_location) {
         (Some(v), None, None, None) => LeaseScope::Asset(FileAssetId(u64_from_i64(
             v,
@@ -366,34 +366,34 @@ fn row_to_use_lease(row: &sqlx::sqlite::SqliteRow) -> Result<UseLease, VoomError
     };
     let issuer_kind: String = row
         .try_get("issuer_kind")
-        .map_err(|e| map_row_err("asset_use_leases", &e))?;
+        .map_err(|e| map_row_err("asset_use_leases", e))?;
     let issuer_ref: String = row
         .try_get("issuer_ref")
-        .map_err(|e| map_row_err("asset_use_leases", &e))?;
+        .map_err(|e| map_row_err("asset_use_leases", e))?;
     let blocking_mode: String = row
         .try_get("blocking_mode")
-        .map_err(|e| map_row_err("asset_use_leases", &e))?;
+        .map_err(|e| map_row_err("asset_use_leases", e))?;
     let ttl_bound_int: i64 = row
         .try_get("ttl_bound")
-        .map_err(|e| map_row_err("asset_use_leases", &e))?;
+        .map_err(|e| map_row_err("asset_use_leases", e))?;
     let acquired_at: String = row
         .try_get("acquired_at")
-        .map_err(|e| map_row_err("asset_use_leases", &e))?;
+        .map_err(|e| map_row_err("asset_use_leases", e))?;
     let expires_at: Option<String> = row
         .try_get("expires_at")
-        .map_err(|e| map_row_err("asset_use_leases", &e))?;
+        .map_err(|e| map_row_err("asset_use_leases", e))?;
     let last_heartbeat_at: Option<String> = row
         .try_get("last_heartbeat_at")
-        .map_err(|e| map_row_err("asset_use_leases", &e))?;
+        .map_err(|e| map_row_err("asset_use_leases", e))?;
     let release_reason: Option<String> = row
         .try_get("release_reason")
-        .map_err(|e| map_row_err("asset_use_leases", &e))?;
+        .map_err(|e| map_row_err("asset_use_leases", e))?;
     let released_at: Option<String> = row
         .try_get("released_at")
-        .map_err(|e| map_row_err("asset_use_leases", &e))?;
+        .map_err(|e| map_row_err("asset_use_leases", e))?;
     let epoch: i64 = row
         .try_get("epoch")
-        .map_err(|e| map_row_err("asset_use_leases", &e))?;
+        .map_err(|e| map_row_err("asset_use_leases", e))?;
 
     Ok(UseLease {
         id: UseLeaseId(u64_from_i64(
@@ -914,7 +914,7 @@ impl SqliteUseLeaseRepo {
             .map(|r| -> Result<UseLeaseId, VoomError> {
                 let id: i64 = r
                     .try_get("id")
-                    .map_err(|e| map_row_err("asset_use_leases", &e))?;
+                    .map_err(|e| map_row_err("asset_use_leases", e))?;
                 Ok(UseLeaseId(u64_from_i64(
                     id,
                     concat!(module_path!(), ": ", stringify!(id)),
@@ -976,10 +976,10 @@ impl SqliteUseLeaseRepo {
         };
         let ttl_bound: i64 = probe
             .try_get("ttl_bound")
-            .map_err(|e| map_row_err("asset_use_leases", &e))?;
+            .map_err(|e| map_row_err("asset_use_leases", e))?;
         let release_reason: Option<String> = probe
             .try_get("release_reason")
-            .map_err(|e| map_row_err("asset_use_leases", &e))?;
+            .map_err(|e| map_row_err("asset_use_leases", e))?;
         if release_reason.is_some() {
             Err(VoomError::Conflict(format!(
                 "use_lease {lease_id} already terminal"
@@ -1059,7 +1059,7 @@ impl SqliteUseLeaseRepo {
             .map(|r| -> Result<UseLeaseId, VoomError> {
                 let id: i64 = r
                     .try_get("id")
-                    .map_err(|e| map_row_err("asset_use_leases", &e))?;
+                    .map_err(|e| map_row_err("asset_use_leases", e))?;
                 Ok(UseLeaseId(u64_from_i64(
                     id,
                     concat!(module_path!(), ": ", stringify!(id)),

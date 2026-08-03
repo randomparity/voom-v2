@@ -413,31 +413,29 @@ async fn get_in_tx(
 }
 
 fn row_to_node(row: &sqlx::sqlite::SqliteRow) -> Result<Node, VoomError> {
-    let id: i64 = row.try_get("id").map_err(|e| map_row_err("nodes", &e))?;
-    let name: String = row.try_get("name").map_err(|e| map_row_err("nodes", &e))?;
-    let kind: String = row.try_get("kind").map_err(|e| map_row_err("nodes", &e))?;
-    let status: String = row
-        .try_get("status")
-        .map_err(|e| map_row_err("nodes", &e))?;
+    let id: i64 = row.try_get("id").map_err(|e| map_row_err("nodes", e))?;
+    let name: String = row.try_get("name").map_err(|e| map_row_err("nodes", e))?;
+    let kind: String = row.try_get("kind").map_err(|e| map_row_err("nodes", e))?;
+    let status: String = row.try_get("status").map_err(|e| map_row_err("nodes", e))?;
     let registered: String = row
         .try_get("registered_at")
-        .map_err(|e| map_row_err("nodes", &e))?;
+        .map_err(|e| map_row_err("nodes", e))?;
     let last_seen: String = row
         .try_get("last_seen_at")
-        .map_err(|e| map_row_err("nodes", &e))?;
+        .map_err(|e| map_row_err("nodes", e))?;
     let retired: Option<String> = row
         .try_get("retired_at")
-        .map_err(|e| map_row_err("nodes", &e))?;
+        .map_err(|e| map_row_err("nodes", e))?;
     let heartbeat_ttl_seconds: i64 = row
         .try_get("heartbeat_ttl_seconds")
-        .map_err(|e| map_row_err("nodes", &e))?;
+        .map_err(|e| map_row_err("nodes", e))?;
     let auth_token_hint: String = row
         .try_get("auth_token_hint")
-        .map_err(|e| map_row_err("nodes", &e))?;
+        .map_err(|e| map_row_err("nodes", e))?;
     let metadata: String = row
         .try_get("metadata")
-        .map_err(|e| map_row_err("nodes", &e))?;
-    let epoch: i64 = row.try_get("epoch").map_err(|e| map_row_err("nodes", &e))?;
+        .map_err(|e| map_row_err("nodes", e))?;
+    let epoch: i64 = row.try_get("epoch").map_err(|e| map_row_err("nodes", e))?;
     Ok(Node {
         id: NodeId(u64_from_i64(
             id,
@@ -458,20 +456,18 @@ fn row_to_node(row: &sqlx::sqlite::SqliteRow) -> Result<Node, VoomError> {
 }
 
 fn row_to_auth_record(row: &sqlx::sqlite::SqliteRow) -> Result<NodeAuthRecord, VoomError> {
-    let id: i64 = row.try_get("id").map_err(|e| map_row_err("nodes", &e))?;
-    let kind: String = row.try_get("kind").map_err(|e| map_row_err("nodes", &e))?;
-    let status: String = row
-        .try_get("status")
-        .map_err(|e| map_row_err("nodes", &e))?;
+    let id: i64 = row.try_get("id").map_err(|e| map_row_err("nodes", e))?;
+    let kind: String = row.try_get("kind").map_err(|e| map_row_err("nodes", e))?;
+    let status: String = row.try_get("status").map_err(|e| map_row_err("nodes", e))?;
     let last_seen: String = row
         .try_get("last_seen_at")
-        .map_err(|e| map_row_err("nodes", &e))?;
+        .map_err(|e| map_row_err("nodes", e))?;
     let heartbeat_ttl_seconds: i64 = row
         .try_get("heartbeat_ttl_seconds")
-        .map_err(|e| map_row_err("nodes", &e))?;
+        .map_err(|e| map_row_err("nodes", e))?;
     let auth_token_hash: String = row
         .try_get("auth_token_hash")
-        .map_err(|e| map_row_err("nodes", &e))?;
+        .map_err(|e| map_row_err("nodes", e))?;
     Ok(NodeAuthRecord {
         id: NodeId(u64_from_i64(
             id,

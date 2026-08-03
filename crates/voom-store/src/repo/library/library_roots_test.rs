@@ -1,3 +1,5 @@
+use std::error::Error;
+
 use time::OffsetDateTime;
 
 use super::super::libraries::{LibraryMediaKind, NewLibrary};
@@ -71,6 +73,41 @@ async fn create_then_get_round_trips_including_json_lists() {
     assert_eq!(fetched.max_depth, Some(4));
     assert_eq!(fetched.stability_seconds, 30);
     assert_eq!(fetched.default_output_root.as_deref(), Some("/out"));
+}
+
+#[tokio::test]
+async fn malformed_json_list_preserves_serde_source() {
+    let (repo, _tmp) = repo().await;
+    let lib = library(&repo, "films").await;
+    let root = repo
+        .create_library_root(new_root(lib, "/media/films"), at(1))
+        .await
+        .unwrap();
+    let mut connection = repo.pool.acquire().await.unwrap();
+    sqlx::query("PRAGMA ignore_check_constraints = TRUE")
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE library_roots SET include_globs = 'not-json' WHERE id = ?")
+        .bind(i64::try_from(root.id.0).unwrap())
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+    sqlx::query("PRAGMA ignore_check_constraints = FALSE")
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+    drop(connection);
+
+    let error = repo.get_library_root(root.id).await.unwrap_err();
+    assert_eq!(error.code(), "DB_UNREACHABLE");
+    let display = error.to_string();
+    let source = error.source().expect("serde source");
+    let serde_error = source.downcast_ref::<serde_json::Error>().unwrap();
+    assert_eq!(
+        display,
+        format!("database error: library_roots.include_globs decode: {serde_error}")
+    );
 }
 
 #[tokio::test]

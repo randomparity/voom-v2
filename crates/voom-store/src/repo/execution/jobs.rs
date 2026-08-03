@@ -306,19 +306,19 @@ async fn transition_open_to(
 }
 
 fn row_to_job(row: &sqlx::sqlite::SqliteRow) -> Result<Job, VoomError> {
-    let id: i64 = row.try_get("id").map_err(|e| map_row_err("jobs", &e))?;
-    let kind: String = row.try_get("kind").map_err(|e| map_row_err("jobs", &e))?;
-    let state_str: String = row.try_get("state").map_err(|e| map_row_err("jobs", &e))?;
+    let id: i64 = row.try_get("id").map_err(|e| map_row_err("jobs", e))?;
+    let kind: String = row.try_get("kind").map_err(|e| map_row_err("jobs", e))?;
+    let state_str: String = row.try_get("state").map_err(|e| map_row_err("jobs", e))?;
     let priority: i64 = row
         .try_get("priority")
-        .map_err(|e| map_row_err("jobs", &e))?;
+        .map_err(|e| map_row_err("jobs", e))?;
     let created: String = row
         .try_get("created_at")
-        .map_err(|e| map_row_err("jobs", &e))?;
+        .map_err(|e| map_row_err("jobs", e))?;
     let updated: String = row
         .try_get("updated_at")
-        .map_err(|e| map_row_err("jobs", &e))?;
-    let epoch: i64 = row.try_get("epoch").map_err(|e| map_row_err("jobs", &e))?;
+        .map_err(|e| map_row_err("jobs", e))?;
+    let epoch: i64 = row.try_get("epoch").map_err(|e| map_row_err("jobs", e))?;
     Ok(Job {
         id: JobId(u64_from_i64(
             id,

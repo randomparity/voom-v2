@@ -188,16 +188,16 @@ impl SqliteWorkerRepo {
         for row in rows {
             let worker_id: i64 = row
                 .try_get("worker_id")
-                .map_err(|error| map_row_err("runtime worker capability worker id", &error))?;
+                .map_err(|error| map_row_err("runtime worker capability worker id", error))?;
             let worker_epoch: i64 = row
                 .try_get("worker_epoch")
-                .map_err(|error| map_row_err("runtime worker capability worker epoch", &error))?;
+                .map_err(|error| map_row_err("runtime worker capability worker epoch", error))?;
             let operation: String = row
                 .try_get("operation")
-                .map_err(|error| map_row_err("runtime worker capability operation", &error))?;
+                .map_err(|error| map_row_err("runtime worker capability operation", error))?;
             let extra: String = row
                 .try_get("extra")
-                .map_err(|error| map_row_err("runtime worker capability extra", &error))?;
+                .map_err(|error| map_row_err("runtime worker capability extra", error))?;
             let worker_id = u64::try_from(worker_id).map_err(|_| {
                 VoomError::database(format!(
                     "runtime worker capability worker id was negative: {worker_id}"
@@ -760,7 +760,7 @@ impl SqliteWorkerRepo {
         for row in &capability_rows {
             let access: String = row
                 .try_get("artifact_access")
-                .map_err(|e| map_row_err("worker_capabilities eligibility", &e))?;
+                .map_err(|e| map_row_err("worker_capabilities eligibility", e))?;
             artifact_access.extend(parse_string_array_json(&access, "artifact_access")?);
         }
 
@@ -780,10 +780,10 @@ impl SqliteWorkerRepo {
         for row in &grant_rows {
             let can_execute: String = row
                 .try_get("can_execute")
-                .map_err(|e| map_row_err("worker_grants eligibility", &e))?;
+                .map_err(|e| map_row_err("worker_grants eligibility", e))?;
             let denies: String = row
                 .try_get("denies")
-                .map_err(|e| map_row_err("worker_grants eligibility", &e))?;
+                .map_err(|e| map_row_err("worker_grants eligibility", e))?;
             has_grant |= parse_operation_array_json(&can_execute, "can_execute")?
                 .iter()
                 .any(|item| item == operation);
@@ -992,13 +992,13 @@ impl SqliteWorkerRepo {
         for row in rows {
             let worker_id: i64 = row
                 .try_get("worker_id")
-                .map_err(|error| map_row_err("worker capability history worker", &error))?;
+                .map_err(|error| map_row_err("worker capability history worker", error))?;
             let hardware: String = row
                 .try_get("hardware")
-                .map_err(|error| map_row_err("worker capability history hardware", &error))?;
+                .map_err(|error| map_row_err("worker capability history hardware", error))?;
             let extra: String = row
                 .try_get("extra")
-                .map_err(|error| map_row_err("worker capability history extra", &error))?;
+                .map_err(|error| map_row_err("worker capability history extra", error))?;
             capabilities.push(WorkerOperationCapability {
                 worker_id: WorkerId(u64_from_i64(
                     worker_id,
@@ -1109,7 +1109,7 @@ async fn accelerator_operation_capacity(
     };
     let hardware_token: Option<String> = row
         .try_get("hardware_token")
-        .map_err(|error| map_row_err("accelerator hardware token", &error))?;
+        .map_err(|error| map_row_err("accelerator hardware token", error))?;
     let hardware_token = hardware_token.ok_or_else(|| {
         VoomError::Config(format!(
             "worker {worker_id} advertises a transcode_video accelerator descriptor but no \
@@ -1171,11 +1171,11 @@ async fn operation_capability_details_in_tx(
     for row in rows {
         let encoded_hardware: String = row
             .try_get("hardware")
-            .map_err(|error| map_row_err("worker capability hardware", &error))?;
+            .map_err(|error| map_row_err("worker capability hardware", error))?;
         hardware.extend(parse_string_array_json(&encoded_hardware, "hardware")?);
         let encoded_extra: String = row
             .try_get("extra")
-            .map_err(|error| map_row_err("worker capability extra", &error))?;
+            .map_err(|error| map_row_err("worker capability extra", error))?;
         extra.push(serde_json::from_str(&encoded_extra).map_err(|error| {
             VoomError::database_context("parse worker capability extra", error)
         })?);
@@ -1186,7 +1186,7 @@ async fn operation_capability_details_in_tx(
 fn worker_candidate_id(row: &sqlx::sqlite::SqliteRow) -> Result<WorkerId, VoomError> {
     let worker_id: i64 = row
         .try_get("worker_id")
-        .map_err(|e| map_row_err("worker operation candidates", &e))?;
+        .map_err(|e| map_row_err("worker operation candidates", e))?;
     Ok(WorkerId(u64_from_i64(
         worker_id,
         concat!(module_path!(), ": ", stringify!(worker_id)),
@@ -1212,7 +1212,7 @@ async fn max_parallel_in_tx(
     for row in rows {
         let raw: String = row
             .try_get("max_parallel")
-            .map_err(|e| map_row_err("worker max_parallel", &e))?;
+            .map_err(|e| map_row_err("worker max_parallel", e))?;
         let value: JsonValue = serde_json::from_str(&raw)
             .map_err(|e| VoomError::database_context("parse worker max_parallel", e))?;
         operation_limit = max_limit(
@@ -1296,31 +1296,27 @@ async fn get_by_name_in_tx(
 }
 
 fn row_to_worker(row: &sqlx::sqlite::SqliteRow) -> Result<Worker, VoomError> {
-    let id: i64 = row.try_get("id").map_err(|e| map_row_err("workers", &e))?;
+    let id: i64 = row.try_get("id").map_err(|e| map_row_err("workers", e))?;
     let node_id: Option<i64> = row
         .try_get("node_id")
-        .map_err(|e| map_row_err("workers", &e))?;
-    let name: String = row
-        .try_get("name")
-        .map_err(|e| map_row_err("workers", &e))?;
-    let kind: String = row
-        .try_get("kind")
-        .map_err(|e| map_row_err("workers", &e))?;
+        .map_err(|e| map_row_err("workers", e))?;
+    let name: String = row.try_get("name").map_err(|e| map_row_err("workers", e))?;
+    let kind: String = row.try_get("kind").map_err(|e| map_row_err("workers", e))?;
     let status: String = row
         .try_get("status")
-        .map_err(|e| map_row_err("workers", &e))?;
+        .map_err(|e| map_row_err("workers", e))?;
     let registered: String = row
         .try_get("registered_at")
-        .map_err(|e| map_row_err("workers", &e))?;
+        .map_err(|e| map_row_err("workers", e))?;
     let last_seen: String = row
         .try_get("last_seen_at")
-        .map_err(|e| map_row_err("workers", &e))?;
+        .map_err(|e| map_row_err("workers", e))?;
     let retired: Option<String> = row
         .try_get("retired_at")
-        .map_err(|e| map_row_err("workers", &e))?;
+        .map_err(|e| map_row_err("workers", e))?;
     let epoch: i64 = row
         .try_get("epoch")
-        .map_err(|e| map_row_err("workers", &e))?;
+        .map_err(|e| map_row_err("workers", e))?;
     Ok(Worker {
         id: WorkerId(u64_from_i64(
             id,
@@ -1343,7 +1339,7 @@ fn row_to_inspection(row: &sqlx::sqlite::SqliteRow) -> Result<WorkerInspection, 
     let worker = row_to_worker(row)?;
     let node_id: Option<i64> = row
         .try_get("node_context_id")
-        .map_err(|e| map_row_err("workers inspection", &e))?;
+        .map_err(|e| map_row_err("workers inspection", e))?;
     if let (Some(worker_node_id), None) = (worker.node_id, node_id) {
         return Err(VoomError::database(format!(
             "workers inspection missing node context: worker_id={} node_id={}",
@@ -1354,16 +1350,16 @@ fn row_to_inspection(row: &sqlx::sqlite::SqliteRow) -> Result<WorkerInspection, 
         .map(|id| {
             let name: String = row
                 .try_get("node_context_name")
-                .map_err(|e| map_row_err("workers inspection", &e))?;
+                .map_err(|e| map_row_err("workers inspection", e))?;
             let kind: String = row
                 .try_get("node_context_kind")
-                .map_err(|e| map_row_err("workers inspection", &e))?;
+                .map_err(|e| map_row_err("workers inspection", e))?;
             let status: String = row
                 .try_get("node_context_status")
-                .map_err(|e| map_row_err("workers inspection", &e))?;
+                .map_err(|e| map_row_err("workers inspection", e))?;
             let last_seen: String = row
                 .try_get("node_context_last_seen_at")
-                .map_err(|e| map_row_err("workers inspection", &e))?;
+                .map_err(|e| map_row_err("workers inspection", e))?;
             Ok(WorkerNodeContext {
                 id: NodeId(u64_from_i64(
                     id,

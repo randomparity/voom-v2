@@ -36,6 +36,6 @@ pub(crate) fn serialize_json<T: Serialize + ?Sized>(
     serde_json::to_string(v).map_err(|e| VoomError::Internal(format!("serialize {field}: {e}")))
 }
 
-pub(crate) fn map_row_err(table: &'static str, e: &sqlx::Error) -> VoomError {
-    VoomError::database(format!("{table} row decode: {e}"))
+pub(crate) fn map_row_err(table: &'static str, e: sqlx::Error) -> VoomError {
+    VoomError::database_context(format!("{table} row decode"), e)
 }

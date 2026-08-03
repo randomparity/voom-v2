@@ -648,7 +648,7 @@ async fn load_fixture_labels(
     rows.iter()
         .map(|row| {
             row.try_get("label")
-                .map_err(|e| map_row_err("policy_input_set_fixture_labels", &e))
+                .map_err(|e| map_row_err("policy_input_set_fixture_labels", e))
         })
         .collect()
 }
@@ -690,10 +690,10 @@ where
     for row in &rows {
         let set_id: i64 = row
             .try_get("policy_input_set_id")
-            .map_err(|e| map_row_err("policy_input_set_fixture_labels", &e))?;
+            .map_err(|e| map_row_err("policy_input_set_fixture_labels", e))?;
         let label = row
             .try_get("label")
-            .map_err(|e| map_row_err("policy_input_set_fixture_labels", &e))?;
+            .map_err(|e| map_row_err("policy_input_set_fixture_labels", e))?;
         labels
             .entry(PolicyInputSetId(u64_from_i64(
                 set_id,
@@ -825,19 +825,19 @@ async fn load_issues(
 fn row_to_root(row: &sqlx::sqlite::SqliteRow) -> Result<RootRow, VoomError> {
     let id: i64 = row
         .try_get("id")
-        .map_err(|e| map_row_err("policy_input_sets", &e))?;
+        .map_err(|e| map_row_err("policy_input_sets", e))?;
     let schema_version: i64 = row
         .try_get("schema_version")
-        .map_err(|e| map_row_err("policy_input_sets", &e))?;
+        .map_err(|e| map_row_err("policy_input_sets", e))?;
     let source_kind: String = row
         .try_get("source_kind")
-        .map_err(|e| map_row_err("policy_input_sets", &e))?;
+        .map_err(|e| map_row_err("policy_input_sets", e))?;
     let created_at: String = row
         .try_get("created_at")
-        .map_err(|e| map_row_err("policy_input_sets", &e))?;
+        .map_err(|e| map_row_err("policy_input_sets", e))?;
     let epoch: i64 = row
         .try_get("epoch")
-        .map_err(|e| map_row_err("policy_input_sets", &e))?;
+        .map_err(|e| map_row_err("policy_input_sets", e))?;
     Ok(RootRow {
         id: PolicyInputSetId(u64_from_i64(
             id,
@@ -845,16 +845,16 @@ fn row_to_root(row: &sqlx::sqlite::SqliteRow) -> Result<RootRow, VoomError> {
         )?),
         slug: row
             .try_get("slug")
-            .map_err(|e| map_row_err("policy_input_sets", &e))?,
+            .map_err(|e| map_row_err("policy_input_sets", e))?,
         display_name: row
             .try_get("display_name")
-            .map_err(|e| map_row_err("policy_input_sets", &e))?,
+            .map_err(|e| map_row_err("policy_input_sets", e))?,
         schema_version: u32_from_i64(schema_version)?,
         source_kind: parse_wire(&source_kind, "policy_input_sets.source_kind")?,
         created_at: parse_iso8601(&created_at)?,
         description: row
             .try_get("description")
-            .map_err(|e| map_row_err("policy_input_sets", &e))?,
+            .map_err(|e| map_row_err("policy_input_sets", e))?,
         epoch: u64_from_i64(epoch, concat!(module_path!(), ": ", stringify!(epoch)))?,
     })
 }
@@ -864,10 +864,10 @@ fn row_to_synthetic_target(
 ) -> Result<PolicySyntheticTarget, VoomError> {
     let id: i64 = row
         .try_get("id")
-        .map_err(|e| map_row_err("policy_input_synthetic_targets", &e))?;
+        .map_err(|e| map_row_err("policy_input_synthetic_targets", e))?;
     let target_kind: String = row
         .try_get("target_kind")
-        .map_err(|e| map_row_err("policy_input_synthetic_targets", &e))?;
+        .map_err(|e| map_row_err("policy_input_synthetic_targets", e))?;
     Ok(PolicySyntheticTarget {
         id: PolicySyntheticTargetId(u64_from_i64(
             id,
@@ -875,11 +875,11 @@ fn row_to_synthetic_target(
         )?),
         synthetic_key: row
             .try_get("synthetic_key")
-            .map_err(|e| map_row_err("policy_input_synthetic_targets", &e))?,
+            .map_err(|e| map_row_err("policy_input_synthetic_targets", e))?,
         target_kind: parse_wire(&target_kind, "policy_input_synthetic_targets.target_kind")?,
         display_name: row
             .try_get("display_name")
-            .map_err(|e| map_row_err("policy_input_synthetic_targets", &e))?,
+            .map_err(|e| map_row_err("policy_input_synthetic_targets", e))?,
     })
 }
 
@@ -891,16 +891,16 @@ fn row_to_media_snapshot(
         target: target_ref_from_row(row, "policy_media_snapshot_inputs")?,
         container: row
             .try_get("container")
-            .map_err(|e| map_row_err("policy_media_snapshot_inputs", &e))?,
+            .map_err(|e| map_row_err("policy_media_snapshot_inputs", e))?,
         stream_summary: json_value(row, "stream_summary", "policy_media_snapshot_inputs")?,
         video_codec: row
             .try_get("video_codec")
-            .map_err(|e| map_row_err("policy_media_snapshot_inputs", &e))?,
+            .map_err(|e| map_row_err("policy_media_snapshot_inputs", e))?,
         width: optional_u32(row, "width", "policy_media_snapshot_inputs")?,
         height: optional_u32(row, "height", "policy_media_snapshot_inputs")?,
         hdr: row
             .try_get("hdr")
-            .map_err(|e| map_row_err("policy_media_snapshot_inputs", &e))?,
+            .map_err(|e| map_row_err("policy_media_snapshot_inputs", e))?,
         bitrate: optional_id(row, "bitrate", "policy_media_snapshot_inputs")?,
         duration_millis: optional_id(row, "duration_millis", "policy_media_snapshot_inputs")?,
         audio_languages: json_value(row, "audio_languages", "policy_media_snapshot_inputs")?,
@@ -920,22 +920,22 @@ fn row_to_identity_evidence(
 ) -> Result<PolicyIdentityEvidenceInput, VoomError> {
     let observed_at: String = row
         .try_get("observed_at")
-        .map_err(|e| map_row_err("policy_identity_evidence_inputs", &e))?;
+        .map_err(|e| map_row_err("policy_identity_evidence_inputs", e))?;
     Ok(PolicyIdentityEvidenceInput {
         ordinal: ordinal(row, "policy_identity_evidence_inputs")?,
         target: target_ref_from_row(row, "policy_identity_evidence_inputs")?,
         assertion_type: row
             .try_get("assertion_type")
-            .map_err(|e| map_row_err("policy_identity_evidence_inputs", &e))?,
+            .map_err(|e| map_row_err("policy_identity_evidence_inputs", e))?,
         provider: row
             .try_get("provider")
-            .map_err(|e| map_row_err("policy_identity_evidence_inputs", &e))?,
+            .map_err(|e| map_row_err("policy_identity_evidence_inputs", e))?,
         provider_version: row
             .try_get("provider_version")
-            .map_err(|e| map_row_err("policy_identity_evidence_inputs", &e))?,
+            .map_err(|e| map_row_err("policy_identity_evidence_inputs", e))?,
         confidence: row
             .try_get("confidence")
-            .map_err(|e| map_row_err("policy_identity_evidence_inputs", &e))?,
+            .map_err(|e| map_row_err("policy_identity_evidence_inputs", e))?,
         provenance: json_value(row, "provenance", "policy_identity_evidence_inputs")?,
         observed_at: parse_iso8601(&observed_at)?,
         existing_evidence_id: optional_id(
@@ -952,23 +952,23 @@ fn row_to_bundle_target(
 ) -> Result<PolicyBundleTargetInput, VoomError> {
     let desired_state: String = row
         .try_get("desired_state")
-        .map_err(|e| map_row_err("policy_bundle_target_inputs", &e))?;
+        .map_err(|e| map_row_err("policy_bundle_target_inputs", e))?;
     Ok(PolicyBundleTargetInput {
         ordinal: ordinal(row, "policy_bundle_target_inputs")?,
         target: target_ref_from_row(row, "policy_bundle_target_inputs")?,
         role: row
             .try_get("role")
-            .map_err(|e| map_row_err("policy_bundle_target_inputs", &e))?,
+            .map_err(|e| map_row_err("policy_bundle_target_inputs", e))?,
         desired_state: parse_wire(&desired_state, "policy_bundle_target_inputs.desired_state")?,
         language: row
             .try_get("language")
-            .map_err(|e| map_row_err("policy_bundle_target_inputs", &e))?,
+            .map_err(|e| map_row_err("policy_bundle_target_inputs", e))?,
         label: row
             .try_get("label")
-            .map_err(|e| map_row_err("policy_bundle_target_inputs", &e))?,
+            .map_err(|e| map_row_err("policy_bundle_target_inputs", e))?,
         disposition: row
             .try_get("disposition")
-            .map_err(|e| map_row_err("policy_bundle_target_inputs", &e))?,
+            .map_err(|e| map_row_err("policy_bundle_target_inputs", e))?,
         artifact_expectation: json_value(
             row,
             "artifact_expectation",
@@ -985,10 +985,10 @@ fn row_to_quality_profile(
         target: target_ref_from_row(row, "policy_quality_profile_selections")?,
         profile_name: row
             .try_get("profile_name")
-            .map_err(|e| map_row_err("policy_quality_profile_selections", &e))?,
+            .map_err(|e| map_row_err("policy_quality_profile_selections", e))?,
         profile_version: row
             .try_get("profile_version")
-            .map_err(|e| map_row_err("policy_quality_profile_selections", &e))?,
+            .map_err(|e| map_row_err("policy_quality_profile_selections", e))?,
         dimension_weights: json_value(
             row,
             "dimension_weights",
@@ -1000,25 +1000,25 @@ fn row_to_quality_profile(
 fn row_to_issue(row: &sqlx::sqlite::SqliteRow) -> Result<PolicyIssueInput, VoomError> {
     let severity: String = row
         .try_get("severity")
-        .map_err(|e| map_row_err("policy_issue_inputs", &e))?;
+        .map_err(|e| map_row_err("policy_issue_inputs", e))?;
     let priority: String = row
         .try_get("priority")
-        .map_err(|e| map_row_err("policy_issue_inputs", &e))?;
+        .map_err(|e| map_row_err("policy_issue_inputs", e))?;
     let state: String = row
         .try_get("state")
-        .map_err(|e| map_row_err("policy_issue_inputs", &e))?;
+        .map_err(|e| map_row_err("policy_issue_inputs", e))?;
     Ok(PolicyIssueInput {
         ordinal: ordinal(row, "policy_issue_inputs")?,
         target: target_ref_from_row(row, "policy_issue_inputs")?,
         kind: row
             .try_get("kind")
-            .map_err(|e| map_row_err("policy_issue_inputs", &e))?,
+            .map_err(|e| map_row_err("policy_issue_inputs", e))?,
         severity: IssueSeverity::parse(&severity)?,
         priority: IssuePriority::parse(&priority)?,
         state: parse_wire(&state, "policy_issue_inputs.state")?,
         reason: row
             .try_get("reason")
-            .map_err(|e| map_row_err("policy_issue_inputs", &e))?,
+            .map_err(|e| map_row_err("policy_issue_inputs", e))?,
         provenance: json_value(row, "provenance", "policy_issue_inputs")?,
         existing_issue_id: optional_id(row, "existing_issue_id", "policy_issue_inputs")?
             .map(IssueId),
@@ -1153,10 +1153,10 @@ fn target_ref_from_row(
         .ok_or_else(|| VoomError::database(format!("{table} target shape missing")))?;
     let key: String = row
         .try_get("synthetic_key")
-        .map_err(|e| map_row_err(table, &e))?;
+        .map_err(|e| map_row_err(table, e))?;
     let kind: String = row
         .try_get("target_kind")
-        .map_err(|e| map_row_err(table, &e))?;
+        .map_err(|e| map_row_err(table, e))?;
     Ok(PolicyInputTargetRef::Synthetic {
         id: PolicySyntheticTargetId(id),
         key,
@@ -1165,7 +1165,7 @@ fn target_ref_from_row(
 }
 
 fn ordinal(row: &sqlx::sqlite::SqliteRow, table: &'static str) -> Result<u32, VoomError> {
-    let ordinal: i64 = row.try_get("ordinal").map_err(|e| map_row_err(table, &e))?;
+    let ordinal: i64 = row.try_get("ordinal").map_err(|e| map_row_err(table, e))?;
     u32_from_i64(ordinal)
 }
 
@@ -1174,7 +1174,7 @@ fn optional_id(
     column: &'static str,
     table: &'static str,
 ) -> Result<Option<u64>, VoomError> {
-    let value: Option<i64> = row.try_get(column).map_err(|e| map_row_err(table, &e))?;
+    let value: Option<i64> = row.try_get(column).map_err(|e| map_row_err(table, e))?;
     value
         .map(|value| u64_from_i64(value, concat!(module_path!(), ": ", stringify!(value))))
         .transpose()
@@ -1185,7 +1185,7 @@ fn optional_u32(
     column: &'static str,
     table: &'static str,
 ) -> Result<Option<u32>, VoomError> {
-    let value: Option<i64> = row.try_get(column).map_err(|e| map_row_err(table, &e))?;
+    let value: Option<i64> = row.try_get(column).map_err(|e| map_row_err(table, e))?;
     value.map(u32_from_i64).transpose()
 }
 
@@ -1194,7 +1194,7 @@ fn json_value<T: DeserializeOwned>(
     column: &'static str,
     table: &'static str,
 ) -> Result<T, VoomError> {
-    let raw: String = row.try_get(column).map_err(|e| map_row_err(table, &e))?;
+    let raw: String = row.try_get(column).map_err(|e| map_row_err(table, e))?;
     serde_json::from_str(&raw)
         .map_err(|e| VoomError::database_context(format!("{table}.{column} JSON"), e))
 }

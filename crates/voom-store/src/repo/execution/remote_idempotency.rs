@@ -170,7 +170,7 @@ impl SqliteRemoteIdempotencyRepo {
 
         let request_hash: String = row
             .try_get("request_hash")
-            .map_err(|e| map_row_err("remote_idempotency_keys", &e))?;
+            .map_err(|e| map_row_err("remote_idempotency_keys", e))?;
         if request_hash != input.request_hash {
             return Err(VoomError::Conflict(
                 "idempotency key reused with different request body".to_owned(),
@@ -179,12 +179,12 @@ impl SqliteRemoteIdempotencyRepo {
 
         let status: String = row
             .try_get("status")
-            .map_err(|e| map_row_err("remote_idempotency_keys", &e))?;
+            .map_err(|e| map_row_err("remote_idempotency_keys", e))?;
         match status.as_str() {
             "completed" => {
                 let response_json: String = row
                     .try_get("response_json")
-                    .map_err(|e| map_row_err("remote_idempotency_keys", &e))?;
+                    .map_err(|e| map_row_err("remote_idempotency_keys", e))?;
                 let response = serde_json::from_str(&response_json).map_err(|e| {
                     VoomError::database_context("remote idempotency response_json", e)
                 })?;

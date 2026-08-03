@@ -824,35 +824,31 @@ fn opt_id<T>(
 ) -> Result<Option<T>, VoomError> {
     let raw: Option<i64> = row
         .try_get(col)
-        .map_err(|e| map_row_err("workflow_file_phase_summaries", &e))?;
+        .map_err(|e| map_row_err("workflow_file_phase_summaries", e))?;
     raw.map(|v| u64_from_i64(v, concat!(module_path!(), ": ", stringify!(v))).map(wrap))
         .transpose()
 }
 
 fn row_to_summary(row: &sqlx::sqlite::SqliteRow) -> Result<WorkflowSummary, VoomError> {
     let t = "workflow_summaries";
-    let job_id: i64 = row.try_get("job_id").map_err(|e| map_row_err(t, &e))?;
-    let branch_count: i64 = row
-        .try_get("branch_count")
-        .map_err(|e| map_row_err(t, &e))?;
-    let ticket_count: i64 = row
-        .try_get("ticket_count")
-        .map_err(|e| map_row_err(t, &e))?;
+    let job_id: i64 = row.try_get("job_id").map_err(|e| map_row_err(t, e))?;
+    let branch_count: i64 = row.try_get("branch_count").map_err(|e| map_row_err(t, e))?;
+    let ticket_count: i64 = row.try_get("ticket_count").map_err(|e| map_row_err(t, e))?;
     let dispatch_count: i64 = row
         .try_get("dispatch_count")
-        .map_err(|e| map_row_err(t, &e))?;
-    let retry_count: i64 = row.try_get("retry_count").map_err(|e| map_row_err(t, &e))?;
+        .map_err(|e| map_row_err(t, e))?;
+    let retry_count: i64 = row.try_get("retry_count").map_err(|e| map_row_err(t, e))?;
     let failure_count: i64 = row
         .try_get("failure_count")
-        .map_err(|e| map_row_err(t, &e))?;
+        .map_err(|e| map_row_err(t, e))?;
     let peak: i64 = row
         .try_get("peak_active_workflow_leases")
-        .map_err(|e| map_row_err(t, &e))?;
-    let elapsed_ns: i64 = row.try_get("elapsed_ns").map_err(|e| map_row_err(t, &e))?;
+        .map_err(|e| map_row_err(t, e))?;
+    let elapsed_ns: i64 = row.try_get("elapsed_ns").map_err(|e| map_row_err(t, e))?;
     let per_operation: String = row
         .try_get("per_operation")
-        .map_err(|e| map_row_err(t, &e))?;
-    let created: String = row.try_get("created_at").map_err(|e| map_row_err(t, &e))?;
+        .map_err(|e| map_row_err(t, e))?;
+    let created: String = row.try_get("created_at").map_err(|e| map_row_err(t, e))?;
     Ok(WorkflowSummary {
         job_id: JobId(u64_from_i64(
             job_id,
@@ -884,16 +880,16 @@ fn row_to_summary(row: &sqlx::sqlite::SqliteRow) -> Result<WorkflowSummary, Voom
 
 fn row_to_phase(row: &sqlx::sqlite::SqliteRow) -> Result<PhaseSummary, VoomError> {
     let t = "workflow_phase_summaries";
-    let id: i64 = row.try_get("id").map_err(|e| map_row_err(t, &e))?;
-    let job_id: i64 = row.try_get("job_id").map_err(|e| map_row_err(t, &e))?;
+    let id: i64 = row.try_get("id").map_err(|e| map_row_err(t, e))?;
+    let job_id: i64 = row.try_get("job_id").map_err(|e| map_row_err(t, e))?;
     let phase_ordinal: i64 = row
         .try_get("phase_ordinal")
-        .map_err(|e| map_row_err(t, &e))?;
-    let phase_name: String = row.try_get("phase_name").map_err(|e| map_row_err(t, &e))?;
-    let report_id: Option<String> = row.try_get("report_id").map_err(|e| map_row_err(t, &e))?;
-    let report: Option<String> = row.try_get("report").map_err(|e| map_row_err(t, &e))?;
-    let outcome: String = row.try_get("outcome").map_err(|e| map_row_err(t, &e))?;
-    let created: String = row.try_get("created_at").map_err(|e| map_row_err(t, &e))?;
+        .map_err(|e| map_row_err(t, e))?;
+    let phase_name: String = row.try_get("phase_name").map_err(|e| map_row_err(t, e))?;
+    let report_id: Option<String> = row.try_get("report_id").map_err(|e| map_row_err(t, e))?;
+    let report: Option<String> = row.try_get("report").map_err(|e| map_row_err(t, e))?;
+    let outcome: String = row.try_get("outcome").map_err(|e| map_row_err(t, e))?;
+    let created: String = row.try_get("created_at").map_err(|e| map_row_err(t, e))?;
     let report = match (report_id, report) {
         (Some(report_id), Some(report)) => Some(PhaseReport {
             report_id,
@@ -922,15 +918,15 @@ fn row_to_phase(row: &sqlx::sqlite::SqliteRow) -> Result<PhaseSummary, VoomError
 
 fn row_to_file_phase(row: &sqlx::sqlite::SqliteRow) -> Result<FilePhaseSummary, VoomError> {
     let t = "workflow_file_phase_summaries";
-    let id: i64 = row.try_get("id").map_err(|e| map_row_err(t, &e))?;
-    let job_id: i64 = row.try_get("job_id").map_err(|e| map_row_err(t, &e))?;
+    let id: i64 = row.try_get("id").map_err(|e| map_row_err(t, e))?;
+    let job_id: i64 = row.try_get("job_id").map_err(|e| map_row_err(t, e))?;
     let phase_ordinal: i64 = row
         .try_get("phase_ordinal")
-        .map_err(|e| map_row_err(t, &e))?;
-    let branch_id: String = row.try_get("branch_id").map_err(|e| map_row_err(t, &e))?;
-    let ticket_ids: String = row.try_get("ticket_ids").map_err(|e| map_row_err(t, &e))?;
-    let outcome: String = row.try_get("outcome").map_err(|e| map_row_err(t, &e))?;
-    let created: String = row.try_get("created_at").map_err(|e| map_row_err(t, &e))?;
+        .map_err(|e| map_row_err(t, e))?;
+    let branch_id: String = row.try_get("branch_id").map_err(|e| map_row_err(t, e))?;
+    let ticket_ids: String = row.try_get("ticket_ids").map_err(|e| map_row_err(t, e))?;
+    let outcome: String = row.try_get("outcome").map_err(|e| map_row_err(t, e))?;
+    let created: String = row.try_get("created_at").map_err(|e| map_row_err(t, e))?;
     let raw_tickets: Vec<u64> = serde_json::from_str(&ticket_ids).map_err(|e| {
         VoomError::database_context(format!("{t}: parse ticket_ids for id={id}"), e)
     })?;
@@ -957,16 +953,16 @@ fn row_to_file_run_start(row: &sqlx::sqlite::SqliteRow) -> Result<FileRunStart, 
     let table = "workflow_file_run_starts";
     let job_id: i64 = row
         .try_get("job_id")
-        .map_err(|error| map_row_err(table, &error))?;
+        .map_err(|error| map_row_err(table, error))?;
     let branch_id: String = row
         .try_get("branch_id")
-        .map_err(|error| map_row_err(table, &error))?;
+        .map_err(|error| map_row_err(table, error))?;
     let version_id: i64 = row
         .try_get("starting_file_version_id")
-        .map_err(|error| map_row_err(table, &error))?;
+        .map_err(|error| map_row_err(table, error))?;
     let phase_ordinal: i64 = row
         .try_get("starting_phase_ordinal")
-        .map_err(|error| map_row_err(table, &error))?;
+        .map_err(|error| map_row_err(table, error))?;
     Ok(FileRunStart {
         job_id: JobId(u64_from_i64(
             job_id,
@@ -985,16 +981,16 @@ fn row_to_file_run_history(row: &sqlx::sqlite::SqliteRow) -> Result<FileRunHisto
     let table = "workflow_file_run_history";
     let job_id: i64 = row
         .try_get("job_id")
-        .map_err(|error| map_row_err(table, &error))?;
+        .map_err(|error| map_row_err(table, error))?;
     let branch_id: String = row
         .try_get("branch_id")
-        .map_err(|error| map_row_err(table, &error))?;
+        .map_err(|error| map_row_err(table, error))?;
     let phase_ordinal: i64 = row
         .try_get("phase_ordinal")
-        .map_err(|error| map_row_err(table, &error))?;
+        .map_err(|error| map_row_err(table, error))?;
     let outcome: String = row
         .try_get("outcome")
-        .map_err(|error| map_row_err(table, &error))?;
+        .map_err(|error| map_row_err(table, error))?;
     Ok(FileRunHistory {
         job_id: JobId(u64_from_i64(
             job_id,

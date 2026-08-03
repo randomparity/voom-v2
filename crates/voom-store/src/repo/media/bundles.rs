@@ -194,7 +194,7 @@ impl SqliteBundleRepo {
                 let bundle = row_to_bundle(row)?;
                 let member_count: i64 = row
                     .try_get("member_count")
-                    .map_err(|e| map_row_err("asset_bundles", &e))?;
+                    .map_err(|e| map_row_err("asset_bundles", e))?;
                 Ok((
                     bundle,
                     u64_from_i64(
@@ -402,19 +402,19 @@ async fn get_bundle_in_tx(
 fn row_to_bundle(row: &sqlx::sqlite::SqliteRow) -> Result<AssetBundle, VoomError> {
     let id: i64 = row
         .try_get("id")
-        .map_err(|e| map_row_err("asset_bundles", &e))?;
+        .map_err(|e| map_row_err("asset_bundles", e))?;
     let media_variant_id: i64 = row
         .try_get("media_variant_id")
-        .map_err(|e| map_row_err("asset_bundles", &e))?;
+        .map_err(|e| map_row_err("asset_bundles", e))?;
     let display_name: String = row
         .try_get("display_name")
-        .map_err(|e| map_row_err("asset_bundles", &e))?;
+        .map_err(|e| map_row_err("asset_bundles", e))?;
     let created_at: String = row
         .try_get("created_at")
-        .map_err(|e| map_row_err("asset_bundles", &e))?;
+        .map_err(|e| map_row_err("asset_bundles", e))?;
     let epoch: i64 = row
         .try_get("epoch")
-        .map_err(|e| map_row_err("asset_bundles", &e))?;
+        .map_err(|e| map_row_err("asset_bundles", e))?;
     Ok(AssetBundle {
         id: BundleId(u64_from_i64(
             id,
@@ -433,16 +433,16 @@ fn row_to_bundle(row: &sqlx::sqlite::SqliteRow) -> Result<AssetBundle, VoomError
 fn row_to_bundle_member(row: &sqlx::sqlite::SqliteRow) -> Result<BundleMember, VoomError> {
     let id: i64 = row
         .try_get("id")
-        .map_err(|e| map_row_err("asset_bundle_members", &e))?;
+        .map_err(|e| map_row_err("asset_bundle_members", e))?;
     let bundle_id: i64 = row
         .try_get("bundle_id")
-        .map_err(|e| map_row_err("asset_bundle_members", &e))?;
+        .map_err(|e| map_row_err("asset_bundle_members", e))?;
     let file_asset_id: i64 = row
         .try_get("file_asset_id")
-        .map_err(|e| map_row_err("asset_bundle_members", &e))?;
+        .map_err(|e| map_row_err("asset_bundle_members", e))?;
     let role: String = row
         .try_get("role")
-        .map_err(|e| map_row_err("asset_bundle_members", &e))?;
+        .map_err(|e| map_row_err("asset_bundle_members", e))?;
     Ok(BundleMember {
         id: u64_from_i64(id, concat!(module_path!(), ": ", stringify!(id)))?,
         bundle_id: BundleId(u64_from_i64(

@@ -381,10 +381,10 @@ async fn validate_plan_coherence_in_tx(
 
     let lease_ticket_id: i64 = row
         .try_get("lease_ticket_id")
-        .map_err(|e| map_row_err("artifact_access_plans coherence", &e))?;
+        .map_err(|e| map_row_err("artifact_access_plans coherence", e))?;
     let lease_worker_id: i64 = row
         .try_get("lease_worker_id")
-        .map_err(|e| map_row_err("artifact_access_plans coherence", &e))?;
+        .map_err(|e| map_row_err("artifact_access_plans coherence", e))?;
 
     let lease_ticket_id = u64_from_i64(lease_ticket_id, "artifact_access_plans.lease_ticket_id")?;
     if lease_ticket_id != input.ticket_id.0 {
@@ -403,7 +403,7 @@ async fn validate_plan_coherence_in_tx(
 
     let worker_node_id: Option<i64> = row
         .try_get("worker_node_id")
-        .map_err(|e| map_row_err("artifact_access_plans coherence", &e))?;
+        .map_err(|e| map_row_err("artifact_access_plans coherence", e))?;
     let Some(worker_node_id) = worker_node_id else {
         // The LEFT JOIN found the worker row (the lease FK guarantees it), but
         // its node_id is NULL. A live lease pointing at a node-less worker is a
@@ -486,43 +486,43 @@ async fn list_by_i64(
 fn row_to_plan(row: &sqlx::sqlite::SqliteRow) -> Result<ArtifactAccessPlan, VoomError> {
     let id: i64 = row
         .try_get("id")
-        .map_err(|e| map_row_err("artifact_access_plans", &e))?;
+        .map_err(|e| map_row_err("artifact_access_plans", e))?;
     let lease_id: i64 = row
         .try_get("lease_id")
-        .map_err(|e| map_row_err("artifact_access_plans", &e))?;
+        .map_err(|e| map_row_err("artifact_access_plans", e))?;
     let ticket_id: i64 = row
         .try_get("ticket_id")
-        .map_err(|e| map_row_err("artifact_access_plans", &e))?;
+        .map_err(|e| map_row_err("artifact_access_plans", e))?;
     let worker_id: i64 = row
         .try_get("worker_id")
-        .map_err(|e| map_row_err("artifact_access_plans", &e))?;
+        .map_err(|e| map_row_err("artifact_access_plans", e))?;
     let node_id: i64 = row
         .try_get("node_id")
-        .map_err(|e| map_row_err("artifact_access_plans", &e))?;
+        .map_err(|e| map_row_err("artifact_access_plans", e))?;
     let input_handles: String = row
         .try_get("input_handles")
-        .map_err(|e| map_row_err("artifact_access_plans", &e))?;
+        .map_err(|e| map_row_err("artifact_access_plans", e))?;
     let output_handles: String = row
         .try_get("output_handles")
-        .map_err(|e| map_row_err("artifact_access_plans", &e))?;
+        .map_err(|e| map_row_err("artifact_access_plans", e))?;
     let mode: String = row
         .try_get("selected_access_mode")
-        .map_err(|e| map_row_err("artifact_access_plans", &e))?;
+        .map_err(|e| map_row_err("artifact_access_plans", e))?;
     let status: String = row
         .try_get("status")
-        .map_err(|e| map_row_err("artifact_access_plans", &e))?;
+        .map_err(|e| map_row_err("artifact_access_plans", e))?;
     let reason: Option<String> = row
         .try_get("reason")
-        .map_err(|e| map_row_err("artifact_access_plans", &e))?;
+        .map_err(|e| map_row_err("artifact_access_plans", e))?;
     let evidence: String = row
         .try_get("evidence")
-        .map_err(|e| map_row_err("artifact_access_plans", &e))?;
+        .map_err(|e| map_row_err("artifact_access_plans", e))?;
     let created_at: String = row
         .try_get("created_at")
-        .map_err(|e| map_row_err("artifact_access_plans", &e))?;
+        .map_err(|e| map_row_err("artifact_access_plans", e))?;
     let updated_at: String = row
         .try_get("updated_at")
-        .map_err(|e| map_row_err("artifact_access_plans", &e))?;
+        .map_err(|e| map_row_err("artifact_access_plans", e))?;
 
     Ok(ArtifactAccessPlan {
         id: u64_from_i64(id, concat!(module_path!(), ": ", stringify!(id)))?,
