@@ -91,7 +91,10 @@ impl SqliteLibraryRepo {
         .map_err(|e| library_insert_error(&input.slug, e))?;
         commit(tx).await?;
         Ok(Library {
-            id: LibraryId(u64_from_i64(res.last_insert_rowid())),
+            id: LibraryId(u64_from_i64(
+                res.last_insert_rowid(),
+                concat!(module_path!(), ": ", stringify!(res.last_insert_rowid())),
+            )?),
             slug: input.slug,
             display_name: input.display_name,
             media_kind: input.media_kind,
@@ -111,7 +114,10 @@ impl SqliteLibraryRepo {
         let row = sqlx::query(&format!(
             "SELECT {LIBRARY_COLS} FROM libraries WHERE id = ?"
         ))
-        .bind(i64_from_u64(id.0))
+        .bind(i64_from_u64(
+            id.0,
+            concat!(module_path!(), ": ", stringify!(id.0)),
+        )?)
         .fetch_optional(&self.pool)
         .await
         .map_err(|e| VoomError::database_context("libraries get", e))?;
@@ -171,7 +177,10 @@ impl SqliteLibraryRepo {
         .bind(update.media_kind.map(LibraryMediaKind::as_str))
         .bind(update.description.as_ref())
         .bind(&timestamp)
-        .bind(i64_from_u64(id.0))
+        .bind(i64_from_u64(
+            id.0,
+            concat!(module_path!(), ": ", stringify!(id.0)),
+        )?)
         .execute(&mut *tx)
         .await
         .map_err(|e| VoomError::database_context("libraries update", e))?;
@@ -199,7 +208,10 @@ impl SqliteLibraryRepo {
         let res = sqlx::query("UPDATE libraries SET enabled = ?, updated_at = ? WHERE id = ?")
             .bind(i64::from(enabled))
             .bind(&timestamp)
-            .bind(i64_from_u64(id.0))
+            .bind(i64_from_u64(
+                id.0,
+                concat!(module_path!(), ": ", stringify!(id.0)),
+            )?)
             .execute(&mut *tx)
             .await
             .map_err(|e| VoomError::database_context("libraries set_enabled", e))?;
@@ -231,7 +243,10 @@ impl SqliteLibraryRepo {
         )
         .bind(profile_name)
         .bind(&timestamp)
-        .bind(i64_from_u64(id.0))
+        .bind(i64_from_u64(
+            id.0,
+            concat!(module_path!(), ": ", stringify!(id.0)),
+        )?)
         .execute(&mut *tx)
         .await
         .map_err(|e| VoomError::database_context("libraries set_default_scoring_profile", e))?;
@@ -252,7 +267,10 @@ impl SqliteLibraryRepo {
     pub async fn delete_library(&self, id: LibraryId) -> Result<bool, VoomError> {
         let mut tx = begin(&self.pool).await?;
         let res = sqlx::query("DELETE FROM libraries WHERE id = ?")
-            .bind(i64_from_u64(id.0))
+            .bind(i64_from_u64(
+                id.0,
+                concat!(module_path!(), ": ", stringify!(id.0)),
+            )?)
             .execute(&mut *tx)
             .await
             .map_err(|e| VoomError::database_context("libraries delete", e))?;
@@ -293,7 +311,10 @@ fn row_to_library(row: &SqliteRow) -> Result<Library, VoomError> {
     let created_at: String = row.try_get("created_at").map_err(|e| map_row_err(t, &e))?;
     let updated_at: String = row.try_get("updated_at").map_err(|e| map_row_err(t, &e))?;
     Ok(Library {
-        id: LibraryId(u64_from_i64(id)),
+        id: LibraryId(u64_from_i64(
+            id,
+            concat!(module_path!(), ": ", stringify!(id)),
+        )?),
         slug,
         display_name,
         media_kind: LibraryMediaKind::parse(&media_kind)?,

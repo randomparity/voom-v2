@@ -325,7 +325,10 @@ pub(super) async fn read_pending_intent_in_tx(
         "SELECT state, target, closure_initial, accepted_evidence_ids, override_token, epoch \
          FROM commit_intents WHERE id = ?",
     )
-    .bind(i64_from_u64(commit_id.0))
+    .bind(i64_from_u64(
+        commit_id.0,
+        concat!(module_path!(), ": ", stringify!(commit_id.0)),
+    )?)
     .fetch_optional(&mut **tx)
     .await
     .map_err(|e| VoomError::database_context("authorize: read intent", e))?;
@@ -371,7 +374,10 @@ pub(super) async fn read_pending_intent_in_tx(
         closure_initial,
         accepted_evidence_ids,
         override_token,
-        epoch: u64_from_i64(epoch_raw),
+        epoch: u64_from_i64(
+            epoch_raw,
+            concat!(module_path!(), ": ", stringify!(epoch_raw)),
+        )?,
     })
 }
 
@@ -453,8 +459,14 @@ async fn abort_pending_intent_in_tx(
     )
     .bind(&aborted_iso)
     .bind(reason_str)
-    .bind(i64_from_u64(commit_id.0))
-    .bind(i64_from_u64(row.epoch))
+    .bind(i64_from_u64(
+        commit_id.0,
+        concat!(module_path!(), ": ", stringify!(commit_id.0)),
+    )?)
+    .bind(i64_from_u64(
+        row.epoch,
+        concat!(module_path!(), ": ", stringify!(row.epoch)),
+    )?)
     .execute(&mut **tx)
     .await
     .map_err(|e| VoomError::database_context("authorize: abort UPDATE", e))?;
@@ -561,8 +573,8 @@ async fn snapshot_target_row_epochs_in_tx(
     let asset_ids: Vec<i64> = closure
         .file_assets
         .iter()
-        .map(|id| i64_from_u64(id.0))
-        .collect();
+        .map(|id| i64_from_u64(id.0, concat!(module_path!(), ": ", stringify!(id.0))))
+        .collect::<Result<Vec<_>, _>>()?;
     snapshot_one_granularity_in_tx(
         tx,
         "file_assets",
@@ -574,8 +586,8 @@ async fn snapshot_target_row_epochs_in_tx(
     let version_ids: Vec<i64> = closure
         .file_versions
         .iter()
-        .map(|id| i64_from_u64(id.0))
-        .collect();
+        .map(|id| i64_from_u64(id.0, concat!(module_path!(), ": ", stringify!(id.0))))
+        .collect::<Result<Vec<_>, _>>()?;
     snapshot_one_granularity_in_tx(
         tx,
         "file_versions",
@@ -587,8 +599,8 @@ async fn snapshot_target_row_epochs_in_tx(
     let location_ids: Vec<i64> = closure
         .file_locations
         .iter()
-        .map(|id| i64_from_u64(id.0))
-        .collect();
+        .map(|id| i64_from_u64(id.0, concat!(module_path!(), ": ", stringify!(id.0))))
+        .collect::<Result<Vec<_>, _>>()?;
     snapshot_one_granularity_in_tx(
         tx,
         "file_locations",
@@ -600,8 +612,8 @@ async fn snapshot_target_row_epochs_in_tx(
     let bundle_ids: Vec<i64> = closure
         .bundles
         .iter()
-        .map(|id| i64_from_u64(id.0))
-        .collect();
+        .map(|id| i64_from_u64(id.0, concat!(module_path!(), ": ", stringify!(id.0))))
+        .collect::<Result<Vec<_>, _>>()?;
     snapshot_one_granularity_in_tx(
         tx,
         "asset_bundles",
@@ -643,8 +655,8 @@ async fn snapshot_one_granularity_in_tx(
             .map_err(|e| VoomError::database_context(format!("snapshot {table} row epoch"), e))?;
         out.push(TargetRowEpochTriple(
             kind,
-            u64_from_i64(id),
-            u64_from_i64(epoch),
+            u64_from_i64(id, concat!(module_path!(), ": ", stringify!(id)))?,
+            u64_from_i64(epoch, concat!(module_path!(), ": ", stringify!(epoch)))?,
         ));
     }
     Ok(())
@@ -663,15 +675,27 @@ async fn reconcile_scope_members(
     initial: &AffectedScopeClosure,
     authorized: &AffectedScopeClosure,
 ) -> Result<(), VoomError> {
-    let cid = i64_from_u64(commit_id.0);
-    // Removed members → DELETE matching scope_*_id rows.
+    let cid = i64_from_u64(commit_id.0, "commit_intent_scope_members.commit_intent_id")?;
+    delete_removed_scope_members(tx, cid, initial, authorized).await?;
+    insert_added_scope_members(tx, cid, initial, authorized).await
+}
+
+async fn delete_removed_scope_members(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    commit_id: i64,
+    initial: &AffectedScopeClosure,
+    authorized: &AffectedScopeClosure,
+) -> Result<(), VoomError> {
     for asset in initial.file_assets.difference(&authorized.file_assets) {
         sqlx::query(
             "DELETE FROM commit_intent_scope_members \
              WHERE commit_intent_id = ? AND scope_asset_id = ?",
         )
-        .bind(cid)
-        .bind(i64_from_u64(asset.0))
+        .bind(commit_id)
+        .bind(i64_from_u64(
+            asset.0,
+            "commit_intent_scope_members.scope_asset_id",
+        )?)
         .execute(&mut **tx)
         .await
         .map_err(|e| VoomError::database_context("scope_members asset delete", e))?;
@@ -681,8 +705,11 @@ async fn reconcile_scope_members(
             "DELETE FROM commit_intent_scope_members \
              WHERE commit_intent_id = ? AND scope_bundle_id = ?",
         )
-        .bind(cid)
-        .bind(i64_from_u64(bundle.0))
+        .bind(commit_id)
+        .bind(i64_from_u64(
+            bundle.0,
+            "commit_intent_scope_members.scope_bundle_id",
+        )?)
         .execute(&mut **tx)
         .await
         .map_err(|e| VoomError::database_context("scope_members bundle delete", e))?;
@@ -692,8 +719,11 @@ async fn reconcile_scope_members(
             "DELETE FROM commit_intent_scope_members \
              WHERE commit_intent_id = ? AND scope_version_id = ?",
         )
-        .bind(cid)
-        .bind(i64_from_u64(version.0))
+        .bind(commit_id)
+        .bind(i64_from_u64(
+            version.0,
+            "commit_intent_scope_members.scope_version_id",
+        )?)
         .execute(&mut **tx)
         .await
         .map_err(|e| VoomError::database_context("scope_members version delete", e))?;
@@ -706,21 +736,35 @@ async fn reconcile_scope_members(
             "DELETE FROM commit_intent_scope_members \
              WHERE commit_intent_id = ? AND scope_location_id = ?",
         )
-        .bind(cid)
-        .bind(i64_from_u64(location.0))
+        .bind(commit_id)
+        .bind(i64_from_u64(
+            location.0,
+            "commit_intent_scope_members.scope_location_id",
+        )?)
         .execute(&mut **tx)
         .await
         .map_err(|e| VoomError::database_context("scope_members location delete", e))?;
     }
 
-    // Added members → INSERT new rows.
+    Ok(())
+}
+
+async fn insert_added_scope_members(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    commit_id: i64,
+    initial: &AffectedScopeClosure,
+    authorized: &AffectedScopeClosure,
+) -> Result<(), VoomError> {
     for asset in authorized.file_assets.difference(&initial.file_assets) {
         sqlx::query(
             "INSERT INTO commit_intent_scope_members \
              (commit_intent_id, scope_asset_id) VALUES (?, ?)",
         )
-        .bind(cid)
-        .bind(i64_from_u64(asset.0))
+        .bind(commit_id)
+        .bind(i64_from_u64(
+            asset.0,
+            "commit_intent_scope_members.scope_asset_id",
+        )?)
         .execute(&mut **tx)
         .await
         .map_err(|e| VoomError::database_context("scope_members asset insert", e))?;
@@ -730,8 +774,11 @@ async fn reconcile_scope_members(
             "INSERT INTO commit_intent_scope_members \
              (commit_intent_id, scope_bundle_id) VALUES (?, ?)",
         )
-        .bind(cid)
-        .bind(i64_from_u64(bundle.0))
+        .bind(commit_id)
+        .bind(i64_from_u64(
+            bundle.0,
+            "commit_intent_scope_members.scope_bundle_id",
+        )?)
         .execute(&mut **tx)
         .await
         .map_err(|e| VoomError::database_context("scope_members bundle insert", e))?;
@@ -741,8 +788,11 @@ async fn reconcile_scope_members(
             "INSERT INTO commit_intent_scope_members \
              (commit_intent_id, scope_version_id) VALUES (?, ?)",
         )
-        .bind(cid)
-        .bind(i64_from_u64(version.0))
+        .bind(commit_id)
+        .bind(i64_from_u64(
+            version.0,
+            "commit_intent_scope_members.scope_version_id",
+        )?)
         .execute(&mut **tx)
         .await
         .map_err(|e| VoomError::database_context("scope_members version insert", e))?;
@@ -755,8 +805,11 @@ async fn reconcile_scope_members(
             "INSERT INTO commit_intent_scope_members \
              (commit_intent_id, scope_location_id) VALUES (?, ?)",
         )
-        .bind(cid)
-        .bind(i64_from_u64(location.0))
+        .bind(commit_id)
+        .bind(i64_from_u64(
+            location.0,
+            "commit_intent_scope_members.scope_location_id",
+        )?)
         .execute(&mut **tx)
         .await
         .map_err(|e| VoomError::database_context("scope_members location insert", e))?;
@@ -791,9 +844,18 @@ async fn transition_pending_to_authorized_in_tx(
     .bind(closure_authorized_json)
     .bind(target_row_epochs_json)
     .bind(&authorized_iso)
-    .bind(i64_from_u64(new_epoch))
-    .bind(i64_from_u64(commit_id.0))
-    .bind(i64_from_u64(expected_epoch))
+    .bind(i64_from_u64(
+        new_epoch,
+        concat!(module_path!(), ": ", stringify!(new_epoch)),
+    )?)
+    .bind(i64_from_u64(
+        commit_id.0,
+        concat!(module_path!(), ": ", stringify!(commit_id.0)),
+    )?)
+    .bind(i64_from_u64(
+        expected_epoch,
+        concat!(module_path!(), ": ", stringify!(expected_epoch)),
+    )?)
     .execute(&mut **tx)
     .await
     .map_err(|e| VoomError::database_context("authorize: UPDATE to authorized", e))?;

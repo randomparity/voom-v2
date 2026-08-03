@@ -271,9 +271,19 @@ impl SqliteWorkflowSummaryRepo {
                  (job_id, branch_id, starting_file_version_id, starting_phase_ordinal) \
                  VALUES (?, ?, ?, ?)",
             )
-            .bind(i64_from_u64(job_id.0))
+            .bind(i64_from_u64(
+                job_id.0,
+                concat!(module_path!(), ": ", stringify!(job_id.0)),
+            )?)
             .bind(&input.branch_id)
-            .bind(i64_from_u64(input.starting_file_version_id.0))
+            .bind(i64_from_u64(
+                input.starting_file_version_id.0,
+                concat!(
+                    module_path!(),
+                    ": ",
+                    stringify!(input.starting_file_version_id.0)
+                ),
+            )?)
             .bind(i64::from(input.starting_phase_ordinal))
             .execute(&mut **tx)
             .await
@@ -301,7 +311,10 @@ impl SqliteWorkflowSummaryRepo {
                  (job_id, branch_id, phase_ordinal, outcome) \
                  VALUES (?, ?, ?, ?)",
             )
-            .bind(i64_from_u64(job_id.0))
+            .bind(i64_from_u64(
+                job_id.0,
+                concat!(module_path!(), ": ", stringify!(job_id.0)),
+            )?)
             .bind(&input.branch_id)
             .bind(i64::from(input.phase_ordinal))
             .bind(input.outcome.as_str())
@@ -361,12 +374,24 @@ impl SqliteWorkflowSummaryRepo {
             "INSERT INTO workflow_summaries ({SUMMARY_COLS}) \
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
         ))
-        .bind(i64_from_u64(input.job_id.0))
+        .bind(i64_from_u64(
+            input.job_id.0,
+            concat!(module_path!(), ": ", stringify!(input.job_id.0)),
+        )?)
         .bind(i64::from(input.branch_count))
         .bind(i64::from(input.ticket_count))
-        .bind(i64_from_u64(input.dispatch_count))
-        .bind(i64_from_u64(input.retry_count))
-        .bind(i64_from_u64(input.failure_count))
+        .bind(i64_from_u64(
+            input.dispatch_count,
+            concat!(module_path!(), ": ", stringify!(input.dispatch_count)),
+        )?)
+        .bind(i64_from_u64(
+            input.retry_count,
+            concat!(module_path!(), ": ", stringify!(input.retry_count)),
+        )?)
+        .bind(i64_from_u64(
+            input.failure_count,
+            concat!(module_path!(), ": ", stringify!(input.failure_count)),
+        )?)
         .bind(i64::from(input.peak_active_workflow_leases))
         .bind(elapsed_ns)
         .bind(&per_operation)
@@ -419,7 +444,10 @@ impl SqliteWorkflowSummaryRepo {
              VALUES (?, ?, ?, ?, ?, ?, ?) \
              ON CONFLICT (job_id, phase_ordinal) DO NOTHING",
         )
-        .bind(i64_from_u64(input.job_id.0))
+        .bind(i64_from_u64(
+            input.job_id.0,
+            concat!(module_path!(), ": ", stringify!(input.job_id.0)),
+        )?)
         .bind(i64::from(input.phase_ordinal))
         .bind(&input.phase_name)
         .bind(report_id.as_deref())
@@ -442,7 +470,10 @@ impl SqliteWorkflowSummaryRepo {
                 });
         }
         Ok(PhaseSummary {
-            id: u64_from_i64(res.last_insert_rowid()),
+            id: u64_from_i64(
+                res.last_insert_rowid(),
+                concat!(module_path!(), ": ", stringify!(res.last_insert_rowid())),
+            )?,
             job_id: input.job_id,
             phase_ordinal: input.phase_ordinal,
             phase_name: input.phase_name,
@@ -483,15 +514,43 @@ impl SqliteWorkflowSummaryRepo {
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
              ON CONFLICT (job_id, phase_ordinal, branch_id) DO NOTHING",
         )
-        .bind(i64_from_u64(input.job_id.0))
+        .bind(i64_from_u64(
+            input.job_id.0,
+            concat!(module_path!(), ": ", stringify!(input.job_id.0)),
+        )?)
         .bind(i64::from(input.phase_ordinal))
         .bind(&input.branch_id)
         .bind(&ticket_ids)
-        .bind(input.produced_file_version_id.map(|i| i64_from_u64(i.0)))
-        .bind(input.produced_file_location_id.map(|i| i64_from_u64(i.0)))
-        .bind(input.artifact_handle_id.map(|i| i64_from_u64(i.0)))
-        .bind(input.artifact_verification_id.map(|i| i64_from_u64(i.0)))
-        .bind(input.reprobe_snapshot_id.map(|i| i64_from_u64(i.0)))
+        .bind(
+            input
+                .produced_file_version_id
+                .map(|i| i64_from_u64(i.0, concat!(module_path!(), ": ", stringify!(i.0))))
+                .transpose()?,
+        )
+        .bind(
+            input
+                .produced_file_location_id
+                .map(|i| i64_from_u64(i.0, concat!(module_path!(), ": ", stringify!(i.0))))
+                .transpose()?,
+        )
+        .bind(
+            input
+                .artifact_handle_id
+                .map(|i| i64_from_u64(i.0, concat!(module_path!(), ": ", stringify!(i.0))))
+                .transpose()?,
+        )
+        .bind(
+            input
+                .artifact_verification_id
+                .map(|i| i64_from_u64(i.0, concat!(module_path!(), ": ", stringify!(i.0))))
+                .transpose()?,
+        )
+        .bind(
+            input
+                .reprobe_snapshot_id
+                .map(|i| i64_from_u64(i.0, concat!(module_path!(), ": ", stringify!(i.0))))
+                .transpose()?,
+        )
         .bind(input.outcome.as_str())
         .bind(&created)
         .execute(&mut **tx)
@@ -515,7 +574,10 @@ impl SqliteWorkflowSummaryRepo {
             });
         }
         Ok(FilePhaseSummary {
-            id: u64_from_i64(res.last_insert_rowid()),
+            id: u64_from_i64(
+                res.last_insert_rowid(),
+                concat!(module_path!(), ": ", stringify!(res.last_insert_rowid())),
+            )?,
             job_id: input.job_id,
             phase_ordinal: input.phase_ordinal,
             branch_id: input.branch_id,
@@ -547,7 +609,10 @@ impl SqliteWorkflowSummaryRepo {
         let row = sqlx::query(&format!(
             "SELECT {SUMMARY_COLS} FROM workflow_summaries WHERE job_id = ?"
         ))
-        .bind(i64_from_u64(job_id.0))
+        .bind(i64_from_u64(
+            job_id.0,
+            concat!(module_path!(), ": ", stringify!(job_id.0)),
+        )?)
         .fetch_optional(&self.pool)
         .await
         .map_err(|e| VoomError::database_context("workflow_summaries get", e))?;
@@ -576,7 +641,10 @@ impl SqliteWorkflowSummaryRepo {
             "SELECT {PHASE_COLS} FROM workflow_phase_summaries \
              WHERE job_id = ? ORDER BY phase_ordinal ASC"
         ))
-        .bind(i64_from_u64(job_id.0))
+        .bind(i64_from_u64(
+            job_id.0,
+            concat!(module_path!(), ": ", stringify!(job_id.0)),
+        )?)
         .fetch_all(&self.pool)
         .await
         .map_err(|e| VoomError::database_context("workflow_phase_summaries list", e))?;
@@ -591,7 +659,10 @@ impl SqliteWorkflowSummaryRepo {
             "SELECT {FILE_PHASE_COLS} FROM workflow_file_phase_summaries \
              WHERE job_id = ? ORDER BY phase_ordinal ASC, branch_id ASC"
         ))
-        .bind(i64_from_u64(job_id.0))
+        .bind(i64_from_u64(
+            job_id.0,
+            concat!(module_path!(), ": ", stringify!(job_id.0)),
+        )?)
         .fetch_all(&self.pool)
         .await
         .map_err(|e| VoomError::database_context("workflow_file_phase_summaries list", e))?;
@@ -610,7 +681,10 @@ impl SqliteWorkflowSummaryRepo {
             "SELECT {FILE_RUN_START_COLS} FROM workflow_file_run_starts \
              WHERE job_id = ? ORDER BY branch_id ASC"
         ))
-        .bind(i64_from_u64(job_id.0))
+        .bind(i64_from_u64(
+            job_id.0,
+            concat!(module_path!(), ": ", stringify!(job_id.0)),
+        )?)
         .fetch_all(&self.pool)
         .await
         .map_err(|error| VoomError::database_context("workflow_file_run_starts list", error))?;
@@ -658,7 +732,10 @@ impl SqliteWorkflowSummaryRepo {
             "SELECT {FILE_RUN_HISTORY_COLS} FROM workflow_file_run_history \
              WHERE job_id = ? ORDER BY branch_id ASC, phase_ordinal ASC"
         ))
-        .bind(i64_from_u64(job_id.0))
+        .bind(i64_from_u64(
+            job_id.0,
+            concat!(module_path!(), ": ", stringify!(job_id.0)),
+        )?)
         .fetch_all(&self.pool)
         .await
         .map_err(|error| VoomError::database_context("workflow_file_run_history list", error))?;
@@ -690,7 +767,10 @@ where
         "SELECT {PHASE_COLS} FROM workflow_phase_summaries \
          WHERE job_id = ? AND phase_ordinal = ?"
     ))
-    .bind(i64_from_u64(job_id.0))
+    .bind(i64_from_u64(
+        job_id.0,
+        concat!(module_path!(), ": ", stringify!(job_id.0)),
+    )?)
     .bind(i64::from(phase_ordinal))
     .fetch_optional(exec)
     .await
@@ -711,7 +791,10 @@ where
         "SELECT {FILE_PHASE_COLS} FROM workflow_file_phase_summaries \
          WHERE job_id = ? AND phase_ordinal = ? AND branch_id = ?"
     ))
-    .bind(i64_from_u64(job_id.0))
+    .bind(i64_from_u64(
+        job_id.0,
+        concat!(module_path!(), ": ", stringify!(job_id.0)),
+    )?)
     .bind(i64::from(phase_ordinal))
     .bind(branch_id)
     .fetch_optional(exec)
@@ -742,7 +825,8 @@ fn opt_id<T>(
     let raw: Option<i64> = row
         .try_get(col)
         .map_err(|e| map_row_err("workflow_file_phase_summaries", &e))?;
-    Ok(raw.map(|v| wrap(u64_from_i64(v))))
+    raw.map(|v| u64_from_i64(v, concat!(module_path!(), ": ", stringify!(v))).map(wrap))
+        .transpose()
 }
 
 fn row_to_summary(row: &sqlx::sqlite::SqliteRow) -> Result<WorkflowSummary, VoomError> {
@@ -770,14 +854,29 @@ fn row_to_summary(row: &sqlx::sqlite::SqliteRow) -> Result<WorkflowSummary, Voom
         .map_err(|e| map_row_err(t, &e))?;
     let created: String = row.try_get("created_at").map_err(|e| map_row_err(t, &e))?;
     Ok(WorkflowSummary {
-        job_id: JobId(u64_from_i64(job_id)),
+        job_id: JobId(u64_from_i64(
+            job_id,
+            concat!(module_path!(), ": ", stringify!(job_id)),
+        )?),
         branch_count: u32_from_i64(branch_count)?,
         ticket_count: u32_from_i64(ticket_count)?,
-        dispatch_count: u64_from_i64(dispatch_count),
-        retry_count: u64_from_i64(retry_count),
-        failure_count: u64_from_i64(failure_count),
+        dispatch_count: u64_from_i64(
+            dispatch_count,
+            concat!(module_path!(), ": ", stringify!(dispatch_count)),
+        )?,
+        retry_count: u64_from_i64(
+            retry_count,
+            concat!(module_path!(), ": ", stringify!(retry_count)),
+        )?,
+        failure_count: u64_from_i64(
+            failure_count,
+            concat!(module_path!(), ": ", stringify!(failure_count)),
+        )?,
         peak_active_workflow_leases: u32_from_i64(peak)?,
-        elapsed: Duration::from_nanos(u64_from_i64(elapsed_ns)),
+        elapsed: Duration::from_nanos(u64_from_i64(
+            elapsed_ns,
+            concat!(module_path!(), ": ", stringify!(elapsed_ns)),
+        )?),
         per_operation: parse_json(&per_operation, "per_operation")?,
         created_at: parse_iso8601(&created)?,
     })
@@ -808,8 +907,11 @@ fn row_to_phase(row: &sqlx::sqlite::SqliteRow) -> Result<PhaseSummary, VoomError
         }
     };
     Ok(PhaseSummary {
-        id: u64_from_i64(id),
-        job_id: JobId(u64_from_i64(job_id)),
+        id: u64_from_i64(id, concat!(module_path!(), ": ", stringify!(id)))?,
+        job_id: JobId(u64_from_i64(
+            job_id,
+            concat!(module_path!(), ": ", stringify!(job_id)),
+        )?),
         phase_ordinal: u32_from_i64(phase_ordinal)?,
         phase_name,
         report,
@@ -833,8 +935,11 @@ fn row_to_file_phase(row: &sqlx::sqlite::SqliteRow) -> Result<FilePhaseSummary, 
         VoomError::database_context(format!("{t}: parse ticket_ids for id={id}"), e)
     })?;
     Ok(FilePhaseSummary {
-        id: u64_from_i64(id),
-        job_id: JobId(u64_from_i64(job_id)),
+        id: u64_from_i64(id, concat!(module_path!(), ": ", stringify!(id)))?,
+        job_id: JobId(u64_from_i64(
+            job_id,
+            concat!(module_path!(), ": ", stringify!(job_id)),
+        )?),
         phase_ordinal: u32_from_i64(phase_ordinal)?,
         branch_id,
         ticket_ids: raw_tickets.into_iter().map(TicketId).collect(),
@@ -863,9 +968,15 @@ fn row_to_file_run_start(row: &sqlx::sqlite::SqliteRow) -> Result<FileRunStart, 
         .try_get("starting_phase_ordinal")
         .map_err(|error| map_row_err(table, &error))?;
     Ok(FileRunStart {
-        job_id: JobId(u64_from_i64(job_id)),
+        job_id: JobId(u64_from_i64(
+            job_id,
+            concat!(module_path!(), ": ", stringify!(job_id)),
+        )?),
         branch_id,
-        starting_file_version_id: FileVersionId(u64_from_i64(version_id)),
+        starting_file_version_id: FileVersionId(u64_from_i64(
+            version_id,
+            concat!(module_path!(), ": ", stringify!(version_id)),
+        )?),
         starting_phase_ordinal: u32_from_i64(phase_ordinal)?,
     })
 }
@@ -885,7 +996,10 @@ fn row_to_file_run_history(row: &sqlx::sqlite::SqliteRow) -> Result<FileRunHisto
         .try_get("outcome")
         .map_err(|error| map_row_err(table, &error))?;
     Ok(FileRunHistory {
-        job_id: JobId(u64_from_i64(job_id)),
+        job_id: JobId(u64_from_i64(
+            job_id,
+            concat!(module_path!(), ": ", stringify!(job_id)),
+        )?),
         branch_id,
         phase_ordinal: u32_from_i64(phase_ordinal)?,
         outcome: FilePhaseOutcome::parse(&outcome, table)?,

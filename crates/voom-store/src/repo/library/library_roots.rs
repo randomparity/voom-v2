@@ -158,7 +158,10 @@ impl SqliteLibraryRepo {
               created_at, updated_at) \
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
-        .bind(i64_from_u64(input.library_id.0))
+        .bind(i64_from_u64(
+            input.library_id.0,
+            concat!(module_path!(), ": ", stringify!(input.library_id.0)),
+        )?)
         .bind(input.root_kind.as_str())
         .bind(&input.canonical_path)
         .bind(&input.display_path)
@@ -182,7 +185,10 @@ impl SqliteLibraryRepo {
         .map_err(|e| root_insert_error(input.library_id, &input.canonical_path, e))?;
         commit(tx).await?;
         Ok(LibraryRoot {
-            id: LibraryRootId(u64_from_i64(res.last_insert_rowid())),
+            id: LibraryRootId(u64_from_i64(
+                res.last_insert_rowid(),
+                concat!(module_path!(), ": ", stringify!(res.last_insert_rowid())),
+            )?),
             library_id: input.library_id,
             root_kind: input.root_kind,
             canonical_path: input.canonical_path,
@@ -216,7 +222,10 @@ impl SqliteLibraryRepo {
         let row = sqlx::query(&format!(
             "SELECT {ROOT_COLS} FROM library_roots WHERE id = ?"
         ))
-        .bind(i64_from_u64(id.0))
+        .bind(i64_from_u64(
+            id.0,
+            concat!(module_path!(), ": ", stringify!(id.0)),
+        )?)
         .fetch_optional(&self.pool)
         .await
         .map_err(|e| VoomError::database_context("library_roots get", e))?;
@@ -238,7 +247,10 @@ impl SqliteLibraryRepo {
                     "SELECT {ROOT_COLS} FROM library_roots WHERE library_id = ? \
                      ORDER BY created_at ASC, id ASC"
                 ))
-                .bind(i64_from_u64(library_id.0))
+                .bind(i64_from_u64(
+                    library_id.0,
+                    concat!(module_path!(), ": ", stringify!(library_id.0)),
+                )?)
                 .fetch_all(&self.pool)
                 .await
             }
@@ -311,7 +323,10 @@ impl SqliteLibraryRepo {
         .bind(update.default_staging_root.as_ref())
         .bind(update.default_backup_root.as_ref())
         .bind(&timestamp)
-        .bind(i64_from_u64(id.0))
+        .bind(i64_from_u64(
+            id.0,
+            concat!(module_path!(), ": ", stringify!(id.0)),
+        )?)
         .execute(&mut *tx)
         .await
         .map_err(|e| VoomError::database_context("library_roots update", e))?;
@@ -339,7 +354,10 @@ impl SqliteLibraryRepo {
         let res = sqlx::query("UPDATE library_roots SET enabled = ?, updated_at = ? WHERE id = ?")
             .bind(i64::from(enabled))
             .bind(&timestamp)
-            .bind(i64_from_u64(id.0))
+            .bind(i64_from_u64(
+                id.0,
+                concat!(module_path!(), ": ", stringify!(id.0)),
+            )?)
             .execute(&mut *tx)
             .await
             .map_err(|e| VoomError::database_context("library_roots set_enabled", e))?;
@@ -359,7 +377,10 @@ impl SqliteLibraryRepo {
     pub async fn delete_library_root(&self, id: LibraryRootId) -> Result<bool, VoomError> {
         let mut tx = begin(&self.pool).await?;
         let res = sqlx::query("DELETE FROM library_roots WHERE id = ?")
-            .bind(i64_from_u64(id.0))
+            .bind(i64_from_u64(
+                id.0,
+                concat!(module_path!(), ": ", stringify!(id.0)),
+            )?)
             .execute(&mut *tx)
             .await
             .map_err(|e| VoomError::database_context("library_roots delete", e))?;
@@ -433,8 +454,14 @@ fn row_to_root(row: &SqliteRow) -> Result<LibraryRoot, VoomError> {
     let created_at: String = row.try_get("created_at").map_err(|e| map_row_err(t, &e))?;
     let updated_at: String = row.try_get("updated_at").map_err(|e| map_row_err(t, &e))?;
     Ok(LibraryRoot {
-        id: LibraryRootId(u64_from_i64(id)),
-        library_id: LibraryId(u64_from_i64(library_id)),
+        id: LibraryRootId(u64_from_i64(
+            id,
+            concat!(module_path!(), ": ", stringify!(id)),
+        )?),
+        library_id: LibraryId(u64_from_i64(
+            library_id,
+            concat!(module_path!(), ": ", stringify!(library_id)),
+        )?),
         root_kind: LibraryRootKind::parse(&root_kind)?,
         canonical_path,
         display_path,

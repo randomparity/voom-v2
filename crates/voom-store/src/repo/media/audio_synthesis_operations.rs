@@ -299,7 +299,10 @@ impl SqliteAudioSynthesisOperationRepo {
                     VoomError::Internal(format!("encode audio synthesis result facts: {error}"))
                 })?,
             )
-            .bind(i64_from_u64(input.operation_id))
+            .bind(i64_from_u64(
+                input.operation_id,
+                concat!(module_path!(), ": ", stringify!(input.operation_id)),
+            )?)
             .bind(&companion.companion_id)
             .execute(&mut **tx)
             .await
@@ -319,17 +322,36 @@ impl SqliteAudioSynthesisOperationRepo {
              AND claim_expires_at > ?",
         )
         .bind(&input.staging_path)
-        .bind(i64_from_u64(input.expected_size_bytes))
+        .bind(i64_from_u64(
+            input.expected_size_bytes,
+            concat!(module_path!(), ": ", stringify!(input.expected_size_bytes)),
+        )?)
         .bind(&input.expected_checksum)
         .bind(
             serde_json::to_string(&input.worker_result).map_err(|error| {
                 VoomError::Internal(format!("encode audio synthesis worker result: {error}"))
             })?,
         )
-        .bind(i64_from_u64(input.artifact_handle_id.0))
-        .bind(i64_from_u64(input.artifact_location_id.0))
-        .bind(i64_from_u64(input.operation_id))
-        .bind(i64_from_u64(input.claim.lease_id.0))
+        .bind(i64_from_u64(
+            input.artifact_handle_id.0,
+            concat!(module_path!(), ": ", stringify!(input.artifact_handle_id.0)),
+        )?)
+        .bind(i64_from_u64(
+            input.artifact_location_id.0,
+            concat!(
+                module_path!(),
+                ": ",
+                stringify!(input.artifact_location_id.0)
+            ),
+        )?)
+        .bind(i64_from_u64(
+            input.operation_id,
+            concat!(module_path!(), ": ", stringify!(input.operation_id)),
+        )?)
+        .bind(i64_from_u64(
+            input.claim.lease_id.0,
+            concat!(module_path!(), ": ", stringify!(input.claim.lease_id.0)),
+        )?)
         .bind(&input.claim.claim_token)
         .bind(iso8601(now)?)
         .execute(&mut **tx)
@@ -347,14 +369,23 @@ impl SqliteAudioSynthesisOperationRepo {
              probe_payload = ? WHERE id = ? AND state = 'staged' AND verification_id IS NULL \
              AND probe_worker_id IS NULL AND probe_payload IS NULL",
         )
-        .bind(i64_from_u64(input.verification_id.0))
-        .bind(i64_from_u64(input.probe_worker_id.0))
+        .bind(i64_from_u64(
+            input.verification_id.0,
+            concat!(module_path!(), ": ", stringify!(input.verification_id.0)),
+        )?)
+        .bind(i64_from_u64(
+            input.probe_worker_id.0,
+            concat!(module_path!(), ": ", stringify!(input.probe_worker_id.0)),
+        )?)
         .bind(
             serde_json::to_string(&input.probe_payload).map_err(|error| {
                 VoomError::Internal(format!("encode audio synthesis probe payload: {error}"))
             })?,
         )
-        .bind(i64_from_u64(input.operation_id))
+        .bind(i64_from_u64(
+            input.operation_id,
+            concat!(module_path!(), ": ", stringify!(input.operation_id)),
+        )?)
         .execute(&self.pool)
         .await
         .map_err(|error| {
@@ -390,13 +421,47 @@ impl SqliteAudioSynthesisOperationRepo {
              result_media_snapshot_id = ?, claim_lease_id = NULL, claim_token = NULL, \
              claim_expires_at = NULL, finished_at = ? WHERE id = ? AND state = 'staged'",
         )
-        .bind(i64_from_u64(input.commit_record_id.0))
-        .bind(i64_from_u64(input.result_file_asset_id.0))
-        .bind(i64_from_u64(input.result_file_version_id.0))
-        .bind(i64_from_u64(input.result_file_location_id.0))
-        .bind(i64_from_u64(input.result_media_snapshot_id.0))
+        .bind(i64_from_u64(
+            input.commit_record_id.0,
+            concat!(module_path!(), ": ", stringify!(input.commit_record_id.0)),
+        )?)
+        .bind(i64_from_u64(
+            input.result_file_asset_id.0,
+            concat!(
+                module_path!(),
+                ": ",
+                stringify!(input.result_file_asset_id.0)
+            ),
+        )?)
+        .bind(i64_from_u64(
+            input.result_file_version_id.0,
+            concat!(
+                module_path!(),
+                ": ",
+                stringify!(input.result_file_version_id.0)
+            ),
+        )?)
+        .bind(i64_from_u64(
+            input.result_file_location_id.0,
+            concat!(
+                module_path!(),
+                ": ",
+                stringify!(input.result_file_location_id.0)
+            ),
+        )?)
+        .bind(i64_from_u64(
+            input.result_media_snapshot_id.0,
+            concat!(
+                module_path!(),
+                ": ",
+                stringify!(input.result_media_snapshot_id.0)
+            ),
+        )?)
         .bind(iso8601(input.recorded_at)?)
-        .bind(i64_from_u64(input.operation_id))
+        .bind(i64_from_u64(
+            input.operation_id,
+            concat!(module_path!(), ": ", stringify!(input.operation_id)),
+        )?)
         .execute(&mut **tx)
         .await
         .map_err(|error| {
@@ -421,13 +486,19 @@ impl SqliteAudioSynthesisOperationRepo {
              AND (claim_token IS NULL OR claim_expires_at <= ? \
                   OR (claim_lease_id = ? AND claim_token = ?))",
         )
-        .bind(i64_from_u64(claim.lease_id.0))
+        .bind(i64_from_u64(
+            claim.lease_id.0,
+            concat!(module_path!(), ": ", stringify!(claim.lease_id.0)),
+        )?)
         .bind(&claim.claim_token)
         .bind(iso8601(claim.expires_at)?)
         .bind(&claim.operation_key)
         .bind(i64::from(claim.expected_generation))
         .bind(iso8601(now)?)
-        .bind(i64_from_u64(claim.lease_id.0))
+        .bind(i64_from_u64(
+            claim.lease_id.0,
+            concat!(module_path!(), ": ", stringify!(claim.lease_id.0)),
+        )?)
         .bind(&claim.claim_token)
         .execute(&self.pool)
         .await
@@ -450,7 +521,10 @@ impl SqliteAudioSynthesisOperationRepo {
         )
         .bind(&claim.operation_key)
         .bind(i64::from(claim.expected_generation))
-        .bind(i64_from_u64(claim.lease_id.0))
+        .bind(i64_from_u64(
+            claim.lease_id.0,
+            concat!(module_path!(), ": ", stringify!(claim.lease_id.0)),
+        )?)
         .bind(&claim.claim_token)
         .bind(iso8601(now)?)
         .fetch_one(&self.pool)
@@ -471,7 +545,10 @@ impl SqliteAudioSynthesisOperationRepo {
         expires_at: OffsetDateTime,
         now: OffsetDateTime,
     ) -> Result<(), VoomError> {
-        let lease_id = i64_from_u64(lease_id.0);
+        let lease_id = i64_from_u64(
+            lease_id.0,
+            concat!(module_path!(), ": ", stringify!(lease_id.0)),
+        )?;
         let now = iso8601(now)?;
         let claimed: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM audio_synthesis_operations \
@@ -523,7 +600,10 @@ impl SqliteAudioSynthesisOperationRepo {
         )
         .bind(&claim.operation_key)
         .bind(i64::from(claim.expected_generation))
-        .bind(i64_from_u64(claim.lease_id.0))
+        .bind(i64_from_u64(
+            claim.lease_id.0,
+            concat!(module_path!(), ": ", stringify!(claim.lease_id.0)),
+        )?)
         .bind(&claim.claim_token)
         .execute(&self.pool)
         .await
@@ -548,7 +628,10 @@ impl SqliteAudioSynthesisOperationRepo {
         )
         .bind(&claim.operation_key)
         .bind(i64::from(claim.expected_generation))
-        .bind(i64_from_u64(claim.lease_id.0))
+        .bind(i64_from_u64(
+            claim.lease_id.0,
+            concat!(module_path!(), ": ", stringify!(claim.lease_id.0)),
+        )?)
         .bind(&claim.claim_token)
         .bind(iso8601(now)?)
         .execute(&self.pool)
@@ -591,10 +674,10 @@ impl SqliteAudioSynthesisOperationRepo {
               attempt_directory, staging_path, status, created_at) \
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
-        .bind(i64_from_u64(operation_id))
+        .bind(i64_from_u64(operation_id, concat!(module_path!(), ": ", stringify!(operation_id)))?)
         .bind(i64::from(claim.expected_generation))
-        .bind(i64_from_u64(attempt.dispatch_lease_id.0))
-        .bind(i64_from_u64(attempt.worker_id))
+        .bind(i64_from_u64(attempt.dispatch_lease_id.0, concat!(module_path!(), ": ", stringify!(attempt.dispatch_lease_id.0)))?)
+        .bind(i64_from_u64(attempt.worker_id, concat!(module_path!(), ": ", stringify!(attempt.worker_id)))?)
         .bind(i64::from(attempt.worker_epoch))
         .bind(&attempt.idempotency_key)
         .bind(&attempt.attempt_directory)
@@ -622,7 +705,10 @@ impl SqliteAudioSynthesisOperationRepo {
             "SELECT id FROM audio_synthesis_dispatch_attempts \
              WHERE operation_id = ? AND generation = ?",
         )
-        .bind(i64_from_u64(operation_id))
+        .bind(i64_from_u64(
+            operation_id,
+            concat!(module_path!(), ": ", stringify!(operation_id)),
+        )?)
         .bind(i64::from(generation))
         .fetch_optional(&self.pool)
         .await
@@ -659,11 +745,17 @@ impl SqliteAudioSynthesisOperationRepo {
         )
         .bind(AudioSynthesisDispatchAttemptStatus::Terminal.as_str())
         .bind(&now)
-        .bind(i64_from_u64(attempt_id))
+        .bind(i64_from_u64(
+            attempt_id,
+            concat!(module_path!(), ": ", stringify!(attempt_id)),
+        )?)
         .bind(AudioSynthesisDispatchAttemptStatus::Active.as_str())
         .bind(&claim.operation_key)
         .bind(i64::from(claim.expected_generation))
-        .bind(i64_from_u64(claim.lease_id.0))
+        .bind(i64_from_u64(
+            claim.lease_id.0,
+            concat!(module_path!(), ": ", stringify!(claim.lease_id.0)),
+        )?)
         .bind(&claim.claim_token)
         .bind(&now)
         .execute(&self.pool)
@@ -697,12 +789,18 @@ impl SqliteAudioSynthesisOperationRepo {
                  AND claim_lease_id = ? AND claim_token = ? AND claim_expires_at > ?)",
         )
         .bind(AudioSynthesisDispatchAttemptStatus::Quarantined.as_str())
-        .bind(i64_from_u64(attempt_id))
+        .bind(i64_from_u64(
+            attempt_id,
+            concat!(module_path!(), ": ", stringify!(attempt_id)),
+        )?)
         .bind(AudioSynthesisDispatchAttemptStatus::Active.as_str())
         .bind(i64::from(claim.expected_generation))
         .bind(&claim.operation_key)
         .bind(i64::from(claim.expected_generation))
-        .bind(i64_from_u64(claim.lease_id.0))
+        .bind(i64_from_u64(
+            claim.lease_id.0,
+            concat!(module_path!(), ": ", stringify!(claim.lease_id.0)),
+        )?)
         .bind(&claim.claim_token)
         .bind(&now)
         .execute(&mut *tx)
@@ -723,7 +821,10 @@ impl SqliteAudioSynthesisOperationRepo {
         )
         .bind(&claim.operation_key)
         .bind(i64::from(claim.expected_generation))
-        .bind(i64_from_u64(claim.lease_id.0))
+        .bind(i64_from_u64(
+            claim.lease_id.0,
+            concat!(module_path!(), ": ", stringify!(claim.lease_id.0)),
+        )?)
         .bind(&claim.claim_token)
         .bind(&now)
         .execute(&mut *tx)
@@ -759,8 +860,22 @@ async fn insert_operation(
     )
     .bind(&input.operation_key)
     .bind(&input.planned_operation_id)
-    .bind(i64_from_u64(input.source_file_version_id.0))
-    .bind(i64_from_u64(input.source_media_snapshot_id.0))
+    .bind(i64_from_u64(
+        input.source_file_version_id.0,
+        concat!(
+            module_path!(),
+            ": ",
+            stringify!(input.source_file_version_id.0)
+        ),
+    )?)
+    .bind(i64_from_u64(
+        input.source_media_snapshot_id.0,
+        concat!(
+            module_path!(),
+            ": ",
+            stringify!(input.source_media_snapshot_id.0)
+        ),
+    )?)
     .bind(&input.target_codec)
     .bind(i64::from(input.target_channels))
     .bind(&input.container)
@@ -769,7 +884,10 @@ async fn insert_operation(
     .execute(&mut **tx)
     .await
     .map_err(|error| VoomError::database_context("insert audio synthesis operation", error))?;
-    Ok(u64_from_i64(result.last_insert_rowid()))
+    u64_from_i64(
+        result.last_insert_rowid(),
+        "audio_synthesis_dispatch_attempts.id",
+    )
 }
 
 async fn insert_companions(
@@ -784,12 +902,26 @@ async fn insert_companions(
               source_provider_stream_index, result_snapshot_stream_id) \
              VALUES (?, ?, ?, ?, ?, ?)",
         )
-        .bind(i64_from_u64(operation_id))
-        .bind(i64_from_u64(u64::try_from(ordinal).map_err(|error| {
-            VoomError::Config(format!(
-                "audio synthesis companion ordinal overflow: {error}"
-            ))
-        })?))
+        .bind(i64_from_u64(
+            operation_id,
+            concat!(module_path!(), ": ", stringify!(operation_id)),
+        )?)
+        .bind(i64_from_u64(
+            u64::try_from(ordinal).map_err(|error| {
+                VoomError::Config(format!(
+                    "audio synthesis companion ordinal overflow: {error}"
+                ))
+            })?,
+            concat!(
+                module_path!(),
+                ": ",
+                stringify!(u64::try_from(ordinal).map_err(|error| {
+                    VoomError::Config(format!(
+                        "audio synthesis companion ordinal overflow: {error}"
+                    ))
+                })?)
+            ),
+        )?)
         .bind(&companion.companion_id)
         .bind(&companion.source_snapshot_stream_id)
         .bind(i64::from(companion.source_provider_stream_index))
@@ -821,7 +953,10 @@ async fn load_record_by_id(
     operation_id: u64,
 ) -> Result<Option<AudioSynthesisOperationRecord>, VoomError> {
     let row = sqlx::query("SELECT * FROM audio_synthesis_operations WHERE id = ?")
-        .bind(i64_from_u64(operation_id))
+        .bind(i64_from_u64(
+            operation_id,
+            concat!(module_path!(), ": ", stringify!(operation_id)),
+        )?)
         .fetch_optional(&mut **tx)
         .await
         .map_err(|error| VoomError::database_context("load audio synthesis operation", error))?;
@@ -842,7 +977,10 @@ async fn load_record_from_row(
          LEFT JOIN audio_synthesis_stream_lineage lineage ON lineage.companion_id = companion.id \
          WHERE companion.operation_id = ? ORDER BY companion.ordinal",
     )
-    .bind(i64_from_u64(operation.id))
+    .bind(i64_from_u64(
+        operation.id,
+        concat!(module_path!(), ": ", stringify!(operation.id)),
+    )?)
     .fetch_all(&mut **tx)
     .await
     .map_err(|error| VoomError::database_context("load audio synthesis companions", error))?;
@@ -857,7 +995,14 @@ async fn load_record_from_row(
 }
 
 fn decode_operation(row: &SqliteRow) -> Result<AudioSynthesisOperation, VoomError> {
-    let id = u64_from_i64(row.try_get("id").map_err(synthesis_row_err)?);
+    let id = u64_from_i64(
+        row.try_get("id").map_err(synthesis_row_err)?,
+        concat!(
+            module_path!(),
+            ": ",
+            stringify!(row.try_get("id").map_err(synthesis_row_err)?)
+        ),
+    )?;
     Ok(AudioSynthesisOperation {
         id,
         operation_key: row.try_get("operation_key").map_err(synthesis_row_err)?,
@@ -867,11 +1012,27 @@ fn decode_operation(row: &SqliteRow) -> Result<AudioSynthesisOperation, VoomErro
         source_file_version_id: FileVersionId(u64_from_i64(
             row.try_get("source_file_version_id")
                 .map_err(synthesis_row_err)?,
-        )),
+            concat!(
+                module_path!(),
+                ": ",
+                stringify!(
+                    row.try_get("source_file_version_id")
+                        .map_err(synthesis_row_err)?
+                )
+            ),
+        )?),
         source_media_snapshot_id: MediaSnapshotId(u64_from_i64(
             row.try_get("source_media_snapshot_id")
                 .map_err(synthesis_row_err)?,
-        )),
+            concat!(
+                module_path!(),
+                ": ",
+                stringify!(
+                    row.try_get("source_media_snapshot_id")
+                        .map_err(synthesis_row_err)?
+                )
+            ),
+        )?),
         target_codec: row.try_get("target_codec").map_err(synthesis_row_err)?,
         target_channels: u32_from_i64(row.try_get("target_channels").map_err(synthesis_row_err)?)?,
         container: row.try_get("container").map_err(synthesis_row_err)?,
@@ -902,8 +1063,22 @@ fn decode_operation(row: &SqliteRow) -> Result<AudioSynthesisOperation, VoomErro
 
 fn decode_companion(row: &SqliteRow) -> Result<AudioSynthesisCompanion, VoomError> {
     Ok(AudioSynthesisCompanion {
-        id: u64_from_i64(row.try_get("id").map_err(synthesis_row_err)?),
-        operation_id: u64_from_i64(row.try_get("operation_id").map_err(synthesis_row_err)?),
+        id: u64_from_i64(
+            row.try_get("id").map_err(synthesis_row_err)?,
+            concat!(
+                module_path!(),
+                ": ",
+                stringify!(row.try_get("id").map_err(synthesis_row_err)?)
+            ),
+        )?,
+        operation_id: u64_from_i64(
+            row.try_get("operation_id").map_err(synthesis_row_err)?,
+            concat!(
+                module_path!(),
+                ": ",
+                stringify!(row.try_get("operation_id").map_err(synthesis_row_err)?)
+            ),
+        )?,
         ordinal: u32_from_i64(row.try_get("ordinal").map_err(synthesis_row_err)?)?,
         companion_id: row.try_get("companion_id").map_err(synthesis_row_err)?,
         source_snapshot_stream_id: row
@@ -936,10 +1111,10 @@ fn optional_u32(row: &SqliteRow, field: &str) -> Result<Option<u32>, VoomError> 
 }
 
 fn optional_u64(row: &SqliteRow, field: &str) -> Result<Option<u64>, VoomError> {
-    Ok(row
-        .try_get::<Option<i64>, _>(field)
+    row.try_get::<Option<i64>, _>(field)
         .map_err(synthesis_row_err)?
-        .map(u64_from_i64))
+        .map(|value| u64_from_i64(value, field))
+        .transpose()
 }
 
 fn optional_bool(row: &SqliteRow, field: &str) -> Result<Option<bool>, VoomError> {
@@ -1004,13 +1179,44 @@ async fn insert_stream_lineage(
           disposition_commentary, recorded_at) \
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
-    .bind(i64_from_u64(companion.id))
-    .bind(i64_from_u64(operation.source_file_version_id.0))
-    .bind(i64_from_u64(operation.source_media_snapshot_id.0))
+    .bind(i64_from_u64(
+        companion.id,
+        concat!(module_path!(), ": ", stringify!(companion.id)),
+    )?)
+    .bind(i64_from_u64(
+        operation.source_file_version_id.0,
+        concat!(
+            module_path!(),
+            ": ",
+            stringify!(operation.source_file_version_id.0)
+        ),
+    )?)
+    .bind(i64_from_u64(
+        operation.source_media_snapshot_id.0,
+        concat!(
+            module_path!(),
+            ": ",
+            stringify!(operation.source_media_snapshot_id.0)
+        ),
+    )?)
     .bind(&companion.source_snapshot_stream_id)
     .bind(i64::from(companion.source_provider_stream_index))
-    .bind(i64_from_u64(input.result_file_version_id.0))
-    .bind(i64_from_u64(input.result_media_snapshot_id.0))
+    .bind(i64_from_u64(
+        input.result_file_version_id.0,
+        concat!(
+            module_path!(),
+            ": ",
+            stringify!(input.result_file_version_id.0)
+        ),
+    )?)
+    .bind(i64_from_u64(
+        input.result_media_snapshot_id.0,
+        concat!(
+            module_path!(),
+            ": ",
+            stringify!(input.result_media_snapshot_id.0)
+        ),
+    )?)
     .bind(&companion.result_snapshot_stream_id)
     .bind(i64::from(result_index))
     .bind(codec)
@@ -1162,7 +1368,10 @@ async fn require_live_planned_claim(
     )
     .bind(&claim.operation_key)
     .bind(i64::from(claim.expected_generation))
-    .bind(i64_from_u64(claim.lease_id.0))
+    .bind(i64_from_u64(
+        claim.lease_id.0,
+        concat!(module_path!(), ": ", stringify!(claim.lease_id.0)),
+    )?)
     .bind(&claim.claim_token)
     .bind(iso8601(now)?)
     .fetch_optional(&mut **tx)
@@ -1174,7 +1383,7 @@ async fn require_live_planned_claim(
             claim.operation_key
         ))
     })?;
-    Ok(u64_from_i64(operation_id))
+    u64_from_i64(operation_id, "audio_synthesis_operations.id")
 }
 
 async fn load_dispatch_attempt(
@@ -1187,14 +1396,43 @@ async fn load_dispatch_attempt(
         .await
         .map_err(|error| VoomError::database_context("load audio synthesis dispatch", error))?;
     Ok(AudioSynthesisDispatchAttempt {
-        id: u64_from_i64(row.try_get("id").map_err(synthesis_row_err)?),
-        operation_id: u64_from_i64(row.try_get("operation_id").map_err(synthesis_row_err)?),
+        id: u64_from_i64(
+            row.try_get("id").map_err(synthesis_row_err)?,
+            concat!(
+                module_path!(),
+                ": ",
+                stringify!(row.try_get("id").map_err(synthesis_row_err)?)
+            ),
+        )?,
+        operation_id: u64_from_i64(
+            row.try_get("operation_id").map_err(synthesis_row_err)?,
+            concat!(
+                module_path!(),
+                ": ",
+                stringify!(row.try_get("operation_id").map_err(synthesis_row_err)?)
+            ),
+        )?,
         generation: u32_from_i64(row.try_get("generation").map_err(synthesis_row_err)?)?,
         dispatch_lease_id: LeaseId(u64_from_i64(
             row.try_get("dispatch_lease_id")
                 .map_err(synthesis_row_err)?,
-        )),
-        worker_id: u64_from_i64(row.try_get("worker_id").map_err(synthesis_row_err)?),
+            concat!(
+                module_path!(),
+                ": ",
+                stringify!(
+                    row.try_get("dispatch_lease_id")
+                        .map_err(synthesis_row_err)?
+                )
+            ),
+        )?),
+        worker_id: u64_from_i64(
+            row.try_get("worker_id").map_err(synthesis_row_err)?,
+            concat!(
+                module_path!(),
+                ": ",
+                stringify!(row.try_get("worker_id").map_err(synthesis_row_err)?)
+            ),
+        )?,
         worker_epoch: u32_from_i64(row.try_get("worker_epoch").map_err(synthesis_row_err)?)?,
         idempotency_key: row.try_get("idempotency_key").map_err(synthesis_row_err)?,
         attempt_directory: row

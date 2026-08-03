@@ -170,7 +170,10 @@ async fn phase_a_gate_abort_with_event(
     .execute(&mut *tx1)
     .await
     .map_err(|e| VoomError::database_context("commit_intents abort insert", e))?;
-    let commit_id = CommitId(u64_from_i64(insert.last_insert_rowid()));
+    let commit_id = CommitId(u64_from_i64(
+        insert.last_insert_rowid(),
+        concat!(module_path!(), ": ", stringify!(insert.last_insert_rowid())),
+    )?);
     tx1.commit()
         .await
         .map_err(|e| VoomError::database_context("phase A abort tx1 commit", e))?;
@@ -588,7 +591,10 @@ async fn insert_pending_intent(
     .execute(&mut **tx)
     .await
     .map_err(|e| VoomError::database_context("commit_intents pending insert", e))?;
-    Ok(CommitId(u64_from_i64(res.last_insert_rowid())))
+    Ok(CommitId(u64_from_i64(
+        res.last_insert_rowid(),
+        concat!(module_path!(), ": ", stringify!(res.last_insert_rowid())),
+    )?))
 }
 
 /// Emit `commit.forced_override` once at prepare time, atomically

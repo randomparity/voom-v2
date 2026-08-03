@@ -167,7 +167,10 @@ impl SqliteWorkflowProgressRepo {
             "INSERT INTO workflow_file_windows \
              (job_id, max_in_flight_files, created_at) VALUES (?, ?, ?)",
         )
-        .bind(i64_from_u64(job_id.0))
+        .bind(i64_from_u64(
+            job_id.0,
+            concat!(module_path!(), ": ", stringify!(job_id.0)),
+        )?)
         .bind(i64::from(max_in_flight_files))
         .bind(&timestamp)
         .execute(&mut **tx)
@@ -179,7 +182,10 @@ impl SqliteWorkflowProgressRepo {
                  (job_id, branch_id, input_ordinal, admission_tier, state, next_phase_ordinal) \
                  VALUES (?, ?, ?, ?, 'pending', ?)",
             )
-            .bind(i64_from_u64(job_id.0))
+            .bind(i64_from_u64(
+                job_id.0,
+                concat!(module_path!(), ": ", stringify!(job_id.0)),
+            )?)
             .bind(&input.branch_id)
             .bind(i64::from(input.input_ordinal))
             .bind(input.admission_tier.as_i64())
@@ -208,7 +214,10 @@ impl SqliteWorkflowProgressRepo {
             )
             .bind(&timestamp)
             .bind(&timestamp)
-            .bind(i64_from_u64(job_id.0))
+            .bind(i64_from_u64(
+                job_id.0,
+                concat!(module_path!(), ": ", stringify!(job_id.0)),
+            )?)
             .bind(branch_id)
             .execute(&mut **tx)
             .await
@@ -255,7 +264,10 @@ impl SqliteWorkflowProgressRepo {
         );
         let row: Option<FileProgressRow> = sqlx::query_as(&sql)
             .bind(timestamp)
-            .bind(i64_from_u64(job_id.0))
+            .bind(i64_from_u64(
+                job_id.0,
+                concat!(module_path!(), ": ", stringify!(job_id.0)),
+            )?)
             .fetch_optional(&mut *tx)
             .await
             .map_err(|error| VoomError::database_context("file admission", error))?;
@@ -265,7 +277,10 @@ impl SqliteWorkflowProgressRepo {
                  JOIN jobs ON jobs.id = workflow_file_windows.job_id \
                  WHERE workflow_file_windows.job_id = ?",
             )
-            .bind(i64_from_u64(job_id.0))
+            .bind(i64_from_u64(
+                job_id.0,
+                concat!(module_path!(), ": ", stringify!(job_id.0)),
+            )?)
             .fetch_optional(&mut *tx)
             .await
             .map_err(|error| VoomError::database_context("file window existence", error))?;
@@ -378,7 +393,10 @@ impl SqliteWorkflowProgressRepo {
              WHERE job_id = ? AND branch_id = ? AND state = 'terminalizing'",
         )
         .bind(timestamp)
-        .bind(i64_from_u64(job_id.0))
+        .bind(i64_from_u64(
+            job_id.0,
+            concat!(module_path!(), ": ", stringify!(job_id.0)),
+        )?)
         .bind(branch_id)
         .execute(&self.pool)
         .await
@@ -402,7 +420,10 @@ impl SqliteWorkflowProgressRepo {
             "UPDATE workflow_file_progress SET state = 'terminalizing' \
              WHERE job_id = ? AND branch_id = ? AND state = 'active'",
         )
-        .bind(i64_from_u64(job_id.0))
+        .bind(i64_from_u64(
+            job_id.0,
+            concat!(module_path!(), ": ", stringify!(job_id.0)),
+        )?)
         .bind(branch_id)
         .execute(&self.pool)
         .await
@@ -434,7 +455,10 @@ impl SqliteWorkflowProgressRepo {
              WHERE job_id = ? ORDER BY input_ordinal"
         );
         let rows: Vec<FileProgressRow> = sqlx::query_as(&sql)
-            .bind(i64_from_u64(job_id.0))
+            .bind(i64_from_u64(
+                job_id.0,
+                concat!(module_path!(), ": ", stringify!(job_id.0)),
+            )?)
             .fetch_all(&self.pool)
             .await
             .map_err(|error| VoomError::database_context("workflow file progress list", error))?;
@@ -466,13 +490,19 @@ impl SqliteWorkflowProgressRepo {
             "SELECT job_id, max_in_flight_files, created_at \
              FROM workflow_file_windows WHERE job_id = ?",
         )
-        .bind(i64_from_u64(job_id.0))
+        .bind(i64_from_u64(
+            job_id.0,
+            concat!(module_path!(), ": ", stringify!(job_id.0)),
+        )?)
         .fetch_optional(&self.pool)
         .await
         .map_err(|error| VoomError::database_context("workflow file window get", error))?;
         row.map(|(job_id, maximum, created_at)| {
             Ok(FileWindow {
-                job_id: JobId(u64_from_i64(job_id)),
+                job_id: JobId(u64_from_i64(
+                    job_id,
+                    concat!(module_path!(), ": ", stringify!(job_id)),
+                )?),
                 max_in_flight_files: u32_from_i64(maximum)?,
                 created_at: parse_iso8601(&created_at)?,
             })
@@ -492,10 +522,16 @@ impl SqliteWorkflowProgressRepo {
              VALUES (?, ?, ?, ?, ?, ?) \
              ON CONFLICT (job_id, phase_ordinal, branch_id) DO NOTHING",
         )
-        .bind(i64_from_u64(input.job_id.0))
+        .bind(i64_from_u64(
+            input.job_id.0,
+            concat!(module_path!(), ": ", stringify!(input.job_id.0)),
+        )?)
         .bind(i64::from(input.phase_ordinal))
         .bind(&input.branch_id)
-        .bind(i64_from_u64(input.media_snapshot_id.0))
+        .bind(i64_from_u64(
+            input.media_snapshot_id.0,
+            concat!(module_path!(), ": ", stringify!(input.media_snapshot_id.0)),
+        )?)
         .bind(input.gate_admitted)
         .bind(created_at)
         .execute(&self.pool)
@@ -531,7 +567,10 @@ impl SqliteWorkflowProgressRepo {
              FROM workflow_file_phase_entries WHERE job_id = ? \
              ORDER BY phase_ordinal, branch_id",
         )
-        .bind(i64_from_u64(job_id.0))
+        .bind(i64_from_u64(
+            job_id.0,
+            concat!(module_path!(), ": ", stringify!(job_id.0)),
+        )?)
         .fetch_all(&self.pool)
         .await
         .map_err(|error| VoomError::database_context("workflow file phase entry list", error))?;
@@ -550,7 +589,10 @@ impl SqliteWorkflowProgressRepo {
              FROM workflow_file_phase_entries \
              WHERE job_id = ? AND phase_ordinal = ? AND branch_id = ?",
         )
-        .bind(i64_from_u64(job_id.0))
+        .bind(i64_from_u64(
+            job_id.0,
+            concat!(module_path!(), ": ", stringify!(job_id.0)),
+        )?)
         .bind(i64::from(phase_ordinal))
         .bind(branch_id)
         .fetch_optional(&self.pool)
@@ -573,7 +615,10 @@ async fn advance_file_progress_in_tx(
                AND next_phase_ordinal = ?",
     )
     .bind(i64::from(next_phase_ordinal))
-    .bind(i64_from_u64(job_id.0))
+    .bind(i64_from_u64(
+        job_id.0,
+        concat!(module_path!(), ": ", stringify!(job_id.0)),
+    )?)
     .bind(branch_id)
     .bind(i64::from(expected_phase_ordinal))
     .execute(&mut **tx)
@@ -595,7 +640,10 @@ type FileProgressRow = (
 
 fn decode_file_progress(row: FileProgressRow) -> Result<FileProgress, VoomError> {
     Ok(FileProgress {
-        job_id: JobId(u64_from_i64(row.0)),
+        job_id: JobId(u64_from_i64(
+            row.0,
+            concat!(module_path!(), ": ", stringify!(row.0)),
+        )?),
         branch_id: row.1,
         input_ordinal: u32_from_i64(row.2)?,
         admission_tier: FileAdmissionTier::parse(row.3)?,
@@ -610,10 +658,16 @@ fn decode_file_phase_entry(
     row: (i64, i64, String, i64, bool, String),
 ) -> Result<FilePhaseEntry, VoomError> {
     Ok(FilePhaseEntry {
-        job_id: JobId(u64_from_i64(row.0)),
+        job_id: JobId(u64_from_i64(
+            row.0,
+            concat!(module_path!(), ": ", stringify!(row.0)),
+        )?),
         phase_ordinal: u32_from_i64(row.1)?,
         branch_id: row.2,
-        media_snapshot_id: MediaSnapshotId(u64_from_i64(row.3)),
+        media_snapshot_id: MediaSnapshotId(u64_from_i64(
+            row.3,
+            concat!(module_path!(), ": ", stringify!(row.3)),
+        )?),
         gate_admitted: row.4,
         created_at: parse_iso8601(&row.5)?,
     })
@@ -644,7 +698,10 @@ where
          WHERE job_id = ? AND branch_id = ?"
     );
     let row: Option<FileProgressRow> = sqlx::query_as(&sql)
-        .bind(i64_from_u64(job_id.0))
+        .bind(i64_from_u64(
+            job_id.0,
+            concat!(module_path!(), ": ", stringify!(job_id.0)),
+        )?)
         .bind(branch_id)
         .fetch_optional(exec)
         .await

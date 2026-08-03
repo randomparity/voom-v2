@@ -95,12 +95,18 @@ async fn build_lineage_closure(
     let mut bundles: BTreeSet<BundleId> = BTreeSet::new();
     let bundle_rows: Vec<i64> =
         sqlx::query_scalar("SELECT bundle_id FROM asset_bundle_members WHERE file_asset_id = ?")
-            .bind(i64_from_u64(file_asset_id.0))
+            .bind(i64_from_u64(
+                file_asset_id.0,
+                concat!(module_path!(), ": ", stringify!(file_asset_id.0)),
+            )?)
             .fetch_all(&mut **tx)
             .await
             .map_err(|e| VoomError::database_context("asset_bundle_members lineage lookup", e))?;
     for raw in bundle_rows {
-        bundles.insert(BundleId(u64_from_i64(raw)));
+        bundles.insert(BundleId(u64_from_i64(
+            raw,
+            concat!(module_path!(), ": ", stringify!(raw)),
+        )?));
     }
 
     Ok(AffectedScopeClosure {
@@ -169,7 +175,10 @@ async fn overlapping_live_leases_in_tx(
             .map_err(|e| VoomError::database_context("lineage-lease row blocking_mode", e))?;
         let scope = decode_scope(row)?;
         out.push((
-            UseLeaseId(u64_from_i64(id)),
+            UseLeaseId(u64_from_i64(
+                id,
+                concat!(module_path!(), ": ", stringify!(id)),
+            )?),
             blocking_mode == "blocking",
             scope,
         ));
@@ -192,10 +201,22 @@ fn decode_scope(row: &sqlx::sqlite::SqliteRow) -> Result<LeaseScope, VoomError> 
         .try_get("scope_location_id")
         .map_err(|e| VoomError::database_context("lineage-lease scope_location_id", e))?;
     match (sa, sb, sv, sl) {
-        (Some(v), None, None, None) => Ok(LeaseScope::Asset(FileAssetId(u64_from_i64(v)))),
-        (None, Some(v), None, None) => Ok(LeaseScope::Bundle(BundleId(u64_from_i64(v)))),
-        (None, None, Some(v), None) => Ok(LeaseScope::Version(FileVersionId(u64_from_i64(v)))),
-        (None, None, None, Some(v)) => Ok(LeaseScope::Location(FileLocationId(u64_from_i64(v)))),
+        (Some(v), None, None, None) => Ok(LeaseScope::Asset(FileAssetId(u64_from_i64(
+            v,
+            concat!(module_path!(), ": ", stringify!(v)),
+        )?))),
+        (None, Some(v), None, None) => Ok(LeaseScope::Bundle(BundleId(u64_from_i64(
+            v,
+            concat!(module_path!(), ": ", stringify!(v)),
+        )?))),
+        (None, None, Some(v), None) => Ok(LeaseScope::Version(FileVersionId(u64_from_i64(
+            v,
+            concat!(module_path!(), ": ", stringify!(v)),
+        )?))),
+        (None, None, None, Some(v)) => Ok(LeaseScope::Location(FileLocationId(u64_from_i64(
+            v,
+            concat!(module_path!(), ": ", stringify!(v)),
+        )?))),
         other => Err(VoomError::database(format!(
             "lineage-lease row: scope_*_id columns are not exactly-one: {other:?}"
         ))),

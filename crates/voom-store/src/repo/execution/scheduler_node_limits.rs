@@ -37,7 +37,10 @@ impl SqliteSchedulerNodeLimitRepo {
     ) -> Result<u32, VoomError> {
         let row =
             sqlx::query("SELECT max_parallel_leases FROM scheduler_node_limits WHERE node_id = ?")
-                .bind(i64_from_u64(node_id.0))
+                .bind(i64_from_u64(
+                    node_id.0,
+                    concat!(module_path!(), ": ", stringify!(node_id.0)),
+                )?)
                 .fetch_optional(&mut **tx)
                 .await
                 .map_err(|e| VoomError::database_context("scheduler_node_limits get", e))?;
@@ -73,7 +76,10 @@ impl SqliteSchedulerNodeLimitRepo {
                  updated_at = excluded.updated_at \
              RETURNING node_id, max_parallel_leases, created_at, updated_at",
         )
-        .bind(i64_from_u64(node_id.0))
+        .bind(i64_from_u64(
+            node_id.0,
+            concat!(module_path!(), ": ", stringify!(node_id.0)),
+        )?)
         .bind(i64::from(max_parallel_leases))
         .bind(&now)
         .bind(&now)

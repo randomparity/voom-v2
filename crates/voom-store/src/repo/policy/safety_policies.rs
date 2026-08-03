@@ -207,7 +207,10 @@ impl SqliteSafetyPolicyRepo {
         .await;
         match res {
             Ok(res) => Ok(row_from_input(
-                u64_from_i64(res.last_insert_rowid()),
+                u64_from_i64(
+                    res.last_insert_rowid(),
+                    concat!(module_path!(), ": ", stringify!(res.last_insert_rowid())),
+                )?,
                 input,
                 now,
             )),
@@ -397,7 +400,7 @@ fn row_to_safety_policy(row: &SqliteRow) -> Result<SafetyPolicy, VoomError> {
     let created_at: String = row.try_get("created_at").map_err(map("created_at"))?;
     let updated_at: String = row.try_get("updated_at").map_err(map("updated_at"))?;
     Ok(SafetyPolicy {
-        id: u64_from_i64(id),
+        id: u64_from_i64(id, concat!(module_path!(), ": ", stringify!(id)))?,
         slug: row.try_get("slug").map_err(map("slug"))?,
         display_name: row.try_get("display_name").map_err(map("display_name"))?,
         schema_version: u32_from_i64(schema_version)?,

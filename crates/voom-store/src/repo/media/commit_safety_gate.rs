@@ -641,7 +641,7 @@ pub(crate) async fn consult_pending_commit_lock_in_tx(
              WHERE ci.state IN ('pending', 'authorized') \
                AND m.scope_asset_id = ? \
              ORDER BY ci.id ASC LIMIT 1",
-            i64_from_u64(id.0),
+            i64_from_u64(id.0, concat!(module_path!(), ": ", stringify!(id.0)))?,
         ),
         LeaseScope::Bundle(id) => (
             "SELECT ci.id FROM commit_intents ci \
@@ -649,7 +649,7 @@ pub(crate) async fn consult_pending_commit_lock_in_tx(
              WHERE ci.state IN ('pending', 'authorized') \
                AND m.scope_bundle_id = ? \
              ORDER BY ci.id ASC LIMIT 1",
-            i64_from_u64(id.0),
+            i64_from_u64(id.0, concat!(module_path!(), ": ", stringify!(id.0)))?,
         ),
         LeaseScope::Version(id) => (
             "SELECT ci.id FROM commit_intents ci \
@@ -657,7 +657,7 @@ pub(crate) async fn consult_pending_commit_lock_in_tx(
              WHERE ci.state IN ('pending', 'authorized') \
                AND m.scope_version_id = ? \
              ORDER BY ci.id ASC LIMIT 1",
-            i64_from_u64(id.0),
+            i64_from_u64(id.0, concat!(module_path!(), ": ", stringify!(id.0)))?,
         ),
         LeaseScope::Location(id) => (
             "SELECT ci.id FROM commit_intents ci \
@@ -665,7 +665,7 @@ pub(crate) async fn consult_pending_commit_lock_in_tx(
              WHERE ci.state IN ('pending', 'authorized') \
                AND m.scope_location_id = ? \
              ORDER BY ci.id ASC LIMIT 1",
-            i64_from_u64(id.0),
+            i64_from_u64(id.0, concat!(module_path!(), ": ", stringify!(id.0)))?,
         ),
     };
     let row: Option<i64> = sqlx::query_scalar(sql)
@@ -673,7 +673,11 @@ pub(crate) async fn consult_pending_commit_lock_in_tx(
         .fetch_optional(&mut **tx)
         .await
         .map_err(|e| VoomError::database_context("consult_pending_commit_lock", e))?;
-    Ok(row.map(|raw| (CommitId(u64_from_i64(raw)), *scope)))
+    row.map(|raw| {
+        u64_from_i64(raw, concat!(module_path!(), ": ", stringify!(raw)))
+            .map(|id| (CommitId(id), *scope))
+    })
+    .transpose()
 }
 
 /// Open a commit-safety-gate transaction with `BEGIN IMMEDIATE` so

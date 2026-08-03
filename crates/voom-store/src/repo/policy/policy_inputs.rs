@@ -210,14 +210,20 @@ impl SqlitePolicyInputRepo {
         .execute(&mut **tx)
         .await
         .map_err(|e| VoomError::database_context("policy_input_sets insert", e))?;
-        let set_id = PolicyInputSetId(u64_from_i64(res.last_insert_rowid()));
+        let set_id = PolicyInputSetId(u64_from_i64(
+            res.last_insert_rowid(),
+            concat!(module_path!(), ": ", stringify!(res.last_insert_rowid())),
+        )?);
 
         for label in &input.fixture_labels {
             sqlx::query(
                 "INSERT INTO policy_input_set_fixture_labels (policy_input_set_id, label) \
                  VALUES (?, ?)",
             )
-            .bind(i64_from_u64(set_id.0))
+            .bind(i64_from_u64(
+                set_id.0,
+                concat!(module_path!(), ": ", stringify!(set_id.0)),
+            )?)
             .bind(label)
             .execute(&mut **tx)
             .await
@@ -233,7 +239,10 @@ impl SqlitePolicyInputRepo {
                  (policy_input_set_id, synthetic_key, target_kind, display_name) \
                  VALUES (?, ?, ?, ?)",
             )
-            .bind(i64_from_u64(set_id.0))
+            .bind(i64_from_u64(
+                set_id.0,
+                concat!(module_path!(), ": ", stringify!(set_id.0)),
+            )?)
             .bind(&target.synthetic_key)
             .bind(target.target_kind.as_str())
             .bind(&target.display_name)
@@ -242,7 +251,10 @@ impl SqlitePolicyInputRepo {
             .map_err(|e| VoomError::database_context("policy_input_synthetic_targets insert", e))?;
             synthetic_target_ids.insert(
                 (target.synthetic_key.clone(), target.target_kind),
-                PolicySyntheticTargetId(u64_from_i64(res.last_insert_rowid())),
+                PolicySyntheticTargetId(u64_from_i64(
+                    res.last_insert_rowid(),
+                    concat!(module_path!(), ": ", stringify!(res.last_insert_rowid())),
+                )?),
             );
         }
 
@@ -256,7 +268,7 @@ impl SqlitePolicyInputRepo {
                   audio_languages, subtitle_languages, health_flags, existing_media_snapshot_id) \
                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             )
-            .bind(i64_from_u64(set_id.0))
+            .bind(i64_from_u64(set_id.0, concat!(module_path!(), ": ", stringify!(set_id.0)))?)
             .bind(i64::from(snapshot.ordinal))
             .bind(ids.media_work_id)
             .bind(ids.media_variant_id)
@@ -271,12 +283,12 @@ impl SqlitePolicyInputRepo {
             .bind(snapshot.width.map(i64::from))
             .bind(snapshot.height.map(i64::from))
             .bind(&snapshot.hdr)
-            .bind(snapshot.bitrate.map(i64_from_u64))
-            .bind(snapshot.duration_millis.map(i64_from_u64))
+            .bind(snapshot.bitrate.map(|value| i64_from_u64(value, concat!(module_path!(), ": ", stringify!(snapshot.bitrate)))).transpose()?)
+            .bind(snapshot.duration_millis.map(|value| i64_from_u64(value, concat!(module_path!(), ": ", stringify!(snapshot.duration_millis)))).transpose()?)
             .bind(json_string(&snapshot.audio_languages, "audio_languages")?)
             .bind(json_string(&snapshot.subtitle_languages, "subtitle_languages")?)
             .bind(json_string(&snapshot.health_flags, "health_flags")?)
-            .bind(snapshot.existing_media_snapshot_id.map(|id| i64_from_u64(id.0)))
+            .bind(snapshot.existing_media_snapshot_id.map(|id| i64_from_u64(id.0, concat!(module_path!(), ": ", stringify!(id.0)))).transpose()?)
             .execute(&mut **tx)
             .await
             .map_err(|e| VoomError::database_context("policy_media_snapshot_inputs insert", e))?;
@@ -291,7 +303,7 @@ impl SqlitePolicyInputRepo {
                   provider, provider_version, confidence, provenance, observed_at, existing_evidence_id) \
                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             )
-            .bind(i64_from_u64(set_id.0))
+            .bind(i64_from_u64(set_id.0, concat!(module_path!(), ": ", stringify!(set_id.0)))?)
             .bind(i64::from(evidence.ordinal))
             .bind(ids.media_work_id)
             .bind(ids.media_variant_id)
@@ -306,7 +318,7 @@ impl SqlitePolicyInputRepo {
             .bind(evidence.confidence)
             .bind(serialize_json(&evidence.provenance, "provenance")?)
             .bind(iso8601(evidence.observed_at)?)
-            .bind(evidence.existing_evidence_id.map(|id| i64_from_u64(id.0)))
+            .bind(evidence.existing_evidence_id.map(|id| i64_from_u64(id.0, concat!(module_path!(), ": ", stringify!(id.0)))).transpose()?)
             .execute(&mut **tx)
             .await
             .map_err(|e| VoomError::database_context("policy_identity_evidence_inputs insert", e))?;
@@ -321,7 +333,10 @@ impl SqlitePolicyInputRepo {
                   desired_state, language, label, disposition, artifact_expectation) \
                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             )
-            .bind(i64_from_u64(set_id.0))
+            .bind(i64_from_u64(
+                set_id.0,
+                concat!(module_path!(), ": ", stringify!(set_id.0)),
+            )?)
             .bind(i64::from(bundle.ordinal))
             .bind(ids.media_work_id)
             .bind(ids.media_variant_id)
@@ -353,7 +368,10 @@ impl SqlitePolicyInputRepo {
                   profile_name, profile_version, dimension_weights) \
                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             )
-            .bind(i64_from_u64(set_id.0))
+            .bind(i64_from_u64(
+                set_id.0,
+                concat!(module_path!(), ": ", stringify!(set_id.0)),
+            )?)
             .bind(i64::from(profile.ordinal))
             .bind(ids.media_work_id)
             .bind(ids.media_variant_id)
@@ -384,7 +402,10 @@ impl SqlitePolicyInputRepo {
                   severity, priority, state, reason, provenance, existing_issue_id) \
                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             )
-            .bind(i64_from_u64(set_id.0))
+            .bind(i64_from_u64(
+                set_id.0,
+                concat!(module_path!(), ": ", stringify!(set_id.0)),
+            )?)
             .bind(i64::from(issue.ordinal))
             .bind(ids.media_work_id)
             .bind(ids.media_variant_id)
@@ -399,7 +420,12 @@ impl SqlitePolicyInputRepo {
             .bind(issue.state.as_str())
             .bind(&issue.reason)
             .bind(serialize_json(&issue.provenance, "provenance")?)
-            .bind(issue.existing_issue_id.map(|id| i64_from_u64(id.0)))
+            .bind(
+                issue
+                    .existing_issue_id
+                    .map(|id| i64_from_u64(id.0, concat!(module_path!(), ": ", stringify!(id.0))))
+                    .transpose()?,
+            )
             .execute(&mut **tx)
             .await
             .map_err(|e| VoomError::database_context("policy_issue_inputs insert", e))?;
@@ -493,7 +519,10 @@ async fn get_input_set_in_tx(
     id: PolicyInputSetId,
 ) -> Result<Option<PolicyInputSet>, VoomError> {
     let row = sqlx::query(ROOT_SELECT)
-        .bind(i64_from_u64(id.0))
+        .bind(i64_from_u64(
+            id.0,
+            concat!(module_path!(), ": ", stringify!(id.0)),
+        )?)
         .fetch_optional(&mut **tx)
         .await
         .map_err(|e| VoomError::database_context("policy_input_sets get", e))?;
@@ -508,7 +537,10 @@ async fn get_input_set_by_id_conn(
     id: PolicyInputSetId,
 ) -> Result<Option<PolicyInputSet>, VoomError> {
     let row = sqlx::query(ROOT_SELECT)
-        .bind(i64_from_u64(id.0))
+        .bind(i64_from_u64(
+            id.0,
+            concat!(module_path!(), ": ", stringify!(id.0)),
+        )?)
         .fetch_optional(&mut *conn)
         .await
         .map_err(|e| VoomError::database_context("policy_input_sets get", e))?;
@@ -562,7 +594,10 @@ async fn load_fixture_labels(
         "SELECT label FROM policy_input_set_fixture_labels \
          WHERE policy_input_set_id = ? ORDER BY label ASC",
     )
-    .bind(i64_from_u64(set_id.0))
+    .bind(i64_from_u64(
+        set_id.0,
+        concat!(module_path!(), ": ", stringify!(set_id.0)),
+    )?)
     .fetch_all(&mut *conn)
     .await
     .map_err(|e| VoomError::database_context("policy_input_set_fixture_labels list", e))?;
@@ -597,7 +632,10 @@ where
     );
     let mut query = sqlx::query(&sql);
     for set_id in &set_ids {
-        query = query.bind(i64_from_u64(set_id.0));
+        query = query.bind(i64_from_u64(
+            set_id.0,
+            concat!(module_path!(), ": ", stringify!(set_id.0)),
+        )?);
     }
 
     let rows = query
@@ -613,7 +651,10 @@ where
             .try_get("label")
             .map_err(|e| map_row_err("policy_input_set_fixture_labels", &e))?;
         labels
-            .entry(PolicyInputSetId(u64_from_i64(set_id)))
+            .entry(PolicyInputSetId(u64_from_i64(
+                set_id,
+                concat!(module_path!(), ": ", stringify!(set_id)),
+            )?))
             .or_default()
             .push(label);
     }
@@ -629,7 +670,10 @@ async fn load_synthetic_targets(
          FROM policy_input_synthetic_targets \
          WHERE policy_input_set_id = ? ORDER BY synthetic_key ASC, id ASC",
     )
-    .bind(i64_from_u64(set_id.0))
+    .bind(i64_from_u64(
+        set_id.0,
+        concat!(module_path!(), ": ", stringify!(set_id.0)),
+    )?)
     .fetch_all(&mut *conn)
     .await
     .map_err(|e| VoomError::database_context("policy_input_synthetic_targets list", e))?;
@@ -650,7 +694,7 @@ async fn load_media_snapshots(
          LEFT JOIN policy_input_synthetic_targets st ON st.id = c.synthetic_target_id \
          WHERE c.policy_input_set_id = ? ORDER BY c.ordinal ASC",
     )
-    .bind(i64_from_u64(set_id.0))
+    .bind(i64_from_u64(set_id.0, concat!(module_path!(), ": ", stringify!(set_id.0)))?)
     .fetch_all(&mut *conn)
     .await
     .map_err(|e| VoomError::database_context("policy_media_snapshot_inputs list", e))?;
@@ -670,7 +714,7 @@ async fn load_identity_evidence(
          LEFT JOIN policy_input_synthetic_targets st ON st.id = c.synthetic_target_id \
          WHERE c.policy_input_set_id = ? ORDER BY c.ordinal ASC",
     )
-    .bind(i64_from_u64(set_id.0))
+    .bind(i64_from_u64(set_id.0, concat!(module_path!(), ": ", stringify!(set_id.0)))?)
     .fetch_all(&mut *conn)
     .await
     .map_err(|e| VoomError::database_context("policy_identity_evidence_inputs list", e))?;
@@ -689,7 +733,7 @@ async fn load_bundle_targets(
          LEFT JOIN policy_input_synthetic_targets st ON st.id = c.synthetic_target_id \
          WHERE c.policy_input_set_id = ? ORDER BY c.ordinal ASC",
     )
-    .bind(i64_from_u64(set_id.0))
+    .bind(i64_from_u64(set_id.0, concat!(module_path!(), ": ", stringify!(set_id.0)))?)
     .fetch_all(&mut *conn)
     .await
     .map_err(|e| VoomError::database_context("policy_bundle_target_inputs list", e))?;
@@ -708,7 +752,7 @@ async fn load_quality_profiles(
          LEFT JOIN policy_input_synthetic_targets st ON st.id = c.synthetic_target_id \
          WHERE c.policy_input_set_id = ? ORDER BY c.ordinal ASC",
     )
-    .bind(i64_from_u64(set_id.0))
+    .bind(i64_from_u64(set_id.0, concat!(module_path!(), ": ", stringify!(set_id.0)))?)
     .fetch_all(&mut *conn)
     .await
     .map_err(|e| VoomError::database_context("policy_quality_profile_selections list", e))?;
@@ -727,7 +771,7 @@ async fn load_issues(
          LEFT JOIN policy_input_synthetic_targets st ON st.id = c.synthetic_target_id \
          WHERE c.policy_input_set_id = ? ORDER BY c.ordinal ASC",
     )
-    .bind(i64_from_u64(set_id.0))
+    .bind(i64_from_u64(set_id.0, concat!(module_path!(), ": ", stringify!(set_id.0)))?)
     .fetch_all(&mut *conn)
     .await
     .map_err(|e| VoomError::database_context("policy_issue_inputs list", e))?;
@@ -751,7 +795,10 @@ fn row_to_root(row: &sqlx::sqlite::SqliteRow) -> Result<RootRow, VoomError> {
         .try_get("epoch")
         .map_err(|e| map_row_err("policy_input_sets", &e))?;
     Ok(RootRow {
-        id: PolicyInputSetId(u64_from_i64(id)),
+        id: PolicyInputSetId(u64_from_i64(
+            id,
+            concat!(module_path!(), ": ", stringify!(id)),
+        )?),
         slug: row
             .try_get("slug")
             .map_err(|e| map_row_err("policy_input_sets", &e))?,
@@ -764,7 +811,7 @@ fn row_to_root(row: &sqlx::sqlite::SqliteRow) -> Result<RootRow, VoomError> {
         description: row
             .try_get("description")
             .map_err(|e| map_row_err("policy_input_sets", &e))?,
-        epoch: u64_from_i64(epoch),
+        epoch: u64_from_i64(epoch, concat!(module_path!(), ": ", stringify!(epoch)))?,
     })
 }
 
@@ -778,7 +825,10 @@ fn row_to_synthetic_target(
         .try_get("target_kind")
         .map_err(|e| map_row_err("policy_input_synthetic_targets", &e))?;
     Ok(PolicySyntheticTarget {
-        id: PolicySyntheticTargetId(u64_from_i64(id)),
+        id: PolicySyntheticTargetId(u64_from_i64(
+            id,
+            concat!(module_path!(), ": ", stringify!(id)),
+        )?),
         synthetic_key: row
             .try_get("synthetic_key")
             .map_err(|e| map_row_err("policy_input_synthetic_targets", &e))?,
@@ -962,27 +1012,45 @@ impl PersistedTargetIds {
         };
         Ok(match target {
             TargetRef::MediaWork { id } => Self {
-                media_work_id: Some(i64_from_u64(id.0)),
+                media_work_id: Some(i64_from_u64(
+                    id.0,
+                    concat!(module_path!(), ": ", stringify!(id.0)),
+                )?),
                 ..empty
             },
             TargetRef::MediaVariant { id } => Self {
-                media_variant_id: Some(i64_from_u64(id.0)),
+                media_variant_id: Some(i64_from_u64(
+                    id.0,
+                    concat!(module_path!(), ": ", stringify!(id.0)),
+                )?),
                 ..empty
             },
             TargetRef::AssetBundle { id } => Self {
-                asset_bundle_id: Some(i64_from_u64(id.0)),
+                asset_bundle_id: Some(i64_from_u64(
+                    id.0,
+                    concat!(module_path!(), ": ", stringify!(id.0)),
+                )?),
                 ..empty
             },
             TargetRef::FileAsset { id } => Self {
-                file_asset_id: Some(i64_from_u64(id.0)),
+                file_asset_id: Some(i64_from_u64(
+                    id.0,
+                    concat!(module_path!(), ": ", stringify!(id.0)),
+                )?),
                 ..empty
             },
             TargetRef::FileVersion { id } => Self {
-                file_version_id: Some(i64_from_u64(id.0)),
+                file_version_id: Some(i64_from_u64(
+                    id.0,
+                    concat!(module_path!(), ": ", stringify!(id.0)),
+                )?),
                 ..empty
             },
             TargetRef::FileLocation { id } => Self {
-                file_location_id: Some(i64_from_u64(id.0)),
+                file_location_id: Some(i64_from_u64(
+                    id.0,
+                    concat!(module_path!(), ": ", stringify!(id.0)),
+                )?),
                 ..empty
             },
             TargetRef::Synthetic { key, kind } => {
@@ -994,7 +1062,10 @@ impl PersistedTargetIds {
                         ))
                     })?;
                 Self {
-                    synthetic_target_id: Some(i64_from_u64(id.0)),
+                    synthetic_target_id: Some(i64_from_u64(
+                        id.0,
+                        concat!(module_path!(), ": ", stringify!(id.0)),
+                    )?),
                     ..empty
                 }
             }
@@ -1060,7 +1131,9 @@ fn optional_id(
     table: &'static str,
 ) -> Result<Option<u64>, VoomError> {
     let value: Option<i64> = row.try_get(column).map_err(|e| map_row_err(table, &e))?;
-    Ok(value.map(u64_from_i64))
+    value
+        .map(|value| u64_from_i64(value, concat!(module_path!(), ": ", stringify!(value))))
+        .transpose()
 }
 
 fn optional_u32(

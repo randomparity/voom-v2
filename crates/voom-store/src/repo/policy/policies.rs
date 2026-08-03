@@ -102,7 +102,14 @@ impl SqlitePolicyRepo {
                 VoomError::database_context("policy_documents insert", e)
             }
         })?;
-        let document_id = PolicyDocumentId(u64_from_i64(document_res.last_insert_rowid()));
+        let document_id = PolicyDocumentId(u64_from_i64(
+            document_res.last_insert_rowid(),
+            concat!(
+                module_path!(),
+                ": ",
+                stringify!(document_res.last_insert_rowid())
+            ),
+        )?);
 
         let version_res = insert_version(
             &mut tx,
@@ -117,7 +124,14 @@ impl SqlitePolicyRepo {
             },
         )
         .await?;
-        let version_id = PolicyVersionId(u64_from_i64(version_res.last_insert_rowid()));
+        let version_id = PolicyVersionId(u64_from_i64(
+            version_res.last_insert_rowid(),
+            concat!(
+                module_path!(),
+                ": ",
+                stringify!(version_res.last_insert_rowid())
+            ),
+        )?);
         advance_current_version(&mut tx, document_id, version_id).await?;
         tx.commit()
             .await
@@ -192,7 +206,14 @@ impl SqlitePolicyRepo {
                 return Err(err);
             }
         };
-        let version_id = PolicyVersionId(u64_from_i64(version_res.last_insert_rowid()));
+        let version_id = PolicyVersionId(u64_from_i64(
+            version_res.last_insert_rowid(),
+            concat!(
+                module_path!(),
+                ": ",
+                stringify!(version_res.last_insert_rowid())
+            ),
+        )?);
         advance_current_version(&mut tx, document_id, version_id).await?;
         tx.commit()
             .await
@@ -208,7 +229,10 @@ impl SqlitePolicyRepo {
         id: PolicyDocumentId,
     ) -> Result<Option<PolicyDocument>, VoomError> {
         let row = sqlx::query(DOCUMENT_SELECT_BY_ID)
-            .bind(i64_from_u64(id.0))
+            .bind(i64_from_u64(
+                id.0,
+                concat!(module_path!(), ": ", stringify!(id.0)),
+            )?)
             .fetch_optional(&self.pool)
             .await
             .map_err(|e| VoomError::database_context("policy_documents get", e))?;
@@ -234,7 +258,10 @@ impl SqlitePolicyRepo {
         id: PolicyVersionId,
     ) -> Result<Option<PolicyVersion>, VoomError> {
         let row = sqlx::query(VERSION_SELECT_BY_ID)
-            .bind(i64_from_u64(id.0))
+            .bind(i64_from_u64(
+                id.0,
+                concat!(module_path!(), ": ", stringify!(id.0)),
+            )?)
             .fetch_optional(&self.pool)
             .await
             .map_err(|e| VoomError::database_context("policy_versions get", e))?;
@@ -251,7 +278,10 @@ impl SqlitePolicyRepo {
              FROM policy_versions WHERE policy_document_id = ? \
              ORDER BY version_number ASC, id ASC",
         )
-        .bind(i64_from_u64(document_id.0))
+        .bind(i64_from_u64(
+            document_id.0,
+            concat!(module_path!(), ": ", stringify!(document_id.0)),
+        )?)
         .fetch_all(&self.pool)
         .await
         .map_err(|e| VoomError::database_context("policy_versions list", e))?;
@@ -269,7 +299,10 @@ impl SqlitePolicyRepo {
         source_hash: &str,
     ) -> Result<Option<PolicyVersion>, VoomError> {
         let row = sqlx::query(VERSION_SELECT_BY_DOCUMENT_AND_HASH)
-            .bind(i64_from_u64(document_id.0))
+            .bind(i64_from_u64(
+                document_id.0,
+                concat!(module_path!(), ": ", stringify!(document_id.0)),
+            )?)
             .bind(source_hash)
             .fetch_optional(&self.pool)
             .await
@@ -315,8 +348,14 @@ async fn insert_version(
          (policy_document_id, version_number, source_text, source_hash, schema_version, \
          compiled_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
     )
-    .bind(i64_from_u64(row.document_id.0))
-    .bind(i64_from_u64(row.version_number))
+    .bind(i64_from_u64(
+        row.document_id.0,
+        concat!(module_path!(), ": ", stringify!(row.document_id.0)),
+    )?)
+    .bind(i64_from_u64(
+        row.version_number,
+        concat!(module_path!(), ": ", stringify!(row.version_number)),
+    )?)
     .bind(row.source_text)
     .bind(row.source_hash)
     .bind(i64::from(row.schema_version))
@@ -343,8 +382,14 @@ async fn advance_current_version(
          SET current_accepted_version_id = ?, epoch = epoch + 1 \
          WHERE id = ?",
     )
-    .bind(i64_from_u64(version_id.0))
-    .bind(i64_from_u64(document_id.0))
+    .bind(i64_from_u64(
+        version_id.0,
+        concat!(module_path!(), ": ", stringify!(version_id.0)),
+    )?)
+    .bind(i64_from_u64(
+        document_id.0,
+        concat!(module_path!(), ": ", stringify!(document_id.0)),
+    )?)
     .execute(&mut **tx)
     .await
     .map_err(|e| VoomError::database_context("policy_documents advance current version", e))?;
@@ -363,13 +408,16 @@ async fn next_version_number(
     let next: Option<i64> = sqlx::query_scalar(
         "SELECT MAX(version_number) + 1 FROM policy_versions WHERE policy_document_id = ?",
     )
-    .bind(i64_from_u64(document_id.0))
+    .bind(i64_from_u64(
+        document_id.0,
+        concat!(module_path!(), ": ", stringify!(document_id.0)),
+    )?)
     .fetch_one(&mut **tx)
     .await
     .map_err(|e| VoomError::database_context("policy_versions next version", e))?;
     let next = next
         .ok_or_else(|| VoomError::NotFound(format!("policy document {document_id} not found")))?;
-    Ok(u64_from_i64(next))
+    u64_from_i64(next, "policy_versions.version")
 }
 
 async fn get_version_by_document_and_hash_in_tx(
@@ -378,7 +426,10 @@ async fn get_version_by_document_and_hash_in_tx(
     source_hash: &str,
 ) -> Result<Option<PolicyVersion>, VoomError> {
     let row = sqlx::query(VERSION_SELECT_BY_DOCUMENT_AND_HASH)
-        .bind(i64_from_u64(document_id.0))
+        .bind(i64_from_u64(
+            document_id.0,
+            concat!(module_path!(), ": ", stringify!(document_id.0)),
+        )?)
         .bind(source_hash)
         .fetch_optional(&mut **tx)
         .await
@@ -435,7 +486,10 @@ fn row_to_document(row: &sqlx::sqlite::SqliteRow) -> Result<PolicyDocument, Voom
         .map_err(|e| map_row_err("policy_documents", &e))?;
 
     Ok(PolicyDocument {
-        id: PolicyDocumentId(u64_from_i64(id)),
+        id: PolicyDocumentId(u64_from_i64(
+            id,
+            concat!(module_path!(), ": ", stringify!(id)),
+        )?),
         slug: row
             .try_get("slug")
             .map_err(|e| map_row_err("policy_documents", &e))?,
@@ -444,9 +498,19 @@ fn row_to_document(row: &sqlx::sqlite::SqliteRow) -> Result<PolicyDocument, Voom
             .map_err(|e| map_row_err("policy_documents", &e))?,
         created_at: parse_iso8601(&created_at)?,
         current_accepted_version_id: current_accepted_version_id
-            .map(u64_from_i64)
+            .map(|value| {
+                u64_from_i64(
+                    value,
+                    concat!(
+                        module_path!(),
+                        ": ",
+                        stringify!(current_accepted_version_id)
+                    ),
+                )
+            })
+            .transpose()?
             .map(PolicyVersionId),
-        epoch: u64_from_i64(epoch),
+        epoch: u64_from_i64(epoch, concat!(module_path!(), ": ", stringify!(epoch)))?,
     })
 }
 
@@ -487,9 +551,18 @@ fn row_to_version(row: &sqlx::sqlite::SqliteRow) -> Result<PolicyVersion, VoomEr
         .map_err(|e| map_row_err("policy_versions", &e))?;
 
     Ok(PolicyVersion {
-        id: PolicyVersionId(u64_from_i64(id)),
-        policy_document_id: PolicyDocumentId(u64_from_i64(document_id)),
-        version_number: u64_from_i64(version_number),
+        id: PolicyVersionId(u64_from_i64(
+            id,
+            concat!(module_path!(), ": ", stringify!(id)),
+        )?),
+        policy_document_id: PolicyDocumentId(u64_from_i64(
+            document_id,
+            concat!(module_path!(), ": ", stringify!(document_id)),
+        )?),
+        version_number: u64_from_i64(
+            version_number,
+            concat!(module_path!(), ": ", stringify!(version_number)),
+        )?,
         source_text: row
             .try_get("source_text")
             .map_err(|e| map_row_err("policy_versions", &e))?,

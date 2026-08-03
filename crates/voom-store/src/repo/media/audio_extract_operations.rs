@@ -327,9 +327,15 @@ impl SqliteAudioExtractOperationRepo {
              AND claim_expires_at > ?",
         )
         .bind(worker_result)
-        .bind(i64_from_u64(input.operation_id))
+        .bind(i64_from_u64(
+            input.operation_id,
+            concat!(module_path!(), ": ", stringify!(input.operation_id)),
+        )?)
         .bind(i64::from(input.claim.expected_generation))
-        .bind(i64_from_u64(input.claim.lease_id.0))
+        .bind(i64_from_u64(
+            input.claim.lease_id.0,
+            concat!(module_path!(), ": ", stringify!(input.claim.lease_id.0)),
+        )?)
         .bind(&input.claim.claim_token)
         .bind(iso8601(input.observed_at)?)
         .execute(&mut **tx)
@@ -354,9 +360,15 @@ impl SqliteAudioExtractOperationRepo {
              AND dispatch_generation = ? AND claim_lease_id = ? AND claim_token = ? \
              AND claim_expires_at > ?",
         )
-        .bind(i64_from_u64(operation_id))
+        .bind(i64_from_u64(
+            operation_id,
+            concat!(module_path!(), ": ", stringify!(operation_id)),
+        )?)
         .bind(i64::from(claim.expected_generation))
-        .bind(i64_from_u64(claim.lease_id.0))
+        .bind(i64_from_u64(
+            claim.lease_id.0,
+            concat!(module_path!(), ": ", stringify!(claim.lease_id.0)),
+        )?)
         .bind(&claim.claim_token)
         .bind(iso8601(now)?)
         .execute(&mut **tx)
@@ -402,9 +414,15 @@ impl SqliteAudioExtractOperationRepo {
              AND claim_expires_at > ?",
         )
         .bind(&finished_at)
-        .bind(i64_from_u64(operation_id))
+        .bind(i64_from_u64(
+            operation_id,
+            concat!(module_path!(), ": ", stringify!(operation_id)),
+        )?)
         .bind(i64::from(claim.expected_generation))
-        .bind(i64_from_u64(claim.lease_id.0))
+        .bind(i64_from_u64(
+            claim.lease_id.0,
+            concat!(module_path!(), ": ", stringify!(claim.lease_id.0)),
+        )?)
         .bind(&claim.claim_token)
         .bind(&finished_at)
         .execute(&mut **tx)
@@ -429,9 +447,15 @@ impl SqliteAudioExtractOperationRepo {
         )
         .bind(&failure.error_code)
         .bind(&failure.message)
-        .bind(i64_from_u64(operation_id))
+        .bind(i64_from_u64(
+            operation_id,
+            concat!(module_path!(), ": ", stringify!(operation_id)),
+        )?)
         .bind(i64::from(claim.expected_generation))
-        .bind(i64_from_u64(claim.lease_id.0))
+        .bind(i64_from_u64(
+            claim.lease_id.0,
+            concat!(module_path!(), ": ", stringify!(claim.lease_id.0)),
+        )?)
         .bind(&claim.claim_token)
         .bind(iso8601(now)?)
         .execute(&mut **tx)
@@ -504,13 +528,19 @@ impl SqliteAudioExtractOperationRepo {
              AND (claim_token IS NULL OR claim_expires_at <= ? \
                   OR (claim_lease_id = ? AND claim_token = ?))",
         )
-        .bind(i64_from_u64(claim.lease_id.0))
+        .bind(i64_from_u64(
+            claim.lease_id.0,
+            concat!(module_path!(), ": ", stringify!(claim.lease_id.0)),
+        )?)
         .bind(&claim.claim_token)
         .bind(expires_at)
         .bind(&claim.operation_key)
         .bind(i64::from(claim.expected_generation))
         .bind(now)
-        .bind(i64_from_u64(claim.lease_id.0))
+        .bind(i64_from_u64(
+            claim.lease_id.0,
+            concat!(module_path!(), ": ", stringify!(claim.lease_id.0)),
+        )?)
         .bind(&claim.claim_token)
         .execute(&self.pool)
         .await
@@ -538,7 +568,10 @@ impl SqliteAudioExtractOperationRepo {
         )
         .bind(&claim.operation_key)
         .bind(i64::from(claim.expected_generation))
-        .bind(i64_from_u64(claim.lease_id.0))
+        .bind(i64_from_u64(
+            claim.lease_id.0,
+            concat!(module_path!(), ": ", stringify!(claim.lease_id.0)),
+        )?)
         .bind(&claim.claim_token)
         .bind(iso8601(now)?)
         .fetch_one(&self.pool)
@@ -561,7 +594,10 @@ impl SqliteAudioExtractOperationRepo {
         expires_at: OffsetDateTime,
         now: OffsetDateTime,
     ) -> Result<(), VoomError> {
-        let lease_id = i64_from_u64(lease_id.0);
+        let lease_id = i64_from_u64(
+            lease_id.0,
+            concat!(module_path!(), ": ", stringify!(lease_id.0)),
+        )?;
         let now = iso8601(now)?;
         let claimed: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM audio_extract_operations \
@@ -616,7 +652,10 @@ impl SqliteAudioExtractOperationRepo {
         )
         .bind(&claim.operation_key)
         .bind(i64::from(claim.expected_generation))
-        .bind(i64_from_u64(claim.lease_id.0))
+        .bind(i64_from_u64(
+            claim.lease_id.0,
+            concat!(module_path!(), ": ", stringify!(claim.lease_id.0)),
+        )?)
         .bind(&claim.claim_token)
         .execute(&self.pool)
         .await
@@ -660,7 +699,10 @@ impl SqliteAudioExtractOperationRepo {
             "SELECT id FROM audio_extract_dispatch_attempts \
              WHERE operation_id = ? AND generation = ?",
         )
-        .bind(i64_from_u64(operation_id))
+        .bind(i64_from_u64(
+            operation_id,
+            concat!(module_path!(), ": ", stringify!(operation_id)),
+        )?)
         .bind(i64::from(generation))
         .fetch_optional(&self.pool)
         .await
@@ -739,10 +781,16 @@ impl SqliteAudioExtractOperationRepo {
         .bind(status)
         .bind(evidence_kind)
         .bind(evidence_at)
-        .bind(i64_from_u64(attempt_id))
+        .bind(i64_from_u64(
+            attempt_id,
+            concat!(module_path!(), ": ", stringify!(attempt_id)),
+        )?)
         .bind(&claim.operation_key)
         .bind(i64::from(claim.expected_generation))
-        .bind(i64_from_u64(claim.lease_id.0))
+        .bind(i64_from_u64(
+            claim.lease_id.0,
+            concat!(module_path!(), ": ", stringify!(claim.lease_id.0)),
+        )?)
         .bind(&claim.claim_token)
         .bind(iso8601(now)?)
         .execute(&self.pool)
@@ -780,10 +828,16 @@ impl SqliteAudioExtractOperationRepo {
         )
         .bind(&claim.operation_key)
         .bind(i64::from(claim.expected_generation))
-        .bind(i64_from_u64(claim.lease_id.0))
+        .bind(i64_from_u64(
+            claim.lease_id.0,
+            concat!(module_path!(), ": ", stringify!(claim.lease_id.0)),
+        )?)
         .bind(&claim.claim_token)
         .bind(iso8601(now)?)
-        .bind(i64_from_u64(attempt_id))
+        .bind(i64_from_u64(
+            attempt_id,
+            concat!(module_path!(), ": ", stringify!(attempt_id)),
+        )?)
         .execute(&self.pool)
         .await
         .map_err(|error| {
@@ -839,9 +893,19 @@ impl SqliteAudioExtractOperationRepo {
         )
         .bind(&now)
         .bind(&acknowledgement.acknowledged_by)
-        .bind(i64_from_u64(acknowledgement.attempt_id))
+        .bind(i64_from_u64(
+            acknowledgement.attempt_id,
+            concat!(module_path!(), ": ", stringify!(acknowledgement.attempt_id)),
+        )?)
         .bind(i64::from(acknowledgement.generation))
-        .bind(i64_from_u64(acknowledgement.worker_id.0))
+        .bind(i64_from_u64(
+            acknowledgement.worker_id.0,
+            concat!(
+                module_path!(),
+                ": ",
+                stringify!(acknowledgement.worker_id.0)
+            ),
+        )?)
         .bind(i64::from(acknowledgement.worker_epoch))
         .bind(&acknowledgement.idempotency_key)
         .bind(&acknowledgement.operation_key)
@@ -879,12 +943,32 @@ async fn bind_staged_output(
          WHERE id = ? AND staging_path IS NULL AND artifact_handle_id IS NULL",
     )
     .bind(&output.staging_path)
-    .bind(i64_from_u64(output.expected_size_bytes))
+    .bind(i64_from_u64(
+        output.expected_size_bytes,
+        concat!(module_path!(), ": ", stringify!(output.expected_size_bytes)),
+    )?)
     .bind(&output.expected_checksum)
-    .bind(i64_from_u64(output.artifact_handle_id.0))
-    .bind(i64_from_u64(output.artifact_location_id.0))
+    .bind(i64_from_u64(
+        output.artifact_handle_id.0,
+        concat!(
+            module_path!(),
+            ": ",
+            stringify!(output.artifact_handle_id.0)
+        ),
+    )?)
+    .bind(i64_from_u64(
+        output.artifact_location_id.0,
+        concat!(
+            module_path!(),
+            ": ",
+            stringify!(output.artifact_location_id.0)
+        ),
+    )?)
     .bind(result_facts)
-    .bind(i64_from_u64(output.operation_output_id))
+    .bind(i64_from_u64(
+        output.operation_output_id,
+        concat!(module_path!(), ": ", stringify!(output.operation_output_id)),
+    )?)
     .execute(&mut **tx)
     .await
     .map_err(|error| VoomError::database_context("bind staged audio extract output", error))?;
@@ -905,14 +989,40 @@ async fn bind_prepared_output(
            AND artifact_location_id = ? AND verification_id IS NULL AND commit_record_id IS NULL",
     )
     .bind(&output.temp_path)
-    .bind(i64_from_u64(output.verification_id.0))
-    .bind(i64_from_u64(output.commit_record_id.0))
-    .bind(i64_from_u64(output.probe_worker_id.0))
+    .bind(i64_from_u64(
+        output.verification_id.0,
+        concat!(module_path!(), ": ", stringify!(output.verification_id.0)),
+    )?)
+    .bind(i64_from_u64(
+        output.commit_record_id.0,
+        concat!(module_path!(), ": ", stringify!(output.commit_record_id.0)),
+    )?)
+    .bind(i64_from_u64(
+        output.probe_worker_id.0,
+        concat!(module_path!(), ": ", stringify!(output.probe_worker_id.0)),
+    )?)
     .bind(probe_payload)
-    .bind(i64_from_u64(output.operation_output_id))
+    .bind(i64_from_u64(
+        output.operation_output_id,
+        concat!(module_path!(), ": ", stringify!(output.operation_output_id)),
+    )?)
     .bind(&output.staging_path)
-    .bind(i64_from_u64(output.artifact_handle_id.0))
-    .bind(i64_from_u64(output.artifact_location_id.0))
+    .bind(i64_from_u64(
+        output.artifact_handle_id.0,
+        concat!(
+            module_path!(),
+            ": ",
+            stringify!(output.artifact_handle_id.0)
+        ),
+    )?)
+    .bind(i64_from_u64(
+        output.artifact_location_id.0,
+        concat!(
+            module_path!(),
+            ": ",
+            stringify!(output.artifact_location_id.0)
+        ),
+    )?)
     .execute(&mut **tx)
     .await
     .map_err(|error| VoomError::database_context("bind prepared audio extract output", error))?;
@@ -933,12 +1043,46 @@ async fn bind_finalized_output(
          bundle_member_id = ? \
          WHERE id = ? AND result_file_version_id IS NULL",
     )
-    .bind(i64_from_u64(output.result_file_asset_id))
-    .bind(i64_from_u64(output.result_file_version_id.0))
-    .bind(i64_from_u64(output.result_file_location_id.0))
-    .bind(i64_from_u64(output.result_media_snapshot_id.0))
-    .bind(i64_from_u64(output.bundle_member_id))
-    .bind(i64_from_u64(output.operation_output_id))
+    .bind(i64_from_u64(
+        output.result_file_asset_id,
+        concat!(
+            module_path!(),
+            ": ",
+            stringify!(output.result_file_asset_id)
+        ),
+    )?)
+    .bind(i64_from_u64(
+        output.result_file_version_id.0,
+        concat!(
+            module_path!(),
+            ": ",
+            stringify!(output.result_file_version_id.0)
+        ),
+    )?)
+    .bind(i64_from_u64(
+        output.result_file_location_id.0,
+        concat!(
+            module_path!(),
+            ": ",
+            stringify!(output.result_file_location_id.0)
+        ),
+    )?)
+    .bind(i64_from_u64(
+        output.result_media_snapshot_id.0,
+        concat!(
+            module_path!(),
+            ": ",
+            stringify!(output.result_media_snapshot_id.0)
+        ),
+    )?)
+    .bind(i64_from_u64(
+        output.bundle_member_id,
+        concat!(module_path!(), ": ", stringify!(output.bundle_member_id)),
+    )?)
+    .bind(i64_from_u64(
+        output.operation_output_id,
+        concat!(module_path!(), ": ", stringify!(output.operation_output_id)),
+    )?)
     .execute(&mut **tx)
     .await
     .map_err(|error| VoomError::database_context("bind finalized audio extract output", error))?;
@@ -1023,7 +1167,10 @@ async fn legacy_owner_row(
            AND member.bundle_id = ? AND member.role = ?",
     )
     .bind(target_path)
-    .bind(i64_from_u64(bundle_id.0))
+    .bind(i64_from_u64(
+        bundle_id.0,
+        concat!(module_path!(), ": ", stringify!(bundle_id.0)),
+    )?)
     .bind(bundle_role)
     .fetch_optional(pool)
     .await
@@ -1150,9 +1297,30 @@ async fn insert_legacy_adopted_operation(
     )
     .bind(&input.operation.operation_key)
     .bind(&input.operation.operation_id)
-    .bind(i64_from_u64(input.operation.source_file_version_id.0))
-    .bind(i64_from_u64(input.operation.source_bundle_id.0))
-    .bind(i64_from_u64(input.operation.source_media_snapshot_id.0))
+    .bind(i64_from_u64(
+        input.operation.source_file_version_id.0,
+        concat!(
+            module_path!(),
+            ": ",
+            stringify!(input.operation.source_file_version_id.0)
+        ),
+    )?)
+    .bind(i64_from_u64(
+        input.operation.source_bundle_id.0,
+        concat!(
+            module_path!(),
+            ": ",
+            stringify!(input.operation.source_bundle_id.0)
+        ),
+    )?)
+    .bind(i64_from_u64(
+        input.operation.source_media_snapshot_id.0,
+        concat!(
+            module_path!(),
+            ": ",
+            stringify!(input.operation.source_media_snapshot_id.0)
+        ),
+    )?)
     .bind(recorded_at)
     .bind(recorded_at)
     .execute(&mut **tx)
@@ -1189,19 +1357,64 @@ async fn insert_legacy_adopted_output(
     .bind(&input.output.target_path)
     .bind(&owner.staging_path)
     .bind(&owner.temp_path)
-    .bind(i64_from_u64(owner.expected_size_bytes))
+    .bind(i64_from_u64(
+        owner.expected_size_bytes,
+        concat!(module_path!(), ": ", stringify!(owner.expected_size_bytes)),
+    )?)
     .bind(&owner.expected_checksum)
-    .bind(i64_from_u64(owner.artifact_handle_id))
-    .bind(i64_from_u64(owner.artifact_location_id))
-    .bind(i64_from_u64(owner.verification_id))
-    .bind(i64_from_u64(owner.commit_record_id))
-    .bind(i64_from_u64(input.probe_worker_id.0))
+    .bind(i64_from_u64(
+        owner.artifact_handle_id,
+        concat!(module_path!(), ": ", stringify!(owner.artifact_handle_id)),
+    )?)
+    .bind(i64_from_u64(
+        owner.artifact_location_id,
+        concat!(module_path!(), ": ", stringify!(owner.artifact_location_id)),
+    )?)
+    .bind(i64_from_u64(
+        owner.verification_id,
+        concat!(module_path!(), ": ", stringify!(owner.verification_id)),
+    )?)
+    .bind(i64_from_u64(
+        owner.commit_record_id,
+        concat!(module_path!(), ": ", stringify!(owner.commit_record_id)),
+    )?)
+    .bind(i64_from_u64(
+        input.probe_worker_id.0,
+        concat!(module_path!(), ": ", stringify!(input.probe_worker_id.0)),
+    )?)
     .bind(probe_payload)
-    .bind(i64_from_u64(owner.result_file_asset_id))
-    .bind(i64_from_u64(owner.result_file_version_id))
-    .bind(i64_from_u64(owner.result_file_location_id))
-    .bind(i64_from_u64(input.result_media_snapshot_id.0))
-    .bind(i64_from_u64(owner.bundle_member_id))
+    .bind(i64_from_u64(
+        owner.result_file_asset_id,
+        concat!(module_path!(), ": ", stringify!(owner.result_file_asset_id)),
+    )?)
+    .bind(i64_from_u64(
+        owner.result_file_version_id,
+        concat!(
+            module_path!(),
+            ": ",
+            stringify!(owner.result_file_version_id)
+        ),
+    )?)
+    .bind(i64_from_u64(
+        owner.result_file_location_id,
+        concat!(
+            module_path!(),
+            ": ",
+            stringify!(owner.result_file_location_id)
+        ),
+    )?)
+    .bind(i64_from_u64(
+        input.result_media_snapshot_id.0,
+        concat!(
+            module_path!(),
+            ": ",
+            stringify!(input.result_media_snapshot_id.0)
+        ),
+    )?)
+    .bind(i64_from_u64(
+        owner.bundle_member_id,
+        concat!(module_path!(), ": ", stringify!(owner.bundle_member_id)),
+    )?)
     .bind(result_facts)
     .execute(&mut **tx)
     .await
@@ -1252,17 +1465,40 @@ async fn insert_output_lineage(
           source_snapshot_stream_id, source_provider_stream_index, \
           result_file_version_id, recorded_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
     )
-    .bind(i64_from_u64(input.operation_output_id))
-    .bind(i64_from_u64(input.source_file_version_id.0))
-    .bind(i64_from_u64(input.source_media_snapshot_id.0))
+    .bind(i64_from_u64(
+        input.operation_output_id,
+        concat!(module_path!(), ": ", stringify!(input.operation_output_id)),
+    )?)
+    .bind(i64_from_u64(
+        input.source_file_version_id.0,
+        "audio_extract_operations.source_file_version_id",
+    )?)
+    .bind(i64_from_u64(
+        input.source_media_snapshot_id.0,
+        concat!(
+            module_path!(),
+            ": ",
+            stringify!(input.source_media_snapshot_id.0)
+        ),
+    )?)
     .bind(input.source_snapshot_stream_id)
     .bind(i64::from(input.source_provider_stream_index))
-    .bind(i64_from_u64(input.result_file_version_id.0))
+    .bind(i64_from_u64(
+        input.result_file_version_id.0,
+        concat!(
+            module_path!(),
+            ": ",
+            stringify!(input.result_file_version_id.0)
+        ),
+    )?)
     .bind(input.recorded_at)
     .execute(&mut **tx)
     .await
     .map_err(|error| VoomError::database_context("insert audio extraction lineage", error))?;
-    Ok(u64_from_i64(result.last_insert_rowid()))
+    u64_from_i64(
+        result.last_insert_rowid(),
+        "audio_extract_dispatch_attempts.id",
+    )
 }
 
 fn validate_new_operation(
@@ -1307,7 +1543,10 @@ async fn require_live_planned_claim(
     )
     .bind(&claim.operation_key)
     .bind(i64::from(claim.expected_generation))
-    .bind(i64_from_u64(claim.lease_id.0))
+    .bind(i64_from_u64(
+        claim.lease_id.0,
+        concat!(module_path!(), ": ", stringify!(claim.lease_id.0)),
+    )?)
     .bind(&claim.claim_token)
     .bind(now)
     .fetch_optional(&mut **tx)
@@ -1338,7 +1577,10 @@ async fn insert_dispatch_attempt(
     )
     .bind(operation_id)
     .bind(i64::from(claim.expected_generation))
-    .bind(i64_from_u64(attempt.worker_id.0))
+    .bind(i64_from_u64(
+        attempt.worker_id.0,
+        concat!(module_path!(), ": ", stringify!(attempt.worker_id.0)),
+    )?)
     .bind(i64::from(attempt.worker_epoch))
     .bind(&attempt.idempotency_key)
     .bind(&attempt.attempt_directory)
@@ -1400,12 +1642,31 @@ async fn load_dispatch_attempt(
     .map_err(|error| VoomError::database_context("audio dispatch attempt paths", error))?;
     let status: String = row.try_get("status").map_err(dispatch_row_err)?;
     Ok(AudioExtractDispatchAttempt {
-        id: u64_from_i64(row.try_get("id").map_err(dispatch_row_err)?),
-        operation_id: u64_from_i64(row.try_get("operation_id").map_err(dispatch_row_err)?),
+        id: u64_from_i64(
+            row.try_get("id").map_err(dispatch_row_err)?,
+            concat!(
+                module_path!(),
+                ": ",
+                stringify!(row.try_get("id").map_err(dispatch_row_err)?)
+            ),
+        )?,
+        operation_id: u64_from_i64(
+            row.try_get("operation_id").map_err(dispatch_row_err)?,
+            concat!(
+                module_path!(),
+                ": ",
+                stringify!(row.try_get("operation_id").map_err(dispatch_row_err)?)
+            ),
+        )?,
         generation: u32_from_i64(row.try_get("generation").map_err(dispatch_row_err)?)?,
         worker_id: WorkerId(u64_from_i64(
             row.try_get("worker_id").map_err(dispatch_row_err)?,
-        )),
+            concat!(
+                module_path!(),
+                ": ",
+                stringify!(row.try_get("worker_id").map_err(dispatch_row_err)?)
+            ),
+        )?),
         worker_epoch: u32_from_i64(row.try_get("worker_epoch").map_err(dispatch_row_err)?)?,
         idempotency_key: row.try_get("idempotency_key").map_err(dispatch_row_err)?,
         attempt_directory: row.try_get("attempt_directory").map_err(dispatch_row_err)?,
@@ -1429,9 +1690,22 @@ async fn insert_planned(
     )
     .bind(&input.operation_key)
     .bind(&input.operation_id)
-    .bind(i64_from_u64(input.source_file_version_id.0))
-    .bind(i64_from_u64(input.source_bundle_id.0))
-    .bind(i64_from_u64(input.source_media_snapshot_id.0))
+    .bind(i64_from_u64(
+        input.source_file_version_id.0,
+        "audio_extract_operations.source_file_version_id",
+    )?)
+    .bind(i64_from_u64(
+        input.source_bundle_id.0,
+        concat!(module_path!(), ": ", stringify!(input.source_bundle_id.0)),
+    )?)
+    .bind(i64_from_u64(
+        input.source_media_snapshot_id.0,
+        concat!(
+            module_path!(),
+            ": ",
+            stringify!(input.source_media_snapshot_id.0)
+        ),
+    )?)
     .bind(created_at)
     .execute(&mut **tx)
     .await
@@ -1537,7 +1811,10 @@ async fn load_record_for_operation_row(
           WHERE lineage.operation_output_id = audio_extract_operation_outputs.id) AS lineage_id \
          FROM audio_extract_operation_outputs WHERE operation_id = ? ORDER BY ordinal",
     )
-    .bind(i64_from_u64(operation.id))
+    .bind(i64_from_u64(
+        operation.id,
+        concat!(module_path!(), ": ", stringify!(operation.id)),
+    )?)
     .fetch_all(&mut **tx)
     .await
     .map_err(|error| VoomError::database_context("audio_extract_operation_outputs list", error))?;
@@ -1551,20 +1828,26 @@ async fn load_record_for_operation_row(
 fn decode_operation(row: &SqliteRow) -> Result<AudioExtractOperation, VoomError> {
     let state: String = row.try_get("state").map_err(operation_row_err)?;
     Ok(AudioExtractOperation {
-        id: u64_from_i64(row.try_get("id").map_err(operation_row_err)?),
+        id: u64_from_i64(
+            row.try_get("id").map_err(operation_row_err)?,
+            "audio_extract_operations.id",
+        )?,
         operation_key: row.try_get("operation_key").map_err(operation_row_err)?,
         operation_id: row.try_get("operation_id").map_err(operation_row_err)?,
         source_file_version_id: FileVersionId(u64_from_i64(
             row.try_get("source_file_version_id")
                 .map_err(operation_row_err)?,
-        )),
+            "audio_extract_operations.source_file_version_id",
+        )?),
         source_bundle_id: BundleId(u64_from_i64(
             row.try_get("source_bundle_id").map_err(operation_row_err)?,
-        )),
+            "audio_extract_operations.source_bundle_id",
+        )?),
         source_media_snapshot_id: MediaSnapshotId(u64_from_i64(
             row.try_get("source_media_snapshot_id")
                 .map_err(operation_row_err)?,
-        )),
+            "audio_extract_operations.source_media_snapshot_id",
+        )?),
         state: AudioExtractOperationState::parse(&state)?,
         dispatch_generation: u32_from_i64(
             row.try_get("dispatch_generation")
@@ -1586,8 +1869,14 @@ fn decode_operation(row: &SqliteRow) -> Result<AudioExtractOperation, VoomError>
 
 fn decode_output(row: &SqliteRow) -> Result<AudioExtractOperationOutput, VoomError> {
     Ok(AudioExtractOperationOutput {
-        id: u64_from_i64(row.try_get("id").map_err(output_row_err)?),
-        operation_id: u64_from_i64(row.try_get("operation_id").map_err(output_row_err)?),
+        id: u64_from_i64(
+            row.try_get("id").map_err(output_row_err)?,
+            "audio_extract_operation_outputs.id",
+        )?,
+        operation_id: u64_from_i64(
+            row.try_get("operation_id").map_err(output_row_err)?,
+            "audio_extract_operation_outputs.operation_id",
+        )?,
         ordinal: u32_from_i64(row.try_get("ordinal").map_err(output_row_err)?)?,
         output_id: row.try_get("output_id").map_err(output_row_err)?,
         source_snapshot_stream_id: row
@@ -1617,21 +1906,12 @@ fn decode_output(row: &SqliteRow) -> Result<AudioExtractOperationOutput, VoomErr
                 })
             })
             .transpose()?,
-        result_file_asset_id: row
-            .try_get::<Option<i64>, _>("result_file_asset_id")
-            .map_err(output_row_err)?
-            .map(u64_from_i64),
+        result_file_asset_id: optional_id(row, "result_file_asset_id", |id| id)?,
         result_file_version_id: optional_id(row, "result_file_version_id", FileVersionId)?,
         result_file_location_id: optional_id(row, "result_file_location_id", FileLocationId)?,
         result_media_snapshot_id: optional_id(row, "result_media_snapshot_id", MediaSnapshotId)?,
-        bundle_member_id: row
-            .try_get::<Option<i64>, _>("bundle_member_id")
-            .map_err(output_row_err)?
-            .map(u64_from_i64),
-        lineage_id: row
-            .try_get::<Option<i64>, _>("lineage_id")
-            .map_err(output_row_err)?
-            .map(u64_from_i64),
+        bundle_member_id: optional_id(row, "bundle_member_id", |id| id)?,
+        lineage_id: optional_id(row, "lineage_id", |id| id)?,
         result_facts: row
             .try_get::<Option<String>, _>("result_facts")
             .map_err(output_row_err)?
@@ -1651,11 +1931,11 @@ fn optional_id<T>(
     column: &str,
     constructor: impl FnOnce(u64) -> T,
 ) -> Result<Option<T>, VoomError> {
-    Ok(row
-        .try_get::<Option<i64>, _>(column)
+    row.try_get::<Option<i64>, _>(column)
         .map_err(output_row_err)?
-        .map(u64_from_i64)
-        .map(constructor))
+        .map(|value| u64_from_i64(value, format!("audio_extract_operation_outputs.{column}")))
+        .transpose()
+        .map(|id| id.map(constructor))
 }
 
 fn require_exact_replay(

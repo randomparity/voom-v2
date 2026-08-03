@@ -533,13 +533,21 @@ impl SqliteArtifactRepo {
         .bind(access)
         .bind(&input.mutability)
         .bind(lineage)
-        .bind(input.file_version_id.map(|id| i64_from_u64(id.0)))
+        .bind(
+            input
+                .file_version_id
+                .map(|id| i64_from_u64(id.0, concat!(module_path!(), ": ", stringify!(id.0))))
+                .transpose()?,
+        )
         .bind(&ts)
         .execute(&mut **tx)
         .await
         .map_err(|e| VoomError::database_context("artifact_handles insert", e))?;
         Ok(ArtifactHandle {
-            id: ArtifactHandleId(u64_from_i64(res.last_insert_rowid())),
+            id: ArtifactHandleId(u64_from_i64(
+                res.last_insert_rowid(),
+                concat!(module_path!(), ": ", stringify!(res.last_insert_rowid())),
+            )?),
             file_version_id: input.file_version_id,
             privacy_class: input.privacy_class,
             durability_class: input.durability_class,
@@ -574,7 +582,10 @@ impl SqliteArtifactRepo {
             "INSERT INTO artifact_locations \
              (artifact_handle_id, kind, value, observed_at) VALUES (?, ?, ?, ?)",
         )
-        .bind(i64_from_u64(input.artifact_handle_id.0))
+        .bind(i64_from_u64(
+            input.artifact_handle_id.0,
+            concat!(module_path!(), ": ", stringify!(input.artifact_handle_id.0)),
+        )?)
         .bind(&input.kind)
         .bind(&input.value)
         .bind(&ts)
@@ -582,7 +593,10 @@ impl SqliteArtifactRepo {
         .await
         .map_err(|e| VoomError::database_context("artifact_locations insert", e))?;
         Ok(ArtifactLocation {
-            id: ArtifactLocationId(u64_from_i64(res.last_insert_rowid())),
+            id: ArtifactLocationId(u64_from_i64(
+                res.last_insert_rowid(),
+                concat!(module_path!(), ": ", stringify!(res.last_insert_rowid())),
+            )?),
             artifact_handle_id: input.artifact_handle_id,
             kind: input.kind,
             value: input.value,
@@ -619,7 +633,10 @@ impl SqliteArtifactRepo {
              WHERE id = ? AND retired_at IS NULL",
         )
         .bind(&ts)
-        .bind(i64_from_u64(location_id.0))
+        .bind(i64_from_u64(
+            location_id.0,
+            concat!(module_path!(), ": ", stringify!(location_id.0)),
+        )?)
         .execute(&mut **tx)
         .await
         .map_err(|e| VoomError::database_context("artifact_locations retire", e))?;
@@ -633,11 +650,17 @@ impl SqliteArtifactRepo {
         // assertion ([[project_in_tx_reread_uses_tx_handle]]).
         let handle_id: i64 =
             sqlx::query_scalar("SELECT artifact_handle_id FROM artifact_locations WHERE id = ?")
-                .bind(i64_from_u64(location_id.0))
+                .bind(i64_from_u64(
+                    location_id.0,
+                    concat!(module_path!(), ": ", stringify!(location_id.0)),
+                )?)
                 .fetch_one(&mut **tx)
                 .await
                 .map_err(|e| VoomError::database_context("artifact_locations handle lookup", e))?;
-        Ok(ArtifactHandleId(u64_from_i64(handle_id)))
+        Ok(ArtifactHandleId(u64_from_i64(
+            handle_id,
+            concat!(module_path!(), ": ", stringify!(handle_id)),
+        )?))
     }
 
     pub async fn retire_location(
@@ -670,15 +693,24 @@ impl SqliteArtifactRepo {
              (parent_artifact_id, child_artifact_id, operation, recorded_at) \
              VALUES (?, ?, ?, ?)",
         )
-        .bind(i64_from_u64(input.parent_artifact_id.0))
-        .bind(i64_from_u64(input.child_artifact_id.0))
+        .bind(i64_from_u64(
+            input.parent_artifact_id.0,
+            concat!(module_path!(), ": ", stringify!(input.parent_artifact_id.0)),
+        )?)
+        .bind(i64_from_u64(
+            input.child_artifact_id.0,
+            concat!(module_path!(), ": ", stringify!(input.child_artifact_id.0)),
+        )?)
         .bind(&input.operation)
         .bind(&ts)
         .execute(&mut **tx)
         .await
         .map_err(|e| VoomError::database_context("artifact_lineage insert", e))?;
         Ok(ArtifactLineage {
-            id: u64_from_i64(res.last_insert_rowid()),
+            id: u64_from_i64(
+                res.last_insert_rowid(),
+                concat!(module_path!(), ": ", stringify!(res.last_insert_rowid())),
+            )?,
         })
     }
 
@@ -706,7 +738,10 @@ impl SqliteArtifactRepo {
             "SELECT id, file_version_id, privacy_class, durability_class, mutability, created_at \
              FROM artifact_handles WHERE id = ?",
         )
-        .bind(i64_from_u64(id.0))
+        .bind(i64_from_u64(
+            id.0,
+            concat!(module_path!(), ": ", stringify!(id.0)),
+        )?)
         .fetch_optional(&self.pool)
         .await
         .map_err(|e| VoomError::database_context("artifact_handles get", e))?;
@@ -934,7 +969,10 @@ impl SqliteArtifactRepo {
              FROM artifact_locations WHERE artifact_handle_id = ? AND retired_at IS NULL \
              ORDER BY id ASC",
         )
-        .bind(i64_from_u64(handle_id.0))
+        .bind(i64_from_u64(
+            handle_id.0,
+            concat!(module_path!(), ": ", stringify!(handle_id.0)),
+        )?)
         .fetch_all(&self.pool)
         .await
         .map_err(|e| VoomError::database_context("artifact_locations list", e))?;
@@ -1006,7 +1044,10 @@ impl SqliteArtifactRepo {
             .create_handle_in_tx(
                 tx,
                 NewArtifactHandle {
-                    size_bytes: Some(i64_from_u64(version.size_bytes)),
+                    size_bytes: Some(i64_from_u64(
+                        version.size_bytes,
+                        concat!(module_path!(), ": ", stringify!(version.size_bytes)),
+                    )?),
                     checksum: Some(version.content_hash.clone()),
                     privacy_class: "internal".to_owned(),
                     durability_class: "active".to_owned(),
@@ -1039,7 +1080,10 @@ impl SqliteArtifactRepo {
                AND value = ? AND retired_at IS NULL \
              ORDER BY id",
         )
-        .bind(i64_from_u64(handle_id.0))
+        .bind(i64_from_u64(
+            handle_id.0,
+            concat!(module_path!(), ": ", stringify!(handle_id.0)),
+        )?)
         .bind(&location.value)
         .fetch_all(&mut **tx)
         .await
@@ -1079,35 +1123,36 @@ impl SqliteArtifactRepo {
                     .to_owned(),
             ));
         }
-        let owner: Option<(i64, String)> =
-            sqlx::query_as("SELECT artifact_handle_id, value FROM artifact_locations WHERE id = ?")
-                .bind(i64_from_u64(input.artifact_location_id.0))
-                .fetch_optional(&mut **tx)
-                .await
-                .map_err(|e| VoomError::database_context("artifact_locations owner lookup", e))?;
-        let (owner_id, location_value) = owner.ok_or_else(|| {
-            VoomError::NotFound(format!(
-                "artifact_locations {} missing",
-                input.artifact_location_id
-            ))
-        })?;
-        if u64_from_i64(owner_id) != input.artifact_handle_id.0 {
-            return Err(VoomError::Conflict(format!(
-                "artifact_verifications: location {} belongs to artifact_handle {}",
-                input.artifact_location_id,
-                ArtifactHandleId(u64_from_i64(owner_id))
-            )));
-        }
-        if input.path != location_value {
-            return Err(VoomError::Conflict(format!(
-                "artifact_verifications: path {:?} does not match artifact_location {} value {:?}",
-                input.path, input.artifact_location_id, location_value
-            )));
-        }
+        validate_verification_location(tx, &input).await?;
 
         let report = serialize_json(&input.report, "artifact_verifications.report")?;
         let started_at = iso8601(input.started_at)?;
         let finished_at = iso8601(input.finished_at)?;
+        let artifact_handle_id = i64_from_u64(
+            input.artifact_handle_id.0,
+            "artifact_verifications.artifact_handle_id",
+        )?;
+        let artifact_location_id = i64_from_u64(
+            input.artifact_location_id.0,
+            "artifact_verifications.artifact_location_id",
+        )?;
+        let worker_id = i64_from_u64(input.worker_id.0, "artifact_verifications.worker_id")?;
+        let workflow_ticket_id = input
+            .workflow_ticket_id
+            .map(|id| i64_from_u64(id.0, "artifact_verifications.workflow_ticket_id"))
+            .transpose()?;
+        let workflow_lease_id = input
+            .workflow_lease_id
+            .map(|id| i64_from_u64(id.0, "artifact_verifications.workflow_lease_id"))
+            .transpose()?;
+        let expected_size_bytes = i64_from_u64(
+            input.expected_size_bytes,
+            "artifact_verifications.expected_size_bytes",
+        )?;
+        let observed_size_bytes = input
+            .observed_size_bytes
+            .map(|value| i64_from_u64(value, "artifact_verifications.observed_size_bytes"))
+            .transpose()?;
         let res = sqlx::query(
             "INSERT INTO artifact_verifications \
              (artifact_handle_id, artifact_location_id, path, worker_id, \
@@ -1116,16 +1161,16 @@ impl SqliteArtifactRepo {
               failure_class, error_code, message, report, started_at, finished_at) \
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
-        .bind(i64_from_u64(input.artifact_handle_id.0))
-        .bind(i64_from_u64(input.artifact_location_id.0))
+        .bind(artifact_handle_id)
+        .bind(artifact_location_id)
         .bind(&input.path)
-        .bind(i64_from_u64(input.worker_id.0))
-        .bind(input.workflow_ticket_id.map(|id| i64_from_u64(id.0)))
-        .bind(input.workflow_lease_id.map(|id| i64_from_u64(id.0)))
+        .bind(worker_id)
+        .bind(workflow_ticket_id)
+        .bind(workflow_lease_id)
         .bind(input.status.as_str())
-        .bind(i64_from_u64(input.expected_size_bytes))
+        .bind(expected_size_bytes)
         .bind(&input.expected_checksum)
-        .bind(input.observed_size_bytes.map(i64_from_u64))
+        .bind(observed_size_bytes)
         .bind(&input.observed_checksum)
         .bind(&input.failure_class)
         .bind(&input.error_code)
@@ -1138,7 +1183,10 @@ impl SqliteArtifactRepo {
         .map_err(|e| VoomError::database_context("artifact_verifications insert", e))?;
 
         Ok(ArtifactVerification {
-            id: ArtifactVerificationId(u64_from_i64(res.last_insert_rowid())),
+            id: ArtifactVerificationId(u64_from_i64(
+                res.last_insert_rowid(),
+                "artifact_verifications.id",
+            )?),
             artifact_handle_id: input.artifact_handle_id,
             artifact_location_id: input.artifact_location_id,
             path: input.path,
@@ -1173,7 +1221,10 @@ impl SqliteArtifactRepo {
                AND l.kind = 'staging' AND l.retired_at IS NULL \
              ORDER BY v.id DESC LIMIT 1";
         let row = sqlx::query(&sql)
-            .bind(i64_from_u64(handle_id.0))
+            .bind(i64_from_u64(
+                handle_id.0,
+                concat!(module_path!(), ": ", stringify!(handle_id.0)),
+            )?)
             .fetch_optional(&mut **tx)
             .await
             .map_err(|e| VoomError::database_context("artifact_verifications latest", e))?;
@@ -1189,7 +1240,10 @@ impl SqliteArtifactRepo {
              FROM artifact_verifications v \
              WHERE v.artifact_handle_id = ? ORDER BY v.id ASC";
         let rows = sqlx::query(&sql)
-            .bind(i64_from_u64(handle_id.0))
+            .bind(i64_from_u64(
+                handle_id.0,
+                concat!(module_path!(), ": ", stringify!(handle_id.0)),
+            )?)
             .fetch_all(&self.pool)
             .await
             .map_err(|e| VoomError::database_context("artifact_verifications list", e))?;
@@ -1203,7 +1257,10 @@ impl SqliteArtifactRepo {
         let sql = SELECT_ARTIFACT_VERIFICATION_COLS.to_owned()
             + " FROM artifact_verifications v WHERE v.workflow_lease_id = ?";
         let row = sqlx::query(&sql)
-            .bind(i64_from_u64(lease_id.0))
+            .bind(i64_from_u64(
+                lease_id.0,
+                concat!(module_path!(), ": ", stringify!(lease_id.0)),
+            )?)
             .fetch_optional(&self.pool)
             .await
             .map_err(|err| {
@@ -1226,8 +1283,14 @@ impl SqliteArtifactRepo {
                   ) \
                ORDER BY v.id";
         let rows = sqlx::query(&sql)
-            .bind(i64_from_u64(job_id.0))
-            .bind(i64_from_u64(job_id.0))
+            .bind(i64_from_u64(
+                job_id.0,
+                concat!(module_path!(), ": ", stringify!(job_id.0)),
+            )?)
+            .bind(i64_from_u64(
+                job_id.0,
+                concat!(module_path!(), ": ", stringify!(job_id.0)),
+            )?)
             .fetch_all(&self.pool)
             .await
             .map_err(|err| {
@@ -1250,9 +1313,22 @@ impl SqliteArtifactRepo {
               state, temp_path, report, started_at) \
              VALUES (?, ?, ?, ?, 'pending', ?, ?, ?)",
         )
-        .bind(i64_from_u64(input.artifact_handle_id.0))
-        .bind(i64_from_u64(input.source_file_version_id.0))
-        .bind(i64_from_u64(input.verification_id.0))
+        .bind(i64_from_u64(
+            input.artifact_handle_id.0,
+            concat!(module_path!(), ": ", stringify!(input.artifact_handle_id.0)),
+        )?)
+        .bind(i64_from_u64(
+            input.source_file_version_id.0,
+            concat!(
+                module_path!(),
+                ": ",
+                stringify!(input.source_file_version_id.0)
+            ),
+        )?)
+        .bind(i64_from_u64(
+            input.verification_id.0,
+            concat!(module_path!(), ": ", stringify!(input.verification_id.0)),
+        )?)
         .bind(&input.target_path)
         .bind(&input.temp_path)
         .bind(report)
@@ -1262,7 +1338,10 @@ impl SqliteArtifactRepo {
         .map_err(|e| map_commit_insert_err(&e, input.artifact_handle_id, &input.target_path))?;
 
         Ok(ArtifactCommitRecord {
-            id: ArtifactCommitRecordId(u64_from_i64(res.last_insert_rowid())),
+            id: ArtifactCommitRecordId(u64_from_i64(
+                res.last_insert_rowid(),
+                concat!(module_path!(), ": ", stringify!(res.last_insert_rowid())),
+            )?),
             artifact_handle_id: input.artifact_handle_id,
             source_file_version_id: input.source_file_version_id,
             verification_id: input.verification_id,
@@ -1304,11 +1383,20 @@ impl SqliteArtifactRepo {
                  failure_class = NULL, error_code = NULL, message = NULL, recovery_reason = NULL \
              WHERE id = ? AND state IN ('pending', 'recovery_required')",
         )
-        .bind(i64_from_u64(result_file_version_id.0))
-        .bind(i64_from_u64(result_file_location_id.0))
+        .bind(i64_from_u64(
+            result_file_version_id.0,
+            concat!(module_path!(), ": ", stringify!(result_file_version_id.0)),
+        )?)
+        .bind(i64_from_u64(
+            result_file_location_id.0,
+            concat!(module_path!(), ": ", stringify!(result_file_location_id.0)),
+        )?)
         .bind(&promotion_started_at)
         .bind(&finished_at)
-        .bind(i64_from_u64(id.0))
+        .bind(i64_from_u64(
+            id.0,
+            concat!(module_path!(), ": ", stringify!(id.0)),
+        )?)
         .execute(&mut **tx)
         .await
         .map_err(|e| VoomError::database_context("artifact_commit_records commit", e))?;
@@ -1331,7 +1419,10 @@ impl SqliteArtifactRepo {
         .bind(&failure.error_code)
         .bind(&failure.message)
         .bind(&finished_at)
-        .bind(i64_from_u64(id.0))
+        .bind(i64_from_u64(
+            id.0,
+            concat!(module_path!(), ": ", stringify!(id.0)),
+        )?)
         .execute(&mut **tx)
         .await
         .map_err(|e| VoomError::database_context("artifact_commit_records fail", e))?;
@@ -1357,7 +1448,10 @@ impl SqliteArtifactRepo {
         .bind(&failure.message)
         .bind(&recovery_reason)
         .bind(&finished_at)
-        .bind(i64_from_u64(id.0))
+        .bind(i64_from_u64(
+            id.0,
+            concat!(module_path!(), ": ", stringify!(id.0)),
+        )?)
         .execute(&mut **tx)
         .await
         .map_err(|e| VoomError::database_context("artifact_commit_records recovery_required", e))?;
@@ -1397,7 +1491,10 @@ impl SqliteArtifactRepo {
         let sql = SELECT_ARTIFACT_COMMIT_RECORD_COLS.to_owned()
             + " FROM artifact_commit_records c WHERE c.id = ?";
         let row = sqlx::query(&sql)
-            .bind(i64_from_u64(id.0))
+            .bind(i64_from_u64(
+                id.0,
+                concat!(module_path!(), ": ", stringify!(id.0)),
+            )?)
             .fetch_optional(&self.pool)
             .await
             .map_err(|e| VoomError::database_context("artifact_commit_records get", e))?;
@@ -1413,7 +1510,10 @@ impl SqliteArtifactRepo {
              FROM artifact_commit_records c \
              WHERE c.artifact_handle_id = ? ORDER BY c.id ASC";
         let rows = sqlx::query(&sql)
-            .bind(i64_from_u64(handle_id.0))
+            .bind(i64_from_u64(
+                handle_id.0,
+                concat!(module_path!(), ": ", stringify!(handle_id.0)),
+            )?)
             .fetch_all(&self.pool)
             .await
             .map_err(|e| VoomError::database_context("artifact_commit_records list", e))?;
@@ -1432,7 +1532,10 @@ impl SqliteArtifactRepo {
             "SELECT COUNT(*) FROM artifact_commit_records \
              WHERE source_file_version_id = ? AND state = 'recovery_required'",
         )
-        .bind(i64_from_u64(source_file_version_id.0))
+        .bind(i64_from_u64(
+            source_file_version_id.0,
+            concat!(module_path!(), ": ", stringify!(source_file_version_id.0)),
+        )?)
         .fetch_one(&self.pool)
         .await
         .map_err(|e| {
@@ -1446,31 +1549,7 @@ impl SqliteArtifactRepo {
         tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
         input: NewSidecarArtifactCommit,
     ) -> Result<SidecarArtifactCommit, VoomError> {
-        let pending = get_active_commit_record_in_tx(tx, input.commit_record_id).await?;
-        if pending.target_path != input.target_path {
-            return Err(VoomError::Conflict(format!(
-                "artifact_commit_records sidecar commit: target_path {:?} does not match pending target {:?}",
-                input.target_path, pending.target_path
-            )));
-        }
-        if input.target_path.is_empty() {
-            return Err(VoomError::Config(
-                "artifact_commit_records sidecar commit: target_path is empty".to_owned(),
-            ));
-        }
-        validate_commit_verification(
-            tx,
-            &NewArtifactCommitRecord {
-                artifact_handle_id: pending.artifact_handle_id,
-                source_file_version_id: pending.source_file_version_id,
-                verification_id: pending.verification_id,
-                target_path: pending.target_path.clone(),
-                temp_path: pending.temp_path.clone(),
-                report: pending.report.clone(),
-                started_at: pending.started_at,
-            },
-        )
-        .await?;
+        let pending = validate_sidecar_commit_input(tx, &input).await?;
 
         let created_at = iso8601(input.observed_at)?;
         let finished_at = iso8601(input.finished_at)?;
@@ -1486,7 +1565,10 @@ impl SqliteArtifactRepo {
             .execute(&mut **tx)
             .await
             .map_err(|e| VoomError::database_context("file_assets sidecar insert", e))?;
-        let file_asset_id = FileAssetId(u64_from_i64(asset_res.last_insert_rowid()));
+        let file_asset_id = FileAssetId(u64_from_i64(
+            asset_res.last_insert_rowid(),
+            "file_assets.id",
+        )?);
 
         let version_res = sqlx::query(
             "INSERT INTO file_versions \
@@ -1494,28 +1576,43 @@ impl SqliteArtifactRepo {
               produced_from_version_id, created_at) \
              VALUES (?, ?, ?, 'staged_commit', ?, ?)",
         )
-        .bind(i64_from_u64(file_asset_id.0))
+        .bind(i64_from_u64(
+            file_asset_id.0,
+            "file_versions.file_asset_id",
+        )?)
         .bind(&input.content_hash)
         .bind(size_i64)
-        .bind(i64_from_u64(pending.source_file_version_id.0))
+        .bind(i64_from_u64(
+            pending.source_file_version_id.0,
+            "file_versions.produced_from_version_id",
+        )?)
         .bind(&created_at)
         .execute(&mut **tx)
         .await
         .map_err(|e| VoomError::database_context("file_versions sidecar insert", e))?;
-        let file_version_id = FileVersionId(u64_from_i64(version_res.last_insert_rowid()));
+        let file_version_id = FileVersionId(u64_from_i64(
+            version_res.last_insert_rowid(),
+            "file_versions.id",
+        )?);
 
         let location_res = sqlx::query(
             "INSERT INTO file_locations \
              (file_version_id, kind, value, proof_kind, proof_value, observed_at) \
              VALUES (?, 'local_path', ?, NULL, NULL, ?)",
         )
-        .bind(i64_from_u64(file_version_id.0))
+        .bind(i64_from_u64(
+            file_version_id.0,
+            "file_locations.file_version_id",
+        )?)
         .bind(&input.target_path)
         .bind(&created_at)
         .execute(&mut **tx)
         .await
         .map_err(|e| VoomError::database_context("file_locations sidecar insert", e))?;
-        let file_location_id = FileLocationId(u64_from_i64(location_res.last_insert_rowid()));
+        let file_location_id = FileLocationId(u64_from_i64(
+            location_res.last_insert_rowid(),
+            "file_locations.id",
+        )?);
 
         let res = sqlx::query(
             "UPDATE artifact_commit_records \
@@ -1524,10 +1621,19 @@ impl SqliteArtifactRepo {
                  error_code = NULL, message = NULL, recovery_reason = NULL \
              WHERE id = ? AND state IN ('pending', 'recovery_required')",
         )
-        .bind(i64_from_u64(file_version_id.0))
-        .bind(i64_from_u64(file_location_id.0))
+        .bind(i64_from_u64(
+            file_version_id.0,
+            "artifact_commit_records.result_file_version_id",
+        )?)
+        .bind(i64_from_u64(
+            file_location_id.0,
+            "artifact_commit_records.result_file_location_id",
+        )?)
         .bind(&finished_at)
-        .bind(i64_from_u64(input.commit_record_id.0))
+        .bind(i64_from_u64(
+            input.commit_record_id.0,
+            "artifact_commit_records.id",
+        )?)
         .execute(&mut **tx)
         .await
         .map_err(|e| VoomError::database_context("artifact_commit_records sidecar commit", e))?;
@@ -1546,6 +1652,73 @@ impl SqliteArtifactRepo {
             file_location_id,
         })
     }
+}
+
+async fn validate_verification_location(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    input: &NewArtifactVerification,
+) -> Result<(), VoomError> {
+    let location_id = i64_from_u64(input.artifact_location_id.0, "artifact_locations.id")?;
+    let owner: Option<(i64, String)> =
+        sqlx::query_as("SELECT artifact_handle_id, value FROM artifact_locations WHERE id = ?")
+            .bind(location_id)
+            .fetch_optional(&mut **tx)
+            .await
+            .map_err(|e| VoomError::database_context("artifact_locations owner lookup", e))?;
+    let (owner_id, location_value) = owner.ok_or_else(|| {
+        VoomError::NotFound(format!(
+            "artifact_locations {} missing",
+            input.artifact_location_id
+        ))
+    })?;
+    let owner_id = u64_from_i64(owner_id, "artifact_locations.artifact_handle_id")?;
+    if owner_id != input.artifact_handle_id.0 {
+        return Err(VoomError::Conflict(format!(
+            "artifact_verifications: location {} belongs to artifact_handle {}",
+            input.artifact_location_id,
+            ArtifactHandleId(owner_id)
+        )));
+    }
+    if input.path != location_value {
+        return Err(VoomError::Conflict(format!(
+            "artifact_verifications: path {:?} does not match artifact_location {} value {:?}",
+            input.path, input.artifact_location_id, location_value
+        )));
+    }
+    Ok(())
+}
+
+async fn validate_sidecar_commit_input(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    input: &NewSidecarArtifactCommit,
+) -> Result<ArtifactCommitRecord, VoomError> {
+    let pending = get_active_commit_record_in_tx(tx, input.commit_record_id).await?;
+    if pending.target_path != input.target_path {
+        return Err(VoomError::Conflict(format!(
+            "artifact_commit_records sidecar commit: target_path {:?} does not match pending target \
+             {:?}",
+            input.target_path, pending.target_path
+        )));
+    }
+    if input.target_path.is_empty() {
+        return Err(VoomError::Config(
+            "artifact_commit_records sidecar commit: target_path is empty".to_owned(),
+        ));
+    }
+    validate_commit_verification(
+        tx,
+        &NewArtifactCommitRecord {
+            artifact_handle_id: pending.artifact_handle_id,
+            source_file_version_id: pending.source_file_version_id,
+            verification_id: pending.verification_id,
+            target_path: pending.target_path.clone(),
+            temp_path: pending.temp_path.clone(),
+            report: pending.report.clone(),
+            started_at: pending.started_at,
+        },
+    )
+    .await?;
+    Ok(pending)
 }
 
 #[async_trait]
@@ -1843,7 +2016,10 @@ async fn validate_commit_verification(
          LEFT JOIN file_versions fv ON fv.id = h.file_version_id \
          WHERE v.id = ?",
     )
-    .bind(i64_from_u64(input.verification_id.0))
+    .bind(i64_from_u64(
+        input.verification_id.0,
+        concat!(module_path!(), ": ", stringify!(input.verification_id.0)),
+    )?)
     .fetch_optional(&mut **tx)
     .await
     .map_err(|e| VoomError::database_context("artifact_verifications commit lookup", e))?;
@@ -1866,13 +2042,23 @@ async fn validate_commit_verification(
             input.verification_id
         )));
     };
-    if u64_from_i64(verification_handle_id) != input.artifact_handle_id.0
-        || u64_from_i64(location_handle_id) != input.artifact_handle_id.0
+    if u64_from_i64(
+        verification_handle_id,
+        concat!(module_path!(), ": ", stringify!(verification_handle_id)),
+    )? != input.artifact_handle_id.0
+        || u64_from_i64(
+            location_handle_id,
+            concat!(module_path!(), ": ", stringify!(location_handle_id)),
+        )? != input.artifact_handle_id.0
         || status != ArtifactVerificationStatus::Succeeded.as_str()
         || verification_path != location_value
         || location_kind != "staging"
         || retired_at.is_some()
-        || latest_successful_id != Some(i64_from_u64(input.verification_id.0))
+        || latest_successful_id
+            != Some(i64_from_u64(
+                input.verification_id.0,
+                concat!(module_path!(), ": ", stringify!(input.verification_id.0)),
+            )?)
     {
         return Err(VoomError::Conflict(format!(
             "artifact_commit_records: verification {} is not a successful live staging \
@@ -1880,14 +2066,29 @@ async fn validate_commit_verification(
             input.verification_id, input.artifact_handle_id
         )));
     }
-    if handle_file_version_id != Some(i64_from_u64(input.source_file_version_id.0)) {
+    if handle_file_version_id
+        != Some(i64_from_u64(
+            input.source_file_version_id.0,
+            concat!(
+                module_path!(),
+                ": ",
+                stringify!(input.source_file_version_id.0)
+            ),
+        )?)
+    {
         return Err(VoomError::Conflict(format!(
             "artifact_commit_records: source_file_version_id {} does not match \
              artifact_handle {} file_version_id",
             input.source_file_version_id, input.artifact_handle_id
         )));
     }
-    if verification_id != i64_from_u64(input.verification_id.0) || source_retired_at.is_some() {
+    if verification_id
+        != i64_from_u64(
+            input.verification_id.0,
+            concat!(module_path!(), ": ", stringify!(input.verification_id.0)),
+        )?
+        || source_retired_at.is_some()
+    {
         return Err(VoomError::Conflict(format!(
             "artifact_commit_records: source_file_version_id {} is not live",
             input.source_file_version_id
@@ -1908,7 +2109,10 @@ async fn validate_committed_result(
         "SELECT source_file_version_id, target_path FROM artifact_commit_records \
          WHERE id = ? AND state IN ('pending', 'recovery_required')",
     )
-    .bind(i64_from_u64(commit_id.0))
+    .bind(i64_from_u64(
+        commit_id.0,
+        concat!(module_path!(), ": ", stringify!(commit_id.0)),
+    )?)
     .fetch_optional(&mut **tx)
     .await
     .map_err(|e| VoomError::database_context("artifact_commit_records pending lookup", e))?;
@@ -1921,7 +2125,10 @@ async fn validate_committed_result(
     let version_row: Option<(String, Option<i64>, Option<String>)> = sqlx::query_as(
         "SELECT produced_by, produced_from_version_id, retired_at FROM file_versions WHERE id = ?",
     )
-    .bind(i64_from_u64(result_file_version_id.0))
+    .bind(i64_from_u64(
+        result_file_version_id.0,
+        concat!(module_path!(), ": ", stringify!(result_file_version_id.0)),
+    )?)
     .fetch_optional(&mut **tx)
     .await
     .map_err(|e| VoomError::database_context("file_versions commit-result lookup", e))?;
@@ -1930,6 +2137,13 @@ async fn validate_committed_result(
             "file_versions {result_file_version_id} missing"
         )));
     };
+    let source_version_id = u64_from_i64(
+        source_version_id,
+        "artifact_commit_records.source_file_version_id",
+    )?;
+    let produced_from_version_id = produced_from_version_id
+        .map(|value| u64_from_i64(value, "file_versions.produced_from_version_id"))
+        .transpose()?;
     if produced_by != "staged_commit"
         || produced_from_version_id != Some(source_version_id)
         || result_retired_at.is_some()
@@ -1937,14 +2151,17 @@ async fn validate_committed_result(
         return Err(VoomError::Conflict(format!(
             "artifact_commit_records commit: result version {result_file_version_id} \
              is not a staged_commit child of source version {}",
-            FileVersionId(u64_from_i64(source_version_id))
+            FileVersionId(source_version_id)
         )));
     }
 
     let location_row: Option<(i64, String, String, Option<String>)> = sqlx::query_as(
         "SELECT file_version_id, kind, value, retired_at FROM file_locations WHERE id = ?",
     )
-    .bind(i64_from_u64(result_file_location_id.0))
+    .bind(i64_from_u64(
+        result_file_location_id.0,
+        concat!(module_path!(), ": ", stringify!(result_file_location_id.0)),
+    )?)
     .fetch_optional(&mut **tx)
     .await
     .map_err(|e| VoomError::database_context("file_locations commit-result lookup", e))?;
@@ -1952,7 +2169,10 @@ async fn validate_committed_result(
         .ok_or_else(|| {
             VoomError::NotFound(format!("file_locations {result_file_location_id} missing"))
         })?;
-    if u64_from_i64(location_version_id) != result_file_version_id.0
+    if u64_from_i64(
+        location_version_id,
+        concat!(module_path!(), ": ", stringify!(location_version_id)),
+    )? != result_file_version_id.0
         || location_kind != "local_path"
         || location_value != target_path
         || retired_at.is_some()
@@ -1973,7 +2193,10 @@ async fn get_active_commit_record_in_tx(
         + " FROM artifact_commit_records c \
            WHERE c.id = ? AND c.state IN ('pending', 'recovery_required')";
     let row = sqlx::query(&sql)
-        .bind(i64_from_u64(id.0))
+        .bind(i64_from_u64(
+            id.0,
+            concat!(module_path!(), ": ", stringify!(id.0)),
+        )?)
         .fetch_optional(&mut **tx)
         .await
         .map_err(|e| VoomError::database_context("artifact_commit_records pending get", e))?;
@@ -2039,7 +2262,10 @@ async fn require_active_policy_file_version(
          FROM file_versions v \
          WHERE v.id = ? AND v.retired_at IS NULL",
     )
-    .bind(i64_from_u64(id.0))
+    .bind(i64_from_u64(
+        id.0,
+        concat!(module_path!(), ": ", stringify!(id.0)),
+    )?)
     .fetch_optional(&mut **tx)
     .await
     .map_err(|err| VoomError::database_context("policy file version lookup", err))?;
@@ -2048,16 +2274,21 @@ async fn require_active_policy_file_version(
             "active file_version {id} missing"
         )));
     };
+    let row_id = u64_from_i64(row_id, "file_versions.id")?;
+    let active_id = u64_from_i64(active_id, "file_versions.active_id")?;
     if row_id != active_id {
         return Err(VoomError::Conflict(format!(
             "file_version {id} was superseded by {}",
-            FileVersionId(u64_from_i64(active_id))
+            FileVersionId(active_id)
         )));
     }
     Ok(PolicyFileVersion {
         id,
         content_hash,
-        size_bytes: u64_from_i64(size_bytes),
+        size_bytes: u64_from_i64(
+            size_bytes,
+            concat!(module_path!(), ": ", stringify!(size_bytes)),
+        )?,
     })
 }
 
@@ -2072,7 +2303,10 @@ async fn select_policy_file_location(
              FROM file_locations \
              WHERE id = ? AND retired_at IS NULL",
         )
-        .bind(i64_from_u64(location_id.0))
+        .bind(i64_from_u64(
+            location_id.0,
+            concat!(module_path!(), ": ", stringify!(location_id.0)),
+        )?)
         .fetch_all(&mut **tx)
         .await
         .map_err(|err| VoomError::database_context("policy file location lookup", err))?
@@ -2083,7 +2317,10 @@ async fn select_policy_file_location(
              WHERE file_version_id = ? AND kind = 'local_path' \
                AND retired_at IS NULL ORDER BY id",
         )
-        .bind(i64_from_u64(version_id.0))
+        .bind(i64_from_u64(
+            version_id.0,
+            concat!(module_path!(), ": ", stringify!(version_id.0)),
+        )?)
         .fetch_all(&mut **tx)
         .await
         .map_err(|err| VoomError::database_context("policy local path lookup", err))?
@@ -2094,11 +2331,15 @@ async fn select_policy_file_location(
             rows.len()
         )));
     };
-    let location_id = FileLocationId(u64_from_i64(row.0));
-    if u64_from_i64(row.1) != version_id.0 {
+    let location_id = FileLocationId(u64_from_i64(
+        row.0,
+        concat!(module_path!(), ": ", stringify!(row.0)),
+    )?);
+    let location_version_id = u64_from_i64(row.1, "file_locations.file_version_id")?;
+    if location_version_id != version_id.0 {
         return Err(VoomError::Conflict(format!(
             "file_location {location_id} belongs to file_version {}, not {version_id}",
-            FileVersionId(u64_from_i64(row.1))
+            FileVersionId(location_version_id)
         )));
     }
     if row.2 != "local_path" {
@@ -2118,16 +2359,22 @@ async fn latest_policy_media_snapshot(
 ) -> Result<MediaSnapshotId, VoomError> {
     let id: Option<i64> =
         sqlx::query_scalar("SELECT MAX(id) FROM media_snapshots WHERE file_version_id = ?")
-            .bind(i64_from_u64(version_id.0))
+            .bind(i64_from_u64(
+                version_id.0,
+                concat!(module_path!(), ": ", stringify!(version_id.0)),
+            )?)
             .fetch_one(&mut **tx)
             .await
             .map_err(|err| VoomError::database_context("policy media snapshot lookup", err))?;
-    id.map(|value| MediaSnapshotId(u64_from_i64(value)))
-        .ok_or_else(|| {
-            VoomError::Config(format!(
-                "file_version {version_id} has no media snapshot for verification"
-            ))
-        })
+    id.map(|value| {
+        u64_from_i64(value, concat!(module_path!(), ": ", stringify!(value))).map(MediaSnapshotId)
+    })
+    .transpose()?
+    .ok_or_else(|| {
+        VoomError::Config(format!(
+            "file_version {version_id} has no media snapshot for verification"
+        ))
+    })
 }
 
 async fn policy_committed_handles(
@@ -2142,7 +2389,10 @@ async fn policy_committed_handles(
          WHERE c.state = 'committed' AND c.result_file_version_id = ? \
          ORDER BY h.id",
     )
-    .bind(i64_from_u64(version_id.0))
+    .bind(i64_from_u64(
+        version_id.0,
+        concat!(module_path!(), ": ", stringify!(version_id.0)),
+    )?)
     .fetch_all(&mut **tx)
     .await
     .map_err(|err| VoomError::database_context("policy committed artifact lookup", err))?;
@@ -2160,7 +2410,10 @@ async fn policy_canonical_handle(
            AND json_extract(source_lineage, '$.kind') = 'policy_verification' \
          ORDER BY id",
     )
-    .bind(i64_from_u64(version_id.0))
+    .bind(i64_from_u64(
+        version_id.0,
+        concat!(module_path!(), ": ", stringify!(version_id.0)),
+    )?)
     .fetch_all(&mut **tx)
     .await
     .map_err(|err| VoomError::database_context("policy canonical artifact lookup", err))?;
@@ -2195,7 +2448,10 @@ async fn require_policy_handle_content_facts(
         "SELECT size_bytes, checksum, file_version_id \
          FROM artifact_handles WHERE id = ?",
     )
-    .bind(i64_from_u64(handle_id.0))
+    .bind(i64_from_u64(
+        handle_id.0,
+        concat!(module_path!(), ": ", stringify!(handle_id.0)),
+    )?)
     .fetch_optional(&mut **tx)
     .await
     .map_err(|err| VoomError::database_context("policy artifact facts lookup", err))?;
@@ -2204,12 +2460,18 @@ async fn require_policy_handle_content_facts(
             "artifact_handle {handle_id} missing"
         )));
     };
-    if size_bytes != Some(i64_from_u64(version.size_bytes))
+    if size_bytes
+        != Some(i64_from_u64(
+            version.size_bytes,
+            concat!(module_path!(), ": ", stringify!(version.size_bytes)),
+        )?)
         || checksum.as_deref() != Some(version.content_hash.as_str())
     {
         return Err(policy_handle_facts_conflict(handle_id, version.id));
     }
-    Ok(file_version_id.map(u64_from_i64))
+    file_version_id
+        .map(|value| u64_from_i64(value, "artifact_handles.file_version_id"))
+        .transpose()
 }
 
 fn policy_handle_facts_conflict(
@@ -2543,17 +2805,32 @@ fn row_to_verification(row: &sqlx::sqlite::SqliteRow) -> Result<ArtifactVerifica
         .map_err(|e| map_row_err("artifact_verifications", &e))?;
 
     Ok(ArtifactVerification {
-        id: ArtifactVerificationId(u64_from_i64(id)),
-        artifact_handle_id: ArtifactHandleId(u64_from_i64(artifact_handle_id)),
-        artifact_location_id: ArtifactLocationId(u64_from_i64(artifact_location_id)),
+        id: ArtifactVerificationId(u64_from_i64(id, "artifact_verifications.id")?),
+        artifact_handle_id: ArtifactHandleId(u64_from_i64(
+            artifact_handle_id,
+            "artifact_verifications.artifact_handle_id",
+        )?),
+        artifact_location_id: ArtifactLocationId(u64_from_i64(
+            artifact_location_id,
+            "artifact_verifications.artifact_location_id",
+        )?),
         path,
-        worker_id: WorkerId(u64_from_i64(worker_id)),
-        workflow_ticket_id: workflow_ticket_id.map(|id| TicketId(u64_from_i64(id))),
-        workflow_lease_id: workflow_lease_id.map(|id| LeaseId(u64_from_i64(id))),
+        worker_id: WorkerId(u64_from_i64(worker_id, "artifact_verifications.worker_id")?),
+        workflow_ticket_id: workflow_ticket_id
+            .map(|id| u64_from_i64(id, "artifact_verifications.workflow_ticket_id").map(TicketId))
+            .transpose()?,
+        workflow_lease_id: workflow_lease_id
+            .map(|id| u64_from_i64(id, "artifact_verifications.workflow_lease_id").map(LeaseId))
+            .transpose()?,
         status: ArtifactVerificationStatus::parse(&status)?,
-        expected_size_bytes: u64_from_i64(expected_size_bytes),
+        expected_size_bytes: u64_from_i64(
+            expected_size_bytes,
+            "artifact_verifications.expected_size_bytes",
+        )?,
         expected_checksum,
-        observed_size_bytes: observed_size_bytes.map(u64_from_i64),
+        observed_size_bytes: observed_size_bytes
+            .map(|value| u64_from_i64(value, "artifact_verifications.observed_size_bytes"))
+            .transpose()?,
         observed_checksum,
         failure_class,
         error_code,
@@ -2590,7 +2867,10 @@ async fn get_commit_record_in_tx(
     let sql = SELECT_ARTIFACT_COMMIT_RECORD_COLS.to_owned()
         + " FROM artifact_commit_records c WHERE c.id = ?";
     let row = sqlx::query(&sql)
-        .bind(i64_from_u64(id.0))
+        .bind(i64_from_u64(
+            id.0,
+            concat!(module_path!(), ": ", stringify!(id.0)),
+        )?)
         .fetch_optional(&mut **tx)
         .await
         .map_err(|e| VoomError::database_context("artifact_commit_records get", e))?;
@@ -2651,13 +2931,33 @@ fn row_to_commit_record(row: &sqlx::sqlite::SqliteRow) -> Result<ArtifactCommitR
         .map_err(|e| map_row_err("artifact_commit_records", &e))?;
 
     Ok(ArtifactCommitRecord {
-        id: ArtifactCommitRecordId(u64_from_i64(id)),
-        artifact_handle_id: ArtifactHandleId(u64_from_i64(artifact_handle_id)),
-        source_file_version_id: FileVersionId(u64_from_i64(source_file_version_id)),
-        verification_id: ArtifactVerificationId(u64_from_i64(verification_id)),
+        id: ArtifactCommitRecordId(u64_from_i64(
+            id,
+            concat!(module_path!(), ": ", stringify!(id)),
+        )?),
+        artifact_handle_id: ArtifactHandleId(u64_from_i64(
+            artifact_handle_id,
+            concat!(module_path!(), ": ", stringify!(artifact_handle_id)),
+        )?),
+        source_file_version_id: FileVersionId(u64_from_i64(
+            source_file_version_id,
+            concat!(module_path!(), ": ", stringify!(source_file_version_id)),
+        )?),
+        verification_id: ArtifactVerificationId(u64_from_i64(
+            verification_id,
+            concat!(module_path!(), ": ", stringify!(verification_id)),
+        )?),
         target_path,
-        result_file_version_id: result_file_version_id.map(|v| FileVersionId(u64_from_i64(v))),
-        result_file_location_id: result_file_location_id.map(|v| FileLocationId(u64_from_i64(v))),
+        result_file_version_id: result_file_version_id
+            .map(|v| {
+                u64_from_i64(v, concat!(module_path!(), ": ", stringify!(v))).map(FileVersionId)
+            })
+            .transpose()?,
+        result_file_location_id: result_file_location_id
+            .map(|v| {
+                u64_from_i64(v, concat!(module_path!(), ": ", stringify!(v))).map(FileLocationId)
+            })
+            .transpose()?,
         state: ArtifactCommitState::parse(&state)?,
         failure_class,
         error_code,
@@ -2694,8 +2994,14 @@ fn row_to_location(row: &sqlx::sqlite::SqliteRow) -> Result<ArtifactLocation, Vo
         .try_get("retired_at")
         .map_err(|e| map_row_err("artifacts", &e))?;
     Ok(ArtifactLocation {
-        id: ArtifactLocationId(u64_from_i64(id)),
-        artifact_handle_id: ArtifactHandleId(u64_from_i64(handle_id)),
+        id: ArtifactLocationId(u64_from_i64(
+            id,
+            concat!(module_path!(), ": ", stringify!(id)),
+        )?),
+        artifact_handle_id: ArtifactHandleId(u64_from_i64(
+            handle_id,
+            concat!(module_path!(), ": ", stringify!(handle_id)),
+        )?),
         kind,
         value,
         observed_at: parse_iso8601(&observed)?,

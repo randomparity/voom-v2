@@ -97,7 +97,10 @@ impl SqliteQualityScoringProfileRepo {
         .await;
         match res {
             Ok(res) => Ok(QualityScoringProfile {
-                id: u64_from_i64(res.last_insert_rowid()),
+                id: u64_from_i64(
+                    res.last_insert_rowid(),
+                    concat!(module_path!(), ": ", stringify!(res.last_insert_rowid())),
+                )?,
                 name: input.name,
                 version: input.version,
                 definition: input.definition,
@@ -208,7 +211,7 @@ fn row_to_profile(row: &SqliteRow) -> Result<QualityScoringProfile, VoomError> {
         ))
     })?;
     Ok(QualityScoringProfile {
-        id: u64_from_i64(id),
+        id: u64_from_i64(id, concat!(module_path!(), ": ", stringify!(id)))?,
         name: row.try_get("name").map_err(map("name"))?,
         version: u32_from_i64(version)?,
         definition,

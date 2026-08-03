@@ -116,8 +116,11 @@ impl SqliteRemoteIdempotencyRepo {
         tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
         input: RemoteIdempotencyInput,
     ) -> Result<IdempotencyOutcome, VoomError> {
-        let worker_scope_id = worker_scope_id(input.worker_id);
-        let worker_id = input.worker_id.map(|id| i64_from_u64(id.0));
+        let worker_scope_id = worker_scope_id(input.worker_id)?;
+        let worker_id = input
+            .worker_id
+            .map(|id| i64_from_u64(id.0, concat!(module_path!(), ": ", stringify!(id.0))))
+            .transpose()?;
         let created_at = iso8601(input.created_at)?;
         let inserted = sqlx::query(
             "INSERT INTO remote_idempotency_keys \
@@ -126,7 +129,10 @@ impl SqliteRemoteIdempotencyRepo {
              VALUES (?, ?, ?, ?, ?, ?, 'in_progress', ?) \
              ON CONFLICT(node_id, route_key, worker_scope_id, idempotency_key) DO NOTHING",
         )
-        .bind(i64_from_u64(input.node_id.0))
+        .bind(i64_from_u64(
+            input.node_id.0,
+            concat!(module_path!(), ": ", stringify!(input.node_id.0)),
+        )?)
         .bind(&input.route_key)
         .bind(worker_scope_id)
         .bind(worker_id)
@@ -145,7 +151,10 @@ impl SqliteRemoteIdempotencyRepo {
             "SELECT request_hash, response_json, status FROM remote_idempotency_keys \
              WHERE node_id = ? AND route_key = ? AND worker_scope_id = ? AND idempotency_key = ?",
         )
-        .bind(i64_from_u64(input.node_id.0))
+        .bind(i64_from_u64(
+            input.node_id.0,
+            concat!(module_path!(), ": ", stringify!(input.node_id.0)),
+        )?)
         .bind(&input.route_key)
         .bind(worker_scope_id)
         .bind(&input.idempotency_key)
@@ -207,9 +216,12 @@ impl SqliteRemoteIdempotencyRepo {
                AND idempotency_key = ? AND status = 'in_progress'",
         )
         .bind(&response_json)
-        .bind(i64_from_u64(node_id.0))
+        .bind(i64_from_u64(
+            node_id.0,
+            concat!(module_path!(), ": ", stringify!(node_id.0)),
+        )?)
         .bind(route_key)
-        .bind(worker_scope_id(worker_id))
+        .bind(worker_scope_id(worker_id)?)
         .bind(idempotency_key)
         .execute(&mut **tx)
         .await
@@ -250,9 +262,12 @@ impl SqliteRemoteIdempotencyRepo {
                AND idempotency_key = ? AND status = 'completed'",
         )
         .bind(&response_json)
-        .bind(i64_from_u64(node_id.0))
+        .bind(i64_from_u64(
+            node_id.0,
+            concat!(module_path!(), ": ", stringify!(node_id.0)),
+        )?)
         .bind(route_key)
-        .bind(worker_scope_id(worker_id))
+        .bind(worker_scope_id(worker_id)?)
         .bind(idempotency_key)
         .execute(&mut **tx)
         .await
@@ -268,8 +283,10 @@ impl SqliteRemoteIdempotencyRepo {
     }
 }
 
-fn worker_scope_id(worker_id: Option<WorkerId>) -> i64 {
-    worker_id.map_or(0, |id| i64_from_u64(id.0))
+fn worker_scope_id(worker_id: Option<WorkerId>) -> Result<i64, VoomError> {
+    worker_id.map_or(Ok(0), |id| {
+        i64_from_u64(id.0, concat!(module_path!(), ": ", stringify!(id.0)))
+    })
 }
 
 #[cfg(test)]

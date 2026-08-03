@@ -117,9 +117,22 @@ impl SqliteBackupRepo {
               started_at, created_at) \
              VALUES (?, ?, ?, ?, ?, 'pending', ?, ?)",
         )
-        .bind(i64_from_u64(input.source_file_version_id.0))
-        .bind(i64_from_u64(input.job_id.0))
-        .bind(i64_from_u64(input.ticket_id.0))
+        .bind(i64_from_u64(
+            input.source_file_version_id.0,
+            concat!(
+                module_path!(),
+                ": ",
+                stringify!(input.source_file_version_id.0)
+            ),
+        )?)
+        .bind(i64_from_u64(
+            input.job_id.0,
+            concat!(module_path!(), ": ", stringify!(input.job_id.0)),
+        )?)
+        .bind(i64_from_u64(
+            input.ticket_id.0,
+            concat!(module_path!(), ": ", stringify!(input.ticket_id.0)),
+        )?)
         .bind(&input.provider)
         .bind(&input.destination_path)
         .bind(&started)
@@ -128,7 +141,10 @@ impl SqliteBackupRepo {
         .await
         .map_err(|e| VoomError::database_context("backups insert_pending", e))?;
         Ok(Backup {
-            id: BackupId(u64_from_i64(res.last_insert_rowid())),
+            id: BackupId(u64_from_i64(
+                res.last_insert_rowid(),
+                concat!(module_path!(), ": ", stringify!(res.last_insert_rowid())),
+            )?),
             source_file_version_id: input.source_file_version_id,
             job_id: input.job_id,
             ticket_id: input.ticket_id,
@@ -171,10 +187,16 @@ impl SqliteBackupRepo {
              SET status = 'verified', size_bytes = ?, checksum = ?, finished_at = ? \
              WHERE id = ? AND status = 'pending'",
         )
-        .bind(i64_from_u64(size_bytes))
+        .bind(i64_from_u64(
+            size_bytes,
+            concat!(module_path!(), ": ", stringify!(size_bytes)),
+        )?)
         .bind(checksum)
         .bind(&finished)
-        .bind(i64_from_u64(id.0))
+        .bind(i64_from_u64(
+            id.0,
+            concat!(module_path!(), ": ", stringify!(id.0)),
+        )?)
         .execute(&mut **tx)
         .await
         .map_err(|e| VoomError::database_context("backups mark_verified", e))?;
@@ -217,7 +239,10 @@ impl SqliteBackupRepo {
         .bind(&detail.error_code)
         .bind(&detail.message)
         .bind(&finished)
-        .bind(i64_from_u64(id.0))
+        .bind(i64_from_u64(
+            id.0,
+            concat!(module_path!(), ": ", stringify!(id.0)),
+        )?)
         .execute(&mut **tx)
         .await
         .map_err(|e| VoomError::database_context("backups mark_failed", e))?;
@@ -242,7 +267,10 @@ impl SqliteBackupRepo {
 
     pub async fn get(&self, id: BackupId) -> Result<Option<Backup>, VoomError> {
         let row = sqlx::query(&format!("SELECT {BACKUP_COLS} FROM backups WHERE id = ?"))
-            .bind(i64_from_u64(id.0))
+            .bind(i64_from_u64(
+                id.0,
+                concat!(module_path!(), ": ", stringify!(id.0)),
+            )?)
             .fetch_optional(&self.pool)
             .await
             .map_err(|e| VoomError::database_context("backups get", e))?;
@@ -266,7 +294,13 @@ impl SqliteBackupRepo {
              ORDER BY id DESC LIMIT ?3"
         ))
         .bind(status.map(BackupStatus::as_str))
-        .bind(after_id.map(i64_from_u64))
+        .bind(
+            after_id
+                .map(|value| {
+                    i64_from_u64(value, concat!(module_path!(), ": ", stringify!(after_id)))
+                })
+                .transpose()?,
+        )
         .bind(i64::from(limit))
         .fetch_all(&self.pool)
         .await
@@ -300,7 +334,10 @@ impl SqliteBackupRepo {
             "SELECT {BACKUP_COLS} FROM backups WHERE source_file_version_id = ? \
              ORDER BY created_at ASC, id ASC LIMIT ?"
         ))
-        .bind(i64_from_u64(source_file_version_id.0))
+        .bind(i64_from_u64(
+            source_file_version_id.0,
+            concat!(module_path!(), ": ", stringify!(source_file_version_id.0)),
+        )?)
         .bind(i64::from(limit))
         .fetch_all(&self.pool)
         .await
@@ -325,7 +362,10 @@ impl SqliteBackupRepo {
             "SELECT {BACKUP_COLS} FROM backups WHERE source_file_version_id = ? \
              ORDER BY created_at DESC, id DESC LIMIT 1"
         ))
-        .bind(i64_from_u64(source_file_version_id.0))
+        .bind(i64_from_u64(
+            source_file_version_id.0,
+            concat!(module_path!(), ": ", stringify!(source_file_version_id.0)),
+        )?)
         .fetch_optional(&self.pool)
         .await
         .map_err(|e| VoomError::database_context("backups latest_by_file_version", e))?;
@@ -344,8 +384,14 @@ impl SqliteBackupRepo {
             "SELECT {BACKUP_COLS} FROM backups \
              WHERE ticket_id = ? AND source_file_version_id = ? AND status = 'verified'"
         ))
-        .bind(i64_from_u64(ticket_id.0))
-        .bind(i64_from_u64(source_file_version_id.0))
+        .bind(i64_from_u64(
+            ticket_id.0,
+            concat!(module_path!(), ": ", stringify!(ticket_id.0)),
+        )?)
+        .bind(i64_from_u64(
+            source_file_version_id.0,
+            concat!(module_path!(), ": ", stringify!(source_file_version_id.0)),
+        )?)
         .fetch_optional(&self.pool)
         .await
         .map_err(|e| VoomError::database_context("backups verified_for_ticket_and_version", e))?;
@@ -389,13 +435,27 @@ fn row_to_backup(row: &SqliteRow) -> Result<Backup, VoomError> {
     let finished_at: Option<String> = row.try_get("finished_at").map_err(|e| map_row_err(t, &e))?;
     let created_at: String = row.try_get("created_at").map_err(|e| map_row_err(t, &e))?;
     Ok(Backup {
-        id: BackupId(u64_from_i64(id)),
-        source_file_version_id: FileVersionId(u64_from_i64(source_file_version_id)),
-        job_id: JobId(u64_from_i64(job_id)),
-        ticket_id: TicketId(u64_from_i64(ticket_id)),
+        id: BackupId(u64_from_i64(
+            id,
+            concat!(module_path!(), ": ", stringify!(id)),
+        )?),
+        source_file_version_id: FileVersionId(u64_from_i64(
+            source_file_version_id,
+            concat!(module_path!(), ": ", stringify!(source_file_version_id)),
+        )?),
+        job_id: JobId(u64_from_i64(
+            job_id,
+            concat!(module_path!(), ": ", stringify!(job_id)),
+        )?),
+        ticket_id: TicketId(u64_from_i64(
+            ticket_id,
+            concat!(module_path!(), ": ", stringify!(ticket_id)),
+        )?),
         provider,
         destination_path,
-        size_bytes: size_bytes.map(u64_from_i64),
+        size_bytes: size_bytes
+            .map(|value| u64_from_i64(value, concat!(module_path!(), ": ", stringify!(size_bytes))))
+            .transpose()?,
         checksum,
         status: BackupStatus::parse(&status)?,
         failure_class,

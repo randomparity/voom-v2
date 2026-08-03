@@ -247,12 +247,20 @@ impl SqliteWorkerRepo {
         .bind(input.kind.as_str())
         .bind(&ts)
         .bind(&ts)
-        .bind(input.node_id.map(|id| i64_from_u64(id.0)))
+        .bind(
+            input
+                .node_id
+                .map(|id| i64_from_u64(id.0, concat!(module_path!(), ": ", stringify!(id.0))))
+                .transpose()?,
+        )
         .execute(&mut **tx)
         .await
         .map_err(|e| VoomError::database_context("workers insert", e))?;
         Ok(Worker {
-            id: WorkerId(u64_from_i64(res.last_insert_rowid())),
+            id: WorkerId(u64_from_i64(
+                res.last_insert_rowid(),
+                concat!(module_path!(), ": ", stringify!(res.last_insert_rowid())),
+            )?),
             node_id: input.node_id,
             name: input.name,
             kind: input.kind,
@@ -285,7 +293,12 @@ impl SqliteWorkerRepo {
         .bind(input.kind.as_str())
         .bind(&registered_at)
         .bind(&registered_at)
-        .bind(input.node_id.map(|id| i64_from_u64(id.0)))
+        .bind(
+            input
+                .node_id
+                .map(|id| i64_from_u64(id.0, concat!(module_path!(), ": ", stringify!(id.0))))
+                .transpose()?,
+        )
         .execute(&mut **tx)
         .await
         .map_err(|error| VoomError::database_context("workers insert built-in", error))?;
@@ -336,7 +349,10 @@ impl SqliteWorkerRepo {
              (worker_id, operation, codecs, hardware, artifact_access, extra) \
              VALUES (?, ?, ?, ?, ?, ?)",
         )
-        .bind(i64_from_u64(input.worker_id.0))
+        .bind(i64_from_u64(
+            input.worker_id.0,
+            concat!(module_path!(), ": ", stringify!(input.worker_id.0)),
+        )?)
         .bind(input.operation.as_str())
         .bind(codecs)
         .bind(hw)
@@ -346,7 +362,10 @@ impl SqliteWorkerRepo {
         .await
         .map_err(|e| VoomError::database_context("worker_capabilities insert", e))?;
         Ok(Capability {
-            id: u64_from_i64(res.last_insert_rowid()),
+            id: u64_from_i64(
+                res.last_insert_rowid(),
+                concat!(module_path!(), ": ", stringify!(res.last_insert_rowid())),
+            )?,
             worker_id: input.worker_id,
             operation: input.operation,
         })
@@ -392,7 +411,10 @@ impl SqliteWorkerRepo {
              (worker_id, can_execute, can_access_read, can_access_write, denies, max_parallel) \
              VALUES (?, ?, ?, ?, ?, ?)",
         )
-        .bind(i64_from_u64(input.worker_id.0))
+        .bind(i64_from_u64(
+            input.worker_id.0,
+            concat!(module_path!(), ": ", stringify!(input.worker_id.0)),
+        )?)
         .bind(ce)
         .bind(cr)
         .bind(cw)
@@ -402,7 +424,10 @@ impl SqliteWorkerRepo {
         .await
         .map_err(|e| VoomError::database_context("worker_grants insert", e))?;
         Ok(Grant {
-            id: u64_from_i64(res.last_insert_rowid()),
+            id: u64_from_i64(
+                res.last_insert_rowid(),
+                concat!(module_path!(), ": ", stringify!(res.last_insert_rowid())),
+            )?,
             worker_id: input.worker_id,
         })
     }
@@ -458,7 +483,10 @@ impl SqliteWorkerRepo {
         }
         let ts = iso8601(now)?;
         sqlx::query("DELETE FROM accelerator_claims WHERE worker_id = ?")
-            .bind(i64_from_u64(id.0))
+            .bind(i64_from_u64(
+                id.0,
+                concat!(module_path!(), ": ", stringify!(id.0)),
+            )?)
             .execute(&mut **tx)
             .await
             .map_err(|e| VoomError::database_context("accelerator_claims release", e))?;
@@ -469,8 +497,14 @@ impl SqliteWorkerRepo {
         )
         .bind(&ts)
         .bind(&ts)
-        .bind(i64_from_u64(id.0))
-        .bind(i64_from_u64(expected_epoch))
+        .bind(i64_from_u64(
+            id.0,
+            concat!(module_path!(), ": ", stringify!(id.0)),
+        )?)
+        .bind(i64_from_u64(
+            expected_epoch,
+            concat!(module_path!(), ": ", stringify!(expected_epoch)),
+        )?)
         .execute(&mut **tx)
         .await
         .map_err(|e| VoomError::database_context("workers update", e))?;
@@ -522,7 +556,7 @@ impl SqliteWorkerRepo {
             "SELECT id, node_id, name, kind, status, registered_at, last_seen_at, retired_at, epoch \
              FROM workers WHERE id = ?",
         )
-        .bind(i64_from_u64(id.0))
+        .bind(i64_from_u64(id.0, concat!(module_path!(), ": ", stringify!(id.0)))?)
         .fetch_optional(&self.pool)
         .await
         .map_err(|e| VoomError::database_context("workers get", e))?;
@@ -632,7 +666,10 @@ impl SqliteWorkerRepo {
              FROM workers w LEFT JOIN nodes n ON n.id = w.node_id \
              WHERE w.id = ?",
         )
-        .bind(i64_from_u64(id.0))
+        .bind(i64_from_u64(
+            id.0,
+            concat!(module_path!(), ": ", stringify!(id.0)),
+        )?)
         .fetch_optional(&self.pool)
         .await
         .map_err(|e| VoomError::database_context("workers inspection get", e))?;
@@ -710,7 +747,10 @@ impl SqliteWorkerRepo {
             "SELECT artifact_access FROM worker_capabilities \
              WHERE worker_id = ? AND operation = ? ORDER BY id ASC",
         )
-        .bind(i64_from_u64(worker_id.0))
+        .bind(i64_from_u64(
+            worker_id.0,
+            concat!(module_path!(), ": ", stringify!(worker_id.0)),
+        )?)
         .bind(operation.as_str())
         .fetch_all(&mut **tx)
         .await
@@ -727,7 +767,10 @@ impl SqliteWorkerRepo {
         let grant_rows = sqlx::query(
             "SELECT can_execute, denies FROM worker_grants WHERE worker_id = ? ORDER BY id ASC",
         )
-        .bind(i64_from_u64(worker_id.0))
+        .bind(i64_from_u64(
+            worker_id.0,
+            concat!(module_path!(), ": ", stringify!(worker_id.0)),
+        )?)
         .fetch_all(&mut **tx)
         .await
         .map_err(|e| VoomError::database_context("worker_grants eligibility", e))?;
@@ -807,9 +850,18 @@ impl SqliteWorkerRepo {
              FROM worker_grants, json_each(worker_grants.denies) AS denied \
              WHERE worker_grants.worker_id = ?",
         )
-        .bind(i64_from_u64(worker_id.0))
-        .bind(i64_from_u64(worker_id.0))
-        .bind(i64_from_u64(worker_id.0))
+        .bind(i64_from_u64(
+            worker_id.0,
+            concat!(module_path!(), ": ", stringify!(worker_id.0)),
+        )?)
+        .bind(i64_from_u64(
+            worker_id.0,
+            concat!(module_path!(), ": ", stringify!(worker_id.0)),
+        )?)
+        .bind(i64_from_u64(
+            worker_id.0,
+            concat!(module_path!(), ": ", stringify!(worker_id.0)),
+        )?)
         .fetch_all(&mut **tx)
         .await
         .map_err(|e| VoomError::database_context("worker candidate operations", e))?;
@@ -875,7 +927,10 @@ impl SqliteWorkerRepo {
              WHERE leases.state = 'held' AND leases.worker_id = ? \
                AND (tickets.kind = ? OR tickets.kind = ?)",
         )
-        .bind(i64_from_u64(worker_id.0))
+        .bind(i64_from_u64(
+            worker_id.0,
+            concat!(module_path!(), ": ", stringify!(worker_id.0)),
+        )?)
         .bind(operation.as_str())
         .bind(workflow_operation)
         .fetch_one(&mut **tx)
@@ -945,7 +1000,10 @@ impl SqliteWorkerRepo {
                 .try_get("extra")
                 .map_err(|error| map_row_err("worker capability history extra", &error))?;
             capabilities.push(WorkerOperationCapability {
-                worker_id: WorkerId(u64_from_i64(worker_id)),
+                worker_id: WorkerId(u64_from_i64(
+                    worker_id,
+                    concat!(module_path!(), ": ", stringify!(worker_id)),
+                )?),
                 hardware: parse_string_array_json(&hardware, "hardware")?,
                 extra: serde_json::from_str(&extra).map_err(|error| {
                     VoomError::database_context("parse worker capability history extra", error)
@@ -1039,7 +1097,10 @@ async fn accelerator_operation_capacity(
            AND json_type(extra, '$.accelerator') = 'object' \
          ORDER BY id ASC LIMIT 1",
     )
-    .bind(i64_from_u64(worker_id.0))
+    .bind(i64_from_u64(
+        worker_id.0,
+        concat!(module_path!(), ": ", stringify!(worker_id.0)),
+    )?)
     .fetch_optional(&mut **tx)
     .await
     .map_err(|error| VoomError::database_context("accelerator capacity descriptor", error))?;
@@ -1097,7 +1158,10 @@ async fn operation_capability_details_in_tx(
         "SELECT hardware, extra FROM worker_capabilities \
          WHERE worker_id = ? AND operation = ? ORDER BY id ASC",
     )
-    .bind(i64_from_u64(worker_id.0))
+    .bind(i64_from_u64(
+        worker_id.0,
+        concat!(module_path!(), ": ", stringify!(worker_id.0)),
+    )?)
     .bind(operation.as_str())
     .fetch_all(&mut **tx)
     .await
@@ -1123,7 +1187,10 @@ fn worker_candidate_id(row: &sqlx::sqlite::SqliteRow) -> Result<WorkerId, VoomEr
     let worker_id: i64 = row
         .try_get("worker_id")
         .map_err(|e| map_row_err("worker operation candidates", &e))?;
-    Ok(WorkerId(u64_from_i64(worker_id)))
+    Ok(WorkerId(u64_from_i64(
+        worker_id,
+        concat!(module_path!(), ": ", stringify!(worker_id)),
+    )?))
 }
 
 async fn max_parallel_in_tx(
@@ -1133,7 +1200,10 @@ async fn max_parallel_in_tx(
 ) -> Result<u32, VoomError> {
     let rows =
         sqlx::query("SELECT max_parallel FROM worker_grants WHERE worker_id = ? ORDER BY id")
-            .bind(i64_from_u64(worker_id.0))
+            .bind(i64_from_u64(
+                worker_id.0,
+                concat!(module_path!(), ": ", stringify!(worker_id.0)),
+            )?)
             .fetch_all(&mut **tx)
             .await
             .map_err(|e| VoomError::database_context("worker max_parallel read", e))?;
@@ -1200,7 +1270,10 @@ async fn get_in_tx(
         "SELECT id, node_id, name, kind, status, registered_at, last_seen_at, retired_at, epoch \
          FROM workers WHERE id = ?",
     )
-    .bind(i64_from_u64(id.0))
+    .bind(i64_from_u64(
+        id.0,
+        concat!(module_path!(), ": ", stringify!(id.0)),
+    )?)
     .fetch_optional(&mut **tx)
     .await
     .map_err(|e| VoomError::database_context("workers reload", e))?;
@@ -1249,15 +1322,20 @@ fn row_to_worker(row: &sqlx::sqlite::SqliteRow) -> Result<Worker, VoomError> {
         .try_get("epoch")
         .map_err(|e| map_row_err("workers", &e))?;
     Ok(Worker {
-        id: WorkerId(u64_from_i64(id)),
-        node_id: node_id.map(|id| NodeId(u64_from_i64(id))),
+        id: WorkerId(u64_from_i64(
+            id,
+            concat!(module_path!(), ": ", stringify!(id)),
+        )?),
+        node_id: node_id
+            .map(|id| u64_from_i64(id, concat!(module_path!(), ": ", stringify!(id))).map(NodeId))
+            .transpose()?,
         name,
         kind: WorkerKind::parse_database("workers.kind", &kind)?,
         status: WorkerStatus::parse_database("workers.status", &status)?,
         registered_at: parse_iso8601(&registered)?,
         last_seen_at: parse_iso8601(&last_seen)?,
         retired_at: retired.map(|s| parse_iso8601(&s)).transpose()?,
-        epoch: u64_from_i64(epoch),
+        epoch: u64_from_i64(epoch, concat!(module_path!(), ": ", stringify!(epoch)))?,
     })
 }
 
@@ -1287,7 +1365,10 @@ fn row_to_inspection(row: &sqlx::sqlite::SqliteRow) -> Result<WorkerInspection, 
                 .try_get("node_context_last_seen_at")
                 .map_err(|e| map_row_err("workers inspection", &e))?;
             Ok(WorkerNodeContext {
-                id: NodeId(u64_from_i64(id)),
+                id: NodeId(u64_from_i64(
+                    id,
+                    concat!(module_path!(), ": ", stringify!(id)),
+                )?),
                 name,
                 kind: NodeKind::parse_database("nodes.kind", &kind)?,
                 status: NodeStatus::parse_database("nodes.status", &status)?,

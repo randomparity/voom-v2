@@ -177,7 +177,12 @@ impl SqliteTicketRepo {
               next_eligible_at, created_at, state_changed_at) \
              VALUES (?, ?, 'pending', ?, ?, ?, ?, ?, ?)",
         )
-        .bind(input.job_id.map(|j| i64_from_u64(j.0)))
+        .bind(
+            input
+                .job_id
+                .map(|j| i64_from_u64(j.0, concat!(module_path!(), ": ", stringify!(j.0))))
+                .transpose()?,
+        )
         .bind(input.kind.as_str())
         .bind(input.priority)
         .bind(payload_json)
@@ -188,7 +193,10 @@ impl SqliteTicketRepo {
         .execute(&mut **tx)
         .await
         .map_err(|e| VoomError::database_context("tickets insert", e))?;
-        let id = TicketId(u64_from_i64(res.last_insert_rowid()));
+        let id = TicketId(u64_from_i64(
+            res.last_insert_rowid(),
+            concat!(module_path!(), ": ", stringify!(res.last_insert_rowid())),
+        )?);
         // Re-read to return the canonical row.
         get_in_tx_inner(tx, id)
             .await?
@@ -233,7 +241,10 @@ impl SqliteTicketRepo {
              WHERE job_id = ? AND kind = ? AND state = 'succeeded' AND result IS NOT NULL \
              ORDER BY id ASC",
         )
-        .bind(i64_from_u64(job_id.0))
+        .bind(i64_from_u64(
+            job_id.0,
+            concat!(module_path!(), ": ", stringify!(job_id.0)),
+        )?)
         .bind(operation.as_str())
         .fetch_all(&self.pool)
         .await
@@ -248,7 +259,10 @@ impl SqliteTicketRepo {
                 .try_get("result")
                 .map_err(|error| map_row_err("succeeded ticket result", &error))?;
             results.push(SucceededTicketResult {
-                ticket_id: TicketId(u64_from_i64(ticket_id)),
+                ticket_id: TicketId(u64_from_i64(
+                    ticket_id,
+                    concat!(module_path!(), ": ", stringify!(ticket_id)),
+                )?),
                 result: serde_json::from_str(&result).map_err(|error| {
                     VoomError::database_context("parse succeeded ticket result", error)
                 })?,
@@ -385,7 +399,10 @@ impl SqliteTicketRepo {
         // `state = 'ready'`, so a late edge would let the ticket lease and
         // run before the new blocker succeeds.
         let row: Option<(String,)> = sqlx::query_as("SELECT state FROM tickets WHERE id = ?")
-            .bind(i64_from_u64(ticket_id.0))
+            .bind(i64_from_u64(
+                ticket_id.0,
+                concat!(module_path!(), ": ", stringify!(ticket_id.0)),
+            )?)
             .fetch_optional(&mut **tx)
             .await
             .map_err(|e| VoomError::database_context("ticket state probe", e))?;
@@ -409,8 +426,14 @@ impl SqliteTicketRepo {
              ) \
              SELECT id FROM reach WHERE id = ? LIMIT 1",
         )
-        .bind(i64_from_u64(depends_on.0))
-        .bind(i64_from_u64(ticket_id.0))
+        .bind(i64_from_u64(
+            depends_on.0,
+            concat!(module_path!(), ": ", stringify!(depends_on.0)),
+        )?)
+        .bind(i64_from_u64(
+            ticket_id.0,
+            concat!(module_path!(), ": ", stringify!(ticket_id.0)),
+        )?)
         .fetch_optional(&mut **tx)
         .await
         .map_err(|e| VoomError::database_context("cycle check", e))?;
@@ -423,8 +446,14 @@ impl SqliteTicketRepo {
             "INSERT INTO ticket_dependencies (ticket_id, depends_on_ticket_id, kind) \
              VALUES (?, ?, 'phase')",
         )
-        .bind(i64_from_u64(ticket_id.0))
-        .bind(i64_from_u64(depends_on.0))
+        .bind(i64_from_u64(
+            ticket_id.0,
+            concat!(module_path!(), ": ", stringify!(ticket_id.0)),
+        )?)
+        .bind(i64_from_u64(
+            depends_on.0,
+            concat!(module_path!(), ": ", stringify!(depends_on.0)),
+        )?)
         .execute(&mut **tx)
         .await
         .map_err(|e| VoomError::database_context("ticket_dependencies insert", e))?;
@@ -471,8 +500,14 @@ impl SqliteTicketRepo {
              WHERE ticket_id = ? AND depends_on_ticket_id = ? \
              LIMIT 1",
         )
-        .bind(i64_from_u64(ticket_id.0))
-        .bind(i64_from_u64(depends_on.0))
+        .bind(i64_from_u64(
+            ticket_id.0,
+            concat!(module_path!(), ": ", stringify!(ticket_id.0)),
+        )?)
+        .bind(i64_from_u64(
+            depends_on.0,
+            concat!(module_path!(), ": ", stringify!(depends_on.0)),
+        )?)
         .fetch_optional(&mut **tx)
         .await
         .map_err(|e| VoomError::database_context("workflow dependency lookup", e))?;
@@ -498,7 +533,10 @@ impl SqliteTicketRepo {
         // pending-state gate below. The post-read after the UPDATE is
         // gone — we use `RETURNING` instead.
         let state: Option<String> = sqlx::query_scalar("SELECT state FROM tickets WHERE id = ?")
-            .bind(i64_from_u64(ticket_id.0))
+            .bind(i64_from_u64(
+                ticket_id.0,
+                concat!(module_path!(), ": ", stringify!(ticket_id.0)),
+            )?)
             .fetch_optional(&mut **tx)
             .await
             .map_err(|e| VoomError::database_context("tickets state probe", e))?;
@@ -513,7 +551,10 @@ impl SqliteTicketRepo {
                JOIN tickets t ON t.id = td.depends_on_ticket_id \
               WHERE td.ticket_id = ? AND t.state != 'succeeded'",
         )
-        .bind(i64_from_u64(ticket_id.0))
+        .bind(i64_from_u64(
+            ticket_id.0,
+            concat!(module_path!(), ": ", stringify!(ticket_id.0)),
+        )?)
         .fetch_one(&mut **tx)
         .await
         .map_err(|e| VoomError::database_context("dependency count", e))?;
@@ -527,7 +568,10 @@ impl SqliteTicketRepo {
              RETURNING {TICKET_RETURNING_COLS}"
         ))
         .bind(&ts)
-        .bind(i64_from_u64(ticket_id.0))
+        .bind(i64_from_u64(
+            ticket_id.0,
+            concat!(module_path!(), ": ", stringify!(ticket_id.0)),
+        )?)
         .fetch_optional(&mut **tx)
         .await
         .map_err(|e| VoomError::database_context("tickets update", e))?;
@@ -575,7 +619,10 @@ impl SqliteTicketRepo {
     /// Returns [`VoomError::Database`] if the query or row decoding fails.
     pub async fn get(&self, id: TicketId) -> Result<Option<Ticket>, VoomError> {
         let row = sqlx::query(SELECT_TICKET_BY_ID)
-            .bind(i64_from_u64(id.0))
+            .bind(i64_from_u64(
+                id.0,
+                concat!(module_path!(), ": ", stringify!(id.0)),
+            )?)
             .fetch_optional(&self.pool)
             .await
             .map_err(|e| VoomError::database_context("tickets get", e))?;
@@ -613,7 +660,10 @@ impl SqliteTicketRepo {
                AND json_type(payload, '$.node_id') = 'text' \
              ORDER BY json_extract(payload, '$.node_id') ASC",
         )
-        .bind(i64_from_u64(job_id.0))
+        .bind(i64_from_u64(
+            job_id.0,
+            concat!(module_path!(), ": ", stringify!(job_id.0)),
+        )?)
         .bind(workflow_id)
         .fetch_all(&self.pool)
         .await
@@ -641,7 +691,10 @@ impl SqliteTicketRepo {
                AND json_extract(payload, '$.node_id') = ? \
              LIMIT 1",
         )
-        .bind(i64_from_u64(job_id.0))
+        .bind(i64_from_u64(
+            job_id.0,
+            concat!(module_path!(), ": ", stringify!(job_id.0)),
+        )?)
         .bind(workflow_id)
         .bind(branch_id)
         .bind(node_id)
@@ -673,7 +726,10 @@ impl SqliteTicketRepo {
              ORDER BY priority DESC, next_eligible_at ASC, id ASC \
              LIMIT ?"
         ))
-        .bind(i64_from_u64(job_id.0))
+        .bind(i64_from_u64(
+            job_id.0,
+            concat!(module_path!(), ": ", stringify!(job_id.0)),
+        )?)
         .bind(iso8601(now)?)
         .bind(workflow_id)
         .bind(i64::from(limit))
@@ -702,7 +758,10 @@ impl SqliteTicketRepo {
              FROM tickets \
              WHERE job_id = ? AND json_extract(payload, '$.workflow_id') = ?",
         )
-        .bind(i64_from_u64(job_id.0))
+        .bind(i64_from_u64(
+            job_id.0,
+            concat!(module_path!(), ": ", stringify!(job_id.0)),
+        )?)
         .bind(workflow_id)
         .fetch_one(&self.pool)
         .await
@@ -732,7 +791,10 @@ impl SqliteTicketRepo {
                AND json_extract(payload, '$.workflow_id') = ? \
              ORDER BY id ASC LIMIT 1"
         ))
-        .bind(i64_from_u64(job_id.0))
+        .bind(i64_from_u64(
+            job_id.0,
+            concat!(module_path!(), ": ", stringify!(job_id.0)),
+        )?)
         .bind(workflow_id)
         .fetch_optional(&self.pool)
         .await
@@ -759,7 +821,10 @@ impl SqliteTicketRepo {
                AND next_eligible_at > ? \
                AND json_extract(payload, '$.workflow_id') = ?",
         )
-        .bind(i64_from_u64(job_id.0))
+        .bind(i64_from_u64(
+            job_id.0,
+            concat!(module_path!(), ": ", stringify!(job_id.0)),
+        )?)
         .bind(iso8601(now)?)
         .bind(workflow_id)
         .fetch_one(&self.pool)
@@ -781,7 +846,13 @@ impl SqliteTicketRepo {
     ) -> Result<Option<TicketId>, VoomError> {
         let source_file_version_id = identity
             .source_file_version_id
-            .map(|file_version_id| i64_from_u64(file_version_id.0));
+            .map(|file_version_id| {
+                i64_from_u64(
+                    file_version_id.0,
+                    concat!(module_path!(), ": ", stringify!(file_version_id.0)),
+                )
+            })
+            .transpose()?;
         let rows: Vec<i64> = sqlx::query_scalar(
             "SELECT id FROM tickets \
              WHERE job_id = ? \
@@ -797,7 +868,10 @@ impl SqliteTicketRepo {
                        ) = ?) \
              ORDER BY id ASC LIMIT 2",
         )
-        .bind(i64_from_u64(identity.job_id.0))
+        .bind(i64_from_u64(
+            identity.job_id.0,
+            concat!(module_path!(), ": ", stringify!(identity.job_id.0)),
+        )?)
         .bind(identity.workflow_id)
         .bind(identity.branch_id)
         .bind(identity.node_id)
@@ -808,7 +882,10 @@ impl SqliteTicketRepo {
         .map_err(|e| VoomError::database_context("workflow ticket identity lookup", e))?;
         match rows.as_slice() {
             [] => Ok(None),
-            [id] => Ok(Some(TicketId(u64_from_i64(*id)))),
+            [id] => Ok(Some(TicketId(u64_from_i64(
+                *id,
+                concat!(module_path!(), ": ", stringify!(*id)),
+            )?))),
             [first, second, ..] => Err(VoomError::Conflict(format!(
                 "duplicate workflow tickets for job {} workflow `{}` branch `{}` node `{}`: \
                  ids {first}, {second}",
@@ -850,7 +927,10 @@ impl SqliteTicketRepo {
         .bind(&now)
         .bind(i64::from(next_attempt))
         .bind(next_eligible_at)
-        .bind(i64_from_u64(ticket_id.0))
+        .bind(i64_from_u64(
+            ticket_id.0,
+            concat!(module_path!(), ": ", stringify!(ticket_id.0)),
+        )?)
         .bind(i64::from(previous_attempt))
         .bind(&now)
         .fetch_optional(&mut **tx)
@@ -883,7 +963,13 @@ impl SqliteTicketRepo {
              ORDER BY id DESC LIMIT ?3"
         ))
         .bind(filter.state.map(TicketState::as_str))
-        .bind(after_id.map(i64_from_u64))
+        .bind(
+            after_id
+                .map(|value| {
+                    i64_from_u64(value, concat!(module_path!(), ": ", stringify!(after_id)))
+                })
+                .transpose()?,
+        )
         .bind(i64::from(limit))
         .fetch_all(&self.pool)
         .await
@@ -925,7 +1011,10 @@ impl SqliteTicketRepo {
             "SELECT {TICKET_RETURNING_COLS} FROM tickets \
              WHERE job_id = ? ORDER BY id ASC"
         ))
-        .bind(i64_from_u64(job_id.0))
+        .bind(i64_from_u64(
+            job_id.0,
+            concat!(module_path!(), ": ", stringify!(job_id.0)),
+        )?)
         .fetch_all(&self.pool)
         .await
         .map_err(|e| VoomError::database_context("tickets list for job", e))?;
@@ -1031,7 +1120,10 @@ impl SqliteTicketRepo {
     /// Returns [`VoomError::Database`] if the query or row decoding fails.
     pub async fn list_dependents(&self, depends_on: TicketId) -> Result<Vec<Ticket>, VoomError> {
         let rows = sqlx::query(SELECT_DEPENDENTS_OF)
-            .bind(i64_from_u64(depends_on.0))
+            .bind(i64_from_u64(
+                depends_on.0,
+                concat!(module_path!(), ": ", stringify!(depends_on.0)),
+            )?)
             .fetch_all(&self.pool)
             .await
             .map_err(|e| VoomError::database_context("tickets list_dependents", e))?;
@@ -1049,7 +1141,10 @@ impl SqliteTicketRepo {
         depends_on: TicketId,
     ) -> Result<Vec<Ticket>, VoomError> {
         let rows = sqlx::query(SELECT_DEPENDENTS_OF)
-            .bind(i64_from_u64(depends_on.0))
+            .bind(i64_from_u64(
+                depends_on.0,
+                concat!(module_path!(), ": ", stringify!(depends_on.0)),
+            )?)
             .fetch_all(&mut **tx)
             .await
             .map_err(|e| VoomError::database_context("tickets list_dependents_in_tx", e))?;
@@ -1082,7 +1177,10 @@ async fn get_in_tx_inner(
     id: TicketId,
 ) -> Result<Option<Ticket>, VoomError> {
     let row = sqlx::query(SELECT_TICKET_BY_ID)
-        .bind(i64_from_u64(id.0))
+        .bind(i64_from_u64(
+            id.0,
+            concat!(module_path!(), ": ", stringify!(id.0)),
+        )?)
         .fetch_optional(&mut **tx)
         .await
         .map_err(|e| VoomError::database_context("tickets get_in_tx", e))?;
@@ -1134,8 +1232,13 @@ fn row_to_ticket(row: &sqlx::sqlite::SqliteRow) -> Result<Ticket, VoomError> {
         .transpose()
         .map_err(|e| VoomError::database_context("parse result", e))?;
     Ok(Ticket {
-        id: TicketId(u64_from_i64(id)),
-        job_id: job_id.map(|j| JobId(u64_from_i64(j))),
+        id: TicketId(u64_from_i64(
+            id,
+            concat!(module_path!(), ": ", stringify!(id)),
+        )?),
+        job_id: job_id
+            .map(|j| u64_from_i64(j, concat!(module_path!(), ": ", stringify!(j))).map(JobId))
+            .transpose()?,
         kind: TicketOperation::from_stored(kind, "tickets.kind")?,
         state: TicketState::parse(&state)?,
         priority,
@@ -1146,7 +1249,7 @@ fn row_to_ticket(row: &sqlx::sqlite::SqliteRow) -> Result<Ticket, VoomError> {
         next_eligible_at: parse_iso8601(&next_eligible)?,
         created_at: parse_iso8601(&created)?,
         state_changed_at: parse_iso8601(&state_changed)?,
-        epoch: u64_from_i64(epoch),
+        epoch: u64_from_i64(epoch, concat!(module_path!(), ": ", stringify!(epoch)))?,
     })
 }
 

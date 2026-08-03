@@ -116,7 +116,10 @@ impl SqliteExternalSystemRepo {
         .await
         .map_err(|e| VoomError::database_context("external_systems insert", e))?;
         Ok(ExternalSystem {
-            id: ExternalSystemId(u64_from_i64(res.last_insert_rowid())),
+            id: ExternalSystemId(u64_from_i64(
+                res.last_insert_rowid(),
+                concat!(module_path!(), ": ", stringify!(res.last_insert_rowid())),
+            )?),
             kind: input.kind,
             display_name: input.display_name,
             connection_profile: input.connection_profile,
@@ -135,7 +138,10 @@ impl SqliteExternalSystemRepo {
     /// Propagates database and row-decode errors.
     pub async fn get(&self, id: ExternalSystemId) -> Result<Option<ExternalSystem>, VoomError> {
         let row = sqlx::query(&format!("SELECT {COLS} FROM external_systems WHERE id = ?"))
-            .bind(i64_from_u64(id.0))
+            .bind(i64_from_u64(
+                id.0,
+                concat!(module_path!(), ": ", stringify!(id.0)),
+            )?)
             .fetch_optional(&self.pool)
             .await
             .map_err(|e| VoomError::database_context("external_systems get", e))?;
@@ -152,7 +158,10 @@ impl SqliteExternalSystemRepo {
         id: ExternalSystemId,
     ) -> Result<Option<ExternalSystem>, VoomError> {
         let row = sqlx::query(&format!("SELECT {COLS} FROM external_systems WHERE id = ?"))
-            .bind(i64_from_u64(id.0))
+            .bind(i64_from_u64(
+                id.0,
+                concat!(module_path!(), ": ", stringify!(id.0)),
+            )?)
             .fetch_optional(&mut **tx)
             .await
             .map_err(|e| VoomError::database_context("external_systems get_in_tx", e))?;
@@ -189,7 +198,10 @@ impl SqliteExternalSystemRepo {
             "UPDATE external_systems SET health_status = ? WHERE id = ? AND retired_at IS NULL",
         )
         .bind(health.as_str())
-        .bind(i64_from_u64(id.0))
+        .bind(i64_from_u64(
+            id.0,
+            concat!(module_path!(), ": ", stringify!(id.0)),
+        )?)
         .execute(&mut **tx)
         .await
         .map_err(|e| VoomError::database_context("external_systems set_health", e))?
@@ -228,7 +240,10 @@ fn row_to_system(row: &SqliteRow) -> Result<ExternalSystem, VoomError> {
     let retired_at: Option<String> = row.try_get("retired_at").map_err(map("retired_at"))?;
     let epoch: i64 = row.try_get("epoch").map_err(map("epoch"))?;
     Ok(ExternalSystem {
-        id: ExternalSystemId(u64_from_i64(id)),
+        id: ExternalSystemId(u64_from_i64(
+            id,
+            concat!(module_path!(), ": ", stringify!(id)),
+        )?),
         kind: ExternalSystemKind::parse(&kind)?,
         display_name: row.try_get("display_name").map_err(map("display_name"))?,
         connection_profile: decode_json(&profile, "connection_profile")?,
@@ -237,7 +252,7 @@ fn row_to_system(row: &SqliteRow) -> Result<ExternalSystem, VoomError> {
         rate_limit_config: decode_json(&rate, "rate_limit_config")?,
         created_at: parse_iso8601(&created_at)?,
         retired_at: retired_at.as_deref().map(parse_iso8601).transpose()?,
-        epoch: u64_from_i64(epoch),
+        epoch: u64_from_i64(epoch, concat!(module_path!(), ": ", stringify!(epoch)))?,
     })
 }
 

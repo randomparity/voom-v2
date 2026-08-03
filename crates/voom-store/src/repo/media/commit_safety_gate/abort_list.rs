@@ -71,9 +71,18 @@ pub async fn abort_destructive_commit(
     )
     .bind(&aborted_iso)
     .bind(reason_str)
-    .bind(i64_from_u64(new_epoch))
-    .bind(i64_from_u64(commit_id.0))
-    .bind(i64_from_u64(row.epoch))
+    .bind(i64_from_u64(
+        new_epoch,
+        concat!(module_path!(), ": ", stringify!(new_epoch)),
+    )?)
+    .bind(i64_from_u64(
+        commit_id.0,
+        concat!(module_path!(), ": ", stringify!(commit_id.0)),
+    )?)
+    .bind(i64_from_u64(
+        row.epoch,
+        concat!(module_path!(), ": ", stringify!(row.epoch)),
+    )?)
     .execute(&mut *tx)
     .await
     .map_err(|e| VoomError::database_context("abort: UPDATE", e))?;
@@ -192,7 +201,10 @@ fn decode_pending_commit_intent_row(
     let id_raw: i64 = row
         .try_get("id")
         .map_err(|e| VoomError::database_context("list_pending_commit_intents: read id", e))?;
-    let commit_id = CommitId(u64_from_i64(id_raw));
+    let commit_id = CommitId(u64_from_i64(
+        id_raw,
+        concat!(module_path!(), ": ", stringify!(id_raw)),
+    )?);
     let state_str: String = row
         .try_get("state")
         .map_err(|e| VoomError::database_context("list_pending_commit_intents: read state", e))?;

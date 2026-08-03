@@ -1,3 +1,6 @@
+use std::error::Error as _;
+use std::num::TryFromIntError;
+
 use time::OffsetDateTime;
 use voom_core::{BundleId, FileVersionId, LeaseId, MediaSnapshotId, WorkerId};
 
@@ -225,6 +228,82 @@ async fn create_planned_persists_ordered_outputs_and_replays_exact_input() {
             .collect::<Vec<_>>(),
         vec![Some("out-1"), Some("out-2")]
     );
+}
+
+#[tokio::test]
+async fn create_planned_rejects_id_above_sqlite_range_before_binding() {
+    let fixture = fixture().await;
+    let mut operation = fixture.operation();
+    operation.source_file_version_id = FileVersionId(u64::MAX);
+    let operation_key = operation.operation_key.clone();
+
+    let error = fixture
+        .repo
+        .create_planned(
+            operation,
+            &outputs(),
+            OffsetDateTime::from_unix_timestamp(0).unwrap(),
+        )
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.code(), "DB_UNREACHABLE");
+    assert!(
+        error
+            .source()
+            .and_then(|source| source.downcast_ref::<TryFromIntError>())
+            .is_some(),
+        "oversized ID must fail checked conversion before SQLite binding: {error:?}"
+    );
+    assert!(
+        error
+            .to_string()
+            .contains("audio_extract_operations.source_file_version_id")
+    );
+    let inserted: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM audio_extract_operations WHERE operation_key = ?")
+            .bind(operation_key)
+            .fetch_one(&fixture.pool)
+            .await
+            .unwrap();
+    assert_eq!(inserted, 0, "failed conversion must not insert a row");
+}
+
+#[tokio::test]
+async fn get_exact_by_key_rejects_negative_persisted_operation_id() {
+    let fixture = fixture().await;
+    let mut operation = fixture.operation();
+    operation.operation_key = "extract:v1:negative-id".to_owned();
+    sqlx::query(
+        "INSERT INTO audio_extract_operations \
+         (id, operation_key, operation_id, source_file_version_id, source_bundle_id, \
+          source_media_snapshot_id, state, created_at) \
+         VALUES (-1, ?, ?, ?, ?, ?, 'planned', ?)",
+    )
+    .bind(&operation.operation_key)
+    .bind(&operation.operation_id)
+    .bind(i64::try_from(operation.source_file_version_id.0).unwrap())
+    .bind(i64::try_from(operation.source_bundle_id.0).unwrap())
+    .bind(i64::try_from(operation.source_media_snapshot_id.0).unwrap())
+    .bind(NOW)
+    .execute(&fixture.pool)
+    .await
+    .unwrap();
+
+    let result = fixture.repo.get_exact_by_key(&operation, &[]).await;
+    let Err(error) = result else {
+        panic!("negative persisted ID must not wrap to u64");
+    };
+
+    assert_eq!(error.code(), "DB_UNREACHABLE");
+    assert!(
+        error
+            .source()
+            .and_then(|source| source.downcast_ref::<TryFromIntError>())
+            .is_some(),
+        "negative persisted ID must retain TryFromIntError: {error:?}"
+    );
+    assert!(error.to_string().contains("audio_extract_operations.id"));
 }
 
 #[tokio::test]

@@ -106,10 +106,22 @@ impl SqliteArtifactAccessPlanRepo {
               selected_access_mode, status, evidence, created_at, updated_at) \
              VALUES (?, ?, ?, ?, ?, ?, ?, 'selected', ?, ?, ?)",
         )
-        .bind(i64_from_u64(input.lease_id.0))
-        .bind(i64_from_u64(input.ticket_id.0))
-        .bind(i64_from_u64(input.worker_id.0))
-        .bind(i64_from_u64(input.node_id.0))
+        .bind(i64_from_u64(
+            input.lease_id.0,
+            concat!(module_path!(), ": ", stringify!(input.lease_id.0)),
+        )?)
+        .bind(i64_from_u64(
+            input.ticket_id.0,
+            concat!(module_path!(), ": ", stringify!(input.ticket_id.0)),
+        )?)
+        .bind(i64_from_u64(
+            input.worker_id.0,
+            concat!(module_path!(), ": ", stringify!(input.worker_id.0)),
+        )?)
+        .bind(i64_from_u64(
+            input.node_id.0,
+            concat!(module_path!(), ": ", stringify!(input.node_id.0)),
+        )?)
         .bind(&input_handles)
         .bind(&output_handles)
         .bind(input.selected_access_mode.as_str())
@@ -120,7 +132,14 @@ impl SqliteArtifactAccessPlanRepo {
         .await
         .map_err(|e| map_insert_err(&e, input.lease_id))?;
 
-        get_by_id_in_tx(tx, u64_from_i64(res.last_insert_rowid())).await
+        get_by_id_in_tx(
+            tx,
+            u64_from_i64(
+                res.last_insert_rowid(),
+                concat!(module_path!(), ": ", stringify!(res.last_insert_rowid())),
+            )?,
+        )
+        .await
     }
 
     pub async fn create_selected(
@@ -165,7 +184,10 @@ impl SqliteArtifactAccessPlanRepo {
         .bind(reason)
         .bind(&evidence)
         .bind(&now)
-        .bind(i64_from_u64(id))
+        .bind(i64_from_u64(
+            id,
+            concat!(module_path!(), ": ", stringify!(id)),
+        )?)
         .execute(&mut **tx)
         .await
         .map_err(|e| VoomError::database_context("artifact_access_plans status update", e))?;
@@ -212,7 +234,10 @@ impl SqliteArtifactAccessPlanRepo {
         lease_id: LeaseId,
     ) -> Result<Option<ArtifactAccessPlan>, VoomError> {
         let row = sqlx::query(SELECT_PLAN_BY_LEASE)
-            .bind(i64_from_u64(lease_id.0))
+            .bind(i64_from_u64(
+                lease_id.0,
+                concat!(module_path!(), ": ", stringify!(lease_id.0)),
+            )?)
             .fetch_optional(&self.pool)
             .await
             .map_err(|e| VoomError::database_context("artifact_access_plans get_by_lease", e))?;
@@ -225,7 +250,10 @@ impl SqliteArtifactAccessPlanRepo {
         lease_id: LeaseId,
     ) -> Result<Option<ArtifactAccessPlan>, VoomError> {
         let row = sqlx::query(SELECT_PLAN_BY_LEASE)
-            .bind(i64_from_u64(lease_id.0))
+            .bind(i64_from_u64(
+                lease_id.0,
+                concat!(module_path!(), ": ", stringify!(lease_id.0)),
+            )?)
             .fetch_optional(&mut **tx)
             .await
             .map_err(|e| {
@@ -241,7 +269,10 @@ impl SqliteArtifactAccessPlanRepo {
         list_by_i64(
             &self.pool,
             SELECT_PLANS_BY_TICKET,
-            i64_from_u64(ticket_id.0),
+            i64_from_u64(
+                ticket_id.0,
+                concat!(module_path!(), ": ", stringify!(ticket_id.0)),
+            )?,
             "list_by_ticket",
         )
         .await
@@ -254,7 +285,10 @@ impl SqliteArtifactAccessPlanRepo {
         list_by_i64(
             &self.pool,
             SELECT_PLANS_BY_WORKER,
-            i64_from_u64(worker_id.0),
+            i64_from_u64(
+                worker_id.0,
+                concat!(module_path!(), ": ", stringify!(worker_id.0)),
+            )?,
             "list_by_worker",
         )
         .await
@@ -267,7 +301,10 @@ impl SqliteArtifactAccessPlanRepo {
         list_by_i64(
             &self.pool,
             SELECT_PLANS_BY_NODE,
-            i64_from_u64(node_id.0),
+            i64_from_u64(
+                node_id.0,
+                concat!(module_path!(), ": ", stringify!(node_id.0)),
+            )?,
             "list_by_node",
         )
         .await
@@ -323,8 +360,14 @@ async fn validate_plan_coherence_in_tx(
          LEFT JOIN workers w ON w.id = ? \
          WHERE l.id = ?",
     )
-    .bind(i64_from_u64(input.worker_id.0))
-    .bind(i64_from_u64(input.lease_id.0))
+    .bind(i64_from_u64(
+        input.worker_id.0,
+        concat!(module_path!(), ": ", stringify!(input.worker_id.0)),
+    )?)
+    .bind(i64_from_u64(
+        input.lease_id.0,
+        concat!(module_path!(), ": ", stringify!(input.lease_id.0)),
+    )?)
     .fetch_optional(&mut **tx)
     .await
     .map_err(|e| VoomError::database_context("artifact_access_plans coherence check", e))?;
@@ -343,20 +386,18 @@ async fn validate_plan_coherence_in_tx(
         .try_get("lease_worker_id")
         .map_err(|e| map_row_err("artifact_access_plans coherence", &e))?;
 
-    if u64_from_i64(lease_ticket_id) != input.ticket_id.0 {
+    let lease_ticket_id = u64_from_i64(lease_ticket_id, "artifact_access_plans.lease_ticket_id")?;
+    if lease_ticket_id != input.ticket_id.0 {
         return Err(VoomError::Conflict(format!(
             "artifact_access_plans lease_id={} belongs to ticket_id={}, not ticket_id={}",
-            input.lease_id.0,
-            u64_from_i64(lease_ticket_id),
-            input.ticket_id.0
+            input.lease_id.0, lease_ticket_id, input.ticket_id.0
         )));
     }
-    if u64_from_i64(lease_worker_id) != input.worker_id.0 {
+    let lease_worker_id = u64_from_i64(lease_worker_id, "artifact_access_plans.lease_worker_id")?;
+    if lease_worker_id != input.worker_id.0 {
         return Err(VoomError::Conflict(format!(
             "artifact_access_plans lease_id={} belongs to worker_id={}, not worker_id={}",
-            input.lease_id.0,
-            u64_from_i64(lease_worker_id),
-            input.worker_id.0
+            input.lease_id.0, lease_worker_id, input.worker_id.0
         )));
     }
 
@@ -373,12 +414,11 @@ async fn validate_plan_coherence_in_tx(
         )));
     };
 
-    if u64_from_i64(worker_node_id) != input.node_id.0 {
+    let worker_node_id = u64_from_i64(worker_node_id, "artifact_access_plans.worker_node_id")?;
+    if worker_node_id != input.node_id.0 {
         return Err(VoomError::Conflict(format!(
             "artifact_access_plans worker_id={} belongs to node_id={}, not node_id={}",
-            input.worker_id.0,
-            u64_from_i64(worker_node_id),
-            input.node_id.0
+            input.worker_id.0, worker_node_id, input.node_id.0
         )));
     }
 
@@ -401,7 +441,10 @@ async fn get_optional_by_id_in_tx(
     id: u64,
 ) -> Result<Option<ArtifactAccessPlan>, VoomError> {
     let row = sqlx::query(SELECT_PLAN_BY_ID)
-        .bind(i64_from_u64(id))
+        .bind(i64_from_u64(
+            id,
+            concat!(module_path!(), ": ", stringify!(id)),
+        )?)
         .fetch_optional(&mut **tx)
         .await
         .map_err(|e| VoomError::database_context("artifact_access_plans get_by_id", e))?;
@@ -482,11 +525,23 @@ fn row_to_plan(row: &sqlx::sqlite::SqliteRow) -> Result<ArtifactAccessPlan, Voom
         .map_err(|e| map_row_err("artifact_access_plans", &e))?;
 
     Ok(ArtifactAccessPlan {
-        id: u64_from_i64(id),
-        lease_id: LeaseId(u64_from_i64(lease_id)),
-        ticket_id: TicketId(u64_from_i64(ticket_id)),
-        worker_id: WorkerId(u64_from_i64(worker_id)),
-        node_id: NodeId(u64_from_i64(node_id)),
+        id: u64_from_i64(id, concat!(module_path!(), ": ", stringify!(id)))?,
+        lease_id: LeaseId(u64_from_i64(
+            lease_id,
+            concat!(module_path!(), ": ", stringify!(lease_id)),
+        )?),
+        ticket_id: TicketId(u64_from_i64(
+            ticket_id,
+            concat!(module_path!(), ": ", stringify!(ticket_id)),
+        )?),
+        worker_id: WorkerId(u64_from_i64(
+            worker_id,
+            concat!(module_path!(), ": ", stringify!(worker_id)),
+        )?),
+        node_id: NodeId(u64_from_i64(
+            node_id,
+            concat!(module_path!(), ": ", stringify!(node_id)),
+        )?),
         input_handles: serde_json::from_str(&input_handles)
             .map_err(|e| VoomError::database_context("artifact_access_plans input_handles", e))?,
         output_handles: serde_json::from_str(&output_handles)

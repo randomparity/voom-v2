@@ -133,12 +133,18 @@ where
     let mut bundles: BTreeSet<BundleId> = BTreeSet::new();
     let bundle_rows: Vec<i64> =
         sqlx::query_scalar("SELECT bundle_id FROM asset_bundle_members WHERE file_asset_id = ?")
-            .bind(i64_from_u64(version.file_asset_id.0))
+            .bind(i64_from_u64(
+                version.file_asset_id.0,
+                concat!(module_path!(), ": ", stringify!(version.file_asset_id.0)),
+            )?)
             .fetch_all(&mut **tx)
             .await
             .map_err(|e| VoomError::database_context("asset_bundle_members lookup", e))?;
     for raw in bundle_rows {
-        bundles.insert(BundleId(u64_from_i64(raw)));
+        bundles.insert(BundleId(u64_from_i64(
+            raw,
+            concat!(module_path!(), ": ", stringify!(raw)),
+        )?));
     }
 
     let mut file_versions: BTreeSet<FileVersionId> = BTreeSet::new();
@@ -272,17 +278,35 @@ async fn blocking_lease_rows_in_tx(
             .try_get("scope_location_id")
             .map_err(|e| VoomError::database_context("blocking-lease row", e))?;
         let scope = match (sa, sb, sv, sl) {
-            (Some(v), None, None, None) => LeaseScope::Asset(FileAssetId(u64_from_i64(v))),
-            (None, Some(v), None, None) => LeaseScope::Bundle(BundleId(u64_from_i64(v))),
-            (None, None, Some(v), None) => LeaseScope::Version(FileVersionId(u64_from_i64(v))),
-            (None, None, None, Some(v)) => LeaseScope::Location(FileLocationId(u64_from_i64(v))),
+            (Some(v), None, None, None) => LeaseScope::Asset(FileAssetId(u64_from_i64(
+                v,
+                concat!(module_path!(), ": ", stringify!(v)),
+            )?)),
+            (None, Some(v), None, None) => LeaseScope::Bundle(BundleId(u64_from_i64(
+                v,
+                concat!(module_path!(), ": ", stringify!(v)),
+            )?)),
+            (None, None, Some(v), None) => LeaseScope::Version(FileVersionId(u64_from_i64(
+                v,
+                concat!(module_path!(), ": ", stringify!(v)),
+            )?)),
+            (None, None, None, Some(v)) => LeaseScope::Location(FileLocationId(u64_from_i64(
+                v,
+                concat!(module_path!(), ": ", stringify!(v)),
+            )?)),
             other => {
                 return Err(VoomError::database(format!(
                     "blocking-lease row: scope_*_id columns are not exactly-one: {other:?}"
                 )));
             }
         };
-        out.push((UseLeaseId(u64_from_i64(id)), scope));
+        out.push((
+            UseLeaseId(u64_from_i64(
+                id,
+                concat!(module_path!(), ": ", stringify!(id)),
+            )?),
+            scope,
+        ));
     }
     Ok(out)
 }
@@ -416,7 +440,10 @@ async fn version_is_retired(
 ) -> Result<bool, VoomError> {
     let row: Option<Option<String>> =
         sqlx::query_scalar("SELECT retired_at FROM file_versions WHERE id = ?")
-            .bind(i64_from_u64(id.0))
+            .bind(i64_from_u64(
+                id.0,
+                concat!(module_path!(), ": ", stringify!(id.0)),
+            )?)
             .fetch_optional(&mut **tx)
             .await
             .map_err(|e| VoomError::database_context("file_versions retired probe", e))?;
@@ -429,7 +456,10 @@ async fn location_is_retired(
 ) -> Result<bool, VoomError> {
     let row: Option<Option<String>> =
         sqlx::query_scalar("SELECT retired_at FROM file_locations WHERE id = ?")
-            .bind(i64_from_u64(id.0))
+            .bind(i64_from_u64(
+                id.0,
+                concat!(module_path!(), ": ", stringify!(id.0)),
+            )?)
             .fetch_optional(&mut **tx)
             .await
             .map_err(|e| VoomError::database_context("file_locations retired probe", e))?;
@@ -442,7 +472,10 @@ async fn version_content_hash(
 ) -> Result<Option<String>, VoomError> {
     let row: Option<String> =
         sqlx::query_scalar("SELECT content_hash FROM file_versions WHERE id = ?")
-            .bind(i64_from_u64(id.0))
+            .bind(i64_from_u64(
+                id.0,
+                concat!(module_path!(), ": ", stringify!(id.0)),
+            )?)
             .fetch_optional(&mut **tx)
             .await
             .map_err(|e| VoomError::database_context("file_versions hash probe", e))?;
@@ -468,14 +501,20 @@ pub(super) async fn expand_scope_members(
     commit_id: CommitId,
     closure: &AffectedScopeClosure,
 ) -> Result<(), VoomError> {
-    let cid = i64_from_u64(commit_id.0);
+    let cid = i64_from_u64(
+        commit_id.0,
+        concat!(module_path!(), ": ", stringify!(commit_id.0)),
+    )?;
     for id in &closure.file_assets {
         sqlx::query(
             "INSERT INTO commit_intent_scope_members \
              (commit_intent_id, scope_asset_id) VALUES (?, ?)",
         )
         .bind(cid)
-        .bind(i64_from_u64(id.0))
+        .bind(i64_from_u64(
+            id.0,
+            concat!(module_path!(), ": ", stringify!(id.0)),
+        )?)
         .execute(&mut **tx)
         .await
         .map_err(|e| VoomError::database_context("scope_members asset insert", e))?;
@@ -486,7 +525,10 @@ pub(super) async fn expand_scope_members(
              (commit_intent_id, scope_bundle_id) VALUES (?, ?)",
         )
         .bind(cid)
-        .bind(i64_from_u64(id.0))
+        .bind(i64_from_u64(
+            id.0,
+            concat!(module_path!(), ": ", stringify!(id.0)),
+        )?)
         .execute(&mut **tx)
         .await
         .map_err(|e| VoomError::database_context("scope_members bundle insert", e))?;
@@ -497,7 +539,10 @@ pub(super) async fn expand_scope_members(
              (commit_intent_id, scope_version_id) VALUES (?, ?)",
         )
         .bind(cid)
-        .bind(i64_from_u64(id.0))
+        .bind(i64_from_u64(
+            id.0,
+            concat!(module_path!(), ": ", stringify!(id.0)),
+        )?)
         .execute(&mut **tx)
         .await
         .map_err(|e| VoomError::database_context("scope_members version insert", e))?;
@@ -508,7 +553,10 @@ pub(super) async fn expand_scope_members(
              (commit_intent_id, scope_location_id) VALUES (?, ?)",
         )
         .bind(cid)
-        .bind(i64_from_u64(id.0))
+        .bind(i64_from_u64(
+            id.0,
+            concat!(module_path!(), ": ", stringify!(id.0)),
+        )?)
         .execute(&mut **tx)
         .await
         .map_err(|e| VoomError::database_context("scope_members location insert", e))?;

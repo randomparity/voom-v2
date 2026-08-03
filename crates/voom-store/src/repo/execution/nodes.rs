@@ -122,7 +122,10 @@ impl SqliteNodeRepo {
         .await
         .map_err(|e| VoomError::database_context("nodes insert", e))?;
         Ok(Node {
-            id: NodeId(u64_from_i64(res.last_insert_rowid())),
+            id: NodeId(u64_from_i64(
+                res.last_insert_rowid(),
+                concat!(module_path!(), ": ", stringify!(res.last_insert_rowid())),
+            )?),
             name: input.name,
             kind: input.kind,
             status: NodeStatus::Registered,
@@ -147,7 +150,10 @@ impl SqliteNodeRepo {
              heartbeat_ttl_seconds, auth_token_hint, metadata, epoch \
              FROM nodes WHERE id = ?",
         )
-        .bind(i64_from_u64(id.0))
+        .bind(i64_from_u64(
+            id.0,
+            concat!(module_path!(), ": ", stringify!(id.0)),
+        )?)
         .fetch_optional(&self.pool)
         .await
         .map_err(|e| VoomError::database_context("nodes get", e))?;
@@ -190,11 +196,16 @@ impl SqliteNodeRepo {
         tx: &mut Transaction<'_, Sqlite>,
         id: NodeId,
     ) -> Result<Option<NodeAuthRecord>, VoomError> {
+        // An unrepresentable ID cannot identify a SQLite row, so preserve this
+        // lookup's absent-record semantics without sending a wrapped value to SQLite.
+        let Ok(id) = i64_from_u64(id.0, "nodes.id") else {
+            return Ok(None);
+        };
         let row = sqlx::query(
             "SELECT id, kind, status, last_seen_at, heartbeat_ttl_seconds, auth_token_hash \
              FROM nodes WHERE id = ?",
         )
-        .bind(i64_from_u64(id.0))
+        .bind(id)
         .fetch_optional(&mut **tx)
         .await
         .map_err(|e| VoomError::database_context("nodes auth record", e))?;
@@ -230,7 +241,10 @@ impl SqliteNodeRepo {
              WHERE id = ? AND status IN ('registered','active','stale')",
         )
         .bind(&ts)
-        .bind(i64_from_u64(id.0))
+        .bind(i64_from_u64(
+            id.0,
+            concat!(module_path!(), ": ", stringify!(id.0)),
+        )?)
         .execute(&mut **tx)
         .await
         .map_err(|e| VoomError::database_context("nodes heartbeat", e))?;
@@ -311,8 +325,14 @@ impl SqliteNodeRepo {
         )
         .bind(&ts)
         .bind(&ts)
-        .bind(i64_from_u64(id.0))
-        .bind(i64_from_u64(expected_epoch))
+        .bind(i64_from_u64(
+            id.0,
+            concat!(module_path!(), ": ", stringify!(id.0)),
+        )?)
+        .bind(i64_from_u64(
+            expected_epoch,
+            concat!(module_path!(), ": ", stringify!(expected_epoch)),
+        )?)
         .execute(&mut **tx)
         .await
         .map_err(|e| VoomError::database_context("nodes retire", e))?;
@@ -348,10 +368,16 @@ async fn mark_stale_candidate_in_tx(
            AND heartbeat_ttl_seconds = ? \
            AND epoch = ?",
     )
-    .bind(i64_from_u64(node.id.0))
+    .bind(i64_from_u64(
+        node.id.0,
+        concat!(module_path!(), ": ", stringify!(node.id.0)),
+    )?)
     .bind(last_seen_at)
     .bind(i64::from(node.heartbeat_ttl_seconds))
-    .bind(i64_from_u64(node.epoch))
+    .bind(i64_from_u64(
+        node.epoch,
+        concat!(module_path!(), ": ", stringify!(node.epoch)),
+    )?)
     .execute(&mut **tx)
     .await
     .map_err(|e| VoomError::database_context("nodes mark stale", e))?;
@@ -376,7 +402,10 @@ async fn get_in_tx(
          heartbeat_ttl_seconds, auth_token_hint, metadata, epoch \
          FROM nodes WHERE id = ?",
     )
-    .bind(i64_from_u64(id.0))
+    .bind(i64_from_u64(
+        id.0,
+        concat!(module_path!(), ": ", stringify!(id.0)),
+    )?)
     .fetch_optional(&mut **tx)
     .await
     .map_err(|e| VoomError::database_context("nodes reload", e))?;
@@ -410,7 +439,10 @@ fn row_to_node(row: &sqlx::sqlite::SqliteRow) -> Result<Node, VoomError> {
         .map_err(|e| map_row_err("nodes", &e))?;
     let epoch: i64 = row.try_get("epoch").map_err(|e| map_row_err("nodes", &e))?;
     Ok(Node {
-        id: NodeId(u64_from_i64(id)),
+        id: NodeId(u64_from_i64(
+            id,
+            concat!(module_path!(), ": ", stringify!(id)),
+        )?),
         name,
         kind: NodeKind::parse_database("nodes.kind", &kind)?,
         status: NodeStatus::parse_database("nodes.status", &status)?,
@@ -421,7 +453,7 @@ fn row_to_node(row: &sqlx::sqlite::SqliteRow) -> Result<Node, VoomError> {
         auth_token_hint,
         metadata: serde_json::from_str(&metadata)
             .map_err(|e| VoomError::database_context("nodes.metadata decode", e))?,
-        epoch: u64_from_i64(epoch),
+        epoch: u64_from_i64(epoch, concat!(module_path!(), ": ", stringify!(epoch)))?,
     })
 }
 
@@ -441,7 +473,10 @@ fn row_to_auth_record(row: &sqlx::sqlite::SqliteRow) -> Result<NodeAuthRecord, V
         .try_get("auth_token_hash")
         .map_err(|e| map_row_err("nodes", &e))?;
     Ok(NodeAuthRecord {
-        id: NodeId(u64_from_i64(id)),
+        id: NodeId(u64_from_i64(
+            id,
+            concat!(module_path!(), ": ", stringify!(id)),
+        )?),
         kind: NodeKind::parse_database("nodes.kind", &kind)?,
         status: NodeStatus::parse_database("nodes.status", &status)?,
         last_seen_at: parse_iso8601(&last_seen)?,

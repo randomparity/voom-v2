@@ -117,13 +117,19 @@ impl SqliteBundleRepo {
             "INSERT INTO asset_bundles (media_variant_id, display_name, created_at) \
              VALUES (?, ?, ?)",
         )
-        .bind(i64_from_u64(input.media_variant_id.0))
+        .bind(i64_from_u64(
+            input.media_variant_id.0,
+            concat!(module_path!(), ": ", stringify!(input.media_variant_id.0)),
+        )?)
         .bind(&input.display_name)
         .bind(&ts)
         .execute(&mut **tx)
         .await
         .map_err(|e| VoomError::database_context("asset_bundles insert", e))?;
-        let id = BundleId(u64_from_i64(res.last_insert_rowid()));
+        let id = BundleId(u64_from_i64(
+            res.last_insert_rowid(),
+            concat!(module_path!(), ": ", stringify!(res.last_insert_rowid())),
+        )?);
         get_bundle_in_tx(tx, id)
             .await?
             .ok_or_else(|| VoomError::Internal(format!("asset_bundles post-insert get: {id}")))
@@ -144,7 +150,10 @@ impl SqliteBundleRepo {
 
     pub async fn get(&self, id: BundleId) -> Result<Option<AssetBundle>, VoomError> {
         let row = sqlx::query(SELECT_BUNDLE_COLS)
-            .bind(i64_from_u64(id.0))
+            .bind(i64_from_u64(
+                id.0,
+                concat!(module_path!(), ": ", stringify!(id.0)),
+            )?)
             .fetch_optional(&self.pool)
             .await
             .map_err(|e| VoomError::database_context("asset_bundles get", e))?;
@@ -169,7 +178,13 @@ impl SqliteBundleRepo {
              WHERE (?1 IS NULL OR b.id < ?1) \
              GROUP BY b.id ORDER BY b.id DESC LIMIT ?2",
         )
-        .bind(after_id.map(i64_from_u64))
+        .bind(
+            after_id
+                .map(|value| {
+                    i64_from_u64(value, concat!(module_path!(), ": ", stringify!(after_id)))
+                })
+                .transpose()?,
+        )
         .bind(i64::from(limit))
         .fetch_all(&self.pool)
         .await
@@ -180,7 +195,13 @@ impl SqliteBundleRepo {
                 let member_count: i64 = row
                     .try_get("member_count")
                     .map_err(|e| map_row_err("asset_bundles", &e))?;
-                Ok((bundle, u64_from_i64(member_count)))
+                Ok((
+                    bundle,
+                    u64_from_i64(
+                        member_count,
+                        concat!(module_path!(), ": ", stringify!(member_count)),
+                    )?,
+                ))
             })
             .collect()
     }
@@ -193,7 +214,10 @@ impl SqliteBundleRepo {
             "SELECT id, media_variant_id, display_name, created_at, epoch \
              FROM asset_bundles WHERE media_variant_id = ? ORDER BY id ASC",
         )
-        .bind(i64_from_u64(media_variant_id.0))
+        .bind(i64_from_u64(
+            media_variant_id.0,
+            concat!(module_path!(), ": ", stringify!(media_variant_id.0)),
+        )?)
         .fetch_all(&self.pool)
         .await
         .map_err(|e| VoomError::database_context("asset_bundles list", e))?;
@@ -212,8 +236,14 @@ impl SqliteBundleRepo {
              WHERE id = ? AND epoch = ?",
         )
         .bind(&display_name)
-        .bind(i64_from_u64(id.0))
-        .bind(i64_from_u64(expected_epoch))
+        .bind(i64_from_u64(
+            id.0,
+            concat!(module_path!(), ": ", stringify!(id.0)),
+        )?)
+        .bind(i64_from_u64(
+            expected_epoch,
+            concat!(module_path!(), ": ", stringify!(expected_epoch)),
+        )?)
         .execute(&mut **tx)
         .await
         .map_err(|e| VoomError::database_context("asset_bundles update", e))?;
@@ -236,8 +266,14 @@ impl SqliteBundleRepo {
             "INSERT INTO asset_bundle_members (bundle_id, file_asset_id, role) \
              VALUES (?, ?, ?)",
         )
-        .bind(i64_from_u64(input.bundle_id.0))
-        .bind(i64_from_u64(input.file_asset_id.0))
+        .bind(i64_from_u64(
+            input.bundle_id.0,
+            concat!(module_path!(), ": ", stringify!(input.bundle_id.0)),
+        )?)
+        .bind(i64_from_u64(
+            input.file_asset_id.0,
+            concat!(module_path!(), ": ", stringify!(input.file_asset_id.0)),
+        )?)
         .bind(input.role.as_str())
         .execute(&mut **tx)
         .await
@@ -255,7 +291,10 @@ impl SqliteBundleRepo {
                 VoomError::database(msg)
             }
         })?;
-        let id = u64_from_i64(res.last_insert_rowid());
+        let id = u64_from_i64(
+            res.last_insert_rowid(),
+            concat!(module_path!(), ": ", stringify!(res.last_insert_rowid())),
+        )?;
         Ok(BundleMember {
             id,
             bundle_id: input.bundle_id,
@@ -286,7 +325,10 @@ impl SqliteBundleRepo {
             "SELECT id, bundle_id, file_asset_id, role FROM asset_bundle_members \
              WHERE file_asset_id = ?",
         )
-        .bind(i64_from_u64(file_asset_id.0))
+        .bind(i64_from_u64(
+            file_asset_id.0,
+            concat!(module_path!(), ": ", stringify!(file_asset_id.0)),
+        )?)
         .fetch_optional(&mut **tx)
         .await
         .map_err(|e| VoomError::database_context("asset_bundle_members get_by_asset", e))?;
@@ -304,8 +346,14 @@ impl SqliteBundleRepo {
              WHERE bundle_id = ? AND file_asset_id = ? \
              RETURNING id, bundle_id, file_asset_id, role",
         )
-        .bind(i64_from_u64(bundle_id.0))
-        .bind(i64_from_u64(file_asset_id.0))
+        .bind(i64_from_u64(
+            bundle_id.0,
+            concat!(module_path!(), ": ", stringify!(bundle_id.0)),
+        )?)
+        .bind(i64_from_u64(
+            file_asset_id.0,
+            concat!(module_path!(), ": ", stringify!(file_asset_id.0)),
+        )?)
         .fetch_optional(&mut **tx)
         .await
         .map_err(|e| VoomError::database_context("asset_bundle_members delete", e))?;
@@ -322,7 +370,10 @@ impl SqliteBundleRepo {
             "SELECT id, bundle_id, file_asset_id, role FROM asset_bundle_members \
              WHERE bundle_id = ? ORDER BY id ASC",
         )
-        .bind(i64_from_u64(bundle_id.0))
+        .bind(i64_from_u64(
+            bundle_id.0,
+            concat!(module_path!(), ": ", stringify!(bundle_id.0)),
+        )?)
         .fetch_all(&self.pool)
         .await
         .map_err(|e| VoomError::database_context("asset_bundle_members list", e))?;
@@ -338,7 +389,10 @@ async fn get_bundle_in_tx(
     id: BundleId,
 ) -> Result<Option<AssetBundle>, VoomError> {
     let row = sqlx::query(SELECT_BUNDLE_COLS)
-        .bind(i64_from_u64(id.0))
+        .bind(i64_from_u64(
+            id.0,
+            concat!(module_path!(), ": ", stringify!(id.0)),
+        )?)
         .fetch_optional(&mut **tx)
         .await
         .map_err(|e| VoomError::database_context("asset_bundles get_in_tx", e))?;
@@ -362,11 +416,17 @@ fn row_to_bundle(row: &sqlx::sqlite::SqliteRow) -> Result<AssetBundle, VoomError
         .try_get("epoch")
         .map_err(|e| map_row_err("asset_bundles", &e))?;
     Ok(AssetBundle {
-        id: BundleId(u64_from_i64(id)),
-        media_variant_id: MediaVariantId(u64_from_i64(media_variant_id)),
+        id: BundleId(u64_from_i64(
+            id,
+            concat!(module_path!(), ": ", stringify!(id)),
+        )?),
+        media_variant_id: MediaVariantId(u64_from_i64(
+            media_variant_id,
+            concat!(module_path!(), ": ", stringify!(media_variant_id)),
+        )?),
         display_name,
         created_at: parse_iso8601(&created_at)?,
-        epoch: u64_from_i64(epoch),
+        epoch: u64_from_i64(epoch, concat!(module_path!(), ": ", stringify!(epoch)))?,
     })
 }
 
@@ -384,9 +444,15 @@ fn row_to_bundle_member(row: &sqlx::sqlite::SqliteRow) -> Result<BundleMember, V
         .try_get("role")
         .map_err(|e| map_row_err("asset_bundle_members", &e))?;
     Ok(BundleMember {
-        id: u64_from_i64(id),
-        bundle_id: BundleId(u64_from_i64(bundle_id)),
-        file_asset_id: FileAssetId(u64_from_i64(file_asset_id)),
+        id: u64_from_i64(id, concat!(module_path!(), ": ", stringify!(id)))?,
+        bundle_id: BundleId(u64_from_i64(
+            bundle_id,
+            concat!(module_path!(), ": ", stringify!(bundle_id)),
+        )?),
+        file_asset_id: FileAssetId(u64_from_i64(
+            file_asset_id,
+            concat!(module_path!(), ": ", stringify!(file_asset_id)),
+        )?),
         role: BundleMemberRole::parse(&role)?,
     })
 }

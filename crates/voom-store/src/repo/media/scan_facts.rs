@@ -42,10 +42,22 @@ pub async fn record_scan_fact_in_tx(
         "INSERT INTO scan_file_facts (file_location_id, dev, ino, nlink, observed_at) \
          VALUES (?, ?, ?, ?, ?)",
     )
-    .bind(i64_from_u64(file_location_id.0))
-    .bind(i64_from_u64(dev))
-    .bind(i64_from_u64(ino))
-    .bind(i64_from_u64(nlink))
+    .bind(i64_from_u64(
+        file_location_id.0,
+        concat!(module_path!(), ": ", stringify!(file_location_id.0)),
+    )?)
+    .bind(i64_from_u64(
+        dev,
+        concat!(module_path!(), ": ", stringify!(dev)),
+    )?)
+    .bind(i64_from_u64(
+        ino,
+        concat!(module_path!(), ": ", stringify!(ino)),
+    )?)
+    .bind(i64_from_u64(
+        nlink,
+        concat!(module_path!(), ": ", stringify!(nlink)),
+    )?)
     .bind(&ts)
     .execute(&mut **tx)
     .await
@@ -80,8 +92,14 @@ pub async fn find_live_hardlink_location_in_tx(
          ORDER BY fl.id ASC \
          LIMIT 1",
     )
-    .bind(i64_from_u64(dev))
-    .bind(i64_from_u64(ino))
+    .bind(i64_from_u64(
+        dev,
+        concat!(module_path!(), ": ", stringify!(dev)),
+    )?)
+    .bind(i64_from_u64(
+        ino,
+        concat!(module_path!(), ": ", stringify!(ino)),
+    )?)
     .bind(path)
     .fetch_optional(&mut **tx)
     .await
@@ -103,10 +121,19 @@ pub async fn find_live_hardlink_location_in_tx(
         .try_get("size_bytes")
         .map_err(|e| VoomError::database_context("scan_file_facts size bytes", e))?;
     Ok(Some(ScanFactMatch {
-        file_location_id: FileLocationId(u64_from_i64(file_location_id)),
-        file_version_id: FileVersionId(u64_from_i64(file_version_id)),
+        file_location_id: FileLocationId(u64_from_i64(
+            file_location_id,
+            concat!(module_path!(), ": ", stringify!(file_location_id)),
+        )?),
+        file_version_id: FileVersionId(u64_from_i64(
+            file_version_id,
+            concat!(module_path!(), ": ", stringify!(file_version_id)),
+        )?),
         content_hash,
-        size_bytes: u64_from_i64(size_bytes),
+        size_bytes: u64_from_i64(
+            size_bytes,
+            concat!(module_path!(), ": ", stringify!(size_bytes)),
+        )?,
     }))
 }
 

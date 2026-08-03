@@ -84,7 +84,10 @@ impl SqliteEventRepo {
                AND subject_id = ? \
              ORDER BY event_id DESC LIMIT 1",
         )
-        .bind(i64_from_u64(ticket_id.0))
+        .bind(i64_from_u64(
+            ticket_id.0,
+            concat!(module_path!(), ": ", stringify!(ticket_id.0)),
+        )?)
         .fetch_optional(&self.pool)
         .await
         .map_err(|e| VoomError::database_context("latest ticket failure event", e))?;
@@ -128,13 +131,25 @@ impl EventRepo for SqliteEventRepo {
         .bind(occurred)
         .bind(env.payload.kind().as_str())
         .bind(env.subject_type.as_str())
-        .bind(env.subject_id.map(i64_from_u64))
+        .bind(
+            env.subject_id
+                .map(|value| {
+                    i64_from_u64(
+                        value,
+                        concat!(module_path!(), ": ", stringify!(env.subject_id)),
+                    )
+                })
+                .transpose()?,
+        )
         .bind(env.trace_id.as_ref().map(|t| t.0.clone()))
         .bind(payload_json)
         .execute(&mut **tx)
         .await
         .map_err(|e| VoomError::database_context("events append", e))?;
-        Ok(EventId(u64_from_i64(res.last_insert_rowid())))
+        Ok(EventId(u64_from_i64(
+            res.last_insert_rowid(),
+            concat!(module_path!(), ": ", stringify!(res.last_insert_rowid())),
+        )?))
     }
 
     async fn list(&self, filter: EventFilter, page: Page) -> Result<EventPage, VoomError> {
@@ -150,7 +165,10 @@ impl EventRepo for SqliteEventRepo {
             "SELECT event_id, occurred_at, kind, subject_type, subject_id, trace_id, payload \
              FROM events WHERE event_id = ?",
         )
-        .bind(i64_from_u64(event_id.0))
+        .bind(i64_from_u64(
+            event_id.0,
+            concat!(module_path!(), ": ", stringify!(event_id.0)),
+        )?)
         .fetch_optional(&self.pool)
         .await
         .map_err(|e| VoomError::database_context("events get", e))?;
@@ -208,7 +226,10 @@ async fn page_query(
         q = q.bind(s.as_str());
     }
     if let Some(s) = filter.subject_id {
-        q = q.bind(i64_from_u64(s));
+        q = q.bind(i64_from_u64(
+            s,
+            concat!(module_path!(), ": ", stringify!(s)),
+        )?);
     }
     if let Some(since) = filter.since {
         q = q.bind(iso8601(since)?);
@@ -217,7 +238,10 @@ async fn page_query(
         q = q.bind(iso8601(until)?);
     }
     if let Some(c) = page.cursor {
-        q = q.bind(i64_from_u64(c));
+        q = q.bind(i64_from_u64(
+            c,
+            concat!(module_path!(), ": ", stringify!(c)),
+        )?);
     }
     q = q.bind(i64::from(page.limit));
 
@@ -254,7 +278,7 @@ fn event_row_id(row: &sqlx::sqlite::SqliteRow) -> Result<u64, VoomError> {
     let id: i64 = row
         .try_get("event_id")
         .map_err(|e| VoomError::database_context("read event_id", e))?;
-    Ok(u64_from_i64(id))
+    u64_from_i64(id, "events.event_id")
 }
 
 /// Reconstruct an `EventRow`, or `Ok(None)` if the row's `kind` is not in this
@@ -307,7 +331,14 @@ fn row_to_event(row: &sqlx::sqlite::SqliteRow) -> Result<Option<EventRow>, VoomE
         envelope: EventEnvelope {
             occurred_at,
             subject_type,
-            subject_id: subject_id_i64.map(u64_from_i64),
+            subject_id: subject_id_i64
+                .map(|value| {
+                    u64_from_i64(
+                        value,
+                        concat!(module_path!(), ": ", stringify!(subject_id_i64)),
+                    )
+                })
+                .transpose()?,
             trace_id: trace_id.map(TraceId),
             payload: event,
         },

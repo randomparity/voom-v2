@@ -327,7 +327,10 @@ async fn read_authorized_intent_in_tx(
         "SELECT state, target, closure_initial, closure_authorized, target_row_epochs, epoch \
          FROM commit_intents WHERE id = ?",
     )
-    .bind(i64_from_u64(commit_id.0))
+    .bind(i64_from_u64(
+        commit_id.0,
+        concat!(module_path!(), ": ", stringify!(commit_id.0)),
+    )?)
     .fetch_optional(&mut **tx)
     .await
     .map_err(|e| VoomError::database_context("finalize: read intent", e))?;
@@ -347,7 +350,10 @@ async fn read_authorized_intent_in_tx(
     let epoch_raw: i64 = row
         .try_get("epoch")
         .map_err(|e| VoomError::database_context("finalize: read epoch", e))?;
-    let row_epoch = u64_from_i64(epoch_raw);
+    let row_epoch = u64_from_i64(
+        epoch_raw,
+        concat!(module_path!(), ": ", stringify!(epoch_raw)),
+    )?;
     if row_epoch != expected_epoch {
         return Err(VoomError::Conflict(format!(
             "finalize: commit_intents row {commit_id} epoch {row_epoch} != permit epoch {expected_epoch}"
@@ -427,9 +433,18 @@ async fn finalize_not_performed_in_tx(
          WHERE id = ? AND state = 'authorized' AND epoch = ?",
     )
     .bind(&aborted_iso)
-    .bind(i64_from_u64(new_epoch))
-    .bind(i64_from_u64(row.commit_id.0))
-    .bind(i64_from_u64(row.epoch))
+    .bind(i64_from_u64(
+        new_epoch,
+        concat!(module_path!(), ": ", stringify!(new_epoch)),
+    )?)
+    .bind(i64_from_u64(
+        row.commit_id.0,
+        concat!(module_path!(), ": ", stringify!(row.commit_id.0)),
+    )?)
+    .bind(i64_from_u64(
+        row.epoch,
+        concat!(module_path!(), ": ", stringify!(row.epoch)),
+    )?)
     .execute(&mut **tx)
     .await
     .map_err(|e| VoomError::database_context("finalize: NotPerformed UPDATE", e))?;
@@ -734,7 +749,10 @@ async fn push_drift_if_mismatch(
     // table-name binding).
     let sql = format!("SELECT epoch FROM {table} WHERE id = ?");
     let observed: Option<i64> = sqlx::query_scalar(&sql)
-        .bind(i64_from_u64(id))
+        .bind(i64_from_u64(
+            id,
+            concat!(module_path!(), ": ", stringify!(id)),
+        )?)
         .fetch_optional(&mut **tx)
         .await
         .map_err(|e| VoomError::database_context(format!("finalize: epoch probe {table}"), e))?;
@@ -743,7 +761,7 @@ async fn push_drift_if_mismatch(
     // it as a deleted member; the gate's audit row carries the snapshot
     // value as `expected` and the sentinel as `observed`.
     let observed = match observed {
-        Some(raw) => u64_from_i64(raw),
+        Some(raw) => u64_from_i64(raw, concat!(module_path!(), ": ", stringify!(raw)))?,
         None => u64::MAX,
     };
     if observed != expected {
@@ -788,9 +806,18 @@ where
          WHERE id = ? AND state = 'authorized' AND epoch = ?",
     )
     .bind(&finalized_iso)
-    .bind(i64_from_u64(new_epoch))
-    .bind(i64_from_u64(row.commit_id.0))
-    .bind(i64_from_u64(row.epoch))
+    .bind(i64_from_u64(
+        new_epoch,
+        concat!(module_path!(), ": ", stringify!(new_epoch)),
+    )?)
+    .bind(i64_from_u64(
+        row.commit_id.0,
+        concat!(module_path!(), ": ", stringify!(row.commit_id.0)),
+    )?)
+    .bind(i64_from_u64(
+        row.epoch,
+        concat!(module_path!(), ": ", stringify!(row.epoch)),
+    )?)
     .execute(&mut **tx)
     .await
     .map_err(|e| VoomError::database_context("finalize: completed UPDATE", e))?;
@@ -846,9 +873,18 @@ async fn finalize_mutation_failed_in_tx(
          WHERE id = ? AND state = 'authorized' AND epoch = ?",
     )
     .bind("mutation_failed")
-    .bind(i64_from_u64(new_epoch))
-    .bind(i64_from_u64(row.commit_id.0))
-    .bind(i64_from_u64(row.epoch))
+    .bind(i64_from_u64(
+        new_epoch,
+        concat!(module_path!(), ": ", stringify!(new_epoch)),
+    )?)
+    .bind(i64_from_u64(
+        row.commit_id.0,
+        concat!(module_path!(), ": ", stringify!(row.commit_id.0)),
+    )?)
+    .bind(i64_from_u64(
+        row.epoch,
+        concat!(module_path!(), ": ", stringify!(row.epoch)),
+    )?)
     .execute(&mut **tx)
     .await
     .map_err(|e| VoomError::database_context("finalize: mutation_failed recovery UPDATE", e))?;
@@ -971,9 +1007,18 @@ async fn finalize_trip_wire_in_tx(
          WHERE id = ? AND state = 'authorized' AND epoch = ?",
     )
     .bind(reason_str)
-    .bind(i64_from_u64(new_epoch))
-    .bind(i64_from_u64(row.commit_id.0))
-    .bind(i64_from_u64(row.epoch))
+    .bind(i64_from_u64(
+        new_epoch,
+        concat!(module_path!(), ": ", stringify!(new_epoch)),
+    )?)
+    .bind(i64_from_u64(
+        row.commit_id.0,
+        concat!(module_path!(), ": ", stringify!(row.commit_id.0)),
+    )?)
+    .bind(i64_from_u64(
+        row.epoch,
+        concat!(module_path!(), ": ", stringify!(row.epoch)),
+    )?)
     .execute(&mut **tx)
     .await
     .map_err(|e| VoomError::database_context("finalize: recovery_required UPDATE", e))?;

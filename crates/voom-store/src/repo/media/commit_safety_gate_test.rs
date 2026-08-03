@@ -2508,7 +2508,12 @@ async fn commit_intent_state_and_epoch(
     let abort_reason: Option<String> = row.try_get("abort_reason").unwrap();
     let aborted_at: Option<String> = row.try_get("aborted_at").unwrap();
     let epoch_raw: i64 = row.try_get("epoch").unwrap();
-    (state, abort_reason, aborted_at, u64_from_i64(epoch_raw))
+    (
+        state,
+        abort_reason,
+        aborted_at,
+        u64_from_i64(epoch_raw, "commit_intents.epoch").unwrap(),
+    )
 }
 
 #[tokio::test]

@@ -128,7 +128,10 @@ impl SqliteIssueRepo {
                 return Ok(PolicyIssueMutation {
                     kind: PolicyIssueMutationKind::Created,
                     row: PolicyIssueRow {
-                        id: IssueId(u64_from_i64(result.last_insert_rowid())),
+                        id: IssueId(u64_from_i64(
+                            result.last_insert_rowid(),
+                            concat!(module_path!(), ": ", stringify!(result.last_insert_rowid())),
+                        )?),
                         dedupe_key: draft.dedupe_key,
                         status: draft.status,
                         epoch: 0,
@@ -165,7 +168,10 @@ impl SqliteIssueRepo {
         .bind(&draft.body)
         .bind(&draft.priority_reason)
         .bind(&timestamp)
-        .bind(i64_from_u64(existing.row.id.0))
+        .bind(i64_from_u64(
+            existing.row.id.0,
+            concat!(module_path!(), ": ", stringify!(existing.row.id.0)),
+        )?)
         .execute(&mut **tx)
         .await
         .map_err(|e| VoomError::database_context("issues update", e))?;
@@ -203,7 +209,10 @@ impl SqliteIssueRepo {
         .bind(body)
         .bind(&timestamp)
         .bind(&timestamp)
-        .bind(i64_from_u64(existing.id.0))
+        .bind(i64_from_u64(
+            existing.id.0,
+            concat!(module_path!(), ": ", stringify!(existing.id.0)),
+        )?)
         .execute(&mut **tx)
         .await
         .map_err(|e| VoomError::database_context("issues resolve", e))?;
@@ -278,7 +287,10 @@ impl SqliteIssueRepo {
         .await;
 
         let issue_id = match inserted {
-            Ok(result) => IssueId(u64_from_i64(result.last_insert_rowid())),
+            Ok(result) => IssueId(u64_from_i64(
+                result.last_insert_rowid(),
+                concat!(module_path!(), ": ", stringify!(result.last_insert_rowid())),
+            )?),
             Err(err) => {
                 let Some(existing) = select_terminal_failure_id(tx, &dedupe_key).await? else {
                     return Err(VoomError::database_context(
@@ -313,7 +325,8 @@ async fn select_terminal_failure_id(
     .fetch_optional(&mut **tx)
     .await
     .map_err(|e| VoomError::database_context("terminal_failure issue select", e))?;
-    Ok(id.map(|id| IssueId(u64_from_i64(id))))
+    id.map(|id| u64_from_i64(id, concat!(module_path!(), ": ", stringify!(id))).map(IssueId))
+        .transpose()
 }
 
 async fn insert_issue_link(
@@ -327,10 +340,16 @@ async fn insert_issue_link(
         "INSERT INTO issue_links (issue_id, link_type, target_type, target_id, created_at) \
          VALUES (?, ?, ?, ?, ?)",
     )
-    .bind(i64_from_u64(issue_id.0))
+    .bind(i64_from_u64(
+        issue_id.0,
+        concat!(module_path!(), ": ", stringify!(issue_id.0)),
+    )?)
     .bind(link_kind)
     .bind(link_kind)
-    .bind(i64_from_u64(target_id))
+    .bind(i64_from_u64(
+        target_id,
+        concat!(module_path!(), ": ", stringify!(target_id)),
+    )?)
     .bind(timestamp)
     .execute(&mut **tx)
     .await
@@ -393,10 +412,13 @@ fn row_to_policy_issue(row: &sqlx::sqlite::SqliteRow) -> Result<PolicyIssueRow, 
         .try_get("epoch")
         .map_err(|e| VoomError::database_context("read issue epoch", e))?;
     Ok(PolicyIssueRow {
-        id: IssueId(u64_from_i64(id)),
+        id: IssueId(u64_from_i64(
+            id,
+            concat!(module_path!(), ": ", stringify!(id)),
+        )?),
         dedupe_key,
         status: PolicyIssueStatus::parse(&status)?,
-        epoch: u64_from_i64(epoch),
+        epoch: u64_from_i64(epoch, concat!(module_path!(), ": ", stringify!(epoch)))?,
     })
 }
 
@@ -552,7 +574,10 @@ impl SqliteIssueRepo {
             q = q.bind(severity.as_str());
         }
         if let Some(cursor) = cursor {
-            q = q.bind(i64_from_u64(cursor));
+            q = q.bind(i64_from_u64(
+                cursor,
+                concat!(module_path!(), ": ", stringify!(cursor)),
+            )?);
         }
         q = q.bind(i64::from(limit));
 
@@ -574,7 +599,10 @@ impl SqliteIssueRepo {
     /// Propagates database errors and enum-vocabulary violations.
     pub async fn get_issue(&self, id: IssueId) -> Result<Option<IssueRecord>, VoomError> {
         let row = sqlx::query(&format!("SELECT {ISSUE_COLUMNS} FROM issues WHERE id = ?"))
-            .bind(i64_from_u64(id.0))
+            .bind(i64_from_u64(
+                id.0,
+                concat!(module_path!(), ": ", stringify!(id.0)),
+            )?)
             .fetch_optional(&self.pool)
             .await
             .map_err(|e| VoomError::database_context("issues get", e))?;
@@ -607,7 +635,10 @@ impl SqliteIssueRepo {
             .bind(priority.as_str())
             .bind(reason)
             .bind(&timestamp)
-            .bind(i64_from_u64(id.0)),
+            .bind(i64_from_u64(
+                id.0,
+                concat!(module_path!(), ": ", stringify!(id.0)),
+            )?),
             None => sqlx::query(
                 "UPDATE issues \
                  SET priority = ?, priority_source = 'user', updated_at = ?, epoch = epoch + 1 \
@@ -615,7 +646,10 @@ impl SqliteIssueRepo {
             )
             .bind(priority.as_str())
             .bind(&timestamp)
-            .bind(i64_from_u64(id.0)),
+            .bind(i64_from_u64(
+                id.0,
+                concat!(module_path!(), ": ", stringify!(id.0)),
+            )?),
         }
         .execute(&mut **tx)
         .await
@@ -644,7 +678,10 @@ impl SqliteIssueRepo {
         )
         .bind(&timestamp)
         .bind(&timestamp)
-        .bind(i64_from_u64(id.0))
+        .bind(i64_from_u64(
+            id.0,
+            concat!(module_path!(), ": ", stringify!(id.0)),
+        )?)
         .execute(&mut **tx)
         .await
         .map_err(|e| VoomError::database_context("issues resolve", e))?;
@@ -674,7 +711,10 @@ impl SqliteIssueRepo {
         )
         .bind(&until_ts)
         .bind(&timestamp)
-        .bind(i64_from_u64(id.0))
+        .bind(i64_from_u64(
+            id.0,
+            concat!(module_path!(), ": ", stringify!(id.0)),
+        )?)
         .execute(&mut **tx)
         .await
         .map_err(|e| VoomError::database_context("issues suppress", e))?;
@@ -701,7 +741,10 @@ impl SqliteIssueRepo {
              WHERE id = ?",
         )
         .bind(&timestamp)
-        .bind(i64_from_u64(id.0))
+        .bind(i64_from_u64(
+            id.0,
+            concat!(module_path!(), ": ", stringify!(id.0)),
+        )?)
         .execute(&mut **tx)
         .await
         .map_err(|e| VoomError::database_context("issues accept", e))?;
@@ -729,7 +772,10 @@ async fn select_issue_record_in_tx(
     id: IssueId,
 ) -> Result<Option<IssueRecord>, VoomError> {
     let row = sqlx::query(&format!("SELECT {ISSUE_COLUMNS} FROM issues WHERE id = ?"))
-        .bind(i64_from_u64(id.0))
+        .bind(i64_from_u64(
+            id.0,
+            concat!(module_path!(), ": ", stringify!(id.0)),
+        )?)
         .fetch_optional(&mut **tx)
         .await
         .map_err(|e| VoomError::database_context("issues select record", e))?;
@@ -747,7 +793,10 @@ fn row_to_issue_record(row: &sqlx::sqlite::SqliteRow) -> Result<IssueRecord, Voo
     let updated_at: String = try_get(row, "updated_at")?;
     let resolved_at: Option<String> = try_get(row, "resolved_at")?;
     Ok(IssueRecord {
-        id: IssueId(u64_from_i64(id)),
+        id: IssueId(u64_from_i64(
+            id,
+            concat!(module_path!(), ": ", stringify!(id)),
+        )?),
         kind: try_get(row, "kind")?,
         severity: IssueSeverity::parse(&severity)?,
         priority: IssuePriority::parse(&priority)?,
@@ -760,7 +809,7 @@ fn row_to_issue_record(row: &sqlx::sqlite::SqliteRow) -> Result<IssueRecord, Voo
         created_at: parse_iso8601(&created_at)?,
         updated_at: parse_iso8601(&updated_at)?,
         resolved_at: resolved_at.as_deref().map(parse_iso8601).transpose()?,
-        epoch: u64_from_i64(epoch),
+        epoch: u64_from_i64(epoch, concat!(module_path!(), ": ", stringify!(epoch)))?,
         dedupe_key: try_get(row, "dedupe_key")?,
     })
 }
