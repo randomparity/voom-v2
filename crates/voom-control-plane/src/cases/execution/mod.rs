@@ -7,6 +7,7 @@ use crate::ControlPlane;
 
 use super::{append_event, begin_tx, commit_tx, require_audit_field};
 
+mod inspection;
 pub(crate) mod jobs;
 pub(crate) mod leases;
 pub(crate) mod remote_execution;
