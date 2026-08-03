@@ -159,7 +159,7 @@ const MIGRATION_0033_SQL: &str =
 ///
 /// Single source of truth for "what schema does this binary expect" — both
 /// `init()` and `probe_schema()` read from here.
-pub static MIGRATOR: LazyLock<Migrator> = LazyLock::new(|| Migrator {
+pub(crate) static MIGRATOR: LazyLock<Migrator> = LazyLock::new(|| Migrator {
     migrations: Cow::Owned(vec![
         Migration::new(
             1,

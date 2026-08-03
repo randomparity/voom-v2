@@ -13,9 +13,8 @@ use sqlx::migrate::Migrator;
 use voom_cli::commands::health::{self, HealthData, HealthDb, HealthRuntime};
 use voom_cli::envelope::Local;
 use voom_control_plane::HealthPlane;
-use voom_store::MIGRATOR;
 use voom_store::test_support::{
-    create_uninitialized_pool, insert_synthetic_migration, sqlite_url_for,
+    create_uninitialized_pool, embedded_migrator, insert_synthetic_migration, sqlite_url_for,
 };
 use voom_test_support::TempDatabase;
 
@@ -94,14 +93,15 @@ fn assert_jq_accepts(filter: &str, stdout: &str, error_code: Option<&str>) {
 }
 
 fn migrator_before_latest() -> Migrator {
-    let latest = MIGRATOR
+    let migrator = embedded_migrator();
+    let latest = migrator
         .iter()
         .map(|migration| migration.version)
         .max()
         .unwrap();
     Migrator {
         migrations: Cow::Owned(
-            MIGRATOR
+            migrator
                 .iter()
                 .filter(|migration| migration.version < latest)
                 .cloned()

@@ -17,8 +17,7 @@ use std::path::PathBuf;
 
 use serde_json::{Value as JsonValue, json};
 use sqlx::migrate::Migrator;
-use voom_store::MIGRATOR;
-use voom_store::test_support::{create_uninitialized_pool, sqlite_url_for};
+use voom_store::test_support::{create_uninitialized_pool, embedded_migrator, sqlite_url_for};
 use voom_test_support::TempDatabase;
 
 const EXPECTED_MIGRATION_FILES: &[&str] = &[
@@ -94,7 +93,7 @@ fn parse_version(name: &str) -> Option<i64> {
 fn migrator_through(version: i64) -> Migrator {
     Migrator {
         migrations: Cow::Owned(
-            MIGRATOR
+            embedded_migrator()
                 .iter()
                 .filter(|migration| migration.version <= version)
                 .cloned()
@@ -116,7 +115,10 @@ fn every_migrations_file_is_registered_in_migrator() {
         .filter_map(|name| parse_version(name))
         .collect();
 
-    let mut registered_versions: Vec<i64> = MIGRATOR.iter().map(|m| m.version).collect();
+    let mut registered_versions: Vec<i64> = embedded_migrator()
+        .iter()
+        .map(|migration| migration.version)
+        .collect();
     registered_versions.sort_unstable();
 
     assert_eq!(
@@ -139,7 +141,7 @@ async fn remote_acquire_replay_shape_migration_canonicalizes_only_missing_decisi
     let (node_id, worker_id) = seed_remote_execution_owner(&pool).await;
     let unchanged = seed_remote_acquire_replays(&pool, node_id, worker_id).await;
 
-    MIGRATOR.run(&pool).await.unwrap();
+    embedded_migrator().run(&pool).await.unwrap();
 
     for key in ["legacy-idle", "legacy-no-candidate", "legacy-leased"] {
         let response = remote_replay_json(&pool, key).await;
@@ -345,7 +347,7 @@ async fn nvidia_profile_migration_preserves_every_existing_profile_field() {
     .unwrap();
 
     let before = legacy_video_profile_snapshot(&pool).await;
-    MIGRATOR.run(&pool).await.unwrap();
+    embedded_migrator().run(&pool).await.unwrap();
     let after = legacy_video_profile_snapshot(&pool).await;
 
     assert_eq!(after, before);
@@ -394,7 +396,7 @@ async fn vaapi_profile_migration_preserves_existing_profile_rows() {
     .unwrap();
 
     let before = accelerated_video_profile_snapshot(&pool).await;
-    MIGRATOR.run(&pool).await.unwrap();
+    embedded_migrator().run(&pool).await.unwrap();
     let after = accelerated_video_profile_snapshot(&pool).await;
 
     assert_eq!(after, before);
@@ -499,7 +501,7 @@ async fn backend_neutral_migration_tags_nvidia_capability_and_preserves_claim() 
     .await
     .unwrap();
 
-    MIGRATOR.run(&pool).await.unwrap();
+    embedded_migrator().run(&pool).await.unwrap();
 
     let backend: String = sqlx::query_scalar(
         "SELECT json_extract(extra, '$.accelerator.backend') \
@@ -592,7 +594,7 @@ async fn staged_artifact_commit_migration_preserves_seeded_file_version_links() 
     .await
     .unwrap();
 
-    MIGRATOR.run(&pool).await.unwrap();
+    embedded_migrator().run(&pool).await.unwrap();
 
     let violations: Vec<(String, i64, String, i64)> = sqlx::query_as("PRAGMA foreign_key_check")
         .fetch_all(&pool)
@@ -664,7 +666,7 @@ async fn worker_grant_max_parallel_migration_rewrites_legacy_limit() {
     .await
     .unwrap();
 
-    MIGRATOR.run(&pool).await.unwrap();
+    embedded_migrator().run(&pool).await.unwrap();
 
     let rows: Vec<String> =
         sqlx::query_scalar("SELECT max_parallel FROM worker_grants ORDER BY id")
@@ -698,7 +700,7 @@ async fn policy_verification_migration_preserves_workflow_progress() {
     let (file_version_id, job_id) = seed_legacy_workflow_progress(&pool).await;
     seed_legacy_artifact_verification(&pool, file_version_id).await;
 
-    MIGRATOR.run(&pool).await.unwrap();
+    embedded_migrator().run(&pool).await.unwrap();
 
     let summary: (String, Option<i64>) = sqlx::query_as(
         "SELECT outcome, artifact_verification_id \
@@ -748,7 +750,7 @@ async fn sliding_window_migration_backfills_legacy_progress_and_accepts_blocked(
     migrator_through(27).run(&pool).await.unwrap();
     let (_file_version_id, job_id) = seed_legacy_workflow_progress(&pool).await;
 
-    MIGRATOR.run(&pool).await.unwrap();
+    embedded_migrator().run(&pool).await.unwrap();
 
     let preserved: String = sqlx::query_scalar(
         "SELECT outcome FROM workflow_file_run_history \
@@ -830,7 +832,7 @@ async fn audio_synthesis_lineage_migration_allows_sequential_versions_of_one_ass
     )
     .await;
 
-    MIGRATOR.run(&pool).await.unwrap();
+    embedded_migrator().run(&pool).await.unwrap();
 
     insert_synthesis_operation(
         &pool,
@@ -1075,7 +1077,7 @@ async fn seed_legacy_artifact_verification(pool: &sqlx::SqlitePool, file_version
 
 #[test]
 fn migrator_versions_are_strictly_increasing() {
-    let versions: Vec<i64> = MIGRATOR.iter().map(|m| m.version).collect();
+    let versions: Vec<i64> = embedded_migrator().iter().map(|m| m.version).collect();
     let mut sorted = versions.clone();
     sorted.sort_unstable();
     assert_eq!(

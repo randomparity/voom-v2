@@ -1,5 +1,6 @@
-//! Test-only helpers shared across the workspace. Gated behind the
-//! `test` feature so production crates cannot reach this module.
+//! Test-only helpers shared across the workspace. This module is available
+//! only when the `test` feature is enabled; production targets must not enable
+//! that feature.
 //!
 //! ### Why no centralized lint preamble
 //!
@@ -27,6 +28,7 @@ use time::OffsetDateTime;
 use voom_core::{JobId, TicketOperation, VoomError, WorkerId};
 
 use crate::init::init;
+use crate::migrator::MIGRATOR;
 use crate::pool::{connect, connect_or_create};
 use crate::repo::execution::tickets::{NewTicket, SqliteTicketRepo, Ticket};
 use crate::repo::execution::workers::{
@@ -69,6 +71,14 @@ pub async fn fresh_initialized_pool_at(path: &Path) -> Result<SqlitePool, VoomEr
     let url = sqlite_url_for(path);
     init(&url).await?;
     connect(&url).await
+}
+
+/// Return the embedded migration registry for integration-test schema fixtures.
+///
+/// Production initialization remains owned by [`crate::init()`].
+#[must_use]
+pub fn embedded_migrator() -> &'static sqlx::migrate::Migrator {
+    &MIGRATOR
 }
 
 /// Insert a synthetic row into `_sqlx_migrations` so callers can simulate

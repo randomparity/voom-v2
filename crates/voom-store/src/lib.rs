@@ -12,7 +12,7 @@
 //! Storage layer: `SQLite` pool, migrations, repositories.
 
 pub mod init;
-pub mod migrator;
+mod migrator;
 pub mod pool;
 pub mod repo;
 pub mod schema;
@@ -21,6 +21,5 @@ pub mod schema;
 pub mod test_support;
 
 pub use init::{InitReport, init};
-pub use migrator::MIGRATOR;
 pub use pool::connect;
 pub use schema::{SchemaState, expected_migrations, probe_schema};

@@ -217,7 +217,7 @@ Adding a new crate: add it to `[workspace] members`, set `version.workspace = tr
 
 - ADRs: `docs/adr/`
 - Sprint specs: `docs/specs/` and `docs/superpowers/specs/`
-- Migrations: `migrations/*.sql` (bundled into `voom-store::MIGRATOR`)
+- Migrations: `migrations/*.sql` (embedded privately by `voom-store`)
 - Insta snapshots: `crates/voom-cli/tests/snapshots/`
 - Clippy/lints config: `[workspace.lints]` in root `Cargo.toml` (pedantic on, panic/unwrap/expect denied)
 
