@@ -362,35 +362,7 @@ impl RunLoopState {
             .err();
         let job_failed = transition_error.is_none();
         let refresh_error = self.refresh(control, job_id, started).await.err();
-        let diagnostic = workflow_failure_diagnostic(
-            job_id,
-            &source,
-            transition_error.as_ref(),
-            refresh_error.as_ref(),
-        );
-        let source = match transition_error {
-            Some(VoomError::Database {
-                source: database_source,
-                ..
-            }) => VoomError::Database {
-                message: diagnostic,
-                source: database_source,
-            },
-            transition_error => match (transition_error, refresh_error) {
-                (None, None) => source,
-                (
-                    _,
-                    Some(VoomError::Database {
-                        source: database_source,
-                        ..
-                    }),
-                ) => VoomError::Database {
-                    message: diagnostic,
-                    source: database_source,
-                },
-                _ => VoomError::Internal(diagnostic),
-            },
-        };
+        let source = workflow_failure_source(job_id, source, transition_error, refresh_error);
         WorkflowRunError {
             summary: self.summary.clone(),
             source,
@@ -416,17 +388,7 @@ impl RunLoopState {
                 dispatch_started: self.dispatch_started,
             };
         };
-        let diagnostic = workflow_failure_diagnostic(job_id, &source, None, Some(&refresh_error));
-        let source = match refresh_error {
-            VoomError::Database {
-                source: database_source,
-                ..
-            } => VoomError::Database {
-                message: diagnostic,
-                source: database_source,
-            },
-            _ => VoomError::Internal(diagnostic),
-        };
+        let source = workflow_failure_source(job_id, source, None, Some(refresh_error));
         WorkflowRunError {
             summary: self.summary.clone(),
             source,
@@ -521,6 +483,51 @@ impl RunLoopState {
                 &mut self.isolated_error,
             )
             .await;
+    }
+}
+
+fn workflow_failure_source(
+    job_id: JobId,
+    source: VoomError,
+    transition_error: Option<VoomError>,
+    refresh_error: Option<VoomError>,
+) -> VoomError {
+    if transition_error.is_none() && refresh_error.is_none() {
+        return source;
+    }
+    let diagnostic = workflow_failure_diagnostic(
+        job_id,
+        &source,
+        transition_error.as_ref(),
+        refresh_error.as_ref(),
+    );
+    match transition_error {
+        Some(VoomError::Database {
+            source: database_source,
+            ..
+        }) => VoomError::Database {
+            message: diagnostic,
+            source: database_source,
+        },
+        _ => match refresh_error {
+            Some(VoomError::Database {
+                source: database_source,
+                ..
+            }) => VoomError::Database {
+                message: diagnostic,
+                source: database_source,
+            },
+            _ => match source {
+                VoomError::Database {
+                    source: database_source,
+                    ..
+                } => VoomError::Database {
+                    message: diagnostic,
+                    source: database_source,
+                },
+                _ => VoomError::Internal(diagnostic),
+            },
+        },
     }
 }
 

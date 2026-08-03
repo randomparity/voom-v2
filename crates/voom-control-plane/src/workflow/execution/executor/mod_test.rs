@@ -38,7 +38,7 @@ use voom_worker_protocol::{
 use super::super::leases::retry_on_database_locked;
 use super::{
     CapacityDeferredTestSync, DispatchReadyOutcome, PostDispatchTestSync, RunLoopState,
-    WorkflowFailureDisposition,
+    WorkflowFailureDisposition, workflow_failure_source,
 };
 use crate::workflow::execution::executor::WorkflowExecutorOptions;
 use crate::workflow::execution::operation_adapters::{
@@ -195,7 +195,7 @@ async fn fail_job_preserves_transition_and_refresh_failures_in_order() {
         .fail_job(
             &fixture.cp,
             job_id,
-            VoomError::Internal("original workflow failure".to_owned()),
+            VoomError::database_context("original workflow failure", sqlx::Error::RowNotFound),
             Instant::now(),
         )
         .await;
@@ -242,7 +242,7 @@ async fn fail_job_preserves_original_when_refresh_fails_after_durable_transition
         .fail_job(
             &fixture.cp,
             job_id,
-            VoomError::Internal("original workflow failure".to_owned()),
+            VoomError::database_context("original workflow failure", sqlx::Error::RowNotFound),
             Instant::now(),
         )
         .await;
@@ -265,6 +265,67 @@ async fn fail_job_preserves_original_when_refresh_fails_after_durable_transition
             "original workflow failure",
             "refreshing the workflow summary also failed",
             "no such table: leases",
+        ],
+    );
+}
+
+#[tokio::test]
+async fn fail_job_preserves_primary_database_source_when_transition_is_non_database() {
+    let fixture = ExecutorFixture::without_workers(0).await;
+    let job_id = fixture.open_workflow_job().await;
+    fixture
+        .cp
+        .cancel_job(job_id, "operator cancelled workflow".to_owned(), T0)
+        .await
+        .unwrap();
+    let mut state = RunLoopState::new(job_id, Duration::ZERO);
+
+    let error = state
+        .fail_job(
+            &fixture.cp,
+            job_id,
+            VoomError::database_context("primary workflow query", sqlx::Error::RowNotFound),
+            Instant::now(),
+        )
+        .await;
+
+    assert!(!error.job_failed);
+    assert_eq!(error.disposition, WorkflowFailureDisposition::Fatal);
+    assert_eq!(
+        fixture.job_state_and_epoch(job_id).await,
+        ("cancelled".to_owned(), 1)
+    );
+    assert_eq!(fixture.event_count("job.failed").await, 0);
+    assert_sqlx_source(&error.source, "no rows returned");
+    assert_fragments_in_order(
+        &error.source.to_string(),
+        &[
+            "primary workflow query",
+            "marking the job failed also failed",
+            "conflict",
+            "cancelled",
+        ],
+    );
+}
+
+#[test]
+fn failure_source_preserves_primary_database_source_when_refresh_is_non_database() {
+    let error = workflow_failure_source(
+        JobId(42),
+        VoomError::database_context("primary workflow query", sqlx::Error::RowNotFound),
+        None,
+        Some(VoomError::Conflict(
+            "summary changed concurrently".to_owned(),
+        )),
+    );
+
+    assert_sqlx_source(&error, "no rows returned");
+    assert_fragments_in_order(
+        &error.to_string(),
+        &[
+            "primary workflow query",
+            "refreshing the workflow summary also failed",
+            "summary changed concurrently",
         ],
     );
 }
