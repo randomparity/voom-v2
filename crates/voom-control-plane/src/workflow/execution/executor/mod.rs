@@ -27,7 +27,7 @@ pub(crate) use config::{
     OperationArtifactRoots, WORKFLOW_JOB_KIND, WorkflowArtifactRoots, WorkflowDispatchOptions,
     WorkflowQueueOptions, WorkflowStreamOptions, WorkflowTimingOptions,
 };
-pub(crate) use errors::WorkflowRunError;
+pub(crate) use errors::{WorkflowFailureDisposition, WorkflowRunError};
 use spawn::SpawnOutcome;
 
 #[derive(Debug, Clone)]
@@ -353,19 +353,36 @@ impl RunLoopState {
         &mut self,
         control: &ControlPlane,
         job_id: JobId,
-        mut source: VoomError,
+        source: VoomError,
         started: Instant,
     ) -> WorkflowRunError {
-        let _ = control
+        let transition_error = control
             .fail_job(job_id, source.to_string(), control.clock().now())
-            .await;
-        if let Err(refresh_error) = self.refresh(control, job_id, started).await {
-            source = refresh_error;
-        }
+            .await
+            .err();
+        let job_failed = transition_error.is_none();
+        let refresh_error = self.refresh(control, job_id, started).await.err();
+        let source = match (transition_error, refresh_error) {
+            (None, None) => source,
+            (Some(transition), None) => VoomError::Internal(format!(
+                "workflow failed for job {job_id}: {source}; \
+                 marking the job failed also failed: {transition}"
+            )),
+            (None, Some(refresh)) => VoomError::Internal(format!(
+                "workflow failed for job {job_id}: {source}; \
+                 refreshing the workflow summary also failed: {refresh}"
+            )),
+            (Some(transition), Some(refresh)) => VoomError::Internal(format!(
+                "workflow failed for job {job_id}: {source}; \
+                 marking the job failed also failed: {transition}; \
+                 refreshing the workflow summary also failed: {refresh}"
+            )),
+        };
         WorkflowRunError {
             summary: self.summary.clone(),
             source,
-            job_failed: true,
+            job_failed,
+            disposition: WorkflowFailureDisposition::Fatal,
             dispatch_started: self.dispatch_started,
         }
     }
@@ -384,6 +401,7 @@ impl RunLoopState {
             summary: self.summary.clone(),
             source,
             job_failed: false,
+            disposition: WorkflowFailureDisposition::IsolatedTicket,
             dispatch_started: self.dispatch_started,
         }
     }
@@ -853,6 +871,7 @@ impl WorkflowExecutor {
                 summary,
                 source,
                 job_failed: false,
+                disposition: WorkflowFailureDisposition::Fatal,
                 dispatch_started: false,
             });
         }
@@ -874,6 +893,7 @@ impl WorkflowExecutor {
                     summary,
                     source,
                     job_failed: false,
+                    disposition: WorkflowFailureDisposition::Fatal,
                     dispatch_started: false,
                 });
             }

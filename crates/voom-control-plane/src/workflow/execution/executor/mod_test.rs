@@ -35,7 +35,10 @@ use voom_worker_protocol::{
 };
 
 use super::super::leases::retry_on_database_locked;
-use super::{CapacityDeferredTestSync, DispatchReadyOutcome, PostDispatchTestSync, RunLoopState};
+use super::{
+    CapacityDeferredTestSync, DispatchReadyOutcome, PostDispatchTestSync, RunLoopState,
+    WorkflowFailureDisposition,
+};
 use crate::workflow::execution::executor::WorkflowExecutorOptions;
 use crate::workflow::execution::operation_adapters::{
     LeaseHeartbeatContext, await_with_lease_heartbeats,
@@ -120,6 +123,162 @@ async fn retry_on_database_locked_does_not_retry_other_errors() {
 
     assert_eq!(err.error_code(), ErrorCode::ConfigInvalid);
     assert_eq!(attempts.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn fail_job_reports_transition_failure_without_claiming_durable_failure() {
+    let fixture = ExecutorFixture::without_workers(0).await;
+    let job_id = fixture.open_workflow_job().await;
+    sqlx::query(
+        "CREATE TRIGGER reject_job_failed_event \
+         BEFORE INSERT ON events WHEN NEW.kind = 'job.failed' \
+         BEGIN SELECT RAISE(ABORT, 'reject job.failed'); END",
+    )
+    .execute(&fixture.cp.pool)
+    .await
+    .unwrap();
+    let mut state = RunLoopState::new(job_id, Duration::ZERO);
+
+    let error = state
+        .fail_job(
+            &fixture.cp,
+            job_id,
+            VoomError::Internal("original workflow failure".to_owned()),
+            Instant::now(),
+        )
+        .await;
+
+    sqlx::query("DROP TRIGGER reject_job_failed_event")
+        .execute(&fixture.cp.pool)
+        .await
+        .unwrap();
+    assert!(!error.job_failed);
+    assert_eq!(error.disposition, WorkflowFailureDisposition::Fatal);
+    assert_eq!(
+        fixture.job_state_and_epoch(job_id).await,
+        ("open".to_owned(), 0)
+    );
+    assert_eq!(fixture.event_count("job.failed").await, 0);
+    let VoomError::Internal(message) = error.source else {
+        panic!("expected composed internal error");
+    };
+    assert_fragments_in_order(
+        &message,
+        &[
+            "workflow failed for job",
+            "original workflow failure",
+            "marking the job failed also failed",
+            "reject job.failed",
+        ],
+    );
+}
+
+#[tokio::test]
+async fn fail_job_preserves_transition_and_refresh_failures_in_order() {
+    let fixture = ExecutorFixture::without_workers(0).await;
+    let job_id = fixture.open_workflow_job().await;
+    sqlx::query(
+        "CREATE TRIGGER reject_job_failed_event \
+         BEFORE INSERT ON events WHEN NEW.kind = 'job.failed' \
+         BEGIN SELECT RAISE(ABORT, 'reject job.failed'); END",
+    )
+    .execute(&fixture.cp.pool)
+    .await
+    .unwrap();
+    sqlx::query("ALTER TABLE leases RENAME TO unavailable_leases")
+        .execute(&fixture.cp.pool)
+        .await
+        .unwrap();
+    let mut state = RunLoopState::new(job_id, Duration::ZERO);
+
+    let error = state
+        .fail_job(
+            &fixture.cp,
+            job_id,
+            VoomError::Internal("original workflow failure".to_owned()),
+            Instant::now(),
+        )
+        .await;
+
+    sqlx::query("ALTER TABLE unavailable_leases RENAME TO leases")
+        .execute(&fixture.cp.pool)
+        .await
+        .unwrap();
+    sqlx::query("DROP TRIGGER reject_job_failed_event")
+        .execute(&fixture.cp.pool)
+        .await
+        .unwrap();
+    assert!(!error.job_failed);
+    assert_eq!(
+        fixture.job_state_and_epoch(job_id).await,
+        ("open".to_owned(), 0)
+    );
+    assert_eq!(fixture.event_count("job.failed").await, 0);
+    let VoomError::Internal(message) = error.source else {
+        panic!("expected composed internal error");
+    };
+    assert_fragments_in_order(
+        &message,
+        &[
+            "original workflow failure",
+            "marking the job failed also failed",
+            "reject job.failed",
+            "refreshing the workflow summary also failed",
+            "no such table: leases",
+        ],
+    );
+}
+
+#[tokio::test]
+async fn fail_job_preserves_original_when_refresh_fails_after_durable_transition() {
+    let fixture = ExecutorFixture::without_workers(0).await;
+    let job_id = fixture.open_workflow_job().await;
+    sqlx::query("ALTER TABLE leases RENAME TO unavailable_leases")
+        .execute(&fixture.cp.pool)
+        .await
+        .unwrap();
+    let mut state = RunLoopState::new(job_id, Duration::ZERO);
+
+    let error = state
+        .fail_job(
+            &fixture.cp,
+            job_id,
+            VoomError::Internal("original workflow failure".to_owned()),
+            Instant::now(),
+        )
+        .await;
+
+    sqlx::query("ALTER TABLE unavailable_leases RENAME TO leases")
+        .execute(&fixture.cp.pool)
+        .await
+        .unwrap();
+    assert!(error.job_failed);
+    assert_eq!(
+        fixture.job_state_and_epoch(job_id).await,
+        ("failed".to_owned(), 1)
+    );
+    assert_eq!(fixture.event_count("job.failed").await, 1);
+    let VoomError::Internal(message) = error.source else {
+        panic!("expected composed internal error");
+    };
+    assert_fragments_in_order(
+        &message,
+        &[
+            "original workflow failure",
+            "refreshing the workflow summary also failed",
+            "no such table: leases",
+        ],
+    );
+}
+
+fn assert_fragments_in_order(actual: &str, expected: &[&str]) {
+    let mut remaining = actual;
+    for fragment in expected {
+        let Some(index) = remaining.find(fragment) else {
+            panic!("missing {fragment:?} after prior fragments in {actual:?}");
+        };
+        remaining = &remaining[index + fragment.len()..];
+    }
 }
 
 #[tokio::test]
@@ -1252,6 +1411,10 @@ async fn continued_invocation_dispatches_every_independent_branch_and_leaves_job
 
     assert_eq!(error.summary.dispatch_count, 3);
     assert!(!error.job_failed);
+    assert_eq!(
+        error.disposition,
+        WorkflowFailureDisposition::IsolatedTicket
+    );
     assert_eq!(fixture.job_state(job_id).await, "open");
 }
 
@@ -3346,6 +3509,14 @@ impl ExecutorFixture {
 
     async fn job_state(&self, job_id: JobId) -> String {
         sqlx::query_scalar("SELECT state FROM jobs WHERE id = ?")
+            .bind(i64::try_from(job_id.0).unwrap())
+            .fetch_one(&self.cp.pool)
+            .await
+            .unwrap()
+    }
+
+    async fn job_state_and_epoch(&self, job_id: JobId) -> (String, i64) {
+        sqlx::query_as("SELECT state, epoch FROM jobs WHERE id = ?")
             .bind(i64::try_from(job_id.0).unwrap())
             .fetch_one(&self.cp.pool)
             .await

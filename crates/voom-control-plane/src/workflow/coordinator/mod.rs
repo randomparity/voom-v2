@@ -45,7 +45,7 @@ use crate::cases::{begin_immediate_tx, begin_tx, commit_tx};
 use super::execution::WorkerRuntimeRegistry;
 use super::execution::executor::{
     PlannedLineageGuard, RunFailureMode, WORKFLOW_JOB_KIND, WorkflowExecutor,
-    WorkflowExecutorOptions,
+    WorkflowExecutorOptions, WorkflowFailureDisposition,
 };
 use super::plan::policy_bridge::{WorkflowExecutionShape, workflow_plan_from_compliance};
 
@@ -321,6 +321,15 @@ struct PhaseDispatchFailure {
     pub(super) source: VoomError,
     pub(super) run_summary: Option<crate::workflow::WorkflowRunSummary>,
     pub(super) job_failed: bool,
+    pub(super) disposition: WorkflowFailureDisposition,
+}
+
+fn should_continue_after_dispatch_failure(
+    failure: &PhaseDispatchFailure,
+    error_strategy: voom_policy::ErrorStrategy,
+) -> bool {
+    failure.disposition == WorkflowFailureDisposition::IsolatedTicket
+        && error_strategy == voom_policy::ErrorStrategy::Continue
 }
 
 /// Shared inputs for a fresh or resumed phase-barrier run. Everything here is
@@ -677,7 +686,11 @@ impl<'a> PhaseLoop<'a> {
         else {
             return Ok(());
         };
-        if failure.job_failed || planned.error_strategy != voom_policy::ErrorStrategy::Continue {
+        debug_assert!(
+            !failure.job_failed || failure.disposition == WorkflowFailureDisposition::Fatal,
+            "a durable job failure cannot be isolated"
+        );
+        if !should_continue_after_dispatch_failure(&failure, planned.error_strategy) {
             let admission_gate = self.admission_gate.clone();
             return close_admission_during_recovery(&admission_gate, async {
                 let phase_dispatched = failure.run_summary.is_some();
@@ -1812,7 +1825,8 @@ impl ControlPlane {
                 PhaseDispatchFailure {
                     source,
                     run_summary: None,
-                    job_failed: true,
+                    job_failed: false,
+                    disposition: WorkflowFailureDisposition::Fatal,
                 }
             })?;
         let Some(scope) = scope else {
@@ -1822,7 +1836,8 @@ impl ControlPlane {
             |source| PhaseDispatchFailure {
                 source,
                 run_summary: None,
-                job_failed: true,
+                job_failed: false,
+                disposition: WorkflowFailureDisposition::Fatal,
             },
         )?;
         let bridge =
@@ -1830,7 +1845,8 @@ impl ControlPlane {
                 .map_err(|source| PhaseDispatchFailure {
                     source,
                     run_summary: None,
-                    job_failed: true,
+                    job_failed: false,
+                    disposition: WorkflowFailureDisposition::Fatal,
                 })?;
         let Some(workflow) = bridge.workflow else {
             return Ok(None);
@@ -1864,6 +1880,7 @@ impl ControlPlane {
                 source: err.source,
                 run_summary,
                 job_failed: err.job_failed,
+                disposition: err.disposition,
             }
         })?;
         Ok(Some(run))

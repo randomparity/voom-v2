@@ -12,11 +12,18 @@ use crate::workflow::execution::executor::WorkflowExecutor;
 use crate::workflow::plan::ticket_payload::WorkflowTicketPayload;
 use crate::workflow::summary::WorkflowRunSummary;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WorkflowFailureDisposition {
+    IsolatedTicket,
+    Fatal,
+}
+
 #[derive(Debug)]
 pub struct WorkflowRunError {
     pub summary: WorkflowRunSummary,
     pub source: VoomError,
     pub(crate) job_failed: bool,
+    pub(crate) disposition: WorkflowFailureDisposition,
     pub(crate) dispatch_started: bool,
 }
 

@@ -24,6 +24,7 @@ use voom_store::repo::media::identity::{
 
 use crate::cases::cp;
 use crate::cases::policy::compliance::ComplianceExecutionOptions;
+use crate::workflow::execution::executor::WorkflowFailureDisposition;
 
 use super::PhaseFile;
 
@@ -1136,6 +1137,31 @@ fn reject_unpublished_on_error_allows_published_strategies_and_unset() {
         .is_ok()
     );
     assert!(super::reject_unpublished_on_error(&policy_with_on_error(None)).is_ok());
+}
+
+#[test]
+fn continue_strategy_rejects_fatal_failure_without_durable_job_transition() {
+    let fatal = super::PhaseDispatchFailure {
+        source: voom_core::VoomError::Internal("fatal".to_owned()),
+        run_summary: None,
+        job_failed: false,
+        disposition: WorkflowFailureDisposition::Fatal,
+    };
+    let isolated = super::PhaseDispatchFailure {
+        source: voom_core::VoomError::Internal("isolated".to_owned()),
+        run_summary: None,
+        job_failed: false,
+        disposition: WorkflowFailureDisposition::IsolatedTicket,
+    };
+
+    assert!(!super::should_continue_after_dispatch_failure(
+        &fatal,
+        voom_policy::ErrorStrategy::Continue,
+    ));
+    assert!(super::should_continue_after_dispatch_failure(
+        &isolated,
+        voom_policy::ErrorStrategy::Continue,
+    ));
 }
 
 #[test]
