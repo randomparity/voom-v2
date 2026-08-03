@@ -362,21 +362,34 @@ impl RunLoopState {
             .err();
         let job_failed = transition_error.is_none();
         let refresh_error = self.refresh(control, job_id, started).await.err();
-        let source = match (transition_error, refresh_error) {
-            (None, None) => source,
-            (Some(transition), None) => VoomError::Internal(format!(
-                "workflow failed for job {job_id}: {source}; \
-                 marking the job failed also failed: {transition}"
-            )),
-            (None, Some(refresh)) => VoomError::Internal(format!(
-                "workflow failed for job {job_id}: {source}; \
-                 refreshing the workflow summary also failed: {refresh}"
-            )),
-            (Some(transition), Some(refresh)) => VoomError::Internal(format!(
-                "workflow failed for job {job_id}: {source}; \
-                 marking the job failed also failed: {transition}; \
-                 refreshing the workflow summary also failed: {refresh}"
-            )),
+        let diagnostic = workflow_failure_diagnostic(
+            job_id,
+            &source,
+            transition_error.as_ref(),
+            refresh_error.as_ref(),
+        );
+        let source = match transition_error {
+            Some(VoomError::Database {
+                source: database_source,
+                ..
+            }) => VoomError::Database {
+                message: diagnostic,
+                source: database_source,
+            },
+            transition_error => match (transition_error, refresh_error) {
+                (None, None) => source,
+                (
+                    _,
+                    Some(VoomError::Database {
+                        source: database_source,
+                        ..
+                    }),
+                ) => VoomError::Database {
+                    message: diagnostic,
+                    source: database_source,
+                },
+                _ => VoomError::Internal(diagnostic),
+            },
         };
         WorkflowRunError {
             summary: self.summary.clone(),
@@ -391,17 +404,34 @@ impl RunLoopState {
         &mut self,
         control: &ControlPlane,
         job_id: JobId,
-        mut source: VoomError,
+        source: VoomError,
         started: Instant,
     ) -> WorkflowRunError {
-        if let Err(refresh_error) = self.refresh(control, job_id, started).await {
-            source = refresh_error;
-        }
+        let Some(refresh_error) = self.refresh(control, job_id, started).await.err() else {
+            return WorkflowRunError {
+                summary: self.summary.clone(),
+                source,
+                job_failed: false,
+                disposition: WorkflowFailureDisposition::IsolatedTicket,
+                dispatch_started: self.dispatch_started,
+            };
+        };
+        let diagnostic = workflow_failure_diagnostic(job_id, &source, None, Some(&refresh_error));
+        let source = match refresh_error {
+            VoomError::Database {
+                source: database_source,
+                ..
+            } => VoomError::Database {
+                message: diagnostic,
+                source: database_source,
+            },
+            _ => VoomError::Internal(diagnostic),
+        };
         WorkflowRunError {
             summary: self.summary.clone(),
             source,
             job_failed: false,
-            disposition: WorkflowFailureDisposition::IsolatedTicket,
+            disposition: WorkflowFailureDisposition::Fatal,
             dispatch_started: self.dispatch_started,
         }
     }
@@ -491,6 +521,30 @@ impl RunLoopState {
                 &mut self.isolated_error,
             )
             .await;
+    }
+}
+
+fn workflow_failure_diagnostic(
+    job_id: JobId,
+    source: &VoomError,
+    transition_error: Option<&VoomError>,
+    refresh_error: Option<&VoomError>,
+) -> String {
+    match (transition_error, refresh_error) {
+        (None, None) => format!("workflow failed for job {job_id}: {source}"),
+        (Some(transition), None) => format!(
+            "workflow failed for job {job_id}: {source}; \
+             marking the job failed also failed: {transition}"
+        ),
+        (None, Some(refresh)) => format!(
+            "workflow failed for job {job_id}: {source}; \
+             refreshing the workflow summary also failed: {refresh}"
+        ),
+        (Some(transition), Some(refresh)) => format!(
+            "workflow failed for job {job_id}: {source}; \
+             marking the job failed also failed: {transition}; \
+             refreshing the workflow summary also failed: {refresh}"
+        ),
     }
 }
 

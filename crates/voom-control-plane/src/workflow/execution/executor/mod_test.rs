@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::error::Error;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
@@ -159,9 +160,8 @@ async fn fail_job_reports_transition_failure_without_claiming_durable_failure() 
         ("open".to_owned(), 0)
     );
     assert_eq!(fixture.event_count("job.failed").await, 0);
-    let VoomError::Internal(message) = error.source else {
-        panic!("expected composed internal error");
-    };
+    assert_sqlx_source(&error.source, "reject job.failed");
+    let message = error.source.to_string();
     assert_fragments_in_order(
         &message,
         &[
@@ -214,9 +214,8 @@ async fn fail_job_preserves_transition_and_refresh_failures_in_order() {
         ("open".to_owned(), 0)
     );
     assert_eq!(fixture.event_count("job.failed").await, 0);
-    let VoomError::Internal(message) = error.source else {
-        panic!("expected composed internal error");
-    };
+    assert_sqlx_source(&error.source, "reject job.failed");
+    let message = error.source.to_string();
     assert_fragments_in_order(
         &message,
         &[
@@ -258,9 +257,8 @@ async fn fail_job_preserves_original_when_refresh_fails_after_durable_transition
         ("failed".to_owned(), 1)
     );
     assert_eq!(fixture.event_count("job.failed").await, 1);
-    let VoomError::Internal(message) = error.source else {
-        panic!("expected composed internal error");
-    };
+    assert_sqlx_source(&error.source, "no such table: leases");
+    let message = error.source.to_string();
     assert_fragments_in_order(
         &message,
         &[
@@ -268,6 +266,57 @@ async fn fail_job_preserves_original_when_refresh_fails_after_durable_transition
             "refreshing the workflow summary also failed",
             "no such table: leases",
         ],
+    );
+}
+
+#[tokio::test]
+async fn isolated_failure_refresh_error_is_fatal_and_preserves_ticket_diagnostic() {
+    let fixture = ExecutorFixture::without_workers(0).await;
+    let job_id = fixture.open_workflow_job().await;
+    sqlx::query("ALTER TABLE leases RENAME TO unavailable_leases")
+        .execute(&fixture.cp.pool)
+        .await
+        .unwrap();
+    let mut state = RunLoopState::new(job_id, Duration::ZERO);
+
+    let error = state
+        .finish_isolated_failure(
+            &fixture.cp,
+            job_id,
+            VoomError::WorkerCrash("ticket worker crashed".to_owned()),
+            Instant::now(),
+        )
+        .await;
+
+    sqlx::query("ALTER TABLE unavailable_leases RENAME TO leases")
+        .execute(&fixture.cp.pool)
+        .await
+        .unwrap();
+    assert!(!error.job_failed);
+    assert_eq!(error.disposition, WorkflowFailureDisposition::Fatal);
+    assert_eq!(
+        fixture.job_state_and_epoch(job_id).await,
+        ("open".to_owned(), 0)
+    );
+    assert_eq!(fixture.event_count("job.failed").await, 0);
+    assert_sqlx_source(&error.source, "no such table: leases");
+    assert_fragments_in_order(
+        &error.source.to_string(),
+        &[
+            "ticket worker crashed",
+            "refreshing the workflow summary also failed",
+            "no such table: leases",
+        ],
+    );
+}
+
+fn assert_sqlx_source(error: &VoomError, expected: &str) {
+    assert_eq!(error.error_code(), ErrorCode::DbUnreachable);
+    let source = error.source().unwrap();
+    let sqlx_error = source.downcast_ref::<sqlx::Error>().unwrap();
+    assert!(
+        sqlx_error.to_string().contains(expected),
+        "source {sqlx_error:?} did not contain {expected:?}"
     );
 }
 
