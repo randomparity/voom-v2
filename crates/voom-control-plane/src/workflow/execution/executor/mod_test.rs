@@ -37,9 +37,10 @@ use voom_worker_protocol::{
 
 use super::super::leases::retry_on_database_locked;
 use super::{
-    CapacityDeferredTestSync, DispatchReadyOutcome, PostDispatchTestSync, RunLoopState,
-    WorkflowFailureDisposition, workflow_failure_source,
+    CapacityDeferredTestSync, DispatchIdentity, DispatchReadyOutcome, PostDispatchTestSync,
+    RunInvocation, RunLoopState, WorkflowFailureDisposition, workflow_failure_source,
 };
+use crate::workflow::execution::dispatch::{DispatchOutcome, DispatchTerminal};
 use crate::workflow::execution::executor::WorkflowExecutorOptions;
 use crate::workflow::execution::operation_adapters::{
     LeaseHeartbeatContext, await_with_lease_heartbeats,
@@ -1188,6 +1189,225 @@ async fn worker_crash_fails_terminally() {
     assert_eq!(err.source.error_code(), ErrorCode::WorkerCrash);
     assert_eq!(err.summary.dispatch_count, 1);
     assert_eq!(err.summary.failure_count, 1);
+}
+
+#[tokio::test]
+async fn panicked_dispatch_fails_its_real_non_hash_ticket() {
+    let (fixture, mut options) = panicking_identify_fixture().await;
+    options.queue.max_attempts = 1;
+
+    let Ok(result) =
+        tokio::time::timeout(Duration::from_secs(5), fixture.run_with_options(options)).await
+    else {
+        panic!("panicked dispatch cleanup must not stall");
+    };
+    let err = result.unwrap_err();
+
+    assert_eq!(err.source.error_code(), ErrorCode::WorkerCrash);
+    assert_eq!(err.disposition, WorkflowFailureDisposition::Fatal);
+    assert!(err.job_failed);
+    assert_eq!(fixture.held_lease_count().await, 0);
+    assert_eq!(fixture.first_ticket_failed_class().await, "worker_crash");
+    let identify = err
+        .summary
+        .per_operation
+        .get(&OperationKind::IdentifyMedia)
+        .unwrap();
+    assert_eq!(identify.failure_count, 1);
+    assert_eq!(identify.last_failure_class, Some(FailureClass::WorkerCrash));
+    assert!(
+        !err.summary
+            .per_operation
+            .contains_key(&OperationKind::HashFile)
+    );
+}
+
+#[tokio::test]
+async fn panicked_dispatch_releases_capacity_before_retry() {
+    let (fixture, mut options) = panicking_identify_fixture().await;
+    options.queue.max_attempts = 2;
+
+    let Ok(result) =
+        tokio::time::timeout(Duration::from_secs(5), fixture.run_with_options(options)).await
+    else {
+        panic!("panicked dispatch retry must not stall at worker capacity");
+    };
+    let err = result.unwrap_err();
+
+    assert_eq!(err.source.error_code(), ErrorCode::WorkerCrash);
+    assert_eq!(err.summary.dispatch_count, 2);
+    assert_eq!(err.summary.retry_count, 1);
+    assert_eq!(fixture.held_lease_count().await, 0);
+    let identify = err
+        .summary
+        .per_operation
+        .get(&OperationKind::IdentifyMedia)
+        .unwrap();
+    assert_eq!(identify.dispatch_count, 2);
+    assert_eq!(identify.failure_count, 2);
+}
+
+#[tokio::test]
+async fn terminal_panicked_dispatch_is_isolated_in_continue_mode() {
+    let (fixture, mut options) = panicking_identify_fixture().await;
+    options.queue.max_attempts = 1;
+    let job_id = fixture.open_workflow_job().await;
+    let executor = fixture.executor_with_options(options);
+
+    let err = executor
+        .submit_and_run_invocation_in_job(
+            job_id,
+            "panic-continue",
+            fixture.plan.clone(),
+            super::RunFailureMode::ContinueIndependent,
+        )
+        .await
+        .unwrap_err();
+
+    assert_eq!(err.source.error_code(), ErrorCode::WorkerCrash);
+    assert_eq!(err.disposition, WorkflowFailureDisposition::IsolatedTicket);
+    assert!(!err.job_failed);
+    assert_eq!(fixture.held_lease_count().await, 0);
+}
+
+#[tokio::test]
+async fn every_join_consumer_clears_identity_and_reservation() {
+    let fixture = ExecutorFixture::with_ready_tickets(0).await;
+    let worker_id = fixture.first_worker_id.unwrap();
+    let job_id = fixture.open_workflow_job().await;
+    let executor = fixture.executor_with_options(WorkflowExecutorOptions::for_tests());
+    let invocation = RunInvocation {
+        job_id,
+        workflow_id: "completion-bookkeeping",
+        plan: &fixture.plan,
+        failure_mode: super::RunFailureMode::ContinueIndependent,
+    };
+
+    let mut completed = tracked_failed_dispatch(&fixture, worker_id).await;
+    completed
+        .process_completed_dispatches(&executor, &invocation)
+        .await;
+    assert_completion_bookkeeping_cleared(&completed);
+
+    let mut drained = tracked_failed_dispatch(&fixture, worker_id).await;
+    drained.drain_active(&executor, &invocation).await;
+    assert_completion_bookkeeping_cleared(&drained);
+
+    let mut waited = tracked_failed_dispatch(&fixture, worker_id).await;
+    waited.wait_for_one(&executor, &invocation).await;
+    assert_completion_bookkeeping_cleared(&waited);
+}
+
+#[tokio::test]
+async fn completed_task_without_identity_is_a_contextual_fatal_error() {
+    let fixture = ExecutorFixture::without_workers(0).await;
+    let job_id = fixture.open_workflow_job().await;
+    let executor = fixture.executor_with_options(WorkflowExecutorOptions::for_tests());
+    let invocation = RunInvocation {
+        job_id,
+        workflow_id: "missing-identity",
+        plan: &fixture.plan,
+        failure_mode: super::RunFailureMode::ContinueIndependent,
+    };
+    let mut state = RunLoopState::new(job_id, Duration::ZERO);
+    let handle = state.active.spawn(async { successful_dispatch_outcome() });
+    let task_id = handle.id();
+    while !handle.is_finished() {
+        tokio::task::yield_now().await;
+    }
+
+    state
+        .process_completed_dispatches(&executor, &invocation)
+        .await;
+
+    assert!(state.active.is_empty());
+    assert!(state.active_identities.is_empty());
+    let error = state.fatal_error.unwrap();
+    assert!(error.to_string().contains(&task_id.to_string()));
+    assert!(error.to_string().contains("without a dispatch identity"));
+}
+
+#[tokio::test]
+async fn cancelled_dispatch_fails_real_lease_and_is_fatal_in_continue_mode() {
+    let fixture = ExecutorFixture::with_ready_tickets(0).await;
+    let worker_id = fixture.first_worker_id.unwrap();
+    let job_id = fixture.open_workflow_job().await;
+    let (ticket_id, lease_id) = fixture.create_heartbeat_test_lease(worker_id).await;
+    let executor = fixture.executor_with_options(WorkflowExecutorOptions::for_tests());
+    let invocation = RunInvocation {
+        job_id,
+        workflow_id: "cancelled-dispatch",
+        plan: &fixture.plan,
+        failure_mode: super::RunFailureMode::ContinueIndependent,
+    };
+    let identity = DispatchIdentity {
+        ticket_id,
+        worker_id,
+        lease_id,
+        operation: OperationKind::HashFile,
+    };
+    let mut state = RunLoopState::new(job_id, Duration::ZERO);
+    state.reservations.insert(worker_id, 1);
+    let handle = state
+        .active
+        .spawn(async { std::future::pending::<DispatchOutcome>().await });
+    state.active_identities.insert(handle.id(), identity);
+
+    state.active.abort_all();
+    state.drain_active(&executor, &invocation).await;
+
+    assert_completion_bookkeeping_cleared(&state);
+    assert_eq!(fixture.held_lease_count().await, 0);
+    assert_eq!(fixture.ticket_state(ticket_id).await, "failed");
+    assert_eq!(fixture.first_ticket_failed_class().await, "worker_crash");
+    assert_eq!(
+        state.fatal_error.as_ref().unwrap().error_code(),
+        ErrorCode::WorkerCrash
+    );
+}
+
+#[tokio::test]
+async fn join_cleanup_database_failure_preserves_source_and_operation_count() {
+    let fixture = ExecutorFixture::with_ready_tickets(0).await;
+    let worker_id = fixture.first_worker_id.unwrap();
+    let job_id = fixture.open_workflow_job().await;
+    let (ticket_id, lease_id) = fixture.create_heartbeat_test_lease(worker_id).await;
+    let executor = fixture.executor_with_options(WorkflowExecutorOptions::for_tests());
+    let invocation = RunInvocation {
+        job_id,
+        workflow_id: "join-cleanup-database-failure",
+        plan: &fixture.plan,
+        failure_mode: super::RunFailureMode::ContinueIndependent,
+    };
+    let identity = DispatchIdentity {
+        ticket_id,
+        worker_id,
+        lease_id,
+        operation: OperationKind::HashFile,
+    };
+    let mut state = RunLoopState::new(job_id, Duration::ZERO);
+    state.reservations.insert(worker_id, 1);
+    let handle = state
+        .active
+        .spawn(async { std::future::pending::<DispatchOutcome>().await });
+    state.active_identities.insert(handle.id(), identity);
+    state.active.abort_all();
+    fixture.cp.pool.close().await;
+
+    state.drain_active(&executor, &invocation).await;
+
+    assert_completion_bookkeeping_cleared(&state);
+    let failure = state.fatal_error.as_ref().unwrap();
+    assert_eq!(failure.error_code(), ErrorCode::DbUnreachable);
+    assert!(failure.source().is_some());
+    assert!(failure.to_string().contains(&lease_id.to_string()));
+    let hash = state
+        .summary
+        .per_operation
+        .get(&OperationKind::HashFile)
+        .unwrap();
+    assert_eq!(hash.failure_count, 1);
+    assert_eq!(hash.last_failure_class, Some(FailureClass::WorkerCrash));
 }
 
 #[tokio::test]
@@ -4625,6 +4845,77 @@ fn simple_operation_node(id: &str, operation: OperationKind) -> OperationNode {
         depends_on_selected: Vec::new(),
         provides_selected: None,
     }
+}
+
+async fn panicking_identify_fixture() -> (ExecutorFixture, WorkflowExecutorOptions) {
+    let mut fixture = ExecutorFixture::without_workers(0).await;
+    fixture.plan.nodes = vec![simple_operation_node(
+        "identify",
+        OperationKind::IdentifyMedia,
+    )];
+    fixture
+        .register_worker(
+            "identify-worker",
+            OperationKind::IdentifyMedia,
+            1,
+            FakeBehavior::Success,
+        )
+        .await;
+    let mut options = WorkflowExecutorOptions::for_tests();
+    options.chaos.panic_after_lease_operation = Some(OperationKind::IdentifyMedia);
+    (fixture, options)
+}
+
+async fn tracked_failed_dispatch(fixture: &ExecutorFixture, worker_id: WorkerId) -> RunLoopState {
+    let (ticket_id, lease_id) = fixture.create_heartbeat_test_lease(worker_id).await;
+    fixture
+        .cp
+        .fail_lease(
+            lease_id,
+            "prepared joined failure".to_owned(),
+            FailureClass::WorkerCrash,
+            fixture.cp.clock().now(),
+        )
+        .await
+        .unwrap();
+    let identity = DispatchIdentity {
+        ticket_id,
+        worker_id,
+        lease_id,
+        operation: OperationKind::HashFile,
+    };
+    let mut state = RunLoopState::new(JobId(900), Duration::ZERO);
+    state.reservations.insert(worker_id, 1);
+    let handle = state.active.spawn(async move {
+        DispatchOutcome {
+            ticket_id,
+            worker_id,
+            operation: OperationKind::HashFile,
+            terminal: DispatchTerminal::Failure {
+                source: VoomError::WorkerCrash("prepared joined failure".to_owned()),
+            },
+        }
+    });
+    state.active_identities.insert(handle.id(), identity);
+    while !handle.is_finished() {
+        tokio::task::yield_now().await;
+    }
+    state
+}
+
+fn successful_dispatch_outcome() -> DispatchOutcome {
+    DispatchOutcome {
+        ticket_id: TicketId(17),
+        worker_id: WorkerId(23),
+        operation: OperationKind::IdentifyMedia,
+        terminal: DispatchTerminal::Success,
+    }
+}
+
+fn assert_completion_bookkeeping_cleared(state: &RunLoopState) {
+    assert!(state.active.is_empty());
+    assert!(state.active_identities.is_empty());
+    assert!(state.reservations.is_empty());
 }
 
 fn policy_transcode_plan(target: TargetRef) -> WorkflowPlan {
