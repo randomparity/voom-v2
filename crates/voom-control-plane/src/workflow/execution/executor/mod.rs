@@ -421,6 +421,7 @@ impl RunLoopState {
             ..*invocation
         };
         self.drain_active(executor, &drain_invocation).await;
+        let source = self.take_fatal_error().unwrap_or(source);
         self.fail_job(&executor.control_plane, invocation.job_id, source, started)
             .await
     }

@@ -965,6 +965,84 @@ async fn stopped_capacity_wait_leaves_restartable_durable_state() {
 }
 
 #[tokio::test]
+async fn dropped_active_dispatch_recovers_through_durable_lease_expiry() {
+    let mut fixture = ExecutorFixture::single_worker_with_behavior(FakeBehavior::Hang).await;
+    let worker_id = fixture.worker_id();
+    let job_id = fixture.open_workflow_job().await;
+    let mut options = WorkflowExecutorOptions::for_tests();
+    options.queue.max_attempts = 2;
+    options.timing.lease_ttl = Duration::from_secs(5);
+    let executor = fixture.executor_with_options(options.clone());
+    let plan = fixture.plan.clone();
+    let run = tokio::spawn(async move {
+        executor
+            .submit_and_run_invocation_in_job(
+                job_id,
+                "active-dispatch-restart",
+                plan,
+                super::RunFailureMode::AbortJob,
+            )
+            .await
+    });
+    for _ in 0..200 {
+        if fixture.worker_dispatch_count(worker_id) == 1 && fixture.held_lease_count().await == 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(fixture.worker_dispatch_count(worker_id), 1);
+    assert_eq!(fixture.held_lease_count().await, 1);
+    let ticket = fixture.first_workflow_ticket().await;
+
+    run.abort();
+    assert!(run.await.unwrap_err().is_cancelled());
+    assert_eq!(fixture.ticket_state(ticket.id).await, "leased");
+    assert_eq!(fixture.event_count("ticket.failed_terminal").await, 0);
+
+    fixture.clock.advance(time::Duration::seconds(6));
+    let expiry = fixture
+        .cp
+        .expire_due(fixture.cp.clock().now())
+        .await
+        .unwrap();
+    assert_eq!(expiry.requeued_tickets, vec![ticket.id]);
+    assert_eq!(fixture.ticket_state(ticket.id).await, "ready");
+    assert_eq!(fixture.held_lease_count().await, 0);
+
+    let client = Arc::new(FakeClient::new(worker_id, FakeBehavior::Success));
+    fixture.registry.register_in_process_runtime(
+        worker_id,
+        client.clone(),
+        WorkerCredentials {
+            worker_id,
+            worker_epoch: 0,
+            secret: SecretString::from("test-secret"),
+        },
+    );
+    fixture.clients.insert(worker_id, client);
+    let restart = fixture.executor_with_options(options);
+    let workflow_id = format!("workflow-{}-active-dispatch-restart", job_id.0);
+    let invocation = RunInvocation {
+        job_id,
+        workflow_id: &workflow_id,
+        plan: &fixture.plan,
+        failure_mode: super::RunFailureMode::AbortJob,
+    };
+    let mut state = RunLoopState::new(job_id, Duration::ZERO);
+    let dispatch = restart
+        .dispatch_ready_tickets(&mut state, &invocation)
+        .await;
+    assert!(dispatch.made_progress);
+    state.wait_for_one(&restart, &invocation).await;
+
+    assert_eq!(state.summary.dispatch_count, 1);
+    assert!(state.fatal_error.is_none());
+    assert_eq!(fixture.worker_dispatch_count(worker_id), 1);
+    assert_eq!(fixture.ticket_state(ticket.id).await, "succeeded");
+    assert_eq!(fixture.held_lease_count().await, 0);
+}
+
+#[tokio::test]
 async fn no_eligible_worker_is_recorded_before_lease_dispatch() {
     let fixture = ExecutorFixture::without_workers(1).await;
     let err = fixture.run().await.unwrap_err();
@@ -1325,6 +1403,84 @@ async fn completed_task_without_identity_is_a_contextual_fatal_error() {
     let error = state.fatal_error.unwrap();
     assert!(error.to_string().contains(&task_id.to_string()));
     assert!(error.to_string().contains("without a dispatch identity"));
+}
+
+#[tokio::test]
+async fn mismatched_completed_task_identity_is_a_contextual_fatal_error() {
+    let fixture = ExecutorFixture::without_workers(0).await;
+    let job_id = fixture.open_workflow_job().await;
+    let executor = fixture.executor_with_options(WorkflowExecutorOptions::for_tests());
+    let invocation = RunInvocation {
+        job_id,
+        workflow_id: "mismatched-identity",
+        plan: &fixture.plan,
+        failure_mode: super::RunFailureMode::ContinueIndependent,
+    };
+    for identity in [
+        DispatchIdentity {
+            ticket_id: TicketId(19),
+            worker_id: WorkerId(23),
+            lease_id: LeaseId(31),
+            operation: OperationKind::IdentifyMedia,
+        },
+        DispatchIdentity {
+            ticket_id: TicketId(17),
+            worker_id: WorkerId(29),
+            lease_id: LeaseId(31),
+            operation: OperationKind::IdentifyMedia,
+        },
+        DispatchIdentity {
+            ticket_id: TicketId(17),
+            worker_id: WorkerId(23),
+            lease_id: LeaseId(31),
+            operation: OperationKind::HashFile,
+        },
+    ] {
+        let mut state = RunLoopState::new(job_id, Duration::ZERO);
+        state.reservations.insert(identity.worker_id, 1);
+        let handle = state.active.spawn(async { successful_dispatch_outcome() });
+        state.active_identities.insert(handle.id(), identity);
+
+        state.wait_for_one(&executor, &invocation).await;
+
+        assert_completion_bookkeeping_cleared(&state);
+        let error = state.fatal_error.unwrap();
+        assert!(error.to_string().contains("identity mismatch"));
+    }
+}
+
+#[tokio::test]
+async fn drain_infrastructure_failure_supersedes_retained_ticket_error() {
+    let fixture = ExecutorFixture::without_workers(0).await;
+    let job_id = fixture.open_workflow_job().await;
+    let executor = fixture.executor_with_options(WorkflowExecutorOptions::for_tests());
+    let invocation = RunInvocation {
+        job_id,
+        workflow_id: "drain-failure-precedence",
+        plan: &fixture.plan,
+        failure_mode: super::RunFailureMode::AbortJob,
+    };
+    let mut state = RunLoopState::new(job_id, Duration::ZERO);
+    state.active.spawn(async { successful_dispatch_outcome() });
+
+    let error = state
+        .fail_after_drain(
+            &executor,
+            &invocation,
+            VoomError::WorkerCrash("retained ticket failure".to_owned()),
+            std::time::Instant::now(),
+        )
+        .await;
+
+    assert_eq!(error.source.error_code(), ErrorCode::Internal);
+    assert!(
+        error
+            .source
+            .to_string()
+            .contains("without a dispatch identity")
+    );
+    assert!(!error.source.to_string().contains("retained ticket failure"));
+    assert!(error.job_failed);
 }
 
 #[tokio::test]
