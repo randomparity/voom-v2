@@ -7,10 +7,10 @@
 
 use std::collections::BTreeSet;
 
-use voom_core::ids::ArtifactVerificationId;
+use voom_core::ids::{ArtifactCommitRecordId, ArtifactVerificationId};
 use voom_core::{
-    ArtifactHandleId, FileAssetId, FileLocationId, FileVersionId, JobId, MediaSnapshotId, TicketId,
-    TicketOperation, VoomError,
+    ArtifactHandleId, FileAssetId, FileLocationId, FileVersionId, JobId, LeaseId, MediaSnapshotId,
+    TicketId, TicketOperation, VoomError,
 };
 use voom_store::repo::execution::leases::LeaseState;
 use voom_store::repo::execution::tickets::{TicketState, WorkflowPhaseScope};
@@ -65,16 +65,16 @@ enum CommitRelevance {
     reason = "fields intentionally mirror the shared durable operation-result keys"
 )]
 struct CommittedResultFields {
-    job_id: u64,
-    ticket_id: u64,
-    lease_id: u64,
-    source_file_version_id: u64,
-    artifact_handle_id: u64,
-    verification_id: u64,
-    commit_record_id: u64,
-    result_file_version_id: u64,
-    result_file_location_id: u64,
-    result_media_snapshot_id: Option<u64>,
+    job_id: JobId,
+    ticket_id: TicketId,
+    lease_id: LeaseId,
+    source_file_version_id: FileVersionId,
+    artifact_handle_id: ArtifactHandleId,
+    verification_id: ArtifactVerificationId,
+    commit_record_id: ArtifactCommitRecordId,
+    result_file_version_id: FileVersionId,
+    result_file_location_id: FileLocationId,
+    result_media_snapshot_id: Option<MediaSnapshotId>,
 }
 
 impl ProducedRefs {
@@ -133,32 +133,45 @@ impl CommittedResultFields {
             return Ok(None);
         }
         Ok(Some(Self {
-            job_id: required_result_u64(value, ticket_id, "job_id")?,
-            ticket_id: required_result_u64(value, ticket_id, "ticket_id")?,
-            lease_id: required_result_u64(value, ticket_id, "lease_id")?,
-            source_file_version_id: required_result_u64(
+            job_id: JobId(required_result_u64(value, ticket_id, "job_id")?),
+            ticket_id: TicketId(required_result_u64(value, ticket_id, "ticket_id")?),
+            lease_id: LeaseId(required_result_u64(value, ticket_id, "lease_id")?),
+            source_file_version_id: FileVersionId(required_result_u64(
                 value,
                 ticket_id,
                 "source_file_version_id",
-            )?,
-            artifact_handle_id: required_result_u64(value, ticket_id, "staged_artifact_handle_id")?,
-            verification_id: required_result_u64(value, ticket_id, "verification_id")?,
-            commit_record_id: required_result_u64(value, ticket_id, "commit_record_id")?,
-            result_file_version_id: required_result_u64(
+            )?),
+            artifact_handle_id: ArtifactHandleId(required_result_u64(
+                value,
+                ticket_id,
+                "staged_artifact_handle_id",
+            )?),
+            verification_id: ArtifactVerificationId(required_result_u64(
+                value,
+                ticket_id,
+                "verification_id",
+            )?),
+            commit_record_id: ArtifactCommitRecordId(required_result_u64(
+                value,
+                ticket_id,
+                "commit_record_id",
+            )?),
+            result_file_version_id: FileVersionId(required_result_u64(
                 value,
                 ticket_id,
                 "result_file_version_id",
-            )?,
-            result_file_location_id: required_result_u64(
+            )?),
+            result_file_location_id: FileLocationId(required_result_u64(
                 value,
                 ticket_id,
                 "result_file_location_id",
-            )?,
+            )?),
             result_media_snapshot_id: optional_result_u64(
                 value,
                 ticket_id,
                 "result_media_snapshot_id",
-            )?,
+            )?
+            .map(MediaSnapshotId),
         }))
     }
 }
@@ -181,8 +194,8 @@ impl CommittedEvidenceValidation for CommittedTicketEvidence {
     ) -> Result<CommitRelevance, VoomError> {
         let ticket_id = self.ticket_id;
         require_evidence(self.ticket_job_id, Some(job_id), ticket_id, "ticket job")?;
-        require_evidence(result.job_id, job_id.0, ticket_id, "result job")?;
-        require_evidence(result.ticket_id, ticket_id.0, ticket_id, "result ticket")?;
+        require_evidence(result.job_id, job_id, ticket_id, "result job")?;
+        require_evidence(result.ticket_id, ticket_id, ticket_id, "result ticket")?;
         let source_asset_id =
             required_evidence(self.source_file_asset_id, ticket_id, "source file asset")?;
         if source_asset_id != expected_asset_id {
@@ -194,7 +207,7 @@ impl CommittedEvidenceValidation for CommittedTicketEvidence {
         if result.result_media_snapshot_id.is_some() {
             require_evidence(
                 self.snapshot_file_version_id,
-                Some(FileVersionId(result.result_file_version_id)),
+                Some(result.result_file_version_id),
                 ticket_id,
                 "snapshot version",
             )?;
@@ -216,38 +229,38 @@ fn validate_commit_evidence(
 ) -> Result<(), VoomError> {
     let commit = required_evidence(evidence.commit.as_ref(), ticket_id, "commit record")?;
     require_evidence(
-        commit.id.0,
+        commit.id,
         result.commit_record_id,
         ticket_id,
         "commit record",
     )?;
     require_evidence(
-        commit.artifact_handle_id.0,
+        commit.artifact_handle_id,
         result.artifact_handle_id,
         ticket_id,
         "commit artifact",
     )?;
     require_evidence(
-        commit.source_file_version_id.0,
+        commit.source_file_version_id,
         result.source_file_version_id,
         ticket_id,
         "commit source version",
     )?;
     require_evidence(
-        commit.verification_id.0,
+        commit.verification_id,
         result.verification_id,
         ticket_id,
         "commit verification",
     )?;
     require_evidence(
         commit.result_file_version_id,
-        Some(FileVersionId(result.result_file_version_id)),
+        Some(result.result_file_version_id),
         ticket_id,
         "commit result version",
     )?;
     require_evidence(
         commit.result_file_location_id,
-        Some(FileLocationId(result.result_file_location_id)),
+        Some(result.result_file_location_id),
         ticket_id,
         "commit result location",
     )?;
@@ -268,14 +281,14 @@ fn validate_verification_evidence(
     let verification =
         required_evidence(evidence.verification.as_ref(), ticket_id, "verification")?;
     require_evidence(
-        verification.artifact_handle_id.0,
+        verification.artifact_handle_id,
         result.artifact_handle_id,
         ticket_id,
         "verification artifact",
     )?;
     let lease = required_evidence(evidence.result_lease.as_ref(), ticket_id, "result lease")?;
     require_evidence(
-        lease.ticket_id.0,
+        lease.ticket_id,
         result.ticket_id,
         ticket_id,
         "result lease ticket",
@@ -294,13 +307,13 @@ fn validate_verification_evidence(
         (verification_ticket_id, verification_lease_id) => {
             require_evidence(
                 verification_ticket_id,
-                Some(TicketId(result.ticket_id)),
+                Some(result.ticket_id),
                 ticket_id,
                 "verification ticket",
             )?;
             require_evidence(
                 verification_lease_id,
-                Some(voom_core::LeaseId(result.lease_id)),
+                Some(result.lease_id),
                 ticket_id,
                 "verification lease",
             )?;
@@ -314,7 +327,7 @@ fn validate_verification_evidence(
     )?;
     require_evidence(
         evidence.location_file_version_id,
-        Some(FileVersionId(result.result_file_version_id)),
+        Some(result.result_file_version_id),
         ticket_id,
         "location version",
     )
@@ -483,13 +496,13 @@ async fn validate_carried_ticket_scope(
 }
 
 fn committed_result_matches_row(result: &CommittedResultFields, row: &FilePhaseSummary) -> bool {
-    row.produced_file_version_id == Some(FileVersionId(result.result_file_version_id))
-        && row.produced_file_location_id == Some(FileLocationId(result.result_file_location_id))
-        && row.artifact_handle_id == Some(ArtifactHandleId(result.artifact_handle_id))
+    row.produced_file_version_id == Some(result.result_file_version_id)
+        && row.produced_file_location_id == Some(result.result_file_location_id)
+        && row.artifact_handle_id == Some(result.artifact_handle_id)
         && row
             .artifact_verification_id
-            .is_none_or(|id| id == ArtifactVerificationId(result.verification_id))
-        && row.reprobe_snapshot_id == result.result_media_snapshot_id.map(MediaSnapshotId)
+            .is_none_or(|id| id == result.verification_id)
+        && row.reprobe_snapshot_id == result.result_media_snapshot_id
 }
 
 impl ControlPlane {
@@ -883,7 +896,7 @@ impl ControlPlane {
                     ));
                 }
                 CommitRelevance::Sidecar => {
-                    locations.push(FileLocationId(result.result_file_location_id));
+                    locations.push(result.result_file_location_id);
                 }
                 CommitRelevance::SameLineage => {
                     let tip_id = row.produced_file_version_id.ok_or_else(|| {
@@ -892,7 +905,7 @@ impl ControlPlane {
                             "same-lineage commit is absent from the carried row",
                         )
                     })?;
-                    let source_id = FileVersionId(result.source_file_version_id);
+                    let source_id = result.source_file_version_id;
                     if !self.version_descends_from(tip_id, source_id).await? {
                         return Err(evidence_mismatch(
                             ticket_id,
@@ -900,7 +913,7 @@ impl ControlPlane {
                         ));
                     }
                     matched_row |= committed_result_matches_row(&result, row);
-                    locations.push(FileLocationId(result.result_file_location_id));
+                    locations.push(result.result_file_location_id);
                 }
             }
         }
@@ -977,15 +990,15 @@ impl ControlPlane {
         &self,
         result: CommittedResultFields,
     ) -> Result<JobProducedCommit, VoomError> {
-        let snapshot_id = MediaSnapshotId(result.result_media_snapshot_id.ok_or_else(|| {
+        let snapshot_id = result.result_media_snapshot_id.ok_or_else(|| {
             VoomError::Internal("validated same-lineage commit lost its snapshot id".to_owned())
-        })?);
+        })?;
         let snapshot = self
             .identity
             .get_media_snapshot(snapshot_id)
             .await?
             .ok_or_else(|| VoomError::NotFound(format!("media_snapshot {snapshot_id}")))?;
-        let file_version_id = FileVersionId(result.result_file_version_id);
+        let file_version_id = result.result_file_version_id;
         if snapshot.file_version_id != file_version_id {
             return Err(VoomError::Conflict(format!(
                 "committed result snapshot {snapshot_id} does not belong to {file_version_id}"
@@ -994,8 +1007,8 @@ impl ControlPlane {
         Ok(JobProducedCommit {
             refs: ProducedRefs {
                 file_version_id: Some(file_version_id),
-                file_location_id: Some(FileLocationId(result.result_file_location_id)),
-                artifact_handle_id: Some(ArtifactHandleId(result.artifact_handle_id)),
+                file_location_id: Some(result.result_file_location_id),
+                artifact_handle_id: Some(result.artifact_handle_id),
                 artifact_verification_id: None,
                 reprobe_snapshot_id: Some(snapshot_id),
             },
