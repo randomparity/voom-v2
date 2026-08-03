@@ -417,7 +417,7 @@ async fn next_version_number(
     .map_err(|e| VoomError::database_context("policy_versions next version", e))?;
     let next = next
         .ok_or_else(|| VoomError::NotFound(format!("policy document {document_id} not found")))?;
-    u64_from_i64(next, "policy_versions.version")
+    u64_from_i64(next, "policy_versions.version_number")
 }
 
 async fn get_version_by_document_and_hash_in_tx(

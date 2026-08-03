@@ -1868,72 +1868,182 @@ fn decode_operation(row: &SqliteRow) -> Result<AudioExtractOperation, VoomError>
 }
 
 fn decode_output(row: &SqliteRow) -> Result<AudioExtractOperationOutput, VoomError> {
-    Ok(AudioExtractOperationOutput {
-        id: u64_from_i64(
-            row.try_get("id").map_err(output_row_err)?,
-            "audio_extract_operation_outputs.id",
-        )?,
-        operation_id: u64_from_i64(
-            row.try_get("operation_id").map_err(output_row_err)?,
-            "audio_extract_operation_outputs.operation_id",
-        )?,
-        ordinal: u32_from_i64(row.try_get("ordinal").map_err(output_row_err)?)?,
-        output_id: row.try_get("output_id").map_err(output_row_err)?,
-        source_snapshot_stream_id: row
-            .try_get("source_snapshot_stream_id")
+    let id = u64_from_i64(
+        row.try_get("id").map_err(output_row_err)?,
+        "audio_extract_operation_outputs.id",
+    )?;
+    let operation_id = u64_from_i64(
+        row.try_get("operation_id").map_err(output_row_err)?,
+        "audio_extract_operation_outputs.operation_id",
+    )?;
+    let ordinal = u32_from_i64(row.try_get("ordinal").map_err(output_row_err)?)?;
+    let output_id = row.try_get("output_id").map_err(output_row_err)?;
+    let source_snapshot_stream_id = row
+        .try_get("source_snapshot_stream_id")
+        .map_err(output_row_err)?;
+    let source_provider_stream_index = u32_from_i64(
+        row.try_get("source_provider_stream_index")
             .map_err(output_row_err)?,
-        source_provider_stream_index: u32_from_i64(
-            row.try_get("source_provider_stream_index")
-                .map_err(output_row_err)?,
+    )?;
+    let bundle_role = row.try_get("bundle_role").map_err(output_row_err)?;
+    let target_path = row.try_get("target_path").map_err(output_row_err)?;
+    let staging_path = row.try_get("staging_path").map_err(output_row_err)?;
+    let temp_path = row.try_get("temp_path").map_err(output_row_err)?;
+    let artifacts = decode_output_artifact_references(row)?;
+    let probe_payload = row
+        .try_get::<Option<String>, _>("probe_payload")
+        .map_err(output_row_err)?
+        .map(|value| {
+            serde_json::from_str(&value).map_err(|error| {
+                VoomError::database(format!(
+                    "audio_extract_operation_outputs.probe_payload malformed: {error}"
+                ))
+            })
+        })
+        .transpose()?;
+    let results = decode_output_result_references(row)?;
+    let result_facts = row
+        .try_get::<Option<String>, _>("result_facts")
+        .map_err(output_row_err)?
+        .map(|value| {
+            serde_json::from_str(&value).map_err(|error| {
+                VoomError::database(format!(
+                    "audio_extract_operation_outputs.result_facts malformed: {error}"
+                ))
+            })
+        })
+        .transpose()?;
+    Ok(AudioExtractOperationOutput {
+        id,
+        operation_id,
+        ordinal,
+        output_id,
+        source_snapshot_stream_id,
+        source_provider_stream_index,
+        bundle_role,
+        target_path,
+        staging_path,
+        temp_path,
+        artifact_handle_id: artifacts.handle,
+        artifact_location_id: artifacts.location,
+        verification_id: artifacts.verification,
+        commit_record_id: artifacts.commit_record,
+        probe_worker_id: artifacts.probe_worker,
+        probe_payload,
+        result_file_asset_id: results.file_asset,
+        result_file_version_id: results.file_version,
+        result_file_location_id: results.file_location,
+        result_media_snapshot_id: results.media_snapshot,
+        bundle_member_id: results.bundle_member,
+        lineage_id: results.lineage,
+        result_facts,
+    })
+}
+
+struct OutputArtifactReferences {
+    handle: Option<ArtifactHandleId>,
+    location: Option<ArtifactLocationId>,
+    verification: Option<ArtifactVerificationId>,
+    commit_record: Option<ArtifactCommitRecordId>,
+    probe_worker: Option<WorkerId>,
+}
+
+struct OutputResultReferences {
+    file_asset: Option<u64>,
+    file_version: Option<FileVersionId>,
+    file_location: Option<FileLocationId>,
+    media_snapshot: Option<MediaSnapshotId>,
+    bundle_member: Option<u64>,
+    lineage: Option<u64>,
+}
+
+fn decode_output_artifact_references(
+    row: &SqliteRow,
+) -> Result<OutputArtifactReferences, VoomError> {
+    Ok(OutputArtifactReferences {
+        handle: optional_id(
+            row,
+            "artifact_handle_id",
+            "audio_extract_operation_outputs.artifact_handle_id",
+            ArtifactHandleId,
         )?,
-        bundle_role: row.try_get("bundle_role").map_err(output_row_err)?,
-        target_path: row.try_get("target_path").map_err(output_row_err)?,
-        staging_path: row.try_get("staging_path").map_err(output_row_err)?,
-        temp_path: row.try_get("temp_path").map_err(output_row_err)?,
-        artifact_handle_id: optional_id(row, "artifact_handle_id", ArtifactHandleId)?,
-        artifact_location_id: optional_id(row, "artifact_location_id", ArtifactLocationId)?,
-        verification_id: optional_id(row, "verification_id", ArtifactVerificationId)?,
-        commit_record_id: optional_id(row, "commit_record_id", ArtifactCommitRecordId)?,
-        probe_worker_id: optional_id(row, "probe_worker_id", WorkerId)?,
-        probe_payload: row
-            .try_get::<Option<String>, _>("probe_payload")
-            .map_err(output_row_err)?
-            .map(|value| {
-                serde_json::from_str(&value).map_err(|error| {
-                    VoomError::database(format!(
-                        "audio_extract_operation_outputs.probe_payload malformed: {error}"
-                    ))
-                })
-            })
-            .transpose()?,
-        result_file_asset_id: optional_id(row, "result_file_asset_id", |id| id)?,
-        result_file_version_id: optional_id(row, "result_file_version_id", FileVersionId)?,
-        result_file_location_id: optional_id(row, "result_file_location_id", FileLocationId)?,
-        result_media_snapshot_id: optional_id(row, "result_media_snapshot_id", MediaSnapshotId)?,
-        bundle_member_id: optional_id(row, "bundle_member_id", |id| id)?,
-        lineage_id: optional_id(row, "lineage_id", |id| id)?,
-        result_facts: row
-            .try_get::<Option<String>, _>("result_facts")
-            .map_err(output_row_err)?
-            .map(|value| {
-                serde_json::from_str(&value).map_err(|error| {
-                    VoomError::database(format!(
-                        "audio_extract_operation_outputs.result_facts malformed: {error}"
-                    ))
-                })
-            })
-            .transpose()?,
+        location: optional_id(
+            row,
+            "artifact_location_id",
+            "audio_extract_operation_outputs.artifact_location_id",
+            ArtifactLocationId,
+        )?,
+        verification: optional_id(
+            row,
+            "verification_id",
+            "audio_extract_operation_outputs.verification_id",
+            ArtifactVerificationId,
+        )?,
+        commit_record: optional_id(
+            row,
+            "commit_record_id",
+            "audio_extract_operation_outputs.commit_record_id",
+            ArtifactCommitRecordId,
+        )?,
+        probe_worker: optional_id(
+            row,
+            "probe_worker_id",
+            "audio_extract_operation_outputs.probe_worker_id",
+            WorkerId,
+        )?,
+    })
+}
+
+fn decode_output_result_references(row: &SqliteRow) -> Result<OutputResultReferences, VoomError> {
+    Ok(OutputResultReferences {
+        file_asset: optional_id(
+            row,
+            "result_file_asset_id",
+            "audio_extract_operation_outputs.result_file_asset_id",
+            |id| id,
+        )?,
+        file_version: optional_id(
+            row,
+            "result_file_version_id",
+            "audio_extract_operation_outputs.result_file_version_id",
+            FileVersionId,
+        )?,
+        file_location: optional_id(
+            row,
+            "result_file_location_id",
+            "audio_extract_operation_outputs.result_file_location_id",
+            FileLocationId,
+        )?,
+        media_snapshot: optional_id(
+            row,
+            "result_media_snapshot_id",
+            "audio_extract_operation_outputs.result_media_snapshot_id",
+            MediaSnapshotId,
+        )?,
+        bundle_member: optional_id(
+            row,
+            "bundle_member_id",
+            "audio_extract_operation_outputs.bundle_member_id",
+            |id| id,
+        )?,
+        lineage: optional_id(
+            row,
+            "lineage_id",
+            "audio_extract_operation_outputs.lineage_id",
+            |id| id,
+        )?,
     })
 }
 
 fn optional_id<T>(
     row: &SqliteRow,
     column: &str,
+    field: &'static str,
     constructor: impl FnOnce(u64) -> T,
 ) -> Result<Option<T>, VoomError> {
     row.try_get::<Option<i64>, _>(column)
         .map_err(output_row_err)?
-        .map(|value| u64_from_i64(value, format!("audio_extract_operation_outputs.{column}")))
+        .map(|value| u64_from_i64(value, field))
         .transpose()
         .map(|id| id.map(constructor))
 }

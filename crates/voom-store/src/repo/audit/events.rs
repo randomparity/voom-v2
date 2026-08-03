@@ -187,76 +187,84 @@ async fn page_query(
     page: Page,
     tail: bool,
 ) -> Result<EventPage, VoomError> {
-    // Build dynamic SQL: WHERE filters + ordering + LIMIT + cursor.
-    let order = if tail { "DESC" } else { "ASC" };
+    let cursor = page.cursor;
+    let sql = build_page_sql(&filter, cursor.is_some(), tail)?;
+    let q = bind_page_query(sqlx::query(&sql), &filter, &page)?;
+    let rows = q
+        .fetch_all(pool)
+        .await
+        .map_err(|e| VoomError::database_context("events list", e))?;
+    decode_page_rows(&rows, cursor, tail)
+}
+
+fn build_page_sql(filter: &EventFilter, has_cursor: bool, tail: bool) -> Result<String, VoomError> {
     let mut sql = String::from(
         "SELECT event_id, occurred_at, kind, subject_type, subject_id, trace_id, payload \
          FROM events WHERE 1=1",
     );
-    if filter.kind.is_some() {
-        sql.push_str(" AND kind = ?");
+    let conditions = [
+        (filter.kind.is_some(), " AND kind = ?"),
+        (filter.subject_type.is_some(), " AND subject_type = ?"),
+        (filter.subject_id.is_some(), " AND subject_id = ?"),
+        (filter.since.is_some(), " AND occurred_at >= ?"),
+        (filter.until.is_some(), " AND occurred_at <= ?"),
+    ];
+    for (present, condition) in conditions {
+        if present {
+            sql.push_str(condition);
+        }
     }
-    if filter.subject_type.is_some() {
-        sql.push_str(" AND subject_type = ?");
-    }
-    if filter.subject_id.is_some() {
-        sql.push_str(" AND subject_id = ?");
-    }
-    if filter.since.is_some() {
-        sql.push_str(" AND occurred_at >= ?");
-    }
-    if filter.until.is_some() {
-        sql.push_str(" AND occurred_at <= ?");
-    }
-    if page.cursor.is_some() {
+    if has_cursor {
         sql.push_str(if tail {
             " AND event_id < ?"
         } else {
             " AND event_id > ?"
         });
     }
+    let order = if tail { "DESC" } else { "ASC" };
     write!(sql, " ORDER BY event_id {order} LIMIT ?")
         .map_err(|e| VoomError::Internal(format!("build list SQL: {e}")))?;
+    Ok(sql)
+}
 
-    let mut q = sqlx::query(&sql);
-    if let Some(k) = filter.kind {
-        q = q.bind(k.as_str());
+fn bind_page_query<'a>(
+    mut query: sqlx::query::Query<'a, sqlx::Sqlite, sqlx::sqlite::SqliteArguments<'a>>,
+    filter: &'a EventFilter,
+    page: &Page,
+) -> Result<sqlx::query::Query<'a, sqlx::Sqlite, sqlx::sqlite::SqliteArguments<'a>>, VoomError> {
+    if let Some(k) = &filter.kind {
+        query = query.bind(k.as_str());
     }
-    if let Some(s) = filter.subject_type {
-        q = q.bind(s.as_str());
+    if let Some(s) = &filter.subject_type {
+        query = query.bind(s.as_str());
     }
     if let Some(s) = filter.subject_id {
-        q = q.bind(i64_from_u64(
-            s,
-            concat!(module_path!(), ": ", stringify!(s)),
-        )?);
+        query = query.bind(i64_from_u64(s, "events.subject_id")?);
     }
     if let Some(since) = filter.since {
-        q = q.bind(iso8601(since)?);
+        query = query.bind(iso8601(since)?);
     }
     if let Some(until) = filter.until {
-        q = q.bind(iso8601(until)?);
+        query = query.bind(iso8601(until)?);
     }
     if let Some(c) = page.cursor {
-        q = q.bind(i64_from_u64(
-            c,
-            concat!(module_path!(), ": ", stringify!(c)),
-        )?);
+        query = query.bind(i64_from_u64(c, "events.event_id cursor")?);
     }
-    q = q.bind(i64::from(page.limit));
+    Ok(query.bind(i64::from(page.limit)))
+}
 
-    let rows = q
-        .fetch_all(pool)
-        .await
-        .map_err(|e| VoomError::database_context("events list", e))?;
-
+fn decode_page_rows(
+    rows: &[sqlx::sqlite::SqliteRow],
+    cursor: Option<u64>,
+    tail: bool,
+) -> Result<EventPage, VoomError> {
     // Rows with an unknown `kind` (written by a newer binary) are skipped so a
     // single unrecognized row does not poison the whole read. The cursor must
     // still advance past skipped rows — keyed off the last RAW row id, not the
     // last kept item — or `tail` would re-scan a trailing run of unknown rows.
     let mut items = Vec::with_capacity(rows.len());
     let mut last_raw_id: Option<u64> = None;
-    for row in &rows {
+    for row in rows {
         last_raw_id = Some(event_row_id(row)?);
         if let Some(event) = row_to_event(row)? {
             items.push(event);
@@ -267,7 +275,7 @@ async fn page_query(
     // pollers stop. `tail` (live polling) keeps the caller's cursor alive
     // across empty pages so a follower can resume when new events arrive.
     let next_cursor = if tail {
-        last_raw_id.or(page.cursor)
+        last_raw_id.or(cursor)
     } else {
         last_raw_id
     };

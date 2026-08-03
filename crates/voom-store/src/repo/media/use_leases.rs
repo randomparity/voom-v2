@@ -428,28 +428,28 @@ type ScopeBindColumns = (Option<i64>, Option<i64>, Option<i64>, Option<i64>);
 fn scope_bind_columns(scope: LeaseScope) -> Result<ScopeBindColumns, VoomError> {
     Ok(match scope {
         LeaseScope::Asset(id) => (
-            Some(i64_from_u64(id.0, "use_leases.scope_asset_id")?),
+            Some(i64_from_u64(id.0, "asset_use_leases.scope_asset_id")?),
             None,
             None,
             None,
         ),
         LeaseScope::Bundle(id) => (
             None,
-            Some(i64_from_u64(id.0, "use_leases.scope_bundle_id")?),
+            Some(i64_from_u64(id.0, "asset_use_leases.scope_bundle_id")?),
             None,
             None,
         ),
         LeaseScope::Version(id) => (
             None,
             None,
-            Some(i64_from_u64(id.0, "use_leases.scope_version_id")?),
+            Some(i64_from_u64(id.0, "asset_use_leases.scope_version_id")?),
             None,
         ),
         LeaseScope::Location(id) => (
             None,
             None,
             None,
-            Some(i64_from_u64(id.0, "use_leases.scope_location_id")?),
+            Some(i64_from_u64(id.0, "asset_use_leases.scope_location_id")?),
         ),
     })
 }

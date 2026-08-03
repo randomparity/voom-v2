@@ -1998,6 +1998,51 @@ type CommitVerificationRow = (
     Option<i64>,
 );
 
+struct CommitVerificationFacts {
+    verification_id: i64,
+    verification_handle_id: i64,
+    status: String,
+    verification_path: String,
+    location_kind: String,
+    location_value: String,
+    retired_at: Option<String>,
+    location_handle_id: i64,
+    handle_file_version_id: Option<i64>,
+    source_retired_at: Option<String>,
+    latest_successful_id: Option<i64>,
+}
+
+impl From<CommitVerificationRow> for CommitVerificationFacts {
+    fn from(row: CommitVerificationRow) -> Self {
+        let (
+            verification_id,
+            verification_handle_id,
+            status,
+            verification_path,
+            location_kind,
+            location_value,
+            retired_at,
+            location_handle_id,
+            handle_file_version_id,
+            source_retired_at,
+            latest_successful_id,
+        ) = row;
+        Self {
+            verification_id,
+            verification_handle_id,
+            status,
+            verification_path,
+            location_kind,
+            location_value,
+            retired_at,
+            location_handle_id,
+            handle_file_version_id,
+            source_retired_at,
+            latest_successful_id,
+        }
+    }
+}
+
 async fn validate_commit_verification(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     input: &NewArtifactCommitRecord,
@@ -2023,78 +2068,62 @@ async fn validate_commit_verification(
     .fetch_optional(&mut **tx)
     .await
     .map_err(|e| VoomError::database_context("artifact_verifications commit lookup", e))?;
-    let Some((
-        verification_id,
-        verification_handle_id,
-        status,
-        verification_path,
-        location_kind,
-        location_value,
-        retired_at,
-        location_handle_id,
-        handle_file_version_id,
-        source_retired_at,
-        latest_successful_id,
-    )) = row
-    else {
+    let Some(row) = row else {
         return Err(VoomError::NotFound(format!(
             "artifact_verifications {} missing",
             input.verification_id
         )));
     };
-    if u64_from_i64(
-        verification_handle_id,
-        concat!(module_path!(), ": ", stringify!(verification_handle_id)),
-    )? != input.artifact_handle_id.0
-        || u64_from_i64(
-            location_handle_id,
-            concat!(module_path!(), ": ", stringify!(location_handle_id)),
-        )? != input.artifact_handle_id.0
-        || status != ArtifactVerificationStatus::Succeeded.as_str()
-        || verification_path != location_value
-        || location_kind != "staging"
-        || retired_at.is_some()
-        || latest_successful_id
-            != Some(i64_from_u64(
-                input.verification_id.0,
-                concat!(module_path!(), ": ", stringify!(input.verification_id.0)),
-            )?)
-    {
+    let facts = CommitVerificationFacts::from(row);
+    if !is_successful_live_staging_verification(&facts, input)? {
         return Err(VoomError::Conflict(format!(
             "artifact_commit_records: verification {} is not a successful live staging \
              verification for artifact_handle {}",
             input.verification_id, input.artifact_handle_id
         )));
     }
-    if handle_file_version_id
-        != Some(i64_from_u64(
-            input.source_file_version_id.0,
-            concat!(
-                module_path!(),
-                ": ",
-                stringify!(input.source_file_version_id.0)
-            ),
-        )?)
-    {
+    let source_file_version_id = i64_from_u64(
+        input.source_file_version_id.0,
+        "artifact_handles.file_version_id",
+    )?;
+    if facts.handle_file_version_id != Some(source_file_version_id) {
         return Err(VoomError::Conflict(format!(
             "artifact_commit_records: source_file_version_id {} does not match \
              artifact_handle {} file_version_id",
             input.source_file_version_id, input.artifact_handle_id
         )));
     }
-    if verification_id
-        != i64_from_u64(
-            input.verification_id.0,
-            concat!(module_path!(), ": ", stringify!(input.verification_id.0)),
-        )?
-        || source_retired_at.is_some()
-    {
+    let verification_id = i64_from_u64(input.verification_id.0, "artifact_verifications.id")?;
+    if facts.verification_id != verification_id || facts.source_retired_at.is_some() {
         return Err(VoomError::Conflict(format!(
             "artifact_commit_records: source_file_version_id {} is not live",
             input.source_file_version_id
         )));
     }
     Ok(())
+}
+
+fn is_successful_live_staging_verification(
+    facts: &CommitVerificationFacts,
+    input: &NewArtifactCommitRecord,
+) -> Result<bool, VoomError> {
+    Ok(u64_from_i64(
+        facts.verification_handle_id,
+        "artifact_verifications.artifact_handle_id",
+    )? == input.artifact_handle_id.0
+        && u64_from_i64(
+            facts.location_handle_id,
+            "artifact_locations.artifact_handle_id",
+        )? == input.artifact_handle_id.0
+        && facts.status == ArtifactVerificationStatus::Succeeded.as_str()
+        && facts.verification_path == facts.location_value
+        && facts.location_kind == "staging"
+        && facts.retired_at.is_none()
+        && facts.latest_successful_id
+            == Some(i64_from_u64(
+                input.verification_id.0,
+                "artifact_verifications.id",
+            )?))
 }
 
 async fn validate_committed_result(

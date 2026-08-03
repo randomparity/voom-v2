@@ -2346,33 +2346,53 @@ fn verify_discovered_proof_matches_alias_proof(
     Ok(())
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "the four-row insert + two evidence-stamp branches are best read inline; \
-              splitting would shred the spec §8.7 NewFileAsset semantics across helpers"
-)]
 async fn ingest_new_file_asset(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     discovered: &DiscoveredFile,
     fallback_from_alias_mismatch: Option<()>,
 ) -> Result<IngestOutcome, VoomError> {
-    // Insert FileAsset.
     let ts = iso8601(discovered.observed_at)?;
+    let (asset_id, version_id) = insert_ingested_asset_and_version(tx, discovered, &ts).await?;
+    let location_id = insert_file_location(
+        tx,
+        version_id,
+        discovered.location_kind,
+        &discovered.location_value,
+        discovered.proof.as_ref(),
+        discovered.observed_at,
+    )
+    .await?;
+    let hash_match_evidence = record_hash_match_evidence(tx, discovered, version_id).await?;
+    let path_rule_evidence = record_path_rule_evidence(
+        tx,
+        discovered,
+        version_id,
+        fallback_from_alias_mismatch.is_some(),
+    )
+    .await?;
+    Ok(IngestOutcome::NewFileAsset {
+        file_asset_id: asset_id,
+        file_version_id: version_id,
+        file_location_id: location_id,
+        hash_match_evidence,
+        path_rule_evidence,
+    })
+}
+
+async fn insert_ingested_asset_and_version(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    discovered: &DiscoveredFile,
+    observed_at: &str,
+) -> Result<(FileAssetId, FileVersionId), VoomError> {
     let asset_res = sqlx::query("INSERT INTO file_assets (created_at) VALUES (?)")
-        .bind(&ts)
+        .bind(observed_at)
         .execute(&mut **tx)
         .await
         .map_err(|e| VoomError::database_context("file_assets insert", e))?;
     let asset_id = FileAssetId(u64_from_i64(
         asset_res.last_insert_rowid(),
-        concat!(
-            module_path!(),
-            ": ",
-            stringify!(asset_res.last_insert_rowid())
-        ),
+        "file_assets.id",
     )?);
-
-    // Insert FileVersion (produced_by = 'ingest', parent NULL).
     let size_i64 = i64::try_from(discovered.size_bytes).map_err(|_| {
         VoomError::Config(format!(
             "file_versions: size_bytes {} overflows i64",
@@ -2385,148 +2405,134 @@ async fn ingest_new_file_asset(
           produced_from_version_id, created_at) \
          VALUES (?, ?, ?, 'ingest', NULL, ?)",
     )
-    .bind(i64_from_u64(
-        asset_id.0,
-        concat!(module_path!(), ": ", stringify!(asset_id.0)),
-    )?)
+    .bind(i64_from_u64(asset_id.0, "file_versions.file_asset_id")?)
     .bind(&discovered.content_hash)
     .bind(size_i64)
-    .bind(&ts)
+    .bind(observed_at)
     .execute(&mut **tx)
     .await
     .map_err(|e| VoomError::database_context("file_versions insert", e))?;
     let version_id = FileVersionId(u64_from_i64(
         version_res.last_insert_rowid(),
-        concat!(
-            module_path!(),
-            ": ",
-            stringify!(version_res.last_insert_rowid())
-        ),
+        "file_versions.id",
     )?);
+    Ok((asset_id, version_id))
+}
 
-    // Insert FileLocation carrying the discovered proof (if any).
-    let location_id = insert_file_location(
-        tx,
-        version_id,
-        discovered.location_kind,
-        &discovered.location_value,
-        discovered.proof.as_ref(),
-        discovered.observed_at,
-    )
-    .await?;
-
-    // Hash-match evidence: if any pre-existing FileVersion (on a
-    // different FileAsset — we just inserted version_id into asset_id)
-    // shares the content hash, stamp a `hash_match` row.
-    //
-    // Per spec §8.7 the row's target is the *existing* `FileAsset`
-    // (so the existing logical asset accumulates candidates) and the
-    // candidate is the *new* `FileVersion` (the bytes that just
-    // arrived). Hash matches never collapse identity — they surface
-    // the candidate without merging assets.
+async fn record_hash_match_evidence(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    discovered: &DiscoveredFile,
+    version_id: FileVersionId,
+) -> Result<Option<EvidenceId>, VoomError> {
     let prior: Option<(i64, i64)> = sqlx::query_as(
         "SELECT id, file_asset_id FROM file_versions \
          WHERE content_hash = ? AND id <> ? LIMIT 1",
     )
     .bind(&discovered.content_hash)
-    .bind(i64_from_u64(
-        version_id.0,
-        concat!(module_path!(), ": ", stringify!(version_id.0)),
-    )?)
+    .bind(i64_from_u64(version_id.0, "file_versions.id")?)
     .fetch_optional(&mut **tx)
     .await
     .map_err(|e| VoomError::database_context("file_versions hash-match probe", e))?;
-    let hash_match_evidence = if let Some((prior_version_i, prior_asset_i)) = prior {
-        let prior_version_id = FileVersionId(u64_from_i64(
-            prior_version_i,
-            concat!(module_path!(), ": ", stringify!(prior_version_i)),
-        )?);
-        let prior_asset_id = FileAssetId(u64_from_i64(
-            prior_asset_i,
-            concat!(module_path!(), ": ", stringify!(prior_asset_i)),
-        )?);
-        let ev = insert_identity_evidence(
-            tx,
-            &NewIdentityEvidence {
-                target_type: IdentityEvidenceTarget::FileAsset,
-                target_id: prior_asset_id.0,
-                assertion_type: AssertionKind::HashMatch,
-                candidate_id: Some(version_id.0),
-                candidate_value: None,
-                provider: "voom.ingest".to_owned(),
-                provider_version: "1".to_owned(),
-                confidence: 1.0,
-                provenance: serde_json::json!({
-                    "discovered_path": discovered.location_value,
-                    "new_file_version_id": version_id.0,
-                    "matched_prior_file_version_id": prior_version_id.0,
-                }),
-                observed_at: discovered.observed_at,
-            },
-        )
-        .await?;
-        Some(ev)
-    } else {
-        None
+    let Some((prior_version_raw, prior_asset_raw)) = prior else {
+        return Ok(None);
     };
-
-    // Path-rule evidence: only when the caller supplied an alias proof
-    // that we then rejected (so we want to surface the near-miss for
-    // operators / future reconciliation).
-    let path_rule_evidence = if fallback_from_alias_mismatch.is_some() {
-        Some(
-            insert_identity_evidence(
-                tx,
-                &NewIdentityEvidence {
-                    target_type: IdentityEvidenceTarget::FileVersion,
-                    target_id: version_id.0,
-                    assertion_type: AssertionKind::PathRuleMatch,
-                    candidate_id: None,
-                    candidate_value: Some(discovered.location_value.clone()),
-                    provider: "voom.ingest".to_owned(),
-                    provider_version: "1".to_owned(),
-                    confidence: 0.5,
-                    provenance: serde_json::json!({
-                        "discovered_path": discovered.location_value,
-                        "alias_proof_validation": "mismatch",
-                    }),
-                    observed_at: discovered.observed_at,
-                },
-            )
-            .await?,
-        )
-    } else {
-        None
-    };
-
-    Ok(IngestOutcome::NewFileAsset {
-        file_asset_id: asset_id,
-        file_version_id: version_id,
-        file_location_id: location_id,
-        hash_match_evidence,
-        path_rule_evidence,
-    })
+    let prior_version_id = FileVersionId(u64_from_i64(prior_version_raw, "file_versions.id")?);
+    let prior_asset_id = FileAssetId(u64_from_i64(
+        prior_asset_raw,
+        "file_versions.file_asset_id",
+    )?);
+    insert_identity_evidence(
+        tx,
+        &NewIdentityEvidence {
+            target_type: IdentityEvidenceTarget::FileAsset,
+            target_id: prior_asset_id.0,
+            assertion_type: AssertionKind::HashMatch,
+            candidate_id: Some(version_id.0),
+            candidate_value: None,
+            provider: "voom.ingest".to_owned(),
+            provider_version: "1".to_owned(),
+            confidence: 1.0,
+            provenance: serde_json::json!({
+                "discovered_path": discovered.location_value,
+                "new_file_version_id": version_id.0,
+                "matched_prior_file_version_id": prior_version_id.0,
+            }),
+            observed_at: discovered.observed_at,
+        },
+    )
+    .await
+    .map(Some)
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "the eight-step validation pipeline in spec §8.7 reads cleanly inline; \
-              factoring it would scatter the same-physical-object invariants across helpers"
-)]
+async fn record_path_rule_evidence(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    discovered: &DiscoveredFile,
+    version_id: FileVersionId,
+    alias_mismatch: bool,
+) -> Result<Option<EvidenceId>, VoomError> {
+    if !alias_mismatch {
+        return Ok(None);
+    }
+    insert_identity_evidence(
+        tx,
+        &NewIdentityEvidence {
+            target_type: IdentityEvidenceTarget::FileVersion,
+            target_id: version_id.0,
+            assertion_type: AssertionKind::PathRuleMatch,
+            candidate_id: None,
+            candidate_value: Some(discovered.location_value.clone()),
+            provider: "voom.ingest".to_owned(),
+            provider_version: "1".to_owned(),
+            confidence: 0.5,
+            provenance: serde_json::json!({
+                "discovered_path": discovered.location_value,
+                "alias_proof_validation": "mismatch",
+            }),
+            observed_at: discovered.observed_at,
+        },
+    )
+    .await
+    .map(Some)
+}
+
+struct ResolvedRenameProof {
+    prior_location_id: FileLocationId,
+    new_kind: FileLocationKind,
+    new_value: String,
+    expected_proof_kind: &'static str,
+    expected_proof_value: String,
+    prior_observed_missing: bool,
+}
+
 async fn reconcile_rename_impl(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     proof: &RenameProof,
     observed: &ObservedBytes,
     observed_at: OffsetDateTime,
 ) -> Result<RenameReconciledOutcome, VoomError> {
-    let (
-        prior_location_id,
-        new_kind,
-        new_value,
-        expected_proof_kind,
-        expected_proof_value,
-        prior_observed_present,
-    ) = match proof {
+    let proof = resolve_rename_proof(proof);
+    let version = validate_rename_source(tx, &proof, observed).await?;
+    retire_rename_source_location(tx, proof.prior_location_id, observed_at).await?;
+    let new_location_id = insert_file_location_with_raw_proof(
+        tx,
+        version.id,
+        proof.new_kind,
+        &proof.new_value,
+        Some(proof.expected_proof_kind),
+        Some(&proof.expected_proof_value),
+        observed_at,
+    )
+    .await?;
+    record_rename_evidence(tx, &proof, new_location_id, observed_at).await?;
+    Ok(RenameReconciledOutcome {
+        file_version_id: version.id,
+        retired_location_id: proof.prior_location_id,
+        new_file_location_id: new_location_id,
+    })
+}
+
+fn resolve_rename_proof(proof: &RenameProof) -> ResolvedRenameProof {
+    match proof {
         RenameProof::LocalFileIdGeneration {
             prior_location_id,
             new_kind,
@@ -2534,18 +2540,18 @@ async fn reconcile_rename_impl(
             file_id,
             generation,
             prior_path_missing,
-        } => (
-            *prior_location_id,
-            *new_kind,
-            new_value.clone(),
-            "file_id_generation",
-            serde_json::json!({
+        } => ResolvedRenameProof {
+            prior_location_id: *prior_location_id,
+            new_kind: *new_kind,
+            new_value: new_value.clone(),
+            expected_proof_kind: "file_id_generation",
+            expected_proof_value: serde_json::json!({
                 "file_id": file_id.to_string(),
                 "generation": generation,
             })
             .to_string(),
-            *prior_path_missing,
-        ),
+            prior_observed_missing: *prior_path_missing,
+        },
         RenameProof::ObjectStoreVersion {
             prior_location_id,
             new_kind,
@@ -2554,49 +2560,55 @@ async fn reconcile_rename_impl(
             key,
             version_id,
             prior_key_missing,
-        } => (
-            *prior_location_id,
-            *new_kind,
-            new_value.clone(),
-            "object_version_id",
-            serde_json::json!({
+        } => ResolvedRenameProof {
+            prior_location_id: *prior_location_id,
+            new_kind: *new_kind,
+            new_value: new_value.clone(),
+            expected_proof_kind: "object_version_id",
+            expected_proof_value: serde_json::json!({
                 "bucket": bucket,
                 "key": key,
                 "version_id": version_id,
             })
             .to_string(),
-            *prior_key_missing,
-        ),
-    };
+            prior_observed_missing: *prior_key_missing,
+        },
+    }
+}
 
-    // 1. Load prior location, require live.
-    let prior = get_file_location_in_tx(tx, prior_location_id)
+async fn validate_rename_source(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    proof: &ResolvedRenameProof,
+    observed: &ObservedBytes,
+) -> Result<FileVersion, VoomError> {
+    let prior = get_file_location_in_tx(tx, proof.prior_location_id)
         .await?
-        .ok_or_else(|| VoomError::NotFound(format!("file_locations {prior_location_id}")))?;
+        .ok_or_else(|| {
+            VoomError::NotFound(format!("file_locations {}", proof.prior_location_id))
+        })?;
     if prior.retired_at.is_some() {
         return Err(VoomError::Conflict(format!(
-            "reconcile_rename: prior location {prior_location_id} already retired"
+            "reconcile_rename: prior location {} already retired",
+            proof.prior_location_id
         )));
     }
-    // 2. proof_kind match.
-    if prior.proof_kind.as_deref() != Some(expected_proof_kind) {
+    if prior.proof_kind.as_deref() != Some(proof.expected_proof_kind) {
         return Err(VoomError::Conflict(format!(
-            "reconcile_rename: proof_kind mismatch on {prior_location_id}"
+            "reconcile_rename: proof_kind mismatch on {}",
+            proof.prior_location_id
         )));
     }
-    // 3. proof_value match.
-    if prior.proof_value.as_deref() != Some(expected_proof_value.as_str()) {
+    if prior.proof_value.as_deref() != Some(proof.expected_proof_value.as_str()) {
         return Err(VoomError::Conflict(format!(
-            "reconcile_rename: proof_value mismatch on {prior_location_id}"
+            "reconcile_rename: proof_value mismatch on {}",
+            proof.prior_location_id
         )));
     }
-    // 4. Require caller observed prior path missing.
-    if !prior_observed_present {
+    if !proof.prior_observed_missing {
         return Err(VoomError::Conflict(
             "reconcile_rename: rename requires prior path missing".to_owned(),
         ));
     }
-    // 5. Hash + size must match the bound FileVersion.
     let version = get_file_version_in_tx(tx, prior.file_version_id)
         .await?
         .ok_or_else(|| {
@@ -2615,7 +2627,14 @@ async fn reconcile_rename_impl(
             "reconcile_rename: size drift during rename".to_owned(),
         ));
     }
-    // 6. Retire the prior location.
+    Ok(version)
+}
+
+async fn retire_rename_source_location(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    prior_location_id: FileLocationId,
+    observed_at: OffsetDateTime,
+) -> Result<(), VoomError> {
     let ts = iso8601(observed_at)?;
     let retire_res = sqlx::query(
         "UPDATE file_locations SET retired_at = ?, epoch = epoch + 1 \
@@ -2634,42 +2653,35 @@ async fn reconcile_rename_impl(
             "reconcile_rename: race on retire of {prior_location_id}"
         )));
     }
-    // 7. Insert new location with the same proof bytes carried over.
-    let new_location_id = insert_file_location_with_raw_proof(
-        tx,
-        version.id,
-        new_kind,
-        &new_value,
-        Some(expected_proof_kind),
-        Some(expected_proof_value.as_str()),
-        observed_at,
-    )
-    .await?;
-    // 9. Append path_rule_match evidence observing the new location.
+    Ok(())
+}
+
+async fn record_rename_evidence(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    proof: &ResolvedRenameProof,
+    new_location_id: FileLocationId,
+    observed_at: OffsetDateTime,
+) -> Result<(), VoomError> {
     insert_identity_evidence(
         tx,
         &NewIdentityEvidence {
             target_type: IdentityEvidenceTarget::FileLocation,
             target_id: new_location_id.0,
             assertion_type: AssertionKind::PathRuleMatch,
-            candidate_id: Some(prior_location_id.0),
-            candidate_value: Some(new_value.clone()),
+            candidate_id: Some(proof.prior_location_id.0),
+            candidate_value: Some(proof.new_value.clone()),
             provider: "voom.rename_reconcile".to_owned(),
             provider_version: "1".to_owned(),
             confidence: 1.0,
             provenance: serde_json::json!({
-                "prior_location_id": prior_location_id.0,
+                "prior_location_id": proof.prior_location_id.0,
                 "new_location_id": new_location_id.0,
             }),
             observed_at,
         },
     )
     .await?;
-    Ok(RenameReconciledOutcome {
-        file_version_id: version.id,
-        retired_location_id: prior_location_id,
-        new_file_location_id: new_location_id,
-    })
+    Ok(())
 }
 
 async fn insert_file_location(

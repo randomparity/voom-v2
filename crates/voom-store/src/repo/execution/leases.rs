@@ -1270,18 +1270,7 @@ async fn process_expired_lease(
     now_str: &str,
     report: &mut ExpireReport,
 ) -> Result<(), VoomError> {
-    let lease_id_i: i64 = row.try_get("id").map_err(|e| map_row_err("leases", &e))?;
-    let ticket_id_i: i64 = row
-        .try_get("ticket_id")
-        .map_err(|e| map_row_err("leases", &e))?;
-    let lease_id = LeaseId(u64_from_i64(
-        lease_id_i,
-        concat!(module_path!(), ": ", stringify!(lease_id_i)),
-    )?);
-    let ticket_id = TicketId(u64_from_i64(
-        ticket_id_i,
-        concat!(module_path!(), ": ", stringify!(ticket_id_i)),
-    )?);
+    let (lease_id_i, ticket_id_i, lease_id, ticket_id) = decode_expired_lease_row(row)?;
     let lease_res = sqlx::query(
         "UPDATE leases SET state = 'expired', release_reason = ?, \
          released_at = ?, epoch = epoch + 1 \
@@ -1363,6 +1352,18 @@ async fn process_expired_lease(
     report.expired_leases.push(lease_id);
     report.pairs.push((lease_id, ticket_id));
     Ok(())
+}
+
+fn decode_expired_lease_row(
+    row: &sqlx::sqlite::SqliteRow,
+) -> Result<(i64, i64, LeaseId, TicketId), VoomError> {
+    let lease_id_raw = row.try_get("id").map_err(|e| map_row_err("leases", &e))?;
+    let ticket_id_raw = row
+        .try_get("ticket_id")
+        .map_err(|e| map_row_err("leases", &e))?;
+    let lease_id = LeaseId(u64_from_i64(lease_id_raw, "leases.id")?);
+    let ticket_id = TicketId(u64_from_i64(ticket_id_raw, "leases.ticket_id")?);
+    Ok((lease_id_raw, ticket_id_raw, lease_id, ticket_id))
 }
 
 fn require_operation_eligibility(

@@ -462,6 +462,12 @@ const DECISION_INSERT_COLS: &str = "created_at, updated_at, first_seen_at, last_
      ticket_id, selected_worker_id, selected_node_id, selected_lease_id, outcome, reason_code, \
      summary, candidate_count, selected_score, suppression_key, explanation_json";
 const DECISION_INSERT_VALUES: &str = "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?";
+const REQUEST_NODE_FIELD: &str = "scheduler_decisions.request_node_id";
+const REQUEST_WORKER_FIELD: &str = "scheduler_decisions.request_worker_id";
+const TICKET_FIELD: &str = "scheduler_decisions.ticket_id";
+const SELECTED_WORKER_FIELD: &str = "scheduler_decisions.selected_worker_id";
+const SELECTED_NODE_FIELD: &str = "scheduler_decisions.selected_node_id";
+const SELECTED_LEASE_FIELD: &str = "scheduler_decisions.selected_lease_id";
 const DECISION_INSERT_SUPPRESS_CLAUSE: &str = "ON CONFLICT(suppression_key) WHERE suppression_key IS NOT NULL DO UPDATE SET \
          updated_at = excluded.updated_at, \
          last_seen_at = excluded.last_seen_at, \
@@ -900,24 +906,7 @@ fn row_to_decision(row: &sqlx::sqlite::SqliteRow) -> Result<SchedulerDecision, V
     let idempotency_key: Option<String> = row
         .try_get("idempotency_key")
         .map_err(|e| map_row_err("scheduler_decisions", &e))?;
-    let request_node_id: Option<i64> = row
-        .try_get("request_node_id")
-        .map_err(|e| map_row_err("scheduler_decisions", &e))?;
-    let request_worker_id: Option<i64> = row
-        .try_get("request_worker_id")
-        .map_err(|e| map_row_err("scheduler_decisions", &e))?;
-    let ticket_id: Option<i64> = row
-        .try_get("ticket_id")
-        .map_err(|e| map_row_err("scheduler_decisions", &e))?;
-    let selected_worker_id: Option<i64> = row
-        .try_get("selected_worker_id")
-        .map_err(|e| map_row_err("scheduler_decisions", &e))?;
-    let selected_node_id: Option<i64> = row
-        .try_get("selected_node_id")
-        .map_err(|e| map_row_err("scheduler_decisions", &e))?;
-    let selected_lease_id: Option<i64> = row
-        .try_get("selected_lease_id")
-        .map_err(|e| map_row_err("scheduler_decisions", &e))?;
+    let references = decision_reference_rows(row)?;
     let outcome: String = row
         .try_get("outcome")
         .map_err(|e| map_row_err("scheduler_decisions", &e))?;
@@ -952,16 +941,28 @@ fn row_to_decision(row: &sqlx::sqlite::SqliteRow) -> Result<SchedulerDecision, V
         decision_kind: SchedulerDecisionKind::parse(&decision_kind)?,
         request_source: SchedulerRequestSource::parse(&request_source)?,
         idempotency_key,
-        request_node_id: decision_optional_id(request_node_id, "request_node_id", NodeId)?,
-        request_worker_id: decision_optional_id(request_worker_id, "request_worker_id", WorkerId)?,
-        ticket_id: decision_optional_id(ticket_id, "ticket_id", TicketId)?,
-        selected_worker_id: decision_optional_id(
-            selected_worker_id,
-            "selected_worker_id",
+        request_node_id: decision_optional_id(references.request_node, REQUEST_NODE_FIELD, NodeId)?,
+        request_worker_id: decision_optional_id(
+            references.request_worker,
+            REQUEST_WORKER_FIELD,
             WorkerId,
         )?,
-        selected_node_id: decision_optional_id(selected_node_id, "selected_node_id", NodeId)?,
-        selected_lease_id: decision_optional_id(selected_lease_id, "selected_lease_id", LeaseId)?,
+        ticket_id: decision_optional_id(references.ticket, TICKET_FIELD, TicketId)?,
+        selected_worker_id: decision_optional_id(
+            references.selected_worker,
+            SELECTED_WORKER_FIELD,
+            WorkerId,
+        )?,
+        selected_node_id: decision_optional_id(
+            references.selected_node,
+            SELECTED_NODE_FIELD,
+            NodeId,
+        )?,
+        selected_lease_id: decision_optional_id(
+            references.selected_lease,
+            SELECTED_LEASE_FIELD,
+            LeaseId,
+        )?,
         outcome: SchedulerDecisionOutcome::parse(&outcome)?,
         reason_code: SchedulerReasonCode::parse(&reason_code)?,
         summary,
@@ -974,13 +975,39 @@ fn row_to_decision(row: &sqlx::sqlite::SqliteRow) -> Result<SchedulerDecision, V
     })
 }
 
+struct DecisionReferenceRows {
+    request_node: Option<i64>,
+    request_worker: Option<i64>,
+    ticket: Option<i64>,
+    selected_worker: Option<i64>,
+    selected_node: Option<i64>,
+    selected_lease: Option<i64>,
+}
+
+fn decision_reference_rows(
+    row: &sqlx::sqlite::SqliteRow,
+) -> Result<DecisionReferenceRows, VoomError> {
+    let field = |name| {
+        row.try_get(name)
+            .map_err(|error| map_row_err("scheduler_decisions", &error))
+    };
+    Ok(DecisionReferenceRows {
+        request_node: field("request_node_id")?,
+        request_worker: field("request_worker_id")?,
+        ticket: field("ticket_id")?,
+        selected_worker: field("selected_worker_id")?,
+        selected_node: field("selected_node_id")?,
+        selected_lease: field("selected_lease_id")?,
+    })
+}
+
 fn decision_optional_id<T>(
     value: Option<i64>,
-    column: &'static str,
+    field: &'static str,
     constructor: fn(u64) -> T,
 ) -> Result<Option<T>, VoomError> {
     value
-        .map(|value| u64_from_i64(value, format!("scheduler_decisions.{column}")).map(constructor))
+        .map(|value| u64_from_i64(value, field).map(constructor))
         .transpose()
 }
 

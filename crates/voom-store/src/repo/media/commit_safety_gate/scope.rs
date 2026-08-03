@@ -260,55 +260,56 @@ async fn blocking_lease_rows_in_tx(
     .await
     .map_err(|e| VoomError::database_context("blocking-lease overlap", e))?;
 
-    let mut out = Vec::with_capacity(rows.len());
-    for row in &rows {
-        let id: i64 = row
-            .try_get("id")
-            .map_err(|e| VoomError::database_context("blocking-lease row", e))?;
-        let sa: Option<i64> = row
-            .try_get("scope_asset_id")
-            .map_err(|e| VoomError::database_context("blocking-lease row", e))?;
-        let sb: Option<i64> = row
-            .try_get("scope_bundle_id")
-            .map_err(|e| VoomError::database_context("blocking-lease row", e))?;
-        let sv: Option<i64> = row
-            .try_get("scope_version_id")
-            .map_err(|e| VoomError::database_context("blocking-lease row", e))?;
-        let sl: Option<i64> = row
-            .try_get("scope_location_id")
-            .map_err(|e| VoomError::database_context("blocking-lease row", e))?;
-        let scope = match (sa, sb, sv, sl) {
-            (Some(v), None, None, None) => LeaseScope::Asset(FileAssetId(u64_from_i64(
-                v,
-                concat!(module_path!(), ": ", stringify!(v)),
-            )?)),
-            (None, Some(v), None, None) => LeaseScope::Bundle(BundleId(u64_from_i64(
-                v,
-                concat!(module_path!(), ": ", stringify!(v)),
-            )?)),
-            (None, None, Some(v), None) => LeaseScope::Version(FileVersionId(u64_from_i64(
-                v,
-                concat!(module_path!(), ": ", stringify!(v)),
-            )?)),
-            (None, None, None, Some(v)) => LeaseScope::Location(FileLocationId(u64_from_i64(
-                v,
-                concat!(module_path!(), ": ", stringify!(v)),
-            )?)),
-            other => {
-                return Err(VoomError::database(format!(
-                    "blocking-lease row: scope_*_id columns are not exactly-one: {other:?}"
-                )));
-            }
-        };
-        out.push((
-            UseLeaseId(u64_from_i64(
-                id,
-                concat!(module_path!(), ": ", stringify!(id)),
-            )?),
-            scope,
-        ));
+    rows.iter().map(decode_blocking_lease_row).collect()
+}
+
+fn decode_blocking_lease_row(
+    row: &sqlx::sqlite::SqliteRow,
+) -> Result<(UseLeaseId, LeaseScope), VoomError> {
+    let id: i64 = row
+        .try_get("id")
+        .map_err(|e| VoomError::database_context("blocking-lease row", e))?;
+    let asset = row
+        .try_get("scope_asset_id")
+        .map_err(|e| VoomError::database_context("blocking-lease row", e))?;
+    let bundle = row
+        .try_get("scope_bundle_id")
+        .map_err(|e| VoomError::database_context("blocking-lease row", e))?;
+    let version = row
+        .try_get("scope_version_id")
+        .map_err(|e| VoomError::database_context("blocking-lease row", e))?;
+    let location = row
+        .try_get("scope_location_id")
+        .map_err(|e| VoomError::database_context("blocking-lease row", e))?;
+    let scope = decode_blocking_lease_scope(asset, bundle, version, location)?;
+    Ok((UseLeaseId(u64_from_i64(id, "asset_use_leases.id")?), scope))
+}
+
+fn decode_blocking_lease_scope(
+    asset: Option<i64>,
+    bundle: Option<i64>,
+    version: Option<i64>,
+    location: Option<i64>,
+) -> Result<LeaseScope, VoomError> {
+    match (asset, bundle, version, location) {
+        (Some(value), None, None, None) => u64_from_i64(value, "asset_use_leases.scope_asset_id")
+            .map(FileAssetId)
+            .map(LeaseScope::Asset),
+        (None, Some(value), None, None) => u64_from_i64(value, "asset_use_leases.scope_bundle_id")
+            .map(BundleId)
+            .map(LeaseScope::Bundle),
+        (None, None, Some(value), None) => u64_from_i64(value, "asset_use_leases.scope_version_id")
+            .map(FileVersionId)
+            .map(LeaseScope::Version),
+        (None, None, None, Some(value)) => {
+            u64_from_i64(value, "asset_use_leases.scope_location_id")
+                .map(FileLocationId)
+                .map(LeaseScope::Location)
+        }
+        other => Err(VoomError::database(format!(
+            "blocking-lease row: scope_*_id columns are not exactly-one: {other:?}"
+        ))),
     }
-    Ok(out)
 }
 
 /// Revalidate every accepted-evidence pin against current state. For
