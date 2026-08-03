@@ -8,7 +8,7 @@ use std::{
 use voom_core::NVIDIA_VIDEO_DECODERS;
 
 use super::{
-    FFmpegPreflightError, FfmpegPreflight, preflight_with_paths,
+    FfmpegPreflight, FfmpegPreflightError, preflight_with_paths,
     process::{
         PROBE_TIMEOUT, ProbeDir, command_output, command_text, kill_and_reap, kill_and_reap_all,
         parse_token, require_executable_file, wait_child_output,
@@ -47,10 +47,10 @@ pub fn preflight_with_nvidia(
     ffmpeg_path: &Path,
     ffprobe_path: &Path,
     config: &NvidiaPreflightConfig,
-) -> Result<FfmpegPreflight, FFmpegPreflightError> {
+) -> Result<FfmpegPreflight, FfmpegPreflightError> {
     validate_nvidia_uuid(&config.device_uuid)?;
     if !(1..=16).contains(&config.max_sessions) {
-        return Err(FFmpegPreflightError::Failed(
+        return Err(FfmpegPreflightError::Failed(
             "NVIDIA max sessions must be in 1..=16".to_owned(),
         ));
     }
@@ -73,9 +73,9 @@ pub fn preflight_with_nvidia(
     Ok(preflight)
 }
 
-pub(super) fn validate_nvidia_uuid(device_uuid: &str) -> Result<(), FFmpegPreflightError> {
+pub(super) fn validate_nvidia_uuid(device_uuid: &str) -> Result<(), FfmpegPreflightError> {
     let Some(uuid) = device_uuid.strip_prefix("GPU-") else {
-        return Err(FFmpegPreflightError::Failed(
+        return Err(FfmpegPreflightError::Failed(
             "NVIDIA device must be a full GPU- UUID".to_owned(),
         ));
     };
@@ -85,7 +85,7 @@ pub(super) fn validate_nvidia_uuid(device_uuid: &str) -> Result<(), FFmpegPrefli
             _ => ch.is_ascii_hexdigit(),
         });
     if !valid {
-        return Err(FFmpegPreflightError::Failed(
+        return Err(FfmpegPreflightError::Failed(
             "NVIDIA device must be a full GPU- UUID".to_owned(),
         ));
     }
@@ -94,7 +94,7 @@ pub(super) fn validate_nvidia_uuid(device_uuid: &str) -> Result<(), FFmpegPrefli
 
 fn probe_nvidia_identity(
     config: &NvidiaPreflightConfig,
-) -> Result<(String, String), FFmpegPreflightError> {
+) -> Result<(String, String), FfmpegPreflightError> {
     let output = command_text(
         "nvidia-smi device identity",
         command_output(
@@ -108,7 +108,7 @@ fn probe_nvidia_identity(
     let line = output.lines().next().unwrap_or_default();
     let fields: Vec<&str> = line.split(',').map(str::trim).collect();
     if fields.len() != 3 || fields[0] != config.device_uuid {
-        return Err(FFmpegPreflightError::Failed(format!(
+        return Err(FfmpegPreflightError::Failed(format!(
             "nvidia-smi returned unexpected identity `{line}` for {}",
             config.device_uuid
         )));
@@ -116,7 +116,7 @@ fn probe_nvidia_identity(
     Ok((fields[1].to_owned(), fields[2].to_owned()))
 }
 
-fn require_nvidia_build_features(ffmpeg_path: &Path) -> Result<(), FFmpegPreflightError> {
+fn require_nvidia_build_features(ffmpeg_path: &Path) -> Result<(), FfmpegPreflightError> {
     for (flag, required) in [
         ("-encoders", &["hevc_nvenc"][..]),
         ("-filters", &["hwupload_cuda", "scale_cuda"][..]),
@@ -127,7 +127,7 @@ fn require_nvidia_build_features(ffmpeg_path: &Path) -> Result<(), FFmpegPreflig
         )?;
         for token in required {
             if parse_token(&text, token).is_none() {
-                return Err(FFmpegPreflightError::Failed(format!(
+                return Err(FfmpegPreflightError::Failed(format!(
                     "ffmpeg does not advertise required NVIDIA feature `{token}`"
                 )));
             }
@@ -139,13 +139,13 @@ fn require_nvidia_build_features(ffmpeg_path: &Path) -> Result<(), FFmpegPreflig
 fn prove_nvidia_process_identity(
     ffmpeg_path: &Path,
     config: &NvidiaPreflightConfig,
-) -> Result<(), FFmpegPreflightError> {
+) -> Result<(), FfmpegPreflightError> {
     for _attempt in 0..3 {
         if run_identity_attempt(ffmpeg_path, config)? {
             return Ok(());
         }
     }
-    Err(FFmpegPreflightError::Failed(
+    Err(FfmpegPreflightError::Failed(
         "NVENC identity probe exited before its PID could be observed after three attempts"
             .to_owned(),
     ))
@@ -154,7 +154,7 @@ fn prove_nvidia_process_identity(
 fn run_identity_attempt(
     ffmpeg_path: &Path,
     config: &NvidiaPreflightConfig,
-) -> Result<bool, FFmpegPreflightError> {
+) -> Result<bool, FfmpegPreflightError> {
     let mut command = nvidia_ffmpeg_command(ffmpeg_path, config);
     command.args([
         "-hide_banner",
@@ -183,21 +183,21 @@ fn run_identity_attempt(
     ]);
     command.stdout(Stdio::null()).stderr(Stdio::piped());
     let mut child = command.spawn().map_err(|error| {
-        FFmpegPreflightError::Failed(format!("NVENC identity encode failed to start: {error}"))
+        FfmpegPreflightError::Failed(format!("NVENC identity encode failed to start: {error}"))
     })?;
     let pid = child.id();
     let started = std::time::Instant::now();
     while started.elapsed() < IDENTITY_POLL_WINDOW {
         if let Some(status) = child.try_wait().map_err(|error| {
-            FFmpegPreflightError::Failed(format!("polling NVENC identity encode: {error}"))
+            FfmpegPreflightError::Failed(format!("polling NVENC identity encode: {error}"))
         })? {
             let output = child.wait_with_output().map_err(|error| {
-                FFmpegPreflightError::Failed(format!("reaping NVENC identity encode: {error}"))
+                FfmpegPreflightError::Failed(format!("reaping NVENC identity encode: {error}"))
             })?;
             if status.success() {
                 return Ok(false);
             }
-            return Err(FFmpegPreflightError::Failed(format!(
+            return Err(FfmpegPreflightError::Failed(format!(
                 "NVENC identity encode exited {status}: {}",
                 String::from_utf8_lossy(&output.stderr).trim()
             )));
@@ -216,7 +216,7 @@ fn run_identity_attempt(
                 return Ok(true);
             }
             kill_and_reap(&mut child);
-            return Err(FFmpegPreflightError::Failed(format!(
+            return Err(FfmpegPreflightError::Failed(format!(
                 "NVENC PID {pid} ran on `{uuid}`, expected `{}`",
                 config.device_uuid
             )));
@@ -230,7 +230,7 @@ fn run_identity_attempt(
 fn query_compute_uuid(
     config: &NvidiaPreflightConfig,
     pid: u32,
-) -> Result<Option<String>, FFmpegPreflightError> {
+) -> Result<Option<String>, FfmpegPreflightError> {
     let output = command_text(
         "nvidia-smi compute-app identity",
         command_output(
@@ -251,7 +251,7 @@ fn query_compute_uuid(
 fn run_hevc_nvenc_smoke(
     ffmpeg_path: &Path,
     config: &NvidiaPreflightConfig,
-) -> Result<(), FFmpegPreflightError> {
+) -> Result<(), FfmpegPreflightError> {
     let mut command = nvidia_ffmpeg_command(ffmpeg_path, config);
     command.args([
         "-hide_banner",
@@ -283,7 +283,7 @@ fn run_hevc_nvenc_smoke(
 fn probe_nvidia_decoders(
     ffmpeg_path: &Path,
     config: &NvidiaPreflightConfig,
-) -> Result<(Vec<String>, Vec<String>), FFmpegPreflightError> {
+) -> Result<(Vec<String>, Vec<String>), FfmpegPreflightError> {
     let probe_dir = ProbeDir::new("nvidia-decoder-probe")?;
     let mut decoders = Vec::new();
     let mut diagnostics = Vec::new();
@@ -295,7 +295,7 @@ fn probe_nvidia_decoders(
         } else if *codec == "av1" {
             "libsvtav1"
         } else {
-            return Err(FFmpegPreflightError::Failed(format!(
+            return Err(FfmpegPreflightError::Failed(format!(
                 "NVIDIA decoder probe has no fixture encoder for `{codec}`"
             )));
         };
@@ -313,7 +313,7 @@ fn create_decoder_fixture(
     ffmpeg_path: &Path,
     encoder: &str,
     output: &Path,
-) -> Result<(), FFmpegPreflightError> {
+) -> Result<(), FfmpegPreflightError> {
     let mut command = Command::new(ffmpeg_path);
     command.args([
         "-hide_banner",
@@ -342,7 +342,7 @@ fn run_decoder_smoke(
     config: &NvidiaPreflightConfig,
     decoder: &str,
     fixture: &Path,
-) -> Result<(), FFmpegPreflightError> {
+) -> Result<(), FfmpegPreflightError> {
     let mut command = nvidia_ffmpeg_command(ffmpeg_path, config);
     command.args([
         "-hide_banner",
@@ -376,7 +376,7 @@ fn run_decoder_smoke(
 fn prove_nvidia_capacity(
     ffmpeg_path: &Path,
     config: &NvidiaPreflightConfig,
-) -> Result<(), FFmpegPreflightError> {
+) -> Result<(), FfmpegPreflightError> {
     let mut children = Vec::new();
     for _session in 0..config.max_sessions {
         let mut command = nvidia_ffmpeg_command(ffmpeg_path, config);
@@ -410,7 +410,7 @@ fn prove_nvidia_capacity(
             Ok(child) => children.push(child),
             Err(error) => {
                 kill_and_reap_all(&mut children);
-                return Err(FFmpegPreflightError::Failed(format!(
+                return Err(FfmpegPreflightError::Failed(format!(
                     "NVENC concurrency probe failed to start: {error}"
                 )));
             }

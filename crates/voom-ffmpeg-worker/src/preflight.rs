@@ -98,7 +98,7 @@ impl FfmpegPreflight {
 
 /// Failure to prove the `FFmpeg` binaries or configured accelerator at startup.
 #[derive(Debug, thiserror::Error)]
-pub enum FFmpegPreflightError {
+pub enum FfmpegPreflightError {
     #[error("ffmpeg preflight failed: {0}")]
     Failed(String),
 }
@@ -114,7 +114,7 @@ const DEFAULT_FFPROBE_BIN: &str = "ffprobe";
 ///
 /// Returns an error when environment configuration conflicts or any required capability cannot be
 /// proven.
-pub fn preflight_from_process_env() -> Result<FfmpegPreflight, FFmpegPreflightError> {
+pub fn preflight_from_process_env() -> Result<FfmpegPreflight, FfmpegPreflightError> {
     let ffmpeg =
         std::env::var_os(FFMPEG_BIN_ENV).unwrap_or_else(|| OsString::from(DEFAULT_FFMPEG_BIN));
     let ffprobe =
@@ -134,7 +134,7 @@ pub fn preflight_from_process_env() -> Result<FfmpegPreflight, FFmpegPreflightEr
             preflight_with_videotoolbox(&ffmpeg_path, &ffprobe_path, &config)
         }
         (None, None, None) => preflight_with_paths(&ffmpeg_path, &ffprobe_path),
-        _ => Err(FFmpegPreflightError::Failed(
+        _ => Err(FfmpegPreflightError::Failed(
             "NVIDIA, VAAPI, and VideoToolbox configurations are mutually exclusive; one worker \
              binds one accelerator, so run one worker per device"
                 .to_owned(),
@@ -142,12 +142,12 @@ pub fn preflight_from_process_env() -> Result<FfmpegPreflight, FFmpegPreflightEr
     }
 }
 
-fn nvidia_config_from_process_env() -> Result<Option<NvidiaPreflightConfig>, FFmpegPreflightError> {
+fn nvidia_config_from_process_env() -> Result<Option<NvidiaPreflightConfig>, FfmpegPreflightError> {
     let device = std::env::var(NVIDIA_DEVICE_ENV).ok();
     let sessions = std::env::var(NVIDIA_MAX_SESSIONS_ENV).ok();
     let Some(device_uuid) = device else {
         if sessions.is_some() {
-            return Err(FFmpegPreflightError::Failed(format!(
+            return Err(FfmpegPreflightError::Failed(format!(
                 "{NVIDIA_MAX_SESSIONS_ENV} requires {NVIDIA_DEVICE_ENV}"
             )));
         }
@@ -159,12 +159,12 @@ fn nvidia_config_from_process_env() -> Result<Option<NvidiaPreflightConfig>, FFm
         .unwrap_or("1")
         .parse::<u32>()
         .map_err(|error| {
-            FFmpegPreflightError::Failed(format!(
+            FfmpegPreflightError::Failed(format!(
                 "{NVIDIA_MAX_SESSIONS_ENV} must be an integer in 1..=16: {error}"
             ))
         })?;
     if !(1..=16).contains(&max_sessions) {
-        return Err(FFmpegPreflightError::Failed(format!(
+        return Err(FfmpegPreflightError::Failed(format!(
             "{NVIDIA_MAX_SESSIONS_ENV} must be in 1..=16"
         )));
     }
@@ -178,12 +178,12 @@ fn nvidia_config_from_process_env() -> Result<Option<NvidiaPreflightConfig>, FFm
 }
 
 fn videotoolbox_config_from_process_env()
--> Result<Option<VideoToolboxPreflightConfig>, FFmpegPreflightError> {
+-> Result<Option<VideoToolboxPreflightConfig>, FfmpegPreflightError> {
     let resource_id = std::env::var(VIDEOTOOLBOX_RESOURCE_ID_ENV).ok();
     let sessions = std::env::var(VIDEOTOOLBOX_MAX_SESSIONS_ENV).ok();
     let Some(resource_id) = resource_id else {
         if sessions.is_some() {
-            return Err(FFmpegPreflightError::Failed(format!(
+            return Err(FfmpegPreflightError::Failed(format!(
                 "{VIDEOTOOLBOX_MAX_SESSIONS_ENV} requires {VIDEOTOOLBOX_RESOURCE_ID_ENV}"
             )));
         }
@@ -195,12 +195,12 @@ fn videotoolbox_config_from_process_env()
         .unwrap_or("1")
         .parse::<u32>()
         .map_err(|error| {
-            FFmpegPreflightError::Failed(format!(
+            FfmpegPreflightError::Failed(format!(
                 "{VIDEOTOOLBOX_MAX_SESSIONS_ENV} must be an integer in 1..=16: {error}"
             ))
         })?;
     if !(1..=16).contains(&max_sessions) {
-        return Err(FFmpegPreflightError::Failed(format!(
+        return Err(FfmpegPreflightError::Failed(format!(
             "{VIDEOTOOLBOX_MAX_SESSIONS_ENV} must be in 1..=16"
         )));
     }
@@ -210,7 +210,7 @@ fn videotoolbox_config_from_process_env()
     }))
 }
 
-fn validate_resource_id(resource_id: &str) -> Result<(), FFmpegPreflightError> {
+fn validate_resource_id(resource_id: &str) -> Result<(), FfmpegPreflightError> {
     if resource_id.len() == 64
         && resource_id
             .chars()
@@ -218,7 +218,7 @@ fn validate_resource_id(resource_id: &str) -> Result<(), FFmpegPreflightError> {
     {
         return Ok(());
     }
-    Err(FFmpegPreflightError::Failed(
+    Err(FfmpegPreflightError::Failed(
         "VideoToolbox resource ID must be a lowercase SHA-256 digest".to_owned(),
     ))
 }
@@ -231,7 +231,7 @@ fn validate_resource_id(resource_id: &str) -> Result<(), FFmpegPreflightError> {
 pub fn preflight_with_paths(
     ffmpeg_path: &Path,
     ffprobe_path: &Path,
-) -> Result<FfmpegPreflight, FFmpegPreflightError> {
+) -> Result<FfmpegPreflight, FfmpegPreflightError> {
     require_executable_file("ffmpeg", ffmpeg_path)?;
     require_executable_file("ffprobe", ffprobe_path)?;
 
@@ -260,21 +260,21 @@ pub fn preflight_with_paths(
         ),
     )?;
     let hevc_encoder = parse_token(&encoders, "libx265").ok_or_else(|| {
-        FFmpegPreflightError::Failed(
+        FfmpegPreflightError::Failed(
             "ffmpeg does not advertise required libx265 encoder".to_owned(),
         )
     })?;
     let svtav1_encoder = parse_token(&encoders, "libsvtav1").ok_or_else(|| {
-        FFmpegPreflightError::Failed(
+        FfmpegPreflightError::Failed(
             "ffmpeg does not advertise required libsvtav1 encoder".to_owned(),
         )
     })?;
     let libaom_encoder = parse_token(&encoders, "libaom-av1").unwrap_or_default();
     let aac_encoder = parse_token(&encoders, "aac").ok_or_else(|| {
-        FFmpegPreflightError::Failed("ffmpeg does not advertise required aac encoder".to_owned())
+        FfmpegPreflightError::Failed("ffmpeg does not advertise required aac encoder".to_owned())
     })?;
     let opus_encoder = parse_token(&encoders, "libopus").ok_or_else(|| {
-        FFmpegPreflightError::Failed(
+        FfmpegPreflightError::Failed(
             "ffmpeg does not advertise required libopus encoder".to_owned(),
         )
     })?;
@@ -283,13 +283,13 @@ pub fn preflight_with_paths(
         command_output(Command::new(ffmpeg_path).arg("-hide_banner").arg("-muxers")),
     )?;
     let matroska_muxer = parse_token(&muxers, "matroska").ok_or_else(|| {
-        FFmpegPreflightError::Failed("ffmpeg does not advertise required matroska muxer".to_owned())
+        FfmpegPreflightError::Failed("ffmpeg does not advertise required matroska muxer".to_owned())
     })?;
     let mp4_muxer = parse_token(&muxers, "mp4").ok_or_else(|| {
-        FFmpegPreflightError::Failed("ffmpeg does not advertise required mp4 muxer".to_owned())
+        FfmpegPreflightError::Failed("ffmpeg does not advertise required mp4 muxer".to_owned())
     })?;
     let ogg_muxer = parse_token(&muxers, "ogg").ok_or_else(|| {
-        FFmpegPreflightError::Failed("ffmpeg does not advertise required ogg muxer".to_owned())
+        FfmpegPreflightError::Failed("ffmpeg does not advertise required ogg muxer".to_owned())
     })?;
 
     Ok(FfmpegPreflight {
@@ -311,7 +311,7 @@ pub fn preflight_with_paths(
     })
 }
 
-fn vaapi_config_from_process_env() -> Result<Option<VaapiPreflightConfig>, FFmpegPreflightError> {
+fn vaapi_config_from_process_env() -> Result<Option<VaapiPreflightConfig>, FfmpegPreflightError> {
     let sessions = std::env::var(VAAPI_MAX_SESSIONS_ENV).ok();
     vaapi_config_from_env_values(
         std::env::var(VAAPI_DEVICE_ENV).ok(),

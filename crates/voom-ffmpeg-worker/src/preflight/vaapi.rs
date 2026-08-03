@@ -10,7 +10,7 @@ use voom_core::VAAPI_VIDEO_DECODERS;
 use voom_worker_protocol::VAAPI_READINESS_DEADLINE;
 
 use super::{
-    FFmpegPreflightError, FfmpegPreflight, preflight_with_paths,
+    FfmpegPreflight, FfmpegPreflightError, preflight_with_paths,
     process::{
         PROBE_TIMEOUT, ProbeDir, command_output, command_output_within, command_text,
         kill_and_reap_all, parse_token, wait_child_output,
@@ -96,7 +96,7 @@ pub struct VaapiPreflight {
 /// start.
 ///
 /// # Errors
-/// Returns `FFmpegPreflightError::Failed` with a distinct message per spec §6
+/// Returns `FfmpegPreflightError::Failed` with a distinct message per spec §6
 /// condition: a malformed or unresolvable address, an absent, occupied, or
 /// unopenable node, a readback mismatch, a driver build lacking the codec, any
 /// other probe-encode failure, a capacity-probe failure, or clock expiry.
@@ -104,9 +104,9 @@ pub fn preflight_with_vaapi(
     ffmpeg_path: &Path,
     ffprobe_path: &Path,
     config: &VaapiPreflightConfig,
-) -> Result<FfmpegPreflight, FFmpegPreflightError> {
+) -> Result<FfmpegPreflight, FfmpegPreflightError> {
     if !(1..=16).contains(&config.max_sessions) {
-        return Err(FFmpegPreflightError::Failed(
+        return Err(FfmpegPreflightError::Failed(
             "VAAPI max sessions must be in 1..=16".to_owned(),
         ));
     }
@@ -140,11 +140,11 @@ fn require_readiness_budget(
     started: std::time::Instant,
     config: &VaapiPreflightConfig,
     stage: &str,
-) -> Result<(), FFmpegPreflightError> {
+) -> Result<(), FfmpegPreflightError> {
     if started.elapsed() < config.clocks.readiness_deadline {
         return Ok(());
     }
-    Err(FFmpegPreflightError::Failed(format!(
+    Err(FfmpegPreflightError::Failed(format!(
         "VAAPI readiness deadline of {} seconds expired before {stage} proved on PCI address `{}`",
         config.clocks.readiness_deadline.as_secs(),
         config.pci_address
@@ -156,7 +156,7 @@ fn require_readiness_budget(
 fn require_vaapi_build_features(
     ffmpeg_path: &Path,
     config: &VaapiPreflightConfig,
-) -> Result<(), FFmpegPreflightError> {
+) -> Result<(), FfmpegPreflightError> {
     for (flag, required) in [
         ("-encoders", &[VAAPI_HEVC_ENCODER][..]),
         ("-filters", &["hwupload", "format"][..]),
@@ -167,7 +167,7 @@ fn require_vaapi_build_features(
         )?;
         for token in required {
             if parse_token(&text, token).is_none() {
-                return Err(FFmpegPreflightError::Failed(format!(
+                return Err(FfmpegPreflightError::Failed(format!(
                     "ffmpeg does not advertise required VAAPI feature `{token}`, so PCI address \
                      `{}` cannot be probed; rebuild ffmpeg with --enable-vaapi --enable-libdrm",
                     config.pci_address
@@ -187,7 +187,7 @@ fn probe_vaapi_identity(
     ffmpeg_path: &Path,
     config: &VaapiPreflightConfig,
     node: &Path,
-) -> Result<(String, String), FFmpegPreflightError> {
+) -> Result<(String, String), FfmpegPreflightError> {
     let mut command = Command::new(ffmpeg_path);
     command.args([
         "-hide_banner",
@@ -218,7 +218,7 @@ fn probe_vaapi_identity(
         .find_map(|line| line.split_once("VAAPI driver: "))
         .map(|(_, driver)| driver.trim().trim_end_matches('.').to_owned())
         .ok_or_else(|| {
-            FFmpegPreflightError::Failed(format!(
+            FfmpegPreflightError::Failed(format!(
                 "VAAPI render node `{}` for PCI address `{}` reported no driver string; \
                  the VA driver did not initialise",
                 node.display(),
@@ -273,7 +273,7 @@ fn run_vaapi_encode_probe(
     ffmpeg_path: &Path,
     config: &VaapiPreflightConfig,
     node: &Path,
-) -> Result<(), FFmpegPreflightError> {
+) -> Result<(), FfmpegPreflightError> {
     let probe_dir = ProbeDir::new("vaapi-encode-probe")?;
     let output = probe_dir.path().join("probe.hevc");
     let mut command = vaapi_encode_probe_command(ffmpeg_path, node, &output);
@@ -281,12 +281,12 @@ fn run_vaapi_encode_probe(
         "probe encode",
         command_output_within(&mut command, config.clocks.probe_timeout),
     );
-    if let Err(FFmpegPreflightError::Failed(detail)) = result {
+    if let Err(FfmpegPreflightError::Failed(detail)) = result {
         return Err(encode_probe_error(config, node, &detail));
     }
     let bytes = std::fs::metadata(&output).map(|metadata| metadata.len());
     if bytes.unwrap_or(0) == 0 {
-        return Err(FFmpegPreflightError::Failed(format!(
+        return Err(FfmpegPreflightError::Failed(format!(
             "`{VAAPI_HEVC_ENCODER}` probe encode on `{}` (PCI address `{}`) exited cleanly but \
              produced no output, so the codec is not proven",
             node.display(),
@@ -305,9 +305,9 @@ fn encode_probe_error(
     config: &VaapiPreflightConfig,
     node: &Path,
     detail: &str,
-) -> FFmpegPreflightError {
+) -> FfmpegPreflightError {
     if detail.contains("No usable encoding profile found") {
-        return FFmpegPreflightError::Failed(format!(
+        return FfmpegPreflightError::Failed(format!(
             "the loaded VA driver build cannot encode `{VAAPI_HEVC_ENCODER}` on `{}` (PCI \
              address `{}`): ffmpeg reported `No usable encoding profile found`; install a driver \
              build carrying HEVC encode (on Fedora, RPM Fusion's mesa-va-drivers-freeworld)",
@@ -315,7 +315,7 @@ fn encode_probe_error(
             config.pci_address
         ));
     }
-    FFmpegPreflightError::Failed(format!(
+    FfmpegPreflightError::Failed(format!(
         "`{VAAPI_HEVC_ENCODER}` probe encode on `{}` (PCI address `{}`) failed: {detail}",
         node.display(),
         config.pci_address
@@ -330,14 +330,14 @@ fn probe_vaapi_decoders(
     ffmpeg_path: &Path,
     config: &VaapiPreflightConfig,
     node: &Path,
-) -> Result<(Vec<String>, Vec<String>), FFmpegPreflightError> {
+) -> Result<(Vec<String>, Vec<String>), FfmpegPreflightError> {
     let probe_dir = ProbeDir::new("vaapi-decoder-probe")?;
     let mut decoders = Vec::new();
     let mut diagnostics = Vec::new();
     for codec in VAAPI_VIDEO_DECODERS {
         let fixture = probe_dir.path().join(format!("{codec}.mkv"));
         std::fs::write(&fixture, vaapi_decoder_fixture(codec)?).map_err(|error| {
-            FFmpegPreflightError::Failed(format!(
+            FfmpegPreflightError::Failed(format!(
                 "writing `{codec}` VAAPI decoder probe fixture to `{}`: {error}",
                 fixture.display()
             ))
@@ -353,12 +353,12 @@ fn probe_vaapi_decoders(
 /// The committed fixtures are `yuv420p`: spec §2.3 records that the obvious
 /// `testsrc`-to-`libx265` recipe yields `gbrp`, which VAAPI cannot decode, so they
 /// cannot be synthesized at probe time.
-fn vaapi_decoder_fixture(codec: &str) -> Result<&'static [u8], FFmpegPreflightError> {
+fn vaapi_decoder_fixture(codec: &str) -> Result<&'static [u8], FfmpegPreflightError> {
     match codec {
         "h264" => Ok(include_bytes!("../../tests/fixtures/vaapi-probe-h264.mkv")),
         "hevc" => Ok(include_bytes!("../../tests/fixtures/vaapi-probe-hevc.mkv")),
         "av1" => Ok(include_bytes!("../../tests/fixtures/vaapi-probe-av1.mkv")),
-        other => Err(FFmpegPreflightError::Failed(format!(
+        other => Err(FfmpegPreflightError::Failed(format!(
             "VAAPI decoder probe has no bundled `{other}` fixture; add one generated with an \
              explicit -pix_fmt yuv420p"
         ))),
@@ -370,7 +370,7 @@ fn run_vaapi_decode_probe(
     config: &VaapiPreflightConfig,
     node: &Path,
     fixture: &Path,
-) -> Result<(), FFmpegPreflightError> {
+) -> Result<(), FfmpegPreflightError> {
     let mut command = Command::new(ffmpeg_path);
     command.args([
         "-hide_banner",
@@ -400,7 +400,7 @@ fn prove_vaapi_capacity(
     ffmpeg_path: &Path,
     config: &VaapiPreflightConfig,
     node: &Path,
-) -> Result<(), FFmpegPreflightError> {
+) -> Result<(), FfmpegPreflightError> {
     let probe_dir = ProbeDir::new("vaapi-capacity-probe")?;
     let started = std::time::Instant::now();
     let mut children = Vec::new();
@@ -423,7 +423,7 @@ fn prove_vaapi_capacity(
             .saturating_sub(started.elapsed());
         let result = wait_child_output(child, remaining, "concurrent probe encode")
             .and_then(|output| command_text("concurrent probe encode", Ok(output)));
-        if let Err(FFmpegPreflightError::Failed(detail)) = result {
+        if let Err(FfmpegPreflightError::Failed(detail)) = result {
             kill_and_reap_all(&mut children);
             return Err(capacity_probe_error(config, node, &detail));
         }
@@ -435,8 +435,8 @@ fn capacity_probe_error(
     config: &VaapiPreflightConfig,
     node: &Path,
     detail: &str,
-) -> FFmpegPreflightError {
-    FFmpegPreflightError::Failed(format!(
+) -> FfmpegPreflightError {
+    FfmpegPreflightError::Failed(format!(
         "VAAPI capacity probe for {} concurrent `{VAAPI_HEVC_ENCODER}` encodes on `{}` (PCI \
          address `{}`) failed: {detail}. VAAPI exposes no encoder-session enumeration, so the \
          cause cannot be attributed; lower the declared capacity or retry when the device is \
@@ -456,10 +456,10 @@ pub(super) fn vaapi_config_from_env_values(
     sessions: Option<&str>,
     dri_root: Option<OsString>,
     drm_sysfs_root: Option<OsString>,
-) -> Result<Option<VaapiPreflightConfig>, FFmpegPreflightError> {
+) -> Result<Option<VaapiPreflightConfig>, FfmpegPreflightError> {
     let Some(pci_address) = device else {
         if sessions.is_some() {
-            return Err(FFmpegPreflightError::Failed(format!(
+            return Err(FfmpegPreflightError::Failed(format!(
                 "{VAAPI_MAX_SESSIONS_ENV} requires {VAAPI_DEVICE_ENV}"
             )));
         }
@@ -467,12 +467,12 @@ pub(super) fn vaapi_config_from_env_values(
     };
     validate_pci_address(&pci_address)?;
     let max_sessions = sessions.unwrap_or("1").parse::<u32>().map_err(|error| {
-        FFmpegPreflightError::Failed(format!(
+        FfmpegPreflightError::Failed(format!(
             "{VAAPI_MAX_SESSIONS_ENV} must be an integer in 1..=16: {error}"
         ))
     })?;
     if !(1..=16).contains(&max_sessions) {
-        return Err(FFmpegPreflightError::Failed(format!(
+        return Err(FfmpegPreflightError::Failed(format!(
             "{VAAPI_MAX_SESSIONS_ENV} must be in 1..=16"
         )));
     }
@@ -491,9 +491,9 @@ pub(super) fn vaapi_config_from_env_values(
 /// Spec §4: configuration accepts `0000:f4:00.0` and nothing else. A render-node
 /// path or an ordinal is an enumeration-order artifact that can renumber across a
 /// reboot, so accepting either would hand the worker an identity it cannot keep.
-fn validate_pci_address(pci_address: &str) -> Result<(), FFmpegPreflightError> {
+fn validate_pci_address(pci_address: &str) -> Result<(), FfmpegPreflightError> {
     let reject = || {
-        FFmpegPreflightError::Failed(format!(
+        FfmpegPreflightError::Failed(format!(
             "VAAPI device must be a PCI address like `0000:f4:00.0`, not `{pci_address}`: \
              render-node paths and ordinals renumber, so they are not accepted"
         ))
@@ -530,14 +530,14 @@ fn valid_hex_component(component: &str, width: usize) -> bool {
 /// membership, and a stale udev symlink are five different operator actions.
 fn resolve_vaapi_render_node(
     config: &VaapiPreflightConfig,
-) -> Result<PathBuf, FFmpegPreflightError> {
+) -> Result<PathBuf, FfmpegPreflightError> {
     validate_pci_address(&config.pci_address)?;
     let by_path = config
         .dri_root
         .join("by-path")
         .join(format!("pci-{}-render", config.pci_address));
     if std::fs::symlink_metadata(&by_path).is_err() {
-        return Err(FFmpegPreflightError::Failed(format!(
+        return Err(FfmpegPreflightError::Failed(format!(
             "PCI address `{}` has no VAAPI render node: `{}` does not exist; \
              confirm the address with `lspci -D` and that a DRM driver bound the device",
             config.pci_address,
@@ -545,7 +545,7 @@ fn resolve_vaapi_render_node(
         )));
     }
     let node = std::fs::canonicalize(&by_path).map_err(|error| {
-        FFmpegPreflightError::Failed(format!(
+        FfmpegPreflightError::Failed(format!(
             "VAAPI render node is absent for PCI address `{}`: `{}` does not resolve ({error}); \
              the device may have been removed or the driver unbound",
             config.pci_address,
@@ -560,9 +560,9 @@ fn resolve_vaapi_render_node(
 fn require_openable_render_node(
     node: &Path,
     pci_address: &str,
-) -> Result<(), FFmpegPreflightError> {
+) -> Result<(), FfmpegPreflightError> {
     let metadata = std::fs::metadata(node).map_err(|error| {
-        FFmpegPreflightError::Failed(format!(
+        FfmpegPreflightError::Failed(format!(
             "VAAPI render node is absent for PCI address `{pci_address}`: \
              cannot stat `{}` ({error})",
             node.display()
@@ -570,20 +570,20 @@ fn require_openable_render_node(
     })?;
     if let Err(error) = std::fs::File::open(node) {
         if error.kind() == io::ErrorKind::PermissionDenied {
-            return Err(FFmpegPreflightError::Failed(format!(
+            return Err(FfmpegPreflightError::Failed(format!(
                 "permission denied opening VAAPI render node `{}` for PCI address \
                  `{pci_address}`: add the worker's user to the `render` group (or `video` on \
                  hosts that own the node that way)",
                 node.display()
             )));
         }
-        return Err(FFmpegPreflightError::Failed(format!(
+        return Err(FfmpegPreflightError::Failed(format!(
             "cannot open VAAPI render node `{}` for PCI address `{pci_address}`: {error}",
             node.display()
         )));
     }
     if !is_character_device(&metadata) {
-        return Err(FFmpegPreflightError::Failed(format!(
+        return Err(FfmpegPreflightError::Failed(format!(
             "VAAPI render node `{}` for PCI address `{pci_address}` is not a character device; \
              something other than a DRM render node occupies that path",
             node.display()
@@ -613,16 +613,16 @@ fn verify_pci_readback(
     config: &VaapiPreflightConfig,
     node: &Path,
     by_path: &Path,
-) -> Result<(), FFmpegPreflightError> {
+) -> Result<(), FfmpegPreflightError> {
     let node_name = node.file_name().ok_or_else(|| {
-        FFmpegPreflightError::Failed(format!(
+        FfmpegPreflightError::Failed(format!(
             "VAAPI render node `{}` has no file name to read its PCI address back from",
             node.display()
         ))
     })?;
     let device_link = config.drm_sysfs_root.join(node_name).join("device");
     let device = std::fs::canonicalize(&device_link).map_err(|error| {
-        FFmpegPreflightError::Failed(format!(
+        FfmpegPreflightError::Failed(format!(
             "cannot read the PCI address of VAAPI render node `{}` back: `{}` does not resolve \
              ({error})",
             node.display(),
@@ -634,7 +634,7 @@ fn verify_pci_readback(
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_default();
     if observed != config.pci_address {
-        return Err(FFmpegPreflightError::Failed(format!(
+        return Err(FfmpegPreflightError::Failed(format!(
             "VAAPI render node `{}` reports PCI address `{observed}` but configuration names \
              `{}`: the `{}` symlink is stale; re-run `udevadm trigger` or correct the \
              configured address",

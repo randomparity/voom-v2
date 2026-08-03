@@ -10,7 +10,7 @@ use std::{
 
 use voom_worker_protocol::VIDEOTOOLBOX_PROBE_TIMEOUT;
 
-use super::FFmpegPreflightError;
+use super::FfmpegPreflightError;
 
 pub(super) const PROBE_TIMEOUT: Duration = VIDEOTOOLBOX_PROBE_TIMEOUT;
 
@@ -34,9 +34,9 @@ pub(super) fn resolve_binary(binary: &OsStr) -> PathBuf {
 pub(super) fn require_executable_file(
     label: &str,
     path: &Path,
-) -> Result<(), FFmpegPreflightError> {
+) -> Result<(), FfmpegPreflightError> {
     if !is_executable_file(path) {
-        return Err(FFmpegPreflightError::Failed(format!(
+        return Err(FfmpegPreflightError::Failed(format!(
             "{label} binary is missing or not executable: {}",
             path.display()
         )));
@@ -69,21 +69,21 @@ fn is_executable_metadata(_metadata: &std::fs::Metadata) -> bool {
 pub(super) fn first_output_line(
     command_name: &str,
     output: std::io::Result<std::process::Output>,
-) -> Result<String, FFmpegPreflightError> {
+) -> Result<String, FfmpegPreflightError> {
     command_text(command_name, output)?
         .lines()
         .next()
         .filter(|line| !line.trim().is_empty())
         .map(str::to_owned)
-        .ok_or_else(|| FFmpegPreflightError::Failed(format!("{command_name} produced no output")))
+        .ok_or_else(|| FfmpegPreflightError::Failed(format!("{command_name} produced no output")))
 }
 
 pub(super) fn command_text(
     command_name: &str,
     output: std::io::Result<std::process::Output>,
-) -> Result<String, FFmpegPreflightError> {
+) -> Result<String, FfmpegPreflightError> {
     let output = output.map_err(|err| {
-        FFmpegPreflightError::Failed(format!("{command_name} failed to start: {err}"))
+        FfmpegPreflightError::Failed(format!("{command_name} failed to start: {err}"))
     })?;
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -91,7 +91,7 @@ pub(super) fn command_text(
     if output.status.success() {
         Ok(text)
     } else {
-        Err(FFmpegPreflightError::Failed(format!(
+        Err(FfmpegPreflightError::Failed(format!(
             "{command_name} exited with status {}: {}",
             output
                 .status
@@ -110,9 +110,9 @@ pub(super) fn wait_child_output(
     child: Child,
     deadline: Duration,
     label: &str,
-) -> Result<Output, FFmpegPreflightError> {
+) -> Result<Output, FfmpegPreflightError> {
     wait_child_output_io(child, deadline, label).map_err(|error| {
-        FFmpegPreflightError::Failed(format!("{label} failed while waiting: {error}"))
+        FfmpegPreflightError::Failed(format!("{label} failed while waiting: {error}"))
     })
 }
 
@@ -179,11 +179,11 @@ pub(super) struct ProbeDir {
 static PROBE_DIR_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 impl ProbeDir {
-    pub(super) fn new(label: &str) -> Result<Self, FFmpegPreflightError> {
+    pub(super) fn new(label: &str) -> Result<Self, FfmpegPreflightError> {
         let nonce = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_err(|error| {
-                FFmpegPreflightError::Failed(format!(
+                FfmpegPreflightError::Failed(format!(
                     "system clock before Unix epoch during {label}: {error}"
                 ))
             })?
@@ -194,7 +194,7 @@ impl ProbeDir {
             std::process::id()
         ));
         std::fs::create_dir(&path).map_err(|error| {
-            FFmpegPreflightError::Failed(format!(
+            FfmpegPreflightError::Failed(format!(
                 "create {label} directory {}: {error}",
                 path.display()
             ))
@@ -209,12 +209,12 @@ impl ProbeDir {
 }
 
 #[cfg(unix)]
-fn set_private_directory_permissions(path: &Path, label: &str) -> Result<(), FFmpegPreflightError> {
+fn set_private_directory_permissions(path: &Path, label: &str) -> Result<(), FfmpegPreflightError> {
     use std::os::unix::fs::PermissionsExt;
 
     let permissions = std::fs::Permissions::from_mode(0o700);
     std::fs::set_permissions(path, permissions).map_err(|error| {
-        FFmpegPreflightError::Failed(format!(
+        FfmpegPreflightError::Failed(format!(
             "secure {label} directory {}: {error}",
             path.display()
         ))
@@ -225,7 +225,7 @@ fn set_private_directory_permissions(path: &Path, label: &str) -> Result<(), FFm
 fn set_private_directory_permissions(
     _path: &Path,
     _label: &str,
-) -> Result<(), FFmpegPreflightError> {
+) -> Result<(), FfmpegPreflightError> {
     Ok(())
 }
 

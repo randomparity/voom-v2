@@ -9,7 +9,7 @@ use std::{
 use voom_worker_protocol::VideoToolboxDecodeCapability;
 
 use super::{
-    FFmpegPreflightError, FfmpegPreflight, preflight_with_paths,
+    FfmpegPreflight, FfmpegPreflightError, preflight_with_paths,
     process::{
         PROBE_TIMEOUT, ProbeDir, command_output, command_text, first_output_line,
         kill_and_reap_all, parse_token, wait_child_output,
@@ -48,15 +48,15 @@ pub fn preflight_with_videotoolbox(
     ffmpeg_path: &Path,
     ffprobe_path: &Path,
     config: &VideoToolboxPreflightConfig,
-) -> Result<FfmpegPreflight, FFmpegPreflightError> {
+) -> Result<FfmpegPreflight, FfmpegPreflightError> {
     if !cfg!(all(target_os = "macos", target_arch = "aarch64")) {
-        return Err(FFmpegPreflightError::Failed(
+        return Err(FfmpegPreflightError::Failed(
             "VideoToolbox requires Apple silicon macOS".to_owned(),
         ));
     }
     validate_resource_id(&config.resource_id)?;
     if !(1..=16).contains(&config.max_sessions) {
-        return Err(FFmpegPreflightError::Failed(
+        return Err(FfmpegPreflightError::Failed(
             "VideoToolbox max sessions must be in 1..=16".to_owned(),
         ));
     }
@@ -67,7 +67,7 @@ pub fn preflight_with_videotoolbox(
     let fixtures = create_videotoolbox_fixtures(ffmpeg_path, &probe_dir)?;
     let (decoders, decoder_diagnostics) = probe_videotoolbox_decoders(ffmpeg_path, &fixtures);
     if decoders.is_empty() {
-        return Err(FFmpegPreflightError::Failed(
+        return Err(FfmpegPreflightError::Failed(
             "VideoToolbox did not prove any decoder codec/pixel-format path".to_owned(),
         ));
     }
@@ -99,7 +99,7 @@ struct VideoToolboxPlatform {
 
 fn probe_videotoolbox_platform(
     config: &VideoToolboxPreflightConfig,
-) -> Result<VideoToolboxPlatform, FFmpegPreflightError> {
+) -> Result<VideoToolboxPlatform, FfmpegPreflightError> {
     let ioreg = redacted_command_text(
         "ioreg platform identity",
         command_output(Command::new("/usr/sbin/ioreg").args([
@@ -110,7 +110,7 @@ fn probe_videotoolbox_platform(
     )?;
     let observed_resource_id = platform_resource_id(&parse_ioreg_platform_uuid(&ioreg)?)?;
     if observed_resource_id != config.resource_id {
-        return Err(FFmpegPreflightError::Failed(
+        return Err(FfmpegPreflightError::Failed(
             "VideoToolbox platform resource does not match supervisor configuration".to_owned(),
         ));
     }
@@ -136,11 +136,11 @@ fn probe_videotoolbox_platform(
     })
 }
 
-fn parse_ioreg_platform_uuid(output: &str) -> Result<String, FFmpegPreflightError> {
+fn parse_ioreg_platform_uuid(output: &str) -> Result<String, FfmpegPreflightError> {
     let line = output
         .lines()
         .find(|line| line.contains("\"IOPlatformUUID\""))
-        .ok_or_else(|| FFmpegPreflightError::Failed("ioreg omitted IOPlatformUUID".to_owned()))?;
+        .ok_or_else(|| FfmpegPreflightError::Failed("ioreg omitted IOPlatformUUID".to_owned()))?;
     let value = line
         .split('=')
         .nth(1)
@@ -148,7 +148,7 @@ fn parse_ioreg_platform_uuid(output: &str) -> Result<String, FFmpegPreflightErro
         .and_then(|value| value.strip_prefix('"'))
         .and_then(|value| value.strip_suffix('"'))
         .ok_or_else(|| {
-            FFmpegPreflightError::Failed("ioreg returned malformed IOPlatformUUID".to_owned())
+            FfmpegPreflightError::Failed("ioreg returned malformed IOPlatformUUID".to_owned())
         })?;
     let normalized = value.to_ascii_uppercase();
     let valid = normalized.len() == 36
@@ -159,19 +159,19 @@ fn parse_ioreg_platform_uuid(output: &str) -> Result<String, FFmpegPreflightErro
                 _ => character.is_ascii_hexdigit(),
             });
     if !valid {
-        return Err(FFmpegPreflightError::Failed(
+        return Err(FfmpegPreflightError::Failed(
             "platform identity was not a canonical UUID".to_owned(),
         ));
     }
     Ok(normalized)
 }
 
-fn platform_resource_id(normalized_uuid: &str) -> Result<String, FFmpegPreflightError> {
+fn platform_resource_id(normalized_uuid: &str) -> Result<String, FfmpegPreflightError> {
     parse_ioreg_platform_uuid(&format!("\"IOPlatformUUID\" = \"{normalized_uuid}\""))?;
     Ok(hex::encode(Sha256::digest(normalized_uuid.as_bytes())))
 }
 
-fn parse_labeled_value(text: &str, label: &str) -> Result<String, FFmpegPreflightError> {
+fn parse_labeled_value(text: &str, label: &str) -> Result<String, FfmpegPreflightError> {
     text.lines()
         .find_map(|line| line.trim().strip_prefix(label))
         .and_then(|value| value.strip_prefix(':'))
@@ -179,13 +179,13 @@ fn parse_labeled_value(text: &str, label: &str) -> Result<String, FFmpegPrefligh
         .filter(|value| !value.is_empty())
         .map(str::to_owned)
         .ok_or_else(|| {
-            FFmpegPreflightError::Failed(format!(
+            FfmpegPreflightError::Failed(format!(
                 "system_profiler omitted required `{label}` value"
             ))
         })
 }
 
-fn require_videotoolbox_build_features(ffmpeg_path: &Path) -> Result<(), FFmpegPreflightError> {
+fn require_videotoolbox_build_features(ffmpeg_path: &Path) -> Result<(), FfmpegPreflightError> {
     for (flag, required) in [
         ("-hwaccels", &["videotoolbox"][..]),
         ("-encoders", &["h264_videotoolbox", "hevc_videotoolbox"][..]),
@@ -197,7 +197,7 @@ fn require_videotoolbox_build_features(ffmpeg_path: &Path) -> Result<(), FFmpegP
         )?;
         for token in required {
             if parse_token(&text, token).is_none() {
-                return Err(FFmpegPreflightError::Failed(format!(
+                return Err(FfmpegPreflightError::Failed(format!(
                     "ffmpeg does not advertise required VideoToolbox feature `{token}`"
                 )));
             }
@@ -256,7 +256,7 @@ struct VideoToolboxFixture {
 fn create_videotoolbox_fixtures(
     ffmpeg_path: &Path,
     probe_dir: &ProbeDir,
-) -> Result<Vec<VideoToolboxFixture>, FFmpegPreflightError> {
+) -> Result<Vec<VideoToolboxFixture>, FfmpegPreflightError> {
     let mut fixtures = Vec::with_capacity(VIDEOTOOLBOX_FIXTURE_SPECS.len());
     for spec in VIDEOTOOLBOX_FIXTURE_SPECS {
         let path = probe_dir.path().join(format!("{}.mkv", spec.name));
@@ -270,7 +270,7 @@ fn create_videotoolbox_fixture(
     ffmpeg_path: &Path,
     spec: VideoToolboxFixtureSpec,
     output: &Path,
-) -> Result<(), FFmpegPreflightError> {
+) -> Result<(), FfmpegPreflightError> {
     let mut command = Command::new(ffmpeg_path);
     command.args([
         "-hide_banner",
@@ -361,7 +361,7 @@ fn record_videotoolbox_decoder(
 fn run_videotoolbox_decoder_smoke(
     ffmpeg_path: &Path,
     fixture: &VideoToolboxFixture,
-) -> Result<(), FFmpegPreflightError> {
+) -> Result<(), FfmpegPreflightError> {
     let mut command = Command::new(ffmpeg_path);
     command.args([
         "-hide_banner",
@@ -405,7 +405,7 @@ fn prove_videotoolbox_capacity(
     probe_dir: &ProbeDir,
     fixtures: &[VideoToolboxFixture],
     decoders: &[VideoToolboxDecodeCapability],
-) -> Result<(), FFmpegPreflightError> {
+) -> Result<(), FfmpegPreflightError> {
     for spec in [
         VideoToolboxFixtureSpec {
             name: "h264-encode",
@@ -483,7 +483,7 @@ fn prove_videotoolbox_capacity_group(
     probe_dir: &ProbeDir,
     input: CapacityInput<'_>,
     spec: VideoToolboxFixtureSpec,
-) -> Result<(), FFmpegPreflightError> {
+) -> Result<(), FfmpegPreflightError> {
     let VideoToolboxFixtureSpec {
         name,
         encoder,
@@ -510,7 +510,7 @@ fn prove_videotoolbox_capacity_group(
             }
             Err(error) => {
                 kill_and_reap_all(&mut children);
-                return Err(FFmpegPreflightError::Failed(format!(
+                return Err(FfmpegPreflightError::Failed(format!(
                     "VideoToolbox {name} capacity process failed to start: {error}"
                 )));
             }
@@ -524,12 +524,12 @@ fn wait_videotoolbox_capacity_children(
     name: &str,
     children: &mut Vec<Child>,
     deadline: std::time::Instant,
-) -> Result<(), FFmpegPreflightError> {
+) -> Result<(), FfmpegPreflightError> {
     while !children.is_empty() {
         let remaining = deadline.saturating_duration_since(std::time::Instant::now());
         if remaining.is_zero() {
             kill_and_reap_all(children);
-            return Err(FFmpegPreflightError::Failed(format!(
+            return Err(FfmpegPreflightError::Failed(format!(
                 "VideoToolbox {name} capacity group exceeded {} seconds",
                 PROBE_TIMEOUT.as_secs()
             )));
@@ -596,21 +596,21 @@ fn require_overlapping_first_frames(
     children: &mut Vec<Child>,
     progress_paths: &[PathBuf],
     deadline: std::time::Instant,
-) -> Result<(), FFmpegPreflightError> {
+) -> Result<(), FfmpegPreflightError> {
     while std::time::Instant::now() < deadline {
         for index in 0..children.len() {
             let status = match children[index].try_wait() {
                 Ok(status) => status,
                 Err(error) => {
                     kill_and_reap_all(children);
-                    return Err(FFmpegPreflightError::Failed(format!(
+                    return Err(FfmpegPreflightError::Failed(format!(
                         "polling VideoToolbox {name} capacity process: {error}"
                     )));
                 }
             };
             if let Some(status) = status {
                 kill_and_reap_all(children);
-                return Err(FFmpegPreflightError::Failed(format!(
+                return Err(FfmpegPreflightError::Failed(format!(
                     "VideoToolbox {name} capacity process exited {status} before overlap proof"
                 )));
             }
@@ -624,7 +624,7 @@ fn require_overlapping_first_frames(
         thread::sleep(Duration::from_millis(50));
     }
     kill_and_reap_all(children);
-    Err(FFmpegPreflightError::Failed(format!(
+    Err(FfmpegPreflightError::Failed(format!(
         "VideoToolbox {name} capacity group did not report a first frame before deadline"
     )))
 }
@@ -640,16 +640,16 @@ fn progress_reports_frame(progress: &str) -> bool {
 fn redacted_command_text(
     command_name: &str,
     output: std::io::Result<std::process::Output>,
-) -> Result<String, FFmpegPreflightError> {
+) -> Result<String, FfmpegPreflightError> {
     let output = output.map_err(|err| {
-        FFmpegPreflightError::Failed(format!("{command_name} failed to start: {err}"))
+        FfmpegPreflightError::Failed(format!("{command_name} failed to start: {err}"))
     })?;
     if output.status.success() {
         let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Ok(format!("{stdout}{stderr}"));
     }
-    Err(FFmpegPreflightError::Failed(format!(
+    Err(FfmpegPreflightError::Failed(format!(
         "{command_name} exited with status {}",
         output
             .status
