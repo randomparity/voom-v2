@@ -95,6 +95,9 @@ fn nvidia_preflight_runs_base_checks_before_interpreting_device_identity() {
 #[cfg(unix)]
 #[test]
 fn nvidia_preflight_runs_the_device_bound_stages_in_order() {
+    const CAPACITY_STAGE: &str =
+        "ffmpeg:-hide_banner -nostdin -f lavfi -re -i testsrc2=size=256x256:rate=30 -t 1";
+
     let temp = tempfile::tempdir().unwrap();
     let log = temp.path().join("nvidia-stages.log");
     let pid = temp.path().join("identity.pid");
@@ -124,6 +127,7 @@ fn nvidia_preflight_runs_the_device_bound_stages_in_order() {
         "ffmpeg:-hide_banner -nostdin -f lavfi -i",
         "ffmpeg:-hide_banner -nostdin -f lavfi -i",
         "ffmpeg:-hide_banner -nostdin -hwaccel cuda",
+        CAPACITY_STAGE,
     ];
     let mut remainder = commands.as_str();
     for stage in stages {
@@ -132,6 +136,13 @@ fn nvidia_preflight_runs_the_device_bound_stages_in_order() {
             .unwrap_or_else(|| panic!("missing ordered NVIDIA stage `{stage}` in {commands}"));
         remainder = &remainder[index + stage.len()..];
     }
+    assert!(
+        commands
+            .lines()
+            .last()
+            .is_some_and(|line| line.contains(CAPACITY_STAGE)),
+        "the capacity probe must be the final NVIDIA preflight stage: {commands}"
+    );
 
     assert_eq!(nvidia.device_uuid, config.device_uuid);
     assert_eq!(nvidia.decoders, ["h264_cuvid", "hevc_cuvid", "av1_cuvid"]);

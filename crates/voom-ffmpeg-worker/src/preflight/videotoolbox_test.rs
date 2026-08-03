@@ -83,6 +83,188 @@ fn videotoolbox_capacity_command_forbids_software_fallback() {
     assert!(args.windows(2).any(|pair| pair == ["-profile:v", "main10"]));
 }
 
+#[test]
+fn videotoolbox_decoder_smoke_commands_are_hardware_only() {
+    for spec in VIDEOTOOLBOX_FIXTURE_SPECS {
+        let fixture = VideoToolboxFixture {
+            spec,
+            path: PathBuf::from(format!("{}.mkv", spec.name)),
+        };
+        let args = videotoolbox_decoder_smoke_command(Path::new("ffmpeg"), &fixture)
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        let profile = if spec.pixel_format == "yuv420p10le" {
+            "main10"
+        } else {
+            "main"
+        };
+
+        assert_eq!(
+            args,
+            [
+                "-hide_banner",
+                "-nostdin",
+                "-hwaccel",
+                "videotoolbox",
+                "-hwaccel_output_format",
+                "videotoolbox_vld",
+                "-i",
+                &format!("{}.mkv", spec.name),
+                "-frames:v",
+                "1",
+                "-an",
+                "-c:v",
+                "hevc_videotoolbox",
+                "-allow_sw",
+                "0",
+                "-b:v",
+                "4M",
+                "-profile:v",
+                profile,
+                "-f",
+                "null",
+                "-",
+            ],
+            "decoder smoke command drifted for {}",
+            spec.name
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn videotoolbox_capacity_runs_every_encoder_and_proven_decoder_group() {
+    let temp = tempfile::tempdir().unwrap();
+    let log = temp.path().join("capacity.log");
+    let ffmpeg = capacity_ffmpeg_stub(temp.path(), &log);
+    let probe_dir = ProbeDir::new("videotoolbox-capacity-test").unwrap();
+    let fixtures = VIDEOTOOLBOX_FIXTURE_SPECS
+        .into_iter()
+        .map(|spec| VideoToolboxFixture {
+            spec,
+            path: temp.path().join(format!("{}.mkv", spec.name)),
+        })
+        .collect::<Vec<_>>();
+    let decoders = all_videotoolbox_decoder_capabilities();
+
+    prove_videotoolbox_capacity(
+        &ffmpeg,
+        &VideoToolboxPreflightConfig {
+            resource_id: String::new(),
+            max_sessions: 1,
+        },
+        &probe_dir,
+        &fixtures,
+        &decoders,
+    )
+    .unwrap();
+
+    let lines = std::fs::read_to_string(log)
+        .unwrap()
+        .lines()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    assert_capacity_groups(&lines, temp.path());
+}
+
+#[cfg(unix)]
+fn all_videotoolbox_decoder_capabilities() -> Vec<VideoToolboxDecodeCapability> {
+    vec![
+        VideoToolboxDecodeCapability {
+            codec: "h264".to_owned(),
+            pixel_formats: vec!["yuv420p".to_owned()],
+        },
+        VideoToolboxDecodeCapability {
+            codec: "hevc".to_owned(),
+            pixel_formats: vec!["yuv420p".to_owned(), "yuv420p10le".to_owned()],
+        },
+        VideoToolboxDecodeCapability {
+            codec: "av1".to_owned(),
+            pixel_formats: vec!["yuv420p".to_owned(), "yuv420p10le".to_owned()],
+        },
+    ]
+}
+
+#[cfg(unix)]
+fn assert_capacity_groups(lines: &[String], fixture_dir: &Path) {
+    let expected = [
+        (
+            "testsrc2=size=256x256:rate=30",
+            "h264_videotoolbox",
+            "high",
+            false,
+        ),
+        (
+            "testsrc2=size=256x256:rate=30",
+            "hevc_videotoolbox",
+            "main",
+            false,
+        ),
+        (
+            "testsrc2=size=256x256:rate=30",
+            "hevc_videotoolbox",
+            "main10",
+            false,
+        ),
+        ("h264-8.mkv", "h264_videotoolbox", "high", true),
+        ("hevc-8.mkv", "hevc_videotoolbox", "main", true),
+        ("hevc-10.mkv", "hevc_videotoolbox", "main10", true),
+        ("av1-8.mkv", "hevc_videotoolbox", "main", true),
+        ("av1-10.mkv", "hevc_videotoolbox", "main10", true),
+    ];
+    assert_eq!(lines.len(), expected.len(), "capacity groups: {lines:#?}");
+    for (line, (input, encoder, profile, hardware)) in lines.iter().zip(expected) {
+        let input = if hardware {
+            fixture_dir.join(input).display().to_string()
+        } else {
+            input.to_owned()
+        };
+        assert!(line.contains(&input), "missing input `{input}` in `{line}`");
+        assert!(line.contains(&format!("-c:v {encoder}")), "{line}");
+        assert!(line.contains(&format!("-profile:v {profile}")), "{line}");
+        assert!(
+            line.contains("-allow_sw 0"),
+            "software fallback allowed: {line}"
+        );
+        assert_eq!(line.contains("-hwaccel videotoolbox"), hardware, "{line}");
+        assert_eq!(
+            line.contains("-hwaccel_output_format videotoolbox_vld"),
+            hardware,
+            "{line}"
+        );
+    }
+}
+
+#[cfg(unix)]
+fn capacity_ffmpeg_stub(dir: &Path, log: &Path) -> PathBuf {
+    let body = format!(
+        "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{log}'\n\
+         previous=''\n\
+         for argument in \"$@\"; do\n\
+           if test \"$previous\" = '-progress'; then\n\
+             printf 'frame=1\\nprogress=continue\\n' > \"$argument\"\n\
+           fi\n\
+           previous=\"$argument\"\n\
+         done\n\
+         sleep 1\n",
+        log = log.display(),
+    );
+    let path = dir.join("ffmpeg");
+    std::fs::write(&path, body).unwrap();
+    make_executable(&path);
+    path
+}
+
+#[cfg(unix)]
+fn make_executable(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+
+    let mut permissions = std::fs::metadata(path).unwrap().permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(path, permissions).unwrap();
+}
+
 #[cfg(unix)]
 #[test]
 fn capacity_failure_reaps_remaining_processes() {

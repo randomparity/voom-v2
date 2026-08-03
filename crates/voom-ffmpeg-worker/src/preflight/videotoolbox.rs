@@ -362,6 +362,18 @@ fn run_videotoolbox_decoder_smoke(
     ffmpeg_path: &Path,
     fixture: &VideoToolboxFixture,
 ) -> Result<(), FfmpegPreflightError> {
+    let mut command = videotoolbox_decoder_smoke_command(ffmpeg_path, fixture);
+    command_text(
+        &format!("VideoToolbox {} decoder smoke", fixture.spec.name),
+        command_output(&mut command),
+    )
+    .map(|_| ())
+}
+
+fn videotoolbox_decoder_smoke_command(
+    ffmpeg_path: &Path,
+    fixture: &VideoToolboxFixture,
+) -> Command {
     let mut command = Command::new(ffmpeg_path);
     command.args([
         "-hide_banner",
@@ -392,11 +404,7 @@ fn run_videotoolbox_decoder_smoke(
         "null",
         "-",
     ]);
-    command_text(
-        &format!("VideoToolbox {} decoder smoke", fixture.spec.name),
-        command_output(&mut command),
-    )
-    .map(|_| ())
+    command
 }
 
 fn prove_videotoolbox_capacity(
