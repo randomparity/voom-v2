@@ -120,8 +120,7 @@ pub mod workers {
         RunningLocalWorker, VaapiLocalWorkerConfig, VideoToolboxLocalWorkerConfig,
     };
     pub use crate::node_auth::{
-        GeneratedNodeToken, NodeTokenGenerator, NodeTokenService, SharedRngNodeTokenGenerator,
-        hash_node_token, token_hint, verify_node_token,
+        GeneratedNodeToken, hash_node_token, token_hint, verify_node_token,
     };
 }
 
@@ -129,11 +128,10 @@ pub mod external {
     pub use crate::cases::external::sync::ExternalSyncReport;
 }
 
-/// Type alias for the boxed, shared, interior-mutable RNG passed to
-/// `SqliteLeaseRepo::fail` (and any future caller that needs full-jitter
-/// backoff). `RngCore::next_u32` takes `&mut self`, so the `Arc` wraps
-/// a `Mutex` to keep the `ControlPlane` itself `Clone`-able and
-/// thread-safe.
+/// Boxed, shared RNG used for node-token generation and lease jitter.
+///
+/// `RngCore` takes `&mut self`, so the `Arc` wraps a `Mutex` to keep
+/// `ControlPlane` cloneable and thread-safe while allowing deterministic test injection.
 pub type SharedRng = Arc<Mutex<dyn RngCore + Send>>;
 
 #[derive(Clone)]

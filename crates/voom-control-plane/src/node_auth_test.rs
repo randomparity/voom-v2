@@ -7,7 +7,7 @@ use super::*;
 
 #[test]
 fn generated_token_uses_v1_prefix_and_256_bits() {
-    let token = generate_token_from_bytes([7_u8; 32]).unwrap();
+    let token = generate_token_from_bytes([7_u8; 32]);
     let exposed = token.expose_secret();
     assert!(exposed.starts_with("voom-node-v1."));
     assert_eq!(exposed.trim_start_matches("voom-node-v1.").len(), 43);
@@ -24,7 +24,7 @@ fn token_hash_uses_versioned_domain_separated_sha256_hex() {
 
 #[test]
 fn generated_token_debug_redacts_plaintext_and_hash() {
-    let plaintext = generate_token_from_bytes([7_u8; 32]).unwrap();
+    let plaintext = generate_token_from_bytes([7_u8; 32]);
     let hash = hash_node_token(plaintext.expose_secret());
     let generated = GeneratedNodeToken {
         plaintext,
@@ -74,12 +74,10 @@ async fn control_plane_generates_token_from_injected_rng() {
     .await
     .unwrap();
 
-    let generated = cp.generate_node_token().unwrap();
+    let generated = cp.generate_node_token();
     assert_eq!(
         generated.plaintext.expose_secret(),
-        generate_token_from_bytes([7_u8; 32])
-            .unwrap()
-            .expose_secret()
+        generate_token_from_bytes([7_u8; 32]).expose_secret()
     );
     assert_eq!(
         generated.hash,
@@ -88,5 +86,32 @@ async fn control_plane_generates_token_from_injected_rng() {
     assert_eq!(
         generated.hint,
         token_hint(generated.plaintext.expose_secret())
+    );
+}
+
+#[tokio::test]
+async fn control_plane_recovers_poisoned_rng_for_token_generation() {
+    let tmp = voom_test_support::TempDatabase::new().unwrap();
+    let url = format!("sqlite://{}", tmp.path().display());
+    voom_store::init(&url).await.unwrap();
+    let pool = voom_store::connect(&url).await.unwrap();
+    let rng: crate::SharedRng = Arc::new(Mutex::new(FrozenRng::new(0x0707_0707)));
+    let poisoned_rng = Arc::clone(&rng);
+    let poisoner = std::thread::spawn(move || {
+        let Ok(_guard) = poisoned_rng.lock() else {
+            return;
+        };
+        panic!("poison shared node-token rng");
+    });
+    assert!(poisoner.join().is_err());
+    let cp = crate::ControlPlane::open_with_pool_and_rng(pool, Arc::new(SystemClock), rng)
+        .await
+        .unwrap();
+
+    let generated = cp.generate_node_token();
+
+    assert_eq!(
+        generated.plaintext.expose_secret(),
+        generate_token_from_bytes([7_u8; 32]).expose_secret()
     );
 }

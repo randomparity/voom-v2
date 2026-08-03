@@ -36,7 +36,7 @@ impl ControlPlane {
     /// Register a node and emit `node.registered` in the same transaction.
     ///
     /// # Errors
-    /// Propagates token generation, repository, and event-append errors.
+    /// Propagates repository and event-append errors.
     pub async fn register_node(
         &self,
         input: RegisterNodeInput,
@@ -46,7 +46,7 @@ impl ControlPlane {
                 "nodes register requires heartbeat_ttl_seconds > 0".to_owned(),
             ));
         }
-        let generated = self.generate_node_token()?;
+        let generated = self.generate_node_token();
         let now = self.clock().now();
         let mut tx = begin_tx(&self.pool).await?;
         let node = self
