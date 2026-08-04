@@ -63,7 +63,7 @@ async fn verify_requires_exactly_one_live_staging_location() {
     cp.artifacts()
         .record_location(NewArtifactLocation {
             artifact_handle_id: staged.artifact_handle_id,
-            kind: "staging".to_owned(),
+            kind: ArtifactLocationKind::Staging,
             value: staging.display().to_string(),
             observed_at: OffsetDateTime::UNIX_EPOCH,
         })
@@ -72,7 +72,7 @@ async fn verify_requires_exactly_one_live_staging_location() {
     cp.artifacts()
         .record_location(NewArtifactLocation {
             artifact_handle_id: staged.artifact_handle_id,
-            kind: "staging".to_owned(),
+            kind: ArtifactLocationKind::Staging,
             value: dir.path().join("second.bin").display().to_string(),
             observed_at: OffsetDateTime::UNIX_EPOCH,
         })
@@ -189,7 +189,7 @@ async fn verification_persistence_survives_a_concurrent_writer_attempt() {
             artifact_location_id: staged.artifact_location_id,
             worker_id,
             path: &path,
-            location_kind: "staging",
+            location_kind: ArtifactLocationKind::Staging,
             require_only_live_kind: true,
             workflow_ticket_id: None,
             workflow_lease_id: None,
@@ -262,12 +262,12 @@ async fn worker_terminal_failure_persists_failed_verification() {
     assert_eq!(verifications.len(), 1);
     assert_eq!(verifications[0].status, ArtifactVerificationStatus::Failed);
     assert_eq!(
-        verifications[0].failure_class.as_deref(),
-        Some("artifact_checksum_mismatch")
+        verifications[0].failure_class,
+        Some(FailureClass::ArtifactChecksumMismatch)
     );
     assert_eq!(
-        verifications[0].error_code.as_deref(),
-        Some("ARTIFACT_CHECKSUM_MISMATCH")
+        verifications[0].error_code,
+        Some(ErrorCode::ArtifactChecksumMismatch)
     );
 }
 
@@ -626,7 +626,7 @@ impl VerifyArtifactHooks for RecordSecondStagingBeforePersist {
         cp.artifacts()
             .record_location(NewArtifactLocation {
                 artifact_handle_id: context.artifact_handle_id,
-                kind: "staging".to_owned(),
+                kind: ArtifactLocationKind::Staging,
                 value: self.path.clone(),
                 observed_at: OffsetDateTime::UNIX_EPOCH,
             })

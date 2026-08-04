@@ -96,6 +96,45 @@ impl FailureClass {
         Self::AmbiguousWorkerSelection,
     ];
 
+    /// Stable snake-case value used by durable records and JSON payloads.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::WorkerTimeout => "worker_timeout",
+            Self::WorkerCrash => "worker_crash",
+            Self::NoEligibleWorker => "no_eligible_worker",
+            Self::ArtifactUnavailable => "artifact_unavailable",
+            Self::ArtifactChecksumMismatch => "artifact_checksum_mismatch",
+            Self::ExternalSystemUnavailable => "external_system_unavailable",
+            Self::ExternalSystemRateLimited => "external_system_rate_limited",
+            Self::VerificationFailure => "verification_failure",
+            Self::BackupFailure => "backup_failure",
+            Self::CommitFailure => "commit_failure",
+            Self::PolicyParseError => "policy_parse_error",
+            Self::PolicyValidationError => "policy_validation_error",
+            Self::MissingCapability => "missing_capability",
+            Self::MalformedWorkerResult => "malformed_worker_result",
+            Self::UserCancellation => "user_cancellation",
+            Self::MalformedMedia => "malformed_media",
+            Self::StaleIdentityEvidence => "stale_identity_evidence",
+            Self::ClosureResolutionIncomplete => "closure_resolution_incomplete",
+            Self::BlockedByActiveUseLease => "blocked_by_active_use_lease",
+            Self::ApprovalRequired => "approval_required",
+            Self::PriorityPolicyConflict => "priority_policy_conflict",
+            Self::ProgressTimeout => "progress_timeout",
+            Self::AmbiguousWorkerSelection => "ambiguous_worker_selection",
+        }
+    }
+
+    /// Parse the stable snake-case representation.
+    #[must_use]
+    pub fn from_wire_str(value: &str) -> Option<Self> {
+        Self::ALL
+            .iter()
+            .copied()
+            .find(|candidate| candidate.as_str() == value)
+    }
+
     /// Coarse-grained retry class — the single source of truth for the
     /// retriability partition. All other classifier methods derive from
     /// this match.

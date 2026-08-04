@@ -6,7 +6,8 @@ use voom_core::{ArtifactHandleId, FileAssetId, FileVersionId, VoomError};
 use voom_events::Event;
 use voom_events::payload::{ArtifactCommitFailedPreMutationPayload, ArtifactCommitStartedPayload};
 use voom_store::repo::media::artifacts::{
-    ArtifactExpectedFacts, ArtifactVerification, LiveArtifactLocation, NewArtifactCommitRecord,
+    ArtifactExpectedFacts, ArtifactLocationKind, ArtifactVerification, LiveArtifactLocation,
+    NewArtifactCommitRecord,
 };
 use voom_store::repo::media::commit_safety_gate::check_lineage_commit_leases_in_tx;
 use voom_store::repo::media::identity::FileVersionRepo;
@@ -267,7 +268,7 @@ pub(super) async fn read_verified_staging_facts(
 ) -> Result<VerifiedStagingFacts, PrepareCommitError> {
     let staging = cp
         .artifacts
-        .live_location_of_kind_in_tx(tx, artifact_handle_id, "staging")
+        .live_location_of_kind_in_tx(tx, artifact_handle_id, ArtifactLocationKind::Staging)
         .await
         .map_err(|err| pre_mutation_error(context, &err))?
         .ok_or_else(|| {

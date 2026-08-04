@@ -9,7 +9,8 @@ use voom_core::ids::BundleId;
 use voom_core::rng_test_support::FrozenRng;
 use voom_core::{JobId, LeaseId, TicketId};
 use voom_store::repo::media::artifacts::{
-    NewArtifactCommitRecord, NewArtifactHandle, NewArtifactLocation, NewSidecarArtifactCommit,
+    ArtifactHandleAccessMode, ArtifactLocationKind, NewArtifactCommitRecord, NewArtifactHandle,
+    NewArtifactLocation, NewSidecarArtifactCommit,
 };
 use voom_store::repo::media::bundles::{BundleMemberRole, NewAssetBundle, NewBundleMember};
 use voom_store::repo::media::identity::{DiscoveredFile, FileLocationKind, IngestOutcome};
@@ -2578,7 +2579,7 @@ async fn seed_historical_staged_artifact(
                 checksum: Some(output.content_hash.clone()),
                 privacy_class: "internal".to_owned(),
                 durability_class: "staging".to_owned(),
-                allowed_access_modes: vec!["local_path".to_owned()],
+                allowed_access_modes: vec![ArtifactHandleAccessMode::LocalPath],
                 mutability: "immutable".to_owned(),
                 source_lineage: Some(serde_json::json!({
                     "operation": "extract_audio",
@@ -2599,7 +2600,7 @@ async fn seed_historical_staged_artifact(
             &mut tx,
             NewArtifactLocation {
                 artifact_handle_id: handle.id,
-                kind: "staging".to_owned(),
+                kind: ArtifactLocationKind::Staging,
                 value: staging.display().to_string(),
                 observed_at: OffsetDateTime::UNIX_EPOCH,
             },

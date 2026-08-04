@@ -394,7 +394,7 @@ async fn success_copies_bytes_records_rows_and_emits_artifact_staged() {
         .unwrap();
     assert_eq!(locations.len(), 1);
     assert_eq!(locations[0].id, report.artifact_location_id);
-    assert_eq!(locations[0].kind, "staging");
+    assert_eq!(locations[0].kind, ArtifactLocationKind::Staging);
     assert_eq!(
         locations[0].value,
         staging.canonicalize().unwrap().display().to_string()

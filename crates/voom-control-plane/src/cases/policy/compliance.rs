@@ -7,8 +7,8 @@ use std::time::Duration;
 use secrecy::SecretString;
 use serde_json::json;
 use voom_core::{
-    FileVersionId, OperationKind, PROTOCOL_VERSION, PolicyInputSetId, PolicyVersionId, TicketId,
-    TicketOperation, VoomError, WorkerId,
+    ErrorCode, FailureClass, FileVersionId, OperationKind, PROTOCOL_VERSION, PolicyInputSetId,
+    PolicyVersionId, TicketId, TicketOperation, VoomError, WorkerId,
 };
 use voom_events::{Event, SubjectType, payload::IssueLifecyclePayload};
 use voom_plan::PlanOperationKind;
@@ -548,8 +548,8 @@ pub struct ArtifactVerificationView {
     pub expected_checksum: String,
     pub observed_size_bytes: Option<u64>,
     pub observed_checksum: Option<String>,
-    pub failure_class: Option<String>,
-    pub error_code: Option<String>,
+    pub failure_class: Option<FailureClass>,
+    pub error_code: Option<ErrorCode>,
     pub message: Option<String>,
 }
 

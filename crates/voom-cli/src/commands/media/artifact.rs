@@ -708,8 +708,8 @@ impl From<VerificationSummary> for VerificationSummaryData {
             expected_checksum: summary.expected_checksum,
             observed_size_bytes: summary.observed_size_bytes,
             observed_checksum: summary.observed_checksum,
-            failure_class: summary.failure_class,
-            error_code: summary.error_code,
+            failure_class: summary.failure_class.map(|value| value.as_str().to_owned()),
+            error_code: summary.error_code.map(|value| value.as_str().to_owned()),
             message: summary.message,
         }
     }
@@ -725,8 +725,8 @@ impl From<CommitSummary> for CommitSummaryData {
             state: commit_state_wire(summary.state),
             result_file_version_id: summary.result_file_version_id.map(|id| id.0),
             result_file_location_id: summary.result_file_location_id.map(|id| id.0),
-            failure_class: summary.failure_class,
-            error_code: summary.error_code,
+            failure_class: summary.failure_class.map(|value| value.as_str().to_owned()),
+            error_code: summary.error_code.map(|value| value.as_str().to_owned()),
             message: summary.message,
             recovery_reason: summary.recovery_reason,
             recovery: summary.recovery.map(RecoverySummaryData::from),

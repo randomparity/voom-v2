@@ -2,11 +2,12 @@ use std::path::{Path, PathBuf};
 
 use voom_core::ids::{ArtifactCommitRecordId, ArtifactVerificationId};
 use voom_core::{
-    ArtifactHandleId, ArtifactLocationId, FileLocationId, FileVersionId, VoomError, WorkerId,
+    ArtifactHandleId, ArtifactLocationId, ErrorCode, FailureClass, FileLocationId, FileVersionId,
+    VoomError, WorkerId,
 };
 use voom_store::repo::media::artifacts::{
     ArtifactCommitRecord, ArtifactCommitState, ArtifactHandleFacts, ArtifactLocation,
-    ArtifactVerification, ArtifactVerificationStatus,
+    ArtifactLocationKind, ArtifactVerification, ArtifactVerificationStatus,
 };
 
 use crate::ControlPlane;
@@ -91,8 +92,8 @@ pub struct VerificationSummary {
     pub expected_checksum: String,
     pub observed_size_bytes: Option<u64>,
     pub observed_checksum: Option<String>,
-    pub failure_class: Option<String>,
-    pub error_code: Option<String>,
+    pub failure_class: Option<FailureClass>,
+    pub error_code: Option<ErrorCode>,
     pub message: Option<String>,
 }
 
@@ -105,8 +106,8 @@ pub struct CommitSummary {
     pub state: ArtifactCommitState,
     pub result_file_version_id: Option<FileVersionId>,
     pub result_file_location_id: Option<FileLocationId>,
-    pub failure_class: Option<String>,
-    pub error_code: Option<String>,
+    pub failure_class: Option<FailureClass>,
+    pub error_code: Option<ErrorCode>,
     pub message: Option<String>,
     pub recovery_reason: Option<String>,
     pub recovery: Option<RecoverySummary>,
@@ -334,7 +335,7 @@ impl From<ArtifactVerification> for VerificationSummary {
 fn one_live_staging_location(locations: &[ArtifactLocation]) -> Option<&ArtifactLocation> {
     let mut staging = locations
         .iter()
-        .filter(|location| location.kind == "staging");
+        .filter(|location| location.kind == ArtifactLocationKind::Staging);
     let first = staging.next()?;
     if staging.next().is_some() {
         return None;

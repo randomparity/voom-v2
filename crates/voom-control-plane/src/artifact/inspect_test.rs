@@ -172,12 +172,12 @@ async fn show_failed_artifact_uses_latest_failure_for_live_staging_without_commi
     let verification = detail.latest_verification.as_ref().unwrap();
     assert_eq!(verification.status, ArtifactVerificationStatus::Failed);
     assert_eq!(
-        verification.failure_class.as_deref(),
-        Some("artifact_checksum_mismatch")
+        verification.failure_class,
+        Some(FailureClass::ArtifactChecksumMismatch)
     );
     assert_eq!(
-        verification.error_code.as_deref(),
-        Some(ErrorCode::ArtifactChecksumMismatch.as_str())
+        verification.error_code,
+        Some(ErrorCode::ArtifactChecksumMismatch)
     );
     assert_eq!(detail.latest_commit, None);
 }
@@ -214,11 +214,8 @@ async fn show_failed_artifact_reports_failure_fields() {
     let commit = detail.latest_commit.as_ref().unwrap();
     assert_eq!(commit.id, failed.commit_record_id);
     assert_eq!(commit.state, ArtifactCommitState::Failed);
-    assert_eq!(commit.failure_class.as_deref(), Some("commit_failure"));
-    assert_eq!(
-        commit.error_code.as_deref(),
-        Some(ErrorCode::CommitFailure.as_str())
-    );
+    assert_eq!(commit.failure_class, Some(FailureClass::CommitFailure));
+    assert_eq!(commit.error_code, Some(ErrorCode::CommitFailure));
     assert_eq!(commit.message.as_deref(), Some("injected failed commit"));
 }
 
@@ -414,8 +411,8 @@ async fn stage_verify_and_fail_commit_bytes(
             &mut tx,
             pending.id,
             ArtifactCommitFailure {
-                failure_class: "commit_failure".to_owned(),
-                error_code: ErrorCode::CommitFailure.as_str().to_owned(),
+                failure_class: FailureClass::CommitFailure,
+                error_code: ErrorCode::CommitFailure,
                 message: "injected failed commit".to_owned(),
                 finished_at: OffsetDateTime::UNIX_EPOCH,
             },

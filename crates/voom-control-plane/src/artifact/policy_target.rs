@@ -44,7 +44,7 @@ impl ControlPlane {
                 Event::ArtifactLocationRecorded(ArtifactLocationRecordedPayload {
                     artifact_location_id: location.id,
                     artifact_handle_id: location.artifact_handle_id,
-                    kind: location.kind.clone(),
+                    kind: location.kind.to_string(),
                     value: location.value.clone(),
                 }),
             )

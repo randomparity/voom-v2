@@ -190,7 +190,7 @@ pub(super) async fn transition_recovery(
     update_commit_report_in_tx(&cp.artifacts, &mut tx, prepared.record.id, &recovery)
         .await
         .map_err(CommitArtifactCommandError::from)?;
-    let error_code = err.error_code().as_str().to_owned();
+    let error_code = err.error_code();
     let message = err.to_string();
     let recovered = mark_recovery_required_with_event_in_tx(
         &cp.artifacts,
@@ -201,7 +201,7 @@ pub(super) async fn transition_recovery(
             artifact_handle_id: prepared.artifact_handle_id,
             failure: ArtifactCommitFailure {
                 failure_class: failure_class_for_error(&err),
-                error_code: error_code.clone(),
+                error_code,
                 message: message.clone(),
                 finished_at: now,
             },
@@ -212,7 +212,7 @@ pub(super) async fn transition_recovery(
                 target_path: prepared.target_path.display().to_string(),
                 temp_path: prepared.temp_path.display().to_string(),
                 recovery_reason: recovery.recovery_reason.clone(),
-                error_code,
+                error_code: error_code.as_str().to_owned(),
                 message,
             }),
             occurred_at: now,
@@ -264,15 +264,11 @@ fn recovery_reason(err: &VoomError) -> String {
     .to_owned()
 }
 
-fn failure_class_for_error(err: &VoomError) -> String {
-    let class = match err {
+fn failure_class_for_error(err: &VoomError) -> FailureClass {
+    match err {
         VoomError::ArtifactChecksumMismatch(_) => FailureClass::ArtifactChecksumMismatch,
         VoomError::ArtifactUnavailable(_) => FailureClass::ArtifactUnavailable,
         VoomError::VerificationFailure(_) => FailureClass::VerificationFailure,
         _ => FailureClass::CommitFailure,
-    };
-    serde_json::to_value(class)
-        .ok()
-        .and_then(|v| v.as_str().map(str::to_owned))
-        .unwrap_or_else(|| "commit_failure".to_owned())
+    }
 }

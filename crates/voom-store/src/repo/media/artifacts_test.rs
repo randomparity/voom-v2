@@ -2,7 +2,9 @@ use super::*;
 
 use serde_json::json;
 use time::OffsetDateTime;
-use voom_core::{FileAssetId, FileLocationId, FileVersionId, LeaseId, TicketId};
+use voom_core::{
+    ErrorCode, FailureClass, FileAssetId, FileLocationId, FileVersionId, LeaseId, TicketId,
+};
 
 use crate::repo::execution::workers::{NewWorker, SqliteWorkerRepo, WorkerKind};
 use crate::repo::media::identity::{
@@ -24,7 +26,10 @@ fn sample_new_handle() -> NewArtifactHandle {
         checksum: Some("abc".to_owned()),
         privacy_class: "internal".to_owned(),
         durability_class: "durable".to_owned(),
-        allowed_access_modes: vec!["read".to_owned(), "write".to_owned()],
+        allowed_access_modes: vec![
+            ArtifactHandleAccessMode::Read,
+            ArtifactHandleAccessMode::Write,
+        ],
         mutability: "immutable".to_owned(),
         source_lineage: Some(json!({"src": "test"})),
         file_version_id: None,
@@ -111,7 +116,7 @@ async fn pending_record_fixture(
     let location = repo
         .record_location(NewArtifactLocation {
             artifact_handle_id: handle.id,
-            kind: "staging".to_owned(),
+            kind: ArtifactLocationKind::Staging,
             value: "/staging/report.mkv".to_owned(),
             observed_at: OffsetDateTime::UNIX_EPOCH,
         })
@@ -285,7 +290,7 @@ async fn policy_target_resolution_reuses_dependency_committed_handle() {
     let artifact_location = repo
         .record_location(NewArtifactLocation {
             artifact_handle_id: handle.id,
-            kind: "staging".to_owned(),
+            kind: ArtifactLocationKind::Staging,
             value: "/tmp/source.mkv".to_owned(),
             observed_at: OffsetDateTime::UNIX_EPOCH,
         })
@@ -614,6 +619,158 @@ async fn require_expected_facts_rejects_negative_persisted_size_as_database_erro
 }
 
 #[tokio::test]
+async fn get_handle_rejects_unknown_persisted_access_mode() {
+    let (pool, _tmp) = pool().await;
+    let repo = SqliteArtifactRepo::new(pool.clone());
+    let handle = repo.create_handle(sample_new_handle()).await.unwrap();
+    sqlx::query(
+        "UPDATE artifact_handles SET allowed_access_modes = '[\"read\",\"future_mode\"]' \
+         WHERE id = ?",
+    )
+    .bind(i64::try_from(handle.id.0).unwrap())
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let error = repo.get_handle(handle.id).await.unwrap_err();
+
+    assert!(matches!(error, VoomError::Database { .. }));
+    assert!(error.to_string().contains("allowed_access_modes"));
+}
+
+#[tokio::test]
+async fn get_handle_rejects_malformed_persisted_access_modes() {
+    let (pool, _tmp) = pool().await;
+    let repo = SqliteArtifactRepo::new(pool.clone());
+    let handle = repo.create_handle(sample_new_handle()).await.unwrap();
+    let mut connection = pool.acquire().await.unwrap();
+    sqlx::query("PRAGMA ignore_check_constraints = TRUE")
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE artifact_handles SET allowed_access_modes = 'not-json' WHERE id = ?")
+        .bind(i64::try_from(handle.id.0).unwrap())
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+    drop(connection);
+
+    let error = repo.get_handle(handle.id).await.unwrap_err();
+
+    assert!(matches!(error, VoomError::Database { .. }));
+    assert!(error.to_string().contains("allowed_access_modes"));
+}
+
+#[tokio::test]
+async fn list_locations_rejects_unknown_persisted_kind() {
+    let (pool, _tmp) = pool().await;
+    let repo = SqliteArtifactRepo::new(pool.clone());
+    let handle = repo.create_handle(sample_new_handle()).await.unwrap();
+    let location = repo
+        .record_location(NewArtifactLocation {
+            artifact_handle_id: handle.id,
+            kind: ArtifactLocationKind::Staging,
+            value: "/staging/out.mkv".to_owned(),
+            observed_at: OffsetDateTime::UNIX_EPOCH,
+        })
+        .await
+        .unwrap();
+    let mut connection = pool.acquire().await.unwrap();
+    sqlx::query("PRAGMA ignore_check_constraints = TRUE")
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE artifact_locations SET kind = 'future_kind' WHERE id = ?")
+        .bind(i64::try_from(location.id.0).unwrap())
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+    drop(connection);
+
+    let error = repo.list_locations_for_handle(handle.id).await.unwrap_err();
+
+    assert!(matches!(error, VoomError::Database { .. }));
+    assert!(error.to_string().contains("artifact_locations.kind"));
+}
+
+#[tokio::test]
+async fn list_verifications_rejects_unknown_persisted_failure_class() {
+    let (pool, _tmp) = pool().await;
+    let repo = SqliteArtifactRepo::new(pool.clone());
+    let worker_id = verification_worker(&pool).await;
+    let handle = repo.create_handle(sample_new_handle()).await.unwrap();
+    let location = repo
+        .record_location(NewArtifactLocation {
+            artifact_handle_id: handle.id,
+            kind: ArtifactLocationKind::Staging,
+            value: "/staging/out.mkv".to_owned(),
+            observed_at: OffsetDateTime::UNIX_EPOCH,
+        })
+        .await
+        .unwrap();
+    let mut tx = pool.begin().await.unwrap();
+    let verification = repo
+        .record_verification_in_tx(
+            &mut tx,
+            failed_verification(
+                handle.id,
+                location.id,
+                worker_id,
+                &location.value,
+                ErrorCode::VerificationFailure,
+                0,
+            ),
+        )
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    sqlx::query("UPDATE artifact_verifications SET failure_class = 'future_failure' WHERE id = ?")
+        .bind(i64::try_from(verification.id.0).unwrap())
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let error = repo.list_verifications(handle.id).await.unwrap_err();
+
+    assert!(matches!(error, VoomError::Database { .. }));
+    assert!(
+        error
+            .to_string()
+            .contains("artifact_verifications.failure_class")
+    );
+}
+
+#[tokio::test]
+async fn get_commit_record_rejects_unknown_persisted_error_code() {
+    let (pool, _tmp) = pool().await;
+    let repo = SqliteArtifactRepo::new(pool.clone());
+    let pending = pending_record_fixture(&pool, &repo).await;
+    let mut tx = pool.begin().await.unwrap();
+    repo.mark_commit_failed_in_tx(
+        &mut tx,
+        pending.id,
+        commit_failure(ErrorCode::CommitFailure, "failed", 2),
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    sqlx::query("UPDATE artifact_commit_records SET error_code = 'FUTURE_ERROR' WHERE id = ?")
+        .bind(i64::try_from(pending.id.0).unwrap())
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let error = repo.get_commit_record(pending.id).await.unwrap_err();
+
+    assert!(matches!(error, VoomError::Database { .. }));
+    assert!(
+        error
+            .to_string()
+            .contains("artifact_commit_records.error_code")
+    );
+}
+
+#[tokio::test]
 async fn require_expected_facts_rejects_negative_size_before_missing_checksum() {
     let (pool, _tmp) = pool().await;
     let repo = SqliteArtifactRepo::new(pool.clone());
@@ -649,7 +806,11 @@ async fn artifact_projections_reject_ids_above_sqlite_integer_range() {
     ));
     let mut tx = pool.begin().await.unwrap();
     assert!(matches!(
-        repo.live_location_of_kind_in_tx(&mut tx, invalid_handle_id, "staging")
+        repo.live_location_of_kind_in_tx(
+            &mut tx,
+            invalid_handle_id,
+            ArtifactLocationKind::Staging,
+        )
             .await
             .unwrap_err(),
         VoomError::Internal(_)
@@ -659,7 +820,7 @@ async fn artifact_projections_reject_ids_above_sqlite_integer_range() {
             &mut tx,
             ArtifactHandleId(1),
             invalid_location_id,
-            "staging",
+            ArtifactLocationKind::Staging,
             "/staging/invalid.mkv",
         )
         .await
@@ -677,7 +838,7 @@ async fn live_location_of_kind_selects_the_exact_single_live_location() {
     let location = repo
         .record_location(NewArtifactLocation {
             artifact_handle_id: handle.id,
-            kind: "staging".to_owned(),
+            kind: ArtifactLocationKind::Staging,
             value: "/staging/exact.mkv".to_owned(),
             observed_at: OffsetDateTime::UNIX_EPOCH,
         })
@@ -686,12 +847,12 @@ async fn live_location_of_kind_selects_the_exact_single_live_location() {
     let mut tx = pool.begin().await.unwrap();
 
     assert_eq!(
-        repo.live_location_of_kind_in_tx(&mut tx, handle.id, "staging")
+        repo.live_location_of_kind_in_tx(&mut tx, handle.id, ArtifactLocationKind::Staging)
             .await
             .unwrap(),
         Some(LiveArtifactLocation {
             id: location.id,
-            kind: "staging".to_owned(),
+            kind: ArtifactLocationKind::Staging,
             value: location.value,
         })
     );
@@ -706,7 +867,7 @@ async fn live_location_of_kind_conflicts_when_multiple_locations_are_live() {
     for value in ["/staging/first.mkv", "/staging/second.mkv"] {
         repo.record_location(NewArtifactLocation {
             artifact_handle_id: handle.id,
-            kind: "staging".to_owned(),
+            kind: ArtifactLocationKind::Staging,
             value: value.to_owned(),
             observed_at: OffsetDateTime::UNIX_EPOCH,
         })
@@ -716,7 +877,7 @@ async fn live_location_of_kind_conflicts_when_multiple_locations_are_live() {
     let mut tx = pool.begin().await.unwrap();
 
     let error = repo
-        .live_location_of_kind_in_tx(&mut tx, handle.id, "staging")
+        .live_location_of_kind_in_tx(&mut tx, handle.id, ArtifactLocationKind::Staging)
         .await
         .unwrap_err();
 
@@ -733,7 +894,7 @@ async fn require_live_location_rejects_retired_or_replaced_rows() {
     let old = repo
         .record_location(NewArtifactLocation {
             artifact_handle_id: handle.id,
-            kind: "staging".to_owned(),
+            kind: ArtifactLocationKind::Staging,
             value: "/staging/old.mkv".to_owned(),
             observed_at: OffsetDateTime::UNIX_EPOCH,
         })
@@ -744,7 +905,7 @@ async fn require_live_location_rejects_retired_or_replaced_rows() {
         .unwrap();
     repo.record_location(NewArtifactLocation {
         artifact_handle_id: handle.id,
-        kind: "staging".to_owned(),
+        kind: ArtifactLocationKind::Staging,
         value: "/staging/replacement.mkv".to_owned(),
         observed_at: OffsetDateTime::UNIX_EPOCH,
     })
@@ -753,7 +914,13 @@ async fn require_live_location_rejects_retired_or_replaced_rows() {
     let mut tx = pool.begin().await.unwrap();
 
     let error = repo
-        .require_live_location_in_tx(&mut tx, handle.id, old.id, "staging", "/staging/old.mkv")
+        .require_live_location_in_tx(
+            &mut tx,
+            handle.id,
+            old.id,
+            ArtifactLocationKind::Staging,
+            "/staging/old.mkv",
+        )
         .await
         .unwrap_err();
 
@@ -770,7 +937,7 @@ async fn require_live_location_rejects_wrong_owner_kind_and_value() {
     let location = repo
         .record_location(NewArtifactLocation {
             artifact_handle_id: handle.id,
-            kind: "staging".to_owned(),
+            kind: ArtifactLocationKind::Staging,
             value: "/staging/exact.mkv".to_owned(),
             observed_at: OffsetDateTime::UNIX_EPOCH,
         })
@@ -779,9 +946,21 @@ async fn require_live_location_rejects_wrong_owner_kind_and_value() {
     let mut tx = pool.begin().await.unwrap();
 
     for (owner, kind, value) in [
-        (other.id, "staging", "/staging/exact.mkv"),
-        (handle.id, "local_path", "/staging/exact.mkv"),
-        (handle.id, "staging", "/staging/wrong.mkv"),
+        (
+            other.id,
+            ArtifactLocationKind::Staging,
+            "/staging/exact.mkv",
+        ),
+        (
+            handle.id,
+            ArtifactLocationKind::LocalPath,
+            "/staging/exact.mkv",
+        ),
+        (
+            handle.id,
+            ArtifactLocationKind::Staging,
+            "/staging/wrong.mkv",
+        ),
     ] {
         let error = repo
             .require_live_location_in_tx(&mut tx, owner, location.id, kind, value)
@@ -843,7 +1022,7 @@ async fn record_verification_persists_success_and_failure_rows() {
     let location = repo
         .record_location(NewArtifactLocation {
             artifact_handle_id: handle.id,
-            kind: "staging".to_owned(),
+            kind: ArtifactLocationKind::Staging,
             value: "/staging/out.mkv".to_owned(),
             observed_at: OffsetDateTime::UNIX_EPOCH,
         })
@@ -891,8 +1070,8 @@ async fn record_verification_persists_success_and_failure_rows() {
                 expected_checksum: "abc".to_owned(),
                 observed_size_bytes: None,
                 observed_checksum: None,
-                failure_class: Some("io".to_owned()),
-                error_code: Some("READ_FAILED".to_owned()),
+                failure_class: Some(FailureClass::ArtifactUnavailable),
+                error_code: Some(ErrorCode::ArtifactUnavailable),
                 message: Some("read failed".to_owned()),
                 report: json!({"attempt": 2}),
                 started_at: OffsetDateTime::UNIX_EPOCH + time::Duration::seconds(2),
@@ -908,7 +1087,7 @@ async fn record_verification_persists_success_and_failure_rows() {
     let rows = repo.list_verifications(handle.id).await.unwrap();
     assert_eq!(rows.len(), 2);
     assert_eq!(rows[0].report, json!({"hash": "matched"}));
-    assert_eq!(rows[1].error_code.as_deref(), Some("READ_FAILED"));
+    assert_eq!(rows[1].error_code, Some(ErrorCode::ArtifactUnavailable));
 }
 
 #[tokio::test]
@@ -920,7 +1099,7 @@ async fn latest_successful_verification_uses_live_staging_location() {
     let old_location = repo
         .record_location(NewArtifactLocation {
             artifact_handle_id: handle.id,
-            kind: "staging".to_owned(),
+            kind: ArtifactLocationKind::Staging,
             value: "/staging/old.mkv".to_owned(),
             observed_at: OffsetDateTime::UNIX_EPOCH,
         })
@@ -935,7 +1114,7 @@ async fn latest_successful_verification_uses_live_staging_location() {
     let live_location = repo
         .record_location(NewArtifactLocation {
             artifact_handle_id: handle.id,
-            kind: "staging".to_owned(),
+            kind: ArtifactLocationKind::Staging,
             value: "/staging/live.mkv".to_owned(),
             observed_at: OffsetDateTime::UNIX_EPOCH + time::Duration::seconds(11),
         })
@@ -992,7 +1171,7 @@ async fn latest_successful_verification_uses_live_staging_location() {
                 live_location.id,
                 worker_id,
                 &live_location.value,
-                "VERIFY_FAILED",
+                ErrorCode::VerificationFailure,
                 23,
             ),
         )
@@ -1020,7 +1199,7 @@ async fn workflow_verification_is_unique_per_lease_but_allows_ticket_retry() {
     let location = repo
         .record_location(NewArtifactLocation {
             artifact_handle_id: handle.id,
-            kind: "local_path".to_owned(),
+            kind: ArtifactLocationKind::LocalPath,
             value: "/media/retry.mkv".to_owned(),
             observed_at: OffsetDateTime::UNIX_EPOCH,
         })
@@ -1131,7 +1310,7 @@ async fn verification_location_must_belong_to_same_handle() {
     let other_location = repo
         .record_location(NewArtifactLocation {
             artifact_handle_id: other_handle.id,
-            kind: "staging".to_owned(),
+            kind: ArtifactLocationKind::Staging,
             value: "/staging/other.mkv".to_owned(),
             observed_at: OffsetDateTime::UNIX_EPOCH,
         })
@@ -1176,7 +1355,7 @@ async fn verification_path_must_match_location_value() {
     let location = repo
         .record_location(NewArtifactLocation {
             artifact_handle_id: handle.id,
-            kind: "staging".to_owned(),
+            kind: ArtifactLocationKind::Staging,
             value: "/staging/live.mkv".to_owned(),
             observed_at: OffsetDateTime::UNIX_EPOCH,
         })
@@ -1222,7 +1401,7 @@ async fn commit_records_move_through_terminal_states() {
     let staging_location = repo
         .record_location(NewArtifactLocation {
             artifact_handle_id: handle.id,
-            kind: "staging".to_owned(),
+            kind: ArtifactLocationKind::Staging,
             value: "/staging/out.mkv".to_owned(),
             observed_at: OffsetDateTime::UNIX_EPOCH,
         })
@@ -1231,7 +1410,7 @@ async fn commit_records_move_through_terminal_states() {
     let failed_staging_location = repo
         .record_location(NewArtifactLocation {
             artifact_handle_id: failed_handle.id,
-            kind: "staging".to_owned(),
+            kind: ArtifactLocationKind::Staging,
             value: "/staging/failed.mkv".to_owned(),
             observed_at: OffsetDateTime::UNIX_EPOCH,
         })
@@ -1240,7 +1419,7 @@ async fn commit_records_move_through_terminal_states() {
     let recovery_staging_location = repo
         .record_location(NewArtifactLocation {
             artifact_handle_id: recovery_handle.id,
-            kind: "staging".to_owned(),
+            kind: ArtifactLocationKind::Staging,
             value: "/staging/recovery.mkv".to_owned(),
             observed_at: OffsetDateTime::UNIX_EPOCH,
         })
@@ -1357,7 +1536,7 @@ async fn commit_records_move_through_terminal_states() {
         .mark_commit_failed_in_tx(
             &mut tx,
             failed.id,
-            commit_failure("RENAME_FAILED", "rename failed", 6),
+            commit_failure(ErrorCode::CommitFailure, "rename failed", 6),
         )
         .await
         .unwrap();
@@ -1378,7 +1557,7 @@ async fn commit_records_move_through_terminal_states() {
         .mark_commit_recovery_required_in_tx(
             &mut tx,
             recovery_required.id,
-            commit_failure("PARTIAL_PROMOTION", "promotion uncertain", 7),
+            commit_failure(ErrorCode::CommitFailure, "promotion uncertain", 7),
             "operator must inspect target".to_owned(),
         )
         .await
@@ -1392,7 +1571,7 @@ async fn commit_records_move_through_terminal_states() {
         Some(committed_location.id)
     );
     assert_eq!(failed.state, ArtifactCommitState::Failed);
-    assert_eq!(failed.error_code.as_deref(), Some("RENAME_FAILED"));
+    assert_eq!(failed.error_code, Some(ErrorCode::CommitFailure));
     assert_eq!(
         recovery_required.state,
         ArtifactCommitState::RecoveryRequired
@@ -1428,7 +1607,7 @@ async fn commit_pending_uniqueness_blocks_second_owner_but_failed_can_retry() {
     let location = repo
         .record_location(NewArtifactLocation {
             artifact_handle_id: handle.id,
-            kind: "staging".to_owned(),
+            kind: ArtifactLocationKind::Staging,
             value: "/staging/out.mkv".to_owned(),
             observed_at: OffsetDateTime::UNIX_EPOCH,
         })
@@ -1437,7 +1616,7 @@ async fn commit_pending_uniqueness_blocks_second_owner_but_failed_can_retry() {
     let other_location = repo
         .record_location(NewArtifactLocation {
             artifact_handle_id: other_handle.id,
-            kind: "staging".to_owned(),
+            kind: ArtifactLocationKind::Staging,
             value: "/staging/other.mkv".to_owned(),
             observed_at: OffsetDateTime::UNIX_EPOCH,
         })
@@ -1506,7 +1685,7 @@ async fn commit_pending_uniqueness_blocks_second_owner_but_failed_can_retry() {
         .mark_commit_failed_in_tx(
             &mut tx,
             pending.id,
-            commit_failure("RENAME_FAILED", "rename failed", 3),
+            commit_failure(ErrorCode::CommitFailure, "rename failed", 3),
         )
         .await
         .unwrap();
@@ -1549,7 +1728,7 @@ async fn pending_commit_requires_successful_live_staging_verification_for_same_h
     let live_location = repo
         .record_location(NewArtifactLocation {
             artifact_handle_id: handle.id,
-            kind: "staging".to_owned(),
+            kind: ArtifactLocationKind::Staging,
             value: "/staging/live.mkv".to_owned(),
             observed_at: OffsetDateTime::UNIX_EPOCH,
         })
@@ -1558,7 +1737,7 @@ async fn pending_commit_requires_successful_live_staging_verification_for_same_h
     let retired_location = repo
         .record_location(NewArtifactLocation {
             artifact_handle_id: handle.id,
-            kind: "staging".to_owned(),
+            kind: ArtifactLocationKind::Staging,
             value: "/staging/retired.mkv".to_owned(),
             observed_at: OffsetDateTime::UNIX_EPOCH,
         })
@@ -1573,7 +1752,7 @@ async fn pending_commit_requires_successful_live_staging_verification_for_same_h
     let other_location = repo
         .record_location(NewArtifactLocation {
             artifact_handle_id: other_handle.id,
-            kind: "staging".to_owned(),
+            kind: ArtifactLocationKind::Staging,
             value: "/staging/other.mkv".to_owned(),
             observed_at: OffsetDateTime::UNIX_EPOCH,
         })
@@ -1582,7 +1761,7 @@ async fn pending_commit_requires_successful_live_staging_verification_for_same_h
     let unlinked_location = repo
         .record_location(NewArtifactLocation {
             artifact_handle_id: unlinked_handle.id,
-            kind: "staging".to_owned(),
+            kind: ArtifactLocationKind::Staging,
             value: "/staging/unlinked.mkv".to_owned(),
             observed_at: OffsetDateTime::UNIX_EPOCH,
         })
@@ -1597,7 +1776,7 @@ async fn pending_commit_requires_successful_live_staging_verification_for_same_h
                 live_location.id,
                 worker_id,
                 &live_location.value,
-                "VERIFY_FAILED",
+                ErrorCode::VerificationFailure,
                 1,
             ),
         )
@@ -1758,7 +1937,7 @@ async fn pending_commit_rejects_retired_source_file_version() {
     let location = repo
         .record_location(NewArtifactLocation {
             artifact_handle_id: handle.id,
-            kind: "staging".to_owned(),
+            kind: ArtifactLocationKind::Staging,
             value: "/staging/source-retired.mkv".to_owned(),
             observed_at: OffsetDateTime::UNIX_EPOCH,
         })
@@ -1823,7 +2002,7 @@ async fn committed_record_requires_result_location_on_staged_commit_child() {
     let staging_location = repo
         .record_location(NewArtifactLocation {
             artifact_handle_id: handle.id,
-            kind: "staging".to_owned(),
+            kind: ArtifactLocationKind::Staging,
             value: "/staging/out.mkv".to_owned(),
             observed_at: OffsetDateTime::UNIX_EPOCH,
         })
@@ -1962,7 +2141,7 @@ async fn committed_record_rejects_retired_result_file_version() {
     let staging_location = repo
         .record_location(NewArtifactLocation {
             artifact_handle_id: handle.id,
-            kind: "staging".to_owned(),
+            kind: ArtifactLocationKind::Staging,
             value: "/staging/result-retired.mkv".to_owned(),
             observed_at: OffsetDateTime::UNIX_EPOCH,
         })
@@ -2060,7 +2239,7 @@ async fn sidecar_commit_helper_links_staged_version_to_source_and_finalizes_pend
     let staging_location = repo
         .record_location(NewArtifactLocation {
             artifact_handle_id: handle.id,
-            kind: "staging".to_owned(),
+            kind: ArtifactLocationKind::Staging,
             value: "/staging/audio.ogg".to_owned(),
             observed_at: OffsetDateTime::UNIX_EPOCH,
         })
@@ -2157,7 +2336,7 @@ async fn sidecar_commit_helper_requires_existing_pending_lineage_record() {
     let staging_location = repo
         .record_location(NewArtifactLocation {
             artifact_handle_id: handle.id,
-            kind: "staging".to_owned(),
+            kind: ArtifactLocationKind::Staging,
             value: "/staging/audio-no-pending.ogg".to_owned(),
             observed_at: OffsetDateTime::UNIX_EPOCH,
         })
@@ -2208,7 +2387,7 @@ async fn sidecar_commit_helper_requires_target_path_from_commit_path() {
     let staging_location = repo
         .record_location(NewArtifactLocation {
             artifact_handle_id: handle.id,
-            kind: "staging".to_owned(),
+            kind: ArtifactLocationKind::Staging,
             value: "/staging/audio-target-mismatch.ogg".to_owned(),
             observed_at: OffsetDateTime::UNIX_EPOCH,
         })
@@ -2312,7 +2491,7 @@ fn failed_verification(
     artifact_location_id: voom_core::ArtifactLocationId,
     worker_id: voom_core::WorkerId,
     path: &str,
-    error_code: &str,
+    error_code: ErrorCode,
     second: i64,
 ) -> NewArtifactVerification {
     NewArtifactVerification {
@@ -2327,10 +2506,10 @@ fn failed_verification(
         expected_checksum: "abc".to_owned(),
         observed_size_bytes: None,
         observed_checksum: None,
-        failure_class: Some("verification".to_owned()),
-        error_code: Some(error_code.to_owned()),
+        failure_class: Some(FailureClass::VerificationFailure),
+        error_code: Some(error_code),
         message: Some("verification failed".to_owned()),
-        report: json!({"error": error_code}),
+        report: json!({"error": error_code.as_str()}),
         started_at: OffsetDateTime::UNIX_EPOCH + time::Duration::seconds(second),
         finished_at: OffsetDateTime::UNIX_EPOCH + time::Duration::seconds(second + 1),
     }
@@ -2353,10 +2532,10 @@ fn pending_commit(
     }
 }
 
-fn commit_failure(error_code: &str, message: &str, second: i64) -> ArtifactCommitFailure {
+fn commit_failure(error_code: ErrorCode, message: &str, second: i64) -> ArtifactCommitFailure {
     ArtifactCommitFailure {
-        failure_class: "io".to_owned(),
-        error_code: error_code.to_owned(),
+        failure_class: FailureClass::CommitFailure,
+        error_code,
         message: message.to_owned(),
         finished_at: OffsetDateTime::UNIX_EPOCH + time::Duration::seconds(second),
     }
@@ -2370,7 +2549,7 @@ async fn record_location_attaches_to_handle() {
     let loc = repo
         .record_location(NewArtifactLocation {
             artifact_handle_id: h.id,
-            kind: "local_path".to_owned(),
+            kind: ArtifactLocationKind::LocalPath,
             value: "/tmp/x".to_owned(),
             observed_at: OffsetDateTime::UNIX_EPOCH,
         })
@@ -2389,7 +2568,7 @@ async fn retire_location_sets_retired_at() {
     let loc = repo
         .record_location(NewArtifactLocation {
             artifact_handle_id: h.id,
-            kind: "local_path".to_owned(),
+            kind: ArtifactLocationKind::LocalPath,
             value: "/tmp/x".to_owned(),
             observed_at: OffsetDateTime::UNIX_EPOCH,
         })

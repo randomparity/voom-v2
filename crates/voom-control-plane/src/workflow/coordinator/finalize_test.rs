@@ -10,8 +10,9 @@ use voom_store::repo::execution::workers::{NewCapability, NewGrant};
 use voom_store::repo::execution::workflow_progress::{FileAdmissionTier, NewFileProgress};
 use voom_store::repo::execution::workflow_summaries::{FilePhaseOutcome, NewFileRunStart};
 use voom_store::repo::media::artifacts::{
-    ArtifactVerificationStatus, NewArtifactCommitRecord, NewArtifactHandle, NewArtifactLocation,
-    NewArtifactVerification, NewSidecarArtifactCommit,
+    ArtifactHandleAccessMode, ArtifactLocationKind, ArtifactVerificationStatus,
+    NewArtifactCommitRecord, NewArtifactHandle, NewArtifactLocation, NewArtifactVerification,
+    NewSidecarArtifactCommit,
 };
 use voom_store::repo::media::identity::{
     DiscoveredFile, FileLocationKind, FileLocationRepo, FileVersionRepo, IngestOutcome,
@@ -1090,7 +1091,7 @@ async fn create_verified_staging(
             checksum: Some("job-produced".to_owned()),
             privacy_class: "internal".to_owned(),
             durability_class: "staging".to_owned(),
-            allowed_access_modes: vec!["local_path".to_owned()],
+            allowed_access_modes: vec![ArtifactHandleAccessMode::LocalPath],
             mutability: "immutable".to_owned(),
             source_lineage: Some(json!({"kind": "test"})),
             file_version_id: Some(source_version_id),
@@ -1101,7 +1102,7 @@ async fn create_verified_staging(
     let location = cp
         .record_artifact_location(NewArtifactLocation {
             artifact_handle_id: handle.id,
-            kind: "staging".to_owned(),
+            kind: ArtifactLocationKind::Staging,
             value: format!("/staging/{}.mkv", handle.id.0),
             observed_at: T0,
         })

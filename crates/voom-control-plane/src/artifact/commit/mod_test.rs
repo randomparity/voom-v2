@@ -6,13 +6,14 @@ use async_trait::async_trait;
 use time::OffsetDateTime;
 use voom_core::ids::{ArtifactCommitRecordId, ArtifactVerificationId};
 use voom_core::{
-    ArtifactHandleId, ErrorCode, FileLocationId, FileVersionId, VoomError,
+    ArtifactHandleId, ErrorCode, FailureClass, FileLocationId, FileVersionId, VoomError,
     rng_test_support::FrozenRng,
 };
 use voom_events::EventKind;
 use voom_store::repo::audit::events::{EventFilter, EventRepo, Page};
 use voom_store::repo::media::artifacts::{
-    ArtifactCommitFailure, ArtifactCommitState, NewArtifactCommitRecord, NewArtifactLocation,
+    ArtifactCommitFailure, ArtifactCommitState, ArtifactLocationKind, NewArtifactCommitRecord,
+    NewArtifactLocation,
 };
 use voom_store::repo::media::identity::{
     DiscoveredFile, FileLocationKind, FileLocationRepo, FileVersionRepo, IngestOutcome,
@@ -66,7 +67,7 @@ async fn stale_verification_for_retired_or_different_staging_location_is_rejecte
     cp.artifacts()
         .record_location(NewArtifactLocation {
             artifact_handle_id: staged.artifact_handle_id,
-            kind: "staging".to_owned(),
+            kind: ArtifactLocationKind::Staging,
             value: replacement_staging.display().to_string(),
             observed_at: OffsetDateTime::UNIX_EPOCH,
         })
@@ -805,8 +806,8 @@ async fn mark_pending_recovery(cp: &ControlPlane, commit_id: ArtifactCommitRecor
             &mut tx,
             commit_id,
             ArtifactCommitFailure {
-                failure_class: "commit_failure".to_owned(),
-                error_code: ErrorCode::CommitFailure.as_str().to_owned(),
+                failure_class: FailureClass::CommitFailure,
+                error_code: ErrorCode::CommitFailure,
                 message: "injected".to_owned(),
                 finished_at: OffsetDateTime::UNIX_EPOCH,
             },

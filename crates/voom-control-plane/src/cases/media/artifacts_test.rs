@@ -3,6 +3,7 @@ use super::*;
 use time::OffsetDateTime;
 use voom_events::EventKind;
 use voom_store::repo::audit::events::{EventFilter, EventRepo, Page};
+use voom_store::repo::media::artifacts::{ArtifactHandleAccessMode, ArtifactLocationKind};
 
 use crate::cases::{count, cp};
 
@@ -12,7 +13,7 @@ fn handle_input() -> NewArtifactHandle {
         checksum: Some("sha256:dead".to_owned()),
         privacy_class: "internal".to_owned(),
         durability_class: "ephemeral".to_owned(),
-        allowed_access_modes: vec!["read".to_owned()],
+        allowed_access_modes: vec![ArtifactHandleAccessMode::Read],
         mutability: "immutable".to_owned(),
         source_lineage: None,
         file_version_id: None,
@@ -49,7 +50,7 @@ async fn record_artifact_location_emits_artifact_location_recorded() {
     let loc = cp
         .record_artifact_location(NewArtifactLocation {
             artifact_handle_id: h.id,
-            kind: "local_path".to_owned(),
+            kind: ArtifactLocationKind::LocalPath,
             value: "/tmp/x".to_owned(),
             observed_at: OffsetDateTime::UNIX_EPOCH,
         })
@@ -66,7 +67,7 @@ async fn retire_artifact_location_emits_artifact_location_retired() {
     let loc = cp
         .record_artifact_location(NewArtifactLocation {
             artifact_handle_id: h.id,
-            kind: "local_path".to_owned(),
+            kind: ArtifactLocationKind::LocalPath,
             value: "/tmp/x".to_owned(),
             observed_at: OffsetDateTime::UNIX_EPOCH,
         })
@@ -92,7 +93,7 @@ async fn retire_artifact_location_payload_handle_matches_recorded_location() {
     let loc = cp
         .record_artifact_location(NewArtifactLocation {
             artifact_handle_id: handle_a.id,
-            kind: "local_path".to_owned(),
+            kind: ArtifactLocationKind::LocalPath,
             value: "/tmp/a".to_owned(),
             observed_at: OffsetDateTime::UNIX_EPOCH,
         })

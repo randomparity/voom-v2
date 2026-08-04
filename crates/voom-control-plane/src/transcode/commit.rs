@@ -8,7 +8,9 @@ use voom_core::{
 };
 use voom_events::payload::ArtifactStagedPayload;
 use voom_events::{Event, SubjectType};
-use voom_store::repo::media::artifacts::{NewArtifactHandle, NewArtifactLocation};
+use voom_store::repo::media::artifacts::{
+    ArtifactHandleAccessMode, ArtifactLocationKind, NewArtifactHandle, NewArtifactLocation,
+};
 use voom_store::repo::media::identity::MediaSnapshot;
 use voom_worker_protocol::{
     ExpectedFileFacts, ProbeFileRequest, ProbeFileResult, TranscodeVideoObservedFacts,
@@ -87,7 +89,7 @@ pub async fn record_staged_transcode(
                 checksum: Some(result.output.content_hash.clone()),
                 privacy_class: "internal".to_owned(),
                 durability_class: "staging".to_owned(),
-                allowed_access_modes: vec!["local_path".to_owned()],
+                allowed_access_modes: vec![ArtifactHandleAccessMode::LocalPath],
                 mutability: "immutable".to_owned(),
                 source_lineage: Some(json!({
                     "operation": "transcode_video",
@@ -105,7 +107,7 @@ pub async fn record_staged_transcode(
             &mut tx,
             NewArtifactLocation {
                 artifact_handle_id: handle.id,
-                kind: "staging".to_owned(),
+                kind: ArtifactLocationKind::Staging,
                 value: staging_path.display().to_string(),
                 observed_at: now,
             },

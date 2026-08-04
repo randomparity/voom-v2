@@ -6,8 +6,8 @@ use sqlx::{Row, SqlitePool};
 use time::OffsetDateTime;
 use voom_core::ids::{ArtifactCommitRecordId, ArtifactVerificationId};
 use voom_core::{
-    ArtifactHandleId, ArtifactLocationId, FileAssetId, FileLocationId, FileVersionId, JobId,
-    LeaseId, MediaSnapshotId, TicketId, VoomError, WorkerId,
+    ArtifactHandleId, ArtifactLocationId, ErrorCode, FailureClass, FileAssetId, FileLocationId,
+    FileVersionId, JobId, LeaseId, MediaSnapshotId, TicketId, VoomError, WorkerId,
 };
 
 use super::Repository;
@@ -16,13 +16,64 @@ use super::common::{
 };
 use crate::repo::execution::leases::LeaseState;
 
+/// Access capabilities persisted on an artifact handle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ArtifactHandleAccessMode {
+    LocalPath,
+    Read,
+    Write,
+}
+
+/// Storage location categories accepted by the artifact-location schema.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArtifactLocationKind {
+    LocalPath,
+    SharedMount,
+    ObjectStore,
+    Staging,
+    Backup,
+}
+
+impl ArtifactLocationKind {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::LocalPath => "local_path",
+            Self::SharedMount => "shared_mount",
+            Self::ObjectStore => "object_store",
+            Self::Staging => "staging",
+            Self::Backup => "backup",
+        }
+    }
+
+    fn parse_database(value: &str) -> Result<Self, VoomError> {
+        match value {
+            "local_path" => Ok(Self::LocalPath),
+            "shared_mount" => Ok(Self::SharedMount),
+            "object_store" => Ok(Self::ObjectStore),
+            "staging" => Ok(Self::Staging),
+            "backup" => Ok(Self::Backup),
+            other => Err(VoomError::database(format!(
+                "artifact_locations.kind {other:?} not in vocab"
+            ))),
+        }
+    }
+}
+
+impl std::fmt::Display for ArtifactLocationKind {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct NewArtifactHandle {
     pub size_bytes: Option<i64>,
     pub checksum: Option<String>,
     pub privacy_class: String,
     pub durability_class: String,
-    pub allowed_access_modes: Vec<String>,
+    pub allowed_access_modes: Vec<ArtifactHandleAccessMode>,
     pub mutability: String,
     pub source_lineage: Option<JsonValue>,
     pub file_version_id: Option<FileVersionId>,
@@ -35,6 +86,7 @@ pub struct ArtifactHandle {
     pub file_version_id: Option<FileVersionId>,
     pub privacy_class: String,
     pub durability_class: String,
+    pub allowed_access_modes: Vec<ArtifactHandleAccessMode>,
     pub mutability: String,
     pub created_at: OffsetDateTime,
 }
@@ -56,7 +108,7 @@ pub struct ArtifactExpectedFacts {
 #[derive(Debug, Clone)]
 pub struct NewArtifactLocation {
     pub artifact_handle_id: ArtifactHandleId,
-    pub kind: String,
+    pub kind: ArtifactLocationKind,
     pub value: String,
     pub observed_at: OffsetDateTime,
 }
@@ -65,7 +117,7 @@ pub struct NewArtifactLocation {
 pub struct ArtifactLocation {
     pub id: ArtifactLocationId,
     pub artifact_handle_id: ArtifactHandleId,
-    pub kind: String,
+    pub kind: ArtifactLocationKind,
     pub value: String,
     pub observed_at: OffsetDateTime,
     pub retired_at: Option<OffsetDateTime>,
@@ -74,7 +126,7 @@ pub struct ArtifactLocation {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LiveArtifactLocation {
     pub id: ArtifactLocationId,
-    pub kind: String,
+    pub kind: ArtifactLocationKind,
     pub value: String,
 }
 
@@ -149,8 +201,8 @@ pub struct NewArtifactVerification {
     pub expected_checksum: String,
     pub observed_size_bytes: Option<u64>,
     pub observed_checksum: Option<String>,
-    pub failure_class: Option<String>,
-    pub error_code: Option<String>,
+    pub failure_class: Option<FailureClass>,
+    pub error_code: Option<ErrorCode>,
     pub message: Option<String>,
     pub report: JsonValue,
     pub started_at: OffsetDateTime,
@@ -171,8 +223,8 @@ pub struct ArtifactVerification {
     pub expected_checksum: String,
     pub observed_size_bytes: Option<u64>,
     pub observed_checksum: Option<String>,
-    pub failure_class: Option<String>,
-    pub error_code: Option<String>,
+    pub failure_class: Option<FailureClass>,
+    pub error_code: Option<ErrorCode>,
     pub message: Option<String>,
     pub report: JsonValue,
     pub started_at: OffsetDateTime,
@@ -232,8 +284,8 @@ pub struct ArtifactCommitRecord {
     pub result_file_version_id: Option<FileVersionId>,
     pub result_file_location_id: Option<FileLocationId>,
     pub state: ArtifactCommitState,
-    pub failure_class: Option<String>,
-    pub error_code: Option<String>,
+    pub failure_class: Option<FailureClass>,
+    pub error_code: Option<ErrorCode>,
     pub message: Option<String>,
     pub recovery_reason: Option<String>,
     pub temp_path: Option<String>,
@@ -303,8 +355,8 @@ pub struct VerifiedTicketEvidence {
 
 #[derive(Debug, Clone)]
 pub struct ArtifactCommitFailure {
-    pub failure_class: String,
-    pub error_code: String,
+    pub failure_class: FailureClass,
+    pub error_code: ErrorCode,
     pub message: String,
     pub finished_at: OffsetDateTime,
 }
@@ -513,8 +565,10 @@ impl SqliteArtifactRepo {
         tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
         input: NewArtifactHandle,
     ) -> Result<ArtifactHandle, VoomError> {
-        let access = serde_json::to_string(&input.allowed_access_modes)
-            .map_err(|e| VoomError::Internal(format!("serialize allowed_access_modes: {e}")))?;
+        let access = serialize_json(
+            &input.allowed_access_modes,
+            "artifact_handles.allowed_access_modes",
+        )?;
         let lineage = match &input.source_lineage {
             None => None,
             Some(v) => Some(serialize_json(v, "source_lineage")?),
@@ -551,6 +605,7 @@ impl SqliteArtifactRepo {
             file_version_id: input.file_version_id,
             privacy_class: input.privacy_class,
             durability_class: input.durability_class,
+            allowed_access_modes: input.allowed_access_modes,
             mutability: input.mutability,
             created_at: input.created_at,
         })
@@ -586,7 +641,7 @@ impl SqliteArtifactRepo {
             input.artifact_handle_id.0,
             concat!(module_path!(), ": ", stringify!(input.artifact_handle_id.0)),
         )?)
-        .bind(&input.kind)
+        .bind(input.kind.as_str())
         .bind(&input.value)
         .bind(&ts)
         .execute(&mut **tx)
@@ -735,8 +790,8 @@ impl SqliteArtifactRepo {
         id: ArtifactHandleId,
     ) -> Result<Option<ArtifactHandle>, VoomError> {
         let row = sqlx::query(
-            "SELECT id, file_version_id, privacy_class, durability_class, mutability, created_at \
-             FROM artifact_handles WHERE id = ?",
+            "SELECT id, file_version_id, privacy_class, durability_class, allowed_access_modes, \
+                    mutability, created_at FROM artifact_handles WHERE id = ?",
         )
         .bind(i64_from_u64(
             id.0,
@@ -794,8 +849,8 @@ impl SqliteArtifactRepo {
         handle_id: ArtifactHandleId,
     ) -> Result<ArtifactHandleFacts, VoomError> {
         let row = sqlx::query(
-            "SELECT id, file_version_id, privacy_class, durability_class, mutability, \
-                    created_at, size_bytes, checksum \
+            "SELECT id, file_version_id, privacy_class, durability_class, allowed_access_modes, \
+                    mutability, created_at, size_bytes, checksum \
              FROM artifact_handles WHERE id = ?",
         )
         .bind(checked_sqlite_id(handle_id.0, "artifact handle id")?)
@@ -894,7 +949,7 @@ impl SqliteArtifactRepo {
         &self,
         tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
         handle_id: ArtifactHandleId,
-        kind: &str,
+        kind: ArtifactLocationKind,
     ) -> Result<Option<LiveArtifactLocation>, VoomError> {
         let rows: Vec<(i64, String, String)> = sqlx::query_as(
             "SELECT id, kind, value FROM artifact_locations \
@@ -902,17 +957,17 @@ impl SqliteArtifactRepo {
              ORDER BY id ASC",
         )
         .bind(checked_sqlite_id(handle_id.0, "artifact handle id")?)
-        .bind(kind)
+        .bind(kind.as_str())
         .fetch_all(&mut **tx)
         .await
         .map_err(|error| VoomError::database_context("artifact_locations live kind", error))?;
         match rows.as_slice() {
             [] => Ok(None),
-            [(id, kind, value)] => Ok(Some(LiveArtifactLocation {
+            [(id, stored_kind, value)] => Ok(Some(LiveArtifactLocation {
                 id: ArtifactLocationId(u64::try_from(*id).map_err(|error| {
                     VoomError::database_context("artifact_locations.id negative", error)
                 })?),
-                kind: kind.clone(),
+                kind: ArtifactLocationKind::parse_database(stored_kind)?,
                 value: value.clone(),
             })),
             _ => Err(VoomError::Conflict(format!(
@@ -928,7 +983,7 @@ impl SqliteArtifactRepo {
         tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
         handle_id: ArtifactHandleId,
         location_id: ArtifactLocationId,
-        kind: &str,
+        kind: ArtifactLocationKind,
         value: &str,
     ) -> Result<(), VoomError> {
         let selected: Option<(i64, String, String, Option<String>)> = sqlx::query_as(
@@ -947,6 +1002,7 @@ impl SqliteArtifactRepo {
         let owner_id = u64::try_from(owner_id).map_err(|error| {
             VoomError::database_context("artifact_locations.artifact_handle_id negative", error)
         })?;
+        let stored_kind = ArtifactLocationKind::parse_database(&stored_kind)?;
         if owner_id != handle_id.0 || stored_kind != kind || stored_value != value {
             return Err(VoomError::Conflict(format!(
                 "artifact_locations {location_id} no longer matches artifact_handle {handle_id}"
@@ -1051,7 +1107,7 @@ impl SqliteArtifactRepo {
                     checksum: Some(version.content_hash.clone()),
                     privacy_class: "internal".to_owned(),
                     durability_class: "active".to_owned(),
-                    allowed_access_modes: vec!["local_path".to_owned()],
+                    allowed_access_modes: vec![ArtifactHandleAccessMode::LocalPath],
                     mutability: "immutable".to_owned(),
                     source_lineage: Some(serde_json::json!({
                         "kind": "policy_verification",
@@ -1095,7 +1151,7 @@ impl SqliteArtifactRepo {
                         tx,
                         NewArtifactLocation {
                             artifact_handle_id: handle_id,
-                            kind: "local_path".to_owned(),
+                            kind: ArtifactLocationKind::LocalPath,
                             value: location.value.clone(),
                             observed_at: now,
                         },
@@ -1153,6 +1209,8 @@ impl SqliteArtifactRepo {
             .observed_size_bytes
             .map(|value| i64_from_u64(value, "artifact_verifications.observed_size_bytes"))
             .transpose()?;
+        let failure_class = input.failure_class.map(FailureClass::as_str);
+        let error_code = input.error_code.map(ErrorCode::as_str);
         let res = sqlx::query(
             "INSERT INTO artifact_verifications \
              (artifact_handle_id, artifact_location_id, path, worker_id, \
@@ -1172,8 +1230,8 @@ impl SqliteArtifactRepo {
         .bind(&input.expected_checksum)
         .bind(observed_size_bytes)
         .bind(&input.observed_checksum)
-        .bind(&input.failure_class)
-        .bind(&input.error_code)
+        .bind(failure_class)
+        .bind(error_code)
         .bind(&input.message)
         .bind(report)
         .bind(&started_at)
@@ -1410,13 +1468,14 @@ impl SqliteArtifactRepo {
         failure: ArtifactCommitFailure,
     ) -> Result<ArtifactCommitRecord, VoomError> {
         let finished_at = iso8601(failure.finished_at)?;
+        let failure_class = failure.failure_class.as_str();
         let res = sqlx::query(
             "UPDATE artifact_commit_records \
              SET state = 'failed', failure_class = ?, error_code = ?, message = ?, finished_at = ? \
              WHERE id = ? AND state = 'pending'",
         )
-        .bind(&failure.failure_class)
-        .bind(&failure.error_code)
+        .bind(failure_class)
+        .bind(failure.error_code.as_str())
         .bind(&failure.message)
         .bind(&finished_at)
         .bind(i64_from_u64(
@@ -1437,14 +1496,15 @@ impl SqliteArtifactRepo {
         recovery_reason: String,
     ) -> Result<ArtifactCommitRecord, VoomError> {
         let finished_at = iso8601(failure.finished_at)?;
+        let failure_class = failure.failure_class.as_str();
         let res = sqlx::query(
             "UPDATE artifact_commit_records \
              SET state = 'recovery_required', failure_class = ?, error_code = ?, message = ?, \
                  recovery_reason = ?, finished_at = ? \
              WHERE id = ? AND state IN ('pending', 'recovery_required')",
         )
-        .bind(&failure.failure_class)
-        .bind(&failure.error_code)
+        .bind(failure_class)
+        .bind(failure.error_code.as_str())
         .bind(&failure.message)
         .bind(&recovery_reason)
         .bind(&finished_at)
@@ -2423,7 +2483,7 @@ async fn policy_committed_handles(
 ) -> Result<Vec<ArtifactHandle>, VoomError> {
     let rows = sqlx::query(
         "SELECT h.id, h.file_version_id, h.privacy_class, h.durability_class, \
-                h.mutability, h.created_at \
+                h.allowed_access_modes, h.mutability, h.created_at \
          FROM artifact_commit_records c \
          JOIN artifact_handles h ON h.id = c.artifact_handle_id \
          WHERE c.state = 'committed' AND c.result_file_version_id = ? \
@@ -2444,7 +2504,8 @@ async fn policy_canonical_handle(
     version_id: FileVersionId,
 ) -> Result<Option<ArtifactHandle>, VoomError> {
     let rows = sqlx::query(
-        "SELECT id, file_version_id, privacy_class, durability_class, mutability, created_at \
+        "SELECT id, file_version_id, privacy_class, durability_class, allowed_access_modes, \
+                mutability, created_at \
          FROM artifact_handles \
          WHERE file_version_id = ? AND durability_class = 'active' \
            AND json_extract(source_lineage, '$.kind') = 'policy_verification' \
@@ -2749,6 +2810,16 @@ fn evidence_optional_timestamp(
     value.as_deref().map(parse_iso8601).transpose()
 }
 
+fn parse_failure_class(value: &str, field: &str) -> Result<FailureClass, VoomError> {
+    FailureClass::from_wire_str(value)
+        .ok_or_else(|| VoomError::database(format!("{field} {value:?} not in vocab")))
+}
+
+fn parse_error_code(value: &str, field: &str) -> Result<ErrorCode, VoomError> {
+    ErrorCode::from_wire_str(value)
+        .ok_or_else(|| VoomError::database(format!("{field} {value:?} not in vocab")))
+}
+
 fn row_to_handle(row: &sqlx::sqlite::SqliteRow) -> Result<ArtifactHandle, VoomError> {
     let id: i64 = row.try_get("id").map_err(|e| map_row_err("artifacts", e))?;
     let file_version_id: Option<i64> = row
@@ -2759,6 +2830,9 @@ fn row_to_handle(row: &sqlx::sqlite::SqliteRow) -> Result<ArtifactHandle, VoomEr
         .map_err(|e| map_row_err("artifacts", e))?;
     let durability_class: String = row
         .try_get("durability_class")
+        .map_err(|e| map_row_err("artifacts", e))?;
+    let allowed_access_modes: String = row
+        .try_get("allowed_access_modes")
         .map_err(|e| map_row_err("artifacts", e))?;
     let mutability: String = row
         .try_get("mutability")
@@ -2781,6 +2855,9 @@ fn row_to_handle(row: &sqlx::sqlite::SqliteRow) -> Result<ArtifactHandle, VoomEr
             .transpose()?,
         privacy_class,
         durability_class,
+        allowed_access_modes: serde_json::from_str(&allowed_access_modes).map_err(|error| {
+            VoomError::database_context("artifact_handles.allowed_access_modes", error)
+        })?,
         mutability,
         created_at: parse_iso8601(&created)?,
     })
@@ -2870,8 +2947,14 @@ fn row_to_verification(row: &sqlx::sqlite::SqliteRow) -> Result<ArtifactVerifica
             .map(|value| u64_from_i64(value, "artifact_verifications.observed_size_bytes"))
             .transpose()?,
         observed_checksum,
-        failure_class,
-        error_code,
+        failure_class: failure_class
+            .as_deref()
+            .map(|value| parse_failure_class(value, "artifact_verifications.failure_class"))
+            .transpose()?,
+        error_code: error_code
+            .as_deref()
+            .map(|value| parse_error_code(value, "artifact_verifications.error_code"))
+            .transpose()?,
         message,
         report: serde_json::from_str(&report)
             .map_err(|e| VoomError::database_context("artifact_verifications report", e))?,
@@ -2997,8 +3080,14 @@ fn row_to_commit_record(row: &sqlx::sqlite::SqliteRow) -> Result<ArtifactCommitR
             })
             .transpose()?,
         state: ArtifactCommitState::parse(&state)?,
-        failure_class,
-        error_code,
+        failure_class: failure_class
+            .as_deref()
+            .map(|value| parse_failure_class(value, "artifact_commit_records.failure_class"))
+            .transpose()?,
+        error_code: error_code
+            .as_deref()
+            .map(|value| parse_error_code(value, "artifact_commit_records.error_code"))
+            .transpose()?,
         message,
         recovery_reason,
         temp_path,
@@ -3038,7 +3127,7 @@ fn row_to_location(row: &sqlx::sqlite::SqliteRow) -> Result<ArtifactLocation, Vo
             handle_id,
             concat!(module_path!(), ": ", stringify!(handle_id)),
         )?),
-        kind,
+        kind: ArtifactLocationKind::parse_database(&kind)?,
         value,
         observed_at: parse_iso8601(&observed)?,
         retired_at: retired.map(|s| parse_iso8601(&s)).transpose()?,

@@ -1171,8 +1171,8 @@ async fn failed_policy_verification_persists_evidence_and_gates_downstream_phase
     assert_eq!(partial.artifact_verifications.len(), 1);
     assert_eq!(partial.artifact_verifications[0].status, "failed");
     assert_eq!(
-        partial.artifact_verifications[0].error_code.as_deref(),
-        Some("ARTIFACT_CHECKSUM_MISMATCH")
+        partial.artifact_verifications[0].error_code,
+        Some(voom_core::ErrorCode::ArtifactChecksumMismatch)
     );
     let stored = cp
         .read_compliance_run_report(voom_core::JobId(partial.summary.job_id))

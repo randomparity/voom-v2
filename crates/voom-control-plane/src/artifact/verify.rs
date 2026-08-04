@@ -13,8 +13,8 @@ use voom_events::payload::{
 };
 use voom_events::{Event, SubjectType};
 use voom_store::repo::media::artifacts::{
-    ArtifactExpectedFacts, ArtifactLocation, ArtifactVerification, ArtifactVerificationStatus,
-    NewArtifactVerification, PolicyArtifactTarget, SqliteArtifactRepo,
+    ArtifactExpectedFacts, ArtifactLocation, ArtifactLocationKind, ArtifactVerification,
+    ArtifactVerificationStatus, NewArtifactVerification, PolicyArtifactTarget, SqliteArtifactRepo,
 };
 use voom_worker_protocol::{
     VerifyArtifactExpectedFacts, VerifyArtifactRequest, VerifyArtifactResult,
@@ -215,7 +215,7 @@ pub(crate) struct VerifyArtifactPersistContext<'a> {
     pub artifact_location_id: ArtifactLocationId,
     pub worker_id: WorkerId,
     pub path: &'a str,
-    pub location_kind: &'a str,
+    pub location_kind: ArtifactLocationKind,
     pub require_only_live_kind: bool,
     pub workflow_ticket_id: Option<TicketId>,
     pub workflow_lease_id: Option<LeaseId>,
@@ -301,7 +301,7 @@ pub(crate) async fn verify_artifact_with_dispatcher(
         artifact_location_id: location.id,
         worker_id,
         path: &path,
-        location_kind: "staging",
+        location_kind: ArtifactLocationKind::Staging,
         require_only_live_kind: true,
         workflow_ticket_id: None,
         workflow_lease_id: None,
@@ -323,7 +323,7 @@ pub(crate) async fn verify_policy_artifact_with_dispatcher(
         .await?
     {
         require_matching_policy_verification(&existing, input)?;
-        return report_from_verification(existing);
+        return Ok(report_from_verification(existing));
     }
 
     let expected = load_expected_artifact_facts(cp, input.target.artifact_handle_id).await?;
@@ -358,7 +358,7 @@ pub(crate) async fn verify_policy_artifact_with_dispatcher(
         artifact_location_id: input.target.artifact_location_id,
         worker_id: input.worker_id,
         path: &input.target.path,
-        location_kind: "local_path",
+        location_kind: ArtifactLocationKind::LocalPath,
         require_only_live_kind: false,
         workflow_ticket_id: Some(input.ticket_id),
         workflow_lease_id: Some(input.lease_id),
@@ -401,10 +401,8 @@ fn require_matching_policy_verification(
     Ok(())
 }
 
-fn report_from_verification(
-    verification: ArtifactVerification,
-) -> Result<VerifyArtifactReport, VoomError> {
-    Ok(VerifyArtifactReport {
+fn report_from_verification(verification: ArtifactVerification) -> VerifyArtifactReport {
+    VerifyArtifactReport {
         artifact_handle_id: verification.artifact_handle_id,
         artifact_location_id: verification.artifact_location_id,
         verification_id: verification.id,
@@ -415,13 +413,9 @@ fn report_from_verification(
         expected_checksum: verification.expected_checksum,
         observed_size_bytes: verification.observed_size_bytes,
         observed_checksum: verification.observed_checksum,
-        error_code: verification
-            .error_code
-            .as_deref()
-            .map(parse_error_code)
-            .transpose()?,
+        error_code: verification.error_code,
         message: verification.message,
-    })
+    }
 }
 
 #[derive(Debug)]
@@ -444,7 +438,7 @@ async fn select_live_staging_location(
     let locations = cp.artifacts.list_locations_for_handle(handle_id).await?;
     let staging = locations
         .into_iter()
-        .filter(|location| location.kind == "staging")
+        .filter(|location| location.kind == ArtifactLocationKind::Staging)
         .collect::<Vec<_>>();
     let [location] = staging.as_slice() else {
         return Err(VoomError::Config(format!(
@@ -536,7 +530,7 @@ async fn persist_verification_outcome(
         }
         Err(err) => return Err(err),
     };
-    let input = new_verification_input(context, &expected, &outcome, now)?;
+    let input = new_verification_input(context, &expected, &outcome, now);
     let verification = cp
         .artifacts
         .record_verification_in_tx(&mut tx, input)
@@ -545,7 +539,7 @@ async fn persist_verification_outcome(
     append_terminal_event(cp, &mut tx, &verification, &outcome, now, context).await?;
     commit_tx(tx).await?;
 
-    report_from_verification(verification)
+    Ok(report_from_verification(verification))
 }
 
 async fn revalidate_selected_live_location(
@@ -554,7 +548,7 @@ async fn revalidate_selected_live_location(
     handle_id: ArtifactHandleId,
     location_id: ArtifactLocationId,
     path: &str,
-    expected_kind: &str,
+    expected_kind: ArtifactLocationKind,
     require_only_live_kind: bool,
 ) -> Result<(), VoomError> {
     artifacts
@@ -609,9 +603,9 @@ fn new_verification_input(
     expected: &ArtifactExpectedFacts,
     outcome: &VerifyOutcome,
     now: time::OffsetDateTime,
-) -> Result<NewArtifactVerification, VoomError> {
+) -> NewArtifactVerification {
     match outcome {
-        VerifyOutcome::Succeeded(result) => Ok(NewArtifactVerification {
+        VerifyOutcome::Succeeded(result) => NewArtifactVerification {
             artifact_handle_id: context.artifact_handle_id,
             artifact_location_id: context.artifact_location_id,
             path: context.path.to_owned(),
@@ -634,8 +628,8 @@ fn new_verification_input(
             }),
             started_at: now,
             finished_at: now,
-        }),
-        VerifyOutcome::Failed(err) => Ok(NewArtifactVerification {
+        },
+        VerifyOutcome::Failed(err) => NewArtifactVerification {
             artifact_handle_id: context.artifact_handle_id,
             artifact_location_id: context.artifact_location_id,
             path: context.path.to_owned(),
@@ -647,17 +641,17 @@ fn new_verification_input(
             expected_checksum: expected.checksum.clone(),
             observed_size_bytes: None,
             observed_checksum: None,
-            failure_class: Some(failure_class_wire(err.failure_class())?),
-            error_code: Some(err.error_code().as_str().to_owned()),
+            failure_class: Some(err.failure_class()),
+            error_code: Some(err.error_code()),
             message: Some(err.to_string()),
             report: json!({
                 "error_code": err.error_code().as_str(),
-                "failure_class": failure_class_wire(err.failure_class())?,
+                "failure_class": err.failure_class().as_str(),
                 "message": err.to_string(),
             }),
             started_at: now,
             finished_at: now,
-        }),
+        },
     }
 }
 
@@ -699,22 +693,6 @@ async fn append_terminal_event(
         payload,
     )
     .await
-}
-
-fn failure_class_wire(class: FailureClass) -> Result<String, VoomError> {
-    serde_json::to_value(class)
-        .map_err(|err| VoomError::Internal(format!("failure class encode: {err}")))?
-        .as_str()
-        .map(str::to_owned)
-        .ok_or_else(|| VoomError::Internal("failure class encoded as non-string".to_owned()))
-}
-
-fn parse_error_code(code: &str) -> Result<ErrorCode, VoomError> {
-    ErrorCode::from_wire_str(code).ok_or_else(|| {
-        VoomError::Internal(format!(
-            "unsupported persisted verification error code {code}"
-        ))
-    })
 }
 
 #[cfg(test)]

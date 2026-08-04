@@ -10,8 +10,8 @@ use voom_artifact::commit_pipeline::{
 };
 use voom_core::ids::{ArtifactCommitRecordId, ArtifactVerificationId, BundleId};
 use voom_core::{
-    ArtifactHandleId, ArtifactLocationId, FileLocationId, FileVersionId, MediaSnapshotId,
-    UseLeaseId, VoomError, WorkerId,
+    ArtifactHandleId, ArtifactLocationId, FailureClass, FileLocationId, FileVersionId,
+    MediaSnapshotId, UseLeaseId, VoomError, WorkerId,
 };
 use voom_events::payload::{
     ArtifactCommitCompletedPayload, ArtifactCommitRecoveryRequiredPayload,
@@ -20,8 +20,9 @@ use voom_events::payload::{
 use voom_events::{Event, SubjectType};
 use voom_plan::planner::audio::AudioBundleRole;
 use voom_store::repo::media::artifacts::{
-    ArtifactCommitFailure, ArtifactCommitRecord, ArtifactCommitState, NewArtifactCommitRecord,
-    NewArtifactHandle, NewArtifactLocation, NewSidecarArtifactCommit, SidecarArtifactCommit,
+    ArtifactCommitFailure, ArtifactCommitRecord, ArtifactCommitState, ArtifactHandleAccessMode,
+    ArtifactLocationKind, NewArtifactCommitRecord, NewArtifactHandle, NewArtifactLocation,
+    NewSidecarArtifactCommit, SidecarArtifactCommit,
 };
 use voom_store::repo::media::audio_extract_operations::{
     AudioExtractOperationRecord, AudioExtractRecoveryFailure, LegacyAudioExtractOwner,
@@ -1622,7 +1623,7 @@ async fn record_staged_audio_in_tx(
                 checksum: Some(input.checksum.to_owned()),
                 privacy_class: "internal".to_owned(),
                 durability_class: "staging".to_owned(),
-                allowed_access_modes: vec!["local_path".to_owned()],
+                allowed_access_modes: vec![ArtifactHandleAccessMode::LocalPath],
                 mutability: "immutable".to_owned(),
                 source_lineage: Some(input.lineage),
                 file_version_id: Some(input.source_file_version_id),
@@ -1636,7 +1637,7 @@ async fn record_staged_audio_in_tx(
             tx,
             NewArtifactLocation {
                 artifact_handle_id: handle.id,
-                kind: "staging".to_owned(),
+                kind: ArtifactLocationKind::Staging,
                 value: input.staging_path.display().to_string(),
                 observed_at: now,
             },
@@ -1939,8 +1940,8 @@ async fn mark_extract_recovery_members(
                 commit_record_id: member.commit_record_id,
                 artifact_handle_id: member.artifact_handle_id,
                 failure: ArtifactCommitFailure {
-                    failure_class: "commit_failure".to_owned(),
-                    error_code: error.error_code().as_str().to_owned(),
+                    failure_class: FailureClass::CommitFailure,
+                    error_code: error.error_code(),
                     message: error.to_string(),
                     finished_at: now,
                 },

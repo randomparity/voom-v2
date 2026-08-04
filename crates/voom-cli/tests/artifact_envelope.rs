@@ -438,7 +438,7 @@ async fn inject_recovery_required(
          (artifact_handle_id, source_file_version_id, verification_id, target_path, \
           result_file_version_id, result_file_location_id, state, failure_class, error_code, \
           message, recovery_reason, temp_path, report, started_at, promotion_started_at, finished_at) \
-         VALUES (?, ?, ?, ?, NULL, NULL, 'recovery_required', 'database_unavailable', \
+         VALUES (?, ?, ?, ?, NULL, NULL, 'recovery_required', 'commit_failure', \
           'DB_UNREACHABLE', 'injected recovery for CLI inspection', 'promotion_started', ?, \
           '{\"test\":true}', '2026-05-25T00:00:00Z', '2026-05-25T00:00:01Z', '2026-05-25T00:00:02Z')",
     )
