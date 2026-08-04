@@ -57,6 +57,28 @@ If you think a convention is harmful, surface it. Don't fork silently.
 "Tests pass" is wrong if any were skipped.
 Default to surfacing uncertainty, not hiding it.
 
+## Refactoring guardrails
+
+- Preserve domain newtypes across repository, orchestration, and event-construction
+  boundaries. Do not flatten distinct IDs or durable vocabulary to primitives in an
+  intermediate struct and reconstruct the types later; that removes compile-time swap
+  protection while leaving the final API looking typed.
+- Treat every value read from SQLite as untrusted persisted data. Perform checked numeric
+  conversions and structural validation before applying business classification such as
+  missing, conflict, or invalid configuration. Corrupt storage is a database error, not a
+  domain absence or configuration error.
+- Removing a serialized field removes the accepted input too. Put
+  `#[serde(deny_unknown_fields)]` on the concrete deserialized struct and add a regression
+  that rejects the former field; an output-shape assertion alone does not prove removal.
+- Architecture prose is a summary, not an authority. Check workspace manifests or
+  `cargo metadata` before changing dependency guidance, distinguish normal dependencies
+  from dev-only edges, and describe transitional ownership as transitional rather than
+  extending it by precedent.
+- When a refactor moves behavior across crate boundaries, compare the old and new failure
+  ordering as well as the happy-path result. Preserve transaction ownership, mutation/event
+  ordering, deterministic query ordering, and corruption diagnostics unless the governing
+  design explicitly changes them.
+
 ## Commands
 
 All routine actions go through `just` (see `justfile`):
@@ -79,32 +101,80 @@ Pre-commit hooks (installed by `just setup` via `prek install`) delegate to `jus
 
 ## Architecture
 
-### Crate layering (one-way dependencies)
+### Crate architecture and dependency map
 
-```
-voom-core ── shared domain types (VoomError, VersionInfo, Config, IDs, Clock)
-   ▲
-   ├─ voom-store ── SqlitePool, MIGRATOR, schema probe, repositories
-   ├─ voom-events ── durable event envelope and payload taxonomy
-   ├─ voom-policy ── policy DSL AST, validation, compilation, fixtures
-   │     ▲
-   │     └─ voom-plan ── compliance reports and execution-plan generation
-   ├─ voom-scheduler ── worker scoring and selection domain
-   └─ voom-worker-protocol ── worker HTTP/NDJSON contracts and typed payloads
-   ▲
-voom-control-plane ── app-services layer and workflow orchestration
-   ▲
-voom-api (axum router, no binary yet)   voom-cli (`voom` binary)
+The map below describes responsibilities and internal **normal** Cargo dependencies.
+`A → B` means `A` declares `B` under `[dependencies]`; it does not describe runtime
+data flow. A responsibility names the crate that owns a concern, not the only crate
+allowed to use its types. Manifests and `cargo metadata` are authoritative when this
+conceptual map and the build graph disagree.
+
+Production crate responsibilities:
+
+- `voom-core`: shared errors, IDs, configuration, clocks, and domain value types.
+- `voom-events`: durable event envelopes, subjects, assertions, and payload taxonomy.
+- `voom-policy`: policy DSL parsing, validation, compilation, fixtures, and profiles.
+- `voom-plan`: deterministic reports, execution plans, diagnostics, and plan hashing.
+- `voom-scheduler`: worker scoring, candidate selection, reasons, and decisions.
+- `voom-worker-protocol`: versioned worker contracts, payloads, progress, and transport.
+- `voom-store`: SQLite connections, migrations, schema probes, and repositories.
+- `voom-artifact`: pending-commit records, event glue, and commit-recovery data.
+- `voom-control-plane`: durable authority, commit authorization, and orchestration.
+- `voom-api`: axum router and application-state wiring; there is no server binary yet.
+- `voom-cli`: agent-facing commands, JSON envelopes, initialization, and presentation.
+- `voom-ffprobe-worker`: local media probing through ffprobe.
+- `voom-ffmpeg-worker`: local video and audio transforms through ffmpeg.
+- `voom-mkvtoolnix-worker`: local remux operations through mkvtoolnix.
+- `voom-verify-artifact-worker`: local artifact verification.
+- `voom-backup-worker`: local artifact backup and checksum verification.
+
+ADR 0050 defines target byte ownership: storage-owner node agents perform or supervise
+every byte read and mutation. The control plane retains durable authority, commit
+authorization, and orchestration. Its current filesystem-promotion path is transitional
+pending issues #416 through #425; do not extend it as control-plane-owned behavior.
+
+Internal normal edges that define the production layering and its exceptions:
+
+```text
+voom-events              → voom-core
+voom-policy              → voom-core
+voom-plan                → voom-core, voom-policy
+voom-scheduler           → voom-core
+voom-worker-protocol     → voom-core
+
+voom-store               → voom-core, voom-events, voom-policy
+voom-artifact            → voom-core, voom-events, voom-store
+voom-control-plane       → voom-artifact, voom-core, voom-events, voom-plan,
+                           voom-policy, voom-scheduler, voom-store,
+                           voom-worker-protocol
+
+voom-api                 → voom-control-plane, voom-core
+voom-cli                 → voom-control-plane, voom-core, voom-events,
+                           voom-plan, voom-policy, voom-store
+real media/backup workers → voom-core, voom-worker-protocol
 ```
 
-Worker binaries (`voom-ffprobe-worker`, `voom-ffmpeg-worker`,
-`voom-mkvtoolnix-worker`, `voom-verify-artifact-worker`) depend on
-`voom-worker-protocol` for their external contract. Test and fake-support crates
-live outside the production dependency path. `voom-artifact` holds
-artifact-domain helpers shared outside the control-plane shell
-(`commit_pipeline` — pending-commit record + event glue and
-recovery-required commit data); keep filesystem promotion, worker
-dispatch, and use-case assembly in `voom-control-plane`.
+The direct lower-crate edges from `voom-cli` are intentional. The CLI presents
+core IDs and errors, event and plan payloads, policy fixtures, and store inspection
+records; these presentation and local-initialization concerns do not all route
+through `voom-control-plane`.
+
+Support crates are workspace members but are not production layers:
+
+- `voom-conformance` owns the black-box protocol harness and echo worker. Its normal
+  edges are to `voom-core` and `voom-worker-protocol`.
+- `voom-test-support` owns shared integration-test fixtures. Its normal edges are to
+  `voom-control-plane`, `voom-core`, and `voom-store`.
+- `voom-fake-support` owns the fake-provider runtime. Its normal edges are to
+  `voom-core` and `voom-worker-protocol`.
+- `voom-fakes` owns fake, chaos, and benchmark worker binaries. Its normal edges are
+  to `voom-core`, `voom-fake-support`, and `voom-worker-protocol`.
+
+`[dev-dependencies]` are deliberately excluded from the production map. They can
+point against the normal layering for tests: notably, `voom-store` has dev-only
+edges to `voom-control-plane` and `voom-test-support` while `voom-control-plane`
+normally depends on `voom-store`. Cargo permits this test-only relationship; it
+is not a circular production dependency.
 
 ### Load-bearing invariants
 
@@ -147,7 +217,7 @@ Adding a new crate: add it to `[workspace] members`, set `version.workspace = tr
 
 - ADRs: `docs/adr/`
 - Sprint specs: `docs/specs/` and `docs/superpowers/specs/`
-- Migrations: `migrations/*.sql` (bundled into `voom-store::MIGRATOR`)
+- Migrations: `migrations/*.sql` (embedded privately by `voom-store`)
 - Insta snapshots: `crates/voom-cli/tests/snapshots/`
 - Clippy/lints config: `[workspace.lints]` in root `Cargo.toml` (pedantic on, panic/unwrap/expect denied)
 

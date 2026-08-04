@@ -261,33 +261,35 @@ async fn append_then_get_round_trips_every_m1_kind() {
         (
             EventKind::JobOpened,
             Event::JobOpened(JobOpenedPayload {
-                job_id: 1,
+                job_id: voom_core::JobId(1),
                 kind: "k".to_owned(),
                 priority: 0,
             }),
         ),
         (
             EventKind::JobSucceeded,
-            Event::JobSucceeded(JobSucceededPayload { job_id: 1 }),
+            Event::JobSucceeded(JobSucceededPayload {
+                job_id: voom_core::JobId(1),
+            }),
         ),
         (
             EventKind::JobFailed,
             Event::JobFailed(JobFailedPayload {
-                job_id: 1,
+                job_id: voom_core::JobId(1),
                 reason: "r".to_owned(),
             }),
         ),
         (
             EventKind::JobCancelled,
             Event::JobCancelled(JobCancelledPayload {
-                job_id: 1,
+                job_id: voom_core::JobId(1),
                 reason: "r".to_owned(),
             }),
         ),
         (
             EventKind::TicketCreated,
             Event::TicketCreated(TicketCreatedPayload {
-                ticket_id: 1,
+                ticket_id: voom_core::TicketId(1),
                 job_id: None,
                 kind: TicketOperation::new("k").unwrap(),
                 priority: 0,
@@ -296,28 +298,30 @@ async fn append_then_get_round_trips_every_m1_kind() {
         ),
         (
             EventKind::TicketReady,
-            Event::TicketReady(TicketReadyPayload { ticket_id: 1 }),
+            Event::TicketReady(TicketReadyPayload {
+                ticket_id: voom_core::TicketId(1),
+            }),
         ),
         (
             EventKind::TicketLeased,
             Event::TicketLeased(TicketLeasedPayload {
-                ticket_id: 1,
-                lease_id: 1,
-                worker_id: 1,
+                ticket_id: voom_core::TicketId(1),
+                lease_id: voom_core::LeaseId(1),
+                worker_id: voom_core::WorkerId(1),
                 attempt: 1,
             }),
         ),
         (
             EventKind::TicketSucceeded,
             Event::TicketSucceeded(TicketSucceededPayload {
-                ticket_id: 1,
-                lease_id: 1,
+                ticket_id: voom_core::TicketId(1),
+                lease_id: voom_core::LeaseId(1),
             }),
         ),
         (
             EventKind::TicketFailedRetriable,
             Event::TicketFailedRetriable(TicketFailedRetriablePayload {
-                ticket_id: 1,
+                ticket_id: voom_core::TicketId(1),
                 attempt: 1,
                 max_attempts: 3,
                 reason: "r".to_owned(),
@@ -328,7 +332,7 @@ async fn append_then_get_round_trips_every_m1_kind() {
         (
             EventKind::TicketFailedTerminal,
             Event::TicketFailedTerminal(TicketFailedTerminalPayload {
-                ticket_id: 1,
+                ticket_id: voom_core::TicketId(1),
                 attempt: 3,
                 max_attempts: 3,
                 reason: "r".to_owned(),
@@ -339,16 +343,16 @@ async fn append_then_get_round_trips_every_m1_kind() {
         (
             EventKind::TicketRequeuedAfterLeaseExpiry,
             Event::TicketRequeuedAfterLeaseExpiry(TicketRequeuedAfterLeaseExpiryPayload {
-                ticket_id: 1,
-                lease_id: 1,
+                ticket_id: voom_core::TicketId(1),
+                lease_id: voom_core::LeaseId(1),
             }),
         ),
         (
             EventKind::LeaseAcquired,
             Event::LeaseAcquired(LeaseAcquiredPayload {
-                lease_id: 1,
-                ticket_id: 1,
-                worker_id: 1,
+                lease_id: voom_core::LeaseId(1),
+                ticket_id: voom_core::TicketId(1),
+                worker_id: voom_core::WorkerId(1),
                 ttl_seconds: 60,
                 expires_at: OffsetDateTime::UNIX_EPOCH,
             }),
@@ -356,23 +360,23 @@ async fn append_then_get_round_trips_every_m1_kind() {
         (
             EventKind::LeaseReleased,
             Event::LeaseReleased(LeaseReleasedPayload {
-                lease_id: 1,
-                ticket_id: 1,
+                lease_id: voom_core::LeaseId(1),
+                ticket_id: voom_core::TicketId(1),
                 release_reason: "released".to_owned(),
             }),
         ),
         (
             EventKind::LeaseExpired,
             Event::LeaseExpired(LeaseExpiredPayload {
-                lease_id: 1,
-                ticket_id: 1,
+                lease_id: voom_core::LeaseId(1),
+                ticket_id: voom_core::TicketId(1),
             }),
         ),
         (
             EventKind::LeaseForceReleased,
             Event::LeaseForceReleased(LeaseForceReleasedPayload {
-                lease_id: 1,
-                ticket_id: 1,
+                lease_id: voom_core::LeaseId(1),
+                ticket_id: voom_core::TicketId(1),
                 actor: "a".to_owned(),
                 reason: "r".to_owned(),
                 also_requeue: false,
@@ -381,7 +385,7 @@ async fn append_then_get_round_trips_every_m1_kind() {
         (
             EventKind::WorkerRegistered,
             Event::WorkerRegistered(WorkerRegisteredPayload {
-                worker_id: 1,
+                worker_id: voom_core::WorkerId(1),
                 name: "w".to_owned(),
                 kind: WorkerKind::Synthetic,
             }),
@@ -389,7 +393,7 @@ async fn append_then_get_round_trips_every_m1_kind() {
         (
             EventKind::WorkerCapabilityRecorded,
             Event::WorkerCapabilityRecorded(WorkerCapabilityRecordedPayload {
-                worker_id: 1,
+                worker_id: voom_core::WorkerId(1),
                 capability_id: 1,
                 operation: TicketOperation::new("op").unwrap(),
             }),
@@ -397,18 +401,20 @@ async fn append_then_get_round_trips_every_m1_kind() {
         (
             EventKind::WorkerGrantRecorded,
             Event::WorkerGrantRecorded(WorkerGrantRecordedPayload {
-                worker_id: 1,
+                worker_id: voom_core::WorkerId(1),
                 grant_id: 1,
             }),
         ),
         (
             EventKind::WorkerRetired,
-            Event::WorkerRetired(WorkerRetiredPayload { worker_id: 1 }),
+            Event::WorkerRetired(WorkerRetiredPayload {
+                worker_id: voom_core::WorkerId(1),
+            }),
         ),
         (
             EventKind::ArtifactHandleCreated,
             Event::ArtifactHandleCreated(ArtifactHandleCreatedPayload {
-                artifact_handle_id: 1,
+                artifact_handle_id: voom_core::ArtifactHandleId(1),
                 privacy_class: "internal".to_owned(),
                 durability_class: "durable".to_owned(),
                 mutability: "immutable".to_owned(),
@@ -417,8 +423,8 @@ async fn append_then_get_round_trips_every_m1_kind() {
         (
             EventKind::ArtifactLocationRecorded,
             Event::ArtifactLocationRecorded(ArtifactLocationRecordedPayload {
-                artifact_location_id: 1,
-                artifact_handle_id: 1,
+                artifact_location_id: voom_core::ArtifactLocationId(1),
+                artifact_handle_id: voom_core::ArtifactHandleId(1),
                 kind: "local_path".to_owned(),
                 value: "/tmp/x".to_owned(),
             }),
@@ -426,16 +432,16 @@ async fn append_then_get_round_trips_every_m1_kind() {
         (
             EventKind::ArtifactLocationRetired,
             Event::ArtifactLocationRetired(ArtifactLocationRetiredPayload {
-                artifact_location_id: 1,
-                artifact_handle_id: 1,
+                artifact_location_id: voom_core::ArtifactLocationId(1),
+                artifact_handle_id: voom_core::ArtifactHandleId(1),
             }),
         ),
         (
             EventKind::ArtifactLineageRecorded,
             Event::ArtifactLineageRecorded(ArtifactLineageRecordedPayload {
                 artifact_lineage_id: 1,
-                parent_artifact_id: 1,
-                child_artifact_id: 2,
+                parent_artifact_id: voom_core::ArtifactHandleId(1),
+                child_artifact_id: voom_core::ArtifactHandleId(2),
                 operation: "transcode".to_owned(),
             }),
         ),
@@ -467,4 +473,67 @@ async fn append_then_get_round_trips_every_m1_kind() {
             "payload mismatch on round-trip for {kind:?}"
         );
     }
+}
+
+#[tokio::test]
+async fn latest_ticket_failure_returns_the_latest_typed_failure_event() {
+    use voom_core::{FailureClass, TicketId};
+    use voom_events::payload::{TicketFailedRetriablePayload, TicketFailedTerminalPayload};
+
+    let (pool, _tmp) = pool().await;
+    let repo = SqliteEventRepo::new(pool.clone());
+    let mut tx = pool.begin().await.unwrap();
+    repo.append_in_tx(
+        &mut tx,
+        EventEnvelope {
+            occurred_at: OffsetDateTime::UNIX_EPOCH,
+            subject_type: SubjectType::Ticket,
+            subject_id: Some(17),
+            trace_id: None,
+            payload: Event::TicketFailedRetriable(TicketFailedRetriablePayload {
+                ticket_id: voom_core::TicketId(17),
+                attempt: 1,
+                max_attempts: 3,
+                reason: "retry".to_owned(),
+                class: FailureClass::WorkerTimeout,
+                next_eligible_at: OffsetDateTime::UNIX_EPOCH,
+            }),
+        },
+    )
+    .await
+    .unwrap();
+    repo.append_in_tx(
+        &mut tx,
+        EventEnvelope {
+            occurred_at: OffsetDateTime::UNIX_EPOCH,
+            subject_type: SubjectType::Ticket,
+            subject_id: Some(17),
+            trace_id: None,
+            payload: Event::TicketFailedTerminal(TicketFailedTerminalPayload {
+                ticket_id: voom_core::TicketId(17),
+                attempt: 2,
+                max_attempts: 3,
+                reason: "terminal".to_owned(),
+                class: FailureClass::MalformedWorkerResult,
+                issue_id: None,
+            }),
+        },
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+
+    let latest = repo
+        .latest_ticket_failure(TicketId(17))
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert!(matches!(
+        latest.payload,
+        Event::TicketFailedTerminal(TicketFailedTerminalPayload {
+            class: FailureClass::MalformedWorkerResult,
+            ..
+        })
+    ));
 }

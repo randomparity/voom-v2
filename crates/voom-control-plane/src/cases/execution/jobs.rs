@@ -8,7 +8,7 @@ use voom_events::payload::{
     JobCancelledPayload, JobFailedPayload, JobOpenedPayload, JobSucceededPayload,
 };
 use voom_events::{Event, SubjectType};
-use voom_store::repo::jobs::{Job, NewJob};
+use voom_store::repo::execution::jobs::{Job, NewJob};
 
 use crate::ControlPlane;
 
@@ -32,7 +32,7 @@ impl ControlPlane {
             Some(job.id.0),
             input.created_at,
             Event::JobOpened(JobOpenedPayload {
-                job_id: job.id.0,
+                job_id: job.id,
                 kind: input.kind,
                 priority: input.priority,
             }),
@@ -65,7 +65,7 @@ impl ControlPlane {
             SubjectType::Job,
             Some(id.0),
             now,
-            Event::JobSucceeded(JobSucceededPayload { job_id: id.0 }),
+            Event::JobSucceeded(JobSucceededPayload { job_id: id }),
         )
         .await?;
         commit_tx(tx).await?;
@@ -75,13 +75,15 @@ impl ControlPlane {
     /// Mark a job failed and emit `job.failed` carrying `reason`.
     ///
     /// # Errors
-    /// Propagates `SqliteJobRepo::fail_in_tx` and event-append errors.
+    /// Returns [`VoomError::Config`] when `reason` is blank. Propagates
+    /// `SqliteJobRepo::fail_in_tx` and event-append errors.
     pub async fn fail_job(
         &self,
         id: JobId,
         reason: String,
         now: OffsetDateTime,
     ) -> Result<Job, VoomError> {
+        require_audit_field("reason", &reason)?;
         let mut tx = begin_tx(&self.pool).await?;
         let job = self.jobs.fail_in_tx(&mut tx, id, now).await?;
         append_event(
@@ -90,10 +92,7 @@ impl ControlPlane {
             SubjectType::Job,
             Some(id.0),
             now,
-            Event::JobFailed(JobFailedPayload {
-                job_id: id.0,
-                reason,
-            }),
+            Event::JobFailed(JobFailedPayload { job_id: id, reason }),
         )
         .await?;
         commit_tx(tx).await?;
@@ -119,10 +118,7 @@ impl ControlPlane {
             SubjectType::Job,
             Some(id.0),
             now,
-            Event::JobCancelled(JobCancelledPayload {
-                job_id: id.0,
-                reason,
-            }),
+            Event::JobCancelled(JobCancelledPayload { job_id: id, reason }),
         )
         .await?;
         commit_tx(tx).await?;

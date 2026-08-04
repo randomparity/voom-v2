@@ -63,7 +63,10 @@ impl SqliteAcceleratorClaimRepo {
         )
         .bind(&input.hardware_token)
         .bind(&input.backend)
-        .bind(i64_from_u64(input.worker_id.0))
+        .bind(i64_from_u64(
+            input.worker_id.0,
+            concat!(module_path!(), ": ", stringify!(input.worker_id.0)),
+        )?)
         .bind(&input.boot_id)
         .bind(i64::from(input.supervisor_pid))
         .bind(input.supervisor_start_identity.as_deref())
@@ -155,7 +158,10 @@ fn row_to_claim(row: &sqlx::sqlite::SqliteRow) -> Result<AcceleratorClaim, VoomE
         backend: row
             .try_get("backend")
             .map_err(|error| VoomError::database_context("accelerator_claims.backend", error))?,
-        worker_id: WorkerId(u64_from_i64(worker_id)),
+        worker_id: WorkerId(u64_from_i64(
+            worker_id,
+            concat!(module_path!(), ": ", stringify!(worker_id)),
+        )?),
         boot_id: row
             .try_get("boot_id")
             .map_err(|error| VoomError::database_context("accelerator_claims.boot_id", error))?,

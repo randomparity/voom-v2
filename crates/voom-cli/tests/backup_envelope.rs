@@ -9,7 +9,7 @@ use std::process::Command;
 use serde_json::Value;
 use time::OffsetDateTime;
 use voom_core::{FileVersionId, JobId, TicketId};
-use voom_store::repo::backups::{BackupFailureDetail, NewBackup, SqliteBackupRepo};
+use voom_store::repo::media::backups::{BackupFailureDetail, NewBackup, SqliteBackupRepo};
 use voom_test_support::TempDatabase;
 
 mod backup_envelope {

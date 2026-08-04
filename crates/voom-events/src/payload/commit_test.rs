@@ -230,7 +230,7 @@ fn commit_aborted_post_mutation_round_trip_unified_schema() {
         removed_bundle_count: 0,
         removed_version_count: 0,
         removed_location_count: 0,
-        fresh_lease_ids: vec![7, 9],
+        fresh_lease_ids: vec![voom_core::UseLeaseId(7), voom_core::UseLeaseId(9)],
         target_epoch_drift: Vec::new(),
         aborted_at: OffsetDateTime::UNIX_EPOCH,
     };
@@ -240,6 +240,10 @@ fn commit_aborted_post_mutation_round_trip_unified_schema() {
     // a closure-grew firing carries an empty `fresh_lease_ids`; a
     // fresh-lease firing carries empty `added_*`/`removed_*`.
     assert!(json["payload"]["fresh_lease_ids"].is_array());
+    assert_eq!(
+        json["payload"]["fresh_lease_ids"],
+        serde_json::json!([7, 9])
+    );
     assert!(json["payload"]["target_epoch_drift"].is_array());
     let back: Event = serde_json::from_value(json).unwrap();
     assert!(matches!(back, Event::CommitAbortedPostMutation(q) if q == p));
@@ -318,7 +322,7 @@ fn commit_recovery_required_round_trip_mirrors_post_mutation_fields() {
         removed_bundle_count: 0,
         removed_version_count: 0,
         removed_location_count: 0,
-        fresh_lease_ids: Vec::new(),
+        fresh_lease_ids: vec![voom_core::UseLeaseId(11), voom_core::UseLeaseId(13)],
         target_epoch_drift: vec![TargetEpochDriftWire {
             kind: "file_version".to_owned(),
             id: 7,
@@ -329,6 +333,10 @@ fn commit_recovery_required_round_trip_mirrors_post_mutation_fields() {
     };
     let json = serde_json::to_value(Event::CommitRecoveryRequired(p.clone())).unwrap();
     assert_eq!(json["kind"], "commit.recovery_required");
+    assert_eq!(
+        json["payload"]["fresh_lease_ids"],
+        serde_json::json!([11, 13])
+    );
     let back: Event = serde_json::from_value(json).unwrap();
     assert!(matches!(back, Event::CommitRecoveryRequired(q) if q == p));
     assert_eq!(
@@ -472,7 +480,7 @@ fn commit_aborted_post_mutation_payload_rejects_unknown_field() {
         removed_bundle_count: 0,
         removed_version_count: 0,
         removed_location_count: 0,
-        fresh_lease_ids: vec![7, 9],
+        fresh_lease_ids: vec![voom_core::UseLeaseId(7), voom_core::UseLeaseId(9)],
         target_epoch_drift: Vec::new(),
         aborted_at: OffsetDateTime::UNIX_EPOCH,
     });

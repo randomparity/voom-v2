@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use serde_json::Value as JsonValue;
 use sqlx::{Row, SqlitePool};
 use time::OffsetDateTime;
-use voom_core::VoomError;
+use voom_core::{TicketId, VoomError};
 use voom_events::{Event, EventEnvelope, EventId, EventKind, SubjectType, TraceId};
 
 use super::Repository;
@@ -65,6 +65,48 @@ impl SqliteEventRepo {
     pub fn new(pool: SqlitePool) -> Self {
         Self { pool }
     }
+
+    /// Return the latest typed terminal or retriable failure event for a ticket.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VoomError::Database`] if the event cannot be queried, or
+    /// [`VoomError::Internal`] if its durable payload cannot be decoded.
+    pub async fn latest_ticket_failure(
+        &self,
+        ticket_id: TicketId,
+    ) -> Result<Option<EventEnvelope>, VoomError> {
+        let row = sqlx::query(
+            "SELECT event_id, occurred_at, kind, subject_type, subject_id, trace_id, payload \
+             FROM events \
+             WHERE kind IN ('ticket.failed_terminal', 'ticket.failed_retriable') \
+               AND subject_type = 'ticket' \
+               AND subject_id = ? \
+             ORDER BY event_id DESC LIMIT 1",
+        )
+        .bind(i64_from_u64(
+            ticket_id.0,
+            concat!(module_path!(), ": ", stringify!(ticket_id.0)),
+        )?)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| VoomError::database_context("latest ticket failure event", e))?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let event_id = event_row_id(&row)?;
+        let payload: String = row.try_get("payload").map_err(|error| {
+            VoomError::Internal(format!(
+                "workflow failure event {event_id} payload: {error}"
+            ))
+        })?;
+        let event = row_to_event(&row).map_err(|error| {
+            VoomError::Internal(format!(
+                "workflow failure event {event_id}: {error}; payload: {payload}"
+            ))
+        })?;
+        Ok(event.map(|event| event.envelope))
+    }
 }
 
 impl Repository for SqliteEventRepo {}
@@ -89,13 +131,25 @@ impl EventRepo for SqliteEventRepo {
         .bind(occurred)
         .bind(env.payload.kind().as_str())
         .bind(env.subject_type.as_str())
-        .bind(env.subject_id.map(i64_from_u64))
+        .bind(
+            env.subject_id
+                .map(|value| {
+                    i64_from_u64(
+                        value,
+                        concat!(module_path!(), ": ", stringify!(env.subject_id)),
+                    )
+                })
+                .transpose()?,
+        )
         .bind(env.trace_id.as_ref().map(|t| t.0.clone()))
         .bind(payload_json)
         .execute(&mut **tx)
         .await
         .map_err(|e| VoomError::database_context("events append", e))?;
-        Ok(EventId(u64_from_i64(res.last_insert_rowid())))
+        Ok(EventId(u64_from_i64(
+            res.last_insert_rowid(),
+            concat!(module_path!(), ": ", stringify!(res.last_insert_rowid())),
+        )?))
     }
 
     async fn list(&self, filter: EventFilter, page: Page) -> Result<EventPage, VoomError> {
@@ -111,7 +165,10 @@ impl EventRepo for SqliteEventRepo {
             "SELECT event_id, occurred_at, kind, subject_type, subject_id, trace_id, payload \
              FROM events WHERE event_id = ?",
         )
-        .bind(i64_from_u64(event_id.0))
+        .bind(i64_from_u64(
+            event_id.0,
+            concat!(module_path!(), ": ", stringify!(event_id.0)),
+        )?)
         .fetch_optional(&self.pool)
         .await
         .map_err(|e| VoomError::database_context("events get", e))?;
@@ -130,70 +187,84 @@ async fn page_query(
     page: Page,
     tail: bool,
 ) -> Result<EventPage, VoomError> {
-    // Build dynamic SQL: WHERE filters + ordering + LIMIT + cursor.
-    let order = if tail { "DESC" } else { "ASC" };
+    let cursor = page.cursor;
+    let sql = build_page_sql(&filter, cursor.is_some(), tail)?;
+    let q = bind_page_query(sqlx::query(&sql), &filter, &page)?;
+    let rows = q
+        .fetch_all(pool)
+        .await
+        .map_err(|e| VoomError::database_context("events list", e))?;
+    decode_page_rows(&rows, cursor, tail)
+}
+
+fn build_page_sql(filter: &EventFilter, has_cursor: bool, tail: bool) -> Result<String, VoomError> {
     let mut sql = String::from(
         "SELECT event_id, occurred_at, kind, subject_type, subject_id, trace_id, payload \
          FROM events WHERE 1=1",
     );
-    if filter.kind.is_some() {
-        sql.push_str(" AND kind = ?");
+    let conditions = [
+        (filter.kind.is_some(), " AND kind = ?"),
+        (filter.subject_type.is_some(), " AND subject_type = ?"),
+        (filter.subject_id.is_some(), " AND subject_id = ?"),
+        (filter.since.is_some(), " AND occurred_at >= ?"),
+        (filter.until.is_some(), " AND occurred_at <= ?"),
+    ];
+    for (present, condition) in conditions {
+        if present {
+            sql.push_str(condition);
+        }
     }
-    if filter.subject_type.is_some() {
-        sql.push_str(" AND subject_type = ?");
-    }
-    if filter.subject_id.is_some() {
-        sql.push_str(" AND subject_id = ?");
-    }
-    if filter.since.is_some() {
-        sql.push_str(" AND occurred_at >= ?");
-    }
-    if filter.until.is_some() {
-        sql.push_str(" AND occurred_at <= ?");
-    }
-    if page.cursor.is_some() {
+    if has_cursor {
         sql.push_str(if tail {
             " AND event_id < ?"
         } else {
             " AND event_id > ?"
         });
     }
+    let order = if tail { "DESC" } else { "ASC" };
     write!(sql, " ORDER BY event_id {order} LIMIT ?")
         .map_err(|e| VoomError::Internal(format!("build list SQL: {e}")))?;
+    Ok(sql)
+}
 
-    let mut q = sqlx::query(&sql);
-    if let Some(k) = filter.kind {
-        q = q.bind(k.as_str());
+fn bind_page_query<'a>(
+    mut query: sqlx::query::Query<'a, sqlx::Sqlite, sqlx::sqlite::SqliteArguments<'a>>,
+    filter: &'a EventFilter,
+    page: &Page,
+) -> Result<sqlx::query::Query<'a, sqlx::Sqlite, sqlx::sqlite::SqliteArguments<'a>>, VoomError> {
+    if let Some(k) = &filter.kind {
+        query = query.bind(k.as_str());
     }
-    if let Some(s) = filter.subject_type {
-        q = q.bind(s.as_str());
+    if let Some(s) = &filter.subject_type {
+        query = query.bind(s.as_str());
     }
     if let Some(s) = filter.subject_id {
-        q = q.bind(i64_from_u64(s));
+        query = query.bind(i64_from_u64(s, "events.subject_id")?);
     }
     if let Some(since) = filter.since {
-        q = q.bind(iso8601(since)?);
+        query = query.bind(iso8601(since)?);
     }
     if let Some(until) = filter.until {
-        q = q.bind(iso8601(until)?);
+        query = query.bind(iso8601(until)?);
     }
     if let Some(c) = page.cursor {
-        q = q.bind(i64_from_u64(c));
+        query = query.bind(i64_from_u64(c, "events.event_id cursor")?);
     }
-    q = q.bind(i64::from(page.limit));
+    Ok(query.bind(i64::from(page.limit)))
+}
 
-    let rows = q
-        .fetch_all(pool)
-        .await
-        .map_err(|e| VoomError::database_context("events list", e))?;
-
+fn decode_page_rows(
+    rows: &[sqlx::sqlite::SqliteRow],
+    cursor: Option<u64>,
+    tail: bool,
+) -> Result<EventPage, VoomError> {
     // Rows with an unknown `kind` (written by a newer binary) are skipped so a
     // single unrecognized row does not poison the whole read. The cursor must
     // still advance past skipped rows — keyed off the last RAW row id, not the
     // last kept item — or `tail` would re-scan a trailing run of unknown rows.
     let mut items = Vec::with_capacity(rows.len());
     let mut last_raw_id: Option<u64> = None;
-    for row in &rows {
+    for row in rows {
         last_raw_id = Some(event_row_id(row)?);
         if let Some(event) = row_to_event(row)? {
             items.push(event);
@@ -204,7 +275,7 @@ async fn page_query(
     // pollers stop. `tail` (live polling) keeps the caller's cursor alive
     // across empty pages so a follower can resume when new events arrive.
     let next_cursor = if tail {
-        last_raw_id.or(page.cursor)
+        last_raw_id.or(cursor)
     } else {
         last_raw_id
     };
@@ -215,7 +286,7 @@ fn event_row_id(row: &sqlx::sqlite::SqliteRow) -> Result<u64, VoomError> {
     let id: i64 = row
         .try_get("event_id")
         .map_err(|e| VoomError::database_context("read event_id", e))?;
-    Ok(u64_from_i64(id))
+    u64_from_i64(id, "events.event_id")
 }
 
 /// Reconstruct an `EventRow`, or `Ok(None)` if the row's `kind` is not in this
@@ -268,7 +339,14 @@ fn row_to_event(row: &sqlx::sqlite::SqliteRow) -> Result<Option<EventRow>, VoomE
         envelope: EventEnvelope {
             occurred_at,
             subject_type,
-            subject_id: subject_id_i64.map(u64_from_i64),
+            subject_id: subject_id_i64
+                .map(|value| {
+                    u64_from_i64(
+                        value,
+                        concat!(module_path!(), ": ", stringify!(subject_id_i64)),
+                    )
+                })
+                .transpose()?,
             trace_id: trace_id.map(TraceId),
             payload: event,
         },

@@ -6,9 +6,9 @@ use voom_control_plane::workers::{
 };
 use voom_control_plane::{ControlPlane, HealthPlane};
 use voom_core::{NodeId, TicketId, TicketOperation, WorkerId};
-use voom_store::repo::nodes::NodeKind;
-use voom_store::repo::tickets::{NewTicket, SqliteTicketRepo, TicketState};
-use voom_store::repo::workers::WorkerKind;
+use voom_store::repo::execution::nodes::NodeKind;
+use voom_store::repo::execution::tickets::{NewTicket, SqliteTicketRepo, TicketState};
+use voom_store::repo::execution::workers::WorkerKind;
 use voom_store::test_support::sqlite_url_for;
 use voom_test_support::TempDatabase;
 

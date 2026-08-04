@@ -2,7 +2,7 @@ use std::io;
 
 use serde::Serialize;
 use voom_core::{BackupId, ErrorCode, format_iso8601};
-use voom_store::repo::backups::Backup;
+use voom_store::repo::media::backups::Backup;
 
 use crate::cli::BackupCommand;
 use crate::commands::common::{emit_voom_error, next_cursor, open_control_plane};

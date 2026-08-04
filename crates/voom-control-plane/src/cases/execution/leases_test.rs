@@ -1,15 +1,24 @@
 use super::*;
 
-use time::{Duration as TDuration, OffsetDateTime};
-use voom_core::{FailureClass, JobId, TicketId, TicketOperation, VoomError, WorkerId};
-use voom_events::EventKind;
-use voom_store::repo::accelerator_claims::{NewAcceleratorClaim, SqliteAcceleratorClaimRepo};
-use voom_store::repo::events::{EventFilter, EventRepo, Page};
-use voom_store::repo::jobs::{JobState, NewJob};
-use voom_store::repo::leases::{LeaseAcquireOutcome, LeaseFilter, LeaseState};
-use voom_store::repo::tickets::{NewTicket, Ticket, TicketState};
-use voom_store::repo::workers::{NewCapability, NewGrant, NewWorker, Worker, WorkerKind};
+use std::sync::{Arc, Mutex};
 
+use time::{Duration as TDuration, OffsetDateTime};
+use voom_core::clock_test_support::ManualClock;
+use voom_core::rng_test_support::FrozenRng;
+use voom_core::{
+    Clock, FailureClass, JobId, TicketId, TicketOperation, VoomError, WorkerId, WorkerKind,
+};
+use voom_events::{EventKind, SubjectType};
+use voom_store::repo::audit::events::{EventFilter, EventRepo, Page};
+use voom_store::repo::execution::accelerator_claims::{
+    NewAcceleratorClaim, SqliteAcceleratorClaimRepo,
+};
+use voom_store::repo::execution::jobs::{JobState, NewJob};
+use voom_store::repo::execution::leases::{LeaseAcquireOutcome, LeaseFilter, LeaseState};
+use voom_store::repo::execution::tickets::{NewTicket, Ticket, TicketState};
+use voom_store::repo::execution::workers::{NewCapability, NewGrant, Worker};
+
+use crate::cases::workers::RegisterWorkerInput;
 use crate::cases::{count, cp, issue_link_targets, terminal_failure_issues};
 
 const T0: OffsetDateTime = OffsetDateTime::UNIX_EPOCH;
@@ -32,12 +41,10 @@ fn ticket_for_job(kind: &str, max_attempts: u32, job_id: JobId) -> NewTicket {
     }
 }
 
-fn worker(name: &str) -> NewWorker {
-    NewWorker {
+fn worker(name: &str) -> RegisterWorkerInput {
+    RegisterWorkerInput {
         name: name.to_owned(),
         kind: WorkerKind::Synthetic,
-        registered_at: T0,
-        node_id: None,
     }
 }
 
@@ -169,11 +176,32 @@ async fn ready_transcode_tickets(cp: &crate::ControlPlane, count: usize) -> Vec<
     tickets
 }
 
+async fn cp_at_t0() -> (
+    crate::ControlPlane,
+    Arc<ManualClock>,
+    voom_test_support::TempDatabase,
+) {
+    let tmp = voom_test_support::TempDatabase::new().unwrap();
+    let url = format!("sqlite://{}", tmp.path().display());
+    voom_store::init(&url).await.unwrap();
+    let pool = voom_store::connect(&url).await.unwrap();
+    let clock = Arc::new(ManualClock::new(T0));
+    let cp = crate::ControlPlane::open_with_pool_and_rng(
+        pool,
+        clock.clone(),
+        Arc::new(Mutex::new(FrozenRng::new(u32::MAX))),
+    )
+    .await
+    .unwrap();
+    (cp, clock, tmp)
+}
+
 fn claim_for(
     worker_id: WorkerId,
     pci_address: &str,
     pid: u32,
     capacity: u32,
+    claimed_at: OffsetDateTime,
 ) -> NewAcceleratorClaim {
     NewAcceleratorClaim {
         hardware_token: format!("vaapi:pci-{pci_address}"),
@@ -184,7 +212,7 @@ fn claim_for(
         supervisor_start_identity: Some(format!("linux-proc-ticks:{}", u64::from(pid) * 10)),
         process_group_id: pid,
         capacity,
-        claimed_at: T0,
+        claimed_at,
     }
 }
 
@@ -298,20 +326,18 @@ async fn vaapi_capacity_never_crosses_devices() {
 /// lease — a lease is released by completion or by TTL expiry, so a worker that only
 /// looked dead cannot have work pulled out from under it.
 ///
-/// Domain time is the explicit timestamp each call takes as `now`; the pool runs on
-/// real time, so nothing here pairs a paused tokio clock with `SqlitePool`.
+/// Control-plane-owned timestamps use a `ManualClock` starting at `T0`, while lifecycle
+/// calls take explicit domain times. The pool runs on real time, so this does not pause tokio.
 #[tokio::test]
 async fn a_retired_vaapi_owner_releases_its_device_to_a_replacement() {
-    let (cp, _tmp) = cp().await;
+    let (cp, clock, _tmp) = cp_at_t0().await;
     let operation = TicketOperation::new("transcode_video").unwrap();
     let tickets = ready_transcode_tickets(&cp, 2).await;
     let claims = SqliteAcceleratorClaimRepo::new(cp.pool_for_test().clone());
     let dead = vaapi_worker(&cp, "vaapi-dead", &operation, "0000:f4:00.0", 1).await;
+    let dead_claim = claim_for(dead.id, "0000:f4:00.0", 4242, 1, dead.registered_at);
     let mut tx = cp.pool_for_test().begin().await.unwrap();
-    claims
-        .claim_in_tx(&mut tx, claim_for(dead.id, "0000:f4:00.0", 4242, 1))
-        .await
-        .unwrap();
+    claims.claim_in_tx(&mut tx, dead_claim).await.unwrap();
     tx.commit().await.unwrap();
     cp.acquire_lease(NewLease {
         ticket_id: tickets[0].id,
@@ -322,7 +348,14 @@ async fn a_retired_vaapi_owner_releases_its_device_to_a_replacement() {
     .await
     .unwrap();
 
-    cp.retire_worker(dead.id, dead.epoch, T0).await.unwrap();
+    clock.advance(TDuration::seconds(1));
+    let retired_at = clock.now();
+    let retired = cp
+        .retire_worker(dead.id, dead.epoch, retired_at)
+        .await
+        .unwrap();
+    assert!(dead.registered_at < retired_at);
+    assert_eq!(retired.retired_at, Some(retired_at));
 
     assert!(
         claims
@@ -333,12 +366,39 @@ async fn a_retired_vaapi_owner_releases_its_device_to_a_replacement() {
         "retiring the proven-dead owner must release its device claim"
     );
     let replacement = vaapi_worker(&cp, "vaapi-new", &operation, "0000:f4:00.0", 1).await;
+    assert!(retired_at <= replacement.registered_at);
+
+    let worker_events = cp
+        .events()
+        .list(
+            EventFilter {
+                subject_type: Some(SubjectType::Worker),
+                ..EventFilter::default()
+            },
+            Page {
+                limit: 20,
+                cursor: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(
+        worker_events
+            .items
+            .windows(2)
+            .all(|events| events[0].envelope.occurred_at <= events[1].envelope.occurred_at)
+    );
+
+    let replacement_claim_input = claim_for(replacement.id, "0000:f4:00.0", 5353, 1, clock.now());
     let mut tx = cp.pool_for_test().begin().await.unwrap();
     claims
-        .claim_in_tx(&mut tx, claim_for(replacement.id, "0000:f4:00.0", 5353, 1))
+        .claim_in_tx(&mut tx, replacement_claim_input)
         .await
         .unwrap();
     tx.commit().await.unwrap();
+    let replacement_claim = claims.get("vaapi:pci-0000:f4:00.0").await.unwrap().unwrap();
+    assert!(replacement_claim.claimed_at >= replacement.registered_at);
+    assert!(replacement_claim.claimed_at >= retired_at);
 
     let occupied = active_leases_for(&cp, &operation, replacement.id).await;
     assert_eq!(
@@ -414,7 +474,7 @@ async fn acquire_lease_emits_lease_acquired_and_ticket_leased() {
         panic!("expected TicketLeased payload");
     };
     assert_eq!(payload.attempt, 1, "first dispatch bumps attempt to 1");
-    assert_eq!(payload.lease_id, lease.id.0);
+    assert_eq!(payload.lease_id, lease.id);
 }
 
 #[tokio::test]
@@ -1152,7 +1212,7 @@ async fn force_release_with_requeue_rejects_when_attempts_exhausted() {
     let lease_after = cp.leases().get(lease.id).await.unwrap().unwrap();
     assert_eq!(
         lease_after.state,
-        voom_store::repo::leases::LeaseState::Held,
+        voom_store::repo::execution::leases::LeaseState::Held,
         "rejected force_release must leave the lease held"
     );
     let ticket_after = cp.tickets().get(t.id).await.unwrap().unwrap();
@@ -1261,7 +1321,7 @@ async fn release_lease_promotes_dependent_and_emits_ticket_ready() {
     let voom_events::Event::TicketReady(payload) = &page.items[0].envelope.payload else {
         panic!("expected TicketReady payload");
     };
-    assert_eq!(payload.ticket_id, child.id.0);
+    assert_eq!(payload.ticket_id, child.id);
 }
 
 #[tokio::test]
@@ -1406,7 +1466,10 @@ async fn force_release_lease_rejects_empty_actor() {
     // no audit event row must have been written.
     assert_eq!(count(&cp, EventKind::LeaseForceReleased).await, before);
     let still = cp.leases().get(lease.id).await.unwrap().unwrap();
-    assert_eq!(still.state, voom_store::repo::leases::LeaseState::Held);
+    assert_eq!(
+        still.state,
+        voom_store::repo::execution::leases::LeaseState::Held
+    );
 }
 
 #[tokio::test]
@@ -1438,7 +1501,10 @@ async fn force_release_lease_rejects_whitespace_reason() {
     assert!(matches!(err, VoomError::Config(_)), "got {err:?}");
     assert_eq!(count(&cp, EventKind::LeaseForceReleased).await, before);
     let still = cp.leases().get(lease.id).await.unwrap().unwrap();
-    assert_eq!(still.state, voom_store::repo::leases::LeaseState::Held);
+    assert_eq!(
+        still.state,
+        voom_store::repo::execution::leases::LeaseState::Held
+    );
 }
 
 // --- terminal_failure issue auto-open (Issue Model + Failure taxonomy) -------

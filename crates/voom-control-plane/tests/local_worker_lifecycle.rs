@@ -12,9 +12,10 @@
 use sqlx::Row;
 use std::time::Duration;
 use tokio::net::TcpStream;
-use voom_control_plane::{ControlPlane, LocalWorkerKind};
+use voom_control_plane::ControlPlane;
+use voom_control_plane::workers::LocalWorkerKind;
 use voom_core::ErrorCode;
-use voom_store::repo::workers::WorkerStatus;
+use voom_store::repo::execution::workers::WorkerStatus;
 use voom_test_support::TempDatabase;
 use voom_test_support::worker::cargo_build_package;
 

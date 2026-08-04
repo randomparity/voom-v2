@@ -17,8 +17,9 @@ use crate::repo::media::bundles::{
     BundleMemberRole, NewAssetBundle, NewBundleMember, SqliteBundleRepo,
 };
 use crate::repo::media::identity::{
-    FileLocationKind, MediaWorkKind, NewFileLocation, NewFileVersion, NewMediaVariant,
-    NewMediaWork, ProducedBy, SqliteIdentityRepo,
+    FileAssetRepo, FileLocationKind, FileVersionRepo, MediaVariantRepo, MediaWorkKind,
+    MediaWorkRepo, NewFileLocation, NewFileVersion, NewMediaVariant, NewMediaWork, ProducedBy,
+    SqliteIdentityRepo,
 };
 use crate::repo::media::use_leases::{
     BlockingMode, IssuerKind, NewUseLease, SqliteUseLeaseRepo, UseLeaseKind, UseLeaseReleaseReason,

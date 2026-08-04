@@ -1,3 +1,4 @@
+pub(super) mod artifact_access_mode;
 pub(super) mod execution_vocab;
 pub(super) mod failure;
 pub(super) mod ids;

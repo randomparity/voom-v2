@@ -317,7 +317,7 @@ fn closure_from_wire(w: AffectedScopeClosureWire) -> AffectedScopeClosure {
 // `commit_intents.target_row_epochs` is a JSON array of [kind, row_id,
 // epoch] triples. Phase B writes it atomically with `state='authorized'`;
 // Phase C re-reads it and uses each `epoch` as the `expected_epoch`
-// argument to the matching `IdentityRepo` destructive mutation. `kind`
+// argument to the matching `FileLocationRepo` destructive mutation. `kind`
 // round-trips through `TargetMemberKind`'s `Serialize/Deserialize` impl
 // (`#[serde(rename_all = "snake_case")]`).
 

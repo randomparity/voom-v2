@@ -5,11 +5,6 @@ use serde::Deserialize;
 use thiserror::Error;
 use voom_worker_protocol::OperationKind;
 
-// `transcribe_audio` is in the fixed vocabulary, but Sprint 2 has no typed
-// fake-provider contract for it yet. Keeping it out of coverage avoids
-// validating the old fake-transcoder `path` + `target_codec` shim as a feature.
-const OPERATIONS_WITHOUT_TYPED_FAKE: &[OperationKind] = &[OperationKind::TranscribeAudio];
-
 #[derive(Debug, Error)]
 pub enum ManifestError {
     #[error("manifest decode: {0}")]
@@ -164,9 +159,7 @@ pub fn validate_operation_coverage(manifest: &Manifest) -> Result<(), ManifestEr
     let missing = OperationKind::ALL
         .iter()
         .copied()
-        .filter(|operation| {
-            !covered.contains(operation) && !OPERATIONS_WITHOUT_TYPED_FAKE.contains(operation)
-        })
+        .filter(|operation| !covered.contains(operation))
         .collect::<Vec<_>>();
     if missing.is_empty() {
         Ok(())

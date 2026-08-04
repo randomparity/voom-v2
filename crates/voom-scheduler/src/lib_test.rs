@@ -1,5 +1,5 @@
 use super::*;
-use voom_core::{NodeId, TicketId, WorkerId};
+use voom_core::{ArtifactAccessMode, NodeId, TicketId, WorkerId};
 use voom_core::{OperationKind, TicketOperation};
 
 fn scored_candidate(
@@ -24,7 +24,7 @@ fn scored_candidate(
             denied: false,
             active_leases: 0,
             max_parallel: 2,
-            artifact_access: vec!["shared_mount".to_owned()],
+            artifact_access: vec![ArtifactAccessMode::SharedMount],
         },
         node: NodeCandidate {
             node_id: NodeId(node_id),
@@ -47,34 +47,30 @@ fn view(id: u64, supports: &[OperationKind]) -> WorkerView {
 
 #[test]
 fn single_eligible_worker_succeeds() {
-    let s = LeastLoadedWorkerSelector;
     let workers = [view(1, &[OperationKind::ProbeFile])];
-    let pick = s.select(OperationKind::ProbeFile, &workers).unwrap();
+    let pick = select_least_loaded_worker(OperationKind::ProbeFile, &workers).unwrap();
     assert_eq!(pick, WorkerId(1));
 }
 
 #[test]
 fn zero_eligible_rejects_no_eligible_worker() {
-    let s = LeastLoadedWorkerSelector;
     let workers = [view(1, &[OperationKind::HashFile])];
-    let err = s.select(OperationKind::ProbeFile, &workers).unwrap_err();
+    let err = select_least_loaded_worker(OperationKind::ProbeFile, &workers).unwrap_err();
     assert_eq!(err.error_code(), voom_core::ErrorCode::NoEligibleWorker);
 }
 
 #[test]
 fn equal_load_uses_lowest_worker_id_regardless_of_input_order() {
-    let s = LeastLoadedWorkerSelector;
     let workers = [
         view(2, &[OperationKind::ProbeFile]),
         view(1, &[OperationKind::ProbeFile]),
     ];
-    let pick = s.select(OperationKind::ProbeFile, &workers).unwrap();
+    let pick = select_least_loaded_worker(OperationKind::ProbeFile, &workers).unwrap();
     assert_eq!(pick, WorkerId(1));
 }
 
 #[test]
 fn lowest_capacity_utilization_wins() {
-    let s = LeastLoadedWorkerSelector;
     let workers = [
         WorkerView {
             worker_id: WorkerId(1),
@@ -89,20 +85,19 @@ fn lowest_capacity_utilization_wins() {
             max_parallel: 8,
         },
     ];
-    let pick = s.select(OperationKind::ProbeFile, &workers).unwrap();
+    let pick = select_least_loaded_worker(OperationKind::ProbeFile, &workers).unwrap();
     assert_eq!(pick, WorkerId(2));
 }
 
 #[test]
 fn at_capacity_filtered_out() {
-    let s = LeastLoadedWorkerSelector;
     let workers = [WorkerView {
         worker_id: WorkerId(1),
         supports: vec![OperationKind::ProbeFile],
         active_leases: 4,
         max_parallel: 4,
     }];
-    let err = s.select(OperationKind::ProbeFile, &workers).unwrap_err();
+    let err = select_least_loaded_worker(OperationKind::ProbeFile, &workers).unwrap_err();
     assert_eq!(err.error_code(), voom_core::ErrorCode::NoEligibleWorker);
 }
 
@@ -117,11 +112,88 @@ fn scorer_selects_eligible_candidate_with_explanation() {
     assert_eq!(out.selected.as_ref().unwrap().ticket_id, TicketId(7));
     assert_eq!(out.selected.as_ref().unwrap().worker_id, WorkerId(11));
     assert_eq!(out.selected.as_ref().unwrap().node_id, NodeId(13));
-    assert_eq!(out.selected.as_ref().unwrap().access_mode, "shared_mount");
+    assert_eq!(
+        out.selected.as_ref().unwrap().access_mode,
+        ArtifactAccessMode::SharedMount
+    );
     assert_eq!(out.explanation["scoring_version"], 1);
     assert_eq!(out.explanation["operation"], "probe_file");
     assert_eq!(out.explanation["candidates"][0]["eligible"], true);
     assert!(out.explanation["candidates"][0]["score"].as_i64().unwrap() > 0);
+}
+
+#[test]
+fn scorer_preserves_artifact_access_priority_and_scores() {
+    let scorer = SchedulerScorer::default();
+    let shared_mount = scored_candidate(1, 2, 3, "probe_file");
+    let mut control_plane = scored_candidate(4, 5, 6, "probe_file");
+    control_plane.worker.artifact_access = vec![ArtifactAccessMode::ControlPlanePlaceholder];
+    let mut staged_output = scored_candidate(7, 8, 9, "probe_file");
+    staged_output.worker.artifact_access = vec![ArtifactAccessMode::StagedOutputPlaceholder];
+
+    let out = scorer
+        .score(&[
+            staged_output.clone(),
+            control_plane.clone(),
+            shared_mount.clone(),
+        ])
+        .unwrap();
+
+    assert_eq!(
+        out.selected.unwrap().access_mode,
+        ArtifactAccessMode::SharedMount
+    );
+    assert_eq!(out.explanation["candidates"][0]["score"], 1665);
+    assert_eq!(
+        out.explanation["candidates"][0]["factors"]["artifact_access"],
+        25
+    );
+    assert_eq!(out.explanation["candidates"][1]["score"], 1690);
+    assert_eq!(
+        out.explanation["candidates"][1]["factors"]["artifact_access"],
+        50
+    );
+    assert_eq!(out.explanation["candidates"][2]["score"], 1740);
+    assert_eq!(
+        out.explanation["candidates"][2]["factors"]["artifact_access"],
+        100
+    );
+}
+
+#[test]
+fn scorer_prefers_the_best_mode_within_one_advertisement() {
+    let cases = [
+        (
+            vec![
+                ArtifactAccessMode::StagedOutputPlaceholder,
+                ArtifactAccessMode::ControlPlanePlaceholder,
+                ArtifactAccessMode::SharedMount,
+            ],
+            ArtifactAccessMode::SharedMount,
+            "shared_mount",
+        ),
+        (
+            vec![
+                ArtifactAccessMode::StagedOutputPlaceholder,
+                ArtifactAccessMode::ControlPlanePlaceholder,
+            ],
+            ArtifactAccessMode::ControlPlanePlaceholder,
+            "control_plane_placeholder",
+        ),
+    ];
+
+    for (modes, expected, expected_token) in cases {
+        let mut candidate = scored_candidate(1, 2, 3, "probe_file");
+        candidate.worker.artifact_access = modes;
+
+        let out = SchedulerScorer::default().score(&[candidate]).unwrap();
+
+        assert_eq!(out.selected.unwrap().access_mode, expected);
+        assert_eq!(
+            out.explanation["candidates"][0]["selected_access_mode"],
+            expected_token
+        );
+    }
 }
 
 #[test]

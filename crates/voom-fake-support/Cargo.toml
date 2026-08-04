@@ -18,5 +18,8 @@ thiserror.workspace = true
 time.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "io-std", "io-util", "net", "sync", "time"] }
 
+[dev-dependencies]
+tempfile.workspace = true
+
 [lints]
 workspace = true

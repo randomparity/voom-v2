@@ -16,12 +16,15 @@ use tempfile::TempDir;
 use time::{Duration, OffsetDateTime};
 use voom_test_support::TempDatabase;
 
+use voom_control_plane::ControlPlane;
+use voom_control_plane::artifact::{StageCopyInput, VerifyArtifactInput};
 use voom_control_plane::scan::ScanPathInput;
-use voom_control_plane::{ControlPlane, StageCopyInput, VerifyArtifactInput};
 use voom_core::ErrorCode;
 use voom_core::ids::ArtifactVerificationId;
-use voom_store::repo::artifacts::ArtifactCommitState;
-use voom_store::repo::{BlockingMode, IssuerKind, LeaseScope, NewUseLease, UseLeaseKind};
+use voom_store::repo::media::artifacts::ArtifactCommitState;
+use voom_store::repo::media::use_leases::{
+    BlockingMode, IssuerKind, LeaseScope, NewUseLease, UseLeaseKind,
+};
 use voom_test_support::worker::{
     FfprobeSiblingGuard, cargo_bin_or_build, install_fake_ffprobe_sibling, target_debug_binary,
     workspace_root,
@@ -142,7 +145,7 @@ async fn inject_recovery_required(url: &str, staged: &StagedFixture, target_path
          (artifact_handle_id, source_file_version_id, verification_id, target_path, \
           result_file_version_id, result_file_location_id, state, failure_class, error_code, \
           message, recovery_reason, temp_path, report, started_at, promotion_started_at, finished_at) \
-         VALUES (?, ?, ?, ?, NULL, NULL, 'recovery_required', 'database_unavailable', \
+         VALUES (?, ?, ?, ?, NULL, NULL, 'recovery_required', 'commit_failure', \
           'DB_UNREACHABLE', 'injected recovery for gate re-drive', 'finalize_failed', ?, \
           '{\"test\":true}', '2026-05-25T00:00:00Z', '2026-05-25T00:00:01Z', '2026-05-25T00:00:02Z')",
     )

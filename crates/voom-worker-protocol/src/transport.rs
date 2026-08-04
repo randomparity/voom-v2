@@ -48,9 +48,13 @@ pub trait ClientHandle: Send + Sync + std::fmt::Debug {
         credentials: &WorkerCredentials,
     ) -> Result<WorkerIdentityResponse, ProtocolError>;
 
-    /// Dispatch one operation. `idempotency_key` must be a fresh ULID
-    /// per dispatch; the same key on a retry must reach the worker as
-    /// the same key so the worker's replay LRU can deduplicate.
+    /// Dispatch one operation.
+    ///
+    /// `idempotency_key` is an opaque, non-empty identifier for one logical dispatch attempt.
+    /// A transport retry must reuse the same key and identical serialized request bytes. If the
+    /// completed response remains cached by the same worker instance, the worker replays it. A
+    /// duplicate received while the original is in flight is rejected. A new logical attempt
+    /// must use a distinct key. The transport does not prescribe ULID or concrete syntax.
     async fn dispatch(
         &self,
         creds: &WorkerCredentials,

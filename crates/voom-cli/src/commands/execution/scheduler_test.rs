@@ -1,7 +1,7 @@
 use serde_json::json;
 use time::OffsetDateTime;
 use voom_core::{NodeId, TicketId, WorkerId};
-use voom_store::repo::scheduler_decisions::{
+use voom_store::repo::execution::scheduler_decisions::{
     NewSchedulerDecision, SchedulerDecisionKind, SchedulerDecisionOutcome, SchedulerReasonCode,
     SchedulerRequestSource,
 };
@@ -15,7 +15,8 @@ async fn decision_data_maps_full_record() {
     voom_store::init(&url).await.unwrap();
     let pool = voom_store::connect(&url).await.unwrap();
     seed_refs(&pool).await;
-    let repo = voom_store::repo::scheduler_decisions::SqliteSchedulerDecisionRepo::new(pool);
+    let repo =
+        voom_store::repo::execution::scheduler_decisions::SqliteSchedulerDecisionRepo::new(pool);
     let created = repo
         .create(NewSchedulerDecision {
             decision_kind: SchedulerDecisionKind::LeaseAcquire,

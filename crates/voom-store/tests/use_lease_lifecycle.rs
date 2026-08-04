@@ -15,9 +15,11 @@ use voom_control_plane::ControlPlane;
 use voom_core::{FileLocationId, FileVersionId};
 use voom_events::{EventKind, SubjectType};
 use voom_store::init;
-use voom_store::repo::events::{EventFilter, EventRepo, Page};
-use voom_store::repo::identity::{DiscoveredFile, FileLocationKind, IdentityRepo, IngestOutcome};
-use voom_store::repo::use_leases::{
+use voom_store::repo::audit::events::{EventFilter, EventRepo, Page};
+use voom_store::repo::media::identity::{
+    DiscoveredFile, FileAssetRepo, FileLocationKind, IngestOutcome,
+};
+use voom_store::repo::media::use_leases::{
     BlockingMode, IssuerKind, LeaseScope, NewUseLease, USE_LEASE_BATCH_LIMIT, UseLeaseKind,
     UseLeaseReleaseReason,
 };
@@ -66,7 +68,7 @@ async fn events_for(
     subject_type: SubjectType,
     subject_id: u64,
     limit: u32,
-) -> Vec<voom_store::repo::events::EventRow> {
+) -> Vec<voom_store::repo::audit::events::EventRow> {
     cp.events()
         .list(
             EventFilter {
@@ -225,7 +227,7 @@ async fn force_release_then_recovery_audit_event_carries_actor_and_reason() {
         voom_events::Event::UseLeaseForceReleased(p) => {
             assert_eq!(p.actor, "operator-jane");
             assert_eq!(p.reason, "clearing for destructive commit");
-            assert_eq!(p.lease_id, lease.id.0);
+            assert_eq!(p.lease_id, lease.id);
         }
         other => panic!("expected UseLeaseForceReleased, got {other:?}"),
     }
@@ -265,9 +267,9 @@ async fn reanchor_on_move_emits_one_event_per_lease() {
 
     match &reanchored_row.envelope.payload {
         voom_events::Event::UseLeaseReanchoredByMove(p) => {
-            assert_eq!(p.retired_location_id, loc_old.0);
-            assert_eq!(p.new_location_id, loc_new.0);
-            assert_eq!(p.lease_id, lease.id.0);
+            assert_eq!(p.retired_location_id, loc_old);
+            assert_eq!(p.new_location_id, loc_new);
+            assert_eq!(p.lease_id, lease.id);
         }
         other => panic!("expected UseLeaseReanchoredByMove, got {other:?}"),
     }

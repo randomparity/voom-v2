@@ -9,7 +9,7 @@ use voom_events::payload::{
     ArtifactLocationRetiredPayload,
 };
 use voom_events::{Event, SubjectType};
-use voom_store::repo::artifacts::{
+use voom_store::repo::media::artifacts::{
     ArtifactHandle, ArtifactLineage, ArtifactLocation, NewArtifactHandle, NewArtifactLineage,
     NewArtifactLocation,
 };
@@ -37,7 +37,7 @@ impl ControlPlane {
             Some(handle.id.0),
             occurred,
             Event::ArtifactHandleCreated(ArtifactHandleCreatedPayload {
-                artifact_handle_id: handle.id.0,
+                artifact_handle_id: handle.id,
                 privacy_class: handle.privacy_class.clone(),
                 durability_class: handle.durability_class.clone(),
                 mutability: handle.mutability.clone(),
@@ -66,9 +66,9 @@ impl ControlPlane {
             Some(location.id.0),
             occurred,
             Event::ArtifactLocationRecorded(ArtifactLocationRecordedPayload {
-                artifact_location_id: location.id.0,
-                artifact_handle_id: location.artifact_handle_id.0,
-                kind: location.kind.clone(),
+                artifact_location_id: location.id,
+                artifact_handle_id: location.artifact_handle_id,
+                kind: location.kind.to_string(),
                 value: location.value.clone(),
             }),
         )
@@ -101,8 +101,8 @@ impl ControlPlane {
             Some(id.0),
             now,
             Event::ArtifactLocationRetired(ArtifactLocationRetiredPayload {
-                artifact_location_id: id.0,
-                artifact_handle_id: handle_id.0,
+                artifact_location_id: id,
+                artifact_handle_id: handle_id,
             }),
         )
         .await?;
@@ -132,8 +132,8 @@ impl ControlPlane {
             occurred,
             Event::ArtifactLineageRecorded(ArtifactLineageRecordedPayload {
                 artifact_lineage_id: lineage.id,
-                parent_artifact_id: parent,
-                child_artifact_id: child,
+                parent_artifact_id: voom_core::ArtifactHandleId(parent),
+                child_artifact_id: voom_core::ArtifactHandleId(child),
                 operation: op,
             }),
         )

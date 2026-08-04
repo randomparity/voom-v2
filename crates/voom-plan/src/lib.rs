@@ -5,9 +5,13 @@
         reason = "planner tests assert deterministic JSON fixtures directly"
     )
 )]
-//! Pure Sprint 5 execution-plan projection.
+//! Deterministic execution-plan and compliance-report projection.
+//!
+//! This crate turns compiled policies plus observed media facts into deterministic
+//! execution plans, phase plans, eligibility diagnostics, and compliance reports.
+//! It performs no persistence, worker dispatch, or workflow coordination; callers
+//! can reproduce every result from the same policy, input, and planning context.
 
-pub mod audio;
 pub mod compliance;
 pub mod diagnostic;
 pub mod eligibility;
@@ -15,14 +19,12 @@ pub mod fixtures;
 pub mod hash;
 pub mod model;
 pub mod planner;
-pub mod remux;
-pub mod transcode_video_profile;
 
 pub use compliance::model::{
     CheckStatus, ComplianceCheck, ComplianceDiagnostic, ComplianceDiagnosticCode,
-    ComplianceDiagnosticSeverity, ComplianceInputIdentity, CompliancePolicyIdentity,
-    ComplianceProvenance, ComplianceReport, ComplianceSummary, ExecutionEligibility,
-    IssueActionHint, ReportStatus,
+    ComplianceDiagnosticSeverity, ComplianceInputIdentity, ComplianceKind,
+    CompliancePolicyIdentity, ComplianceProvenance, ComplianceReport, ComplianceSummary,
+    ExecutionEligibility, IssueActionHint, ReportStatus,
 };
 pub use compliance::report::{ComplianceReportError, generate_compliance_report};
 pub use compliance::{
@@ -38,5 +40,4 @@ pub use model::{
     PlanningContext, PlanningRequest, PolicyIdentity, ResourceEstimates, SafetyHints,
     SchedulingHints, TargetRef,
 };
-pub use planner::{PlanGenerationError, generate_plan, plan_phase, video_stream_field};
-pub use transcode_video_profile::{cpu_cost, inline_profile_id};
+pub use planner::{PlanGenerationError, generate_plan, plan_phase};

@@ -1,5 +1,8 @@
 # VOOM Sprint 5 Plan DAG Dry-Run Implementation Plan
 
+> **Historical notice:** This is a completed historical implementation plan. Do not re-execute it
+> against current code. `PlanningContext` has no generic feature flag bag.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Build the Sprint 5 pure execution-plan projection and plan-only CLI inspection commands described in `docs/superpowers/specs/2026-05-23-voom-sprint-5-design.md`.

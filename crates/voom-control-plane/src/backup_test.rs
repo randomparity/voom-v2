@@ -184,7 +184,7 @@ async fn success_writes_a_verified_backup_record() {
     assert_eq!(rows.len(), 1);
     assert_eq!(
         rows[0].status,
-        voom_store::repo::backups::BackupStatus::Verified
+        voom_store::repo::media::backups::BackupStatus::Verified
     );
     assert_eq!(rows[0].size_bytes, Some(4096));
     assert_eq!(rows[0].checksum.as_deref(), Some("blake3:abcdef"));
@@ -220,7 +220,7 @@ async fn dispatcher_failure_aborts_with_backup_failure_and_failed_record() {
     assert_eq!(rows.len(), 1);
     assert_eq!(
         rows[0].status,
-        voom_store::repo::backups::BackupStatus::Failed
+        voom_store::repo::media::backups::BackupStatus::Failed
     );
     assert_eq!(rows[0].error_code.as_deref(), Some("BACKUP_FAILURE"));
 }

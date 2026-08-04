@@ -3,8 +3,8 @@ use super::*;
 use time::OffsetDateTime;
 use voom_core::{JobId, VoomError};
 use voom_events::EventKind;
-use voom_store::repo::events::{EventFilter, EventRepo, Page};
-use voom_store::repo::jobs::JobState;
+use voom_store::repo::audit::events::{EventFilter, EventRepo, Page};
+use voom_store::repo::execution::jobs::JobState;
 
 use crate::cases::{count, cp};
 
@@ -75,6 +75,7 @@ async fn succeed_job_emits_job_succeeded() {
 #[tokio::test]
 async fn fail_job_emits_job_failed_with_reason_in_payload() {
     let (cp, _tmp) = cp().await;
+    let reason = "  downstream\nbroken — 再試行  ";
     let job = cp
         .open_job(NewJob {
             kind: "ingest".to_owned(),
@@ -85,7 +86,7 @@ async fn fail_job_emits_job_failed_with_reason_in_payload() {
         .unwrap();
     cp.fail_job(
         job.id,
-        "downstream broken".to_owned(),
+        reason.to_owned(),
         OffsetDateTime::UNIX_EPOCH + time::Duration::seconds(1),
     )
     .await
@@ -108,7 +109,60 @@ async fn fail_job_emits_job_failed_with_reason_in_payload() {
     let voom_events::Event::JobFailed(payload) = &page.items[0].envelope.payload else {
         panic!("expected JobFailed payload");
     };
-    assert_eq!(payload.reason, "downstream broken");
+    assert_eq!(payload.reason.as_bytes(), reason.as_bytes());
+}
+
+#[tokio::test]
+async fn fail_job_rejects_blank_reasons_without_durable_changes() {
+    let (cp, _tmp) = cp().await;
+
+    for reason in ["", " \t\n "] {
+        let job = cp
+            .open_job(NewJob {
+                kind: "ingest".to_owned(),
+                priority: 0,
+                created_at: OffsetDateTime::UNIX_EPOCH,
+            })
+            .await
+            .unwrap();
+        let before_events = count(&cp, EventKind::JobFailed).await;
+
+        let err = cp
+            .fail_job(
+                job.id,
+                reason.to_owned(),
+                OffsetDateTime::UNIX_EPOCH + time::Duration::seconds(1),
+            )
+            .await
+            .unwrap_err();
+
+        assert_eq!(err.code(), "CONFIG_INVALID");
+        let VoomError::Config(message) = err else {
+            panic!("expected configuration error");
+        };
+        assert_eq!(message, "reason must not be empty or whitespace");
+        let stored = cp.get_job(job.id.0).await.unwrap().unwrap();
+        assert_eq!(stored.state, JobState::Open);
+        assert_eq!(stored.epoch, 0);
+        assert_eq!(count(&cp, EventKind::JobFailed).await, before_events);
+    }
+}
+
+#[tokio::test]
+async fn fail_job_validates_blank_reason_before_database_access() {
+    let (cp, _tmp) = cp().await;
+    cp.pool.close().await;
+
+    let err = cp
+        .fail_job(JobId(1), "  \n".to_owned(), OffsetDateTime::UNIX_EPOCH)
+        .await
+        .unwrap_err();
+
+    assert_eq!(err.code(), "CONFIG_INVALID");
+    let VoomError::Config(message) = err else {
+        panic!("expected configuration error");
+    };
+    assert_eq!(message, "reason must not be empty or whitespace");
 }
 
 #[tokio::test]
@@ -151,7 +205,7 @@ async fn cancel_job_persists_state_and_reason_in_one_event() {
     let voom_events::Event::JobCancelled(payload) = &page.items[0].envelope.payload else {
         panic!("expected JobCancelled payload");
     };
-    assert_eq!(payload.job_id, job.id.0);
+    assert_eq!(payload.job_id, job.id);
     assert_eq!(payload.reason, "operator cancel");
 }
 

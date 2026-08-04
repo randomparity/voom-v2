@@ -29,11 +29,11 @@ use std::process::Command;
 use std::time::Duration;
 
 use voom_control_plane::ControlPlane;
-use voom_control_plane::CoordinatorOutcome;
 use voom_control_plane::policy::{ComplianceExecutionOptions, PolicyInputFromScanInput};
 use voom_control_plane::scan::{ScanPathInput, ScanReportFileStatus};
+use voom_control_plane::workflow::CoordinatorOutcome;
 use voom_core::FileVersionId;
-use voom_store::repo::workflow_summaries::{
+use voom_store::repo::execution::workflow_summaries::{
     FilePhaseOutcome, PhaseOutcome, SqliteWorkflowSummaryRepo,
 };
 use voom_test_support::worker::{

@@ -25,7 +25,7 @@ use voom_core::{FileVersionId, MediaSnapshotId, PolicyVersionId};
 use voom_ffmpeg_worker::preflight_from_process_env;
 use voom_plan::PlanOperationKind;
 use voom_policy::{MediaSnapshotInput, PolicyInputSetDraft, PolicyInputSourceKind, TargetRef};
-use voom_store::repo::identity::{IdentityRepo, SqliteIdentityRepo};
+use voom_store::repo::media::identity::{MediaSnapshotRepo, SqliteIdentityRepo};
 use voom_test_support::TempDatabase;
 use voom_test_support::worker::{
     FfprobeSiblingGuard, TestWorkerConfig, TestWorkerLaunch, cargo_build_package,
@@ -327,7 +327,7 @@ async fn assert_committed_result(
 /// a non-empty `streams` array whose video stream reports the expected codec,
 /// pixel format, and the committed output dimensions.
 fn assert_probed_result_snapshot(
-    snapshot: &voom_store::repo::identity::MediaSnapshot,
+    snapshot: &voom_store::repo::media::identity::MediaSnapshot,
     case: &Case,
     output_width: u64,
     output_height: u64,

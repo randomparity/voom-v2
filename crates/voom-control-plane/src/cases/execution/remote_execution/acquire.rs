@@ -5,22 +5,22 @@ use std::collections::HashMap;
 use serde_json::{Value as JsonValue, json};
 use sqlx::{Sqlite, Transaction};
 use time::{Duration, OffsetDateTime};
-use voom_core::{LeaseId, NodeId, TicketId, TicketOperation, VoomError, WorkerId};
+use voom_core::{
+    ArtifactAccessMode, LeaseId, NodeId, TicketId, TicketOperation, VoomError, WorkerId,
+};
 use voom_scheduler::{
     NodeCandidate, SCORING_VERSION, SchedulerCandidate, SchedulerScorer, ScoreDecision,
     ScoreOutcome, ScoreReasonCode, TicketCandidate, WorkerCandidate,
 };
-use voom_store::repo::artifact_access_plans::{
-    ArtifactAccessMode, ArtifactAccessPlan, NewArtifactAccessPlan,
-};
-use voom_store::repo::leases::NewLease;
-use voom_store::repo::remote_idempotency::{IdempotencyOutcome, RemoteIdempotencyInput};
-use voom_store::repo::scheduler_decisions::{
+use voom_store::repo::execution::leases::NewLease;
+use voom_store::repo::execution::remote_idempotency::{IdempotencyOutcome, RemoteIdempotencyInput};
+use voom_store::repo::execution::scheduler_decisions::{
     NewSchedulerDecision, SchedulerDecision, SchedulerDecisionKind, SchedulerDecisionOutcome,
     SchedulerReasonCode as StoreSchedulerReasonCode, SchedulerRequestSource,
 };
-use voom_store::repo::tickets::Ticket;
-use voom_store::repo::workers::WorkerOperationEligibility;
+use voom_store::repo::execution::tickets::Ticket;
+use voom_store::repo::execution::workers::WorkerOperationEligibility;
+use voom_store::repo::media::artifact_access_plans::{ArtifactAccessPlan, NewArtifactAccessPlan};
 
 use crate::ControlPlane;
 use crate::cases::execution::remote_execution::{
@@ -154,7 +154,10 @@ impl ControlPlane {
             .node_owned_worker_in_tx(tx, input.worker_id, input.node_id)
             .await?;
         super::recover::require_remote_worker(&worker)?;
-        let operations = worker_candidate_operations_in_tx(tx, input.worker_id).await?;
+        let operations = self
+            .workers
+            .candidate_operations_in_tx(tx, input.worker_id)
+            .await?;
         let tickets = self
             .tickets
             .ready_for_operations_in_tx(tx, &operations, now)
@@ -256,7 +259,7 @@ impl ControlPlane {
             return Ok(RemoteAcquirePrepared::NoCandidate(outcome));
         }
 
-        let selected_access_mode = artifact_access_mode_from_scheduler(&selected.access_mode)?;
+        let selected_access_mode = selected.access_mode;
         let scheduler_decision = self
             .scheduler_decisions
             .create_in_tx(
@@ -289,7 +292,10 @@ impl ControlPlane {
             .scheduler_node_limits
             .node_limit_in_tx(tx, input.node_id)
             .await?;
-        let node_active_leases = active_lease_count_for_node_in_tx(tx, input.node_id).await?;
+        let node_active_leases = self
+            .leases
+            .active_count_for_node_in_tx(tx, input.node_id)
+            .await?;
         let mut candidates = Vec::with_capacity(tickets.len());
 
         for ticket in &tickets {
@@ -365,7 +371,10 @@ impl ControlPlane {
                 .map(Some);
         }
 
-        let node_active = active_lease_count_for_node_in_tx(tx, input.node_id).await?;
+        let node_active = self
+            .leases
+            .active_count_for_node_in_tx(tx, input.node_id)
+            .await?;
         let node_limit = self
             .scheduler_node_limits
             .node_limit_in_tx(tx, input.node_id)
@@ -515,34 +524,6 @@ struct SelectedCapacityFull<'a> {
     observed_limit: u32,
 }
 
-async fn worker_candidate_operations_in_tx(
-    tx: &mut Transaction<'_, Sqlite>,
-    worker_id: WorkerId,
-) -> Result<Vec<TicketOperation>, VoomError> {
-    let operations = sqlx::query_scalar::<_, String>(
-        "SELECT operation FROM worker_capabilities WHERE worker_id = ? \
-         UNION \
-         SELECT value AS operation FROM worker_grants, json_each(worker_grants.can_execute) \
-         WHERE worker_id = ? \
-         ORDER BY operation ASC",
-    )
-    .bind(i64::try_from(worker_id.0).map_err(|_| {
-        VoomError::Config(format!("worker id {} does not fit sqlite i64", worker_id.0))
-    })?)
-    .bind(i64::try_from(worker_id.0).map_err(|_| {
-        VoomError::Config(format!("worker id {} does not fit sqlite i64", worker_id.0))
-    })?)
-    .fetch_all(&mut **tx)
-    .await
-    .map_err(|e| VoomError::database_context("worker candidate operations", e))?;
-    operations
-        .into_iter()
-        .map(|operation| {
-            TicketOperation::from_stored(operation, "worker candidate operations.operation")
-        })
-        .collect()
-}
-
 fn candidate_from_ticket(
     input: &RemoteAcquireInput,
     ticket: &Ticket,
@@ -573,7 +554,11 @@ fn candidate_from_ticket(
             denied: eligibility.is_denied,
             active_leases: worker_active,
             max_parallel: worker_limit,
-            artifact_access: eligibility.artifact_access.clone(),
+            artifact_access: eligibility
+                .artifact_access
+                .iter()
+                .filter_map(|mode| ArtifactAccessMode::from_wire(mode))
+                .collect(),
         },
         node: NodeCandidate {
             node_id: input.node_id,
@@ -768,43 +753,6 @@ fn selected_candidate_key(
         candidate.worker.worker_id.0,
         candidate.ticket.ticket_id.0,
     )
-}
-
-async fn active_lease_count_for_node_in_tx(
-    tx: &mut Transaction<'_, Sqlite>,
-    node_id: NodeId,
-) -> Result<u32, VoomError> {
-    let count = sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*) \
-         FROM leases \
-         JOIN workers ON workers.id = leases.worker_id \
-         WHERE leases.state = 'held' AND workers.node_id = ?",
-    )
-    .bind(sqlite_id(node_id.0, "node id")?)
-    .fetch_one(&mut **tx)
-    .await
-    .map_err(|e| VoomError::database_context("node active lease count", e))?;
-    count_to_u32(count, "node active lease count")
-}
-
-fn sqlite_id(id: u64, label: &'static str) -> Result<i64, VoomError> {
-    i64::try_from(id)
-        .map_err(|_| VoomError::Config(format!("{label} {id} does not fit sqlite i64")))
-}
-
-fn count_to_u32(count: i64, label: &'static str) -> Result<u32, VoomError> {
-    u32::try_from(count).map_err(|_| VoomError::database(format!("{label} does not fit u32")))
-}
-
-fn artifact_access_mode_from_scheduler(mode: &str) -> Result<ArtifactAccessMode, VoomError> {
-    match mode {
-        "shared_mount" => Ok(ArtifactAccessMode::SharedMount),
-        "control_plane_placeholder" => Ok(ArtifactAccessMode::ControlPlanePlaceholder),
-        "staged_output_placeholder" => Ok(ArtifactAccessMode::StagedOutputPlaceholder),
-        other => Err(VoomError::Internal(format!(
-            "scheduler selected unsupported artifact access mode {other:?}"
-        ))),
-    }
 }
 
 fn decision_from_score(

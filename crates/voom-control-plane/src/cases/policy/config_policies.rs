@@ -4,8 +4,8 @@
 //! consumes safety policies live in `safety_gate.rs`.
 
 use voom_core::VoomError;
-use voom_store::repo::safety_policies::{NewSafetyPolicy, SafetyPolicy};
-use voom_store::repo::scheduling_policies::{NewSchedulingPolicy, SchedulingPolicy};
+use voom_store::repo::policy::safety_policies::{NewSafetyPolicy, SafetyPolicy};
+use voom_store::repo::policy::scheduling_policies::{NewSchedulingPolicy, SchedulingPolicy};
 
 use crate::ControlPlane;
 

@@ -1,4 +1,7 @@
-use std::collections::BTreeMap;
+use std::{
+    collections::BTreeMap,
+    fmt::{Display, Formatter},
+};
 
 use crate::PlanOperationKind;
 
@@ -36,6 +39,35 @@ pub enum ExecutionEligibility {
     NoOp,
     Blocked,
     Unsupported,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ComplianceKind {
+    Container,
+    TranscodeVideo,
+    TranscodeAudio,
+    ExtractAudio,
+    Unsupported,
+}
+
+impl ComplianceKind {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Container => "container",
+            Self::TranscodeVideo => "transcode_video",
+            Self::TranscodeAudio => "transcode_audio",
+            Self::ExtractAudio => "extract_audio",
+            Self::Unsupported => "unsupported",
+        }
+    }
+}
+
+impl Display for ComplianceKind {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -90,7 +122,7 @@ pub struct ComplianceCheck {
     pub check_id: String,
     pub node_id: String,
     pub target: crate::TargetRef,
-    pub compliance_kind: String,
+    pub compliance_kind: ComplianceKind,
     pub operation_kind: PlanOperationKind,
     pub desired_state: serde_json::Value,
     #[serde(skip_serializing_if = "Option::is_none")]

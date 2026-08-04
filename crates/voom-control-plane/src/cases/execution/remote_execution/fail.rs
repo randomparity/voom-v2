@@ -2,8 +2,8 @@
 
 use sqlx::{Sqlite, Transaction};
 use voom_core::VoomError;
-use voom_store::repo::artifact_access_plans::ArtifactAccessPlanStatus;
-use voom_store::repo::remote_idempotency::{IdempotencyOutcome, RemoteIdempotencyInput};
+use voom_store::repo::execution::remote_idempotency::{IdempotencyOutcome, RemoteIdempotencyInput};
+use voom_store::repo::media::artifact_access_plans::ArtifactAccessPlanStatus;
 
 use crate::ControlPlane;
 use crate::cases::execution::remote_execution::{

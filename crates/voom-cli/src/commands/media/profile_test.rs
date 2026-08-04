@@ -1,4 +1,4 @@
-use voom_store::repo::video_profiles::{NewVideoProfile, VideoProfile};
+use voom_store::repo::policy::video_profiles::{NewVideoProfile, VideoProfile};
 
 use crate::cli::{VideoDecodeBackendArg, VideoProfileFields};
 

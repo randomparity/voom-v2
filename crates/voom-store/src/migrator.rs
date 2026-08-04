@@ -141,6 +141,11 @@ const MIGRATION_0031_SQL: &str =
 const MIGRATION_0032_SQL: &str =
     include_str!("../../../migrations/0032_vaapi_video_acceleration.sql");
 
+/// SQL for migration 0033 (canonical remote acquire replay shape), embedded at
+/// compile time.
+const MIGRATION_0033_SQL: &str =
+    include_str!("../../../migrations/0033_remote_acquire_replay_shape.sql");
+
 /// Embedded migration set, constructed without the `sqlx::migrate!` macro.
 ///
 /// We don't use sqlx's `macros` feature: it pulls `sqlx-macros-core`, which
@@ -154,7 +159,7 @@ const MIGRATION_0032_SQL: &str =
 ///
 /// Single source of truth for "what schema does this binary expect" — both
 /// `init()` and `probe_schema()` read from here.
-pub static MIGRATOR: LazyLock<Migrator> = LazyLock::new(|| Migrator {
+pub(crate) static MIGRATOR: LazyLock<Migrator> = LazyLock::new(|| Migrator {
     migrations: Cow::Owned(vec![
         Migration::new(
             1,
@@ -378,6 +383,13 @@ pub static MIGRATOR: LazyLock<Migrator> = LazyLock::new(|| Migrator {
             Cow::Borrowed("vaapi_video_acceleration"),
             MigrationType::Simple,
             Cow::Borrowed(MIGRATION_0032_SQL),
+            false,
+        ),
+        Migration::new(
+            33,
+            Cow::Borrowed("remote_acquire_replay_shape"),
+            MigrationType::Simple,
+            Cow::Borrowed(MIGRATION_0033_SQL),
             false,
         ),
     ]),

@@ -3,7 +3,7 @@
 use sqlx::{Sqlite, Transaction};
 use time::Duration;
 use voom_core::VoomError;
-use voom_store::repo::remote_idempotency::{IdempotencyOutcome, RemoteIdempotencyInput};
+use voom_store::repo::execution::remote_idempotency::{IdempotencyOutcome, RemoteIdempotencyInput};
 
 use crate::ControlPlane;
 use crate::cases::execution::remote_execution::{

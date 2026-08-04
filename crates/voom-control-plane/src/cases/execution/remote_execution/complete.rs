@@ -3,9 +3,11 @@
 use serde_json::Value as JsonValue;
 use sqlx::{Sqlite, Transaction};
 use voom_core::{FailureClass, NodeId, VoomError, WorkerId};
-use voom_store::repo::artifact_access_plans::{ArtifactAccessPlan, ArtifactAccessPlanStatus};
-use voom_store::repo::remote_idempotency::{
+use voom_store::repo::execution::remote_idempotency::{
     IdempotencyOutcome, RemoteIdempotencyInput, RemoteMutationReplay,
+};
+use voom_store::repo::media::artifact_access_plans::{
+    ArtifactAccessPlan, ArtifactAccessPlanStatus,
 };
 
 use crate::ControlPlane;

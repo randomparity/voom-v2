@@ -11,8 +11,8 @@ use same_file::Handle;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use voom_core::{FileAssetId, FileLocationId, FileVersionId, VoomError};
 use voom_policy::{PolicyInputSetDraft, TargetRef};
-use voom_store::repo::identity::{FileLocationKind, IdentityRepo};
-use voom_store::repo::workflow_summaries::FilePhaseSummary;
+use voom_store::repo::execution::workflow_summaries::FilePhaseSummary;
+use voom_store::repo::media::identity::{FileLocationKind, FileLocationRepo, FileVersionRepo};
 
 use crate::ControlPlane;
 use crate::cases::policy::compliance::PromotionPlan;
@@ -632,7 +632,7 @@ impl ControlPlane {
 
     async fn reclaim_intermediate_location(
         &self,
-        location: &voom_store::repo::identity::FileLocation,
+        location: &voom_store::repo::media::identity::FileLocation,
     ) -> Result<(), VoomError> {
         let path = PathBuf::from(&location.value);
         match tokio::fs::remove_file(&path).await {

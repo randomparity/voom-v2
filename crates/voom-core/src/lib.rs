@@ -15,6 +15,10 @@ pub mod clock {
     pub use crate::runtime::clock::{Clock, SystemClock, format_iso8601};
 }
 
+pub mod artifact_access_mode {
+    pub use crate::taxonomy::artifact_access_mode::ArtifactAccessMode;
+}
+
 #[cfg(any(test, feature = "test"))]
 pub mod clock_test_support {
     pub use crate::runtime::clock_test_support::{FrozenClock, ManualClock};
@@ -89,6 +93,7 @@ pub mod version {
     pub use crate::runtime::version::VersionInfo;
 }
 
+pub use artifact_access_mode::ArtifactAccessMode;
 pub use clock::{Clock, SystemClock, format_iso8601};
 pub use config::{Config, EnvSource, LogFormat, MapEnv, ProcessEnv};
 pub use encoder_caps::{
@@ -124,8 +129,8 @@ pub use transcode_video_profile::{
 };
 pub use version::VersionInfo;
 
-/// Worker-protocol wire version (Sprint 2). Consumed by
-/// `voom-worker-protocol`'s handshake and middleware.
+/// Worker-protocol wire version consumed by `voom-worker-protocol`'s handshake
+/// and middleware.
 ///
 /// Workers are bundled, co-deployed, and version-locked with the
 /// control-plane build (ADR-0002), so the contract is an **exact match**:

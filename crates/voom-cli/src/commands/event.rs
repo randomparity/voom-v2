@@ -8,7 +8,7 @@ use serde_json::Value as JsonValue;
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 use voom_events::{Event, EventKind, SubjectType};
-use voom_store::repo::events::{EventFilter, EventRow};
+use voom_store::repo::audit::events::{EventFilter, EventRow};
 
 use crate::cli::EventCommand;
 use crate::commands::common::{emit_voom_error, next_cursor, open_control_plane};

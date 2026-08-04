@@ -72,7 +72,10 @@ impl SqliteExternalSystemRepo {
              (external_system_id, internal_prefix, external_prefix, visibility, created_at) \
              VALUES (?, ?, ?, ?, ?)",
         )
-        .bind(i64_from_u64(input.external_system_id.0))
+        .bind(i64_from_u64(
+            input.external_system_id.0,
+            concat!(module_path!(), ": ", stringify!(input.external_system_id.0)),
+        )?)
         .bind(&input.internal_prefix)
         .bind(&input.external_prefix)
         .bind(input.visibility.as_str())
@@ -88,7 +91,10 @@ impl SqliteExternalSystemRepo {
             }
         };
         Ok(ExternalPathMapping {
-            id: ExternalPathMappingId(u64_from_i64(res.last_insert_rowid())),
+            id: ExternalPathMappingId(u64_from_i64(
+                res.last_insert_rowid(),
+                concat!(module_path!(), ": ", stringify!(res.last_insert_rowid())),
+            )?),
             external_system_id: input.external_system_id,
             internal_prefix: input.internal_prefix,
             external_prefix: input.external_prefix,
@@ -122,7 +128,10 @@ impl SqliteExternalSystemRepo {
         let row = sqlx::query(&format!(
             "SELECT {COLS} FROM external_path_mappings WHERE id = ?"
         ))
-        .bind(i64_from_u64(id.0))
+        .bind(i64_from_u64(
+            id.0,
+            concat!(module_path!(), ": ", stringify!(id.0)),
+        )?)
         .fetch_optional(&self.pool)
         .await
         .map_err(|e| VoomError::database_context("external_path_mappings get", e))?;
@@ -141,7 +150,10 @@ impl SqliteExternalSystemRepo {
             "SELECT {COLS} FROM external_path_mappings \
              WHERE external_system_id = ? AND retired_at IS NULL ORDER BY id ASC"
         ))
-        .bind(i64_from_u64(system_id.0))
+        .bind(i64_from_u64(
+            system_id.0,
+            concat!(module_path!(), ": ", stringify!(system_id.0)),
+        )?)
         .fetch_all(&self.pool)
         .await
         .map_err(|e| VoomError::database_context("external_path_mappings list", e))?;
@@ -168,7 +180,10 @@ impl SqliteExternalSystemRepo {
         .bind(update.internal_prefix.as_deref())
         .bind(update.external_prefix.as_deref())
         .bind(update.visibility.map(PathVisibility::as_str))
-        .bind(i64_from_u64(id.0))
+        .bind(i64_from_u64(
+            id.0,
+            concat!(module_path!(), ": ", stringify!(id.0)),
+        )?)
         .execute(&self.pool)
         .await
         .map_err(|e| VoomError::database_context("external_path_mappings update", e))?
@@ -194,7 +209,10 @@ impl SqliteExternalSystemRepo {
             "UPDATE external_path_mappings SET retired_at = ? WHERE id = ? AND retired_at IS NULL",
         )
         .bind(&ts)
-        .bind(i64_from_u64(id.0))
+        .bind(i64_from_u64(
+            id.0,
+            concat!(module_path!(), ": ", stringify!(id.0)),
+        )?)
         .execute(&self.pool)
         .await
         .map_err(|e| VoomError::database_context("external_path_mappings retire", e))?
@@ -217,8 +235,14 @@ fn row_to_mapping(row: &SqliteRow) -> Result<ExternalPathMapping, VoomError> {
     let created_at: String = row.try_get("created_at").map_err(map("created_at"))?;
     let retired_at: Option<String> = row.try_get("retired_at").map_err(map("retired_at"))?;
     Ok(ExternalPathMapping {
-        id: ExternalPathMappingId(u64_from_i64(id)),
-        external_system_id: ExternalSystemId(u64_from_i64(system_id)),
+        id: ExternalPathMappingId(u64_from_i64(
+            id,
+            concat!(module_path!(), ": ", stringify!(id)),
+        )?),
+        external_system_id: ExternalSystemId(u64_from_i64(
+            system_id,
+            concat!(module_path!(), ": ", stringify!(system_id)),
+        )?),
         internal_prefix: row
             .try_get("internal_prefix")
             .map_err(map("internal_prefix"))?,

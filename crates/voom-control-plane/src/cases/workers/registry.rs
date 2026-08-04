@@ -7,16 +7,15 @@ use serde_json::Value as JsonValue;
 use sqlx::{Sqlite, Transaction};
 use time::Duration;
 use time::OffsetDateTime;
-use voom_core::{NodeId, TicketOperation, VoomError, WorkerId};
+use voom_core::{NodeId, TicketOperation, VoomError, WorkerId, WorkerKind};
 use voom_events::payload::{
     WorkerCapabilityRecordedPayload, WorkerGrantRecordedPayload, WorkerLinkedToNodePayload,
     WorkerRegisteredPayload, WorkerRetiredPayload,
 };
 use voom_events::{Event, SubjectType};
-use voom_store::repo::nodes::NodeStatus;
-use voom_store::repo::workers::{
-    Capability, Grant, NewCapability, NewGrant, NewWorker, Worker, WorkerInspection, WorkerKind,
-    WorkerStatus,
+use voom_store::repo::execution::nodes::NodeStatus;
+use voom_store::repo::execution::workers::{
+    Capability, Grant, NewCapability, NewGrant, NewWorker, Worker, WorkerInspection, WorkerStatus,
 };
 
 use crate::ControlPlane;
@@ -55,6 +54,13 @@ fn is_name_or_incarnation(name: &str, base: &str) -> bool {
             .is_some_and(|suffix| suffix.starts_with('-'))
 }
 
+/// Caller-supplied fields for generic, node-less worker registration.
+#[derive(Debug)]
+pub struct RegisterWorkerInput {
+    pub name: String,
+    pub kind: WorkerKind,
+}
+
 #[derive(Debug)]
 pub struct RegisterWorkerForNodeInput {
     pub node_id: NodeId,
@@ -88,11 +94,20 @@ impl ControlPlane {
     ///
     /// # Errors
     /// Propagates `SqliteWorkerRepo::register_in_tx` and event-append errors.
-    pub async fn register_worker(&self, input: NewWorker) -> Result<Worker, VoomError> {
+    pub async fn register_worker(&self, input: RegisterWorkerInput) -> Result<Worker, VoomError> {
         reject_reserved_provider(&input.name)?;
+        let registered_at = self.clock().now();
         let mut tx = begin_tx(&self.pool).await?;
         let worker = self
-            .register_worker_with_event_in_tx(&mut tx, input)
+            .register_worker_with_event_in_tx(
+                &mut tx,
+                NewWorker {
+                    name: input.name,
+                    kind: input.kind,
+                    registered_at,
+                    node_id: None,
+                },
+            )
             .await?;
         commit_tx(tx).await?;
         Ok(worker)
@@ -135,7 +150,7 @@ impl ControlPlane {
             Some(worker.id.0),
             registered_at,
             Event::WorkerRegistered(WorkerRegisteredPayload {
-                worker_id: worker.id.0,
+                worker_id: worker.id,
                 name: worker.name.clone(),
                 kind: worker.kind,
             }),
@@ -206,7 +221,7 @@ impl ControlPlane {
             Some(worker.id.0),
             now,
             Event::WorkerRegistered(WorkerRegisteredPayload {
-                worker_id: worker.id.0,
+                worker_id: worker.id,
                 name: worker.name.clone(),
                 kind: worker.kind,
             }),
@@ -219,8 +234,8 @@ impl ControlPlane {
             Some(worker.id.0),
             now,
             Event::WorkerLinkedToNode(WorkerLinkedToNodePayload {
-                worker_id: worker.id.0,
-                node_id: input.node_id.0,
+                worker_id: worker.id,
+                node_id: input.node_id,
             }),
         )
         .await?;
@@ -285,7 +300,7 @@ impl ControlPlane {
                 Some(worker_id.0),
                 now,
                 Event::WorkerCapabilityRecorded(WorkerCapabilityRecordedPayload {
-                    worker_id: worker_id.0,
+                    worker_id,
                     capability_id: cap.id,
                     operation: cap.operation,
                 }),
@@ -324,7 +339,7 @@ impl ControlPlane {
                 Some(worker_id.0),
                 now,
                 Event::WorkerGrantRecorded(WorkerGrantRecordedPayload {
-                    worker_id: worker_id.0,
+                    worker_id,
                     grant_id: grant.id,
                 }),
             )
@@ -349,7 +364,7 @@ impl ControlPlane {
             Some(worker_id.0),
             self.clock().now(),
             Event::WorkerCapabilityRecorded(WorkerCapabilityRecordedPayload {
-                worker_id: worker_id.0,
+                worker_id,
                 capability_id: cap.id,
                 operation,
             }),
@@ -374,7 +389,7 @@ impl ControlPlane {
             Some(worker_id.0),
             self.clock().now(),
             Event::WorkerGrantRecorded(WorkerGrantRecordedPayload {
-                worker_id: worker_id.0,
+                worker_id,
                 grant_id: grant.id,
             }),
         )
@@ -404,7 +419,7 @@ impl ControlPlane {
             SubjectType::Worker,
             Some(id.0),
             now,
-            Event::WorkerRetired(WorkerRetiredPayload { worker_id: id.0 }),
+            Event::WorkerRetired(WorkerRetiredPayload { worker_id: id }),
         )
         .await?;
         commit_tx(tx).await?;

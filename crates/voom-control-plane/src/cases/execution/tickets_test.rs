@@ -1,13 +1,14 @@
 use super::*;
 
 use time::{Duration as TDuration, OffsetDateTime};
-use voom_core::{FailureClass, TicketOperation, VoomError};
+use voom_core::{FailureClass, TicketOperation, VoomError, WorkerKind};
 use voom_events::EventKind;
-use voom_store::repo::events::{EventFilter, EventPage, EventRepo, Page};
-use voom_store::repo::leases::NewLease;
-use voom_store::repo::tickets::TicketState;
-use voom_store::repo::workers::{NewCapability, NewGrant, NewWorker, WorkerKind};
+use voom_store::repo::audit::events::{EventFilter, EventPage, EventRepo, Page};
+use voom_store::repo::execution::leases::NewLease;
+use voom_store::repo::execution::tickets::TicketState;
+use voom_store::repo::execution::workers::{NewCapability, NewGrant};
 
+use crate::cases::workers::RegisterWorkerInput;
 use crate::cases::{cp, issue_link_targets, terminal_failure_issues};
 
 const T0: OffsetDateTime = OffsetDateTime::UNIX_EPOCH;
@@ -27,12 +28,10 @@ fn ticket(kind: &str) -> NewTicket {
     ticket_with_max_attempts(kind, 1)
 }
 
-fn worker(name: &str) -> NewWorker {
-    NewWorker {
+fn worker(name: &str) -> RegisterWorkerInput {
+    RegisterWorkerInput {
         name: name.to_owned(),
         kind: WorkerKind::Synthetic,
-        registered_at: T0,
-        node_id: None,
     }
 }
 
@@ -187,7 +186,7 @@ async fn pre_lease_no_eligible_worker_requeues_without_creating_lease() {
     let voom_events::Event::TicketFailedRetriable(payload) = &page.items[0].envelope.payload else {
         panic!("expected TicketFailedRetriable payload");
     };
-    assert_eq!(payload.ticket_id, t.id.0);
+    assert_eq!(payload.ticket_id, t.id);
     assert_eq!(payload.attempt, 1);
     assert_eq!(payload.max_attempts, 3);
     assert_eq!(payload.class, FailureClass::NoEligibleWorker);
@@ -258,7 +257,7 @@ async fn pre_lease_ambiguous_worker_selection_terminal_fails_immediately() {
     let voom_events::Event::TicketFailedTerminal(payload) = &page.items[0].envelope.payload else {
         panic!("expected TicketFailedTerminal payload");
     };
-    assert_eq!(payload.ticket_id, t.id.0);
+    assert_eq!(payload.ticket_id, t.id);
     assert_eq!(payload.attempt, 1);
     assert_eq!(payload.max_attempts, 3);
     assert_eq!(payload.class, FailureClass::AmbiguousWorkerSelection);
@@ -319,7 +318,7 @@ async fn pre_lease_no_eligible_worker_terminal_fails_when_attempts_exhausted() {
     let voom_events::Event::TicketFailedTerminal(payload) = &page.items[0].envelope.payload else {
         panic!("expected TicketFailedTerminal payload");
     };
-    assert_eq!(payload.ticket_id, t.id.0);
+    assert_eq!(payload.ticket_id, t.id);
     assert_eq!(payload.attempt, 1);
     assert_eq!(payload.max_attempts, 1);
     assert_eq!(payload.class, FailureClass::NoEligibleWorker);

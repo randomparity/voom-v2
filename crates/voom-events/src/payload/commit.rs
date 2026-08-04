@@ -185,7 +185,7 @@ pub struct TargetEpochDriftWire {
 }
 
 /// `commit.completed` — Phase C success. The durable identity mutation
-/// has been applied to the matching `IdentityRepo` in the same tx the
+/// has been applied through the matching identity repository capability in the same tx the
 /// `commit_intents` row transitioned to `completed`. Carries the
 /// granularity-bucketed member counts of `closure_final` so an audit
 /// reader can size the silent-path closure without re-deserializing
@@ -253,9 +253,9 @@ pub struct CommitAbortedPostMutationPayload {
     pub removed_bundle_count: u32,
     pub removed_version_count: u32,
     pub removed_location_count: u32,
-    /// `UseLeaseId.0` values for every fresh blocking lease the Phase C
-    /// recheck saw against `closure_final`. Possibly empty.
-    pub fresh_lease_ids: Vec<u64>,
+    /// Every fresh blocking lease the Phase C recheck saw against
+    /// `closure_final`. Possibly empty.
+    pub fresh_lease_ids: Vec<UseLeaseId>,
     /// Drifted `(kind, id, expected, observed)` triples from the
     /// `stale_target_epoch` recheck. Possibly empty (only populated
     /// when `reason='stale_target_epoch'`).
@@ -309,7 +309,7 @@ pub struct CommitRecoveryRequiredPayload {
     pub removed_bundle_count: u32,
     pub removed_version_count: u32,
     pub removed_location_count: u32,
-    pub fresh_lease_ids: Vec<u64>,
+    pub fresh_lease_ids: Vec<UseLeaseId>,
     pub target_epoch_drift: Vec<TargetEpochDriftWire>,
     #[serde(with = "time::serde::iso8601")]
     pub recorded_at: OffsetDateTime,

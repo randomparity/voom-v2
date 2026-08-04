@@ -2,8 +2,8 @@ use super::*;
 
 use std::path::PathBuf;
 
-use voom_plan::audio::{AudioBundleRole, AudioDispositionFact, SnapshotAudioStreamFact};
-use voom_store::repo::identity::{FileLocation, FileLocationKind, FileVersion, ProducedBy};
+use voom_plan::planner::audio::{AudioBundleRole, AudioDispositionFact, SnapshotAudioStreamFact};
+use voom_store::repo::media::identity::{FileLocation, FileLocationKind, FileVersion, ProducedBy};
 use voom_worker_protocol::{
     AudioDispositionFact as WorkerDisposition, AudioOutputStreamFact, ExtractAudioResult,
     ExtractAudioStatus, TranscodeAudioResult, TranscodeAudioStatus,

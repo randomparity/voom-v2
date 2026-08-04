@@ -1,6 +1,6 @@
 use voom_plan::PlanOperationKind;
 use voom_policy::{FixtureName, load_fixture, load_policy_fixture};
-use voom_store::repo::identity::{DiscoveredFile, FileLocationKind, IngestOutcome};
+use voom_store::repo::media::identity::{DiscoveredFile, FileLocationKind, IngestOutcome};
 
 use super::*;
 use crate::cases::policy::policy_inputs::PolicyInputFromScanInput;

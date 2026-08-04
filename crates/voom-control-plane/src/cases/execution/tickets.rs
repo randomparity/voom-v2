@@ -9,7 +9,9 @@ use voom_events::payload::{
     TicketReadyPayload,
 };
 use voom_events::{Event, SubjectType};
-use voom_store::repo::tickets::{NewTicket, Ticket, TicketState};
+use voom_store::repo::execution::tickets::{
+    NewTicket, PreLeaseFailureTransition, Ticket, TicketState,
+};
 
 use crate::ControlPlane;
 
@@ -46,8 +48,8 @@ impl ControlPlane {
             Some(ticket.id.0),
             input.created_at,
             Event::TicketCreated(TicketCreatedPayload {
-                ticket_id: ticket.id.0,
-                job_id: input.job_id.map(|j| j.0),
+                ticket_id: ticket.id,
+                job_id: input.job_id,
                 kind: input.kind.clone(),
                 priority: input.priority,
                 max_attempts: input.max_attempts,
@@ -94,7 +96,7 @@ impl ControlPlane {
                 SubjectType::Ticket,
                 Some(t.id.0),
                 now,
-                Event::TicketReady(TicketReadyPayload { ticket_id: t.id.0 }),
+                Event::TicketReady(TicketReadyPayload { ticket_id: t.id }),
             )
             .await?;
         }
@@ -123,7 +125,7 @@ impl ControlPlane {
             .get_in_tx(&mut tx, ticket_id)
             .await?
             .ok_or_else(|| VoomError::NotFound(format!("ticket {ticket_id}")))?;
-        require_no_held_lease(&mut tx, ticket_id).await?;
+        self.require_no_held_lease(&mut tx, ticket_id).await?;
         if ticket.state != TicketState::Ready {
             return Err(VoomError::Conflict(format!(
                 "pre-lease failure rejected: ticket {ticket_id} is {:?}, not ready",
@@ -161,40 +163,26 @@ impl ControlPlane {
         terminal: bool,
         now: OffsetDateTime,
     ) -> Result<Ticket, VoomError> {
-        let ticket_id_i = sqlite_i64(ticket.id.0, "ticket id")?;
-        let now_str = iso8601(now)?;
-        let updated = if terminal {
-            terminal_fail_ready_ticket(tx, ticket_id_i, ticket.attempt, next_attempt, &now_str, now)
-                .await?
+        let transition = if terminal {
+            PreLeaseFailureTransition::Terminal
         } else {
             let mut shot = self.snapshot_rng();
-            let backoff = voom_store::repo::tickets::SqliteTicketRepo::default_backoff(
+            let backoff = voom_store::repo::execution::tickets::SqliteTicketRepo::default_backoff(
                 next_attempt,
-                &*self.clock,
                 &mut shot,
             );
-            requeue_ready_ticket(
+            PreLeaseFailureTransition::RetryAt(now + backoff)
+        };
+        self.tickets
+            .transition_ready_before_lease_failure_in_tx(
                 tx,
-                ticket_id_i,
+                ticket.id,
                 ticket.attempt,
                 next_attempt,
-                &now_str,
-                now + backoff,
+                transition,
+                now,
             )
-            .await?
-        };
-        if updated.rows_affected() != 1 {
-            return Err(VoomError::Conflict(format!(
-                "pre-lease failure rejected: ticket {} changed concurrently",
-                ticket.id
-            )));
-        }
-        self.tickets.get_in_tx(tx, ticket.id).await?.ok_or_else(|| {
-            VoomError::Internal(format!(
-                "pre-lease failure: ticket {} vanished mid-tx",
-                ticket.id
-            ))
-        })
+            .await
     }
 
     async fn emit_pre_lease_failure_event(
@@ -218,7 +206,7 @@ impl ControlPlane {
                 Some(ticket.id.0),
                 now,
                 Event::TicketFailedTerminal(TicketFailedTerminalPayload {
-                    ticket_id: ticket.id.0,
+                    ticket_id: ticket.id,
                     attempt: ticket.attempt,
                     max_attempts: ticket.max_attempts,
                     reason: reason.to_owned(),
@@ -235,7 +223,7 @@ impl ControlPlane {
                 Some(ticket.id.0),
                 now,
                 Event::TicketFailedRetriable(TicketFailedRetriablePayload {
-                    ticket_id: ticket.id.0,
+                    ticket_id: ticket.id,
                     attempt: ticket.attempt,
                     max_attempts: ticket.max_attempts,
                     reason: reason.to_owned(),
@@ -248,70 +236,19 @@ impl ControlPlane {
     }
 }
 
-async fn require_no_held_lease(
-    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-    ticket_id: TicketId,
-) -> Result<(), VoomError> {
-    let ticket_id_i = sqlite_i64(ticket_id.0, "ticket id")?;
-    let held_lease: Option<i64> =
-        sqlx::query_scalar("SELECT 1 FROM leases WHERE ticket_id = ? AND state = 'held' LIMIT 1")
-            .bind(ticket_id_i)
-            .fetch_optional(&mut **tx)
-            .await
-            .map_err(|e| VoomError::database_context("pre-lease held lease probe", e))?;
-    if held_lease.is_some() {
-        return Err(VoomError::Conflict(format!(
-            "pre-lease failure rejected: ticket {ticket_id} has an active lease"
-        )));
+impl ControlPlane {
+    async fn require_no_held_lease(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        ticket_id: TicketId,
+    ) -> Result<(), VoomError> {
+        if self.leases.has_held_for_ticket_in_tx(tx, ticket_id).await? {
+            return Err(VoomError::Conflict(format!(
+                "pre-lease failure rejected: ticket {ticket_id} has an active lease"
+            )));
+        }
+        Ok(())
     }
-    Ok(())
-}
-
-async fn terminal_fail_ready_ticket(
-    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-    ticket_id_i: i64,
-    previous_attempt: u32,
-    next_attempt: u32,
-    now_str: &str,
-    now: OffsetDateTime,
-) -> Result<sqlx::sqlite::SqliteQueryResult, VoomError> {
-    sqlx::query(
-        "UPDATE tickets SET state = 'failed', state_changed_at = ?, \
-         attempt = ?, epoch = epoch + 1 WHERE id = ? AND state = 'ready' \
-         AND attempt = ? AND next_eligible_at <= ?",
-    )
-    .bind(now_str)
-    .bind(i64::from(next_attempt))
-    .bind(ticket_id_i)
-    .bind(i64::from(previous_attempt))
-    .bind(iso8601(now)?)
-    .execute(&mut **tx)
-    .await
-    .map_err(|e| VoomError::database_context("pre-lease terminal fail", e))
-}
-
-async fn requeue_ready_ticket(
-    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-    ticket_id_i: i64,
-    previous_attempt: u32,
-    next_attempt: u32,
-    now_str: &str,
-    next_eligible_at: OffsetDateTime,
-) -> Result<sqlx::sqlite::SqliteQueryResult, VoomError> {
-    sqlx::query(
-        "UPDATE tickets SET state = 'ready', state_changed_at = ?, \
-         attempt = ?, next_eligible_at = ?, epoch = epoch + 1 \
-         WHERE id = ? AND state = 'ready' AND attempt = ? AND next_eligible_at <= ?",
-    )
-    .bind(now_str)
-    .bind(i64::from(next_attempt))
-    .bind(iso8601(next_eligible_at)?)
-    .bind(ticket_id_i)
-    .bind(i64::from(previous_attempt))
-    .bind(now_str)
-    .execute(&mut **tx)
-    .await
-    .map_err(|e| VoomError::database_context("pre-lease requeue", e))
 }
 
 fn pre_lease_failure_reason(class: FailureClass) -> Result<&'static str, VoomError> {
@@ -324,17 +261,6 @@ fn pre_lease_failure_reason(class: FailureClass) -> Result<&'static str, VoomErr
             "failure class {other:?} is not supported for pre-lease ticket failure"
         ))),
     }
-}
-
-fn sqlite_i64(value: u64, field: &str) -> Result<i64, VoomError> {
-    i64::try_from(value).map_err(|e| {
-        VoomError::database_context(format!("{field} {value} does not fit SQLite i64"), e)
-    })
-}
-
-fn iso8601(t: OffsetDateTime) -> Result<String, VoomError> {
-    t.format(&time::format_description::well_known::Iso8601::DEFAULT)
-        .map_err(|e| VoomError::Internal(format!("format iso8601: {e}")))
 }
 
 #[cfg(test)]

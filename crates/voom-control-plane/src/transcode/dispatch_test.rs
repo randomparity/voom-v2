@@ -4,7 +4,7 @@ use std::ffi::{OsStr, OsString};
 use std::path::PathBuf;
 
 use voom_core::{FileAssetId, FileLocationId, FileVersionId};
-use voom_store::repo::identity::{FileLocation, FileLocationKind, FileVersion, ProducedBy};
+use voom_store::repo::media::identity::{FileLocation, FileLocationKind, FileVersion, ProducedBy};
 use voom_worker_protocol::{
     TranscodeVideoExpectedFacts, TranscodeVideoInput, TranscodeVideoObservedFacts,
     TranscodeVideoOutput, TranscodeVideoProfile, TranscodeVideoStatus, VideoHardwareAssignment,

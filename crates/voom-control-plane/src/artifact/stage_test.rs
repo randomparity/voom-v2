@@ -6,9 +6,10 @@ use sqlx::Row;
 use time::OffsetDateTime;
 use voom_core::{ErrorCode, FileLocationId, FileVersionId, VoomError, rng_test_support::FrozenRng};
 use voom_events::EventKind;
-use voom_store::repo::events::{EventFilter, EventRepo, Page};
-use voom_store::repo::identity::{
-    DiscoveredFile, FileLocationKind, IdentityRepo, IngestOutcome, NewFileLocation, ProducedBy,
+use voom_store::repo::audit::events::{EventFilter, EventRepo, Page};
+use voom_store::repo::media::identity::{
+    DiscoveredFile, FileAssetRepo, FileLocationKind, FileLocationRepo, FileVersionRepo,
+    IngestOutcome, NewFileLocation, ProducedBy,
 };
 
 use crate::ControlPlane;
@@ -393,7 +394,7 @@ async fn success_copies_bytes_records_rows_and_emits_artifact_staged() {
         .unwrap();
     assert_eq!(locations.len(), 1);
     assert_eq!(locations[0].id, report.artifact_location_id);
-    assert_eq!(locations[0].kind, "staging");
+    assert_eq!(locations[0].kind, ArtifactLocationKind::Staging);
     assert_eq!(
         locations[0].value,
         staging.canonicalize().unwrap().display().to_string()
@@ -421,12 +422,12 @@ async fn success_copies_bytes_records_rows_and_emits_artifact_staged() {
     let voom_events::Event::ArtifactStaged(payload) = &events.items[0].envelope.payload else {
         panic!("expected artifact.staged payload");
     };
-    assert_eq!(payload.artifact_handle_id, report.artifact_handle_id.0);
-    assert_eq!(payload.artifact_location_id, report.artifact_location_id.0);
-    assert_eq!(payload.source_file_version_id, seeded.file_version_id.0);
+    assert_eq!(payload.artifact_handle_id, report.artifact_handle_id);
+    assert_eq!(payload.artifact_location_id, report.artifact_location_id);
+    assert_eq!(payload.source_file_version_id, seeded.file_version_id);
     assert_eq!(
         payload.source_file_location_id,
-        Some(seeded.file_location_id.0)
+        Some(seeded.file_location_id)
     );
     assert_eq!(
         payload.staging_path,
@@ -505,7 +506,7 @@ async fn create_version_without_locations(cp: &ControlPlane) -> FileVersionId {
         .identity()
         .create_file_version_in_tx(
             &mut tx,
-            voom_store::repo::identity::NewFileVersion {
+            voom_store::repo::media::identity::NewFileVersion {
                 file_asset_id: asset.id,
                 content_hash: blake3_checksum(b"unused"),
                 size_bytes: 6,

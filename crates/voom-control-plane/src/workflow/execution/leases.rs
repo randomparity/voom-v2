@@ -4,7 +4,7 @@ use std::time::Duration;
 use serde_json::Value;
 use tokio::time::Instant;
 use voom_core::{FailureClass, LeaseId, VoomError};
-use voom_store::repo::leases::{LeaseAcquireOutcome, NewLease};
+use voom_store::repo::execution::leases::{LeaseAcquireOutcome, NewLease};
 
 use crate::ControlPlane;
 use crate::workflow::execution::executor::WorkflowTimingOptions;

@@ -5,9 +5,9 @@ use serde_json::json;
 use time::OffsetDateTime;
 use voom_core::{ErrorCode, JobId, LeaseId, TicketId, rng_test_support::FrozenRng};
 use voom_events::EventKind;
-use voom_store::repo::artifacts::ArtifactCommitState;
-use voom_store::repo::events::{EventFilter, EventRepo, Page};
-use voom_store::repo::identity::{DiscoveredFile, FileLocationKind, IngestOutcome};
+use voom_store::repo::audit::events::{EventFilter, EventRepo, Page};
+use voom_store::repo::media::artifacts::ArtifactCommitState;
+use voom_store::repo::media::identity::{DiscoveredFile, FileLocationKind, IngestOutcome};
 use voom_worker_protocol::{
     ObservedFileFacts, ProbeFileRequest, ProbeFileResult, ProbeFileStatus, RemuxObservedFacts,
     RemuxRequest, RemuxResult, RemuxStatus, VerifyArtifactObservedFacts, VerifyArtifactRequest,
@@ -140,7 +140,7 @@ async fn execute_rejects_source_media_snapshot_for_other_file_version() {
     assert!(err.to_string().contains("does not belong"));
     let failed = single_failed_remux_payload(&cp).await;
     assert_eq!(failed.error_code, "CONFIG_INVALID");
-    assert_eq!(failed.source_file_location_id, Some(seeded.1.0));
+    assert_eq!(failed.source_file_location_id, Some(seeded.1));
     assert_eq!(failed.staging_path, None);
     assert!(failed.selected_streams.is_empty());
 }
@@ -197,8 +197,14 @@ async fn verification_failure_event_includes_staged_artifact_ids() {
     assert_eq!(err.error_code(), ErrorCode::VerificationFailure);
     let failed = single_failed_remux_payload(&cp).await;
     assert_eq!(failed.error_code, "VERIFICATION_FAILURE");
-    assert_eq!(failed.artifact_handle_id, Some(1));
-    assert_eq!(failed.artifact_location_id, Some(1));
+    assert_eq!(
+        failed.artifact_handle_id,
+        Some(voom_core::ArtifactHandleId(1))
+    );
+    assert_eq!(
+        failed.artifact_location_id,
+        Some(voom_core::ArtifactLocationId(1))
+    );
 }
 
 #[tokio::test]
@@ -974,7 +980,7 @@ async fn single_failed_remux_payload(
 async fn single_event(
     cp: &crate::ControlPlane,
     kind: EventKind,
-) -> voom_store::repo::events::EventRow {
+) -> voom_store::repo::audit::events::EventRow {
     cp.events()
         .list(
             EventFilter {

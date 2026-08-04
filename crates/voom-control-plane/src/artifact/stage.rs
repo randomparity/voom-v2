@@ -8,8 +8,12 @@ use voom_core::{
 };
 use voom_events::payload::ArtifactStagedPayload;
 use voom_events::{Event, SubjectType};
-use voom_store::repo::artifacts::{NewArtifactHandle, NewArtifactLocation};
-use voom_store::repo::identity::{FileLocation, FileLocationKind, FileVersion, IdentityRepo};
+use voom_store::repo::media::artifacts::{
+    ArtifactHandleAccessMode, ArtifactLocationKind, NewArtifactHandle, NewArtifactLocation,
+};
+use voom_store::repo::media::identity::{
+    FileLocation, FileLocationKind, FileLocationRepo, FileVersion, FileVersionRepo,
+};
 
 use crate::ControlPlane;
 use crate::artifact::fs::{
@@ -310,7 +314,7 @@ async fn record_staged_artifact(
                 checksum: Some(staged_facts.content_hash.clone()),
                 privacy_class: "internal".to_owned(),
                 durability_class: "staging".to_owned(),
-                allowed_access_modes: vec!["local_path".to_owned()],
+                allowed_access_modes: vec![ArtifactHandleAccessMode::LocalPath],
                 mutability: "immutable".to_owned(),
                 source_lineage: Some(json!({
                     "source_file_version_id": source_version.id.0,
@@ -328,7 +332,7 @@ async fn record_staged_artifact(
             &mut tx,
             NewArtifactLocation {
                 artifact_handle_id: handle.id,
-                kind: "staging".to_owned(),
+                kind: ArtifactLocationKind::Staging,
                 value: staging_path.display().to_string(),
                 observed_at: now,
             },
@@ -341,10 +345,10 @@ async fn record_staged_artifact(
         Some(handle.id.0),
         now,
         Event::ArtifactStaged(ArtifactStagedPayload {
-            artifact_handle_id: handle.id.0,
-            artifact_location_id: location.id.0,
-            source_file_version_id: source_version.id.0,
-            source_file_location_id: Some(source_location.id.0),
+            artifact_handle_id: handle.id,
+            artifact_location_id: location.id,
+            source_file_version_id: source_version.id,
+            source_file_location_id: Some(source_location.id),
             staging_path: staging_path.display().to_string(),
             size_bytes: staged_facts.size_bytes,
             checksum: staged_facts.content_hash.clone(),

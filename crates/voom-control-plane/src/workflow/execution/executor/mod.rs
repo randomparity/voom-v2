@@ -1,12 +1,15 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
+#[cfg(test)]
+use std::collections::BTreeMap;
+use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
-use tokio::task::JoinSet;
-use voom_core::OperationKind;
-use voom_core::{FileAssetId, FileVersionId, JobId, VoomError, WorkerId};
-use voom_store::repo::jobs::JobState;
+use tokio::task::{Id, JoinSet};
+use voom_core::{
+    FileAssetId, FileVersionId, JobId, LeaseId, OperationKind, TicketId, VoomError, WorkerId,
+};
+use voom_store::repo::execution::jobs::JobState;
 #[cfg(test)]
-use voom_store::repo::jobs::NewJob;
+use voom_store::repo::execution::jobs::NewJob;
 
 use super::dispatch::DispatchOutcome;
 use super::runtime::WorkerRuntimeRegistry;
@@ -24,7 +27,7 @@ pub(crate) use config::{
     OperationArtifactRoots, WORKFLOW_JOB_KIND, WorkflowArtifactRoots, WorkflowDispatchOptions,
     WorkflowQueueOptions, WorkflowStreamOptions, WorkflowTimingOptions,
 };
-pub(crate) use errors::WorkflowRunError;
+pub(crate) use errors::{WorkflowFailureDisposition, WorkflowRunError};
 use spawn::SpawnOutcome;
 
 #[derive(Debug, Clone)]
@@ -81,6 +84,7 @@ pub struct WorkflowExecutorOptions {
     pub timing: WorkflowTimingOptions,
     pub queue: WorkflowQueueOptions,
     pub artifact_roots: WorkflowArtifactRoots,
+    #[cfg(test)]
     pub chaos: WorkflowChaosOptions,
     #[cfg(test)]
     pub(crate) capacity_deferred_sync: Option<CapacityDeferredTestSync>,
@@ -108,6 +112,7 @@ impl WorkflowExecutorOptions {
         WorkflowDispatchOptions {
             timing: self.timing.clone(),
             artifact_roots: self.artifact_roots.clone(),
+            #[cfg(test)]
             chaos: self.chaos.clone(),
         }
     }
@@ -125,17 +130,20 @@ impl WorkflowExecutorOptions {
     }
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, Default)]
 pub struct WorkflowChaosOptions {
     pub disable_heartbeat_ticks: bool,
     pub suppress_heartbeat_operation: Option<OperationKind>,
     pub payload_modes: BTreeMap<OperationKind, String>,
+    pub(crate) panic_after_lease_operation: Option<OperationKind>,
     #[cfg(test)]
     pub(crate) post_dispatch_sync: Option<PostDispatchTestSync>,
     #[cfg(test)]
     pub(crate) fail_heartbeat_operation: Option<OperationKind>,
 }
 
+#[cfg(test)]
 impl WorkflowChaosOptions {
     #[cfg(test)]
     #[must_use]
@@ -191,6 +199,7 @@ impl WorkflowChaosOptions {
 struct RunLoopState {
     reservations: HashMap<WorkerId, u32>,
     active: JoinSet<DispatchOutcome>,
+    active_identities: HashMap<Id, DispatchIdentity>,
     summary: WorkflowRunSummary,
     fatal_error: Option<VoomError>,
     isolated_error: Option<VoomError>,
@@ -205,6 +214,14 @@ struct RunInvocation<'a> {
     workflow_id: &'a str,
     plan: &'a WorkflowPlan,
     failure_mode: RunFailureMode,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DispatchIdentity {
+    ticket_id: TicketId,
+    worker_id: WorkerId,
+    lease_id: LeaseId,
+    operation: OperationKind,
 }
 
 #[derive(Debug, Default)]
@@ -240,6 +257,7 @@ impl RunLoopState {
         Self {
             reservations: HashMap::new(),
             active: JoinSet::new(),
+            active_identities: HashMap::new(),
             summary: WorkflowRunSummary::empty(job_id, elapsed),
             fatal_error: None,
             isolated_error: None,
@@ -321,10 +339,15 @@ impl RunLoopState {
             .map(|remaining| interval.min(remaining))
     }
 
-    async fn refresh(&mut self, control: &ControlPlane, job_id: JobId, started: Instant) {
+    async fn refresh(
+        &mut self,
+        control: &ControlPlane,
+        job_id: JobId,
+        started: Instant,
+    ) -> Result<(), VoomError> {
         self.summary
-            .refresh_counts(control, job_id, started.elapsed())
-            .await;
+            .refresh_counts(&control.tickets, &control.leases, job_id, started.elapsed())
+            .await
     }
 
     async fn finish_success(
@@ -332,9 +355,9 @@ impl RunLoopState {
         control: &ControlPlane,
         job_id: JobId,
         started: Instant,
-    ) -> WorkflowRunSummary {
-        self.refresh(control, job_id, started).await;
-        self.summary.clone()
+    ) -> Result<WorkflowRunSummary, VoomError> {
+        self.refresh(control, job_id, started).await?;
+        Ok(self.summary.clone())
     }
 
     async fn fail_job(
@@ -344,14 +367,18 @@ impl RunLoopState {
         source: VoomError,
         started: Instant,
     ) -> WorkflowRunError {
-        let _ = control
+        let transition_error = control
             .fail_job(job_id, source.to_string(), control.clock().now())
-            .await;
-        self.refresh(control, job_id, started).await;
+            .await
+            .err();
+        let job_failed = transition_error.is_none();
+        let refresh_error = self.refresh(control, job_id, started).await.err();
+        let source = workflow_failure_source(job_id, source, transition_error, refresh_error);
         WorkflowRunError {
             summary: self.summary.clone(),
             source,
-            job_failed: true,
+            job_failed,
+            disposition: WorkflowFailureDisposition::Fatal,
             dispatch_started: self.dispatch_started,
         }
     }
@@ -363,11 +390,21 @@ impl RunLoopState {
         source: VoomError,
         started: Instant,
     ) -> WorkflowRunError {
-        self.refresh(control, job_id, started).await;
+        let Some(refresh_error) = self.refresh(control, job_id, started).await.err() else {
+            return WorkflowRunError {
+                summary: self.summary.clone(),
+                source,
+                job_failed: false,
+                disposition: WorkflowFailureDisposition::IsolatedTicket,
+                dispatch_started: self.dispatch_started,
+            };
+        };
+        let source = workflow_failure_source(job_id, source, None, Some(refresh_error));
         WorkflowRunError {
             summary: self.summary.clone(),
             source,
             job_failed: false,
+            disposition: WorkflowFailureDisposition::Fatal,
             dispatch_started: self.dispatch_started,
         }
     }
@@ -375,62 +412,41 @@ impl RunLoopState {
     async fn fail_after_drain(
         &mut self,
         executor: &WorkflowExecutor,
-        plan: &WorkflowPlan,
-        workflow_id: &str,
-        job_id: JobId,
+        invocation: &RunInvocation<'_>,
         source: VoomError,
         started: Instant,
     ) -> WorkflowRunError {
-        self.drain_active(
-            executor,
-            plan,
-            workflow_id,
-            job_id,
-            RunFailureMode::ContinueIndependent,
-        )
-        .await;
-        self.fail_job(&executor.control_plane, job_id, source, started)
+        let drain_invocation = RunInvocation {
+            failure_mode: RunFailureMode::ContinueIndependent,
+            ..*invocation
+        };
+        self.drain_active(executor, &drain_invocation).await;
+        let source = self.take_fatal_error().unwrap_or(source);
+        self.fail_job(&executor.control_plane, invocation.job_id, source, started)
             .await
     }
 
     async fn process_completed_dispatches(
         &mut self,
         executor: &WorkflowExecutor,
-        plan: &WorkflowPlan,
-        workflow_id: &str,
-        job_id: JobId,
-        failure_mode: RunFailureMode,
+        invocation: &RunInvocation<'_>,
     ) {
-        while let Some(joined) = self.active.try_join_next() {
-            self.process_joined_dispatch(executor, joined, plan, workflow_id, job_id, failure_mode)
+        while let Some(joined) = self.active.try_join_next_with_id() {
+            self.process_joined_dispatch(executor, joined, invocation)
                 .await;
         }
     }
 
-    async fn drain_active(
-        &mut self,
-        executor: &WorkflowExecutor,
-        plan: &WorkflowPlan,
-        workflow_id: &str,
-        job_id: JobId,
-        failure_mode: RunFailureMode,
-    ) {
-        while let Some(joined) = self.active.join_next().await {
-            self.process_joined_dispatch(executor, joined, plan, workflow_id, job_id, failure_mode)
+    async fn drain_active(&mut self, executor: &WorkflowExecutor, invocation: &RunInvocation<'_>) {
+        while let Some(joined) = self.active.join_next_with_id().await {
+            self.process_joined_dispatch(executor, joined, invocation)
                 .await;
         }
     }
 
-    async fn wait_for_one(
-        &mut self,
-        executor: &WorkflowExecutor,
-        plan: &WorkflowPlan,
-        workflow_id: &str,
-        job_id: JobId,
-        failure_mode: RunFailureMode,
-    ) {
-        if let Some(joined) = self.active.join_next().await {
-            self.process_joined_dispatch(executor, joined, plan, workflow_id, job_id, failure_mode)
+    async fn wait_for_one(&mut self, executor: &WorkflowExecutor, invocation: &RunInvocation<'_>) {
+        if let Some(joined) = self.active.join_next_with_id().await {
+            self.process_joined_dispatch(executor, joined, invocation)
                 .await;
         }
     }
@@ -438,25 +454,101 @@ impl RunLoopState {
     async fn process_joined_dispatch(
         &mut self,
         executor: &WorkflowExecutor,
-        joined: Result<DispatchOutcome, tokio::task::JoinError>,
-        plan: &WorkflowPlan,
-        workflow_id: &str,
-        job_id: JobId,
-        failure_mode: RunFailureMode,
+        joined: Result<(Id, DispatchOutcome), tokio::task::JoinError>,
+        invocation: &RunInvocation<'_>,
     ) {
+        let task_id = joined_task_id(&joined);
+        let Some(identity) = self.active_identities.remove(&task_id) else {
+            self.record_fatal_error(VoomError::Internal(format!(
+                "workflow dispatch task {task_id} completed without a dispatch identity"
+            )));
+            return;
+        };
+        spawn::decrement_reservation(&mut self.reservations, identity.worker_id);
         executor
             .process_joined_dispatch(
-                joined,
-                plan,
-                workflow_id,
-                job_id,
-                &mut self.reservations,
-                &mut self.summary,
-                failure_mode,
-                &mut self.fatal_error,
-                &mut self.isolated_error,
+                joined.map(|(_, outcome)| outcome),
+                identity,
+                invocation,
+                self,
             )
             .await;
+    }
+}
+
+fn joined_task_id(joined: &Result<(Id, DispatchOutcome), tokio::task::JoinError>) -> Id {
+    match joined {
+        Ok((task_id, _)) => *task_id,
+        Err(error) => error.id(),
+    }
+}
+
+fn workflow_failure_source(
+    job_id: JobId,
+    source: VoomError,
+    transition_error: Option<VoomError>,
+    refresh_error: Option<VoomError>,
+) -> VoomError {
+    if transition_error.is_none() && refresh_error.is_none() {
+        return source;
+    }
+    let diagnostic = workflow_failure_diagnostic(
+        job_id,
+        &source,
+        transition_error.as_ref(),
+        refresh_error.as_ref(),
+    );
+    match transition_error {
+        Some(VoomError::Database {
+            source: database_source,
+            ..
+        }) => VoomError::Database {
+            message: diagnostic,
+            source: database_source,
+        },
+        _ => match refresh_error {
+            Some(VoomError::Database {
+                source: database_source,
+                ..
+            }) => VoomError::Database {
+                message: diagnostic,
+                source: database_source,
+            },
+            _ => match source {
+                VoomError::Database {
+                    source: database_source,
+                    ..
+                } => VoomError::Database {
+                    message: diagnostic,
+                    source: database_source,
+                },
+                _ => VoomError::Internal(diagnostic),
+            },
+        },
+    }
+}
+
+fn workflow_failure_diagnostic(
+    job_id: JobId,
+    source: &VoomError,
+    transition_error: Option<&VoomError>,
+    refresh_error: Option<&VoomError>,
+) -> String {
+    match (transition_error, refresh_error) {
+        (None, None) => format!("workflow failed for job {job_id}: {source}"),
+        (Some(transition), None) => format!(
+            "workflow failed for job {job_id}: {source}; \
+             marking the job failed also failed: {transition}"
+        ),
+        (None, Some(refresh)) => format!(
+            "workflow failed for job {job_id}: {source}; \
+             refreshing the workflow summary also failed: {refresh}"
+        ),
+        (Some(transition), Some(refresh)) => format!(
+            "workflow failed for job {job_id}: {source}; \
+             marking the job failed also failed: {transition}; \
+             refreshing the workflow summary also failed: {refresh}"
+        ),
     }
 }
 
@@ -837,6 +929,7 @@ impl WorkflowExecutor {
                 summary,
                 source,
                 job_failed: false,
+                disposition: WorkflowFailureDisposition::Fatal,
                 dispatch_started: false,
             });
         }
@@ -858,6 +951,7 @@ impl WorkflowExecutor {
                     summary,
                     source,
                     job_failed: false,
+                    disposition: WorkflowFailureDisposition::Fatal,
                     dispatch_started: false,
                 });
             }
@@ -981,14 +1075,14 @@ impl WorkflowExecutor {
         state.dispatch_started = true;
 
         loop {
-            state
-                .process_completed_dispatches(self, &plan, workflow_id, job_id, failure_mode)
-                .await;
+            state.process_completed_dispatches(self, &invocation).await;
 
-            state.refresh(control, job_id, started).await;
+            if let Err(source) = state.refresh(control, job_id, started).await {
+                return Err(state.fail_job(control, job_id, source, started).await);
+            }
             if let Some(source) = state.take_fatal_error() {
                 return Err(state
-                    .fail_after_drain(self, &plan, workflow_id, job_id, source, started)
+                    .fail_after_drain(self, &invocation, source, started)
                     .await);
             }
             let finished = match self.workflow_finished(job_id, workflow_id).await {
@@ -999,9 +1093,12 @@ impl WorkflowExecutor {
             };
             if state.active_is_empty() && finished {
                 match self.first_failed_ticket_error(job_id, workflow_id).await {
-                    Ok(None) => {
-                        return Ok(state.finish_success(control, job_id, started).await);
-                    }
+                    Ok(None) => match state.finish_success(control, job_id, started).await {
+                        Ok(summary) => return Ok(summary),
+                        Err(source) => {
+                            return Err(state.fail_job(control, job_id, source, started).await);
+                        }
+                    },
                     Ok(Some(source)) => {
                         let source = state.take_isolated_error().unwrap_or(source);
                         return match failure_mode {
@@ -1030,7 +1127,7 @@ impl WorkflowExecutor {
                     self.options.queue.accelerator_unavailable_timeout
                 ));
                 return Err(state
-                    .fail_after_drain(self, &plan, workflow_id, job_id, source, started)
+                    .fail_after_drain(self, &invocation, source, started)
                     .await);
             }
             if dispatch.made_progress {
@@ -1049,9 +1146,7 @@ impl WorkflowExecutor {
                     .await?;
                 continue;
             }
-            state
-                .wait_for_one(self, &plan, workflow_id, job_id, failure_mode)
-                .await;
+            state.wait_for_one(self, &invocation).await;
         }
     }
 }

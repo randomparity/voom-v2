@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::error::Error;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
@@ -15,15 +16,16 @@ use voom_core::clock_test_support::ManualClock;
 use voom_core::rng_test_support::FrozenRng;
 use voom_core::{
     ErrorCode, FailureClass, FileAssetId, FileVersionId, JobId, LeaseId, MediaSnapshotId, TicketId,
-    TicketOperation, VoomError, WorkerId,
+    TicketOperation, VoomError, WorkerId, WorkerKind,
 };
-use voom_store::repo::identity::{
-    DiscoveredFile, FileLocationKind, IdentityRepo, IngestOutcome, NewFileVersion, ProducedBy,
+use voom_store::repo::execution::jobs::NewJob;
+use voom_store::repo::execution::leases::NewLease;
+use voom_store::repo::execution::tickets::{NewTicket, Ticket};
+use voom_store::repo::execution::workers::{NewCapability, NewGrant};
+use voom_store::repo::media::identity::{
+    DiscoveredFile, FileAssetRepo, FileLocationKind, FileVersionRepo, IngestOutcome,
+    NewFileVersion, ProducedBy,
 };
-use voom_store::repo::jobs::NewJob;
-use voom_store::repo::leases::NewLease;
-use voom_store::repo::tickets::{NewTicket, Ticket};
-use voom_store::repo::workers::{NewCapability, NewGrant, NewWorker, WorkerKind};
 use voom_worker_protocol::{
     AudioObservedFacts, AudioOutputStreamFact, ClientHandle, DispatchStream,
     ExtractAudioOutputResult, ExtractAudioRequest, ExtractAudioResult, ExtractAudioStatus,
@@ -34,7 +36,11 @@ use voom_worker_protocol::{
 };
 
 use super::super::leases::retry_on_database_locked;
-use super::{CapacityDeferredTestSync, DispatchReadyOutcome, PostDispatchTestSync, RunLoopState};
+use super::{
+    CapacityDeferredTestSync, DispatchIdentity, DispatchReadyOutcome, PostDispatchTestSync,
+    RunInvocation, RunLoopState, WorkflowFailureDisposition, workflow_failure_source,
+};
+use crate::workflow::execution::dispatch::{DispatchOutcome, DispatchTerminal};
 use crate::workflow::execution::executor::WorkflowExecutorOptions;
 use crate::workflow::execution::operation_adapters::{
     LeaseHeartbeatContext, await_with_lease_heartbeats,
@@ -119,6 +125,271 @@ async fn retry_on_database_locked_does_not_retry_other_errors() {
 
     assert_eq!(err.error_code(), ErrorCode::ConfigInvalid);
     assert_eq!(attempts.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn fail_job_reports_transition_failure_without_claiming_durable_failure() {
+    let fixture = ExecutorFixture::without_workers(0).await;
+    let job_id = fixture.open_workflow_job().await;
+    sqlx::query(
+        "CREATE TRIGGER reject_job_failed_event \
+         BEFORE INSERT ON events WHEN NEW.kind = 'job.failed' \
+         BEGIN SELECT RAISE(ABORT, 'reject job.failed'); END",
+    )
+    .execute(&fixture.cp.pool)
+    .await
+    .unwrap();
+    let mut state = RunLoopState::new(job_id, Duration::ZERO);
+
+    let error = state
+        .fail_job(
+            &fixture.cp,
+            job_id,
+            VoomError::Internal("original workflow failure".to_owned()),
+            Instant::now(),
+        )
+        .await;
+
+    sqlx::query("DROP TRIGGER reject_job_failed_event")
+        .execute(&fixture.cp.pool)
+        .await
+        .unwrap();
+    assert!(!error.job_failed);
+    assert_eq!(error.disposition, WorkflowFailureDisposition::Fatal);
+    assert_eq!(
+        fixture.job_state_and_epoch(job_id).await,
+        ("open".to_owned(), 0)
+    );
+    assert_eq!(fixture.event_count("job.failed").await, 0);
+    assert_sqlx_source(&error.source, "reject job.failed");
+    let message = error.source.to_string();
+    assert_fragments_in_order(
+        &message,
+        &[
+            "workflow failed for job",
+            "original workflow failure",
+            "marking the job failed also failed",
+            "reject job.failed",
+        ],
+    );
+}
+
+#[tokio::test]
+async fn fail_job_preserves_transition_and_refresh_failures_in_order() {
+    let fixture = ExecutorFixture::without_workers(0).await;
+    let job_id = fixture.open_workflow_job().await;
+    sqlx::query(
+        "CREATE TRIGGER reject_job_failed_event \
+         BEFORE INSERT ON events WHEN NEW.kind = 'job.failed' \
+         BEGIN SELECT RAISE(ABORT, 'reject job.failed'); END",
+    )
+    .execute(&fixture.cp.pool)
+    .await
+    .unwrap();
+    sqlx::query("ALTER TABLE leases RENAME TO unavailable_leases")
+        .execute(&fixture.cp.pool)
+        .await
+        .unwrap();
+    let mut state = RunLoopState::new(job_id, Duration::ZERO);
+
+    let error = state
+        .fail_job(
+            &fixture.cp,
+            job_id,
+            VoomError::database_context("original workflow failure", sqlx::Error::RowNotFound),
+            Instant::now(),
+        )
+        .await;
+
+    sqlx::query("ALTER TABLE unavailable_leases RENAME TO leases")
+        .execute(&fixture.cp.pool)
+        .await
+        .unwrap();
+    sqlx::query("DROP TRIGGER reject_job_failed_event")
+        .execute(&fixture.cp.pool)
+        .await
+        .unwrap();
+    assert!(!error.job_failed);
+    assert_eq!(
+        fixture.job_state_and_epoch(job_id).await,
+        ("open".to_owned(), 0)
+    );
+    assert_eq!(fixture.event_count("job.failed").await, 0);
+    assert_sqlx_source(&error.source, "reject job.failed");
+    let message = error.source.to_string();
+    assert_fragments_in_order(
+        &message,
+        &[
+            "original workflow failure",
+            "marking the job failed also failed",
+            "reject job.failed",
+            "refreshing the workflow summary also failed",
+            "no such table: leases",
+        ],
+    );
+}
+
+#[tokio::test]
+async fn fail_job_preserves_original_when_refresh_fails_after_durable_transition() {
+    let fixture = ExecutorFixture::without_workers(0).await;
+    let job_id = fixture.open_workflow_job().await;
+    sqlx::query("ALTER TABLE leases RENAME TO unavailable_leases")
+        .execute(&fixture.cp.pool)
+        .await
+        .unwrap();
+    let mut state = RunLoopState::new(job_id, Duration::ZERO);
+
+    let error = state
+        .fail_job(
+            &fixture.cp,
+            job_id,
+            VoomError::database_context("original workflow failure", sqlx::Error::RowNotFound),
+            Instant::now(),
+        )
+        .await;
+
+    sqlx::query("ALTER TABLE unavailable_leases RENAME TO leases")
+        .execute(&fixture.cp.pool)
+        .await
+        .unwrap();
+    assert!(error.job_failed);
+    assert_eq!(
+        fixture.job_state_and_epoch(job_id).await,
+        ("failed".to_owned(), 1)
+    );
+    assert_eq!(fixture.event_count("job.failed").await, 1);
+    assert_sqlx_source(&error.source, "no such table: leases");
+    let message = error.source.to_string();
+    assert_fragments_in_order(
+        &message,
+        &[
+            "original workflow failure",
+            "refreshing the workflow summary also failed",
+            "no such table: leases",
+        ],
+    );
+}
+
+#[tokio::test]
+async fn fail_job_preserves_primary_database_source_when_transition_is_non_database() {
+    let fixture = ExecutorFixture::without_workers(0).await;
+    let job_id = fixture.open_workflow_job().await;
+    fixture
+        .cp
+        .cancel_job(job_id, "operator cancelled workflow".to_owned(), T0)
+        .await
+        .unwrap();
+    let mut state = RunLoopState::new(job_id, Duration::ZERO);
+
+    let error = state
+        .fail_job(
+            &fixture.cp,
+            job_id,
+            VoomError::database_context("primary workflow query", sqlx::Error::RowNotFound),
+            Instant::now(),
+        )
+        .await;
+
+    assert!(!error.job_failed);
+    assert_eq!(error.disposition, WorkflowFailureDisposition::Fatal);
+    assert_eq!(
+        fixture.job_state_and_epoch(job_id).await,
+        ("cancelled".to_owned(), 1)
+    );
+    assert_eq!(fixture.event_count("job.failed").await, 0);
+    assert_sqlx_source(&error.source, "no rows returned");
+    assert_fragments_in_order(
+        &error.source.to_string(),
+        &[
+            "primary workflow query",
+            "marking the job failed also failed",
+            "conflict",
+            "cancelled",
+        ],
+    );
+}
+
+#[test]
+fn failure_source_preserves_primary_database_source_when_refresh_is_non_database() {
+    let error = workflow_failure_source(
+        JobId(42),
+        VoomError::database_context("primary workflow query", sqlx::Error::RowNotFound),
+        None,
+        Some(VoomError::Conflict(
+            "summary changed concurrently".to_owned(),
+        )),
+    );
+
+    assert_sqlx_source(&error, "no rows returned");
+    assert_fragments_in_order(
+        &error.to_string(),
+        &[
+            "primary workflow query",
+            "refreshing the workflow summary also failed",
+            "summary changed concurrently",
+        ],
+    );
+}
+
+#[tokio::test]
+async fn isolated_failure_refresh_error_is_fatal_and_preserves_ticket_diagnostic() {
+    let fixture = ExecutorFixture::without_workers(0).await;
+    let job_id = fixture.open_workflow_job().await;
+    sqlx::query("ALTER TABLE leases RENAME TO unavailable_leases")
+        .execute(&fixture.cp.pool)
+        .await
+        .unwrap();
+    let mut state = RunLoopState::new(job_id, Duration::ZERO);
+
+    let error = state
+        .finish_isolated_failure(
+            &fixture.cp,
+            job_id,
+            VoomError::WorkerCrash("ticket worker crashed".to_owned()),
+            Instant::now(),
+        )
+        .await;
+
+    sqlx::query("ALTER TABLE unavailable_leases RENAME TO leases")
+        .execute(&fixture.cp.pool)
+        .await
+        .unwrap();
+    assert!(!error.job_failed);
+    assert_eq!(error.disposition, WorkflowFailureDisposition::Fatal);
+    assert_eq!(
+        fixture.job_state_and_epoch(job_id).await,
+        ("open".to_owned(), 0)
+    );
+    assert_eq!(fixture.event_count("job.failed").await, 0);
+    assert_sqlx_source(&error.source, "no such table: leases");
+    assert_fragments_in_order(
+        &error.source.to_string(),
+        &[
+            "ticket worker crashed",
+            "refreshing the workflow summary also failed",
+            "no such table: leases",
+        ],
+    );
+}
+
+fn assert_sqlx_source(error: &VoomError, expected: &str) {
+    assert_eq!(error.error_code(), ErrorCode::DbUnreachable);
+    let source = error.source().unwrap();
+    let sqlx_error = source.downcast_ref::<sqlx::Error>().unwrap();
+    assert!(
+        sqlx_error.to_string().contains(expected),
+        "source {sqlx_error:?} did not contain {expected:?}"
+    );
+}
+
+fn assert_fragments_in_order(actual: &str, expected: &[&str]) {
+    let mut remaining = actual;
+    for fragment in expected {
+        let Some(index) = remaining.find(fragment) else {
+            panic!("missing {fragment:?} after prior fragments in {actual:?}");
+        };
+        remaining = &remaining[index + fragment.len()..];
+    }
 }
 
 #[tokio::test]
@@ -625,7 +896,13 @@ async fn stopped_capacity_wait_leaves_restartable_durable_state() {
         .occupy_worker_capacity(&other, worker_id, OperationKind::HashFile)
         .await;
     let job_id = fixture.open_workflow_job().await;
-    let executor = fixture.executor_with_options(WorkflowExecutorOptions::for_tests());
+    let sync = CapacityDeferredTestSync {
+        observed: Arc::new(tokio::sync::Notify::new()),
+        resume: Arc::new(tokio::sync::Notify::new()),
+    };
+    let mut options = WorkflowExecutorOptions::for_tests();
+    options.capacity_deferred_sync = Some(sync.clone());
+    let executor = fixture.executor_with_options(options);
     let plan = fixture.plan.clone();
     let run = tokio::spawn(async move {
         executor
@@ -638,7 +915,10 @@ async fn stopped_capacity_wait_leaves_restartable_durable_state() {
             .await
     });
     let ticket_before = fixture.wait_for_workflow_ticket().await;
-    tokio::time::sleep(Duration::from_millis(30)).await;
+    tokio::time::timeout(Duration::from_secs(5), sync.observed.notified())
+        .await
+        .unwrap();
+    assert!(!run.is_finished());
 
     run.abort();
     assert!(run.await.unwrap_err().is_cancelled());
@@ -682,6 +962,84 @@ async fn stopped_capacity_wait_leaves_restartable_durable_state() {
     assert_eq!(fixture.worker_dispatch_count(worker_id), 1);
     assert_eq!(fixture.job_state(job_id).await, "cancelled");
     assert_eq!(fixture.ticket_state(ticket_before.id).await, "ready");
+}
+
+#[tokio::test]
+async fn dropped_active_dispatch_recovers_through_durable_lease_expiry() {
+    let mut fixture = ExecutorFixture::single_worker_with_behavior(FakeBehavior::Hang).await;
+    let worker_id = fixture.worker_id();
+    let job_id = fixture.open_workflow_job().await;
+    let mut options = WorkflowExecutorOptions::for_tests();
+    options.queue.max_attempts = 2;
+    options.timing.lease_ttl = Duration::from_secs(5);
+    let executor = fixture.executor_with_options(options.clone());
+    let plan = fixture.plan.clone();
+    let run = tokio::spawn(async move {
+        executor
+            .submit_and_run_invocation_in_job(
+                job_id,
+                "active-dispatch-restart",
+                plan,
+                super::RunFailureMode::AbortJob,
+            )
+            .await
+    });
+    for _ in 0..200 {
+        if fixture.worker_dispatch_count(worker_id) == 1 && fixture.held_lease_count().await == 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(fixture.worker_dispatch_count(worker_id), 1);
+    assert_eq!(fixture.held_lease_count().await, 1);
+    let ticket = fixture.first_workflow_ticket().await;
+
+    run.abort();
+    assert!(run.await.unwrap_err().is_cancelled());
+    assert_eq!(fixture.ticket_state(ticket.id).await, "leased");
+    assert_eq!(fixture.event_count("ticket.failed_terminal").await, 0);
+
+    fixture.clock.advance(time::Duration::seconds(6));
+    let expiry = fixture
+        .cp
+        .expire_due(fixture.cp.clock().now())
+        .await
+        .unwrap();
+    assert_eq!(expiry.requeued_tickets, vec![ticket.id]);
+    assert_eq!(fixture.ticket_state(ticket.id).await, "ready");
+    assert_eq!(fixture.held_lease_count().await, 0);
+
+    let client = Arc::new(FakeClient::new(worker_id, FakeBehavior::Success));
+    fixture.registry.register_in_process_runtime(
+        worker_id,
+        client.clone(),
+        WorkerCredentials {
+            worker_id,
+            worker_epoch: 0,
+            secret: SecretString::from("test-secret"),
+        },
+    );
+    fixture.clients.insert(worker_id, client);
+    let restart = fixture.executor_with_options(options);
+    let workflow_id = format!("workflow-{}-active-dispatch-restart", job_id.0);
+    let invocation = RunInvocation {
+        job_id,
+        workflow_id: &workflow_id,
+        plan: &fixture.plan,
+        failure_mode: super::RunFailureMode::AbortJob,
+    };
+    let mut state = RunLoopState::new(job_id, Duration::ZERO);
+    let dispatch = restart
+        .dispatch_ready_tickets(&mut state, &invocation)
+        .await;
+    assert!(dispatch.made_progress);
+    state.wait_for_one(&restart, &invocation).await;
+
+    assert_eq!(state.summary.dispatch_count, 1);
+    assert!(state.fatal_error.is_none());
+    assert_eq!(fixture.worker_dispatch_count(worker_id), 1);
+    assert_eq!(fixture.ticket_state(ticket.id).await, "succeeded");
+    assert_eq!(fixture.held_lease_count().await, 0);
 }
 
 #[tokio::test]
@@ -909,6 +1267,303 @@ async fn worker_crash_fails_terminally() {
     assert_eq!(err.source.error_code(), ErrorCode::WorkerCrash);
     assert_eq!(err.summary.dispatch_count, 1);
     assert_eq!(err.summary.failure_count, 1);
+}
+
+#[tokio::test]
+async fn panicked_dispatch_fails_its_real_non_hash_ticket() {
+    let (fixture, mut options) = panicking_identify_fixture().await;
+    options.queue.max_attempts = 1;
+
+    let Ok(result) =
+        tokio::time::timeout(Duration::from_secs(5), fixture.run_with_options(options)).await
+    else {
+        panic!("panicked dispatch cleanup must not stall");
+    };
+    let err = result.unwrap_err();
+
+    assert_eq!(err.source.error_code(), ErrorCode::WorkerCrash);
+    assert_eq!(err.disposition, WorkflowFailureDisposition::Fatal);
+    assert!(err.job_failed);
+    assert_eq!(fixture.held_lease_count().await, 0);
+    assert_eq!(fixture.first_ticket_failed_class().await, "worker_crash");
+    let identify = err
+        .summary
+        .per_operation
+        .get(&OperationKind::IdentifyMedia)
+        .unwrap();
+    assert_eq!(identify.failure_count, 1);
+    assert_eq!(identify.last_failure_class, Some(FailureClass::WorkerCrash));
+    assert!(
+        !err.summary
+            .per_operation
+            .contains_key(&OperationKind::HashFile)
+    );
+}
+
+#[tokio::test]
+async fn panicked_dispatch_releases_capacity_before_retry() {
+    let (fixture, mut options) = panicking_identify_fixture().await;
+    options.queue.max_attempts = 2;
+
+    let Ok(result) =
+        tokio::time::timeout(Duration::from_secs(5), fixture.run_with_options(options)).await
+    else {
+        panic!("panicked dispatch retry must not stall at worker capacity");
+    };
+    let err = result.unwrap_err();
+
+    assert_eq!(err.source.error_code(), ErrorCode::WorkerCrash);
+    assert_eq!(err.summary.dispatch_count, 2);
+    assert_eq!(err.summary.retry_count, 1);
+    assert_eq!(fixture.held_lease_count().await, 0);
+    let identify = err
+        .summary
+        .per_operation
+        .get(&OperationKind::IdentifyMedia)
+        .unwrap();
+    assert_eq!(identify.dispatch_count, 2);
+    assert_eq!(identify.failure_count, 2);
+}
+
+#[tokio::test]
+async fn terminal_panicked_dispatch_is_isolated_in_continue_mode() {
+    let (fixture, mut options) = panicking_identify_fixture().await;
+    options.queue.max_attempts = 1;
+    let job_id = fixture.open_workflow_job().await;
+    let executor = fixture.executor_with_options(options);
+
+    let err = executor
+        .submit_and_run_invocation_in_job(
+            job_id,
+            "panic-continue",
+            fixture.plan.clone(),
+            super::RunFailureMode::ContinueIndependent,
+        )
+        .await
+        .unwrap_err();
+
+    assert_eq!(err.source.error_code(), ErrorCode::WorkerCrash);
+    assert_eq!(err.disposition, WorkflowFailureDisposition::IsolatedTicket);
+    assert!(!err.job_failed);
+    assert_eq!(fixture.held_lease_count().await, 0);
+}
+
+#[tokio::test]
+async fn every_join_consumer_clears_identity_and_reservation() {
+    let fixture = ExecutorFixture::with_ready_tickets(0).await;
+    let worker_id = fixture.first_worker_id.unwrap();
+    let job_id = fixture.open_workflow_job().await;
+    let executor = fixture.executor_with_options(WorkflowExecutorOptions::for_tests());
+    let invocation = RunInvocation {
+        job_id,
+        workflow_id: "completion-bookkeeping",
+        plan: &fixture.plan,
+        failure_mode: super::RunFailureMode::ContinueIndependent,
+    };
+
+    let mut completed = tracked_failed_dispatch(&fixture, worker_id).await;
+    completed
+        .process_completed_dispatches(&executor, &invocation)
+        .await;
+    assert_completion_bookkeeping_cleared(&completed);
+
+    let mut drained = tracked_failed_dispatch(&fixture, worker_id).await;
+    drained.drain_active(&executor, &invocation).await;
+    assert_completion_bookkeeping_cleared(&drained);
+
+    let mut waited = tracked_failed_dispatch(&fixture, worker_id).await;
+    waited.wait_for_one(&executor, &invocation).await;
+    assert_completion_bookkeeping_cleared(&waited);
+}
+
+#[tokio::test]
+async fn completed_task_without_identity_is_a_contextual_fatal_error() {
+    let fixture = ExecutorFixture::without_workers(0).await;
+    let job_id = fixture.open_workflow_job().await;
+    let executor = fixture.executor_with_options(WorkflowExecutorOptions::for_tests());
+    let invocation = RunInvocation {
+        job_id,
+        workflow_id: "missing-identity",
+        plan: &fixture.plan,
+        failure_mode: super::RunFailureMode::ContinueIndependent,
+    };
+    let mut state = RunLoopState::new(job_id, Duration::ZERO);
+    let handle = state.active.spawn(async { successful_dispatch_outcome() });
+    let task_id = handle.id();
+    while !handle.is_finished() {
+        tokio::task::yield_now().await;
+    }
+
+    state
+        .process_completed_dispatches(&executor, &invocation)
+        .await;
+
+    assert!(state.active.is_empty());
+    assert!(state.active_identities.is_empty());
+    let error = state.fatal_error.unwrap();
+    assert!(error.to_string().contains(&task_id.to_string()));
+    assert!(error.to_string().contains("without a dispatch identity"));
+}
+
+#[tokio::test]
+async fn mismatched_completed_task_identity_is_a_contextual_fatal_error() {
+    let fixture = ExecutorFixture::without_workers(0).await;
+    let job_id = fixture.open_workflow_job().await;
+    let executor = fixture.executor_with_options(WorkflowExecutorOptions::for_tests());
+    let invocation = RunInvocation {
+        job_id,
+        workflow_id: "mismatched-identity",
+        plan: &fixture.plan,
+        failure_mode: super::RunFailureMode::ContinueIndependent,
+    };
+    for identity in [
+        DispatchIdentity {
+            ticket_id: TicketId(19),
+            worker_id: WorkerId(23),
+            lease_id: LeaseId(31),
+            operation: OperationKind::IdentifyMedia,
+        },
+        DispatchIdentity {
+            ticket_id: TicketId(17),
+            worker_id: WorkerId(29),
+            lease_id: LeaseId(31),
+            operation: OperationKind::IdentifyMedia,
+        },
+        DispatchIdentity {
+            ticket_id: TicketId(17),
+            worker_id: WorkerId(23),
+            lease_id: LeaseId(31),
+            operation: OperationKind::HashFile,
+        },
+    ] {
+        let mut state = RunLoopState::new(job_id, Duration::ZERO);
+        state.reservations.insert(identity.worker_id, 1);
+        let handle = state.active.spawn(async { successful_dispatch_outcome() });
+        state.active_identities.insert(handle.id(), identity);
+
+        state.wait_for_one(&executor, &invocation).await;
+
+        assert_completion_bookkeeping_cleared(&state);
+        let error = state.fatal_error.unwrap();
+        assert!(error.to_string().contains("identity mismatch"));
+    }
+}
+
+#[tokio::test]
+async fn drain_infrastructure_failure_supersedes_retained_ticket_error() {
+    let fixture = ExecutorFixture::without_workers(0).await;
+    let job_id = fixture.open_workflow_job().await;
+    let executor = fixture.executor_with_options(WorkflowExecutorOptions::for_tests());
+    let invocation = RunInvocation {
+        job_id,
+        workflow_id: "drain-failure-precedence",
+        plan: &fixture.plan,
+        failure_mode: super::RunFailureMode::AbortJob,
+    };
+    let mut state = RunLoopState::new(job_id, Duration::ZERO);
+    state.active.spawn(async { successful_dispatch_outcome() });
+
+    let error = state
+        .fail_after_drain(
+            &executor,
+            &invocation,
+            VoomError::WorkerCrash("retained ticket failure".to_owned()),
+            std::time::Instant::now(),
+        )
+        .await;
+
+    assert_eq!(error.source.error_code(), ErrorCode::Internal);
+    assert!(
+        error
+            .source
+            .to_string()
+            .contains("without a dispatch identity")
+    );
+    assert!(!error.source.to_string().contains("retained ticket failure"));
+    assert!(error.job_failed);
+}
+
+#[tokio::test]
+async fn cancelled_dispatch_fails_real_lease_and_is_fatal_in_continue_mode() {
+    let fixture = ExecutorFixture::with_ready_tickets(0).await;
+    let worker_id = fixture.first_worker_id.unwrap();
+    let job_id = fixture.open_workflow_job().await;
+    let (ticket_id, lease_id) = fixture.create_heartbeat_test_lease(worker_id).await;
+    let executor = fixture.executor_with_options(WorkflowExecutorOptions::for_tests());
+    let invocation = RunInvocation {
+        job_id,
+        workflow_id: "cancelled-dispatch",
+        plan: &fixture.plan,
+        failure_mode: super::RunFailureMode::ContinueIndependent,
+    };
+    let identity = DispatchIdentity {
+        ticket_id,
+        worker_id,
+        lease_id,
+        operation: OperationKind::HashFile,
+    };
+    let mut state = RunLoopState::new(job_id, Duration::ZERO);
+    state.reservations.insert(worker_id, 1);
+    let handle = state
+        .active
+        .spawn(async { std::future::pending::<DispatchOutcome>().await });
+    state.active_identities.insert(handle.id(), identity);
+
+    state.active.abort_all();
+    state.drain_active(&executor, &invocation).await;
+
+    assert_completion_bookkeeping_cleared(&state);
+    assert_eq!(fixture.held_lease_count().await, 0);
+    assert_eq!(fixture.ticket_state(ticket_id).await, "failed");
+    assert_eq!(fixture.first_ticket_failed_class().await, "worker_crash");
+    assert_eq!(
+        state.fatal_error.as_ref().unwrap().error_code(),
+        ErrorCode::WorkerCrash
+    );
+}
+
+#[tokio::test]
+async fn join_cleanup_database_failure_preserves_source_and_operation_count() {
+    let fixture = ExecutorFixture::with_ready_tickets(0).await;
+    let worker_id = fixture.first_worker_id.unwrap();
+    let job_id = fixture.open_workflow_job().await;
+    let (ticket_id, lease_id) = fixture.create_heartbeat_test_lease(worker_id).await;
+    let executor = fixture.executor_with_options(WorkflowExecutorOptions::for_tests());
+    let invocation = RunInvocation {
+        job_id,
+        workflow_id: "join-cleanup-database-failure",
+        plan: &fixture.plan,
+        failure_mode: super::RunFailureMode::ContinueIndependent,
+    };
+    let identity = DispatchIdentity {
+        ticket_id,
+        worker_id,
+        lease_id,
+        operation: OperationKind::HashFile,
+    };
+    let mut state = RunLoopState::new(job_id, Duration::ZERO);
+    state.reservations.insert(worker_id, 1);
+    let handle = state
+        .active
+        .spawn(async { std::future::pending::<DispatchOutcome>().await });
+    state.active_identities.insert(handle.id(), identity);
+    state.active.abort_all();
+    fixture.cp.pool.close().await;
+
+    state.drain_active(&executor, &invocation).await;
+
+    assert_completion_bookkeeping_cleared(&state);
+    let failure = state.fatal_error.as_ref().unwrap();
+    assert_eq!(failure.error_code(), ErrorCode::DbUnreachable);
+    assert!(failure.source().is_some());
+    assert!(failure.to_string().contains(&lease_id.to_string()));
+    let hash = state
+        .summary
+        .per_operation
+        .get(&OperationKind::HashFile)
+        .unwrap();
+    assert_eq!(hash.failure_count, 1);
+    assert_eq!(hash.last_failure_class, Some(FailureClass::WorkerCrash));
 }
 
 #[tokio::test]
@@ -1242,6 +1897,10 @@ async fn continued_invocation_dispatches_every_independent_branch_and_leaves_job
 
     assert_eq!(error.summary.dispatch_count, 3);
     assert!(!error.job_failed);
+    assert_eq!(
+        error.disposition,
+        WorkflowFailureDisposition::IsolatedTicket
+    );
     assert_eq!(fixture.job_state(job_id).await, "open");
 }
 
@@ -1650,7 +2309,7 @@ async fn policy_extract_audio_root_ticket_carries_source_ids_audio_payload_and_r
     );
     assert_eq!(
         workflow_payload.rendered_payload["audio"]["outputs"][0]["output_id"],
-        voom_plan::audio::extract_output_id("node_extract_audio_test", "stream-audio-1")
+        voom_plan::planner::audio::extract_output_id("node_extract_audio_test", "stream-audio-1")
     );
     assert_eq!(
         workflow_payload.rendered_payload["audio"]["outputs"][0]["name_suffix"],
@@ -2386,6 +3045,74 @@ async fn policy_transcode_success_result_includes_generated_staging_path() {
 async fn await_with_lease_heartbeats_refreshes_workflow_lease_while_future_runs() {
     let fixture = ExecutorFixture::with_ready_tickets(1).await;
     let worker_id = fixture.worker_id();
+    let (_unrelated_ticket_id, unrelated_lease_id) =
+        fixture.create_heartbeat_test_lease(worker_id).await;
+    let (_ticket_id, lease_id) = fixture.create_heartbeat_test_lease(worker_id).await;
+    let mut options = WorkflowExecutorOptions::for_tests();
+    options.timing.heartbeat_interval = Duration::from_millis(10);
+    let operation_gate = Arc::new(tokio::sync::Notify::new());
+    let operation_gate_in_task = operation_gate.clone();
+    let control = fixture.cp.clone();
+    let timing = options.timing.clone();
+    let chaos = options.chaos.clone();
+    let mut heartbeat_task = tokio::spawn(async move {
+        let context = LeaseHeartbeatContext {
+            control: &control,
+            lease_id,
+            timing: &timing,
+            chaos: &chaos,
+        };
+        await_with_lease_heartbeats(context, OperationKind::HashFile, async move {
+            operation_gate_in_task.notified().await;
+            Ok::<_, VoomError>(())
+        })
+        .await
+    });
+    let (acquired_at, initial_heartbeat_at) = fixture.lease_heartbeat_window(lease_id).await;
+    assert_eq!(initial_heartbeat_at, acquired_at);
+    fixture.clock.advance(time::Duration::milliseconds(80));
+    let observed_heartbeat_at =
+        match wait_for_lease_heartbeat(&fixture, lease_id, acquired_at, Duration::from_secs(5))
+            .await
+        {
+            Ok(observed) => observed,
+            Err(diagnostic) => {
+                operation_gate.notify_one();
+                let cleanup =
+                    tokio::time::timeout(Duration::from_secs(5), &mut heartbeat_task).await;
+                if cleanup.is_err() {
+                    heartbeat_task.abort();
+                    let _ = heartbeat_task.await;
+                }
+                panic!("{diagnostic}; wrapper cleanup result: {cleanup:?}");
+            }
+        };
+
+    operation_gate.notify_one();
+    let Ok(joined) = tokio::time::timeout(Duration::from_secs(5), &mut heartbeat_task).await else {
+        heartbeat_task.abort();
+        let cleanup = heartbeat_task.await;
+        panic!("heartbeat wrapper did not finish after release: {cleanup:?}");
+    };
+    joined.unwrap().unwrap();
+
+    let (final_acquired_at, final_heartbeat_at) = fixture.lease_heartbeat_window(lease_id).await;
+    let (unrelated_acquired_at, unrelated_heartbeat_at) =
+        fixture.lease_heartbeat_window(unrelated_lease_id).await;
+    assert_eq!(final_acquired_at, acquired_at);
+    assert_eq!(unrelated_heartbeat_at, unrelated_acquired_at);
+    assert!(
+        final_heartbeat_at >= observed_heartbeat_at && final_heartbeat_at > acquired_at,
+        "heartbeat wrapper must keep the outer workflow lease fresh: \
+         acquired_at={acquired_at}, observed_heartbeat_at={observed_heartbeat_at}, \
+         final_heartbeat_at={final_heartbeat_at}"
+    );
+}
+
+#[tokio::test]
+async fn heartbeat_write_does_not_block_operation_holding_sqlite_writer_lock() {
+    let fixture = ExecutorFixture::with_ready_tickets(1).await;
+    let worker_id = fixture.worker_id();
     let (_ticket_id, lease_id) = fixture.create_heartbeat_test_lease(worker_id).await;
     let mut options = WorkflowExecutorOptions::for_tests();
     options.timing.heartbeat_interval = Duration::from_millis(10);
@@ -2395,32 +3122,27 @@ async fn await_with_lease_heartbeats_refreshes_workflow_lease_while_future_runs(
         timing: &options.timing,
         chaos: &options.chaos,
     };
-
-    // The freshness assertion is driven by the injected ManualClock: advancing it
-    // sets last_heartbeat_at to T0+80ms independent of tokio's clock. Run the
-    // heartbeat loop in real time rather than under tokio's paused, auto-advancing
-    // clock: pausing makes the runtime auto-advance past the pool's acquire_timeout
-    // while a heartbeat write waits on the blocking DB thread, which spuriously
-    // failed the write with "pool timed out" on loaded runners. The 10ms heartbeat
-    // interval against the 80ms future keeps a wide ordering margin, so at least one
-    // heartbeat still fires before the future completes under load.
-    fixture.clock.advance(time::Duration::milliseconds(80));
-    let heartbeat = await_with_lease_heartbeats(context, OperationKind::HashFile, async {
-        tokio::time::sleep(Duration::from_millis(80)).await;
+    let operation = async {
+        let mut transaction = fixture.cp.pool_for_test().begin().await.unwrap();
+        sqlx::query("UPDATE leases SET last_heartbeat_at = last_heartbeat_at WHERE id = ?")
+            .bind(i64::try_from(lease_id.0).unwrap())
+            .execute(&mut *transaction)
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        transaction.commit().await.unwrap();
         Ok::<_, VoomError>(())
-    });
-    tokio::pin!(heartbeat);
-    tokio::select! {
-        result = &mut heartbeat => panic!("heartbeat future finished early: {result:?}"),
-        () = tokio::task::yield_now() => {}
-    }
-    heartbeat.await.unwrap();
+    };
 
-    let (acquired_at, last_heartbeat_at) = fixture.first_lease_heartbeat_window().await;
+    let result = tokio::time::timeout(
+        Duration::from_secs(2),
+        await_with_lease_heartbeats(context, OperationKind::HashFile, operation),
+    )
+    .await;
+
     assert!(
-        last_heartbeat_at > acquired_at,
-        "heartbeat wrapper must keep the outer workflow lease fresh: \
-         acquired_at={acquired_at}, last_heartbeat_at={last_heartbeat_at}"
+        matches!(result, Ok(Ok(()))),
+        "operation stalled: {result:?}"
     );
 }
 
@@ -2649,6 +3371,38 @@ async fn wait_for_new_lease_heartbeat(
     None
 }
 
+async fn wait_for_lease_heartbeat(
+    fixture: &ExecutorFixture,
+    lease_id: LeaseId,
+    acquired_at: OffsetDateTime,
+    timeout: Duration,
+) -> Result<OffsetDateTime, String> {
+    let observation = async {
+        loop {
+            let (current_acquired_at, last_heartbeat_at) =
+                fixture.lease_heartbeat_window(lease_id).await;
+            if current_acquired_at != acquired_at {
+                return Err(format!(
+                    "lease {lease_id} acquired_at changed while observing heartbeats: \
+                     expected={acquired_at}, actual={current_acquired_at}"
+                ));
+            }
+            if last_heartbeat_at > acquired_at {
+                return Ok(last_heartbeat_at);
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    };
+    let Ok(result) = tokio::time::timeout(timeout, observation).await else {
+        let (_, last_heartbeat_at) = fixture.lease_heartbeat_window(lease_id).await;
+        return Err(format!(
+            "timed out after {timeout:?} waiting for lease {lease_id} heartbeat: \
+             acquired_at={acquired_at}, last_heartbeat_at={last_heartbeat_at}"
+        ));
+    };
+    result
+}
+
 #[tokio::test]
 async fn policy_transcode_dispatch_rejects_malformed_worker_result() {
     let mut fixture = ExecutorFixture::without_workers(0).await;
@@ -2798,11 +3552,9 @@ async fn seed_terminally_ineligible_worker(
 ) {
     let worker = fixture
         .cp
-        .register_worker(NewWorker {
+        .register_worker(crate::cases::workers::RegisterWorkerInput {
             name: format!("{}-worker", ineligibility.label()),
             kind: WorkerKind::Synthetic,
-            registered_at: T0,
-            node_id: None,
         })
         .await
         .unwrap();
@@ -3013,11 +3765,9 @@ impl ExecutorFixture {
     ) -> WorkerId {
         let worker = self
             .cp
-            .register_worker(NewWorker {
+            .register_worker(crate::cases::workers::RegisterWorkerInput {
                 name: name.to_owned(),
                 kind: WorkerKind::Synthetic,
-                registered_at: T0,
-                node_id: None,
             })
             .await
             .unwrap();
@@ -3309,6 +4059,14 @@ impl ExecutorFixture {
             .unwrap()
     }
 
+    async fn job_state_and_epoch(&self, job_id: JobId) -> (String, i64) {
+        sqlx::query_as("SELECT state, epoch FROM jobs WHERE id = ?")
+            .bind(i64::try_from(job_id.0).unwrap())
+            .fetch_one(&self.cp.pool)
+            .await
+            .unwrap()
+    }
+
     async fn non_terminal_ticket_count(&self, job_id: JobId) -> i64 {
         sqlx::query_scalar(
             "SELECT COUNT(*) FROM tickets \
@@ -3347,6 +4105,19 @@ impl ExecutorFixture {
         .fetch_one(&self.cp.pool)
         .await
         .unwrap();
+        (
+            parse_test_time(&acquired_at),
+            parse_test_time(&last_heartbeat_at),
+        )
+    }
+
+    async fn lease_heartbeat_window(&self, lease_id: LeaseId) -> (OffsetDateTime, OffsetDateTime) {
+        let (acquired_at, last_heartbeat_at): (String, String) =
+            sqlx::query_as("SELECT acquired_at, last_heartbeat_at FROM leases WHERE id = ?")
+                .bind(i64::try_from(lease_id.0).unwrap())
+                .fetch_one(&self.cp.pool)
+                .await
+                .unwrap();
         (
             parse_test_time(&acquired_at),
             parse_test_time(&last_heartbeat_at),
@@ -3659,9 +4430,9 @@ impl ExecutorFixture {
         source_media_snapshot_id: MediaSnapshotId,
         max_attempts: u32,
     ) -> (
-        voom_store::repo::tickets::Ticket,
+        voom_store::repo::execution::tickets::Ticket,
         WorkflowTicketPayload,
-        voom_store::repo::leases::Lease,
+        voom_store::repo::execution::leases::Lease,
     ) {
         let job = self
             .cp
@@ -4303,6 +5074,77 @@ fn simple_operation_node(id: &str, operation: OperationKind) -> OperationNode {
     }
 }
 
+async fn panicking_identify_fixture() -> (ExecutorFixture, WorkflowExecutorOptions) {
+    let mut fixture = ExecutorFixture::without_workers(0).await;
+    fixture.plan.nodes = vec![simple_operation_node(
+        "identify",
+        OperationKind::IdentifyMedia,
+    )];
+    fixture
+        .register_worker(
+            "identify-worker",
+            OperationKind::IdentifyMedia,
+            1,
+            FakeBehavior::Success,
+        )
+        .await;
+    let mut options = WorkflowExecutorOptions::for_tests();
+    options.chaos.panic_after_lease_operation = Some(OperationKind::IdentifyMedia);
+    (fixture, options)
+}
+
+async fn tracked_failed_dispatch(fixture: &ExecutorFixture, worker_id: WorkerId) -> RunLoopState {
+    let (ticket_id, lease_id) = fixture.create_heartbeat_test_lease(worker_id).await;
+    fixture
+        .cp
+        .fail_lease(
+            lease_id,
+            "prepared joined failure".to_owned(),
+            FailureClass::WorkerCrash,
+            fixture.cp.clock().now(),
+        )
+        .await
+        .unwrap();
+    let identity = DispatchIdentity {
+        ticket_id,
+        worker_id,
+        lease_id,
+        operation: OperationKind::HashFile,
+    };
+    let mut state = RunLoopState::new(JobId(900), Duration::ZERO);
+    state.reservations.insert(worker_id, 1);
+    let handle = state.active.spawn(async move {
+        DispatchOutcome {
+            ticket_id,
+            worker_id,
+            operation: OperationKind::HashFile,
+            terminal: DispatchTerminal::Failure {
+                source: VoomError::WorkerCrash("prepared joined failure".to_owned()),
+            },
+        }
+    });
+    state.active_identities.insert(handle.id(), identity);
+    while !handle.is_finished() {
+        tokio::task::yield_now().await;
+    }
+    state
+}
+
+fn successful_dispatch_outcome() -> DispatchOutcome {
+    DispatchOutcome {
+        ticket_id: TicketId(17),
+        worker_id: WorkerId(23),
+        operation: OperationKind::IdentifyMedia,
+        terminal: DispatchTerminal::Success,
+    }
+}
+
+fn assert_completion_bookkeeping_cleared(state: &RunLoopState) {
+    assert!(state.active.is_empty());
+    assert!(state.active_identities.is_empty());
+    assert!(state.reservations.is_empty());
+}
+
 fn policy_transcode_plan(target: TargetRef) -> WorkflowPlan {
     // The resolved_profile is normally emitted by the planner (Task 5.2) and
     // threaded via binding.rs into the ticket payload. Here we supply it
@@ -4443,7 +5285,7 @@ fn policy_extract_audio_plan_for_snapshot(
                 "type": "commentary"
             },
             "outputs": [{
-                "output_id": voom_plan::audio::extract_output_id(
+                "output_id": voom_plan::planner::audio::extract_output_id(
                     operation_id,
                     "stream-audio-1"
                 ),
@@ -4512,7 +5354,8 @@ fn policy_synthesize_audio_plan(
     source_media_snapshot_id: MediaSnapshotId,
 ) -> WorkflowPlan {
     let operation_id = "node_synthesis_test";
-    let companion_id = voom_plan::audio::synthesis_companion_id(operation_id, "stream-audio-1");
+    let companion_id =
+        voom_plan::planner::audio::synthesis_companion_id(operation_id, "stream-audio-1");
     single_policy_operation_plan(
         "policy-synthesize-audio-test",
         "policy-node_synthesize_audio",

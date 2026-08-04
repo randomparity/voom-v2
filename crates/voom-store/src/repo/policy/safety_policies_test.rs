@@ -1,3 +1,5 @@
+use std::error::Error;
+
 use time::OffsetDateTime;
 use voom_core::{OperationKind, VoomError};
 
@@ -196,6 +198,40 @@ async fn unknown_operation_token_in_row_fails_loud_on_read() {
     .unwrap();
     let err = repo.get_by_slug("x").await.unwrap_err();
     assert!(matches!(err, VoomError::Database { .. }), "got {err:?}");
+    assert_eq!(err.code(), "DB_UNREACHABLE");
+    assert!(err.source().is_none());
+}
+
+#[tokio::test]
+async fn malformed_json_list_columns_preserve_serde_sources() {
+    let (repo, pool, _tmp) = repo().await;
+    repo.create(sample("safe"), now()).await.unwrap();
+
+    for column in ["auto_execute_operations", "allowed_commit_modes"] {
+        sqlx::query(&format!(
+            "UPDATE safety_policies SET {column} = 'not-json' WHERE slug = 'safe'"
+        ))
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let error = repo.get_by_slug("safe").await.unwrap_err();
+        assert_eq!(error.code(), "DB_UNREACHABLE");
+        let display = error.to_string();
+        let source = error.source().expect("serde source");
+        let serde_error = source.downcast_ref::<serde_json::Error>().unwrap();
+        assert_eq!(
+            display,
+            format!("database error: safety_policies.{column} decode: {serde_error}")
+        );
+
+        sqlx::query(&format!(
+            "UPDATE safety_policies SET {column} = '[]' WHERE slug = 'safe'"
+        ))
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
 }
 
 #[tokio::test]

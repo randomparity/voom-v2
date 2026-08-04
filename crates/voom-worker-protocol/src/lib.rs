@@ -7,11 +7,10 @@
 )]
 //! Versioned HTTP/JSON worker protocol for VOOM.
 //!
-//! Public API surface is fixed in `docs/superpowers/specs/2026-05-19-voom-sprint-2-phase-1-design.md`.
-//! Sub-modules land incrementally in the Phase 1 commit sequence; this
-//! commit replaces the Sprint 0 placeholder with the empty real
-//! module skeleton so subsequent commits can fill it without
-//! disturbing the build.
+//! This crate owns the typed operation payloads, authentication and identity
+//! handshakes, HTTP/NDJSON transport, worker startup contract, and accelerator
+//! capability descriptors shared across the process boundary. Worker execution
+//! and control-plane scheduling remain in their respective crates.
 
 pub mod encoder_caps;
 pub mod http;

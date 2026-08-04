@@ -2,12 +2,12 @@ use std::collections::{BTreeSet, HashSet};
 
 use serde_json::Value;
 use voom_core::VoomError;
-use voom_plan::remux::{
+use voom_plan::planner::remux::{
     RemuxOperationPayload, RemuxPlanningBlock, SnapshotFact, SnapshotStreamFact,
     resolve_track_keep_ids, stream_facts,
 };
 use voom_policy::{DefaultStrategy, TrackTarget};
-use voom_store::repo::identity::MediaSnapshot;
+use voom_store::repo::media::identity::MediaSnapshot;
 use voom_worker_protocol::{RemuxSelection, RemuxStreamRef};
 
 pub fn selection_from_payload_and_snapshot(
@@ -328,7 +328,7 @@ impl EffectiveDefaultAction<'_> {
 }
 
 fn effective_default_actions(
-    defaults: &[voom_plan::remux::RemuxDefaultAction],
+    defaults: &[voom_plan::planner::remux::RemuxDefaultAction],
 ) -> Result<Vec<EffectiveDefaultAction<'_>>, VoomError> {
     let classified = defaults
         .iter()
@@ -362,7 +362,7 @@ fn effective_default_actions(
 }
 
 fn classify_default_action(
-    action: &voom_plan::remux::RemuxDefaultAction,
+    action: &voom_plan::planner::remux::RemuxDefaultAction,
 ) -> Result<ClassifiedDefaultAction<'_>, VoomError> {
     match (
         action.strategy,

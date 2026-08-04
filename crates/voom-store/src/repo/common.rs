@@ -5,14 +5,14 @@ use serde::Serialize;
 use time::OffsetDateTime;
 use voom_core::VoomError;
 
-#[expect(clippy::cast_possible_wrap, reason = "SQLite rowid fits i64")]
-pub(crate) const fn i64_from_u64(v: u64) -> i64 {
-    v as i64
+pub(crate) fn i64_from_u64(v: u64, field: impl std::fmt::Display) -> Result<i64, VoomError> {
+    i64::try_from(v)
+        .map_err(|error| VoomError::database_context(format!("{field}: i64 conv from {v}"), error))
 }
 
-#[expect(clippy::cast_sign_loss, reason = "SQLite rowid is non-negative")]
-pub(crate) const fn u64_from_i64(v: i64) -> u64 {
-    v as u64
+pub(crate) fn u64_from_i64(v: i64, field: impl std::fmt::Display) -> Result<u64, VoomError> {
+    u64::try_from(v)
+        .map_err(|error| VoomError::database_context(format!("{field}: u64 conv from {v}"), error))
 }
 
 pub(crate) fn u32_from_i64(v: i64) -> Result<u32, VoomError> {
@@ -36,6 +36,6 @@ pub(crate) fn serialize_json<T: Serialize + ?Sized>(
     serde_json::to_string(v).map_err(|e| VoomError::Internal(format!("serialize {field}: {e}")))
 }
 
-pub(crate) fn map_row_err(table: &'static str, e: &sqlx::Error) -> VoomError {
-    VoomError::database(format!("{table} row decode: {e}"))
+pub(crate) fn map_row_err(table: &'static str, e: sqlx::Error) -> VoomError {
+    VoomError::database_context(format!("{table} row decode"), e)
 }

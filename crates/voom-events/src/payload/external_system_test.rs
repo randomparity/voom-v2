@@ -24,9 +24,28 @@ fn assert_rejects_unknown<T: Serialize + DeserializeOwned>(valid: &T) {
 }
 
 #[test]
+fn external_system_ids_preserve_numeric_wire_representation() {
+    let payload = ExternalSystemLinkedPayload {
+        external_system_id: voom_core::ExternalSystemId(51),
+        link_id: voom_core::ExternalSystemLinkId(52),
+        target_type: "media_work".to_owned(),
+        target_id: 53,
+        external_ref: "plex://library/metadata/1".to_owned(),
+    };
+
+    let json = serde_json::to_value(&payload).unwrap();
+    assert_eq!(json["external_system_id"], 51);
+    assert_eq!(json["link_id"], 52);
+    assert_eq!(
+        serde_json::from_value::<ExternalSystemLinkedPayload>(json).unwrap(),
+        payload
+    );
+}
+
+#[test]
 fn registered_payload_round_trip_through_event() {
     let p = ExternalSystemRegisteredPayload {
-        external_system_id: 3,
+        external_system_id: voom_core::ExternalSystemId(3),
         kind: "filesystem".to_owned(),
         display_name: "local media".to_owned(),
         health_status: "unknown".to_owned(),
@@ -39,7 +58,7 @@ fn registered_payload_round_trip_through_event() {
 #[test]
 fn health_changed_payload_round_trip_through_event() {
     let p = ExternalSystemHealthChangedPayload {
-        external_system_id: 3,
+        external_system_id: voom_core::ExternalSystemId(3),
         previous: "unknown".to_owned(),
         current: "healthy".to_owned(),
     };
@@ -51,8 +70,8 @@ fn health_changed_payload_round_trip_through_event() {
 #[test]
 fn linked_and_unlinked_payloads_round_trip_through_event() {
     let linked = ExternalSystemLinkedPayload {
-        external_system_id: 3,
-        link_id: 8,
+        external_system_id: voom_core::ExternalSystemId(3),
+        link_id: voom_core::ExternalSystemLinkId(8),
         target_type: "media_work".to_owned(),
         target_id: 42,
         external_ref: "plex://library/metadata/1".to_owned(),
@@ -63,8 +82,8 @@ fn linked_and_unlinked_payloads_round_trip_through_event() {
         Event::ExternalSystemLinked(linked)
     );
     let unlinked = ExternalSystemUnlinkedPayload {
-        external_system_id: 3,
-        link_id: 8,
+        external_system_id: voom_core::ExternalSystemId(3),
+        link_id: voom_core::ExternalSystemLinkId(8),
         target_type: "media_work".to_owned(),
         target_id: 42,
         external_ref: "plex://library/metadata/1".to_owned(),
@@ -79,7 +98,7 @@ fn linked_and_unlinked_payloads_round_trip_through_event() {
 #[test]
 fn synced_payload_round_trip_through_event() {
     let p = ExternalSystemSyncedPayload {
-        external_system_id: 3,
+        external_system_id: voom_core::ExternalSystemId(3),
         outcome: "ok".to_owned(),
         links_recorded: 2,
         links_retired: 1,
@@ -94,18 +113,18 @@ fn synced_payload_round_trip_through_event() {
 #[test]
 fn payloads_reject_unknown_fields() {
     assert_rejects_unknown(&ExternalSystemRegisteredPayload {
-        external_system_id: 3,
+        external_system_id: voom_core::ExternalSystemId(3),
         kind: "filesystem".to_owned(),
         display_name: "local media".to_owned(),
         health_status: "unknown".to_owned(),
     });
     assert_rejects_unknown(&ExternalSystemHealthChangedPayload {
-        external_system_id: 3,
+        external_system_id: voom_core::ExternalSystemId(3),
         previous: "unknown".to_owned(),
         current: "healthy".to_owned(),
     });
     assert_rejects_unknown(&ExternalSystemSyncedPayload {
-        external_system_id: 3,
+        external_system_id: voom_core::ExternalSystemId(3),
         outcome: "ok".to_owned(),
         links_recorded: 0,
         links_retired: 0,

@@ -3,7 +3,7 @@ use std::io;
 use serde::Serialize;
 use voom_control_plane::ControlPlane;
 use voom_core::OperationKind;
-use voom_store::repo::safety_policies::{NewSafetyPolicy, SafetyPolicy};
+use voom_store::repo::policy::safety_policies::{NewSafetyPolicy, SafetyPolicy};
 
 use crate::cli::{SafetyPolicyCommand, SafetyPolicyFields};
 use crate::commands::common::{emit_voom_error, open_control_plane};

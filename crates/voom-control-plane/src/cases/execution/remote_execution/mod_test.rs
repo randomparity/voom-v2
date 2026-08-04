@@ -3,7 +3,7 @@ use super::*;
 use serde_json::json;
 use time::{Duration, OffsetDateTime};
 use voom_core::{
-    ErrorCode, FailureClass, LeaseId, NodeId, TicketId, TicketOperation,
+    ArtifactAccessMode, ErrorCode, FailureClass, LeaseId, NodeId, TicketId, TicketOperation,
     clock_test_support::FrozenClock,
 };
 use voom_events::EventKind;
@@ -11,14 +11,14 @@ use voom_scheduler::{
     NodeCandidate, SCORING_VERSION, SchedulerCandidate, ScoreDecision, ScoreOutcome,
     ScoreReasonCode, TicketCandidate, WorkerCandidate,
 };
-use voom_store::repo::artifact_access_plans::{ArtifactAccessMode, ArtifactAccessPlanStatus};
-use voom_store::repo::nodes::NodeKind;
-use voom_store::repo::remote_idempotency::RemoteMutationReplay;
-use voom_store::repo::scheduler_decisions::{
+use voom_store::repo::execution::nodes::NodeKind;
+use voom_store::repo::execution::remote_idempotency::RemoteMutationReplay;
+use voom_store::repo::execution::scheduler_decisions::{
     SchedulerDecisionFilter, SchedulerDecisionOutcome, SchedulerReasonCode,
 };
-use voom_store::repo::tickets::{NewTicket, TicketState};
-use voom_store::repo::workers::WorkerKind;
+use voom_store::repo::execution::tickets::{NewTicket, TicketState};
+use voom_store::repo::execution::workers::WorkerKind;
+use voom_store::repo::media::artifact_access_plans::ArtifactAccessPlanStatus;
 
 use crate::cases::count;
 use crate::cases::workers::nodes::RegisterNodeInput;
@@ -28,6 +28,128 @@ use crate::cases::workers::{
 
 const T0: OffsetDateTime = OffsetDateTime::UNIX_EPOCH;
 const OP: &str = "test.remote";
+
+#[test]
+fn remote_replay_outcomes_reject_unknown_fields() {
+    assert_unknown_rejected::<RemoteNodeHeartbeatOutcome>(json!({
+        "node_id": 1,
+        "status": "active"
+    }));
+    assert_unknown_rejected::<RemoteAcquireOutcome>(json!({
+        "outcome": "idle",
+        "worker_id": 1,
+        "scheduler_decision_id": 2
+    }));
+    assert_unknown_rejected::<RemoteAcquireOutcome>(json!({
+        "outcome": "no_candidate",
+        "worker_id": 1,
+        "scheduler_decision_id": 2
+    }));
+    let mut leased = remote_lease_dispatch_json();
+    leased["outcome"] = json!("leased");
+    assert_unknown_rejected::<RemoteAcquireOutcome>(leased);
+    assert_unknown_rejected::<RemoteLeaseDispatch>(remote_lease_dispatch_json());
+    assert_unknown_rejected::<RemoteLeaseHeartbeatOutcome>(json!({
+        "lease_id": 1,
+        "worker_id": 2,
+        "ttl_seconds": 60
+    }));
+    assert_unknown_rejected::<RemoteCompleteOutcome>(json!({
+        "lease_id": 1,
+        "ticket_id": 2,
+        "worker_id": 3,
+        "artifact_access_plan": remote_artifact_access_plan_json()
+    }));
+    assert_unknown_rejected::<RemoteFailOutcome>(json!({
+        "lease_id": 1,
+        "ticket_id": 2,
+        "worker_id": 3,
+        "artifact_access_plan": remote_artifact_access_plan_json()
+    }));
+    assert_unknown_rejected::<RemoteArtifactAccessPlan>(remote_artifact_access_plan_json());
+}
+
+#[test]
+fn remote_acquire_outcomes_preserve_durable_wire_shapes() {
+    let idle = RemoteAcquireOutcome::Idle {
+        worker_id: voom_core::WorkerId(1),
+        scheduler_decision_id: 2,
+    };
+    assert_eq!(
+        serde_json::to_value(idle).unwrap(),
+        json!({
+            "outcome": "idle",
+            "worker_id": 1,
+            "scheduler_decision_id": 2
+        })
+    );
+
+    let no_candidate = RemoteAcquireOutcome::NoCandidate {
+        worker_id: voom_core::WorkerId(1),
+        scheduler_decision_id: 2,
+    };
+    assert_eq!(
+        serde_json::to_value(no_candidate).unwrap(),
+        json!({
+            "outcome": "no_candidate",
+            "worker_id": 1,
+            "scheduler_decision_id": 2
+        })
+    );
+
+    let leased = RemoteAcquireOutcome::Leased(RemoteLeaseDispatch {
+        lease_id: LeaseId(1),
+        scheduler_decision_id: 2,
+        ticket_id: TicketId(3),
+        worker_id: voom_core::WorkerId(4),
+        operation: "test.remote".to_owned(),
+        dispatch_payload: json!({}),
+        lease_ttl_seconds: 60,
+        heartbeat_after_seconds: 20,
+        artifact_access_plan: RemoteArtifactAccessPlan {
+            id: 1,
+            input_handles: vec!["input".to_owned()],
+            output_handles: vec!["output".to_owned()],
+            selected_access_mode: ArtifactAccessMode::SharedMount,
+        },
+    });
+    let mut expected = remote_lease_dispatch_json();
+    expected["outcome"] = json!("leased");
+    assert_eq!(serde_json::to_value(leased).unwrap(), expected);
+}
+
+fn assert_unknown_rejected<T>(value: serde_json::Value)
+where
+    T: serde::de::DeserializeOwned,
+{
+    assert!(serde_json::from_value::<T>(value.clone()).is_ok());
+    let mut value = value;
+    value["unexpected"] = json!(true);
+    assert!(serde_json::from_value::<T>(value).is_err());
+}
+
+fn remote_lease_dispatch_json() -> serde_json::Value {
+    json!({
+        "lease_id": 1,
+        "scheduler_decision_id": 2,
+        "ticket_id": 3,
+        "worker_id": 4,
+        "operation": "test.remote",
+        "dispatch_payload": {},
+        "lease_ttl_seconds": 60,
+        "heartbeat_after_seconds": 20,
+        "artifact_access_plan": remote_artifact_access_plan_json()
+    })
+}
+
+fn remote_artifact_access_plan_json() -> serde_json::Value {
+    json!({
+        "id": 1,
+        "input_handles": ["input"],
+        "output_handles": ["output"],
+        "selected_access_mode": "shared_mount"
+    })
+}
 
 fn ticket_op(value: &str) -> TicketOperation {
     TicketOperation::new(value).unwrap()
@@ -344,7 +466,7 @@ fn score_remote_candidates_uses_global_no_candidate_reason_priority() {
             denied: false,
             active_leases: 0,
             max_parallel: 1,
-            artifact_access: vec!["shared_mount".to_owned()],
+            artifact_access: vec![ArtifactAccessMode::SharedMount],
         },
         node: NodeCandidate {
             node_id: NodeId(1),
@@ -609,7 +731,7 @@ fn scheduler_candidate(operation: &str, ticket_id: TicketId) -> SchedulerCandida
             denied: false,
             active_leases: 0,
             max_parallel: 1,
-            artifact_access: vec!["local_path".to_owned()],
+            artifact_access: Vec::new(),
         },
         node: NodeCandidate {
             node_id: NodeId(1),
@@ -639,108 +761,60 @@ async fn remote_acquire_replays_new_idle_decision_without_duplicate_log() {
 }
 
 #[tokio::test]
-async fn remote_acquire_replays_legacy_idle_without_decision_id() {
+async fn remote_acquire_repoints_noncanonical_replays_terminal() {
     let fixture = remote_fixture(&[(OP, vec!["shared_mount"])], &[OP], &[]).await;
-    seed_legacy_acquire_replay(
-        &fixture,
-        "legacy-idle",
-        "hash-legacy-idle",
-        json!({
-            "outcome": "idle",
-            "worker_id": fixture.worker_id,
-        }),
-    )
-    .await;
+    let cases = [
+        (
+            "missing-decision-id",
+            json!({
+                "outcome": "idle",
+                "worker_id": fixture.worker_id,
+            }),
+        ),
+        (
+            "null-decision-id",
+            json!({
+                "outcome": "idle",
+                "worker_id": fixture.worker_id,
+                "scheduler_decision_id": null,
+            }),
+        ),
+        (
+            "wrong-decision-id-type",
+            json!({
+                "outcome": "idle",
+                "worker_id": fixture.worker_id,
+                "scheduler_decision_id": "42",
+            }),
+        ),
+        ("non-object-data", json!("idle")),
+        (
+            "unknown-outcome",
+            json!({ "outcome": "unrecognized_future_variant" }),
+        ),
+    ];
 
-    let replay = fixture
-        .cp
-        .remote_acquire(fixture.acquire_input("legacy-idle", "hash-legacy-idle"))
-        .await
-        .unwrap();
+    for (name, data) in cases {
+        let key = format!("poison-{name}");
+        let request_hash = format!("hash-{name}");
+        seed_legacy_acquire_replay(&fixture, &key, &request_hash, data).await;
 
-    assert_eq!(
-        replay,
-        RemoteAcquireOutcome::Idle {
-            worker_id: fixture.worker_id,
-            scheduler_decision_id: 0,
-        }
-    );
-}
+        let err = fixture
+            .cp
+            .remote_acquire(fixture.acquire_input(&key, &request_hash))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, VoomError::Internal(_)),
+            "{name} replay should surface a decode error, got: {err:?}"
+        );
 
-#[tokio::test]
-async fn remote_acquire_poisoned_replay_is_rewritten_terminal() {
-    // M7 regression: a completed idempotency row whose stored Ok{data} no
-    // longer decodes into RemoteAcquireOutcome (e.g. after the outcome struct
-    // changed) must be rewritten to a terminal Error replay in the same
-    // transaction that observes the decode failure. Otherwise every future
-    // call with the same key re-runs the identical decode failure forever.
-    // The original mutation already executed, so it must NOT be re-run — only
-    // the stored result is repointed.
-    let fixture = remote_fixture(&[(OP, vec!["shared_mount"])], &[OP], &[]).await;
-    seed_legacy_acquire_replay(
-        &fixture,
-        "poisoned",
-        "hash-poisoned",
-        json!({ "outcome": "unrecognized_future_variant" }),
-    )
-    .await;
-
-    let err = fixture
-        .cp
-        .remote_acquire(fixture.acquire_input("poisoned", "hash-poisoned"))
-        .await
-        .unwrap_err();
-    assert!(
-        matches!(err, VoomError::Internal(_)),
-        "poisoned replay should surface a decode error, got: {err:?}"
-    );
-
-    // The stored row must now be a terminal Error replay, not the original
-    // un-decodable Ok{data} that would re-fail decode on every future call.
-    let stored = stored_replay(&fixture, "poisoned").await;
-    assert!(
-        matches!(stored, RemoteMutationReplay::Error { .. }),
-        "poisoned replay must be rewritten terminal, still: {stored:?}"
-    );
-}
-
-#[tokio::test]
-async fn remote_acquire_replays_legacy_lease_without_decision_id() {
-    let fixture = remote_fixture(&[(OP, vec!["shared_mount"])], &[OP], &[]).await;
-    seed_legacy_acquire_replay(
-        &fixture,
-        "legacy-leased",
-        "hash-legacy-leased",
-        json!({
-            "outcome": "leased",
-            "lease_id": 91,
-            "ticket_id": 92,
-            "worker_id": fixture.worker_id,
-            "operation": OP,
-            "dispatch_payload": {"dispatch": {"kind": OP}},
-            "lease_ttl_seconds": 60,
-            "heartbeat_after_seconds": 30,
-            "artifact_access_plan": {
-                "id": 93,
-                "input_handles": ["handle:input:test"],
-                "output_handles": ["handle:output:test"],
-                "selected_access_mode": "shared_mount"
-            }
-        }),
-    )
-    .await;
-
-    let replay = fixture
-        .cp
-        .remote_acquire(fixture.acquire_input("legacy-leased", "hash-legacy-leased"))
-        .await
-        .unwrap();
-
-    let RemoteAcquireOutcome::Leased(dispatch) = replay else {
-        panic!("expected legacy leased replay");
-    };
-    assert_eq!(dispatch.scheduler_decision_id, 0);
-    assert_eq!(dispatch.worker_id, fixture.worker_id);
+        let stored = stored_replay(&fixture, &key).await;
+        assert!(
+            matches!(stored, RemoteMutationReplay::Error { .. }),
+            "{name} replay must be rewritten terminal, still: {stored:?}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -845,12 +919,12 @@ async fn remote_acquire_requires_worker_node_ownership_capability_grant_and_no_d
         .remote_acquire(denied.acquire_input("denied", "hash-denied"))
         .await
         .unwrap();
-    let RemoteAcquireOutcome::NoCandidate {
+    let RemoteAcquireOutcome::Idle {
         scheduler_decision_id,
         ..
     } = outcome
     else {
-        panic!("expected denied no-candidate");
+        panic!("expected denied idle result");
     };
     let decision = denied
         .cp
@@ -858,7 +932,7 @@ async fn remote_acquire_requires_worker_node_ownership_capability_grant_and_no_d
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(decision.reason_code.as_str(), "operation_denied");
+    assert_eq!(decision.outcome, SchedulerDecisionOutcome::Idle);
     assert_eq!(
         denied
             .cp
@@ -887,6 +961,39 @@ async fn remote_acquire_requires_worker_node_ownership_capability_grant_and_no_d
         dispatch.artifact_access_plan.selected_access_mode,
         ArtifactAccessMode::SharedMount
     );
+}
+
+#[tokio::test]
+async fn remote_acquire_ignores_unknown_artifact_access_when_known_mode_is_advertised() {
+    let fixture = remote_fixture(
+        &[(OP, vec!["future_transport", "shared_mount"])],
+        &[OP],
+        &[],
+    )
+    .await;
+    fixture.ready_ticket(OP).await;
+
+    let outcome = fixture
+        .cp
+        .remote_acquire(fixture.acquire_input("mixed-access", "hash-mixed-access"))
+        .await
+        .unwrap();
+    let RemoteAcquireOutcome::Leased(dispatch) = outcome else {
+        panic!("expected known artifact access mode to remain selectable");
+    };
+    let plan = fixture
+        .cp
+        .artifact_access_plans()
+        .get_by_lease(dispatch.lease_id)
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(
+        dispatch.artifact_access_plan.selected_access_mode,
+        ArtifactAccessMode::SharedMount
+    );
+    assert_eq!(plan.selected_access_mode, ArtifactAccessMode::SharedMount);
 }
 
 #[tokio::test]
@@ -935,6 +1042,49 @@ async fn remote_acquire_replays_unsupported_artifact_access_no_candidate_without
 }
 
 #[tokio::test]
+async fn remote_authentication_failures_share_unauthorized_error() {
+    let missing_node = remote_fixture(&[(OP, vec!["shared_mount"])], &[OP], &[]).await;
+    let mut missing_node_input = missing_node.acquire_input("missing-node", "hash-missing-node");
+    missing_node_input.node_id = NodeId(u64::MAX);
+    let missing_node_error = missing_node
+        .cp
+        .remote_acquire(missing_node_input)
+        .await
+        .unwrap_err();
+
+    let local_node = fixture_with_options(
+        NodeKind::Local,
+        WorkerKind::Remote,
+        &[(OP, vec!["shared_mount"])],
+        &[OP],
+        &[],
+    )
+    .await;
+    let local_node_error = local_node
+        .cp
+        .remote_acquire(local_node.acquire_input("local-node-auth", "hash-local-node-auth"))
+        .await
+        .unwrap_err();
+
+    let wrong_token = remote_fixture(&[(OP, vec!["shared_mount"])], &[OP], &[]).await;
+    let mut wrong_token_input = wrong_token.acquire_input("wrong-token", "hash-wrong-token");
+    wrong_token_input.token = secrecy::SecretString::from("incorrect-token");
+    let wrong_token_error = wrong_token
+        .cp
+        .remote_acquire(wrong_token_input)
+        .await
+        .unwrap_err();
+
+    for error in [&missing_node_error, &local_node_error, &wrong_token_error] {
+        assert_eq!(error.error_code(), ErrorCode::Unauthorized);
+        assert_eq!(
+            error.to_string(),
+            "unauthorized: remote node authentication failed"
+        );
+    }
+}
+
+#[tokio::test]
 async fn remote_acquire_requires_remote_node_and_worker_kind() {
     let local_node = fixture_with_options(
         NodeKind::Local,
@@ -950,7 +1100,7 @@ async fn remote_acquire_requires_remote_node_and_worker_kind() {
         .remote_acquire(local_node.acquire_input("local-node", "hash-local-node"))
         .await
         .unwrap_err();
-    assert_eq!(err.error_code(), ErrorCode::Conflict);
+    assert_eq!(err.error_code(), ErrorCode::Unauthorized);
 
     let local_worker = fixture_with_options(
         NodeKind::Remote,

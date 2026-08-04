@@ -6,24 +6,25 @@
 
 //! Pending-commit lock retrofit — end-to-end coverage for the two call
 //! sites wired in M3 Phase 2 commit 5 (`SqliteUseLeaseRepo::acquire_in_tx` and
-//! `IdentityRepo::record_discovered_file_in_tx::AliasAttached`) plus the
-//! architectural exemption for `IdentityRepo::reconcile_rename_in_tx`.
+//! `IngestRepo::record_discovered_file_in_tx::AliasAttached`) plus the
+//! architectural exemption for `IngestRepo::reconcile_rename_in_tx`.
 //! Disk-mode parity via the M1 harness mirrors the Phase A suite.
 
 use sqlx::SqlitePool;
 use time::Duration;
 use voom_core::{FileAssetId, FileLocationId, FileVersionId, VoomError};
 use voom_events::EventKind;
-use voom_store::repo::commit_safety_gate::{
+use voom_store::repo::audit::events::{EventFilter, EventRepo, Page, SqliteEventRepo};
+use voom_store::repo::media::commit_safety_gate::{
     AliasResolver, CommitGateContext, CommitGateResult, CommitTarget, DestructiveCommit,
     PrepareOutcome, prepare_destructive_commit,
 };
-use voom_store::repo::events::{EventFilter, EventRepo, Page, SqliteEventRepo};
-use voom_store::repo::identity::{
-    AliasProof, DiscoveredFile, FileLocationKind, IdentityRepo, IngestOutcome, LocationProof,
-    NewFileLocation, NewFileVersion, ObservedBytes, ProducedBy, RenameProof, SqliteIdentityRepo,
+use voom_store::repo::media::identity::{
+    AliasProof, CommitGateIdentityRepo, DiscoveredFile, FileAssetRepo, FileLocationKind,
+    FileLocationRepo, FileVersionRepo, IngestOutcome, IngestRepo, LocationProof, NewFileLocation,
+    NewFileVersion, ObservedBytes, ProducedBy, RenameProof, SqliteIdentityRepo,
 };
-use voom_store::repo::use_leases::{
+use voom_store::repo::media::use_leases::{
     BlockingMode, IssuerKind, LeaseScope, NewUseLease, SqliteUseLeaseRepo, UseLeaseKind,
 };
 use voom_store::test_support::{FailingAliasResolver, T0, fresh_initialized_pool_at};
@@ -31,7 +32,7 @@ use voom_test_support::TempDatabase;
 
 fn gate<'a>(
     pool: &'a SqlitePool,
-    identity_repo: &'a dyn IdentityRepo,
+    identity_repo: &'a dyn CommitGateIdentityRepo,
     event_repo: &'a dyn EventRepo,
     alias_resolver: &'a dyn AliasResolver,
 ) -> CommitGateContext<'a> {

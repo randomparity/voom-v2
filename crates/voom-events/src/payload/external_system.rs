@@ -5,12 +5,13 @@
 
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
+use voom_core::{ExternalSystemId, ExternalSystemLinkId};
 
 /// A system was registered. Health always starts `unknown`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExternalSystemRegisteredPayload {
-    pub external_system_id: u64,
+    pub external_system_id: ExternalSystemId,
     pub kind: String,
     pub display_name: String,
     pub health_status: String,
@@ -20,7 +21,7 @@ pub struct ExternalSystemRegisteredPayload {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExternalSystemHealthChangedPayload {
-    pub external_system_id: u64,
+    pub external_system_id: ExternalSystemId,
     pub previous: String,
     pub current: String,
 }
@@ -29,8 +30,8 @@ pub struct ExternalSystemHealthChangedPayload {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExternalSystemLinkedPayload {
-    pub external_system_id: u64,
-    pub link_id: u64,
+    pub external_system_id: ExternalSystemId,
+    pub link_id: ExternalSystemLinkId,
     pub target_type: String,
     pub target_id: u64,
     pub external_ref: String,
@@ -40,8 +41,8 @@ pub struct ExternalSystemLinkedPayload {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExternalSystemUnlinkedPayload {
-    pub external_system_id: u64,
-    pub link_id: u64,
+    pub external_system_id: ExternalSystemId,
+    pub link_id: ExternalSystemLinkId,
     pub target_type: String,
     pub target_id: u64,
     pub external_ref: String,
@@ -51,7 +52,7 @@ pub struct ExternalSystemUnlinkedPayload {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExternalSystemSyncedPayload {
-    pub external_system_id: u64,
+    pub external_system_id: ExternalSystemId,
     pub outcome: String,
     pub links_recorded: u32,
     pub links_retired: u32,

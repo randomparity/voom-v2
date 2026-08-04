@@ -4,7 +4,7 @@ use tokio::fs;
 use voom_core::{FailureClass, VoomError};
 use voom_events::Event;
 use voom_events::payload::ArtifactCommitRecoveryRequiredPayload;
-use voom_store::repo::artifacts::{ArtifactCommitFailure, ArtifactCommitState};
+use voom_store::repo::media::artifacts::{ArtifactCommitFailure, ArtifactCommitState};
 
 use voom_artifact::commit_pipeline::{
     RecoveryRequiredCommit, mark_recovery_required_with_event_in_tx,
@@ -187,10 +187,10 @@ pub(super) async fn transition_recovery(
     let mut tx = begin_tx(&cp.pool).await?;
     let now = cp.clock().now();
     let recovery = observe_recovery(prepared, recovery_reason(&err)).await;
-    update_commit_report_in_tx(&mut tx, prepared.record.id, &recovery)
+    update_commit_report_in_tx(&cp.artifacts, &mut tx, prepared.record.id, &recovery)
         .await
         .map_err(CommitArtifactCommandError::from)?;
-    let error_code = err.error_code().as_str().to_owned();
+    let error_code = err.error_code();
     let message = err.to_string();
     let recovered = mark_recovery_required_with_event_in_tx(
         &cp.artifacts,
@@ -201,18 +201,18 @@ pub(super) async fn transition_recovery(
             artifact_handle_id: prepared.artifact_handle_id,
             failure: ArtifactCommitFailure {
                 failure_class: failure_class_for_error(&err),
-                error_code: error_code.clone(),
+                error_code,
                 message: message.clone(),
                 finished_at: now,
             },
             recovery_reason: recovery.recovery_reason.clone(),
             event: Event::ArtifactCommitRecoveryRequired(ArtifactCommitRecoveryRequiredPayload {
-                commit_record_id: prepared.record.id.0,
-                artifact_handle_id: prepared.artifact_handle_id.0,
+                commit_record_id: prepared.record.id,
+                artifact_handle_id: prepared.artifact_handle_id,
                 target_path: prepared.target_path.display().to_string(),
                 temp_path: prepared.temp_path.display().to_string(),
                 recovery_reason: recovery.recovery_reason.clone(),
-                error_code,
+                error_code: error_code.as_str().to_owned(),
                 message,
             }),
             occurred_at: now,
@@ -264,15 +264,11 @@ fn recovery_reason(err: &VoomError) -> String {
     .to_owned()
 }
 
-fn failure_class_for_error(err: &VoomError) -> String {
-    let class = match err {
+fn failure_class_for_error(err: &VoomError) -> FailureClass {
+    match err {
         VoomError::ArtifactChecksumMismatch(_) => FailureClass::ArtifactChecksumMismatch,
         VoomError::ArtifactUnavailable(_) => FailureClass::ArtifactUnavailable,
         VoomError::VerificationFailure(_) => FailureClass::VerificationFailure,
         _ => FailureClass::CommitFailure,
-    };
-    serde_json::to_value(class)
-        .ok()
-        .and_then(|v| v.as_str().map(str::to_owned))
-        .unwrap_or_else(|| "commit_failure".to_owned())
+    }
 }

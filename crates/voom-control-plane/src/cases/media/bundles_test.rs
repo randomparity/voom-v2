@@ -1,11 +1,11 @@
 use time::{Duration, OffsetDateTime};
 use voom_events::payload::AssetBundleMemberRemovedPayload;
 use voom_events::{Event, EventKind};
-use voom_store::repo::bundles::{BundleMemberRole, NewAssetBundle};
-use voom_store::repo::events::{EventFilter, EventRepo, Page};
-use voom_store::repo::identity::{
-    DiscoveredFile, FileLocationKind, IdentityRepo, IngestOutcome, MediaWorkKind, NewFileVersion,
-    NewMediaVariant, NewMediaWork, ProducedBy,
+use voom_store::repo::audit::events::{EventFilter, EventRepo, Page};
+use voom_store::repo::media::bundles::{BundleMemberRole, NewAssetBundle};
+use voom_store::repo::media::identity::{
+    DiscoveredFile, FileLocationKind, FileVersionRepo, IngestOutcome, MediaWorkKind,
+    NewFileVersion, NewMediaVariant, NewMediaWork, ProducedBy,
 };
 
 use crate::cases::{begin_immediate_tx, commit_tx, count, cp};

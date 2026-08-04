@@ -148,7 +148,7 @@ The provider-to-operation mapping is fixed for this phase:
 |---|---|---|
 | `fake-scanner` | `ScanLibrary` | none |
 | `fake-prober` | `ProbeFile` | `HashFile` |
-| `fake-transcoder` | `TranscodeVideo` | `ExtractAudio`, `TranscribeAudio` |
+| `fake-transcoder` | `TranscodeVideo` | `TranscodeAudio`, `ExtractAudio` |
 | `fake-remuxer` | `Remux` | none |
 | `fake-backup-store` | `BackUpFile` | `DeleteArtifact` |
 | `fake-health-checker` | `VerifyArtifact` | none |
@@ -161,7 +161,7 @@ The provider-to-operation mapping is fixed for this phase:
 This mapping covers all fifteen fixed `OperationKind` variants:
 `ScanLibrary`, `ProbeFile`, `HashFile`, `IdentifyMedia`,
 `ScoreQuality`, `SyncExternalSystem`, `BackUpFile`, `Remux`,
-`TranscodeVideo`, `EditTracks`, `ExtractAudio`, `TranscribeAudio`,
+`TranscodeVideo`, `TranscodeAudio`, `EditTracks`, `ExtractAudio`,
 `VerifyArtifact`, `CommitArtifact`, and `DeleteArtifact`.
 
 `voom-conformance` remains black-box. It may read operation and
@@ -395,8 +395,8 @@ The implementation should proceed provider-support first:
    `fake-health-checker`) to shake out the runtime API.
 3. Convert the remaining fake providers in small batches.
 4. Extend the conformance manifest schema and suite request builders.
-5. Add secondary operation cases for `HashFile`, `ExtractAudio`,
-   `TranscribeAudio`, and `DeleteArtifact`.
+5. Add secondary operation cases for `HashFile`, `TranscodeAudio`,
+   `ExtractAudio`, and `DeleteArtifact`.
 6. Add the failure taxonomy fixture registry and coverage test before
    declaring Phase 6 conformance complete.
 7. Promote all eleven fake providers to active and enforce the Phase 6

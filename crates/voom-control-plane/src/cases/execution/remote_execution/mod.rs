@@ -3,9 +3,10 @@
 use secrecy::SecretString;
 use serde_json::Value as JsonValue;
 use sqlx::{Sqlite, Transaction};
-use voom_core::{ErrorCode, FailureClass, LeaseId, NodeId, TicketId, VoomError, WorkerId};
-use voom_store::repo::artifact_access_plans::ArtifactAccessMode;
-use voom_store::repo::remote_idempotency::RemoteMutationReplay;
+use voom_core::{
+    ArtifactAccessMode, ErrorCode, FailureClass, LeaseId, NodeId, TicketId, VoomError, WorkerId,
+};
+use voom_store::repo::execution::remote_idempotency::RemoteMutationReplay;
 
 use crate::ControlPlane;
 
@@ -33,6 +34,7 @@ pub struct RemoteNodeHeartbeatInput {
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RemoteNodeHeartbeatOutcome {
     pub node_id: NodeId,
     pub status: String,
@@ -48,8 +50,7 @@ pub struct RemoteAcquireInput {
     pub lease_ttl_seconds: i64,
 }
 
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-#[serde(tag = "outcome", rename_all = "snake_case")]
+#[derive(Debug, Clone, PartialEq)]
 pub enum RemoteAcquireOutcome {
     Idle {
         worker_id: WorkerId,
@@ -63,6 +64,93 @@ pub enum RemoteAcquireOutcome {
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "outcome", rename_all = "snake_case")]
+enum RemoteAcquireOutcomeWire {
+    Idle(RemoteAcquireIdleWire),
+    NoCandidate(RemoteAcquireNoCandidateWire),
+    Leased(RemoteLeaseDispatch),
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RemoteAcquireIdleWire {
+    worker_id: WorkerId,
+    scheduler_decision_id: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RemoteAcquireNoCandidateWire {
+    worker_id: WorkerId,
+    scheduler_decision_id: u64,
+}
+
+impl serde::Serialize for RemoteAcquireOutcome {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let wire = RemoteAcquireOutcomeWire::from(self.clone());
+        serde::Serialize::serialize(&wire, serializer)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for RemoteAcquireOutcome {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let wire = <RemoteAcquireOutcomeWire as serde::Deserialize>::deserialize(deserializer)?;
+        Ok(Self::from(wire))
+    }
+}
+
+impl From<RemoteAcquireOutcome> for RemoteAcquireOutcomeWire {
+    fn from(outcome: RemoteAcquireOutcome) -> Self {
+        match outcome {
+            RemoteAcquireOutcome::Idle {
+                worker_id,
+                scheduler_decision_id,
+            } => Self::Idle(RemoteAcquireIdleWire {
+                worker_id,
+                scheduler_decision_id,
+            }),
+            RemoteAcquireOutcome::NoCandidate {
+                worker_id,
+                scheduler_decision_id,
+            } => Self::NoCandidate(RemoteAcquireNoCandidateWire {
+                worker_id,
+                scheduler_decision_id,
+            }),
+            RemoteAcquireOutcome::Leased(dispatch) => Self::Leased(dispatch),
+        }
+    }
+}
+
+impl From<RemoteAcquireOutcomeWire> for RemoteAcquireOutcome {
+    fn from(wire: RemoteAcquireOutcomeWire) -> Self {
+        match wire {
+            RemoteAcquireOutcomeWire::Idle(RemoteAcquireIdleWire {
+                worker_id,
+                scheduler_decision_id,
+            }) => Self::Idle {
+                worker_id,
+                scheduler_decision_id,
+            },
+            RemoteAcquireOutcomeWire::NoCandidate(RemoteAcquireNoCandidateWire {
+                worker_id,
+                scheduler_decision_id,
+            }) => Self::NoCandidate {
+                worker_id,
+                scheduler_decision_id,
+            },
+            RemoteAcquireOutcomeWire::Leased(dispatch) => Self::Leased(dispatch),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RemoteLeaseDispatch {
     pub lease_id: LeaseId,
     pub scheduler_decision_id: u64,
@@ -76,6 +164,7 @@ pub struct RemoteLeaseDispatch {
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RemoteArtifactAccessPlan {
     pub id: u64,
     pub input_handles: Vec<String>,
@@ -95,6 +184,7 @@ pub struct RemoteLeaseHeartbeatInput {
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RemoteLeaseHeartbeatOutcome {
     pub lease_id: LeaseId,
     pub worker_id: WorkerId,
@@ -113,6 +203,7 @@ pub struct RemoteCompleteInput {
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RemoteCompleteOutcome {
     pub lease_id: LeaseId,
     pub ticket_id: TicketId,
@@ -134,6 +225,7 @@ pub struct RemoteFailInput {
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RemoteFailOutcome {
     pub lease_id: LeaseId,
     pub ticket_id: TicketId,
@@ -307,9 +399,7 @@ impl ReplayRoute for RemoteFailInput {
 }
 
 pub(super) fn decode_acquire_replay(data: JsonValue) -> Result<RemoteAcquireOutcome, VoomError> {
-    let data = acquire_replay_with_legacy_decision_id(data);
-    serde_json::from_value(data)
-        .map_err(|e| VoomError::Internal(format!("remote acquire replay decode: {e}")))
+    decode_replay(data, "remote acquire")
 }
 
 pub(super) fn decode_replay<T>(data: JsonValue, label: &str) -> Result<T, VoomError>
@@ -318,22 +408,6 @@ where
 {
     serde_json::from_value(data)
         .map_err(|e| VoomError::Internal(format!("{label} replay decode: {e}")))
-}
-
-fn acquire_replay_with_legacy_decision_id(mut data: JsonValue) -> JsonValue {
-    let Some(outcome) = data.get("outcome").and_then(JsonValue::as_str) else {
-        return data;
-    };
-    if !matches!(outcome, "idle" | "no_candidate" | "leased") {
-        return data;
-    }
-    let Some(object) = data.as_object_mut() else {
-        return data;
-    };
-    object
-        .entry("scheduler_decision_id")
-        .or_insert(JsonValue::from(0_u64));
-    data
 }
 
 fn replay_error(code: &str, message: String) -> VoomError {

@@ -9,7 +9,7 @@ use voom_control_plane::policy::{
     RootScopedScanInputResult, WholeScanInput, WholeScanInputResult,
 };
 use voom_core::{FileVersionId, LibraryRootId, MediaSnapshotId, PolicyDocumentId};
-use voom_store::repo::policies::{
+use voom_store::repo::policy::policies::{
     CreatedPolicyVersion, PolicyDocument, PolicyDocumentSummary, PolicyVersion,
 };
 

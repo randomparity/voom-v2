@@ -21,7 +21,10 @@ setup:
     @echo "==> Setup complete. Try: just ci"
 
 # Run the exact set of checks GitHub Actions runs
-ci: fmt-check lint check-test-layout check-paused-time-db check-paused-time-db-selftest check-payload-deny-unknown check-payload-deny-unknown-selftest check-adr-index check-adr-index-selftest test doc deny audit
+ci: fmt-check lint check-test-layout check-paused-time-db check-paused-time-db-selftest \
+    check-control-plane-sql-boundary check-control-plane-sql-boundary-selftest \
+    check-payload-deny-unknown check-payload-deny-unknown-selftest \
+    check-adr-index check-adr-index-selftest test doc deny audit
     @echo "==> All CI checks passed"
 
 # Individual checks (also called by `ci`)
@@ -45,7 +48,8 @@ test:
     VOOM_TEST_PREBUILT_WORKERS=1 cargo test --workspace --all-features
 
 doc:
-    RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --document-private-items
+    RUSTDOCFLAGS="-D warnings" cargo doc \
+        --workspace --all-features --no-deps --document-private-items
 
 audit:
     cargo audit --deny warnings
@@ -72,6 +76,14 @@ check-paused-time-db:
 # Self-test for the paused-time guard (keeps its ast-grep patterns honest)
 check-paused-time-db-selftest:
     ./scripts/check-paused-time-db-selftest.sh
+
+# Guard: production control-plane code delegates every SQL operation to voom-store
+check-control-plane-sql-boundary:
+    ./scripts/check-control-plane-sql-boundary.sh
+
+# Self-test for the control-plane SQL boundary guard
+check-control-plane-sql-boundary-selftest:
+    ./scripts/check-control-plane-sql-boundary-selftest.sh
 
 # Guard: every durable typed payload denies unknown fields (audit M4, ADR 0013)
 check-payload-deny-unknown:

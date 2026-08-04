@@ -5,7 +5,7 @@ fn all_contains_every_operation_kind_once() {
     use std::collections::HashSet;
 
     let all = OperationKind::ALL;
-    assert_eq!(all.len(), 16);
+    assert_eq!(all.len(), 15);
     let unique = all.iter().copied().collect::<HashSet<_>>();
     assert_eq!(unique.len(), all.len());
     assert!(unique.contains(&OperationKind::ScanLibrary));
@@ -20,7 +20,6 @@ fn all_contains_every_operation_kind_once() {
     assert!(unique.contains(&OperationKind::TranscodeAudio));
     assert!(unique.contains(&OperationKind::EditTracks));
     assert!(unique.contains(&OperationKind::ExtractAudio));
-    assert!(unique.contains(&OperationKind::TranscribeAudio));
     assert!(unique.contains(&OperationKind::VerifyArtifact));
     assert!(unique.contains(&OperationKind::CommitArtifact));
     assert!(unique.contains(&OperationKind::DeleteArtifact));
@@ -50,7 +49,6 @@ fn every_variant_round_trips_snake_case() {
         (OperationKind::TranscodeAudio, "transcode_audio"),
         (OperationKind::EditTracks, "edit_tracks"),
         (OperationKind::ExtractAudio, "extract_audio"),
-        (OperationKind::TranscribeAudio, "transcribe_audio"),
         (OperationKind::VerifyArtifact, "verify_artifact"),
         (OperationKind::CommitArtifact, "commit_artifact"),
         (OperationKind::DeleteArtifact, "delete_artifact"),
@@ -86,6 +84,7 @@ fn from_wire_round_trips_every_variant_and_rejects_unknown() {
         );
     }
     assert_eq!(OperationKind::from_wire("unknown_op"), None);
+    assert_eq!(OperationKind::from_wire("transcribe_audio"), None);
     assert_eq!(OperationKind::from_wire("ScanLibrary"), None);
     assert_eq!(OperationKind::from_wire(""), None);
 }
@@ -94,6 +93,12 @@ fn from_wire_round_trips_every_variant_and_rejects_unknown() {
 fn unknown_string_fails_to_deserialize() {
     let res: Result<OperationKind, _> = serde_json::from_str("\"unknown_op\"");
     assert!(res.is_err(), "unknown_op should not deserialize");
+}
+
+#[test]
+fn removed_transcribe_audio_wire_name_fails_to_deserialize() {
+    let res: Result<OperationKind, _> = serde_json::from_str("\"transcribe_audio\"");
+    assert!(res.is_err(), "transcribe_audio should not deserialize");
 }
 
 #[test]

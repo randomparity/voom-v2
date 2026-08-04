@@ -96,7 +96,10 @@ impl SqliteJobRepo {
         .await
         .map_err(|e| VoomError::database_context("jobs insert", e))?;
         Ok(Job {
-            id: JobId(u64_from_i64(res.last_insert_rowid())),
+            id: JobId(u64_from_i64(
+                res.last_insert_rowid(),
+                concat!(module_path!(), ": ", stringify!(res.last_insert_rowid())),
+            )?),
             kind: input.kind,
             state: JobState::Open,
             priority: input.priority,
@@ -124,7 +127,10 @@ impl SqliteJobRepo {
             "SELECT id, kind, state, priority, created_at, updated_at, epoch \
              FROM jobs WHERE id = ?",
         )
-        .bind(i64_from_u64(id.0))
+        .bind(i64_from_u64(
+            id.0,
+            concat!(module_path!(), ": ", stringify!(id.0)),
+        )?)
         .fetch_optional(&self.pool)
         .await
         .map_err(|e| VoomError::database_context("jobs get", e))?;
@@ -148,7 +154,13 @@ impl SqliteJobRepo {
              ORDER BY id DESC LIMIT ?3",
         )
         .bind(filter.state.map(JobState::as_str))
-        .bind(after_id.map(i64_from_u64))
+        .bind(
+            after_id
+                .map(|value| {
+                    i64_from_u64(value, concat!(module_path!(), ": ", stringify!(after_id)))
+                })
+                .transpose()?,
+        )
         .bind(i64::from(limit))
         .fetch_all(&self.pool)
         .await
@@ -250,13 +262,19 @@ async fn transition_open_to(
     )
     .bind(next.as_str())
     .bind(&updated)
-    .bind(i64_from_u64(id.0))
+    .bind(i64_from_u64(
+        id.0,
+        concat!(module_path!(), ": ", stringify!(id.0)),
+    )?)
     .execute(&mut **tx)
     .await
     .map_err(|e| VoomError::database_context("jobs update", e))?;
     if res.rows_affected() == 0 {
         let state: Option<String> = sqlx::query_scalar("SELECT state FROM jobs WHERE id = ?")
-            .bind(i64_from_u64(id.0))
+            .bind(i64_from_u64(
+                id.0,
+                concat!(module_path!(), ": ", stringify!(id.0)),
+            )?)
             .fetch_optional(&mut **tx)
             .await
             .map_err(|e| VoomError::database_context("jobs transition state read", e))?;
@@ -275,7 +293,10 @@ async fn transition_open_to(
         "SELECT id, kind, state, priority, created_at, updated_at, epoch \
          FROM jobs WHERE id = ?",
     )
-    .bind(i64_from_u64(id.0))
+    .bind(i64_from_u64(
+        id.0,
+        concat!(module_path!(), ": ", stringify!(id.0)),
+    )?)
     .fetch_optional(&mut **tx)
     .await
     .map_err(|e| VoomError::database_context("jobs reload", e))?;
@@ -285,27 +306,30 @@ async fn transition_open_to(
 }
 
 fn row_to_job(row: &sqlx::sqlite::SqliteRow) -> Result<Job, VoomError> {
-    let id: i64 = row.try_get("id").map_err(|e| map_row_err("jobs", &e))?;
-    let kind: String = row.try_get("kind").map_err(|e| map_row_err("jobs", &e))?;
-    let state_str: String = row.try_get("state").map_err(|e| map_row_err("jobs", &e))?;
+    let id: i64 = row.try_get("id").map_err(|e| map_row_err("jobs", e))?;
+    let kind: String = row.try_get("kind").map_err(|e| map_row_err("jobs", e))?;
+    let state_str: String = row.try_get("state").map_err(|e| map_row_err("jobs", e))?;
     let priority: i64 = row
         .try_get("priority")
-        .map_err(|e| map_row_err("jobs", &e))?;
+        .map_err(|e| map_row_err("jobs", e))?;
     let created: String = row
         .try_get("created_at")
-        .map_err(|e| map_row_err("jobs", &e))?;
+        .map_err(|e| map_row_err("jobs", e))?;
     let updated: String = row
         .try_get("updated_at")
-        .map_err(|e| map_row_err("jobs", &e))?;
-    let epoch: i64 = row.try_get("epoch").map_err(|e| map_row_err("jobs", &e))?;
+        .map_err(|e| map_row_err("jobs", e))?;
+    let epoch: i64 = row.try_get("epoch").map_err(|e| map_row_err("jobs", e))?;
     Ok(Job {
-        id: JobId(u64_from_i64(id)),
+        id: JobId(u64_from_i64(
+            id,
+            concat!(module_path!(), ": ", stringify!(id)),
+        )?),
         kind,
         state: JobState::parse(&state_str)?,
         priority,
         created_at: parse_iso8601(&created)?,
         updated_at: parse_iso8601(&updated)?,
-        epoch: u64_from_i64(epoch),
+        epoch: u64_from_i64(epoch, concat!(module_path!(), ": ", stringify!(epoch)))?,
     })
 }
 

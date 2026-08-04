@@ -1,11 +1,11 @@
 use serde_json::json;
 use time::{Duration, OffsetDateTime};
 use voom_events::EventKind;
-use voom_store::repo::events::{EventFilter, EventRepo, Page};
-use voom_store::repo::identity::{
+use voom_store::repo::audit::events::{EventFilter, EventRepo, Page};
+use voom_store::repo::media::identity::{
     DiscoveredFile, FileLocationKind, IngestOutcome, LocationProof, MediaWorkKind, NewMediaWork,
 };
-use voom_store::repo::use_leases::{
+use voom_store::repo::media::use_leases::{
     BlockingMode, IssuerKind, LeaseScope, NewUseLease, UseLeaseKind,
 };
 
@@ -124,7 +124,7 @@ async fn reconcile_rename_emits_paired_move_events() {
     let before_recorded = count(&cp, EventKind::FileLocationRecordedByMove).await;
     let result = cp
         .reconcile_rename(
-            voom_store::repo::identity::RenameProof::LocalFileIdGeneration {
+            voom_store::repo::media::identity::RenameProof::LocalFileIdGeneration {
                 prior_location_id: file_location_id,
                 new_kind: FileLocationKind::LocalPath,
                 new_value: "/srv/new.mkv".to_owned(),
@@ -132,7 +132,7 @@ async fn reconcile_rename_emits_paired_move_events() {
                 generation: 1,
                 prior_path_missing: true,
             },
-            voom_store::repo::identity::ObservedBytes {
+            voom_store::repo::media::identity::ObservedBytes {
                 content_hash: "h".to_owned(),
                 size_bytes: 1,
             },
@@ -201,7 +201,7 @@ async fn reconcile_rename_reanchors_location_scoped_use_lease_in_same_tx() {
     let recorded_before = count(&cp, EventKind::FileLocationRecordedByMove).await;
     let result = cp
         .reconcile_rename(
-            voom_store::repo::identity::RenameProof::LocalFileIdGeneration {
+            voom_store::repo::media::identity::RenameProof::LocalFileIdGeneration {
                 prior_location_id: file_location_id,
                 new_kind: FileLocationKind::LocalPath,
                 new_value: "/srv/new.mkv".to_owned(),
@@ -209,7 +209,7 @@ async fn reconcile_rename_reanchors_location_scoped_use_lease_in_same_tx() {
                 generation: 1,
                 prior_path_missing: true,
             },
-            voom_store::repo::identity::ObservedBytes {
+            voom_store::repo::media::identity::ObservedBytes {
                 content_hash: "h".to_owned(),
                 size_bytes: 1,
             },
@@ -251,9 +251,9 @@ async fn reconcile_rename_reanchors_location_scoped_use_lease_in_same_tx() {
     else {
         panic!("expected UseLeaseReanchoredByMove payload");
     };
-    assert_eq!(payload.lease_id, lease.id.0);
-    assert_eq!(payload.retired_location_id, file_location_id.0);
-    assert_eq!(payload.new_location_id, result.new_file_location_id.0);
+    assert_eq!(payload.lease_id, lease.id);
+    assert_eq!(payload.retired_location_id, file_location_id);
+    assert_eq!(payload.new_location_id, result.new_file_location_id);
 }
 
 #[tokio::test]

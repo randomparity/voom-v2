@@ -69,7 +69,9 @@ async fn concurrent_init_on_same_disk_db_is_safe() {
 
     // Pre-create the file so both spawned tasks race on migration application,
     // not on file creation.
-    voom_store::connect_or_create(&url).await.unwrap();
+    voom_store::test_support::create_uninitialized_pool(&url)
+        .await
+        .unwrap();
 
     let a_url = url.clone();
     let b_url = url.clone();
@@ -120,7 +122,9 @@ async fn concurrent_init_stress() {
 
         // Pre-create the file so peers race on migration application, not
         // on file creation. Mirrors the single-shot test's setup.
-        voom_store::connect_or_create(&url).await.unwrap();
+        voom_store::test_support::create_uninitialized_pool(&url)
+            .await
+            .unwrap();
 
         let handles: Vec<_> = (0..6)
             .map(|_| {

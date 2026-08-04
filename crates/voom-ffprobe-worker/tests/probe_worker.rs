@@ -11,9 +11,7 @@ use std::time::Duration;
 use secrecy::SecretString;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 use voom_core::{ErrorCode, FailureClass, LeaseId, WorkerId};
-use voom_ffprobe_worker::{
-    FFPROBE_BIN_ENV, FfprobeConfig, observe_file_facts, operation_handler_with_config,
-};
+use voom_ffprobe_worker::{FFPROBE_BIN_ENV, FfprobeConfig, observe_file_facts, operation_handler};
 use voom_worker_protocol::{
     ClientHandle, ExpectedFileFacts, HttpClient, HttpServer, NdjsonOutcome, OperationKind,
     OperationRequest, ProbeFileRequest, ProgressFrame, ProtocolError, ServerHandle, ServerRunning,
@@ -387,7 +385,7 @@ fn assert_terminal_error(frame: ProgressFrame, class: FailureClass, code: ErrorC
 async fn running_server(
     config: FfprobeConfig,
 ) -> Result<(std::net::SocketAddr, ServerRunning), ProtocolError> {
-    let server = HttpServer::new(credentials(), operation_handler_with_config(config));
+    let server = HttpServer::new(credentials(), operation_handler(config));
     let running = server
         .serve(std::net::SocketAddr::from(([127, 0, 0, 1], 0)))
         .await?;

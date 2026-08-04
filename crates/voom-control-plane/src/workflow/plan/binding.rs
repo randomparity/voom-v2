@@ -3,8 +3,8 @@ use serde_json::{Value, json};
 use std::path::Path;
 use voom_core::OperationKind;
 use voom_core::{FileLocationId, FileVersionId};
-use voom_plan::audio::{AudioOperationPayload, AudioOperationType};
-use voom_plan::remux::RemuxOperationPayload;
+use voom_plan::planner::audio::{AudioOperationPayload, AudioOperationType};
+use voom_plan::planner::remux::RemuxOperationPayload;
 use voom_worker_protocol::{
     TranscodeVideoExpectedFacts, TranscodeVideoInput, TranscodeVideoOutput, TranscodeVideoProfile,
     TranscodeVideoRequest,
@@ -53,7 +53,6 @@ pub fn render_default_payload_with_fan_out(
         | OperationKind::VerifyArtifact
         | OperationKind::ExtractAudio
         | OperationKind::TranscodeAudio
-        | OperationKind::TranscribeAudio
         | OperationKind::DeleteArtifact => json!({ "path": branch.path }),
         OperationKind::ScoreQuality => {
             let codec = branch.probe_codec.as_ref().ok_or_else(|| {

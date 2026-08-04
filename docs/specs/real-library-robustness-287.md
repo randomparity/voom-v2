@@ -175,7 +175,7 @@ joins only *live* locations, and the content-hash guard rejects any stale match
 that slips through, so a recycled inode never collapses two identities.
 
 The attach reuses the existing alias machinery's protection: it routes through
-a new `IdentityRepo::attach_local_hardlink_location_in_tx` that inserts the
+a new `IngestRepo::attach_local_hardlink_location_in_tx` that inserts the
 location and, like the alias-attach path, consults the pending-commit lock so a
 hardlink attach cannot race past the commit safety gate's authorized closure.
 

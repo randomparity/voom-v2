@@ -43,13 +43,13 @@ expression: json
         "phase_ordinal": 0,
         "phase_name": "normalize",
         "outcome": "completed",
-        "report_id": "report_88b2ed675ba7f956",
+        "report_id": "report_4bee8828218ac137",
         "report": {
           "schema_version": 1,
-          "report_id": "report_88b2ed675ba7f956",
-          "report_hash": "blake3:1e94641eb3fe5158027ccd08b399b813bea68ef4621343cd351cdc8794608763",
-          "plan_id": "plan_c161ec1aa94eea89",
-          "plan_hash": "blake3:c161ec1aa94eea89b768adeded5b044aaaf384536fe6fc23ea28bacf341fd344",
+          "report_id": "report_4bee8828218ac137",
+          "report_hash": "blake3:f122fb8c47800fe3b3a4397918beb0d60ce8dbe276d833c4f65f7bd70f2ca107",
+          "plan_id": "plan_a15a21974e287e87",
+          "plan_hash": "blake3:a15a21974e287e87ffb29170e4576bf7dc5ebf06684d4ccc82005a94453a53d7",
           "policy": {
             "slug": "container-metadata",
             "source_hash": "efc80d0415953f5ed3fa23a052d98561c4153bbfb346f579ccf9270281c1f89b",
@@ -79,7 +79,7 @@ expression: json
           },
           "checks": [
             {
-              "check_id": "check_d811611bfc7809dd",
+              "check_id": "check_f194dd6fad877551",
               "node_id": "node_d9b6b0cc4caf4781",
               "target": {
                 "type": "file_version",
@@ -108,7 +108,7 @@ expression: json
               "execution_eligibility": "supported"
             },
             {
-              "check_id": "check_241a1d00e698be90",
+              "check_id": "check_b519887a1d717d2c",
               "node_id": "node_c520b9e0e0a4da73",
               "target": {
                 "type": "file_version",
@@ -120,12 +120,12 @@ expression: json
                 "type": "clear_tags"
               },
               "check_status": "blocked",
-              "reason": "operation is not supported by Sprint 5 planner",
+              "reason": "operation is not supported by the planner",
               "issue_action_hint": "none",
               "execution_eligibility": "unsupported"
             },
             {
-              "check_id": "check_2bc16b6889cb5aae",
+              "check_id": "check_82aa9c8039464928",
               "node_id": "node_2cb1f04bb88984c6",
               "target": {
                 "type": "file_version",
@@ -145,12 +145,12 @@ expression: json
                 }
               },
               "check_status": "blocked",
-              "reason": "operation is not supported by Sprint 5 planner",
+              "reason": "operation is not supported by the planner",
               "issue_action_hint": "none",
               "execution_eligibility": "unsupported"
             },
             {
-              "check_id": "check_ac8b47fd75cb4bf5",
+              "check_id": "check_f1d0ca560c02c1f1",
               "node_id": "node_7e472d6411e7638f",
               "target": {
                 "type": "file_version",
@@ -163,7 +163,7 @@ expression: json
                 "key": "encoder"
               },
               "check_status": "blocked",
-              "reason": "operation is not supported by Sprint 5 planner",
+              "reason": "operation is not supported by the planner",
               "issue_action_hint": "none",
               "execution_eligibility": "unsupported"
             }
@@ -173,9 +173,9 @@ expression: json
               "severity": "warning",
               "code": "unsupported_compliance_operation",
               "message": "operation clear_tags is not supported by compliance reports",
-              "plan_id": "plan_c161ec1aa94eea89",
+              "plan_id": "plan_a15a21974e287e87",
               "node_id": "node_c520b9e0e0a4da73",
-              "check_id": "check_241a1d00e698be90",
+              "check_id": "check_b519887a1d717d2c",
               "target": {
                 "type": "file_version",
                 "id": 2
@@ -185,9 +185,9 @@ expression: json
               "severity": "warning",
               "code": "unsupported_compliance_operation",
               "message": "operation set_tag is not supported by compliance reports",
-              "plan_id": "plan_c161ec1aa94eea89",
+              "plan_id": "plan_a15a21974e287e87",
               "node_id": "node_2cb1f04bb88984c6",
-              "check_id": "check_2bc16b6889cb5aae",
+              "check_id": "check_82aa9c8039464928",
               "target": {
                 "type": "file_version",
                 "id": 2
@@ -197,9 +197,9 @@ expression: json
               "severity": "warning",
               "code": "unsupported_compliance_operation",
               "message": "operation delete_tag is not supported by compliance reports",
-              "plan_id": "plan_c161ec1aa94eea89",
+              "plan_id": "plan_a15a21974e287e87",
               "node_id": "node_7e472d6411e7638f",
-              "check_id": "check_ac8b47fd75cb4bf5",
+              "check_id": "check_f1d0ca560c02c1f1",
               "target": {
                 "type": "file_version",
                 "id": 2

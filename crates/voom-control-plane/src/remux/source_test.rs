@@ -4,8 +4,8 @@ use std::path::Path;
 
 use time::OffsetDateTime;
 use voom_core::{ErrorCode, FileVersionId, rng_test_support::FrozenRng};
-use voom_store::repo::identity::{
-    DiscoveredFile, FileLocationKind, IdentityRepo, IngestOutcome, NewFileLocation,
+use voom_store::repo::media::identity::{
+    DiscoveredFile, FileLocationKind, FileLocationRepo, IngestOutcome, NewFileLocation,
 };
 
 #[tokio::test]

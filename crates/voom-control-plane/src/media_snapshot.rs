@@ -5,7 +5,7 @@ use voom_core::VoomError;
 use voom_events::payload::MediaSnapshotRecordedPayload;
 use voom_events::{Event, SubjectType};
 use voom_policy::{MediaSnapshotInput, TargetRef};
-use voom_store::repo::identity::{IdentityRepo, MediaSnapshot, NewMediaSnapshot};
+use voom_store::repo::media::identity::{MediaSnapshot, MediaSnapshotRepo, NewMediaSnapshot};
 
 use crate::ControlPlane;
 use crate::cases::append_event;
@@ -26,9 +26,9 @@ pub(crate) async fn record_with_event_in_tx(
         Some(snapshot.id.0),
         snapshot.probed_at,
         Event::MediaSnapshotRecorded(MediaSnapshotRecordedPayload {
-            media_snapshot_id: snapshot.id.0,
-            file_version_id: snapshot.file_version_id.0,
-            probed_by_worker_id: snapshot.probed_by.map(|worker| worker.0),
+            media_snapshot_id: snapshot.id,
+            file_version_id: snapshot.file_version_id,
+            probed_by_worker_id: snapshot.probed_by,
             probed_at: snapshot.probed_at,
         }),
     )

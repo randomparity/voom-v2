@@ -6,11 +6,13 @@
 use std::collections::{HashMap, HashSet};
 
 use voom_core::OperationKind;
-use voom_core::{JobId, TicketId, TicketOperation, VideoEncoderBackend, VoomError, WorkerId};
-use voom_scheduler::{LeastLoadedWorkerSelector, WorkerSelector, WorkerView};
-use voom_store::repo::leases::{LeaseAcquireOutcome, NewLease};
-use voom_store::repo::tickets::{Ticket, TicketState};
-use voom_store::repo::workers::WorkerOperationCandidate;
+use voom_core::{
+    FailureClass, TicketId, TicketOperation, VideoEncoderBackend, VoomError, WorkerId,
+};
+use voom_scheduler::{WorkerView, select_least_loaded_worker};
+use voom_store::repo::execution::leases::{LeaseAcquireOutcome, NewLease};
+use voom_store::repo::execution::tickets::{Ticket, TicketState};
+use voom_store::repo::execution::workers::WorkerOperationCandidate;
 use voom_worker_protocol::{
     NvidiaVideoAcceleratorDescriptor, NvidiaVideoHardwareRequirement, TranscodeVideoProfile,
     VaapiVideoAcceleratorDescriptor, VaapiVideoHardwareRequirement, VideoAcceleratorDescriptor,
@@ -23,14 +25,16 @@ use crate::video_hardware::{candidate_accelerator_descriptor, historical_acceler
 use crate::workflow::execution::dispatch::{DispatchOutcome, DispatchTerminal, dispatch_ticket};
 use crate::workflow::execution::executor::errors::selector_failure_class;
 use crate::workflow::execution::executor::tickets::parse_payload;
-use crate::workflow::execution::executor::{RunFailureMode, RunLoopState, WorkflowExecutor};
+use crate::workflow::execution::executor::{
+    DispatchIdentity, RunFailureMode, RunInvocation, RunLoopState, WorkflowDispatchOptions,
+    WorkflowExecutor,
+};
 use crate::workflow::execution::leases::{
-    acquire_lease_with_retry, failure_class_for_error, time_duration,
+    acquire_lease_with_retry, fail_lease_with_retry, failure_class_for_error, time_duration,
 };
 use crate::workflow::execution::operation_adapters::uses_bundled_policy_verification;
 use crate::workflow::execution::runtime::{WorkerRuntime, WorkerRuntimeRegistry};
-use crate::workflow::plan::model::WorkflowPlan;
-use crate::workflow::summary::WorkflowRunSummary;
+use crate::workflow::plan::ticket_payload::WorkflowTicketPayload;
 
 #[derive(Debug)]
 pub(super) enum SpawnOutcome {
@@ -41,7 +45,72 @@ pub(super) enum SpawnOutcome {
     AcceleratorUnavailable(Vec<String>),
 }
 
+struct DispatchTask {
+    identity: DispatchIdentity,
+    control: crate::ControlPlane,
+    runtime: Option<WorkerRuntime>,
+    ticket: Ticket,
+    workflow_payload: WorkflowTicketPayload,
+    options: WorkflowDispatchOptions,
+    #[cfg(test)]
+    panic_after_lease: Option<OperationKind>,
+}
+
+impl DispatchTask {
+    async fn run(self) -> DispatchOutcome {
+        #[cfg(test)]
+        assert!(
+            self.panic_after_lease != Some(self.identity.operation),
+            "injected dispatch panic after lease acquisition"
+        );
+        dispatch_ticket(
+            self.control,
+            self.identity.worker_id,
+            self.runtime,
+            self.ticket,
+            self.workflow_payload,
+            self.identity.lease_id,
+            self.options,
+        )
+        .await
+    }
+}
+
+fn spawn_dispatch_task(state: &mut RunLoopState, task: DispatchTask) {
+    let identity = task.identity;
+    let abort_handle = state.active.spawn(task.run());
+    state.active_identities.insert(abort_handle.id(), identity);
+}
+
 impl WorkflowExecutor {
+    fn start_dispatch(
+        &self,
+        state: &mut RunLoopState,
+        ticket: Ticket,
+        workflow_payload: WorkflowTicketPayload,
+        runtime: Option<WorkerRuntime>,
+        identity: DispatchIdentity,
+    ) {
+        increment_reservation(&mut state.reservations, identity.worker_id);
+        state.summary.dispatch_count += 1;
+        state
+            .summary
+            .record_dispatch(identity.operation, identity.worker_id, &state.reservations);
+        spawn_dispatch_task(
+            state,
+            DispatchTask {
+                identity,
+                control: self.control_plane.clone(),
+                runtime,
+                ticket,
+                workflow_payload,
+                options: self.options.dispatch_options(),
+                #[cfg(test)]
+                panic_after_lease: self.options.chaos.panic_after_lease_operation,
+            },
+        );
+    }
+
     pub(super) async fn try_spawn_dispatch(
         &self,
         state: &mut RunLoopState,
@@ -67,8 +136,7 @@ impl WorkflowExecutor {
         if candidates.is_empty() && !unavailable_tokens.is_empty() {
             return Ok(SpawnOutcome::AcceleratorUnavailable(unavailable_tokens));
         }
-        let selector = LeastLoadedWorkerSelector;
-        let worker_id = match selector.select(workflow_payload.operation, &candidates) {
+        let worker_id = match select_least_loaded_worker(workflow_payload.operation, &candidates) {
             Ok(worker_id) => worker_id,
             Err(source) => {
                 if matches!(source, VoomError::NoEligibleWorker(_))
@@ -121,26 +189,13 @@ impl WorkflowExecutor {
         let LeaseAcquireOutcome::Acquired(lease) = acquisition else {
             return Ok(SpawnOutcome::CapacityDeferred);
         };
-        increment_reservation(&mut state.reservations, worker_id);
-        state.summary.dispatch_count += 1;
-        state
-            .summary
-            .record_dispatch(workflow_payload.operation, worker_id, &state.reservations);
-
-        let control = self.control_plane.clone();
-        let options = self.options.dispatch_options();
-        state.active.spawn(async move {
-            dispatch_ticket(
-                control,
-                worker_id,
-                runtime,
-                ticket,
-                workflow_payload,
-                lease.id,
-                options,
-            )
-            .await
-        });
+        let identity = DispatchIdentity {
+            ticket_id: ticket.id,
+            worker_id,
+            lease_id: lease.id,
+            operation: workflow_payload.operation,
+        };
+        self.start_dispatch(state, ticket, workflow_payload, runtime, identity);
         Ok(SpawnOutcome::Spawned(recovery_tokens))
     }
 
@@ -166,79 +221,158 @@ impl WorkflowExecutor {
         runtimes.get(worker_id).map(Some)
     }
 
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "completion handling needs shared scheduler state plus immutable workflow context"
-    )]
     pub(super) async fn process_joined_dispatch(
         &self,
         joined: Result<DispatchOutcome, tokio::task::JoinError>,
-        plan: &WorkflowPlan,
-        workflow_id: &str,
-        job_id: JobId,
-        reservations: &mut HashMap<WorkerId, u32>,
-        summary: &mut WorkflowRunSummary,
-        failure_mode: RunFailureMode,
-        fatal_error: &mut Option<VoomError>,
-        isolated_error: &mut Option<VoomError>,
+        identity: DispatchIdentity,
+        invocation: &RunInvocation<'_>,
+        state: &mut RunLoopState,
     ) {
-        let outcome = match joined {
-            Ok(outcome) => outcome,
-            Err(err) => DispatchOutcome {
-                ticket_id: TicketId(0),
-                worker_id: WorkerId(0),
-                operation: OperationKind::HashFile,
-                terminal: DispatchTerminal::Failure {
-                    source: VoomError::WorkerCrash(format!(
-                        "workflow dispatch task crashed: {err}"
-                    )),
-                },
-            },
-        };
-        decrement_reservation(reservations, outcome.worker_id);
+        match joined {
+            Ok(outcome) => {
+                self.process_dispatch_outcome(outcome, identity, invocation, state)
+                    .await;
+            }
+            Err(error) => {
+                self.process_dispatch_join_error(error, identity, invocation, state)
+                    .await;
+            }
+        }
+    }
+
+    async fn process_dispatch_outcome(
+        &self,
+        outcome: DispatchOutcome,
+        identity: DispatchIdentity,
+        invocation: &RunInvocation<'_>,
+        state: &mut RunLoopState,
+    ) {
+        if outcome.ticket_id != identity.ticket_id
+            || outcome.worker_id != identity.worker_id
+            || outcome.operation != identity.operation
+        {
+            state.record_fatal_error(VoomError::Internal(format!(
+                "workflow dispatch identity mismatch: registered {identity:?}, \
+                 returned ticket {}, worker {}, operation {:?}",
+                outcome.ticket_id, outcome.worker_id, outcome.operation
+            )));
+            return;
+        }
         match outcome.terminal {
             DispatchTerminal::Success => {
-                summary.record_success(outcome.operation);
+                state.summary.record_success(identity.operation);
                 if let Err(source) = self
-                    .expand_successful_ticket(plan, workflow_id, job_id, outcome.ticket_id)
+                    .expand_successful_ticket(
+                        invocation.plan,
+                        invocation.workflow_id,
+                        invocation.job_id,
+                        identity.ticket_id,
+                    )
                     .await
                 {
-                    *fatal_error = Some(source);
+                    state.record_fatal_error(source);
                 }
             }
             DispatchTerminal::Failure { source } => {
-                let class = match self.ticket_failure_class(outcome.ticket_id).await {
-                    Ok(Some(class)) => class,
-                    Ok(None) => failure_class_for_error(&source),
-                    Err(err) => {
-                        summary.record_failure(outcome.operation, failure_class_for_error(&source));
-                        *fatal_error = Some(err);
-                        return;
-                    }
-                };
-                summary.record_failure(outcome.operation, class);
-                match self.control_plane.tickets.get(outcome.ticket_id).await {
-                    Ok(Some(ticket)) if ticket.state == TicketState::Failed => match failure_mode {
-                        RunFailureMode::AbortJob => *fatal_error = Some(source),
-                        RunFailureMode::ContinueIndependent => {
-                            if isolated_error.is_none() {
-                                *isolated_error = Some(source);
-                            }
-                        }
-                    },
-                    Ok(Some(_)) => {}
-                    Ok(None) => {
-                        *fatal_error = Some(VoomError::NotFound(format!(
-                            "ticket {} vanished after dispatch failure",
-                            outcome.ticket_id
-                        )));
-                    }
-                    Err(err) => {
-                        *fatal_error = Some(err);
-                    }
-                }
+                self.process_dispatch_failure(identity, source, invocation, state, false)
+                    .await;
             }
         }
+    }
+
+    async fn process_dispatch_join_error(
+        &self,
+        error: tokio::task::JoinError,
+        identity: DispatchIdentity,
+        invocation: &RunInvocation<'_>,
+        state: &mut RunLoopState,
+    ) {
+        let lifecycle_fatal = error.is_cancelled();
+        let source = VoomError::WorkerCrash(format!(
+            "workflow dispatch task {} failed for ticket {}, worker {}, lease {}, \
+             operation {:?}: {error}",
+            error.id(),
+            identity.ticket_id,
+            identity.worker_id,
+            identity.lease_id,
+            identity.operation
+        ));
+        if let Err(transition) = fail_lease_with_retry(
+            &self.control_plane,
+            identity.lease_id,
+            source.to_string(),
+            FailureClass::WorkerCrash,
+        )
+        .await
+        {
+            state
+                .summary
+                .record_failure(identity.operation, FailureClass::WorkerCrash);
+            state.record_fatal_error(join_cleanup_failure(&source, transition, identity));
+            return;
+        }
+        self.process_dispatch_failure(identity, source, invocation, state, lifecycle_fatal)
+            .await;
+    }
+
+    async fn process_dispatch_failure(
+        &self,
+        identity: DispatchIdentity,
+        source: VoomError,
+        invocation: &RunInvocation<'_>,
+        state: &mut RunLoopState,
+        lifecycle_fatal: bool,
+    ) {
+        let fallback_class = failure_class_for_error(&source);
+        let class = match self
+            .resolved_ticket_failure_class(identity.ticket_id, fallback_class)
+            .await
+        {
+            Ok(class) => class,
+            Err(error) => {
+                state
+                    .summary
+                    .record_failure(identity.operation, fallback_class);
+                state.record_fatal_error(error);
+                return;
+            }
+        };
+        state.summary.record_failure(identity.operation, class);
+        let ticket = match self.control_plane.tickets.get(identity.ticket_id).await {
+            Ok(ticket) => ticket,
+            Err(error) => {
+                state.record_fatal_error(error);
+                return;
+            }
+        };
+        let Some(ticket) = ticket else {
+            state.record_fatal_error(VoomError::NotFound(format!(
+                "ticket {} vanished after dispatch failure",
+                identity.ticket_id
+            )));
+            return;
+        };
+        if ticket.state == TicketState::Failed {
+            record_terminal_dispatch_failure(
+                state,
+                source,
+                invocation.failure_mode,
+                lifecycle_fatal,
+            );
+        } else if lifecycle_fatal {
+            state.record_fatal_error(source);
+        }
+    }
+
+    async fn resolved_ticket_failure_class(
+        &self,
+        ticket_id: TicketId,
+        fallback: FailureClass,
+    ) -> Result<FailureClass, VoomError> {
+        Ok(self
+            .ticket_failure_class(ticket_id)
+            .await?
+            .unwrap_or(fallback))
     }
 
     async fn candidate_workers(
@@ -390,6 +524,27 @@ impl WorkflowExecutor {
         tokens.dedup();
         history.insert(cache_key, tokens.clone());
         Ok(tokens)
+    }
+}
+
+fn join_cleanup_failure(
+    source: &VoomError,
+    transition: VoomError,
+    identity: DispatchIdentity,
+) -> VoomError {
+    let context = format!(
+        "{source}; failing lease {} for ticket {}, worker {}, operation {:?} also failed",
+        identity.lease_id, identity.ticket_id, identity.worker_id, identity.operation
+    );
+    match transition {
+        VoomError::Database {
+            message,
+            source: database_source,
+        } => VoomError::Database {
+            message: format!("{context}: database error: {message}"),
+            source: database_source,
+        },
+        transition => VoomError::Internal(format!("{context}: {transition}")),
     }
 }
 
@@ -762,7 +917,23 @@ fn increment_reservation(reservations: &mut HashMap<WorkerId, u32>, worker_id: W
     *reservations.entry(worker_id).or_default() += 1;
 }
 
-fn decrement_reservation(reservations: &mut HashMap<WorkerId, u32>, worker_id: WorkerId) {
+fn record_terminal_dispatch_failure(
+    state: &mut RunLoopState,
+    source: VoomError,
+    failure_mode: RunFailureMode,
+    lifecycle_fatal: bool,
+) {
+    if lifecycle_fatal || failure_mode == RunFailureMode::AbortJob {
+        state.record_fatal_error(source);
+    } else if state.isolated_error.is_none() {
+        state.isolated_error = Some(source);
+    }
+}
+
+pub(super) fn decrement_reservation(
+    reservations: &mut HashMap<WorkerId, u32>,
+    worker_id: WorkerId,
+) {
     if let Some(count) = reservations.get_mut(&worker_id) {
         *count = count.saturating_sub(1);
         if *count == 0 {

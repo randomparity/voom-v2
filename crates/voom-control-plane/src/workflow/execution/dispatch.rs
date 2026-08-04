@@ -1,17 +1,18 @@
 use std::pin::Pin;
 use std::time::Duration;
 
+#[cfg(test)]
 use serde_json::Value;
 use tokio::time::Instant;
 use voom_core::{ErrorCode, FailureClass, LeaseId, TicketId, VoomError, WorkerId};
-use voom_store::repo::tickets::Ticket;
+use voom_store::repo::execution::tickets::Ticket;
 use voom_worker_protocol::{
     DispatchStream, NdjsonOutcome, OperationKind, OperationRequest, ProgressFrame, ProtocolError,
 };
 
-use super::executor::{
-    WorkflowChaosOptions, WorkflowDispatchOptions, WorkflowStreamOptions, WorkflowTimingOptions,
-};
+#[cfg(test)]
+use super::executor::WorkflowChaosOptions;
+use super::executor::{WorkflowDispatchOptions, WorkflowStreamOptions, WorkflowTimingOptions};
 use super::leases::{
     fail_if_watchdog_elapsed, fail_lease_and_return, failure_class_for_error,
     heartbeat_workflow_lease, release_lease_with_retry,
@@ -76,7 +77,11 @@ async fn dispatch_ticket_inner(
     lease_id: LeaseId,
     options: WorkflowDispatchOptions,
 ) -> Result<(), VoomError> {
+    #[cfg(test)]
     let mut payload = workflow_payload.rendered_payload.clone();
+    #[cfg(not(test))]
+    let payload = workflow_payload.rendered_payload.clone();
+    #[cfg(test)]
     apply_chaos_payload_override(&mut payload, workflow_payload.operation, &options.chaos)?;
     if let Some(result) = dispatch_control_plane_ticket(TicketDispatchContext {
         control,
@@ -158,6 +163,8 @@ async fn consume_dispatch_stream(
     mut dispatch: DispatchStream,
     options: WorkflowStreamOptions,
 ) -> Result<(), VoomError> {
+    #[cfg(not(test))]
+    let _ = operation;
     let mut last_progress = Instant::now();
     let mut last_heartbeat = Instant::now();
     let mut heartbeat = tokio::time::interval(options.timing.heartbeat_interval);
@@ -166,6 +173,16 @@ async fn consume_dispatch_stream(
         let heartbeat_deadline = sleep_until(last_heartbeat + options.timing.heartbeat_timeout);
         tokio::pin!(progress_deadline);
         tokio::pin!(heartbeat_deadline);
+        #[cfg(test)]
+        let heartbeat_tick = async {
+            if options.chaos.suppresses_heartbeats_for(operation) {
+                std::future::pending().await
+            } else {
+                heartbeat.tick().await
+            }
+        };
+        #[cfg(not(test))]
+        let heartbeat_tick = heartbeat.tick();
         tokio::select! {
             biased;
             frame = dispatch.frames.next_frame() => {
@@ -173,40 +190,26 @@ async fn consume_dispatch_stream(
                     Ok(NdjsonOutcome::Frame(frame)) => {
                         validate_frame_lease(&frame, lease_id)?;
                         fail_if_watchdog_elapsed(
-                            control,
-                            lease_id,
-                            last_heartbeat,
-                            last_progress,
-                            &options.timing,
+                            control, lease_id, last_heartbeat, last_progress, &options.timing,
                         )
                         .await?;
                         last_progress = Instant::now();
-                        if !options.chaos.suppresses_heartbeats_for(operation) {
-                            heartbeat_workflow_lease(
-                                control,
-                                lease_id,
-                                &mut last_heartbeat,
-                                &options.timing,
-                            )
-                            .await?;
+                        #[cfg(test)]
+                        if options.chaos.suppresses_heartbeats_for(operation) {
+                            continue;
                         }
+                        heartbeat_workflow_lease(
+                            control, lease_id, &mut last_heartbeat, &options.timing,
+                        )
+                        .await?;
                     }
                     Ok(NdjsonOutcome::Terminated(frame)) => {
                         validate_frame_lease(&frame, lease_id)?;
                         fail_if_watchdog_elapsed(
-                            control,
-                            lease_id,
-                            last_heartbeat,
-                            last_progress,
-                            &options.timing,
+                            control, lease_id, last_heartbeat, last_progress, &options.timing,
                         )
                         .await?;
-                        return handle_terminal_frame(
-                            control,
-                            lease_id,
-                            frame,
-                        )
-                        .await;
+                        return handle_terminal_frame(control, lease_id, frame).await;
                     }
                     Ok(NdjsonOutcome::StreamEnd) => {
                         return fail_lease_and_return(
@@ -242,12 +245,9 @@ async fn consume_dispatch_stream(
                     VoomError::WorkerTimeout(format!("progress timeout for lease {lease_id}")),
                 ).await;
             }
-            _ = heartbeat.tick(), if !options.chaos.suppresses_heartbeats_for(operation) => {
+            _ = heartbeat_tick => {
                 heartbeat_workflow_lease(
-                    control,
-                    lease_id,
-                    &mut last_heartbeat,
-                    &options.timing,
+                    control, lease_id, &mut last_heartbeat, &options.timing,
                 )
                 .await?;
             }
@@ -345,6 +345,7 @@ fn voom_error_for_failure_class(class: FailureClass, message: String) -> VoomErr
     }
 }
 
+#[cfg(test)]
 fn apply_chaos_payload_override(
     payload: &mut Value,
     operation: OperationKind,

@@ -4,9 +4,10 @@ use serde_json::json;
 
 use crate::{
     CheckStatus, ComplianceCheck, ComplianceDiagnostic, ComplianceDiagnosticCode,
-    ComplianceDiagnosticSeverity, ComplianceInputIdentity, CompliancePolicyIdentity,
-    ComplianceProvenance, ComplianceReport, ComplianceSummary, ExecutionEligibility, ExecutionPlan,
-    IssueActionHint, NodeStatus, PlanNode, PlanOperationKind, ReportStatus,
+    ComplianceDiagnosticSeverity, ComplianceInputIdentity, ComplianceKind,
+    CompliancePolicyIdentity, ComplianceProvenance, ComplianceReport, ComplianceSummary,
+    ExecutionEligibility, ExecutionPlan, IssueActionHint, NodeStatus, PlanNode, PlanOperationKind,
+    ReportStatus,
 };
 
 #[derive(Debug)]
@@ -101,7 +102,7 @@ fn check_from_node(report_id_preimage: &str, node: &PlanNode) -> ComplianceCheck
         ),
         node_id: node.node_id.clone(),
         target: node.target.clone(),
-        compliance_kind: compliance_kind(node).to_owned(),
+        compliance_kind: compliance_kind(node),
         operation_kind: node.operation_kind,
         desired_state: node.operation_payload.clone(),
         observed_state: node.observed_state.clone(),
@@ -112,15 +113,15 @@ fn check_from_node(report_id_preimage: &str, node: &PlanNode) -> ComplianceCheck
     }
 }
 
-fn compliance_kind(node: &PlanNode) -> &'static str {
+fn compliance_kind(node: &PlanNode) -> ComplianceKind {
     match (node.status, node.operation_kind) {
         (_, PlanOperationKind::Remux) | (NodeStatus::NoOp, PlanOperationKind::SetContainer) => {
-            "container"
+            ComplianceKind::Container
         }
-        (_, PlanOperationKind::TranscodeVideo) => "transcode_video",
-        (_, PlanOperationKind::TranscodeAudio) => "transcode_audio",
-        (_, PlanOperationKind::ExtractAudio) => "extract_audio",
-        _ => "unsupported",
+        (_, PlanOperationKind::TranscodeVideo) => ComplianceKind::TranscodeVideo,
+        (_, PlanOperationKind::TranscodeAudio) => ComplianceKind::TranscodeAudio,
+        (_, PlanOperationKind::ExtractAudio) => ComplianceKind::ExtractAudio,
+        _ => ComplianceKind::Unsupported,
     }
 }
 
@@ -180,7 +181,7 @@ fn compliance_diagnostics(
 ) -> Vec<ComplianceDiagnostic> {
     checks
         .iter()
-        .filter(|check| check.compliance_kind == "unsupported")
+        .filter(|check| check.compliance_kind == ComplianceKind::Unsupported)
         .map(|check| ComplianceDiagnostic {
             severity: ComplianceDiagnosticSeverity::Warning,
             code: ComplianceDiagnosticCode::UnsupportedComplianceOperation,

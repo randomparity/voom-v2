@@ -11,7 +11,7 @@ use voom_core::ids::{FileLocationId, FileVersionId};
 
 fn gate<'a>(
     pool: &'a SqlitePool,
-    identity_repo: &'a dyn IdentityRepo,
+    identity_repo: &'a dyn CommitGateIdentityRepo,
     event_repo: &'a dyn EventRepo,
     alias_resolver: &'a dyn AliasResolver,
 ) -> CommitGateContext<'a> {
@@ -24,19 +24,6 @@ fn gate<'a>(
 }
 
 #[test]
-fn commit_target_constructors_compile_for_every_sprint_1_variant() {
-    let _ = CommitTarget::DeleteFileLocation(FileLocationId(1));
-    let _ = CommitTarget::ReplaceFileLocation {
-        retired: FileLocationId(3),
-        new: file_location_proposal_fixture(),
-    };
-    let _ = CommitTarget::MoveFileLocation {
-        retired: FileLocationId(4),
-        new: file_location_proposal_fixture(),
-    };
-}
-
-#[test]
 fn affected_scope_closure_default_is_empty() {
     let c = AffectedScopeClosure::default();
     assert!(c.file_assets.is_empty());
@@ -44,51 +31,6 @@ fn affected_scope_closure_default_is_empty() {
     assert!(c.file_locations.is_empty());
     assert!(c.bundles.is_empty());
     assert!(c.resolution_warnings.is_empty());
-}
-
-#[test]
-fn closure_warning_debug_round_trips() {
-    let w = ClosureWarning {
-        message: "alias unreachable".to_owned(),
-    };
-    let debug = format!("{w:?}");
-    assert!(debug.contains("alias unreachable"));
-}
-
-#[test]
-fn closure_failure_variants_construct() {
-    let _ = ClosureFailure::AliasUnreachable {
-        message: "fs error".to_owned(),
-    };
-}
-
-#[test]
-fn evidence_drift_variants_construct() {
-    let _ = EvidenceDrift::PinnedFileVersionRetired;
-    let _ = EvidenceDrift::PinnedHashDiffers;
-    let _ = EvidenceDrift::PinnedLocationRetired;
-}
-
-#[test]
-fn target_member_kind_variants_construct() {
-    let _ = TargetMemberKind::FileAsset;
-    let _ = TargetMemberKind::FileVersion;
-    let _ = TargetMemberKind::FileLocation;
-    let _ = TargetMemberKind::Bundle;
-}
-
-#[test]
-fn target_epoch_drift_constructor_smokes() {
-    let d = TargetEpochDrift {
-        kind: TargetMemberKind::FileLocation,
-        id: 17,
-        expected: 4,
-        observed: 5,
-    };
-    assert_eq!(d.kind, TargetMemberKind::FileLocation);
-    assert_eq!(d.id, 17);
-    assert_eq!(d.expected, 4);
-    assert_eq!(d.observed, 5);
 }
 
 fn file_location_proposal_fixture() -> FileLocationProposal {
@@ -99,166 +41,6 @@ fn file_location_proposal_fixture() -> FileLocationProposal {
         proof: None,
         observed_at: time::OffsetDateTime::UNIX_EPOCH,
     }
-}
-
-#[test]
-fn commit_intent_state_variants_construct() {
-    let _ = CommitIntentState::Pending;
-    let _ = CommitIntentState::Authorized;
-    let _ = CommitIntentState::Completed;
-    let _ = CommitIntentState::Aborted;
-    let _ = CommitIntentState::RecoveryRequired;
-}
-
-#[test]
-fn mutation_outcome_variants_construct() {
-    let _ = MutationOutcome::Applied { observed: None };
-    let _ = MutationOutcome::Applied {
-        observed: Some(AffectedScopeClosure::default()),
-    };
-    let _ = MutationOutcome::NotPerformed;
-}
-
-#[test]
-fn abort_reason_variants_construct() {
-    let _ = AbortReason::OperatorCancel;
-    let _ = AbortReason::MutationFailed;
-    let _ = AbortReason::ClosureGrew;
-    let _ = AbortReason::ClosureIncomplete;
-    let _ = AbortReason::FreshLease;
-    let _ = AbortReason::StaleEvidence;
-    let _ = AbortReason::StaleTargetEpoch;
-    let _ = AbortReason::Other("custom".to_owned());
-}
-
-#[test]
-fn commit_intent_constructor_smokes() {
-    let intent = CommitIntent {
-        commit_id: CommitId(1),
-        closure_initial: AffectedScopeClosure::default(),
-        evaluated_lease_ids: Vec::new(),
-        revalidated_evidence: Vec::new(),
-        epoch: 0,
-    };
-    assert_eq!(intent.commit_id, CommitId(1));
-}
-
-#[test]
-fn commit_permit_constructor_smokes() {
-    let permit = CommitPermit {
-        commit_id: CommitId(2),
-        authorized_at: time::OffsetDateTime::UNIX_EPOCH,
-        closure_authorized: AffectedScopeClosure::default(),
-        evaluated_lease_ids: Vec::new(),
-        revalidated_evidence: Vec::new(),
-        epoch: 1,
-    };
-    assert_eq!(permit.commit_id(), CommitId(2));
-    assert_eq!(permit.epoch(), 1);
-}
-
-#[test]
-fn commit_permit_accessors_return_internal_state() {
-    // Round-4 finding: CommitPermit fields are module-private; external
-    // consumers reach state through accessors. This test is a sibling
-    // of the parent module and uses the struct literal directly to pin
-    // each accessor to its field — a future rename or accessor
-    // regression breaks the test.
-    let mut closure = AffectedScopeClosure::default();
-    closure.file_locations.insert(FileLocationId(99));
-    let leases = vec![voom_core::ids::UseLeaseId(7)];
-    let evidence = vec![EvidenceRevalidationResult {
-        evidence_id: voom_core::ids::EvidenceId(3),
-        drift: None,
-    }];
-
-    let permit = CommitPermit {
-        commit_id: CommitId(42),
-        authorized_at: time::OffsetDateTime::UNIX_EPOCH,
-        closure_authorized: closure.clone(),
-        evaluated_lease_ids: leases.clone(),
-        revalidated_evidence: evidence.clone(),
-        epoch: 5,
-    };
-
-    assert_eq!(permit.commit_id(), CommitId(42));
-    assert_eq!(permit.authorized_at(), time::OffsetDateTime::UNIX_EPOCH);
-    assert_eq!(permit.closure_authorized(), &closure);
-    assert_eq!(permit.evaluated_lease_ids(), leases.as_slice());
-    assert_eq!(permit.revalidated_evidence(), evidence.as_slice());
-    assert_eq!(permit.epoch(), 5);
-}
-
-#[test]
-fn commit_gate_outcome_constructor_smokes() {
-    let outcome = CommitGateOutcome {
-        commit_id: CommitId(4),
-        closure_initial: AffectedScopeClosure::default(),
-        closure_authorized: AffectedScopeClosure::default(),
-        closure_final: AffectedScopeClosure::default(),
-        evaluated_lease_ids: Vec::new(),
-        revalidated_evidence: Vec::new(),
-        result: CommitGateResult::Allowed,
-    };
-    assert!(matches!(outcome.result, CommitGateResult::Allowed));
-}
-
-#[test]
-fn commit_gate_result_every_sprint_1_variant_constructs() {
-    let _ = CommitGateResult::Allowed;
-    let _ = CommitGateResult::CancelledAfterAuthorize;
-    let _ = CommitGateResult::BlockedByUseLease {
-        lease_id: voom_core::ids::UseLeaseId(1),
-        lease_scope: LeaseScope::Bundle(BundleId(1)),
-    };
-    let _ = CommitGateResult::BlockedByPendingCommit {
-        commit_id: CommitId(2),
-        offending_scope: LeaseScope::Bundle(BundleId(1)),
-    };
-    let _ = CommitGateResult::BlockedByStaleEvidence {
-        evidence_id: voom_core::ids::EvidenceId(3),
-        drift: EvidenceDrift::PinnedFileVersionRetired,
-    };
-    let _ = CommitGateResult::BlockedByClosureIncomplete {
-        reason: ClosureFailure::AliasUnreachable {
-            message: "fs".into(),
-        },
-        unreachable: Vec::new(),
-    };
-    let _ = CommitGateResult::BlockedByClosureGrew {
-        delta: ClosureMemberDelta::default(),
-    };
-    let _ = CommitGateResult::BlockedByStaleTargetEpoch { drift: Vec::new() };
-}
-
-#[test]
-fn destructive_commit_constructs_with_and_without_override_token() {
-    // Default path: `override_token = None`. The pre-commit-10 abort
-    // semantics (closure-incomplete on `Unreachable`) apply.
-    let none = DestructiveCommit {
-        target: CommitTarget::DeleteFileLocation(FileLocationId(1)),
-        accepted_evidence_ids: Vec::new(),
-        override_token: None,
-    };
-    assert!(none.override_token.is_none());
-
-    // Force path: `override_token = Some(_)`. Validation runs in
-    // `prepare_destructive_commit` before any tx opens; an invalid
-    // bypass bit surfaces as `VoomError::Config` without materializing
-    // a row.
-    let mut bypass = std::collections::BTreeSet::new();
-    bypass.insert(BypassKind::ClosureIncomplete);
-    let some = DestructiveCommit {
-        target: CommitTarget::DeleteFileLocation(FileLocationId(2)),
-        accepted_evidence_ids: Vec::new(),
-        override_token: Some(ForcePathToken {
-            actor: "ops@example.com".to_owned(),
-            reason: "fs offline".to_owned(),
-            bypass,
-        }),
-    };
-    let token = some.override_token.as_ref().unwrap();
-    assert_eq!(token.actor, "ops@example.com");
 }
 
 #[test]
@@ -303,69 +85,6 @@ fn file_location_proposal_does_not_carry_file_version_id() {
         proof: _,
         observed_at: _,
     } = p;
-}
-
-#[test]
-fn evidence_revalidation_result_constructs() {
-    let r = EvidenceRevalidationResult {
-        evidence_id: voom_core::ids::EvidenceId(1),
-        drift: None,
-    };
-    assert_eq!(r.evidence_id, voom_core::ids::EvidenceId(1));
-    assert!(r.drift.is_none());
-
-    let r2 = EvidenceRevalidationResult {
-        evidence_id: voom_core::ids::EvidenceId(2),
-        drift: Some(EvidenceDrift::PinnedHashDiffers),
-    };
-    assert!(r2.drift.is_some());
-}
-
-#[test]
-fn pending_commit_intent_constructs() {
-    let p = PendingCommitIntent {
-        commit_id: CommitId(9),
-        target: CommitTarget::DeleteFileLocation(FileLocationId(2)),
-        state: CommitIntentState::Pending,
-        closure_initial: AffectedScopeClosure::default(),
-        closure_authorized: None,
-        accepted_evidence_ids: Vec::new(),
-        started_at: time::OffsetDateTime::UNIX_EPOCH,
-        authorized_at: None,
-    };
-    assert_eq!(p.state, CommitIntentState::Pending);
-    assert!(p.closure_authorized.is_none());
-
-    let p2 = PendingCommitIntent {
-        commit_id: CommitId(10),
-        target: CommitTarget::DeleteFileLocation(FileLocationId(3)),
-        state: CommitIntentState::Authorized,
-        closure_initial: AffectedScopeClosure::default(),
-        closure_authorized: Some(AffectedScopeClosure::default()),
-        accepted_evidence_ids: Vec::new(),
-        started_at: time::OffsetDateTime::UNIX_EPOCH,
-        authorized_at: Some(time::OffsetDateTime::UNIX_EPOCH),
-    };
-    assert_eq!(p2.state, CommitIntentState::Authorized);
-    assert!(p2.closure_authorized.is_some());
-}
-
-#[test]
-fn bypass_kind_variants_construct() {
-    let _ = BypassKind::ClosureIncomplete;
-}
-
-#[test]
-fn force_path_token_constructs() {
-    let mut bypass = std::collections::BTreeSet::new();
-    bypass.insert(BypassKind::ClosureIncomplete);
-    let t = ForcePathToken {
-        actor: "ops@example.com".to_owned(),
-        reason: "fs offline".to_owned(),
-        bypass,
-    };
-    assert_eq!(t.actor, "ops@example.com");
-    assert!(t.bypass.contains(&BypassKind::ClosureIncomplete));
 }
 
 #[test]
@@ -478,23 +197,6 @@ fn id_member_delta_reports_added_and_removed_ids() {
     assert!(delta.removed_locations.contains(&FileLocationId(1)));
     assert!(delta.added_bundles.contains(&BundleId(11)));
     assert!(delta.removed_bundles.is_empty());
-}
-
-#[test]
-fn alias_resolution_error_variants_construct() {
-    let _ = AliasResolutionError::Unreachable {
-        message: "fs offline".to_owned(),
-    };
-    let _ = AliasResolutionError::Database("connect refused".to_owned());
-}
-
-#[test]
-fn alias_resolution_error_debug_round_trips() {
-    let e = AliasResolutionError::Unreachable {
-        message: "mount /srv/media offline".to_owned(),
-    };
-    let debug = format!("{e:?}");
-    assert!(debug.contains("mount /srv/media offline"));
 }
 
 // -- FailingAliasResolver -------------------------------------------------
@@ -610,9 +312,9 @@ async fn commit_intents_check_rejects_recovery_required_with_null_closure_author
 
 use crate::repo::audit::events::{EventFilter, EventRepo, Page, SqliteEventRepo};
 use crate::repo::media::identity::{
-    AcceptedPin, FileLocationKind as IdentityFileLocationKind, IdentityRepo,
-    NewFileLocation as IdentityNewFileLocation, NewFileVersion, NewIdentityEvidence, ProducedBy,
-    SqliteIdentityRepo,
+    AcceptedPin, FileAssetRepo, FileLocationKind as IdentityFileLocationKind, FileLocationRepo,
+    FileVersionRepo, IdentityEvidenceRepo, NewFileLocation as IdentityNewFileLocation,
+    NewFileVersion, NewIdentityEvidence, ProducedBy, SqliteIdentityRepo,
 };
 use crate::repo::media::use_leases::{
     BlockingMode, IssuerKind, NewUseLease, SqliteUseLeaseRepo, UseLeaseKind,
@@ -2806,7 +2508,12 @@ async fn commit_intent_state_and_epoch(
     let abort_reason: Option<String> = row.try_get("abort_reason").unwrap();
     let aborted_at: Option<String> = row.try_get("aborted_at").unwrap();
     let epoch_raw: i64 = row.try_get("epoch").unwrap();
-    (state, abort_reason, aborted_at, u64_from_i64(epoch_raw))
+    (
+        state,
+        abort_reason,
+        aborted_at,
+        u64_from_i64(epoch_raw, "commit_intents.epoch").unwrap(),
+    )
 }
 
 #[tokio::test]

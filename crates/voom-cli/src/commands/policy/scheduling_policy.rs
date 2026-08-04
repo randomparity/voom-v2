@@ -2,7 +2,7 @@ use std::io;
 
 use serde::Serialize;
 use voom_control_plane::ControlPlane;
-use voom_store::repo::scheduling_policies::{NewSchedulingPolicy, SchedulingPolicy};
+use voom_store::repo::policy::scheduling_policies::{NewSchedulingPolicy, SchedulingPolicy};
 
 use crate::cli::SchedulingPolicyCommand;
 use crate::commands::common::{emit_voom_error, open_control_plane};

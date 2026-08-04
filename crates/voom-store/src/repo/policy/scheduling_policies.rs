@@ -133,7 +133,10 @@ impl SqliteSchedulingPolicyRepo {
         .await;
         match res {
             Ok(res) => Ok(SchedulingPolicy {
-                id: u64_from_i64(res.last_insert_rowid()),
+                id: u64_from_i64(
+                    res.last_insert_rowid(),
+                    concat!(module_path!(), ": ", stringify!(res.last_insert_rowid())),
+                )?,
                 slug: input.slug,
                 display_name: input.display_name,
                 schema_version: SCHEDULING_POLICY_SCHEMA_VERSION,
@@ -270,7 +273,7 @@ fn row_to_scheduling_policy(row: &SqliteRow) -> Result<SchedulingPolicy, VoomErr
     let created_at: String = row.try_get("created_at").map_err(map("created_at"))?;
     let updated_at: String = row.try_get("updated_at").map_err(map("updated_at"))?;
     Ok(SchedulingPolicy {
-        id: u64_from_i64(id),
+        id: u64_from_i64(id, concat!(module_path!(), ": ", stringify!(id)))?,
         slug: row.try_get("slug").map_err(map("slug"))?,
         display_name: row.try_get("display_name").map_err(map("display_name"))?,
         schema_version: u32_from_i64(schema_version)?,

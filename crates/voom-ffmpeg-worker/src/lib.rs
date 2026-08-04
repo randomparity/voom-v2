@@ -26,6 +26,6 @@ pub use handler::{
 };
 pub use observe::{ObserveError, observe_file_facts};
 pub use preflight::{
-    FFMPEG_BIN_ENV, FFPROBE_BIN_ENV, FFmpegPreflightError, FfmpegPreflight,
+    FFMPEG_BIN_ENV, FFPROBE_BIN_ENV, FfmpegPreflight, FfmpegPreflightError,
     preflight_from_process_env, preflight_with_paths,
 };

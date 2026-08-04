@@ -3,7 +3,7 @@
     reason = "integration tests favor unwrap over plumbing Result<()> through every assertion"
 )]
 
-use voom_store::repo::SqliteSchemaMetaRepo;
+use voom_store::repo::audit::schema_meta::SqliteSchemaMetaRepo;
 use voom_store::test_support::fresh_initialized_pool_at;
 use voom_test_support::TempDatabase;
 

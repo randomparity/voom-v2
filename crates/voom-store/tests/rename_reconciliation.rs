@@ -15,12 +15,12 @@ use voom_control_plane::ControlPlane;
 use voom_core::rng_test_support::FrozenRng;
 use voom_core::{SystemClock, VoomError};
 use voom_events::EventKind;
-use voom_store::repo::events::{EventFilter, EventRepo, Page};
-use voom_store::repo::identity::{
-    DiscoveredFile, FileLocationKind, IdentityRepo, IngestOutcome, LocationProof, ObservedBytes,
-    RenameProof,
+use voom_store::repo::audit::events::{EventFilter, EventRepo, Page};
+use voom_store::repo::media::identity::{
+    DiscoveredFile, FileLocationKind, FileLocationRepo, IngestOutcome, LocationProof,
+    ObservedBytes, RenameProof,
 };
-use voom_store::repo::use_leases::{
+use voom_store::repo::media::use_leases::{
     BlockingMode, IssuerKind, LeaseScope, NewUseLease, UseLeaseKind,
 };
 use voom_store::test_support::T0;
@@ -283,9 +283,9 @@ async fn reconcile_rename_reanchors_location_scoped_use_lease() {
     else {
         panic!("expected UseLeaseReanchoredByMove payload");
     };
-    assert_eq!(payload.lease_id, lease.id.0);
-    assert_eq!(payload.retired_location_id, prior_loc.0);
-    assert_eq!(payload.new_location_id, outcome.new_file_location_id.0);
+    assert_eq!(payload.lease_id, lease.id);
+    assert_eq!(payload.retired_location_id, prior_loc);
+    assert_eq!(payload.new_location_id, outcome.new_file_location_id);
 }
 
 // --- Conflict paths: every one asserts no side effects -------------------

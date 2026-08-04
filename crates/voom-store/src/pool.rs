@@ -14,7 +14,7 @@ pub async fn connect(url: &str) -> Result<SqlitePool, VoomError> {
 
 /// Open a `SQLite` pool, creating the database file and any missing parent
 /// directories. Only `init()` should call this.
-pub async fn connect_or_create(url: &str) -> Result<SqlitePool, VoomError> {
+pub(crate) async fn connect_or_create(url: &str) -> Result<SqlitePool, VoomError> {
     connect_inner(url, /* create = */ true).await
 }
 

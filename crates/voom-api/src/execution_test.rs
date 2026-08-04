@@ -3,13 +3,14 @@
     reason = "hash serialization failures should fail this focused unit test"
 )]
 
+use serde::de::DeserializeOwned;
 use serde_json::json;
 
 use super::*;
 
 #[test]
 fn request_hash_includes_route_instance() {
-    let body = json!({"node_id": 1, "worker_id": 2});
+    let body = json!({"node_id": 1, "worker_id": 2, "result": {"ok": true}});
 
     let a = match stable_request_hash("POST", "/v1/execution/lease/1/complete", &body) {
         Ok(hash) => hash,
@@ -24,19 +25,36 @@ fn request_hash_includes_route_instance() {
 }
 
 #[test]
-fn node_heartbeat_request_rejects_unknown_fields() {
-    let request: NodeHeartbeatRequest = match serde_json::from_value(json!({})) {
-        Ok(request) => request,
-        Err(err) => panic!("{err}"),
-    };
-    let hash = match stable_request_hash("POST", "/v1/execution/node/1/heartbeat", &request) {
-        Ok(hash) => hash,
-        Err(err) => panic!("{err}"),
-    };
-    assert!(!hash.is_empty());
+fn execution_request_dtos_reject_unknown_fields() {
+    assert_unknown_field_rejected::<AcquireRequest>(json!({
+        "node_id": 1,
+        "worker_id": 2,
+        "unknown": true
+    }));
+    assert_unknown_field_rejected::<NodeHeartbeatRequest>(json!({"unknown": true}));
+    assert_unknown_field_rejected::<LeaseHeartbeatRequest>(json!({
+        "node_id": 1,
+        "worker_id": 2,
+        "unknown": true
+    }));
+    assert_unknown_field_rejected::<CompleteRequest>(json!({
+        "node_id": 1,
+        "worker_id": 2,
+        "result": {},
+        "unknown": true
+    }));
+    assert_unknown_field_rejected::<FailRequest>(json!({
+        "node_id": 1,
+        "worker_id": 2,
+        "reason": "timed out",
+        "class": FailureClass::WorkerTimeout,
+        "unknown": true
+    }));
+}
 
-    let Err(err) = serde_json::from_value::<NodeHeartbeatRequest>(json!({"node_id": 1})) else {
-        panic!("node heartbeat body with fields should be rejected");
+fn assert_unknown_field_rejected<T: DeserializeOwned>(value: JsonValue) {
+    let Err(err) = serde_json::from_value::<T>(value) else {
+        panic!("request body with an unknown field should be rejected");
     };
     assert!(
         err.to_string().contains("unknown field"),

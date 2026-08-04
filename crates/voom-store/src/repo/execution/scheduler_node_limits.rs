@@ -37,7 +37,10 @@ impl SqliteSchedulerNodeLimitRepo {
     ) -> Result<u32, VoomError> {
         let row =
             sqlx::query("SELECT max_parallel_leases FROM scheduler_node_limits WHERE node_id = ?")
-                .bind(i64_from_u64(node_id.0))
+                .bind(i64_from_u64(
+                    node_id.0,
+                    concat!(module_path!(), ": ", stringify!(node_id.0)),
+                )?)
                 .fetch_optional(&mut **tx)
                 .await
                 .map_err(|e| VoomError::database_context("scheduler_node_limits get", e))?;
@@ -47,7 +50,7 @@ impl SqliteSchedulerNodeLimitRepo {
         };
         let max_parallel_leases: i64 = row
             .try_get("max_parallel_leases")
-            .map_err(|e| map_row_err("scheduler_node_limits", &e))?;
+            .map_err(|e| map_row_err("scheduler_node_limits", e))?;
         u32_from_i64(max_parallel_leases)
     }
 
@@ -73,7 +76,10 @@ impl SqliteSchedulerNodeLimitRepo {
                  updated_at = excluded.updated_at \
              RETURNING node_id, max_parallel_leases, created_at, updated_at",
         )
-        .bind(i64_from_u64(node_id.0))
+        .bind(i64_from_u64(
+            node_id.0,
+            concat!(module_path!(), ": ", stringify!(node_id.0)),
+        )?)
         .bind(i64::from(max_parallel_leases))
         .bind(&now)
         .bind(&now)
@@ -87,16 +93,16 @@ impl SqliteSchedulerNodeLimitRepo {
 fn row_to_node_limit(row: &sqlx::sqlite::SqliteRow) -> Result<SchedulerNodeLimit, VoomError> {
     let node_id: i64 = row
         .try_get("node_id")
-        .map_err(|e| map_row_err("scheduler_node_limits", &e))?;
+        .map_err(|e| map_row_err("scheduler_node_limits", e))?;
     let max_parallel_leases: i64 = row
         .try_get("max_parallel_leases")
-        .map_err(|e| map_row_err("scheduler_node_limits", &e))?;
+        .map_err(|e| map_row_err("scheduler_node_limits", e))?;
     let created_at: String = row
         .try_get("created_at")
-        .map_err(|e| map_row_err("scheduler_node_limits", &e))?;
+        .map_err(|e| map_row_err("scheduler_node_limits", e))?;
     let updated_at: String = row
         .try_get("updated_at")
-        .map_err(|e| map_row_err("scheduler_node_limits", &e))?;
+        .map_err(|e| map_row_err("scheduler_node_limits", e))?;
     Ok(SchedulerNodeLimit {
         node_id: NodeId(u64::try_from(node_id).map_err(|e| {
             VoomError::database_context("scheduler_node_limits.node_id out of range", e)

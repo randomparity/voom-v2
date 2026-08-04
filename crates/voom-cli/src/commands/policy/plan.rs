@@ -47,7 +47,11 @@ pub async fn dry_run(policy_file: &Path, input_fixture: &str) -> io::Result<i32>
         }
     };
 
-    match voom_control_plane::plan_policy_source_with_input(&source, input, Some(input_fixture)) {
+    match voom_control_plane::policy::plan_policy_source_with_input(
+        &source,
+        input,
+        Some(input_fixture),
+    ) {
         Ok(plan) => emit_ok("plan", PlanData { plan }, None, Vec::new()).map(|()| 0),
         Err(err) => {
             emit_err("plan", err.code(), err.to_string(), None, None)?;

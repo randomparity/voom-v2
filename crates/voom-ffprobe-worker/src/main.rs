@@ -3,7 +3,7 @@
     reason = "ffprobe-worker advertises readiness with BOUND addr=..."
 )]
 
-use voom_ffprobe_worker::{FfprobeConfig, operation_handler_with_config};
+use voom_ffprobe_worker::{FfprobeConfig, operation_handler};
 use voom_worker_protocol::{
     HttpServer, WorkerCredentials, WorkerStartupError, load_worker_bind_addr_from_env,
     load_worker_credentials_from_env, serve_worker_http,
@@ -40,7 +40,7 @@ async fn main() -> Result<(), WorkerStartupError> {
 }
 
 fn worker_server(credentials: WorkerCredentials, config: FfprobeConfig) -> HttpServer {
-    HttpServer::new(credentials, operation_handler_with_config(config))
+    HttpServer::new(credentials, operation_handler(config))
 }
 
 #[cfg(test)]

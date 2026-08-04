@@ -6,12 +6,12 @@
         reason = "tests favor unwrap over plumbing Result<()> through every assertion"
     )
 )]
-//! Shared helpers for Sprint 2 fake-provider binaries.
+//! Shared runtime, validation, scenario, and result helpers for fake providers.
 //!
-//! Consumed only by the eleven `fake-*` binaries in `voom-fakes`.
-//! `chaos-worker`, `benchmark-worker`, and `voom-conformance` do
-//! NOT depend on this crate -- keeping their behavior independent
-//! of any shared encoder/decoder bug.
+//! Its production consumers are the eleven `fake-*` binaries in `voom-fakes`;
+//! control-plane integration tests also reuse the provider dispatcher.
+//! `chaos-worker`, `benchmark-worker`, and `voom-conformance` do not depend on
+//! this crate, keeping their behavior independent of shared fake-provider bugs.
 
 mod catalog;
 mod results;

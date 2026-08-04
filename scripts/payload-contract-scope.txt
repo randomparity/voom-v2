@@ -1,9 +1,7 @@
 # In-scope source files for check-payload-deny-unknown.sh.
-# Derived from docs/payload-contract-inventory.md (Class-T / T-upstream rows).
+# Derived from the enforced typed roots in docs/payload-contract-inventory.md.
 # Add a line here when a new durable column is typed into a struct whose
-# defining file is not already listed. Migration 0032's `video_profiles.qp` and
-# nullable `preset` land in TranscodeVideoProfile, already covered by the last
-# entry below; see the "Durable typed column changes" table in the inventory.
+# defining file is not already listed.
 crates/voom-events/src/payload/artifact.rs
 crates/voom-events/src/payload/commit.rs
 crates/voom-events/src/payload/execution.rs
@@ -16,9 +14,11 @@ crates/voom-events/src/payload/workers.rs
 crates/voom-events/src/payload/mod.rs
 crates/voom-store/src/repo/media/commit_safety_gate/codecs.rs
 crates/voom-store/src/repo/media/commit_safety_gate.rs
+crates/voom-store/src/repo/execution/remote_idempotency.rs
 crates/voom-control-plane/src/workflow/plan/ticket_payload.rs
 crates/voom-control-plane/src/workflow/execution/timing.rs
 crates/voom-control-plane/src/workflow/ticket_results.rs
+crates/voom-control-plane/src/cases/execution/remote_execution/mod.rs
 crates/voom-control-plane/src/audio/mod.rs
 crates/voom-control-plane/src/cases/policy/compliance.rs
 crates/voom-policy/src/compile/compiled.rs
@@ -26,7 +26,6 @@ crates/voom-policy/src/data/video_profile.rs
 crates/voom-policy/src/diagnostic.rs
 crates/voom-policy/src/syntax/span.rs
 crates/voom-core/src/media/transcode_video_profile.rs
-# worker_capabilities.extra's `accelerator` object is read typed in
-# voom-control-plane/src/video_hardware.rs; this is its defining file. See the
-# "Non-durable coordinated retype" note in the inventory.
+crates/voom-worker-protocol/src/operations/audio.rs
+# This defines the typed accelerator object read from worker_capabilities.extra.
 crates/voom-worker-protocol/src/video_acceleration.rs

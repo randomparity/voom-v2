@@ -8,6 +8,7 @@ use axum::routing::post;
 use secrecy::SecretString;
 use serde::Deserialize;
 use serde::Serialize;
+use serde::de::DeserializeOwned;
 use serde_json::Value as JsonValue;
 use voom_control_plane::ControlPlane;
 use voom_control_plane::execution::{
@@ -16,7 +17,9 @@ use voom_control_plane::execution::{
 };
 use voom_core::{ErrorCode, FailureClass, LeaseId, NodeId, WorkerId};
 
-use crate::{AppState, bad_args_response, ok_response, voom_route_error_response};
+use crate::{
+    AppState, bad_args_response, ok_response, unauthorized_response, voom_route_error_response,
+};
 
 const ACQUIRE_COMMAND: &str = "execution.acquire";
 const NODE_HEARTBEAT_COMMAND: &str = "execution.node_heartbeat";
@@ -25,6 +28,7 @@ const COMPLETE_COMMAND: &str = "execution.complete";
 const FAIL_COMMAND: &str = "execution.fail";
 
 #[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 struct AcquireRequest {
     node_id: u64,
     worker_id: u64,
@@ -37,6 +41,7 @@ struct AcquireRequest {
 struct NodeHeartbeatRequest {}
 
 #[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 struct LeaseHeartbeatRequest {
     node_id: u64,
     worker_id: u64,
@@ -45,6 +50,7 @@ struct LeaseHeartbeatRequest {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 struct CompleteRequest {
     node_id: u64,
     worker_id: u64,
@@ -52,6 +58,7 @@ struct CompleteRequest {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 struct FailRequest {
     node_id: u64,
     worker_id: u64,
@@ -81,24 +88,24 @@ async fn acquire(
     headers: HeaderMap,
     body: Result<Json<JsonValue>, JsonRejection>,
 ) -> axum::response::Response {
-    let Some(control_plane) = configured_control_plane(state) else {
-        return not_configured_response(ACQUIRE_COMMAND);
-    };
     let (token, idempotency_key) = match request_credentials(&headers) {
         Ok(credentials) => credentials,
-        Err(message) => return bad_args_response(ACQUIRE_COMMAND, message),
+        Err(error) => return credentials_error_response(ACQUIRE_COMMAND, error),
+    };
+    let Some(control_plane) = configured_control_plane(state) else {
+        return not_configured_response(ACQUIRE_COMMAND);
     };
     let body = match json_body(body) {
         Ok(body) => body,
         Err(message) => return bad_args_response(ACQUIRE_COMMAND, message),
     };
+    let request: AcquireRequest = match parse_request_body(&body) {
+        Ok(request) => request,
+        Err(message) => return bad_args_response(ACQUIRE_COMMAND, message),
+    };
     let request_hash = match stable_request_hash("POST", "/v1/execution/lease/acquire", &body) {
         Ok(hash) => hash,
         Err(message) => return bad_args_response(ACQUIRE_COMMAND, message),
-    };
-    let request: AcquireRequest = match serde_json::from_value(body) {
-        Ok(request) => request,
-        Err(err) => return bad_args_response(ACQUIRE_COMMAND, format!("invalid JSON body: {err}")),
     };
 
     match control_plane
@@ -123,12 +130,12 @@ async fn node_heartbeat(
     headers: HeaderMap,
     body: Result<Json<JsonValue>, JsonRejection>,
 ) -> axum::response::Response {
-    let Some(control_plane) = configured_control_plane(state) else {
-        return not_configured_response(NODE_HEARTBEAT_COMMAND);
-    };
     let (token, idempotency_key) = match request_credentials(&headers) {
         Ok(credentials) => credentials,
-        Err(message) => return bad_args_response(NODE_HEARTBEAT_COMMAND, message),
+        Err(error) => return credentials_error_response(NODE_HEARTBEAT_COMMAND, error),
+    };
+    let Some(control_plane) = configured_control_plane(state) else {
+        return not_configured_response(NODE_HEARTBEAT_COMMAND);
     };
     let node_id = match path_id(path) {
         Ok(id) => id,
@@ -138,14 +145,12 @@ async fn node_heartbeat(
         Ok(body) => body,
         Err(message) => return bad_args_response(NODE_HEARTBEAT_COMMAND, message),
     };
-    let request: NodeHeartbeatRequest = match serde_json::from_value(body) {
+    let _request: NodeHeartbeatRequest = match parse_request_body(&body) {
         Ok(request) => request,
-        Err(err) => {
-            return bad_args_response(NODE_HEARTBEAT_COMMAND, format!("invalid JSON body: {err}"));
-        }
+        Err(message) => return bad_args_response(NODE_HEARTBEAT_COMMAND, message),
     };
     let route_instance = format!("/v1/execution/node/{node_id}/heartbeat");
-    let request_hash = match stable_request_hash("POST", &route_instance, &request) {
+    let request_hash = match stable_request_hash("POST", &route_instance, &body) {
         Ok(hash) => hash,
         Err(message) => return bad_args_response(NODE_HEARTBEAT_COMMAND, message),
     };
@@ -170,12 +175,12 @@ async fn lease_heartbeat(
     headers: HeaderMap,
     body: Result<Json<JsonValue>, JsonRejection>,
 ) -> axum::response::Response {
-    let Some(control_plane) = configured_control_plane(state) else {
-        return not_configured_response(LEASE_HEARTBEAT_COMMAND);
-    };
     let (token, idempotency_key) = match request_credentials(&headers) {
         Ok(credentials) => credentials,
-        Err(message) => return bad_args_response(LEASE_HEARTBEAT_COMMAND, message),
+        Err(error) => return credentials_error_response(LEASE_HEARTBEAT_COMMAND, error),
+    };
+    let Some(control_plane) = configured_control_plane(state) else {
+        return not_configured_response(LEASE_HEARTBEAT_COMMAND);
     };
     let lease_id = match path_id(path) {
         Ok(id) => id,
@@ -185,16 +190,14 @@ async fn lease_heartbeat(
         Ok(body) => body,
         Err(message) => return bad_args_response(LEASE_HEARTBEAT_COMMAND, message),
     };
+    let request: LeaseHeartbeatRequest = match parse_request_body(&body) {
+        Ok(request) => request,
+        Err(message) => return bad_args_response(LEASE_HEARTBEAT_COMMAND, message),
+    };
     let route_instance = format!("/v1/execution/lease/{lease_id}/heartbeat");
     let request_hash = match stable_request_hash("POST", &route_instance, &body) {
         Ok(hash) => hash,
         Err(message) => return bad_args_response(LEASE_HEARTBEAT_COMMAND, message),
-    };
-    let request: LeaseHeartbeatRequest = match serde_json::from_value(body) {
-        Ok(request) => request,
-        Err(err) => {
-            return bad_args_response(LEASE_HEARTBEAT_COMMAND, format!("invalid JSON body: {err}"));
-        }
     };
 
     match control_plane
@@ -220,12 +223,12 @@ async fn complete(
     headers: HeaderMap,
     body: Result<Json<JsonValue>, JsonRejection>,
 ) -> axum::response::Response {
-    let Some(control_plane) = configured_control_plane(state) else {
-        return not_configured_response(COMPLETE_COMMAND);
-    };
     let (token, idempotency_key) = match request_credentials(&headers) {
         Ok(credentials) => credentials,
-        Err(message) => return bad_args_response(COMPLETE_COMMAND, message),
+        Err(error) => return credentials_error_response(COMPLETE_COMMAND, error),
+    };
+    let Some(control_plane) = configured_control_plane(state) else {
+        return not_configured_response(COMPLETE_COMMAND);
     };
     let lease_id = match path_id(path) {
         Ok(id) => id,
@@ -235,16 +238,14 @@ async fn complete(
         Ok(body) => body,
         Err(message) => return bad_args_response(COMPLETE_COMMAND, message),
     };
+    let request: CompleteRequest = match parse_request_body(&body) {
+        Ok(request) => request,
+        Err(message) => return bad_args_response(COMPLETE_COMMAND, message),
+    };
     let route_instance = format!("/v1/execution/lease/{lease_id}/complete");
     let request_hash = match stable_request_hash("POST", &route_instance, &body) {
         Ok(hash) => hash,
         Err(message) => return bad_args_response(COMPLETE_COMMAND, message),
-    };
-    let request: CompleteRequest = match serde_json::from_value(body) {
-        Ok(request) => request,
-        Err(err) => {
-            return bad_args_response(COMPLETE_COMMAND, format!("invalid JSON body: {err}"));
-        }
     };
 
     match control_plane
@@ -270,12 +271,12 @@ async fn fail(
     headers: HeaderMap,
     body: Result<Json<JsonValue>, JsonRejection>,
 ) -> axum::response::Response {
-    let Some(control_plane) = configured_control_plane(state) else {
-        return not_configured_response(FAIL_COMMAND);
-    };
     let (token, idempotency_key) = match request_credentials(&headers) {
         Ok(credentials) => credentials,
-        Err(message) => return bad_args_response(FAIL_COMMAND, message),
+        Err(error) => return credentials_error_response(FAIL_COMMAND, error),
+    };
+    let Some(control_plane) = configured_control_plane(state) else {
+        return not_configured_response(FAIL_COMMAND);
     };
     let lease_id = match path_id(path) {
         Ok(id) => id,
@@ -285,14 +286,14 @@ async fn fail(
         Ok(body) => body,
         Err(message) => return bad_args_response(FAIL_COMMAND, message),
     };
+    let request: FailRequest = match parse_request_body(&body) {
+        Ok(request) => request,
+        Err(message) => return bad_args_response(FAIL_COMMAND, message),
+    };
     let route_instance = format!("/v1/execution/lease/{lease_id}/fail");
     let request_hash = match stable_request_hash("POST", &route_instance, &body) {
         Ok(hash) => hash,
         Err(message) => return bad_args_response(FAIL_COMMAND, message),
-    };
-    let request: FailRequest = match serde_json::from_value(body) {
-        Ok(request) => request,
-        Err(err) => return bad_args_response(FAIL_COMMAND, format!("invalid JSON body: {err}")),
     };
 
     match control_plane
@@ -318,10 +319,27 @@ fn configured_control_plane(state: AppState) -> Option<ControlPlane> {
     state.control_plane
 }
 
-fn request_credentials(headers: &HeaderMap) -> Result<(SecretString, String), String> {
-    let token = bearer(headers)?;
-    let key = idempotency_key(headers)?;
+enum RequestCredentialsError {
+    Unauthorized,
+    BadArgs(String),
+}
+
+fn request_credentials(
+    headers: &HeaderMap,
+) -> Result<(SecretString, String), RequestCredentialsError> {
+    let token = bearer(headers).map_err(|_| RequestCredentialsError::Unauthorized)?;
+    let key = idempotency_key(headers).map_err(RequestCredentialsError::BadArgs)?;
     Ok((token, key))
+}
+
+fn credentials_error_response(
+    command: &'static str,
+    error: RequestCredentialsError,
+) -> axum::response::Response {
+    match error {
+        RequestCredentialsError::Unauthorized => unauthorized_response(command),
+        RequestCredentialsError::BadArgs(message) => bad_args_response(command, message),
+    }
 }
 
 fn not_configured_response(command: &'static str) -> axum::response::Response {
@@ -334,9 +352,13 @@ fn not_configured_response(command: &'static str) -> axum::response::Response {
     )
 }
 
-fn json_body(body: Result<Json<JsonValue>, JsonRejection>) -> Result<JsonValue, String> {
+fn json_body<T>(body: Result<Json<T>, JsonRejection>) -> Result<T, String> {
     body.map(|Json(value)| value)
         .map_err(|err| format!("invalid JSON body: {err}"))
+}
+
+fn parse_request_body<T: DeserializeOwned>(body: &JsonValue) -> Result<T, String> {
+    serde_json::from_value(body.clone()).map_err(|err| format!("invalid JSON body: {err}"))
 }
 
 fn path_id(path: Result<Path<u64>, PathRejection>) -> Result<u64, String> {

@@ -14,9 +14,12 @@ use voom_events::payload::{
 };
 use voom_events::{Event, SubjectType};
 use voom_store::repo::{
-    bundles::{BundleMemberRole, NewBundleMember},
-    identity::{DiscoveredFile, FileLocationKind, IdentityRepo, IngestOutcome, NewMediaSnapshot},
-    scan_facts::{find_live_hardlink_location_in_tx, record_scan_fact_in_tx},
+    media::bundles::{BundleMemberRole, NewBundleMember},
+    media::identity::{
+        DiscoveredFile, FileLocationKind, FileLocationRepo, FileVersionRepo, IdentityEvidenceRepo,
+        IngestOutcome, IngestRepo, NewMediaSnapshot,
+    },
+    media::scan_facts::{find_live_hardlink_location_in_tx, record_scan_fact_in_tx},
 };
 use voom_worker_protocol::ProbeFileResult;
 
@@ -199,7 +202,10 @@ pub async fn persist_scanned_media_snapshot(
         .await
         .map_err(|e| VoomError::database_context("begin", e))?;
 
-    ensure_worker_live_in_tx(&mut tx, worker_id).await?;
+    control_plane
+        .workers
+        .require_live_in_tx(&mut tx, worker_id)
+        .await?;
 
     // Resolve identity. A candidate whose (dev, ino) matches a live prior local
     // location at a different path — and whose content matches that version — is
@@ -329,8 +335,8 @@ async fn resolve_hardlink(
         Some(new_location_id.0),
         now,
         Event::FileLocationAliased(FileLocationAliasedPayload {
-            file_location_id: new_location_id.0,
-            file_version_id: matched.file_version_id.0,
+            file_location_id: new_location_id,
+            file_version_id: matched.file_version_id,
             kind: FileLocationKind::LocalPath.as_str().to_owned(),
             value: location_value.to_owned(),
         }),
@@ -574,8 +580,8 @@ async fn add_bundle_member_event(
         Some(bundle_id.0),
         observed_at,
         Event::AssetBundleMemberAdded(AssetBundleMemberAddedPayload {
-            bundle_id: bundle_id.0,
-            file_asset_id: file_asset_id.0,
+            bundle_id,
+            file_asset_id,
             role: role.as_str().to_owned(),
         }),
     )
@@ -609,7 +615,7 @@ async fn emit_ingest_events(
                 Some(file_asset_id.0),
                 observed_at,
                 Event::FileAssetCreated(FileAssetCreatedPayload {
-                    file_asset_id: file_asset_id.0,
+                    file_asset_id: *file_asset_id,
                 }),
             )
             .await?;
@@ -629,12 +635,12 @@ async fn emit_ingest_events(
                 Some(version.id.0),
                 observed_at,
                 Event::FileVersionCreated(FileVersionCreatedPayload {
-                    file_version_id: version.id.0,
-                    file_asset_id: version.file_asset_id.0,
+                    file_version_id: version.id,
+                    file_asset_id: version.file_asset_id,
                     content_hash: version.content_hash.clone(),
                     size_bytes: version.size_bytes,
                     produced_by: version.produced_by.as_str().to_owned(),
-                    produced_from_version_id: version.produced_from_version_id.map(|id| id.0),
+                    produced_from_version_id: version.produced_from_version_id,
                 }),
             )
             .await?;
@@ -654,8 +660,8 @@ async fn emit_ingest_events(
                 Some(location.id.0),
                 observed_at,
                 Event::FileLocationRecorded(FileLocationRecordedPayload {
-                    file_location_id: location.id.0,
-                    file_version_id: location.file_version_id.0,
+                    file_location_id: location.id,
+                    file_version_id: location.file_version_id,
                     kind: location.kind.as_str().to_owned(),
                     value: location.value,
                 }),
@@ -679,10 +685,10 @@ async fn emit_ingest_events(
                     Some(evidence.id.0),
                     evidence.observed_at,
                     Event::IdentityEvidenceRecorded(IdentityEvidenceRecordedPayload {
-                        evidence_id: evidence.id.0,
+                        evidence_id: evidence.id,
                         target_type: evidence.target_type.as_str().to_owned(),
                         target_id: evidence.target_id,
-                        assertion_type: evidence.assertion_type.as_str().to_owned(),
+                        assertion_type: evidence.assertion_type,
                         provider: evidence.provider,
                         provider_version: evidence.provider_version,
                         confidence: evidence.confidence,
@@ -717,8 +723,8 @@ async fn emit_ingest_events(
                 Some(location.id.0),
                 observed_at,
                 Event::FileLocationAliased(FileLocationAliasedPayload {
-                    file_location_id: location.id.0,
-                    file_version_id: file_version_id.0,
+                    file_location_id: location.id,
+                    file_version_id: *file_version_id,
                     kind: location.kind.as_str().to_owned(),
                     value: location.value,
                 }),
@@ -740,28 +746,6 @@ async fn emit_ingest_events(
             ))
         }
     }
-}
-
-async fn ensure_worker_live_in_tx(
-    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-    worker_id: WorkerId,
-) -> Result<(), VoomError> {
-    let status: Option<String> = sqlx::query_scalar("SELECT status FROM workers WHERE id = ?")
-        .bind(worker_id_as_i64(worker_id)?)
-        .fetch_optional(&mut **tx)
-        .await
-        .map_err(|e| VoomError::database_context("scan persist worker reload", e))?;
-    match status.as_deref() {
-        Some("retired") | None => Err(VoomError::Conflict(format!(
-            "scan persist rejected worker {worker_id}: missing or retired"
-        ))),
-        Some(_) => Ok(()),
-    }
-}
-
-fn worker_id_as_i64(worker_id: WorkerId) -> Result<i64, VoomError> {
-    i64::try_from(worker_id.0)
-        .map_err(|_| VoomError::Internal(format!("worker id out of sqlite range: {worker_id}")))
 }
 
 fn canonical_path_value(path: &Path) -> Result<String, VoomError> {

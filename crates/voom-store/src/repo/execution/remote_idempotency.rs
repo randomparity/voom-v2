@@ -24,11 +24,72 @@ pub enum IdempotencyOutcome {
     Replay(RemoteMutationReplay),
 }
 
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-#[serde(tag = "status", rename_all = "snake_case")]
+#[derive(Debug, Clone, PartialEq)]
 pub enum RemoteMutationReplay {
     Ok { data: JsonValue },
     Error { code: String, message: String },
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+enum RemoteMutationReplayWire {
+    Ok(RemoteMutationSuccessWire),
+    Error(RemoteMutationErrorWire),
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RemoteMutationSuccessWire {
+    data: JsonValue,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RemoteMutationErrorWire {
+    code: String,
+    message: String,
+}
+
+impl serde::Serialize for RemoteMutationReplay {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let wire = RemoteMutationReplayWire::from(self.clone());
+        serde::Serialize::serialize(&wire, serializer)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for RemoteMutationReplay {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let wire = <RemoteMutationReplayWire as serde::Deserialize>::deserialize(deserializer)?;
+        Ok(Self::from(wire))
+    }
+}
+
+impl From<RemoteMutationReplay> for RemoteMutationReplayWire {
+    fn from(replay: RemoteMutationReplay) -> Self {
+        match replay {
+            RemoteMutationReplay::Ok { data } => Self::Ok(RemoteMutationSuccessWire { data }),
+            RemoteMutationReplay::Error { code, message } => {
+                Self::Error(RemoteMutationErrorWire { code, message })
+            }
+        }
+    }
+}
+
+impl From<RemoteMutationReplayWire> for RemoteMutationReplay {
+    fn from(wire: RemoteMutationReplayWire) -> Self {
+        match wire {
+            RemoteMutationReplayWire::Ok(RemoteMutationSuccessWire { data }) => Self::Ok { data },
+            RemoteMutationReplayWire::Error(RemoteMutationErrorWire { code, message }) => {
+                Self::Error { code, message }
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -55,8 +116,11 @@ impl SqliteRemoteIdempotencyRepo {
         tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
         input: RemoteIdempotencyInput,
     ) -> Result<IdempotencyOutcome, VoomError> {
-        let worker_scope_id = worker_scope_id(input.worker_id);
-        let worker_id = input.worker_id.map(|id| i64_from_u64(id.0));
+        let worker_scope_id = worker_scope_id(input.worker_id)?;
+        let worker_id = input
+            .worker_id
+            .map(|id| i64_from_u64(id.0, concat!(module_path!(), ": ", stringify!(id.0))))
+            .transpose()?;
         let created_at = iso8601(input.created_at)?;
         let inserted = sqlx::query(
             "INSERT INTO remote_idempotency_keys \
@@ -65,7 +129,10 @@ impl SqliteRemoteIdempotencyRepo {
              VALUES (?, ?, ?, ?, ?, ?, 'in_progress', ?) \
              ON CONFLICT(node_id, route_key, worker_scope_id, idempotency_key) DO NOTHING",
         )
-        .bind(i64_from_u64(input.node_id.0))
+        .bind(i64_from_u64(
+            input.node_id.0,
+            concat!(module_path!(), ": ", stringify!(input.node_id.0)),
+        )?)
         .bind(&input.route_key)
         .bind(worker_scope_id)
         .bind(worker_id)
@@ -84,7 +151,10 @@ impl SqliteRemoteIdempotencyRepo {
             "SELECT request_hash, response_json, status FROM remote_idempotency_keys \
              WHERE node_id = ? AND route_key = ? AND worker_scope_id = ? AND idempotency_key = ?",
         )
-        .bind(i64_from_u64(input.node_id.0))
+        .bind(i64_from_u64(
+            input.node_id.0,
+            concat!(module_path!(), ": ", stringify!(input.node_id.0)),
+        )?)
         .bind(&input.route_key)
         .bind(worker_scope_id)
         .bind(&input.idempotency_key)
@@ -100,7 +170,7 @@ impl SqliteRemoteIdempotencyRepo {
 
         let request_hash: String = row
             .try_get("request_hash")
-            .map_err(|e| map_row_err("remote_idempotency_keys", &e))?;
+            .map_err(|e| map_row_err("remote_idempotency_keys", e))?;
         if request_hash != input.request_hash {
             return Err(VoomError::Conflict(
                 "idempotency key reused with different request body".to_owned(),
@@ -109,12 +179,12 @@ impl SqliteRemoteIdempotencyRepo {
 
         let status: String = row
             .try_get("status")
-            .map_err(|e| map_row_err("remote_idempotency_keys", &e))?;
+            .map_err(|e| map_row_err("remote_idempotency_keys", e))?;
         match status.as_str() {
             "completed" => {
                 let response_json: String = row
                     .try_get("response_json")
-                    .map_err(|e| map_row_err("remote_idempotency_keys", &e))?;
+                    .map_err(|e| map_row_err("remote_idempotency_keys", e))?;
                 let response = serde_json::from_str(&response_json).map_err(|e| {
                     VoomError::database_context("remote idempotency response_json", e)
                 })?;
@@ -146,9 +216,12 @@ impl SqliteRemoteIdempotencyRepo {
                AND idempotency_key = ? AND status = 'in_progress'",
         )
         .bind(&response_json)
-        .bind(i64_from_u64(node_id.0))
+        .bind(i64_from_u64(
+            node_id.0,
+            concat!(module_path!(), ": ", stringify!(node_id.0)),
+        )?)
         .bind(route_key)
-        .bind(worker_scope_id(worker_id))
+        .bind(worker_scope_id(worker_id)?)
         .bind(idempotency_key)
         .execute(&mut **tx)
         .await
@@ -189,9 +262,12 @@ impl SqliteRemoteIdempotencyRepo {
                AND idempotency_key = ? AND status = 'completed'",
         )
         .bind(&response_json)
-        .bind(i64_from_u64(node_id.0))
+        .bind(i64_from_u64(
+            node_id.0,
+            concat!(module_path!(), ": ", stringify!(node_id.0)),
+        )?)
         .bind(route_key)
-        .bind(worker_scope_id(worker_id))
+        .bind(worker_scope_id(worker_id)?)
         .bind(idempotency_key)
         .execute(&mut **tx)
         .await
@@ -207,8 +283,10 @@ impl SqliteRemoteIdempotencyRepo {
     }
 }
 
-fn worker_scope_id(worker_id: Option<WorkerId>) -> i64 {
-    worker_id.map_or(0, |id| i64_from_u64(id.0))
+fn worker_scope_id(worker_id: Option<WorkerId>) -> Result<i64, VoomError> {
+    worker_id.map_or(Ok(0), |id| {
+        i64_from_u64(id.0, concat!(module_path!(), ": ", stringify!(id.0)))
+    })
 }
 
 #[cfg(test)]

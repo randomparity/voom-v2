@@ -4,6 +4,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
+#[cfg(test)]
 use crate::workflow::execution::executor::WorkflowChaosOptions;
 
 pub(crate) const WORKFLOW_JOB_KIND: &str = "synthetic.workflow";
@@ -55,12 +56,14 @@ pub(crate) struct OperationArtifactRoots {
 pub(crate) struct WorkflowDispatchOptions {
     pub timing: WorkflowTimingOptions,
     pub artifact_roots: WorkflowArtifactRoots,
+    #[cfg(test)]
     pub chaos: WorkflowChaosOptions,
 }
 
 #[derive(Debug, Clone)]
 pub(crate) struct WorkflowStreamOptions {
     pub timing: WorkflowTimingOptions,
+    #[cfg(test)]
     pub chaos: WorkflowChaosOptions,
 }
 
@@ -174,6 +177,7 @@ impl WorkflowDispatchOptions {
     pub fn stream_options(&self) -> WorkflowStreamOptions {
         WorkflowStreamOptions {
             timing: self.timing.clone(),
+            #[cfg(test)]
             chaos: self.chaos.clone(),
         }
     }

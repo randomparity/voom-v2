@@ -17,13 +17,13 @@ use time::Duration;
 use std::sync::Mutex;
 
 use voom_control_plane::ControlPlane;
+use voom_control_plane::workers::RegisterWorkerInput;
 use voom_core::rng_test_support::FrozenRng;
-use voom_core::{FailureClass, SystemClock, TicketOperation};
+use voom_core::{FailureClass, SystemClock, TicketOperation, WorkerKind};
 use voom_events::EventKind;
-use voom_store::repo::events::{EventFilter, EventRepo, Page};
-use voom_store::repo::leases::NewLease;
-use voom_store::repo::tickets::{NewTicket, TicketState};
-use voom_store::repo::workers::{NewWorker, WorkerKind};
+use voom_store::repo::audit::events::{EventFilter, EventRepo, Page};
+use voom_store::repo::execution::leases::NewLease;
+use voom_store::repo::execution::tickets::{NewTicket, TicketState};
 use voom_store::test_support::{T0, record_worker_eligibility};
 
 async fn cp() -> (ControlPlane, voom_test_support::TempDatabase) {
@@ -79,11 +79,9 @@ async fn happy_path_ready_leased_succeeded_with_events() {
         .await
         .unwrap();
     let w = cp
-        .register_worker(NewWorker {
+        .register_worker(RegisterWorkerInput {
             name: "w-happy".to_owned(),
             kind: WorkerKind::Synthetic,
-            registered_at: T0,
-            node_id: None,
         })
         .await
         .unwrap();
@@ -142,11 +140,9 @@ async fn max_attempts_2_via_fail_retriable_yields_two_dispatched_attempts() {
         .await
         .unwrap();
     let w = cp
-        .register_worker(NewWorker {
+        .register_worker(RegisterWorkerInput {
             name: "w-a".to_owned(),
             kind: WorkerKind::Synthetic,
-            registered_at: T0,
-            node_id: None,
         })
         .await
         .unwrap();
@@ -225,11 +221,9 @@ async fn max_attempts_2_via_expire_due_yields_two_dispatched_attempts() {
         .await
         .unwrap();
     let w = cp
-        .register_worker(NewWorker {
+        .register_worker(RegisterWorkerInput {
             name: "w-b".to_owned(),
             kind: WorkerKind::Synthetic,
-            registered_at: T0,
-            node_id: None,
         })
         .await
         .unwrap();
@@ -292,11 +286,9 @@ async fn max_attempts_3_mixed_fail_and_expire_due() {
         .await
         .unwrap();
     let w = cp
-        .register_worker(NewWorker {
+        .register_worker(RegisterWorkerInput {
             name: "w-c".to_owned(),
             kind: WorkerKind::Synthetic,
-            registered_at: T0,
-            node_id: None,
         })
         .await
         .unwrap();
@@ -395,11 +387,9 @@ async fn force_release_requeue_rejects_when_exhausted() {
         .unwrap();
     cp.mark_ready_if_unblocked(t.id, T0).await.unwrap();
     let w = cp
-        .register_worker(NewWorker {
+        .register_worker(RegisterWorkerInput {
             name: "w-strand".to_owned(),
             kind: WorkerKind::Synthetic,
-            registered_at: T0,
-            node_id: None,
         })
         .await
         .unwrap();
@@ -434,7 +424,7 @@ async fn force_release_requeue_rejects_when_exhausted() {
     let lease_after = cp.leases().get(lease.id).await.unwrap().unwrap();
     assert_eq!(
         lease_after.state,
-        voom_store::repo::leases::LeaseState::Held,
+        voom_store::repo::execution::leases::LeaseState::Held,
         "rejected force_release must leave the lease held"
     );
     let ticket_after = cp.tickets().get(t.id).await.unwrap().unwrap();

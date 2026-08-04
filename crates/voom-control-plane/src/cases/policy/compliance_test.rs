@@ -3,16 +3,17 @@ use std::time::Duration;
 
 use sqlx::Row;
 use time::OffsetDateTime;
-use voom_core::{OperationKind, TicketOperation};
+use voom_core::{OperationKind, TicketId, TicketOperation, WorkerKind};
 use voom_events::EventKind;
 use voom_plan::PlanOperationKind;
 use voom_policy::{FixtureName, load_fixture, load_policy_fixture};
-use voom_store::repo::identity::{DiscoveredFile, FileLocationKind, IngestOutcome};
-use voom_store::repo::tickets::NewTicket;
-use voom_store::repo::workers::{NewCapability, NewGrant, NewWorker, WorkerKind};
+use voom_store::repo::execution::tickets::NewTicket;
+use voom_store::repo::execution::workers::{NewCapability, NewGrant};
+use voom_store::repo::media::identity::{DiscoveredFile, FileLocationKind, IngestOutcome};
 use voom_test_support::worker::cargo_bin_or_build;
 
 use crate::cases::policy::policy_inputs::{PolicyInputFromScanInput, WholeScanInput};
+use crate::cases::workers::RegisterWorkerInput;
 use crate::cases::{count, cp, transcodable_input};
 use crate::workflow::WorkerRuntimeRegistry;
 use crate::workflow::execution::executor::WorkflowExecutorOptions;
@@ -488,7 +489,7 @@ async fn compliance_apply_resolves_matching_issue_after_compliance() {
         .report
         .checks
         .iter()
-        .find(|check| check.compliance_kind == "container")
+        .find(|check| check.compliance_kind == voom_plan::ComplianceKind::Container)
         .unwrap();
     let key = test_dedupe_key(document_id, input_set_id, check);
     sqlx::query(
@@ -1170,8 +1171,8 @@ async fn failed_policy_verification_persists_evidence_and_gates_downstream_phase
     assert_eq!(partial.artifact_verifications.len(), 1);
     assert_eq!(partial.artifact_verifications[0].status, "failed");
     assert_eq!(
-        partial.artifact_verifications[0].error_code.as_deref(),
-        Some("ARTIFACT_CHECKSUM_MISMATCH")
+        partial.artifact_verifications[0].error_code,
+        Some(voom_core::ErrorCode::ArtifactChecksumMismatch)
     );
     let stored = cp
         .read_compliance_run_report(voom_core::JobId(partial.summary.job_id))
@@ -1744,11 +1745,9 @@ async fn register_policy_worker_with_extra(
     extra: serde_json::Value,
 ) -> voom_core::WorkerId {
     let worker = cp
-        .register_worker(NewWorker {
+        .register_worker(RegisterWorkerInput {
             name: name.to_owned(),
             kind: WorkerKind::Synthetic,
-            registered_at: cp.clock().now(),
-            node_id: None,
         })
         .await
         .unwrap();
@@ -1864,7 +1863,7 @@ async fn read_compliance_run_report_unknown_job_is_not_found() {
 async fn compliance_audio_extract_outputs_preserve_ticket_and_descriptor_order() {
     let (cp, _tmp) = cp().await;
     let job = cp
-        .open_job(voom_store::repo::jobs::NewJob {
+        .open_job(voom_store::repo::execution::jobs::NewJob {
             kind: "synthetic.workflow".to_owned(),
             priority: 0,
             created_at: T0,
@@ -2012,7 +2011,7 @@ fn compliance_audio_extract_outputs_reject_incomplete_published_members() {
         }]
     });
 
-    let error = super::decode_compliance_extract_result(42, &result.to_string()).unwrap_err();
+    let error = super::decode_compliance_extract_result(TicketId(42), &result).unwrap_err();
 
     assert!(
         error
@@ -2027,7 +2026,7 @@ fn compliance_audio_extract_outputs_reject_unknown_published_fields() {
     output["unexpected"] = serde_json::json!(true);
     let result = serde_json::json!({ "outputs": [output] });
 
-    let error = super::decode_compliance_extract_result(42, &result.to_string()).unwrap_err();
+    let error = super::decode_compliance_extract_result(TicketId(42), &result).unwrap_err();
 
     assert!(
         error
@@ -2041,7 +2040,7 @@ fn compliance_audio_extract_outputs_reject_unknown_legacy_fields() {
     let mut result = historical_extract_result();
     result["unexpected"] = serde_json::json!(true);
 
-    let error = super::decode_compliance_extract_result(42, &result.to_string()).unwrap_err();
+    let error = super::decode_compliance_extract_result(TicketId(42), &result).unwrap_err();
 
     assert!(
         error
@@ -2054,7 +2053,7 @@ fn compliance_audio_extract_outputs_reject_unknown_legacy_fields() {
 async fn compliance_audio_synthesis_companions_preserve_ticket_and_descriptor_order() {
     let (cp, _tmp) = cp().await;
     let job = cp
-        .open_job(voom_store::repo::jobs::NewJob {
+        .open_job(voom_store::repo::execution::jobs::NewJob {
             kind: "synthetic.workflow".to_owned(),
             priority: 0,
             created_at: T0,
@@ -2104,7 +2103,7 @@ fn compliance_audio_synthesis_companions_reject_incomplete_or_unknown_fields() {
             published_synthesis_companion("companion-a", "a-1", 1, 3, 1)
         ]
     });
-    let error = super::decode_compliance_synthesis_result(42, &incomplete.to_string()).unwrap_err();
+    let error = super::decode_compliance_synthesis_result(TicketId(42), &incomplete).unwrap_err();
     assert!(error.to_string().contains(
         "audio synthesis ticket 42 must contain operation id, operation key, and non-empty"
     ));
@@ -2116,7 +2115,7 @@ fn compliance_audio_synthesis_companions_reject_incomplete_or_unknown_fields() {
         "synthesis_operation_key": "synthesize:7:node-synthesis",
         "synthesized_companions": [companion]
     });
-    let error = super::decode_compliance_synthesis_result(42, &malformed.to_string()).unwrap_err();
+    let error = super::decode_compliance_synthesis_result(TicketId(42), &malformed).unwrap_err();
     assert!(
         error
             .to_string()
@@ -2127,7 +2126,7 @@ fn compliance_audio_synthesis_companions_reject_incomplete_or_unknown_fields() {
 async fn create_transcode_audio_ticket(
     cp: &crate::ControlPlane,
     job_id: voom_core::JobId,
-) -> voom_store::repo::tickets::Ticket {
+) -> voom_store::repo::execution::tickets::Ticket {
     cp.create_ticket(NewTicket {
         job_id: Some(job_id),
         kind: TicketOperation::new("synthetic.workflow.operation.transcode_audio").unwrap(),
@@ -2195,7 +2194,7 @@ async fn read_compliance_run_report_in_flight_job_has_no_summary() {
     // A job that opened but never finalized a workflow summary row: the read must
     // distinguish "still running / not a workflow job" from an unknown job id.
     let job = cp
-        .open_job(voom_store::repo::jobs::NewJob {
+        .open_job(voom_store::repo::execution::jobs::NewJob {
             kind: "synthetic.workflow".to_owned(),
             priority: 0,
             created_at: T0,
@@ -2249,13 +2248,13 @@ async fn read_compliance_run_report_zero_phase_job_is_ok_and_empty() {
 
 #[tokio::test]
 async fn read_compliance_run_report_orders_phases_and_points_at_latest() {
-    use voom_store::repo::workflow_summaries::{
+    use voom_store::repo::execution::workflow_summaries::{
         NewPhaseSummary, NewWorkflowSummary, PhaseOutcome, PhaseReport,
     };
 
     let (cp, _tmp) = cp().await;
     let job = cp
-        .open_job(voom_store::repo::jobs::NewJob {
+        .open_job(voom_store::repo::execution::jobs::NewJob {
             kind: "synthetic.workflow".to_owned(),
             priority: 0,
             created_at: T0,
@@ -2455,7 +2454,7 @@ async fn backup_evidence_for_plan_surfaces_seeded_backups() {
     let backup = cp
         .backups
         .insert_pending(
-            voom_store::repo::backups::NewBackup {
+            voom_store::repo::media::backups::NewBackup {
                 source_file_version_id: file_version_id,
                 job_id,
                 ticket_id,

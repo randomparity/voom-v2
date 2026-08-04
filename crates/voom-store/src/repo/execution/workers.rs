@@ -1,9 +1,9 @@
 //! `SqliteWorkerRepo` — owns workers + `worker_capabilities` + `worker_grants`.
 
 use serde_json::Value as JsonValue;
-use sqlx::{Row, SqlitePool};
+use sqlx::{QueryBuilder, Row, SqlitePool};
 use time::OffsetDateTime;
-use voom_core::{NodeId, TicketOperation, VoomError, WorkerId};
+use voom_core::{NodeId, OperationKind, TicketOperation, VoomError, WorkerId};
 pub use voom_core::{WorkerKind, WorkerStatus};
 
 use super::Repository;
@@ -85,6 +85,14 @@ pub struct WorkerOperationCapability {
     pub extra: JsonValue,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct RuntimeWorkerCapability {
+    pub worker_id: WorkerId,
+    pub worker_epoch: u64,
+    pub operation: TicketOperation,
+    pub extra: JsonValue,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WorkerOperationCapacity {
     pub active_leases: u32,
@@ -142,11 +150,89 @@ impl SqliteWorkerRepo {
     pub fn new(pool: SqlitePool) -> Self {
         Self { pool }
     }
+
+    /// Return runtime metadata for live workers declaring one of the operations.
+    ///
+    /// A worker is live when its durable status is `registered` or `active`.
+    /// Results are ordered by worker id and then capability id.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VoomError::Database`] if the rows, stored operation, or JSON
+    /// metadata cannot be read or decoded.
+    pub async fn runtime_capabilities_for_operations(
+        &self,
+        operations: &[TicketOperation],
+    ) -> Result<Vec<RuntimeWorkerCapability>, VoomError> {
+        if operations.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut query = QueryBuilder::new(
+            "SELECT w.id AS worker_id, w.epoch AS worker_epoch, wc.operation, wc.extra \
+             FROM workers w \
+             JOIN worker_capabilities wc ON wc.worker_id = w.id \
+             WHERE w.status IN ('registered', 'active') AND wc.operation IN (",
+        );
+        let mut separated = query.separated(", ");
+        for operation in operations {
+            separated.push_bind(operation.as_str());
+        }
+        separated.push_unseparated(") ORDER BY w.id ASC, wc.id ASC");
+        let rows =
+            query.build().fetch_all(&self.pool).await.map_err(|error| {
+                VoomError::database_context("runtime worker capabilities", error)
+            })?;
+
+        let mut capabilities = Vec::with_capacity(rows.len());
+        for row in rows {
+            let worker_id: i64 = row
+                .try_get("worker_id")
+                .map_err(|error| map_row_err("runtime worker capability worker id", error))?;
+            let worker_epoch: i64 = row
+                .try_get("worker_epoch")
+                .map_err(|error| map_row_err("runtime worker capability worker epoch", error))?;
+            let operation: String = row
+                .try_get("operation")
+                .map_err(|error| map_row_err("runtime worker capability operation", error))?;
+            let extra: String = row
+                .try_get("extra")
+                .map_err(|error| map_row_err("runtime worker capability extra", error))?;
+            let worker_id = u64::try_from(worker_id).map_err(|_| {
+                VoomError::database(format!(
+                    "runtime worker capability worker id was negative: {worker_id}"
+                ))
+            })?;
+            let worker_epoch = u64::try_from(worker_epoch).map_err(|_| {
+                VoomError::database(format!(
+                    "runtime worker capability worker epoch was negative: {worker_epoch}"
+                ))
+            })?;
+            capabilities.push(RuntimeWorkerCapability {
+                worker_id: WorkerId(worker_id),
+                worker_epoch,
+                operation: TicketOperation::from_stored(
+                    operation,
+                    "runtime worker capability operation",
+                )?,
+                extra: serde_json::from_str(&extra).map_err(|error| {
+                    VoomError::database_context("parse runtime worker capability extra", error)
+                })?,
+            });
+        }
+        Ok(capabilities)
+    }
 }
 
 impl Repository for SqliteWorkerRepo {}
 
 impl SqliteWorkerRepo {
+    /// Register a worker in the caller's transaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VoomError::Database`] if the row cannot be inserted, and
+    /// [`VoomError::Internal`] if the registration timestamp cannot be encoded.
     pub async fn register_in_tx(
         &self,
         tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
@@ -161,12 +247,20 @@ impl SqliteWorkerRepo {
         .bind(input.kind.as_str())
         .bind(&ts)
         .bind(&ts)
-        .bind(input.node_id.map(|id| i64_from_u64(id.0)))
+        .bind(
+            input
+                .node_id
+                .map(|id| i64_from_u64(id.0, concat!(module_path!(), ": ", stringify!(id.0))))
+                .transpose()?,
+        )
         .execute(&mut **tx)
         .await
         .map_err(|e| VoomError::database_context("workers insert", e))?;
         Ok(Worker {
-            id: WorkerId(u64_from_i64(res.last_insert_rowid())),
+            id: WorkerId(u64_from_i64(
+                res.last_insert_rowid(),
+                concat!(module_path!(), ": ", stringify!(res.last_insert_rowid())),
+            )?),
             node_id: input.node_id,
             name: input.name,
             kind: input.kind,
@@ -178,6 +272,50 @@ impl SqliteWorkerRepo {
         })
     }
 
+    /// Register a built-in worker without changing an existing identity.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VoomError::Database`] if the worker cannot be inserted or read,
+    /// and [`VoomError::Internal`] if the timestamp cannot be encoded.
+    pub async fn register_builtin_if_missing_in_tx(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        input: NewWorker,
+    ) -> Result<Worker, VoomError> {
+        let registered_at = iso8601(input.registered_at)?;
+        sqlx::query(
+            "INSERT OR IGNORE INTO workers \
+             (name, kind, status, registered_at, last_seen_at, node_id) \
+             VALUES (?, ?, 'registered', ?, ?, ?)",
+        )
+        .bind(&input.name)
+        .bind(input.kind.as_str())
+        .bind(&registered_at)
+        .bind(&registered_at)
+        .bind(
+            input
+                .node_id
+                .map(|id| i64_from_u64(id.0, concat!(module_path!(), ": ", stringify!(id.0))))
+                .transpose()?,
+        )
+        .execute(&mut **tx)
+        .await
+        .map_err(|error| VoomError::database_context("workers insert built-in", error))?;
+        get_by_name_in_tx(tx, &input.name).await?.ok_or_else(|| {
+            VoomError::Internal(format!(
+                "built-in worker {} missing after insert",
+                input.name
+            ))
+        })
+    }
+
+    /// Register and commit a worker.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors documented by [`Self::register_in_tx`], or
+    /// [`VoomError::Database`] if the transaction cannot begin or commit.
     pub async fn register(&self, input: NewWorker) -> Result<Worker, VoomError> {
         let mut tx = self
             .pool
@@ -191,6 +329,12 @@ impl SqliteWorkerRepo {
         Ok(out)
     }
 
+    /// Record a worker capability in the caller's transaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VoomError::Database`] if the row cannot be inserted, and
+    /// [`VoomError::Internal`] if capability fields cannot be serialized.
     pub async fn record_capability_in_tx(
         &self,
         tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
@@ -205,7 +349,10 @@ impl SqliteWorkerRepo {
              (worker_id, operation, codecs, hardware, artifact_access, extra) \
              VALUES (?, ?, ?, ?, ?, ?)",
         )
-        .bind(i64_from_u64(input.worker_id.0))
+        .bind(i64_from_u64(
+            input.worker_id.0,
+            concat!(module_path!(), ": ", stringify!(input.worker_id.0)),
+        )?)
         .bind(input.operation.as_str())
         .bind(codecs)
         .bind(hw)
@@ -215,12 +362,21 @@ impl SqliteWorkerRepo {
         .await
         .map_err(|e| VoomError::database_context("worker_capabilities insert", e))?;
         Ok(Capability {
-            id: u64_from_i64(res.last_insert_rowid()),
+            id: u64_from_i64(
+                res.last_insert_rowid(),
+                concat!(module_path!(), ": ", stringify!(res.last_insert_rowid())),
+            )?,
             worker_id: input.worker_id,
             operation: input.operation,
         })
     }
 
+    /// Record and commit a worker capability.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors documented by [`Self::record_capability_in_tx`], or
+    /// [`VoomError::Database`] if the transaction cannot begin or commit.
     pub async fn record_capability(&self, input: NewCapability) -> Result<Capability, VoomError> {
         let mut tx = self
             .pool
@@ -234,6 +390,12 @@ impl SqliteWorkerRepo {
         Ok(out)
     }
 
+    /// Record worker grants in the caller's transaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VoomError::Database`] if the row cannot be inserted, and
+    /// [`VoomError::Internal`] if grant fields cannot be serialized.
     pub async fn record_grant_in_tx(
         &self,
         tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
@@ -249,7 +411,10 @@ impl SqliteWorkerRepo {
              (worker_id, can_execute, can_access_read, can_access_write, denies, max_parallel) \
              VALUES (?, ?, ?, ?, ?, ?)",
         )
-        .bind(i64_from_u64(input.worker_id.0))
+        .bind(i64_from_u64(
+            input.worker_id.0,
+            concat!(module_path!(), ": ", stringify!(input.worker_id.0)),
+        )?)
         .bind(ce)
         .bind(cr)
         .bind(cw)
@@ -259,11 +424,20 @@ impl SqliteWorkerRepo {
         .await
         .map_err(|e| VoomError::database_context("worker_grants insert", e))?;
         Ok(Grant {
-            id: u64_from_i64(res.last_insert_rowid()),
+            id: u64_from_i64(
+                res.last_insert_rowid(),
+                concat!(module_path!(), ": ", stringify!(res.last_insert_rowid())),
+            )?,
             worker_id: input.worker_id,
         })
     }
 
+    /// Record and commit worker grants.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors documented by [`Self::record_grant_in_tx`], or
+    /// [`VoomError::Database`] if the transaction cannot begin or commit.
     pub async fn record_grant(&self, input: NewGrant) -> Result<Grant, VoomError> {
         let mut tx = self
             .pool
@@ -277,6 +451,14 @@ impl SqliteWorkerRepo {
         Ok(out)
     }
 
+    /// Retire a worker when its epoch still matches the caller's observation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VoomError::NotFound`] when the worker does not exist,
+    /// [`VoomError::Conflict`] when it is retired or its epoch changes,
+    /// [`VoomError::Database`] for storage failures, and [`VoomError::Internal`]
+    /// if the updated row cannot be encoded or re-read.
     pub async fn retire_in_tx(
         &self,
         tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
@@ -301,7 +483,10 @@ impl SqliteWorkerRepo {
         }
         let ts = iso8601(now)?;
         sqlx::query("DELETE FROM accelerator_claims WHERE worker_id = ?")
-            .bind(i64_from_u64(id.0))
+            .bind(i64_from_u64(
+                id.0,
+                concat!(module_path!(), ": ", stringify!(id.0)),
+            )?)
             .execute(&mut **tx)
             .await
             .map_err(|e| VoomError::database_context("accelerator_claims release", e))?;
@@ -312,8 +497,14 @@ impl SqliteWorkerRepo {
         )
         .bind(&ts)
         .bind(&ts)
-        .bind(i64_from_u64(id.0))
-        .bind(i64_from_u64(expected_epoch))
+        .bind(i64_from_u64(
+            id.0,
+            concat!(module_path!(), ": ", stringify!(id.0)),
+        )?)
+        .bind(i64_from_u64(
+            expected_epoch,
+            concat!(module_path!(), ": ", stringify!(expected_epoch)),
+        )?)
         .execute(&mut **tx)
         .await
         .map_err(|e| VoomError::database_context("workers update", e))?;
@@ -331,6 +522,12 @@ impl SqliteWorkerRepo {
         })
     }
 
+    /// Retire and commit a worker at an expected epoch.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors documented by [`Self::retire_in_tx`], or
+    /// [`VoomError::Database`] if the transaction cannot begin or commit.
     pub async fn retire(
         &self,
         id: WorkerId,
@@ -349,18 +546,28 @@ impl SqliteWorkerRepo {
         Ok(out)
     }
 
+    /// Look up a worker by id.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VoomError::Database`] if the query or row decoding fails.
     pub async fn get(&self, id: WorkerId) -> Result<Option<Worker>, VoomError> {
         let row = sqlx::query(
             "SELECT id, node_id, name, kind, status, registered_at, last_seen_at, retired_at, epoch \
              FROM workers WHERE id = ?",
         )
-        .bind(i64_from_u64(id.0))
+        .bind(i64_from_u64(id.0, concat!(module_path!(), ": ", stringify!(id.0)))?)
         .fetch_optional(&self.pool)
         .await
         .map_err(|e| VoomError::database_context("workers get", e))?;
         row.as_ref().map(row_to_worker).transpose()
     }
 
+    /// Look up a worker by name in the caller's transaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VoomError::Database`] if the query or row decoding fails.
     pub async fn get_by_name_in_tx(
         &self,
         tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
@@ -369,6 +576,12 @@ impl SqliteWorkerRepo {
         get_by_name_in_tx(tx, name).await
     }
 
+    /// Look up and commit a worker-by-name read.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VoomError::Database`] if the transaction, query, or row
+    /// decoding fails.
     pub async fn get_by_name(&self, name: &str) -> Result<Option<Worker>, VoomError> {
         let mut tx = self
             .pool
@@ -382,6 +595,11 @@ impl SqliteWorkerRepo {
         Ok(out)
     }
 
+    /// List live workers in an exact legacy-name or incarnation namespace.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VoomError::Database`] if the query or row decoding fails.
     pub async fn list_live_by_name_namespace_in_tx(
         &self,
         tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
@@ -407,7 +625,8 @@ impl SqliteWorkerRepo {
     /// List every worker in an exact legacy-name or incarnation-prefix namespace.
     ///
     /// # Errors
-    /// Returns a database error when the namespace query or row decoding fails.
+    ///
+    /// Returns [`VoomError::Database`] when the query or row decoding fails.
     pub async fn list_by_name_namespace(
         &self,
         legacy_name: &str,
@@ -428,6 +647,12 @@ impl SqliteWorkerRepo {
         rows.iter().map(row_to_worker).collect()
     }
 
+    /// Read a worker together with its optional node context.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VoomError::Database`] if the query or row decoding fails,
+    /// including when a worker references a missing node.
     pub async fn get_inspection(
         &self,
         id: WorkerId,
@@ -441,13 +666,21 @@ impl SqliteWorkerRepo {
              FROM workers w LEFT JOIN nodes n ON n.id = w.node_id \
              WHERE w.id = ?",
         )
-        .bind(i64_from_u64(id.0))
+        .bind(i64_from_u64(
+            id.0,
+            concat!(module_path!(), ": ", stringify!(id.0)),
+        )?)
         .fetch_optional(&self.pool)
         .await
         .map_err(|e| VoomError::database_context("workers inspection get", e))?;
         row.as_ref().map(row_to_inspection).transpose()
     }
 
+    /// List workers in one status.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VoomError::Database`] if the query or row decoding fails.
     pub async fn list_by_status(
         &self,
         status: WorkerStatus,
@@ -466,6 +699,12 @@ impl SqliteWorkerRepo {
         rows.iter().map(row_to_worker).collect()
     }
 
+    /// List workers and their optional node context.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VoomError::Database`] if the query or row decoding fails,
+    /// including when a worker references a missing node.
     pub async fn list_inspections(
         &self,
         status: Option<WorkerStatus>,
@@ -491,6 +730,12 @@ impl SqliteWorkerRepo {
         rows.iter().map(row_to_inspection).collect()
     }
 
+    /// Evaluate whether a worker may execute an operation in this transaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VoomError::Database`] if worker, capability, or grant rows
+    /// cannot be queried or decoded.
     pub async fn operation_eligibility_in_tx(
         &self,
         tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
@@ -502,7 +747,10 @@ impl SqliteWorkerRepo {
             "SELECT artifact_access FROM worker_capabilities \
              WHERE worker_id = ? AND operation = ? ORDER BY id ASC",
         )
-        .bind(i64_from_u64(worker_id.0))
+        .bind(i64_from_u64(
+            worker_id.0,
+            concat!(module_path!(), ": ", stringify!(worker_id.0)),
+        )?)
         .bind(operation.as_str())
         .fetch_all(&mut **tx)
         .await
@@ -512,14 +760,17 @@ impl SqliteWorkerRepo {
         for row in &capability_rows {
             let access: String = row
                 .try_get("artifact_access")
-                .map_err(|e| map_row_err("worker_capabilities eligibility", &e))?;
+                .map_err(|e| map_row_err("worker_capabilities eligibility", e))?;
             artifact_access.extend(parse_string_array_json(&access, "artifact_access")?);
         }
 
         let grant_rows = sqlx::query(
             "SELECT can_execute, denies FROM worker_grants WHERE worker_id = ? ORDER BY id ASC",
         )
-        .bind(i64_from_u64(worker_id.0))
+        .bind(i64_from_u64(
+            worker_id.0,
+            concat!(module_path!(), ": ", stringify!(worker_id.0)),
+        )?)
         .fetch_all(&mut **tx)
         .await
         .map_err(|e| VoomError::database_context("worker_grants eligibility", e))?;
@@ -529,10 +780,10 @@ impl SqliteWorkerRepo {
         for row in &grant_rows {
             let can_execute: String = row
                 .try_get("can_execute")
-                .map_err(|e| map_row_err("worker_grants eligibility", &e))?;
+                .map_err(|e| map_row_err("worker_grants eligibility", e))?;
             let denies: String = row
                 .try_get("denies")
-                .map_err(|e| map_row_err("worker_grants eligibility", &e))?;
+                .map_err(|e| map_row_err("worker_grants eligibility", e))?;
             has_grant |= parse_operation_array_json(&can_execute, "can_execute")?
                 .iter()
                 .any(|item| item == operation);
@@ -550,6 +801,12 @@ impl SqliteWorkerRepo {
         })
     }
 
+    /// Evaluate whether a worker may execute an operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors documented by [`Self::operation_eligibility_in_tx`],
+    /// or [`VoomError::Database`] if the transaction cannot begin or commit.
     pub async fn operation_eligibility(
         &self,
         worker_id: WorkerId,
@@ -569,8 +826,87 @@ impl SqliteWorkerRepo {
         Ok(out)
     }
 
+    /// Return this worker's candidate operations from capabilities and grants.
+    ///
+    /// Denials override either source. The decoded result is sorted and unique.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VoomError::Database`] if durable rows cannot be queried and
+    /// [`VoomError::Database`] when an operation is outside the stored vocabulary.
+    pub async fn candidate_operations_in_tx(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        worker_id: WorkerId,
+    ) -> Result<Vec<TicketOperation>, VoomError> {
+        let rows = sqlx::query_scalar::<_, String>(
+            "SELECT operation FROM worker_capabilities WHERE worker_id = ? \
+             UNION \
+             SELECT grants.value AS operation \
+             FROM worker_grants, json_each(worker_grants.can_execute) AS grants \
+             WHERE worker_grants.worker_id = ? \
+             EXCEPT \
+             SELECT denied.value AS operation \
+             FROM worker_grants, json_each(worker_grants.denies) AS denied \
+             WHERE worker_grants.worker_id = ?",
+        )
+        .bind(i64_from_u64(
+            worker_id.0,
+            concat!(module_path!(), ": ", stringify!(worker_id.0)),
+        )?)
+        .bind(i64_from_u64(
+            worker_id.0,
+            concat!(module_path!(), ": ", stringify!(worker_id.0)),
+        )?)
+        .bind(i64_from_u64(
+            worker_id.0,
+            concat!(module_path!(), ": ", stringify!(worker_id.0)),
+        )?)
+        .fetch_all(&mut **tx)
+        .await
+        .map_err(|e| VoomError::database_context("worker candidate operations", e))?;
+        let mut operations = rows
+            .into_iter()
+            .map(|operation| {
+                TicketOperation::from_stored(operation, "worker candidate operations.operation")
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        operations.sort_by(|left, right| left.as_str().cmp(right.as_str()));
+        operations.dedup();
+        Ok(operations)
+    }
+
+    /// Return a worker only if its lifecycle state permits new work.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VoomError::NotFound`] for a missing worker, [`VoomError::Conflict`]
+    /// for stale or retired workers, and [`VoomError::Database`] if it cannot be read.
+    pub async fn require_live_in_tx(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        worker_id: WorkerId,
+    ) -> Result<Worker, VoomError> {
+        let worker = get_in_tx(tx, worker_id)
+            .await?
+            .ok_or_else(|| VoomError::NotFound(format!("worker {worker_id}")))?;
+        match worker.status {
+            WorkerStatus::Registered | WorkerStatus::Active => Ok(worker),
+            WorkerStatus::Stale | WorkerStatus::Retired => Err(VoomError::Conflict(format!(
+                "worker {worker_id} is {:?}, not live",
+                worker.status
+            ))),
+        }
+    }
+
     /// Read the effective held-lease count and grant limit for one worker
     /// operation in the caller's transaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VoomError::Database`] if operation, capability, grant, or lease
+    /// state cannot be queried or decoded, and [`VoomError::Config`] when an
+    /// accelerator capability omits its required hardware token.
     pub async fn operation_capacity_in_tx(
         &self,
         tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
@@ -578,7 +914,7 @@ impl SqliteWorkerRepo {
         operation: &TicketOperation,
     ) -> Result<WorkerOperationCapacity, VoomError> {
         let operation = normalized_worker_operation(operation)?;
-        if operation.as_str() == "transcode_video"
+        if operation == TicketOperation::from(OperationKind::TranscodeVideo)
             && let Some(capacity) = accelerator_operation_capacity(tx, worker_id).await?
         {
             return Ok(capacity);
@@ -591,7 +927,10 @@ impl SqliteWorkerRepo {
              WHERE leases.state = 'held' AND leases.worker_id = ? \
                AND (tickets.kind = ? OR tickets.kind = ?)",
         )
-        .bind(i64_from_u64(worker_id.0))
+        .bind(i64_from_u64(
+            worker_id.0,
+            concat!(module_path!(), ": ", stringify!(worker_id.0)),
+        )?)
         .bind(operation.as_str())
         .bind(workflow_operation)
         .fetch_one(&mut **tx)
@@ -610,8 +949,9 @@ impl SqliteWorkerRepo {
     ///
     /// # Errors
     ///
-    /// Returns a database error when worker, lease, or grant rows cannot be
-    /// read or decoded.
+    /// Returns [`VoomError::Database`] when worker, lease, capability, or grant
+    /// rows cannot be read or decoded, and [`VoomError::Config`] when an
+    /// accelerator capability omits its required hardware token.
     pub async fn operation_candidates(
         &self,
         operation: &TicketOperation,
@@ -630,6 +970,11 @@ impl SqliteWorkerRepo {
 
     /// Lists every durable capability declaration for an operation, including
     /// declarations owned by stale or retired workers.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VoomError::Database`] if capability rows cannot be queried or
+    /// decoded.
     pub async fn operation_capability_history(
         &self,
         operation: &TicketOperation,
@@ -647,15 +992,18 @@ impl SqliteWorkerRepo {
         for row in rows {
             let worker_id: i64 = row
                 .try_get("worker_id")
-                .map_err(|error| map_row_err("worker capability history worker", &error))?;
+                .map_err(|error| map_row_err("worker capability history worker", error))?;
             let hardware: String = row
                 .try_get("hardware")
-                .map_err(|error| map_row_err("worker capability history hardware", &error))?;
+                .map_err(|error| map_row_err("worker capability history hardware", error))?;
             let extra: String = row
                 .try_get("extra")
-                .map_err(|error| map_row_err("worker capability history extra", &error))?;
+                .map_err(|error| map_row_err("worker capability history extra", error))?;
             capabilities.push(WorkerOperationCapability {
-                worker_id: WorkerId(u64_from_i64(worker_id)),
+                worker_id: WorkerId(u64_from_i64(
+                    worker_id,
+                    concat!(module_path!(), ": ", stringify!(worker_id)),
+                )?),
                 hardware: parse_string_array_json(&hardware, "hardware")?,
                 extra: serde_json::from_str(&extra).map_err(|error| {
                     VoomError::database_context("parse worker capability history extra", error)
@@ -699,6 +1047,13 @@ impl SqliteWorkerRepo {
         Ok(candidates)
     }
 
+    /// Return a non-retired worker owned by the supplied node.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VoomError::NotFound`] when the worker does not exist,
+    /// [`VoomError::Conflict`] when another node owns it or it is retired, and
+    /// [`VoomError::Database`] if the row cannot be queried or decoded.
     pub async fn node_owned_worker_in_tx(
         &self,
         tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
@@ -742,7 +1097,10 @@ async fn accelerator_operation_capacity(
            AND json_type(extra, '$.accelerator') = 'object' \
          ORDER BY id ASC LIMIT 1",
     )
-    .bind(i64_from_u64(worker_id.0))
+    .bind(i64_from_u64(
+        worker_id.0,
+        concat!(module_path!(), ": ", stringify!(worker_id.0)),
+    )?)
     .fetch_optional(&mut **tx)
     .await
     .map_err(|error| VoomError::database_context("accelerator capacity descriptor", error))?;
@@ -751,7 +1109,7 @@ async fn accelerator_operation_capacity(
     };
     let hardware_token: Option<String> = row
         .try_get("hardware_token")
-        .map_err(|error| map_row_err("accelerator hardware token", &error))?;
+        .map_err(|error| map_row_err("accelerator hardware token", error))?;
     let hardware_token = hardware_token.ok_or_else(|| {
         VoomError::Config(format!(
             "worker {worker_id} advertises a transcode_video accelerator descriptor but no \
@@ -800,7 +1158,10 @@ async fn operation_capability_details_in_tx(
         "SELECT hardware, extra FROM worker_capabilities \
          WHERE worker_id = ? AND operation = ? ORDER BY id ASC",
     )
-    .bind(i64_from_u64(worker_id.0))
+    .bind(i64_from_u64(
+        worker_id.0,
+        concat!(module_path!(), ": ", stringify!(worker_id.0)),
+    )?)
     .bind(operation.as_str())
     .fetch_all(&mut **tx)
     .await
@@ -810,11 +1171,11 @@ async fn operation_capability_details_in_tx(
     for row in rows {
         let encoded_hardware: String = row
             .try_get("hardware")
-            .map_err(|error| map_row_err("worker capability hardware", &error))?;
+            .map_err(|error| map_row_err("worker capability hardware", error))?;
         hardware.extend(parse_string_array_json(&encoded_hardware, "hardware")?);
         let encoded_extra: String = row
             .try_get("extra")
-            .map_err(|error| map_row_err("worker capability extra", &error))?;
+            .map_err(|error| map_row_err("worker capability extra", error))?;
         extra.push(serde_json::from_str(&encoded_extra).map_err(|error| {
             VoomError::database_context("parse worker capability extra", error)
         })?);
@@ -825,8 +1186,11 @@ async fn operation_capability_details_in_tx(
 fn worker_candidate_id(row: &sqlx::sqlite::SqliteRow) -> Result<WorkerId, VoomError> {
     let worker_id: i64 = row
         .try_get("worker_id")
-        .map_err(|e| map_row_err("worker operation candidates", &e))?;
-    Ok(WorkerId(u64_from_i64(worker_id)))
+        .map_err(|e| map_row_err("worker operation candidates", e))?;
+    Ok(WorkerId(u64_from_i64(
+        worker_id,
+        concat!(module_path!(), ": ", stringify!(worker_id)),
+    )?))
 }
 
 async fn max_parallel_in_tx(
@@ -836,7 +1200,10 @@ async fn max_parallel_in_tx(
 ) -> Result<u32, VoomError> {
     let rows =
         sqlx::query("SELECT max_parallel FROM worker_grants WHERE worker_id = ? ORDER BY id")
-            .bind(i64_from_u64(worker_id.0))
+            .bind(i64_from_u64(
+                worker_id.0,
+                concat!(module_path!(), ": ", stringify!(worker_id.0)),
+            )?)
             .fetch_all(&mut **tx)
             .await
             .map_err(|e| VoomError::database_context("worker max_parallel read", e))?;
@@ -845,7 +1212,7 @@ async fn max_parallel_in_tx(
     for row in rows {
         let raw: String = row
             .try_get("max_parallel")
-            .map_err(|e| map_row_err("worker max_parallel", &e))?;
+            .map_err(|e| map_row_err("worker max_parallel", e))?;
         let value: JsonValue = serde_json::from_str(&raw)
             .map_err(|e| VoomError::database_context("parse worker max_parallel", e))?;
         operation_limit = max_limit(
@@ -903,7 +1270,10 @@ async fn get_in_tx(
         "SELECT id, node_id, name, kind, status, registered_at, last_seen_at, retired_at, epoch \
          FROM workers WHERE id = ?",
     )
-    .bind(i64_from_u64(id.0))
+    .bind(i64_from_u64(
+        id.0,
+        concat!(module_path!(), ": ", stringify!(id.0)),
+    )?)
     .fetch_optional(&mut **tx)
     .await
     .map_err(|e| VoomError::database_context("workers reload", e))?;
@@ -926,41 +1296,42 @@ async fn get_by_name_in_tx(
 }
 
 fn row_to_worker(row: &sqlx::sqlite::SqliteRow) -> Result<Worker, VoomError> {
-    let id: i64 = row.try_get("id").map_err(|e| map_row_err("workers", &e))?;
+    let id: i64 = row.try_get("id").map_err(|e| map_row_err("workers", e))?;
     let node_id: Option<i64> = row
         .try_get("node_id")
-        .map_err(|e| map_row_err("workers", &e))?;
-    let name: String = row
-        .try_get("name")
-        .map_err(|e| map_row_err("workers", &e))?;
-    let kind: String = row
-        .try_get("kind")
-        .map_err(|e| map_row_err("workers", &e))?;
+        .map_err(|e| map_row_err("workers", e))?;
+    let name: String = row.try_get("name").map_err(|e| map_row_err("workers", e))?;
+    let kind: String = row.try_get("kind").map_err(|e| map_row_err("workers", e))?;
     let status: String = row
         .try_get("status")
-        .map_err(|e| map_row_err("workers", &e))?;
+        .map_err(|e| map_row_err("workers", e))?;
     let registered: String = row
         .try_get("registered_at")
-        .map_err(|e| map_row_err("workers", &e))?;
+        .map_err(|e| map_row_err("workers", e))?;
     let last_seen: String = row
         .try_get("last_seen_at")
-        .map_err(|e| map_row_err("workers", &e))?;
+        .map_err(|e| map_row_err("workers", e))?;
     let retired: Option<String> = row
         .try_get("retired_at")
-        .map_err(|e| map_row_err("workers", &e))?;
+        .map_err(|e| map_row_err("workers", e))?;
     let epoch: i64 = row
         .try_get("epoch")
-        .map_err(|e| map_row_err("workers", &e))?;
+        .map_err(|e| map_row_err("workers", e))?;
     Ok(Worker {
-        id: WorkerId(u64_from_i64(id)),
-        node_id: node_id.map(|id| NodeId(u64_from_i64(id))),
+        id: WorkerId(u64_from_i64(
+            id,
+            concat!(module_path!(), ": ", stringify!(id)),
+        )?),
+        node_id: node_id
+            .map(|id| u64_from_i64(id, concat!(module_path!(), ": ", stringify!(id))).map(NodeId))
+            .transpose()?,
         name,
         kind: WorkerKind::parse_database("workers.kind", &kind)?,
         status: WorkerStatus::parse_database("workers.status", &status)?,
         registered_at: parse_iso8601(&registered)?,
         last_seen_at: parse_iso8601(&last_seen)?,
         retired_at: retired.map(|s| parse_iso8601(&s)).transpose()?,
-        epoch: u64_from_i64(epoch),
+        epoch: u64_from_i64(epoch, concat!(module_path!(), ": ", stringify!(epoch)))?,
     })
 }
 
@@ -968,7 +1339,7 @@ fn row_to_inspection(row: &sqlx::sqlite::SqliteRow) -> Result<WorkerInspection, 
     let worker = row_to_worker(row)?;
     let node_id: Option<i64> = row
         .try_get("node_context_id")
-        .map_err(|e| map_row_err("workers inspection", &e))?;
+        .map_err(|e| map_row_err("workers inspection", e))?;
     if let (Some(worker_node_id), None) = (worker.node_id, node_id) {
         return Err(VoomError::database(format!(
             "workers inspection missing node context: worker_id={} node_id={}",
@@ -979,18 +1350,21 @@ fn row_to_inspection(row: &sqlx::sqlite::SqliteRow) -> Result<WorkerInspection, 
         .map(|id| {
             let name: String = row
                 .try_get("node_context_name")
-                .map_err(|e| map_row_err("workers inspection", &e))?;
+                .map_err(|e| map_row_err("workers inspection", e))?;
             let kind: String = row
                 .try_get("node_context_kind")
-                .map_err(|e| map_row_err("workers inspection", &e))?;
+                .map_err(|e| map_row_err("workers inspection", e))?;
             let status: String = row
                 .try_get("node_context_status")
-                .map_err(|e| map_row_err("workers inspection", &e))?;
+                .map_err(|e| map_row_err("workers inspection", e))?;
             let last_seen: String = row
                 .try_get("node_context_last_seen_at")
-                .map_err(|e| map_row_err("workers inspection", &e))?;
+                .map_err(|e| map_row_err("workers inspection", e))?;
             Ok(WorkerNodeContext {
-                id: NodeId(u64_from_i64(id)),
+                id: NodeId(u64_from_i64(
+                    id,
+                    concat!(module_path!(), ": ", stringify!(id)),
+                )?),
                 name,
                 kind: NodeKind::parse_database("nodes.kind", &kind)?,
                 status: NodeStatus::parse_database("nodes.status", &status)?,

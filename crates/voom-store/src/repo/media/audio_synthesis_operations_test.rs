@@ -1,3 +1,5 @@
+use std::error::Error;
+
 use time::OffsetDateTime;
 use voom_core::{FileVersionId, LeaseId, MediaSnapshotId};
 
@@ -207,6 +209,52 @@ async fn create_planned_replays_the_exact_ordered_companion_set() {
 }
 
 #[tokio::test]
+async fn malformed_worker_result_preserves_serde_source() {
+    let fixture = fixture().await;
+    fixture
+        .repo
+        .create_planned(
+            fixture.operation(),
+            &companions(),
+            OffsetDateTime::UNIX_EPOCH,
+        )
+        .await
+        .unwrap();
+    let mut connection = fixture.pool.acquire().await.unwrap();
+    sqlx::query("PRAGMA ignore_check_constraints = TRUE")
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+    sqlx::query(
+        "UPDATE audio_synthesis_operations SET worker_result = 'not-json' \
+         WHERE operation_key = ?",
+    )
+    .bind(&fixture.operation().operation_key)
+    .execute(&mut *connection)
+    .await
+    .unwrap();
+    sqlx::query("PRAGMA ignore_check_constraints = FALSE")
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+    drop(connection);
+
+    let error = fixture
+        .repo
+        .get_by_key("synthesis:v1:key")
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), "DB_UNREACHABLE");
+    let display = error.to_string();
+    let source = error.source().expect("serde source");
+    let serde_error = source.downcast_ref::<serde_json::Error>().unwrap();
+    assert_eq!(
+        display,
+        format!("database error: audio synthesis worker_result is invalid JSON: {serde_error}")
+    );
+}
+
+#[tokio::test]
 async fn create_planned_rejects_semantic_or_order_drift() {
     let fixture = fixture().await;
     let now = OffsetDateTime::UNIX_EPOCH;
@@ -299,7 +347,7 @@ async fn claim_and_generation_fence_dispatch_paths() {
         .await
         .unwrap();
 
-    assert_eq!(attempt.status, "active");
+    assert_eq!(attempt.status, AudioSynthesisDispatchAttemptStatus::Active);
     assert_eq!(second.generation, 1);
     assert_ne!(attempt.staging_path, second.staging_path);
     assert!(
@@ -316,4 +364,247 @@ async fn claim_and_generation_fence_dispatch_paths() {
             .await
             .unwrap();
     assert_eq!(quarantined, "quarantined");
+}
+
+#[tokio::test]
+async fn release_claim_contract_releases_the_current_synthesis_claim() {
+    let fixture = fixture().await;
+    let now = OffsetDateTime::UNIX_EPOCH;
+    fixture
+        .repo
+        .create_planned(fixture.operation(), &companions(), now)
+        .await
+        .unwrap();
+    let claim = fixture.claim(0, "current");
+    fixture.repo.acquire_claim(&claim, now).await.unwrap();
+
+    fixture.repo.release_claim_exact(&claim).await.unwrap();
+
+    let claim_token: Option<String> = sqlx::query_scalar(
+        "SELECT claim_token FROM audio_synthesis_operations WHERE operation_key = ?",
+    )
+    .bind(&claim.operation_key)
+    .fetch_one(&fixture.pool)
+    .await
+    .unwrap();
+    assert_eq!(claim_token, None);
+}
+
+#[tokio::test]
+async fn release_claim_contract_rejects_stale_and_replaced_synthesis_claims() {
+    let fixture = fixture().await;
+    let now = OffsetDateTime::UNIX_EPOCH;
+    fixture
+        .repo
+        .create_planned(fixture.operation(), &companions(), now)
+        .await
+        .unwrap();
+    let first = fixture.claim(0, "first");
+    fixture.repo.acquire_claim(&first, now).await.unwrap();
+    let stale_generation = fixture.claim(1, "first");
+
+    let error = fixture
+        .repo
+        .release_claim_exact(&stale_generation)
+        .await
+        .unwrap_err();
+    assert!(matches!(error, voom_core::VoomError::Conflict(_)));
+
+    let mut replacement = fixture.claim(0, "replacement");
+    replacement.expires_at = OffsetDateTime::from_unix_timestamp(20).unwrap();
+    fixture
+        .repo
+        .acquire_claim(
+            &replacement,
+            OffsetDateTime::from_unix_timestamp(11).unwrap(),
+        )
+        .await
+        .unwrap();
+    let error = fixture.repo.release_claim_exact(&first).await.unwrap_err();
+    assert!(matches!(error, voom_core::VoomError::Conflict(_)));
+
+    let claim_token: Option<String> = sqlx::query_scalar(
+        "SELECT claim_token FROM audio_synthesis_operations WHERE operation_key = ?",
+    )
+    .bind(&first.operation_key)
+    .fetch_one(&fixture.pool)
+    .await
+    .unwrap();
+    assert_eq!(claim_token.as_deref(), Some("replacement"));
+}
+
+#[tokio::test]
+async fn release_claim_contract_rejects_released_and_committed_synthesis_claims() {
+    let fixture = fixture().await;
+    let now = OffsetDateTime::UNIX_EPOCH;
+    fixture
+        .repo
+        .create_planned(fixture.operation(), &companions(), now)
+        .await
+        .unwrap();
+    let released = fixture.claim(0, "released");
+    fixture.repo.acquire_claim(&released, now).await.unwrap();
+    fixture.repo.release_claim_exact(&released).await.unwrap();
+
+    let error = fixture
+        .repo
+        .release_claim_exact(&released)
+        .await
+        .unwrap_err();
+    assert!(matches!(error, voom_core::VoomError::Conflict(_)));
+
+    let committed = fixture.claim(0, "committed");
+    fixture.repo.acquire_claim(&committed, now).await.unwrap();
+    sqlx::query(
+        "UPDATE audio_synthesis_operations SET state = 'committed', finished_at = ? \
+         WHERE operation_key = ?",
+    )
+    .bind(NOW)
+    .bind(&committed.operation_key)
+    .execute(&fixture.pool)
+    .await
+    .unwrap();
+    let error = fixture
+        .repo
+        .release_claim_exact(&committed)
+        .await
+        .unwrap_err();
+    assert!(matches!(error, voom_core::VoomError::Conflict(_)));
+}
+
+#[tokio::test]
+async fn audio_synthesis_dispatch_attempt_status_round_trips_durable_vocabulary() {
+    let fixture = fixture().await;
+    let now = OffsetDateTime::UNIX_EPOCH;
+    fixture
+        .repo
+        .create_planned(fixture.operation(), &companions(), now)
+        .await
+        .unwrap();
+    let claim = fixture.claim(0, "status-vocabulary");
+    fixture.repo.acquire_claim(&claim, now).await.unwrap();
+    let attempt = fixture
+        .repo
+        .record_dispatch_attempt(
+            &claim,
+            &NewAudioSynthesisDispatchAttempt {
+                dispatch_lease_id: fixture.lease_id,
+                worker_id: fixture.worker_id,
+                worker_epoch: 7,
+                idempotency_key: "synthesis:status:0".to_owned(),
+                attempt_directory: "/staging/op/g0".to_owned(),
+                staging_path: "/staging/op/g0/result.mkv".to_owned(),
+            },
+            now,
+        )
+        .await
+        .unwrap();
+
+    for (stored, expected) in [
+        ("active", AudioSynthesisDispatchAttemptStatus::Active),
+        ("terminal", AudioSynthesisDispatchAttemptStatus::Terminal),
+        (
+            "quarantined",
+            AudioSynthesisDispatchAttemptStatus::Quarantined,
+        ),
+        ("quiesced", AudioSynthesisDispatchAttemptStatus::Quiesced),
+    ] {
+        let (evidence_kind, evidence_at, acknowledged_by) = match expected {
+            AudioSynthesisDispatchAttemptStatus::Active
+            | AudioSynthesisDispatchAttemptStatus::Quarantined => (None, None, None),
+            AudioSynthesisDispatchAttemptStatus::Terminal => {
+                (Some("terminal_response"), Some(NOW), None)
+            }
+            AudioSynthesisDispatchAttemptStatus::Quiesced => (
+                Some("operator_acknowledgement"),
+                Some(NOW),
+                Some("operator"),
+            ),
+        };
+        sqlx::query(
+            "UPDATE audio_synthesis_dispatch_attempts \
+             SET status = ?, evidence_kind = ?, evidence_at = ?, acknowledged_by = ? \
+             WHERE id = ?",
+        )
+        .bind(stored)
+        .bind(evidence_kind)
+        .bind(evidence_at)
+        .bind(acknowledged_by)
+        .bind(i64::try_from(attempt.id).unwrap())
+        .execute(&fixture.pool)
+        .await
+        .unwrap();
+
+        let loaded = fixture
+            .repo
+            .get_dispatch_attempt(attempt.operation_id, attempt.generation)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(loaded.status, expected);
+    }
+}
+
+#[test]
+fn audio_synthesis_dispatch_attempt_status_is_copy() {
+    fn assert_copy<T: Copy>() {}
+
+    assert_copy::<AudioSynthesisDispatchAttemptStatus>();
+}
+
+#[tokio::test]
+async fn audio_synthesis_dispatch_attempt_status_rejects_unknown_durable_value() {
+    let fixture = fixture().await;
+    let now = OffsetDateTime::UNIX_EPOCH;
+    fixture
+        .repo
+        .create_planned(fixture.operation(), &companions(), now)
+        .await
+        .unwrap();
+    let claim = fixture.claim(0, "invalid-status");
+    fixture.repo.acquire_claim(&claim, now).await.unwrap();
+    let attempt = fixture
+        .repo
+        .record_dispatch_attempt(
+            &claim,
+            &NewAudioSynthesisDispatchAttempt {
+                dispatch_lease_id: fixture.lease_id,
+                worker_id: fixture.worker_id,
+                worker_epoch: 7,
+                idempotency_key: "synthesis:invalid-status:0".to_owned(),
+                attempt_directory: "/staging/op/g0".to_owned(),
+                staging_path: "/staging/op/g0/result.mkv".to_owned(),
+            },
+            now,
+        )
+        .await
+        .unwrap();
+    let mut connection = fixture.pool.acquire().await.unwrap();
+    sqlx::query("PRAGMA ignore_check_constraints = TRUE")
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE audio_synthesis_dispatch_attempts SET status = ? WHERE id = ?")
+        .bind("impossible")
+        .bind(i64::try_from(attempt.id).unwrap())
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+    sqlx::query("PRAGMA ignore_check_constraints = FALSE")
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+    drop(connection);
+
+    let error = fixture
+        .repo
+        .get_dispatch_attempt(attempt.operation_id, attempt.generation)
+        .await
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("audio_synthesis_dispatch_attempts.status")
+    );
+    assert!(error.to_string().contains("impossible"));
 }

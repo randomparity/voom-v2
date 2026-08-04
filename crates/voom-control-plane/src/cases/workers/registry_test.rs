@@ -5,11 +5,12 @@ use sqlx::Row;
 use std::sync::{Arc, Mutex};
 use time::Duration;
 use time::OffsetDateTime;
-use voom_core::{Clock, ErrorCode, clock_test_support::ManualClock, rng_test_support::FrozenRng};
+use voom_core::{
+    Clock, ErrorCode, WorkerKind, clock_test_support::ManualClock, rng_test_support::FrozenRng,
+};
 use voom_events::{Event, EventKind, SubjectType};
-use voom_store::repo::events::{EventFilter, EventRepo, Page};
-use voom_store::repo::nodes::{NodeKind, NodeStatus};
-use voom_store::repo::workers::WorkerKind;
+use voom_store::repo::audit::events::{EventFilter, EventRepo, Page};
+use voom_store::repo::execution::nodes::{NodeKind, NodeStatus};
 
 use crate::cases::cp;
 use crate::cases::workers::nodes::RegisterNodeInput;
@@ -31,12 +32,7 @@ fn page_filter(kind: EventKind) -> EventFilter {
 async fn register_worker_emits_worker_registered() {
     let (cp, _tmp) = cp().await;
     let w = cp
-        .register_worker(NewWorker {
-            name: "alpha".to_owned(),
-            kind: WorkerKind::Synthetic,
-            registered_at: OffsetDateTime::UNIX_EPOCH,
-            node_id: None,
-        })
+        .register_worker(register_worker_input("alpha"))
         .await
         .unwrap();
     let page = cp
@@ -55,6 +51,38 @@ async fn register_worker_emits_worker_registered() {
 }
 
 #[tokio::test]
+async fn register_worker_owns_timestamp_and_node_identity() {
+    let (cp, clock, _tmp) = cp_with_manual_clock(T0).await;
+    clock.advance(Duration::seconds(42));
+    let expected_now = clock.now();
+
+    let worker = cp
+        .register_worker(RegisterWorkerInput {
+            name: "clock-owned".to_owned(),
+            kind: WorkerKind::Synthetic,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(worker.registered_at, expected_now);
+    assert_eq!(worker.last_seen_at, expected_now);
+    assert_eq!(worker.node_id, None);
+
+    let events = worker_events(&cp).await;
+    assert_eq!(events.len(), 1);
+    assert_eq!(
+        events[0].envelope.payload.kind(),
+        EventKind::WorkerRegistered
+    );
+    assert_eq!(events[0].envelope.occurred_at, expected_now);
+    assert!(
+        !events
+            .iter()
+            .any(|row| row.envelope.payload.kind() == EventKind::WorkerLinkedToNode)
+    );
+}
+
+#[tokio::test]
 async fn general_registration_rejects_supervisor_reserved_names() {
     let (cp, _tmp) = cp().await;
 
@@ -70,12 +98,7 @@ async fn general_registration_rejects_supervisor_reserved_names() {
         "builtin.ffprobe-test",
     ] {
         let err = cp
-            .register_worker(NewWorker {
-                name: name.to_owned(),
-                kind: WorkerKind::Synthetic,
-                registered_at: T0,
-                node_id: None,
-            })
+            .register_worker(register_worker_input(name))
             .await
             .unwrap_err();
         assert_eq!(err.error_code(), ErrorCode::Conflict);
@@ -155,12 +178,7 @@ async fn supervisor_registration_requires_reserved_node_less_local_shape() {
 async fn record_capability_emits_worker_capability_recorded() {
     let (cp, _tmp) = cp().await;
     let w = cp
-        .register_worker(NewWorker {
-            name: "alpha".to_owned(),
-            kind: WorkerKind::Synthetic,
-            registered_at: OffsetDateTime::UNIX_EPOCH,
-            node_id: None,
-        })
+        .register_worker(register_worker_input("alpha"))
         .await
         .unwrap();
     let cap = cp
@@ -198,12 +216,7 @@ async fn record_capability_emits_worker_capability_recorded() {
 async fn record_grant_emits_worker_grant_recorded() {
     let (cp, _tmp) = cp().await;
     let w = cp
-        .register_worker(NewWorker {
-            name: "alpha".to_owned(),
-            kind: WorkerKind::Synthetic,
-            registered_at: OffsetDateTime::UNIX_EPOCH,
-            node_id: None,
-        })
+        .register_worker(register_worker_input("alpha"))
         .await
         .unwrap();
     let grant = cp
@@ -237,23 +250,28 @@ async fn record_grant_emits_worker_grant_recorded() {
 
 #[tokio::test]
 async fn retire_worker_emits_worker_retired() {
-    let (cp, _tmp) = cp().await;
+    let (cp, _clock, _tmp) = cp_with_manual_clock(T0).await;
     let w = cp
-        .register_worker(NewWorker {
-            name: "alpha".to_owned(),
-            kind: WorkerKind::Synthetic,
-            registered_at: OffsetDateTime::UNIX_EPOCH,
-            node_id: None,
-        })
+        .register_worker(register_worker_input("alpha"))
         .await
         .unwrap();
-    cp.retire_worker(
-        w.id,
-        w.epoch,
-        OffsetDateTime::UNIX_EPOCH + time::Duration::seconds(1),
-    )
-    .await
-    .unwrap();
+    let retired_at = T0 + Duration::seconds(1);
+    let retired = cp.retire_worker(w.id, w.epoch, retired_at).await.unwrap();
+    assert!(w.registered_at < retired_at);
+    assert_eq!(retired.retired_at, Some(retired_at));
+
+    let worker_events = worker_events(&cp).await;
+    assert_eq!(worker_events.len(), 2);
+    assert_eq!(
+        worker_events[0].envelope.payload.kind(),
+        EventKind::WorkerRegistered
+    );
+    assert_eq!(
+        worker_events[1].envelope.payload.kind(),
+        EventKind::WorkerRetired
+    );
+    assert!(worker_events[0].envelope.occurred_at < worker_events[1].envelope.occurred_at);
+
     let page = cp
         .events()
         .list(
@@ -316,7 +334,7 @@ async fn register_worker_for_node_links_worker_and_emits_required_event_sequence
     assert!(matches!(
         &events[1].envelope.payload,
         Event::WorkerLinkedToNode(payload)
-            if payload.worker_id == worker.id.0 && payload.node_id == registered.node.id.0
+            if payload.worker_id == worker.id && payload.node_id == registered.node.id
     ));
 }
 
@@ -487,6 +505,13 @@ fn register_node_input(name: &str) -> RegisterNodeInput {
     }
 }
 
+fn register_worker_input(name: &str) -> RegisterWorkerInput {
+    RegisterWorkerInput {
+        name: name.to_owned(),
+        kind: WorkerKind::Synthetic,
+    }
+}
+
 fn worker_for_node_input(
     node_id: voom_core::NodeId,
     token: &str,
@@ -554,7 +579,7 @@ async fn cp_with_manual_clock(
     (cp, clock, tmp)
 }
 
-async fn worker_events(cp: &crate::ControlPlane) -> Vec<voom_store::repo::EventRow> {
+async fn worker_events(cp: &crate::ControlPlane) -> Vec<voom_store::repo::audit::events::EventRow> {
     cp.events()
         .list(
             EventFilter {

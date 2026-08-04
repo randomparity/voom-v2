@@ -1,6 +1,40 @@
 use super::*;
 
 #[test]
+fn planning_context_rejects_removed_feature_flags() {
+    let error = serde_json::from_value::<PlanningContext>(serde_json::json!({
+        "schema_version": 1,
+        "feature_flags": {},
+    }))
+    .unwrap_err();
+
+    assert!(error.to_string().contains("unknown field `feature_flags`"));
+}
+
+#[test]
+fn default_planning_context_serializes_remaining_public_fields() {
+    let json = serde_json::to_value(PlanningContext::default()).unwrap();
+    let keys = json
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        keys,
+        [
+            "schema_version",
+            "policy_document_id",
+            "policy_version_id",
+            "policy_input_set_id",
+            "input_source_label",
+            "generated_at",
+        ]
+    );
+}
+
+#[test]
 fn execution_plan_serializes_public_shape() {
     let plan = ExecutionPlan {
         schema_version: 1,

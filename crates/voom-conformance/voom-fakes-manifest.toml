@@ -1,11 +1,8 @@
-# Conformance harness manifest — Sprint 2 Phase 6 scaffold.
+# Active conformance harness manifest.
 #
-# Lists worker binaries the conformance suite runs against. Binaries
-# in [scaffold] are placeholders (Phase 3 / 4 / 5 stubs) and are
-# skipped until their real implementations land.
-#
-# `voom-conformance::Harness` will consume this file in a follow-up
-# commit to gate Phase 3 / 4 / 5 / 6 follow-up work.
+# Lists the required worker binaries and operation cases exercised by
+# `voom-conformance::Harness`. The empty scaffold section remains as
+# manifest-schema coverage.
 
 [[binaries]]
 name = "echo-worker"

@@ -23,10 +23,29 @@ fn assert_rejects_unknown<T: Serialize + DeserializeOwned>(valid: &T) {
         "unknown top-level field must be rejected"
     );
 }
+
+#[test]
+fn execution_ids_preserve_numeric_wire_representation() {
+    let payload = TicketLeasedPayload {
+        ticket_id: voom_core::TicketId(11),
+        lease_id: voom_core::LeaseId(12),
+        worker_id: voom_core::WorkerId(13),
+        attempt: 2,
+    };
+
+    let json = serde_json::to_value(&payload).unwrap();
+    assert_eq!(json["ticket_id"], 11);
+    assert_eq!(json["lease_id"], 12);
+    assert_eq!(json["worker_id"], 13);
+    assert_eq!(
+        serde_json::from_value::<TicketLeasedPayload>(json).unwrap(),
+        payload
+    );
+}
 #[test]
 fn ticket_failed_retriable_payload_round_trip() {
     let p = TicketFailedRetriablePayload {
-        ticket_id: 5,
+        ticket_id: voom_core::TicketId(5),
         attempt: 1,
         max_attempts: 3,
         reason: "transient sqlite lock".to_owned(),
@@ -41,7 +60,7 @@ fn ticket_failed_retriable_payload_round_trip() {
 #[test]
 fn ticket_failed_terminal_payload_round_trip_carries_class_and_null_issue_id() {
     let p = TicketFailedTerminalPayload {
-        ticket_id: 7,
+        ticket_id: voom_core::TicketId(7),
         attempt: 3,
         max_attempts: 3,
         reason: "retries exhausted".to_owned(),
@@ -60,8 +79,8 @@ fn ticket_failed_terminal_payload_round_trip_carries_class_and_null_issue_id() {
 #[test]
 fn ticket_requeued_after_force_release_payload_round_trip() {
     let p = TicketRequeuedAfterForceReleasePayload {
-        ticket_id: 3,
-        lease_id: 9,
+        ticket_id: voom_core::TicketId(3),
+        lease_id: voom_core::LeaseId(9),
         actor: "alice".to_owned(),
         reason: "stuck worker".to_owned(),
     };
@@ -73,8 +92,8 @@ fn ticket_requeued_after_force_release_payload_round_trip() {
 #[test]
 fn lease_force_released_payload_carries_actor_and_reason() {
     let p = LeaseForceReleasedPayload {
-        lease_id: 9,
-        ticket_id: 5,
+        lease_id: voom_core::LeaseId(9),
+        ticket_id: voom_core::TicketId(5),
         actor: "alice".to_owned(),
         reason: "clearing stuck lease".to_owned(),
         also_requeue: true,
@@ -92,7 +111,7 @@ fn lease_force_released_payload_carries_actor_and_reason() {
 #[test]
 fn job_opened_payload_rejects_unknown_field() {
     assert_rejects_unknown(&JobOpenedPayload {
-        job_id: 1,
+        job_id: voom_core::JobId(1),
         kind: "transcode".to_owned(),
         priority: 5,
     });
@@ -100,13 +119,15 @@ fn job_opened_payload_rejects_unknown_field() {
 
 #[test]
 fn job_succeeded_payload_rejects_unknown_field() {
-    assert_rejects_unknown(&JobSucceededPayload { job_id: 1 });
+    assert_rejects_unknown(&JobSucceededPayload {
+        job_id: voom_core::JobId(1),
+    });
 }
 
 #[test]
 fn job_failed_payload_rejects_unknown_field() {
     assert_rejects_unknown(&JobFailedPayload {
-        job_id: 1,
+        job_id: voom_core::JobId(1),
         reason: "worker crashed".to_owned(),
     });
 }
@@ -114,7 +135,7 @@ fn job_failed_payload_rejects_unknown_field() {
 #[test]
 fn job_cancelled_payload_rejects_unknown_field() {
     assert_rejects_unknown(&JobCancelledPayload {
-        job_id: 1,
+        job_id: voom_core::JobId(1),
         reason: "operator cancel".to_owned(),
     });
 }
@@ -122,8 +143,8 @@ fn job_cancelled_payload_rejects_unknown_field() {
 #[test]
 fn ticket_created_payload_rejects_unknown_field() {
     assert_rejects_unknown(&TicketCreatedPayload {
-        ticket_id: 1,
-        job_id: Some(2),
+        ticket_id: voom_core::TicketId(1),
+        job_id: Some(voom_core::JobId(2)),
         kind: voom_core::TicketOperation::new("synthetic.workflow.operation.hash_file").unwrap(),
         priority: 5,
         max_attempts: 3,
@@ -132,15 +153,17 @@ fn ticket_created_payload_rejects_unknown_field() {
 
 #[test]
 fn ticket_ready_payload_rejects_unknown_field() {
-    assert_rejects_unknown(&TicketReadyPayload { ticket_id: 1 });
+    assert_rejects_unknown(&TicketReadyPayload {
+        ticket_id: voom_core::TicketId(1),
+    });
 }
 
 #[test]
 fn ticket_leased_payload_rejects_unknown_field() {
     assert_rejects_unknown(&TicketLeasedPayload {
-        ticket_id: 1,
-        lease_id: 2,
-        worker_id: 3,
+        ticket_id: voom_core::TicketId(1),
+        lease_id: voom_core::LeaseId(2),
+        worker_id: voom_core::WorkerId(3),
         attempt: 1,
     });
 }
@@ -148,15 +171,15 @@ fn ticket_leased_payload_rejects_unknown_field() {
 #[test]
 fn ticket_succeeded_payload_rejects_unknown_field() {
     assert_rejects_unknown(&TicketSucceededPayload {
-        ticket_id: 1,
-        lease_id: 2,
+        ticket_id: voom_core::TicketId(1),
+        lease_id: voom_core::LeaseId(2),
     });
 }
 
 #[test]
 fn ticket_failed_retriable_payload_rejects_unknown_field() {
     assert_rejects_unknown(&TicketFailedRetriablePayload {
-        ticket_id: 5,
+        ticket_id: voom_core::TicketId(5),
         attempt: 1,
         max_attempts: 3,
         reason: "transient sqlite lock".to_owned(),
@@ -168,7 +191,7 @@ fn ticket_failed_retriable_payload_rejects_unknown_field() {
 #[test]
 fn ticket_failed_terminal_payload_rejects_unknown_field() {
     assert_rejects_unknown(&TicketFailedTerminalPayload {
-        ticket_id: 7,
+        ticket_id: voom_core::TicketId(7),
         attempt: 3,
         max_attempts: 3,
         reason: "retries exhausted".to_owned(),
@@ -180,16 +203,16 @@ fn ticket_failed_terminal_payload_rejects_unknown_field() {
 #[test]
 fn ticket_requeued_after_lease_expiry_payload_rejects_unknown_field() {
     assert_rejects_unknown(&TicketRequeuedAfterLeaseExpiryPayload {
-        ticket_id: 1,
-        lease_id: 2,
+        ticket_id: voom_core::TicketId(1),
+        lease_id: voom_core::LeaseId(2),
     });
 }
 
 #[test]
 fn ticket_requeued_after_force_release_payload_rejects_unknown_field() {
     assert_rejects_unknown(&TicketRequeuedAfterForceReleasePayload {
-        ticket_id: 3,
-        lease_id: 9,
+        ticket_id: voom_core::TicketId(3),
+        lease_id: voom_core::LeaseId(9),
         actor: "alice".to_owned(),
         reason: "stuck worker".to_owned(),
     });
@@ -198,9 +221,9 @@ fn ticket_requeued_after_force_release_payload_rejects_unknown_field() {
 #[test]
 fn lease_acquired_payload_rejects_unknown_field() {
     assert_rejects_unknown(&LeaseAcquiredPayload {
-        lease_id: 1,
-        ticket_id: 2,
-        worker_id: 3,
+        lease_id: voom_core::LeaseId(1),
+        ticket_id: voom_core::TicketId(2),
+        worker_id: voom_core::WorkerId(3),
         ttl_seconds: 60,
         expires_at: OffsetDateTime::UNIX_EPOCH,
     });
@@ -209,8 +232,8 @@ fn lease_acquired_payload_rejects_unknown_field() {
 #[test]
 fn lease_released_payload_rejects_unknown_field() {
     assert_rejects_unknown(&LeaseReleasedPayload {
-        lease_id: 1,
-        ticket_id: 2,
+        lease_id: voom_core::LeaseId(1),
+        ticket_id: voom_core::TicketId(2),
         release_reason: "completed".to_owned(),
     });
 }
@@ -218,16 +241,16 @@ fn lease_released_payload_rejects_unknown_field() {
 #[test]
 fn lease_expired_payload_rejects_unknown_field() {
     assert_rejects_unknown(&LeaseExpiredPayload {
-        lease_id: 1,
-        ticket_id: 2,
+        lease_id: voom_core::LeaseId(1),
+        ticket_id: voom_core::TicketId(2),
     });
 }
 
 #[test]
 fn lease_force_released_payload_rejects_unknown_field() {
     assert_rejects_unknown(&LeaseForceReleasedPayload {
-        lease_id: 9,
-        ticket_id: 5,
+        lease_id: voom_core::LeaseId(9),
+        ticket_id: voom_core::TicketId(5),
         actor: "alice".to_owned(),
         reason: "clearing stuck lease".to_owned(),
         also_requeue: true,

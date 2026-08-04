@@ -22,6 +22,17 @@ fn report_status_serializes_as_snake_case_contract() {
         serde_json::to_value(ExecutionEligibility::Supported).unwrap(),
         json!("supported")
     );
+    assert_eq!(
+        serde_json::to_value(ComplianceKind::TranscodeVideo).unwrap(),
+        json!("transcode_video")
+    );
+}
+
+#[test]
+fn compliance_kind_rejects_unknown_wire_value() {
+    let result = serde_json::from_value::<ComplianceKind>(json!("other"));
+
+    assert!(result.is_err());
 }
 
 #[test]
@@ -60,7 +71,7 @@ fn compliance_report_serializes_expected_public_shape() {
                 key: "movie-a".to_owned(),
                 kind: voom_policy::TargetKind::MediaWork,
             },
-            compliance_kind: "container".to_owned(),
+            compliance_kind: ComplianceKind::Container,
             operation_kind: PlanOperationKind::SetContainer,
             desired_state: json!({"container": "mkv"}),
             observed_state: Some(json!({"container": "mp4"})),

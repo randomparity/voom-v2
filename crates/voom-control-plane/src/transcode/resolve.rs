@@ -8,9 +8,9 @@ use voom_core::{
     TranscodeVideoProfile, VoomError, canonical_video_codec, encoder_descriptor,
     normalize_codec_token, validate_profile_against_descriptor,
 };
-use voom_plan::inline_profile_id;
+use voom_plan::planner::transcode_video::{inline_profile_id, video_stream_field};
 use voom_policy::{MediaSnapshotInput, VideoProfileRef, VideoProfileSettings};
-use voom_store::repo::video_profiles::SqliteVideoProfileRepo;
+use voom_store::repo::policy::video_profiles::SqliteVideoProfileRepo;
 
 #[derive(Debug, Clone)]
 pub struct ResolvedProfile {
@@ -191,7 +191,7 @@ pub fn decide_copy_video(profile: &TranscodeVideoProfile, snapshot: &MediaSnapsh
         Err(_) => return false,
         Ok(None) => {}
         Ok(Some(target_pf)) => {
-            let Some(observed_pf) = voom_plan::video_stream_field(snapshot, "pixel_format") else {
+            let Some(observed_pf) = video_stream_field(snapshot, "pixel_format") else {
                 return false;
             };
             if !observed_pf.eq_ignore_ascii_case(target_pf) {
@@ -203,7 +203,7 @@ pub fn decide_copy_video(profile: &TranscodeVideoProfile, snapshot: &MediaSnapsh
     // Codec profile must match if constrained (normalize whitespace/case like the planner).
     // Cross-reference: planner.rs::codec_profile_needs_change uses the same normalization.
     if let Some(target_cp) = profile.codec_profile.as_deref() {
-        let Some(observed_cp) = voom_plan::video_stream_field(snapshot, "profile") else {
+        let Some(observed_cp) = video_stream_field(snapshot, "profile") else {
             return false;
         };
         if normalize_codec_token(observed_cp) != normalize_codec_token(target_cp) {
@@ -213,7 +213,7 @@ pub fn decide_copy_video(profile: &TranscodeVideoProfile, snapshot: &MediaSnapsh
 
     // Codec level must match if constrained.
     if let Some(target_cl) = profile.codec_level.as_deref() {
-        let Some(observed_cl) = voom_plan::video_stream_field(snapshot, "level") else {
+        let Some(observed_cl) = video_stream_field(snapshot, "level") else {
             return false;
         };
         if normalize_codec_token(observed_cl) != normalize_codec_token(target_cl) {

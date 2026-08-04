@@ -3,8 +3,8 @@ use std::io;
 use serde::Serialize;
 use voom_control_plane::ControlPlane;
 use voom_core::{BundleId, ErrorCode, VoomError, format_iso8601};
-use voom_store::repo::bundles::{AssetBundle, BundleMember};
-use voom_store::repo::identity::{
+use voom_store::repo::media::bundles::{AssetBundle, BundleMember};
+use voom_store::repo::media::identity::{
     FileLocation, FileLocationKind, FileVersion, MediaVariant, MediaWork,
 };
 

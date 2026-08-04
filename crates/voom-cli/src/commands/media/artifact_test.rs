@@ -2,16 +2,17 @@ use std::path::PathBuf;
 
 use clap::{CommandFactory, Parser};
 use serde_json::json;
-use voom_control_plane::{
+use voom_control_plane::artifact::{
     ArtifactDetail, ArtifactInspectionState, ArtifactSummary, CommitArtifactReport,
     CommitRecoveryReport, CommitSummary, PathFacts, PathObservation, RecoverySummary,
     StageCopyReport, VerificationSummary, VerifyArtifactReport,
 };
 use voom_core::ids::{ArtifactCommitRecordId, ArtifactVerificationId};
 use voom_core::{
-    ArtifactHandleId, ArtifactLocationId, ErrorCode, FileLocationId, FileVersionId, WorkerId,
+    ArtifactHandleId, ArtifactLocationId, ErrorCode, FailureClass, FileLocationId, FileVersionId,
+    WorkerId,
 };
-use voom_store::repo::artifacts::{ArtifactCommitState, ArtifactVerificationStatus};
+use voom_store::repo::media::artifacts::{ArtifactCommitState, ArtifactVerificationStatus};
 
 use super::{
     ArtifactDetailData, ArtifactEnvelopeData, ArtifactSummaryData, CommitArtifactData,
@@ -338,7 +339,7 @@ fn expected_commit_summary_json() -> serde_json::Value {
         "state": "recovery_required",
         "result_file_version_id": 70,
         "result_file_location_id": 80,
-        "failure_class": "database_unavailable",
+        "failure_class": "commit_failure",
         "error_code": "DB_UNREACHABLE",
         "message": "finalize failed",
         "recovery_reason": "temp_installed",
@@ -424,7 +425,7 @@ fn failed_verification_fixture() -> VerificationSummary {
         observed_size_bytes: None,
         observed_checksum: None,
         failure_class: None,
-        error_code: Some("ARTIFACT_CHECKSUM_MISMATCH".to_owned()),
+        error_code: Some(ErrorCode::ArtifactChecksumMismatch),
         message: Some("checksum drift".to_owned()),
         ..success_verification_fixture()
     }
@@ -439,8 +440,8 @@ fn commit_summary_fixture() -> CommitSummary {
         state: ArtifactCommitState::RecoveryRequired,
         result_file_version_id: Some(FileVersionId(70)),
         result_file_location_id: Some(FileLocationId(80)),
-        failure_class: Some("database_unavailable".to_owned()),
-        error_code: Some("DB_UNREACHABLE".to_owned()),
+        failure_class: Some(FailureClass::CommitFailure),
+        error_code: Some(ErrorCode::DbUnreachable),
         message: Some("finalize failed".to_owned()),
         recovery_reason: Some("temp_installed".to_owned()),
         recovery: Some(RecoverySummary {

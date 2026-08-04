@@ -8,8 +8,10 @@ use voom_core::{
 };
 use voom_events::payload::ArtifactStagedPayload;
 use voom_events::{Event, SubjectType};
-use voom_store::repo::artifacts::{NewArtifactHandle, NewArtifactLocation};
-use voom_store::repo::identity::MediaSnapshot;
+use voom_store::repo::media::artifacts::{
+    ArtifactHandleAccessMode, ArtifactLocationKind, NewArtifactHandle, NewArtifactLocation,
+};
+use voom_store::repo::media::identity::MediaSnapshot;
 use voom_worker_protocol::{
     ExpectedFileFacts, ProbeFileRequest, ProbeFileResult, RemuxObservedFacts, RemuxResult,
 };
@@ -84,7 +86,7 @@ pub async fn record_staged_remux(
                 checksum: Some(result.output.content_hash.clone()),
                 privacy_class: "internal".to_owned(),
                 durability_class: "staging".to_owned(),
-                allowed_access_modes: vec!["local_path".to_owned()],
+                allowed_access_modes: vec![ArtifactHandleAccessMode::LocalPath],
                 mutability: "immutable".to_owned(),
                 source_lineage: Some(json!({
                     "operation": "remux",
@@ -104,7 +106,7 @@ pub async fn record_staged_remux(
             &mut tx,
             NewArtifactLocation {
                 artifact_handle_id: handle.id,
-                kind: "staging".to_owned(),
+                kind: ArtifactLocationKind::Staging,
                 value: staging_path.display().to_string(),
                 observed_at: now,
             },
@@ -117,10 +119,10 @@ pub async fn record_staged_remux(
         Some(handle.id.0),
         now,
         Event::ArtifactStaged(ArtifactStagedPayload {
-            artifact_handle_id: handle.id.0,
-            artifact_location_id: location.id.0,
-            source_file_version_id: input.source_file_version_id.0,
-            source_file_location_id: Some(source_file_location_id.0),
+            artifact_handle_id: handle.id,
+            artifact_location_id: location.id,
+            source_file_version_id: input.source_file_version_id,
+            source_file_location_id: Some(source_file_location_id),
             staging_path: location.value.clone(),
             size_bytes: result.output.size_bytes,
             checksum: result.output.content_hash.clone(),

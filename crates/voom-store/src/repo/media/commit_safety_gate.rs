@@ -26,7 +26,8 @@ use voom_events::{Event, EventEnvelope, SubjectType};
 use crate::repo::audit::events::EventRepo;
 use crate::repo::common::{i64_from_u64, iso8601, parse_iso8601, u64_from_i64};
 use crate::repo::media::identity::{
-    FileLocationKind, IdentityEvidenceTarget, IdentityRepo, LocationProof,
+    CommitGateIdentityRepo, FileLocationKind, FileLocationRepo, FileVersionRepo,
+    IdentityEvidenceRepo, IdentityEvidenceTarget, LocationProof,
 };
 use crate::repo::media::use_leases::LeaseScope;
 
@@ -535,7 +536,7 @@ pub enum AliasResolutionError {
 ///
 /// **DB-internal alias enumeration does NOT use this trait.** The
 /// gate's closure walker reads live `file_locations` rows directly via
-/// `IdentityRepo::list_live_file_locations_by_version_in_tx`,
+/// `FileLocationRepo::list_live_file_locations_by_version_in_tx`,
 /// inside the same IMMEDIATE transaction the gate's safety checks
 /// run under. Mixing DB-internal enumeration with this trait
 /// (which has no transaction parameter) would either observe
@@ -577,7 +578,7 @@ pub struct CommitGateContext<'a> {
     /// Pool used to open the gate's IMMEDIATE transactions.
     pub pool: &'a SqlitePool,
     /// Identity repository used for closure walks and Phase C mutations.
-    pub identity_repo: &'a dyn IdentityRepo,
+    pub identity_repo: &'a dyn CommitGateIdentityRepo,
     /// Event repository used to append gate audit events.
     pub event_repo: &'a dyn EventRepo,
     /// External alias resolver used during closure walks.
@@ -588,7 +589,7 @@ impl std::fmt::Debug for CommitGateContext<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("CommitGateContext")
             .field("pool", self.pool)
-            .field("identity_repo", &"<dyn IdentityRepo>")
+            .field("identity_repo", &"<dyn CommitGateIdentityRepo>")
             .field("event_repo", &"<dyn EventRepo>")
             .field("alias_resolver", &"<dyn AliasResolver>")
             .finish()
@@ -616,8 +617,8 @@ impl std::fmt::Debug for CommitGateContext<'_> {
 ///
 /// Callers translate a hit into the lock's caller-facing error variant
 /// (`VoomError::Conflict(...)` for `SqliteUseLeaseRepo::acquire_in_tx` and
-/// the `IdentityRepo::record_discovered_file_in_tx::AliasAttached`
-/// branch). `IdentityRepo::reconcile_rename_in_tx` deliberately does
+/// the `IngestRepo::record_discovered_file_in_tx::AliasAttached`
+/// branch). `IngestRepo::reconcile_rename_in_tx` deliberately does
 /// NOT consult this helper: rename reconciliation must be allowed to
 /// land against an in-flight commit so external moves never deadlock
 /// the gate.
@@ -640,7 +641,7 @@ pub(crate) async fn consult_pending_commit_lock_in_tx(
              WHERE ci.state IN ('pending', 'authorized') \
                AND m.scope_asset_id = ? \
              ORDER BY ci.id ASC LIMIT 1",
-            i64_from_u64(id.0),
+            i64_from_u64(id.0, concat!(module_path!(), ": ", stringify!(id.0)))?,
         ),
         LeaseScope::Bundle(id) => (
             "SELECT ci.id FROM commit_intents ci \
@@ -648,7 +649,7 @@ pub(crate) async fn consult_pending_commit_lock_in_tx(
              WHERE ci.state IN ('pending', 'authorized') \
                AND m.scope_bundle_id = ? \
              ORDER BY ci.id ASC LIMIT 1",
-            i64_from_u64(id.0),
+            i64_from_u64(id.0, concat!(module_path!(), ": ", stringify!(id.0)))?,
         ),
         LeaseScope::Version(id) => (
             "SELECT ci.id FROM commit_intents ci \
@@ -656,7 +657,7 @@ pub(crate) async fn consult_pending_commit_lock_in_tx(
              WHERE ci.state IN ('pending', 'authorized') \
                AND m.scope_version_id = ? \
              ORDER BY ci.id ASC LIMIT 1",
-            i64_from_u64(id.0),
+            i64_from_u64(id.0, concat!(module_path!(), ": ", stringify!(id.0)))?,
         ),
         LeaseScope::Location(id) => (
             "SELECT ci.id FROM commit_intents ci \
@@ -664,7 +665,7 @@ pub(crate) async fn consult_pending_commit_lock_in_tx(
              WHERE ci.state IN ('pending', 'authorized') \
                AND m.scope_location_id = ? \
              ORDER BY ci.id ASC LIMIT 1",
-            i64_from_u64(id.0),
+            i64_from_u64(id.0, concat!(module_path!(), ": ", stringify!(id.0)))?,
         ),
     };
     let row: Option<i64> = sqlx::query_scalar(sql)
@@ -672,7 +673,11 @@ pub(crate) async fn consult_pending_commit_lock_in_tx(
         .fetch_optional(&mut **tx)
         .await
         .map_err(|e| VoomError::database_context("consult_pending_commit_lock", e))?;
-    Ok(row.map(|raw| (CommitId(u64_from_i64(raw)), *scope)))
+    row.map(|raw| {
+        u64_from_i64(raw, concat!(module_path!(), ": ", stringify!(raw)))
+            .map(|id| (CommitId(id), *scope))
+    })
+    .transpose()
 }
 
 /// Open a commit-safety-gate transaction with `BEGIN IMMEDIATE` so

@@ -4,7 +4,9 @@
 //! Scoring Registry); see `docs/adr/0032`.
 
 use voom_core::VoomError;
-use voom_store::repo::quality_scoring_profiles::{NewQualityScoringProfile, QualityScoringProfile};
+use voom_store::repo::policy::quality_scoring_profiles::{
+    NewQualityScoringProfile, QualityScoringProfile,
+};
 
 use crate::ControlPlane;
 

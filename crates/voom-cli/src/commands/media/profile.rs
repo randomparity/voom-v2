@@ -3,7 +3,7 @@ use std::io;
 use serde::Serialize;
 use voom_control_plane::ControlPlane;
 use voom_core::{ErrorCode, VideoDecodeMode};
-use voom_store::repo::video_profiles::{NewVideoProfile, VideoProfile};
+use voom_store::repo::policy::video_profiles::{NewVideoProfile, VideoProfile};
 
 use crate::cli::{ProfileCommand, VideoProfileFields};
 use crate::commands::common::{emit_voom_error, open_control_plane};

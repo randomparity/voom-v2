@@ -1,3 +1,6 @@
+use std::error::Error as _;
+use std::num::TryFromIntError;
+
 use time::OffsetDateTime;
 use voom_core::{BundleId, FileVersionId, LeaseId, MediaSnapshotId, WorkerId};
 
@@ -168,6 +171,16 @@ impl Fixture {
             source_media_snapshot_id: self.source_media_snapshot_id,
         }
     }
+
+    fn claim(&self, generation: u32, token: &str) -> NewAudioExtractClaim {
+        NewAudioExtractClaim {
+            operation_key: "extract:v1:key".to_owned(),
+            expected_generation: generation,
+            lease_id: self.lease_id,
+            claim_token: token.to_owned(),
+            expires_at: OffsetDateTime::from_unix_timestamp(10).unwrap(),
+        }
+    }
 }
 
 fn outputs() -> Vec<NewAudioExtractOutput> {
@@ -215,6 +228,82 @@ async fn create_planned_persists_ordered_outputs_and_replays_exact_input() {
             .collect::<Vec<_>>(),
         vec![Some("out-1"), Some("out-2")]
     );
+}
+
+#[tokio::test]
+async fn create_planned_rejects_id_above_sqlite_range_before_binding() {
+    let fixture = fixture().await;
+    let mut operation = fixture.operation();
+    operation.source_file_version_id = FileVersionId(u64::MAX);
+    let operation_key = operation.operation_key.clone();
+
+    let error = fixture
+        .repo
+        .create_planned(
+            operation,
+            &outputs(),
+            OffsetDateTime::from_unix_timestamp(0).unwrap(),
+        )
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.code(), "DB_UNREACHABLE");
+    assert!(
+        error
+            .source()
+            .and_then(|source| source.downcast_ref::<TryFromIntError>())
+            .is_some(),
+        "oversized ID must fail checked conversion before SQLite binding: {error:?}"
+    );
+    assert!(
+        error
+            .to_string()
+            .contains("audio_extract_operations.source_file_version_id")
+    );
+    let inserted: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM audio_extract_operations WHERE operation_key = ?")
+            .bind(operation_key)
+            .fetch_one(&fixture.pool)
+            .await
+            .unwrap();
+    assert_eq!(inserted, 0, "failed conversion must not insert a row");
+}
+
+#[tokio::test]
+async fn get_exact_by_key_rejects_negative_persisted_operation_id() {
+    let fixture = fixture().await;
+    let mut operation = fixture.operation();
+    operation.operation_key = "extract:v1:negative-id".to_owned();
+    sqlx::query(
+        "INSERT INTO audio_extract_operations \
+         (id, operation_key, operation_id, source_file_version_id, source_bundle_id, \
+          source_media_snapshot_id, state, created_at) \
+         VALUES (-1, ?, ?, ?, ?, ?, 'planned', ?)",
+    )
+    .bind(&operation.operation_key)
+    .bind(&operation.operation_id)
+    .bind(i64::try_from(operation.source_file_version_id.0).unwrap())
+    .bind(i64::try_from(operation.source_bundle_id.0).unwrap())
+    .bind(i64::try_from(operation.source_media_snapshot_id.0).unwrap())
+    .bind(NOW)
+    .execute(&fixture.pool)
+    .await
+    .unwrap();
+
+    let result = fixture.repo.get_exact_by_key(&operation, &[]).await;
+    let Err(error) = result else {
+        panic!("negative persisted ID must not wrap to u64");
+    };
+
+    assert_eq!(error.code(), "DB_UNREACHABLE");
+    assert!(
+        error
+            .source()
+            .and_then(|source| source.downcast_ref::<TryFromIntError>())
+            .is_some(),
+        "negative persisted ID must retain TryFromIntError: {error:?}"
+    );
+    assert!(error.to_string().contains("audio_extract_operations.id"));
 }
 
 #[tokio::test]
@@ -273,6 +362,121 @@ async fn claim_fences_competing_tokens_until_expiry() {
     fixture
         .repo
         .acquire_claim(&competing, OffsetDateTime::from_unix_timestamp(11).unwrap())
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn release_claim_contract_releases_the_current_extract_claim() {
+    let fixture = fixture().await;
+    let now = OffsetDateTime::UNIX_EPOCH;
+    fixture
+        .repo
+        .create_planned(fixture.operation(), &outputs(), now)
+        .await
+        .unwrap();
+    let claim = fixture.claim(0, "current");
+    fixture.repo.acquire_claim(&claim, now).await.unwrap();
+
+    fixture.repo.release_claim_if_current(&claim).await.unwrap();
+
+    let claim_token: Option<String> = sqlx::query_scalar(
+        "SELECT claim_token FROM audio_extract_operations WHERE operation_key = ?",
+    )
+    .bind(&claim.operation_key)
+    .fetch_one(&fixture.pool)
+    .await
+    .unwrap();
+    assert_eq!(claim_token, None);
+}
+
+#[tokio::test]
+async fn release_claim_contract_ignores_stale_and_replaced_extract_claims() {
+    let fixture = fixture().await;
+    let now = OffsetDateTime::UNIX_EPOCH;
+    fixture
+        .repo
+        .create_planned(fixture.operation(), &outputs(), now)
+        .await
+        .unwrap();
+    let first = fixture.claim(0, "first");
+    fixture.repo.acquire_claim(&first, now).await.unwrap();
+    let stale_generation = fixture.claim(1, "first");
+
+    fixture
+        .repo
+        .release_claim_if_current(&stale_generation)
+        .await
+        .unwrap();
+
+    let claim_token: Option<String> = sqlx::query_scalar(
+        "SELECT claim_token FROM audio_extract_operations WHERE operation_key = ?",
+    )
+    .bind(&first.operation_key)
+    .fetch_one(&fixture.pool)
+    .await
+    .unwrap();
+    assert_eq!(claim_token.as_deref(), Some("first"));
+
+    let mut replacement = fixture.claim(0, "replacement");
+    replacement.expires_at = OffsetDateTime::from_unix_timestamp(20).unwrap();
+    fixture
+        .repo
+        .acquire_claim(
+            &replacement,
+            OffsetDateTime::from_unix_timestamp(11).unwrap(),
+        )
+        .await
+        .unwrap();
+    fixture.repo.release_claim_if_current(&first).await.unwrap();
+
+    let claim_token: Option<String> = sqlx::query_scalar(
+        "SELECT claim_token FROM audio_extract_operations WHERE operation_key = ?",
+    )
+    .bind(&first.operation_key)
+    .fetch_one(&fixture.pool)
+    .await
+    .unwrap();
+    assert_eq!(claim_token.as_deref(), Some("replacement"));
+}
+
+#[tokio::test]
+async fn release_claim_contract_ignores_released_and_committed_extract_claims() {
+    let fixture = fixture().await;
+    let now = OffsetDateTime::UNIX_EPOCH;
+    fixture
+        .repo
+        .create_planned(fixture.operation(), &outputs(), now)
+        .await
+        .unwrap();
+    let released = fixture.claim(0, "released");
+    fixture.repo.acquire_claim(&released, now).await.unwrap();
+    fixture
+        .repo
+        .release_claim_if_current(&released)
+        .await
+        .unwrap();
+    fixture
+        .repo
+        .release_claim_if_current(&released)
+        .await
+        .unwrap();
+
+    let committed = fixture.claim(0, "committed");
+    fixture.repo.acquire_claim(&committed, now).await.unwrap();
+    sqlx::query(
+        "UPDATE audio_extract_operations SET state = 'committed', finished_at = ? \
+         WHERE operation_key = ?",
+    )
+    .bind(NOW)
+    .bind(&committed.operation_key)
+    .execute(&fixture.pool)
+    .await
+    .unwrap();
+
+    fixture
+        .repo
+        .release_claim_if_current(&committed)
         .await
         .unwrap();
 }

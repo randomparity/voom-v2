@@ -2,7 +2,7 @@
 //! `voom backup list|show` command.
 
 use voom_core::{BackupId, VoomError};
-use voom_store::repo::backups::{Backup, BackupStatus};
+use voom_store::repo::media::backups::{Backup, BackupStatus};
 
 use crate::ControlPlane;
 

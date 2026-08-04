@@ -2,22 +2,16 @@ use super::*;
 
 use serde_json::json;
 use time::Duration;
-use voom_core::clock_test_support::FrozenClock;
 use voom_core::rng_test_support::FrozenRng;
-use voom_core::{FailureClass, LeaseId, TicketId, TicketOperation, VoomError, WorkerId};
+use voom_core::{FailureClass, LeaseId, NodeId, TicketId, TicketOperation, VoomError, WorkerId};
 
+use crate::repo::execution::jobs::{NewJob, SqliteJobRepo};
+use crate::repo::execution::nodes::{NewNode, NodeKind, SqliteNodeRepo};
 use crate::repo::execution::tickets::{NewTicket, SqliteTicketRepo, TicketState};
 use crate::repo::execution::workers::{
     NewCapability, NewGrant, NewWorker, SqliteWorkerRepo, WorkerKind,
 };
 use crate::test_support::{T0, fresh_initialized_pool_at};
-
-/// Helper: build a (clock, rng) pair pinned to `T0` and the jitter
-/// floor. Pinning jitter to 0 (`FrozenRng::new(0)`) makes the
-/// `next_eligible_at` math exact: `now + 0`.
-fn test_clock() -> FrozenClock {
-    FrozenClock::new(T0)
-}
 
 /// Jitter floor — `FrozenRng::new(0)` makes `default_backoff` return
 /// `Duration::seconds(0)`, so `next_eligible_at == now`.
@@ -215,6 +209,101 @@ async fn acquire_promotes_ticket_to_leased_and_bumps_attempt() {
     assert_eq!(t.state, TicketState::Leased);
     assert_eq!(t.attempt, 1);
     drop(pool);
+}
+
+#[tokio::test]
+async fn dispatch_context_projects_held_lease_worker_epoch_and_expiry() {
+    let (pool, _trepo, _wrepo, lrepo, ticket_id, worker_id, _tmp) = setup().await;
+    sqlx::query("UPDATE workers SET epoch = 7 WHERE id = ?")
+        .bind(i64::try_from(worker_id.0).unwrap())
+        .execute(&pool)
+        .await
+        .unwrap();
+    let lease = lrepo
+        .acquire(NewLease {
+            ticket_id,
+            worker_id,
+            ttl: Duration::seconds(60),
+            now: T0,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(
+        lrepo.dispatch_context(lease.id).await.unwrap(),
+        Some(LeaseDispatchContext {
+            worker_id,
+            worker_epoch: 7,
+            expires_at: T0 + Duration::seconds(60),
+        })
+    );
+
+    lrepo
+        .release(lease.id, json!({}), T0 + Duration::seconds(1))
+        .await
+        .unwrap();
+    assert_eq!(lrepo.dispatch_context(lease.id).await.unwrap(), None);
+}
+
+#[tokio::test]
+async fn dispatch_context_returns_none_when_the_worker_row_is_missing() {
+    let (pool, _trepo, _wrepo, lrepo, ticket_id, worker_id, _tmp) = setup().await;
+    let lease = lrepo
+        .acquire(NewLease {
+            ticket_id,
+            worker_id,
+            ttl: Duration::seconds(60),
+            now: T0,
+        })
+        .await
+        .unwrap();
+    let mut connection = pool.acquire().await.unwrap();
+    sqlx::query("PRAGMA foreign_keys = OFF")
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM workers WHERE id = ?")
+        .bind(i64::try_from(worker_id.0).unwrap())
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+    drop(connection);
+
+    assert_eq!(lrepo.dispatch_context(lease.id).await.unwrap(), None);
+}
+
+#[tokio::test]
+async fn dispatch_context_rejects_negative_worker_epoch_as_database_error() {
+    let (pool, _trepo, _wrepo, lrepo, ticket_id, worker_id, _tmp) = setup().await;
+    let lease = lrepo
+        .acquire(NewLease {
+            ticket_id,
+            worker_id,
+            ttl: Duration::seconds(60),
+            now: T0,
+        })
+        .await
+        .unwrap();
+    sqlx::query("UPDATE workers SET epoch = -1 WHERE id = ?")
+        .bind(i64::try_from(worker_id.0).unwrap())
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let error = lrepo.dispatch_context(lease.id).await.unwrap_err();
+
+    assert!(matches!(error, VoomError::Database { .. }));
+    assert!(error.to_string().contains("epoch"));
+}
+
+#[tokio::test]
+async fn dispatch_context_rejects_lease_id_above_sqlite_integer_range() {
+    let (_pool, _trepo, _wrepo, lrepo, _ticket_id, _worker_id, _tmp) = setup().await;
+
+    let error = lrepo.dispatch_context(LeaseId(u64::MAX)).await.unwrap_err();
+
+    assert!(matches!(error, VoomError::Config(_)));
+    assert!(error.to_string().contains("lease id"));
 }
 
 #[tokio::test]
@@ -575,7 +664,6 @@ async fn fail_retriable_requeues_ticket_and_sets_backoff() {
             l.id,
             FailureClass::WorkerTimeout,
             T0 + Duration::seconds(10),
-            &test_clock(),
             &mut ceiling_rng(),
         )
         .await
@@ -607,7 +695,6 @@ async fn fail_retriable_with_floor_rng_sets_next_eligible_to_now() {
             l.id,
             FailureClass::WorkerTimeout,
             T0 + Duration::seconds(10),
-            &test_clock(),
             &mut floor_rng(),
         )
         .await
@@ -638,7 +725,6 @@ async fn fail_with_non_retriable_class_skips_requeue_even_when_attempts_remain()
             l.id,
             FailureClass::MalformedWorkerResult,
             T0 + Duration::seconds(5),
-            &test_clock(),
             &mut floor_rng(),
         )
         .await
@@ -667,7 +753,6 @@ async fn fail_terminal_marks_ticket_failed() {
                 l.id,
                 FailureClass::WorkerTimeout,
                 T0 + Duration::seconds(60 * i + 1),
-                &test_clock(),
                 &mut floor_rng(),
             )
             .await
@@ -729,7 +814,6 @@ async fn expire_due_requeue_resets_next_eligible_at() {
             l1.id,
             FailureClass::WorkerTimeout,
             T0 + Duration::seconds(10),
-            &test_clock(),
             &mut ceiling_rng(),
         )
         .await
@@ -988,11 +1072,11 @@ fn default_backoff_floor_is_zero_and_ceiling_caps_at_window() {
     // Floor (FrozenRng(0)) — always 0 seconds.
     let mut rng_floor = FrozenRng::new(0);
     assert_eq!(
-        SqliteTicketRepo::default_backoff(0, &test_clock(), &mut rng_floor),
+        SqliteTicketRepo::default_backoff(0, &mut rng_floor),
         Duration::seconds(0)
     );
     assert_eq!(
-        SqliteTicketRepo::default_backoff(5, &test_clock(), &mut rng_floor),
+        SqliteTicketRepo::default_backoff(5, &mut rng_floor),
         Duration::seconds(0)
     );
 
@@ -1000,22 +1084,22 @@ fn default_backoff_floor_is_zero_and_ceiling_caps_at_window() {
     let mut rng_ceil = FrozenRng::new(u32::MAX);
     // attempt=0: base*2^0 = 5s, < cap → 5s.
     assert_eq!(
-        SqliteTicketRepo::default_backoff(0, &test_clock(), &mut rng_ceil),
+        SqliteTicketRepo::default_backoff(0, &mut rng_ceil),
         Duration::seconds(5)
     );
     // attempt=1: 10s.
     assert_eq!(
-        SqliteTicketRepo::default_backoff(1, &test_clock(), &mut rng_ceil),
+        SqliteTicketRepo::default_backoff(1, &mut rng_ceil),
         Duration::seconds(10)
     );
     // attempt=2: 20s.
     assert_eq!(
-        SqliteTicketRepo::default_backoff(2, &test_clock(), &mut rng_ceil),
+        SqliteTicketRepo::default_backoff(2, &mut rng_ceil),
         Duration::seconds(20)
     );
     // attempt=20: base*2^20 = ~5M s, clamps to cap=300s.
     assert_eq!(
-        SqliteTicketRepo::default_backoff(20, &test_clock(), &mut rng_ceil),
+        SqliteTicketRepo::default_backoff(20, &mut rng_ceil),
         Duration::seconds(300)
     );
 }
@@ -1078,7 +1162,6 @@ async fn fail_retriable_returns_conflict_when_ticket_no_longer_leased() {
             l.id,
             FailureClass::WorkerTimeout,
             T0 + Duration::seconds(1),
-            &test_clock(),
             &mut floor_rng(),
         )
         .await
@@ -1106,7 +1189,6 @@ async fn fail_terminal_returns_conflict_when_ticket_no_longer_leased() {
             l1.id,
             FailureClass::WorkerTimeout,
             T0 + Duration::seconds(1),
-            &test_clock(),
             &mut floor_rng(),
         )
         .await
@@ -1126,7 +1208,6 @@ async fn fail_terminal_returns_conflict_when_ticket_no_longer_leased() {
             l2.id,
             FailureClass::WorkerTimeout,
             now2 + Duration::seconds(1),
-            &test_clock(),
             &mut floor_rng(),
         )
         .await
@@ -1153,7 +1234,6 @@ async fn fail_terminal_returns_conflict_when_ticket_no_longer_leased() {
             l3.id,
             FailureClass::WorkerTimeout,
             now3 + Duration::seconds(2),
-            &test_clock(),
             &mut floor_rng(),
         )
         .await
@@ -1317,5 +1397,195 @@ async fn expire_due_caps_at_lease_batch_limit_and_drains_remainder() {
     assert!(
         third.expired_leases.is_empty(),
         "no candidates remain after the drain"
+    );
+}
+
+#[tokio::test]
+async fn held_lease_probe_only_matches_the_requested_ticket() {
+    let (pool, _trepo, _wrepo, lrepo, ticket_id, worker_id, _tmp) = setup().await;
+    let lease = lrepo
+        .acquire(NewLease {
+            ticket_id,
+            worker_id,
+            ttl: Duration::seconds(60),
+            now: T0,
+        })
+        .await
+        .unwrap();
+    let mut tx = pool.begin().await.unwrap();
+
+    assert!(
+        lrepo
+            .has_held_for_ticket_in_tx(&mut tx, ticket_id)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !lrepo
+            .has_held_for_ticket_in_tx(&mut tx, TicketId(ticket_id.0 + 1))
+            .await
+            .unwrap()
+    );
+    lrepo
+        .release_in_tx(&mut tx, lease.id, json!({}), T0 + Duration::seconds(1))
+        .await
+        .unwrap();
+    assert!(
+        !lrepo
+            .has_held_for_ticket_in_tx(&mut tx, ticket_id)
+            .await
+            .unwrap()
+    );
+    tx.rollback().await.unwrap();
+}
+
+#[tokio::test]
+async fn active_count_for_node_counts_only_held_leases_for_that_node() {
+    let (pool, _trepo, _wrepo, lrepo, ticket_id, worker_id, _tmp) = setup().await;
+    let nodes = SqliteNodeRepo::new(pool.clone());
+    let mut tx = pool.begin().await.unwrap();
+    let node = nodes
+        .register_in_tx(
+            &mut tx,
+            NewNode {
+                name: "lease-node".to_owned(),
+                kind: NodeKind::Synthetic,
+                registered_at: T0,
+                heartbeat_ttl_seconds: 60,
+                auth_token_hash: "voom-node-token-sha256-v1:lease-node".to_owned(),
+                auth_token_hint: "lease-node".to_owned(),
+                metadata: json!({}),
+            },
+        )
+        .await
+        .unwrap();
+    sqlx::query("UPDATE workers SET node_id = ? WHERE id = ?")
+        .bind(i64::try_from(node.id.0).unwrap())
+        .bind(i64::try_from(worker_id.0).unwrap())
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    let lease = lrepo
+        .acquire_in_tx(
+            &mut tx,
+            NewLease {
+                ticket_id,
+                worker_id,
+                ttl: Duration::seconds(60),
+                now: T0,
+            },
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        lrepo
+            .active_count_for_node_in_tx(&mut tx, node.id)
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        lrepo
+            .active_count_for_node_in_tx(&mut tx, NodeId(node.id.0 + 1))
+            .await
+            .unwrap(),
+        0
+    );
+    lrepo
+        .release_in_tx(&mut tx, lease.id, json!({}), T0 + Duration::seconds(1))
+        .await
+        .unwrap();
+    assert_eq!(
+        lrepo
+            .active_count_for_node_in_tx(&mut tx, node.id)
+            .await
+            .unwrap(),
+        0
+    );
+    tx.rollback().await.unwrap();
+}
+
+#[tokio::test]
+async fn timeline_for_job_returns_held_and_released_worker_intervals_in_order() {
+    let (pool, trepo, wrepo, lrepo, first_ticket_id, first_worker_id, _tmp) = setup().await;
+    let job = SqliteJobRepo::new(pool.clone())
+        .create(NewJob {
+            kind: "workflow".to_owned(),
+            priority: 0,
+            created_at: T0,
+        })
+        .await
+        .unwrap();
+    sqlx::query("UPDATE tickets SET job_id = ? WHERE id = ?")
+        .bind(i64::try_from(job.id.0).unwrap())
+        .bind(i64::try_from(first_ticket_id.0).unwrap())
+        .execute(&pool)
+        .await
+        .unwrap();
+    let second_ticket = trepo
+        .create(NewTicket {
+            job_id: Some(job.id),
+            kind: ticket_op("noop"),
+            priority: 0,
+            payload: json!({}),
+            max_attempts: 1,
+            created_at: T0,
+        })
+        .await
+        .unwrap();
+    trepo
+        .mark_ready_if_unblocked(second_ticket.id, T0)
+        .await
+        .unwrap();
+    let second_worker = wrepo
+        .register(NewWorker {
+            name: "w-2".to_owned(),
+            kind: WorkerKind::Synthetic,
+            registered_at: T0,
+            node_id: None,
+        })
+        .await
+        .unwrap();
+    make_worker_eligible(&wrepo, second_worker.id, ticket_op("noop")).await;
+    let first_lease = lrepo
+        .acquire(NewLease {
+            ticket_id: first_ticket_id,
+            worker_id: first_worker_id,
+            ttl: Duration::seconds(60),
+            now: T0,
+        })
+        .await
+        .unwrap();
+    lrepo
+        .release(first_lease.id, json!({}), T0 + Duration::seconds(10))
+        .await
+        .unwrap();
+    lrepo
+        .acquire(NewLease {
+            ticket_id: second_ticket.id,
+            worker_id: second_worker.id,
+            ttl: Duration::seconds(60),
+            now: T0 + Duration::seconds(5),
+        })
+        .await
+        .unwrap();
+
+    let timeline = lrepo.timeline_for_job(job.id).await.unwrap();
+
+    assert_eq!(
+        timeline,
+        vec![
+            LeaseInterval {
+                worker_id: first_worker_id,
+                acquired_at: T0,
+                released_at: Some(T0 + Duration::seconds(10)),
+            },
+            LeaseInterval {
+                worker_id: second_worker.id,
+                acquired_at: T0 + Duration::seconds(5),
+                released_at: None,
+            },
+        ]
     );
 }

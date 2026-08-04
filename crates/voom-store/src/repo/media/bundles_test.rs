@@ -3,7 +3,8 @@ use super::*;
 use time::Duration;
 
 use crate::repo::media::identity::{
-    IdentityRepo, MediaWorkKind, NewMediaVariant, NewMediaWork, SqliteIdentityRepo,
+    FileAssetRepo, MediaVariantRepo, MediaWorkKind, MediaWorkRepo, NewMediaVariant, NewMediaWork,
+    SqliteIdentityRepo,
 };
 use crate::test_support::{T0, fresh_initialized_pool_at};
 
@@ -307,13 +308,13 @@ async fn deleting_bundle_cascades_to_members() {
     // Hit the underlying pool to DELETE the bundle row; the ON DELETE
     // CASCADE on asset_bundle_members.bundle_id should drop the membership.
     sqlx::query("DELETE FROM asset_bundles WHERE id = ?")
-        .bind(i64_from_u64(bundle.id.0))
+        .bind(i64_from_u64(bundle.id.0, "asset_bundles.id").unwrap())
         .execute(&bun.pool)
         .await
         .unwrap();
     let count: (i64,) =
         sqlx::query_as("SELECT COUNT(*) FROM asset_bundle_members WHERE bundle_id = ?")
-            .bind(i64_from_u64(bundle.id.0))
+            .bind(i64_from_u64(bundle.id.0, "asset_bundles.id").unwrap())
             .fetch_one(&bun.pool)
             .await
             .unwrap();

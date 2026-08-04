@@ -15,9 +15,9 @@ use std::fs;
 use std::path::Path;
 use std::path::PathBuf;
 
+use serde_json::{Value as JsonValue, json};
 use sqlx::migrate::Migrator;
-use voom_store::test_support::sqlite_url_for;
-use voom_store::{MIGRATOR, connect_or_create};
+use voom_store::test_support::{create_uninitialized_pool, embedded_migrator, sqlite_url_for};
 use voom_test_support::TempDatabase;
 
 const EXPECTED_MIGRATION_FILES: &[&str] = &[
@@ -53,6 +53,7 @@ const EXPECTED_MIGRATION_FILES: &[&str] = &[
     "0030_videotoolbox_video_profiles.sql",
     "0031_backend_neutral_accelerator_claims.sql",
     "0032_vaapi_video_acceleration.sql",
+    "0033_remote_acquire_replay_shape.sql",
 ];
 
 fn workspace_root() -> PathBuf {
@@ -92,7 +93,7 @@ fn parse_version(name: &str) -> Option<i64> {
 fn migrator_through(version: i64) -> Migrator {
     Migrator {
         migrations: Cow::Owned(
-            MIGRATOR
+            embedded_migrator()
                 .iter()
                 .filter(|migration| migration.version <= version)
                 .cloned()
@@ -114,7 +115,10 @@ fn every_migrations_file_is_registered_in_migrator() {
         .filter_map(|name| parse_version(name))
         .collect();
 
-    let mut registered_versions: Vec<i64> = MIGRATOR.iter().map(|m| m.version).collect();
+    let mut registered_versions: Vec<i64> = embedded_migrator()
+        .iter()
+        .map(|migration| migration.version)
+        .collect();
     registered_versions.sort_unstable();
 
     assert_eq!(
@@ -129,10 +133,202 @@ fn every_migrations_file_is_registered_in_migrator() {
 }
 
 #[tokio::test]
+async fn remote_acquire_replay_shape_migration_canonicalizes_only_missing_decision_ids() {
+    let tmp = TempDatabase::new().unwrap();
+    let url = sqlite_url_for(tmp.path());
+    let pool = create_uninitialized_pool(&url).await.unwrap();
+    migrator_through(32).run(&pool).await.unwrap();
+    let (node_id, worker_id) = seed_remote_execution_owner(&pool).await;
+    let unchanged = seed_remote_acquire_replays(&pool, node_id, worker_id).await;
+
+    embedded_migrator().run(&pool).await.unwrap();
+
+    for key in ["legacy-idle", "legacy-no-candidate", "legacy-leased"] {
+        let response = remote_replay_json(&pool, key).await;
+        assert_eq!(
+            response.pointer("/data/scheduler_decision_id"),
+            Some(&json!(0)),
+            "migration must canonicalize {key}"
+        );
+    }
+    for (key, before) in unchanged {
+        let after: String = sqlx::query_scalar(
+            "SELECT response_json FROM remote_idempotency_keys WHERE idempotency_key = ?",
+        )
+        .bind(key)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(after, before, "migration must not rewrite {key}");
+    }
+}
+
+async fn seed_remote_execution_owner(pool: &sqlx::SqlitePool) -> (i64, i64) {
+    let node_id = sqlx::query(
+        "INSERT INTO nodes \
+         (name, kind, status, registered_at, last_seen_at, heartbeat_ttl_seconds, \
+          auth_token_hash, auth_token_hint, metadata) \
+         VALUES ('migration-node', 'synthetic', 'active', '1970-01-01T00:00:00Z', \
+                 '1970-01-01T00:00:00Z', 60, 'hash', 'hint', '{}')",
+    )
+    .execute(pool)
+    .await
+    .unwrap()
+    .last_insert_rowid();
+    let worker_id = sqlx::query(
+        "INSERT INTO workers (name, kind, status, node_id, registered_at, last_seen_at) \
+         VALUES ('migration-worker', 'remote', 'active', ?, \
+                 '1970-01-01T00:00:00Z', '1970-01-01T00:00:00Z')",
+    )
+    .bind(node_id)
+    .execute(pool)
+    .await
+    .unwrap()
+    .last_insert_rowid();
+    (node_id, worker_id)
+}
+
+async fn seed_remote_acquire_replays(
+    pool: &sqlx::SqlitePool,
+    node_id: i64,
+    worker_id: i64,
+) -> Vec<(&'static str, String)> {
+    let cases = remote_acquire_replay_cases(worker_id);
+    let mut unchanged = Vec::new();
+    for (key, route, response, should_change) in cases {
+        let encoded = serde_json::to_string(&response).unwrap();
+        sqlx::query(
+            "INSERT INTO remote_idempotency_keys \
+             (node_id, route_key, worker_scope_id, worker_id, idempotency_key, request_hash, \
+              response_json, status, created_at) \
+             VALUES (?, ?, ?, ?, ?, 'hash', ?, 'completed', '1970-01-01T00:00:00Z')",
+        )
+        .bind(node_id)
+        .bind(route)
+        .bind(worker_id)
+        .bind(worker_id)
+        .bind(key)
+        .bind(&encoded)
+        .execute(pool)
+        .await
+        .unwrap();
+        if !should_change {
+            unchanged.push((key, encoded));
+        }
+    }
+    unchanged
+}
+
+fn remote_acquire_replay_cases(
+    worker_id: i64,
+) -> Vec<(&'static str, &'static str, JsonValue, bool)> {
+    let acquire = "POST /v1/execution/lease/acquire";
+    vec![
+        (
+            "legacy-idle",
+            acquire,
+            replay_ok(&json!({"outcome":"idle","worker_id":worker_id})),
+            true,
+        ),
+        (
+            "legacy-no-candidate",
+            acquire,
+            replay_ok(&json!({"outcome":"no_candidate","worker_id":worker_id})),
+            true,
+        ),
+        (
+            "legacy-leased",
+            acquire,
+            replay_ok(&json!({
+                "outcome":"leased",
+                "lease_id":91,
+                "ticket_id":92,
+                "worker_id":worker_id,
+                "operation":"probe_file",
+                "dispatch_payload":{"source":"migration"},
+                "lease_ttl_seconds":60,
+                "heartbeat_after_seconds":30,
+                "artifact_access_plan":{
+                    "id":93,
+                    "input_handles":["handle:input:migration"],
+                    "output_handles":["handle:output:migration"],
+                    "selected_access_mode":"shared_mount"
+                }
+            })),
+            true,
+        ),
+        (
+            "current",
+            acquire,
+            replay_ok(&json!({
+                "outcome":"idle",
+                "worker_id":worker_id,
+                "scheduler_decision_id":42
+            })),
+            false,
+        ),
+        (
+            "explicit-null",
+            acquire,
+            replay_ok(&json!({
+                "outcome":"idle",
+                "worker_id":worker_id,
+                "scheduler_decision_id":null
+            })),
+            false,
+        ),
+        (
+            "wrong-type",
+            acquire,
+            replay_ok(&json!({
+                "outcome":"idle",
+                "worker_id":worker_id,
+                "scheduler_decision_id":"42"
+            })),
+            false,
+        ),
+        ("non-object", acquire, replay_ok(&json!("idle")), false),
+        (
+            "unknown-outcome",
+            acquire,
+            replay_ok(&json!({"outcome":"future"})),
+            false,
+        ),
+        (
+            "error",
+            acquire,
+            json!({"status":"error","code":"CONFLICT","message":"done"}),
+            false,
+        ),
+        (
+            "other-route",
+            "POST /v1/execution/node/1/heartbeat",
+            replay_ok(&json!({"outcome":"idle"})),
+            false,
+        ),
+    ]
+}
+
+fn replay_ok(data: &JsonValue) -> JsonValue {
+    json!({"status":"ok","data":data})
+}
+
+async fn remote_replay_json(pool: &sqlx::SqlitePool, key: &str) -> JsonValue {
+    let response: String = sqlx::query_scalar(
+        "SELECT response_json FROM remote_idempotency_keys WHERE idempotency_key = ?",
+    )
+    .bind(key)
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    serde_json::from_str(&response).unwrap()
+}
+
+#[tokio::test]
 async fn nvidia_profile_migration_preserves_every_existing_profile_field() {
     let tmp = TempDatabase::new().unwrap();
     let url = sqlite_url_for(tmp.path());
-    let pool = connect_or_create(&url).await.unwrap();
+    let pool = create_uninitialized_pool(&url).await.unwrap();
     migrator_through(28).run(&pool).await.unwrap();
 
     sqlx::query(
@@ -151,7 +347,7 @@ async fn nvidia_profile_migration_preserves_every_existing_profile_field() {
     .unwrap();
 
     let before = legacy_video_profile_snapshot(&pool).await;
-    MIGRATOR.run(&pool).await.unwrap();
+    embedded_migrator().run(&pool).await.unwrap();
     let after = legacy_video_profile_snapshot(&pool).await;
 
     assert_eq!(after, before);
@@ -177,7 +373,7 @@ async fn nvidia_profile_migration_preserves_every_existing_profile_field() {
 async fn vaapi_profile_migration_preserves_existing_profile_rows() {
     let tmp = TempDatabase::new().unwrap();
     let url = sqlite_url_for(tmp.path());
-    let pool = connect_or_create(&url).await.unwrap();
+    let pool = create_uninitialized_pool(&url).await.unwrap();
     migrator_through(29).run(&pool).await.unwrap();
 
     sqlx::query(
@@ -200,7 +396,7 @@ async fn vaapi_profile_migration_preserves_existing_profile_rows() {
     .unwrap();
 
     let before = accelerated_video_profile_snapshot(&pool).await;
-    MIGRATOR.run(&pool).await.unwrap();
+    embedded_migrator().run(&pool).await.unwrap();
     let after = accelerated_video_profile_snapshot(&pool).await;
 
     assert_eq!(after, before);
@@ -262,7 +458,7 @@ async fn accelerated_video_profile_snapshot(pool: &sqlx::SqlitePool) -> String {
 async fn backend_neutral_migration_tags_nvidia_capability_and_preserves_claim() {
     let tmp = TempDatabase::new().unwrap();
     let url = sqlite_url_for(tmp.path());
-    let pool = connect_or_create(&url).await.unwrap();
+    let pool = create_uninitialized_pool(&url).await.unwrap();
     migrator_through(30).run(&pool).await.unwrap();
 
     sqlx::query(
@@ -305,7 +501,7 @@ async fn backend_neutral_migration_tags_nvidia_capability_and_preserves_claim() 
     .await
     .unwrap();
 
-    MIGRATOR.run(&pool).await.unwrap();
+    embedded_migrator().run(&pool).await.unwrap();
 
     let backend: String = sqlx::query_scalar(
         "SELECT json_extract(extra, '$.accelerator.backend') \
@@ -336,7 +532,7 @@ async fn staged_artifact_commit_migration_preserves_seeded_file_version_links() 
 
     let tmp = TempDatabase::new().unwrap();
     let url = sqlite_url_for(tmp.path());
-    let pool = connect_or_create(&url).await.unwrap();
+    let pool = create_uninitialized_pool(&url).await.unwrap();
 
     migrator_through(11).run(&pool).await.unwrap();
 
@@ -398,7 +594,7 @@ async fn staged_artifact_commit_migration_preserves_seeded_file_version_links() 
     .await
     .unwrap();
 
-    MIGRATOR.run(&pool).await.unwrap();
+    embedded_migrator().run(&pool).await.unwrap();
 
     let violations: Vec<(String, i64, String, i64)> = sqlx::query_as("PRAGMA foreign_key_check")
         .fetch_all(&pool)
@@ -430,7 +626,7 @@ async fn worker_grant_max_parallel_migration_rewrites_legacy_limit() {
 
     let tmp = TempDatabase::new().unwrap();
     let url = sqlite_url_for(tmp.path());
-    let pool = connect_or_create(&url).await.unwrap();
+    let pool = create_uninitialized_pool(&url).await.unwrap();
 
     migrator_through(15).run(&pool).await.unwrap();
 
@@ -470,7 +666,7 @@ async fn worker_grant_max_parallel_migration_rewrites_legacy_limit() {
     .await
     .unwrap();
 
-    MIGRATOR.run(&pool).await.unwrap();
+    embedded_migrator().run(&pool).await.unwrap();
 
     let rows: Vec<String> =
         sqlx::query_scalar("SELECT max_parallel FROM worker_grants ORDER BY id")
@@ -497,14 +693,14 @@ async fn policy_verification_migration_preserves_workflow_progress() {
 
     let tmp = TempDatabase::new().unwrap();
     let url = sqlite_url_for(tmp.path());
-    let pool = connect_or_create(&url).await.unwrap();
+    let pool = create_uninitialized_pool(&url).await.unwrap();
 
     migrator_through(25).run(&pool).await.unwrap();
 
     let (file_version_id, job_id) = seed_legacy_workflow_progress(&pool).await;
     seed_legacy_artifact_verification(&pool, file_version_id).await;
 
-    MIGRATOR.run(&pool).await.unwrap();
+    embedded_migrator().run(&pool).await.unwrap();
 
     let summary: (String, Option<i64>) = sqlx::query_as(
         "SELECT outcome, artifact_verification_id \
@@ -550,11 +746,11 @@ async fn sliding_window_migration_backfills_legacy_progress_and_accepts_blocked(
 
     let tmp = TempDatabase::new().unwrap();
     let url = sqlite_url_for(tmp.path());
-    let pool = connect_or_create(&url).await.unwrap();
+    let pool = create_uninitialized_pool(&url).await.unwrap();
     migrator_through(27).run(&pool).await.unwrap();
     let (_file_version_id, job_id) = seed_legacy_workflow_progress(&pool).await;
 
-    MIGRATOR.run(&pool).await.unwrap();
+    embedded_migrator().run(&pool).await.unwrap();
 
     let preserved: String = sqlx::query_scalar(
         "SELECT outcome FROM workflow_file_run_history \
@@ -617,7 +813,7 @@ async fn audio_synthesis_lineage_migration_allows_sequential_versions_of_one_ass
     );
     let tmp = TempDatabase::new().unwrap();
     let url = sqlite_url_for(tmp.path());
-    let pool = connect_or_create(&url).await.unwrap();
+    let pool = create_uninitialized_pool(&url).await.unwrap();
     migrator_through(26).run(&pool).await.unwrap();
 
     let (asset_id, versions, locations, snapshots) = seed_synthesis_versions(&pool).await;
@@ -636,7 +832,7 @@ async fn audio_synthesis_lineage_migration_allows_sequential_versions_of_one_ass
     )
     .await;
 
-    MIGRATOR.run(&pool).await.unwrap();
+    embedded_migrator().run(&pool).await.unwrap();
 
     insert_synthesis_operation(
         &pool,
@@ -881,7 +1077,7 @@ async fn seed_legacy_artifact_verification(pool: &sqlx::SqlitePool, file_version
 
 #[test]
 fn migrator_versions_are_strictly_increasing() {
-    let versions: Vec<i64> = MIGRATOR.iter().map(|m| m.version).collect();
+    let versions: Vec<i64> = embedded_migrator().iter().map(|m| m.version).collect();
     let mut sorted = versions.clone();
     sorted.sort_unstable();
     assert_eq!(

@@ -9,7 +9,7 @@ use voom_events::payload::{
     NodeHeartbeatRecordedPayload, NodeMarkedStalePayload, NodeRegisteredPayload, NodeRetiredPayload,
 };
 use voom_events::{Event, SubjectType};
-use voom_store::repo::nodes::{NewNode, Node, NodeKind, NodeStatus};
+use voom_store::repo::execution::nodes::{NewNode, Node, NodeKind, NodeStatus};
 
 use crate::ControlPlane;
 use crate::node_auth::verify_node_token;
@@ -36,7 +36,7 @@ impl ControlPlane {
     /// Register a node and emit `node.registered` in the same transaction.
     ///
     /// # Errors
-    /// Propagates token generation, repository, and event-append errors.
+    /// Propagates repository and event-append errors.
     pub async fn register_node(
         &self,
         input: RegisterNodeInput,
@@ -46,7 +46,7 @@ impl ControlPlane {
                 "nodes register requires heartbeat_ttl_seconds > 0".to_owned(),
             ));
         }
-        let generated = self.generate_node_token()?;
+        let generated = self.generate_node_token();
         let now = self.clock().now();
         let mut tx = begin_tx(&self.pool).await?;
         let node = self
@@ -71,7 +71,7 @@ impl ControlPlane {
             Some(node.id.0),
             now,
             Event::NodeRegistered(NodeRegisteredPayload {
-                node_id: node.id.0,
+                node_id: node.id,
                 name: node.name.clone(),
                 kind: node.kind,
                 status: node.status,
@@ -136,7 +136,7 @@ impl ControlPlane {
             Some(node.id.0),
             now,
             Event::NodeHeartbeatRecorded(NodeHeartbeatRecordedPayload {
-                node_id: node.id.0,
+                node_id: node.id,
                 status: node.status,
                 last_seen_at: node.last_seen_at,
                 epoch: node.epoch,
@@ -161,7 +161,7 @@ impl ControlPlane {
                 Some(node.id.0),
                 now,
                 Event::NodeMarkedStale(NodeMarkedStalePayload {
-                    node_id: node.id.0,
+                    node_id: node.id,
                     marked_stale_at: now,
                     epoch: node.epoch,
                 }),
@@ -194,7 +194,7 @@ impl ControlPlane {
             Some(node.id.0),
             now,
             Event::NodeRetired(NodeRetiredPayload {
-                node_id: node.id.0,
+                node_id: node.id,
                 retired_at: now,
                 epoch: node.epoch,
             }),

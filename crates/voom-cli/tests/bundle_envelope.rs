@@ -9,8 +9,8 @@ use std::process::Command;
 use serde_json::Value;
 use time::OffsetDateTime;
 use voom_control_plane::ControlPlane;
-use voom_store::repo::bundles::{BundleMemberRole, NewAssetBundle};
-use voom_store::repo::identity::{
+use voom_store::repo::media::bundles::{BundleMemberRole, NewAssetBundle};
+use voom_store::repo::media::identity::{
     FileLocationKind, MediaWorkKind, NewFileLocation, NewFileVersion, NewMediaVariant,
     NewMediaWork, ProducedBy,
 };

@@ -4,8 +4,8 @@ use serde_json::Value;
 use time::OffsetDateTime;
 use voom_core::OperationKind;
 use voom_core::{JobId, SystemClock, TicketId, TicketOperation};
-use voom_store::repo::jobs::NewJob;
-use voom_store::repo::tickets::{NewTicket, Ticket};
+use voom_store::repo::execution::jobs::NewJob;
+use voom_store::repo::execution::tickets::{NewTicket, Ticket};
 
 use crate::ControlPlane;
 use crate::workflow::execution::timing::EffectiveTiming;
@@ -282,7 +282,10 @@ async fn expansion_promotes_existing_pending_ticket_after_restart() {
 
     assert!(created.is_empty());
     let quality = fixture.find_ticket("quality", "file-001").await.unwrap();
-    assert_eq!(quality.state, voom_store::repo::tickets::TicketState::Ready);
+    assert_eq!(
+        quality.state,
+        voom_store::repo::execution::tickets::TicketState::Ready
+    );
     fixture.assert_ticket_count(2).await;
     fixture.assert_dependency_count(1).await;
 }

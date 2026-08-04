@@ -1,4 +1,6 @@
-//! `voom` CLI entrypoint. Tests live in the sibling `voom_cli` library crate.
+//! `voom` CLI entrypoint.
+//!
+//! Binary-owned unit tests live in `main_test.rs`; end-to-end tests live in `tests/`.
 use std::process::ExitCode;
 
 use anyhow::Result;
@@ -32,7 +34,7 @@ struct HelpData {
 /// `u8::try_from(code).unwrap_or(2)` would silently clamp any future
 /// out-of-range code to 2 — hiding the real exit.
 #[repr(u8)]
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 enum Exit {
     Ok = 0,
     BadArgs = 1,
@@ -657,3 +659,7 @@ async fn dispatch_compliance(cli: &Cli, command: ComplianceCommand) -> Result<Ex
     };
     Ok(Exit::from_run_code(code))
 }
+
+#[cfg(test)]
+#[path = "main_test.rs"]
+mod tests;

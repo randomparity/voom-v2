@@ -3,25 +3,148 @@ use std::collections::BTreeMap;
 use serde_json::{Value, json};
 use time::{Duration, OffsetDateTime};
 use voom_core::{FileLocationId, FileVersionId, MediaSnapshotId, TicketOperation, WorkerKind};
-use voom_store::repo::artifacts::{
-    ArtifactVerificationStatus, NewArtifactCommitRecord, NewArtifactHandle, NewArtifactLocation,
-    NewArtifactVerification, NewSidecarArtifactCommit,
+use voom_store::repo::execution::jobs::NewJob;
+use voom_store::repo::execution::leases::NewLease;
+use voom_store::repo::execution::tickets::NewTicket;
+use voom_store::repo::execution::workers::{NewCapability, NewGrant};
+use voom_store::repo::execution::workflow_progress::{FileAdmissionTier, NewFileProgress};
+use voom_store::repo::execution::workflow_summaries::{FilePhaseOutcome, NewFileRunStart};
+use voom_store::repo::media::artifacts::{
+    ArtifactHandleAccessMode, ArtifactLocationKind, ArtifactVerificationStatus,
+    NewArtifactCommitRecord, NewArtifactHandle, NewArtifactLocation, NewArtifactVerification,
+    NewSidecarArtifactCommit,
 };
-use voom_store::repo::identity::{
-    DiscoveredFile, FileLocationKind, IdentityRepo, IngestOutcome, NewFileLocation, NewFileVersion,
-    ProducedBy,
+use voom_store::repo::media::identity::{
+    DiscoveredFile, FileLocationKind, FileLocationRepo, FileVersionRepo, IngestOutcome,
+    MediaSnapshotRepo, NewFileLocation, NewFileVersion, ProducedBy,
 };
-use voom_store::repo::jobs::NewJob;
-use voom_store::repo::leases::NewLease;
-use voom_store::repo::tickets::NewTicket;
-use voom_store::repo::workers::{NewCapability, NewGrant, NewWorker};
-use voom_store::repo::workflow_summaries::{FilePhaseOutcome, NewFileProgress, NewFileRunStart};
 
 use super::*;
 use crate::workflow::coordinator::{Disposition, PhaseFile};
 
 const T0: OffsetDateTime = OffsetDateTime::UNIX_EPOCH;
 const NODE_ID: &str = "normalize";
+
+fn committed_result_value() -> Value {
+    json!({
+        "job_id": 1,
+        "ticket_id": 2,
+        "lease_id": 3,
+        "source_file_version_id": 4,
+        "staged_artifact_handle_id": 5,
+        "verification_id": 6,
+        "commit_record_id": 7,
+        "result_file_version_id": 8,
+        "result_file_location_id": 9,
+        "result_media_snapshot_id": 10,
+        "worker_metadata": {"ignored": true},
+    })
+}
+
+fn committed_result_decode_error(field: &str, invalid: Value) -> VoomError {
+    let mut value = committed_result_value();
+    value[field] = invalid;
+    match CommittedResultFields::decode(voom_core::TicketId(2), &value) {
+        Err(error) => error,
+        Ok(_) => panic!("invalid committed result field `{field}` decoded successfully"),
+    }
+}
+
+fn assert_positive_integer_database_error(error: &VoomError, field: &str) {
+    assert!(matches!(error, VoomError::Database { .. }));
+    assert!(
+        error
+            .to_string()
+            .contains(&format!("field `{field}` must be a positive integer")),
+        "{error}"
+    );
+}
+
+#[test]
+fn committed_result_decode_preserves_domain_id_types() {
+    let result = CommittedResultFields::decode(voom_core::TicketId(2), &committed_result_value())
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(result.job_id, voom_core::JobId(1));
+    assert_eq!(result.ticket_id, voom_core::TicketId(2));
+    assert_eq!(result.lease_id, voom_core::LeaseId(3));
+    assert_eq!(result.source_file_version_id, FileVersionId(4));
+    assert_eq!(result.artifact_handle_id, voom_core::ArtifactHandleId(5));
+    assert_eq!(
+        result.verification_id,
+        voom_core::ids::ArtifactVerificationId(6)
+    );
+    assert_eq!(
+        result.commit_record_id,
+        voom_core::ids::ArtifactCommitRecordId(7)
+    );
+    assert_eq!(result.result_file_version_id, FileVersionId(8));
+    assert_eq!(result.result_file_location_id, FileLocationId(9));
+    assert_eq!(result.result_media_snapshot_id, Some(MediaSnapshotId(10)));
+}
+
+#[test]
+fn committed_result_decode_ignores_markerless_results() {
+    let result = CommittedResultFields::decode(
+        voom_core::TicketId(2),
+        &json!({"job_id": null, "ticket_id": -1}),
+    )
+    .unwrap();
+
+    assert!(result.is_none());
+}
+
+#[test]
+fn committed_result_decode_rejects_zero_required_id_as_database_error() {
+    let error = committed_result_decode_error("lease_id", json!(0));
+    assert_positive_integer_database_error(&error, "lease_id");
+}
+
+#[test]
+fn committed_result_decode_rejects_negative_required_id_as_database_error() {
+    let error = committed_result_decode_error("lease_id", json!(-1));
+    assert_positive_integer_database_error(&error, "lease_id");
+}
+
+#[test]
+fn committed_result_decode_rejects_null_required_id_as_database_error() {
+    let error = committed_result_decode_error("lease_id", Value::Null);
+    assert_positive_integer_database_error(&error, "lease_id");
+}
+
+#[test]
+fn committed_result_decode_rejects_zero_optional_id_as_database_error() {
+    let error = committed_result_decode_error("result_media_snapshot_id", json!(0));
+    assert_positive_integer_database_error(&error, "result_media_snapshot_id");
+}
+
+#[test]
+fn committed_result_decode_rejects_negative_optional_id_as_database_error() {
+    let error = committed_result_decode_error("result_media_snapshot_id", json!(-1));
+    assert_positive_integer_database_error(&error, "result_media_snapshot_id");
+}
+
+#[test]
+fn committed_result_decode_rejects_null_optional_id_as_database_error() {
+    let error = committed_result_decode_error("result_media_snapshot_id", Value::Null);
+    assert_positive_integer_database_error(&error, "result_media_snapshot_id");
+}
+
+#[test]
+fn committed_result_decode_reports_job_before_later_invalid_fields() {
+    let mut value = committed_result_value();
+    value["job_id"] = Value::Null;
+    value["ticket_id"] = Value::Null;
+    value["result_media_snapshot_id"] = Value::Null;
+
+    let Err(error) = CommittedResultFields::decode(voom_core::TicketId(2), &value) else {
+        panic!("multi-invalid committed result decoded successfully");
+    };
+
+    assert_positive_integer_database_error(&error, "job_id");
+    assert!(!error.to_string().contains("field `ticket_id`"));
+}
 
 #[tokio::test]
 async fn finalization_attributes_exact_job_commit_when_unrelated_tip_is_newer() {
@@ -228,6 +351,41 @@ async fn ordered_sidecar_outputs_require_and_return_each_commit_location() {
 }
 
 #[tokio::test]
+async fn ordered_sidecar_outputs_accept_missing_snapshots() {
+    let (cp, _tmp) = crate::cases::cp().await;
+    let fixture = seed_ordered_sidecar_ticket(&cp).await;
+    let result: String = sqlx::query_scalar("SELECT result FROM tickets WHERE id = ?")
+        .bind(i64::try_from(fixture.ticket_id.0).unwrap())
+        .fetch_one(&cp.pool)
+        .await
+        .unwrap();
+    let mut result: Value = serde_json::from_str(&result).unwrap();
+    result
+        .as_object_mut()
+        .unwrap()
+        .remove("result_media_snapshot_id");
+    for output in result["outputs"].as_array_mut().unwrap() {
+        output
+            .as_object_mut()
+            .unwrap()
+            .remove("result_media_snapshot_id");
+    }
+    sqlx::query("UPDATE tickets SET result = ? WHERE id = ?")
+        .bind(serde_json::to_string(&result).unwrap())
+        .bind(i64::try_from(fixture.ticket_id.0).unwrap())
+        .execute(&cp.pool)
+        .await
+        .unwrap();
+
+    let validated = cp
+        .validated_committed_location_ids_for_rows(&fixture.rows)
+        .await
+        .unwrap();
+
+    assert_eq!(validated, fixture.locations);
+}
+
+#[tokio::test]
 async fn ordered_sidecar_output_rejects_foreign_snapshot() {
     let (cp, _tmp) = crate::cases::cp().await;
     let fixture = seed_ordered_sidecar_ticket(&cp).await;
@@ -254,9 +412,54 @@ async fn ordered_sidecar_output_rejects_foreign_snapshot() {
     assert!(error.to_string().contains("snapshot version"));
 }
 
+#[tokio::test]
+async fn finalization_rejects_snapshotless_same_lineage_commit() {
+    let (cp, _tmp) = crate::cases::cp().await;
+    let source = seed_version(&cp, "/library/snapshotless.mkv", "source").await;
+    let mut files = vec![phase_file(&cp, source, "snapshotless").await];
+    let job = open_policy_job(&cp).await;
+    activate_file_progress(&cp, job.id, &files[0]).await;
+    let evidence = seed_committed_ticket_evidence(&cp, job.id, source, "snapshotless").await;
+    let result: String = sqlx::query_scalar("SELECT result FROM tickets WHERE id = ?")
+        .bind(i64::try_from(evidence.ticket_id.0).unwrap())
+        .fetch_one(&cp.pool)
+        .await
+        .unwrap();
+    let mut result: Value = serde_json::from_str(&result).unwrap();
+    result
+        .as_object_mut()
+        .unwrap()
+        .remove("result_media_snapshot_id");
+    sqlx::query("UPDATE tickets SET result = ? WHERE id = ?")
+        .bind(serde_json::to_string(&result).unwrap())
+        .bind(i64::try_from(evidence.ticket_id.0).unwrap())
+        .execute(&cp.pool)
+        .await
+        .unwrap();
+
+    let error = cp
+        .finalize_phase(
+            job.id,
+            0,
+            &mut files,
+            &[Disposition::Planned {
+                node_ids: vec![NODE_ID.to_owned()],
+            }],
+        )
+        .await
+        .unwrap_err();
+
+    assert!(matches!(error, VoomError::Conflict(_)));
+    assert!(
+        error
+            .to_string()
+            .contains("same-lineage result reprobe snapshot is missing")
+    );
+}
+
 struct OrderedSidecarFixture {
     ticket_id: voom_core::TicketId,
-    rows: [voom_store::repo::workflow_summaries::FilePhaseSummary; 1],
+    rows: [voom_store::repo::execution::workflow_summaries::FilePhaseSummary; 1],
     locations: Vec<FileLocationId>,
 }
 
@@ -336,20 +539,22 @@ async fn seed_ordered_sidecar_ticket(cp: &crate::ControlPlane) -> OrderedSidecar
     .unwrap();
     OrderedSidecarFixture {
         ticket_id: ticket.id,
-        rows: [voom_store::repo::workflow_summaries::FilePhaseSummary {
-            id: 1,
-            job_id: job.id,
-            phase_ordinal: 0,
-            branch_id: "ordered-sidecars".to_owned(),
-            ticket_ids: vec![ticket.id],
-            produced_file_version_id: None,
-            produced_file_location_id: None,
-            artifact_handle_id: None,
-            artifact_verification_id: None,
-            reprobe_snapshot_id: None,
-            outcome: FilePhaseOutcome::Skipped,
-            created_at: T0,
-        }],
+        rows: [
+            voom_store::repo::execution::workflow_summaries::FilePhaseSummary {
+                id: 1,
+                job_id: job.id,
+                phase_ordinal: 0,
+                branch_id: "ordered-sidecars".to_owned(),
+                ticket_ids: vec![ticket.id],
+                produced_file_version_id: None,
+                produced_file_location_id: None,
+                artifact_handle_id: None,
+                artifact_verification_id: None,
+                reprobe_snapshot_id: None,
+                outcome: FilePhaseOutcome::Skipped,
+                created_at: T0,
+            },
+        ],
         locations,
     }
 }
@@ -551,7 +756,7 @@ async fn failed_phase_reports_only_exact_job_commit_evidence() {
         .unwrap();
     assert_eq!(durable, file_phases);
     assert_eq!(
-        cp.workflow_summaries
+        cp.workflow_progress
             .file_progress(job.id, "produced")
             .await
             .unwrap()
@@ -584,8 +789,8 @@ fn phase_summary(
     job_id: voom_core::JobId,
     phase_ordinal: u32,
     evidence: &CommittedEvidence,
-) -> voom_store::repo::workflow_summaries::FilePhaseSummary {
-    voom_store::repo::workflow_summaries::FilePhaseSummary {
+) -> voom_store::repo::execution::workflow_summaries::FilePhaseSummary {
+    voom_store::repo::execution::workflow_summaries::FilePhaseSummary {
         id: u64::from(phase_ordinal) + 1,
         job_id,
         phase_ordinal,
@@ -627,7 +832,7 @@ async fn repoint_location(
     crate::cases::commit_tx(tx).await.unwrap();
 }
 
-async fn open_policy_job(cp: &crate::ControlPlane) -> voom_store::repo::jobs::Job {
+async fn open_policy_job(cp: &crate::ControlPlane) -> voom_store::repo::execution::jobs::Job {
     cp.open_job(NewJob {
         kind: "policy_phase_barrier".to_owned(),
         priority: 0,
@@ -653,21 +858,21 @@ async fn activate_file_progress(
         )
         .await
         .unwrap();
-    cp.workflow_summaries
+    cp.workflow_progress
         .insert_file_window(
             job_id,
             1,
             vec![NewFileProgress {
                 branch_id: file.branch_id.clone(),
                 input_ordinal: file.ordinal,
-                admission_tier: voom_store::repo::workflow_summaries::FileAdmissionTier::Pending,
+                admission_tier: FileAdmissionTier::Pending,
                 next_phase_ordinal: 0,
             }],
             T0,
         )
         .await
         .unwrap();
-    cp.workflow_summaries
+    cp.workflow_progress
         .admit_next_file(job_id, T0)
         .await
         .unwrap()
@@ -886,7 +1091,7 @@ async fn create_verified_staging(
             checksum: Some("job-produced".to_owned()),
             privacy_class: "internal".to_owned(),
             durability_class: "staging".to_owned(),
-            allowed_access_modes: vec!["local_path".to_owned()],
+            allowed_access_modes: vec![ArtifactHandleAccessMode::LocalPath],
             mutability: "immutable".to_owned(),
             source_lineage: Some(json!({"kind": "test"})),
             file_version_id: Some(source_version_id),
@@ -897,7 +1102,7 @@ async fn create_verified_staging(
     let location = cp
         .record_artifact_location(NewArtifactLocation {
             artifact_handle_id: handle.id,
-            kind: "staging".to_owned(),
+            kind: ArtifactLocationKind::Staging,
             value: format!("/staging/{}.mkv", handle.id.0),
             observed_at: T0,
         })
@@ -942,7 +1147,7 @@ async fn create_pending_commit(
     cp: &crate::ControlPlane,
     source_version_id: FileVersionId,
     staged: &VerifiedStaging,
-) -> voom_store::repo::artifacts::ArtifactCommitRecord {
+) -> voom_store::repo::media::artifacts::ArtifactCommitRecord {
     let mut tx = crate::cases::begin_tx(&cp.pool).await.unwrap();
     let record = cp
         .artifacts()
@@ -981,17 +1186,15 @@ async fn mark_commit_committed(
 async fn eligible_worker(
     cp: &crate::ControlPlane,
     operation: &TicketOperation,
-) -> voom_store::repo::workers::Worker {
+) -> voom_store::repo::execution::workers::Worker {
     let ordinal: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM workers")
         .fetch_one(&cp.pool)
         .await
         .unwrap();
     let worker = cp
-        .register_worker(NewWorker {
+        .register_worker(crate::cases::workers::RegisterWorkerInput {
             name: format!("lineage-worker-{ordinal}"),
             kind: WorkerKind::Synthetic,
-            registered_at: T0,
-            node_id: None,
         })
         .await
         .unwrap();
@@ -1100,7 +1303,7 @@ async fn phase_file(
         snapshot: latest_snapshot(cp, version_id).await,
         branch_id: branch_id.to_owned(),
         ordinal: 1,
-        admission_tier: voom_store::repo::workflow_summaries::FileAdmissionTier::Pending,
+        admission_tier: FileAdmissionTier::Pending,
         resume_ordinal: 0,
         phase_history: BTreeMap::new(),
     }

@@ -47,6 +47,62 @@ async fn register_with_duplicate_name_fails() {
 }
 
 #[tokio::test]
+async fn register_builtin_if_missing_inserts_and_returns_the_worker() {
+    let (pool, _tmp) = pool().await;
+    let repo = SqliteWorkerRepo::new(pool.clone());
+    let input = NewWorker {
+        name: "builtin.verify_artifact".to_owned(),
+        kind: WorkerKind::Local,
+        registered_at: T0,
+        node_id: None,
+    };
+    let mut tx = pool.begin().await.unwrap();
+
+    let worker = repo
+        .register_builtin_if_missing_in_tx(&mut tx, input)
+        .await
+        .unwrap();
+
+    assert_eq!(worker.name, "builtin.verify_artifact");
+    assert_eq!(worker.kind, WorkerKind::Local);
+    assert_eq!(worker.status, WorkerStatus::Registered);
+    assert_eq!(worker.registered_at, T0);
+    tx.rollback().await.unwrap();
+}
+
+#[tokio::test]
+async fn register_builtin_if_missing_returns_existing_identity_without_mutation() {
+    let (pool, _tmp) = pool().await;
+    let repo = SqliteWorkerRepo::new(pool.clone());
+    let existing = repo
+        .register(sample_new_worker("builtin.worker"))
+        .await
+        .unwrap();
+    let mut tx = pool.begin().await.unwrap();
+
+    let returned = repo
+        .register_builtin_if_missing_in_tx(
+            &mut tx,
+            NewWorker {
+                name: existing.name.clone(),
+                kind: WorkerKind::Local,
+                registered_at: T0 + time::Duration::hours(1),
+                node_id: Some(voom_core::NodeId(42)),
+            },
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(returned.id, existing.id);
+    assert_eq!(returned.name, existing.name);
+    assert_eq!(returned.kind, existing.kind);
+    assert_eq!(returned.registered_at, existing.registered_at);
+    assert_eq!(returned.node_id, existing.node_id);
+    assert_eq!(returned.epoch, existing.epoch);
+    tx.rollback().await.unwrap();
+}
+
+#[tokio::test]
 async fn get_by_name_returns_seeded_worker() {
     let (pool, _tmp) = pool().await;
     let repo = SqliteWorkerRepo::new(pool.clone());
@@ -134,6 +190,107 @@ async fn record_grant_stores_max_parallel_as_json_object() {
         .await
         .unwrap();
     assert!(g.id > 0);
+}
+
+#[tokio::test]
+async fn runtime_capabilities_for_operations_projects_live_workers_epoch_operation_and_extra() {
+    let (pool, _tmp) = pool().await;
+    let repo = SqliteWorkerRepo::new(pool.clone());
+    let registered = repo
+        .register(sample_new_worker("registered"))
+        .await
+        .unwrap();
+    let active = repo.register(sample_new_worker("active")).await.unwrap();
+    let stale = repo.register(sample_new_worker("stale")).await.unwrap();
+    let retired = repo.register(sample_new_worker("retired")).await.unwrap();
+    let operation = worker_op("transcode_video");
+    let extra = serde_json::json!({"endpoint": "127.0.0.1:8080", "secret": "token"});
+
+    for worker_id in [registered.id, active.id, stale.id, retired.id] {
+        repo.record_capability(NewCapability {
+            worker_id,
+            operation: operation.clone(),
+            codecs: Vec::new(),
+            hardware: Vec::new(),
+            artifact_access: Vec::new(),
+            extra: extra.clone(),
+        })
+        .await
+        .unwrap();
+    }
+    sqlx::query("UPDATE workers SET status = 'active', epoch = 4 WHERE id = ?")
+        .bind(i64::try_from(active.id.0).unwrap())
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE workers SET status = 'stale' WHERE id = ?")
+        .bind(i64::try_from(stale.id.0).unwrap())
+        .execute(&pool)
+        .await
+        .unwrap();
+    repo.retire(retired.id, retired.epoch, T0).await.unwrap();
+
+    let capabilities = repo
+        .runtime_capabilities_for_operations(std::slice::from_ref(&operation))
+        .await
+        .unwrap();
+
+    assert_eq!(capabilities.len(), 2);
+    assert_eq!(capabilities[0].worker_id, registered.id);
+    assert_eq!(capabilities[0].worker_epoch, registered.epoch);
+    assert_eq!(capabilities[0].operation, operation);
+    assert_eq!(capabilities[0].extra, extra);
+    assert_eq!(capabilities[1].worker_id, active.id);
+    assert_eq!(capabilities[1].worker_epoch, 4);
+}
+
+#[tokio::test]
+async fn runtime_capabilities_for_operations_returns_empty_without_operations() {
+    let (pool, _tmp) = pool().await;
+    let repo = SqliteWorkerRepo::new(pool);
+
+    let capabilities = repo.runtime_capabilities_for_operations(&[]).await.unwrap();
+
+    assert!(capabilities.is_empty());
+}
+
+#[tokio::test]
+async fn runtime_capabilities_for_operations_rejects_negative_worker_epoch() {
+    let (pool, _tmp) = pool().await;
+    let repo = SqliteWorkerRepo::new(pool.clone());
+    let worker = repo
+        .register(sample_new_worker("negative-epoch"))
+        .await
+        .unwrap();
+    let operation = worker_op("transcode_video");
+    repo.record_capability(NewCapability {
+        worker_id: worker.id,
+        operation: operation.clone(),
+        codecs: Vec::new(),
+        hardware: Vec::new(),
+        artifact_access: Vec::new(),
+        extra: serde_json::json!({}),
+    })
+    .await
+    .unwrap();
+    sqlx::query("UPDATE workers SET epoch = -1 WHERE id = ?")
+        .bind(i64::try_from(worker.id.0).unwrap())
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let error = repo
+        .runtime_capabilities_for_operations(std::slice::from_ref(&operation))
+        .await
+        .unwrap_err();
+
+    let VoomError::Database { message, .. } = error else {
+        panic!("expected a database error naming the corrupt epoch, got {error:?}");
+    };
+    assert!(
+        message.contains("runtime worker capability worker epoch was negative: -1"),
+        "expected the error to name the corrupt epoch, got {message:?}"
+    );
 }
 
 #[tokio::test]
@@ -414,6 +571,100 @@ async fn worker_operation_eligibility_rejects_stale_and_retired_lifecycle_states
 }
 
 #[tokio::test]
+async fn candidate_operations_unite_this_workers_rows_and_exclude_denials() {
+    let fixture = worker_fixture().await;
+    fixture.insert_capability("capability_only", &[]).await;
+    fixture.insert_capability("probe_media", &[]).await;
+    fixture.insert_capability("transcode_video", &[]).await;
+    fixture
+        .insert_grant(&["grant_only", "transcode_video"], &["probe_media"])
+        .await;
+    let other = fixture
+        .repo
+        .register(sample_new_worker("other-worker"))
+        .await
+        .unwrap();
+    fixture
+        .repo
+        .record_capability(NewCapability {
+            worker_id: other.id,
+            operation: worker_op("other_worker_operation"),
+            codecs: Vec::new(),
+            hardware: Vec::new(),
+            artifact_access: Vec::new(),
+            extra: serde_json::json!({}),
+        })
+        .await
+        .unwrap();
+    let mut tx = fixture.repo.pool.begin().await.unwrap();
+
+    let operations = fixture
+        .repo
+        .candidate_operations_in_tx(&mut tx, fixture.worker_id)
+        .await
+        .unwrap();
+    tx.rollback().await.unwrap();
+
+    assert_eq!(
+        operations,
+        vec![
+            worker_op("capability_only"),
+            worker_op("grant_only"),
+            worker_op("transcode_video"),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn require_live_accepts_registered_and_active_but_distinguishes_rejections() {
+    let fixture = worker_fixture().await;
+    let mut tx = fixture.repo.pool.begin().await.unwrap();
+    let registered = fixture
+        .repo
+        .require_live_in_tx(&mut tx, fixture.worker_id)
+        .await
+        .unwrap();
+    assert_eq!(registered.status, WorkerStatus::Registered);
+    tx.rollback().await.unwrap();
+
+    fixture.set_status("active").await;
+    let mut tx = fixture.repo.pool.begin().await.unwrap();
+    let active = fixture
+        .repo
+        .require_live_in_tx(&mut tx, fixture.worker_id)
+        .await
+        .unwrap();
+    assert_eq!(active.status, WorkerStatus::Active);
+    tx.rollback().await.unwrap();
+
+    fixture.set_status("stale").await;
+    let mut tx = fixture.repo.pool.begin().await.unwrap();
+    let stale = fixture
+        .repo
+        .require_live_in_tx(&mut tx, fixture.worker_id)
+        .await
+        .unwrap_err();
+    tx.rollback().await.unwrap();
+    assert!(matches!(stale, VoomError::Conflict(message) if message.contains("Stale")));
+
+    fixture.set_retired().await;
+    let mut tx = fixture.repo.pool.begin().await.unwrap();
+    let retired = fixture
+        .repo
+        .require_live_in_tx(&mut tx, fixture.worker_id)
+        .await
+        .unwrap_err();
+    let missing = fixture
+        .repo
+        .require_live_in_tx(&mut tx, voom_core::WorkerId(99_999))
+        .await
+        .unwrap_err();
+    tx.rollback().await.unwrap();
+    assert!(matches!(retired, VoomError::Conflict(message) if message.contains("Retired")));
+    assert!(matches!(missing, VoomError::NotFound(_)));
+}
+
+#[tokio::test]
 async fn operation_candidates_returns_each_effective_worker_once() {
     let fixture = worker_fixture().await;
     fixture
@@ -440,6 +691,30 @@ async fn operation_candidates_returns_each_effective_worker_once() {
     assert_eq!(candidates[0].worker_id, fixture.worker_id);
     assert_eq!(candidates[0].active_leases, 0);
     assert_eq!(candidates[0].max_parallel, 4);
+}
+
+#[tokio::test]
+async fn operation_capacity_honors_custom_ticket_operation_limit() {
+    let fixture = worker_fixture().await;
+    let operation = worker_op("plugin.custom.noop");
+    fixture
+        .insert_grant_with_limit(
+            &[operation.as_str()],
+            &[],
+            serde_json::json!({"plugin.custom.noop": 7}),
+        )
+        .await;
+    let mut tx = fixture.repo.pool.begin().await.unwrap();
+
+    let capacity = fixture
+        .repo
+        .operation_capacity_in_tx(&mut tx, fixture.worker_id, &operation)
+        .await
+        .unwrap();
+
+    assert_eq!(capacity.active_leases, 0);
+    assert_eq!(capacity.max_parallel, 7);
+    tx.rollback().await.unwrap();
 }
 
 #[tokio::test]

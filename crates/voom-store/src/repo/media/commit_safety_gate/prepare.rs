@@ -7,11 +7,11 @@ use super::{
     AbortReason, AffectedScopeClosure, AliasResolver, BTreeSet, BypassKind, ClosureFailure,
     ClosureWarning, CommitAbortedByClosureIncompletePayload, CommitAbortedByPendingCommitPayload,
     CommitAbortedByStaleEvidencePayload, CommitAbortedByUseLeasePayload,
-    CommitForcedOverridePayload, CommitGateContext, CommitGateResult, CommitId, CommitIntent,
-    CommitIntentRecordedPayload, CommitTarget, DestructiveCommit, Event, EventEnvelope, EventRepo,
-    EvidenceDrift, EvidenceId, EvidenceRevalidationResult, ForcePathToken, IdentityRepo,
-    LeaseScope, OffsetDateTime, SqlitePool, SubjectType, UseLeaseId, VoomError, begin_gate_tx,
-    bypass_kind_str, consult_pending_commit_lock_in_tx, iso8601, u64_from_i64,
+    CommitForcedOverridePayload, CommitGateContext, CommitGateIdentityRepo, CommitGateResult,
+    CommitId, CommitIntent, CommitIntentRecordedPayload, CommitTarget, DestructiveCommit, Event,
+    EventEnvelope, EventRepo, EvidenceDrift, EvidenceId, EvidenceRevalidationResult,
+    ForcePathToken, LeaseScope, OffsetDateTime, SqlitePool, SubjectType, UseLeaseId, VoomError,
+    begin_gate_tx, bypass_kind_str, consult_pending_commit_lock_in_tx, iso8601, u64_from_i64,
 };
 
 // ============================================================================
@@ -170,7 +170,10 @@ async fn phase_a_gate_abort_with_event(
     .execute(&mut *tx1)
     .await
     .map_err(|e| VoomError::database_context("commit_intents abort insert", e))?;
-    let commit_id = CommitId(u64_from_i64(insert.last_insert_rowid()));
+    let commit_id = CommitId(u64_from_i64(
+        insert.last_insert_rowid(),
+        concat!(module_path!(), ": ", stringify!(insert.last_insert_rowid())),
+    )?);
     tx1.commit()
         .await
         .map_err(|e| VoomError::database_context("phase A abort tx1 commit", e))?;
@@ -284,7 +287,7 @@ pub(super) fn commit_target_kind_str(t: &CommitTarget) -> &'static str {
 ///
 /// `alias_resolver` covers **external** (non-DB) alias sources only.
 /// DB-internal alias enumeration goes through
-/// `IdentityRepo::list_live_file_locations_by_version_in_tx` on the
+/// `FileLocationRepo::list_live_file_locations_by_version_in_tx` on the
 /// gate's tx handle, preserving the gate snapshot and avoiding nested
 /// connection waits.
 ///
@@ -448,7 +451,7 @@ struct GateWalkAbort {
 /// with the DB-internal closure.
 async fn run_phase_a_gate_in_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-    identity_repo: &dyn IdentityRepo,
+    identity_repo: &dyn CommitGateIdentityRepo,
     alias_resolver: &dyn AliasResolver,
     target: &CommitTarget,
     accepted_evidence_ids: &[EvidenceId],
@@ -588,7 +591,10 @@ async fn insert_pending_intent(
     .execute(&mut **tx)
     .await
     .map_err(|e| VoomError::database_context("commit_intents pending insert", e))?;
-    Ok(CommitId(u64_from_i64(res.last_insert_rowid())))
+    Ok(CommitId(u64_from_i64(
+        res.last_insert_rowid(),
+        concat!(module_path!(), ": ", stringify!(res.last_insert_rowid())),
+    )?))
 }
 
 /// Emit `commit.forced_override` once at prepare time, atomically

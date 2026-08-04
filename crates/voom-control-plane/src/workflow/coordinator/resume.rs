@@ -8,11 +8,14 @@
 use std::collections::BTreeMap;
 
 use voom_core::{FileVersionId, JobId, TicketId, VoomError};
-use voom_store::repo::identity::{FileLocationKind, IdentityRepo};
-use voom_store::repo::workflow_summaries::{
-    FileAdmissionTier, FilePhaseOutcome, FilePhaseSummary, FileProgress, FileProgressState,
-    FileRunHistory, FileRunStart, NewFileProgress, NewFileRunHistory, NewFileRunStart,
+use voom_store::repo::execution::workflow_progress::{
+    FileAdmissionTier, FileProgress, FileProgressState, NewFileProgress,
 };
+use voom_store::repo::execution::workflow_summaries::{
+    FilePhaseOutcome, FilePhaseSummary, FileRunHistory, FileRunStart, NewFileRunHistory,
+    NewFileRunStart,
+};
+use voom_store::repo::media::identity::{FileLocationKind, FileLocationRepo, FileVersionRepo};
 
 use crate::ControlPlane;
 use crate::workflow::coordinator::PhaseFile;
@@ -122,14 +125,14 @@ impl ControlPlane {
             .file_run_history_for_job(prior_job_id)
             .await?;
         let window = self
-            .workflow_summaries
+            .workflow_progress
             .file_window(prior_job_id)
             .await?
             .ok_or_else(|| {
                 resume_incomplete(format!("missing file window for job {prior_job_id}"))
             })?;
         let progress = self
-            .workflow_summaries
+            .workflow_progress
             .file_progress_for_job(prior_job_id)
             .await?;
         validate_branch_sets(&files, &starts, &rows, &inherited, &progress)?;

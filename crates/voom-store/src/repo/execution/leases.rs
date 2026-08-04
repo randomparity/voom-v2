@@ -4,7 +4,9 @@ use rand::RngCore;
 use serde_json::Value as JsonValue;
 use sqlx::{Acquire, Row, SqlitePool};
 use time::{Duration, OffsetDateTime};
-use voom_core::{Clock, FailureClass, LeaseId, TicketId, TicketOperation, VoomError, WorkerId};
+use voom_core::{
+    FailureClass, JobId, LeaseId, NodeId, TicketId, TicketOperation, VoomError, WorkerId,
+};
 
 use super::Repository;
 use super::common::{
@@ -34,7 +36,7 @@ impl LeaseState {
         }
     }
 
-    fn parse(s: &str) -> Result<Self, VoomError> {
+    pub(crate) fn parse(s: &str) -> Result<Self, VoomError> {
         match s {
             "held" => Ok(Self::Held),
             "released" => Ok(Self::Released),
@@ -109,6 +111,20 @@ pub struct Lease {
     pub release_reason: Option<ReleaseReason>,
     pub released_at: Option<OffsetDateTime>,
     pub epoch: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LeaseInterval {
+    pub worker_id: WorkerId,
+    pub acquired_at: OffsetDateTime,
+    pub released_at: Option<OffsetDateTime>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LeaseDispatchContext {
+    pub worker_id: WorkerId,
+    pub worker_epoch: u64,
+    pub expires_at: OffsetDateTime,
 }
 
 /// Durable operation-capacity observation that rejected a lease acquisition.
@@ -228,8 +244,11 @@ impl SqliteLeaseRepo {
     ///
     /// # Errors
     ///
-    /// Returns configuration, database, ticket-state, or worker-eligibility
-    /// errors encountered before a lease can be committed.
+    /// Returns [`VoomError::Config`] for a non-positive TTL,
+    /// [`VoomError::NotFound`] when the ticket or worker is missing,
+    /// [`VoomError::Conflict`] when ticket state or worker eligibility rejects
+    /// acquisition, [`VoomError::Database`] for storage failures, and
+    /// [`VoomError::Internal`] when required state cannot be encoded or re-read.
     pub async fn try_acquire_in_tx(
         &self,
         tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
@@ -273,6 +292,12 @@ impl SqliteLeaseRepo {
         }
     }
 
+    /// Acquire a lease, mapping capacity saturation to `NoEligibleWorker`.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors documented by [`Self::try_acquire_in_tx`], and
+    /// [`VoomError::NoEligibleWorker`] when the worker is at capacity.
     pub async fn acquire_in_tx(
         &self,
         tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
@@ -305,7 +330,10 @@ impl SqliteLeaseRepo {
                    ))",
         )
         .bind(&now_str)
-        .bind(i64_from_u64(input.ticket_id.0))
+        .bind(i64_from_u64(
+            input.ticket_id.0,
+            concat!(module_path!(), ": ", stringify!(input.ticket_id.0)),
+        )?)
         .bind(&now_str)
         .execute(&mut **tx)
         .await
@@ -344,8 +372,14 @@ impl SqliteLeaseRepo {
               last_heartbeat_at, ttl_seconds) \
              VALUES (?, ?, 'held', ?, ?, ?, ?)",
         )
-        .bind(i64_from_u64(input.ticket_id.0))
-        .bind(i64_from_u64(input.worker_id.0))
+        .bind(i64_from_u64(
+            input.ticket_id.0,
+            concat!(module_path!(), ": ", stringify!(input.ticket_id.0)),
+        )?)
+        .bind(i64_from_u64(
+            input.worker_id.0,
+            concat!(module_path!(), ": ", stringify!(input.worker_id.0)),
+        )?)
         .bind(&now_str)
         .bind(&expires_str)
         .bind(&now_str)
@@ -353,12 +387,24 @@ impl SqliteLeaseRepo {
         .execute(&mut **tx)
         .await
         .map_err(|e| VoomError::database_context("leases insert", e))?;
-        let lease = get_lease_in_tx(tx, LeaseId(u64_from_i64(res2.last_insert_rowid())))
-            .await?
-            .ok_or_else(|| VoomError::Internal("acquire: post-insert get vanished".to_owned()))?;
+        let lease = get_lease_in_tx(
+            tx,
+            LeaseId(u64_from_i64(
+                res2.last_insert_rowid(),
+                concat!(module_path!(), ": ", stringify!(res2.last_insert_rowid())),
+            )?),
+        )
+        .await?
+        .ok_or_else(|| VoomError::Internal("acquire: post-insert get vanished".to_owned()))?;
         Ok(LeaseAcquireOutcome::Acquired(lease))
     }
 
+    /// Acquire and commit a lease.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors documented by [`Self::acquire_in_tx`], or
+    /// [`VoomError::Database`] if the transaction cannot begin or commit.
     pub async fn acquire(&self, input: NewLease) -> Result<Lease, VoomError> {
         let mut tx = self
             .pool
@@ -372,6 +418,14 @@ impl SqliteLeaseRepo {
         Ok(out)
     }
 
+    /// Extend a held lease without shortening its existing deadline.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VoomError::Conflict`] when the lease is missing or not held,
+    /// [`VoomError::Database`] for query or row-decoding failures, and
+    /// [`VoomError::Internal`] if timestamps cannot be encoded or the updated
+    /// row cannot be re-read.
     pub async fn heartbeat_in_tx(
         &self,
         tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
@@ -395,7 +449,10 @@ impl SqliteLeaseRepo {
         )
         .bind(&now_str)
         .bind(&expires_str)
-        .bind(i64_from_u64(lease_id.0))
+        .bind(i64_from_u64(
+            lease_id.0,
+            concat!(module_path!(), ": ", stringify!(lease_id.0)),
+        )?)
         .execute(&mut **tx)
         .await
         .map_err(|e| VoomError::database_context("leases heartbeat", e))?;
@@ -409,6 +466,12 @@ impl SqliteLeaseRepo {
             .ok_or_else(|| VoomError::Internal("heartbeat: post-update get vanished".to_owned()))
     }
 
+    /// Extend and commit a held lease heartbeat.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors documented by [`Self::heartbeat_in_tx`], or
+    /// [`VoomError::Database`] if the transaction cannot begin or commit.
     pub async fn heartbeat(
         &self,
         lease_id: LeaseId,
@@ -434,6 +497,13 @@ impl SqliteLeaseRepo {
     /// the lease was already absent or in a non-`held` state — both
     /// outcomes surface as `VoomError::Conflict`. Callers that need to
     /// distinguish "missing" from "wrong state" should `get` first.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VoomError::Conflict`] when the lease or ticket is not in its
+    /// expected state, [`VoomError::Database`] for storage or row-decoding
+    /// failures, and [`VoomError::Internal`] if the result or timestamp cannot
+    /// be encoded.
     pub async fn release_in_tx(
         &self,
         tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
@@ -451,15 +521,15 @@ impl SqliteLeaseRepo {
         ))
         .bind(ReleaseReason::Released.as_str())
         .bind(&now_str)
-        .bind(i64_from_u64(lease_id.0))
+        .bind(i64_from_u64(
+            lease_id.0,
+            concat!(module_path!(), ": ", stringify!(lease_id.0)),
+        )?)
         .fetch_optional(&mut **tx)
         .await
         .map_err(|e| VoomError::database_context("leases release", e))?;
         let Some(lease) = lease_row.as_ref().map(row_to_lease).transpose()? else {
-            tracing::warn!(
-                lease_id = i64_from_u64(lease_id.0),
-                "release rejected: lease not held"
-            );
+            tracing::warn!(lease_id = lease_id.0, "release rejected: lease not held");
             return Err(VoomError::Conflict(format!(
                 "release rejected: lease {lease_id} not held or not found"
             )));
@@ -471,14 +541,17 @@ impl SqliteLeaseRepo {
         )
         .bind(result_json)
         .bind(&now_str)
-        .bind(i64_from_u64(lease.ticket_id.0))
+        .bind(i64_from_u64(
+            lease.ticket_id.0,
+            concat!(module_path!(), ": ", stringify!(lease.ticket_id.0)),
+        )?)
         .execute(&mut **tx)
         .await
         .map_err(|e| VoomError::database_context("tickets release", e))?;
         if ticket_res.rows_affected() != 1 {
             tracing::warn!(
-                lease_id = i64_from_u64(lease_id.0),
-                ticket_id = i64_from_u64(lease.ticket_id.0),
+                lease_id = lease_id.0,
+                ticket_id = lease.ticket_id.0,
                 "release aborting: ticket no longer leased"
             );
             return Err(VoomError::Conflict(format!(
@@ -489,6 +562,12 @@ impl SqliteLeaseRepo {
         Ok(lease)
     }
 
+    /// Release and commit a held lease as succeeded.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors documented by [`Self::release_in_tx`], or
+    /// [`VoomError::Database`] if the transaction cannot begin or commit.
     pub async fn release(
         &self,
         lease_id: LeaseId,
@@ -514,13 +593,18 @@ impl SqliteLeaseRepo {
     /// `state = 'held'` (replaces the previous wide `get_lease_in_tx`).
     /// On a missing lease, on a non-`held` lease, or on a lost race the
     /// caller sees `VoomError::Conflict`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VoomError::Conflict`] when lease or ticket state prevents the
+    /// transition, [`VoomError::Database`] for storage or row-decoding failures,
+    /// and [`VoomError::Internal`] if timestamps cannot be encoded.
     pub async fn fail_in_tx(
         &self,
         tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
         lease_id: LeaseId,
         class: FailureClass,
         now: OffsetDateTime,
-        clock: &dyn Clock,
         rng: &mut (dyn RngCore + Send),
     ) -> Result<Lease, VoomError> {
         // Single JOIN read: ticket attempts gated on the lease being held.
@@ -531,20 +615,23 @@ impl SqliteLeaseRepo {
              FROM tickets t JOIN leases l ON l.ticket_id = t.id \
              WHERE l.id = ? AND l.state = 'held'",
         )
-        .bind(i64_from_u64(lease_id.0))
+        .bind(i64_from_u64(
+            lease_id.0,
+            concat!(module_path!(), ": ", stringify!(lease_id.0)),
+        )?)
         .fetch_optional(&mut **tx)
         .await
         .map_err(|e| VoomError::database_context("fail probe", e))?;
         let Some((ticket_id_i, attempt, max_attempts)) = probe else {
-            tracing::warn!(
-                lease_id = i64_from_u64(lease_id.0),
-                "fail rejected: lease not held"
-            );
+            tracing::warn!(lease_id = lease_id.0, "fail rejected: lease not held");
             return Err(VoomError::Conflict(format!(
                 "fail rejected: lease {lease_id} not held or not found"
             )));
         };
-        let ticket_id = TicketId(u64_from_i64(ticket_id_i));
+        let ticket_id = TicketId(u64_from_i64(
+            ticket_id_i,
+            concat!(module_path!(), ": ", stringify!(ticket_id_i)),
+        )?);
         let attempts_remain = attempt < max_attempts;
         let retriable = class.is_retriable();
         let now_str = iso8601(now)?;
@@ -553,34 +640,13 @@ impl SqliteLeaseRepo {
         } else {
             ReleaseReason::FailedTerminal
         };
-        let lease_row = sqlx::query(&format!(
-            "UPDATE leases \
-              SET state = 'released', release_reason = ?, released_at = ?, \
-                  epoch = epoch + 1 \
-              WHERE id = ? AND state = 'held' \
-            RETURNING {LEASE_RETURNING_COLS}"
-        ))
-        .bind(release_reason.as_str())
-        .bind(&now_str)
-        .bind(i64_from_u64(lease_id.0))
-        .fetch_optional(&mut **tx)
-        .await
-        .map_err(|e| VoomError::database_context("leases release on fail", e))?;
-        let Some(lease) = lease_row.as_ref().map(row_to_lease).transpose()? else {
-            tracing::warn!(
-                lease_id = i64_from_u64(lease_id.0),
-                "fail aborting: lease no longer held"
-            );
-            return Err(VoomError::Conflict(format!(
-                "fail rejected: lease {lease_id} no longer held"
-            )));
-        };
+        let lease = release_lease_for_failure_in_tx(tx, lease_id, release_reason, &now_str).await?;
         // Transition ticket: ready (with backoff) or failed.
         if retriable && attempts_remain {
             // attempt is already incremented to reflect "this dispatch"; backoff
             // factor is the current attempt number per §7.5.
             let attempt_u32 = u32_from_i64(attempt)?;
-            let next_eligible = now + SqliteTicketRepo::default_backoff(attempt_u32, clock, rng);
+            let next_eligible = now + SqliteTicketRepo::default_backoff(attempt_u32, rng);
             let ticket_res = sqlx::query(
                 "UPDATE tickets SET state = 'ready', state_changed_at = ?, \
                  next_eligible_at = ?, epoch = epoch + 1 \
@@ -594,7 +660,7 @@ impl SqliteLeaseRepo {
             .map_err(|e| VoomError::database_context("tickets requeue", e))?;
             if ticket_res.rows_affected() != 1 {
                 tracing::warn!(
-                    lease_id = i64_from_u64(lease_id.0),
+                    lease_id = lease_id.0,
                     ticket_id = ticket_id_i,
                     "fail aborting: ticket no longer leased on requeue"
                 );
@@ -614,7 +680,7 @@ impl SqliteLeaseRepo {
             .map_err(|e| VoomError::database_context("tickets fail terminal", e))?;
             if ticket_res.rows_affected() != 1 {
                 tracing::warn!(
-                    lease_id = i64_from_u64(lease_id.0),
+                    lease_id = lease_id.0,
                     ticket_id = ticket_id_i,
                     "fail aborting: ticket no longer leased on terminal fail"
                 );
@@ -626,12 +692,17 @@ impl SqliteLeaseRepo {
         Ok(lease)
     }
 
+    /// Fail and commit a held lease, requeuing it when retries remain.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors documented by [`Self::fail_in_tx`], or
+    /// [`VoomError::Database`] if the transaction cannot begin or commit.
     pub async fn fail(
         &self,
         lease_id: LeaseId,
         class: FailureClass,
         now: OffsetDateTime,
-        clock: &dyn Clock,
         rng: &mut (dyn RngCore + Send),
     ) -> Result<Lease, VoomError> {
         let mut tx = self
@@ -639,15 +710,20 @@ impl SqliteLeaseRepo {
             .begin()
             .await
             .map_err(|e| VoomError::database_context("begin", e))?;
-        let out = self
-            .fail_in_tx(&mut tx, lease_id, class, now, clock, rng)
-            .await?;
+        let out = self.fail_in_tx(&mut tx, lease_id, class, now, rng).await?;
         tx.commit()
             .await
             .map_err(|e| VoomError::database_context("commit", e))?;
         Ok(out)
     }
 
+    /// Expire one bounded batch of overdue leases in the caller's transaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VoomError::Conflict`] when a lease or ticket changes during
+    /// expiry, [`VoomError::Database`] for storage or row-decoding failures, and
+    /// [`VoomError::Internal`] if the timestamp cannot be encoded.
     pub async fn expire_due_in_tx(
         &self,
         tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
@@ -687,6 +763,12 @@ impl SqliteLeaseRepo {
         Ok(report)
     }
 
+    /// Expire and commit one bounded batch of overdue leases.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors documented by [`Self::expire_due_in_tx`], or
+    /// [`VoomError::Database`] if the transaction cannot begin or commit.
     pub async fn expire_due(&self, now: OffsetDateTime) -> Result<ExpireReport, VoomError> {
         let mut tx = self
             .pool
@@ -700,6 +782,14 @@ impl SqliteLeaseRepo {
         Ok(out)
     }
 
+    /// Force-release a held lease and either requeue or fail its ticket.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VoomError::Conflict`] when the lease or ticket is not in its
+    /// expected state, or when requeue was requested after retry exhaustion;
+    /// returns [`VoomError::Database`] for storage or row-decoding failures and
+    /// [`VoomError::Internal`] if the timestamp cannot be encoded.
     pub async fn force_release_in_tx(
         &self,
         tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
@@ -715,20 +805,26 @@ impl SqliteLeaseRepo {
              FROM tickets t JOIN leases l ON l.ticket_id = t.id \
              WHERE l.id = ? AND l.state = 'held'",
         )
-        .bind(i64_from_u64(lease_id.0))
+        .bind(i64_from_u64(
+            lease_id.0,
+            concat!(module_path!(), ": ", stringify!(lease_id.0)),
+        )?)
         .fetch_optional(&mut **tx)
         .await
         .map_err(|e| VoomError::database_context("force_release probe", e))?;
         let Some((ticket_id_i, attempt, max_attempts)) = probe else {
             tracing::warn!(
-                lease_id = i64_from_u64(lease_id.0),
+                lease_id = lease_id.0,
                 "force_release rejected: lease not held"
             );
             return Err(VoomError::Conflict(format!(
                 "force_release rejected: lease {lease_id} not held or not found"
             )));
         };
-        let ticket_id = TicketId(u64_from_i64(ticket_id_i));
+        let ticket_id = TicketId(u64_from_i64(
+            ticket_id_i,
+            concat!(module_path!(), ": ", stringify!(ticket_id_i)),
+        )?);
         // Operator asked for requeue but the ticket is already out of
         // attempts: refuse the call entirely. Promoting back to `ready`
         // would strand the ticket — `acquire` refuses it (out of
@@ -744,28 +840,7 @@ impl SqliteLeaseRepo {
         }
         let ticket_requeued = also_requeue;
         let now_str = iso8601(now)?;
-        let lease_row = sqlx::query(&format!(
-            "UPDATE leases \
-              SET state = 'force_released', release_reason = ?, \
-                  released_at = ?, epoch = epoch + 1 \
-              WHERE id = ? AND state = 'held' \
-            RETURNING {LEASE_RETURNING_COLS}"
-        ))
-        .bind(ReleaseReason::ForceReleased.as_str())
-        .bind(&now_str)
-        .bind(i64_from_u64(lease_id.0))
-        .fetch_optional(&mut **tx)
-        .await
-        .map_err(|e| VoomError::database_context("lease force_release", e))?;
-        let Some(lease) = lease_row.as_ref().map(row_to_lease).transpose()? else {
-            tracing::warn!(
-                lease_id = i64_from_u64(lease_id.0),
-                "force_release aborting: lease no longer held"
-            );
-            return Err(VoomError::Conflict(format!(
-                "force_release rejected: lease {lease_id} no longer held"
-            )));
-        };
+        let lease = force_release_lease_in_tx(tx, lease_id, &now_str).await?;
         // On requeue, set next_eligible_at = now (operator-driven, no
         // backoff). On terminal, the column is irrelevant.
         let ticket_res = if ticket_requeued {
@@ -793,7 +868,7 @@ impl SqliteLeaseRepo {
         };
         if ticket_res.rows_affected() != 1 {
             tracing::warn!(
-                lease_id = i64_from_u64(lease_id.0),
+                lease_id = lease_id.0,
                 ticket_id = ticket_id_i,
                 "force_release aborting: ticket no longer leased"
             );
@@ -809,6 +884,12 @@ impl SqliteLeaseRepo {
         })
     }
 
+    /// Force-release and commit a held lease.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors documented by [`Self::force_release_in_tx`], or
+    /// [`VoomError::Database`] if the transaction cannot begin or commit.
     pub async fn force_release(
         &self,
         lease_id: LeaseId,
@@ -829,6 +910,13 @@ impl SqliteLeaseRepo {
         Ok(out)
     }
 
+    /// Return a held lease only when it belongs to the supplied worker.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VoomError::NotFound`] when the lease does not exist,
+    /// [`VoomError::Conflict`] when another worker holds it or it is not held,
+    /// and [`VoomError::Database`] if the row cannot be queried or decoded.
     pub async fn get_held_for_worker_in_tx(
         &self,
         tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
@@ -853,6 +941,12 @@ impl SqliteLeaseRepo {
         Ok(lease)
     }
 
+    /// Return and commit a held-lease ownership check.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors documented by [`Self::get_held_for_worker_in_tx`], or
+    /// [`VoomError::Database`] if the transaction cannot begin or commit.
     pub async fn get_held_for_worker(
         &self,
         lease_id: LeaseId,
@@ -872,19 +966,147 @@ impl SqliteLeaseRepo {
         Ok(out)
     }
 
+    /// Return whether a ticket currently has a held lease.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VoomError::Database`] if the lease state cannot be queried.
+    pub async fn has_held_for_ticket_in_tx(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        ticket_id: TicketId,
+    ) -> Result<bool, VoomError> {
+        let held: Option<i64> = sqlx::query_scalar(
+            "SELECT 1 FROM leases WHERE ticket_id = ? AND state = 'held' LIMIT 1",
+        )
+        .bind(i64_from_u64(
+            ticket_id.0,
+            concat!(module_path!(), ": ", stringify!(ticket_id.0)),
+        )?)
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(|e| VoomError::database_context("held lease for ticket", e))?;
+        Ok(held.is_some())
+    }
+
+    /// Count held leases whose workers belong to one node.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VoomError::Database`] if the count cannot be queried or decoded.
+    pub async fn active_count_for_node_in_tx(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        node_id: NodeId,
+    ) -> Result<u32, VoomError> {
+        let count = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM leases \
+             JOIN workers ON workers.id = leases.worker_id \
+             WHERE leases.state = 'held' AND workers.node_id = ?",
+        )
+        .bind(i64_from_u64(
+            node_id.0,
+            concat!(module_path!(), ": ", stringify!(node_id.0)),
+        )?)
+        .fetch_one(&mut **tx)
+        .await
+        .map_err(|e| VoomError::database_context("node active lease count", e))?;
+        u32_from_i64(count)
+    }
+
+    /// Look up a lease by id.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VoomError::Database`] if the query or row decoding fails.
     pub async fn get(&self, id: LeaseId) -> Result<Option<Lease>, VoomError> {
         let row = sqlx::query(SELECT_LEASE_COLS)
-            .bind(i64_from_u64(id.0))
+            .bind(i64_from_u64(
+                id.0,
+                concat!(module_path!(), ": ", stringify!(id.0)),
+            )?)
             .fetch_optional(&self.pool)
             .await
             .map_err(|e| VoomError::database_context("leases get", e))?;
         row.as_ref().map(row_to_lease).transpose()
     }
 
+    /// Return the worker context for a currently held lease.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VoomError::Database`] if the row or timestamp cannot be decoded.
+    pub async fn dispatch_context(
+        &self,
+        lease_id: LeaseId,
+    ) -> Result<Option<LeaseDispatchContext>, VoomError> {
+        let row: Option<(i64, i64, String)> = sqlx::query_as(
+            "SELECT workers.id, workers.epoch, leases.expires_at \
+             FROM leases JOIN workers ON workers.id = leases.worker_id \
+             WHERE leases.id = ? AND leases.state = 'held'",
+        )
+        .bind(i64::try_from(lease_id.0).map_err(|error| {
+            VoomError::Config(format!("lease id exceeds SQLite integer: {error}"))
+        })?)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|error| VoomError::database_context("lease dispatch context", error))?;
+        row.map(|(worker_id, worker_epoch, expires_at)| {
+            Ok(LeaseDispatchContext {
+                worker_id: WorkerId(u64::try_from(worker_id).map_err(|error| {
+                    VoomError::database_context("lease dispatch worker id negative", error)
+                })?),
+                worker_epoch: u64::try_from(worker_epoch).map_err(|error| {
+                    VoomError::database_context("lease dispatch worker epoch negative", error)
+                })?,
+                expires_at: parse_iso8601(&expires_at)?,
+            })
+        })
+        .transpose()
+    }
+
+    /// Return every lease interval for tickets in one job in deterministic order.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VoomError::Database`] if the query or typed timestamp decoding fails.
+    pub async fn timeline_for_job(&self, job_id: JobId) -> Result<Vec<LeaseInterval>, VoomError> {
+        let rows: Vec<(i64, String, Option<String>)> = sqlx::query_as(
+            "SELECT leases.worker_id, leases.acquired_at, leases.released_at \
+             FROM leases \
+             JOIN tickets ON tickets.id = leases.ticket_id \
+             WHERE tickets.job_id = ? \
+             ORDER BY leases.acquired_at ASC, leases.worker_id ASC, leases.id ASC",
+        )
+        .bind(i64_from_u64(
+            job_id.0,
+            concat!(module_path!(), ": ", stringify!(job_id.0)),
+        )?)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| VoomError::database_context("lease timeline for job", e))?;
+        rows.into_iter()
+            .map(|(worker_id, acquired_at, released_at)| {
+                Ok(LeaseInterval {
+                    worker_id: WorkerId(u64_from_i64(
+                        worker_id,
+                        concat!(module_path!(), ": ", stringify!(worker_id)),
+                    )?),
+                    acquired_at: parse_iso8601(&acquired_at)?,
+                    released_at: released_at.as_deref().map(parse_iso8601).transpose()?,
+                })
+            })
+            .collect()
+    }
+
     /// Keyset-paginated inspection read for `voom scheduler leases list`
     /// (ADR 0031). Orders strictly by `id` descending (newest first);
     /// `after_id` is an exclusive continuation token returning rows with
     /// `id < after_id`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VoomError::Database`] if the query or row decoding fails.
     pub async fn list(
         &self,
         filter: LeaseFilter,
@@ -898,13 +1120,83 @@ impl SqliteLeaseRepo {
              ORDER BY id DESC LIMIT ?3"
         ))
         .bind(filter.state.map(LeaseState::as_str))
-        .bind(after_id.map(i64_from_u64))
+        .bind(
+            after_id
+                .map(|value| {
+                    i64_from_u64(value, concat!(module_path!(), ": ", stringify!(after_id)))
+                })
+                .transpose()?,
+        )
         .bind(i64::from(limit))
         .fetch_all(&self.pool)
         .await
         .map_err(|e| VoomError::database_context("leases list", e))?;
         rows.iter().map(row_to_lease).collect()
     }
+}
+
+async fn release_lease_for_failure_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    lease_id: LeaseId,
+    release_reason: ReleaseReason,
+    now_str: &str,
+) -> Result<Lease, VoomError> {
+    let lease_row = sqlx::query(&format!(
+        "UPDATE leases \
+          SET state = 'released', release_reason = ?, released_at = ?, \
+              epoch = epoch + 1 \
+          WHERE id = ? AND state = 'held' \
+        RETURNING {LEASE_RETURNING_COLS}"
+    ))
+    .bind(release_reason.as_str())
+    .bind(now_str)
+    .bind(i64_from_u64(
+        lease_id.0,
+        concat!(module_path!(), ": ", stringify!(lease_id.0)),
+    )?)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(|e| VoomError::database_context("leases release on fail", e))?;
+    let Some(lease) = lease_row.as_ref().map(row_to_lease).transpose()? else {
+        tracing::warn!(lease_id = lease_id.0, "fail aborting: lease no longer held");
+        return Err(VoomError::Conflict(format!(
+            "fail rejected: lease {lease_id} no longer held"
+        )));
+    };
+    Ok(lease)
+}
+
+async fn force_release_lease_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    lease_id: LeaseId,
+    now_str: &str,
+) -> Result<Lease, VoomError> {
+    let lease_row = sqlx::query(&format!(
+        "UPDATE leases \
+          SET state = 'force_released', release_reason = ?, \
+              released_at = ?, epoch = epoch + 1 \
+          WHERE id = ? AND state = 'held' \
+        RETURNING {LEASE_RETURNING_COLS}"
+    ))
+    .bind(ReleaseReason::ForceReleased.as_str())
+    .bind(now_str)
+    .bind(i64_from_u64(
+        lease_id.0,
+        concat!(module_path!(), ": ", stringify!(lease_id.0)),
+    )?)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(|e| VoomError::database_context("lease force_release", e))?;
+    let Some(lease) = lease_row.as_ref().map(row_to_lease).transpose()? else {
+        tracing::warn!(
+            lease_id = lease_id.0,
+            "force_release aborting: lease no longer held"
+        );
+        return Err(VoomError::Conflict(format!(
+            "force_release rejected: lease {lease_id} no longer held"
+        )));
+    };
+    Ok(lease)
 }
 
 const SELECT_LEASE_COLS: &str = "SELECT id, ticket_id, worker_id, state, acquired_at, expires_at, \
@@ -919,7 +1211,7 @@ const LEASE_RETURNING_COLS: &str = "id, ticket_id, worker_id, state, acquired_at
 
 fn extract_ticket_id_i(row: &sqlx::sqlite::SqliteRow) -> Result<i64, VoomError> {
     row.try_get("ticket_id")
-        .map_err(|e| map_row_err("leases", &e))
+        .map_err(|e| map_row_err("leases", e))
 }
 
 /// Chunk size for the `IN (?, …, ?)` clause built by
@@ -972,13 +1264,13 @@ where
             .await
             .map_err(|e| VoomError::database_context("ticket attempts batch", e))?;
         for row in &rows {
-            let id: i64 = row.try_get("id").map_err(|e| map_row_err("tickets", &e))?;
+            let id: i64 = row.try_get("id").map_err(|e| map_row_err("tickets", e))?;
             let attempt: i64 = row
                 .try_get("attempt")
-                .map_err(|e| map_row_err("tickets", &e))?;
+                .map_err(|e| map_row_err("tickets", e))?;
             let max_attempts: i64 = row
                 .try_get("max_attempts")
-                .map_err(|e| map_row_err("tickets", &e))?;
+                .map_err(|e| map_row_err("tickets", e))?;
             out.insert(id, (attempt, max_attempts));
         }
     }
@@ -997,12 +1289,7 @@ async fn process_expired_lease(
     now_str: &str,
     report: &mut ExpireReport,
 ) -> Result<(), VoomError> {
-    let lease_id_i: i64 = row.try_get("id").map_err(|e| map_row_err("leases", &e))?;
-    let ticket_id_i: i64 = row
-        .try_get("ticket_id")
-        .map_err(|e| map_row_err("leases", &e))?;
-    let lease_id = LeaseId(u64_from_i64(lease_id_i));
-    let ticket_id = TicketId(u64_from_i64(ticket_id_i));
+    let (lease_id_i, ticket_id_i, lease_id, ticket_id) = decode_expired_lease_row(row)?;
     let lease_res = sqlx::query(
         "UPDATE leases SET state = 'expired', release_reason = ?, \
          released_at = ?, epoch = epoch + 1 \
@@ -1086,6 +1373,18 @@ async fn process_expired_lease(
     Ok(())
 }
 
+fn decode_expired_lease_row(
+    row: &sqlx::sqlite::SqliteRow,
+) -> Result<(i64, i64, LeaseId, TicketId), VoomError> {
+    let lease_id_raw = row.try_get("id").map_err(|e| map_row_err("leases", e))?;
+    let ticket_id_raw = row
+        .try_get("ticket_id")
+        .map_err(|e| map_row_err("leases", e))?;
+    let lease_id = LeaseId(u64_from_i64(lease_id_raw, "leases.id")?);
+    let ticket_id = TicketId(u64_from_i64(ticket_id_raw, "leases.ticket_id")?);
+    Ok((lease_id_raw, ticket_id_raw, lease_id, ticket_id))
+}
+
 fn require_operation_eligibility(
     worker_id: WorkerId,
     operation: &TicketOperation,
@@ -1133,7 +1432,10 @@ async fn get_lease_in_tx(
     id: LeaseId,
 ) -> Result<Option<Lease>, VoomError> {
     let row = sqlx::query(SELECT_LEASE_COLS)
-        .bind(i64_from_u64(id.0))
+        .bind(i64_from_u64(
+            id.0,
+            concat!(module_path!(), ": ", stringify!(id.0)),
+        )?)
         .fetch_optional(&mut **tx)
         .await
         .map_err(|e| VoomError::database_context("leases get_in_tx", e))?;
@@ -1141,41 +1443,46 @@ async fn get_lease_in_tx(
 }
 
 fn row_to_lease(row: &sqlx::sqlite::SqliteRow) -> Result<Lease, VoomError> {
-    let id: i64 = row.try_get("id").map_err(|e| map_row_err("leases", &e))?;
+    let id: i64 = row.try_get("id").map_err(|e| map_row_err("leases", e))?;
     let ticket_id: i64 = row
         .try_get("ticket_id")
-        .map_err(|e| map_row_err("leases", &e))?;
+        .map_err(|e| map_row_err("leases", e))?;
     let worker_id: i64 = row
         .try_get("worker_id")
-        .map_err(|e| map_row_err("leases", &e))?;
-    let state: String = row
-        .try_get("state")
-        .map_err(|e| map_row_err("leases", &e))?;
+        .map_err(|e| map_row_err("leases", e))?;
+    let state: String = row.try_get("state").map_err(|e| map_row_err("leases", e))?;
     let acquired: String = row
         .try_get("acquired_at")
-        .map_err(|e| map_row_err("leases", &e))?;
+        .map_err(|e| map_row_err("leases", e))?;
     let expires: String = row
         .try_get("expires_at")
-        .map_err(|e| map_row_err("leases", &e))?;
+        .map_err(|e| map_row_err("leases", e))?;
     let last_hb: String = row
         .try_get("last_heartbeat_at")
-        .map_err(|e| map_row_err("leases", &e))?;
+        .map_err(|e| map_row_err("leases", e))?;
     let ttl: i64 = row
         .try_get("ttl_seconds")
-        .map_err(|e| map_row_err("leases", &e))?;
+        .map_err(|e| map_row_err("leases", e))?;
     let reason: Option<String> = row
         .try_get("release_reason")
-        .map_err(|e| map_row_err("leases", &e))?;
+        .map_err(|e| map_row_err("leases", e))?;
     let released: Option<String> = row
         .try_get("released_at")
-        .map_err(|e| map_row_err("leases", &e))?;
-    let epoch: i64 = row
-        .try_get("epoch")
-        .map_err(|e| map_row_err("leases", &e))?;
+        .map_err(|e| map_row_err("leases", e))?;
+    let epoch: i64 = row.try_get("epoch").map_err(|e| map_row_err("leases", e))?;
     Ok(Lease {
-        id: LeaseId(u64_from_i64(id)),
-        ticket_id: TicketId(u64_from_i64(ticket_id)),
-        worker_id: WorkerId(u64_from_i64(worker_id)),
+        id: LeaseId(u64_from_i64(
+            id,
+            concat!(module_path!(), ": ", stringify!(id)),
+        )?),
+        ticket_id: TicketId(u64_from_i64(
+            ticket_id,
+            concat!(module_path!(), ": ", stringify!(ticket_id)),
+        )?),
+        worker_id: WorkerId(u64_from_i64(
+            worker_id,
+            concat!(module_path!(), ": ", stringify!(worker_id)),
+        )?),
         state: LeaseState::parse(&state)?,
         acquired_at: parse_iso8601(&acquired)?,
         expires_at: parse_iso8601(&expires)?,
@@ -1183,7 +1490,7 @@ fn row_to_lease(row: &sqlx::sqlite::SqliteRow) -> Result<Lease, VoomError> {
         ttl_seconds: ttl,
         release_reason: reason.map(|s| ReleaseReason::parse(&s)).transpose()?,
         released_at: released.map(|s| parse_iso8601(&s)).transpose()?,
-        epoch: u64_from_i64(epoch),
+        epoch: u64_from_i64(epoch, concat!(module_path!(), ": ", stringify!(epoch)))?,
     })
 }
 

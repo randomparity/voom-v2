@@ -2,7 +2,7 @@ use super::*;
 
 use time::OffsetDateTime;
 use voom_core::{FileAssetId, FileLocationId, FileVersionId};
-use voom_store::repo::identity::ProducedBy;
+use voom_store::repo::media::identity::ProducedBy;
 
 const EPOCH: OffsetDateTime = OffsetDateTime::UNIX_EPOCH;
 

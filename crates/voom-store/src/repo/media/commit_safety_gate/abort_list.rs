@@ -71,9 +71,18 @@ pub async fn abort_destructive_commit(
     )
     .bind(&aborted_iso)
     .bind(reason_str)
-    .bind(i64_from_u64(new_epoch))
-    .bind(i64_from_u64(commit_id.0))
-    .bind(i64_from_u64(row.epoch))
+    .bind(i64_from_u64(
+        new_epoch,
+        concat!(module_path!(), ": ", stringify!(new_epoch)),
+    )?)
+    .bind(i64_from_u64(
+        commit_id.0,
+        concat!(module_path!(), ": ", stringify!(commit_id.0)),
+    )?)
+    .bind(i64_from_u64(
+        row.epoch,
+        concat!(module_path!(), ": ", stringify!(row.epoch)),
+    )?)
     .execute(&mut *tx)
     .await
     .map_err(|e| VoomError::database_context("abort: UPDATE", e))?;
@@ -189,101 +198,31 @@ pub async fn list_pending_commit_intents(
 fn decode_pending_commit_intent_row(
     row: &sqlx::sqlite::SqliteRow,
 ) -> Result<PendingCommitIntent, VoomError> {
-    let id_raw: i64 = row
+    let id: i64 = row
         .try_get("id")
         .map_err(|e| VoomError::database_context("list_pending_commit_intents: read id", e))?;
-    let commit_id = CommitId(u64_from_i64(id_raw));
+    let commit_id = CommitId(u64_from_i64(id, "commit_intents.id")?);
     let state_str: String = row
         .try_get("state")
         .map_err(|e| VoomError::database_context("list_pending_commit_intents: read state", e))?;
     let state = parse_in_flight_state(&state_str, commit_id)?;
-    let target_json: String = row
-        .try_get("target")
-        .map_err(|e| VoomError::database_context("list_pending_commit_intents: read target", e))?;
-    let closure_initial_json: String = row.try_get("closure_initial").map_err(|e| {
-        VoomError::database(format!(
-            "list_pending_commit_intents: read closure_initial: {e}"
-        ))
-    })?;
-    let closure_authorized_json: Option<String> =
-        row.try_get("closure_authorized").map_err(|e| {
-            VoomError::database(format!(
-                "list_pending_commit_intents: read closure_authorized: {e}"
-            ))
-        })?;
-    let accepted_evidence_ids_json: String = row.try_get("accepted_evidence_ids").map_err(|e| {
-        VoomError::database(format!(
-            "list_pending_commit_intents: read accepted_evidence_ids: {e}"
-        ))
-    })?;
-    let started_at_str: String = row.try_get("started_at").map_err(|e| {
-        VoomError::database_context("list_pending_commit_intents: read started_at", e)
-    })?;
-    let authorized_at_str: Option<String> = row.try_get("authorized_at").map_err(|e| {
-        VoomError::database(format!(
-            "list_pending_commit_intents: read authorized_at: {e}"
-        ))
-    })?;
-
-    // Migration 0005 CHECK: closure_authorized IS NOT NULL iff
-    // state = 'authorized', and authorized_at moves in lockstep with
-    // closure_authorized. Cross-validate so a corrupt row surfaces
-    // here rather than as a misleading `None` in the public shape.
-    // The two terminal-state variants are excluded by both the SQL
-    // `WHERE` clause and `parse_in_flight_state` above; this match is
-    // exhaustive against the in-flight subset.
-    let (closure_authorized, authorized_at) = match state {
-        CommitIntentState::Pending => {
-            if closure_authorized_json.is_some() || authorized_at_str.is_some() {
-                return Err(VoomError::Internal(format!(
-                    "list_pending_commit_intents: commit_intents row {commit_id} is pending but \
-                     has closure_authorized or authorized_at set; migration 0005 CHECK should \
-                     have prevented this"
-                )));
-            }
-            (None, None)
-        }
-        CommitIntentState::Authorized => {
-            let closure_json = closure_authorized_json.ok_or_else(|| {
-                VoomError::Internal(format!(
-                    "list_pending_commit_intents: commit_intents row {commit_id} is authorized \
-                     but closure_authorized is NULL; migration 0005 CHECK should have prevented this"
-                ))
-            })?;
-            let authorized_at_iso = authorized_at_str.ok_or_else(|| {
-                VoomError::Internal(format!(
-                    "list_pending_commit_intents: commit_intents row {commit_id} is authorized \
-                     but authorized_at is NULL; migration 0005 CHECK should have prevented this"
-                ))
-            })?;
-            (
-                Some(decode_closure(&closure_json)?),
-                Some(parse_iso8601(&authorized_at_iso)?),
-            )
-        }
-        CommitIntentState::Completed
-        | CommitIntentState::Aborted
-        | CommitIntentState::RecoveryRequired => {
-            // `parse_in_flight_state` only ever returns Pending /
-            // Authorized; reaching this arm means that contract was
-            // violated upstream. Treat as an invariant violation.
-            return Err(VoomError::Internal(format!(
-                "list_pending_commit_intents: commit_intents row {commit_id} surfaced terminal \
-                 state {state_str:?}; parser should have rejected it"
-            )));
-        }
-    };
-
-    let target = decode_target(&target_json)?;
-    let closure_initial = decode_closure(&closure_initial_json)?;
-    let accepted_evidence_ids: Vec<EvidenceId> = serde_json::from_str(&accepted_evidence_ids_json)
-        .map_err(|e| {
+    let columns = decode_pending_commit_intent_columns(row)?;
+    let (closure_authorized, authorized_at) = decode_in_flight_authorization(
+        state,
+        commit_id,
+        &state_str,
+        columns.closure_authorized,
+        columns.authorized_at,
+    )?;
+    let target = decode_target(&columns.target)?;
+    let closure_initial = decode_closure(&columns.closure_initial)?;
+    let accepted_evidence_ids: Vec<EvidenceId> =
+        serde_json::from_str(&columns.accepted_evidence_ids).map_err(|e| {
             VoomError::database(format!(
                 "list_pending_commit_intents: decode accepted_evidence_ids: {e}"
             ))
         })?;
-    let started_at = parse_iso8601(&started_at_str)?;
-
+    let started_at = parse_iso8601(&columns.started_at)?;
     Ok(PendingCommitIntent {
         commit_id,
         target,
@@ -294,6 +233,93 @@ fn decode_pending_commit_intent_row(
         started_at,
         authorized_at,
     })
+}
+
+struct PendingCommitIntentColumns {
+    target: String,
+    closure_initial: String,
+    closure_authorized: Option<String>,
+    accepted_evidence_ids: String,
+    started_at: String,
+    authorized_at: Option<String>,
+}
+
+fn decode_pending_commit_intent_columns(
+    row: &sqlx::sqlite::SqliteRow,
+) -> Result<PendingCommitIntentColumns, VoomError> {
+    Ok(PendingCommitIntentColumns {
+        target: row.try_get("target").map_err(|e| {
+            VoomError::database_context("list_pending_commit_intents: read target", e)
+        })?,
+        closure_initial: row.try_get("closure_initial").map_err(|e| {
+            VoomError::database(format!(
+                "list_pending_commit_intents: read closure_initial: {e}"
+            ))
+        })?,
+        closure_authorized: row.try_get("closure_authorized").map_err(|e| {
+            VoomError::database(format!(
+                "list_pending_commit_intents: read closure_authorized: {e}"
+            ))
+        })?,
+        accepted_evidence_ids: row.try_get("accepted_evidence_ids").map_err(|e| {
+            VoomError::database(format!(
+                "list_pending_commit_intents: read accepted_evidence_ids: {e}"
+            ))
+        })?,
+        started_at: row.try_get("started_at").map_err(|e| {
+            VoomError::database_context("list_pending_commit_intents: read started_at", e)
+        })?,
+        authorized_at: row.try_get("authorized_at").map_err(|e| {
+            VoomError::database(format!(
+                "list_pending_commit_intents: read authorized_at: {e}"
+            ))
+        })?,
+    })
+}
+
+fn decode_in_flight_authorization(
+    state: CommitIntentState,
+    commit_id: CommitId,
+    state_str: &str,
+    closure_authorized: Option<String>,
+    authorized_at: Option<String>,
+) -> Result<(Option<super::AffectedScopeClosure>, Option<OffsetDateTime>), VoomError> {
+    match state {
+        CommitIntentState::Pending => {
+            if closure_authorized.is_some() || authorized_at.is_some() {
+                return Err(VoomError::Internal(format!(
+                    "list_pending_commit_intents: commit_intents row {commit_id} is pending but \
+                     has closure_authorized or authorized_at set; migration 0005 CHECK should \
+                     have prevented this"
+                )));
+            }
+            Ok((None, None))
+        }
+        CommitIntentState::Authorized => {
+            let closure = closure_authorized.ok_or_else(|| {
+                VoomError::Internal(format!(
+                    "list_pending_commit_intents: commit_intents row {commit_id} is authorized \
+                     but closure_authorized is NULL; migration 0005 CHECK should have prevented this"
+                ))
+            })?;
+            let authorized_at = authorized_at.ok_or_else(|| {
+                VoomError::Internal(format!(
+                    "list_pending_commit_intents: commit_intents row {commit_id} is authorized \
+                     but authorized_at is NULL; migration 0005 CHECK should have prevented this"
+                ))
+            })?;
+            Ok((
+                Some(decode_closure(&closure)?),
+                Some(parse_iso8601(&authorized_at)?),
+            ))
+        }
+        CommitIntentState::Completed
+        | CommitIntentState::Aborted
+        | CommitIntentState::RecoveryRequired => Err(VoomError::Internal(format!(
+            "list_pending_commit_intents: commit_intents row {commit_id} surfaced terminal \
+             state {state_str:?}; parser should have rejected it"
+        ))),
+    }
 }
 
 /// Parse a `commit_intents.state` string into `CommitIntentState`,

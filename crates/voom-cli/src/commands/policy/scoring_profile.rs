@@ -3,7 +3,9 @@ use std::io;
 use serde::Serialize;
 use serde_json::Value;
 use voom_control_plane::ControlPlane;
-use voom_store::repo::quality_scoring_profiles::{NewQualityScoringProfile, QualityScoringProfile};
+use voom_store::repo::policy::quality_scoring_profiles::{
+    NewQualityScoringProfile, QualityScoringProfile,
+};
 
 use crate::cli::ScoringProfileCommand;
 use crate::commands::common::{emit_voom_error, open_control_plane};

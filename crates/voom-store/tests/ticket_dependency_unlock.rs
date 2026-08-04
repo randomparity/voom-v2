@@ -14,10 +14,10 @@ use serde_json::json;
 use time::Duration;
 
 use voom_control_plane::ControlPlane;
-use voom_core::{SystemClock, TicketOperation, VoomError};
-use voom_store::repo::leases::NewLease;
-use voom_store::repo::tickets::{NewTicket, TicketState};
-use voom_store::repo::workers::{NewWorker, WorkerKind};
+use voom_control_plane::workers::RegisterWorkerInput;
+use voom_core::{SystemClock, TicketOperation, VoomError, WorkerKind};
+use voom_store::repo::execution::leases::NewLease;
+use voom_store::repo::execution::tickets::{NewTicket, TicketState};
 use voom_store::test_support::{T0, record_worker_eligibility};
 
 async fn cp() -> (ControlPlane, voom_test_support::TempDatabase) {
@@ -40,11 +40,9 @@ async fn linear_chain_unlocks_in_order() {
     // step-0 -> step-1 -> ... -> step-9 (10 tickets in a chain)
     let (cp, _tmp) = cp().await;
     let w = cp
-        .register_worker(NewWorker {
+        .register_worker(RegisterWorkerInput {
             name: "w".to_owned(),
             kind: WorkerKind::Synthetic,
-            registered_at: T0,
-            node_id: None,
         })
         .await
         .unwrap();

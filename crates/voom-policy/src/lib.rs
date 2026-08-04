@@ -7,7 +7,7 @@
         reason = "policy tests assert deterministic fixtures directly and use unwrap/panic for concise failures"
     )
 )]
-//! Policy-domain inputs for Sprint 3.
+//! Policy syntax, fixtures, validation, and deterministic compiled domain model.
 
 pub mod compile;
 pub mod data;

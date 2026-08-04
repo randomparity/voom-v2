@@ -1,5 +1,6 @@
-//! Test-only helpers shared across the workspace. Gated behind the
-//! `test` feature so production crates cannot reach this module.
+//! Test-only helpers shared across the workspace. This module is available
+//! only when the `test` feature is enabled; production targets must not enable
+//! that feature.
 //!
 //! ### Why no centralized lint preamble
 //!
@@ -27,7 +28,8 @@ use time::OffsetDateTime;
 use voom_core::{JobId, TicketOperation, VoomError, WorkerId};
 
 use crate::init::init;
-use crate::pool::connect;
+use crate::migrator::MIGRATOR;
+use crate::pool::{connect, connect_or_create};
 use crate::repo::execution::tickets::{NewTicket, SqliteTicketRepo, Ticket};
 use crate::repo::execution::workers::{
     NewCapability, NewGrant, NewWorker, SqliteWorkerRepo, Worker, WorkerKind,
@@ -47,6 +49,17 @@ pub fn sqlite_url_for(path: &Path) -> String {
     format!("sqlite://{}", path.display())
 }
 
+/// Create a database without applying migrations so tests can seed partial or
+/// invalid schema states. Production callers must use [`crate::init()`] instead.
+///
+/// # Errors
+///
+/// Returns a `VoomError` if the database or its parent directory cannot be
+/// created.
+pub async fn create_uninitialized_pool(url: &str) -> Result<SqlitePool, VoomError> {
+    connect_or_create(url).await
+}
+
 /// Run `init` against `path` and return a connected pool. Callers own the
 /// path (typically backed by `voom_test_support::TempDatabase`) so the temporary
 /// directory's lifetime is explicit at the test site.
@@ -58,6 +71,14 @@ pub async fn fresh_initialized_pool_at(path: &Path) -> Result<SqlitePool, VoomEr
     let url = sqlite_url_for(path);
     init(&url).await?;
     connect(&url).await
+}
+
+/// Return the embedded migration registry for integration-test schema fixtures.
+///
+/// Production initialization remains owned by [`crate::init()`].
+#[must_use]
+pub fn embedded_migrator() -> &'static sqlx::migrate::Migrator {
+    &MIGRATOR
 }
 
 /// Insert a synthetic row into `_sqlx_migrations` so callers can simulate

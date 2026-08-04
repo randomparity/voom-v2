@@ -1,5 +1,9 @@
 # VOOM Sprint 9 Scheduler Scoring Implementation Plan
 
+> **Historical notice:** This is a completed historical implementation plan. Do not re-execute it
+> against current code. Worker selection now uses `select_least_loaded_worker`; `WorkerSelector`
+> no longer exists.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Build Sprint 9 scheduler scoring: deterministic scored remote acquire, durable scheduler decision logs, node concurrency limits, and CLI decision inspection.

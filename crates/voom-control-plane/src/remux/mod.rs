@@ -7,7 +7,7 @@ use voom_core::{
     ArtifactHandleId, ArtifactLocationId, FileLocationId, FileVersionId, JobId, LeaseId,
     MediaSnapshotId, TicketId, VoomError,
 };
-use voom_store::repo::artifacts::ArtifactVerificationStatus;
+use voom_store::repo::media::artifacts::ArtifactVerificationStatus;
 use voom_worker_protocol::{RemuxResult, RemuxSelection};
 
 use crate::ControlPlane;
@@ -19,13 +19,15 @@ use crate::artifact::verify::{
     verify_artifact_with_dispatcher,
 };
 
-pub mod commit;
-pub mod dispatch;
-pub mod events;
-pub mod selection;
-pub mod source;
-pub mod stage;
+pub(crate) mod commit;
+pub(crate) mod dispatch;
+pub(crate) mod events;
+pub(crate) mod selection;
+pub(crate) mod source;
+pub(crate) mod stage;
 pub(crate) mod workflow;
+
+pub use dispatch::RemuxProgressSink;
 
 #[derive(Debug, Clone)]
 pub struct ExecuteRemuxInput {
@@ -124,7 +126,7 @@ pub trait RemuxDispatcher: Send + Sync {
     async fn dispatch_remux_with_progress(
         &self,
         request: voom_worker_protocol::RemuxRequest,
-        progress: &mut dyn dispatch::RemuxProgressSink,
+        progress: &mut dyn RemuxProgressSink,
     ) -> Result<RemuxResult, VoomError>;
 }
 

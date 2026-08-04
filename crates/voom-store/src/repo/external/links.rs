@@ -68,16 +68,25 @@ impl SqliteExternalSystemRepo {
              (external_system_id, target_type, target_id, external_ref, created_at) \
              VALUES (?, ?, ?, ?, ?)",
         )
-        .bind(i64_from_u64(input.external_system_id.0))
+        .bind(i64_from_u64(
+            input.external_system_id.0,
+            concat!(module_path!(), ": ", stringify!(input.external_system_id.0)),
+        )?)
         .bind(input.target_type.as_str())
-        .bind(i64_from_u64(input.target_id))
+        .bind(i64_from_u64(
+            input.target_id,
+            concat!(module_path!(), ": ", stringify!(input.target_id)),
+        )?)
         .bind(&input.external_ref)
         .bind(&ts)
         .execute(&mut **tx)
         .await
         .map_err(|e| VoomError::database_context("external_system_links insert", e))?;
         Ok(ExternalSystemLink {
-            id: ExternalSystemLinkId(u64_from_i64(res.last_insert_rowid())),
+            id: ExternalSystemLinkId(u64_from_i64(
+                res.last_insert_rowid(),
+                concat!(module_path!(), ": ", stringify!(res.last_insert_rowid())),
+            )?),
             external_system_id: input.external_system_id,
             target_type: input.target_type,
             target_id: input.target_id,
@@ -99,7 +108,10 @@ impl SqliteExternalSystemRepo {
             "SELECT {COLS} FROM external_system_links \
              WHERE external_system_id = ? AND retired_at IS NULL ORDER BY id ASC"
         ))
-        .bind(i64_from_u64(system_id.0))
+        .bind(i64_from_u64(
+            system_id.0,
+            concat!(module_path!(), ": ", stringify!(system_id.0)),
+        )?)
         .fetch_all(&self.pool)
         .await
         .map_err(|e| VoomError::database_context("external_system_links list", e))?;
@@ -119,7 +131,10 @@ impl SqliteExternalSystemRepo {
             "SELECT {COLS} FROM external_system_links \
              WHERE external_system_id = ? AND retired_at IS NULL ORDER BY id ASC"
         ))
-        .bind(i64_from_u64(system_id.0))
+        .bind(i64_from_u64(
+            system_id.0,
+            concat!(module_path!(), ": ", stringify!(system_id.0)),
+        )?)
         .fetch_all(&mut **tx)
         .await
         .map_err(|e| VoomError::database_context("external_system_links list_in_tx", e))?;
@@ -142,7 +157,10 @@ impl SqliteExternalSystemRepo {
             "UPDATE external_system_links SET retired_at = ? WHERE id = ? AND retired_at IS NULL",
         )
         .bind(&ts)
-        .bind(i64_from_u64(id.0))
+        .bind(i64_from_u64(
+            id.0,
+            concat!(module_path!(), ": ", stringify!(id.0)),
+        )?)
         .execute(&mut **tx)
         .await
         .map_err(|e| VoomError::database_context("external_system_links retire", e))?
@@ -153,7 +171,10 @@ impl SqliteExternalSystemRepo {
         let row = sqlx::query(&format!(
             "SELECT {COLS} FROM external_system_links WHERE id = ?"
         ))
-        .bind(i64_from_u64(id.0))
+        .bind(i64_from_u64(
+            id.0,
+            concat!(module_path!(), ": ", stringify!(id.0)),
+        )?)
         .fetch_optional(&mut **tx)
         .await
         .map_err(|e| VoomError::database_context("external_system_links retire get", e))?;
@@ -176,10 +197,19 @@ fn row_to_link(row: &SqliteRow) -> Result<ExternalSystemLink, VoomError> {
     let created_at: String = row.try_get("created_at").map_err(map("created_at"))?;
     let retired_at: Option<String> = row.try_get("retired_at").map_err(map("retired_at"))?;
     Ok(ExternalSystemLink {
-        id: ExternalSystemLinkId(u64_from_i64(id)),
-        external_system_id: ExternalSystemId(u64_from_i64(system_id)),
+        id: ExternalSystemLinkId(u64_from_i64(
+            id,
+            concat!(module_path!(), ": ", stringify!(id)),
+        )?),
+        external_system_id: ExternalSystemId(u64_from_i64(
+            system_id,
+            concat!(module_path!(), ": ", stringify!(system_id)),
+        )?),
         target_type: ExternalLinkTargetType::parse(&target_type)?,
-        target_id: u64_from_i64(target_id),
+        target_id: u64_from_i64(
+            target_id,
+            concat!(module_path!(), ": ", stringify!(target_id)),
+        )?,
         external_ref: row.try_get("external_ref").map_err(map("external_ref"))?,
         created_at: parse_iso8601(&created_at)?,
         retired_at: retired_at.as_deref().map(parse_iso8601).transpose()?,

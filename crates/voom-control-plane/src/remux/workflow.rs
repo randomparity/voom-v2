@@ -82,7 +82,7 @@ pub(crate) async fn dispatch_control_plane_remux_context(
 pub(crate) async fn dispatch_control_plane_remux(
     control: &crate::ControlPlane,
     runtime: &crate::workflow::execution::runtime::WorkerRuntime,
-    ticket: &voom_store::repo::tickets::Ticket,
+    ticket: &voom_store::repo::execution::tickets::Ticket,
     _workflow_payload: &crate::workflow::plan::ticket_payload::WorkflowTicketPayload,
     lease_id: voom_core::LeaseId,
     payload: &Value,
@@ -96,6 +96,7 @@ pub(crate) async fn dispatch_control_plane_remux(
         payload,
         artifact_roots: &options.artifact_roots.remux,
         backup_root: options.artifact_roots.backup_root.as_deref(),
+        #[cfg(test)]
         chaos: &options.chaos,
     })
     .await

@@ -1,13 +1,13 @@
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
-use voom_core::{FailureClass, IssueId, TicketOperation};
+use voom_core::{FailureClass, IssueId, JobId, LeaseId, TicketId, TicketOperation, WorkerId};
 
 // --- jobs -------------------------------------------------------------------
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct JobOpenedPayload {
-    pub job_id: u64,
+    pub job_id: JobId,
     pub kind: String,
     pub priority: i64,
 }
@@ -15,20 +15,20 @@ pub struct JobOpenedPayload {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct JobSucceededPayload {
-    pub job_id: u64,
+    pub job_id: JobId,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct JobFailedPayload {
-    pub job_id: u64,
+    pub job_id: JobId,
     pub reason: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct JobCancelledPayload {
-    pub job_id: u64,
+    pub job_id: JobId,
     pub reason: String,
 }
 
@@ -37,8 +37,8 @@ pub struct JobCancelledPayload {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TicketCreatedPayload {
-    pub ticket_id: u64,
-    pub job_id: Option<u64>,
+    pub ticket_id: TicketId,
+    pub job_id: Option<JobId>,
     pub kind: TicketOperation,
     pub priority: i64,
     pub max_attempts: u32,
@@ -47,29 +47,29 @@ pub struct TicketCreatedPayload {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TicketReadyPayload {
-    pub ticket_id: u64,
+    pub ticket_id: TicketId,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TicketLeasedPayload {
-    pub ticket_id: u64,
-    pub lease_id: u64,
-    pub worker_id: u64,
+    pub ticket_id: TicketId,
+    pub lease_id: LeaseId,
+    pub worker_id: WorkerId,
     pub attempt: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TicketSucceededPayload {
-    pub ticket_id: u64,
-    pub lease_id: u64,
+    pub ticket_id: TicketId,
+    pub lease_id: LeaseId,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TicketFailedRetriablePayload {
-    pub ticket_id: u64,
+    pub ticket_id: TicketId,
     pub attempt: u32,
     pub max_attempts: u32,
     pub reason: String,
@@ -84,7 +84,7 @@ pub struct TicketFailedRetriablePayload {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TicketFailedTerminalPayload {
-    pub ticket_id: u64,
+    pub ticket_id: TicketId,
     pub attempt: u32,
     pub max_attempts: u32,
     pub reason: String,
@@ -101,8 +101,8 @@ pub struct TicketFailedTerminalPayload {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TicketRequeuedAfterLeaseExpiryPayload {
-    pub ticket_id: u64,
-    pub lease_id: u64,
+    pub ticket_id: TicketId,
+    pub lease_id: LeaseId,
 }
 
 /// Emitted alongside `lease.force_released` when the operator asked
@@ -112,8 +112,8 @@ pub struct TicketRequeuedAfterLeaseExpiryPayload {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TicketRequeuedAfterForceReleasePayload {
-    pub ticket_id: u64,
-    pub lease_id: u64,
+    pub ticket_id: TicketId,
+    pub lease_id: LeaseId,
     pub actor: String,
     pub reason: String,
 }
@@ -123,9 +123,9 @@ pub struct TicketRequeuedAfterForceReleasePayload {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LeaseAcquiredPayload {
-    pub lease_id: u64,
-    pub ticket_id: u64,
-    pub worker_id: u64,
+    pub lease_id: LeaseId,
+    pub ticket_id: TicketId,
+    pub worker_id: WorkerId,
     pub ttl_seconds: i64,
     #[serde(with = "time::serde::iso8601")]
     pub expires_at: OffsetDateTime,
@@ -134,23 +134,23 @@ pub struct LeaseAcquiredPayload {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LeaseReleasedPayload {
-    pub lease_id: u64,
-    pub ticket_id: u64,
+    pub lease_id: LeaseId,
+    pub ticket_id: TicketId,
     pub release_reason: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LeaseExpiredPayload {
-    pub lease_id: u64,
-    pub ticket_id: u64,
+    pub lease_id: LeaseId,
+    pub ticket_id: TicketId,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LeaseForceReleasedPayload {
-    pub lease_id: u64,
-    pub ticket_id: u64,
+    pub lease_id: LeaseId,
+    pub ticket_id: TicketId,
     pub actor: String,
     pub reason: String,
     pub also_requeue: bool,

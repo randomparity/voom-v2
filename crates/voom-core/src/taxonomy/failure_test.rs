@@ -189,11 +189,12 @@ fn malformed_media_is_non_retriable_and_round_trips_its_own_error_code() {
 
 #[test]
 fn serde_round_trips_wire_format() {
-    // The on-disk + on-wire shape is snake_case.
-    let s = serde_json::to_string(&FailureClass::WorkerTimeout).unwrap();
-    assert_eq!(s, "\"worker_timeout\"");
-    let back: FailureClass = serde_json::from_str(&s).unwrap();
-    assert_eq!(back, FailureClass::WorkerTimeout);
+    for &class in FailureClass::ALL {
+        let serialized = serde_json::to_value(class).unwrap();
+        assert_eq!(serialized.as_str(), Some(class.as_str()));
+        assert_eq!(FailureClass::from_wire_str(class.as_str()), Some(class));
+    }
+    assert_eq!(FailureClass::from_wire_str("unknown_failure"), None);
 }
 
 #[test]

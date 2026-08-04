@@ -10,8 +10,11 @@ use voom_core::{
     PolicySyntheticTargetId, VoomError,
 };
 use voom_policy::{
-    BundleTargetState, IssueInputState, PolicyInputSetDraft, PolicyInputSourceKind, TargetKind,
-    TargetRef, ValidatedPolicyInputSetDraft,
+    BundleTargetInput as BundleTargetDraft, BundleTargetState,
+    IdentityEvidenceInput as IdentityEvidenceDraft, IssueInput as IssueDraft, IssueInputState,
+    MediaSnapshotInput as MediaSnapshotDraft, PolicyInputSetDraft, PolicyInputSourceKind,
+    PolicySyntheticTarget as SyntheticTargetDraft, QualityProfileSelection as QualityProfileDraft,
+    TargetKind, TargetRef, ValidatedPolicyInputSetDraft,
 };
 
 use super::Repository;
@@ -165,10 +168,6 @@ impl SqlitePolicyInputRepo {
 
 impl Repository for SqlitePolicyInputRepo {}
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "transactional create mirrors the policy input schema tables in one atomic write"
-)]
 impl SqlitePolicyInputRepo {
     pub async fn create_input_set(
         &self,
@@ -195,215 +194,21 @@ impl SqlitePolicyInputRepo {
     ) -> Result<PolicyInputSet, VoomError> {
         let input = input.into_draft();
 
-        let created_at = iso8601(input.created_at)?;
-        let res = sqlx::query(
-            "INSERT INTO policy_input_sets \
-             (slug, display_name, schema_version, source_kind, created_at, description) \
-             VALUES (?, ?, ?, ?, ?, ?)",
-        )
-        .bind(&input.slug)
-        .bind(&input.display_name)
-        .bind(i64::from(input.schema_version))
-        .bind(input.source_kind.as_str())
-        .bind(&created_at)
-        .bind(&input.description)
-        .execute(&mut **tx)
-        .await
-        .map_err(|e| VoomError::database_context("policy_input_sets insert", e))?;
-        let set_id = PolicyInputSetId(u64_from_i64(res.last_insert_rowid()));
+        let set_id = insert_input_set(tx, &input).await?;
+        insert_fixture_labels(tx, set_id, &input.fixture_labels).await?;
+        let synthetic_target_ids =
+            insert_synthetic_targets(tx, set_id, &input.synthetic_targets).await?;
 
-        for label in &input.fixture_labels {
-            sqlx::query(
-                "INSERT INTO policy_input_set_fixture_labels (policy_input_set_id, label) \
-                 VALUES (?, ?)",
-            )
-            .bind(i64_from_u64(set_id.0))
-            .bind(label)
-            .execute(&mut **tx)
-            .await
-            .map_err(|e| {
-                VoomError::database_context("policy_input_set_fixture_labels insert", e)
-            })?;
-        }
+        insert_media_snapshots(tx, set_id, &input.media_snapshots, &synthetic_target_ids).await?;
 
-        let mut synthetic_target_ids = HashMap::new();
-        for target in &input.synthetic_targets {
-            let res = sqlx::query(
-                "INSERT INTO policy_input_synthetic_targets \
-                 (policy_input_set_id, synthetic_key, target_kind, display_name) \
-                 VALUES (?, ?, ?, ?)",
-            )
-            .bind(i64_from_u64(set_id.0))
-            .bind(&target.synthetic_key)
-            .bind(target.target_kind.as_str())
-            .bind(&target.display_name)
-            .execute(&mut **tx)
-            .await
-            .map_err(|e| VoomError::database_context("policy_input_synthetic_targets insert", e))?;
-            synthetic_target_ids.insert(
-                (target.synthetic_key.clone(), target.target_kind),
-                PolicySyntheticTargetId(u64_from_i64(res.last_insert_rowid())),
-            );
-        }
+        insert_identity_evidence(tx, set_id, &input.identity_evidence, &synthetic_target_ids)
+            .await?;
 
-        for snapshot in &input.media_snapshots {
-            let ids = PersistedTargetIds::from_ref(&snapshot.target, &synthetic_target_ids)?;
-            sqlx::query(
-                "INSERT INTO policy_media_snapshot_inputs \
-                 (policy_input_set_id, ordinal, media_work_id, media_variant_id, asset_bundle_id, \
-                  file_asset_id, file_version_id, file_location_id, synthetic_target_id, container, \
-                  stream_summary, video_codec, width, height, hdr, bitrate, duration_millis, \
-                  audio_languages, subtitle_languages, health_flags, existing_media_snapshot_id) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            )
-            .bind(i64_from_u64(set_id.0))
-            .bind(i64::from(snapshot.ordinal))
-            .bind(ids.media_work_id)
-            .bind(ids.media_variant_id)
-            .bind(ids.asset_bundle_id)
-            .bind(ids.file_asset_id)
-            .bind(ids.file_version_id)
-            .bind(ids.file_location_id)
-            .bind(ids.synthetic_target_id)
-            .bind(&snapshot.container)
-            .bind(serialize_json(&snapshot.stream_summary, "stream_summary")?)
-            .bind(&snapshot.video_codec)
-            .bind(snapshot.width.map(i64::from))
-            .bind(snapshot.height.map(i64::from))
-            .bind(&snapshot.hdr)
-            .bind(snapshot.bitrate.map(i64_from_u64))
-            .bind(snapshot.duration_millis.map(i64_from_u64))
-            .bind(json_string(&snapshot.audio_languages, "audio_languages")?)
-            .bind(json_string(&snapshot.subtitle_languages, "subtitle_languages")?)
-            .bind(json_string(&snapshot.health_flags, "health_flags")?)
-            .bind(snapshot.existing_media_snapshot_id.map(|id| i64_from_u64(id.0)))
-            .execute(&mut **tx)
-            .await
-            .map_err(|e| VoomError::database_context("policy_media_snapshot_inputs insert", e))?;
-        }
+        insert_bundle_targets(tx, set_id, &input.bundle_targets, &synthetic_target_ids).await?;
 
-        for evidence in &input.identity_evidence {
-            let ids = PersistedTargetIds::from_ref(&evidence.target, &synthetic_target_ids)?;
-            sqlx::query(
-                "INSERT INTO policy_identity_evidence_inputs \
-                 (policy_input_set_id, ordinal, media_work_id, media_variant_id, asset_bundle_id, \
-                  file_asset_id, file_version_id, file_location_id, synthetic_target_id, assertion_type, \
-                  provider, provider_version, confidence, provenance, observed_at, existing_evidence_id) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            )
-            .bind(i64_from_u64(set_id.0))
-            .bind(i64::from(evidence.ordinal))
-            .bind(ids.media_work_id)
-            .bind(ids.media_variant_id)
-            .bind(ids.asset_bundle_id)
-            .bind(ids.file_asset_id)
-            .bind(ids.file_version_id)
-            .bind(ids.file_location_id)
-            .bind(ids.synthetic_target_id)
-            .bind(&evidence.assertion_type)
-            .bind(&evidence.provider)
-            .bind(&evidence.provider_version)
-            .bind(evidence.confidence)
-            .bind(serialize_json(&evidence.provenance, "provenance")?)
-            .bind(iso8601(evidence.observed_at)?)
-            .bind(evidence.existing_evidence_id.map(|id| i64_from_u64(id.0)))
-            .execute(&mut **tx)
-            .await
-            .map_err(|e| VoomError::database_context("policy_identity_evidence_inputs insert", e))?;
-        }
+        insert_quality_profiles(tx, set_id, &input.quality_profiles, &synthetic_target_ids).await?;
 
-        for bundle in &input.bundle_targets {
-            let ids = PersistedTargetIds::from_ref(&bundle.target, &synthetic_target_ids)?;
-            sqlx::query(
-                "INSERT INTO policy_bundle_target_inputs \
-                 (policy_input_set_id, ordinal, media_work_id, media_variant_id, asset_bundle_id, \
-                  file_asset_id, file_version_id, file_location_id, synthetic_target_id, role, \
-                  desired_state, language, label, disposition, artifact_expectation) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            )
-            .bind(i64_from_u64(set_id.0))
-            .bind(i64::from(bundle.ordinal))
-            .bind(ids.media_work_id)
-            .bind(ids.media_variant_id)
-            .bind(ids.asset_bundle_id)
-            .bind(ids.file_asset_id)
-            .bind(ids.file_version_id)
-            .bind(ids.file_location_id)
-            .bind(ids.synthetic_target_id)
-            .bind(&bundle.role)
-            .bind(bundle.desired_state.as_str())
-            .bind(&bundle.language)
-            .bind(&bundle.label)
-            .bind(&bundle.disposition)
-            .bind(serialize_json(
-                &bundle.artifact_expectation,
-                "artifact_expectation",
-            )?)
-            .execute(&mut **tx)
-            .await
-            .map_err(|e| VoomError::database_context("policy_bundle_target_inputs insert", e))?;
-        }
-
-        for profile in &input.quality_profiles {
-            let ids = PersistedTargetIds::from_ref(&profile.target, &synthetic_target_ids)?;
-            sqlx::query(
-                "INSERT INTO policy_quality_profile_selections \
-                 (policy_input_set_id, ordinal, media_work_id, media_variant_id, asset_bundle_id, \
-                  file_asset_id, file_version_id, file_location_id, synthetic_target_id, \
-                  profile_name, profile_version, dimension_weights) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            )
-            .bind(i64_from_u64(set_id.0))
-            .bind(i64::from(profile.ordinal))
-            .bind(ids.media_work_id)
-            .bind(ids.media_variant_id)
-            .bind(ids.asset_bundle_id)
-            .bind(ids.file_asset_id)
-            .bind(ids.file_version_id)
-            .bind(ids.file_location_id)
-            .bind(ids.synthetic_target_id)
-            .bind(&profile.profile_name)
-            .bind(&profile.profile_version)
-            .bind(serialize_json(
-                &profile.dimension_weights,
-                "dimension_weights",
-            )?)
-            .execute(&mut **tx)
-            .await
-            .map_err(|e| {
-                VoomError::database_context("policy_quality_profile_selections insert", e)
-            })?;
-        }
-
-        for issue in &input.issues {
-            let ids = PersistedTargetIds::from_ref(&issue.target, &synthetic_target_ids)?;
-            sqlx::query(
-                "INSERT INTO policy_issue_inputs \
-                 (policy_input_set_id, ordinal, media_work_id, media_variant_id, asset_bundle_id, \
-                  file_asset_id, file_version_id, file_location_id, synthetic_target_id, kind, \
-                  severity, priority, state, reason, provenance, existing_issue_id) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            )
-            .bind(i64_from_u64(set_id.0))
-            .bind(i64::from(issue.ordinal))
-            .bind(ids.media_work_id)
-            .bind(ids.media_variant_id)
-            .bind(ids.asset_bundle_id)
-            .bind(ids.file_asset_id)
-            .bind(ids.file_version_id)
-            .bind(ids.file_location_id)
-            .bind(ids.synthetic_target_id)
-            .bind(&issue.kind)
-            .bind(issue.severity.as_str())
-            .bind(issue.priority.as_str())
-            .bind(issue.state.as_str())
-            .bind(&issue.reason)
-            .bind(serialize_json(&issue.provenance, "provenance")?)
-            .bind(issue.existing_issue_id.map(|id| i64_from_u64(id.0)))
-            .execute(&mut **tx)
-            .await
-            .map_err(|e| VoomError::database_context("policy_issue_inputs insert", e))?;
-        }
+        insert_issues(tx, set_id, &input.issues, &synthetic_target_ids).await?;
 
         get_input_set_in_tx(tx, set_id).await?.ok_or_else(|| {
             VoomError::Internal(format!("policy_input_sets post-insert get: {set_id}"))
@@ -483,6 +288,337 @@ impl SqlitePolicyInputRepo {
     }
 }
 
+async fn insert_input_set(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    input: &PolicyInputSetDraft,
+) -> Result<PolicyInputSetId, VoomError> {
+    let created_at = iso8601(input.created_at)?;
+    let res = sqlx::query(
+        "INSERT INTO policy_input_sets \
+         (slug, display_name, schema_version, source_kind, created_at, description) \
+         VALUES (?, ?, ?, ?, ?, ?)",
+    )
+    .bind(&input.slug)
+    .bind(&input.display_name)
+    .bind(i64::from(input.schema_version))
+    .bind(input.source_kind.as_str())
+    .bind(&created_at)
+    .bind(&input.description)
+    .execute(&mut **tx)
+    .await
+    .map_err(|e| VoomError::database_context("policy_input_sets insert", e))?;
+    Ok(PolicyInputSetId(u64_from_i64(
+        res.last_insert_rowid(),
+        concat!(module_path!(), ": ", stringify!(res.last_insert_rowid())),
+    )?))
+}
+
+async fn insert_fixture_labels(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    set_id: PolicyInputSetId,
+    labels: &[String],
+) -> Result<(), VoomError> {
+    for label in labels {
+        sqlx::query(
+            "INSERT INTO policy_input_set_fixture_labels (policy_input_set_id, label) \
+             VALUES (?, ?)",
+        )
+        .bind(i64_from_u64(
+            set_id.0,
+            concat!(module_path!(), ": ", stringify!(set_id.0)),
+        )?)
+        .bind(label)
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| VoomError::database_context("policy_input_set_fixture_labels insert", e))?;
+    }
+    Ok(())
+}
+
+async fn insert_synthetic_targets(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    set_id: PolicyInputSetId,
+    targets: &[SyntheticTargetDraft],
+) -> Result<HashMap<(String, TargetKind), PolicySyntheticTargetId>, VoomError> {
+    let mut synthetic_target_ids = HashMap::new();
+    for target in targets {
+        let res = sqlx::query(
+            "INSERT INTO policy_input_synthetic_targets \
+             (policy_input_set_id, synthetic_key, target_kind, display_name) \
+             VALUES (?, ?, ?, ?)",
+        )
+        .bind(i64_from_u64(
+            set_id.0,
+            concat!(module_path!(), ": ", stringify!(set_id.0)),
+        )?)
+        .bind(&target.synthetic_key)
+        .bind(target.target_kind.as_str())
+        .bind(&target.display_name)
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| VoomError::database_context("policy_input_synthetic_targets insert", e))?;
+        synthetic_target_ids.insert(
+            (target.synthetic_key.clone(), target.target_kind),
+            PolicySyntheticTargetId(u64_from_i64(
+                res.last_insert_rowid(),
+                concat!(module_path!(), ": ", stringify!(res.last_insert_rowid())),
+            )?),
+        );
+    }
+    Ok(synthetic_target_ids)
+}
+
+async fn insert_media_snapshots(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    set_id: PolicyInputSetId,
+    snapshots: &[MediaSnapshotDraft],
+    synthetic_target_ids: &HashMap<(String, TargetKind), PolicySyntheticTargetId>,
+) -> Result<(), VoomError> {
+    for snapshot in snapshots {
+        let ids = PersistedTargetIds::from_ref(&snapshot.target, synthetic_target_ids)?;
+        sqlx::query(
+            "INSERT INTO policy_media_snapshot_inputs \
+             (policy_input_set_id, ordinal, media_work_id, media_variant_id, asset_bundle_id, \
+              file_asset_id, file_version_id, file_location_id, synthetic_target_id, container, \
+              stream_summary, video_codec, width, height, hdr, bitrate, duration_millis, \
+              audio_languages, subtitle_languages, health_flags, existing_media_snapshot_id) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(i64_from_u64(
+            set_id.0,
+            concat!(module_path!(), ": ", stringify!(set_id.0)),
+        )?)
+        .bind(i64::from(snapshot.ordinal))
+        .bind(ids.media_work_id)
+        .bind(ids.media_variant_id)
+        .bind(ids.asset_bundle_id)
+        .bind(ids.file_asset_id)
+        .bind(ids.file_version_id)
+        .bind(ids.file_location_id)
+        .bind(ids.synthetic_target_id)
+        .bind(&snapshot.container)
+        .bind(serialize_json(&snapshot.stream_summary, "stream_summary")?)
+        .bind(&snapshot.video_codec)
+        .bind(snapshot.width.map(i64::from))
+        .bind(snapshot.height.map(i64::from))
+        .bind(&snapshot.hdr)
+        .bind(
+            snapshot
+                .bitrate
+                .map(|value| {
+                    i64_from_u64(
+                        value,
+                        concat!(module_path!(), ": ", stringify!(snapshot.bitrate)),
+                    )
+                })
+                .transpose()?,
+        )
+        .bind(
+            snapshot
+                .duration_millis
+                .map(|value| {
+                    i64_from_u64(
+                        value,
+                        concat!(module_path!(), ": ", stringify!(snapshot.duration_millis)),
+                    )
+                })
+                .transpose()?,
+        )
+        .bind(json_string(&snapshot.audio_languages, "audio_languages")?)
+        .bind(json_string(
+            &snapshot.subtitle_languages,
+            "subtitle_languages",
+        )?)
+        .bind(json_string(&snapshot.health_flags, "health_flags")?)
+        .bind(
+            snapshot
+                .existing_media_snapshot_id
+                .map(|id| i64_from_u64(id.0, concat!(module_path!(), ": ", stringify!(id.0))))
+                .transpose()?,
+        )
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| VoomError::database_context("policy_media_snapshot_inputs insert", e))?;
+    }
+    Ok(())
+}
+
+async fn insert_identity_evidence(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    set_id: PolicyInputSetId,
+    evidence_rows: &[IdentityEvidenceDraft],
+    synthetic_target_ids: &HashMap<(String, TargetKind), PolicySyntheticTargetId>,
+) -> Result<(), VoomError> {
+    for evidence in evidence_rows {
+        let ids = PersistedTargetIds::from_ref(&evidence.target, synthetic_target_ids)?;
+        sqlx::query(
+            "INSERT INTO policy_identity_evidence_inputs \
+             (policy_input_set_id, ordinal, media_work_id, media_variant_id, asset_bundle_id, \
+              file_asset_id, file_version_id, file_location_id, synthetic_target_id, \
+              assertion_type, provider, provider_version, confidence, provenance, observed_at, \
+              existing_evidence_id) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(i64_from_u64(
+            set_id.0,
+            concat!(module_path!(), ": ", stringify!(set_id.0)),
+        )?)
+        .bind(i64::from(evidence.ordinal))
+        .bind(ids.media_work_id)
+        .bind(ids.media_variant_id)
+        .bind(ids.asset_bundle_id)
+        .bind(ids.file_asset_id)
+        .bind(ids.file_version_id)
+        .bind(ids.file_location_id)
+        .bind(ids.synthetic_target_id)
+        .bind(&evidence.assertion_type)
+        .bind(&evidence.provider)
+        .bind(&evidence.provider_version)
+        .bind(evidence.confidence)
+        .bind(serialize_json(&evidence.provenance, "provenance")?)
+        .bind(iso8601(evidence.observed_at)?)
+        .bind(
+            evidence
+                .existing_evidence_id
+                .map(|id| i64_from_u64(id.0, concat!(module_path!(), ": ", stringify!(id.0))))
+                .transpose()?,
+        )
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| VoomError::database_context("policy_identity_evidence_inputs insert", e))?;
+    }
+    Ok(())
+}
+
+async fn insert_bundle_targets(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    set_id: PolicyInputSetId,
+    bundles: &[BundleTargetDraft],
+    synthetic_target_ids: &HashMap<(String, TargetKind), PolicySyntheticTargetId>,
+) -> Result<(), VoomError> {
+    for bundle in bundles {
+        let ids = PersistedTargetIds::from_ref(&bundle.target, synthetic_target_ids)?;
+        sqlx::query(
+            "INSERT INTO policy_bundle_target_inputs \
+             (policy_input_set_id, ordinal, media_work_id, media_variant_id, asset_bundle_id, \
+              file_asset_id, file_version_id, file_location_id, synthetic_target_id, role, \
+              desired_state, language, label, disposition, artifact_expectation) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(i64_from_u64(
+            set_id.0,
+            concat!(module_path!(), ": ", stringify!(set_id.0)),
+        )?)
+        .bind(i64::from(bundle.ordinal))
+        .bind(ids.media_work_id)
+        .bind(ids.media_variant_id)
+        .bind(ids.asset_bundle_id)
+        .bind(ids.file_asset_id)
+        .bind(ids.file_version_id)
+        .bind(ids.file_location_id)
+        .bind(ids.synthetic_target_id)
+        .bind(&bundle.role)
+        .bind(bundle.desired_state.as_str())
+        .bind(&bundle.language)
+        .bind(&bundle.label)
+        .bind(&bundle.disposition)
+        .bind(serialize_json(
+            &bundle.artifact_expectation,
+            "artifact_expectation",
+        )?)
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| VoomError::database_context("policy_bundle_target_inputs insert", e))?;
+    }
+    Ok(())
+}
+
+async fn insert_quality_profiles(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    set_id: PolicyInputSetId,
+    profiles: &[QualityProfileDraft],
+    synthetic_target_ids: &HashMap<(String, TargetKind), PolicySyntheticTargetId>,
+) -> Result<(), VoomError> {
+    for profile in profiles {
+        let ids = PersistedTargetIds::from_ref(&profile.target, synthetic_target_ids)?;
+        sqlx::query(
+            "INSERT INTO policy_quality_profile_selections \
+             (policy_input_set_id, ordinal, media_work_id, media_variant_id, asset_bundle_id, \
+              file_asset_id, file_version_id, file_location_id, synthetic_target_id, \
+              profile_name, profile_version, dimension_weights) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(i64_from_u64(
+            set_id.0,
+            concat!(module_path!(), ": ", stringify!(set_id.0)),
+        )?)
+        .bind(i64::from(profile.ordinal))
+        .bind(ids.media_work_id)
+        .bind(ids.media_variant_id)
+        .bind(ids.asset_bundle_id)
+        .bind(ids.file_asset_id)
+        .bind(ids.file_version_id)
+        .bind(ids.file_location_id)
+        .bind(ids.synthetic_target_id)
+        .bind(&profile.profile_name)
+        .bind(&profile.profile_version)
+        .bind(serialize_json(
+            &profile.dimension_weights,
+            "dimension_weights",
+        )?)
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| VoomError::database_context("policy_quality_profile_selections insert", e))?;
+    }
+    Ok(())
+}
+
+async fn insert_issues(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    set_id: PolicyInputSetId,
+    issues: &[IssueDraft],
+    synthetic_target_ids: &HashMap<(String, TargetKind), PolicySyntheticTargetId>,
+) -> Result<(), VoomError> {
+    for issue in issues {
+        let ids = PersistedTargetIds::from_ref(&issue.target, synthetic_target_ids)?;
+        sqlx::query(
+            "INSERT INTO policy_issue_inputs \
+             (policy_input_set_id, ordinal, media_work_id, media_variant_id, asset_bundle_id, \
+              file_asset_id, file_version_id, file_location_id, synthetic_target_id, kind, \
+              severity, priority, state, reason, provenance, existing_issue_id) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(i64_from_u64(
+            set_id.0,
+            concat!(module_path!(), ": ", stringify!(set_id.0)),
+        )?)
+        .bind(i64::from(issue.ordinal))
+        .bind(ids.media_work_id)
+        .bind(ids.media_variant_id)
+        .bind(ids.asset_bundle_id)
+        .bind(ids.file_asset_id)
+        .bind(ids.file_version_id)
+        .bind(ids.file_location_id)
+        .bind(ids.synthetic_target_id)
+        .bind(&issue.kind)
+        .bind(issue.severity.as_str())
+        .bind(issue.priority.as_str())
+        .bind(issue.state.as_str())
+        .bind(&issue.reason)
+        .bind(serialize_json(&issue.provenance, "provenance")?)
+        .bind(
+            issue
+                .existing_issue_id
+                .map(|id| i64_from_u64(id.0, concat!(module_path!(), ": ", stringify!(id.0))))
+                .transpose()?,
+        )
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| VoomError::database_context("policy_issue_inputs insert", e))?;
+    }
+    Ok(())
+}
+
 const ROOT_SELECT: &str = "SELECT id, slug, display_name, schema_version, source_kind, created_at, description, epoch \
     FROM policy_input_sets WHERE id = ?";
 const ROOT_SELECT_SLUG: &str = "SELECT id, slug, display_name, schema_version, source_kind, created_at, description, epoch \
@@ -493,7 +629,10 @@ async fn get_input_set_in_tx(
     id: PolicyInputSetId,
 ) -> Result<Option<PolicyInputSet>, VoomError> {
     let row = sqlx::query(ROOT_SELECT)
-        .bind(i64_from_u64(id.0))
+        .bind(i64_from_u64(
+            id.0,
+            concat!(module_path!(), ": ", stringify!(id.0)),
+        )?)
         .fetch_optional(&mut **tx)
         .await
         .map_err(|e| VoomError::database_context("policy_input_sets get", e))?;
@@ -508,7 +647,10 @@ async fn get_input_set_by_id_conn(
     id: PolicyInputSetId,
 ) -> Result<Option<PolicyInputSet>, VoomError> {
     let row = sqlx::query(ROOT_SELECT)
-        .bind(i64_from_u64(id.0))
+        .bind(i64_from_u64(
+            id.0,
+            concat!(module_path!(), ": ", stringify!(id.0)),
+        )?)
         .fetch_optional(&mut *conn)
         .await
         .map_err(|e| VoomError::database_context("policy_input_sets get", e))?;
@@ -562,14 +704,17 @@ async fn load_fixture_labels(
         "SELECT label FROM policy_input_set_fixture_labels \
          WHERE policy_input_set_id = ? ORDER BY label ASC",
     )
-    .bind(i64_from_u64(set_id.0))
+    .bind(i64_from_u64(
+        set_id.0,
+        concat!(module_path!(), ": ", stringify!(set_id.0)),
+    )?)
     .fetch_all(&mut *conn)
     .await
     .map_err(|e| VoomError::database_context("policy_input_set_fixture_labels list", e))?;
     rows.iter()
         .map(|row| {
             row.try_get("label")
-                .map_err(|e| map_row_err("policy_input_set_fixture_labels", &e))
+                .map_err(|e| map_row_err("policy_input_set_fixture_labels", e))
         })
         .collect()
 }
@@ -597,7 +742,10 @@ where
     );
     let mut query = sqlx::query(&sql);
     for set_id in &set_ids {
-        query = query.bind(i64_from_u64(set_id.0));
+        query = query.bind(i64_from_u64(
+            set_id.0,
+            concat!(module_path!(), ": ", stringify!(set_id.0)),
+        )?);
     }
 
     let rows = query
@@ -608,12 +756,15 @@ where
     for row in &rows {
         let set_id: i64 = row
             .try_get("policy_input_set_id")
-            .map_err(|e| map_row_err("policy_input_set_fixture_labels", &e))?;
+            .map_err(|e| map_row_err("policy_input_set_fixture_labels", e))?;
         let label = row
             .try_get("label")
-            .map_err(|e| map_row_err("policy_input_set_fixture_labels", &e))?;
+            .map_err(|e| map_row_err("policy_input_set_fixture_labels", e))?;
         labels
-            .entry(PolicyInputSetId(u64_from_i64(set_id)))
+            .entry(PolicyInputSetId(u64_from_i64(
+                set_id,
+                concat!(module_path!(), ": ", stringify!(set_id)),
+            )?))
             .or_default()
             .push(label);
     }
@@ -629,7 +780,10 @@ async fn load_synthetic_targets(
          FROM policy_input_synthetic_targets \
          WHERE policy_input_set_id = ? ORDER BY synthetic_key ASC, id ASC",
     )
-    .bind(i64_from_u64(set_id.0))
+    .bind(i64_from_u64(
+        set_id.0,
+        concat!(module_path!(), ": ", stringify!(set_id.0)),
+    )?)
     .fetch_all(&mut *conn)
     .await
     .map_err(|e| VoomError::database_context("policy_input_synthetic_targets list", e))?;
@@ -650,7 +804,7 @@ async fn load_media_snapshots(
          LEFT JOIN policy_input_synthetic_targets st ON st.id = c.synthetic_target_id \
          WHERE c.policy_input_set_id = ? ORDER BY c.ordinal ASC",
     )
-    .bind(i64_from_u64(set_id.0))
+    .bind(i64_from_u64(set_id.0, concat!(module_path!(), ": ", stringify!(set_id.0)))?)
     .fetch_all(&mut *conn)
     .await
     .map_err(|e| VoomError::database_context("policy_media_snapshot_inputs list", e))?;
@@ -670,7 +824,7 @@ async fn load_identity_evidence(
          LEFT JOIN policy_input_synthetic_targets st ON st.id = c.synthetic_target_id \
          WHERE c.policy_input_set_id = ? ORDER BY c.ordinal ASC",
     )
-    .bind(i64_from_u64(set_id.0))
+    .bind(i64_from_u64(set_id.0, concat!(module_path!(), ": ", stringify!(set_id.0)))?)
     .fetch_all(&mut *conn)
     .await
     .map_err(|e| VoomError::database_context("policy_identity_evidence_inputs list", e))?;
@@ -689,7 +843,7 @@ async fn load_bundle_targets(
          LEFT JOIN policy_input_synthetic_targets st ON st.id = c.synthetic_target_id \
          WHERE c.policy_input_set_id = ? ORDER BY c.ordinal ASC",
     )
-    .bind(i64_from_u64(set_id.0))
+    .bind(i64_from_u64(set_id.0, concat!(module_path!(), ": ", stringify!(set_id.0)))?)
     .fetch_all(&mut *conn)
     .await
     .map_err(|e| VoomError::database_context("policy_bundle_target_inputs list", e))?;
@@ -708,7 +862,7 @@ async fn load_quality_profiles(
          LEFT JOIN policy_input_synthetic_targets st ON st.id = c.synthetic_target_id \
          WHERE c.policy_input_set_id = ? ORDER BY c.ordinal ASC",
     )
-    .bind(i64_from_u64(set_id.0))
+    .bind(i64_from_u64(set_id.0, concat!(module_path!(), ": ", stringify!(set_id.0)))?)
     .fetch_all(&mut *conn)
     .await
     .map_err(|e| VoomError::database_context("policy_quality_profile_selections list", e))?;
@@ -727,7 +881,7 @@ async fn load_issues(
          LEFT JOIN policy_input_synthetic_targets st ON st.id = c.synthetic_target_id \
          WHERE c.policy_input_set_id = ? ORDER BY c.ordinal ASC",
     )
-    .bind(i64_from_u64(set_id.0))
+    .bind(i64_from_u64(set_id.0, concat!(module_path!(), ": ", stringify!(set_id.0)))?)
     .fetch_all(&mut *conn)
     .await
     .map_err(|e| VoomError::database_context("policy_issue_inputs list", e))?;
@@ -737,34 +891,37 @@ async fn load_issues(
 fn row_to_root(row: &sqlx::sqlite::SqliteRow) -> Result<RootRow, VoomError> {
     let id: i64 = row
         .try_get("id")
-        .map_err(|e| map_row_err("policy_input_sets", &e))?;
+        .map_err(|e| map_row_err("policy_input_sets", e))?;
     let schema_version: i64 = row
         .try_get("schema_version")
-        .map_err(|e| map_row_err("policy_input_sets", &e))?;
+        .map_err(|e| map_row_err("policy_input_sets", e))?;
     let source_kind: String = row
         .try_get("source_kind")
-        .map_err(|e| map_row_err("policy_input_sets", &e))?;
+        .map_err(|e| map_row_err("policy_input_sets", e))?;
     let created_at: String = row
         .try_get("created_at")
-        .map_err(|e| map_row_err("policy_input_sets", &e))?;
+        .map_err(|e| map_row_err("policy_input_sets", e))?;
     let epoch: i64 = row
         .try_get("epoch")
-        .map_err(|e| map_row_err("policy_input_sets", &e))?;
+        .map_err(|e| map_row_err("policy_input_sets", e))?;
     Ok(RootRow {
-        id: PolicyInputSetId(u64_from_i64(id)),
+        id: PolicyInputSetId(u64_from_i64(
+            id,
+            concat!(module_path!(), ": ", stringify!(id)),
+        )?),
         slug: row
             .try_get("slug")
-            .map_err(|e| map_row_err("policy_input_sets", &e))?,
+            .map_err(|e| map_row_err("policy_input_sets", e))?,
         display_name: row
             .try_get("display_name")
-            .map_err(|e| map_row_err("policy_input_sets", &e))?,
+            .map_err(|e| map_row_err("policy_input_sets", e))?,
         schema_version: u32_from_i64(schema_version)?,
         source_kind: parse_wire(&source_kind, "policy_input_sets.source_kind")?,
         created_at: parse_iso8601(&created_at)?,
         description: row
             .try_get("description")
-            .map_err(|e| map_row_err("policy_input_sets", &e))?,
-        epoch: u64_from_i64(epoch),
+            .map_err(|e| map_row_err("policy_input_sets", e))?,
+        epoch: u64_from_i64(epoch, concat!(module_path!(), ": ", stringify!(epoch)))?,
     })
 }
 
@@ -773,19 +930,22 @@ fn row_to_synthetic_target(
 ) -> Result<PolicySyntheticTarget, VoomError> {
     let id: i64 = row
         .try_get("id")
-        .map_err(|e| map_row_err("policy_input_synthetic_targets", &e))?;
+        .map_err(|e| map_row_err("policy_input_synthetic_targets", e))?;
     let target_kind: String = row
         .try_get("target_kind")
-        .map_err(|e| map_row_err("policy_input_synthetic_targets", &e))?;
+        .map_err(|e| map_row_err("policy_input_synthetic_targets", e))?;
     Ok(PolicySyntheticTarget {
-        id: PolicySyntheticTargetId(u64_from_i64(id)),
+        id: PolicySyntheticTargetId(u64_from_i64(
+            id,
+            concat!(module_path!(), ": ", stringify!(id)),
+        )?),
         synthetic_key: row
             .try_get("synthetic_key")
-            .map_err(|e| map_row_err("policy_input_synthetic_targets", &e))?,
+            .map_err(|e| map_row_err("policy_input_synthetic_targets", e))?,
         target_kind: parse_wire(&target_kind, "policy_input_synthetic_targets.target_kind")?,
         display_name: row
             .try_get("display_name")
-            .map_err(|e| map_row_err("policy_input_synthetic_targets", &e))?,
+            .map_err(|e| map_row_err("policy_input_synthetic_targets", e))?,
     })
 }
 
@@ -797,16 +957,16 @@ fn row_to_media_snapshot(
         target: target_ref_from_row(row, "policy_media_snapshot_inputs")?,
         container: row
             .try_get("container")
-            .map_err(|e| map_row_err("policy_media_snapshot_inputs", &e))?,
+            .map_err(|e| map_row_err("policy_media_snapshot_inputs", e))?,
         stream_summary: json_value(row, "stream_summary", "policy_media_snapshot_inputs")?,
         video_codec: row
             .try_get("video_codec")
-            .map_err(|e| map_row_err("policy_media_snapshot_inputs", &e))?,
+            .map_err(|e| map_row_err("policy_media_snapshot_inputs", e))?,
         width: optional_u32(row, "width", "policy_media_snapshot_inputs")?,
         height: optional_u32(row, "height", "policy_media_snapshot_inputs")?,
         hdr: row
             .try_get("hdr")
-            .map_err(|e| map_row_err("policy_media_snapshot_inputs", &e))?,
+            .map_err(|e| map_row_err("policy_media_snapshot_inputs", e))?,
         bitrate: optional_id(row, "bitrate", "policy_media_snapshot_inputs")?,
         duration_millis: optional_id(row, "duration_millis", "policy_media_snapshot_inputs")?,
         audio_languages: json_value(row, "audio_languages", "policy_media_snapshot_inputs")?,
@@ -826,22 +986,22 @@ fn row_to_identity_evidence(
 ) -> Result<PolicyIdentityEvidenceInput, VoomError> {
     let observed_at: String = row
         .try_get("observed_at")
-        .map_err(|e| map_row_err("policy_identity_evidence_inputs", &e))?;
+        .map_err(|e| map_row_err("policy_identity_evidence_inputs", e))?;
     Ok(PolicyIdentityEvidenceInput {
         ordinal: ordinal(row, "policy_identity_evidence_inputs")?,
         target: target_ref_from_row(row, "policy_identity_evidence_inputs")?,
         assertion_type: row
             .try_get("assertion_type")
-            .map_err(|e| map_row_err("policy_identity_evidence_inputs", &e))?,
+            .map_err(|e| map_row_err("policy_identity_evidence_inputs", e))?,
         provider: row
             .try_get("provider")
-            .map_err(|e| map_row_err("policy_identity_evidence_inputs", &e))?,
+            .map_err(|e| map_row_err("policy_identity_evidence_inputs", e))?,
         provider_version: row
             .try_get("provider_version")
-            .map_err(|e| map_row_err("policy_identity_evidence_inputs", &e))?,
+            .map_err(|e| map_row_err("policy_identity_evidence_inputs", e))?,
         confidence: row
             .try_get("confidence")
-            .map_err(|e| map_row_err("policy_identity_evidence_inputs", &e))?,
+            .map_err(|e| map_row_err("policy_identity_evidence_inputs", e))?,
         provenance: json_value(row, "provenance", "policy_identity_evidence_inputs")?,
         observed_at: parse_iso8601(&observed_at)?,
         existing_evidence_id: optional_id(
@@ -858,23 +1018,23 @@ fn row_to_bundle_target(
 ) -> Result<PolicyBundleTargetInput, VoomError> {
     let desired_state: String = row
         .try_get("desired_state")
-        .map_err(|e| map_row_err("policy_bundle_target_inputs", &e))?;
+        .map_err(|e| map_row_err("policy_bundle_target_inputs", e))?;
     Ok(PolicyBundleTargetInput {
         ordinal: ordinal(row, "policy_bundle_target_inputs")?,
         target: target_ref_from_row(row, "policy_bundle_target_inputs")?,
         role: row
             .try_get("role")
-            .map_err(|e| map_row_err("policy_bundle_target_inputs", &e))?,
+            .map_err(|e| map_row_err("policy_bundle_target_inputs", e))?,
         desired_state: parse_wire(&desired_state, "policy_bundle_target_inputs.desired_state")?,
         language: row
             .try_get("language")
-            .map_err(|e| map_row_err("policy_bundle_target_inputs", &e))?,
+            .map_err(|e| map_row_err("policy_bundle_target_inputs", e))?,
         label: row
             .try_get("label")
-            .map_err(|e| map_row_err("policy_bundle_target_inputs", &e))?,
+            .map_err(|e| map_row_err("policy_bundle_target_inputs", e))?,
         disposition: row
             .try_get("disposition")
-            .map_err(|e| map_row_err("policy_bundle_target_inputs", &e))?,
+            .map_err(|e| map_row_err("policy_bundle_target_inputs", e))?,
         artifact_expectation: json_value(
             row,
             "artifact_expectation",
@@ -891,10 +1051,10 @@ fn row_to_quality_profile(
         target: target_ref_from_row(row, "policy_quality_profile_selections")?,
         profile_name: row
             .try_get("profile_name")
-            .map_err(|e| map_row_err("policy_quality_profile_selections", &e))?,
+            .map_err(|e| map_row_err("policy_quality_profile_selections", e))?,
         profile_version: row
             .try_get("profile_version")
-            .map_err(|e| map_row_err("policy_quality_profile_selections", &e))?,
+            .map_err(|e| map_row_err("policy_quality_profile_selections", e))?,
         dimension_weights: json_value(
             row,
             "dimension_weights",
@@ -906,25 +1066,25 @@ fn row_to_quality_profile(
 fn row_to_issue(row: &sqlx::sqlite::SqliteRow) -> Result<PolicyIssueInput, VoomError> {
     let severity: String = row
         .try_get("severity")
-        .map_err(|e| map_row_err("policy_issue_inputs", &e))?;
+        .map_err(|e| map_row_err("policy_issue_inputs", e))?;
     let priority: String = row
         .try_get("priority")
-        .map_err(|e| map_row_err("policy_issue_inputs", &e))?;
+        .map_err(|e| map_row_err("policy_issue_inputs", e))?;
     let state: String = row
         .try_get("state")
-        .map_err(|e| map_row_err("policy_issue_inputs", &e))?;
+        .map_err(|e| map_row_err("policy_issue_inputs", e))?;
     Ok(PolicyIssueInput {
         ordinal: ordinal(row, "policy_issue_inputs")?,
         target: target_ref_from_row(row, "policy_issue_inputs")?,
         kind: row
             .try_get("kind")
-            .map_err(|e| map_row_err("policy_issue_inputs", &e))?,
+            .map_err(|e| map_row_err("policy_issue_inputs", e))?,
         severity: IssueSeverity::parse(&severity)?,
         priority: IssuePriority::parse(&priority)?,
         state: parse_wire(&state, "policy_issue_inputs.state")?,
         reason: row
             .try_get("reason")
-            .map_err(|e| map_row_err("policy_issue_inputs", &e))?,
+            .map_err(|e| map_row_err("policy_issue_inputs", e))?,
         provenance: json_value(row, "provenance", "policy_issue_inputs")?,
         existing_issue_id: optional_id(row, "existing_issue_id", "policy_issue_inputs")?
             .map(IssueId),
@@ -962,27 +1122,45 @@ impl PersistedTargetIds {
         };
         Ok(match target {
             TargetRef::MediaWork { id } => Self {
-                media_work_id: Some(i64_from_u64(id.0)),
+                media_work_id: Some(i64_from_u64(
+                    id.0,
+                    concat!(module_path!(), ": ", stringify!(id.0)),
+                )?),
                 ..empty
             },
             TargetRef::MediaVariant { id } => Self {
-                media_variant_id: Some(i64_from_u64(id.0)),
+                media_variant_id: Some(i64_from_u64(
+                    id.0,
+                    concat!(module_path!(), ": ", stringify!(id.0)),
+                )?),
                 ..empty
             },
             TargetRef::AssetBundle { id } => Self {
-                asset_bundle_id: Some(i64_from_u64(id.0)),
+                asset_bundle_id: Some(i64_from_u64(
+                    id.0,
+                    concat!(module_path!(), ": ", stringify!(id.0)),
+                )?),
                 ..empty
             },
             TargetRef::FileAsset { id } => Self {
-                file_asset_id: Some(i64_from_u64(id.0)),
+                file_asset_id: Some(i64_from_u64(
+                    id.0,
+                    concat!(module_path!(), ": ", stringify!(id.0)),
+                )?),
                 ..empty
             },
             TargetRef::FileVersion { id } => Self {
-                file_version_id: Some(i64_from_u64(id.0)),
+                file_version_id: Some(i64_from_u64(
+                    id.0,
+                    concat!(module_path!(), ": ", stringify!(id.0)),
+                )?),
                 ..empty
             },
             TargetRef::FileLocation { id } => Self {
-                file_location_id: Some(i64_from_u64(id.0)),
+                file_location_id: Some(i64_from_u64(
+                    id.0,
+                    concat!(module_path!(), ": ", stringify!(id.0)),
+                )?),
                 ..empty
             },
             TargetRef::Synthetic { key, kind } => {
@@ -994,7 +1172,10 @@ impl PersistedTargetIds {
                         ))
                     })?;
                 Self {
-                    synthetic_target_id: Some(i64_from_u64(id.0)),
+                    synthetic_target_id: Some(i64_from_u64(
+                        id.0,
+                        concat!(module_path!(), ": ", stringify!(id.0)),
+                    )?),
                     ..empty
                 }
             }
@@ -1038,10 +1219,10 @@ fn target_ref_from_row(
         .ok_or_else(|| VoomError::database(format!("{table} target shape missing")))?;
     let key: String = row
         .try_get("synthetic_key")
-        .map_err(|e| map_row_err(table, &e))?;
+        .map_err(|e| map_row_err(table, e))?;
     let kind: String = row
         .try_get("target_kind")
-        .map_err(|e| map_row_err(table, &e))?;
+        .map_err(|e| map_row_err(table, e))?;
     Ok(PolicyInputTargetRef::Synthetic {
         id: PolicySyntheticTargetId(id),
         key,
@@ -1050,7 +1231,7 @@ fn target_ref_from_row(
 }
 
 fn ordinal(row: &sqlx::sqlite::SqliteRow, table: &'static str) -> Result<u32, VoomError> {
-    let ordinal: i64 = row.try_get("ordinal").map_err(|e| map_row_err(table, &e))?;
+    let ordinal: i64 = row.try_get("ordinal").map_err(|e| map_row_err(table, e))?;
     u32_from_i64(ordinal)
 }
 
@@ -1059,8 +1240,10 @@ fn optional_id(
     column: &'static str,
     table: &'static str,
 ) -> Result<Option<u64>, VoomError> {
-    let value: Option<i64> = row.try_get(column).map_err(|e| map_row_err(table, &e))?;
-    Ok(value.map(u64_from_i64))
+    let value: Option<i64> = row.try_get(column).map_err(|e| map_row_err(table, e))?;
+    value
+        .map(|value| u64_from_i64(value, concat!(module_path!(), ": ", stringify!(value))))
+        .transpose()
 }
 
 fn optional_u32(
@@ -1068,7 +1251,7 @@ fn optional_u32(
     column: &'static str,
     table: &'static str,
 ) -> Result<Option<u32>, VoomError> {
-    let value: Option<i64> = row.try_get(column).map_err(|e| map_row_err(table, &e))?;
+    let value: Option<i64> = row.try_get(column).map_err(|e| map_row_err(table, e))?;
     value.map(u32_from_i64).transpose()
 }
 
@@ -1077,7 +1260,7 @@ fn json_value<T: DeserializeOwned>(
     column: &'static str,
     table: &'static str,
 ) -> Result<T, VoomError> {
-    let raw: String = row.try_get(column).map_err(|e| map_row_err(table, &e))?;
+    let raw: String = row.try_get(column).map_err(|e| map_row_err(table, e))?;
     serde_json::from_str(&raw)
         .map_err(|e| VoomError::database_context(format!("{table}.{column} JSON"), e))
 }

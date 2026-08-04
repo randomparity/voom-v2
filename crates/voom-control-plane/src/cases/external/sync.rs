@@ -11,7 +11,7 @@ use time::OffsetDateTime;
 use voom_core::{ExternalSystemId, VoomError};
 use voom_events::payload::ExternalSystemSyncedPayload;
 use voom_events::{Event, EventKind, SubjectType};
-use voom_store::repo::events::{EventFilter, EventRepo, Page};
+use voom_store::repo::audit::events::{EventFilter, EventRepo, Page};
 
 use crate::ControlPlane;
 
@@ -67,7 +67,7 @@ impl ControlPlane {
             Some(id.0),
             finished_at,
             Event::ExternalSystemSynced(ExternalSystemSyncedPayload {
-                external_system_id: id.0,
+                external_system_id: id,
                 outcome: outcome.clone(),
                 links_recorded: 0,
                 links_retired: 0,

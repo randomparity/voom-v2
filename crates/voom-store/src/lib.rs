@@ -10,9 +10,20 @@
     )
 )]
 //! Storage layer: `SQLite` pool, migrations, repositories.
+//!
+//! The embedded migration registry is deliberately absent from the default
+//! public API:
+//!
+//! ```compile_fail,E0432
+//! use voom_store::MIGRATOR;
+//! ```
+//!
+//! ```compile_fail,E0603
+//! use voom_store::migrator;
+//! ```
 
 pub mod init;
-pub mod migrator;
+mod migrator;
 pub mod pool;
 pub mod repo;
 pub mod schema;
@@ -21,6 +32,5 @@ pub mod schema;
 pub mod test_support;
 
 pub use init::{InitReport, init};
-pub use migrator::MIGRATOR;
-pub use pool::{connect, connect_or_create};
+pub use pool::connect;
 pub use schema::{SchemaState, expected_migrations, probe_schema};

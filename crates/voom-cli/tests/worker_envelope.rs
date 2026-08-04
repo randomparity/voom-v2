@@ -8,7 +8,8 @@ use std::process::Command;
 
 use serde_json::Value;
 use voom_control_plane::ControlPlane;
-use voom_store::repo::workers::{NewWorker, WorkerKind};
+use voom_control_plane::workers::RegisterWorkerInput;
+use voom_core::WorkerKind;
 use voom_store::test_support::sqlite_url_for;
 use voom_test_support::TempDatabase;
 
@@ -74,7 +75,9 @@ mod worker_envelope {
     async fn worker_list_uninitialized_db_uses_uninitialized_error_envelope() {
         let tmp = TempDatabase::new().unwrap();
         let url = sqlite_url_for(tmp.path());
-        voom_store::connect_or_create(&url).await.unwrap();
+        voom_store::test_support::create_uninitialized_pool(&url)
+            .await
+            .unwrap();
 
         let output = worker_command(&url).args(["list"]).output().unwrap();
 
@@ -234,11 +237,9 @@ mod worker_envelope {
 
     async fn seed_legacy_worker(url: &str) {
         let cp = ControlPlane::open(url).await.unwrap();
-        cp.register_worker(NewWorker {
+        cp.register_worker(RegisterWorkerInput {
             name: "legacy".to_owned(),
             kind: WorkerKind::Synthetic,
-            registered_at: cp.clock().now(),
-            node_id: None,
         })
         .await
         .unwrap();

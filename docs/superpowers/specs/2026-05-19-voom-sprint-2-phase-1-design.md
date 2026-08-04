@@ -253,9 +253,9 @@ pub enum OperationKind {
     BackUpFile,
     Remux,                  // remux/containerize
     TranscodeVideo,
+    TranscodeAudio,
     EditTracks,
     ExtractAudio,
-    TranscribeAudio,
     VerifyArtifact,
     CommitArtifact,
     DeleteArtifact,
@@ -427,9 +427,11 @@ pub type NdjsonStream = NdjsonReader<Pin<Box<dyn tokio::io::AsyncRead + Send>>>;
 #[async_trait::async_trait]
 pub trait ClientHandle: Send + Sync {
     async fn handshake(&self, offered: u32) -> Result<HandshakeResponse, ProtocolError>;
-    /// Caller supplies a fresh `idempotency_key` (ULID) per dispatch.
-    /// The same key on a retry MUST yield the same outcome via
-    /// worker-side dedupe.
+    /// `idempotency_key` is an opaque, non-empty identifier for one logical dispatch attempt.
+    /// A transport retry must reuse the same key and identical serialized request bytes. If the
+    /// completed response remains cached by the same worker instance, the worker replays it. A
+    /// duplicate received while the original is in flight is rejected. A new logical attempt
+    /// must use a distinct key. The transport does not prescribe ULID or concrete syntax.
     async fn dispatch(
         &self,
         creds: &WorkerCredentials,

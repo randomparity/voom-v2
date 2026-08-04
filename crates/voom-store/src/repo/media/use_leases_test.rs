@@ -4,7 +4,9 @@ use voom_core::{FileAssetId, FileLocationId, FileVersionId, UseLeaseId};
 use voom_test_support::TempDatabase;
 
 use super::*;
-use crate::repo::media::identity::{IdentityRepo, SqliteIdentityRepo};
+use crate::repo::media::identity::{
+    FileAssetRepo, FileLocationRepo, FileVersionRepo, SqliteIdentityRepo,
+};
 use crate::test_support::{T0, fresh_initialized_pool_at};
 
 /// Spin up a fresh pool with migration 0004 applied, plus a single
@@ -98,6 +100,30 @@ async fn acquire_ttl_bound_with_no_ttl_is_rejected() {
         .await
         .unwrap_err();
     assert!(matches!(err, VoomError::Config(_)), "got {err:?}");
+}
+
+#[tokio::test]
+async fn acquire_validates_ttl_before_scope_lookup() {
+    let (pool, _tmp, _real_asset) = pool_with_asset().await;
+    let repo = SqliteUseLeaseRepo::new(pool.clone());
+    let err = repo
+        .acquire(NewUseLease {
+            kind: UseLeaseKind::Playback,
+            scope: LeaseScope::Asset(FileAssetId(99_999)),
+            issuer_kind: IssuerKind::User,
+            issuer_ref: "alice".to_owned(),
+            blocking_mode: BlockingMode::Blocking,
+            ttl: None,
+            acquired_at: T0,
+        })
+        .await
+        .unwrap_err();
+    assert!(matches!(err, VoomError::Config(_)), "got {err:?}");
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM asset_use_leases")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 0);
 }
 
 #[tokio::test]
@@ -996,7 +1022,7 @@ async fn seed_pool_with_location() -> (
     FileVersionId,
     FileLocationId,
 ) {
-    use crate::repo::media::identity::{FileLocationKind, IdentityRepo};
+    use crate::repo::media::identity::FileLocationKind;
     let tmp = TempDatabase::new().unwrap();
     let pool = fresh_initialized_pool_at(tmp.path()).await.unwrap();
     let identity = SqliteIdentityRepo::new(pool.clone());

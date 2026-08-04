@@ -8,13 +8,16 @@ use time::OffsetDateTime;
 use voom_core::ids::BundleId;
 use voom_core::rng_test_support::FrozenRng;
 use voom_core::{JobId, LeaseId, TicketId};
-use voom_store::repo::artifacts::{
-    NewArtifactCommitRecord, NewArtifactHandle, NewArtifactLocation, NewSidecarArtifactCommit,
+use voom_store::repo::media::artifacts::{
+    ArtifactHandleAccessMode, ArtifactLocationKind, NewArtifactCommitRecord, NewArtifactHandle,
+    NewArtifactLocation, NewSidecarArtifactCommit,
 };
-use voom_store::repo::bundles::{BundleMemberRole, NewAssetBundle, NewBundleMember};
-use voom_store::repo::identity::{DiscoveredFile, FileLocationKind, IdentityRepo, IngestOutcome};
-use voom_store::repo::identity::{MediaWorkKind, NewMediaVariant, NewMediaWork};
-use voom_store::repo::{
+use voom_store::repo::media::bundles::{BundleMemberRole, NewAssetBundle, NewBundleMember};
+use voom_store::repo::media::identity::{DiscoveredFile, FileLocationKind, IngestOutcome};
+use voom_store::repo::media::identity::{
+    MediaSnapshotRepo, MediaWorkKind, NewMediaVariant, NewMediaWork,
+};
+use voom_store::repo::media::use_leases::{
     BlockingMode, IssuerKind, LeaseScope, NewUseLease, UseLeaseKind, UseLeaseReleaseReason,
 };
 use voom_worker_protocol::{
@@ -247,14 +250,14 @@ async fn extract_audio_plural_commits_every_output_and_lineage_atomically() {
     input.operation_payload["operation_id"] = serde_json::json!(operation_id);
     input.operation_payload["outputs"] = serde_json::json!([
         {
-            "output_id": voom_plan::audio::extract_output_id(operation_id, "a-1"),
+            "output_id": voom_plan::planner::audio::extract_output_id(operation_id, "a-1"),
             "source_snapshot_stream_id": "a-1",
             "source_provider_stream_index": 1,
             "name_suffix": "a-1.opus.ogg",
             "bundle_role": "external_audio"
         },
         {
-            "output_id": voom_plan::audio::extract_output_id(operation_id, "a-2"),
+            "output_id": voom_plan::planner::audio::extract_output_id(operation_id, "a-2"),
             "source_snapshot_stream_id": "a-2",
             "source_provider_stream_index": 2,
             "name_suffix": "a-2.opus.ogg",
@@ -312,7 +315,7 @@ async fn extract_audio_plural_commits_every_output_and_lineage_atomically() {
     assert_eq!(event["outputs"].as_array().unwrap().len(), 2);
     assert_eq!(
         event["outputs"][0]["output_id"],
-        voom_plan::audio::extract_output_id(operation_id, "a-1")
+        voom_plan::planner::audio::extract_output_id(operation_id, "a-1")
     );
     assert_eq!(event["outputs"][1]["source_snapshot_stream_id"], "a-2");
     assert_eq!(
@@ -665,6 +668,104 @@ async fn active_synthesis_attempt_replays_same_worker_key_and_path_after_restart
 }
 
 #[tokio::test]
+async fn non_active_synthesis_attempt_is_not_reconciled_as_active() {
+    let (cp, _db, dir) = fixture_with_dir().await;
+    let source = seed_audio_source(&cp, &dir, b"source").await;
+    let now = cp.clock().now();
+    let operation = cp
+        .audio_synthesis_operations
+        .create_planned(
+            NewAudioSynthesisOperation {
+                operation_key: "synthesis:terminal-attempt".to_owned(),
+                planned_operation_id: "terminal-attempt".to_owned(),
+                source_file_version_id: source.version,
+                source_media_snapshot_id: voom_core::MediaSnapshotId(source.snapshot),
+                target_codec: "aac".to_owned(),
+                target_channels: 2,
+                container: "mkv".to_owned(),
+                target_path: dir.path().join("output.mkv").display().to_string(),
+            },
+            &[NewAudioSynthesisCompanion {
+                companion_id: "companion".to_owned(),
+                source_snapshot_stream_id: "stream".to_owned(),
+                source_provider_stream_index: 1,
+                result_snapshot_stream_id: "companion".to_owned(),
+            }],
+            now,
+        )
+        .await
+        .unwrap();
+    let claim = NewAudioSynthesisClaim {
+        operation_key: operation.operation.operation_key.clone(),
+        expected_generation: 0,
+        lease_id: LeaseId(3),
+        claim_token: "terminal-attempt".to_owned(),
+        expires_at: now + time::Duration::minutes(1),
+    };
+    cp.audio_synthesis_operations
+        .acquire_claim(&claim, now)
+        .await
+        .unwrap();
+    let staging = stage::PreparedStagingPath {
+        canonical_root: dir.path().to_path_buf(),
+        path: dir.path().join("staging/result.mkv"),
+    };
+    let attempt = cp
+        .audio_synthesis_operations
+        .record_dispatch_attempt(
+            &claim,
+            &NewAudioSynthesisDispatchAttempt {
+                dispatch_lease_id: LeaseId(3),
+                worker_id: 1,
+                worker_epoch: 0,
+                idempotency_key: format!("audio-synthesis:{}:0", operation.operation.operation_key),
+                attempt_directory: staging.path.parent().unwrap().display().to_string(),
+                staging_path: staging.path.display().to_string(),
+            },
+            now,
+        )
+        .await
+        .unwrap();
+    sqlx::query(
+        "UPDATE audio_synthesis_dispatch_attempts \
+         SET status = 'terminal', evidence_kind = 'terminal_response', evidence_at = ? \
+         WHERE id = ?",
+    )
+    .bind("1970-01-01T00:00:00Z")
+    .bind(i64::try_from(attempt.id).unwrap())
+    .execute(cp.pool_for_test())
+    .await
+    .unwrap();
+    let terminal_attempt = cp
+        .audio_synthesis_operations
+        .get_dispatch_attempt(attempt.operation_id, attempt.generation)
+        .await
+        .unwrap()
+        .unwrap();
+    let Err(error) = reconcile_synthesis_dispatch(
+        &cp.audio_synthesis_operations,
+        claim,
+        terminal_attempt,
+        voom_core::WorkerId(1),
+        0,
+        staging,
+        now,
+    )
+    .await
+    else {
+        panic!("terminal attempt must not be reconciled as active");
+    };
+    assert_eq!(error.error_code(), voom_core::ErrorCode::Conflict);
+    assert!(error.to_string().contains("is terminal"));
+    let generation: i64 =
+        sqlx::query_scalar("SELECT dispatch_generation FROM audio_synthesis_operations")
+            .fetch_one(cp.pool_for_test())
+            .await
+            .unwrap();
+    assert_eq!(generation, 1);
+}
+
+#[tokio::test]
 async fn staged_synthesis_probe_failure_reuses_bound_artifact_on_retry() {
     let (cp, _db, dir) = fixture_with_dir().await;
     let mut source = seed_audio_source(&cp, &dir, b"source").await;
@@ -971,7 +1072,13 @@ async fn legacy_adoption_rejects_ambiguous_or_different_source_snapshot() {
     let mut input = seeded.input;
     input.operation_payload["source_media_snapshot_id"] = serde_json::json!(second.id.0);
 
-    assert_legacy_adoption_rejected_without_mutation(&cp, input, &seeded.target).await;
+    assert_legacy_adoption_rejected_without_mutation(
+        &cp,
+        input,
+        &seeded.target,
+        "artifact source snapshot evidence is not unique",
+    )
+    .await;
 }
 
 #[tokio::test]
@@ -982,7 +1089,7 @@ async fn published_operation_isolated_from_legacy_singleton() {
     let operation_id = "different-published-operation";
     input.operation_payload["operation_id"] = serde_json::json!(operation_id);
     input.operation_payload["outputs"] = serde_json::json!([{
-        "output_id": voom_plan::audio::extract_output_id(operation_id, "a-1"),
+        "output_id": voom_plan::planner::audio::extract_output_id(operation_id, "a-1"),
         "source_snapshot_stream_id": "a-1",
         "source_provider_stream_index": 1,
         "name_suffix": "a-1.opus.ogg",
@@ -1022,6 +1129,17 @@ enum LegacyEvidenceMutation {
     RetiredResultLocation,
 }
 
+impl LegacyEvidenceMutation {
+    const fn expected_message(self) -> &'static str {
+        match self {
+            Self::WrongStream => "lineage stream id differs",
+            Self::MissingLineage => "is missing source lineage",
+            Self::MismatchedVerification => "artifact checksum evidence is inconsistent",
+            Self::RetiredResultLocation => "result location is retired",
+        }
+    }
+}
+
 #[tokio::test]
 async fn legacy_adoption_rejects_mismatched_or_incomplete_evidence() {
     for mutation in [
@@ -1034,7 +1152,13 @@ async fn legacy_adoption_rejects_mismatched_or_incomplete_evidence() {
         let seeded = seed_legacy_singleton(&cp, &dir).await;
         mutate_legacy_evidence(&cp, mutation).await;
 
-        assert_legacy_adoption_rejected_without_mutation(&cp, seeded.input, &seeded.target).await;
+        assert_legacy_adoption_rejected_without_mutation(
+            &cp,
+            seeded.input,
+            &seeded.target,
+            mutation.expected_message(),
+        )
+        .await;
     }
 }
 
@@ -1067,7 +1191,13 @@ async fn legacy_adoption_rejects_unowned_existing_target() {
     .remove(0);
     tokio::fs::write(&target, b"unowned").await.unwrap();
 
-    assert_legacy_adoption_rejected_without_mutation(&cp, input, &target).await;
+    assert_legacy_adoption_rejected_without_mutation(
+        &cp,
+        input,
+        &target,
+        "exists without a committed artifact owner",
+    )
+    .await;
 }
 
 #[tokio::test]
@@ -1335,14 +1465,14 @@ async fn committed_plural_extract_retry_returns_same_ordered_identities_without_
     input.operation_payload["operation_id"] = serde_json::json!(operation_id);
     input.operation_payload["outputs"] = serde_json::json!([
         {
-            "output_id": voom_plan::audio::extract_output_id(operation_id, "a-1"),
+            "output_id": voom_plan::planner::audio::extract_output_id(operation_id, "a-1"),
             "source_snapshot_stream_id": "a-1",
             "source_provider_stream_index": 1,
             "name_suffix": "a-1.opus.ogg",
             "bundle_role": "external_audio"
         },
         {
-            "output_id": voom_plan::audio::extract_output_id(operation_id, "a-2"),
+            "output_id": voom_plan::planner::audio::extract_output_id(operation_id, "a-2"),
             "source_snapshot_stream_id": "a-2",
             "source_provider_stream_index": 2,
             "name_suffix": "a-2.opus.ogg",
@@ -1447,14 +1577,14 @@ async fn prepared_extract_resume_failure_persists_diagnostics_then_recovers_with
     input.operation_payload["operation_id"] = serde_json::json!(operation_id);
     input.operation_payload["outputs"] = serde_json::json!([
         {
-            "output_id": voom_plan::audio::extract_output_id(operation_id, "a-1"),
+            "output_id": voom_plan::planner::audio::extract_output_id(operation_id, "a-1"),
             "source_snapshot_stream_id": "a-1",
             "source_provider_stream_index": 1,
             "name_suffix": "a-1.opus.ogg",
             "bundle_role": "external_audio"
         },
         {
-            "output_id": voom_plan::audio::extract_output_id(operation_id, "a-2"),
+            "output_id": voom_plan::planner::audio::extract_output_id(operation_id, "a-2"),
             "source_snapshot_stream_id": "a-2",
             "source_provider_stream_index": 2,
             "name_suffix": "a-2.opus.ogg",
@@ -1774,14 +1904,14 @@ async fn partial_extract_result_cleans_terminal_staging_and_retries_without_dupl
     input.operation_payload["operation_id"] = serde_json::json!(operation_id);
     input.operation_payload["outputs"] = serde_json::json!([
         {
-            "output_id": voom_plan::audio::extract_output_id(operation_id, "a-1"),
+            "output_id": voom_plan::planner::audio::extract_output_id(operation_id, "a-1"),
             "source_snapshot_stream_id": "a-1",
             "source_provider_stream_index": 1,
             "name_suffix": "a-1.opus.ogg",
             "bundle_role": "external_audio"
         },
         {
-            "output_id": voom_plan::audio::extract_output_id(operation_id, "a-2"),
+            "output_id": voom_plan::planner::audio::extract_output_id(operation_id, "a-2"),
             "source_snapshot_stream_id": "a-2",
             "source_provider_stream_index": 2,
             "name_suffix": "a-2.opus.ogg",
@@ -1836,14 +1966,14 @@ async fn second_extract_verification_failure_never_promotes_or_registers_any_mem
     input.operation_payload["operation_id"] = serde_json::json!(operation_id);
     input.operation_payload["outputs"] = serde_json::json!([
         {
-            "output_id": voom_plan::audio::extract_output_id(operation_id, "a-1"),
+            "output_id": voom_plan::planner::audio::extract_output_id(operation_id, "a-1"),
             "source_snapshot_stream_id": "a-1",
             "source_provider_stream_index": 1,
             "name_suffix": "a-1.opus.ogg",
             "bundle_role": "external_audio"
         },
         {
-            "output_id": voom_plan::audio::extract_output_id(operation_id, "a-2"),
+            "output_id": voom_plan::planner::audio::extract_output_id(operation_id, "a-2"),
             "source_snapshot_stream_id": "a-2",
             "source_provider_stream_index": 2,
             "name_suffix": "a-2.opus.ogg",
@@ -2264,7 +2394,7 @@ struct HistoricalStagedArtifact {
 }
 
 struct SeededActiveExtractAttempt {
-    attempt: voom_store::repo::audio_extract_operations::AudioExtractDispatchAttempt,
+    attempt: voom_store::repo::media::audio_extract_operations::AudioExtractDispatchAttempt,
     staging: stage::PreparedStagingPaths,
 }
 
@@ -2372,14 +2502,14 @@ fn set_plural_extract_outputs(input: &mut ExecuteExtractAudioInput, operation_id
     input.operation_payload["operation_id"] = serde_json::json!(operation_id);
     input.operation_payload["outputs"] = serde_json::json!([
         {
-            "output_id": voom_plan::audio::extract_output_id(operation_id, "a-1"),
+            "output_id": voom_plan::planner::audio::extract_output_id(operation_id, "a-1"),
             "source_snapshot_stream_id": "a-1",
             "source_provider_stream_index": 1,
             "name_suffix": "a-1.opus.ogg",
             "bundle_role": "external_audio"
         },
         {
-            "output_id": voom_plan::audio::extract_output_id(operation_id, "a-2"),
+            "output_id": voom_plan::planner::audio::extract_output_id(operation_id, "a-2"),
             "source_snapshot_stream_id": "a-2",
             "source_provider_stream_index": 2,
             "name_suffix": "a-2.opus.ogg",
@@ -2449,7 +2579,7 @@ async fn seed_historical_staged_artifact(
                 checksum: Some(output.content_hash.clone()),
                 privacy_class: "internal".to_owned(),
                 durability_class: "staging".to_owned(),
-                allowed_access_modes: vec!["local_path".to_owned()],
+                allowed_access_modes: vec![ArtifactHandleAccessMode::LocalPath],
                 mutability: "immutable".to_owned(),
                 source_lineage: Some(serde_json::json!({
                     "operation": "extract_audio",
@@ -2470,7 +2600,7 @@ async fn seed_historical_staged_artifact(
             &mut tx,
             NewArtifactLocation {
                 artifact_handle_id: handle.id,
-                kind: "staging".to_owned(),
+                kind: ArtifactLocationKind::Staging,
                 value: staging.display().to_string(),
                 observed_at: OffsetDateTime::UNIX_EPOCH,
             },
@@ -2500,7 +2630,7 @@ async fn commit_historical_sidecar(
     staged: &HistoricalStagedArtifact,
     target: &std::path::Path,
     output: &AudioObservedFacts,
-) -> voom_store::repo::artifacts::SidecarArtifactCommit {
+) -> voom_store::repo::media::artifacts::SidecarArtifactCommit {
     let mut tx = cp.pool_for_test().begin().await.unwrap();
     let pending = cp
         .artifacts()
@@ -2576,6 +2706,7 @@ async fn assert_legacy_adoption_rejected_without_mutation(
     cp: &crate::ControlPlane,
     input: ExecuteExtractAudioInput,
     target: &std::path::Path,
+    expected_message: &str,
 ) {
     let publication_counts = legacy_publication_counts(cp).await;
     let media_snapshot_count = table_count(cp, "media_snapshots").await;
@@ -2592,6 +2723,10 @@ async fn assert_legacy_adoption_rejected_without_mutation(
     .unwrap_err();
 
     assert_eq!(error.error_code(), voom_core::ErrorCode::Conflict);
+    assert!(
+        error.to_string().contains(expected_message),
+        "expected `{expected_message}` in `{error}`"
+    );
     assert_eq!(legacy_publication_counts(cp).await, publication_counts);
     assert_eq!(
         table_count(cp, "media_snapshots").await,
@@ -2815,7 +2950,7 @@ async fn record_plural_surround_audio_snapshot(
     .0
 }
 
-async fn seed_bundle(cp: &crate::ControlPlane) -> voom_store::repo::bundles::AssetBundle {
+async fn seed_bundle(cp: &crate::ControlPlane) -> voom_store::repo::media::bundles::AssetBundle {
     let work = cp
         .create_media_work(NewMediaWork {
             kind: MediaWorkKind::Movie,
@@ -2891,7 +3026,7 @@ fn synthesis_input_for_source(
     dir: &tempfile::TempDir,
 ) -> ExecuteTranscodeAudioInput {
     let operation_id = "node_synthesis_test";
-    let companion_id = voom_plan::audio::synthesis_companion_id(operation_id, "a-1");
+    let companion_id = voom_plan::planner::audio::synthesis_companion_id(operation_id, "a-1");
     ExecuteTranscodeAudioInput {
         job_id: JobId(1),
         ticket_id: TicketId(2),
@@ -2924,8 +3059,8 @@ fn plural_synthesis_input_for_source(
     dir: &tempfile::TempDir,
 ) -> ExecuteTranscodeAudioInput {
     let operation_id = "node_plural_synthesis_test";
-    let first = voom_plan::audio::synthesis_companion_id(operation_id, "a-1");
-    let second = voom_plan::audio::synthesis_companion_id(operation_id, "a-2");
+    let first = voom_plan::planner::audio::synthesis_companion_id(operation_id, "a-1");
+    let second = voom_plan::planner::audio::synthesis_companion_id(operation_id, "a-2");
     let mut input = synthesis_input_for_source(source, dir);
     input.operation_payload["operation_id"] = serde_json::json!(operation_id);
     input.operation_payload["filter"] =
@@ -3014,7 +3149,7 @@ fn extract_input_for_source(
             "snapshot_stream_id": "a-1",
             "filter": null,
             "outputs": [{
-                "output_id": voom_plan::audio::extract_output_id(operation_id, "a-1"),
+                "output_id": voom_plan::planner::audio::extract_output_id(operation_id, "a-1"),
                 "source_snapshot_stream_id": "a-1",
                 "source_provider_stream_index": 1,
                 "name_suffix": "a-1.opus.ogg",

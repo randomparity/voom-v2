@@ -9,14 +9,15 @@ use std::process::Command;
 
 use serde_json::json;
 use voom_control_plane::ControlPlane;
-use voom_control_plane::CoordinatorOutcome;
 use voom_control_plane::policy::ComplianceExecutionOptions;
 use voom_control_plane::scan::{ScanPathInput, ScanReportFileStatus};
+use voom_control_plane::workflow::CoordinatorOutcome;
 use voom_core::{FileVersionId, MediaSnapshotId};
 use voom_policy::{
     MediaSnapshotInput, PolicyInputSetDraft, PolicyInputSourceKind, TargetRef, load_policy_fixture,
 };
-use voom_store::repo::workflow_summaries::{
+use voom_store::repo::execution::workflow_progress::SqliteWorkflowProgressRepo;
+use voom_store::repo::execution::workflow_summaries::{
     FilePhaseOutcome, FilePhaseSummary, PhaseOutcome, SqliteWorkflowSummaryRepo,
 };
 use voom_test_support::TempDatabase;
@@ -204,7 +205,7 @@ async fn assert_sliding_order_and_refill(pool: &sqlx::SqlitePool, job_id: voom_c
         later.1 < sibling_phase_zero.2,
         "a completed file must enter phase 1 before its slower sibling completes phase 0"
     );
-    let progress = SqliteWorkflowSummaryRepo::new(pool.clone())
+    let progress = SqliteWorkflowProgressRepo::new(pool.clone())
         .file_progress_for_job(job_id)
         .await
         .unwrap();

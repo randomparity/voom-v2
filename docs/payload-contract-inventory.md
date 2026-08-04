@@ -1,198 +1,197 @@
-# Durable Payload Contract Inventory (audit M4, #220)
+# Durable Payload Contract Inventory
 
-Completeness artifact for the deny-unknown-fields contract (ADR 0013). Every
-durable JSON column is listed exactly once. A Class-T / T-upstream row is "done"
-only when its typed root (and reachable named-field sub-structs) carry an
-**effective** `#[serde(deny_unknown_fields)]` (per the spec §1 placement rule) and
-a behavioral unknown-field-rejection test exists. Class-P rows carry no M4 risk.
+This inventory is the completeness record for the durable JSON evolution contract in
+ADR 0013. It covers the SQLite schema through migration `0033` and separates payloads by
+their current enforcement state.
 
-The guard (`scripts/check-payload-deny-unknown.sh`) scans exactly the files listed
-in `scripts/payload-contract-scope.txt`, which is the set of "defining file(s)"
-for every Class-T / T-upstream row below.
+A durable JSON value is in one of three states:
 
-Durable columns are surveyed across the SQLite migrations in `migrations/`
-(`0001`–`0032`). Read sites are in `crates/voom-store/src/repo/` (store layer)
-and `crates/voom-control-plane/src/` (typed higher layer for T-upstream columns).
+1. **Enforced typed root.** Production code deserializes the value into a Rust type. Every
+   reachable named-field `Deserialize` struct rejects unknown fields, tagged enums use
+   newtype variants, and a behavioral test proves rejection.
+2. **Safe by construction.** Production code deserializes the value, but its complete shape
+   contains only scalar elements, ID newtypes, tuple newtypes, or unit enums. There is no
+   named-field surface on which serde could silently drop a field.
+3. **Passthrough JSON.** Production code retains the value as `serde_json::Value`; no typed
+   deserialization boundary exists.
 
-Scalar typed columns (`INTEGER`/`TEXT` read into a Rust field, not JSON) carry no
-field-drop surface and so get no Class-T row of their own. They still reach this
-contract when the same value is a field of a typed root above — see the
-`TranscodeVideoProfile` note under "Durable typed column changes" below.
+The guard in `scripts/check-payload-deny-unknown.sh` scans the defining files listed in
+`scripts/payload-contract-scope.txt`. A new typed durable root must be added to both this
+inventory and that scope file.
 
-## Class T / T-upstream (contract applies)
+## Enforced typed roots
 
-| table.column | class | read site | typed root | reachable typed sub-structs | defining file(s) | action |
-|---|---|---|---|---|---|---|
-| events.payload | T | repo/audit/events.rs:280 `from_value::<Event>` | `Event` (adjacently tagged, newtype variants — enum itself effective) | all variant content structs in voom-events/src/payload/{artifact,commit,execution,external_system,media_identity,policy,system,use_leases,workers}.rs | those 9 files | artifact.rs is only ~half-covered (16/32) — sweep all 8 files incl. artifact.rs (Task 5) |
-| commit_intents.target | T | repo/media/commit_safety_gate/codecs.rs:182 `decode_target` (`let wire: CommitTargetWire = from_str`) | `CommitTargetWire` (internally tagged, **inline** struct-variants) | `FileLocationProposalWire` | codecs.rs | extract variants to newtype content structs; add attr (Task 3) |
-| commit_intents.closure_initial / closure_authorized | T | repo/media/commit_safety_gate/codecs.rs:188 `decode_closure`; called from authorize.rs:361 / finalize.rs | `AffectedScopeClosureWire` | `ClosureWarningWire` | codecs.rs | add attr (Task 3) |
-| commit_intents.override_token | T | repo/media/commit_safety_gate/codecs.rs:168 `decode_force_path_token` (`from_str` → `ForcePathToken`) | `ForcePathToken` | — (`BypassKind` unit enum) | commit_safety_gate.rs | add attr (Task 3) |
-| commit_intents.target_row_epochs | T | repo/media/commit_safety_gate/finalize.rs:393 `decode_target_row_epochs` (`from_str::<Vec<TargetRowEpochTriple>>`) | `TargetRowEpochTriple` (tuple newtype, no named fields) | — | codecs.rs | safe by construction; NOT in scope |
-| commit_intents.accepted_evidence_ids | T | repo/media/commit_safety_gate/authorize.rs:362 / abort_list.rs:279 (`Vec<EvidenceId>`) | `EvidenceId` (id newtype) | — | n/a | safe by construction; NOT in scope |
-| worker_capabilities.{codecs,hardware,artifact_access}; worker_grants.{can_execute,can_access_read,can_access_write,denies}; workflow_file_phase_summaries.ticket_ids; policy_media_snapshot_inputs.{audio_languages,subtitle_languages,health_flags} | T | executor.rs:1403 `json_string_array_contains` (`Vec<String>`); workflow_summaries.rs:622 (`Vec<u64>`); policy_inputs.rs:813–815 `json_value` → `Vec<String>` | `Vec<String>` / `Vec<u64>` | — | n/a | scalar element types, no named-field surface; NOT in scope |
-| worker_capabilities.extra (`$.accelerator` only) | T-upstream | store: repo/execution/workers.rs (`JsonValue`); typed: video_hardware.rs `from_value` → `VideoAcceleratorDescriptor` | `VideoAcceleratorDescriptor` (`backend`-tagged, every backend) | `NvidiaVideoAcceleratorDescriptor`; `VaapiVideoAcceleratorDescriptor`; `VideoToolboxVideoAcceleratorDescriptor`; `VideoToolboxDecodeCapability` | worker-protocol/src/video_acceleration.rs | complete: every descriptor struct rejects unknown fields; all rows are `backend`-tagged, pre-#411 NVIDIA rows by migration 0031's backfill |
-| tickets.payload | T-upstream | store: repo/execution/tickets.rs:532 (`JsonValue`); typed: ticket_payload.rs:83 `from_value` → `WorkflowTicketPayload` | `WorkflowTicketPayload` | `EffectiveTiming` (named struct); `OperationKind` (unit enum — no surface) | ticket_payload.rs, timing.rs | add attr+tests to `WorkflowTicketPayload` and `EffectiveTiming` (Task 4) |
-| tickets.result | T-upstream | store: repo/execution/tickets.rs (`JsonValue`); typed: compliance.rs `decode_compliance_extract_result`, workflow ticket-result normalization, and finalize.rs policy-verification adoption | `ExecuteExtractAudioOutputReport`; `ComplianceLegacyAudioExtractResult`; `PolicyVerificationTicketResult` | — (historical `commit_recovery_required` is intentionally opaque `JsonValue`; `PolicyVerificationTicketStatus` is a unit enum) | audio/mod.rs, cases/policy/compliance.rs, workflow/ticket_results.rs | complete: published and complete historical scalar wire forms reject unknown fields; pre-#337 audio serialization compatibility remains; policy-verification results retain their initial durable shape and reject unknown fields (#334) |
-| policy_versions.compiled_json | T-upstream | store: repo/policy/policies.rs:483 (`JsonValue`); typed: plans.rs:291 `deserialize_stored_compiled_policy` → `CompiledPolicy`, used by accepted-version planning and compliance execution | `CompiledPolicy` | all distinct content structs for `CompiledOperation`, `TrackFilter`, `CompiledCondition`, and `CompiledValue`; `CompiledConfig`; `CompiledPhase`; `CompiledRunIfWire`; `CompiledRule`; `PolicyProvenance`; diagnostic/span structs; `VideoProfileSettings`; `TranscodeVideoProfile` | compile/compiled.rs, data/video_profile.rs, diagnostic.rs, syntax/span.rs, voom-core/src/media/transcode_video_profile.rs | complete: all 41 tagged variants retain their exact wire shape and reject unknown fields; current and historical compiled versions remain readable (#344) |
+| Durable column | Read boundary | Typed root and closure | Current contract |
+|---|---|---|---|
+| `events.payload` | `voom-store/src/repo/audit/events.rs` | `Event` and the content structs in all nine `voom-events/src/payload/*.rs` families | Event content structs reject unknown fields. The tagged `Event` enum uses newtype variants. |
+| `commit_intents.target` | `commit_safety_gate/codecs.rs::decode_target` | `CommitTargetWire`, its three variant content structs, and `FileLocationProposalWire` | Wire kinds are `delete_file_location`, `replace_file_location`, and `move_file_location`; every content struct is strict. |
+| `commit_intents.closure_initial`, `commit_intents.closure_authorized` | `commit_safety_gate/codecs.rs::decode_closure` | `AffectedScopeClosureWire`, `ClosureWarningWire` | The complete commit-gate closure rejects unknown fields. |
+| `commit_intents.override_token` | `commit_safety_gate/codecs.rs::decode_force_path_token` | `ForcePathToken` | The token is strict; `BypassKind` is a unit enum with no field-drop surface. |
+| `worker_capabilities.extra` at `$.accelerator` | `video_hardware.rs` | `VideoAcceleratorDescriptor` and the NVIDIA, VAAPI, and VideoToolbox descriptor closure | Every stored descriptor is `backend` tagged and every descriptor struct is strict. Other keys in `extra` remain passthrough. |
+| `tickets.payload` | `ticket_payload.rs::parse_ticket` | `WorkflowTicketPayload`, `EffectiveTiming` | The workflow envelope and timing fields are strict. `rendered_payload` and `source_file` remain intentionally opaque inside that envelope. |
+| `tickets.result` | compliance and workflow ticket-result decoders | `ExecuteExtractAudioOutputReport`, `ComplianceLegacyAudioExtractResult`, `PolicyVerificationTicketResult` | Published and historical typed result forms reject unknown fields. Recovery-only subpayloads remain opaque. |
+| `audio_extract_operations.worker_result` | staged extraction recovery in `audio/mod.rs` | `ExtractAudioResult` and its output, stream, and observed-facts closure | Stored worker results use the worker-protocol wire contract and reject unknown fields throughout the closure. |
+| `audio_synthesis_operations.worker_result` | staged synthesis validation and recovery in `audio/mod.rs` | `TranscodeAudioResult` and its stream, disposition, and observed-facts closure | Stored worker results use the worker-protocol wire contract and reject unknown fields throughout the closure. |
+| `audio_extract_operation_outputs.result_facts` | `audio/mod.rs::recovery_output_input` | `AudioObservedFacts` | Recovery facts reject unknown fields before they can drive a resumed commit. |
+| `policy_versions.compiled_json` | `plans.rs::deserialize_stored_compiled_policy` | `CompiledPolicy` and its compiled operation, filter, condition, value, profile, diagnostic, span, and provenance closure | All 41 tagged variants use strict content structs. Intentionally opaque metadata and provenance maps remain `JsonValue`. |
+| `remote_idempotency_keys.response_json` | `remote_idempotency.rs::reserve_or_replay_in_tx`, then route-specific replay decoders | `RemoteMutationReplay`, `RemoteAcquireOutcome`, the heartbeat/complete/fail outcomes, `RemoteLeaseDispatch`, and `RemoteArtifactAccessPlan` | Envelope status values are `ok` and `error`; acquire outcomes are `idle`, `no_candidate`, and `leased`. Strict private wire structs preserve the public domain enums while rejecting unknown fields. |
 
-### Durable typed column changes
+### Event families and audit boundary
 
-New or retyped durable columns whose value is also a field of a Class-T /
-T-upstream typed root, newest first. Each row names the migration, the columns,
-and the already-scoped defining file — the scope list needs a new line only when
-the change introduces a *new* defining file.
+`SqliteEventRepo::append_in_tx` is the single durable event emission path. Reads reconstruct the
+tagged `Event` value in `repo/audit/events.rs` before deserializing it. The strict content structs
+therefore protect the audit log at both the emission taxonomy and historical-read boundary.
 
-| migration | durable columns | typed root | evolution | defining file |
-|---|---|---|---|---|
-| `0032` (#409) | `video_profiles.qp` (new, nullable); `video_profiles.preset` (now nullable) | `TranscodeVideoProfile` **and** `VideoProfileSettings`, both reachable from `policy_versions.compiled_json` via `VideoProfileRef` (`Named` resolves to the former, `Inline` is the latter) | `qp: Option<u8>` is additive — an older compiled payload without it reads as `None`. `preset: String` → `Option<String>` is a **retype**, so a payload written with `preset` absent is unreadable by a pre-#409 binary: binary-before-DB upgrade ordering applies (ADR 0013). Both fields are `skip_serializing_if = "Option::is_none"`, so every software and NVENC payload is byte-identical to before, and `inline_profile_id`'s canonical form omits an absent `preset` rather than substituting one, keeping pre-#409 `inline-<hash>` identities stable. | `crates/voom-core/src/media/transcode_video_profile.rs` and `crates/voom-policy/src/data/video_profile.rs` (both already in scope) |
-| `0030` (#411) | `video_profiles.bitrate_kbps` (new, nullable); `accelerator_claims` gains `backend` | `TranscodeVideoProfile` **and** `VideoProfileSettings`, same two roots as the row above | `bitrate_kbps: Option<u32>` is additive and `skip_serializing_if = "Option::is_none"`, so every pre-#411 payload is byte-identical. `inline_profile_id`'s canonical form contributes a `bitrate_kbps=` part only when the field is present, so pre-#411 `inline-<hash>` identities are unchanged while two profiles differing only in bitrate now hash differently. | `crates/voom-core/src/media/transcode_video_profile.rs` and `crates/voom-policy/src/data/video_profile.rs` (both already in scope) |
-| `0029` (#400) | `video_profiles.cq`, `video_profiles.decode_backend` | same | `cq: Option<u8>` and `decode: VideoDecodeMode` are additive; `decode` defaults to `Software` and is skipped when software. | `crates/voom-core/src/media/transcode_video_profile.rs` (already in scope) |
+The enforced families are:
 
-#### Non-durable coordinated retype: `LocalWorkerBound.accelerator` (#409)
+- artifact lifecycle;
+- commit lifecycle;
+- execution lifecycle;
+- external systems;
+- media identity;
+- policy;
+- system;
+- use leases;
+- workers.
 
-`LocalWorkerBound` is the local worker's stdout readiness handshake, not a
-durable column, so it gets no row above. It is recorded here because #409 changes
-it non-additively: `accelerator` goes from
-`Option<NvidiaVideoAcceleratorDescriptor>` to `Option<VideoAcceleratorDescriptor>`,
-a `backend`-tagged enum over the NVIDIA and VAAPI descriptor structs. An NVIDIA
-descriptor is therefore nested under `{"backend":"nvidia", …}` on the wire, so a
-control plane and a bundled worker binary on opposite sides of the change cannot
-exchange a bound payload. ADR 0013's binary-before-DB ordering applies: the pair
-is lock-stepped (ADR 0002/0016) and must be deployed together, never mixed.
+The enum itself is adjacently tagged. Strictness belongs on each newtype variant's content struct,
+where serde enforces it, rather than on the tagged enum.
 
-The NVIDIA durable side **is** changed, by issue #411 rather than by #409.
-Migration 0031 backfills `"backend":"nvidia"` onto every pre-existing
-`worker_capabilities.extra.accelerator` object with a `json_set` update, so there
-is no untagged shape left in the database and no reader has to sniff for one.
-`local_worker.rs` serializes the tagged enum for every backend. Pinned by
-`local_worker_test.rs::nvidia_capability_records_the_tagged_descriptor_token_and_capacity`.
+#### Event payload domain typing
 
-**Reconciliation closed (#409).** `worker_capabilities.extra` was classified
-Class P ("passthrough `JsonValue` — no typed read") while `extra.accelerator` was
-in fact read typed at `crates/voom-control-plane/src/video_hardware.rs`
-(`from_value` → `NvidiaVideoAcceleratorDescriptor`). #409 makes a second
-descriptor durable there, so the column is **promoted P → T-upstream**: its typed
-surface is the accelerator descriptor structs in
-`crates/voom-worker-protocol/src/video_acceleration.rs`, which is in
-`scripts/payload-contract-scope.txt`. The rest of the column stays passthrough —
-`endpoint` and `secret` are read as untyped strings.
+Event payloads carry the existing `voom-core` ID newtypes wherever the field identifies one
+durable entity. The serde-transparent IDs preserve the historical JSON number representation:
 
-The stored `accelerator` object is **`backend`-tagged for every backend**, and is
-read by unconditional `VideoAcceleratorDescriptor` deserialization — there is no
-untagged branch and no presence-of-`backend` sniffing. Migration 0031 is what
-makes that safe: it tagged the pre-existing NVIDIA rows in place, so the
-asymmetric scheme #409 originally designed against (untagged NVIDIA beside tagged
-VAAPI) was overtaken before either shipped. A backend tag this build cannot parse
-is an error for that one worker; video preflight treats such a worker as
-contributing no availability rather than letting the error escape candidate
-projection (ADR 0049 §6).
+- execution events use `JobId`, `TicketId`, `LeaseId`, and `WorkerId`;
+- worker events use `NodeId` and `WorkerId`;
+- commit events use `CommitId`, `EvidenceId`, and `UseLeaseId`, including typed
+  `fresh_lease_ids` vectors on post-mutation and recovery-required events;
+- media-identity events use the matching work, variant, bundle, file, evidence, snapshot, and
+  worker IDs;
+- artifact events use the matching execution, file, snapshot, bundle, handle, location,
+  verification, commit-record, worker, and use-lease IDs;
+- use-lease events use `UseLeaseId` and `FileLocationId`;
+- external-system events use `ExternalSystemId` and `ExternalSystemLinkId`.
 
-The capacity SQL no longer needs to tolerate either shape. It read the grouping
-key from `json_extract(extra, '$.accelerator.hardware_token')`, a field only the
-NVIDIA descriptor carries, so a VAAPI descriptor silently produced no capacity row
-and the bound device never received work. #409 changes those three queries in
-`crates/voom-store/src/repo/execution/workers.rs` to group on
-`json_extract(hardware, '$[0]')` — the capability's own token column, which is
-where ADR 0049 §4 puts the stable token and what ADR 0049 §6 defines capacity
-across. `max_sessions` is still read from the descriptor, because both descriptors
-carry it. A capability with an accelerator descriptor and no `hardware` token is
-now a loud `CONFIG_INVALID` rather than a silent zero. Pinned by
-`local_worker_test.rs::vaapi_capability_records_the_tagged_descriptor_token_and_capacity`.
+`IdentityEvidenceRecordedPayload.assertion_type` uses `AssertionKind`. Its canonical JSON remains
+the existing snake-case token, and deserialization now rejects tokens outside that complete
+vocabulary.
 
-### Transitive typed closure (named-field `Deserialize` sub-structs)
+The following event fields intentionally remain primitive:
 
-For each Class-T / T-upstream root, the reachable named-field `Deserialize`
-structs (the field-drop surface) and the no-surface members:
+- `target_id` and `scope_id` are polymorphic; their companion type field determines the entity;
+- capability, grant, artifact-lineage, bundle-member, lineage, and dispatch-attempt IDs have no
+  matching `voom-core` newtype;
+- provider names and versions, external references, reason and error text, job kinds, artifact
+  lineage operations, and status values without a shared complete enum remain open strings.
 
-- `Event` (voom-events) → all per-variant content structs across the 8
-  `payload/*.rs` files. Each content struct is a named-field `Deserialize` struct
-  and is in scope (Task 5). The enum itself is adjacently tagged with newtype
-  variants, so the attribute lands on the content structs, not the enum.
-- `CommitTargetWire` (codecs.rs:21) → `FileLocationProposalWire` (codecs.rs:37,
-  named-field struct, **in scope**). Variants are currently inline struct-variants
-  (`Delete` / `Replace` / `Move`); Task 3 extracts them to newtype content structs.
-- `AffectedScopeClosureWire` (codecs.rs:110) → `ClosureWarningWire` (codecs.rs:119,
-  named-field struct, **in scope**). Other fields are `BTreeSet`/`Vec` of id
-  newtypes (no surface).
-- `ForcePathToken` (commit_safety_gate.rs:492) → fields are `String`, `String`,
-  `BTreeSet<BypassKind>`; `BypassKind` (commit_safety_gate.rs:482) is a unit-variant
-  enum — **no field-drop surface**. The struct itself is in scope (Task 3).
-- `TargetRowEpochTriple` (codecs.rs:299) → tuple newtype
-  `(TargetMemberKind, u64, u64)`, **no named fields** → attribute inapplicable, safe
-  by construction; **NOT in scope**.
-- `WorkflowTicketPayload` (ticket_payload.rs:8) → `EffectiveTiming` (timing.rs:4,
-  named-field struct, **in scope**); `OperationKind` (voom-core, unit-variant enum —
-  no surface); `rendered_payload: Value` and `source_file: Option<Value>` are
-  untyped passthrough (not a deserialization boundary, not in scope).
-- `EffectiveTiming` (timing.rs:4) → only `u64` scalar fields; terminal, no further
-  nested structs.
-- `ExecuteExtractAudioOutputReport` and `ComplianceLegacyAudioExtractResult`
-  (compliance.rs) are terminal named-field roots, **in scope**. The historical
-  recovery subpayload remains intentionally opaque. `ComplianceAudioExtractOutput`
-  and `ComplianceLegacyAudioExtractOutput` are Serialize-only report projections,
-  not typed durable-read roots.
-- `PolicyVerificationTicketResult` (ticket_results.rs) is a terminal named-field
-  root, **in scope**. `PolicyVerificationTicketStatus` is a unit enum with no
-  field-drop surface.
-- `CompiledPolicy` (compiled.rs) → strict ordinary structs and distinct strict
-  content structs for all 41 tagged variants. `CompiledRunIf` delegates to the
-  strict `CompiledRunIfWire`. `VideoProfileRef` retains its audited compatibility
-  visitor, whose inline form delegates to strict `VideoProfileSettings`.
-  `TranscodeVideoProfile` is strict. Metadata and provenance flags remain
-  intentionally opaque `JsonValue` maps.
+These source-level type changes require no historical-data migration: canonical serialization is
+unchanged, and the strict content structs continue to reject unknown fields.
 
-**No named fields → attribute inapplicable, safe by construction** (recorded, not in
-scope): `TargetRowEpochTriple` (tuple newtype), `EvidenceId` (id newtype),
-`OperationKind` (unit enum), `BypassKind` (unit enum).
+### Commit-gate payloads
 
-### Reconciliation (Step 5b)
+The commit gate persists the proposed target, affected-scope closure, authorization closure,
+override token, target epochs, and accepted evidence IDs. The target, closure, and override are
+strict typed roots. Target epochs and evidence IDs are safe by construction and are listed below.
 
-Every Class-T / T-upstream defining file in scope maps to a sweep task:
+The target wire names and the `BypassKind` values are durable vocabulary. Renaming one is a
+coordinated wire change, not a source-only refactor.
 
-- `crates/voom-events/src/payload/*.rs` → Task 5
-- `crates/voom-store/src/repo/media/commit_safety_gate/codecs.rs`,
-  `…/commit_safety_gate.rs` → Task 3
-- `crates/voom-control-plane/src/workflow/plan/ticket_payload.rs`,
-  `…/execution/timing.rs` → Task 4
-- `crates/voom-control-plane/src/audio/mod.rs`,
-  `…/cases/policy/compliance.rs` → complete in #337
-- `crates/voom-control-plane/src/workflow/ticket_results.rs` → complete in #334
-- `crates/voom-policy/src/compile/compiled.rs`, `…/data/video_profile.rs`,
-  `…/diagnostic.rs`, `…/syntax/span.rs`, and
-  `crates/voom-core/src/media/transcode_video_profile.rs` → complete in #344
+### Workflow and remote-execution payloads
 
-A full sweep of every non-test typed deserialization read (`from_value::<T>`,
-`from_str::<T>`, and type-annotated-let `from_str`/`from_value`) across all crates
-surfaced no Class-T / T-upstream root with a named-field surface outside these
-files. No new sweep task is required.
+Workflow ticket payloads enforce their routing envelope while keeping worker-specific rendered
+payloads opaque. Ticket results enforce the result forms that the control plane reads back.
 
-```
-Reconciliation result: [x] all discovered roots map to Tasks 3–5 (no new task needed)
-                       [ ] new sweep task(s) added: ____________________
-```
+Remote idempotency records have two typed layers. `RemoteMutationReplay` enforces the outer
+`status` envelope, and the route decoder enforces the `data` value for that route. A replay that
+cannot be decoded is repointed to a terminal error so the completed mutation is never executed
+again. Migration `0033` adds `scheduler_decision_id: 0` to older acquire outcomes, making all
+stored acquire replay data conform to the current typed shape.
 
-## Class P (passthrough JsonValue — no typed read, no risk)
+### Policy payloads
 
-worker_grants.max_parallel;
-artifact_handles.{allowed_access_modes,source_lineage};
-artifact_commit_records.report; artifact_verifications.report;
-audio_extract_operation_outputs.{probe_payload,result_facts}
-(in-memory `*Report` derive neither Serialize nor Deserialize);
-external_systems.{connection_profile,rate_limit_config};
-quality_scoring_profiles.definition; quality_scores.{dimension_scores,provenance};
-remote_idempotency_keys.response_json;
-artifact_access_plans.{input_handles,output_handles,evidence};
-workflow_summaries.per_operation;
-workflow_phase_summaries.report; scheduler_decisions.explanation_json;
-nodes.metadata; identity_evidence.provenance; media_snapshots.payload;
-identity_evidence.{pinned_file_version_ids,pinned_hashes,pinned_locations}
-(read in repo/media/identity.rs via `from_str` → `Option<JsonValue>`);
-policy_media_snapshot_inputs.stream_summary;
-policy_identity_evidence_inputs.provenance;
-policy_bundle_target_inputs.artifact_expectation;
-policy_quality_profile_selections.dimension_weights;
-policy_issue_inputs.provenance
-(read in repo/policy/policy_inputs.rs via `json_value` → `JsonValue`).
+`CompiledPolicy` is the root of the largest typed closure. Its tagged enums use distinct strict
+content structs, including all compiled operations, track filters, conditions, and values.
+`VideoProfileRef` retains its compatibility visitor; inline profiles delegate to strict
+`VideoProfileSettings`, and named profiles resolve to strict `TranscodeVideoProfile` values.
 
-If a future change starts typing any Class-P column, add it to the Class-T table
-above and to `scripts/payload-contract-scope.txt`.
+## Durable wire evolution
+
+Migration identifiers identify the durable schema transitions that make the current reader safe.
+
+| Migration | Durable change | Current read contract |
+|---|---|---|
+| `0033` | Adds a missing `scheduler_decision_id` to historical remote acquire replay outcomes. | `RemoteAcquireOutcome` always receives the field; `0` identifies a replay written before scheduler-decision persistence. |
+| `0032` | Adds nullable `video_profiles.qp` and makes `video_profiles.preset` nullable. | `qp: Option<u8>` is additive. The `preset` retype requires binary-before-database upgrade ordering. Absent optional fields remain omitted from canonical inline-profile identity input. |
+| `0031` | Adds `backend: "nvidia"` to stored accelerator descriptors that predate backend-neutral acceleration. | `VideoAcceleratorDescriptor` can deserialize every stored accelerator without shape sniffing. |
+| `0030` | Adds nullable `video_profiles.bitrate_kbps` and an accelerator-claim backend. | `bitrate_kbps: Option<u32>` is additive and affects inline-profile identity only when present. |
+| `0029` | Adds `video_profiles.cq` and `video_profiles.decode_backend`. | `cq: Option<u8>` is additive; absent decode mode means software and is omitted when serialized. |
+
+`LocalWorkerBound.accelerator` is not durable, but it shares the backend-tagged
+`VideoAcceleratorDescriptor` contract with stored worker capabilities. The control plane and bundled
+worker are version-locked under ADRs 0002 and 0016, so a non-additive readiness-handshake change is
+deployed as one binary set.
+
+Accelerator capacity groups by the capability's stable token in `hardware[0]`. The descriptor
+supplies `max_sessions`. A descriptor without a hardware token is `CONFIG_INVALID`; silently
+treating it as zero capacity would hide a broken worker configuration.
+
+## Safe by construction
+
+These typed JSON values contain no reachable named-field struct and therefore need no guard entry:
+
+- `commit_intents.target_row_epochs` → `Vec<TargetRowEpochTriple>`, where the element is a tuple
+  newtype;
+- `commit_intents.accepted_evidence_ids` → `Vec<EvidenceId>`, where the element is an ID newtype;
+- `OperationKind` and `BypassKind` values → unit enums;
+- string and integer arrays in worker capabilities, worker grants, workflow summaries, and policy
+  inputs → `Vec<String>` or `Vec<u64>`;
+- `library_roots.include_globs`, `library_roots.exclude_globs`, and
+  `library_roots.extension_allowlist` → `Vec<String>`;
+- `artifact_handles.allowed_access_modes`, `artifact_access_plans.input_handles`, and
+  `artifact_access_plans.output_handles` → `Vec<String>`.
+
+## Guard scope
+
+The scope file groups defining sources for these enforced closures:
+
+- all nine event payload families and their `Event` root;
+- commit-gate target, closure, and override wire types;
+- workflow ticket payloads, timing, and ticket results;
+- remote idempotency envelopes and route-specific replay outcomes;
+- durable audio worker results, recovery facts, and policy-verification result roots;
+- compiled policy, video-profile, diagnostic, span, and provenance types;
+- backend-neutral accelerator descriptors.
+
+The guard rejects a named-field `Deserialize` struct without
+`#[serde(deny_unknown_fields)]` and a tagged enum with inline struct variants. Behavioral tests
+independently verify that unknown fields fail deserialization at each root and nested closure.
+
+## Passthrough JSON
+
+The following columns remain `JsonValue` at production read boundaries:
+
+- `worker_grants.max_parallel`;
+- `artifact_handles.source_lineage`;
+- `artifact_commit_records.report`, `artifact_verifications.report`;
+- `audio_extract_operation_outputs.probe_payload`;
+- `audio_synthesis_operations.probe_payload`;
+- `audio_synthesis_companions.result_facts`;
+- `external_systems.connection_profile`, `external_systems.rate_limit_config`;
+- `quality_scoring_profiles.definition`, `quality_scores.dimension_scores`,
+  `quality_scores.provenance`;
+- `artifact_access_plans.evidence`;
+- `workflow_summaries.per_operation`, `workflow_phase_summaries.report`,
+  `scheduler_decisions.explanation_json`;
+- `nodes.metadata`, `identity_evidence.provenance`, `media_snapshots.payload`;
+- `identity_evidence.pinned_file_version_ids`, `identity_evidence.pinned_hashes`,
+  `identity_evidence.pinned_locations`;
+- `policy_media_snapshot_inputs.stream_summary`;
+- `policy_identity_evidence_inputs.provenance`;
+- `policy_bundle_target_inputs.artifact_expectation`;
+- `policy_quality_profile_selections.dimension_weights`;
+- `policy_issue_inputs.provenance`.
+
+If production code starts deserializing one of these values into a typed root, move it to the
+enforced or safe-by-construction section and update `scripts/payload-contract-scope.txt` when a new
+defining file enters the strict closure.

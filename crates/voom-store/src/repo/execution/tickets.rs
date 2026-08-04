@@ -4,17 +4,14 @@ use rand::RngCore;
 use serde_json::Value as JsonValue;
 use sqlx::{QueryBuilder, Row, SqlitePool};
 use time::{Duration, OffsetDateTime};
-use voom_core::{Clock, JobId, TicketId, TicketOperation, VoomError};
+use voom_core::{FileVersionId, JobId, TicketId, TicketOperation, VoomError};
 
 use super::Repository;
 use super::common::{
     i64_from_u64, iso8601, map_row_err, parse_iso8601, serialize_json, u32_from_i64, u64_from_i64,
 };
 
-/// Sprint 1 default backoff window — capped exponential with full
-/// jitter, matching the architectural spec's Error Handling And
-/// Recovery → Retry policy. Sprint 4+'s scheduling policy will replace
-/// these constants with policy-driven values.
+/// Default backoff window: capped exponential with full jitter.
 const DEFAULT_BACKOFF_BASE_SECS: u64 = 5;
 const DEFAULT_BACKOFF_CAP_SECS: u64 = 300;
 
@@ -86,6 +83,42 @@ pub struct Ticket {
     pub epoch: u64,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct SucceededTicketResult {
+    pub ticket_id: TicketId,
+    pub result: JsonValue,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WorkflowTicketFacts {
+    pub unfinished: u32,
+    pub ready: u32,
+    pub leased: u32,
+    pub failed: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkflowTicketIdentity<'a> {
+    pub job_id: JobId,
+    pub workflow_id: &'a str,
+    pub branch_id: &'a str,
+    pub node_id: &'a str,
+    pub source_file_version_id: Option<FileVersionId>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkflowPhaseScope<'a> {
+    pub job_id: JobId,
+    pub exact_workflow_id: &'a str,
+    pub file_workflow_pattern: &'a str,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PreLeaseFailureTransition {
+    Terminal,
+    RetryAt(OffsetDateTime),
+}
+
 #[derive(Debug, Clone)]
 pub struct SqliteTicketRepo {
     pool: SqlitePool,
@@ -98,26 +131,11 @@ impl SqliteTicketRepo {
     }
 
     /// Default backoff window after a retriable failure: capped
-    /// exponential with full jitter, per the architectural spec's
-    /// Error Handling And Recovery → Retry policy.
+    /// exponential with full jitter.
     ///
     /// The current value is `random_between(0, min(cap, base * 2^attempt))`
-    /// with `base = 5s` and `cap = 300s`. Sprint 4+ replaces the
-    /// constants with scheduling-policy values; the signature stays
-    /// stable so call sites don't move.
-    ///
-    /// `clock` is currently unused — it stays in the signature so
-    /// Sprint 4 can introduce time-of-day-aware backoff windows
-    /// without forcing every caller to change.
-    #[expect(
-        unused_variables,
-        reason = "clock reserved for Sprint 4 time-of-day-aware backoff windows"
-    )]
-    pub fn default_backoff(
-        attempt: u32,
-        clock: &dyn Clock,
-        rng: &mut (dyn RngCore + Send),
-    ) -> Duration {
+    /// with `base = 5s` and `cap = 300s`.
+    pub fn default_backoff(attempt: u32, rng: &mut (dyn RngCore + Send)) -> Duration {
         let exp_secs =
             DEFAULT_BACKOFF_BASE_SECS.saturating_mul(1u64.checked_shl(attempt).unwrap_or(u64::MAX));
         let cap_secs = exp_secs.min(DEFAULT_BACKOFF_CAP_SECS);
@@ -139,6 +157,13 @@ impl SqliteTicketRepo {
 impl Repository for SqliteTicketRepo {}
 
 impl SqliteTicketRepo {
+    /// Create a pending ticket in the caller's transaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VoomError::Database`] if the row cannot be inserted or decoded,
+    /// and [`VoomError::Internal`] if the payload or timestamp cannot be encoded
+    /// or the inserted row cannot be re-read.
     pub async fn create_in_tx(
         &self,
         tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
@@ -152,7 +177,12 @@ impl SqliteTicketRepo {
               next_eligible_at, created_at, state_changed_at) \
              VALUES (?, ?, 'pending', ?, ?, ?, ?, ?, ?)",
         )
-        .bind(input.job_id.map(|j| i64_from_u64(j.0)))
+        .bind(
+            input
+                .job_id
+                .map(|j| i64_from_u64(j.0, concat!(module_path!(), ": ", stringify!(j.0))))
+                .transpose()?,
+        )
         .bind(input.kind.as_str())
         .bind(input.priority)
         .bind(payload_json)
@@ -163,13 +193,22 @@ impl SqliteTicketRepo {
         .execute(&mut **tx)
         .await
         .map_err(|e| VoomError::database_context("tickets insert", e))?;
-        let id = TicketId(u64_from_i64(res.last_insert_rowid()));
+        let id = TicketId(u64_from_i64(
+            res.last_insert_rowid(),
+            concat!(module_path!(), ": ", stringify!(res.last_insert_rowid())),
+        )?);
         // Re-read to return the canonical row.
         get_in_tx_inner(tx, id)
             .await?
             .ok_or_else(|| VoomError::Internal(format!("tickets create: row vanished id={id}")))
     }
 
+    /// Create and commit a pending ticket.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors documented by [`Self::create_in_tx`], or
+    /// [`VoomError::Database`] if the transaction cannot begin or commit.
     pub async fn create(&self, input: NewTicket) -> Result<Ticket, VoomError> {
         let mut tx = self
             .pool
@@ -183,6 +222,165 @@ impl SqliteTicketRepo {
         Ok(out)
     }
 
+    /// Return succeeded, result-bearing tickets for one job and operation.
+    ///
+    /// Results are ordered by ticket id so consumers preserve durable ticket
+    /// order when a result contains multiple projected records.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VoomError::Database`] if rows or persisted JSON cannot be
+    /// read or decoded.
+    pub async fn succeeded_results_for_job_and_operation(
+        &self,
+        job_id: JobId,
+        operation: TicketOperation,
+    ) -> Result<Vec<SucceededTicketResult>, VoomError> {
+        let rows = sqlx::query(
+            "SELECT id, result FROM tickets \
+             WHERE job_id = ? AND kind = ? AND state = 'succeeded' AND result IS NOT NULL \
+             ORDER BY id ASC",
+        )
+        .bind(i64_from_u64(
+            job_id.0,
+            concat!(module_path!(), ": ", stringify!(job_id.0)),
+        )?)
+        .bind(operation.as_str())
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|error| VoomError::database_context("succeeded ticket results", error))?;
+
+        let mut results = Vec::with_capacity(rows.len());
+        for row in rows {
+            let ticket_id: i64 = row
+                .try_get("id")
+                .map_err(|error| map_row_err("succeeded ticket result ticket id", error))?;
+            let result: String = row
+                .try_get("result")
+                .map_err(|error| map_row_err("succeeded ticket result", error))?;
+            results.push(SucceededTicketResult {
+                ticket_id: TicketId(u64_from_i64(
+                    ticket_id,
+                    concat!(module_path!(), ": ", stringify!(ticket_id)),
+                )?),
+                result: serde_json::from_str(&result).map_err(|error| {
+                    VoomError::database_context("parse succeeded ticket result", error)
+                })?,
+            });
+        }
+        Ok(results)
+    }
+
+    pub async fn ticket_ids_for_workflow_phase(
+        &self,
+        scope: &WorkflowPhaseScope<'_>,
+    ) -> Result<Vec<TicketId>, VoomError> {
+        let rows: Vec<i64> = sqlx::query_scalar(
+            "SELECT id FROM tickets WHERE job_id = ? \
+             AND (json_extract(payload, '$.workflow_id') = ? \
+                  OR json_extract(payload, '$.workflow_id') GLOB ?) ORDER BY id ASC",
+        )
+        .bind(workflow_sqlite_id(scope.job_id.0, "workflow phase job id")?)
+        .bind(scope.exact_workflow_id)
+        .bind(scope.file_workflow_pattern)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|error| VoomError::database_context("workflow phase ticket ids", error))?;
+        decode_ticket_ids(rows, "workflow phase ticket id")
+    }
+
+    pub async fn ticket_ids_for_workflow_phase_file(
+        &self,
+        scope: &WorkflowPhaseScope<'_>,
+        file_version_id: FileVersionId,
+    ) -> Result<Vec<TicketId>, VoomError> {
+        let rows: Vec<i64> = sqlx::query_scalar(
+            "SELECT id FROM tickets WHERE job_id = ? \
+             AND (json_extract(payload, '$.workflow_id') = ? \
+                  OR json_extract(payload, '$.workflow_id') GLOB ?) \
+             AND json_extract(payload, '$.rendered_payload.source_file_version_id') = ? \
+             ORDER BY id ASC",
+        )
+        .bind(workflow_sqlite_id(scope.job_id.0, "workflow phase job id")?)
+        .bind(scope.exact_workflow_id)
+        .bind(scope.file_workflow_pattern)
+        .bind(workflow_sqlite_id(
+            file_version_id.0,
+            "workflow phase source version id",
+        )?)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|error| VoomError::database_context("workflow phase file ticket ids", error))?;
+        decode_ticket_ids(rows, "workflow phase file ticket id")
+    }
+
+    pub async fn ticket_ids_for_workflow_phase_scope(
+        &self,
+        scope: &WorkflowPhaseScope<'_>,
+        workflow_node_id: &str,
+        file_version_id: Option<FileVersionId>,
+    ) -> Result<Vec<TicketId>, VoomError> {
+        let file_version_id = file_version_id
+            .map(|id| workflow_sqlite_id(id.0, "workflow phase source version id"))
+            .transpose()?;
+        let rows: Vec<i64> = sqlx::query_scalar(
+            "SELECT id FROM tickets WHERE job_id = ? \
+             AND (json_extract(payload, '$.workflow_id') = ? \
+                  OR json_extract(payload, '$.workflow_id') GLOB ?) \
+             AND json_extract(payload, '$.node_id') = ? \
+             AND (? IS NULL OR \
+                  json_extract(payload, '$.rendered_payload.source_file_version_id') = ?) \
+             ORDER BY id ASC",
+        )
+        .bind(workflow_sqlite_id(scope.job_id.0, "workflow phase job id")?)
+        .bind(scope.exact_workflow_id)
+        .bind(scope.file_workflow_pattern)
+        .bind(workflow_node_id)
+        .bind(file_version_id)
+        .bind(file_version_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|error| VoomError::database_context("workflow phase scope ticket ids", error))?;
+        decode_ticket_ids(rows, "workflow phase scope ticket id")
+    }
+
+    pub async fn succeeded_ticket_ids_for_workflow_phase_file_and_operation(
+        &self,
+        scope: &WorkflowPhaseScope<'_>,
+        file_version_id: FileVersionId,
+        operation: TicketOperation,
+    ) -> Result<Vec<TicketId>, VoomError> {
+        let rows: Vec<i64> = sqlx::query_scalar(
+            "SELECT id FROM tickets WHERE job_id = ? AND state = 'succeeded' AND kind = ? \
+             AND (json_extract(payload, '$.workflow_id') = ? \
+                  OR json_extract(payload, '$.workflow_id') GLOB ?) \
+             AND json_extract(payload, '$.rendered_payload.source_file_version_id') = ? \
+             ORDER BY id ASC",
+        )
+        .bind(workflow_sqlite_id(scope.job_id.0, "workflow phase job id")?)
+        .bind(operation.as_str())
+        .bind(scope.exact_workflow_id)
+        .bind(scope.file_workflow_pattern)
+        .bind(workflow_sqlite_id(
+            file_version_id.0,
+            "workflow phase source version id",
+        )?)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|error| {
+            VoomError::database_context("succeeded workflow phase file ticket ids", error)
+        })?;
+        decode_ticket_ids(rows, "succeeded workflow phase file ticket id")
+    }
+
+    /// Add a dependency to a pending ticket in the caller's transaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VoomError::NotFound`] when the dependent ticket is missing,
+    /// [`VoomError::Conflict`] when it is no longer pending,
+    /// [`VoomError::DependencyCycle`] for a self-edge or transitive cycle, and
+    /// [`VoomError::Database`] for query or constraint failures.
     pub async fn add_dependency_in_tx(
         &self,
         tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
@@ -201,7 +399,10 @@ impl SqliteTicketRepo {
         // `state = 'ready'`, so a late edge would let the ticket lease and
         // run before the new blocker succeeds.
         let row: Option<(String,)> = sqlx::query_as("SELECT state FROM tickets WHERE id = ?")
-            .bind(i64_from_u64(ticket_id.0))
+            .bind(i64_from_u64(
+                ticket_id.0,
+                concat!(module_path!(), ": ", stringify!(ticket_id.0)),
+            )?)
             .fetch_optional(&mut **tx)
             .await
             .map_err(|e| VoomError::database_context("ticket state probe", e))?;
@@ -225,8 +426,14 @@ impl SqliteTicketRepo {
              ) \
              SELECT id FROM reach WHERE id = ? LIMIT 1",
         )
-        .bind(i64_from_u64(depends_on.0))
-        .bind(i64_from_u64(ticket_id.0))
+        .bind(i64_from_u64(
+            depends_on.0,
+            concat!(module_path!(), ": ", stringify!(depends_on.0)),
+        )?)
+        .bind(i64_from_u64(
+            ticket_id.0,
+            concat!(module_path!(), ": ", stringify!(ticket_id.0)),
+        )?)
         .fetch_optional(&mut **tx)
         .await
         .map_err(|e| VoomError::database_context("cycle check", e))?;
@@ -239,14 +446,26 @@ impl SqliteTicketRepo {
             "INSERT INTO ticket_dependencies (ticket_id, depends_on_ticket_id, kind) \
              VALUES (?, ?, 'phase')",
         )
-        .bind(i64_from_u64(ticket_id.0))
-        .bind(i64_from_u64(depends_on.0))
+        .bind(i64_from_u64(
+            ticket_id.0,
+            concat!(module_path!(), ": ", stringify!(ticket_id.0)),
+        )?)
+        .bind(i64_from_u64(
+            depends_on.0,
+            concat!(module_path!(), ": ", stringify!(depends_on.0)),
+        )?)
         .execute(&mut **tx)
         .await
         .map_err(|e| VoomError::database_context("ticket_dependencies insert", e))?;
         Ok(())
     }
 
+    /// Add and commit a dependency to a pending ticket.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors documented by [`Self::add_dependency_in_tx`], or
+    /// [`VoomError::Database`] if the transaction cannot begin or commit.
     pub async fn add_dependency(
         &self,
         ticket_id: TicketId,
@@ -265,6 +484,44 @@ impl SqliteTicketRepo {
         Ok(())
     }
 
+    /// Report whether an exact dependency edge exists in the caller's transaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VoomError::Database`] if the existence query fails.
+    pub async fn dependency_exists_in_tx(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        ticket_id: TicketId,
+        depends_on: TicketId,
+    ) -> Result<bool, VoomError> {
+        let exists: Option<i64> = sqlx::query_scalar(
+            "SELECT 1 FROM ticket_dependencies \
+             WHERE ticket_id = ? AND depends_on_ticket_id = ? \
+             LIMIT 1",
+        )
+        .bind(i64_from_u64(
+            ticket_id.0,
+            concat!(module_path!(), ": ", stringify!(ticket_id.0)),
+        )?)
+        .bind(i64_from_u64(
+            depends_on.0,
+            concat!(module_path!(), ": ", stringify!(depends_on.0)),
+        )?)
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(|e| VoomError::database_context("workflow dependency lookup", e))?;
+        Ok(exists.is_some())
+    }
+
+    /// Promote a pending ticket when all dependencies have succeeded.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VoomError::NotFound`] when the ticket does not exist,
+    /// [`VoomError::Conflict`] when it changes during promotion,
+    /// [`VoomError::Database`] for query or row-decoding failures, and
+    /// [`VoomError::Internal`] if the timestamp cannot be encoded.
     pub async fn mark_ready_if_unblocked_in_tx(
         &self,
         tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
@@ -276,7 +533,10 @@ impl SqliteTicketRepo {
         // pending-state gate below. The post-read after the UPDATE is
         // gone — we use `RETURNING` instead.
         let state: Option<String> = sqlx::query_scalar("SELECT state FROM tickets WHERE id = ?")
-            .bind(i64_from_u64(ticket_id.0))
+            .bind(i64_from_u64(
+                ticket_id.0,
+                concat!(module_path!(), ": ", stringify!(ticket_id.0)),
+            )?)
             .fetch_optional(&mut **tx)
             .await
             .map_err(|e| VoomError::database_context("tickets state probe", e))?;
@@ -291,7 +551,10 @@ impl SqliteTicketRepo {
                JOIN tickets t ON t.id = td.depends_on_ticket_id \
               WHERE td.ticket_id = ? AND t.state != 'succeeded'",
         )
-        .bind(i64_from_u64(ticket_id.0))
+        .bind(i64_from_u64(
+            ticket_id.0,
+            concat!(module_path!(), ": ", stringify!(ticket_id.0)),
+        )?)
         .fetch_one(&mut **tx)
         .await
         .map_err(|e| VoomError::database_context("dependency count", e))?;
@@ -305,7 +568,10 @@ impl SqliteTicketRepo {
              RETURNING {TICKET_RETURNING_COLS}"
         ))
         .bind(&ts)
-        .bind(i64_from_u64(ticket_id.0))
+        .bind(i64_from_u64(
+            ticket_id.0,
+            concat!(module_path!(), ": ", stringify!(ticket_id.0)),
+        )?)
         .fetch_optional(&mut **tx)
         .await
         .map_err(|e| VoomError::database_context("tickets update", e))?;
@@ -321,6 +587,12 @@ impl SqliteTicketRepo {
         Ok(vec![promoted])
     }
 
+    /// Promote and commit a pending ticket when all dependencies have succeeded.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors documented by [`Self::mark_ready_if_unblocked_in_tx`],
+    /// or [`VoomError::Database`] if the transaction cannot begin or commit.
     pub async fn mark_ready_if_unblocked(
         &self,
         ticket_id: TicketId,
@@ -340,15 +612,28 @@ impl SqliteTicketRepo {
         Ok(out)
     }
 
+    /// Look up a ticket by id.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VoomError::Database`] if the query or row decoding fails.
     pub async fn get(&self, id: TicketId) -> Result<Option<Ticket>, VoomError> {
         let row = sqlx::query(SELECT_TICKET_BY_ID)
-            .bind(i64_from_u64(id.0))
+            .bind(i64_from_u64(
+                id.0,
+                concat!(module_path!(), ": ", stringify!(id.0)),
+            )?)
             .fetch_optional(&self.pool)
             .await
             .map_err(|e| VoomError::database_context("tickets get", e))?;
         row.as_ref().map(row_to_ticket).transpose()
     }
 
+    /// Look up a ticket by id in the caller's transaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VoomError::Database`] if the query or row decoding fails.
     pub async fn get_in_tx(
         &self,
         tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
@@ -357,9 +642,314 @@ impl SqliteTicketRepo {
         get_in_tx_inner(tx, id).await
     }
 
+    /// List the distinct succeeded node ids for one workflow in lexical order.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VoomError::Database`] if the projection cannot be queried or decoded.
+    pub async fn succeeded_workflow_node_ids(
+        &self,
+        job_id: JobId,
+        workflow_id: &str,
+    ) -> Result<Vec<String>, VoomError> {
+        sqlx::query_scalar(
+            "SELECT DISTINCT json_extract(payload, '$.node_id') FROM tickets \
+             WHERE job_id = ? \
+               AND state = 'succeeded' \
+               AND json_extract(payload, '$.workflow_id') = ? \
+               AND json_type(payload, '$.node_id') = 'text' \
+             ORDER BY json_extract(payload, '$.node_id') ASC",
+        )
+        .bind(i64_from_u64(
+            job_id.0,
+            concat!(module_path!(), ": ", stringify!(job_id.0)),
+        )?)
+        .bind(workflow_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| VoomError::database_context("workflow succeeded node ids", e))
+    }
+
+    /// Report whether one workflow node already has a ticket in the caller's transaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VoomError::Database`] if the existence query fails.
+    pub async fn workflow_ticket_exists_in_tx(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        job_id: JobId,
+        workflow_id: &str,
+        branch_id: &str,
+        node_id: &str,
+    ) -> Result<bool, VoomError> {
+        let exists: Option<i64> = sqlx::query_scalar(
+            "SELECT 1 FROM tickets \
+             WHERE job_id = ? \
+               AND json_extract(payload, '$.workflow_id') = ? \
+               AND json_extract(payload, '$.branch_id') = ? \
+               AND json_extract(payload, '$.node_id') = ? \
+             LIMIT 1",
+        )
+        .bind(i64_from_u64(
+            job_id.0,
+            concat!(module_path!(), ": ", stringify!(job_id.0)),
+        )?)
+        .bind(workflow_id)
+        .bind(branch_id)
+        .bind(node_id)
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(|e| VoomError::database_context("workflow ticket existence", e))?;
+        Ok(exists.is_some())
+    }
+
+    /// List eligible ready tickets for one workflow in scheduling order.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VoomError::Database`] if the query or typed row decoding fails, and
+    /// [`VoomError::Internal`] if the eligibility timestamp cannot be encoded.
+    pub async fn ready_workflow_tickets(
+        &self,
+        job_id: JobId,
+        workflow_id: &str,
+        now: OffsetDateTime,
+        limit: u32,
+    ) -> Result<Vec<Ticket>, VoomError> {
+        let rows = sqlx::query(&format!(
+            "SELECT {TICKET_RETURNING_COLS} FROM tickets \
+             WHERE job_id = ? \
+               AND state = 'ready' \
+               AND next_eligible_at <= ? \
+               AND json_extract(payload, '$.workflow_id') = ? \
+             ORDER BY priority DESC, next_eligible_at ASC, id ASC \
+             LIMIT ?"
+        ))
+        .bind(i64_from_u64(
+            job_id.0,
+            concat!(module_path!(), ": ", stringify!(job_id.0)),
+        )?)
+        .bind(iso8601(now)?)
+        .bind(workflow_id)
+        .bind(i64::from(limit))
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| VoomError::database_context("workflow ready tickets", e))?;
+        rows.iter().map(row_to_ticket).collect()
+    }
+
+    /// Return execution-state counts for one workflow.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VoomError::Database`] if the projection cannot be queried or decoded.
+    pub async fn workflow_ticket_facts(
+        &self,
+        job_id: JobId,
+        workflow_id: &str,
+    ) -> Result<WorkflowTicketFacts, VoomError> {
+        let (unfinished, ready, leased, failed): (i64, i64, i64, i64) = sqlx::query_as(
+            "SELECT \
+               COALESCE(SUM(state IN ('pending', 'ready', 'leased')), 0), \
+               COALESCE(SUM(state = 'ready'), 0), \
+               COALESCE(SUM(state = 'leased'), 0), \
+               COALESCE(SUM(state = 'failed'), 0) \
+             FROM tickets \
+             WHERE job_id = ? AND json_extract(payload, '$.workflow_id') = ?",
+        )
+        .bind(i64_from_u64(
+            job_id.0,
+            concat!(module_path!(), ": ", stringify!(job_id.0)),
+        )?)
+        .bind(workflow_id)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|e| VoomError::database_context("workflow ticket facts", e))?;
+        Ok(WorkflowTicketFacts {
+            unfinished: u32_from_i64(unfinished)?,
+            ready: u32_from_i64(ready)?,
+            leased: u32_from_i64(leased)?,
+            failed: u32_from_i64(failed)?,
+        })
+    }
+
+    /// Return the earliest-created failed ticket for one workflow.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VoomError::Database`] if the query or typed row decoding fails.
+    pub async fn first_failed_workflow_ticket(
+        &self,
+        job_id: JobId,
+        workflow_id: &str,
+    ) -> Result<Option<Ticket>, VoomError> {
+        let row = sqlx::query(&format!(
+            "SELECT {TICKET_RETURNING_COLS} FROM tickets \
+             WHERE job_id = ? \
+               AND state = 'failed' \
+               AND json_extract(payload, '$.workflow_id') = ? \
+             ORDER BY id ASC LIMIT 1"
+        ))
+        .bind(i64_from_u64(
+            job_id.0,
+            concat!(module_path!(), ": ", stringify!(job_id.0)),
+        )?)
+        .bind(workflow_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| VoomError::database_context("first failed workflow ticket", e))?;
+        row.as_ref().map(row_to_ticket).transpose()
+    }
+
+    /// Return the earliest future eligibility timestamp among ready workflow tickets.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VoomError::Database`] if the projection cannot be queried or decoded, and
+    /// [`VoomError::Internal`] if the comparison timestamp cannot be encoded.
+    pub async fn retry_eligible_at(
+        &self,
+        job_id: JobId,
+        workflow_id: &str,
+        now: OffsetDateTime,
+    ) -> Result<Option<OffsetDateTime>, VoomError> {
+        let eligible_at: Option<String> = sqlx::query_scalar(
+            "SELECT MIN(next_eligible_at) FROM tickets \
+             WHERE job_id = ? \
+               AND state = 'ready' \
+               AND next_eligible_at > ? \
+               AND json_extract(payload, '$.workflow_id') = ?",
+        )
+        .bind(i64_from_u64(
+            job_id.0,
+            concat!(module_path!(), ": ", stringify!(job_id.0)),
+        )?)
+        .bind(iso8601(now)?)
+        .bind(workflow_id)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|e| VoomError::database_context("workflow retry eligibility", e))?;
+        eligible_at.as_deref().map(parse_iso8601).transpose()
+    }
+
+    /// Find the unique ticket for one durable workflow phase identity.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VoomError::Conflict`] if multiple tickets share the identity and
+    /// [`VoomError::Database`] if the projection cannot be queried or decoded.
+    pub async fn find_workflow_ticket_id_in_tx(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        identity: WorkflowTicketIdentity<'_>,
+    ) -> Result<Option<TicketId>, VoomError> {
+        let source_file_version_id = identity
+            .source_file_version_id
+            .map(|file_version_id| {
+                i64_from_u64(
+                    file_version_id.0,
+                    concat!(module_path!(), ": ", stringify!(file_version_id.0)),
+                )
+            })
+            .transpose()?;
+        let rows: Vec<i64> = sqlx::query_scalar(
+            "SELECT id FROM tickets \
+             WHERE job_id = ? \
+               AND json_extract(payload, '$.workflow_id') = ? \
+               AND json_extract(payload, '$.branch_id') = ? \
+               AND json_extract(payload, '$.node_id') = ? \
+               AND ((? IS NULL \
+                     AND json_extract( \
+                         payload, '$.rendered_payload.source_file_version_id' \
+                     ) IS NULL) \
+                    OR json_extract( \
+                         payload, '$.rendered_payload.source_file_version_id' \
+                       ) = ?) \
+             ORDER BY id ASC LIMIT 2",
+        )
+        .bind(i64_from_u64(
+            identity.job_id.0,
+            concat!(module_path!(), ": ", stringify!(identity.job_id.0)),
+        )?)
+        .bind(identity.workflow_id)
+        .bind(identity.branch_id)
+        .bind(identity.node_id)
+        .bind(source_file_version_id)
+        .bind(source_file_version_id)
+        .fetch_all(&mut **tx)
+        .await
+        .map_err(|e| VoomError::database_context("workflow ticket identity lookup", e))?;
+        match rows.as_slice() {
+            [] => Ok(None),
+            [id] => Ok(Some(TicketId(u64_from_i64(
+                *id,
+                concat!(module_path!(), ": ", stringify!(*id)),
+            )?))),
+            [first, second, ..] => Err(VoomError::Conflict(format!(
+                "duplicate workflow tickets for job {} workflow `{}` branch `{}` node `{}`: \
+                 ids {first}, {second}",
+                identity.job_id, identity.workflow_id, identity.branch_id, identity.node_id
+            ))),
+        }
+    }
+
+    /// Transition a ready ticket after failure before any lease exists.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VoomError::Conflict`] when the ready-state, prior-attempt, or
+    /// eligibility predicate no longer holds, and [`VoomError::Database`] or
+    /// [`VoomError::Internal`] when the mutation cannot be completed or decoded.
+    pub async fn transition_ready_before_lease_failure_in_tx(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        ticket_id: TicketId,
+        previous_attempt: u32,
+        next_attempt: u32,
+        transition: PreLeaseFailureTransition,
+        now: OffsetDateTime,
+    ) -> Result<Ticket, VoomError> {
+        let now = iso8601(now)?;
+        let (state, next_eligible_at) = match transition {
+            PreLeaseFailureTransition::Terminal => (TicketState::Failed.as_str(), None),
+            PreLeaseFailureTransition::RetryAt(at) => {
+                (TicketState::Ready.as_str(), Some(iso8601(at)?))
+            }
+        };
+        let row = sqlx::query(&format!(
+            "UPDATE tickets SET state = ?, state_changed_at = ?, attempt = ?, \
+             next_eligible_at = COALESCE(?, next_eligible_at), epoch = epoch + 1 \
+             WHERE id = ? AND state = 'ready' AND attempt = ? AND next_eligible_at <= ? \
+             RETURNING {TICKET_RETURNING_COLS}"
+        ))
+        .bind(state)
+        .bind(&now)
+        .bind(i64::from(next_attempt))
+        .bind(next_eligible_at)
+        .bind(i64_from_u64(
+            ticket_id.0,
+            concat!(module_path!(), ": ", stringify!(ticket_id.0)),
+        )?)
+        .bind(i64::from(previous_attempt))
+        .bind(&now)
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(|e| VoomError::database_context("pre-lease ticket transition", e))?;
+        row.as_ref().map(row_to_ticket).transpose()?.ok_or_else(|| {
+            VoomError::Conflict(format!(
+                "pre-lease failure rejected: ticket {ticket_id} changed concurrently"
+            ))
+        })
+    }
+
     /// Keyset-paginated inspection read for `voom ticket list` (ADR 0031).
     /// Orders strictly by `id` descending (newest first); `after_id` is an
     /// exclusive continuation token returning rows with `id < after_id`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VoomError::Database`] if the query or row decoding fails.
     pub async fn list(
         &self,
         filter: TicketFilter,
@@ -373,7 +963,13 @@ impl SqliteTicketRepo {
              ORDER BY id DESC LIMIT ?3"
         ))
         .bind(filter.state.map(TicketState::as_str))
-        .bind(after_id.map(i64_from_u64))
+        .bind(
+            after_id
+                .map(|value| {
+                    i64_from_u64(value, concat!(module_path!(), ": ", stringify!(after_id)))
+                })
+                .transpose()?,
+        )
         .bind(i64::from(limit))
         .fetch_all(&self.pool)
         .await
@@ -381,6 +977,11 @@ impl SqliteTicketRepo {
         rows.iter().map(row_to_ticket).collect()
     }
 
+    /// List tickets in one state using scheduling order.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VoomError::Database`] if the query or row decoding fails.
     pub async fn list_by_state(
         &self,
         state: TicketState,
@@ -400,6 +1001,32 @@ impl SqliteTicketRepo {
         rows.iter().map(row_to_ticket).collect()
     }
 
+    /// List every ticket for one job in deterministic id order.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VoomError::Database`] if the query or typed row decoding fails.
+    pub async fn list_for_job(&self, job_id: JobId) -> Result<Vec<Ticket>, VoomError> {
+        let rows = sqlx::query(&format!(
+            "SELECT {TICKET_RETURNING_COLS} FROM tickets \
+             WHERE job_id = ? ORDER BY id ASC"
+        ))
+        .bind(i64_from_u64(
+            job_id.0,
+            concat!(module_path!(), ": ", stringify!(job_id.0)),
+        )?)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| VoomError::database_context("tickets list for job", e))?;
+        rows.iter().map(row_to_ticket).collect()
+    }
+
+    /// Return the highest-priority eligible ticket for the requested operations.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VoomError::Database`] if the query or row decoding fails, and
+    /// [`VoomError::Internal`] if the supplied timestamp cannot be encoded.
     pub async fn next_ready_for_operations_in_tx(
         &self,
         tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
@@ -413,6 +1040,12 @@ impl SqliteTicketRepo {
             .next())
     }
 
+    /// List eligible tickets for the requested operations in scheduling order.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VoomError::Database`] if the query or row decoding fails, and
+    /// [`VoomError::Internal`] if the supplied timestamp cannot be encoded.
     pub async fn ready_for_operations_in_tx(
         &self,
         tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
@@ -455,6 +1088,12 @@ impl SqliteTicketRepo {
         rows.iter().map(row_to_ticket).collect()
     }
 
+    /// Return the highest-priority eligible ticket for the requested operations.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors documented by [`Self::next_ready_for_operations_in_tx`],
+    /// or [`VoomError::Database`] if the transaction cannot begin or commit.
     pub async fn next_ready_for_operations(
         &self,
         operations: &[TicketOperation],
@@ -474,22 +1113,38 @@ impl SqliteTicketRepo {
         Ok(out)
     }
 
+    /// List tickets that directly depend on the supplied ticket.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VoomError::Database`] if the query or row decoding fails.
     pub async fn list_dependents(&self, depends_on: TicketId) -> Result<Vec<Ticket>, VoomError> {
         let rows = sqlx::query(SELECT_DEPENDENTS_OF)
-            .bind(i64_from_u64(depends_on.0))
+            .bind(i64_from_u64(
+                depends_on.0,
+                concat!(module_path!(), ": ", stringify!(depends_on.0)),
+            )?)
             .fetch_all(&self.pool)
             .await
             .map_err(|e| VoomError::database_context("tickets list_dependents", e))?;
         rows.iter().map(row_to_ticket).collect()
     }
 
+    /// List direct dependents in the caller's transaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VoomError::Database`] if the query or row decoding fails.
     pub async fn list_dependents_in_tx(
         &self,
         tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
         depends_on: TicketId,
     ) -> Result<Vec<Ticket>, VoomError> {
         let rows = sqlx::query(SELECT_DEPENDENTS_OF)
-            .bind(i64_from_u64(depends_on.0))
+            .bind(i64_from_u64(
+                depends_on.0,
+                concat!(module_path!(), ": ", stringify!(depends_on.0)),
+            )?)
             .fetch_all(&mut **tx)
             .await
             .map_err(|e| VoomError::database_context("tickets list_dependents_in_tx", e))?;
@@ -522,7 +1177,10 @@ async fn get_in_tx_inner(
     id: TicketId,
 ) -> Result<Option<Ticket>, VoomError> {
     let row = sqlx::query(SELECT_TICKET_BY_ID)
-        .bind(i64_from_u64(id.0))
+        .bind(i64_from_u64(
+            id.0,
+            concat!(module_path!(), ": ", stringify!(id.0)),
+        )?)
         .fetch_optional(&mut **tx)
         .await
         .map_err(|e| VoomError::database_context("tickets get_in_tx", e))?;
@@ -530,43 +1188,41 @@ async fn get_in_tx_inner(
 }
 
 fn row_to_ticket(row: &sqlx::sqlite::SqliteRow) -> Result<Ticket, VoomError> {
-    let id: i64 = row.try_get("id").map_err(|e| map_row_err("tickets", &e))?;
+    let id: i64 = row.try_get("id").map_err(|e| map_row_err("tickets", e))?;
     let job_id: Option<i64> = row
         .try_get("job_id")
-        .map_err(|e| map_row_err("tickets", &e))?;
-    let kind: String = row
-        .try_get("kind")
-        .map_err(|e| map_row_err("tickets", &e))?;
+        .map_err(|e| map_row_err("tickets", e))?;
+    let kind: String = row.try_get("kind").map_err(|e| map_row_err("tickets", e))?;
     let state: String = row
         .try_get("state")
-        .map_err(|e| map_row_err("tickets", &e))?;
+        .map_err(|e| map_row_err("tickets", e))?;
     let priority: i64 = row
         .try_get("priority")
-        .map_err(|e| map_row_err("tickets", &e))?;
+        .map_err(|e| map_row_err("tickets", e))?;
     let payload: String = row
         .try_get("payload")
-        .map_err(|e| map_row_err("tickets", &e))?;
+        .map_err(|e| map_row_err("tickets", e))?;
     let result: Option<String> = row
         .try_get("result")
-        .map_err(|e| map_row_err("tickets", &e))?;
+        .map_err(|e| map_row_err("tickets", e))?;
     let attempt: i64 = row
         .try_get("attempt")
-        .map_err(|e| map_row_err("tickets", &e))?;
+        .map_err(|e| map_row_err("tickets", e))?;
     let max_attempts: i64 = row
         .try_get("max_attempts")
-        .map_err(|e| map_row_err("tickets", &e))?;
+        .map_err(|e| map_row_err("tickets", e))?;
     let next_eligible: String = row
         .try_get("next_eligible_at")
-        .map_err(|e| map_row_err("tickets", &e))?;
+        .map_err(|e| map_row_err("tickets", e))?;
     let created: String = row
         .try_get("created_at")
-        .map_err(|e| map_row_err("tickets", &e))?;
+        .map_err(|e| map_row_err("tickets", e))?;
     let state_changed: String = row
         .try_get("state_changed_at")
-        .map_err(|e| map_row_err("tickets", &e))?;
+        .map_err(|e| map_row_err("tickets", e))?;
     let epoch: i64 = row
         .try_get("epoch")
-        .map_err(|e| map_row_err("tickets", &e))?;
+        .map_err(|e| map_row_err("tickets", e))?;
     let payload_v: JsonValue = serde_json::from_str(&payload)
         .map_err(|e| VoomError::database_context("parse payload", e))?;
     let result_v = result
@@ -574,8 +1230,13 @@ fn row_to_ticket(row: &sqlx::sqlite::SqliteRow) -> Result<Ticket, VoomError> {
         .transpose()
         .map_err(|e| VoomError::database_context("parse result", e))?;
     Ok(Ticket {
-        id: TicketId(u64_from_i64(id)),
-        job_id: job_id.map(|j| JobId(u64_from_i64(j))),
+        id: TicketId(u64_from_i64(
+            id,
+            concat!(module_path!(), ": ", stringify!(id)),
+        )?),
+        job_id: job_id
+            .map(|j| u64_from_i64(j, concat!(module_path!(), ": ", stringify!(j))).map(JobId))
+            .transpose()?,
         kind: TicketOperation::from_stored(kind, "tickets.kind")?,
         state: TicketState::parse(&state)?,
         priority,
@@ -586,8 +1247,23 @@ fn row_to_ticket(row: &sqlx::sqlite::SqliteRow) -> Result<Ticket, VoomError> {
         next_eligible_at: parse_iso8601(&next_eligible)?,
         created_at: parse_iso8601(&created)?,
         state_changed_at: parse_iso8601(&state_changed)?,
-        epoch: u64_from_i64(epoch),
+        epoch: u64_from_i64(epoch, concat!(module_path!(), ": ", stringify!(epoch)))?,
     })
+}
+
+fn workflow_sqlite_id(value: u64, field: &str) -> Result<i64, VoomError> {
+    i64::try_from(value)
+        .map_err(|error| VoomError::database_context(format!("{field} exceeds SQLite i64"), error))
+}
+
+fn decode_ticket_ids(rows: Vec<i64>, field: &str) -> Result<Vec<TicketId>, VoomError> {
+    rows.into_iter()
+        .map(|id| {
+            u64::try_from(id)
+                .map(TicketId)
+                .map_err(|error| VoomError::database_context(field, error))
+        })
+        .collect()
 }
 
 #[cfg(test)]

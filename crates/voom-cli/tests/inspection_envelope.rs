@@ -14,8 +14,8 @@ use std::process::Command;
 use serde_json::Value;
 use time::{Duration, OffsetDateTime};
 use voom_events::{Event, EventEnvelope, SubjectType, payload::SchemaInitializedPayload};
-use voom_store::repo::events::{EventRepo, SqliteEventRepo};
-use voom_store::repo::jobs::{NewJob, SqliteJobRepo};
+use voom_store::repo::audit::events::{EventRepo, SqliteEventRepo};
+use voom_store::repo::execution::jobs::{NewJob, SqliteJobRepo};
 use voom_test_support::TempDatabase;
 
 mod inspection_envelope {

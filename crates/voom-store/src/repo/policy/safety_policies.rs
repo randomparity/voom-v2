@@ -207,7 +207,10 @@ impl SqliteSafetyPolicyRepo {
         .await;
         match res {
             Ok(res) => Ok(row_from_input(
-                u64_from_i64(res.last_insert_rowid()),
+                u64_from_i64(
+                    res.last_insert_rowid(),
+                    concat!(module_path!(), ": ", stringify!(res.last_insert_rowid())),
+                )?,
                 input,
                 now,
             )),
@@ -311,9 +314,7 @@ fn encode_commit_modes(modes: &[CommitMode]) -> Result<String, VoomError> {
 
 fn decode_operations(json: &str) -> Result<Vec<OperationKind>, VoomError> {
     let tokens: Vec<String> = serde_json::from_str(json).map_err(|e| {
-        VoomError::database(format!(
-            "safety_policies.auto_execute_operations decode: {e}"
-        ))
+        VoomError::database_context("safety_policies.auto_execute_operations decode", e)
     })?;
     tokens
         .iter()
@@ -329,7 +330,7 @@ fn decode_operations(json: &str) -> Result<Vec<OperationKind>, VoomError> {
 
 fn decode_commit_modes(json: &str) -> Result<Vec<CommitMode>, VoomError> {
     let tokens: Vec<String> = serde_json::from_str(json).map_err(|e| {
-        VoomError::database(format!("safety_policies.allowed_commit_modes decode: {e}"))
+        VoomError::database_context("safety_policies.allowed_commit_modes decode", e)
     })?;
     tokens
         .iter()
@@ -397,7 +398,7 @@ fn row_to_safety_policy(row: &SqliteRow) -> Result<SafetyPolicy, VoomError> {
     let created_at: String = row.try_get("created_at").map_err(map("created_at"))?;
     let updated_at: String = row.try_get("updated_at").map_err(map("updated_at"))?;
     Ok(SafetyPolicy {
-        id: u64_from_i64(id),
+        id: u64_from_i64(id, concat!(module_path!(), ": ", stringify!(id)))?,
         slug: row.try_get("slug").map_err(map("slug"))?,
         display_name: row.try_get("display_name").map_err(map("display_name"))?,
         schema_version: u32_from_i64(schema_version)?,

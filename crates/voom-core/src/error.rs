@@ -30,6 +30,8 @@ pub enum ErrorCode {
     DependencyCycle,
     /// Optimistic-locking conflict; caller should re-read and retry.
     Conflict,
+    /// Authentication credentials are missing or invalid.
+    Unauthorized,
     // --- Commit safety gate (M3 Phase 2 / §9.3) -------------------
     /// A blocking use-lease overlaps the commit's affected scope.
     BlockedByUseLease,
@@ -130,6 +132,7 @@ impl ErrorCode {
         Self::BadArgs,
         Self::DependencyCycle,
         Self::Conflict,
+        Self::Unauthorized,
         Self::BlockedByUseLease,
         Self::BlockedByPendingCommit,
         Self::BlockedByClosureGrew,
@@ -177,6 +180,7 @@ impl ErrorCode {
             Self::BadArgs => "BAD_ARGS",
             Self::DependencyCycle => "DEPENDENCY_CYCLE",
             Self::Conflict => "CONFLICT",
+            Self::Unauthorized => "UNAUTHORIZED",
             Self::BlockedByUseLease => "BLOCKED_BY_USE_LEASE",
             Self::BlockedByPendingCommit => "BLOCKED_BY_PENDING_COMMIT",
             Self::BlockedByClosureGrew => "BLOCKED_BY_CLOSURE_GREW",
@@ -255,6 +259,8 @@ pub enum VoomError {
     DependencyCycle(String),
     #[error("conflict: {0}")]
     Conflict(String),
+    #[error("unauthorized: {0}")]
+    Unauthorized(String),
     // --- Commit safety gate (M3 Phase 2 / §9.3) -----------------------
     #[error("blocked by use lease: {0}")]
     BlockedByUseLease(String),
@@ -359,6 +365,7 @@ impl VoomError {
             Self::Internal(_) => ErrorCode::Internal,
             Self::DependencyCycle(_) => ErrorCode::DependencyCycle,
             Self::Conflict(_) => ErrorCode::Conflict,
+            Self::Unauthorized(_) => ErrorCode::Unauthorized,
             Self::BlockedByUseLease(_) => ErrorCode::BlockedByUseLease,
             Self::BlockedByPendingCommit(_) => ErrorCode::BlockedByPendingCommit,
             Self::BlockedByClosureGrew(_) => ErrorCode::BlockedByClosureGrew,

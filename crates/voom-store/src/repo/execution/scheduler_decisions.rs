@@ -268,7 +268,7 @@ impl SqliteSchedulerDecisionRepo {
             &input,
             prepared.now,
             prepared.explanation,
-        )
+        )?
         .fetch_one(&mut **tx)
         .await
         .map_err(|e| VoomError::database_context("scheduler_decisions insert", e))?;
@@ -305,7 +305,7 @@ impl SqliteSchedulerDecisionRepo {
             &input,
             prepared.now,
             prepared.explanation,
-        )
+        )?
         .fetch_optional(&mut **tx)
         .await
         .map_err(|e| VoomError::database_context("scheduler_decisions upsert", e))?;
@@ -354,10 +354,19 @@ impl SqliteSchedulerDecisionRepo {
              WHERE id = ? AND (selected_lease_id IS NULL OR selected_lease_id = ?) \
              RETURNING {DECISION_COLS}"
         ))
-        .bind(i64_from_u64(lease_id.0))
+        .bind(i64_from_u64(
+            lease_id.0,
+            concat!(module_path!(), ": ", stringify!(lease_id.0)),
+        )?)
         .bind(now)
-        .bind(i64_from_u64(id))
-        .bind(i64_from_u64(lease_id.0))
+        .bind(i64_from_u64(
+            id,
+            concat!(module_path!(), ": ", stringify!(id)),
+        )?)
+        .bind(i64_from_u64(
+            lease_id.0,
+            concat!(module_path!(), ": ", stringify!(lease_id.0)),
+        )?)
         .fetch_optional(&mut **tx)
         .await
         .map_err(|e| VoomError::database_context("scheduler_decisions link lease", e))?;
@@ -372,7 +381,10 @@ impl SqliteSchedulerDecisionRepo {
         let row = sqlx::query(&format!(
             "SELECT {DECISION_COLS} FROM scheduler_decisions WHERE id = ?"
         ))
-        .bind(i64_from_u64(id))
+        .bind(i64_from_u64(
+            id,
+            concat!(module_path!(), ": ", stringify!(id)),
+        )?)
         .fetch_optional(&self.pool)
         .await
         .map_err(|e| VoomError::database_context("scheduler_decisions get", e))?;
@@ -383,11 +395,28 @@ impl SqliteSchedulerDecisionRepo {
         &self,
         filter: SchedulerDecisionFilter,
     ) -> Result<Vec<SchedulerDecision>, VoomError> {
-        let ticket_id = filter.ticket_id.map(|id| i64_from_u64(id.0));
-        let worker_id = filter.worker_id.map(|id| i64_from_u64(id.0));
-        let node_id = filter.node_id.map(|id| i64_from_u64(id.0));
+        let ticket_id = filter
+            .ticket_id
+            .map(|id| i64_from_u64(id.0, concat!(module_path!(), ": ", stringify!(id.0))))
+            .transpose()?;
+        let worker_id = filter
+            .worker_id
+            .map(|id| i64_from_u64(id.0, concat!(module_path!(), ": ", stringify!(id.0))))
+            .transpose()?;
+        let node_id = filter
+            .node_id
+            .map(|id| i64_from_u64(id.0, concat!(module_path!(), ": ", stringify!(id.0))))
+            .transpose()?;
         let outcome = filter.outcome.map(SchedulerDecisionOutcome::as_str);
-        let after_id = filter.after_id.map(i64_from_u64);
+        let after_id = filter
+            .after_id
+            .map(|value| {
+                i64_from_u64(
+                    value,
+                    concat!(module_path!(), ": ", stringify!(filter.after_id)),
+                )
+            })
+            .transpose()?;
         let limit = if filter.limit == 0 { 100 } else { filter.limit };
 
         // Keyset order is strictly by `id` descending (ADR 0031): unique and
@@ -433,6 +462,12 @@ const DECISION_INSERT_COLS: &str = "created_at, updated_at, first_seen_at, last_
      ticket_id, selected_worker_id, selected_node_id, selected_lease_id, outcome, reason_code, \
      summary, candidate_count, selected_score, suppression_key, explanation_json";
 const DECISION_INSERT_VALUES: &str = "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?";
+const REQUEST_NODE_FIELD: &str = "scheduler_decisions.request_node_id";
+const REQUEST_WORKER_FIELD: &str = "scheduler_decisions.request_worker_id";
+const TICKET_FIELD: &str = "scheduler_decisions.ticket_id";
+const SELECTED_WORKER_FIELD: &str = "scheduler_decisions.selected_worker_id";
+const SELECTED_NODE_FIELD: &str = "scheduler_decisions.selected_node_id";
+const SELECTED_LEASE_FIELD: &str = "scheduler_decisions.selected_lease_id";
 const DECISION_INSERT_SUPPRESS_CLAUSE: &str = "ON CONFLICT(suppression_key) WHERE suppression_key IS NOT NULL DO UPDATE SET \
          updated_at = excluded.updated_at, \
          last_seen_at = excluded.last_seen_at, \
@@ -602,8 +637,14 @@ async fn validate_selected_lease_link_in_tx(
          LEFT JOIN workers w ON w.id = l.worker_id \
          WHERE d.id = ?",
     )
-    .bind(i64_from_u64(lease_id.0))
-    .bind(i64_from_u64(decision_id))
+    .bind(i64_from_u64(
+        lease_id.0,
+        concat!(module_path!(), ": ", stringify!(lease_id.0)),
+    )?)
+    .bind(i64_from_u64(
+        decision_id,
+        concat!(module_path!(), ": ", stringify!(decision_id)),
+    )?)
     .fetch_optional(&mut **tx)
     .await
     .map_err(|e| VoomError::database_context("scheduler_decisions link coherence", e))?;
@@ -625,7 +666,10 @@ async fn link_selected_lease_after_empty_update_in_tx(
     let row = sqlx::query(&format!(
         "SELECT {DECISION_COLS} FROM scheduler_decisions WHERE id = ?"
     ))
-    .bind(i64_from_u64(decision_id))
+    .bind(i64_from_u64(
+        decision_id,
+        concat!(module_path!(), ": ", stringify!(decision_id)),
+    )?)
     .fetch_optional(&mut **tx)
     .await
     .map_err(|e| VoomError::database_context("scheduler_decisions link reread", e))?;
@@ -665,31 +709,31 @@ fn link_facts_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<SelectedLeaseLin
     Ok(SelectedLeaseLinkFacts {
         decision_kind: row
             .try_get("decision_kind")
-            .map_err(|e| map_row_err("scheduler_decisions link coherence", &e))?,
+            .map_err(|e| map_row_err("scheduler_decisions link coherence", e))?,
         outcome: row
             .try_get("outcome")
-            .map_err(|e| map_row_err("scheduler_decisions link coherence", &e))?,
+            .map_err(|e| map_row_err("scheduler_decisions link coherence", e))?,
         decision_ticket_id: row
             .try_get("ticket_id")
-            .map_err(|e| map_row_err("scheduler_decisions link coherence", &e))?,
+            .map_err(|e| map_row_err("scheduler_decisions link coherence", e))?,
         decision_worker_id: row
             .try_get("selected_worker_id")
-            .map_err(|e| map_row_err("scheduler_decisions link coherence", &e))?,
+            .map_err(|e| map_row_err("scheduler_decisions link coherence", e))?,
         decision_node_id: row
             .try_get("selected_node_id")
-            .map_err(|e| map_row_err("scheduler_decisions link coherence", &e))?,
+            .map_err(|e| map_row_err("scheduler_decisions link coherence", e))?,
         existing_lease_id: row
             .try_get("selected_lease_id")
-            .map_err(|e| map_row_err("scheduler_decisions link coherence", &e))?,
+            .map_err(|e| map_row_err("scheduler_decisions link coherence", e))?,
         lease_ticket_id: row
             .try_get("lease_ticket_id")
-            .map_err(|e| map_row_err("scheduler_decisions link coherence", &e))?,
+            .map_err(|e| map_row_err("scheduler_decisions link coherence", e))?,
         lease_worker_id: row
             .try_get("lease_worker_id")
-            .map_err(|e| map_row_err("scheduler_decisions link coherence", &e))?,
+            .map_err(|e| map_row_err("scheduler_decisions link coherence", e))?,
         lease_node_id: row
             .try_get("lease_node_id")
-            .map_err(|e| map_row_err("scheduler_decisions link coherence", &e))?,
+            .map_err(|e| map_row_err("scheduler_decisions link coherence", e))?,
     })
 }
 
@@ -698,6 +742,35 @@ fn validate_selected_lease_link_facts(
     lease_id: LeaseId,
     facts: &SelectedLeaseLinkFacts,
 ) -> Result<(), VoomError> {
+    let decision_ticket_id = facts
+        .decision_ticket_id
+        .map(|value| u64_from_i64(value, "scheduler_decisions.ticket_id"))
+        .transpose()?;
+    let decision_worker_id = facts
+        .decision_worker_id
+        .map(|value| u64_from_i64(value, "scheduler_decisions.selected_worker_id"))
+        .transpose()?;
+    let decision_node_id = facts
+        .decision_node_id
+        .map(|value| u64_from_i64(value, "scheduler_decisions.selected_node_id"))
+        .transpose()?;
+    let existing_lease_id = facts
+        .existing_lease_id
+        .map(|value| u64_from_i64(value, "scheduler_decisions.selected_lease_id"))
+        .transpose()?;
+    let lease_ticket_id = facts
+        .lease_ticket_id
+        .map(|value| u64_from_i64(value, "leases.ticket_id"))
+        .transpose()?;
+    let lease_worker_id = facts
+        .lease_worker_id
+        .map(|value| u64_from_i64(value, "leases.worker_id"))
+        .transpose()?;
+    let lease_node_id = facts
+        .lease_node_id
+        .map(|value| u64_from_i64(value, "workers.node_id"))
+        .transpose()?;
+
     if facts.decision_kind != SchedulerDecisionKind::LeaseAcquire.as_str()
         || facts.outcome != SchedulerDecisionOutcome::Selected.as_str()
     {
@@ -707,52 +780,48 @@ fn validate_selected_lease_link_facts(
         )));
     }
 
-    let Some(lease_ticket_id) = facts.lease_ticket_id else {
+    let Some(lease_ticket_id) = lease_ticket_id else {
         return Err(VoomError::NotFound(format!(
             "leases id={} not found",
             lease_id.0
         )));
     };
-    let Some(lease_worker_id) = facts.lease_worker_id else {
+    let Some(lease_worker_id) = lease_worker_id else {
         return Err(VoomError::NotFound(format!(
             "leases id={} has no worker",
             lease_id.0
         )));
     };
-    let Some(lease_node_id) = facts.lease_node_id else {
+    let Some(lease_node_id) = lease_node_id else {
         return Err(VoomError::NotFound(format!(
-            "workers id={} not found",
-            u64_from_i64(lease_worker_id)
+            "workers id={lease_worker_id} not found"
         )));
     };
 
-    if facts.decision_ticket_id != Some(lease_ticket_id) {
+    if decision_ticket_id != Some(lease_ticket_id) {
         return Err(VoomError::Conflict(format!(
-            "scheduler_decisions id={decision_id} ticket_id={:?} does not match lease ticket_id={}",
-            facts.decision_ticket_id.map(u64_from_i64),
-            u64_from_i64(lease_ticket_id)
+            "scheduler_decisions id={decision_id} ticket_id={decision_ticket_id:?} does not match \
+             lease ticket_id={lease_ticket_id}"
         )));
     }
-    if facts.decision_worker_id != Some(lease_worker_id) {
+    if decision_worker_id != Some(lease_worker_id) {
         return Err(VoomError::Conflict(format!(
-            "scheduler_decisions id={decision_id} worker_id={:?} does not match lease worker_id={}",
-            facts.decision_worker_id.map(u64_from_i64),
-            u64_from_i64(lease_worker_id)
+            "scheduler_decisions id={decision_id} worker_id={decision_worker_id:?} does not match \
+             lease worker_id={lease_worker_id}"
         )));
     }
-    if facts.decision_node_id != Some(lease_node_id) {
+    if decision_node_id != Some(lease_node_id) {
         return Err(VoomError::Conflict(format!(
-            "scheduler_decisions id={decision_id} node_id={:?} does not match lease node_id={}",
-            facts.decision_node_id.map(u64_from_i64),
-            u64_from_i64(lease_node_id)
+            "scheduler_decisions id={decision_id} node_id={decision_node_id:?} does not match \
+             lease node_id={lease_node_id}"
         )));
     }
-    if let Some(existing_lease_id) = facts.existing_lease_id
-        && existing_lease_id != i64_from_u64(lease_id.0)
+    if let Some(existing_lease_id) = existing_lease_id
+        && existing_lease_id != lease_id.0
     {
         return Err(VoomError::Conflict(format!(
-            "scheduler_decisions id={decision_id} is already linked to lease_id={}",
-            u64_from_i64(existing_lease_id)
+            "scheduler_decisions id={decision_id} is already linked to \
+             lease_id={existing_lease_id}"
         )));
     }
 
@@ -764,8 +833,32 @@ fn bind_decision_query<'a>(
     input: &'a NewSchedulerDecision,
     now: String,
     explanation: String,
-) -> sqlx::query::Query<'a, sqlx::Sqlite, sqlx::sqlite::SqliteArguments<'a>> {
-    query
+) -> Result<sqlx::query::Query<'a, sqlx::Sqlite, sqlx::sqlite::SqliteArguments<'a>>, VoomError> {
+    let request_node_id = input
+        .request_node_id
+        .map(|id| i64_from_u64(id.0, "scheduler_decisions.request_node_id"))
+        .transpose()?;
+    let request_worker_id = input
+        .request_worker_id
+        .map(|id| i64_from_u64(id.0, "scheduler_decisions.request_worker_id"))
+        .transpose()?;
+    let ticket_id = input
+        .ticket_id
+        .map(|id| i64_from_u64(id.0, "scheduler_decisions.ticket_id"))
+        .transpose()?;
+    let selected_worker_id = input
+        .selected_worker_id
+        .map(|id| i64_from_u64(id.0, "scheduler_decisions.selected_worker_id"))
+        .transpose()?;
+    let selected_node_id = input
+        .selected_node_id
+        .map(|id| i64_from_u64(id.0, "scheduler_decisions.selected_node_id"))
+        .transpose()?;
+    let selected_lease_id = input
+        .selected_lease_id
+        .map(|id| i64_from_u64(id.0, "scheduler_decisions.selected_lease_id"))
+        .transpose()?;
+    Ok(query
         .bind(now.clone())
         .bind(now.clone())
         .bind(now.clone())
@@ -773,91 +866,74 @@ fn bind_decision_query<'a>(
         .bind(input.decision_kind.as_str())
         .bind(input.request_source.as_str())
         .bind(input.idempotency_key.as_deref())
-        .bind(input.request_node_id.map(|id| i64_from_u64(id.0)))
-        .bind(input.request_worker_id.map(|id| i64_from_u64(id.0)))
-        .bind(input.ticket_id.map(|id| i64_from_u64(id.0)))
-        .bind(input.selected_worker_id.map(|id| i64_from_u64(id.0)))
-        .bind(input.selected_node_id.map(|id| i64_from_u64(id.0)))
-        .bind(input.selected_lease_id.map(|id| i64_from_u64(id.0)))
+        .bind(request_node_id)
+        .bind(request_worker_id)
+        .bind(ticket_id)
+        .bind(selected_worker_id)
+        .bind(selected_node_id)
+        .bind(selected_lease_id)
         .bind(input.outcome.as_str())
         .bind(input.reason_code.as_str())
         .bind(input.summary.as_str())
         .bind(i64::from(input.candidate_count))
         .bind(input.selected_score)
         .bind(input.suppression_key.as_deref())
-        .bind(explanation)
+        .bind(explanation))
 }
 
 fn row_to_decision(row: &sqlx::sqlite::SqliteRow) -> Result<SchedulerDecision, VoomError> {
     let id: i64 = row
         .try_get("id")
-        .map_err(|e| map_row_err("scheduler_decisions", &e))?;
+        .map_err(|e| map_row_err("scheduler_decisions", e))?;
     let created_at: String = row
         .try_get("created_at")
-        .map_err(|e| map_row_err("scheduler_decisions", &e))?;
+        .map_err(|e| map_row_err("scheduler_decisions", e))?;
     let updated_at: String = row
         .try_get("updated_at")
-        .map_err(|e| map_row_err("scheduler_decisions", &e))?;
+        .map_err(|e| map_row_err("scheduler_decisions", e))?;
     let first_seen_at: String = row
         .try_get("first_seen_at")
-        .map_err(|e| map_row_err("scheduler_decisions", &e))?;
+        .map_err(|e| map_row_err("scheduler_decisions", e))?;
     let last_seen_at: String = row
         .try_get("last_seen_at")
-        .map_err(|e| map_row_err("scheduler_decisions", &e))?;
+        .map_err(|e| map_row_err("scheduler_decisions", e))?;
     let decision_kind: String = row
         .try_get("decision_kind")
-        .map_err(|e| map_row_err("scheduler_decisions", &e))?;
+        .map_err(|e| map_row_err("scheduler_decisions", e))?;
     let request_source: String = row
         .try_get("request_source")
-        .map_err(|e| map_row_err("scheduler_decisions", &e))?;
+        .map_err(|e| map_row_err("scheduler_decisions", e))?;
     let idempotency_key: Option<String> = row
         .try_get("idempotency_key")
-        .map_err(|e| map_row_err("scheduler_decisions", &e))?;
-    let request_node_id: Option<i64> = row
-        .try_get("request_node_id")
-        .map_err(|e| map_row_err("scheduler_decisions", &e))?;
-    let request_worker_id: Option<i64> = row
-        .try_get("request_worker_id")
-        .map_err(|e| map_row_err("scheduler_decisions", &e))?;
-    let ticket_id: Option<i64> = row
-        .try_get("ticket_id")
-        .map_err(|e| map_row_err("scheduler_decisions", &e))?;
-    let selected_worker_id: Option<i64> = row
-        .try_get("selected_worker_id")
-        .map_err(|e| map_row_err("scheduler_decisions", &e))?;
-    let selected_node_id: Option<i64> = row
-        .try_get("selected_node_id")
-        .map_err(|e| map_row_err("scheduler_decisions", &e))?;
-    let selected_lease_id: Option<i64> = row
-        .try_get("selected_lease_id")
-        .map_err(|e| map_row_err("scheduler_decisions", &e))?;
+        .map_err(|e| map_row_err("scheduler_decisions", e))?;
+    let references = decision_reference_rows(row)?;
     let outcome: String = row
         .try_get("outcome")
-        .map_err(|e| map_row_err("scheduler_decisions", &e))?;
+        .map_err(|e| map_row_err("scheduler_decisions", e))?;
     let reason_code: String = row
         .try_get("reason_code")
-        .map_err(|e| map_row_err("scheduler_decisions", &e))?;
+        .map_err(|e| map_row_err("scheduler_decisions", e))?;
     let summary: String = row
         .try_get("summary")
-        .map_err(|e| map_row_err("scheduler_decisions", &e))?;
+        .map_err(|e| map_row_err("scheduler_decisions", e))?;
     let candidate_count: i64 = row
         .try_get("candidate_count")
-        .map_err(|e| map_row_err("scheduler_decisions", &e))?;
+        .map_err(|e| map_row_err("scheduler_decisions", e))?;
     let selected_score: Option<i64> = row
         .try_get("selected_score")
-        .map_err(|e| map_row_err("scheduler_decisions", &e))?;
+        .map_err(|e| map_row_err("scheduler_decisions", e))?;
     let suppressed_count: i64 = row
         .try_get("suppressed_count")
-        .map_err(|e| map_row_err("scheduler_decisions", &e))?;
+        .map_err(|e| map_row_err("scheduler_decisions", e))?;
     let suppression_key: Option<String> = row
         .try_get("suppression_key")
-        .map_err(|e| map_row_err("scheduler_decisions", &e))?;
+        .map_err(|e| map_row_err("scheduler_decisions", e))?;
     let explanation_json: String = row
         .try_get("explanation_json")
-        .map_err(|e| map_row_err("scheduler_decisions", &e))?;
+        .map_err(|e| map_row_err("scheduler_decisions", e))?;
 
     Ok(SchedulerDecision {
-        id: u64_from_i64(id),
+        id: u64_from_i64(id, "scheduler_decisions.id")?,
         created_at: parse_iso8601(&created_at)?,
         updated_at: parse_iso8601(&updated_at)?,
         first_seen_at: parse_iso8601(&first_seen_at)?,
@@ -865,12 +941,28 @@ fn row_to_decision(row: &sqlx::sqlite::SqliteRow) -> Result<SchedulerDecision, V
         decision_kind: SchedulerDecisionKind::parse(&decision_kind)?,
         request_source: SchedulerRequestSource::parse(&request_source)?,
         idempotency_key,
-        request_node_id: request_node_id.map(|id| NodeId(u64_from_i64(id))),
-        request_worker_id: request_worker_id.map(|id| WorkerId(u64_from_i64(id))),
-        ticket_id: ticket_id.map(|id| TicketId(u64_from_i64(id))),
-        selected_worker_id: selected_worker_id.map(|id| WorkerId(u64_from_i64(id))),
-        selected_node_id: selected_node_id.map(|id| NodeId(u64_from_i64(id))),
-        selected_lease_id: selected_lease_id.map(|id| LeaseId(u64_from_i64(id))),
+        request_node_id: decision_optional_id(references.request_node, REQUEST_NODE_FIELD, NodeId)?,
+        request_worker_id: decision_optional_id(
+            references.request_worker,
+            REQUEST_WORKER_FIELD,
+            WorkerId,
+        )?,
+        ticket_id: decision_optional_id(references.ticket, TICKET_FIELD, TicketId)?,
+        selected_worker_id: decision_optional_id(
+            references.selected_worker,
+            SELECTED_WORKER_FIELD,
+            WorkerId,
+        )?,
+        selected_node_id: decision_optional_id(
+            references.selected_node,
+            SELECTED_NODE_FIELD,
+            NodeId,
+        )?,
+        selected_lease_id: decision_optional_id(
+            references.selected_lease,
+            SELECTED_LEASE_FIELD,
+            LeaseId,
+        )?,
         outcome: SchedulerDecisionOutcome::parse(&outcome)?,
         reason_code: SchedulerReasonCode::parse(&reason_code)?,
         summary,
@@ -881,6 +973,42 @@ fn row_to_decision(row: &sqlx::sqlite::SqliteRow) -> Result<SchedulerDecision, V
         explanation: serde_json::from_str(&explanation_json)
             .map_err(|e| VoomError::database_context("scheduler_decisions explanation_json", e))?,
     })
+}
+
+struct DecisionReferenceRows {
+    request_node: Option<i64>,
+    request_worker: Option<i64>,
+    ticket: Option<i64>,
+    selected_worker: Option<i64>,
+    selected_node: Option<i64>,
+    selected_lease: Option<i64>,
+}
+
+fn decision_reference_rows(
+    row: &sqlx::sqlite::SqliteRow,
+) -> Result<DecisionReferenceRows, VoomError> {
+    let field = |name| {
+        row.try_get(name)
+            .map_err(|error| map_row_err("scheduler_decisions", error))
+    };
+    Ok(DecisionReferenceRows {
+        request_node: field("request_node_id")?,
+        request_worker: field("request_worker_id")?,
+        ticket: field("ticket_id")?,
+        selected_worker: field("selected_worker_id")?,
+        selected_node: field("selected_node_id")?,
+        selected_lease: field("selected_lease_id")?,
+    })
+}
+
+fn decision_optional_id<T>(
+    value: Option<i64>,
+    field: &'static str,
+    constructor: fn(u64) -> T,
+) -> Result<Option<T>, VoomError> {
+    value
+        .map(|value| u64_from_i64(value, field).map(constructor))
+        .transpose()
 }
 
 #[cfg(test)]

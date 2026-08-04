@@ -163,7 +163,10 @@ fn legacy_set_container_planned_node_maps_to_unsupported_check() {
         report.checks[0].check_status,
         crate::CheckStatus::Noncompliant
     );
-    assert_eq!(report.checks[0].compliance_kind, "unsupported");
+    assert_eq!(
+        report.checks[0].compliance_kind,
+        crate::ComplianceKind::Unsupported
+    );
     assert_eq!(
         report.checks[0].execution_eligibility,
         crate::ExecutionEligibility::Unsupported
@@ -200,7 +203,10 @@ fn legacy_set_container_blocked_node_maps_to_unsupported_check() {
         report.checks[0].execution_eligibility,
         crate::ExecutionEligibility::Unsupported
     );
-    assert_eq!(report.checks[0].compliance_kind, "unsupported");
+    assert_eq!(
+        report.checks[0].compliance_kind,
+        crate::ComplianceKind::Unsupported
+    );
     assert_eq!(
         report.checks[0].issue_action_hint,
         crate::IssueActionHint::None
@@ -214,7 +220,10 @@ fn transcode_video_planned_node_maps_to_supported_check() {
         generate_compliance_report(&plan(vec![transcode_node(NodeStatus::Planned)])).unwrap();
 
     assert_eq!(report.summary.status, crate::ReportStatus::Noncompliant);
-    assert_eq!(report.checks[0].compliance_kind, "transcode_video");
+    assert_eq!(
+        report.checks[0].compliance_kind,
+        crate::ComplianceKind::TranscodeVideo
+    );
     assert_eq!(
         report.checks[0].execution_eligibility,
         crate::ExecutionEligibility::Supported
@@ -241,7 +250,10 @@ fn transcode_audio_planned_node_maps_to_supported_check() {
         generate_compliance_report(&plan(vec![transcode_audio_node(NodeStatus::Planned)])).unwrap();
 
     assert_eq!(report.summary.status, crate::ReportStatus::Noncompliant);
-    assert_eq!(report.checks[0].compliance_kind, "transcode_audio");
+    assert_eq!(
+        report.checks[0].compliance_kind,
+        crate::ComplianceKind::TranscodeAudio
+    );
     assert_eq!(
         report.checks[0].execution_eligibility,
         crate::ExecutionEligibility::Supported
@@ -259,7 +271,10 @@ fn extract_audio_planned_node_maps_to_supported_check() {
         generate_compliance_report(&plan(vec![extract_audio_node(NodeStatus::Planned)])).unwrap();
 
     assert_eq!(report.summary.status, crate::ReportStatus::Noncompliant);
-    assert_eq!(report.checks[0].compliance_kind, "extract_audio");
+    assert_eq!(
+        report.checks[0].compliance_kind,
+        crate::ComplianceKind::ExtractAudio
+    );
     assert_eq!(
         report.checks[0].execution_eligibility,
         crate::ExecutionEligibility::Supported
@@ -276,7 +291,10 @@ fn remux_planned_node_maps_to_supported_check() {
     let report = generate_compliance_report(&plan(vec![remux_node(NodeStatus::Planned)])).unwrap();
 
     assert_eq!(report.summary.status, crate::ReportStatus::Noncompliant);
-    assert_eq!(report.checks[0].compliance_kind, "container");
+    assert_eq!(
+        report.checks[0].compliance_kind,
+        crate::ComplianceKind::Container
+    );
     assert_eq!(
         report.checks[0].execution_eligibility,
         crate::ExecutionEligibility::Supported
@@ -295,7 +313,10 @@ fn remux_blocked_node_maps_to_blocked_check() {
     let report = generate_compliance_report(&plan(vec![node])).unwrap();
 
     assert_eq!(report.summary.status, crate::ReportStatus::Blocked);
-    assert_eq!(report.checks[0].compliance_kind, "container");
+    assert_eq!(
+        report.checks[0].compliance_kind,
+        crate::ComplianceKind::Container
+    );
     assert_eq!(report.checks[0].reason, "snapshot container is unknown");
     assert_eq!(
         report.checks[0].execution_eligibility,

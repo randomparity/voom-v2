@@ -4,8 +4,8 @@ use async_trait::async_trait;
 use time::OffsetDateTime;
 use voom_core::{ErrorCode, JobId, LeaseId, TicketId, rng_test_support::FrozenRng};
 use voom_events::EventKind;
-use voom_store::repo::events::{EventFilter, EventRepo, Page};
-use voom_store::repo::identity::{DiscoveredFile, FileLocationKind, IngestOutcome};
+use voom_store::repo::audit::events::{EventFilter, EventRepo, Page};
+use voom_store::repo::media::identity::{DiscoveredFile, FileLocationKind, IngestOutcome};
 use voom_worker_protocol::{
     TranscodeVideoObservedFacts, TranscodeVideoProfile, TranscodeVideoRequest,
     TranscodeVideoResult, TranscodeVideoStatus, VerifyArtifactObservedFacts, VerifyArtifactRequest,

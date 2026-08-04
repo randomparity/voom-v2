@@ -4,7 +4,8 @@
 )]
 
 use axum::body::Body;
-use axum::http::{Request, Response, StatusCode};
+use axum::http::header::{AUTHORIZATION, WWW_AUTHENTICATE};
+use axum::http::{HeaderValue, Request, Response, StatusCode};
 use http_body_util::BodyExt;
 use secrecy::ExposeSecret;
 use serde_json::{Value, json};
@@ -15,9 +16,9 @@ use voom_control_plane::workers::{
 };
 use voom_control_plane::{ControlPlane, HealthPlane};
 use voom_core::{FailureClass, LeaseId, NodeId, TicketId, TicketOperation, WorkerId};
-use voom_store::repo::nodes::NodeKind;
-use voom_store::repo::tickets::{NewTicket, SqliteTicketRepo, TicketState};
-use voom_store::repo::workers::WorkerKind;
+use voom_store::repo::execution::nodes::NodeKind;
+use voom_store::repo::execution::tickets::{NewTicket, SqliteTicketRepo, TicketState};
+use voom_store::repo::execution::workers::WorkerKind;
 use voom_store::test_support::sqlite_url_for;
 use voom_test_support::TempDatabase;
 
@@ -50,18 +51,31 @@ impl ApiFixture {
         token: &str,
         body: Value,
     ) -> Response<Body> {
-        self.app
-            .clone()
-            .oneshot(
-                Request::post(path)
-                    .header("content-type", "application/json")
-                    .header("authorization", format!("Bearer {token}"))
-                    .header("x-voom-idempotency-key", idempotency_key)
-                    .body(Body::from(body.to_string()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap()
+        self.post_json_with_authorization(
+            path,
+            idempotency_key,
+            Some(HeaderValue::from_str(&format!("Bearer {token}")).unwrap()),
+            body,
+        )
+        .await
+    }
+
+    async fn post_json_with_authorization(
+        &self,
+        path: &str,
+        idempotency_key: &str,
+        authorization: Option<HeaderValue>,
+        body: Value,
+    ) -> Response<Body> {
+        let mut request = Request::post(path)
+            .header("content-type", "application/json")
+            .header("x-voom-idempotency-key", idempotency_key)
+            .body(Body::from(body.to_string()))
+            .unwrap();
+        if let Some(authorization) = authorization {
+            request.headers_mut().insert(AUTHORIZATION, authorization);
+        }
+        self.app.clone().oneshot(request).await.unwrap()
     }
 
     async fn post_raw(&self, path: &str, idempotency_key: &str, body: &str) -> Response<Body> {
@@ -136,7 +150,7 @@ impl ApiFixture {
 }
 
 #[tokio::test]
-async fn acquire_requires_bearer_token_and_idempotency_key() {
+async fn acquire_requires_idempotency_key() {
     let fixture = api_fixture().await;
 
     let res = fixture
@@ -145,6 +159,7 @@ async fn acquire_requires_bearer_token_and_idempotency_key() {
         .oneshot(
             Request::post("/v1/execution/lease/acquire")
                 .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {}", fixture.token))
                 .body(Body::from(r#"{"node_id":1,"worker_id":1}"#))
                 .unwrap(),
         )
@@ -155,6 +170,142 @@ async fn acquire_requires_bearer_token_and_idempotency_key() {
     let json = response_json(res).await;
     assert_eq!(json["status"], "error");
     assert_eq!(json["error"]["code"], "BAD_ARGS");
+}
+
+#[tokio::test]
+async fn execution_routes_use_one_unauthorized_bearer_response() {
+    let fixture = api_fixture().await;
+    let routes = [
+        (
+            "/v1/execution/lease/acquire".to_owned(),
+            "execution.acquire",
+            json!({"node_id": fixture.node_id.0, "worker_id": fixture.worker_id.0}),
+        ),
+        (
+            format!("/v1/execution/node/{}/heartbeat", fixture.node_id.0),
+            "execution.node_heartbeat",
+            json!({}),
+        ),
+        (
+            "/v1/execution/lease/1/heartbeat".to_owned(),
+            "execution.lease_heartbeat",
+            json!({"node_id": fixture.node_id.0, "worker_id": fixture.worker_id.0}),
+        ),
+        (
+            "/v1/execution/lease/1/complete".to_owned(),
+            "execution.complete",
+            json!({
+                "node_id": fixture.node_id.0,
+                "worker_id": fixture.worker_id.0,
+                "result": {}
+            }),
+        ),
+        (
+            "/v1/execution/lease/1/fail".to_owned(),
+            "execution.fail",
+            json!({
+                "node_id": fixture.node_id.0,
+                "worker_id": fixture.worker_id.0,
+                "reason": "timed out",
+                "class": FailureClass::WorkerTimeout
+            }),
+        ),
+    ];
+    let authorization_cases = [
+        ("missing", None),
+        ("non-utf8", Some(HeaderValue::from_bytes(&[0xff]).unwrap())),
+        (
+            "wrong-scheme",
+            Some(HeaderValue::from_static("Basic token")),
+        ),
+        ("empty", Some(HeaderValue::from_static("Bearer "))),
+        (
+            "incorrect",
+            Some(HeaderValue::from_static("Bearer incorrect-token")),
+        ),
+    ];
+
+    for (authorization_name, authorization) in authorization_cases {
+        for (path, command, body) in &routes {
+            let response = fixture
+                .post_json_with_authorization(
+                    path,
+                    &format!("{authorization_name}-{command}"),
+                    authorization.clone(),
+                    body.clone(),
+                )
+                .await;
+            assert_unauthorized_envelope(response, command).await;
+        }
+    }
+}
+
+#[tokio::test]
+async fn unconfigured_execution_routes_reject_invalid_bearer_syntax() {
+    let tmp = TempDatabase::new().unwrap();
+    let url = sqlite_url_for(tmp.path());
+    voom_store::init(&url).await.unwrap();
+    let app = router(HealthPlane::open(&url).await.unwrap());
+    let routes = [
+        (
+            "/v1/execution/lease/acquire",
+            "execution.acquire",
+            json!({"node_id": 1, "worker_id": 1}),
+        ),
+        (
+            "/v1/execution/node/1/heartbeat",
+            "execution.node_heartbeat",
+            json!({}),
+        ),
+        (
+            "/v1/execution/lease/1/heartbeat",
+            "execution.lease_heartbeat",
+            json!({"node_id": 1, "worker_id": 1}),
+        ),
+        (
+            "/v1/execution/lease/1/complete",
+            "execution.complete",
+            json!({"node_id": 1, "worker_id": 1, "result": {}}),
+        ),
+        (
+            "/v1/execution/lease/1/fail",
+            "execution.fail",
+            json!({
+                "node_id": 1,
+                "worker_id": 1,
+                "reason": "timed out",
+                "class": FailureClass::WorkerTimeout
+            }),
+        ),
+    ];
+    let authorization_cases = [
+        ("missing", None),
+        ("non-utf8", Some(HeaderValue::from_bytes(&[0xff]).unwrap())),
+        (
+            "wrong-scheme",
+            Some(HeaderValue::from_static("Basic token")),
+        ),
+        ("empty", Some(HeaderValue::from_static("Bearer "))),
+    ];
+
+    for (authorization_name, authorization) in authorization_cases {
+        for (path, command, body) in &routes {
+            let mut request = Request::post(*path)
+                .header("content-type", "application/json")
+                .header(
+                    "x-voom-idempotency-key",
+                    format!("unconfigured-{authorization_name}-{command}"),
+                )
+                .body(Body::from(body.to_string()))
+                .unwrap();
+            if let Some(authorization) = authorization.clone() {
+                request.headers_mut().insert(AUTHORIZATION, authorization);
+            }
+
+            let response = app.clone().oneshot(request).await.unwrap();
+            assert_unauthorized_envelope(response, command).await;
+        }
+    }
 }
 
 #[tokio::test]
@@ -195,7 +346,11 @@ async fn acquire_same_key_replays_and_different_body_conflicts() {
         .post_json(
             "/v1/execution/lease/acquire",
             "same-key",
-            json!({"node_id": fixture.node_id.0, "worker_id": fixture.worker_id.0, "extra": true}),
+            json!({
+                "node_id": fixture.node_id.0,
+                "worker_id": fixture.worker_id.0,
+                "lease_ttl_seconds": 61
+            }),
         )
         .await;
 
@@ -256,18 +411,65 @@ async fn node_and_lease_heartbeat_routes_are_idempotent() {
 }
 
 #[tokio::test]
-async fn node_heartbeat_rejects_unknown_body_fields() {
+async fn execution_routes_reject_unknown_body_fields() {
     let fixture = api_fixture().await;
 
-    let res = fixture
-        .post_json(
-            &format!("/v1/execution/node/{}/heartbeat", fixture.node_id.0),
+    let cases = [
+        (
+            "/v1/execution/lease/acquire".to_owned(),
+            "acquire-unknown-body",
+            "execution.acquire",
+            json!({
+                "node_id": fixture.node_id.0,
+                "worker_id": fixture.worker_id.0,
+                "unknown": true
+            }),
+        ),
+        (
+            format!("/v1/execution/node/{}/heartbeat", fixture.node_id.0),
             "node-heartbeat-unknown-body",
-            json!({"node_id": fixture.node_id.0}),
-        )
-        .await;
+            "execution.node_heartbeat",
+            json!({"unknown": true}),
+        ),
+        (
+            "/v1/execution/lease/1/heartbeat".to_owned(),
+            "lease-heartbeat-unknown-body",
+            "execution.lease_heartbeat",
+            json!({
+                "node_id": fixture.node_id.0,
+                "worker_id": fixture.worker_id.0,
+                "unknown": true
+            }),
+        ),
+        (
+            "/v1/execution/lease/1/complete".to_owned(),
+            "complete-unknown-body",
+            "execution.complete",
+            json!({
+                "node_id": fixture.node_id.0,
+                "worker_id": fixture.worker_id.0,
+                "result": {},
+                "unknown": true
+            }),
+        ),
+        (
+            "/v1/execution/lease/1/fail".to_owned(),
+            "fail-unknown-body",
+            "execution.fail",
+            json!({
+                "node_id": fixture.node_id.0,
+                "worker_id": fixture.worker_id.0,
+                "reason": "timed out",
+                "class": FailureClass::WorkerTimeout,
+                "unknown": true
+            }),
+        ),
+    ];
 
-    assert_bad_args_envelope(res, "execution.node_heartbeat").await;
+    for (path, key, command, body) in cases {
+        let response = fixture.post_json(&path, key, body).await;
+        assert_bad_args_envelope(response, command).await;
+    }
 }
 
 #[tokio::test]
@@ -545,4 +747,21 @@ async fn assert_bad_args_envelope(res: Response<Body>, command: &str) {
     assert_eq!(json["command"], command);
     assert_eq!(json["status"], "error");
     assert_eq!(json["error"]["code"], "BAD_ARGS");
+}
+
+async fn assert_unauthorized_envelope(res: Response<Body>, command: &str) {
+    assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        res.headers().get(WWW_AUTHENTICATE),
+        Some(&HeaderValue::from_static("Bearer realm=\"voom\""))
+    );
+    let json = response_json(res).await;
+    assert_eq!(json["schema_version"], "0");
+    assert_eq!(json["command"], command);
+    assert_eq!(json["status"], "error");
+    assert_eq!(json["error"]["code"], "UNAUTHORIZED");
+    assert_eq!(
+        json["error"]["message"],
+        "unauthorized: remote node authentication failed"
+    );
 }

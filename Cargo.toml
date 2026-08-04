@@ -67,14 +67,14 @@ sha2 = "0.10.9"
 sqlx = { version = "0.8.6", default-features = false, features = ["runtime-tokio", "sqlite"] }
 tempfile = "3.27.0"
 time = { version = "0.3.45", features = ["formatting"] }
-tokio = { version = "1.52.3", features = ["rt-multi-thread", "macros"] }
+tokio = { version = "1.52.3", default-features = false }
 tracing = "0.1.44"
 
 # Sprint 2 Phase 1 (worker protocol + conformance) deps.
 async-trait = "0.1.89"
 blake3 = "1.5"
 bytes = "1.7"
-constant_time_eq = "0.5.0"
+constant_time_eq = "0.4.2"
 http = "1.4"
 http-body = "1"
 http-body-util = "0.1"
@@ -85,7 +85,6 @@ reqwest = { version = "0.13.3", default-features = false, features = ["json"] }
 secrecy = "0.10"
 thiserror = "2"
 toml = "1.1"
-tokio-util = { version = "0.7.13", features = ["io"] }
 trybuild = "1.0.108"
 
 [workspace.lints.clippy]

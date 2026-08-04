@@ -39,16 +39,17 @@ use sqlx::SqlitePool;
 use time::Duration;
 use voom_core::{CommitId, FileLocationId, FileVersionId};
 use voom_events::{EventKind, SubjectType};
-use voom_store::repo::commit_safety_gate::{
+use voom_store::repo::audit::events::{EventFilter, EventRepo, Page, SqliteEventRepo};
+use voom_store::repo::media::commit_safety_gate::{
     AliasResolver, AuthorizeOutcome, BypassKind, CommitGateContext, CommitGateResult, CommitTarget,
     DestructiveCommit, ForcePathToken, PrepareOutcome, authorize_destructive_commit,
     prepare_destructive_commit,
 };
-use voom_store::repo::events::{EventFilter, EventRepo, Page, SqliteEventRepo};
-use voom_store::repo::identity::{
-    FileLocationKind, IdentityRepo, NewFileLocation, NewFileVersion, ProducedBy, SqliteIdentityRepo,
+use voom_store::repo::media::identity::{
+    CommitGateIdentityRepo, FileAssetRepo, FileLocationKind, FileLocationRepo, FileVersionRepo,
+    NewFileLocation, NewFileVersion, ProducedBy, SqliteIdentityRepo,
 };
-use voom_store::repo::use_leases::{
+use voom_store::repo::media::use_leases::{
     BlockingMode, IssuerKind, LeaseScope, NewUseLease, SqliteUseLeaseRepo, UseLeaseKind,
 };
 use voom_store::test_support::{FailingAliasResolver, T0, fresh_initialized_pool_at};
@@ -56,7 +57,7 @@ use voom_test_support::TempDatabase;
 
 fn gate<'a>(
     pool: &'a SqlitePool,
-    identity_repo: &'a dyn IdentityRepo,
+    identity_repo: &'a dyn CommitGateIdentityRepo,
     event_repo: &'a dyn EventRepo,
     alias_resolver: &'a dyn AliasResolver,
 ) -> CommitGateContext<'a> {

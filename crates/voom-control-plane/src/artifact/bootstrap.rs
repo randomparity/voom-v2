@@ -1,5 +1,7 @@
 use voom_core::{OperationKind, TicketOperation, VoomError};
-use voom_store::repo::workers::{NewCapability, NewGrant, Worker, WorkerKind, WorkerStatus};
+use voom_store::repo::execution::workers::{
+    NewCapability, NewGrant, NewWorker, Worker, WorkerKind, WorkerStatus,
+};
 
 use crate::ControlPlane;
 
@@ -8,16 +10,18 @@ pub async fn ensure_builtin_verify_artifact_worker_in_tx(
     control_plane: &ControlPlane,
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
 ) -> Result<Worker, VoomError> {
-    insert_builtin_worker_if_missing(control_plane, tx).await?;
     let worker = control_plane
         .workers
-        .get_by_name_in_tx(tx, BUILTIN_VERIFY_ARTIFACT_WORKER_NAME)
-        .await?
-        .ok_or_else(|| {
-            VoomError::Internal(format!(
-                "built-in worker {BUILTIN_VERIFY_ARTIFACT_WORKER_NAME} missing after insert"
-            ))
-        })?;
+        .register_builtin_if_missing_in_tx(
+            tx,
+            NewWorker {
+                name: BUILTIN_VERIFY_ARTIFACT_WORKER_NAME.to_owned(),
+                kind: WorkerKind::Local,
+                registered_at: control_plane.clock().now(),
+                node_id: None,
+            },
+        )
+        .await?;
 
     validate_builtin_worker(&worker)?;
 
@@ -70,29 +74,6 @@ pub async fn ensure_builtin_verify_artifact_worker_in_tx(
     }
 
     Ok(worker)
-}
-
-async fn insert_builtin_worker_if_missing(
-    control_plane: &ControlPlane,
-    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-) -> Result<(), VoomError> {
-    let ts = control_plane
-        .clock()
-        .now()
-        .format(&time::format_description::well_known::Iso8601::DEFAULT)
-        .map_err(|err| VoomError::Internal(format!("format built-in worker timestamp: {err}")))?;
-    sqlx::query(
-        "INSERT OR IGNORE INTO workers \
-         (name, kind, status, registered_at, last_seen_at, node_id) \
-         VALUES (?, 'local', 'registered', ?, ?, NULL)",
-    )
-    .bind(BUILTIN_VERIFY_ARTIFACT_WORKER_NAME)
-    .bind(&ts)
-    .bind(&ts)
-    .execute(&mut **tx)
-    .await
-    .map_err(|err| VoomError::database_context("workers insert built-in verify_artifact", err))?;
-    Ok(())
 }
 
 fn validate_builtin_worker(worker: &Worker) -> Result<(), VoomError> {

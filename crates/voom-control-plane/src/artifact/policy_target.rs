@@ -1,7 +1,7 @@
 use voom_core::{FileLocationId, FileVersionId, VoomError};
 use voom_events::payload::{ArtifactHandleCreatedPayload, ArtifactLocationRecordedPayload};
 use voom_events::{Event, SubjectType};
-use voom_store::repo::artifacts::PolicyArtifactTarget;
+use voom_store::repo::media::artifacts::PolicyArtifactTarget;
 
 use crate::ControlPlane;
 use crate::cases::{append_event, begin_immediate_tx, commit_tx};
@@ -26,7 +26,7 @@ impl ControlPlane {
                 Some(handle.id.0),
                 now,
                 Event::ArtifactHandleCreated(ArtifactHandleCreatedPayload {
-                    artifact_handle_id: handle.id.0,
+                    artifact_handle_id: handle.id,
                     privacy_class: handle.privacy_class.clone(),
                     durability_class: handle.durability_class.clone(),
                     mutability: handle.mutability.clone(),
@@ -42,9 +42,9 @@ impl ControlPlane {
                 Some(location.id.0),
                 now,
                 Event::ArtifactLocationRecorded(ArtifactLocationRecordedPayload {
-                    artifact_location_id: location.id.0,
-                    artifact_handle_id: location.artifact_handle_id.0,
-                    kind: location.kind.clone(),
+                    artifact_location_id: location.id,
+                    artifact_handle_id: location.artifact_handle_id,
+                    kind: location.kind.to_string(),
                     value: location.value.clone(),
                 }),
             )

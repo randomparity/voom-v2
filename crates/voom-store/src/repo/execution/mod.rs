@@ -9,4 +9,5 @@ pub mod scheduler_decisions;
 pub mod scheduler_node_limits;
 pub mod tickets;
 pub mod workers;
+pub mod workflow_progress;
 pub mod workflow_summaries;

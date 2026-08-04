@@ -26,13 +26,16 @@ use tokio::task::JoinSet;
 use voom_core::{FileAssetId, FileVersionId, JobId, PolicyInputSetId, PolicyVersionId, VoomError};
 use voom_plan::{ExecutionPlan, PlanningContext, PlanningRequest};
 use voom_policy::PolicyInputSetDraft;
-use voom_store::repo::identity::{IdentityRepo, MediaSnapshot};
-use voom_store::repo::jobs::{JobState, NewJob};
-use voom_store::repo::tickets::TicketState;
-use voom_store::repo::workflow_summaries::{
-    FileAdmissionTier, FilePhaseOutcome, FilePhaseSummary, NewFilePhaseEntry, NewFileProgress,
-    NewFileRunHistory, NewFileRunStart, NewPhaseSummary, PhaseSummary, WorkflowSummary,
+use voom_store::repo::execution::jobs::{JobState, NewJob};
+use voom_store::repo::execution::tickets::TicketState;
+use voom_store::repo::execution::workflow_progress::{
+    FileAdmissionTier, FileProgress, NewFilePhaseEntry, NewFileProgress,
 };
+use voom_store::repo::execution::workflow_summaries::{
+    FilePhaseOutcome, FilePhaseSummary, NewFileRunHistory, NewFileRunStart, NewPhaseSummary,
+    PhaseSummary, WorkflowSummary,
+};
+use voom_store::repo::media::identity::{MediaSnapshot, MediaSnapshotRepo};
 
 use crate::ControlPlane;
 use crate::cases::policy::compliance::{ComplianceExecutionOptions, PromotionPlan};
@@ -42,7 +45,7 @@ use crate::cases::{begin_immediate_tx, begin_tx, commit_tx};
 use super::execution::WorkerRuntimeRegistry;
 use super::execution::executor::{
     PlannedLineageGuard, RunFailureMode, WORKFLOW_JOB_KIND, WorkflowExecutor,
-    WorkflowExecutorOptions,
+    WorkflowExecutorOptions, WorkflowFailureDisposition,
 };
 use super::plan::policy_bridge::{WorkflowExecutionShape, workflow_plan_from_compliance};
 
@@ -58,8 +61,6 @@ use planning::{
 };
 use resume::{PreparedResumeSeed, ResumePreparation};
 
-#[cfg(test)]
-use finalize::{sqlite_i64, sqlite_u64};
 #[cfg(test)]
 use planning::zero_phase_summary;
 
@@ -320,6 +321,15 @@ struct PhaseDispatchFailure {
     pub(super) source: VoomError,
     pub(super) run_summary: Option<crate::workflow::WorkflowRunSummary>,
     pub(super) job_failed: bool,
+    pub(super) disposition: WorkflowFailureDisposition,
+}
+
+fn should_continue_after_dispatch_failure(
+    failure: &PhaseDispatchFailure,
+    error_strategy: voom_policy::ErrorStrategy,
+) -> bool {
+    failure.disposition == WorkflowFailureDisposition::IsolatedTicket
+        && error_strategy == voom_policy::ErrorStrategy::Continue
 }
 
 /// Shared inputs for a fresh or resumed phase-barrier run. Everything here is
@@ -409,13 +419,13 @@ impl FileAdmissionGate {
         &self,
         control_plane: &ControlPlane,
         job_id: JobId,
-    ) -> Result<Option<voom_store::repo::workflow_summaries::FileProgress>, VoomError> {
+    ) -> Result<Option<FileProgress>, VoomError> {
         let _admission = self.admission_lock.lock().await;
         if !self.open.load(Ordering::Acquire) {
             return Ok(None);
         }
         control_plane
-            .workflow_summaries
+            .workflow_progress
             .admit_next_file(job_id, control_plane.clock().now())
             .await
     }
@@ -676,7 +686,11 @@ impl<'a> PhaseLoop<'a> {
         else {
             return Ok(());
         };
-        if failure.job_failed || planned.error_strategy != voom_policy::ErrorStrategy::Continue {
+        debug_assert!(
+            !failure.job_failed || failure.disposition == WorkflowFailureDisposition::Fatal,
+            "a durable job failure cannot be isolated"
+        );
+        if !should_continue_after_dispatch_failure(&failure, planned.error_strategy) {
             let admission_gate = self.admission_gate.clone();
             return close_admission_during_recovery(&admission_gate, async {
                 let phase_dispatched = failure.run_summary.is_some();
@@ -750,7 +764,7 @@ impl<'a> PhaseLoop<'a> {
             )));
         };
         self.control_plane
-            .workflow_summaries
+            .workflow_progress
             .upsert_file_phase_entry(
                 NewFilePhaseEntry {
                     job_id: self.job_id,
@@ -773,7 +787,7 @@ impl<'a> PhaseLoop<'a> {
             )
         })?;
         self.control_plane
-            .workflow_summaries
+            .workflow_progress
             .begin_file_terminalization(self.job_id, &branch_id)
             .await
             .map_err(|source| file_pipeline_failure(source, self.last_run.as_ref()))?;
@@ -805,7 +819,7 @@ impl<'a> PhaseLoop<'a> {
                 .map_err(|source| file_pipeline_failure(source, self.last_run.as_ref()))?;
         }
         self.control_plane
-            .workflow_summaries
+            .workflow_progress
             .mark_file_terminal(self.job_id, &branch_id, self.control_plane.clock().now())
             .await
             .map_err(|source| file_pipeline_failure(source, self.last_run.as_ref()))?;
@@ -1243,7 +1257,13 @@ impl ControlPlane {
         seeds: Vec<PreparedResumeSeed>,
         files: &[PhaseFile],
         max_in_flight_files: u32,
-    ) -> Result<(voom_store::repo::jobs::Job, Vec<FilePhaseSummary>), VoomError> {
+    ) -> Result<
+        (
+            voom_store::repo::execution::jobs::Job,
+            Vec<FilePhaseSummary>,
+        ),
+        VoomError,
+    > {
         self.open_sliding_file_job_with_terminal_progress(
             run_starts,
             history,
@@ -1263,7 +1283,13 @@ impl ControlPlane {
         files: &[PhaseFile],
         terminal_progress: Vec<NewFileProgress>,
         max_in_flight_files: u32,
-    ) -> Result<(voom_store::repo::jobs::Job, Vec<FilePhaseSummary>), VoomError> {
+    ) -> Result<
+        (
+            voom_store::repo::execution::jobs::Job,
+            Vec<FilePhaseSummary>,
+        ),
+        VoomError,
+    > {
         let now = self.clock().now();
         let mut tx = begin_tx(&self.pool).await?;
         let job = self
@@ -1296,10 +1322,10 @@ impl ControlPlane {
             .map(|row| row.branch_id.clone())
             .collect::<Vec<_>>();
         progress.extend(terminal_progress);
-        self.workflow_summaries
+        self.workflow_progress
             .insert_file_window_in_tx(&mut tx, job.id, max_in_flight_files, &progress, now)
             .await?;
-        self.workflow_summaries
+        self.workflow_progress
             .mark_file_progress_terminal_in_tx(&mut tx, job.id, &terminal_branches, now)
             .await?;
         let mut rows = Vec::with_capacity(seeds.len());
@@ -1506,8 +1532,13 @@ impl ControlPlane {
             crate::workflow::WorkflowRunSummary::empty(inputs.job_id, started.elapsed())
         });
         job_run
-            .refresh_counts(self, inputs.job_id, started.elapsed())
-            .await;
+            .refresh_counts(
+                &self.tickets,
+                &self.leases,
+                inputs.job_id,
+                started.elapsed(),
+            )
+            .await?;
         let last_run = Some(job_run);
         let (phases, file_phases) = self.persist_sliding_phase_summaries(&inputs).await?;
         let failure = pipeline_error.or(supervisor_error).or(continued_error);
@@ -1691,14 +1722,14 @@ impl ControlPlane {
         file_phases: &[FilePhaseSummary],
     ) -> Result<Vec<FilePhaseObservation>, VoomError> {
         let progress = self
-            .workflow_summaries
+            .workflow_progress
             .file_progress_for_job(inputs.job_id)
             .await?
             .into_iter()
             .map(|row| (row.branch_id, row.input_ordinal))
             .collect::<BTreeMap<_, _>>();
         let entries = self
-            .workflow_summaries
+            .workflow_progress
             .file_phase_entries_for_job(inputs.job_id)
             .await?;
         let completed_snapshots = file_phases
@@ -1794,7 +1825,8 @@ impl ControlPlane {
                 PhaseDispatchFailure {
                     source,
                     run_summary: None,
-                    job_failed: true,
+                    job_failed: false,
+                    disposition: WorkflowFailureDisposition::Fatal,
                 }
             })?;
         let Some(scope) = scope else {
@@ -1804,7 +1836,8 @@ impl ControlPlane {
             |source| PhaseDispatchFailure {
                 source,
                 run_summary: None,
-                job_failed: true,
+                job_failed: false,
+                disposition: WorkflowFailureDisposition::Fatal,
             },
         )?;
         let bridge =
@@ -1812,7 +1845,8 @@ impl ControlPlane {
                 .map_err(|source| PhaseDispatchFailure {
                     source,
                     run_summary: None,
-                    job_failed: true,
+                    job_failed: false,
+                    disposition: WorkflowFailureDisposition::Fatal,
                 })?;
         let Some(workflow) = bridge.workflow else {
             return Ok(None);
@@ -1846,6 +1880,7 @@ impl ControlPlane {
                 source: err.source,
                 run_summary,
                 job_failed: err.job_failed,
+                disposition: err.disposition,
             }
         })?;
         Ok(Some(run))
