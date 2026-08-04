@@ -11,8 +11,8 @@ use super::{
 use sqlx::Row;
 
 use super::super::common::{i64_from_u64, parse_iso8601, serialize_json, u64_from_i64};
-use super::artifact_handles::{row_to_handle, row_to_location};
-use super::artifact_verification::{SELECT_ARTIFACT_VERIFICATION_COLS, row_to_verification};
+use super::handles::{row_to_handle, row_to_location};
+use super::verification::{SELECT_ARTIFACT_VERIFICATION_COLS, row_to_verification};
 use crate::repo::execution::leases::LeaseState;
 
 #[derive(Debug)]

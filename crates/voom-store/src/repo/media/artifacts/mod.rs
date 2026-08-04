@@ -698,14 +698,10 @@ impl ArtifactCommitRepo for SqliteArtifactRepo {
     }
 }
 
-#[path = "artifact_commits.rs"]
-mod artifact_commits;
-#[path = "artifact_evidence.rs"]
-mod artifact_evidence;
-#[path = "artifact_handles.rs"]
-mod artifact_handles;
-#[path = "artifact_verification.rs"]
-mod artifact_verification;
+mod commits;
+mod evidence;
+mod handles;
+mod verification;
 
 pub(super) fn parse_failure_class(value: &str, field: &str) -> Result<FailureClass, VoomError> {
     FailureClass::from_wire_str(value)
@@ -723,5 +719,4 @@ pub(super) fn checked_sqlite_id(value: u64, context: &str) -> Result<i64, VoomEr
 }
 
 #[cfg(test)]
-#[path = "artifacts_test.rs"]
 mod tests;
