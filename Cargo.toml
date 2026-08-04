@@ -57,7 +57,7 @@ voom-mkvtoolnix-worker = { version = "0.1.0-dev", path = "crates/voom-mkvtoolnix
 # Shared third-party crates. Workspace declarations carry the union of
 # features common to every consumer; member crates add crate-specific
 # features via `{ workspace = true, features = ["..."] }`.
-base64 = "0.22.1"
+base64 = "0.23.0"
 hex = "0.4.3"
 rand = { version = "0.9.4", default-features = false, features = ["os_rng", "std", "std_rng"] }
 same-file = "=1.0.6"
@@ -74,7 +74,7 @@ tracing = "0.1.44"
 async-trait = "0.1.89"
 blake3 = "1.5"
 bytes = "1.7"
-constant_time_eq = "0.4.2"
+constant_time_eq = "0.5.0"
 http = "1.4"
 http-body = "1"
 http-body-util = "0.1"
