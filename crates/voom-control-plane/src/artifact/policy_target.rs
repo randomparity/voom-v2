@@ -20,7 +20,11 @@ impl ControlPlane {
         )
         .await?;
         let (selected_root_id, selected_relative_locator) = selected.location.rooted_address()?;
-        let canonical_path = selected.canonical_path.to_string_lossy().into_owned();
+        let canonical_path = selected.canonical_path.to_str().ok_or_else(|| {
+            VoomError::Config(
+                "policy artifact verification canonical path must be valid UTF-8".into(),
+            )
+        })?;
         let mut tx = begin_immediate_tx(&self.pool).await?;
         let now = self.clock().now();
         let resolution = self
@@ -29,7 +33,7 @@ impl ControlPlane {
                 &mut tx,
                 file_version_id,
                 file_location_id,
-                &canonical_path,
+                canonical_path,
                 now,
             )
             .await?;

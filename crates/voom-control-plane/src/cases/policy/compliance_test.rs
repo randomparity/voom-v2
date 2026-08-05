@@ -1098,6 +1098,53 @@ async fn scanned_fixture_persists_canonical_policy_path_for_root_alias() {
     assert_eq!(durable_path, target.path);
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn non_utf8_canonical_policy_path_is_rejected_without_durable_writes() {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
+    use std::os::unix::fs::symlink;
+
+    let (cp, _tmp) = cp().await;
+    let temp = tempfile::tempdir().unwrap();
+    let real_root = temp
+        .path()
+        .join(OsString::from_vec(b"non-utf8-\xff-root".to_vec()));
+    let alias_root = temp.path().join("utf8-root-alias");
+    std::fs::create_dir(&real_root).unwrap();
+    symlink(&real_root, &alias_root).unwrap();
+    let media_path = alias_root.join("movie.mkv");
+    tokio::fs::write(&media_path, b"fixture bytes")
+        .await
+        .unwrap();
+
+    let (file_version_id, _) = scanned_snapshot_for_existing_file(&cp, &media_path).await;
+    let before: (i64, i64, i64) = sqlx::query_as(
+        "SELECT (SELECT COUNT(*) FROM artifact_handles), \
+                (SELECT COUNT(*) FROM artifact_locations), \
+                (SELECT COUNT(*) FROM events)",
+    )
+    .fetch_one(cp.pool_for_test())
+    .await
+    .unwrap();
+
+    let error = cp
+        .resolve_policy_artifact_target(file_version_id, None)
+        .await
+        .unwrap_err();
+    let after: (i64, i64, i64) = sqlx::query_as(
+        "SELECT (SELECT COUNT(*) FROM artifact_handles), \
+                (SELECT COUNT(*) FROM artifact_locations), \
+                (SELECT COUNT(*) FROM events)",
+    )
+    .fetch_one(cp.pool_for_test())
+    .await
+    .unwrap();
+
+    assert_eq!(error.code(), "CONFIG_INVALID", "{error:?}");
+    assert_eq!(after, before);
+}
+
 #[tokio::test]
 async fn verification_source_inside_committed_working_dir_is_never_moved_or_deleted() {
     ensure_policy_verify_worker();
