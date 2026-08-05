@@ -96,6 +96,10 @@ pub(crate) struct ExtractClaimFenceContext<'a> {
 
 #[async_trait]
 pub(crate) trait ExtractClaimFenceHooks: Send + Sync {
+    async fn after_prepare_gate(&self) -> Result<(), VoomError> {
+        Ok(())
+    }
+
     async fn before_assert(
         &self,
         _cp: &ControlPlane,
@@ -1183,7 +1187,7 @@ pub(crate) async fn commit_audio_extract_set_with_hooks(
             "audio extraction commit set must not be empty".to_owned(),
         ));
     }
-    let prepared = prepare_extract_set(cp, input).await?;
+    let prepared = prepare_extract_set(cp, input, hooks).await?;
     match commit_audio_extract_set_inner(cp, input, &prepared, hooks).await {
         Ok(outputs) => Ok(outputs),
         Err(error) => Err(record_extract_recovery_failure(cp, input, &prepared, error).await),
@@ -1421,15 +1425,28 @@ async fn recover_promote_extract_member(member: &PreparedSidecarCommit) -> Resul
 async fn prepare_extract_set(
     cp: &ControlPlane,
     input: &CommitAudioExtractSetInput,
+    hooks: &dyn ExtractClaimFenceHooks,
 ) -> Result<Vec<PreparedSidecarCommit>, VoomError> {
     let mut inspected = Vec::with_capacity(input.outputs.len());
     for output in &input.outputs {
         inspected.push(inspect_extract_output(output).await?);
     }
-    let mut tx = begin_tx(&cp.pool).await?;
+    let preflight_now = cp.clock().now();
+    let mut preflight_tx = begin_tx(&cp.pool).await?;
+    check_sidecar_commit_gate(
+        cp,
+        &mut preflight_tx,
+        input.source_file_version_id,
+        preflight_now,
+    )
+    .await?;
+    commit_tx(preflight_tx).await?;
+
+    let mut tx = begin_immediate_tx(&cp.pool).await?;
     let now = cp.clock().now();
     let evaluated =
         check_sidecar_commit_gate(cp, &mut tx, input.source_file_version_id, now).await?;
+    hooks.after_prepare_gate().await?;
     let mut prepared = Vec::with_capacity(input.outputs.len());
     let mut bindings = Vec::with_capacity(input.outputs.len());
     for (output, inspected) in input.outputs.iter().zip(inspected) {

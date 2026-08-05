@@ -1,12 +1,18 @@
 use super::*;
 
+use std::sync::Arc;
+
+use async_trait::async_trait;
 use serde_json::json;
-use sqlx::Row;
+use sqlx::{Connection, Executor, Row};
 use time::OffsetDateTime;
 use voom_core::rng_test_support::FrozenRng;
 use voom_plan::planner::audio::{AudioDispositionFact, SnapshotAudioStreamFact};
 use voom_store::repo::media::identity::{
     DiscoveredFile, FileLocationKind, IngestOutcome, MediaSnapshot,
+};
+use voom_store::repo::media::use_leases::{
+    BlockingMode, IssuerKind, LeaseScope, NewUseLease, UseLeaseKind,
 };
 use voom_worker_protocol::{
     AudioDispositionFact as WorkerAudioDispositionFact, AudioOutputStreamFact, AudioStreamRef,
@@ -14,6 +20,122 @@ use voom_worker_protocol::{
 };
 
 use crate::audio::selection::{SelectedAudioStream, TranscodeAudioSelectionPlan};
+
+struct HeldPrepareGate {
+    entered: tokio::sync::Notify,
+    release: tokio::sync::Semaphore,
+}
+
+impl HeldPrepareGate {
+    fn new() -> Self {
+        Self {
+            entered: tokio::sync::Notify::new(),
+            release: tokio::sync::Semaphore::new(0),
+        }
+    }
+}
+
+#[async_trait]
+impl ExtractClaimFenceHooks for HeldPrepareGate {
+    async fn after_prepare_gate(&self) -> Result<(), VoomError> {
+        self.entered.notify_one();
+        self.release
+            .acquire()
+            .await
+            .map_err(|error| VoomError::Internal(format!("prepare gate closed: {error}")))?
+            .forget();
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn extract_prepare_reserves_writer_before_artifact_inserts() {
+    let (cp, _db, dir) = fixture().await;
+    let source = seed_source(&cp, dir.path().join("source.mkv"), b"source").await;
+    let hooks = Arc::new(HeldPrepareGate::new());
+    let task_hooks = Arc::clone(&hooks);
+    let cp = Arc::new(cp);
+    let task_cp = Arc::clone(&cp);
+    let input = empty_extract_input(source.file_version_id);
+    let prepare =
+        tokio::spawn(
+            async move { prepare_extract_set(&task_cp, &input, task_hooks.as_ref()).await },
+        );
+
+    hooks.entered.notified().await;
+    let mut probe = cp.pool_for_test().acquire().await.unwrap();
+    probe.execute("PRAGMA busy_timeout = 0").await.unwrap();
+    let probe_result = probe.begin_with("BEGIN IMMEDIATE").await;
+    let probe_acquired = probe_result.is_ok();
+    if let Ok(transaction) = probe_result {
+        transaction.rollback().await.unwrap();
+    }
+    hooks.release.add_permits(1);
+    assert!(
+        prepare.await.unwrap().is_err(),
+        "the empty fixture must roll back after the reservation assertion"
+    );
+
+    assert!(
+        !probe_acquired,
+        "audio prepare must reserve SQLite's writer before its first artifact insert"
+    );
+}
+
+#[tokio::test]
+async fn extract_prepare_reports_blocking_lease_before_contended_writer() {
+    let (cp, _db, dir) = fixture().await;
+    let source = seed_source(&cp, dir.path().join("source.mkv"), b"source").await;
+    let now = cp.clock().now();
+    cp.acquire_use_lease(NewUseLease {
+        kind: UseLeaseKind::Playback,
+        scope: LeaseScope::Version(source.file_version_id),
+        issuer_kind: IssuerKind::User,
+        issuer_ref: "prepare-preflight-test".to_owned(),
+        blocking_mode: BlockingMode::Blocking,
+        ttl: Some(time::Duration::hours(1)),
+        acquired_at: now,
+    })
+    .await
+    .unwrap();
+    let ready_reader = cp.pool_for_test().acquire().await.unwrap();
+    let writer = crate::cases::begin_immediate_tx(cp.pool_for_test())
+        .await
+        .unwrap();
+    drop(ready_reader);
+
+    let error = prepare_extract_set(
+        &cp,
+        &empty_extract_input(source.file_version_id),
+        &NoExtractClaimFenceHooks,
+    )
+    .await
+    .unwrap_err();
+    writer.rollback().await.unwrap();
+
+    assert_eq!(
+        error.error_code(),
+        voom_core::ErrorCode::BlockedByUseLease,
+        "{error}"
+    );
+}
+
+fn empty_extract_input(source_file_version_id: FileVersionId) -> CommitAudioExtractSetInput {
+    CommitAudioExtractSetInput {
+        operation_row_id: u64::MAX,
+        source_file_version_id,
+        source_media_snapshot_id: MediaSnapshotId(1),
+        source_bundle_id: BundleId(1),
+        outputs: Vec::new(),
+        claim: NewAudioExtractClaim {
+            operation_key: "writer-reservation-test".to_owned(),
+            expected_generation: 0,
+            lease_id: voom_core::LeaseId(1),
+            claim_token: "writer-reservation-test".to_owned(),
+            expires_at: OffsetDateTime::UNIX_EPOCH,
+        },
+    }
+}
 
 #[tokio::test]
 async fn record_staged_audio_transcode_writes_selected_stream_lineage() {
