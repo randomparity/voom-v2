@@ -155,6 +155,39 @@ fn ffprobe_config_timeout_kills_and_reaps_version_child() {
 }
 
 #[test]
+fn version_timeout_cleanup_reaps_after_termination_failure() {
+    let mut reaped = false;
+    let binary = Path::new("ffprobe-test");
+
+    let result = reap_version_child_after_termination(
+        binary,
+        Err(io::Error::other("termination failed")),
+        || {
+            reaped = true;
+            Ok(())
+        },
+    );
+
+    assert!(reaped, "reap must be attempted after termination fails");
+    assert!(result.is_err());
+    let Err(error) = result else {
+        return;
+    };
+    assert_eq!(config_error_kind(&error), ConfigErrorKind::Io);
+    let FfprobeConfigError::Io {
+        binary: actual_binary,
+        operation,
+        source,
+    } = error
+    else {
+        return;
+    };
+    assert_eq!(actual_binary, binary);
+    assert_eq!(operation, "terminate timed-out version check");
+    assert_eq!(source.to_string(), "termination failed");
+}
+
+#[test]
 fn ffprobe_config_rejects_nonzero_version_probe() {
     let Ok(dir) = tempfile::tempdir() else {
         return;
