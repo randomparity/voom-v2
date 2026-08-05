@@ -93,13 +93,6 @@ impl TransportConfig {
 }
 
 #[derive(Clone, Copy, Debug)]
-#[cfg_attr(
-    not(any(test, feature = "test")),
-    expect(
-        dead_code,
-        reason = "fixed limits are consumed by the following server-boundary implementation slice"
-    )
-)]
 pub struct ServerLimits {
     pub(crate) max_request_body_bytes: usize,
     pub(crate) tls_handshake: Duration,
@@ -184,7 +177,7 @@ impl ServerConfig {
         self.limits
     }
 
-    #[cfg(feature = "test")]
+    #[cfg(any(test, feature = "test"))]
     #[must_use]
     pub const fn with_limits_for_test(mut self, limits: ServerLimits) -> Self {
         self.limits = limits;
