@@ -419,6 +419,36 @@ async fn corrupt_persisted_root_data_is_a_database_error() {
 }
 
 #[tokio::test]
+async fn effective_root_with_missing_library_is_a_database_error() {
+    let (repo, _tmp) = repo().await;
+    let library_id = library(&repo, "films", true).await;
+    let owner = node(&repo, "node-a", NodeStatus::Active).await;
+    let root = repo
+        .create_library_root(new_root(library_id, owner, "/media"), at(1))
+        .await
+        .unwrap();
+    let mut connection = repo.pool.acquire().await.unwrap();
+    sqlx::query("PRAGMA foreign_keys = OFF")
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM libraries WHERE id = ?")
+        .bind(i64::try_from(library_id.0).unwrap())
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+    sqlx::query("PRAGMA foreign_keys = ON")
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+    drop(connection);
+
+    let error = repo.effective_library_root(root.id).await.unwrap_err();
+    assert_eq!(error.code(), "DB_UNREACHABLE");
+    assert!(error.to_string().contains("missing library"));
+}
+
+#[tokio::test]
 async fn corrupt_persisted_root_lifecycle_is_a_database_error_before_classification() {
     let (repo, _tmp) = repo().await;
     let library_id = library(&repo, "films", true).await;

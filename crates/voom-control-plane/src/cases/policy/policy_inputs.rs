@@ -129,7 +129,9 @@ impl ControlPlane {
     ///
     /// # Errors
     /// Returns `NOT_FOUND` for missing scan rows, `CONFLICT` for stale or
-    /// mismatched scan rows, and propagates policy validation/repository errors.
+    /// mismatched scan rows, `CONFIG_INVALID` when the version has no location
+    /// on an effectively available root, and propagates policy validation or
+    /// repository errors.
     pub async fn create_policy_input_set_from_scan(
         &self,
         input: PolicyInputFromScanInput,
@@ -162,6 +164,15 @@ impl ControlPlane {
             return Err(VoomError::Conflict(format!(
                 "media snapshot {} does not belong to file version {}",
                 input.media_snapshot_id, input.file_version_id
+            )));
+        }
+        if !self
+            .file_version_has_available_root_in_tx(&mut tx, input.file_version_id)
+            .await?
+        {
+            return Err(VoomError::Config(format!(
+                "file version {} has no effectively available rooted location",
+                input.file_version_id
             )));
         }
 
@@ -416,6 +427,49 @@ impl ControlPlane {
                 effective.available
             };
             if available {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    async fn file_version_has_available_root_in_tx(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        file_version_id: FileVersionId,
+    ) -> Result<bool, VoomError> {
+        let location_ids = self
+            .identity
+            .list_live_file_locations_by_version_in_tx(tx, file_version_id)
+            .await?;
+        for location_id in location_ids {
+            let location = self
+                .identity
+                .get_file_location_in_tx(tx, location_id)
+                .await?
+                .ok_or_else(|| {
+                    VoomError::database(format!(
+                        "live file location {location_id} vanished while authorizing file version \
+                         {file_version_id}"
+                    ))
+                })?;
+            let FileLocationAddress::Rooted {
+                storage_root_id, ..
+            } = location.address
+            else {
+                continue;
+            };
+            let effective = self
+                .libraries
+                .effective_library_root_in_tx(tx, storage_root_id)
+                .await?
+                .ok_or_else(|| {
+                    VoomError::database(format!(
+                        "file version {file_version_id} references missing storage root \
+                         {storage_root_id}"
+                    ))
+                })?;
+            if effective.available {
                 return Ok(true);
             }
         }

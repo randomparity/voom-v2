@@ -237,9 +237,10 @@ impl SqliteLibraryRepo {
     ) -> Result<Option<EffectiveLibraryRoot>, VoomError> {
         let row = sqlx::query(&format!(
             "SELECT {ROOT_COLS}, l.enabled AS library_enabled, n.status AS owner_status, \
+                    CASE WHEN l.id IS NULL THEN 0 ELSE 1 END AS library_present, \
                     CASE WHEN r.owner_node_id IS NULL THEN 0 ELSE 1 END AS owner_expected \
              FROM library_roots r \
-             JOIN libraries l ON l.id = r.library_id \
+             LEFT JOIN libraries l ON l.id = r.library_id \
              LEFT JOIN nodes n ON n.id = r.owner_node_id \
              WHERE r.id = ?"
         ))
@@ -247,6 +248,29 @@ impl SqliteLibraryRepo {
         .fetch_optional(&self.pool)
         .await
         .map_err(|error| VoomError::database_context("library_roots availability", error))?;
+        row.as_ref().map(row_to_effective).transpose()
+    }
+
+    pub async fn effective_library_root_in_tx(
+        &self,
+        tx: &mut Transaction<'_, Sqlite>,
+        id: StorageRootId,
+    ) -> Result<Option<EffectiveLibraryRoot>, VoomError> {
+        let row = sqlx::query(&format!(
+            "SELECT {ROOT_COLS}, l.enabled AS library_enabled, n.status AS owner_status, \
+                    CASE WHEN l.id IS NULL THEN 0 ELSE 1 END AS library_present, \
+                    CASE WHEN r.owner_node_id IS NULL THEN 0 ELSE 1 END AS owner_expected \
+             FROM library_roots r \
+             LEFT JOIN libraries l ON l.id = r.library_id \
+             LEFT JOIN nodes n ON n.id = r.owner_node_id \
+             WHERE r.id = ?"
+        ))
+        .bind(root_i64(id)?)
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(|error| {
+            VoomError::database_context("library_roots availability in transaction", error)
+        })?;
         row.as_ref().map(row_to_effective).transpose()
     }
 
@@ -645,7 +669,10 @@ async fn update_root_settings(
 
 fn row_to_effective(row: &SqliteRow) -> Result<EffectiveLibraryRoot, VoomError> {
     let root = row_to_root(row)?;
-    let library_enabled: i64 = row
+    let library_present: i64 = row
+        .try_get("library_present")
+        .map_err(|error| map_row_err("library_roots", error))?;
+    let library_enabled: Option<i64> = row
         .try_get("library_enabled")
         .map_err(|error| map_row_err("library_roots", error))?;
     let owner_expected: i64 = row
@@ -654,6 +681,12 @@ fn row_to_effective(row: &SqliteRow) -> Result<EffectiveLibraryRoot, VoomError> 
     let owner_status: Option<String> = row
         .try_get("owner_status")
         .map_err(|error| map_row_err("library_roots", error))?;
+    if library_present == 0 || library_enabled.is_none() {
+        return Err(VoomError::database(format!(
+            "library_roots {} references missing library",
+            root.id
+        )));
+    }
     if owner_expected != 0 && owner_status.is_none() {
         return Err(VoomError::database(format!(
             "library_roots {} references missing owner node",
@@ -664,7 +697,7 @@ fn row_to_effective(row: &SqliteRow) -> Result<EffectiveLibraryRoot, VoomError> 
         .as_deref()
         .map(|value| NodeStatus::parse_database("nodes.status", value))
         .transpose()?;
-    let reason = availability_reason(&root, library_enabled != 0, owner_status)?;
+    let reason = availability_reason(&root, library_enabled != Some(0), owner_status)?;
     Ok(EffectiveLibraryRoot {
         root,
         available: reason == RootAvailabilityReason::Available,
