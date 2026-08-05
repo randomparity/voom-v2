@@ -1,3 +1,10 @@
+#![cfg_attr(
+    test,
+    expect(
+        clippy::panic_in_result_fn,
+        reason = "tests return Result for fallible setup and use assertions for behavior"
+    )
+)]
 //! HTTP surface for the control plane. Shared envelope without the host-only
 //! `local` block.
 
@@ -13,6 +20,7 @@ use voom_core::{ErrorCode, VoomError, format_iso8601};
 
 pub const SCHEMA_VERSION: &str = "0";
 
+pub mod config;
 mod execution;
 
 #[cfg(test)]

@@ -57,9 +57,13 @@ voom-mkvtoolnix-worker = { version = "0.1.0-dev", path = "crates/voom-mkvtoolnix
 # Shared third-party crates. Workspace declarations carry the union of
 # features common to every consumer; member crates add crate-specific
 # features via `{ workspace = true, features = ["..."] }`.
+axum-server = { version = "0.8.0", features = ["tls-rustls-no-provider"] }
 base64 = "0.22.1"
+clap = { version = "=4.6.2", features = ["derive", "env"] }
 hex = "0.4.3"
 rand = { version = "0.9.4", default-features = false, features = ["os_rng", "std", "std_rng"] }
+rcgen = { version = "0.14.8", default-features = false, features = ["pem", "ring"] }
+rustls = { version = "0.23.43", default-features = false, features = ["ring", "std", "tls12"] }
 same-file = "=1.0.6"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = { version = "1.0.150", features = ["preserve_order"] }
@@ -68,7 +72,10 @@ sqlx = { version = "0.8.6", default-features = false, features = ["runtime-tokio
 tempfile = "3.27.0"
 time = { version = "0.3.45", features = ["formatting"] }
 tokio = { version = "1.52.3", default-features = false }
+tokio-rustls = { version = "0.26.4", default-features = false, features = ["ring", "tls12"] }
+tower-http = { version = "0.6.11", features = ["limit", "timeout"] }
 tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt", "json"] }
 
 # Sprint 2 Phase 1 (worker protocol + conformance) deps.
 async-trait = "0.1.89"

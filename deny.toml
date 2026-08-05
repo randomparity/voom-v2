@@ -20,6 +20,7 @@ allow = [
     "Zlib",
     "MPL-2.0",
     "CC0-1.0",
+    "ISC",
 ]
 
 [bans]
@@ -42,6 +43,9 @@ skip = [
     { crate = "r-efi@5.3.0", reason = "tolerated 5.3.0; baseline 6.0.0" },
     # Tolerate wit-bindgen 0.51.0; the wit-bindgen 0.57.1 baseline remains unskipped.
     { crate = "wit-bindgen@0.51.0", reason = "tolerated 0.51.0; baseline 0.57.1" },
+    # ring 0.17.14 retains the older Windows bindings. Tolerate only that transitive
+    # version; the workspace's windows-sys 0.61.2 baseline remains unskipped.
+    { crate = "windows-sys@0.52.0", reason = "ring TLS provider; baseline 0.61.2" },
 ]
 skip-tree = []
 
