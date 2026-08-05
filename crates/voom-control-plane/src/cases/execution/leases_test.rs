@@ -1450,6 +1450,107 @@ async fn fail_lease_terminal_emits_lease_released_and_ticket_failed_terminal() {
 }
 
 #[tokio::test]
+async fn fail_lease_retriable_reserves_writer_before_reading_held_state() {
+    let (cp, _clock, _tmp) = cp_with_zero_busy_timeout().await;
+    let lease = held_noop_lease(&cp).await;
+    let ticket = cp.tickets().get(lease.ticket_id).await.unwrap().unwrap();
+    let events_before = (
+        count(&cp, EventKind::LeaseReleased).await,
+        count(&cp, EventKind::TicketFailedRetriable).await,
+        count(&cp, EventKind::TicketFailedTerminal).await,
+    );
+    let issues_before = terminal_failure_issues(&cp).await;
+    let writer = begin_immediate_tx(cp.pool_for_test()).await.unwrap();
+
+    let error = cp
+        .fail_lease(
+            lease.id,
+            "contended retriable failure".to_owned(),
+            FailureClass::WorkerTimeout,
+            T0 + TDuration::seconds(1),
+        )
+        .await
+        .unwrap_err();
+    writer.rollback().await.unwrap();
+
+    assert!(
+        error.to_string().contains("begin immediate"),
+        "lease failure must contend before reading held state: {error}"
+    );
+    let stored_lease = cp.leases().get(lease.id).await.unwrap().unwrap();
+    assert_eq!(stored_lease.state, lease.state);
+    assert_eq!(stored_lease.release_reason, lease.release_reason);
+    assert_eq!(stored_lease.released_at, lease.released_at);
+    assert_eq!(stored_lease.epoch, lease.epoch);
+    assert_ticket_unchanged(&cp, &ticket).await;
+    assert_eq!(
+        (
+            count(&cp, EventKind::LeaseReleased).await,
+            count(&cp, EventKind::TicketFailedRetriable).await,
+            count(&cp, EventKind::TicketFailedTerminal).await,
+        ),
+        events_before
+    );
+    assert_eq!(terminal_failure_issues(&cp).await, issues_before);
+}
+
+#[tokio::test]
+async fn fail_lease_terminal_reserves_writer_before_reading_held_state() {
+    let (cp, _clock, _tmp) = cp_with_zero_busy_timeout().await;
+    let ticket = cp.create_ticket(ticket("noop", 1)).await.unwrap();
+    cp.mark_ready_if_unblocked(ticket.id, T0).await.unwrap();
+    let worker = eligible_worker(&cp, "terminal-writer-reservation", &ticket.kind).await;
+    let lease = cp
+        .acquire_lease(NewLease {
+            ticket_id: ticket.id,
+            worker_id: worker.id,
+            ttl: TDuration::minutes(1),
+            now: T0,
+        })
+        .await
+        .unwrap();
+    let ticket = cp.tickets().get(ticket.id).await.unwrap().unwrap();
+    let events_before = (
+        count(&cp, EventKind::LeaseReleased).await,
+        count(&cp, EventKind::TicketFailedRetriable).await,
+        count(&cp, EventKind::TicketFailedTerminal).await,
+    );
+    let issues_before = terminal_failure_issues(&cp).await;
+    let writer = begin_immediate_tx(cp.pool_for_test()).await.unwrap();
+
+    let error = cp
+        .fail_lease(
+            lease.id,
+            "contended terminal failure".to_owned(),
+            FailureClass::WorkerTimeout,
+            T0 + TDuration::seconds(1),
+        )
+        .await
+        .unwrap_err();
+    writer.rollback().await.unwrap();
+
+    assert!(
+        error.to_string().contains("begin immediate"),
+        "terminal failure must contend before reading held state: {error}"
+    );
+    let stored_lease = cp.leases().get(lease.id).await.unwrap().unwrap();
+    assert_eq!(stored_lease.state, lease.state);
+    assert_eq!(stored_lease.release_reason, lease.release_reason);
+    assert_eq!(stored_lease.released_at, lease.released_at);
+    assert_eq!(stored_lease.epoch, lease.epoch);
+    assert_ticket_unchanged(&cp, &ticket).await;
+    assert_eq!(
+        (
+            count(&cp, EventKind::LeaseReleased).await,
+            count(&cp, EventKind::TicketFailedRetriable).await,
+            count(&cp, EventKind::TicketFailedTerminal).await,
+        ),
+        events_before
+    );
+    assert_eq!(terminal_failure_issues(&cp).await, issues_before);
+}
+
+#[tokio::test]
 async fn expire_due_emits_paired_events_requeued() {
     let (cp, _tmp) = cp().await;
     let t = cp.create_ticket(ticket("noop", 3)).await.unwrap();
