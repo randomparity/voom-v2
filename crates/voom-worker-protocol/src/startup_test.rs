@@ -1,4 +1,18 @@
 use super::*;
+use std::time::Duration;
+
+#[test]
+fn ffprobe_supervisor_budget_outlasts_the_version_probe() {
+    assert!(
+        FFPROBE_STARTUP_TIMEOUT > FFPROBE_VERSION_TIMEOUT,
+        "supervisor budget {FFPROBE_STARTUP_TIMEOUT:?} must exceed version timeout \
+         {FFPROBE_VERSION_TIMEOUT:?}"
+    );
+    assert_eq!(
+        FFPROBE_STARTUP_TIMEOUT.checked_sub(FFPROBE_VERSION_TIMEOUT),
+        Some(Duration::from_secs(FFPROBE_STARTUP_COORDINATION_SECONDS))
+    );
+}
 
 #[test]
 fn parse_integer_env_reports_variable_and_value() {

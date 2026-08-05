@@ -60,7 +60,8 @@ pub use operations::verify_artifact::{
     VerifyArtifactResult, VerifyArtifactStatus,
 };
 pub use startup::{
-    DEFAULT_WORKER_BIND, WORKER_BIND_ENV, WORKER_EPOCH_ENV, WORKER_ID_ENV, WORKER_SECRET_ENV,
+    DEFAULT_WORKER_BIND, FFPROBE_STARTUP_COORDINATION_SECONDS, FFPROBE_STARTUP_TIMEOUT,
+    FFPROBE_VERSION_TIMEOUT, WORKER_BIND_ENV, WORKER_EPOCH_ENV, WORKER_ID_ENV, WORKER_SECRET_ENV,
     WorkerStartupError, load_worker_bind_addr_from_env, load_worker_credentials_from_env,
     serve_worker_http,
 };
