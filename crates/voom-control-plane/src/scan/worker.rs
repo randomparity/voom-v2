@@ -8,8 +8,8 @@ use voom_core::{ErrorCode, FailureClass, WorkerId};
 #[cfg(test)]
 use voom_worker_protocol::HttpClient;
 use voom_worker_protocol::{
-    ClientHandle, OperationKind, ProbeFileRequest, ProbeFileResult, ProtocolError,
-    WorkerCredentials,
+    ClientHandle, FFPROBE_STARTUP_TIMEOUT, OperationKind, ProbeFileRequest, ProbeFileResult,
+    ProtocolError, WorkerCredentials,
 };
 
 pub use crate::worker_process::WorkerCommand;
@@ -158,9 +158,17 @@ impl std::fmt::Debug for BundledWorkerProcess {
 
 impl BundledWorkerProcess {
     pub async fn launch_bundled_ffprobe(worker_id: WorkerId) -> Result<Self, ScanWorkerError> {
-        Self::launch(worker_id, bundled_ffprobe_command()).await
+        Ok(Self {
+            inner: WorkerProcess::launch_with_startup_timeout(
+                worker_id,
+                bundled_ffprobe_command(),
+                FFPROBE_STARTUP_TIMEOUT,
+            )
+            .await?,
+        })
     }
 
+    #[cfg(test)]
     pub async fn launch(
         worker_id: WorkerId,
         command: WorkerCommand,
@@ -228,7 +236,14 @@ pub(crate) async fn verify_bundled_ffprobe_readiness() -> Result<(), ScanWorkerE
 }
 
 async fn verify_ffprobe_readiness(command: WorkerCommand) -> Result<(), ScanWorkerError> {
-    let process = BundledWorkerProcess::launch(WorkerId(u64::MAX), command).await?;
+    let process = BundledWorkerProcess {
+        inner: WorkerProcess::launch_with_startup_timeout(
+            WorkerId(u64::MAX),
+            command,
+            FFPROBE_STARTUP_TIMEOUT,
+        )
+        .await?,
+    };
     let readiness: Result<(), ScanWorkerError> = async {
         process
             .inner
