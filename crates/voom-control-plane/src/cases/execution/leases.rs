@@ -25,6 +25,14 @@ use crate::cases::begin_immediate_tx;
 
 use super::{append_event, begin_tx, commit_tx, require_audit_field};
 
+#[cfg(test)]
+#[derive(Default)]
+pub(crate) struct HeartbeatTransactionObserver {
+    pub(crate) invocations: std::sync::atomic::AtomicUsize,
+    pub(crate) acquired: std::sync::atomic::AtomicBool,
+    pub(crate) invoked: tokio::sync::Notify,
+}
+
 impl ControlPlane {
     /// Acquire a worker lease. Emits `lease.acquired` + `ticket.leased` in
     /// the same transaction. The `ticket.leased` payload's `attempt` is the
@@ -125,7 +133,37 @@ impl ControlPlane {
         ttl: Duration,
         now: OffsetDateTime,
     ) -> Result<Lease, VoomError> {
-        let mut tx = begin_tx(&self.pool).await?;
+        self.heartbeat_lease_observed(
+            lease_id,
+            ttl,
+            now,
+            #[cfg(test)]
+            None,
+        )
+        .await
+    }
+
+    async fn heartbeat_lease_observed(
+        &self,
+        lease_id: LeaseId,
+        ttl: Duration,
+        now: OffsetDateTime,
+        #[cfg(test)] observer: Option<&HeartbeatTransactionObserver>,
+    ) -> Result<Lease, VoomError> {
+        #[cfg(test)]
+        if let Some(observer) = observer {
+            observer
+                .invocations
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            observer.invoked.notify_one();
+        }
+        let mut tx = begin_immediate_tx(&self.pool).await?;
+        #[cfg(test)]
+        if let Some(observer) = observer {
+            observer
+                .acquired
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+        }
         let lease = self
             .heartbeat_lease_in_tx(&mut tx, lease_id, ttl, now)
             .await?;
