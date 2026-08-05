@@ -1,7 +1,11 @@
 use super::*;
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
+use sqlx::ConnectOptions;
+use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
 use time::{Duration as TDuration, OffsetDateTime};
 use voom_core::clock_test_support::ManualClock;
 use voom_core::rng_test_support::FrozenRng;
@@ -17,6 +21,10 @@ use voom_store::repo::execution::jobs::{JobState, NewJob};
 use voom_store::repo::execution::leases::{LeaseAcquireOutcome, LeaseFilter, LeaseState};
 use voom_store::repo::execution::tickets::{NewTicket, Ticket, TicketState};
 use voom_store::repo::execution::workers::{NewCapability, NewGrant, Worker};
+use voom_store::repo::media::bundles::NewAssetBundle;
+use voom_store::repo::media::identity::{
+    DiscoveredFile, FileLocationKind, IngestOutcome, MediaWorkKind, NewMediaVariant, NewMediaWork,
+};
 
 use crate::cases::workers::RegisterWorkerInput;
 use crate::cases::{count, cp, issue_link_targets, terminal_failure_issues};
@@ -194,6 +202,383 @@ async fn cp_at_t0() -> (
     .await
     .unwrap();
     (cp, clock, tmp)
+}
+
+async fn cp_with_zero_busy_timeout() -> (
+    crate::ControlPlane,
+    Arc<ManualClock>,
+    voom_test_support::TempDatabase,
+) {
+    let tmp = voom_test_support::TempDatabase::new().unwrap();
+    let url = format!("sqlite://{}", tmp.path().display());
+    voom_store::init(&url).await.unwrap();
+    let options: SqliteConnectOptions = url
+        .parse::<SqliteConnectOptions>()
+        .unwrap()
+        .foreign_keys(true)
+        .journal_mode(SqliteJournalMode::Wal)
+        .busy_timeout(Duration::from_secs(30))
+        .disable_statement_logging();
+    let pool = SqlitePoolOptions::new()
+        .max_connections(2)
+        .connect_with(options)
+        .await
+        .unwrap();
+    let clock = Arc::new(ManualClock::new(T0));
+    let cp = crate::ControlPlane::open_with_pool_and_rng(
+        pool,
+        clock.clone(),
+        Arc::new(Mutex::new(FrozenRng::new(u32::MAX))),
+    )
+    .await
+    .unwrap();
+    let mut first = cp.pool_for_test().acquire().await.unwrap();
+    let mut second = cp.pool_for_test().acquire().await.unwrap();
+    sqlx::query("PRAGMA busy_timeout = 0")
+        .execute(&mut *first)
+        .await
+        .unwrap();
+    sqlx::query("PRAGMA busy_timeout = 0")
+        .execute(&mut *second)
+        .await
+        .unwrap();
+    drop((first, second));
+    (cp, clock, tmp)
+}
+
+async fn held_noop_lease(cp: &crate::ControlPlane) -> voom_store::repo::execution::leases::Lease {
+    let lease_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM leases")
+        .fetch_one(cp.pool_for_test())
+        .await
+        .unwrap();
+    let ticket = cp.create_ticket(ticket("noop", 2)).await.unwrap();
+    cp.mark_ready_if_unblocked(ticket.id, T0).await.unwrap();
+    let worker =
+        eligible_worker(cp, &format!("heartbeat-worker-{lease_count}"), &ticket.kind).await;
+    cp.acquire_lease(NewLease {
+        ticket_id: ticket.id,
+        worker_id: worker.id,
+        ttl: TDuration::minutes(1),
+        now: T0,
+    })
+    .await
+    .unwrap()
+}
+
+async fn seed_audio_claim_pair(
+    cp: &crate::ControlPlane,
+    lease_id: voom_core::LeaseId,
+    suffix: &str,
+    extract_expires_at: OffsetDateTime,
+    synthesis_expires_at: OffsetDateTime,
+) {
+    let discovered = cp
+        .record_discovered_file(
+            DiscoveredFile {
+                location_kind: FileLocationKind::LocalPath,
+                location_value: format!("/heartbeat-test/{suffix}.mkv"),
+                content_hash: format!("blake3:{suffix}"),
+                size_bytes: 1,
+                observed_at: T0,
+                proof: None,
+            },
+            None,
+        )
+        .await
+        .unwrap();
+    let IngestOutcome::NewFileAsset {
+        file_version_id, ..
+    } = discovered
+    else {
+        panic!("heartbeat claim source must be new");
+    };
+    let snapshot = cp
+        .record_media_snapshot(
+            file_version_id,
+            None,
+            serde_json::json!({"container": "mkv", "streams": []}),
+            T0,
+        )
+        .await
+        .unwrap();
+    let work = cp
+        .create_media_work(NewMediaWork {
+            kind: MediaWorkKind::Movie,
+            display_title: suffix.to_owned(),
+            provisional: true,
+            created_at: T0,
+        })
+        .await
+        .unwrap();
+    let variant = cp
+        .create_media_variant(NewMediaVariant {
+            media_work_id: work.id,
+            label: suffix.to_owned(),
+            provisional: true,
+            created_at: T0,
+        })
+        .await
+        .unwrap();
+    let bundle = cp
+        .create_bundle(NewAssetBundle {
+            media_variant_id: variant.id,
+            display_name: suffix.to_owned(),
+            created_at: T0,
+        })
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO audio_extract_operations \
+         (operation_key, operation_id, source_file_version_id, source_bundle_id, \
+          source_media_snapshot_id, state, claim_lease_id, claim_token, claim_expires_at, \
+          created_at) VALUES (?, ?, ?, ?, ?, 'planned', ?, ?, ?, ?)",
+    )
+    .bind(format!("extract:{suffix}"))
+    .bind(format!("extract-{suffix}"))
+    .bind(i64::try_from(file_version_id.0).unwrap())
+    .bind(i64::try_from(bundle.id.0).unwrap())
+    .bind(i64::try_from(snapshot.id.0).unwrap())
+    .bind(i64::try_from(lease_id.0).unwrap())
+    .bind(format!("extract-claim-{suffix}"))
+    .bind(extract_expires_at)
+    .bind(T0)
+    .execute(cp.pool_for_test())
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO audio_synthesis_operations \
+         (operation_key, planned_operation_id, source_file_version_id, \
+          source_media_snapshot_id, target_codec, target_channels, container, target_path, \
+          state, claim_lease_id, claim_token, claim_expires_at, created_at) \
+         VALUES (?, ?, ?, ?, 'aac', 2, 'mkv', ?, 'planned', ?, ?, ?, ?)",
+    )
+    .bind(format!("synthesis:{suffix}"))
+    .bind(format!("synthesis-{suffix}"))
+    .bind(i64::try_from(file_version_id.0).unwrap())
+    .bind(i64::try_from(snapshot.id.0).unwrap())
+    .bind(format!("/heartbeat-test/{suffix}-synthesized.mkv"))
+    .bind(i64::try_from(lease_id.0).unwrap())
+    .bind(format!("synthesis-claim-{suffix}"))
+    .bind(synthesis_expires_at)
+    .bind(T0)
+    .execute(cp.pool_for_test())
+    .await
+    .unwrap();
+}
+
+type LeaseHeartbeatRow = (String, String, String, i64);
+type AudioClaimRow = (String, i64, String, String);
+
+async fn lease_heartbeat_row(
+    cp: &crate::ControlPlane,
+    lease_id: voom_core::LeaseId,
+) -> Option<LeaseHeartbeatRow> {
+    sqlx::query_as("SELECT state, expires_at, last_heartbeat_at, epoch FROM leases WHERE id = ?")
+        .bind(i64::try_from(lease_id.0).unwrap())
+        .fetch_optional(cp.pool_for_test())
+        .await
+        .unwrap()
+}
+
+async fn audio_claim_rows(cp: &crate::ControlPlane, table: &str) -> Vec<AudioClaimRow> {
+    let query = format!(
+        "SELECT operation_key, claim_lease_id, claim_token, claim_expires_at \
+         FROM {table} WHERE claim_lease_id IS NOT NULL ORDER BY operation_key"
+    );
+    sqlx::query_as(&query)
+        .fetch_all(cp.pool_for_test())
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn heartbeat_rejects_missing_and_released_leases_without_mutation() {
+    let (cp, _clock, _tmp) = cp_at_t0().await;
+    let missing = cp
+        .heartbeat_lease(
+            voom_core::LeaseId(999),
+            TDuration::minutes(1),
+            T0 + TDuration::seconds(1),
+        )
+        .await
+        .unwrap_err();
+    assert!(missing.to_string().contains("not held"));
+
+    let lease = held_noop_lease(&cp).await;
+    cp.release_lease(
+        lease.id,
+        serde_json::json!({"status": "done"}),
+        T0 + TDuration::seconds(1),
+    )
+    .await
+    .unwrap();
+    let before = lease_heartbeat_row(&cp, lease.id).await;
+    let released = cp
+        .heartbeat_lease(lease.id, TDuration::minutes(1), T0 + TDuration::seconds(2))
+        .await
+        .unwrap_err();
+
+    assert!(released.to_string().contains("not held"));
+    assert_eq!(lease_heartbeat_row(&cp, lease.id).await, before);
+}
+
+#[tokio::test]
+async fn heartbeat_rolls_back_lease_and_claims_when_extraction_claim_expired() {
+    assert_expired_audio_claim_rolls_back(true).await;
+}
+
+#[tokio::test]
+async fn heartbeat_rolls_back_lease_and_claims_when_synthesis_claim_expired() {
+    assert_expired_audio_claim_rolls_back(false).await;
+}
+
+async fn assert_expired_audio_claim_rolls_back(extraction_expired: bool) {
+    let (cp, _clock, _tmp) = cp_at_t0().await;
+    let lease = held_noop_lease(&cp).await;
+    let expired = T0 + TDuration::seconds(1);
+    let live = T0 + TDuration::minutes(1);
+    seed_audio_claim_pair(
+        &cp,
+        lease.id,
+        if extraction_expired {
+            "expired-extraction"
+        } else {
+            "expired-synthesis"
+        },
+        if extraction_expired { expired } else { live },
+        if extraction_expired { live } else { expired },
+    )
+    .await;
+    let before_lease = lease_heartbeat_row(&cp, lease.id).await;
+    let before_extract = audio_claim_rows(&cp, "audio_extract_operations").await;
+    let before_synthesis = audio_claim_rows(&cp, "audio_synthesis_operations").await;
+
+    let error = cp
+        .heartbeat_lease(lease.id, TDuration::minutes(2), T0 + TDuration::seconds(2))
+        .await
+        .unwrap_err();
+
+    let expected = if extraction_expired {
+        "expired audio extraction claim"
+    } else {
+        "expired audio synthesis claim"
+    };
+    assert!(error.to_string().contains(expected));
+    assert_eq!(lease_heartbeat_row(&cp, lease.id).await, before_lease);
+    assert_eq!(
+        audio_claim_rows(&cp, "audio_extract_operations").await,
+        before_extract
+    );
+    assert_eq!(
+        audio_claim_rows(&cp, "audio_synthesis_operations").await,
+        before_synthesis
+    );
+}
+
+#[tokio::test]
+async fn heartbeat_advances_only_claims_owned_by_its_lease() {
+    let (cp, _clock, _tmp) = cp_at_t0().await;
+    let target = held_noop_lease(&cp).await;
+    let other = held_noop_lease(&cp).await;
+    let original_expiry = T0 + TDuration::minutes(1);
+    seed_audio_claim_pair(
+        &cp,
+        target.id,
+        "target-owner",
+        original_expiry,
+        original_expiry,
+    )
+    .await;
+    seed_audio_claim_pair(
+        &cp,
+        other.id,
+        "other-owner",
+        original_expiry,
+        original_expiry,
+    )
+    .await;
+    let before_extract = audio_claim_rows(&cp, "audio_extract_operations").await;
+    let before_synthesis = audio_claim_rows(&cp, "audio_synthesis_operations").await;
+
+    let heartbeat = cp
+        .heartbeat_lease(target.id, TDuration::minutes(2), T0 + TDuration::seconds(1))
+        .await
+        .unwrap();
+
+    let after_extract = audio_claim_rows(&cp, "audio_extract_operations").await;
+    let after_synthesis = audio_claim_rows(&cp, "audio_synthesis_operations").await;
+    for (before, after) in before_extract
+        .iter()
+        .zip(&after_extract)
+        .chain(before_synthesis.iter().zip(&after_synthesis))
+    {
+        if before.1 == i64::try_from(other.id.0).unwrap() {
+            assert_eq!(after, before, "another lease's claim must remain unchanged");
+        } else {
+            assert_eq!(after.0, before.0);
+            assert_eq!(after.1, before.1);
+            assert_eq!(after.2, before.2);
+            assert_ne!(after.3, before.3);
+        }
+    }
+    assert_eq!(heartbeat.last_heartbeat_at, T0 + TDuration::seconds(1));
+}
+
+#[tokio::test]
+async fn heartbeat_reserves_writer_at_transaction_start() {
+    let (cp, _clock, _tmp) = cp_with_zero_busy_timeout().await;
+    let lease = held_noop_lease(&cp).await;
+    let writer = begin_immediate_tx(cp.pool_for_test()).await.unwrap();
+
+    let error = cp
+        .heartbeat_lease(lease.id, TDuration::minutes(1), T0 + TDuration::seconds(1))
+        .await
+        .unwrap_err();
+    writer.rollback().await.unwrap();
+
+    assert!(
+        error.to_string().contains("begin immediate"),
+        "heartbeat contention must be reported at its immediate transaction opener: {error}"
+    );
+}
+
+#[tokio::test]
+async fn heartbeat_serializes_one_production_attempt_behind_a_writer() {
+    let (cp, _clock, _tmp) = cp_at_t0().await;
+    let lease = held_noop_lease(&cp).await;
+    let cp = Arc::new(cp);
+    let writer = begin_immediate_tx(cp.pool_for_test()).await.unwrap();
+    let observer = Arc::new(HeartbeatTransactionObserver::default());
+    let outer_attempts = Arc::new(AtomicUsize::new(0));
+    let task_cp = Arc::clone(&cp);
+    let task_observer = Arc::clone(&observer);
+    let task_attempts = Arc::clone(&outer_attempts);
+    let heartbeat = tokio::spawn(async move {
+        crate::workflow::execution::leases::retry_on_database_locked(|| {
+            task_attempts.fetch_add(1, Ordering::SeqCst);
+            task_cp.heartbeat_lease_observed(
+                lease.id,
+                TDuration::minutes(1),
+                T0 + TDuration::seconds(1),
+                Some(task_observer.as_ref()),
+            )
+        })
+        .await
+    });
+
+    observer.invoked.notified().await;
+    assert_eq!(observer.invocations.load(Ordering::SeqCst), 1);
+    assert_eq!(outer_attempts.load(Ordering::SeqCst), 1);
+    assert!(!observer.acquired.load(Ordering::SeqCst));
+    assert!(!heartbeat.is_finished());
+
+    writer.rollback().await.unwrap();
+    let updated = heartbeat.await.unwrap().unwrap();
+
+    assert_eq!(observer.invocations.load(Ordering::SeqCst), 1);
+    assert_eq!(outer_attempts.load(Ordering::SeqCst), 1);
+    assert!(observer.acquired.load(Ordering::SeqCst));
+    assert_eq!(updated.last_heartbeat_at, T0 + TDuration::seconds(1));
 }
 
 fn claim_for(
