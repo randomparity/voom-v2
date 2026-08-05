@@ -1,4 +1,5 @@
 use std::error::Error;
+use std::sync::{Arc, Condvar, Mutex};
 
 use time::OffsetDateTime;
 use voom_core::{NodeKind, ProviderLocator};
@@ -77,6 +78,68 @@ fn new_root(library_id: LibraryId, owner_node_id: NodeId, locator: &str) -> NewL
     }
 }
 
+struct RollbackBarrier {
+    entered: tokio::sync::Notify,
+    release: (Mutex<bool>, Condvar),
+}
+
+impl RollbackBarrier {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            entered: tokio::sync::Notify::new(),
+            release: (Mutex::new(false), Condvar::new()),
+        })
+    }
+
+    fn callback(self: &Arc<Self>) -> impl FnMut() + Send + 'static {
+        let barrier = Arc::clone(self);
+        move || {
+            barrier.entered.notify_one();
+            let (lock, wake) = &barrier.release;
+            let mut released = lock.lock().unwrap();
+            while !*released {
+                released = wake.wait(released).unwrap();
+            }
+        }
+    }
+
+    fn rearm(&self) {
+        *self.release.0.lock().unwrap() = false;
+    }
+
+    fn release(&self) {
+        *self.release.0.lock().unwrap() = true;
+        self.release.1.notify_one();
+    }
+
+    async fn wait_until_entered(&self) {
+        tokio::time::timeout(std::time::Duration::from_secs(5), self.entered.notified())
+            .await
+            .expect("transaction did not reach rollback hook");
+    }
+}
+
+async fn isolate_rollback_connection(
+    repo: &SqliteLibraryRepo,
+) -> (
+    Vec<sqlx::pool::PoolConnection<sqlx::Sqlite>>,
+    Arc<RollbackBarrier>,
+) {
+    let mut held_connections = Vec::new();
+    for _ in 0..repo.pool.options().get_max_connections() {
+        held_connections.push(repo.pool.acquire().await.unwrap());
+    }
+    let mut rollback_connection = held_connections.pop().unwrap();
+    let barrier = RollbackBarrier::new();
+    rollback_connection
+        .lock_handle()
+        .await
+        .unwrap()
+        .set_rollback_hook(barrier.callback());
+    rollback_connection.return_to_pool().await;
+    (held_connections, barrier)
+}
+
 #[tokio::test]
 async fn create_then_get_round_trips_typed_owner_provider_and_state() {
     let (repo, _tmp) = repo().await;
@@ -136,6 +199,69 @@ async fn provider_locator_is_unique_only_within_one_owner() {
     repo.create_library_root(new_root(library_id, owner_b, "/media"), at(3))
         .await
         .unwrap();
+}
+
+#[tokio::test]
+async fn standalone_root_writes_await_rollback_before_returning_errors() {
+    let (repo, _tmp) = repo().await;
+    let library_id = library(&repo, "films", true).await;
+    let owner = node(&repo, "node-a", NodeStatus::Registered).await;
+    let root = repo
+        .create_library_root(new_root(library_id, owner, "/media"), at(1))
+        .await
+        .unwrap();
+    let (mut held_connections, rollback) = isolate_rollback_connection(&repo).await;
+
+    let create_repo = repo.clone();
+    let create_task = tokio::spawn(async move {
+        create_repo
+            .create_library_root(new_root(library_id, owner, "/media"), at(2))
+            .await
+    });
+    rollback.wait_until_entered().await;
+    tokio::task::yield_now().await;
+    let create_returned_before_rollback = create_task.is_finished();
+    rollback.release();
+    let create_error = create_task.await.unwrap().unwrap_err();
+    assert!(matches!(create_error, VoomError::Conflict(_)));
+    assert!(
+        !create_returned_before_rollback,
+        "create returned before its failed transaction released SQLite writer ownership"
+    );
+
+    sqlx::query(
+        "CREATE TRIGGER reject_root_update BEFORE UPDATE ON library_roots \
+         BEGIN SELECT RAISE(FAIL, 'forced root update failure'); END",
+    )
+    .execute(&mut *held_connections[0])
+    .await
+    .unwrap();
+    rollback.rearm();
+    let update_repo = repo.clone();
+    let update_task = tokio::spawn(async move {
+        update_repo
+            .update_library_root(
+                root.id,
+                LibraryRootUpdate {
+                    debounce_seconds: Some(10),
+                    ..LibraryRootUpdate::default()
+                },
+                at(3),
+            )
+            .await
+    });
+    rollback.wait_until_entered().await;
+    tokio::task::yield_now().await;
+    let update_returned_before_rollback = update_task.is_finished();
+    rollback.release();
+    let update_error = update_task.await.unwrap().unwrap_err();
+    assert!(matches!(update_error, VoomError::Database { .. }));
+    assert!(
+        !update_returned_before_rollback,
+        "update returned before its failed transaction released SQLite writer ownership"
+    );
+
+    drop(held_connections);
 }
 
 #[tokio::test]

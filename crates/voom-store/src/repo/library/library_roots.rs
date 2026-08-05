@@ -12,7 +12,7 @@ use super::super::common::{
     i64_from_u64, iso8601, map_row_err, parse_iso8601, serialize_json, u32_from_i64, u64_from_i64,
 };
 use super::libraries::is_unique_violation;
-use super::{SqliteLibraryRepo, begin, commit};
+use super::{SqliteLibraryRepo, begin, commit, rollback};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LibraryScanMode {
@@ -162,7 +162,18 @@ impl SqliteLibraryRepo {
         now: OffsetDateTime,
     ) -> Result<LibraryRoot, VoomError> {
         let mut tx = begin(&self.pool).await?;
-        let root = self.create_library_root_in_tx(&mut tx, input, now).await?;
+        let root = match self.create_library_root_in_tx(&mut tx, input, now).await {
+            Ok(root) => root,
+            Err(error) => {
+                rollback(tx).await.map_err(|rollback_error| {
+                    VoomError::database(format!(
+                        "library root create failed: {error}; rollback also failed: \
+                         {rollback_error}"
+                    ))
+                })?;
+                return Err(error);
+            }
+        };
         commit(tx).await?;
         Ok(root)
     }
@@ -291,8 +302,19 @@ impl SqliteLibraryRepo {
         ];
         let timestamp = iso8601(now)?;
         let mut tx = begin(&self.pool).await?;
-        require_default_ids_in_library(&mut tx, current.library_id, &updated_defaults).await?;
-        update_root_settings(&mut tx, id, &update, &timestamp).await?;
+        let update_result = async {
+            require_default_ids_in_library(&mut tx, current.library_id, &updated_defaults).await?;
+            update_root_settings(&mut tx, id, &update, &timestamp).await
+        }
+        .await;
+        if let Err(error) = update_result {
+            rollback(tx).await.map_err(|rollback_error| {
+                VoomError::database(format!(
+                    "library root update failed: {error}; rollback also failed: {rollback_error}"
+                ))
+            })?;
+            return Err(error);
+        }
         commit(tx).await?;
         self.get_library_root(id).await?.ok_or_else(|| {
             VoomError::Internal(format!("library_roots post-update row vanished: {id}"))

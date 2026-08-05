@@ -63,3 +63,9 @@ async fn commit(tx: Transaction<'_, Sqlite>) -> Result<(), VoomError> {
         .await
         .map_err(|e| VoomError::database_context("commit", e))
 }
+
+async fn rollback(tx: Transaction<'_, Sqlite>) -> Result<(), VoomError> {
+    tx.rollback()
+        .await
+        .map_err(|e| VoomError::database_context("rollback", e))
+}
