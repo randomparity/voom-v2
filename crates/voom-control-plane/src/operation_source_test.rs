@@ -83,3 +83,51 @@ async fn artifact_target_rejects_cross_library_default_root_as_corrupt_storage()
     assert!(matches!(error, VoomError::Database { .. }));
     assert!(error.to_string().contains("belongs to library"));
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn configured_root_alias_resolves_but_descendant_symlink_is_rejected() {
+    use std::os::unix::fs::symlink;
+
+    let (cp, _db) = crate::cases::cp().await;
+    let temp = tempfile::tempdir().unwrap();
+    let real_root = temp.path().join("real-root");
+    let alias_root = temp.path().join("root-alias");
+    std::fs::create_dir(&real_root).unwrap();
+    symlink(&real_root, &alias_root).unwrap();
+    let safe_path = real_root.join("safe.mkv");
+    std::fs::write(&safe_path, b"safe").unwrap();
+    let library_id = library(&cp, "root-alias").await;
+    let root = cp
+        .create_library_root(root_input(library_id, &alias_root))
+        .await
+        .unwrap();
+    cp.activate_library_root(root.id, "root-alias".to_owned())
+        .await
+        .unwrap();
+
+    let safe = resolve_root_relative_existing_path(
+        &cp,
+        "test artifact",
+        root.id,
+        &ProviderRelativeLocator::new("safe.mkv".to_owned()).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(safe, safe_path.canonicalize().unwrap());
+
+    let real_nested = real_root.join("real-nested");
+    std::fs::create_dir(&real_nested).unwrap();
+    std::fs::write(real_nested.join("unsafe.mkv"), b"unsafe").unwrap();
+    symlink(&real_nested, real_root.join("nested-alias")).unwrap();
+    let error = resolve_root_relative_existing_path(
+        &cp,
+        "test artifact",
+        root.id,
+        &ProviderRelativeLocator::new("nested-alias/unsafe.mkv".to_owned()).unwrap(),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.code(), "CONFIG_INVALID");
+    assert!(error.to_string().contains("must not traverse a symlink"));
+}

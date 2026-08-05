@@ -1058,6 +1058,34 @@ async fn compliance_execute_verifies_existing_active_artifact_through_bundled_wo
     );
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn scanned_fixture_scopes_a_root_alias_before_source_resolution() {
+    use std::os::unix::fs::symlink;
+
+    let (cp, _tmp) = cp().await;
+    let temp = tempfile::tempdir().unwrap();
+    let real_root = temp.path().join("real-root");
+    let alias_root = temp.path().join("root-alias");
+    std::fs::create_dir(&real_root).unwrap();
+    symlink(&real_root, &alias_root).unwrap();
+    let media_path = alias_root.join("movie.mkv");
+    tokio::fs::write(&media_path, b"fixture bytes")
+        .await
+        .unwrap();
+
+    let (file_version_id, _) = scanned_snapshot_for_existing_file(&cp, &media_path).await;
+    let selected =
+        crate::operation_source::select_local_source(&cp, "test fixture", file_version_id, None)
+            .await
+            .unwrap();
+
+    assert_eq!(
+        selected.canonical_path,
+        real_root.join("movie.mkv").canonicalize().unwrap()
+    );
+}
+
 #[tokio::test]
 async fn verification_source_inside_committed_working_dir_is_never_moved_or_deleted() {
     ensure_policy_verify_worker();
@@ -1616,6 +1644,11 @@ async fn scanned_snapshot_for_existing_file(
     cp: &crate::ControlPlane,
     path: &std::path::Path,
 ) -> (voom_core::FileVersionId, voom_core::MediaSnapshotId) {
+    let root_path = path.parent().unwrap();
+    voom_store::test_support::set_test_storage_root_path(cp.pool_for_test(), root_path)
+        .await
+        .unwrap();
+    let relative_locator = path.file_name().unwrap().to_string_lossy();
     let facts = crate::scan::hash::observe_candidate_file(path)
         .await
         .unwrap();
@@ -1624,7 +1657,7 @@ async fn scanned_snapshot_for_existing_file(
             DiscoveredFile {
                 storage_root_id: voom_store::test_support::TEST_STORAGE_ROOT_ID,
                 provider_relative_locator: voom_store::test_support::test_relative_locator(
-                    &path.display().to_string(),
+                    &relative_locator,
                 ),
                 content_hash: facts.content_hash,
                 size_bytes: facts.size_bytes,

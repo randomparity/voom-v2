@@ -278,6 +278,46 @@ async fn finalization_uses_latest_exact_commit_from_multi_operation_phase() {
     );
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn repointed_fixture_scopes_a_root_alias_before_source_resolution() {
+    use std::os::unix::fs::symlink;
+
+    let (cp, _tmp) = crate::cases::cp().await;
+    let temp = tempfile::tempdir().unwrap();
+    let real_root = temp.path().join("real-root");
+    let alias_root = temp.path().join("root-alias");
+    std::fs::create_dir(&real_root).unwrap();
+    symlink(&real_root, &alias_root).unwrap();
+    let source = seed_version(&cp, "/library/alias.mkv", "source").await;
+    let location = cp
+        .identity()
+        .list_file_locations_by_version(source)
+        .await
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap();
+    let aliased_path = alias_root.join("committed.mkv");
+
+    repoint_location(&cp, location.id, &aliased_path).await;
+    let location = cp
+        .identity()
+        .get_file_location(location.id)
+        .await
+        .unwrap()
+        .unwrap();
+    let selected =
+        crate::operation_source::resolve_rooted_existing_path(&cp, "test fixture", &location)
+            .await
+            .unwrap();
+
+    assert_eq!(
+        selected,
+        real_root.join("committed.mkv").canonicalize().unwrap()
+    );
+}
+
 #[tokio::test]
 async fn repeated_terminalization_cleanup_uses_carried_ticket_provenance() {
     let (cp, _tmp) = crate::cases::cp().await;
@@ -812,6 +852,13 @@ async fn repoint_location(
     path: &std::path::Path,
 ) {
     tokio::fs::write(path, b"committed-bytes").await.unwrap();
+    voom_store::test_support::set_test_storage_root_path(
+        cp.pool_for_test(),
+        path.parent().unwrap(),
+    )
+    .await
+    .unwrap();
+    let relative_locator = path.file_name().unwrap().to_string_lossy();
     let location = cp
         .identity()
         .get_file_location(location_id)
@@ -825,7 +872,7 @@ async fn repoint_location(
             location_id,
             location.epoch,
             voom_store::test_support::TEST_STORAGE_ROOT_ID,
-            voom_store::test_support::test_relative_locator(&path.display().to_string()),
+            voom_store::test_support::test_relative_locator(&relative_locator),
             T0,
         )
         .await
