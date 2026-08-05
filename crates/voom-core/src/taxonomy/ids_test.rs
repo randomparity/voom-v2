@@ -49,6 +49,14 @@ fn node_id_display_and_json_match_public_id_contract() {
 }
 
 #[test]
+fn storage_root_id_display_and_json_match_public_id_contract() {
+    let id = StorageRootId(73);
+    assert_eq!(id.to_string(), "73");
+    assert_eq!(serde_json::to_string(&id).unwrap(), "73");
+    assert_eq!(serde_json::from_str::<StorageRootId>("73").unwrap(), id);
+}
+
+#[test]
 fn media_work_id_displays_inner_u64() {
     assert_eq!(MediaWorkId(1).to_string(), "1");
 }
