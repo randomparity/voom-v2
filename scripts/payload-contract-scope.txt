@@ -15,7 +15,9 @@ crates/voom-events/src/payload/workers.rs
 crates/voom-events/src/payload/mod.rs
 crates/voom-store/src/repo/media/commit_safety_gate/codecs.rs
 crates/voom-store/src/repo/media/commit_safety_gate.rs
+crates/voom-store/src/repo/media/artifacts/commits.rs
 crates/voom-store/src/repo/execution/remote_idempotency.rs
+crates/voom-control-plane/src/artifact/commit/mod.rs
 crates/voom-control-plane/src/workflow/plan/ticket_payload.rs
 crates/voom-control-plane/src/workflow/execution/timing.rs
 crates/voom-control-plane/src/workflow/ticket_results.rs
