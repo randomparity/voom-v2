@@ -50,9 +50,10 @@ The change is successful when automated tests prove:
 
 Use `axum-server` for plain/TLS listeners, bounded TLS handshakes, listener readiness, and
 graceful connection draining. Restrict Hyper to HTTP/1.1, disable persistent connections,
-apply Tower HTTP middleware to the existing Axum router, and set Hyper's request-head
-deadline on the server builder. This reuses maintained connection lifecycle code while
-leaving application use cases unchanged.
+and wrap the post-handshake stream with a 90-second total connection deadline. Apply Tower
+HTTP middleware to the existing Axum router and set Hyper's request-head deadline on the
+server builder. This reuses maintained connection lifecycle code while leaving application
+use cases unchanged.
 
 ### Direct Tokio-Rustls and Hyper accept loop
 
@@ -72,8 +73,9 @@ an upstream proxy later, but it is not the server's only TLS boundary.
 - `crates/voom-api/src/config.rs` owns Clap parsing and converts raw arguments into a
   validated `ServerConfig`. It never reads certificate or key contents.
 - `crates/voom-api/src/server.rs` owns request bounds, listener construction, Rustls PEM
-  loading, listening notification, and graceful draining. It accepts a router so tests can
-  exercise timeout and shutdown behavior without test-only production routes.
+  loading, the post-handshake deadline stream, listening notification, and graceful
+  draining. It accepts a router so tests can exercise timeout and shutdown behavior without
+  test-only production routes.
 - `crates/voom-api/src/main.rs` initializes stderr logging, resolves the existing database
   configuration, opens `HealthPlane` and `ControlPlane`, installs OS signal handling, and
   invokes the server. It contains no scheduling loop.
@@ -106,15 +108,18 @@ Fixed limits deliberately avoid speculative public knobs:
 - maximum request body: 1 MiB;
 - TLS handshake deadline: 30 seconds;
 - request-head deadline: 30 seconds;
-- complete request-processing deadline: 30 seconds; and
+- complete request-processing deadline: 30 seconds;
+- total post-handshake connection deadline: 90 seconds; and
 - graceful shutdown deadline: 30 seconds.
 
 The existing route semantics remain the contract within those process bounds. A request
 that exceeds the body limit receives HTTP 413. A request that exceeds the processing
 deadline receives HTTP 408. Slow TLS or request-head peers are disconnected because no Axum
 handler has run and therefore no JSON command envelope exists to preserve. The server
-accepts HTTP/1.1 only and closes each connection after its one response; no unauthenticated
-peer can remain between requests or open HTTP/2 streams outside these deadlines.
+accepts HTTP/1.1 only and closes each connection after its one response. The outer
+post-handshake deadline covers response production, socket write, and flush, so a client
+that stops reading cannot retain the connection indefinitely. No unauthenticated peer can
+remain between requests or open HTTP/2 streams outside these deadlines.
 
 ## Startup and runtime flow
 
@@ -126,9 +131,11 @@ peer can remain between requests or open HTTP/2 streams outside these deadlines.
    missing, uninitialized, partial, dirty, or too-new state aborts startup without binding.
 5. TLS mode reads and parses the certificate chain and private key. Failure names the
    operation and affected option, not PEM contents.
-6. The process binds, logs its bound address and transport mode to stderr, and serves the
+6. After TLS acceptance, a deadline stream wraps the established connection and returns a
+   timed-out I/O error once its total lifetime expires, including during response writes.
+7. The process binds, logs its bound address and transport mode to stderr, and serves the
    bounded existing router over non-persistent HTTP/1.1.
-7. SIGINT or SIGTERM stops acceptance, drains accepted work for at most 30 seconds, and
+8. SIGINT or SIGTERM stops acceptance, drains accepted work for at most 30 seconds, and
    logs retirement to stderr.
 
 The existing `/health` endpoint is the readiness endpoint. It returns the current schema
@@ -206,7 +213,7 @@ Widened boundaries:
 |---|---|---|
 | Operator configuration | Clap type parsing; complete TLS pair; loopback test for cleartext | Fail before bind; name option and remedy, never supplied value or key bytes |
 | PEM files | Rustls parses certificate chain and matching supported private key | TLS setup is startup-only; parse errors are sanitized |
-| TCP/TLS peer | Rustls server authentication; HTTP unavailable before handshake; HTTP/1.1 only | 30-second handshake and request-head deadlines; one response per connection; TLS failures expose no application data |
+| TCP/TLS peer | Rustls server authentication; HTTP unavailable before handshake; HTTP/1.1 only | 30-second handshake and request-head deadlines; 90-second total post-handshake lifetime includes response write/flush; one response per connection; TLS failures expose no application data |
 | HTTP route | Existing bearer-token and node/worker authorization; existing strict DTO parsing | 1 MiB body and 30-second processing deadline; generic auth failure and existing envelopes |
 | Shutdown signal | Only local OS signal delivery invokes the handle | Stop accept immediately; 30-second drain; no secret-bearing diagnostic |
 | SQLite | Existing `connect`, schema probe, repositories, transactions, and checked decoding | No migration or new persistence; existing database errors remain authoritative |
@@ -246,6 +253,9 @@ Widened boundaries:
 - router middleware returns 413 for an oversized body and 408 for a slow handler;
 - server protocol tests reject HTTP/2 negotiation and prove that HTTP/1.1 responses close
   their connection;
+- a post-handshake deadline-stream test proves that a blocked write wakes and fails at its
+  deadline, and a real slow-reading client cannot retain a large-response connection past a
+  shortened test deadline;
 - TLS loader diagnostics omit sentinel PEM contents; and
 - signal-driven handle shutdown completes an accepted slow request within the test grace
   while refusing a new connection, then cuts off a request that exceeds a shorter test grace

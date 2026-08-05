@@ -31,11 +31,13 @@ Configuration is fail-fast. Cleartext on a non-loopback bind, a partial TLS file
 unreadable or malformed PEM, a zero bound, or an unavailable database prevents the listener
 from starting with an actionable diagnostic. The safe default bind is loopback.
 
-The server accepts HTTP/1.1 only and disables persistent connections. Together with fixed
-30-second TLS-handshake, request-head, and request-processing deadlines, every connection
-phase is bounded. The router also limits request bodies to 1 MiB. Axum keeps the existing
-JSON envelopes and route idempotency behavior. The existing `/health` route is the readiness
-report: it returns success only for a current database schema.
+The server accepts HTTP/1.1 only and disables persistent connections. A thin
+`axum-server` acceptor wrapper starts a 90-second total connection deadline after the TLS
+handshake, covering the request head, handler, response write, and flush. Fixed 30-second
+request-head and request-processing deadlines provide tighter phase bounds; TLS handshakes
+have their own 30-second bound. The router also limits request bodies to 1 MiB. Axum keeps
+the existing JSON envelopes and route idempotency behavior. The existing `/health` route is
+the readiness report: it returns success only for a current database schema.
 
 SIGINT and SIGTERM stop acceptance and allow in-flight requests up to a 30-second grace
 period, then terminate any remainder. A client whose mutating response is cut off cannot
@@ -54,11 +56,13 @@ rotation orchestration, mutual TLS, HTTP/2, and persistent HTTP/1.1 connections 
 future work rather than parallel mechanisms.
 
 The new process adds Rustls-serving and Tower middleware dependencies, but avoids a bespoke
-Hyper accept loop and its connection-draining state machine. At a forced shutdown deadline,
-a client may observe an ambiguous response after a committed transition; the existing
-idempotency contract makes same-key retry the recovery path. A process restart is required
-after certificate replacement. Cleartext remains available for explicit loopback-only tests
-and local operation, never as a remote deployment fallback.
+Hyper accept loop and its connection-draining state machine. The small connection-deadline
+stream wrapper is security-sensitive code and requires a slow-reader regression test. At a
+forced shutdown or connection deadline, a client may observe an ambiguous response after a
+committed transition; the existing idempotency contract makes same-key retry the recovery
+path. A process restart is required after certificate replacement. Cleartext remains
+available for explicit loopback-only tests and local operation, never as a remote deployment
+fallback.
 
 ## Considered & rejected
 
