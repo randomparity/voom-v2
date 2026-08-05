@@ -4,6 +4,7 @@ use std::env::VarError;
 use std::fmt::Display;
 use std::net::{AddrParseError, SocketAddr};
 use std::num::ParseIntError;
+use std::time::Duration;
 
 use secrecy::SecretString;
 use thiserror::Error;
@@ -16,6 +17,13 @@ pub const WORKER_BIND_ENV: &str = "VOOM_WORKER_BIND";
 pub const WORKER_EPOCH_ENV: &str = "VOOM_WORKER_EPOCH";
 pub const WORKER_ID_ENV: &str = "VOOM_WORKER_ID";
 pub const WORKER_SECRET_ENV: &str = "VOOM_WORKER_SECRET";
+/// Deadline for the ffprobe worker's dependency version probe.
+pub const FFPROBE_VERSION_TIMEOUT: Duration = Duration::from_secs(4);
+/// Allowance around the version probe for worker startup, scheduling, and binding.
+pub const FFPROBE_STARTUP_COORDINATION_SECONDS: u64 = 5;
+/// Supervisor deadline for a bundled ffprobe worker to advertise readiness.
+pub const FFPROBE_STARTUP_TIMEOUT: Duration =
+    Duration::from_secs(FFPROBE_VERSION_TIMEOUT.as_secs() + FFPROBE_STARTUP_COORDINATION_SECONDS);
 
 #[derive(Debug, Error)]
 pub enum WorkerStartupError {
