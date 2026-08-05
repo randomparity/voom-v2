@@ -155,20 +155,23 @@ fn ffprobe_config_timeout_kills_and_reaps_version_child() {
 }
 
 #[test]
-fn version_timeout_cleanup_reaps_after_termination_failure() {
-    let mut reaped = false;
+fn version_timeout_cleanup_try_reaps_after_termination_failure() {
+    let mut try_reaped = false;
     let binary = Path::new("ffprobe-test");
 
-    let result = reap_version_child_after_termination(
+    let result = try_reap_version_child_after_termination_failure(
         binary,
-        Err(io::Error::other("termination failed")),
+        io::Error::other("termination failed"),
         || {
-            reaped = true;
-            Ok(())
+            try_reaped = true;
+            Ok(None)
         },
     );
 
-    assert!(reaped, "reap must be attempted after termination fails");
+    assert!(
+        try_reaped,
+        "non-blocking reap must be attempted after termination fails"
+    );
     assert!(result.is_err());
     let Err(error) = result else {
         return;
@@ -185,6 +188,34 @@ fn version_timeout_cleanup_reaps_after_termination_failure() {
     assert_eq!(actual_binary, binary);
     assert_eq!(operation, "terminate timed-out version check");
     assert_eq!(source.to_string(), "termination failed");
+}
+
+#[test]
+fn version_timeout_cleanup_maps_try_reap_failure() {
+    let binary = Path::new("ffprobe-test");
+
+    let result = try_reap_version_child_after_termination_failure(
+        binary,
+        io::Error::other("termination failed"),
+        || Err(io::Error::other("try reap failed")),
+    );
+
+    assert!(result.is_err());
+    let Err(error) = result else {
+        return;
+    };
+    assert_eq!(config_error_kind(&error), ConfigErrorKind::Io);
+    let FfprobeConfigError::Io {
+        binary: actual_binary,
+        operation,
+        source,
+    } = error
+    else {
+        return;
+    };
+    assert_eq!(actual_binary, binary);
+    assert_eq!(operation, "reap timed-out version check");
+    assert_eq!(source.to_string(), "try reap failed");
 }
 
 #[test]

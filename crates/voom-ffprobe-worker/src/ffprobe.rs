@@ -275,10 +275,20 @@ fn detect_ffprobe_version(
             return Ok(version);
         }
         if started.elapsed() >= version_timeout {
-            let terminate_result = child.kill();
-            reap_version_child_after_termination(&binary, terminate_result, || {
-                child.wait().map(|_status| ())
-            })?;
+            match child.kill() {
+                Ok(()) => {
+                    child.wait().map_err(|source| FfprobeConfigError::Io {
+                        binary: binary.clone(),
+                        operation: "reap timed-out version check",
+                        source,
+                    })?;
+                }
+                Err(source) => {
+                    try_reap_version_child_after_termination_failure(&binary, source, || {
+                        child.try_wait().map(|status| status.map(|_status| ()))
+                    })?;
+                }
+            }
             return Err(FfprobeConfigError::Timeout {
                 binary,
                 timeout: version_timeout,
@@ -288,20 +298,20 @@ fn detect_ffprobe_version(
     }
 }
 
-fn reap_version_child_after_termination(
+fn try_reap_version_child_after_termination_failure(
     binary: &Path,
-    terminate_result: io::Result<()>,
-    reap: impl FnOnce() -> io::Result<()>,
+    terminate_source: io::Error,
+    try_reap: impl FnOnce() -> io::Result<Option<()>>,
 ) -> Result<(), FfprobeConfigError> {
-    reap().map_err(|source| FfprobeConfigError::Io {
+    let _status = try_reap().map_err(|source| FfprobeConfigError::Io {
         binary: binary.to_path_buf(),
         operation: "reap timed-out version check",
         source,
     })?;
-    terminate_result.map_err(|source| FfprobeConfigError::Io {
+    Err(FfprobeConfigError::Io {
         binary: binary.to_path_buf(),
         operation: "terminate timed-out version check",
-        source,
+        source: terminate_source,
     })
 }
 
