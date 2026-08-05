@@ -16,16 +16,18 @@ use axum::body::Bytes;
 use axum::routing::get;
 use clap::Parser;
 use secrecy::ExposeSecret;
-use serde_json::json;
+use serde_json::{Value, json};
 use tempfile::TempDir;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
+use tokio::net::{TcpSocket, TcpStream};
 use tokio_rustls::TlsConnector;
 use voom_api::config::{Cli, ServerConfig, ServerLimits};
 use voom_api::router_with_control_plane;
 use voom_api::server::RunningServer;
 use voom_control_plane::workers::RegisterNodeInput;
 use voom_control_plane::{ControlPlane, HealthPlane};
+use voom_events::{Event, EventKind};
+use voom_store::repo::audit::events::{EventFilter, EventRepo, Page};
 use voom_store::repo::execution::nodes::NodeKind;
 use voom_store::test_support::sqlite_url_for;
 use voom_test_support::TempDatabase;
@@ -246,6 +248,102 @@ async fn invalid_bearer_keeps_existing_generic_401_without_token_leak() -> TestR
 }
 
 #[tokio::test]
+async fn valid_bearer_commits_heartbeat_through_real_tls() -> TestResult {
+    let database = TempDatabase::new()?;
+    let url = sqlite_url_for(database.path());
+    voom_store::init(&url).await?;
+    let control_plane = ControlPlane::open(&url).await?;
+    let registered = control_plane
+        .register_node(RegisterNodeInput {
+            name: "tls-success-node".to_owned(),
+            kind: NodeKind::Remote,
+            heartbeat_ttl_seconds: 60,
+            metadata: json!({}),
+        })
+        .await?;
+    let health_plane = HealthPlane::open(&url).await?;
+    let router = router_with_control_plane(health_plane, control_plane.clone());
+    let directory = TempDir::new()?;
+    let certificate = valid_localhost(directory.path())?;
+    let server = RunningServer::start(tls_config(&certificate, None)?, router).await?;
+    let client = rustls_client(certificate.ca_der, vec![b"http/1.1".to_vec()])?;
+    let request = format!(
+        "POST /v1/execution/node/{}/heartbeat HTTP/1.1\r\nHost: localhost\r\n\
+         Authorization: Bearer {}\r\nContent-Type: application/json\r\n\
+         X-Voom-Idempotency-Key: tls-valid-heartbeat\r\nContent-Length: 2\r\n\r\n{{}}",
+        registered.node.id.0,
+        registered.token.expose_secret()
+    );
+    let (response, _) = tls_request(server.local_addr(), client, request.as_bytes()).await?;
+    assert!(response.starts_with(b"HTTP/1.1 200 OK\r\n"));
+    let response: Value = serde_json::from_slice(http_response_body(&response)?)?;
+    assert_eq!(response["schema_version"], "0");
+    assert_eq!(response["command"], "execution.node_heartbeat");
+    assert_eq!(response["status"], "ok");
+    assert_eq!(
+        heartbeat_event_count(&control_plane, registered.node.id).await?,
+        1
+    );
+    server.shutdown_on(std::future::ready(())).await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn chunked_oversized_execution_json_uses_exact_413_envelope() -> TestResult {
+    let database = TempDatabase::new()?;
+    let url = sqlite_url_for(database.path());
+    voom_store::init(&url).await?;
+    let control_plane = ControlPlane::open(&url).await?;
+    let registered = control_plane
+        .register_node(RegisterNodeInput {
+            name: "tls-chunked-node".to_owned(),
+            kind: NodeKind::Remote,
+            heartbeat_ttl_seconds: 60,
+            metadata: json!({}),
+        })
+        .await?;
+    let health_plane = HealthPlane::open(&url).await?;
+    let router = router_with_control_plane(health_plane, control_plane);
+    let directory = TempDir::new()?;
+    let certificate = valid_localhost(directory.path())?;
+    let server = RunningServer::start(tls_config(&certificate, None)?, router).await?;
+    let client = rustls_client(certificate.ca_der, vec![b"http/1.1".to_vec()])?;
+    let oversized = vec![b'x'; 1024 * 1024 + 1];
+    let mut request = format!(
+        "POST /v1/execution/node/{}/heartbeat HTTP/1.1\r\nHost: localhost\r\n\
+         Authorization: Bearer {}\r\nContent-Type: application/json\r\n\
+         X-Voom-Idempotency-Key: tls-chunked-oversized\r\n\
+         Transfer-Encoding: chunked\r\n\r\n{:x}\r\n",
+        registered.node.id.0,
+        registered.token.expose_secret(),
+        oversized.len()
+    )
+    .into_bytes();
+    request.extend_from_slice(&oversized);
+    request.extend_from_slice(b"\r\n0\r\n\r\n");
+
+    let (response, _) = tls_request(server.local_addr(), client, &request).await?;
+    assert!(response.starts_with(b"HTTP/1.1 413 Payload Too Large\r\n"));
+    assert_eq!(
+        serde_json::from_slice::<Value>(http_response_body(&response)?)?,
+        json!({
+            "schema_version": "0",
+            "command": "api.request",
+            "status": "error",
+            "data": null,
+            "warnings": [],
+            "error": {
+                "code": "PAYLOAD_TOO_LARGE",
+                "message": "request body exceeds the 1048576-byte limit",
+                "hint": "Send a request body of 1048576 bytes or fewer"
+            }
+        })
+    );
+    server.shutdown_on(std::future::ready(())).await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn malformed_pem_diagnostic_is_static_and_bind_never_opens() -> TestResult {
     let directory = TempDir::new()?;
     let cert_path = directory.path().join("sentinel-cert-path.pem");
@@ -301,7 +399,7 @@ async fn slow_reader_is_cut_off_for_cleartext_and_tls() -> TestResult {
             ),
         )
         .await?;
-        let tcp = TcpStream::connect(server.local_addr()).await?;
+        let tcp = small_receive_buffer_stream(server.local_addr()).await?;
         if use_tls {
             let name = rustls::pki_types::ServerName::try_from("localhost")?.to_owned();
             let client = rustls_client(certificate.ca_der.clone(), vec![b"http/1.1".to_vec()])?;
@@ -335,4 +433,47 @@ async fn wait_for_connection_cycle(server: &RunningServer) -> TestResult {
     })
     .await?;
     Ok(())
+}
+
+async fn small_receive_buffer_stream(addr: SocketAddr) -> Result<TcpStream, std::io::Error> {
+    let socket = TcpSocket::new_v4()?;
+    socket.set_recv_buffer_size(1024)?;
+    socket.connect(addr).await
+}
+
+fn http_response_body(response: &[u8]) -> Result<&[u8], std::io::Error> {
+    let offset = response
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, "missing HTTP body"))?;
+    Ok(&response[offset + 4..])
+}
+
+async fn heartbeat_event_count(
+    control_plane: &ControlPlane,
+    node_id: voom_core::NodeId,
+) -> Result<usize, Box<dyn Error>> {
+    let events = control_plane
+        .events()
+        .list(
+            EventFilter {
+                kind: Some(EventKind::NodeHeartbeatRecorded),
+                ..EventFilter::default()
+            },
+            Page {
+                limit: 20,
+                cursor: None,
+            },
+        )
+        .await?;
+    Ok(events
+        .items
+        .iter()
+        .filter(|row| {
+            matches!(
+                &row.envelope.payload,
+                Event::NodeHeartbeatRecorded(payload) if payload.node_id == node_id
+            )
+        })
+        .count())
 }
