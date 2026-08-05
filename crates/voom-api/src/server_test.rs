@@ -11,6 +11,7 @@ use axum::body::{Body, Bytes};
 use axum::http::header::CONTENT_TYPE;
 use axum::http::{Request, StatusCode};
 use axum::routing::{get, post};
+use clap::Parser;
 use http_body::{Body as HttpBody, Frame};
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
@@ -20,7 +21,7 @@ use tokio::sync::Notify;
 use tower::ServiceExt;
 
 use super::{DeadlineStream, RunningServer, bounded_router};
-use crate::config::ServerLimits;
+use crate::config::{Cli, ServerLimits};
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
@@ -196,13 +197,21 @@ fn lifecycle_limits(
 async fn start_cleartext_test_server(
     router: Router,
     limits: ServerLimits,
-) -> Result<RunningServer, super::ServerError> {
-    RunningServer::start_cleartext_for_test(
-        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
-        limits,
-        router,
-    )
-    .await
+) -> Result<RunningServer, Box<dyn std::error::Error>> {
+    let bind = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0).to_string();
+    let config = Cli::try_parse_from(["voom-api", "--bind", &bind, "--allow-cleartext-loopback"])?
+        .validate()?
+        .with_limits_for_test(limits);
+    Ok(RunningServer::start(config, router).await?)
+}
+
+#[test]
+fn running_server_has_one_production_listener_entrypoint() {
+    let source = include_str!("server.rs");
+    assert_eq!(source.matches("pub async fn start(").count(), 1);
+    assert_eq!(source.matches("TcpListener::bind").count(), 1);
+    assert!(!source.contains("pub async fn start_"));
+    assert!(!source.contains("pub fn start_"));
 }
 
 async fn raw_http1(addr: SocketAddr, request: &[u8]) -> io::Result<Vec<u8>> {

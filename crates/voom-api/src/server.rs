@@ -4,6 +4,7 @@ use std::future::Future;
 use std::io;
 use std::net::SocketAddr;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Duration;
 
@@ -12,7 +13,11 @@ use axum::http::StatusCode;
 use axum::middleware;
 use axum::response::Response;
 use axum_server::Handle;
-use axum_server::accept::Accept;
+use axum_server::accept::{Accept, DefaultAcceptor};
+use axum_server::tls_rustls::{RustlsAcceptor, RustlsConfig};
+use hyper_util::rt::TokioTimer;
+use rustls::pki_types::pem::PemObject;
+use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::task::{JoinError, JoinHandle};
 use tokio::time::{Sleep, sleep};
@@ -20,13 +25,8 @@ use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::timeout::TimeoutLayer;
 use voom_core::ErrorCode;
 
-use crate::config::ServerLimits;
+use crate::config::{ServerConfig, ServerLimits, TransportConfig};
 use crate::err_response;
-
-#[cfg(test)]
-use axum_server::accept::DefaultAcceptor;
-#[cfg(test)]
-use hyper_util::rt::TokioTimer;
 
 const TIMEOUT_MESSAGE: &str = "request processing exceeded the 30-second deadline";
 const TIMEOUT_HINT: &str =
@@ -158,6 +158,11 @@ where
 
 #[derive(Debug, thiserror::Error)]
 pub enum ServerError {
+    #[error(
+        "failed to load TLS identity; verify --tls-cert and --tls-key are readable PEM files, \
+         the certificate chain is ordered correctly, and the private key matches"
+    )]
+    TlsConfig,
     #[error("failed to bind API listener; verify --bind and local socket permissions")]
     Bind(#[source] io::Error),
     #[error("API server task failed while serving connections")]
@@ -176,45 +181,42 @@ pub struct RunningServer {
 }
 
 impl RunningServer {
-    #[cfg(test)]
-    pub async fn start_cleartext_for_test(
-        bind: SocketAddr,
-        limits: ServerLimits,
-        router: Router,
-    ) -> Result<Self, ServerError> {
-        let listener = std::net::TcpListener::bind(bind).map_err(ServerError::Bind)?;
-        listener.set_nonblocking(true).map_err(ServerError::Bind)?;
-        let local_addr = listener.local_addr().map_err(ServerError::Bind)?;
-        let handle = Handle::new();
-        let mut server = axum_server::from_tcp(listener)
-            .map_err(ServerError::Bind)?
-            .http1_only()
-            .handle(handle.clone());
-        server
-            .http_builder()
-            .http1()
-            .timer(TokioTimer::new())
-            .header_read_timeout(limits.request_head)
-            .keep_alive(false);
-        let server = server.acceptor(ConnectionDeadlineAcceptor::new(
-            DefaultAcceptor::new(),
-            limits.connection,
-        ));
-        let task = tokio::spawn(server.serve(bounded_router(router, limits).into_make_service()));
-
-        let listening = handle.listening().await.ok_or_else(|| {
-            ServerError::Bind(io::Error::new(
-                io::ErrorKind::AddrNotAvailable,
-                "listener did not report a bound address",
-            ))
-        })?;
-        debug_assert_eq!(listening, local_addr);
-        Ok(Self {
-            local_addr,
-            handle,
-            task,
-            shutdown_grace: limits.shutdown_grace,
-        })
+    pub async fn start(config: ServerConfig, router: Router) -> Result<Self, ServerError> {
+        let bind = config.bind();
+        let limits = config.limits();
+        match config.transport().clone() {
+            TransportConfig::Tls {
+                cert_path,
+                key_path,
+            } => {
+                let tls_config = load_tls_config(&cert_path, &key_path).await?;
+                let (listener, local_addr) = bind_listener(bind)?;
+                let handle = Handle::new();
+                let server = configured_server(listener, handle.clone(), limits)?;
+                let rustls =
+                    RustlsAcceptor::new(tls_config).handshake_timeout(limits.tls_handshake);
+                let acceptor = ConnectionDeadlineAcceptor::new(rustls, limits.connection);
+                let task = tokio::spawn(
+                    server
+                        .acceptor(acceptor)
+                        .serve(bounded_router(router, limits).into_make_service()),
+                );
+                finish_start(local_addr, handle, task, limits).await
+            }
+            TransportConfig::CleartextLoopback => {
+                let (listener, local_addr) = bind_listener(bind)?;
+                let handle = Handle::new();
+                let server = configured_server(listener, handle.clone(), limits)?;
+                let acceptor =
+                    ConnectionDeadlineAcceptor::new(DefaultAcceptor::new(), limits.connection);
+                let task = tokio::spawn(
+                    server
+                        .acceptor(acceptor)
+                        .serve(bounded_router(router, limits).into_make_service()),
+                );
+                finish_start(local_addr, handle, task, limits).await
+            }
+        }
     }
 
     #[must_use]
@@ -246,6 +248,81 @@ impl RunningServer {
             }
         }
     }
+}
+
+fn bind_listener(bind: SocketAddr) -> Result<(std::net::TcpListener, SocketAddr), ServerError> {
+    let listener = std::net::TcpListener::bind(bind).map_err(ServerError::Bind)?;
+    listener.set_nonblocking(true).map_err(ServerError::Bind)?;
+    let local_addr = listener.local_addr().map_err(ServerError::Bind)?;
+    Ok((listener, local_addr))
+}
+
+fn configured_server(
+    listener: std::net::TcpListener,
+    handle: Handle<SocketAddr>,
+    limits: ServerLimits,
+) -> Result<axum_server::Server<SocketAddr>, ServerError> {
+    let mut server = axum_server::from_tcp(listener)
+        .map_err(ServerError::Bind)?
+        .http1_only()
+        .handle(handle);
+    server
+        .http_builder()
+        .http1()
+        .timer(TokioTimer::new())
+        .header_read_timeout(limits.request_head)
+        .keep_alive(false);
+    Ok(server)
+}
+
+async fn finish_start(
+    local_addr: SocketAddr,
+    handle: Handle<SocketAddr>,
+    task: JoinHandle<io::Result<()>>,
+    limits: ServerLimits,
+) -> Result<RunningServer, ServerError> {
+    let listening = handle.listening().await.ok_or_else(|| {
+        ServerError::Bind(io::Error::new(
+            io::ErrorKind::AddrNotAvailable,
+            "listener did not report a bound address",
+        ))
+    })?;
+    debug_assert_eq!(listening, local_addr);
+    Ok(RunningServer {
+        local_addr,
+        handle,
+        task,
+        shutdown_grace: limits.shutdown_grace,
+    })
+}
+
+async fn load_tls_config(
+    cert_path: &std::path::Path,
+    key_path: &std::path::Path,
+) -> Result<RustlsConfig, ServerError> {
+    let cert_pem = tokio::fs::read(cert_path)
+        .await
+        .map_err(|_| ServerError::TlsConfig)?;
+    let key_pem = tokio::fs::read(key_path)
+        .await
+        .map_err(|_| ServerError::TlsConfig)?;
+    let certificates = CertificateDer::pem_slice_iter(&cert_pem)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| ServerError::TlsConfig)?;
+    if certificates.is_empty() {
+        return Err(ServerError::TlsConfig);
+    }
+    let private_key =
+        PrivateKeyDer::from_pem_slice(&key_pem).map_err(|_| ServerError::TlsConfig)?;
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let mut config = rustls::ServerConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .map_err(|_| ServerError::TlsConfig)?
+        .with_no_client_auth()
+        .with_single_cert(certificates, private_key)
+        .map_err(|_| ServerError::TlsConfig)?;
+    config.alpn_protocols = vec![b"http/1.1".to_vec()];
+    Ok(RustlsConfig::from_config(Arc::new(config)))
 }
 
 fn flatten_server_task(result: Result<io::Result<()>, JoinError>) -> Result<(), ServerError> {
