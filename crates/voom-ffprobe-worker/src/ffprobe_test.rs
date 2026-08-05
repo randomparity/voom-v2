@@ -1,5 +1,12 @@
+#![expect(
+    clippy::expect_used,
+    reason = "unit tests use expect for direct thread and process assertions"
+)]
+
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::process::Stdio;
+use std::time::{Duration, Instant};
 
 use voom_core::{ErrorCode, FailureClass};
 
@@ -107,32 +114,44 @@ fn ffprobe_config_rejects_missing_dependency() {
 }
 
 #[test]
-fn ffprobe_config_rejects_timed_out_version_probe_quickly() {
+fn ffprobe_config_timeout_kills_and_reaps_version_child() {
     let dir_result = tempfile::tempdir();
     assert!(dir_result.is_ok());
     let Ok(dir) = dir_result else {
         return;
     };
+    let pid_file = dir.path().join("ffprobe.pid");
     let fake_ffprobe = write_executable(
         dir.path(),
-        "#!/bin/sh\n\
-         if [ \"${1:-}\" = '-version' ]; then exec sleep 5; fi\n\
-         printf '{\"format\":{\"format_name\":\"mov,mp4\"},\"streams\":[]}\\n'\n",
+        &format!(
+            "#!/bin/sh\n\
+             if [ \"${{1:-}}\" = '-version' ]; then \
+             printf '%s' $$ > '{}'; exec sleep 60; fi\n\
+             exit 1\n",
+            pid_file.display()
+        ),
     );
-    let started = std::time::Instant::now();
+    let short_timeout = Duration::from_secs(2);
+    let (pid, result) = std::thread::scope(|scope| {
+        let probe = scope.spawn(|| {
+            FfprobeConfig::from_bin_with_version_timeout(
+                fake_ffprobe.into_os_string(),
+                short_timeout,
+            )
+        });
+        let pid = wait_for_pid_file(&pid_file, Duration::from_secs(5));
+        let result = probe.join().expect("version probe thread should not panic");
+        (pid, result)
+    });
 
-    let result = FfprobeConfig::from_env_pairs([(FFPROBE_BIN_ENV, fake_ffprobe.as_os_str())]);
-
-    assert!(started.elapsed() < std::time::Duration::from_secs(2));
-    assert!(result.is_err());
-    let Err(error) = result else {
-        return;
-    };
+    let error = result.expect_err("hung version probe should time out");
+    assert!(error.to_string().contains("version check exceeded"));
     assert_eq!(config_error_kind(&error), ConfigErrorKind::Timeout);
     let FfprobeConfigError::Timeout { binary: _, timeout } = error else {
         return;
     };
-    assert_eq!(timeout, FFPROBE_VERSION_TIMEOUT);
+    assert_eq!(timeout, short_timeout);
+    assert_process_exited(pid.trim());
 }
 
 #[test]
@@ -319,4 +338,29 @@ fn write_executable(dir: &Path, script: &str) -> PathBuf {
     let chmod_result = std::fs::set_permissions(&path, permissions);
     assert!(chmod_result.is_ok());
     path
+}
+
+fn wait_for_pid_file(path: &Path, timeout: Duration) -> String {
+    let started = Instant::now();
+    loop {
+        if let Ok(pid) = std::fs::read_to_string(path) {
+            return pid;
+        }
+        assert!(
+            started.elapsed() < timeout,
+            "ffprobe helper did not create PID file {}",
+            path.display()
+        );
+        std::thread::yield_now();
+    }
+}
+
+fn assert_process_exited(pid: &str) {
+    let status = std::process::Command::new("kill")
+        .arg("-0")
+        .arg(pid)
+        .stderr(Stdio::null())
+        .status()
+        .expect("process existence check should launch");
+    assert!(!status.success(), "child process {pid} still exists");
 }
