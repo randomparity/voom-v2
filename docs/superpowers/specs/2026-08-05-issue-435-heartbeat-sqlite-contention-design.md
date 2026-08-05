@@ -43,7 +43,9 @@ Run the gate once in a short read-only preflight transaction, then replace the d
 prepare transaction's deferred begin with `begin_immediate_tx` and re-run the authoritative
 gate check inside it. The preflight preserves the existing domain refusal when a blocking
 use lease and writer contention coexist. The authoritative check closes the preflight-to-lock
-race before any pending record or event is written.
+race before any pending record or event is written. It reads the clock after writer acquisition,
+so lease expiry and durable prepare timestamps are evaluated at the authoritative transaction,
+not at the potentially much earlier preflight.
 
 The heartbeat use case also changes from deferred begin to `begin_immediate_tx`. Its current
 first SQL statement is already the lease update, so this does not repair another stale read

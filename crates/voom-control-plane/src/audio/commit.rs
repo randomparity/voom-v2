@@ -1431,12 +1431,19 @@ async fn prepare_extract_set(
     for output in &input.outputs {
         inspected.push(inspect_extract_output(output).await?);
     }
-    let now = cp.clock().now();
+    let preflight_now = cp.clock().now();
     let mut preflight_tx = begin_tx(&cp.pool).await?;
-    check_sidecar_commit_gate(cp, &mut preflight_tx, input.source_file_version_id, now).await?;
+    check_sidecar_commit_gate(
+        cp,
+        &mut preflight_tx,
+        input.source_file_version_id,
+        preflight_now,
+    )
+    .await?;
     commit_tx(preflight_tx).await?;
 
     let mut tx = begin_immediate_tx(&cp.pool).await?;
+    let now = cp.clock().now();
     let evaluated =
         check_sidecar_commit_gate(cp, &mut tx, input.source_file_version_id, now).await?;
     hooks.after_prepare_gate().await?;
