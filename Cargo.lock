@@ -2675,6 +2675,7 @@ dependencies = [
  "axum-server",
  "blake3",
  "clap",
+ "http-body",
  "http-body-util",
  "hyper-util",
  "rcgen",
