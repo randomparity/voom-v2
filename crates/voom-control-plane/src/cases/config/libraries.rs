@@ -1,6 +1,7 @@
 //! `ControlPlane` wrappers over `SqliteLibraryRepo` for the `voom library` /
 //! `voom library root` CLI, including atomic lifecycle facts.
 
+use sqlx::{Sqlite, Transaction};
 use voom_core::{LibraryId, NodeId, StorageRootId, StorageRootState, VoomError};
 use voom_events::payload::{
     StorageRootActivatedPayload, StorageRootCreatedPayload, StorageRootOwnerAssignedPayload,
@@ -149,18 +150,7 @@ impl ControlPlane {
             Ok(root)
         }
         .await;
-        match result {
-            Ok(root) => {
-                commit_tx(tx).await?;
-                Ok(root)
-            }
-            Err(error) => {
-                tx.rollback().await.map_err(|rollback_error| {
-                    VoomError::database_context("library root create rollback", rollback_error)
-                })?;
-                Err(error)
-            }
-        }
+        finish_library_root_tx(tx, "create", result).await
     }
 
     /// Get a library root by id.
@@ -229,26 +219,29 @@ impl ControlPlane {
     ) -> Result<LibraryRoot, VoomError> {
         let now = self.clock().now();
         let mut tx = begin_tx(&self.pool).await?;
-        let root = self
-            .libraries
-            .assign_library_root_owner_in_tx(&mut tx, id, owner_node_id, now)
+        let result = async {
+            let root = self
+                .libraries
+                .assign_library_root_owner_in_tx(&mut tx, id, owner_node_id, now)
+                .await?;
+            append_event(
+                &self.events,
+                &mut tx,
+                SubjectType::StorageRoot,
+                Some(id.0),
+                now,
+                Event::StorageRootOwnerAssigned(StorageRootOwnerAssignedPayload {
+                    storage_root_id: id,
+                    owner_node_id,
+                    state: root.state,
+                    root_epoch: root.root_epoch,
+                }),
+            )
             .await?;
-        append_event(
-            &self.events,
-            &mut tx,
-            SubjectType::StorageRoot,
-            Some(id.0),
-            now,
-            Event::StorageRootOwnerAssigned(StorageRootOwnerAssignedPayload {
-                storage_root_id: id,
-                owner_node_id,
-                state: root.state,
-                root_epoch: root.root_epoch,
-            }),
-        )
-        .await?;
-        commit_tx(tx).await?;
-        Ok(root)
+            Ok(root)
+        }
+        .await;
+        finish_library_root_tx(tx, "assign owner", result).await
     }
 
     /// Record successful owner validation. Revalidation from unavailable emits
@@ -260,42 +253,45 @@ impl ControlPlane {
     ) -> Result<LibraryRoot, VoomError> {
         let now = self.clock().now();
         let mut tx = begin_tx(&self.pool).await?;
-        let prior = self
-            .libraries
-            .get_library_root_in_tx(&mut tx, id)
-            .await?
-            .ok_or_else(|| VoomError::NotFound(format!("library root {id} not found")))?;
-        let root = self
-            .libraries
-            .activate_library_root_in_tx(&mut tx, id, activation_identity.clone(), now)
+        let result = async {
+            let prior = self
+                .libraries
+                .get_library_root_in_tx(&mut tx, id)
+                .await?
+                .ok_or_else(|| VoomError::NotFound(format!("library root {id} not found")))?;
+            let root = self
+                .libraries
+                .activate_library_root_in_tx(&mut tx, id, activation_identity.clone(), now)
+                .await?;
+            let owner_node_id = required_root_owner(&root)?;
+            let event = if prior.state == StorageRootState::Unavailable {
+                Event::StorageRootReactivated(StorageRootReactivatedPayload {
+                    storage_root_id: id,
+                    owner_node_id,
+                    activation_identity,
+                    root_epoch: root.root_epoch,
+                })
+            } else {
+                Event::StorageRootActivated(StorageRootActivatedPayload {
+                    storage_root_id: id,
+                    owner_node_id,
+                    activation_identity,
+                    root_epoch: root.root_epoch,
+                })
+            };
+            append_event(
+                &self.events,
+                &mut tx,
+                SubjectType::StorageRoot,
+                Some(id.0),
+                now,
+                event,
+            )
             .await?;
-        let owner_node_id = required_root_owner(&root)?;
-        let event = if prior.state == StorageRootState::Unavailable {
-            Event::StorageRootReactivated(StorageRootReactivatedPayload {
-                storage_root_id: id,
-                owner_node_id,
-                activation_identity,
-                root_epoch: root.root_epoch,
-            })
-        } else {
-            Event::StorageRootActivated(StorageRootActivatedPayload {
-                storage_root_id: id,
-                owner_node_id,
-                activation_identity,
-                root_epoch: root.root_epoch,
-            })
-        };
-        append_event(
-            &self.events,
-            &mut tx,
-            SubjectType::StorageRoot,
-            Some(id.0),
-            now,
-            event,
-        )
-        .await?;
-        commit_tx(tx).await?;
-        Ok(root)
+            Ok(root)
+        }
+        .await;
+        finish_library_root_tx(tx, "activate", result).await
     }
 
     /// Mark an active root unavailable after owner validation is lost.
@@ -311,52 +307,78 @@ impl ControlPlane {
         }
         let now = self.clock().now();
         let mut tx = begin_tx(&self.pool).await?;
-        let root = self
-            .libraries
-            .mark_library_root_unavailable_in_tx(&mut tx, id, now)
+        let result = async {
+            let root = self
+                .libraries
+                .mark_library_root_unavailable_in_tx(&mut tx, id, now)
+                .await?;
+            let owner_node_id = required_root_owner(&root)?;
+            append_event(
+                &self.events,
+                &mut tx,
+                SubjectType::StorageRoot,
+                Some(id.0),
+                now,
+                Event::StorageRootValidationLost(StorageRootValidationLostPayload {
+                    storage_root_id: id,
+                    owner_node_id,
+                    reason,
+                    root_epoch: root.root_epoch,
+                }),
+            )
             .await?;
-        let owner_node_id = required_root_owner(&root)?;
-        append_event(
-            &self.events,
-            &mut tx,
-            SubjectType::StorageRoot,
-            Some(id.0),
-            now,
-            Event::StorageRootValidationLost(StorageRootValidationLostPayload {
-                storage_root_id: id,
-                owner_node_id,
-                reason,
-                root_epoch: root.root_epoch,
-            }),
-        )
-        .await?;
-        commit_tx(tx).await?;
-        Ok(root)
+            Ok(root)
+        }
+        .await;
+        finish_library_root_tx(tx, "mark unavailable", result).await
     }
 
     /// Terminally retire a root while retaining its stable identity and facts.
     pub async fn retire_library_root(&self, id: StorageRootId) -> Result<LibraryRoot, VoomError> {
         let now = self.clock().now();
         let mut tx = begin_tx(&self.pool).await?;
-        let root = self
-            .libraries
-            .retire_library_root_in_tx(&mut tx, id, now)
+        let result = async {
+            let root = self
+                .libraries
+                .retire_library_root_in_tx(&mut tx, id, now)
+                .await?;
+            append_event(
+                &self.events,
+                &mut tx,
+                SubjectType::StorageRoot,
+                Some(id.0),
+                now,
+                Event::StorageRootRetired(StorageRootRetiredPayload {
+                    storage_root_id: id,
+                    owner_node_id: root.owner_node_id,
+                    root_epoch: root.root_epoch,
+                }),
+            )
             .await?;
-        append_event(
-            &self.events,
-            &mut tx,
-            SubjectType::StorageRoot,
-            Some(id.0),
-            now,
-            Event::StorageRootRetired(StorageRootRetiredPayload {
-                storage_root_id: id,
-                owner_node_id: root.owner_node_id,
-                root_epoch: root.root_epoch,
-            }),
-        )
-        .await?;
-        commit_tx(tx).await?;
-        Ok(root)
+            Ok(root)
+        }
+        .await;
+        finish_library_root_tx(tx, "retire", result).await
+    }
+}
+
+async fn finish_library_root_tx(
+    tx: Transaction<'_, Sqlite>,
+    operation: &str,
+    result: Result<LibraryRoot, VoomError>,
+) -> Result<LibraryRoot, VoomError> {
+    match result {
+        Ok(root) => {
+            commit_tx(tx).await?;
+            Ok(root)
+        }
+        Err(original_error) => match tx.rollback().await {
+            Ok(()) => Err(original_error),
+            Err(rollback_error) => Err(VoomError::database(format!(
+                "library root {operation} failed: {original_error}; rollback also failed: \
+                 {rollback_error}"
+            ))),
+        },
     }
 }
 
