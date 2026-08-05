@@ -649,6 +649,55 @@ async fn create_policy_input_set_from_scan_rejects_each_unavailable_root_state()
 }
 
 #[tokio::test]
+async fn create_policy_input_set_from_scan_rejects_corrupt_library_enabled() {
+    let (cp, _tmp) = cp().await;
+    let root_id = library_root_at(&cp, "corrupt-enabled", "/corrupt-enabled").await;
+    let (file_version_id, media_snapshot_id) = scanned_snapshot_with_payload_on_root(
+        &cp,
+        root_id,
+        "movie.mp4",
+        "hash-corrupt-enabled",
+        json!({"format": "test", "streams": []}),
+    )
+    .await;
+    let library_id: i64 = sqlx::query_scalar("SELECT library_id FROM library_roots WHERE id = ?")
+        .bind(i64::try_from(root_id.0).unwrap())
+        .fetch_one(cp.pool_for_test())
+        .await
+        .unwrap();
+    let mut connection = cp.pool_for_test().acquire().await.unwrap();
+    sqlx::query("PRAGMA ignore_check_constraints = TRUE")
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE libraries SET enabled = 2 WHERE id = ?")
+        .bind(library_id)
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+    sqlx::query("PRAGMA ignore_check_constraints = FALSE")
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+    drop(connection);
+
+    let error = cp
+        .create_policy_input_set_from_scan(PolicyInputFromScanInput {
+            slug: "corrupt-enabled".to_owned(),
+            file_version_id,
+            media_snapshot_id,
+            container: "mp4".to_owned(),
+            video_codec: "h264".to_owned(),
+        })
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.error_code(), ErrorCode::DbUnreachable);
+    assert!(error.to_string().contains("libraries.enabled"));
+    assert!(cp.list_policy_input_sets().await.unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn create_policy_input_set_from_scan_accepts_another_available_location() {
     let (cp, _tmp) = cp().await;
     let unavailable_root = library_root_at(&cp, "unavailable-alias", "/unavailable-alias").await;

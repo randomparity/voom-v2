@@ -322,6 +322,15 @@ fn row_to_library(row: &SqliteRow) -> Result<Library, VoomError> {
     let media_kind: String = row.try_get("media_kind").map_err(|e| map_row_err(t, e))?;
     let description: Option<String> = row.try_get("description").map_err(|e| map_row_err(t, e))?;
     let enabled: i64 = row.try_get("enabled").map_err(|e| map_row_err(t, e))?;
+    let enabled = match enabled {
+        0 => false,
+        1 => true,
+        other => {
+            return Err(VoomError::database(format!(
+                "libraries.enabled invalid boolean {other}"
+            )));
+        }
+    };
     let default_scoring_profile_name: Option<String> = row
         .try_get("default_scoring_profile_name")
         .map_err(|e| map_row_err(t, e))?;
@@ -336,7 +345,7 @@ fn row_to_library(row: &SqliteRow) -> Result<Library, VoomError> {
         display_name,
         media_kind: LibraryMediaKind::parse(&media_kind)?,
         description,
-        enabled: enabled != 0,
+        enabled,
         default_scoring_profile_name,
         created_at: parse_iso8601(&created_at)?,
         updated_at: parse_iso8601(&updated_at)?,
