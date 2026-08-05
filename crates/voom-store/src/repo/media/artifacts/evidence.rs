@@ -27,7 +27,6 @@ struct PolicyFileLocation {
     id: FileLocationId,
     storage_root_id: StorageRootId,
     provider_relative_locator: ProviderRelativeLocator,
-    resolved_path: String,
 }
 
 const COMMITTED_TICKET_EVIDENCE_SQL: &str = "WITH ticket_results AS ( \
@@ -148,6 +147,7 @@ impl SqliteArtifactRepo {
         tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
         file_version_id: FileVersionId,
         file_location_id: Option<FileLocationId>,
+        owner_resolved_path: &str,
         now: OffsetDateTime,
     ) -> Result<PolicyArtifactResolution, VoomError> {
         let version = require_active_policy_file_version(tx, file_version_id).await?;
@@ -157,7 +157,7 @@ impl SqliteArtifactRepo {
             .resolve_policy_artifact_handle(tx, &version, &location, now)
             .await?;
         let (artifact_location, created_location) = self
-            .resolve_policy_artifact_location(tx, handle.id, &location, now)
+            .resolve_policy_artifact_location(tx, handle.id, owner_resolved_path, now)
             .await?;
 
         Ok(PolicyArtifactResolution {
@@ -169,7 +169,7 @@ impl SqliteArtifactRepo {
                 media_snapshot_id,
                 storage_root_id: location.storage_root_id,
                 provider_relative_locator: location.provider_relative_locator,
-                path: location.resolved_path,
+                path: owner_resolved_path.to_owned(),
                 size_bytes: version.size_bytes,
                 checksum: version.content_hash,
             },
@@ -236,7 +236,7 @@ impl SqliteArtifactRepo {
         &self,
         tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
         handle_id: ArtifactHandleId,
-        location: &PolicyFileLocation,
+        owner_resolved_path: &str,
         now: OffsetDateTime,
     ) -> Result<(ArtifactLocation, Option<ArtifactLocation>), VoomError> {
         let rows = sqlx::query(
@@ -250,7 +250,7 @@ impl SqliteArtifactRepo {
             handle_id.0,
             concat!(module_path!(), ": ", stringify!(handle_id.0)),
         )?)
-        .bind(&location.resolved_path)
+        .bind(owner_resolved_path)
         .fetch_all(&mut **tx)
         .await
         .map_err(|err| VoomError::database_context("policy artifact location lookup", err))?;
@@ -262,7 +262,7 @@ impl SqliteArtifactRepo {
                         NewArtifactLocation {
                             artifact_handle_id: handle_id,
                             kind: ArtifactLocationKind::LocalPath,
-                            value: location.resolved_path.clone(),
+                            value: owner_resolved_path.to_owned(),
                             observed_at: now,
                         },
                     )
@@ -273,7 +273,7 @@ impl SqliteArtifactRepo {
             _ => Err(VoomError::Conflict(format!(
                 "artifact_handle {handle_id} has {} live local_path locations for {:?}",
                 rows.len(),
-                location.resolved_path
+                owner_resolved_path
             ))),
         }
     }
@@ -326,10 +326,10 @@ async fn select_policy_file_location(
     version_id: FileVersionId,
     selected_id: Option<FileLocationId>,
 ) -> Result<PolicyFileLocation, VoomError> {
-    let mut rows: Vec<(i64, i64, i64, String, String)> = if let Some(location_id) = selected_id {
+    let mut rows: Vec<(i64, i64, i64, String)> = if let Some(location_id) = selected_id {
         sqlx::query_as(
             "SELECT fl.id, fl.file_version_id, fl.storage_root_id, \
-                    fl.provider_relative_locator, lr.provider_locator \
+                    fl.provider_relative_locator \
              FROM file_locations fl JOIN library_roots lr ON lr.id = fl.storage_root_id \
              WHERE fl.id = ? AND fl.address_state = 'rooted' AND fl.retired_at IS NULL",
         )
@@ -343,7 +343,7 @@ async fn select_policy_file_location(
     } else {
         sqlx::query_as(
             "SELECT fl.id, fl.file_version_id, fl.storage_root_id, \
-                    fl.provider_relative_locator, lr.provider_locator \
+                    fl.provider_relative_locator \
              FROM file_locations fl JOIN library_roots lr ON lr.id = fl.storage_root_id \
              WHERE fl.file_version_id = ? AND fl.address_state = 'rooted' \
                AND fl.retired_at IS NULL ORDER BY fl.id",
@@ -382,15 +382,10 @@ async fn select_policy_file_location(
         .map_err(|error| {
             VoomError::database_context("policy file location relative locator", error)
         })?;
-    let resolved_path = std::path::Path::new(&row.4)
-        .join(provider_relative_locator.as_str())
-        .to_string_lossy()
-        .into_owned();
     Ok(PolicyFileLocation {
         id: location_id,
         storage_root_id,
         provider_relative_locator,
-        resolved_path,
     })
 }
 

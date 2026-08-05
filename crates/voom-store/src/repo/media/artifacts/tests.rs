@@ -1,5 +1,7 @@
 use super::*;
 
+const OWNER_RESOLVED_SOURCE_PATH: &str = "/owner-resolved/source.mkv";
+
 use serde_json::json;
 use time::OffsetDateTime;
 use voom_core::{
@@ -241,6 +243,7 @@ async fn policy_target_resolution_creates_then_reuses_active_artifact() {
             &mut first_tx,
             version_id,
             Some(location_id),
+            OWNER_RESOLVED_SOURCE_PATH,
             OffsetDateTime::UNIX_EPOCH,
         )
         .await
@@ -253,6 +256,7 @@ async fn policy_target_resolution_creates_then_reuses_active_artifact() {
             &mut second_tx,
             version_id,
             Some(location_id),
+            OWNER_RESOLVED_SOURCE_PATH,
             OffsetDateTime::UNIX_EPOCH,
         )
         .await
@@ -261,6 +265,10 @@ async fn policy_target_resolution_creates_then_reuses_active_artifact() {
 
     assert!(first.created_handle.is_some());
     assert!(first.created_location.is_some());
+    assert_eq!(
+        first.created_location.as_ref().unwrap().value,
+        OWNER_RESOLVED_SOURCE_PATH
+    );
     assert!(second.created_handle.is_none());
     assert!(second.created_location.is_none());
     assert_eq!(
@@ -273,7 +281,7 @@ async fn policy_target_resolution_creates_then_reuses_active_artifact() {
     );
     assert_eq!(second.target.file_version_id, version_id);
     assert_eq!(second.target.file_location_id, location_id);
-    assert_eq!(second.target.path, "/media/source-1.mkv");
+    assert_eq!(second.target.path, OWNER_RESOLVED_SOURCE_PATH);
     assert_eq!(second.target.size_bytes, 1024);
     assert_eq!(second.target.checksum, "source-hash");
 }
@@ -352,6 +360,7 @@ async fn policy_target_resolution_reuses_dependency_committed_handle() {
             &mut tx,
             version_id,
             Some(location_id),
+            OWNER_RESOLVED_SOURCE_PATH,
             OffsetDateTime::UNIX_EPOCH,
         )
         .await
@@ -392,6 +401,7 @@ async fn policy_target_resolution_rejects_superseded_version() {
             &mut tx,
             version_id,
             Some(location_id),
+            OWNER_RESOLVED_SOURCE_PATH,
             OffsetDateTime::UNIX_EPOCH,
         )
         .await
@@ -420,6 +430,7 @@ async fn policy_target_resolution_rejects_retired_or_mismatched_location() {
             &mut mismatched_tx,
             version_id,
             Some(other_location_id),
+            OWNER_RESOLVED_SOURCE_PATH,
             OffsetDateTime::UNIX_EPOCH,
         )
         .await
@@ -438,6 +449,7 @@ async fn policy_target_resolution_rejects_retired_or_mismatched_location() {
             &mut retired_tx,
             version_id,
             Some(location_id),
+            OWNER_RESOLVED_SOURCE_PATH,
             OffsetDateTime::UNIX_EPOCH,
         )
         .await
@@ -478,7 +490,13 @@ async fn policy_target_resolution_rejects_ambiguous_unpinned_local_path() {
 
     let mut tx = pool.begin().await.unwrap();
     let error = repo
-        .resolve_policy_artifact_target_in_tx(&mut tx, version_id, None, OffsetDateTime::UNIX_EPOCH)
+        .resolve_policy_artifact_target_in_tx(
+            &mut tx,
+            version_id,
+            None,
+            OWNER_RESOLVED_SOURCE_PATH,
+            OffsetDateTime::UNIX_EPOCH,
+        )
         .await
         .unwrap_err();
 

@@ -1060,7 +1060,7 @@ async fn compliance_execute_verifies_existing_active_artifact_through_bundled_wo
 
 #[cfg(unix)]
 #[tokio::test]
-async fn scanned_fixture_scopes_a_root_alias_before_source_resolution() {
+async fn scanned_fixture_persists_canonical_policy_path_for_root_alias() {
     use std::os::unix::fs::symlink;
 
     let (cp, _tmp) = cp().await;
@@ -1079,11 +1079,23 @@ async fn scanned_fixture_scopes_a_root_alias_before_source_resolution() {
         crate::operation_source::select_local_source(&cp, "test fixture", file_version_id, None)
             .await
             .unwrap();
+    let target = cp
+        .resolve_policy_artifact_target(file_version_id, None)
+        .await
+        .unwrap();
+    let durable_path: String =
+        sqlx::query_scalar("SELECT value FROM artifact_locations WHERE id = ?")
+            .bind(i64::try_from(target.artifact_location_id.0).unwrap())
+            .fetch_one(cp.pool_for_test())
+            .await
+            .unwrap();
 
     assert_eq!(
         selected.canonical_path,
         real_root.join("movie.mkv").canonicalize().unwrap()
     );
+    assert_eq!(target.path, selected.canonical_path.to_string_lossy());
+    assert_eq!(durable_path, target.path);
 }
 
 #[tokio::test]
