@@ -34,6 +34,12 @@ pub enum EventKind {
     NodeHeartbeatRecorded,
     NodeMarkedStale,
     NodeRetired,
+    StorageRootCreated,
+    StorageRootOwnerAssigned,
+    StorageRootActivated,
+    StorageRootValidationLost,
+    StorageRootReactivated,
+    StorageRootRetired,
     WorkerRegistered,
     WorkerLinkedToNode,
     WorkerCapabilityRecorded,
@@ -120,6 +126,10 @@ pub enum EventKind {
 
 impl EventKind {
     #[must_use]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one flat wire-string arm per EventKind variant preserves the public contract"
+    )]
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::SchemaInitialized => "schema.initialized",
@@ -143,6 +153,12 @@ impl EventKind {
             Self::NodeHeartbeatRecorded => "node.heartbeat_recorded",
             Self::NodeMarkedStale => "node.marked_stale",
             Self::NodeRetired => "node.retired",
+            Self::StorageRootCreated => "storage_root.created",
+            Self::StorageRootOwnerAssigned => "storage_root.owner_assigned",
+            Self::StorageRootActivated => "storage_root.activated",
+            Self::StorageRootValidationLost => "storage_root.validation_lost",
+            Self::StorageRootReactivated => "storage_root.reactivated",
+            Self::StorageRootRetired => "storage_root.retired",
             Self::WorkerRegistered => "worker.registered",
             Self::WorkerLinkedToNode => "worker.linked_to_node",
             Self::WorkerCapabilityRecorded => "worker.capability_recorded",
@@ -260,6 +276,12 @@ impl EventKind {
             "node.heartbeat_recorded" => Self::NodeHeartbeatRecorded,
             "node.marked_stale" => Self::NodeMarkedStale,
             "node.retired" => Self::NodeRetired,
+            "storage_root.created" => Self::StorageRootCreated,
+            "storage_root.owner_assigned" => Self::StorageRootOwnerAssigned,
+            "storage_root.activated" => Self::StorageRootActivated,
+            "storage_root.validation_lost" => Self::StorageRootValidationLost,
+            "storage_root.reactivated" => Self::StorageRootReactivated,
+            "storage_root.retired" => Self::StorageRootRetired,
             "worker.registered" => Self::WorkerRegistered,
             "worker.linked_to_node" => Self::WorkerLinkedToNode,
             "worker.capability_recorded" => Self::WorkerCapabilityRecorded,

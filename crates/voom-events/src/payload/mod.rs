@@ -7,6 +7,7 @@ mod execution;
 mod external_system;
 mod media_identity;
 mod policy;
+mod storage;
 mod system;
 mod use_leases;
 mod workers;
@@ -17,6 +18,7 @@ pub use execution::*;
 pub use external_system::*;
 pub use media_identity::*;
 pub use policy::*;
+pub use storage::*;
 pub use system::*;
 pub use use_leases::*;
 pub use workers::*;
@@ -83,6 +85,18 @@ pub enum Event {
     NodeMarkedStale(NodeMarkedStalePayload),
     #[serde(rename = "node.retired")]
     NodeRetired(NodeRetiredPayload),
+    #[serde(rename = "storage_root.created")]
+    StorageRootCreated(StorageRootCreatedPayload),
+    #[serde(rename = "storage_root.owner_assigned")]
+    StorageRootOwnerAssigned(StorageRootOwnerAssignedPayload),
+    #[serde(rename = "storage_root.activated")]
+    StorageRootActivated(StorageRootActivatedPayload),
+    #[serde(rename = "storage_root.validation_lost")]
+    StorageRootValidationLost(StorageRootValidationLostPayload),
+    #[serde(rename = "storage_root.reactivated")]
+    StorageRootReactivated(StorageRootReactivatedPayload),
+    #[serde(rename = "storage_root.retired")]
+    StorageRootRetired(StorageRootRetiredPayload),
     #[serde(rename = "worker.registered")]
     WorkerRegistered(WorkerRegisteredPayload),
     #[serde(rename = "worker.linked_to_node")]
@@ -240,6 +254,10 @@ impl Event {
     /// match so a new variant is a compile error until both `EventKind` and
     /// the `as_str()` table grow to match.
     #[must_use]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one exhaustive arm per durable Event variant preserves kind/payload pairing"
+    )]
     pub const fn kind(&self) -> EventKind {
         match self {
             Self::SchemaInitialized(_) => EventKind::SchemaInitialized,
@@ -263,6 +281,12 @@ impl Event {
             Self::NodeHeartbeatRecorded(_) => EventKind::NodeHeartbeatRecorded,
             Self::NodeMarkedStale(_) => EventKind::NodeMarkedStale,
             Self::NodeRetired(_) => EventKind::NodeRetired,
+            Self::StorageRootCreated(_) => EventKind::StorageRootCreated,
+            Self::StorageRootOwnerAssigned(_) => EventKind::StorageRootOwnerAssigned,
+            Self::StorageRootActivated(_) => EventKind::StorageRootActivated,
+            Self::StorageRootValidationLost(_) => EventKind::StorageRootValidationLost,
+            Self::StorageRootReactivated(_) => EventKind::StorageRootReactivated,
+            Self::StorageRootRetired(_) => EventKind::StorageRootRetired,
             Self::WorkerRegistered(_) => EventKind::WorkerRegistered,
             Self::WorkerLinkedToNode(_) => EventKind::WorkerLinkedToNode,
             Self::WorkerCapabilityRecorded(_) => EventKind::WorkerCapabilityRecorded,

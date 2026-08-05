@@ -155,7 +155,7 @@ These typed JSON values contain no reachable named-field struct and therefore ne
 
 The scope file groups defining sources for these enforced closures:
 
-- all nine event payload families and their `Event` root;
+- all ten event payload families and their `Event` root, including storage-root lifecycle facts;
 - commit-gate target, closure, and override wire types;
 - workflow ticket payloads, timing, and ticket results;
 - remote idempotency envelopes and route-specific replay outcomes;

@@ -26,6 +26,10 @@ fn issue_payload(status: &str) -> IssueLifecyclePayload {
     reason = "one arm per Event variant — a new variant must fail to compile here; \
               identical empty bodies are intentional, never collapse them"
 )]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one arm per Event variant is an intentional compile-time exhaustiveness guard"
+)]
 fn _event_variants_are_exhaustive(e: &Event) {
     match e {
         Event::SchemaInitialized(_) => {}
@@ -49,6 +53,12 @@ fn _event_variants_are_exhaustive(e: &Event) {
         Event::NodeHeartbeatRecorded(_) => {}
         Event::NodeMarkedStale(_) => {}
         Event::NodeRetired(_) => {}
+        Event::StorageRootCreated(_) => {}
+        Event::StorageRootOwnerAssigned(_) => {}
+        Event::StorageRootActivated(_) => {}
+        Event::StorageRootValidationLost(_) => {}
+        Event::StorageRootReactivated(_) => {}
+        Event::StorageRootRetired(_) => {}
         Event::WorkerRegistered(_) => {}
         Event::WorkerLinkedToNode(_) => {}
         Event::WorkerCapabilityRecorded(_) => {}
@@ -257,6 +267,43 @@ fn event_kind_matches_serde_tag() {
             node_id: voom_core::NodeId(1),
             retired_at: OffsetDateTime::UNIX_EPOCH,
             epoch: 3,
+        }),
+        Event::StorageRootCreated(StorageRootCreatedPayload {
+            storage_root_id: voom_core::StorageRootId(1),
+            library_id: voom_core::LibraryId(1),
+            owner_node_id: voom_core::NodeId(1),
+            provider_kind: voom_core::StorageProviderKind::LocalFilesystem,
+            state: voom_core::StorageRootState::Configured,
+            root_epoch: 0,
+        }),
+        Event::StorageRootOwnerAssigned(StorageRootOwnerAssignedPayload {
+            storage_root_id: voom_core::StorageRootId(1),
+            owner_node_id: voom_core::NodeId(1),
+            state: voom_core::StorageRootState::Configured,
+            root_epoch: 0,
+        }),
+        Event::StorageRootActivated(StorageRootActivatedPayload {
+            storage_root_id: voom_core::StorageRootId(1),
+            owner_node_id: voom_core::NodeId(1),
+            activation_identity: "identity".to_owned(),
+            root_epoch: 1,
+        }),
+        Event::StorageRootValidationLost(StorageRootValidationLostPayload {
+            storage_root_id: voom_core::StorageRootId(1),
+            owner_node_id: voom_core::NodeId(1),
+            reason: "reason".to_owned(),
+            root_epoch: 1,
+        }),
+        Event::StorageRootReactivated(StorageRootReactivatedPayload {
+            storage_root_id: voom_core::StorageRootId(1),
+            owner_node_id: voom_core::NodeId(1),
+            activation_identity: "identity".to_owned(),
+            root_epoch: 1,
+        }),
+        Event::StorageRootRetired(StorageRootRetiredPayload {
+            storage_root_id: voom_core::StorageRootId(1),
+            owner_node_id: Some(voom_core::NodeId(1)),
+            root_epoch: 1,
         }),
         Event::WorkerRegistered(WorkerRegisteredPayload {
             worker_id: voom_core::WorkerId(1),
