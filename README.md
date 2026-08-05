@@ -35,7 +35,7 @@ just smoke
 | `voom-scheduler` | Scheduler scoring, candidate models, score reasons, decisions, and worker selection helpers. |
 | `voom-worker-protocol` | Versioned HTTP/JSON worker protocol, credentials, operation payloads, NDJSON progress codec, and loopback transport. |
 | `voom-control-plane` | App-services layer for health, scan, policy inputs, plan generation, compliance execution, artifact orchestration, node/worker lifecycle, scheduler inspection, and durable workflow execution. |
-| `voom-api` | axum HTTP router and app state wiring (no server binary yet). |
+| `voom-api` | axum control-plane API router plus the bounded TLS server binary. |
 | `voom-cli` | `voom` binary for `version`, `health`, `init`, `scan`, `plan`, `policy input`, `compliance`, `node`, `profile`, `worker`, `scheduler decisions`, and `artifact` commands. |
 | `voom-conformance` | Black-box worker protocol conformance harness and `echo-worker`. |
 | `voom-test-support` | Shared integration-test support for control-plane and worker flows. |
