@@ -104,9 +104,12 @@ fn _event_variants_are_exhaustive(e: &Event) {
         Event::FileAssetCreated(_) => {}
         Event::FileVersionCreated(_) => {}
         Event::FileLocationRecorded(_) => {}
+        Event::FileLocationRootedRecorded(_) => {}
         Event::FileLocationAliased(_) => {}
+        Event::FileLocationRootedAliased(_) => {}
         Event::FileLocationRetiredByMove(_) => {}
         Event::FileLocationRecordedByMove(_) => {}
+        Event::FileLocationRootedRecordedByMove(_) => {}
         Event::IdentityEvidenceRecorded(_) => {}
         Event::IdentityEvidenceAccepted(_) => {}
         Event::IdentityEvidenceSuperseded(_) => {}
@@ -749,13 +752,27 @@ fn event_kind_matches_serde_tag() {
             file_location_id: voom_core::FileLocationId(1),
             file_version_id: voom_core::FileVersionId(1),
             kind: "local_path".to_owned(),
-            value: "/tmp/x".to_owned(),
+            value: "/legacy/x.mkv".to_owned(),
+        }),
+        Event::FileLocationRootedRecorded(FileLocationRootedRecordedPayload {
+            file_location_id: voom_core::FileLocationId(1),
+            file_version_id: voom_core::FileVersionId(1),
+            storage_root_id: voom_core::StorageRootId(1),
+            provider_relative_locator: voom_core::ProviderRelativeLocator::new("x.mkv".to_owned())
+                .unwrap(),
         }),
         Event::FileLocationAliased(FileLocationAliasedPayload {
             file_location_id: voom_core::FileLocationId(1),
             file_version_id: voom_core::FileVersionId(1),
             kind: "local_path".to_owned(),
-            value: "/tmp/x".to_owned(),
+            value: "/legacy/x.mkv".to_owned(),
+        }),
+        Event::FileLocationRootedAliased(FileLocationRootedAliasedPayload {
+            file_location_id: voom_core::FileLocationId(1),
+            file_version_id: voom_core::FileVersionId(1),
+            storage_root_id: voom_core::StorageRootId(1),
+            provider_relative_locator: voom_core::ProviderRelativeLocator::new("x.mkv".to_owned())
+                .unwrap(),
         }),
         Event::FileLocationRetiredByMove(FileLocationRetiredByMovePayload {
             file_location_id: voom_core::FileLocationId(1),
@@ -767,7 +784,16 @@ fn event_kind_matches_serde_tag() {
             new_file_location_id: voom_core::FileLocationId(2),
             file_version_id: voom_core::FileVersionId(1),
             kind: "local_path".to_owned(),
-            value: "/tmp/x".to_owned(),
+            value: "/legacy/x.mkv".to_owned(),
+            observed_at: OffsetDateTime::UNIX_EPOCH,
+        }),
+        Event::FileLocationRootedRecordedByMove(FileLocationRootedRecordedByMovePayload {
+            retired_file_location_id: voom_core::FileLocationId(1),
+            new_file_location_id: voom_core::FileLocationId(2),
+            file_version_id: voom_core::FileVersionId(1),
+            storage_root_id: voom_core::StorageRootId(1),
+            provider_relative_locator: voom_core::ProviderRelativeLocator::new("x.mkv".to_owned())
+                .unwrap(),
             observed_at: OffsetDateTime::UNIX_EPOCH,
         }),
         Event::IdentityEvidenceRecorded(IdentityEvidenceRecordedPayload {

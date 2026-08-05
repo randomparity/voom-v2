@@ -68,8 +68,10 @@ async fn seed_refs(pool: &sqlx::SqlitePool) {
     .unwrap();
 
     sqlx::query(
-        "INSERT INTO file_locations (id, file_version_id, kind, value, observed_at) \
-         VALUES (1, 1, 'local_path', '/media/1.mkv', '1970-01-01T00:00:00Z')",
+        "INSERT INTO file_locations \
+         (id, file_version_id, address_state, storage_root_id, provider_relative_locator, \
+          observed_at) \
+         VALUES (1, 1, 'rooted', 9000001, 'media/1.mkv', '1970-01-01T00:00:00Z')",
     )
     .execute(pool)
     .await

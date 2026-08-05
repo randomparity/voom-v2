@@ -10,7 +10,7 @@ use std::process::Command;
 use serde_json::json;
 use voom_control_plane::ControlPlane;
 use voom_control_plane::policy::ComplianceExecutionOptions;
-use voom_control_plane::scan::{ScanPathInput, ScanReportFileStatus};
+use voom_control_plane::scan::{RootScanOutcome, ScanReportFileStatus};
 use voom_control_plane::workflow::CoordinatorOutcome;
 use voom_core::{FileVersionId, MediaSnapshotId};
 use voom_policy::{
@@ -25,6 +25,19 @@ use voom_test_support::worker::{
     TestWorkerConfig, TestWorkerLaunch, cargo_build_package, hide_stale_fake_ffprobe_sibling,
     target_debug_binary,
 };
+
+async fn open_test_control_plane(pool: sqlx::SqlitePool, root: &Path) -> ControlPlane {
+    voom_store::test_support::seed_test_storage_root(&pool)
+        .await
+        .unwrap();
+    voom_store::test_support::set_test_storage_root_path(&pool, root)
+        .await
+        .unwrap();
+    ControlPlane::open_with_pool(pool, std::sync::Arc::new(voom_core::SystemClock))
+        .await
+        .unwrap()
+        .with_local_node_id(Some(voom_core::NodeId(9_000_001)))
+}
 
 /// The phase-barrier coordinator drives one `plan_phase` per phase across every
 /// active file, fanning the phase's planned nodes out across the files in a
@@ -54,9 +67,7 @@ async fn phase_barrier_commits_every_file_in_a_single_phase() {
     let url = format!("sqlite://{}", db.path().display());
     voom_store::init(&url).await.unwrap();
     let pool = voom_store::connect(&url).await.unwrap();
-    let cp = ControlPlane::open_with_pool(pool, std::sync::Arc::new(voom_core::SystemClock))
-        .await
-        .unwrap();
+    let cp = open_test_control_plane(pool, &root).await;
 
     let file_one = scan_one(&cp, &source_one).await;
     let file_two = scan_one(&cp, &source_two).await;
@@ -116,10 +127,7 @@ async fn sliding_window_advances_a_file_while_its_sibling_is_in_an_earlier_phase
     let url = format!("sqlite://{}", db.path().display());
     voom_store::init(&url).await.unwrap();
     let pool = voom_store::connect(&url).await.unwrap();
-    let cp =
-        ControlPlane::open_with_pool(pool.clone(), std::sync::Arc::new(voom_core::SystemClock))
-            .await
-            .unwrap();
+    let cp = open_test_control_plane(pool.clone(), &root).await;
     let first = scan_one(&cp, &first_path).await;
     let second = scan_one(&cp, &second_path).await;
     let third = scan_one(&cp, &third_path).await;
@@ -367,9 +375,7 @@ async fn phase_barrier_chains_committed_artifact_into_the_next_phase() {
     let url = format!("sqlite://{}", db.path().display());
     voom_store::init(&url).await.unwrap();
     let pool = voom_store::connect(&url).await.unwrap();
-    let cp = ControlPlane::open_with_pool(pool, std::sync::Arc::new(voom_core::SystemClock))
-        .await
-        .unwrap();
+    let cp = open_test_control_plane(pool, &root).await;
 
     let file = scan_one(&cp, &source).await;
     let scanned_version = file.file_version_id;
@@ -594,9 +600,7 @@ async fn phase_barrier_records_committed_sibling_when_a_file_fails() {
     let url = format!("sqlite://{}", db.path().display());
     voom_store::init(&url).await.unwrap();
     let pool = voom_store::connect(&url).await.unwrap();
-    let cp = ControlPlane::open_with_pool(pool, std::sync::Arc::new(voom_core::SystemClock))
-        .await
-        .unwrap();
+    let cp = open_test_control_plane(pool, &root).await;
 
     let good_file = scan_one(&cp, &good).await;
     let doomed_file = scan_one(&cp, &doomed).await;
@@ -702,9 +706,7 @@ async fn phase_barrier_continue_blocks_failed_file_and_promotes_committed_siblin
     let url = format!("sqlite://{}", db.path().display());
     voom_store::init(&url).await.unwrap();
     let pool = voom_store::connect(&url).await.unwrap();
-    let cp = ControlPlane::open_with_pool(pool, std::sync::Arc::new(voom_core::SystemClock))
-        .await
-        .unwrap();
+    let cp = open_test_control_plane(pool, &root).await;
     let good_file = scan_one(&cp, &good).await;
     let doomed_file = scan_one(&cp, &doomed).await;
     std::fs::write(&doomed, b"not a video anymore").unwrap();
@@ -796,9 +798,7 @@ async fn phase_barrier_resumes_failed_file_without_remutating_committed_sibling(
     let url = format!("sqlite://{}", db.path().display());
     voom_store::init(&url).await.unwrap();
     let pool = voom_store::connect(&url).await.unwrap();
-    let cp = ControlPlane::open_with_pool(pool, std::sync::Arc::new(voom_core::SystemClock))
-        .await
-        .unwrap();
+    let cp = open_test_control_plane(pool, &root).await;
 
     let good_file = scan_one(&cp, &good).await;
     let doomed_file = scan_one(&cp, &doomed).await;
@@ -918,9 +918,7 @@ async fn phase_barrier_promotes_only_terminal_artifact_across_phases() {
     let url = format!("sqlite://{}", db.path().display());
     voom_store::init(&url).await.unwrap();
     let pool = voom_store::connect(&url).await.unwrap();
-    let cp = ControlPlane::open_with_pool(pool, std::sync::Arc::new(voom_core::SystemClock))
-        .await
-        .unwrap();
+    let cp = open_test_control_plane(pool, &root).await;
 
     let file = scan_one(&cp, &source).await;
     let scanned_version = file.file_version_id;
@@ -1010,9 +1008,7 @@ async fn phase_barrier_withholds_intermediate_when_later_phase_blocks() {
     let url = format!("sqlite://{}", db.path().display());
     voom_store::init(&url).await.unwrap();
     let pool = voom_store::connect(&url).await.unwrap();
-    let cp = ControlPlane::open_with_pool(pool, std::sync::Arc::new(voom_core::SystemClock))
-        .await
-        .unwrap();
+    let cp = open_test_control_plane(pool, &root).await;
 
     let file = scan_one(&cp, &source).await;
     let scanned_version = file.file_version_id;
@@ -1124,25 +1120,26 @@ fn mkvs_in(dir: &Path) -> Vec<String> {
     names
 }
 
-/// The live local-path location value of the chain tip (latest non-retired
-/// version) of the asset that `start_version` belongs to — read directly so the
-/// test pins the durable promoted path, not an in-memory projection.
+/// The live rooted location of the chain tip (latest non-retired version) of
+/// the asset that `start_version` belongs to, resolved from durable root data.
 async fn tip_location_value(url: &str, start_version: FileVersionId) -> String {
     let pool = voom_store::connect(url).await.unwrap();
-    sqlx::query_scalar::<_, String>(
-        "SELECT value FROM file_locations \
-         WHERE retired_at IS NULL AND file_version_id = ( \
+    let (root, relative): (String, String) = sqlx::query_as(
+        "SELECT lr.provider_locator, fl.provider_relative_locator FROM file_locations fl \
+         JOIN library_roots lr ON lr.id = fl.storage_root_id \
+         WHERE fl.retired_at IS NULL AND fl.file_version_id = ( \
              SELECT id FROM file_versions \
              WHERE file_asset_id = (SELECT file_asset_id FROM file_versions WHERE id = ?) \
                AND retired_at IS NULL \
              ORDER BY id DESC LIMIT 1 \
          ) \
-         ORDER BY id DESC LIMIT 1",
+         ORDER BY fl.id DESC LIMIT 1",
     )
     .bind(i64::try_from(start_version.0).unwrap())
     .fetch_one(&pool)
     .await
-    .unwrap()
+    .unwrap();
+    Path::new(&root).join(relative).display().to_string()
 }
 
 fn require_command(program: &str, args: &[&str]) {
@@ -1307,17 +1304,17 @@ async fn transcode_lineage_sources(url: &str) -> Vec<i64> {
 }
 
 async fn scan_one(cp: &ControlPlane, source: &Path) -> ScannedFile {
-    let scan = cp
-        .scan_path(ScanPathInput {
-            path: source.to_owned(),
-            extension_allowlist: Vec::new(),
-        })
+    let outcome = cp
+        .scan_library_root(voom_store::test_support::TEST_STORAGE_ROOT_ID)
         .await
         .unwrap();
+    let RootScanOutcome::Scanned(scan) = outcome else {
+        unreachable!("active local test root must scan")
+    };
     let scanned = scan
         .files
         .iter()
-        .find(|file| file.status == ScanReportFileStatus::Scanned)
+        .find(|file| file.path == source && file.status == ScanReportFileStatus::Scanned)
         .unwrap();
     ScannedFile {
         file_version_id: scanned.file_version_id.unwrap(),

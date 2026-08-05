@@ -2,9 +2,11 @@ use std::error::Error;
 use std::fmt::{Display, Formatter};
 use std::path::{Path, PathBuf};
 
+use serde::Deserialize;
 use voom_core::ids::{ArtifactCommitRecordId, ArtifactVerificationId};
 use voom_core::{
-    ArtifactHandleId, ArtifactLocationId, ErrorCode, FileLocationId, FileVersionId, VoomError,
+    ArtifactHandleId, ArtifactLocationId, ErrorCode, FileLocationId, FileVersionId,
+    ProviderRelativeLocator, StorageRootId, VoomError,
 };
 use voom_store::repo::media::artifacts::{ArtifactCommitRecord, ArtifactCommitState};
 
@@ -331,6 +333,42 @@ pub(crate) async fn prepare_artifact_recovery(
     recovery::prepare_commit_recovery(cp, artifact_handle_id, state).await
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PersistedRootedTarget {
+    storage_root_id: u64,
+    provider_relative_locator: String,
+}
+
+pub(crate) fn rooted_target_from_commit_report(
+    record: &ArtifactCommitRecord,
+) -> Result<(StorageRootId, ProviderRelativeLocator), VoomError> {
+    let value = record.report.get("rooted_target").ok_or_else(|| {
+        VoomError::database(format!(
+            "artifact commit {} report is missing rooted_target",
+            record.id
+        ))
+    })?;
+    let persisted: PersistedRootedTarget =
+        serde_json::from_value(value.clone()).map_err(|error| {
+            VoomError::database(format!(
+                "artifact commit {} report has invalid rooted_target: {error}",
+                record.id
+            ))
+        })?;
+    if persisted.storage_root_id == 0 || persisted.storage_root_id > i64::MAX.unsigned_abs() {
+        return Err(VoomError::database(format!(
+            "artifact commit {} report rooted_target.storage_root_id {} is not a valid SQLite ID",
+            record.id, persisted.storage_root_id
+        )));
+    }
+    let relative = ProviderRelativeLocator::parse_database(
+        "artifact_commit_records.report.rooted_target.provider_relative_locator",
+        &persisted.provider_relative_locator,
+    )?;
+    Ok((StorageRootId(persisted.storage_root_id), relative))
+}
+
 #[derive(Debug)]
 pub(super) struct PreparedCommit {
     record: ArtifactCommitRecord,
@@ -340,6 +378,8 @@ pub(super) struct PreparedCommit {
     staging_location_id: ArtifactLocationId,
     staging_path: PathBuf,
     target_path: PathBuf,
+    target_storage_root_id: StorageRootId,
+    target_relative_locator: ProviderRelativeLocator,
     temp_path: PathBuf,
     expected_facts: ArtifactFileFacts,
     promotion_started_at: time::OffsetDateTime,

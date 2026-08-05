@@ -146,6 +146,10 @@ const MIGRATION_0032_SQL: &str =
 const MIGRATION_0033_SQL: &str =
     include_str!("../../../migrations/0033_remote_acquire_replay_shape.sql");
 
+/// SQL for migration 0034 (node-owned roots and relative file locations), embedded at
+/// compile time.
+const MIGRATION_0034_SQL: &str = include_str!("../../../migrations/0034_node_owned_roots.sql");
+
 /// Embedded migration set, constructed without the `sqlx::migrate!` macro.
 ///
 /// We don't use sqlx's `macros` feature: it pulls `sqlx-macros-core`, which
@@ -390,6 +394,13 @@ pub(crate) static MIGRATOR: LazyLock<Migrator> = LazyLock::new(|| Migrator {
             Cow::Borrowed("remote_acquire_replay_shape"),
             MigrationType::Simple,
             Cow::Borrowed(MIGRATION_0033_SQL),
+            false,
+        ),
+        Migration::new(
+            34,
+            Cow::Borrowed("node_owned_roots"),
+            MigrationType::Simple,
+            Cow::Borrowed(MIGRATION_0034_SQL),
             false,
         ),
     ]),

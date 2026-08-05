@@ -3,6 +3,7 @@ use std::future::Future;
 use std::time::Duration;
 
 use serde_json::{Value, json};
+use sqlx::Row;
 use time::OffsetDateTime;
 use time::format_description::well_known::Iso8601;
 use voom_core::{FileLocationId, FileVersionId, JobId, TicketOperation};
@@ -18,8 +19,8 @@ use voom_store::repo::execution::workflow_summaries::{
 };
 use voom_store::repo::media::identity::NewFileLocation;
 use voom_store::repo::media::identity::{
-    DiscoveredFile, FileLocationKind, FileLocationRepo, FileVersionRepo, IngestOutcome,
-    MediaSnapshot, MediaSnapshotRepo, NewFileVersion, ProducedBy,
+    DiscoveredFile, FileLocationRepo, FileVersionRepo, IngestOutcome, MediaSnapshot,
+    MediaSnapshotRepo, NewFileVersion, ProducedBy,
 };
 
 use crate::cases::cp;
@@ -216,13 +217,15 @@ async fn seed_version(
     hash: &str,
     payload: Value,
 ) -> FileVersionId {
+    let (provider_relative_locator, content_hash, size_bytes) =
+        materialize_source(cp, path, hash).await;
     let outcome = cp
         .record_discovered_file(
             DiscoveredFile {
-                location_kind: FileLocationKind::LocalPath,
-                location_value: path.to_owned(),
-                content_hash: hash.to_owned(),
-                size_bytes: 1024,
+                storage_root_id: voom_store::test_support::TEST_STORAGE_ROOT_ID,
+                provider_relative_locator,
+                content_hash,
+                size_bytes,
                 observed_at: T0,
                 proof: None,
             },
@@ -240,6 +243,38 @@ async fn seed_version(
         .await
         .unwrap();
     file_version_id
+}
+
+async fn materialize_source(
+    cp: &crate::ControlPlane,
+    logical_path: &str,
+    content_seed: &str,
+) -> (voom_core::ProviderRelativeLocator, String, u64) {
+    let rows = sqlx::query("PRAGMA database_list")
+        .fetch_all(cp.pool_for_test())
+        .await
+        .unwrap();
+    let database_path: String = rows
+        .iter()
+        .find(|row| row.get::<String, _>("name") == "main")
+        .unwrap()
+        .get("file");
+    let fixture_path = std::path::Path::new(&database_path)
+        .parent()
+        .unwrap()
+        .join("rooted-fixtures")
+        .join(logical_path.trim_start_matches('/'));
+    std::fs::create_dir_all(fixture_path.parent().unwrap()).unwrap();
+    let seed = content_seed.as_bytes();
+    let bytes = (0..1024)
+        .map(|index| seed[index % seed.len()])
+        .collect::<Vec<_>>();
+    std::fs::write(&fixture_path, &bytes).unwrap();
+    (
+        voom_store::test_support::test_relative_locator(&fixture_path.display().to_string()),
+        format!("blake3:{}", blake3::hash(&bytes).to_hex()),
+        u64::try_from(bytes.len()).unwrap(),
+    )
 }
 
 async fn latest_snapshot(cp: &crate::ControlPlane, version: FileVersionId) -> MediaSnapshot {
@@ -1475,6 +1510,9 @@ async fn advance_chain_tip(
     hash: &str,
     payload: Value,
 ) -> FileVersionId {
+    let logical_path = format!("/lib/produced/{hash}.mkv");
+    let (provider_relative_locator, content_hash, size_bytes) =
+        materialize_source(cp, &logical_path, hash).await;
     let asset_id = cp
         .identity()
         .get_file_version(parent)
@@ -1485,8 +1523,8 @@ async fn advance_chain_tip(
     let version = cp
         .create_file_version(NewFileVersion {
             file_asset_id: asset_id,
-            content_hash: hash.to_owned(),
-            size_bytes: 2048,
+            content_hash,
+            size_bytes,
             produced_by: ProducedBy::Transcode,
             produced_from_version_id: Some(parent),
             created_at: T0,
@@ -1495,8 +1533,8 @@ async fn advance_chain_tip(
         .unwrap();
     cp.create_file_location(NewFileLocation {
         file_version_id: version.id,
-        kind: FileLocationKind::LocalPath,
-        value: format!("/lib/produced/{hash}.mkv"),
+        storage_root_id: voom_store::test_support::TEST_STORAGE_ROOT_ID,
+        provider_relative_locator,
         proof: None,
         observed_at: T0,
     })
@@ -3535,13 +3573,11 @@ async fn tool_requirements_fail_before_fresh_or_resume_jobs_open() {
     assert_eq!(jobs, 1, "resume preflight failure opened a new job");
 }
 
-/// Post-run promotion canonicalizes the working dirs, so the candidate artifact
-/// path must be canonicalized too: a live location recorded at a path that
-/// traverses a symlink (e.g. macOS `/tmp` -> `/private/tmp`) must still match its
-/// working dir and be promoted. A non-symmetric prefix match would silently leave
-/// the terminal artifact in the working dir while the job succeeded.
+/// A rooted location that traverses a symlink is not an exact storage-owner
+/// address. Promotion must reject it without moving bytes or repointing durable
+/// state, even when the symlink resolves under the configured working directory.
 #[tokio::test]
-async fn promote_terminal_artifacts_matches_through_symlinked_working_dir() {
+async fn promote_terminal_artifacts_rejects_symlinked_working_dir() {
     use crate::cases::policy::compliance::{PromotionPair, PromotionPlan};
 
     let (cp, _db) = cp().await;
@@ -3564,13 +3600,35 @@ async fn promote_terminal_artifacts_matches_through_symlinked_working_dir() {
         .join("Movie.mkv")
         .display()
         .to_string();
-    let version = seed_version(
-        &cp,
-        &symlinked_value,
-        "hash-symlink",
-        reprobe_payload("hevc"),
-    )
-    .await;
+    let facts = crate::scan::hash::observe_candidate_file(&working.join("Movie.mkv"))
+        .await
+        .unwrap();
+    let outcome = cp
+        .record_discovered_file(
+            DiscoveredFile {
+                storage_root_id: voom_store::test_support::TEST_STORAGE_ROOT_ID,
+                provider_relative_locator: voom_store::test_support::test_relative_locator(
+                    &symlinked_value,
+                ),
+                content_hash: facts.content_hash,
+                size_bytes: facts.size_bytes,
+                observed_at: T0,
+                proof: None,
+            },
+            None,
+        )
+        .await
+        .unwrap();
+    let IngestOutcome::NewFileAsset {
+        file_version_id: version,
+        ..
+    } = outcome
+    else {
+        panic!("expected terminal artifact identity")
+    };
+    cp.record_media_snapshot(version, None, reprobe_payload("hevc"), T0)
+        .await
+        .unwrap();
 
     // The working dir is supplied symlinked, exactly as it would arrive from a
     // `--staging-root` that traverses a symlink.
@@ -3582,19 +3640,20 @@ async fn promote_terminal_artifacts_matches_through_symlinked_working_dir() {
     };
 
     let location_id = live_location_id(&cp, version).await;
-    cp.promote_terminal_artifacts(&plan, &[location_id], std::path::Path::new(""), None)
+    let error = cp
+        .promote_terminal_artifacts(&plan, &[location_id], std::path::Path::new(""), None)
         .await
-        .unwrap();
+        .unwrap_err();
 
-    let promoted = out_dir.join("Movie.mkv");
     assert!(
-        promoted.is_file(),
-        "the terminal artifact must be promoted through the symlinked working dir"
+        error.to_string().contains("must not traverse a symlink"),
+        "unexpected promotion error: {error}"
     );
     assert!(
-        !working.join("Movie.mkv").exists(),
-        "the artifact must be moved out of the working dir"
+        working.join("Movie.mkv").is_file(),
+        "rejected promotion must leave the terminal artifact in place"
     );
+    assert!(!out_dir.join("Movie.mkv").exists());
     let location = cp
         .identity()
         .list_live_file_locations_by_version(version)
@@ -3604,9 +3663,9 @@ async fn promote_terminal_artifacts_matches_through_symlinked_working_dir() {
         .next()
         .unwrap();
     assert_eq!(
-        location.value,
-        promoted.display().to_string(),
-        "the chain tip location must repoint to the promoted (canonical) path"
+        location.rooted_address().unwrap().1,
+        &voom_store::test_support::test_relative_locator(&symlinked_value),
+        "rejected promotion must not repoint the chain tip location"
     );
 }
 
@@ -3704,14 +3763,24 @@ async fn promote_terminal_artifacts_mirrors_source_subtree_for_duplicate_basenam
         std::fs::write(&artifact_path, format!("{season}-bytes")).unwrap();
         cp.create_file_location(NewFileLocation {
             file_version_id: v2.id,
-            kind: FileLocationKind::LocalPath,
-            value: artifact_path.display().to_string(),
+            storage_root_id: voom_store::test_support::TEST_STORAGE_ROOT_ID,
+            provider_relative_locator: voom_store::test_support::test_relative_locator(
+                &artifact_path.display().to_string(),
+            ),
             proof: None,
             observed_at: T0,
         })
         .await
         .unwrap();
-        tips.push((season, v2.id));
+        let source_dir = cp
+            .asset_source_path(asset_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        tips.push((season, v2.id, source_dir));
     }
 
     let plan = PromotionPlan {
@@ -3722,22 +3791,17 @@ async fn promote_terminal_artifacts_mirrors_source_subtree_for_duplicate_basenam
     };
 
     let mut location_ids = Vec::new();
-    for (_, vid) in &tips {
+    for (_, vid, _) in &tips {
         location_ids.push(live_location_id(&cp, *vid).await);
     }
-    for ((season, _), location_id) in tips.iter().zip(location_ids) {
-        let source_dir = std::path::Path::new("/library").join(season);
-        cp.promote_terminal_artifacts(
-            &plan,
-            &[location_id],
-            std::path::Path::new("/library"),
-            Some(&source_dir),
-        )
-        .await
-        .unwrap();
+    let source_root = tips[0].2.parent().unwrap().to_path_buf();
+    for ((_, _, source_dir), location_id) in tips.iter().zip(location_ids) {
+        cp.promote_terminal_artifacts(&plan, &[location_id], &source_root, Some(source_dir))
+            .await
+            .unwrap();
     }
 
-    for (season, vid) in tips {
+    for (season, vid, _) in tips {
         let promoted = out_dir.join(season).join("episode.remux.mkv");
         assert!(
             promoted.is_file(),
@@ -3753,8 +3817,8 @@ async fn promote_terminal_artifacts_mirrors_source_subtree_for_duplicate_basenam
             .next()
             .unwrap();
         assert_eq!(
-            location.value,
-            promoted.display().to_string(),
+            location.rooted_address().unwrap().1,
+            &voom_store::test_support::test_relative_locator(&promoted.display().to_string()),
             "the {season} chain tip must repoint to the mirrored promoted path"
         );
     }
@@ -3804,7 +3868,10 @@ async fn promote_terminal_artifacts_ignores_unscoped_working_dir_artifacts() {
         .into_iter()
         .find(|location| location.id == second.location_id)
         .unwrap();
-    assert_eq!(second_location.value, second_path.display().to_string());
+    assert_eq!(
+        second_location.rooted_address().unwrap().1,
+        &voom_store::test_support::test_relative_locator(&second_path.display().to_string())
+    );
 }
 
 #[tokio::test]
@@ -3851,8 +3918,10 @@ async fn promote_terminal_artifacts_skips_non_tip_scoped_locations() {
     let new_location = cp
         .create_file_location(NewFileLocation {
             file_version_id: new_version.id,
-            kind: FileLocationKind::LocalPath,
-            value: new_path.display().to_string(),
+            storage_root_id: voom_store::test_support::TEST_STORAGE_ROOT_ID,
+            provider_relative_locator: voom_store::test_support::test_relative_locator(
+                &new_path.display().to_string(),
+            ),
             proof: None,
             observed_at: T0,
         })
@@ -3998,8 +4067,10 @@ async fn seed_terminal_artifact(
     let location = cp
         .create_file_location(NewFileLocation {
             file_version_id: version.id,
-            kind: FileLocationKind::LocalPath,
-            value: artifact_path.display().to_string(),
+            storage_root_id: voom_store::test_support::TEST_STORAGE_ROOT_ID,
+            provider_relative_locator: voom_store::test_support::test_relative_locator(
+                &artifact_path.display().to_string(),
+            ),
             proof: None,
             observed_at: T0,
         })

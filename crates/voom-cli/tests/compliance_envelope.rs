@@ -17,10 +17,12 @@ use voom_core::{TicketOperation, WorkerId};
 use voom_policy::{FixtureName, load_fixture, load_policy_fixture};
 use voom_store::repo::execution::leases::NewLease;
 use voom_store::repo::execution::tickets::NewTicket;
-use voom_store::repo::media::identity::{DiscoveredFile, FileLocationKind, IngestOutcome};
+use voom_store::repo::media::identity::{DiscoveredFile, IngestOutcome};
 use voom_store::test_support::sqlite_url_for;
 use voom_test_support::TempDatabase;
 use voom_test_support::worker::{TestWorkerConfig, TestWorkerLaunch, cargo_bin_or_build};
+
+const TEST_LOCAL_NODE_ID: &str = "9000001";
 
 #[tokio::test]
 async fn report_outputs_compliance_report_envelope() {
@@ -263,7 +265,7 @@ async fn execute_scanned_remux_existing_target_outputs_failure_envelope() {
     assert!(
         json["error"]["message"]
             .as_str()
-            .is_some_and(|message| { message.contains("promotion destination already exists") }),
+            .is_some_and(|message| message.contains("artifact path must not already exist")),
         "stdout={} stderr={}",
         serde_json::to_string_pretty(&json).unwrap(),
         String::from_utf8_lossy(&output.stderr)
@@ -527,6 +529,9 @@ async fn seed_scanned_remux() -> Seeded {
     let url = sqlite_url_for(tmp.path());
     voom_store::init(&url).await.unwrap();
     let pool = voom_store::connect(&url).await.unwrap();
+    voom_store::test_support::seed_test_storage_root(&pool)
+        .await
+        .unwrap();
     let cp = voom_control_plane::ControlPlane::open_with_pool(
         pool,
         std::sync::Arc::new(voom_core::SystemClock),
@@ -546,8 +551,10 @@ async fn seed_scanned_remux() -> Seeded {
     let outcome = cp
         .record_discovered_file(
             DiscoveredFile {
-                location_kind: FileLocationKind::LocalPath,
-                location_value: source.display().to_string(),
+                storage_root_id: voom_store::test_support::TEST_STORAGE_ROOT_ID,
+                provider_relative_locator: voom_store::test_support::test_relative_locator(
+                    &source.display().to_string(),
+                ),
                 content_hash: blake3_checksum(source_bytes),
                 size_bytes: u64::try_from(source_bytes.len()).unwrap(),
                 observed_at: OffsetDateTime::UNIX_EPOCH,
@@ -618,6 +625,9 @@ async fn seed_scanned_verify() -> Seeded {
     let url = sqlite_url_for(tmp.path());
     voom_store::init(&url).await.unwrap();
     let pool = voom_store::connect(&url).await.unwrap();
+    voom_store::test_support::seed_test_storage_root(&pool)
+        .await
+        .unwrap();
     let cp = voom_control_plane::ControlPlane::open_with_pool(
         pool,
         std::sync::Arc::new(voom_core::SystemClock),
@@ -637,8 +647,10 @@ async fn seed_scanned_verify() -> Seeded {
     let outcome = cp
         .record_discovered_file(
             DiscoveredFile {
-                location_kind: FileLocationKind::LocalPath,
-                location_value: source.display().to_string(),
+                storage_root_id: voom_store::test_support::TEST_STORAGE_ROOT_ID,
+                provider_relative_locator: voom_store::test_support::test_relative_locator(
+                    &source.display().to_string(),
+                ),
                 content_hash: blake3_checksum(source_bytes),
                 size_bytes: u64::try_from(source_bytes.len()).unwrap(),
                 observed_at: OffsetDateTime::UNIX_EPOCH,
@@ -697,6 +709,9 @@ async fn seed_scanned_audio() -> Seeded {
     let url = sqlite_url_for(tmp.path());
     voom_store::init(&url).await.unwrap();
     let pool = voom_store::connect(&url).await.unwrap();
+    voom_store::test_support::seed_test_storage_root(&pool)
+        .await
+        .unwrap();
     let cp = voom_control_plane::ControlPlane::open_with_pool(
         pool,
         std::sync::Arc::new(voom_core::SystemClock),
@@ -716,8 +731,10 @@ async fn seed_scanned_audio() -> Seeded {
     let outcome = cp
         .record_discovered_file(
             DiscoveredFile {
-                location_kind: FileLocationKind::LocalPath,
-                location_value: source.display().to_string(),
+                storage_root_id: voom_store::test_support::TEST_STORAGE_ROOT_ID,
+                provider_relative_locator: voom_store::test_support::test_relative_locator(
+                    &source.display().to_string(),
+                ),
                 content_hash: blake3_checksum(source_bytes),
                 size_bytes: u64::try_from(source_bytes.len()).unwrap(),
                 observed_at: OffsetDateTime::UNIX_EPOCH,
@@ -820,6 +837,7 @@ fn compliance_command(
     input_id: u64,
 ) -> std::process::Output {
     Command::new(env!("CARGO_BIN_EXE_voom"))
+        .env("VOOM_LOCAL_NODE_ID", TEST_LOCAL_NODE_ID)
         .args([
             "--database-url",
             url,
@@ -843,6 +861,7 @@ fn compliance_execute_command_with_dirs(
     ffprobe_bin: &Path,
 ) -> std::process::Output {
     Command::new(env!("CARGO_BIN_EXE_voom"))
+        .env("VOOM_LOCAL_NODE_ID", TEST_LOCAL_NODE_ID)
         .env("VOOM_FFPROBE_BIN", ffprobe_bin)
         .args([
             "--database-url",
@@ -887,6 +906,7 @@ fn spawn_compliance_execute(
     ffprobe_bin: &Path,
 ) -> Child {
     Command::new(env!("CARGO_BIN_EXE_voom"))
+        .env("VOOM_LOCAL_NODE_ID", TEST_LOCAL_NODE_ID)
         .env("VOOM_FFPROBE_BIN", ffprobe_bin)
         .args([
             "--database-url",

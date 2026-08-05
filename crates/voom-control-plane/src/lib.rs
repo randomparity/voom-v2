@@ -25,7 +25,7 @@ use std::sync::{Arc, Mutex};
 use rand::rngs::StdRng;
 use rand::{RngCore, SeedableRng};
 use sqlx::SqlitePool;
-use voom_core::{Clock, SystemClock, VoomError};
+use voom_core::{Clock, NodeId, SystemClock, VoomError};
 use voom_store::repo::{
     audit::events::SqliteEventRepo,
     execution::{
@@ -132,6 +132,7 @@ pub struct ControlPlane {
     pool: SqlitePool,
     clock: Arc<dyn Clock>,
     rng: SharedRng,
+    local_node_id: Option<NodeId>,
     pub(crate) events: SqliteEventRepo,
     pub(crate) jobs: SqliteJobRepo,
     pub(crate) tickets: SqliteTicketRepo,
@@ -172,6 +173,7 @@ impl std::fmt::Debug for ControlPlane {
             .field("pool", &self.pool)
             .field("clock", &"<dyn Clock>")
             .field("rng", &"<dyn RngCore>")
+            .field("local_node_id", &self.local_node_id)
             .field("events", &self.events)
             .field("jobs", &self.jobs)
             .field("tickets", &self.tickets)
@@ -283,7 +285,12 @@ impl ControlPlane {
                 )));
             }
         }
-        Ok(Self::new_unchecked(pool, clock, rng))
+        #[cfg(test)]
+        voom_store::test_support::seed_test_storage_root(&pool).await?;
+        let control_plane = Self::new_unchecked(pool, clock, rng);
+        #[cfg(test)]
+        let control_plane = control_plane.with_local_node_id(Some(NodeId(9_000_001)));
+        Ok(control_plane)
     }
 
     fn new_unchecked(pool: SqlitePool, clock: Arc<dyn Clock>, rng: SharedRng) -> Self {
@@ -319,7 +326,16 @@ impl ControlPlane {
             pool,
             clock,
             rng,
+            local_node_id: None,
         }
+    }
+
+    /// Configure the exact logical node whose filesystem namespace this
+    /// process may resolve. Absence remains fail-closed for storage access.
+    #[must_use]
+    pub fn with_local_node_id(mut self, local_node_id: Option<NodeId>) -> Self {
+        self.local_node_id = local_node_id;
+        self
     }
 
     #[must_use]

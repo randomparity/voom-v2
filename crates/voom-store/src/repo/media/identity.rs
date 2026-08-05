@@ -14,7 +14,7 @@ use sqlx::{Acquire, Row, SqlitePool};
 use time::OffsetDateTime;
 use voom_core::{
     EvidenceId, FileAssetId, FileLocationId, FileVersionId, MediaSnapshotId, MediaVariantId,
-    MediaWorkId, PolicyVersionId, VoomError, WorkerId,
+    MediaWorkId, PolicyVersionId, ProviderRelativeLocator, StorageRootId, VoomError, WorkerId,
 };
 use voom_events::AssertionKind;
 
@@ -55,42 +55,6 @@ impl MediaWorkKind {
             "unknown" => Ok(Self::Unknown),
             other => Err(VoomError::database(format!(
                 "media_works.kind {other:?} not in vocab"
-            ))),
-        }
-    }
-}
-
-/// `file_locations.kind` vocabulary. Mirrors the SQL CHECK exactly.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum FileLocationKind {
-    LocalPath,
-    SharedMount,
-    ObjectStoreKey,
-    BackupPath,
-    Historical,
-}
-
-impl FileLocationKind {
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::LocalPath => "local_path",
-            Self::SharedMount => "shared_mount",
-            Self::ObjectStoreKey => "object_store_key",
-            Self::BackupPath => "backup_path",
-            Self::Historical => "historical",
-        }
-    }
-
-    pub(crate) fn parse(s: &str) -> Result<Self, VoomError> {
-        match s {
-            "local_path" => Ok(Self::LocalPath),
-            "shared_mount" => Ok(Self::SharedMount),
-            "object_store_key" => Ok(Self::ObjectStoreKey),
-            "backup_path" => Ok(Self::BackupPath),
-            "historical" => Ok(Self::Historical),
-            other => Err(VoomError::database(format!(
-                "file_locations.kind {other:?} not in vocab"
             ))),
         }
     }
@@ -254,16 +218,16 @@ pub enum AliasProof {
 pub enum RenameProof {
     LocalFileIdGeneration {
         prior_location_id: FileLocationId,
-        new_kind: FileLocationKind,
-        new_value: String,
+        storage_root_id: StorageRootId,
+        provider_relative_locator: ProviderRelativeLocator,
         file_id: u128,
         generation: u64,
         prior_path_missing: bool,
     },
     ObjectStoreVersion {
         prior_location_id: FileLocationId,
-        new_kind: FileLocationKind,
-        new_value: String,
+        storage_root_id: StorageRootId,
+        provider_relative_locator: ProviderRelativeLocator,
         bucket: String,
         key: String,
         version_id: String,
@@ -273,8 +237,8 @@ pub enum RenameProof {
 
 #[derive(Debug, Clone)]
 pub struct DiscoveredFile {
-    pub location_kind: FileLocationKind,
-    pub location_value: String,
+    pub storage_root_id: StorageRootId,
+    pub provider_relative_locator: ProviderRelativeLocator,
     pub content_hash: String,
     pub size_bytes: u64,
     pub observed_at: OffsetDateTime,
@@ -395,18 +359,29 @@ pub struct FileVersion {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewFileLocation {
     pub file_version_id: FileVersionId,
-    pub kind: FileLocationKind,
-    pub value: String,
+    pub storage_root_id: StorageRootId,
+    pub provider_relative_locator: ProviderRelativeLocator,
     pub proof: Option<LocationProof>,
     pub observed_at: OffsetDateTime,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FileLocationAddress {
+    Rooted {
+        storage_root_id: StorageRootId,
+        provider_relative_locator: ProviderRelativeLocator,
+    },
+    UnassignedLegacy {
+        legacy_kind: String,
+        legacy_locator: String,
+    },
 }
 
 #[derive(Debug, Clone)]
 pub struct FileLocation {
     pub id: FileLocationId,
     pub file_version_id: FileVersionId,
-    pub kind: FileLocationKind,
-    pub value: String,
+    pub address: FileLocationAddress,
     pub proof_kind: Option<String>,
     pub proof_value: Option<String>,
     pub observed_at: OffsetDateTime,
@@ -414,11 +389,28 @@ pub struct FileLocation {
     pub epoch: u64,
 }
 
+impl FileLocation {
+    /// Return the typed usable address, rejecting quarantined migration rows.
+    pub fn rooted_address(&self) -> Result<(StorageRootId, &ProviderRelativeLocator), VoomError> {
+        match &self.address {
+            FileLocationAddress::Rooted {
+                storage_root_id,
+                provider_relative_locator,
+            } => Ok((*storage_root_id, provider_relative_locator)),
+            FileLocationAddress::UnassignedLegacy { .. } => Err(VoomError::Config(format!(
+                "file_location {} is quarantined legacy data and has no usable rooted address",
+                self.id
+            ))),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LiveChainTipLocation {
     pub location_id: FileLocationId,
     pub file_asset_id: FileAssetId,
-    pub value: String,
+    pub storage_root_id: StorageRootId,
+    pub provider_relative_locator: ProviderRelativeLocator,
     pub epoch: u64,
 }
 
@@ -550,7 +542,8 @@ pub trait IngestRepo: Repository {
         &self,
         tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
         file_version_id: FileVersionId,
-        value: &str,
+        storage_root_id: StorageRootId,
+        provider_relative_locator: &ProviderRelativeLocator,
         observed_at: OffsetDateTime,
     ) -> Result<FileLocationId, VoomError>;
 
@@ -765,20 +758,18 @@ pub trait FileLocationRepo: Repository {
         retired_at: OffsetDateTime,
     ) -> Result<FileLocationId, VoomError>;
 
-    /// Update a live file location's `value` (path) in place under an epoch
-    /// guard, bumping its epoch and `observed_at`. Post-run artifact promotion
-    /// uses this to repoint a committed chain-tip artifact's durable location at
-    /// its promoted output path *without* changing the location id, so the
-    /// per-`(file, phase)` summary rows that reference it stay valid.
+    /// Update a live file location's rooted address in place under an epoch
+    /// guard, bumping its epoch and `observed_at`.
     ///
     /// Returns `Conflict` when the row is missing, already retired, or its
     /// `expected_epoch` is stale.
-    async fn update_file_location_value_in_tx<'tx>(
+    async fn update_file_location_address_in_tx<'tx>(
         &self,
         tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
         id: FileLocationId,
         expected_epoch: u64,
-        value: String,
+        storage_root_id: StorageRootId,
+        provider_relative_locator: ProviderRelativeLocator,
         observed_at: OffsetDateTime,
     ) -> Result<FileLocation, VoomError>;
 }
@@ -938,8 +929,8 @@ impl IngestRepo for SqliteIdentityRepo {
                         let new_location_id = insert_file_location(
                             tx,
                             file_version_id,
-                            discovered.location_kind,
-                            &discovered.location_value,
+                            discovered.storage_root_id,
+                            &discovered.provider_relative_locator,
                             discovered.proof.as_ref(),
                             discovered.observed_at,
                         )
@@ -988,7 +979,8 @@ impl IngestRepo for SqliteIdentityRepo {
         &self,
         tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
         file_version_id: FileVersionId,
-        value: &str,
+        storage_root_id: StorageRootId,
+        provider_relative_locator: &ProviderRelativeLocator,
         observed_at: OffsetDateTime,
     ) -> Result<FileLocationId, VoomError> {
         // Same guard as the alias-attach path: reject if an in-flight commit
@@ -1007,8 +999,8 @@ impl IngestRepo for SqliteIdentityRepo {
         insert_file_location(
             tx,
             file_version_id,
-            FileLocationKind::LocalPath,
-            value,
+            storage_root_id,
+            provider_relative_locator,
             None,
             observed_at,
         )
@@ -1601,8 +1593,8 @@ impl FileLocationRepo for SqliteIdentityRepo {
         let id = insert_file_location(
             tx,
             input.file_version_id,
-            input.kind,
-            &input.value,
+            input.storage_root_id,
+            &input.provider_relative_locator,
             input.proof.as_ref(),
             input.observed_at,
         )
@@ -1640,7 +1632,9 @@ impl FileLocationRepo for SqliteIdentityRepo {
         version_id: FileVersionId,
     ) -> Result<Vec<FileLocation>, VoomError> {
         let rows = sqlx::query(
-            "SELECT id, file_version_id, kind, value, proof_kind, proof_value, \
+            "SELECT id, file_version_id, address_state, storage_root_id, \
+                    provider_relative_locator, legacy_kind, legacy_locator, \
+                    proof_kind, proof_value, \
                     observed_at, retired_at, epoch \
              FROM file_locations WHERE file_version_id = ? ORDER BY id ASC",
         )
@@ -1659,7 +1653,9 @@ impl FileLocationRepo for SqliteIdentityRepo {
         version_id: FileVersionId,
     ) -> Result<Vec<FileLocation>, VoomError> {
         let rows = sqlx::query(
-            "SELECT id, file_version_id, kind, value, proof_kind, proof_value, \
+            "SELECT id, file_version_id, address_state, storage_root_id, \
+                    provider_relative_locator, legacy_kind, legacy_locator, \
+                    proof_kind, proof_value, \
                     observed_at, retired_at, epoch \
              FROM file_locations WHERE file_version_id = ? AND retired_at IS NULL \
              ORDER BY id ASC",
@@ -1690,11 +1686,12 @@ impl FileLocationRepo for SqliteIdentityRepo {
             })
             .collect::<Result<Vec<_>, _>>()?;
         let ids = serialize_json(&ids, "live chain tip location ids")?;
-        let rows: Vec<(i64, i64, String, i64)> = sqlx::query_as(
-            "SELECT fl.id, fv.file_asset_id, fl.value, fl.epoch \
+        let rows: Vec<(i64, i64, i64, String, i64)> = sqlx::query_as(
+            "SELECT fl.id, fv.file_asset_id, fl.storage_root_id, \
+                    fl.provider_relative_locator, fl.epoch \
              FROM file_locations fl JOIN file_versions fv ON fv.id = fl.file_version_id \
              WHERE fl.id IN (SELECT value FROM json_each(?)) \
-               AND fl.retired_at IS NULL AND fl.kind = 'local_path' \
+               AND fl.retired_at IS NULL AND fl.address_state = 'rooted' \
                AND fv.retired_at IS NULL \
                AND NOT EXISTS (SELECT 1 FROM file_versions newer \
                    WHERE newer.file_asset_id = fv.file_asset_id \
@@ -1706,20 +1703,29 @@ impl FileLocationRepo for SqliteIdentityRepo {
         .await
         .map_err(|error| VoomError::database_context("live local chain tip locations", error))?;
         rows.into_iter()
-            .map(|(location_id, file_asset_id, value, epoch)| {
-                Ok(LiveChainTipLocation {
-                    location_id: FileLocationId(checked_identity_u64(
-                        location_id,
-                        "live chain tip location id",
-                    )?),
-                    file_asset_id: FileAssetId(checked_identity_u64(
-                        file_asset_id,
-                        "live chain tip file asset id",
-                    )?),
-                    value,
-                    epoch: checked_identity_u64(epoch, "live chain tip location epoch")?,
-                })
-            })
+            .map(
+                |(location_id, file_asset_id, storage_root_id, locator, epoch)| {
+                    Ok(LiveChainTipLocation {
+                        location_id: FileLocationId(checked_identity_u64(
+                            location_id,
+                            "live chain tip location id",
+                        )?),
+                        file_asset_id: FileAssetId(checked_identity_u64(
+                            file_asset_id,
+                            "live chain tip file asset id",
+                        )?),
+                        storage_root_id: StorageRootId(checked_identity_u64(
+                            storage_root_id,
+                            "live chain tip storage root id",
+                        )?),
+                        provider_relative_locator: ProviderRelativeLocator::parse_database(
+                            "file_locations.provider_relative_locator",
+                            &locator,
+                        )?,
+                        epoch: checked_identity_u64(epoch, "live chain tip location epoch")?,
+                    })
+                },
+            )
             .collect()
     }
 
@@ -1847,8 +1853,8 @@ impl FileLocationRepo for SqliteIdentityRepo {
         let new_id = insert_file_location(
             &mut sp,
             new_location.file_version_id,
-            new_location.kind,
-            &new_location.value,
+            new_location.storage_root_id,
+            &new_location.provider_relative_locator,
             new_location.proof.as_ref(),
             new_location.observed_at,
         )
@@ -1860,20 +1866,26 @@ impl FileLocationRepo for SqliteIdentityRepo {
         Ok(new_id)
     }
 
-    async fn update_file_location_value_in_tx<'tx>(
+    async fn update_file_location_address_in_tx<'tx>(
         &self,
         tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
         id: FileLocationId,
         expected_epoch: u64,
-        value: String,
+        storage_root_id: StorageRootId,
+        provider_relative_locator: ProviderRelativeLocator,
         observed_at: OffsetDateTime,
     ) -> Result<FileLocation, VoomError> {
         let ts = iso8601(observed_at)?;
         let res = sqlx::query(
-            "UPDATE file_locations SET value = ?, observed_at = ?, epoch = epoch + 1 \
+            "UPDATE file_locations SET storage_root_id = ?, provider_relative_locator = ?, \
+                 observed_at = ?, epoch = epoch + 1 \
              WHERE id = ? AND epoch = ? AND retired_at IS NULL",
         )
-        .bind(&value)
+        .bind(i64_from_u64(
+            storage_root_id.0,
+            "file_locations.storage_root_id",
+        )?)
+        .bind(provider_relative_locator.as_str())
         .bind(&ts)
         .bind(i64_from_u64(
             id.0,
@@ -1885,10 +1897,14 @@ impl FileLocationRepo for SqliteIdentityRepo {
         )?)
         .execute(&mut **tx)
         .await
-        .map_err(|e| VoomError::database_context("file_locations value update", e))?;
+        .map_err(|e| VoomError::database_context("file_locations address update", e))?;
         if res.rows_affected() != 1 {
             return Err(VoomError::Conflict(format!(
-                "file_locations value update: id={id} expected_epoch={expected_epoch} or already retired"
+                concat!(
+                    "file_locations address update: id={} expected_epoch={} ",
+                    "or already retired"
+                ),
+                id, expected_epoch
             )));
         }
         get_file_location_in_tx(tx, id).await?.ok_or_else(|| {
@@ -2356,8 +2372,8 @@ async fn ingest_new_file_asset(
     let location_id = insert_file_location(
         tx,
         version_id,
-        discovered.location_kind,
-        &discovered.location_value,
+        discovered.storage_root_id,
+        &discovered.provider_relative_locator,
         discovered.proof.as_ref(),
         discovered.observed_at,
     )
@@ -2453,7 +2469,8 @@ async fn record_hash_match_evidence(
             provider_version: "1".to_owned(),
             confidence: 1.0,
             provenance: serde_json::json!({
-                "discovered_path": discovered.location_value,
+                "storage_root_id": discovered.storage_root_id,
+                "provider_relative_locator": discovered.provider_relative_locator,
                 "new_file_version_id": version_id.0,
                 "matched_prior_file_version_id": prior_version_id.0,
             }),
@@ -2480,12 +2497,13 @@ async fn record_path_rule_evidence(
             target_id: version_id.0,
             assertion_type: AssertionKind::PathRuleMatch,
             candidate_id: None,
-            candidate_value: Some(discovered.location_value.clone()),
+            candidate_value: Some(discovered.provider_relative_locator.as_str().to_owned()),
             provider: "voom.ingest".to_owned(),
             provider_version: "1".to_owned(),
             confidence: 0.5,
             provenance: serde_json::json!({
-                "discovered_path": discovered.location_value,
+                "storage_root_id": discovered.storage_root_id,
+                "provider_relative_locator": discovered.provider_relative_locator,
                 "alias_proof_validation": "mismatch",
             }),
             observed_at: discovered.observed_at,
@@ -2497,8 +2515,8 @@ async fn record_path_rule_evidence(
 
 struct ResolvedRenameProof {
     prior_location_id: FileLocationId,
-    new_kind: FileLocationKind,
-    new_value: String,
+    storage_root_id: StorageRootId,
+    provider_relative_locator: ProviderRelativeLocator,
     expected_proof_kind: &'static str,
     expected_proof_value: String,
     prior_observed_missing: bool,
@@ -2516,8 +2534,8 @@ async fn reconcile_rename_impl(
     let new_location_id = insert_file_location_with_raw_proof(
         tx,
         version.id,
-        proof.new_kind,
-        &proof.new_value,
+        proof.storage_root_id,
+        &proof.provider_relative_locator,
         Some(proof.expected_proof_kind),
         Some(&proof.expected_proof_value),
         observed_at,
@@ -2535,15 +2553,15 @@ fn resolve_rename_proof(proof: &RenameProof) -> ResolvedRenameProof {
     match proof {
         RenameProof::LocalFileIdGeneration {
             prior_location_id,
-            new_kind,
-            new_value,
+            storage_root_id,
+            provider_relative_locator,
             file_id,
             generation,
             prior_path_missing,
         } => ResolvedRenameProof {
             prior_location_id: *prior_location_id,
-            new_kind: *new_kind,
-            new_value: new_value.clone(),
+            storage_root_id: *storage_root_id,
+            provider_relative_locator: provider_relative_locator.clone(),
             expected_proof_kind: "file_id_generation",
             expected_proof_value: serde_json::json!({
                 "file_id": file_id.to_string(),
@@ -2554,16 +2572,16 @@ fn resolve_rename_proof(proof: &RenameProof) -> ResolvedRenameProof {
         },
         RenameProof::ObjectStoreVersion {
             prior_location_id,
-            new_kind,
-            new_value,
+            storage_root_id,
+            provider_relative_locator,
             bucket,
             key,
             version_id,
             prior_key_missing,
         } => ResolvedRenameProof {
             prior_location_id: *prior_location_id,
-            new_kind: *new_kind,
-            new_value: new_value.clone(),
+            storage_root_id: *storage_root_id,
+            provider_relative_locator: provider_relative_locator.clone(),
             expected_proof_kind: "object_version_id",
             expected_proof_value: serde_json::json!({
                 "bucket": bucket,
@@ -2669,13 +2687,14 @@ async fn record_rename_evidence(
             target_id: new_location_id.0,
             assertion_type: AssertionKind::PathRuleMatch,
             candidate_id: Some(proof.prior_location_id.0),
-            candidate_value: Some(proof.new_value.clone()),
+            candidate_value: Some(proof.provider_relative_locator.as_str().to_owned()),
             provider: "voom.rename_reconcile".to_owned(),
             provider_version: "1".to_owned(),
             confidence: 1.0,
             provenance: serde_json::json!({
                 "prior_location_id": proof.prior_location_id.0,
                 "new_location_id": new_location_id.0,
+                "storage_root_id": proof.storage_root_id,
             }),
             observed_at,
         },
@@ -2687,8 +2706,8 @@ async fn record_rename_evidence(
 async fn insert_file_location(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     file_version_id: FileVersionId,
-    kind: FileLocationKind,
-    value: &str,
+    storage_root_id: StorageRootId,
+    provider_relative_locator: &ProviderRelativeLocator,
     proof: Option<&LocationProof>,
     observed_at: OffsetDateTime,
 ) -> Result<FileLocationId, VoomError> {
@@ -2699,8 +2718,8 @@ async fn insert_file_location(
     insert_file_location_with_raw_proof(
         tx,
         file_version_id,
-        kind,
-        value,
+        storage_root_id,
+        provider_relative_locator,
         proof_kind,
         proof_value.as_deref(),
         observed_at,
@@ -2711,8 +2730,8 @@ async fn insert_file_location(
 async fn insert_file_location_with_raw_proof(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     file_version_id: FileVersionId,
-    kind: FileLocationKind,
-    value: &str,
+    storage_root_id: StorageRootId,
+    provider_relative_locator: &ProviderRelativeLocator,
     proof_kind: Option<&str>,
     proof_value: Option<&str>,
     observed_at: OffsetDateTime,
@@ -2720,15 +2739,19 @@ async fn insert_file_location_with_raw_proof(
     let ts = iso8601(observed_at)?;
     let res = sqlx::query(
         "INSERT INTO file_locations \
-         (file_version_id, kind, value, proof_kind, proof_value, observed_at) \
-         VALUES (?, ?, ?, ?, ?, ?)",
+         (file_version_id, address_state, storage_root_id, provider_relative_locator, \
+          proof_kind, proof_value, observed_at) \
+         VALUES (?, 'rooted', ?, ?, ?, ?, ?)",
     )
     .bind(i64_from_u64(
         file_version_id.0,
         concat!(module_path!(), ": ", stringify!(file_version_id.0)),
     )?)
-    .bind(kind.as_str())
-    .bind(value)
+    .bind(i64_from_u64(
+        storage_root_id.0,
+        "file_locations.storage_root_id",
+    )?)
+    .bind(provider_relative_locator.as_str())
     .bind(proof_kind)
     .bind(proof_value)
     .bind(&ts)
@@ -3005,9 +3028,11 @@ fn row_to_file_version(row: &sqlx::sqlite::SqliteRow) -> Result<FileVersion, Voo
     })
 }
 
-const SELECT_FILE_LOCATION_COLS: &str = "SELECT id, file_version_id, kind, value, proof_kind, proof_value, \
-            observed_at, retired_at, epoch \
-     FROM file_locations WHERE id = ?";
+const SELECT_FILE_LOCATION_COLS: &str = concat!(
+    "SELECT id, file_version_id, address_state, storage_root_id, ",
+    "provider_relative_locator, legacy_kind, legacy_locator, proof_kind, proof_value, ",
+    "observed_at, retired_at, epoch FROM file_locations WHERE id = ?"
+);
 
 async fn get_file_location_in_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
@@ -3031,11 +3056,20 @@ fn row_to_file_location(row: &sqlx::sqlite::SqliteRow) -> Result<FileLocation, V
     let file_version_id: i64 = row
         .try_get("file_version_id")
         .map_err(|e| map_row_err("file_locations", e))?;
-    let kind: String = row
-        .try_get("kind")
+    let address_state: String = row
+        .try_get("address_state")
         .map_err(|e| map_row_err("file_locations", e))?;
-    let value: String = row
-        .try_get("value")
+    let storage_root_id: Option<i64> = row
+        .try_get("storage_root_id")
+        .map_err(|e| map_row_err("file_locations", e))?;
+    let provider_relative_locator: Option<String> = row
+        .try_get("provider_relative_locator")
+        .map_err(|e| map_row_err("file_locations", e))?;
+    let legacy_kind: Option<String> = row
+        .try_get("legacy_kind")
+        .map_err(|e| map_row_err("file_locations", e))?;
+    let legacy_locator: Option<String> = row
+        .try_get("legacy_locator")
         .map_err(|e| map_row_err("file_locations", e))?;
     let proof_kind: Option<String> = row
         .try_get("proof_kind")
@@ -3052,8 +3086,13 @@ fn row_to_file_location(row: &sqlx::sqlite::SqliteRow) -> Result<FileLocation, V
     let epoch: i64 = row
         .try_get("epoch")
         .map_err(|e| map_row_err("file_locations", e))?;
-    // Validate kind round-trips.
-    let _ = FileLocationKind::parse(&kind)?;
+    let address = decode_location_address(
+        &address_state,
+        storage_root_id,
+        provider_relative_locator,
+        legacy_kind,
+        legacy_locator,
+    )?;
     Ok(FileLocation {
         id: FileLocationId(u64_from_i64(
             id,
@@ -3063,14 +3102,65 @@ fn row_to_file_location(row: &sqlx::sqlite::SqliteRow) -> Result<FileLocation, V
             file_version_id,
             concat!(module_path!(), ": ", stringify!(file_version_id)),
         )?),
-        kind: FileLocationKind::parse(&kind)?,
-        value,
+        address,
         proof_kind,
         proof_value,
         observed_at: parse_iso8601(&observed_at)?,
         retired_at: retired_at.map(|s| parse_iso8601(&s)).transpose()?,
         epoch: u64_from_i64(epoch, concat!(module_path!(), ": ", stringify!(epoch)))?,
     })
+}
+
+fn decode_location_address(
+    address_state: &str,
+    storage_root_id: Option<i64>,
+    provider_relative_locator: Option<String>,
+    legacy_kind: Option<String>,
+    legacy_locator: Option<String>,
+) -> Result<FileLocationAddress, VoomError> {
+    match address_state {
+        "rooted" => {
+            let root_id = storage_root_id.ok_or_else(|| {
+                VoomError::database("rooted file location has no storage root".to_owned())
+            })?;
+            let locator = provider_relative_locator.ok_or_else(|| {
+                VoomError::database("rooted file location has no relative locator".to_owned())
+            })?;
+            if legacy_kind.is_some() || legacy_locator.is_some() {
+                return Err(VoomError::database(
+                    "rooted file location contains legacy address fields".to_owned(),
+                ));
+            }
+            Ok(FileLocationAddress::Rooted {
+                storage_root_id: StorageRootId(u64_from_i64(
+                    root_id,
+                    "file_locations.storage_root_id",
+                )?),
+                provider_relative_locator: ProviderRelativeLocator::parse_database(
+                    "file_locations.provider_relative_locator",
+                    &locator,
+                )?,
+            })
+        }
+        "unassigned_legacy" => {
+            if storage_root_id.is_some() || provider_relative_locator.is_some() {
+                return Err(VoomError::database(
+                    "legacy file location contains rooted address fields".to_owned(),
+                ));
+            }
+            Ok(FileLocationAddress::UnassignedLegacy {
+                legacy_kind: legacy_kind.ok_or_else(|| {
+                    VoomError::database("legacy file location has no kind".to_owned())
+                })?,
+                legacy_locator: legacy_locator.ok_or_else(|| {
+                    VoomError::database("legacy file location has no locator".to_owned())
+                })?,
+            })
+        }
+        other => Err(VoomError::database(format!(
+            "file_locations.address_state {other:?} not in vocab"
+        ))),
+    }
 }
 
 const SELECT_IDENTITY_EVIDENCE_COLS: &str = "SELECT id, target_type, target_id, assertion_type, candidate_id, candidate_value, \

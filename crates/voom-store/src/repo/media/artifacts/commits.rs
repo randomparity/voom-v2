@@ -165,10 +165,33 @@ async fn validate_committed_result(
     result_file_version_id: FileVersionId,
     result_file_location_id: FileLocationId,
 ) -> Result<(), VoomError> {
+    let target = pending_commit_target(tx, commit_id).await?;
+    validate_result_version(tx, result_file_version_id, target.source_version_id).await?;
+    validate_result_location(tx, result_file_location_id, result_file_version_id, &target).await
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PersistedRootedTarget {
+    storage_root_id: u64,
+    provider_relative_locator: String,
+}
+
+struct PendingCommitTarget {
+    source_version_id: u64,
+    target_path: String,
+    storage_root_id: super::StorageRootId,
+    provider_relative_locator: super::ProviderRelativeLocator,
+}
+
+async fn pending_commit_target(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    commit_id: ArtifactCommitRecordId,
+) -> Result<PendingCommitTarget, VoomError> {
     // Accept `recovery_required` as well as `pending`: the recovery entrypoint
     // finalizes a re-driven commit on the existing (recovery_required) record.
-    let pending_row: Option<(i64, String)> = sqlx::query_as(
-        "SELECT source_file_version_id, target_path FROM artifact_commit_records \
+    let pending_row: Option<(i64, String, String)> = sqlx::query_as(
+        "SELECT source_file_version_id, target_path, report FROM artifact_commit_records \
          WHERE id = ? AND state IN ('pending', 'recovery_required')",
     )
     .bind(i64_from_u64(
@@ -178,12 +201,52 @@ async fn validate_committed_result(
     .fetch_optional(&mut **tx)
     .await
     .map_err(|e| VoomError::database_context("artifact_commit_records pending lookup", e))?;
-    let (source_version_id, target_path) = pending_row.ok_or_else(|| {
+    let (source_version_id, target_path, report) = pending_row.ok_or_else(|| {
         VoomError::Conflict(format!(
             "artifact_commit_records commit: id={commit_id} not pending or recovery_required"
         ))
     })?;
+    let report: JsonValue = serde_json::from_str(&report).map_err(|error| {
+        VoomError::database_context("artifact_commit_records.report decode", error)
+    })?;
+    let rooted = report.get("rooted_target").ok_or_else(|| {
+        VoomError::database(format!(
+            "artifact_commit_records {commit_id} report missing rooted_target"
+        ))
+    })?;
+    let rooted: PersistedRootedTarget =
+        serde_json::from_value(rooted.clone()).map_err(|error| {
+            VoomError::database_context(
+                format!("artifact_commit_records {commit_id} rooted_target decode"),
+                error,
+            )
+        })?;
+    if rooted.storage_root_id == 0 || rooted.storage_root_id > i64::MAX.unsigned_abs() {
+        return Err(VoomError::database(format!(
+            "artifact_commit_records {commit_id} rooted_target.storage_root_id {} is not a \
+             valid SQLite ID",
+            rooted.storage_root_id
+        )));
+    }
+    Ok(PendingCommitTarget {
+        source_version_id: u64_from_i64(
+            source_version_id,
+            "artifact_commit_records.source_file_version_id",
+        )?,
+        target_path,
+        storage_root_id: super::StorageRootId(rooted.storage_root_id),
+        provider_relative_locator: super::ProviderRelativeLocator::parse_database(
+            "artifact_commit_records.report.rooted_target.provider_relative_locator",
+            &rooted.provider_relative_locator,
+        )?,
+    })
+}
 
+async fn validate_result_version(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    result_file_version_id: FileVersionId,
+    source_version_id: u64,
+) -> Result<(), VoomError> {
     let version_row: Option<(String, Option<i64>, Option<String>)> = sqlx::query_as(
         "SELECT produced_by, produced_from_version_id, retired_at FROM file_versions WHERE id = ?",
     )
@@ -199,10 +262,6 @@ async fn validate_committed_result(
             "file_versions {result_file_version_id} missing"
         )));
     };
-    let source_version_id = u64_from_i64(
-        source_version_id,
-        "artifact_commit_records.source_file_version_id",
-    )?;
     let produced_from_version_id = produced_from_version_id
         .map(|value| u64_from_i64(value, "file_versions.produced_from_version_id"))
         .transpose()?;
@@ -216,9 +275,22 @@ async fn validate_committed_result(
             FileVersionId(source_version_id)
         )));
     }
+    Ok(())
+}
 
-    let location_row: Option<(i64, String, String, Option<String>)> = sqlx::query_as(
-        "SELECT file_version_id, kind, value, retired_at FROM file_locations WHERE id = ?",
+type CommitResultLocationRow = (i64, String, Option<i64>, Option<String>, Option<String>);
+
+async fn validate_result_location(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    result_file_location_id: FileLocationId,
+    result_file_version_id: FileVersionId,
+    target: &PendingCommitTarget,
+) -> Result<(), VoomError> {
+    let location_row: Option<CommitResultLocationRow> = sqlx::query_as(
+        "SELECT file_version_id, address_state, storage_root_id, \
+                    provider_relative_locator, retired_at \
+             FROM file_locations fl \
+             WHERE fl.id = ?",
     )
     .bind(i64_from_u64(
         result_file_location_id.0,
@@ -227,21 +299,36 @@ async fn validate_committed_result(
     .fetch_optional(&mut **tx)
     .await
     .map_err(|e| VoomError::database_context("file_locations commit-result lookup", e))?;
-    let (location_version_id, location_kind, location_value, retired_at) = location_row
-        .ok_or_else(|| {
+    let (location_version_id, address_state, storage_root_id, relative_locator, retired_at) =
+        location_row.ok_or_else(|| {
             VoomError::NotFound(format!("file_locations {result_file_location_id} missing"))
         })?;
+    let rooted_address_is_valid = match (storage_root_id, relative_locator) {
+        (Some(storage_root_id), Some(relative_locator)) => {
+            super::StorageRootId(u64_from_i64(
+                storage_root_id,
+                "file_locations.storage_root_id",
+            )?) == target.storage_root_id
+                && super::ProviderRelativeLocator::parse_database(
+                    "file_locations.provider_relative_locator",
+                    &relative_locator,
+                )? == target.provider_relative_locator
+        }
+        _ => false,
+    };
     if u64_from_i64(
         location_version_id,
         concat!(module_path!(), ": ", stringify!(location_version_id)),
     )? != result_file_version_id.0
-        || location_kind != "local_path"
-        || location_value != target_path
+        || address_state != "rooted"
+        || !rooted_address_is_valid
         || retired_at.is_some()
     {
         return Err(VoomError::Conflict(format!(
             "artifact_commit_records commit: result location {result_file_location_id} \
-             does not match committed target {target_path:?} for file_version {result_file_version_id}"
+             is not a live rooted location for committed target {:?} on \
+             file_version {result_file_version_id}",
+            target.target_path
         )));
     }
     Ok(())
@@ -600,14 +687,19 @@ impl SqliteArtifactRepo {
 
         let location_res = sqlx::query(
             "INSERT INTO file_locations \
-             (file_version_id, kind, value, proof_kind, proof_value, observed_at) \
-             VALUES (?, 'local_path', ?, NULL, NULL, ?)",
+             (file_version_id, address_state, storage_root_id, provider_relative_locator, \
+              proof_kind, proof_value, observed_at) \
+             VALUES (?, 'rooted', ?, ?, NULL, NULL, ?)",
         )
         .bind(i64_from_u64(
             file_version_id.0,
             "file_locations.file_version_id",
         )?)
-        .bind(&input.target_path)
+        .bind(i64_from_u64(
+            input.storage_root_id.0,
+            "file_locations.storage_root_id",
+        )?)
+        .bind(input.provider_relative_locator.as_str())
         .bind(&created_at)
         .execute(&mut **tx)
         .await

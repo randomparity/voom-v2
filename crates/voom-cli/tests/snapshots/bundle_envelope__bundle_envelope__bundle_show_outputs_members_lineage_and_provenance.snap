@@ -37,7 +37,11 @@ expression: json
         "size_bytes": 1000,
         "produced_by": "ingest",
         "produced_from_version_id": null,
-        "location": "/library/Solaris.mkv"
+        "location": {
+          "file_location_id": 1,
+          "storage_root_id": 9000001,
+          "provider_relative_locator": "library/Solaris.mkv"
+        }
       },
       {
         "file_asset_id": 2,
@@ -47,7 +51,11 @@ expression: json
         "size_bytes": 20,
         "produced_by": "ingest",
         "produced_from_version_id": null,
-        "location": "/library/Solaris.srt"
+        "location": {
+          "file_location_id": 2,
+          "storage_root_id": 9000001,
+          "provider_relative_locator": "library/Solaris.srt"
+        }
       },
       {
         "file_asset_id": 3,
@@ -57,7 +65,11 @@ expression: json
         "size_bytes": 300,
         "produced_by": "transcode",
         "produced_from_version_id": 3,
-        "location": "/library/Solaris.eac3"
+        "location": {
+          "file_location_id": 3,
+          "storage_root_id": 9000001,
+          "provider_relative_locator": "library/Solaris.eac3"
+        }
       }
     ]
   },

@@ -113,6 +113,7 @@ async fn list_is_creation_ordered() {
         .unwrap()
         .into_iter()
         .map(|l| l.id)
+        .filter(|id| *id == a.id || *id == b.id)
         .collect();
     assert_eq!(ids, vec![a.id, b.id]);
 }

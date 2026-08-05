@@ -12,14 +12,13 @@ use voom_store::repo::media::artifacts::{
     ArtifactHandleAccessMode, ArtifactLocationKind, NewArtifactHandle, NewArtifactLocation,
 };
 use voom_store::repo::media::identity::{
-    FileLocation, FileLocationKind, FileLocationRepo, FileVersion, FileVersionRepo,
+    FileLocation, FileLocationAddress, FileLocationRepo, FileVersion, FileVersionRepo,
 };
 
 use crate::ControlPlane;
 use crate::artifact::fs::{
     ArtifactFileFacts, PromotionFailpoint, PromotionFailpointContext,
-    canonical_existing_file_no_symlink, canonical_new_leaf_no_symlink, observe_regular_file,
-    promote_staged_add_only,
+    canonical_new_leaf_no_symlink, observe_regular_file, promote_staged_add_only,
 };
 use crate::cases::{append_event, begin_tx, commit_tx};
 
@@ -145,7 +144,12 @@ pub(crate) async fn stage_copy_with_hooks(
     let source_version = require_source_version(cp, input.file_version_id).await?;
     let source_location =
         select_source_location(cp, input.file_version_id, input.source_location_id).await?;
-    let source_path = canonical_existing_file_no_symlink(&source_location.value).await?;
+    let source_path = crate::operation_source::resolve_rooted_existing_path(
+        cp,
+        "artifact stage",
+        &source_location,
+    )
+    .await?;
     let staging_path = canonical_new_leaf_no_symlink(&input.staging_path).await?;
     let source_facts = observe_regular_file(&source_path).await?;
     require_matching_version_facts(&source_version, &source_facts)?;
@@ -216,11 +220,11 @@ async fn select_source_location(
         .list_live_file_locations_by_version(file_version_id)
         .await?
         .into_iter()
-        .filter(|location| location.kind == FileLocationKind::LocalPath)
+        .filter(|location| matches!(location.address, FileLocationAddress::Rooted { .. }))
         .collect::<Vec<_>>();
     let [location] = local_locations.as_slice() else {
         return Err(VoomError::Config(format!(
-            "file_version {file_version_id} must have exactly one live local_path source \
+            "file_version {file_version_id} must have exactly one live rooted source \
              location; found {}",
             local_locations.len()
         )));
@@ -244,9 +248,9 @@ fn require_live_local_source_location(
             location.id
         )));
     }
-    if location.kind != FileLocationKind::LocalPath {
+    if !matches!(location.address, FileLocationAddress::Rooted { .. }) {
         return Err(VoomError::Config(format!(
-            "file_location {} must be kind local_path",
+            "file_location {} must have a rooted address",
             location.id
         )));
     }
@@ -318,7 +322,7 @@ async fn record_staged_artifact(
                 mutability: "immutable".to_owned(),
                 source_lineage: Some(json!({
                     "source_file_version_id": source_version.id.0,
-                    "source_location_id": source_location.id.0,
+                    "source_file_location_id": source_location.id.0,
                     "source_path": source_path.display().to_string(),
                 })),
                 file_version_id: Some(source_version.id),

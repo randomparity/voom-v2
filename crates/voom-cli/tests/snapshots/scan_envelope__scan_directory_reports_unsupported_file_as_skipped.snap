@@ -7,30 +7,24 @@ expression: json
   "command": "scan",
   "status": "ok",
   "data": {
-    "path": "[media]",
+    "path": "[scan-dir]",
     "mode": "directory",
     "summary": {
       "discovered": 1,
-      "ingested": 1,
-      "probed": 1,
-      "snapshots_recorded": 1,
+      "ingested": 0,
+      "probed": 0,
+      "snapshots_recorded": 0,
       "hardlinked": 0,
-      "skipped": 0,
+      "skipped": 1,
       "failed": 0
     },
-    "files": [
+    "files": [],
+    "skipped": [
       {
-        "path": "[media]/tiny.mp4",
-        "status": "scanned",
-        "file_asset_id": 1,
-        "file_version_id": 1,
-        "file_location_id": 1,
-        "content_hash": "[content-hash]",
-        "size_bytes": 1545,
-        "probe_worker_id": 1
+        "path": "[scan-dir]/note.txt",
+        "status": "skipped_unsupported_extension"
       }
-    ],
-    "skipped": []
+    ]
   },
   "local": {
     "db_url": "[db-url]",

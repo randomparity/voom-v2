@@ -2,7 +2,7 @@ use super::*;
 
 use std::path::PathBuf;
 
-use voom_store::repo::media::identity::{FileLocation, FileLocationKind, FileVersion, ProducedBy};
+use voom_store::repo::media::identity::{FileLocation, FileVersion, ProducedBy};
 use voom_worker_protocol::{
     RemuxObservedFacts, RemuxResult, RemuxSelection, RemuxStatus, RemuxStreamRef, RemuxTrackGroup,
 };
@@ -78,8 +78,12 @@ fn selected_source() -> crate::remux::source::SelectedSource {
         location: FileLocation {
             id: voom_core::FileLocationId(1),
             file_version_id: voom_core::FileVersionId(1),
-            kind: FileLocationKind::LocalPath,
-            value: "/library/source.mkv".to_owned(),
+            address: voom_store::repo::media::identity::FileLocationAddress::Rooted {
+                storage_root_id: voom_store::test_support::TEST_STORAGE_ROOT_ID,
+                provider_relative_locator: voom_store::test_support::test_relative_locator(
+                    "/library/source.mkv",
+                ),
+            },
             proof_kind: None,
             proof_value: None,
             observed_at: time::OffsetDateTime::UNIX_EPOCH,

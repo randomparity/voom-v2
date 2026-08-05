@@ -38,8 +38,8 @@ use voom_store::repo::media::commit_safety_gate::{
     finalize_destructive_commit, prepare_destructive_commit,
 };
 use voom_store::repo::media::identity::{
-    CommitGateIdentityRepo, FileAssetRepo, FileLocationKind, FileLocationRepo, FileVersionRepo,
-    NewFileLocation, NewFileVersion, ProducedBy, SqliteIdentityRepo,
+    CommitGateIdentityRepo, FileAssetRepo, FileLocationRepo, FileVersionRepo, NewFileLocation,
+    NewFileVersion, ProducedBy, SqliteIdentityRepo,
 };
 use voom_store::test_support::{FailingAliasResolver, T0, fresh_initialized_pool_at};
 use voom_test_support::TempDatabase;
@@ -89,8 +89,8 @@ async fn seed_chain(pool: &SqlitePool, value: &str) -> Seeded {
             &mut tx,
             NewFileLocation {
                 file_version_id: version.id,
-                kind: FileLocationKind::LocalPath,
-                value: value.to_owned(),
+                storage_root_id: voom_store::test_support::TEST_STORAGE_ROOT_ID,
+                provider_relative_locator: voom_store::test_support::test_relative_locator(value),
                 proof: None,
                 observed_at: T0,
             },
@@ -191,8 +191,10 @@ async fn phase_c_closure_grew_lands_recovery_required_with_unified_payload() {
             &mut tx,
             NewFileLocation {
                 file_version_id: seeded.version_id,
-                kind: FileLocationKind::LocalPath,
-                value: "/srv/x-added".to_owned(),
+                storage_root_id: voom_store::test_support::TEST_STORAGE_ROOT_ID,
+                provider_relative_locator: voom_store::test_support::test_relative_locator(
+                    "/srv/x-added",
+                ),
                 proof: None,
                 observed_at: T0 + Duration::seconds(2),
             },
@@ -319,8 +321,10 @@ async fn phase_c_closure_grew_and_fresh_lease_lands_recovery_required_with_combi
             &mut tx,
             NewFileLocation {
                 file_version_id: seeded.version_id,
-                kind: FileLocationKind::LocalPath,
-                value: "/srv/x-added".to_owned(),
+                storage_root_id: voom_store::test_support::TEST_STORAGE_ROOT_ID,
+                provider_relative_locator: voom_store::test_support::test_relative_locator(
+                    "/srv/x-added",
+                ),
                 proof: None,
                 observed_at: T0 + Duration::seconds(2),
             },

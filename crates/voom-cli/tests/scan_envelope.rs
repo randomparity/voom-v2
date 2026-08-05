@@ -21,9 +21,10 @@ const BASIC_FFPROBE_JSON: &str =
 #[tokio::test]
 async fn scan_file_success_outputs_envelope_and_persists_snapshot() {
     let seeded = seed().await;
-    let media = tiny_media_fixture();
+    let media = seeded.root.path().join("tiny.mp4");
+    std::fs::copy(tiny_media_fixture(), &media).unwrap();
 
-    let output = scan_command(&seeded.url, &media).output().unwrap();
+    let output = scan_command(&seeded).output().unwrap();
 
     assert_status(&output, Some(0));
     let mut json = envelope(output.stdout);
@@ -37,6 +38,7 @@ async fn scan_file_success_outputs_envelope_and_persists_snapshot() {
             .contains("VOOM_FFPROBE_BIN is set; scan ffprobe binary: ")
     );
     redact_common(&mut json);
+    redact_path_set(&mut json, &[(seeded.root.path(), "[media]")]);
     redact_path_set(&mut json, &[(media.as_path(), "[media]/tiny.mp4")]);
     redact_content_hashes(&mut json);
     insta::assert_json_snapshot!(
@@ -57,11 +59,10 @@ async fn scan_file_success_outputs_envelope_and_persists_snapshot() {
 #[tokio::test]
 async fn scan_file_success_finds_worker_beside_cli_without_worker_env() {
     let seeded = seed().await;
-    let media = tiny_media_fixture();
+    let media = seeded.root.path().join("tiny.mp4");
+    std::fs::copy(tiny_media_fixture(), &media).unwrap();
 
-    let output = scan_command_without_worker_env(&seeded.url, &media)
-        .output()
-        .unwrap();
+    let output = scan_command_without_worker_env(&seeded).output().unwrap();
 
     assert_status(&output, Some(0));
     let json = envelope(output.stdout);
@@ -76,13 +77,13 @@ async fn scan_file_success_finds_worker_beside_cli_without_worker_env() {
 #[tokio::test]
 async fn scan_directory_reports_unsupported_entries_as_skipped() {
     let seeded = seed().await;
-    let dir = TempDir::new().unwrap();
-    let media = dir.path().join("tiny.mp4");
+    let dir = seeded.root.path();
+    let media = dir.join("tiny.mp4");
     std::fs::copy(tiny_media_fixture(), &media).unwrap();
-    let note = dir.path().join("note.txt");
+    let note = dir.join("note.txt");
     std::fs::write(&note, b"not media").unwrap();
 
-    let output = scan_command(&seeded.url, dir.path()).output().unwrap();
+    let output = scan_command(&seeded).output().unwrap();
 
     assert_status(&output, Some(0));
     let mut json = envelope(output.stdout);
@@ -93,7 +94,7 @@ async fn scan_directory_reports_unsupported_entries_as_skipped() {
     redact_path_set(
         &mut json,
         &[
-            (dir.path(), "[scan-dir]"),
+            (dir, "[scan-dir]"),
             (media.as_path(), "[scan-dir]/tiny.mp4"),
             (note.as_path(), "[scan-dir]/note.txt"),
         ],
@@ -111,13 +112,13 @@ async fn scan_directory_reports_unsupported_entries_as_skipped() {
 #[tokio::test]
 async fn scan_directory_outputs_durable_sidecar_links() {
     let seeded = seed().await;
-    let dir = TempDir::new().unwrap();
-    let media = dir.path().join("Movie.Name.mp4");
+    let dir = seeded.root.path();
+    let media = dir.join("Movie.Name.mp4");
     std::fs::copy(tiny_media_fixture(), &media).unwrap();
-    let sidecar = dir.path().join("Movie.Name.eng.srt");
+    let sidecar = dir.join("Movie.Name.eng.srt");
     std::fs::write(&sidecar, b"1\n00:00:00,000 --> 00:00:01,000\nHello\n").unwrap();
 
-    let output = scan_command(&seeded.url, dir.path()).output().unwrap();
+    let output = scan_command(&seeded).output().unwrap();
 
     assert_status(&output, Some(0));
     let json = envelope(output.stdout);
@@ -158,22 +159,22 @@ async fn scan_directory_outputs_durable_sidecar_links() {
 }
 
 #[tokio::test]
-async fn scan_unsupported_explicit_file_is_bad_args() {
+async fn scan_directory_reports_unsupported_file_as_skipped() {
     let seeded = seed().await;
-    let dir = TempDir::new().unwrap();
-    let note = dir.path().join("note.txt");
+    let note = seeded.root.path().join("note.txt");
     std::fs::write(&note, b"not media").unwrap();
 
-    let output = scan_command(&seeded.url, &note).output().unwrap();
+    let output = scan_command(&seeded).output().unwrap();
 
-    assert_status(&output, Some(1));
+    assert_status(&output, Some(0));
     let mut json = envelope(output.stdout);
     assert_eq!(json["command"], "scan");
-    assert_eq!(json["status"], "error");
-    assert_eq!(json["error"]["code"], "BAD_ARGS");
+    assert_eq!(json["status"], "ok");
+    assert_eq!(json["data"]["summary"]["skipped"], 1);
     redact_common(&mut json);
+    redact_path_set(&mut json, &[(seeded.root.path(), "[scan-dir]")]);
     redact_path_set(&mut json, &[(note.as_path(), "[scan-dir]/note.txt")]);
-    insta::assert_json_snapshot!("scan_unsupported_explicit_file_is_bad_args", json);
+    insta::assert_json_snapshot!("scan_directory_reports_unsupported_file_as_skipped", json);
 
     let pool = voom_store::connect(&seeded.url).await.unwrap();
     assert_table_count(&pool, "workers", 0).await;
@@ -183,17 +184,19 @@ async fn scan_unsupported_explicit_file_is_bad_args() {
 #[tokio::test]
 async fn scan_reuses_builtin_ffprobe_worker_row() {
     let seeded = seed().await;
-    let media = tiny_media_fixture();
+    let media = seeded.root.path().join("tiny.mp4");
+    std::fs::copy(tiny_media_fixture(), &media).unwrap();
 
-    let first = scan_command(&seeded.url, &media).output().unwrap();
+    let first = scan_command(&seeded).output().unwrap();
     assert_status(&first, Some(0));
-    let second = scan_command(&seeded.url, &media).output().unwrap();
+    let second = scan_command(&seeded).output().unwrap();
 
     assert_status(&second, Some(0));
     let mut json = envelope(second.stdout);
     assert_eq!(json["command"], "scan");
     assert_eq!(json["status"], "ok");
     redact_common(&mut json);
+    redact_path_set(&mut json, &[(seeded.root.path(), "[media]")]);
     redact_path_set(&mut json, &[(media.as_path(), "[media]/tiny.mp4")]);
     redact_content_hashes(&mut json);
     insta::assert_json_snapshot!("scan_reuses_builtin_ffprobe_worker_row", json);
@@ -213,18 +216,19 @@ async fn scan_reuses_builtin_ffprobe_worker_row() {
             .await
             .unwrap();
     assert_eq!(probed_by, vec![1]);
-    assert_table_count(&pool, "media_snapshots", 2).await;
+    assert_table_count(&pool, "media_snapshots", 1).await;
 }
 
 #[tokio::test]
 async fn scan_content_drift_fails_without_snapshot() {
     let seeded = seed().await;
-    let dir = TempDir::new().unwrap();
-    let media = dir.path().join("drift.mp4");
+    let dir = seeded.root.path();
+    let media = dir.join("drift.mp4");
     std::fs::write(&media, b"media before probe").unwrap();
-    let fake_ffprobe = write_drifting_ffprobe(dir.path());
+    let tool_dir = TempDir::new().unwrap();
+    let fake_ffprobe = write_drifting_ffprobe(tool_dir.path());
 
-    let output = scan_command(&seeded.url, &media)
+    let output = scan_command(&seeded)
         .env("VOOM_FFPROBE_BIN", &fake_ffprobe)
         .output()
         .unwrap();
@@ -242,8 +246,9 @@ async fn scan_content_drift_fails_without_snapshot() {
     redact_path_set(
         &mut json,
         &[
+            (seeded.root.path(), "[scan-dir]"),
             (media.as_path(), "[scan-dir]/drift.mp4"),
-            (fake_ffprobe.as_path(), "[scan-dir]/ffprobe"),
+            (fake_ffprobe.as_path(), "[tool-dir]/ffprobe"),
         ],
     );
     redact_content_hashes(&mut json);
@@ -256,8 +261,9 @@ async fn scan_content_drift_fails_without_snapshot() {
 #[tokio::test]
 async fn policy_input_create_from_scan_outputs_ids_for_scanned_file() {
     let seeded = seed().await;
-    let media = tiny_media_fixture();
-    let scan = scan_command(&seeded.url, &media).output().unwrap();
+    let media = seeded.root.path().join("tiny.mp4");
+    std::fs::copy(tiny_media_fixture(), &media).unwrap();
+    let scan = scan_command(&seeded).output().unwrap();
     assert_status(&scan, Some(0));
     let scan_json = envelope(scan.stdout);
     let file = &scan_json["data"]["files"][0];
@@ -295,8 +301,9 @@ async fn policy_input_create_from_scan_outputs_ids_for_scanned_file() {
 #[tokio::test]
 async fn policy_input_create_from_scan_can_feed_plan_show() {
     let seeded = seed().await;
-    let media = tiny_media_fixture();
-    let scan = scan_command(&seeded.url, &media).output().unwrap();
+    let media = seeded.root.path().join("tiny.mp4");
+    std::fs::copy(tiny_media_fixture(), &media).unwrap();
+    let scan = scan_command(&seeded).output().unwrap();
     assert_status(&scan, Some(0));
     let scan_json = envelope(scan.stdout);
     let file = &scan_json["data"]["files"][0];
@@ -356,12 +363,12 @@ async fn policy_input_create_from_scan_can_feed_plan_show() {
 #[tokio::test]
 async fn policy_input_create_from_scan_all_builds_whole_library() {
     let seeded = seed().await;
-    let dir = TempDir::new().unwrap();
-    let media = dir.path().join("Movie.Name.mp4");
+    let dir = seeded.root.path();
+    let media = dir.join("Movie.Name.mp4");
     std::fs::copy(tiny_media_fixture(), &media).unwrap();
-    let sidecar = dir.path().join("Movie.Name.eng.srt");
+    let sidecar = dir.join("Movie.Name.eng.srt");
     std::fs::write(&sidecar, b"1\n00:00:00,000 --> 00:00:01,000\nHello\n").unwrap();
-    let scan = scan_command(&seeded.url, dir.path()).output().unwrap();
+    let scan = scan_command(&seeded).output().unwrap();
     assert_status(&scan, Some(0));
 
     let output = policy_input_whole_scan_command(&seeded.url, "whole")
@@ -458,32 +465,67 @@ async fn policy_input_create_from_scan_missing_rows_is_not_found() {
 
 struct Seeded {
     _tmp: TempDatabase,
+    root: TempDir,
     url: String,
 }
 
 async fn seed() -> Seeded {
     let tmp = TempDatabase::new().unwrap();
+    let root = TempDir::new().unwrap();
     let url = sqlite_url_for(tmp.path());
     voom_store::init(&url).await.unwrap();
-    Seeded { _tmp: tmp, url }
+    let pool = voom_store::connect(&url).await.unwrap();
+    voom_store::test_support::seed_test_storage_root(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE library_roots SET provider_locator = ?, display_locator = ? WHERE id = ?")
+        .bind(root.path().display().to_string())
+        .bind(root.path().display().to_string())
+        .bind(i64::try_from(voom_store::test_support::TEST_STORAGE_ROOT_ID.0).unwrap())
+        .execute(&pool)
+        .await
+        .unwrap();
+    Seeded {
+        _tmp: tmp,
+        root,
+        url,
+    }
 }
 
-fn scan_command(url: &str, path: &Path) -> Command {
+fn scan_command(seeded: &Seeded) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_voom"));
     command
-        .args(["--database-url", url, "scan", "--path"])
-        .arg(path)
+        .args([
+            "--database-url",
+            &seeded.url,
+            "scan",
+            "--root",
+            &voom_store::test_support::TEST_STORAGE_ROOT_ID.0.to_string(),
+        ])
+        .env(
+            "VOOM_LOCAL_NODE_ID",
+            voom_store::test_support::TEST_STORAGE_ROOT_ID.0.to_string(),
+        )
         .env("VOOM_FFPROBE_WORKER_BIN", built_worker_binary())
         .env("VOOM_FFPROBE_BIN", success_ffprobe_binary());
     command
 }
 
-fn scan_command_without_worker_env(url: &str, path: &Path) -> Command {
+fn scan_command_without_worker_env(seeded: &Seeded) -> Command {
     let _worker_binary = built_worker_binary();
     let mut command = Command::new(env!("CARGO_BIN_EXE_voom"));
     command
-        .args(["--database-url", url, "scan", "--path"])
-        .arg(path)
+        .args([
+            "--database-url",
+            &seeded.url,
+            "scan",
+            "--root",
+            &voom_store::test_support::TEST_STORAGE_ROOT_ID.0.to_string(),
+        ])
+        .env(
+            "VOOM_LOCAL_NODE_ID",
+            voom_store::test_support::TEST_STORAGE_ROOT_ID.0.to_string(),
+        )
         .env_remove("VOOM_FFPROBE_WORKER_BIN")
         .env("VOOM_FFPROBE_BIN", success_ffprobe_binary())
         .env("PATH", "/usr/bin:/bin");

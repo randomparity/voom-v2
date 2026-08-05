@@ -9,8 +9,16 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::OnceLock;
 
+use secrecy::ExposeSecret as _;
 use serde_json::Value;
 use tempfile::TempDir;
+use voom_control_plane::ControlPlane;
+use voom_control_plane::workers::RegisterNodeInput;
+use voom_core::{NodeKind, ProviderLocator, StorageProviderKind};
+use voom_store::repo::library::libraries::{LibraryMediaKind, NewLibrary};
+use voom_store::repo::library::library_roots::{
+    HiddenFilePolicy, LibraryScanMode, NewLibraryRoot, SymlinkPolicy,
+};
 use voom_store::test_support::sqlite_url_for;
 use voom_test_support::TempDatabase;
 use voom_test_support::worker::cargo_bin_or_build;
@@ -21,18 +29,18 @@ const BASIC_FFPROBE_JSON: &str =
 #[tokio::test]
 async fn artifact_full_flow_outputs_committed_envelopes() {
     let seeded = seed().await;
-    let dir = artifact_tempdir();
-    let media = tiny_media_fixture();
+    let dir = artifact_tempdir(&seeded);
+    let media = seeded.media.clone();
     let staging = dir.path().join("staged.mp4");
     let target = dir.path().join("committed.mp4");
 
-    let scan = run(&mut scan_command(&seeded.url, &media), Some(0));
+    let scan = run(&mut scan_command(&seeded), Some(0));
     let scanned = scan["data"]["files"][0].clone();
     let file_version_id = id(&scanned["file_version_id"]);
     let file_location_id = id(&scanned["file_location_id"]);
 
     let stage = run(
-        artifact_command(&seeded.url)
+        artifact_command(&seeded)
             .args([
                 "artifact",
                 "stage-copy",
@@ -47,7 +55,7 @@ async fn artifact_full_flow_outputs_committed_envelopes() {
     );
     let artifact_handle_id = id(&stage["data"]["artifact"]["artifact_handle_id"]);
     let verify = run(
-        artifact_command(&seeded.url)
+        artifact_command(&seeded)
             .args([
                 "artifact",
                 "verify",
@@ -59,7 +67,7 @@ async fn artifact_full_flow_outputs_committed_envelopes() {
         Some(0),
     );
     let commit = run(
-        artifact_command(&seeded.url)
+        artifact_command(&seeded)
             .args([
                 "artifact",
                 "commit",
@@ -71,7 +79,7 @@ async fn artifact_full_flow_outputs_committed_envelopes() {
         Some(0),
     );
     let show = run(
-        artifact_command(&seeded.url).args([
+        artifact_command(&seeded).args([
             "artifact",
             "show",
             "--artifact-handle-id",
@@ -93,18 +101,19 @@ async fn artifact_full_flow_outputs_committed_envelopes() {
             (target.as_path(), "[artifact-dir]/committed.mp4"),
         ],
     );
+    redact_path_set(&mut json, &[(seeded.root.path(), "[media]")]);
     insta::assert_json_snapshot!("artifact_full_flow_outputs_committed_envelopes", json);
 }
 
 #[tokio::test]
 async fn artifact_list_and_show_cover_all_inspection_states() {
     let seeded = seed().await;
-    let dir = artifact_tempdir();
-    let staged = create_staged_artifact(&seeded.url, dir.path(), "staged");
-    let verified = create_verified_artifact(&seeded.url, dir.path(), "verified");
-    let committed = create_committed_artifact(&seeded.url, dir.path(), "committed");
-    let failed = create_failed_artifact(&seeded.url, dir.path(), "failed");
-    let recovery = create_verified_artifact(&seeded.url, dir.path(), "recovery");
+    let dir = artifact_tempdir(&seeded);
+    let staged = create_staged_artifact(&seeded, dir.path(), "staged");
+    let verified = create_verified_artifact(&seeded, dir.path(), "verified");
+    let committed = create_committed_artifact(&seeded, dir.path(), "committed");
+    let failed = create_failed_artifact(&seeded, dir.path(), "failed");
+    let recovery = create_verified_artifact(&seeded, dir.path(), "recovery");
     inject_recovery_required(
         &seeded.url,
         recovery.artifact_handle_id,
@@ -122,7 +131,7 @@ async fn artifact_list_and_show_cover_all_inspection_states() {
         "recovery_required",
     ] {
         let list = run(
-            artifact_command(&seeded.url).args(["artifact", "list", "--state", state]),
+            artifact_command(&seeded).args(["artifact", "list", "--state", state]),
             Some(0),
         );
         assert_eq!(list["data"]["artifacts"].as_array().unwrap().len(), 1);
@@ -131,7 +140,7 @@ async fn artifact_list_and_show_cover_all_inspection_states() {
     }
     for artifact in [&staged, &verified, &committed, &failed, &recovery] {
         envelopes.push(run(
-            artifact_command(&seeded.url).args([
+            artifact_command(&seeded).args([
                 "artifact",
                 "show",
                 "--artifact-handle-id",
@@ -170,29 +179,30 @@ async fn artifact_list_and_show_cover_all_inspection_states() {
             ],
         ),
     );
+    redact_path_set(&mut json, &[(seeded.root.path(), "[media]")]);
     insta::assert_json_snapshot!("artifact_list_and_show_cover_all_inspection_states", json);
 }
 
 #[tokio::test]
 async fn artifact_failure_envelopes_are_actionable() {
     let seeded = seed().await;
-    let dir = artifact_tempdir();
-    let unverified = create_staged_artifact(&seeded.url, dir.path(), "unverified");
-    let drift = create_verified_artifact(&seeded.url, dir.path(), "drift");
+    let dir = artifact_tempdir(&seeded);
+    let unverified = create_staged_artifact(&seeded, dir.path(), "unverified");
+    let drift = create_verified_artifact(&seeded, dir.path(), "drift");
     std::fs::write(&drift.staging_path, b"changed bytes").unwrap();
-    let existing_target = create_verified_artifact(&seeded.url, dir.path(), "existing");
+    let existing_target = create_verified_artifact(&seeded, dir.path(), "existing");
     let existing_target_path = dir.path().join("already-exists.mp4");
     std::fs::write(&existing_target_path, b"already here").unwrap();
-    let failed = create_failed_artifact(&seeded.url, dir.path(), "verify-failed");
-    let recovery_failure = create_verified_artifact(&seeded.url, dir.path(), "recovery-failure");
+    let failed = create_failed_artifact(&seeded, dir.path(), "verify-failed");
+    let recovery_failure = create_verified_artifact(&seeded, dir.path(), "recovery-failure");
     let recovery_target = dir.path().join(format!("{}.mp4", "x".repeat(240)));
 
     let missing = run(
-        artifact_command(&seeded.url).args(["artifact", "show", "--artifact-handle-id", "999999"]),
+        artifact_command(&seeded).args(["artifact", "show", "--artifact-handle-id", "999999"]),
         Some(2),
     );
     let failed_verification = run(
-        artifact_command(&seeded.url).args([
+        artifact_command(&seeded).args([
             "artifact",
             "show",
             "--artifact-handle-id",
@@ -201,7 +211,7 @@ async fn artifact_failure_envelopes_are_actionable() {
         Some(0),
     );
     let unverified_commit = run(
-        artifact_command(&seeded.url)
+        artifact_command(&seeded)
             .args([
                 "artifact",
                 "commit",
@@ -213,7 +223,7 @@ async fn artifact_failure_envelopes_are_actionable() {
         Some(2),
     );
     let drift_commit = run(
-        artifact_command(&seeded.url)
+        artifact_command(&seeded)
             .args([
                 "artifact",
                 "commit",
@@ -225,7 +235,7 @@ async fn artifact_failure_envelopes_are_actionable() {
         Some(2),
     );
     let target_exists = run(
-        artifact_command(&seeded.url)
+        artifact_command(&seeded)
             .args([
                 "artifact",
                 "commit",
@@ -237,7 +247,7 @@ async fn artifact_failure_envelopes_are_actionable() {
         Some(2),
     );
     let recovery_required = run(
-        artifact_command(&seeded.url)
+        artifact_command(&seeded)
             .args([
                 "artifact",
                 "commit",
@@ -292,6 +302,7 @@ async fn artifact_failure_envelopes_are_actionable() {
             ],
         ),
     );
+    redact_path_set(&mut json, &[(seeded.root.path(), "[media]")]);
     redact_path_set(
         &mut json,
         &[(
@@ -310,7 +321,11 @@ async fn artifact_failure_envelopes_are_actionable() {
 #[derive(Debug)]
 struct Seeded {
     _tmp: TempDatabase,
+    root: TempDir,
     url: String,
+    media: PathBuf,
+    node_id: u64,
+    root_id: u64,
 }
 
 #[derive(Debug)]
@@ -325,17 +340,76 @@ async fn seed() -> Seeded {
     let tmp = TempDatabase::new().unwrap();
     let url = sqlite_url_for(tmp.path());
     voom_store::init(&url).await.unwrap();
-    Seeded { _tmp: tmp, url }
+    let cp = ControlPlane::open(&url).await.unwrap();
+    let registered = cp
+        .register_node(RegisterNodeInput {
+            name: "artifact-envelope-local".to_owned(),
+            kind: NodeKind::Local,
+            heartbeat_ttl_seconds: 60,
+            metadata: serde_json::json!({}),
+        })
+        .await
+        .unwrap();
+    cp.heartbeat_node(registered.node.id, registered.token.expose_secret())
+        .await
+        .unwrap();
+    let library = cp
+        .create_library(NewLibrary {
+            slug: "artifact-envelope".to_owned(),
+            display_name: "Artifact envelope".to_owned(),
+            media_kind: LibraryMediaKind::Movie,
+            description: None,
+            enabled: true,
+        })
+        .await
+        .unwrap();
+    let root_dir = tempfile::tempdir().unwrap();
+    let media = root_dir.path().join("tiny.source");
+    std::fs::copy(tiny_media_fixture(), &media).unwrap();
+    let root_path = root_dir.path().to_str().unwrap().to_owned();
+    let storage_root = cp
+        .create_library_root(NewLibraryRoot {
+            library_id: library.id,
+            owner_node_id: registered.node.id,
+            provider_kind: StorageProviderKind::LocalFilesystem,
+            provider_locator: ProviderLocator::new(root_path.clone()).unwrap(),
+            display_locator: root_path,
+            include_globs: Vec::new(),
+            exclude_globs: Vec::new(),
+            extension_allowlist: vec!["source".to_owned()],
+            scan_mode: LibraryScanMode::ManualRecursive,
+            symlink_policy: SymlinkPolicy::Reject,
+            hidden_file_policy: HiddenFilePolicy::Ignore,
+            max_depth: None,
+            stability_seconds: 0,
+            debounce_seconds: 0,
+            default_output_root_id: None,
+            default_staging_root_id: None,
+            default_backup_root_id: None,
+            enabled: true,
+        })
+        .await
+        .unwrap();
+    cp.activate_library_root(storage_root.id, "artifact-envelope-fixture".to_owned())
+        .await
+        .unwrap();
+    Seeded {
+        _tmp: tmp,
+        root: root_dir,
+        url,
+        media,
+        node_id: registered.node.id.0,
+        root_id: storage_root.id.0,
+    }
 }
 
-fn create_staged_artifact(url: &str, dir: &Path, name: &str) -> ArtifactFixture {
-    let media = tiny_media_fixture();
-    let scan = run(&mut scan_command(url, &media), Some(0));
+fn create_staged_artifact(seeded: &Seeded, dir: &Path, name: &str) -> ArtifactFixture {
+    let scan = run(&mut scan_command(seeded), Some(0));
     let file_version_id = id(&scan["data"]["files"][0]["file_version_id"]);
     let file_location_id = id(&scan["data"]["files"][0]["file_location_id"]);
     let staging_path = dir.join(format!("{name}-staged.mp4"));
     let stage = run(
-        artifact_command(url)
+        artifact_command(seeded)
             .args([
                 "artifact",
                 "stage-copy",
@@ -357,10 +431,10 @@ fn create_staged_artifact(url: &str, dir: &Path, name: &str) -> ArtifactFixture 
     }
 }
 
-fn create_verified_artifact(url: &str, dir: &Path, name: &str) -> ArtifactFixture {
-    let mut artifact = create_staged_artifact(url, dir, name);
+fn create_verified_artifact(seeded: &Seeded, dir: &Path, name: &str) -> ArtifactFixture {
+    let mut artifact = create_staged_artifact(seeded, dir, name);
     let verify = run(
-        artifact_command(url)
+        artifact_command(seeded)
             .args([
                 "artifact",
                 "verify",
@@ -376,11 +450,11 @@ fn create_verified_artifact(url: &str, dir: &Path, name: &str) -> ArtifactFixtur
     artifact
 }
 
-fn create_committed_artifact(url: &str, dir: &Path, name: &str) -> ArtifactFixture {
-    let mut artifact = create_verified_artifact(url, dir, name);
+fn create_committed_artifact(seeded: &Seeded, dir: &Path, name: &str) -> ArtifactFixture {
+    let mut artifact = create_verified_artifact(seeded, dir, name);
     let target_path = dir.join(format!("{name}-committed.mp4"));
     let commit = run(
-        artifact_command(url)
+        artifact_command(seeded)
             .args([
                 "artifact",
                 "commit",
@@ -396,11 +470,11 @@ fn create_committed_artifact(url: &str, dir: &Path, name: &str) -> ArtifactFixtu
     artifact
 }
 
-fn create_failed_artifact(url: &str, dir: &Path, name: &str) -> ArtifactFixture {
-    let mut artifact = create_staged_artifact(url, dir, name);
+fn create_failed_artifact(seeded: &Seeded, dir: &Path, name: &str) -> ArtifactFixture {
+    let mut artifact = create_staged_artifact(seeded, dir, name);
     std::fs::write(&artifact.staging_path, b"changed bytes").unwrap();
     let verify = run(
-        artifact_command(url)
+        artifact_command(seeded)
             .args([
                 "artifact",
                 "verify",
@@ -452,21 +526,28 @@ async fn inject_recovery_required(
     .unwrap();
 }
 
-fn scan_command(url: &str, path: &Path) -> Command {
+fn scan_command(seeded: &Seeded) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_voom"));
     command
-        .args(["--database-url", url, "scan", "--path"])
-        .arg(path)
+        .args([
+            "--database-url",
+            &seeded.url,
+            "scan",
+            "--root",
+            &seeded.root_id.to_string(),
+        ])
+        .env("VOOM_LOCAL_NODE_ID", seeded.node_id.to_string())
         .env("VOOM_FFPROBE_WORKER_BIN", built_ffprobe_worker_binary())
         .env("VOOM_FFPROBE_BIN", success_ffprobe_binary());
     command
 }
 
-fn artifact_command(url: &str) -> Command {
+fn artifact_command(seeded: &Seeded) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_voom"));
     command
         .arg("--database-url")
-        .arg(url)
+        .arg(&seeded.url)
+        .env("VOOM_LOCAL_NODE_ID", seeded.node_id.to_string())
         .env(
             "VOOM_VERIFY_ARTIFACT_WORKER_BIN",
             built_verify_worker_binary(),
@@ -504,8 +585,8 @@ fn tiny_media_fixture() -> PathBuf {
         .unwrap()
 }
 
-fn artifact_tempdir() -> TempDir {
-    TempDir::new_in(std::env::current_dir().unwrap()).unwrap()
+fn artifact_tempdir(seeded: &Seeded) -> TempDir {
+    TempDir::new_in(seeded.root.path()).unwrap()
 }
 
 fn success_ffprobe_binary() -> &'static PathBuf {

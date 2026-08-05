@@ -7,7 +7,11 @@
 use std::path::Path;
 use std::process::{Command, Output};
 
+use secrecy::ExposeSecret as _;
 use serde_json::Value;
+use voom_control_plane::ControlPlane;
+use voom_control_plane::workers::RegisterNodeInput;
+use voom_core::{NodeKind, StorageRootId};
 use voom_store::test_support::sqlite_url_for;
 
 const POLICY: &str = "policy \"empty tools\" {\n  \
@@ -21,8 +25,21 @@ async fn empty_whole_scan_runs_end_to_end_as_zero_work_without_workers() {
     let database = voom_test_support::TempDatabase::new_in(dir.path()).unwrap();
     let database_url = sqlite_url_for(database.path());
     voom_store::init(&database_url).await.unwrap();
+    let cp = ControlPlane::open(&database_url).await.unwrap();
+    let owner = cp
+        .register_node(RegisterNodeInput {
+            name: "empty-root-owner".to_owned(),
+            kind: NodeKind::Local,
+            heartbeat_ttl_seconds: 60,
+            metadata: serde_json::json!({}),
+        })
+        .await
+        .unwrap();
+    cp.heartbeat_node(owner.node.id, owner.token.expose_secret())
+        .await
+        .unwrap();
 
-    let input_set_id = create_empty_inputs(&database_url, dir.path());
+    let input_set_id = create_empty_inputs(&database_url, dir.path()).await;
     let policy_version_id = create_policy(&database_url, dir.path());
     assert_preview(&database_url, policy_version_id, input_set_id);
     let job_id = execute_empty_input(&database_url, policy_version_id, input_set_id);
@@ -30,7 +47,7 @@ async fn empty_whole_scan_runs_end_to_end_as_zero_work_without_workers() {
     assert_durable_zero_work(&database_url).await;
 }
 
-fn create_empty_inputs(database_url: &str, root: &Path) -> u64 {
+async fn create_empty_inputs(database_url: &str, root: &Path) -> u64 {
     let input = ok(run(
         database_url,
         &[
@@ -68,10 +85,20 @@ fn create_empty_inputs(database_url: &str, root: &Path) -> u64 {
             "add",
             "--library-id",
             "1",
-            "--path",
+            "--owner-node-id",
+            "1",
+            "--provider",
+            "local_filesystem",
+            "--provider-locator",
             path_str(&empty_root),
         ],
     ));
+    ControlPlane::open(database_url)
+        .await
+        .unwrap()
+        .activate_library_root(StorageRootId(1), "empty-root-fixture".to_owned())
+        .await
+        .unwrap();
     let root_input = ok(run(
         database_url,
         &[
@@ -180,7 +207,15 @@ async fn assert_durable_zero_work(database_url: &str) {
         .unwrap();
     assert_eq!(
         event_kinds,
-        ["schema.initialized", "job.opened", "job.succeeded"]
+        [
+            "schema.initialized",
+            "node.registered",
+            "node.heartbeat_recorded",
+            "storage_root.created",
+            "storage_root.activated",
+            "job.opened",
+            "job.succeeded",
+        ]
     );
 }
 

@@ -427,7 +427,8 @@ fn latest_commit_index(
 pub(super) struct WorkingDirArtifact {
     pub(super) location_id: FileLocationId,
     pub(super) asset_id: FileAssetId,
-    pub(super) value: String,
+    pub(super) storage_root_id: voom_core::StorageRootId,
+    pub(super) provider_relative_locator: voom_core::ProviderRelativeLocator,
     pub(super) epoch: u64,
 }
 
@@ -545,7 +546,8 @@ impl ControlPlane {
                     .map(|location| WorkingDirArtifact {
                         location_id: location.location_id,
                         asset_id: location.file_asset_id,
-                        value: location.value,
+                        storage_root_id: location.storage_root_id,
+                        provider_relative_locator: location.provider_relative_locator,
                         epoch: location.epoch,
                     })
                     .collect()
@@ -1081,6 +1083,26 @@ impl ControlPlane {
                 result.artifact_verification_id
             )));
         };
+        let evidence_path = match (
+            evidence.storage_root_id,
+            evidence.provider_relative_locator.as_ref(),
+        ) {
+            (Some(storage_root_id), Some(relative_locator)) => {
+                crate::operation_source::resolve_root_relative_existing_path(
+                    self,
+                    "workflow verification resume",
+                    storage_root_id,
+                    relative_locator,
+                )
+                .await?
+            }
+            _ => {
+                return Err(VoomError::Conflict(format!(
+                    "source file_location {} has no rooted address",
+                    result.source_location_id
+                )));
+            }
+        };
         let verification = evidence.verification;
         if verification.id != result.artifact_verification_id
             || verification.artifact_handle_id != result.artifact_handle_id
@@ -1093,7 +1115,7 @@ impl ControlPlane {
             || verification.observed_size_bytes != result.observed_size_bytes
             || verification.observed_checksum != result.observed_checksum
             || evidence.file_version_id != Some(file.version_id)
-            || evidence.location_value.as_deref() != Some(result.path.as_str())
+            || evidence_path.to_string_lossy() != result.path
         {
             return Err(VoomError::Conflict(format!(
                 "artifact_verification {} does not match verified ticket result",

@@ -1,6 +1,6 @@
 use super::{
     ArtifactExpectedFacts, ArtifactHandle, ArtifactHandleFacts, ArtifactHandleId, ArtifactLineage,
-    ArtifactLocation, ArtifactLocationId, ArtifactLocationKind, FileVersionId,
+    ArtifactLocation, ArtifactLocationId, ArtifactLocationKind, FileLocationId, FileVersionId,
     LiveArtifactLocation, NewArtifactHandle, NewArtifactLineage, NewArtifactLocation,
     OffsetDateTime, SqliteArtifactRepo, VoomError, checked_sqlite_id,
 };
@@ -353,15 +353,19 @@ impl SqliteArtifactRepo {
         tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
         handle_id: ArtifactHandleId,
     ) -> Result<ArtifactExpectedFacts, VoomError> {
-        let row: Option<(Option<i64>, Option<i64>, Option<String>)> = sqlx::query_as(
-            "SELECT file_version_id, size_bytes, checksum \
+        type ExpectedFactsRow = (Option<i64>, Option<i64>, Option<i64>, Option<String>);
+        let row: Option<ExpectedFactsRow> = sqlx::query_as(
+            "SELECT file_version_id, \
+                    json_extract(source_lineage, '$.source_file_location_id'), \
+                    size_bytes, checksum \
              FROM artifact_handles WHERE id = ?",
         )
         .bind(checked_sqlite_id(handle_id.0, "artifact handle id")?)
         .fetch_optional(&mut **tx)
         .await
         .map_err(|error| VoomError::database_context("artifact_handles expected facts", error))?;
-        let Some((source_file_version_id, size_bytes, checksum)) = row else {
+        let Some((source_file_version_id, source_file_location_id, size_bytes, checksum)) = row
+        else {
             return Err(VoomError::NotFound(format!(
                 "artifact_handles {handle_id} missing"
             )));
@@ -385,6 +389,16 @@ impl SqliteArtifactRepo {
                     u64::try_from(id).map(FileVersionId).map_err(|error| {
                         VoomError::database_context(
                             "artifact_handles.file_version_id negative",
+                            error,
+                        )
+                    })
+                })
+                .transpose()?,
+            source_file_location_id: source_file_location_id
+                .map(|id| {
+                    u64::try_from(id).map(FileLocationId).map_err(|error| {
+                        VoomError::database_context(
+                            "artifact_handles source_lineage.source_file_location_id negative",
                             error,
                         )
                     })

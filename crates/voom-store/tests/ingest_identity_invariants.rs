@@ -14,13 +14,13 @@ use std::sync::{Arc, Mutex};
 use time::Duration;
 
 use voom_control_plane::ControlPlane;
-use voom_core::SystemClock;
 use voom_core::rng_test_support::FrozenRng;
+use voom_core::{NodeId, SystemClock};
 use voom_events::EventKind;
 use voom_store::repo::audit::events::{EventFilter, EventRepo, Page};
 use voom_store::repo::media::identity::{
-    AliasProof, DiscoveredFile, FileLocationKind, FileLocationRepo, IdentityEvidenceRepo,
-    IdentityEvidenceTarget, IngestOutcome, LocationProof,
+    AliasProof, DiscoveredFile, FileLocationRepo, IdentityEvidenceRepo, IdentityEvidenceTarget,
+    IngestOutcome, LocationProof,
 };
 use voom_store::test_support::T0;
 
@@ -29,10 +29,14 @@ async fn cp() -> (ControlPlane, voom_test_support::TempDatabase) {
     let url = format!("sqlite://{}", tmp.path().display());
     let _ = voom_store::init(&url).await.unwrap();
     let pool = voom_store::connect(&url).await.unwrap();
+    voom_store::test_support::seed_test_storage_root(&pool)
+        .await
+        .unwrap();
     let rng = Arc::new(Mutex::new(FrozenRng::new(0)));
     let cp = ControlPlane::open_with_pool_and_rng(pool, Arc::new(SystemClock), rng)
         .await
-        .unwrap();
+        .unwrap()
+        .with_local_node_id(Some(NodeId(9_000_001)));
     (cp, tmp)
 }
 
@@ -56,8 +60,8 @@ async fn count_kind(cp: &ControlPlane, kind: EventKind) -> usize {
 
 fn new_local(path: &str, hash: &str, size: u64) -> DiscoveredFile {
     DiscoveredFile {
-        location_kind: FileLocationKind::LocalPath,
-        location_value: path.to_owned(),
+        storage_root_id: voom_store::test_support::TEST_STORAGE_ROOT_ID,
+        provider_relative_locator: voom_store::test_support::test_relative_locator(path),
         content_hash: hash.to_owned(),
         size_bytes: size,
         observed_at: T0,
@@ -73,8 +77,8 @@ fn new_local_with_proof(
     generation: u64,
 ) -> DiscoveredFile {
     DiscoveredFile {
-        location_kind: FileLocationKind::LocalPath,
-        location_value: path.to_owned(),
+        storage_root_id: voom_store::test_support::TEST_STORAGE_ROOT_ID,
+        provider_relative_locator: voom_store::test_support::test_relative_locator(path),
         content_hash: hash.to_owned(),
         size_bytes: size,
         observed_at: T0,
@@ -86,6 +90,7 @@ fn new_local_with_proof(
 }
 
 fn new_object_store_with_proof(
+    locator: &str,
     key: &str,
     hash: &str,
     size: u64,
@@ -93,8 +98,8 @@ fn new_object_store_with_proof(
     version_id: &str,
 ) -> DiscoveredFile {
     DiscoveredFile {
-        location_kind: FileLocationKind::ObjectStoreKey,
-        location_value: format!("s3://{bucket}/{key}#{version_id}"),
+        storage_root_id: voom_store::test_support::TEST_STORAGE_ROOT_ID,
+        provider_relative_locator: voom_store::test_support::test_relative_locator(locator),
         content_hash: hash.to_owned(),
         size_bytes: size,
         observed_at: T0,
@@ -118,7 +123,10 @@ async fn new_filesystem_object_creates_new_file_asset() {
     assert!(matches!(outcome, IngestOutcome::NewFileAsset { .. }));
     assert_eq!(count_kind(&cp, EventKind::FileAssetCreated).await, 1);
     assert_eq!(count_kind(&cp, EventKind::FileVersionCreated).await, 1);
-    assert_eq!(count_kind(&cp, EventKind::FileLocationRecorded).await, 1);
+    assert_eq!(
+        count_kind(&cp, EventKind::FileLocationRootedRecorded).await,
+        1
+    );
     assert_eq!(
         count_kind(&cp, EventKind::IdentityEvidenceRecorded).await,
         0
@@ -155,7 +163,10 @@ async fn local_proof_with_matching_hash_attaches_alias() {
         matches!(second, IngestOutcome::AliasAttached { .. }),
         "got: {second:?}"
     );
-    assert_eq!(count_kind(&cp, EventKind::FileLocationAliased).await, 1);
+    assert_eq!(
+        count_kind(&cp, EventKind::FileLocationRootedAliased).await,
+        1
+    );
     assert_eq!(
         count_kind(&cp, EventKind::FileAssetCreated).await,
         1,
@@ -239,7 +250,7 @@ async fn object_store_full_proof_attaches_alias() {
     let (cp, _tmp) = cp().await;
     let first = cp
         .record_discovered_file(
-            new_object_store_with_proof("k/a.mkv", "h1", 100, "media", "v1"),
+            new_object_store_with_proof("objects/a.mkv", "k/a.mkv", "h1", 100, "media", "v1"),
             None,
         )
         .await
@@ -252,7 +263,7 @@ async fn object_store_full_proof_attaches_alias() {
     };
     let second = cp
         .record_discovered_file(
-            new_object_store_with_proof("k/a.mkv", "h1", 100, "media", "v1"),
+            new_object_store_with_proof("aliases/a.mkv", "k/a.mkv", "h1", 100, "media", "v1"),
             Some(AliasProof::ObjectStoreVersion {
                 bucket: "media".to_owned(),
                 key: "k/a.mkv".to_owned(),
@@ -273,7 +284,7 @@ async fn object_store_key_match_without_version_id_falls_back_to_new_asset() {
     let (cp, _tmp) = cp().await;
     let first = cp
         .record_discovered_file(
-            new_object_store_with_proof("k/a.mkv", "h1", 100, "media", "v1"),
+            new_object_store_with_proof("objects/a.mkv", "k/a.mkv", "h1", 100, "media", "v1"),
             None,
         )
         .await
@@ -287,7 +298,14 @@ async fn object_store_key_match_without_version_id_falls_back_to_new_asset() {
     // Same bucket/key, different version_id → mismatch.
     let second = cp
         .record_discovered_file(
-            new_object_store_with_proof("k/a-other.mkv", "h1", 100, "media", "v2"),
+            new_object_store_with_proof(
+                "objects/a-v2.mkv",
+                "k/a-other.mkv",
+                "h1",
+                100,
+                "media",
+                "v2",
+            ),
             Some(AliasProof::ObjectStoreVersion {
                 bucket: "media".to_owned(),
                 key: "k/a.mkv".to_owned(),
@@ -362,8 +380,10 @@ async fn etag_match_is_the_same_path_as_hash_match() {
     let _ = cp
         .record_discovered_file(
             DiscoveredFile {
-                location_kind: FileLocationKind::ObjectStoreKey,
-                location_value: "s3://b/a.mkv#etag-x".to_owned(),
+                storage_root_id: voom_store::test_support::TEST_STORAGE_ROOT_ID,
+                provider_relative_locator: voom_store::test_support::test_relative_locator(
+                    "objects/a.mkv",
+                ),
                 content_hash: "etag-x".to_owned(),
                 size_bytes: 10,
                 observed_at: T0,
@@ -376,8 +396,10 @@ async fn etag_match_is_the_same_path_as_hash_match() {
     let second = cp
         .record_discovered_file(
             DiscoveredFile {
-                location_kind: FileLocationKind::ObjectStoreKey,
-                location_value: "s3://b/copy.mkv#etag-x".to_owned(),
+                storage_root_id: voom_store::test_support::TEST_STORAGE_ROOT_ID,
+                provider_relative_locator: voom_store::test_support::test_relative_locator(
+                    "objects/copy.mkv",
+                ),
                 content_hash: "etag-x".to_owned(),
                 size_bytes: 10,
                 observed_at: T0 + Duration::seconds(1),
@@ -432,7 +454,10 @@ async fn discover_with_local_proof_persists_on_initial_location() {
 async fn discover_with_object_store_proof_persists() {
     let (cp, _tmp) = cp().await;
     let outcome = cp
-        .record_discovered_file(new_object_store_with_proof("k.mkv", "h", 1, "b", "v"), None)
+        .record_discovered_file(
+            new_object_store_with_proof("objects/k.mkv", "k.mkv", "h", 1, "b", "v"),
+            None,
+        )
         .await
         .unwrap();
     let IngestOutcome::NewFileAsset {
@@ -569,5 +594,8 @@ async fn alias_attach_proof_drift_rejected() {
     let _ = evidence;
     // Only the first discovery's events should exist.
     assert_eq!(count_kind(&cp, EventKind::FileAssetCreated).await, 1);
-    assert_eq!(count_kind(&cp, EventKind::FileLocationAliased).await, 0);
+    assert_eq!(
+        count_kind(&cp, EventKind::FileLocationRootedAliased).await,
+        0
+    );
 }

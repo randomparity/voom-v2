@@ -27,7 +27,7 @@ async fn probe_returns_uninitialized_on_fresh_db() {
 #[tokio::test]
 async fn expected_migrations_matches_embedded_count() {
     // review whenever a migration is added/removed.
-    assert_eq!(expected_migrations(), 33);
+    assert_eq!(expected_migrations(), 34);
 }
 
 /// Column list every video-profile fixture below shares, so each test spells
@@ -402,7 +402,7 @@ async fn workflow_file_run_history_schema_is_strict_and_run_owned() {
 }
 
 #[tokio::test]
-async fn library_schema_enforces_vocab_and_root_cascade() {
+async fn library_schema_enforces_node_owned_root_contract() {
     let (pool, _tmp) = fresh_pool().await;
 
     let libraries_sql: String = sqlx::query_scalar(
@@ -422,6 +422,11 @@ async fn library_schema_enforces_vocab_and_root_cascade() {
     .await
     .unwrap();
     assert!(roots_sql.contains("CHECK (json_valid(include_globs))"));
+    assert!(roots_sql.contains("provider_kind IN ('local_filesystem')"));
+    assert!(
+        roots_sql
+            .contains("state IN ('unassigned', 'configured', 'active', 'unavailable', 'retired')")
+    );
     assert!(
         roots_sql.contains(
             "CHECK (scan_mode IN ('explicit_only', 'manual_recursive', 'watch_enabled'))"
@@ -438,7 +443,7 @@ async fn library_schema_enforces_vocab_and_root_cascade() {
 
     let fk_count: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM pragma_foreign_key_list('library_roots') \
-         WHERE \"table\" = 'libraries' AND on_delete = 'CASCADE'",
+         WHERE \"table\" = 'libraries' AND on_delete = 'RESTRICT'",
     )
     .fetch_one(&pool)
     .await

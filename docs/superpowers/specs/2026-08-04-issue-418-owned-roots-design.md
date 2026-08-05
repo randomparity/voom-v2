@@ -200,8 +200,8 @@ safe relative locators cannot be reconstructed from old absolute strings.
 
 ### Root administration and inspection
 
-`library root add` replaces `--path`/`--root-kind` with `--owner-node`,
-`--provider local-filesystem`, and `--provider-locator`. Inspection returns the
+`library root add` replaces `--path`/`--root-kind` with `--owner-node-id`,
+`--provider local_filesystem`, and `--provider-locator`. Inspection returns the
 stable root ID, owner, provider, persisted state, effective availability and
 reason, enabled flag, root epoch, and display locator. It never labels the
 provider locator a canonical or globally usable path.

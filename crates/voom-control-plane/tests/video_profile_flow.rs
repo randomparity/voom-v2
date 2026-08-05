@@ -20,7 +20,7 @@ use voom_control_plane::ControlPlane;
 use voom_control_plane::policy::{
     ComplianceExecuteData, ComplianceExecutionOptions, PolicyInputFromScanInput,
 };
-use voom_control_plane::scan::{ScanPathInput, ScanReportFileStatus};
+use voom_control_plane::scan::{RootScanOutcome, ScanReportFileStatus};
 use voom_core::{FileVersionId, MediaSnapshotId, PolicyVersionId};
 use voom_ffmpeg_worker::preflight_from_process_env;
 use voom_plan::PlanOperationKind;
@@ -179,9 +179,16 @@ async fn run_case(case: &Case) -> CaseOutcome {
     let url = format!("sqlite://{}", db.path().display());
     voom_store::init(&url).await.unwrap();
     let pool = voom_store::connect(&url).await.unwrap();
-    let cp = ControlPlane::open_with_pool(pool, std::sync::Arc::new(voom_core::SystemClock))
+    voom_store::test_support::seed_test_storage_root(&pool)
         .await
         .unwrap();
+    voom_store::test_support::set_test_storage_root_path(&pool, &root)
+        .await
+        .unwrap();
+    let cp = ControlPlane::open_with_pool(pool, std::sync::Arc::new(voom_core::SystemClock))
+        .await
+        .unwrap()
+        .with_local_node_id(Some(voom_core::NodeId(9_000_001)));
 
     let source_file_version_id = scan_source(&cp, &source).await;
     let policy = cp
@@ -422,16 +429,16 @@ fn find_output(out_dir: &Path, prefix: &str, container: &str) -> std::path::Path
 }
 
 async fn scan_source(cp: &ControlPlane, source: &Path) -> FileVersionId {
-    let scan = cp
-        .scan_path(ScanPathInput {
-            path: source.to_path_buf(),
-            extension_allowlist: Vec::new(),
-        })
+    let outcome = cp
+        .scan_library_root(voom_store::test_support::TEST_STORAGE_ROOT_ID)
         .await
         .unwrap();
+    let RootScanOutcome::Scanned(scan) = outcome else {
+        unreachable!("active local test root must scan")
+    };
     scan.files
         .iter()
-        .find(|file| file.status == ScanReportFileStatus::Scanned)
+        .find(|file| file.path == source && file.status == ScanReportFileStatus::Scanned)
         .unwrap()
         .file_version_id
         .unwrap()

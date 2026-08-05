@@ -25,7 +25,9 @@ use std::path::Path;
 use serde_json::Value as JsonValue;
 use sqlx::SqlitePool;
 use time::OffsetDateTime;
-use voom_core::{JobId, TicketOperation, VoomError, WorkerId};
+use voom_core::{
+    JobId, ProviderRelativeLocator, StorageRootId, TicketOperation, VoomError, WorkerId,
+};
 
 use crate::init::init;
 use crate::migrator::MIGRATOR;
@@ -40,6 +42,88 @@ use crate::repo::execution::workers::{
 /// Hoisted here so the 6+ `const T0` declarations across the test suite
 /// import a single source of truth instead of redeclaring it.
 pub const T0: OffsetDateTime = OffsetDateTime::UNIX_EPOCH;
+pub const TEST_STORAGE_ROOT_ID: StorageRootId = StorageRootId(9_000_001);
+
+/// Seed one active storage root for repository tests whose subject is not root
+/// administration. The deliberately high stable ids avoid colliding with rows
+/// created through the repositories under test.
+pub async fn seed_test_storage_root(pool: &SqlitePool) -> Result<StorageRootId, VoomError> {
+    sqlx::query(
+        "INSERT OR IGNORE INTO nodes \
+         (id, name, kind, status, registered_at, last_seen_at, retired_at, \
+          heartbeat_ttl_seconds, auth_token_hash, auth_token_hint, metadata, epoch) \
+         VALUES (9000001, 'repository-test-root-owner', 'local', 'active', \
+                 '1970-01-01T00:00:00Z', '1970-01-01T00:00:00Z', NULL, 60, \
+                 'hash', 'hint', '{}', 0)",
+    )
+    .execute(pool)
+    .await
+    .map_err(|error| VoomError::database_context("seed test storage-root owner", error))?;
+    sqlx::query(
+        "INSERT OR IGNORE INTO libraries \
+         (id, slug, display_name, media_kind, description, enabled, created_at, updated_at) \
+         VALUES (9000001, 'repository-test-root', 'Repository Test Root', 'unknown', NULL, 1, \
+                 '1970-01-01T00:00:00Z', '1970-01-01T00:00:00Z')",
+    )
+    .execute(pool)
+    .await
+    .map_err(|error| VoomError::database_context("seed test storage-root library", error))?;
+    sqlx::query(
+        "INSERT OR IGNORE INTO library_roots \
+         (id, library_id, owner_node_id, provider_kind, provider_locator, display_locator, \
+          state, root_epoch, activation_identity, include_globs, exclude_globs, \
+          extension_allowlist, scan_mode, symlink_policy, hidden_file_policy, max_depth, \
+          stability_seconds, debounce_seconds, default_output_root_id, default_staging_root_id, \
+          default_backup_root_id, enabled, created_at, updated_at) \
+         VALUES (9000001, 9000001, 9000001, 'local_filesystem', '/', '/', 'active', 1, \
+                 'repository-test-root', '[]', '[]', '[]', 'manual_recursive', 'reject', 'ignore', \
+                 NULL, 0, 0, NULL, NULL, NULL, 1, '1970-01-01T00:00:00Z', \
+                 '1970-01-01T00:00:00Z')",
+    )
+    .execute(pool)
+    .await
+    .map_err(|error| VoomError::database_context("seed test storage root", error))?;
+    Ok(TEST_STORAGE_ROOT_ID)
+}
+
+/// Point the shared active test root at an isolated fixture directory.
+///
+/// # Errors
+///
+/// Returns a database error if the fixture row cannot be updated.
+pub async fn set_test_storage_root_path(pool: &SqlitePool, path: &Path) -> Result<(), VoomError> {
+    let locator = path.to_string_lossy();
+    sqlx::query(
+        "UPDATE library_roots SET provider_locator = ?, display_locator = ?, updated_at = \
+         '1970-01-01T00:00:00Z' WHERE id = ?",
+    )
+    .bind(locator.as_ref())
+    .bind(locator.as_ref())
+    .bind(i64::try_from(TEST_STORAGE_ROOT_ID.0).map_err(|error| {
+        VoomError::database(format!("test storage root id conversion: {error}"))
+    })?)
+    .execute(pool)
+    .await
+    .map_err(|error| VoomError::database_context("set test storage-root path", error))?;
+    Ok(())
+}
+
+/// Convert a historical absolute-path fixture into a valid provider-relative
+/// locator without preserving any global-path semantics.
+#[must_use]
+#[expect(
+    clippy::expect_used,
+    reason = "invalid provider-relative fixture input is a test-author error"
+)]
+pub fn test_relative_locator(value: &str) -> ProviderRelativeLocator {
+    let value = value.trim_matches('/');
+    ProviderRelativeLocator::new(if value.is_empty() {
+        "fixture".to_owned()
+    } else {
+        value.to_owned()
+    })
+    .expect("test relative locator must be valid")
+}
 
 /// Format a filesystem path as a `sqlite://` URL. Centralizes the
 /// `format!("sqlite://{}", path.display())` literal that otherwise appears
@@ -70,7 +154,9 @@ pub async fn create_uninitialized_pool(url: &str) -> Result<SqlitePool, VoomErro
 pub async fn fresh_initialized_pool_at(path: &Path) -> Result<SqlitePool, VoomError> {
     let url = sqlite_url_for(path);
     init(&url).await?;
-    connect(&url).await
+    let pool = connect(&url).await?;
+    seed_test_storage_root(&pool).await?;
+    Ok(pool)
 }
 
 /// Return the embedded migration registry for integration-test schema fixtures.

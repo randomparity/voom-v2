@@ -444,14 +444,14 @@ async fn execute_replacement_audio(
         &input.staging_root,
         input.ticket_id,
         input.lease_id,
-        std::path::Path::new(&selected.location.value),
+        &selected.canonical_path,
         &selection.target_codec,
     )
     .await?;
     context.staging_path = Some(staging.path.clone());
     let target_path = stage::transcode_target_path(
         &input.target_dir,
-        std::path::Path::new(&selected.location.value),
+        &selected.canonical_path,
         &selection.target_codec,
     )
     .await?;
@@ -1889,7 +1889,7 @@ async fn prepare_extract_execution(
     let paths = prepare_extract_paths(
         cp,
         input,
-        std::path::Path::new(&selected.location.value),
+        &selected.canonical_path,
         snapshot.id.0,
         &selection,
         result_probe,
@@ -2100,7 +2100,7 @@ pub(crate) async fn plan_first_extract_with_bundle(
         &input.operation_payload,
         &snapshot,
     )?;
-    let source_path = Path::new(&selected.location.value);
+    let source_path = &selected.canonical_path;
     let targets = stage::extract_target_paths(&input.target_dir, source_path, &selection).await?;
     let mut tx = crate::cases::begin_immediate_tx(&cp.pool).await?;
     let resolution = cp
@@ -2450,6 +2450,7 @@ async fn recover_extract_report(
         &commit::CommitAudioExtractSetInput {
             operation_row_id: operation.operation.id,
             source_file_version_id: input.source_file_version_id,
+            source_file_location_id: source_location_id,
             source_media_snapshot_id: operation.operation.source_media_snapshot_id,
             source_bundle_id: input.source_bundle_id,
             outputs,
@@ -2892,6 +2893,7 @@ async fn commit_verified_extract_audio_with_hooks(
         &commit::CommitAudioExtractSetInput {
             operation_row_id: request.operation_row_id,
             source_file_version_id: request.input.source_file_version_id,
+            source_file_location_id: request.source_location_id,
             source_media_snapshot_id: MediaSnapshotId(request.source_media_snapshot_id),
             source_bundle_id: request.input.source_bundle_id,
             outputs,

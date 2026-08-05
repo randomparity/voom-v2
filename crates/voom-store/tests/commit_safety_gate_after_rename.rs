@@ -36,8 +36,8 @@ use voom_store::repo::media::commit_safety_gate::{
     DestructiveCommit, PrepareOutcome, authorize_destructive_commit, prepare_destructive_commit,
 };
 use voom_store::repo::media::identity::{
-    CommitGateIdentityRepo, DiscoveredFile, FileLocationKind, IngestOutcome, IngestRepo,
-    LocationProof, ObservedBytes, RenameProof, SqliteIdentityRepo,
+    CommitGateIdentityRepo, DiscoveredFile, IngestOutcome, IngestRepo, LocationProof,
+    ObservedBytes, RenameProof, SqliteIdentityRepo,
 };
 use voom_store::repo::media::use_leases::{
     BlockingMode, IssuerKind, LeaseScope, NewUseLease, SqliteUseLeaseRepo, UseLeaseKind,
@@ -75,8 +75,8 @@ async fn seed_via_ingest(pool: &SqlitePool, path: &str) -> FileLocationId {
         .record_discovered_file_in_tx(
             &mut tx,
             DiscoveredFile {
-                location_kind: FileLocationKind::LocalPath,
-                location_value: path.to_owned(),
+                storage_root_id: voom_store::test_support::TEST_STORAGE_ROOT_ID,
+                provider_relative_locator: voom_store::test_support::test_relative_locator(path),
                 content_hash: "h".to_owned(),
                 size_bytes: 10,
                 observed_at: T0,
@@ -199,8 +199,10 @@ async fn authorize_after_external_rename_blocks_with_closure_grew_and_reanchors_
             &mut tx,
             RenameProof::LocalFileIdGeneration {
                 prior_location_id,
-                new_kind: FileLocationKind::LocalPath,
-                new_value: "/srv/new.mkv".to_owned(),
+                storage_root_id: voom_store::test_support::TEST_STORAGE_ROOT_ID,
+                provider_relative_locator: voom_store::test_support::test_relative_locator(
+                    "/srv/new.mkv",
+                ),
                 file_id: 99,
                 generation: 1,
                 prior_path_missing: true,

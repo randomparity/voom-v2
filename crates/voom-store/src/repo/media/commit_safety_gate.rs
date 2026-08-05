@@ -13,6 +13,7 @@ use voom_core::VoomError;
 use voom_core::ids::{
     BundleId, CommitId, EvidenceId, FileAssetId, FileLocationId, FileVersionId, UseLeaseId,
 };
+use voom_core::{ProviderRelativeLocator, StorageRootId};
 use voom_events::payload::{
     CommitAbortedByClosureGrewPayload, CommitAbortedByClosureIncompletePayload,
     CommitAbortedByPendingCommitPayload, CommitAbortedByStaleEvidencePayload,
@@ -26,8 +27,8 @@ use voom_events::{Event, EventEnvelope, SubjectType};
 use crate::repo::audit::events::EventRepo;
 use crate::repo::common::{i64_from_u64, iso8601, parse_iso8601, u64_from_i64};
 use crate::repo::media::identity::{
-    CommitGateIdentityRepo, FileLocationKind, FileLocationRepo, FileVersionRepo,
-    IdentityEvidenceRepo, IdentityEvidenceTarget, LocationProof,
+    CommitGateIdentityRepo, FileLocationRepo, FileVersionRepo, IdentityEvidenceRepo,
+    IdentityEvidenceTarget, LocationProof,
 };
 use crate::repo::media::use_leases::LeaseScope;
 
@@ -40,8 +41,8 @@ use crate::repo::media::use_leases::LeaseScope;
 /// pairing it with the retired row's `file_version_id`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileLocationProposal {
-    pub kind: FileLocationKind,
-    pub value: String,
+    pub storage_root_id: StorageRootId,
+    pub provider_relative_locator: ProviderRelativeLocator,
     pub proof: Option<LocationProof>,
     pub observed_at: OffsetDateTime,
 }

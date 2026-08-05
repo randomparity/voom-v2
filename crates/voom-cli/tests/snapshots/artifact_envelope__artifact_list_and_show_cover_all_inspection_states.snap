@@ -35,7 +35,7 @@ expression: json
         {
           "artifact_handle_id": 2,
           "state": "verified",
-          "source_file_version_id": 2,
+          "source_file_version_id": 1,
           "staging_path": "[artifact-dir]/verified-staged.mp4",
           "size_bytes": 1545,
           "checksum": "[hash]",
@@ -69,7 +69,7 @@ expression: json
         {
           "artifact_handle_id": 3,
           "state": "committed",
-          "source_file_version_id": 3,
+          "source_file_version_id": 1,
           "target_path": "[artifact-dir]/committed-committed.mp4",
           "size_bytes": 1545,
           "checksum": "[hash]",
@@ -90,8 +90,8 @@ expression: json
             "target_path": "[artifact-dir]/committed-committed.mp4",
             "temp_path": "[artifact-dir]/.voom-tmp.committed-committed.mp4.[temp]",
             "state": "committed",
-            "result_file_version_id": 4,
-            "result_file_location_id": 4
+            "result_file_version_id": 2,
+            "result_file_location_id": 2
           }
         }
       ]
@@ -112,7 +112,7 @@ expression: json
         {
           "artifact_handle_id": 4,
           "state": "failed",
-          "source_file_version_id": 5,
+          "source_file_version_id": 1,
           "staging_path": "[artifact-dir]/failed-staged.mp4",
           "size_bytes": 1545,
           "checksum": "[hash]",
@@ -147,7 +147,7 @@ expression: json
         {
           "artifact_handle_id": 5,
           "state": "recovery_required",
-          "source_file_version_id": 6,
+          "source_file_version_id": 1,
           "staging_path": "[artifact-dir]/recovery-staged.mp4",
           "target_path": "[artifact-dir]/recovery-target.mp4",
           "size_bytes": 1545,
@@ -248,7 +248,7 @@ expression: json
       "artifact": {
         "artifact_handle_id": 2,
         "state": "verified",
-        "source_file_version_id": 2,
+        "source_file_version_id": 1,
         "staging_path": "[artifact-dir]/verified-staged.mp4",
         "size_bytes": 1545,
         "checksum": "[hash]",
@@ -294,7 +294,7 @@ expression: json
       "artifact": {
         "artifact_handle_id": 3,
         "state": "committed",
-        "source_file_version_id": 3,
+        "source_file_version_id": 1,
         "target_path": "[artifact-dir]/committed-committed.mp4",
         "size_bytes": 1545,
         "checksum": "[hash]",
@@ -318,8 +318,8 @@ expression: json
             "target_path": "[artifact-dir]/committed-committed.mp4",
             "temp_path": "[artifact-dir]/.voom-tmp.committed-committed.mp4.[temp]",
             "state": "committed",
-            "result_file_version_id": 4,
-            "result_file_location_id": 4
+            "result_file_version_id": 2,
+            "result_file_location_id": 2
           }
         ],
         "latest_verification": {
@@ -339,8 +339,8 @@ expression: json
           "target_path": "[artifact-dir]/committed-committed.mp4",
           "temp_path": "[artifact-dir]/.voom-tmp.committed-committed.mp4.[temp]",
           "state": "committed",
-          "result_file_version_id": 4,
-          "result_file_location_id": 4
+          "result_file_version_id": 2,
+          "result_file_location_id": 2
         }
       }
     },
@@ -359,7 +359,7 @@ expression: json
       "artifact": {
         "artifact_handle_id": 4,
         "state": "failed",
-        "source_file_version_id": 5,
+        "source_file_version_id": 1,
         "staging_path": "[artifact-dir]/failed-staged.mp4",
         "size_bytes": 1545,
         "checksum": "[hash]",
@@ -407,7 +407,7 @@ expression: json
       "artifact": {
         "artifact_handle_id": 5,
         "state": "recovery_required",
-        "source_file_version_id": 6,
+        "source_file_version_id": 1,
         "staging_path": "[artifact-dir]/recovery-staged.mp4",
         "target_path": "[artifact-dir]/recovery-target.mp4",
         "size_bytes": 1545,

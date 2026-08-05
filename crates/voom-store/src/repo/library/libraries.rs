@@ -259,21 +259,40 @@ impl SqliteLibraryRepo {
             .ok_or_else(|| VoomError::NotFound(format!("library {id} not found")))
     }
 
-    /// Delete a library. Its roots cascade (FK `ON DELETE CASCADE`). Returns
+    /// Delete a library only when no durable root references it. Returns
     /// whether a row was removed.
     ///
     /// # Errors
     /// Propagates database errors.
     pub async fn delete_library(&self, id: LibraryId) -> Result<bool, VoomError> {
         let mut tx = begin(&self.pool).await?;
+        let id_value = i64_from_u64(id.0, concat!(module_path!(), ": ", stringify!(id.0)))?;
+        let has_durable_roots: i64 =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM library_roots WHERE library_id = ?)")
+                .bind(id_value)
+                .fetch_one(&mut *tx)
+                .await
+                .map_err(|error| {
+                    VoomError::database_context("libraries delete root check", error)
+                })?;
+        if has_durable_roots != 0 {
+            return Err(VoomError::Conflict(format!(
+                "library {id} has durable storage roots and cannot be deleted"
+            )));
+        }
         let res = sqlx::query("DELETE FROM libraries WHERE id = ?")
-            .bind(i64_from_u64(
-                id.0,
-                concat!(module_path!(), ": ", stringify!(id.0)),
-            )?)
+            .bind(id_value)
             .execute(&mut *tx)
             .await
-            .map_err(|e| VoomError::database_context("libraries delete", e))?;
+            .map_err(|e| {
+                if matches!(&e, sqlx::Error::Database(inner) if inner.is_foreign_key_violation()) {
+                    VoomError::Conflict(format!(
+                        "library {id} has durable storage roots and cannot be deleted"
+                    ))
+                } else {
+                    VoomError::database_context("libraries delete", e)
+                }
+            })?;
         commit(tx).await?;
         Ok(res.rows_affected() > 0)
     }

@@ -5,7 +5,7 @@ use voom_control_plane::ControlPlane;
 use voom_core::{BundleId, ErrorCode, VoomError, format_iso8601};
 use voom_store::repo::media::bundles::{AssetBundle, BundleMember};
 use voom_store::repo::media::identity::{
-    FileLocation, FileLocationKind, FileVersion, MediaVariant, MediaWork,
+    FileLocation, FileLocationAddress, FileVersion, MediaVariant, MediaWork,
 };
 
 use crate::cli::BundleCommand;
@@ -75,7 +75,14 @@ struct MemberData {
     size_bytes: Option<u64>,
     produced_by: Option<String>,
     produced_from_version_id: Option<u64>,
-    location: Option<String>,
+    location: Option<LocationData>,
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+struct LocationData {
+    file_location_id: u64,
+    storage_root_id: u64,
+    provider_relative_locator: String,
 }
 
 pub async fn run(database_url: &str, local: Local, command: BundleCommand) -> io::Result<i32> {
@@ -202,13 +209,23 @@ fn select_live_version(versions: Vec<FileVersion>) -> Option<FileVersion> {
         .max_by_key(|version| version.id.0)
 }
 
-/// Pick the live local-path location (highest id when several), else `None`.
-fn select_local_location(locations: Vec<FileLocation>) -> Option<String> {
+/// Pick the live rooted location (highest id when several), else `None`.
+fn select_local_location(locations: Vec<FileLocation>) -> Option<LocationData> {
     locations
         .into_iter()
-        .filter(|location| location.kind == FileLocationKind::LocalPath)
+        .filter(|location| matches!(location.address, FileLocationAddress::Rooted { .. }))
         .max_by_key(|location| location.id.0)
-        .map(|location| location.value)
+        .and_then(|location| match location.address {
+            FileLocationAddress::Rooted {
+                storage_root_id,
+                provider_relative_locator,
+            } => Some(LocationData {
+                file_location_id: location.id.0,
+                storage_root_id: storage_root_id.0,
+                provider_relative_locator: provider_relative_locator.into_inner(),
+            }),
+            FileLocationAddress::UnassignedLegacy { .. } => None,
+        })
 }
 
 fn bundle_summary((bundle, member_count): (AssetBundle, u64)) -> BundleSummaryData {

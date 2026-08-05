@@ -6,8 +6,12 @@
 
 use std::process::Command;
 
+use secrecy::ExposeSecret as _;
 use serde_json::Value;
 use tempfile::TempDir;
+use voom_control_plane::ControlPlane;
+use voom_control_plane::workers::RegisterNodeInput;
+use voom_core::NodeKind;
 use voom_test_support::TempDatabase;
 
 mod library_envelope {
@@ -22,6 +26,19 @@ mod library_envelope {
         let tmp = TempDatabase::new().unwrap();
         let url = voom_store::test_support::sqlite_url_for(tmp.path());
         voom_store::init(&url).await.unwrap();
+        let cp = ControlPlane::open(&url).await.unwrap();
+        let owner = cp
+            .register_node(RegisterNodeInput {
+                name: "library-envelope-owner".to_owned(),
+                kind: NodeKind::Local,
+                heartbeat_ttl_seconds: 60,
+                metadata: serde_json::json!({}),
+            })
+            .await
+            .unwrap();
+        cp.heartbeat_node(owner.node.id, owner.token.expose_secret())
+            .await
+            .unwrap();
         Fixture { _tmp: tmp, url }
     }
 
@@ -53,7 +70,10 @@ mod library_envelope {
                 for (key, value) in map.iter_mut() {
                     if key == "created_at" || key == "updated_at" {
                         *value = Value::String("[ts]".to_owned());
-                    } else if key == "canonical_path" || key == "display_path" {
+                    } else if matches!(
+                        key.as_str(),
+                        "canonical_path" | "display_path" | "provider_locator" | "display_locator"
+                    ) {
                         *value = Value::String("[path]".to_owned());
                     } else {
                         redact_walk(value);
@@ -90,7 +110,11 @@ mod library_envelope {
                 "add",
                 "--library-id",
                 "1",
-                "--path",
+                "--owner-node-id",
+                "1",
+                "--provider",
+                "local_filesystem",
+                "--provider-locator",
                 &path,
             ],
         );
@@ -173,16 +197,16 @@ mod library_envelope {
     }
 
     #[tokio::test]
-    async fn library_remove_cascades() {
+    async fn library_remove_refuses_durable_root() {
         let fx = fixture().await;
         library_and_root(&fx.url);
-        let (code, removed) = run(&fx.url, &["library", "remove", "--library-id", "1"]);
-        assert_eq!(code, 0);
-        assert_eq!(removed["data"]["removed"], true);
-        // The cascade removed the root too.
+        let (code, refused) = run(&fx.url, &["library", "remove", "--library-id", "1"]);
+        assert_eq!(code, 2);
+        assert_eq!(refused["error"]["code"], "CONFLICT");
+        // Durable root identity is retained rather than cascade-deleted.
         let (code, roots) = run(&fx.url, &["library", "root", "list"]);
         assert_eq!(code, 0);
-        assert_eq!(roots["data"]["roots"].as_array().unwrap().len(), 0);
+        assert_eq!(roots["data"]["roots"].as_array().unwrap().len(), 1);
     }
 
     #[tokio::test]
@@ -198,6 +222,18 @@ mod library_envelope {
     }
 
     #[tokio::test]
+    async fn root_retire_preserves_identity() {
+        let fx = fixture().await;
+        let (_path, _dir) = library_and_root(&fx.url);
+
+        let (code, retired) = run(&fx.url, &["library", "root", "retire", "--root-id", "1"]);
+        assert_eq!(code, 0);
+        assert_eq!(retired["data"]["state"], "retired");
+        assert_eq!(retired["data"]["enabled"], false);
+        assert_eq!(retired["data"]["root_id"], 1);
+    }
+
+    #[tokio::test]
     async fn root_add_missing_library_is_not_found() {
         let fx = fixture().await;
         let dir = tempfile::tempdir().unwrap();
@@ -210,7 +246,11 @@ mod library_envelope {
                 "add",
                 "--library-id",
                 "99",
-                "--path",
+                "--owner-node-id",
+                "1",
+                "--provider",
+                "local_filesystem",
+                "--provider-locator",
                 &path,
             ],
         );
@@ -221,12 +261,9 @@ mod library_envelope {
     }
 
     #[tokio::test]
-    async fn root_add_overlapping_is_conflict() {
+    async fn root_add_duplicate_is_conflict() {
         let fx = fixture().await;
-        let (_, dir) = library_and_root(&fx.url);
-        let nested = dir.path().join("2024");
-        std::fs::create_dir(&nested).unwrap();
-        let nested = nested.to_str().unwrap().to_owned();
+        let (path, _dir) = library_and_root(&fx.url);
         let (code, json) = run(
             &fx.url,
             &[
@@ -235,8 +272,12 @@ mod library_envelope {
                 "add",
                 "--library-id",
                 "1",
-                "--path",
-                &nested,
+                "--owner-node-id",
+                "1",
+                "--provider",
+                "local_filesystem",
+                "--provider-locator",
+                &path,
             ],
         );
         assert_eq!(code, 2);
@@ -267,10 +308,10 @@ mod library_envelope {
     }
 
     #[tokio::test]
-    async fn scan_requires_path_or_root() {
+    async fn scan_requires_root() {
         let fx = fixture().await;
         let output = voom(&fx.url).arg("scan").output().unwrap();
-        // clap rejects "neither --path nor --root" at parse time (exit 1).
+        // clap rejects a scan without the required --root at parse time (exit 1).
         assert_eq!(output.status.code(), Some(1));
     }
 

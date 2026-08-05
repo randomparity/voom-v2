@@ -23,8 +23,7 @@ use voom_store::repo::execution::leases::NewLease;
 use voom_store::repo::execution::tickets::{NewTicket, Ticket};
 use voom_store::repo::execution::workers::{NewCapability, NewGrant};
 use voom_store::repo::media::identity::{
-    DiscoveredFile, FileAssetRepo, FileLocationKind, FileVersionRepo, IngestOutcome,
-    NewFileVersion, ProducedBy,
+    DiscoveredFile, FileAssetRepo, FileVersionRepo, IngestOutcome, NewFileVersion, ProducedBy,
 };
 use voom_worker_protocol::{
     AudioObservedFacts, AudioOutputStreamFact, ClientHandle, DispatchStream,
@@ -4268,8 +4267,10 @@ impl ExecutorFixture {
             .cp
             .record_discovered_file(
                 DiscoveredFile {
-                    location_kind: FileLocationKind::LocalPath,
-                    location_value,
+                    storage_root_id: voom_store::test_support::TEST_STORAGE_ROOT_ID,
+                    provider_relative_locator: voom_store::test_support::test_relative_locator(
+                        &location_value,
+                    ),
                     content_hash: format!("blake3:{}", blake3::hash(bytes).to_hex()),
                     size_bytes: bytes.len().try_into().unwrap(),
                     observed_at: T0,

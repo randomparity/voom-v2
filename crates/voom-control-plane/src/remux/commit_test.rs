@@ -4,9 +4,7 @@ use async_trait::async_trait;
 use serde_json::json;
 use time::OffsetDateTime;
 use voom_core::{ErrorCode, FileVersionId, WorkerId};
-use voom_store::repo::media::identity::{
-    DiscoveredFile, FileLocationKind, IngestOutcome, MediaSnapshotRepo,
-};
+use voom_store::repo::media::identity::{DiscoveredFile, IngestOutcome, MediaSnapshotRepo};
 use voom_worker_protocol::{
     ObservedFileFacts, ProbeFileRequest, ProbeFileResult, ProbeFileStatus, RemuxObservedFacts,
     RemuxResult, RemuxStatus,
@@ -169,8 +167,10 @@ async fn seed_source(
     let outcome = cp
         .record_discovered_file(
             DiscoveredFile {
-                location_kind: FileLocationKind::LocalPath,
-                location_value: path.display().to_string(),
+                storage_root_id: voom_store::test_support::TEST_STORAGE_ROOT_ID,
+                provider_relative_locator: voom_store::test_support::test_relative_locator(
+                    &path.display().to_string(),
+                ),
                 content_hash: blake3_checksum(bytes),
                 size_bytes: u64::try_from(bytes.len()).unwrap(),
                 observed_at: OffsetDateTime::UNIX_EPOCH,

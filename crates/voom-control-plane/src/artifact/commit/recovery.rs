@@ -21,11 +21,9 @@ use crate::artifact::commit::prepare::{
 use crate::artifact::commit::promote::promote_prepared;
 use crate::artifact::commit::{
     CommitArtifactCommandError, CommitArtifactReport, CommitRecoveryReport, NoCommitArtifactHooks,
-    PreparedCommit, PromotionOutcome, same_file_facts,
+    PreparedCommit, PromotionOutcome, rooted_target_from_commit_report, same_file_facts,
 };
-use crate::artifact::fs::{
-    canonical_new_leaf_no_symlink, observe_regular_file, unique_temp_sibling_path,
-};
+use crate::artifact::fs::{observe_regular_file, unique_temp_sibling_path};
 use crate::cases::{begin_tx, commit_tx};
 use voom_core::ArtifactHandleId;
 
@@ -76,6 +74,8 @@ pub(crate) async fn prepare_commit_recovery(
             ))
         })?;
     let target_path = PathBuf::from(&record.target_path);
+    let (target_storage_root_id, target_relative_locator) =
+        rooted_target_from_commit_report(&record)?;
 
     // Re-read the same inputs the initial prepare used; the staging artifact is
     // still live because finalize (which retires it) never completed.
@@ -115,41 +115,16 @@ pub(crate) async fn prepare_commit_recovery(
         &expected_facts,
     )?;
 
-    // Decide where to resume from based on the target's current state. Only a
-    // genuinely absent target (NotFound) means "resume a fresh install"; a
-    // permission/IO error or an occupied path must surface loudly rather than
-    // be misread as absent (which would attempt a spurious fresh install).
-    let existing_target = match fs::symlink_metadata(&target_path).await {
-        Ok(_) => Some(observe_regular_file(&target_path).await?),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
-        Err(err) => {
-            return Err(VoomError::CommitFailure(format!(
-                "commit recovery cannot stat target {}: {err}",
-                target_path.display()
-            )));
-        }
-    };
-    let already_installed = match &existing_target {
-        Some(facts) if same_file_facts(facts, &expected_facts) => true,
-        Some(_) => {
-            return Err(VoomError::Conflict(format!(
-                "commit recovery: target {} exists with mismatched facts",
-                target_path.display()
-            )));
-        }
-        None => false,
-    };
-    let canonical_target = if already_installed {
-        fs::canonicalize(&target_path).await.map_err(|err| {
-            VoomError::CommitFailure(format!(
-                "commit recovery cannot canonicalize installed target {}: {err}",
-                target_path.display()
-            ))
-        })?
-    } else {
-        canonical_new_leaf_no_symlink(&target_path).await?
-    };
-    let temp_path = unique_temp_sibling_path(&canonical_target)?;
+    let recovery_target = inspect_recovery_target(
+        cp,
+        source.source_storage_root_id,
+        target_storage_root_id,
+        &target_relative_locator,
+        &target_path,
+        &expected_facts,
+    )
+    .await?;
+    let temp_path = unique_temp_sibling_path(&recovery_target.canonical_path)?;
 
     let prepared = PreparedCommit {
         record,
@@ -158,17 +133,17 @@ pub(crate) async fn prepare_commit_recovery(
         source_file_asset_id: source.source_file_asset_id,
         staging_location_id: verified_staging.staging.id,
         staging_path,
-        target_path: canonical_target,
+        target_path: recovery_target.canonical_path,
+        target_storage_root_id,
+        target_relative_locator,
         temp_path,
         expected_facts: expected_facts.clone(),
         promotion_started_at: cp.clock().now(),
         gate_evaluated_lease_ids,
     };
 
-    let promotion = if already_installed {
-        PromotionOutcome {
-            target_facts: existing_target.unwrap_or(expected_facts),
-        }
+    let promotion = if let Some(target_facts) = recovery_target.existing_facts {
+        PromotionOutcome { target_facts }
     } else {
         promote_prepared(cp, &prepared, &NoCommitArtifactHooks).await?
     };
@@ -176,6 +151,58 @@ pub(crate) async fn prepare_commit_recovery(
     Ok(super::PreparedArtifactCommit {
         prepared,
         promotion,
+    })
+}
+
+struct RecoveryTarget {
+    canonical_path: PathBuf,
+    existing_facts: Option<crate::artifact::fs::ArtifactFileFacts>,
+}
+
+async fn inspect_recovery_target(
+    cp: &ControlPlane,
+    source_storage_root_id: voom_core::StorageRootId,
+    target_storage_root_id: voom_core::StorageRootId,
+    target_relative_locator: &voom_core::ProviderRelativeLocator,
+    target_path: &Path,
+    expected_facts: &crate::artifact::fs::ArtifactFileFacts,
+) -> Result<RecoveryTarget, VoomError> {
+    // Only a genuinely absent target means "resume a fresh install". A
+    // permission/IO error or occupied path must surface before promotion.
+    let target_exists = match fs::symlink_metadata(target_path).await {
+        Ok(_) => true,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => {
+            return Err(VoomError::CommitFailure(format!(
+                "commit recovery cannot stat target {}: {error}",
+                target_path.display()
+            )));
+        }
+    };
+    let canonical_path = crate::operation_source::resolve_exact_artifact_recovery_target(
+        cp,
+        "artifact commit recovery",
+        source_storage_root_id,
+        target_storage_root_id,
+        target_relative_locator,
+        target_path,
+    )
+    .await?;
+    let existing_facts = if target_exists {
+        let facts = observe_regular_file(target_path).await?;
+        if !same_file_facts(&facts, expected_facts) {
+            return Err(VoomError::Conflict(format!(
+                "commit recovery: target {} exists with mismatched facts",
+                target_path.display()
+            )));
+        }
+        Some(facts)
+    } else {
+        None
+    };
+    Ok(RecoveryTarget {
+        canonical_path,
+        existing_facts,
     })
 }
 
@@ -187,9 +214,16 @@ pub(super) async fn transition_recovery(
     let mut tx = begin_tx(&cp.pool).await?;
     let now = cp.clock().now();
     let recovery = observe_recovery(prepared, recovery_reason(&err)).await;
-    update_commit_report_in_tx(&cp.artifacts, &mut tx, prepared.record.id, &recovery)
-        .await
-        .map_err(CommitArtifactCommandError::from)?;
+    update_commit_report_in_tx(
+        &cp.artifacts,
+        &mut tx,
+        prepared.record.id,
+        &recovery,
+        prepared.target_storage_root_id,
+        &prepared.target_relative_locator,
+    )
+    .await
+    .map_err(CommitArtifactCommandError::from)?;
     let error_code = err.error_code();
     let message = err.to_string();
     let recovered = mark_recovery_required_with_event_in_tx(

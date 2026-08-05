@@ -187,12 +187,18 @@ pub enum Event {
     FileVersionCreated(FileVersionCreatedPayload),
     #[serde(rename = "file_location.recorded")]
     FileLocationRecorded(FileLocationRecordedPayload),
+    #[serde(rename = "file_location.rooted_recorded")]
+    FileLocationRootedRecorded(FileLocationRootedRecordedPayload),
     #[serde(rename = "file_location.aliased")]
     FileLocationAliased(FileLocationAliasedPayload),
+    #[serde(rename = "file_location.rooted_aliased")]
+    FileLocationRootedAliased(FileLocationRootedAliasedPayload),
     #[serde(rename = "file_location.retired_by_move")]
     FileLocationRetiredByMove(FileLocationRetiredByMovePayload),
     #[serde(rename = "file_location.recorded_by_move")]
     FileLocationRecordedByMove(FileLocationRecordedByMovePayload),
+    #[serde(rename = "file_location.rooted_recorded_by_move")]
+    FileLocationRootedRecordedByMove(FileLocationRootedRecordedByMovePayload),
     #[serde(rename = "identity_evidence.recorded")]
     IdentityEvidenceRecorded(IdentityEvidenceRecordedPayload),
     #[serde(rename = "identity_evidence.accepted")]
@@ -332,9 +338,14 @@ impl Event {
             Self::FileAssetCreated(_) => EventKind::FileAssetCreated,
             Self::FileVersionCreated(_) => EventKind::FileVersionCreated,
             Self::FileLocationRecorded(_) => EventKind::FileLocationRecorded,
+            Self::FileLocationRootedRecorded(_) => EventKind::FileLocationRootedRecorded,
             Self::FileLocationAliased(_) => EventKind::FileLocationAliased,
+            Self::FileLocationRootedAliased(_) => EventKind::FileLocationRootedAliased,
             Self::FileLocationRetiredByMove(_) => EventKind::FileLocationRetiredByMove,
             Self::FileLocationRecordedByMove(_) => EventKind::FileLocationRecordedByMove,
+            Self::FileLocationRootedRecordedByMove(_) => {
+                EventKind::FileLocationRootedRecordedByMove
+            }
             Self::IdentityEvidenceRecorded(_) => EventKind::IdentityEvidenceRecorded,
             Self::IdentityEvidenceAccepted(_) => EventKind::IdentityEvidenceAccepted,
             Self::IdentityEvidenceSuperseded(_) => EventKind::IdentityEvidenceSuperseded,

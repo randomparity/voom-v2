@@ -2,9 +2,7 @@ use time::{Duration, OffsetDateTime};
 use voom_core::VoomError;
 use voom_events::EventKind;
 use voom_store::repo::audit::events::{EventFilter, EventRepo, Page};
-use voom_store::repo::media::identity::{
-    FileLocationKind, NewFileLocation, NewFileVersion, ProducedBy,
-};
+use voom_store::repo::media::identity::{NewFileLocation, NewFileVersion, ProducedBy};
 use voom_store::repo::media::use_leases::{
     BlockingMode, IssuerKind, LeaseScope, NewUseLease, UseLeaseKind, UseLeaseReleaseReason,
 };
@@ -362,8 +360,10 @@ async fn reanchor_use_leases_on_move_emits_one_event_per_lease() {
     let loc_retired = cp
         .create_file_location(NewFileLocation {
             file_version_id: version.id,
-            kind: FileLocationKind::LocalPath,
-            value: "/mnt/old/file.mkv".to_owned(),
+            storage_root_id: voom_store::test_support::TEST_STORAGE_ROOT_ID,
+            provider_relative_locator: voom_store::test_support::test_relative_locator(
+                "/mnt/old/file.mkv",
+            ),
             proof: None,
             observed_at: T0,
         })
@@ -372,8 +372,10 @@ async fn reanchor_use_leases_on_move_emits_one_event_per_lease() {
     let loc_new = cp
         .create_file_location(NewFileLocation {
             file_version_id: version.id,
-            kind: FileLocationKind::LocalPath,
-            value: "/mnt/new/file.mkv".to_owned(),
+            storage_root_id: voom_store::test_support::TEST_STORAGE_ROOT_ID,
+            provider_relative_locator: voom_store::test_support::test_relative_locator(
+                "/mnt/new/file.mkv",
+            ),
             proof: None,
             observed_at: T0,
         })

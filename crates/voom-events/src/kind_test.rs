@@ -373,9 +373,12 @@ fn identity_layer_event_kinds_round_trip() {
         EventKind::FileAssetCreated,
         EventKind::FileVersionCreated,
         EventKind::FileLocationRecorded,
+        EventKind::FileLocationRootedRecorded,
         EventKind::FileLocationAliased,
+        EventKind::FileLocationRootedAliased,
         EventKind::FileLocationRetiredByMove,
         EventKind::FileLocationRecordedByMove,
+        EventKind::FileLocationRootedRecordedByMove,
         EventKind::IdentityEvidenceRecorded,
         EventKind::IdentityEvidenceAccepted,
         EventKind::IdentityEvidenceSuperseded,
@@ -422,8 +425,16 @@ fn identity_layer_event_kinds_use_dotted_wire_format() {
         "file_location.recorded"
     );
     assert_eq!(
+        EventKind::FileLocationRootedRecorded.as_str(),
+        "file_location.rooted_recorded"
+    );
+    assert_eq!(
         EventKind::FileLocationAliased.as_str(),
         "file_location.aliased"
+    );
+    assert_eq!(
+        EventKind::FileLocationRootedAliased.as_str(),
+        "file_location.rooted_aliased"
     );
     assert_eq!(
         EventKind::FileLocationRetiredByMove.as_str(),
@@ -432,6 +443,10 @@ fn identity_layer_event_kinds_use_dotted_wire_format() {
     assert_eq!(
         EventKind::FileLocationRecordedByMove.as_str(),
         "file_location.recorded_by_move"
+    );
+    assert_eq!(
+        EventKind::FileLocationRootedRecordedByMove.as_str(),
+        "file_location.rooted_recorded_by_move"
     );
     assert_eq!(
         EventKind::IdentityEvidenceRecorded.as_str(),

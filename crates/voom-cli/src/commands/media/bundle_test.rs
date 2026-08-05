@@ -1,8 +1,10 @@
 use super::*;
 
 use time::OffsetDateTime;
-use voom_core::{FileAssetId, FileLocationId, FileVersionId};
-use voom_store::repo::media::identity::ProducedBy;
+use voom_core::{
+    FileAssetId, FileLocationId, FileVersionId, ProviderRelativeLocator, StorageRootId,
+};
+use voom_store::repo::media::identity::{FileLocationAddress, ProducedBy};
 
 const EPOCH: OffsetDateTime = OffsetDateTime::UNIX_EPOCH;
 
@@ -20,12 +22,31 @@ fn version(id: u64, retired: bool) -> FileVersion {
     }
 }
 
-fn location(id: u64, kind: FileLocationKind, value: &str) -> FileLocation {
+fn rooted_location(id: u64, relative_locator: &str) -> FileLocation {
     FileLocation {
         id: FileLocationId(id),
         file_version_id: FileVersionId(1),
-        kind,
-        value: value.to_owned(),
+        address: FileLocationAddress::Rooted {
+            storage_root_id: StorageRootId(7),
+            provider_relative_locator: ProviderRelativeLocator::new(relative_locator.to_owned())
+                .unwrap(),
+        },
+        proof_kind: None,
+        proof_value: None,
+        observed_at: EPOCH,
+        retired_at: None,
+        epoch: 0,
+    }
+}
+
+fn legacy_location(id: u64) -> FileLocation {
+    FileLocation {
+        id: FileLocationId(id),
+        file_version_id: FileVersionId(1),
+        address: FileLocationAddress::UnassignedLegacy {
+            legacy_kind: "object_store_key".to_owned(),
+            legacy_locator: "s3://ignored".to_owned(),
+        },
         proof_kind: None,
         proof_value: None,
         observed_at: EPOCH,
@@ -51,19 +72,24 @@ fn select_live_version_is_none_when_empty_or_all_retired() {
 }
 
 #[test]
-fn select_local_location_picks_highest_id_local_path() {
+fn select_local_location_picks_highest_id_rooted_location() {
     let chosen = select_local_location(vec![
-        location(1, FileLocationKind::LocalPath, "/a"),
-        location(5, FileLocationKind::ObjectStoreKey, "s3://ignored"),
-        location(3, FileLocationKind::LocalPath, "/b"),
+        rooted_location(1, "a"),
+        legacy_location(5),
+        rooted_location(3, "b"),
     ]);
-    assert_eq!(chosen, Some("/b".to_owned()));
+    assert_eq!(
+        chosen,
+        Some(LocationData {
+            file_location_id: 3,
+            storage_root_id: 7,
+            provider_relative_locator: "b".to_owned(),
+        })
+    );
 }
 
 #[test]
-fn select_local_location_is_none_without_a_local_path() {
+fn select_local_location_is_none_without_a_rooted_location() {
     assert!(select_local_location(Vec::new()).is_none());
-    assert!(
-        select_local_location(vec![location(1, FileLocationKind::BackupPath, "/backup")]).is_none()
-    );
+    assert!(select_local_location(vec![legacy_location(1)]).is_none());
 }

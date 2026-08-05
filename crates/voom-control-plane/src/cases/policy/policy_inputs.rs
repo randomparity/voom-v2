@@ -1,14 +1,12 @@
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
-
-use voom_core::{FileVersionId, LibraryRootId, MediaSnapshotId, PolicyInputSetId, VoomError};
+use voom_core::{FileVersionId, MediaSnapshotId, PolicyInputSetId, StorageRootId, VoomError};
 use voom_policy::{
     MediaSnapshotInput, PolicyInputSetDraft, PolicyInputSourceKind, TargetRef,
     ValidatedPolicyInputSetDraft,
 };
 use voom_store::repo::{
     media::identity::{
-        FileLocationKind, FileLocationRepo, FileVersionRepo, MediaSnapshotFileVersionQuery,
+        FileLocationAddress, FileLocationRepo, FileVersionRepo, MediaSnapshotFileVersionQuery,
         MediaSnapshotRepo,
     },
     policy::policy_inputs::{PolicyInputSet, PolicyInputSetSummary},
@@ -46,14 +44,14 @@ pub struct WholeScanInput {
 #[derive(Debug, Clone)]
 pub struct RootScopedScanInput {
     pub slug: String,
-    pub library_root_id: LibraryRootId,
+    pub library_root_id: StorageRootId,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RootScopedScanInputResult {
     pub input_set_id: PolicyInputSetId,
     pub slug: String,
-    pub library_root_id: LibraryRootId,
+    pub library_root_id: StorageRootId,
     /// Live file-versions under the root whose latest snapshot had a video
     /// stream.
     pub included_count: u32,
@@ -68,8 +66,8 @@ pub struct WholeScanInputResult {
     pub slug: String,
     /// Live file-versions whose latest snapshot had a video stream.
     pub included_count: u32,
-    /// Live file-versions skipped because they had no snapshot or no
-    /// video stream (non-video / unprobeable).
+    /// Live file-versions skipped because they had no effectively available
+    /// rooted location, no snapshot, or no video stream.
     pub skipped_count: u32,
 }
 
@@ -220,8 +218,9 @@ impl ControlPlane {
     /// video file in the library.
     ///
     /// There is no durable scan id, so the anchor is "all live (non-retired)
-    /// file-versions whose latest media snapshot has a video stream". Each
-    /// such file contributes one media-snapshot member; non-video or
+    /// file-versions with an effectively available rooted location whose
+    /// latest media snapshot has a video stream". Each such file contributes
+    /// one media-snapshot member; quarantined, unavailable, non-video, or
     /// unprobeable file-versions are skipped and counted.
     ///
     /// # Errors
@@ -231,10 +230,18 @@ impl ControlPlane {
         input: WholeScanInput,
     ) -> Result<WholeScanInputResult, VoomError> {
         let versions = self.identity.list_live_file_versions().await?;
+        let mut root_availability = HashMap::new();
         let mut media_snapshots: Vec<MediaSnapshotInput> = Vec::new();
         let mut included_count: u32 = 0;
         let mut skipped_count: u32 = 0;
         for version in versions {
+            if !self
+                .file_version_has_available_root(version.id, &mut root_availability)
+                .await?
+            {
+                skipped_count += 1;
+                continue;
+            }
             let latest = self
                 .identity
                 .list_media_snapshots_by_version(version.id)
@@ -290,13 +297,19 @@ impl ControlPlane {
         &self,
         input: RootScopedScanInput,
     ) -> Result<RootScopedScanInputResult, VoomError> {
-        let root = self
-            .get_library_root(input.library_root_id)
+        let effective = self
+            .effective_library_root(input.library_root_id)
             .await?
             .ok_or_else(|| {
                 VoomError::NotFound(format!("library root {} not found", input.library_root_id))
             })?;
-        let root_path = PathBuf::from(&root.canonical_path);
+        if !effective.available {
+            return Err(VoomError::Config(format!(
+                "library root {} unavailable: {}",
+                input.library_root_id,
+                effective.reason.as_str()
+            )));
+        }
 
         let versions = self.identity.list_live_file_versions().await?;
         let mut media_snapshots: Vec<MediaSnapshotInput> = Vec::new();
@@ -304,7 +317,7 @@ impl ControlPlane {
         let mut skipped_count: u32 = 0;
         for version in versions {
             if !self
-                .file_version_is_under_root(version.id, &root_path)
+                .file_version_is_under_root(version.id, input.library_root_id)
                 .await?
             {
                 skipped_count += 1;
@@ -350,23 +363,63 @@ impl ControlPlane {
         })
     }
 
-    /// True when a file-version has a live local/shared-mount location whose
-    /// path is the root path or a component-wise descendant of it.
+    /// True when a file-version has a live location in the selected root.
     async fn file_version_is_under_root(
         &self,
         file_version_id: FileVersionId,
-        root_path: &Path,
+        storage_root_id: StorageRootId,
     ) -> Result<bool, VoomError> {
         let locations = self
             .identity
             .list_live_file_locations_by_version(file_version_id)
             .await?;
-        Ok(locations.iter().any(|loc| {
+        Ok(locations.iter().any(|location| {
             matches!(
-                loc.kind,
-                FileLocationKind::LocalPath | FileLocationKind::SharedMount
-            ) && Path::new(&loc.value).starts_with(root_path)
+                location.address,
+                FileLocationAddress::Rooted {
+                    storage_root_id: id,
+                    ..
+                } if id == storage_root_id
+            )
         }))
+    }
+
+    async fn file_version_has_available_root(
+        &self,
+        file_version_id: FileVersionId,
+        root_availability: &mut HashMap<StorageRootId, bool>,
+    ) -> Result<bool, VoomError> {
+        let locations = self
+            .identity
+            .list_live_file_locations_by_version(file_version_id)
+            .await?;
+        for location in locations {
+            let FileLocationAddress::Rooted {
+                storage_root_id, ..
+            } = location.address
+            else {
+                continue;
+            };
+            let available = if let Some(available) = root_availability.get(&storage_root_id) {
+                *available
+            } else {
+                let effective = self
+                    .effective_library_root(storage_root_id)
+                    .await?
+                    .ok_or_else(|| {
+                        VoomError::database(format!(
+                            "file version {file_version_id} references missing storage root \
+                             {storage_root_id}"
+                        ))
+                    })?;
+                root_availability.insert(storage_root_id, effective.available);
+                effective.available
+            };
+            if available {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     /// Get a policy input set by id.

@@ -1,8 +1,8 @@
 use super::{
     AffectedScopeClosure, BTreeSet, BundleId, ClosureWarning, CommitTarget, Deserialize,
-    EvidenceId, FileAssetId, FileLocationId, FileLocationKind, FileLocationProposal, FileVersionId,
-    ForcePathToken, JsonValue, LocationProof, OffsetDateTime, Serialize, TargetMemberKind,
-    VoomError,
+    EvidenceId, FileAssetId, FileLocationId, FileLocationProposal, FileVersionId, ForcePathToken,
+    JsonValue, LocationProof, OffsetDateTime, ProviderRelativeLocator, Serialize, StorageRootId,
+    TargetMemberKind, VoomError,
 };
 
 // ----- JSON wire formats for the `commit_intents` JSON columns ----------------
@@ -10,7 +10,7 @@ use super::{
 // `commit_intents.target` and `commit_intents.closure_initial` are
 // JSON-encoded; `accepted_evidence_ids` is a JSON array. The Rust-side
 // public types intentionally do NOT derive `Serialize`/`Deserialize`
-// (some embed M2 types like `FileLocationKind` and `LocationProof`
+// (some embed M2 types like `LocationProof`
 // that do not derive serde, and adding derives there would force a
 // wider M2 touch). Dedicated wire-format structs keep the on-disk JSON
 // shape stable and isolated; later commits read the same columns back
@@ -50,8 +50,8 @@ struct MoveFileLocationWire {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct FileLocationProposalWire {
-    kind: String,
-    value: String,
+    storage_root_id: StorageRootId,
+    provider_relative_locator: String,
     proof_kind: Option<String>,
     proof_value: Option<String>,
     #[serde(with = "time::serde::iso8601")]
@@ -68,8 +68,8 @@ impl FileLocationProposalWire {
             ),
         };
         Self {
-            kind: p.kind.as_str().to_owned(),
-            value: p.value.clone(),
+            storage_root_id: p.storage_root_id,
+            provider_relative_locator: p.provider_relative_locator.as_str().to_owned(),
             proof_kind,
             proof_value,
             observed_at: p.observed_at,
@@ -220,25 +220,28 @@ fn commit_target_from_wire(w: CommitTargetWire) -> Result<CommitTarget, VoomErro
         CommitTargetWire::Replace(ReplaceFileLocationWire { retired, new }) => {
             CommitTarget::ReplaceFileLocation {
                 retired,
-                new: file_location_proposal_from_wire(new)?,
+                new: file_location_proposal_from_wire(&new)?,
             }
         }
         CommitTargetWire::Move(MoveFileLocationWire { retired, new }) => {
             CommitTarget::MoveFileLocation {
                 retired,
-                new: file_location_proposal_from_wire(new)?,
+                new: file_location_proposal_from_wire(&new)?,
             }
         }
     })
 }
 
 fn file_location_proposal_from_wire(
-    w: FileLocationProposalWire,
+    w: &FileLocationProposalWire,
 ) -> Result<FileLocationProposal, VoomError> {
     let proof = decode_proof(w.proof_kind.as_deref(), w.proof_value.as_deref())?;
     Ok(FileLocationProposal {
-        kind: FileLocationKind::parse(&w.kind)?,
-        value: w.value,
+        storage_root_id: w.storage_root_id,
+        provider_relative_locator: ProviderRelativeLocator::parse_database(
+            "commit_intents.target.provider_relative_locator",
+            &w.provider_relative_locator,
+        )?,
         proof,
         observed_at: w.observed_at,
     })

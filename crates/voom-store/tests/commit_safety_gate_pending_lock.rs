@@ -20,9 +20,9 @@ use voom_store::repo::media::commit_safety_gate::{
     PrepareOutcome, prepare_destructive_commit,
 };
 use voom_store::repo::media::identity::{
-    AliasProof, CommitGateIdentityRepo, DiscoveredFile, FileAssetRepo, FileLocationKind,
-    FileLocationRepo, FileVersionRepo, IngestOutcome, IngestRepo, LocationProof, NewFileLocation,
-    NewFileVersion, ObservedBytes, ProducedBy, RenameProof, SqliteIdentityRepo,
+    AliasProof, CommitGateIdentityRepo, DiscoveredFile, FileAssetRepo, FileLocationRepo,
+    FileVersionRepo, IngestOutcome, IngestRepo, LocationProof, NewFileLocation, NewFileVersion,
+    ObservedBytes, ProducedBy, RenameProof, SqliteIdentityRepo,
 };
 use voom_store::repo::media::use_leases::{
     BlockingMode, IssuerKind, LeaseScope, NewUseLease, SqliteUseLeaseRepo, UseLeaseKind,
@@ -78,8 +78,8 @@ async fn seed_chain(pool: &SqlitePool, value: &str) -> Seeded {
             &mut tx,
             NewFileLocation {
                 file_version_id: version.id,
-                kind: FileLocationKind::LocalPath,
-                value: value.to_owned(),
+                storage_root_id: voom_store::test_support::TEST_STORAGE_ROOT_ID,
+                provider_relative_locator: voom_store::test_support::test_relative_locator(value),
                 proof: None,
                 observed_at: T0,
             },
@@ -108,8 +108,8 @@ async fn seed_chain_with_local_proof(
         .record_discovered_file_in_tx(
             &mut tx,
             DiscoveredFile {
-                location_kind: FileLocationKind::LocalPath,
-                location_value: value.to_owned(),
+                storage_root_id: voom_store::test_support::TEST_STORAGE_ROOT_ID,
+                provider_relative_locator: voom_store::test_support::test_relative_locator(value),
                 content_hash: "h-local".to_owned(),
                 size_bytes: 1,
                 observed_at: T0,
@@ -228,8 +228,10 @@ async fn alias_attach_rejected_when_in_flight_commit_covers_file_version() {
         .record_discovered_file_in_tx(
             &mut tx,
             DiscoveredFile {
-                location_kind: FileLocationKind::LocalPath,
-                location_value: "/srv/local/alias.mkv".to_owned(),
+                storage_root_id: voom_store::test_support::TEST_STORAGE_ROOT_ID,
+                provider_relative_locator: voom_store::test_support::test_relative_locator(
+                    "/srv/local/alias.mkv",
+                ),
                 content_hash: "h-local".to_owned(),
                 size_bytes: 1,
                 observed_at: T0 + Duration::seconds(2),
@@ -272,8 +274,10 @@ async fn reconcile_rename_proceeds_against_in_flight_commit_on_same_file_version
         .reconcile_rename(
             RenameProof::LocalFileIdGeneration {
                 prior_location_id: seeded.location,
-                new_kind: FileLocationKind::LocalPath,
-                new_value: "/srv/local/moved.mkv".to_owned(),
+                storage_root_id: voom_store::test_support::TEST_STORAGE_ROOT_ID,
+                provider_relative_locator: voom_store::test_support::test_relative_locator(
+                    "/srv/local/moved.mkv",
+                ),
                 file_id: 42,
                 generation: 1,
                 prior_path_missing: true,

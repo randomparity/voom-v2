@@ -9,7 +9,7 @@ use time::OffsetDateTime;
 use voom_core::rng_test_support::FrozenRng;
 use voom_plan::planner::audio::{AudioDispositionFact, SnapshotAudioStreamFact};
 use voom_store::repo::media::identity::{
-    DiscoveredFile, FileLocationKind, IngestOutcome, MediaSnapshot,
+    DiscoveredFile, IngestOutcome, MediaSnapshot,
 };
 use voom_store::repo::media::use_leases::{
     BlockingMode, IssuerKind, LeaseScope, NewUseLease, UseLeaseKind,
@@ -56,7 +56,7 @@ async fn extract_prepare_reserves_writer_before_artifact_inserts() {
     let task_hooks = Arc::clone(&hooks);
     let cp = Arc::new(cp);
     let task_cp = Arc::clone(&cp);
-    let input = empty_extract_input(source.file_version_id);
+    let input = empty_extract_input(source.file_version_id, source.file_location_id);
     let prepare =
         tokio::spawn(
             async move { prepare_extract_set(&task_cp, &input, task_hooks.as_ref()).await },
@@ -106,7 +106,7 @@ async fn extract_prepare_reports_blocking_lease_before_contended_writer() {
 
     let error = prepare_extract_set(
         &cp,
-        &empty_extract_input(source.file_version_id),
+        &empty_extract_input(source.file_version_id, source.file_location_id),
         &NoExtractClaimFenceHooks,
     )
     .await
@@ -120,10 +120,14 @@ async fn extract_prepare_reports_blocking_lease_before_contended_writer() {
     );
 }
 
-fn empty_extract_input(source_file_version_id: FileVersionId) -> CommitAudioExtractSetInput {
+fn empty_extract_input(
+    source_file_version_id: FileVersionId,
+    source_file_location_id: FileLocationId,
+) -> CommitAudioExtractSetInput {
     CommitAudioExtractSetInput {
         operation_row_id: u64::MAX,
         source_file_version_id,
+        source_file_location_id,
         source_media_snapshot_id: MediaSnapshotId(1),
         source_bundle_id: BundleId(1),
         outputs: Vec::new(),
@@ -244,8 +248,10 @@ async fn seed_source(cp: &crate::ControlPlane, path: PathBuf, bytes: &[u8]) -> S
     let outcome = cp
         .record_discovered_file(
             DiscoveredFile {
-                location_kind: FileLocationKind::LocalPath,
-                location_value: path.display().to_string(),
+                storage_root_id: voom_store::test_support::TEST_STORAGE_ROOT_ID,
+                provider_relative_locator: voom_store::test_support::test_relative_locator(
+                    &path.display().to_string(),
+                ),
                 content_hash: blake3_checksum(bytes),
                 size_bytes: u64::try_from(bytes.len()).unwrap(),
                 observed_at: OffsetDateTime::UNIX_EPOCH,

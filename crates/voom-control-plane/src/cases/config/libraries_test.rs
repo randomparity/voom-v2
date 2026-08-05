@@ -1,10 +1,9 @@
-use voom_core::LibraryId;
+use voom_core::{LibraryId, NodeId, NodeStatus, ProviderLocator, StorageProviderKind};
 use voom_store::repo::library::libraries::{LibraryMediaKind, NewLibrary};
 use voom_store::repo::library::library_roots::{
-    HiddenFilePolicy, LibraryRootKind, LibraryScanMode, NewLibraryRoot, SymlinkPolicy,
+    HiddenFilePolicy, LibraryScanMode, NewLibraryRoot, SymlinkPolicy,
 };
 
-use super::paths_overlap;
 use crate::cases::cp;
 
 fn new_library(slug: &str) -> NewLibrary {
@@ -17,12 +16,13 @@ fn new_library(slug: &str) -> NewLibrary {
     }
 }
 
-fn new_root(library_id: LibraryId, path: &str) -> NewLibraryRoot {
+fn new_root(library_id: LibraryId, owner_node_id: NodeId, path: &str) -> NewLibraryRoot {
     NewLibraryRoot {
         library_id,
-        root_kind: LibraryRootKind::LocalPath,
-        canonical_path: path.to_owned(),
-        display_path: path.to_owned(),
+        owner_node_id,
+        provider_kind: StorageProviderKind::LocalFilesystem,
+        provider_locator: ProviderLocator::new(path.to_owned()).unwrap(),
+        display_locator: path.to_owned(),
         include_globs: Vec::new(),
         exclude_globs: Vec::new(),
         extension_allowlist: Vec::new(),
@@ -32,58 +32,69 @@ fn new_root(library_id: LibraryId, path: &str) -> NewLibraryRoot {
         max_depth: None,
         stability_seconds: 0,
         debounce_seconds: 0,
-        default_output_root: None,
-        default_staging_root: None,
-        default_backup_root: None,
+        default_output_root_id: None,
+        default_staging_root_id: None,
+        default_backup_root_id: None,
         enabled: true,
     }
 }
 
-#[test]
-fn paths_overlap_is_component_wise_not_string_prefix() {
-    // Sibling sharing a textual prefix must NOT overlap.
-    assert!(!paths_overlap("/media/movies", "/media/movies-adult"));
-    // Nested and ancestor overlap.
-    assert!(paths_overlap("/media", "/media/movies"));
-    assert!(paths_overlap("/media/movies", "/media"));
-    // Identical overlaps.
-    assert!(paths_overlap("/media/movies", "/media/movies"));
-    // Disjoint do not.
-    assert!(!paths_overlap("/media/movies", "/media/shows"));
+async fn node(cp: &crate::ControlPlane, name: &str, status: NodeStatus) -> NodeId {
+    let id = sqlx::query(
+        "INSERT INTO nodes \
+         (name, kind, status, registered_at, last_seen_at, heartbeat_ttl_seconds, \
+          auth_token_hash, auth_token_hint, metadata) \
+         VALUES (?, 'local', ?, '1970-01-01T00:00:00Z', '1970-01-01T00:00:00Z', \
+                 60, 'hash', 'hint', '{}')",
+    )
+    .bind(name)
+    .bind(status.as_str())
+    .execute(cp.pool_for_test())
+    .await
+    .unwrap()
+    .last_insert_rowid();
+    NodeId(u64::try_from(id).unwrap())
 }
 
 #[tokio::test]
 async fn library_and_root_crud_round_trip() {
     let (cp, _tmp) = cp().await;
     let lib = cp.create_library(new_library("films")).await.unwrap();
-    assert_eq!(cp.list_libraries().await.unwrap().len(), 1);
+    let owner = node(&cp, "node-a", NodeStatus::Registered).await;
+    assert!(
+        cp.list_libraries()
+            .await
+            .unwrap()
+            .iter()
+            .any(|listed| listed.id == lib.id)
+    );
 
     let root = cp
-        .create_library_root(new_root(lib.id, "/media/films"))
+        .create_library_root(new_root(lib.id, owner, "/media/films"))
         .await
         .unwrap();
     let fetched = cp.get_library_root(root.id).await.unwrap().unwrap();
-    assert_eq!(fetched.canonical_path, "/media/films");
+    assert_eq!(fetched.provider_locator.as_str(), "/media/films");
     assert_eq!(cp.list_library_roots(Some(lib.id)).await.unwrap().len(), 1);
 }
 
 #[tokio::test]
-async fn overlapping_root_is_rejected() {
+async fn owner_scoped_provider_locator_identity_is_enforced() {
     let (cp, _tmp) = cp().await;
     let lib = cp.create_library(new_library("films")).await.unwrap();
-    cp.create_library_root(new_root(lib.id, "/media/films"))
+    let owner_a = node(&cp, "node-a", NodeStatus::Registered).await;
+    let owner_b = node(&cp, "node-b", NodeStatus::Registered).await;
+    cp.create_library_root(new_root(lib.id, owner_a, "/media/films"))
         .await
         .unwrap();
 
-    // Nested under the existing root.
-    let nested = cp
-        .create_library_root(new_root(lib.id, "/media/films/2024"))
+    let duplicate = cp
+        .create_library_root(new_root(lib.id, owner_a, "/media/films"))
         .await
         .unwrap_err();
-    assert_eq!(nested.code(), "CONFLICT");
+    assert_eq!(duplicate.code(), "CONFLICT");
 
-    // Sibling sharing a textual prefix is allowed.
-    cp.create_library_root(new_root(lib.id, "/media/films-4k"))
+    cp.create_library_root(new_root(lib.id, owner_b, "/media/films"))
         .await
         .unwrap();
 }

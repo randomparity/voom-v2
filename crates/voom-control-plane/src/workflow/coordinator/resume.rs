@@ -15,7 +15,7 @@ use voom_store::repo::execution::workflow_summaries::{
     FilePhaseOutcome, FilePhaseSummary, FileRunHistory, FileRunStart, NewFileRunHistory,
     NewFileRunStart,
 };
-use voom_store::repo::media::identity::{FileLocationKind, FileLocationRepo, FileVersionRepo};
+use voom_store::repo::media::identity::{FileLocationAddress, FileLocationRepo, FileVersionRepo};
 
 use crate::ControlPlane;
 use crate::workflow::coordinator::PhaseFile;
@@ -94,9 +94,13 @@ impl ControlPlane {
             .await?;
         let path = locations
             .iter()
-            .find(|location| location.kind == FileLocationKind::LocalPath)
-            .or_else(|| locations.first())
-            .map(|location| location.value.clone())
+            .find_map(|location| match &location.address {
+                FileLocationAddress::Rooted {
+                    provider_relative_locator,
+                    ..
+                } => Some(provider_relative_locator.as_str().to_owned()),
+                FileLocationAddress::UnassignedLegacy { .. } => None,
+            })
             .ok_or_else(|| {
                 VoomError::NotFound(format!(
                     "file version {file_version_id} has no live location to derive a branch id"

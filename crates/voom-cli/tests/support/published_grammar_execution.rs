@@ -52,7 +52,7 @@ pub fn prepare_worker_binaries() -> io::Result<WorkerBinaryGuard> {
 }
 
 pub fn execute_core(media: &ScenarioMedia) -> io::Result<()> {
-    let mut run = ScenarioRun::start(&media.root)?;
+    let mut run = ScenarioRun::start(&media.root, &media.library)?;
     let scan = run.scan(&media.library)?;
     require(scan["data"]["summary"]["ingested"] == 1, "C1 scan ingested")?;
     require(scan["data"]["summary"]["failed"] == 0, "C1 scan failures")?;
@@ -60,8 +60,8 @@ pub fn execute_core(media: &ScenarioMedia) -> io::Result<()> {
     let input_id = run.create_input("published-grammar-core-input", 1)?;
     let preview = run.preview(version_id, input_id)?;
     assert_core_preview(&preview)?;
-    let staging = media.root.join("stage");
-    let output = media.root.join("output");
+    let staging = media.library.join("stage");
+    let output = media.library.join("output");
     let execute = run.execute(version_id, input_id, &staging, &output)?;
     assert_core_execute(&execute)?;
     let job_id = number(&execute["data"]["summary"]["job_id"], "C1 job id")?;
@@ -78,7 +78,7 @@ pub fn execute_core(media: &ScenarioMedia) -> io::Result<()> {
 }
 
 pub fn execute_tracks(media: &ScenarioMedia) -> io::Result<()> {
-    let mut run = ScenarioRun::start(&media.root)?;
+    let mut run = ScenarioRun::start(&media.root, &media.library)?;
     let scan = run.scan(&media.library)?;
     require(scan["data"]["summary"]["ingested"] == 3, "T1 scan ingested")?;
     require(scan["data"]["summary"]["failed"] == 0, "T1 scan failures")?;
@@ -111,8 +111,8 @@ pub fn execute_tracks(media: &ScenarioMedia) -> io::Result<()> {
             && preview["data"]["plan"]["summary"]["blocked_node_count"] == 0,
         format!("T1 preview shape: {preview}"),
     )?;
-    let staging = media.root.join("stage");
-    let output = media.root.join("output");
+    let staging = media.library.join("stage");
+    let output = media.library.join("output");
     let execute = run.execute(version_id, input_id, &staging, &output)?;
     assert_tracks_execute(&execute)?;
     let job_id = number(&execute["data"]["summary"]["job_id"], "T1 job id")?;
@@ -129,7 +129,7 @@ pub fn execute_tracks(media: &ScenarioMedia) -> io::Result<()> {
 }
 
 pub fn execute_audio(media: &ScenarioMedia) -> io::Result<()> {
-    let mut run = ScenarioRun::start(&media.root)?;
+    let mut run = ScenarioRun::start(&media.root, &media.library)?;
     let scan = run.scan(&media.library)?;
     require(scan["data"]["summary"]["ingested"] == 2, "A1 scan ingested")?;
     require(scan["data"]["summary"]["failed"] == 0, "A1 scan failures")?;
@@ -138,8 +138,8 @@ pub fn execute_audio(media: &ScenarioMedia) -> io::Result<()> {
     let input_id = run.create_input("published-grammar-audio-input", 1)?;
     let preview = run.preview(version_id, input_id)?;
     assert_audio_preview(&preview)?;
-    let staging = media.root.join("stage");
-    let output = media.root.join("output");
+    let staging = media.library.join("stage");
+    let output = media.library.join("output");
     let execute = run.execute(version_id, input_id, &staging, &output)?;
     assert_audio_execute(&execute)?;
     let job_id = number(&execute["data"]["summary"]["job_id"], "A1 job id")?;
@@ -156,7 +156,7 @@ pub fn execute_audio(media: &ScenarioMedia) -> io::Result<()> {
 }
 
 pub fn execute_control_flow(media: &ScenarioMedia) -> io::Result<()> {
-    let mut run = ScenarioRun::start(&media.root)?;
+    let mut run = ScenarioRun::start(&media.root, &media.library)?;
     let scan = run.scan(&media.library)?;
     require(scan["data"]["summary"]["ingested"] == 3, "F1 scan ingested")?;
     require(scan["data"]["summary"]["failed"] == 0, "F1 scan failures")?;
@@ -169,8 +169,8 @@ pub fn execute_control_flow(media: &ScenarioMedia) -> io::Result<()> {
     let input_id = run.create_input("published-grammar-control-flow-input", 3)?;
     let preview = run.preview(version_id, input_id)?;
     assert_control_flow_preview(&preview)?;
-    let staging = media.root.join("stage");
-    let output = media.root.join("output");
+    let staging = media.library.join("stage");
+    let output = media.library.join("output");
     let sentinel = staging
         .join(".committed")
         .join("remux")
@@ -207,11 +207,35 @@ pub fn execute_control_flow(media: &ScenarioMedia) -> io::Result<()> {
 }
 
 impl ScenarioRun {
-    fn start(root: &Path) -> io::Result<Self> {
+    fn start(root: &Path, library: &Path) -> io::Result<Self> {
         let db = TempDatabase::new_in(root)?;
         let url = format!("sqlite://{}", db.path().display());
         let init = run_cli(&url, &["init"])?;
         assert_ok_envelope(&init, "init", "init")?;
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+        runtime.block_on(async {
+            let pool = voom_store::connect(&url)
+                .await
+                .map_err(|error| io::Error::other(error.to_string()))?;
+            voom_store::test_support::seed_test_storage_root(&pool)
+                .await
+                .map_err(|error| io::Error::other(error.to_string()))?;
+            sqlx::query(
+                "UPDATE library_roots SET provider_locator = ?, display_locator = ? WHERE id = ?",
+            )
+            .bind(library.display().to_string())
+            .bind(library.display().to_string())
+            .bind(
+                i64::try_from(voom_store::test_support::TEST_STORAGE_ROOT_ID.0)
+                    .map_err(|error| io::Error::other(error.to_string()))?,
+            )
+            .execute(&pool)
+            .await
+            .map_err(|error| io::Error::other(error.to_string()))?;
+            Ok::<(), io::Error>(())
+        })?;
         let mut ffmpeg = LocalWorker::spawn(&url, "ffmpeg")?;
         let mut mkvtoolnix = LocalWorker::spawn(&url, "mkvtoolnix")?;
         ffmpeg.wait_for_ready(READY_TIMEOUT)?;
@@ -224,9 +248,13 @@ impl ScenarioRun {
         })
     }
 
-    fn scan(&self, library: &Path) -> io::Result<Value> {
+    fn scan(&self, _library: &Path) -> io::Result<Value> {
         self.ok(
-            &["scan", "--path", &library.display().to_string()],
+            &[
+                "scan",
+                "--root",
+                &voom_store::test_support::TEST_STORAGE_ROOT_ID.0.to_string(),
+            ],
             "scan",
             "scan",
         )
@@ -1276,6 +1304,10 @@ fn assert_core_output(output_dir: &Path) -> io::Result<()> {
 fn run_cli(url: &str, args: &[&str]) -> io::Result<BoundedOutput> {
     run_bounded(
         Command::new(env!("CARGO_BIN_EXE_voom"))
+            .env(
+                "VOOM_LOCAL_NODE_ID",
+                voom_store::test_support::TEST_STORAGE_ROOT_ID.0.to_string(),
+            )
             .args(["--database-url", url])
             .args(args),
         PROCESS_TIMEOUT,

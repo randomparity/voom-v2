@@ -6,7 +6,7 @@ use time::OffsetDateTime;
 use voom_core::ids::{ArtifactCommitRecordId, ArtifactVerificationId};
 use voom_core::{
     ArtifactHandleId, ArtifactLocationId, BundleId, FileLocationId, FileVersionId, LeaseId,
-    MediaSnapshotId, VoomError, WorkerId,
+    MediaSnapshotId, ProviderRelativeLocator, StorageRootId, VoomError, WorkerId,
 };
 
 use super::Repository;
@@ -118,7 +118,8 @@ pub struct LegacyAudioExtractOwner {
     pub result_file_version_id: u64,
     pub result_file_location_id: u64,
     pub result_location_file_version_id: u64,
-    pub result_location: String,
+    pub result_storage_root_id: StorageRootId,
+    pub result_provider_relative_locator: ProviderRelativeLocator,
     pub result_location_retired_at: Option<String>,
     pub result_size_bytes: u64,
     pub result_checksum: String,
@@ -1145,7 +1146,8 @@ async fn legacy_owner_row(
          result_version.file_asset_id AS result_file_asset_id, \
          commit_record.result_file_version_id, commit_record.result_file_location_id, \
          result_location.file_version_id AS result_location_file_version_id, \
-         result_location.value AS result_location, \
+         result_location.storage_root_id AS result_storage_root_id, \
+         result_location.provider_relative_locator AS result_provider_relative_locator, \
          result_location.retired_at AS result_location_retired_at, \
          result_version.size_bytes AS result_size_bytes, \
          result_version.content_hash AS result_checksum, member.id AS bundle_member_id, \
@@ -1233,7 +1235,11 @@ fn decode_legacy_owner(row: &SqliteRow) -> Result<LegacyAudioExtractOwner, VoomE
             row,
             "result_location_file_version_id",
         )?,
-        result_location: legacy_string(row, "result_location")?,
+        result_storage_root_id: StorageRootId(legacy_optional_u64(row, "result_storage_root_id")?),
+        result_provider_relative_locator: ProviderRelativeLocator::parse_database(
+            "file_locations.provider_relative_locator",
+            &legacy_string(row, "result_provider_relative_locator")?,
+        )?,
         result_location_retired_at: legacy_optional_string(row, "result_location_retired_at")?,
         result_size_bytes: legacy_optional_u64(row, "result_size_bytes")?,
         result_checksum: legacy_string(row, "result_checksum")?,

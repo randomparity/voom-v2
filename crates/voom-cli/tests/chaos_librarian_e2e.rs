@@ -268,8 +268,13 @@ async fn transcode_noop_does_not_schedule_worker_mutation() {
         .unwrap();
     let db = VoomTestDb::init().await.unwrap();
     let library_path = run.scan_root();
-    let library_arg = library_path.to_str().unwrap().to_owned();
-    let scan = run_voom(&db.url, ["scan", "--path", library_arg.as_str()]).unwrap();
+    let root_id = db
+        .configure_local_root(&library_path)
+        .await
+        .unwrap()
+        .0
+        .to_string();
+    let scan = run_voom(&db.url, ["scan", "--root", root_id.as_str()]).unwrap();
     assert_eq!(scan.status_code, Some(0), "stderr: {}", scan.stderr);
 
     let cp = db.control_plane().await.unwrap();
@@ -303,7 +308,7 @@ async fn transcode_noop_does_not_schedule_worker_mutation() {
 
 #[tokio::test]
 #[ignore = "run with just chaos-e2e-ci; requires Chaos Librarian media tools"]
-async fn step_mutation_rescan_observes_changed_media_facts() {
+async fn step_mutation_rescan_rejects_changed_bytes_at_live_rooted_address() {
     let chaos = ready_chaos();
 
     let tmp = tempfile::tempdir().unwrap();
@@ -319,8 +324,13 @@ async fn step_mutation_rescan_observes_changed_media_facts() {
     let db = VoomTestDb::init().await.unwrap();
     let library_path = run_dir.join("library");
     wait_for_file_with_extension(&library_path, "mkv");
-    let library_arg = library_path.to_str().unwrap().to_owned();
-    let first = run_voom(&db.url, ["scan", "--path", library_arg.as_str()]).unwrap();
+    let root_id = db
+        .configure_local_root(&library_path)
+        .await
+        .unwrap()
+        .0
+        .to_string();
+    let first = run_voom(&db.url, ["scan", "--root", root_id.as_str()]).unwrap();
     assert_eq!(first.status_code, Some(0), "stderr: {}", first.stderr);
 
     let output = child.wait_with_output().unwrap();
@@ -330,18 +340,14 @@ async fn step_mutation_rescan_observes_changed_media_facts() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    let second = run_voom(&db.url, ["scan", "--path", library_arg.as_str()]).unwrap();
-    assert_eq!(second.status_code, Some(0), "stderr: {}", second.stderr);
-
+    let second = run_voom(&db.url, ["scan", "--root", root_id.as_str()]).unwrap();
+    assert_eq!(second.status_code, Some(2), "stderr: {}", second.stderr);
+    assert_eq!(second.json["error"]["code"], "CONFLICT");
     assert!(
-        second.json["data"]["summary"]["snapshots_recorded"]
-            .as_u64()
+        second.json["error"]["message"]
+            .as_str()
             .unwrap()
-            > 0
-    );
-    assert_ne!(
-        first.json["data"]["files"][0]["content_hash"],
-        second.json["data"]["files"][0]["content_hash"]
+            .contains("already records different bytes")
     );
 }
 
@@ -478,7 +484,12 @@ async fn scan_materialized_scenario(chaos: &ChaosLibrarian, scenario: &Path) -> 
     let run = chaos.materialize(scenario).unwrap();
     let db = VoomTestDb::init().await.unwrap();
     let library_path = run.scan_root();
-    let library_arg = library_path.to_str().unwrap().to_owned();
-    let scan = run_voom(&db.url, ["scan", "--path", library_arg.as_str()]).unwrap();
+    let root_id = db
+        .configure_local_root(&library_path)
+        .await
+        .unwrap()
+        .0
+        .to_string();
+    let scan = run_voom(&db.url, ["scan", "--root", root_id.as_str()]).unwrap();
     ScannedChaosRun { run, db, scan }
 }

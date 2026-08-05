@@ -12,13 +12,11 @@
 
 use time::Duration;
 use voom_control_plane::ControlPlane;
-use voom_core::{FileLocationId, FileVersionId};
+use voom_core::{FileLocationId, FileVersionId, NodeId};
 use voom_events::{EventKind, SubjectType};
 use voom_store::init;
 use voom_store::repo::audit::events::{EventFilter, EventRepo, Page};
-use voom_store::repo::media::identity::{
-    DiscoveredFile, FileAssetRepo, FileLocationKind, IngestOutcome,
-};
+use voom_store::repo::media::identity::{DiscoveredFile, FileAssetRepo, IngestOutcome};
 use voom_store::repo::media::use_leases::{
     BlockingMode, IssuerKind, LeaseScope, NewUseLease, USE_LEASE_BATCH_LIMIT, UseLeaseKind,
     UseLeaseReleaseReason,
@@ -30,7 +28,15 @@ async fn open_disk_plane() -> (ControlPlane, TempDatabase) {
     let tmp = TempDatabase::new().unwrap();
     let url = sqlite_url_for(tmp.path());
     init(&url).await.unwrap();
-    let cp = ControlPlane::open(&url).await.unwrap();
+    let pool = voom_store::connect(&url).await.unwrap();
+    voom_store::test_support::seed_test_storage_root(&pool)
+        .await
+        .unwrap();
+    pool.close().await;
+    let cp = ControlPlane::open(&url)
+        .await
+        .unwrap()
+        .with_local_node_id(Some(NodeId(9_000_001)));
     (cp, tmp)
 }
 
@@ -41,8 +47,8 @@ async fn seed_location(cp: &ControlPlane, path: &str) -> (FileVersionId, FileLoc
     let outcome = cp
         .record_discovered_file(
             DiscoveredFile {
-                location_kind: FileLocationKind::LocalPath,
-                location_value: path.to_owned(),
+                storage_root_id: voom_store::test_support::TEST_STORAGE_ROOT_ID,
+                provider_relative_locator: voom_store::test_support::test_relative_locator(path),
                 content_hash: format!("hash-of-{path}"),
                 size_bytes: 1,
                 observed_at: T0,

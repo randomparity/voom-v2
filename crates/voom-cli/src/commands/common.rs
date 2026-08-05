@@ -1,7 +1,7 @@
 use std::io;
 
 use voom_control_plane::ControlPlane;
-use voom_core::{ErrorCode, VoomError};
+use voom_core::{Config, ErrorCode, VoomError};
 
 use crate::commands::health::voom_error_hint;
 use crate::envelope::{Local, emit_err};
@@ -11,8 +11,21 @@ pub async fn open_control_plane(
     database_url: &str,
     local: &Local,
 ) -> io::Result<Result<ControlPlane, i32>> {
+    let config = match Config::resolve(Some(database_url.to_owned()), None, None) {
+        Ok(config) => config,
+        Err(err) => {
+            emit_err(
+                command,
+                err.code(),
+                err.to_string(),
+                None,
+                Some(local.clone()),
+            )?;
+            return Ok(Err(2));
+        }
+    };
     match ControlPlane::open(database_url).await {
-        Ok(cp) => Ok(Ok(cp)),
+        Ok(cp) => Ok(Ok(cp.with_local_node_id(config.local_node_id))),
         Err(err) => {
             emit_err(
                 command,

@@ -9,7 +9,7 @@ use std::process::Command;
 
 use voom_control_plane::ControlPlane;
 use voom_control_plane::policy::{ComplianceExecutionOptions, PolicyInputFromScanInput};
-use voom_control_plane::scan::{ScanPathInput, ScanReportFileStatus};
+use voom_control_plane::scan::{RootScanOutcome, ScanReportFileStatus};
 use voom_core::{FileLocationId, FileVersionId, MediaSnapshotId};
 use voom_plan::PlanOperationKind;
 use voom_store::repo::media::identity::{MediaSnapshotRepo, SqliteIdentityRepo};
@@ -54,17 +54,24 @@ async fn remux_flow_verifies_commits_and_records_result_snapshot() {
     let url = format!("sqlite://{}", db.path().display());
     voom_store::init(&url).await.unwrap();
     let pool = voom_store::connect(&url).await.unwrap();
+    voom_store::test_support::seed_test_storage_root(&pool)
+        .await
+        .unwrap();
+    voom_store::test_support::set_test_storage_root_path(&pool, tmp.path())
+        .await
+        .unwrap();
     let cp = ControlPlane::open_with_pool(pool, std::sync::Arc::new(voom_core::SystemClock))
         .await
-        .unwrap();
+        .unwrap()
+        .with_local_node_id(Some(voom_core::NodeId(9_000_001)));
 
-    let scan = cp
-        .scan_path(ScanPathInput {
-            path: source.clone(),
-            extension_allowlist: Vec::new(),
-        })
+    let outcome = cp
+        .scan_library_root(voom_store::test_support::TEST_STORAGE_ROOT_ID)
         .await
         .unwrap();
+    let RootScanOutcome::Scanned(scan) = outcome else {
+        unreachable!("active local test root must scan")
+    };
     assert_eq!(scan.summary.scanned_count(), 1);
     let scanned = scan
         .files
@@ -530,6 +537,9 @@ fn generate_remux_fixture(path: &Path) {
         "ffmpeg remux fixture generation failed: {status}"
     );
     attach_remux_fixture(path, &base, &font, &cover);
+    for generated_input in [&base, &subtitle, &forced_subtitle, &font, &cover] {
+        std::fs::remove_file(generated_input).unwrap();
+    }
 }
 
 fn attach_remux_fixture(path: &Path, base: &Path, font: &Path, cover: &Path) {

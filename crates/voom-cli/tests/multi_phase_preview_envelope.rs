@@ -23,7 +23,7 @@ use tempfile::TempDir;
 use time::OffsetDateTime;
 use voom_control_plane::ControlPlane;
 use voom_control_plane::policy::PolicyInputFromScanInput;
-use voom_store::repo::media::identity::{DiscoveredFile, FileLocationKind, IngestOutcome};
+use voom_store::repo::media::identity::{DiscoveredFile, IngestOutcome};
 use voom_store::test_support::sqlite_url_for;
 use voom_test_support::TempDatabase;
 
@@ -105,6 +105,9 @@ async fn seed_combined() -> Seeded {
     let url = sqlite_url_for(tmp.path());
     voom_store::init(&url).await.unwrap();
     let pool = voom_store::connect(&url).await.unwrap();
+    voom_store::test_support::seed_test_storage_root(&pool)
+        .await
+        .unwrap();
     let cp = ControlPlane::open_with_pool(pool, std::sync::Arc::new(voom_core::SystemClock))
         .await
         .unwrap();
@@ -120,8 +123,10 @@ async fn seed_combined() -> Seeded {
     let outcome = cp
         .record_discovered_file(
             DiscoveredFile {
-                location_kind: FileLocationKind::LocalPath,
-                location_value: source.display().to_string(),
+                storage_root_id: voom_store::test_support::TEST_STORAGE_ROOT_ID,
+                provider_relative_locator: voom_store::test_support::test_relative_locator(
+                    &source.display().to_string(),
+                ),
                 content_hash: blake3_checksum(source_bytes),
                 size_bytes: u64::try_from(source_bytes.len()).unwrap(),
                 observed_at: OffsetDateTime::UNIX_EPOCH,

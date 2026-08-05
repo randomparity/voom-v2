@@ -7,8 +7,8 @@ expression: json
   "command": "scan",
   "status": "ok",
   "data": {
-    "path": "[media]/tiny.mp4",
-    "mode": "file",
+    "path": "[media]",
+    "mode": "directory",
     "summary": {
       "discovered": 1,
       "ingested": 1,

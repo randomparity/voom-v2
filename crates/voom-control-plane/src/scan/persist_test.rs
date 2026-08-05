@@ -28,6 +28,8 @@ async fn persists_discovered_file_and_media_snapshot_with_selected_worker() {
     let persisted = persist_scanned_media_snapshot(
         &cp,
         worker.id,
+        voom_store::test_support::TEST_STORAGE_ROOT_ID,
+        Path::new("/"),
         Path::new("/library/movie.mkv"),
         &[],
         &candidate,
@@ -41,14 +43,15 @@ async fn persists_discovered_file_and_media_snapshot_with_selected_worker() {
     assert_eq!(table_count(&cp, "file_locations").await, 1);
     assert_eq!(table_count(&cp, "media_snapshots").await, 1);
 
-    let (kind, value): (String, String) =
-        sqlx::query_as("SELECT kind, value FROM file_locations WHERE id = ?")
-            .bind(i64::try_from(persisted.file_location_id.0).unwrap())
-            .fetch_one(cp.pool_for_test())
-            .await
-            .unwrap();
-    assert_eq!(kind, "local_path");
-    assert_eq!(value, "/library/movie.mkv");
+    let (storage_root_id, relative_locator): (i64, String) = sqlx::query_as(
+        "SELECT storage_root_id, provider_relative_locator FROM file_locations WHERE id = ?",
+    )
+    .bind(i64::try_from(persisted.file_location_id.0).unwrap())
+    .fetch_one(cp.pool_for_test())
+    .await
+    .unwrap();
+    assert_eq!(storage_root_id, 9_000_001);
+    assert_eq!(relative_locator, "library/movie.mkv");
 
     let snapshot = cp
         .identity()
@@ -72,10 +75,56 @@ async fn persists_discovered_file_and_media_snapshot_with_selected_worker() {
         vec![
             EventKind::FileAssetCreated.as_str(),
             EventKind::FileVersionCreated.as_str(),
-            EventKind::FileLocationRecorded.as_str(),
+            EventKind::FileLocationRootedRecorded.as_str(),
             EventKind::MediaSnapshotRecorded.as_str(),
         ]
     );
+}
+
+#[tokio::test]
+async fn changed_bytes_at_same_rooted_address_conflict_without_new_identity() {
+    let (cp, _tmp) = cp_with_manual_clock(T0).await;
+    let worker = register_local_worker(&cp, "scan-worker").await;
+    let original = candidate_facts(123, "blake3:original");
+    let changed = candidate_facts(124, "blake3:changed");
+
+    persist_scanned_media_snapshot(
+        &cp,
+        worker.id,
+        voom_store::test_support::TEST_STORAGE_ROOT_ID,
+        Path::new("/"),
+        Path::new("/library/movie.mkv"),
+        &[],
+        &original,
+        &matching_probe_result(&original),
+    )
+    .await
+    .unwrap();
+
+    let error = persist_scanned_media_snapshot(
+        &cp,
+        worker.id,
+        voom_store::test_support::TEST_STORAGE_ROOT_ID,
+        Path::new("/"),
+        Path::new("/library/movie.mkv"),
+        &[],
+        &changed,
+        &matching_probe_result(&changed),
+    )
+    .await
+    .unwrap_err();
+
+    let ScanPersistError::Store(VoomError::Conflict(message)) = error else {
+        panic!("expected the rooted address collision to be a conflict");
+    };
+    assert_eq!(
+        message,
+        "scan address (9000001, library/movie.mkv) already records different bytes"
+    );
+    assert_eq!(table_count(&cp, "file_assets").await, 1);
+    assert_eq!(table_count(&cp, "file_versions").await, 1);
+    assert_eq!(table_count(&cp, "file_locations").await, 1);
+    assert_eq!(table_count(&cp, "media_snapshots").await, 1);
 }
 
 #[tokio::test]
@@ -89,6 +138,8 @@ async fn content_drift_skips_persistence_and_returns_failed_content_drift() {
     let err = persist_scanned_media_snapshot(
         &cp,
         worker.id,
+        voom_store::test_support::TEST_STORAGE_ROOT_ID,
+        Path::new("/"),
         Path::new("/library/movie.mkv"),
         &[],
         &candidate,
@@ -128,6 +179,8 @@ async fn persist_scan_assigns_stable_stream_ids() {
     let persisted = persist_scanned_media_snapshot(
         &cp,
         worker.id,
+        voom_store::test_support::TEST_STORAGE_ROOT_ID,
+        Path::new("/"),
         Path::new("/library/movie.mkv"),
         &[],
         &candidate,
@@ -156,6 +209,8 @@ async fn missing_or_retired_worker_id_is_rejected_without_replacement_worker() {
     let missing_err = persist_scanned_media_snapshot(
         &cp,
         WorkerId(999),
+        voom_store::test_support::TEST_STORAGE_ROOT_ID,
+        Path::new("/"),
         Path::new("/library/movie.mkv"),
         &[],
         &candidate,
@@ -177,6 +232,8 @@ async fn missing_or_retired_worker_id_is_rejected_without_replacement_worker() {
     let retired_err = persist_scanned_media_snapshot(
         &cp,
         worker.id,
+        voom_store::test_support::TEST_STORAGE_ROOT_ID,
+        Path::new("/"),
         Path::new("/library/movie.mkv"),
         &[],
         &candidate,
@@ -206,6 +263,8 @@ async fn stale_worker_is_rejected_before_scan_persistence() {
     let err = persist_scanned_media_snapshot(
         &cp,
         worker.id,
+        voom_store::test_support::TEST_STORAGE_ROOT_ID,
+        Path::new("/"),
         Path::new("/library/movie.mkv"),
         &[],
         &candidate,
@@ -230,6 +289,8 @@ async fn two_hardlinks_resolve_to_one_asset_with_two_locations() {
     let a = persist_scanned_media_snapshot(
         &cp,
         worker.id,
+        voom_store::test_support::TEST_STORAGE_ROOT_ID,
+        Path::new("/"),
         Path::new("/library/a.mkv"),
         &[],
         &first,
@@ -242,6 +303,8 @@ async fn two_hardlinks_resolve_to_one_asset_with_two_locations() {
     let b = persist_scanned_media_snapshot(
         &cp,
         worker.id,
+        voom_store::test_support::TEST_STORAGE_ROOT_ID,
+        Path::new("/"),
         Path::new("/library/b.mkv"),
         &[],
         &second,
@@ -275,6 +338,8 @@ async fn byte_identical_copy_on_a_different_inode_stays_a_distinct_asset() {
     persist_scanned_media_snapshot(
         &cp,
         worker.id,
+        voom_store::test_support::TEST_STORAGE_ROOT_ID,
+        Path::new("/"),
         Path::new("/library/a.mkv"),
         &[],
         &first,
@@ -285,6 +350,8 @@ async fn byte_identical_copy_on_a_different_inode_stays_a_distinct_asset() {
     let b = persist_scanned_media_snapshot(
         &cp,
         worker.id,
+        voom_store::test_support::TEST_STORAGE_ROOT_ID,
+        Path::new("/"),
         Path::new("/library/copy.mkv"),
         &[],
         &copy,
@@ -311,6 +378,8 @@ async fn recycled_inode_with_different_content_does_not_collapse_identity() {
     persist_scanned_media_snapshot(
         &cp,
         worker.id,
+        voom_store::test_support::TEST_STORAGE_ROOT_ID,
+        Path::new("/"),
         Path::new("/library/a.mkv"),
         &[],
         &first,
@@ -321,6 +390,8 @@ async fn recycled_inode_with_different_content_does_not_collapse_identity() {
     let b = persist_scanned_media_snapshot(
         &cp,
         worker.id,
+        voom_store::test_support::TEST_STORAGE_ROOT_ID,
+        Path::new("/"),
         Path::new("/library/recycled.mkv"),
         &[],
         &recycled,
@@ -406,6 +477,8 @@ async fn hardlink_with_its_own_sidecars_attaches_them_to_the_bundle() {
     persist_scanned_media_snapshot(
         &cp,
         worker.id,
+        voom_store::test_support::TEST_STORAGE_ROOT_ID,
+        Path::new("/"),
         Path::new("/library/a.mkv"),
         &[],
         &first,
@@ -425,6 +498,8 @@ async fn hardlink_with_its_own_sidecars_attaches_them_to_the_bundle() {
     let hardlink = persist_scanned_media_snapshot(
         &cp,
         worker.id,
+        voom_store::test_support::TEST_STORAGE_ROOT_ID,
+        Path::new("/"),
         Path::new("/library/b.mkv"),
         &sidecars,
         &second,
@@ -480,6 +555,8 @@ async fn persists_sidecars_under_per_kind_roles() {
     let persisted = persist_scanned_media_snapshot(
         &cp,
         worker.id,
+        voom_store::test_support::TEST_STORAGE_ROOT_ID,
+        Path::new("/"),
         Path::new("/library/Movie.mkv"),
         &sidecars,
         &candidate,

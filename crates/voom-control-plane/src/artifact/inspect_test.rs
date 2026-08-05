@@ -12,7 +12,7 @@ use voom_core::{
 use voom_store::repo::media::artifacts::{
     ArtifactCommitFailure, ArtifactCommitState, ArtifactVerificationStatus, NewArtifactCommitRecord,
 };
-use voom_store::repo::media::identity::{DiscoveredFile, FileLocationKind, IngestOutcome};
+use voom_store::repo::media::identity::{DiscoveredFile, IngestOutcome};
 use voom_worker_protocol::{
     VerifyArtifactObservedFacts, VerifyArtifactRequest, VerifyArtifactResult, VerifyArtifactStatus,
 };
@@ -464,8 +464,10 @@ async fn seed_source(cp: &ControlPlane, path: &Path, bytes: &[u8]) -> SeededSour
     let outcome = cp
         .record_discovered_file(
             DiscoveredFile {
-                location_kind: FileLocationKind::LocalPath,
-                location_value: path.display().to_string(),
+                storage_root_id: voom_store::test_support::TEST_STORAGE_ROOT_ID,
+                provider_relative_locator: voom_store::test_support::test_relative_locator(
+                    &path.display().to_string(),
+                ),
                 content_hash: blake3_checksum(bytes),
                 size_bytes: u64::try_from(bytes.len()).unwrap(),
                 observed_at: OffsetDateTime::UNIX_EPOCH,
