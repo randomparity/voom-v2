@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use async_trait::async_trait;
 use secrecy::SecretString;
@@ -16,6 +17,7 @@ use voom_worker_protocol::{
 
 use super::{UnavailableTool, format_unavailable_tools, policy_video_backend_requirements};
 use crate::cases::cp;
+use crate::scan::worker::ScanWorkerError;
 use crate::workflow::WorkerRuntimeRegistry;
 
 #[test]
@@ -639,18 +641,29 @@ async fn denied_ffprobe_is_aggregated_with_later_missing_tool() {
     .await
     .unwrap();
 
+    let calls = Arc::new(AtomicUsize::new(0));
+    let readiness_calls = Arc::clone(&calls);
     let error = cp
-        .preflight_policy_tools(
+        .preflight_policy_tools_with_ffprobe_readiness(
             &mut policy_requiring(&["ffprobe", "ffmpeg"]),
             &WorkerRuntimeRegistry::new(),
+            move || {
+                let calls = Arc::clone(&readiness_calls);
+                async move {
+                    calls.fetch_add(1, Ordering::Relaxed);
+                    Ok::<(), ScanWorkerError>(())
+                }
+            },
         )
         .await
         .unwrap_err();
+    assert_eq!(calls.load(Ordering::Relaxed), 1);
     let message = error.to_string();
 
     assert_eq!(error.code(), "POLICY_EXECUTION_ERROR");
     assert!(message.contains("- ffprobe: live built-in provider"));
     assert!(message.contains("denied probe_file"));
+    assert!(message.contains("- ffmpeg: no reserved local provider is registered"));
     assert!(message.find("- ffprobe:").unwrap() < message.find("- ffmpeg:").unwrap());
 }
 

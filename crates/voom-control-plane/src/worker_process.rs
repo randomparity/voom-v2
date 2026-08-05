@@ -192,7 +192,6 @@ impl BundledWorkerProcess {
         Self::launch_inner(worker_id, command, STARTUP_TIMEOUT).await
     }
 
-    #[cfg(test)]
     pub(crate) async fn launch_with_startup_timeout(
         worker_id: WorkerId,
         command: WorkerCommand,
