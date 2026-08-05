@@ -76,11 +76,13 @@ an upstream proxy later, but it is not the server's only TLS boundary.
   loading, the post-handshake deadline stream, listening notification, and graceful
   draining. It accepts a router so tests can exercise timeout and shutdown behavior without
   test-only production routes.
+- `crates/voom-api/src/lib.rs` keeps the shared envelope type and adds the explicit boundary
+  adapter that replaces stock middleware 408/413 responses with API JSON envelopes.
 - `crates/voom-api/src/main.rs` initializes stderr logging, resolves the existing database
   configuration, opens `HealthPlane` and `ControlPlane`, installs OS signal handling, and
   invokes the server. It contains no scheduling loop.
-- Existing `lib.rs` and `execution.rs` continue to own routes, envelopes, bearer parsing,
-  idempotency hashing, and use-case calls.
+- Existing `execution.rs` continues to own route commands, bearer parsing, idempotency
+  hashing, and use-case calls.
 
 Unit tests remain sibling `*_test.rs` files. Integration tests under
 `crates/voom-api/tests/` exercise a real TCP listener, TLS handshakes, process startup, and
@@ -121,6 +123,21 @@ post-handshake deadline covers response production, socket write, and flush, so 
 that stops reading cannot retain the connection indefinitely. No unauthenticated peer can
 remain between requests or open HTTP/2 streams outside these deadlines.
 
+Stock Tower responses are not public API. A boundary-response adapter replaces the body
+limit and request-processing timeout responses with `application/json` envelopes. Both use
+the generic `api.request` command because these process-wide bounds execute outside the
+route handler that owns a route-specific command. Their exact contracts are:
+
+| HTTP | `error.code` | `error.message` | `error.hint` |
+|---|---|---|---|
+| 408 | `REQUEST_TIMEOUT` | `request processing exceeded the 30-second deadline` | `Retry a mutation with the same idempotency key if its outcome is unknown` |
+| 413 | `PAYLOAD_TOO_LARGE` | `request body exceeds the 1048576-byte limit` | `Send a request body of 1048576 bytes or fewer` |
+
+Each response has `schema_version: "0"`, `command: "api.request"`, `status: "error"`,
+`data: null`, `warnings: []`, and the error object above. `REQUEST_TIMEOUT` and
+`PAYLOAD_TOO_LARGE` are new centralized `voom_core::ErrorCode` variants, not API-local
+strings or aliases of existing failure meanings.
+
 ## Startup and runtime flow
 
 1. Clap parses types and required/conflicting arguments without exposing input values in
@@ -131,8 +148,12 @@ remain between requests or open HTTP/2 streams outside these deadlines.
    missing, uninitialized, partial, dirty, or too-new state aborts startup without binding.
 5. TLS mode reads and parses the certificate chain and private key. Failure names the
    operation and affected option, not PEM contents.
-6. After TLS acceptance, a deadline stream wraps the established connection and returns a
-   timed-out I/O error once its total lifetime expires, including during response writes.
+6. One generic `ConnectionDeadlineAcceptor<A>` delegates to its inner acceptor and then
+   wraps the returned stream. In TLS mode its inner acceptor is Rustls, so the deadline
+   starts after the handshake. In explicit loopback-cleartext mode its inner acceptor is the
+   plain TCP acceptor, so the deadline starts immediately after TCP acceptance. The wrapped
+   stream returns a timed-out I/O error once its total lifetime expires, including during
+   response writes.
 7. The process binds, logs its bound address and transport mode to stderr, and serves the
    bounded existing router over non-persistent HTTP/1.1.
 8. SIGINT or SIGTERM stops acceptance, drains accepted work for at most 30 seconds, and
@@ -161,8 +182,9 @@ failed operation, relevant option name, and corrective action. They do not print
 values that may be secrets, PEM bytes, authorization headers, or bearer tokens. Stdout is
 unused by the long-running process.
 
-HTTP requests continue to use the existing API envelopes. TLS failures have no HTTP
-response. Invalid bearer credentials keep the single generic HTTP 401 response and
+HTTP requests continue to use the existing API envelopes, including the explicit
+`api.request` envelopes for process-generated 408 and 413 responses. TLS failures have no
+HTTP response. Invalid bearer credentials keep the single generic HTTP 401 response and
 `WWW-Authenticate: Bearer`; the presented token is absent from the body and logs.
 
 ## Shutdown behavior
@@ -250,12 +272,15 @@ Widened boundaries:
 - configuration accepts TLS on any bind and explicit cleartext on IPv4/IPv6 loopback;
 - configuration rejects non-loopback cleartext, missing/partial/conflicting TLS input, and
   zero limit values in test-only limit construction;
-- router middleware returns 413 for an oversized body and 408 for a slow handler;
+- router middleware returns the exact 413 and 408 JSON contracts above. Tests assert HTTP
+  status, `application/json` content type, schema version, command, envelope status, `null`
+  data, empty warnings, code, message, and hint rather than status alone;
 - server protocol tests reject HTTP/2 negotiation and prove that HTTP/1.1 responses close
   their connection;
-- a post-handshake deadline-stream test proves that a blocked write wakes and fails at its
-  deadline, and a real slow-reading client cannot retain a large-response connection past a
-  shortened test deadline;
+- a deadline-stream test proves that a blocked write wakes and fails at its deadline. A
+  parameterized real slow-reading-client test covers both compositions: Rustls inside the
+  shared deadline acceptor and the plain acceptor inside the same wrapper. Neither may
+  retain a large-response connection past a shortened test deadline;
 - TLS loader diagnostics omit sentinel PEM contents; and
 - signal-driven handle shutdown completes an accepted slow request within the test grace
   while refusing a new connection, then cuts off a request that exceeds a shorter test grace
@@ -269,8 +294,11 @@ Widened boundaries:
 - a client presented an expired server certificate fails the TLS handshake;
 - an invalid bearer token over accepted TLS returns the existing generic 401 envelope and
   neither response nor captured diagnostics contain the token;
-- a mutation whose response is cut off can be retried with the same idempotency key without
-  duplicating the transition;
+- a deterministic committed-but-response-lost test runs the production authenticated route
+  over a capacity-bounded test stream, withholds response reads, observes the committed
+  database transition and idempotency row, and triggers a shortened connection deadline.
+  Retrying the identical request and key on a fresh connection must replay the original
+  stored result and leave exactly one durable transition/event;
 - the binary rejects non-loopback cleartext before listen; and
 - the binary opens an initialized database without changing migration count.
 
