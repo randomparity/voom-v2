@@ -73,6 +73,8 @@ pub fn voom_error_hint(err: &VoomError) -> Option<String> {
         | ErrorCode::NotFound
         | ErrorCode::Internal
         | ErrorCode::BadArgs
+        | ErrorCode::RequestTimeout
+        | ErrorCode::PayloadTooLarge
         | ErrorCode::DependencyCycle
         | ErrorCode::Conflict
         | ErrorCode::Unauthorized

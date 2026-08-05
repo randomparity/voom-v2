@@ -181,6 +181,8 @@ fn voom_error_response(err: &VoomError) -> axum::response::Response {
         | ErrorCode::NotFound
         | ErrorCode::Internal
         | ErrorCode::BadArgs
+        | ErrorCode::RequestTimeout
+        | ErrorCode::PayloadTooLarge
         | ErrorCode::DependencyCycle
         | ErrorCode::Conflict
         | ErrorCode::Unauthorized

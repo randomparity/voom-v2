@@ -32,6 +32,10 @@ pub enum ErrorCode {
     Conflict,
     /// Authentication credentials are missing or invalid.
     Unauthorized,
+    /// The API did not finish processing a request before its public deadline.
+    RequestTimeout,
+    /// The API request body exceeds its public byte limit.
+    PayloadTooLarge,
     // --- Commit safety gate (M3 Phase 2 / §9.3) -------------------
     /// A blocking use-lease overlaps the commit's affected scope.
     BlockedByUseLease,
@@ -133,6 +137,8 @@ impl ErrorCode {
         Self::DependencyCycle,
         Self::Conflict,
         Self::Unauthorized,
+        Self::RequestTimeout,
+        Self::PayloadTooLarge,
         Self::BlockedByUseLease,
         Self::BlockedByPendingCommit,
         Self::BlockedByClosureGrew,
@@ -181,6 +187,8 @@ impl ErrorCode {
             Self::DependencyCycle => "DEPENDENCY_CYCLE",
             Self::Conflict => "CONFLICT",
             Self::Unauthorized => "UNAUTHORIZED",
+            Self::RequestTimeout => "REQUEST_TIMEOUT",
+            Self::PayloadTooLarge => "PAYLOAD_TOO_LARGE",
             Self::BlockedByUseLease => "BLOCKED_BY_USE_LEASE",
             Self::BlockedByPendingCommit => "BLOCKED_BY_PENDING_COMMIT",
             Self::BlockedByClosureGrew => "BLOCKED_BY_CLOSURE_GREW",

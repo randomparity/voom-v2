@@ -175,6 +175,17 @@ fn policy_execution_error_has_stable_public_code() {
     assert_eq!(err.error_code(), ErrorCode::PolicyExecutionError);
 }
 
+#[test]
+fn api_request_boundary_codes_have_stable_wire_strings() {
+    for (code, wire) in [
+        (ErrorCode::RequestTimeout, "REQUEST_TIMEOUT"),
+        (ErrorCode::PayloadTooLarge, "PAYLOAD_TOO_LARGE"),
+    ] {
+        assert_eq!(code.as_str(), wire);
+        assert_eq!(ErrorCode::from_wire_str(wire), Some(code));
+    }
+}
+
 /// Adding a variant to `ErrorCode` must force a wire-string decision in
 /// `as_str()`. This test is intentionally an exhaustive match so a new
 /// variant fails compilation here too — both halves of the round trip
@@ -194,6 +205,8 @@ fn every_error_code_has_a_wire_string() {
         ErrorCode::DependencyCycle,
         ErrorCode::Conflict,
         ErrorCode::Unauthorized,
+        ErrorCode::RequestTimeout,
+        ErrorCode::PayloadTooLarge,
         ErrorCode::BlockedByUseLease,
         ErrorCode::BlockedByPendingCommit,
         ErrorCode::BlockedByClosureGrew,
