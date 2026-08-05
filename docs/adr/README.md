@@ -59,3 +59,4 @@ are append-only — supersede an ADR with a new one rather than rewriting histor
 | [0051](0051-videotoolbox-is-a-host-scoped-accelerator-resource.md) | VideoToolbox is a host-scoped accelerator resource |
 | [0052](0052-vaapi-device-identity-and-probe-proven-capability.md) | VAAPI device identity is the PCI address, and capability is probe-proven |
 | [0053](0053-artifact-access-mode-is-core-domain-vocabulary.md) | Artifact access mode is core domain vocabulary |
+| [0054](0054-control-plane-api-process-owns-tls-and-draining.md) | The control-plane API process owns TLS and graceful draining |
