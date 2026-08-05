@@ -35,8 +35,9 @@ creation; a different configuration requires retirement and a new stable root.
 Activation records provider validation supplied by the owner-node boundary and
 moves the root to `active`. Explicit validation loss moves it to `unavailable`;
 successful validation by the same owner may reactivate it. Retirement is
-terminal. After first activation, owner changes are rejected rather than
-modeled as updates.
+terminal and replaces deletion; stable root IDs and their history are never
+removed. A library containing any root cannot be deleted. After first
+activation, owner changes are rejected rather than modeled as updates.
 
 Persisted root state records provider validation; effective availability
 overlays the current owner-node status without rewriting every root when one
@@ -73,7 +74,7 @@ not accept the removed location kind/value shape.
 
 ### Flag-day migration and transitional boundaries
 
-Migration 0035 rebuilds the root and file-location tables in place. It preserves
+Migration 0034 rebuilds the root and file-location tables in place. It preserves
 stable IDs and all foreign-key relationships. Because existing absolute paths
 do not prove either an owner or a containing root, migrated roots are disabled
 and `unassigned`, and migrated file locations are explicitly quarantined as
@@ -96,6 +97,14 @@ containment before byte access. It never infers locality from node kind, worker
 placement, or locator text. It does not persist a global path or make remote
 roots usable. Worker-protocol and worker implementations remain unchanged by
 #418; #423 replaces their path-bearing requests.
+
+Current artifact finalization also remains successful without inventing a
+rootless write: its rooted source selects an explicit target root from that
+source root's configured output-root relationship, falling back to the same
+root. The exact-local resolver proves the target path is contained by that
+target root and derives the relative locator before recording the result. This
+is bounded address plumbing only; #422 still owns owner-node commit authority
+and #423 still removes path-bearing worker requests.
 
 ## Consequences
 

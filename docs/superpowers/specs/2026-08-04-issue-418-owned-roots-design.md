@@ -3,7 +3,7 @@
 ## Charter and provenance
 
 This design implements the root/location substrate selected by ADR 0050 and
-issue #418. The campaign assigned ADR 0055 and migration 0035 to this issue.
+issue #418. The campaign assigned ADR 0055 and migration 0034 to this issue.
 The frozen campaign interpretation is bounded: #418 removes global paths from
 the durable root/location model and root-scoped control-plane and CLI contracts;
 #423 still owns replacement of media-worker path requests. Issue #417 owns
@@ -100,6 +100,10 @@ active and records an opaque validation identity. The first activation advances
 the root epoch. Reactivation by the same owner with unchanged provider locator
 and identity preserves the epoch; a changed validation identity advances it.
 Unavailable and active roots may be retired; retirement is terminal.
+Root deletion is removed: retirement preserves its stable ID, location
+relationships, and fact history. The root-to-library foreign key changes from
+cascade to restrict, so a library with any configured or historical root must
+also be retained rather than erasing root history.
 
 Persisted state describes the latest provider-validation result. Owner-node
 liveness is an availability overlay, not a fan-out mutation: an active root may
@@ -152,9 +156,9 @@ Retirement retains the stable row, lineage references, use leases, hardlink
 facts, and proof history. Rediscovery of a live rooted address follows current
 location identity/version semantics; it must not merge addresses across roots.
 
-## Persistence and migration 0035
+## Persistence and migration 0034
 
-Migration 0035 follows the repository's established SQLite table-rebuild
+Migration 0034 follows the repository's established SQLite table-rebuild
 protocol: it exits sqlx's wrapper transaction, disables foreign-key rewriting,
 enables legacy alter-table behavior, rebuilds the tables, reenables foreign
 keys, runs `foreign_key_check`, and begins a new transaction for migrator
@@ -206,7 +210,8 @@ provider locator a canonical or globally usable path.
 that have never activated. Assignment, activation, and retirement each run in a
 write transaction that checks current state before mutation. Enabling a root
 does not activate it; scan and scheduling remain blocked until owner validation
-activates it. Retirement cannot be reversed.
+activates it. `library root retire` replaces `remove`; retirement cannot be
+reversed. Library deletion reports a conflict while any root row remains.
 
 ### Scan and local transition
 
@@ -243,10 +248,17 @@ mismatched local ID fails closed. #423 removes this resolver and converts child-
 worker requests to stable references.
 
 Artifact output/commit path removal belongs to #422 and #423. Code changed in
-#418 must not create a new rootless `file_locations` row for those flows. If an
-existing transitional artifact flow cannot supply a rooted address, it fails
-before durable location creation rather than storing an absolute path under a
-new name.
+#418 must not create a new rootless `file_locations` row for those flows.
+Existing artifact finalization preserves successful local behavior through
+bounded rooted-result plumbing: the selected source location identifies its
+source root and library; the target root is that root's configured
+`default_output_root_id`, or the source root when no output default is set. The
+exact-local resolver proves the existing target path is contained by that
+explicit target root and derives the provider-relative locator before the
+commit-safety finalizer records it. Missing, unavailable, unowned, or out-of-
+root targets fail before location creation. The artifact schema, commit
+authority, worker request, and child path contract do not change here; #422 and
+#423 retain those responsibilities.
 
 ## Error and failure ordering
 
@@ -306,6 +318,8 @@ Tests must first fail against the old model, then prove:
   retirement/rediscovery, lineage, hardlink proof, and location epochs survive;
 - policy inputs use root relationships and cannot be widened by path prefixes;
 - local resolution rejects lexical and symlink escape and remote ownership;
+- artifact finalization preserves successful same-root/default-output-root
+  completion while rejecting targets outside the explicit available root;
 - migration preserves root/location IDs and foreign-key relationships while
   disabling roots and quarantining all legacy locations;
 - removed CLI fields and former serialized location fields are rejected, with
