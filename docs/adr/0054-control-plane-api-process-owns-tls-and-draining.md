@@ -9,8 +9,8 @@ Accepted
 Issue #416 requires the existing Axum control-plane routes to become a production-safe
 remote-node service. ADR 0050 already requires authenticated, encrypted agent traffic,
 while the current `voom-api` crate owns only a router. The process boundary must reject an
-unsafe transport before binding, bound untrusted requests, preserve bearer authorization,
-and stop without abandoning accepted work.
+unsafe transport before binding, bound untrusted connections and requests, preserve bearer
+authorization, and drain accepted work for a finite interval during shutdown.
 
 The operator selected one explicit development exception: cleartext HTTP is permitted only
 when the configured bind address is loopback. Every non-loopback deployment is HTTPS-only.
@@ -31,25 +31,32 @@ Configuration is fail-fast. Cleartext on a non-loopback bind, a partial TLS file
 unreadable or malformed PEM, a zero bound, or an unavailable database prevents the listener
 from starting with an actionable diagnostic. The safe default bind is loopback.
 
-The router applies fixed production bounds: a 1 MiB request body, 30-second TLS handshake,
-request-head, and request-processing deadlines. Axum keeps the existing JSON envelopes and
-route idempotency behavior. The existing `/health` route is the readiness report: it returns
-success only for a current database schema.
+The server accepts HTTP/1.1 only and disables persistent connections. Together with fixed
+30-second TLS-handshake, request-head, and request-processing deadlines, every connection
+phase is bounded. The router also limits request bodies to 1 MiB. Axum keeps the existing
+JSON envelopes and route idempotency behavior. The existing `/health` route is the readiness
+report: it returns success only for a current database schema.
 
 SIGINT and SIGTERM stop acceptance and allow in-flight requests up to a 30-second grace
-period. Startup, listening, and shutdown diagnostics go to stderr through `tracing`; stdout
-remains unused. Diagnostics name operations and configuration fields but never include
-certificate/key contents or bearer-token values.
+period, then terminate any remainder. A client whose mutating response is cut off cannot
+infer whether the transaction committed; it retries the same request with the same
+idempotency key to recover the authoritative result. Startup, listening, and shutdown
+diagnostics go to stderr through `tracing`; stdout remains unused. Diagnostics name
+operations and configuration fields but never include certificate/key contents or
+bearer-token values.
 
 ## Consequences
 
 Remote nodes can authenticate the server with configured CA trust and then use the existing
 bearer-token boundary. Expired or untrusted certificates fail at the client TLS handshake;
 operators must provision and renew certificates outside VOOM. Certificate hot reload,
-rotation orchestration, and mutual TLS remain future work rather than parallel mechanisms.
+rotation orchestration, mutual TLS, HTTP/2, and persistent HTTP/1.1 connections remain
+future work rather than parallel mechanisms.
 
 The new process adds Rustls-serving and Tower middleware dependencies, but avoids a bespoke
-Hyper accept loop and its connection-draining state machine. A process restart is required
+Hyper accept loop and its connection-draining state machine. At a forced shutdown deadline,
+a client may observe an ambiguous response after a committed transition; the existing
+idempotency contract makes same-key retry the recovery path. A process restart is required
 after certificate replacement. Cleartext remains available for explicit loopback-only tests
 and local operation, never as a remote deployment fallback.
 

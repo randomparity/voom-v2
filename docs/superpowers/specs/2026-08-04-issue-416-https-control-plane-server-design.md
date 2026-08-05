@@ -35,10 +35,10 @@ The change is successful when automated tests prove:
    an existing node-authenticated route;
 2. an untrusted CA, expired server certificate, invalid bearer token, and cleartext
    non-loopback configuration each fail at the boundary responsible for them;
-3. request bodies, TLS handshakes, request heads, request processing, and shutdown draining
-   are bounded;
-4. an accepted in-flight request finishes during graceful shutdown while new connections
-   are no longer accepted;
+3. request bodies, TLS handshakes, request heads, request processing, connection lifetimes,
+   and shutdown draining are bounded;
+4. an accepted in-flight request finishes within the grace period while new connections are
+   no longer accepted, and forced cutoff leaves same-key retry as the recovery path;
 5. route idempotency and error envelopes are unchanged;
 6. bearer tokens and PEM key contents never appear in response bodies or process
    diagnostics; and
@@ -49,9 +49,10 @@ The change is successful when automated tests prove:
 ### Rustls through `axum-server` — selected
 
 Use `axum-server` for plain/TLS listeners, bounded TLS handshakes, listener readiness, and
-graceful connection draining. Apply Tower HTTP middleware to the existing Axum router and
-set Hyper's request-head deadline on the server builder. This reuses maintained connection
-lifecycle code while leaving application use cases unchanged.
+graceful connection draining. Restrict Hyper to HTTP/1.1, disable persistent connections,
+apply Tower HTTP middleware to the existing Axum router, and set Hyper's request-head
+deadline on the server builder. This reuses maintained connection lifecycle code while
+leaving application use cases unchanged.
 
 ### Direct Tokio-Rustls and Hyper accept loop
 
@@ -111,7 +112,9 @@ Fixed limits deliberately avoid speculative public knobs:
 The existing route semantics remain the contract within those process bounds. A request
 that exceeds the body limit receives HTTP 413. A request that exceeds the processing
 deadline receives HTTP 408. Slow TLS or request-head peers are disconnected because no Axum
-handler has run and therefore no JSON command envelope exists to preserve.
+handler has run and therefore no JSON command envelope exists to preserve. The server
+accepts HTTP/1.1 only and closes each connection after its one response; no unauthenticated
+peer can remain between requests or open HTTP/2 streams outside these deadlines.
 
 ## Startup and runtime flow
 
@@ -124,7 +127,7 @@ handler has run and therefore no JSON command envelope exists to preserve.
 5. TLS mode reads and parses the certificate chain and private key. Failure names the
    operation and affected option, not PEM contents.
 6. The process binds, logs its bound address and transport mode to stderr, and serves the
-   bounded existing router.
+   bounded existing router over non-persistent HTTP/1.1.
 7. SIGINT or SIGTERM stops acceptance, drains accepted work for at most 30 seconds, and
    logs retirement to stderr.
 
@@ -160,9 +163,14 @@ response. Invalid bearer credentials keep the single generic HTTP 401 response a
 Signal handling owns one `axum-server::Handle`. Once signaled, the handle stops accepting
 connections and asks each active HTTP connection to shut down gracefully. Requests already
 inside the router may finish within the 30-second grace period. At the deadline remaining
-connections are dropped and process exit completes. No durable state transition is invented
-at the server layer; route use cases retain their existing transaction and idempotency
-ownership.
+connections are dropped and process exit completes.
+
+A dropped mutating response is ambiguous: the route transaction may have committed before
+the connection was cut off, or cancellation may have occurred before commit. The node
+client must retry that request with the same idempotency key. Existing route ownership then
+returns the original result or performs the not-yet-committed transition once. No durable
+state transition is invented at the server layer; route use cases retain transaction and
+idempotency ownership.
 
 ## Threat model
 
@@ -198,7 +206,7 @@ Widened boundaries:
 |---|---|---|
 | Operator configuration | Clap type parsing; complete TLS pair; loopback test for cleartext | Fail before bind; name option and remedy, never supplied value or key bytes |
 | PEM files | Rustls parses certificate chain and matching supported private key | TLS setup is startup-only; parse errors are sanitized |
-| TCP/TLS peer | Rustls server authentication; HTTP unavailable before handshake | 30-second handshake and request-head deadlines; TLS failures expose no application data |
+| TCP/TLS peer | Rustls server authentication; HTTP unavailable before handshake; HTTP/1.1 only | 30-second handshake and request-head deadlines; one response per connection; TLS failures expose no application data |
 | HTTP route | Existing bearer-token and node/worker authorization; existing strict DTO parsing | 1 MiB body and 30-second processing deadline; generic auth failure and existing envelopes |
 | Shutdown signal | Only local OS signal delivery invokes the handle | Stop accept immediately; 30-second drain; no secret-bearing diagnostic |
 | SQLite | Existing `connect`, schema probe, repositories, transactions, and checked decoding | No migration or new persistence; existing database errors remain authoritative |
@@ -222,8 +230,8 @@ Widened boundaries:
   mechanism selected by issue #416.
 - Certificate issuance, renewal, revocation distribution, and hot reload: deployment owns
   these; replacing a certificate requires restart.
-- Denial of service above the fixed per-request/per-connection bounds, including aggregate
-  connection rate limiting: no requirement establishes a tenant or edge-rate policy.
+- Denial of service above the fixed per-connection bounds, including aggregate concurrent
+  connection or rate limiting: no requirement establishes a tenant or edge-rate policy.
 - Host compromise: a principal able to replace the private key or database is already
   inside the trusted deployment boundary.
 - New node routes, a node agent, or scheduler loops: those are separate epic work.
@@ -236,9 +244,12 @@ Widened boundaries:
 - configuration rejects non-loopback cleartext, missing/partial/conflicting TLS input, and
   zero limit values in test-only limit construction;
 - router middleware returns 413 for an oversized body and 408 for a slow handler;
+- server protocol tests reject HTTP/2 negotiation and prove that HTTP/1.1 responses close
+  their connection;
 - TLS loader diagnostics omit sentinel PEM contents; and
 - signal-driven handle shutdown completes an accepted slow request within the test grace
-  while refusing a new connection.
+  while refusing a new connection, then cuts off a request that exceeds a shorter test grace
+  period.
 
 ### Integration tests
 
@@ -248,6 +259,8 @@ Widened boundaries:
 - a client presented an expired server certificate fails the TLS handshake;
 - an invalid bearer token over accepted TLS returns the existing generic 401 envelope and
   neither response nor captured diagnostics contain the token;
+- a mutation whose response is cut off can be retried with the same idempotency key without
+  duplicating the transition;
 - the binary rejects non-loopback cleartext before listen; and
 - the binary opens an initialized database without changing migration count.
 
