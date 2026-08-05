@@ -16,7 +16,10 @@ and [ADR 0054](../../adr/0054-control-plane-api-process-owns-tls-and-draining.md
   campaign-checkpoint decision selecting explicit loopback-only cleartext.
 - Permitted surface: `crates/voom-api/**`, necessary workspace dependency declarations and
   `Cargo.lock`, API integration tests, ADR 0054 and its index row, this spec and plan, and
-  relevant operator documentation.
+  relevant operator documentation. The campaign-approved public-interface expansion adds
+  only `crates/voom-core/src/error.rs`, `crates/voom-core/src/error_test.rs`, and
+  compiler-required exhaustive consumer matches/tests for the new `REQUEST_TIMEOUT` and
+  `PAYLOAD_TOO_LARGE` codes; it authorizes no broader core change.
 - Exclusions: no scheduling loop, broad REST API, database migration, alternate SQLite
   owner, route-use-case relocation, node-agent implementation, mutual TLS, certificate
   issuance, or certificate hot reload.
