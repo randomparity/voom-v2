@@ -1,5 +1,8 @@
 use std::convert::Infallible;
+use std::io;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::pin::Pin;
+use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Duration;
 
@@ -11,9 +14,12 @@ use axum::routing::{get, post};
 use http_body::{Body as HttpBody, Frame};
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
+use tokio::net::TcpStream;
+use tokio::sync::Notify;
 use tower::ServiceExt;
 
-use super::bounded_router;
+use super::{DeadlineStream, RunningServer, bounded_router};
 use crate::config::ServerLimits;
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
@@ -169,5 +175,270 @@ impl HttpBody for OneFrameThenPending {
             self.yielded = true;
             Poll::Ready(Some(Ok(Frame::data(Bytes::from_static(b"partial")))))
         }
+    }
+}
+
+fn lifecycle_limits(
+    request_head: Duration,
+    connection: Duration,
+    shutdown_grace: Duration,
+) -> Result<ServerLimits, voom_core::VoomError> {
+    ServerLimits::new_for_test(
+        1024 * 1024,
+        Duration::from_secs(1),
+        request_head,
+        Duration::from_secs(1),
+        connection,
+        shutdown_grace,
+    )
+}
+
+async fn start_cleartext_test_server(
+    router: Router,
+    limits: ServerLimits,
+) -> Result<RunningServer, super::ServerError> {
+    RunningServer::start_cleartext_for_test(
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+        limits,
+        router,
+    )
+    .await
+}
+
+async fn raw_http1(addr: SocketAddr, request: &[u8]) -> io::Result<Vec<u8>> {
+    let mut stream = TcpStream::connect(addr).await?;
+    stream.write_all(request).await?;
+    let mut response = Vec::new();
+    stream.read_to_end(&mut response).await?;
+    Ok(response)
+}
+
+async fn assert_connection_refused(addr: SocketAddr) -> TestResult {
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            if TcpStream::connect(addr).await.is_err() {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn deadline_stream_times_out_a_blocked_write() -> TestResult {
+    let (server, _client) = tokio::io::duplex(1);
+    let mut stream = DeadlineStream::new(server, Duration::from_millis(25));
+    stream.write_all(b"x").await?;
+    let error =
+        stream.write_all(b"y").await.err().ok_or_else(|| {
+            io::Error::other("blocked deadline stream write unexpectedly succeeded")
+        })?;
+
+    assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+    Ok(())
+}
+
+#[tokio::test]
+async fn deadline_stream_times_out_a_blocked_read() -> TestResult {
+    let (server, _client) = tokio::io::duplex(1);
+    let mut stream = DeadlineStream::new(server, Duration::from_millis(25));
+    let mut byte = [0_u8; 1];
+    let error =
+        stream.read_exact(&mut byte).await.err().ok_or_else(|| {
+            io::Error::other("blocked deadline stream read unexpectedly succeeded")
+        })?;
+
+    assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+    Ok(())
+}
+
+#[tokio::test]
+async fn deadline_stream_times_out_a_blocked_flush() -> TestResult {
+    let mut stream = DeadlineStream::new(PendingFlush, Duration::from_millis(25));
+    let error =
+        stream.flush().await.err().ok_or_else(|| {
+            io::Error::other("blocked deadline stream flush unexpectedly succeeded")
+        })?;
+
+    assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+    Ok(())
+}
+
+#[tokio::test]
+async fn cleartext_server_is_http1_and_closes_each_connection() -> TestResult {
+    let limits = lifecycle_limits(
+        Duration::from_secs(1),
+        Duration::from_secs(1),
+        Duration::from_secs(1),
+    )?;
+    let server =
+        start_cleartext_test_server(Router::new().route("/", get(|| async { "ok" })), limits)
+            .await?;
+    let mut stream = TcpStream::connect(server.local_addr()).await?;
+    stream
+        .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        .await?;
+    let mut response = Vec::new();
+    stream.read_to_end(&mut response).await?;
+
+    let response = String::from_utf8(response)?;
+    assert!(response.starts_with("HTTP/1.1 200 OK\r\n"));
+    assert!(response.to_ascii_lowercase().contains("connection: close"));
+    if stream
+        .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        .await
+        .is_ok()
+    {
+        let mut second = Vec::new();
+        stream.read_to_end(&mut second).await?;
+        assert!(second.is_empty());
+    }
+    server.shutdown_on(std::future::ready(())).await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn cleartext_server_closes_a_partial_request_head() -> TestResult {
+    let limits = lifecycle_limits(
+        Duration::from_millis(25),
+        Duration::from_secs(1),
+        Duration::from_secs(1),
+    )?;
+    let server = start_cleartext_test_server(Router::new(), limits).await?;
+    let mut stream = TcpStream::connect(server.local_addr()).await?;
+    stream.write_all(b"GET / HTTP/1.1\r\nHost:").await?;
+    let mut response = Vec::new();
+    tokio::time::timeout(Duration::from_secs(1), stream.read_to_end(&mut response)).await??;
+
+    assert!(response.is_empty());
+    server.shutdown_on(std::future::ready(())).await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn cleartext_server_rejects_http2_prior_knowledge() -> TestResult {
+    let limits = lifecycle_limits(
+        Duration::from_secs(1),
+        Duration::from_secs(1),
+        Duration::from_secs(1),
+    )?;
+    let server = start_cleartext_test_server(Router::new(), limits).await?;
+    let response = raw_http1(server.local_addr(), b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n").await?;
+
+    assert!(!response.starts_with(b"HTTP/2"));
+    server.shutdown_on(std::future::ready(())).await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn graceful_shutdown_finishes_an_inflight_request() -> TestResult {
+    let started = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let router = Router::new().route(
+        "/wait",
+        get({
+            let started = started.clone();
+            let release = release.clone();
+            move || {
+                let started = started.clone();
+                let release = release.clone();
+                async move {
+                    started.notify_one();
+                    release.notified().await;
+                    "done"
+                }
+            }
+        }),
+    );
+    let limits = lifecycle_limits(
+        Duration::from_secs(1),
+        Duration::from_secs(1),
+        Duration::from_millis(250),
+    )?;
+    let server = start_cleartext_test_server(router, limits).await?;
+    let addr = server.local_addr();
+    let request = tokio::spawn(raw_http1(
+        addr,
+        b"GET /wait HTTP/1.1\r\nHost: localhost\r\n\r\n",
+    ));
+    started.notified().await;
+    let shutdown = tokio::spawn(server.shutdown_on(std::future::ready(())));
+    assert_connection_refused(addr).await?;
+    release.notify_one();
+
+    let response = String::from_utf8(request.await??)?;
+    assert!(response.ends_with("done"));
+    shutdown.await??;
+    Ok(())
+}
+
+#[tokio::test]
+async fn graceful_shutdown_forces_a_stalled_request_at_grace() -> TestResult {
+    let started = Arc::new(Notify::new());
+    let router = Router::new().route(
+        "/wait",
+        get({
+            let started = started.clone();
+            move || {
+                let started = started.clone();
+                async move {
+                    started.notify_one();
+                    std::future::pending::<()>().await;
+                }
+            }
+        }),
+    );
+    let limits = lifecycle_limits(
+        Duration::from_secs(1),
+        Duration::from_secs(1),
+        Duration::from_millis(25),
+    )?;
+    let server = start_cleartext_test_server(router, limits).await?;
+    let addr = server.local_addr();
+    let request = tokio::spawn(raw_http1(
+        addr,
+        b"GET /wait HTTP/1.1\r\nHost: localhost\r\n\r\n",
+    ));
+    started.notified().await;
+
+    tokio::time::timeout(
+        Duration::from_secs(1),
+        server.shutdown_on(std::future::ready(())),
+    )
+    .await??;
+    let response = request.await?;
+    assert!(response.is_err() || response?.is_empty());
+    Ok(())
+}
+
+struct PendingFlush;
+
+impl AsyncRead for PendingFlush {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+        _buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        Poll::Pending
+    }
+}
+
+impl AsyncWrite for PendingFlush {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        Poll::Ready(Ok(buf.len()))
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Poll::Pending
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Poll::Ready(Ok(()))
     }
 }
