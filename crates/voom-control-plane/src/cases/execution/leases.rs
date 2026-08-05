@@ -301,7 +301,7 @@ impl ControlPlane {
         class: FailureClass,
         now: OffsetDateTime,
     ) -> Result<Lease, VoomError> {
-        let mut tx = begin_tx(&self.pool).await?;
+        let mut tx = begin_immediate_tx(&self.pool).await?;
         let lease = self
             .fail_lease_in_tx(&mut tx, lease_id, reason, class, now)
             .await?;
