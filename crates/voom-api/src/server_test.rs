@@ -422,6 +422,27 @@ async fn graceful_shutdown_forces_a_stalled_request_at_grace() -> TestResult {
     Ok(())
 }
 
+#[tokio::test]
+async fn unexpected_server_task_exit_fails_loud_without_a_signal() -> TestResult {
+    let server = RunningServer {
+        local_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+        handle: axum_server::Handle::new(),
+        task: tokio::spawn(async { Ok(()) }),
+        shutdown_grace: Duration::from_secs(1),
+    };
+
+    let result = tokio::time::timeout(
+        Duration::from_secs(1),
+        server.shutdown_on(std::future::pending::<()>()),
+    )
+    .await?;
+    let Err(error) = result else {
+        return Err("a stopped listener must fail before any signal arrives".into());
+    };
+    assert!(matches!(error, super::ServerError::Stopped));
+    Ok(())
+}
+
 struct PendingFlush;
 
 impl AsyncRead for PendingFlush {

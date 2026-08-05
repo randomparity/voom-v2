@@ -97,7 +97,7 @@ async fn acquire(
     };
     let body = match json_body(body) {
         Ok(body) => body,
-        Err(message) => return bad_args_response(ACQUIRE_COMMAND, message),
+        Err(error) => return json_body_error_response(ACQUIRE_COMMAND, error),
     };
     let request: AcquireRequest = match parse_request_body(&body) {
         Ok(request) => request,
@@ -143,7 +143,7 @@ async fn node_heartbeat(
     };
     let body = match json_body(body) {
         Ok(body) => body,
-        Err(message) => return bad_args_response(NODE_HEARTBEAT_COMMAND, message),
+        Err(error) => return json_body_error_response(NODE_HEARTBEAT_COMMAND, error),
     };
     let _request: NodeHeartbeatRequest = match parse_request_body(&body) {
         Ok(request) => request,
@@ -188,7 +188,7 @@ async fn lease_heartbeat(
     };
     let body = match json_body(body) {
         Ok(body) => body,
-        Err(message) => return bad_args_response(LEASE_HEARTBEAT_COMMAND, message),
+        Err(error) => return json_body_error_response(LEASE_HEARTBEAT_COMMAND, error),
     };
     let request: LeaseHeartbeatRequest = match parse_request_body(&body) {
         Ok(request) => request,
@@ -236,7 +236,7 @@ async fn complete(
     };
     let body = match json_body(body) {
         Ok(body) => body,
-        Err(message) => return bad_args_response(COMPLETE_COMMAND, message),
+        Err(error) => return json_body_error_response(COMPLETE_COMMAND, error),
     };
     let request: CompleteRequest = match parse_request_body(&body) {
         Ok(request) => request,
@@ -284,7 +284,7 @@ async fn fail(
     };
     let body = match json_body(body) {
         Ok(body) => body,
-        Err(message) => return bad_args_response(FAIL_COMMAND, message),
+        Err(error) => return json_body_error_response(FAIL_COMMAND, error),
     };
     let request: FailRequest = match parse_request_body(&body) {
         Ok(request) => request,
@@ -352,9 +352,31 @@ fn not_configured_response(command: &'static str) -> axum::response::Response {
     )
 }
 
-fn json_body<T>(body: Result<Json<T>, JsonRejection>) -> Result<T, String> {
-    body.map(|Json(value)| value)
-        .map_err(|err| format!("invalid JSON body: {err}"))
+enum JsonBodyError {
+    PayloadTooLarge,
+    BadArgs(String),
+}
+
+fn json_body<T>(body: Result<Json<T>, JsonRejection>) -> Result<T, JsonBodyError> {
+    match body {
+        Ok(Json(value)) => Ok(value),
+        Err(error) if error.status() == StatusCode::PAYLOAD_TOO_LARGE => {
+            Err(JsonBodyError::PayloadTooLarge)
+        }
+        Err(error) => Err(JsonBodyError::BadArgs(format!(
+            "invalid JSON body: {error}"
+        ))),
+    }
+}
+
+fn json_body_error_response(
+    command: &'static str,
+    error: JsonBodyError,
+) -> axum::response::Response {
+    match error {
+        JsonBodyError::PayloadTooLarge => crate::server::payload_too_large_response(),
+        JsonBodyError::BadArgs(message) => bad_args_response(command, message),
+    }
 }
 
 fn parse_request_body<T: DeserializeOwned>(body: &JsonValue) -> Result<T, String> {

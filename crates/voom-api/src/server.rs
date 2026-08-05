@@ -169,6 +169,8 @@ pub enum ServerError {
     Serve(#[source] io::Error),
     #[error("API server task stopped unexpectedly")]
     Join(#[source] JoinError),
+    #[error("API server listener stopped unexpectedly")]
+    Stopped,
 }
 
 /// One listening server and its bounded shutdown lifecycle.
@@ -229,9 +231,9 @@ impl RunningServer {
         self.handle.connection_count()
     }
 
-    pub async fn shutdown_on<F>(self, signal: F) -> Result<(), ServerError>
+    pub async fn shutdown_on<F, S>(self, signal: F) -> Result<S, ServerError>
     where
-        F: Future<Output = ()>,
+        F: Future<Output = S>,
     {
         let Self {
             handle,
@@ -241,10 +243,11 @@ impl RunningServer {
         } = self;
         tokio::pin!(signal);
         tokio::select! {
-            result = &mut task => flatten_server_task(result),
-            () = &mut signal => {
+            result = &mut task => Err(unexpected_server_task(result)),
+            signal_result = &mut signal => {
                 handle.graceful_shutdown(Some(shutdown_grace));
-                flatten_server_task(task.await)
+                flatten_server_task(task.await)?;
+                Ok(signal_result)
             }
         }
     }
@@ -331,6 +334,13 @@ fn flatten_server_task(result: Result<io::Result<()>, JoinError>) -> Result<(), 
         .map_err(ServerError::Serve)
 }
 
+fn unexpected_server_task(result: Result<io::Result<()>, JoinError>) -> ServerError {
+    match flatten_server_task(result) {
+        Ok(()) => ServerError::Stopped,
+        Err(error) => error,
+    }
+}
+
 /// Apply the fixed process-wide request bounds to an application router.
 pub fn bounded_router(router: Router, limits: ServerLimits) -> Router {
     router
@@ -351,15 +361,19 @@ async fn normalize_boundary_response(response: Response) -> Response {
             TIMEOUT_MESSAGE.to_owned(),
             Some(TIMEOUT_HINT.to_owned()),
         ),
-        StatusCode::PAYLOAD_TOO_LARGE => err_response(
-            StatusCode::PAYLOAD_TOO_LARGE,
-            "api.request",
-            ErrorCode::PayloadTooLarge.as_str(),
-            BODY_LIMIT_MESSAGE.to_owned(),
-            Some(BODY_LIMIT_HINT.to_owned()),
-        ),
+        StatusCode::PAYLOAD_TOO_LARGE => payload_too_large_response(),
         _ => response,
     }
+}
+
+pub(crate) fn payload_too_large_response() -> Response {
+    err_response(
+        StatusCode::PAYLOAD_TOO_LARGE,
+        "api.request",
+        ErrorCode::PayloadTooLarge.as_str(),
+        BODY_LIMIT_MESSAGE.to_owned(),
+        Some(BODY_LIMIT_HINT.to_owned()),
+    )
 }
 
 #[cfg(test)]

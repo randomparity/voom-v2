@@ -2680,7 +2680,6 @@ dependencies = [
  "hyper",
  "hyper-util",
  "rcgen",
- "reqwest",
  "rustls",
  "secrecy",
  "serde",

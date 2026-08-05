@@ -45,20 +45,30 @@ curl --fail --silent --show-error \
 ```
 
 Authenticated execution routes use a node bearer token. Read it without echo,
-send it only over verified HTTPS, and clear it from the shell afterward. This
-heartbeat example is a mutation, so it also supplies an idempotency key:
+send it only over verified HTTPS, and keep it out of process arguments. Set
+`VOOM_NODE_ID` to the registered remote node ID. This Bash subshell writes the
+header to a mode-0600 temporary file, removes it on every exit, and supplies an
+idempotency key because the heartbeat is a mutation:
 
 ```bash
-read -r -s -p 'Node bearer token: ' VOOM_NODE_TOKEN
-printf '\n' >&2
-curl --fail --silent --show-error \
-  --cacert /etc/voom/client-ca.pem \
-  --header "Authorization: Bearer ${VOOM_NODE_TOKEN}" \
-  --header 'Content-Type: application/json' \
-  --header 'X-Voom-Idempotency-Key: operator-heartbeat-001' \
-  --data '{}' \
-  "https://api.example.test:7443/v1/execution/node/${VOOM_NODE_ID}/heartbeat"
-unset VOOM_NODE_TOKEN
+(
+  set -eu
+  umask 077
+  auth_header=$(mktemp)
+  trap 'rm -f -- "$auth_header"; unset VOOM_NODE_TOKEN' EXIT
+  trap 'exit 130' HUP INT TERM
+  chmod 600 "$auth_header"
+  read -r -s -p 'Node bearer token: ' VOOM_NODE_TOKEN
+  printf '\n' >&2
+  printf 'Authorization: Bearer %s\n' "$VOOM_NODE_TOKEN" >"$auth_header"
+  curl --fail --silent --show-error \
+    --cacert /etc/voom/client-ca.pem \
+    --header "@$auth_header" \
+    --header 'Content-Type: application/json' \
+    --header 'X-Voom-Idempotency-Key: operator-heartbeat-001' \
+    --data '{}' \
+    "https://api.example.test:7443/v1/execution/node/${VOOM_NODE_ID}/heartbeat"
+)
 ```
 
 ## Loopback-only HTTP

@@ -86,11 +86,11 @@ async fn run() -> Result<(), StartupDiagnostic> {
         bind = %server.local_addr(),
         transport = transport_label
     );
-    termination.await?;
-    server
-        .shutdown_on(std::future::ready(()))
+    let termination_result = server
+        .shutdown_on(termination)
         .await
         .map_err(|error| server_diagnostic(&error))?;
+    termination_result?;
     tracing::info!(event = "shutdown_complete");
     Ok(())
 }
@@ -143,11 +143,16 @@ fn server_diagnostic(error: &ServerError) -> StartupDiagnostic {
             ErrorCode::Internal.as_str(),
             "failed to bind the API listener; verify --bind and local socket permissions",
         ),
-        ServerError::Serve(_) | ServerError::Join(_) => StartupDiagnostic::new(
-            "serve_connections",
-            ErrorCode::Internal.as_str(),
-            "the API server stopped unexpectedly; inspect host resources and restart the process",
-        ),
+        ServerError::Serve(_) | ServerError::Join(_) | ServerError::Stopped => {
+            StartupDiagnostic::new(
+                "serve_connections",
+                ErrorCode::Internal.as_str(),
+                concat!(
+                    "the API server stopped unexpectedly; inspect host resources ",
+                    "and restart the process"
+                ),
+            )
+        }
     }
 }
 
