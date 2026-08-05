@@ -1,7 +1,6 @@
 #![expect(
     clippy::expect_used,
-    clippy::panic,
-    reason = "integration tests use direct assertions and panic after bounded cleanup"
+    reason = "integration tests use expect for direct setup and process assertions"
 )]
 
 use std::os::unix::fs::PermissionsExt;
@@ -280,6 +279,10 @@ async fn binary_does_not_bind_when_ffprobe_dependency_is_missing() {
 
 #[cfg(unix)]
 #[tokio::test]
+#[expect(
+    clippy::panic,
+    reason = "outer-timeout failure is emitted only after bounded process cleanup"
+)]
 async fn delayed_worker_hung_version_probe_reports_inner_timeout_and_reaps() {
     let binary = env!("CARGO_BIN_EXE_voom-ffprobe-worker");
     let dir = tempfile::tempdir().expect("temporary directory should be created");

@@ -275,15 +275,9 @@ fn detect_ffprobe_version(
             return Ok(version);
         }
         if started.elapsed() >= version_timeout {
-            child.kill().map_err(|source| FfprobeConfigError::Io {
-                binary: binary.clone(),
-                operation: "terminate timed-out version check",
-                source,
-            })?;
-            child.wait().map_err(|source| FfprobeConfigError::Io {
-                binary: binary.clone(),
-                operation: "reap timed-out version check",
-                source,
+            let terminate_result = child.kill();
+            reap_version_child_after_termination(&binary, terminate_result, || {
+                child.wait().map(|_status| ())
             })?;
             return Err(FfprobeConfigError::Timeout {
                 binary,
@@ -292,6 +286,23 @@ fn detect_ffprobe_version(
         }
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
+}
+
+fn reap_version_child_after_termination(
+    binary: &Path,
+    terminate_result: io::Result<()>,
+    reap: impl FnOnce() -> io::Result<()>,
+) -> Result<(), FfprobeConfigError> {
+    reap().map_err(|source| FfprobeConfigError::Io {
+        binary: binary.to_path_buf(),
+        operation: "reap timed-out version check",
+        source,
+    })?;
+    terminate_result.map_err(|source| FfprobeConfigError::Io {
+        binary: binary.to_path_buf(),
+        operation: "terminate timed-out version check",
+        source,
+    })
 }
 
 async fn command_output(command: &mut Command) -> io::Result<std::process::Output> {
