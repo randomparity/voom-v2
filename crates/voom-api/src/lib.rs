@@ -22,6 +22,7 @@ pub const SCHEMA_VERSION: &str = "0";
 
 pub mod config;
 mod execution;
+pub mod server;
 
 #[cfg(test)]
 #[path = "lib_test.rs"]
