@@ -1,21 +1,22 @@
 #![expect(
     clippy::expect_used,
-    reason = "integration tests use expect for direct setup and process assertions"
+    clippy::panic,
+    reason = "integration tests use direct assertions and panic after bounded cleanup"
 )]
 
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use secrecy::SecretString;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 use voom_core::{ErrorCode, FailureClass, LeaseId, WorkerId};
 use voom_ffprobe_worker::{FFPROBE_BIN_ENV, FfprobeConfig, observe_file_facts, operation_handler};
 use voom_worker_protocol::{
-    ClientHandle, ExpectedFileFacts, HttpClient, HttpServer, NdjsonOutcome, OperationKind,
-    OperationRequest, ProbeFileRequest, ProgressFrame, ProtocolError, ServerHandle, ServerRunning,
-    WorkerCredentials,
+    ClientHandle, ExpectedFileFacts, FFPROBE_STARTUP_TIMEOUT, FFPROBE_VERSION_TIMEOUT, HttpClient,
+    HttpServer, NdjsonOutcome, OperationKind, OperationRequest, ProbeFileRequest, ProgressFrame,
+    ProtocolError, ServerHandle, ServerRunning, WorkerCredentials,
 };
 
 const BASIC_FFPROBE_JSON: &str = include_str!("../fixtures/ffprobe/basic-mp4.json");
@@ -277,6 +278,78 @@ async fn binary_does_not_bind_when_ffprobe_dependency_is_missing() {
     );
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn delayed_worker_hung_version_probe_reports_inner_timeout_and_reaps() {
+    let binary = env!("CARGO_BIN_EXE_voom-ffprobe-worker");
+    let dir = tempfile::tempdir().expect("temporary directory should be created");
+    let pid_file = dir.path().join("ffprobe.pid");
+    let fake_ffprobe = write_hung_version_ffprobe(dir.path(), &pid_file);
+    let mut command = tokio::process::Command::new("/bin/sh");
+    command
+        .args(["-c", "sleep 1; exec \"$1\"", "delayed-worker", binary])
+        .env("VOOM_WORKER_ID", "7")
+        .env("VOOM_WORKER_EPOCH", "3")
+        .env("VOOM_WORKER_SECRET", "secret")
+        .env("VOOM_WORKER_BIND", "127.0.0.1:0")
+        .env(FFPROBE_BIN_ENV, &fake_ffprobe)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .process_group(0)
+        .kill_on_drop(true);
+    let mut child = command.spawn().expect("worker process should launch");
+    let process_group = child.id().expect("worker should have PID");
+    let mut process_group_guard = ProcessGroupGuard::new(process_group);
+    let stdout = child.stdout.take().expect("stdout should be piped");
+    let stderr = child.stderr.take().expect("stderr should be piped");
+    let mut stdout = tokio::spawn(read_all(stdout));
+    let mut stderr = tokio::spawn(read_all(stderr));
+
+    let Ok(status) = tokio::time::timeout(FFPROBE_STARTUP_TIMEOUT, child.wait()).await else {
+        let mut cleanup_errors = Vec::new();
+        if let Err(error) = process_group_guard.kill_now() {
+            cleanup_errors.push(format!("process-group kill: {error}"));
+        }
+        bounded_child_cleanup(&mut child, &mut cleanup_errors).await;
+        bounded_pipe_cleanup(&mut stdout, "stdout", &mut cleanup_errors).await;
+        bounded_pipe_cleanup(&mut stderr, "stderr", &mut cleanup_errors).await;
+        if let Err(error) = cleanup_recorded_process(&pid_file) {
+            cleanup_errors.push(error);
+        }
+        panic!(
+            "outer ffprobe supervisor timeout won before inner cleanup; cleanup: {}",
+            cleanup_errors.join("; ")
+        );
+    };
+    let status = status.expect("worker wait should succeed");
+    let stdout = stdout.await.expect("stdout drain task should succeed");
+    let stderr = stderr.await.expect("stderr drain task should succeed");
+    let recorded_pid = wait_for_pid_file(&pid_file, Duration::from_secs(5));
+    let stdout = String::from_utf8_lossy(&stdout);
+    let stderr = String::from_utf8_lossy(&stderr);
+    let expected_timeout = format!(
+        "version check exceeded {} seconds",
+        FFPROBE_VERSION_TIMEOUT.as_secs()
+    );
+
+    assert!(!status.success(), "worker unexpectedly succeeded");
+    assert!(
+        !stdout.contains("BOUND addr="),
+        "worker advertised readiness before dependency validation: {stdout}"
+    );
+    assert!(
+        stderr.contains("ffprobe"),
+        "startup error should identify ffprobe: {stderr}"
+    );
+    assert!(
+        stderr.contains(&expected_timeout),
+        "startup error should report {expected_timeout:?}: {stderr}"
+    );
+    assert_process_exited(recorded_pid.trim());
+    process_group_guard.disarm();
+}
+
 #[tokio::test]
 async fn malformed_payload_returns_terminal_domain_error_over_http_success() {
     let dir = tempfile::tempdir().expect("temporary directory should be created");
@@ -495,6 +568,160 @@ fn write_fake_ffprobe(dir: &Path, body: &str) -> PathBuf {
     let chmod_result = std::fs::set_permissions(&path, permissions);
     assert!(chmod_result.is_ok());
     path
+}
+
+fn write_hung_version_ffprobe(dir: &Path, pid_file: &Path) -> PathBuf {
+    let path = dir.join("ffprobe-hung-version");
+    let script = format!(
+        "#!/bin/sh\n\
+         if [ \"${{1:-}}\" = '-version' ]; then \
+         printf '%s' $$ > '{}'; exec sleep 60; fi\n\
+         exit 1\n",
+        pid_file.display()
+    );
+    std::fs::write(&path, script).expect("hung ffprobe fixture should be written");
+    let mut permissions = std::fs::metadata(&path)
+        .expect("hung ffprobe fixture metadata should be readable")
+        .permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&path, permissions)
+        .expect("hung ffprobe fixture should be executable");
+    path
+}
+
+async fn read_all(mut pipe: impl tokio::io::AsyncRead + Unpin) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    pipe.read_to_end(&mut bytes)
+        .await
+        .expect("worker output should be readable");
+    bytes
+}
+
+fn wait_for_pid_file(path: &Path, timeout: Duration) -> String {
+    let started = Instant::now();
+    loop {
+        if let Ok(pid) = std::fs::read_to_string(path) {
+            return pid;
+        }
+        assert!(
+            started.elapsed() < timeout,
+            "ffprobe helper did not create PID file {}",
+            path.display()
+        );
+        std::thread::yield_now();
+    }
+}
+
+fn process_exists(pid: &str) -> bool {
+    std::process::Command::new("kill")
+        .arg("-0")
+        .arg(pid)
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+fn assert_process_exited(pid: &str) {
+    assert!(!process_exists(pid), "child process {pid} still exists");
+}
+
+fn signal_process_group(process_group: u32) -> std::io::Result<()> {
+    let status = std::process::Command::new("kill")
+        .arg("-KILL")
+        .arg("--")
+        .arg(format!("-{process_group}"))
+        .status()?;
+    if status.success() {
+        return Ok(());
+    }
+    Err(std::io::Error::other(format!(
+        "kill exited with {status} for process group {process_group}"
+    )))
+}
+
+struct ProcessGroupGuard(Option<u32>);
+
+impl ProcessGroupGuard {
+    const fn new(process_group: u32) -> Self {
+        Self(Some(process_group))
+    }
+
+    fn kill_now(&mut self) -> std::io::Result<()> {
+        let Some(process_group) = self.0 else {
+            return Ok(());
+        };
+        signal_process_group(process_group)?;
+        self.0 = None;
+        Ok(())
+    }
+
+    fn disarm(&mut self) {
+        self.0 = None;
+    }
+}
+
+impl Drop for ProcessGroupGuard {
+    fn drop(&mut self) {
+        if let Some(process_group) = self.0 {
+            let _result = signal_process_group(process_group);
+        }
+    }
+}
+
+async fn bounded_child_cleanup(child: &mut tokio::process::Child, errors: &mut Vec<String>) {
+    match tokio::time::timeout(Duration::from_secs(5), child.wait()).await {
+        Ok(Ok(_status)) => return,
+        Ok(Err(error)) => errors.push(format!("direct worker wait: {error}")),
+        Err(_) => errors.push("direct worker wait exceeded five seconds".to_owned()),
+    }
+    if let Err(error) = child.start_kill() {
+        errors.push(format!("direct worker kill: {error}"));
+    }
+    match tokio::time::timeout(Duration::from_secs(5), child.wait()).await {
+        Ok(Ok(_status)) => {}
+        Ok(Err(error)) => errors.push(format!("post-kill worker wait: {error}")),
+        Err(_) => errors.push("post-kill worker wait exceeded five seconds".to_owned()),
+    }
+}
+
+async fn bounded_pipe_cleanup(
+    pipe: &mut tokio::task::JoinHandle<Vec<u8>>,
+    name: &str,
+    errors: &mut Vec<String>,
+) {
+    match tokio::time::timeout(Duration::from_secs(5), &mut *pipe).await {
+        Ok(Ok(_bytes)) => {}
+        Ok(Err(error)) => errors.push(format!("{name} drain task: {error}")),
+        Err(_) => {
+            pipe.abort();
+            errors.push(format!("{name} drain exceeded five seconds"));
+        }
+    }
+}
+
+fn cleanup_recorded_process(pid_file: &Path) -> Result<(), String> {
+    let Ok(pid) = std::fs::read_to_string(pid_file) else {
+        return Ok(());
+    };
+    let pid = pid.trim();
+    if process_exists(pid) {
+        let status = std::process::Command::new("kill")
+            .arg("-KILL")
+            .arg(pid)
+            .status()
+            .map_err(|error| format!("ffprobe helper kill failed: {error}"))?;
+        if !status.success() {
+            return Err(format!("ffprobe helper kill exited with {status}"));
+        }
+    }
+    let started = Instant::now();
+    while process_exists(pid) {
+        if started.elapsed() >= Duration::from_secs(5) {
+            return Err(format!("ffprobe helper {pid} survived cleanup"));
+        }
+        std::thread::yield_now();
+    }
+    Ok(())
 }
 
 fn configured_ffprobe(path: &Path) -> FfprobeConfig {
