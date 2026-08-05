@@ -46,8 +46,11 @@ seconds and the timeout test choosing a short duration. Derive a nine-second ffp
 supervisor timeout from the four-second probe plus the existing five-second coordination
 allowance.
 
-This preserves ownership and failure order, tests the actual durable deny path, and creates
-no public or operator-facing surface. ADR 0056 records the timing and injection decision.
+This preserves ownership and failure order and tests the actual durable deny path. It adds
+named public Rust constants to the existing `voom-worker-protocol::startup` module because
+the two process-owning crates must consume one relationship; it adds no wire, CLI,
+environment, or operator-configuration surface. ADR 0056 records the timing and injection
+decision.
 
 ### Rejected: environment-installed fake executable
 
@@ -106,9 +109,11 @@ existing built-in observation step, which then reads/repairs eligibility exactly
 The denied-row test therefore exercises the real transaction and deny classification while
 substituting only the unrelated host process.
 
-No environment variable, durable schema, public API, or CLI output changes. Readiness still
-precedes built-in eligibility, and all unavailable observations are still aggregated in
-metadata order.
+No environment variable, durable schema, wire API, or CLI output changes. The additive
+public Rust constants make the cross-process ordering visible to workspace consumers;
+removing or changing their meaning would require the usual crate compatibility review.
+Readiness still precedes built-in eligibility, and all unavailable observations are still
+aggregated in metadata order.
 
 ## Failure behavior
 
@@ -152,6 +157,8 @@ temporary fixtures and no process-global environment.
   starting a host ffprobe.
 - Public ffprobe configuration uses a four-second version deadline, and bundled ffprobe
   supervision uses the derived nine-second outer deadline; other worker budgets do not move.
+- `voom-worker-protocol::startup` publicly owns the three named timing constants; no wire,
+  CLI, environment, or operator-configurable contract is added.
 - A short injected deadline deterministically proves timeout, kill, reap, and actionable
   error details for a hung child.
 - A delayed real worker with a hung version child emits the actionable inner dependency
