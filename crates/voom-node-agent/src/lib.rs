@@ -6,5 +6,6 @@
     )
 )]
 
+pub mod child;
 pub mod client;
 pub mod config;
