@@ -79,6 +79,9 @@ impl ControlPlane {
         let node = self
             .heartbeat_node_in_tx(&mut tx, input.node_id, now)
             .await?;
+        self.node_incarnations
+            .heartbeat_in_tx(&mut tx, input.incarnation_id, now)
+            .await?;
         let outcome = RemoteNodeHeartbeatOutcome {
             node_id: node.id,
             status: node.status.as_str().to_owned(),
@@ -236,3 +239,7 @@ impl ControlPlane {
         })
     }
 }
+
+#[cfg(test)]
+#[path = "heartbeat_test.rs"]
+mod tests;

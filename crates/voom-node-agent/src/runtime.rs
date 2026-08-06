@@ -717,7 +717,7 @@ async fn settle_lease(
     dispatch: &LeaseDispatch,
     outcome: LeaseOutcome,
 ) -> Result<(), RuntimeFatal> {
-    let result = match outcome {
+    match outcome {
         LeaseOutcome::Complete(result) => {
             let request = RetryRequest::new(
                 new_key("complete"),
@@ -729,33 +729,52 @@ async fn settle_lease(
                 },
             )
             .map_err(RuntimeFatal::ControlPlane)?;
-            context
-                .client
-                .complete(dispatch.lease_id, &request)
-                .await
-                .map(|_| ())
+            match context.client.complete(dispatch.lease_id, &request).await {
+                Ok(_) | Err(VoomError::NotFound(_)) => Ok(()),
+                Err(VoomError::Conflict(message)) => {
+                    settle_failure(
+                        context,
+                        dispatch,
+                        FailureClass::MalformedWorkerResult,
+                        "control plane rejected the worker completion".to_owned(),
+                        json!({"complete_rejection": message}),
+                    )
+                    .await
+                }
+                Err(error) => Err(classify_control_plane_error(error)),
+            }
         }
         LeaseOutcome::Failure(class, reason, evidence) => {
-            let request = RetryRequest::new(
-                new_key("fail"),
-                &FailRequest {
-                    node_id: context.node_id,
-                    worker_id: context.worker_id(),
-                    incarnation_id: context.incarnation_id,
-                    reason,
-                    class,
-                    evidence,
-                },
-            )
-            .map_err(RuntimeFatal::ControlPlane)?;
-            context
-                .client
-                .fail(dispatch.lease_id, &request)
-                .await
-                .map(|_| ())
+            settle_failure(context, dispatch, class, reason, evidence).await
         }
-        LeaseOutcome::TerminalElsewhere | LeaseOutcome::Fenced => return Ok(()),
-    };
+        LeaseOutcome::TerminalElsewhere | LeaseOutcome::Fenced => Ok(()),
+    }
+}
+
+async fn settle_failure(
+    context: &CoordinatorContext,
+    dispatch: &LeaseDispatch,
+    class: FailureClass,
+    reason: String,
+    evidence: JsonValue,
+) -> Result<(), RuntimeFatal> {
+    let request = RetryRequest::new(
+        new_key("fail"),
+        &FailRequest {
+            node_id: context.node_id,
+            worker_id: context.worker_id(),
+            incarnation_id: context.incarnation_id,
+            reason,
+            class,
+            evidence,
+        },
+    )
+    .map_err(RuntimeFatal::ControlPlane)?;
+    let result = context
+        .client
+        .fail(dispatch.lease_id, &request)
+        .await
+        .map(|_| ());
     match result {
         Ok(()) | Err(VoomError::Conflict(_) | VoomError::NotFound(_)) => Ok(()),
         Err(error) => Err(classify_control_plane_error(error)),

@@ -203,7 +203,7 @@ impl ControlPlaneClient {
             .http
             .post(url)
             .bearer_auth(self.node_token.expose_secret())
-            .header("Idempotency-Key", request.idempotency_key())
+            .header("X-Voom-Idempotency-Key", request.idempotency_key())
             .header(reqwest::header::CONTENT_TYPE, "application/json")
             .body(request.body().to_vec())
             .send()

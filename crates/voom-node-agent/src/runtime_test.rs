@@ -1,7 +1,7 @@
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use async_trait::async_trait;
 use secrecy::SecretString;
@@ -105,6 +105,26 @@ async fn terminal_retry_retains_heartbeat_and_parallelism_permit() {
     gate.notify_waiters();
     task.await.unwrap();
     assert!(permits.try_acquire_owned().is_ok());
+}
+
+#[tokio::test]
+async fn rejected_completion_fails_the_held_lease_as_a_malformed_result() {
+    let control = Arc::new(FakeControlPlane::default());
+    control.reject_complete.store(true, Ordering::SeqCst);
+
+    settle_lease(
+        &context(control.clone()),
+        &dispatch(json!({})),
+        LeaseOutcome::Complete(json!({"invalid": "result"})),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(control.complete_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        control.failures.lock().await.as_slice(),
+        &[FailureClass::MalformedWorkerResult]
+    );
 }
 
 #[tokio::test(start_paused = true)]
@@ -302,6 +322,8 @@ struct FakeControlPlane {
     fail_gate: Mutex<Option<Arc<Notify>>>,
     fail_started: Notify,
     fail_started_count: AtomicUsize,
+    complete_calls: AtomicUsize,
+    reject_complete: AtomicBool,
     events: Mutex<Vec<String>>,
 }
 
@@ -321,6 +343,8 @@ impl Default for FakeControlPlane {
             fail_gate: Mutex::new(None),
             fail_started: Notify::new(),
             fail_started_count: AtomicUsize::new(0),
+            complete_calls: AtomicUsize::new(0),
+            reject_complete: AtomicBool::new(false),
             events: Mutex::new(Vec::new()),
         }
     }
@@ -426,6 +450,12 @@ impl ControlPlaneApi for FakeControlPlane {
         lease_id: LeaseId,
         _request: &RetryRequest<CompleteRequest>,
     ) -> Result<CompleteOutcome, VoomError> {
+        self.complete_calls.fetch_add(1, Ordering::SeqCst);
+        if self.reject_complete.load(Ordering::SeqCst) {
+            return Err(VoomError::Conflict(
+                "remote complete rejected: artifact access validation missing".to_owned(),
+            ));
+        }
         Ok(CompleteOutcome {
             lease_id,
             ticket_id: TicketId(13),

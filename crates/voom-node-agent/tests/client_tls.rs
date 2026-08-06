@@ -83,7 +83,7 @@ async fn authenticated_heartbeat(
     Json(body): Json<JsonValue>,
 ) -> Json<JsonValue> {
     assert_eq!(headers["authorization"], "Bearer secret-token");
-    assert_eq!(headers["idempotency-key"], "heartbeat-key");
+    assert_eq!(headers["x-voom-idempotency-key"], "heartbeat-key");
     assert_eq!(
         body,
         json!({"incarnation_id": "0123456789abcdef0123456789abcdef"})

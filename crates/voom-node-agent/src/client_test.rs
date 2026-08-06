@@ -289,7 +289,7 @@ fn read_request(stream: &mut TcpStream) -> CapturedRequest {
             .nth(1)
             .unwrap()
             .to_owned(),
-        idempotency_key: header_value(&headers, "idempotency-key").to_owned(),
+        idempotency_key: header_value(&headers, "x-voom-idempotency-key").to_owned(),
         authorization: header_value(&headers, "authorization").to_owned(),
         body: bytes[header_end..header_end + content_length].to_vec(),
     }

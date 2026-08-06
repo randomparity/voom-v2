@@ -79,7 +79,7 @@ pub(crate) fn handle_operation(req: OperationRequest) -> OperationFuture {
             lease_id: req.lease_id,
             seq: 1,
             emitted_at: now,
-            payload: serde_json::json!({"echoed_path": path}),
+            payload: probe_result(&req.payload, &path)?,
         };
         let mut body: Vec<u8> = Vec::new();
         body.extend_from_slice(&serde_json::to_vec(&progress).map_err(|e| {
@@ -102,4 +102,57 @@ pub(crate) fn handle_operation(req: OperationRequest) -> OperationFuture {
             body,
         ))
     })
+}
+
+fn probe_result(
+    request: &serde_json::Value,
+    path: &str,
+) -> Result<serde_json::Value, ProtocolError> {
+    let mut result = serde_json::json!({"echoed_path": path});
+    let Some(plan) = request.get("artifact_access_plan") else {
+        return Ok(result);
+    };
+    let selected_access_mode = required_string(plan, "selected_access_mode")?;
+    let input_handles = required_string_array(plan, "input_handles")?;
+    let output_handles = required_string_array(plan, "output_handles")?;
+    result["artifact_access"] = serde_json::json!({
+        "validated": true,
+        "mode": selected_access_mode,
+        "inputs_consumed": input_handles,
+        "outputs_declared": output_handles,
+    });
+    Ok(result)
+}
+
+fn required_string<'a>(
+    value: &'a serde_json::Value,
+    field: &'static str,
+) -> Result<&'a str, ProtocolError> {
+    value
+        .get(field)
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| ProtocolError::InvalidPayload {
+            detail: format!("artifact_access_plan.{field} must be a string"),
+        })
+}
+
+fn required_string_array(
+    value: &serde_json::Value,
+    field: &'static str,
+) -> Result<Vec<String>, ProtocolError> {
+    value
+        .get(field)
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| ProtocolError::InvalidPayload {
+            detail: format!("artifact_access_plan.{field} must be an array"),
+        })?
+        .iter()
+        .map(|item| {
+            item.as_str()
+                .map(str::to_owned)
+                .ok_or_else(|| ProtocolError::InvalidPayload {
+                    detail: format!("artifact_access_plan.{field} entries must be strings"),
+                })
+        })
+        .collect()
 }

@@ -10,7 +10,7 @@ use voom_conformance::Harness;
 use voom_core::LeaseId;
 use voom_worker_protocol::{
     ClientHandle, HttpClient, NdjsonOutcome, OperationKind, OperationRequest, ProgressFrame,
-    ProtocolError,
+    ProtocolError, WorkerCredentials,
 };
 
 #[tokio::test]
@@ -36,6 +36,7 @@ async fn echo_worker_binary_preserves_probe_and_unknown_operation_contracts() {
             .await?;
         let progress = probe.frames.next_frame().await?;
         let terminal = probe.frames.next_frame().await?;
+        let remote_terminal = remote_probe(&client, &launch.credentials).await?;
         let unsupported = client
             .dispatch(
                 &launch.credentials,
@@ -49,12 +50,18 @@ async fn echo_worker_binary_preserves_probe_and_unknown_operation_contracts() {
                 },
             )
             .await;
-        Ok::<_, ProtocolError>((probe.response, progress, terminal, unsupported))
+        Ok::<_, ProtocolError>((
+            probe.response,
+            progress,
+            terminal,
+            remote_terminal,
+            unsupported,
+        ))
     }
     .await;
 
     let shutdown = launch.shutdown(Duration::from_secs(5)).await;
-    let (response, progress, terminal, unsupported) = outcomes.unwrap();
+    let (response, progress, terminal, remote_terminal, unsupported) = outcomes.unwrap();
     let status = shutdown.unwrap();
 
     assert!(bound.ip().is_loopback(), "worker bound to {bound}");
@@ -94,8 +101,55 @@ async fn echo_worker_binary_preserves_probe_and_unknown_operation_contracts() {
         payload,
         serde_json::json!({"echoed_path": "/tmp/input.mov"})
     );
+    assert_remote_artifact_access(remote_terminal);
     assert!(
         matches!(unsupported, Err(ProtocolError::UnknownOperation { .. })),
         "expected UnknownOperation, got {unsupported:?}"
+    );
+}
+
+async fn remote_probe(
+    client: &HttpClient,
+    credentials: &WorkerCredentials,
+) -> Result<NdjsonOutcome, ProtocolError> {
+    let mut probe = client
+        .dispatch(
+            credentials,
+            "echo-remote-probe-23",
+            OperationRequest {
+                operation: OperationKind::ProbeFile,
+                lease_id: LeaseId(23),
+                payload: serde_json::json!({
+                    "path": "/tmp/remote.mov",
+                    "artifact_access_plan": {
+                        "selected_access_mode": "shared_mount",
+                        "input_handles": ["handle:input:23"],
+                        "output_handles": ["handle:output:23"]
+                    }
+                }),
+                heartbeat_deadline_ms: 1_000,
+                progress_idle_deadline_ms: 1_000,
+            },
+        )
+        .await?;
+    let _progress = probe.frames.next_frame().await?;
+    probe.frames.next_frame().await
+}
+
+fn assert_remote_artifact_access(terminal: NdjsonOutcome) {
+    let NdjsonOutcome::Terminated(ProgressFrame::Result { payload, .. }) = terminal else {
+        panic!("expected remote terminal result, got {terminal:?}");
+    };
+    assert_eq!(
+        payload,
+        serde_json::json!({
+            "echoed_path": "/tmp/remote.mov",
+            "artifact_access": {
+                "validated": true,
+                "mode": "shared_mount",
+                "inputs_consumed": ["handle:input:23"],
+                "outputs_declared": ["handle:output:23"]
+            }
+        })
     );
 }
