@@ -1,0 +1,138 @@
+# Runbook: Pull-Based Node Agent
+
+Run one `voom-node-agent` process on each remote worker host. The agent authenticates as
+one pre-registered logical node, pulls leases from `voom-api`, and supervises the configured
+out-of-process workers over loopback HTTP.
+
+## Register the node and protect its token
+
+On the control-plane host, initialize the database and register a remote node once:
+
+```sh
+export VOOM_DATABASE_URL=sqlite:///var/lib/voom/voom.db
+voom node register --name media-node-1 --kind remote --heartbeat-ttl-seconds 30
+```
+
+The successful JSON envelope contains the node ID and the bearer token. The token is shown
+only at registration. Transfer it through the deployment secret store, write it as a
+mode-0600 file owned by the agent service account, and do not place it in process arguments,
+logs, or the TOML document itself.
+
+```sh
+sudo install -o voom -g voom -m 0600 node-token /etc/voom/node-token
+```
+
+## Configure the agent
+
+The configuration is strict TOML: unknown or duplicate fields, invalid bounds, relative
+worker programs, duplicate worker names/capabilities, and empty capability lists stop
+startup. This example reads the token from a file:
+
+```toml
+control_plane_url = "https://api.example.test:7443"
+ca_cert = "/etc/voom/client-ca.pem"
+node_id = 7
+poll_interval_ms = 250
+lease_ttl_seconds = 30
+progress_idle_timeout_seconds = 120
+shutdown_grace_seconds = 10
+node_token = { source = "file", path = "/etc/voom/node-token" }
+
+[[workers]]
+name = "probe"
+program = "/usr/local/libexec/voom/voom-ffprobe-worker"
+args = []
+operations = ["probe_file"]
+artifact_access = ["shared_mount"]
+max_parallel = 2
+```
+
+An environment-backed secret is also supported:
+
+```toml
+node_token = { source = "env", name = "VOOM_NODE_TOKEN" }
+```
+
+Use the environment form only when the service manager injects secrets without exposing
+them in unit files or diagnostics. The agent trims one trailing newline from either source
+and rejects embedded newlines.
+
+Remote control-plane URLs must use HTTPS. `ca_cert` adds a private/custom CA while retaining
+certificate and hostname verification. Cleartext HTTP is accepted only for an explicit
+loopback host, for local testing; there is no insecure remote override.
+
+## Start and supervise
+
+Validate the installed binary version and start the foreground process under a supervisor:
+
+```sh
+voom-node-agent --version
+voom-node-agent --config /etc/voom/node-agent.toml
+```
+
+Startup creates a fresh random incarnation, activates the declared workers, sends the first
+node heartbeat before starting children, and then begins lease acquisition. Starting a
+second agent for the same node atomically supersedes the first incarnation. The superseded
+process is fenced from heartbeat, acquire, and terminal mutations and exits unsuccessfully;
+do not configure two instances as an availability pair.
+
+Node heartbeats run independently from child startup and lease dispatch. Every held lease
+also has its own heartbeat, which stays active until completion/failure is acknowledged.
+`progress_idle_timeout_seconds` starts when a worker is dispatched and resets only after a
+valid NDJSON progress frame. Silence, malformed frames, a child exit, or a protocol failure
+settles the lease with the corresponding failure class.
+
+After a child exits, the agent first cancels and settles that child's held leases, then
+restarts it. Three consecutive startup failures exhaust the restart budget, retire the
+incarnation with `child_restart_exhausted`, and make the agent exit unsuccessfully. Let the
+service supervisor apply its normal process-level restart/backoff policy.
+
+## Inspect operation
+
+Run inspection commands on the control-plane host against the same database:
+
+```sh
+export VOOM_DATABASE_URL=sqlite:///var/lib/voom/voom.db
+voom node show --node-id 7
+voom node incarnation list --node-id 7 --limit 20
+voom worker list --status active
+voom worker list --status retired
+voom scheduler decisions list --limit 20
+```
+
+The incarnation list is newest first. A normal replacement shows the new incarnation as
+`active` and the prior one as `superseded`; a normal stop records `retired` with
+`graceful_shutdown` and retires its workers.
+
+## Stop and upgrade
+
+SIGINT or SIGTERM stops acquisition, fails held leases as `user_cancellation`, closes and
+reaps every child (killing one after `shutdown_grace_seconds` if necessary), and deactivates
+the incarnation. Set the supervisor stop timeout above the configured shutdown grace. A
+second termination signal cancels blocked lease settlement or deactivation and makes the
+process exit unsuccessfully. It still kills and reaps every child before exit, but the
+incarnation or lease terminal state can remain for expiry/recovery to reconcile.
+
+The schema change for this release is a pre-release flag day, not a rolling mixed-version
+upgrade:
+
+1. Stop the agents and API, then take the WAL-aware SQLite backup described in
+   [migration-rollback.md](migration-rollback.md).
+2. Install the matching `voom`, `voom-api`, `voom-node-agent`, and worker binaries on every
+   host before changing the database.
+3. Run `voom init` once with the new CLI to apply migrations.
+4. Start `voom-api`, verify `/health`, then start each node agent and inspect its incarnation
+   and workers.
+
+Do not run old binaries against the migrated database. Rollback is paired: stop the new
+processes, restore both the prior binaries and the pre-upgrade database backup, then start
+the prior deployment. Restoring only one side is unsupported.
+
+## Current boundary
+
+This agent supplies authenticated pull execution, fencing, heartbeats, child supervision,
+and explicit artifact-access-plan forwarding. Issues #418 through #425 remain future
+byte-local work: node-owned root persistence and resolution, scan/hash/probe conversion,
+transform and backup conversion, storage-owner commit, and removal of transitional
+control-plane filesystem access are not available through this agent yet. Do not infer
+owner-local path resolution or byte transfer from `shared_mount` declarations.

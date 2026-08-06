@@ -101,6 +101,12 @@ mutation. Generate a new key only for a new logical operation.
 The process loads its certificate and key only at startup. After renewal,
 restart it with SIGTERM-driven draining so the new identity is loaded.
 
+Remote execution is driven by the pull client documented in
+[operator-node-agent.md](operator-node-agent.md). Start the API and verify health before
+starting agents. An agent uses the registered node token over HTTPS, and every mutation
+must carry `X-Voom-Idempotency-Key`; operators should not place a reverse proxy in front of
+the API if it removes either header.
+
 ## Troubleshooting
 
 | Symptom | Operator action |

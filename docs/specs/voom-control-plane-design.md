@@ -443,13 +443,20 @@ Every provider runs as an out-of-process worker. The worker protocol is
 network-capable from day one, even when workers run on the same machine.
 
 One pull-based node agent is the remote host boundary. A stable logical node
-owns roots; each authenticated agent process is a fenced node incarnation. The
-agent heartbeats, pulls leases, activates owned roots, resolves locations, and
-supervises version-matched scan, hash, probe, FFmpeg, MKVToolNix, backup,
-verification, and commit providers over node-local endpoints. Restart changes
-the incarnation ID without changing root ownership. The existing
-heartbeat-updated node row epoch remains optimistic concurrency state, not an
-incarnation fence.
+owns roots; each authenticated agent process is a fenced node incarnation.
+Issue #417 delivers the leaf `voom-node-agent` process: it activates declared
+workers, sends independent node and lease heartbeats, pulls explicit leases,
+validates freshness before dispatch, supervises protocol-checked loopback worker
+processes, and settles structured results. Restart changes the incarnation ID
+without changing root ownership. The existing heartbeat-updated node row epoch
+remains optimistic concurrency state, not an incarnation fence.
+
+The delivered agent forwards the control plane's artifact access plan but does
+not resolve owned roots or transfer/open media bytes. Issues #418 through #425
+remain the future byte-local conversion: root persistence and activation,
+owner-local scan/hash/probe, transforms and backup, storage-owner commit, and
+removal of transitional control-plane filesystem access. Those capabilities
+must not be inferred from the current `shared_mount` synthetic execution path.
 
 Workers:
 

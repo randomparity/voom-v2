@@ -7,6 +7,8 @@ proven daemon-ready in the Sprint 17 closeout matrix
 
 | Runbook | What it covers | Matrix rows it exercises |
 |---|---|---|
+| [operator-control-plane-api.md](operator-control-plane-api.md) | Foreground HTTPS API startup, TLS identity, health, mutation retries, and shutdown. | Authenticated control-plane transport and durable execution routes. |
+| [operator-node-agent.md](operator-node-agent.md) | Remote-node registration, strict agent configuration, pull execution, incarnation fencing, child supervision, inspection, shutdown, and flag-day upgrade/rollback. | Node/worker activation, remote leases, heartbeats, artifact-access plans, and recovery. |
 | [operator-real-media-execution.md](operator-real-media-execution.md) | End-to-end real-media run: `init` → `worker run-local` (ffmpeg + mkvtoolnix) → `scan` → `policy create` → `policy input create-from-scan --all` → `compliance execute` → inspect / resume. Includes the sample-policy catalog, output/promotion rules, mid-run monitoring (WAL concurrent reads), and the `run-local` two-line stdout contract. | Node/worker grants, policies, input sets, artifacts, reports, recovery records (closeout matrix 1); continuous monitoring, scan reconciliation, crash recovery, event/inspection (matrix 2). |
 | [migration-rollback.md](migration-rollback.md) | Rolling a VOOM install back to a prior release: up-only migrations, binary-before-DB ordering, WAL-aware snapshot restore, dirty-migration recovery, and the no-backup fallbacks. | The durability/recovery foundation the daemon relies on before it automates any mutation (recovery records, reports; matrix 1). |
 
@@ -25,6 +27,9 @@ recovery path to a CLI/API command and a test. These runbooks are the
 - The **migration-rollback** runbook is the recovery story for the durable state
   the daemon consumes: it documents how to restore and verify the database the
   daemon reads, so a daemon sprint never has to invent a rollback path.
+- The **control-plane API** and **node-agent** runbooks describe the delivered remote
+  pull path. They cover control transport and synthetic/declared worker execution, not the
+  byte-local root and media-operation conversion planned in issues #418 through #425.
 
 When a daemon sprint (18-20) automates one of these procedures, it must consume
 the same durable state and CLI/API contracts these runbooks use — it must not

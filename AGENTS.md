@@ -120,7 +120,8 @@ Production crate responsibilities:
 - `voom-store`: SQLite connections, migrations, schema probes, and repositories.
 - `voom-artifact`: pending-commit records, event glue, and commit-recovery data.
 - `voom-control-plane`: durable authority, commit authorization, and orchestration.
-- `voom-api`: axum router and application-state wiring; there is no server binary yet.
+- `voom-api`: axum router, application-state wiring, and bounded TLS server binary.
+- `voom-node-agent`: authenticated pull execution and node-local worker supervision.
 - `voom-cli`: agent-facing commands, JSON envelopes, initialization, and presentation.
 - `voom-ffprobe-worker`: local media probing through ffprobe.
 - `voom-ffmpeg-worker`: local video and audio transforms through ffmpeg.
@@ -149,6 +150,7 @@ voom-control-plane       → voom-artifact, voom-core, voom-events, voom-plan,
                            voom-worker-protocol
 
 voom-api                 → voom-control-plane, voom-core
+voom-node-agent          → voom-core, voom-worker-protocol
 voom-cli                 → voom-control-plane, voom-core, voom-events,
                            voom-plan, voom-policy, voom-store
 real media/backup workers → voom-core, voom-worker-protocol
