@@ -1,0 +1,10 @@
+#![cfg_attr(
+    test,
+    expect(
+        clippy::unwrap_used,
+        reason = "tests favor unwrap over plumbing Result through fixture assertions"
+    )
+)]
+
+pub mod client;
+pub mod config;

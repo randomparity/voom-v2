@@ -21,6 +21,7 @@ members = [
     "crates/voom-mkvtoolnix-worker",
     "crates/voom-verify-artifact-worker",
     "crates/voom-backup-worker",
+    "crates/voom-node-agent",
 ]
 
 [workspace.package]
