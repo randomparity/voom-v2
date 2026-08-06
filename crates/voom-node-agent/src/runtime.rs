@@ -63,7 +63,16 @@ impl AgentRuntime {
     ///
     /// Returns an error when activation, child supervision, fencing, or deactivation fails.
     pub async fn run(self) -> Result<(), VoomError> {
-        self.run_until(shutdown_signal()).await
+        let (signal_tx, signal_rx) = mpsc::unbounded_channel();
+        let runtime = self.run_with_shutdowns(signal_rx);
+        let signals = forward_os_shutdowns(signal_tx);
+        tokio::pin!(runtime, signals);
+        tokio::select! {
+            result = &mut runtime => result,
+            () = &mut signals => Err(VoomError::Internal(
+                "node-agent signal listener stopped unexpectedly".to_owned(),
+            )),
+        }
     }
 
     /// Run until the supplied shutdown future resolves.
@@ -77,6 +86,32 @@ impl AgentRuntime {
     where
         F: Future<Output = ()> + Send,
     {
+        self.run_until_signals(shutdown, std::future::pending())
+            .await
+    }
+
+    async fn run_until_signals<F, S>(self, first: F, second: S) -> Result<(), VoomError>
+    where
+        F: Future<Output = ()> + Send,
+        S: Future<Output = ()> + Send,
+    {
+        let (signal_tx, signal_rx) = mpsc::unbounded_channel();
+        let runtime = self.run_with_shutdowns(signal_rx);
+        let signals = async move {
+            forward_shutdowns(first, second, signal_tx).await;
+            std::future::pending::<()>().await;
+        };
+        tokio::pin!(runtime, signals);
+        tokio::select! {
+            result = &mut runtime => result,
+            () = &mut signals => unreachable!("shutdown forwarder remains pending"),
+        }
+    }
+
+    async fn run_with_shutdowns(
+        self,
+        mut signals: mpsc::UnboundedReceiver<()>,
+    ) -> Result<(), VoomError> {
         let incarnation_id = NodeIncarnationId::generate()?;
         let activation = self.activate(incarnation_id).await?;
         let (fatal_tx, mut fatal_rx) = mpsc::unbounded_channel();
@@ -105,23 +140,29 @@ impl AgentRuntime {
         let (shutdown_tx, shutdown_rx) = watch::channel(ShutdownKind::Running);
         let mut coordinators =
             self.spawn_coordinators(children, incarnation_id, &shutdown_rx, &fatal_tx)?;
-        tokio::pin!(shutdown);
         let exit = tokio::select! {
-            () = &mut shutdown => RuntimeExit::Graceful,
+            signal = signals.recv() => {
+                if signal.is_some() {
+                    RuntimeExit::Graceful
+                } else {
+                    RuntimeExit::Fatal(RuntimeFatal::Internal(
+                        "node-agent shutdown signal source closed".to_owned(),
+                    ))
+                }
+            },
             Some(fatal) = fatal_rx.recv() => RuntimeExit::Fatal(fatal),
             joined = coordinators.join_next() => coordinator_exit(joined),
         };
 
         let shutdown_kind = shutdown_kind_for_exit(&exit);
         let _ = shutdown_tx.send(shutdown_kind);
-        while let Some(joined) = coordinators.join_next().await {
-            if let Err(error) = joined {
-                node_heartbeat.stop();
-                return Err(VoomError::Internal(format!(
-                    "join node-agent worker coordinator: {error}"
-                )));
-            }
-        }
+        let forced = wait_for_coordinators(
+            &mut coordinators,
+            &shutdown_tx,
+            &mut signals,
+            matches!(&exit, RuntimeExit::Graceful),
+        )
+        .await?;
         node_heartbeat.stop();
 
         let reason = match &exit {
@@ -129,7 +170,15 @@ impl AgentRuntime {
             RuntimeExit::Fatal(_) => return Err(exit.into_error()),
             RuntimeExit::RestartExhausted => NodeIncarnationEndReason::ChildRestartExhausted,
         };
-        self.deactivate(incarnation_id, reason).await?;
+        if forced {
+            return Err(forced_shutdown_error());
+        }
+        if reason == NodeIncarnationEndReason::GracefulShutdown {
+            self.deactivate_or_second_signal(incarnation_id, &mut signals)
+                .await?;
+        } else {
+            self.deactivate(incarnation_id, reason).await?;
+        }
         match exit {
             RuntimeExit::Graceful => Ok(()),
             RuntimeExit::RestartExhausted => Err(VoomError::ExternalSystemUnavailable(
@@ -295,6 +344,20 @@ impl AgentRuntime {
         Ok(())
     }
 
+    async fn deactivate_or_second_signal(
+        &self,
+        incarnation_id: NodeIncarnationId,
+        signals: &mut mpsc::UnboundedReceiver<()>,
+    ) -> Result<(), VoomError> {
+        tokio::select! {
+            result = self.deactivate(
+                incarnation_id,
+                NodeIncarnationEndReason::GracefulShutdown,
+            ) => result,
+            _ = signals.recv() => Err(forced_shutdown_error()),
+        }
+    }
+
     fn shutdown_grace(&self) -> Duration {
         Duration::from_secs(u64::from(self.config.config.shutdown_grace_seconds))
     }
@@ -373,12 +436,7 @@ async fn run_coordinator(
             CoordinatorEvent::Acquire(Ok(Acquired::Terminal)) => {}
             CoordinatorEvent::Acquire(Err(error)) => return CoordinatorExit::Fatal(error),
             CoordinatorEvent::Shutdown(kind) => {
-                let cancellation = if kind == ShutdownKind::User {
-                    LeaseCancellation::User
-                } else {
-                    LeaseCancellation::Fenced
-                };
-                cancel_and_wait(&cancel_tx, cancellation, &mut leases).await;
+                settle_leases_for_shutdown(&cancel_tx, &mut leases, &mut shutdown, kind).await;
                 let supervisor = ChildSupervisor::new(context.shutdown_grace);
                 let _ = supervisor.shutdown_all(vec![child]).await;
                 return CoordinatorExit::Shutdown;
@@ -1025,6 +1083,74 @@ async fn cancel_and_wait(
     wait_for_leases(leases).await;
 }
 
+async fn settle_leases_for_shutdown(
+    cancellation: &watch::Sender<LeaseCancellation>,
+    leases: &mut JoinSet<()>,
+    shutdown: &mut watch::Receiver<ShutdownKind>,
+    kind: ShutdownKind,
+) -> bool {
+    let reason = if kind == ShutdownKind::User {
+        LeaseCancellation::User
+    } else {
+        LeaseCancellation::Fenced
+    };
+    let _ = cancellation.send(reason);
+    if kind != ShutdownKind::User {
+        wait_for_leases(leases).await;
+        return false;
+    }
+
+    let forced = {
+        let settlement = wait_for_leases(leases);
+        tokio::pin!(settlement);
+        loop {
+            tokio::select! {
+                () = &mut settlement => break false,
+                changed = shutdown.changed() => {
+                    if changed.is_err() || *shutdown.borrow() == ShutdownKind::Forced {
+                        break true;
+                    }
+                }
+            }
+        }
+    };
+    if forced {
+        leases.abort_all();
+        wait_for_leases(leases).await;
+    }
+    forced
+}
+
+async fn wait_for_coordinators(
+    coordinators: &mut JoinSet<CoordinatorExit>,
+    shutdown: &watch::Sender<ShutdownKind>,
+    signals: &mut mpsc::UnboundedReceiver<()>,
+    allow_force: bool,
+) -> Result<bool, VoomError> {
+    let mut forced = false;
+    let mut force_enabled = allow_force;
+    while !coordinators.is_empty() {
+        tokio::select! {
+            joined = coordinators.join_next() => {
+                if let Some(Err(error)) = joined {
+                    return Err(VoomError::Internal(format!(
+                        "join node-agent worker coordinator: {error}"
+                    )));
+                }
+            }
+            signal = signals.recv(), if force_enabled && !forced => {
+                if signal.is_none() {
+                    force_enabled = false;
+                    continue;
+                }
+                forced = true;
+                let _ = shutdown.send(ShutdownKind::Forced);
+            }
+        }
+    }
+    Ok(forced)
+}
+
 fn shutdown_kind_for_exit(exit: &RuntimeExit) -> ShutdownKind {
     match exit {
         RuntimeExit::Graceful => ShutdownKind::User,
@@ -1077,6 +1203,7 @@ enum RuntimeFatal {
 enum ShutdownKind {
     Running,
     User,
+    Forced,
     Fenced,
     RestartExhausted,
 }
@@ -1131,19 +1258,59 @@ fn random_hex(byte_count: usize) -> String {
     encoded
 }
 
-async fn shutdown_signal() {
-    #[cfg(unix)]
-    {
-        let terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate());
-        if let Ok(mut terminate) = terminate {
-            tokio::select! {
-                _ = tokio::signal::ctrl_c() => {}
-                _ = terminate.recv() => {}
+fn forced_shutdown_error() -> VoomError {
+    VoomError::ExternalSystemUnavailable(
+        "node-agent shutdown interrupted by a second termination signal".to_owned(),
+    )
+}
+
+async fn forward_shutdowns<F, S>(first: F, second: S, signals: mpsc::UnboundedSender<()>)
+where
+    F: Future<Output = ()>,
+    S: Future<Output = ()>,
+{
+    first.await;
+    if signals.send(()).is_err() {
+        return;
+    }
+    second.await;
+    let _ = signals.send(());
+}
+
+#[cfg(unix)]
+async fn forward_os_shutdowns(signals: mpsc::UnboundedSender<()>) {
+    let terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate());
+    let Ok(mut terminate) = terminate else {
+        forward_ctrl_c(signals).await;
+        return;
+    };
+    loop {
+        tokio::select! {
+            result = tokio::signal::ctrl_c() => {
+                if result.is_err() || signals.send(()).is_err() {
+                    return;
+                }
             }
+            signal = terminate.recv() => {
+                if signal.is_none() || signals.send(()).is_err() {
+                    return;
+                }
+            }
+        }
+    }
+}
+
+#[cfg(not(unix))]
+async fn forward_os_shutdowns(signals: mpsc::UnboundedSender<()>) {
+    forward_ctrl_c(signals).await;
+}
+
+async fn forward_ctrl_c(signals: mpsc::UnboundedSender<()>) {
+    loop {
+        if tokio::signal::ctrl_c().await.is_err() || signals.send(()).is_err() {
             return;
         }
     }
-    let _ = tokio::signal::ctrl_c().await;
 }
 
 #[cfg(test)]

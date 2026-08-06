@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use secrecy::SecretString;
 use time::OffsetDateTime;
 use tokio::io::{AsyncRead, AsyncWriteExt};
-use tokio::sync::{Mutex, Notify};
+use tokio::sync::{Mutex, Notify, oneshot};
 use voom_core::{
     ArtifactAccessMode, LeaseId, NodeId, NodeIncarnationStatus, OperationKind, TicketId, WorkerId,
 };
@@ -292,6 +292,99 @@ async fn shutdown_orders_settlement_before_reap_and_deactivation() {
     );
 }
 
+#[tokio::test]
+async fn synthetic_shutdown_sequence_delivers_first_and_second_signals_in_order() {
+    let (first_tx, first_rx) = oneshot::channel();
+    let (second_tx, second_rx) = oneshot::channel();
+    let (signal_tx, mut signal_rx) = mpsc::unbounded_channel();
+    let forwarder = tokio::spawn(forward_shutdowns(
+        async move {
+            let _ = first_rx.await;
+        },
+        async move {
+            let _ = second_rx.await;
+        },
+        signal_tx,
+    ));
+
+    assert!(signal_rx.try_recv().is_err());
+    first_tx.send(()).unwrap();
+    signal_rx.recv().await.unwrap();
+    assert!(signal_rx.try_recv().is_err());
+    second_tx.send(()).unwrap();
+    signal_rx.recv().await.unwrap();
+    forwarder.await.unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn second_signal_interrupts_blocked_settlement_then_reap_completes() {
+    let control = Arc::new(FakeControlPlane::default());
+    *control.fail_gate.lock().await = Some(Arc::new(Notify::new()));
+    let worker = Arc::new(FakeWorker::new(WorkerMode::Error));
+    let permits = Arc::new(Semaphore::new(1));
+    let (cancel_tx, cancel_rx) = watch::channel(LeaseCancellation::Running);
+    let (shutdown_tx, mut shutdown_rx) = watch::channel(ShutdownKind::Running);
+    let mut leases = JoinSet::new();
+    leases.spawn(run_lease(
+        held_lease(Arc::clone(&permits)).await,
+        worker,
+        credentials(),
+        context(control.clone()),
+        cancel_rx,
+        shutdown_rx.clone(),
+    ));
+    shutdown_tx.send(ShutdownKind::User).unwrap();
+
+    let coordinator_control = control.clone();
+    let coordinator = tokio::spawn(async move {
+        let forced = settle_leases_for_shutdown(
+            &cancel_tx,
+            &mut leases,
+            &mut shutdown_rx,
+            ShutdownKind::User,
+        )
+        .await;
+        coordinator_control
+            .events
+            .lock()
+            .await
+            .push("reap".to_owned());
+        forced
+    });
+    wait_for_count(&control.fail_started, &control.fail_started_count, 1).await;
+    assert!(Arc::clone(&permits).try_acquire_owned().is_err());
+
+    shutdown_tx.send(ShutdownKind::Forced).unwrap();
+    assert!(coordinator.await.unwrap());
+    assert_eq!(control.events.lock().await.as_slice(), &["reap"]);
+    assert!(permits.try_acquire_owned().is_ok());
+}
+
+#[tokio::test]
+async fn second_signal_interrupts_deactivation_only_after_reap() {
+    let control = Arc::new(FakeControlPlane::default());
+    *control.deactivate_gate.lock().await = Some(Arc::new(Notify::new()));
+    control.events.lock().await.push("reap".to_owned());
+    let runtime = AgentRuntime::with_client(loaded_config(), control.clone());
+    let (signal_tx, mut signal_rx) = mpsc::unbounded_channel();
+    let deactivation = tokio::spawn(async move {
+        runtime
+            .deactivate_or_second_signal(incarnation(), &mut signal_rx)
+            .await
+    });
+    wait_for_count(
+        &control.deactivate_started,
+        &control.deactivate_started_count,
+        1,
+    )
+    .await;
+
+    signal_tx.send(()).unwrap();
+    let error = deactivation.await.unwrap().unwrap_err();
+    assert!(error.to_string().contains("second termination signal"));
+    assert_eq!(control.events.lock().await.as_slice(), &["reap"]);
+}
+
 #[derive(Debug, Clone)]
 enum HeartbeatAction {
     Success,
@@ -322,6 +415,9 @@ struct FakeControlPlane {
     fail_gate: Mutex<Option<Arc<Notify>>>,
     fail_started: Notify,
     fail_started_count: AtomicUsize,
+    deactivate_gate: Mutex<Option<Arc<Notify>>>,
+    deactivate_started: Notify,
+    deactivate_started_count: AtomicUsize,
     complete_calls: AtomicUsize,
     reject_complete: AtomicBool,
     events: Mutex<Vec<String>>,
@@ -343,6 +439,9 @@ impl Default for FakeControlPlane {
             fail_gate: Mutex::new(None),
             fail_started: Notify::new(),
             fail_started_count: AtomicUsize::new(0),
+            deactivate_gate: Mutex::new(None),
+            deactivate_started: Notify::new(),
+            deactivate_started_count: AtomicUsize::new(0),
             complete_calls: AtomicUsize::new(0),
             reject_complete: AtomicBool::new(false),
             events: Mutex::new(Vec::new()),
@@ -375,6 +474,11 @@ impl ControlPlaneApi for FakeControlPlane {
         node_id: NodeId,
         _request: &RetryRequest<DeactivateRequest>,
     ) -> Result<DeactivateOutcome, VoomError> {
+        self.deactivate_started_count.fetch_add(1, Ordering::SeqCst);
+        self.deactivate_started.notify_waiters();
+        if let Some(gate) = self.deactivate_gate.lock().await.clone() {
+            gate.notified().await;
+        }
         self.events.lock().await.push("deactivate".to_owned());
         Ok(DeactivateOutcome {
             node_id,
@@ -559,7 +663,7 @@ impl ClientHandle for FakeWorker {
                     };
                     let mut bytes = serde_json::to_vec(&frame).unwrap();
                     bytes.push(b'\n');
-                    writer.write_all(&bytes).await.unwrap();
+                    let _ = writer.write_all(&bytes).await;
                 });
             }
         }
