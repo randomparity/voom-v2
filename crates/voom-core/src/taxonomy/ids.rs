@@ -6,7 +6,13 @@
 //! intentional: the application never constructs raw IDs by hand; it only
 //! round-trips values emitted by `SQLite`.
 
+use rand::TryRngCore;
 use serde::{Deserialize, Serialize};
+
+use crate::VoomError;
+
+const INCARNATION_ID_BYTES: usize = 16;
+const INCARNATION_ID_HEX_LEN: usize = INCARNATION_ID_BYTES * 2;
 
 /// Defines a strongly-typed `u64` ID newtype.
 ///
@@ -34,6 +40,99 @@ define_id!(TicketId);
 define_id!(LeaseId);
 define_id!(WorkerId);
 define_id!(NodeId);
+
+/// Random identity for one node-agent process lifetime.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct NodeIncarnationId([u8; INCARNATION_ID_BYTES]);
+
+impl NodeIncarnationId {
+    /// Generate a fresh incarnation ID from the operating-system RNG.
+    pub fn generate() -> Result<Self, VoomError> {
+        let mut bytes = [0_u8; INCARNATION_ID_BYTES];
+        rand::rngs::OsRng
+            .try_fill_bytes(&mut bytes)
+            .map_err(|error| {
+                VoomError::Internal(format!("generate node incarnation id from OS RNG: {error}"))
+            })?;
+        Ok(Self(bytes))
+    }
+
+    /// Parse persisted text, reporting corruption as a database error.
+    pub fn parse_database(field: &str, value: &str) -> Result<Self, VoomError> {
+        parse_incarnation_id(value)
+            .map_err(|message| VoomError::database(format!("{field} {message}")))
+    }
+}
+
+impl std::fmt::Debug for NodeIncarnationId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(self, f)
+    }
+}
+
+impl std::fmt::Display for NodeIncarnationId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        for byte in self.0 {
+            write!(f, "{byte:02x}")?;
+        }
+        Ok(())
+    }
+}
+
+impl std::str::FromStr for NodeIncarnationId {
+    type Err = VoomError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        parse_incarnation_id(value).map_err(VoomError::Config)
+    }
+}
+
+impl Serialize for NodeIncarnationId {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.collect_str(self)
+    }
+}
+
+impl<'de> Deserialize<'de> for NodeIncarnationId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        value.parse().map_err(serde::de::Error::custom)
+    }
+}
+
+fn parse_incarnation_id(value: &str) -> Result<NodeIncarnationId, String> {
+    if value.len() != INCARNATION_ID_HEX_LEN {
+        return Err(format!(
+            "must be {INCARNATION_ID_HEX_LEN} lowercase hexadecimal characters, got length {}",
+            value.len()
+        ));
+    }
+    let mut bytes = [0_u8; INCARNATION_ID_BYTES];
+    for (index, pair) in value.as_bytes().chunks_exact(2).enumerate() {
+        let high = lowercase_hex_value(pair[0]).ok_or_else(|| invalid_incarnation_id(value))?;
+        let low = lowercase_hex_value(pair[1]).ok_or_else(|| invalid_incarnation_id(value))?;
+        bytes[index] = (high << 4) | low;
+    }
+    Ok(NodeIncarnationId(bytes))
+}
+
+const fn lowercase_hex_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        _ => None,
+    }
+}
+
+fn invalid_incarnation_id(value: &str) -> String {
+    format!("must contain only lowercase hexadecimal characters, got {value:?}")
+}
 define_id!(JobId);
 define_id!(EventId);
 define_id!(ArtifactHandleId);

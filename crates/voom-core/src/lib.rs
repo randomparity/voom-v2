@@ -48,8 +48,8 @@ pub mod ids {
         BackupId, BundleId, CommitId, EventId, EvidenceId, ExternalPathMappingId, ExternalSystemId,
         ExternalSystemLinkId, FileAssetId, FileLocationId, FileVersionId, IssueId, JobId, LeaseId,
         LibraryId, LibraryRootId, MediaSnapshotId, MediaVariantId, MediaWorkId, NodeId,
-        PolicyDocumentId, PolicyInputSetId, PolicySyntheticTargetId, PolicyVersionId,
-        StorageRootId, TicketId, UseLeaseId, WorkerId,
+        NodeIncarnationId, PolicyDocumentId, PolicyInputSetId, PolicySyntheticTargetId,
+        PolicyVersionId, StorageRootId, TicketId, UseLeaseId, WorkerId,
     };
 }
 
@@ -113,7 +113,7 @@ pub use ids::{
     ArtifactHandleId, ArtifactLocationId, BackupId, BundleId, CommitId, EventId, EvidenceId,
     ExternalPathMappingId, ExternalSystemId, ExternalSystemLinkId, FileAssetId, FileLocationId,
     FileVersionId, IssueId, JobId, LeaseId, LibraryId, LibraryRootId, MediaSnapshotId,
-    MediaVariantId, MediaWorkId, NodeId, PolicyDocumentId, PolicyInputSetId,
+    MediaVariantId, MediaWorkId, NodeId, NodeIncarnationId, PolicyDocumentId, PolicyInputSetId,
     PolicySyntheticTargetId, PolicyVersionId, StorageRootId, TicketId, UseLeaseId, WorkerId,
 };
 pub use issue::{IssuePriority, IssueSeverity};
@@ -125,7 +125,9 @@ pub use remux::{
 pub use storage::{
     ProviderLocator, ProviderRelativeLocator, StorageProviderKind, StorageRootState,
 };
-pub use taxonomy::execution_vocab::{NodeKind, NodeStatus, WorkerKind, WorkerStatus};
+pub use taxonomy::execution_vocab::{
+    NodeIncarnationEndReason, NodeIncarnationStatus, NodeKind, NodeStatus, WorkerKind, WorkerStatus,
+};
 pub use ticket_operation::TicketOperation;
 pub use transcode_video_profile::{
     NvidiaVideoDecode, SoftwareVideoDecode, TRANSCODE_VIDEO_CODEC,

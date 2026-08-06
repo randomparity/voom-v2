@@ -53,6 +53,8 @@ fn _event_variants_are_exhaustive(e: &Event) {
         Event::NodeHeartbeatRecorded(_) => {}
         Event::NodeMarkedStale(_) => {}
         Event::NodeRetired(_) => {}
+        Event::NodeIncarnationActivated(_) => {}
+        Event::NodeIncarnationEnded(_) => {}
         Event::StorageRootCreated(_) => {}
         Event::StorageRootOwnerAssigned(_) => {}
         Event::StorageRootActivated(_) => {}
@@ -270,6 +272,19 @@ fn event_kind_matches_serde_tag() {
             node_id: voom_core::NodeId(1),
             retired_at: OffsetDateTime::UNIX_EPOCH,
             epoch: 3,
+        }),
+        Event::NodeIncarnationActivated(NodeIncarnationActivatedPayload {
+            node_id: voom_core::NodeId(1),
+            incarnation_id: "0123456789abcdef0123456789abcdef".parse().unwrap(),
+            node_epoch: 4,
+            worker_ids: vec![voom_core::WorkerId(1)],
+        }),
+        Event::NodeIncarnationEnded(NodeIncarnationEndedPayload {
+            node_id: voom_core::NodeId(1),
+            incarnation_id: "0123456789abcdef0123456789abcdef".parse().unwrap(),
+            status: voom_core::NodeIncarnationStatus::Failed,
+            reason: voom_core::NodeIncarnationEndReason::HeartbeatExpired,
+            retired_worker_ids: vec![voom_core::WorkerId(1)],
         }),
         Event::StorageRootCreated(StorageRootCreatedPayload {
             storage_root_id: voom_core::StorageRootId(1),

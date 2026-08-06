@@ -49,6 +49,50 @@ fn node_id_display_and_json_match_public_id_contract() {
 }
 
 #[test]
+fn node_incarnation_id_uses_strict_lowercase_hex_wire_format() {
+    let text = "0123456789abcdef0123456789abcdef";
+    let id: NodeIncarnationId = text.parse().unwrap();
+
+    assert_eq!(id.to_string(), text);
+    assert_eq!(serde_json::to_string(&id).unwrap(), format!("\"{text}\""));
+    assert_eq!(
+        serde_json::from_str::<NodeIncarnationId>(&format!("\"{text}\"")).unwrap(),
+        id
+    );
+}
+
+#[test]
+fn node_incarnation_id_rejects_noncanonical_text() {
+    for invalid in [
+        "0123456789abcdef0123456789abcde",
+        "0123456789abcdef0123456789abcdef0",
+        "0123456789ABCDEF0123456789ABCDEF",
+        "0123456789abcdef0123456789abcdeg",
+    ] {
+        assert!(
+            invalid.parse::<NodeIncarnationId>().is_err(),
+            "accepted {invalid:?}"
+        );
+        assert!(
+            serde_json::from_str::<NodeIncarnationId>(&format!("\"{invalid}\"")).is_err(),
+            "serde accepted {invalid:?}"
+        );
+    }
+}
+
+#[test]
+fn generated_node_incarnation_id_is_canonical() {
+    let id = NodeIncarnationId::generate().unwrap();
+    let text = id.to_string();
+
+    assert_eq!(text.len(), 32);
+    assert!(
+        text.bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    );
+}
+
+#[test]
 fn storage_root_id_display_and_json_match_public_id_contract() {
     let id = StorageRootId(73);
     assert_eq!(id.to_string(), "73");
