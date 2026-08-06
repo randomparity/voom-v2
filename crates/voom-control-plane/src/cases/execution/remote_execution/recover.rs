@@ -3,7 +3,7 @@
 use secrecy::{ExposeSecret, SecretString};
 use sqlx::{Sqlite, Transaction};
 use time::Duration;
-use voom_core::{NodeId, VoomError};
+use voom_core::{NodeId, NodeIncarnationId, VoomError, WorkerId};
 use voom_store::repo::execution::nodes::{NodeAuthRecord, NodeKind, NodeStatus};
 use voom_store::repo::execution::workers::{Worker, WorkerKind};
 
@@ -52,6 +52,28 @@ impl ControlPlane {
         }
         if !verify_node_token(token.expose_secret(), &auth.auth_token_hash) {
             return Err(VoomError::Unauthorized(REMOTE_NODE_AUTH_FAILURE.to_owned()));
+        }
+        Ok(auth)
+    }
+
+    pub(crate) async fn require_remote_incarnation_fence_in_tx(
+        &self,
+        tx: &mut Transaction<'_, Sqlite>,
+        node_id: NodeId,
+        token: &SecretString,
+        incarnation_id: NodeIncarnationId,
+        worker_id: Option<WorkerId>,
+    ) -> Result<NodeAuthRecord, VoomError> {
+        let auth = self
+            .verify_remote_node_token_in_tx(tx, node_id, token)
+            .await?;
+        self.nodes
+            .require_active_incarnation_in_tx(tx, node_id, incarnation_id)
+            .await?;
+        if let Some(worker_id) = worker_id {
+            self.workers
+                .incarnation_owned_worker_in_tx(tx, worker_id, node_id, incarnation_id)
+                .await?;
         }
         Ok(auth)
     }

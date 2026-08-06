@@ -1,14 +1,11 @@
 use secrecy::ExposeSecret;
 use serde_json::json;
 use voom_api::router_with_control_plane;
-use voom_control_plane::workers::{
-    NewWorkerCapabilityDraft, NewWorkerGrantDraft, RegisterNodeInput, RegisterWorkerForNodeInput,
-};
+use voom_control_plane::workers::RegisterNodeInput;
 use voom_control_plane::{ControlPlane, HealthPlane};
-use voom_core::{NodeId, TicketId, TicketOperation, WorkerId};
+use voom_core::{NodeId, OperationKind, TicketId, TicketOperation};
 use voom_store::repo::execution::nodes::NodeKind;
 use voom_store::repo::execution::tickets::{NewTicket, SqliteTicketRepo, TicketState};
-use voom_store::repo::execution::workers::WorkerKind;
 use voom_store::test_support::sqlite_url_for;
 use voom_test_support::TempDatabase;
 
@@ -123,7 +120,7 @@ async fn runner_instances_use_random_idempotency_run_ids() {
 }
 
 #[tokio::test]
-async fn runner_fails_lease_when_configured_artifact_access_is_incompatible() {
+async fn runner_activation_declares_configured_artifact_access() {
     let fixture = RemoteRunnerFixture::new().await;
     let ticket_id = fixture
         .ready_ticket(transcode_video_ticket(
@@ -140,9 +137,12 @@ async fn runner_fails_lease_when_configured_artifact_access_is_incompatible() {
         .unwrap();
 
     assert_eq!(summary.acquired, 1);
-    assert_eq!(summary.completed, 0);
-    assert_eq!(summary.failed, 1);
-    assert_eq!(fixture.ticket_state(ticket_id).await, TicketState::Ready);
+    assert_eq!(summary.completed, 1);
+    assert_eq!(summary.failed, 0);
+    assert_eq!(
+        fixture.ticket_state(ticket_id).await,
+        TicketState::Succeeded
+    );
 }
 
 struct RemoteRunnerFixture {
@@ -153,7 +153,6 @@ struct RemoteRunnerFixture {
     server: tokio::task::JoinHandle<()>,
     node_id: NodeId,
     token: secrecy::SecretString,
-    worker_id: WorkerId,
 }
 
 impl RemoteRunnerFixture {
@@ -168,29 +167,6 @@ impl RemoteRunnerFixture {
                 kind: NodeKind::Remote,
                 heartbeat_ttl_seconds: 60,
                 metadata: json!({}),
-            })
-            .await
-            .unwrap();
-        let worker = cp
-            .register_worker_for_node(RegisterWorkerForNodeInput {
-                node_id: registered.node.id,
-                token: registered.token.clone(),
-                name: "remote-worker".to_owned(),
-                kind: WorkerKind::Remote,
-                capabilities: vec![NewWorkerCapabilityDraft {
-                    operation: ticket_op(OP),
-                    codecs: vec!["json".to_owned()],
-                    hardware: Vec::new(),
-                    artifact_access: vec!["shared_mount".to_owned()],
-                    extra: json!({}),
-                }],
-                grants: vec![NewWorkerGrantDraft {
-                    can_execute: vec![ticket_op(OP)],
-                    can_access_read: Vec::new(),
-                    can_access_write: Vec::new(),
-                    denies: Vec::new(),
-                    max_parallel: json!({"*": 1}),
-                }],
             })
             .await
             .unwrap();
@@ -209,7 +185,6 @@ impl RemoteRunnerFixture {
             server,
             node_id: registered.node.id,
             token: registered.token,
-            worker_id: worker.id,
         }
     }
 
@@ -218,8 +193,10 @@ impl RemoteRunnerFixture {
             base_url: self.base_url.clone(),
             node_id: self.node_id,
             token: self.token.expose_secret().to_owned().into(),
-            worker_id: self.worker_id,
+            worker_logical_name: "remote-worker".to_owned(),
+            operations: vec![OperationKind::TranscodeVideo],
             artifact_access: vec!["shared_mount".to_owned()],
+            max_parallel: 1,
             max_polls: 3,
             idle_timeout: std::time::Duration::from_millis(100),
             lease_heartbeat_interval: std::time::Duration::from_millis(10),

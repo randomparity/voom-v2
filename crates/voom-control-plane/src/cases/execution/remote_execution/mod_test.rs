@@ -11,6 +11,7 @@ use voom_scheduler::{
     NodeCandidate, SCORING_VERSION, SchedulerCandidate, ScoreDecision, ScoreOutcome,
     ScoreReasonCode, TicketCandidate, WorkerCandidate,
 };
+use voom_store::repo::execution::node_incarnations::NewNodeIncarnation;
 use voom_store::repo::execution::nodes::NodeKind;
 use voom_store::repo::execution::remote_idempotency::RemoteMutationReplay;
 use voom_store::repo::execution::scheduler_decisions::{
@@ -160,6 +161,7 @@ struct RemoteFixture {
     _tmp: voom_test_support::TempDatabase,
     node_id: NodeId,
     token: secrecy::SecretString,
+    incarnation_id: NodeIncarnationId,
     worker_id: voom_core::WorkerId,
 }
 
@@ -198,6 +200,7 @@ impl RemoteFixture {
         RemoteAcquireInput {
             node_id: self.node_id,
             token: self.token.clone(),
+            incarnation_id: self.incarnation_id,
             worker_id: self.worker_id,
             idempotency_key: idempotency_key.to_owned(),
             request_hash: request_hash.to_owned(),
@@ -214,6 +217,7 @@ impl RemoteFixture {
         RemoteAcquireInput {
             node_id: self.node_id,
             token: self.token.clone(),
+            incarnation_id: self.incarnation_id,
             worker_id: self.worker_id,
             idempotency_key: idempotency_key.to_owned(),
             request_hash: request_hash.to_owned(),
@@ -230,6 +234,7 @@ impl RemoteFixture {
         RemoteCompleteInput {
             node_id: self.node_id,
             token: self.token.clone(),
+            incarnation_id: self.incarnation_id,
             worker_id: self.worker_id,
             lease_id,
             idempotency_key: idempotency_key.to_owned(),
@@ -254,6 +259,7 @@ impl RemoteFixture {
         RemoteNodeHeartbeatInput {
             node_id: self.node_id,
             token: self.token.clone(),
+            incarnation_id: self.incarnation_id,
             idempotency_key: idempotency_key.to_owned(),
             request_hash: request_hash.to_owned(),
         }
@@ -268,6 +274,7 @@ impl RemoteFixture {
         RemoteLeaseHeartbeatInput {
             node_id: self.node_id,
             token: self.token.clone(),
+            incarnation_id: self.incarnation_id,
             worker_id: self.worker_id,
             lease_id,
             idempotency_key: idempotency_key.to_owned(),
@@ -285,6 +292,7 @@ impl RemoteFixture {
         RemoteFailInput {
             node_id: self.node_id,
             token: self.token.clone(),
+            incarnation_id: self.incarnation_id,
             worker_id: self.worker_id,
             lease_id,
             idempotency_key: idempotency_key.to_owned(),
@@ -293,6 +301,183 @@ impl RemoteFixture {
             class: FailureClass::ArtifactUnavailable,
             evidence: json!({"validated": false, "selected_access_mode": "shared_mount"}),
         }
+    }
+}
+
+fn stale_incarnation_id() -> NodeIncarnationId {
+    "fedcba9876543210fedcba9876543210".parse().unwrap()
+}
+
+#[tokio::test]
+async fn remote_node_and_acquire_fences_precede_replay_reservation() {
+    let fixture = remote_fixture(&[(OP, vec!["shared_mount"])], &[OP], &[]).await;
+
+    let mut heartbeat = fixture.node_heartbeat_input("stale-node", "hash-stale-node");
+    heartbeat.incarnation_id = stale_incarnation_id();
+    let heartbeat_error = fixture
+        .cp
+        .remote_node_heartbeat(heartbeat)
+        .await
+        .unwrap_err();
+    assert_eq!(heartbeat_error.error_code(), ErrorCode::Conflict);
+
+    let mut acquire = fixture.acquire_input("stale-acquire", "hash-stale-acquire");
+    acquire.incarnation_id = stale_incarnation_id();
+    let acquire_error = fixture.cp.remote_acquire(acquire).await.unwrap_err();
+    assert_eq!(acquire_error.error_code(), ErrorCode::Conflict);
+
+    let reserved: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM remote_idempotency_keys \
+         WHERE idempotency_key LIKE '%stale-node' \
+            OR idempotency_key LIKE '%stale-acquire'",
+    )
+    .fetch_one(fixture.cp.pool_for_test())
+    .await
+    .unwrap();
+    assert_eq!(reserved, 0);
+}
+
+#[tokio::test]
+async fn remote_fence_rejects_corrupt_active_pointer_before_replay_reservation() {
+    let fixture = remote_fixture(&[(OP, vec!["shared_mount"])], &[OP], &[]).await;
+    let other = fixture
+        .cp
+        .register_node(remote_node_input("other-node"))
+        .await
+        .unwrap();
+    let corrupt_id = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    sqlx::query(
+        "INSERT INTO node_incarnations \
+         (incarnation_id, node_id, status, started_at, last_seen_at) \
+         VALUES (?, ?, 'active', '1970-01-01T00:00:00Z', '1970-01-01T00:00:00Z')",
+    )
+    .bind(corrupt_id)
+    .bind(i64::try_from(other.node.id.0).unwrap())
+    .execute(fixture.cp.pool_for_test())
+    .await
+    .unwrap();
+    sqlx::query("UPDATE nodes SET active_incarnation_id = ? WHERE id = ?")
+        .bind(corrupt_id)
+        .bind(i64::try_from(fixture.node_id.0).unwrap())
+        .execute(fixture.cp.pool_for_test())
+        .await
+        .unwrap();
+
+    let error = fixture
+        .cp
+        .remote_node_heartbeat(
+            fixture.node_heartbeat_input("corrupt-pointer", "corrupt-pointer-hash"),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.error_code(), ErrorCode::DbUnreachable);
+    let replay_rows: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM remote_idempotency_keys \
+         WHERE idempotency_key LIKE '%:corrupt-pointer'",
+    )
+    .fetch_one(fixture.cp.pool_for_test())
+    .await
+    .unwrap();
+    assert_eq!(replay_rows, 0);
+}
+
+#[tokio::test]
+async fn node_incarnations_may_reuse_external_idempotency_keys() {
+    let fixture = remote_fixture(&[(OP, vec!["shared_mount"])], &[OP], &[]).await;
+    fixture
+        .cp
+        .remote_node_heartbeat(fixture.node_heartbeat_input("shared-key", "first-hash"))
+        .await
+        .unwrap();
+
+    let next_incarnation_id = stale_incarnation_id();
+    fixture
+        .cp
+        .remote_activate(RemoteActivateInput {
+            node_id: fixture.node_id,
+            token: fixture.token.clone(),
+            idempotency_key: "activate-next-incarnation".to_owned(),
+            request_hash: "activate-next-incarnation-hash".to_owned(),
+            incarnation_id: next_incarnation_id,
+            workers: vec![RemoteWorkerDeclaration {
+                logical_name: "replacement-worker".to_owned(),
+                operations: vec![voom_core::OperationKind::TranscodeVideo],
+                artifact_access: vec![ArtifactAccessMode::SharedMount],
+                max_parallel: 1,
+            }],
+        })
+        .await
+        .unwrap();
+    fixture
+        .cp
+        .remote_node_heartbeat(RemoteNodeHeartbeatInput {
+            node_id: fixture.node_id,
+            token: fixture.token.clone(),
+            incarnation_id: next_incarnation_id,
+            idempotency_key: "shared-key".to_owned(),
+            request_hash: "second-hash".to_owned(),
+        })
+        .await
+        .unwrap();
+
+    let replay_keys: Vec<String> = sqlx::query_scalar(
+        "SELECT idempotency_key FROM remote_idempotency_keys \
+         WHERE idempotency_key LIKE '%:shared-key' \
+         ORDER BY idempotency_key",
+    )
+    .fetch_all(fixture.cp.pool_for_test())
+    .await
+    .unwrap();
+    assert_eq!(
+        replay_keys,
+        vec![
+            format!("{}:shared-key", fixture.incarnation_id),
+            format!("{next_incarnation_id}:shared-key"),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn remote_lease_mutation_fences_precede_replay_reservation() {
+    for route in ["heartbeat", "complete", "fail"] {
+        let fixture = leased_fixture().await;
+        let lease_id = fixture_lease_id(&fixture).await;
+        let error = match route {
+            "heartbeat" => {
+                let mut input = fixture.lease_heartbeat_input(
+                    lease_id,
+                    "stale-lease-heartbeat",
+                    "hash-stale-lease-heartbeat",
+                );
+                input.incarnation_id = stale_incarnation_id();
+                fixture.cp.remote_lease_heartbeat(input).await.unwrap_err()
+            }
+            "complete" => {
+                let mut input = fixture.complete_input(
+                    lease_id,
+                    "stale-lease-complete",
+                    "hash-stale-lease-complete",
+                );
+                input.incarnation_id = stale_incarnation_id();
+                fixture.cp.remote_complete(input).await.unwrap_err()
+            }
+            "fail" => {
+                let mut input =
+                    fixture.fail_input(lease_id, "stale-lease-fail", "hash-stale-lease-fail");
+                input.incarnation_id = stale_incarnation_id();
+                fixture.cp.remote_fail(input).await.unwrap_err()
+            }
+            _ => unreachable!(),
+        };
+        assert_eq!(error.error_code(), ErrorCode::Conflict);
+        let reserved: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM remote_idempotency_keys \
+             WHERE idempotency_key LIKE '%stale-lease-%'",
+        )
+        .fetch_one(fixture.cp.pool_for_test())
+        .await
+        .unwrap();
+        assert_eq!(reserved, 0);
     }
 }
 
@@ -507,6 +692,7 @@ fn suppression_key_includes_operation_fingerprint() {
     let fixture_input = RemoteAcquireInput {
         node_id: NodeId(1),
         token: secrecy::SecretString::from("token"),
+        incarnation_id: stale_incarnation_id(),
         worker_id: WorkerId(2),
         idempotency_key: "operation-fingerprint".to_owned(),
         request_hash: "hash".to_owned(),
@@ -543,6 +729,7 @@ fn capacity_suppression_key_includes_operation_fingerprint() {
     let fixture_input = RemoteAcquireInput {
         node_id: NodeId(1),
         token: secrecy::SecretString::from("token"),
+        incarnation_id: stale_incarnation_id(),
         worker_id: WorkerId(2),
         idempotency_key: "capacity-operation-fingerprint".to_owned(),
         request_hash: "hash".to_owned(),
@@ -835,6 +1022,7 @@ async fn remote_acquire_requires_worker_node_ownership_capability_grant_and_no_d
         .remote_acquire(RemoteAcquireInput {
             node_id: other_node.node.id,
             token: other_node.token,
+            incarnation_id: stale_incarnation_id(),
             worker_id: wrong_owner.worker_id,
             idempotency_key: "wrong-owner".to_owned(),
             request_hash: "hash-wrong-owner".to_owned(),
@@ -1272,7 +1460,7 @@ async fn remote_complete_rejects_incomplete_or_mismatched_artifact_evidence() {
 }
 
 #[tokio::test]
-async fn remote_heartbeat_rejects_stale_node_and_replays_lease_heartbeat() {
+async fn remote_heartbeat_rejects_stale_node_and_lease_heartbeat() {
     let fixture = leased_fixture().await;
     let lease_id = fixture_lease_id(&fixture).await;
     fixture
@@ -1303,7 +1491,7 @@ async fn remote_heartbeat_rejects_stale_node_and_replays_lease_heartbeat() {
             "hash-lease-hb",
         ))
         .await
-        .unwrap();
+        .unwrap_err();
     let replay = fixture
         .cp
         .remote_lease_heartbeat(fixture.lease_heartbeat_input(
@@ -1312,9 +1500,10 @@ async fn remote_heartbeat_rejects_stale_node_and_replays_lease_heartbeat() {
             "hash-lease-hb",
         ))
         .await
-        .unwrap();
+        .unwrap_err();
 
-    assert_eq!(replay, first);
+    assert_eq!(first.error_code(), ErrorCode::Conflict);
+    assert_eq!(replay.error_code(), ErrorCode::Conflict);
     assert_eq!(count(&fixture.cp, EventKind::LeaseReleased).await, 0);
 }
 
@@ -1349,7 +1538,7 @@ async fn remote_lease_heartbeat_invalid_ttl_is_idempotent_and_does_not_move_expi
 }
 
 #[tokio::test]
-async fn remote_complete_replay_ignores_later_node_retirement() {
+async fn remote_complete_replay_is_fenced_after_node_retirement() {
     let fixture = leased_fixture().await;
     let complete = fixture.complete_input(
         fixture_lease_id(&fixture).await,
@@ -1357,7 +1546,7 @@ async fn remote_complete_replay_ignores_later_node_retirement() {
         "hash-1",
     );
 
-    let first = fixture.cp.remote_complete(complete.clone()).await.unwrap();
+    fixture.cp.remote_complete(complete.clone()).await.unwrap();
     let node = fixture.cp.get_node(fixture.node_id).await.unwrap().unwrap();
     fixture
         .cp
@@ -1365,9 +1554,9 @@ async fn remote_complete_replay_ignores_later_node_retirement() {
         .await
         .unwrap();
 
-    let replay = fixture.cp.remote_complete(complete).await.unwrap();
+    let replay = fixture.cp.remote_complete(complete).await.unwrap_err();
 
-    assert_eq!(replay, first);
+    assert_eq!(replay.error_code(), ErrorCode::Conflict);
     assert_eq!(count(&fixture.cp, EventKind::LeaseReleased).await, 1);
 }
 
@@ -1406,6 +1595,7 @@ async fn remote_fail_marks_timeouts_and_crashes_as_failed_even_with_artifact_rea
         .remote_fail(RemoteFailInput {
             node_id: fixture.node_id,
             token: fixture.token.clone(),
+            incarnation_id: fixture.incarnation_id,
             worker_id: fixture.worker_id,
             lease_id,
             idempotency_key: "fail-timeout".to_owned(),
@@ -1506,7 +1696,10 @@ async fn seed_legacy_acquire_replay(
     .bind(ROUTE_ACQUIRE)
     .bind(i64::try_from(fixture.worker_id.0).unwrap())
     .bind(i64::try_from(fixture.worker_id.0).unwrap())
-    .bind(idempotency_key)
+    .bind(incarnation_replay_key(
+        fixture.incarnation_id,
+        idempotency_key,
+    ))
     .bind(request_hash)
     .bind(response)
     .execute(fixture.cp.pool_for_test())
@@ -1518,7 +1711,7 @@ async fn stored_replay(fixture: &RemoteFixture, key: &str) -> RemoteMutationRepl
     let json: String = sqlx::query_scalar(
         "SELECT response_json FROM remote_idempotency_keys WHERE idempotency_key = ?",
     )
-    .bind(key)
+    .bind(incarnation_replay_key(fixture.incarnation_id, key))
     .fetch_one(fixture.cp.pool_for_test())
     .await
     .unwrap();
@@ -1581,12 +1774,35 @@ async fn fixture_with_options(
         })
         .await
         .unwrap();
+    let incarnation_id: NodeIncarnationId = "0123456789abcdef0123456789abcdef".parse().unwrap();
+    let mut tx = cp.pool_for_test().begin().await.unwrap();
+    cp.node_incarnations
+        .insert_in_tx(
+            &mut tx,
+            NewNodeIncarnation {
+                id: incarnation_id,
+                node_id: registered.node.id,
+                started_at: T0,
+            },
+        )
+        .await
+        .unwrap();
+    cp.nodes
+        .activate_incarnation_in_tx(&mut tx, registered.node.id, None, incarnation_id, T0)
+        .await
+        .unwrap();
+    cp.workers
+        .bind_incarnation_in_tx(&mut tx, worker.id, registered.node.id, incarnation_id)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
 
     RemoteFixture {
         cp,
         _tmp: tmp,
         node_id: registered.node.id,
         token: registered.token,
+        incarnation_id,
         worker_id: worker.id,
     }
 }

@@ -338,7 +338,7 @@ async fn remote_activation_stale_recovery_ends_incarnation_before_node_and_rejec
         incarnation.end_reason,
         Some(NodeIncarnationEndReason::HeartbeatExpired)
     );
-    for worker in activated.workers {
+    for worker in &activated.workers {
         assert_eq!(
             cp.workers()
                 .get(worker.worker_id)
@@ -369,6 +369,7 @@ async fn remote_activation_stale_recovery_ends_incarnation_before_node_and_rejec
         .remote_node_heartbeat(RemoteNodeHeartbeatInput {
             node_id: registered.node.id,
             token: registered.token,
+            incarnation_id: activated.incarnation_id,
             idempotency_key: "stale-heartbeat".to_owned(),
             request_hash: "stale-heartbeat-body".to_owned(),
         })
@@ -477,6 +478,7 @@ async fn hold_hash_lease(
         .remote_acquire(RemoteAcquireInput {
             node_id: registered.node.id,
             token: registered.token.clone(),
+            incarnation_id: activated.incarnation_id,
             worker_id: activated.workers[1].worker_id,
             idempotency_key: "hold-before-supersede".to_owned(),
             request_hash: "hold-before-supersede-body".to_owned(),

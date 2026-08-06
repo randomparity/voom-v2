@@ -10,7 +10,10 @@ use secrecy::{ExposeSecret, SecretString};
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Value as JsonValue;
-use voom_core::{FailureClass, LeaseId, WorkerId};
+use voom_core::{
+    FailureClass, LeaseId, NodeId, NodeIncarnationId, OperationKind as ControlPlaneOperationKind,
+    WorkerId,
+};
 use voom_fake_support::{dispatch_provider, provider_definition_for_operation};
 use voom_worker_protocol::http::OperationBody;
 use voom_worker_protocol::{OperationKind, OperationRequest, ProgressFrame, ProtocolError};
@@ -18,10 +21,12 @@ use voom_worker_protocol::{OperationKind, OperationRequest, ProgressFrame, Proto
 #[derive(Debug, Clone)]
 pub struct RemoteRunnerConfig {
     pub base_url: String,
-    pub node_id: voom_core::NodeId,
+    pub node_id: NodeId,
     pub token: SecretString,
-    pub worker_id: WorkerId,
+    pub worker_logical_name: String,
+    pub operations: Vec<ControlPlaneOperationKind>,
     pub artifact_access: Vec<String>,
+    pub max_parallel: u32,
     pub max_polls: u32,
     pub idle_timeout: Duration,
     pub lease_heartbeat_interval: Duration,
@@ -84,13 +89,16 @@ impl RemoteSyntheticRunner {
     /// Returns HTTP, API-envelope, or fake-provider protocol failures.
     pub async fn run_once_to_completion(&self) -> Result<RemoteRunnerSummary, RemoteRunnerError> {
         let run_id = new_run_id();
-        let mut keys = IdempotencyKeys::new(self.config.worker_id, &run_id);
+        let mut keys = IdempotencyKeys::new(&run_id);
+        let incarnation_id = NodeIncarnationId::generate()
+            .map_err(|error| RemoteRunnerError::Protocol(error.to_string()))?;
+        let active_worker = self.activate(incarnation_id, keys.next()).await?;
         let mut summary = RemoteRunnerSummary::default();
         let started = std::time::Instant::now();
 
         loop {
-            self.node_heartbeat(keys.next()).await?;
-            let acquire = self.acquire(keys.next()).await?;
+            self.node_heartbeat(&active_worker, keys.next()).await?;
+            let acquire = self.acquire(&active_worker, keys.next()).await?;
             match acquire {
                 AcquireOutcome::Idle { .. } => {
                     summary.idle_polls += 1;
@@ -103,16 +111,25 @@ impl RemoteSyntheticRunner {
                 }
                 AcquireOutcome::Leased(lease) => {
                     summary.acquired += 1;
-                    self.lease_heartbeat(lease.lease_id, keys.next()).await?;
+                    self.lease_heartbeat(&active_worker, lease.lease_id, keys.next())
+                        .await?;
                     match Self::dispatch(&lease, &self.config.artifact_access) {
                         Ok(result) => {
-                            self.complete(lease.lease_id, result, keys.next()).await?;
+                            self.complete(&active_worker, lease.lease_id, result, keys.next())
+                                .await?;
                             summary.completed += 1;
                         }
                         Err(err) => {
                             let (class, reason, evidence) = classify_dispatch_error(&err);
-                            self.fail(lease.lease_id, class, reason, evidence, keys.next())
-                                .await?;
+                            self.fail(
+                                &active_worker,
+                                lease.lease_id,
+                                class,
+                                reason,
+                                evidence,
+                                keys.next(),
+                            )
+                            .await?;
                             summary.failed += 1;
                         }
                     }
@@ -122,24 +139,81 @@ impl RemoteSyntheticRunner {
         }
     }
 
-    async fn node_heartbeat(&self, idempotency_key: String) -> Result<(), RemoteRunnerError> {
+    async fn activate(
+        &self,
+        incarnation_id: NodeIncarnationId,
+        idempotency_key: String,
+    ) -> Result<ActiveWorker, RemoteRunnerError> {
+        let outcome: RemoteActivateData = self
+            .post(
+                &format!("/v1/execution/node/{}/activate", self.config.node_id.0),
+                &idempotency_key,
+                serde_json::json!({
+                    "incarnation_id": incarnation_id,
+                    "workers": [{
+                        "logical_name": self.config.worker_logical_name,
+                        "operations": self.config.operations,
+                        "artifact_access": self.config.artifact_access,
+                        "max_parallel": self.config.max_parallel,
+                    }],
+                }),
+            )
+            .await?;
+        if outcome.node_id != self.config.node_id
+            || outcome.incarnation_id != incarnation_id
+            || outcome.node_epoch == 0
+            || outcome.heartbeat_ttl_seconds == 0
+        {
+            return Err(RemoteRunnerError::MalformedResponse(
+                "activation response identity does not match the request".to_owned(),
+            ));
+        }
+        let [worker] = outcome.workers.as_slice() else {
+            return Err(RemoteRunnerError::MalformedResponse(
+                "activation response must contain exactly one worker".to_owned(),
+            ));
+        };
+        if worker.logical_name != self.config.worker_logical_name {
+            return Err(RemoteRunnerError::MalformedResponse(
+                "activation response worker does not match the declaration".to_owned(),
+            ));
+        }
+        Ok(ActiveWorker {
+            incarnation_id,
+            worker_id: worker.worker_id,
+            _worker_epoch: worker.worker_epoch,
+        })
+    }
+
+    async fn node_heartbeat(
+        &self,
+        active_worker: &ActiveWorker,
+        idempotency_key: String,
+    ) -> Result<(), RemoteRunnerError> {
         let _: RemoteNodeHeartbeatData = self
             .post(
                 &format!("/v1/execution/node/{}/heartbeat", self.config.node_id.0),
                 &idempotency_key,
-                serde_json::json!({}),
+                serde_json::json!({
+                    "incarnation_id": active_worker.incarnation_id,
+                }),
             )
             .await?;
         Ok(())
     }
 
-    async fn acquire(&self, idempotency_key: String) -> Result<AcquireOutcome, RemoteRunnerError> {
+    async fn acquire(
+        &self,
+        active_worker: &ActiveWorker,
+        idempotency_key: String,
+    ) -> Result<AcquireOutcome, RemoteRunnerError> {
         self.post(
             "/v1/execution/lease/acquire",
             &idempotency_key,
             serde_json::json!({
                 "node_id": self.config.node_id.0,
-                "worker_id": self.config.worker_id.0,
+                "incarnation_id": active_worker.incarnation_id,
+                "worker_id": active_worker.worker_id.0,
             }),
         )
         .await
@@ -147,6 +221,7 @@ impl RemoteSyntheticRunner {
 
     async fn lease_heartbeat(
         &self,
+        active_worker: &ActiveWorker,
         lease_id: LeaseId,
         idempotency_key: String,
     ) -> Result<(), RemoteRunnerError> {
@@ -156,7 +231,8 @@ impl RemoteSyntheticRunner {
                 &idempotency_key,
                 serde_json::json!({
                     "node_id": self.config.node_id.0,
-                    "worker_id": self.config.worker_id.0,
+                    "incarnation_id": active_worker.incarnation_id,
+                    "worker_id": active_worker.worker_id.0,
                 }),
             )
             .await?;
@@ -165,6 +241,7 @@ impl RemoteSyntheticRunner {
 
     async fn complete(
         &self,
+        active_worker: &ActiveWorker,
         lease_id: LeaseId,
         result: JsonValue,
         idempotency_key: String,
@@ -175,7 +252,8 @@ impl RemoteSyntheticRunner {
                 &idempotency_key,
                 serde_json::json!({
                     "node_id": self.config.node_id.0,
-                    "worker_id": self.config.worker_id.0,
+                    "incarnation_id": active_worker.incarnation_id,
+                    "worker_id": active_worker.worker_id.0,
                     "result": result,
                 }),
             )
@@ -185,6 +263,7 @@ impl RemoteSyntheticRunner {
 
     async fn fail(
         &self,
+        active_worker: &ActiveWorker,
         lease_id: LeaseId,
         class: FailureClass,
         reason: String,
@@ -197,7 +276,8 @@ impl RemoteSyntheticRunner {
                 &idempotency_key,
                 serde_json::json!({
                     "node_id": self.config.node_id.0,
-                    "worker_id": self.config.worker_id.0,
+                    "incarnation_id": active_worker.incarnation_id,
+                    "worker_id": active_worker.worker_id.0,
                     "reason": reason,
                     "class": class,
                     "evidence": evidence,
@@ -270,28 +350,30 @@ impl RemoteSyntheticRunner {
 
 #[derive(Debug)]
 struct IdempotencyKeys {
-    worker_id: WorkerId,
     run_id: String,
     sequence: u64,
 }
 
 impl IdempotencyKeys {
-    fn new(worker_id: WorkerId, run_id: &str) -> Self {
+    fn new(run_id: &str) -> Self {
         Self {
-            worker_id,
             run_id: run_id.to_owned(),
             sequence: 0,
         }
     }
 
     fn next(&mut self) -> String {
-        let key = format!(
-            "runner-{}-{}-{}",
-            self.worker_id.0, self.run_id, self.sequence
-        );
+        let key = format!("runner-{}-{}", self.run_id, self.sequence);
         self.sequence += 1;
         key
     }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ActiveWorker {
+    incarnation_id: NodeIncarnationId,
+    worker_id: WorkerId,
+    _worker_epoch: u64,
 }
 
 fn new_run_id() -> String {
@@ -316,6 +398,22 @@ struct ApiError {
 
 #[derive(Debug, Deserialize)]
 struct RemoteNodeHeartbeatData {}
+
+#[derive(Debug, Deserialize)]
+struct RemoteActivateData {
+    node_id: NodeId,
+    node_epoch: u64,
+    incarnation_id: NodeIncarnationId,
+    heartbeat_ttl_seconds: u32,
+    workers: Vec<ActivatedWorkerData>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ActivatedWorkerData {
+    logical_name: String,
+    worker_id: WorkerId,
+    worker_epoch: u64,
+}
 
 #[derive(Debug, Deserialize)]
 struct RemoteLeaseHeartbeatData {}
