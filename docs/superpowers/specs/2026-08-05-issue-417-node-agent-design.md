@@ -38,8 +38,9 @@ no compatibility mode for unfenced remote execution.
    reports ordered historical status, timestamps, reason, and worker count without
    exposing node or worker secrets.
 7. An acquire response replayed after lease expiry is rejected by pre-dispatch renewal and
-   never reaches a child. A silent child is failed at the configured progress-idle deadline
-   even while lease heartbeats succeed.
+   never reaches a child. Tests cover an expired-but-still-`held` row and a successful
+   renewal response replayed after its client freshness window. A silent child is failed at
+   the configured progress-idle deadline even while lease heartbeats succeed.
 8. A worker never owns more than `max_parallel` concurrent leases. Startup heartbeats keep
    an incarnation live while all children start concurrently, and any partial startup
    failure terminates and reaps every sibling before exit.
@@ -167,6 +168,9 @@ Before reservation or mutation, the control plane verifies:
 The server prefixes the repository idempotency key with the validated incarnation ID.
 This changes the internal namespace without rebuilding historical replay rows. Activation
 uses its distinct route key and unprefixed process key because it creates the incarnation.
+Lease heartbeat additionally compares the persisted expiry to server time in the mutation
+transaction and rejects a deadline at or before `now` even when recovery has not yet
+transitioned the row from `held`. It never revives an expired lease.
 
 A node heartbeat updates both `nodes.last_seen_at`/epoch and the incarnation's
 `last_seen_at` in one transaction, then appends the existing node-heartbeat event. It never
@@ -276,9 +280,15 @@ One worker coordinator per child checks for child exit and owns a semaphore with
 the declared `max_parallel` permits. It polls acquire with a fresh logical request key only
 after reserving a permit and sleeps the configured interval after idle/no-candidate
 responses. After every leased acquire response, including a replay, it performs an
-idempotent lease heartbeat/renewal with a stable validation key before dispatch. An expired,
-cancelled, or otherwise terminal lease response releases the permit without invoking the
-child. A successful renewal establishes current ownership; the leased dispatch then adds
+idempotent lease heartbeat/renewal before dispatch. Each validation key has a client
+monotonic timer beginning before its first send. The agent accepts a successful response as
+fresh only when it arrives in less than half the requested lease TTL; this conservatively
+leaves at least half a TTL from server-side renewal even under response delay. At the
+half-TTL boundary the agent permanently discards that key and its later responses, creates
+a fresh validation key, and tries again. The store atomically rejects an expired persisted
+deadline, so a fresh key cannot revive an expired-but-still-`held` row. An expired,
+cancelled, or otherwise terminal response releases the permit without invoking the child.
+A timely successful renewal establishes current ownership; the leased dispatch then adds
 the artifact-access plan and configured advertised modes to the object payload and sends
 the existing worker protocol request with an incarnation-and-lease-derived idempotency key.
 
@@ -316,6 +326,7 @@ leaves the incarnation to become durably failed through heartbeat expiry.
 |---|---|---|
 | Lost activation/acquire/heartbeat/terminal response | Retry identical body and key | One replay row and one mutation |
 | Acquire replay after lease expiry | Renewal reports terminal; release permit without dispatch | Existing expiry and requeue evidence only |
+| Validation success replays after its freshness window | Discard response and rotate validation key; never dispatch from it | No additional mutation beyond the idempotent renewal |
 | Control-plane outage | Keep independent tasks retrying with capped backoff | Held lease remains visible; node/lease expiry records failure if outage exceeds TTL |
 | Prior incarnation or stale node | Stop polling, terminate children, exit nonzero | Superseded/failed incarnation and retired workers |
 | Child protocol or identity mismatch | Kill/reap, deactivate, exit nonzero | Failed incarnation with `child_startup_failed` |

@@ -48,6 +48,8 @@ incarnation. The fence rejects that incarnation's later lease heartbeats and ter
 calls, so each held lease follows the existing TTL-expiry path before its ticket becomes
 available again. This preserves the established retirement and lease-failure ordering and
 its durable expiry evidence instead of adding a second cancellation path to activation.
+Lease heartbeats also reject a persisted deadline at or before server time even if recovery
+has not yet changed the row from `held`; an expired lease can never be revived lazily.
 
 A graceful or failed agent shutdown uses one authenticated, idempotent deactivation
 request. It ends the incarnation, records a bounded reason, retires its workers, and clears
