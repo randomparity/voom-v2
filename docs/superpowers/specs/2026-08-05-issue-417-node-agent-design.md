@@ -37,6 +37,12 @@ no compatibility mode for unfenced remote execution.
 6. `voom node show` reports the current incarnation, and `voom node incarnation list`
    reports ordered historical status, timestamps, reason, and worker count without
    exposing node or worker secrets.
+7. An acquire response replayed after lease expiry is rejected by pre-dispatch renewal and
+   never reaches a child. A silent child is failed at the configured progress-idle deadline
+   even while lease heartbeats succeed.
+8. A worker never owns more than `max_parallel` concurrent leases. Startup heartbeats keep
+   an incarnation live while all children start concurrently, and any partial startup
+   failure terminates and reaps every sibling before exit.
 
 ## Approaches considered
 
@@ -128,10 +134,23 @@ worker, records one capability per operation and one derived execute grant, appe
 incarnation activation fact, stores the strict response, and commits. Any failure rolls the
 whole sequence back.
 
+Supersession does not cancel leases held by the prior incarnation. Its subsequent lease
+heartbeats and terminal calls fail the incarnation fence, and those leases follow the
+existing TTL-expiry path before their tickets become available. The replacement does not
+redispatch them. Promotion also occurs before replacement children are proven ready; this
+intentional fail-stop ordering favors one replayable transaction over a prepared-activation
+protocol and can turn a broken replacement into immediate downtime.
+
 The response contains the logical node ID and epoch, incarnation ID, heartbeat TTL, and one
 worker descriptor per request entry (`logical_name`, `worker_id`, `worker_epoch`). A replay
 returns this exact mapping. Reusing an incarnation under another activation key conflicts,
 including after it is terminal.
+
+Deployment is a coordinated flag day: quiesce legacy remote callers, deploy and migrate
+the enforcing control plane to schema 35, then start incarnation-aware agents. Schema
+version checks prevent an older control-plane binary from opening the migrated database.
+Rollback therefore restores the pre-migration database backup and older binaries together;
+mixed old callers or binaries are unsupported.
 
 ### Heartbeat and fencing
 
@@ -195,6 +214,7 @@ ca_cert = "/etc/voom/control-ca.pem" # optional; system roots otherwise
 node_id = 7
 poll_interval_ms = 1000
 lease_ttl_seconds = 30
+progress_idle_timeout_seconds = 300
 shutdown_grace_seconds = 10
 
 [node_token]
@@ -213,8 +233,9 @@ max_parallel = 1
 The URL must contain only scheme/authority with no credentials, query, or fragment. HTTPS
 is required unless the URL host is loopback and the operator explicitly uses `http`.
 Worker programs must be absolute paths. Polling is 50 milliseconds through 60 seconds,
-lease TTL is 5 through 3600 seconds, shutdown grace is 1 through 60 seconds, worker count
-is 1 through 64, and worker declaration constraints match activation.
+lease TTL and progress-idle timeout are each 5 through 3600 seconds, shutdown grace is 1
+through 60 seconds, worker count is 1 through 64, and worker declaration constraints match
+activation.
 
 The token source is exactly one environment-variable name or file path. Empty tokens and
 tokens containing line breaks after one trailing newline is removed are rejected. Secret
@@ -228,7 +249,10 @@ HTTP client with the configured trust roots and a finite request timeout, genera
 incarnation ID and activation key, and retries the identical activation request with
 exponential backoff from 250 milliseconds capped at 30 seconds. HTTP 408, 429, and 5xx plus
 transport failures retry; authentication, validation, conflict, and other 4xx responses are
-terminal. Backoff resets after a successful response.
+terminal. Backoff resets after a successful response. Immediately after activation, the
+agent starts the node-heartbeat task and waits for its first successful acknowledgement
+before launching children. The heartbeat continues independently throughout child startup,
+dispatch, retry, and shutdown until deactivation begins.
 
 For every returned worker descriptor the agent generates one random worker secret and
 spawns the configured program directly with argv; it never invokes a shell. The child
@@ -236,31 +260,46 @@ environment is cleared, then receives only `VOOM_WORKER_ID`, `VOOM_WORKER_EPOCH`
 `VOOM_WORKER_SECRET`, and forced `VOOM_WORKER_BIND=127.0.0.1:0`. Stdout is consumed only for
 the bounded readiness line; stderr is inherited for operator diagnostics; stdin remains
 piped as the parent-death watchdog. The readiness line has a 4 KiB maximum and a ten-second
-deadline. The advertised address must be IPv4 loopback with a nonzero port.
+deadline. The advertised address must be IPv4 loopback with a nonzero port. All configured
+children start concurrently, bounded by the 64-worker manifest limit. A startup guard owns
+every spawned child until startup completes; any child failure or incarnation fence makes
+the guard terminate and reap every started sibling before deactivation or exit.
 
 Before polling, the agent performs the existing exact `PROTOCOL_VERSION` handshake and
-worker identity challenge. Mismatch kills and reaps the child, deactivates the incarnation
-as `child_startup_failed`, and exits nonzero. No lease can be acquired before every child
-has passed these checks.
+worker identity challenge. Any mismatch triggers the all-children cleanup guard,
+deactivates the incarnation as `child_startup_failed`, and exits nonzero. No lease can be
+acquired before every child has passed these checks.
 
-One node-heartbeat task runs independently. One worker task per child checks for child exit,
-polls acquire with a fresh logical request key, and sleeps the configured interval after
-idle/no-candidate responses. A leased dispatch adds the artifact-access plan and the
-configured advertised modes to the object payload, then sends the existing worker protocol
-request with an incarnation-and-lease-derived idempotency key.
+One worker coordinator per child checks for child exit and owns a semaphore with exactly
+the declared `max_parallel` permits. It polls acquire with a fresh logical request key only
+after reserving a permit and sleeps the configured interval after idle/no-candidate
+responses. After every leased acquire response, including a replay, it performs an
+idempotent lease heartbeat/renewal with a stable validation key before dispatch. An expired,
+cancelled, or otherwise terminal lease response releases the permit without invoking the
+child. A successful renewal establishes current ownership; the leased dispatch then adds
+the artifact-access plan and configured advertised modes to the object payload and sends
+the existing worker protocol request with an incarnation-and-lease-derived idempotency key.
 
-Each lease starts a separate heartbeat task at the server-provided heartbeat interval. It
-does not observe progress frames and remains running while the agent retries complete or
-fail. Frame validation enforces lease ID, sequence, terminal shape, and the existing worker
-protocol limits. A result payload must be an object before complete. Error frames, worker
-exit, malformed streams, and progress timeout produce the matching durable remote fail.
-The agent never re-dispatches an uncertain operation to a restarted child.
+The successful pre-dispatch renewal hands off to a separate lease-heartbeat task at the
+server-provided heartbeat interval. It does not observe progress frames and remains running
+while the agent retries complete or fail. The progress-idle deadline begins when dispatch
+starts and resets only after a syntactically and semantically valid progress frame. Terminal
+frames do not reset it. Frame validation enforces lease ID, sequence, terminal shape, and
+the existing worker protocol limits. A result payload must be an object before complete.
+Error frames, worker exit, malformed streams, and expiry of the configured idle deadline
+produce the matching durable remote fail; idle expiry uses `progress_timeout`. The permit
+is held until complete/fail is acknowledged or the server reports the lease terminal or
+fenced. Lease heartbeats continue while a silent dispatch approaches its independent
+progress deadline. The agent never re-dispatches an uncertain operation to a restarted
+child.
 
-A child that exits is killed/reaped if necessary and restarted with the same incarnation,
-worker ID, epoch, and secret after bounded backoff. Three consecutive startup failures end
-the whole incarnation as `child_restart_exhausted`; one successful handshake resets the
-counter. This fixed policy avoids a configuration surface before operational evidence
-justifies one.
+A child that exits is killed/reaped if necessary. The coordinator cancels every dispatch
+using that child, reports every held lease as failed while its heartbeat continues, and
+waits until each terminal report is acknowledged, fenced, or expired before restart. It
+then restarts with the same incarnation, worker ID, epoch, and secret after bounded backoff.
+Three consecutive startup failures end the whole incarnation as
+`child_restart_exhausted`; one successful handshake resets the counter. This fixed policy
+avoids a configuration surface before operational evidence justifies one.
 
 SIGINT or SIGTERM broadcasts shutdown. In-flight operations stop, their children are
 terminated, and held leases are reported as `user_cancellation` while lease heartbeats
@@ -274,10 +313,12 @@ leaves the incarnation to become durably failed through heartbeat expiry.
 | Failure | Agent action | Durable evidence |
 |---|---|---|
 | Lost activation/acquire/heartbeat/terminal response | Retry identical body and key | One replay row and one mutation |
+| Acquire replay after lease expiry | Renewal reports terminal; release permit without dispatch | Existing expiry and requeue evidence only |
 | Control-plane outage | Keep independent tasks retrying with capped backoff | Held lease remains visible; node/lease expiry records failure if outage exceeds TTL |
 | Prior incarnation or stale node | Stop polling, terminate children, exit nonzero | Superseded/failed incarnation and retired workers |
 | Child protocol or identity mismatch | Kill/reap, deactivate, exit nonzero | Failed incarnation with `child_startup_failed` |
 | Child crash while leased | Fail lease, restart child without redispatch | Lease failure plus eventual active or failed incarnation |
+| Child emits no valid progress before the configured idle deadline | Fail every timed-out lease while its heartbeat continues | Lease failure with `progress_timeout` |
 | Restart budget exhausted | Deactivate and exit nonzero | Failed incarnation with `child_restart_exhausted` |
 | Graceful shutdown | Cancel/fail held work, reap children, deactivate | Retired incarnation with `graceful_shutdown` |
 | Deactivation response lost | Replay identical deactivation | One ended incarnation and one retirement set |

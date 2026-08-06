@@ -43,6 +43,12 @@ that incarnation. The incarnation ID is included in the server-side idempotency 
 so keys from different process lifetimes cannot collide. The existing `nodes.epoch` remains
 the optimistic row epoch and is never used as the incarnation fence.
 
+Supersession and worker retirement do not cancel leases already held by the prior
+incarnation. The fence rejects that incarnation's later lease heartbeats and terminal
+calls, so each held lease follows the existing TTL-expiry path before its ticket becomes
+available again. This preserves the established retirement and lease-failure ordering and
+its durable expiry evidence instead of adding a second cancellation path to activation.
+
 A graceful or failed agent shutdown uses one authenticated, idempotent deactivation
 request. It ends the incarnation, records a bounded reason, retires its workers, and clears
 the node's active-incarnation pointer. A new activation supersedes a live predecessor.
@@ -61,13 +67,23 @@ cleartext is accepted only for a loopback control-plane URL.
 Activation is a larger transaction than worker-by-worker registration, but there is no
 partially visible process lifetime for the agent to reconcile after a timeout. Starting a
 second process with the same node credential deliberately fences the first process rather
-than attempting leader election. Operators can inspect current incarnation state on
+than attempting leader election. Promotion is deliberately fail-stop: it fences a healthy
+incumbent before the replacement has received worker IDs or proved its children ready. A
+broken replacement can therefore cause immediate downtime; operators recover by fixing
+and restarting it, which creates another fresh incarnation. Operators can inspect current
+incarnation state on
 `voom node show` and incarnation history with `voom node incarnation list`.
 
 Existing synthetic remote callers must activate and send an incarnation ID. There is no
 compatibility path that accepts unfenced remote mutations. Historical worker rows remain
 readable but have no incarnation and cannot be acquired through the production remote
 path.
+
+This is a coordinated, pre-release flag-day cutover. Operators first quiesce legacy remote
+callers, then deploy the schema-35 control plane, and only then start incarnation-aware
+agents. An older control-plane binary rejects schema 35 as too new, so rollback requires
+restoring the pre-migration database backup together with the older binaries; mixing old
+remote callers or binaries with the migrated service is unsupported and fails closed.
 
 Loopback TCP plus worker credentials protects the child operation endpoint from the
 network and unauthenticated operations, but it is not an operating-system sandbox. A
@@ -81,6 +97,11 @@ model.
 - Activate first, then register each worker through separate calls. A lost response leaves
   an ambiguous partial manifest and makes safe restart depend on a second reconciliation
   protocol.
+- Prepare worker identities, verify children locally, then commit takeover. This reduces
+  restart downtime when the replacement is broken, but adds a durable prepared state,
+  expiry and cleanup semantics, credentials valid before ownership, and another replay
+  transition. The pre-release synthetic-first lifecycle accepts one-phase fail-stop
+  takeover instead of that protocol.
 - Let the server generate the incarnation ID. A response lost after commit would hide the
   new fence from the process that owns it; client generation makes the retry body complete.
 - Keep the synthetic runner as the production supervisor. It dispatches fake providers in
@@ -88,3 +109,6 @@ model.
 - Bind children on configurable network addresses. The issue requires node-local child
   endpoints; widening them adds authentication and exposure risk without serving this
   issue's synthetic-first scope.
+- Keep the current incarnation-less remote API. It cannot distinguish concurrent process
+  lifetimes holding the same node token, so stale processes remain able to mutate current
+  work and the issue's fencing requirement is unmet.
