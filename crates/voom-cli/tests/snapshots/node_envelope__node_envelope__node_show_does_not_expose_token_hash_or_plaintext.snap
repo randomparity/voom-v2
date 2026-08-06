@@ -13,7 +13,8 @@ expression: show_json
       "kind": "local",
       "status": "registered",
       "heartbeat_ttl_seconds": 60,
-      "epoch": 0
+      "epoch": 0,
+      "active_incarnation_id": null
     }
   },
   "local": {
