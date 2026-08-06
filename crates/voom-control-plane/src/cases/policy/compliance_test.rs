@@ -1098,7 +1098,7 @@ async fn scanned_fixture_persists_canonical_policy_path_for_root_alias() {
     assert_eq!(durable_path, target.path);
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn non_utf8_canonical_policy_path_is_rejected_without_durable_writes() {
     use std::ffi::OsString;
