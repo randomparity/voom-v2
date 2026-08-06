@@ -277,6 +277,81 @@ impl SqliteNodeRepo {
         Ok(node)
     }
 
+    /// Point a non-retired logical node at a newly inserted active incarnation.
+    ///
+    /// `expected_current` is checked without decoding the temporarily incoherent
+    /// pointer created while the caller ends the predecessor and inserts the
+    /// replacement in the same transaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VoomError::Conflict`] when the pointer or lifecycle changed and
+    /// database/internal errors for storage failures or an unreadable result.
+    pub async fn activate_incarnation_in_tx(
+        &self,
+        tx: &mut Transaction<'_, Sqlite>,
+        node_id: NodeId,
+        expected_current: Option<NodeIncarnationId>,
+        incarnation_id: NodeIncarnationId,
+        now: OffsetDateTime,
+    ) -> Result<Node, VoomError> {
+        let now = iso8601(now)?;
+        let result = sqlx::query(
+            "UPDATE nodes SET status = 'active', last_seen_at = ?, retired_at = NULL, \
+             active_incarnation_id = ?, epoch = epoch + 1 \
+             WHERE id = ? AND active_incarnation_id IS ? AND status != 'retired'",
+        )
+        .bind(now)
+        .bind(incarnation_id.to_string())
+        .bind(i64_from_u64(node_id.0, "nodes.id")?)
+        .bind(expected_current.map(|id| id.to_string()))
+        .execute(&mut **tx)
+        .await
+        .map_err(|error| VoomError::database_context("nodes activate incarnation", error))?;
+        if result.rows_affected() != 1 {
+            return Err(VoomError::Conflict(format!(
+                "node {node_id} active incarnation changed during activation"
+            )));
+        }
+        get_in_tx(tx, node_id).await?.ok_or_else(|| {
+            VoomError::Internal(format!(
+                "node {node_id} missing after incarnation activation"
+            ))
+        })
+    }
+
+    /// Clear the exact current incarnation and return a non-retired node to registered.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VoomError::Conflict`] when the pointer or lifecycle changed and
+    /// database/internal errors for storage failures or an unreadable result.
+    pub async fn clear_incarnation_in_tx(
+        &self,
+        tx: &mut Transaction<'_, Sqlite>,
+        node_id: NodeId,
+        incarnation_id: NodeIncarnationId,
+    ) -> Result<Node, VoomError> {
+        let result = sqlx::query(
+            "UPDATE nodes SET status = 'registered', active_incarnation_id = NULL, \
+             epoch = epoch + 1 \
+             WHERE id = ? AND active_incarnation_id = ? AND status != 'retired'",
+        )
+        .bind(i64_from_u64(node_id.0, "nodes.id")?)
+        .bind(incarnation_id.to_string())
+        .execute(&mut **tx)
+        .await
+        .map_err(|error| VoomError::database_context("nodes clear incarnation", error))?;
+        if result.rows_affected() != 1 {
+            return Err(VoomError::Conflict(format!(
+                "node {node_id} active incarnation changed during deactivation"
+            )));
+        }
+        get_in_tx(tx, node_id).await?.ok_or_else(|| {
+            VoomError::Internal(format!("node {node_id} missing after incarnation clear"))
+        })
+    }
+
     /// Record a heartbeat and activate the node in the caller's transaction.
     ///
     /// # Errors
@@ -334,6 +409,26 @@ impl SqliteNodeRepo {
         tx: &mut Transaction<'_, Sqlite>,
         now: OffsetDateTime,
     ) -> Result<Vec<Node>, VoomError> {
+        let candidates = self.stale_candidates_in_tx(tx).await?;
+        let mut changed = Vec::new();
+        for node in &candidates {
+            if let Some(node) = self.mark_stale_candidate_in_tx(tx, node, now).await? {
+                changed.push(node);
+            }
+        }
+        Ok(changed)
+    }
+
+    /// Read validated non-terminal node snapshots in deterministic stale-check order.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VoomError::Database`] when the query or a persisted node/incarnation
+    /// projection is corrupt.
+    pub async fn stale_candidates_in_tx(
+        &self,
+        tx: &mut Transaction<'_, Sqlite>,
+    ) -> Result<Vec<Node>, VoomError> {
         let rows = sqlx::query(
             "SELECT n.id, n.name, n.kind, n.status, n.registered_at, n.last_seen_at, \
              n.retired_at, n.heartbeat_ttl_seconds, n.auth_token_hint, n.metadata, n.epoch, \
@@ -351,14 +446,66 @@ impl SqliteNodeRepo {
         .fetch_all(&mut **tx)
         .await
         .map_err(|e| VoomError::database_context("nodes stale candidates", e))?;
-        let mut changed = Vec::new();
-        for row in &rows {
-            let node = row_to_node(row)?;
-            if let Some(node) = mark_stale_candidate_in_tx(tx, &node, now).await? {
-                changed.push(node);
-            }
+        rows.iter().map(row_to_node).collect()
+    }
+
+    /// Mark one validated candidate stale when its snapshot is still current.
+    ///
+    /// # Errors
+    ///
+    /// Returns database/internal errors from the guarded transition and reload.
+    pub async fn mark_stale_candidate_in_tx(
+        &self,
+        tx: &mut Transaction<'_, Sqlite>,
+        node: &Node,
+        now: OffsetDateTime,
+    ) -> Result<Option<Node>, VoomError> {
+        mark_stale_candidate_in_tx(tx, node, now).await
+    }
+
+    /// Mark an expired snapshot stale after its active incarnation was ended in this transaction.
+    ///
+    /// This typed transition clears the now-terminal pointer without decoding the deliberately
+    /// short-lived intermediate state between incarnation end and node transition.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VoomError::Conflict`] when the snapshot changed, plus database/internal errors.
+    pub async fn mark_stale_after_incarnation_end_in_tx(
+        &self,
+        tx: &mut Transaction<'_, Sqlite>,
+        node: &Node,
+        incarnation_id: NodeIncarnationId,
+        now: OffsetDateTime,
+    ) -> Result<Option<Node>, VoomError> {
+        let expires_at =
+            node.last_seen_at + Duration::seconds(i64::from(node.heartbeat_ttl_seconds));
+        if expires_at > now {
+            return Ok(None);
         }
-        Ok(changed)
+        if node.active_incarnation_id != Some(incarnation_id) {
+            return Err(VoomError::Conflict(format!(
+                "node {} active incarnation changed before stale transition",
+                node.id
+            )));
+        }
+        let result = sqlx::query(
+            "UPDATE nodes SET status = 'stale', active_incarnation_id = NULL, epoch = epoch + 1 \
+             WHERE id = ? AND status IN ('registered','active') AND epoch = ? \
+               AND active_incarnation_id = ?",
+        )
+        .bind(i64_from_u64(node.id.0, "nodes.id")?)
+        .bind(i64_from_u64(node.epoch, "nodes.epoch")?)
+        .bind(incarnation_id.to_string())
+        .execute(&mut **tx)
+        .await
+        .map_err(|error| VoomError::database_context("nodes stale ended incarnation", error))?;
+        if result.rows_affected() == 0 {
+            return Ok(None);
+        }
+        get_in_tx(tx, node.id).await?.map(Some).ok_or_else(|| {
+            VoomError::Internal(format!("node {} missing after stale transition", node.id))
+        })
     }
 
     /// Retire a node when its epoch still matches the caller's observation.
@@ -417,6 +564,46 @@ impl SqliteNodeRepo {
         }
         get_in_tx(tx, id).await?.ok_or_else(|| {
             VoomError::Internal(format!("nodes retire: row vanished post-update id={id}"))
+        })
+    }
+
+    /// Retire a node and clear the exact incarnation already ended by the caller.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VoomError::Conflict`] when the epoch, pointer, or lifecycle changed,
+    /// plus database/internal errors for the guarded update and reload.
+    pub async fn retire_after_incarnation_end_in_tx(
+        &self,
+        tx: &mut Transaction<'_, Sqlite>,
+        id: NodeId,
+        expected_epoch: u64,
+        incarnation_id: NodeIncarnationId,
+        now: OffsetDateTime,
+    ) -> Result<Node, VoomError> {
+        let now = iso8601(now)?;
+        let result = sqlx::query(
+            "UPDATE nodes SET status = 'retired', retired_at = ?, last_seen_at = ?, \
+             active_incarnation_id = NULL, epoch = epoch + 1 \
+             WHERE id = ? AND epoch = ? AND active_incarnation_id = ? AND status != 'retired'",
+        )
+        .bind(&now)
+        .bind(&now)
+        .bind(i64_from_u64(id.0, "nodes.id")?)
+        .bind(i64_from_u64(expected_epoch, "nodes.epoch")?)
+        .bind(incarnation_id.to_string())
+        .execute(&mut **tx)
+        .await
+        .map_err(|error| VoomError::database_context("nodes retire ended incarnation", error))?;
+        if result.rows_affected() != 1 {
+            return Err(VoomError::Conflict(format!(
+                "nodes retire rejected: id={id} expected epoch/pointer changed"
+            )));
+        }
+        get_in_tx(tx, id).await?.ok_or_else(|| {
+            VoomError::Internal(format!(
+                "node {id} missing after incarnation-aware retirement"
+            ))
         })
     }
 }

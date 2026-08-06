@@ -4,7 +4,8 @@ use secrecy::SecretString;
 use serde_json::Value as JsonValue;
 use sqlx::{Sqlite, Transaction};
 use voom_core::{
-    ArtifactAccessMode, ErrorCode, FailureClass, LeaseId, NodeId, TicketId, VoomError, WorkerId,
+    ArtifactAccessMode, ErrorCode, FailureClass, LeaseId, NodeId, NodeIncarnationEndReason,
+    NodeIncarnationId, NodeIncarnationStatus, OperationKind, TicketId, VoomError, WorkerId,
 };
 use voom_store::repo::execution::remote_idempotency::RemoteMutationReplay;
 
@@ -13,6 +14,7 @@ use crate::ControlPlane;
 use super::commit_tx;
 
 mod acquire;
+mod activation;
 mod complete;
 mod fail;
 mod heartbeat;
@@ -24,6 +26,63 @@ use acquire::{
 };
 
 pub(super) const ROUTE_ACQUIRE: &str = "POST /v1/execution/lease/acquire";
+
+#[derive(Debug, Clone)]
+pub struct RemoteActivateInput {
+    pub node_id: NodeId,
+    pub token: SecretString,
+    pub idempotency_key: String,
+    pub request_hash: String,
+    pub incarnation_id: NodeIncarnationId,
+    pub workers: Vec<RemoteWorkerDeclaration>,
+}
+
+#[derive(Debug, Clone)]
+pub struct RemoteWorkerDeclaration {
+    pub logical_name: String,
+    pub operations: Vec<OperationKind>,
+    pub artifact_access: Vec<ArtifactAccessMode>,
+    pub max_parallel: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ActivatedWorker {
+    pub logical_name: String,
+    pub worker_id: WorkerId,
+    pub worker_epoch: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RemoteActivateOutcome {
+    pub node_id: NodeId,
+    pub node_epoch: u64,
+    pub incarnation_id: NodeIncarnationId,
+    pub heartbeat_ttl_seconds: u32,
+    pub workers: Vec<ActivatedWorker>,
+}
+
+#[derive(Debug, Clone)]
+pub struct RemoteDeactivateInput {
+    pub node_id: NodeId,
+    pub token: SecretString,
+    pub idempotency_key: String,
+    pub request_hash: String,
+    pub incarnation_id: NodeIncarnationId,
+    pub reason: NodeIncarnationEndReason,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RemoteDeactivateOutcome {
+    pub node_id: NodeId,
+    pub node_epoch: u64,
+    pub incarnation_id: NodeIncarnationId,
+    pub status: NodeIncarnationStatus,
+    pub reason: NodeIncarnationEndReason,
+    pub retired_worker_ids: Vec<WorkerId>,
+}
 
 #[derive(Debug, Clone)]
 pub struct RemoteNodeHeartbeatInput {
@@ -307,6 +366,14 @@ pub(super) fn route_lease_complete(lease_id: LeaseId) -> String {
     format!("POST /v1/execution/lease/{}/complete", lease_id.0)
 }
 
+pub(super) fn route_node_activate(node_id: NodeId) -> String {
+    format!("POST /v1/execution/node/{}/activate", node_id.0)
+}
+
+pub(super) fn route_node_deactivate(node_id: NodeId) -> String {
+    format!("POST /v1/execution/node/{}/deactivate", node_id.0)
+}
+
 pub(super) fn route_node_heartbeat(node_id: NodeId) -> String {
     format!("POST /v1/execution/node/{}/heartbeat", node_id.0)
 }
@@ -349,6 +416,28 @@ impl ReplayRoute for RemoteAcquireInput {
             node_id: self.node_id,
             route_key: ROUTE_ACQUIRE.to_owned(),
             worker_id: Some(self.worker_id),
+            idempotency_key: &self.idempotency_key,
+        }
+    }
+}
+
+impl ReplayRoute for RemoteActivateInput {
+    fn replay_slot(&self) -> ReplaySlot<'_> {
+        ReplaySlot {
+            node_id: self.node_id,
+            route_key: route_node_activate(self.node_id),
+            worker_id: None,
+            idempotency_key: &self.idempotency_key,
+        }
+    }
+}
+
+impl ReplayRoute for RemoteDeactivateInput {
+    fn replay_slot(&self) -> ReplaySlot<'_> {
+        ReplaySlot {
+            node_id: self.node_id,
+            route_key: route_node_deactivate(self.node_id),
+            worker_id: None,
             idempotency_key: &self.idempotency_key,
         }
     }

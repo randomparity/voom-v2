@@ -1,7 +1,10 @@
 use time::{Duration, OffsetDateTime};
-use voom_core::{ErrorCode, NodeId};
+use voom_core::{
+    ErrorCode, NodeId, NodeIncarnationEndReason, NodeIncarnationId, NodeIncarnationStatus,
+};
 
 use super::{NewNode, Node, NodeKind, NodeStatus, SqliteNodeRepo};
+use crate::repo::execution::node_incarnations::{NewNodeIncarnation, SqliteNodeIncarnationRepo};
 use crate::test_support::T0;
 
 #[tokio::test]
@@ -123,6 +126,54 @@ async fn node_reads_reject_terminal_active_pointer_before_lifecycle_classificati
         .unwrap_err();
     assert_eq!(error.error_code(), ErrorCode::DbUnreachable);
     assert!(error.to_string().contains("not active"));
+}
+
+#[tokio::test]
+async fn node_incarnation_pointer_transitions_bridge_atomic_replacement_and_clear() {
+    let (pool, _tmp) = fresh_pool().await;
+    let nodes = SqliteNodeRepo::new(pool.clone());
+    let incarnations = SqliteNodeIncarnationRepo::new(pool.clone());
+    let node = seed_node(&pool, &nodes, "transition", NodeStatus::Registered, T0, 60).await;
+    let incarnation_id: NodeIncarnationId = "0123456789abcdef0123456789abcdef".parse().unwrap();
+
+    let mut tx = pool.begin().await.unwrap();
+    incarnations
+        .insert_in_tx(
+            &mut tx,
+            NewNodeIncarnation {
+                id: incarnation_id,
+                node_id: node.id,
+                started_at: T0,
+            },
+        )
+        .await
+        .unwrap();
+    let active = nodes
+        .activate_incarnation_in_tx(&mut tx, node.id, None, incarnation_id, T0)
+        .await
+        .unwrap();
+    assert_eq!(active.active_incarnation_id, Some(incarnation_id));
+    assert_eq!(active.status, NodeStatus::Active);
+
+    incarnations
+        .end_in_tx(
+            &mut tx,
+            incarnation_id,
+            NodeIncarnationStatus::Retired,
+            NodeIncarnationEndReason::GracefulShutdown,
+            T0,
+        )
+        .await
+        .unwrap();
+    let cleared = nodes
+        .clear_incarnation_in_tx(&mut tx, node.id, incarnation_id)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+
+    assert_eq!(cleared.active_incarnation_id, None);
+    assert_eq!(cleared.status, NodeStatus::Registered);
+    assert_eq!(cleared.epoch, node.epoch + 2);
 }
 
 #[tokio::test]

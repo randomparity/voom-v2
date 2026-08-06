@@ -53,8 +53,7 @@ impl ControlPlane {
             }
         }
 
-        if let Err(err) =
-            super::recover::validate_remote_node_live(&auth, input.node_id, now, false)
+        if let Err(err) = super::recover::validate_remote_node_live(&auth, input.node_id, now, true)
         {
             self.complete_remote_error_in_tx(
                 &mut tx,

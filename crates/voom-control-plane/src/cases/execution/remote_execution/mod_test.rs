@@ -1272,7 +1272,7 @@ async fn remote_complete_rejects_incomplete_or_mismatched_artifact_evidence() {
 }
 
 #[tokio::test]
-async fn remote_heartbeat_reactivates_stale_node_and_replays_lease_heartbeat() {
+async fn remote_heartbeat_rejects_stale_node_and_replays_lease_heartbeat() {
     let fixture = leased_fixture().await;
     let lease_id = fixture_lease_id(&fixture).await;
     fixture
@@ -1292,9 +1292,8 @@ async fn remote_heartbeat_reactivates_stale_node_and_replays_lease_heartbeat() {
         .cp
         .remote_node_heartbeat(fixture.node_heartbeat_input("node-heartbeat", "hash-node-hb"))
         .await
-        .unwrap();
-    assert_eq!(heartbeat.node_id, fixture.node_id);
-    assert_eq!(heartbeat.status, "active");
+        .unwrap_err();
+    assert_eq!(heartbeat.error_code(), ErrorCode::Conflict);
 
     let first = fixture
         .cp

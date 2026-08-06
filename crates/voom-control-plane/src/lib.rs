@@ -29,8 +29,8 @@ use voom_core::{Clock, NodeId, SystemClock, VoomError};
 use voom_store::repo::{
     audit::events::SqliteEventRepo,
     execution::{
-        jobs::SqliteJobRepo, leases::SqliteLeaseRepo, nodes::SqliteNodeRepo,
-        remote_idempotency::SqliteRemoteIdempotencyRepo,
+        jobs::SqliteJobRepo, leases::SqliteLeaseRepo, node_incarnations::SqliteNodeIncarnationRepo,
+        nodes::SqliteNodeRepo, remote_idempotency::SqliteRemoteIdempotencyRepo,
         scheduler_decisions::SqliteSchedulerDecisionRepo,
         scheduler_node_limits::SqliteSchedulerNodeLimitRepo, tickets::SqliteTicketRepo,
         workers::SqliteWorkerRepo, workflow_progress::SqliteWorkflowProgressRepo,
@@ -74,10 +74,12 @@ pub use health::{HealthDiagnostic, HealthPlane, HealthSnapshot};
 
 pub mod execution {
     pub use crate::cases::execution::remote_execution::{
-        RemoteAcquireInput, RemoteAcquireOutcome, RemoteArtifactAccessPlan, RemoteCompleteInput,
-        RemoteCompleteOutcome, RemoteFailInput, RemoteFailOutcome, RemoteLeaseDispatch,
-        RemoteLeaseHeartbeatInput, RemoteLeaseHeartbeatOutcome, RemoteNodeHeartbeatInput,
-        RemoteNodeHeartbeatOutcome, RemoteRecoverReport,
+        ActivatedWorker, RemoteAcquireInput, RemoteAcquireOutcome, RemoteActivateInput,
+        RemoteActivateOutcome, RemoteArtifactAccessPlan, RemoteCompleteInput,
+        RemoteCompleteOutcome, RemoteDeactivateInput, RemoteDeactivateOutcome, RemoteFailInput,
+        RemoteFailOutcome, RemoteLeaseDispatch, RemoteLeaseHeartbeatInput,
+        RemoteLeaseHeartbeatOutcome, RemoteNodeHeartbeatInput, RemoteNodeHeartbeatOutcome,
+        RemoteRecoverReport, RemoteWorkerDeclaration,
     };
     pub use crate::cases::execution::tickets::PreLeaseFailureOutcome;
 }
@@ -138,6 +140,7 @@ pub struct ControlPlane {
     pub(crate) tickets: SqliteTicketRepo,
     pub(crate) workers: SqliteWorkerRepo,
     pub(crate) nodes: SqliteNodeRepo,
+    pub(crate) node_incarnations: SqliteNodeIncarnationRepo,
     pub(crate) leases: SqliteLeaseRepo,
     pub(crate) remote_idempotency: SqliteRemoteIdempotencyRepo,
     pub(crate) artifact_access_plans: SqliteArtifactAccessPlanRepo,
@@ -179,6 +182,7 @@ impl std::fmt::Debug for ControlPlane {
             .field("tickets", &self.tickets)
             .field("workers", &self.workers)
             .field("nodes", &self.nodes)
+            .field("node_incarnations", &self.node_incarnations)
             .field("leases", &self.leases)
             .field("remote_idempotency", &self.remote_idempotency)
             .field("artifact_access_plans", &self.artifact_access_plans)
@@ -300,6 +304,7 @@ impl ControlPlane {
             tickets: SqliteTicketRepo::new(pool.clone()),
             workers: SqliteWorkerRepo::new(pool.clone()),
             nodes: SqliteNodeRepo::new(pool.clone()),
+            node_incarnations: SqliteNodeIncarnationRepo::new(pool.clone()),
             leases: SqliteLeaseRepo::new(pool.clone()),
             remote_idempotency: SqliteRemoteIdempotencyRepo::new(pool.clone()),
             artifact_access_plans: SqliteArtifactAccessPlanRepo::new(pool.clone()),
