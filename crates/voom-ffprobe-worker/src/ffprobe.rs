@@ -7,11 +7,11 @@ use thiserror::Error;
 use tokio::process::Command;
 use tokio::time::{Duration, timeout};
 use voom_core::{ErrorCode, FailureClass};
+use voom_worker_protocol::FFPROBE_VERSION_TIMEOUT;
 
 pub const FFPROBE_BIN_ENV: &str = "VOOM_FFPROBE_BIN";
 const DEFAULT_FFPROBE_BIN: &str = "ffprobe";
 const FFPROBE_TIMEOUT: Duration = Duration::from_secs(30);
-const FFPROBE_VERSION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FfprobeConfig {
@@ -47,8 +47,15 @@ impl FfprobeConfig {
     }
 
     fn from_bin(ffprobe_bin: OsString) -> Result<Self, FfprobeConfigError> {
+        Self::from_bin_with_version_timeout(ffprobe_bin, FFPROBE_VERSION_TIMEOUT)
+    }
+
+    fn from_bin_with_version_timeout(
+        ffprobe_bin: OsString,
+        version_timeout: Duration,
+    ) -> Result<Self, FfprobeConfigError> {
         Ok(Self {
-            provider_version: detect_ffprobe_version(&ffprobe_bin)?,
+            provider_version: detect_ffprobe_version(&ffprobe_bin, version_timeout)?,
             ffprobe_bin,
         })
     }
@@ -73,7 +80,7 @@ pub enum FfprobeConfigError {
         source: io::Error,
     },
     #[error(
-        "ffprobe dependency {binary:?} version check exceeded {} second",
+        "ffprobe dependency {binary:?} version check exceeded {} seconds",
         timeout.as_secs()
     )]
     Timeout {
@@ -220,7 +227,10 @@ pub async fn run_ffprobe_json(path: &Path, config: &FfprobeConfig) -> Result<Val
     })
 }
 
-fn detect_ffprobe_version(ffprobe_bin: &OsStr) -> Result<String, FfprobeConfigError> {
+fn detect_ffprobe_version(
+    ffprobe_bin: &OsStr,
+    version_timeout: Duration,
+) -> Result<String, FfprobeConfigError> {
     let binary = PathBuf::from(ffprobe_bin);
     let started = std::time::Instant::now();
     let mut command = std::process::Command::new(ffprobe_bin);
@@ -264,24 +274,45 @@ fn detect_ffprobe_version(ffprobe_bin: &OsStr) -> Result<String, FfprobeConfigEr
             };
             return Ok(version);
         }
-        if started.elapsed() >= FFPROBE_VERSION_TIMEOUT {
-            child.kill().map_err(|source| FfprobeConfigError::Io {
-                binary: binary.clone(),
-                operation: "terminate timed-out version check",
-                source,
-            })?;
-            child.wait().map_err(|source| FfprobeConfigError::Io {
-                binary: binary.clone(),
-                operation: "reap timed-out version check",
-                source,
-            })?;
+        if started.elapsed() >= version_timeout {
+            match child.kill() {
+                Ok(()) => {
+                    child.wait().map_err(|source| FfprobeConfigError::Io {
+                        binary: binary.clone(),
+                        operation: "reap timed-out version check",
+                        source,
+                    })?;
+                }
+                Err(source) => {
+                    try_reap_version_child_after_termination_failure(&binary, source, || {
+                        child.try_wait().map(|status| status.map(|_status| ()))
+                    })?;
+                }
+            }
             return Err(FfprobeConfigError::Timeout {
                 binary,
-                timeout: FFPROBE_VERSION_TIMEOUT,
+                timeout: version_timeout,
             });
         }
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
+}
+
+fn try_reap_version_child_after_termination_failure(
+    binary: &Path,
+    terminate_source: io::Error,
+    try_reap: impl FnOnce() -> io::Result<Option<()>>,
+) -> Result<(), FfprobeConfigError> {
+    let _status = try_reap().map_err(|source| FfprobeConfigError::Io {
+        binary: binary.to_path_buf(),
+        operation: "reap timed-out version check",
+        source,
+    })?;
+    Err(FfprobeConfigError::Io {
+        binary: binary.to_path_buf(),
+        operation: "terminate timed-out version check",
+        source: terminate_source,
+    })
 }
 
 async fn command_output(command: &mut Command) -> io::Result<std::process::Output> {

@@ -61,3 +61,4 @@ are append-only — supersede an ADR with a new one rather than rewriting histor
 | [0053](0053-artifact-access-mode-is-core-domain-vocabulary.md) | Artifact access mode is core domain vocabulary |
 | [0054](0054-control-plane-api-process-owns-tls-and-draining.md) | The control-plane API process owns TLS and graceful draining |
 | [0055](0055-node-owned-roots-and-relative-file-locations.md) | Node-owned roots and provider-relative file locations |
+| [0056](0056-bound-ffprobe-version-probing-inside-worker-startup.md) | Bound ffprobe version probing inside worker startup |

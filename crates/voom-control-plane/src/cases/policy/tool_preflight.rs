@@ -1,4 +1,5 @@
 use std::collections::BTreeSet;
+use std::future::Future;
 
 use voom_core::{
     OperationKind, PROTOCOL_VERSION, TicketOperation, VideoDecodeMode, VideoEncoderBackend,
@@ -11,6 +12,7 @@ use voom_worker_protocol::VideoAcceleratorDescriptor;
 
 use crate::ControlPlane;
 use crate::cases::{begin_immediate_tx, commit_tx};
+use crate::scan::worker::ScanWorkerError;
 use crate::video_hardware::candidate_accelerator_descriptor;
 use crate::workflow::WorkerRuntimeRegistry;
 
@@ -39,6 +41,24 @@ impl ControlPlane {
         policy: &mut CompiledPolicy,
         runtimes: &WorkerRuntimeRegistry,
     ) -> Result<(), VoomError> {
+        self.preflight_policy_tools_with_ffprobe_readiness(
+            policy,
+            runtimes,
+            crate::scan::worker::verify_bundled_ffprobe_readiness,
+        )
+        .await
+    }
+
+    async fn preflight_policy_tools_with_ffprobe_readiness<F, Fut>(
+        &self,
+        policy: &mut CompiledPolicy,
+        runtimes: &WorkerRuntimeRegistry,
+        ffprobe_readiness: F,
+    ) -> Result<(), VoomError>
+    where
+        F: Fn() -> Fut,
+        Fut: Future<Output = Result<(), ScanWorkerError>>,
+    {
         let tools = normalize_policy_tool_requirements(policy)?;
 
         let mut unavailable = Vec::new();
@@ -66,7 +86,10 @@ impl ControlPlane {
                     )
                     .await?
                 }
-                PolicyTool::Ffprobe => self.observe_bundled_ffprobe().await?,
+                PolicyTool::Ffprobe => {
+                    self.observe_bundled_ffprobe(ffprobe_readiness().await)
+                        .await?
+                }
             };
             if let Some(reason) = reason {
                 unavailable.push(UnavailableTool { tool, reason });
@@ -278,8 +301,11 @@ impl ControlPlane {
         Ok(findings)
     }
 
-    async fn observe_bundled_ffprobe(&self) -> Result<Option<String>, VoomError> {
-        if let Err(error) = crate::scan::worker::verify_bundled_ffprobe_readiness().await {
+    async fn observe_bundled_ffprobe(
+        &self,
+        readiness: Result<(), ScanWorkerError>,
+    ) -> Result<Option<String>, VoomError> {
+        if let Err(error) = readiness {
             return Ok(Some(format!("bundled ffprobe readiness failed: {error}")));
         }
 
