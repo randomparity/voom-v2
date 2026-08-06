@@ -80,10 +80,13 @@ readable but have no incarnation and cannot be acquired through the production r
 path.
 
 This is a coordinated, pre-release flag-day cutover. Operators first quiesce legacy remote
-callers, then deploy the schema-35 control plane, and only then start incarnation-aware
-agents. An older control-plane binary rejects schema 35 as too new, so rollback requires
-restoring the pre-migration database backup together with the older binaries; mixing old
-remote callers or binaries with the migrated service is unsupported and fails closed.
+callers, create and verify a pre-migration database backup, apply migration 0035 through
+the supported `voom init` path, deploy and start the schema-35 control plane, and only then
+start incarnation-aware agents. The control-plane process only connects and never applies
+migrations. An older control-plane binary rejects schema 35 as too new, so rollback
+requires restoring the verified pre-migration backup together with the older binaries;
+mixing old remote callers or binaries with the migrated service is unsupported and fails
+closed.
 
 Loopback TCP plus worker credentials protects the child operation endpoint from the
 network and unauthenticated operations, but it is not an operating-system sandbox. A

@@ -146,11 +146,13 @@ worker descriptor per request entry (`logical_name`, `worker_id`, `worker_epoch`
 returns this exact mapping. Reusing an incarnation under another activation key conflicts,
 including after it is terminal.
 
-Deployment is a coordinated flag day: quiesce legacy remote callers, deploy and migrate
-the enforcing control plane to schema 35, then start incarnation-aware agents. Schema
-version checks prevent an older control-plane binary from opening the migrated database.
-Rollback therefore restores the pre-migration database backup and older binaries together;
-mixed old callers or binaries are unsupported.
+Deployment is a coordinated flag day: quiesce legacy remote callers, create and verify a
+pre-migration database backup, apply migration 0035 through the supported `voom init` path,
+deploy and start the enforcing control plane, then start incarnation-aware agents. The
+control-plane process connects without migrating. Schema-version checks prevent an older
+binary from opening the migrated database. Rollback therefore restores the verified
+pre-migration backup and older binaries together; mixed old callers or binaries are
+unsupported.
 
 ### Heartbeat and fencing
 
