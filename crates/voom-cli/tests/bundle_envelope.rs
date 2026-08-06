@@ -11,8 +11,7 @@ use time::OffsetDateTime;
 use voom_control_plane::ControlPlane;
 use voom_store::repo::media::bundles::{BundleMemberRole, NewAssetBundle};
 use voom_store::repo::media::identity::{
-    FileLocationKind, MediaWorkKind, NewFileLocation, NewFileVersion, NewMediaVariant,
-    NewMediaWork, ProducedBy,
+    MediaWorkKind, NewFileLocation, NewFileVersion, NewMediaVariant, NewMediaWork, ProducedBy,
 };
 use voom_test_support::TempDatabase;
 
@@ -30,6 +29,10 @@ mod bundle_envelope {
         let tmp = TempDatabase::new().unwrap();
         let url = voom_store::test_support::sqlite_url_for(tmp.path());
         voom_store::init(&url).await.unwrap();
+        let pool = voom_store::connect(&url).await.unwrap();
+        voom_store::test_support::seed_test_storage_root(&pool)
+            .await
+            .unwrap();
         let cp = ControlPlane::open(&url).await.unwrap();
 
         let work = cp
@@ -109,8 +112,10 @@ mod bundle_envelope {
             .unwrap();
         cp.create_file_location(NewFileLocation {
             file_version_id: version.id,
-            kind: FileLocationKind::LocalPath,
-            value: location_value.to_owned(),
+            storage_root_id: voom_store::test_support::TEST_STORAGE_ROOT_ID,
+            provider_relative_locator: voom_store::test_support::test_relative_locator(
+                location_value,
+            ),
             proof: None,
             observed_at: T0,
         })
@@ -147,8 +152,10 @@ mod bundle_envelope {
             .unwrap();
         cp.create_file_location(NewFileLocation {
             file_version_id: transcoded.id,
-            kind: FileLocationKind::LocalPath,
-            value: "/library/Solaris.eac3".to_owned(),
+            storage_root_id: voom_store::test_support::TEST_STORAGE_ROOT_ID,
+            provider_relative_locator: voom_store::test_support::test_relative_locator(
+                "/library/Solaris.eac3",
+            ),
             proof: None,
             observed_at: T0,
         })

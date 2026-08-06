@@ -263,8 +263,9 @@ async fn prepare_transcode(
     .await?;
     let (copy_video, source_video_codec, source_video_pixel_format) =
         source_video_decision(cp, input.source_file_version_id, &input.resolved).await?;
+    let source_path = selected.canonical_path.to_string_lossy();
     let output_name = stage::OutputName {
-        source_path: &selected.location.value,
+        source_path: &source_path,
         profile_id: &input.resolved.profile.name,
         codec: &input.resolved.profile.target_codec,
         container: &input.resolved.output_container,

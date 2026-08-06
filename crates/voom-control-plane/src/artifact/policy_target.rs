@@ -12,12 +12,40 @@ impl ControlPlane {
         file_version_id: FileVersionId,
         file_location_id: Option<FileLocationId>,
     ) -> Result<PolicyArtifactTarget, VoomError> {
+        let selected = crate::operation_source::select_local_source(
+            self,
+            "policy artifact verification",
+            file_version_id,
+            file_location_id,
+        )
+        .await?;
+        let (selected_root_id, selected_relative_locator) = selected.location.rooted_address()?;
+        let canonical_path = selected.canonical_path.to_str().ok_or_else(|| {
+            VoomError::Config(
+                "policy artifact verification canonical path must be valid UTF-8".into(),
+            )
+        })?;
         let mut tx = begin_immediate_tx(&self.pool).await?;
         let now = self.clock().now();
         let resolution = self
             .artifacts
-            .resolve_policy_artifact_target_in_tx(&mut tx, file_version_id, file_location_id, now)
+            .resolve_policy_artifact_target_in_tx(
+                &mut tx,
+                file_version_id,
+                file_location_id,
+                canonical_path,
+                now,
+            )
             .await?;
+        if resolution.target.file_location_id != selected.location.id
+            || resolution.target.storage_root_id != selected_root_id
+            || resolution.target.provider_relative_locator != *selected_relative_locator
+        {
+            return Err(VoomError::Conflict(format!(
+                "policy artifact location {} changed during resolution",
+                selected.location.id
+            )));
+        }
         if let Some(handle) = &resolution.created_handle {
             append_event(
                 &self.events,

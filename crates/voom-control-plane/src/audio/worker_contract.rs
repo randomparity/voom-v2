@@ -89,7 +89,7 @@ pub async fn revalidate_source_file(selected: &SelectedSource) -> Result<(), Voo
     {
         return Err(VoomError::ArtifactChecksumMismatch(format!(
             "audio source facts do not match selected file_version at {}",
-            selected.location.value
+            selected.canonical_path.display()
         )));
     }
     Ok(())

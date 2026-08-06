@@ -10,8 +10,8 @@ expression: json
     "status": "blocked",
     "reason": "root_disabled",
     "library_id": 1,
-    "library_root_id": 1,
-    "canonical_path": "[path]"
+    "storage_root_id": 1,
+    "provider_locator": "[path]"
   },
   "local": {
     "db_url": "[db-url]",

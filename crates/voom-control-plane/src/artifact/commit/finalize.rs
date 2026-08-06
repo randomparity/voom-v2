@@ -1,14 +1,13 @@
 use std::path::{Path, PathBuf};
 
 use serde_json::json;
-use voom_core::VoomError;
 use voom_core::ids::ArtifactCommitRecordId;
+use voom_core::{ProviderRelativeLocator, StorageRootId, VoomError};
 use voom_events::Event;
 use voom_events::payload::ArtifactCommitCompletedPayload;
 use voom_store::repo::media::artifacts::{ArtifactCommitRecord, SqliteArtifactRepo};
 use voom_store::repo::media::identity::{
-    FileLocationKind, FileLocationRepo, FileVersionRepo, NewFileLocation, NewFileVersion,
-    ProducedBy,
+    FileLocationRepo, FileVersionRepo, NewFileLocation, NewFileVersion, ProducedBy,
 };
 
 use voom_artifact::commit_pipeline::append_commit_event_in_tx;
@@ -57,8 +56,8 @@ pub(crate) async fn finalize_commit_in_tx(
             tx,
             NewFileLocation {
                 file_version_id: result_version.id,
-                kind: FileLocationKind::LocalPath,
-                value: prepared.target_path.display().to_string(),
+                storage_root_id: prepared.target_storage_root_id,
+                provider_relative_locator: prepared.target_relative_locator.clone(),
                 proof: None,
                 observed_at: now,
             },
@@ -101,6 +100,8 @@ pub(super) async fn update_commit_report_in_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     id: ArtifactCommitRecordId,
     recovery: &CommitRecoveryReport,
+    target_storage_root_id: StorageRootId,
+    target_relative_locator: &ProviderRelativeLocator,
 ) -> Result<(), VoomError> {
     let report = json!({
         "phase": "recovery_required",
@@ -113,6 +114,10 @@ pub(super) async fn update_commit_report_in_tx(
         "staging_exists": recovery.staging_exists,
         "result_file_version_id": recovery.result_file_version_id.map(|id| id.0),
         "result_file_location_id": recovery.result_file_location_id.map(|id| id.0),
+        "rooted_target": {
+            "storage_root_id": target_storage_root_id.0,
+            "provider_relative_locator": target_relative_locator.as_str(),
+        },
     });
     artifacts
         .update_pending_commit_report_in_tx(tx, id, &report)

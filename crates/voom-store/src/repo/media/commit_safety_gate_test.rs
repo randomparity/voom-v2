@@ -34,10 +34,9 @@ fn affected_scope_closure_default_is_empty() {
 }
 
 fn file_location_proposal_fixture() -> FileLocationProposal {
-    use crate::repo::media::identity::FileLocationKind;
     FileLocationProposal {
-        kind: FileLocationKind::LocalPath,
-        value: "/tmp/stub".to_owned(),
+        storage_root_id: crate::test_support::TEST_STORAGE_ROOT_ID,
+        provider_relative_locator: crate::test_support::test_relative_locator("/tmp/stub"),
         proof: None,
         observed_at: time::OffsetDateTime::UNIX_EPOCH,
     }
@@ -80,8 +79,8 @@ fn file_location_proposal_does_not_carry_file_version_id() {
     // compiling and the new field name must be added explicitly.
     let p = file_location_proposal_fixture();
     let FileLocationProposal {
-        kind: _,
-        value: _,
+        storage_root_id: _,
+        provider_relative_locator: _,
         proof: _,
         observed_at: _,
     } = p;
@@ -312,9 +311,9 @@ async fn commit_intents_check_rejects_recovery_required_with_null_closure_author
 
 use crate::repo::audit::events::{EventFilter, EventRepo, Page, SqliteEventRepo};
 use crate::repo::media::identity::{
-    AcceptedPin, FileAssetRepo, FileLocationKind as IdentityFileLocationKind, FileLocationRepo,
-    FileVersionRepo, IdentityEvidenceRepo, NewFileLocation as IdentityNewFileLocation,
-    NewFileVersion, NewIdentityEvidence, ProducedBy, SqliteIdentityRepo,
+    AcceptedPin, FileAssetRepo, FileLocationRepo, FileVersionRepo, IdentityEvidenceRepo,
+    NewFileLocation as IdentityNewFileLocation, NewFileVersion, NewIdentityEvidence, ProducedBy,
+    SqliteIdentityRepo,
 };
 use crate::repo::media::use_leases::{
     BlockingMode, IssuerKind, NewUseLease, SqliteUseLeaseRepo, UseLeaseKind,
@@ -360,8 +359,8 @@ async fn seed_location(pool: &SqlitePool, value: &str) -> SeededLocation {
             &mut tx,
             IdentityNewFileLocation {
                 file_version_id: version.id,
-                kind: IdentityFileLocationKind::LocalPath,
-                value: value.to_owned(),
+                storage_root_id: crate::test_support::TEST_STORAGE_ROOT_ID,
+                provider_relative_locator: crate::test_support::test_relative_locator(value),
                 proof: None,
                 observed_at: T0,
             },
@@ -1004,8 +1003,10 @@ async fn authorize_phase_b_blocked_by_closure_grew_lands_aborted_row_plus_event(
             &mut tx,
             IdentityNewFileLocation {
                 file_version_id: seeded.version_id,
-                kind: IdentityFileLocationKind::LocalPath,
-                value: "/srv/x-alias".to_owned(),
+                storage_root_id: crate::test_support::TEST_STORAGE_ROOT_ID,
+                provider_relative_locator: crate::test_support::test_relative_locator(
+                    "/srv/x-alias",
+                ),
                 proof: None,
                 observed_at: T0 + time::Duration::seconds(2),
             },
@@ -1521,8 +1522,10 @@ async fn finalize_phase_c_silent_replace_dispatches_replace() {
             target: CommitTarget::ReplaceFileLocation {
                 retired: seeded.location_id,
                 new: FileLocationProposal {
-                    kind: IdentityFileLocationKind::LocalPath,
-                    value: "/srv/x-replaced".to_owned(),
+                    storage_root_id: crate::test_support::TEST_STORAGE_ROOT_ID,
+                    provider_relative_locator: crate::test_support::test_relative_locator(
+                        "/srv/x-replaced",
+                    ),
                     proof: None,
                     observed_at: T0,
                 },
@@ -1562,7 +1565,8 @@ async fn finalize_phase_c_silent_replace_dispatches_replace() {
     assert!(retired_at.is_some());
     let new_count: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM file_locations \
-         WHERE file_version_id = ? AND value = '/srv/x-replaced' AND retired_at IS NULL",
+         WHERE file_version_id = ? AND storage_root_id = 9000001 \
+           AND provider_relative_locator = 'srv/x-replaced' AND retired_at IS NULL",
     )
     .bind(seeded.version_id.0.cast_signed())
     .fetch_one(&pool)
@@ -1585,8 +1589,10 @@ async fn finalize_phase_c_silent_move_dispatches_replace() {
             target: CommitTarget::MoveFileLocation {
                 retired: seeded.location_id,
                 new: FileLocationProposal {
-                    kind: IdentityFileLocationKind::LocalPath,
-                    value: "/srv/x-moved".to_owned(),
+                    storage_root_id: crate::test_support::TEST_STORAGE_ROOT_ID,
+                    provider_relative_locator: crate::test_support::test_relative_locator(
+                        "/srv/x-moved",
+                    ),
                     proof: None,
                     observed_at: T0,
                 },
@@ -1619,7 +1625,8 @@ async fn finalize_phase_c_silent_move_dispatches_replace() {
     // ReplaceFileLocation — both route through replace_file_location_in_tx.
     let new_count: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM file_locations \
-         WHERE file_version_id = ? AND value = '/srv/x-moved' AND retired_at IS NULL",
+         WHERE file_version_id = ? AND storage_root_id = 9000001 \
+           AND provider_relative_locator = 'srv/x-moved' AND retired_at IS NULL",
     )
     .bind(seeded.version_id.0.cast_signed())
     .fetch_one(&pool)
@@ -1645,8 +1652,10 @@ async fn finalize_phase_c_closure_grew_drives_recovery_required() {
             &mut tx,
             IdentityNewFileLocation {
                 file_version_id: seeded.version_id,
-                kind: IdentityFileLocationKind::LocalPath,
-                value: "/srv/x-late-alias".to_owned(),
+                storage_root_id: crate::test_support::TEST_STORAGE_ROOT_ID,
+                provider_relative_locator: crate::test_support::test_relative_locator(
+                    "/srv/x-late-alias",
+                ),
                 proof: None,
                 observed_at: T0 + time::Duration::seconds(2),
             },
@@ -1781,8 +1790,10 @@ async fn finalize_phase_c_closure_grew_and_fresh_lease_drives_recovery_required(
             &mut tx,
             IdentityNewFileLocation {
                 file_version_id: seeded.version_id,
-                kind: IdentityFileLocationKind::LocalPath,
-                value: "/srv/x-late-alias".to_owned(),
+                storage_root_id: crate::test_support::TEST_STORAGE_ROOT_ID,
+                provider_relative_locator: crate::test_support::test_relative_locator(
+                    "/srv/x-late-alias",
+                ),
                 proof: None,
                 observed_at: T0 + time::Duration::seconds(2),
             },

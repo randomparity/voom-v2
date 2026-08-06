@@ -15,8 +15,8 @@ use voom_store::repo::media::artifacts::{
     NewSidecarArtifactCommit,
 };
 use voom_store::repo::media::identity::{
-    DiscoveredFile, FileLocationKind, FileLocationRepo, FileVersionRepo, IngestOutcome,
-    MediaSnapshotRepo, NewFileLocation, NewFileVersion, ProducedBy,
+    DiscoveredFile, FileLocationRepo, FileVersionRepo, IngestOutcome, MediaSnapshotRepo,
+    NewFileLocation, NewFileVersion, ProducedBy,
 };
 
 use super::*;
@@ -275,6 +275,46 @@ async fn finalization_uses_latest_exact_commit_from_multi_operation_phase() {
             .retired_at
             .is_some(),
         "cleanup must retire the earlier same-phase location"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn repointed_fixture_scopes_a_root_alias_before_source_resolution() {
+    use std::os::unix::fs::symlink;
+
+    let (cp, _tmp) = crate::cases::cp().await;
+    let temp = tempfile::tempdir().unwrap();
+    let real_root = temp.path().join("real-root");
+    let alias_root = temp.path().join("root-alias");
+    std::fs::create_dir(&real_root).unwrap();
+    symlink(&real_root, &alias_root).unwrap();
+    let source = seed_version(&cp, "/library/alias.mkv", "source").await;
+    let location = cp
+        .identity()
+        .list_file_locations_by_version(source)
+        .await
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap();
+    let aliased_path = alias_root.join("committed.mkv");
+
+    repoint_location(&cp, location.id, &aliased_path).await;
+    let location = cp
+        .identity()
+        .get_file_location(location.id)
+        .await
+        .unwrap()
+        .unwrap();
+    let selected =
+        crate::operation_source::resolve_rooted_existing_path(&cp, "test fixture", &location)
+            .await
+            .unwrap();
+
+    assert_eq!(
+        selected,
+        real_root.join("committed.mkv").canonicalize().unwrap()
     );
 }
 
@@ -812,6 +852,13 @@ async fn repoint_location(
     path: &std::path::Path,
 ) {
     tokio::fs::write(path, b"committed-bytes").await.unwrap();
+    voom_store::test_support::set_test_storage_root_path(
+        cp.pool_for_test(),
+        path.parent().unwrap(),
+    )
+    .await
+    .unwrap();
+    let relative_locator = path.file_name().unwrap().to_string_lossy();
     let location = cp
         .identity()
         .get_file_location(location_id)
@@ -820,11 +867,12 @@ async fn repoint_location(
         .unwrap();
     let mut tx = crate::cases::begin_tx(&cp.pool).await.unwrap();
     cp.identity()
-        .update_file_location_value_in_tx(
+        .update_file_location_address_in_tx(
             &mut tx,
             location_id,
             location.epoch,
-            path.display().to_string(),
+            voom_store::test_support::TEST_STORAGE_ROOT_ID,
+            voom_store::test_support::test_relative_locator(&relative_locator),
             T0,
         )
         .await
@@ -1045,6 +1093,10 @@ async fn create_sidecar_commit_result(
             &mut tx,
             NewSidecarArtifactCommit {
                 commit_record_id: commit.id,
+                storage_root_id: voom_store::test_support::TEST_STORAGE_ROOT_ID,
+                provider_relative_locator: voom_store::test_support::test_relative_locator(
+                    &commit.target_path.clone(),
+                ),
                 target_path: commit.target_path.clone(),
                 content_hash: format!("sidecar-committed-{ordinal}"),
                 size_bytes: 2048,
@@ -1148,6 +1200,8 @@ async fn create_pending_commit(
     source_version_id: FileVersionId,
     staged: &VerifiedStaging,
 ) -> voom_store::repo::media::artifacts::ArtifactCommitRecord {
+    let target_path = format!("/output/job-produced-{}.mkv", staged.handle_id.0);
+    let provider_relative_locator = voom_store::test_support::test_relative_locator(&target_path);
     let mut tx = crate::cases::begin_tx(&cp.pool).await.unwrap();
     let record = cp
         .artifacts()
@@ -1157,9 +1211,14 @@ async fn create_pending_commit(
                 artifact_handle_id: staged.handle_id,
                 source_file_version_id: source_version_id,
                 verification_id: staged.verification_id,
-                target_path: format!("/output/job-produced-{}.mkv", staged.handle_id.0),
+                target_path,
                 temp_path: None,
-                report: json!({}),
+                report: json!({
+                    "rooted_target": {
+                        "storage_root_id": voom_store::test_support::TEST_STORAGE_ROOT_ID.0,
+                        "provider_relative_locator": provider_relative_locator.as_str(),
+                    },
+                }),
                 started_at: T0,
             },
         )
@@ -1225,8 +1284,8 @@ async fn seed_version(cp: &crate::ControlPlane, path: &str, hash: &str) -> FileV
     let outcome = cp
         .record_discovered_file(
             DiscoveredFile {
-                location_kind: FileLocationKind::LocalPath,
-                location_value: path.to_owned(),
+                storage_root_id: voom_store::test_support::TEST_STORAGE_ROOT_ID,
+                provider_relative_locator: voom_store::test_support::test_relative_locator(path),
                 content_hash: hash.to_owned(),
                 size_bytes: 1024,
                 observed_at: T0,
@@ -1273,8 +1332,10 @@ async fn advance_chain_tip(
         .unwrap();
     cp.create_file_location(NewFileLocation {
         file_version_id: version.id,
-        kind: FileLocationKind::LocalPath,
-        value: format!("/output/{hash}.mkv"),
+        storage_root_id: voom_store::test_support::TEST_STORAGE_ROOT_ID,
+        provider_relative_locator: voom_store::test_support::test_relative_locator(&format!(
+            "/output/{hash}.mkv"
+        )),
         proof: None,
         observed_at: T0,
     })

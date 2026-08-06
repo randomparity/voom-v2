@@ -7,7 +7,8 @@ use time::OffsetDateTime;
 use voom_core::ids::{ArtifactCommitRecordId, ArtifactVerificationId};
 use voom_core::{
     ArtifactHandleId, ArtifactLocationId, ErrorCode, FailureClass, FileAssetId, FileLocationId,
-    FileVersionId, JobId, LeaseId, MediaSnapshotId, TicketId, VoomError, WorkerId,
+    FileVersionId, JobId, LeaseId, MediaSnapshotId, ProviderRelativeLocator, StorageRootId,
+    TicketId, VoomError, WorkerId,
 };
 
 use super::Repository;
@@ -98,6 +99,7 @@ pub struct ArtifactHandleFacts {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ArtifactExpectedFacts {
     pub source_file_version_id: Option<FileVersionId>,
+    pub source_file_location_id: Option<FileLocationId>,
     pub size_bytes: u64,
     pub checksum: String,
 }
@@ -134,6 +136,8 @@ pub struct PolicyArtifactTarget {
     pub file_version_id: FileVersionId,
     pub file_location_id: FileLocationId,
     pub media_snapshot_id: MediaSnapshotId,
+    pub storage_root_id: StorageRootId,
+    pub provider_relative_locator: ProviderRelativeLocator,
     pub path: String,
     pub size_bytes: u64,
     pub checksum: String,
@@ -347,7 +351,8 @@ pub struct CommittedTicketEvidence {
 pub struct VerifiedTicketEvidence {
     pub verification: ArtifactVerification,
     pub file_version_id: Option<FileVersionId>,
-    pub location_value: Option<String>,
+    pub storage_root_id: Option<StorageRootId>,
+    pub provider_relative_locator: Option<ProviderRelativeLocator>,
 }
 
 #[derive(Debug, Clone)]
@@ -362,6 +367,8 @@ pub struct ArtifactCommitFailure {
 pub struct NewSidecarArtifactCommit {
     pub commit_record_id: ArtifactCommitRecordId,
     pub target_path: String,
+    pub storage_root_id: StorageRootId,
+    pub provider_relative_locator: ProviderRelativeLocator,
     pub content_hash: String,
     pub size_bytes: u64,
     pub observed_at: OffsetDateTime,

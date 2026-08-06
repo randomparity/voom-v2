@@ -4,8 +4,8 @@ use voom_events::{Event, EventKind};
 use voom_store::repo::audit::events::{EventFilter, EventRepo, Page};
 use voom_store::repo::media::bundles::{BundleMemberRole, NewAssetBundle};
 use voom_store::repo::media::identity::{
-    DiscoveredFile, FileLocationKind, FileVersionRepo, IngestOutcome, MediaWorkKind,
-    NewFileVersion, NewMediaVariant, NewMediaWork, ProducedBy,
+    DiscoveredFile, FileVersionRepo, IngestOutcome, MediaWorkKind, NewFileVersion, NewMediaVariant,
+    NewMediaWork, ProducedBy,
 };
 
 use crate::cases::{begin_immediate_tx, commit_tx, count, cp};
@@ -374,8 +374,10 @@ async fn discovered_source(
     let outcome = cp
         .record_discovered_file(
             DiscoveredFile {
-                location_kind: FileLocationKind::LocalPath,
-                location_value: "/library/Movie.mkv".to_owned(),
+                storage_root_id: voom_store::test_support::TEST_STORAGE_ROOT_ID,
+                provider_relative_locator: voom_store::test_support::test_relative_locator(
+                    "/library/Movie.mkv",
+                ),
                 content_hash: "sha256:source".to_owned(),
                 size_bytes: 10,
                 observed_at: T0,

@@ -77,6 +77,34 @@ async fn create_then_get_round_trips_all_fields() {
 }
 
 #[tokio::test]
+async fn get_rejects_corrupt_enabled_value() {
+    let (repo, _tmp) = repo().await;
+    let created = repo
+        .create_library(new_library("films"), at(10))
+        .await
+        .unwrap();
+    let mut connection = repo.pool.acquire().await.unwrap();
+    sqlx::query("PRAGMA ignore_check_constraints = TRUE")
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE libraries SET enabled = 2 WHERE id = ?")
+        .bind(i64::try_from(created.id.0).unwrap())
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+    sqlx::query("PRAGMA ignore_check_constraints = FALSE")
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+    drop(connection);
+
+    let error = repo.get_library(created.id).await.unwrap_err();
+    assert_eq!(error.code(), "DB_UNREACHABLE");
+    assert!(error.to_string().contains("libraries.enabled"));
+}
+
+#[tokio::test]
 async fn duplicate_slug_is_conflict() {
     let (repo, _tmp) = repo().await;
     repo.create_library(new_library("films"), at(0))
@@ -113,6 +141,7 @@ async fn list_is_creation_ordered() {
         .unwrap()
         .into_iter()
         .map(|l| l.id)
+        .filter(|id| *id == a.id || *id == b.id)
         .collect();
     assert_eq!(ids, vec![a.id, b.id]);
 }

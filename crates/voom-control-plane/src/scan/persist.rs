@@ -6,20 +6,22 @@ use serde_json::Value;
 use sha2::Digest as _;
 use voom_core::{
     BundleId, ErrorCode, FailureClass, FileAssetId, FileLocationId, FileVersionId, MediaSnapshotId,
-    VoomError, WorkerId,
+    ProviderRelativeLocator, StorageRootId, VoomError, WorkerId,
 };
 use voom_events::payload::{
-    AssetBundleMemberAddedPayload, FileAssetCreatedPayload, FileLocationAliasedPayload,
-    FileLocationRecordedPayload, FileVersionCreatedPayload, IdentityEvidenceRecordedPayload,
+    AssetBundleMemberAddedPayload, FileAssetCreatedPayload, FileLocationRootedAliasedPayload,
+    FileLocationRootedRecordedPayload, FileVersionCreatedPayload, IdentityEvidenceRecordedPayload,
 };
 use voom_events::{Event, SubjectType};
 use voom_store::repo::{
     media::bundles::{BundleMemberRole, NewBundleMember},
     media::identity::{
-        DiscoveredFile, FileLocationKind, FileLocationRepo, FileVersionRepo, IdentityEvidenceRepo,
-        IngestOutcome, IngestRepo, NewMediaSnapshot,
+        DiscoveredFile, FileLocationRepo, FileVersionRepo, IdentityEvidenceRepo, IngestOutcome,
+        IngestRepo, NewMediaSnapshot,
     },
-    media::scan_facts::{find_live_hardlink_location_in_tx, record_scan_fact_in_tx},
+    media::scan_facts::{
+        find_live_hardlink_location_in_tx, find_live_scanned_address_in_tx, record_scan_fact_in_tx,
+    },
 };
 use voom_worker_protocol::ProbeFileResult;
 
@@ -68,7 +70,7 @@ pub struct PersistedSidecar {
 struct ObservedSidecar {
     path: PathBuf,
     role: BundleMemberRole,
-    location_value: String,
+    provider_relative_locator: ProviderRelativeLocator,
     content_hash: String,
     size_bytes: u64,
 }
@@ -182,18 +184,62 @@ pub fn verify_probe_facts(
 /// Returns [`ScanPersistError::File`] when worker probe facts drifted from
 /// the original candidate facts, and [`ScanPersistError::Store`] for durable
 /// store conflicts or database failures.
+#[cfg(test)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "test adapter preserves concise scan-persistence fixture calls"
+)]
 pub async fn persist_scanned_media_snapshot(
     control_plane: &ControlPlane,
     worker_id: WorkerId,
+    storage_root_id: StorageRootId,
+    canonical_root: &Path,
     canonical_path: &Path,
     sidecars: &[SidecarCandidate],
     candidate: &ObservedCandidateFacts,
     result: &ProbeFileResult,
 ) -> Result<PersistedScan, ScanPersistError> {
+    persist_scanned_media_snapshot_request(
+        control_plane,
+        worker_id,
+        PersistScanRequest {
+            storage_root_id,
+            canonical_root,
+            canonical_path,
+            sidecars,
+            candidate,
+            result,
+        },
+    )
+    .await
+}
+
+pub(super) struct PersistScanRequest<'a> {
+    pub storage_root_id: StorageRootId,
+    pub canonical_root: &'a Path,
+    pub canonical_path: &'a Path,
+    pub sidecars: &'a [SidecarCandidate],
+    pub candidate: &'a ObservedCandidateFacts,
+    pub result: &'a ProbeFileResult,
+}
+
+pub(super) async fn persist_scanned_media_snapshot_request(
+    control_plane: &ControlPlane,
+    worker_id: WorkerId,
+    input: PersistScanRequest<'_>,
+) -> Result<PersistedScan, ScanPersistError> {
+    let PersistScanRequest {
+        storage_root_id,
+        canonical_root,
+        canonical_path,
+        sidecars,
+        candidate,
+        result,
+    } = input;
     verify_probe_facts(candidate, result)?;
     let snapshot_payload = snapshot_with_stream_ids(&result.snapshot)?;
-    let location_value = canonical_path_value(canonical_path)?;
-    let observed_sidecars = observe_sidecars(sidecars).await?;
+    let provider_relative_locator = relative_locator(canonical_root, canonical_path)?;
+    let observed_sidecars = observe_sidecars(canonical_root, sidecars).await?;
 
     let now = control_plane.clock().now();
     let mut tx = control_plane
@@ -214,22 +260,43 @@ pub async fn persist_scanned_media_snapshot(
     // ingest a fresh asset. Either way the shared bundle/sidecar block below runs
     // against the resolved `file_asset_id`, so a hardlink path's own sidecars are
     // still attached to the owning bundle.
-    let resolved =
-        match resolve_hardlink(control_plane, &mut tx, candidate, &location_value, now).await? {
+    let resolved = match resolve_same_address(
+        &mut tx,
+        candidate,
+        storage_root_id,
+        &provider_relative_locator,
+    )
+    .await?
+    {
+        Some(existing) => existing,
+        None => match resolve_hardlink(
+            control_plane,
+            &mut tx,
+            candidate,
+            storage_root_id,
+            &provider_relative_locator,
+            now,
+        )
+        .await?
+        {
             Some(hardlink) => hardlink,
             None => {
                 ingest_new_scanned_file(
                     control_plane,
                     &mut tx,
-                    worker_id,
-                    location_value,
-                    candidate,
-                    snapshot_payload,
-                    now,
+                    NewScanIdentity {
+                        worker_id,
+                        storage_root_id,
+                        provider_relative_locator,
+                        candidate,
+                        snapshot_payload,
+                        now,
+                    },
                 )
                 .await?
             }
-        };
+        },
+    };
     let ResolvedScanIdentity {
         file_asset_id,
         file_version_id,
@@ -238,24 +305,16 @@ pub async fn persist_scanned_media_snapshot(
         hardlink,
     } = resolved;
 
-    let (bundle_id, bundle_member_role, persisted_sidecars) = if observed_sidecars.is_empty() {
-        (None, None, Vec::new())
-    } else {
-        let bundle_id = control_plane
-            .resolve_or_create_primary_bundle_in_tx(&mut tx, file_version_id, canonical_path, now)
-            .await?
-            .bundle_id;
-        let mut persisted_sidecars = Vec::with_capacity(observed_sidecars.len());
-        for sidecar in observed_sidecars {
-            persisted_sidecars
-                .push(persist_sidecar(control_plane, &mut tx, bundle_id, sidecar, now).await?);
-        }
-        (
-            Some(bundle_id),
-            Some(BundleMemberRole::PrimaryVideo.as_str().to_owned()),
-            persisted_sidecars,
-        )
-    };
+    let bundle = persist_bundle_sidecars(
+        control_plane,
+        &mut tx,
+        file_version_id,
+        canonical_path,
+        storage_root_id,
+        observed_sidecars,
+        now,
+    )
+    .await?;
 
     tx.commit()
         .await
@@ -266,10 +325,49 @@ pub async fn persist_scanned_media_snapshot(
         file_version_id,
         file_location_id,
         media_snapshot_id,
-        bundle_id,
-        bundle_member_role,
-        sidecars: persisted_sidecars,
+        bundle_id: bundle.id,
+        bundle_member_role: bundle.member_role,
+        sidecars: bundle.sidecars,
         hardlink,
+    })
+}
+
+struct PersistedBundle {
+    id: Option<BundleId>,
+    member_role: Option<String>,
+    sidecars: Vec<PersistedSidecar>,
+}
+
+async fn persist_bundle_sidecars(
+    control_plane: &ControlPlane,
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    file_version_id: FileVersionId,
+    canonical_path: &Path,
+    storage_root_id: StorageRootId,
+    observed_sidecars: Vec<ObservedSidecar>,
+    now: time::OffsetDateTime,
+) -> Result<PersistedBundle, ScanPersistError> {
+    if observed_sidecars.is_empty() {
+        return Ok(PersistedBundle {
+            id: None,
+            member_role: None,
+            sidecars: Vec::new(),
+        });
+    }
+    let bundle_id = control_plane
+        .resolve_or_create_primary_bundle_in_tx(tx, file_version_id, canonical_path, now)
+        .await?
+        .bundle_id;
+    let mut sidecars = Vec::with_capacity(observed_sidecars.len());
+    for sidecar in observed_sidecars {
+        sidecars.push(
+            persist_sidecar(control_plane, tx, bundle_id, storage_root_id, sidecar, now).await?,
+        );
+    }
+    Ok(PersistedBundle {
+        id: Some(bundle_id),
+        member_role: Some(BundleMemberRole::PrimaryVideo.as_str().to_owned()),
+        sidecars,
     })
 }
 
@@ -286,23 +384,55 @@ struct ResolvedScanIdentity {
     hardlink: bool,
 }
 
+async fn resolve_same_address(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    candidate: &ObservedCandidateFacts,
+    storage_root_id: StorageRootId,
+    provider_relative_locator: &ProviderRelativeLocator,
+) -> Result<Option<ResolvedScanIdentity>, ScanPersistError> {
+    let Some(existing) =
+        find_live_scanned_address_in_tx(tx, storage_root_id, provider_relative_locator).await?
+    else {
+        return Ok(None);
+    };
+    if existing.content_hash != candidate.content_hash
+        || existing.size_bytes != candidate.size_bytes
+    {
+        return Err(VoomError::Conflict(format!(
+            "scan address ({storage_root_id}, {}) already records different bytes",
+            provider_relative_locator.as_str()
+        ))
+        .into());
+    }
+    Ok(Some(ResolvedScanIdentity {
+        file_asset_id: existing.file_asset_id,
+        file_version_id: existing.file_version_id,
+        file_location_id: existing.file_location_id,
+        media_snapshot_id: None,
+        hardlink: false,
+    }))
+}
+
 /// Resolve a discovered candidate to an existing physical file via matching
 /// `(dev, ino)` inode facts. Returns `Some` when the candidate is a hardlink to
 /// an already-ingested file whose content still matches; `None` when there is no
 /// inode data, no `(dev, ino)` match at a different path, or a match whose
-/// content differs (a recycled inode or an in-place edit — treated as a fresh
-/// ingest).
+/// content differs (a recycled inode at a different address). Same-address
+/// edits are rejected before hardlink resolution.
 async fn resolve_hardlink(
     control_plane: &ControlPlane,
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     candidate: &ObservedCandidateFacts,
-    location_value: &str,
+    storage_root_id: StorageRootId,
+    provider_relative_locator: &ProviderRelativeLocator,
     now: time::OffsetDateTime,
 ) -> Result<Option<ResolvedScanIdentity>, ScanPersistError> {
     let (Some(dev), Some(ino)) = (candidate.dev, candidate.ino) else {
         return Ok(None);
     };
-    let Some(matched) = find_live_hardlink_location_in_tx(tx, dev, ino, location_value).await?
+    let Some(matched) =
+        find_live_hardlink_location_in_tx(tx, dev, ino, storage_root_id, provider_relative_locator)
+            .await?
     else {
         return Ok(None);
     };
@@ -325,7 +455,13 @@ async fn resolve_hardlink(
         })?;
     let new_location_id = control_plane
         .identity
-        .attach_local_hardlink_location_in_tx(tx, matched.file_version_id, location_value, now)
+        .attach_local_hardlink_location_in_tx(
+            tx,
+            matched.file_version_id,
+            storage_root_id,
+            provider_relative_locator,
+            now,
+        )
         .await?;
     record_scan_fact(tx, new_location_id, candidate, now).await?;
     append_event(
@@ -334,11 +470,11 @@ async fn resolve_hardlink(
         SubjectType::FileLocation,
         Some(new_location_id.0),
         now,
-        Event::FileLocationAliased(FileLocationAliasedPayload {
+        Event::FileLocationRootedAliased(FileLocationRootedAliasedPayload {
             file_location_id: new_location_id,
             file_version_id: matched.file_version_id,
-            kind: FileLocationKind::LocalPath.as_str().to_owned(),
-            value: location_value.to_owned(),
+            storage_root_id,
+            provider_relative_locator: provider_relative_locator.clone(),
         }),
     )
     .await?;
@@ -356,19 +492,23 @@ async fn resolve_hardlink(
 async fn ingest_new_scanned_file(
     control_plane: &ControlPlane,
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-    worker_id: WorkerId,
-    location_value: String,
-    candidate: &ObservedCandidateFacts,
-    snapshot_payload: Value,
-    now: time::OffsetDateTime,
+    input: NewScanIdentity<'_>,
 ) -> Result<ResolvedScanIdentity, ScanPersistError> {
+    let NewScanIdentity {
+        worker_id,
+        storage_root_id,
+        provider_relative_locator,
+        candidate,
+        snapshot_payload,
+        now,
+    } = input;
     let outcome = control_plane
         .identity
         .record_discovered_file_in_tx(
             tx,
             DiscoveredFile {
-                location_kind: FileLocationKind::LocalPath,
-                location_value,
+                storage_root_id,
+                provider_relative_locator,
                 content_hash: candidate.content_hash.clone(),
                 size_bytes: candidate.size_bytes,
                 observed_at: now,
@@ -398,6 +538,15 @@ async fn ingest_new_scanned_file(
         media_snapshot_id: Some(snapshot.id),
         hardlink: false,
     })
+}
+
+struct NewScanIdentity<'a> {
+    worker_id: WorkerId,
+    storage_root_id: StorageRootId,
+    provider_relative_locator: ProviderRelativeLocator,
+    candidate: &'a ObservedCandidateFacts,
+    snapshot_payload: Value,
+    now: time::OffsetDateTime,
 }
 
 /// Record the candidate's inode facts against the given location, when the
@@ -450,13 +599,16 @@ pub(crate) fn snapshot_with_stream_ids(snapshot: &Value) -> Result<Value, VoomEr
 }
 
 async fn observe_sidecars(
+    canonical_root: &Path,
     sidecars: &[SidecarCandidate],
 ) -> Result<Vec<ObservedSidecar>, VoomError> {
     let mut observed = Vec::with_capacity(sidecars.len());
     for sidecar in sidecars {
-        let bytes = tokio::fs::read(&sidecar.path).await.map_err(|err| {
-            VoomError::Config(format!("sidecar read {}: {err}", sidecar.path.display()))
-        })?;
+        let bytes = super::hash::read_candidate_bytes_in_root(canonical_root, &sidecar.path)
+            .await
+            .map_err(|err| {
+                VoomError::Config(format!("sidecar read {}: {err}", sidecar.path.display()))
+            })?;
         let size_bytes = u64::try_from(bytes.len()).map_err(|_| {
             VoomError::Internal(format!("sidecar too large: {}", sidecar.path.display()))
         })?;
@@ -464,7 +616,7 @@ async fn observe_sidecars(
         observed.push(ObservedSidecar {
             path: sidecar.path.clone(),
             role: role_for_sidecar_kind(sidecar.kind),
-            location_value: canonical_path_value(&sidecar.path)?,
+            provider_relative_locator: relative_locator(canonical_root, &sidecar.path)?,
             content_hash,
             size_bytes,
         });
@@ -476,16 +628,43 @@ async fn persist_sidecar(
     control_plane: &ControlPlane,
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     bundle_id: BundleId,
+    storage_root_id: StorageRootId,
     sidecar: ObservedSidecar,
     observed_at: time::OffsetDateTime,
 ) -> Result<PersistedSidecar, VoomError> {
+    if let Some(existing) =
+        find_live_scanned_address_in_tx(tx, storage_root_id, &sidecar.provider_relative_locator)
+            .await?
+    {
+        if existing.content_hash != sidecar.content_hash
+            || existing.size_bytes != sidecar.size_bytes
+        {
+            return Err(VoomError::Conflict(format!(
+                "scan sidecar address ({storage_root_id}, {}) already records different bytes",
+                sidecar.provider_relative_locator.as_str()
+            )));
+        }
+        return require_sidecar_membership(
+            control_plane,
+            tx,
+            bundle_id,
+            sidecar,
+            SidecarIdentity {
+                file_asset_id: existing.file_asset_id,
+                file_version_id: existing.file_version_id,
+                file_location_id: existing.file_location_id,
+                observed_at,
+            },
+        )
+        .await;
+    }
     let outcome = control_plane
         .identity
         .record_discovered_file_in_tx(
             tx,
             DiscoveredFile {
-                location_kind: FileLocationKind::LocalPath,
-                location_value: sidecar.location_value.clone(),
+                storage_root_id,
+                provider_relative_locator: sidecar.provider_relative_locator.clone(),
                 content_hash: sidecar.content_hash.clone(),
                 size_bytes: sidecar.size_bytes,
                 observed_at,
@@ -496,6 +675,34 @@ async fn persist_sidecar(
         .await?;
     let IngestedIds(file_asset_id, file_version_id, file_location_id) =
         emit_ingest_events(control_plane, tx, &outcome, observed_at).await?;
+    require_sidecar_membership(
+        control_plane,
+        tx,
+        bundle_id,
+        sidecar,
+        SidecarIdentity {
+            file_asset_id,
+            file_version_id,
+            file_location_id,
+            observed_at,
+        },
+    )
+    .await
+}
+
+async fn require_sidecar_membership(
+    control_plane: &ControlPlane,
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    bundle_id: BundleId,
+    sidecar: ObservedSidecar,
+    identity: SidecarIdentity,
+) -> Result<PersistedSidecar, VoomError> {
+    let SidecarIdentity {
+        file_asset_id,
+        file_version_id,
+        file_location_id,
+        observed_at,
+    } = identity;
     let role = sidecar.role;
     if let Some(member) = control_plane
         .bundles
@@ -533,6 +740,13 @@ async fn persist_sidecar(
         file_location_id,
         bundle_id,
     ))
+}
+
+struct SidecarIdentity {
+    file_asset_id: FileAssetId,
+    file_version_id: FileVersionId,
+    file_location_id: FileLocationId,
+    observed_at: time::OffsetDateTime,
 }
 
 fn persisted_sidecar_report(
@@ -653,17 +867,18 @@ async fn emit_ingest_events(
                         "scan persist: file_location {file_location_id} vanished"
                     ))
                 })?;
+            let (storage_root_id, provider_relative_locator) = location.rooted_address()?;
             append_event(
                 &control_plane.events,
                 tx,
                 SubjectType::FileLocation,
                 Some(location.id.0),
                 observed_at,
-                Event::FileLocationRecorded(FileLocationRecordedPayload {
+                Event::FileLocationRootedRecorded(FileLocationRootedRecordedPayload {
                     file_location_id: location.id,
                     file_version_id: location.file_version_id,
-                    kind: location.kind.as_str().to_owned(),
-                    value: location.value,
+                    storage_root_id,
+                    provider_relative_locator: provider_relative_locator.clone(),
                 }),
             )
             .await?;
@@ -716,17 +931,18 @@ async fn emit_ingest_events(
                         "scan persist: alias location {new_file_location_id} vanished"
                     ))
                 })?;
+            let (storage_root_id, provider_relative_locator) = location.rooted_address()?;
             append_event(
                 &control_plane.events,
                 tx,
                 SubjectType::FileLocation,
                 Some(location.id.0),
                 observed_at,
-                Event::FileLocationAliased(FileLocationAliasedPayload {
+                Event::FileLocationRootedAliased(FileLocationRootedAliasedPayload {
                     file_location_id: location.id,
                     file_version_id: *file_version_id,
-                    kind: location.kind.as_str().to_owned(),
-                    value: location.value,
+                    storage_root_id,
+                    provider_relative_locator: provider_relative_locator.clone(),
                 }),
             )
             .await?;
@@ -748,13 +964,21 @@ async fn emit_ingest_events(
     }
 }
 
-fn canonical_path_value(path: &Path) -> Result<String, VoomError> {
-    path.to_str().map(str::to_owned).ok_or_else(|| {
+fn relative_locator(root: &Path, path: &Path) -> Result<ProviderRelativeLocator, VoomError> {
+    let relative = path.strip_prefix(root).map_err(|_| {
+        VoomError::Config(format!(
+            "scan path {} escapes storage root {}",
+            path.display(),
+            root.display()
+        ))
+    })?;
+    let value = relative.to_str().ok_or_else(|| {
         VoomError::Config(format!(
             "scan path is not valid UTF-8 and cannot be stored losslessly: {}",
             path.display()
         ))
-    })
+    })?;
+    ProviderRelativeLocator::new(value.to_owned())
 }
 
 #[cfg(test)]

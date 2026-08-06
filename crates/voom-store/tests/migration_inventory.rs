@@ -17,6 +17,8 @@ use std::path::PathBuf;
 
 use serde_json::{Value as JsonValue, json};
 use sqlx::migrate::Migrator;
+use voom_events::Event;
+use voom_store::repo::audit::events::{EventFilter, EventRepo, Page, SqliteEventRepo};
 use voom_store::test_support::{create_uninitialized_pool, embedded_migrator, sqlite_url_for};
 use voom_test_support::TempDatabase;
 
@@ -54,6 +56,7 @@ const EXPECTED_MIGRATION_FILES: &[&str] = &[
     "0031_backend_neutral_accelerator_claims.sql",
     "0032_vaapi_video_acceleration.sql",
     "0033_remote_acquire_replay_shape.sql",
+    "0034_node_owned_roots.sql",
 ];
 
 fn workspace_root() -> PathBuf {
@@ -132,6 +135,18 @@ fn every_migrations_file_is_registered_in_migrator() {
     );
 }
 
+type RootRow = (
+    i64,
+    Option<i64>,
+    String,
+    String,
+    String,
+    i64,
+    Option<i64>,
+    Option<i64>,
+    Option<i64>,
+);
+
 #[tokio::test]
 async fn remote_acquire_replay_shape_migration_canonicalizes_only_missing_decision_ids() {
     let tmp = TempDatabase::new().unwrap();
@@ -161,6 +176,770 @@ async fn remote_acquire_replay_shape_migration_canonicalizes_only_missing_decisi
         .unwrap();
         assert_eq!(after, before, "migration must not rewrite {key}");
     }
+}
+
+#[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the migration regression keeps its ordered before/after integrity proof together"
+)]
+async fn node_owned_roots_migration_quarantines_legacy_paths() {
+    let migration_path = migrations_dir().join("0034_node_owned_roots.sql");
+    assert!(
+        migration_path.is_file(),
+        "{} must exist before the upgrade path can be exercised",
+        migration_path.display()
+    );
+
+    let tmp = TempDatabase::new().unwrap();
+    let url = sqlite_url_for(tmp.path());
+    let pool = create_uninitialized_pool(&url).await.unwrap();
+    migrator_through(33).run(&pool).await.unwrap();
+    let seed = seed_legacy_root_and_location(&pool).await;
+    seed_location_foreign_key_children(&pool, &seed).await;
+    let child_ids_before = location_child_rowids(&pool).await;
+    let location_ids_before: Vec<i64> =
+        sqlx::query_scalar("SELECT id FROM file_locations ORDER BY id")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+
+    embedded_migrator().run(&pool).await.unwrap();
+
+    let root: RootRow = sqlx::query_as(
+        "SELECT id, owner_node_id, provider_kind, provider_locator, state, enabled, \
+             default_output_root_id, default_staging_root_id, default_backup_root_id \
+             FROM library_roots WHERE id = ?",
+    )
+    .bind(seed.root)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        root,
+        (
+            seed.root,
+            None,
+            "local_filesystem".to_owned(),
+            "/legacy/library".to_owned(),
+            "unassigned".to_owned(),
+            0,
+            None,
+            None,
+            None,
+        )
+    );
+
+    let location: (
+        i64,
+        String,
+        Option<i64>,
+        Option<String>,
+        String,
+        String,
+        i64,
+    ) = sqlx::query_as(
+        "SELECT id, address_state, storage_root_id, provider_relative_locator, \
+             legacy_kind, legacy_locator, epoch FROM file_locations WHERE id = ?",
+    )
+    .bind(seed.location)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        location,
+        (
+            seed.location,
+            "unassigned_legacy".to_owned(),
+            None,
+            None,
+            "local_path".to_owned(),
+            "/legacy/library/movie.mkv".to_owned(),
+            7,
+        )
+    );
+
+    let retired_location: (
+        String,
+        String,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        i64,
+    ) = sqlx::query_as(
+        "SELECT address_state, legacy_kind, proof_kind, proof_value, retired_at, epoch \
+         FROM file_locations WHERE id = ?",
+    )
+    .bind(seed.retired_location)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        retired_location,
+        (
+            "unassigned_legacy".to_owned(),
+            "historical".to_owned(),
+            Some("file_id_generation".to_owned()),
+            Some("11:12:6".to_owned()),
+            Some("2026-08-04T00:01:00Z".to_owned()),
+            9,
+        )
+    );
+
+    let scan_location_id: i64 = sqlx::query_scalar("SELECT file_location_id FROM scan_file_facts")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(scan_location_id, seed.location);
+
+    let location_ids_after: Vec<i64> =
+        sqlx::query_scalar("SELECT id FROM file_locations ORDER BY id")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert_eq!(location_ids_after, location_ids_before);
+    assert_eq!(location_child_rowids(&pool).await, child_ids_before);
+    assert_seeded_location_children(&pool).await;
+    let lineage: String = sqlx::query_scalar(
+        "SELECT source_lineage FROM artifact_handles \
+         WHERE file_version_id = ? AND source_lineage IS NOT NULL",
+    )
+    .bind(seed.file_version)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let lineage: serde_json::Value = serde_json::from_str(&lineage).unwrap();
+    assert_eq!(
+        lineage.get("source_file_location_id"),
+        Some(&json!(seed.location))
+    );
+    assert!(lineage.get("source_location_id").is_none());
+    assert_post_root_migration_integrity(&pool, &seed).await;
+}
+
+#[tokio::test]
+async fn node_owned_roots_migration_preserves_and_decodes_legacy_location_events() {
+    let tmp = TempDatabase::new().unwrap();
+    let url = sqlite_url_for(tmp.path());
+    let pool = create_uninitialized_pool(&url).await.unwrap();
+    migrator_through(33).run(&pool).await.unwrap();
+    let events = [
+        (
+            "file_location.recorded",
+            json!({
+                "file_location_id": 11,
+                "file_version_id": 21,
+                "kind": "local_path",
+                "value": "/legacy/recorded.mkv"
+            }),
+        ),
+        (
+            "file_location.aliased",
+            json!({
+                "file_location_id": 12,
+                "file_version_id": 21,
+                "kind": "local_path",
+                "value": "/legacy/alias.mkv"
+            }),
+        ),
+        (
+            "file_location.recorded_by_move",
+            json!({
+                "retired_file_location_id": 12,
+                "new_file_location_id": 13,
+                "file_version_id": 21,
+                "kind": "local_path",
+                "value": "/legacy/moved.mkv",
+                "observed_at": "2026-08-04T00:00:00Z"
+            }),
+        ),
+    ];
+    for (kind, payload) in events {
+        sqlx::query(
+            "INSERT INTO events \
+             (occurred_at, kind, subject_type, subject_id, trace_id, payload) \
+             VALUES ('2026-08-04T00:00:00Z', ?, 'file_location', 11, NULL, ?)",
+        )
+        .bind(kind)
+        .bind(payload.to_string())
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+    let before: Vec<(i64, String, String)> = sqlx::query_as(
+        "SELECT event_id, kind, payload FROM events \
+         WHERE kind LIKE 'file_location.%' ORDER BY event_id",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+
+    embedded_migrator().run(&pool).await.unwrap();
+
+    let after: Vec<(i64, String, String)> = sqlx::query_as(
+        "SELECT event_id, kind, payload FROM events \
+         WHERE kind LIKE 'file_location.%' ORDER BY event_id",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        after, before,
+        "append-only event facts must not be rewritten"
+    );
+    let page = SqliteEventRepo::new(pool)
+        .list(
+            EventFilter::default(),
+            Page {
+                limit: 100,
+                cursor: None,
+            },
+        )
+        .await
+        .unwrap();
+    let decoded: Vec<&Event> = page
+        .items
+        .iter()
+        .map(|row| &row.envelope.payload)
+        .filter(|event| event.kind().as_str().starts_with("file_location."))
+        .collect();
+    assert!(matches!(decoded[0], Event::FileLocationRecorded(_)));
+    assert!(matches!(decoded[1], Event::FileLocationAliased(_)));
+    assert!(matches!(decoded[2], Event::FileLocationRecordedByMove(_)));
+}
+
+#[tokio::test]
+async fn node_owned_roots_migration_rejects_ambiguous_artifact_lineage_keys() {
+    let tmp = TempDatabase::new().unwrap();
+    let url = sqlite_url_for(tmp.path());
+    let pool = create_uninitialized_pool(&url).await.unwrap();
+    migrator_through(33).run(&pool).await.unwrap();
+    sqlx::query(
+        "INSERT INTO artifact_handles \
+         (privacy_class, durability_class, allowed_access_modes, mutability, source_lineage, \
+          created_at) \
+         VALUES ('internal', 'staging', '[\"read\"]', 'immutable', \
+                 '{\"source_location_id\":1,\"source_file_location_id\":2}', \
+                 '2026-08-04T00:00:00Z')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let error = embedded_migrator().run(&pool).await.unwrap_err();
+
+    assert!(
+        error.to_string().contains("CHECK constraint failed"),
+        "unexpected migration error: {error}"
+    );
+    let legacy_column_count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM pragma_table_info('library_roots') WHERE name = 'canonical_path'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        legacy_column_count, 1,
+        "guard must fail before table rebuild"
+    );
+}
+
+struct LegacyRootLocationSeed {
+    root: i64,
+    file_version: i64,
+    location: i64,
+    retired_location: i64,
+}
+
+async fn seed_legacy_root_and_location(pool: &sqlx::SqlitePool) -> LegacyRootLocationSeed {
+    let now = "2026-08-04T00:00:00Z";
+    let library_id = sqlx::query(
+        "INSERT INTO libraries \
+         (slug, display_name, media_kind, enabled, created_at, updated_at) \
+         VALUES ('legacy', 'Legacy', 'movie', 1, ?, ?)",
+    )
+    .bind(now)
+    .bind(now)
+    .execute(pool)
+    .await
+    .unwrap()
+    .last_insert_rowid();
+    let root_id = sqlx::query(
+        "INSERT INTO library_roots \
+         (library_id, root_kind, canonical_path, display_path, scan_mode, symlink_policy, \
+          hidden_file_policy, default_output_root, default_staging_root, default_backup_root, \
+          enabled, created_at, updated_at) \
+         VALUES (?, 'local_path', '/legacy/library', '/legacy/library', 'manual_recursive', \
+                 'reject', 'ignore', '/legacy/output', '/legacy/staging', '/legacy/backup', \
+                 1, ?, ?)",
+    )
+    .bind(library_id)
+    .bind(now)
+    .bind(now)
+    .execute(pool)
+    .await
+    .unwrap()
+    .last_insert_rowid();
+    let file_asset_id = sqlx::query("INSERT INTO file_assets (created_at) VALUES (?)")
+        .bind(now)
+        .execute(pool)
+        .await
+        .unwrap()
+        .last_insert_rowid();
+    let file_version_id = sqlx::query(
+        "INSERT INTO file_versions \
+         (file_asset_id, content_hash, size_bytes, produced_by, created_at) \
+         VALUES (?, 'blake3:legacy', 7, 'external_observed', ?)",
+    )
+    .bind(file_asset_id)
+    .bind(now)
+    .execute(pool)
+    .await
+    .unwrap()
+    .last_insert_rowid();
+    let location_id = sqlx::query(
+        "INSERT INTO file_locations \
+         (file_version_id, kind, value, observed_at, epoch) \
+         VALUES (?, 'local_path', '/legacy/library/movie.mkv', ?, 7)",
+    )
+    .bind(file_version_id)
+    .bind(now)
+    .execute(pool)
+    .await
+    .unwrap()
+    .last_insert_rowid();
+    let retired_location_id = sqlx::query(
+        "INSERT INTO file_locations \
+         (file_version_id, kind, value, proof_kind, proof_value, observed_at, retired_at, epoch) \
+         VALUES (?, 'historical', '/legacy/library/old-name.mkv', 'file_id_generation', \
+                 '11:12:6', ?, '2026-08-04T00:01:00Z', 9)",
+    )
+    .bind(file_version_id)
+    .bind(now)
+    .execute(pool)
+    .await
+    .unwrap()
+    .last_insert_rowid();
+    sqlx::query(
+        "INSERT INTO scan_file_facts (file_location_id, dev, ino, nlink, observed_at) \
+         VALUES (?, 11, 12, 2, ?)",
+    )
+    .bind(location_id)
+    .bind(now)
+    .execute(pool)
+    .await
+    .unwrap();
+    LegacyRootLocationSeed {
+        root: root_id,
+        file_version: file_version_id,
+        location: location_id,
+        retired_location: retired_location_id,
+    }
+}
+
+async fn seed_location_foreign_key_children(
+    pool: &sqlx::SqlitePool,
+    seed: &LegacyRootLocationSeed,
+) {
+    seed_location_lease_and_commit_scope(pool, seed.location).await;
+    seed_policy_location_inputs(pool, seed.location).await;
+    let artifact = seed_artifact_commit_location(pool, seed).await;
+    seed_workflow_location_summary(pool, seed, artifact).await;
+    seed_audio_operation_locations(pool).await;
+}
+
+async fn seed_location_lease_and_commit_scope(pool: &sqlx::SqlitePool, location_id: i64) {
+    let now = "2026-08-04T00:00:00Z";
+    sqlx::query(
+        "INSERT INTO asset_use_leases \
+         (kind, scope_location_id, issuer_kind, issuer_ref, blocking_mode, ttl_bound, \
+          acquired_at, clock_source) \
+         VALUES ('playback', ?, 'user', 'migration', 'advisory', 0, ?, 'control_plane')",
+    )
+    .bind(location_id)
+    .bind(now)
+    .execute(pool)
+    .await
+    .unwrap();
+    let intent_id = sqlx::query(
+        "INSERT INTO commit_intents \
+         (target, closure_initial, accepted_evidence_ids, state, started_at) \
+         VALUES ('{}', '{}', '[]', 'pending', ?)",
+    )
+    .bind(now)
+    .execute(pool)
+    .await
+    .unwrap()
+    .last_insert_rowid();
+    sqlx::query(
+        "INSERT INTO commit_intent_scope_members (commit_intent_id, scope_location_id) \
+         VALUES (?, ?)",
+    )
+    .bind(intent_id)
+    .bind(location_id)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+async fn seed_policy_location_inputs(pool: &sqlx::SqlitePool, location_id: i64) {
+    let now = "2026-08-04T00:00:00Z";
+    let set_id = sqlx::query(
+        "INSERT INTO policy_input_sets \
+         (slug, display_name, schema_version, source_kind, created_at) \
+         VALUES ('migration-location', 'Migration location', 1, 'test', ?)",
+    )
+    .bind(now)
+    .execute(pool)
+    .await
+    .unwrap()
+    .last_insert_rowid();
+    sqlx::query(
+        "INSERT INTO policy_media_snapshot_inputs \
+         (policy_input_set_id, ordinal, file_location_id, stream_summary) \
+         VALUES (?, 0, ?, '{}')",
+    )
+    .bind(set_id)
+    .bind(location_id)
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO policy_identity_evidence_inputs \
+         (policy_input_set_id, ordinal, file_location_id, assertion_type, provider, \
+          provider_version, confidence, provenance, observed_at) \
+         VALUES (?, 0, ?, 'hash_match', 'migration', '1', 1.0, '{}', ?)",
+    )
+    .bind(set_id)
+    .bind(location_id)
+    .bind(now)
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO policy_bundle_target_inputs \
+         (policy_input_set_id, ordinal, file_location_id, role, desired_state, \
+          artifact_expectation) VALUES (?, 0, ?, 'primary_video', 'allowed', '{}')",
+    )
+    .bind(set_id)
+    .bind(location_id)
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO policy_quality_profile_selections \
+         (policy_input_set_id, ordinal, file_location_id, profile_name, profile_version, \
+          dimension_weights) VALUES (?, 0, ?, 'migration', '1', '{}')",
+    )
+    .bind(set_id)
+    .bind(location_id)
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO policy_issue_inputs \
+         (policy_input_set_id, ordinal, file_location_id, kind, severity, priority, state, \
+          reason, provenance) \
+         VALUES (?, 0, ?, 'migration', 'low', 'normal', 'open', 'migration', '{}')",
+    )
+    .bind(set_id)
+    .bind(location_id)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+struct ArtifactCommitSeed {
+    handle_id: i64,
+    verification_id: i64,
+}
+
+async fn seed_artifact_commit_location(
+    pool: &sqlx::SqlitePool,
+    seed: &LegacyRootLocationSeed,
+) -> ArtifactCommitSeed {
+    let now = "2026-08-04T00:00:00Z";
+    let worker_id = sqlx::query(
+        "INSERT INTO workers (name, kind, status, registered_at, last_seen_at) \
+         VALUES ('migration-worker-418', 'local', 'active', ?, ?)",
+    )
+    .bind(now)
+    .bind(now)
+    .execute(pool)
+    .await
+    .unwrap()
+    .last_insert_rowid();
+    let handle_id = sqlx::query(
+        "INSERT INTO artifact_handles \
+         (size_bytes, checksum, privacy_class, durability_class, allowed_access_modes, \
+          mutability, source_lineage, created_at, file_version_id) \
+         VALUES (7, 'blake3:legacy', 'internal', 'durable', '[\"read\"]', \
+                 'immutable', json_object('source_location_id', ?), ?, ?)",
+    )
+    .bind(seed.location)
+    .bind(now)
+    .bind(seed.file_version)
+    .execute(pool)
+    .await
+    .unwrap()
+    .last_insert_rowid();
+    let artifact_location_id = sqlx::query(
+        "INSERT INTO artifact_locations \
+         (artifact_handle_id, kind, value, observed_at) \
+         VALUES (?, 'staging', '/legacy/staging/movie.mkv', ?)",
+    )
+    .bind(handle_id)
+    .bind(now)
+    .execute(pool)
+    .await
+    .unwrap()
+    .last_insert_rowid();
+    let verification_id = sqlx::query(
+        "INSERT INTO artifact_verifications \
+         (artifact_handle_id, artifact_location_id, path, worker_id, status, \
+          expected_size_bytes, expected_checksum, observed_size_bytes, observed_checksum, \
+          report, started_at, finished_at) \
+         VALUES (?, ?, '/legacy/staging/movie.mkv', ?, 'succeeded', 7, 'blake3:legacy', \
+                 7, 'blake3:legacy', '{}', ?, ?)",
+    )
+    .bind(handle_id)
+    .bind(artifact_location_id)
+    .bind(worker_id)
+    .bind(now)
+    .bind(now)
+    .execute(pool)
+    .await
+    .unwrap()
+    .last_insert_rowid();
+    sqlx::query(
+        "INSERT INTO artifact_commit_records \
+         (artifact_handle_id, source_file_version_id, verification_id, target_path, \
+          result_file_version_id, result_file_location_id, state, report, started_at, \
+          promotion_started_at, finished_at) \
+         VALUES (?, ?, ?, '/legacy/library/movie.mkv', ?, ?, 'committed', '{}', ?, ?, ?)",
+    )
+    .bind(handle_id)
+    .bind(seed.file_version)
+    .bind(verification_id)
+    .bind(seed.file_version)
+    .bind(seed.location)
+    .bind(now)
+    .bind(now)
+    .bind(now)
+    .execute(pool)
+    .await
+    .unwrap();
+    ArtifactCommitSeed {
+        handle_id,
+        verification_id,
+    }
+}
+
+async fn seed_workflow_location_summary(
+    pool: &sqlx::SqlitePool,
+    seed: &LegacyRootLocationSeed,
+    artifact: ArtifactCommitSeed,
+) {
+    let now = "2026-08-04T00:00:00Z";
+    let snapshot_id = sqlx::query(
+        "INSERT INTO media_snapshots (file_version_id, probed_at, payload) VALUES (?, ?, '{}')",
+    )
+    .bind(seed.file_version)
+    .bind(now)
+    .execute(pool)
+    .await
+    .unwrap()
+    .last_insert_rowid();
+    let job_id = sqlx::query(
+        "INSERT INTO jobs (kind, state, created_at, updated_at) \
+         VALUES ('migration', 'succeeded', ?, ?)",
+    )
+    .bind(now)
+    .bind(now)
+    .execute(pool)
+    .await
+    .unwrap()
+    .last_insert_rowid();
+    sqlx::query(
+        "INSERT INTO workflow_file_phase_summaries \
+         (job_id, phase_ordinal, branch_id, ticket_ids, produced_file_version_id, \
+          produced_file_location_id, artifact_handle_id, artifact_verification_id, \
+          reprobe_snapshot_id, outcome, created_at) \
+         VALUES (?, 0, 'migration', '[]', ?, ?, ?, ?, ?, 'verified', ?)",
+    )
+    .bind(job_id)
+    .bind(seed.file_version)
+    .bind(seed.location)
+    .bind(artifact.handle_id)
+    .bind(artifact.verification_id)
+    .bind(snapshot_id)
+    .bind(now)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+async fn seed_audio_operation_locations(pool: &sqlx::SqlitePool) {
+    let (asset_id, versions, locations, snapshots) = seed_synthesis_versions(pool).await;
+    let bundle_id = seed_audio_bundle(pool, asset_id).await;
+    let operation_id = sqlx::query(
+        "INSERT INTO audio_extract_operations \
+         (operation_key, source_file_version_id, source_bundle_id, source_media_snapshot_id, \
+          state, created_at) VALUES ('migration-extract', ?, ?, ?, 'planned', \
+                                    '2026-08-04T00:00:00Z')",
+    )
+    .bind(versions[0])
+    .bind(bundle_id.0)
+    .bind(snapshots[0])
+    .execute(pool)
+    .await
+    .unwrap()
+    .last_insert_rowid();
+    sqlx::query(
+        "INSERT INTO audio_extract_operation_outputs \
+         (operation_id, ordinal, source_snapshot_stream_id, source_provider_stream_index, \
+          bundle_role, target_path, result_file_asset_id, result_file_version_id, \
+          result_file_location_id, result_media_snapshot_id, bundle_member_id) \
+         VALUES (?, 0, 'audio:0', 0, 'external_audio', '/media/extract.mka', ?, ?, ?, ?, ?)",
+    )
+    .bind(operation_id)
+    .bind(asset_id)
+    .bind(versions[1])
+    .bind(locations[1])
+    .bind(snapshots[1])
+    .bind(bundle_id.1)
+    .execute(pool)
+    .await
+    .unwrap();
+    insert_synthesis_operation(
+        pool,
+        SynthesisOperationSeed {
+            operation_key: "migration-synthesis",
+            target_path: "/media/synthesis.mkv",
+            source_version_id: versions[1],
+            source_snapshot_id: snapshots[1],
+            result_asset_id: asset_id,
+            result_version_id: versions[2],
+            result_location_id: locations[2],
+            result_snapshot_id: snapshots[2],
+        },
+    )
+    .await;
+}
+
+async fn seed_audio_bundle(pool: &sqlx::SqlitePool, asset_id: i64) -> (i64, i64) {
+    let now = "2026-08-04T00:00:00Z";
+    let work_id = sqlx::query(
+        "INSERT INTO media_works (kind, display_title, created_at) \
+         VALUES ('movie', 'Migration', ?)",
+    )
+    .bind(now)
+    .execute(pool)
+    .await
+    .unwrap()
+    .last_insert_rowid();
+    let variant_id = sqlx::query(
+        "INSERT INTO media_variants (media_work_id, label, created_at) VALUES (?, 'main', ?)",
+    )
+    .bind(work_id)
+    .bind(now)
+    .execute(pool)
+    .await
+    .unwrap()
+    .last_insert_rowid();
+    let bundle_id = sqlx::query(
+        "INSERT INTO asset_bundles (media_variant_id, display_name, created_at) \
+         VALUES (?, 'Migration', ?)",
+    )
+    .bind(variant_id)
+    .bind(now)
+    .execute(pool)
+    .await
+    .unwrap()
+    .last_insert_rowid();
+    let member_id = sqlx::query(
+        "INSERT INTO asset_bundle_members (bundle_id, file_asset_id, role) \
+         VALUES (?, ?, 'primary_video')",
+    )
+    .bind(bundle_id)
+    .bind(asset_id)
+    .execute(pool)
+    .await
+    .unwrap()
+    .last_insert_rowid();
+    (bundle_id, member_id)
+}
+
+async fn assert_seeded_location_children(pool: &sqlx::SqlitePool) {
+    for table in location_child_tables() {
+        let query = format!("SELECT count(*) FROM {table}");
+        let count: i64 = sqlx::query_scalar(&query).fetch_one(pool).await.unwrap();
+        assert!(count > 0, "{table} seed was not preserved");
+    }
+}
+
+async fn location_child_rowids(pool: &sqlx::SqlitePool) -> Vec<(String, Vec<i64>)> {
+    let mut snapshot = Vec::new();
+    for table in location_child_tables() {
+        let query = format!("SELECT rowid FROM {table} ORDER BY rowid");
+        let rowids = sqlx::query_scalar(&query).fetch_all(pool).await.unwrap();
+        snapshot.push((table.to_owned(), rowids));
+    }
+    snapshot
+}
+
+fn location_child_tables() -> [&'static str; 12] {
+    [
+        "scan_file_facts",
+        "asset_use_leases",
+        "commit_intent_scope_members",
+        "policy_media_snapshot_inputs",
+        "policy_identity_evidence_inputs",
+        "policy_bundle_target_inputs",
+        "policy_quality_profile_selections",
+        "policy_issue_inputs",
+        "artifact_commit_records",
+        "workflow_file_phase_summaries",
+        "audio_extract_operation_outputs",
+        "audio_synthesis_operations",
+    ]
+}
+
+async fn assert_post_root_migration_integrity(
+    pool: &sqlx::SqlitePool,
+    seed: &LegacyRootLocationSeed,
+) {
+    let violations: Vec<(String, i64, String, i64)> = sqlx::query_as("PRAGMA foreign_key_check")
+        .fetch_all(pool)
+        .await
+        .unwrap();
+    assert!(violations.is_empty(), "{violations:?}");
+
+    let old_references: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM sqlite_schema \
+         WHERE sql LIKE '%library_roots_old%' OR sql LIKE '%file_locations_old%'",
+    )
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    assert_eq!(old_references, 0);
+
+    let foreign_keys_enabled: i64 = sqlx::query_scalar("PRAGMA foreign_keys")
+        .fetch_one(pool)
+        .await
+        .unwrap();
+    assert_eq!(foreign_keys_enabled, 1);
+    let error = sqlx::query(
+        "INSERT INTO file_locations \
+         (file_version_id, address_state, storage_root_id, provider_relative_locator, \
+          observed_at) VALUES (?, 'rooted', 9223372036854775807, 'movie.mkv', \
+                               '2026-08-04T00:00:00Z')",
+    )
+    .bind(seed.file_version)
+    .execute(pool)
+    .await
+    .unwrap_err();
+    assert!(error.to_string().contains("FOREIGN KEY constraint failed"));
 }
 
 async fn seed_remote_execution_owner(pool: &sqlx::SqlitePool) -> (i64, i64) {

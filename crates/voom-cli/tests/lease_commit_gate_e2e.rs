@@ -32,12 +32,29 @@ async fn manual_lock_blocks_commit_and_force_release_unblocks_it() {
     voom_store::init(&url).await.unwrap();
 
     let dir = TempDir::new_in(std::env::current_dir().unwrap()).unwrap();
+    let source = dir.path().join("tiny.mp4");
+    std::fs::copy(tiny_media_fixture(), &source).unwrap();
+    let pool = voom_store::connect(&url).await.unwrap();
+    voom_store::test_support::seed_test_storage_root(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE library_roots SET provider_locator = ?, display_locator = ? WHERE id = ?")
+        .bind(dir.path().display().to_string())
+        .bind(dir.path().display().to_string())
+        .bind(i64::try_from(voom_store::test_support::TEST_STORAGE_ROOT_ID.0).unwrap())
+        .execute(&pool)
+        .await
+        .unwrap();
     let staging = dir.path().join("staged.mp4");
     let target = dir.path().join("committed.mp4");
 
     // Scan the fixture and stage + verify an artifact ready to commit.
     let scan = run(
-        cmd(&url).args(["scan", "--path"]).arg(tiny_media_fixture()),
+        cmd(&url).args([
+            "scan",
+            "--root",
+            &voom_store::test_support::TEST_STORAGE_ROOT_ID.0.to_string(),
+        ]),
         0,
     );
     let file_version_id = id(&scan["data"]["files"][0]["file_version_id"]);
@@ -173,6 +190,10 @@ fn cmd(url: &str) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_voom"));
     command
         .args(["--database-url", url])
+        .env(
+            "VOOM_LOCAL_NODE_ID",
+            voom_store::test_support::TEST_STORAGE_ROOT_ID.0.to_string(),
+        )
         .env(
             "VOOM_FFPROBE_WORKER_BIN",
             built_worker("voom-ffprobe-worker"),

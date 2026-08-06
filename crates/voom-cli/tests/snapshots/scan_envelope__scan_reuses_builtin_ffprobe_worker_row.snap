@@ -7,8 +7,8 @@ expression: json
   "command": "scan",
   "status": "ok",
   "data": {
-    "path": "[media]/tiny.mp4",
-    "mode": "file",
+    "path": "[media]",
+    "mode": "directory",
     "summary": {
       "discovered": 1,
       "ingested": 1,
@@ -22,10 +22,9 @@ expression: json
       {
         "path": "[media]/tiny.mp4",
         "status": "scanned",
-        "file_asset_id": 2,
-        "file_version_id": 2,
-        "file_location_id": 2,
-        "media_snapshot_id": 2,
+        "file_asset_id": 1,
+        "file_version_id": 1,
+        "file_location_id": 1,
         "content_hash": "[content-hash]",
         "size_bytes": 1545,
         "probe_worker_id": 1

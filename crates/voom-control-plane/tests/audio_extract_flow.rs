@@ -9,7 +9,7 @@ use std::process::Command;
 
 use voom_control_plane::ControlPlane;
 use voom_control_plane::policy::{ComplianceExecutionOptions, PolicyInputFromScanInput};
-use voom_control_plane::scan::{ScanPathInput, ScanReportFileStatus};
+use voom_control_plane::scan::{RootScanOutcome, ScanReportFileStatus};
 use voom_core::{FileAssetId, FileVersionId, JobId, MediaSnapshotId};
 use voom_plan::PlanOperationKind;
 use voom_policy::{MediaSnapshotInput, PolicyInputSetDraft, PolicyInputSourceKind, TargetRef};
@@ -56,10 +56,17 @@ async fn audio_extract_flow_verifies_commits_and_adds_sidecar_to_source_bundle()
     let url = format!("sqlite://{}", db.path().display());
     voom_store::init(&url).await.unwrap();
     let pool = voom_store::connect(&url).await.unwrap();
+    voom_store::test_support::seed_test_storage_root(&pool)
+        .await
+        .unwrap();
+    voom_store::test_support::set_test_storage_root_path(&pool, tmp.path())
+        .await
+        .unwrap();
     let cp =
         ControlPlane::open_with_pool(pool.clone(), std::sync::Arc::new(voom_core::SystemClock))
             .await
-            .unwrap();
+            .unwrap()
+            .with_local_node_id(Some(voom_core::NodeId(9_000_001)));
 
     let scanned = scan_source(&cp, &source).await;
     let scanned = enrich_audio_snapshot_for_extract(&cp, &url, scanned).await;
@@ -134,10 +141,17 @@ async fn audio_extract_multi_match_publishes_ordered_media_and_lineage() {
     let url = format!("sqlite://{}", db.path().display());
     voom_store::init(&url).await.unwrap();
     let pool = voom_store::connect(&url).await.unwrap();
+    voom_store::test_support::seed_test_storage_root(&pool)
+        .await
+        .unwrap();
+    voom_store::test_support::set_test_storage_root_path(&pool, tmp.path())
+        .await
+        .unwrap();
     let cp =
         ControlPlane::open_with_pool(pool.clone(), std::sync::Arc::new(voom_core::SystemClock))
             .await
-            .unwrap();
+            .unwrap()
+            .with_local_node_id(Some(voom_core::NodeId(9_000_001)));
 
     let scanned = scan_source(&cp, &source).await;
     let scanned = enrich_audio_snapshot_for_extract(&cp, &url, scanned).await;
@@ -237,13 +251,19 @@ async fn duplicate_basename_sidecars_keep_their_source_subtrees() {
     let url = format!("sqlite://{}", db.path().display());
     voom_store::init(&url).await.unwrap();
     let pool = voom_store::connect(&url).await.unwrap();
-    let cp = ControlPlane::open_with_pool(pool, std::sync::Arc::new(voom_core::SystemClock))
+    voom_store::test_support::seed_test_storage_root(&pool)
         .await
         .unwrap();
-    let first =
-        enrich_audio_snapshot_for_extract(&cp, &url, scan_source(&cp, &first_path).await).await;
-    let second =
-        enrich_audio_snapshot_for_extract(&cp, &url, scan_source(&cp, &second_path).await).await;
+    voom_store::test_support::set_test_storage_root_path(&pool, tmp.path())
+        .await
+        .unwrap();
+    let cp = ControlPlane::open_with_pool(pool, std::sync::Arc::new(voom_core::SystemClock))
+        .await
+        .unwrap()
+        .with_local_node_id(Some(voom_core::NodeId(9_000_001)));
+    let scanned = scan_sources(&cp, &[&first_path, &second_path]).await;
+    let first = enrich_audio_snapshot_for_extract(&cp, &url, scanned[0].clone()).await;
+    let second = enrich_audio_snapshot_for_extract(&cp, &url, scanned[1].clone()).await;
     let policy = cp
         .create_policy_document("extract-commentary-audio", EXTRACT_COMMENTARY_POLICY)
         .await
@@ -281,6 +301,7 @@ fn tempdir_in_repo() -> tempfile::TempDir {
     tempfile::TempDir::new_in(std::env::current_dir().unwrap()).unwrap()
 }
 
+#[derive(Clone)]
 struct ScannedSource {
     file_version_id: FileVersionId,
     snapshot_id: MediaSnapshotId,
@@ -327,23 +348,32 @@ fn two_audio_file_input(files: &[ScannedSource]) -> PolicyInputSetDraft {
 }
 
 async fn scan_source(cp: &ControlPlane, source: &Path) -> ScannedSource {
-    let scan = cp
-        .scan_path(ScanPathInput {
-            path: source.to_path_buf(),
-            extension_allowlist: Vec::new(),
-        })
+    scan_sources(cp, &[source]).await.remove(0)
+}
+
+async fn scan_sources(cp: &ControlPlane, sources: &[&Path]) -> Vec<ScannedSource> {
+    let outcome = cp
+        .scan_library_root(voom_store::test_support::TEST_STORAGE_ROOT_ID)
         .await
         .unwrap();
-    assert_eq!(scan.summary.scanned_count(), 1);
-    let scanned = scan
-        .files
+    let RootScanOutcome::Scanned(scan) = outcome else {
+        unreachable!("active local test root must scan")
+    };
+    assert!(scan.summary.scanned_count() >= u64::try_from(sources.len()).unwrap());
+    sources
         .iter()
-        .find(|file| file.status == ScanReportFileStatus::Scanned)
-        .unwrap();
-    ScannedSource {
-        file_version_id: scanned.file_version_id.unwrap(),
-        snapshot_id: scanned.media_snapshot_id.unwrap(),
-    }
+        .map(|source| {
+            let scanned = scan
+                .files
+                .iter()
+                .find(|file| file.path == *source && file.status == ScanReportFileStatus::Scanned)
+                .unwrap();
+            ScannedSource {
+                file_version_id: scanned.file_version_id.unwrap(),
+                snapshot_id: scanned.media_snapshot_id.unwrap(),
+            }
+        })
+        .collect()
 }
 
 trait ScanSummaryExt {

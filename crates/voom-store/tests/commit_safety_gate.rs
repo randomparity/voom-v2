@@ -20,8 +20,8 @@ use voom_store::repo::media::commit_safety_gate::{
     EvidenceDrift, PrepareOutcome, prepare_destructive_commit,
 };
 use voom_store::repo::media::identity::{
-    AcceptedPin, CommitGateIdentityRepo, FileAssetRepo, FileLocationKind, FileLocationRepo,
-    FileVersionRepo, IdentityEvidenceRepo, IdentityEvidenceTarget, NewFileLocation, NewFileVersion,
+    AcceptedPin, CommitGateIdentityRepo, FileAssetRepo, FileLocationRepo, FileVersionRepo,
+    IdentityEvidenceRepo, IdentityEvidenceTarget, NewFileLocation, NewFileVersion,
     NewIdentityEvidence, ProducedBy, SqliteIdentityRepo,
 };
 use voom_store::repo::media::use_leases::{
@@ -76,8 +76,8 @@ async fn seed_location(pool: &SqlitePool, value: &str) -> Seeded {
             &mut tx,
             NewFileLocation {
                 file_version_id: version.id,
-                kind: FileLocationKind::LocalPath,
-                value: value.to_owned(),
+                storage_root_id: voom_store::test_support::TEST_STORAGE_ROOT_ID,
+                provider_relative_locator: voom_store::test_support::test_relative_locator(value),
                 proof: None,
                 observed_at: T0,
             },

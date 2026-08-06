@@ -18,7 +18,7 @@ use voom_test_support::TempDatabase;
 
 use voom_control_plane::ControlPlane;
 use voom_control_plane::artifact::{StageCopyInput, VerifyArtifactInput};
-use voom_control_plane::scan::ScanPathInput;
+use voom_control_plane::scan::RootScanOutcome;
 use voom_core::ErrorCode;
 use voom_core::ids::ArtifactVerificationId;
 use voom_store::repo::media::artifacts::ArtifactCommitState;
@@ -140,20 +140,32 @@ fn advisory_lease(version_id: voom_core::FileVersionId) -> NewUseLease {
 async fn inject_recovery_required(url: &str, staged: &StagedFixture, target_path: &Path) {
     let pool = voom_store::connect(url).await.unwrap();
     let temp_path = target_path.with_extension("mp4.voom.tmp");
+    let target_relative_locator = target_path
+        .file_name()
+        .and_then(std::ffi::OsStr::to_str)
+        .unwrap();
+    let report = serde_json::json!({
+        "test": true,
+        "rooted_target": {
+            "storage_root_id": voom_store::test_support::TEST_STORAGE_ROOT_ID.0,
+            "provider_relative_locator": target_relative_locator,
+        },
+    });
     sqlx::query(
         "INSERT INTO artifact_commit_records \
          (artifact_handle_id, source_file_version_id, verification_id, target_path, \
           result_file_version_id, result_file_location_id, state, failure_class, error_code, \
           message, recovery_reason, temp_path, report, started_at, promotion_started_at, finished_at) \
          VALUES (?, ?, ?, ?, NULL, NULL, 'recovery_required', 'commit_failure', \
-          'DB_UNREACHABLE', 'injected recovery for gate re-drive', 'finalize_failed', ?, \
-          '{\"test\":true}', '2026-05-25T00:00:00Z', '2026-05-25T00:00:01Z', '2026-05-25T00:00:02Z')",
+          'DB_UNREACHABLE', 'injected recovery for gate re-drive', 'finalize_failed', ?, ?, \
+          '2026-05-25T00:00:00Z', '2026-05-25T00:00:01Z', '2026-05-25T00:00:02Z')",
     )
     .bind(i64::try_from(staged.artifact_handle_id.0).unwrap())
     .bind(i64::try_from(staged.source_file_version_id.0).unwrap())
     .bind(i64::try_from(staged.verification_id.0).unwrap())
     .bind(target_path.display().to_string())
     .bind(temp_path.display().to_string())
+    .bind(report.to_string())
     .execute(&pool)
     .await
     .unwrap();
@@ -199,11 +211,22 @@ struct StagedFixture {
 }
 
 async fn fixture() -> (ControlPlane, Db, TempDir) {
+    let dir = artifact_tempdir();
     let tmp = TempDatabase::new().unwrap();
     let url = format!("sqlite://{}", tmp.path().display());
     voom_store::init(&url).await.unwrap();
-    let cp = ControlPlane::open(&url).await.unwrap();
-    (cp, Db { _tmp: tmp, url }, artifact_tempdir())
+    let pool = voom_store::connect(&url).await.unwrap();
+    voom_store::test_support::seed_test_storage_root(&pool)
+        .await
+        .unwrap();
+    voom_store::test_support::set_test_storage_root_path(&pool, dir.path())
+        .await
+        .unwrap();
+    let cp = ControlPlane::open_with_pool(pool, std::sync::Arc::new(voom_core::SystemClock))
+        .await
+        .unwrap()
+        .with_local_node_id(Some(voom_core::NodeId(9_000_001)));
+    (cp, Db { _tmp: tmp, url }, dir)
 }
 
 fn artifact_tempdir() -> TempDir {
@@ -211,14 +234,20 @@ fn artifact_tempdir() -> TempDir {
 }
 
 async fn verified_fixture(cp: &ControlPlane, dir: &Path, name: &str) -> StagedFixture {
-    let scan = cp
-        .scan_path(ScanPathInput {
-            path: tiny_media_fixture(),
-            extension_allowlist: Vec::new(),
-        })
+    let source_path = dir.join(format!("{name}-source.mp4"));
+    std::fs::copy(tiny_media_fixture(), &source_path).unwrap();
+    let outcome = cp
+        .scan_library_root(voom_store::test_support::TEST_STORAGE_ROOT_ID)
         .await
         .unwrap();
-    let scanned = scan.files.first().unwrap();
+    let RootScanOutcome::Scanned(scan) = outcome else {
+        unreachable!("active local test root must scan")
+    };
+    let scanned = scan
+        .files
+        .iter()
+        .find(|file| file.path == source_path)
+        .unwrap();
     let staging_path = dir.join(format!("{name}-staged.mp4"));
     let staged = cp
         .stage_copy(StageCopyInput {

@@ -7,8 +7,8 @@ expression: json
   "command": "scan",
   "status": "error",
   "data": {
-    "path": "[scan-dir]/drift.mp4",
-    "mode": "file",
+    "path": "[scan-dir]",
+    "mode": "directory",
     "summary": {
       "discovered": 1,
       "ingested": 0,
@@ -39,7 +39,7 @@ expression: json
     "config_path": "[config-path]"
   },
   "warnings": [
-    "VOOM_FFPROBE_BIN is set; scan ffprobe binary: [scan-dir]/ffprobe"
+    "VOOM_FFPROBE_BIN is set; scan ffprobe binary: [tool-dir]/ffprobe"
   ],
   "error": {
     "code": "ARTIFACT_CHECKSUM_MISMATCH",

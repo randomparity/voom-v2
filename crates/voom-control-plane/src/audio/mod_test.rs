@@ -7,13 +7,13 @@ use sqlx::Row;
 use time::OffsetDateTime;
 use voom_core::ids::BundleId;
 use voom_core::rng_test_support::FrozenRng;
-use voom_core::{JobId, LeaseId, TicketId};
+use voom_core::{JobId, LeaseId, StorageRootId, TicketId};
 use voom_store::repo::media::artifacts::{
     ArtifactHandleAccessMode, ArtifactLocationKind, NewArtifactCommitRecord, NewArtifactHandle,
     NewArtifactLocation, NewSidecarArtifactCommit,
 };
 use voom_store::repo::media::bundles::{BundleMemberRole, NewAssetBundle, NewBundleMember};
-use voom_store::repo::media::identity::{DiscoveredFile, FileLocationKind, IngestOutcome};
+use voom_store::repo::media::identity::{DiscoveredFile, IngestOutcome};
 use voom_store::repo::media::identity::{
     MediaSnapshotRepo, MediaWorkKind, NewMediaVariant, NewMediaWork,
 };
@@ -1789,6 +1789,99 @@ async fn prepared_successor_records_evidence_before_malformed_result_decode() {
     assert_decode_failure_left_recovery_evidence(&cp, "malformed result_facts").await;
 }
 
+#[tokio::test]
+async fn prepared_audio_recovery_rejects_zero_persisted_root_id() {
+    let (cp, _db, dir) = fixture_with_dir().await;
+    let source = seed_audio_source(&cp, &dir, b"source").await;
+    let bundle = seed_bundle(&cp).await;
+    let input = extract_input_for_source(&source, bundle.id, &dir);
+    seed_rewound_prepared_extract(&cp, &input).await;
+    sqlx::query(
+        "UPDATE artifact_commit_records \
+         SET report = json_set(report, '$.rooted_target.storage_root_id', 0)",
+    )
+    .execute(cp.pool_for_test())
+    .await
+    .unwrap();
+
+    let error = execute_extract_audio_with_dispatchers(
+        &cp,
+        input,
+        &UncalledExtractDispatcher,
+        &UncalledVerifyDispatcher,
+        &UncalledProbeDispatcher,
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error.error_code(), voom_core::ErrorCode::DbUnreachable);
+    assert!(error.to_string().contains("not a valid SQLite ID"));
+}
+
+#[tokio::test]
+async fn prepared_audio_recovery_keeps_rooted_target_after_default_changes() {
+    let (cp, _db, dir) = fixture_with_dir().await;
+    let source = seed_audio_source(&cp, &dir, b"source").await;
+    let bundle = seed_bundle(&cp).await;
+    let input = extract_input_for_source(&source, bundle.id, &dir);
+    std::fs::create_dir_all(&input.target_dir).unwrap();
+    let prepared_root_id = StorageRootId(9_000_002);
+    let replacement_root_id = StorageRootId(9_000_003);
+    insert_active_audio_test_root(&cp, prepared_root_id, dir.path()).await;
+    insert_active_audio_test_root(&cp, replacement_root_id, &input.target_dir).await;
+    set_audio_test_default_output_root(&cp, prepared_root_id).await;
+    seed_rewound_prepared_extract(&cp, &input).await;
+
+    set_audio_test_default_output_root(&cp, replacement_root_id).await;
+    execute_extract_audio_with_dispatchers(
+        &cp,
+        input,
+        &UncalledExtractDispatcher,
+        &UncalledVerifyDispatcher,
+        &UncalledProbeDispatcher,
+    )
+    .await
+    .unwrap();
+    let stored_root_id: i64 =
+        sqlx::query_scalar("SELECT storage_root_id FROM file_locations ORDER BY id DESC LIMIT 1")
+            .fetch_one(cp.pool_for_test())
+            .await
+            .unwrap();
+
+    assert_eq!(u64::try_from(stored_root_id).unwrap(), prepared_root_id.0);
+}
+
+async fn insert_active_audio_test_root(
+    cp: &crate::ControlPlane,
+    id: StorageRootId,
+    path: &std::path::Path,
+) {
+    sqlx::query(
+        "INSERT INTO library_roots \
+         (id, library_id, owner_node_id, provider_kind, provider_locator, display_locator, state, \
+          root_epoch, activation_identity, include_globs, exclude_globs, extension_allowlist, \
+          scan_mode, symlink_policy, hidden_file_policy, stability_seconds, debounce_seconds, \
+          enabled, created_at, updated_at) \
+         VALUES (?, 9000001, 9000001, 'local_filesystem', ?, ?, 'active', 1, 'test-owner', \
+                 '[]', '[]', '[]', 'manual_recursive', 'reject', 'ignore', 0, 0, 1, \
+                 '1970-01-01T00:00:00Z', '1970-01-01T00:00:00Z')",
+    )
+    .bind(i64::try_from(id.0).unwrap())
+    .bind(path.display().to_string())
+    .bind(path.display().to_string())
+    .execute(cp.pool_for_test())
+    .await
+    .unwrap();
+}
+
+async fn set_audio_test_default_output_root(cp: &crate::ControlPlane, id: StorageRootId) {
+    sqlx::query("UPDATE library_roots SET default_output_root_id = ? WHERE id = 9000001")
+        .bind(i64::try_from(id.0).unwrap())
+        .execute(cp.pool_for_test())
+        .await
+        .unwrap();
+}
+
 async fn seed_rewound_prepared_extract(cp: &crate::ControlPlane, input: &ExecuteExtractAudioInput) {
     sqlx::query(
         "CREATE TRIGGER fail_audio_extract_finalize BEFORE INSERT ON file_assets \
@@ -2654,6 +2747,10 @@ async fn commit_historical_sidecar(
             &mut tx,
             NewSidecarArtifactCommit {
                 commit_record_id: pending.id,
+                storage_root_id: voom_store::test_support::TEST_STORAGE_ROOT_ID,
+                provider_relative_locator: voom_store::test_support::test_relative_locator(
+                    &target.display().to_string(),
+                ),
                 target_path: target.display().to_string(),
                 content_hash: output.content_hash.clone(),
                 size_bytes: output.size_bytes,
@@ -2748,8 +2845,10 @@ async fn seed_audio_source(
     let outcome = cp
         .record_discovered_file(
             DiscoveredFile {
-                location_kind: FileLocationKind::LocalPath,
-                location_value: source_path.display().to_string(),
+                storage_root_id: voom_store::test_support::TEST_STORAGE_ROOT_ID,
+                provider_relative_locator: voom_store::test_support::test_relative_locator(
+                    &source_path.display().to_string(),
+                ),
                 content_hash: blake3_checksum(bytes),
                 size_bytes: u64::try_from(bytes.len()).unwrap(),
                 observed_at: OffsetDateTime::UNIX_EPOCH,

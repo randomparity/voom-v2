@@ -956,8 +956,8 @@ where
                 })?;
             let new_location = NewFileLocation {
                 file_version_id: retired_row.file_version_id,
-                kind: new.kind,
-                value: new.value.clone(),
+                storage_root_id: new.storage_root_id,
+                provider_relative_locator: new.provider_relative_locator.clone(),
                 proof: new.proof.clone(),
                 observed_at: new.observed_at,
             };

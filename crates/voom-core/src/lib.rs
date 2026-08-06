@@ -48,8 +48,8 @@ pub mod ids {
         BackupId, BundleId, CommitId, EventId, EvidenceId, ExternalPathMappingId, ExternalSystemId,
         ExternalSystemLinkId, FileAssetId, FileLocationId, FileVersionId, IssueId, JobId, LeaseId,
         LibraryId, LibraryRootId, MediaSnapshotId, MediaVariantId, MediaWorkId, NodeId,
-        PolicyDocumentId, PolicyInputSetId, PolicySyntheticTargetId, PolicyVersionId, TicketId,
-        UseLeaseId, WorkerId,
+        PolicyDocumentId, PolicyInputSetId, PolicySyntheticTargetId, PolicyVersionId,
+        StorageRootId, TicketId, UseLeaseId, WorkerId,
     };
 }
 
@@ -65,6 +65,12 @@ pub mod remux {
     pub use crate::media::remux::{
         REMUX_CONTAINER_MKV, RemuxTrackGroup, is_font_attachment_mime_type,
         is_supported_remux_container,
+    };
+}
+
+pub mod storage {
+    pub use crate::taxonomy::storage::{
+        ProviderLocator, ProviderRelativeLocator, StorageProviderKind, StorageRootState,
     };
 }
 
@@ -108,13 +114,16 @@ pub use ids::{
     ExternalPathMappingId, ExternalSystemId, ExternalSystemLinkId, FileAssetId, FileLocationId,
     FileVersionId, IssueId, JobId, LeaseId, LibraryId, LibraryRootId, MediaSnapshotId,
     MediaVariantId, MediaWorkId, NodeId, PolicyDocumentId, PolicyInputSetId,
-    PolicySyntheticTargetId, PolicyVersionId, TicketId, UseLeaseId, WorkerId,
+    PolicySyntheticTargetId, PolicyVersionId, StorageRootId, TicketId, UseLeaseId, WorkerId,
 };
 pub use issue::{IssuePriority, IssueSeverity};
 pub use operation_kind::OperationKind;
 pub use remux::{
     REMUX_CONTAINER_MKV, RemuxTrackGroup, is_font_attachment_mime_type,
     is_supported_remux_container,
+};
+pub use storage::{
+    ProviderLocator, ProviderRelativeLocator, StorageProviderKind, StorageRootState,
 };
 pub use taxonomy::execution_vocab::{NodeKind, NodeStatus, WorkerKind, WorkerStatus};
 pub use ticket_operation::TicketOperation;

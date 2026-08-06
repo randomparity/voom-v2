@@ -17,9 +17,8 @@ use crate::repo::media::bundles::{
     BundleMemberRole, NewAssetBundle, NewBundleMember, SqliteBundleRepo,
 };
 use crate::repo::media::identity::{
-    FileAssetRepo, FileLocationKind, FileVersionRepo, MediaVariantRepo, MediaWorkKind,
-    MediaWorkRepo, NewFileLocation, NewFileVersion, NewMediaVariant, NewMediaWork, ProducedBy,
-    SqliteIdentityRepo,
+    FileAssetRepo, FileVersionRepo, MediaVariantRepo, MediaWorkKind, MediaWorkRepo,
+    NewFileLocation, NewFileVersion, NewMediaVariant, NewMediaWork, ProducedBy, SqliteIdentityRepo,
 };
 use crate::repo::media::use_leases::{
     BlockingMode, IssuerKind, NewUseLease, SqliteUseLeaseRepo, UseLeaseKind, UseLeaseReleaseReason,
@@ -63,8 +62,8 @@ async fn seed(pool: &SqlitePool, value: &str) -> Seed {
             &mut tx,
             NewFileLocation {
                 file_version_id: version.id,
-                kind: FileLocationKind::LocalPath,
-                value: value.to_owned(),
+                storage_root_id: crate::test_support::TEST_STORAGE_ROOT_ID,
+                provider_relative_locator: crate::test_support::test_relative_locator(value),
                 proof: None,
                 observed_at: T0,
             },

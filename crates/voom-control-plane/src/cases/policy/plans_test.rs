@@ -1,6 +1,6 @@
 use voom_plan::PlanOperationKind;
 use voom_policy::{FixtureName, load_fixture, load_policy_fixture};
-use voom_store::repo::media::identity::{DiscoveredFile, FileLocationKind, IngestOutcome};
+use voom_store::repo::media::identity::{DiscoveredFile, IngestOutcome};
 
 use super::*;
 use crate::cases::policy::policy_inputs::PolicyInputFromScanInput;
@@ -25,8 +25,8 @@ async fn seed_stored_version(cp: &crate::ControlPlane, path: &str) -> voom_core:
     let outcome = cp
         .record_discovered_file(
             DiscoveredFile {
-                location_kind: FileLocationKind::LocalPath,
-                location_value: path.to_owned(),
+                storage_root_id: voom_store::test_support::TEST_STORAGE_ROOT_ID,
+                provider_relative_locator: voom_store::test_support::test_relative_locator(path),
                 content_hash: format!("hash-{path}"),
                 size_bytes: 1024,
                 observed_at: T0,

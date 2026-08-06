@@ -2,15 +2,14 @@ use std::io;
 use std::path::Path;
 
 use serde::Serialize;
-use voom_control_plane::ControlPlane;
 use voom_control_plane::scan::{
-    RootScanBlocked, RootScanOutcome, ScanFileErrorReport, ScanFileReport, ScanMode, ScanPathInput,
-    ScanReport, ScanReportFileStatus, ScanSidecarReport, is_supported_media_path,
+    RootScanBlocked, RootScanOutcome, ScanFileErrorReport, ScanFileReport, ScanMode, ScanReport,
+    ScanReportFileStatus, ScanSidecarReport,
 };
-use voom_core::{ErrorCode, FailureClass, LibraryRootId};
+use voom_core::{ErrorCode, FailureClass, StorageRootId};
 
 use crate::commands::common::open_control_plane;
-use crate::envelope::{Local, emit_err, emit_err_with_data_and_warnings, emit_ok};
+use crate::envelope::{Local, emit_err_with_data_and_warnings, emit_ok};
 
 #[derive(Debug, Serialize)]
 pub struct ScanData {
@@ -79,48 +78,11 @@ pub struct ScanFileErrorData {
     pub message: String,
 }
 
-pub async fn run(
-    database_url: &str,
-    local: Local,
-    path: Option<&Path>,
-    root: Option<u64>,
-) -> io::Result<i32> {
-    match (path, root) {
-        (Some(path), None) => run_explicit_path(database_url, local, path).await,
-        (None, Some(root_id)) => run_root(database_url, local, LibraryRootId(root_id)).await,
-        _ => {
-            emit_err(
-                "scan",
-                ErrorCode::BadArgs.as_str(),
-                "exactly one of --path or --root is required".to_owned(),
-                None,
-                Some(local),
-            )?;
-            Ok(1)
-        }
-    }
+pub async fn run(database_url: &str, local: Local, root: u64) -> io::Result<i32> {
+    run_root(database_url, local, StorageRootId(root)).await
 }
 
-async fn run_explicit_path(database_url: &str, local: Local, path: &Path) -> io::Result<i32> {
-    if let Err(message) = validate_explicit_path(path).await {
-        emit_err(
-            "scan",
-            ErrorCode::BadArgs.as_str(),
-            message,
-            None,
-            Some(local),
-        )?;
-        return Ok(1);
-    }
-
-    let cp = match open_control_plane("scan", database_url, &local).await? {
-        Ok(cp) => cp,
-        Err(code) => return Ok(code),
-    };
-    scan_with_control_plane(&cp, local, path).await
-}
-
-async fn run_root(database_url: &str, local: Local, root_id: LibraryRootId) -> io::Result<i32> {
+async fn run_root(database_url: &str, local: Local, root_id: StorageRootId) -> io::Result<i32> {
     let cp = match open_control_plane("scan", database_url, &local).await? {
         Ok(cp) => cp,
         Err(code) => return Ok(code),
@@ -132,7 +94,7 @@ async fn run_root(database_url: &str, local: Local, root_id: LibraryRootId) -> i
         Ok(RootScanOutcome::Blocked(blocked)) => {
             let message = format!(
                 "library root {} is blocked ({}); not scanned",
-                blocked.library_root_id,
+                blocked.storage_root_id,
                 blocked.reason.as_str()
             );
             emit_err_with_data_and_warnings(
@@ -168,8 +130,8 @@ pub struct BlockedData {
     pub status: &'static str,
     pub reason: &'static str,
     pub library_id: u64,
-    pub library_root_id: u64,
-    pub canonical_path: String,
+    pub storage_root_id: u64,
+    pub provider_locator: String,
 }
 
 impl From<RootScanBlocked> for BlockedData {
@@ -178,36 +140,8 @@ impl From<RootScanBlocked> for BlockedData {
             status: "blocked",
             reason: blocked.reason.as_str(),
             library_id: blocked.library_id.0,
-            library_root_id: blocked.library_root_id.0,
-            canonical_path: path_wire(&blocked.canonical_path),
-        }
-    }
-}
-
-async fn scan_with_control_plane(cp: &ControlPlane, local: Local, path: &Path) -> io::Result<i32> {
-    match cp
-        .scan_path(ScanPathInput {
-            path: path.to_path_buf(),
-            extension_allowlist: Vec::new(),
-        })
-        .await
-    {
-        Ok(report) => {
-            emit_ok("scan", ScanData::from(report), Some(local), scan_warnings()).map(|()| 0)
-        }
-        Err(err) => {
-            let code = err.code();
-            let message = err.to_string();
-            emit_err_with_data_and_warnings(
-                "scan",
-                ScanData::from(err.into_report()),
-                code.as_str(),
-                message,
-                None,
-                Some(local),
-                scan_warnings(),
-            )?;
-            Ok(2)
+            storage_root_id: blocked.storage_root_id.0,
+            provider_locator: blocked.provider_locator,
         }
     }
 }
@@ -220,32 +154,6 @@ fn scan_warnings() -> Vec<String> {
         "VOOM_FFPROBE_BIN is set; scan ffprobe binary: {}",
         std::path::Path::new(&ffprobe_bin).display()
     )]
-}
-
-async fn validate_explicit_path(path: &Path) -> Result<(), String> {
-    let metadata = tokio::fs::symlink_metadata(path)
-        .await
-        .map_err(|err| format!("cannot inspect scan path {}: {err}", path.display()))?;
-    let file_type = metadata.file_type();
-    if file_type.is_symlink() {
-        return Err(format!(
-            "scan path must not be a symlink: {}",
-            path.display()
-        ));
-    }
-    if file_type.is_file() {
-        if is_supported_media_path(path) {
-            return Ok(());
-        }
-        return Err(format!("unsupported media extension: {}", path.display()));
-    }
-    if file_type.is_dir() {
-        return Ok(());
-    }
-    Err(format!(
-        "scan path must be a file or directory: {}",
-        path.display()
-    ))
 }
 
 impl From<ScanReport> for ScanData {

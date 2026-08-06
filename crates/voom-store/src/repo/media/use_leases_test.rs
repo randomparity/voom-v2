@@ -742,8 +742,9 @@ async fn reanchor_on_move_updates_all_live_leases() {
         .format(&time::format_description::well_known::Iso8601::DEFAULT)
         .unwrap();
     let loc_old = sqlx::query(
-        "INSERT INTO file_locations (file_version_id, kind, value, observed_at) VALUES (?, \
-         'local_path', '/old', ?)",
+        "INSERT INTO file_locations \
+         (file_version_id, address_state, storage_root_id, provider_relative_locator, observed_at) \
+         VALUES (?, 'rooted', 9000001, 'old', ?)",
     )
     .bind(version_id)
     .bind(&now_iso)
@@ -752,8 +753,9 @@ async fn reanchor_on_move_updates_all_live_leases() {
     .unwrap()
     .last_insert_rowid();
     let loc_new = sqlx::query(
-        "INSERT INTO file_locations (file_version_id, kind, value, observed_at) VALUES (?, \
-         'local_path', '/new', ?)",
+        "INSERT INTO file_locations \
+         (file_version_id, address_state, storage_root_id, provider_relative_locator, observed_at) \
+         VALUES (?, 'rooted', 9000001, 'new', ?)",
     )
     .bind(version_id)
     .bind(&now_iso)
@@ -832,8 +834,9 @@ async fn reanchor_skips_terminal_leases() {
         .format(&time::format_description::well_known::Iso8601::DEFAULT)
         .unwrap();
     let loc_old = sqlx::query(
-        "INSERT INTO file_locations (file_version_id, kind, value, observed_at) VALUES (?, \
-         'local_path', '/old', ?)",
+        "INSERT INTO file_locations \
+         (file_version_id, address_state, storage_root_id, provider_relative_locator, observed_at) \
+         VALUES (?, 'rooted', 9000001, 'old', ?)",
     )
     .bind(version_id)
     .bind(&now_iso)
@@ -842,8 +845,9 @@ async fn reanchor_skips_terminal_leases() {
     .unwrap()
     .last_insert_rowid();
     let loc_new = sqlx::query(
-        "INSERT INTO file_locations (file_version_id, kind, value, observed_at) VALUES (?, \
-         'local_path', '/new', ?)",
+        "INSERT INTO file_locations \
+         (file_version_id, address_state, storage_root_id, provider_relative_locator, observed_at) \
+         VALUES (?, 'rooted', 9000001, 'new', ?)",
     )
     .bind(version_id)
     .bind(&now_iso)
@@ -903,8 +907,9 @@ async fn reanchor_on_move_with_no_matching_leases_is_empty() {
         .format(&time::format_description::well_known::Iso8601::DEFAULT)
         .unwrap();
     let loc_old = sqlx::query(
-        "INSERT INTO file_locations (file_version_id, kind, value, observed_at) VALUES (?, \
-         'local_path', '/old', ?)",
+        "INSERT INTO file_locations \
+         (file_version_id, address_state, storage_root_id, provider_relative_locator, observed_at) \
+         VALUES (?, 'rooted', 9000001, 'old', ?)",
     )
     .bind(version_id)
     .bind(&now_iso)
@@ -913,8 +918,9 @@ async fn reanchor_on_move_with_no_matching_leases_is_empty() {
     .unwrap()
     .last_insert_rowid();
     let loc_new = sqlx::query(
-        "INSERT INTO file_locations (file_version_id, kind, value, observed_at) VALUES (?, \
-         'local_path', '/new', ?)",
+        "INSERT INTO file_locations \
+         (file_version_id, address_state, storage_root_id, provider_relative_locator, observed_at) \
+         VALUES (?, 'rooted', 9000001, 'new', ?)",
     )
     .bind(version_id)
     .bind(&now_iso)
@@ -960,8 +966,9 @@ async fn reanchor_on_move_with_same_location_is_noop() {
         .format(&time::format_description::well_known::Iso8601::DEFAULT)
         .unwrap();
     let loc = sqlx::query(
-        "INSERT INTO file_locations (file_version_id, kind, value, observed_at) VALUES (?, \
-         'local_path', '/same', ?)",
+        "INSERT INTO file_locations \
+         (file_version_id, address_state, storage_root_id, provider_relative_locator, observed_at) \
+         VALUES (?, 'rooted', 9000001, 'same', ?)",
     )
     .bind(version_id)
     .bind(&now_iso)
@@ -1022,7 +1029,6 @@ async fn seed_pool_with_location() -> (
     FileVersionId,
     FileLocationId,
 ) {
-    use crate::repo::media::identity::FileLocationKind;
     let tmp = TempDatabase::new().unwrap();
     let pool = fresh_initialized_pool_at(tmp.path()).await.unwrap();
     let identity = SqliteIdentityRepo::new(pool.clone());
@@ -1044,8 +1050,8 @@ async fn seed_pool_with_location() -> (
             &mut tx,
             NewFileLocation {
                 file_version_id: version.id,
-                kind: FileLocationKind::LocalPath,
-                value: "/srv/x".to_owned(),
+                storage_root_id: crate::test_support::TEST_STORAGE_ROOT_ID,
+                provider_relative_locator: crate::test_support::test_relative_locator("/srv/x"),
                 proof: None,
                 observed_at: T0,
             },

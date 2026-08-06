@@ -236,6 +236,6 @@ expression: json
   "warnings": [],
   "error": {
     "code": "CONFIG_INVALID",
-    "message": "config error: promotion destination already exists: [tmp-dir]/out/Movie.remux.mkv"
+    "message": "config error: artifact path must not already exist: [tmp-dir]/out/Movie.remux.mkv"
   }
 }

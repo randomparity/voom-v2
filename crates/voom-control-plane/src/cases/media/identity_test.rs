@@ -3,7 +3,7 @@ use time::{Duration, OffsetDateTime};
 use voom_events::EventKind;
 use voom_store::repo::audit::events::{EventFilter, EventRepo, Page};
 use voom_store::repo::media::identity::{
-    DiscoveredFile, FileLocationKind, IngestOutcome, LocationProof, MediaWorkKind, NewMediaWork,
+    DiscoveredFile, IngestOutcome, LocationProof, MediaWorkKind, NewMediaWork,
 };
 use voom_store::repo::media::use_leases::{
     BlockingMode, IssuerKind, LeaseScope, NewUseLease, UseLeaseKind,
@@ -35,8 +35,10 @@ async fn record_discovered_file_emits_full_event_chain() {
     let outcome = cp
         .record_discovered_file(
             DiscoveredFile {
-                location_kind: FileLocationKind::LocalPath,
-                location_value: "/srv/a.mkv".to_owned(),
+                storage_root_id: voom_store::test_support::TEST_STORAGE_ROOT_ID,
+                provider_relative_locator: voom_store::test_support::test_relative_locator(
+                    "/srv/a.mkv",
+                ),
                 content_hash: "h-x".to_owned(),
                 size_bytes: 1024,
                 observed_at: T0,
@@ -51,7 +53,7 @@ async fn record_discovered_file_emits_full_event_chain() {
     };
     assert_eq!(count(&cp, EventKind::FileAssetCreated).await, 1);
     assert_eq!(count(&cp, EventKind::FileVersionCreated).await, 1);
-    assert_eq!(count(&cp, EventKind::FileLocationRecorded).await, 1);
+    assert_eq!(count(&cp, EventKind::FileLocationRootedRecorded).await, 1);
     // No alias_proof supplied → no path_rule evidence event.
     // No prior hash → no hash_match evidence event.
     assert_eq!(count(&cp, EventKind::IdentityEvidenceRecorded).await, 0);
@@ -64,8 +66,10 @@ async fn record_discovered_file_hash_match_emits_evidence_event() {
     let _ = cp
         .record_discovered_file(
             DiscoveredFile {
-                location_kind: FileLocationKind::LocalPath,
-                location_value: "/srv/a.mkv".to_owned(),
+                storage_root_id: voom_store::test_support::TEST_STORAGE_ROOT_ID,
+                provider_relative_locator: voom_store::test_support::test_relative_locator(
+                    "/srv/a.mkv",
+                ),
                 content_hash: "h-dup".to_owned(),
                 size_bytes: 10,
                 observed_at: T0,
@@ -80,8 +84,10 @@ async fn record_discovered_file_hash_match_emits_evidence_event() {
     let _ = cp
         .record_discovered_file(
             DiscoveredFile {
-                location_kind: FileLocationKind::LocalPath,
-                location_value: "/srv/b.mkv".to_owned(),
+                storage_root_id: voom_store::test_support::TEST_STORAGE_ROOT_ID,
+                provider_relative_locator: voom_store::test_support::test_relative_locator(
+                    "/srv/b.mkv",
+                ),
                 content_hash: "h-dup".to_owned(),
                 size_bytes: 10,
                 observed_at: T0 + Duration::seconds(1),
@@ -100,8 +106,10 @@ async fn reconcile_rename_emits_paired_move_events() {
     let outcome = cp
         .record_discovered_file(
             DiscoveredFile {
-                location_kind: FileLocationKind::LocalPath,
-                location_value: "/srv/old.mkv".to_owned(),
+                storage_root_id: voom_store::test_support::TEST_STORAGE_ROOT_ID,
+                provider_relative_locator: voom_store::test_support::test_relative_locator(
+                    "/srv/old.mkv",
+                ),
                 content_hash: "h".to_owned(),
                 size_bytes: 1,
                 observed_at: T0,
@@ -121,13 +129,15 @@ async fn reconcile_rename_emits_paired_move_events() {
         panic!("expected NewFileAsset");
     };
     let before_retired = count(&cp, EventKind::FileLocationRetiredByMove).await;
-    let before_recorded = count(&cp, EventKind::FileLocationRecordedByMove).await;
+    let before_recorded = count(&cp, EventKind::FileLocationRootedRecordedByMove).await;
     let result = cp
         .reconcile_rename(
             voom_store::repo::media::identity::RenameProof::LocalFileIdGeneration {
                 prior_location_id: file_location_id,
-                new_kind: FileLocationKind::LocalPath,
-                new_value: "/srv/new.mkv".to_owned(),
+                storage_root_id: voom_store::test_support::TEST_STORAGE_ROOT_ID,
+                provider_relative_locator: voom_store::test_support::test_relative_locator(
+                    "/srv/new.mkv",
+                ),
                 file_id: 7,
                 generation: 1,
                 prior_path_missing: true,
@@ -146,7 +156,7 @@ async fn reconcile_rename_emits_paired_move_events() {
         before_retired + 1
     );
     assert_eq!(
-        count(&cp, EventKind::FileLocationRecordedByMove).await,
+        count(&cp, EventKind::FileLocationRootedRecordedByMove).await,
         before_recorded + 1
     );
     // path_rule_match evidence emitted on the new location.
@@ -163,8 +173,10 @@ async fn reconcile_rename_reanchors_location_scoped_use_lease_in_same_tx() {
     let outcome = cp
         .record_discovered_file(
             DiscoveredFile {
-                location_kind: FileLocationKind::LocalPath,
-                location_value: "/srv/old.mkv".to_owned(),
+                storage_root_id: voom_store::test_support::TEST_STORAGE_ROOT_ID,
+                provider_relative_locator: voom_store::test_support::test_relative_locator(
+                    "/srv/old.mkv",
+                ),
                 content_hash: "h".to_owned(),
                 size_bytes: 1,
                 observed_at: T0,
@@ -198,13 +210,15 @@ async fn reconcile_rename_reanchors_location_scoped_use_lease_in_same_tx() {
         .unwrap();
     let reanchor_before = count(&cp, EventKind::UseLeaseReanchoredByMove).await;
     let retired_before = count(&cp, EventKind::FileLocationRetiredByMove).await;
-    let recorded_before = count(&cp, EventKind::FileLocationRecordedByMove).await;
+    let recorded_before = count(&cp, EventKind::FileLocationRootedRecordedByMove).await;
     let result = cp
         .reconcile_rename(
             voom_store::repo::media::identity::RenameProof::LocalFileIdGeneration {
                 prior_location_id: file_location_id,
-                new_kind: FileLocationKind::LocalPath,
-                new_value: "/srv/new.mkv".to_owned(),
+                storage_root_id: voom_store::test_support::TEST_STORAGE_ROOT_ID,
+                provider_relative_locator: voom_store::test_support::test_relative_locator(
+                    "/srv/new.mkv",
+                ),
                 file_id: 11,
                 generation: 1,
                 prior_path_missing: true,
@@ -224,7 +238,7 @@ async fn reconcile_rename_reanchors_location_scoped_use_lease_in_same_tx() {
         retired_before + 1
     );
     assert_eq!(
-        count(&cp, EventKind::FileLocationRecordedByMove).await,
+        count(&cp, EventKind::FileLocationRootedRecordedByMove).await,
         recorded_before + 1
     );
     assert_eq!(
@@ -262,8 +276,10 @@ async fn record_media_snapshot_emits_event() {
     let outcome = cp
         .record_discovered_file(
             DiscoveredFile {
-                location_kind: FileLocationKind::LocalPath,
-                location_value: "/srv/x.mkv".to_owned(),
+                storage_root_id: voom_store::test_support::TEST_STORAGE_ROOT_ID,
+                provider_relative_locator: voom_store::test_support::test_relative_locator(
+                    "/srv/x.mkv",
+                ),
                 content_hash: "h".to_owned(),
                 size_bytes: 1,
                 observed_at: T0,

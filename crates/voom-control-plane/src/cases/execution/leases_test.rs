@@ -23,7 +23,7 @@ use voom_store::repo::execution::tickets::{NewTicket, Ticket, TicketState};
 use voom_store::repo::execution::workers::{NewCapability, NewGrant, Worker};
 use voom_store::repo::media::bundles::NewAssetBundle;
 use voom_store::repo::media::identity::{
-    DiscoveredFile, FileLocationKind, IngestOutcome, MediaWorkKind, NewMediaVariant, NewMediaWork,
+    DiscoveredFile, IngestOutcome, MediaWorkKind, NewMediaVariant, NewMediaWork,
 };
 
 use crate::cases::workers::RegisterWorkerInput;
@@ -272,11 +272,16 @@ async fn seed_audio_claim_pair(
     extract_expires_at: OffsetDateTime,
     synthesis_expires_at: OffsetDateTime,
 ) {
+    voom_store::test_support::seed_test_storage_root(cp.pool_for_test())
+        .await
+        .unwrap();
     let discovered = cp
         .record_discovered_file(
             DiscoveredFile {
-                location_kind: FileLocationKind::LocalPath,
-                location_value: format!("/heartbeat-test/{suffix}.mkv"),
+                storage_root_id: voom_store::test_support::TEST_STORAGE_ROOT_ID,
+                provider_relative_locator: voom_store::test_support::test_relative_locator(
+                    &format!("heartbeat-test/{suffix}.mkv"),
+                ),
                 content_hash: format!("blake3:{suffix}"),
                 size_bytes: 1,
                 observed_at: T0,

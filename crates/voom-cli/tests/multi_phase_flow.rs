@@ -28,7 +28,7 @@ use std::process::Command;
 
 use serde_json::{Value, json};
 use voom_control_plane::ControlPlane;
-use voom_control_plane::scan::{ScanPathInput, ScanReportFileStatus};
+use voom_control_plane::scan::{RootScanOutcome, ScanReportFileStatus};
 use voom_core::FileVersionId;
 use voom_policy::{MediaSnapshotInput, PolicyInputSetDraft, PolicyInputSourceKind, TargetRef};
 use voom_store::test_support::sqlite_url_for;
@@ -58,9 +58,16 @@ async fn multi_phase_execute_then_report_by_job_id() {
     let url = sqlite_url_for(db.path());
     voom_store::init(&url).await.unwrap();
     let pool = voom_store::connect(&url).await.unwrap();
-    let cp = ControlPlane::open_with_pool(pool, std::sync::Arc::new(voom_core::SystemClock))
+    voom_store::test_support::seed_test_storage_root(&pool)
         .await
         .unwrap();
+    voom_store::test_support::set_test_storage_root_path(&pool, &root)
+        .await
+        .unwrap();
+    let cp = ControlPlane::open_with_pool(pool, std::sync::Arc::new(voom_core::SystemClock))
+        .await
+        .unwrap()
+        .with_local_node_id(Some(voom_core::NodeId(9_000_001)));
 
     let file = scan_one(&cp, &source).await;
     let policy = cp
@@ -208,6 +215,10 @@ fn file_phase_at(file_phases: &[Value], ordinal: u64) -> &Value {
 
 fn run_voom(url: &str, args: &[&str]) -> std::process::Output {
     Command::new(env!("CARGO_BIN_EXE_voom"))
+        .env(
+            "VOOM_LOCAL_NODE_ID",
+            voom_store::test_support::TEST_STORAGE_ROOT_ID.0.to_string(),
+        )
         .arg("--database-url")
         .arg(url)
         .args(args)
@@ -228,17 +239,17 @@ struct ScannedFile {
 }
 
 async fn scan_one(cp: &ControlPlane, source: &Path) -> ScannedFile {
-    let scan = cp
-        .scan_path(ScanPathInput {
-            path: source.to_owned(),
-            extension_allowlist: Vec::new(),
-        })
+    let outcome = cp
+        .scan_library_root(voom_store::test_support::TEST_STORAGE_ROOT_ID)
         .await
         .unwrap();
+    let RootScanOutcome::Scanned(scan) = outcome else {
+        panic!("active local test root must scan")
+    };
     let scanned = scan
         .files
         .iter()
-        .find(|file| file.status == ScanReportFileStatus::Scanned)
+        .find(|file| file.path == source && file.status == ScanReportFileStatus::Scanned)
         .unwrap();
     ScannedFile {
         file_version_id: scanned.file_version_id.unwrap(),

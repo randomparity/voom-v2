@@ -6,8 +6,8 @@ use async_trait::async_trait;
 use time::OffsetDateTime;
 use voom_core::ids::{ArtifactCommitRecordId, ArtifactVerificationId};
 use voom_core::{
-    ArtifactHandleId, ErrorCode, FailureClass, FileLocationId, FileVersionId, VoomError,
-    rng_test_support::FrozenRng,
+    ArtifactHandleId, ErrorCode, FailureClass, FileLocationId, FileVersionId, StorageRootId,
+    VoomError, rng_test_support::FrozenRng,
 };
 use voom_events::EventKind;
 use voom_store::repo::audit::events::{EventFilter, EventRepo, Page};
@@ -16,8 +16,8 @@ use voom_store::repo::media::artifacts::{
     NewArtifactLocation,
 };
 use voom_store::repo::media::identity::{
-    DiscoveredFile, FileLocationKind, FileLocationRepo, FileVersionRepo, IngestOutcome,
-    NewFileLocation, NewFileVersion, ProducedBy,
+    DiscoveredFile, FileLocationRepo, FileVersionRepo, IngestOutcome, NewFileLocation,
+    NewFileVersion, ProducedBy,
 };
 
 use crate::ControlPlane;
@@ -260,10 +260,14 @@ async fn successful_commit_promotes_target_records_identity_retires_staging_and_
         .unwrap()
         .unwrap();
     assert_eq!(location.file_version_id, result_version_id);
-    assert_eq!(location.kind, FileLocationKind::LocalPath);
     assert_eq!(
-        location.value,
-        target.canonicalize().unwrap().display().to_string()
+        location.rooted_address().unwrap(),
+        (
+            voom_store::test_support::TEST_STORAGE_ROOT_ID,
+            &voom_store::test_support::test_relative_locator(
+                &target.canonicalize().unwrap().display().to_string()
+            )
+        )
     );
 
     let locations = cp
@@ -296,6 +300,29 @@ async fn successful_commit_promotes_target_records_identity_retires_staging_and_
         count_events(&cp, EventKind::ArtifactCommitCompleted).await,
         1
     );
+}
+
+#[tokio::test]
+async fn commit_accepts_relative_provider_locator_for_rooted_target() {
+    let (cp, _db, dir) = fixture().await;
+    let staged = stage_and_verify_bytes(&cp, dir.path(), b"source bytes").await;
+    let current_dir = std::env::current_dir().unwrap();
+    let relative_root = dir.path().strip_prefix(&current_dir).unwrap();
+    let relative_root_id = StorageRootId(9_000_002);
+    insert_active_test_root(&cp, relative_root_id, relative_root).await;
+    set_test_default_output_root(&cp, relative_root_id).await;
+    let target = dir.path().join("relative-root-target.bin");
+
+    let report = cp
+        .commit_artifact(CommitArtifactInput {
+            artifact_handle_id: staged.artifact_handle_id,
+            target_path: target.clone(),
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(report.state, ArtifactCommitState::Committed);
+    assert_eq!(std::fs::read(target).unwrap(), b"source bytes");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -466,6 +493,118 @@ async fn recover_commit_resumes_finalize_when_target_already_installed() {
 }
 
 #[tokio::test]
+async fn recovery_uses_prepared_rooted_target_after_default_changes() {
+    let (cp, _db, dir) = fixture().await;
+    let overlap = dir.path().join("overlap");
+    std::fs::create_dir(&overlap).unwrap();
+    let prepared_root_id = StorageRootId(9_000_002);
+    let replacement_root_id = StorageRootId(9_000_003);
+    insert_active_test_root(&cp, prepared_root_id, dir.path()).await;
+    insert_active_test_root(&cp, replacement_root_id, &overlap).await;
+    set_test_default_output_root(&cp, prepared_root_id).await;
+
+    let staged = stage_and_verify_bytes(&cp, dir.path(), b"source bytes").await;
+    let target = overlap.join("target.bin");
+    commit_artifact_with_hooks(
+        &cp,
+        CommitArtifactInput {
+            artifact_handle_id: staged.artifact_handle_id,
+            target_path: target.clone(),
+        },
+        &FailBeforeFinalize,
+    )
+    .await
+    .unwrap_err();
+
+    set_test_default_output_root(&cp, replacement_root_id).await;
+    let report = cp.recover_commit(staged.artifact_handle_id).await.unwrap();
+    let location_id = report.result_file_location_id.unwrap();
+    let stored_root_id: i64 =
+        sqlx::query_scalar("SELECT storage_root_id FROM file_locations WHERE id = ?")
+            .bind(i64::try_from(location_id.0).unwrap())
+            .fetch_one(cp.pool_for_test())
+            .await
+            .unwrap();
+
+    assert_eq!(report.state, ArtifactCommitState::Committed);
+    assert_eq!(u64::try_from(stored_root_id).unwrap(), prepared_root_id.0);
+    assert_eq!(std::fs::read(target).unwrap(), b"source bytes");
+}
+
+#[tokio::test]
+async fn recovery_rejects_unknown_persisted_rooted_target_fields() {
+    let (cp, _db, dir) = fixture().await;
+    let staged = stage_and_verify_bytes(&cp, dir.path(), b"source bytes").await;
+    let target = dir.path().join("target.bin");
+    commit_artifact_with_hooks(
+        &cp,
+        CommitArtifactInput {
+            artifact_handle_id: staged.artifact_handle_id,
+            target_path: target,
+        },
+        &FailAfterPrepare,
+    )
+    .await
+    .unwrap_err();
+    sqlx::query(
+        "UPDATE artifact_commit_records \
+         SET report = json_set(report, '$.rooted_target.removed_field', 'legacy') \
+         WHERE artifact_handle_id = ?",
+    )
+    .bind(i64::try_from(staged.artifact_handle_id.0).unwrap())
+    .execute(cp.pool_for_test())
+    .await
+    .unwrap();
+
+    let error = cp
+        .recover_commit(staged.artifact_handle_id)
+        .await
+        .unwrap_err();
+    assert_eq!(error.error_code(), ErrorCode::DbUnreachable);
+    assert!(error.to_string().contains("unknown field"));
+}
+
+#[tokio::test]
+async fn recovery_rejects_invalid_persisted_rooted_target_sqlite_ids() {
+    for invalid_id in [0, u64::MAX] {
+        let (cp, _db, dir) = fixture().await;
+        let staged = stage_and_verify_bytes(&cp, dir.path(), b"source bytes").await;
+        commit_artifact_with_hooks(
+            &cp,
+            CommitArtifactInput {
+                artifact_handle_id: staged.artifact_handle_id,
+                target_path: dir.path().join("target.bin"),
+            },
+            &FailAfterPrepare,
+        )
+        .await
+        .unwrap_err();
+        let mut report: serde_json::Value = sqlx::query_scalar(
+            "SELECT report FROM artifact_commit_records WHERE artifact_handle_id = ?",
+        )
+        .bind(i64::try_from(staged.artifact_handle_id.0).unwrap())
+        .fetch_one(cp.pool_for_test())
+        .await
+        .map(|raw: String| serde_json::from_str(&raw).unwrap())
+        .unwrap();
+        report["rooted_target"]["storage_root_id"] = serde_json::json!(invalid_id);
+        sqlx::query("UPDATE artifact_commit_records SET report = ? WHERE artifact_handle_id = ?")
+            .bind(report.to_string())
+            .bind(i64::try_from(staged.artifact_handle_id.0).unwrap())
+            .execute(cp.pool_for_test())
+            .await
+            .unwrap();
+
+        let error = cp
+            .recover_commit(staged.artifact_handle_id)
+            .await
+            .unwrap_err();
+        assert_eq!(error.error_code(), ErrorCode::DbUnreachable);
+        assert!(error.to_string().contains("not a valid SQLite ID"));
+    }
+}
+
+#[tokio::test]
 async fn recover_commit_repromotes_when_target_absent() {
     let (cp, _db, dir) = fixture().await;
     let staged = stage_and_verify_bytes(&cp, dir.path(), b"source bytes").await;
@@ -630,6 +769,33 @@ async fn fixture() -> (
     (cp, db, artifact_tempdir())
 }
 
+async fn insert_active_test_root(cp: &ControlPlane, id: StorageRootId, path: &Path) {
+    sqlx::query(
+        "INSERT INTO library_roots \
+         (id, library_id, owner_node_id, provider_kind, provider_locator, display_locator, state, \
+          root_epoch, activation_identity, include_globs, exclude_globs, extension_allowlist, \
+          scan_mode, symlink_policy, hidden_file_policy, stability_seconds, debounce_seconds, \
+          enabled, created_at, updated_at) \
+         VALUES (?, 9000001, 9000001, 'local_filesystem', ?, ?, 'active', 1, 'test-owner', \
+                 '[]', '[]', '[]', 'manual_recursive', 'reject', 'ignore', 0, 0, 1, \
+                 '1970-01-01T00:00:00Z', '1970-01-01T00:00:00Z')",
+    )
+    .bind(i64::try_from(id.0).unwrap())
+    .bind(path.display().to_string())
+    .bind(path.display().to_string())
+    .execute(cp.pool_for_test())
+    .await
+    .unwrap();
+}
+
+async fn set_test_default_output_root(cp: &ControlPlane, id: StorageRootId) {
+    sqlx::query("UPDATE library_roots SET default_output_root_id = ? WHERE id = 9000001")
+        .bind(i64::try_from(id.0).unwrap())
+        .execute(cp.pool_for_test())
+        .await
+        .unwrap();
+}
+
 fn artifact_tempdir() -> tempfile::TempDir {
     tempfile::TempDir::new_in(std::env::current_dir().unwrap()).unwrap()
 }
@@ -676,8 +842,10 @@ async fn seed_source(cp: &ControlPlane, path: &Path, bytes: &[u8]) -> SeededSour
     let outcome = cp
         .record_discovered_file(
             DiscoveredFile {
-                location_kind: FileLocationKind::LocalPath,
-                location_value: path.display().to_string(),
+                storage_root_id: voom_store::test_support::TEST_STORAGE_ROOT_ID,
+                provider_relative_locator: voom_store::test_support::test_relative_locator(
+                    &path.display().to_string(),
+                ),
                 content_hash: blake3_checksum(bytes),
                 size_bytes: u64::try_from(bytes.len()).unwrap(),
                 observed_at: OffsetDateTime::UNIX_EPOCH,
@@ -718,6 +886,8 @@ async fn create_pending_commit_result(
     verification_id: ArtifactVerificationId,
     target_path: &str,
 ) -> Result<voom_store::repo::media::artifacts::ArtifactCommitRecord, VoomError> {
+    let target_relative_locator =
+        voom_store::test_support::test_relative_locator(target_path).into_inner();
     let mut tx = cp.pool_for_test().begin().await.unwrap();
     let result = cp
         .artifacts()
@@ -729,7 +899,13 @@ async fn create_pending_commit_result(
                 verification_id,
                 target_path: target_path.to_owned(),
                 temp_path: Some(format!("{target_path}.tmp")),
-                report: serde_json::json!({ "test": true }),
+                report: serde_json::json!({
+                    "test": true,
+                    "rooted_target": {
+                        "storage_root_id": voom_store::test_support::TEST_STORAGE_ROOT_ID.0,
+                        "provider_relative_locator": target_relative_locator,
+                    },
+                }),
                 started_at: OffsetDateTime::UNIX_EPOCH,
             },
         )
@@ -777,8 +953,10 @@ async fn mark_pending_committed(
             &mut tx,
             NewFileLocation {
                 file_version_id: version.id,
-                kind: FileLocationKind::LocalPath,
-                value: target_path.to_owned(),
+                storage_root_id: voom_store::test_support::TEST_STORAGE_ROOT_ID,
+                provider_relative_locator: voom_store::test_support::test_relative_locator(
+                    target_path,
+                ),
                 proof: None,
                 observed_at: OffsetDateTime::UNIX_EPOCH,
             },

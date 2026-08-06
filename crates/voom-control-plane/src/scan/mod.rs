@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use voom_core::{
     BundleId, ErrorCode, FailureClass, FileAssetId, FileLocationId, FileVersionId, MediaSnapshotId,
-    VoomError, WorkerId, format_iso8601,
+    StorageRootId, VoomError, WorkerId, format_iso8601,
 };
 use voom_worker_protocol::{ExpectedFileFacts, ProbeFileRequest, ProbeFileResult};
 
@@ -24,7 +24,9 @@ pub use discovery::{ScanMode, SidecarKind, classify_sidecar, is_supported_media_
 pub use library::{RootBlockReason, RootScanBlocked, RootScanOutcome};
 
 #[derive(Debug, Clone)]
-pub struct ScanPathInput {
+struct ScanPathInput {
+    pub storage_root_id: StorageRootId,
+    pub root_path: PathBuf,
     pub path: PathBuf,
     /// Primary-media extension allowlist. Empty = the built-in
     /// `SUPPORTED_EXTENSIONS` (unchanged explicit-path behavior). A
@@ -139,7 +141,7 @@ impl ControlPlane {
     /// Scan an explicit file or directory path, persisting each successfully
     /// probed media file and returning a report of successes, skips, and the
     /// first selected-file failure.
-    pub async fn scan_path(&self, input: ScanPathInput) -> Result<ScanReport, ScanCommandError> {
+    async fn scan_path(&self, input: ScanPathInput) -> Result<ScanReport, ScanCommandError> {
         let mut launcher = BundledFfprobeLauncher;
         self.scan_path_with_launcher(input, &mut launcher).await
     }
@@ -170,11 +172,17 @@ impl ControlPlane {
             .await
             .map_err(|err| discovery_error(input.path.clone(), &err))?;
         let report = ScanReportBuilder::from_discovered(&discovered);
+        validate_discovered_paths(&input.root_path, &discovered.candidates)
+            .await
+            .map_err(|err| command_error_from_scan(&err, report.report().clone()))?;
         if discovered.candidates.is_empty() {
             return Ok(report.finish());
         }
         let candidate_count = discovered.candidates.len();
         let groups = group_candidates_by_filesystem(discovered.candidates, classifier).await;
+        validate_group_paths(&input.root_path, &groups)
+            .await
+            .map_err(|err| command_error_from_scan(&err, report.report().clone()))?;
         let mut worker_groups = Vec::with_capacity(groups.len());
         for group in groups {
             match self.launch_scan_worker(launcher, &report).await {
@@ -185,8 +193,15 @@ impl ControlPlane {
                 }
             }
         }
-        self.scan_worker_groups(discovered.mode, candidate_count, worker_groups, report)
-            .await
+        self.scan_worker_groups(
+            input.storage_root_id,
+            input.root_path,
+            discovered.mode,
+            candidate_count,
+            worker_groups,
+            report,
+        )
+        .await
     }
 
     async fn launch_scan_worker<L>(
@@ -218,6 +233,8 @@ impl ControlPlane {
 
     async fn scan_worker_groups(
         &self,
+        storage_root_id: StorageRootId,
+        canonical_root: PathBuf,
         mode: discovery::ScanMode,
         candidate_count: usize,
         worker_groups: Vec<(ScanCandidateGroup, Box<dyn ProbeWorkerSession + Send>)>,
@@ -228,8 +245,9 @@ impl ControlPlane {
         let mut tasks = tokio::task::JoinSet::new();
         for (group, worker) in worker_groups {
             let sender = sender.clone();
+            let canonical_root = canonical_root.clone();
             tasks.spawn(async move {
-                run_scan_group(group, worker, sender).await;
+                run_scan_group(group, canonical_root, worker, sender).await;
             });
         }
         drop(sender);
@@ -246,7 +264,16 @@ impl ControlPlane {
             pending.insert(outcome.index(), outcome);
             while let Some(outcome) = pending.remove(&next_index) {
                 next_index += 1;
-                if let Err(err) = self.apply_scan_outcome(mode, &mut report, outcome).await {
+                if let Err(err) = self
+                    .apply_scan_outcome(
+                        storage_root_id,
+                        &canonical_root,
+                        mode,
+                        &mut report,
+                        outcome,
+                    )
+                    .await
+                {
                     fatal = Some(err);
                     pending.clear();
                     break;
@@ -274,6 +301,8 @@ impl ControlPlane {
 
     async fn apply_scan_outcome(
         &self,
+        storage_root_id: StorageRootId,
+        canonical_root: &Path,
         mode: discovery::ScanMode,
         report: &mut ScanReportBuilder,
         outcome: ScanCandidateOutcome,
@@ -287,13 +316,17 @@ impl ControlPlane {
                 ..
             } => {
                 report.record_probe();
-                match persist::persist_scanned_media_snapshot(
+                match persist::persist_scanned_media_snapshot_request(
                     self,
                     worker_id,
-                    &candidate.path,
-                    &candidate.sidecars,
-                    &facts,
-                    &probe,
+                    persist::PersistScanRequest {
+                        storage_root_id,
+                        canonical_root,
+                        canonical_path: &candidate.path,
+                        sidecars: &candidate.sidecars,
+                        candidate: &facts,
+                        result: &probe,
+                    },
                 )
                 .await
                 {
@@ -450,12 +483,14 @@ async fn shutdown_worker_groups(
 
 async fn run_scan_group(
     group: ScanCandidateGroup,
+    canonical_root: PathBuf,
     mut worker: Box<dyn ProbeWorkerSession + Send>,
     sender: tokio::sync::mpsc::Sender<ScanCandidateOutcome>,
 ) {
     let worker_id = worker.worker_id();
     for indexed in group.candidates {
-        let outcome = scan_group_candidate(indexed, worker_id, worker.as_mut()).await;
+        let outcome =
+            scan_group_candidate(indexed, &canonical_root, worker_id, worker.as_mut()).await;
         let should_stop = outcome.is_group_terminal();
         if sender.send(outcome).await.is_err() {
             break;
@@ -469,12 +504,13 @@ async fn run_scan_group(
 
 async fn scan_group_candidate(
     indexed: IndexedScanCandidate,
+    canonical_root: &Path,
     worker_id: WorkerId,
     worker: &mut (dyn ProbeWorkerSession + Send),
 ) -> ScanCandidateOutcome {
     let index = indexed.index;
     let candidate = indexed.candidate;
-    let facts = match hash::observe_candidate_file(&candidate.path).await {
+    let facts = match hash::observe_candidate_file_in_root(canonical_root, &candidate.path).await {
         Ok(facts) => facts,
         Err(error) => {
             return ScanCandidateOutcome::ObserveError {
@@ -512,6 +548,34 @@ async fn scan_group_candidate(
             error,
         },
     }
+}
+
+async fn validate_discovered_paths(
+    canonical_root: &Path,
+    candidates: &[discovery::ScanCandidate],
+) -> Result<(), discovery::ScanError> {
+    for candidate in candidates {
+        hash::ensure_candidate_path_in_root(canonical_root, &candidate.path).await?;
+        for sidecar in &candidate.sidecars {
+            hash::ensure_candidate_path_in_root(canonical_root, &sidecar.path).await?;
+        }
+    }
+    Ok(())
+}
+
+async fn validate_group_paths(
+    canonical_root: &Path,
+    groups: &[ScanCandidateGroup],
+) -> Result<(), discovery::ScanError> {
+    for indexed in groups {
+        for candidate in &indexed.candidates {
+            hash::ensure_candidate_path_in_root(canonical_root, &candidate.candidate.path).await?;
+            for sidecar in &candidate.candidate.sidecars {
+                hash::ensure_candidate_path_in_root(canonical_root, &sidecar.path).await?;
+            }
+        }
+    }
+    Ok(())
 }
 
 impl ScanCandidateOutcome {
@@ -910,6 +974,14 @@ fn discovery_error(path: PathBuf, err: &discovery::ScanError) -> ScanCommandErro
 }
 
 fn command_error_from_voom(err: &VoomError, report: ScanReport) -> ScanCommandError {
+    ScanCommandError {
+        code: err.error_code(),
+        message: err.to_string(),
+        report,
+    }
+}
+
+fn command_error_from_scan(err: &discovery::ScanError, report: ScanReport) -> ScanCommandError {
     ScanCommandError {
         code: err.error_code(),
         message: err.to_string(),

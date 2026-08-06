@@ -5,8 +5,8 @@ use super::{
     ArtifactVerificationStatus, CommittedTicketEvidence, FileAssetId, FileLocationId,
     FileVersionId, JobId, JsonValue, LeaseId, MediaSnapshotId, NewArtifactHandle,
     NewArtifactLocation, OffsetDateTime, PolicyArtifactResolution, PolicyArtifactTarget,
-    ResultLeaseEvidence, SqliteArtifactRepo, TicketId, VerifiedTicketEvidence, VoomError,
-    checked_sqlite_id,
+    ProviderRelativeLocator, ResultLeaseEvidence, SqliteArtifactRepo, StorageRootId, TicketId,
+    VerifiedTicketEvidence, VoomError, checked_sqlite_id,
 };
 use sqlx::Row;
 
@@ -25,7 +25,8 @@ struct PolicyFileVersion {
 #[derive(Debug)]
 struct PolicyFileLocation {
     id: FileLocationId,
-    value: String,
+    storage_root_id: StorageRootId,
+    provider_relative_locator: ProviderRelativeLocator,
 }
 
 const COMMITTED_TICKET_EVIDENCE_SQL: &str = "WITH ticket_results AS ( \
@@ -114,7 +115,8 @@ impl SqliteArtifactRepo {
         let sql = format!(
             "{SELECT_ARTIFACT_VERIFICATION_COLS}, \
              fl.file_version_id AS selected_file_version_id, \
-             fl.value AS selected_location_value, \
+             fl.storage_root_id AS selected_storage_root_id, \
+             fl.provider_relative_locator AS selected_provider_relative_locator, \
              l.ticket_id AS selected_lease_ticket_id \
              FROM artifact_verifications v \
              LEFT JOIN leases l ON l.id = v.workflow_lease_id \
@@ -145,6 +147,7 @@ impl SqliteArtifactRepo {
         tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
         file_version_id: FileVersionId,
         file_location_id: Option<FileLocationId>,
+        owner_resolved_path: &str,
         now: OffsetDateTime,
     ) -> Result<PolicyArtifactResolution, VoomError> {
         let version = require_active_policy_file_version(tx, file_version_id).await?;
@@ -154,7 +157,7 @@ impl SqliteArtifactRepo {
             .resolve_policy_artifact_handle(tx, &version, &location, now)
             .await?;
         let (artifact_location, created_location) = self
-            .resolve_policy_artifact_location(tx, handle.id, &location, now)
+            .resolve_policy_artifact_location(tx, handle.id, owner_resolved_path, now)
             .await?;
 
         Ok(PolicyArtifactResolution {
@@ -164,7 +167,9 @@ impl SqliteArtifactRepo {
                 file_version_id,
                 file_location_id: location.id,
                 media_snapshot_id,
-                path: location.value,
+                storage_root_id: location.storage_root_id,
+                provider_relative_locator: location.provider_relative_locator,
+                path: owner_resolved_path.to_owned(),
                 size_bytes: version.size_bytes,
                 checksum: version.content_hash,
             },
@@ -231,7 +236,7 @@ impl SqliteArtifactRepo {
         &self,
         tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
         handle_id: ArtifactHandleId,
-        location: &PolicyFileLocation,
+        owner_resolved_path: &str,
         now: OffsetDateTime,
     ) -> Result<(ArtifactLocation, Option<ArtifactLocation>), VoomError> {
         let rows = sqlx::query(
@@ -245,7 +250,7 @@ impl SqliteArtifactRepo {
             handle_id.0,
             concat!(module_path!(), ": ", stringify!(handle_id.0)),
         )?)
-        .bind(&location.value)
+        .bind(owner_resolved_path)
         .fetch_all(&mut **tx)
         .await
         .map_err(|err| VoomError::database_context("policy artifact location lookup", err))?;
@@ -257,7 +262,7 @@ impl SqliteArtifactRepo {
                         NewArtifactLocation {
                             artifact_handle_id: handle_id,
                             kind: ArtifactLocationKind::LocalPath,
-                            value: location.value.clone(),
+                            value: owner_resolved_path.to_owned(),
                             observed_at: now,
                         },
                     )
@@ -268,7 +273,7 @@ impl SqliteArtifactRepo {
             _ => Err(VoomError::Conflict(format!(
                 "artifact_handle {handle_id} has {} live local_path locations for {:?}",
                 rows.len(),
-                location.value
+                owner_resolved_path
             ))),
         }
     }
@@ -321,11 +326,12 @@ async fn select_policy_file_location(
     version_id: FileVersionId,
     selected_id: Option<FileLocationId>,
 ) -> Result<PolicyFileLocation, VoomError> {
-    let mut rows: Vec<(i64, i64, String, String)> = if let Some(location_id) = selected_id {
+    let mut rows: Vec<(i64, i64, i64, String)> = if let Some(location_id) = selected_id {
         sqlx::query_as(
-            "SELECT id, file_version_id, kind, value \
-             FROM file_locations \
-             WHERE id = ? AND retired_at IS NULL",
+            "SELECT fl.id, fl.file_version_id, fl.storage_root_id, \
+                    fl.provider_relative_locator \
+             FROM file_locations fl JOIN library_roots lr ON lr.id = fl.storage_root_id \
+             WHERE fl.id = ? AND fl.address_state = 'rooted' AND fl.retired_at IS NULL",
         )
         .bind(i64_from_u64(
             location_id.0,
@@ -336,10 +342,11 @@ async fn select_policy_file_location(
         .map_err(|err| VoomError::database_context("policy file location lookup", err))?
     } else {
         sqlx::query_as(
-            "SELECT id, file_version_id, kind, value \
-             FROM file_locations \
-             WHERE file_version_id = ? AND kind = 'local_path' \
-               AND retired_at IS NULL ORDER BY id",
+            "SELECT fl.id, fl.file_version_id, fl.storage_root_id, \
+                    fl.provider_relative_locator \
+             FROM file_locations fl JOIN library_roots lr ON lr.id = fl.storage_root_id \
+             WHERE fl.file_version_id = ? AND fl.address_state = 'rooted' \
+               AND fl.retired_at IS NULL ORDER BY fl.id",
         )
         .bind(i64_from_u64(
             version_id.0,
@@ -351,7 +358,11 @@ async fn select_policy_file_location(
     };
     let [row] = rows.as_mut_slice() else {
         return Err(VoomError::Config(format!(
-            "file_version {version_id} must have exactly one selected live local_path; found {}",
+            concat!(
+                "file_version {} must have exactly one selected live rooted location; ",
+                "found {}"
+            ),
+            version_id,
             rows.len()
         )));
     };
@@ -366,14 +377,15 @@ async fn select_policy_file_location(
             FileVersionId(location_version_id)
         )));
     }
-    if row.2 != "local_path" {
-        return Err(VoomError::Config(format!(
-            "file_location {location_id} must be kind local_path"
-        )));
-    }
+    let storage_root_id = StorageRootId(u64_from_i64(row.2, "file_locations.storage_root_id")?);
+    let provider_relative_locator = ProviderRelativeLocator::new(std::mem::take(&mut row.3))
+        .map_err(|error| {
+            VoomError::database_context("policy file location relative locator", error)
+        })?;
     Ok(PolicyFileLocation {
         id: location_id,
-        value: std::mem::take(&mut row.3),
+        storage_root_id,
+        provider_relative_locator,
     })
 }
 
@@ -614,10 +626,28 @@ fn decode_verified_ticket_evidence(
     validate_verification_integer_fields(row)?;
     let verification = row_to_verification(row)?;
     validate_verification_lease_ticket(row, &verification)?;
+    let storage_root_id = evidence_optional_id(row, "selected_storage_root_id", StorageRootId)?;
+    let relative_locator: Option<String> =
+        evidence_value(row, "selected_provider_relative_locator")?;
+    let provider_relative_locator = relative_locator
+        .map(ProviderRelativeLocator::new)
+        .transpose()
+        .map_err(|error| {
+            VoomError::database_context(
+                "workflow evidence selected_provider_relative_locator",
+                error,
+            )
+        })?;
+    if storage_root_id.is_some() != provider_relative_locator.is_some() {
+        return Err(VoomError::database(
+            "workflow evidence selected file location has an incomplete rooted address",
+        ));
+    }
     Ok(VerifiedTicketEvidence {
         verification,
         file_version_id: evidence_optional_id(row, "selected_file_version_id", FileVersionId)?,
-        location_value: evidence_value(row, "selected_location_value")?,
+        storage_root_id,
+        provider_relative_locator,
     })
 }
 

@@ -26,6 +26,10 @@ fn issue_payload(status: &str) -> IssueLifecyclePayload {
     reason = "one arm per Event variant — a new variant must fail to compile here; \
               identical empty bodies are intentional, never collapse them"
 )]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one arm per Event variant is an intentional compile-time exhaustiveness guard"
+)]
 fn _event_variants_are_exhaustive(e: &Event) {
     match e {
         Event::SchemaInitialized(_) => {}
@@ -49,6 +53,12 @@ fn _event_variants_are_exhaustive(e: &Event) {
         Event::NodeHeartbeatRecorded(_) => {}
         Event::NodeMarkedStale(_) => {}
         Event::NodeRetired(_) => {}
+        Event::StorageRootCreated(_) => {}
+        Event::StorageRootOwnerAssigned(_) => {}
+        Event::StorageRootActivated(_) => {}
+        Event::StorageRootValidationLost(_) => {}
+        Event::StorageRootReactivated(_) => {}
+        Event::StorageRootRetired(_) => {}
         Event::WorkerRegistered(_) => {}
         Event::WorkerLinkedToNode(_) => {}
         Event::WorkerCapabilityRecorded(_) => {}
@@ -94,9 +104,12 @@ fn _event_variants_are_exhaustive(e: &Event) {
         Event::FileAssetCreated(_) => {}
         Event::FileVersionCreated(_) => {}
         Event::FileLocationRecorded(_) => {}
+        Event::FileLocationRootedRecorded(_) => {}
         Event::FileLocationAliased(_) => {}
+        Event::FileLocationRootedAliased(_) => {}
         Event::FileLocationRetiredByMove(_) => {}
         Event::FileLocationRecordedByMove(_) => {}
+        Event::FileLocationRootedRecordedByMove(_) => {}
         Event::IdentityEvidenceRecorded(_) => {}
         Event::IdentityEvidenceAccepted(_) => {}
         Event::IdentityEvidenceSuperseded(_) => {}
@@ -257,6 +270,43 @@ fn event_kind_matches_serde_tag() {
             node_id: voom_core::NodeId(1),
             retired_at: OffsetDateTime::UNIX_EPOCH,
             epoch: 3,
+        }),
+        Event::StorageRootCreated(StorageRootCreatedPayload {
+            storage_root_id: voom_core::StorageRootId(1),
+            library_id: voom_core::LibraryId(1),
+            owner_node_id: voom_core::NodeId(1),
+            provider_kind: voom_core::StorageProviderKind::LocalFilesystem,
+            state: voom_core::StorageRootState::Configured,
+            root_epoch: 0,
+        }),
+        Event::StorageRootOwnerAssigned(StorageRootOwnerAssignedPayload {
+            storage_root_id: voom_core::StorageRootId(1),
+            owner_node_id: voom_core::NodeId(1),
+            state: voom_core::StorageRootState::Configured,
+            root_epoch: 0,
+        }),
+        Event::StorageRootActivated(StorageRootActivatedPayload {
+            storage_root_id: voom_core::StorageRootId(1),
+            owner_node_id: voom_core::NodeId(1),
+            activation_identity: "identity".to_owned(),
+            root_epoch: 1,
+        }),
+        Event::StorageRootValidationLost(StorageRootValidationLostPayload {
+            storage_root_id: voom_core::StorageRootId(1),
+            owner_node_id: voom_core::NodeId(1),
+            reason: "reason".to_owned(),
+            root_epoch: 1,
+        }),
+        Event::StorageRootReactivated(StorageRootReactivatedPayload {
+            storage_root_id: voom_core::StorageRootId(1),
+            owner_node_id: voom_core::NodeId(1),
+            activation_identity: "identity".to_owned(),
+            root_epoch: 1,
+        }),
+        Event::StorageRootRetired(StorageRootRetiredPayload {
+            storage_root_id: voom_core::StorageRootId(1),
+            owner_node_id: Some(voom_core::NodeId(1)),
+            root_epoch: 1,
         }),
         Event::WorkerRegistered(WorkerRegisteredPayload {
             worker_id: voom_core::WorkerId(1),
@@ -702,13 +752,27 @@ fn event_kind_matches_serde_tag() {
             file_location_id: voom_core::FileLocationId(1),
             file_version_id: voom_core::FileVersionId(1),
             kind: "local_path".to_owned(),
-            value: "/tmp/x".to_owned(),
+            value: "/legacy/x.mkv".to_owned(),
+        }),
+        Event::FileLocationRootedRecorded(FileLocationRootedRecordedPayload {
+            file_location_id: voom_core::FileLocationId(1),
+            file_version_id: voom_core::FileVersionId(1),
+            storage_root_id: voom_core::StorageRootId(1),
+            provider_relative_locator: voom_core::ProviderRelativeLocator::new("x.mkv".to_owned())
+                .unwrap(),
         }),
         Event::FileLocationAliased(FileLocationAliasedPayload {
             file_location_id: voom_core::FileLocationId(1),
             file_version_id: voom_core::FileVersionId(1),
             kind: "local_path".to_owned(),
-            value: "/tmp/x".to_owned(),
+            value: "/legacy/x.mkv".to_owned(),
+        }),
+        Event::FileLocationRootedAliased(FileLocationRootedAliasedPayload {
+            file_location_id: voom_core::FileLocationId(1),
+            file_version_id: voom_core::FileVersionId(1),
+            storage_root_id: voom_core::StorageRootId(1),
+            provider_relative_locator: voom_core::ProviderRelativeLocator::new("x.mkv".to_owned())
+                .unwrap(),
         }),
         Event::FileLocationRetiredByMove(FileLocationRetiredByMovePayload {
             file_location_id: voom_core::FileLocationId(1),
@@ -720,7 +784,16 @@ fn event_kind_matches_serde_tag() {
             new_file_location_id: voom_core::FileLocationId(2),
             file_version_id: voom_core::FileVersionId(1),
             kind: "local_path".to_owned(),
-            value: "/tmp/x".to_owned(),
+            value: "/legacy/x.mkv".to_owned(),
+            observed_at: OffsetDateTime::UNIX_EPOCH,
+        }),
+        Event::FileLocationRootedRecordedByMove(FileLocationRootedRecordedByMovePayload {
+            retired_file_location_id: voom_core::FileLocationId(1),
+            new_file_location_id: voom_core::FileLocationId(2),
+            file_version_id: voom_core::FileVersionId(1),
+            storage_root_id: voom_core::StorageRootId(1),
+            provider_relative_locator: voom_core::ProviderRelativeLocator::new("x.mkv".to_owned())
+                .unwrap(),
             observed_at: OffsetDateTime::UNIX_EPOCH,
         }),
         Event::IdentityEvidenceRecorded(IdentityEvidenceRecordedPayload {

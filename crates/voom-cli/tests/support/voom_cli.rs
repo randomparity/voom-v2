@@ -4,6 +4,7 @@
 )]
 
 use std::io;
+use std::path::Path;
 use std::process::{Command, Output};
 
 use serde_json::Value;
@@ -37,6 +38,16 @@ impl VoomTestDb {
     pub async fn control_plane(&self) -> Result<ControlPlane, Box<dyn std::error::Error>> {
         Ok(ControlPlane::open(&self.url).await?)
     }
+
+    pub async fn configure_local_root(
+        &self,
+        path: &Path,
+    ) -> Result<voom_core::StorageRootId, Box<dyn std::error::Error>> {
+        let pool = voom_store::connect(&self.url).await?;
+        let root_id = voom_store::test_support::seed_test_storage_root(&pool).await?;
+        voom_store::test_support::set_test_storage_root_path(&pool, path).await?;
+        Ok(root_id)
+    }
 }
 
 pub fn run_voom<I, S>(database_url: &str, args: I) -> Result<VoomOutput, Box<dyn std::error::Error>>
@@ -58,6 +69,10 @@ where
         .env(
             "VOOM_VERIFY_ARTIFACT_WORKER_BIN",
             target_debug_binary("voom-verify-artifact-worker"),
+        )
+        .env(
+            "VOOM_LOCAL_NODE_ID",
+            voom_store::test_support::TEST_STORAGE_ROOT_ID.0.to_string(),
         )
         .output()?;
     output_to_envelope(output)

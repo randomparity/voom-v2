@@ -26,6 +26,8 @@ async fn directory_scan_summarizes_successes_and_skips() {
     let report = cp
         .scan_path_with_launcher(
             ScanPathInput {
+                storage_root_id: voom_store::test_support::TEST_STORAGE_ROOT_ID,
+                root_path: std::path::PathBuf::from("/"),
                 path: dir.path().to_path_buf(),
                 extension_allowlist: Vec::new(),
             },
@@ -73,6 +75,8 @@ async fn directory_scan_persists_matching_srt_sidecar_as_bundle_member() {
     let report = cp
         .scan_path_with_launcher(
             ScanPathInput {
+                storage_root_id: voom_store::test_support::TEST_STORAGE_ROOT_ID,
+                root_path: std::path::PathBuf::from("/"),
                 path: dir.path().to_path_buf(),
                 extension_allowlist: Vec::new(),
             },
@@ -124,6 +128,8 @@ async fn repeated_directory_scan_links_sidecar_without_membership_conflict() {
     let first = cp
         .scan_path_with_launcher(
             ScanPathInput {
+                storage_root_id: voom_store::test_support::TEST_STORAGE_ROOT_ID,
+                root_path: std::path::PathBuf::from("/"),
                 path: dir.path().to_path_buf(),
                 extension_allowlist: Vec::new(),
             },
@@ -134,6 +140,8 @@ async fn repeated_directory_scan_links_sidecar_without_membership_conflict() {
     let second = cp
         .scan_path_with_launcher(
             ScanPathInput {
+                storage_root_id: voom_store::test_support::TEST_STORAGE_ROOT_ID,
+                root_path: std::path::PathBuf::from("/"),
                 path: dir.path().to_path_buf(),
                 extension_allowlist: Vec::new(),
             },
@@ -152,8 +160,8 @@ async fn repeated_directory_scan_links_sidecar_without_membership_conflict() {
         second.files[0].sidecars[0].bundle_id,
         second.files[0].bundle_id.unwrap()
     );
-    assert_eq!(table_count(&cp, "asset_bundles").await, 2);
-    assert_eq!(table_count(&cp, "asset_bundle_members").await, 4);
+    assert_eq!(table_count(&cp, "asset_bundles").await, 1);
+    assert_eq!(table_count(&cp, "asset_bundle_members").await, 2);
 }
 
 #[tokio::test]
@@ -169,6 +177,8 @@ async fn scan_report_root_path_is_canonical() {
     let report = cp
         .scan_path_with_launcher(
             ScanPathInput {
+                storage_root_id: voom_store::test_support::TEST_STORAGE_ROOT_ID,
+                root_path: std::path::PathBuf::from("/"),
                 path: noncanonical,
                 extension_allowlist: Vec::new(),
             },
@@ -190,6 +200,8 @@ async fn all_skipped_directory_does_not_launch_worker() {
     let report = cp
         .scan_path_with_launcher(
             ScanPathInput {
+                storage_root_id: voom_store::test_support::TEST_STORAGE_ROOT_ID,
+                root_path: std::path::PathBuf::from("/"),
                 path: dir.path().to_path_buf(),
                 extension_allowlist: Vec::new(),
             },
@@ -223,6 +235,8 @@ async fn single_filesystem_directory_scan_uses_one_worker() {
     let report = cp
         .scan_path_with_launcher_and_classifier(
             ScanPathInput {
+                storage_root_id: voom_store::test_support::TEST_STORAGE_ROOT_ID,
+                root_path: std::path::PathBuf::from("/"),
                 path: dir.path().to_path_buf(),
                 extension_allowlist: Vec::new(),
             },
@@ -248,6 +262,50 @@ async fn single_filesystem_directory_scan_uses_one_worker() {
     assert_eq!(launcher.shutdowns(), launcher.launched());
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn scan_rejects_candidate_swapped_to_out_of_root_symlink_before_dispatch() {
+    let root = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let candidate = write_file(root.path(), "movie.mkv", b"inside");
+    let outside_file = write_file(outside.path(), "secret.mkv", b"outside");
+    let classifier = SwappingFilesystemClassifier {
+        candidate: candidate.clone(),
+        outside_file,
+    };
+    let (cp, _db) = cp_with_manual_clock(T0).await;
+    let mut launcher = FakeLauncher::new(FakePlan::AllSuccess);
+
+    let error = cp
+        .scan_path_with_launcher_and_classifier(
+            ScanPathInput {
+                storage_root_id: voom_store::test_support::TEST_STORAGE_ROOT_ID,
+                root_path: root.path().canonicalize().unwrap(),
+                path: root.path().to_path_buf(),
+                extension_allowlist: Vec::new(),
+            },
+            &mut launcher,
+            &classifier,
+        )
+        .await
+        .unwrap_err();
+
+    assert!(
+        error.to_string().contains("symlink") || error.to_string().contains("escaped"),
+        "unexpected error: {error}"
+    );
+    assert!(
+        candidate
+            .symlink_metadata()
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    assert!(launcher.launched().is_empty());
+    assert!(launcher.dispatched().is_empty());
+    assert_eq!(table_count(&cp, "file_locations").await, 0);
+}
+
 #[tokio::test]
 async fn multi_filesystem_directory_scan_uses_one_worker_per_identity() {
     let dir = tempfile::tempdir().unwrap();
@@ -263,6 +321,8 @@ async fn multi_filesystem_directory_scan_uses_one_worker_per_identity() {
     let report = cp
         .scan_path_with_launcher_and_classifier(
             ScanPathInput {
+                storage_root_id: voom_store::test_support::TEST_STORAGE_ROOT_ID,
+                root_path: std::path::PathBuf::from("/"),
                 path: dir.path().to_path_buf(),
                 extension_allowlist: Vec::new(),
             },
@@ -302,6 +362,8 @@ async fn multi_filesystem_directory_scan_dispatches_groups_concurrently() {
         Duration::from_secs(2),
         cp.scan_path_with_launcher_and_classifier(
             ScanPathInput {
+                storage_root_id: voom_store::test_support::TEST_STORAGE_ROOT_ID,
+                root_path: std::path::PathBuf::from("/"),
                 path: dir.path().to_path_buf(),
                 extension_allowlist: Vec::new(),
             },
@@ -343,6 +405,8 @@ async fn multi_filesystem_fatal_probe_error_preserves_ordered_report() {
     let err = cp
         .scan_path_with_launcher_and_classifier(
             ScanPathInput {
+                storage_root_id: voom_store::test_support::TEST_STORAGE_ROOT_ID,
+                root_path: std::path::PathBuf::from("/"),
                 path: dir.path().to_path_buf(),
                 extension_allowlist: Vec::new(),
             },
@@ -380,6 +444,8 @@ async fn launch_failure_after_prior_group_shuts_down_started_worker() {
     let err = cp
         .scan_path_with_launcher_and_classifier(
             ScanPathInput {
+                storage_root_id: voom_store::test_support::TEST_STORAGE_ROOT_ID,
+                root_path: std::path::PathBuf::from("/"),
                 path: dir.path().to_path_buf(),
                 extension_allowlist: Vec::new(),
             },
@@ -405,6 +471,8 @@ async fn failure_after_prior_commit_returns_success_and_failing_file() {
     let err = cp
         .scan_path_with_launcher(
             ScanPathInput {
+                storage_root_id: voom_store::test_support::TEST_STORAGE_ROOT_ID,
+                root_path: std::path::PathBuf::from("/"),
                 path: dir.path().to_path_buf(),
                 extension_allowlist: Vec::new(),
             },
@@ -453,6 +521,8 @@ async fn directory_scan_continues_after_unprobeable_media_file() {
     let report = cp
         .scan_path_with_launcher(
             ScanPathInput {
+                storage_root_id: voom_store::test_support::TEST_STORAGE_ROOT_ID,
+                root_path: std::path::PathBuf::from("/"),
                 path: dir.path().to_path_buf(),
                 extension_allowlist: Vec::new(),
             },
@@ -491,6 +561,8 @@ async fn explicit_file_scan_keeps_unprobeable_media_failure_fatal() {
     let err = cp
         .scan_path_with_launcher(
             ScanPathInput {
+                storage_root_id: voom_store::test_support::TEST_STORAGE_ROOT_ID,
+                root_path: std::path::PathBuf::from("/"),
                 path: media.clone(),
                 extension_allowlist: Vec::new(),
             },
@@ -519,6 +591,8 @@ async fn spawn_style_worker_failure_still_aborts_directory_scan() {
     let err = cp
         .scan_path_with_launcher(
             ScanPathInput {
+                storage_root_id: voom_store::test_support::TEST_STORAGE_ROOT_ID,
+                root_path: std::path::PathBuf::from("/"),
                 path: dir.path().to_path_buf(),
                 extension_allowlist: Vec::new(),
             },
@@ -545,6 +619,8 @@ async fn bootstrap_worker_id_is_used_for_launch_dispatch_and_persistence() {
     let report = cp
         .scan_path_with_launcher(
             ScanPathInput {
+                storage_root_id: voom_store::test_support::TEST_STORAGE_ROOT_ID,
+                root_path: std::path::PathBuf::from("/"),
                 path: media.clone(),
                 extension_allowlist: Vec::new(),
             },
@@ -587,6 +663,8 @@ async fn non_utf8_candidate_path_fails_before_worker_dispatch() {
     let err = cp
         .scan_path_with_launcher(
             ScanPathInput {
+                storage_root_id: voom_store::test_support::TEST_STORAGE_ROOT_ID,
+                root_path: std::path::PathBuf::from("/"),
                 path: dir.path().to_path_buf(),
                 extension_allowlist: Vec::new(),
             },
@@ -701,6 +779,22 @@ struct FakeSession {
 #[derive(Clone)]
 struct FakeFilesystemClassifier {
     identities: Arc<BTreeMap<std::path::PathBuf, ScanFilesystemIdentity>>,
+}
+
+#[cfg(unix)]
+struct SwappingFilesystemClassifier {
+    candidate: std::path::PathBuf,
+    outside_file: std::path::PathBuf,
+}
+
+#[cfg(unix)]
+#[async_trait::async_trait]
+impl ScanFilesystemClassifier for SwappingFilesystemClassifier {
+    async fn identify(&self, _path: &Path) -> ScanFilesystemIdentity {
+        std::fs::remove_file(&self.candidate).unwrap();
+        std::os::unix::fs::symlink(&self.outside_file, &self.candidate).unwrap();
+        ScanFilesystemIdentity(7)
+    }
 }
 
 #[async_trait::async_trait]

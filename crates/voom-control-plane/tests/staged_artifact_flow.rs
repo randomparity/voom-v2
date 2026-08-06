@@ -12,7 +12,7 @@ use voom_control_plane::artifact::{
     ArtifactInspectionState, ArtifactListInput, CommitArtifactInput, StageCopyInput,
     VerifyArtifactInput,
 };
-use voom_control_plane::scan::ScanPathInput;
+use voom_control_plane::scan::RootScanOutcome;
 use voom_core::ErrorCode;
 use voom_store::repo::media::artifacts::ArtifactCommitState;
 use voom_test_support::TempDatabase;
@@ -28,16 +28,17 @@ const BASIC_FFPROBE_JSON: &str =
 async fn scan_stage_verify_commit_flow_persists_committed_artifact() {
     let _ffprobe_guard = install_worker_siblings();
     let (cp, _db, dir) = fixture().await;
-    let media = tiny_media_fixture();
+    let media = dir.path().join("committed-source.mp4");
+    std::fs::copy(tiny_media_fixture(), &media).unwrap();
 
-    let scan = cp
-        .scan_path(ScanPathInput {
-            path: media.clone(),
-            extension_allowlist: Vec::new(),
-        })
+    let outcome = cp
+        .scan_library_root(voom_store::test_support::TEST_STORAGE_ROOT_ID)
         .await
         .unwrap();
-    let scanned = scan.files.first().unwrap();
+    let RootScanOutcome::Scanned(scan) = outcome else {
+        unreachable!("active local test root must scan")
+    };
+    let scanned = scan.files.iter().find(|file| file.path == media).unwrap();
     let staging_path = dir.path().join("staged.mp4");
     let staged = cp
         .stage_copy(StageCopyInput {
@@ -142,11 +143,22 @@ struct StagedFixture {
 }
 
 async fn fixture() -> (ControlPlane, Db, TempDir) {
+    let dir = artifact_tempdir();
     let tmp = TempDatabase::new().unwrap();
     let url = format!("sqlite://{}", tmp.path().display());
     voom_store::init(&url).await.unwrap();
-    let cp = ControlPlane::open(&url).await.unwrap();
-    (cp, Db { _tmp: tmp, url }, artifact_tempdir())
+    let pool = voom_store::connect(&url).await.unwrap();
+    voom_store::test_support::seed_test_storage_root(&pool)
+        .await
+        .unwrap();
+    voom_store::test_support::set_test_storage_root_path(&pool, dir.path())
+        .await
+        .unwrap();
+    let cp = ControlPlane::open_with_pool(pool, std::sync::Arc::new(voom_core::SystemClock))
+        .await
+        .unwrap()
+        .with_local_node_id(Some(voom_core::NodeId(9_000_001)));
+    (cp, Db { _tmp: tmp, url }, dir)
 }
 
 fn artifact_tempdir() -> TempDir {
@@ -154,14 +166,20 @@ fn artifact_tempdir() -> TempDir {
 }
 
 async fn stage_fixture(cp: &ControlPlane, dir: &Path, name: &str) -> StagedFixture {
-    let scan = cp
-        .scan_path(ScanPathInput {
-            path: tiny_media_fixture(),
-            extension_allowlist: Vec::new(),
-        })
+    let source_path = dir.join(format!("{name}-source.mp4"));
+    std::fs::copy(tiny_media_fixture(), &source_path).unwrap();
+    let outcome = cp
+        .scan_library_root(voom_store::test_support::TEST_STORAGE_ROOT_ID)
         .await
         .unwrap();
-    let scanned = scan.files.first().unwrap();
+    let RootScanOutcome::Scanned(scan) = outcome else {
+        unreachable!("active local test root must scan")
+    };
+    let scanned = scan
+        .files
+        .iter()
+        .find(|file| file.path == source_path)
+        .unwrap();
     let staging_path = dir.join(format!("{name}-staged.mp4"));
     let staged = cp
         .stage_copy(StageCopyInput {

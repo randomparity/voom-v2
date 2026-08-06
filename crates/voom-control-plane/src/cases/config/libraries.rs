@@ -1,14 +1,20 @@
 //! `ControlPlane` wrappers over `SqliteLibraryRepo` for the `voom library` /
-//! `voom library root` CLI. Thin delegation plus the no-overlap rule that keeps
-//! root ownership unambiguous (ADR 0027).
+//! `voom library root` CLI, including atomic lifecycle facts.
 
-use std::path::Path;
-
-use voom_core::{LibraryId, LibraryRootId, VoomError};
+use sqlx::{Sqlite, Transaction};
+use voom_core::{LibraryId, NodeId, StorageRootId, StorageRootState, VoomError};
+use voom_events::payload::{
+    StorageRootActivatedPayload, StorageRootCreatedPayload, StorageRootOwnerAssignedPayload,
+    StorageRootReactivatedPayload, StorageRootRetiredPayload, StorageRootValidationLostPayload,
+};
+use voom_events::{Event, SubjectType};
 use voom_store::repo::library::libraries::{Library, LibraryUpdate, NewLibrary};
-use voom_store::repo::library::library_roots::{LibraryRoot, LibraryRootUpdate, NewLibraryRoot};
+use voom_store::repo::library::library_roots::{
+    EffectiveLibraryRoot, LibraryRoot, LibraryRootUpdate, NewLibraryRoot,
+};
 
 use crate::ControlPlane;
+use crate::cases::{append_event, begin_tx, commit_tx};
 
 impl ControlPlane {
     /// Create a library.
@@ -97,7 +103,8 @@ impl ControlPlane {
             .await
     }
 
-    /// Delete a library (its roots cascade). Returns whether a row was removed.
+    /// Delete a library with no durable roots. Root history is retained, so a
+    /// library with any root must be retained too.
     ///
     /// # Errors
     /// Propagates repository errors.
@@ -105,29 +112,45 @@ impl ControlPlane {
         self.libraries.delete_library(id).await
     }
 
-    /// Create a library root. `input.canonical_path` must already be
-    /// canonicalized by the caller. Rejects a path that overlaps an existing
-    /// root (component-wise ancestor-or-descendant) so no file is claimed by
-    /// two roots.
+    /// Create a configured node-owned library root and its lifecycle fact in
+    /// one transaction.
     ///
     /// # Errors
-    /// Returns `NotFound` for a missing library, `Conflict` for a duplicate or
-    /// overlapping `canonical_path`; propagates repository errors.
+    /// Returns `NotFound` for a missing library or owner and `Conflict` for a
+    /// retired owner or duplicate owner/provider/locator tuple.
     pub async fn create_library_root(
         &self,
         input: NewLibraryRoot,
     ) -> Result<LibraryRoot, VoomError> {
-        for existing in self.libraries.list_library_roots(None).await? {
-            if paths_overlap(&existing.canonical_path, &input.canonical_path) {
-                return Err(VoomError::Conflict(format!(
-                    "library root path {:?} overlaps existing root {} at {:?}",
-                    input.canonical_path, existing.id, existing.canonical_path
-                )));
-            }
+        let now = self.clock().now();
+        let mut tx = begin_tx(&self.pool).await?;
+        let result = async {
+            let root = self
+                .libraries
+                .create_library_root_in_tx(&mut tx, input, now)
+                .await?;
+            append_event(
+                &self.events,
+                &mut tx,
+                SubjectType::StorageRoot,
+                Some(root.id.0),
+                now,
+                Event::StorageRootCreated(StorageRootCreatedPayload {
+                    storage_root_id: root.id,
+                    library_id: root.library_id,
+                    owner_node_id: root.owner_node_id.ok_or_else(|| {
+                        VoomError::database("new storage root has no owner".to_owned())
+                    })?,
+                    provider_kind: root.provider_kind,
+                    state: root.state,
+                    root_epoch: root.root_epoch,
+                }),
+            )
+            .await?;
+            Ok(root)
         }
-        self.libraries
-            .create_library_root(input, self.clock().now())
-            .await
+        .await;
+        finish_library_root_tx(tx, "create", result).await
     }
 
     /// Get a library root by id.
@@ -136,7 +159,7 @@ impl ControlPlane {
     /// Propagates repository errors.
     pub async fn get_library_root(
         &self,
-        id: LibraryRootId,
+        id: StorageRootId,
     ) -> Result<Option<LibraryRoot>, VoomError> {
         self.libraries.get_library_root(id).await
     }
@@ -152,13 +175,21 @@ impl ControlPlane {
         self.libraries.list_library_roots(library_id).await
     }
 
+    /// Read a root with the parent-library and owner-node availability overlay.
+    pub async fn effective_library_root(
+        &self,
+        id: StorageRootId,
+    ) -> Result<Option<EffectiveLibraryRoot>, VoomError> {
+        self.libraries.effective_library_root(id).await
+    }
+
     /// Apply a partial update to a library root.
     ///
     /// # Errors
     /// Returns `NotFound` for a missing id; propagates repository errors.
     pub async fn update_library_root(
         &self,
-        id: LibraryRootId,
+        id: StorageRootId,
         update: LibraryRootUpdate,
     ) -> Result<LibraryRoot, VoomError> {
         self.libraries
@@ -172,7 +203,7 @@ impl ControlPlane {
     /// Returns `NotFound` for a missing id; propagates repository errors.
     pub async fn set_library_root_enabled(
         &self,
-        id: LibraryRootId,
+        id: StorageRootId,
         enabled: bool,
     ) -> Result<LibraryRoot, VoomError> {
         self.libraries
@@ -180,22 +211,180 @@ impl ControlPlane {
             .await
     }
 
-    /// Delete a library root. Returns whether a row was removed.
-    ///
-    /// # Errors
-    /// Propagates repository errors.
-    pub async fn delete_library_root(&self, id: LibraryRootId) -> Result<bool, VoomError> {
-        self.libraries.delete_library_root(id).await
+    /// Assign a migrated, never-activated root to a non-retired owner.
+    pub async fn assign_library_root_owner(
+        &self,
+        id: StorageRootId,
+        owner_node_id: NodeId,
+    ) -> Result<LibraryRoot, VoomError> {
+        let now = self.clock().now();
+        let mut tx = begin_tx(&self.pool).await?;
+        let result = async {
+            let root = self
+                .libraries
+                .assign_library_root_owner_in_tx(&mut tx, id, owner_node_id, now)
+                .await?;
+            append_event(
+                &self.events,
+                &mut tx,
+                SubjectType::StorageRoot,
+                Some(id.0),
+                now,
+                Event::StorageRootOwnerAssigned(StorageRootOwnerAssignedPayload {
+                    storage_root_id: id,
+                    owner_node_id,
+                    state: root.state,
+                    root_epoch: root.root_epoch,
+                }),
+            )
+            .await?;
+            Ok(root)
+        }
+        .await;
+        finish_library_root_tx(tx, "assign owner", result).await
+    }
+
+    /// Record successful owner validation. Revalidation from unavailable emits
+    /// a reactivation fact; first activation emits an activation fact.
+    pub async fn activate_library_root(
+        &self,
+        id: StorageRootId,
+        activation_identity: String,
+    ) -> Result<LibraryRoot, VoomError> {
+        let now = self.clock().now();
+        let mut tx = begin_tx(&self.pool).await?;
+        let result = async {
+            let prior = self
+                .libraries
+                .get_library_root_in_tx(&mut tx, id)
+                .await?
+                .ok_or_else(|| VoomError::NotFound(format!("library root {id} not found")))?;
+            let root = self
+                .libraries
+                .activate_library_root_in_tx(&mut tx, id, activation_identity.clone(), now)
+                .await?;
+            let owner_node_id = required_root_owner(&root)?;
+            let event = if prior.state == StorageRootState::Unavailable {
+                Event::StorageRootReactivated(StorageRootReactivatedPayload {
+                    storage_root_id: id,
+                    owner_node_id,
+                    activation_identity,
+                    root_epoch: root.root_epoch,
+                })
+            } else {
+                Event::StorageRootActivated(StorageRootActivatedPayload {
+                    storage_root_id: id,
+                    owner_node_id,
+                    activation_identity,
+                    root_epoch: root.root_epoch,
+                })
+            };
+            append_event(
+                &self.events,
+                &mut tx,
+                SubjectType::StorageRoot,
+                Some(id.0),
+                now,
+                event,
+            )
+            .await?;
+            Ok(root)
+        }
+        .await;
+        finish_library_root_tx(tx, "activate", result).await
+    }
+
+    /// Mark an active root unavailable after owner validation is lost.
+    pub async fn mark_library_root_unavailable(
+        &self,
+        id: StorageRootId,
+        reason: String,
+    ) -> Result<LibraryRoot, VoomError> {
+        if reason.trim().is_empty() {
+            return Err(VoomError::Config(
+                "storage root validation-loss reason must not be empty".to_owned(),
+            ));
+        }
+        let now = self.clock().now();
+        let mut tx = begin_tx(&self.pool).await?;
+        let result = async {
+            let root = self
+                .libraries
+                .mark_library_root_unavailable_in_tx(&mut tx, id, now)
+                .await?;
+            let owner_node_id = required_root_owner(&root)?;
+            append_event(
+                &self.events,
+                &mut tx,
+                SubjectType::StorageRoot,
+                Some(id.0),
+                now,
+                Event::StorageRootValidationLost(StorageRootValidationLostPayload {
+                    storage_root_id: id,
+                    owner_node_id,
+                    reason,
+                    root_epoch: root.root_epoch,
+                }),
+            )
+            .await?;
+            Ok(root)
+        }
+        .await;
+        finish_library_root_tx(tx, "mark unavailable", result).await
+    }
+
+    /// Terminally retire a root while retaining its stable identity and facts.
+    pub async fn retire_library_root(&self, id: StorageRootId) -> Result<LibraryRoot, VoomError> {
+        let now = self.clock().now();
+        let mut tx = begin_tx(&self.pool).await?;
+        let result = async {
+            let root = self
+                .libraries
+                .retire_library_root_in_tx(&mut tx, id, now)
+                .await?;
+            append_event(
+                &self.events,
+                &mut tx,
+                SubjectType::StorageRoot,
+                Some(id.0),
+                now,
+                Event::StorageRootRetired(StorageRootRetiredPayload {
+                    storage_root_id: id,
+                    owner_node_id: root.owner_node_id,
+                    root_epoch: root.root_epoch,
+                }),
+            )
+            .await?;
+            Ok(root)
+        }
+        .await;
+        finish_library_root_tx(tx, "retire", result).await
     }
 }
 
-/// True when either path is a component-wise prefix of the other (equal,
-/// ancestor, or descendant). Both must be canonical absolute paths. Component
-/// comparison — not string prefix — so `/media/movies` and
-/// `/media/movies-adult` do **not** overlap.
-pub(crate) fn paths_overlap(a: &str, b: &str) -> bool {
-    let (a, b) = (Path::new(a), Path::new(b));
-    a.starts_with(b) || b.starts_with(a)
+async fn finish_library_root_tx(
+    tx: Transaction<'_, Sqlite>,
+    operation: &str,
+    result: Result<LibraryRoot, VoomError>,
+) -> Result<LibraryRoot, VoomError> {
+    match result {
+        Ok(root) => {
+            commit_tx(tx).await?;
+            Ok(root)
+        }
+        Err(original_error) => match tx.rollback().await {
+            Ok(()) => Err(original_error),
+            Err(rollback_error) => Err(VoomError::database(format!(
+                "library root {operation} failed: {original_error}; rollback also failed: \
+                 {rollback_error}"
+            ))),
+        },
+    }
+}
+
+fn required_root_owner(root: &LibraryRoot) -> Result<NodeId, VoomError> {
+    root.owner_node_id
+        .ok_or_else(|| VoomError::database(format!("storage root {} has no owner", root.id)))
 }
 
 #[cfg(test)]

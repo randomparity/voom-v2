@@ -11,7 +11,7 @@ use voom_artifact::commit_pipeline::{
 use voom_core::ids::{ArtifactCommitRecordId, ArtifactVerificationId, BundleId};
 use voom_core::{
     ArtifactHandleId, ArtifactLocationId, FailureClass, FileLocationId, FileVersionId,
-    MediaSnapshotId, UseLeaseId, VoomError, WorkerId,
+    MediaSnapshotId, ProviderRelativeLocator, StorageRootId, UseLeaseId, VoomError, WorkerId,
 };
 use voom_events::payload::{
     ArtifactCommitCompletedPayload, ArtifactCommitRecoveryRequiredPayload,
@@ -81,6 +81,7 @@ pub struct CommitAudioExtractOutputInput {
 pub struct CommitAudioExtractSetInput {
     pub operation_row_id: u64,
     pub source_file_version_id: FileVersionId,
+    pub source_file_location_id: FileLocationId,
     pub source_media_snapshot_id: MediaSnapshotId,
     pub source_bundle_id: BundleId,
     pub outputs: Vec<CommitAudioExtractOutputInput>,
@@ -512,7 +513,7 @@ pub(crate) async fn try_adopt_legacy_extract(
             target.display()
         )));
     }
-    let observed = validate_legacy_extract_owner(&input, &owner, &target).await?;
+    let observed = validate_legacy_extract_owner(cp, &input, &owner, &target).await?;
     let probed = probe_staged_extract_result(
         cp,
         &target,
@@ -531,6 +532,7 @@ pub(crate) async fn try_adopt_legacy_extract(
 }
 
 async fn validate_legacy_extract_owner(
+    cp: &ControlPlane,
     input: &LegacyExtractAdoptionInput,
     owner: &LegacyAudioExtractOwner,
     target: &Path,
@@ -538,7 +540,7 @@ async fn validate_legacy_extract_owner(
     require_legacy_selection(input, owner)?;
     require_legacy_lineage(input, owner)?;
     require_legacy_artifact_owner(input, owner)?;
-    require_legacy_result(input, owner)?;
+    require_legacy_result(cp, owner, target).await?;
     require_legacy_bundle(input, owner)?;
     let observed = crate::artifact::fs::observe_regular_file(target).await?;
     if observed.size_bytes != owner.result_size_bytes
@@ -695,17 +697,26 @@ fn require_legacy_artifact_owner(
     )
 }
 
-fn require_legacy_result(
-    input: &LegacyExtractAdoptionInput,
+async fn require_legacy_result(
+    cp: &ControlPlane,
     owner: &LegacyAudioExtractOwner,
+    target: &Path,
 ) -> Result<(), VoomError> {
     require_legacy_evidence(
         owner.result_location_file_version_id == owner.result_file_version_id,
         owner,
         "result location belongs to another file version",
     )?;
+    let result_location = crate::operation_source::resolve_root_relative_existing_path(
+        cp,
+        "legacy audio extraction result",
+        owner.result_storage_root_id,
+        &owner.result_provider_relative_locator,
+    )
+    .await?;
+    let requested_target = crate::artifact::fs::canonical_existing_file_no_symlink(target).await?;
     require_legacy_evidence(
-        owner.result_location == input.output.target_path,
+        result_location == requested_target,
         owner,
         "result location differs from the requested target",
     )?;
@@ -1350,6 +1361,14 @@ async fn load_recovery_extract_set(
     cp: &ControlPlane,
     input: &CommitAudioExtractSetInput,
 ) -> Result<Vec<PreparedSidecarCommit>, VoomError> {
+    let source = crate::operation_source::select_local_source(
+        cp,
+        "audio extraction recovery",
+        input.source_file_version_id,
+        Some(input.source_file_location_id),
+    )
+    .await?;
+    let (source_storage_root_id, _) = source.location.rooted_address()?;
     let mut prepared = Vec::with_capacity(input.outputs.len());
     for output in &input.outputs {
         let commit_record_id = output.prepared_commit_record_id.ok_or_else(|| {
@@ -1381,10 +1400,23 @@ async fn load_recovery_extract_set(
                 output.operation_output_id
             ))
         })?;
+        let (storage_root_id, provider_relative_locator) =
+            crate::artifact::commit::rooted_target_from_commit_report(&record)?;
+        let target_path = crate::operation_source::resolve_exact_artifact_recovery_target(
+            cp,
+            "audio extraction recovery",
+            source_storage_root_id,
+            storage_root_id,
+            &provider_relative_locator,
+            &output.target_path,
+        )
+        .await?;
         prepared.push(PreparedSidecarCommit {
             record,
             staging_path: output.staging_path.clone(),
-            target_path: output.target_path.clone(),
+            storage_root_id,
+            provider_relative_locator,
+            target_path,
             temp_path,
             expected_facts: ArtifactFileFacts {
                 path: output.staging_path.clone(),
@@ -1427,9 +1459,17 @@ async fn prepare_extract_set(
     input: &CommitAudioExtractSetInput,
     hooks: &dyn ExtractClaimFenceHooks,
 ) -> Result<Vec<PreparedSidecarCommit>, VoomError> {
+    let source = crate::operation_source::select_local_source(
+        cp,
+        "audio extraction commit",
+        input.source_file_version_id,
+        Some(input.source_file_location_id),
+    )
+    .await?;
+    let (source_storage_root_id, _) = source.location.rooted_address()?;
     let mut inspected = Vec::with_capacity(input.outputs.len());
     for output in &input.outputs {
-        inspected.push(inspect_extract_output(output).await?);
+        inspected.push(inspect_extract_output(cp, source_storage_root_id, output).await?);
     }
     let preflight_now = cp.clock().now();
     let mut preflight_tx = begin_tx(&cp.pool).await?;
@@ -1466,6 +1506,8 @@ async fn prepare_extract_set(
         prepared.push(PreparedSidecarCommit {
             record,
             staging_path: output.staging_path.clone(),
+            storage_root_id: inspected.storage_root_id,
+            provider_relative_locator: inspected.provider_relative_locator,
             target_path: inspected.target_path,
             temp_path: inspected.temp_path,
             expected_facts: inspected.expected_facts,
@@ -1485,15 +1527,26 @@ async fn prepare_extract_set(
 }
 
 struct InspectedExtractOutput {
+    storage_root_id: StorageRootId,
+    provider_relative_locator: ProviderRelativeLocator,
     target_path: PathBuf,
     temp_path: PathBuf,
     expected_facts: ArtifactFileFacts,
 }
 
 async fn inspect_extract_output(
+    cp: &ControlPlane,
+    source_storage_root_id: StorageRootId,
     input: &CommitAudioExtractOutputInput,
 ) -> Result<InspectedExtractOutput, VoomError> {
-    let target_path = canonical_new_leaf_no_symlink(&input.target_path).await?;
+    let (storage_root_id, provider_relative_locator, target_path) =
+        crate::operation_source::resolve_artifact_target(
+            cp,
+            "audio extraction commit",
+            source_storage_root_id,
+            &input.target_path,
+        )
+        .await?;
     let temp_path = canonical_new_leaf_no_symlink(unique_temp_sibling_path(&target_path)?).await?;
     let reported_facts = ArtifactFileFacts {
         path: input.staging_path.clone(),
@@ -1505,6 +1558,8 @@ async fn inspect_extract_output(
     let expected_facts =
         require_expected_staging_facts(&input.staging_path, &reported_facts).await?;
     Ok(InspectedExtractOutput {
+        storage_root_id,
+        provider_relative_locator,
         target_path,
         temp_path,
         expected_facts,
@@ -1540,6 +1595,10 @@ async fn create_extract_pending_in_tx(
             "expected_size_bytes": inspected.expected_facts.size_bytes,
             "expected_checksum": inspected.expected_facts.content_hash,
             "staging_local_file_key": inspected.expected_facts.local_file_key,
+            "rooted_target": {
+                "storage_root_id": inspected.storage_root_id.0,
+                "provider_relative_locator": inspected.provider_relative_locator.as_str(),
+            },
         }),
         started_at: now,
     };
@@ -1687,6 +1746,8 @@ async fn record_staged_audio_in_tx(
 struct PreparedSidecarCommit {
     record: ArtifactCommitRecord,
     staging_path: PathBuf,
+    storage_root_id: StorageRootId,
+    provider_relative_locator: ProviderRelativeLocator,
     target_path: PathBuf,
     temp_path: PathBuf,
     expected_facts: ArtifactFileFacts,
@@ -1770,6 +1831,8 @@ async fn finalize_extract_member(
             tx,
             NewSidecarArtifactCommit {
                 commit_record_id: member.record.id,
+                storage_root_id: member.storage_root_id,
+                provider_relative_locator: member.provider_relative_locator.clone(),
                 target_path: member.target_path.display().to_string(),
                 content_hash: member.expected_facts.content_hash.clone(),
                 size_bytes: member.expected_facts.size_bytes,

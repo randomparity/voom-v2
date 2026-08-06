@@ -5,7 +5,7 @@ use std::path::Path;
 use time::OffsetDateTime;
 use voom_core::{ErrorCode, FileVersionId, rng_test_support::FrozenRng};
 use voom_store::repo::media::identity::{
-    DiscoveredFile, FileLocationKind, FileLocationRepo, IngestOutcome, NewFileLocation,
+    DiscoveredFile, FileLocationRepo, IngestOutcome, NewFileLocation,
 };
 
 #[tokio::test]
@@ -16,13 +16,7 @@ async fn source_selection_rejects_ambiguous_live_locations() {
     std::fs::write(&source, b"source bytes").unwrap();
     std::fs::write(&alias, b"source bytes").unwrap();
     let seeded = seed_source(&cp, &source, b"source bytes").await;
-    create_location(
-        &cp,
-        seeded.file_version_id,
-        FileLocationKind::LocalPath,
-        &alias,
-    )
-    .await;
+    create_location(&cp, seeded.file_version_id, (), &alias).await;
 
     let err = select_source(&cp, seeded.file_version_id, None)
         .await
@@ -31,7 +25,7 @@ async fn source_selection_rejects_ambiguous_live_locations() {
     assert_eq!(err.error_code(), ErrorCode::ConfigInvalid);
     assert!(
         err.to_string()
-            .contains("multiple live local source locations")
+            .contains("multiple live rooted source locations")
     );
 }
 
@@ -81,8 +75,10 @@ async fn seed_source(cp: &crate::ControlPlane, path: &Path, bytes: &[u8]) -> See
     let outcome = cp
         .record_discovered_file(
             DiscoveredFile {
-                location_kind: FileLocationKind::LocalPath,
-                location_value: path.display().to_string(),
+                storage_root_id: voom_store::test_support::TEST_STORAGE_ROOT_ID,
+                provider_relative_locator: voom_store::test_support::test_relative_locator(
+                    &path.display().to_string(),
+                ),
                 content_hash: blake3_checksum(bytes),
                 size_bytes: u64::try_from(bytes.len()).unwrap(),
                 observed_at: OffsetDateTime::UNIX_EPOCH,
@@ -106,7 +102,7 @@ async fn seed_source(cp: &crate::ControlPlane, path: &Path, bytes: &[u8]) -> See
 async fn create_location(
     cp: &crate::ControlPlane,
     file_version_id: FileVersionId,
-    kind: FileLocationKind,
+    _kind: (),
     path: &Path,
 ) -> FileLocationId {
     let mut tx = cp.pool_for_test().begin().await.unwrap();
@@ -116,8 +112,10 @@ async fn create_location(
             &mut tx,
             NewFileLocation {
                 file_version_id,
-                kind,
-                value: path.display().to_string(),
+                storage_root_id: voom_store::test_support::TEST_STORAGE_ROOT_ID,
+                provider_relative_locator: voom_store::test_support::test_relative_locator(
+                    &path.display().to_string(),
+                ),
                 proof: None,
                 observed_at: OffsetDateTime::UNIX_EPOCH,
             },

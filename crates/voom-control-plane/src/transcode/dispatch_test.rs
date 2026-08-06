@@ -4,7 +4,7 @@ use std::ffi::{OsStr, OsString};
 use std::path::PathBuf;
 
 use voom_core::{FileAssetId, FileLocationId, FileVersionId};
-use voom_store::repo::media::identity::{FileLocation, FileLocationKind, FileVersion, ProducedBy};
+use voom_store::repo::media::identity::{FileLocation, FileVersion, ProducedBy};
 use voom_worker_protocol::{
     TranscodeVideoExpectedFacts, TranscodeVideoInput, TranscodeVideoObservedFacts,
     TranscodeVideoOutput, TranscodeVideoProfile, TranscodeVideoStatus, VideoHardwareAssignment,
@@ -108,8 +108,12 @@ fn selected_source() -> SelectedSource {
         location: FileLocation {
             id: FileLocationId(1),
             file_version_id: FileVersionId(1),
-            kind: FileLocationKind::LocalPath,
-            value: "/library/Movie.mkv".to_owned(),
+            address: voom_store::repo::media::identity::FileLocationAddress::Rooted {
+                storage_root_id: voom_store::test_support::TEST_STORAGE_ROOT_ID,
+                provider_relative_locator: voom_store::test_support::test_relative_locator(
+                    "/library/Movie.mkv",
+                ),
+            },
             proof_kind: None,
             proof_value: None,
             observed_at: time::OffsetDateTime::UNIX_EPOCH,

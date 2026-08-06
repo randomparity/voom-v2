@@ -30,7 +30,7 @@ use std::time::Duration;
 
 use voom_control_plane::ControlPlane;
 use voom_control_plane::policy::{ComplianceExecutionOptions, PolicyInputFromScanInput};
-use voom_control_plane::scan::{ScanPathInput, ScanReportFileStatus};
+use voom_control_plane::scan::{RootScanOutcome, ScanReportFileStatus};
 use voom_control_plane::workflow::CoordinatorOutcome;
 use voom_core::FileVersionId;
 use voom_store::repo::execution::workflow_summaries::{
@@ -100,9 +100,16 @@ async fn phase_barrier_runs_transcode_remux_audio_chain_end_to_end() {
     let url = format!("sqlite://{}", db.path().display());
     voom_store::init(&url).await.unwrap();
     let pool = voom_store::connect(&url).await.unwrap();
-    let cp = ControlPlane::open_with_pool(pool, std::sync::Arc::new(voom_core::SystemClock))
+    voom_store::test_support::seed_test_storage_root(&pool)
         .await
         .unwrap();
+    voom_store::test_support::set_test_storage_root_path(&pool, &root)
+        .await
+        .unwrap();
+    let cp = ControlPlane::open_with_pool(pool, std::sync::Arc::new(voom_core::SystemClock))
+        .await
+        .unwrap()
+        .with_local_node_id(Some(voom_core::NodeId(9_000_001)));
 
     let scanned = scan_one(&cp, &source).await;
     let scanned_version = scanned.file_version_id;
@@ -340,17 +347,17 @@ struct ScannedFile {
 }
 
 async fn scan_one(cp: &ControlPlane, source: &Path) -> ScannedFile {
-    let scan = cp
-        .scan_path(ScanPathInput {
-            path: source.to_owned(),
-            extension_allowlist: Vec::new(),
-        })
+    let outcome = cp
+        .scan_library_root(voom_store::test_support::TEST_STORAGE_ROOT_ID)
         .await
         .unwrap();
+    let RootScanOutcome::Scanned(scan) = outcome else {
+        unreachable!("active local test root must scan")
+    };
     let scanned = scan
         .files
         .iter()
-        .find(|file| file.status == ScanReportFileStatus::Scanned)
+        .find(|file| file.path == source && file.status == ScanReportFileStatus::Scanned)
         .unwrap();
     ScannedFile {
         file_version_id: scanned.file_version_id.unwrap(),

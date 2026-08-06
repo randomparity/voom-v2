@@ -8,7 +8,7 @@ use voom_control_plane::policy::{
     PolicyInputFromScanInput, PolicyInputFromScanResult, PolicyMutationError, RootScopedScanInput,
     RootScopedScanInputResult, WholeScanInput, WholeScanInputResult,
 };
-use voom_core::{FileVersionId, LibraryRootId, MediaSnapshotId, PolicyDocumentId};
+use voom_core::{FileVersionId, MediaSnapshotId, PolicyDocumentId, StorageRootId};
 use voom_store::repo::policy::policies::{
     CreatedPolicyVersion, PolicyDocument, PolicyDocumentSummary, PolicyVersion,
 };
@@ -131,7 +131,7 @@ pub async fn run(database_url: &str, local: Local, command: PolicyCommand) -> io
                 return create_from_whole_scan(&cp, local, slug).await;
             }
             if let Some(root_id) = root {
-                return create_from_root(&cp, local, slug, LibraryRootId(root_id)).await;
+                return create_from_root(&cp, local, slug, StorageRootId(root_id)).await;
             }
             match single_file_input(
                 slug,
@@ -201,7 +201,7 @@ async fn create_from_root(
     cp: &ControlPlane,
     local: Local,
     slug: String,
-    library_root_id: LibraryRootId,
+    library_root_id: StorageRootId,
 ) -> io::Result<i32> {
     match cp
         .create_policy_input_set_from_root(RootScopedScanInput {

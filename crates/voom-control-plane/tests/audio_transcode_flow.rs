@@ -10,7 +10,7 @@ use std::process::Command;
 use serde_json::{Value, json};
 use voom_control_plane::ControlPlane;
 use voom_control_plane::policy::{ComplianceExecutionOptions, PolicyInputFromScanInput};
-use voom_control_plane::scan::{ScanPathInput, ScanReportFileStatus};
+use voom_control_plane::scan::{RootScanOutcome, ScanReportFileStatus};
 use voom_core::{FileLocationId, FileVersionId, MediaSnapshotId};
 use voom_plan::PlanOperationKind;
 use voom_store::repo::media::identity::{MediaSnapshotRepo, SqliteIdentityRepo};
@@ -44,7 +44,7 @@ async fn audio_transcode_flow_verifies_commits_and_authoritative_replan() {
     let source = tmp.path().join("Movie.mkv");
     generate_audio_fixture(&source);
 
-    let (cp, url, _db) = control_plane().await;
+    let (cp, url, _db) = control_plane(tmp.path()).await;
     let scanned = scan_fixture(&cp, &source).await;
     let source_snapshot_id =
         record_augmented_audio_snapshot(&cp, &url, scanned.file_version_id, scanned.snapshot_id)
@@ -122,7 +122,7 @@ async fn audio_transcode_existing_target_path_fails_before_success_reporting() {
     let source = tmp.path().join("Movie.mkv");
     generate_audio_fixture(&source);
 
-    let (cp, url, _db) = control_plane().await;
+    let (cp, url, _db) = control_plane(tmp.path()).await;
     let scanned = scan_fixture(&cp, &source).await;
     let source_snapshot_id =
         record_augmented_audio_snapshot(&cp, &url, scanned.file_version_id, scanned.snapshot_id)
@@ -169,7 +169,7 @@ async fn audio_transcode_existing_target_path_fails_before_success_reporting() {
     assert!(
         err.source
             .to_string()
-            .contains("promotion destination already exists"),
+            .contains("artifact path must not already exist"),
         "unexpected error: {}",
         err.source
     );
@@ -188,30 +188,37 @@ struct ScannedFixture {
     snapshot_id: MediaSnapshotId,
 }
 
-async fn control_plane() -> (ControlPlane, String, TempDatabase) {
+async fn control_plane(root: &Path) -> (ControlPlane, String, TempDatabase) {
     let db = TempDatabase::new().unwrap();
     let url = format!("sqlite://{}", db.path().display());
     voom_store::init(&url).await.unwrap();
     let pool = voom_store::connect(&url).await.unwrap();
-    let cp = ControlPlane::open_with_pool(pool, std::sync::Arc::new(voom_core::SystemClock))
+    voom_store::test_support::seed_test_storage_root(&pool)
         .await
         .unwrap();
+    voom_store::test_support::set_test_storage_root_path(&pool, root)
+        .await
+        .unwrap();
+    let cp = ControlPlane::open_with_pool(pool, std::sync::Arc::new(voom_core::SystemClock))
+        .await
+        .unwrap()
+        .with_local_node_id(Some(voom_core::NodeId(9_000_001)));
     (cp, url, db)
 }
 
 async fn scan_fixture(cp: &ControlPlane, source: &Path) -> ScannedFixture {
-    let scan = cp
-        .scan_path(ScanPathInput {
-            path: source.to_path_buf(),
-            extension_allowlist: Vec::new(),
-        })
+    let outcome = cp
+        .scan_library_root(voom_store::test_support::TEST_STORAGE_ROOT_ID)
         .await
         .unwrap();
+    let RootScanOutcome::Scanned(scan) = outcome else {
+        unreachable!("active local test root must scan")
+    };
     assert_eq!(scan.summary.scanned_count(), 1);
     let scanned = scan
         .files
         .iter()
-        .find(|file| file.status == ScanReportFileStatus::Scanned)
+        .find(|file| file.path == source && file.status == ScanReportFileStatus::Scanned)
         .unwrap();
     ScannedFixture {
         file_version_id: scanned.file_version_id.unwrap(),

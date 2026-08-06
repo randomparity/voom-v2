@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use voom_core::{
     BundleId, EvidenceId, FileAssetId, FileLocationId, FileVersionId, MediaSnapshotId,
-    MediaVariantId, MediaWorkId, WorkerId,
+    MediaVariantId, MediaWorkId, ProviderRelativeLocator, StorageRootId, WorkerId,
 };
 
 use crate::AssertionKind;
@@ -83,11 +83,29 @@ pub struct FileLocationRecordedPayload {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct FileLocationRootedRecordedPayload {
+    pub file_location_id: FileLocationId,
+    pub file_version_id: FileVersionId,
+    pub storage_root_id: StorageRootId,
+    pub provider_relative_locator: ProviderRelativeLocator,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct FileLocationAliasedPayload {
     pub file_location_id: FileLocationId,
     pub file_version_id: FileVersionId,
     pub kind: String,
     pub value: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FileLocationRootedAliasedPayload {
+    pub file_location_id: FileLocationId,
+    pub file_version_id: FileVersionId,
+    pub storage_root_id: StorageRootId,
+    pub provider_relative_locator: ProviderRelativeLocator,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -107,6 +125,18 @@ pub struct FileLocationRecordedByMovePayload {
     pub file_version_id: FileVersionId,
     pub kind: String,
     pub value: String,
+    #[serde(with = "time::serde::iso8601")]
+    pub observed_at: OffsetDateTime,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FileLocationRootedRecordedByMovePayload {
+    pub retired_file_location_id: FileLocationId,
+    pub new_file_location_id: FileLocationId,
+    pub file_version_id: FileVersionId,
+    pub storage_root_id: StorageRootId,
+    pub provider_relative_locator: ProviderRelativeLocator,
     #[serde(with = "time::serde::iso8601")]
     pub observed_at: OffsetDateTime,
 }

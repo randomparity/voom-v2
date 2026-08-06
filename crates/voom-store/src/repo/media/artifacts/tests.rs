@@ -1,5 +1,7 @@
 use super::*;
 
+const OWNER_RESOLVED_SOURCE_PATH: &str = "/owner-resolved/source.mkv";
+
 use serde_json::json;
 use time::OffsetDateTime;
 use voom_core::{
@@ -8,8 +10,8 @@ use voom_core::{
 
 use crate::repo::execution::workers::{NewWorker, SqliteWorkerRepo, WorkerKind};
 use crate::repo::media::identity::{
-    FileAssetRepo, FileLocationKind, FileLocationRepo, FileVersionRepo, NewFileLocation,
-    NewFileVersion, ProducedBy, SqliteIdentityRepo,
+    FileAssetRepo, FileLocationRepo, FileVersionRepo, NewFileLocation, NewFileVersion, ProducedBy,
+    SqliteIdentityRepo,
 };
 
 use crate::test_support::fresh_initialized_pool_at;
@@ -60,8 +62,11 @@ async fn source_version_and_location(pool: &sqlx::SqlitePool) -> (FileVersionId,
             &mut tx,
             NewFileLocation {
                 file_version_id: source.id,
-                kind: FileLocationKind::LocalPath,
-                value: "/media/source.mkv".to_owned(),
+                storage_root_id: crate::test_support::TEST_STORAGE_ROOT_ID,
+                provider_relative_locator: crate::test_support::test_relative_locator(&format!(
+                    "/media/source-{}.mkv",
+                    source.id.0
+                )),
                 proof: None,
                 observed_at: OffsetDateTime::UNIX_EPOCH,
             },
@@ -188,8 +193,10 @@ async fn dependency_produced_version_and_location(
             &mut tx,
             NewFileLocation {
                 file_version_id: version.id,
-                kind: FileLocationKind::LocalPath,
-                value: "/media/produced.mkv".to_owned(),
+                storage_root_id: crate::test_support::TEST_STORAGE_ROOT_ID,
+                provider_relative_locator: crate::test_support::test_relative_locator(
+                    "/media/produced.mkv",
+                ),
                 proof: None,
                 observed_at: OffsetDateTime::UNIX_EPOCH,
             },
@@ -236,6 +243,7 @@ async fn policy_target_resolution_creates_then_reuses_active_artifact() {
             &mut first_tx,
             version_id,
             Some(location_id),
+            OWNER_RESOLVED_SOURCE_PATH,
             OffsetDateTime::UNIX_EPOCH,
         )
         .await
@@ -248,6 +256,7 @@ async fn policy_target_resolution_creates_then_reuses_active_artifact() {
             &mut second_tx,
             version_id,
             Some(location_id),
+            OWNER_RESOLVED_SOURCE_PATH,
             OffsetDateTime::UNIX_EPOCH,
         )
         .await
@@ -256,6 +265,10 @@ async fn policy_target_resolution_creates_then_reuses_active_artifact() {
 
     assert!(first.created_handle.is_some());
     assert!(first.created_location.is_some());
+    assert_eq!(
+        first.created_location.as_ref().unwrap().value,
+        OWNER_RESOLVED_SOURCE_PATH
+    );
     assert!(second.created_handle.is_none());
     assert!(second.created_location.is_none());
     assert_eq!(
@@ -268,7 +281,7 @@ async fn policy_target_resolution_creates_then_reuses_active_artifact() {
     );
     assert_eq!(second.target.file_version_id, version_id);
     assert_eq!(second.target.file_location_id, location_id);
-    assert_eq!(second.target.path, "/media/source.mkv");
+    assert_eq!(second.target.path, OWNER_RESOLVED_SOURCE_PATH);
     assert_eq!(second.target.size_bytes, 1024);
     assert_eq!(second.target.checksum, "source-hash");
 }
@@ -347,6 +360,7 @@ async fn policy_target_resolution_reuses_dependency_committed_handle() {
             &mut tx,
             version_id,
             Some(location_id),
+            OWNER_RESOLVED_SOURCE_PATH,
             OffsetDateTime::UNIX_EPOCH,
         )
         .await
@@ -387,6 +401,7 @@ async fn policy_target_resolution_rejects_superseded_version() {
             &mut tx,
             version_id,
             Some(location_id),
+            OWNER_RESOLVED_SOURCE_PATH,
             OffsetDateTime::UNIX_EPOCH,
         )
         .await
@@ -415,6 +430,7 @@ async fn policy_target_resolution_rejects_retired_or_mismatched_location() {
             &mut mismatched_tx,
             version_id,
             Some(other_location_id),
+            OWNER_RESOLVED_SOURCE_PATH,
             OffsetDateTime::UNIX_EPOCH,
         )
         .await
@@ -433,6 +449,7 @@ async fn policy_target_resolution_rejects_retired_or_mismatched_location() {
             &mut retired_tx,
             version_id,
             Some(location_id),
+            OWNER_RESOLVED_SOURCE_PATH,
             OffsetDateTime::UNIX_EPOCH,
         )
         .await
@@ -459,8 +476,10 @@ async fn policy_target_resolution_rejects_ambiguous_unpinned_local_path() {
             &mut location_tx,
             NewFileLocation {
                 file_version_id: version_id,
-                kind: FileLocationKind::LocalPath,
-                value: "/media/duplicate-source.mkv".to_owned(),
+                storage_root_id: crate::test_support::TEST_STORAGE_ROOT_ID,
+                provider_relative_locator: crate::test_support::test_relative_locator(
+                    "/media/duplicate-source.mkv",
+                ),
                 proof: None,
                 observed_at: OffsetDateTime::UNIX_EPOCH,
             },
@@ -471,7 +490,13 @@ async fn policy_target_resolution_rejects_ambiguous_unpinned_local_path() {
 
     let mut tx = pool.begin().await.unwrap();
     let error = repo
-        .resolve_policy_artifact_target_in_tx(&mut tx, version_id, None, OffsetDateTime::UNIX_EPOCH)
+        .resolve_policy_artifact_target_in_tx(
+            &mut tx,
+            version_id,
+            None,
+            OWNER_RESOLVED_SOURCE_PATH,
+            OffsetDateTime::UNIX_EPOCH,
+        )
         .await
         .unwrap_err();
 
@@ -561,6 +586,7 @@ async fn require_expected_facts_returns_typed_values_inside_and_outside_transact
     let handle = create_staged_handle(&repo, source_version_id).await;
     let expected = ArtifactExpectedFacts {
         source_file_version_id: Some(source_version_id),
+        source_file_location_id: None,
         size_bytes: 1024,
         checksum: "abc".to_owned(),
     };
@@ -1487,8 +1513,10 @@ async fn commit_records_move_through_terminal_states() {
             &mut tx,
             NewFileLocation {
                 file_version_id: committed_version.id,
-                kind: FileLocationKind::LocalPath,
-                value: "/media/committed.mkv".to_owned(),
+                storage_root_id: crate::test_support::TEST_STORAGE_ROOT_ID,
+                provider_relative_locator: crate::test_support::test_relative_locator(
+                    "/media/committed.mkv",
+                ),
                 proof: None,
                 observed_at: OffsetDateTime::UNIX_EPOCH + time::Duration::seconds(3),
             },
@@ -2068,8 +2096,10 @@ async fn committed_record_requires_result_location_on_staged_commit_child() {
             &mut tx,
             NewFileLocation {
                 file_version_id: wrong_child.id,
-                kind: FileLocationKind::LocalPath,
-                value: "/media/wrong.mkv".to_owned(),
+                storage_root_id: crate::test_support::TEST_STORAGE_ROOT_ID,
+                provider_relative_locator: crate::test_support::test_relative_locator(
+                    "/media/wrong.mkv",
+                ),
                 proof: None,
                 observed_at: OffsetDateTime::UNIX_EPOCH,
             },
@@ -2081,32 +2111,37 @@ async fn committed_record_requires_result_location_on_staged_commit_child() {
             &mut tx,
             NewFileLocation {
                 file_version_id: staged_child.id,
-                kind: FileLocationKind::LocalPath,
-                value: "/media/wrong-target.mkv".to_owned(),
+                storage_root_id: crate::test_support::TEST_STORAGE_ROOT_ID,
+                provider_relative_locator: crate::test_support::test_relative_locator(
+                    "/media/wrong-target.mkv",
+                ),
                 proof: None,
                 observed_at: OffsetDateTime::UNIX_EPOCH,
             },
         )
         .await
         .unwrap();
-    let wrong_kind_location = identity
-        .create_file_location_in_tx(
-            &mut tx,
-            NewFileLocation {
-                file_version_id: staged_child.id,
-                kind: FileLocationKind::Historical,
-                value: "/media/out.mkv".to_owned(),
-                proof: None,
-                observed_at: OffsetDateTime::UNIX_EPOCH,
-            },
+    let wrong_address_location = FileLocationId(
+        u64::try_from(
+            sqlx::query(
+                "INSERT INTO file_locations \
+                 (file_version_id, address_state, legacy_kind, legacy_locator, observed_at) \
+                 VALUES (?, 'unassigned_legacy', 'object_store_key', 's3://bucket/out.mkv', \
+                         '1970-01-01T00:00:00Z')",
+            )
+            .bind(i64::try_from(staged_child.id.0).unwrap())
+            .execute(&mut *tx)
+            .await
+            .unwrap()
+            .last_insert_rowid(),
         )
-        .await
-        .unwrap();
+        .unwrap(),
+    );
 
     for location_id in [
         wrong_location.id,
         wrong_path_location.id,
-        wrong_kind_location.id,
+        wrong_address_location,
     ] {
         let err = repo
             .mark_commit_committed_in_tx(
@@ -2193,8 +2228,10 @@ async fn committed_record_rejects_retired_result_file_version() {
             &mut tx,
             NewFileLocation {
                 file_version_id: result_version.id,
-                kind: FileLocationKind::LocalPath,
-                value: "/media/result-retired.mkv".to_owned(),
+                storage_root_id: crate::test_support::TEST_STORAGE_ROOT_ID,
+                provider_relative_locator: crate::test_support::test_relative_locator(
+                    "/media/result-retired.mkv",
+                ),
                 proof: None,
                 observed_at: OffsetDateTime::UNIX_EPOCH,
             },
@@ -2278,6 +2315,10 @@ async fn sidecar_commit_helper_links_staged_version_to_source_and_finalizes_pend
             &mut tx,
             NewSidecarArtifactCommit {
                 commit_record_id: pending.id,
+                storage_root_id: crate::test_support::TEST_STORAGE_ROOT_ID,
+                provider_relative_locator: crate::test_support::test_relative_locator(
+                    "/media/movie.eng.opus.ogg",
+                ),
                 target_path: "/media/movie.eng.opus.ogg".to_owned(),
                 content_hash: "sidecar-hash".to_owned(),
                 size_bytes: 2048,
@@ -2322,8 +2363,13 @@ async fn sidecar_commit_helper_links_staged_version_to_source_and_finalizes_pend
         .unwrap();
     assert_eq!(locations.len(), 1);
     assert_eq!(locations[0].id, committed.file_location_id);
-    assert_eq!(locations[0].kind, FileLocationKind::LocalPath);
-    assert_eq!(locations[0].value, "/media/movie.eng.opus.ogg");
+    assert_eq!(
+        locations[0].rooted_address().unwrap(),
+        (
+            crate::test_support::TEST_STORAGE_ROOT_ID,
+            &crate::test_support::test_relative_locator("/media/movie.eng.opus.ogg")
+        )
+    );
 }
 
 #[tokio::test]
@@ -2363,6 +2409,10 @@ async fn sidecar_commit_helper_requires_existing_pending_lineage_record() {
             &mut tx,
             NewSidecarArtifactCommit {
                 commit_record_id: voom_core::ids::ArtifactCommitRecordId(404),
+                storage_root_id: crate::test_support::TEST_STORAGE_ROOT_ID,
+                provider_relative_locator: crate::test_support::test_relative_locator(
+                    "/media/no-pending.opus.ogg",
+                ),
                 target_path: "/media/no-pending.opus.ogg".to_owned(),
                 content_hash: "sidecar-no-pending-hash".to_owned(),
                 size_bytes: 2048,
@@ -2434,6 +2484,10 @@ async fn sidecar_commit_helper_requires_target_path_from_commit_path() {
             &mut tx,
             NewSidecarArtifactCommit {
                 commit_record_id: pending.id,
+                storage_root_id: crate::test_support::TEST_STORAGE_ROOT_ID,
+                provider_relative_locator: crate::test_support::test_relative_locator(
+                    "/media/other.opus.ogg",
+                ),
                 target_path: "/media/other.opus.ogg".to_owned(),
                 content_hash: "sidecar-target-mismatch-hash".to_owned(),
                 size_bytes: 2048,
@@ -2521,13 +2575,20 @@ fn pending_commit(
     verification_id: voom_core::ids::ArtifactVerificationId,
     target_path: &str,
 ) -> NewArtifactCommitRecord {
+    let provider_relative_locator = crate::test_support::test_relative_locator(target_path);
     NewArtifactCommitRecord {
         artifact_handle_id,
         source_file_version_id,
         verification_id,
         target_path: target_path.to_owned(),
         temp_path: Some(format!("{target_path}.tmp")),
-        report: json!({"target_path": target_path}),
+        report: json!({
+            "target_path": target_path,
+            "rooted_target": {
+                "storage_root_id": crate::test_support::TEST_STORAGE_ROOT_ID.0,
+                "provider_relative_locator": provider_relative_locator.as_str(),
+            },
+        }),
         started_at: OffsetDateTime::UNIX_EPOCH,
     }
 }
@@ -2712,7 +2773,14 @@ async fn verified_ticket_evidence_decodes_verification_and_optional_location() {
         voom_core::ids::ArtifactVerificationId(1)
     );
     assert_eq!(evidence.file_version_id, Some(FileVersionId(2)));
-    assert_eq!(evidence.location_value.as_deref(), Some("/output.mkv"));
+    assert_eq!(
+        evidence.storage_root_id,
+        Some(crate::test_support::TEST_STORAGE_ROOT_ID)
+    );
+    assert_eq!(
+        evidence.provider_relative_locator,
+        Some(crate::test_support::test_relative_locator("/output.mkv"))
+    );
 
     let without_location = repo
         .verified_ticket_evidence(
@@ -2725,7 +2793,8 @@ async fn verified_ticket_evidence_decodes_verification_and_optional_location() {
         .unwrap()
         .unwrap();
     assert_eq!(without_location.file_version_id, None);
-    assert_eq!(without_location.location_value, None);
+    assert_eq!(without_location.storage_root_id, None);
+    assert_eq!(without_location.provider_relative_locator, None);
 }
 
 #[tokio::test]
@@ -3016,13 +3085,17 @@ async fn seed_workflow_evidence(pool: &sqlx::SqlitePool) {
         "INSERT INTO file_versions (id, file_asset_id, content_hash, size_bytes, produced_by, \
          produced_from_version_id, created_at) VALUES \
          (2, 1, 'result', 10, 'staged_commit', 1, '1970-01-01T00:00:00Z')",
-        "INSERT INTO file_locations (id, file_version_id, kind, value, observed_at) VALUES \
-         (1, 2, 'local_path', '/output.mkv', '1970-01-01T00:00:00Z')",
+        "INSERT INTO file_locations \
+         (id, file_version_id, address_state, storage_root_id, provider_relative_locator, \
+          observed_at) VALUES \
+         (1, 2, 'rooted', 9000001, 'output.mkv', '1970-01-01T00:00:00Z')",
         "INSERT INTO file_versions (id, file_asset_id, content_hash, size_bytes, produced_by, \
          produced_from_version_id, created_at) VALUES \
          (3, 2, 'sidecar', 2, 'staged_commit', 1, '1970-01-01T00:00:00Z')",
-        "INSERT INTO file_locations (id, file_version_id, kind, value, observed_at) VALUES \
-         (2, 3, 'local_path', '/sidecar.srt', '1970-01-01T00:00:00Z')",
+        "INSERT INTO file_locations \
+         (id, file_version_id, address_state, storage_root_id, provider_relative_locator, \
+          observed_at) VALUES \
+         (2, 3, 'rooted', 9000001, 'sidecar.srt', '1970-01-01T00:00:00Z')",
         "INSERT INTO media_snapshots (id, file_version_id, probed_at, payload) VALUES \
          (1, 2, '1970-01-01T00:00:00Z', '{}')",
         "INSERT INTO media_snapshots (id, file_version_id, probed_at, payload) VALUES \

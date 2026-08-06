@@ -1,6 +1,5 @@
 use super::super::identity::{
-    DiscoveredFile, FileLocationKind, FileLocationRepo, IngestOutcome, IngestRepo,
-    SqliteIdentityRepo,
+    DiscoveredFile, FileLocationRepo, IngestOutcome, IngestRepo, SqliteIdentityRepo,
 };
 use super::*;
 use crate::test_support::{T0, fresh_initialized_pool_at};
@@ -30,8 +29,8 @@ async fn ingest(
         .record_discovered_file_in_tx(
             &mut tx,
             DiscoveredFile {
-                location_kind: FileLocationKind::LocalPath,
-                location_value: path.to_owned(),
+                storage_root_id: crate::test_support::TEST_STORAGE_ROOT_ID,
+                provider_relative_locator: crate::test_support::test_relative_locator(path),
                 content_hash: content_hash.to_owned(),
                 size_bytes,
                 observed_at: T0,
@@ -64,16 +63,28 @@ async fn record_and_find_hardlink_by_dev_ino() {
         .unwrap();
     // A different path with the same (dev, ino) is a hardlink to the recorded
     // location.
-    let found = find_live_hardlink_location_in_tx(&mut tx, 42, 7, "/srv/b.mkv")
-        .await
-        .unwrap()
-        .expect("a different path with the same dev/ino resolves to the recorded location");
+    let found = find_live_hardlink_location_in_tx(
+        &mut tx,
+        42,
+        7,
+        crate::test_support::TEST_STORAGE_ROOT_ID,
+        &crate::test_support::test_relative_locator("/srv/b.mkv"),
+    )
+    .await
+    .unwrap()
+    .expect("a different path with the same dev/ino resolves to the recorded location");
     // The same path re-scanned is not a hardlink — it is excluded.
     assert!(
-        find_live_hardlink_location_in_tx(&mut tx, 42, 7, "/srv/a.mkv")
-            .await
-            .unwrap()
-            .is_none()
+        find_live_hardlink_location_in_tx(
+            &mut tx,
+            42,
+            7,
+            crate::test_support::TEST_STORAGE_ROOT_ID,
+            &crate::test_support::test_relative_locator("/srv/a.mkv"),
+        )
+        .await
+        .unwrap()
+        .is_none()
     );
     tx.commit().await.unwrap();
 
@@ -94,17 +105,29 @@ async fn no_match_for_unknown_dev_ino_or_copy_on_different_inode() {
         .unwrap();
     // A byte-identical copy has the same hash but a different inode: no match.
     assert!(
-        find_live_hardlink_location_in_tx(&mut tx, 42, 8, "/srv/copy.mkv")
-            .await
-            .unwrap()
-            .is_none()
+        find_live_hardlink_location_in_tx(
+            &mut tx,
+            42,
+            8,
+            crate::test_support::TEST_STORAGE_ROOT_ID,
+            &crate::test_support::test_relative_locator("/srv/copy.mkv"),
+        )
+        .await
+        .unwrap()
+        .is_none()
     );
     // A different device with the same inode number is also not a hardlink.
     assert!(
-        find_live_hardlink_location_in_tx(&mut tx, 99, 7, "/srv/other.mkv")
-            .await
-            .unwrap()
-            .is_none()
+        find_live_hardlink_location_in_tx(
+            &mut tx,
+            99,
+            7,
+            crate::test_support::TEST_STORAGE_ROOT_ID,
+            &crate::test_support::test_relative_locator("/srv/other.mkv"),
+        )
+        .await
+        .unwrap()
+        .is_none()
     );
     tx.commit().await.unwrap();
 }
@@ -120,7 +143,13 @@ async fn attach_hardlink_adds_second_live_location_to_same_version() {
         .unwrap();
     // A second path with the same (dev, ino) attaches to the existing version.
     let second_location = repo
-        .attach_local_hardlink_location_in_tx(&mut tx, version_id, "/srv/b.mkv", T0)
+        .attach_local_hardlink_location_in_tx(
+            &mut tx,
+            version_id,
+            crate::test_support::TEST_STORAGE_ROOT_ID,
+            &crate::test_support::test_relative_locator("/srv/b.mkv"),
+            T0,
+        )
         .await
         .unwrap();
     record_scan_fact_in_tx(&mut tx, second_location, 42, 7, 2, T0)
@@ -137,10 +166,16 @@ async fn attach_hardlink_adds_second_live_location_to_same_version() {
     assert_eq!(locations.len(), 2);
     // The lookup returns the earliest live location for the shared inode.
     let mut tx = pool.begin().await.unwrap();
-    let found = find_live_hardlink_location_in_tx(&mut tx, 42, 7, "/srv/c.mkv")
-        .await
-        .unwrap()
-        .unwrap();
+    let found = find_live_hardlink_location_in_tx(
+        &mut tx,
+        42,
+        7,
+        crate::test_support::TEST_STORAGE_ROOT_ID,
+        &crate::test_support::test_relative_locator("/srv/c.mkv"),
+    )
+    .await
+    .unwrap()
+    .unwrap();
     tx.commit().await.unwrap();
     assert_eq!(found.file_location_id, first_location);
 }

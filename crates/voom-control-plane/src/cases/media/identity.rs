@@ -9,9 +9,9 @@ use voom_core::{
     EvidenceId, FileAssetId, FileVersionId, MediaVariantId, MediaWorkId, VoomError, WorkerId,
 };
 use voom_events::payload::{
-    FileAssetCreatedPayload, FileLocationAliasedPayload, FileLocationRecordedByMovePayload,
-    FileLocationRecordedPayload, FileLocationRetiredByMovePayload, FileVersionCreatedPayload,
-    IdentityEvidenceAcceptedPayload, IdentityEvidenceRecordedPayload,
+    FileAssetCreatedPayload, FileLocationRetiredByMovePayload, FileLocationRootedAliasedPayload,
+    FileLocationRootedRecordedByMovePayload, FileLocationRootedRecordedPayload,
+    FileVersionCreatedPayload, IdentityEvidenceAcceptedPayload, IdentityEvidenceRecordedPayload,
     IdentityEvidenceSupersededPayload, MediaVariantCreatedPayload, MediaWorkCreatedPayload,
     UseLeaseReanchoredByMovePayload,
 };
@@ -33,7 +33,7 @@ impl ControlPlane {
     /// Watcher-side ingest entry point. Composes
     /// `IngestRepo::record_discovered_file_in_tx` with the matching
     /// `file_asset.created` / `file_version.created` /
-    /// `file_location.recorded` / `file_location.aliased` events plus
+    /// `file_location.rooted_recorded` / `file_location.rooted_aliased` events plus
     /// any auto-recorded `identity_evidence.recorded` rows.
     ///
     /// # Errors
@@ -107,17 +107,18 @@ impl ControlPlane {
                             "record_discovered_file: file_location {file_location_id} vanished",
                         ))
                     })?;
+                let (storage_root_id, provider_relative_locator) = location.rooted_address()?;
                 append_event(
                     &self.events,
                     &mut tx,
                     SubjectType::FileLocation,
                     Some(location.id.0),
                     observed_at,
-                    Event::FileLocationRecorded(FileLocationRecordedPayload {
+                    Event::FileLocationRootedRecorded(FileLocationRootedRecordedPayload {
                         file_location_id: location.id,
                         file_version_id: location.file_version_id,
-                        kind: location.kind.as_str().to_owned(),
-                        value: location.value,
+                        storage_root_id,
+                        provider_relative_locator: provider_relative_locator.clone(),
                     }),
                 )
                 .await?;
@@ -174,17 +175,18 @@ impl ControlPlane {
                             "record_discovered_file: alias location {new_file_location_id} vanished",
                         ))
                     })?;
+                let (storage_root_id, provider_relative_locator) = location.rooted_address()?;
                 append_event(
                     &self.events,
                     &mut tx,
                     SubjectType::FileLocation,
                     Some(location.id.0),
                     observed_at,
-                    Event::FileLocationAliased(FileLocationAliasedPayload {
+                    Event::FileLocationRootedAliased(FileLocationRootedAliasedPayload {
                         file_location_id: location.id,
                         file_version_id: *file_version_id,
-                        kind: location.kind.as_str().to_owned(),
-                        value: location.value,
+                        storage_root_id,
+                        provider_relative_locator: provider_relative_locator.clone(),
                     }),
                 )
                 .await?;
@@ -196,7 +198,7 @@ impl ControlPlane {
 
     /// Reconcile a same-physical-object rename. Composes
     /// `IngestRepo::reconcile_rename_in_tx` with the matching
-    /// `file_location.retired_by_move`, `file_location.recorded_by_move`,
+    /// `file_location.retired_by_move`, `file_location.rooted_recorded_by_move`,
     /// and `identity_evidence.recorded` (`path_rule_match`) events.
     /// Any live `Location`-scoped use leases on the retired location
     /// are re-anchored in the same transaction and each emits a
@@ -249,12 +251,12 @@ impl ControlPlane {
             SubjectType::FileLocation,
             Some(new_location.id.0),
             observed_at,
-            Event::FileLocationRecordedByMove(FileLocationRecordedByMovePayload {
+            Event::FileLocationRootedRecordedByMove(FileLocationRootedRecordedByMovePayload {
                 retired_file_location_id: outcome.retired_location_id,
                 new_file_location_id: new_location.id,
                 file_version_id: outcome.file_version_id,
-                kind: new_location.kind.as_str().to_owned(),
-                value: new_location.value,
+                storage_root_id: new_location.rooted_address()?.0,
+                provider_relative_locator: new_location.rooted_address()?.1.clone(),
                 observed_at,
             }),
         )
@@ -572,7 +574,7 @@ impl ControlPlane {
         Ok(v)
     }
 
-    /// Create a `FileLocation`. Emits `file_location.recorded`.
+    /// Create a `FileLocation`. Emits `file_location.rooted_recorded`.
     ///
     /// # Errors
     /// Propagates repo and event-append errors.
@@ -586,17 +588,18 @@ impl ControlPlane {
             .identity
             .create_file_location_in_tx(&mut tx, input)
             .await?;
+        let (storage_root_id, provider_relative_locator) = loc.rooted_address()?;
         append_event(
             &self.events,
             &mut tx,
             SubjectType::FileLocation,
             Some(loc.id.0),
             observed_at,
-            Event::FileLocationRecorded(FileLocationRecordedPayload {
+            Event::FileLocationRootedRecorded(FileLocationRootedRecordedPayload {
                 file_location_id: loc.id,
                 file_version_id: loc.file_version_id,
-                kind: loc.kind.as_str().to_owned(),
-                value: loc.value.clone(),
+                storage_root_id,
+                provider_relative_locator: provider_relative_locator.clone(),
             }),
         )
         .await?;

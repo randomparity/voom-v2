@@ -51,15 +51,26 @@ async fn operator_runs_real_media_pipeline_through_cli() {
     let _ffprobe_guard = hide_stale_fake_ffprobe_sibling("operator-execution-e2e").unwrap();
     let (_tmp, root, library, url) = prepare_operator_fixture();
     assert_ok(&run_voom(&url, &["init"]), "init");
+    let pool = voom_store::connect(&url).await.unwrap();
+    voom_store::test_support::seed_test_storage_root(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE library_roots SET provider_locator = ?, display_locator = ? WHERE id = ?")
+        .bind(library.display().to_string())
+        .bind(library.display().to_string())
+        .bind(i64::try_from(voom_store::test_support::TEST_STORAGE_ROOT_ID.0).unwrap())
+        .execute(&pool)
+        .await
+        .unwrap();
 
     let mut ffmpeg = LocalWorker::spawn(&url, "ffmpeg").unwrap();
     let mut mkvtoolnix = LocalWorker::spawn(&url, "mkvtoolnix").unwrap();
     ffmpeg.wait_for_ready(READY_TIMEOUT).unwrap();
     mkvtoolnix.wait_for_ready(READY_TIMEOUT).unwrap();
-    let (policy_version_id, input_set_id) = create_library_policy(&url, &root, &library);
+    let (policy_version_id, input_set_id) = create_library_policy(&url, &root);
 
-    let out_dir = root.join("out");
-    let staging_root = root.join("stage");
+    let out_dir = library.join("out");
+    let staging_root = library.join("stage");
     let execute = run_execute_with_concurrent_reader(
         &url,
         policy_version_id,
@@ -88,8 +99,15 @@ async fn operator_runs_real_media_pipeline_through_cli() {
     assert_no_live_worker(&final_json, mkvtoolnix_id);
 }
 
-fn create_library_policy(url: &str, root: &Path, library: &Path) -> (u64, u64) {
-    let scan = run_voom(url, &["scan", "--path", &library.display().to_string()]);
+fn create_library_policy(url: &str, root: &Path) -> (u64, u64) {
+    let scan = run_voom(
+        url,
+        &[
+            "scan",
+            "--root",
+            &voom_store::test_support::TEST_STORAGE_ROOT_ID.0.to_string(),
+        ],
+    );
     let scan_json = assert_ok(&scan, "scan");
     assert_eq!(
         scan_json["data"]["summary"]["ingested"], 1,
@@ -337,6 +355,10 @@ fn run_voom(url: &str, args: &[&str]) -> BoundedOutput {
     run_bounded(
         Command::new(env!("CARGO_BIN_EXE_voom"))
             .env("VOOM_DATABASE_URL", url)
+            .env(
+                "VOOM_LOCAL_NODE_ID",
+                voom_store::test_support::TEST_STORAGE_ROOT_ID.0.to_string(),
+            )
             .args(args),
         PROCESS_TIMEOUT,
     )

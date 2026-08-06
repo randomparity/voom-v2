@@ -38,6 +38,10 @@ async fn nodes_register_node_returns_plaintext_token_once_and_emits_event() {
 #[tokio::test]
 async fn nodes_register_rejects_zero_ttl_before_persisting_node() {
     let (cp, _tmp) = cp_at(T0).await;
+    let node_count_before: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM nodes")
+        .fetch_one(cp.pool_for_test())
+        .await
+        .unwrap();
     let mut input = register_input("bad-ttl");
     input.heartbeat_ttl_seconds = 0;
 
@@ -48,7 +52,7 @@ async fn nodes_register_rejects_zero_ttl_before_persisting_node() {
         .fetch_one(cp.pool_for_test())
         .await
         .unwrap();
-    assert_eq!(node_count, 0);
+    assert_eq!(node_count, node_count_before);
     assert_eq!(events(&cp, EventKind::NodeRegistered).await.len(), 0);
 }
 

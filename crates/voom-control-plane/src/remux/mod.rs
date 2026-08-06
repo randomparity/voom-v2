@@ -241,7 +241,7 @@ async fn execute_remux_core(
         &input.staging_root,
         input.ticket_id,
         input.lease_id,
-        std::path::Path::new(&selected.location.value),
+        &selected.canonical_path,
     )
     .await
     {
@@ -253,12 +253,7 @@ async fn execute_remux_core(
     };
     let staging_path = staging.path.clone();
     let failure = failure.with_staging_path(&staging_path);
-    let target_path = match stage::target_path(
-        &input.target_dir,
-        std::path::Path::new(&selected.location.value),
-    )
-    .await
-    {
+    let target_path = match stage::target_path(&input.target_dir, &selected.canonical_path).await {
         Ok(path) => path,
         Err(err) => {
             failure.record_failure(&err).await?;

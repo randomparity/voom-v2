@@ -259,21 +259,40 @@ impl SqliteLibraryRepo {
             .ok_or_else(|| VoomError::NotFound(format!("library {id} not found")))
     }
 
-    /// Delete a library. Its roots cascade (FK `ON DELETE CASCADE`). Returns
+    /// Delete a library only when no durable root references it. Returns
     /// whether a row was removed.
     ///
     /// # Errors
     /// Propagates database errors.
     pub async fn delete_library(&self, id: LibraryId) -> Result<bool, VoomError> {
         let mut tx = begin(&self.pool).await?;
+        let id_value = i64_from_u64(id.0, concat!(module_path!(), ": ", stringify!(id.0)))?;
+        let has_durable_roots: i64 =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM library_roots WHERE library_id = ?)")
+                .bind(id_value)
+                .fetch_one(&mut *tx)
+                .await
+                .map_err(|error| {
+                    VoomError::database_context("libraries delete root check", error)
+                })?;
+        if has_durable_roots != 0 {
+            return Err(VoomError::Conflict(format!(
+                "library {id} has durable storage roots and cannot be deleted"
+            )));
+        }
         let res = sqlx::query("DELETE FROM libraries WHERE id = ?")
-            .bind(i64_from_u64(
-                id.0,
-                concat!(module_path!(), ": ", stringify!(id.0)),
-            )?)
+            .bind(id_value)
             .execute(&mut *tx)
             .await
-            .map_err(|e| VoomError::database_context("libraries delete", e))?;
+            .map_err(|e| {
+                if matches!(&e, sqlx::Error::Database(inner) if inner.is_foreign_key_violation()) {
+                    VoomError::Conflict(format!(
+                        "library {id} has durable storage roots and cannot be deleted"
+                    ))
+                } else {
+                    VoomError::database_context("libraries delete", e)
+                }
+            })?;
         commit(tx).await?;
         Ok(res.rows_affected() > 0)
     }
@@ -303,6 +322,15 @@ fn row_to_library(row: &SqliteRow) -> Result<Library, VoomError> {
     let media_kind: String = row.try_get("media_kind").map_err(|e| map_row_err(t, e))?;
     let description: Option<String> = row.try_get("description").map_err(|e| map_row_err(t, e))?;
     let enabled: i64 = row.try_get("enabled").map_err(|e| map_row_err(t, e))?;
+    let enabled = match enabled {
+        0 => false,
+        1 => true,
+        other => {
+            return Err(VoomError::database(format!(
+                "libraries.enabled invalid boolean {other}"
+            )));
+        }
+    };
     let default_scoring_profile_name: Option<String> = row
         .try_get("default_scoring_profile_name")
         .map_err(|e| map_row_err(t, e))?;
@@ -317,7 +345,7 @@ fn row_to_library(row: &SqliteRow) -> Result<Library, VoomError> {
         display_name,
         media_kind: LibraryMediaKind::parse(&media_kind)?,
         description,
-        enabled: enabled != 0,
+        enabled,
         default_scoring_profile_name,
         created_at: parse_iso8601(&created_at)?,
         updated_at: parse_iso8601(&updated_at)?,

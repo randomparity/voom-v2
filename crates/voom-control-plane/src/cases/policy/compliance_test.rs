@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use sqlx::Row;
@@ -9,7 +9,7 @@ use voom_plan::PlanOperationKind;
 use voom_policy::{FixtureName, load_fixture, load_policy_fixture};
 use voom_store::repo::execution::tickets::NewTicket;
 use voom_store::repo::execution::workers::{NewCapability, NewGrant};
-use voom_store::repo::media::identity::{DiscoveredFile, FileLocationKind, IngestOutcome};
+use voom_store::repo::media::identity::{DiscoveredFile, IngestOutcome};
 use voom_test_support::worker::cargo_bin_or_build;
 
 use crate::cases::policy::policy_inputs::{PolicyInputFromScanInput, WholeScanInput};
@@ -1058,6 +1058,93 @@ async fn compliance_execute_verifies_existing_active_artifact_through_bundled_wo
     );
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn scanned_fixture_persists_canonical_policy_path_for_root_alias() {
+    use std::os::unix::fs::symlink;
+
+    let (cp, _tmp) = cp().await;
+    let temp = tempfile::tempdir().unwrap();
+    let real_root = temp.path().join("real-root");
+    let alias_root = temp.path().join("root-alias");
+    std::fs::create_dir(&real_root).unwrap();
+    symlink(&real_root, &alias_root).unwrap();
+    let media_path = alias_root.join("movie.mkv");
+    tokio::fs::write(&media_path, b"fixture bytes")
+        .await
+        .unwrap();
+
+    let (file_version_id, _) = scanned_snapshot_for_existing_file(&cp, &media_path).await;
+    let selected =
+        crate::operation_source::select_local_source(&cp, "test fixture", file_version_id, None)
+            .await
+            .unwrap();
+    let target = cp
+        .resolve_policy_artifact_target(file_version_id, None)
+        .await
+        .unwrap();
+    let durable_path: String =
+        sqlx::query_scalar("SELECT value FROM artifact_locations WHERE id = ?")
+            .bind(i64::try_from(target.artifact_location_id.0).unwrap())
+            .fetch_one(cp.pool_for_test())
+            .await
+            .unwrap();
+
+    assert_eq!(
+        selected.canonical_path,
+        real_root.join("movie.mkv").canonicalize().unwrap()
+    );
+    assert_eq!(target.path, selected.canonical_path.to_string_lossy());
+    assert_eq!(durable_path, target.path);
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn non_utf8_canonical_policy_path_is_rejected_without_durable_writes() {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
+    use std::os::unix::fs::symlink;
+
+    let (cp, _tmp) = cp().await;
+    let temp = tempfile::tempdir().unwrap();
+    let real_root = temp
+        .path()
+        .join(OsString::from_vec(b"non-utf8-\xff-root".to_vec()));
+    let alias_root = temp.path().join("utf8-root-alias");
+    std::fs::create_dir(&real_root).unwrap();
+    symlink(&real_root, &alias_root).unwrap();
+    let media_path = alias_root.join("movie.mkv");
+    tokio::fs::write(&media_path, b"fixture bytes")
+        .await
+        .unwrap();
+
+    let (file_version_id, _) = scanned_snapshot_for_existing_file(&cp, &media_path).await;
+    let before: (i64, i64, i64) = sqlx::query_as(
+        "SELECT (SELECT COUNT(*) FROM artifact_handles), \
+                (SELECT COUNT(*) FROM artifact_locations), \
+                (SELECT COUNT(*) FROM events)",
+    )
+    .fetch_one(cp.pool_for_test())
+    .await
+    .unwrap();
+
+    let error = cp
+        .resolve_policy_artifact_target(file_version_id, None)
+        .await
+        .unwrap_err();
+    let after: (i64, i64, i64) = sqlx::query_as(
+        "SELECT (SELECT COUNT(*) FROM artifact_handles), \
+                (SELECT COUNT(*) FROM artifact_locations), \
+                (SELECT COUNT(*) FROM events)",
+    )
+    .fetch_one(cp.pool_for_test())
+    .await
+    .unwrap();
+
+    assert_eq!(error.code(), "CONFIG_INVALID", "{error:?}");
+    assert_eq!(after, before);
+}
+
 #[tokio::test]
 async fn verification_source_inside_committed_working_dir_is_never_moved_or_deleted() {
     ensure_policy_verify_worker();
@@ -1108,13 +1195,17 @@ async fn verification_source_inside_committed_working_dir_is_never_moved_or_dele
         b"source bytes",
         "a verified source is not a produced artifact even under a working-dir prefix"
     );
-    let location: (String, Option<String>) =
-        sqlx::query_as("SELECT value, retired_at FROM file_locations WHERE file_version_id = ?")
-            .bind(i64::try_from(file_version_id.0).unwrap())
-            .fetch_one(cp.pool_for_test())
-            .await
-            .unwrap();
-    assert_eq!(location, (media_path.display().to_string(), None));
+    let location: (String, String, Option<String>) = sqlx::query_as(
+        "SELECT lr.provider_locator, fl.provider_relative_locator, fl.retired_at \
+         FROM file_locations fl JOIN library_roots lr ON lr.id = fl.storage_root_id \
+         WHERE fl.file_version_id = ?",
+    )
+    .bind(i64::try_from(file_version_id.0).unwrap())
+    .fetch_one(cp.pool_for_test())
+    .await
+    .unwrap();
+    assert_eq!(Path::new(&location.0).join(&location.1), media_path);
+    assert_eq!(location.2, None);
 }
 
 #[tokio::test]
@@ -1563,13 +1654,15 @@ fn quoted_identifier(identifier: &str) -> String {
 async fn scanned_snapshot_with_video(
     cp: &crate::ControlPlane,
 ) -> (voom_core::FileVersionId, voom_core::MediaSnapshotId) {
+    let (provider_relative_locator, content_hash, size_bytes) =
+        materialized_scan_source(cp, "remux-roots.mp4", b"remux source").await;
     let outcome = cp
         .record_discovered_file(
             DiscoveredFile {
-                location_kind: FileLocationKind::LocalPath,
-                location_value: "/srv/remux-roots.mp4".to_owned(),
-                content_hash: "hash-remux-roots".to_owned(),
-                size_bytes: 1024,
+                storage_root_id: voom_store::test_support::TEST_STORAGE_ROOT_ID,
+                provider_relative_locator,
+                content_hash,
+                size_bytes,
                 observed_at: T0,
                 proof: None,
             },
@@ -1610,14 +1703,21 @@ async fn scanned_snapshot_for_existing_file(
     cp: &crate::ControlPlane,
     path: &std::path::Path,
 ) -> (voom_core::FileVersionId, voom_core::MediaSnapshotId) {
+    let root_path = path.parent().unwrap();
+    voom_store::test_support::set_test_storage_root_path(cp.pool_for_test(), root_path)
+        .await
+        .unwrap();
+    let relative_locator = path.file_name().unwrap().to_string_lossy();
     let facts = crate::scan::hash::observe_candidate_file(path)
         .await
         .unwrap();
     let outcome = cp
         .record_discovered_file(
             DiscoveredFile {
-                location_kind: FileLocationKind::LocalPath,
-                location_value: path.display().to_string(),
+                storage_root_id: voom_store::test_support::TEST_STORAGE_ROOT_ID,
+                provider_relative_locator: voom_store::test_support::test_relative_locator(
+                    &relative_locator,
+                ),
                 content_hash: facts.content_hash,
                 size_bytes: facts.size_bytes,
                 observed_at: T0,
@@ -1657,13 +1757,15 @@ async fn scanned_snapshot_for_existing_file(
 async fn scanned_snapshot_with_audio(
     cp: &crate::ControlPlane,
 ) -> (voom_core::FileVersionId, voom_core::MediaSnapshotId) {
+    let (provider_relative_locator, content_hash, size_bytes) =
+        materialized_scan_source(cp, "audio-roots.mkv", b"audio source").await;
     let outcome = cp
         .record_discovered_file(
             DiscoveredFile {
-                location_kind: FileLocationKind::LocalPath,
-                location_value: "/srv/audio-roots.mkv".to_owned(),
-                content_hash: "hash-audio-roots".to_owned(),
-                size_bytes: 1024,
+                storage_root_id: voom_store::test_support::TEST_STORAGE_ROOT_ID,
+                provider_relative_locator,
+                content_hash,
+                size_bytes,
                 observed_at: T0,
                 proof: None,
             },
@@ -1726,6 +1828,32 @@ async fn scanned_snapshot_with_audio(
         .await
         .unwrap();
     (file_version_id, snapshot.id)
+}
+
+async fn materialized_scan_source(
+    cp: &crate::ControlPlane,
+    name: &str,
+    bytes: &[u8],
+) -> (voom_core::ProviderRelativeLocator, String, u64) {
+    let rows = sqlx::query("PRAGMA database_list")
+        .fetch_all(cp.pool_for_test())
+        .await
+        .unwrap();
+    let database_path: String = rows
+        .iter()
+        .find(|row| row.get::<String, _>("name") == "main")
+        .unwrap()
+        .get("file");
+    let path = Path::new(&database_path).parent().unwrap().join(name);
+    std::fs::write(&path, bytes).unwrap();
+    let facts = crate::scan::hash::observe_candidate_file(&path)
+        .await
+        .unwrap();
+    (
+        voom_store::test_support::test_relative_locator(&path.display().to_string()),
+        facts.content_hash,
+        facts.size_bytes,
+    )
 }
 
 async fn register_policy_remux_worker(cp: &crate::ControlPlane) -> voom_core::WorkerId {

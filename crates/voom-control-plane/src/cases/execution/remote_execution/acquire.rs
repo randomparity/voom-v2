@@ -659,7 +659,7 @@ fn aggregate_score_decision(
             .explanation
             .get("operation")
             .and_then(JsonValue::as_str)
-            && !operations.contains(&operation.to_owned())
+            && operations.iter().all(|existing| existing != operation)
         {
             operations.push(operation.to_owned());
         }

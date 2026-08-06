@@ -5,8 +5,8 @@ use std::path::Path;
 use time::OffsetDateTime;
 use voom_core::{ErrorCode, FileLocationId, FileVersionId, rng_test_support::FrozenRng};
 use voom_store::repo::media::identity::{
-    DiscoveredFile, FileAssetRepo, FileLocationKind, FileLocationRepo, FileVersionRepo,
-    IngestOutcome, NewFileLocation, NewFileVersion, ProducedBy,
+    DiscoveredFile, FileAssetRepo, FileLocationRepo, FileVersionRepo, IngestOutcome,
+    NewFileLocation, NewFileVersion, ProducedBy,
 };
 
 #[tokio::test]
@@ -39,7 +39,7 @@ async fn implicit_source_requires_exactly_one_live_local_location() {
     create_location(
         &cp,
         seeded.file_version_id,
-        FileLocationKind::LocalPath,
+        voom_store::test_support::TEST_STORAGE_ROOT_ID,
         &alias,
     )
     .await;
@@ -70,17 +70,13 @@ async fn explicit_source_location_must_match_and_be_live_local() {
     .unwrap_err();
     assert_eq!(wrong_version_err.error_code(), ErrorCode::ConfigInvalid);
 
-    let non_local = create_location(
-        &cp,
-        seeded_b.file_version_id,
-        FileLocationKind::SharedMount,
-        &source_b,
-    )
-    .await;
+    let foreign_root_id = seed_foreign_storage_root(&cp).await;
+    let non_local =
+        create_location(&cp, seeded_b.file_version_id, foreign_root_id, &source_b).await;
     let non_local_err = select_source(&cp, seeded_b.file_version_id, Some(non_local))
         .await
         .unwrap_err();
-    assert_eq!(non_local_err.error_code(), ErrorCode::ConfigInvalid);
+    assert_eq!(non_local_err.error_code(), ErrorCode::ArtifactUnavailable);
 }
 
 #[cfg(unix)]
@@ -146,8 +142,10 @@ async fn seed_source(cp: &crate::ControlPlane, path: &Path, bytes: &[u8]) -> See
     let outcome = cp
         .record_discovered_file(
             DiscoveredFile {
-                location_kind: FileLocationKind::LocalPath,
-                location_value: path.display().to_string(),
+                storage_root_id: voom_store::test_support::TEST_STORAGE_ROOT_ID,
+                provider_relative_locator: voom_store::test_support::test_relative_locator(
+                    &path.display().to_string(),
+                ),
                 content_hash: blake3_checksum(bytes),
                 size_bytes: u64::try_from(bytes.len()).unwrap(),
                 observed_at: OffsetDateTime::UNIX_EPOCH,
@@ -200,7 +198,7 @@ async fn create_version_without_locations(cp: &crate::ControlPlane) -> FileVersi
 async fn create_location(
     cp: &crate::ControlPlane,
     file_version_id: FileVersionId,
-    kind: FileLocationKind,
+    storage_root_id: voom_core::StorageRootId,
     path: &Path,
 ) -> FileLocationId {
     let mut tx = cp.pool_for_test().begin().await.unwrap();
@@ -210,8 +208,10 @@ async fn create_location(
             &mut tx,
             NewFileLocation {
                 file_version_id,
-                kind,
-                value: path.display().to_string(),
+                storage_root_id,
+                provider_relative_locator: voom_store::test_support::test_relative_locator(
+                    &path.display().to_string(),
+                ),
                 proof: None,
                 observed_at: OffsetDateTime::UNIX_EPOCH,
             },
@@ -220,6 +220,34 @@ async fn create_location(
         .unwrap();
     tx.commit().await.unwrap();
     location.id
+}
+
+async fn seed_foreign_storage_root(cp: &crate::ControlPlane) -> voom_core::StorageRootId {
+    sqlx::query(
+        "INSERT INTO nodes \
+         (id, name, kind, status, registered_at, last_seen_at, heartbeat_ttl_seconds, \
+          auth_token_hash, auth_token_hint, metadata) \
+         VALUES (9000002, 'foreign-transcode-owner', 'local', 'active', \
+                 '1970-01-01T00:00:00Z', '1970-01-01T00:00:00Z', 60, 'hash', 'hint', '{}')",
+    )
+    .execute(cp.pool_for_test())
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO library_roots \
+         (id, library_id, owner_node_id, provider_kind, provider_locator, display_locator, \
+          state, root_epoch, activation_identity, include_globs, exclude_globs, \
+          extension_allowlist, scan_mode, symlink_policy, hidden_file_policy, \
+          stability_seconds, debounce_seconds, enabled, created_at, updated_at) \
+         VALUES (9000002, 9000001, 9000002, 'local_filesystem', '/', '/', 'active', 1, \
+                 'foreign-transcode-root', '[]', '[]', '[]', 'manual_recursive', 'reject', \
+                 'ignore', 0, 0, 1, '1970-01-01T00:00:00Z', \
+                 '1970-01-01T00:00:00Z')",
+    )
+    .execute(cp.pool_for_test())
+    .await
+    .unwrap();
+    voom_core::StorageRootId(9_000_002)
 }
 
 fn blake3_checksum(bytes: &[u8]) -> String {

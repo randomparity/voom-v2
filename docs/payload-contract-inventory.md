@@ -27,6 +27,7 @@ inventory and that scope file.
 | `commit_intents.target` | `commit_safety_gate/codecs.rs::decode_target` | `CommitTargetWire`, its three variant content structs, and `FileLocationProposalWire` | Wire kinds are `delete_file_location`, `replace_file_location`, and `move_file_location`; every content struct is strict. |
 | `commit_intents.closure_initial`, `commit_intents.closure_authorized` | `commit_safety_gate/codecs.rs::decode_closure` | `AffectedScopeClosureWire`, `ClosureWarningWire` | The complete commit-gate closure rejects unknown fields. |
 | `commit_intents.override_token` | `commit_safety_gate/codecs.rs::decode_force_path_token` | `ForcePathToken` | The token is strict; `BypassKind` is a unit enum with no field-drop surface. |
+| `artifact_commit_records.report` at `$.rooted_target` | `voom-store/src/repo/media/artifacts/commits.rs::pending_commit_target` and `voom-control-plane/src/artifact/commit/mod.rs::rooted_target_from_commit_report` | Both `PersistedRootedTarget` read-boundary structs | The persisted storage-root ID and provider-relative locator reject unknown fields at both commit finalization and recovery boundaries. Other report keys remain passthrough. |
 | `worker_capabilities.extra` at `$.accelerator` | `video_hardware.rs` | `VideoAcceleratorDescriptor` and the NVIDIA, VAAPI, and VideoToolbox descriptor closure | Every stored descriptor is `backend` tagged and every descriptor struct is strict. Other keys in `extra` remain passthrough. |
 | `tickets.payload` | `ticket_payload.rs::parse_ticket` | `WorkflowTicketPayload`, `EffectiveTiming` | The workflow envelope and timing fields are strict. `rendered_payload` and `source_file` remain intentionally opaque inside that envelope. |
 | `tickets.result` | compliance and workflow ticket-result decoders | `ExecuteExtractAudioOutputReport`, `ComplianceLegacyAudioExtractResult`, `PolicyVerificationTicketResult` | Published and historical typed result forms reject unknown fields. Recovery-only subpayloads remain opaque. |
@@ -155,8 +156,9 @@ These typed JSON values contain no reachable named-field struct and therefore ne
 
 The scope file groups defining sources for these enforced closures:
 
-- all nine event payload families and their `Event` root;
+- all ten event payload families and their `Event` root, including storage-root lifecycle facts;
 - commit-gate target, closure, and override wire types;
+- artifact-commit rooted targets at the store and control-plane read boundaries;
 - workflow ticket payloads, timing, and ticket results;
 - remote idempotency envelopes and route-specific replay outcomes;
 - durable audio worker results, recovery facts, and policy-verification result roots;
@@ -173,7 +175,8 @@ The following columns remain `JsonValue` at production read boundaries:
 
 - `worker_grants.max_parallel`;
 - `artifact_handles.source_lineage`;
-- `artifact_commit_records.report`, `artifact_verifications.report`;
+- `artifact_commit_records.report` except `$.rooted_target`, and
+  `artifact_verifications.report`;
 - `audio_extract_operation_outputs.probe_payload`;
 - `audio_synthesis_operations.probe_payload`;
 - `audio_synthesis_companions.result_facts`;

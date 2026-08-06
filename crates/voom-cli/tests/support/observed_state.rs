@@ -19,14 +19,28 @@ pub async fn export_observed_state(
     let pool = voom_store::connect(database_url).await?;
     let library_root = run_dir.join("library").canonicalize()?;
     let run_id = fixture_run_id(run_dir)?;
-    let rows = sqlx::query_as::<_, (i64, i64, String, i64, String, Option<String>, Option<i64>)>(
+    let rows = sqlx::query_as::<
+        _,
+        (
+            i64,
+            i64,
+            String,
+            i64,
+            String,
+            String,
+            Option<String>,
+            Option<i64>,
+        ),
+    >(
         "SELECT fa.id AS file_asset_id, fv.id AS file_version_id, fv.content_hash, \
-                fv.size_bytes, fl.value AS location_value, ms.payload AS snapshot_payload, \
+                fv.size_bytes, lr.provider_locator, fl.provider_relative_locator, \
+                ms.payload AS snapshot_payload, \
                 bm.bundle_id AS bundle_id \
          FROM file_assets fa \
          JOIN file_versions fv ON fv.file_asset_id = fa.id AND fv.retired_at IS NULL \
          JOIN file_locations fl ON fl.file_version_id = fv.id \
-              AND fl.retired_at IS NULL AND fl.kind = 'local_path' \
+              AND fl.retired_at IS NULL AND fl.address_state = 'rooted' \
+         JOIN library_roots lr ON lr.id = fl.storage_root_id \
          LEFT JOIN asset_bundle_members bm ON bm.file_asset_id = fa.id \
          LEFT JOIN media_snapshots ms ON ms.id = ( \
              SELECT max(ms2.id) FROM media_snapshots ms2 WHERE ms2.file_version_id = fv.id \
@@ -45,12 +59,14 @@ pub async fn export_observed_state(
         _file_version_id,
         content_hash,
         size_bytes,
-        location_value,
+        provider_locator,
+        provider_relative_locator,
         snapshot_payload,
         bundle_id,
     ) in rows
     {
-        let current_path = library_relative_path(&library_root, Path::new(&location_value))?;
+        let location = Path::new(&provider_locator).join(provider_relative_locator);
+        let current_path = library_relative_path(&library_root, &location)?;
         let mut asset = serde_json::Map::new();
         asset.insert(
             "observed_ref".to_owned(),
@@ -280,24 +296,34 @@ async fn durable_sidecars_by_bundle(
     pool: &sqlx::SqlitePool,
     library_root: &Path,
 ) -> Result<BTreeMap<i64, Vec<Value>>, Box<dyn std::error::Error>> {
-    let rows = sqlx::query_as::<_, (i64, i64, i64, String, i64, String)>(
-        "SELECT bm.bundle_id, fa.id, fv.id, fv.content_hash, fv.size_bytes, fl.value \
+    let rows = sqlx::query_as::<_, (i64, i64, i64, String, i64, String, String)>(
+        "SELECT bm.bundle_id, fa.id, fv.id, fv.content_hash, fv.size_bytes, \
+                lr.provider_locator, fl.provider_relative_locator \
          FROM asset_bundle_members bm \
          JOIN file_assets fa ON fa.id = bm.file_asset_id AND fa.retired_at IS NULL \
          JOIN file_versions fv ON fv.file_asset_id = fa.id AND fv.retired_at IS NULL \
          JOIN file_locations fl ON fl.file_version_id = fv.id \
-              AND fl.retired_at IS NULL AND fl.kind = 'local_path' \
+              AND fl.retired_at IS NULL AND fl.address_state = 'rooted' \
+         JOIN library_roots lr ON lr.id = fl.storage_root_id \
          WHERE bm.role = 'external_subtitle' \
-         ORDER BY bm.bundle_id ASC, fl.value ASC",
+         ORDER BY bm.bundle_id ASC, fl.provider_relative_locator ASC",
     )
     .fetch_all(pool)
     .await?;
 
     let mut by_bundle = BTreeMap::<i64, Vec<Value>>::new();
-    for (bundle_id, file_asset_id, _file_version_id, content_hash, _size_bytes, location_value) in
-        rows
+    for (
+        bundle_id,
+        file_asset_id,
+        _file_version_id,
+        content_hash,
+        _size_bytes,
+        provider_locator,
+        provider_relative_locator,
+    ) in rows
     {
-        let relative_path = library_relative_path(library_root, Path::new(&location_value))?;
+        let location = Path::new(&provider_locator).join(provider_relative_locator);
+        let relative_path = library_relative_path(library_root, &location)?;
         by_bundle.entry(bundle_id).or_default().push(json!({
             "observed_ref": format!("file_asset_{file_asset_id}"),
             "kind": "subtitle",

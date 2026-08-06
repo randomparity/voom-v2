@@ -52,14 +52,8 @@ async fn live_local_chain_tips_filters_scope_and_orders_locations() {
         })
         .await
         .unwrap();
-    let first = create_location(&repo, first_version.id, FileLocationKind::LocalPath, "/one").await;
-    let shared = create_location(
-        &repo,
-        first_version.id,
-        FileLocationKind::SharedMount,
-        "/shared",
-    )
-    .await;
+    let first = create_location(&repo, first_version.id, (), "/one").await;
+    let shared = create_location(&repo, first_version.id, (), "/shared").await;
     let newer = repo
         .create_file_version(NewFileVersion {
             file_asset_id: first_asset.id,
@@ -71,7 +65,7 @@ async fn live_local_chain_tips_filters_scope_and_orders_locations() {
         })
         .await
         .unwrap();
-    let tip = create_location(&repo, newer.id, FileLocationKind::LocalPath, "/tip").await;
+    let tip = create_location(&repo, newer.id, (), "/tip").await;
     let second_asset = repo.create_file_asset(T0).await.unwrap();
     let second_version = repo
         .create_file_version(NewFileVersion {
@@ -84,13 +78,7 @@ async fn live_local_chain_tips_filters_scope_and_orders_locations() {
         })
         .await
         .unwrap();
-    let retired = create_location(
-        &repo,
-        second_version.id,
-        FileLocationKind::LocalPath,
-        "/retired",
-    )
-    .await;
+    let retired = create_location(&repo, second_version.id, (), "/retired").await;
     let mut tx = repo.pool.begin().await.unwrap();
     repo.retire_file_location_in_tx(&mut tx, retired.id, T0, retired.epoch)
         .await
@@ -107,7 +95,8 @@ async fn live_local_chain_tips_filters_scope_and_orders_locations() {
         vec![LiveChainTipLocation {
             location_id: tip.id,
             file_asset_id: first_asset.id,
-            value: "/tip".to_owned(),
+            storage_root_id: crate::test_support::TEST_STORAGE_ROOT_ID,
+            provider_relative_locator: crate::test_support::test_relative_locator("/tip"),
             epoch: 0,
         }]
     );
@@ -119,13 +108,7 @@ async fn live_local_chain_tips_excludes_retired_candidate_versions() {
     let (repo, _tmp) = fresh().await;
     let asset = repo.create_file_asset(T0).await.unwrap();
     let version = create_version(&repo, asset.id, "retired", None).await;
-    let location = create_location(
-        &repo,
-        version.id,
-        FileLocationKind::LocalPath,
-        "/retired-tip",
-    )
-    .await;
+    let location = create_location(&repo, version.id, (), "/retired-tip").await;
     let mut tx = repo.pool.begin().await.unwrap();
     repo.retire_file_version_in_tx(&mut tx, version.id, T0 + Duration::seconds(1), 0)
         .await
@@ -142,11 +125,9 @@ async fn live_local_chain_tips_returns_older_active_tip_when_newer_version_is_re
     let (repo, _tmp) = fresh().await;
     let asset = repo.create_file_asset(T0).await.unwrap();
     let older = create_version(&repo, asset.id, "older", None).await;
-    let older_location =
-        create_location(&repo, older.id, FileLocationKind::LocalPath, "/older").await;
+    let older_location = create_location(&repo, older.id, (), "/older").await;
     let newer = create_version(&repo, asset.id, "newer", Some(older.id)).await;
-    let newer_location =
-        create_location(&repo, newer.id, FileLocationKind::LocalPath, "/newer").await;
+    let newer_location = create_location(&repo, newer.id, (), "/newer").await;
     let mut tx = repo.pool.begin().await.unwrap();
     repo.retire_file_version_in_tx(&mut tx, newer.id, T0 + Duration::seconds(1), 0)
         .await
@@ -163,7 +144,8 @@ async fn live_local_chain_tips_returns_older_active_tip_when_newer_version_is_re
         vec![LiveChainTipLocation {
             location_id: older_location.id,
             file_asset_id: asset.id,
-            value: "/older".to_owned(),
+            storage_root_id: crate::test_support::TEST_STORAGE_ROOT_ID,
+            provider_relative_locator: crate::test_support::test_relative_locator("/older",),
             epoch: 0,
         }]
     );
@@ -174,22 +156,10 @@ async fn live_local_chain_tips_orders_multiple_returned_locations_by_id() {
     let (repo, _tmp) = fresh().await;
     let first_asset = repo.create_file_asset(T0).await.unwrap();
     let first_version = create_version(&repo, first_asset.id, "first-ordered", None).await;
-    let first = create_location(
-        &repo,
-        first_version.id,
-        FileLocationKind::LocalPath,
-        "/first-ordered",
-    )
-    .await;
+    let first = create_location(&repo, first_version.id, (), "/first-ordered").await;
     let second_asset = repo.create_file_asset(T0).await.unwrap();
     let second_version = create_version(&repo, second_asset.id, "second-ordered", None).await;
-    let second = create_location(
-        &repo,
-        second_version.id,
-        FileLocationKind::LocalPath,
-        "/second-ordered",
-    )
-    .await;
+    let second = create_location(&repo, second_version.id, (), "/second-ordered").await;
 
     let rows = repo
         .live_local_chain_tips(&[second.id, first.id])
@@ -205,7 +175,7 @@ async fn live_local_chain_tips_orders_multiple_returned_locations_by_id() {
 async fn create_location(
     repo: &SqliteIdentityRepo,
     version_id: FileVersionId,
-    kind: FileLocationKind,
+    _kind: (),
     value: &str,
 ) -> FileLocation {
     let mut tx = repo.pool.begin().await.unwrap();
@@ -214,8 +184,8 @@ async fn create_location(
             &mut tx,
             NewFileLocation {
                 file_version_id: version_id,
-                kind,
-                value: value.to_owned(),
+                storage_root_id: crate::test_support::TEST_STORAGE_ROOT_ID,
+                provider_relative_locator: crate::test_support::test_relative_locator(value),
                 proof: None,
                 observed_at: T0,
             },
@@ -1201,8 +1171,10 @@ async fn discovered_file_with_no_alias_proof_creates_new_asset() {
         .record_discovered_file_in_tx(
             &mut tx,
             DiscoveredFile {
-                location_kind: FileLocationKind::LocalPath,
-                location_value: "/srv/files/movie.mkv".to_owned(),
+                storage_root_id: crate::test_support::TEST_STORAGE_ROOT_ID,
+                provider_relative_locator: crate::test_support::test_relative_locator(
+                    "/srv/files/movie.mkv",
+                ),
                 content_hash: "hash-1".to_owned(),
                 size_bytes: 1024,
                 observed_at: T0,
@@ -1247,8 +1219,8 @@ async fn discovered_file_hash_match_stamps_evidence_against_existing_asset() {
         .record_discovered_file_in_tx(
             &mut tx,
             DiscoveredFile {
-                location_kind: FileLocationKind::LocalPath,
-                location_value: "/srv/a.mkv".to_owned(),
+                storage_root_id: crate::test_support::TEST_STORAGE_ROOT_ID,
+                provider_relative_locator: crate::test_support::test_relative_locator("/srv/a.mkv"),
                 content_hash: "h-dup".to_owned(),
                 size_bytes: 1,
                 observed_at: T0,
@@ -1274,8 +1246,8 @@ async fn discovered_file_hash_match_stamps_evidence_against_existing_asset() {
         .record_discovered_file_in_tx(
             &mut tx,
             DiscoveredFile {
-                location_kind: FileLocationKind::LocalPath,
-                location_value: "/srv/b.mkv".to_owned(),
+                storage_root_id: crate::test_support::TEST_STORAGE_ROOT_ID,
+                provider_relative_locator: crate::test_support::test_relative_locator("/srv/b.mkv"),
                 content_hash: "h-dup".to_owned(),
                 size_bytes: 1,
                 observed_at: T0 + Duration::seconds(1),
@@ -1338,8 +1310,10 @@ async fn reconcile_rename_rejects_when_prior_path_not_missing() {
         .record_discovered_file_in_tx(
             &mut tx,
             DiscoveredFile {
-                location_kind: FileLocationKind::LocalPath,
-                location_value: "/srv/old.mkv".to_owned(),
+                storage_root_id: crate::test_support::TEST_STORAGE_ROOT_ID,
+                provider_relative_locator: crate::test_support::test_relative_locator(
+                    "/srv/old.mkv",
+                ),
                 content_hash: "h".to_owned(),
                 size_bytes: 1,
                 observed_at: T0,
@@ -1363,8 +1337,10 @@ async fn reconcile_rename_rejects_when_prior_path_not_missing() {
         .reconcile_rename(
             RenameProof::LocalFileIdGeneration {
                 prior_location_id: file_location_id,
-                new_kind: FileLocationKind::LocalPath,
-                new_value: "/srv/new.mkv".to_owned(),
+                storage_root_id: crate::test_support::TEST_STORAGE_ROOT_ID,
+                provider_relative_locator: crate::test_support::test_relative_locator(
+                    "/srv/new.mkv",
+                ),
                 file_id: 42,
                 generation: 1,
                 prior_path_missing: false,
@@ -1429,8 +1405,10 @@ async fn list_live_file_locations_by_version_in_tx_sees_within_tx_inserts() {
             &mut tx,
             NewFileLocation {
                 file_version_id: version.id,
-                kind: FileLocationKind::LocalPath,
-                value: "/srv/media/in-tx.mkv".to_owned(),
+                storage_root_id: crate::test_support::TEST_STORAGE_ROOT_ID,
+                provider_relative_locator: crate::test_support::test_relative_locator(
+                    "/srv/media/in-tx.mkv",
+                ),
                 proof: None,
                 observed_at: T0,
             },
@@ -1483,8 +1461,10 @@ async fn list_live_file_locations_by_version_in_tx_excludes_retired() {
             &mut tx,
             NewFileLocation {
                 file_version_id: version.id,
-                kind: FileLocationKind::LocalPath,
-                value: "/srv/media/live.mkv".to_owned(),
+                storage_root_id: crate::test_support::TEST_STORAGE_ROOT_ID,
+                provider_relative_locator: crate::test_support::test_relative_locator(
+                    "/srv/media/live.mkv",
+                ),
                 proof: None,
                 observed_at: T0,
             },
@@ -1496,8 +1476,10 @@ async fn list_live_file_locations_by_version_in_tx_excludes_retired() {
             &mut tx,
             NewFileLocation {
                 file_version_id: version.id,
-                kind: FileLocationKind::LocalPath,
-                value: "/srv/media/retired.mkv".to_owned(),
+                storage_root_id: crate::test_support::TEST_STORAGE_ROOT_ID,
+                provider_relative_locator: crate::test_support::test_relative_locator(
+                    "/srv/media/retired.mkv",
+                ),
                 proof: None,
                 observed_at: T0,
             },
@@ -1547,8 +1529,10 @@ async fn fresh_with_one_live_location() -> (
             &mut tx,
             NewFileLocation {
                 file_version_id: version.id,
-                kind: FileLocationKind::LocalPath,
-                value: "/srv/media/a.mkv".to_owned(),
+                storage_root_id: crate::test_support::TEST_STORAGE_ROOT_ID,
+                provider_relative_locator: crate::test_support::test_relative_locator(
+                    "/srv/media/a.mkv",
+                ),
                 proof: None,
                 observed_at: T0,
             },
@@ -1626,20 +1610,21 @@ async fn retire_file_location_stale_epoch_on_live_row_is_conflict() {
     assert_eq!(still.epoch, 1);
 }
 
-// ---- update_file_location_value_in_tx (post-run promotion repoint) ------
+// ---- update_file_location_address_in_tx (post-run promotion repoint) ----
 
 #[tokio::test]
-async fn update_file_location_value_happy_path_sets_value_and_bumps_epoch() {
+async fn update_file_location_address_happy_path_sets_address_and_bumps_epoch() {
     let (repo, loc, _tmp) = fresh_with_one_live_location().await;
     assert_eq!(loc.epoch, 0);
 
     let mut tx = repo.pool.begin().await.unwrap();
     let updated = repo
-        .update_file_location_value_in_tx(
+        .update_file_location_address_in_tx(
             &mut tx,
             loc.id,
             0,
-            "/srv/output/a.mkv".to_owned(),
+            crate::test_support::TEST_STORAGE_ROOT_ID,
+            crate::test_support::test_relative_locator("/srv/output/a.mkv"),
             T0 + Duration::seconds(3),
         )
         .await
@@ -1650,13 +1635,19 @@ async fn update_file_location_value_happy_path_sets_value_and_bumps_epoch() {
         updated.id, loc.id,
         "the location id is stable across a repoint"
     );
-    assert_eq!(updated.value, "/srv/output/a.mkv");
+    assert_eq!(
+        updated.rooted_address().unwrap(),
+        (
+            crate::test_support::TEST_STORAGE_ROOT_ID,
+            &crate::test_support::test_relative_locator("/srv/output/a.mkv")
+        )
+    );
     assert_eq!(updated.epoch, 1);
     assert!(updated.retired_at.is_none());
 }
 
 #[tokio::test]
-async fn update_file_location_value_stale_epoch_is_conflict_and_no_write() {
+async fn update_file_location_address_stale_epoch_is_conflict_and_no_write() {
     let (repo, loc, _tmp) = fresh_with_one_live_location().await;
 
     sqlx::query("UPDATE file_locations SET epoch = epoch + 1 WHERE id = ?")
@@ -1667,24 +1658,31 @@ async fn update_file_location_value_stale_epoch_is_conflict_and_no_write() {
 
     let mut tx = repo.pool.begin().await.unwrap();
     let err = repo
-        .update_file_location_value_in_tx(
+        .update_file_location_address_in_tx(
             &mut tx,
             loc.id,
             0,
-            "/srv/output/a.mkv".to_owned(),
+            crate::test_support::TEST_STORAGE_ROOT_ID,
+            crate::test_support::test_relative_locator("/srv/output/a.mkv"),
             T0 + Duration::seconds(3),
         )
         .await
         .unwrap_err();
     assert!(matches!(err, VoomError::Conflict(_)), "got: {err:?}");
 
-    // The value is unchanged — no partial write.
+    // The address is unchanged — no partial write.
     let still = repo.get_file_location(loc.id).await.unwrap().unwrap();
-    assert_eq!(still.value, "/srv/media/a.mkv");
+    assert_eq!(
+        still.rooted_address().unwrap(),
+        (
+            crate::test_support::TEST_STORAGE_ROOT_ID,
+            &crate::test_support::test_relative_locator("/srv/media/a.mkv")
+        )
+    );
 }
 
 #[tokio::test]
-async fn update_file_location_value_on_retired_row_is_conflict() {
+async fn update_file_location_address_on_retired_row_is_conflict() {
     let (repo, loc, _tmp) = fresh_with_one_live_location().await;
 
     let mut tx = repo.pool.begin().await.unwrap();
@@ -1695,11 +1693,12 @@ async fn update_file_location_value_on_retired_row_is_conflict() {
 
     let mut tx = repo.pool.begin().await.unwrap();
     let err = repo
-        .update_file_location_value_in_tx(
+        .update_file_location_address_in_tx(
             &mut tx,
             loc.id,
             1,
-            "/srv/output/a.mkv".to_owned(),
+            crate::test_support::TEST_STORAGE_ROOT_ID,
+            crate::test_support::test_relative_locator("/srv/output/a.mkv"),
             T0 + Duration::seconds(2),
         )
         .await
@@ -1842,8 +1841,10 @@ async fn replace_file_location_happy_path_retires_old_and_inserts_new() {
             0,
             NewFileLocation {
                 file_version_id: loc.file_version_id,
-                kind: FileLocationKind::LocalPath,
-                value: "/srv/media/a.renamed.mkv".to_owned(),
+                storage_root_id: crate::test_support::TEST_STORAGE_ROOT_ID,
+                provider_relative_locator: crate::test_support::test_relative_locator(
+                    "/srv/media/a.renamed.mkv",
+                ),
                 proof: None,
                 observed_at: T0 + Duration::seconds(2),
             },
@@ -1862,7 +1863,13 @@ async fn replace_file_location_happy_path_retires_old_and_inserts_new() {
     let inserted = repo.get_file_location(new_id).await.unwrap().unwrap();
     assert!(inserted.retired_at.is_none());
     assert_eq!(inserted.file_version_id, loc.file_version_id);
-    assert_eq!(inserted.value, "/srv/media/a.renamed.mkv");
+    assert_eq!(
+        inserted.rooted_address().unwrap(),
+        (
+            crate::test_support::TEST_STORAGE_ROOT_ID,
+            &crate::test_support::test_relative_locator("/srv/media/a.renamed.mkv")
+        )
+    );
 }
 
 #[tokio::test]
@@ -1890,8 +1897,10 @@ async fn replace_file_location_already_terminal_is_conflict_and_no_insert() {
             1,
             NewFileLocation {
                 file_version_id: loc.file_version_id,
-                kind: FileLocationKind::LocalPath,
-                value: "/srv/media/should-not-land.mkv".to_owned(),
+                storage_root_id: crate::test_support::TEST_STORAGE_ROOT_ID,
+                provider_relative_locator: crate::test_support::test_relative_locator(
+                    "/srv/media/should-not-land.mkv",
+                ),
                 proof: None,
                 observed_at: T0 + Duration::seconds(3),
             },
@@ -1936,8 +1945,10 @@ async fn replace_file_location_stale_epoch_on_live_row_is_conflict_and_no_insert
             0, // caller's snapshot — now stale
             NewFileLocation {
                 file_version_id: loc.file_version_id,
-                kind: FileLocationKind::LocalPath,
-                value: "/srv/media/should-not-land.mkv".to_owned(),
+                storage_root_id: crate::test_support::TEST_STORAGE_ROOT_ID,
+                provider_relative_locator: crate::test_support::test_relative_locator(
+                    "/srv/media/should-not-land.mkv",
+                ),
                 proof: None,
                 observed_at: T0 + Duration::seconds(2),
             },
@@ -2008,8 +2019,10 @@ async fn replace_file_location_rejects_cross_version_supply() {
             &mut tx,
             NewFileLocation {
                 file_version_id: version_a.id,
-                kind: FileLocationKind::LocalPath,
-                value: "/srv/media/on-a.mkv".to_owned(),
+                storage_root_id: crate::test_support::TEST_STORAGE_ROOT_ID,
+                provider_relative_locator: crate::test_support::test_relative_locator(
+                    "/srv/media/on-a.mkv",
+                ),
                 proof: None,
                 observed_at: T0,
             },
@@ -2036,8 +2049,10 @@ async fn replace_file_location_rejects_cross_version_supply() {
             0,
             NewFileLocation {
                 file_version_id: version_b.id, // ← mismatch
-                kind: FileLocationKind::LocalPath,
-                value: "/srv/media/should-not-land.mkv".to_owned(),
+                storage_root_id: crate::test_support::TEST_STORAGE_ROOT_ID,
+                provider_relative_locator: crate::test_support::test_relative_locator(
+                    "/srv/media/should-not-land.mkv",
+                ),
                 proof: None,
                 observed_at: T0 + Duration::seconds(1),
             },
@@ -2105,8 +2120,10 @@ async fn replace_file_location_savepoint_rolls_back_on_insert_failure() {
             0,
             NewFileLocation {
                 file_version_id: loc.file_version_id, // matches → passes round-6 #1 pre-check
-                kind: FileLocationKind::LocalPath,
-                value: "__force_failure_marker__".to_owned(), // ← INSERT trips trigger
+                storage_root_id: crate::test_support::TEST_STORAGE_ROOT_ID,
+                provider_relative_locator: crate::test_support::test_relative_locator(
+                    "__force_failure_marker__",
+                ), // ← INSERT trips trigger
                 proof: None,
                 observed_at: T0 + Duration::seconds(2),
             },
@@ -2162,8 +2179,10 @@ async fn seed_local_proof_location(repo: &SqliteIdentityRepo) -> (FileLocationId
         .record_discovered_file_in_tx(
             &mut tx,
             DiscoveredFile {
-                location_kind: FileLocationKind::LocalPath,
-                location_value: "/srv/old.mkv".to_owned(),
+                storage_root_id: crate::test_support::TEST_STORAGE_ROOT_ID,
+                provider_relative_locator: crate::test_support::test_relative_locator(
+                    "/srv/old.mkv",
+                ),
                 content_hash: "h".to_owned(),
                 size_bytes: 1,
                 observed_at: T0,
@@ -2228,8 +2247,10 @@ async fn alias_attached_rejects_when_pending_commit_covers_file_version() {
         .record_discovered_file_in_tx(
             &mut tx,
             DiscoveredFile {
-                location_kind: FileLocationKind::LocalPath,
-                location_value: "/srv/alias.mkv".to_owned(),
+                storage_root_id: crate::test_support::TEST_STORAGE_ROOT_ID,
+                provider_relative_locator: crate::test_support::test_relative_locator(
+                    "/srv/alias.mkv",
+                ),
                 content_hash: "h".to_owned(),
                 size_bytes: 1,
                 observed_at: T0 + Duration::seconds(2),
@@ -2272,8 +2293,10 @@ async fn alias_attached_succeeds_when_no_in_flight_commit_exists() {
         .record_discovered_file_in_tx(
             &mut tx,
             DiscoveredFile {
-                location_kind: FileLocationKind::LocalPath,
-                location_value: "/srv/alias.mkv".to_owned(),
+                storage_root_id: crate::test_support::TEST_STORAGE_ROOT_ID,
+                provider_relative_locator: crate::test_support::test_relative_locator(
+                    "/srv/alias.mkv",
+                ),
                 content_hash: "h".to_owned(),
                 size_bytes: 1,
                 observed_at: T0 + Duration::seconds(2),
@@ -2335,8 +2358,10 @@ async fn reconcile_rename_in_tx_proceeds_against_in_flight_commit() {
         .reconcile_rename(
             RenameProof::LocalFileIdGeneration {
                 prior_location_id: prior_id,
-                new_kind: FileLocationKind::LocalPath,
-                new_value: "/srv/new.mkv".to_owned(),
+                storage_root_id: crate::test_support::TEST_STORAGE_ROOT_ID,
+                provider_relative_locator: crate::test_support::test_relative_locator(
+                    "/srv/new.mkv",
+                ),
                 file_id: 42,
                 generation: 1,
                 prior_path_missing: true,

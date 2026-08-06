@@ -3,6 +3,7 @@ use std::path::PathBuf;
 
 use serde::Serialize;
 
+use crate::NodeId;
 use crate::error::VoomError;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -35,6 +36,7 @@ pub struct Config {
     pub log_level: String,
     pub log_format: LogFormat,
     pub config_path: PathBuf,
+    pub local_node_id: Option<NodeId>,
 }
 
 /// Source of environment variables. Production uses `ProcessEnv`; tests inject
@@ -110,11 +112,16 @@ impl Config {
             .unwrap_or_else(|| "json".to_owned());
         let log_format = LogFormat::parse(&log_format_str)?;
         let config_path = default_config_path()?;
+        let local_node_id = env
+            .get("VOOM_LOCAL_NODE_ID")
+            .map(|value| parse_local_node_id(&value))
+            .transpose()?;
         Ok(Self {
             database_url,
             log_level,
             log_format,
             config_path,
+            local_node_id,
         })
     }
 
@@ -136,6 +143,18 @@ impl Config {
             log_format_override,
         )
     }
+}
+
+fn parse_local_node_id(value: &str) -> Result<NodeId, VoomError> {
+    let id = value.parse::<u64>().map_err(|error| {
+        VoomError::Config(format!("VOOM_LOCAL_NODE_ID must be a nonzero u64: {error}"))
+    })?;
+    if id == 0 {
+        return Err(VoomError::Config(
+            "VOOM_LOCAL_NODE_ID must be a nonzero u64".to_owned(),
+        ));
+    }
+    Ok(NodeId(id))
 }
 
 fn project_dirs() -> Result<directories::ProjectDirs, VoomError> {

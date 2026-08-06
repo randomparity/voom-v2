@@ -73,16 +73,17 @@ fn media_work_created_round_trips() {
 
 #[test]
 fn file_location_recorded_by_move_round_trips() {
-    let p = FileLocationRecordedByMovePayload {
+    let p = FileLocationRootedRecordedByMovePayload {
         retired_file_location_id: voom_core::FileLocationId(1),
         new_file_location_id: voom_core::FileLocationId(2),
         file_version_id: voom_core::FileVersionId(3),
-        kind: "local_path".to_owned(),
-        value: "/srv/new".to_owned(),
+        storage_root_id: voom_core::StorageRootId(4),
+        provider_relative_locator: voom_core::ProviderRelativeLocator::new("new.mkv".to_owned())
+            .unwrap(),
         observed_at: OffsetDateTime::UNIX_EPOCH,
     };
     let json = serde_json::to_string(&p).unwrap();
-    let back: FileLocationRecordedByMovePayload = serde_json::from_str(&json).unwrap();
+    let back: FileLocationRootedRecordedByMovePayload = serde_json::from_str(&json).unwrap();
     assert_eq!(p, back);
 }
 
@@ -116,13 +117,16 @@ fn event_dotted_tag_matches_event_kind_as_str_for_identity_variants() {
             "media_work.created",
         ),
         (
-            Event::FileLocationAliased(FileLocationAliasedPayload {
+            Event::FileLocationRootedAliased(FileLocationRootedAliasedPayload {
                 file_location_id: voom_core::FileLocationId(1),
                 file_version_id: voom_core::FileVersionId(1),
-                kind: "local_path".to_owned(),
-                value: "/x".to_owned(),
+                storage_root_id: voom_core::StorageRootId(2),
+                provider_relative_locator: voom_core::ProviderRelativeLocator::new(
+                    "x.mkv".to_owned(),
+                )
+                .unwrap(),
             }),
-            "file_location.aliased",
+            "file_location.rooted_aliased",
         ),
     ];
     for (event, expected_tag) in cases {
@@ -202,8 +206,15 @@ fn file_location_recorded_payload_rejects_unknown_field() {
     assert_rejects_unknown(&FileLocationRecordedPayload {
         file_location_id: voom_core::FileLocationId(1),
         file_version_id: voom_core::FileVersionId(2),
-        kind: "filesystem".to_owned(),
-        value: "/media/x".to_owned(),
+        kind: "local_path".to_owned(),
+        value: "/media/x.mkv".to_owned(),
+    });
+    assert_rejects_unknown(&FileLocationRootedRecordedPayload {
+        file_location_id: voom_core::FileLocationId(1),
+        file_version_id: voom_core::FileVersionId(2),
+        storage_root_id: voom_core::StorageRootId(3),
+        provider_relative_locator: voom_core::ProviderRelativeLocator::new("x.mkv".to_owned())
+            .unwrap(),
     });
 }
 
@@ -212,8 +223,15 @@ fn file_location_aliased_payload_rejects_unknown_field() {
     assert_rejects_unknown(&FileLocationAliasedPayload {
         file_location_id: voom_core::FileLocationId(1),
         file_version_id: voom_core::FileVersionId(2),
-        kind: "filesystem".to_owned(),
-        value: "/media/y".to_owned(),
+        kind: "local_path".to_owned(),
+        value: "/media/y.mkv".to_owned(),
+    });
+    assert_rejects_unknown(&FileLocationRootedAliasedPayload {
+        file_location_id: voom_core::FileLocationId(1),
+        file_version_id: voom_core::FileVersionId(2),
+        storage_root_id: voom_core::StorageRootId(3),
+        provider_relative_locator: voom_core::ProviderRelativeLocator::new("y.mkv".to_owned())
+            .unwrap(),
     });
 }
 
@@ -232,10 +250,59 @@ fn file_location_recorded_by_move_payload_rejects_unknown_field() {
         retired_file_location_id: voom_core::FileLocationId(1),
         new_file_location_id: voom_core::FileLocationId(2),
         file_version_id: voom_core::FileVersionId(3),
-        kind: "filesystem".to_owned(),
-        value: "/media/z".to_owned(),
+        kind: "local_path".to_owned(),
+        value: "/media/z.mkv".to_owned(),
         observed_at: OffsetDateTime::UNIX_EPOCH,
     });
+    assert_rejects_unknown(&FileLocationRootedRecordedByMovePayload {
+        retired_file_location_id: voom_core::FileLocationId(1),
+        new_file_location_id: voom_core::FileLocationId(2),
+        file_version_id: voom_core::FileVersionId(3),
+        storage_root_id: voom_core::StorageRootId(4),
+        provider_relative_locator: voom_core::ProviderRelativeLocator::new("z.mkv".to_owned())
+            .unwrap(),
+        observed_at: OffsetDateTime::UNIX_EPOCH,
+    });
+}
+
+#[test]
+fn legacy_and_rooted_location_payloads_do_not_accept_each_others_shapes() {
+    let legacy = serde_json::json!({
+        "file_location_id": 1,
+        "file_version_id": 2,
+        "kind": "local_path",
+        "value": "/media/x"
+    });
+    assert!(serde_json::from_value::<FileLocationRecordedPayload>(legacy.clone()).is_ok());
+    assert!(serde_json::from_value::<FileLocationAliasedPayload>(legacy.clone()).is_ok());
+    assert!(serde_json::from_value::<FileLocationRootedRecordedPayload>(legacy.clone()).is_err());
+    assert!(serde_json::from_value::<FileLocationRootedAliasedPayload>(legacy).is_err());
+
+    let legacy_move = serde_json::json!({
+        "retired_file_location_id": 1,
+        "new_file_location_id": 2,
+        "file_version_id": 3,
+        "kind": "local_path",
+        "value": "/media/z",
+        "observed_at": "1970-01-01T00:00:00Z"
+    });
+    assert!(
+        serde_json::from_value::<FileLocationRecordedByMovePayload>(legacy_move.clone()).is_ok()
+    );
+    assert!(
+        serde_json::from_value::<FileLocationRootedRecordedByMovePayload>(legacy_move).is_err()
+    );
+
+    let rooted = serde_json::json!({
+        "file_location_id": 1,
+        "file_version_id": 2,
+        "storage_root_id": 3,
+        "provider_relative_locator": "x.mkv"
+    });
+    assert!(serde_json::from_value::<FileLocationRecordedPayload>(rooted.clone()).is_err());
+    assert!(serde_json::from_value::<FileLocationAliasedPayload>(rooted.clone()).is_err());
+    assert!(serde_json::from_value::<FileLocationRootedRecordedPayload>(rooted.clone()).is_ok());
+    assert!(serde_json::from_value::<FileLocationRootedAliasedPayload>(rooted).is_ok());
 }
 
 #[test]

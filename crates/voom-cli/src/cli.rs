@@ -75,14 +75,10 @@ pub enum Command {
     /// Stage, verify, commit, or inspect artifacts.
     #[command(subcommand)]
     Artifact(ArtifactCommand),
-    /// Scan an explicit path (`--path`) or a configured library root (`--root`).
+    /// Scan a configured node-owned storage root.
     Scan {
-        #[arg(long, required_unless_present = "root", conflicts_with = "root")]
-        path: Option<PathBuf>,
-        /// Scan the enabled library root with this id. A disabled root or
-        /// library is refused (`BLOCKED`), not scanned.
-        #[arg(long, conflicts_with = "path")]
-        root: Option<u64>,
+        #[arg(long)]
+        root: u64,
     },
     /// List and inspect asset bundles and their members.
     #[command(subcommand)]
@@ -505,7 +501,7 @@ pub enum LibraryCommand {
         #[arg(long)]
         library_id: u64,
     },
-    /// Delete a library and cascade its roots.
+    /// Delete a library only when it has no durable roots.
     Remove {
         #[arg(long)]
         library_id: u64,
@@ -529,8 +525,7 @@ pub enum LibraryCommand {
 
 #[derive(Subcommand, Debug, Clone)]
 pub enum LibraryRootCommand {
-    /// Add a root to a library. `--path` is canonicalized and stored; a
-    /// symlinked path is rejected.
+    /// Add a configured node-owned storage root.
     Add(LibraryRootAddArgs),
     /// List roots, optionally filtered to one library.
     List {
@@ -554,8 +549,15 @@ pub enum LibraryRootCommand {
         #[arg(long)]
         root_id: u64,
     },
-    /// Delete a root.
-    Remove {
+    /// Assign an unassigned migrated root to its logical owner.
+    AssignOwner {
+        #[arg(long)]
+        root_id: u64,
+        #[arg(long)]
+        owner_node_id: u64,
+    },
+    /// Terminally retire a root while retaining its durable identity.
+    Retire {
         #[arg(long)]
         root_id: u64,
     },
@@ -566,9 +568,13 @@ pub struct LibraryRootAddArgs {
     #[arg(long)]
     pub library_id: u64,
     #[arg(long)]
-    pub path: PathBuf,
-    #[arg(long, default_value_t = LibraryRootKindArg::LocalPath)]
-    pub root_kind: LibraryRootKindArg,
+    pub owner_node_id: u64,
+    #[arg(long)]
+    pub provider: StorageProviderKindArg,
+    #[arg(long)]
+    pub provider_locator: String,
+    #[arg(long)]
+    pub display_locator: Option<String>,
     #[arg(long, default_value_t = LibraryScanModeArg::ManualRecursive)]
     pub scan_mode: LibraryScanModeArg,
     #[arg(long = "include-glob")]
@@ -589,11 +595,11 @@ pub struct LibraryRootAddArgs {
     #[arg(long, default_value_t = 0)]
     pub debounce_seconds: u32,
     #[arg(long)]
-    pub output_root: Option<String>,
+    pub output_root: Option<u64>,
     #[arg(long)]
-    pub staging_root: Option<String>,
+    pub staging_root: Option<u64>,
     #[arg(long)]
-    pub backup_root: Option<String>,
+    pub backup_root: Option<u64>,
     /// Create the root disabled.
     #[arg(long)]
     pub disabled: bool,
@@ -622,11 +628,11 @@ pub struct LibraryRootUpdateArgs {
     #[arg(long)]
     pub debounce_seconds: Option<u32>,
     #[arg(long)]
-    pub output_root: Option<String>,
+    pub output_root: Option<u64>,
     #[arg(long)]
-    pub staging_root: Option<String>,
+    pub staging_root: Option<u64>,
     #[arg(long)]
-    pub backup_root: Option<String>,
+    pub backup_root: Option<u64>,
 }
 
 macro_rules! value_enum_to_store {
@@ -662,9 +668,8 @@ value_enum_to_store!(LibraryMediaKindArg => voom_store::repo::library::libraries
     Personal,
     Unknown,
 });
-value_enum_to_store!(LibraryRootKindArg => voom_store::repo::library::library_roots::LibraryRootKind {
-    LocalPath,
-    SharedMount,
+value_enum_to_store!(StorageProviderKindArg => voom_core::StorageProviderKind {
+    LocalFilesystem,
 });
 value_enum_to_store!(LibraryScanModeArg => voom_store::repo::library::library_roots::LibraryScanMode {
     ExplicitOnly,

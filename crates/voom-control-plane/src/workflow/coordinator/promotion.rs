@@ -12,7 +12,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use voom_core::{FileAssetId, FileLocationId, FileVersionId, VoomError};
 use voom_policy::{PolicyInputSetDraft, TargetRef};
 use voom_store::repo::execution::workflow_summaries::FilePhaseSummary;
-use voom_store::repo::media::identity::{FileLocationKind, FileLocationRepo, FileVersionRepo};
+use voom_store::repo::media::identity::{FileLocationAddress, FileLocationRepo, FileVersionRepo};
 
 use crate::ControlPlane;
 use crate::cases::policy::compliance::PromotionPlan;
@@ -516,8 +516,13 @@ impl ControlPlane {
             // artifact exists at promotion time; fall back to the raw value if it
             // does not so a vanished-but-still-live location still fails loudly in
             // the move rather than being silently skipped.
-            let raw = PathBuf::from(&artifact.value);
-            let current = tokio::fs::canonicalize(&raw).await.unwrap_or(raw);
+            let current = crate::operation_source::resolve_root_relative_existing_path(
+                self,
+                "workflow promotion",
+                artifact.storage_root_id,
+                &artifact.provider_relative_locator,
+            )
+            .await?;
             let Some((working_dir, output_dir)) = dirs.pair_for(&current) else {
                 continue;
             };
@@ -617,15 +622,22 @@ impl ControlPlane {
             let Some(location) = self.identity.get_file_location(location_id).await? else {
                 continue;
             };
-            if location.retired_at.is_some() || location.kind != FileLocationKind::LocalPath {
+            if location.retired_at.is_some()
+                || !matches!(location.address, FileLocationAddress::Rooted { .. })
+            {
                 continue;
             }
-            let path = PathBuf::from(&location.value);
-            let canonical = tokio::fs::canonicalize(&path).await.unwrap_or(path.clone());
+            let canonical = crate::operation_source::resolve_rooted_existing_path(
+                self,
+                "workflow reclaim",
+                &location,
+            )
+            .await?;
             if dirs.output_for(&canonical).is_none() {
                 continue;
             }
-            self.reclaim_intermediate_location(&location).await?;
+            self.reclaim_intermediate_location(&location, &canonical)
+                .await?;
         }
         Ok(())
     }
@@ -633,9 +645,9 @@ impl ControlPlane {
     async fn reclaim_intermediate_location(
         &self,
         location: &voom_store::repo::media::identity::FileLocation,
+        path: &Path,
     ) -> Result<(), VoomError> {
-        let path = PathBuf::from(&location.value);
-        match tokio::fs::remove_file(&path).await {
+        match tokio::fs::remove_file(path).await {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => {
@@ -692,10 +704,18 @@ impl ControlPlane {
             .identity
             .list_file_locations_by_version(first.id)
             .await?;
-        Ok(locations
-            .into_iter()
-            .find(|location| location.kind == FileLocationKind::LocalPath)
-            .map(|location| PathBuf::from(location.value)))
+        for location in locations {
+            if matches!(location.address, FileLocationAddress::Rooted { .. }) {
+                return crate::operation_source::resolve_rooted_existing_path(
+                    self,
+                    "workflow source",
+                    &location,
+                )
+                .await
+                .map(Some);
+            }
+        }
+        Ok(None)
     }
 
     /// Move a terminal artifact into `dest_dir` and repoint its location.
@@ -713,14 +733,23 @@ impl ControlPlane {
         })?;
         let dest_dir = ensure_output_dir(dest_dir).await?;
         let dest = dest_dir.join(file_name);
-        let dest = move_terminal_artifact(current, &dest, artifact.location_id).await?;
+        let (target_storage_root_id, target_relative_locator, dest) =
+            crate::operation_source::resolve_artifact_target(
+                self,
+                "workflow promotion",
+                artifact.storage_root_id,
+                &dest,
+            )
+            .await?;
+        move_terminal_artifact(current, &dest, artifact.location_id).await?;
         let mut tx = begin_tx(&self.pool).await?;
         self.identity
-            .update_file_location_value_in_tx(
+            .update_file_location_address_in_tx(
                 &mut tx,
                 artifact.location_id,
                 artifact.epoch,
-                dest.display().to_string(),
+                target_storage_root_id,
+                target_relative_locator,
                 self.clock().now(),
             )
             .await?;

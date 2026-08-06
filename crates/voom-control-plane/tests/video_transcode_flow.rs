@@ -10,7 +10,7 @@ use std::process::Command;
 use serde_json::json;
 use voom_control_plane::ControlPlane;
 use voom_control_plane::policy::{ComplianceExecutionOptions, PolicyInputFromScanInput};
-use voom_control_plane::scan::{ScanPathInput, ScanReportFileStatus};
+use voom_control_plane::scan::{RootScanOutcome, ScanReportFileStatus};
 use voom_core::{FileVersionId, MediaSnapshotId};
 use voom_plan::PlanOperationKind;
 use voom_policy::{
@@ -41,17 +41,24 @@ async fn video_transcode_flow_verifies_commits_and_authoritative_replan() {
     let url = format!("sqlite://{}", db.path().display());
     voom_store::init(&url).await.unwrap();
     let pool = voom_store::connect(&url).await.unwrap();
+    voom_store::test_support::seed_test_storage_root(&pool)
+        .await
+        .unwrap();
+    voom_store::test_support::set_test_storage_root_path(&pool, tmp.path())
+        .await
+        .unwrap();
     let cp = ControlPlane::open_with_pool(pool, std::sync::Arc::new(voom_core::SystemClock))
         .await
-        .unwrap();
+        .unwrap()
+        .with_local_node_id(Some(voom_core::NodeId(9_000_001)));
 
-    let scan = cp
-        .scan_path(ScanPathInput {
-            path: source.clone(),
-            extension_allowlist: Vec::new(),
-        })
+    let outcome = cp
+        .scan_library_root(voom_store::test_support::TEST_STORAGE_ROOT_ID)
         .await
         .unwrap();
+    let RootScanOutcome::Scanned(scan) = outcome else {
+        unreachable!("active local test root must scan")
+    };
     assert_eq!(scan.summary.scanned_count(), 1);
     let scanned = scan
         .files

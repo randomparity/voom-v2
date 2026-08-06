@@ -13,12 +13,11 @@ use time::Duration;
 
 use voom_control_plane::ControlPlane;
 use voom_core::rng_test_support::FrozenRng;
-use voom_core::{SystemClock, VoomError};
+use voom_core::{NodeId, SystemClock, VoomError};
 use voom_events::EventKind;
 use voom_store::repo::audit::events::{EventFilter, EventRepo, Page};
 use voom_store::repo::media::identity::{
-    DiscoveredFile, FileLocationKind, FileLocationRepo, IngestOutcome, LocationProof,
-    ObservedBytes, RenameProof,
+    DiscoveredFile, FileLocationRepo, IngestOutcome, LocationProof, ObservedBytes, RenameProof,
 };
 use voom_store::repo::media::use_leases::{
     BlockingMode, IssuerKind, LeaseScope, NewUseLease, UseLeaseKind,
@@ -30,10 +29,14 @@ async fn cp() -> (ControlPlane, voom_test_support::TempDatabase) {
     let url = format!("sqlite://{}", tmp.path().display());
     let _ = voom_store::init(&url).await.unwrap();
     let pool = voom_store::connect(&url).await.unwrap();
+    voom_store::test_support::seed_test_storage_root(&pool)
+        .await
+        .unwrap();
     let rng = Arc::new(Mutex::new(FrozenRng::new(0)));
     let cp = ControlPlane::open_with_pool_and_rng(pool, Arc::new(SystemClock), rng)
         .await
-        .unwrap();
+        .unwrap()
+        .with_local_node_id(Some(NodeId(9_000_001)));
     (cp, tmp)
 }
 
@@ -61,8 +64,8 @@ async fn seed_local(cp: &ControlPlane, path: &str, hash: &str, size: u64) -> u64
     let outcome = cp
         .record_discovered_file(
             DiscoveredFile {
-                location_kind: FileLocationKind::LocalPath,
-                location_value: path.to_owned(),
+                storage_root_id: voom_store::test_support::TEST_STORAGE_ROOT_ID,
+                provider_relative_locator: voom_store::test_support::test_relative_locator(path),
                 content_hash: hash.to_owned(),
                 size_bytes: size,
                 observed_at: T0,
@@ -89,8 +92,10 @@ async fn seed_object(cp: &ControlPlane, key: &str, hash: &str, size: u64) -> u64
     let outcome = cp
         .record_discovered_file(
             DiscoveredFile {
-                location_kind: FileLocationKind::ObjectStoreKey,
-                location_value: format!("s3://b/{key}#v1"),
+                storage_root_id: voom_store::test_support::TEST_STORAGE_ROOT_ID,
+                provider_relative_locator: voom_store::test_support::test_relative_locator(
+                    &format!("objects/{key}"),
+                ),
                 content_hash: hash.to_owned(),
                 size_bytes: size,
                 observed_at: T0,
@@ -130,13 +135,15 @@ async fn reconcile_rename_happy_path_local() {
     let (cp, _tmp) = cp().await;
     let prior_id = seed_local(&cp, "/srv/old.mkv", "h", 10).await;
     let retired_before = count_kind(&cp, EventKind::FileLocationRetiredByMove).await;
-    let recorded_before = count_kind(&cp, EventKind::FileLocationRecordedByMove).await;
+    let recorded_before = count_kind(&cp, EventKind::FileLocationRootedRecordedByMove).await;
     let outcome = cp
         .reconcile_rename(
             RenameProof::LocalFileIdGeneration {
                 prior_location_id: voom_core::FileLocationId(prior_id),
-                new_kind: FileLocationKind::LocalPath,
-                new_value: "/srv/new.mkv".to_owned(),
+                storage_root_id: voom_store::test_support::TEST_STORAGE_ROOT_ID,
+                provider_relative_locator: voom_store::test_support::test_relative_locator(
+                    "/srv/new.mkv",
+                ),
                 file_id: 99,
                 generation: 1,
                 prior_path_missing: true,
@@ -155,7 +162,7 @@ async fn reconcile_rename_happy_path_local() {
         retired_before + 1
     );
     assert_eq!(
-        count_kind(&cp, EventKind::FileLocationRecordedByMove).await,
+        count_kind(&cp, EventKind::FileLocationRootedRecordedByMove).await,
         recorded_before + 1
     );
     // path_rule_match evidence appended on the new location.
@@ -175,13 +182,15 @@ async fn reconcile_rename_happy_path_object_store() {
     let (cp, _tmp) = cp().await;
     let prior_id = seed_object(&cp, "old/key.mkv", "h", 10).await;
     let retired_before = count_kind(&cp, EventKind::FileLocationRetiredByMove).await;
-    let recorded_before = count_kind(&cp, EventKind::FileLocationRecordedByMove).await;
+    let recorded_before = count_kind(&cp, EventKind::FileLocationRootedRecordedByMove).await;
     let outcome = cp
         .reconcile_rename(
             RenameProof::ObjectStoreVersion {
                 prior_location_id: voom_core::FileLocationId(prior_id),
-                new_kind: FileLocationKind::ObjectStoreKey,
-                new_value: "s3://b/new/key.mkv#v1".to_owned(),
+                storage_root_id: voom_store::test_support::TEST_STORAGE_ROOT_ID,
+                provider_relative_locator: voom_store::test_support::test_relative_locator(
+                    "objects/new/key.mkv",
+                ),
                 bucket: "b".to_owned(),
                 key: "old/key.mkv".to_owned(),
                 version_id: "v1".to_owned(),
@@ -200,7 +209,7 @@ async fn reconcile_rename_happy_path_object_store() {
         retired_before + 1
     );
     assert_eq!(
-        count_kind(&cp, EventKind::FileLocationRecordedByMove).await,
+        count_kind(&cp, EventKind::FileLocationRootedRecordedByMove).await,
         recorded_before + 1
     );
     let _ = outcome;
@@ -236,8 +245,10 @@ async fn reconcile_rename_reanchors_location_scoped_use_lease() {
         .reconcile_rename(
             RenameProof::LocalFileIdGeneration {
                 prior_location_id: prior_loc,
-                new_kind: FileLocationKind::LocalPath,
-                new_value: "/srv/new.mkv".to_owned(),
+                storage_root_id: voom_store::test_support::TEST_STORAGE_ROOT_ID,
+                provider_relative_locator: voom_store::test_support::test_relative_locator(
+                    "/srv/new.mkv",
+                ),
                 file_id: 99,
                 generation: 1,
                 prior_path_missing: true,
@@ -295,13 +306,15 @@ async fn reconcile_rename_rejects_proof_kind_mismatch() {
     let (cp, _tmp) = cp().await;
     let prior_id = seed_local(&cp, "/srv/old.mkv", "h", 10).await;
     let retired_before = count_kind(&cp, EventKind::FileLocationRetiredByMove).await;
-    let recorded_before = count_kind(&cp, EventKind::FileLocationRecordedByMove).await;
+    let recorded_before = count_kind(&cp, EventKind::FileLocationRootedRecordedByMove).await;
     let err = cp
         .reconcile_rename(
             RenameProof::ObjectStoreVersion {
                 prior_location_id: voom_core::FileLocationId(prior_id),
-                new_kind: FileLocationKind::LocalPath,
-                new_value: "/srv/new.mkv".to_owned(),
+                storage_root_id: voom_store::test_support::TEST_STORAGE_ROOT_ID,
+                provider_relative_locator: voom_store::test_support::test_relative_locator(
+                    "/srv/new.mkv",
+                ),
                 bucket: "b".to_owned(),
                 key: "k".to_owned(),
                 version_id: "v".to_owned(),
@@ -318,7 +331,7 @@ async fn reconcile_rename_rejects_proof_kind_mismatch() {
     assert!(matches!(err, VoomError::Conflict(_)), "got: {err:?}");
     assert_prior_still_live_and_no_move_events_via_count(
         count_kind(&cp, EventKind::FileLocationRetiredByMove).await,
-        count_kind(&cp, EventKind::FileLocationRecordedByMove).await,
+        count_kind(&cp, EventKind::FileLocationRootedRecordedByMove).await,
         retired_before,
         recorded_before,
     );
@@ -329,13 +342,15 @@ async fn reconcile_rename_rejects_proof_value_mismatch_local() {
     let (cp, _tmp) = cp().await;
     let prior_id = seed_local(&cp, "/srv/old.mkv", "h", 10).await;
     let retired_before = count_kind(&cp, EventKind::FileLocationRetiredByMove).await;
-    let recorded_before = count_kind(&cp, EventKind::FileLocationRecordedByMove).await;
+    let recorded_before = count_kind(&cp, EventKind::FileLocationRootedRecordedByMove).await;
     let err = cp
         .reconcile_rename(
             RenameProof::LocalFileIdGeneration {
                 prior_location_id: voom_core::FileLocationId(prior_id),
-                new_kind: FileLocationKind::LocalPath,
-                new_value: "/srv/new.mkv".to_owned(),
+                storage_root_id: voom_store::test_support::TEST_STORAGE_ROOT_ID,
+                provider_relative_locator: voom_store::test_support::test_relative_locator(
+                    "/srv/new.mkv",
+                ),
                 file_id: 99,
                 generation: 2, // mismatch — seed used generation = 1
                 prior_path_missing: true,
@@ -351,7 +366,7 @@ async fn reconcile_rename_rejects_proof_value_mismatch_local() {
     assert!(matches!(err, VoomError::Conflict(_)), "got: {err:?}");
     assert_prior_still_live_and_no_move_events_via_count(
         count_kind(&cp, EventKind::FileLocationRetiredByMove).await,
-        count_kind(&cp, EventKind::FileLocationRecordedByMove).await,
+        count_kind(&cp, EventKind::FileLocationRootedRecordedByMove).await,
         retired_before,
         recorded_before,
     );
@@ -362,13 +377,15 @@ async fn reconcile_rename_rejects_proof_value_mismatch_object_store() {
     let (cp, _tmp) = cp().await;
     let prior_id = seed_object(&cp, "k.mkv", "h", 10).await;
     let retired_before = count_kind(&cp, EventKind::FileLocationRetiredByMove).await;
-    let recorded_before = count_kind(&cp, EventKind::FileLocationRecordedByMove).await;
+    let recorded_before = count_kind(&cp, EventKind::FileLocationRootedRecordedByMove).await;
     let err = cp
         .reconcile_rename(
             RenameProof::ObjectStoreVersion {
                 prior_location_id: voom_core::FileLocationId(prior_id),
-                new_kind: FileLocationKind::ObjectStoreKey,
-                new_value: "s3://b/new.mkv#v2".to_owned(),
+                storage_root_id: voom_store::test_support::TEST_STORAGE_ROOT_ID,
+                provider_relative_locator: voom_store::test_support::test_relative_locator(
+                    "objects/new.mkv",
+                ),
                 bucket: "b".to_owned(),
                 key: "k.mkv".to_owned(),
                 version_id: "v2".to_owned(), // mismatch — seed used v1
@@ -385,7 +402,7 @@ async fn reconcile_rename_rejects_proof_value_mismatch_object_store() {
     assert!(matches!(err, VoomError::Conflict(_)), "got: {err:?}");
     assert_prior_still_live_and_no_move_events_via_count(
         count_kind(&cp, EventKind::FileLocationRetiredByMove).await,
-        count_kind(&cp, EventKind::FileLocationRecordedByMove).await,
+        count_kind(&cp, EventKind::FileLocationRootedRecordedByMove).await,
         retired_before,
         recorded_before,
     );
@@ -396,13 +413,15 @@ async fn reconcile_rename_rejects_prior_path_present() {
     let (cp, _tmp) = cp().await;
     let prior_id = seed_local(&cp, "/srv/old.mkv", "h", 10).await;
     let retired_before = count_kind(&cp, EventKind::FileLocationRetiredByMove).await;
-    let recorded_before = count_kind(&cp, EventKind::FileLocationRecordedByMove).await;
+    let recorded_before = count_kind(&cp, EventKind::FileLocationRootedRecordedByMove).await;
     let err = cp
         .reconcile_rename(
             RenameProof::LocalFileIdGeneration {
                 prior_location_id: voom_core::FileLocationId(prior_id),
-                new_kind: FileLocationKind::LocalPath,
-                new_value: "/srv/new.mkv".to_owned(),
+                storage_root_id: voom_store::test_support::TEST_STORAGE_ROOT_ID,
+                provider_relative_locator: voom_store::test_support::test_relative_locator(
+                    "/srv/new.mkv",
+                ),
                 file_id: 99,
                 generation: 1,
                 prior_path_missing: false, // caller did NOT verify
@@ -418,7 +437,7 @@ async fn reconcile_rename_rejects_prior_path_present() {
     assert!(matches!(err, VoomError::Conflict(_)), "got: {err:?}");
     assert_prior_still_live_and_no_move_events_via_count(
         count_kind(&cp, EventKind::FileLocationRetiredByMove).await,
-        count_kind(&cp, EventKind::FileLocationRecordedByMove).await,
+        count_kind(&cp, EventKind::FileLocationRootedRecordedByMove).await,
         retired_before,
         recorded_before,
     );
@@ -429,13 +448,15 @@ async fn reconcile_rename_rejects_hash_drift() {
     let (cp, _tmp) = cp().await;
     let prior_id = seed_local(&cp, "/srv/old.mkv", "h-original", 10).await;
     let retired_before = count_kind(&cp, EventKind::FileLocationRetiredByMove).await;
-    let recorded_before = count_kind(&cp, EventKind::FileLocationRecordedByMove).await;
+    let recorded_before = count_kind(&cp, EventKind::FileLocationRootedRecordedByMove).await;
     let err = cp
         .reconcile_rename(
             RenameProof::LocalFileIdGeneration {
                 prior_location_id: voom_core::FileLocationId(prior_id),
-                new_kind: FileLocationKind::LocalPath,
-                new_value: "/srv/new.mkv".to_owned(),
+                storage_root_id: voom_store::test_support::TEST_STORAGE_ROOT_ID,
+                provider_relative_locator: voom_store::test_support::test_relative_locator(
+                    "/srv/new.mkv",
+                ),
                 file_id: 99,
                 generation: 1,
                 prior_path_missing: true,
@@ -451,7 +472,7 @@ async fn reconcile_rename_rejects_hash_drift() {
     assert!(matches!(err, VoomError::Conflict(_)), "got: {err:?}");
     assert_prior_still_live_and_no_move_events_via_count(
         count_kind(&cp, EventKind::FileLocationRetiredByMove).await,
-        count_kind(&cp, EventKind::FileLocationRecordedByMove).await,
+        count_kind(&cp, EventKind::FileLocationRootedRecordedByMove).await,
         retired_before,
         recorded_before,
     );
@@ -462,13 +483,15 @@ async fn reconcile_rename_rejects_size_drift() {
     let (cp, _tmp) = cp().await;
     let prior_id = seed_local(&cp, "/srv/old.mkv", "h", 10).await;
     let retired_before = count_kind(&cp, EventKind::FileLocationRetiredByMove).await;
-    let recorded_before = count_kind(&cp, EventKind::FileLocationRecordedByMove).await;
+    let recorded_before = count_kind(&cp, EventKind::FileLocationRootedRecordedByMove).await;
     let err = cp
         .reconcile_rename(
             RenameProof::LocalFileIdGeneration {
                 prior_location_id: voom_core::FileLocationId(prior_id),
-                new_kind: FileLocationKind::LocalPath,
-                new_value: "/srv/new.mkv".to_owned(),
+                storage_root_id: voom_store::test_support::TEST_STORAGE_ROOT_ID,
+                provider_relative_locator: voom_store::test_support::test_relative_locator(
+                    "/srv/new.mkv",
+                ),
                 file_id: 99,
                 generation: 1,
                 prior_path_missing: true,
@@ -484,7 +507,7 @@ async fn reconcile_rename_rejects_size_drift() {
     assert!(matches!(err, VoomError::Conflict(_)), "got: {err:?}");
     assert_prior_still_live_and_no_move_events_via_count(
         count_kind(&cp, EventKind::FileLocationRetiredByMove).await,
-        count_kind(&cp, EventKind::FileLocationRecordedByMove).await,
+        count_kind(&cp, EventKind::FileLocationRootedRecordedByMove).await,
         retired_before,
         recorded_before,
     );
@@ -499,8 +522,10 @@ async fn reconcile_rename_rejects_prior_already_retired() {
         .reconcile_rename(
             RenameProof::LocalFileIdGeneration {
                 prior_location_id: voom_core::FileLocationId(prior_id),
-                new_kind: FileLocationKind::LocalPath,
-                new_value: "/srv/new.mkv".to_owned(),
+                storage_root_id: voom_store::test_support::TEST_STORAGE_ROOT_ID,
+                provider_relative_locator: voom_store::test_support::test_relative_locator(
+                    "/srv/new.mkv",
+                ),
                 file_id: 99,
                 generation: 1,
                 prior_path_missing: true,
@@ -514,14 +539,16 @@ async fn reconcile_rename_rejects_prior_already_retired() {
         .await
         .unwrap();
     let retired_before = count_kind(&cp, EventKind::FileLocationRetiredByMove).await;
-    let recorded_before = count_kind(&cp, EventKind::FileLocationRecordedByMove).await;
+    let recorded_before = count_kind(&cp, EventKind::FileLocationRootedRecordedByMove).await;
     // Second call on the same now-retired prior_id must Conflict.
     let err = cp
         .reconcile_rename(
             RenameProof::LocalFileIdGeneration {
                 prior_location_id: voom_core::FileLocationId(prior_id),
-                new_kind: FileLocationKind::LocalPath,
-                new_value: "/srv/new2.mkv".to_owned(),
+                storage_root_id: voom_store::test_support::TEST_STORAGE_ROOT_ID,
+                provider_relative_locator: voom_store::test_support::test_relative_locator(
+                    "/srv/new2.mkv",
+                ),
                 file_id: 99,
                 generation: 1,
                 prior_path_missing: true,
@@ -537,7 +564,7 @@ async fn reconcile_rename_rejects_prior_already_retired() {
     assert!(matches!(err, VoomError::Conflict(_)), "got: {err:?}");
     assert_prior_still_live_and_no_move_events_via_count(
         count_kind(&cp, EventKind::FileLocationRetiredByMove).await,
-        count_kind(&cp, EventKind::FileLocationRecordedByMove).await,
+        count_kind(&cp, EventKind::FileLocationRootedRecordedByMove).await,
         retired_before,
         recorded_before,
     );

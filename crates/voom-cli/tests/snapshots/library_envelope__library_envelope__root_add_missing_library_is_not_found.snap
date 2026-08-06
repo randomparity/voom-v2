@@ -14,6 +14,6 @@ expression: json
   "warnings": [],
   "error": {
     "code": "NOT_FOUND",
-    "message": "not found: library 99 not found"
+    "message": "not found: library 99 or referenced storage root not found"
   }
 }

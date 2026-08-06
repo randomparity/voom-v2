@@ -6,12 +6,12 @@ use voom_policy::{
     load_fixture,
 };
 use voom_store::repo::audit::events::EventFilter;
-use voom_store::repo::media::identity::{DiscoveredFile, FileLocationKind, IngestOutcome};
+use voom_store::repo::media::identity::{DiscoveredFile, IngestOutcome, NewFileLocation};
 use voom_store::repo::policy::policy_inputs::PolicyInputTargetRef;
 
 use voom_store::repo::library::libraries::{LibraryMediaKind, NewLibrary};
 use voom_store::repo::library::library_roots::{
-    HiddenFilePolicy, LibraryRootKind, LibraryScanMode, NewLibraryRoot, SymlinkPolicy,
+    HiddenFilePolicy, LibraryScanMode, NewLibraryRoot, SymlinkPolicy,
 };
 
 use crate::cases::cp;
@@ -541,6 +541,203 @@ async fn input_from_scan_copies_snapshot_stream_facts() {
 }
 
 #[tokio::test]
+async fn create_policy_input_set_from_scan_rejects_quarantined_only_location() {
+    let (cp, _tmp) = cp().await;
+    let (file_version_id, media_snapshot_id) =
+        scanned_snapshot(&cp, "/legacy/movie.mp4", "hash-legacy").await;
+    sqlx::query(
+        "UPDATE file_locations SET address_state = 'unassigned_legacy', \
+         storage_root_id = NULL, provider_relative_locator = NULL, \
+         legacy_kind = 'local_path', legacy_locator = '/legacy/movie.mp4' \
+         WHERE file_version_id = ?",
+    )
+    .bind(i64::try_from(file_version_id.0).unwrap())
+    .execute(cp.pool_for_test())
+    .await
+    .unwrap();
+
+    let err = cp
+        .create_policy_input_set_from_scan(PolicyInputFromScanInput {
+            slug: "quarantined".to_owned(),
+            file_version_id,
+            media_snapshot_id,
+            container: "mp4".to_owned(),
+            video_codec: "h264".to_owned(),
+        })
+        .await
+        .unwrap_err();
+
+    assert_eq!(err.error_code(), ErrorCode::ConfigInvalid);
+    assert!(
+        err.to_string()
+            .contains("effectively available rooted location")
+    );
+    assert!(cp.list_policy_input_sets().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn create_policy_input_set_from_scan_rejects_each_unavailable_root_state() {
+    let (cp, _tmp) = cp().await;
+
+    let disabled_root = library_root_at(&cp, "disabled-single", "/disabled-single").await;
+    let disabled = scanned_snapshot_with_payload_on_root(
+        &cp,
+        disabled_root,
+        "movie.mp4",
+        "hash-disabled-single",
+        json!({"format": "test", "streams": []}),
+    )
+    .await;
+    cp.set_library_root_enabled(disabled_root, false)
+        .await
+        .unwrap();
+
+    let unavailable_root = library_root_at(&cp, "unavailable-single", "/unavailable-single").await;
+    let unavailable = scanned_snapshot_with_payload_on_root(
+        &cp,
+        unavailable_root,
+        "movie.mp4",
+        "hash-unavailable-single",
+        json!({"format": "test", "streams": []}),
+    )
+    .await;
+    cp.mark_library_root_unavailable(unavailable_root, "test validation loss".to_owned())
+        .await
+        .unwrap();
+
+    let stale_root = library_root_at(&cp, "stale-single", "/stale-single").await;
+    let stale = scanned_snapshot_with_payload_on_root(
+        &cp,
+        stale_root,
+        "movie.mp4",
+        "hash-stale-single",
+        json!({"format": "test", "streams": []}),
+    )
+    .await;
+    set_root_owner_status(&cp, stale_root, "stale").await;
+
+    let retired_root = library_root_at(&cp, "retired-single", "/retired-single").await;
+    let retired = scanned_snapshot_with_payload_on_root(
+        &cp,
+        retired_root,
+        "movie.mp4",
+        "hash-retired-single",
+        json!({"format": "test", "streams": []}),
+    )
+    .await;
+    set_root_owner_status(&cp, retired_root, "retired").await;
+
+    for (slug, (file_version_id, media_snapshot_id)) in [
+        ("disabled-single", disabled),
+        ("unavailable-single", unavailable),
+        ("stale-single", stale),
+        ("retired-single", retired),
+    ] {
+        let err = cp
+            .create_policy_input_set_from_scan(PolicyInputFromScanInput {
+                slug: slug.to_owned(),
+                file_version_id,
+                media_snapshot_id,
+                container: "mp4".to_owned(),
+                video_codec: "h264".to_owned(),
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(err.error_code(), ErrorCode::ConfigInvalid);
+    }
+    assert!(cp.list_policy_input_sets().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn create_policy_input_set_from_scan_rejects_corrupt_library_enabled() {
+    let (cp, _tmp) = cp().await;
+    let root_id = library_root_at(&cp, "corrupt-enabled", "/corrupt-enabled").await;
+    let (file_version_id, media_snapshot_id) = scanned_snapshot_with_payload_on_root(
+        &cp,
+        root_id,
+        "movie.mp4",
+        "hash-corrupt-enabled",
+        json!({"format": "test", "streams": []}),
+    )
+    .await;
+    let library_id: i64 = sqlx::query_scalar("SELECT library_id FROM library_roots WHERE id = ?")
+        .bind(i64::try_from(root_id.0).unwrap())
+        .fetch_one(cp.pool_for_test())
+        .await
+        .unwrap();
+    let mut connection = cp.pool_for_test().acquire().await.unwrap();
+    sqlx::query("PRAGMA ignore_check_constraints = TRUE")
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE libraries SET enabled = 2 WHERE id = ?")
+        .bind(library_id)
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+    sqlx::query("PRAGMA ignore_check_constraints = FALSE")
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+    drop(connection);
+
+    let error = cp
+        .create_policy_input_set_from_scan(PolicyInputFromScanInput {
+            slug: "corrupt-enabled".to_owned(),
+            file_version_id,
+            media_snapshot_id,
+            container: "mp4".to_owned(),
+            video_codec: "h264".to_owned(),
+        })
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.error_code(), ErrorCode::DbUnreachable);
+    assert!(error.to_string().contains("libraries.enabled"));
+    assert!(cp.list_policy_input_sets().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn create_policy_input_set_from_scan_accepts_another_available_location() {
+    let (cp, _tmp) = cp().await;
+    let unavailable_root = library_root_at(&cp, "unavailable-alias", "/unavailable-alias").await;
+    let (file_version_id, media_snapshot_id) = scanned_snapshot_with_payload_on_root(
+        &cp,
+        unavailable_root,
+        "movie.mp4",
+        "hash-available-alias",
+        json!({"format": "test", "streams": []}),
+    )
+    .await;
+    cp.mark_library_root_unavailable(unavailable_root, "test validation loss".to_owned())
+        .await
+        .unwrap();
+    let available_root = library_root_at(&cp, "available-alias", "/available-alias").await;
+    cp.create_file_location(NewFileLocation {
+        file_version_id,
+        storage_root_id: available_root,
+        provider_relative_locator: voom_store::test_support::test_relative_locator("movie.mp4"),
+        proof: None,
+        observed_at: T0,
+    })
+    .await
+    .unwrap();
+
+    let created = cp
+        .create_policy_input_set_from_scan(PolicyInputFromScanInput {
+            slug: "available-alias".to_owned(),
+            file_version_id,
+            media_snapshot_id,
+            container: "mp4".to_owned(),
+            video_codec: "h264".to_owned(),
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(created.file_version_id, file_version_id);
+}
+
+#[tokio::test]
 async fn create_policy_input_set_from_scan_rejects_missing_file_version() {
     let (cp, _tmp) = cp().await;
     let (_, media_snapshot_id) = scanned_snapshot(&cp, "/srv/a.mp4", "hash-a").await;
@@ -652,6 +849,68 @@ async fn whole_scan_includes_video_and_skips_non_video() {
     assert_eq!(
         media.existing_media_snapshot_id,
         Some(video_media_snapshot_id)
+    );
+}
+
+#[tokio::test]
+async fn whole_scan_skips_quarantined_and_unavailable_locations() {
+    let (cp, _tmp) = cp().await;
+    let video = || {
+        json!({
+            "container": "mp4",
+            "video_codec": "h264",
+            "streams": [{"id": "v-0", "index": 0, "kind": "video", "codec_name": "h264"}]
+        })
+    };
+    let disabled_root = library_root_at(&cp, "disabled", "/media/disabled").await;
+    scanned_snapshot_with_payload_on_root(
+        &cp,
+        disabled_root,
+        "disabled.mp4",
+        "hash-disabled",
+        video(),
+    )
+    .await;
+    cp.set_library_root_enabled(disabled_root, false)
+        .await
+        .unwrap();
+
+    let (legacy_version, _) =
+        scanned_snapshot_with_payload(&cp, "/legacy/movie.mp4", "hash-legacy", video()).await;
+    sqlx::query(
+        "UPDATE file_locations SET address_state = 'unassigned_legacy', \
+         storage_root_id = NULL, provider_relative_locator = NULL, \
+         legacy_kind = 'local_path', legacy_locator = '/legacy/movie.mp4' \
+         WHERE file_version_id = ?",
+    )
+    .bind(i64::try_from(legacy_version.0).unwrap())
+    .execute(cp.pool_for_test())
+    .await
+    .unwrap();
+
+    let (eligible_version, _) =
+        scanned_snapshot_with_payload(&cp, "/media/eligible.mp4", "hash-eligible", video()).await;
+
+    let result = cp
+        .create_policy_input_set_from_whole_scan(WholeScanInput {
+            slug: "available-only".to_owned(),
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(result.included_count, 1);
+    assert_eq!(result.skipped_count, 2);
+    let input_set = cp
+        .get_policy_input_set(result.input_set_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(input_set.media_snapshots.len(), 1);
+    assert_eq!(
+        input_set.media_snapshots[0].target,
+        PolicyInputTargetRef::FileVersion {
+            id: eligible_version
+        }
     );
 }
 
@@ -812,7 +1071,7 @@ async fn library_root_at(
     cp: &crate::ControlPlane,
     slug: &str,
     path: &str,
-) -> voom_core::LibraryRootId {
+) -> voom_core::StorageRootId {
     let lib = cp
         .create_library(NewLibrary {
             slug: slug.to_owned(),
@@ -823,33 +1082,51 @@ async fn library_root_at(
         })
         .await
         .unwrap();
-    cp.create_library_root(NewLibraryRoot {
-        library_id: lib.id,
-        root_kind: LibraryRootKind::LocalPath,
-        canonical_path: path.to_owned(),
-        display_path: path.to_owned(),
-        include_globs: Vec::new(),
-        exclude_globs: Vec::new(),
-        extension_allowlist: Vec::new(),
-        scan_mode: LibraryScanMode::ManualRecursive,
-        symlink_policy: SymlinkPolicy::Reject,
-        hidden_file_policy: HiddenFilePolicy::Ignore,
-        max_depth: None,
-        stability_seconds: 0,
-        debounce_seconds: 0,
-        default_output_root: None,
-        default_staging_root: None,
-        default_backup_root: None,
-        enabled: true,
-    })
+    let owner_id = sqlx::query(
+        "INSERT INTO nodes \
+         (name, kind, status, registered_at, last_seen_at, heartbeat_ttl_seconds, \
+          auth_token_hash, auth_token_hint, metadata) \
+         VALUES (?, 'local', 'active', '1970-01-01T00:00:00Z', \
+                 '1970-01-01T00:00:00Z', 60, 'hash', 'hint', '{}')",
+    )
+    .bind(format!("{slug}-owner"))
+    .execute(cp.pool_for_test())
     .await
     .unwrap()
-    .id
+    .last_insert_rowid();
+    let root = cp
+        .create_library_root(NewLibraryRoot {
+            library_id: lib.id,
+            owner_node_id: voom_core::NodeId(u64::try_from(owner_id).unwrap()),
+            provider_kind: voom_core::StorageProviderKind::LocalFilesystem,
+            provider_locator: voom_core::ProviderLocator::new(path.to_owned()).unwrap(),
+            display_locator: path.to_owned(),
+            include_globs: Vec::new(),
+            exclude_globs: Vec::new(),
+            extension_allowlist: Vec::new(),
+            scan_mode: LibraryScanMode::ManualRecursive,
+            symlink_policy: SymlinkPolicy::Reject,
+            hidden_file_policy: HiddenFilePolicy::Ignore,
+            max_depth: None,
+            stability_seconds: 0,
+            debounce_seconds: 0,
+            default_output_root_id: None,
+            default_staging_root_id: None,
+            default_backup_root_id: None,
+            enabled: true,
+        })
+        .await
+        .unwrap();
+    cp.activate_library_root(root.id, format!("test:{slug}"))
+        .await
+        .unwrap();
+    root.id
 }
 
 #[tokio::test]
 async fn root_scoped_scan_includes_only_files_under_the_root() {
     let (cp, _tmp) = cp().await;
+    let root_id = library_root_at(&cp, "films", "/media/films").await;
     let video = || {
         json!({
             "container": "mp4",
@@ -859,13 +1136,12 @@ async fn root_scoped_scan_includes_only_files_under_the_root() {
     };
     // Under the root.
     let (under, _) =
-        scanned_snapshot_with_payload(&cp, "/media/films/a.mp4", "hash-a", video()).await;
-    // Different library.
+        scanned_snapshot_with_payload_on_root(&cp, root_id, "a.mp4", "hash-a", video()).await;
+    // Different storage root.
     scanned_snapshot_with_payload(&cp, "/media/shows/b.mp4", "hash-b", video()).await;
-    // Sibling sharing a textual prefix — must NOT match.
+    // A textual prefix is irrelevant when the durable root identity differs.
     scanned_snapshot_with_payload(&cp, "/media/films-4k/c.mp4", "hash-c", video()).await;
 
-    let root_id = library_root_at(&cp, "films", "/media/films").await;
     let result = cp
         .create_policy_input_set_from_root(RootScopedScanInput {
             slug: "films-input".to_owned(),
@@ -926,7 +1202,7 @@ async fn root_scoped_scan_missing_root_is_not_found() {
     let err = cp
         .create_policy_input_set_from_root(RootScopedScanInput {
             slug: "x".to_owned(),
-            library_root_id: voom_core::LibraryRootId(999),
+            library_root_id: voom_core::StorageRootId(999),
         })
         .await
         .unwrap_err();
@@ -941,8 +1217,49 @@ async fn scanned_snapshot(
     scanned_snapshot_with_payload(cp, path, hash, json!({"format": "test", "streams": []})).await
 }
 
+async fn set_root_owner_status(
+    cp: &crate::ControlPlane,
+    root_id: voom_core::StorageRootId,
+    status: &str,
+) {
+    let owner_node_id: i64 =
+        sqlx::query_scalar("SELECT owner_node_id FROM library_roots WHERE id = ?")
+            .bind(i64::try_from(root_id.0).unwrap())
+            .fetch_one(cp.pool_for_test())
+            .await
+            .unwrap();
+    sqlx::query(
+        "UPDATE nodes SET status = ?, \
+         retired_at = CASE WHEN ? = 'retired' THEN '1970-01-01T00:00:00Z' END \
+         WHERE id = ?",
+    )
+    .bind(status)
+    .bind(status)
+    .bind(owner_node_id)
+    .execute(cp.pool_for_test())
+    .await
+    .unwrap();
+}
+
 async fn scanned_snapshot_with_payload(
     cp: &crate::ControlPlane,
+    path: &str,
+    hash: &str,
+    payload: serde_json::Value,
+) -> (FileVersionId, MediaSnapshotId) {
+    scanned_snapshot_with_payload_on_root(
+        cp,
+        voom_store::test_support::TEST_STORAGE_ROOT_ID,
+        path,
+        hash,
+        payload,
+    )
+    .await
+}
+
+async fn scanned_snapshot_with_payload_on_root(
+    cp: &crate::ControlPlane,
+    storage_root_id: voom_core::StorageRootId,
     path: &str,
     hash: &str,
     payload: serde_json::Value,
@@ -950,8 +1267,8 @@ async fn scanned_snapshot_with_payload(
     let outcome = cp
         .record_discovered_file(
             DiscoveredFile {
-                location_kind: FileLocationKind::LocalPath,
-                location_value: path.to_owned(),
+                storage_root_id,
+                provider_relative_locator: voom_store::test_support::test_relative_locator(path),
                 content_hash: hash.to_owned(),
                 size_bytes: 1024,
                 observed_at: T0,

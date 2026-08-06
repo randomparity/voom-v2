@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::json;
 use voom_core::ids::ArtifactVerificationId;
-use voom_core::{ArtifactHandleId, FileAssetId, FileVersionId, VoomError};
+use voom_core::{ArtifactHandleId, FileAssetId, FileVersionId, StorageRootId, VoomError};
 use voom_events::Event;
 use voom_events::payload::{ArtifactCommitFailedPreMutationPayload, ArtifactCommitStartedPayload};
 use voom_store::repo::media::artifacts::{
@@ -10,7 +10,7 @@ use voom_store::repo::media::artifacts::{
     NewArtifactCommitRecord,
 };
 use voom_store::repo::media::commit_safety_gate::check_lineage_commit_leases_in_tx;
-use voom_store::repo::media::identity::FileVersionRepo;
+use voom_store::repo::media::identity::{FileLocationRepo, FileVersionRepo};
 
 use voom_artifact::commit_pipeline::{
     PendingCommitRecordError, append_commit_event_in_tx,
@@ -67,6 +67,15 @@ async fn prepare_commit_in_tx(
         target_path: input.target_path.clone(),
     };
     let source = read_commit_source_facts(cp, tx, input.artifact_handle_id, &context).await?;
+    let (target_storage_root_id, target_relative_locator, resolved_target_path) =
+        crate::operation_source::resolve_artifact_target(
+            cp,
+            "artifact commit",
+            source.source_storage_root_id,
+            &input.target_path,
+        )
+        .await
+        .map_err(|err| pre_mutation_error(&context, &err))?;
     let verified_staging = read_verified_staging_facts(
         cp,
         tx,
@@ -81,7 +90,8 @@ async fn prepare_commit_in_tx(
     // gate-check error is fail-closed — the commit does not proceed.
     let gate_evaluated_lease_ids =
         check_commit_safety_gate(cp, tx, &source, &verified_staging.context, now).await?;
-    let paths = prepare_commit_paths(&input.target_path, &source.handle, &verified_staging).await?;
+    let paths =
+        prepare_commit_paths(&resolved_target_path, &source.handle, &verified_staging).await?;
 
     let target_path_string = paths.target_path.display().to_string();
     let temp_path_string = paths.temp_path.display().to_string();
@@ -99,6 +109,10 @@ async fn prepare_commit_in_tx(
             "expected_size_bytes": paths.expected_facts.size_bytes,
             "expected_checksum": paths.expected_facts.content_hash,
             "staging_local_file_key": paths.expected_facts.local_file_key,
+            "rooted_target": {
+                "storage_root_id": target_storage_root_id.0,
+                "provider_relative_locator": target_relative_locator.as_str(),
+            },
         }),
         started_at: now,
     };
@@ -134,6 +148,8 @@ async fn prepare_commit_in_tx(
         staging_location_id: verified_staging.staging.id,
         staging_path: paths.staging_path,
         target_path: paths.target_path,
+        target_storage_root_id,
+        target_relative_locator,
         temp_path: paths.temp_path,
         expected_facts: paths.expected_facts,
         promotion_started_at: now,
@@ -198,6 +214,7 @@ pub(super) struct CommitSourceFacts {
     pub(super) handle: ArtifactExpectedFacts,
     pub(super) source_file_version_id: FileVersionId,
     pub(super) source_file_asset_id: FileAssetId,
+    pub(super) source_storage_root_id: StorageRootId,
 }
 
 #[derive(Debug)]
@@ -251,11 +268,51 @@ pub(super) async fn read_commit_source_facts(
             &VoomError::Config(format!("file_versions {source_file_version_id} is retired")),
         ));
     }
-
+    let source_location_id = handle.source_file_location_id.ok_or_else(|| {
+        pre_mutation_error(
+            context,
+            &VoomError::Config(format!(
+                "artifact_handle {artifact_handle_id} has no source file_location"
+            )),
+        )
+    })?;
+    let source_location = cp
+        .identity
+        .get_file_location_in_tx(tx, source_location_id)
+        .await
+        .map_err(|err| pre_mutation_error(context, &err))?
+        .ok_or_else(|| {
+            pre_mutation_error(
+                context,
+                &VoomError::NotFound(format!("file_location {source_location_id}")),
+            )
+        })?;
+    if source_location.file_version_id != source_file_version_id
+        || source_location.retired_at.is_some()
+    {
+        return Err(pre_mutation_error(
+            context,
+            &VoomError::Config(format!(
+                "artifact_handle {artifact_handle_id} source location {source_location_id} \
+                 is not live on file_version {source_file_version_id}"
+            )),
+        ));
+    }
+    let (source_storage_root_id, _) = source_location
+        .rooted_address()
+        .map_err(|err| pre_mutation_error(context, &err))?;
+    crate::operation_source::resolve_rooted_existing_path(
+        cp,
+        "artifact commit source",
+        &source_location,
+    )
+    .await
+    .map_err(|err| pre_mutation_error(context, &err))?;
     Ok(CommitSourceFacts {
         handle,
         source_file_version_id,
         source_file_asset_id: source.file_asset_id,
+        source_storage_root_id,
     })
 }
 

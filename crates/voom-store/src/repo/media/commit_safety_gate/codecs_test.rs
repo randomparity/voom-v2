@@ -15,8 +15,8 @@ fn sample_replace_target() -> CommitTarget {
     CommitTarget::ReplaceFileLocation {
         retired: FileLocationId(3),
         new: FileLocationProposal {
-            kind: FileLocationKind::LocalPath,
-            value: "/tmp/stub".to_owned(),
+            storage_root_id: crate::test_support::TEST_STORAGE_ROOT_ID,
+            provider_relative_locator: crate::test_support::test_relative_locator("/tmp/stub"),
             proof: None,
             observed_at: OffsetDateTime::UNIX_EPOCH,
         },

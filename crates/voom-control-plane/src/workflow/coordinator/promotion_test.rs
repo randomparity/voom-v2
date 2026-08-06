@@ -357,9 +357,7 @@ async fn stale_waiter_rejects_replaced_temp_path() {
 
 #[tokio::test]
 async fn interrupted_intermediate_cleanup_retires_a_location_after_file_is_already_gone() {
-    use voom_store::repo::media::identity::{
-        DiscoveredFile, FileLocationKind, FileLocationRepo, IngestOutcome,
-    };
+    use voom_store::repo::media::identity::{DiscoveredFile, FileLocationRepo, IngestOutcome};
 
     let (cp, _db) = crate::cases::cp().await;
     let tmp = tempfile::TempDir::new().unwrap();
@@ -370,8 +368,10 @@ async fn interrupted_intermediate_cleanup_retires_a_location_after_file_is_alrea
     } = cp
         .record_discovered_file(
             DiscoveredFile {
-                location_kind: FileLocationKind::LocalPath,
-                location_value: path.display().to_string(),
+                storage_root_id: voom_store::test_support::TEST_STORAGE_ROOT_ID,
+                provider_relative_locator: voom_store::test_support::test_relative_locator(
+                    &path.display().to_string(),
+                ),
                 content_hash: "cleanup-replay".to_owned(),
                 size_bytes: 12,
                 observed_at: time::OffsetDateTime::UNIX_EPOCH,
@@ -392,7 +392,9 @@ async fn interrupted_intermediate_cleanup_retires_a_location_after_file_is_alrea
         .unwrap();
     tokio::fs::remove_file(&path).await.unwrap();
 
-    cp.reclaim_intermediate_location(&location).await.unwrap();
+    cp.reclaim_intermediate_location(&location, &path)
+        .await
+        .unwrap();
 
     assert!(
         cp.identity()
@@ -408,9 +410,7 @@ async fn interrupted_intermediate_cleanup_retires_a_location_after_file_is_alrea
 
 #[tokio::test]
 async fn cleanup_failure_before_delete_keeps_location_live() {
-    use voom_store::repo::media::identity::{
-        DiscoveredFile, FileLocationKind, FileLocationRepo, IngestOutcome,
-    };
+    use voom_store::repo::media::identity::{DiscoveredFile, FileLocationRepo, IngestOutcome};
 
     let (cp, _db) = crate::cases::cp().await;
     let tmp = tempfile::TempDir::new().unwrap();
@@ -421,8 +421,10 @@ async fn cleanup_failure_before_delete_keeps_location_live() {
     } = cp
         .record_discovered_file(
             DiscoveredFile {
-                location_kind: FileLocationKind::LocalPath,
-                location_value: path.display().to_string(),
+                storage_root_id: voom_store::test_support::TEST_STORAGE_ROOT_ID,
+                provider_relative_locator: voom_store::test_support::test_relative_locator(
+                    &path.display().to_string(),
+                ),
                 content_hash: "cleanup-failure".to_owned(),
                 size_bytes: 0,
                 observed_at: time::OffsetDateTime::UNIX_EPOCH,
@@ -442,7 +444,7 @@ async fn cleanup_failure_before_delete_keeps_location_live() {
         .unwrap()
         .unwrap();
 
-    cp.reclaim_intermediate_location(&location)
+    cp.reclaim_intermediate_location(&location, &path)
         .await
         .unwrap_err();
 
