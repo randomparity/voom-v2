@@ -29,12 +29,100 @@ async fn nodes_register_get_and_list_round_trip_without_exposing_plaintext_token
     assert_eq!(node.status, NodeStatus::Registered);
     assert_eq!(node.last_seen_at, T0);
     assert_eq!(node.epoch, 0);
+    assert_eq!(node.active_incarnation_id, None);
     let got = repo.get(node.id).await.unwrap().unwrap();
     assert_eq!(got.auth_token_hint, "abc");
     assert_eq!(got.metadata, serde_json::json!({"zone":"test"}));
     let listed = repo.list(Some(NodeStatus::Registered), 10).await.unwrap();
     assert_eq!(listed.len(), 1);
     assert_eq!(listed[0].id, node.id);
+}
+
+#[tokio::test]
+async fn node_reads_reject_null_pointer_with_active_incarnation() {
+    let (pool, _tmp) = fresh_pool().await;
+    let repo = SqliteNodeRepo::new(pool.clone());
+    let node = seed_node(&pool, &repo, "corrupt-null", NodeStatus::Active, T0, 60).await;
+    insert_incarnation(&pool, node.id, "0123456789abcdef0123456789abcdef", "active").await;
+
+    let error = repo.get(node.id).await.unwrap_err();
+    assert_eq!(error.error_code(), ErrorCode::DbUnreachable);
+    assert!(error.to_string().contains("active incarnation pointer"));
+}
+
+#[tokio::test]
+async fn node_reads_reject_cross_node_active_pointer() {
+    let (pool, _tmp) = fresh_pool().await;
+    let repo = SqliteNodeRepo::new(pool.clone());
+    let owner = seed_node(&pool, &repo, "owner", NodeStatus::Active, T0, 60).await;
+    let pointed = seed_node(&pool, &repo, "pointed", NodeStatus::Active, T0, 60).await;
+    let incarnation_id = "0123456789abcdef0123456789abcdef";
+    insert_incarnation(&pool, owner.id, incarnation_id, "active").await;
+    sqlx::query("UPDATE nodes SET active_incarnation_id = ? WHERE id = ?")
+        .bind(incarnation_id)
+        .bind(i64::try_from(pointed.id.0).unwrap())
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let error = repo.get(pointed.id).await.unwrap_err();
+    assert_eq!(error.error_code(), ErrorCode::DbUnreachable);
+    assert!(error.to_string().contains("owned by node"));
+    let mut tx = pool.begin().await.unwrap();
+    let auth_error = repo
+        .auth_record_in_tx(&mut tx, pointed.id)
+        .await
+        .unwrap_err();
+    assert_eq!(auth_error.error_code(), ErrorCode::DbUnreachable);
+}
+
+#[tokio::test]
+async fn node_reads_reject_malformed_active_incarnation_id() {
+    let (pool, _tmp) = fresh_pool().await;
+    let repo = SqliteNodeRepo::new(pool.clone());
+    let node = seed_node(&pool, &repo, "malformed", NodeStatus::Active, T0, 60).await;
+    insert_incarnation(&pool, node.id, "malformed", "active").await;
+    sqlx::query("UPDATE nodes SET active_incarnation_id = 'malformed' WHERE id = ?")
+        .bind(i64::try_from(node.id.0).unwrap())
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let error = repo.get(node.id).await.unwrap_err();
+    assert_eq!(error.error_code(), ErrorCode::DbUnreachable);
+    assert!(error.to_string().contains("active incarnation id"));
+}
+
+#[tokio::test]
+async fn node_reads_reject_terminal_active_pointer_before_lifecycle_classification() {
+    let (pool, _tmp) = fresh_pool().await;
+    let repo = SqliteNodeRepo::new(pool.clone());
+    let node = seed_node(&pool, &repo, "terminal", NodeStatus::Retired, T0, 60).await;
+    let incarnation_id = "0123456789abcdef0123456789abcdef";
+    insert_incarnation(&pool, node.id, incarnation_id, "active").await;
+    sqlx::query("UPDATE nodes SET active_incarnation_id = ? WHERE id = ?")
+        .bind(incarnation_id)
+        .bind(i64::try_from(node.id.0).unwrap())
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "UPDATE node_incarnations SET status = 'retired', ended_at = ?, \
+         end_reason = 'graceful_shutdown' WHERE incarnation_id = ?",
+    )
+    .bind(iso8601_for_test(T0))
+    .bind(incarnation_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let mut tx = pool.begin().await.unwrap();
+    let error = repo
+        .retire_in_tx(&mut tx, node.id, node.epoch, T0)
+        .await
+        .unwrap_err();
+    assert_eq!(error.error_code(), ErrorCode::DbUnreachable);
+    assert!(error.to_string().contains("not active"));
 }
 
 #[tokio::test]
@@ -278,4 +366,32 @@ async fn seeded_node(
 fn iso8601_for_test(t: OffsetDateTime) -> String {
     t.format(&time::format_description::well_known::Iso8601::DEFAULT)
         .unwrap()
+}
+
+async fn insert_incarnation(
+    pool: &sqlx::SqlitePool,
+    node_id: NodeId,
+    incarnation_id: &str,
+    status: &str,
+) {
+    let (ended_at, reason) = if status == "active" {
+        (None, None)
+    } else {
+        (Some(iso8601_for_test(T0)), Some("graceful_shutdown"))
+    };
+    sqlx::query(
+        "INSERT INTO node_incarnations \
+         (incarnation_id, node_id, status, started_at, last_seen_at, ended_at, end_reason) \
+         VALUES (?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(incarnation_id)
+    .bind(i64::try_from(node_id.0).unwrap())
+    .bind(status)
+    .bind(iso8601_for_test(T0))
+    .bind(iso8601_for_test(T0))
+    .bind(ended_at)
+    .bind(reason)
+    .execute(pool)
+    .await
+    .unwrap();
 }

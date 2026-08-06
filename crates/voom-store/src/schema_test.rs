@@ -27,7 +27,7 @@ async fn probe_returns_uninitialized_on_fresh_db() {
 #[tokio::test]
 async fn expected_migrations_matches_embedded_count() {
     // review whenever a migration is added/removed.
-    assert_eq!(expected_migrations(), 34);
+    assert_eq!(expected_migrations(), 35);
 }
 
 /// Column list every video-profile fixture below shares, so each test spells

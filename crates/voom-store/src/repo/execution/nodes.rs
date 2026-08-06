@@ -5,7 +5,7 @@ use std::fmt;
 use serde_json::Value as JsonValue;
 use sqlx::{Row, Sqlite, SqlitePool, Transaction};
 use time::{Duration, OffsetDateTime};
-use voom_core::{NodeId, VoomError};
+use voom_core::{NodeId, NodeIncarnationId, VoomError};
 pub use voom_core::{NodeKind, NodeStatus};
 
 use super::Repository;
@@ -51,6 +51,7 @@ pub struct Node {
     pub auth_token_hint: String,
     pub metadata: JsonValue,
     pub epoch: u64,
+    pub active_incarnation_id: Option<NodeIncarnationId>,
 }
 
 #[derive(Clone)]
@@ -61,6 +62,7 @@ pub struct NodeAuthRecord {
     pub last_seen_at: OffsetDateTime,
     pub heartbeat_ttl_seconds: u32,
     pub auth_token_hash: String,
+    pub active_incarnation_id: Option<NodeIncarnationId>,
 }
 
 impl fmt::Debug for NodeAuthRecord {
@@ -72,6 +74,7 @@ impl fmt::Debug for NodeAuthRecord {
             .field("last_seen_at", &self.last_seen_at)
             .field("heartbeat_ttl_seconds", &self.heartbeat_ttl_seconds)
             .field("auth_token_hash", &"<secret>")
+            .field("active_incarnation_id", &self.active_incarnation_id)
             .finish()
     }
 }
@@ -136,6 +139,7 @@ impl SqliteNodeRepo {
             auth_token_hint: input.auth_token_hint,
             metadata: input.metadata,
             epoch: 0,
+            active_incarnation_id: None,
         })
     }
 
@@ -146,9 +150,17 @@ impl SqliteNodeRepo {
     /// Returns [`VoomError::Database`] if the query or row decoding fails.
     pub async fn get(&self, id: NodeId) -> Result<Option<Node>, VoomError> {
         let row = sqlx::query(
-            "SELECT id, name, kind, status, registered_at, last_seen_at, retired_at, \
-             heartbeat_ttl_seconds, auth_token_hint, metadata, epoch \
-             FROM nodes WHERE id = ?",
+            "SELECT n.id, n.name, n.kind, n.status, n.registered_at, n.last_seen_at, \
+             n.retired_at, n.heartbeat_ttl_seconds, n.auth_token_hint, n.metadata, n.epoch, \
+             n.active_incarnation_id, \
+             ai.node_id AS active_incarnation_node_id, \
+             ai.status AS active_incarnation_status, \
+             (SELECT COUNT(*) FROM node_incarnations active \
+              WHERE active.node_id = n.id AND active.status = 'active') \
+                 AS active_incarnation_count \
+             FROM nodes n \
+             LEFT JOIN node_incarnations ai ON ai.incarnation_id = n.active_incarnation_id \
+             WHERE n.id = ?",
         )
         .bind(i64_from_u64(
             id.0,
@@ -172,10 +184,18 @@ impl SqliteNodeRepo {
     ) -> Result<Vec<Node>, VoomError> {
         let status = status.map(NodeStatus::as_str);
         let rows = sqlx::query(
-            "SELECT id, name, kind, status, registered_at, last_seen_at, retired_at, \
-             heartbeat_ttl_seconds, auth_token_hint, metadata, epoch \
-             FROM nodes WHERE (? IS NULL OR status = ?) \
-             ORDER BY registered_at ASC, id ASC LIMIT ?",
+            "SELECT n.id, n.name, n.kind, n.status, n.registered_at, n.last_seen_at, \
+             n.retired_at, n.heartbeat_ttl_seconds, n.auth_token_hint, n.metadata, n.epoch, \
+             n.active_incarnation_id, \
+             ai.node_id AS active_incarnation_node_id, \
+             ai.status AS active_incarnation_status, \
+             (SELECT COUNT(*) FROM node_incarnations active \
+              WHERE active.node_id = n.id AND active.status = 'active') \
+                 AS active_incarnation_count \
+             FROM nodes n \
+             LEFT JOIN node_incarnations ai ON ai.incarnation_id = n.active_incarnation_id \
+             WHERE (? IS NULL OR n.status = ?) \
+             ORDER BY n.registered_at ASC, n.id ASC LIMIT ?",
         )
         .bind(status)
         .bind(status)
@@ -202,14 +222,59 @@ impl SqliteNodeRepo {
             return Ok(None);
         };
         let row = sqlx::query(
-            "SELECT id, kind, status, last_seen_at, heartbeat_ttl_seconds, auth_token_hash \
-             FROM nodes WHERE id = ?",
+            "SELECT n.id, n.kind, n.status, n.last_seen_at, n.heartbeat_ttl_seconds, \
+             n.auth_token_hash, n.active_incarnation_id, \
+             ai.node_id AS active_incarnation_node_id, \
+             ai.status AS active_incarnation_status, \
+             (SELECT COUNT(*) FROM node_incarnations active \
+              WHERE active.node_id = n.id AND active.status = 'active') \
+                 AS active_incarnation_count \
+             FROM nodes n \
+             LEFT JOIN node_incarnations ai ON ai.incarnation_id = n.active_incarnation_id \
+             WHERE n.id = ?",
         )
         .bind(id)
         .fetch_optional(&mut **tx)
         .await
         .map_err(|e| VoomError::database_context("nodes auth record", e))?;
         row.as_ref().map(row_to_auth_record).transpose()
+    }
+
+    /// Read a node and its validated active-incarnation context in this transaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VoomError::Database`] when the node or its incarnation pointer is corrupt.
+    pub async fn active_context_in_tx(
+        &self,
+        tx: &mut Transaction<'_, Sqlite>,
+        id: NodeId,
+    ) -> Result<Option<Node>, VoomError> {
+        get_in_tx(tx, id).await
+    }
+
+    /// Require one node's validated active-incarnation pointer to match a request fence.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VoomError::NotFound`] when the node is absent,
+    /// [`VoomError::Conflict`] for an inactive or mismatched incarnation, and
+    /// [`VoomError::Database`] when the persisted pointer is corrupt.
+    pub async fn require_active_incarnation_in_tx(
+        &self,
+        tx: &mut Transaction<'_, Sqlite>,
+        node_id: NodeId,
+        incarnation_id: NodeIncarnationId,
+    ) -> Result<Node, VoomError> {
+        let node = get_in_tx(tx, node_id)
+            .await?
+            .ok_or_else(|| VoomError::NotFound(format!("node {node_id}")))?;
+        if node.active_incarnation_id != Some(incarnation_id) {
+            return Err(VoomError::Conflict(format!(
+                "node {node_id} active incarnation does not match {incarnation_id}"
+            )));
+        }
+        Ok(node)
     }
 
     /// Record a heartbeat and activate the node in the caller's transaction.
@@ -270,10 +335,18 @@ impl SqliteNodeRepo {
         now: OffsetDateTime,
     ) -> Result<Vec<Node>, VoomError> {
         let rows = sqlx::query(
-            "SELECT id, name, kind, status, registered_at, last_seen_at, retired_at, \
-             heartbeat_ttl_seconds, auth_token_hint, metadata, epoch \
-             FROM nodes WHERE status IN ('registered','active') \
-             ORDER BY last_seen_at ASC, id ASC",
+            "SELECT n.id, n.name, n.kind, n.status, n.registered_at, n.last_seen_at, \
+             n.retired_at, n.heartbeat_ttl_seconds, n.auth_token_hint, n.metadata, n.epoch, \
+             n.active_incarnation_id, \
+             ai.node_id AS active_incarnation_node_id, \
+             ai.status AS active_incarnation_status, \
+             (SELECT COUNT(*) FROM node_incarnations active \
+              WHERE active.node_id = n.id AND active.status = 'active') \
+                 AS active_incarnation_count \
+             FROM nodes n \
+             LEFT JOIN node_incarnations ai ON ai.incarnation_id = n.active_incarnation_id \
+             WHERE n.status IN ('registered','active') \
+             ORDER BY n.last_seen_at ASC, n.id ASC",
         )
         .fetch_all(&mut **tx)
         .await
@@ -398,9 +471,17 @@ async fn get_in_tx(
     id: NodeId,
 ) -> Result<Option<Node>, VoomError> {
     let row = sqlx::query(
-        "SELECT id, name, kind, status, registered_at, last_seen_at, retired_at, \
-         heartbeat_ttl_seconds, auth_token_hint, metadata, epoch \
-         FROM nodes WHERE id = ?",
+        "SELECT n.id, n.name, n.kind, n.status, n.registered_at, n.last_seen_at, \
+         n.retired_at, n.heartbeat_ttl_seconds, n.auth_token_hint, n.metadata, n.epoch, \
+         n.active_incarnation_id, \
+         ai.node_id AS active_incarnation_node_id, \
+         ai.status AS active_incarnation_status, \
+         (SELECT COUNT(*) FROM node_incarnations active \
+          WHERE active.node_id = n.id AND active.status = 'active') \
+             AS active_incarnation_count \
+         FROM nodes n \
+         LEFT JOIN node_incarnations ai ON ai.incarnation_id = n.active_incarnation_id \
+         WHERE n.id = ?",
     )
     .bind(i64_from_u64(
         id.0,
@@ -436,11 +517,13 @@ fn row_to_node(row: &sqlx::sqlite::SqliteRow) -> Result<Node, VoomError> {
         .try_get("metadata")
         .map_err(|e| map_row_err("nodes", e))?;
     let epoch: i64 = row.try_get("epoch").map_err(|e| map_row_err("nodes", e))?;
+    let id = NodeId(u64_from_i64(
+        id,
+        concat!(module_path!(), ": ", stringify!(id)),
+    )?);
+    let active_incarnation_id = active_incarnation_projection(row, id)?;
     Ok(Node {
-        id: NodeId(u64_from_i64(
-            id,
-            concat!(module_path!(), ": ", stringify!(id)),
-        )?),
+        id,
         name,
         kind: NodeKind::parse_database("nodes.kind", &kind)?,
         status: NodeStatus::parse_database("nodes.status", &status)?,
@@ -452,6 +535,7 @@ fn row_to_node(row: &sqlx::sqlite::SqliteRow) -> Result<Node, VoomError> {
         metadata: serde_json::from_str(&metadata)
             .map_err(|e| VoomError::database_context("nodes.metadata decode", e))?,
         epoch: u64_from_i64(epoch, concat!(module_path!(), ": ", stringify!(epoch)))?,
+        active_incarnation_id,
     })
 }
 
@@ -468,17 +552,80 @@ fn row_to_auth_record(row: &sqlx::sqlite::SqliteRow) -> Result<NodeAuthRecord, V
     let auth_token_hash: String = row
         .try_get("auth_token_hash")
         .map_err(|e| map_row_err("nodes", e))?;
+    let id = NodeId(u64_from_i64(
+        id,
+        concat!(module_path!(), ": ", stringify!(id)),
+    )?);
+    let active_incarnation_id = active_incarnation_projection(row, id)?;
     Ok(NodeAuthRecord {
-        id: NodeId(u64_from_i64(
-            id,
-            concat!(module_path!(), ": ", stringify!(id)),
-        )?),
+        id,
         kind: NodeKind::parse_database("nodes.kind", &kind)?,
         status: NodeStatus::parse_database("nodes.status", &status)?,
         last_seen_at: parse_iso8601(&last_seen)?,
         heartbeat_ttl_seconds: u32_from_i64(heartbeat_ttl_seconds)?,
         auth_token_hash,
+        active_incarnation_id,
     })
+}
+
+fn active_incarnation_projection(
+    row: &sqlx::sqlite::SqliteRow,
+    node_id: NodeId,
+) -> Result<Option<NodeIncarnationId>, VoomError> {
+    let id: Option<String> = row
+        .try_get("active_incarnation_id")
+        .map_err(|error| map_row_err("nodes active incarnation id", error))?;
+    let owner_id: Option<i64> = row
+        .try_get("active_incarnation_node_id")
+        .map_err(|error| map_row_err("nodes active incarnation owner", error))?;
+    let status: Option<String> = row
+        .try_get("active_incarnation_status")
+        .map_err(|error| map_row_err("nodes active incarnation status", error))?;
+    let active_count: i64 = row
+        .try_get("active_incarnation_count")
+        .map_err(|error| map_row_err("nodes active incarnation count", error))?;
+    let active_count = u32_from_i64(active_count)?;
+
+    let Some(id) = id else {
+        if active_count != 0 || owner_id.is_some() || status.is_some() {
+            return Err(VoomError::database(format!(
+                "nodes active incarnation pointer is null but node {node_id} has \
+                 {active_count} active incarnation rows"
+            )));
+        }
+        return Ok(None);
+    };
+    let id = NodeIncarnationId::parse_database("nodes active incarnation id", &id)?;
+    let owner_id = owner_id
+        .ok_or_else(|| {
+            VoomError::database(format!(
+                "nodes active incarnation {id} does not resolve for node {node_id}"
+            ))
+        })
+        .and_then(|value| u64_from_i64(value, "nodes active incarnation owner"))
+        .map(NodeId)?;
+    if owner_id != node_id {
+        return Err(VoomError::database(format!(
+            "nodes active incarnation {id} is owned by node {owner_id}, not node {node_id}"
+        )));
+    }
+    let status = status.ok_or_else(|| {
+        VoomError::database(format!(
+            "nodes active incarnation {id} has no readable status"
+        ))
+    })?;
+    if status != "active" {
+        return Err(VoomError::database(format!(
+            "nodes active incarnation {id} for node {node_id} is not active: {status:?}"
+        )));
+    }
+    if active_count != 1 {
+        return Err(VoomError::database(format!(
+            "nodes active incarnation pointer {id} for node {node_id} has \
+             active row count {active_count}, expected 1"
+        )));
+    }
+    Ok(Some(id))
 }
 
 #[cfg(test)]
