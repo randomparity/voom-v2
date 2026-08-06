@@ -3295,6 +3295,7 @@ dependencies = [
 name = "voom-node-agent"
 version = "0.1.0-dev"
 dependencies = [
+ "async-trait",
  "axum",
  "axum-server",
  "clap",

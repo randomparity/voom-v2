@@ -557,7 +557,7 @@ pub struct LeaseDispatch {
     pub artifact_access_plan: ArtifactAccessPlan,
 }
 
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ArtifactAccessPlan {
     pub id: u64,
