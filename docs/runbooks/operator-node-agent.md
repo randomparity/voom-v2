@@ -113,6 +113,10 @@ second termination signal cancels blocked lease settlement or deactivation and m
 process exit unsuccessfully. It still kills and reaps every child before exit, but the
 incarnation or lease terminal state can remain for expiry/recovery to reconcile.
 
+A signal that arrives while the agent is still retrying activation against an unreachable
+control plane stops it immediately and exits successfully. No child has started at that
+point; if an earlier activation attempt did land, heartbeat expiry reconciles it.
+
 The schema change for this release is a pre-release flag day, not a rolling mixed-version
 upgrade:
 

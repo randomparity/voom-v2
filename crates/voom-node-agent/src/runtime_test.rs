@@ -385,6 +385,26 @@ async fn second_signal_interrupts_deactivation_only_after_reap() {
     assert_eq!(control.events.lock().await.as_slice(), &["reap"]);
 }
 
+#[tokio::test]
+async fn shutdown_signal_interrupts_activation_before_children_start() {
+    let control = Arc::new(FakeControlPlane::default());
+    *control.activate_gate.lock().await = Some(Arc::new(Notify::new()));
+    let runtime = AgentRuntime::with_client(loaded_config(), control.clone());
+    let (signal_tx, signal_rx) = mpsc::unbounded_channel();
+    let running = tokio::spawn(async move { runtime.run_with_shutdowns(signal_rx).await });
+    wait_for_count(
+        &control.activate_started,
+        &control.activate_started_count,
+        1,
+    )
+    .await;
+
+    signal_tx.send(()).unwrap();
+
+    running.await.unwrap().unwrap();
+    assert!(control.events.lock().await.is_empty());
+}
+
 #[derive(Debug, Clone)]
 enum HeartbeatAction {
     Success,
@@ -415,6 +435,9 @@ struct FakeControlPlane {
     fail_gate: Mutex<Option<Arc<Notify>>>,
     fail_started: Notify,
     fail_started_count: AtomicUsize,
+    activate_gate: Mutex<Option<Arc<Notify>>>,
+    activate_started: Notify,
+    activate_started_count: AtomicUsize,
     deactivate_gate: Mutex<Option<Arc<Notify>>>,
     deactivate_started: Notify,
     deactivate_started_count: AtomicUsize,
@@ -439,6 +462,9 @@ impl Default for FakeControlPlane {
             fail_gate: Mutex::new(None),
             fail_started: Notify::new(),
             fail_started_count: AtomicUsize::new(0),
+            activate_gate: Mutex::new(None),
+            activate_started: Notify::new(),
+            activate_started_count: AtomicUsize::new(0),
             deactivate_gate: Mutex::new(None),
             deactivate_started: Notify::new(),
             deactivate_started_count: AtomicUsize::new(0),
@@ -456,6 +482,11 @@ impl ControlPlaneApi for FakeControlPlane {
         node_id: NodeId,
         _request: &RetryRequest<ActivateRequest>,
     ) -> Result<ActivateOutcome, VoomError> {
+        self.activate_started_count.fetch_add(1, Ordering::SeqCst);
+        self.activate_started.notify_waiters();
+        if let Some(gate) = self.activate_gate.lock().await.clone() {
+            gate.notified().await;
+        }
         Ok(ActivateOutcome {
             node_id,
             node_epoch: 1,

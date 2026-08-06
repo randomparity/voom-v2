@@ -113,7 +113,10 @@ impl AgentRuntime {
         mut signals: mpsc::UnboundedReceiver<()>,
     ) -> Result<(), VoomError> {
         let incarnation_id = NodeIncarnationId::generate()?;
-        let activation = self.activate(incarnation_id).await?;
+        let activation = tokio::select! {
+            result = self.activate(incarnation_id) => result?,
+            _ = signals.recv() => return Ok(()),
+        };
         let (fatal_tx, mut fatal_rx) = mpsc::unbounded_channel();
         let node_heartbeat = self
             .start_node_heartbeat(
