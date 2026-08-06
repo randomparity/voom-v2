@@ -586,7 +586,7 @@ fn tiny_media_fixture() -> PathBuf {
 }
 
 fn artifact_tempdir(seeded: &Seeded) -> TempDir {
-    TempDir::new_in(seeded.root.path()).unwrap()
+    TempDir::new_in(seeded.root.path().canonicalize().unwrap()).unwrap()
 }
 
 fn success_ffprobe_binary() -> &'static PathBuf {
