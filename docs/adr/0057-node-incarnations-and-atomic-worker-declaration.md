@@ -35,7 +35,10 @@ The response is the agent's sole source of worker IDs and epochs. A repeated req
 the same key and body replays it; the same incarnation under a different activation is a
 conflict. Worker declarations use a bounded logical name, exact `OperationKind` values,
 advertised artifact-access modes, and a positive parallelism limit. The control plane,
-not the request, derives worker kind, durable names, capabilities, and grants.
+not the request, derives worker kind, durable names, capabilities, and grants. Each durable
+worker name includes the node ID, full incarnation ID, and bounded logical name, so a
+restart with the same manifest creates distinct historical and current worker rows despite
+the global uniqueness of `workers.name`.
 
 Every later remote mutation carries the incarnation ID. The control plane accepts it only
 when it equals the node's current active incarnation and the referenced worker belongs to
@@ -50,6 +53,17 @@ available again. This preserves the established retirement and lease-failure ord
 its durable expiry evidence instead of adding a second cancellation path to activation.
 Lease heartbeats also reject a persisted deadline at or before server time even if recovery
 has not yet changed the row from `held`; an expired lease can never be revived lazily.
+
+Incarnation pointers are redundant indexes, not independent authority. A non-null
+`nodes.active_incarnation_id` must resolve to that same node's sole active incarnation; a
+null pointer requires that the node have no active incarnation. A worker incarnation must
+belong to its worker's node. Terminal status and reason combinations are closed: only
+`superseded`/`superseded`, `retired`/(`graceful_shutdown` or
+`logical_node_retired`), and `failed`/(`child_startup_failed`,
+`child_restart_exhausted`, or `heartbeat_expired`) are valid. SQLite checks enforce the
+same-row combinations; repository joined reads validate cross-row ownership and coherence
+before applying absence, conflict, or lifecycle classification. Any violation is database
+corruption.
 
 A graceful or failed agent shutdown uses one authenticated, idempotent deactivation
 request. It ends the incarnation, records a bounded reason, retires its workers, and clears

@@ -88,10 +88,21 @@ node_incarnations
 ```
 
 Exactly one `active` row may exist per node, enforced by a partial unique index. Active
-rows have no end fields; terminal rows have both. `nodes.active_incarnation_id` is nullable
-and references the table. `workers.node_incarnation_id` is nullable for historical and
-node-less rows and references the table. A worker with a non-null incarnation must have a
-node, and repository decoding rejects a worker whose node and incarnation disagree.
+rows have no end fields or reason. A superseded row has reason `superseded`; a retired row
+has `graceful_shutdown` or `logical_node_retired`; a failed row has
+`child_startup_failed`, `child_restart_exhausted`, or `heartbeat_expired`. A table `CHECK`
+rejects every other status/end/reason combination.
+
+`nodes.active_incarnation_id` is nullable and references the table. A non-null pointer must
+resolve to an `active` incarnation owned by that same node, and a null pointer requires
+zero active incarnations for the node. `workers.node_incarnation_id` is nullable for
+historical and node-less rows and references the table. A non-null worker incarnation
+requires a non-null node ID and must resolve to an incarnation owned by that node. Foreign
+keys and same-row checks enforce what SQLite can express; repository node, worker, fence,
+activation, and history reads join and validate the remaining cross-row invariants before
+business classification. A missing target, wrong owner, terminal active pointer,
+null-pointer/live-row mismatch, or incompatible terminal pair is `VoomError::Database`,
+never absence, conflict, or valid lifecycle history.
 
 The migration preserves existing nodes and workers. Their active-incarnation fields are
 null; they remain inspectable, but remote acquire no longer treats an incarnation-less
@@ -134,6 +145,13 @@ existing worker retirement facts, inserts the new active incarnation, updates th
 worker, records one capability per operation and one derived execute grant, appends the
 incarnation activation fact, stores the strict response, and commits. Any failure rolls the
 whole sequence back.
+
+The durable worker name is
+`node-{node_id}-{incarnation_id}-{logical_name}`. The full incarnation ID makes the name
+globally unique across restarts while the activation response retains `logical_name` for
+configuration mapping. Two successive activations with an identical manifest therefore
+create distinct retired/current worker rows rather than colliding with the global
+`workers.name` constraint.
 
 Supersession does not cancel leases held by the prior incarnation. Its subsequent lease
 heartbeats and terminal calls fail the incarnation fence, and those leases follow the
@@ -386,11 +404,16 @@ the accepted #416 transport contract.
 
 ## Verification
 
-- Migration tests prove empty, existing-node/worker, corruption, uniqueness, and terminal
-  check constraints, including checked incarnation decoding.
+- Migration tests prove empty and existing-node/worker upgrades, per-incarnation worker-name
+  uniqueness, exact terminal status/reason checks, and checked incarnation decoding.
+- Store corruption tests prove that cross-node or terminal active pointers,
+  null-pointer/active-row mismatches, worker node/incarnation disagreement, and incompatible
+  terminal pairs return database errors before absence, conflict, fencing, or history
+  classification.
 - Store/control-plane tests prove activation replay, atomic rollback, supersession ordering,
-  stale fencing, worker ownership fencing, heartbeat updates, deactivation replay, logical
-  retirement, and stale-node failure ordering.
+  same-manifest restart without worker-name collision, stale fencing, worker ownership
+  fencing, heartbeat updates, deactivation replay, logical retirement, and stale-node
+  failure ordering.
 - API tests prove strict request bodies, authentication, response envelopes, unknown-field
   rejection, required incarnation fields on all remote routes, and end-to-end replay.
 - Agent unit tests prove config bounds, URL/CA rules, secret redaction, child environment,
