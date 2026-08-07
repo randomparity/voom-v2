@@ -117,8 +117,12 @@ async fn history_rejects_malformed_ids_and_invalid_status_reason_pairs() {
     let (pool, _tmp) = fresh_pool().await;
     let node = seed_node(&pool, "node-a").await;
     let node_id = i64::try_from(node.id.0).unwrap();
+    // `ignore_check_constraints` is per-connection, and an on-disk pool hands out up to eight
+    // connections. Hold one for every statement that must bypass the constraints, or a later
+    // insert lands on a connection that never saw the pragma and the CHECK rejects it.
+    let mut corrupting = pool.acquire().await.unwrap();
     sqlx::query("PRAGMA ignore_check_constraints = ON")
-        .execute(&pool)
+        .execute(&mut *corrupting)
         .await
         .unwrap();
     sqlx::query(
@@ -129,7 +133,7 @@ async fn history_rejects_malformed_ids_and_invalid_status_reason_pairs() {
     .bind(node_id)
     .bind(timestamp(T0))
     .bind(timestamp(T0))
-    .execute(&pool)
+    .execute(&mut *corrupting)
     .await
     .unwrap();
 
@@ -139,7 +143,7 @@ async fn history_rejects_malformed_ids_and_invalid_status_reason_pairs() {
     assert!(malformed.to_string().contains("incarnation id"));
 
     sqlx::query("DELETE FROM node_incarnations")
-        .execute(&pool)
+        .execute(&mut *corrupting)
         .await
         .unwrap();
     sqlx::query(
@@ -152,7 +156,7 @@ async fn history_rejects_malformed_ids_and_invalid_status_reason_pairs() {
     .bind(timestamp(T0))
     .bind(timestamp(T0))
     .bind(timestamp(T0))
-    .execute(&pool)
+    .execute(&mut *corrupting)
     .await
     .unwrap();
     let invalid_pair = repo.list_for_node(node.id, 10).await.unwrap_err();
