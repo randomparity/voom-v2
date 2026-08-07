@@ -22,6 +22,19 @@ struct TestResponse {
     accepted: bool,
 }
 
+/// How long `RawResponse::Timeout` withholds a response so the client's request timeout fires.
+const SERVER_STALL: Duration = Duration::from_millis(400);
+
+/// Long enough that a stalled server is back in `accept()` before the client's next attempt.
+///
+/// `raw_server` serves connections serially on one thread, so while it is stalling it is not
+/// accepting. A shorter retry delay lets the client open connections the listen backlog completes
+/// but nobody reads, burning attempts against a server that never sees them.
+const RETRY_DELAY: Duration = Duration::from_millis(600);
+
+/// Shorter than [`SERVER_STALL`] so a stall is classified as a timeout rather than a disconnect.
+const REQUEST_TIMEOUT: Duration = Duration::from_millis(100);
+
 #[test]
 fn retry_request_freezes_body_key_and_hash() {
     let request = RetryRequest::new(
@@ -78,7 +91,7 @@ async fn retries_reuse_identical_body_and_key_across_retry_classes() {
         RawResponse::Success,
     ];
     let (address, received, server) = raw_server(responses);
-    let client = test_client(address, responses.len() + 1, Duration::from_millis(50));
+    let client = test_client(address, responses.len() + 1, RETRY_DELAY, REQUEST_TIMEOUT);
     let request = RetryRequest::new(
         "replay-key".to_owned(),
         &TestBody {
@@ -104,7 +117,7 @@ async fn retries_reuse_identical_body_and_key_across_retry_classes() {
 async fn other_client_errors_are_terminal() {
     let responses = [RawResponse::BadRequest];
     let (address, received, server) = raw_server(responses);
-    let client = test_client(address, 3, Duration::from_millis(100));
+    let client = test_client(address, 3, Duration::ZERO, REQUEST_TIMEOUT);
     let request = RetryRequest::new(
         "terminal-key".to_owned(),
         &TestBody {
@@ -123,7 +136,7 @@ async fn other_client_errors_are_terminal() {
 async fn success_envelopes_are_strict_and_bounded() {
     for response in [RawResponse::UnknownEnvelope, RawResponse::Oversized] {
         let (address, received, server) = raw_server([response]);
-        let client = test_client(address, 1, Duration::from_millis(100));
+        let client = test_client(address, 1, Duration::ZERO, REQUEST_TIMEOUT);
         let request = RetryRequest::new(
             "strict-key".to_owned(),
             &TestBody {
@@ -179,14 +192,15 @@ fn loaded_config(url: &str) -> LoadedAgentConfig {
 fn test_client(
     address: SocketAddr,
     maximum_attempts: usize,
+    retry_delay: Duration,
     timeout: Duration,
 ) -> ControlPlaneClient {
     let loaded = loaded_config(&format!("http://{address}"));
     ControlPlaneClient::from_config_with_settings(
         &loaded,
         RetrySettings {
-            initial_delay: Duration::ZERO,
-            maximum_delay: Duration::ZERO,
+            initial_delay: retry_delay,
+            maximum_delay: retry_delay,
             maximum_attempts: Some(maximum_attempts),
         },
         timeout,
@@ -232,7 +246,7 @@ fn raw_server<const N: usize>(
             sender.send(read_request(&mut stream)).unwrap();
             match response {
                 RawResponse::Status(status) => write_response(&mut stream, status, "{}"),
-                RawResponse::Timeout => thread::sleep(Duration::from_millis(150)),
+                RawResponse::Timeout => thread::sleep(SERVER_STALL),
                 RawResponse::Disconnect => {}
                 RawResponse::Success => write_response(
                     &mut stream,
