@@ -407,7 +407,7 @@ async fn heartbeat_rejects_missing_and_released_leases_without_mutation() {
         )
         .await
         .unwrap_err();
-    assert!(missing.to_string().contains("not held"));
+    assert!(missing.to_string().contains("not found"));
 
     let lease = held_noop_lease(&cp).await;
     cp.release_lease(

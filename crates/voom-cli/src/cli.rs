@@ -898,6 +898,9 @@ pub enum NodeCommand {
         #[arg(long)]
         status: Option<NodeStatusArg>,
     },
+    /// Inspect node-agent process incarnations.
+    #[command(subcommand)]
+    Incarnation(NodeIncarnationCommand),
     /// Show one node.
     Show {
         #[arg(long)]
@@ -909,6 +912,21 @@ pub enum NodeCommand {
         node_id: u64,
         #[arg(long)]
         expected_epoch: u64,
+    },
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum NodeIncarnationCommand {
+    /// List one node's incarnation history newest first.
+    List {
+        #[arg(long)]
+        node_id: u64,
+        #[arg(
+            long,
+            default_value_t = 100,
+            value_parser = clap::value_parser!(u32).range(1..=1_000)
+        )]
+        limit: u32,
     },
 }
 

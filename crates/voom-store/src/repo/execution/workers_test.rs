@@ -1,9 +1,12 @@
 use super::*;
 
+use std::str::FromStr;
+
 use sqlx::Executor;
 use time::OffsetDateTime;
-use voom_core::{TicketOperation, VoomError};
+use voom_core::{ErrorCode, NodeIncarnationId, TicketOperation, VoomError};
 
+use crate::repo::execution::node_incarnations::{NewNodeIncarnation, SqliteNodeIncarnationRepo};
 use crate::repo::execution::nodes::{NewNode, Node, NodeKind, SqliteNodeRepo};
 use crate::test_support::{T0, fresh_initialized_pool_at};
 
@@ -35,6 +38,152 @@ async fn register_returns_worker_in_registered_status() {
     assert_eq!(w.name, "w-1");
     assert_eq!(w.status, WorkerStatus::Registered);
     assert_eq!(w.retired_at, None);
+    assert_eq!(w.node_incarnation_id, None);
+}
+
+#[tokio::test]
+async fn bind_count_and_retire_incarnation_workers_preserve_typed_ownership() {
+    let (pool, _tmp) = pool().await;
+    let node = register_test_node(&pool, "node-a").await;
+    let incarnation_id = NodeIncarnationId::from_str("0123456789abcdef0123456789abcdef").unwrap();
+    let incarnations = SqliteNodeIncarnationRepo::new(pool.clone());
+    let workers = SqliteWorkerRepo::new(pool.clone());
+    let mut tx = pool.begin().await.unwrap();
+    incarnations
+        .insert_in_tx(
+            &mut tx,
+            NewNodeIncarnation {
+                id: incarnation_id,
+                node_id: node.id,
+                started_at: T0,
+            },
+        )
+        .await
+        .unwrap();
+    let worker = workers
+        .register_in_tx(
+            &mut tx,
+            NewWorker {
+                name: "incarnation-worker".to_owned(),
+                kind: WorkerKind::Remote,
+                registered_at: T0,
+                node_id: Some(node.id),
+            },
+        )
+        .await
+        .unwrap();
+    let bound = workers
+        .bind_incarnation_in_tx(&mut tx, worker.id, node.id, incarnation_id)
+        .await
+        .unwrap();
+    assert_eq!(bound.node_incarnation_id, Some(incarnation_id));
+    assert_eq!(
+        workers
+            .incarnation_owned_worker_in_tx(&mut tx, worker.id, node.id, incarnation_id)
+            .await
+            .unwrap()
+            .id,
+        worker.id
+    );
+    let retired = workers
+        .retire_live_for_incarnation_in_tx(&mut tx, incarnation_id, T0)
+        .await
+        .unwrap();
+    assert_eq!(retired.len(), 1);
+    assert_eq!(retired[0].id, worker.id);
+    assert_eq!(retired[0].status, WorkerStatus::Retired);
+    tx.commit().await.unwrap();
+}
+
+#[tokio::test]
+async fn worker_reads_reject_node_incarnation_owner_disagreement() {
+    let (pool, _tmp) = pool().await;
+    let owner = register_test_node(&pool, "owner").await;
+    let worker_node = register_test_node(&pool, "worker-node").await;
+    let incarnation_id = "0123456789abcdef0123456789abcdef";
+    sqlx::query(
+        "INSERT INTO node_incarnations \
+         (incarnation_id, node_id, status, started_at, last_seen_at) \
+         VALUES (?, ?, 'active', ?, ?)",
+    )
+    .bind(incarnation_id)
+    .bind(i64::try_from(owner.id.0).unwrap())
+    .bind(T0.to_string())
+    .bind(T0.to_string())
+    .execute(&pool)
+    .await
+    .unwrap();
+    let repo = SqliteWorkerRepo::new(pool.clone());
+    let worker = repo
+        .register(NewWorker {
+            name: "mismatched-worker".to_owned(),
+            kind: WorkerKind::Remote,
+            registered_at: T0,
+            node_id: Some(worker_node.id),
+        })
+        .await
+        .unwrap();
+    sqlx::query("UPDATE workers SET node_incarnation_id = ? WHERE id = ?")
+        .bind(incarnation_id)
+        .bind(i64::try_from(worker.id.0).unwrap())
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let error = repo.get(worker.id).await.unwrap_err();
+    assert_eq!(error.error_code(), ErrorCode::DbUnreachable);
+    assert!(error.to_string().contains("incarnation owner"));
+    repo.record_capability(NewCapability {
+        worker_id: worker.id,
+        operation: worker_op("probe"),
+        codecs: vec![],
+        hardware: vec![],
+        artifact_access: vec![],
+        extra: serde_json::json!({}),
+    })
+    .await
+    .unwrap();
+    let capability_error = repo
+        .runtime_capabilities_for_operations(&[worker_op("probe")])
+        .await
+        .unwrap_err();
+    assert_eq!(capability_error.error_code(), ErrorCode::DbUnreachable);
+}
+
+#[tokio::test]
+async fn worker_reads_reject_malformed_persisted_incarnation_id() {
+    let (pool, _tmp) = pool().await;
+    let node = register_test_node(&pool, "node-a").await;
+    sqlx::query(
+        "INSERT INTO node_incarnations \
+         (incarnation_id, node_id, status, started_at, last_seen_at) \
+         VALUES ('malformed', ?, 'active', ?, ?)",
+    )
+    .bind(i64::try_from(node.id.0).unwrap())
+    .bind(T0.to_string())
+    .bind(T0.to_string())
+    .execute(&pool)
+    .await
+    .unwrap();
+    let repo = SqliteWorkerRepo::new(pool.clone());
+    let worker = repo
+        .register(NewWorker {
+            name: "malformed-incarnation-worker".to_owned(),
+            kind: WorkerKind::Remote,
+            registered_at: T0,
+            node_id: Some(node.id),
+        })
+        .await
+        .unwrap();
+    sqlx::query("UPDATE workers SET node_incarnation_id = 'malformed' WHERE id = ?")
+        .bind(i64::try_from(worker.id.0).unwrap())
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let error = repo.get(worker.id).await.unwrap_err();
+    assert_eq!(error.error_code(), ErrorCode::DbUnreachable);
+    assert!(error.to_string().contains("node incarnation id"));
 }
 
 #[tokio::test]

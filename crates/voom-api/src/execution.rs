@@ -12,16 +12,20 @@ use serde::de::DeserializeOwned;
 use serde_json::Value as JsonValue;
 use voom_control_plane::ControlPlane;
 use voom_control_plane::execution::{
-    RemoteAcquireInput, RemoteCompleteInput, RemoteFailInput, RemoteLeaseHeartbeatInput,
-    RemoteNodeHeartbeatInput,
+    RemoteAcquireInput, RemoteActivateInput, RemoteCompleteInput, RemoteDeactivateInput,
+    RemoteFailInput, RemoteLeaseHeartbeatInput, RemoteNodeHeartbeatInput, RemoteWorkerDeclaration,
 };
-use voom_core::{ErrorCode, FailureClass, LeaseId, NodeId, WorkerId};
+use voom_core::{
+    ErrorCode, FailureClass, LeaseId, NodeId, NodeIncarnationEndReason, NodeIncarnationId, WorkerId,
+};
 
 use crate::{
     AppState, bad_args_response, ok_response, unauthorized_response, voom_route_error_response,
 };
 
 const ACQUIRE_COMMAND: &str = "execution.acquire";
+const ACTIVATE_COMMAND: &str = "execution.activate";
+const DEACTIVATE_COMMAND: &str = "execution.deactivate";
 const NODE_HEARTBEAT_COMMAND: &str = "execution.node_heartbeat";
 const LEASE_HEARTBEAT_COMMAND: &str = "execution.lease_heartbeat";
 const COMPLETE_COMMAND: &str = "execution.complete";
@@ -32,19 +36,37 @@ const FAIL_COMMAND: &str = "execution.fail";
 struct AcquireRequest {
     node_id: u64,
     worker_id: u64,
+    incarnation_id: NodeIncarnationId,
     #[serde(default = "default_lease_ttl_seconds")]
     lease_ttl_seconds: i64,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-struct NodeHeartbeatRequest {}
+struct NodeHeartbeatRequest {
+    incarnation_id: NodeIncarnationId,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ActivateRequest {
+    incarnation_id: NodeIncarnationId,
+    workers: Vec<RemoteWorkerDeclaration>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct DeactivateRequest {
+    incarnation_id: NodeIncarnationId,
+    reason: NodeIncarnationEndReason,
+}
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct LeaseHeartbeatRequest {
     node_id: u64,
     worker_id: u64,
+    incarnation_id: NodeIncarnationId,
     #[serde(default = "default_lease_ttl_seconds")]
     lease_ttl_seconds: i64,
 }
@@ -54,6 +76,7 @@ struct LeaseHeartbeatRequest {
 struct CompleteRequest {
     node_id: u64,
     worker_id: u64,
+    incarnation_id: NodeIncarnationId,
     result: JsonValue,
 }
 
@@ -62,6 +85,7 @@ struct CompleteRequest {
 struct FailRequest {
     node_id: u64,
     worker_id: u64,
+    incarnation_id: NodeIncarnationId,
     reason: String,
     class: FailureClass,
     #[serde(default)]
@@ -70,6 +94,8 @@ struct FailRequest {
 
 pub(crate) fn routes() -> axum::Router<AppState> {
     axum::Router::new()
+        .route("/v1/execution/node/{node_id}/activate", post(activate))
+        .route("/v1/execution/node/{node_id}/deactivate", post(deactivate))
         .route(
             "/v1/execution/node/{node_id}/heartbeat",
             post(node_heartbeat),
@@ -81,6 +107,100 @@ pub(crate) fn routes() -> axum::Router<AppState> {
         )
         .route("/v1/execution/lease/{lease_id}/complete", post(complete))
         .route("/v1/execution/lease/{lease_id}/fail", post(fail))
+}
+
+async fn activate(
+    State(state): State<AppState>,
+    path: Result<Path<u64>, PathRejection>,
+    headers: HeaderMap,
+    body: Result<Json<JsonValue>, JsonRejection>,
+) -> axum::response::Response {
+    let (token, idempotency_key) = match request_credentials(&headers) {
+        Ok(credentials) => credentials,
+        Err(error) => return credentials_error_response(ACTIVATE_COMMAND, error),
+    };
+    let Some(control_plane) = configured_control_plane(state) else {
+        return not_configured_response(ACTIVATE_COMMAND);
+    };
+    let node_id = match path_id(path) {
+        Ok(id) => id,
+        Err(message) => return bad_args_response(ACTIVATE_COMMAND, message),
+    };
+    let body = match json_body(body) {
+        Ok(body) => body,
+        Err(error) => return json_body_error_response(ACTIVATE_COMMAND, error),
+    };
+    let request: ActivateRequest = match parse_request_body(&body) {
+        Ok(request) => request,
+        Err(message) => return bad_args_response(ACTIVATE_COMMAND, message),
+    };
+    let route_instance = format!("/v1/execution/node/{node_id}/activate");
+    let request_hash = match stable_request_hash("POST", &route_instance, &body) {
+        Ok(hash) => hash,
+        Err(message) => return bad_args_response(ACTIVATE_COMMAND, message),
+    };
+
+    match control_plane
+        .remote_activate(RemoteActivateInput {
+            node_id: NodeId(node_id),
+            token,
+            idempotency_key,
+            request_hash,
+            incarnation_id: request.incarnation_id,
+            workers: request.workers,
+        })
+        .await
+    {
+        Ok(outcome) => ok_response(ACTIVATE_COMMAND, outcome),
+        Err(err) => voom_route_error_response(ACTIVATE_COMMAND, &err),
+    }
+}
+
+async fn deactivate(
+    State(state): State<AppState>,
+    path: Result<Path<u64>, PathRejection>,
+    headers: HeaderMap,
+    body: Result<Json<JsonValue>, JsonRejection>,
+) -> axum::response::Response {
+    let (token, idempotency_key) = match request_credentials(&headers) {
+        Ok(credentials) => credentials,
+        Err(error) => return credentials_error_response(DEACTIVATE_COMMAND, error),
+    };
+    let Some(control_plane) = configured_control_plane(state) else {
+        return not_configured_response(DEACTIVATE_COMMAND);
+    };
+    let node_id = match path_id(path) {
+        Ok(id) => id,
+        Err(message) => return bad_args_response(DEACTIVATE_COMMAND, message),
+    };
+    let body = match json_body(body) {
+        Ok(body) => body,
+        Err(error) => return json_body_error_response(DEACTIVATE_COMMAND, error),
+    };
+    let request: DeactivateRequest = match parse_request_body(&body) {
+        Ok(request) => request,
+        Err(message) => return bad_args_response(DEACTIVATE_COMMAND, message),
+    };
+    let route_instance = format!("/v1/execution/node/{node_id}/deactivate");
+    let request_hash = match stable_request_hash("POST", &route_instance, &body) {
+        Ok(hash) => hash,
+        Err(message) => return bad_args_response(DEACTIVATE_COMMAND, message),
+    };
+
+    match control_plane
+        .remote_deactivate(RemoteDeactivateInput {
+            node_id: NodeId(node_id),
+            token,
+            idempotency_key,
+            request_hash,
+            incarnation_id: request.incarnation_id,
+            reason: request.reason,
+        })
+        .await
+    {
+        Ok(outcome) => ok_response(DEACTIVATE_COMMAND, outcome),
+        Err(err) => voom_route_error_response(DEACTIVATE_COMMAND, &err),
+    }
 }
 
 async fn acquire(
@@ -112,6 +232,7 @@ async fn acquire(
         .remote_acquire(RemoteAcquireInput {
             node_id: NodeId(request.node_id),
             token,
+            incarnation_id: request.incarnation_id,
             worker_id: WorkerId(request.worker_id),
             idempotency_key,
             request_hash,
@@ -145,7 +266,7 @@ async fn node_heartbeat(
         Ok(body) => body,
         Err(error) => return json_body_error_response(NODE_HEARTBEAT_COMMAND, error),
     };
-    let _request: NodeHeartbeatRequest = match parse_request_body(&body) {
+    let request: NodeHeartbeatRequest = match parse_request_body(&body) {
         Ok(request) => request,
         Err(message) => return bad_args_response(NODE_HEARTBEAT_COMMAND, message),
     };
@@ -159,6 +280,7 @@ async fn node_heartbeat(
         .remote_node_heartbeat(RemoteNodeHeartbeatInput {
             node_id: NodeId(node_id),
             token,
+            incarnation_id: request.incarnation_id,
             idempotency_key,
             request_hash,
         })
@@ -204,6 +326,7 @@ async fn lease_heartbeat(
         .remote_lease_heartbeat(RemoteLeaseHeartbeatInput {
             node_id: NodeId(request.node_id),
             token,
+            incarnation_id: request.incarnation_id,
             worker_id: WorkerId(request.worker_id),
             lease_id: LeaseId(lease_id),
             idempotency_key,
@@ -252,6 +375,7 @@ async fn complete(
         .remote_complete(RemoteCompleteInput {
             node_id: NodeId(request.node_id),
             token,
+            incarnation_id: request.incarnation_id,
             worker_id: WorkerId(request.worker_id),
             lease_id: LeaseId(lease_id),
             idempotency_key,
@@ -300,6 +424,7 @@ async fn fail(
         .remote_fail(RemoteFailInput {
             node_id: NodeId(request.node_id),
             token,
+            incarnation_id: request.incarnation_id,
             worker_id: WorkerId(request.worker_id),
             lease_id: LeaseId(lease_id),
             idempotency_key,

@@ -86,6 +86,78 @@ impl NodeStatus {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
+pub enum NodeIncarnationStatus {
+    Active,
+    Superseded,
+    Retired,
+    Failed,
+}
+
+impl NodeIncarnationStatus {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Superseded => "superseded",
+            Self::Retired => "retired",
+            Self::Failed => "failed",
+        }
+    }
+
+    pub fn parse_database(field: &str, value: &str) -> Result<Self, VoomError> {
+        match value {
+            "active" => Ok(Self::Active),
+            "superseded" => Ok(Self::Superseded),
+            "retired" => Ok(Self::Retired),
+            "failed" => Ok(Self::Failed),
+            _ => Err(VoomError::database(format!(
+                "{field} {value:?} not in node incarnation status vocab"
+            ))),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NodeIncarnationEndReason {
+    Superseded,
+    GracefulShutdown,
+    ChildStartupFailed,
+    ChildRestartExhausted,
+    HeartbeatExpired,
+    LogicalNodeRetired,
+}
+
+impl NodeIncarnationEndReason {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Superseded => "superseded",
+            Self::GracefulShutdown => "graceful_shutdown",
+            Self::ChildStartupFailed => "child_startup_failed",
+            Self::ChildRestartExhausted => "child_restart_exhausted",
+            Self::HeartbeatExpired => "heartbeat_expired",
+            Self::LogicalNodeRetired => "logical_node_retired",
+        }
+    }
+
+    pub fn parse_database(field: &str, value: &str) -> Result<Self, VoomError> {
+        match value {
+            "superseded" => Ok(Self::Superseded),
+            "graceful_shutdown" => Ok(Self::GracefulShutdown),
+            "child_startup_failed" => Ok(Self::ChildStartupFailed),
+            "child_restart_exhausted" => Ok(Self::ChildRestartExhausted),
+            "heartbeat_expired" => Ok(Self::HeartbeatExpired),
+            "logical_node_retired" => Ok(Self::LogicalNodeRetired),
+            _ => Err(VoomError::database(format!(
+                "{field} {value:?} not in node incarnation end reason vocab"
+            ))),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum WorkerKind {
     Synthetic,
     Local,

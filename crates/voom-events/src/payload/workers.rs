@@ -1,6 +1,9 @@
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
-use voom_core::{NodeId, NodeKind, NodeStatus, TicketOperation, WorkerId, WorkerKind};
+use voom_core::{
+    NodeId, NodeIncarnationEndReason, NodeIncarnationId, NodeIncarnationStatus, NodeKind,
+    NodeStatus, TicketOperation, WorkerId, WorkerKind,
+};
 
 // --- nodes ------------------------------------------------------------------
 
@@ -40,6 +43,25 @@ pub struct NodeRetiredPayload {
     #[serde(with = "time::serde::iso8601")]
     pub retired_at: OffsetDateTime,
     pub epoch: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NodeIncarnationActivatedPayload {
+    pub node_id: NodeId,
+    pub incarnation_id: NodeIncarnationId,
+    pub node_epoch: u64,
+    pub worker_ids: Vec<WorkerId>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NodeIncarnationEndedPayload {
+    pub node_id: NodeId,
+    pub incarnation_id: NodeIncarnationId,
+    pub status: NodeIncarnationStatus,
+    pub reason: NodeIncarnationEndReason,
+    pub retired_worker_ids: Vec<WorkerId>,
 }
 
 // --- workers ---------------------------------------------------------------

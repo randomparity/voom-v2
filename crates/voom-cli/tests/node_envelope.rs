@@ -5,8 +5,12 @@
 )]
 
 use std::process::Command;
+use std::sync::Arc;
 
 use serde_json::Value;
+use voom_control_plane::ControlPlane;
+use voom_control_plane::execution::{RemoteActivateInput, RemoteWorkerDeclaration};
+use voom_core::{ArtifactAccessMode, Clock, NodeId, NodeIncarnationId, OperationKind};
 use voom_store::test_support::sqlite_url_for;
 use voom_test_support::TempDatabase;
 
@@ -104,6 +108,66 @@ mod node_envelope {
             "node_list_does_not_expose_token_hash_or_plaintext",
             list_json
         );
+    }
+
+    #[tokio::test]
+    async fn node_incarnation_list_outputs_history() {
+        let seeded = seed().await;
+        let registered = register_node_kind(&seeded.url, "remote-a", "remote");
+        let pool = voom_store::connect(&seeded.url).await.unwrap();
+        let cp = ControlPlane::open_with_pool(pool, Arc::new(FixedClock))
+            .await
+            .unwrap();
+        activate_incarnation(
+            &cp,
+            &registered,
+            "11111111111111111111111111111111",
+            "activate-first",
+        )
+        .await;
+        activate_incarnation(
+            &cp,
+            &registered,
+            "22222222222222222222222222222222",
+            "activate-second",
+        )
+        .await;
+
+        let show = node_command(&seeded.url)
+            .args(["show", "--node-id", registered.node_id.to_string().as_str()])
+            .output()
+            .unwrap();
+        assert_eq!(show.status.code(), Some(0));
+        let show = envelope(show.stdout);
+        assert_eq!(
+            show["data"]["node"]["active_incarnation_id"],
+            "22222222222222222222222222222222"
+        );
+        assert_no_secret_fields(&show["data"]);
+
+        let output = node_command(&seeded.url)
+            .args([
+                "incarnation",
+                "list",
+                "--node-id",
+                registered.node_id.to_string().as_str(),
+                "--limit",
+                "10",
+            ])
+            .output()
+            .unwrap();
+
+        assert_eq!(output.status.code(), Some(0));
+        let mut json = envelope(output.stdout);
+        assert_eq!(
+            json["data"]["incarnations"][0]["incarnation_id"],
+            "22222222222222222222222222222222"
+        );
+        assert_eq!(json["data"]["incarnations"][0]["status"], "active");
+        assert_eq!(json["data"]["incarnations"][1]["status"], "superseded");
+        assert_no_secret_fields(&json["data"]);
+        redact_local(&mut json);
+        insta::assert_json_snapshot!("node_incarnation_list_outputs_history", json);
     }
 
     #[tokio::test]
@@ -221,6 +285,14 @@ mod node_envelope {
         token: String,
     }
 
+    struct FixedClock;
+
+    impl Clock for FixedClock {
+        fn now(&self) -> time::OffsetDateTime {
+            time::OffsetDateTime::UNIX_EPOCH
+        }
+    }
+
     async fn seed() -> Seeded {
         let tmp = TempDatabase::new().unwrap();
         let url = sqlite_url_for(tmp.path());
@@ -229,8 +301,12 @@ mod node_envelope {
     }
 
     fn register_node(url: &str, name: &str) -> Registered {
+        register_node_kind(url, name, "local")
+    }
+
+    fn register_node_kind(url: &str, name: &str, kind: &str) -> Registered {
         let output = node_command(url)
-            .args(["register", "--name", name, "--kind", "local"])
+            .args(["register", "--name", name, "--kind", kind])
             .output()
             .unwrap();
         assert_eq!(output.status.code(), Some(0));
@@ -239,6 +315,30 @@ mod node_envelope {
             node_id: json["data"]["node"]["id"].as_u64().unwrap(),
             token: json["data"]["token"].as_str().unwrap().to_owned(),
         }
+    }
+
+    async fn activate_incarnation(
+        cp: &ControlPlane,
+        registered: &Registered,
+        incarnation_id: &str,
+        key: &str,
+    ) {
+        let incarnation_id: NodeIncarnationId = incarnation_id.parse().unwrap();
+        cp.remote_activate(RemoteActivateInput {
+            node_id: NodeId(registered.node_id),
+            token: registered.token.clone().into(),
+            idempotency_key: key.to_owned(),
+            request_hash: format!("{key}-hash"),
+            incarnation_id,
+            workers: vec![RemoteWorkerDeclaration {
+                logical_name: "probe".to_owned(),
+                operations: vec![OperationKind::ProbeFile],
+                artifact_access: vec![ArtifactAccessMode::SharedMount],
+                max_parallel: 1,
+            }],
+        })
+        .await
+        .unwrap();
     }
 
     fn node_command(url: &str) -> Command {

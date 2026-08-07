@@ -64,7 +64,8 @@ Event payloads carry the existing `voom-core` ID newtypes wherever the field ide
 durable entity. The serde-transparent IDs preserve the historical JSON number representation:
 
 - execution events use `JobId`, `TicketId`, `LeaseId`, and `WorkerId`;
-- worker events use `NodeId` and `WorkerId`;
+- worker events use `NodeId`, `NodeIncarnationId`, and `WorkerId`; incarnation lifecycle
+  status and reason fields use their closed `voom-core` vocabularies;
 - commit events use `CommitId`, `EvidenceId`, and `UseLeaseId`, including typed
   `fresh_lease_ids` vectors on post-mutation and recovery-required events;
 - media-identity events use the matching work, variant, bundle, file, evidence, snapshot, and

@@ -3,8 +3,8 @@
 use secrecy::SecretString;
 use serde_json::Value as JsonValue;
 use sqlx::{Sqlite, Transaction};
-use time::OffsetDateTime;
-use voom_core::{NodeId, VoomError};
+use time::{Duration, OffsetDateTime};
+use voom_core::{NodeId, NodeIncarnationEndReason, NodeIncarnationStatus, VoomError};
 use voom_events::payload::{
     NodeHeartbeatRecordedPayload, NodeMarkedStalePayload, NodeRegisteredPayload, NodeRetiredPayload,
 };
@@ -14,7 +14,7 @@ use voom_store::repo::execution::nodes::{NewNode, Node, NodeKind, NodeStatus};
 use crate::ControlPlane;
 use crate::node_auth::verify_node_token;
 
-use super::{append_event, begin_tx, commit_tx};
+use super::{append_event, begin_immediate_tx, begin_tx, commit_tx};
 
 /// Inputs required to register a durable node.
 #[derive(Debug)]
@@ -151,9 +151,48 @@ impl ControlPlane {
     /// # Errors
     /// Propagates repository and event-append errors.
     pub async fn mark_stale_nodes(&self, now: OffsetDateTime) -> Result<Vec<Node>, VoomError> {
-        let mut tx = begin_tx(&self.pool).await?;
-        let nodes = self.nodes.mark_stale_in_tx(&mut tx, now).await?;
-        for node in &nodes {
+        let mut tx = begin_immediate_tx(&self.pool).await?;
+        let candidates = self.nodes.stale_candidates_in_tx(&mut tx).await?;
+        let mut changed = Vec::new();
+        for candidate in candidates {
+            let expires_at = candidate.last_seen_at
+                + Duration::seconds(i64::from(candidate.heartbeat_ttl_seconds));
+            if expires_at > now {
+                continue;
+            }
+            let node = if let Some(incarnation_id) = candidate.active_incarnation_id {
+                self.end_incarnation_in_tx(
+                    &mut tx,
+                    candidate.id,
+                    incarnation_id,
+                    NodeIncarnationStatus::Failed,
+                    NodeIncarnationEndReason::HeartbeatExpired,
+                    now,
+                )
+                .await?;
+                let transitioned = self
+                    .nodes
+                    .mark_stale_after_incarnation_end_in_tx(
+                        &mut tx,
+                        &candidate,
+                        incarnation_id,
+                        now,
+                    )
+                    .await?;
+                Some(transitioned.ok_or_else(|| {
+                    VoomError::Internal(format!(
+                        "node {} did not transition after its incarnation was ended",
+                        candidate.id
+                    ))
+                })?)
+            } else {
+                self.nodes
+                    .mark_stale_candidate_in_tx(&mut tx, &candidate, now)
+                    .await?
+            };
+            let Some(node) = node else {
+                continue;
+            };
             append_event(
                 &self.events,
                 &mut tx,
@@ -167,9 +206,10 @@ impl ControlPlane {
                 }),
             )
             .await?;
+            changed.push(node);
         }
         commit_tx(tx).await?;
-        Ok(nodes)
+        Ok(changed)
     }
 
     /// Retire a node using optimistic epoch checking and emit `node.retired`.
@@ -182,11 +222,43 @@ impl ControlPlane {
         expected_epoch: u64,
         now: OffsetDateTime,
     ) -> Result<Node, VoomError> {
-        let mut tx = begin_tx(&self.pool).await?;
-        let node = self
+        let mut tx = begin_immediate_tx(&self.pool).await?;
+        let current = self
             .nodes
-            .retire_in_tx(&mut tx, node_id, expected_epoch, now)
+            .active_context_in_tx(&mut tx, node_id)
+            .await?
+            .ok_or_else(|| VoomError::NotFound(format!("nodes retire: id={node_id} not found")))?;
+        if current.epoch != expected_epoch {
+            return Err(VoomError::Conflict(format!(
+                "nodes retire rejected: id={node_id} expected_epoch={expected_epoch} \
+                 actual_epoch={}",
+                current.epoch
+            )));
+        }
+        let node = if let Some(incarnation_id) = current.active_incarnation_id {
+            self.end_incarnation_in_tx(
+                &mut tx,
+                node_id,
+                incarnation_id,
+                NodeIncarnationStatus::Retired,
+                NodeIncarnationEndReason::LogicalNodeRetired,
+                now,
+            )
             .await?;
+            self.nodes
+                .retire_after_incarnation_end_in_tx(
+                    &mut tx,
+                    node_id,
+                    expected_epoch,
+                    incarnation_id,
+                    now,
+                )
+                .await?
+        } else {
+            self.nodes
+                .retire_in_tx(&mut tx, node_id, expected_epoch, now)
+                .await?
+        };
         append_event(
             &self.events,
             &mut tx,

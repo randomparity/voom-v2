@@ -8,7 +8,9 @@ parsing and planning, compliance reports and execution, scan/identity
 ingest, artifact staging/verification/commit flows, scheduler scoring and
 decision inspection, node and worker lifecycle APIs, the worker protocol,
 local media worker binaries, conformance tooling, and the agent-facing CLI.
-Daemon mode, remote-node TLS transport, and UI work remain later surfaces.
+The HTTPS API server and pull-based remote node agent provide authenticated,
+incarnation-fenced worker execution. Byte-local root/media conversion (issues #418 through
+#425), continuous daemon scheduling, and UI work remain later surfaces.
 
 ## Getting started
 
@@ -36,6 +38,7 @@ just smoke
 | `voom-worker-protocol` | Versioned HTTP/JSON worker protocol, credentials, operation payloads, NDJSON progress codec, and loopback transport. |
 | `voom-control-plane` | App-services layer for health, scan, policy inputs, plan generation, compliance execution, artifact orchestration, node/worker lifecycle, scheduler inspection, and durable workflow execution. |
 | `voom-api` | axum control-plane API router plus the bounded TLS server binary. |
+| `voom-node-agent` | Authenticated pull client that fences node incarnations and supervises loopback worker processes. |
 | `voom-cli` | `voom` binary for `version`, `health`, `init`, `scan`, `plan`, `policy input`, `compliance`, `node`, `profile`, `worker`, `scheduler decisions`, and `artifact` commands. |
 | `voom-conformance` | Black-box worker protocol conformance harness and `echo-worker`. |
 | `voom-test-support` | Shared integration-test support for control-plane and worker flows. |

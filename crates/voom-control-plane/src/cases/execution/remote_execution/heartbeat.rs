@@ -25,8 +25,16 @@ impl ControlPlane {
         let route_key = super::route_node_heartbeat(input.node_id);
         let mut tx = begin_immediate_tx(&self.pool).await?;
         let auth = self
-            .verify_remote_node_token_in_tx(&mut tx, input.node_id, &input.token)
+            .require_remote_incarnation_fence_in_tx(
+                &mut tx,
+                input.node_id,
+                &input.token,
+                input.incarnation_id,
+                None,
+            )
             .await?;
+        let replay_key =
+            super::incarnation_replay_key(input.incarnation_id, &input.idempotency_key);
 
         match self
             .remote_idempotency
@@ -36,7 +44,7 @@ impl ControlPlane {
                     node_id: input.node_id,
                     route_key: route_key.clone(),
                     worker_id: None,
-                    idempotency_key: input.idempotency_key.clone(),
+                    idempotency_key: replay_key.clone(),
                     request_hash: input.request_hash.clone(),
                     created_at: now,
                 },
@@ -53,15 +61,14 @@ impl ControlPlane {
             }
         }
 
-        if let Err(err) =
-            super::recover::validate_remote_node_live(&auth, input.node_id, now, false)
+        if let Err(err) = super::recover::validate_remote_node_live(&auth, input.node_id, now, true)
         {
             self.complete_remote_error_in_tx(
                 &mut tx,
                 input.node_id,
                 &route_key,
                 None,
-                &input.idempotency_key,
+                &replay_key,
                 &err,
             )
             .await?;
@@ -72,6 +79,9 @@ impl ControlPlane {
         let node = self
             .heartbeat_node_in_tx(&mut tx, input.node_id, now)
             .await?;
+        self.node_incarnations
+            .heartbeat_in_tx(&mut tx, input.incarnation_id, now)
+            .await?;
         let outcome = RemoteNodeHeartbeatOutcome {
             node_id: node.id,
             status: node.status.as_str().to_owned(),
@@ -81,7 +91,7 @@ impl ControlPlane {
             input.node_id,
             &route_key,
             None,
-            &input.idempotency_key,
+            &replay_key,
             &outcome,
         )
         .await?;
@@ -101,8 +111,16 @@ impl ControlPlane {
         let route_key = super::route_lease_heartbeat(input.lease_id);
         let mut tx = begin_immediate_tx(&self.pool).await?;
         let auth = self
-            .verify_remote_node_token_in_tx(&mut tx, input.node_id, &input.token)
+            .require_remote_incarnation_fence_in_tx(
+                &mut tx,
+                input.node_id,
+                &input.token,
+                input.incarnation_id,
+                Some(input.worker_id),
+            )
             .await?;
+        let replay_key =
+            super::incarnation_replay_key(input.incarnation_id, &input.idempotency_key);
 
         match self
             .remote_idempotency
@@ -112,7 +130,7 @@ impl ControlPlane {
                     node_id: input.node_id,
                     route_key: route_key.clone(),
                     worker_id: Some(input.worker_id),
-                    idempotency_key: input.idempotency_key.clone(),
+                    idempotency_key: replay_key.clone(),
                     request_hash: input.request_hash.clone(),
                     created_at: now,
                 },
@@ -137,7 +155,7 @@ impl ControlPlane {
                 input.node_id,
                 &route_key,
                 Some(input.worker_id),
-                &input.idempotency_key,
+                &replay_key,
                 &err,
             )
             .await?;
@@ -162,7 +180,7 @@ impl ControlPlane {
                     input.node_id,
                     &route_key,
                     Some(input.worker_id),
-                    &input.idempotency_key,
+                    &replay_key,
                     &err,
                 )
                 .await?;
@@ -175,7 +193,7 @@ impl ControlPlane {
             input.node_id,
             &route_key,
             Some(input.worker_id),
-            &input.idempotency_key,
+            &replay_key,
             &outcome,
         )
         .await?;
@@ -221,3 +239,7 @@ impl ControlPlane {
         })
     }
 }
+
+#[cfg(test)]
+#[path = "heartbeat_test.rs"]
+mod tests;

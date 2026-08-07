@@ -150,6 +150,10 @@ const MIGRATION_0033_SQL: &str =
 /// compile time.
 const MIGRATION_0034_SQL: &str = include_str!("../../../migrations/0034_node_owned_roots.sql");
 
+/// SQL for migration 0035 (node process incarnations and worker ownership), embedded at
+/// compile time.
+const MIGRATION_0035_SQL: &str = include_str!("../../../migrations/0035_node_incarnations.sql");
+
 /// Embedded migration set, constructed without the `sqlx::migrate!` macro.
 ///
 /// We don't use sqlx's `macros` feature: it pulls `sqlx-macros-core`, which
@@ -401,6 +405,13 @@ pub(crate) static MIGRATOR: LazyLock<Migrator> = LazyLock::new(|| Migrator {
             Cow::Borrowed("node_owned_roots"),
             MigrationType::Simple,
             Cow::Borrowed(MIGRATION_0034_SQL),
+            false,
+        ),
+        Migration::new(
+            35,
+            Cow::Borrowed("node_incarnations"),
+            MigrationType::Simple,
+            Cow::Borrowed(MIGRATION_0035_SQL),
             false,
         ),
     ]),

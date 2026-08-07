@@ -24,8 +24,10 @@ use tokio_rustls::TlsConnector;
 use voom_api::config::{Cli, ServerConfig, ServerLimits};
 use voom_api::router_with_control_plane;
 use voom_api::server::RunningServer;
+use voom_control_plane::execution::{RemoteActivateInput, RemoteWorkerDeclaration};
 use voom_control_plane::workers::RegisterNodeInput;
 use voom_control_plane::{ControlPlane, HealthPlane};
+use voom_core::{ArtifactAccessMode, NodeIncarnationId, OperationKind};
 use voom_events::{Event, EventKind};
 use voom_store::repo::audit::events::{EventFilter, EventRepo, Page};
 use voom_store::repo::execution::nodes::NodeKind;
@@ -227,11 +229,16 @@ async fn invalid_bearer_keeps_existing_generic_401_without_token_leak() -> TestR
     let server = RunningServer::start(tls_config(&certificate, None)?, router).await?;
     let client = rustls_client(certificate.ca_der, vec![b"http/1.1".to_vec()])?;
     let sentinel = "sentinel-invalid-bearer-secret";
+    let request_body = json!({
+        "incarnation_id": "0123456789abcdef0123456789abcdef"
+    })
+    .to_string();
     let request = format!(
         "POST /v1/execution/node/{}/heartbeat HTTP/1.1\r\nHost: localhost\r\n\
          Authorization: Bearer {sentinel}\r\nContent-Type: application/json\r\n\
-         X-Voom-Idempotency-Key: tls-invalid-token\r\nContent-Length: 2\r\n\r\n{{}}",
-        registered.node.id.0
+         X-Voom-Idempotency-Key: tls-invalid-token\r\nContent-Length: {}\r\n\r\n{request_body}",
+        registered.node.id.0,
+        request_body.len()
     );
     let (response, _) = tls_request(server.local_addr(), client, request.as_bytes()).await?;
     let response = String::from_utf8(response)?;
@@ -261,18 +268,36 @@ async fn valid_bearer_commits_heartbeat_through_real_tls() -> TestResult {
             metadata: json!({}),
         })
         .await?;
+    let incarnation_id: NodeIncarnationId = "0123456789abcdef0123456789abcdef".parse()?;
+    control_plane
+        .remote_activate(RemoteActivateInput {
+            node_id: registered.node.id,
+            token: registered.token.clone(),
+            idempotency_key: "tls-activation".to_owned(),
+            request_hash: "tls-activation-body".to_owned(),
+            incarnation_id,
+            workers: vec![RemoteWorkerDeclaration {
+                logical_name: "tls-worker".to_owned(),
+                operations: vec![OperationKind::ProbeFile],
+                artifact_access: vec![ArtifactAccessMode::SharedMount],
+                max_parallel: 1,
+            }],
+        })
+        .await?;
     let health_plane = HealthPlane::open(&url).await?;
     let router = router_with_control_plane(health_plane, control_plane.clone());
     let directory = TempDir::new()?;
     let certificate = valid_localhost(directory.path())?;
     let server = RunningServer::start(tls_config(&certificate, None)?, router).await?;
     let client = rustls_client(certificate.ca_der, vec![b"http/1.1".to_vec()])?;
+    let request_body = json!({"incarnation_id": incarnation_id}).to_string();
     let request = format!(
         "POST /v1/execution/node/{}/heartbeat HTTP/1.1\r\nHost: localhost\r\n\
          Authorization: Bearer {}\r\nContent-Type: application/json\r\n\
-         X-Voom-Idempotency-Key: tls-valid-heartbeat\r\nContent-Length: 2\r\n\r\n{{}}",
+         X-Voom-Idempotency-Key: tls-valid-heartbeat\r\nContent-Length: {}\r\n\r\n{request_body}",
         registered.node.id.0,
-        registered.token.expose_secret()
+        registered.token.expose_secret(),
+        request_body.len()
     );
     let (response, _) = tls_request(server.local_addr(), client, request.as_bytes()).await?;
     assert!(response.starts_with(b"HTTP/1.1 200 OK\r\n"));

@@ -57,6 +57,7 @@ const EXPECTED_MIGRATION_FILES: &[&str] = &[
     "0032_vaapi_video_acceleration.sql",
     "0033_remote_acquire_replay_shape.sql",
     "0034_node_owned_roots.sql",
+    "0035_node_incarnations.sql",
 ];
 
 fn workspace_root() -> PathBuf {
@@ -133,6 +134,32 @@ fn every_migrations_file_is_registered_in_migrator() {
         !file_versions.is_empty(),
         "no migrations found — sanity check that the test is reading the right path"
     );
+}
+
+#[tokio::test]
+async fn node_incarnation_migration_preserves_existing_nodes_and_workers() {
+    let tmp = TempDatabase::new().unwrap();
+    let url = sqlite_url_for(tmp.path());
+    let pool = create_uninitialized_pool(&url).await.unwrap();
+    migrator_through(34).run(&pool).await.unwrap();
+    let (node_id, worker_id) = seed_remote_execution_owner(&pool).await;
+
+    embedded_migrator().run(&pool).await.unwrap();
+
+    let active_incarnation: Option<String> =
+        sqlx::query_scalar("SELECT active_incarnation_id FROM nodes WHERE id = ?")
+            .bind(node_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let worker_incarnation: Option<String> =
+        sqlx::query_scalar("SELECT node_incarnation_id FROM workers WHERE id = ?")
+            .bind(worker_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(active_incarnation, None);
+    assert_eq!(worker_incarnation, None);
 }
 
 type RootRow = (

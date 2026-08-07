@@ -4,7 +4,8 @@ use secrecy::SecretString;
 use serde_json::Value as JsonValue;
 use sqlx::{Sqlite, Transaction};
 use voom_core::{
-    ArtifactAccessMode, ErrorCode, FailureClass, LeaseId, NodeId, TicketId, VoomError, WorkerId,
+    ArtifactAccessMode, ErrorCode, FailureClass, LeaseId, NodeId, NodeIncarnationEndReason,
+    NodeIncarnationId, NodeIncarnationStatus, OperationKind, TicketId, VoomError, WorkerId,
 };
 use voom_store::repo::execution::remote_idempotency::RemoteMutationReplay;
 
@@ -13,6 +14,7 @@ use crate::ControlPlane;
 use super::commit_tx;
 
 mod acquire;
+mod activation;
 mod complete;
 mod fail;
 mod heartbeat;
@@ -26,9 +28,68 @@ use acquire::{
 pub(super) const ROUTE_ACQUIRE: &str = "POST /v1/execution/lease/acquire";
 
 #[derive(Debug, Clone)]
+pub struct RemoteActivateInput {
+    pub node_id: NodeId,
+    pub token: SecretString,
+    pub idempotency_key: String,
+    pub request_hash: String,
+    pub incarnation_id: NodeIncarnationId,
+    pub workers: Vec<RemoteWorkerDeclaration>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RemoteWorkerDeclaration {
+    pub logical_name: String,
+    pub operations: Vec<OperationKind>,
+    pub artifact_access: Vec<ArtifactAccessMode>,
+    pub max_parallel: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ActivatedWorker {
+    pub logical_name: String,
+    pub worker_id: WorkerId,
+    pub worker_epoch: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RemoteActivateOutcome {
+    pub node_id: NodeId,
+    pub node_epoch: u64,
+    pub incarnation_id: NodeIncarnationId,
+    pub heartbeat_ttl_seconds: u32,
+    pub workers: Vec<ActivatedWorker>,
+}
+
+#[derive(Debug, Clone)]
+pub struct RemoteDeactivateInput {
+    pub node_id: NodeId,
+    pub token: SecretString,
+    pub idempotency_key: String,
+    pub request_hash: String,
+    pub incarnation_id: NodeIncarnationId,
+    pub reason: NodeIncarnationEndReason,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RemoteDeactivateOutcome {
+    pub node_id: NodeId,
+    pub node_epoch: u64,
+    pub incarnation_id: NodeIncarnationId,
+    pub status: NodeIncarnationStatus,
+    pub reason: NodeIncarnationEndReason,
+    pub retired_worker_ids: Vec<WorkerId>,
+}
+
+#[derive(Debug, Clone)]
 pub struct RemoteNodeHeartbeatInput {
     pub node_id: NodeId,
     pub token: SecretString,
+    pub incarnation_id: NodeIncarnationId,
     pub idempotency_key: String,
     pub request_hash: String,
 }
@@ -44,6 +105,7 @@ pub struct RemoteNodeHeartbeatOutcome {
 pub struct RemoteAcquireInput {
     pub node_id: NodeId,
     pub token: SecretString,
+    pub incarnation_id: NodeIncarnationId,
     pub worker_id: WorkerId,
     pub idempotency_key: String,
     pub request_hash: String,
@@ -176,6 +238,7 @@ pub struct RemoteArtifactAccessPlan {
 pub struct RemoteLeaseHeartbeatInput {
     pub node_id: NodeId,
     pub token: SecretString,
+    pub incarnation_id: NodeIncarnationId,
     pub worker_id: WorkerId,
     pub lease_id: LeaseId,
     pub idempotency_key: String,
@@ -195,6 +258,7 @@ pub struct RemoteLeaseHeartbeatOutcome {
 pub struct RemoteCompleteInput {
     pub node_id: NodeId,
     pub token: SecretString,
+    pub incarnation_id: NodeIncarnationId,
     pub worker_id: WorkerId,
     pub lease_id: LeaseId,
     pub idempotency_key: String,
@@ -215,6 +279,7 @@ pub struct RemoteCompleteOutcome {
 pub struct RemoteFailInput {
     pub node_id: NodeId,
     pub token: SecretString,
+    pub incarnation_id: NodeIncarnationId,
     pub worker_id: WorkerId,
     pub lease_id: LeaseId,
     pub idempotency_key: String,
@@ -252,7 +317,7 @@ impl ControlPlane {
     async fn finish_replay_in_tx<T, F>(
         &self,
         mut tx: Transaction<'_, Sqlite>,
-        slot: ReplaySlot<'_>,
+        slot: ReplaySlot,
         replay: RemoteMutationReplay,
         decode: F,
     ) -> Result<T, VoomError>
@@ -288,7 +353,7 @@ impl ControlPlane {
                             slot.node_id,
                             &slot.route_key,
                             slot.worker_id,
-                            slot.idempotency_key,
+                            &slot.idempotency_key,
                             RemoteMutationReplay::Error {
                                 code: err.code().to_owned(),
                                 message: remote_error_message(&err),
@@ -305,6 +370,14 @@ impl ControlPlane {
 
 pub(super) fn route_lease_complete(lease_id: LeaseId) -> String {
     format!("POST /v1/execution/lease/{}/complete", lease_id.0)
+}
+
+pub(super) fn route_node_activate(node_id: NodeId) -> String {
+    format!("POST /v1/execution/node/{}/activate", node_id.0)
+}
+
+pub(super) fn route_node_deactivate(node_id: NodeId) -> String {
+    format!("POST /v1/execution/node/{}/deactivate", node_id.0)
 }
 
 pub(super) fn route_node_heartbeat(node_id: NodeId) -> String {
@@ -329,73 +402,99 @@ pub(super) fn is_remote_replayable_error(err: &VoomError) -> bool {
 /// Identity of the idempotency row a replay decodes from — the tuple
 /// `repoint_completed_replay_in_tx` matches on. Owns `route_key` because some
 /// routes derive it (`route_lease_*`) rather than holding a borrowable field.
-pub(super) struct ReplaySlot<'a> {
+pub(super) struct ReplaySlot {
     node_id: NodeId,
     route_key: String,
     worker_id: Option<WorkerId>,
-    idempotency_key: &'a str,
+    idempotency_key: String,
 }
 
 /// Maps a remote-execution input to the idempotency row it replays from, so
 /// the replay branch and any poison-repoint target the same row the
 /// reservation used.
 pub(super) trait ReplayRoute {
-    fn replay_slot(&self) -> ReplaySlot<'_>;
+    fn replay_slot(&self) -> ReplaySlot;
 }
 
 impl ReplayRoute for RemoteAcquireInput {
-    fn replay_slot(&self) -> ReplaySlot<'_> {
+    fn replay_slot(&self) -> ReplaySlot {
         ReplaySlot {
             node_id: self.node_id,
             route_key: ROUTE_ACQUIRE.to_owned(),
             worker_id: Some(self.worker_id),
-            idempotency_key: &self.idempotency_key,
+            idempotency_key: incarnation_replay_key(self.incarnation_id, &self.idempotency_key),
+        }
+    }
+}
+
+impl ReplayRoute for RemoteActivateInput {
+    fn replay_slot(&self) -> ReplaySlot {
+        ReplaySlot {
+            node_id: self.node_id,
+            route_key: route_node_activate(self.node_id),
+            worker_id: None,
+            idempotency_key: self.idempotency_key.clone(),
+        }
+    }
+}
+
+impl ReplayRoute for RemoteDeactivateInput {
+    fn replay_slot(&self) -> ReplaySlot {
+        ReplaySlot {
+            node_id: self.node_id,
+            route_key: route_node_deactivate(self.node_id),
+            worker_id: None,
+            idempotency_key: self.idempotency_key.clone(),
         }
     }
 }
 
 impl ReplayRoute for RemoteNodeHeartbeatInput {
-    fn replay_slot(&self) -> ReplaySlot<'_> {
+    fn replay_slot(&self) -> ReplaySlot {
         ReplaySlot {
             node_id: self.node_id,
             route_key: route_node_heartbeat(self.node_id),
             worker_id: None,
-            idempotency_key: &self.idempotency_key,
+            idempotency_key: incarnation_replay_key(self.incarnation_id, &self.idempotency_key),
         }
     }
 }
 
 impl ReplayRoute for RemoteLeaseHeartbeatInput {
-    fn replay_slot(&self) -> ReplaySlot<'_> {
+    fn replay_slot(&self) -> ReplaySlot {
         ReplaySlot {
             node_id: self.node_id,
             route_key: route_lease_heartbeat(self.lease_id),
             worker_id: Some(self.worker_id),
-            idempotency_key: &self.idempotency_key,
+            idempotency_key: incarnation_replay_key(self.incarnation_id, &self.idempotency_key),
         }
     }
 }
 
 impl ReplayRoute for RemoteCompleteInput {
-    fn replay_slot(&self) -> ReplaySlot<'_> {
+    fn replay_slot(&self) -> ReplaySlot {
         ReplaySlot {
             node_id: self.node_id,
             route_key: route_lease_complete(self.lease_id),
             worker_id: Some(self.worker_id),
-            idempotency_key: &self.idempotency_key,
+            idempotency_key: incarnation_replay_key(self.incarnation_id, &self.idempotency_key),
         }
     }
 }
 
 impl ReplayRoute for RemoteFailInput {
-    fn replay_slot(&self) -> ReplaySlot<'_> {
+    fn replay_slot(&self) -> ReplaySlot {
         ReplaySlot {
             node_id: self.node_id,
             route_key: route_lease_fail(self.lease_id),
             worker_id: Some(self.worker_id),
-            idempotency_key: &self.idempotency_key,
+            idempotency_key: incarnation_replay_key(self.incarnation_id, &self.idempotency_key),
         }
     }
+}
+
+pub(super) fn incarnation_replay_key(id: NodeIncarnationId, key: &str) -> String {
+    format!("{id}:{key}")
 }
 
 pub(super) fn decode_acquire_replay(data: JsonValue) -> Result<RemoteAcquireOutcome, VoomError> {

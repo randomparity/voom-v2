@@ -503,6 +503,32 @@ async fn heartbeat_extends_expires_at() {
 }
 
 #[tokio::test]
+async fn heartbeat_rejects_expired_held_lease_without_reviving_it() {
+    let (_pool, _trepo, _wrepo, lrepo, tid, wid, _tmp) = setup().await;
+    let lease = lrepo
+        .acquire(NewLease {
+            ticket_id: tid,
+            worker_id: wid,
+            ttl: Duration::seconds(60),
+            now: T0,
+        })
+        .await
+        .unwrap();
+
+    let error = lrepo
+        .heartbeat(lease.id, Duration::seconds(60), lease.expires_at)
+        .await
+        .unwrap_err();
+    assert_eq!(error.error_code(), voom_core::ErrorCode::Conflict);
+
+    let persisted = lrepo.get(lease.id).await.unwrap().unwrap();
+    assert_eq!(persisted.state, LeaseState::Held);
+    assert_eq!(persisted.expires_at, lease.expires_at);
+    assert_eq!(persisted.last_heartbeat_at, lease.last_heartbeat_at);
+    assert_eq!(persisted.epoch, lease.epoch);
+}
+
+#[tokio::test]
 async fn heartbeat_never_shortens_expires_at_but_still_records_beat() {
     // M5 regression: a heartbeat carrying a shorter TTL than the lease's
     // current deadline must NOT move expires_at backwards (a shortened

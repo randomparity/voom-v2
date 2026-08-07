@@ -3,7 +3,10 @@
 use serde_json::Value as JsonValue;
 use sqlx::{QueryBuilder, Row, SqlitePool};
 use time::OffsetDateTime;
-use voom_core::{NodeId, OperationKind, TicketOperation, VoomError, WorkerId};
+use voom_core::{
+    NodeId, NodeIncarnationId, NodeIncarnationStatus, OperationKind, TicketOperation, VoomError,
+    WorkerId,
+};
 pub use voom_core::{WorkerKind, WorkerStatus};
 
 use super::Repository;
@@ -24,6 +27,7 @@ pub struct NewWorker {
 pub struct Worker {
     pub id: WorkerId,
     pub node_id: Option<NodeId>,
+    pub node_incarnation_id: Option<NodeIncarnationId>,
     pub name: String,
     pub kind: WorkerKind,
     pub status: WorkerStatus,
@@ -169,9 +173,12 @@ impl SqliteWorkerRepo {
         }
 
         let mut query = QueryBuilder::new(
-            "SELECT w.id AS worker_id, w.epoch AS worker_epoch, wc.operation, wc.extra \
+            "SELECT w.id AS worker_id, w.epoch AS worker_epoch, w.node_id, \
+             w.node_incarnation_id, ni.node_id AS incarnation_node_id, \
+             wc.operation, wc.extra \
              FROM workers w \
              JOIN worker_capabilities wc ON wc.worker_id = w.id \
+             LEFT JOIN node_incarnations ni ON ni.incarnation_id = w.node_incarnation_id \
              WHERE w.status IN ('registered', 'active') AND wc.operation IN (",
         );
         let mut separated = query.separated(", ");
@@ -198,6 +205,17 @@ impl SqliteWorkerRepo {
             let extra: String = row
                 .try_get("extra")
                 .map_err(|error| map_row_err("runtime worker capability extra", error))?;
+            let node_id: Option<i64> = row
+                .try_get("node_id")
+                .map_err(|error| map_row_err("runtime worker capability node id", error))?;
+            let incarnation_id: Option<String> = row
+                .try_get("node_incarnation_id")
+                .map_err(|error| map_row_err("runtime worker capability incarnation id", error))?;
+            let incarnation_node_id: Option<i64> =
+                row.try_get("incarnation_node_id").map_err(|error| {
+                    map_row_err("runtime worker capability incarnation owner", error)
+                })?;
+            worker_incarnation_projection(node_id, incarnation_id, incarnation_node_id)?;
             let worker_id = u64::try_from(worker_id).map_err(|_| {
                 VoomError::database(format!(
                     "runtime worker capability worker id was negative: {worker_id}"
@@ -262,6 +280,7 @@ impl SqliteWorkerRepo {
                 concat!(module_path!(), ": ", stringify!(res.last_insert_rowid())),
             )?),
             node_id: input.node_id,
+            node_incarnation_id: None,
             name: input.name,
             kind: input.kind,
             status: WorkerStatus::Registered,
@@ -327,6 +346,115 @@ impl SqliteWorkerRepo {
             .await
             .map_err(|e| VoomError::database_context("commit", e))?;
         Ok(out)
+    }
+
+    /// Bind an existing node-owned worker to one active incarnation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VoomError::NotFound`] for absent rows, [`VoomError::Conflict`]
+    /// for caller-supplied ownership/lifecycle mismatches, and
+    /// [`VoomError::Database`] for corrupt persisted ownership.
+    pub async fn bind_incarnation_in_tx(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        worker_id: WorkerId,
+        node_id: NodeId,
+        incarnation_id: NodeIncarnationId,
+    ) -> Result<Worker, VoomError> {
+        let worker = get_in_tx(tx, worker_id)
+            .await?
+            .ok_or_else(|| VoomError::NotFound(format!("worker {worker_id}")))?;
+        if worker.node_id != Some(node_id) {
+            return Err(VoomError::Conflict(format!(
+                "worker {worker_id} is not owned by node {node_id}"
+            )));
+        }
+        if worker.node_incarnation_id.is_some() {
+            return Err(VoomError::Conflict(format!(
+                "worker {worker_id} is already bound to an incarnation"
+            )));
+        }
+        let row =
+            sqlx::query("SELECT node_id, status FROM node_incarnations WHERE incarnation_id = ?")
+                .bind(incarnation_id.to_string())
+                .fetch_optional(&mut **tx)
+                .await
+                .map_err(|error| VoomError::database_context("worker incarnation lookup", error))?
+                .ok_or_else(|| VoomError::NotFound(format!("node incarnation {incarnation_id}")))?;
+        let owner: i64 = row
+            .try_get("node_id")
+            .map_err(|error| map_row_err("worker incarnation owner", error))?;
+        let owner = NodeId(u64_from_i64(owner, "worker incarnation owner")?);
+        let status: String = row
+            .try_get("status")
+            .map_err(|error| map_row_err("worker incarnation status", error))?;
+        let status = NodeIncarnationStatus::parse_database("worker incarnation status", &status)?;
+        if owner != node_id {
+            return Err(VoomError::Conflict(format!(
+                "node incarnation {incarnation_id} is not owned by node {node_id}"
+            )));
+        }
+        if status != NodeIncarnationStatus::Active {
+            return Err(VoomError::Conflict(format!(
+                "node incarnation {incarnation_id} is {}",
+                status.as_str()
+            )));
+        }
+        let result = sqlx::query(
+            "UPDATE workers SET node_incarnation_id = ? \
+             WHERE id = ? AND node_id = ? AND node_incarnation_id IS NULL",
+        )
+        .bind(incarnation_id.to_string())
+        .bind(i64_from_u64(worker_id.0, "workers.id")?)
+        .bind(i64_from_u64(node_id.0, "workers.node_id")?)
+        .execute(&mut **tx)
+        .await
+        .map_err(|error| VoomError::database_context("worker incarnation bind", error))?;
+        if result.rows_affected() != 1 {
+            return Err(VoomError::Conflict(format!(
+                "worker {worker_id} changed during incarnation bind"
+            )));
+        }
+        get_in_tx(tx, worker_id).await?.ok_or_else(|| {
+            VoomError::Internal(format!("worker {worker_id} missing after incarnation bind"))
+        })
+    }
+
+    /// Retire every live worker of one incarnation, ordered by worker ID.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors documented by [`Self::retire_in_tx`], including
+    /// corruption detected while decoding incarnation ownership.
+    pub async fn retire_live_for_incarnation_in_tx(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        incarnation_id: NodeIncarnationId,
+        now: OffsetDateTime,
+    ) -> Result<Vec<Worker>, VoomError> {
+        let rows = sqlx::query(
+            "SELECT id FROM workers \
+             WHERE node_incarnation_id = ? AND status != 'retired' ORDER BY id ASC",
+        )
+        .bind(incarnation_id.to_string())
+        .fetch_all(&mut **tx)
+        .await
+        .map_err(|error| VoomError::database_context("worker incarnation live list", error))?;
+        let mut retired = Vec::with_capacity(rows.len());
+        for row in rows {
+            let id: i64 = row
+                .try_get("id")
+                .map_err(|error| map_row_err("worker incarnation worker id", error))?;
+            let id = WorkerId(u64_from_i64(id, "worker incarnation worker id")?);
+            let worker = get_in_tx(tx, id).await?.ok_or_else(|| {
+                VoomError::database(format!(
+                    "worker {id} vanished from incarnation {incarnation_id}"
+                ))
+            })?;
+            retired.push(self.retire_in_tx(tx, id, worker.epoch, now).await?);
+        }
+        Ok(retired)
     }
 
     /// Record a worker capability in the caller's transaction.
@@ -553,10 +681,17 @@ impl SqliteWorkerRepo {
     /// Returns [`VoomError::Database`] if the query or row decoding fails.
     pub async fn get(&self, id: WorkerId) -> Result<Option<Worker>, VoomError> {
         let row = sqlx::query(
-            "SELECT id, node_id, name, kind, status, registered_at, last_seen_at, retired_at, epoch \
-             FROM workers WHERE id = ?",
+            "SELECT w.id, w.node_id, w.name, w.kind, w.status, w.registered_at, \
+             w.last_seen_at, w.retired_at, w.epoch, w.node_incarnation_id, \
+             ni.node_id AS incarnation_node_id \
+             FROM workers w \
+             LEFT JOIN node_incarnations ni ON ni.incarnation_id = w.node_incarnation_id \
+             WHERE w.id = ?",
         )
-        .bind(i64_from_u64(id.0, concat!(module_path!(), ": ", stringify!(id.0)))?)
+        .bind(i64_from_u64(
+            id.0,
+            concat!(module_path!(), ": ", stringify!(id.0)),
+        )?)
         .fetch_optional(&self.pool)
         .await
         .map_err(|e| VoomError::database_context("workers get", e))?;
@@ -607,11 +742,14 @@ impl SqliteWorkerRepo {
         incarnation_prefix: &str,
     ) -> Result<Vec<Worker>, VoomError> {
         let rows = sqlx::query(
-            "SELECT id, node_id, name, kind, status, registered_at, last_seen_at, retired_at, epoch \
-             FROM workers \
-             WHERE (name = ? OR substr(name, 1, length(?)) = ?) \
-               AND status IN ('registered', 'active') \
-             ORDER BY registered_at ASC, id ASC",
+            "SELECT w.id, w.node_id, w.name, w.kind, w.status, w.registered_at, \
+             w.last_seen_at, w.retired_at, w.epoch, w.node_incarnation_id, \
+             ni.node_id AS incarnation_node_id \
+             FROM workers w \
+             LEFT JOIN node_incarnations ni ON ni.incarnation_id = w.node_incarnation_id \
+             WHERE (w.name = ? OR substr(w.name, 1, length(?)) = ?) \
+               AND w.status IN ('registered', 'active') \
+             ORDER BY w.registered_at ASC, w.id ASC",
         )
         .bind(legacy_name)
         .bind(incarnation_prefix)
@@ -633,10 +771,13 @@ impl SqliteWorkerRepo {
         incarnation_prefix: &str,
     ) -> Result<Vec<Worker>, VoomError> {
         let rows = sqlx::query(
-            "SELECT id, node_id, name, kind, status, registered_at, last_seen_at, retired_at, epoch \
-             FROM workers \
-             WHERE name = ? OR substr(name, 1, length(?)) = ? \
-             ORDER BY registered_at ASC, id ASC",
+            "SELECT w.id, w.node_id, w.name, w.kind, w.status, w.registered_at, \
+             w.last_seen_at, w.retired_at, w.epoch, w.node_incarnation_id, \
+             ni.node_id AS incarnation_node_id \
+             FROM workers w \
+             LEFT JOIN node_incarnations ni ON ni.incarnation_id = w.node_incarnation_id \
+             WHERE w.name = ? OR substr(w.name, 1, length(?)) = ? \
+             ORDER BY w.registered_at ASC, w.id ASC",
         )
         .bind(legacy_name)
         .bind(incarnation_prefix)
@@ -659,11 +800,13 @@ impl SqliteWorkerRepo {
     ) -> Result<Option<WorkerInspection>, VoomError> {
         let row = sqlx::query(
             "SELECT w.id, w.node_id, w.name, w.kind, w.status, w.registered_at, \
-             w.last_seen_at, w.retired_at, w.epoch, \
+             w.last_seen_at, w.retired_at, w.epoch, w.node_incarnation_id, \
+             ni.node_id AS incarnation_node_id, \
              n.id AS node_context_id, n.name AS node_context_name, \
              n.kind AS node_context_kind, n.status AS node_context_status, \
              n.last_seen_at AS node_context_last_seen_at \
              FROM workers w LEFT JOIN nodes n ON n.id = w.node_id \
+             LEFT JOIN node_incarnations ni ON ni.incarnation_id = w.node_incarnation_id \
              WHERE w.id = ?",
         )
         .bind(i64_from_u64(
@@ -687,9 +830,13 @@ impl SqliteWorkerRepo {
         limit: u32,
     ) -> Result<Vec<Worker>, VoomError> {
         let rows = sqlx::query(
-            "SELECT id, node_id, name, kind, status, registered_at, last_seen_at, retired_at, epoch \
-             FROM workers WHERE status = ? \
-             ORDER BY registered_at ASC, id ASC LIMIT ?",
+            "SELECT w.id, w.node_id, w.name, w.kind, w.status, w.registered_at, \
+             w.last_seen_at, w.retired_at, w.epoch, w.node_incarnation_id, \
+             ni.node_id AS incarnation_node_id \
+             FROM workers w \
+             LEFT JOIN node_incarnations ni ON ni.incarnation_id = w.node_incarnation_id \
+             WHERE w.status = ? \
+             ORDER BY w.registered_at ASC, w.id ASC LIMIT ?",
         )
         .bind(status.as_str())
         .bind(i64::from(limit))
@@ -713,11 +860,13 @@ impl SqliteWorkerRepo {
         let status = status.map(WorkerStatus::as_str);
         let rows = sqlx::query(
             "SELECT w.id, w.node_id, w.name, w.kind, w.status, w.registered_at, \
-             w.last_seen_at, w.retired_at, w.epoch, \
+             w.last_seen_at, w.retired_at, w.epoch, w.node_incarnation_id, \
+             ni.node_id AS incarnation_node_id, \
              n.id AS node_context_id, n.name AS node_context_name, \
              n.kind AS node_context_kind, n.status AS node_context_status, \
              n.last_seen_at AS node_context_last_seen_at \
              FROM workers w LEFT JOIN nodes n ON n.id = w.node_id \
+             LEFT JOIN node_incarnations ni ON ni.incarnation_id = w.node_incarnation_id \
              WHERE (? IS NULL OR w.status = ?) \
              ORDER BY w.registered_at ASC, w.id ASC LIMIT ?",
         )
@@ -1075,6 +1224,29 @@ impl SqliteWorkerRepo {
         }
         Ok(worker)
     }
+
+    /// Return a live worker only when both its logical node and incarnation match.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VoomError::NotFound`] when the worker is absent,
+    /// [`VoomError::Conflict`] for a caller-supplied fence mismatch, and
+    /// [`VoomError::Database`] when persisted ownership is corrupt.
+    pub async fn incarnation_owned_worker_in_tx(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        worker_id: WorkerId,
+        node_id: NodeId,
+        incarnation_id: NodeIncarnationId,
+    ) -> Result<Worker, VoomError> {
+        let worker = self.node_owned_worker_in_tx(tx, worker_id, node_id).await?;
+        if worker.node_incarnation_id != Some(incarnation_id) {
+            return Err(VoomError::Conflict(format!(
+                "worker {worker_id} does not belong to node incarnation {incarnation_id}"
+            )));
+        }
+        Ok(worker)
+    }
 }
 
 /// Per-device `transcode_video` capacity for an accelerator-bound worker.
@@ -1267,8 +1439,12 @@ async fn get_in_tx(
     id: WorkerId,
 ) -> Result<Option<Worker>, VoomError> {
     let row = sqlx::query(
-        "SELECT id, node_id, name, kind, status, registered_at, last_seen_at, retired_at, epoch \
-         FROM workers WHERE id = ?",
+        "SELECT w.id, w.node_id, w.name, w.kind, w.status, w.registered_at, \
+         w.last_seen_at, w.retired_at, w.epoch, w.node_incarnation_id, \
+         ni.node_id AS incarnation_node_id \
+         FROM workers w \
+         LEFT JOIN node_incarnations ni ON ni.incarnation_id = w.node_incarnation_id \
+         WHERE w.id = ?",
     )
     .bind(i64_from_u64(
         id.0,
@@ -1285,8 +1461,12 @@ async fn get_by_name_in_tx(
     name: &str,
 ) -> Result<Option<Worker>, VoomError> {
     let row = sqlx::query(
-        "SELECT id, node_id, name, kind, status, registered_at, last_seen_at, retired_at, epoch \
-         FROM workers WHERE name = ?",
+        "SELECT w.id, w.node_id, w.name, w.kind, w.status, w.registered_at, \
+         w.last_seen_at, w.retired_at, w.epoch, w.node_incarnation_id, \
+         ni.node_id AS incarnation_node_id \
+         FROM workers w \
+         LEFT JOIN node_incarnations ni ON ni.incarnation_id = w.node_incarnation_id \
+         WHERE w.name = ?",
     )
     .bind(name)
     .fetch_optional(&mut **tx)
@@ -1300,6 +1480,12 @@ fn row_to_worker(row: &sqlx::sqlite::SqliteRow) -> Result<Worker, VoomError> {
     let node_id: Option<i64> = row
         .try_get("node_id")
         .map_err(|e| map_row_err("workers", e))?;
+    let node_incarnation_id: Option<String> = row
+        .try_get("node_incarnation_id")
+        .map_err(|error| map_row_err("workers node incarnation id", error))?;
+    let incarnation_node_id: Option<i64> = row
+        .try_get("incarnation_node_id")
+        .map_err(|error| map_row_err("workers incarnation owner", error))?;
     let name: String = row.try_get("name").map_err(|e| map_row_err("workers", e))?;
     let kind: String = row.try_get("kind").map_err(|e| map_row_err("workers", e))?;
     let status: String = row
@@ -1317,14 +1503,15 @@ fn row_to_worker(row: &sqlx::sqlite::SqliteRow) -> Result<Worker, VoomError> {
     let epoch: i64 = row
         .try_get("epoch")
         .map_err(|e| map_row_err("workers", e))?;
+    let (node_id, node_incarnation_id) =
+        worker_incarnation_projection(node_id, node_incarnation_id, incarnation_node_id)?;
     Ok(Worker {
         id: WorkerId(u64_from_i64(
             id,
             concat!(module_path!(), ": ", stringify!(id)),
         )?),
-        node_id: node_id
-            .map(|id| u64_from_i64(id, concat!(module_path!(), ": ", stringify!(id))).map(NodeId))
-            .transpose()?,
+        node_id,
+        node_incarnation_id,
         name,
         kind: WorkerKind::parse_database("workers.kind", &kind)?,
         status: WorkerStatus::parse_database("workers.status", &status)?,
@@ -1333,6 +1520,47 @@ fn row_to_worker(row: &sqlx::sqlite::SqliteRow) -> Result<Worker, VoomError> {
         retired_at: retired.map(|s| parse_iso8601(&s)).transpose()?,
         epoch: u64_from_i64(epoch, concat!(module_path!(), ": ", stringify!(epoch)))?,
     })
+}
+
+fn worker_incarnation_projection(
+    node_id: Option<i64>,
+    incarnation_id: Option<String>,
+    incarnation_node_id: Option<i64>,
+) -> Result<(Option<NodeId>, Option<NodeIncarnationId>), VoomError> {
+    let node_id = node_id
+        .map(|id| u64_from_i64(id, "workers.node_id").map(NodeId))
+        .transpose()?;
+    let incarnation_id = incarnation_id
+        .map(|id| NodeIncarnationId::parse_database("workers node incarnation id", &id))
+        .transpose()?;
+    let incarnation_node_id = incarnation_node_id
+        .map(|id| u64_from_i64(id, "workers incarnation owner").map(NodeId))
+        .transpose()?;
+    match (incarnation_id, node_id, incarnation_node_id) {
+        (None, _, None) => {}
+        (None, _, Some(owner)) => {
+            return Err(VoomError::database(format!(
+                "worker without an incarnation resolved incarnation owner {owner}"
+            )));
+        }
+        (Some(_), Some(node), Some(owner)) if node == owner => {}
+        (Some(incarnation), Some(node), Some(owner)) => {
+            return Err(VoomError::database(format!(
+                "worker node {node} disagrees with incarnation owner {owner} for {incarnation}"
+            )));
+        }
+        (Some(incarnation), None, _) => {
+            return Err(VoomError::database(format!(
+                "worker incarnation {incarnation} has no worker node owner"
+            )));
+        }
+        (Some(incarnation), Some(node), None) => {
+            return Err(VoomError::database(format!(
+                "worker incarnation {incarnation} does not resolve for node {node}"
+            )));
+        }
+    }
+    Ok((node_id, incarnation_id))
 }
 
 fn row_to_inspection(row: &sqlx::sqlite::SqliteRow) -> Result<WorkerInspection, VoomError> {

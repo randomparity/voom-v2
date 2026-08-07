@@ -15,7 +15,9 @@ use voom_control_plane::workers::{
     NewWorkerCapabilityDraft, NewWorkerGrantDraft, RegisterNodeInput, RegisterWorkerForNodeInput,
 };
 use voom_control_plane::{ControlPlane, HealthPlane};
-use voom_core::{FailureClass, LeaseId, NodeId, TicketId, TicketOperation, WorkerId};
+use voom_core::{
+    FailureClass, LeaseId, NodeId, NodeIncarnationId, TicketId, TicketOperation, WorkerId,
+};
 use voom_store::repo::execution::nodes::NodeKind;
 use voom_store::repo::execution::tickets::{NewTicket, SqliteTicketRepo, TicketState};
 use voom_store::repo::execution::workers::WorkerKind;
@@ -35,11 +37,21 @@ struct ApiFixture {
     cp: ControlPlane,
     node_id: NodeId,
     token: String,
+    incarnation_id: NodeIncarnationId,
     worker_id: WorkerId,
 }
 
 impl ApiFixture {
-    async fn post_json(&self, path: &str, idempotency_key: &str, body: Value) -> Response<Body> {
+    async fn post_json(
+        &self,
+        path: &str,
+        idempotency_key: &str,
+        mut body: Value,
+    ) -> Response<Body> {
+        if let Some(body) = body.as_object_mut() {
+            body.entry("incarnation_id")
+                .or_insert_with(|| Value::String(self.incarnation_id.to_string()));
+        }
         self.post_json_with_token(path, idempotency_key, &self.token, body)
             .await
     }
@@ -173,9 +185,9 @@ async fn acquire_requires_idempotency_key() {
 }
 
 #[tokio::test]
-async fn execution_routes_use_one_unauthorized_bearer_response() {
+async fn execution_routes_reject_former_incarnation_less_bodies() {
     let fixture = api_fixture().await;
-    let routes = [
+    let cases = [
         (
             "/v1/execution/lease/acquire".to_owned(),
             "execution.acquire",
@@ -205,6 +217,112 @@ async fn execution_routes_use_one_unauthorized_bearer_response() {
             "execution.fail",
             json!({
                 "node_id": fixture.node_id.0,
+                "worker_id": fixture.worker_id.0,
+                "reason": "timed out",
+                "class": FailureClass::WorkerTimeout
+            }),
+        ),
+    ];
+
+    for (index, (path, command, body)) in cases.into_iter().enumerate() {
+        let response = fixture
+            .post_json_with_token(
+                &path,
+                &format!("missing-incarnation-{index}"),
+                &fixture.token,
+                body,
+            )
+            .await;
+        assert_bad_args_envelope(response, command).await;
+    }
+}
+
+#[tokio::test]
+async fn activation_and_deactivation_routes_own_the_node_lifecycle() {
+    let fixture = api_fixture().await;
+    let incarnation_id: NodeIncarnationId = "fedcba9876543210fedcba9876543210".parse().unwrap();
+    let activate = fixture
+        .post_json(
+            &format!("/v1/execution/node/{}/activate", fixture.node_id.0),
+            "activate-route",
+            json!({
+                "incarnation_id": incarnation_id,
+                "workers": [{
+                    "logical_name": "transcode",
+                    "operations": ["transcode_video"],
+                    "artifact_access": ["shared_mount"],
+                    "max_parallel": 2
+                }]
+            }),
+        )
+        .await;
+    assert_eq!(activate.status(), StatusCode::OK);
+    let activated = response_json(activate).await;
+    assert_eq!(
+        activated["data"]["incarnation_id"],
+        incarnation_id.to_string()
+    );
+    assert_eq!(activated["data"]["workers"].as_array().unwrap().len(), 1);
+
+    let deactivate = fixture
+        .post_json(
+            &format!("/v1/execution/node/{}/deactivate", fixture.node_id.0),
+            "deactivate-route",
+            json!({
+                "incarnation_id": incarnation_id,
+                "reason": "graceful_shutdown"
+            }),
+        )
+        .await;
+    assert_eq!(deactivate.status(), StatusCode::OK);
+    let deactivated = response_json(deactivate).await;
+    assert_eq!(deactivated["data"]["status"], "retired");
+    assert_eq!(deactivated["data"]["reason"], "graceful_shutdown");
+}
+
+#[tokio::test]
+async fn execution_routes_use_one_unauthorized_bearer_response() {
+    let fixture = api_fixture().await;
+    let routes = [
+        (
+            "/v1/execution/lease/acquire".to_owned(),
+            "execution.acquire",
+            json!({
+                "node_id": fixture.node_id.0,
+                "incarnation_id": fixture.incarnation_id,
+                "worker_id": fixture.worker_id.0
+            }),
+        ),
+        (
+            format!("/v1/execution/node/{}/heartbeat", fixture.node_id.0),
+            "execution.node_heartbeat",
+            json!({"incarnation_id": fixture.incarnation_id}),
+        ),
+        (
+            "/v1/execution/lease/1/heartbeat".to_owned(),
+            "execution.lease_heartbeat",
+            json!({
+                "node_id": fixture.node_id.0,
+                "incarnation_id": fixture.incarnation_id,
+                "worker_id": fixture.worker_id.0
+            }),
+        ),
+        (
+            "/v1/execution/lease/1/complete".to_owned(),
+            "execution.complete",
+            json!({
+                "node_id": fixture.node_id.0,
+                "incarnation_id": fixture.incarnation_id,
+                "worker_id": fixture.worker_id.0,
+                "result": {}
+            }),
+        ),
+        (
+            "/v1/execution/lease/1/fail".to_owned(),
+            "execution.fail",
+            json!({
+                "node_id": fixture.node_id.0,
+                "incarnation_id": fixture.incarnation_id,
                 "worker_id": fixture.worker_id.0,
                 "reason": "timed out",
                 "class": FailureClass::WorkerTimeout
@@ -569,6 +687,7 @@ async fn lease_routes_reject_worker_node_mismatch() {
             other.token.expose_secret(),
             json!({
                 "node_id": other.node.id.0,
+                "incarnation_id": fixture.incarnation_id,
                 "worker_id": fixture.worker_id.0,
                 "lease_ttl_seconds": 60
             }),
@@ -722,6 +841,30 @@ async fn api_fixture() -> ApiFixture {
         })
         .await
         .unwrap();
+    let incarnation_id: NodeIncarnationId = "0123456789abcdef0123456789abcdef".parse().unwrap();
+    let pool = voom_store::connect(&url).await.unwrap();
+    sqlx::query(
+        "INSERT INTO node_incarnations \
+         (incarnation_id, node_id, status, started_at, last_seen_at) \
+         VALUES (?, ?, 'active', '1970-01-01T00:00:00Z', '1970-01-01T00:00:00Z')",
+    )
+    .bind(incarnation_id.to_string())
+    .bind(i64::try_from(registered.node.id.0).unwrap())
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query("UPDATE nodes SET status = 'active', active_incarnation_id = ? WHERE id = ?")
+        .bind(incarnation_id.to_string())
+        .bind(i64::try_from(registered.node.id.0).unwrap())
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE workers SET node_incarnation_id = ? WHERE id = ?")
+        .bind(incarnation_id.to_string())
+        .bind(i64::try_from(worker.id.0).unwrap())
+        .execute(&pool)
+        .await
+        .unwrap();
     let hp = HealthPlane::open(&url).await.unwrap();
     let app = router_with_control_plane(hp, cp.clone());
     ApiFixture {
@@ -731,6 +874,7 @@ async fn api_fixture() -> ApiFixture {
         cp,
         node_id: registered.node.id,
         token: registered.token.expose_secret().to_owned(),
+        incarnation_id,
         worker_id: worker.id,
     }
 }

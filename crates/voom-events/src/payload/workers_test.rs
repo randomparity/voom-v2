@@ -3,7 +3,10 @@ use crate::payload::{Event, EventKind};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use time::OffsetDateTime;
-use voom_core::{NodeKind, NodeStatus, TicketOperation, WorkerKind};
+use voom_core::{
+    NodeIncarnationEndReason, NodeIncarnationId, NodeIncarnationStatus, NodeKind, NodeStatus,
+    TicketOperation, WorkerKind,
+};
 
 /// Assert that `valid` round-trips and that injecting a top-level unknown field
 /// is rejected by `#[serde(deny_unknown_fields)]`.
@@ -100,6 +103,39 @@ fn node_retired_payload_round_trip() {
     let back: Event = serde_json::from_value(json).unwrap();
     assert!(matches!(back, Event::NodeRetired(q) if q == p));
     assert_eq!(Event::NodeRetired(p).kind(), EventKind::NodeRetired);
+}
+
+#[test]
+fn node_incarnation_payloads_round_trip_and_reject_unknown_fields() {
+    let incarnation_id: NodeIncarnationId = "0123456789abcdef0123456789abcdef".parse().unwrap();
+    let activated = NodeIncarnationActivatedPayload {
+        node_id: voom_core::NodeId(42),
+        incarnation_id,
+        node_epoch: 7,
+        worker_ids: vec![voom_core::WorkerId(11), voom_core::WorkerId(12)],
+    };
+    let json = serde_json::to_value(Event::NodeIncarnationActivated(activated.clone())).unwrap();
+    assert_eq!(json["kind"], "node.incarnation_activated");
+    assert!(matches!(
+        serde_json::from_value::<Event>(json).unwrap(),
+        Event::NodeIncarnationActivated(payload) if payload == activated
+    ));
+    assert_rejects_unknown(&activated);
+
+    let ended = NodeIncarnationEndedPayload {
+        node_id: voom_core::NodeId(42),
+        incarnation_id,
+        status: NodeIncarnationStatus::Failed,
+        reason: NodeIncarnationEndReason::HeartbeatExpired,
+        retired_worker_ids: vec![voom_core::WorkerId(11), voom_core::WorkerId(12)],
+    };
+    let json = serde_json::to_value(Event::NodeIncarnationEnded(ended.clone())).unwrap();
+    assert_eq!(json["kind"], "node.incarnation_ended");
+    assert!(matches!(
+        serde_json::from_value::<Event>(json).unwrap(),
+        Event::NodeIncarnationEnded(payload) if payload == ended
+    ));
+    assert_rejects_unknown(&ended);
 }
 
 #[test]

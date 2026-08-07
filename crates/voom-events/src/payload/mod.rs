@@ -85,6 +85,10 @@ pub enum Event {
     NodeMarkedStale(NodeMarkedStalePayload),
     #[serde(rename = "node.retired")]
     NodeRetired(NodeRetiredPayload),
+    #[serde(rename = "node.incarnation_activated")]
+    NodeIncarnationActivated(NodeIncarnationActivatedPayload),
+    #[serde(rename = "node.incarnation_ended")]
+    NodeIncarnationEnded(NodeIncarnationEndedPayload),
     #[serde(rename = "storage_root.created")]
     StorageRootCreated(StorageRootCreatedPayload),
     #[serde(rename = "storage_root.owner_assigned")]
@@ -287,6 +291,8 @@ impl Event {
             Self::NodeHeartbeatRecorded(_) => EventKind::NodeHeartbeatRecorded,
             Self::NodeMarkedStale(_) => EventKind::NodeMarkedStale,
             Self::NodeRetired(_) => EventKind::NodeRetired,
+            Self::NodeIncarnationActivated(_) => EventKind::NodeIncarnationActivated,
+            Self::NodeIncarnationEnded(_) => EventKind::NodeIncarnationEnded,
             Self::StorageRootCreated(_) => EventKind::StorageRootCreated,
             Self::StorageRootOwnerAssigned(_) => EventKind::StorageRootOwnerAssigned,
             Self::StorageRootActivated(_) => EventKind::StorageRootActivated,

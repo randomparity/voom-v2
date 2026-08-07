@@ -22,6 +22,12 @@ allow = [
     "CC0-1.0",
     "ISC",
 ]
+exceptions = [
+    # reqwest's cross-platform Rustls verifier bundles public root data for
+    # targets without a native verifier. Scope its permissive data license to
+    # the exact reviewed package instead of widening the workspace allowlist.
+    { allow = ["CDLA-Permissive-2.0"], crate = "webpki-root-certs@1.0.9" },
+]
 
 [bans]
 multiple-versions = "deny"

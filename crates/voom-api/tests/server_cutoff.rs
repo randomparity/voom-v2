@@ -19,9 +19,10 @@ use tokio::io::{AsyncWriteExt, DuplexStream};
 use tower::ServiceExt;
 use voom_api::router_with_control_plane;
 use voom_api::server::DeadlineStream;
+use voom_control_plane::execution::{RemoteActivateInput, RemoteWorkerDeclaration};
 use voom_control_plane::workers::RegisterNodeInput;
 use voom_control_plane::{ControlPlane, HealthPlane};
-use voom_core::NodeId;
+use voom_core::{ArtifactAccessMode, NodeId, NodeIncarnationId, OperationKind};
 use voom_events::{Event, EventKind};
 use voom_store::repo::audit::events::{EventFilter, EventRepo, Page};
 use voom_store::repo::execution::nodes::NodeKind;
@@ -45,23 +46,43 @@ async fn committed_response_loss_replays_original_result() -> TestResult {
             metadata: json!({}),
         })
         .await?;
+    let incarnation_id: NodeIncarnationId = "0123456789abcdef0123456789abcdef".parse()?;
+    control_plane
+        .remote_activate(RemoteActivateInput {
+            node_id: registered.node.id,
+            token: registered.token.clone(),
+            idempotency_key: "cutoff-activation".to_owned(),
+            request_hash: "cutoff-activation-body".to_owned(),
+            incarnation_id,
+            workers: vec![RemoteWorkerDeclaration {
+                logical_name: "cutoff-worker".to_owned(),
+                operations: vec![OperationKind::ProbeFile],
+                artifact_access: vec![ArtifactAccessMode::SharedMount],
+                max_parallel: 1,
+            }],
+        })
+        .await?;
     let health_plane = HealthPlane::open(&url).await?;
     let router = router_with_control_plane(health_plane, control_plane.clone());
     let replay_router = router.clone();
     let idempotency_key = "committed-response-loss";
+    let stored_idempotency_key = format!("{incarnation_id}:{idempotency_key}");
     let path = format!("/v1/execution/node/{}/heartbeat", registered.node.id.0);
+    let request_body = json!({"incarnation_id": incarnation_id}).to_string();
     let request_bytes = format!(
         "POST {path} HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {}\r\n\
          Content-Type: application/json\r\nX-Voom-Idempotency-Key: {idempotency_key}\r\n\
-         Content-Length: 2\r\n\r\n{{}}",
-        registered.token.expose_secret()
+         Content-Length: {}\r\n\r\n{request_body}",
+        registered.token.expose_secret(),
+        request_body.len()
     );
     let (server_io, mut client_io) = tokio::io::duplex(1);
     let server_task = spawn_one_connection(router, server_io);
     client_io.write_all(request_bytes.as_bytes()).await?;
 
     let stored =
-        wait_for_committed_result(&pool, registered.node.id, &path, idempotency_key).await?;
+        wait_for_committed_result(&pool, registered.node.id, &path, &stored_idempotency_key)
+            .await?;
     assert_eq!(
         heartbeat_event_count(&control_plane, registered.node.id).await?,
         1
@@ -78,7 +99,7 @@ async fn committed_response_loss_replays_original_result() -> TestResult {
                     format!("Bearer {}", registered.token.expose_secret()),
                 )
                 .header("x-voom-idempotency-key", idempotency_key)
-                .body(Body::from("{}"))?,
+                .body(Body::from(request_body))?,
         )
         .await?;
     assert_eq!(replay.status(), StatusCode::OK);
@@ -90,7 +111,7 @@ async fn committed_response_loss_replays_original_result() -> TestResult {
         1
     );
     assert_eq!(
-        idempotency_row_count(&pool, registered.node.id, &path, idempotency_key).await?,
+        idempotency_row_count(&pool, registered.node.id, &path, &stored_idempotency_key,).await?,
         1
     );
     Ok(())

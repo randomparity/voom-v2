@@ -445,7 +445,7 @@ impl SqliteLeaseRepo {
         let res = sqlx::query(
             "UPDATE leases SET last_heartbeat_at = ?, \
                  expires_at = max(expires_at, ?), epoch = epoch + 1 \
-             WHERE id = ? AND state = 'held'",
+             WHERE id = ? AND state = 'held' AND expires_at > ?",
         )
         .bind(&now_str)
         .bind(&expires_str)
@@ -453,12 +453,30 @@ impl SqliteLeaseRepo {
             lease_id.0,
             concat!(module_path!(), ": ", stringify!(lease_id.0)),
         )?)
+        .bind(&now_str)
         .execute(&mut **tx)
         .await
         .map_err(|e| VoomError::database_context("leases heartbeat", e))?;
         if res.rows_affected() == 0 {
+            let lease = get_lease_in_tx(tx, lease_id).await?;
+            let Some(lease) = lease else {
+                return Err(VoomError::Conflict(format!(
+                    "heartbeat rejected: lease {lease_id} not found"
+                )));
+            };
+            if lease.state != LeaseState::Held {
+                return Err(VoomError::Conflict(format!(
+                    "heartbeat rejected: lease {lease_id} not held"
+                )));
+            }
+            if lease.expires_at <= now {
+                return Err(VoomError::Conflict(format!(
+                    "heartbeat rejected: lease {lease_id} expired at {}",
+                    lease.expires_at
+                )));
+            }
             return Err(VoomError::Conflict(format!(
-                "heartbeat rejected: lease {lease_id} not held"
+                "heartbeat rejected: lease {lease_id} changed concurrently"
             )));
         }
         get_lease_in_tx(tx, lease_id)

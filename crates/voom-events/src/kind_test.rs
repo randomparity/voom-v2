@@ -24,6 +24,8 @@ fn each_kind_has_distinct_wire_string() {
         EventKind::NodeHeartbeatRecorded,
         EventKind::NodeMarkedStale,
         EventKind::NodeRetired,
+        EventKind::NodeIncarnationActivated,
+        EventKind::NodeIncarnationEnded,
         EventKind::StorageRootCreated,
         EventKind::StorageRootOwnerAssigned,
         EventKind::StorageRootActivated,
@@ -122,6 +124,14 @@ fn node_event_kinds_use_dotted_wire_format() {
     assert_eq!(EventKind::NodeMarkedStale.as_str(), "node.marked_stale");
     assert_eq!(EventKind::NodeRetired.as_str(), "node.retired");
     assert_eq!(
+        EventKind::NodeIncarnationActivated.as_str(),
+        "node.incarnation_activated"
+    );
+    assert_eq!(
+        EventKind::NodeIncarnationEnded.as_str(),
+        "node.incarnation_ended"
+    );
+    assert_eq!(
         EventKind::WorkerLinkedToNode.as_str(),
         "worker.linked_to_node"
     );
@@ -153,6 +163,8 @@ fn every_kind_round_trips_through_as_str_and_from_str() {
         EventKind::NodeHeartbeatRecorded,
         EventKind::NodeMarkedStale,
         EventKind::NodeRetired,
+        EventKind::NodeIncarnationActivated,
+        EventKind::NodeIncarnationEnded,
         EventKind::StorageRootCreated,
         EventKind::StorageRootOwnerAssigned,
         EventKind::StorageRootActivated,
