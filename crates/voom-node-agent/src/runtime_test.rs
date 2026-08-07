@@ -401,6 +401,46 @@ async fn second_signal_interrupts_deactivation_only_after_reap() {
     assert_eq!(control.events.lock().await.as_slice(), &["reap"]);
 }
 
+#[tokio::test]
+async fn settling_a_crash_reports_a_shutdown_it_consumed() {
+    let control = Arc::new(FakeControlPlane::default());
+    let (cancel_tx, _cancel_rx) = watch::channel(LeaseCancellation::Running);
+    let (shutdown_tx, mut shutdown_rx) = watch::channel(ShutdownKind::Running);
+    let mut leases = JoinSet::new();
+    let _ = control;
+    // Hold settlement open so the shutdown branch is the only ready one; an empty JoinSet
+    // would make the select a coin flip between the two.
+    let blocked = Arc::new(Notify::new());
+    leases.spawn({
+        let blocked = Arc::clone(&blocked);
+        async move { blocked.notified().await }
+    });
+
+    // A single (non-forced) shutdown during crash settlement must be reported back. The
+    // wait consumes the watch notification, so if this returned None the coordinator would
+    // restart the child and then block forever on a `changed()` that has already fired.
+    shutdown_tx.send(ShutdownKind::User).unwrap();
+    // Bounded: swallowing the shutdown makes this wait forever, and a hanging test would
+    // burn the CI timeout instead of reporting the defect.
+    let settled = tokio::time::timeout(
+        Duration::from_secs(5),
+        cancel_and_wait(
+            &cancel_tx,
+            LeaseCancellation::Crash,
+            &mut leases,
+            &mut shutdown_rx,
+        ),
+    )
+    .await;
+
+    assert!(
+        settled.is_ok(),
+        "crash settlement swallowed the shutdown instead of reporting it"
+    );
+    assert_eq!(settled.unwrap(), Some(ShutdownKind::User));
+    leases.abort_all();
+}
+
 #[tokio::test(start_paused = true)]
 async fn crash_after_a_clean_start_exhausts_the_budget_instead_of_respawning_forever() {
     let mut budget = CrashBudget::new();
@@ -468,7 +508,7 @@ async fn unreachable_control_plane_fences_the_lease_at_the_ttl_deadline() {
     let (_stop_tx, stop_rx) = watch::channel(false);
     let loop_context = context(control.clone());
     let running = tokio::spawn(async move {
-        lease_heartbeat_loop(loop_context, LeaseId(1), 1, stop_rx, fence_tx).await;
+        lease_heartbeat_loop(loop_context, LeaseId(1), 1, 6, stop_rx, fence_tx).await;
     });
 
     // lease_ttl is 6s. The first beat fires at 1s and hangs, so the remaining budget is 5s

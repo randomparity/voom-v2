@@ -247,7 +247,9 @@ impl AgentRuntime {
         )
         .await?;
         let interval = heartbeat_interval(ttl_seconds);
-        let ttl = Duration::from_secs(u64::from(ttl_seconds.max(1)));
+        // Keep the deadline at least one interval beyond the beat. An advertised TTL of 0 or
+        // 1 would otherwise be spent by the very first sleep and self-fence every start.
+        let ttl = Duration::from_secs(u64::from(ttl_seconds)).max(interval.saturating_mul(2));
         let client = Arc::clone(&self.client);
         let node_id = self.config.config.node_id;
         let (stop_tx, mut stop_rx) = watch::channel(false);
@@ -479,14 +481,18 @@ async fn run_coordinator(
                 return CoordinatorExit::Shutdown;
             }
             CoordinatorEvent::ChildExit(Ok(())) => {
-                let forced = cancel_and_wait(
+                // Settling here consumes any shutdown notification, so this arm must act on
+                // it. Falling through to a restart would leave the top-of-loop `changed()`
+                // waiting for a value that has already been sent.
+                if let Some(kind) = cancel_and_wait(
                     &cancel_tx,
                     LeaseCancellation::Crash,
                     &mut leases,
                     &mut shutdown,
                 )
-                .await;
-                if forced {
+                .await
+                {
+                    settle_leases_for_shutdown(&cancel_tx, &mut leases, &mut shutdown, kind).await;
                     let supervisor = ChildSupervisor::new(context.shutdown_grace);
                     let _ = supervisor.shutdown_all(vec![child]).await;
                     return CoordinatorExit::Shutdown;
@@ -666,6 +672,7 @@ async fn run_lease(
             heartbeat_context,
             lease_id,
             lease.dispatch.heartbeat_after_seconds,
+            lease.dispatch.lease_ttl_seconds,
             heartbeat_stop_rx,
             lease_fence_tx,
         )
@@ -689,12 +696,21 @@ async fn lease_heartbeat_loop(
     context: CoordinatorContext,
     lease_id: LeaseId,
     heartbeat_after_seconds: i64,
+    lease_ttl_seconds: i64,
     mut stop: watch::Receiver<bool>,
     fence: mpsc::Sender<()>,
 ) {
+    // Both the beat and the deadline come from the grant the control plane returned, not
+    // from local config: the server expires the lease on its own granted TTL, and the
+    // deadline has to be at least one beat longer or every lease fences on its first beat.
     let seconds = u64::try_from(heartbeat_after_seconds).unwrap_or(1).max(1);
-    // The control plane expires the lease `lease_ttl` after the last heartbeat it observed.
-    // Fence locally at that same deadline so the child stops before the ticket is redispatched.
+    let ttl = Duration::from_secs(
+        u64::try_from(lease_ttl_seconds)
+            .unwrap_or(seconds)
+            .max(seconds.saturating_add(1)),
+    );
+    // The control plane expires the lease `ttl` after the last heartbeat it observed. Fence
+    // locally at that same deadline so the child stops before the ticket is redispatched.
     let mut last_success = Instant::now();
     loop {
         tokio::select! {
@@ -710,7 +726,7 @@ async fn lease_heartbeat_loop(
                     ));
                     return;
                 };
-                let Some(budget) = context.lease_ttl.checked_sub(last_success.elapsed()) else {
+                let Some(budget) = ttl.checked_sub(last_success.elapsed()) else {
                     let _ = fence.send(()).await;
                     return;
                 };
@@ -1167,37 +1183,53 @@ async fn cancel_and_wait(
     reason: LeaseCancellation,
     leases: &mut JoinSet<()>,
     shutdown: &mut watch::Receiver<ShutdownKind>,
-) -> bool {
+) -> Option<ShutdownKind> {
     let _ = cancellation.send(reason);
-    wait_or_force(leases, shutdown).await
+    wait_or_force(leases, shutdown, true).await
 }
 
 /// Wait for every lease task to settle, abandoning settlement when a forced shutdown
-/// arrives. Returns whether settlement was forced. Settlement calls the control plane,
-/// which retries an unreachable peer, so every wait needs this escape.
+/// arrives. Settlement calls the control plane, which retries an unreachable peer, so
+/// every wait needs this escape.
+///
+/// Returns the shutdown observed while waiting, if any. Waiting here consumes the watch
+/// notification, so the caller — not a later `changed()` — owns acting on it.
+///
+/// `report_any` separates the two callers. Shutdown settlement already knows its kind and
+/// only escalates on `Forced`, so it ignores anything else and keeps waiting. Crash
+/// settlement has observed no shutdown at all, so it must report the first one and let the
+/// caller run the real settlement rather than restarting the child.
 async fn wait_or_force(
     leases: &mut JoinSet<()>,
     shutdown: &mut watch::Receiver<ShutdownKind>,
-) -> bool {
-    let forced = {
+    report_any: bool,
+) -> Option<ShutdownKind> {
+    let observed = {
         let settlement = wait_for_leases(leases);
         tokio::pin!(settlement);
         loop {
             tokio::select! {
-                () = &mut settlement => break false,
+                () = &mut settlement => break None,
                 changed = shutdown.changed() => {
-                    if changed.is_err() || *shutdown.borrow() == ShutdownKind::Forced {
-                        break true;
+                    let kind = if changed.is_err() {
+                        ShutdownKind::Fenced
+                    } else {
+                        *shutdown.borrow()
+                    };
+                    if kind == ShutdownKind::Forced
+                        || (report_any && kind != ShutdownKind::Running)
+                    {
+                        break Some(kind);
                     }
                 }
             }
         }
     };
-    if forced {
+    if observed == Some(ShutdownKind::Forced) {
         leases.abort_all();
         wait_for_leases(leases).await;
     }
-    forced
+    observed
 }
 
 async fn settle_leases_for_shutdown(
@@ -1217,7 +1249,7 @@ async fn settle_leases_for_shutdown(
         return false;
     }
 
-    wait_or_force(leases, shutdown).await
+    wait_or_force(leases, shutdown, false).await == Some(ShutdownKind::Forced)
 }
 
 async fn wait_for_coordinators(
