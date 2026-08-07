@@ -166,13 +166,7 @@ impl AgentRuntime {
 
         let shutdown_kind = shutdown_kind_for_exit(&exit);
         let _ = shutdown_tx.send(shutdown_kind);
-        let settled = wait_for_coordinators(
-            &mut coordinators,
-            &shutdown_tx,
-            &mut signals,
-            matches!(&exit, RuntimeExit::Graceful),
-        )
-        .await;
+        let settled = wait_for_coordinators(&mut coordinators, &shutdown_tx, &mut signals).await;
         // Stop the heartbeat before propagating a coordinator join failure, or the task
         // keeps heartbeating an incarnation this runtime has already abandoned.
         node_heartbeat.stop();
@@ -484,15 +478,19 @@ async fn run_coordinator(
                 // Settling here consumes any shutdown notification, so this arm must act on
                 // it. Falling through to a restart would leave the top-of-loop `changed()`
                 // waiting for a value that has already been sent.
-                if let Some(kind) = cancel_and_wait(
+                if cancel_and_wait(
                     &cancel_tx,
                     LeaseCancellation::Crash,
                     &mut leases,
                     &mut shutdown,
                 )
                 .await
+                .is_some()
                 {
-                    settle_leases_for_shutdown(&cancel_tx, &mut leases, &mut shutdown, kind).await;
+                    // Finish settling with the force escape, but do not re-send a
+                    // cancellation: these leases died with the child, and overwriting
+                    // `Crash` would record a crashed worker's ticket as user-cancelled.
+                    wait_or_force(&mut leases, &mut shutdown, false).await;
                     let supervisor = ChildSupervisor::new(context.shutdown_grace);
                     let _ = supervisor.shutdown_all(vec![child]).await;
                     return CoordinatorExit::Shutdown;
@@ -701,14 +699,12 @@ async fn lease_heartbeat_loop(
     fence: mpsc::Sender<()>,
 ) {
     // Both the beat and the deadline come from the grant the control plane returned, not
-    // from local config: the server expires the lease on its own granted TTL, and the
-    // deadline has to be at least one beat longer or every lease fences on its first beat.
+    // from local config: the server expires the lease on its own granted TTL, so anything
+    // longer here reopens the redispatch window this deadline exists to close. A grant whose
+    // TTL is not longer than its beat is incoherent and fences almost immediately; that is
+    // the honest outcome, since the server would expire such a lease just as fast.
     let seconds = u64::try_from(heartbeat_after_seconds).unwrap_or(1).max(1);
-    let ttl = Duration::from_secs(
-        u64::try_from(lease_ttl_seconds)
-            .unwrap_or(seconds)
-            .max(seconds.saturating_add(1)),
-    );
+    let ttl = Duration::from_secs(u64::try_from(lease_ttl_seconds).unwrap_or(1).max(1));
     // The control plane expires the lease `ttl` after the last heartbeat it observed. Fence
     // locally at that same deadline so the child stops before the ticket is redispatched.
     let mut last_success = Instant::now();
@@ -1211,11 +1207,12 @@ async fn wait_or_force(
             tokio::select! {
                 () = &mut settlement => break None,
                 changed = shutdown.changed() => {
-                    let kind = if changed.is_err() {
-                        ShutdownKind::Fenced
-                    } else {
-                        *shutdown.borrow()
+                    // A closed channel means the runtime is gone: treat it as forced rather
+                    // than looping, since `changed()` then returns Err on every poll.
+                    let Ok(()) = changed else {
+                        break Some(ShutdownKind::Forced);
                     };
+                    let kind = *shutdown.borrow();
                     if kind == ShutdownKind::Forced
                         || (report_any && kind != ShutdownKind::Running)
                     {
@@ -1244,22 +1241,24 @@ async fn settle_leases_for_shutdown(
         LeaseCancellation::Fenced
     };
     let _ = cancellation.send(reason);
-    if kind != ShutdownKind::User {
-        wait_for_leases(leases).await;
-        return false;
-    }
-
+    // Settlement calls the control plane on every path, not just the user-requested one, so
+    // a fenced or restart-exhausted shutdown needs the same force escape. Without it a lease
+    // stuck retrying an unreachable control plane hangs the coordinator with no way out.
     wait_or_force(leases, shutdown, false).await == Some(ShutdownKind::Forced)
 }
 
+/// Wait for coordinators to finish, letting a termination signal force settlement.
+///
+/// Forcing is available on every exit, not just the user-requested one. A fenced or
+/// restart-exhausted exit settles against the same control plane, so gating the escape on a
+/// graceful exit left an unreachable control plane hanging the process with no recovery.
 async fn wait_for_coordinators(
     coordinators: &mut JoinSet<CoordinatorExit>,
     shutdown: &watch::Sender<ShutdownKind>,
     signals: &mut mpsc::UnboundedReceiver<()>,
-    allow_force: bool,
 ) -> Result<bool, VoomError> {
     let mut forced = false;
-    let mut force_enabled = allow_force;
+    let mut force_enabled = true;
     while !coordinators.is_empty() {
         tokio::select! {
             joined = coordinators.join_next() => {
@@ -1397,7 +1396,9 @@ fn random_hex(byte_count: usize) -> String {
 
 fn forced_shutdown_error() -> VoomError {
     VoomError::ExternalSystemUnavailable(
-        "node-agent shutdown interrupted by a second termination signal".to_owned(),
+        // Not always the *second* signal: the graceful path consumed one to begin shutting
+        // down, but a failing path reaches deactivation without having consumed any.
+        "node-agent shutdown interrupted by a termination signal".to_owned(),
     )
 }
 

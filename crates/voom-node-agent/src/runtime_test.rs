@@ -397,7 +397,7 @@ async fn second_signal_interrupts_deactivation_only_after_reap() {
 
     signal_tx.send(()).unwrap();
     let error = deactivation.await.unwrap().unwrap_err();
-    assert!(error.to_string().contains("second termination signal"));
+    assert!(error.to_string().contains("termination signal"));
     assert_eq!(control.events.lock().await.as_slice(), &["reap"]);
 }
 
@@ -493,7 +493,7 @@ async fn second_signal_interrupts_a_non_graceful_deactivation() {
     signal_tx.send(()).unwrap();
 
     let error = deactivation.await.unwrap().unwrap_err();
-    assert!(error.to_string().contains("second termination signal"));
+    assert!(error.to_string().contains("termination signal"));
 }
 
 #[tokio::test(start_paused = true)]
