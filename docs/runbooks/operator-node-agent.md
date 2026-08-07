@@ -84,8 +84,20 @@ settles the lease with the corresponding failure class.
 
 After a child exits, the agent first cancels and settles that child's held leases, then
 restarts it. Three consecutive startup failures exhaust the restart budget, retire the
-incarnation with `child_restart_exhausted`, and make the agent exit unsuccessfully. Let the
-service supervisor apply its normal process-level restart/backoff policy.
+incarnation with `child_restart_exhausted`, and make the agent exit unsuccessfully. A child
+that starts cleanly and then crashes is bounded separately: more than three crashes within
+sixty seconds exhausts the same budget, so a worker that dies on every dispatch cannot
+respawn indefinitely. Let the service supervisor apply its normal process-level
+restart/backoff policy.
+
+## Behavior when the control plane is unreachable
+
+The agent does not keep working against a control plane it cannot reach. If no lease
+heartbeat succeeds within `lease_ttl_seconds`, it fences that lease locally and stops the
+dispatch rather than racing the control plane's redispatch of the same ticket. If no node
+heartbeat succeeds within the incarnation TTL, the agent treats the incarnation as lost and
+exits unsuccessfully. Both deadlines match the ones the control plane applies, so a
+partition ends with the node idle rather than executing work a second node has taken over.
 
 ## Inspect operation
 

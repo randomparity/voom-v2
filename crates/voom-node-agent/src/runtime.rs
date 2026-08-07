@@ -30,6 +30,9 @@ use crate::config::{LoadedAgentConfig, WorkerConfig};
 
 const HEARTBEAT_DIVISOR: u32 = 3;
 const RESTART_DELAY: Duration = Duration::from_millis(250);
+const VALIDATION_ATTEMPTS: u32 = 3;
+const CRASH_LIMIT: u32 = 3;
+const CRASH_WINDOW: Duration = Duration::from_mins(1);
 
 /// Owns one node incarnation from activation through ordered deactivation.
 #[derive(Debug)]
@@ -132,8 +135,12 @@ impl AgentRuntime {
             Ok(children) => children,
             Err(error) => {
                 node_heartbeat.stop();
-                self.deactivate(incarnation_id, NodeIncarnationEndReason::ChildStartupFailed)
-                    .await?;
+                self.deactivate_or_second_signal(
+                    incarnation_id,
+                    NodeIncarnationEndReason::ChildStartupFailed,
+                    &mut signals,
+                )
+                .await?;
                 return Err(VoomError::ExternalSystemUnavailable(format!(
                     "start node-agent children: {error}"
                 )));
@@ -159,14 +166,17 @@ impl AgentRuntime {
 
         let shutdown_kind = shutdown_kind_for_exit(&exit);
         let _ = shutdown_tx.send(shutdown_kind);
-        let forced = wait_for_coordinators(
+        let settled = wait_for_coordinators(
             &mut coordinators,
             &shutdown_tx,
             &mut signals,
             matches!(&exit, RuntimeExit::Graceful),
         )
-        .await?;
+        .await;
+        // Stop the heartbeat before propagating a coordinator join failure, or the task
+        // keeps heartbeating an incarnation this runtime has already abandoned.
         node_heartbeat.stop();
+        let forced = settled?;
 
         let reason = match &exit {
             RuntimeExit::Graceful => NodeIncarnationEndReason::GracefulShutdown,
@@ -176,12 +186,8 @@ impl AgentRuntime {
         if forced {
             return Err(forced_shutdown_error());
         }
-        if reason == NodeIncarnationEndReason::GracefulShutdown {
-            self.deactivate_or_second_signal(incarnation_id, &mut signals)
-                .await?;
-        } else {
-            self.deactivate(incarnation_id, reason).await?;
-        }
+        self.deactivate_or_second_signal(incarnation_id, reason, &mut signals)
+            .await?;
         match exit {
             RuntimeExit::Graceful => Ok(()),
             RuntimeExit::RestartExhausted => Err(VoomError::ExternalSystemUnavailable(
@@ -241,10 +247,15 @@ impl AgentRuntime {
         )
         .await?;
         let interval = heartbeat_interval(ttl_seconds);
+        let ttl = Duration::from_secs(u64::from(ttl_seconds.max(1)));
         let client = Arc::clone(&self.client);
         let node_id = self.config.config.node_id;
         let (stop_tx, mut stop_rx) = watch::channel(false);
         let joined = tokio::spawn(async move {
+            // The control plane expires the incarnation `ttl` after the last heartbeat it
+            // observed. Self-fence at that deadline instead of retrying an unreachable
+            // control plane while children keep acquiring against a dead incarnation.
+            let mut last_success = Instant::now();
             loop {
                 tokio::select! {
                     changed = stop_rx.changed() => {
@@ -253,9 +264,25 @@ impl AgentRuntime {
                         }
                     }
                     () = tokio::time::sleep(interval) => {
-                        if let Err(error) = send_node_heartbeat(client.as_ref(), node_id, incarnation_id).await {
-                            let _ = fatal_tx.send(RuntimeFatal::ControlPlane(error));
+                        let Some(budget) = ttl.checked_sub(last_success.elapsed()) else {
+                            let _ = fatal_tx.send(node_heartbeat_expiry());
                             return;
+                        };
+                        match tokio::time::timeout(
+                            budget,
+                            send_node_heartbeat(client.as_ref(), node_id, incarnation_id),
+                        )
+                        .await
+                        {
+                            Ok(Ok(())) => last_success = Instant::now(),
+                            Ok(Err(error)) => {
+                                let _ = fatal_tx.send(RuntimeFatal::ControlPlane(error));
+                                return;
+                            }
+                            Err(_) => {
+                                let _ = fatal_tx.send(node_heartbeat_expiry());
+                                return;
+                            }
                         }
                     }
                 }
@@ -347,16 +374,18 @@ impl AgentRuntime {
         Ok(())
     }
 
+    /// Deactivate, letting a further termination signal abandon a deactivation that the
+    /// control plane is not answering. Every deactivation path uses this: the runbook
+    /// promises a second signal cancels blocked deactivation, without qualifying which
+    /// reason ended the incarnation.
     async fn deactivate_or_second_signal(
         &self,
         incarnation_id: NodeIncarnationId,
+        reason: NodeIncarnationEndReason,
         signals: &mut mpsc::UnboundedReceiver<()>,
     ) -> Result<(), VoomError> {
         tokio::select! {
-            result = self.deactivate(
-                incarnation_id,
-                NodeIncarnationEndReason::GracefulShutdown,
-            ) => result,
+            result = self.deactivate(incarnation_id, reason) => result,
             _ = signals.recv() => Err(forced_shutdown_error()),
         }
     }
@@ -406,6 +435,7 @@ async fn run_coordinator(
 ) -> CoordinatorExit {
     let permits = Arc::new(Semaphore::new(context.worker.max_parallel as usize));
     let mut leases = JoinSet::new();
+    let mut crashes = CrashBudget::new();
     let (cancel_tx, cancel_rx) = watch::channel(LeaseCancellation::Running);
     loop {
         drain_finished_leases(&mut leases);
@@ -436,7 +466,11 @@ async fn run_coordinator(
                     shutdown.clone(),
                 ));
             }
-            CoordinatorEvent::Acquire(Ok(Acquired::Terminal)) => {}
+            CoordinatorEvent::Acquire(Ok(Acquired::Terminal)) => {
+                // A lease that validated as terminal yields nothing to run. Without this the
+                // coordinator spins acquire/heartbeat pairs at full rate.
+                tokio::time::sleep(context.poll_interval).await;
+            }
             CoordinatorEvent::Acquire(Err(error)) => return CoordinatorExit::Fatal(error),
             CoordinatorEvent::Shutdown(kind) => {
                 settle_leases_for_shutdown(&cancel_tx, &mut leases, &mut shutdown, kind).await;
@@ -445,14 +479,26 @@ async fn run_coordinator(
                 return CoordinatorExit::Shutdown;
             }
             CoordinatorEvent::ChildExit(Ok(())) => {
-                cancel_and_wait(&cancel_tx, LeaseCancellation::Crash, &mut leases).await;
+                let forced = cancel_and_wait(
+                    &cancel_tx,
+                    LeaseCancellation::Crash,
+                    &mut leases,
+                    &mut shutdown,
+                )
+                .await;
+                if forced {
+                    let supervisor = ChildSupervisor::new(context.shutdown_grace);
+                    let _ = supervisor.shutdown_all(vec![child]).await;
+                    return CoordinatorExit::Shutdown;
+                }
+                if crashes.record_and_exhausted() {
+                    return CoordinatorExit::RestartExhausted;
+                }
+                tokio::time::sleep(RESTART_DELAY).await;
                 match restart_child(&context, child.spec().clone()).await {
                     Ok(restarted) => {
                         child = restarted;
                         let _ = cancel_tx.send(LeaseCancellation::Running);
-                    }
-                    Err(ChildErrorKind::RestartExhausted) => {
-                        return CoordinatorExit::RestartExhausted;
                     }
                     Err(_) => return CoordinatorExit::RestartExhausted,
                 }
@@ -461,6 +507,33 @@ async fn run_coordinator(
                 return CoordinatorExit::Fatal(RuntimeFatal::Internal(error.to_string()));
             }
         }
+    }
+}
+
+/// Bounds children that start cleanly and then crash. [`ChildSupervisor`] only counts
+/// consecutive *launch* failures and resets that count on a successful launch, so without
+/// this a worker that serves handshake and then dies on every dispatch respawns forever.
+struct CrashBudget {
+    window_started: Instant,
+    crashes: u32,
+}
+
+impl CrashBudget {
+    fn new() -> Self {
+        Self {
+            window_started: Instant::now(),
+            crashes: 0,
+        }
+    }
+
+    /// Record one crash episode and report whether this window's budget is spent.
+    fn record_and_exhausted(&mut self) -> bool {
+        if self.window_started.elapsed() >= CRASH_WINDOW {
+            self.window_started = Instant::now();
+            self.crashes = 0;
+        }
+        self.crashes += 1;
+        self.crashes > CRASH_LIMIT
     }
 }
 
@@ -551,7 +624,7 @@ async fn validate_lease(
     dispatch: &LeaseDispatch,
 ) -> Result<ValidationOutcome, RuntimeFatal> {
     let freshness = context.lease_ttl / 2;
-    loop {
+    for _ in 0..VALIDATION_ATTEMPTS {
         let started = Instant::now();
         let request = lease_heartbeat_request(context, new_key("validate"))
             .map_err(RuntimeFatal::ControlPlane)?;
@@ -571,6 +644,9 @@ async fn validate_lease(
             Ok(Err(error)) => return Err(classify_control_plane_error(error)),
         }
     }
+    // Every attempt either timed out or came back too stale to trust. Give the lease back
+    // rather than renewing it forever while holding a worker permit.
+    Ok(ValidationOutcome::Terminal)
 }
 
 async fn run_lease(
@@ -617,6 +693,9 @@ async fn lease_heartbeat_loop(
     fence: mpsc::Sender<()>,
 ) {
     let seconds = u64::try_from(heartbeat_after_seconds).unwrap_or(1).max(1);
+    // The control plane expires the lease `lease_ttl` after the last heartbeat it observed.
+    // Fence locally at that same deadline so the child stops before the ticket is redispatched.
+    let mut last_success = Instant::now();
     loop {
         tokio::select! {
             changed = stop.changed() => {
@@ -631,13 +710,22 @@ async fn lease_heartbeat_loop(
                     ));
                     return;
                 };
-                match context.client.lease_heartbeat(lease_id, &request).await {
-                    Ok(_) => {}
-                    Err(VoomError::Conflict(_) | VoomError::NotFound(_)) => {
+                let Some(budget) = context.lease_ttl.checked_sub(last_success.elapsed()) else {
+                    let _ = fence.send(()).await;
+                    return;
+                };
+                match tokio::time::timeout(
+                    budget,
+                    context.client.lease_heartbeat(lease_id, &request),
+                )
+                .await
+                {
+                    Ok(Ok(_)) => last_success = Instant::now(),
+                    Ok(Err(VoomError::Conflict(_) | VoomError::NotFound(_))) | Err(_) => {
                         let _ = fence.send(()).await;
                         return;
                     }
-                    Err(error) => {
+                    Ok(Err(error)) => {
                         let _ = context.fatal_tx.send(classify_control_plane_error(error));
                         return;
                     }
@@ -1064,13 +1152,10 @@ fn validate_activated_workers(
     Ok(())
 }
 
+/// Reap finished lease tasks. A cancelled task still releases its permit on drop, so a
+/// join error needs no handling beyond being collected here.
 fn drain_finished_leases(leases: &mut JoinSet<()>) {
-    while let Some(result) = leases.try_join_next() {
-        if result.is_err() {
-            // A cancelled lease task releases its permit; the coordinator remains responsible
-            // for the child and subsequent work.
-        }
-    }
+    while leases.try_join_next().is_some() {}
 }
 
 async fn wait_for_leases(leases: &mut JoinSet<()>) {
@@ -1081,28 +1166,19 @@ async fn cancel_and_wait(
     cancellation: &watch::Sender<LeaseCancellation>,
     reason: LeaseCancellation,
     leases: &mut JoinSet<()>,
-) {
+    shutdown: &mut watch::Receiver<ShutdownKind>,
+) -> bool {
     let _ = cancellation.send(reason);
-    wait_for_leases(leases).await;
+    wait_or_force(leases, shutdown).await
 }
 
-async fn settle_leases_for_shutdown(
-    cancellation: &watch::Sender<LeaseCancellation>,
+/// Wait for every lease task to settle, abandoning settlement when a forced shutdown
+/// arrives. Returns whether settlement was forced. Settlement calls the control plane,
+/// which retries an unreachable peer, so every wait needs this escape.
+async fn wait_or_force(
     leases: &mut JoinSet<()>,
     shutdown: &mut watch::Receiver<ShutdownKind>,
-    kind: ShutdownKind,
 ) -> bool {
-    let reason = if kind == ShutdownKind::User {
-        LeaseCancellation::User
-    } else {
-        LeaseCancellation::Fenced
-    };
-    let _ = cancellation.send(reason);
-    if kind != ShutdownKind::User {
-        wait_for_leases(leases).await;
-        return false;
-    }
-
     let forced = {
         let settlement = wait_for_leases(leases);
         tokio::pin!(settlement);
@@ -1122,6 +1198,26 @@ async fn settle_leases_for_shutdown(
         wait_for_leases(leases).await;
     }
     forced
+}
+
+async fn settle_leases_for_shutdown(
+    cancellation: &watch::Sender<LeaseCancellation>,
+    leases: &mut JoinSet<()>,
+    shutdown: &mut watch::Receiver<ShutdownKind>,
+    kind: ShutdownKind,
+) -> bool {
+    let reason = if kind == ShutdownKind::User {
+        LeaseCancellation::User
+    } else {
+        LeaseCancellation::Fenced
+    };
+    let _ = cancellation.send(reason);
+    if kind != ShutdownKind::User {
+        wait_for_leases(leases).await;
+        return false;
+    }
+
+    wait_or_force(leases, shutdown).await
 }
 
 async fn wait_for_coordinators(
@@ -1227,6 +1323,12 @@ impl CoordinatorContext {
 
 fn classify_control_plane_error(error: VoomError) -> RuntimeFatal {
     RuntimeFatal::ControlPlane(error)
+}
+
+fn node_heartbeat_expiry() -> RuntimeFatal {
+    RuntimeFatal::ControlPlane(VoomError::ExternalSystemUnavailable(
+        "node heartbeat did not reach the control plane within the incarnation ttl".to_owned(),
+    ))
 }
 
 fn heartbeat_interval(ttl_seconds: u32) -> Duration {

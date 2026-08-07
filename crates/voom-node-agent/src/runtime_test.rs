@@ -212,7 +212,13 @@ async fn child_crash_settles_all_held_leases_before_restart_can_begin() {
     }
     wait_for_count(&worker.dispatched, &worker.dispatches, 2).await;
 
-    cancel_and_wait(&cancel_tx, LeaseCancellation::Crash, &mut leases).await;
+    cancel_and_wait(
+        &cancel_tx,
+        LeaseCancellation::Crash,
+        &mut leases,
+        &mut shutdown_rx.clone(),
+    )
+    .await;
     control.events.lock().await.push("restart".to_owned());
 
     let events = control.events.lock().await;
@@ -258,7 +264,7 @@ async fn shutdown_orders_settlement_before_reap_and_deactivation() {
     let worker = Arc::new(FakeWorker::new(WorkerMode::Silent));
     let permits = Arc::new(Semaphore::new(1));
     let (cancel_tx, cancel_rx) = watch::channel(LeaseCancellation::Running);
-    let (_shutdown_tx, shutdown_rx) = watch::channel(ShutdownKind::Running);
+    let (shutdown_tx, shutdown_rx) = watch::channel(ShutdownKind::Running);
     let mut leases = JoinSet::new();
     leases.spawn(run_lease(
         held_lease(permits).await,
@@ -270,7 +276,13 @@ async fn shutdown_orders_settlement_before_reap_and_deactivation() {
     ));
     wait_for_count(&worker.dispatched, &worker.dispatches, 1).await;
 
-    cancel_and_wait(&cancel_tx, LeaseCancellation::User, &mut leases).await;
+    cancel_and_wait(
+        &cancel_tx,
+        LeaseCancellation::User,
+        &mut leases,
+        &mut shutdown_tx.subscribe(),
+    )
+    .await;
     control.events.lock().await.push("reap".to_owned());
     let request = RetryRequest::new(
         "deactivate".to_owned(),
@@ -369,7 +381,11 @@ async fn second_signal_interrupts_deactivation_only_after_reap() {
     let (signal_tx, mut signal_rx) = mpsc::unbounded_channel();
     let deactivation = tokio::spawn(async move {
         runtime
-            .deactivate_or_second_signal(incarnation(), &mut signal_rx)
+            .deactivate_or_second_signal(
+                incarnation(),
+                NodeIncarnationEndReason::GracefulShutdown,
+                &mut signal_rx,
+            )
             .await
     });
     wait_for_count(
@@ -383,6 +399,138 @@ async fn second_signal_interrupts_deactivation_only_after_reap() {
     let error = deactivation.await.unwrap().unwrap_err();
     assert!(error.to_string().contains("second termination signal"));
     assert_eq!(control.events.lock().await.as_slice(), &["reap"]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn crash_after_a_clean_start_exhausts_the_budget_instead_of_respawning_forever() {
+    let mut budget = CrashBudget::new();
+
+    // A child that starts cleanly and then dies still spends the budget: ChildSupervisor
+    // resets its own counter on every successful launch, so it can never bound this.
+    for _ in 0..CRASH_LIMIT {
+        assert!(!budget.record_and_exhausted());
+    }
+    assert!(budget.record_and_exhausted());
+}
+
+#[tokio::test(start_paused = true)]
+async fn crash_budget_recovers_after_a_quiet_window() {
+    let mut budget = CrashBudget::new();
+    for _ in 0..CRASH_LIMIT {
+        assert!(!budget.record_and_exhausted());
+    }
+
+    tokio::time::advance(CRASH_WINDOW + Duration::from_secs(1)).await;
+
+    assert!(
+        !budget.record_and_exhausted(),
+        "an isolated later crash must not inherit a stale window"
+    );
+}
+
+#[tokio::test]
+async fn second_signal_interrupts_a_non_graceful_deactivation() {
+    let control = Arc::new(FakeControlPlane::default());
+    *control.deactivate_gate.lock().await = Some(Arc::new(Notify::new()));
+    let runtime = AgentRuntime::with_client(loaded_config(), control.clone());
+    let (signal_tx, mut signal_rx) = mpsc::unbounded_channel();
+    let deactivation = tokio::spawn(async move {
+        runtime
+            .deactivate_or_second_signal(
+                incarnation(),
+                NodeIncarnationEndReason::ChildRestartExhausted,
+                &mut signal_rx,
+            )
+            .await
+    });
+    wait_for_count(
+        &control.deactivate_started,
+        &control.deactivate_started_count,
+        1,
+    )
+    .await;
+
+    signal_tx.send(()).unwrap();
+
+    let error = deactivation.await.unwrap().unwrap_err();
+    assert!(error.to_string().contains("second termination signal"));
+}
+
+#[tokio::test(start_paused = true)]
+async fn unreachable_control_plane_fences_the_lease_at_the_ttl_deadline() {
+    let control = Arc::new(FakeControlPlane::default());
+    control
+        .heartbeat_actions
+        .lock()
+        .await
+        .push_back(HeartbeatAction::Hang);
+    let (fence_tx, mut fence_rx) = mpsc::channel(1);
+    let (_stop_tx, stop_rx) = watch::channel(false);
+    let loop_context = context(control.clone());
+    let running = tokio::spawn(async move {
+        lease_heartbeat_loop(loop_context, LeaseId(1), 1, stop_rx, fence_tx).await;
+    });
+
+    // lease_ttl is 6s. The first beat fires at 1s and hangs, so the remaining budget is 5s
+    // and the fence must land at 6s -- not merely "eventually". try_recv keeps paused time
+    // from auto-advancing to a later deadline and passing this by accident.
+    advance_seconds(5).await;
+    assert!(
+        fence_rx.try_recv().is_err(),
+        "fenced before the lease ttl elapsed"
+    );
+
+    advance_seconds(2).await;
+    assert_eq!(
+        fence_rx.try_recv(),
+        Ok(()),
+        "did not fence once the lease ttl elapsed"
+    );
+    running.await.unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn unreachable_control_plane_fails_the_node_at_the_incarnation_ttl() {
+    let control = Arc::new(FakeControlPlane::default());
+    let runtime = AgentRuntime::with_client(loaded_config(), control.clone());
+    let (fatal_tx, mut fatal_rx) = mpsc::unbounded_channel();
+    let heartbeat = runtime
+        .start_node_heartbeat(incarnation(), 6, fatal_tx)
+        .await
+        .unwrap();
+    control.node_heartbeat_hangs.store(true, Ordering::SeqCst);
+
+    advance_seconds(10).await;
+
+    let fatal = fatal_rx.try_recv().unwrap();
+    assert!(
+        format!("{fatal:?}").contains("incarnation ttl"),
+        "{fatal:?}"
+    );
+    heartbeat.stop();
+}
+
+#[tokio::test(start_paused = true)]
+async fn validation_gives_the_lease_back_after_a_bounded_number_of_stale_attempts() {
+    let control = Arc::new(FakeControlPlane::default());
+    for _ in 0..VALIDATION_ATTEMPTS {
+        control
+            .heartbeat_actions
+            .lock()
+            .await
+            .push_back(HeartbeatAction::Delay(Duration::from_secs(5)));
+    }
+    let context = context(control.clone());
+
+    let outcome = validate_lease(&context, &dispatch(json!({})))
+        .await
+        .unwrap();
+
+    assert!(matches!(outcome, ValidationOutcome::Terminal));
+    assert_eq!(
+        control.lease_heartbeats.load(Ordering::SeqCst),
+        VALIDATION_ATTEMPTS as usize
+    );
 }
 
 #[tokio::test]
@@ -409,6 +557,9 @@ async fn shutdown_signal_interrupts_activation_before_children_start() {
 enum HeartbeatAction {
     Success,
     Delay(Duration),
+    /// Never resolves, standing in for the client's unbounded retry against an
+    /// unreachable control plane.
+    Hang,
     Conflict,
 }
 
@@ -435,6 +586,7 @@ struct FakeControlPlane {
     fail_gate: Mutex<Option<Arc<Notify>>>,
     fail_started: Notify,
     fail_started_count: AtomicUsize,
+    node_heartbeat_hangs: AtomicBool,
     activate_gate: Mutex<Option<Arc<Notify>>>,
     activate_started: Notify,
     activate_started_count: AtomicUsize,
@@ -462,6 +614,7 @@ impl Default for FakeControlPlane {
             fail_gate: Mutex::new(None),
             fail_started: Notify::new(),
             fail_started_count: AtomicUsize::new(0),
+            node_heartbeat_hangs: AtomicBool::new(false),
             activate_gate: Mutex::new(None),
             activate_started: Notify::new(),
             activate_started_count: AtomicUsize::new(0),
@@ -527,6 +680,9 @@ impl ControlPlaneApi for FakeControlPlane {
         _request: &RetryRequest<NodeHeartbeatRequest>,
     ) -> Result<NodeHeartbeatOutcome, VoomError> {
         self.node_heartbeats.fetch_add(1, Ordering::SeqCst);
+        if self.node_heartbeat_hangs.load(Ordering::SeqCst) {
+            std::future::pending::<()>().await;
+        }
         Ok(NodeHeartbeatOutcome {
             node_id,
             status: "active".to_owned(),
@@ -576,6 +732,7 @@ impl ControlPlaneApi for FakeControlPlane {
                 tokio::time::sleep(delay).await;
                 Ok(lease_heartbeat_outcome(lease_id))
             }
+            HeartbeatAction::Hang => std::future::pending().await,
             HeartbeatAction::Conflict => Err(VoomError::Conflict("lease expired".to_owned())),
         }
     }

@@ -233,9 +233,15 @@ fn load_token(source: &TokenSource) -> Result<SecretString, VoomError> {
                     "node token environment variable name is empty",
                 ));
             }
+            // Never format the VarError: NotUnicode embeds the variable's raw value, which
+            // would put the token itself into stderr and the service journal.
             std::env::var(name).map_err(|error| {
+                let cause = match error {
+                    std::env::VarError::NotPresent => "not set",
+                    std::env::VarError::NotUnicode(_) => "not valid unicode",
+                };
                 config_error(format!(
-                    "read node token environment variable {name}: {error}"
+                    "read node token environment variable {name}: {cause}"
                 ))
             })?
         }
