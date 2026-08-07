@@ -239,7 +239,9 @@ impl ChildSupervisor {
         }
     }
 
-    #[cfg(test)]
+    // Gated exactly like the module that uses it: `child_test.rs` is Linux-only, so a plain
+    // `cfg(test)` leaves this with no callers on other targets and fails the dead-code lint.
+    #[cfg(all(test, target_os = "linux"))]
     fn with_timeouts(startup_timeout: Duration, shutdown_grace: Duration) -> Self {
         Self {
             startup_timeout,

@@ -74,10 +74,13 @@ async fn child_receives_direct_argv_and_exact_environment_then_exits_on_eof() {
 
 #[tokio::test]
 async fn readiness_is_length_newline_time_and_address_bounded() {
+    // The startup budget must clear interpreter startup: the child records its pid as its
+    // first action, and a budget tight enough to kill it mid-startup leaves no record for
+    // the reap assertion to read. The slow case then has to exceed the larger budget.
     let cases = [
         ("x".repeat(4097), 0, true),
         ("BOUND addr=127.0.0.1:4321".to_owned(), 0, false),
-        ("BOUND addr=127.0.0.1:4321".to_owned(), 150, true),
+        ("BOUND addr=127.0.0.1:4321".to_owned(), 3_000, true),
         ("malformed".to_owned(), 0, true),
         ("BOUND addr=0.0.0.0:4321".to_owned(), 0, true),
         ("BOUND addr=[::1]:4321".to_owned(), 0, true),
@@ -87,7 +90,7 @@ async fn readiness_is_length_newline_time_and_address_bounded() {
         let fixture = ChildFixture::new();
         fixture.write(&line, delay_ms, newline, false);
         let supervisor =
-            ChildSupervisor::with_timeouts(Duration::from_millis(40), Duration::from_millis(40));
+            ChildSupervisor::with_timeouts(Duration::from_secs(1), Duration::from_millis(40));
         let result = supervisor
             .start_all(vec![fixture.spec("bad", credentials(1, 0, "secret"), &[])])
             .await;
@@ -192,7 +195,7 @@ async fn restart_preserves_identity_and_resets_only_after_full_startup() {
     fixture.write(&format!("BOUND addr={}", server.bound()), 0, true, false);
     let spec = fixture.spec("restart", credentials.clone(), &[]);
     let mut supervisor =
-        ChildSupervisor::with_timeouts(Duration::from_millis(100), Duration::from_millis(50));
+        ChildSupervisor::with_timeouts(Duration::from_secs(1), Duration::from_millis(50));
     let initial = supervisor.start_all(vec![spec.clone()]).await.unwrap();
     supervisor.shutdown_all(initial).await.unwrap();
 
@@ -478,8 +481,26 @@ sys.stdout.flush()
         )
     }
 
+    /// Read the record the child writes on start, waiting briefly for it to appear.
+    ///
+    /// The child is spawned concurrently, so on a loaded machine the record can lag the
+    /// assertion that reads it. Waiting keeps the failure message about the child rather
+    /// than a bare `NotFound`.
     fn record(&self) -> ChildRecord {
-        serde_json::from_slice(&std::fs::read(&self.record_path).unwrap()).unwrap()
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Ok(bytes) = std::fs::read(&self.record_path)
+                && let Ok(record) = serde_json::from_slice(&bytes)
+            {
+                return record;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "child never wrote {}",
+                self.record_path.display()
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
     }
 }
 
