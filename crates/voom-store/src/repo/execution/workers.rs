@@ -421,29 +421,6 @@ impl SqliteWorkerRepo {
         })
     }
 
-    /// Count workers bound to one incarnation inside the caller's transaction.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`VoomError::Database`] for query failures or an unrepresentable count.
-    pub async fn count_for_incarnation_in_tx(
-        &self,
-        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-        incarnation_id: NodeIncarnationId,
-    ) -> Result<u32, VoomError> {
-        let count: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM workers WHERE node_incarnation_id = ?")
-                .bind(incarnation_id.to_string())
-                .fetch_one(&mut **tx)
-                .await
-                .map_err(|error| VoomError::database_context("worker incarnation count", error))?;
-        u32::try_from(count).map_err(|_| {
-            VoomError::database(format!(
-                "worker incarnation count does not fit u32: {count}"
-            ))
-        })
-    }
-
     /// Retire every live worker of one incarnation, ordered by worker ID.
     ///
     /// # Errors

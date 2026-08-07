@@ -85,13 +85,6 @@ async fn bind_count_and_retire_incarnation_workers_preserve_typed_ownership() {
             .id,
         worker.id
     );
-    assert_eq!(
-        workers
-            .count_for_incarnation_in_tx(&mut tx, incarnation_id)
-            .await
-            .unwrap(),
-        1
-    );
     let retired = workers
         .retire_live_for_incarnation_in_tx(&mut tx, incarnation_id, T0)
         .await

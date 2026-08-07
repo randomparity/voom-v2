@@ -398,27 +398,6 @@ impl SqliteNodeRepo {
         })
     }
 
-    /// Mark every node whose heartbeat deadline has elapsed as stale.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`VoomError::Database`] if candidates cannot be queried, decoded,
-    /// or updated, and [`VoomError::Internal`] if an updated row vanishes.
-    pub async fn mark_stale_in_tx(
-        &self,
-        tx: &mut Transaction<'_, Sqlite>,
-        now: OffsetDateTime,
-    ) -> Result<Vec<Node>, VoomError> {
-        let candidates = self.stale_candidates_in_tx(tx).await?;
-        let mut changed = Vec::new();
-        for node in &candidates {
-            if let Some(node) = self.mark_stale_candidate_in_tx(tx, node, now).await? {
-                changed.push(node);
-            }
-        }
-        Ok(changed)
-    }
-
     /// Read validated non-terminal node snapshots in deterministic stale-check order.
     ///
     /// # Errors
@@ -619,11 +598,15 @@ async fn mark_stale_candidate_in_tx(
     }
 
     let last_seen_at = iso8601(node.last_seen_at)?;
+    // `active_incarnation_id IS NULL` keeps this transition off any node that still owns an
+    // incarnation: those must go through end_incarnation_in_tx first, or the node would read
+    // stale while its incarnation stayed active and its workers stayed live.
     let res = sqlx::query(
         "UPDATE nodes \
          SET status = 'stale', epoch = epoch + 1 \
          WHERE id = ? \
            AND status IN ('registered','active') \
+           AND active_incarnation_id IS NULL \
            AND last_seen_at = ? \
            AND heartbeat_ttl_seconds = ? \
            AND epoch = ?",

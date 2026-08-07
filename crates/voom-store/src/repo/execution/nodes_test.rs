@@ -1,3 +1,5 @@
+use std::str::FromStr;
+
 use time::{Duration, OffsetDateTime};
 use voom_core::{
     ErrorCode, NodeId, NodeIncarnationEndReason, NodeIncarnationId, NodeIncarnationStatus,
@@ -257,11 +259,18 @@ async fn nodes_mark_stale_changes_only_freshly_expired_non_retired_rows() {
     .await;
     let stale = seed_node(&pool, &repo, "already-stale", NodeStatus::Stale, T0, 5).await;
 
+    // Mirror the control-plane reaper: enumerate candidates, then transition each one.
     let mut tx = pool.begin().await.unwrap();
-    let changed = repo
-        .mark_stale_in_tx(&mut tx, T0 + Duration::seconds(10))
-        .await
-        .unwrap();
+    let mut changed = Vec::new();
+    for candidate in repo.stale_candidates_in_tx(&mut tx).await.unwrap() {
+        if let Some(node) = repo
+            .mark_stale_candidate_in_tx(&mut tx, &candidate, T0 + Duration::seconds(10))
+            .await
+            .unwrap()
+        {
+            changed.push(node);
+        }
+    }
     tx.commit().await.unwrap();
 
     assert_eq!(
@@ -276,6 +285,45 @@ async fn nodes_mark_stale_changes_only_freshly_expired_non_retired_rows() {
         repo.get(stale.id).await.unwrap().unwrap().epoch,
         stale.epoch
     );
+}
+
+#[tokio::test]
+async fn nodes_mark_stale_candidate_refuses_a_node_that_still_owns_an_incarnation() {
+    let (pool, _tmp) = fresh_pool().await;
+    let repo = SqliteNodeRepo::new(pool.clone());
+    let incarnations = SqliteNodeIncarnationRepo::new(pool.clone());
+    let node = seed_node(&pool, &repo, "expired", NodeStatus::Active, T0, 5).await;
+    let incarnation_id =
+        NodeIncarnationId::from_str("0123456789abcdef0123456789abcdef").expect("incarnation id");
+
+    let mut tx = pool.begin().await.unwrap();
+    incarnations
+        .insert_in_tx(
+            &mut tx,
+            NewNodeIncarnation {
+                id: incarnation_id,
+                node_id: node.id,
+                started_at: T0,
+            },
+        )
+        .await
+        .unwrap();
+    let active = repo
+        .activate_incarnation_in_tx(&mut tx, node.id, None, incarnation_id, T0)
+        .await
+        .unwrap();
+    // The incarnation-blind transition must not fire while the node still points at an
+    // active incarnation: ending the incarnation is the only way through.
+    let changed = repo
+        .mark_stale_candidate_in_tx(&mut tx, &active, T0 + Duration::seconds(10))
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+
+    assert!(changed.is_none());
+    let stored = repo.get(node.id).await.unwrap().unwrap();
+    assert_eq!(stored.status, NodeStatus::Active);
+    assert_eq!(stored.active_incarnation_id, Some(incarnation_id));
 }
 
 #[tokio::test]
