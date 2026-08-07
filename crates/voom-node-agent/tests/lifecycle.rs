@@ -2,6 +2,11 @@
     clippy::unwrap_used,
     reason = "integration tests favor unwrap over plumbing Result through fixture assertions"
 )]
+#![expect(
+    clippy::expect_used,
+    reason = "every HANG_GUARD expiry names the wait it bounds; a bare Elapsed(()) panic \
+              reports only a line number, which is how #446 was filed against the wrong wait"
+)]
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -29,6 +34,17 @@ use voom_node_agent::runtime::AgentRuntime;
 use voom_store::repo::execution::nodes::NodeKind;
 use voom_store::repo::execution::tickets::{NewTicket, TicketState};
 use voom_test_support::TempDatabase;
+
+/// Upper bound on every wait in this suite. It detects a hang; it is not a latency
+/// assertion, so it is sized to fail fast rather than to outlast a slow host.
+///
+/// Raising it was considered and rejected. Under 16 concurrent copies of this suite on a
+/// CPU-oversubscribed host, run durations are bimodal: a run either settles in 6-9s or
+/// consumes the whole budget exactly, with nothing in between. Bounds of 60s and 150s each
+/// reproduced the same expiry at the same rate as 10s, so the waits that fail are hung, not
+/// slow, and a larger budget only delays the report. 30s keeps headroom over the observed
+/// 6-9s loaded ceiling while still surfacing a hang promptly.
+const HANG_GUARD: Duration = Duration::from_secs(30);
 
 #[tokio::test]
 async fn live_agent_fences_prior_incarnation_and_retires_orderly() {
@@ -77,16 +93,16 @@ async fn live_agent_fences_prior_incarnation_and_retires_orderly() {
     );
     assert!(superseded[1].last_seen_at > superseded[1].started_at);
 
-    let first_result = tokio::time::timeout(Duration::from_secs(10), first)
+    let first_result = tokio::time::timeout(HANG_GUARD, first)
         .await
-        .unwrap()
+        .expect("fenced first agent did not exit after being superseded")
         .unwrap();
     assert!(first_result.is_err(), "the fenced agent must exit nonzero");
 
     stop_second.send(()).unwrap();
-    tokio::time::timeout(Duration::from_secs(10), second)
+    tokio::time::timeout(HANG_GUARD, second)
         .await
-        .unwrap()
+        .expect("second agent did not exit after a graceful stop request")
         .unwrap()
         .unwrap();
     let retired =
@@ -132,9 +148,9 @@ async fn delayed_acquire_replay_never_dispatches() {
     delay.release_response.notify_one();
     wait_for_count(&delay.acquire_count, 2).await;
     stop.send(()).unwrap();
-    tokio::time::timeout(Duration::from_secs(10), agent)
+    tokio::time::timeout(HANG_GUARD, agent)
         .await
-        .unwrap()
+        .expect("agent did not exit after a graceful stop request")
         .unwrap()
         .unwrap();
 
@@ -341,7 +357,7 @@ async fn wait_for_incarnations(
     node_id: NodeId,
     count: usize,
 ) -> Vec<voom_store::repo::execution::node_incarnations::NodeIncarnation> {
-    tokio::time::timeout(Duration::from_secs(10), async {
+    tokio::time::timeout(HANG_GUARD, async {
         loop {
             let history = cp.list_node_incarnations(node_id, 10).await.unwrap();
             if history.len() >= count {
@@ -351,7 +367,7 @@ async fn wait_for_incarnations(
         }
     })
     .await
-    .unwrap()
+    .expect("node never reached the expected incarnation count")
 }
 
 async fn wait_for_incarnation_status(
@@ -359,7 +375,7 @@ async fn wait_for_incarnation_status(
     node_id: NodeId,
     status: NodeIncarnationStatus,
 ) -> Vec<voom_store::repo::execution::node_incarnations::NodeIncarnation> {
-    tokio::time::timeout(Duration::from_secs(10), async {
+    tokio::time::timeout(HANG_GUARD, async {
         loop {
             let history = cp.list_node_incarnations(node_id, 10).await.unwrap();
             if history.first().is_some_and(|row| row.status == status) {
@@ -369,11 +385,11 @@ async fn wait_for_incarnation_status(
         }
     })
     .await
-    .unwrap()
+    .expect("node incarnation never reached the expected status")
 }
 
 async fn wait_for_request_count(requests: &Mutex<Vec<String>>, path: &str, expected: usize) {
-    tokio::time::timeout(Duration::from_secs(10), async {
+    tokio::time::timeout(HANG_GUARD, async {
         loop {
             let count = requests
                 .lock()
@@ -388,7 +404,7 @@ async fn wait_for_request_count(requests: &Mutex<Vec<String>>, path: &str, expec
         }
     })
     .await
-    .unwrap();
+    .expect("control plane never saw the expected request count");
 }
 
 async fn wait_for_ticket_state(
@@ -396,7 +412,7 @@ async fn wait_for_ticket_state(
     ticket_id: TicketId,
     expected: TicketState,
 ) -> bool {
-    let result = tokio::time::timeout(Duration::from_secs(10), async {
+    let result = tokio::time::timeout(HANG_GUARD, async {
         loop {
             let ticket = cp.tickets().get(ticket_id).await.unwrap().unwrap();
             if ticket.state == expected {
@@ -410,11 +426,11 @@ async fn wait_for_ticket_state(
 }
 
 async fn wait_for_count(count: &AtomicUsize, expected: usize) {
-    tokio::time::timeout(Duration::from_secs(10), async {
+    tokio::time::timeout(HANG_GUARD, async {
         while count.load(Ordering::SeqCst) < expected {
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
     })
     .await
-    .unwrap();
+    .expect("counter never reached the expected value");
 }
