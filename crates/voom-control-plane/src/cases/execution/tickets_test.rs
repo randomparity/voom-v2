@@ -1,5 +1,7 @@
 use super::*;
 
+use std::sync::Arc;
+
 use time::{Duration as TDuration, OffsetDateTime};
 use voom_core::{FailureClass, TicketOperation, VoomError, WorkerKind};
 use voom_events::EventKind;
@@ -112,6 +114,55 @@ async fn mark_ready_emits_nothing_when_not_eligible() {
         .await
         .unwrap();
     assert!(page.items.is_empty());
+}
+
+#[tokio::test]
+async fn mark_ready_reserves_writer_lock_before_repository_reads() {
+    let (cp, _tmp) = cp().await;
+    let ticket = cp.create_ticket(ticket("writer-lock")).await.unwrap();
+    let observer = Arc::new(MarkReadyTransactionObserver::default());
+    let operation_cp = cp.clone();
+    let operation_observer = Arc::clone(&observer);
+    let operation = tokio::spawn(async move {
+        operation_cp
+            .mark_ready_if_unblocked_observed(ticket.id, T0, Some(operation_observer.as_ref()))
+            .await
+    });
+
+    observer.begun.notified().await;
+    let mut contender = cp.pool_for_test().acquire().await.unwrap();
+    sqlx::query("PRAGMA busy_timeout = 0")
+        .execute(&mut *contender)
+        .await
+        .unwrap();
+    let contender_begin = sqlx::query("BEGIN IMMEDIATE")
+        .execute(&mut *contender)
+        .await;
+    let contention_failure = match contender_begin {
+        Ok(_) => {
+            sqlx::query("ROLLBACK")
+                .execute(&mut *contender)
+                .await
+                .unwrap();
+            Some("competing writer acquired the lock".to_owned())
+        }
+        Err(sqlx::Error::Database(error)) if error.code().as_deref() == Some("5") => None,
+        Err(error) => Some(format!(
+            "competing writer returned an unexpected error: {error}"
+        )),
+    };
+
+    observer.release.notify_one();
+    let promoted = operation.await.unwrap().unwrap();
+
+    assert_eq!(promoted.len(), 1);
+    assert_eq!(promoted[0].state, TicketState::Ready);
+    assert_eq!(event_count(&cp, EventKind::TicketReady).await, 1);
+    assert!(
+        contention_failure.is_none(),
+        "ticket readiness must reserve SQLite's writer lock before repository reads: {}",
+        contention_failure.unwrap_or_default()
+    );
 }
 
 #[tokio::test]
