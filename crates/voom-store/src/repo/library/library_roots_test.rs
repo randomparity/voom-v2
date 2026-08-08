@@ -6,6 +6,7 @@ use voom_core::{NodeKind, ProviderLocator};
 
 use super::super::libraries::{LibraryMediaKind, NewLibrary};
 use super::*;
+use crate::test_support::with_check_constraints_disabled;
 
 async fn repo() -> (SqliteLibraryRepo, voom_test_support::TempDatabase) {
     let tmp = voom_test_support::TempDatabase::new().unwrap();
@@ -523,21 +524,17 @@ async fn corrupt_persisted_root_data_is_a_database_error() {
         .create_library_root(new_root(library_id, owner, "/media"), at(1))
         .await
         .unwrap();
-    let mut connection = repo.pool.acquire().await.unwrap();
-    sqlx::query("PRAGMA ignore_check_constraints = TRUE")
-        .execute(&mut *connection)
-        .await
-        .unwrap();
-    sqlx::query("UPDATE library_roots SET provider_locator = '' WHERE id = ?")
-        .bind(i64::try_from(root.id.0).unwrap())
-        .execute(&mut *connection)
-        .await
-        .unwrap();
-    sqlx::query("PRAGMA ignore_check_constraints = FALSE")
-        .execute(&mut *connection)
-        .await
-        .unwrap();
-    drop(connection);
+    with_check_constraints_disabled(&repo.pool, move |connection| {
+        Box::pin(async move {
+            sqlx::query("UPDATE library_roots SET provider_locator = '' WHERE id = ?")
+                .bind(i64::try_from(root.id.0).unwrap())
+                .execute(&mut *connection)
+                .await?;
+            Ok(())
+        })
+    })
+    .await
+    .unwrap();
 
     let error = repo.get_library_root(root.id).await.unwrap_err();
     assert_eq!(error.code(), "DB_UNREACHABLE");
@@ -583,21 +580,17 @@ async fn effective_root_with_corrupt_library_enabled_is_a_database_error() {
         .create_library_root(new_root(library_id, owner, "/media"), at(1))
         .await
         .unwrap();
-    let mut connection = repo.pool.acquire().await.unwrap();
-    sqlx::query("PRAGMA ignore_check_constraints = TRUE")
-        .execute(&mut *connection)
-        .await
-        .unwrap();
-    sqlx::query("UPDATE libraries SET enabled = 2 WHERE id = ?")
-        .bind(i64::try_from(library_id.0).unwrap())
-        .execute(&mut *connection)
-        .await
-        .unwrap();
-    sqlx::query("PRAGMA ignore_check_constraints = FALSE")
-        .execute(&mut *connection)
-        .await
-        .unwrap();
-    drop(connection);
+    with_check_constraints_disabled(&repo.pool, move |connection| {
+        Box::pin(async move {
+            sqlx::query("UPDATE libraries SET enabled = 2 WHERE id = ?")
+                .bind(i64::try_from(library_id.0).unwrap())
+                .execute(&mut *connection)
+                .await?;
+            Ok(())
+        })
+    })
+    .await
+    .unwrap();
 
     let error = repo.effective_library_root(root.id).await.unwrap_err();
     assert_eq!(error.code(), "DB_UNREACHABLE");
@@ -619,21 +612,17 @@ async fn corrupt_persisted_root_lifecycle_is_a_database_error_before_classificat
         .unwrap();
     commit(tx).await.unwrap();
 
-    let mut connection = repo.pool.acquire().await.unwrap();
-    sqlx::query("PRAGMA ignore_check_constraints = TRUE")
-        .execute(&mut *connection)
-        .await
-        .unwrap();
-    sqlx::query("UPDATE library_roots SET activation_identity = NULL WHERE id = ?")
-        .bind(i64::try_from(root.id.0).unwrap())
-        .execute(&mut *connection)
-        .await
-        .unwrap();
-    sqlx::query("PRAGMA ignore_check_constraints = FALSE")
-        .execute(&mut *connection)
-        .await
-        .unwrap();
-    drop(connection);
+    with_check_constraints_disabled(&repo.pool, move |connection| {
+        Box::pin(async move {
+            sqlx::query("UPDATE library_roots SET activation_identity = NULL WHERE id = ?")
+                .bind(i64::try_from(root.id.0).unwrap())
+                .execute(&mut *connection)
+                .await?;
+            Ok(())
+        })
+    })
+    .await
+    .unwrap();
 
     let error = repo.effective_library_root(root.id).await.unwrap_err();
     assert_eq!(error.code(), "DB_UNREACHABLE");

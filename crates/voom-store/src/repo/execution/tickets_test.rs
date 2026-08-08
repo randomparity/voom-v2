@@ -4,7 +4,7 @@ use time::{Duration, OffsetDateTime};
 use voom_core::{FileVersionId, JobId, TicketOperation, VoomError};
 
 use crate::repo::execution::jobs::{NewJob, SqliteJobRepo};
-use crate::test_support::fresh_initialized_pool_at;
+use crate::test_support::{fresh_initialized_pool_at, with_check_constraints_disabled};
 
 async fn pool() -> (sqlx::SqlitePool, voom_test_support::TempDatabase) {
     let tmp = voom_test_support::TempDatabase::new().unwrap();
@@ -120,20 +120,17 @@ async fn succeeded_results_for_job_and_operation_rejects_malformed_result_json()
     let job = jobs.create(sample_job()).await.unwrap();
     let operation = ticket_op("synthetic.workflow.operation.extract_audio");
     let ticket = create_ticket_for_job(&repo, job.id, operation.clone()).await;
-    let mut connection = pool.acquire().await.unwrap();
-    sqlx::query("PRAGMA ignore_check_constraints = TRUE")
-        .execute(&mut *connection)
-        .await
-        .unwrap();
-    sqlx::query("UPDATE tickets SET state = 'succeeded', result = '{' WHERE id = ?")
-        .bind(i64::try_from(ticket.id.0).unwrap())
-        .execute(&mut *connection)
-        .await
-        .unwrap();
-    sqlx::query("PRAGMA ignore_check_constraints = FALSE")
-        .execute(&mut *connection)
-        .await
-        .unwrap();
+    with_check_constraints_disabled(&pool, move |connection| {
+        Box::pin(async move {
+            sqlx::query("UPDATE tickets SET state = 'succeeded', result = '{' WHERE id = ?")
+                .bind(i64::try_from(ticket.id.0).unwrap())
+                .execute(&mut *connection)
+                .await?;
+            Ok(())
+        })
+    })
+    .await
+    .unwrap();
 
     let error = repo
         .succeeded_results_for_job_and_operation(job.id, operation)

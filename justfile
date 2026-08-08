@@ -23,6 +23,7 @@ setup:
 # Run the exact set of checks GitHub Actions runs
 ci: fmt-check lint check-test-layout check-paused-time-db check-paused-time-db-selftest \
     check-control-plane-sql-boundary check-control-plane-sql-boundary-selftest \
+    check-check-constraint-bypass check-check-constraint-bypass-selftest \
     check-payload-deny-unknown check-payload-deny-unknown-selftest \
     check-adr-index check-adr-index-selftest test doc deny audit
     @echo "==> All CI checks passed"
@@ -84,6 +85,14 @@ check-control-plane-sql-boundary:
 # Self-test for the control-plane SQL boundary guard
 check-control-plane-sql-boundary-selftest:
     ./scripts/check-control-plane-sql-boundary-selftest.sh
+
+# Guard: check-constraint bypasses use the shared pinned-connection helper
+check-check-constraint-bypass:
+    ./scripts/check-check-constraint-bypass.sh
+
+# Self-test for the check-constraint bypass source guard
+check-check-constraint-bypass-selftest:
+    ./scripts/check-check-constraint-bypass-selftest.sh
 
 # Guard: every durable typed payload denies unknown fields (audit M4, ADR 0013)
 check-payload-deny-unknown:
