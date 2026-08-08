@@ -123,13 +123,18 @@ async fn mark_ready_reserves_writer_lock_before_repository_reads() {
     let observer = Arc::new(MarkReadyTransactionObserver::default());
     let operation_cp = cp.clone();
     let operation_observer = Arc::clone(&observer);
-    let operation = tokio::spawn(async move {
+    let mut operation = tokio::spawn(async move {
         operation_cp
             .mark_ready_if_unblocked_observed(ticket.id, T0, Some(operation_observer.as_ref()))
             .await
     });
 
-    observer.begun.notified().await;
+    tokio::select! {
+        () = observer.begun.notified() => {}
+        result = &mut operation => {
+            panic!("ticket readiness ended before acquiring its transaction: {result:?}");
+        }
+    }
     let mut contender = cp.pool_for_test().acquire().await.unwrap();
     sqlx::query("PRAGMA busy_timeout = 0")
         .execute(&mut *contender)
