@@ -49,12 +49,19 @@ The public `ControlPlane::mark_ready_if_unblocked` wrapper will call
 `begin_immediate_tx` instead of `begin_tx`. The `_in_tx` method remains unchanged
 because its caller owns the outer transaction and therefore owns its lock policy.
 
-The focused test will hold a write transaction on a separate connection, start
-`mark_ready_if_unblocked`, verify that the operation remains pending while the
-lock is held, release the lock, and assert successful promotion plus exactly one
-`ticket.ready` event. Explicit task-start synchronization will ensure the
-operation has been dispatched before the pending assertion; the wall-clock bound
-is only a failure guard, not the business assertion.
+The production wrapper will delegate to a private helper carrying an optional,
+test-only transaction observer, following the existing heartbeat observer
+pattern in `cases::execution::leases`. The observer pauses the operation
+immediately after its transaction begins and never exists in non-test builds.
+
+While the observed operation is paused, a separate connection with
+`busy_timeout = 0` will attempt `BEGIN IMMEDIATE`. The attempt must return
+`SQLITE_BUSY`, proving that `mark_ready_if_unblocked` already owns the writer
+lock before its repository reads. Under the old deferred begin, the contender
+instead acquires the writer lock, so the assertion deterministically fails.
+The test will release the observer, then assert successful promotion plus exactly
+one `ticket.ready` event. Notifications, rather than sleeps or elapsed-time
+assumptions, coordinate every phase.
 
 ## Failure and Ordering Guarantees
 
@@ -66,6 +73,8 @@ is only a failure guard, not the business assertion.
   its event.
 - Ineligible and missing tickets retain their existing results after contention
   clears.
+- The test-only observer pauses after begin and before the first repository read;
+  it cannot reorder production statements because it is absent outside tests.
 
 ## Verification
 
