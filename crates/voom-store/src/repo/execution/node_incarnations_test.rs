@@ -5,7 +5,7 @@ use voom_core::{ErrorCode, NodeIncarnationEndReason, NodeIncarnationId, NodeInca
 
 use super::{NewNodeIncarnation, SqliteNodeIncarnationRepo};
 use crate::repo::execution::nodes::{NewNode, NodeKind, SqliteNodeRepo};
-use crate::test_support::T0;
+use crate::test_support::{T0, with_check_constraints_disabled};
 
 const FIRST_ID: &str = "0123456789abcdef0123456789abcdef";
 const SECOND_ID: &str = "1123456789abcdef0123456789abcdef";
@@ -117,51 +117,47 @@ async fn history_rejects_malformed_ids_and_invalid_status_reason_pairs() {
     let (pool, _tmp) = fresh_pool().await;
     let node = seed_node(&pool, "node-a").await;
     let node_id = i64::try_from(node.id.0).unwrap();
-    // `ignore_check_constraints` is per-connection, and an on-disk pool hands out up to eight
-    // connections. Hold one for every statement that must bypass the constraints, or a later
-    // insert lands on a connection that never saw the pragma and the CHECK rejects it.
-    let mut corrupting = pool.acquire().await.unwrap();
-    sqlx::query("PRAGMA ignore_check_constraints = ON")
-        .execute(&mut *corrupting)
-        .await
-        .unwrap();
-    sqlx::query(
-        "INSERT INTO node_incarnations \
-         (incarnation_id, node_id, status, started_at, last_seen_at, ended_at, end_reason) \
-         VALUES ('not-an-incarnation', ?, 'active', ?, ?, NULL, NULL)",
-    )
-    .bind(node_id)
-    .bind(timestamp(T0))
-    .bind(timestamp(T0))
-    .execute(&mut *corrupting)
-    .await
-    .unwrap();
-
     let repo = SqliteNodeIncarnationRepo::new(pool.clone());
-    let malformed = repo.list_for_node(node.id, 10).await.unwrap_err();
-    assert_eq!(malformed.error_code(), ErrorCode::DbUnreachable);
-    assert!(malformed.to_string().contains("incarnation id"));
+    with_check_constraints_disabled(&pool, move |connection| {
+        Box::pin(async move {
+            sqlx::query(
+                "INSERT INTO node_incarnations \
+                 (incarnation_id, node_id, status, started_at, last_seen_at, ended_at, end_reason) \
+                 VALUES ('not-an-incarnation', ?, 'active', ?, ?, NULL, NULL)",
+            )
+            .bind(node_id)
+            .bind(timestamp(T0))
+            .bind(timestamp(T0))
+            .execute(&mut *connection)
+            .await?;
 
-    sqlx::query("DELETE FROM node_incarnations")
-        .execute(&mut *corrupting)
-        .await
-        .unwrap();
-    sqlx::query(
-        "INSERT INTO node_incarnations \
-         (incarnation_id, node_id, status, started_at, last_seen_at, ended_at, end_reason) \
-         VALUES (?, ?, 'retired', ?, ?, ?, 'superseded')",
-    )
-    .bind(FIRST_ID)
-    .bind(node_id)
-    .bind(timestamp(T0))
-    .bind(timestamp(T0))
-    .bind(timestamp(T0))
-    .execute(&mut *corrupting)
+            let malformed = repo.list_for_node(node.id, 10).await.unwrap_err();
+            assert_eq!(malformed.error_code(), ErrorCode::DbUnreachable);
+            assert!(malformed.to_string().contains("incarnation id"));
+
+            sqlx::query("DELETE FROM node_incarnations")
+                .execute(&mut *connection)
+                .await?;
+            sqlx::query(
+                "INSERT INTO node_incarnations \
+                 (incarnation_id, node_id, status, started_at, last_seen_at, ended_at, end_reason) \
+                 VALUES (?, ?, 'retired', ?, ?, ?, 'superseded')",
+            )
+            .bind(FIRST_ID)
+            .bind(node_id)
+            .bind(timestamp(T0))
+            .bind(timestamp(T0))
+            .bind(timestamp(T0))
+            .execute(&mut *connection)
+            .await?;
+            let invalid_pair = repo.list_for_node(node.id, 10).await.unwrap_err();
+            assert_eq!(invalid_pair.error_code(), ErrorCode::DbUnreachable);
+            assert!(invalid_pair.to_string().contains("status/end reason"));
+            Ok(())
+        })
+    })
     .await
     .unwrap();
-    let invalid_pair = repo.list_for_node(node.id, 10).await.unwrap_err();
-    assert_eq!(invalid_pair.error_code(), ErrorCode::DbUnreachable);
-    assert!(invalid_pair.to_string().contains("status/end reason"));
 }
 
 #[test]

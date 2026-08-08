@@ -5,6 +5,7 @@ use time::OffsetDateTime;
 
 use super::*;
 use crate::repo::external::SqliteExternalSystemRepo;
+use crate::test_support::with_check_constraints_disabled;
 
 async fn repo() -> (SqliteExternalSystemRepo, voom_test_support::TempDatabase) {
     let tmp = voom_test_support::TempDatabase::new().unwrap();
@@ -52,21 +53,18 @@ async fn malformed_connection_profile_preserves_serde_source() {
     let mut tx = repo.pool.begin().await.unwrap();
     let created = repo.register_in_tx(&mut tx, sample(), now()).await.unwrap();
     tx.commit().await.unwrap();
-    let mut connection = repo.pool.acquire().await.unwrap();
-    sqlx::query("PRAGMA ignore_check_constraints = TRUE")
-        .execute(&mut *connection)
-        .await
-        .unwrap();
-    sqlx::query("UPDATE external_systems SET connection_profile = 'not-json' WHERE id = ?")
-        .bind(i64::try_from(created.id.0).unwrap())
-        .execute(&mut *connection)
-        .await
-        .unwrap();
-    sqlx::query("PRAGMA ignore_check_constraints = FALSE")
-        .execute(&mut *connection)
-        .await
-        .unwrap();
-    drop(connection);
+    let created_id = created.id;
+    with_check_constraints_disabled(&repo.pool, move |connection| {
+        Box::pin(async move {
+            sqlx::query("UPDATE external_systems SET connection_profile = 'not-json' WHERE id = ?")
+                .bind(i64::try_from(created_id.0).unwrap())
+                .execute(&mut *connection)
+                .await?;
+            Ok(())
+        })
+    })
+    .await
+    .unwrap();
 
     let error = repo.get(created.id).await.unwrap_err();
     assert_eq!(error.code(), "DB_UNREACHABLE");

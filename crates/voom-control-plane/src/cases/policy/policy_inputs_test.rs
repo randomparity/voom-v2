@@ -8,6 +8,7 @@ use voom_policy::{
 use voom_store::repo::audit::events::EventFilter;
 use voom_store::repo::media::identity::{DiscoveredFile, IngestOutcome, NewFileLocation};
 use voom_store::repo::policy::policy_inputs::PolicyInputTargetRef;
+use voom_store::test_support::with_check_constraints_disabled;
 
 use voom_store::repo::library::libraries::{LibraryMediaKind, NewLibrary};
 use voom_store::repo::library::library_roots::{
@@ -665,21 +666,17 @@ async fn create_policy_input_set_from_scan_rejects_corrupt_library_enabled() {
         .fetch_one(cp.pool_for_test())
         .await
         .unwrap();
-    let mut connection = cp.pool_for_test().acquire().await.unwrap();
-    sqlx::query("PRAGMA ignore_check_constraints = TRUE")
-        .execute(&mut *connection)
-        .await
-        .unwrap();
-    sqlx::query("UPDATE libraries SET enabled = 2 WHERE id = ?")
-        .bind(library_id)
-        .execute(&mut *connection)
-        .await
-        .unwrap();
-    sqlx::query("PRAGMA ignore_check_constraints = FALSE")
-        .execute(&mut *connection)
-        .await
-        .unwrap();
-    drop(connection);
+    with_check_constraints_disabled(cp.pool_for_test(), move |connection| {
+        Box::pin(async move {
+            sqlx::query("UPDATE libraries SET enabled = 2 WHERE id = ?")
+                .bind(library_id)
+                .execute(&mut *connection)
+                .await?;
+            Ok(())
+        })
+    })
+    .await
+    .unwrap();
 
     let error = cp
         .create_policy_input_set_from_scan(PolicyInputFromScanInput {

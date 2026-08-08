@@ -1,6 +1,7 @@
 use time::OffsetDateTime;
 
 use super::*;
+use crate::test_support::with_check_constraints_disabled;
 
 async fn repo() -> (SqliteLibraryRepo, voom_test_support::TempDatabase) {
     let tmp = voom_test_support::TempDatabase::new().unwrap();
@@ -83,21 +84,18 @@ async fn get_rejects_corrupt_enabled_value() {
         .create_library(new_library("films"), at(10))
         .await
         .unwrap();
-    let mut connection = repo.pool.acquire().await.unwrap();
-    sqlx::query("PRAGMA ignore_check_constraints = TRUE")
-        .execute(&mut *connection)
-        .await
-        .unwrap();
-    sqlx::query("UPDATE libraries SET enabled = 2 WHERE id = ?")
-        .bind(i64::try_from(created.id.0).unwrap())
-        .execute(&mut *connection)
-        .await
-        .unwrap();
-    sqlx::query("PRAGMA ignore_check_constraints = FALSE")
-        .execute(&mut *connection)
-        .await
-        .unwrap();
-    drop(connection);
+    let created_id = created.id;
+    with_check_constraints_disabled(&repo.pool, move |connection| {
+        Box::pin(async move {
+            sqlx::query("UPDATE libraries SET enabled = 2 WHERE id = ?")
+                .bind(i64::try_from(created_id.0).unwrap())
+                .execute(&mut *connection)
+                .await?;
+            Ok(())
+        })
+    })
+    .await
+    .unwrap();
 
     let error = repo.get_library(created.id).await.unwrap_err();
     assert_eq!(error.code(), "DB_UNREACHABLE");

@@ -20,10 +20,10 @@
 //! and `SQLite` sidecar. Keeping the fixture in the dev-only support crate also
 //! avoids adding `tempfile` to voom-store's production dependency graph.
 
-use std::path::Path;
+use std::{future::Future, path::Path, pin::Pin};
 
 use serde_json::Value as JsonValue;
-use sqlx::SqlitePool;
+use sqlx::{SqliteConnection, SqlitePool};
 use time::OffsetDateTime;
 use voom_core::{
     JobId, ProviderRelativeLocator, StorageRootId, TicketOperation, VoomError, WorkerId,
@@ -157,6 +157,31 @@ pub async fn fresh_initialized_pool_at(path: &Path) -> Result<SqlitePool, VoomEr
     let pool = connect(&url).await?;
     seed_test_storage_root(&pool).await?;
     Ok(pool)
+}
+
+/// Run a test operation with `SQLite` check constraints disabled on one pooled connection.
+///
+/// The operation must execute every statement that depends on the bypass through the
+/// supplied connection. Dropping the connection returns it to the pool and scopes the
+/// connection-local pragma to this operation.
+pub async fn with_check_constraints_disabled<T, F>(
+    pool: &SqlitePool,
+    operation: F,
+) -> Result<T, sqlx::Error>
+where
+    F: for<'connection> FnOnce(
+        &'connection mut SqliteConnection,
+    ) -> Pin<
+        Box<dyn Future<Output = Result<T, sqlx::Error>> + Send + 'connection>,
+    >,
+{
+    let mut connection = pool.acquire().await?;
+    sqlx::query("PRAGMA ignore_check_constraints = ON")
+        .execute(&mut *connection)
+        .await?;
+    let result = operation(&mut connection).await;
+    drop(connection);
+    result
 }
 
 /// Return the embedded migration registry for integration-test schema fixtures.

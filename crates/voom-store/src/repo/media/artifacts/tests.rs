@@ -14,7 +14,7 @@ use crate::repo::media::identity::{
     SqliteIdentityRepo,
 };
 
-use crate::test_support::fresh_initialized_pool_at;
+use crate::test_support::{fresh_initialized_pool_at, with_check_constraints_disabled};
 
 async fn pool() -> (sqlx::SqlitePool, voom_test_support::TempDatabase) {
     let tmp = voom_test_support::TempDatabase::new().unwrap();
@@ -669,17 +669,20 @@ async fn get_handle_rejects_malformed_persisted_access_modes() {
     let (pool, _tmp) = pool().await;
     let repo = SqliteArtifactRepo::new(pool.clone());
     let handle = repo.create_handle(sample_new_handle()).await.unwrap();
-    let mut connection = pool.acquire().await.unwrap();
-    sqlx::query("PRAGMA ignore_check_constraints = TRUE")
-        .execute(&mut *connection)
-        .await
-        .unwrap();
-    sqlx::query("UPDATE artifact_handles SET allowed_access_modes = 'not-json' WHERE id = ?")
-        .bind(i64::try_from(handle.id.0).unwrap())
-        .execute(&mut *connection)
-        .await
-        .unwrap();
-    drop(connection);
+    let handle_id = i64::try_from(handle.id.0).unwrap();
+    with_check_constraints_disabled(&pool, move |connection| {
+        Box::pin(async move {
+            sqlx::query(
+                "UPDATE artifact_handles SET allowed_access_modes = 'not-json' WHERE id = ?",
+            )
+            .bind(handle_id)
+            .execute(&mut *connection)
+            .await?;
+            Ok(())
+        })
+    })
+    .await
+    .unwrap();
 
     let error = repo.get_handle(handle.id).await.unwrap_err();
 
@@ -701,17 +704,18 @@ async fn list_locations_rejects_unknown_persisted_kind() {
         })
         .await
         .unwrap();
-    let mut connection = pool.acquire().await.unwrap();
-    sqlx::query("PRAGMA ignore_check_constraints = TRUE")
-        .execute(&mut *connection)
-        .await
-        .unwrap();
-    sqlx::query("UPDATE artifact_locations SET kind = 'future_kind' WHERE id = ?")
-        .bind(i64::try_from(location.id.0).unwrap())
-        .execute(&mut *connection)
-        .await
-        .unwrap();
-    drop(connection);
+    let location_id = i64::try_from(location.id.0).unwrap();
+    with_check_constraints_disabled(&pool, move |connection| {
+        Box::pin(async move {
+            sqlx::query("UPDATE artifact_locations SET kind = 'future_kind' WHERE id = ?")
+                .bind(location_id)
+                .execute(&mut *connection)
+                .await?;
+            Ok(())
+        })
+    })
+    .await
+    .unwrap();
 
     let error = repo.list_locations_for_handle(handle.id).await.unwrap_err();
 
@@ -2735,15 +2739,16 @@ async fn committed_ticket_evidence_preserves_absent_joins_and_rejects_corruption
         .unwrap();
     assert!(row.commit.is_none());
 
-    let mut connection = pool.acquire().await.unwrap();
-    sqlx::query("PRAGMA ignore_check_constraints = TRUE")
-        .execute(&mut *connection)
-        .await
-        .unwrap();
-    sqlx::query("UPDATE tickets SET result = '{' WHERE id = 1")
-        .execute(&mut *connection)
-        .await
-        .unwrap();
+    with_check_constraints_disabled(&pool, |connection| {
+        Box::pin(async move {
+            sqlx::query("UPDATE tickets SET result = '{' WHERE id = 1")
+                .execute(&mut *connection)
+                .await?;
+            Ok(())
+        })
+    })
+    .await
+    .unwrap();
     let error = repo
         .committed_ticket_evidence(&[TicketId(1)])
         .await
@@ -3040,16 +3045,14 @@ async fn committed_ticket_evidence_rejects_each_corrupt_durable_kind() {
     ] {
         let (pool, _tmp) = pool().await;
         seed_workflow_evidence(&pool).await;
-        let mut connection = pool.acquire().await.unwrap();
-        sqlx::query("PRAGMA ignore_check_constraints = TRUE")
-            .execute(&mut *connection)
-            .await
-            .unwrap();
-        sqlx::query(statement)
-            .execute(&mut *connection)
-            .await
-            .unwrap();
-        drop(connection);
+        with_check_constraints_disabled(&pool, |connection| {
+            Box::pin(async move {
+                sqlx::query(statement).execute(&mut *connection).await?;
+                Ok(())
+            })
+        })
+        .await
+        .unwrap();
         let error = SqliteArtifactRepo::new(pool)
             .committed_ticket_evidence(&[TicketId(1)])
             .await

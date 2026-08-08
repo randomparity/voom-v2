@@ -4,6 +4,7 @@ use time::OffsetDateTime;
 use voom_core::{FileVersionId, LeaseId, MediaSnapshotId};
 
 use super::*;
+use crate::test_support::with_check_constraints_disabled;
 
 const NOW: &str = "1970-01-01T00:00:00Z";
 
@@ -220,24 +221,21 @@ async fn malformed_worker_result_preserves_serde_source() {
         )
         .await
         .unwrap();
-    let mut connection = fixture.pool.acquire().await.unwrap();
-    sqlx::query("PRAGMA ignore_check_constraints = TRUE")
-        .execute(&mut *connection)
-        .await
-        .unwrap();
-    sqlx::query(
-        "UPDATE audio_synthesis_operations SET worker_result = 'not-json' \
-         WHERE operation_key = ?",
-    )
-    .bind(&fixture.operation().operation_key)
-    .execute(&mut *connection)
+    let operation_key = fixture.operation().operation_key.clone();
+    with_check_constraints_disabled(&fixture.pool, move |connection| {
+        Box::pin(async move {
+            sqlx::query(
+                "UPDATE audio_synthesis_operations SET worker_result = 'not-json' \
+                 WHERE operation_key = ?",
+            )
+            .bind(operation_key)
+            .execute(&mut *connection)
+            .await?;
+            Ok(())
+        })
+    })
     .await
     .unwrap();
-    sqlx::query("PRAGMA ignore_check_constraints = FALSE")
-        .execute(&mut *connection)
-        .await
-        .unwrap();
-    drop(connection);
 
     let error = fixture
         .repo
@@ -579,22 +577,19 @@ async fn audio_synthesis_dispatch_attempt_status_rejects_unknown_durable_value()
         )
         .await
         .unwrap();
-    let mut connection = fixture.pool.acquire().await.unwrap();
-    sqlx::query("PRAGMA ignore_check_constraints = TRUE")
-        .execute(&mut *connection)
-        .await
-        .unwrap();
-    sqlx::query("UPDATE audio_synthesis_dispatch_attempts SET status = ? WHERE id = ?")
-        .bind("impossible")
-        .bind(i64::try_from(attempt.id).unwrap())
-        .execute(&mut *connection)
-        .await
-        .unwrap();
-    sqlx::query("PRAGMA ignore_check_constraints = FALSE")
-        .execute(&mut *connection)
-        .await
-        .unwrap();
-    drop(connection);
+    let attempt_id = i64::try_from(attempt.id).unwrap();
+    with_check_constraints_disabled(&fixture.pool, move |connection| {
+        Box::pin(async move {
+            sqlx::query("UPDATE audio_synthesis_dispatch_attempts SET status = ? WHERE id = ?")
+                .bind("impossible")
+                .bind(attempt_id)
+                .execute(&mut *connection)
+                .await?;
+            Ok(())
+        })
+    })
+    .await
+    .unwrap();
 
     let error = fixture
         .repo
