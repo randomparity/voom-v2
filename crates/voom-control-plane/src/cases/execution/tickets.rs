@@ -14,8 +14,16 @@ use voom_store::repo::execution::tickets::{
 };
 
 use crate::ControlPlane;
+use crate::cases::begin_immediate_tx;
 
 use super::{append_event, begin_tx, commit_tx};
+
+#[cfg(test)]
+#[derive(Default)]
+pub(crate) struct MarkReadyTransactionObserver {
+    pub(crate) begun: tokio::sync::Notify,
+    pub(crate) release: tokio::sync::Notify,
+}
 
 #[derive(Debug, Clone)]
 pub struct PreLeaseFailureOutcome {
@@ -71,7 +79,27 @@ impl ControlPlane {
         ticket_id: TicketId,
         now: OffsetDateTime,
     ) -> Result<Vec<Ticket>, VoomError> {
-        let mut tx = begin_tx(&self.pool).await?;
+        self.mark_ready_if_unblocked_observed(
+            ticket_id,
+            now,
+            #[cfg(test)]
+            None,
+        )
+        .await
+    }
+
+    async fn mark_ready_if_unblocked_observed(
+        &self,
+        ticket_id: TicketId,
+        now: OffsetDateTime,
+        #[cfg(test)] observer: Option<&MarkReadyTransactionObserver>,
+    ) -> Result<Vec<Ticket>, VoomError> {
+        let mut tx = begin_immediate_tx(&self.pool).await?;
+        #[cfg(test)]
+        if let Some(observer) = observer {
+            observer.begun.notify_one();
+            observer.release.notified().await;
+        }
         let promoted = self
             .mark_ready_if_unblocked_in_tx(&mut tx, ticket_id, now)
             .await?;
