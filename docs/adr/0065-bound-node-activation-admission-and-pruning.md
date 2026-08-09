@@ -27,10 +27,19 @@ Admission uses existing `node_incarnations` rows rather than a second ledger. Co
 requests remain serialized by the immediate transaction.
 
 An explicit `ControlPlane::prune_node_activation_history(node_id, cutoff)` operation prunes
-terminal incarnations strictly older than the earlier of the caller cutoff and the active
-quota-window floor. It deletes only retired workers with no durable references, retains an
-incarnation while any worker remains bound, and leaves append-only events untouched.
-Foreign keys remain enabled and unexpected failures roll back the prune transaction.
+terminal incarnations whose `ended_at` is strictly older than the earlier of the caller
+cutoff and the active quota-window floor. `started_at` remains quota evidence and is not
+retention age. It deletes only retired workers with no durable relational references,
+retains an incarnation while any worker remains bound, and leaves append-only events and
+completed activation replay rows untouched. Foreign keys remain enabled and unexpected
+failures roll back the prune transaction.
+
+Completed activation replay outcomes are historical facts rather than live-resource
+handles. After eligible catalog pruning, replay returns the same serialized outcome and
+remains non-mutating even if an identity in that outcome is no longer resolvable. The
+approved replay guarantee is non-mutation, not indefinite catalog retention; making every
+completed activation response a retention hold would leave no normal successful
+incarnation eligible for pruning.
 
 ## Consequences
 
@@ -40,7 +49,10 @@ The quota is fixed in v1 and changing it requires a code and decision update.
 
 Pruning is operator-driven and can leave terminal history in place when operational or
 decision records still reference a retired worker. Event payloads continue to name pruned
-identities, preserving audit facts without retaining every catalog row.
+identities, and completed replay rows retain their original response, preserving historical
+facts without retaining every catalog row. This decision does not bound append-only event
+or completed replay growth; it bounds activation frequency and makes the heavier mutable
+incarnation/worker manifest history reclaimable.
 
 No schema migration is needed: existing node-history and incarnation-worker indexes serve
 the count and prune queries. Campaign migration number 0036 is reserved but unused rather
@@ -48,6 +60,11 @@ than adding a redundant index or another retention obligation.
 
 ## Considered & rejected
 
+- Do nothing. Authentication and the one-active-incarnation index constrain identity and
+  concurrency, not repeated successful fresh keys; a crash loop or valid-token caller can
+  still grow incarnation and worker-manifest rows without bound. This decision knowingly
+  retains append-only events and completed replay rows rather than pretending to bound all
+  database growth.
 - Add a dedicated admission ledger. It separates quota evidence from incarnation history,
   but duplicates a durable fact and creates another unbounded history requiring cleanup.
 - Enforce a one-activation cooldown. It is simpler but rejects legitimate restart bursts

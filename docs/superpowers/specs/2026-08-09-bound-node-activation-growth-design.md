@@ -97,8 +97,9 @@ retained; only rows strictly older than it are candidates. This prevents mainten
 erasing evidence still needed by admission even when a caller supplies a future cutoff.
 
 The operation selects terminal incarnations for exactly one logical node in deterministic
-oldest-first order. For each candidate, the worker repository considers only workers that
-are already `retired` and bound to that incarnation:
+`ended_at` order; `started_at` is quota evidence, not retention age. An incarnation whose
+`ended_at` equals the effective cutoff is retained. For each candidate, the worker
+repository considers only workers that are already `retired` and bound to that incarnation:
 
 - capability and grant rows are worker-owned metadata and may cascade with an eligible
   worker;
@@ -113,6 +114,14 @@ SQLite foreign keys remain enabled throughout. The method does not disable const
 null references, or rewrite history to make a row eligible. Events have no foreign key to
 workers or incarnations and are append-only by trigger; pruning never touches them, so
 their payload IDs remain audit evidence after eligible catalog rows are removed.
+
+Completed activation idempotency rows are also retained unchanged. Their serialized
+outcomes are historical facts, not live-resource handles: replay after pruning returns the
+same outcome bytes and remains non-mutating even when an eligible incarnation or worker ID
+is no longer resolvable through current catalog reads. The external replay requirement is
+non-mutation; it does not promise indefinite catalog retention. Treating every completed
+activation response as a retention hold would make every normal successful incarnation
+ineligible and defeat the requested prune path.
 
 The method returns `Result<(), VoomError>`; callers inspect normal repository state if they
 need counts. A partial prune is not exposed: any unexpected database error rolls back the
@@ -183,6 +192,8 @@ Tokio time. They prove:
 - pruning retains active/recent incarnations, live workers, and workers referenced by
   durable operational or scheduler history;
 - events that named pruned rows remain unchanged;
+- completed activation replay after pruning returns the original historical outcome
+  without recreating any catalog row;
 - an injected prune failure rolls back earlier eligible deletions.
 
 Repository tests separately cover inclusive window counting, checked count conversion,
