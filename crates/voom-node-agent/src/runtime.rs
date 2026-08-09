@@ -4,8 +4,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use rand::rngs::StdRng;
-use rand::{RngCore, SeedableRng};
+use rand::rngs::{OsRng, StdRng};
+use rand::{Rng, RngCore, SeedableRng, TryRngCore};
 use secrecy::SecretString;
 use serde_json::{Value as JsonValue, json};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, watch};
@@ -113,7 +113,27 @@ impl AgentRuntime {
 
     async fn run_with_shutdowns(
         self,
+        signals: mpsc::UnboundedReceiver<()>,
+    ) -> Result<(), VoomError> {
+        self.run_with_shutdowns_from_rng(signals, &mut OsRng).await
+    }
+
+    async fn run_with_shutdowns_from_rng<R>(
+        self,
+        signals: mpsc::UnboundedReceiver<()>,
+        source: &mut R,
+    ) -> Result<(), VoomError>
+    where
+        R: TryRngCore,
+    {
+        let schedule_rng = schedule_rng_from(source)?;
+        self.run_with_seeded_shutdowns(signals, schedule_rng).await
+    }
+
+    async fn run_with_seeded_shutdowns(
+        self,
         mut signals: mpsc::UnboundedReceiver<()>,
+        mut schedule_rng: StdRng,
     ) -> Result<(), VoomError> {
         let incarnation_id = NodeIncarnationId::generate()?;
         let activation = tokio::select! {
@@ -150,8 +170,13 @@ impl AgentRuntime {
         };
 
         let (shutdown_tx, shutdown_rx) = watch::channel(ShutdownKind::Running);
-        let mut coordinators =
-            self.spawn_coordinators(children, incarnation_id, &shutdown_rx, &fatal_tx)?;
+        let mut coordinators = self.spawn_coordinators(
+            children,
+            incarnation_id,
+            &shutdown_rx,
+            &fatal_tx,
+            &mut schedule_rng,
+        )?;
         let exit = tokio::select! {
             signal = signals.recv() => {
                 if signal.is_some() {
@@ -342,6 +367,7 @@ impl AgentRuntime {
         incarnation_id: NodeIncarnationId,
         shutdown: &watch::Receiver<ShutdownKind>,
         fatal_tx: &mpsc::UnboundedSender<RuntimeFatal>,
+        schedule_rng: &mut StdRng,
     ) -> Result<JoinSet<CoordinatorExit>, VoomError> {
         let workers = self
             .config
@@ -369,7 +395,13 @@ impl AgentRuntime {
                 worker: (*worker).clone(),
                 fatal_tx: fatal_tx.clone(),
             };
-            coordinators.spawn(run_coordinator(child, context, shutdown.clone()));
+            let coordinator_rng = derive_schedule_rng(schedule_rng);
+            coordinators.spawn(run_coordinator(
+                child,
+                context,
+                shutdown.clone(),
+                coordinator_rng,
+            ));
         }
         Ok(coordinators)
     }
@@ -468,26 +500,43 @@ async fn run_coordinator(
     mut child: RunningChild,
     context: CoordinatorContext,
     mut shutdown: watch::Receiver<ShutdownKind>,
+    mut schedule_rng: StdRng,
 ) -> CoordinatorExit {
     let permits = Arc::new(Semaphore::new(context.worker.max_parallel as usize));
     let mut leases = JoinSet::new();
     let mut crashes = CrashBudget::new();
     let (cancel_tx, cancel_rx) = watch::channel(LeaseCancellation::Running);
+    let mut poll_before_acquire = false;
     loop {
         drain_finished_leases(&mut leases);
-        let acquire = acquire_one(&context, Arc::clone(&permits));
-        tokio::pin!(acquire);
-        let event = tokio::select! {
-            changed = shutdown.changed() => {
-                let kind = if changed.is_err() { ShutdownKind::Fenced } else { *shutdown.borrow() };
-                CoordinatorEvent::Shutdown(kind)
+        let event = if poll_before_acquire {
+            poll_before_acquire = false;
+            acquisition_poll_event(
+                context.poll_interval,
+                &mut schedule_rng,
+                &mut shutdown,
+                child.wait_for_exit(),
+            )
+            .await
+        } else {
+            let acquire = acquire_one(&context, Arc::clone(&permits));
+            tokio::pin!(acquire);
+            tokio::select! {
+                changed = shutdown.changed() => {
+                    let kind = if changed.is_err() {
+                        ShutdownKind::Fenced
+                    } else {
+                        *shutdown.borrow()
+                    };
+                    CoordinatorEvent::Shutdown(kind)
+                }
+                status = child.wait_for_exit() => CoordinatorEvent::ChildExit(status.map(|_| ())),
+                result = &mut acquire => CoordinatorEvent::Acquire(result),
             }
-            status = child.wait_for_exit() => CoordinatorEvent::ChildExit(status.map(|_| ())),
-            result = &mut acquire => CoordinatorEvent::Acquire(result),
         };
         match event {
             CoordinatorEvent::Acquire(Ok(Acquired::Idle)) => {
-                tokio::time::sleep(context.poll_interval).await;
+                poll_before_acquire = true;
             }
             CoordinatorEvent::Acquire(Ok(Acquired::Lease(lease))) => {
                 let lease_context = context.clone();
@@ -505,7 +554,7 @@ async fn run_coordinator(
             CoordinatorEvent::Acquire(Ok(Acquired::Terminal)) => {
                 // A lease that validated as terminal yields nothing to run. Without this the
                 // coordinator spins acquire/heartbeat pairs at full rate.
-                tokio::time::sleep(context.poll_interval).await;
+                poll_before_acquire = true;
             }
             CoordinatorEvent::Acquire(Err(error)) => return CoordinatorExit::Fatal(error),
             CoordinatorEvent::Shutdown(kind) => {
@@ -541,6 +590,7 @@ async fn run_coordinator(
             CoordinatorEvent::ChildExit(Err(error)) => {
                 return CoordinatorExit::Fatal(RuntimeFatal::Internal(error.to_string()));
             }
+            CoordinatorEvent::PollElapsed => {}
         }
     }
 }
@@ -591,7 +641,43 @@ async fn restart_child(
 enum CoordinatorEvent {
     Acquire(Result<Acquired, RuntimeFatal>),
     ChildExit(Result<(), crate::child::ChildError>),
+    PollElapsed,
     Shutdown(ShutdownKind),
+}
+
+async fn acquisition_poll_event<F, T>(
+    interval: Duration,
+    rng: &mut impl Rng,
+    shutdown: &mut watch::Receiver<ShutdownKind>,
+    child_exit: F,
+) -> CoordinatorEvent
+where
+    F: Future<Output = Result<T, crate::child::ChildError>>,
+{
+    let delay = acquisition_poll_delay(interval, rng);
+    wait_for_acquisition_poll(delay, shutdown, child_exit).await
+}
+
+async fn wait_for_acquisition_poll<F, T>(
+    delay: Duration,
+    shutdown: &mut watch::Receiver<ShutdownKind>,
+    child_exit: F,
+) -> CoordinatorEvent
+where
+    F: Future<Output = Result<T, crate::child::ChildError>>,
+{
+    tokio::select! {
+        changed = shutdown.changed() => {
+            let kind = if changed.is_err() {
+                ShutdownKind::Fenced
+            } else {
+                *shutdown.borrow()
+            };
+            CoordinatorEvent::Shutdown(kind)
+        }
+        status = child_exit => CoordinatorEvent::ChildExit(status.map(|_| ())),
+        () = tokio::time::sleep(delay) => CoordinatorEvent::PollElapsed,
+    }
 }
 
 enum Acquired {
@@ -1489,6 +1575,39 @@ fn node_heartbeat_expiry() -> RuntimeFatal {
 
 fn heartbeat_interval(ttl_seconds: u32) -> Duration {
     Duration::from_secs(u64::from((ttl_seconds / HEARTBEAT_DIVISOR).max(1)))
+}
+
+fn schedule_rng_from<R>(source: &mut R) -> Result<StdRng, VoomError>
+where
+    R: TryRngCore,
+{
+    StdRng::try_from_rng(source).map_err(|error| {
+        VoomError::Internal(format!(
+            "seed node-agent schedule RNG from OS entropy: {error}"
+        ))
+    })
+}
+
+fn derive_schedule_rng(parent: &mut StdRng) -> StdRng {
+    StdRng::from_rng(parent)
+}
+
+fn acquisition_poll_delay(interval: Duration, rng: &mut impl Rng) -> Duration {
+    centered_jitter(interval, rng)
+}
+
+fn centered_jitter(interval: Duration, rng: &mut impl Rng) -> Duration {
+    let half = interval / 2;
+    let lower = half.as_nanos();
+    let upper = interval.saturating_add(half).as_nanos();
+    duration_from_nanos(rng.random_range(lower..=upper))
+}
+
+fn duration_from_nanos(nanos: u128) -> Duration {
+    const NANOS_PER_SECOND: u128 = 1_000_000_000;
+    let seconds = u64::try_from(nanos / NANOS_PER_SECOND).unwrap_or(u64::MAX);
+    let subsecond = u32::try_from(nanos % NANOS_PER_SECOND).unwrap_or(999_999_999);
+    Duration::new(seconds, subsecond)
 }
 
 fn is_validation_fresh(elapsed: Duration, ttl: Duration) -> bool {
