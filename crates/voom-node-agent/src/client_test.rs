@@ -9,7 +9,7 @@ use rand::SeedableRng;
 use rand::rngs::StdRng;
 use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
-use voom_core::{ArtifactAccessMode, NodeId, OperationKind, VoomError};
+use voom_core::{ArtifactAccessMode, ErrorCode, NodeId, OperationKind, VoomError};
 
 use super::{
     ControlPlaneClient, DEFAULT_MAXIMUM_ATTEMPTS, INITIAL_RETRY_DELAY, MAX_RETRY_DELAY,
@@ -65,9 +65,9 @@ async fn retryable_failures_stop_at_the_attempt_limit() {
         .unwrap_err();
 
     assert_eq!(received.iter().count(), 2);
-    let message = match error {
-        VoomError::ExternalSystemUnavailable(message) => message,
-        error => format!("unexpected retry exhaustion error: {error}"),
+    assert_eq!(error.error_code(), ErrorCode::ExternalSystemUnavailable);
+    let VoomError::ExternalSystemUnavailable(message) = error else {
+        return;
     };
     assert!(message.contains("after 2 attempts"));
     assert!(message.contains("500 Internal Server Error"));
