@@ -64,4 +64,5 @@ are append-only — supersede an ADR with a new one rather than rewriting histor
 | [0056](0056-bound-ffprobe-version-probing-inside-worker-startup.md) | Bound ffprobe version probing inside worker startup |
 | [0057](0057-node-incarnations-and-atomic-worker-declaration.md) | Node incarnations atomically declare supervised workers |
 | [0059](0059-bounded-jittered-control-plane-client-retries.md) | Bound and jitter control-plane client retries by default |
+| [0060](0060-explicit-node-agent-shutdown-signal-phase.md) | Track node-agent shutdown signal phase explicitly |
 | [0061](0061-shared-check-constraint-bypass-helper.md) | Shared test helper for SQLite check-constraint bypasses |
