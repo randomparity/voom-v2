@@ -85,9 +85,11 @@ The regression proof has two arms:
   the new diagnostic identifying durable retirement as complete and the second-agent join
   as missing. Restore the source and guard, then rerun green.
 - Record the host OS, architecture, logical CPU count, and Rust version. Build the lifecycle
-  test binary once. Start twice as many CPU busy loops as logical CPUs, then run four waves
-  of 16 concurrent copies of that exact binary with two test threads per copy. Stop and
-  reap every load process after the fourth wave. All 64 test-process exit codes must be
+  test binary once. Before starting load, install cleanup for normal exit, command failure,
+  and interrupt that terminates and waits for only the load-process PIDs recorded by this
+  run. Start twice as many CPU busy loops as logical CPUs, then run four waves of 16
+  concurrent copies of that exact binary with two test threads per copy. Cleanup runs on
+  every exit path, including an early failed wave. All 64 test-process exit codes must be
   zero; preserve the exact command, host facts, elapsed time, and per-wave result counts in
   the work report.
 
