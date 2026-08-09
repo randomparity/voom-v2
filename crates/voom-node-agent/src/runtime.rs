@@ -141,11 +141,13 @@ impl AgentRuntime {
             _ = signals.recv() => return Ok(()),
         };
         let (fatal_tx, mut fatal_rx) = mpsc::unbounded_channel();
+        let node_heartbeat_rng = derive_schedule_rng(&mut schedule_rng);
         let node_heartbeat = self
             .start_node_heartbeat(
                 incarnation_id,
                 activation.heartbeat_ttl_seconds,
                 fatal_tx.clone(),
+                node_heartbeat_rng,
             )
             .await?;
 
@@ -275,6 +277,7 @@ impl AgentRuntime {
         incarnation_id: NodeIncarnationId,
         ttl_seconds: u32,
         fatal_tx: mpsc::UnboundedSender<RuntimeFatal>,
+        schedule_rng: StdRng,
     ) -> Result<NodeHeartbeatHandle, VoomError> {
         send_node_heartbeat(
             self.client.as_ref(),
@@ -288,43 +291,18 @@ impl AgentRuntime {
         let ttl = Duration::from_secs(u64::from(ttl_seconds)).max(interval.saturating_mul(2));
         let client = Arc::clone(&self.client);
         let node_id = self.config.config.node_id;
-        let (stop_tx, mut stop_rx) = watch::channel(false);
+        let (stop_tx, stop_rx) = watch::channel(false);
         let joined = tokio::spawn(async move {
-            // The control plane expires the incarnation `ttl` after the last heartbeat it
-            // observed. Self-fence at that deadline instead of retrying an unreachable
-            // control plane while children keep acquiring against a dead incarnation.
-            let mut last_success = Instant::now();
-            loop {
-                tokio::select! {
-                    changed = stop_rx.changed() => {
-                        if changed.is_err() || *stop_rx.borrow() {
-                            return;
-                        }
-                    }
-                    () = tokio::time::sleep(interval) => {
-                        let Some(budget) = ttl.checked_sub(last_success.elapsed()) else {
-                            let _ = fatal_tx.send(node_heartbeat_expiry());
-                            return;
-                        };
-                        match tokio::time::timeout(
-                            budget,
-                            send_node_heartbeat(client.as_ref(), node_id, incarnation_id),
-                        )
-                        .await
-                        {
-                            Ok(Ok(())) => last_success = Instant::now(),
-                            Ok(Err(error)) => {
-                                let _ = fatal_tx.send(RuntimeFatal::ControlPlane(error));
-                                return;
-                            }
-                            Err(_) => {
-                                let _ = fatal_tx.send(node_heartbeat_expiry());
-                                return;
-                            }
-                        }
-                    }
-                }
-            }
+            node_heartbeat_loop(
+                client,
+                node_id,
+                incarnation_id,
+                NodeHeartbeatTiming { interval, ttl },
+                fatal_tx,
+                stop_rx,
+                schedule_rng,
+            )
+            .await;
         });
         Ok(NodeHeartbeatHandle {
             stop_tx,
@@ -457,6 +435,58 @@ impl AgentRuntime {
     }
 }
 
+struct NodeHeartbeatTiming {
+    interval: Duration,
+    ttl: Duration,
+}
+
+async fn node_heartbeat_loop(
+    client: Arc<dyn ControlPlaneApi>,
+    node_id: voom_core::NodeId,
+    incarnation_id: NodeIncarnationId,
+    timing: NodeHeartbeatTiming,
+    fatal_tx: mpsc::UnboundedSender<RuntimeFatal>,
+    mut stop: watch::Receiver<bool>,
+    mut schedule_rng: StdRng,
+) {
+    // The control plane expires the incarnation `ttl` after the last heartbeat it observed.
+    // Self-fence at that deadline instead of retrying while children keep acquiring against a
+    // dead incarnation.
+    let mut last_success = Instant::now();
+    loop {
+        let delay = node_heartbeat_delay(timing.interval, &mut schedule_rng);
+        tokio::select! {
+            changed = stop.changed() => {
+                if changed.is_err() || *stop.borrow() {
+                    return;
+                }
+            }
+            () = tokio::time::sleep(delay) => {
+                let Some(budget) = timing.ttl.checked_sub(last_success.elapsed()) else {
+                    let _ = fatal_tx.send(node_heartbeat_expiry());
+                    return;
+                };
+                match tokio::time::timeout(
+                    budget,
+                    send_node_heartbeat(client.as_ref(), node_id, incarnation_id),
+                )
+                .await
+                {
+                    Ok(Ok(())) => last_success = Instant::now(),
+                    Ok(Err(error)) => {
+                        let _ = fatal_tx.send(RuntimeFatal::ControlPlane(error));
+                        return;
+                    }
+                    Err(_) => {
+                        let _ = fatal_tx.send(node_heartbeat_expiry());
+                        return;
+                    }
+                }
+            }
+        }
+    }
+}
+
 struct NodeHeartbeatHandle {
     stop_tx: watch::Sender<bool>,
     joined: tokio::task::JoinHandle<()>,
@@ -542,6 +572,7 @@ async fn run_coordinator(
                 let lease_context = context.clone();
                 let client = child.client();
                 let credentials = child.spec().credentials().clone();
+                let lease_rng = derive_schedule_rng(&mut schedule_rng);
                 leases.spawn(run_lease(
                     *lease,
                     client,
@@ -549,6 +580,7 @@ async fn run_coordinator(
                     lease_context,
                     cancel_rx.clone(),
                     shutdown.clone(),
+                    lease_rng,
                 ));
             }
             CoordinatorEvent::Acquire(Ok(Acquired::Terminal)) => {
@@ -778,6 +810,7 @@ async fn run_lease(
     context: CoordinatorContext,
     mut worker_cancel: watch::Receiver<LeaseCancellation>,
     mut shutdown: watch::Receiver<ShutdownKind>,
+    schedule_rng: StdRng,
 ) {
     let lease_id = lease.dispatch.lease_id;
     let (heartbeat_stop_tx, heartbeat_stop_rx) = watch::channel(false);
@@ -791,6 +824,7 @@ async fn run_lease(
             lease.dispatch.lease_ttl_seconds,
             heartbeat_stop_rx,
             lease_fence_tx,
+            schedule_rng,
         )
         .await;
     });
@@ -815,6 +849,7 @@ async fn lease_heartbeat_loop(
     lease_ttl_seconds: i64,
     mut stop: watch::Receiver<bool>,
     fence: mpsc::Sender<()>,
+    mut schedule_rng: StdRng,
 ) {
     // Both the beat and the deadline come from the grant the control plane returned, not
     // from local config: the server expires the lease on its own granted TTL, so anything
@@ -822,6 +857,7 @@ async fn lease_heartbeat_loop(
     // TTL is not longer than its beat is incoherent and fences almost immediately; that is
     // the honest outcome, since the server would expire such a lease just as fast.
     let seconds = u64::try_from(heartbeat_after_seconds).unwrap_or(1).max(1);
+    let interval = Duration::from_secs(seconds);
     let ttl = granted_lease_ttl(lease_ttl_seconds);
     // The control plane expires the lease `ttl` after the last heartbeat it observed. Fence
     // locally at that same deadline so the child stops before the ticket is redispatched.
@@ -833,7 +869,7 @@ async fn lease_heartbeat_loop(
                     return;
                 }
             }
-            () = tokio::time::sleep(Duration::from_secs(seconds)) => {
+            () = tokio::time::sleep(lease_heartbeat_delay(interval, ttl, &mut schedule_rng)) => {
                 let Ok(request) = lease_heartbeat_request(
                     &context,
                     new_key("lease-heartbeat"),
@@ -1594,6 +1630,19 @@ fn derive_schedule_rng(parent: &mut StdRng) -> StdRng {
 
 fn acquisition_poll_delay(interval: Duration, rng: &mut impl Rng) -> Duration {
     centered_jitter(interval, rng)
+}
+
+fn node_heartbeat_delay(interval: Duration, rng: &mut impl Rng) -> Duration {
+    centered_jitter(interval, rng)
+}
+
+fn lease_heartbeat_delay(interval: Duration, ttl: Duration, rng: &mut impl Rng) -> Duration {
+    let upper = interval.saturating_add(interval / 2);
+    if upper < ttl {
+        centered_jitter(interval, rng)
+    } else {
+        interval
+    }
 }
 
 fn centered_jitter(interval: Duration, rng: &mut impl Rng) -> Duration {
