@@ -28,9 +28,11 @@ The timeout diagnostic identifies the second-agent graceful-shutdown path, recor
 of the join and durable-state witnesses completed, and includes already-observed request
 paths. Diagnostic collection must itself remain bounded.
 
-The fix is verified by deliberately withholding the second shutdown signal so the focused
-test fails through this guard, and by running concurrent copies under CPU oversubscription.
-The contention exercise is release evidence, not a permanent oversubscribing CI loop.
+The fix is verified by sending the second shutdown signal and then temporarily making a
+production stage after signal consumption remain pending, so the focused test must fail
+through this guard. The mutation is restored before the test reruns green. Concurrent
+copies then run under CPU oversubscription. The contention exercise is release evidence,
+not a permanent oversubscribing CI loop.
 
 ## Consequences
 
@@ -47,6 +49,12 @@ No production interface, runtime ordering, persistent schema, or default timeout
 
 ## Considered & rejected
 
+- Retain the corrected sequential join and retirement poll, then gather only bite and load
+  evidence. PRs #454 and #460 make that a credible status quo, but its two independent
+  guards permit two 30-second waits and cannot identify whether durable retirement became
+  visible while task termination remained stuck. One shared guard expresses the requested
+  lifecycle completion bound and records each witness separately with little test-only
+  machinery.
 - Increase or retry the guard. The reproduced failures consume every tested bound exactly,
   so this delays the same report without proving progress.
 - Add an injectable production shutdown observer. It adds a single-use seam and tests the

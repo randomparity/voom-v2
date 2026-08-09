@@ -79,9 +79,10 @@ back to an explicit unavailable marker.
 
 The regression proof has two arms:
 
-- Temporarily make the second agent's shutdown future non-terminating while preserving the
-  helper and use a short local guard. The focused lifecycle test must fail with the new
-  second-agent lifecycle diagnostic. Restore the source and guard, then rerun green.
+- Send the second shutdown signal, then temporarily make a production stage after the
+  runtime consumes it remain pending while preserving the helper and using a short local
+  guard. The focused lifecycle test must fail with the new second-agent lifecycle
+  diagnostic. Restore the source and guard, then rerun green.
 - Build the lifecycle test binary once, then run multiple copies concurrently while the
   host is CPU-oversubscribed. This recreates the process and scheduler contention shape
   from the issue without weakening or ignoring the test. Every copy must exit successfully.
