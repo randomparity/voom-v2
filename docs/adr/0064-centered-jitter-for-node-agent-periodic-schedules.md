@@ -21,7 +21,9 @@ leave heartbeat deadline margin and preserve prompt shutdown while a sampled del
 Each periodic sleep samples uniformly from 50% through 150% of its existing interval. The
 range is centered on the existing interval, so its expected delay and mean request rate remain
 unchanged. A private duration sampler accepts an injected random-number generator so seeded
-unit tests can prove the bounds without wall-clock randomness.
+unit tests can prove the bounds without wall-clock randomness. Production tasks each seed an
+independent RNG stream from operating-system entropy once and reuse it across cycles; shared
+seeds would preserve the fleet phase this decision exists to break.
 
 Acquisition polling uses the configured poll interval as its center. Its pending sleep selects
 against shutdown, so a sampled upper bound does not worsen shutdown responsiveness.
@@ -54,6 +56,8 @@ decision restores fixed periodic timing.
 
 ## Considered & rejected
 
+- **Retain exact periodic intervals:** has no implementation risk, but preserves synchronized
+  fleet waves after shared starts and recovery and therefore does not meet issue #459's outcome.
 - **Full jitter from zero through the existing interval:** disperses traffic but halves the
   expected delay and approximately doubles periodic request load.
 - **Delay-only jitter from the interval through twice the interval:** never sends earlier, but
