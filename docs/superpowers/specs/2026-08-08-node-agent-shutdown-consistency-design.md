@@ -41,12 +41,18 @@ Introduce a private two-state signal phase:
   `ShutdownKind::Forced` and records a forced outcome.
 
 `RuntimeExit::Graceful` starts coordinator reaping in `ForceEnabled`; fatal and
-restart-exhausted exits start in `AwaitingFirst`. A closed signal source disables further
-signal handling without spinning. Coordinator reaping still completes every coordinator
-unless genuine force causes its lease tasks to abort through the existing watch channel.
+restart-exhausted exits start in `AwaitingFirst`. Child-startup failure also starts
+deactivation in `AwaitingFirst` because no signal was consumed. A closed signal source
+disables further signal handling without spinning. Coordinator reaping still completes
+every coordinator unless genuine force causes its lease tasks to abort through the existing
+watch channel.
 
 This phase is state, not a timing heuristic. A signal buffered before reaping and a signal
-delivered later during reaping follow the same transition.
+delivered later during reaping follow the same transition. Coordinator reaping returns the
+possibly advanced phase with its forced result. Restart-exhausted deactivation resumes from
+that exact phase, so finishing reaping before the first signal cannot reset the lifecycle to
+force-enabled. Deactivation consumes an owed first signal and keeps waiting; only a signal
+received in `ForceEnabled` interrupts it.
 
 ### Typed settlement outcome
 
@@ -98,9 +104,10 @@ The change must not reorder any durable or process-lifecycle step:
 
 A genuine second signal continues to return the existing actionable forced-shutdown error
 where that error is observable. A fatal exit retains its original fatal error even if a
-second signal accelerates settlement, so force does not mask the root cause. No new logs or
-public error codes are introduced. The typed internal outcome is observable through tests
-and through the runtime's existing forced result aggregation.
+second signal accelerates settlement, so force does not mask the root cause. A closed signal
+source retains its existing deactivation error behavior. No new logs or public error codes
+are introduced. The typed internal outcome is observable through tests and through the
+runtime's existing forced result aggregation.
 
 The operator runbook will state that the first signal never forces settlement, including
 when an internal fatal or restart-exhausted exit began shutdown concurrently. A second
@@ -115,9 +122,11 @@ Tests will prove the change bites before implementation:
    second signal and prove force is broadcast and reaping completes.
 2. Prove graceful reaping, whose first signal was already consumed, still forces on the
    next signal.
-3. Prove a coordinator surfaces `LeaseSettlement::Forced` after forced lease abortion and
+3. Let restart-exhausted reaping finish before any signal, block deactivation, and prove
+   the first signal does not interrupt it while the second does.
+4. Prove a coordinator surfaces `LeaseSettlement::Forced` after forced lease abortion and
    that coordinator reaping aggregates that outcome.
-4. Give validation a dispatch TTL different from configured TTL and a response whose delay
+5. Give validation a dispatch TTL different from configured TTL and a response whose delay
    is fresh only under the grant. Prove validation accepts it. Existing stale-attempt,
    heartbeat-fence, terminal-response, shutdown-order, and second-signal tests remain green.
 
