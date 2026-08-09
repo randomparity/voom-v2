@@ -17,11 +17,14 @@ history, append-only events, or evidence still used by admission.
 
 ## Decision
 
-One logical node may complete five fresh activations in a rolling 60-second window. Within
-the existing immediate activation transaction, completed replay returns before quota
-evaluation. A fresh request counts incarnation starts in the inclusive lower-bound window
-and rejects at the limit before supersession or any activation mutation. Rejection emits a
-structured warning with a fixed quota-exceeded reason and non-secret policy fields.
+One logical node may complete five fresh activations in a rolling 60-second window. After
+the existing immediate activation transaction acquires its writer lock, it samples the
+clock. Completed replay returns first, and the existing incarnation-uniqueness check then
+precedes quota evaluation. A genuinely fresh request counts incarnation starts at or after
+the inclusive lower bound; future-dated rows count conservatively if the clock moves
+backward. It rejects at the limit before supersession or any activation mutation.
+Rejection emits a structured warning with a fixed quota-exceeded reason and non-secret
+policy fields.
 
 Admission uses existing `node_incarnations` rows rather than a second ledger. Concurrent
 requests remain serialized by the immediate transaction.
@@ -32,7 +35,10 @@ cutoff and the active quota-window floor. `started_at` remains quota evidence an
 retention age. It deletes only retired workers with no durable relational references,
 retains an incarnation while any worker remains bound, and leaves append-only events and
 completed activation replay rows untouched. Foreign keys remain enabled and unexpected
-failures roll back the prune transaction.
+failures roll back the prune transaction. The only permitted worker-owned cascades are
+capabilities and grants. Both scheduler-decision worker columns use `SET NULL`, so pruning
+explicitly treats them as retention holds; a schema-inventory regression prevents a new
+permissive worker foreign key from bypassing classification.
 
 Completed activation replay outcomes are historical facts rather than live-resource
 handles. After eligible catalog pruning, replay returns the same serialized outcome and
