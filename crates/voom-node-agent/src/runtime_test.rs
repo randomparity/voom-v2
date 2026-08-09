@@ -6,6 +6,8 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use async_trait::async_trait;
 use secrecy::SecretString;
+#[cfg(unix)]
+use tempfile::TempDir;
 use time::OffsetDateTime;
 use tokio::io::{AsyncRead, AsyncWriteExt};
 use tokio::sync::{Mutex, Notify, oneshot};
@@ -13,7 +15,8 @@ use voom_core::{
     ArtifactAccessMode, LeaseId, NodeId, NodeIncarnationStatus, OperationKind, TicketId, WorkerId,
 };
 use voom_worker_protocol::{
-    DispatchStream, HandshakeResponse, NdjsonReader, OperationResponse, ProtocolError,
+    DispatchStream, HandshakeResponse, HttpServer, NdjsonReader, OperationFuture, OperationHandler,
+    OperationResponse, ProtocolError, ServerHandle, ServerRunning, WorkerCredentials,
     WorkerIdentityResponse,
 };
 
@@ -309,41 +312,57 @@ async fn max_parallel_reserves_before_acquire_and_never_over_acquires() {
     assert_eq!(control.max_active_acquires.load(Ordering::SeqCst), 2);
 }
 
-#[tokio::test(start_paused = true)]
-async fn child_crash_settles_all_held_leases_before_restart_can_begin() {
+#[cfg(unix)]
+#[tokio::test]
+async fn child_crash_restarts_only_after_every_held_lease_settles() {
+    let fixture = ProcessWorkerFixture::new();
     let control = Arc::new(FakeControlPlane::default());
-    let worker = Arc::new(FakeWorker::new(WorkerMode::Silent));
-    let permits = Arc::new(Semaphore::new(2));
-    let (cancel_tx, cancel_rx) = watch::channel(LeaseCancellation::Running);
-    let (_shutdown_tx, shutdown_rx) = watch::channel(ShutdownKind::Running);
-    let mut leases = JoinSet::new();
-    for _ in 0..2 {
-        leases.spawn(run_lease(
-            held_lease(Arc::clone(&permits)).await,
-            worker.clone(),
-            credentials(),
-            context(control.clone()),
-            cancel_rx.clone(),
-            shutdown_rx.clone(),
-        ));
-    }
-    wait_for_count(&worker.dispatched, &worker.dispatches, 2).await;
+    let fail_gate = Arc::new(Notify::new());
+    *control.fail_gate.lock().await = Some(Arc::clone(&fail_gate));
+    *control.acquire_mode.lock().await = AcquireMode::Leases(Arc::new(StdMutex::new(
+        [dispatch_with_lease(11), dispatch_with_lease(12)].into(),
+    )));
+    let runtime = AgentRuntime::with_client(
+        loaded_config_with_worker(fixture.worker(2)),
+        control.clone(),
+    );
+    let (signal_tx, signal_rx) = mpsc::unbounded_channel();
+    let running = tokio::spawn(async move { runtime.run_with_shutdowns(signal_rx).await });
 
-    cancel_and_wait(
-        &cancel_tx,
-        LeaseCancellation::Crash,
-        &mut leases,
-        &mut shutdown_rx.clone(),
-    )
-    .await;
-    control.events.lock().await.push("restart".to_owned());
+    let server = fixture.start_pending_server().await;
+    wait_for_count_bounded(&server.dispatched, &server.dispatches, 2).await;
+    fixture.crash();
+    wait_for_count_bounded(&control.fail_started, &control.fail_started_count, 2).await;
+    assert_eq!(fixture.start_count(), 1);
+    assert!(
+        tokio::time::timeout(RESTART_DELAY + Duration::from_millis(100), async {
+            while fixture.start_count() < 2 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .is_err(),
+        "replacement started while lease failures were unacknowledged"
+    );
+    *control.acquire_mode.lock().await = AcquireMode::Idle;
+    fail_gate.notify_one();
+    wait_for_event_count(control.as_ref(), "fail-ack", 1).await;
+    assert_eq!(fixture.start_count(), 1);
+    fail_gate.notify_one();
+    wait_for_process_starts(&fixture, 2).await;
 
-    let events = control.events.lock().await;
-    assert_eq!(events.as_slice(), &["fail-ack", "fail-ack", "restart"]);
     assert_eq!(
         control.failures.lock().await.as_slice(),
         &[FailureClass::WorkerCrash, FailureClass::WorkerCrash]
     );
+
+    signal_tx.send(()).unwrap();
+    tokio::time::timeout(Duration::from_secs(5), running)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    server.stop().await;
 }
 
 #[tokio::test(start_paused = true)]
@@ -375,49 +394,116 @@ async fn incarnation_conflict_fences_inflight_child_without_terminal_mutation() 
     assert!(permits.try_acquire_owned().is_ok());
 }
 
-#[tokio::test(start_paused = true)]
-async fn shutdown_orders_settlement_before_reap_and_deactivation() {
+#[cfg(unix)]
+#[tokio::test]
+async fn graceful_shutdown_settles_before_child_reap_and_deactivation() {
+    let fixture = ProcessWorkerFixture::new();
     let control = Arc::new(FakeControlPlane::default());
-    let worker = Arc::new(FakeWorker::new(WorkerMode::Silent));
-    let permits = Arc::new(Semaphore::new(1));
-    let (cancel_tx, cancel_rx) = watch::channel(LeaseCancellation::Running);
-    let (shutdown_tx, shutdown_rx) = watch::channel(ShutdownKind::Running);
-    let mut leases = JoinSet::new();
-    leases.spawn(run_lease(
-        held_lease(permits).await,
-        worker.clone(),
-        credentials(),
-        context(control.clone()),
-        cancel_rx,
-        shutdown_rx,
-    ));
-    wait_for_count(&worker.dispatched, &worker.dispatches, 1).await;
+    let fail_gate = Arc::new(Notify::new());
+    let deactivate_gate = Arc::new(Notify::new());
+    *control.fail_gate.lock().await = Some(Arc::clone(&fail_gate));
+    *control.deactivate_gate.lock().await = Some(Arc::clone(&deactivate_gate));
+    *control.acquire_mode.lock().await =
+        AcquireMode::Leases(Arc::new(StdMutex::new([dispatch_with_lease(11)].into())));
+    let runtime = AgentRuntime::with_client(
+        loaded_config_with_worker(fixture.worker(1)),
+        control.clone(),
+    );
+    let (signal_tx, signal_rx) = mpsc::unbounded_channel();
+    let running = tokio::spawn(async move { runtime.run_with_shutdowns(signal_rx).await });
 
-    cancel_and_wait(
-        &cancel_tx,
-        LeaseCancellation::User,
-        &mut leases,
-        &mut shutdown_tx.subscribe(),
+    let server = fixture.start_pending_server().await;
+    wait_for_count_bounded(&server.dispatched, &server.dispatches, 1).await;
+    signal_tx.send(()).unwrap();
+    wait_for_count_bounded(&control.fail_started, &control.fail_started_count, 1).await;
+    assert!(fixture.process_is_alive());
+    assert!(!fixture.has_exited());
+    assert_eq!(control.deactivate_started_count.load(Ordering::SeqCst), 0);
+
+    fail_gate.notify_one();
+    wait_for_count_bounded(
+        &control.deactivate_started,
+        &control.deactivate_started_count,
+        1,
     )
     .await;
-    control.events.lock().await.push("reap".to_owned());
-    let request = RetryRequest::new(
-        "deactivate".to_owned(),
-        &DeactivateRequest {
-            incarnation_id: incarnation(),
-            reason: NodeIncarnationEndReason::GracefulShutdown,
-        },
-    )
-    .unwrap();
-    control.deactivate(NodeId(7), &request).await.unwrap();
-
-    assert_eq!(
-        control.events.lock().await.as_slice(),
-        &["fail-ack", "reap", "deactivate"]
-    );
+    assert!(fixture.has_exited());
+    assert!(!fixture.process_is_alive());
+    deactivate_gate.notify_one();
+    tokio::time::timeout(Duration::from_secs(5), running)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    server.stop().await;
     assert_eq!(
         control.failures.lock().await.as_slice(),
         &[FailureClass::UserCancellation]
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn restart_child_reports_exhausted_startup_budget() {
+    let temp = TempDir::new().unwrap();
+    let script = temp.path().join("failing-worker.sh");
+    let starts = temp.path().join("starts");
+    std::fs::write(&script, "printf '%s\\n' \"$$\" >> \"$1\"\nexit 1\n").unwrap();
+    let mut failing_worker = worker();
+    failing_worker.program = PathBuf::from("/bin/sh");
+    failing_worker.args = vec![script.display().to_string(), starts.display().to_string()];
+    let spec = ChildSpec::from_worker(&failing_worker, credentials());
+
+    let error = restart_child(&context(Arc::new(FakeControlPlane::default())), spec)
+        .await
+        .unwrap_err();
+
+    assert_eq!(error, ChildErrorKind::RestartExhausted);
+    assert_eq!(std::fs::read_to_string(starts).unwrap().lines().count(), 3);
+}
+
+#[tokio::test]
+async fn coordinator_exit_maps_coordinator_results() {
+    let mut coordinators = JoinSet::new();
+    coordinators.spawn(async { CoordinatorExit::RestartExhausted });
+    let restart = coordinator_exit(coordinators.join_next().await);
+    assert_eq!(
+        shutdown_kind_for_exit(&restart),
+        ShutdownKind::RestartExhausted
+    );
+
+    coordinators
+        .spawn(async { CoordinatorExit::Fatal(RuntimeFatal::Internal("fatal".to_owned())) });
+    let fatal = coordinator_exit(coordinators.join_next().await);
+    assert_eq!(fatal.into_error().to_string(), "internal error: fatal");
+
+    coordinators.spawn(async { CoordinatorExit::Shutdown(LeaseSettlement::Completed) });
+    let stopped = coordinator_exit(coordinators.join_next().await);
+    assert_eq!(
+        stopped.into_error().to_string(),
+        "internal error: worker coordinator stopped before shutdown"
+    );
+
+    let absent = coordinator_exit(None);
+    assert_eq!(
+        absent.into_error().to_string(),
+        "internal error: worker coordinator stopped before shutdown"
+    );
+}
+
+#[tokio::test]
+async fn coordinator_exit_maps_join_failure() {
+    let mut coordinators = JoinSet::new();
+    coordinators.spawn(std::future::pending());
+    coordinators.abort_all();
+
+    let failed = coordinator_exit(coordinators.join_next().await);
+
+    assert!(
+        failed
+            .into_error()
+            .to_string()
+            .starts_with("internal error: worker coordinator task failed:")
     );
 }
 
@@ -993,6 +1079,7 @@ enum HeartbeatAction {
 enum AcquireMode {
     Idle,
     Lease(LeaseDispatch),
+    Leases(Arc<StdMutex<VecDeque<LeaseDispatch>>>),
     GatedIdle(Arc<Notify>),
     Conflict,
 }
@@ -1129,6 +1216,11 @@ impl ControlPlaneApi for FakeControlPlane {
         match mode {
             AcquireMode::Idle => Ok(idle()),
             AcquireMode::Lease(dispatch) => Ok(AcquireOutcome::Leased(dispatch)),
+            AcquireMode::Leases(dispatches) => Ok(dispatches
+                .lock()
+                .unwrap()
+                .pop_front()
+                .map_or_else(idle, AcquireOutcome::Leased)),
             AcquireMode::Conflict => Err(VoomError::Conflict("incarnation fenced".to_owned())),
             AcquireMode::GatedIdle(gate) => {
                 self.acquire_started.fetch_add(1, Ordering::SeqCst);
@@ -1304,7 +1396,234 @@ impl ClientHandle for FakeWorker {
     }
 }
 
+#[cfg(unix)]
+struct ProcessWorkerFixture {
+    _temp: TempDir,
+    script: PathBuf,
+    starts: PathBuf,
+    secret: PathBuf,
+    endpoint: PathBuf,
+    exited: PathBuf,
+}
+
+#[cfg(unix)]
+impl ProcessWorkerFixture {
+    fn new() -> Self {
+        let temp = TempDir::new().unwrap();
+        let script = temp.path().join("worker-wrapper.sh");
+        let starts = temp.path().join("starts");
+        let secret = temp.path().join("secret");
+        let endpoint = temp.path().join("endpoint");
+        let exited = temp.path().join("exited");
+        std::fs::write(
+            &script,
+            r#"umask 077
+printf '%s\n' "$$" >> "$1"
+secret_tmp="$2.tmp.$$"
+printf '%s\n' "$VOOM_WORKER_SECRET" > "$secret_tmp"
+/bin/mv "$secret_tmp" "$2"
+while [ ! -s "$3" ]; do /bin/sleep 0.01; done
+IFS= read -r endpoint < "$3"
+printf 'BOUND addr=%s\n' "$endpoint"
+while IFS= read -r line; do :; done
+printf 'exited\n' > "$4"
+"#,
+        )
+        .unwrap();
+        Self {
+            _temp: temp,
+            script,
+            starts,
+            secret,
+            endpoint,
+            exited,
+        }
+    }
+
+    fn worker(&self, max_parallel: u32) -> WorkerConfig {
+        WorkerConfig {
+            name: "echo".to_owned(),
+            program: PathBuf::from("/bin/sh"),
+            args: vec![
+                self.script.display().to_string(),
+                self.starts.display().to_string(),
+                self.secret.display().to_string(),
+                self.endpoint.display().to_string(),
+                self.exited.display().to_string(),
+            ],
+            operations: vec![OperationKind::ProbeFile],
+            artifact_access: vec![ArtifactAccessMode::SharedMount],
+            max_parallel,
+        }
+    }
+
+    fn start_count(&self) -> usize {
+        std::fs::read_to_string(&self.starts)
+            .unwrap_or_default()
+            .lines()
+            .count()
+    }
+
+    fn latest_pid(&self) -> u32 {
+        std::fs::read_to_string(&self.starts)
+            .unwrap()
+            .lines()
+            .last()
+            .unwrap()
+            .parse()
+            .unwrap()
+    }
+
+    fn process_is_alive(&self) -> bool {
+        let pid = self.latest_pid().to_string();
+        std::process::Command::new("/bin/kill")
+            .args(["-0", pid.as_str()])
+            .output()
+            .unwrap()
+            .status
+            .success()
+    }
+
+    fn has_exited(&self) -> bool {
+        self.exited.exists()
+    }
+
+    fn crash(&self) {
+        let pid = self.latest_pid().to_string();
+        let status = std::process::Command::new("/bin/kill")
+            .args(["-KILL", pid.as_str()])
+            .status()
+            .unwrap();
+        assert!(status.success());
+    }
+
+    async fn start_pending_server(&self) -> PendingWorkerServer {
+        let secret = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Ok(secret) = std::fs::read_to_string(&self.secret) {
+                    break secret.trim().to_owned();
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let dispatches = Arc::new(AtomicUsize::new(0));
+        let dispatched = Arc::new(Notify::new());
+        let handler_dispatches = Arc::clone(&dispatches);
+        let handler_dispatched = Arc::clone(&dispatched);
+        let handler: OperationHandler = Arc::new(move |_| -> OperationFuture {
+            handler_dispatches.fetch_add(1, Ordering::SeqCst);
+            handler_dispatched.notify_waiters();
+            Box::pin(std::future::pending())
+        });
+        let running = HttpServer::new(
+            WorkerCredentials {
+                worker_id: WorkerId(14),
+                worker_epoch: 1,
+                secret: SecretString::from(secret),
+            },
+            handler,
+        )
+        .serve("127.0.0.1:0".parse().unwrap())
+        .await
+        .unwrap();
+        let endpoint_tmp = self.endpoint.with_extension("tmp");
+        std::fs::write(&endpoint_tmp, format!("{}\n", running.bound)).unwrap();
+        std::fs::rename(endpoint_tmp, &self.endpoint).unwrap();
+        PendingWorkerServer {
+            running: Some(running),
+            dispatches,
+            dispatched,
+        }
+    }
+}
+
+#[cfg(unix)]
+impl Drop for ProcessWorkerFixture {
+    fn drop(&mut self) {
+        if self.start_count() == 0 || !self.process_is_alive() {
+            return;
+        }
+        let pid = self.latest_pid().to_string();
+        let _ = std::process::Command::new("/bin/kill")
+            .args(["-KILL", pid.as_str()])
+            .status();
+    }
+}
+
+#[cfg(unix)]
+struct PendingWorkerServer {
+    running: Option<ServerRunning>,
+    dispatches: Arc<AtomicUsize>,
+    dispatched: Arc<Notify>,
+}
+
+#[cfg(unix)]
+impl PendingWorkerServer {
+    async fn stop(mut self) {
+        let running = self.running.take().unwrap();
+        let _ = running.shutdown.send(());
+        running.joined.await.unwrap();
+    }
+}
+
+#[cfg(unix)]
+impl Drop for PendingWorkerServer {
+    fn drop(&mut self) {
+        if let Some(running) = self.running.take() {
+            let _ = running.shutdown.send(());
+            running.joined.abort();
+        }
+    }
+}
+
+#[cfg(unix)]
+async fn wait_for_process_starts(fixture: &ProcessWorkerFixture, expected: usize) {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while fixture.start_count() < expected {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+}
+
+#[cfg(unix)]
+async fn wait_for_event_count(control: &FakeControlPlane, event: &str, expected: usize) {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let count = control
+                .events
+                .lock()
+                .await
+                .iter()
+                .filter(|recorded| recorded.as_str() == event)
+                .count();
+            if count >= expected {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+}
+
+async fn wait_for_count_bounded(notify: &Notify, count: &AtomicUsize, expected: usize) {
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        wait_for_count(notify, count, expected),
+    )
+    .await
+    .unwrap();
+}
+
 fn loaded_config() -> LoadedAgentConfig {
+    loaded_config_with_worker(worker())
+}
+
+fn loaded_config_with_worker(worker: WorkerConfig) -> LoadedAgentConfig {
     LoadedAgentConfig {
         config: AgentConfig {
             control_plane_url: "http://127.0.0.1:1".to_owned(),
@@ -1317,7 +1636,7 @@ fn loaded_config() -> LoadedAgentConfig {
             node_token: TokenSource::Env {
                 name: "VOOM_NODE_TOKEN".to_owned(),
             },
-            workers: vec![worker()],
+            workers: vec![worker],
         },
         node_token: SecretString::from("node-secret"),
     }
@@ -1365,8 +1684,16 @@ async fn held_lease(permits: Arc<Semaphore>) -> HeldLeaseGuard {
 }
 
 fn dispatch(payload: JsonValue) -> LeaseDispatch {
+    dispatch_with_payload(11, payload)
+}
+
+fn dispatch_with_lease(lease_id: u64) -> LeaseDispatch {
+    dispatch_with_payload(lease_id, json!({"path": "/media/a.mkv"}))
+}
+
+fn dispatch_with_payload(lease_id: u64, payload: JsonValue) -> LeaseDispatch {
     LeaseDispatch {
-        lease_id: LeaseId(11),
+        lease_id: LeaseId(lease_id),
         scheduler_decision_id: 12,
         ticket_id: TicketId(13),
         worker_id: WorkerId(14),
