@@ -3,8 +3,10 @@ use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Mutex as StdMutex;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::task::{Context, Poll, Waker};
 
 use async_trait::async_trait;
+use rand::{RngCore, TryRngCore};
 use secrecy::SecretString;
 #[cfg(unix)]
 use tempfile::TempDir;
@@ -149,6 +151,146 @@ fn granted_lease_ttl_normalizes_nonpositive_grants_to_one_second() {
     assert_eq!(granted_lease_ttl(0), Duration::from_secs(1));
     assert_eq!(granted_lease_ttl(-1), Duration::from_secs(1));
     assert_eq!(granted_lease_ttl(20), Duration::from_secs(20));
+}
+
+#[test]
+fn acquisition_poll_schedule_is_centered_across_full_duration_range() {
+    let bases = [
+        Duration::from_secs(20),
+        Duration::from_secs(u64::MAX / 1_000_000_000 + 1),
+    ];
+    for base in bases {
+        let mut rng = StdRng::seed_from_u64(459);
+        let samples = (0..128)
+            .map(|_| acquisition_poll_delay(base, &mut rng))
+            .collect::<Vec<_>>();
+        let lower = base / 2;
+        let upper = base.saturating_add(lower);
+        assert!(samples.iter().all(|delay| *delay >= lower));
+        assert!(samples.iter().all(|delay| *delay <= upper));
+        assert!(samples.iter().any(|delay| *delay < base));
+        assert!(samples.iter().any(|delay| *delay > base));
+    }
+}
+
+#[test]
+fn acquisition_poll_task_streams_consume_distinct_parent_output() {
+    let mut master = StdRng::seed_from_u64(459);
+    let mut first = derive_schedule_rng(&mut master);
+    let mut second = derive_schedule_rng(&mut master);
+
+    let first = (0..128).map(|_| first.next_u64()).collect::<Vec<_>>();
+    let second = (0..128).map(|_| second.next_u64()).collect::<Vec<_>>();
+
+    assert_ne!(first, second);
+}
+
+#[tokio::test]
+async fn acquisition_poll_entropy_failure_precedes_activation() {
+    let control = Arc::new(FakeControlPlane::default());
+    let runtime = AgentRuntime::with_client(loaded_config(), control.clone());
+    let (_signal_tx, signal_rx) = mpsc::unbounded_channel();
+    let mut source = FailingRng;
+
+    let error = runtime
+        .run_with_shutdowns_from_rng(signal_rx, &mut source)
+        .await
+        .unwrap_err();
+
+    assert!(error.to_string().contains("seed node-agent schedule RNG"));
+    assert_eq!(control.activate_started_count.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn acquisition_poll_resamples_each_production_wait() {
+    let interval = Duration::from_secs(20);
+    let mut expected_rng = StdRng::seed_from_u64(459);
+    let first_delay = acquisition_poll_delay(interval, &mut expected_rng);
+    let second_delay = acquisition_poll_delay(interval, &mut expected_rng);
+    assert_ne!(first_delay, second_delay);
+
+    let mut actual_rng = StdRng::seed_from_u64(459);
+    let (_shutdown_tx, mut shutdown_rx) = watch::channel(ShutdownKind::Running);
+    for expected in [first_delay, second_delay] {
+        let started = tokio::time::Instant::now();
+        let event = acquisition_poll_event(
+            interval,
+            &mut actual_rng,
+            &mut shutdown_rx,
+            std::future::pending::<Result<(), crate::child::ChildError>>(),
+        );
+        tokio::pin!(event);
+        assert_future_pending(event.as_mut());
+        let before_deadline = expected
+            .checked_sub(Duration::from_nanos(1))
+            .unwrap_or(Duration::ZERO);
+        tokio::time::advance(before_deadline).await;
+        assert_future_pending(event.as_mut());
+        tokio::time::advance(Duration::from_nanos(1)).await;
+        assert!(matches!(event.await, CoordinatorEvent::PollElapsed));
+        assert!(started.elapsed() >= expected);
+        assert!(started.elapsed() <= expected + Duration::from_millis(2));
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn acquisition_poll_shutdown_interrupts_the_upper_bound() {
+    let interval = Duration::from_secs(20);
+    let upper = interval + interval / 2;
+    let started = tokio::time::Instant::now();
+    let (shutdown_tx, mut shutdown_rx) = watch::channel(ShutdownKind::Running);
+    let waiting = wait_for_acquisition_poll(
+        upper,
+        &mut shutdown_rx,
+        std::future::pending::<Result<(), crate::child::ChildError>>(),
+    );
+    tokio::pin!(waiting);
+    assert_future_pending(waiting.as_mut());
+
+    shutdown_tx.send(ShutdownKind::User).unwrap();
+
+    assert!(matches!(
+        waiting.await,
+        CoordinatorEvent::Shutdown(ShutdownKind::User)
+    ));
+    assert!(started.elapsed() < upper);
+}
+
+#[tokio::test(start_paused = true)]
+async fn acquisition_poll_child_exit_interrupts_the_upper_bound() {
+    let interval = Duration::from_secs(20);
+    let upper = interval + interval / 2;
+    let (_shutdown_tx, mut shutdown_rx) = watch::channel(ShutdownKind::Running);
+    let waiting = wait_for_acquisition_poll(upper, &mut shutdown_rx, std::future::ready(Ok(())));
+
+    assert!(matches!(waiting.await, CoordinatorEvent::ChildExit(Ok(()))));
+}
+
+#[derive(Debug)]
+struct FailingRng;
+
+fn assert_future_pending<F>(mut future: Pin<&mut F>)
+where
+    F: Future,
+{
+    let mut context = Context::from_waker(Waker::noop());
+    assert!(matches!(future.as_mut().poll(&mut context), Poll::Pending));
+}
+
+impl TryRngCore for FailingRng {
+    type Error = std::io::Error;
+
+    fn try_next_u32(&mut self) -> Result<u32, Self::Error> {
+        Err(std::io::Error::other("entropy unavailable"))
+    }
+
+    fn try_next_u64(&mut self) -> Result<u64, Self::Error> {
+        Err(std::io::Error::other("entropy unavailable"))
+    }
+
+    fn try_fill_bytes(&mut self, _destination: &mut [u8]) -> Result<(), Self::Error> {
+        Err(std::io::Error::other("entropy unavailable"))
+    }
 }
 
 #[tokio::test(start_paused = true)]
