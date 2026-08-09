@@ -44,10 +44,12 @@ effective incarnation TTL is at least twice their base interval. Lease heartbeat
 when the upper bound is strictly below the granted TTL; otherwise they retain the exact
 granted interval and existing fail-closed behavior.
 
-One private nanosecond-resolution sampler accepts `&mut impl Rng`. Three small loop-specific
-functions state the distinct policies and call the sampler. Production tasks seed their own
-`StdRng` from the operating system once, then reuse it across cycles. Seeded unit tests inspect
-many samples deterministically.
+One private nanosecond-resolution sampler accepts `&mut impl Rng`. It samples the full `u128`
+nanosecond range represented by `Duration` and reconstructs seconds plus subsecond nanoseconds;
+it does not narrow accepted lease grants through `u64` nanosecond saturation. Three small
+loop-specific functions state the distinct policies and call the sampler. Production tasks
+seed their own `StdRng` from the operating system once, then reuse it across cycles. Seeded
+production-loop seams make the sampled deadlines observable without public configuration.
 
 ### Rejected: full jitter below the existing interval
 
@@ -75,9 +77,10 @@ lease-heartbeat functions make the authority and budget visible at their call si
 of hiding all three policies behind one generic schedule type.
 
 The acquisition coordinator creates one RNG and samples after every idle or terminal result.
-A private poll wait selects the sampled sleep against `shutdown.changed()`. If shutdown wins,
-the coordinator immediately enters the existing lease-settlement and child-reap path. The
-same shutdown handling is used whether shutdown arrives during acquisition or polling.
+A private poll wait selects the sampled sleep against `shutdown.changed()` and the existing
+child-exit future. If either control event wins, the coordinator routes it through the same
+settlement or restart handling used when the event arrives during acquisition. The sampled
+upper bound therefore does not extend shutdown or child-failure detection latency.
 
 The node-heartbeat task creates one RNG and samples immediately before every select. Its base
 interval remains `heartbeat_interval(TTL)`, and its effective TTL remains
@@ -104,20 +107,25 @@ Its stop watch remains in the same `select!`, so settlement and shutdown interru
 
 ## Testing
 
-Seeded pure unit tests will prove that:
+Seeded unit tests will prove that:
 
 1. poll samples span both sides of the configured interval and stay within 50% through 150%;
 2. node-heartbeat samples stay in the centered range and strictly inside the effective TTL;
 3. coherent lease-heartbeat samples stay centered and before the granted TTL;
 4. incoherent lease grants retain the exact interval;
-5. independent seeded streams do not produce one fixed schedule; and
-6. shutdown interrupts a pending acquisition-poll sleep without advancing paused time to the
-   sampled deadline.
+5. intervals beyond `u64::MAX` nanoseconds preserve centered bounds and mean rather than
+   saturating to a shorter delay;
+6. independent seeded streams do not produce one fixed schedule;
+7. the production acquisition-poll wait consumes successive seeded samples, and shutdown and
+   child exit each interrupt a maximum sampled sleep without advancing paused time; and
+8. seeded production node- and lease-heartbeat loops observe at least two successive sampled
+   deadlines while retaining stop-channel interruption and TTL fencing.
 
-Existing paused-time tests continue proving node and lease stop channels interrupt their
-sleeps and that unreachable requests fence at the exact TTL. The focused crate suite,
-workspace lint, and `just ci` provide regression evidence. Bite proof removes the production
-timing implementation while retaining the new tests and confirms the tests fail.
+Existing paused-time tests continue proving unreachable requests fence at the exact TTL. The
+focused crate suite, workspace lint, and `just ci` provide regression evidence. Bite proof
+temporarily restores the former fixed delay independently in each production poll, node, and
+lease loop while retaining the new tests; the corresponding test must fail in each arm before
+the sampled implementation is restored.
 
 ## Success criteria
 

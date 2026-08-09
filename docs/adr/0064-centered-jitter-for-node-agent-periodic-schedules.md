@@ -26,7 +26,8 @@ independent RNG stream from operating-system entropy once and reuse it across cy
 seeds would preserve the fleet phase this decision exists to break.
 
 Acquisition polling uses the configured poll interval as its center. Its pending sleep selects
-against shutdown, so a sampled upper bound does not worsen shutdown responsiveness.
+against both shutdown and child exit, so a sampled upper bound does not worsen shutdown or
+child-supervision responsiveness.
 
 Node heartbeats use the existing `TTL/3` interval as their center. The runtime's existing
 minimum effective TTL is at least twice that interval, while the latest sample is at most
