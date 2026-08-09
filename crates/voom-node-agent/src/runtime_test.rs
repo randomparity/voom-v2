@@ -371,6 +371,20 @@ fn lease_heartbeat_schedule_preserves_coherent_and_incoherent_grants() {
     );
     assert!(samples.iter().all(|delay| *delay < ttl));
 
+    let boundary_interval = Duration::from_secs(4);
+    let boundary_ttl = Duration::from_secs(6);
+    let mut boundary_rng = StdRng::seed_from_u64(459);
+    let mut untouched_rng = boundary_rng.clone();
+    assert_eq!(
+        lease_heartbeat_delay(boundary_interval, boundary_ttl, &mut boundary_rng),
+        boundary_interval
+    );
+    assert_eq!(
+        centered_jitter(interval, &mut boundary_rng),
+        centered_jitter(interval, &mut untouched_rng),
+        "an equality-boundary grant must not consume schedule entropy"
+    );
+
     let incoherent = Duration::from_secs(8);
     assert_eq!(
         lease_heartbeat_delay(incoherent, Duration::from_secs(6), &mut rng),
