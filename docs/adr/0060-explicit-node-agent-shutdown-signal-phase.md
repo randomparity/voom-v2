@@ -19,11 +19,13 @@ whether force interrupted it, but its production caller discards that outcome.
 
 ## Decision
 
-Shutdown carries an explicit signal phase into coordinator reaping. A graceful exit enters
-the phase where the next signal forces because it already consumed the first signal. Fatal
-and restart-exhausted exits enter the phase where one signal remains to be consumed without
-forcing. Only a later signal advances from force-enabled to forced and broadcasts the
-forced shutdown kind.
+Shutdown carries one explicit signal phase through coordinator reaping and any later
+deactivation. A graceful exit enters the phase where the next signal forces because it
+already consumed the first signal. Fatal and restart-exhausted exits enter the phase where
+one signal remains to be consumed without forcing. Child-startup failure also enters that
+phase because startup did not consume a signal. Coordinator reaping returns the advanced
+phase to its caller; deactivation continues from that exact state. Only a signal received
+while force is enabled broadcasts force or interrupts deactivation.
 
 Lease settlement returns a typed completed-or-forced outcome. A coordinator includes that
 outcome in its shutdown exit, and the coordinator-reaping loop aggregates forced outcomes
@@ -37,10 +39,11 @@ the server grant governs the lease after acquisition.
 
 ## Consequences
 
-A first signal never becomes force merely because a fatal exit won a concurrent selection.
-Operators must send a genuine second signal to abandon settlement on every exit path.
-Fatal shutdown may therefore remain blocked on settlement after one signal, as documented,
-until settlement completes or a second signal arrives.
+A first signal never becomes force merely because a fatal exit won a concurrent selection
+or because coordinator reaping completed before that signal arrived. Operators must send a
+genuine second signal to abandon settlement or deactivation on every exit path. Fatal
+shutdown may therefore remain blocked on settlement after one signal, as documented, until
+settlement completes or a second signal arrives.
 
 Coordinator exit values become more descriptive, but no persisted state, API, schema, or
 event changes. No migration is required. Invalid non-positive granted TTL values continue
@@ -50,7 +53,8 @@ to fail safe at a one-second local window, matching heartbeat behavior.
 
 - Drain currently buffered signals before enabling force. This handles only a signal that
   arrived before the drain; a first signal arriving later during fatal settlement would
-  still be mistaken for force unless the phase remained explicit.
+  still be mistaken for force unless the phase remained explicit. Ending the phase after
+  coordinator reaping has the same defect during restart-exhausted deactivation.
 - Enable force only for graceful shutdown. Fatal settlement can block on an unreachable
   control plane too, so this recreates the hang fixed by the original second-signal escape.
 - Remove the lease-settlement return value. That eliminates dead data but hides whether a
