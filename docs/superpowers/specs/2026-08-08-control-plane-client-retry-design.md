@@ -59,9 +59,12 @@ On a retryable failure, `send` checks the attempt limit before sleeping. Exhaust
 message. It does not include a request body, token, or response body. Terminal errors return
 unchanged and do not gain retry-exhaustion wrapping.
 
-When another attempt is allowed, a small helper samples a uniform duration in
-`0..=delay_ceiling`. `send` sleeps for that sample, then doubles `delay_ceiling`, capped at
-30 seconds. Sampling does not influence the next ceiling.
+When another attempt is allowed, a private retry-backoff state object samples a uniform
+duration in `0..=delay_ceiling`, advances its ceiling by exponential doubling capped at
+30 seconds, and returns the sampled sleep. The state object is the production loop's only
+source of retry sleeps, so its deterministic unit test proves both sampling and ceiling
+progression without adding a public abstraction. Sampling does not influence the next
+ceiling.
 
 The public operation methods continue to call `send`. No production path opts into unlimited
 retrying, and `runtime.rs` keeps every existing domain-specific timeout and force escape.
@@ -97,7 +100,9 @@ Unit tests will prove:
 2. retryable statuses and transport failures stop exactly at the configured attempt count
    with an actionable error;
 3. the explicit unlimited constructor continues past the production limit;
-4. full-jitter samples stay within the ceiling and vary under a seeded generator;
+4. a seeded retry-backoff state returns full-jitter samples inside each pre-advance ceiling,
+   while its ceilings progress from 250 milliseconds by doubling to the 30-second cap
+   independently of the sampled values;
 5. body and idempotency-key reuse survives all retry classes; and
 6. terminal responses still perform one attempt.
 
