@@ -196,6 +196,7 @@ Control-plane tests use a real SQLite pool and the injected `ManualClock` withou
 Tokio time. They prove:
 
 - five distinct fresh activation keys succeed and the sixth is a conflict;
+- saturating one logical node does not consume another node's capacity;
 - the exact 60-second lower boundary remains counted and one nanosecond beyond it admits;
 - queued evaluation samples time after serialization, and a backward clock adjustment
   conservatively counts future-dated starts;
@@ -203,12 +204,16 @@ Tokio time. They prove:
 - reuse of an existing incarnation under a fresh key retains the duplicate-incarnation
   error at quota and emits no quota warning;
 - quota rejection leaves the active incarnation, node epoch, incarnation/worker/
-  capability/grant counts, replay completions, and events unchanged;
+  capability/grant counts, every replay status, and events unchanged. No idempotency row
+  exists for the rejected route/key; after the window advances, that same key is admitted
+  and completes normally;
 - the warning subscriber observes the fixed quota-exceeded reason and non-secret fields;
 - pruning removes eligible old terminal incarnations and retired unreferenced workers,
   including their owned capabilities and grants;
 - pruning retains active/recent incarnations, live workers, and workers referenced by
   durable operational or scheduler history, including both scheduler-decision columns;
+- pruning one logical node leaves another node's otherwise-eligible incarnations, workers,
+  references, and events unchanged;
 - the worker foreign-key inventory rejects an unclassified `CASCADE` or `SET NULL` edge;
 - events that named pruned rows remain unchanged;
 - completed activation replay after pruning returns the original historical outcome
