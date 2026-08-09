@@ -846,6 +846,31 @@ async fn unreachable_control_plane_fences_the_lease_at_the_ttl_deadline() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn ongoing_heartbeat_uses_granted_ttl_not_local_configuration() {
+    let control = Arc::new(FakeControlPlane::default());
+    let (fence_tx, mut fence_rx) = mpsc::channel(1);
+    let (stop_tx, stop_rx) = watch::channel(false);
+    let mut loop_context = context(control.clone());
+    loop_context.lease_ttl = Duration::from_secs(20);
+    let running = tokio::spawn(async move {
+        lease_heartbeat_loop(loop_context, LeaseId(1), 1, 6, stop_rx, fence_tx).await;
+    });
+
+    advance_seconds(1).await;
+    wait_for_count(
+        &control.lease_heartbeat_started,
+        &control.lease_heartbeats,
+        1,
+    )
+    .await;
+
+    assert_eq!(control.heartbeat_ttls.lock().await.as_slice(), &[6]);
+    assert!(fence_rx.try_recv().is_err());
+    stop_tx.send(true).unwrap();
+    running.await.unwrap();
+}
+
+#[tokio::test(start_paused = true)]
 async fn unreachable_control_plane_fails_the_node_at_the_incarnation_ttl() {
     let control = Arc::new(FakeControlPlane::default());
     let runtime = AgentRuntime::with_client(loaded_config(), control.clone());
@@ -906,6 +931,7 @@ async fn validation_uses_a_longer_granted_ttl_than_local_configuration() {
 
     assert!(matches!(outcome, ValidationOutcome::Fresh));
     assert_eq!(control.lease_heartbeats.load(Ordering::SeqCst), 1);
+    assert_eq!(control.heartbeat_ttls.lock().await.as_slice(), &[20]);
 }
 
 #[tokio::test(start_paused = true)]
@@ -930,6 +956,7 @@ async fn validation_rejects_a_shorter_granted_ttl_than_local_configuration() {
         control.lease_heartbeats.load(Ordering::SeqCst),
         VALIDATION_ATTEMPTS as usize
     );
+    assert_eq!(control.heartbeat_ttls.lock().await.as_slice(), &[6, 6, 6]);
 }
 
 #[tokio::test]
@@ -974,8 +1001,10 @@ enum AcquireMode {
 struct FakeControlPlane {
     node_heartbeats: AtomicUsize,
     lease_heartbeats: AtomicUsize,
+    lease_heartbeat_started: Notify,
     heartbeat_actions: Mutex<VecDeque<HeartbeatAction>>,
     heartbeat_keys: Mutex<Vec<String>>,
+    heartbeat_ttls: Mutex<Vec<i64>>,
     acquire_mode: Mutex<AcquireMode>,
     acquire_started: AtomicUsize,
     active_acquires: AtomicUsize,
@@ -1002,8 +1031,10 @@ impl Default for FakeControlPlane {
         Self {
             node_heartbeats: AtomicUsize::new(0),
             lease_heartbeats: AtomicUsize::new(0),
+            lease_heartbeat_started: Notify::new(),
             heartbeat_actions: Mutex::new(VecDeque::new()),
             heartbeat_keys: Mutex::new(Vec::new()),
+            heartbeat_ttls: Mutex::new(Vec::new()),
             acquire_mode: Mutex::new(AcquireMode::Idle),
             acquire_started: AtomicUsize::new(0),
             active_acquires: AtomicUsize::new(0),
@@ -1121,6 +1152,12 @@ impl ControlPlaneApi for FakeControlPlane {
             .lock()
             .await
             .push(request.idempotency_key().to_owned());
+        let body: JsonValue = serde_json::from_slice(request.body()).unwrap();
+        self.heartbeat_ttls
+            .lock()
+            .await
+            .push(body["lease_ttl_seconds"].as_i64().unwrap());
+        self.lease_heartbeat_started.notify_waiters();
         let action = self
             .heartbeat_actions
             .lock()

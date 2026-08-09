@@ -662,7 +662,7 @@ async fn validate_lease(
     let freshness = granted_ttl / 2;
     for _ in 0..VALIDATION_ATTEMPTS {
         let started = Instant::now();
-        let request = lease_heartbeat_request(context, new_key("validate"))
+        let request = lease_heartbeat_request(context, new_key("validate"), granted_ttl)
             .map_err(RuntimeFatal::ControlPlane)?;
         let result = tokio::time::timeout(
             freshness,
@@ -748,7 +748,11 @@ async fn lease_heartbeat_loop(
                 }
             }
             () = tokio::time::sleep(Duration::from_secs(seconds)) => {
-                let Ok(request) = lease_heartbeat_request(&context, new_key("lease-heartbeat")) else {
+                let Ok(request) = lease_heartbeat_request(
+                    &context,
+                    new_key("lease-heartbeat"),
+                    ttl,
+                ) else {
                     let _ = context.fatal_tx.send(RuntimeFatal::Internal(
                         "build lease heartbeat request".to_owned(),
                     ));
@@ -1040,6 +1044,7 @@ fn augment_payload(dispatch: &LeaseDispatch, worker: &WorkerConfig) -> Result<Js
 fn lease_heartbeat_request(
     context: &CoordinatorContext,
     key: String,
+    granted_ttl: Duration,
 ) -> Result<RetryRequest<LeaseHeartbeatRequest>, VoomError> {
     RetryRequest::new(
         key,
@@ -1047,7 +1052,7 @@ fn lease_heartbeat_request(
             node_id: context.node_id,
             worker_id: context.worker_id(),
             incarnation_id: context.incarnation_id,
-            lease_ttl_seconds: duration_seconds_i64(context.lease_ttl),
+            lease_ttl_seconds: duration_seconds_i64(granted_ttl),
         },
     )
 }
