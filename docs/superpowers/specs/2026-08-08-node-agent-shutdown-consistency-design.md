@@ -71,8 +71,9 @@ force-aware wait determines `Completed` or `Forced`; if crash settlement itself 
 `Forced`, that result is preserved rather than overwritten by a later empty wait.
 Tokio watch channels coalesce updates, so the ordinary shutdown kind and later `Forced`
 kind may appear to a coordinator only as `Forced`. An initially observed `Forced` kind
+publishes the same fenced cancellation the existing forced-kind branch selects, then
 immediately aborts and joins lease tasks and returns `LeaseSettlement::Forced`; it does not
-publish a cancellation and wait for a nonexistent third update.
+wait for a nonexistent third update.
 
 `wait_for_coordinators` observes shutdown outcomes and aggregates `Forced`. The top-level
 runtime still stops node heartbeat only after all coordinators finish, then classifies the
@@ -147,8 +148,8 @@ Tests will prove the change bites before implementation:
    reaping aggregates a forced shutdown outcome even when it learns that outcome from the
    joined coordinator.
 7. Publish ordinary shutdown and `Forced` before a blocked coordinator polls its watch.
-   Prove the coalesced initial `Forced` value aborts and joins leases, returns the forced
-   outcome, and needs no third signal.
+   Prove the coalesced initial `Forced` value publishes fenced cancellation before it aborts
+   and joins leases, returns the forced outcome, and needs no third signal.
 8. Prove original fatal classification precedes the forced result through a narrow
    post-reap lifecycle seam with an observable test-only heartbeat-stop event. The test must
    assert coordinator reaping is already complete, heartbeat stop occurs before return, the
