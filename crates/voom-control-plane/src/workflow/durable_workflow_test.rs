@@ -45,7 +45,10 @@ async fn process_provider_test_guard() -> tokio::sync::MutexGuard<'static, ()> {
 #[test]
 fn provider_binary_uses_active_test_profile() -> TestResult<()> {
     let actual = provider_binary("fake-scanner")?;
-    let expected = voom_test_support::worker::target_debug_binary("fake-scanner");
+    let expected = std::env::var_os("CARGO_BIN_EXE_fake-scanner").map_or_else(
+        || voom_test_support::worker::target_debug_binary("fake-scanner"),
+        PathBuf::from,
+    );
 
     expect_eq("provider binary path", &actual, &expected)
 }
