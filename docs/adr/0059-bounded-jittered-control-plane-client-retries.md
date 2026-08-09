@@ -40,8 +40,16 @@ the last-resort default for every current and future operation.
 
 A control-plane outage becomes a visible error after at most five request attempts instead
 of parking a caller forever. With the existing 30-second request timeout, the theoretical
-upper bound remains longer than domain-specific lease and shutdown budgets; those guards
-therefore remain load-bearing.
+worst case is about 154 seconds: five request timeouts plus four sleeps at ceilings from
+250 milliseconds through two seconds. That remains longer than domain-specific lease and
+shutdown budgets, so those guards remain load-bearing.
+
+Current `acquire`, terminal-settlement, and heartbeat callers classify an exhausted request
+as fatal. The runtime then fences and reaps its children, exits without a deactivation
+write, and relies on incarnation or lease expiry plus the service supervisor's normal
+process-restart policy. This fail-stop recovery is intentional: continuing after the shared
+client has established prolonged control-plane unavailability would let a node operate
+against authority it can no longer reach.
 
 Full jitter may choose a near-zero delay, so a single agent can retry sooner than the former
 fixed schedule. Across a fleet, the uniformly distributed attempts trade that per-agent
