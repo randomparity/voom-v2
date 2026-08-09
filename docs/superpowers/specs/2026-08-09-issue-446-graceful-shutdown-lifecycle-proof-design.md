@@ -79,13 +79,17 @@ back to an explicit unavailable marker.
 
 The regression proof has two arms:
 
-- Send the second shutdown signal, then temporarily make a production stage after the
-  runtime consumes it remain pending while preserving the helper and using a short local
-  guard. The focused lifecycle test must fail with the new second-agent lifecycle
-  diagnostic. Restore the source and guard, then rerun green.
-- Build the lifecycle test binary once, then run multiple copies concurrently while the
-  host is CPU-oversubscribed. This recreates the process and scheduler contention shape
-  from the issue without weakening or ignoring the test. Every copy must exit successfully.
+- Send the second shutdown signal, then temporarily make the production runtime remain
+  pending after successful deactivation has recorded durable retirement but before
+  `run_until` returns. Use a short local guard. The focused lifecycle test must fail with
+  the new diagnostic identifying durable retirement as complete and the second-agent join
+  as missing. Restore the source and guard, then rerun green.
+- Record the host OS, architecture, logical CPU count, and Rust version. Build the lifecycle
+  test binary once. Start twice as many CPU busy loops as logical CPUs, then run four waves
+  of 16 concurrent copies of that exact binary with two test threads per copy. Stop and
+  reap every load process after the fourth wave. All 64 test-process exit codes must be
+  zero; preserve the exact command, host facts, elapsed time, and per-wave result counts in
+  the work report.
 
 Ordinary serial reruns do not satisfy the second arm. The contended run is verification
 evidence rather than a default CI loop because oversubscribing every CI job would increase
@@ -105,8 +109,9 @@ temporary SQLite fixture.
 
 ## Verification
 
-Run the focused lifecycle test, the deliberate non-termination bite, repeated concurrent
-copies under CPU oversubscription, `cargo test -p voom-node-agent --all-features`, and bare
-`just ci`. Report all ignored or skipped tests; the known baseline is six environment-
-specific ignored tests (one ffmpeg hardware test and five toxiproxy network-resilience
-tests), so any additional skip is a regression to investigate.
+Run the focused lifecycle test, the deliberate post-retirement non-termination bite, the
+specified 4-by-16 concurrent-copy exercise under 2x CPU oversubscription,
+`cargo test -p voom-node-agent --all-features`, and bare `just ci`. Report all ignored or
+skipped tests; the known baseline is six environment-specific ignored tests (one ffmpeg
+hardware test and five toxiproxy network-resilience tests), so any additional skip is a
+regression to investigate.
