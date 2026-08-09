@@ -31,6 +31,9 @@ Lease settlement returns a typed completed-or-forced outcome. A coordinator incl
 outcome in its shutdown exit, and the coordinator-reaping loop aggregates forced outcomes
 instead of discarding them. Lease settlement still precedes child shutdown and reap;
 heartbeat stop and fatal propagation or deactivation retain their existing order.
+Because Tokio watch updates may coalesce, a coordinator that first observes
+`ShutdownKind::Forced` aborts and joins lease tasks immediately and returns the forced
+outcome. It never waits for a third watch update.
 
 Lease validation derives both its per-attempt timeout and freshness check from the lease
 TTL in the acquired dispatch. It applies the same minimum-one-second normalization as the
@@ -48,6 +51,10 @@ settlement completes or a second signal arrives.
 Coordinator exit values become more descriptive, but no persisted state, API, schema, or
 event changes. No migration is required. Invalid non-positive granted TTL values continue
 to fail safe at a one-second local window, matching heartbeat behavior.
+
+Forced shutdown deliberately may skip lease terminal mutation whether the coordinator
+observes the ordinary and forced updates separately or as one coalesced forced value. Child
+reap still completes before the coordinator reports that outcome.
 
 ## Considered & rejected
 

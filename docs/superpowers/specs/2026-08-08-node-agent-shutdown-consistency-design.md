@@ -69,6 +69,10 @@ Every construction of `CoordinatorExit::Shutdown` carries the typed outcome. Thi
 the child-crash branch: if crash settlement consumes an ordinary shutdown, its final
 force-aware wait determines `Completed` or `Forced`; if crash settlement itself observes
 `Forced`, that result is preserved rather than overwritten by a later empty wait.
+Tokio watch channels coalesce updates, so the ordinary shutdown kind and later `Forced`
+kind may appear to a coordinator only as `Forced`. An initially observed `Forced` kind
+immediately aborts and joins lease tasks and returns `LeaseSettlement::Forced`; it does not
+publish a cancellation and wait for a nonexistent third update.
 
 `wait_for_coordinators` observes shutdown outcomes and aggregates `Forced`. The top-level
 runtime still stops node heartbeat only after all coordinators finish, then classifies the
@@ -142,13 +146,18 @@ Tests will prove the change bites before implementation:
    prove the final coordinator outcome is `LeaseSettlement::Forced`; prove coordinator
    reaping aggregates a forced shutdown outcome even when it learns that outcome from the
    joined coordinator.
-7. Prove original fatal classification precedes the forced result. The test must assert the
-   original fatal error, no deactivation, and the existing heartbeat-stop-before-return
-   event ordering; it must not race simultaneous `tokio::select!` branches.
-8. With configured TTL six seconds and granted TTL twenty seconds, delay the first
+7. Publish ordinary shutdown and `Forced` before a blocked coordinator polls its watch.
+   Prove the coalesced initial `Forced` value aborts and joins leases, returns the forced
+   outcome, and needs no third signal.
+8. Prove original fatal classification precedes the forced result through a narrow
+   post-reap lifecycle seam with an observable test-only heartbeat-stop event. The test must
+   assert coordinator reaping is already complete, heartbeat stop occurs before return, the
+   original fatal error is returned, and deactivation is never called; it must not race
+   simultaneous `tokio::select!` branches.
+9. With configured TTL six seconds and granted TTL twenty seconds, delay the first
    validation response five seconds. Assert `Fresh` after exactly one heartbeat call. The
    old configured half-TTL times out and makes a second call, so it must fail this test.
-9. With configured TTL twenty seconds and granted TTL six seconds, delay every response
+10. With configured TTL twenty seconds and granted TTL six seconds, delay every response
    five seconds. Assert `Terminal` after exactly `VALIDATION_ATTEMPTS`. The old configured
    TTL accepts the first response, so it must fail this test. Unit-test that a non-positive
    grant normalizes to one second and retain the existing freshness-boundary test.
