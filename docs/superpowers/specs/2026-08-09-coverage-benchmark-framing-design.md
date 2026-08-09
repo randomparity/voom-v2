@@ -21,13 +21,19 @@
 `target/llvm-cov-target/debug/deps`. The durable-workflow fixture does not receive a
 `CARGO_BIN_EXE_*` path in that unit-test context, so it falls back to a nested
 `cargo build -p voom-fakes --bins`. That nested command writes to the default target tree,
-but the fixture then resolves and launches the worker from `CARGO_TARGET_DIR`, the coverage
-tree. A focused coverage run reproduced this split: the outer test ran from the coverage
-tree while the nested build compiled a second copy in the default tree.
+and, because llvm-cov does not export `CARGO_TARGET_DIR` to this test, the fixture also
+launches the default-tree executable instead of the artifact from the active coverage
+profile. A focused coverage run proved the split: the control-plane test ran from the
+coverage tree, the nested worker build used the default tree, and no fake-provider
+executable existed in the coverage profile.
 
-The nested build therefore does not determine the executable that the test launches. A
-missing active-target executable produces a launch failure; a cached incompatible executable
-can produce the observed duplicate or malformed response framing. The shared
+The coverage job restores Cargo artifacts before compiling. Its failed attempt compiled the
+current worker protocol into the coverage profile, but the nested default-profile build
+reported every fake provider fresh in 0.14 seconds. The provider processes were therefore
+not artifacts of the current coverage build. The observed `OperationResponse` line reaching
+the `ProgressFrame` decoder is consistent with an incompatible cached provider wire
+implementation; the failed process is no longer available to identify its exact source
+revision. The shared
 `voom_test_support::worker::cargo_bin_or_build` helper already exists to keep nested builds
 and launched paths in the active profile tree, including `llvm-cov`, custom target roots,
 prebuilt-worker test runs, and all-feature workspace builds.
@@ -60,12 +66,12 @@ The durable-workflow fixture delegates provider binary selection and any require
 NDJSON transport, credentials, registration order, and shutdown behavior remain unchanged.
 The obsolete local target-path and build helpers are removed.
 
-The shared helper's active-target invariant receives a focused unit regression: the target
-root supplied to nested Cargo builds must own the active profile directory used by
-`target_debug_binary`. The existing durable-workflow benchmark remains the end-to-end
-regression. Its bite is demonstrated by removing the active-target provider artifacts after
-the coverage test binary is built: the old fixture builds elsewhere and fails to launch;
-the delegated helper rebuilds into the active target and the benchmark succeeds.
+The durable-workflow fixture receives a focused regression asserting that the provider path
+returned by its resolver belongs to the active test profile reported by
+`voom_test_support::worker::target_debug_dir`. Under llvm-cov the old resolver returns the
+default profile and the test fails; the delegated resolver builds and returns the coverage
+profile path. The existing durable-workflow benchmark remains the end-to-end framing
+regression.
 
 ## Failure behavior
 
@@ -76,14 +82,13 @@ cleanup errors retain their existing mappings.
 
 ## Verification
 
-1. Run the focused helper unit regression and prove it fails against an intentionally broken
-   target-root derivation, then restore the implementation and prove it passes.
-2. Run the focused durable-workflow benchmark under `cargo llvm-cov`, with the active worker
-   artifacts absent before process launch, to prove the old path fails and the new path builds
-   and launches the same artifact.
-3. Run the ordinary focused durable-workflow benchmark.
-4. Run `just ci`.
-5. Run `just coverage`, which exercises the exact workspace coverage command from issue #463.
+1. Add the provider-path regression, run it under focused `cargo llvm-cov`, and capture its
+   failure showing the default profile instead of the active coverage profile.
+2. Delegate provider resolution to the shared helper and rerun the regression until it passes.
+3. Run the focused durable-workflow benchmark under `cargo llvm-cov`.
+4. Run the ordinary focused durable-workflow benchmark.
+5. Run `just ci`.
+6. Run `just coverage`, which exercises the exact workspace coverage command from issue #463.
 
 ## Non-goals
 
