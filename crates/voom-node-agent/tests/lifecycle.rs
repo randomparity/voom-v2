@@ -188,7 +188,28 @@ async fn acquire_transition_reports_ready_agent_before_ready_milestone() {
         .await
         .unwrap_err();
 
-    assert!(error.contains("agent exited before simultaneous test milestone"));
+    assert_eq!(
+        error,
+        "agent exited before simultaneous test milestone: Ok(())"
+    );
+}
+
+#[tokio::test]
+async fn acquire_transition_observes_milestone_notified_before_waiting() {
+    let milestone = Notify::new();
+    milestone.notify_one();
+    let mut agent = tokio::spawn(std::future::pending::<()>());
+
+    tokio::time::timeout(
+        Duration::from_millis(100),
+        wait_for_acquire_transition(&milestone, &mut agent, "pre-notified test milestone"),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+
+    agent.abort();
+    assert!(agent.await.unwrap_err().is_cancelled());
 }
 
 struct LiveFixture {
