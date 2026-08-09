@@ -12,18 +12,25 @@ when production reorders settlement, child restart, child reap, or deactivation.
 runtime module has no direct coverage for restart-budget exhaustion or the mapping from a
 joined worker coordinator to the top-level runtime exit.
 
-The node agent already has a real chaos-worker binary and a test-support helper that locates
-or builds workspace worker binaries. The runtime tests can therefore drive the actual child
-supervisor, coordinator, lease settlement, restart, reap, and deactivation paths without
-adding a production interface whose only consumer is a test.
+The worker protocol already provides the real authenticated HTTP server used by workers.
+Runtime tests can pair that server with a supervised process fixture and drive the actual
+child supervisor, coordinator, lease settlement, restart, reap, and deactivation paths
+without adding a production interface whose only consumer is a test.
 
 ## Decision
 
-Lifecycle-ordering tests launch the existing chaos worker through a small temporary shell
-wrapper. The wrapper records each process start and then replaces itself with the real
-worker, preserving the exact credentials and parent-death pipe established by the child
-supervisor. Tests use the fake control-plane boundary to hold lease failure acknowledgement
-or deactivation and observe which production stage has and has not completed.
+Lifecycle-ordering tests launch a small temporary shell child that records each process
+start, atomically exports its supervisor-provided secret beneath a mode-private temporary
+directory, prints the production readiness line, and waits on the supervisor's parent-death pipe. An
+in-process `HttpServer`, configured with that exact credential, supplies a deliberately
+pending operation through the real authenticated worker protocol. Tests use the fake
+control-plane boundary to hold lease failure acknowledgement or deactivation and observe
+which production stage has and has not completed.
+
+The handoff uses `umask 077`, a newline-terminated temporary file, and atomic rename. The
+test combines the captured secret with the worker ID and epoch returned by its fake
+activation. The endpoint is published with the same complete-file protocol. Fixture drop
+guards kill an owned child and abort an owned server task after an assertion failure.
 
 One crash-mode test proves that a replacement process is not started while terminal lease
 settlement is blocked. One stall-mode test proves that shutdown does not reap the child or
@@ -38,8 +45,8 @@ No migration is required.
 
 The ordering regressions fail on observable process, control-plane, and runtime behavior
 instead of on an event sequence authored by the test. The tests are slower than pure helper
-tests because they launch worker processes, but they remain focused unit-module tests and
-reuse the same workspace binary support as the existing lifecycle integration suite.
+tests because they launch worker processes and bind a loopback server, but they remain
+focused unit-module tests.
 
 The process-backed tests run only on Unix, where `/bin/sh` and process signalling provide
 the worker wrapper and liveness probe. Existing helper-level tests continue to cover the
