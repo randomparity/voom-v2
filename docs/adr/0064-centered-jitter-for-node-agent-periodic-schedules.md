@@ -21,9 +21,12 @@ leave heartbeat deadline margin and preserve prompt shutdown while a sampled del
 Each periodic sleep samples uniformly from 50% through 150% of its existing interval. The
 range is centered on the existing interval, so its expected delay and mean request rate remain
 unchanged. A private duration sampler accepts an injected random-number generator so seeded
-unit tests can prove the bounds without wall-clock randomness. Production tasks each seed an
-independent RNG stream from operating-system entropy once and reuse it across cycles; shared
-seeds would preserve the fleet phase this decision exists to break.
+unit tests can prove the bounds without wall-clock randomness. Before activation, the runtime
+fallibly seeds one master RNG from operating-system entropy. It derives an independent stream
+for each production task, which that task reuses across cycles; shared task seeds would
+preserve the fleet phase this decision exists to break. Entropy failure therefore aborts before
+the runtime activates an incarnation or holds a lease, rather than panicking in a detached
+heartbeat task.
 
 Acquisition polling uses the configured poll interval as its center. Its pending sleep selects
 against both shutdown and child exit, so a sampled upper bound does not worsen shutdown or

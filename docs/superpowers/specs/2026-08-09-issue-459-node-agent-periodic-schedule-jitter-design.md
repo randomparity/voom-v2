@@ -47,9 +47,11 @@ granted interval and existing fail-closed behavior.
 One private nanosecond-resolution sampler accepts `&mut impl Rng`. It samples the full `u128`
 nanosecond range represented by `Duration` and reconstructs seconds plus subsecond nanoseconds;
 it does not narrow accepted lease grants through `u64` nanosecond saturation. Three small
-loop-specific functions state the distinct policies and call the sampler. Production tasks
-seed their own `StdRng` from the operating system once, then reuse it across cycles. Seeded
-production-loop seams make the sampled deadlines observable without public configuration.
+loop-specific functions state the distinct policies and call the sampler. Before activation,
+the runtime fallibly seeds one master `StdRng` from operating-system entropy, then derives an
+independent stream for each heartbeat or coordinator task. Each task reuses its stream across
+cycles. Seeded production-loop seams make the sampled deadlines observable without public
+configuration.
 
 ### Rejected: full jitter below the existing interval
 
@@ -66,8 +68,9 @@ successful loops.
 ### Rejected: public timing abstraction or configuration
 
 A scheduler trait or new jitter settings would add public and test surface for three private
-Tokio loops. Production wrappers instead seed `StdRng` and pass it into private async loop
-bodies, which is the smallest seam that lets deterministic tests exercise production wiring.
+Tokio loops. The production runtime instead derives private `StdRng` streams and passes them
+into private async loop bodies, which is the smallest seam that lets deterministic tests
+exercise production wiring.
 
 ## Detailed design
 
@@ -100,9 +103,13 @@ shutdown interrupt the sample.
 ## Failure behavior and boundaries
 
 - A poll RNG sample cannot prevent shutdown: the shutdown watch wins the poll wait.
+- Failure to seed the master schedule RNG returns an internal runtime error before activation;
+  it cannot silently terminate a detached heartbeat task.
 - A node heartbeat delayed past its remaining TTL still follows the existing local expiry and
   fatal path; jitter does not relax the deadline.
-- An unreachable lease-heartbeat request still fences at the granted TTL.
+- For a coherent lease grant whose sampled upper bound is below its TTL, an unreachable
+  lease-heartbeat request still fences at the granted TTL. An incoherent grant retains the
+  documented exact-interval/no-jitter behavior and may fence locally after server expiry.
 - A non-positive granted heartbeat interval or TTL keeps the existing one-second
   normalization and fail-closed behavior.
 - Random-source initialization uses the already-required `rand` dependency. No new dependency,
@@ -119,14 +126,17 @@ Seeded unit tests will prove that:
 4. incoherent lease grants retain the exact interval;
 5. intervals beyond `u64::MAX` nanoseconds preserve centered bounds and mean rather than
    saturating to a shorter delay;
-6. independent seeded streams do not produce one fixed schedule;
+6. a private failing entropy source returns an error before activation, while independently
+   derived seeded task streams do not produce one fixed schedule;
 7. the production acquisition-poll wait consumes successive seeded samples, and shutdown and
    child exit each interrupt a maximum sampled sleep without advancing paused time; and
 8. seeded production node- and lease-heartbeat loops observe at least two successive sampled
-   deadlines while retaining stop-channel interruption and TTL fencing.
+   deadlines while retaining stop-channel interruption and coherent-grant TTL fencing. A
+   separate incoherent-grant regression proves the exact normalized interval receives no
+   jitter without asserting an exact local fence deadline.
 
-Existing paused-time tests continue proving unreachable requests fence at the exact TTL. The
-focused crate suite, workspace lint, and `just ci` provide regression evidence. Bite proof
+Existing paused-time tests continue proving coherent unreachable requests fence at the exact
+TTL. The focused crate suite, workspace lint, and `just ci` provide regression evidence. Bite proof
 temporarily restores the former fixed delay independently in each production poll, node, and
 lease loop while retaining the new tests; the corresponding test must fail in each arm before
 the sampled implementation is restored.
