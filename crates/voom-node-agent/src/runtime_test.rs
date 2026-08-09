@@ -141,6 +141,13 @@ fn validation_accepts_only_responses_before_half_ttl() {
     assert!(!is_validation_fresh(Duration::from_secs(16), ttl));
 }
 
+#[test]
+fn granted_lease_ttl_normalizes_nonpositive_grants_to_one_second() {
+    assert_eq!(granted_lease_ttl(0), Duration::from_secs(1));
+    assert_eq!(granted_lease_ttl(-1), Duration::from_secs(1));
+    assert_eq!(granted_lease_ttl(20), Duration::from_secs(20));
+}
+
 #[tokio::test(start_paused = true)]
 async fn node_heartbeat_continues_during_delayed_child_startup() {
     let control = Arc::new(FakeControlPlane::default());
@@ -874,6 +881,49 @@ async fn validation_gives_the_lease_back_after_a_bounded_number_of_stale_attempt
     let outcome = validate_lease(&context, &dispatch(json!({})))
         .await
         .unwrap();
+
+    assert!(matches!(outcome, ValidationOutcome::Terminal));
+    assert_eq!(
+        control.lease_heartbeats.load(Ordering::SeqCst),
+        VALIDATION_ATTEMPTS as usize
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn validation_uses_a_longer_granted_ttl_than_local_configuration() {
+    let control = Arc::new(FakeControlPlane::default());
+    control
+        .heartbeat_actions
+        .lock()
+        .await
+        .push_back(HeartbeatAction::Delay(Duration::from_secs(5)));
+    let mut dispatch = dispatch(json!({}));
+    dispatch.lease_ttl_seconds = 20;
+
+    let outcome = validate_lease(&context(control.clone()), &dispatch)
+        .await
+        .unwrap();
+
+    assert!(matches!(outcome, ValidationOutcome::Fresh));
+    assert_eq!(control.lease_heartbeats.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn validation_rejects_a_shorter_granted_ttl_than_local_configuration() {
+    let control = Arc::new(FakeControlPlane::default());
+    for _ in 0..VALIDATION_ATTEMPTS {
+        control
+            .heartbeat_actions
+            .lock()
+            .await
+            .push_back(HeartbeatAction::Delay(Duration::from_secs(5)));
+    }
+    let mut context = context(control.clone());
+    context.lease_ttl = Duration::from_secs(20);
+    let mut dispatch = dispatch(json!({}));
+    dispatch.lease_ttl_seconds = 6;
+
+    let outcome = validate_lease(&context, &dispatch).await.unwrap();
 
     assert!(matches!(outcome, ValidationOutcome::Terminal));
     assert_eq!(

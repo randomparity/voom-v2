@@ -658,7 +658,8 @@ async fn validate_lease(
     context: &CoordinatorContext,
     dispatch: &LeaseDispatch,
 ) -> Result<ValidationOutcome, RuntimeFatal> {
-    let freshness = context.lease_ttl / 2;
+    let granted_ttl = granted_lease_ttl(dispatch.lease_ttl_seconds);
+    let freshness = granted_ttl / 2;
     for _ in 0..VALIDATION_ATTEMPTS {
         let started = Instant::now();
         let request = lease_heartbeat_request(context, new_key("validate"))
@@ -669,7 +670,7 @@ async fn validate_lease(
         )
         .await;
         match result {
-            Ok(Ok(_)) if is_validation_fresh(started.elapsed(), context.lease_ttl) => {
+            Ok(Ok(_)) if is_validation_fresh(started.elapsed(), granted_ttl) => {
                 return Ok(ValidationOutcome::Fresh);
             }
             Ok(Ok(_)) | Err(_) => {}
@@ -735,7 +736,7 @@ async fn lease_heartbeat_loop(
     // TTL is not longer than its beat is incoherent and fences almost immediately; that is
     // the honest outcome, since the server would expire such a lease just as fast.
     let seconds = u64::try_from(heartbeat_after_seconds).unwrap_or(1).max(1);
-    let ttl = Duration::from_secs(u64::try_from(lease_ttl_seconds).unwrap_or(1).max(1));
+    let ttl = granted_lease_ttl(lease_ttl_seconds);
     // The control plane expires the lease `ttl` after the last heartbeat it observed. Fence
     // locally at that same deadline so the child stops before the ticket is redispatched.
     let mut last_success = Instant::now();
@@ -1487,6 +1488,10 @@ fn heartbeat_interval(ttl_seconds: u32) -> Duration {
 
 fn is_validation_fresh(elapsed: Duration, ttl: Duration) -> bool {
     elapsed < ttl / 2
+}
+
+fn granted_lease_ttl(lease_ttl_seconds: i64) -> Duration {
+    Duration::from_secs(u64::try_from(lease_ttl_seconds).unwrap_or(1).max(1))
 }
 
 fn duration_seconds_i64(duration: Duration) -> i64 {
