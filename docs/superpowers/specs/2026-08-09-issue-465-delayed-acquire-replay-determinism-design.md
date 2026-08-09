@@ -112,8 +112,9 @@ helper and middleware signals make it green, three mutation bites run independen
    `live agent never reached first acquire response committed`;
 2. restore the first signal, remove the replay-start signal under the same temporary guard, and
    require exit 101 with `live agent never reached replay acquire started`; and
-3. restore both signals, remove biased agent-exit precedence, and run the simultaneous-readiness
-   helper regression; it must fail because notification incorrectly wins over the completed agent.
+3. restore both signals, temporarily remove the agent-completion select arm entirely, and run the
+   simultaneous-readiness helper regression; its `should_panic` contract must fail deterministically
+   because the helper returns from the ready notification instead of reporting the completed agent.
 
 Restoring every mutation must return both focused tests to exit 0. The temporary short guard
 distinguishes the intended missing signal from setup failure and leaves the committed 30-second
