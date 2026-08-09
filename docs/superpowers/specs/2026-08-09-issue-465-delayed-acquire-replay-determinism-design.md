@@ -29,10 +29,19 @@ the cause of a permanent wait.
 The harness does discard decisive state: it spawns the agent and does not observe the join handle
 while waiting for either counter. If the runtime exits before a transition, the helper continues
 polling an unreachable count until `HANG_GUARD` expires and reports only “counter never reached.”
-That turns a concrete early-exit result into an ambiguous 30-second timeout. A 16-way controlled
-run on the current base completed without reproducing the intermittent exit, consistent with the
-original one-off failure and immediate passing rerun; nondeterministic reproduction is not treated
-as evidence that the harness is sound.
+That turns a concrete early-exit result into an ambiguous 30-second timeout. One focused run, one
+16-way focused run, and 64 loaded full-lifecycle-suite runs on the current base all passed. These
+runs do not establish whether the original missing transition was an early exit or a live-agent
+stall, and this design does not claim that underlying cause. They do establish that reproduction is
+not currently a usable discovery mechanism.
+
+The verified harness cause is narrower: the original failure cannot identify the absent transition
+or distinguish a live stall from a completed agent because both waits share one line and discard the
+join result. Issue #465 explicitly accepts reporting the stalled transition without a timing-sensitive
+poll as the alternative when deterministic reproduction is unavailable. This change is diagnostic
+instrumentation that removes that ambiguity; it does not declare the underlying runtime innocent.
+If the instrumented test later reports a live-agent stall or early exit, that result is new causal
+evidence for a linked production issue rather than authority to speculate in this change.
 
 ## Approaches
 
@@ -44,10 +53,12 @@ started. `notify_one` stores a permit when the test has not begun waiting yet, s
 is persistent across the producer/consumer scheduling race. A helper races the named notification,
 the mutable agent join handle, and `HANG_GUARD`.
 
-The transition wins immediately when reached. An early agent exit fails immediately with the join
-result and transition name. A genuine stalled live agent still expires under the unchanged guard
-and identifies the exact missing transition. Completion/failure counters remain because they are
-final negative assertions, not synchronization.
+The select is biased with the agent join arm first. Any agent completion before the test sends its
+stop request is a failure, even if a transition notification is also ready, so the exit result cannot
+be hidden by simultaneous readiness. Otherwise the transition wins immediately when reached. A
+genuine stalled live agent still expires under the unchanged guard and identifies the exact missing
+transition. Completion/failure counters remain because they are final negative assertions, not
+synchronization.
 
 ### Rejected: keep atomic polling and improve only the error strings
 
@@ -75,10 +86,12 @@ to gate the first response. After the real acquire handler returns, middleware s
 signals `replay_acquire_started` before returning the synthetic idle response.
 
 `wait_for_acquire_transition` accepts the notification, a mutable reference to the agent join
-handle, and a static transition description. Its `tokio::select!` has three arms: notification,
-agent completion, and the guard sleep. The agent and timeout arms panic with distinct actionable
-messages. The test keeps the join handle after both waits and performs the existing graceful-stop
-join and durable ticket assertions unchanged.
+handle, and a static transition description. Its biased `tokio::select!` has the agent completion
+arm first, followed by notification and the guard sleep. The agent and timeout arms panic with
+distinct actionable messages. A focused helper regression makes both agent completion and the
+notification ready before polling and proves the exit arm wins. The test keeps the join handle
+after both waits and performs the existing graceful-stop join and durable ticket assertions
+unchanged.
 
 This is a test-local synchronization choice, not a production ownership or public concurrency
 contract, so it does not warrant an ADR. No production file changes.
@@ -89,18 +102,25 @@ The lifecycle test itself crosses the real HTTP middleware and runtime boundary,
 regression test. TDD starts by changing it to require the named notification fields and helper; the
 focused build must fail because that synchronization surface does not yet exist. After the minimal
 helper and middleware signals make it green, bite proof temporarily removes the replay-start signal
-and runs the focused test under a short external deadline. The test must remain blocked waiting for
-that named transition; restoring the signal must return it to green. A concurrent focused run then
-checks that notification permits survive producer/consumer scheduling variation.
+and temporarily changes only the test-local `HANG_GUARD` to 500 milliseconds. The focused test must
+exit 101 with `live agent never reached replay acquire started`; restoring both mutations must return
+it to exit 0. This distinguishes the intended missing signal from setup failure and leaves the
+committed 30-second guard unchanged.
 
-`cargo test -p voom-node-agent --test lifecycle delayed_acquire_replay_never_dispatches -- --exact`
-is the focused check. `just ci` is the final repository guardrail.
+The focused command is
+`cargo test -p voom-node-agent --test lifecycle delayed_acquire_replay_never_dispatches -- --exact`.
+The simultaneous-readiness helper regression runs by its exact test name. The concurrency check runs
+four waves of 16 direct lifecycle test-binary copies, for 64 total suites, and requires every process
+to exit 0; this matches the controlled reproduction command recorded in the implementation plan.
+The completed baseline was 64/64 before the change. The same 64/64 threshold applies after it.
+`just ci` is the final repository guardrail.
 
 ## Success criteria
 
 - The two acquire transitions use distinct persistent notifications rather than counter polling.
 - Each wait terminates on transition, early agent exit, or the unchanged deadlock guard.
-- A failure names the missing transition and includes an early agent result when available.
+- Agent exit wins when exit and transition are simultaneously ready; the failure names the missing
+  transition and includes the exit result.
 - Ticket state and zero complete/fail dispatch assertions remain unchanged.
 - No production behavior, public contract, dependency, timeout, or migration changes.
 - Focused, concurrent, bite, and repository guardrails pass without unexpected skips or warnings.
