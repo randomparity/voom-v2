@@ -32,7 +32,7 @@ the control plane's `Retired` incarnation state inside one `HANG_GUARD`. The ter
 poll remains a real control-plane read and the join remains the production runtime future;
 neither is replaced by a test-only observer. When the guard expires, report that the
 second-agent graceful-shutdown lifecycle did not complete and include which witness was
-still missing plus a bounded snapshot of incarnation state and observed request paths.
+still missing plus the request paths already held by the fixture.
 
 The existing first-agent fencing join and all of its supersession assertions remain
 unchanged. After the combined second-agent witness completes, retain the explicit
@@ -70,10 +70,10 @@ The worker query remains after the helper and proves both workers were retired. 
 therefore continues to cover the ordered production path: graceful request, coordinator
 settlement and child reap, deactivation, durable retirement, runtime exit.
 
-Timeout diagnostics must not create a second unbounded wait. The helper records progress
-as each witness completes. On expiry it reports the missing witness and the request paths
-already held by the fixture. Any optional database snapshot is itself bounded and falls
-back to an explicit unavailable marker.
+Timeout diagnostics must not create a second wait. The helper records progress as each
+witness completes. On expiry it reports the missing witness and the request paths already
+held by the fixture; it does not issue another database request after the lifecycle guard
+has expired.
 
 ## Regression and contention proof
 
