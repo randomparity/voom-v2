@@ -37,10 +37,13 @@ permitted production/test surface is `crates/voom-node-agent/src/runtime.rs` and
 
 ### Selected: process-backed production-path tests
 
-Use `voom_test_support::worker::cargo_bin_or_build` to locate the existing chaos-worker
-binary. A temporary `/bin/sh` wrapper records its PID/start count and then `exec`s the real
-worker. Because the child supervisor supplies credentials and the parent-death pipe through
-environment and stdin, the wrapper does not emulate any worker protocol behavior.
+Use a temporary `/bin/sh` child to record its PID/start count and preserve the supervisor's
+parent-death pipe. It writes the randomly generated worker secret to a mode-private
+temporary file before readiness. The test starts the existing production `HttpServer` with
+that secret, the fake activation's worker ID and epoch, and a deliberately pending operation
+handler. It writes the server's loopback address for the child to announce, and thereby lets
+the unmodified runtime complete handshake and identity verification through its real HTTP
+client.
 
 The fake control plane remains the correct mock boundary: it is external, nondeterministic
 in production, and already exposes gates for lease failure acknowledgement and deactivation.
@@ -61,21 +64,29 @@ does not encode the runtime guarantee.
 
 ## Test fixture and observations
 
-The Unix-only worker fixture owns a temporary wrapper and process-start log. Each launch
-appends its shell PID and replaces the shell with chaos-worker, so that PID remains the
-supervised worker PID. The fixture provides bounded helpers for start-count observation and
-process liveness. Every spawned runtime receives an explicit shutdown signal and every gate
-is released before test cleanup.
+The Unix-only worker fixture owns a temporary wrapper, process-start log, credential file,
+and endpoint file. Each launch appends its shell PID, writes the credential supplied by the
+supervisor, announces the test server's endpoint, and blocks on stdin, so that PID remains
+the supervised worker PID. The fixture provides bounded helpers for credential, start-count,
+and process-liveness observation. Every spawned runtime receives an explicit shutdown signal,
+every gate is released, and the protocol server is stopped before test cleanup.
 
-For crash ordering, the control plane grants two concurrent leases and one chaos payload
-exits the shared worker. Both lease tasks must reach failure acknowledgement before the
+The shell sets `umask 077`, writes a newline-terminated secret to a sibling temporary file,
+and atomically renames it into place. The Rust fixture publishes the newline-terminated
+endpoint through the same temporary-file-and-rename protocol. Bounded readers accept only
+the complete published file. Drop guards kill the last owned child and abort the server
+task if a timeout, assertion, or deliberate bite mutation unwinds before normal cleanup.
+
+For crash ordering, the control plane grants two concurrent leases and the protocol server
+holds both operation requests pending. The test kills the shared supervised process after
+both dispatches arrive. Both lease tasks must reach failure acknowledgement before the
 assertions begin. They wait on one acknowledgement gate whose single-permit notifications
 release them independently. The start log must remain at one entry while both are held and
 after the first acknowledgement completes; only after the second acknowledgement may
 production restart and the log reach two. Acquisition switches to idle before either
 release so the replacement stays alive for clean shutdown.
 
-For graceful ordering, a stall payload keeps one lease held. After the shutdown signal, the
+For graceful ordering, a pending operation keeps one lease held. After the shutdown signal, the
 failure acknowledgement gate proves settlement has begun. While held, the worker PID must
 remain live and deactivation must not start. After acknowledgement, the deactivation gate
 proves deactivation has begun; by then the worker PID must no longer be live. Releasing the
