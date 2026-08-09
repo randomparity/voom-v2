@@ -120,10 +120,13 @@ The incarnation list is newest first. A normal replacement shows the new incarna
 
 SIGINT or SIGTERM stops acquisition, fails held leases as `user_cancellation`, closes and
 reaps every child (killing one after `shutdown_grace_seconds` if necessary), and deactivates
-the incarnation. Set the supervisor stop timeout above the configured shutdown grace. A
-second termination signal cancels blocked lease settlement or deactivation and makes the
-process exit unsuccessfully. It still kills and reaps every child before exit, but the
-incarnation or lease terminal state can remain for expiry/recovery to reconcile.
+the incarnation. Set the supervisor stop timeout above the configured shutdown grace. The
+first operator signal always begins or acknowledges ordered shutdown, even when an internal
+fatal error or restart-budget exhaustion already began it; that unconsumed first signal never
+forces settlement or deactivation. Only a genuine second operator signal, after the first has
+been consumed, cancels blocked lease settlement or deactivation and makes the process exit
+unsuccessfully. It still kills and reaps every child before exit, but forced shutdown can leave
+the incarnation or lease terminal state for TTL expiry/recovery to reconcile.
 
 A signal that arrives while the agent is still retrying activation against an unreachable
 control plane stops it immediately and exits successfully. No child has started at that
