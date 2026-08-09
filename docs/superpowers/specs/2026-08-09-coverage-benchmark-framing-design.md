@@ -30,10 +30,18 @@ executable existed in the coverage profile.
 The coverage job restores Cargo artifacts before compiling. Its failed attempt compiled the
 current worker protocol into the coverage profile, but the nested default-profile build
 reported every fake provider fresh in 0.14 seconds. The provider processes were therefore
-not artifacts of the current coverage build. The observed `OperationResponse` line reaching
-the `ProgressFrame` decoder is consistent with an incompatible cached provider wire
-implementation; the failed process is no longer available to identify its exact source
-revision. The shared
+not artifacts of the current coverage build.
+
+A controlled reproduction replaced the default tree's `fake-scanner` top-level executable
+and hashed executable with a server that emits an `OperationResponse` as both the response
+line and the first frame. The focused llvm-cov benchmark again reported the nested default
+build fresh, selected that executable, and failed in the `ProgressFrame` decoder on the
+second response line. This proves the causal path from the wrong target-tree selection to
+the observed failure class. It does not identify which cached executable produced the
+original runner's line; that process is no longer available, and the successful rerun at
+the same commit rules out a deterministic source defect.
+
+The shared
 `voom_test_support::worker::cargo_bin_or_build` helper already exists to keep nested builds
 and launched paths in the active profile tree, including `llvm-cov`, custom target roots,
 prebuilt-worker test runs, and all-feature workspace builds.
@@ -70,8 +78,9 @@ The durable-workflow fixture receives a focused regression asserting that the pr
 returned by its resolver belongs to the active test profile reported by
 `voom_test_support::worker::target_debug_dir`. Under llvm-cov the old resolver returns the
 default profile and the test fails; the delegated resolver builds and returns the coverage
-profile path. The existing durable-workflow benchmark remains the end-to-end framing
-regression.
+profile path. This assertion blocks the reproduced path by preventing a default-tree
+executable from becoming the benchmark's wire producer. The existing durable-workflow
+benchmark remains the end-to-end framing regression.
 
 ## Failure behavior
 
