@@ -135,10 +135,12 @@ impl AgentRuntime {
             Ok(children) => children,
             Err(error) => {
                 node_heartbeat.stop();
+                let mut signal_phase = ShutdownSignalPhase::AwaitingFirst;
                 self.deactivate_or_second_signal(
                     incarnation_id,
                     NodeIncarnationEndReason::ChildStartupFailed,
                     &mut signals,
+                    &mut signal_phase,
                 )
                 .await?;
                 return Err(VoomError::ExternalSystemUnavailable(format!(
@@ -165,22 +167,37 @@ impl AgentRuntime {
         };
 
         let shutdown_kind = shutdown_kind_for_exit(&exit);
+        let signal_phase = signal_phase_for_exit(&exit);
         let _ = shutdown_tx.send(shutdown_kind);
-        let settled = wait_for_coordinators(&mut coordinators, &shutdown_tx, &mut signals).await;
+        let settled =
+            wait_for_coordinators(&mut coordinators, &shutdown_tx, &mut signals, signal_phase)
+                .await;
+        self.finish_shutdown_lifecycle(incarnation_id, exit, settled, node_heartbeat, &mut signals)
+            .await
+    }
+
+    async fn finish_shutdown_lifecycle(
+        &self,
+        incarnation_id: NodeIncarnationId,
+        exit: RuntimeExit,
+        settled: Result<ShutdownProgress, VoomError>,
+        node_heartbeat: NodeHeartbeatHandle,
+        signals: &mut mpsc::UnboundedReceiver<()>,
+    ) -> Result<(), VoomError> {
         // Stop the heartbeat before propagating a coordinator join failure, or the task
         // keeps heartbeating an incarnation this runtime has already abandoned.
         node_heartbeat.stop();
-        let forced = settled?;
-
+        let progress = settled?;
         let reason = match &exit {
             RuntimeExit::Graceful => NodeIncarnationEndReason::GracefulShutdown,
             RuntimeExit::Fatal(_) => return Err(exit.into_error()),
             RuntimeExit::RestartExhausted => NodeIncarnationEndReason::ChildRestartExhausted,
         };
-        if forced {
+        if progress.forced {
             return Err(forced_shutdown_error());
         }
-        self.deactivate_or_second_signal(incarnation_id, reason, &mut signals)
+        let mut signal_phase = progress.signal_phase;
+        self.deactivate_or_second_signal(incarnation_id, reason, signals, &mut signal_phase)
             .await?;
         match exit {
             RuntimeExit::Graceful => Ok(()),
@@ -284,7 +301,12 @@ impl AgentRuntime {
                 }
             }
         });
-        Ok(NodeHeartbeatHandle { stop_tx, joined })
+        Ok(NodeHeartbeatHandle {
+            stop_tx,
+            joined,
+            #[cfg(test)]
+            stop_observer: None,
+        })
     }
 
     fn child_specs(&self, activation: &ActivateOutcome) -> Result<Vec<ChildSpec>, VoomError> {
@@ -379,10 +401,22 @@ impl AgentRuntime {
         incarnation_id: NodeIncarnationId,
         reason: NodeIncarnationEndReason,
         signals: &mut mpsc::UnboundedReceiver<()>,
+        signal_phase: &mut ShutdownSignalPhase,
     ) -> Result<(), VoomError> {
-        tokio::select! {
-            result = self.deactivate(incarnation_id, reason) => result,
-            _ = signals.recv() => Err(forced_shutdown_error()),
+        let deactivation = self.deactivate(incarnation_id, reason);
+        tokio::pin!(deactivation);
+        loop {
+            tokio::select! {
+                result = &mut deactivation => return result,
+                signal = signals.recv() => {
+                    let Some(()) = signal else {
+                        return Err(forced_shutdown_error());
+                    };
+                    if signal_phase.signal_forces() {
+                        return Err(forced_shutdown_error());
+                    }
+                }
+            }
         }
     }
 
@@ -394,10 +428,16 @@ impl AgentRuntime {
 struct NodeHeartbeatHandle {
     stop_tx: watch::Sender<bool>,
     joined: tokio::task::JoinHandle<()>,
+    #[cfg(test)]
+    stop_observer: Option<Arc<dyn Fn() + Send + Sync>>,
 }
 
 impl NodeHeartbeatHandle {
     fn stop(self) {
+        #[cfg(test)]
+        if let Some(observer) = &self.stop_observer {
+            observer();
+        }
         let _ = self.stop_tx.send(true);
         self.joined.abort();
     }
@@ -419,7 +459,7 @@ struct CoordinatorContext {
 
 #[derive(Debug)]
 enum CoordinatorExit {
-    Shutdown,
+    Shutdown(LeaseSettlement),
     RestartExhausted,
     Fatal(RuntimeFatal),
 }
@@ -469,31 +509,22 @@ async fn run_coordinator(
             }
             CoordinatorEvent::Acquire(Err(error)) => return CoordinatorExit::Fatal(error),
             CoordinatorEvent::Shutdown(kind) => {
-                settle_leases_for_shutdown(&cancel_tx, &mut leases, &mut shutdown, kind).await;
+                let settlement =
+                    settle_leases_for_shutdown(&cancel_tx, &mut leases, &mut shutdown, kind).await;
                 let supervisor = ChildSupervisor::new(context.shutdown_grace);
                 let _ = supervisor.shutdown_all(vec![child]).await;
-                return CoordinatorExit::Shutdown;
+                return CoordinatorExit::Shutdown(settlement);
             }
             CoordinatorEvent::ChildExit(Ok(())) => {
                 // Settling here consumes any shutdown notification, so this arm must act on
                 // it. Falling through to a restart would leave the top-of-loop `changed()`
                 // waiting for a value that has already been sent.
-                if cancel_and_wait(
-                    &cancel_tx,
-                    LeaseCancellation::Crash,
-                    &mut leases,
-                    &mut shutdown,
-                )
-                .await
-                .is_some()
+                if let Some(settlement) =
+                    settle_leases_after_child_crash(&cancel_tx, &mut leases, &mut shutdown).await
                 {
-                    // Finish settling with the force escape, but do not re-send a
-                    // cancellation: these leases died with the child, and overwriting
-                    // `Crash` would record a crashed worker's ticket as user-cancelled.
-                    wait_or_force(&mut leases, &mut shutdown, false).await;
                     let supervisor = ChildSupervisor::new(context.shutdown_grace);
                     let _ = supervisor.shutdown_all(vec![child]).await;
-                    return CoordinatorExit::Shutdown;
+                    return CoordinatorExit::Shutdown(settlement);
                 }
                 if crashes.record_and_exhausted() {
                     return CoordinatorExit::RestartExhausted;
@@ -1184,6 +1215,31 @@ async fn cancel_and_wait(
     wait_or_force(leases, shutdown, true).await
 }
 
+async fn settle_leases_after_child_crash(
+    cancellation: &watch::Sender<LeaseCancellation>,
+    leases: &mut JoinSet<()>,
+    shutdown: &mut watch::Receiver<ShutdownKind>,
+) -> Option<LeaseSettlement> {
+    let observed = cancel_and_wait(cancellation, LeaseCancellation::Crash, leases, shutdown).await;
+    let observed = observed?;
+    // Finish settling with the force escape, but do not re-send a cancellation: these
+    // leases died with the child, and overwriting `Crash` would record a crashed worker's
+    // ticket as user-cancelled.
+    let final_observed = wait_or_force(leases, shutdown, false).await;
+    Some(child_crash_lease_settlement(observed, final_observed))
+}
+
+fn child_crash_lease_settlement(
+    observed: ShutdownKind,
+    final_observed: Option<ShutdownKind>,
+) -> LeaseSettlement {
+    if observed == ShutdownKind::Forced || final_observed == Some(ShutdownKind::Forced) {
+        LeaseSettlement::Forced
+    } else {
+        LeaseSettlement::Completed
+    }
+}
+
 /// Wait for every lease task to settle, abandoning settlement when a forced shutdown
 /// arrives. Settlement calls the control plane, which retries an unreachable peer, so
 /// every wait needs this escape.
@@ -1234,17 +1290,26 @@ async fn settle_leases_for_shutdown(
     leases: &mut JoinSet<()>,
     shutdown: &mut watch::Receiver<ShutdownKind>,
     kind: ShutdownKind,
-) -> bool {
+) -> LeaseSettlement {
     let reason = if kind == ShutdownKind::User {
         LeaseCancellation::User
     } else {
         LeaseCancellation::Fenced
     };
     let _ = cancellation.send(reason);
+    if kind == ShutdownKind::Forced {
+        leases.abort_all();
+        wait_for_leases(leases).await;
+        return LeaseSettlement::Forced;
+    }
     // Settlement calls the control plane on every path, not just the user-requested one, so
     // a fenced or restart-exhausted shutdown needs the same force escape. Without it a lease
     // stuck retrying an unreachable control plane hangs the coordinator with no way out.
-    wait_or_force(leases, shutdown, false).await == Some(ShutdownKind::Forced)
+    if wait_or_force(leases, shutdown, false).await == Some(ShutdownKind::Forced) {
+        LeaseSettlement::Forced
+    } else {
+        LeaseSettlement::Completed
+    }
 }
 
 /// Wait for coordinators to finish, letting a termination signal force settlement.
@@ -1256,29 +1321,46 @@ async fn wait_for_coordinators(
     coordinators: &mut JoinSet<CoordinatorExit>,
     shutdown: &watch::Sender<ShutdownKind>,
     signals: &mut mpsc::UnboundedReceiver<()>,
-) -> Result<bool, VoomError> {
+    mut signal_phase: ShutdownSignalPhase,
+) -> Result<ShutdownProgress, VoomError> {
     let mut forced = false;
-    let mut force_enabled = true;
+    let mut signals_open = true;
     while !coordinators.is_empty() {
         tokio::select! {
             joined = coordinators.join_next() => {
-                if let Some(Err(error)) = joined {
-                    return Err(VoomError::Internal(format!(
-                        "join node-agent worker coordinator: {error}"
-                    )));
+                match joined {
+                    Some(Ok(CoordinatorExit::Shutdown(LeaseSettlement::Forced))) => {
+                        forced = true;
+                    }
+                    Some(Ok(
+                        CoordinatorExit::Shutdown(LeaseSettlement::Completed)
+                        | CoordinatorExit::RestartExhausted
+                        | CoordinatorExit::Fatal(_),
+                    ))
+                    | None => {}
+                    Some(Err(error)) => {
+                        return Err(VoomError::Internal(format!(
+                            "join node-agent worker coordinator: {error}"
+                        )));
+                    }
                 }
             }
-            signal = signals.recv(), if force_enabled && !forced => {
-                if signal.is_none() {
-                    force_enabled = false;
+            signal = signals.recv(), if signals_open && !forced => {
+                let Some(()) = signal else {
+                    signals_open = false;
                     continue;
+                };
+                if signal_phase.signal_forces() {
+                    forced = true;
+                    let _ = shutdown.send(ShutdownKind::Forced);
                 }
-                forced = true;
-                let _ = shutdown.send(ShutdownKind::Forced);
             }
         }
     }
-    Ok(forced)
+    Ok(ShutdownProgress {
+        signal_phase,
+        forced,
+    })
 }
 
 fn shutdown_kind_for_exit(exit: &RuntimeExit) -> ShutdownKind {
@@ -1289,15 +1371,22 @@ fn shutdown_kind_for_exit(exit: &RuntimeExit) -> ShutdownKind {
     }
 }
 
+fn signal_phase_for_exit(exit: &RuntimeExit) -> ShutdownSignalPhase {
+    match exit {
+        RuntimeExit::Graceful => ShutdownSignalPhase::ForceEnabled,
+        RuntimeExit::Fatal(_) | RuntimeExit::RestartExhausted => ShutdownSignalPhase::AwaitingFirst,
+    }
+}
+
 fn coordinator_exit(
     joined: Option<Result<CoordinatorExit, tokio::task::JoinError>>,
 ) -> RuntimeExit {
     match joined {
         Some(Ok(CoordinatorExit::RestartExhausted)) => RuntimeExit::RestartExhausted,
         Some(Ok(CoordinatorExit::Fatal(fatal))) => RuntimeExit::Fatal(fatal),
-        Some(Ok(CoordinatorExit::Shutdown)) | None => RuntimeExit::Fatal(RuntimeFatal::Internal(
-            "worker coordinator stopped before shutdown".to_owned(),
-        )),
+        Some(Ok(CoordinatorExit::Shutdown(_))) | None => RuntimeExit::Fatal(
+            RuntimeFatal::Internal("worker coordinator stopped before shutdown".to_owned()),
+        ),
         Some(Err(error)) => RuntimeExit::Fatal(RuntimeFatal::Internal(format!(
             "worker coordinator task failed: {error}"
         ))),
@@ -1327,6 +1416,36 @@ impl RuntimeExit {
 enum RuntimeFatal {
     ControlPlane(VoomError),
     Internal(String),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ShutdownSignalPhase {
+    AwaitingFirst,
+    ForceEnabled,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LeaseSettlement {
+    Completed,
+    Forced,
+}
+
+impl ShutdownSignalPhase {
+    fn signal_forces(&mut self) -> bool {
+        match self {
+            Self::AwaitingFirst => {
+                *self = Self::ForceEnabled;
+                false
+            }
+            Self::ForceEnabled => true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ShutdownProgress {
+    signal_phase: ShutdownSignalPhase,
+    forced: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1396,8 +1515,6 @@ fn random_hex(byte_count: usize) -> String {
 
 fn forced_shutdown_error() -> VoomError {
     VoomError::ExternalSystemUnavailable(
-        // Not always the *second* signal: the graceful path consumed one to begin shutting
-        // down, but a failing path reaches deactivation without having consumed any.
         "node-agent shutdown interrupted by a termination signal".to_owned(),
     )
 }
