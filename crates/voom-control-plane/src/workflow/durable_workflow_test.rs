@@ -4,9 +4,9 @@
     reason = "integration tests fail fast on unexpected durable state"
 )]
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::Stdio;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::ControlPlane;
@@ -40,6 +40,14 @@ type TestResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
 async fn process_provider_test_guard() -> tokio::sync::MutexGuard<'static, ()> {
     PROCESS_PROVIDER_TEST_LOCK.lock().await
+}
+
+#[test]
+fn provider_binary_uses_active_test_profile() -> TestResult<()> {
+    let actual = provider_binary("fake-scanner")?;
+    let expected = voom_test_support::worker::target_debug_binary("fake-scanner");
+
+    expect_eq("provider binary path", &actual, &expected)
 }
 
 #[tokio::test]
@@ -1432,63 +1440,8 @@ async fn read_bound_addr(child: &mut Child, name: &str) -> TestResult<std::net::
 }
 
 fn provider_binary(name: &str) -> TestResult<PathBuf> {
-    let env_name = format!("CARGO_BIN_EXE_{name}");
-    if let Some(path) = std::env::var_os(env_name) {
-        return Ok(PathBuf::from(path));
-    }
-    ensure_fake_provider_bins_built()?;
-    let target_dir =
-        std::env::var_os("CARGO_TARGET_DIR").map_or_else(default_target_dir, target_dir_from_env);
-    let suffix = if cfg!(windows) { ".exe" } else { "" };
-    Ok(debug_dir(&target_dir).join(format!("{name}{suffix}")))
-}
-
-fn ensure_fake_provider_bins_built() -> TestResult<()> {
-    static BUILD: OnceLock<Result<(), String>> = OnceLock::new();
-    BUILD
-        .get_or_init(|| {
-            let status = std::process::Command::new("cargo")
-                .args(["build", "-p", "voom-fakes", "--bins"])
-                .current_dir(workspace_root())
-                .status()
-                .map_err(|e| format!("fake provider build failed to start: {e}"))?;
-            if status.success() {
-                Ok(())
-            } else {
-                Err(format!("fake provider build exited with {status}"))
-            }
-        })
-        .clone()
-        .map_err(io_error)
-}
-
-fn target_dir_from_env(path: std::ffi::OsString) -> PathBuf {
-    let path = PathBuf::from(path);
-    if path.is_absolute() {
-        path
-    } else {
-        workspace_root().join(path)
-    }
-}
-
-fn debug_dir(target_dir: &Path) -> PathBuf {
-    if let Some(target) = std::env::var_os("CARGO_BUILD_TARGET").filter(|target| !target.is_empty())
-    {
-        target_dir.join(target).join("debug")
-    } else {
-        target_dir.join("debug")
-    }
-}
-
-fn default_target_dir() -> PathBuf {
-    workspace_root().join("target")
-}
-
-fn workspace_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(Path::parent)
-        .map_or_else(|| PathBuf::from("."), PathBuf::from)
+    voom_test_support::worker::cargo_bin_or_build("voom-fakes", name)
+        .map_err(|err| io_error(format!("fake provider binary {name}: {err}")))
 }
 
 async fn connect_single_connection_pool(url: &str) -> TestResult<SqlitePool> {
