@@ -1,6 +1,7 @@
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::pin::Pin;
+use std::sync::Mutex as StdMutex;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use async_trait::async_trait;
@@ -22,6 +23,115 @@ use crate::client::{
     LeaseHeartbeatOutcome, NodeHeartbeatOutcome,
 };
 use crate::config::{AgentConfig, TokenSource};
+
+#[test]
+fn shutdown_signal_phase_matches_original_exit() {
+    assert_eq!(
+        signal_phase_for_exit(&RuntimeExit::Graceful),
+        ShutdownSignalPhase::ForceEnabled
+    );
+    assert_eq!(
+        signal_phase_for_exit(&RuntimeExit::Fatal(RuntimeFatal::Internal(
+            "fatal".to_owned()
+        ))),
+        ShutdownSignalPhase::AwaitingFirst
+    );
+    assert_eq!(
+        signal_phase_for_exit(&RuntimeExit::RestartExhausted),
+        ShutdownSignalPhase::AwaitingFirst
+    );
+}
+
+#[tokio::test]
+async fn fatal_reaping_requires_a_genuine_second_signal() {
+    let (release_tx, release_rx) = oneshot::channel();
+    let mut coordinators = JoinSet::new();
+    coordinators.spawn(async move {
+        let _ = release_rx.await;
+        CoordinatorExit::Shutdown(LeaseSettlement::Completed)
+    });
+    let (shutdown_tx, mut shutdown_rx) = watch::channel(ShutdownKind::Fenced);
+    let (signal_tx, mut signal_rx) = mpsc::unbounded_channel();
+    signal_tx.send(()).unwrap();
+
+    let reaping = wait_for_coordinators(
+        &mut coordinators,
+        &shutdown_tx,
+        &mut signal_rx,
+        ShutdownSignalPhase::AwaitingFirst,
+    );
+    tokio::pin!(reaping);
+
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), async {
+            tokio::select! {
+                result = &mut reaping => {
+                    assert!(result.is_err(), "blocked coordinator reaped early: {result:?}");
+                    Ok(())
+                }
+                changed = shutdown_rx.changed() => changed,
+            }
+        })
+        .await
+        .is_err(),
+        "a buffered first signal must not force fatal settlement"
+    );
+    assert_eq!(*shutdown_rx.borrow(), ShutdownKind::Fenced);
+
+    signal_tx.send(()).unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::select! {
+            result = &mut reaping => {
+                assert!(result.is_err(), "blocked coordinator reaped early: {result:?}");
+                Ok(())
+            }
+            changed = shutdown_rx.changed() => changed,
+        }
+    })
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(*shutdown_rx.borrow(), ShutdownKind::Forced);
+    release_tx.send(()).unwrap();
+
+    let progress = reaping.await.unwrap();
+    assert_eq!(progress.signal_phase, ShutdownSignalPhase::ForceEnabled);
+    assert!(progress.forced);
+}
+
+#[tokio::test]
+async fn graceful_reaping_forces_on_its_next_signal() {
+    let (release_tx, release_rx) = oneshot::channel();
+    let mut coordinators = JoinSet::new();
+    coordinators.spawn(async move {
+        let _ = release_rx.await;
+        CoordinatorExit::Shutdown(LeaseSettlement::Completed)
+    });
+    let (shutdown_tx, mut shutdown_rx) = watch::channel(ShutdownKind::User);
+    let (signal_tx, mut signal_rx) = mpsc::unbounded_channel();
+
+    let reaping = tokio::spawn(async move {
+        wait_for_coordinators(
+            &mut coordinators,
+            &shutdown_tx,
+            &mut signal_rx,
+            ShutdownSignalPhase::ForceEnabled,
+        )
+        .await
+    });
+    signal_tx.send(()).unwrap();
+
+    tokio::time::timeout(Duration::from_secs(5), shutdown_rx.changed())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(*shutdown_rx.borrow(), ShutdownKind::Forced);
+    release_tx.send(()).unwrap();
+
+    let progress = reaping.await.unwrap().unwrap();
+    assert_eq!(progress.signal_phase, ShutdownSignalPhase::ForceEnabled);
+    assert!(progress.forced);
+}
 
 #[test]
 fn validation_accepts_only_responses_before_half_ttl() {
@@ -367,9 +477,92 @@ async fn second_signal_interrupts_blocked_settlement_then_reap_completes() {
     assert!(Arc::clone(&permits).try_acquire_owned().is_err());
 
     shutdown_tx.send(ShutdownKind::Forced).unwrap();
-    assert!(coordinator.await.unwrap());
+    assert_eq!(coordinator.await.unwrap(), LeaseSettlement::Forced);
     assert_eq!(control.events.lock().await.as_slice(), &["reap"]);
     assert!(permits.try_acquire_owned().is_ok());
+}
+
+#[tokio::test]
+async fn child_crash_shutdown_preserves_forced_final_wait() {
+    let (cancel_tx, _cancel_rx) = watch::channel(LeaseCancellation::Running);
+    let (shutdown_tx, mut shutdown_rx) = watch::channel(ShutdownKind::Running);
+    let mut leases = JoinSet::new();
+    leases.spawn(std::future::pending());
+
+    shutdown_tx.send(ShutdownKind::User).unwrap();
+    let initial = cancel_and_wait(
+        &cancel_tx,
+        LeaseCancellation::Crash,
+        &mut leases,
+        &mut shutdown_rx,
+    )
+    .await
+    .unwrap();
+    assert_eq!(initial, ShutdownKind::User);
+
+    shutdown_tx.send(ShutdownKind::Forced).unwrap();
+    let final_observed = wait_or_force(&mut leases, &mut shutdown_rx, false).await;
+    assert_eq!(
+        child_crash_lease_settlement(initial, final_observed),
+        LeaseSettlement::Forced
+    );
+}
+
+#[tokio::test]
+async fn coordinator_reaping_aggregates_forced_settlement() {
+    let mut coordinators = JoinSet::new();
+    coordinators.spawn(async { CoordinatorExit::Shutdown(LeaseSettlement::Forced) });
+    let (shutdown_tx, _shutdown_rx) = watch::channel(ShutdownKind::Fenced);
+    let (_signal_tx, mut signal_rx) = mpsc::unbounded_channel();
+
+    let progress = wait_for_coordinators(
+        &mut coordinators,
+        &shutdown_tx,
+        &mut signal_rx,
+        ShutdownSignalPhase::AwaitingFirst,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(progress.signal_phase, ShutdownSignalPhase::AwaitingFirst);
+    assert!(progress.forced);
+}
+
+#[tokio::test]
+async fn coalesced_forced_shutdown_cancels_before_aborting_leases() {
+    let trace = Arc::new(StdMutex::new(Vec::new()));
+    let (cancel_tx, cancel_rx) = watch::channel(LeaseCancellation::Running);
+    let (shutdown_tx, mut shutdown_rx) = watch::channel(ShutdownKind::Running);
+    let (started_tx, started_rx) = oneshot::channel();
+    let mut leases = JoinSet::new();
+    leases.spawn({
+        let trace = Arc::clone(&trace);
+        async move {
+            let _guard = CancellationBeforeDropTrace {
+                cancellation: cancel_rx,
+                trace,
+            };
+            let _ = started_tx.send(());
+            std::future::pending::<()>().await;
+        }
+    });
+    started_rx.await.unwrap();
+
+    shutdown_tx.send(ShutdownKind::User).unwrap();
+    shutdown_tx.send(ShutdownKind::Forced).unwrap();
+    let kind = *shutdown_rx.borrow_and_update();
+    let settlement = tokio::time::timeout(
+        Duration::from_secs(5),
+        settle_leases_for_shutdown(&cancel_tx, &mut leases, &mut shutdown_rx, kind),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(settlement, LeaseSettlement::Forced);
+    assert_eq!(
+        trace.lock().unwrap().as_slice(),
+        &["cancellation-fenced", "task-drop"]
+    );
 }
 
 #[tokio::test]
@@ -380,11 +573,13 @@ async fn second_signal_interrupts_deactivation_only_after_reap() {
     let runtime = AgentRuntime::with_client(loaded_config(), control.clone());
     let (signal_tx, mut signal_rx) = mpsc::unbounded_channel();
     let deactivation = tokio::spawn(async move {
+        let mut signal_phase = ShutdownSignalPhase::ForceEnabled;
         runtime
             .deactivate_or_second_signal(
                 incarnation(),
                 NodeIncarnationEndReason::GracefulShutdown,
                 &mut signal_rx,
+                &mut signal_phase,
             )
             .await
     });
@@ -399,6 +594,118 @@ async fn second_signal_interrupts_deactivation_only_after_reap() {
     let error = deactivation.await.unwrap().unwrap_err();
     assert!(error.to_string().contains("termination signal"));
     assert_eq!(control.events.lock().await.as_slice(), &["reap"]);
+}
+
+#[tokio::test]
+async fn restart_exhausted_deactivation_requires_a_genuine_second_signal() {
+    let control = Arc::new(FakeControlPlane::default());
+    *control.deactivate_gate.lock().await = Some(Arc::new(Notify::new()));
+    let runtime = AgentRuntime::with_client(loaded_config(), control.clone());
+    let (signal_tx, mut signal_rx) = mpsc::unbounded_channel();
+    let finishing = runtime.finish_shutdown_lifecycle(
+        incarnation(),
+        RuntimeExit::RestartExhausted,
+        Ok(ShutdownProgress {
+            signal_phase: ShutdownSignalPhase::AwaitingFirst,
+            forced: false,
+        }),
+        pending_heartbeat_handle(),
+        &mut signal_rx,
+    );
+    tokio::pin!(finishing);
+    let early = tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::select! {
+            result = &mut finishing => Some(result),
+            () = wait_for_count(
+                &control.deactivate_started,
+                &control.deactivate_started_count,
+                1,
+            ) => None,
+        }
+    })
+    .await
+    .unwrap();
+    assert!(early.is_none(), "finished before deactivation: {early:?}");
+
+    signal_tx.send(()).unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), &mut finishing)
+            .await
+            .is_err(),
+        "the first signal must leave restart-exhausted deactivation pending"
+    );
+
+    signal_tx.send(()).unwrap();
+    let error = finishing.await.unwrap_err();
+    assert!(error.to_string().contains("termination signal"));
+}
+
+#[tokio::test]
+async fn child_startup_failure_deactivation_requires_a_genuine_second_signal() {
+    let control = Arc::new(FakeControlPlane::default());
+    *control.deactivate_gate.lock().await = Some(Arc::new(Notify::new()));
+    let runtime = AgentRuntime::with_client(loaded_config(), control.clone());
+    let (signal_tx, signal_rx) = mpsc::unbounded_channel();
+    let running = runtime.run_with_shutdowns(signal_rx);
+    tokio::pin!(running);
+    let early = tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::select! {
+            result = &mut running => Some(result),
+            () = wait_for_count(
+                &control.deactivate_started,
+                &control.deactivate_started_count,
+                1,
+            ) => None,
+        }
+    })
+    .await
+    .unwrap();
+    assert!(early.is_none(), "finished before deactivation: {early:?}");
+
+    signal_tx.send(()).unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), &mut running)
+            .await
+            .is_err(),
+        "the first signal must not replace the child-startup failure"
+    );
+
+    signal_tx.send(()).unwrap();
+    let error = running.await.unwrap_err();
+    assert!(error.to_string().contains("termination signal"));
+}
+
+#[tokio::test]
+async fn fatal_exit_stops_heartbeat_before_return_and_skips_deactivation() {
+    let control = Arc::new(FakeControlPlane::default());
+    let runtime = AgentRuntime::with_client(loaded_config(), control.clone());
+    let trace = Arc::new(StdMutex::new(vec!["reap"]));
+    let heartbeat = observed_heartbeat_handle({
+        let trace = Arc::clone(&trace);
+        Arc::new(move || trace.lock().unwrap().push("heartbeat-stop"))
+    });
+    let (_signal_tx, mut signal_rx) = mpsc::unbounded_channel();
+
+    let error = runtime
+        .finish_shutdown_lifecycle(
+            incarnation(),
+            RuntimeExit::Fatal(RuntimeFatal::Internal("fatal".to_owned())),
+            Ok(ShutdownProgress {
+                signal_phase: ShutdownSignalPhase::ForceEnabled,
+                forced: true,
+            }),
+            heartbeat,
+            &mut signal_rx,
+        )
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.to_string(), "internal error: fatal");
+    assert_eq!(
+        trace.lock().unwrap().as_slice(),
+        &["reap", "heartbeat-stop"]
+    );
+    assert_eq!(control.deactivate_started_count.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test]
@@ -475,11 +782,13 @@ async fn second_signal_interrupts_a_non_graceful_deactivation() {
     let runtime = AgentRuntime::with_client(loaded_config(), control.clone());
     let (signal_tx, mut signal_rx) = mpsc::unbounded_channel();
     let deactivation = tokio::spawn(async move {
+        let mut signal_phase = ShutdownSignalPhase::ForceEnabled;
         runtime
             .deactivate_or_second_signal(
                 incarnation(),
                 NodeIncarnationEndReason::ChildRestartExhausted,
                 &mut signal_rx,
+                &mut signal_phase,
             )
             .await
     });
@@ -673,17 +982,19 @@ impl ControlPlaneApi for FakeControlPlane {
     async fn activate(
         &self,
         node_id: NodeId,
-        _request: &RetryRequest<ActivateRequest>,
+        request: &RetryRequest<ActivateRequest>,
     ) -> Result<ActivateOutcome, VoomError> {
         self.activate_started_count.fetch_add(1, Ordering::SeqCst);
         self.activate_started.notify_waiters();
         if let Some(gate) = self.activate_gate.lock().await.clone() {
             gate.notified().await;
         }
+        let body: JsonValue = serde_json::from_slice(request.body()).unwrap();
+        let incarnation_id = body["incarnation_id"].as_str().unwrap().parse().unwrap();
         Ok(ActivateOutcome {
             node_id,
             node_epoch: 1,
-            incarnation_id: incarnation(),
+            incarnation_id,
             heartbeat_ttl_seconds: 6,
             workers: vec![ActivatedWorker {
                 logical_name: "echo".to_owned(),
@@ -1006,6 +1317,40 @@ fn lease_heartbeat_outcome(lease_id: LeaseId) -> LeaseHeartbeatOutcome {
 
 fn incarnation() -> NodeIncarnationId {
     "0123456789abcdef0123456789abcdef".parse().unwrap()
+}
+
+fn pending_heartbeat_handle() -> NodeHeartbeatHandle {
+    let (stop_tx, _stop_rx) = watch::channel(false);
+    let joined = tokio::spawn(std::future::pending());
+    NodeHeartbeatHandle {
+        stop_tx,
+        joined,
+        stop_observer: None,
+    }
+}
+
+fn observed_heartbeat_handle(observer: Arc<dyn Fn() + Send + Sync>) -> NodeHeartbeatHandle {
+    let (stop_tx, _stop_rx) = watch::channel(false);
+    let joined = tokio::spawn(std::future::pending());
+    NodeHeartbeatHandle {
+        stop_tx,
+        joined,
+        stop_observer: Some(observer),
+    }
+}
+
+struct CancellationBeforeDropTrace {
+    cancellation: watch::Receiver<LeaseCancellation>,
+    trace: Arc<StdMutex<Vec<&'static str>>>,
+}
+
+impl Drop for CancellationBeforeDropTrace {
+    fn drop(&mut self) {
+        if *self.cancellation.borrow() == LeaseCancellation::Fenced {
+            self.trace.lock().unwrap().push("cancellation-fenced");
+        }
+        self.trace.lock().unwrap().push("task-drop");
+    }
 }
 
 async fn wait_for_count(notify: &Notify, count: &AtomicUsize, expected: usize) {
