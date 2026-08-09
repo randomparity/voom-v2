@@ -64,14 +64,21 @@ async fn custom_ca_trust_is_hostname_bound() -> Result<(), Box<dyn Error>> {
     assert_eq!(outcome.status, "active");
 
     let untrusted = loaded_config(&format!("https://localhost:{}", address.port()), None);
-    assert_request_keeps_retrying(ControlPlaneClient::from_config(&untrusted)?, &request).await;
+    assert_unbounded_request_keeps_retrying(
+        ControlPlaneClient::from_config_with_unbounded_retries(&untrusted)?,
+        &request,
+    )
+    .await;
 
     let wrong_hostname = loaded_config(
         &format!("https://127.0.0.1:{}", address.port()),
         Some(certificate.ca),
     );
-    assert_request_keeps_retrying(ControlPlaneClient::from_config(&wrong_hostname)?, &request)
-        .await;
+    assert_unbounded_request_keeps_retrying(
+        ControlPlaneClient::from_config_with_unbounded_retries(&wrong_hostname)?,
+        &request,
+    )
+    .await;
 
     handle.graceful_shutdown(Some(Duration::from_secs(1)));
     tokio::time::timeout(Duration::from_secs(2), server).await???;
@@ -98,7 +105,7 @@ async fn authenticated_heartbeat(
     }))
 }
 
-async fn assert_request_keeps_retrying(
+async fn assert_unbounded_request_keeps_retrying(
     client: ControlPlaneClient,
     request: &RetryRequest<NodeHeartbeatRequest>,
 ) {
