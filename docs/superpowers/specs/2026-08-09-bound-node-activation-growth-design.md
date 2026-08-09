@@ -52,22 +52,26 @@ Pruning remains an explicit maintenance operation.
 The existing `remote_activate` transaction keeps its authority and ordering:
 
 1. Validate the manifest before database access.
-2. Begin an immediate transaction and authenticate the logical node.
+2. Begin an immediate transaction, wait for its writer lock, then sample the authoritative
+   control-plane clock and authenticate the logical node.
 3. Reject retired nodes.
 4. Reserve or resolve the activation idempotency key.
 5. Return a completed replay immediately.
-6. For a fresh reservation, count successful incarnation starts in the closed lower-bound
-   window `[now - 60 seconds, now]`.
-7. If the count is five, emit a structured warning and return `VoomError::Conflict`.
+6. For a fresh reservation, reject an incarnation ID that already exists, preserving the
+   existing duplicate-incarnation conflict before quota classification.
+7. Count successful incarnation starts whose `started_at` is at or after
+   `now - 60 seconds`. Rows later than `now` are conservatively included if the clock moves
+   backward.
+8. If the count is five, emit a structured warning and return `VoomError::Conflict`.
    Dropping the transaction rolls back the fresh replay reservation.
-8. Only an admitted request may check incarnation uniqueness, supersede the active
-   incarnation, register the new manifest, complete replay state, append events, and
-   commit.
+9. Only an admitted request may supersede the active incarnation, register the new
+   manifest, complete replay state, append events, and commit.
 
 The lower boundary is inclusive. An activation exactly 60 seconds old therefore still
 occupies capacity; it leaves the window only after time advances beyond that boundary.
-This definition is deterministic under the injected clock and avoids two callers treating
-the same boundary differently.
+Sampling after writer-lock acquisition prevents a queued request from evaluating with a
+stale time captured before another activation committed. Conservatively counting
+future-dated rows fails closed across backward clock adjustments.
 
 Concurrent fresh requests serialize on the existing immediate transaction. Each admitted
 transaction commits an incarnation row before the next requester counts, so no pair can
@@ -101,9 +105,12 @@ The operation selects terminal incarnations for exactly one logical node in dete
 `ended_at` equals the effective cutoff is retained. For each candidate, the worker
 repository considers only workers that are already `retired` and bound to that incarnation:
 
-- capability and grant rows are worker-owned metadata and may cascade with an eligible
-  worker;
-- a worker referenced by any durable operational or decision row is retained;
+- capability and grant rows are the only worker-owned metadata permitted to cascade with
+  an eligible worker;
+- a worker referenced by any durable operational or decision row is retained. SQLite
+  `RESTRICT` foreign keys enforce most holds. Because scheduler-decision worker references
+  use `ON DELETE SET NULL`, the worker repository explicitly checks both
+  `scheduler_decisions.request_worker_id` and `selected_worker_id` before deletion;
 - a foreign-key rejection is treated as retained eligibility, not as permission to drop
   the reference;
 - a live/non-retired worker is never attempted;
@@ -122,6 +129,13 @@ is no longer resolvable through current catalog reads. The external replay requi
 non-mutation; it does not promise indefinite catalog retention. Treating every completed
 activation response as a retention hold would make every normal successful incarnation
 ineligible and defeat the requested prune path.
+
+A schema-inventory regression enumerates every foreign key that targets `workers`. It
+permits `CASCADE` only for `worker_capabilities.worker_id` and
+`worker_grants.worker_id`, permits `SET NULL` only for the two explicitly prechecked
+scheduler-decision columns, and requires every other worker reference to remain
+`RESTRICT`. A new permissive reference action therefore fails tests until pruning
+classifies and protects it.
 
 The method returns `Result<(), VoomError>`; callers inspect normal repository state if they
 need counts. A partial prune is not exposed: any unexpected database error rolls back the
@@ -183,14 +197,19 @@ Tokio time. They prove:
 
 - five distinct fresh activation keys succeed and the sixth is a conflict;
 - the exact 60-second lower boundary remains counted and one nanosecond beyond it admits;
+- queued evaluation samples time after serialization, and a backward clock adjustment
+  conservatively counts future-dated starts;
 - replay of a completed key remains non-mutating even when the node is at quota;
+- reuse of an existing incarnation under a fresh key retains the duplicate-incarnation
+  error at quota and emits no quota warning;
 - quota rejection leaves the active incarnation, node epoch, incarnation/worker/
   capability/grant counts, replay completions, and events unchanged;
 - the warning subscriber observes the fixed quota-exceeded reason and non-secret fields;
 - pruning removes eligible old terminal incarnations and retired unreferenced workers,
   including their owned capabilities and grants;
 - pruning retains active/recent incarnations, live workers, and workers referenced by
-  durable operational or scheduler history;
+  durable operational or scheduler history, including both scheduler-decision columns;
+- the worker foreign-key inventory rejects an unclassified `CASCADE` or `SET NULL` edge;
 - events that named pruned rows remain unchanged;
 - completed activation replay after pruning returns the original historical outcome
   without recreating any catalog row;
