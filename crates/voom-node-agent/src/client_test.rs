@@ -50,7 +50,7 @@ fn production_retry_policy_is_bounded_and_unlimited_is_explicit() {
 async fn retryable_failures_stop_at_the_attempt_limit() {
     let responses = [RawResponse::Status(500), RawResponse::Status(500)];
     let (address, received, server) = raw_server(responses);
-    let client = test_client(address, 2, Duration::ZERO, REQUEST_TIMEOUT);
+    let client = test_client(address, Some(2), Duration::ZERO, REQUEST_TIMEOUT);
     let request = RetryRequest::new(
         "bounded-key".to_owned(),
         &TestBody {
@@ -71,6 +71,32 @@ async fn retryable_failures_stop_at_the_attempt_limit() {
     };
     assert!(message.contains("after 2 attempts"));
     assert!(message.contains("500 Internal Server Error"));
+    server.join().unwrap();
+}
+
+#[tokio::test]
+async fn unlimited_retries_continue_past_default_attempt_limit() {
+    let responses: [RawResponse; DEFAULT_MAXIMUM_ATTEMPTS + 1] = std::array::from_fn(|index| {
+        if index < DEFAULT_MAXIMUM_ATTEMPTS {
+            RawResponse::Status(500)
+        } else {
+            RawResponse::Success
+        }
+    });
+    let (address, received, server) = raw_server(responses);
+    let client = test_client(address, None, Duration::ZERO, REQUEST_TIMEOUT);
+    let request = RetryRequest::new(
+        "unbounded-key".to_owned(),
+        &TestBody {
+            incarnation_id: "0123456789abcdef0123456789abcdef",
+        },
+    )
+    .unwrap();
+
+    let response: TestResponse = client.send("/test", &request).await.unwrap();
+
+    assert_eq!(response, TestResponse { accepted: true });
+    assert_eq!(received.iter().count(), DEFAULT_MAXIMUM_ATTEMPTS + 1);
     server.join().unwrap();
 }
 
@@ -164,7 +190,7 @@ async fn retries_reuse_identical_body_and_key_across_retry_classes() {
     let (address, received, server) = raw_server(responses);
     let client = test_client(
         address,
-        responses.len() + 1,
+        Some(responses.len() + 1),
         Duration::ZERO,
         REQUEST_TIMEOUT,
     );
@@ -193,7 +219,7 @@ async fn retries_reuse_identical_body_and_key_across_retry_classes() {
 async fn other_client_errors_are_terminal() {
     let responses = [RawResponse::BadRequest];
     let (address, received, server) = raw_server(responses);
-    let client = test_client(address, 3, Duration::ZERO, REQUEST_TIMEOUT);
+    let client = test_client(address, Some(3), Duration::ZERO, REQUEST_TIMEOUT);
     let request = RetryRequest::new(
         "terminal-key".to_owned(),
         &TestBody {
@@ -212,7 +238,7 @@ async fn other_client_errors_are_terminal() {
 async fn success_envelopes_are_strict_and_bounded() {
     for response in [RawResponse::UnknownEnvelope, RawResponse::Oversized] {
         let (address, received, server) = raw_server([response]);
-        let client = test_client(address, 1, Duration::ZERO, REQUEST_TIMEOUT);
+        let client = test_client(address, Some(1), Duration::ZERO, REQUEST_TIMEOUT);
         let request = RetryRequest::new(
             "strict-key".to_owned(),
             &TestBody {
@@ -267,7 +293,7 @@ fn loaded_config(url: &str) -> LoadedAgentConfig {
 
 fn test_client(
     address: SocketAddr,
-    maximum_attempts: usize,
+    maximum_attempts: Option<usize>,
     retry_delay: Duration,
     timeout: Duration,
 ) -> ControlPlaneClient {
@@ -277,7 +303,7 @@ fn test_client(
         RetrySettings {
             initial_delay: retry_delay,
             maximum_delay: retry_delay,
-            maximum_attempts: Some(maximum_attempts),
+            maximum_attempts,
         },
         timeout,
     )
