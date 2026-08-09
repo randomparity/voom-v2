@@ -8,6 +8,7 @@
               reports only a line number, which is how #446 was filed against the wrong wait"
 )]
 
+use std::fmt::Debug;
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::Arc;
@@ -22,6 +23,7 @@ use secrecy::{ExposeSecret, SecretString};
 use serde_json::json;
 use time::OffsetDateTime;
 use tokio::sync::{Mutex, Notify, oneshot};
+use tokio::task::JoinHandle;
 use voom_api::router_with_control_plane;
 use voom_control_plane::workers::RegisterNodeInput;
 use voom_control_plane::{ControlPlane, HealthPlane};
@@ -135,18 +137,30 @@ async fn delayed_acquire_replay_never_dispatches() {
     let config = fixture.agent_config(echo_worker_binary());
     let ticket_id = fixture.ready_probe_ticket().await;
     let (stop, shutdown) = oneshot::channel();
-    let agent = tokio::spawn(AgentRuntime::new(config).unwrap().run_until(async move {
+    let mut agent = tokio::spawn(AgentRuntime::new(config).unwrap().run_until(async move {
         let _ = shutdown.await;
     }));
 
-    wait_for_count(&delay.committed_count, 1).await;
+    wait_for_acquire_transition(
+        &delay.first_response_committed,
+        &mut agent,
+        "first acquire response committed",
+    )
+    .await
+    .unwrap();
     fixture
         .cp
         .expire_due(OffsetDateTime::now_utc() + time::Duration::seconds(30))
         .await
         .unwrap();
     delay.release_response.notify_one();
-    wait_for_count(&delay.acquire_count, 2).await;
+    wait_for_acquire_transition(
+        &delay.replay_acquire_started,
+        &mut agent,
+        "replay acquire started",
+    )
+    .await
+    .unwrap();
     stop.send(()).unwrap();
     tokio::time::timeout(HANG_GUARD, agent)
         .await
@@ -159,6 +173,22 @@ async fn delayed_acquire_replay_never_dispatches() {
     assert_eq!(delay.complete_count.load(Ordering::SeqCst), 0);
     assert_eq!(delay.fail_count.load(Ordering::SeqCst), 0);
     fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn acquire_transition_reports_ready_agent_before_ready_milestone() {
+    let milestone = Notify::new();
+    milestone.notify_one();
+    let mut agent = tokio::spawn(std::future::ready(()));
+    while !agent.is_finished() {
+        tokio::task::yield_now().await;
+    }
+
+    let error = wait_for_acquire_transition(&milestone, &mut agent, "simultaneous test milestone")
+        .await
+        .unwrap_err();
+
+    assert!(error.contains("agent exited before simultaneous test milestone"));
 }
 
 struct LiveFixture {
@@ -282,10 +312,11 @@ impl LiveFixture {
 #[derive(Default)]
 struct DelayedAcquire {
     acquire_count: AtomicUsize,
-    committed_count: AtomicUsize,
     complete_count: AtomicUsize,
     fail_count: AtomicUsize,
+    first_response_committed: Notify,
     release_response: Notify,
+    replay_acquire_started: Notify,
 }
 
 async fn delay_acquire(
@@ -304,6 +335,7 @@ async fn delay_acquire(
     }
     let attempt = delay.acquire_count.fetch_add(1, Ordering::SeqCst);
     if attempt > 0 {
+        delay.replay_acquire_started.notify_one();
         return (
             StatusCode::OK,
             axum::Json(json!({
@@ -322,7 +354,7 @@ async fn delay_acquire(
             .into_response();
     }
     let response = next.run(request).await;
-    delay.committed_count.fetch_add(1, Ordering::SeqCst);
+    delay.first_response_committed.notify_one();
     delay.release_response.notified().await;
     response
 }
@@ -425,12 +457,17 @@ async fn wait_for_ticket_state(
     result.unwrap_or(false)
 }
 
-async fn wait_for_count(count: &AtomicUsize, expected: usize) {
-    tokio::time::timeout(HANG_GUARD, async {
-        while count.load(Ordering::SeqCst) < expected {
-            tokio::time::sleep(Duration::from_millis(25)).await;
+async fn wait_for_acquire_transition<T: Debug>(
+    milestone: &Notify,
+    agent: &mut JoinHandle<T>,
+    transition: &'static str,
+) -> Result<(), String> {
+    tokio::select! {
+        biased;
+        result = agent => Err(format!("agent exited before {transition}: {result:?}")),
+        () = milestone.notified() => Ok(()),
+        () = tokio::time::sleep(HANG_GUARD) => {
+            Err(format!("live agent never reached {transition}"))
         }
-    })
-    .await
-    .expect("counter never reached the expected value");
+    }
 }
