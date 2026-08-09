@@ -67,11 +67,13 @@ supervised worker PID. The fixture provides bounded helpers for start-count obse
 process liveness. Every spawned runtime receives an explicit shutdown signal and every gate
 is released before test cleanup.
 
-For crash ordering, the control plane grants one lease whose chaos payload exits the worker.
-The failure acknowledgement gate holds settlement. The start log must remain at one entry
-while the gate is held; after acknowledgement, production may restart and the log reaches
-two. Acquisition switches to idle before release so the replacement stays alive for clean
-shutdown.
+For crash ordering, the control plane grants two concurrent leases and one chaos payload
+exits the shared worker. Both lease tasks must reach failure acknowledgement before the
+assertions begin. They wait on one acknowledgement gate whose single-permit notifications
+release them independently. The start log must remain at one entry while both are held and
+after the first acknowledgement completes; only after the second acknowledgement may
+production restart and the log reach two. Acquisition switches to idle before either
+release so the replacement stays alive for clean shutdown.
 
 For graceful ordering, a stall payload keeps one lease held. After the shutdown signal, the
 failure acknowledgement gate proves settlement has begun. While held, the worker PID must
