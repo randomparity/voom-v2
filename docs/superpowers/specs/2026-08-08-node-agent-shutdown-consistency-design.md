@@ -134,17 +134,21 @@ Tests will prove the change bites before implementation:
    next signal.
 4. Let restart-exhausted reaping finish before any signal, block deactivation, and prove
    the first signal does not interrupt it while the second does.
-5. Hold child-crash settlement open, deliver ordinary shutdown and then genuine force, and
+5. Drive the real child-startup-failure arm into a blocked deactivation. Prove the first
+   signal leaves deactivation pending and preserves the startup failure, then prove the
+   second signal interrupts it. This pins the call site's `AwaitingFirst` initialization,
+   which bypasses the `RuntimeExit` mapping.
+6. Hold child-crash settlement open, deliver ordinary shutdown and then genuine force, and
    prove the final coordinator outcome is `LeaseSettlement::Forced`; prove coordinator
    reaping aggregates a forced shutdown outcome even when it learns that outcome from the
    joined coordinator.
-6. Prove original fatal classification precedes the forced result. The test must assert the
+7. Prove original fatal classification precedes the forced result. The test must assert the
    original fatal error, no deactivation, and the existing heartbeat-stop-before-return
    event ordering; it must not race simultaneous `tokio::select!` branches.
-7. With configured TTL six seconds and granted TTL twenty seconds, delay the first
+8. With configured TTL six seconds and granted TTL twenty seconds, delay the first
    validation response five seconds. Assert `Fresh` after exactly one heartbeat call. The
    old configured half-TTL times out and makes a second call, so it must fail this test.
-8. With configured TTL twenty seconds and granted TTL six seconds, delay every response
+9. With configured TTL twenty seconds and granted TTL six seconds, delay every response
    five seconds. Assert `Terminal` after exactly `VALIDATION_ATTEMPTS`. The old configured
    TTL accepts the first response, so it must fail this test. Unit-test that a non-positive
    grant normalizes to one second and retain the existing freshness-boundary test.
