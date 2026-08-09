@@ -4,17 +4,21 @@ Issue: #465
 
 ## Scope authority
 
-- Scope identity: issue #465 plus token `b0ab5e02-be96-44d5-8c3f-358725a91c46`.
-- Outcome: make the delayed-acquire replay lifecycle test deterministic.
-- Completion criteria: reproduce or instrument the intermittent stall; identify its cause;
-  synchronize on the transition under test without a timing-sensitive counter poll; retain the
-  existing hang guard as a deadlock detector; prove the regression test bites; pass repository
+- Scope identity: issue #465 plus token `1af46e42-ea01-437b-a323-00a34e6f2a06`.
+- Outcome: make delayed-acquire replay failure diagnosis deterministic without claiming the
+  unreproduced production timing flake is fixed.
+- Completion criteria: replace anonymous counter polling with persistent named milestone signals;
+  race every milestone against agent completion and the unchanged hang guard; make agent exit win
+  simultaneous readiness; mutation-bite removal of each notification and ignored early exit;
+  retain durable ticket and zero dispatch assertions; pass focused, loaded, and repository
   guardrails; deliver a green, mergeable PR.
-- Provenance: public issue #465 and its linked discovery from issue #463.
-- Exclusions: no increased timeout; no API, schema, migration, or unrelated production behavior
-  change; the campaign manifest remains orchestrator-owned.
-- Surface: `crates/voom-node-agent/tests/lifecycle.rs`; acquisition-loop code only if root-cause
-  evidence requires it; directly related test helpers and this design and plan.
+- Provenance: issue #465's explicit deterministic-transition-or-diagnostic acceptance clause, plus
+  the campaign orchestrator's 2026-08-09 scope decision after 256/256 instrumented loaded runs did
+  not reproduce the underlying rare scheduler path.
+- Exclusions: no claim that the production timing flake itself is fixed; no production runtime,
+  API, schema, migration, timeout increase, or unrelated behavior change; the campaign manifest
+  remains orchestrator-owned.
+- Surface: `crates/voom-node-agent/tests/lifecycle.rs` and directly related design and plan artifacts.
 - Ambiguities: none.
 - Interaction: unattended campaign subagent.
 
@@ -30,10 +34,10 @@ The harness does discard decisive state: it spawns the agent and does not observ
 while waiting for either counter. If the runtime exits before a transition, the helper continues
 polling an unreachable count until `HANG_GUARD` expires and reports only “counter never reached.”
 That turns a concrete early-exit result into an ambiguous 30-second timeout. One focused run, one
-16-way focused run, and 64 loaded full-lifecycle-suite runs on the current base all passed. These
-runs do not establish whether the original missing transition was an early exit or a live-agent
-stall, and this design does not claim that underlying cause. They do establish that reproduction is
-not currently a usable discovery mechanism.
+16-way focused run, 64 loaded full-lifecycle-suite runs, and 256 instrumented loaded suites on the
+current base all passed. These runs do not establish whether the original missing transition was
+an early exit or a live-agent stall, and this design does not claim that underlying cause. They do
+establish that reproduction is not currently a usable discovery mechanism.
 
 The verified harness cause is narrower: the original failure cannot identify the absent transition
 or distinguish a live stall from a completed agent because both waits share one line and discard the
@@ -101,11 +105,19 @@ contract, so it does not warrant an ADR. No production file changes.
 The lifecycle test itself crosses the real HTTP middleware and runtime boundary, so it remains the
 regression test. TDD starts by changing it to require the named notification fields and helper; the
 focused build must fail because that synchronization surface does not yet exist. After the minimal
-helper and middleware signals make it green, bite proof temporarily removes the replay-start signal
-and temporarily changes only the test-local `HANG_GUARD` to 500 milliseconds. The focused test must
-exit 101 with `live agent never reached replay acquire started`; restoring both mutations must return
-it to exit 0. This distinguishes the intended missing signal from setup failure and leaves the
-committed 30-second guard unchanged.
+helper and middleware signals make it green, three mutation bites run independently:
+
+1. remove the first-response-committed signal and temporarily change only the test-local
+   `HANG_GUARD` to 500 milliseconds; the focused test must exit 101 with
+   `live agent never reached first acquire response committed`;
+2. restore the first signal, remove the replay-start signal under the same temporary guard, and
+   require exit 101 with `live agent never reached replay acquire started`; and
+3. restore both signals, remove biased agent-exit precedence, and run the simultaneous-readiness
+   helper regression; it must fail because notification incorrectly wins over the completed agent.
+
+Restoring every mutation must return both focused tests to exit 0. The temporary short guard
+distinguishes the intended missing signal from setup failure and leaves the committed 30-second
+guard unchanged.
 
 The focused command is
 `cargo test -p voom-node-agent --test lifecycle delayed_acquire_replay_never_dispatches -- --exact`.
