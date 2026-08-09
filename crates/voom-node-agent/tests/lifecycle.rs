@@ -12,7 +12,7 @@ use std::fmt::Debug;
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use axum::extract::{Request, State};
@@ -82,7 +82,7 @@ async fn live_agent_fences_prior_incarnation_and_retires_orderly() {
     );
 
     let (stop_second, second_shutdown) = oneshot::channel();
-    let second = tokio::spawn(AgentRuntime::new(config).unwrap().run_until(async move {
+    let mut second = tokio::spawn(AgentRuntime::new(config).unwrap().run_until(async move {
         let _ = second_shutdown.await;
     }));
     let superseded = wait_for_incarnations(&fixture.cp, fixture.node_id, 2).await;
@@ -102,14 +102,10 @@ async fn live_agent_fences_prior_incarnation_and_retires_orderly() {
     assert!(first_result.is_err(), "the fenced agent must exit nonzero");
 
     stop_second.send(()).unwrap();
-    tokio::time::timeout(HANG_GUARD, second)
-        .await
-        .expect("second agent did not exit after a graceful stop request")
-        .unwrap()
-        .unwrap();
     let retired =
-        wait_for_incarnation_status(&fixture.cp, fixture.node_id, NodeIncarnationStatus::Retired)
-            .await;
+        wait_for_graceful_shutdown(&fixture.cp, fixture.node_id, &mut second, &fixture.requests)
+            .await
+            .expect("second agent graceful-shutdown lifecycle did not complete");
     assert_eq!(
         retired[0].end_reason,
         Some(NodeIncarnationEndReason::GracefulShutdown)
@@ -423,22 +419,59 @@ async fn wait_for_incarnations(
     .expect("node never reached the expected incarnation count")
 }
 
-async fn wait_for_incarnation_status(
+async fn wait_for_graceful_shutdown(
+    cp: &ControlPlane,
+    node_id: NodeId,
+    agent: &mut JoinHandle<Result<(), voom_core::VoomError>>,
+    requests: &Mutex<Vec<String>>,
+) -> Result<Vec<voom_store::repo::execution::node_incarnations::NodeIncarnation>, String> {
+    let task_exit_observed = AtomicBool::new(false);
+    let durable_retirement_observed = AtomicBool::new(false);
+    let result = tokio::time::timeout(HANG_GUARD, async {
+        let task_exit = async {
+            let result = agent.await;
+            task_exit_observed.store(true, Ordering::SeqCst);
+            result.unwrap().unwrap();
+        };
+        let durable_retirement = async {
+            let history =
+                poll_for_incarnation_status(cp, node_id, NodeIncarnationStatus::Retired).await;
+            durable_retirement_observed.store(true, Ordering::SeqCst);
+            history
+        };
+        let ((), history) = tokio::join!(task_exit, durable_retirement);
+        history
+    })
+    .await;
+    match result {
+        Ok(history) => Ok(history),
+        Err(error) => {
+            let request_paths = requests.try_lock().map_or_else(
+                |_| "request log busy".to_owned(),
+                |requests| format!("{requests:?}"),
+            );
+            Err(format!(
+                "{error}; task_exit_observed={}; durable_retirement_observed={}; \
+                 requests={request_paths}",
+                task_exit_observed.load(Ordering::SeqCst),
+                durable_retirement_observed.load(Ordering::SeqCst),
+            ))
+        }
+    }
+}
+
+async fn poll_for_incarnation_status(
     cp: &ControlPlane,
     node_id: NodeId,
     status: NodeIncarnationStatus,
 ) -> Vec<voom_store::repo::execution::node_incarnations::NodeIncarnation> {
-    tokio::time::timeout(HANG_GUARD, async {
-        loop {
-            let history = cp.list_node_incarnations(node_id, 10).await.unwrap();
-            if history.first().is_some_and(|row| row.status == status) {
-                return history;
-            }
-            tokio::time::sleep(Duration::from_millis(25)).await;
+    loop {
+        let history = cp.list_node_incarnations(node_id, 10).await.unwrap();
+        if history.first().is_some_and(|row| row.status == status) {
+            return history;
         }
-    })
-    .await
-    .expect("node incarnation never reached the expected status")
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
 }
 
 async fn wait_for_request_count(requests: &Mutex<Vec<String>>, path: &str, expected: usize) {
