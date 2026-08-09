@@ -63,18 +63,20 @@ A one-time offset preserves the ongoing interval, but shared outage recovery can
 again after their request retries complete together. Per-cycle sampling continually disperses
 successful loops.
 
-### Rejected: runtime timing abstraction or configuration
+### Rejected: public timing abstraction or configuration
 
 A scheduler trait or new jitter settings would add public and test surface for three private
-Tokio loops. Injecting only the random generator into pure private functions is enough for
-deterministic proof.
+Tokio loops. Production wrappers instead seed `StdRng` and pass it into private async loop
+bodies, which is the smallest seam that lets deterministic tests exercise production wiring.
 
 ## Detailed design
 
-`centered_jitter(interval, rng)` converts the lower and upper duration bounds to saturated
-nanoseconds and uniformly samples the inclusive range. Poll, node-heartbeat, and
-lease-heartbeat functions make the authority and budget visible at their call sites instead
-of hiding all three policies behind one generic schedule type.
+`centered_jitter(interval, rng)` converts the lower and upper duration bounds to their full
+`u128` nanosecond values and uniformly samples the inclusive range. It reconstructs the result
+with checked whole seconds and subsecond nanoseconds. Only the calculation of the upper bound
+saturates at `Duration::MAX`; sampling never narrows a valid `Duration` to `u64` nanoseconds.
+Poll, node-heartbeat, and lease-heartbeat functions make the authority and budget visible at
+their call sites instead of hiding all three policies behind one generic schedule type.
 
 The acquisition coordinator creates one RNG and samples after every idle or terminal result.
 A private poll wait selects the sampled sleep against `shutdown.changed()` and the existing
@@ -90,8 +92,10 @@ budget and preserves self-fencing.
 
 The lease-heartbeat task derives its base interval and granted TTL exactly as today. It uses
 centered jitter only when the upper bound is strictly below the TTL. If not, it sleeps for the
-base interval exactly, preserving the current prompt fence for malformed or incoherent grants.
-Its stop watch remains in the same `select!`, so settlement and shutdown interrupt the sample.
+normalized base interval exactly and then takes the existing local deadline/fence path. When
+the interval exceeds the TTL, that local fence may follow server expiry; the malformed grant
+receives no new safety promise. Its stop watch remains in the same `select!`, so settlement and
+shutdown interrupt the sample.
 
 ## Failure behavior and boundaries
 
