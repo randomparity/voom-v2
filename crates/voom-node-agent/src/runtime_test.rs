@@ -293,13 +293,140 @@ impl TryRngCore for FailingRng {
     }
 }
 
+#[test]
+fn node_heartbeat_schedule_stays_centered_inside_the_effective_ttl() {
+    let interval = Duration::from_secs(20);
+    let ttl = Duration::from_mins(1);
+    let mut rng = StdRng::seed_from_u64(459);
+    let samples = (0..128)
+        .map(|_| node_heartbeat_delay(interval, &mut rng))
+        .collect::<Vec<_>>();
+
+    assert!(samples.iter().all(|delay| *delay >= interval / 2));
+    assert!(
+        samples
+            .iter()
+            .all(|delay| *delay <= interval + interval / 2)
+    );
+    assert!(samples.iter().all(|delay| *delay < ttl));
+}
+
+#[tokio::test(start_paused = true)]
+async fn node_heartbeat_schedule_resamples_the_production_loop() {
+    let control = Arc::new(FakeControlPlane::default());
+    let client: Arc<dyn ControlPlaneApi> = control.clone();
+    let interval = Duration::from_secs(20);
+    let ttl = Duration::from_mins(1);
+    let mut expected_rng = StdRng::seed_from_u64(459);
+    let expected = [
+        node_heartbeat_delay(interval, &mut expected_rng),
+        node_heartbeat_delay(interval, &mut expected_rng),
+    ];
+    assert_ne!(expected[0], expected[1]);
+    let (stop_tx, stop_rx) = watch::channel(false);
+    let (fatal_tx, mut fatal_rx) = mpsc::unbounded_channel();
+    let running = node_heartbeat_loop(
+        client,
+        NodeId(7),
+        incarnation(),
+        NodeHeartbeatTiming { interval, ttl },
+        fatal_tx,
+        stop_rx,
+        StdRng::seed_from_u64(459),
+    );
+    tokio::pin!(running);
+    assert_future_pending(running.as_mut());
+
+    for (index, delay) in expected.into_iter().enumerate() {
+        let before_deadline = delay
+            .checked_sub(Duration::from_millis(2))
+            .unwrap_or(Duration::ZERO);
+        tokio::time::advance(before_deadline).await;
+        assert_future_pending(running.as_mut());
+        assert_eq!(control.node_heartbeats.load(Ordering::SeqCst), index);
+        tokio::time::advance(Duration::from_millis(4)).await;
+        assert_future_pending(running.as_mut());
+        assert_eq!(control.node_heartbeats.load(Ordering::SeqCst), index + 1);
+    }
+
+    stop_tx.send(true).unwrap();
+    running.await;
+    assert!(fatal_rx.try_recv().is_err());
+}
+
+#[test]
+fn lease_heartbeat_schedule_preserves_coherent_and_incoherent_grants() {
+    let interval = Duration::from_secs(3);
+    let ttl = Duration::from_secs(10);
+    let mut rng = StdRng::seed_from_u64(459);
+    let samples = (0..128)
+        .map(|_| lease_heartbeat_delay(interval, ttl, &mut rng))
+        .collect::<Vec<_>>();
+
+    assert!(samples.iter().all(|delay| *delay >= interval / 2));
+    assert!(
+        samples
+            .iter()
+            .all(|delay| *delay <= interval + interval / 2)
+    );
+    assert!(samples.iter().all(|delay| *delay < ttl));
+
+    let incoherent = Duration::from_secs(8);
+    assert_eq!(
+        lease_heartbeat_delay(incoherent, Duration::from_secs(6), &mut rng),
+        incoherent
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn lease_heartbeat_schedule_resamples_the_production_loop() {
+    let control = Arc::new(FakeControlPlane::default());
+    let interval = Duration::from_secs(3);
+    let ttl = Duration::from_secs(10);
+    let mut expected_rng = StdRng::seed_from_u64(459);
+    let expected = [
+        lease_heartbeat_delay(interval, ttl, &mut expected_rng),
+        lease_heartbeat_delay(interval, ttl, &mut expected_rng),
+    ];
+    assert_ne!(expected[0], expected[1]);
+    let (stop_tx, stop_rx) = watch::channel(false);
+    let (fence_tx, mut fence_rx) = mpsc::channel(1);
+    let running = lease_heartbeat_loop(
+        context(control.clone()),
+        LeaseId(1),
+        3,
+        10,
+        stop_rx,
+        fence_tx,
+        StdRng::seed_from_u64(459),
+    );
+    tokio::pin!(running);
+    assert_future_pending(running.as_mut());
+
+    for (index, delay) in expected.into_iter().enumerate() {
+        let before_deadline = delay
+            .checked_sub(Duration::from_millis(2))
+            .unwrap_or(Duration::ZERO);
+        tokio::time::advance(before_deadline).await;
+        assert_future_pending(running.as_mut());
+        assert_eq!(control.lease_heartbeats.load(Ordering::SeqCst), index);
+        tokio::time::advance(Duration::from_millis(4)).await;
+        assert_future_pending(running.as_mut());
+        assert_eq!(control.lease_heartbeats.load(Ordering::SeqCst), index + 1);
+    }
+
+    stop_tx.send(true).unwrap();
+    running.await;
+    assert!(fence_rx.try_recv().is_err());
+}
+
 #[tokio::test(start_paused = true)]
 async fn node_heartbeat_continues_during_delayed_child_startup() {
     let control = Arc::new(FakeControlPlane::default());
     let runtime = AgentRuntime::with_client(loaded_config(), control.clone());
     let (fatal_tx, mut fatal_rx) = mpsc::unbounded_channel();
     let heartbeat = runtime
-        .start_node_heartbeat(incarnation(), 6, fatal_tx)
+        .start_node_heartbeat(incarnation(), 6, fatal_tx, StdRng::seed_from_u64(459))
         .await
         .unwrap();
 
@@ -307,7 +434,9 @@ async fn node_heartbeat_continues_during_delayed_child_startup() {
     advance_seconds(7).await;
 
     assert!(!delayed_startup.is_finished());
-    assert!(control.node_heartbeats.load(Ordering::SeqCst) >= 4);
+    // The initial heartbeat plus two worst-case 3-second jittered intervals must land while
+    // child startup remains blocked. Exact resampling timing is covered by the schedule test.
+    assert!(control.node_heartbeats.load(Ordering::SeqCst) >= 3);
     assert!(fatal_rx.try_recv().is_err());
     delayed_startup.abort();
     heartbeat.stop();
@@ -328,6 +457,7 @@ async fn silent_dispatch_keeps_lease_heartbeat_until_progress_timeout_is_settled
         context(control.clone()),
         worker_cancel_rx,
         shutdown_rx,
+        StdRng::seed_from_u64(459),
     ));
 
     tokio::time::advance(Duration::from_secs(6)).await;
@@ -356,6 +486,7 @@ async fn terminal_retry_retains_heartbeat_and_parallelism_permit() {
         context(control.clone()),
         worker_cancel_rx,
         shutdown_rx,
+        StdRng::seed_from_u64(459),
     ));
 
     wait_for_count(&control.fail_started, &control.fail_started_count, 1).await;
@@ -528,6 +659,7 @@ async fn incarnation_conflict_fences_inflight_child_without_terminal_mutation() 
         context(control.clone()),
         cancel_rx,
         shutdown_rx,
+        StdRng::seed_from_u64(459),
     ));
     wait_for_count(&worker.dispatched, &worker.dispatches, 1).await;
     shutdown_tx.send(ShutdownKind::Fenced).unwrap();
@@ -689,6 +821,7 @@ async fn second_signal_interrupts_blocked_settlement_then_reap_completes() {
         context(control.clone()),
         cancel_rx,
         shutdown_rx.clone(),
+        StdRng::seed_from_u64(459),
     ));
     shutdown_tx.send(ShutdownKind::User).unwrap();
 
@@ -1052,7 +1185,16 @@ async fn unreachable_control_plane_fences_the_lease_at_the_ttl_deadline() {
     let (_stop_tx, stop_rx) = watch::channel(false);
     let loop_context = context(control.clone());
     let running = tokio::spawn(async move {
-        lease_heartbeat_loop(loop_context, LeaseId(1), 1, 6, stop_rx, fence_tx).await;
+        lease_heartbeat_loop(
+            loop_context,
+            LeaseId(1),
+            1,
+            6,
+            stop_rx,
+            fence_tx,
+            StdRng::seed_from_u64(459),
+        )
+        .await;
     });
 
     // lease_ttl is 6s. The first beat fires at 1s and hangs, so the remaining budget is 5s
@@ -1081,7 +1223,16 @@ async fn ongoing_heartbeat_uses_granted_ttl_not_local_configuration() {
     let mut loop_context = context(control.clone());
     loop_context.lease_ttl = Duration::from_secs(20);
     let running = tokio::spawn(async move {
-        lease_heartbeat_loop(loop_context, LeaseId(1), 1, 6, stop_rx, fence_tx).await;
+        lease_heartbeat_loop(
+            loop_context,
+            LeaseId(1),
+            1,
+            6,
+            stop_rx,
+            fence_tx,
+            StdRng::seed_from_u64(459),
+        )
+        .await;
     });
 
     advance_seconds(1).await;
@@ -1104,7 +1255,7 @@ async fn unreachable_control_plane_fails_the_node_at_the_incarnation_ttl() {
     let runtime = AgentRuntime::with_client(loaded_config(), control.clone());
     let (fatal_tx, mut fatal_rx) = mpsc::unbounded_channel();
     let heartbeat = runtime
-        .start_node_heartbeat(incarnation(), 6, fatal_tx)
+        .start_node_heartbeat(incarnation(), 6, fatal_tx, StdRng::seed_from_u64(459))
         .await
         .unwrap();
     control.node_heartbeat_hangs.store(true, Ordering::SeqCst);
