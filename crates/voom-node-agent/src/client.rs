@@ -1,6 +1,8 @@
 use std::marker::PhantomData;
 use std::time::Duration;
 
+use rand::rngs::StdRng;
+use rand::{Rng, SeedableRng};
 use reqwest::StatusCode;
 use secrecy::{ExposeSecret, SecretString};
 use serde::de::DeserializeOwned;
@@ -17,6 +19,7 @@ use crate::config::LoadedAgentConfig;
 const RESPONSE_LIMIT_BYTES: usize = 1024 * 1024;
 const INITIAL_RETRY_DELAY: Duration = Duration::from_millis(250);
 const MAX_RETRY_DELAY: Duration = Duration::from_secs(30);
+const DEFAULT_MAXIMUM_ATTEMPTS: usize = 5;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone)]
@@ -105,6 +108,25 @@ impl ControlPlaneClient {
             RetrySettings {
                 initial_delay: INITIAL_RETRY_DELAY,
                 maximum_delay: MAX_RETRY_DELAY,
+                maximum_attempts: Some(DEFAULT_MAXIMUM_ATTEMPTS),
+            },
+            REQUEST_TIMEOUT,
+        )
+    }
+
+    /// Build a client that retries indefinitely for exceptional operator-directed recovery.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VoomError::Config`] when the URL, custom CA, or HTTP client is invalid.
+    pub fn from_config_with_unbounded_retries(
+        config: &LoadedAgentConfig,
+    ) -> Result<Self, VoomError> {
+        Self::from_config_with_settings(
+            config,
+            RetrySettings {
+                initial_delay: INITIAL_RETRY_DELAY,
+                maximum_delay: MAX_RETRY_DELAY,
                 maximum_attempts: None,
             },
             REQUEST_TIMEOUT,
@@ -170,7 +192,7 @@ impl ControlPlaneClient {
     {
         let url = self.route_url(path)?;
         let mut attempt = 0_usize;
-        let mut delay = self.retry.initial_delay;
+        let mut backoff = RetryBackoff::new(self.retry.initial_delay, self.retry.maximum_delay);
         loop {
             attempt += 1;
             let result = self.send_attempt(url.clone(), request).await;
@@ -182,10 +204,15 @@ impl ControlPlaneClient {
                         .maximum_attempts
                         .is_some_and(|maximum| attempt >= maximum)
                     {
-                        return Err(error);
+                        return Err(VoomError::ExternalSystemUnavailable(format!(
+                            "control-plane request exhausted after {attempt} attempts: {error}"
+                        )));
                     }
+                    let delay = {
+                        let mut rng = StdRng::from_os_rng();
+                        backoff.next_delay(&mut rng)
+                    };
                     tokio::time::sleep(delay).await;
-                    delay = delay.saturating_mul(2).min(self.retry.maximum_delay);
                 }
             }
         }
@@ -327,6 +354,27 @@ impl ControlPlaneClient {
 enum AttemptResult<T> {
     Complete(Result<T, VoomError>),
     Retry(VoomError),
+}
+
+struct RetryBackoff {
+    ceiling: Duration,
+    maximum: Duration,
+}
+
+impl RetryBackoff {
+    const fn new(initial: Duration, maximum: Duration) -> Self {
+        Self {
+            ceiling: initial,
+            maximum,
+        }
+    }
+
+    fn next_delay(&mut self, rng: &mut impl Rng) -> Duration {
+        let ceiling_nanos = u64::try_from(self.ceiling.as_nanos()).unwrap_or(u64::MAX);
+        let delay = Duration::from_nanos(rng.random_range(0..=ceiling_nanos));
+        self.ceiling = self.ceiling.saturating_mul(2).min(self.maximum);
+        delay
+    }
 }
 
 #[derive(Debug, Deserialize)]

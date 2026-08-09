@@ -5,11 +5,16 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 
+use rand::SeedableRng;
+use rand::rngs::StdRng;
 use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
-use voom_core::{ArtifactAccessMode, NodeId, OperationKind};
+use voom_core::{ArtifactAccessMode, NodeId, OperationKind, VoomError};
 
-use super::{ControlPlaneClient, RetryRequest, RetrySettings};
+use super::{
+    ControlPlaneClient, DEFAULT_MAXIMUM_ATTEMPTS, INITIAL_RETRY_DELAY, MAX_RETRY_DELAY,
+    RetryBackoff, RetryRequest, RetrySettings,
+};
 use crate::config::{AgentConfig, LoadedAgentConfig, TokenSource, WorkerConfig};
 
 #[derive(Debug, Serialize)]
@@ -25,15 +30,81 @@ struct TestResponse {
 /// How long `RawResponse::Timeout` withholds a response so the client's request timeout fires.
 const SERVER_STALL: Duration = Duration::from_millis(400);
 
-/// Long enough that a stalled server is back in `accept()` before the client's next attempt.
-///
-/// `raw_server` serves connections serially on one thread, so while it is stalling it is not
-/// accepting. A shorter retry delay lets the client open connections the listen backlog completes
-/// but nobody reads, burning attempts against a server that never sees them.
-const RETRY_DELAY: Duration = Duration::from_millis(600);
-
 /// Shorter than [`SERVER_STALL`] so a stall is classified as a timeout rather than a disconnect.
 const REQUEST_TIMEOUT: Duration = Duration::from_millis(100);
+
+#[test]
+fn production_retry_policy_is_bounded_and_unlimited_is_explicit() {
+    let loaded = loaded_config("http://127.0.0.1:7443");
+    let bounded = ControlPlaneClient::from_config(&loaded).unwrap();
+    let unlimited = ControlPlaneClient::from_config_with_unbounded_retries(&loaded).unwrap();
+
+    assert_eq!(
+        bounded.retry.maximum_attempts,
+        Some(DEFAULT_MAXIMUM_ATTEMPTS)
+    );
+    assert_eq!(unlimited.retry.maximum_attempts, None);
+}
+
+#[tokio::test]
+async fn retryable_failures_stop_at_the_attempt_limit() {
+    let responses = [RawResponse::Status(500), RawResponse::Status(500)];
+    let (address, received, server) = raw_server(responses);
+    let client = test_client(address, 2, Duration::ZERO, REQUEST_TIMEOUT);
+    let request = RetryRequest::new(
+        "bounded-key".to_owned(),
+        &TestBody {
+            incarnation_id: "0123456789abcdef0123456789abcdef",
+        },
+    )
+    .unwrap();
+
+    let error = client
+        .send::<TestResponse, _>("/test", &request)
+        .await
+        .unwrap_err();
+
+    assert_eq!(received.iter().count(), 2);
+    let message = match error {
+        VoomError::ExternalSystemUnavailable(message) => message,
+        error => format!("unexpected retry exhaustion error: {error}"),
+    };
+    assert!(message.contains("after 2 attempts"));
+    assert!(message.contains("500 Internal Server Error"));
+    server.join().unwrap();
+}
+
+#[test]
+fn retry_backoff_jitters_each_sleep_and_doubles_only_the_ceiling() {
+    let mut rng = StdRng::seed_from_u64(448);
+    let mut backoff = RetryBackoff::new(INITIAL_RETRY_DELAY, MAX_RETRY_DELAY);
+    let ceilings = [
+        Duration::from_millis(250),
+        Duration::from_millis(500),
+        Duration::from_secs(1),
+        Duration::from_secs(2),
+        Duration::from_secs(4),
+        Duration::from_secs(8),
+        Duration::from_secs(16),
+        Duration::from_secs(30),
+        Duration::from_secs(30),
+    ];
+
+    let mut delays = Vec::new();
+    for ceiling in ceilings {
+        assert_eq!(backoff.ceiling, ceiling);
+        let delay = backoff.next_delay(&mut rng);
+        assert!(delay <= ceiling);
+        delays.push(delay);
+    }
+    assert_eq!(backoff.ceiling, MAX_RETRY_DELAY);
+    assert!(delays.windows(2).any(|pair| pair[0] != pair[1]));
+    let capped_delays = (0..8)
+        .map(|_| backoff.next_delay(&mut rng))
+        .collect::<Vec<_>>();
+    assert!(capped_delays.iter().any(|delay| *delay < MAX_RETRY_DELAY));
+    assert!(capped_delays.windows(2).any(|pair| pair[0] != pair[1]));
+}
 
 #[test]
 fn retry_request_freezes_body_key_and_hash() {
@@ -91,7 +162,12 @@ async fn retries_reuse_identical_body_and_key_across_retry_classes() {
         RawResponse::Success,
     ];
     let (address, received, server) = raw_server(responses);
-    let client = test_client(address, responses.len() + 1, RETRY_DELAY, REQUEST_TIMEOUT);
+    let client = test_client(
+        address,
+        responses.len() + 1,
+        Duration::ZERO,
+        REQUEST_TIMEOUT,
+    );
     let request = RetryRequest::new(
         "replay-key".to_owned(),
         &TestBody {
@@ -238,37 +314,44 @@ fn raw_server<const N: usize>(
     let address = listener.local_addr().unwrap();
     let (sender, receiver) = mpsc::channel();
     let handle = thread::spawn(move || {
+        let mut handlers = Vec::new();
         for response in responses {
             let (mut stream, _) = listener.accept().unwrap();
-            stream
-                .set_read_timeout(Some(Duration::from_secs(2)))
-                .unwrap();
-            sender.send(read_request(&mut stream)).unwrap();
-            match response {
-                RawResponse::Status(status) => write_response(&mut stream, status, "{}"),
-                RawResponse::Timeout => thread::sleep(SERVER_STALL),
-                RawResponse::Disconnect => {}
-                RawResponse::Success => write_response(
-                    &mut stream,
-                    200,
-                    r#"{"schema_version":"0","command":"test","status":"ok","data":{"accepted":true},"warnings":[],"error":null}"#,
-                ),
-                RawResponse::BadRequest => write_response(
-                    &mut stream,
-                    400,
-                    r#"{"schema_version":"0","command":"test","status":"error","data":null,"warnings":[],"error":{"code":"BAD_ARGS","message":"bad input"}}"#,
-                ),
-                RawResponse::UnknownEnvelope => write_response(
-                    &mut stream,
-                    200,
-                    r#"{"schema_version":"0","command":"test","status":"ok","data":{"accepted":true},"warnings":[],"error":null,"unknown":true}"#,
-                ),
-                RawResponse::Oversized => {
-                    let _ = stream.write_all(
-                        b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 1048577\r\nConnection: close\r\n\r\n",
-                    );
+            let sender = sender.clone();
+            handlers.push(thread::spawn(move || {
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .unwrap();
+                sender.send(read_request(&mut stream)).unwrap();
+                match response {
+                    RawResponse::Status(status) => write_response(&mut stream, status, "{}"),
+                    RawResponse::Timeout => thread::sleep(SERVER_STALL),
+                    RawResponse::Disconnect => {}
+                    RawResponse::Success => write_response(
+                        &mut stream,
+                        200,
+                        r#"{"schema_version":"0","command":"test","status":"ok","data":{"accepted":true},"warnings":[],"error":null}"#,
+                    ),
+                    RawResponse::BadRequest => write_response(
+                        &mut stream,
+                        400,
+                        r#"{"schema_version":"0","command":"test","status":"error","data":null,"warnings":[],"error":{"code":"BAD_ARGS","message":"bad input"}}"#,
+                    ),
+                    RawResponse::UnknownEnvelope => write_response(
+                        &mut stream,
+                        200,
+                        r#"{"schema_version":"0","command":"test","status":"ok","data":{"accepted":true},"warnings":[],"error":null,"unknown":true}"#,
+                    ),
+                    RawResponse::Oversized => {
+                        let _ = stream.write_all(
+                            b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 1048577\r\nConnection: close\r\n\r\n",
+                        );
+                    }
                 }
-            }
+            }));
+        }
+        for handler in handlers {
+            handler.join().unwrap();
         }
     });
     (address, receiver, handle)
