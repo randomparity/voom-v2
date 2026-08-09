@@ -68,4 +68,5 @@ are append-only — supersede an ADR with a new one rather than rewriting histor
 | [0060](0060-explicit-node-agent-shutdown-signal-phase.md) | Track node-agent shutdown signal phase explicitly |
 | [0061](0061-shared-check-constraint-bypass-helper.md) | Shared test helper for SQLite check-constraint bypasses |
 | [0064](0064-centered-jitter-for-node-agent-periodic-schedules.md) | Center node-agent periodic jitter on the existing interval |
+| [0065](0065-bound-node-activation-admission-and-pruning.md) | Bound node activation admission and prune history explicitly |
 | [0066](0066-observe-graceful-shutdown-as-one-bounded-lifecycle.md) | Observe graceful shutdown as one bounded lifecycle |
