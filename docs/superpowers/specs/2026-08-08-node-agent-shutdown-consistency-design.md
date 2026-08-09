@@ -65,17 +65,25 @@ branch follows the existing order:
 3. shut down and reap the child;
 4. return the typed coordinator outcome.
 
+Every construction of `CoordinatorExit::Shutdown` carries the typed outcome. This includes
+the child-crash branch: if crash settlement consumes an ordinary shutdown, its final
+force-aware wait determines `Completed` or `Forced`; if crash settlement itself observes
+`Forced`, that result is preserved rather than overwritten by a later empty wait.
+
 `wait_for_coordinators` observes shutdown outcomes and aggregates `Forced`. The top-level
-runtime still stops node heartbeat only after all coordinators finish, then preserves the
-existing exit classification and deactivation ordering. Fatal errors remain fatal; a
-forced graceful or restart-exhausted shutdown remains unsuccessful.
+runtime still stops node heartbeat only after all coordinators finish, then classifies the
+original exit before considering the forced result. Fatal errors therefore retain
+precedence over force; a forced graceful or restart-exhausted shutdown remains
+unsuccessful. Graceful, fatal, and restart-exhausted exits map to signal phase through one
+private deterministic function so tests do not depend on simultaneous `tokio::select!`
+readiness.
 
 ### Granted-TTL validation
 
-For an acquired dispatch, normalize `dispatch.lease_ttl_seconds` to at least one second,
-using the same checked conversion as the heartbeat loop. Use half that granted TTL for
-each validation request timeout and the full granted TTL for the elapsed freshness check.
-The configured TTL continues to populate the acquire request only.
+For an acquired dispatch, normalize `dispatch.lease_ttl_seconds` to at least one second
+through one private granted-TTL conversion shared with the heartbeat loop. Use half that
+granted TTL for each validation request timeout and the full granted TTL for the elapsed
+freshness check. The configured TTL continues to populate the acquire request only.
 
 ## Alternatives
 
@@ -117,18 +125,32 @@ signal is always required to abandon settlement or deactivation.
 
 Tests will prove the change bites before implementation:
 
-1. Buffer one first signal while a fatal-style shutdown is reaping a blocked coordinator.
+1. Unit-test the pure exit-to-phase mapping: graceful is `ForceEnabled`; fatal and
+   restart-exhausted are `AwaitingFirst`.
+2. Buffer one first signal while a fatal-phase shutdown is reaping a blocked coordinator.
    Prove the shutdown watch remains fenced and settlement is not forced; then deliver a
    second signal and prove force is broadcast and reaping completes.
-2. Prove graceful reaping, whose first signal was already consumed, still forces on the
+3. Prove graceful reaping, whose first signal was already consumed, still forces on the
    next signal.
-3. Let restart-exhausted reaping finish before any signal, block deactivation, and prove
+4. Let restart-exhausted reaping finish before any signal, block deactivation, and prove
    the first signal does not interrupt it while the second does.
-4. Prove a coordinator surfaces `LeaseSettlement::Forced` after forced lease abortion and
-   that coordinator reaping aggregates that outcome.
-5. Give validation a dispatch TTL different from configured TTL and a response whose delay
-   is fresh only under the grant. Prove validation accepts it. Existing stale-attempt,
-   heartbeat-fence, terminal-response, shutdown-order, and second-signal tests remain green.
+5. Hold child-crash settlement open, deliver ordinary shutdown and then genuine force, and
+   prove the final coordinator outcome is `LeaseSettlement::Forced`; prove coordinator
+   reaping aggregates a forced shutdown outcome even when it learns that outcome from the
+   joined coordinator.
+6. Prove original fatal classification precedes the forced result. The test must assert the
+   original fatal error, no deactivation, and the existing heartbeat-stop-before-return
+   event ordering; it must not race simultaneous `tokio::select!` branches.
+7. With configured TTL six seconds and granted TTL twenty seconds, delay the first
+   validation response five seconds. Assert `Fresh` after exactly one heartbeat call. The
+   old configured half-TTL times out and makes a second call, so it must fail this test.
+8. With configured TTL twenty seconds and granted TTL six seconds, delay every response
+   five seconds. Assert `Terminal` after exactly `VALIDATION_ATTEMPTS`. The old configured
+   TTL accepts the first response, so it must fail this test. Unit-test that a non-positive
+   grant normalizes to one second and retain the existing freshness-boundary test.
+
+Existing stale-attempt, heartbeat-fence, terminal-response, shutdown-order, and
+second-signal tests remain green.
 
 Focused verification is `cargo test -p voom-node-agent`; the repository guardrail is
 `just ci`.
