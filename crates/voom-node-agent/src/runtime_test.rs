@@ -490,21 +490,21 @@ async fn child_crash_shutdown_preserves_forced_final_wait() {
     leases.spawn(std::future::pending());
 
     shutdown_tx.send(ShutdownKind::User).unwrap();
-    let initial = cancel_and_wait(
-        &cancel_tx,
-        LeaseCancellation::Crash,
-        &mut leases,
-        &mut shutdown_rx,
-    )
-    .await
-    .unwrap();
-    assert_eq!(initial, ShutdownKind::User);
+    let settling = settle_leases_after_child_crash(&cancel_tx, &mut leases, &mut shutdown_rx);
+    tokio::pin!(settling);
+    tokio::select! {
+        biased;
+        result = &mut settling => {
+            assert!(result.is_none(), "settled before force: {result:?}");
+        }
+        () = tokio::task::yield_now() => {}
+    }
 
     shutdown_tx.send(ShutdownKind::Forced).unwrap();
-    let final_observed = wait_or_force(&mut leases, &mut shutdown_rx, false).await;
     assert_eq!(
-        child_crash_lease_settlement(initial, final_observed),
-        LeaseSettlement::Forced
+        settling.await,
+        Some(LeaseSettlement::Forced),
+        "the production crash-settlement handoff must preserve final force"
     );
 }
 
