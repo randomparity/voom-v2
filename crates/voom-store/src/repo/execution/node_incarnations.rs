@@ -141,18 +141,30 @@ impl SqliteNodeIncarnationRepo {
             return Ok(0);
         }
         let node_id = i64_from_u64(node_id.0, "node incarnation activation count node id")?;
-        let mut cursor = String::new();
+        let mut cursor: Option<(String, String)> = None;
         let mut count = 0_u32;
         loop {
-            let rows = sqlx::query(
-                "SELECT incarnation_id, started_at FROM node_incarnations \
-                 WHERE node_id = ? AND incarnation_id > ? \
-                 ORDER BY incarnation_id ASC LIMIT 32",
-            )
-            .bind(node_id)
-            .bind(&cursor)
-            .fetch_all(&mut **tx)
-            .await
+            let rows = if let Some((started_at, incarnation_id)) = &cursor {
+                sqlx::query(
+                    "SELECT incarnation_id, started_at FROM node_incarnations \
+                     WHERE node_id = ? AND (started_at, incarnation_id) < (?, ?) \
+                     ORDER BY started_at DESC, incarnation_id DESC LIMIT 32",
+                )
+                .bind(node_id)
+                .bind(started_at)
+                .bind(incarnation_id)
+                .fetch_all(&mut **tx)
+                .await
+            } else {
+                sqlx::query(
+                    "SELECT incarnation_id, started_at FROM node_incarnations \
+                     WHERE node_id = ? \
+                     ORDER BY started_at DESC, incarnation_id DESC LIMIT 32",
+                )
+                .bind(node_id)
+                .fetch_all(&mut **tx)
+                .await
+            }
             .map_err(|error| {
                 VoomError::database_context("node incarnation activation count", error)
             })?;
@@ -167,16 +179,16 @@ impl SqliteNodeIncarnationRepo {
                     "node incarnation activation evidence id",
                     &incarnation_id,
                 )?;
-                cursor = incarnation_id;
-                let started_at: String = row.try_get("started_at").map_err(|error| {
+                let stored_started_at: String = row.try_get("started_at").map_err(|error| {
                     map_row_err("node incarnation activation evidence started at", error)
                 })?;
-                let started_at = parse_iso8601(&started_at).map_err(|error| {
+                let started_at = parse_iso8601(&stored_started_at).map_err(|error| {
                     VoomError::database_context(
                         "node incarnation activation evidence started at",
                         error,
                     )
                 })?;
+                cursor = Some((stored_started_at, incarnation_id));
                 if started_at >= lower_bound {
                     count = count.checked_add(1).ok_or_else(|| {
                         VoomError::database("node incarnation activation count overflow")
