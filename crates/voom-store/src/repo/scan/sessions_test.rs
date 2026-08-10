@@ -1,5 +1,6 @@
 use voom_core::{
-    NodeId, ProviderRelativeLocator, ScanSessionId, ScanSessionStatus, StorageRootId, VoomError,
+    NodeId, ProviderRelativeLocator, ScanSessionId, ScanSessionStatus, ScanTerminalReason,
+    StorageRootId, VoomError,
 };
 
 use super::{
@@ -716,6 +717,135 @@ async fn stale_expiry_decodes_every_active_deadline_before_any_mutation() {
     for deadline in ["0000-not-a-time", "zzzz-not-a-time"] {
         assert_malformed_deadline_rejects_without_partial_staleness(deadline).await;
     }
+}
+
+#[tokio::test]
+async fn stale_running_for_incarnation_returns_checked_rows_in_id_order() {
+    let (pool, _tmp) = fresh_pool().await;
+    let first_root = seed_test_storage_root(&pool).await.unwrap();
+    let second_root = seed_second_root(&pool).await;
+    let incarnation = "22222222222222222222222222222222";
+    seed_incarnation(&pool, incarnation).await;
+    let incarnation = incarnation.parse().unwrap();
+    let repo = SqliteScanSessionRepo::new(pool.clone());
+    let mut tx = pool.begin().await.unwrap();
+    let first = repo
+        .insert_requested_in_tx(&mut tx, new_session(first_root))
+        .await
+        .unwrap();
+    let second = repo
+        .insert_requested_in_tx(&mut tx, new_session(second_root))
+        .await
+        .unwrap();
+    for session in [&first, &second] {
+        repo.start_in_tx(
+            &mut tx,
+            session.id,
+            incarnation,
+            T0 + time::Duration::minutes(10),
+            T0,
+        )
+        .await
+        .unwrap();
+    }
+
+    let stale = repo
+        .stale_running_for_incarnation_in_tx(
+            &mut tx,
+            incarnation,
+            ScanTerminalReason::new("owner incarnation ended").unwrap(),
+            T0 + time::Duration::minutes(1),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        stale.iter().map(|session| session.id).collect::<Vec<_>>(),
+        vec![first.id, second.id]
+    );
+    assert!(stale.iter().all(|session| {
+        session.status == ScanSessionStatus::Stale
+            && session.owner_incarnation_id == Some(incarnation)
+    }));
+}
+
+#[tokio::test]
+async fn stale_running_for_incarnation_decodes_all_running_rows_before_mutation() {
+    let (pool, _tmp) = fresh_pool().await;
+    let first_root = seed_test_storage_root(&pool).await.unwrap();
+    let second_root = seed_second_root(&pool).await;
+    let target = "22222222222222222222222222222222";
+    seed_incarnation(&pool, target).await;
+    let repo = SqliteScanSessionRepo::new(pool.clone());
+    let mut tx = pool.begin().await.unwrap();
+    let target_session = repo
+        .insert_requested_in_tx(&mut tx, new_session(first_root))
+        .await
+        .unwrap();
+    repo.start_in_tx(
+        &mut tx,
+        target_session.id,
+        target.parse().unwrap(),
+        T0 + time::Duration::minutes(10),
+        T0,
+    )
+    .await
+    .unwrap();
+    let corrupt_session = repo
+        .insert_requested_in_tx(&mut tx, new_session(second_root))
+        .await
+        .unwrap();
+    repo.start_in_tx(
+        &mut tx,
+        corrupt_session.id,
+        target.parse().unwrap(),
+        T0 + time::Duration::minutes(10),
+        T0,
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    with_check_constraints_disabled(&pool, |connection| {
+        Box::pin(async move {
+            sqlx::query(
+                "INSERT INTO node_incarnations \
+                 (incarnation_id, node_id, status, started_at, last_seen_at, ended_at, end_reason) \
+                 VALUES ('not-an-incarnation', 9000001, 'superseded', \
+                         '1970-01-01T00:00:00Z', '1970-01-01T00:00:00Z', \
+                         '1970-01-01T00:00:00Z', 'superseded')",
+            )
+            .execute(&mut *connection)
+            .await?;
+            sqlx::query("UPDATE scan_sessions SET owner_incarnation_id = ? WHERE id = ?")
+                .bind("not-an-incarnation")
+                .bind(i64::try_from(corrupt_session.id.0).unwrap())
+                .execute(connection)
+                .await
+        })
+    })
+    .await
+    .unwrap();
+    let mut tx = pool.begin().await.unwrap();
+
+    let error = repo
+        .stale_running_for_incarnation_in_tx(
+            &mut tx,
+            target.parse().unwrap(),
+            ScanTerminalReason::new("owner incarnation ended").unwrap(),
+            T0 + time::Duration::minutes(1),
+        )
+        .await
+        .unwrap_err();
+
+    assert!(matches!(error, VoomError::Database { .. }));
+    assert_eq!(
+        repo.get_in_tx(&mut tx, target_session.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        ScanSessionStatus::Running
+    );
 }
 
 #[tokio::test]

@@ -9,7 +9,10 @@ use voom_store::repo::execution::workers::{Worker, WorkerKind};
 
 use crate::ControlPlane;
 use crate::cases::execution::remote_execution::RemoteRecoverReport;
+use crate::cases::{begin_immediate_tx, commit_tx};
 use crate::node_auth::verify_node_token;
+
+use super::append_scan_stale_events_in_tx;
 
 const REMOTE_NODE_AUTH_FAILURE: &str = "remote node authentication failed";
 
@@ -23,9 +26,11 @@ impl ControlPlane {
         now: time::OffsetDateTime,
     ) -> Result<RemoteRecoverReport, VoomError> {
         let stale_nodes = self.mark_stale_nodes(now).await?;
+        let stale_scan_sessions = self.recover_expired_scan_sessions(now).await?;
         let expired = self.expire_due(now).await?;
         Ok(RemoteRecoverReport {
             stale_nodes: stale_nodes.iter().map(|node| node.id).collect(),
+            stale_scan_sessions,
             expired_leases: expired.expired_leases,
             requeued_tickets: expired.requeued_tickets,
             failed_tickets: expired
@@ -34,6 +39,18 @@ impl ControlPlane {
                 .map(|failed| failed.ticket_id)
                 .collect(),
         })
+    }
+
+    async fn recover_expired_scan_sessions(
+        &self,
+        now: time::OffsetDateTime,
+    ) -> Result<Vec<voom_core::ScanSessionId>, VoomError> {
+        let mut tx = begin_immediate_tx(&self.pool).await?;
+        let stale = self.scan_sessions.stale_expired_in_tx(&mut tx, now).await?;
+        append_scan_stale_events_in_tx(self, &mut tx, &stale, now).await?;
+        let ids = stale.iter().map(|session| session.id).collect();
+        commit_tx(tx).await?;
+        Ok(ids)
     }
 
     pub(crate) async fn verify_remote_node_token_in_tx(

@@ -6,8 +6,8 @@ use serde_json::json;
 use sqlx::{Sqlite, Transaction};
 use time::OffsetDateTime;
 use voom_core::{
-    NodeIncarnationEndReason, NodeIncarnationStatus, TicketOperation, VoomError, WorkerId,
-    WorkerKind,
+    NodeIncarnationEndReason, NodeIncarnationStatus, ScanTerminalReason, TicketOperation,
+    VoomError, WorkerId, WorkerKind,
 };
 use voom_events::payload::{
     NodeIncarnationActivatedPayload, NodeIncarnationEndedPayload, WorkerCapabilityRecordedPayload,
@@ -25,7 +25,8 @@ use crate::cases::{append_event, begin_immediate_tx, commit_tx};
 
 use super::{
     ActivatedWorker, RemoteActivateInput, RemoteActivateOutcome, RemoteDeactivateInput,
-    RemoteDeactivateOutcome, RemoteWorkerDeclaration, ReplayRoute, decode_replay,
+    RemoteDeactivateOutcome, RemoteWorkerDeclaration, ReplayRoute, append_scan_stale_events_in_tx,
+    decode_replay,
 };
 
 const MAX_WORKERS: usize = 64;
@@ -461,6 +462,8 @@ impl ControlPlane {
         reason: NodeIncarnationEndReason,
         now: OffsetDateTime,
     ) -> Result<Vec<WorkerId>, VoomError> {
+        let stale_reason =
+            ScanTerminalReason::new(format!("owner incarnation ended: {}", reason.as_str()))?;
         let retired = self
             .workers
             .retire_live_for_incarnation_in_tx(tx, incarnation_id, now)
@@ -478,6 +481,11 @@ impl ControlPlane {
             )
             .await?;
         }
+        let stale_sessions = self
+            .scan_sessions
+            .stale_running_for_incarnation_in_tx(tx, incarnation_id, stale_reason, now)
+            .await?;
+        append_scan_stale_events_in_tx(self, tx, &stale_sessions, now).await?;
         let ended = self
             .node_incarnations
             .end_in_tx(tx, incarnation_id, status, reason, now)

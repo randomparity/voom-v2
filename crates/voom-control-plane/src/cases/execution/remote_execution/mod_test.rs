@@ -3,8 +3,9 @@ use super::*;
 use serde_json::json;
 use time::{Duration, OffsetDateTime};
 use voom_core::{
-    ArtifactAccessMode, ErrorCode, FailureClass, LeaseId, NodeId, TicketId, TicketOperation,
-    clock_test_support::FrozenClock,
+    ArtifactAccessMode, ErrorCode, FailureClass, LeaseId, LibraryId, NodeId, ProviderLocator,
+    ProviderRelativeLocator, ScanSessionStatus, StorageProviderKind, StorageRootId, TicketId,
+    TicketOperation, clock_test_support::FrozenClock,
 };
 use voom_events::EventKind;
 use voom_scheduler::{
@@ -19,13 +20,19 @@ use voom_store::repo::execution::scheduler_decisions::{
 };
 use voom_store::repo::execution::tickets::{NewTicket, TicketState};
 use voom_store::repo::execution::workers::WorkerKind;
+use voom_store::repo::library::libraries::{LibraryMediaKind, NewLibrary};
+use voom_store::repo::library::library_roots::{
+    HiddenFilePolicy, LibraryScanMode, NewLibraryRoot, SymlinkPolicy,
+};
 use voom_store::repo::media::artifact_access_plans::ArtifactAccessPlanStatus;
+use voom_store::repo::scan::sessions::ScanObservation;
 
 use crate::cases::count;
 use crate::cases::workers::nodes::RegisterNodeInput;
 use crate::cases::workers::{
     NewWorkerCapabilityDraft, NewWorkerGrantDraft, RegisterWorkerForNodeInput,
 };
+use crate::scan::{RemoteScanBatchInput, RemoteScanStartInput};
 
 const T0: OffsetDateTime = OffsetDateTime::UNIX_EPOCH;
 const OP: &str = "test.remote";
@@ -1621,6 +1628,30 @@ async fn remote_fail_marks_timeouts_and_crashes_as_failed_even_with_artifact_rea
 async fn remote_recover_marks_stale_nodes_and_expires_due_leases() {
     let fixture = leased_fixture().await;
     let lease_id = fixture_lease_id(&fixture).await;
+    let running_root = create_remote_scan_root(&fixture, "heartbeat-running").await;
+    let running = fixture
+        .cp
+        .request_scan_session(running_root, 300)
+        .await
+        .unwrap();
+    fixture
+        .cp
+        .start_scan_session(RemoteScanStartInput {
+            node_id: fixture.node_id,
+            scan_session_id: running.id,
+            incarnation_id: fixture.incarnation_id,
+            token: fixture.token.clone(),
+            idempotency_key: "heartbeat-scan-start".to_owned(),
+            request_hash: "heartbeat-scan-start-body".to_owned(),
+        })
+        .await
+        .unwrap();
+    let requested_root = create_remote_scan_root(&fixture, "heartbeat-requested").await;
+    let requested = fixture
+        .cp
+        .request_scan_session(requested_root, 30)
+        .await
+        .unwrap();
 
     let report = fixture
         .cp
@@ -1629,12 +1660,109 @@ async fn remote_recover_marks_stale_nodes_and_expires_due_leases() {
         .unwrap();
 
     assert_eq!(report.stale_nodes, vec![fixture.node_id]);
+    assert_eq!(report.stale_scan_sessions, vec![requested.id]);
     assert_eq!(report.expired_leases, vec![lease_id]);
     assert!(!report.requeued_tickets.is_empty());
     assert_eq!(count(&fixture.cp, EventKind::LeaseExpired).await, 1);
     assert_eq!(
         count(&fixture.cp, EventKind::TicketRequeuedAfterLeaseExpiry).await,
         1
+    );
+    assert_eq!(
+        fixture.cp.scan_session(running.id).await.unwrap().status,
+        ScanSessionStatus::Stale
+    );
+    let recovery_order: Vec<String> = sqlx::query_scalar(
+        "SELECT kind FROM events WHERE kind IN ('scan_session.stale', 'lease.expired') \
+         ORDER BY event_id ASC",
+    )
+    .fetch_all(fixture.cp.pool_for_test())
+    .await
+    .unwrap();
+    assert_eq!(
+        recovery_order,
+        vec!["scan_session.stale", "scan_session.stale", "lease.expired"]
+    );
+}
+
+#[tokio::test]
+async fn remote_recover_marks_scan_sessions_stale() {
+    let fixture = remote_fixture(&[(OP, vec!["shared_mount"])], &[OP], &[]).await;
+    let root_id = create_remote_scan_root(&fixture, "timeout-running").await;
+    let location_id = seed_scan_location(&fixture.cp, root_id, "old.mkv").await;
+    let requested = fixture.cp.request_scan_session(root_id, 10).await.unwrap();
+    fixture
+        .cp
+        .start_scan_session(RemoteScanStartInput {
+            node_id: fixture.node_id,
+            scan_session_id: requested.id,
+            incarnation_id: fixture.incarnation_id,
+            token: fixture.token.clone(),
+            idempotency_key: "recover-scan-start".to_owned(),
+            request_hash: "recover-scan-start-body".to_owned(),
+        })
+        .await
+        .unwrap();
+    fixture
+        .cp
+        .accept_scan_observation_batch(RemoteScanBatchInput {
+            node_id: fixture.node_id,
+            scan_session_id: requested.id,
+            incarnation_id: fixture.incarnation_id,
+            token: fixture.token.clone(),
+            idempotency_key: "recover-scan-batch".to_owned(),
+            request_hash: "a".repeat(64),
+            sequence: 0,
+            observations: vec![ScanObservation {
+                provider_relative_locator: ProviderRelativeLocator::new("old.mkv".to_owned())
+                    .unwrap(),
+                provider_object_identity: "recover-object".to_owned(),
+                size_bytes: 1,
+                modified_at: T0,
+                stability_started_at: T0,
+                stability_confirmed_at: T0,
+            }],
+        })
+        .await
+        .unwrap();
+    let requested_root = create_remote_scan_root(&fixture, "timeout-requested").await;
+    let requested_only = fixture
+        .cp
+        .request_scan_session(requested_root, 10)
+        .await
+        .unwrap();
+
+    let report = fixture
+        .cp
+        .remote_recover(T0 + Duration::seconds(10))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        report.stale_scan_sessions,
+        vec![requested.id, requested_only.id]
+    );
+    for id in [requested.id, requested_only.id] {
+        assert_eq!(
+            fixture.cp.scan_session(id).await.unwrap().status,
+            ScanSessionStatus::Stale
+        );
+    }
+    assert_eq!(
+        scan_location_state(&fixture.cp, location_id).await,
+        (None, 0, None)
+    );
+    assert_eq!(scan_root_pointer(&fixture.cp, root_id).await, None);
+    let stale_events = count(&fixture.cp, EventKind::ScanSessionStale).await;
+    let rerun = fixture
+        .cp
+        .remote_recover(T0 + Duration::seconds(10))
+        .await
+        .unwrap();
+    assert!(rerun.stale_scan_sessions.is_empty());
+    assert_eq!(
+        count(&fixture.cp, EventKind::ScanSessionStale).await,
+        stale_events
     );
 }
 
@@ -1731,6 +1859,117 @@ async fn remote_fixture(
         denies,
     )
     .await
+}
+
+async fn create_remote_scan_root(fixture: &RemoteFixture, suffix: &str) -> StorageRootId {
+    let library = fixture
+        .cp
+        .create_library(NewLibrary {
+            slug: format!("remote-recover-{suffix}"),
+            display_name: format!("Remote recover {suffix}"),
+            media_kind: LibraryMediaKind::Movie,
+            description: None,
+            enabled: true,
+        })
+        .await
+        .unwrap();
+    let root = fixture
+        .cp
+        .create_library_root(remote_scan_root_input(library.id, fixture.node_id, suffix))
+        .await
+        .unwrap();
+    fixture
+        .cp
+        .activate_library_root(root.id, format!("remote-recover-{suffix}"))
+        .await
+        .unwrap();
+    root.id
+}
+
+fn remote_scan_root_input(
+    library_id: LibraryId,
+    owner_node_id: NodeId,
+    suffix: &str,
+) -> NewLibraryRoot {
+    NewLibraryRoot {
+        library_id,
+        owner_node_id,
+        provider_kind: StorageProviderKind::LocalFilesystem,
+        provider_locator: ProviderLocator::new(format!("/remote-recover/{suffix}")).unwrap(),
+        display_locator: format!("/remote-recover/{suffix}"),
+        include_globs: Vec::new(),
+        exclude_globs: Vec::new(),
+        extension_allowlist: Vec::new(),
+        scan_mode: LibraryScanMode::ManualRecursive,
+        symlink_policy: SymlinkPolicy::Reject,
+        hidden_file_policy: HiddenFilePolicy::Ignore,
+        max_depth: None,
+        stability_seconds: 0,
+        debounce_seconds: 0,
+        default_output_root_id: None,
+        default_staging_root_id: None,
+        default_backup_root_id: None,
+        enabled: true,
+    }
+}
+
+async fn seed_scan_location(
+    cp: &crate::ControlPlane,
+    storage_root_id: StorageRootId,
+    locator: &str,
+) -> u64 {
+    let asset_id = sqlx::query("INSERT INTO file_assets (created_at, epoch) VALUES (?, 0)")
+        .bind("1970-01-01T00:00:00Z")
+        .execute(cp.pool_for_test())
+        .await
+        .unwrap()
+        .last_insert_rowid();
+    let version_id = sqlx::query(
+        "INSERT INTO file_versions (file_asset_id, content_hash, size_bytes, produced_by, \
+         produced_from_version_id, created_at, retired_at, epoch) \
+         VALUES (?, ?, 1, 'ingest', NULL, '1970-01-01T00:00:00Z', NULL, 0)",
+    )
+    .bind(asset_id)
+    .bind(format!("remote-recover-{locator}"))
+    .execute(cp.pool_for_test())
+    .await
+    .unwrap()
+    .last_insert_rowid();
+    let location_id = sqlx::query(
+        "INSERT INTO file_locations (file_version_id, address_state, storage_root_id, \
+         provider_relative_locator, observed_at, epoch) \
+         VALUES (?, 'rooted', ?, ?, '1970-01-01T00:00:00Z', 0)",
+    )
+    .bind(version_id)
+    .bind(i64::try_from(storage_root_id.0).unwrap())
+    .bind(locator)
+    .execute(cp.pool_for_test())
+    .await
+    .unwrap()
+    .last_insert_rowid();
+    u64::try_from(location_id).unwrap()
+}
+
+async fn scan_location_state(
+    cp: &crate::ControlPlane,
+    location_id: u64,
+) -> (Option<String>, i64, Option<i64>) {
+    sqlx::query_as(
+        "SELECT retired_at, epoch, retired_by_scan_session_id \
+         FROM file_locations WHERE id = ?",
+    )
+    .bind(i64::try_from(location_id).unwrap())
+    .fetch_one(cp.pool_for_test())
+    .await
+    .unwrap()
+}
+
+async fn scan_root_pointer(cp: &crate::ControlPlane, root_id: StorageRootId) -> Option<i64> {
+    sqlx::query_scalar("SELECT last_scan_session_id FROM library_roots WHERE id = ?")
+        .bind(i64::try_from(root_id.0).unwrap())
+        .fetch_one(cp.pool_for_test())
+        .await
+        .unwrap()
 }
 
 async fn fixture_with_options(

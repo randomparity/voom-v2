@@ -8,13 +8,19 @@ use serde_json::json;
 use time::{Duration, OffsetDateTime};
 use tracing::instrument::WithSubscriber;
 use voom_core::{
-    ArtifactAccessMode, ErrorCode, NodeIncarnationEndReason, NodeIncarnationStatus, OperationKind,
+    ArtifactAccessMode, ErrorCode, LibraryId, NodeIncarnationEndReason, NodeIncarnationStatus,
+    OperationKind, ProviderLocator, ScanSessionStatus, StorageProviderKind, StorageRootId,
     clock_test_support::{FrozenClock, ManualClock},
 };
 use voom_store::repo::execution::nodes::NodeKind;
 use voom_store::repo::execution::tickets::NewTicket;
+use voom_store::repo::library::libraries::{LibraryMediaKind, NewLibrary};
+use voom_store::repo::library::library_roots::{
+    HiddenFilePolicy, LibraryScanMode, NewLibraryRoot, SymlinkPolicy,
+};
 
 use crate::cases::workers::nodes::RegisterNodeInput;
+use crate::scan::RemoteScanStartInput;
 
 const T0: OffsetDateTime = OffsetDateTime::UNIX_EPOCH;
 
@@ -803,6 +809,249 @@ async fn remote_activation_logical_retire_ends_incarnation_before_node() {
     );
 }
 
+#[tokio::test]
+async fn ending_incarnation_stales_scan_sessions_atomically() {
+    let (cp, _tmp) = cp_at(T0).await;
+    let registered = register_remote_node(&cp).await;
+    let activated = cp
+        .remote_activate(activation_input(
+            registered.node.id,
+            registered.token.clone(),
+        ))
+        .await
+        .unwrap();
+    let first =
+        running_scan_session(&cp, &registered, activated.incarnation_id, "graceful-one").await;
+    let second =
+        running_scan_session(&cp, &registered, activated.incarnation_id, "graceful-two").await;
+    let requested_root = create_scan_root(&cp, registered.node.id, "graceful-requested").await;
+    let requested = cp.request_scan_session(requested_root, 300).await.unwrap();
+
+    let outcome = cp
+        .remote_deactivate(RemoteDeactivateInput {
+            node_id: registered.node.id,
+            token: registered.token,
+            idempotency_key: "deactivate-scans".to_owned(),
+            request_hash: "deactivate-scans-body".to_owned(),
+            incarnation_id: activated.incarnation_id,
+            reason: NodeIncarnationEndReason::GracefulShutdown,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(outcome.retired_worker_ids.len(), activated.workers.len());
+    for id in [first.id, second.id] {
+        assert_eq!(
+            cp.scan_session(id).await.unwrap().status,
+            ScanSessionStatus::Stale
+        );
+    }
+    assert_eq!(
+        cp.scan_session(requested.id).await.unwrap().status,
+        ScanSessionStatus::Requested
+    );
+    let stale_subjects: Vec<i64> = sqlx::query_scalar(
+        "SELECT subject_id FROM events WHERE kind = 'scan_session.stale' ORDER BY event_id ASC",
+    )
+    .fetch_all(cp.pool_for_test())
+    .await
+    .unwrap();
+    assert_eq!(
+        stale_subjects,
+        vec![
+            i64::try_from(first.id.0).unwrap(),
+            i64::try_from(second.id.0).unwrap()
+        ]
+    );
+    let ordered_kinds: Vec<String> = sqlx::query_scalar(
+        "SELECT kind FROM events WHERE kind IN \
+         ('scan_session.stale', 'node.incarnation_ended') ORDER BY event_id ASC",
+    )
+    .fetch_all(cp.pool_for_test())
+    .await
+    .unwrap();
+    assert_eq!(
+        ordered_kinds,
+        vec![
+            "scan_session.stale",
+            "scan_session.stale",
+            "node.incarnation_ended"
+        ]
+    );
+}
+
+#[tokio::test]
+async fn failed_deactivation_reasons_stale_running_scan_sessions() {
+    for (ordinal, reason) in [
+        NodeIncarnationEndReason::ChildStartupFailed,
+        NodeIncarnationEndReason::ChildRestartExhausted,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let (cp, _tmp) = cp_at(T0).await;
+        let registered = register_remote_node(&cp).await;
+        let activated = cp
+            .remote_activate(activation_input(
+                registered.node.id,
+                registered.token.clone(),
+            ))
+            .await
+            .unwrap();
+        let session = running_scan_session(
+            &cp,
+            &registered,
+            activated.incarnation_id,
+            &format!("failed-{ordinal}"),
+        )
+        .await;
+
+        cp.remote_deactivate(RemoteDeactivateInput {
+            node_id: registered.node.id,
+            token: registered.token,
+            idempotency_key: format!("deactivate-failed-{ordinal}"),
+            request_hash: format!("deactivate-failed-body-{ordinal}"),
+            incarnation_id: activated.incarnation_id,
+            reason,
+        })
+        .await
+        .unwrap();
+
+        let session = cp.scan_session(session.id).await.unwrap();
+        assert_eq!(session.status, ScanSessionStatus::Stale);
+        assert!(
+            session
+                .terminal_reason
+                .unwrap()
+                .as_str()
+                .contains(reason.as_str())
+        );
+    }
+}
+
+#[tokio::test]
+async fn supersession_and_logical_retirement_stale_running_scan_sessions() {
+    let (supersede_cp, _tmp) = cp_at(T0).await;
+    let superseded_node = register_remote_node(&supersede_cp).await;
+    let first = supersede_cp
+        .remote_activate(activation_input(
+            superseded_node.node.id,
+            superseded_node.token.clone(),
+        ))
+        .await
+        .unwrap();
+    let superseded_scan = running_scan_session(
+        &supersede_cp,
+        &superseded_node,
+        first.incarnation_id,
+        "superseded",
+    )
+    .await;
+    supersede_cp
+        .remote_activate(activation_input_for(
+            superseded_node.node.id,
+            superseded_node.token,
+            2,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        supersede_cp
+            .scan_session(superseded_scan.id)
+            .await
+            .unwrap()
+            .status,
+        ScanSessionStatus::Stale
+    );
+
+    let (retire_cp, _tmp) = cp_at(T0).await;
+    let retired_node = register_remote_node(&retire_cp).await;
+    let activated = retire_cp
+        .remote_activate(activation_input(
+            retired_node.node.id,
+            retired_node.token.clone(),
+        ))
+        .await
+        .unwrap();
+    let retired_scan = running_scan_session(
+        &retire_cp,
+        &retired_node,
+        activated.incarnation_id,
+        "retired",
+    )
+    .await;
+    retire_cp
+        .retire_node(retired_node.node.id, activated.node_epoch, T0)
+        .await
+        .unwrap();
+    assert_eq!(
+        retire_cp
+            .scan_session(retired_scan.id)
+            .await
+            .unwrap()
+            .status,
+        ScanSessionStatus::Stale
+    );
+}
+
+#[tokio::test]
+async fn stale_scan_event_failure_rolls_back_incarnation_and_worker_retirement() {
+    let (cp, _tmp) = cp_at(T0).await;
+    let registered = register_remote_node(&cp).await;
+    let activated = cp
+        .remote_activate(activation_input(
+            registered.node.id,
+            registered.token.clone(),
+        ))
+        .await
+        .unwrap();
+    let session =
+        running_scan_session(&cp, &registered, activated.incarnation_id, "rollback").await;
+    let statuses_before = worker_statuses(&cp, &activated).await;
+    sqlx::query(
+        "CREATE TRIGGER reject_scan_stale_event BEFORE INSERT ON events \
+         WHEN NEW.kind = 'scan_session.stale' \
+         BEGIN SELECT RAISE(ABORT, 'forced stale event failure'); END",
+    )
+    .execute(cp.pool_for_test())
+    .await
+    .unwrap();
+
+    let error = cp
+        .remote_deactivate(RemoteDeactivateInput {
+            node_id: registered.node.id,
+            token: registered.token,
+            idempotency_key: "deactivate-rollback".to_owned(),
+            request_hash: "deactivate-rollback-body".to_owned(),
+            incarnation_id: activated.incarnation_id,
+            reason: NodeIncarnationEndReason::GracefulShutdown,
+        })
+        .await
+        .unwrap_err();
+
+    assert!(error.to_string().contains("forced stale event failure"));
+    assert_eq!(
+        cp.scan_session(session.id).await.unwrap().status,
+        ScanSessionStatus::Running
+    );
+    assert_eq!(worker_statuses(&cp, &activated).await, statuses_before);
+    assert_eq!(
+        cp.list_node_incarnations(registered.node.id, 10)
+            .await
+            .unwrap()[0]
+            .status,
+        NodeIncarnationStatus::Active
+    );
+    assert_eq!(
+        cp.get_node(registered.node.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .active_incarnation_id,
+        Some(activated.incarnation_id)
+    );
+}
+
 fn activation_input(node_id: voom_core::NodeId, token: SecretString) -> RemoteActivateInput {
     RemoteActivateInput {
         node_id,
@@ -869,6 +1118,97 @@ async fn register_remote_node(cp: &crate::ControlPlane) -> crate::workers::Regis
     })
     .await
     .unwrap()
+}
+
+async fn create_scan_root(
+    cp: &crate::ControlPlane,
+    owner_node_id: voom_core::NodeId,
+    suffix: &str,
+) -> StorageRootId {
+    let library = cp
+        .create_library(NewLibrary {
+            slug: format!("activation-scan-{suffix}"),
+            display_name: format!("Activation scan {suffix}"),
+            media_kind: LibraryMediaKind::Movie,
+            description: None,
+            enabled: true,
+        })
+        .await
+        .unwrap();
+    let root = cp
+        .create_library_root(scan_root_input(library.id, owner_node_id, suffix))
+        .await
+        .unwrap();
+    cp.activate_library_root(root.id, format!("activation-scan-{suffix}"))
+        .await
+        .unwrap();
+    root.id
+}
+
+fn scan_root_input(
+    library_id: LibraryId,
+    owner_node_id: voom_core::NodeId,
+    suffix: &str,
+) -> NewLibraryRoot {
+    NewLibraryRoot {
+        library_id,
+        owner_node_id,
+        provider_kind: StorageProviderKind::LocalFilesystem,
+        provider_locator: ProviderLocator::new(format!("/activation-scan/{suffix}")).unwrap(),
+        display_locator: format!("/activation-scan/{suffix}"),
+        include_globs: Vec::new(),
+        exclude_globs: Vec::new(),
+        extension_allowlist: Vec::new(),
+        scan_mode: LibraryScanMode::ManualRecursive,
+        symlink_policy: SymlinkPolicy::Reject,
+        hidden_file_policy: HiddenFilePolicy::Ignore,
+        max_depth: None,
+        stability_seconds: 0,
+        debounce_seconds: 0,
+        default_output_root_id: None,
+        default_staging_root_id: None,
+        default_backup_root_id: None,
+        enabled: true,
+    }
+}
+
+async fn running_scan_session(
+    cp: &crate::ControlPlane,
+    registered: &crate::workers::RegisteredNode,
+    incarnation_id: voom_core::NodeIncarnationId,
+    suffix: &str,
+) -> crate::scan::ScanSession {
+    let root_id = create_scan_root(cp, registered.node.id, suffix).await;
+    let requested = cp.request_scan_session(root_id, 300).await.unwrap();
+    cp.start_scan_session(RemoteScanStartInput {
+        node_id: registered.node.id,
+        scan_session_id: requested.id,
+        incarnation_id,
+        token: registered.token.clone(),
+        idempotency_key: format!("start-{suffix}"),
+        request_hash: format!("start-{suffix}-body"),
+    })
+    .await
+    .unwrap();
+    cp.scan_session(requested.id).await.unwrap()
+}
+
+async fn worker_statuses(
+    cp: &crate::ControlPlane,
+    activation: &super::super::RemoteActivateOutcome,
+) -> Vec<voom_core::WorkerStatus> {
+    let mut statuses = Vec::new();
+    for worker in &activation.workers {
+        statuses.push(
+            cp.workers()
+                .get(worker.worker_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+        );
+    }
+    statuses
 }
 
 async fn hold_hash_lease(

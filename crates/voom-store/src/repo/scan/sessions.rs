@@ -214,6 +214,58 @@ impl SqliteScanSessionRepo {
         Ok(sessions)
     }
 
+    pub async fn stale_running_for_incarnation_in_tx(
+        &self,
+        tx: &mut Transaction<'_, Sqlite>,
+        incarnation_id: NodeIncarnationId,
+        reason: ScanTerminalReason,
+        now: OffsetDateTime,
+    ) -> Result<Vec<ScanSession>, VoomError> {
+        let rows = sqlx::query(&format!(
+            "SELECT {SCAN_SESSION_COLS} FROM scan_sessions \
+             WHERE status = 'running' ORDER BY id ASC"
+        ))
+        .fetch_all(&mut **tx)
+        .await
+        .map_err(|error| VoomError::database_context("scan_sessions running incarnation", error))?;
+        let running = rows
+            .iter()
+            .map(row_to_scan_session)
+            .collect::<Result<Vec<_>, _>>()?;
+        let session_ids = running
+            .iter()
+            .filter(|session| session.owner_incarnation_id == Some(incarnation_id))
+            .map(|session| i64_from_u64(session.id.0, "scan_sessions.id"))
+            .collect::<Result<Vec<_>, _>>()?;
+        if session_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let expected_count = session_ids.len();
+        let session_ids = serialize_json(&session_ids, "incarnation scan session IDs")?;
+        let mut sessions = sqlx::query(&format!(
+            "UPDATE scan_sessions SET status = 'stale', terminal_at = ?, terminal_reason = ? \
+             WHERE status = 'running' AND id IN (SELECT value FROM json_each(?)) \
+             RETURNING {SCAN_SESSION_COLS}"
+        ))
+        .bind(iso8601(now)?)
+        .bind(reason.as_str())
+        .bind(session_ids)
+        .fetch_all(&mut **tx)
+        .await
+        .map_err(|error| VoomError::database_context("scan_sessions stale incarnation", error))?
+        .iter()
+        .map(row_to_scan_session)
+        .collect::<Result<Vec<_>, _>>()?;
+        if sessions.len() != expected_count {
+            return Err(VoomError::database(format!(
+                "scan incarnation staleness expected {expected_count} rows but updated {}",
+                sessions.len()
+            )));
+        }
+        sessions.sort_by_key(|session| session.id);
+        Ok(sessions)
+    }
+
     pub async fn start_in_tx(
         &self,
         tx: &mut Transaction<'_, Sqlite>,
