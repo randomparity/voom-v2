@@ -487,6 +487,18 @@ impl SqliteWorkerRepo {
                 .try_get("id")
                 .map_err(|error| map_row_err("worker activation-history prune id", error))?;
             let id = WorkerId(u64_from_i64(raw_id, "worker activation-history prune id")?);
+            let worker = get_in_tx(tx, id).await?.ok_or_else(|| {
+                VoomError::database(format!(
+                    "worker activation-history prune candidate {id} vanished"
+                ))
+            })?;
+            if worker.status != WorkerStatus::Retired
+                || worker.node_incarnation_id != Some(incarnation_id)
+            {
+                return Err(VoomError::database(format!(
+                    "worker activation-history prune candidate {id} changed classification"
+                )));
+            }
             let scheduler_hold: i64 = sqlx::query_scalar(
                 "SELECT COUNT(*) FROM scheduler_decisions \
                  WHERE request_worker_id = ? OR selected_worker_id = ?",
