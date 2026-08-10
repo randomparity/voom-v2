@@ -80,6 +80,9 @@ pub enum Command {
         #[arg(long)]
         root: u64,
     },
+    /// Request, inspect, reconcile, or cancel durable scan sessions.
+    #[command(subcommand)]
+    ScanSession(ScanSessionCommand),
     /// List and inspect asset bundles and their members.
     #[command(subcommand)]
     Bundle(BundleCommand),
@@ -105,6 +108,95 @@ pub enum Command {
     /// external systems.
     #[command(subcommand)]
     ExternalSystem(ExternalSystemCommand),
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum ScanSessionCommand {
+    /// Request a durable scan session without scheduling scan work.
+    Request {
+        #[arg(long)]
+        root: u64,
+        #[arg(
+            long,
+            default_value_t = 300,
+            value_parser = clap::value_parser!(u32).range(1..=86_400)
+        )]
+        idle_timeout_seconds: u32,
+    },
+    /// Show one durable scan session.
+    Show {
+        #[arg(long)]
+        id: u64,
+    },
+    /// List durable scan sessions in ascending ID order.
+    List {
+        #[arg(long)]
+        root: Option<u64>,
+        #[arg(long)]
+        status: Option<ScanSessionStatusArg>,
+        /// Return only sessions with an ID greater than this cursor.
+        #[arg(long)]
+        after: Option<u64>,
+        #[arg(
+            long,
+            default_value_t = 50,
+            value_parser = clap::value_parser!(u32).range(1..=100)
+        )]
+        limit: u32,
+    },
+    /// List successful absence-reconciliation evidence in location-ID order.
+    Reconciliation {
+        #[arg(long)]
+        id: u64,
+        /// Return only locations with an ID greater than this cursor.
+        #[arg(long)]
+        after: Option<u64>,
+        #[arg(
+            long,
+            default_value_t = 50,
+            value_parser = clap::value_parser!(u32).range(1..=100)
+        )]
+        limit: u32,
+    },
+    /// Cancel a requested or running session without reconciling absence.
+    Cancel {
+        #[arg(long)]
+        id: u64,
+        #[arg(long, value_parser = parse_scan_terminal_reason)]
+        reason: String,
+    },
+}
+
+#[derive(Copy, Clone, Debug, ValueEnum, PartialEq, Eq)]
+#[value(rename_all = "snake_case")]
+pub enum ScanSessionStatusArg {
+    Requested,
+    Running,
+    Succeeded,
+    Failed,
+    Cancelled,
+    Stale,
+}
+
+impl ScanSessionStatusArg {
+    #[must_use]
+    pub const fn to_core(self) -> voom_core::ScanSessionStatus {
+        use voom_core::ScanSessionStatus;
+        match self {
+            Self::Requested => ScanSessionStatus::Requested,
+            Self::Running => ScanSessionStatus::Running,
+            Self::Succeeded => ScanSessionStatus::Succeeded,
+            Self::Failed => ScanSessionStatus::Failed,
+            Self::Cancelled => ScanSessionStatus::Cancelled,
+            Self::Stale => ScanSessionStatus::Stale,
+        }
+    }
+}
+
+fn parse_scan_terminal_reason(value: &str) -> Result<String, String> {
+    voom_core::ScanTerminalReason::new(value.to_owned())
+        .map(|reason| reason.as_str().to_owned())
+        .map_err(|error| error.to_string())
 }
 
 #[derive(Subcommand, Debug, Clone)]
@@ -1692,3 +1784,7 @@ impl std::fmt::Display for PathVisibilityArg {
         f.write_str(self.to_store().as_str())
     }
 }
+
+#[cfg(test)]
+#[path = "cli_test.rs"]
+mod tests;

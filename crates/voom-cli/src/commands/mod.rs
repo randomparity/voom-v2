@@ -10,6 +10,7 @@ mod library_domain;
 mod media;
 #[path = "policy/mod.rs"]
 mod policy_domain;
+pub mod scan_session;
 mod system;
 pub mod ticket;
 

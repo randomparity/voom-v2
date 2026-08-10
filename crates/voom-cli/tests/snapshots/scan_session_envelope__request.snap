@@ -1,0 +1,37 @@
+---
+source: crates/voom-cli/tests/scan_session_envelope.rs
+expression: request
+---
+{
+  "schema_version": "0",
+  "command": "scan-session",
+  "status": "ok",
+  "data": {
+    "session": {
+      "id": 6,
+      "storage_root_id": 6,
+      "root_epoch": 1,
+      "owner_node_id": 1,
+      "owner_incarnation_id": null,
+      "status": "requested",
+      "next_sequence": 0,
+      "batch_count": 0,
+      "observation_count": 0,
+      "idle_timeout_seconds": 300,
+      "progress_deadline_at": "[timestamp]",
+      "location_high_watermark_id": null,
+      "requested_at": "[timestamp]",
+      "started_at": null,
+      "terminal_at": null,
+      "terminal_reason": null,
+      "retired_location_count": 0,
+      "reconciliation_applied": false
+    }
+  },
+  "local": {
+    "db_url": "[db-url]",
+    "config_path": "[config-path]"
+  },
+  "warnings": [],
+  "error": null
+}

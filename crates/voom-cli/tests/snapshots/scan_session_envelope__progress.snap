@@ -1,0 +1,146 @@
+---
+source: crates/voom-cli/tests/scan_session_envelope.rs
+expression: "json!({\n    \"show\": show, \"filtered_list\": list, \"first_page\": first, \"second_page\":\n    second,\n})"
+---
+{
+  "show": {
+    "schema_version": "0",
+    "command": "scan-session",
+    "status": "ok",
+    "data": {
+      "session": {
+        "id": 1,
+        "storage_root_id": 1,
+        "root_epoch": 1,
+        "owner_node_id": 1,
+        "owner_incarnation_id": "0123456789abcdef0123456789abcdef",
+        "status": "running",
+        "next_sequence": 1,
+        "batch_count": 1,
+        "observation_count": 1,
+        "idle_timeout_seconds": 300,
+        "progress_deadline_at": "2033-05-18T03:38:20.000000000Z",
+        "location_high_watermark_id": null,
+        "requested_at": "2033-05-18T03:33:20.000000000Z",
+        "started_at": "2033-05-18T03:33:20.000000000Z",
+        "terminal_at": null,
+        "terminal_reason": null,
+        "retired_location_count": 0,
+        "reconciliation_applied": false
+      }
+    },
+    "local": {
+      "db_url": "[db-url]",
+      "config_path": "[config-path]"
+    },
+    "warnings": [],
+    "error": null
+  },
+  "filtered_list": {
+    "schema_version": "0",
+    "command": "scan-session",
+    "status": "ok",
+    "data": {
+      "sessions": [
+        {
+          "id": 1,
+          "storage_root_id": 1,
+          "root_epoch": 1,
+          "owner_node_id": 1,
+          "owner_incarnation_id": "0123456789abcdef0123456789abcdef",
+          "status": "running",
+          "next_sequence": 1,
+          "batch_count": 1,
+          "observation_count": 1,
+          "idle_timeout_seconds": 300,
+          "progress_deadline_at": "2033-05-18T03:38:20.000000000Z",
+          "location_high_watermark_id": null,
+          "requested_at": "2033-05-18T03:33:20.000000000Z",
+          "started_at": "2033-05-18T03:33:20.000000000Z",
+          "terminal_at": null,
+          "terminal_reason": null,
+          "retired_location_count": 0,
+          "reconciliation_applied": false
+        }
+      ]
+    },
+    "local": {
+      "db_url": "[db-url]",
+      "config_path": "[config-path]"
+    },
+    "warnings": [],
+    "error": null
+  },
+  "first_page": {
+    "schema_version": "0",
+    "command": "scan-session",
+    "status": "ok",
+    "data": {
+      "sessions": [
+        {
+          "id": 1,
+          "storage_root_id": 1,
+          "root_epoch": 1,
+          "owner_node_id": 1,
+          "owner_incarnation_id": "0123456789abcdef0123456789abcdef",
+          "status": "running",
+          "next_sequence": 1,
+          "batch_count": 1,
+          "observation_count": 1,
+          "idle_timeout_seconds": 300,
+          "progress_deadline_at": "2033-05-18T03:38:20.000000000Z",
+          "location_high_watermark_id": null,
+          "requested_at": "2033-05-18T03:33:20.000000000Z",
+          "started_at": "2033-05-18T03:33:20.000000000Z",
+          "terminal_at": null,
+          "terminal_reason": null,
+          "retired_location_count": 0,
+          "reconciliation_applied": false
+        }
+      ]
+    },
+    "next_cursor": 1,
+    "local": {
+      "db_url": "[db-url]",
+      "config_path": "[config-path]"
+    },
+    "warnings": [],
+    "error": null
+  },
+  "second_page": {
+    "schema_version": "0",
+    "command": "scan-session",
+    "status": "ok",
+    "data": {
+      "sessions": [
+        {
+          "id": 2,
+          "storage_root_id": 2,
+          "root_epoch": 1,
+          "owner_node_id": 1,
+          "owner_incarnation_id": "0123456789abcdef0123456789abcdef",
+          "status": "succeeded",
+          "next_sequence": 0,
+          "batch_count": 0,
+          "observation_count": 0,
+          "idle_timeout_seconds": 300,
+          "progress_deadline_at": "2033-05-18T03:38:20.000000000Z",
+          "location_high_watermark_id": 2,
+          "requested_at": "2033-05-18T03:33:20.000000000Z",
+          "started_at": "2033-05-18T03:33:20.000000000Z",
+          "terminal_at": "2033-05-18T03:33:20.000000000Z",
+          "terminal_reason": null,
+          "retired_location_count": 2,
+          "reconciliation_applied": true
+        }
+      ]
+    },
+    "next_cursor": 2,
+    "local": {
+      "db_url": "[db-url]",
+      "config_path": "[config-path]"
+    },
+    "warnings": [],
+    "error": null
+  }
+}

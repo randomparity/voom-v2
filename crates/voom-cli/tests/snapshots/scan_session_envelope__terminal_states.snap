@@ -1,0 +1,138 @@
+---
+source: crates/voom-cli/tests/scan_session_envelope.rs
+expression: envelopes
+---
+[
+  {
+    "schema_version": "0",
+    "command": "scan-session",
+    "status": "ok",
+    "data": {
+      "session": {
+        "id": 2,
+        "storage_root_id": 2,
+        "root_epoch": 1,
+        "owner_node_id": 1,
+        "owner_incarnation_id": "0123456789abcdef0123456789abcdef",
+        "status": "succeeded",
+        "next_sequence": 0,
+        "batch_count": 0,
+        "observation_count": 0,
+        "idle_timeout_seconds": 300,
+        "progress_deadline_at": "2033-05-18T03:38:20.000000000Z",
+        "location_high_watermark_id": 2,
+        "requested_at": "2033-05-18T03:33:20.000000000Z",
+        "started_at": "2033-05-18T03:33:20.000000000Z",
+        "terminal_at": "2033-05-18T03:33:20.000000000Z",
+        "terminal_reason": null,
+        "retired_location_count": 2,
+        "reconciliation_applied": true
+      }
+    },
+    "local": {
+      "db_url": "[db-url]",
+      "config_path": "[config-path]"
+    },
+    "warnings": [],
+    "error": null
+  },
+  {
+    "schema_version": "0",
+    "command": "scan-session",
+    "status": "ok",
+    "data": {
+      "session": {
+        "id": 3,
+        "storage_root_id": 3,
+        "root_epoch": 1,
+        "owner_node_id": 1,
+        "owner_incarnation_id": "0123456789abcdef0123456789abcdef",
+        "status": "failed",
+        "next_sequence": 0,
+        "batch_count": 0,
+        "observation_count": 0,
+        "idle_timeout_seconds": 300,
+        "progress_deadline_at": "2033-05-18T03:38:20.000000000Z",
+        "location_high_watermark_id": null,
+        "requested_at": "2033-05-18T03:33:20.000000000Z",
+        "started_at": "2033-05-18T03:33:20.000000000Z",
+        "terminal_at": "2033-05-18T03:33:20.000000000Z",
+        "terminal_reason": "scanner reported failure",
+        "retired_location_count": 0,
+        "reconciliation_applied": false
+      }
+    },
+    "local": {
+      "db_url": "[db-url]",
+      "config_path": "[config-path]"
+    },
+    "warnings": [],
+    "error": null
+  },
+  {
+    "schema_version": "0",
+    "command": "scan-session",
+    "status": "ok",
+    "data": {
+      "session": {
+        "id": 4,
+        "storage_root_id": 4,
+        "root_epoch": 1,
+        "owner_node_id": 1,
+        "owner_incarnation_id": null,
+        "status": "cancelled",
+        "next_sequence": 0,
+        "batch_count": 0,
+        "observation_count": 0,
+        "idle_timeout_seconds": 300,
+        "progress_deadline_at": "2033-05-18T03:38:20.000000000Z",
+        "location_high_watermark_id": null,
+        "requested_at": "2033-05-18T03:33:20.000000000Z",
+        "started_at": null,
+        "terminal_at": "2033-05-18T03:33:20.000000000Z",
+        "terminal_reason": "operator cancelled fixture",
+        "retired_location_count": 0,
+        "reconciliation_applied": false
+      }
+    },
+    "local": {
+      "db_url": "[db-url]",
+      "config_path": "[config-path]"
+    },
+    "warnings": [],
+    "error": null
+  },
+  {
+    "schema_version": "0",
+    "command": "scan-session",
+    "status": "ok",
+    "data": {
+      "session": {
+        "id": 5,
+        "storage_root_id": 5,
+        "root_epoch": 1,
+        "owner_node_id": 1,
+        "owner_incarnation_id": null,
+        "status": "stale",
+        "next_sequence": 0,
+        "batch_count": 0,
+        "observation_count": 0,
+        "idle_timeout_seconds": 300,
+        "progress_deadline_at": "2033-05-18T03:38:20.000000000Z",
+        "location_high_watermark_id": null,
+        "requested_at": "2033-05-18T03:33:20.000000000Z",
+        "started_at": null,
+        "terminal_at": "2033-05-18T03:33:20.000000000Z",
+        "terminal_reason": "scan session authority or storage root fence changed",
+        "retired_location_count": 0,
+        "reconciliation_applied": false
+      }
+    },
+    "local": {
+      "db_url": "[db-url]",
+      "config_path": "[config-path]"
+    },
+    "warnings": [],
+    "error": null
+  }
+]
