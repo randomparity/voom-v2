@@ -488,12 +488,12 @@ impl SqliteScanSessionRepo {
         session: &ScanSession,
         session_id: i64,
     ) -> Result<(), VoomError> {
-        let terminal_at = session.terminal_at.ok_or_else(|| {
-            VoomError::database(format!(
+        if session.terminal_at.is_none() {
+            return Err(VoomError::database(format!(
                 "succeeded scan session {} has no terminal timestamp",
                 session.id
-            ))
-        })?;
+            )));
+        }
         let high_watermark = session
             .location_high_watermark_id
             .map(|id| i64_from_u64(id.0, "scan_sessions.location_high_watermark_id"))
@@ -504,7 +504,7 @@ impl SqliteScanSessionRepo {
                 session.storage_root_id.0,
                 "scan_sessions.storage_root_id",
             )?)
-            .bind(iso8601(terminal_at)?)
+            .bind(session_id)
             .bind(high_watermark)
             .bind(high_watermark)
             .bind(session_id)
@@ -664,7 +664,8 @@ const RECONCILIATION_PAGE_AFTER_SQL: &str = "SELECT l.id, l.storage_root_id, l.p
 
 const RECONCILIATION_INVALID_SQL: &str = "SELECT EXISTS(SELECT 1 FROM file_locations AS l \
      WHERE l.retired_by_scan_session_id = ? AND (l.storage_root_id != ? \
-     OR julianday(l.retired_at) IS NULL OR julianday(l.retired_at) != julianday(?) \
+     OR l.retired_at IS NULL OR l.retired_at != \
+     (SELECT terminal_at FROM scan_sessions WHERE id = ?) \
      OR ? IS NULL OR l.id > ? OR l.epoch < 1 \
      OR l.provider_relative_locator IS NULL \
      OR length(CAST(l.provider_relative_locator AS BLOB)) NOT BETWEEN 1 AND 4096 \
