@@ -5,7 +5,7 @@ use super::super::{
 
 use secrecy::SecretString;
 use serde_json::json;
-use time::OffsetDateTime;
+use time::{Duration, OffsetDateTime};
 use voom_core::{
     ArtifactAccessMode, ErrorCode, NodeIncarnationEndReason, NodeIncarnationStatus, OperationKind,
     clock_test_support::{FrozenClock, ManualClock},
@@ -453,6 +453,160 @@ async fn remote_activation_deactivation_is_terminal_atomic_and_replayable() {
             .active_incarnation_id,
         None
     );
+}
+
+#[tokio::test]
+async fn remote_activation_pruning_removes_only_old_unreferenced_history_and_preserves_replay() {
+    let (cp, clock, _tmp) = cp_with_manual_clock(T0).await;
+    let eligible = register_remote_node(&cp).await;
+    let activation = activation_input(eligible.node.id, eligible.token.clone());
+    let activated = cp.remote_activate(activation.clone()).await.unwrap();
+    cp.remote_deactivate(RemoteDeactivateInput {
+        node_id: eligible.node.id,
+        token: eligible.token,
+        idempotency_key: "prune-deactivate".to_owned(),
+        request_hash: "prune-deactivate-body".to_owned(),
+        incarnation_id: activated.incarnation_id,
+        reason: NodeIncarnationEndReason::GracefulShutdown,
+    })
+    .await
+    .unwrap();
+    let events_before: Vec<(i64, String, String)> =
+        sqlx::query_as("SELECT event_id, kind, payload FROM events ORDER BY event_id")
+            .fetch_all(cp.pool_for_test())
+            .await
+            .unwrap();
+    clock.advance(Duration::seconds(61));
+
+    cp.prune_node_activation_history(eligible.node.id, T0 + Duration::days(1))
+        .await
+        .unwrap();
+
+    assert!(
+        cp.list_node_incarnations(eligible.node.id, 10)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let worker_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM workers WHERE node_id = ?")
+        .bind(i64::try_from(eligible.node.id.0).unwrap())
+        .fetch_one(cp.pool_for_test())
+        .await
+        .unwrap();
+    assert_eq!(worker_count, 0);
+    assert_eq!(cp.remote_activate(activation).await.unwrap(), activated);
+    assert_eq!(
+        sqlx::query_as::<_, (i64, String, String)>(
+            "SELECT event_id, kind, payload FROM events ORDER BY event_id",
+        )
+        .fetch_all(cp.pool_for_test())
+        .await
+        .unwrap(),
+        events_before
+    );
+}
+
+#[tokio::test]
+async fn remote_activation_pruning_retains_live_and_referenced_records() {
+    let (cp, clock, _tmp) = cp_with_manual_clock(T0).await;
+    let referenced = register_remote_node(&cp).await;
+    let activated = cp
+        .remote_activate(activation_input(
+            referenced.node.id,
+            referenced.token.clone(),
+        ))
+        .await
+        .unwrap();
+    hold_hash_lease(&cp, &referenced, &activated).await;
+    cp.remote_deactivate(RemoteDeactivateInput {
+        node_id: referenced.node.id,
+        token: referenced.token,
+        idempotency_key: "referenced-deactivate".to_owned(),
+        request_hash: "referenced-deactivate-body".to_owned(),
+        incarnation_id: activated.incarnation_id,
+        reason: NodeIncarnationEndReason::GracefulShutdown,
+    })
+    .await
+    .unwrap();
+    let live = cp
+        .register_node(RegisterNodeInput {
+            name: "live-prune-node".to_owned(),
+            kind: NodeKind::Remote,
+            heartbeat_ttl_seconds: 60,
+            metadata: json!({}),
+        })
+        .await
+        .unwrap();
+    cp.remote_activate(activation_input_for(live.node.id, live.token, 9))
+        .await
+        .unwrap();
+    clock.advance(Duration::seconds(61));
+
+    cp.prune_node_activation_history(referenced.node.id, T0 + Duration::days(1))
+        .await
+        .unwrap();
+
+    let retained = cp
+        .list_node_incarnations(referenced.node.id, 10)
+        .await
+        .unwrap();
+    assert_eq!(retained.len(), 1);
+    assert_eq!(retained[0].worker_count, 1);
+    assert_eq!(
+        cp.list_node_incarnations(live.node.id, 10).await.unwrap()[0].status,
+        NodeIncarnationStatus::Active
+    );
+}
+
+#[tokio::test]
+async fn remote_activation_pruning_rolls_back_all_candidates_on_delete_failure() {
+    let (cp, clock, _tmp) = cp_with_manual_clock(T0).await;
+    let registered = register_remote_node(&cp).await;
+    cp.remote_activate(activation_input_for(
+        registered.node.id,
+        registered.token.clone(),
+        1,
+    ))
+    .await
+    .unwrap();
+    let current = cp
+        .remote_activate(activation_input_for(
+            registered.node.id,
+            registered.token.clone(),
+            2,
+        ))
+        .await
+        .unwrap();
+    cp.remote_deactivate(RemoteDeactivateInput {
+        node_id: registered.node.id,
+        token: registered.token,
+        idempotency_key: "rollback-deactivate".to_owned(),
+        request_hash: "rollback-deactivate-body".to_owned(),
+        incarnation_id: current.incarnation_id,
+        reason: NodeIncarnationEndReason::GracefulShutdown,
+    })
+    .await
+    .unwrap();
+    sqlx::query(&format!(
+        "CREATE TRIGGER reject_later_incarnation_delete \
+         BEFORE DELETE ON node_incarnations \
+         WHEN OLD.incarnation_id = '{}' \
+         BEGIN SELECT RAISE(ABORT, 'injected prune failure'); END",
+        current.incarnation_id
+    ))
+    .execute(cp.pool_for_test())
+    .await
+    .unwrap();
+    let counts_before = activation_row_counts(&cp).await;
+    clock.advance(Duration::seconds(61));
+
+    let error = cp
+        .prune_node_activation_history(registered.node.id, T0 + Duration::days(1))
+        .await
+        .unwrap_err();
+
+    assert!(error.to_string().contains("injected prune failure"));
+    assert_eq!(activation_row_counts(&cp).await, counts_before);
 }
 
 #[tokio::test]

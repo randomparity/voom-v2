@@ -211,6 +211,79 @@ async fn activation_count_is_inclusive_and_scoped_to_one_node() {
     assert_eq!(count, 2);
 }
 
+#[tokio::test]
+async fn prune_candidates_are_terminal_strict_old_scoped_and_exact() {
+    let (pool, _tmp) = fresh_pool().await;
+    let first = seed_node(&pool, "prune-a").await;
+    let second = seed_node(&pool, "prune-b").await;
+    let cutoff = T0 + Duration::seconds(100);
+    let ids = [
+        FIRST_ID,
+        SECOND_ID,
+        "2123456789abcdef0123456789abcdef",
+        "3123456789abcdef0123456789abcdef",
+        "4123456789abcdef0123456789abcdef",
+    ];
+    for (id, node_id, ended_at) in [
+        (ids[0], first.id, cutoff - Duration::seconds(2)),
+        (ids[1], first.id, cutoff - Duration::seconds(1)),
+        (ids[2], first.id, cutoff),
+        (ids[3], first.id, cutoff + Duration::seconds(1)),
+        (ids[4], second.id, cutoff - Duration::seconds(3)),
+    ] {
+        sqlx::query(
+            "INSERT INTO node_incarnations \
+             (incarnation_id, node_id, status, started_at, last_seen_at, ended_at, end_reason) \
+             VALUES (?, ?, 'superseded', ?, ?, ?, 'superseded')",
+        )
+        .bind(id)
+        .bind(i64::try_from(node_id.0).unwrap())
+        .bind(timestamp(ended_at - Duration::seconds(1)))
+        .bind(timestamp(ended_at))
+        .bind(timestamp(ended_at))
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+    let repo = SqliteNodeIncarnationRepo::new(pool.clone());
+    let mut tx = pool.begin().await.unwrap();
+
+    let candidates = repo
+        .terminal_before_in_tx(&mut tx, first.id, cutoff)
+        .await
+        .unwrap();
+    assert_eq!(
+        candidates
+            .iter()
+            .map(|candidate| candidate.id)
+            .collect::<Vec<_>>(),
+        vec![incarnation(ids[0]), incarnation(ids[1])]
+    );
+    assert!(
+        repo.delete_terminal_if_empty_in_tx(&mut tx, first.id, incarnation(ids[1]), cutoff)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !repo
+            .delete_terminal_if_empty_in_tx(&mut tx, second.id, incarnation(ids[0]), cutoff)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !repo
+            .delete_terminal_if_empty_in_tx(&mut tx, first.id, incarnation(ids[2]), cutoff)
+            .await
+            .unwrap()
+    );
+    assert!(
+        repo.get_in_tx(&mut tx, incarnation(ids[0]))
+            .await
+            .unwrap()
+            .is_some()
+    );
+}
+
 #[test]
 fn activation_count_conversion_is_checked() {
     let error = super::activation_count_from_i64(i64::MAX).unwrap_err();
