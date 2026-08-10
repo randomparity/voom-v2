@@ -1,7 +1,7 @@
 # Durable Payload Contract Inventory
 
 This inventory is the completeness record for the durable JSON evolution contract in
-ADR 0013. It covers the SQLite schema through migration `0033` and separates payloads by
+ADR 0013. It covers the SQLite schema through migration `0036` and separates payloads by
 their current enforcement state.
 
 A durable JSON value is in one of three states:
@@ -23,7 +23,7 @@ inventory and that scope file.
 
 | Durable column | Read boundary | Typed root and closure | Current contract |
 |---|---|---|---|
-| `events.payload` | `voom-store/src/repo/audit/events.rs` | `Event` and the content structs in all nine `voom-events/src/payload/*.rs` families | Event content structs reject unknown fields. The tagged `Event` enum uses newtype variants. |
+| `events.payload` | `voom-store/src/repo/audit/events.rs` | `Event` and the content structs in all eleven `voom-events/src/payload/*.rs` families | Event content structs reject unknown fields. The tagged `Event` enum uses newtype variants. |
 | `commit_intents.target` | `commit_safety_gate/codecs.rs::decode_target` | `CommitTargetWire`, its three variant content structs, and `FileLocationProposalWire` | Wire kinds are `delete_file_location`, `replace_file_location`, and `move_file_location`; every content struct is strict. |
 | `commit_intents.closure_initial`, `commit_intents.closure_authorized` | `commit_safety_gate/codecs.rs::decode_closure` | `AffectedScopeClosureWire`, `ClosureWarningWire` | The complete commit-gate closure rejects unknown fields. |
 | `commit_intents.override_token` | `commit_safety_gate/codecs.rs::decode_force_path_token` | `ForcePathToken` | The token is strict; `BypassKind` is a unit enum with no field-drop surface. |
@@ -35,7 +35,7 @@ inventory and that scope file.
 | `audio_synthesis_operations.worker_result` | staged synthesis validation and recovery in `audio/mod.rs` | `TranscodeAudioResult` and its stream, disposition, and observed-facts closure | Stored worker results use the worker-protocol wire contract and reject unknown fields throughout the closure. |
 | `audio_extract_operation_outputs.result_facts` | `audio/mod.rs::recovery_output_input` | `AudioObservedFacts` | Recovery facts reject unknown fields before they can drive a resumed commit. |
 | `policy_versions.compiled_json` | `plans.rs::deserialize_stored_compiled_policy` | `CompiledPolicy` and its compiled operation, filter, condition, value, profile, diagnostic, span, and provenance closure | All 41 tagged variants use strict content structs. Intentionally opaque metadata and provenance maps remain `JsonValue`. |
-| `remote_idempotency_keys.response_json` | `remote_idempotency.rs::reserve_or_replay_in_tx`, then route-specific replay decoders | `RemoteMutationReplay`, `RemoteAcquireOutcome`, the heartbeat/complete/fail outcomes, `RemoteLeaseDispatch`, and `RemoteArtifactAccessPlan` | Envelope status values are `ok` and `error`; acquire outcomes are `idle`, `no_candidate`, and `leased`. Strict private wire structs preserve the public domain enums while rejecting unknown fields. |
+| `remote_idempotency_keys.response_json` | `remote_idempotency.rs::reserve_or_replay_in_tx`, then route-specific replay decoders | `RemoteMutationReplay`, `RemoteAcquireOutcome`, execution heartbeat/complete/fail outcomes, scan start/batch/failure outcomes, `RemoteLeaseDispatch`, and `RemoteArtifactAccessPlan` | Envelope status values are `ok` and `error`; acquire outcomes are `idle`, `no_candidate`, and `leased`. Scan mutation routes decode stored `data` into their route-specific strict outcome. Strict wire structs preserve the public domain enums while rejecting unknown fields. |
 
 ### Event families and audit boundary
 
@@ -51,6 +51,8 @@ The enforced families are:
 - external systems;
 - media identity;
 - policy;
+- scan sessions;
+- storage roots;
 - system;
 - use leases;
 - workers.
@@ -74,6 +76,7 @@ durable entity. The serde-transparent IDs preserve the historical JSON number re
   verification, commit-record, worker, and use-lease IDs;
 - use-lease events use `UseLeaseId` and `FileLocationId`;
 - external-system events use `ExternalSystemId` and `ExternalSystemLinkId`.
+- scan-session events use `ScanSessionId`, `StorageRootId`, and `ScanSessionStatus`.
 
 `IdentityEvidenceRecordedPayload.assertion_type` uses `AssertionKind`. Its canonical JSON remains
 the existing snake-case token, and deserialization now rejects tokens outside that complete
@@ -108,7 +111,9 @@ Remote idempotency records have two typed layers. `RemoteMutationReplay` enforce
 `status` envelope, and the route decoder enforces the `data` value for that route. A replay that
 cannot be decoded is repointed to a terminal error so the completed mutation is never executed
 again. Migration `0033` adds `scheduler_decision_id: 0` to older acquire outcomes, making all
-stored acquire replay data conform to the current typed shape.
+stored acquire replay data conform to the current typed shape. Scan-session start, observation
+batch, and failure routes persist and decode distinct strict outcome structs; their input request
+hashes and observation details are not copied into replay responses.
 
 ### Policy payloads
 
@@ -157,7 +162,8 @@ These typed JSON values contain no reachable named-field struct and therefore ne
 
 The scope file groups defining sources for these enforced closures:
 
-- all ten event payload families and their `Event` root, including storage-root lifecycle facts;
+- all eleven event payload families and their `Event` root, including scan-session and
+  storage-root lifecycle facts;
 - commit-gate target, closure, and override wire types;
 - artifact-commit rooted targets at the store and control-plane read boundaries;
 - workflow ticket payloads, timing, and ticket results;

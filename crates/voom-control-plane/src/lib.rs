@@ -51,6 +51,7 @@ use voom_store::repo::{
         safety_policies::SqliteSafetyPolicyRepo, scheduling_policies::SqliteSchedulingPolicyRepo,
         video_profiles::SqliteVideoProfileRepo,
     },
+    scan::sessions::SqliteScanSessionRepo,
 };
 use voom_store::{SchemaState, connect, probe_schema};
 
@@ -143,6 +144,7 @@ pub struct ControlPlane {
     pub(crate) node_incarnations: SqliteNodeIncarnationRepo,
     pub(crate) leases: SqliteLeaseRepo,
     pub(crate) remote_idempotency: SqliteRemoteIdempotencyRepo,
+    pub(crate) scan_sessions: SqliteScanSessionRepo,
     pub(crate) artifact_access_plans: SqliteArtifactAccessPlanRepo,
     pub(crate) artifacts: SqliteArtifactRepo,
     pub(crate) audio_extract_operations: SqliteAudioExtractOperationRepo,
@@ -185,6 +187,7 @@ impl std::fmt::Debug for ControlPlane {
             .field("node_incarnations", &self.node_incarnations)
             .field("leases", &self.leases)
             .field("remote_idempotency", &self.remote_idempotency)
+            .field("scan_sessions", &self.scan_sessions)
             .field("artifact_access_plans", &self.artifact_access_plans)
             .field("artifacts", &self.artifacts)
             .field("audio_extract_operations", &self.audio_extract_operations)
@@ -307,6 +310,7 @@ impl ControlPlane {
             node_incarnations: SqliteNodeIncarnationRepo::new(pool.clone()),
             leases: SqliteLeaseRepo::new(pool.clone()),
             remote_idempotency: SqliteRemoteIdempotencyRepo::new(pool.clone()),
+            scan_sessions: SqliteScanSessionRepo::new(pool.clone()),
             artifact_access_plans: SqliteArtifactAccessPlanRepo::new(pool.clone()),
             artifacts: SqliteArtifactRepo::new(pool.clone()),
             audio_extract_operations: SqliteAudioExtractOperationRepo::new(pool.clone()),
