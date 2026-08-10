@@ -22,6 +22,7 @@ pub const SCHEMA_VERSION: &str = "0";
 
 pub mod config;
 mod execution;
+mod scan;
 pub mod server;
 
 #[cfg(test)]
@@ -60,6 +61,7 @@ fn base_router(state: AppState) -> axum::Router {
     axum::Router::new()
         .route("/health", get(health))
         .merge(execution::routes())
+        .merge(scan::routes())
         .with_state(state)
 }
 
