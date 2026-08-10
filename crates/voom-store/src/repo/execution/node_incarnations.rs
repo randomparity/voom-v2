@@ -211,6 +211,7 @@ impl SqliteNodeIncarnationRepo {
         tx: &mut Transaction<'_, Sqlite>,
         node_id: NodeId,
         cutoff: OffsetDateTime,
+        protected_started_at: OffsetDateTime,
     ) -> Result<Vec<NodeIncarnation>, VoomError> {
         let rows = sqlx::query(
             "SELECT ni.incarnation_id, ni.node_id, ni.status, ni.started_at, \
@@ -228,7 +229,10 @@ impl SqliteNodeIncarnationRepo {
             .iter()
             .map(row_to_incarnation)
             .collect::<Result<Vec<_>, _>>()?;
-        candidates.retain(|candidate| candidate.ended_at.is_some_and(|ended| ended < cutoff));
+        candidates.retain(|candidate| {
+            candidate.ended_at.is_some_and(|ended| ended < cutoff)
+                && candidate.started_at < protected_started_at
+        });
         candidates.sort_by_key(|candidate| (candidate.ended_at, candidate.id));
         Ok(candidates)
     }
@@ -244,6 +248,7 @@ impl SqliteNodeIncarnationRepo {
         node_id: NodeId,
         incarnation_id: NodeIncarnationId,
         cutoff: OffsetDateTime,
+        protected_started_at: OffsetDateTime,
     ) -> Result<bool, VoomError> {
         let Some(candidate) = self.get_in_tx(tx, incarnation_id).await? else {
             return Ok(false);
@@ -252,6 +257,7 @@ impl SqliteNodeIncarnationRepo {
             || candidate.status == NodeIncarnationStatus::Active
             || candidate.worker_count != 0
             || candidate.ended_at.is_none_or(|ended| ended >= cutoff)
+            || candidate.started_at >= protected_started_at
         {
             return Ok(false);
         }

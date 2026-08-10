@@ -398,7 +398,7 @@ async fn prune_candidates_are_terminal_strict_old_scoped_and_exact() {
     let mut tx = pool.begin().await.unwrap();
 
     let candidates = repo
-        .terminal_before_in_tx(&mut tx, first.id, cutoff)
+        .terminal_before_in_tx(&mut tx, first.id, cutoff, cutoff)
         .await
         .unwrap();
     assert_eq!(
@@ -409,19 +409,31 @@ async fn prune_candidates_are_terminal_strict_old_scoped_and_exact() {
         vec![incarnation(ids[0]), incarnation(ids[1])]
     );
     assert!(
-        repo.delete_terminal_if_empty_in_tx(&mut tx, first.id, incarnation(ids[1]), cutoff)
+        repo.delete_terminal_if_empty_in_tx(
+            &mut tx,
+            first.id,
+            incarnation(ids[1]),
+            cutoff,
+            cutoff,
+        )
             .await
             .unwrap()
     );
     assert!(
         !repo
-            .delete_terminal_if_empty_in_tx(&mut tx, second.id, incarnation(ids[0]), cutoff)
+            .delete_terminal_if_empty_in_tx(
+                &mut tx,
+                second.id,
+                incarnation(ids[0]),
+                cutoff,
+                cutoff,
+            )
             .await
             .unwrap()
     );
     assert!(
         !repo
-            .delete_terminal_if_empty_in_tx(&mut tx, first.id, incarnation(ids[2]), cutoff)
+            .delete_terminal_if_empty_in_tx(&mut tx, first.id, incarnation(ids[2]), cutoff, cutoff,)
             .await
             .unwrap()
     );
@@ -470,7 +482,7 @@ async fn prune_cutoff_compares_offset_timestamps_as_instants() {
     let mut tx = pool.begin().await.unwrap();
 
     let candidates = repo
-        .terminal_before_in_tx(&mut tx, node.id, cutoff)
+        .terminal_before_in_tx(&mut tx, node.id, cutoff, cutoff)
         .await
         .unwrap();
 
@@ -483,7 +495,7 @@ async fn prune_cutoff_compares_offset_timestamps_as_instants() {
     );
     assert!(
         !repo
-            .delete_terminal_if_empty_in_tx(&mut tx, node.id, after_id, cutoff)
+            .delete_terminal_if_empty_in_tx(&mut tx, node.id, after_id, cutoff, cutoff)
             .await
             .unwrap()
     );
