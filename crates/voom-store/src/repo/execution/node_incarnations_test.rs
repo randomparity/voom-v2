@@ -1,5 +1,6 @@
 use std::str::FromStr;
 
+use sqlx::Row;
 use time::{Duration, UtcOffset};
 use voom_core::{ErrorCode, NodeIncarnationEndReason, NodeIncarnationId, NodeIncarnationStatus};
 
@@ -237,11 +238,55 @@ async fn activation_count_rejects_malformed_qualifying_evidence() {
 }
 
 #[tokio::test]
+async fn activation_count_rejects_empty_persisted_incarnation_id() {
+    let (pool, _tmp) = fresh_pool().await;
+    let node = seed_node(&pool, "empty-activation-evidence").await;
+    sqlx::query(
+        "INSERT INTO node_incarnations \
+         (incarnation_id, node_id, status, started_at, last_seen_at, ended_at, end_reason) \
+         VALUES ('', ?, 'superseded', ?, ?, ?, 'superseded')",
+    )
+    .bind(i64::try_from(node.id.0).unwrap())
+    .bind(timestamp(T0))
+    .bind(timestamp(T0))
+    .bind(timestamp(T0))
+    .execute(&pool)
+    .await
+    .unwrap();
+    let repo = SqliteNodeIncarnationRepo::new(pool.clone());
+    let mut tx = pool.begin().await.unwrap();
+
+    let error = repo
+        .count_started_at_or_after_in_tx(&mut tx, node.id, T0, 5)
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.error_code(), ErrorCode::DbUnreachable);
+    assert!(error.to_string().contains("activation evidence id"));
+}
+
+#[tokio::test]
 async fn activation_count_compares_offset_timestamps_as_instants_and_honors_limit() {
     let (pool, _tmp) = fresh_pool().await;
     let node = seed_node(&pool, "offset-activation-evidence").await;
     let lower_bound = T0 + Duration::seconds(60);
     let negative_offset = UtcOffset::from_hms(-1, 0, 0).unwrap();
+    for ordinal in 100..164 {
+        let started_at = lower_bound - Duration::seconds(100);
+        sqlx::query(
+            "INSERT INTO node_incarnations \
+             (incarnation_id, node_id, status, started_at, last_seen_at, ended_at, end_reason) \
+             VALUES (?, ?, 'superseded', ?, ?, ?, 'superseded')",
+        )
+        .bind(format!("{ordinal:032x}"))
+        .bind(i64::try_from(node.id.0).unwrap())
+        .bind(timestamp(started_at))
+        .bind(timestamp(started_at))
+        .bind(timestamp(started_at))
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
     for ordinal in 8..=13 {
         let started_at =
             (lower_bound + Duration::nanoseconds(i64::from(ordinal))).to_offset(negative_offset);
@@ -268,6 +313,51 @@ async fn activation_count_compares_offset_timestamps_as_instants_and_honors_limi
         .unwrap();
 
     assert_eq!(count, 5);
+}
+
+#[tokio::test]
+async fn activation_evidence_pages_use_the_history_index_without_temp_sort() {
+    let (pool, _tmp) = fresh_pool().await;
+    let node = seed_node(&pool, "activation-plan-node").await;
+    let mut details: Vec<String> = sqlx::query(
+        "EXPLAIN QUERY PLAN \
+         SELECT incarnation_id, started_at FROM node_incarnations \
+         WHERE node_id = ? ORDER BY started_at DESC, incarnation_id DESC LIMIT 32",
+    )
+    .bind(i64::try_from(node.id.0).unwrap())
+    .fetch_all(&pool)
+    .await
+    .unwrap()
+    .iter()
+    .map(|row| row.try_get("detail").unwrap())
+    .collect();
+    details.extend(
+        sqlx::query(
+            "EXPLAIN QUERY PLAN \
+             SELECT incarnation_id, started_at FROM node_incarnations \
+             WHERE node_id = ? AND (started_at, incarnation_id) < (?, ?) \
+             ORDER BY started_at DESC, incarnation_id DESC LIMIT 32",
+        )
+        .bind(i64::try_from(node.id.0).unwrap())
+        .bind(timestamp(T0))
+        .bind(FIRST_ID)
+        .fetch_all(&pool)
+        .await
+        .unwrap()
+        .iter()
+        .map(|row| row.try_get("detail").unwrap()),
+    );
+
+    assert!(
+        details
+            .iter()
+            .any(|detail| detail.contains("node_incarnations_history"))
+    );
+    assert!(
+        details
+            .iter()
+            .all(|detail| !detail.contains("USE TEMP B-TREE"))
+    );
 }
 
 #[tokio::test]
