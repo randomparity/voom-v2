@@ -49,7 +49,7 @@ pub mod ids {
         ExternalSystemLinkId, FileAssetId, FileLocationId, FileVersionId, IssueId, JobId, LeaseId,
         LibraryId, LibraryRootId, MediaSnapshotId, MediaVariantId, MediaWorkId, NodeId,
         NodeIncarnationId, PolicyDocumentId, PolicyInputSetId, PolicySyntheticTargetId,
-        PolicyVersionId, StorageRootId, TicketId, UseLeaseId, WorkerId,
+        PolicyVersionId, ScanSessionId, StorageRootId, TicketId, UseLeaseId, WorkerId,
     };
 }
 
@@ -114,7 +114,8 @@ pub use ids::{
     ExternalPathMappingId, ExternalSystemId, ExternalSystemLinkId, FileAssetId, FileLocationId,
     FileVersionId, IssueId, JobId, LeaseId, LibraryId, LibraryRootId, MediaSnapshotId,
     MediaVariantId, MediaWorkId, NodeId, NodeIncarnationId, PolicyDocumentId, PolicyInputSetId,
-    PolicySyntheticTargetId, PolicyVersionId, StorageRootId, TicketId, UseLeaseId, WorkerId,
+    PolicySyntheticTargetId, PolicyVersionId, ScanSessionId, StorageRootId, TicketId, UseLeaseId,
+    WorkerId,
 };
 pub use issue::{IssuePriority, IssueSeverity};
 pub use operation_kind::OperationKind;
@@ -128,6 +129,7 @@ pub use storage::{
 pub use taxonomy::execution_vocab::{
     NodeIncarnationEndReason, NodeIncarnationStatus, NodeKind, NodeStatus, WorkerKind, WorkerStatus,
 };
+pub use taxonomy::scan::{ScanSessionStatus, ScanTerminalReason};
 pub use ticket_operation::TicketOperation;
 pub use transcode_video_profile::{
     NvidiaVideoDecode, SoftwareVideoDecode, TRANSCODE_VIDEO_CODEC,

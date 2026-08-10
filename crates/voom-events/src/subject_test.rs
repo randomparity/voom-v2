@@ -25,6 +25,7 @@ fn every_subject_round_trips_through_as_str_and_from_str() {
         SubjectType::Worker,
         SubjectType::ArtifactHandle,
         SubjectType::ArtifactLocation,
+        SubjectType::ScanSession,
     ];
     for s in subjects {
         let wire = s.as_str();
@@ -74,6 +75,15 @@ fn external_system_subject_round_trips() {
     let s = SubjectType::ExternalSystem;
     assert_eq!(s.as_str(), "external_system");
     assert_eq!(SubjectType::from_str("external_system").unwrap(), s);
+}
+
+#[test]
+fn scan_session_subject_round_trips() {
+    assert_eq!(SubjectType::ScanSession.as_str(), "scan_session");
+    assert_eq!(
+        SubjectType::from_str("scan_session").unwrap(),
+        SubjectType::ScanSession
+    );
 }
 
 #[test]

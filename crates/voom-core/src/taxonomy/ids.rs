@@ -183,6 +183,7 @@ define_id!(BackupId);
 define_id!(LibraryId);
 define_id!(LibraryRootId);
 define_id!(StorageRootId);
+define_id!(ScanSessionId);
 
 // --- External system (Sprint 17, T15) ---
 define_id!(ExternalSystemId);

@@ -101,6 +101,14 @@ fn storage_root_id_display_and_json_match_public_id_contract() {
 }
 
 #[test]
+fn scan_session_id_display_and_json_match_public_id_contract() {
+    let id = ScanSessionId(74);
+    assert_eq!(id.to_string(), "74");
+    assert_eq!(serde_json::to_string(&id).unwrap(), "74");
+    assert_eq!(serde_json::from_str::<ScanSessionId>("74").unwrap(), id);
+}
+
+#[test]
 fn media_work_id_displays_inner_u64() {
     assert_eq!(MediaWorkId(1).to_string(), "1");
 }
