@@ -124,3 +124,6 @@ ALTER TABLE library_roots ADD COLUMN last_scan_session_id INTEGER
 ALTER TABLE file_locations ADD COLUMN retired_by_scan_session_id INTEGER
     REFERENCES scan_sessions(id) ON DELETE RESTRICT
     CHECK (retired_by_scan_session_id IS NULL OR retired_at IS NOT NULL);
+
+CREATE INDEX file_locations_by_retired_scan_session
+ON file_locations(retired_by_scan_session_id, id);

@@ -8,7 +8,7 @@ use voom_core::{
 
 use super::super::Repository;
 use super::super::common::{
-    i64_from_u64, iso8601, map_row_err, parse_iso8601, u32_from_i64, u64_from_i64,
+    i64_from_u64, iso8601, map_row_err, parse_iso8601, serialize_json, u32_from_i64, u64_from_i64,
 };
 
 #[derive(Debug, Clone)]
@@ -166,21 +166,49 @@ impl SqliteScanSessionRepo {
         tx: &mut Transaction<'_, Sqlite>,
         now: OffsetDateTime,
     ) -> Result<Vec<ScanSession>, VoomError> {
+        let active_rows = sqlx::query(&format!(
+            "SELECT {SCAN_SESSION_COLS} FROM scan_sessions \
+             WHERE status IN ('requested', 'running') ORDER BY id ASC"
+        ))
+        .fetch_all(&mut **tx)
+        .await
+        .map_err(|error| VoomError::database_context("scan_sessions active expiry", error))?;
+        let active = active_rows
+            .iter()
+            .map(row_to_scan_session)
+            .collect::<Result<Vec<_>, _>>()?;
+        let expired_ids = active
+            .iter()
+            .filter(|session| session.progress_deadline_at <= now)
+            .map(|session| i64_from_u64(session.id.0, "scan_sessions.id"))
+            .collect::<Result<Vec<_>, _>>()?;
+        if expired_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let expired_count = expired_ids.len();
         let now = iso8601(now)?;
+        let expired_ids = serialize_json(&expired_ids, "expired scan session IDs")?;
         let mut sessions = sqlx::query(&format!(
             "UPDATE scan_sessions SET status = 'stale', terminal_at = ?, \
              terminal_reason = 'scan session progress deadline expired' \
-             WHERE status IN ('requested', 'running') AND progress_deadline_at <= ? \
+             WHERE status IN ('requested', 'running') \
+             AND id IN (SELECT value FROM json_each(?)) \
              RETURNING {SCAN_SESSION_COLS}"
         ))
         .bind(&now)
-        .bind(&now)
+        .bind(expired_ids)
         .fetch_all(&mut **tx)
         .await
         .map_err(|error| VoomError::database_context("scan_sessions stale expired", error))?
         .iter()
         .map(row_to_scan_session)
         .collect::<Result<Vec<_>, _>>()?;
+        if sessions.len() != expired_count {
+            return Err(VoomError::database(format!(
+                "scan session expiry expected {expired_count} rows but updated {}",
+                sessions.len()
+            )));
+        }
         sessions.sort_by_key(|session| session.id);
         Ok(sessions)
     }
@@ -190,7 +218,6 @@ impl SqliteScanSessionRepo {
         tx: &mut Transaction<'_, Sqlite>,
         id: ScanSessionId,
         incarnation_id: NodeIncarnationId,
-        _location_high_watermark_id: Option<FileLocationId>,
         deadline: OffsetDateTime,
         now: OffsetDateTime,
     ) -> Result<ScanSession, VoomError> {
@@ -401,68 +428,122 @@ impl SqliteScanSessionRepo {
                 query.scan_session_id
             )));
         };
-        let location_rows = sqlx::query(
-            "SELECT id, storage_root_id, provider_relative_locator, retired_at, epoch FROM file_locations \
-             WHERE retired_by_scan_session_id = ? ORDER BY id ASC",
-        )
-        .bind(i64_from_u64(query.scan_session_id.0, "file_locations.retired_by_scan_session_id")?)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(|error| VoomError::database_context("scan reconciliation evidence", error))?;
-        if session.status != ScanSessionStatus::Succeeded {
-            if location_rows.is_empty() {
-                return Err(VoomError::Conflict(format!(
-                    "scan session {} has not succeeded",
-                    query.scan_session_id
-                )));
-            }
-            return Err(VoomError::database(format!(
-                "non-succeeded scan session {} has attributed locations",
-                query.scan_session_id
-            )));
-        }
-        let observed_locators = self.observed_locators(session.id).await?;
-        let items = reconciliation_items(&session, &location_rows, &observed_locators)?;
-        let start = query.after_id.map_or(0, |after_id| {
-            items.partition_point(|item| item.file_location_id <= after_id)
-        });
+        self.validate_reconciliation_integrity(&session).await?;
+        let rows = self.reconciliation_page_rows(&query, limit + 1).await?;
+        let mut items = rows
+            .iter()
+            .map(|row| reconciliation_item(&session, row))
+            .collect::<Result<Vec<_>, _>>()?;
         let limit = usize::try_from(limit)
             .map_err(|error| VoomError::database_context("scan reconciliation limit", error))?;
-        let end = start.saturating_add(limit).min(items.len());
-        let page_items = items[start..end].to_vec();
-        let next_after_id = (end < items.len())
-            .then(|| page_items.last().map(|item| item.file_location_id))
+        let has_more = items.len() > limit;
+        items.truncate(limit);
+        let next_after_id = has_more
+            .then(|| items.last().map(|item| item.file_location_id))
             .flatten();
         Ok(ScanReconciliationPage {
-            items: page_items,
+            items,
             next_after_id,
         })
     }
 
-    async fn observed_locators(
+    async fn validate_reconciliation_integrity(
         &self,
-        session_id: ScanSessionId,
-    ) -> Result<std::collections::BTreeSet<String>, VoomError> {
-        let rows = sqlx::query(
-            "SELECT provider_relative_locator FROM scan_observations \
-             WHERE scan_session_id = ? ORDER BY provider_relative_locator ASC",
+        session: &ScanSession,
+    ) -> Result<(), VoomError> {
+        let session_id = i64_from_u64(session.id.0, "file_locations.retired_by_scan_session_id")?;
+        let attributed_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM file_locations WHERE retired_by_scan_session_id = ?",
         )
-        .bind(i64_from_u64(
-            session_id.0,
-            "scan_observations.scan_session_id",
-        )?)
-        .fetch_all(&self.pool)
+        .bind(session_id)
+        .fetch_one(&self.pool)
         .await
-        .map_err(|error| VoomError::database_context("scan reconciliation observations", error))?;
-        let mut locators = std::collections::BTreeSet::new();
-        for row in rows {
-            let locator = ProviderRelativeLocator::parse_database(
-                "scan_observations.provider_relative_locator",
-                &string_column(&row, "provider_relative_locator")?,
-            )?;
-            locators.insert(locator.into_inner());
+        .map_err(|error| VoomError::database_context("scan reconciliation count", error))?;
+        let attributed_count = u64_from_i64(attributed_count, "scan reconciliation count")?;
+        if session.status != ScanSessionStatus::Succeeded {
+            return if attributed_count == 0 {
+                Err(VoomError::Conflict(format!(
+                    "scan session {} has not succeeded",
+                    session.id
+                )))
+            } else {
+                Err(VoomError::database(format!(
+                    "non-succeeded scan session {} has attributed locations",
+                    session.id
+                )))
+            };
         }
-        Ok(locators)
+        if attributed_count != session.retired_location_count {
+            return Err(VoomError::database(format!(
+                "scan session {} retired count {} does not match {attributed_count} attributed locations",
+                session.id, session.retired_location_count
+            )));
+        }
+        self.reject_invalid_reconciliation_locations(session, session_id)
+            .await
+    }
+
+    async fn reject_invalid_reconciliation_locations(
+        &self,
+        session: &ScanSession,
+        session_id: i64,
+    ) -> Result<(), VoomError> {
+        let terminal_at = session.terminal_at.ok_or_else(|| {
+            VoomError::database(format!(
+                "succeeded scan session {} has no terminal timestamp",
+                session.id
+            ))
+        })?;
+        let high_watermark = session
+            .location_high_watermark_id
+            .map(|id| i64_from_u64(id.0, "scan_sessions.location_high_watermark_id"))
+            .transpose()?;
+        let invalid: i64 = sqlx::query_scalar(RECONCILIATION_INVALID_SQL)
+            .bind(session_id)
+            .bind(i64_from_u64(
+                session.storage_root_id.0,
+                "scan_sessions.storage_root_id",
+            )?)
+            .bind(iso8601(terminal_at)?)
+            .bind(high_watermark)
+            .bind(high_watermark)
+            .bind(session_id)
+            .fetch_one(&self.pool)
+            .await
+            .map_err(|error| VoomError::database_context("scan reconciliation integrity", error))?;
+        if invalid != 0 {
+            return Err(VoomError::database(format!(
+                "scan session {} has invalid reconciliation locations",
+                session.id
+            )));
+        }
+        Ok(())
+    }
+
+    async fn reconciliation_page_rows(
+        &self,
+        query: &ScanReconciliationQuery,
+        fetch_limit: i64,
+    ) -> Result<Vec<sqlx::sqlite::SqliteRow>, VoomError> {
+        let session_id = i64_from_u64(
+            query.scan_session_id.0,
+            "file_locations.retired_by_scan_session_id",
+        )?;
+        let rows = if let Some(after_id) = query.after_id {
+            sqlx::query(RECONCILIATION_PAGE_AFTER_SQL)
+                .bind(session_id)
+                .bind(i64_from_u64(after_id.0, "file_locations.id")?)
+                .bind(fetch_limit)
+                .fetch_all(&self.pool)
+                .await
+        } else {
+            sqlx::query(RECONCILIATION_PAGE_FIRST_SQL)
+                .bind(session_id)
+                .bind(fetch_limit)
+                .fetch_all(&self.pool)
+                .await
+        };
+        rows.map_err(|error| VoomError::database_context("scan reconciliation page", error))
     }
 }
 
@@ -573,6 +654,29 @@ const SELECT_SCAN_SESSION_COLS: &str = "SELECT id, storage_root_id, root_epoch, 
     owner_incarnation_id, status, next_sequence, batch_count, observation_count, \
     idle_timeout_seconds, progress_deadline_at, location_high_watermark_id, requested_at, \
     started_at, terminal_at, terminal_reason, retired_location_count FROM scan_sessions WHERE id = ?";
+
+const RECONCILIATION_PAGE_FIRST_SQL: &str = "SELECT l.id, l.storage_root_id, l.provider_relative_locator, l.retired_at, l.epoch \
+     FROM file_locations AS l WHERE l.retired_by_scan_session_id = ? ORDER BY l.id ASC LIMIT ?";
+
+const RECONCILIATION_PAGE_AFTER_SQL: &str = "SELECT l.id, l.storage_root_id, l.provider_relative_locator, l.retired_at, l.epoch \
+     FROM file_locations AS l WHERE l.retired_by_scan_session_id = ? AND l.id > ? \
+     ORDER BY l.id ASC LIMIT ?";
+
+const RECONCILIATION_INVALID_SQL: &str = "SELECT EXISTS(SELECT 1 FROM file_locations AS l \
+     WHERE l.retired_by_scan_session_id = ? AND (l.storage_root_id != ? \
+     OR julianday(l.retired_at) IS NULL OR julianday(l.retired_at) != julianday(?) \
+     OR ? IS NULL OR l.id > ? OR l.epoch < 1 \
+     OR l.provider_relative_locator IS NULL \
+     OR length(CAST(l.provider_relative_locator AS BLOB)) NOT BETWEEN 1 AND 4096 \
+     OR instr(l.provider_relative_locator, char(0)) != 0 \
+     OR instr(l.provider_relative_locator, char(92)) != 0 \
+     OR substr(l.provider_relative_locator, 1, 1) = '/' \
+     OR substr(l.provider_relative_locator, -1, 1) = '/' \
+     OR instr(l.provider_relative_locator, '//') != 0 \
+     OR instr('/' || l.provider_relative_locator || '/', '/./') != 0 \
+     OR instr('/' || l.provider_relative_locator || '/', '/../') != 0 \
+     OR EXISTS(SELECT 1 FROM scan_observations AS o WHERE o.scan_session_id = ? \
+     AND o.provider_relative_locator = l.provider_relative_locator)))";
 
 fn row_to_scan_session(row: &sqlx::sqlite::SqliteRow) -> Result<ScanSession, VoomError> {
     let session = ScanSession {
@@ -982,48 +1086,13 @@ fn batch_outcome_from_row(
     Ok(outcome)
 }
 
-fn reconciliation_items(
-    session: &ScanSession,
-    rows: &[sqlx::sqlite::SqliteRow],
-    observed_locators: &std::collections::BTreeSet<String>,
-) -> Result<Vec<ScanReconciliationEvidence>, VoomError> {
-    let expected_count = usize::try_from(session.retired_location_count)
-        .map_err(|error| VoomError::database_context("scan reconciliation count", error))?;
-    if rows.len() != expected_count {
-        return Err(VoomError::database(format!(
-            "scan session {} retired count {} does not match {} attributed locations",
-            session.id,
-            session.retired_location_count,
-            rows.len()
-        )));
-    }
-    let terminal_at = session.terminal_at.ok_or_else(|| {
-        VoomError::database(format!(
-            "succeeded scan session {} has no terminal timestamp",
-            session.id
-        ))
-    })?;
-    let mut items = Vec::with_capacity(rows.len());
-    for row in rows {
-        items.push(reconciliation_item(
-            session,
-            row,
-            terminal_at,
-            observed_locators,
-        )?);
-    }
-    Ok(items)
-}
-
 fn reconciliation_item(
     session: &ScanSession,
     row: &sqlx::sqlite::SqliteRow,
-    terminal_at: OffsetDateTime,
-    observed_locators: &std::collections::BTreeSet<String>,
 ) -> Result<ScanReconciliationEvidence, VoomError> {
     let file_location_id = FileLocationId(checked_u64(row, "id")?);
     let storage_root_id = StorageRootId(checked_u64(row, "storage_root_id")?);
-    let locator = ProviderRelativeLocator::parse_database(
+    ProviderRelativeLocator::parse_database(
         "file_locations.provider_relative_locator",
         &string_column(row, "provider_relative_locator")?,
     )?;
@@ -1036,10 +1105,9 @@ fn reconciliation_item(
         ));
     };
     if storage_root_id != session.storage_root_id
-        || retired_at != terminal_at
+        || Some(retired_at) != session.terminal_at
         || file_location_id > high_watermark
         || retired_epoch == 0
-        || observed_locators.contains(locator.as_str())
     {
         return Err(invalid_reconciliation_location(
             session.id,

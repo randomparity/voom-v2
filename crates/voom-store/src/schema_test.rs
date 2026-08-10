@@ -77,6 +77,24 @@ async fn scan_session_schema_enforces_lifecycle_and_provenance_backstops() {
     .unwrap();
     assert!(observation_index.contains("scan_session_id, provider_relative_locator"));
 
+    let reconciliation_index: Option<String> = sqlx::query_scalar(
+        "SELECT sql FROM sqlite_schema WHERE type = 'index' \
+         AND name = 'file_locations_by_retired_scan_session'",
+    )
+    .fetch_optional(&pool)
+    .await
+    .unwrap();
+    let reconciliation_index = reconciliation_index
+        .expect("file_locations reconciliation index")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert_eq!(
+        reconciliation_index,
+        "CREATE INDEX file_locations_by_retired_scan_session \
+         ON file_locations(retired_by_scan_session_id, id)"
+    );
+
     let root_pointer: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM pragma_table_info('library_roots') WHERE name = 'last_scan_session_id'",
     )
