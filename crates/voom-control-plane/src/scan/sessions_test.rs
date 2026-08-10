@@ -11,11 +11,12 @@ use voom_core::{
 };
 use voom_events::EventKind;
 use voom_store::repo::execution::nodes::NodeKind;
+use voom_store::repo::execution::remote_idempotency::RemoteMutationReplay;
 use voom_store::repo::library::libraries::{LibraryMediaKind, NewLibrary};
 use voom_store::repo::library::library_roots::{
     HiddenFilePolicy, LibraryScanMode, NewLibraryRoot, SymlinkPolicy,
 };
-use voom_store::repo::scan::sessions::ScanObservation;
+use voom_store::repo::scan::sessions::{ScanObservation, ScanSession};
 
 use super::{
     RemoteScanBatchInput, RemoteScanBatchOutcome, RemoteScanFailInput, RemoteScanInspectInput,
@@ -53,6 +54,35 @@ enum RollbackTrigger {
     SessionUpdate,
     ObservationInsert,
     BatchEvent,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum TerminalRollbackTrigger {
+    EventInsert,
+    ReplayCompletion,
+    SessionUpdate,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum CancelRollbackTrigger {
+    EventInsert,
+    SessionUpdate,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum StartRootFence {
+    EpochDrift,
+    Unavailable,
+}
+
+#[derive(Debug)]
+struct LifecycleSnapshot {
+    session: ScanSession,
+    observations: i64,
+    events: i64,
+    replays: i64,
+    routing: (i64, i64),
+    reconciliation_pointer: Option<i64>,
 }
 
 #[tokio::test]
@@ -274,6 +304,42 @@ async fn start_rejects_bad_credentials_before_revealing_the_session() {
 
     assert_eq!(error.error_code(), ErrorCode::Unauthorized);
     assert_eq!(completed_replay_count(&fixture.cp).await, 1);
+}
+
+#[tokio::test]
+async fn start_rejects_non_current_incarnation_before_session_or_replay_effects() {
+    let fixture = fixture().await;
+    let requested = request(&fixture).await;
+    let before = lifecycle_snapshot(&fixture, requested.id).await;
+    let mut input = start_input(&fixture, requested.id, "non-current-incarnation");
+    input.incarnation_id = "fedcba9876543210fedcba9876543210".parse().unwrap();
+
+    let error = fixture.cp.start_scan_session(input).await.unwrap_err();
+
+    assert_eq!(error.error_code(), ErrorCode::Conflict);
+    assert_lifecycle_unchanged(&fixture, requested.id, &before).await;
+    assert_eq!(
+        replay_rows_for_key(&fixture.cp, "non-current-incarnation").await,
+        0
+    );
+    assert_eq!(
+        event_count(&fixture.cp, EventKind::ScanSessionStarted).await,
+        0
+    );
+    assert_eq!(
+        event_count(&fixture.cp, EventKind::ScanSessionStale).await,
+        0
+    );
+}
+
+#[tokio::test]
+async fn start_epoch_drift_persists_only_the_stale_conflict_replay() {
+    assert_start_root_fence(StartRootFence::EpochDrift).await;
+}
+
+#[tokio::test]
+async fn start_unavailable_root_persists_only_the_stale_conflict_replay() {
+    assert_start_root_fence(StartRootFence::Unavailable).await;
 }
 
 #[tokio::test]
@@ -667,6 +733,69 @@ async fn observation_and_batch_event_aborts_roll_back_the_whole_batch() {
     }
 }
 
+#[tokio::test]
+async fn failure_abort_points_roll_back_session_observations_replay_and_event() {
+    for trigger in [
+        TerminalRollbackTrigger::EventInsert,
+        TerminalRollbackTrigger::ReplayCompletion,
+        TerminalRollbackTrigger::SessionUpdate,
+    ] {
+        let fixture = fixture().await;
+        let session = running_session_with_observation(&fixture).await;
+        let before = lifecycle_snapshot(&fixture, session.id).await;
+        install_failure_rollback_trigger(&fixture.cp, trigger).await;
+
+        let error = fixture
+            .cp
+            .fail_scan_session(fail_input(&fixture, session.id, "rollback-failure"))
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.error_code(), ErrorCode::DbUnreachable, "{trigger:?}");
+        assert_lifecycle_unchanged(&fixture, session.id, &before).await;
+        assert_eq!(
+            event_count(&fixture.cp, EventKind::ScanSessionFailed).await,
+            0,
+            "{trigger:?}"
+        );
+        assert_eq!(
+            replay_rows_for_key(&fixture.cp, "rollback-failure").await,
+            0,
+            "{trigger:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn cancellation_abort_points_roll_back_session_observations_and_event() {
+    for trigger in [
+        CancelRollbackTrigger::EventInsert,
+        CancelRollbackTrigger::SessionUpdate,
+    ] {
+        let fixture = fixture().await;
+        let session = running_session_with_observation(&fixture).await;
+        let before = lifecycle_snapshot(&fixture, session.id).await;
+        install_cancel_rollback_trigger(&fixture.cp, trigger).await;
+
+        let error = fixture
+            .cp
+            .cancel_scan_session(
+                session.id,
+                ScanTerminalReason::new("rollback cancellation").unwrap(),
+            )
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.error_code(), ErrorCode::DbUnreachable, "{trigger:?}");
+        assert_lifecycle_unchanged(&fixture, session.id, &before).await;
+        assert_eq!(
+            event_count(&fixture.cp, EventKind::ScanSessionCancelled).await,
+            0,
+            "{trigger:?}"
+        );
+    }
+}
+
 #[test]
 fn replay_outcomes_reject_unknown_fields() {
     let incarnation_id = INCARNATION.parse().unwrap();
@@ -785,6 +914,72 @@ fn new_root(library_id: LibraryId, owner: NodeId, suffix: &str) -> NewLibraryRoo
     }
 }
 
+async fn assert_start_root_fence(fence: StartRootFence) {
+    let fixture = fixture().await;
+    seed_rooted_location(&fixture.cp, fixture.root_id, "must-not-be-captured.mkv").await;
+    let requested = request(&fixture).await;
+    apply_start_root_fence(&fixture, fence).await;
+    let before_events = total_event_count(&fixture.cp).await;
+    let before_replays = replay_count(&fixture.cp).await;
+    let before_routing = routing_counts(&fixture.cp).await;
+    let input = start_input(&fixture, requested.id, "start-root-fence");
+
+    let first_error = fixture
+        .cp
+        .start_scan_session(input.clone())
+        .await
+        .unwrap_err();
+
+    assert_eq!(first_error.error_code(), ErrorCode::Conflict, "{fence:?}");
+    let stale = fixture.cp.scan_session(requested.id).await.unwrap();
+    assert_eq!(stale.status, ScanSessionStatus::Stale, "{fence:?}");
+    assert_eq!(stale.owner_incarnation_id, None, "{fence:?}");
+    assert_eq!(stale.started_at, None, "{fence:?}");
+    assert_eq!(stale.location_high_watermark_id, None, "{fence:?}");
+    assert_eq!(observation_count(&fixture.cp, requested.id).await, 0);
+    assert_eq!(total_event_count(&fixture.cp).await, before_events + 1);
+    assert_eq!(
+        event_count(&fixture.cp, EventKind::ScanSessionStale).await,
+        1
+    );
+    assert_eq!(
+        event_count(&fixture.cp, EventKind::ScanSessionStarted).await,
+        0
+    );
+    assert_eq!(replay_count(&fixture.cp).await, before_replays + 1);
+    assert_eq!(routing_counts(&fixture.cp).await, before_routing);
+    assert_eq!(
+        reconciliation_pointer(&fixture.cp, fixture.root_id).await,
+        None
+    );
+    assert_conflict_replay(&fixture.cp, "start-root-fence").await;
+
+    let replay_error = fixture.cp.start_scan_session(input).await.unwrap_err();
+    assert_eq!(
+        replay_error.to_string(),
+        first_error.to_string(),
+        "{fence:?}"
+    );
+    assert_eq!(total_event_count(&fixture.cp).await, before_events + 1);
+    assert_eq!(replay_count(&fixture.cp).await, before_replays + 1);
+}
+
+async fn apply_start_root_fence(fixture: &Fixture, fence: StartRootFence) {
+    let sql = match fence {
+        StartRootFence::EpochDrift => {
+            "UPDATE library_roots SET root_epoch = root_epoch + 1 WHERE id = ?"
+        }
+        StartRootFence::Unavailable => {
+            "UPDATE library_roots SET state = 'unavailable' WHERE id = ?"
+        }
+    };
+    sqlx::query(sql)
+        .bind(i64::try_from(fixture.root_id.0).unwrap())
+        .execute(fixture.cp.pool_for_test())
+        .await
+        .unwrap();
+}
+
 async fn request(fixture: &Fixture) -> voom_store::repo::scan::sessions::ScanSession {
     fixture
         .cp
@@ -808,6 +1003,22 @@ async fn running_session(
         .await
         .unwrap();
     fixture.cp.scan_session(requested.id).await.unwrap()
+}
+
+async fn running_session_with_observation(fixture: &Fixture) -> ScanSession {
+    let running = running_session(fixture, 30).await;
+    fixture
+        .cp
+        .accept_scan_observation_batch(batch_input(
+            fixture,
+            running.id,
+            0,
+            "terminal-rollback-baseline",
+            'e',
+        ))
+        .await
+        .unwrap();
+    fixture.cp.scan_session(running.id).await.unwrap()
 }
 
 fn start_input(fixture: &Fixture, id: ScanSessionId, key: &str) -> RemoteScanStartInput {
@@ -847,6 +1058,18 @@ fn batch_input(
             stability_started_at: T0,
             stability_confirmed_at: T0,
         }],
+    }
+}
+
+fn fail_input(fixture: &Fixture, id: ScanSessionId, key: &str) -> RemoteScanFailInput {
+    RemoteScanFailInput {
+        node_id: fixture.node_id,
+        scan_session_id: id,
+        incarnation_id: fixture.incarnation_id,
+        token: fixture.token.clone(),
+        idempotency_key: key.to_owned(),
+        request_hash: format!("{key}-route-instance"),
+        reason: ScanTerminalReason::new("scanner failed during rollback proof").unwrap(),
     }
 }
 
@@ -993,6 +1216,78 @@ async fn install_batch_rollback_trigger(cp: &crate::ControlPlane, trigger: Rollb
     sqlx::query(sql).execute(cp.pool_for_test()).await.unwrap();
 }
 
+async fn install_failure_rollback_trigger(
+    cp: &crate::ControlPlane,
+    trigger: TerminalRollbackTrigger,
+) {
+    let sql = match trigger {
+        TerminalRollbackTrigger::EventInsert => {
+            "CREATE TRIGGER reject_scan_failure_event BEFORE INSERT ON events \
+             WHEN NEW.kind = 'scan_session.failed' \
+             BEGIN SELECT RAISE(ABORT, 'forced failure event rollback'); END"
+        }
+        TerminalRollbackTrigger::ReplayCompletion => {
+            "CREATE TRIGGER reject_scan_failure_replay \
+             BEFORE UPDATE OF status ON remote_idempotency_keys \
+             WHEN NEW.status = 'completed' \
+             AND NEW.route_key = 'POST /v1/scan/session/fail' \
+             BEGIN SELECT RAISE(ABORT, 'forced failure replay rollback'); END"
+        }
+        TerminalRollbackTrigger::SessionUpdate => {
+            "CREATE TRIGGER reject_scan_failure_update BEFORE UPDATE OF status ON scan_sessions \
+             WHEN NEW.status = 'failed' \
+             BEGIN SELECT RAISE(ABORT, 'forced failure session rollback'); END"
+        }
+    };
+    sqlx::query(sql).execute(cp.pool_for_test()).await.unwrap();
+}
+
+async fn install_cancel_rollback_trigger(cp: &crate::ControlPlane, trigger: CancelRollbackTrigger) {
+    let sql = match trigger {
+        CancelRollbackTrigger::EventInsert => {
+            "CREATE TRIGGER reject_scan_cancel_event BEFORE INSERT ON events \
+             WHEN NEW.kind = 'scan_session.cancelled' \
+             BEGIN SELECT RAISE(ABORT, 'forced cancel event rollback'); END"
+        }
+        CancelRollbackTrigger::SessionUpdate => {
+            "CREATE TRIGGER reject_scan_cancel_update BEFORE UPDATE OF status ON scan_sessions \
+             WHEN NEW.status = 'cancelled' \
+             BEGIN SELECT RAISE(ABORT, 'forced cancel session rollback'); END"
+        }
+    };
+    sqlx::query(sql).execute(cp.pool_for_test()).await.unwrap();
+}
+
+async fn lifecycle_snapshot(fixture: &Fixture, id: ScanSessionId) -> LifecycleSnapshot {
+    LifecycleSnapshot {
+        session: fixture.cp.scan_session(id).await.unwrap(),
+        observations: observation_count(&fixture.cp, id).await,
+        events: total_event_count(&fixture.cp).await,
+        replays: replay_count(&fixture.cp).await,
+        routing: routing_counts(&fixture.cp).await,
+        reconciliation_pointer: reconciliation_pointer(&fixture.cp, fixture.root_id).await,
+    }
+}
+
+async fn assert_lifecycle_unchanged(
+    fixture: &Fixture,
+    id: ScanSessionId,
+    before: &LifecycleSnapshot,
+) {
+    assert_eq!(fixture.cp.scan_session(id).await.unwrap(), before.session);
+    assert_eq!(
+        observation_count(&fixture.cp, id).await,
+        before.observations
+    );
+    assert_eq!(total_event_count(&fixture.cp).await, before.events);
+    assert_eq!(replay_count(&fixture.cp).await, before.replays);
+    assert_eq!(routing_counts(&fixture.cp).await, before.routing);
+    assert_eq!(
+        reconciliation_pointer(&fixture.cp, fixture.root_id).await,
+        before.reconciliation_pointer
+    );
+}
+
 async fn routing_counts(cp: &crate::ControlPlane) -> (i64, i64) {
     let tickets = sqlx::query_scalar("SELECT COUNT(*) FROM tickets")
         .fetch_one(cp.pool_for_test())
@@ -1008,6 +1303,13 @@ async fn routing_counts(cp: &crate::ControlPlane) -> (i64, i64) {
 async fn event_count(cp: &crate::ControlPlane, kind: EventKind) -> i64 {
     sqlx::query_scalar("SELECT COUNT(*) FROM events WHERE kind = ?")
         .bind(kind.as_str())
+        .fetch_one(cp.pool_for_test())
+        .await
+        .unwrap()
+}
+
+async fn total_event_count(cp: &crate::ControlPlane) -> i64 {
+    sqlx::query_scalar("SELECT COUNT(*) FROM events")
         .fetch_one(cp.pool_for_test())
         .await
         .unwrap()
@@ -1035,12 +1337,35 @@ async fn completed_replay_count(cp: &crate::ControlPlane) -> i64 {
         .unwrap()
 }
 
+async fn replay_count(cp: &crate::ControlPlane) -> i64 {
+    sqlx::query_scalar("SELECT COUNT(*) FROM remote_idempotency_keys")
+        .fetch_one(cp.pool_for_test())
+        .await
+        .unwrap()
+}
+
 async fn replay_rows_for_key(cp: &crate::ControlPlane, key: &str) -> i64 {
     sqlx::query_scalar("SELECT COUNT(*) FROM remote_idempotency_keys WHERE idempotency_key LIKE ?")
         .bind(format!("%:{key}"))
         .fetch_one(cp.pool_for_test())
         .await
         .unwrap()
+}
+
+async fn assert_conflict_replay(cp: &crate::ControlPlane, key: &str) {
+    let response: String = sqlx::query_scalar(
+        "SELECT response_json FROM remote_idempotency_keys \
+         WHERE idempotency_key LIKE ? AND status = 'completed'",
+    )
+    .bind(format!("%:{key}"))
+    .fetch_one(cp.pool_for_test())
+    .await
+    .unwrap();
+    let replay: RemoteMutationReplay = serde_json::from_str(&response).unwrap();
+    let RemoteMutationReplay::Error { code, .. } = replay else {
+        panic!("expected a replayed error")
+    };
+    assert_eq!(code, ErrorCode::Conflict.as_str());
 }
 
 async fn reconciliation_pointer(cp: &crate::ControlPlane, root: StorageRootId) -> Option<i64> {
