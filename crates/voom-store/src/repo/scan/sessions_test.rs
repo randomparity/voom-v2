@@ -1,7 +1,14 @@
-use voom_core::{ScanSessionId, VoomError};
+use voom_core::{
+    NodeId, ProviderRelativeLocator, ScanSessionId, ScanSessionStatus, StorageRootId, VoomError,
+};
 
-use super::SqliteScanSessionRepo;
-use crate::test_support::{fresh_initialized_pool_at, with_check_constraints_disabled};
+use super::{
+    NewScanObservationBatch, NewScanSession, ScanObservation, ScanReconciliationQuery,
+    ScanSessionListQuery, SqliteScanSessionRepo,
+};
+use crate::test_support::{
+    T0, fresh_initialized_pool_at, seed_test_storage_root, with_check_constraints_disabled,
+};
 
 async fn fresh_pool() -> (sqlx::SqlitePool, voom_test_support::TempDatabase) {
     let tmp = voom_test_support::TempDatabase::new().unwrap();
@@ -177,7 +184,7 @@ async fn assert_observation_decoder_rejects(
 }
 
 #[tokio::test]
-async fn scan_observation_row_decoder_rejects_isolated_and_combined_corruption() {
+async fn scan_observation_row_decoder_rejects_locator_identity_and_size_corruption() {
     let (pool, _tmp) = fresh_pool().await;
     assert_observation_decoder_rejects(
         &pool,
@@ -234,6 +241,11 @@ async fn scan_observation_row_decoder_rejects_isolated_and_combined_corruption()
         "negative size",
     )
     .await;
+}
+
+#[tokio::test]
+async fn scan_observation_row_decoder_rejects_timestamp_and_combined_corruption() {
+    let (pool, _tmp) = fresh_pool().await;
     assert_observation_decoder_rejects(
         &pool,
         ObservationFixture {
@@ -284,4 +296,1185 @@ async fn scan_observation_row_decoder_rejects_isolated_and_combined_corruption()
         "combined corruption",
     )
     .await;
+}
+
+fn new_session(storage_root_id: StorageRootId) -> NewScanSession {
+    NewScanSession {
+        storage_root_id,
+        root_epoch: 1,
+        owner_node_id: NodeId(9_000_001),
+        idle_timeout_seconds: 300,
+        progress_deadline_at: T0 + time::Duration::minutes(5),
+        requested_at: T0,
+    }
+}
+
+async fn seed_incarnation(pool: &sqlx::SqlitePool, incarnation: &str) {
+    sqlx::query(
+        "INSERT OR IGNORE INTO node_incarnations \
+         (incarnation_id, node_id, status, started_at, last_seen_at) \
+         VALUES (?, 9000001, 'active', '1970-01-01T00:00:00Z', '1970-01-01T00:00:00Z')",
+    )
+    .bind(incarnation)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+async fn seed_second_root(pool: &sqlx::SqlitePool) -> StorageRootId {
+    sqlx::query(
+        "INSERT INTO libraries (id, slug, display_name, media_kind, description, enabled, created_at, updated_at) \
+         VALUES (9000002, 'repository-test-root-two', 'Repository Test Root Two', 'unknown', NULL, 1, \
+         '1970-01-01T00:00:00Z', '1970-01-01T00:00:00Z')",
+    )
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO library_roots (id, library_id, owner_node_id, provider_kind, provider_locator, display_locator, \
+         state, root_epoch, activation_identity, include_globs, exclude_globs, extension_allowlist, scan_mode, \
+         symlink_policy, hidden_file_policy, max_depth, stability_seconds, debounce_seconds, default_output_root_id, \
+         default_staging_root_id, default_backup_root_id, enabled, created_at, updated_at) \
+         VALUES (9000002, 9000002, 9000001, 'local_filesystem', '/two', '/two', 'active', 1, 'root-two', \
+         '[]', '[]', '[]', 'manual_recursive', 'reject', 'ignore', NULL, 0, 0, NULL, NULL, NULL, 1, \
+         '1970-01-01T00:00:00Z', '1970-01-01T00:00:00Z')",
+    )
+    .execute(pool)
+    .await
+    .unwrap();
+    StorageRootId(9_000_002)
+}
+
+async fn seed_rooted_location(
+    pool: &sqlx::SqlitePool,
+    storage_root_id: StorageRootId,
+    locator: &str,
+) -> i64 {
+    let asset_id = sqlx::query("INSERT INTO file_assets (created_at, epoch) VALUES (?, 0)")
+        .bind("1970-01-01T00:00:00Z")
+        .execute(pool)
+        .await
+        .unwrap()
+        .last_insert_rowid();
+    let version_id = sqlx::query(
+        "INSERT INTO file_versions (file_asset_id, content_hash, size_bytes, produced_by, \
+         produced_from_version_id, created_at, retired_at, epoch) \
+         VALUES (?, ?, 1, 'ingest', NULL, '1970-01-01T00:00:00Z', NULL, 0)",
+    )
+    .bind(asset_id)
+    .bind(format!("scan-session-{locator}"))
+    .execute(pool)
+    .await
+    .unwrap()
+    .last_insert_rowid();
+    sqlx::query(
+        "INSERT INTO file_locations (file_version_id, address_state, storage_root_id, \
+         provider_relative_locator, legacy_kind, legacy_locator, proof_kind, proof_value, \
+         observed_at, retired_at, epoch) VALUES (?, 'rooted', ?, ?, NULL, NULL, NULL, NULL, \
+         '1970-01-01T00:00:00Z', NULL, 0)",
+    )
+    .bind(version_id)
+    .bind(i64::try_from(storage_root_id.0).unwrap())
+    .bind(locator)
+    .execute(pool)
+    .await
+    .unwrap()
+    .last_insert_rowid()
+}
+
+async fn seed_succeeded_session(
+    pool: &sqlx::SqlitePool,
+    storage_root_id: StorageRootId,
+    high_watermark_id: Option<i64>,
+    retired_location_count: u64,
+    terminal_at: &str,
+) -> ScanSessionId {
+    seed_incarnation(pool, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa").await;
+    let id = sqlx::query(
+        "INSERT INTO scan_sessions (storage_root_id, root_epoch, owner_node_id, \
+         owner_incarnation_id, status, idle_timeout_seconds, progress_deadline_at, \
+         location_high_watermark_id, requested_at, started_at, terminal_at, \
+         retired_location_count) VALUES (?, 1, 9000001, ?, 'succeeded', 300, \
+         '1970-01-01T00:05:00Z', ?, '1970-01-01T00:00:00Z', \
+         '1970-01-01T00:01:00Z', ?, ?)",
+    )
+    .bind(i64::try_from(storage_root_id.0).unwrap())
+    .bind("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+    .bind(high_watermark_id)
+    .bind(terminal_at)
+    .bind(i64::try_from(retired_location_count).unwrap())
+    .execute(pool)
+    .await
+    .unwrap()
+    .last_insert_rowid();
+    ScanSessionId(u64::try_from(id).unwrap())
+}
+
+async fn attribute_location(
+    pool: &sqlx::SqlitePool,
+    location_id: i64,
+    session_id: ScanSessionId,
+    retired_at: &str,
+) {
+    sqlx::query(
+        "UPDATE file_locations SET retired_at = ?, retired_by_scan_session_id = ?, epoch = 1 \
+         WHERE id = ?",
+    )
+    .bind(retired_at)
+    .bind(i64::try_from(session_id.0).unwrap())
+    .bind(location_id)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+fn observation(locator: &str) -> ScanObservation {
+    ScanObservation {
+        provider_relative_locator: ProviderRelativeLocator::new(locator.to_owned()).unwrap(),
+        provider_object_identity: format!("identity-{locator}"),
+        size_bytes: 1,
+        modified_at: T0,
+        stability_started_at: T0,
+        stability_confirmed_at: T0,
+    }
+}
+
+fn batch(
+    session_id: ScanSessionId,
+    sequence: u64,
+    request_hash: char,
+    observations: Vec<ScanObservation>,
+) -> NewScanObservationBatch {
+    NewScanObservationBatch {
+        scan_session_id: session_id,
+        sequence,
+        request_hash: request_hash.to_string().repeat(64),
+        observations,
+        accepted_at: T0,
+        next_progress_deadline_at: T0 + time::Duration::minutes(5),
+    }
+}
+
+#[tokio::test]
+async fn request_snapshots_root_and_start_binds_incarnation_and_high_watermark() {
+    let (pool, _tmp) = fresh_pool().await;
+    let root = seed_test_storage_root(&pool).await.unwrap();
+    let other_root = seed_second_root(&pool).await;
+    let expected_high_watermark = seed_rooted_location(&pool, root, "live.mkv").await;
+    let retired = seed_rooted_location(&pool, root, "retired.mkv").await;
+    sqlx::query("UPDATE file_locations SET retired_at = ? WHERE id = ?")
+        .bind("1970-01-01T00:01:00Z")
+        .bind(retired)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let other_root_location = seed_rooted_location(&pool, other_root, "other.mkv").await;
+    seed_incarnation(&pool, "11111111111111111111111111111111").await;
+    let repo = SqliteScanSessionRepo::new(pool.clone());
+    let mut tx = pool.begin().await.unwrap();
+
+    let requested = repo
+        .insert_requested_in_tx(&mut tx, new_session(root))
+        .await
+        .unwrap();
+    assert_eq!(requested.storage_root_id, root);
+    assert_eq!(requested.root_epoch, 1);
+    assert_eq!(requested.status, ScanSessionStatus::Requested);
+    assert_eq!(requested.owner_incarnation_id, None);
+
+    let incarnation = "11111111111111111111111111111111".parse().unwrap();
+    let started = repo
+        .start_in_tx(
+            &mut tx,
+            requested.id,
+            incarnation,
+            Some(voom_core::FileLocationId(
+                u64::try_from(other_root_location).unwrap(),
+            )),
+            T0 + time::Duration::minutes(10),
+            T0 + time::Duration::minutes(5),
+        )
+        .await
+        .unwrap();
+    assert_eq!(started.status, ScanSessionStatus::Running);
+    assert_eq!(started.owner_incarnation_id, Some(incarnation));
+    assert_eq!(
+        started.location_high_watermark_id,
+        Some(voom_core::FileLocationId(
+            u64::try_from(expected_high_watermark).unwrap()
+        ))
+    );
+    assert_eq!(
+        started.progress_deadline_at,
+        T0 + time::Duration::minutes(10)
+    );
+
+    let duplicate_start = repo
+        .start_in_tx(
+            &mut tx,
+            requested.id,
+            incarnation,
+            None,
+            T0 + time::Duration::minutes(10),
+            T0 + time::Duration::minutes(5),
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(duplicate_start, VoomError::Conflict(_)));
+}
+
+#[tokio::test]
+async fn request_rejects_timeout_bounds_before_inserting() {
+    let (pool, _tmp) = fresh_pool().await;
+    let root = seed_test_storage_root(&pool).await.unwrap();
+    let repo = SqliteScanSessionRepo::new(pool.clone());
+    let mut tx = pool.begin().await.unwrap();
+
+    for timeout in [0, 86_401] {
+        let error = repo
+            .insert_requested_in_tx(
+                &mut tx,
+                NewScanSession {
+                    idle_timeout_seconds: timeout,
+                    ..new_session(root)
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(error, VoomError::Config(_)));
+    }
+    let accepted = repo
+        .insert_requested_in_tx(
+            &mut tx,
+            NewScanSession {
+                idle_timeout_seconds: 86_400,
+                ..new_session(root)
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(accepted.idle_timeout_seconds, 86_400);
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM scan_sessions")
+        .fetch_one(&mut *tx)
+        .await
+        .unwrap();
+    assert_eq!(count, 1);
+}
+
+#[tokio::test]
+async fn concurrent_requests_have_one_same_root_winner_and_independent_roots_both_win() {
+    let (pool, _tmp) = fresh_pool().await;
+    let root = seed_test_storage_root(&pool).await.unwrap();
+    let other_root = seed_second_root(&pool).await;
+    let request = |storage_root_id| {
+        let pool = pool.clone();
+        async move {
+            let repo = SqliteScanSessionRepo::new(pool.clone());
+            let mut tx = pool.begin().await.unwrap();
+            let result = repo
+                .insert_requested_in_tx(&mut tx, new_session(storage_root_id))
+                .await;
+            match result {
+                Ok(session) => {
+                    tx.commit().await.unwrap();
+                    Ok(session)
+                }
+                Err(error) => {
+                    tx.rollback().await.unwrap();
+                    Err(error)
+                }
+            }
+        }
+    };
+    let (left, right) = tokio::join!(request(root), request(root));
+    assert_eq!(usize::from(left.is_ok()) + usize::from(right.is_ok()), 1);
+    let repo = SqliteScanSessionRepo::new(pool.clone());
+    let mut tx = pool.begin().await.unwrap();
+    let active = repo
+        .active_for_root_in_tx(&mut tx, root)
+        .await
+        .unwrap()
+        .unwrap();
+    repo.terminalize_in_tx(
+        &mut tx,
+        active.id,
+        ScanSessionStatus::Cancelled,
+        voom_core::ScanTerminalReason::new("test reset").unwrap(),
+        T0,
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    let (left, right) = tokio::join!(request(other_root), request(root));
+    assert!(left.is_ok());
+    assert!(right.is_ok());
+}
+
+#[tokio::test]
+async fn stale_expiry_is_set_based_at_the_exact_deadline_and_returns_post_transition_rows() {
+    let (pool, _tmp) = fresh_pool().await;
+    let root = seed_test_storage_root(&pool).await.unwrap();
+    let other_root = seed_second_root(&pool).await;
+    let repo = SqliteScanSessionRepo::new(pool.clone());
+    let mut tx = pool.begin().await.unwrap();
+    let requested = repo
+        .insert_requested_in_tx(&mut tx, new_session(root))
+        .await
+        .unwrap();
+    let earlier = repo
+        .insert_requested_in_tx(
+            &mut tx,
+            NewScanSession {
+                progress_deadline_at: T0 + time::Duration::minutes(4),
+                ..new_session(other_root)
+            },
+        )
+        .await
+        .unwrap();
+
+    let expired = repo
+        .stale_expired_in_tx(&mut tx, T0 + time::Duration::minutes(5))
+        .await
+        .unwrap();
+    assert_eq!(expired.len(), 2);
+    assert_eq!(expired[0].id, requested.id);
+    assert_eq!(expired[1].id, earlier.id);
+    assert!(
+        expired
+            .iter()
+            .all(|session| session.status == ScanSessionStatus::Stale)
+    );
+    assert_eq!(
+        expired[0].terminal_at,
+        Some(T0 + time::Duration::minutes(5))
+    );
+}
+
+#[tokio::test]
+async fn batch_acceptance_replays_the_same_session_sequence_and_rejects_conflicts_without_rows() {
+    let (pool, _tmp) = fresh_pool().await;
+    let root = seed_test_storage_root(&pool).await.unwrap();
+    seed_incarnation(&pool, "22222222222222222222222222222222").await;
+    let repo = SqliteScanSessionRepo::new(pool.clone());
+    let mut tx = pool.begin().await.unwrap();
+    let session = repo
+        .insert_requested_in_tx(&mut tx, new_session(root))
+        .await
+        .unwrap();
+    let incarnation = "22222222222222222222222222222222".parse().unwrap();
+    repo.start_in_tx(
+        &mut tx,
+        session.id,
+        incarnation,
+        None,
+        T0 + time::Duration::minutes(10),
+        T0 + time::Duration::minutes(5),
+    )
+    .await
+    .unwrap();
+
+    let batch = NewScanObservationBatch {
+        scan_session_id: session.id,
+        sequence: 0,
+        request_hash: "a".repeat(64),
+        observations: vec![ScanObservation {
+            provider_relative_locator: ProviderRelativeLocator::new("one.mkv".to_owned()).unwrap(),
+            provider_object_identity: "opaque-id".to_owned(),
+            size_bytes: 1,
+            modified_at: T0,
+            stability_started_at: T0,
+            stability_confirmed_at: T0,
+        }],
+        accepted_at: T0 + time::Duration::minutes(5),
+        next_progress_deadline_at: T0 + time::Duration::minutes(10),
+    };
+    let accepted = repo
+        .accepted_batch_in_tx(&mut tx, batch.clone())
+        .await
+        .unwrap();
+    let replay = repo
+        .accepted_batch_in_tx(&mut tx, batch.clone())
+        .await
+        .unwrap();
+    assert_eq!(accepted, replay);
+    let gap = repo
+        .accepted_batch_in_tx(
+            &mut tx,
+            NewScanObservationBatch {
+                sequence: 2,
+                request_hash: "f".repeat(64),
+                ..batch.clone()
+            },
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(gap, VoomError::Conflict(_)));
+    let thousand = (0_u64..1_000)
+        .map(|ordinal| ScanObservation {
+            provider_relative_locator: ProviderRelativeLocator::new(format!("many/{ordinal}.mkv"))
+                .unwrap(),
+            provider_object_identity: format!("identity-{ordinal}"),
+            size_bytes: ordinal,
+            modified_at: T0,
+            stability_started_at: T0,
+            stability_confirmed_at: T0,
+        })
+        .collect();
+    let outcome = repo
+        .accepted_batch_in_tx(
+            &mut tx,
+            NewScanObservationBatch {
+                sequence: 1,
+                request_hash: "f".repeat(64),
+                observations: thousand,
+                ..batch.clone()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(outcome.accepted_observation_count, 1_000);
+    let conflict = repo
+        .accepted_batch_in_tx(
+            &mut tx,
+            NewScanObservationBatch {
+                request_hash: "b".repeat(64),
+                ..batch
+            },
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(conflict, VoomError::Conflict(_)));
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM scan_observations")
+        .fetch_one(&mut *tx)
+        .await
+        .unwrap();
+    assert_eq!(count, 1_001);
+}
+
+#[tokio::test]
+async fn batch_locator_conflict_leaves_no_partial_ledger_row_when_the_caller_commits() {
+    let (pool, _tmp) = fresh_pool().await;
+    let root = seed_test_storage_root(&pool).await.unwrap();
+    seed_incarnation(&pool, "33333333333333333333333333333333").await;
+    let repo = SqliteScanSessionRepo::new(pool.clone());
+    let mut tx = pool.begin().await.unwrap();
+    let session = repo
+        .insert_requested_in_tx(&mut tx, new_session(root))
+        .await
+        .unwrap();
+    repo.start_in_tx(
+        &mut tx,
+        session.id,
+        "33333333333333333333333333333333".parse().unwrap(),
+        None,
+        T0 + time::Duration::minutes(10),
+        T0,
+    )
+    .await
+    .unwrap();
+    let first = NewScanObservationBatch {
+        scan_session_id: session.id,
+        sequence: 0,
+        request_hash: "c".repeat(64),
+        observations: vec![ScanObservation {
+            provider_relative_locator: ProviderRelativeLocator::new("same.mkv".to_owned()).unwrap(),
+            provider_object_identity: "first-identity".to_owned(),
+            size_bytes: 1,
+            modified_at: T0,
+            stability_started_at: T0,
+            stability_confirmed_at: T0,
+        }],
+        accepted_at: T0,
+        next_progress_deadline_at: T0 + time::Duration::minutes(5),
+    };
+    repo.accepted_batch_in_tx(&mut tx, first).await.unwrap();
+    let duplicate = NewScanObservationBatch {
+        sequence: 1,
+        request_hash: "d".repeat(64),
+        observations: vec![ScanObservation {
+            provider_relative_locator: ProviderRelativeLocator::new("same.mkv".to_owned()).unwrap(),
+            provider_object_identity: "second-identity".to_owned(),
+            size_bytes: 2,
+            modified_at: T0,
+            stability_started_at: T0,
+            stability_confirmed_at: T0,
+        }],
+        accepted_at: T0,
+        next_progress_deadline_at: T0 + time::Duration::minutes(5),
+        scan_session_id: session.id,
+    };
+    let error = repo
+        .accepted_batch_in_tx(&mut tx, duplicate)
+        .await
+        .unwrap_err();
+    assert!(matches!(error, VoomError::Conflict(_)));
+    assert!(error.to_string().contains("same.mkv"));
+    assert!(!error.to_string().contains("second-identity"));
+    tx.commit().await.unwrap();
+    let batch_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM scan_observation_batches")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(batch_count, 1);
+}
+
+#[tokio::test]
+async fn batch_rejections_and_cross_session_hash_reuse_preserve_each_sessions_counts() {
+    let (pool, _tmp) = fresh_pool().await;
+    let first_root = seed_test_storage_root(&pool).await.unwrap();
+    let second_root = seed_second_root(&pool).await;
+    seed_incarnation(&pool, "44444444444444444444444444444444").await;
+    let repo = SqliteScanSessionRepo::new(pool.clone());
+    let mut tx = pool.begin().await.unwrap();
+    let first = repo
+        .insert_requested_in_tx(&mut tx, new_session(first_root))
+        .await
+        .unwrap();
+    let second = repo
+        .insert_requested_in_tx(&mut tx, new_session(second_root))
+        .await
+        .unwrap();
+    let incarnation = "44444444444444444444444444444444".parse().unwrap();
+    for session in [first.id, second.id] {
+        repo.start_in_tx(
+            &mut tx,
+            session,
+            incarnation,
+            None,
+            T0 + time::Duration::minutes(5),
+            T0,
+        )
+        .await
+        .unwrap();
+    }
+
+    let first_outcome = repo
+        .accepted_batch_in_tx(
+            &mut tx,
+            batch(first.id, 0, 'a', vec![observation("same.mkv")]),
+        )
+        .await
+        .unwrap();
+    let second_outcome = repo
+        .accepted_batch_in_tx(
+            &mut tx,
+            batch(second.id, 0, 'a', vec![observation("same.mkv")]),
+        )
+        .await
+        .unwrap();
+    assert_eq!(first_outcome.scan_session_id, first.id);
+    assert_eq!(second_outcome.scan_session_id, second.id);
+
+    let within_body = batch(
+        first.id,
+        1,
+        'b',
+        vec![observation("duplicate.mkv"), observation("duplicate.mkv")],
+    );
+    let error = repo
+        .accepted_batch_in_tx(&mut tx, within_body)
+        .await
+        .unwrap_err();
+    assert!(matches!(error, VoomError::Conflict(_)));
+    assert!(error.to_string().contains("duplicate.mkv"));
+    let across_bodies = batch(first.id, 1, 'c', vec![observation("same.mkv")]);
+    assert!(matches!(
+        repo.accepted_batch_in_tx(&mut tx, across_bodies)
+            .await
+            .unwrap_err(),
+        VoomError::Conflict(_)
+    ));
+    sqlx::query("UPDATE scan_sessions SET next_sequence = 2 WHERE id = ?")
+        .bind(i64::try_from(first.id.0).unwrap())
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    let regression = batch(first.id, 1, 'd', vec![observation("regression.mkv")]);
+    assert!(matches!(
+        repo.accepted_batch_in_tx(&mut tx, regression)
+            .await
+            .unwrap_err(),
+        VoomError::Conflict(_)
+    ));
+
+    let batch_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM scan_observation_batches")
+        .fetch_one(&mut *tx)
+        .await
+        .unwrap();
+    let observation_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM scan_observations")
+        .fetch_one(&mut *tx)
+        .await
+        .unwrap();
+    assert_eq!((batch_count, observation_count), (2, 2));
+    for session in [first.id, second.id] {
+        let stored = repo.get_in_tx(&mut tx, session).await.unwrap().unwrap();
+        assert_eq!((stored.batch_count, stored.observation_count), (1, 1));
+    }
+}
+
+#[derive(Clone, Copy)]
+enum BatchLedgerCorruption {
+    RequestHash,
+    ObservationCount,
+    CumulativeCount,
+}
+
+async fn assert_batch_replay_rejects_corruption(case: BatchLedgerCorruption) {
+    let (pool, _tmp) = fresh_pool().await;
+    let root = seed_test_storage_root(&pool).await.unwrap();
+    seed_incarnation(&pool, "66666666666666666666666666666666").await;
+    let repo = SqliteScanSessionRepo::new(pool.clone());
+    let mut tx = pool.begin().await.unwrap();
+    let session = repo
+        .insert_requested_in_tx(&mut tx, new_session(root))
+        .await
+        .unwrap();
+    repo.start_in_tx(
+        &mut tx,
+        session.id,
+        "66666666666666666666666666666666".parse().unwrap(),
+        None,
+        T0 + time::Duration::minutes(5),
+        T0,
+    )
+    .await
+    .unwrap();
+    let input = batch(session.id, 0, 'a', vec![observation("corrupt.mkv")]);
+    repo.accepted_batch_in_tx(&mut tx, input.clone())
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    with_check_constraints_disabled(&pool, |connection| {
+        Box::pin(async move {
+            match case {
+                BatchLedgerCorruption::RequestHash => {
+                    sqlx::query("UPDATE scan_observation_batches SET request_hash = 'invalid'")
+                        .execute(connection)
+                        .await
+                }
+                BatchLedgerCorruption::ObservationCount => {
+                    sqlx::query("UPDATE scan_observation_batches SET observation_count = 0")
+                        .execute(connection)
+                        .await
+                }
+                BatchLedgerCorruption::CumulativeCount => {
+                    sqlx::query(
+                        "UPDATE scan_observation_batches SET cumulative_observation_count = 0",
+                    )
+                    .execute(connection)
+                    .await
+                }
+            }
+        })
+    })
+    .await
+    .unwrap();
+    let mut tx = pool.begin().await.unwrap();
+    let error = repo.accepted_batch_in_tx(&mut tx, input).await.unwrap_err();
+    assert!(matches!(error, VoomError::Database { .. }));
+}
+
+#[tokio::test]
+async fn batch_replay_validates_the_stored_hash_and_outcome_before_returning_it() {
+    for case in [
+        BatchLedgerCorruption::RequestHash,
+        BatchLedgerCorruption::ObservationCount,
+        BatchLedgerCorruption::CumulativeCount,
+    ] {
+        assert_batch_replay_rejects_corruption(case).await;
+    }
+}
+
+#[tokio::test]
+async fn batch_validation_rejects_bounds_overflow_and_reversed_stability_before_sql() {
+    let (pool, _tmp) = fresh_pool().await;
+    let repo = SqliteScanSessionRepo::new(pool.clone());
+    let observation = ScanObservation {
+        provider_relative_locator: ProviderRelativeLocator::new("one.mkv".to_owned()).unwrap(),
+        provider_object_identity: "identity".to_owned(),
+        size_bytes: 1,
+        modified_at: T0,
+        stability_started_at: T0,
+        stability_confirmed_at: T0,
+    };
+    let batch = |observations: Vec<ScanObservation>| NewScanObservationBatch {
+        scan_session_id: ScanSessionId(999),
+        sequence: 0,
+        request_hash: "e".repeat(64),
+        observations,
+        accepted_at: T0,
+        next_progress_deadline_at: T0,
+    };
+    let mut tx = pool.begin().await.unwrap();
+    let too_many = vec![observation.clone(); 1_001];
+    assert!(matches!(
+        repo.accepted_batch_in_tx(&mut tx, batch(too_many))
+            .await
+            .unwrap_err(),
+        VoomError::Config(_)
+    ));
+    let overflow = ScanObservation {
+        size_bytes: u64::MAX,
+        ..observation.clone()
+    };
+    assert!(matches!(
+        repo.accepted_batch_in_tx(&mut tx, batch(vec![overflow]))
+            .await
+            .unwrap_err(),
+        VoomError::Config(_)
+    ));
+    let reversed = ScanObservation {
+        stability_confirmed_at: T0 - time::Duration::seconds(1),
+        ..observation
+    };
+    assert!(matches!(
+        repo.accepted_batch_in_tx(&mut tx, batch(vec![reversed]))
+            .await
+            .unwrap_err(),
+        VoomError::Config(_)
+    ));
+    tx.commit().await.unwrap();
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM scan_observation_batches")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 0);
+}
+
+#[tokio::test]
+async fn session_list_uses_ascending_exclusive_keyset_pagination_and_validates_limits() {
+    let (pool, _tmp) = fresh_pool().await;
+    let root = seed_test_storage_root(&pool).await.unwrap();
+    let other_root = seed_second_root(&pool).await;
+    let repo = SqliteScanSessionRepo::new(pool.clone());
+    let mut tx = pool.begin().await.unwrap();
+    let first = repo
+        .insert_requested_in_tx(&mut tx, new_session(root))
+        .await
+        .unwrap();
+    repo.terminalize_in_tx(
+        &mut tx,
+        first.id,
+        ScanSessionStatus::Cancelled,
+        voom_core::ScanTerminalReason::new("operator cancelled").unwrap(),
+        T0,
+    )
+    .await
+    .unwrap();
+    let second = repo
+        .insert_requested_in_tx(&mut tx, new_session(root))
+        .await
+        .unwrap();
+    let other = repo
+        .insert_requested_in_tx(&mut tx, new_session(other_root))
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+
+    let first_page = repo
+        .list(ScanSessionListQuery {
+            storage_root_id: Some(root),
+            status: None,
+            after_id: None,
+            limit: 1,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        first_page.items,
+        vec![repo.get(first.id).await.unwrap().unwrap()]
+    );
+    assert_eq!(first_page.next_after_id, Some(first.id));
+    let second_page = repo
+        .list(ScanSessionListQuery {
+            storage_root_id: Some(root),
+            status: None,
+            after_id: first_page.next_after_id,
+            limit: 1,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        second_page.items,
+        vec![repo.get(second.id).await.unwrap().unwrap()]
+    );
+    assert_eq!(second_page.next_after_id, None);
+    let invalid_limit = repo
+        .list(ScanSessionListQuery {
+            storage_root_id: None,
+            status: None,
+            after_id: None,
+            limit: 0,
+        })
+        .await
+        .unwrap_err();
+    assert!(matches!(invalid_limit, VoomError::Config(_)));
+    let over_limit = repo
+        .list(ScanSessionListQuery {
+            storage_root_id: None,
+            status: None,
+            after_id: None,
+            limit: 101,
+        })
+        .await
+        .unwrap_err();
+    assert!(matches!(over_limit, VoomError::Config(_)));
+    let cancelled = repo
+        .list(ScanSessionListQuery {
+            storage_root_id: Some(root),
+            status: Some(ScanSessionStatus::Cancelled),
+            after_id: None,
+            limit: 100,
+        })
+        .await
+        .unwrap();
+    assert_eq!(cancelled.items.len(), 1);
+    assert_eq!(cancelled.items[0].id, first.id);
+    let other_root_page = repo
+        .list(ScanSessionListQuery {
+            storage_root_id: Some(other_root),
+            status: None,
+            after_id: None,
+            limit: 100,
+        })
+        .await
+        .unwrap();
+    assert_eq!(other_root_page.items.len(), 1);
+    assert_eq!(other_root_page.items[0].id, other.id);
+}
+
+#[tokio::test]
+async fn reconciliation_pages_in_location_order_with_an_exclusive_cursor() {
+    let (pool, _tmp) = fresh_pool().await;
+    let root = seed_test_storage_root(&pool).await.unwrap();
+    let first = seed_rooted_location(&pool, root, "first.mkv").await;
+    let second = seed_rooted_location(&pool, root, "second.mkv").await;
+    let third = seed_rooted_location(&pool, root, "third.mkv").await;
+    let session = seed_succeeded_session(&pool, root, Some(third), 3, "1970-01-01T00:02:00Z").await;
+    for location in [third, first, second] {
+        attribute_location(&pool, location, session, "1970-01-01T00:02:00Z").await;
+    }
+    sqlx::query("UPDATE library_roots SET last_scan_session_id = ? WHERE id = ?")
+        .bind(i64::try_from(session.0).unwrap())
+        .bind(i64::try_from(root.0).unwrap())
+        .execute(&pool)
+        .await
+        .unwrap();
+    let repo = SqliteScanSessionRepo::new(pool.clone());
+
+    let latest = repo.latest_succeeded_for_root(root).await.unwrap().unwrap();
+    assert_eq!(latest.id, session);
+    let first_page = repo
+        .reconciliation_page(ScanReconciliationQuery {
+            scan_session_id: session,
+            after_id: None,
+            limit: 2,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        first_page
+            .items
+            .iter()
+            .map(|item| item.file_location_id.0)
+            .collect::<Vec<_>>(),
+        vec![
+            u64::try_from(first).unwrap(),
+            u64::try_from(second).unwrap()
+        ]
+    );
+    assert_eq!(
+        first_page.next_after_id,
+        Some(voom_core::FileLocationId(u64::try_from(second).unwrap()))
+    );
+    assert!(
+        first_page
+            .items
+            .iter()
+            .all(|item| (item.prior_epoch, item.retired_epoch) == (0, 1))
+    );
+    let second_page = repo
+        .reconciliation_page(ScanReconciliationQuery {
+            scan_session_id: session,
+            after_id: first_page.next_after_id,
+            limit: 2,
+        })
+        .await
+        .unwrap();
+    assert_eq!(second_page.items.len(), 1);
+    assert_eq!(
+        second_page.items[0].file_location_id.0,
+        u64::try_from(third).unwrap()
+    );
+    assert_eq!(second_page.next_after_id, None);
+}
+
+#[tokio::test]
+async fn reconciliation_rejects_limits_outside_one_through_one_hundred() {
+    let (pool, _tmp) = fresh_pool().await;
+    let repo = SqliteScanSessionRepo::new(pool);
+    for limit in [0, 101] {
+        let error = repo
+            .reconciliation_page(ScanReconciliationQuery {
+                scan_session_id: ScanSessionId(1),
+                after_id: None,
+                limit,
+            })
+            .await
+            .unwrap_err();
+        assert!(matches!(error, VoomError::Config(_)));
+    }
+}
+
+#[tokio::test]
+async fn lifecycle_and_batch_mutations_remain_owned_by_the_callers_transaction() {
+    let (pool, _tmp) = fresh_pool().await;
+    let root = seed_test_storage_root(&pool).await.unwrap();
+    seed_incarnation(&pool, "55555555555555555555555555555555").await;
+    let repo = SqliteScanSessionRepo::new(pool.clone());
+    let mut tx = pool.begin().await.unwrap();
+    let session = repo
+        .insert_requested_in_tx(&mut tx, new_session(root))
+        .await
+        .unwrap();
+    repo.start_in_tx(
+        &mut tx,
+        session.id,
+        "55555555555555555555555555555555".parse().unwrap(),
+        None,
+        T0 + time::Duration::minutes(5),
+        T0,
+    )
+    .await
+    .unwrap();
+    repo.accepted_batch_in_tx(
+        &mut tx,
+        batch(session.id, 0, 'a', vec![observation("rollback.mkv")]),
+    )
+    .await
+    .unwrap();
+    repo.terminalize_in_tx(
+        &mut tx,
+        session.id,
+        ScanSessionStatus::Failed,
+        voom_core::ScanTerminalReason::new("rollback proof").unwrap(),
+        T0 + time::Duration::minutes(1),
+    )
+    .await
+    .unwrap();
+    tx.rollback().await.unwrap();
+
+    assert!(repo.get(session.id).await.unwrap().is_none());
+    let batches: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM scan_observation_batches")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(batches, 0);
+}
+
+#[derive(Clone, Copy)]
+enum RootPointerCorruption {
+    WrongRoot,
+    NonSuccess,
+    OlderSuccess,
+}
+
+async fn assert_root_pointer_corruption(case: RootPointerCorruption) {
+    let (pool, _tmp) = fresh_pool().await;
+    let root = seed_test_storage_root(&pool).await.unwrap();
+    let other_root = seed_second_root(&pool).await;
+    let (pointed, historical) = match case {
+        RootPointerCorruption::WrongRoot => {
+            let session =
+                seed_succeeded_session(&pool, other_root, None, 0, "1970-01-01T00:02:00Z").await;
+            (session, session)
+        }
+        RootPointerCorruption::NonSuccess => {
+            seed_incarnation(&pool, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa").await;
+            let id = sqlx::query(
+                "INSERT INTO scan_sessions (storage_root_id, root_epoch, owner_node_id, status, \
+                 idle_timeout_seconds, progress_deadline_at, requested_at, terminal_at, \
+                 terminal_reason) VALUES (?, 1, 9000001, 'failed', 300, \
+                 '1970-01-01T00:05:00Z', '1970-01-01T00:00:00Z', \
+                 '1970-01-01T00:02:00Z', 'failed scan')",
+            )
+            .bind(i64::try_from(root.0).unwrap())
+            .execute(&pool)
+            .await
+            .unwrap()
+            .last_insert_rowid();
+            let session = ScanSessionId(u64::try_from(id).unwrap());
+            (session, session)
+        }
+        RootPointerCorruption::OlderSuccess => {
+            let older = seed_succeeded_session(&pool, root, None, 0, "1970-01-01T00:02:00Z").await;
+            let newer = seed_succeeded_session(&pool, root, None, 0, "1970-01-01T00:03:00Z").await;
+            (older, newer)
+        }
+    };
+    sqlx::query("UPDATE library_roots SET last_scan_session_id = ? WHERE id = ?")
+        .bind(i64::try_from(pointed.0).unwrap())
+        .bind(i64::try_from(root.0).unwrap())
+        .execute(&pool)
+        .await
+        .unwrap();
+    let repo = SqliteScanSessionRepo::new(pool);
+    assert!(matches!(
+        repo.latest_succeeded_for_root(root).await.unwrap_err(),
+        VoomError::Database { .. }
+    ));
+    assert_eq!(repo.get(historical).await.unwrap().unwrap().id, historical);
+}
+
+#[tokio::test]
+async fn root_pointer_semantic_corruption_is_database_only_when_followed() {
+    for case in [
+        RootPointerCorruption::WrongRoot,
+        RootPointerCorruption::NonSuccess,
+        RootPointerCorruption::OlderSuccess,
+    ] {
+        assert_root_pointer_corruption(case).await;
+    }
+}
+
+#[derive(Clone, Copy)]
+enum LocationPointerCorruption {
+    WrongRoot,
+    NonSuccess,
+    RetirementTime,
+    AboveHighWatermark,
+    ObservedLocator,
+    RetiredCount,
+}
+
+async fn add_observed_locator(pool: &sqlx::SqlitePool, session: ScanSessionId) {
+    sqlx::query(
+        "UPDATE scan_sessions SET next_sequence = 1, batch_count = 1, observation_count = 1 \
+         WHERE id = ?",
+    )
+    .bind(i64::try_from(session.0).unwrap())
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO scan_observation_batches (scan_session_id, sequence, request_hash, \
+         observation_count, accepted_at, cumulative_observation_count) \
+         VALUES (?, 0, ?, 1, '1970-01-01T00:01:00Z', 1)",
+    )
+    .bind(i64::try_from(session.0).unwrap())
+    .bind("b".repeat(64))
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO scan_observations (scan_session_id, batch_sequence, ordinal, \
+         provider_relative_locator, provider_object_identity, size_bytes, modified_at, \
+         stability_started_at, stability_confirmed_at) VALUES \
+         (?, 0, 0, 'low.mkv', 'observed', 1, '1970-01-01T00:00:00Z', \
+         '1970-01-01T00:00:00Z', '1970-01-01T00:00:00Z')",
+    )
+    .bind(i64::try_from(session.0).unwrap())
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+async fn apply_location_pointer_detail(
+    pool: &sqlx::SqlitePool,
+    session: ScanSessionId,
+    case: LocationPointerCorruption,
+) {
+    match case {
+        LocationPointerCorruption::ObservedLocator => add_observed_locator(pool, session).await,
+        LocationPointerCorruption::RetiredCount => {
+            sqlx::query("UPDATE scan_sessions SET retired_location_count = 2 WHERE id = ?")
+                .bind(i64::try_from(session.0).unwrap())
+                .execute(pool)
+                .await
+                .unwrap();
+        }
+        LocationPointerCorruption::WrongRoot
+        | LocationPointerCorruption::NonSuccess
+        | LocationPointerCorruption::RetirementTime
+        | LocationPointerCorruption::AboveHighWatermark => {}
+    }
+}
+
+async fn assert_location_pointer_corruption(case: LocationPointerCorruption) {
+    let (pool, _tmp) = fresh_pool().await;
+    let root = seed_test_storage_root(&pool).await.unwrap();
+    let other_root = seed_second_root(&pool).await;
+    let low = seed_rooted_location(&pool, root, "low.mkv").await;
+    let (session, attributed) = match case {
+        LocationPointerCorruption::WrongRoot => {
+            let other = seed_rooted_location(&pool, other_root, "other-pointer.mkv").await;
+            (
+                seed_succeeded_session(&pool, other_root, Some(other), 1, "1970-01-01T00:02:00Z")
+                    .await,
+                low,
+            )
+        }
+        LocationPointerCorruption::NonSuccess => {
+            seed_incarnation(&pool, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa").await;
+            let id = sqlx::query(
+                "INSERT INTO scan_sessions (storage_root_id, root_epoch, owner_node_id, \
+                 owner_incarnation_id, status, idle_timeout_seconds, progress_deadline_at, \
+                 location_high_watermark_id, requested_at, started_at, terminal_at, \
+                 terminal_reason) VALUES (?, 1, 9000001, ?, 'failed', 300, \
+                 '1970-01-01T00:05:00Z', ?, '1970-01-01T00:00:00Z', \
+                 '1970-01-01T00:01:00Z', '1970-01-01T00:02:00Z', 'failed scan')",
+            )
+            .bind(i64::try_from(root.0).unwrap())
+            .bind("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+            .bind(low)
+            .execute(&pool)
+            .await
+            .unwrap()
+            .last_insert_rowid();
+            (ScanSessionId(u64::try_from(id).unwrap()), low)
+        }
+        LocationPointerCorruption::AboveHighWatermark => {
+            let session =
+                seed_succeeded_session(&pool, root, Some(low), 1, "1970-01-01T00:02:00Z").await;
+            let high = seed_rooted_location(&pool, root, "high.mkv").await;
+            (session, high)
+        }
+        _ => (
+            seed_succeeded_session(&pool, root, Some(low), 1, "1970-01-01T00:02:00Z").await,
+            low,
+        ),
+    };
+    let retired_at = if matches!(case, LocationPointerCorruption::RetirementTime) {
+        "1970-01-01T00:03:00Z"
+    } else {
+        "1970-01-01T00:02:00Z"
+    };
+    attribute_location(&pool, attributed, session, retired_at).await;
+    apply_location_pointer_detail(&pool, session, case).await;
+    let repo = SqliteScanSessionRepo::new(pool);
+    assert!(matches!(
+        repo.reconciliation_page(ScanReconciliationQuery {
+            scan_session_id: session,
+            after_id: None,
+            limit: 100,
+        })
+        .await
+        .unwrap_err(),
+        VoomError::Database { .. }
+    ));
+    assert_eq!(repo.get(session).await.unwrap().unwrap().id, session);
+}
+
+#[tokio::test]
+async fn location_pointer_semantic_corruption_is_database_only_when_followed() {
+    for case in [
+        LocationPointerCorruption::WrongRoot,
+        LocationPointerCorruption::NonSuccess,
+        LocationPointerCorruption::RetirementTime,
+        LocationPointerCorruption::AboveHighWatermark,
+        LocationPointerCorruption::ObservedLocator,
+        LocationPointerCorruption::RetiredCount,
+    ] {
+        assert_location_pointer_corruption(case).await;
+    }
 }
