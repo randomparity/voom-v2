@@ -80,10 +80,13 @@ both observe the same remaining slot.
 The repository method accepts `NodeId`, an `OffsetDateTime` lower bound, the policy count
 limit, and a transaction. It decodes stored IDs and timestamps before comparing instants,
 including offset-bearing timestamps, and stops after the policy limit is reached. The query
-uses an indexable lexical lower envelope 26 hours before the UTC lower bound; 26 hours covers
-the pinned parser's accepted offsets through ±25:59:59, while typed comparison remains the
-authority. History lexically older than that conservative envelope is not quota evidence and
-is not scanned. Corrupt evidence inside the envelope is a database error, not quota state.
+computes an envelope 26 hours before the UTC lower bound, covering the pinned parser's
+accepted offsets through ±25:59:59. It scans two indexed year-prefix ranges derived from
+that envelope: unsigned four-digit ISO years and signed six-digit ISO years. Widening each
+range to the envelope's containing year covers the parser's calendar, ordinal, week, basic,
+extended, and reduced-precision representations; typed comparison remains the authority.
+History in earlier years is not scanned. Corrupt evidence inside the ranges is a database
+error, not quota state.
 
 ## Quota rejection logging
 

@@ -143,73 +143,41 @@ impl SqliteNodeIncarnationRepo {
             return Ok(0);
         }
         let node_id = i64_from_u64(node_id.0, "node incarnation activation count node id")?;
-        let lexical_lower_bound = lower_bound
+        let envelope_start = lower_bound
             .to_offset(UtcOffset::UTC)
             .checked_sub(ACTIVATION_LEXICAL_ENVELOPE)
-            .map(iso8601)
-            .transpose()?
-            .unwrap_or_default();
-        let mut cursor: Option<(String, String)> = None;
-        let mut count = 0_u32;
-        loop {
-            let rows = if let Some((started_at, incarnation_id)) = &cursor {
-                sqlx::query(
-                    "SELECT incarnation_id, started_at FROM node_incarnations \
-                     WHERE node_id = ? AND started_at >= ? \
-                     AND (started_at, incarnation_id) < (?, ?) \
-                     ORDER BY started_at DESC, incarnation_id DESC LIMIT 32",
-                )
-                .bind(node_id)
-                .bind(&lexical_lower_bound)
-                .bind(started_at)
-                .bind(incarnation_id)
-                .fetch_all(&mut **tx)
-                .await
-            } else {
-                sqlx::query(
-                    "SELECT incarnation_id, started_at FROM node_incarnations \
-                     WHERE node_id = ? AND started_at >= ? \
-                     ORDER BY started_at DESC, incarnation_id DESC LIMIT 32",
-                )
-                .bind(node_id)
-                .bind(&lexical_lower_bound)
-                .fetch_all(&mut **tx)
-                .await
-            }
-            .map_err(|error| {
-                VoomError::database_context("node incarnation activation count", error)
+            .ok_or_else(|| {
+                VoomError::Internal("activation window precedes supported time".to_owned())
             })?;
-            if rows.is_empty() {
-                return Ok(count);
-            }
-            for row in rows {
-                let incarnation_id: String = row.try_get("incarnation_id").map_err(|error| {
-                    map_row_err("node incarnation activation evidence id", error)
-                })?;
-                NodeIncarnationId::parse_database(
-                    "node incarnation activation evidence id",
-                    &incarnation_id,
-                )?;
-                let stored_started_at: String = row.try_get("started_at").map_err(|error| {
-                    map_row_err("node incarnation activation evidence started at", error)
-                })?;
-                let started_at = parse_iso8601(&stored_started_at).map_err(|error| {
-                    VoomError::database_context(
-                        "node incarnation activation evidence started at",
-                        error,
-                    )
-                })?;
-                cursor = Some((stored_started_at, incarnation_id));
-                if started_at >= lower_bound {
-                    count = count.checked_add(1).ok_or_else(|| {
-                        VoomError::database("node incarnation activation count overflow")
-                    })?;
-                    if count == count_limit {
-                        return Ok(count);
-                    }
-                }
+        let envelope_year = u32::try_from(envelope_start.year()).map_err(|_| {
+            VoomError::Internal("activation window precedes the supported ISO year".to_owned())
+        })?;
+        if envelope_year > 9_999 {
+            return Err(VoomError::Internal(
+                "activation window exceeds the supported ISO year".to_owned(),
+            ));
+        }
+        let lexical_ranges = [
+            (format!("{envelope_year:04}"), "\u{10ffff}"),
+            (format!("+{envelope_year:06}"), ","),
+        ];
+        let mut count = 0_u32;
+        for (lexical_lower_bound, lexical_upper_bound) in lexical_ranges {
+            count = count_started_in_lexical_range(
+                tx,
+                node_id,
+                lower_bound,
+                count_limit,
+                count,
+                &lexical_lower_bound,
+                lexical_upper_bound,
+            )
+            .await?;
+            if count == count_limit {
+                break;
             }
         }
+        Ok(count)
     }
 
     /// List a node's terminal incarnations whose terminal timestamp precedes `cutoff`.
@@ -384,6 +352,77 @@ impl SqliteNodeIncarnationRepo {
 }
 
 impl Repository for SqliteNodeIncarnationRepo {}
+
+async fn count_started_in_lexical_range(
+    tx: &mut Transaction<'_, Sqlite>,
+    node_id: i64,
+    lower_bound: OffsetDateTime,
+    count_limit: u32,
+    mut count: u32,
+    lexical_lower_bound: &str,
+    lexical_upper_bound: &str,
+) -> Result<u32, VoomError> {
+    let mut cursor: Option<(String, String)> = None;
+    loop {
+        let rows = if let Some((started_at, incarnation_id)) = &cursor {
+            sqlx::query(
+                "SELECT incarnation_id, started_at FROM node_incarnations \
+                 WHERE node_id = ? AND started_at >= ? AND started_at < ? \
+                 AND (started_at, incarnation_id) < (?, ?) \
+                 ORDER BY started_at DESC, incarnation_id DESC LIMIT 32",
+            )
+            .bind(node_id)
+            .bind(lexical_lower_bound)
+            .bind(lexical_upper_bound)
+            .bind(started_at)
+            .bind(incarnation_id)
+            .fetch_all(&mut **tx)
+            .await
+        } else {
+            sqlx::query(
+                "SELECT incarnation_id, started_at FROM node_incarnations \
+                 WHERE node_id = ? AND started_at >= ? AND started_at < ? \
+                 ORDER BY started_at DESC, incarnation_id DESC LIMIT 32",
+            )
+            .bind(node_id)
+            .bind(lexical_lower_bound)
+            .bind(lexical_upper_bound)
+            .fetch_all(&mut **tx)
+            .await
+        }
+        .map_err(|error| VoomError::database_context("node incarnation activation count", error))?;
+        if rows.is_empty() {
+            return Ok(count);
+        }
+        for row in rows {
+            let incarnation_id: String = row
+                .try_get("incarnation_id")
+                .map_err(|error| map_row_err("node incarnation activation evidence id", error))?;
+            NodeIncarnationId::parse_database(
+                "node incarnation activation evidence id",
+                &incarnation_id,
+            )?;
+            let stored_started_at: String = row.try_get("started_at").map_err(|error| {
+                map_row_err("node incarnation activation evidence started at", error)
+            })?;
+            let started_at = parse_iso8601(&stored_started_at).map_err(|error| {
+                VoomError::database_context(
+                    "node incarnation activation evidence started at",
+                    error,
+                )
+            })?;
+            cursor = Some((stored_started_at, incarnation_id));
+            if started_at >= lower_bound {
+                count = count.checked_add(1).ok_or_else(|| {
+                    VoomError::database("node incarnation activation count overflow")
+                })?;
+                if count == count_limit {
+                    return Ok(count);
+                }
+            }
+        }
+    }
+}
 
 fn row_to_incarnation(row: &sqlx::sqlite::SqliteRow) -> Result<NodeIncarnation, VoomError> {
     let id: String = row
