@@ -166,6 +166,57 @@ fn worker_count_conversion_is_checked() {
     assert_eq!(error.error_code(), ErrorCode::DbUnreachable);
 }
 
+#[tokio::test]
+async fn activation_count_is_inclusive_and_scoped_to_one_node() {
+    let (pool, _tmp) = fresh_pool().await;
+    let first = seed_node(&pool, "node-a").await;
+    let second = seed_node(&pool, "node-b").await;
+    let lower_bound = T0 + Duration::seconds(60);
+    for (id, node_id, started_at) in [
+        (FIRST_ID, first.id, lower_bound - Duration::nanoseconds(1)),
+        (SECOND_ID, first.id, lower_bound),
+        (
+            "2123456789abcdef0123456789abcdef",
+            first.id,
+            lower_bound + Duration::seconds(30),
+        ),
+        (
+            "3123456789abcdef0123456789abcdef",
+            second.id,
+            lower_bound + Duration::seconds(30),
+        ),
+    ] {
+        sqlx::query(
+            "INSERT INTO node_incarnations \
+             (incarnation_id, node_id, status, started_at, last_seen_at, ended_at, end_reason) \
+             VALUES (?, ?, 'superseded', ?, ?, ?, 'superseded')",
+        )
+        .bind(id)
+        .bind(i64::try_from(node_id.0).unwrap())
+        .bind(timestamp(started_at))
+        .bind(timestamp(started_at))
+        .bind(timestamp(started_at))
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+    let repo = SqliteNodeIncarnationRepo::new(pool.clone());
+    let mut tx = pool.begin().await.unwrap();
+
+    let count = repo
+        .count_started_at_or_after_in_tx(&mut tx, first.id, lower_bound)
+        .await
+        .unwrap();
+
+    assert_eq!(count, 2);
+}
+
+#[test]
+fn activation_count_conversion_is_checked() {
+    let error = super::activation_count_from_i64(i64::MAX).unwrap_err();
+    assert_eq!(error.error_code(), ErrorCode::DbUnreachable);
+}
+
 async fn fresh_pool() -> (sqlx::SqlitePool, voom_test_support::TempDatabase) {
     let tmp = voom_test_support::TempDatabase::new().unwrap();
     let pool = crate::test_support::fresh_initialized_pool_at(tmp.path())

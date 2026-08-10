@@ -45,6 +45,7 @@ voom-store = { workspace = true }
 voom-worker-protocol = { workspace = true }
 
 [dev-dependencies]
+tracing-subscriber = { workspace = true }
 voom-store = { workspace = true, features = ["test"] }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["io-util", "process", "time", "test-util"] }

@@ -8,7 +8,7 @@ use serde_json::json;
 use time::OffsetDateTime;
 use voom_core::{
     ArtifactAccessMode, ErrorCode, NodeIncarnationEndReason, NodeIncarnationStatus, OperationKind,
-    clock_test_support::FrozenClock,
+    clock_test_support::{FrozenClock, ManualClock},
 };
 use voom_store::repo::execution::nodes::NodeKind;
 use voom_store::repo::execution::tickets::NewTicket;
@@ -16,6 +16,46 @@ use voom_store::repo::execution::tickets::NewTicket;
 use crate::cases::workers::nodes::RegisterNodeInput;
 
 const T0: OffsetDateTime = OffsetDateTime::UNIX_EPOCH;
+
+#[derive(Clone, Default)]
+struct LogBuffer(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+struct LogWriter(LogBuffer);
+
+impl std::io::Write for LogWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'writer> tracing_subscriber::fmt::MakeWriter<'writer> for LogBuffer {
+    type Writer = LogWriter;
+
+    fn make_writer(&'writer self) -> Self::Writer {
+        LogWriter(self.clone())
+    }
+}
+
+impl LogBuffer {
+    fn text(&self) -> String {
+        String::from_utf8(
+            self.0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone(),
+        )
+        .unwrap()
+    }
+}
 
 #[test]
 fn remote_activation_outcomes_reject_unknown_fields() {
@@ -74,6 +114,142 @@ async fn remote_activation_registers_complete_manifest_atomically_and_replays() 
             .len(),
         1
     );
+}
+
+#[tokio::test]
+async fn remote_activation_bounds_fresh_successes_per_node_without_poisoning_replay() {
+    let (cp, clock, _tmp) = cp_with_manual_clock(T0).await;
+    let first_node = register_remote_node(&cp).await;
+    let second_node = cp
+        .register_node(RegisterNodeInput {
+            name: "second-remote-node".to_owned(),
+            kind: NodeKind::Remote,
+            heartbeat_ttl_seconds: 60,
+            metadata: json!({}),
+        })
+        .await
+        .unwrap();
+    let mut first_input = None;
+    let mut first_outcome = None;
+    for ordinal in 1..=5 {
+        let input = activation_input_for(first_node.node.id, first_node.token.clone(), ordinal);
+        let outcome = cp.remote_activate(input.clone()).await.unwrap();
+        if ordinal == 1 {
+            first_input = Some(input);
+            first_outcome = Some(outcome);
+        }
+    }
+    let first_input = first_input.unwrap();
+    let first_outcome = first_outcome.unwrap();
+    assert_eq!(
+        cp.remote_activate(first_input).await.unwrap(),
+        first_outcome
+    );
+    cp.remote_activate(activation_input_for(
+        second_node.node.id,
+        second_node.token,
+        100,
+    ))
+    .await
+    .unwrap();
+
+    let rejected = activation_input_for(first_node.node.id, first_node.token.clone(), 6);
+    let counts_before = activation_row_counts(&cp).await;
+    let error = cp.remote_activate(rejected.clone()).await.unwrap_err();
+    assert_eq!(error.error_code(), ErrorCode::Conflict);
+    assert!(error.to_string().contains("5 activations per 60 seconds"));
+    assert_eq!(activation_row_counts(&cp).await, counts_before);
+    let rejected_replay_rows: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM remote_idempotency_keys \
+         WHERE node_id = ? AND idempotency_key = ?",
+    )
+    .bind(i64::try_from(first_node.node.id.0).unwrap())
+    .bind(&rejected.idempotency_key)
+    .fetch_one(cp.pool_for_test())
+    .await
+    .unwrap();
+    assert_eq!(rejected_replay_rows, 0);
+
+    let mut duplicate = activation_input_for(first_node.node.id, first_node.token.clone(), 5);
+    duplicate.idempotency_key = "activate-duplicate-incarnation".to_owned();
+    duplicate.request_hash = "activation-duplicate-incarnation-body".to_owned();
+    let duplicate_error = cp.remote_activate(duplicate).await.unwrap_err();
+    assert!(
+        duplicate_error
+            .to_string()
+            .contains("was already activated")
+    );
+
+    clock.advance(time::Duration::seconds(60));
+    assert!(cp.remote_activate(rejected.clone()).await.is_err());
+    clock.advance(time::Duration::nanoseconds(1));
+    cp.remote_activate(rejected).await.unwrap();
+}
+
+#[tokio::test]
+async fn remote_activation_samples_quota_window_after_writer_serialization() {
+    let (cp, clock, _tmp) = cp_with_manual_clock(T0).await;
+    let registered = register_remote_node(&cp).await;
+    for ordinal in 1..=5 {
+        cp.remote_activate(activation_input_for(
+            registered.node.id,
+            registered.token.clone(),
+            ordinal,
+        ))
+        .await
+        .unwrap();
+    }
+    let holding_tx = crate::cases::begin_immediate_tx(cp.pool_for_test())
+        .await
+        .unwrap();
+    let waiting_cp = cp.clone();
+    let waiting_input = activation_input_for(registered.node.id, registered.token, 6);
+    let waiting = tokio::spawn(async move { waiting_cp.remote_activate(waiting_input).await });
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    clock.advance(time::Duration::seconds(61));
+    holding_tx.commit().await.unwrap();
+
+    waiting.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn remote_activation_quota_rejection_is_operator_visible_without_secrets() {
+    let (cp, _clock, _tmp) = cp_with_manual_clock(T0).await;
+    let registered = register_remote_node(&cp).await;
+    for ordinal in 1..=5 {
+        cp.remote_activate(activation_input_for(
+            registered.node.id,
+            registered.token.clone(),
+            ordinal,
+        ))
+        .await
+        .unwrap();
+    }
+    let mut rejected = activation_input_for(registered.node.id, registered.token, 6);
+    rejected.idempotency_key = "secret-idempotency-key".to_owned();
+    rejected.request_hash = "secret-request-hash".to_owned();
+    rejected.workers[0].logical_name = "secret-worker-name".to_owned();
+    let rejected_incarnation = rejected.incarnation_id.to_string();
+    let logs = LogBuffer::default();
+    let subscriber = tracing_subscriber::fmt()
+        .without_time()
+        .with_ansi(false)
+        .with_writer(logs.clone())
+        .finish();
+    let _guard = tracing::subscriber::set_default(subscriber);
+
+    let error = cp.remote_activate(rejected).await.unwrap_err();
+
+    assert_eq!(error.error_code(), ErrorCode::Conflict);
+    let output = logs.text();
+    assert!(output.contains("remote node activation quota exceeded"));
+    assert!(output.contains("activation_count=5"));
+    assert!(output.contains("activation_limit=5"));
+    assert!(output.contains("window_seconds=60"));
+    assert!(!output.contains("secret-idempotency-key"));
+    assert!(!output.contains("secret-request-hash"));
+    assert!(!output.contains("secret-worker-name"));
+    assert!(!output.contains(&rejected_incarnation));
 }
 
 #[tokio::test]
@@ -440,6 +616,39 @@ fn activation_input(node_id: voom_core::NodeId, token: SecretString) -> RemoteAc
     }
 }
 
+fn activation_input_for(
+    node_id: voom_core::NodeId,
+    token: SecretString,
+    ordinal: u8,
+) -> RemoteActivateInput {
+    let mut input = activation_input(node_id, token);
+    input.idempotency_key = format!("activate-{ordinal}");
+    input.request_hash = format!("activation-body-{ordinal}");
+    input.incarnation_id = format!("{ordinal:032x}").parse().unwrap();
+    input
+}
+
+async fn activation_row_counts(cp: &crate::ControlPlane) -> Vec<i64> {
+    let mut counts = Vec::new();
+    for table in [
+        "node_incarnations",
+        "workers",
+        "worker_capabilities",
+        "worker_grants",
+        "remote_idempotency_keys",
+        "events",
+    ] {
+        let query = format!("SELECT COUNT(*) FROM {table}");
+        counts.push(
+            sqlx::query_scalar(&query)
+                .fetch_one(cp.pool_for_test())
+                .await
+                .unwrap(),
+        );
+    }
+    counts
+}
+
 async fn register_remote_node(cp: &crate::ControlPlane) -> crate::workers::RegisteredNode {
     cp.register_node(RegisterNodeInput {
         name: "remote-node".to_owned(),
@@ -507,4 +716,28 @@ async fn cp_at(now: OffsetDateTime) -> (crate::ControlPlane, voom_test_support::
     .await
     .unwrap();
     (cp, tmp)
+}
+
+async fn cp_with_manual_clock(
+    now: OffsetDateTime,
+) -> (
+    crate::ControlPlane,
+    std::sync::Arc<ManualClock>,
+    voom_test_support::TempDatabase,
+) {
+    let tmp = voom_test_support::TempDatabase::new().unwrap();
+    let url = format!("sqlite://{}", tmp.path().display());
+    voom_store::init(&url).await.unwrap();
+    let pool = voom_store::connect(&url).await.unwrap();
+    let clock = std::sync::Arc::new(ManualClock::new(now));
+    let cp = crate::ControlPlane::open_with_pool_and_rng(
+        pool,
+        clock.clone(),
+        std::sync::Arc::new(std::sync::Mutex::new(
+            voom_core::rng_test_support::FrozenRng::new(0x0808_0808),
+        )),
+    )
+    .await
+    .unwrap();
+    (cp, clock, tmp)
 }
