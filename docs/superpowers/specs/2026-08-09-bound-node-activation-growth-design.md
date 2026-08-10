@@ -79,8 +79,11 @@ both observe the same remaining slot.
 
 The repository method accepts `NodeId`, an `OffsetDateTime` lower bound, the policy count
 limit, and a transaction. It decodes stored IDs and timestamps before comparing instants,
-including offset-bearing timestamps, and stops after the policy limit is reached. Corrupt
-evidence is a database error, not quota state.
+including offset-bearing timestamps, and stops after the policy limit is reached. The query
+uses an indexable lexical lower envelope 26 hours before the UTC lower bound; 26 hours covers
+the pinned parser's accepted offsets through ±25:59:59, while typed comparison remains the
+authority. History lexically older than that conservative envelope is not quota evidence and
+is not scanned. Corrupt evidence inside the envelope is a database error, not quota state.
 
 ## Quota rejection logging
 

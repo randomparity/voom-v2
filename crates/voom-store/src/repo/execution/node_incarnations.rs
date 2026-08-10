@@ -1,13 +1,15 @@
 //! Durable node-process incarnations and their worker ownership boundary.
 
 use sqlx::{Row, Sqlite, SqlitePool, Transaction};
-use time::OffsetDateTime;
+use time::{Duration, OffsetDateTime, UtcOffset};
 use voom_core::{
     NodeId, NodeIncarnationEndReason, NodeIncarnationId, NodeIncarnationStatus, VoomError,
 };
 
 use super::Repository;
 use super::common::{i64_from_u64, iso8601, map_row_err, parse_iso8601, u64_from_i64};
+
+const ACTIVATION_LEXICAL_ENVELOPE: Duration = Duration::hours(26);
 
 #[derive(Debug, Clone, Copy)]
 pub struct NewNodeIncarnation {
@@ -141,16 +143,24 @@ impl SqliteNodeIncarnationRepo {
             return Ok(0);
         }
         let node_id = i64_from_u64(node_id.0, "node incarnation activation count node id")?;
+        let lexical_lower_bound = lower_bound
+            .to_offset(UtcOffset::UTC)
+            .checked_sub(ACTIVATION_LEXICAL_ENVELOPE)
+            .map(iso8601)
+            .transpose()?
+            .unwrap_or_default();
         let mut cursor: Option<(String, String)> = None;
         let mut count = 0_u32;
         loop {
             let rows = if let Some((started_at, incarnation_id)) = &cursor {
                 sqlx::query(
                     "SELECT incarnation_id, started_at FROM node_incarnations \
-                     WHERE node_id = ? AND (started_at, incarnation_id) < (?, ?) \
+                     WHERE node_id = ? AND started_at >= ? \
+                     AND (started_at, incarnation_id) < (?, ?) \
                      ORDER BY started_at DESC, incarnation_id DESC LIMIT 32",
                 )
                 .bind(node_id)
+                .bind(&lexical_lower_bound)
                 .bind(started_at)
                 .bind(incarnation_id)
                 .fetch_all(&mut **tx)
@@ -158,10 +168,11 @@ impl SqliteNodeIncarnationRepo {
             } else {
                 sqlx::query(
                     "SELECT incarnation_id, started_at FROM node_incarnations \
-                     WHERE node_id = ? \
+                     WHERE node_id = ? AND started_at >= ? \
                      ORDER BY started_at DESC, incarnation_id DESC LIMIT 32",
                 )
                 .bind(node_id)
+                .bind(&lexical_lower_bound)
                 .fetch_all(&mut **tx)
                 .await
             }

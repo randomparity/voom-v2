@@ -270,9 +270,9 @@ async fn activation_count_compares_offset_timestamps_as_instants_and_honors_limi
     let (pool, _tmp) = fresh_pool().await;
     let node = seed_node(&pool, "offset-activation-evidence").await;
     let lower_bound = T0 + Duration::seconds(60);
-    let negative_offset = UtcOffset::from_hms(-1, 0, 0).unwrap();
+    let negative_offset = UtcOffset::from_hms(-25, -59, 0).unwrap();
     for ordinal in 100..164 {
-        let started_at = lower_bound - Duration::seconds(100);
+        let started_at = lower_bound - Duration::days(2);
         sqlx::query(
             "INSERT INTO node_incarnations \
              (incarnation_id, node_id, status, started_at, last_seen_at, ended_at, end_reason) \
@@ -287,6 +287,18 @@ async fn activation_count_compares_offset_timestamps_as_instants_and_honors_limi
         .await
         .unwrap();
     }
+    sqlx::query(
+        "INSERT INTO node_incarnations \
+         (incarnation_id, node_id, status, started_at, last_seen_at, ended_at, end_reason) \
+         VALUES ('not-an-incarnation', ?, 'superseded', ?, ?, ?, 'superseded')",
+    )
+    .bind(i64::try_from(node.id.0).unwrap())
+    .bind(timestamp(lower_bound - Duration::days(2)))
+    .bind(timestamp(lower_bound - Duration::days(2)))
+    .bind(timestamp(lower_bound - Duration::days(2)))
+    .execute(&pool)
+    .await
+    .unwrap();
     for ordinal in 8..=13 {
         let started_at =
             (lower_bound + Duration::nanoseconds(i64::from(ordinal))).to_offset(negative_offset);
@@ -311,20 +323,27 @@ async fn activation_count_compares_offset_timestamps_as_instants_and_honors_limi
         .count_started_at_or_after_in_tx(&mut tx, node.id, lower_bound, 5)
         .await
         .unwrap();
+    let bounded_count = repo
+        .count_started_at_or_after_in_tx(&mut tx, node.id, lower_bound, u32::MAX)
+        .await
+        .unwrap();
 
     assert_eq!(count, 5);
+    assert_eq!(bounded_count, 6);
 }
 
 #[tokio::test]
-async fn activation_evidence_pages_use_the_history_index_without_temp_sort() {
+async fn activation_evidence_range_and_pages_use_the_history_index_without_temp_sort() {
     let (pool, _tmp) = fresh_pool().await;
     let node = seed_node(&pool, "activation-plan-node").await;
     let mut details: Vec<String> = sqlx::query(
         "EXPLAIN QUERY PLAN \
          SELECT incarnation_id, started_at FROM node_incarnations \
-         WHERE node_id = ? ORDER BY started_at DESC, incarnation_id DESC LIMIT 32",
+         WHERE node_id = ? AND started_at >= ? \
+         ORDER BY started_at DESC, incarnation_id DESC LIMIT 32",
     )
     .bind(i64::try_from(node.id.0).unwrap())
+    .bind(timestamp(T0 - Duration::hours(26)))
     .fetch_all(&pool)
     .await
     .unwrap()
@@ -335,10 +354,12 @@ async fn activation_evidence_pages_use_the_history_index_without_temp_sort() {
         sqlx::query(
             "EXPLAIN QUERY PLAN \
              SELECT incarnation_id, started_at FROM node_incarnations \
-             WHERE node_id = ? AND (started_at, incarnation_id) < (?, ?) \
+             WHERE node_id = ? AND started_at >= ? \
+             AND (started_at, incarnation_id) < (?, ?) \
              ORDER BY started_at DESC, incarnation_id DESC LIMIT 32",
         )
         .bind(i64::try_from(node.id.0).unwrap())
+        .bind(timestamp(T0 - Duration::hours(26)))
         .bind(timestamp(T0))
         .bind(FIRST_ID)
         .fetch_all(&pool)
