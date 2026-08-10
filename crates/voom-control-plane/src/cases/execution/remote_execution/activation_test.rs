@@ -510,6 +510,60 @@ async fn remote_activation_pruning_removes_only_old_unreferenced_history_and_pre
 }
 
 #[tokio::test]
+async fn remote_activation_pruning_preserves_window_evidence_after_clock_moves_backward() {
+    let (cp, clock, _tmp) = cp_with_manual_clock(T0).await;
+    let registered = register_remote_node(&cp).await;
+    let first = cp
+        .remote_activate(activation_input_for(
+            registered.node.id,
+            registered.token.clone(),
+            1,
+        ))
+        .await
+        .unwrap();
+    clock.set(T0 - Duration::minutes(2));
+    cp.remote_activate(activation_input_for(
+        registered.node.id,
+        registered.token.clone(),
+        2,
+    ))
+    .await
+    .unwrap();
+    clock.set(T0 + Duration::seconds(30));
+    for ordinal in 3..=6 {
+        cp.remote_activate(activation_input_for(
+            registered.node.id,
+            registered.token.clone(),
+            ordinal,
+        ))
+        .await
+        .unwrap();
+    }
+
+    cp.prune_node_activation_history(registered.node.id, T0 + Duration::days(1))
+        .await
+        .unwrap();
+
+    let retained = cp
+        .list_node_incarnations(registered.node.id, 10)
+        .await
+        .unwrap();
+    assert!(retained.iter().any(|item| {
+        item.id == first.incarnation_id
+            && item.worker_count == u32::try_from(first.workers.len()).unwrap()
+    }));
+    let error = cp
+        .remote_activate(activation_input_for(
+            registered.node.id,
+            registered.token,
+            7,
+        ))
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("5 activations per 60 seconds"));
+}
+
+#[tokio::test]
 async fn remote_activation_pruning_retains_live_and_referenced_records() {
     let (cp, clock, _tmp) = cp_with_manual_clock(T0).await;
     let referenced = register_remote_node(&cp).await;

@@ -225,14 +225,20 @@ impl ControlPlane {
         let effective_cutoff = cutoff.min(quota_floor);
         let candidates = self
             .node_incarnations
-            .terminal_before_in_tx(&mut tx, node_id, effective_cutoff)
+            .terminal_before_in_tx(&mut tx, node_id, effective_cutoff, quota_floor)
             .await?;
         for candidate in candidates {
             self.workers
                 .prune_retired_for_incarnation_in_tx(&mut tx, candidate.id)
                 .await?;
             self.node_incarnations
-                .delete_terminal_if_empty_in_tx(&mut tx, node_id, candidate.id, effective_cutoff)
+                .delete_terminal_if_empty_in_tx(
+                    &mut tx,
+                    node_id,
+                    candidate.id,
+                    effective_cutoff,
+                    quota_floor,
+                )
                 .await?;
         }
         commit_tx(tx).await
