@@ -151,6 +151,15 @@ null. Successful completion sets the pointer, `retired_at`, and `epoch = epoch +
 Filtering by the pointer yields stable per-location evidence; its prior epoch is the checked
 persisted epoch minus one.
 
+Foreign keys do not prove reconciliation semantics. Every inspection read that follows either
+pointer uses checked joins. A root pointer must reference a `succeeded` session for that same root.
+A location pointer must reference a `succeeded` session for the location's root, the location must
+be retired with epoch at least one, its `retired_at` must equal the session's `terminal_at`, its ID
+must not exceed that session's high-water mark, and its locator must be absent from that session's
+observations. Session inspection also checks that the count of attributed location rows equals
+`retired_location_count`. Any violation is `VoomError::Database`, not an empty result or domain
+state.
+
 Migration 0036 is additive and runs under the normal migrator transaction. It adds the new SQL to
 `voom-store`'s embedded migrator and updates migration-count/schema tests. There is no down
 migration; rollback uses the pre-migration database and prior binary.
@@ -253,10 +262,14 @@ locators are absent from its observations. This conservative rule prevents concu
 publication from being mistaken for absence. A later complete session can reconcile them.
 
 Completion necessarily performs an O(number of pre-start live root locations) anti-join and
-update under SQLite's single writer. The implementation must include a release-mode scale test at
-the repository's supported root size and demonstrate completion within the existing 30-second API
-timeout. If it cannot, implementation stops for a design checkpoint; chunking is not an acceptable
-fallback because it would expose partially reconciled catalog state.
+update under SQLite's single writer. The supported bound for this slice is 100,000 live rooted
+locations. A release-mode scale gate creates one root with 100,000 distinct live rooted locations,
+accepts an empty traversal, and measures only the completion call; fixture creation and assertions
+are outside the timer. On both existing `ubuntu-latest` and `macos-latest` CI runners, three fresh-
+database repetitions must each complete within 25 seconds, leaving five seconds of the 30-second
+API deadline for routing and response work. Each repetition verifies 100,000 retirements, the
+session/root summary, and zero partial rows. Failure stops implementation for a design checkpoint;
+chunking is not an acceptable fallback because it would expose partially reconciled catalog state.
 
 ### Other terminal outcomes and stale recovery
 
@@ -442,6 +455,9 @@ is live.
   existing root and location rows, rejects invalid state shapes, and appears in schema probes.
 - Corrupt negative counters/epochs, unknown status, malformed timestamps, invalid locator/object
   identity, and impossible terminal shapes surface as database errors.
+- FK-valid reconciliation pointers to a wrong-root or non-succeeded session, mismatched terminal
+  and retirement timestamps, an above-watermark or observed attributed location, and a mismatched
+  retired count each surface as a database error before inspection returns domain data.
 
 ### Repository and transaction tests
 
@@ -466,8 +482,9 @@ is live.
   back the whole logical operation.
 - Reconciliation evidence pages by `retired_by_scan_session_id` in stable location-ID order and
   reports the derived prior and persisted retired epochs exactly.
-- A release-mode completion scale test at the supported root size finishes within the existing
-  30-second API timeout; failure triggers a design checkpoint rather than chunked reconciliation.
+- A release-mode completion gate with 100,000 absent pre-start locations runs three fresh-database
+  repetitions on both CI operating systems; every measured completion is at most 25 seconds and
+  retires exactly 100,000 rows, or implementation returns to design.
 
 ### API and CLI tests
 
