@@ -468,7 +468,7 @@ async fn request_snapshots_root_and_start_binds_incarnation_and_high_watermark()
         .execute(&pool)
         .await
         .unwrap();
-    let other_root_location = seed_rooted_location(&pool, other_root, "other.mkv").await;
+    seed_rooted_location(&pool, other_root, "other.mkv").await;
     seed_incarnation(&pool, "11111111111111111111111111111111").await;
     let repo = SqliteScanSessionRepo::new(pool.clone());
     let mut tx = pool.begin().await.unwrap();
@@ -488,9 +488,6 @@ async fn request_snapshots_root_and_start_binds_incarnation_and_high_watermark()
             &mut tx,
             requested.id,
             incarnation,
-            Some(voom_core::FileLocationId(
-                u64::try_from(other_root_location).unwrap(),
-            )),
             T0 + time::Duration::minutes(10),
             T0 + time::Duration::minutes(5),
         )
@@ -514,7 +511,6 @@ async fn request_snapshots_root_and_start_binds_incarnation_and_high_watermark()
             &mut tx,
             requested.id,
             incarnation,
-            None,
             T0 + time::Duration::minutes(10),
             T0 + time::Duration::minutes(5),
         )
@@ -651,6 +647,78 @@ async fn stale_expiry_is_set_based_at_the_exact_deadline_and_returns_post_transi
 }
 
 #[tokio::test]
+async fn stale_expiry_compares_valid_non_utc_deadlines_chronologically() {
+    let (pool, _tmp) = fresh_pool().await;
+    let root = seed_test_storage_root(&pool).await.unwrap();
+    let repo = SqliteScanSessionRepo::new(pool.clone());
+    let mut tx = pool.begin().await.unwrap();
+    let requested = repo
+        .insert_requested_in_tx(&mut tx, new_session(root))
+        .await
+        .unwrap();
+    sqlx::query("UPDATE scan_sessions SET progress_deadline_at = ? WHERE id = ?")
+        .bind("1970-01-01T01:00:00+01:00")
+        .bind(i64::try_from(requested.id.0).unwrap())
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+
+    let expired = repo.stale_expired_in_tx(&mut tx, T0).await.unwrap();
+
+    assert_eq!(expired.len(), 1);
+    assert_eq!(expired[0].id, requested.id);
+    assert_eq!(expired[0].status, ScanSessionStatus::Stale);
+}
+
+async fn assert_malformed_deadline_rejects_without_partial_staleness(deadline: &str) {
+    let (pool, _tmp) = fresh_pool().await;
+    let root = seed_test_storage_root(&pool).await.unwrap();
+    let other_root = seed_second_root(&pool).await;
+    let repo = SqliteScanSessionRepo::new(pool.clone());
+    let mut tx = pool.begin().await.unwrap();
+    let valid = repo
+        .insert_requested_in_tx(
+            &mut tx,
+            NewScanSession {
+                progress_deadline_at: T0,
+                ..new_session(root)
+            },
+        )
+        .await
+        .unwrap();
+    let malformed = repo
+        .insert_requested_in_tx(&mut tx, new_session(other_root))
+        .await
+        .unwrap();
+    sqlx::query("UPDATE scan_sessions SET progress_deadline_at = ? WHERE id = ?")
+        .bind(deadline)
+        .bind(i64::try_from(malformed.id.0).unwrap())
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+
+    let error = repo.stale_expired_in_tx(&mut tx, T0).await.unwrap_err();
+    assert!(matches!(error, VoomError::Database { .. }));
+    tx.commit().await.unwrap();
+
+    for id in [valid.id, malformed.id] {
+        let status: String = sqlx::query_scalar("SELECT status FROM scan_sessions WHERE id = ?")
+            .bind(i64::try_from(id.0).unwrap())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(status, "requested");
+    }
+}
+
+#[tokio::test]
+async fn stale_expiry_decodes_every_active_deadline_before_any_mutation() {
+    for deadline in ["0000-not-a-time", "zzzz-not-a-time"] {
+        assert_malformed_deadline_rejects_without_partial_staleness(deadline).await;
+    }
+}
+
+#[tokio::test]
 async fn batch_acceptance_replays_the_same_session_sequence_and_rejects_conflicts_without_rows() {
     let (pool, _tmp) = fresh_pool().await;
     let root = seed_test_storage_root(&pool).await.unwrap();
@@ -666,7 +734,6 @@ async fn batch_acceptance_replays_the_same_session_sequence_and_rejects_conflict
         &mut tx,
         session.id,
         incarnation,
-        None,
         T0 + time::Duration::minutes(10),
         T0 + time::Duration::minutes(5),
     )
@@ -766,7 +833,6 @@ async fn batch_locator_conflict_leaves_no_partial_ledger_row_when_the_caller_com
         &mut tx,
         session.id,
         "33333333333333333333333333333333".parse().unwrap(),
-        None,
         T0 + time::Duration::minutes(10),
         T0,
     )
@@ -840,7 +906,6 @@ async fn batch_rejections_and_cross_session_hash_reuse_preserve_each_sessions_co
             &mut tx,
             session,
             incarnation,
-            None,
             T0 + time::Duration::minutes(5),
             T0,
         )
@@ -933,7 +998,6 @@ async fn assert_batch_replay_rejects_corruption(case: BatchLedgerCorruption) {
         &mut tx,
         session.id,
         "66666666666666666666666666666666".parse().unwrap(),
-        None,
         T0 + time::Duration::minutes(5),
         T0,
     )
@@ -1227,6 +1291,36 @@ async fn reconciliation_rejects_limits_outside_one_through_one_hundred() {
 }
 
 #[tokio::test]
+async fn reconciliation_page_sql_is_indexed_bounded_and_set_based() {
+    let (pool, _tmp) = fresh_pool().await;
+    assert!(super::RECONCILIATION_PAGE_AFTER_SQL.contains("l.id > ?"));
+    assert!(super::RECONCILIATION_PAGE_AFTER_SQL.contains("LIMIT ?"));
+    assert!(super::RECONCILIATION_INVALID_SQL.contains("EXISTS"));
+    assert!(!super::RECONCILIATION_INVALID_SQL.contains("SELECT provider_relative_locator FROM"));
+
+    let explain_sql = format!(
+        "EXPLAIN QUERY PLAN {}",
+        super::RECONCILIATION_PAGE_AFTER_SQL
+    );
+    let rows = sqlx::query(&explain_sql)
+        .bind(1_i64)
+        .bind(1_i64)
+        .bind(2_i64)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+    let details = rows
+        .iter()
+        .map(|row| sqlx::Row::get::<String, _>(row, "detail"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        details.contains("file_locations_by_retired_scan_session"),
+        "query plan did not use reconciliation index: {details}"
+    );
+}
+
+#[tokio::test]
 async fn lifecycle_and_batch_mutations_remain_owned_by_the_callers_transaction() {
     let (pool, _tmp) = fresh_pool().await;
     let root = seed_test_storage_root(&pool).await.unwrap();
@@ -1241,7 +1335,6 @@ async fn lifecycle_and_batch_mutations_remain_owned_by_the_callers_transaction()
         &mut tx,
         session.id,
         "55555555555555555555555555555555".parse().unwrap(),
-        None,
         T0 + time::Duration::minutes(5),
         T0,
     )
