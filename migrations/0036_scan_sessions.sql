@@ -1,3 +1,6 @@
+CREATE UNIQUE INDEX file_locations_scan_watermark_root
+ON file_locations(id, storage_root_id);
+
 CREATE TABLE scan_sessions (
     id                          INTEGER PRIMARY KEY,
     storage_root_id             INTEGER NOT NULL
@@ -13,8 +16,7 @@ CREATE TABLE scan_sessions (
     observation_count           INTEGER NOT NULL DEFAULT 0 CHECK (observation_count >= 0),
     idle_timeout_seconds        INTEGER NOT NULL CHECK (idle_timeout_seconds BETWEEN 1 AND 86400),
     progress_deadline_at        TEXT NOT NULL,
-    location_high_watermark_id  INTEGER
-        REFERENCES file_locations(id) ON DELETE RESTRICT,
+    location_high_watermark_id  INTEGER,
     requested_at                TEXT NOT NULL,
     started_at                  TEXT,
     terminal_at                 TEXT,
@@ -32,6 +34,25 @@ CREATE TABLE scan_sessions (
     retired_location_count      INTEGER NOT NULL DEFAULT 0 CHECK (
         retired_location_count >= 0
         AND (status = 'succeeded' OR retired_location_count = 0)
+    ),
+    FOREIGN KEY (location_high_watermark_id, storage_root_id)
+        REFERENCES file_locations(id, storage_root_id) ON DELETE RESTRICT,
+    CHECK (
+        batch_count = next_sequence
+        AND (
+            (batch_count = 0 AND observation_count = 0)
+            OR (
+                batch_count > 0
+                AND observation_count >= batch_count
+                AND (
+                    observation_count / batch_count < 1000
+                    OR (
+                        observation_count / batch_count = 1000
+                        AND observation_count % batch_count = 0
+                    )
+                )
+            )
+        )
     ),
     CHECK (
         (status = 'requested'

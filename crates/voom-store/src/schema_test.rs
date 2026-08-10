@@ -158,6 +158,24 @@ async fn scan_session_schema_rejects_invalid_rows_and_preserves_byte_boundaries(
           '1970-01-01T00:00:00Z')",
     )
     .await;
+    assert_scan_session_rejected(
+        &pool,
+        "INSERT INTO scan_sessions (storage_root_id, root_epoch, owner_node_id, status, \
+         next_sequence, batch_count, observation_count, idle_timeout_seconds, \
+         progress_deadline_at, requested_at) VALUES \
+         (9000001, 1, 9000001, 'requested', 1, 0, 0, 300, \
+          '1970-01-01T00:05:00Z', '1970-01-01T00:00:00Z')",
+    )
+    .await;
+    assert_scan_session_rejected(
+        &pool,
+        "INSERT INTO scan_sessions (storage_root_id, root_epoch, owner_node_id, status, \
+         next_sequence, batch_count, observation_count, idle_timeout_seconds, \
+         progress_deadline_at, requested_at) VALUES \
+         (9000001, 1, 9000001, 'requested', 1, 1, 1001, 300, \
+          '1970-01-01T00:05:00Z', '1970-01-01T00:00:00Z')",
+    )
+    .await;
 
     let exact_multibyte = "é".repeat(512);
     sqlx::query(&format!(
@@ -199,6 +217,16 @@ async fn scan_session_schema_rejects_invalid_rows_and_preserves_byte_boundaries(
     .unwrap();
 
     seed_second_storage_root(&pool).await;
+    let other_root_location =
+        seed_live_rooted_location_for_root(&pool, 9_000_002, "scan-schema-other-root").await;
+    assert_scan_session_foreign_key_rejected(
+        &pool,
+        &format!(
+            "UPDATE scan_sessions SET location_high_watermark_id = {other_root_location} \
+             WHERE id = {active_session_id}"
+        ),
+    )
+    .await;
     sqlx::query(
         "INSERT INTO scan_sessions (storage_root_id, root_epoch, owner_node_id, status, \
          idle_timeout_seconds, progress_deadline_at, requested_at) VALUES \
@@ -268,6 +296,14 @@ async fn assert_scan_session_unique_rejected(pool: &sqlx::SqlitePool, sql: &str)
             .to_string()
             .contains("UNIQUE constraint failed: scan_sessions.storage_root_id"),
         "expected active-root unique index to reject a lifecycle-valid row, got {error:?}"
+    );
+}
+
+async fn assert_scan_session_foreign_key_rejected(pool: &sqlx::SqlitePool, sql: &str) {
+    let error = sqlx::query(sql).execute(pool).await.unwrap_err();
+    assert!(
+        error.to_string().contains("FOREIGN KEY constraint failed"),
+        "expected scan-session root binding foreign key to reject row, got {error:?}"
     );
 }
 
@@ -352,6 +388,14 @@ async fn assert_file_location_rejected(pool: &sqlx::SqlitePool, sql: &str) {
 }
 
 async fn seed_live_rooted_location(pool: &sqlx::SqlitePool) -> i64 {
+    seed_live_rooted_location_for_root(pool, 9_000_001, "scan-schema-fixture").await
+}
+
+async fn seed_live_rooted_location_for_root(
+    pool: &sqlx::SqlitePool,
+    storage_root_id: i64,
+    fixture_name: &str,
+) -> i64 {
     let asset_id = sqlx::query("INSERT INTO file_assets (created_at, epoch) VALUES (?, 0)")
         .bind("1970-01-01T00:00:00Z")
         .execute(pool)
@@ -361,9 +405,10 @@ async fn seed_live_rooted_location(pool: &sqlx::SqlitePool) -> i64 {
     let version_id = sqlx::query(
         "INSERT INTO file_versions (file_asset_id, content_hash, size_bytes, produced_by, \
          produced_from_version_id, created_at, retired_at, epoch) \
-         VALUES (?, 'scan-schema-fixture', 1, 'ingest', NULL, '1970-01-01T00:00:00Z', NULL, 0)",
+         VALUES (?, ?, 1, 'ingest', NULL, '1970-01-01T00:00:00Z', NULL, 0)",
     )
     .bind(asset_id)
+    .bind(fixture_name)
     .execute(pool)
     .await
     .unwrap()
@@ -371,10 +416,12 @@ async fn seed_live_rooted_location(pool: &sqlx::SqlitePool) -> i64 {
     sqlx::query(
         "INSERT INTO file_locations (file_version_id, address_state, storage_root_id, \
          provider_relative_locator, legacy_kind, legacy_locator, proof_kind, proof_value, \
-         observed_at, retired_at, epoch) VALUES (?, 'rooted', 9000001, 'scan-schema-fixture', \
+         observed_at, retired_at, epoch) VALUES (?, 'rooted', ?, ?, \
          NULL, NULL, NULL, NULL, '1970-01-01T00:00:00Z', NULL, 0)",
     )
     .bind(version_id)
+    .bind(storage_root_id)
+    .bind(fixture_name)
     .execute(pool)
     .await
     .unwrap()
