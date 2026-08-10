@@ -40,12 +40,12 @@ scan workers.
 
 ## Approaches considered
 
-### Chosen: normalized session, batch, observation, and reconciliation ledgers
+### Chosen: normalized session, batch, and observation ledgers
 
 Store session state and counters in one row, batch replay identity in one row per accepted batch,
-observations in scalar rows, and per-location reconciliation evidence in scalar rows. SQLite can
-then enforce session/sequence and session/locator uniqueness, join observations to rooted
-locations without decoding JSON, and paginate evidence deterministically.
+and observations in scalar rows. Successful completion tags each retained location row that it
+retires. SQLite can then enforce session/sequence and session/locator uniqueness, join
+observations to rooted locations without decoding JSON, and paginate evidence deterministically.
 
 ### Rejected: provisional stamps on `file_locations`
 
@@ -137,19 +137,19 @@ The six observation fields above are scalar columns. A unique constraint on
 boundaries. The repository validates every locator, size, and timestamp read from SQLite before
 returning a domain row or using it in reconciliation.
 
-### `scan_reconciled_locations`
-
-The primary key is `(scan_session_id, file_location_id)`. Each row records `prior_epoch`,
-`retired_epoch`, and `retired_at`, with FKs to the successful session and retained location row.
-Rows are inserted only by successful completion and are the paginated, per-location evidence for
-the absence decision.
-
-### Root pointer
+### Reconciliation pointers
 
 After creating the session table, migration 0036 adds nullable
 `library_roots.last_scan_session_id REFERENCES scan_sessions(id) ON DELETE RESTRICT`. Only the
 successful completion transaction updates it. Existing roots receive null; no historical scan is
 invented.
+
+Migration 0036 also adds nullable
+`file_locations.retired_by_scan_session_id REFERENCES scan_sessions(id) ON DELETE RESTRICT`.
+Existing locations receive null. A CHECK requires the pointer to be null while `retired_at` is
+null. Successful completion sets the pointer, `retired_at`, and `epoch = epoch + 1` together.
+Filtering by the pointer yields stable per-location evidence; its prior epoch is the checked
+persisted epoch minus one.
 
 Migration 0036 is additive and runs under the normal migrator transaction. It adds the new SQL to
 `voom-store`'s embedded migrator and updates migration-count/schema tests. There is no down
@@ -185,6 +185,13 @@ current incarnation, reserves the remote idempotency key, loads the session and 
 It captures the maximum ID of currently live rooted locations for that root, transitions to
 `running`, binds the incarnation, resets the progress deadline from the authoritative clock,
 appends `scan_session.started`, stores the replay outcome, and commits.
+
+The request transaction initializes `progress_deadline_at`. A successful start and each newly
+accepted contiguous batch reset it to authoritative `now + idle_timeout_seconds`; exact replays,
+rejected requests, and inspection do not. At `now >= progress_deadline_at`, the mutation first
+persists `stale` and its event, so expiry wins over start, batch, success, failure, and operator
+cancel. Before the boundary, immediate transactions serialize terminal outcomes and the first one
+to obtain the writer lock wins.
 
 ### Accept batch
 
@@ -232,15 +239,21 @@ recovery-required commit scope contains a candidate location. This extends the s
 query rather than copying its vocabulary. A conflict leaves the session running so the exact
 completion request can be retried.
 
-The transaction inserts the candidates and prior epochs into `scan_reconciled_locations`, updates
-exactly those live rows with one `retired_at` and `epoch + 1`, verifies affected-row counts, marks
-the session `succeeded`, updates the root's `last_scan_session_id`, appends one
+The transaction updates exactly those live rows with one `retired_at`,
+`retired_by_scan_session_id`, and `epoch + 1`, verifies affected-row counts, marks the session
+`succeeded`, updates the root's `last_scan_session_id`, appends one
 `scan_session.succeeded` summary, completes replay state, and commits. Any error rolls back every
-part, including evidence and events.
+part, including location provenance and events.
 
 Locations with IDs above the high-water mark are never retired by that session, even if their
 locators are absent from its observations. This conservative rule prevents concurrent
 publication from being mistaken for absence. A later complete session can reconcile them.
+
+Completion necessarily performs an O(number of pre-start live root locations) anti-join and
+update under SQLite's single writer. The implementation must include a release-mode scale test at
+the repository's supported root size and demonstrate completion within the existing 30-second API
+timeout. If it cannot, implementation stops for a design checkpoint; chunking is not an acceptable
+fallback because it would expose partially reconciled catalog state.
 
 ### Other terminal outcomes and stale recovery
 
@@ -263,7 +276,7 @@ and successful completion serialize under immediate transactions; exactly one wi
 
 `voom-core` owns `ScanSessionId` and `ScanSessionStatus`. `voom-store` adds
 `repo/scan/{mod,sessions}.rs` and owns checked row decoding, state-transition SQL, batch insertion,
-candidate/evidence queries, and keyset pagination. Its APIs preserve `StorageRootId`, `NodeId`,
+candidate/provenance queries, and keyset pagination. Its APIs preserve `StorageRootId`, `NodeId`,
 `NodeIncarnationId`, `FileLocationId`, `ProviderRelativeLocator`, and `ScanSessionId` across every
 boundary; they never flatten IDs into an intermediate primitive struct.
 
@@ -339,7 +352,7 @@ or completes scan work.
 - `scan_session.stale`.
 
 Payloads use core newtypes and `ScanSessionStatus`, reject unknown fields, and contain only the
-minimum lifecycle or count evidence. The observation rows and reconciliation ledger carry detail;
+minimum lifecycle or count evidence. The observation and retained location rows carry detail;
 events do not duplicate locator lists.
 
 Remote idempotency responses for start, batch, completion, and failure are typed strict roots.
@@ -380,8 +393,8 @@ reject negative or oversized SQLite integers before classification.
 - **New local operator boundary — CLI to SQLite-backed control-plane methods.** A local operator
   can request, inspect, and cancel sessions. This is the existing trusted local CLI deployment
   boundary; no unauthenticated HTTP operator mutation is added.
-- **New persisted-data boundary — SQLite to typed readers.** Session, observation, and
-  reconciliation rows may be corrupt or manually edited and are untrusted on every read.
+- **New persisted-data boundary — SQLite to typed readers.** Session, observation, and location
+  provenance rows may be corrupt or manually edited and are untrusted on every read.
 - **Existing log/output boundary.** Session metadata and failures reach API/CLI envelopes and
   tracing. Bearer tokens, request hashes, provider object identities, and full locator sets must
   not be logged.
@@ -421,8 +434,8 @@ is live.
 ### Domain and migration tests
 
 - `ScanSessionId` round-trips without flattening and every status token is exhaustive.
-- Migration 0036 creates all constraints/indexes, adds the root pointer, preserves existing root
-  and location rows, rejects invalid state shapes, and appears in schema probes.
+- Migration 0036 creates all constraints/indexes, adds the root and location pointers, preserves
+  existing root and location rows, rejects invalid state shapes, and appears in schema probes.
 - Corrupt negative counters/epochs, unknown status, malformed timestamps, invalid locator/object
   identity, and impossible terminal shapes surface as database errors.
 
@@ -443,9 +456,12 @@ is live.
   other root. A non-empty traversal keeps observed locations and retires unseen ones.
 - A location created above the start high-water mark remains live. A pending, authorized, or
   recovery-required commit lock makes completion retryable and leaves all candidates live.
-- Forced event, replay-completion, evidence-insert, location-update, session-update, and commit
-  failures each roll back the whole logical operation.
-- Reconciliation evidence pages in stable ID order and reports prior/retired epochs exactly.
+- Forced event, replay-completion, location-update, session-update, and commit failures each roll
+  back the whole logical operation.
+- Reconciliation evidence pages by `retired_by_scan_session_id` in stable location-ID order and
+  reports the derived prior and persisted retired epochs exactly.
+- A release-mode completion scale test at the supported root size finishes within the existing
+  30-second API timeout; failure triggers a design checkpoint rather than chunked reconciliation.
 
 ### API and CLI tests
 
