@@ -426,6 +426,100 @@ async fn exact_batch_replays_precede_deadline_and_new_batch_persists_stale_once(
 }
 
 #[tokio::test]
+async fn corrupt_batch_progress_is_database_and_repair_allows_the_same_key() {
+    let fixture = fixture().await;
+    let running = running_session(&fixture, 30).await;
+    fixture
+        .cp
+        .accept_scan_observation_batch(batch_input(
+            &fixture,
+            running.id,
+            0,
+            "corrupt-progress-baseline",
+            'a',
+        ))
+        .await
+        .unwrap();
+    let before_events = total_event_count(&fixture.cp).await;
+    let session_id = i64::try_from(running.id.0).unwrap();
+    with_check_constraints_disabled(fixture.cp.pool_for_test(), move |connection| {
+        Box::pin(async move {
+            sqlx::query(
+                "UPDATE scan_sessions SET next_sequence = 2, batch_count = 1, \
+                 observation_count = 1 WHERE id = ?",
+            )
+            .bind(session_id)
+            .execute(connection)
+            .await
+        })
+    })
+    .await
+    .unwrap();
+    let input = batch_input(&fixture, running.id, 1, "repairable-corruption", 'b');
+
+    let incoherent = fixture
+        .cp
+        .accept_scan_observation_batch(input.clone())
+        .await
+        .unwrap_err();
+    assert!(matches!(incoherent, voom_core::VoomError::Database { .. }));
+    assert_eq!(
+        replay_rows_for_key(&fixture.cp, "repairable-corruption").await,
+        0
+    );
+    assert_eq!(total_event_count(&fixture.cp).await, before_events);
+    assert_eq!(observation_count(&fixture.cp, running.id).await, 1);
+    assert_eq!(scan_progress(&fixture.cp, running.id).await, (2, 1, 1));
+
+    sqlx::query(
+        "UPDATE scan_sessions SET next_sequence = 2, batch_count = 2, \
+         observation_count = 2 WHERE id = ?",
+    )
+    .bind(session_id)
+    .execute(fixture.cp.pool_for_test())
+    .await
+    .unwrap();
+    let missing_ledger = fixture
+        .cp
+        .accept_scan_observation_batch(input.clone())
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        missing_ledger,
+        voom_core::VoomError::Database { .. }
+    ));
+    assert_eq!(
+        replay_rows_for_key(&fixture.cp, "repairable-corruption").await,
+        0
+    );
+    assert_eq!(total_event_count(&fixture.cp).await, before_events);
+    assert_eq!(observation_count(&fixture.cp, running.id).await, 1);
+    assert_eq!(scan_progress(&fixture.cp, running.id).await, (2, 2, 2));
+
+    sqlx::query(
+        "UPDATE scan_sessions SET next_sequence = 1, batch_count = 1, \
+         observation_count = 1 WHERE id = ?",
+    )
+    .bind(session_id)
+    .execute(fixture.cp.pool_for_test())
+    .await
+    .unwrap();
+    let accepted = fixture
+        .cp
+        .accept_scan_observation_batch(input)
+        .await
+        .unwrap();
+    assert_eq!(accepted.sequence, 1);
+    assert_eq!(accepted.cumulative_observation_count, 2);
+    assert_eq!(
+        replay_rows_for_key(&fixture.cp, "repairable-corruption").await,
+        1
+    );
+    assert_eq!(total_event_count(&fixture.cp).await, before_events + 1);
+    assert_eq!(observation_count(&fixture.cp, running.id).await, 2);
+}
+
+#[tokio::test]
 async fn deadline_boundary_makes_new_start_failure_and_cancel_stale() {
     let fixture = fixture().await;
     let start_root = fixture.root_id;
@@ -1052,6 +1146,54 @@ async fn complete_retires_only_unobserved_pre_start_locations_from_the_session_r
             .is_none()
     );
     assert!(location_retirement(&fixture.cp, other).await.0.is_none());
+}
+
+#[tokio::test]
+async fn complete_rejects_wrong_root_high_watermark_without_any_mutation() {
+    let fixture = fixture().await;
+    let pre_start = seed_rooted_location(&fixture.cp, fixture.root_id, "pre-start.mkv").await;
+    let running = running_session(&fixture, 30).await;
+    let post_start = seed_rooted_location(&fixture.cp, fixture.root_id, "post-start.mkv").await;
+    let other_root = create_root(&fixture.cp, fixture.node_id, "watermark-other").await;
+    let other = seed_rooted_location(&fixture.cp, other_root, "other-root.mkv").await;
+    let mut connection = fixture.cp.pool_for_test().acquire().await.unwrap();
+    connection.close_on_drop();
+    sqlx::query("PRAGMA foreign_keys = OFF")
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE scan_sessions SET location_high_watermark_id = ? WHERE id = ?")
+        .bind(i64::try_from(other).unwrap())
+        .bind(i64::try_from(running.id.0).unwrap())
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+    sqlx::query("PRAGMA foreign_keys = ON")
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+    connection.close().await.unwrap();
+    let before = lifecycle_snapshot(&fixture, running.id).await;
+    let input = complete_input(&fixture, running.id, "wrong-root-watermark", None, 0);
+
+    let error = fixture.cp.complete_scan_session(input).await.unwrap_err();
+
+    assert!(matches!(error, voom_core::VoomError::Database { .. }));
+    assert_lifecycle_unchanged(&fixture, running.id, &before).await;
+    for location in [pre_start, post_start, other] {
+        assert_eq!(
+            location_retirement(&fixture.cp, location).await,
+            (None, 0, None)
+        );
+    }
+    assert_eq!(
+        event_count(&fixture.cp, EventKind::ScanSessionSucceeded).await,
+        0
+    );
+    assert_eq!(
+        replay_rows_for_key(&fixture.cp, "wrong-root-watermark").await,
+        0
+    );
 }
 
 #[tokio::test]
@@ -2019,6 +2161,16 @@ async fn observation_count(cp: &crate::ControlPlane, id: ScanSessionId) -> i64 {
         .fetch_one(cp.pool_for_test())
         .await
         .unwrap()
+}
+
+async fn scan_progress(cp: &crate::ControlPlane, id: ScanSessionId) -> (i64, i64, i64) {
+    sqlx::query_as(
+        "SELECT next_sequence, batch_count, observation_count FROM scan_sessions WHERE id = ?",
+    )
+    .bind(i64::try_from(id.0).unwrap())
+    .fetch_one(cp.pool_for_test())
+    .await
+    .unwrap()
 }
 
 async fn completed_replay_count(cp: &crate::ControlPlane) -> i64 {

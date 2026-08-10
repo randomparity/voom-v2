@@ -336,6 +336,12 @@ impl SqliteScanSessionRepo {
                 input.scan_session_id
             )));
         };
+        if input.sequence < session.next_sequence {
+            return Err(VoomError::database(format!(
+                "scan session {} is missing accepted batch ledger sequence {} below next sequence {}",
+                session.id, input.sequence, session.next_sequence
+            )));
+        }
         if session.status != ScanSessionStatus::Running || session.next_sequence != input.sequence {
             return Err(VoomError::Conflict(format!(
                 "scan session {} expects running batch {}",
@@ -432,6 +438,7 @@ impl SqliteScanSessionRepo {
         input: CompleteScanSessionInput,
     ) -> Result<ScanCompletionRecord, VoomError> {
         let session = completion_session_in_tx(tx, &input).await?;
+        validate_completion_high_watermark_in_tx(tx, &session).await?;
         validate_completion_authority_binding(&session, &input)?;
         validate_completion_ledger_in_tx(tx, &session).await?;
         validate_completion_request_watermark(&session, &input)?;
@@ -1116,6 +1123,52 @@ fn completion_next_sequence(last_sequence: Option<u64>) -> Result<u64, VoomError
     })
 }
 
+async fn validate_completion_high_watermark_in_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    session: &ScanSession,
+) -> Result<(), VoomError> {
+    let Some(high_watermark_id) = session.location_high_watermark_id else {
+        return Ok(());
+    };
+    let row = sqlx::query("SELECT storage_root_id FROM file_locations WHERE id = ?")
+        .bind(i64_from_u64(
+            high_watermark_id.0,
+            "scan completion high-water location ID",
+        )?)
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(|error| {
+            VoomError::database_context("scan completion high-water root binding", error)
+        })?;
+    let Some(row) = row else {
+        return Err(VoomError::database(format!(
+            "scan session {} high-water location {high_watermark_id} is missing",
+            session.id
+        )));
+    };
+    let storage_root_id = row
+        .try_get::<Option<i64>, _>("storage_root_id")
+        .map_err(|error| map_row_err("scan completion high-water root binding", error))?
+        .ok_or_else(|| {
+            VoomError::database(format!(
+                "scan session {} high-water location {high_watermark_id} is not rooted",
+                session.id
+            ))
+        })?;
+    let storage_root_id = StorageRootId(u64_from_i64(
+        storage_root_id,
+        "scan completion high-water storage root ID",
+    )?);
+    if storage_root_id != session.storage_root_id {
+        return Err(VoomError::database(format!(
+            "scan session {} high-water location {high_watermark_id} belongs to root \
+             {storage_root_id}, not {}",
+            session.id, session.storage_root_id
+        )));
+    }
+    Ok(())
+}
+
 async fn completion_candidates_in_tx(
     tx: &mut Transaction<'_, Sqlite>,
     session: &ScanSession,
@@ -1337,6 +1390,12 @@ fn validate_scan_session(session: &ScanSession) -> Result<(), VoomError> {
             session.id.0
         )));
     }
+    if !has_coherent_progress_counters(session) {
+        return Err(VoomError::database(format!(
+            "scan_sessions {} has incoherent progress counters",
+            session.id.0
+        )));
+    }
     if has_valid_lifecycle_shape(session) {
         Ok(())
     } else {
@@ -1346,6 +1405,22 @@ fn validate_scan_session(session: &ScanSession) -> Result<(), VoomError> {
             session.status.as_str()
         )))
     }
+}
+
+fn has_coherent_progress_counters(session: &ScanSession) -> bool {
+    if session.batch_count != session.next_sequence {
+        return false;
+    }
+    if session.batch_count == 0 {
+        return session.observation_count == 0;
+    }
+    if session.observation_count < session.batch_count {
+        return false;
+    }
+    session
+        .batch_count
+        .checked_mul(1_000)
+        .is_none_or(|maximum| session.observation_count <= maximum)
 }
 
 fn has_valid_lifecycle_shape(session: &ScanSession) -> bool {

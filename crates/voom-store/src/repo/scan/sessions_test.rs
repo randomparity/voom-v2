@@ -124,6 +124,30 @@ async fn scan_session_row_decoder_rejects_isolated_persisted_corruption() {
              NULL AS location_high_watermark_id, '1970-01-01T00:00:00Z' AS requested_at, NULL AS started_at, \
              NULL AS terminal_at, NULL AS terminal_reason, 1 AS retired_location_count",
         ),
+        (
+            "batch count differs from next sequence",
+            "SELECT 1 AS id, 9000001 AS storage_root_id, 1 AS root_epoch, 9000001 AS owner_node_id, \
+             NULL AS owner_incarnation_id, 'requested' AS status, 1 AS next_sequence, 0 AS batch_count, \
+             0 AS observation_count, 300 AS idle_timeout_seconds, '1970-01-01T00:05:00Z' AS progress_deadline_at, \
+             NULL AS location_high_watermark_id, '1970-01-01T00:00:00Z' AS requested_at, NULL AS started_at, \
+             NULL AS terminal_at, NULL AS terminal_reason, 0 AS retired_location_count",
+        ),
+        (
+            "fewer observations than non-empty batches",
+            "SELECT 1 AS id, 9000001 AS storage_root_id, 1 AS root_epoch, 9000001 AS owner_node_id, \
+             NULL AS owner_incarnation_id, 'requested' AS status, 2 AS next_sequence, 2 AS batch_count, \
+             1 AS observation_count, 300 AS idle_timeout_seconds, '1970-01-01T00:05:00Z' AS progress_deadline_at, \
+             NULL AS location_high_watermark_id, '1970-01-01T00:00:00Z' AS requested_at, NULL AS started_at, \
+             NULL AS terminal_at, NULL AS terminal_reason, 0 AS retired_location_count",
+        ),
+        (
+            "more observations than bounded batches can contain",
+            "SELECT 1 AS id, 9000001 AS storage_root_id, 1 AS root_epoch, 9000001 AS owner_node_id, \
+             NULL AS owner_incarnation_id, 'requested' AS status, 1 AS next_sequence, 1 AS batch_count, \
+             1001 AS observation_count, 300 AS idle_timeout_seconds, '1970-01-01T00:05:00Z' AS progress_deadline_at, \
+             NULL AS location_high_watermark_id, '1970-01-01T00:00:00Z' AS requested_at, NULL AS started_at, \
+             NULL AS terminal_at, NULL AS terminal_reason, 0 AS retired_location_count",
+        ),
     ] {
         let row = sqlx::query(sql).fetch_one(&pool).await.unwrap();
         let error = super::row_to_scan_session(&row).unwrap_err();
@@ -1079,18 +1103,33 @@ async fn batch_rejections_and_cross_session_hash_reuse_preserve_each_sessions_co
             .unwrap_err(),
         VoomError::Conflict(_)
     ));
-    sqlx::query("UPDATE scan_sessions SET next_sequence = 2 WHERE id = ?")
-        .bind(i64::try_from(first.id.0).unwrap())
-        .execute(&mut *tx)
-        .await
-        .unwrap();
+    tx.commit().await.unwrap();
+    let first_id = i64::try_from(first.id.0).unwrap();
+    with_check_constraints_disabled(&pool, move |connection| {
+        Box::pin(async move {
+            sqlx::query("UPDATE scan_sessions SET next_sequence = 2 WHERE id = ?")
+                .bind(first_id)
+                .execute(connection)
+                .await
+        })
+    })
+    .await
+    .unwrap();
+    let mut tx = pool.begin().await.unwrap();
     let regression = batch(first.id, 1, 'd', vec![observation("regression.mkv")]);
     assert!(matches!(
         repo.accepted_batch_in_tx(&mut tx, regression)
             .await
             .unwrap_err(),
-        VoomError::Conflict(_)
+        VoomError::Database { .. }
     ));
+    tx.commit().await.unwrap();
+    sqlx::query("UPDATE scan_sessions SET next_sequence = 1 WHERE id = ?")
+        .bind(first_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let mut tx = pool.begin().await.unwrap();
 
     let batch_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM scan_observation_batches")
         .fetch_one(&mut *tx)
@@ -1177,6 +1216,89 @@ async fn batch_replay_validates_the_stored_hash_and_outcome_before_returning_it(
     ] {
         assert_batch_replay_rejects_corruption(case).await;
     }
+}
+
+#[tokio::test]
+async fn missing_batch_below_coherent_progress_is_database_and_repair_accepts_same_input() {
+    let (pool, _tmp) = fresh_pool().await;
+    let root = seed_test_storage_root(&pool).await.unwrap();
+    seed_incarnation(&pool, "77777777777777777777777777777777").await;
+    let repo = SqliteScanSessionRepo::new(pool.clone());
+    let mut tx = pool.begin().await.unwrap();
+    let session = repo
+        .insert_requested_in_tx(&mut tx, new_session(root))
+        .await
+        .unwrap();
+    repo.start_in_tx(
+        &mut tx,
+        session.id,
+        "77777777777777777777777777777777".parse().unwrap(),
+        T0 + time::Duration::minutes(5),
+        T0,
+    )
+    .await
+    .unwrap();
+    repo.accepted_batch_in_tx(
+        &mut tx,
+        batch(session.id, 0, 'a', vec![observation("present.mkv")]),
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+
+    let session_id = i64::try_from(session.id.0).unwrap();
+    with_check_constraints_disabled(&pool, move |connection| {
+        Box::pin(async move {
+            sqlx::query(
+                "UPDATE scan_sessions SET next_sequence = 2, batch_count = 2, \
+                 observation_count = 2 WHERE id = ?",
+            )
+            .bind(session_id)
+            .execute(connection)
+            .await
+        })
+    })
+    .await
+    .unwrap();
+
+    let input = batch(session.id, 1, 'b', vec![observation("repairable.mkv")]);
+    let mut tx = pool.begin().await.unwrap();
+    let error = repo
+        .accepted_batch_in_tx(&mut tx, input.clone())
+        .await
+        .unwrap_err();
+    assert!(matches!(error, VoomError::Database { .. }));
+    tx.commit().await.unwrap();
+    let counts: (i64, i64) = sqlx::query_as(
+        "SELECT COUNT(*), (SELECT COUNT(*) FROM scan_observations) \
+         FROM scan_observation_batches",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(counts, (1, 1));
+    let progress: (i64, i64, i64) = sqlx::query_as(
+        "SELECT next_sequence, batch_count, observation_count FROM scan_sessions WHERE id = ?",
+    )
+    .bind(session_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(progress, (2, 2, 2));
+
+    sqlx::query(
+        "UPDATE scan_sessions SET next_sequence = 1, batch_count = 1, \
+         observation_count = 1 WHERE id = ?",
+    )
+    .bind(session_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let mut tx = pool.begin().await.unwrap();
+    let outcome = repo.accepted_batch_in_tx(&mut tx, input).await.unwrap();
+    tx.commit().await.unwrap();
+    assert_eq!(outcome.sequence, 1);
+    assert_eq!(outcome.cumulative_observation_count, 2);
 }
 
 #[tokio::test]
