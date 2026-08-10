@@ -202,6 +202,37 @@ impl ControlPlane {
         self.node_incarnations.list_for_node(node_id, limit).await
     }
 
+    /// Prune eligible terminal activation history for one logical node.
+    ///
+    /// The effective cutoff never enters the active admission window. Referenced workers,
+    /// their owning incarnations, completed replay rows, and append-only events are retained.
+    ///
+    /// # Errors
+    ///
+    /// Propagates transaction, repository, timestamp, and persisted-data validation errors.
+    pub async fn prune_node_activation_history(
+        &self,
+        node_id: voom_core::NodeId,
+        cutoff: OffsetDateTime,
+    ) -> Result<(), VoomError> {
+        let mut tx = begin_immediate_tx(&self.pool).await?;
+        let quota_floor = self.clock().now() - ACTIVATION_WINDOW;
+        let effective_cutoff = cutoff.min(quota_floor);
+        let candidates = self
+            .node_incarnations
+            .terminal_before_in_tx(&mut tx, node_id, effective_cutoff)
+            .await?;
+        for candidate in candidates {
+            self.workers
+                .prune_retired_for_incarnation_in_tx(&mut tx, candidate.id)
+                .await?;
+            self.node_incarnations
+                .delete_terminal_if_empty_in_tx(&mut tx, node_id, candidate.id, effective_cutoff)
+                .await?;
+        }
+        commit_tx(tx).await
+    }
+
     async fn activate_manifest_in_tx(
         &self,
         tx: &mut Transaction<'_, Sqlite>,

@@ -151,6 +151,67 @@ impl SqliteNodeIncarnationRepo {
         activation_count_from_i64(count)
     }
 
+    /// List a node's terminal incarnations whose terminal timestamp precedes `cutoff`.
+    ///
+    /// # Errors
+    ///
+    /// Returns database/internal errors for query, timestamp, or persisted-data failures.
+    pub async fn terminal_before_in_tx(
+        &self,
+        tx: &mut Transaction<'_, Sqlite>,
+        node_id: NodeId,
+        cutoff: OffsetDateTime,
+    ) -> Result<Vec<NodeIncarnation>, VoomError> {
+        let rows = sqlx::query(
+            "SELECT ni.incarnation_id, ni.node_id, ni.status, ni.started_at, \
+             ni.last_seen_at, ni.ended_at, ni.end_reason, COUNT(w.id) AS worker_count \
+             FROM node_incarnations ni \
+             LEFT JOIN workers w ON w.node_incarnation_id = ni.incarnation_id \
+             WHERE ni.node_id = ? AND ni.status != 'active' AND ni.ended_at < ? \
+             GROUP BY ni.incarnation_id \
+             ORDER BY ni.ended_at ASC, ni.incarnation_id ASC",
+        )
+        .bind(i64_from_u64(node_id.0, "node incarnation prune node id")?)
+        .bind(iso8601(cutoff)?)
+        .fetch_all(&mut **tx)
+        .await
+        .map_err(|error| VoomError::database_context("node incarnation prune list", error))?;
+        rows.iter().map(row_to_incarnation).collect()
+    }
+
+    /// Delete one exact terminal incarnation only when it is old and owns no workers.
+    ///
+    /// # Errors
+    ///
+    /// Returns database/internal errors for query or timestamp failures.
+    pub async fn delete_terminal_if_empty_in_tx(
+        &self,
+        tx: &mut Transaction<'_, Sqlite>,
+        node_id: NodeId,
+        incarnation_id: NodeIncarnationId,
+        cutoff: OffsetDateTime,
+    ) -> Result<bool, VoomError> {
+        let result = sqlx::query(
+            "DELETE FROM node_incarnations \
+             WHERE node_id = ? AND incarnation_id = ? AND status != 'active' AND ended_at < ? \
+             AND NOT EXISTS (SELECT 1 FROM workers WHERE node_incarnation_id = ?)",
+        )
+        .bind(i64_from_u64(node_id.0, "node incarnation prune node id")?)
+        .bind(incarnation_id.to_string())
+        .bind(iso8601(cutoff)?)
+        .bind(incarnation_id.to_string())
+        .execute(&mut **tx)
+        .await
+        .map_err(|error| VoomError::database_context("node incarnation prune delete", error))?;
+        match result.rows_affected() {
+            0 => Ok(false),
+            1 => Ok(true),
+            count => Err(VoomError::database(format!(
+                "node incarnation prune deleted {count} rows for {incarnation_id}"
+            ))),
+        }
+    }
+
     /// Update the last-seen timestamp for an active incarnation.
     ///
     /// # Errors

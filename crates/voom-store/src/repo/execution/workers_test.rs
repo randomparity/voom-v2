@@ -96,6 +96,202 @@ async fn bind_count_and_retire_incarnation_workers_preserve_typed_ownership() {
 }
 
 #[tokio::test]
+async fn prune_retired_incarnation_workers_deletes_only_unreferenced_owned_rows() {
+    let (pool, _tmp) = pool().await;
+    let node = register_test_node(&pool, "prune-worker-node").await;
+    let incarnation_id = NodeIncarnationId::from_str("5123456789abcdef0123456789abcdef").unwrap();
+    let incarnations = SqliteNodeIncarnationRepo::new(pool.clone());
+    let workers = SqliteWorkerRepo::new(pool.clone());
+    let mut tx = pool.begin().await.unwrap();
+    incarnations
+        .insert_in_tx(
+            &mut tx,
+            NewNodeIncarnation {
+                id: incarnation_id,
+                node_id: node.id,
+                started_at: T0,
+            },
+        )
+        .await
+        .unwrap();
+    let retired = workers
+        .register_in_tx(
+            &mut tx,
+            NewWorker {
+                name: "prune-retired".to_owned(),
+                kind: WorkerKind::Remote,
+                registered_at: T0,
+                node_id: Some(node.id),
+            },
+        )
+        .await
+        .unwrap();
+    workers
+        .bind_incarnation_in_tx(&mut tx, retired.id, node.id, incarnation_id)
+        .await
+        .unwrap();
+    workers
+        .retire_in_tx(&mut tx, retired.id, retired.epoch, T0)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO worker_capabilities \
+         (worker_id, operation, codecs, hardware, artifact_access, extra) \
+         VALUES (?, 'probe', '[]', '[]', '[]', '{}')",
+    )
+    .bind(i64::try_from(retired.id.0).unwrap())
+    .execute(&mut *tx)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO worker_grants \
+         (worker_id, can_execute, can_access_read, can_access_write, denies, max_parallel) \
+         VALUES (?, '[]', '[]', '[]', '[]', '{}')",
+    )
+    .bind(i64::try_from(retired.id.0).unwrap())
+    .execute(&mut *tx)
+    .await
+    .unwrap();
+    let live = workers
+        .register_in_tx(
+            &mut tx,
+            NewWorker {
+                name: "prune-live".to_owned(),
+                kind: WorkerKind::Remote,
+                registered_at: T0,
+                node_id: Some(node.id),
+            },
+        )
+        .await
+        .unwrap();
+    workers
+        .bind_incarnation_in_tx(&mut tx, live.id, node.id, incarnation_id)
+        .await
+        .unwrap();
+    let referenced = workers
+        .register_in_tx(
+            &mut tx,
+            NewWorker {
+                name: "prune-referenced".to_owned(),
+                kind: WorkerKind::Remote,
+                registered_at: T0,
+                node_id: Some(node.id),
+            },
+        )
+        .await
+        .unwrap();
+    workers
+        .bind_incarnation_in_tx(&mut tx, referenced.id, node.id, incarnation_id)
+        .await
+        .unwrap();
+    workers
+        .retire_in_tx(&mut tx, referenced.id, referenced.epoch, T0)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO remote_idempotency_keys \
+         (node_id, route_key, worker_scope_id, worker_id, idempotency_key, request_hash, \
+          response_json, status, created_at) \
+         VALUES (?, 'test', ?, ?, 'retain', 'hash', '{}', 'completed', ?)",
+    )
+    .bind(i64::try_from(node.id.0).unwrap())
+    .bind(i64::try_from(referenced.id.0).unwrap())
+    .bind(i64::try_from(referenced.id.0).unwrap())
+    .bind(T0.to_string())
+    .execute(&mut *tx)
+    .await
+    .unwrap();
+
+    assert_eq!(
+        workers
+            .prune_retired_for_incarnation_in_tx(&mut tx, incarnation_id)
+            .await
+            .unwrap(),
+        1
+    );
+    assert!(
+        super::get_in_tx(&mut tx, retired.id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(super::get_in_tx(&mut tx, live.id).await.unwrap().is_some());
+    assert!(
+        super::get_in_tx(&mut tx, referenced.id)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    let owned_rows: i64 = sqlx::query_scalar(
+        "SELECT (SELECT COUNT(*) FROM worker_capabilities WHERE worker_id = ?) + \
+                (SELECT COUNT(*) FROM worker_grants WHERE worker_id = ?)",
+    )
+    .bind(i64::try_from(retired.id.0).unwrap())
+    .bind(i64::try_from(retired.id.0).unwrap())
+    .fetch_one(&mut *tx)
+    .await
+    .unwrap();
+    assert_eq!(owned_rows, 0);
+}
+
+#[tokio::test]
+async fn worker_foreign_key_actions_preserve_pruning_audit_holds() {
+    let (pool, _tmp) = pool().await;
+    let tables: Vec<String> = sqlx::query_scalar(
+        "SELECT name FROM sqlite_schema WHERE type = 'table' AND name NOT LIKE 'sqlite_%'",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    let mut cascade = Vec::new();
+    let mut set_null = Vec::new();
+    let mut restrict = Vec::new();
+    for table in tables {
+        assert!(
+            table
+                .chars()
+                .all(|character| character.is_ascii_alphanumeric() || character == '_')
+        );
+        let rows = sqlx::query(&format!("PRAGMA foreign_key_list(\"{table}\")"))
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        for row in rows {
+            let referenced_table: String = row.try_get("table").unwrap();
+            if referenced_table != "workers" {
+                continue;
+            }
+            let from: String = row.try_get("from").unwrap();
+            let to: String = row.try_get("to").unwrap();
+            assert_eq!(to, "id");
+            let edge = format!("{table}.{from}");
+            let on_delete: String = row.try_get("on_delete").unwrap();
+            match on_delete.as_str() {
+                "CASCADE" => cascade.push(edge),
+                "SET NULL" => set_null.push(edge),
+                "RESTRICT" => restrict.push(edge),
+                action => panic!("unexpected worker foreign-key delete action {action}: {edge}"),
+            }
+        }
+    }
+    cascade.sort();
+    set_null.sort();
+    restrict.sort();
+    assert_eq!(
+        cascade,
+        ["worker_capabilities.worker_id", "worker_grants.worker_id"]
+    );
+    assert_eq!(
+        set_null,
+        [
+            "scheduler_decisions.request_worker_id",
+            "scheduler_decisions.selected_worker_id"
+        ]
+    );
+    assert!(!restrict.is_empty());
+}
+
+#[tokio::test]
 async fn worker_reads_reject_node_incarnation_owner_disagreement() {
     let (pool, _tmp) = pool().await;
     let owner = register_test_node(&pool, "owner").await;

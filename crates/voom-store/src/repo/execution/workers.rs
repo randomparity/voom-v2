@@ -1,7 +1,7 @@
 //! `SqliteWorkerRepo` — owns workers + `worker_capabilities` + `worker_grants`.
 
 use serde_json::Value as JsonValue;
-use sqlx::{QueryBuilder, Row, SqlitePool};
+use sqlx::{QueryBuilder, Row, SqlitePool, error::ErrorKind};
 use time::OffsetDateTime;
 use voom_core::{
     NodeId, NodeIncarnationId, NodeIncarnationStatus, OperationKind, TicketOperation, VoomError,
@@ -455,6 +455,81 @@ impl SqliteWorkerRepo {
             retired.push(self.retire_in_tx(tx, id, worker.epoch, now).await?);
         }
         Ok(retired)
+    }
+
+    /// Delete retired workers for an incarnation when no audit/reference row retains them.
+    ///
+    /// Scheduler decisions are explicit retention holds even though their foreign keys use
+    /// `SET NULL`. Other references are retained by `SQLite` `RESTRICT`; capability and grant
+    /// ownership rows cascade with an eligible worker.
+    ///
+    /// # Errors
+    ///
+    /// Returns database errors for query failures and corrupt worker identifiers/counts.
+    pub async fn prune_retired_for_incarnation_in_tx(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        incarnation_id: NodeIncarnationId,
+    ) -> Result<u32, VoomError> {
+        let rows = sqlx::query(
+            "SELECT id FROM workers \
+             WHERE node_incarnation_id = ? AND status = 'retired' ORDER BY id ASC",
+        )
+        .bind(incarnation_id.to_string())
+        .fetch_all(&mut **tx)
+        .await
+        .map_err(|error| {
+            VoomError::database_context("worker activation-history prune list", error)
+        })?;
+        let mut deleted = 0_u32;
+        for row in rows {
+            let raw_id: i64 = row
+                .try_get("id")
+                .map_err(|error| map_row_err("worker activation-history prune id", error))?;
+            let id = WorkerId(u64_from_i64(raw_id, "worker activation-history prune id")?);
+            let scheduler_hold: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM scheduler_decisions \
+                 WHERE request_worker_id = ? OR selected_worker_id = ?",
+            )
+            .bind(raw_id)
+            .bind(raw_id)
+            .fetch_one(&mut **tx)
+            .await
+            .map_err(|error| {
+                VoomError::database_context("worker activation-history prune scheduler hold", error)
+            })?;
+            if scheduler_hold != 0 {
+                continue;
+            }
+            match sqlx::query("DELETE FROM workers WHERE id = ? AND status = 'retired'")
+                .bind(raw_id)
+                .execute(&mut **tx)
+                .await
+            {
+                Ok(result) => {
+                    let affected = u32::try_from(result.rows_affected()).map_err(|_| {
+                        VoomError::database(format!(
+                            "worker activation-history prune count overflow for {id}"
+                        ))
+                    })?;
+                    deleted = deleted.checked_add(affected).ok_or_else(|| {
+                        VoomError::database("worker activation-history prune count overflow")
+                    })?;
+                }
+                Err(error)
+                    if error.as_database_error().is_some_and(|database| {
+                        database.kind() == ErrorKind::ForeignKeyViolation
+                            || database.message() == "FOREIGN KEY constraint failed"
+                    }) => {}
+                Err(error) => {
+                    return Err(VoomError::database_context(
+                        "worker activation-history prune delete",
+                        error,
+                    ));
+                }
+            }
+        }
+        Ok(deleted)
     }
 
     /// Record a worker capability in the caller's transaction.
