@@ -1463,6 +1463,160 @@ async fn completion_compare_and_set_rejects_non_running_session_without_reconcil
 }
 
 #[derive(Clone, Copy)]
+enum CompletionLedgerCorruption {
+    ResidualRowsWithResetCounters,
+    BatchAndSessionCountsExceedActual,
+    InvalidObservationLocator,
+}
+
+async fn corrupt_completion_ledger(
+    pool: &sqlx::SqlitePool,
+    session: ScanSessionId,
+    case: CompletionLedgerCorruption,
+) {
+    let session_id = i64::try_from(session.0).unwrap();
+    match case {
+        CompletionLedgerCorruption::ResidualRowsWithResetCounters => {
+            sqlx::query(
+                "UPDATE scan_sessions SET next_sequence = 0, batch_count = 0, \
+                 observation_count = 0 WHERE id = ?",
+            )
+            .bind(session_id)
+            .execute(pool)
+            .await
+            .unwrap();
+        }
+        CompletionLedgerCorruption::BatchAndSessionCountsExceedActual => {
+            sqlx::query(
+                "UPDATE scan_observation_batches SET observation_count = 2, \
+                 cumulative_observation_count = 2 WHERE scan_session_id = ?",
+            )
+            .bind(session_id)
+            .execute(pool)
+            .await
+            .unwrap();
+            sqlx::query("UPDATE scan_sessions SET observation_count = 2 WHERE id = ?")
+                .bind(session_id)
+                .execute(pool)
+                .await
+                .unwrap();
+        }
+        CompletionLedgerCorruption::InvalidObservationLocator => {
+            with_check_constraints_disabled(pool, |connection| {
+                Box::pin(async move {
+                    sqlx::query(
+                        "UPDATE scan_observations SET provider_relative_locator = '/corrupt' \
+                         WHERE scan_session_id = ?",
+                    )
+                    .bind(session_id)
+                    .execute(connection)
+                    .await
+                })
+            })
+            .await
+            .unwrap();
+        }
+    }
+}
+
+fn corrupted_completion_watermark(case: CompletionLedgerCorruption) -> (Option<u64>, u64) {
+    match case {
+        CompletionLedgerCorruption::ResidualRowsWithResetCounters => (None, 0),
+        CompletionLedgerCorruption::BatchAndSessionCountsExceedActual => (Some(0), 2),
+        CompletionLedgerCorruption::InvalidObservationLocator => (Some(0), 1),
+    }
+}
+
+async fn assert_completion_rejects_ledger_corruption(case: CompletionLedgerCorruption) {
+    let (pool, _tmp) = fresh_pool().await;
+    let root = seed_test_storage_root(&pool).await.unwrap();
+    let observed = seed_rooted_location(&pool, root, "observed.mkv").await;
+    let absent = seed_rooted_location(&pool, root, "absent.mkv").await;
+    let incarnation = "77777777777777777777777777777777";
+    seed_incarnation(&pool, incarnation).await;
+    let incarnation_id = incarnation.parse().unwrap();
+    let repo = SqliteScanSessionRepo::new(pool.clone());
+    let mut tx = pool.begin().await.unwrap();
+    let session = repo
+        .insert_requested_in_tx(&mut tx, new_session(root))
+        .await
+        .unwrap();
+    repo.start_in_tx(
+        &mut tx,
+        session.id,
+        incarnation_id,
+        T0 + time::Duration::minutes(5),
+        T0,
+    )
+    .await
+    .unwrap();
+    repo.accepted_batch_in_tx(
+        &mut tx,
+        batch(session.id, 0, 'a', vec![observation("observed.mkv")]),
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    corrupt_completion_ledger(&pool, session.id, case).await;
+
+    let (last_sequence, observation_count) = corrupted_completion_watermark(case);
+    let mut tx = pool.begin().await.unwrap();
+    let error = repo
+        .complete_in_tx(
+            &mut tx,
+            CompleteScanSessionInput {
+                scan_session_id: session.id,
+                expected_storage_root_id: root,
+                expected_root_epoch: 1,
+                expected_owner_node_id: NodeId(9_000_001),
+                expected_owner_incarnation_id: incarnation_id,
+                last_sequence,
+                observation_count,
+                completed_at: T0 + time::Duration::minutes(2),
+            },
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(error, VoomError::Database { .. }));
+    let state: (String, Option<String>, i64) = sqlx::query_as(
+        "SELECT status, terminal_at, retired_location_count FROM scan_sessions WHERE id = ?",
+    )
+    .bind(i64::try_from(session.id.0).unwrap())
+    .fetch_one(&mut *tx)
+    .await
+    .unwrap();
+    assert_eq!(state, ("running".to_owned(), None, 0));
+    let retired: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM file_locations WHERE id IN (?, ?) AND retired_at IS NOT NULL",
+    )
+    .bind(observed)
+    .bind(absent)
+    .fetch_one(&mut *tx)
+    .await
+    .unwrap();
+    assert_eq!(retired, 0);
+    let pointer: Option<i64> =
+        sqlx::query_scalar("SELECT last_scan_session_id FROM library_roots WHERE id = ?")
+            .bind(i64::try_from(root.0).unwrap())
+            .fetch_one(&mut *tx)
+            .await
+            .unwrap();
+    assert_eq!(pointer, None);
+    tx.rollback().await.unwrap();
+}
+
+#[tokio::test]
+async fn completion_rejects_incoherent_or_invalid_persisted_traversal_evidence() {
+    for case in [
+        CompletionLedgerCorruption::ResidualRowsWithResetCounters,
+        CompletionLedgerCorruption::BatchAndSessionCountsExceedActual,
+        CompletionLedgerCorruption::InvalidObservationLocator,
+    ] {
+        assert_completion_rejects_ledger_corruption(case).await;
+    }
+}
+
+#[derive(Clone, Copy)]
 enum RootPointerCorruption {
     WrongRoot,
     NonSuccess,

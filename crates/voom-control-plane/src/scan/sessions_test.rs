@@ -897,20 +897,25 @@ async fn complete_rejects_wrong_final_sequence_or_count_without_reconciliation()
         let fixture = fixture().await;
         let location = seed_rooted_location(&fixture.cp, fixture.root_id, "still-live.mkv").await;
         let running = running_session(&fixture, 30).await;
+        let input = complete_input(
+            &fixture,
+            running.id,
+            "bad-watermark",
+            last_sequence,
+            observation_count,
+        );
 
         let error = fixture
             .cp
-            .complete_scan_session(complete_input(
-                &fixture,
-                running.id,
-                "bad-watermark",
-                last_sequence,
-                observation_count,
-            ))
+            .complete_scan_session(input.clone())
             .await
             .unwrap_err();
 
         assert_eq!(error.error_code(), ErrorCode::Conflict);
+        assert_eq!(replay_rows_for_key(&fixture.cp, "bad-watermark").await, 1);
+        let replayed = fixture.cp.complete_scan_session(input).await.unwrap_err();
+        assert_eq!(replayed.error_code(), ErrorCode::Conflict);
+        assert_eq!(replay_rows_for_key(&fixture.cp, "bad-watermark").await, 1);
         assert_eq!(
             fixture.cp.scan_session(running.id).await.unwrap().status,
             ScanSessionStatus::Running
@@ -1081,15 +1086,10 @@ async fn complete_commit_locks_are_retryable_and_leave_the_session_running() {
         let running = running_session(&fixture, 30).await;
         let commit_id = seed_completion_commit_lock(&fixture.cp, location, state).await;
 
+        let input = complete_input(&fixture, running.id, "locked-completion", None, 0);
         let error = fixture
             .cp
-            .complete_scan_session(complete_input(
-                &fixture,
-                running.id,
-                "locked-completion",
-                None,
-                0,
-            ))
+            .complete_scan_session(input.clone())
             .await
             .unwrap_err();
 
@@ -1104,24 +1104,23 @@ async fn complete_commit_locks_are_retryable_and_leave_the_session_running() {
             reconciliation_pointer(&fixture.cp, fixture.root_id).await,
             None
         );
+        assert_eq!(
+            replay_rows_for_key(&fixture.cp, "locked-completion").await,
+            0
+        );
 
         sqlx::query("DELETE FROM commit_intents WHERE id = ?")
             .bind(commit_id)
             .execute(fixture.cp.pool_for_test())
             .await
             .unwrap();
-        let retried = fixture
-            .cp
-            .complete_scan_session(complete_input(
-                &fixture,
-                running.id,
-                "retry-completion",
-                None,
-                0,
-            ))
-            .await
-            .unwrap();
+        let retried = fixture.cp.complete_scan_session(input).await.unwrap();
         assert_eq!(retried.status, ScanSessionStatus::Succeeded, "{state}");
+        assert_eq!(
+            event_count(&fixture.cp, EventKind::ScanSessionSucceeded).await,
+            1,
+            "{state}"
+        );
     }
 }
 

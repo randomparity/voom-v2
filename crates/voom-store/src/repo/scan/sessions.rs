@@ -381,6 +381,7 @@ impl SqliteScanSessionRepo {
     ) -> Result<ScanCompletionRecord, VoomError> {
         let session = completion_session_in_tx(tx, &input).await?;
         validate_completion_binding(&session, &input)?;
+        validate_completion_ledger_in_tx(tx, &session).await?;
         let candidates = completion_candidates_in_tx(tx, &session).await?;
         if let Some((commit_id, location_id)) = consult_scan_reconciliation_commit_lock_in_tx(
             tx,
@@ -390,10 +391,11 @@ impl SqliteScanSessionRepo {
         )
         .await?
         {
-            return Err(VoomError::Conflict(format!(
-                "scan session {} cannot reconcile location {location_id} while commit {commit_id} is in flight",
-                session.id
-            )));
+            return Err(completion_commit_lock_conflict(
+                session.id,
+                commit_id,
+                location_id,
+            ));
         }
         retire_completion_candidates_in_tx(tx, &session, &input, candidates.len()).await?;
         let session =
@@ -760,6 +762,36 @@ const RETIRE_COMPLETION_CANDIDATES_SQL: &str = "WITH completion_scope(storage_ro
              AND observation.provider_relative_locator = file_locations.provider_relative_locator \
        )";
 
+const COMPLETION_LEDGER_PAGE_SIZE: i64 = 256;
+const COMPLETION_BATCH_PAGE_SQL: &str = "SELECT sequence, request_hash, observation_count, \
+     accepted_at, cumulative_observation_count FROM scan_observation_batches \
+     WHERE scan_session_id = ? AND (? IS NULL OR sequence > ?) \
+     ORDER BY sequence ASC LIMIT ?";
+const COMPLETION_OBSERVATION_PAGE_SQL: &str = "SELECT batch_sequence, ordinal, \
+     provider_relative_locator, provider_object_identity, size_bytes, modified_at, \
+     stability_started_at, stability_confirmed_at FROM scan_observations \
+     WHERE scan_session_id = ? AND (? IS NULL OR batch_sequence > ? \
+       OR (batch_sequence = ? AND ordinal > ?)) \
+     ORDER BY batch_sequence ASC, ordinal ASC LIMIT ?";
+const COMPLETION_OBSERVATION_DISTRIBUTION_SQL: &str = "SELECT (EXISTS( \
+     SELECT 1 FROM scan_observation_batches AS batch \
+     LEFT JOIN scan_observations AS observation \
+       ON observation.scan_session_id = batch.scan_session_id \
+      AND observation.batch_sequence = batch.sequence \
+     WHERE batch.scan_session_id = ? \
+     GROUP BY batch.sequence, batch.observation_count \
+     HAVING COUNT(observation.ordinal) != batch.observation_count \
+        OR MIN(observation.ordinal) != 0 \
+        OR MAX(observation.ordinal) != batch.observation_count - 1 \
+     ) OR EXISTS( \
+     SELECT 1 FROM scan_observations AS observation \
+     LEFT JOIN scan_observation_batches AS batch \
+       ON batch.scan_session_id = observation.scan_session_id \
+      AND batch.sequence = observation.batch_sequence \
+     WHERE observation.scan_session_id = ? AND batch.sequence IS NULL))";
+
+const COMPLETION_COMMIT_LOCK_PREFIX: &str = "transient scan completion commit lock: ";
+
 async fn completion_session_in_tx(
     tx: &mut Transaction<'_, Sqlite>,
     input: &CompleteScanSessionInput,
@@ -802,6 +834,197 @@ fn validate_completion_binding(
         )));
     }
     Ok(())
+}
+
+#[derive(Clone, Copy)]
+struct CompletionLedgerSummary {
+    batch_count: u64,
+    observation_count: u64,
+}
+
+async fn validate_completion_ledger_in_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    session: &ScanSession,
+) -> Result<(), VoomError> {
+    if session.batch_count != session.next_sequence {
+        return Err(invalid_completion_ledger(
+            session,
+            "batch count does not equal next sequence",
+        ));
+    }
+    let summary = validate_completion_batches_in_tx(tx, session).await?;
+    if summary.batch_count != session.batch_count
+        || summary.observation_count != session.observation_count
+    {
+        return Err(invalid_completion_ledger(
+            session,
+            "batch totals do not equal session counters",
+        ));
+    }
+    validate_completion_observation_distribution_in_tx(tx, session).await?;
+    let actual = validate_completion_observations_in_tx(tx, session).await?;
+    if actual != summary.observation_count {
+        return Err(invalid_completion_ledger(
+            session,
+            "observation rows do not equal accepted batch totals",
+        ));
+    }
+    Ok(())
+}
+
+async fn validate_completion_batches_in_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    session: &ScanSession,
+) -> Result<CompletionLedgerSummary, VoomError> {
+    let session_id = i64_from_u64(session.id.0, "scan completion session ID")?;
+    let mut after_sequence = None;
+    let mut summary = CompletionLedgerSummary {
+        batch_count: 0,
+        observation_count: 0,
+    };
+    loop {
+        let rows = sqlx::query(COMPLETION_BATCH_PAGE_SQL)
+            .bind(session_id)
+            .bind(after_sequence)
+            .bind(after_sequence)
+            .bind(COMPLETION_LEDGER_PAGE_SIZE)
+            .fetch_all(&mut **tx)
+            .await
+            .map_err(|error| VoomError::database_context("scan completion batch ledger", error))?;
+        if rows.is_empty() {
+            return Ok(summary);
+        }
+        for row in &rows {
+            let sequence = checked_u64(row, "sequence")?;
+            if sequence != summary.batch_count {
+                return Err(invalid_completion_ledger(
+                    session,
+                    "batch sequence is not contiguous",
+                ));
+            }
+            validate_completion_batch_row(row, session, &mut summary)?;
+            after_sequence = Some(i64_from_u64(sequence, "scan batch sequence")?);
+        }
+    }
+}
+
+fn validate_completion_batch_row(
+    row: &sqlx::sqlite::SqliteRow,
+    session: &ScanSession,
+    summary: &mut CompletionLedgerSummary,
+) -> Result<(), VoomError> {
+    let request_hash = string_column(row, "request_hash")?;
+    if !is_lowercase_sha256(&request_hash) {
+        return Err(invalid_completion_ledger(
+            session,
+            "batch request hash is invalid",
+        ));
+    }
+    timestamp_column(row, "accepted_at")?;
+    let count = checked_u64(row, "observation_count")?;
+    if !(1..=1_000).contains(&count) {
+        return Err(invalid_completion_ledger(
+            session,
+            "batch observation count is invalid",
+        ));
+    }
+    summary.observation_count = summary
+        .observation_count
+        .checked_add(count)
+        .ok_or_else(|| invalid_completion_ledger(session, "observation count overflow"))?;
+    let cumulative = checked_u64(row, "cumulative_observation_count")?;
+    if cumulative != summary.observation_count {
+        return Err(invalid_completion_ledger(
+            session,
+            "batch cumulative count is invalid",
+        ));
+    }
+    summary.batch_count = summary
+        .batch_count
+        .checked_add(1)
+        .ok_or_else(|| invalid_completion_ledger(session, "batch count overflow"))?;
+    Ok(())
+}
+
+async fn validate_completion_observation_distribution_in_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    session: &ScanSession,
+) -> Result<(), VoomError> {
+    let invalid: i64 = sqlx::query_scalar(COMPLETION_OBSERVATION_DISTRIBUTION_SQL)
+        .bind(i64_from_u64(session.id.0, "scan completion session ID")?)
+        .bind(i64_from_u64(session.id.0, "scan completion session ID")?)
+        .fetch_one(&mut **tx)
+        .await
+        .map_err(|error| {
+            VoomError::database_context("scan completion observation distribution", error)
+        })?;
+    if invalid != 0 {
+        return Err(invalid_completion_ledger(
+            session,
+            "observation rows do not agree with their batches",
+        ));
+    }
+    Ok(())
+}
+
+async fn validate_completion_observations_in_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    session: &ScanSession,
+) -> Result<u64, VoomError> {
+    let session_id = i64_from_u64(session.id.0, "scan completion session ID")?;
+    let mut after_sequence = None;
+    let mut after_ordinal = None;
+    let mut actual = 0_u64;
+    loop {
+        let rows = sqlx::query(COMPLETION_OBSERVATION_PAGE_SQL)
+            .bind(session_id)
+            .bind(after_sequence)
+            .bind(after_sequence)
+            .bind(after_sequence)
+            .bind(after_ordinal)
+            .bind(COMPLETION_LEDGER_PAGE_SIZE)
+            .fetch_all(&mut **tx)
+            .await
+            .map_err(|error| {
+                VoomError::database_context("scan completion observation ledger", error)
+            })?;
+        if rows.is_empty() {
+            return Ok(actual);
+        }
+        for row in &rows {
+            decode_observation_row(row)?;
+            let sequence = checked_u64(row, "batch_sequence")?;
+            let ordinal = checked_u64(row, "ordinal")?;
+            after_sequence = Some(i64_from_u64(sequence, "scan observation batch sequence")?);
+            after_ordinal = Some(i64_from_u64(ordinal, "scan observation ordinal")?);
+            actual = actual.checked_add(1).ok_or_else(|| {
+                invalid_completion_ledger(session, "actual observation count overflow")
+            })?;
+        }
+    }
+}
+
+fn invalid_completion_ledger(session: &ScanSession, detail: &str) -> VoomError {
+    VoomError::database(format!(
+        "scan session {} has invalid completion ledger: {detail}",
+        session.id
+    ))
+}
+
+fn completion_commit_lock_conflict(
+    session_id: ScanSessionId,
+    commit_id: voom_core::CommitId,
+    location_id: FileLocationId,
+) -> VoomError {
+    VoomError::Conflict(format!(
+        "{COMPLETION_COMMIT_LOCK_PREFIX}scan session {session_id} cannot reconcile location \
+         {location_id} while commit {commit_id} is in flight"
+    ))
+}
+
+#[must_use]
+pub fn is_completion_commit_lock_conflict(error: &VoomError) -> bool {
+    matches!(error, VoomError::Conflict(detail) if detail.starts_with(COMPLETION_COMMIT_LOCK_PREFIX))
 }
 
 fn completion_next_sequence(last_sequence: Option<u64>) -> Result<u64, VoomError> {

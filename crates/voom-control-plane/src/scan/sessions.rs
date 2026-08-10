@@ -16,7 +16,7 @@ use voom_store::repo::execution::remote_idempotency::{
 use voom_store::repo::library::library_roots::EffectiveLibraryRoot;
 use voom_store::repo::scan::sessions::{
     CompleteScanSessionInput, NewScanObservationBatch, NewScanSession, ScanBatchOutcome,
-    ScanCompletionRecord,
+    ScanCompletionRecord, is_completion_commit_lock_conflict,
 };
 pub use voom_store::repo::scan::sessions::{
     ScanObservation, ScanReconciliationEvidence, ScanReconciliationPage, ScanReconciliationQuery,
@@ -506,6 +506,9 @@ impl ControlPlane {
             .await;
         let completion = match completion {
             Ok(completion) => completion,
+            Err(error) if is_completion_commit_lock_conflict(&error) => {
+                return rollback_scan_error(tx, error).await;
+            }
             Err(error) => return self.finish_scan_error(tx, &replay, error).await,
         };
         let outcome = completion_outcome(&completion)?;
@@ -792,6 +795,18 @@ impl ControlPlane {
             commit_tx(tx).await?;
         }
         Err(error)
+    }
+}
+
+async fn rollback_scan_error<T>(
+    tx: Transaction<'_, Sqlite>,
+    error: VoomError,
+) -> Result<T, VoomError> {
+    match tx.rollback().await {
+        Ok(()) => Err(error),
+        Err(rollback_error) => Err(VoomError::database(format!(
+            "scan completion failed: {error}; rollback also failed: {rollback_error}"
+        ))),
     }
 }
 
