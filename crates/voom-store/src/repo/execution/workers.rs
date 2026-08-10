@@ -1592,6 +1592,13 @@ fn row_to_worker(row: &sqlx::sqlite::SqliteRow) -> Result<Worker, VoomError> {
         .map_err(|e| map_row_err("workers", e))?;
     let (node_id, node_incarnation_id) =
         worker_incarnation_projection(node_id, node_incarnation_id, incarnation_node_id)?;
+    let status = WorkerStatus::parse_database("workers.status", &status)?;
+    let retired_at = retired.map(|value| parse_iso8601(&value)).transpose()?;
+    if (status == WorkerStatus::Retired) != retired_at.is_some() {
+        return Err(VoomError::database(
+            "workers status/retired timestamp pair is invalid",
+        ));
+    }
     Ok(Worker {
         id: WorkerId(u64_from_i64(
             id,
@@ -1601,10 +1608,10 @@ fn row_to_worker(row: &sqlx::sqlite::SqliteRow) -> Result<Worker, VoomError> {
         node_incarnation_id,
         name,
         kind: WorkerKind::parse_database("workers.kind", &kind)?,
-        status: WorkerStatus::parse_database("workers.status", &status)?,
+        status,
         registered_at: parse_iso8601(&registered)?,
         last_seen_at: parse_iso8601(&last_seen)?,
-        retired_at: retired.map(|s| parse_iso8601(&s)).transpose()?,
+        retired_at,
         epoch: u64_from_i64(epoch, concat!(module_path!(), ": ", stringify!(epoch)))?,
     })
 }

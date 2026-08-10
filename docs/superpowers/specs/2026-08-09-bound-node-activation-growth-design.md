@@ -77,9 +77,10 @@ Concurrent fresh requests serialize on the existing immediate transaction. Each 
 transaction commits an incarnation row before the next requester counts, so no pair can
 both observe the same remaining slot.
 
-The repository method accepts `NodeId`, a checked `OffsetDateTime` lower bound, and a
-transaction. It returns a checked `u32`; negative or out-of-range persisted counts are
-database corruption, not quota state.
+The repository method accepts `NodeId`, an `OffsetDateTime` lower bound, the policy count
+limit, and a transaction. It decodes stored IDs and timestamps before comparing instants,
+including offset-bearing timestamps, and stops after the policy limit is reached. Corrupt
+evidence is a database error, not quota state.
 
 ## Quota rejection logging
 
@@ -100,8 +101,9 @@ is the earlier of the requested cutoff and `quota_floor`. Rows at the effective 
 retained; only rows strictly older than it are candidates. This prevents maintenance from
 erasing evidence still needed by admission even when a caller supplies a future cutoff.
 
-The operation selects terminal incarnations for exactly one logical node in deterministic
-`ended_at` order; `started_at` is quota evidence, not retention age. An incarnation whose
+The operation decodes and selects terminal incarnations for exactly one logical node in
+deterministic typed-`ended_at` order; `started_at` is quota evidence, not retention age. An
+incarnation whose
 `ended_at` equals the effective cutoff is retained. For each candidate, the worker
 repository considers only workers that are already `retired` and bound to that incarnation:
 

@@ -1,6 +1,6 @@
 use std::str::FromStr;
 
-use time::Duration;
+use time::{Duration, UtcOffset};
 use voom_core::{ErrorCode, NodeIncarnationEndReason, NodeIncarnationId, NodeIncarnationStatus};
 
 use super::{NewNodeIncarnation, SqliteNodeIncarnationRepo};
@@ -204,7 +204,7 @@ async fn activation_count_is_inclusive_and_scoped_to_one_node() {
     let mut tx = pool.begin().await.unwrap();
 
     let count = repo
-        .count_started_at_or_after_in_tx(&mut tx, first.id, lower_bound)
+        .count_started_at_or_after_in_tx(&mut tx, first.id, lower_bound, u32::MAX)
         .await
         .unwrap();
 
@@ -228,12 +228,46 @@ async fn activation_count_rejects_malformed_qualifying_evidence() {
     let mut tx = pool.begin().await.unwrap();
 
     let error = repo
-        .count_started_at_or_after_in_tx(&mut tx, node.id, T0)
+        .count_started_at_or_after_in_tx(&mut tx, node.id, T0, 5)
         .await
         .unwrap_err();
 
     assert_eq!(error.error_code(), ErrorCode::DbUnreachable);
     assert!(error.to_string().contains("activation evidence"));
+}
+
+#[tokio::test]
+async fn activation_count_compares_offset_timestamps_as_instants_and_honors_limit() {
+    let (pool, _tmp) = fresh_pool().await;
+    let node = seed_node(&pool, "offset-activation-evidence").await;
+    let lower_bound = T0 + Duration::seconds(60);
+    let negative_offset = UtcOffset::from_hms(-1, 0, 0).unwrap();
+    for ordinal in 8..=13 {
+        let started_at =
+            (lower_bound + Duration::nanoseconds(i64::from(ordinal))).to_offset(negative_offset);
+        sqlx::query(
+            "INSERT INTO node_incarnations \
+             (incarnation_id, node_id, status, started_at, last_seen_at, ended_at, end_reason) \
+             VALUES (?, ?, 'superseded', ?, ?, ?, 'superseded')",
+        )
+        .bind(format!("{ordinal:032x}"))
+        .bind(i64::try_from(node.id.0).unwrap())
+        .bind(timestamp(started_at))
+        .bind(timestamp(started_at))
+        .bind(timestamp(started_at))
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+    let repo = SqliteNodeIncarnationRepo::new(pool.clone());
+    let mut tx = pool.begin().await.unwrap();
+
+    let count = repo
+        .count_started_at_or_after_in_tx(&mut tx, node.id, lower_bound, 5)
+        .await
+        .unwrap();
+
+    assert_eq!(count, 5);
 }
 
 #[tokio::test]
@@ -309,10 +343,60 @@ async fn prune_candidates_are_terminal_strict_old_scoped_and_exact() {
     );
 }
 
-#[test]
-fn activation_count_conversion_is_checked() {
-    let error = super::activation_count_from_i64(i64::MAX).unwrap_err();
-    assert_eq!(error.error_code(), ErrorCode::DbUnreachable);
+#[tokio::test]
+async fn prune_cutoff_compares_offset_timestamps_as_instants() {
+    let (pool, _tmp) = fresh_pool().await;
+    let node = seed_node(&pool, "offset-prune-node").await;
+    let cutoff = T0 + Duration::hours(2);
+    let before_id = incarnation("8123456789abcdef0123456789abcdef");
+    let after_id = incarnation("9123456789abcdef0123456789abcdef");
+    let positive_offset = UtcOffset::from_hms(1, 0, 0).unwrap();
+    let negative_offset = UtcOffset::from_hms(-1, 0, 0).unwrap();
+    for (id, ended_at) in [
+        (
+            before_id,
+            (cutoff - Duration::nanoseconds(1)).to_offset(positive_offset),
+        ),
+        (
+            after_id,
+            (cutoff + Duration::nanoseconds(1)).to_offset(negative_offset),
+        ),
+    ] {
+        sqlx::query(
+            "INSERT INTO node_incarnations \
+             (incarnation_id, node_id, status, started_at, last_seen_at, ended_at, end_reason) \
+             VALUES (?, ?, 'superseded', ?, ?, ?, 'superseded')",
+        )
+        .bind(id.to_string())
+        .bind(i64::try_from(node.id.0).unwrap())
+        .bind(timestamp(ended_at - Duration::seconds(1)))
+        .bind(timestamp(ended_at))
+        .bind(timestamp(ended_at))
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+    let repo = SqliteNodeIncarnationRepo::new(pool.clone());
+    let mut tx = pool.begin().await.unwrap();
+
+    let candidates = repo
+        .terminal_before_in_tx(&mut tx, node.id, cutoff)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        candidates
+            .iter()
+            .map(|candidate| candidate.id)
+            .collect::<Vec<_>>(),
+        vec![before_id]
+    );
+    assert!(
+        !repo
+            .delete_terminal_if_empty_in_tx(&mut tx, node.id, after_id, cutoff)
+            .await
+            .unwrap()
+    );
 }
 
 async fn fresh_pool() -> (sqlx::SqlitePool, voom_test_support::TempDatabase) {
