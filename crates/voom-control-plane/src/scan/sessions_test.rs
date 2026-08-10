@@ -21,6 +21,7 @@ use voom_store::repo::library::library_roots::{
     HiddenFilePolicy, LibraryScanMode, NewLibraryRoot, SymlinkPolicy,
 };
 use voom_store::repo::scan::sessions::{ScanObservation, ScanSession};
+use voom_store::test_support::with_check_constraints_disabled;
 
 use super::{
     RemoteScanBatchInput, RemoteScanBatchOutcome, RemoteScanCompleteInput,
@@ -1768,16 +1769,18 @@ async fn apply_root_case(fixture: &Fixture, root_case: RootCase) {
 }
 
 async fn corrupt_root_epoch(cp: &crate::ControlPlane, root_id: StorageRootId) {
-    let mut connection = cp.pool_for_test().acquire().await.unwrap();
-    sqlx::query("PRAGMA ignore_check_constraints = ON")
-        .execute(&mut *connection)
-        .await
-        .unwrap();
-    sqlx::query("UPDATE library_roots SET root_epoch = -1 WHERE id = ?")
-        .bind(i64::try_from(root_id.0).unwrap())
-        .execute(&mut *connection)
-        .await
-        .unwrap();
+    let root_id = i64::try_from(root_id.0).unwrap();
+    with_check_constraints_disabled(cp.pool_for_test(), move |connection| {
+        Box::pin(async move {
+            sqlx::query("UPDATE library_roots SET root_epoch = -1 WHERE id = ?")
+                .bind(root_id)
+                .execute(&mut *connection)
+                .await?;
+            Ok(())
+        })
+    })
+    .await
+    .unwrap();
 }
 
 async fn install_start_rollback_trigger(cp: &crate::ControlPlane, trigger: RollbackTrigger) {
