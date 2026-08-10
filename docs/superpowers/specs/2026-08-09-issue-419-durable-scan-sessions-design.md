@@ -83,8 +83,9 @@ entries without making a device/inode spelling part of the cross-provider contra
 defines how the local-filesystem scanner constructs these facts and how hash/probe results bind
 to them.
 
-A batch contains 1–1000 observations. The existing API-wide 1 MiB body limit remains the harder
-byte bound. An empty traversal sends no batch and completes with a null last sequence.
+A batch contains 1–1000 observations and a session accepts at most 100,000 cumulative
+observations. The existing API-wide 1 MiB body limit remains the harder per-request byte bound.
+An empty traversal sends no batch and completes with a null last sequence.
 
 ## Persistence: migration 0036
 
@@ -99,7 +100,7 @@ byte bound. An empty traversal sends no batch and completes with a null last seq
 | `owner_incarnation_id` | nullable until start, then required FK to `node_incarnations` |
 | `status` | closed six-token lifecycle vocabulary |
 | `next_sequence` | next zero-based batch sequence, initially `0` |
-| `batch_count`, `observation_count` | checked non-negative progress counters |
+| `batch_count`, `observation_count` | `batch_count = next_sequence`; observations `0..=100000` |
 | `idle_timeout_seconds` | `1..=86400`; default selected by CLI/use case is `300` |
 | `progress_deadline_at` | requested/start/latest-new-batch time plus idle timeout |
 | `location_high_watermark_id` | nullable until start; highest pre-start rooted live location ID |
@@ -117,17 +118,19 @@ The state-shape CHECK requires:
   from running retains its bindings, while a requested terminal may keep them null.
 
 The high-water mark uses nullable `FileLocationId`: null means there were no live rooted
-locations when the session started. A partial unique index on `storage_root_id` where status is
-`requested` or `running` is the database backstop for single-root concurrency. Indexes support
-status/deadline recovery and root/time inspection.
+locations when the session started. A composite foreign key binds a non-null high-water location
+to the session's storage root, so a corrupt cross-root numeric pointer cannot widen the retirement
+fence. A partial unique index on `storage_root_id` where status is `requested` or `running` is the
+database backstop for single-root concurrency. Indexes support status/deadline recovery and
+root/time inspection.
 
 ### `scan_observation_batches`
 
 The primary key is `(scan_session_id, sequence)`. Each row stores a lowercase SHA-256 request
 hash, observation count, accepted timestamp, and cumulative count returned to the caller. CHECKs
-bound sequence and counts to non-negative signed integers. The row is inserted only in the same
-transaction as all its observation rows, the session counter advance, its event, and the remote
-idempotency completion.
+require 1–1000 observations in a batch and bound cumulative count to 100,000. The row is inserted
+only in the same transaction as all its observation rows, the session counter advance, its event,
+and the remote idempotency completion.
 
 ### `scan_observations`
 
@@ -224,6 +227,17 @@ an earlier batch is a conflict. A new accepted batch inserts the batch and obser
 deadline, appends one `scan_session.observation_batch_accepted` event, stores the remote replay,
 and commits.
 
+An exact accepted batch replay is resolved before the cumulative limit and continues to succeed
+when the session already contains 100,000 observations. A genuinely new batch whose observations
+would take the durable total above 100,000 reaches capacity classification only after the existing
+authority, lifecycle, root, and deadline fences. An expired genuinely new request therefore marks
+the session stale as before. An otherwise eligible crossing batch returns a cache-replayed
+`CONFLICT`/HTTP 409 with the maximum, current, and incoming counts. It creates no batch or
+observation, does not advance counters or the deadline, and emits no batch event. Persisted counter
+relationships are validated before capacity classification; a below-next request whose
+accepted-batch row is missing is a database error, not a sequence conflict. The same idempotency
+key can succeed after repair.
+
 The remote idempotency key is namespaced by incarnation, as on existing node routes. Reusing one
 key for another session or sequence produces a different route-instance request hash and fails as
 an idempotency conflict. Thus both same-key and same-sequence replays are safe.
@@ -263,15 +277,17 @@ Locations with IDs above the high-water mark are never retired by that session, 
 locators are absent from its observations. This conservative rule prevents concurrent
 publication from being mistaken for absence. A later complete session can reconcile them.
 
-Completion necessarily performs an O(number of pre-start live root locations) anti-join and
-update under SQLite's single writer. The supported bound for this slice is 100,000 live rooted
-locations. A release-mode scale gate creates one root with 100,000 distinct live rooted locations,
-accepts an empty traversal, and measures only the completion call; fixture creation and assertions
-are outside the timer. On both existing `ubuntu-latest` and `macos-latest` CI runners, three fresh-
-database repetitions must each complete within 25 seconds, leaving five seconds of the 30-second
-API deadline for routing and response work. Each repetition verifies 100,000 retirements, the
-session/root summary, and zero partial rows. Failure stops implementation for a design checkpoint;
-chunking is not an acceptable fallback because it would expose partially reconciled catalog state.
+Completion necessarily performs O(accepted observations + pre-start live root locations) work
+under SQLite's single writer. Both supported bounds for this slice are 100,000. A release-mode
+scale gate measures two fresh-database cases outside fixture creation and assertions: an empty
+traversal over 100,000 absent locations, and completion of a ledger containing 100,000 one-row
+batches whose observations match 100,000 live locations. The second case exercises the maximum
+batch-row, observation-row, and candidate-row validation cost together. On both existing
+`ubuntu-latest` and `macos-latest` CI runners, three repetitions of each completion must finish
+within 25 seconds, leaving five seconds of the 30-second API deadline for routing and response
+work. The cases verify exact ledger, retirement, session, and root counts with no partial rows.
+Failure stops implementation for a design checkpoint; chunking is not an acceptable fallback
+because it would expose partially reconciled catalog state.
 
 ### Other terminal outcomes and stale recovery
 
@@ -335,10 +351,10 @@ The API does not add a scan-session acquisition route. That would route work out
 Issue #421 will dispatch a scan ticket whose payload names the requested session.
 
 HTTP classifications reuse public codes: malformed input is `BAD_ARGS`/400, missing session is
-`NOT_FOUND`/404, bad credentials are `UNAUTHORIZED`/401, stale fences/order/replay conflicts are
-`CONFLICT`/409, unavailable root is the existing `BLOCKED` classification, payload bounds are
-`PAYLOAD_TOO_LARGE`/413, and unexpected storage failures are server errors. Credentials are
-validated before session existence is revealed.
+`NOT_FOUND`/404, bad credentials are `UNAUTHORIZED`/401, stale fences/order/replay/capacity
+conflicts are `CONFLICT`/409, unavailable root is the existing `BLOCKED` classification, payload
+bounds are `PAYLOAD_TOO_LARGE`/413, and unexpected storage failures are server errors. Credentials
+are validated before session existence is revealed.
 
 ## CLI contract
 
@@ -384,13 +400,14 @@ event and control-plane session files. No new durable JSON column is introduced 
 
 Public mutation ordering is:
 
-1. parse path/query/body and validate bounded typed values;
+1. parse path/query/body and validate bounded typed values, including per-batch count;
 2. authenticate the bearer token without revealing session existence;
 3. require the current incarnation fence;
 4. reserve or resolve remote replay identity;
 5. decode session/root/location rows with checked numeric, enum, locator, and timestamp parsing;
 6. validate session ownership, lifecycle, deadline, root epoch, and root availability;
-7. validate sequence, body hash, locator uniqueness, or completion watermark;
+7. validate sequence, body hash, cumulative session capacity, locator uniqueness, or completion
+   watermark, after any applicable stale transition from step 6;
 8. check every completion candidate against in-flight commit locks;
 9. mutate session/catalog state and append facts in one transaction; and
 10. complete replay state and commit.
@@ -423,8 +440,9 @@ reject negative or oversized SQLite integers before classification.
 
 - Existing constant-time bearer verification plus current-incarnation checks authenticate every
   node API call; root/session owner equality authorizes it.
-- Provider-relative locator validation, length/count/body bounds, checked numeric conversion,
-  strict request DTOs, and chronological stability checks constrain untrusted input.
+- Provider-relative locator validation, per-batch and 100,000-per-session count bounds, body
+  limits, checked numeric conversion, strict request DTOs, and chronological stability checks
+  constrain untrusted input and ledger growth.
 - One shared terminal-reason validator enforces 1–1024 UTF-8 bytes with no NUL for failure and
   cancellation API/use-case inputs, replay decoding, and persisted rows; migration CHECKs enforce
   the byte length and nonblank/no-NUL shape as a database backstop. The SQLite byte bound uses
@@ -448,8 +466,11 @@ This design does not protect a root from its legitimately authenticated owner su
 filesystem facts; #421's worker/agent evidence contract and provider implementation establish
 those facts. It adds no token revocation, operator HTTP authentication, cross-tenant isolation,
 object-store credentials, scanning sandbox, hash/probe validation, scheduler ownership gate, or
-continuous cleanup loop. Those threats are owned by existing auth/deployment controls or the
-explicitly excluded issues.
+continuous cleanup loop. The 100,000 limit bounds one authenticated owner's active session and one
+completion transaction; it is not a lifetime quota across replacement sessions requested by the
+trusted local operator. Retention policy and database capacity planning remain deployment
+concerns. Those threats are owned by existing auth/deployment controls or the explicitly excluded
+issues.
 
 ## Test strategy
 
@@ -461,8 +482,9 @@ is live.
 - `ScanSessionId` round-trips without flattening and every status token is exhaustive.
 - Migration 0036 creates all constraints/indexes, adds the root and location pointers, preserves
   existing root and location rows, rejects invalid state shapes, and appears in schema probes.
-- Corrupt negative counters/epochs, unknown status, malformed timestamps, invalid locator/object
-  identity, and impossible terminal shapes surface as database errors.
+- Corrupt negative or relationally incoherent counters, missing accepted-batch rows, epochs,
+  unknown status, malformed timestamps, invalid locator/object identity, wrong-root high-water
+  marks, and impossible terminal shapes surface as database errors before business classification.
 - Empty, ASCII 1024-byte, ASCII 1025-byte, and NUL-containing terminal reasons are exercised
   through failure API and cancellation CLI/use-case paths. Multibyte cases accept exactly 1024
   encoded bytes and reject the next complete UTF-8 scalar above the limit through both the shared
@@ -482,7 +504,11 @@ is live.
 - An exact accepted replay after its session deadline remains read-only and returns the stored
   outcome; recovery or the next genuinely new mutation then persists `stale` exactly once.
 - Gaps, regressions, conflicting body hashes, duplicate locators within/across batches, cross-
-  session key reuse, oversized batches, and invalid stability order fail before mutation.
+  session key reuse, oversized batches, and invalid stability order fail before scan-state
+  mutation. For an otherwise eligible session, the capacity boundary proves 100,000 accepted,
+  100,001 rejected as cache-replayed `CONFLICT` without batch-state mutation, and an accepted
+  replay at the bound still succeeds. An expired crossing request instead persists `stale` exactly
+  once with no batch, observation, progress-extension, or batch-event mutation.
 - Disconnect, explicit failure, cancellation, timeout recovery, incarnation supersession, root
   unavailability, and root-epoch drift yield terminal/non-success state with no retired locations
   and no root pointer update.
@@ -495,9 +521,10 @@ is live.
   back the whole logical operation.
 - Reconciliation evidence pages by `retired_by_scan_session_id` in stable location-ID order and
   reports the derived prior and persisted retired epochs exactly.
-- A release-mode completion gate with 100,000 absent pre-start locations runs three fresh-database
-  repetitions on both CI operating systems; every measured completion is at most 25 seconds and
-  retires exactly 100,000 rows, or implementation returns to design.
+- A release-mode completion gate runs three fresh-database repetitions for both 100,000 absent
+  pre-start locations and a maximum 100,000-one-row-batch ledger over 100,000 matching locations
+  on both CI operating systems; every measured completion is at most 25 seconds with exact
+  resulting counts, or implementation returns to design.
 
 ### API and CLI tests
 
