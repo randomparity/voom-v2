@@ -137,17 +137,39 @@ impl SqliteNodeIncarnationRepo {
         lower_bound: OffsetDateTime,
     ) -> Result<u32, VoomError> {
         let lower_bound = iso8601(lower_bound)?;
-        let count: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM node_incarnations WHERE node_id = ? AND started_at >= ?",
+        let rows = sqlx::query(
+            "SELECT incarnation_id, started_at FROM node_incarnations \
+             WHERE node_id = ? AND started_at >= ?",
         )
         .bind(i64_from_u64(
             node_id.0,
             "node incarnation activation count node id",
         )?)
         .bind(lower_bound)
-        .fetch_one(&mut **tx)
+        .fetch_all(&mut **tx)
         .await
         .map_err(|error| VoomError::database_context("node incarnation activation count", error))?;
+        for row in &rows {
+            let incarnation_id: String = row
+                .try_get("incarnation_id")
+                .map_err(|error| map_row_err("node incarnation activation evidence id", error))?;
+            NodeIncarnationId::parse_database(
+                "node incarnation activation evidence id",
+                &incarnation_id,
+            )?;
+            let started_at: String = row.try_get("started_at").map_err(|error| {
+                map_row_err("node incarnation activation evidence started at", error)
+            })?;
+            parse_iso8601(&started_at).map_err(|error| {
+                VoomError::database_context(
+                    "node incarnation activation evidence started at",
+                    error,
+                )
+            })?;
+        }
+        let count = i64::try_from(rows.len()).map_err(|_| {
+            VoomError::database("node incarnation activation count does not fit i64")
+        })?;
         activation_count_from_i64(count)
     }
 

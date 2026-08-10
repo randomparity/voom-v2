@@ -212,6 +212,31 @@ async fn activation_count_is_inclusive_and_scoped_to_one_node() {
 }
 
 #[tokio::test]
+async fn activation_count_rejects_malformed_qualifying_evidence() {
+    let (pool, _tmp) = fresh_pool().await;
+    let node = seed_node(&pool, "corrupt-activation-evidence").await;
+    sqlx::query(
+        "INSERT INTO node_incarnations \
+         (incarnation_id, node_id, status, started_at, last_seen_at, ended_at, end_reason) \
+         VALUES ('not-an-incarnation', ?, 'superseded', 'zzzz', 'zzzz', 'zzzz', 'superseded')",
+    )
+    .bind(i64::try_from(node.id.0).unwrap())
+    .execute(&pool)
+    .await
+    .unwrap();
+    let repo = SqliteNodeIncarnationRepo::new(pool.clone());
+    let mut tx = pool.begin().await.unwrap();
+
+    let error = repo
+        .count_started_at_or_after_in_tx(&mut tx, node.id, T0)
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.error_code(), ErrorCode::DbUnreachable);
+    assert!(error.to_string().contains("activation evidence"));
+}
+
+#[tokio::test]
 async fn prune_candidates_are_terminal_strict_old_scoped_and_exact() {
     let (pool, _tmp) = fresh_pool().await;
     let first = seed_node(&pool, "prune-a").await;

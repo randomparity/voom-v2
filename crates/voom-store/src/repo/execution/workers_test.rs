@@ -235,6 +235,170 @@ async fn prune_retired_incarnation_workers_deletes_only_unreferenced_owned_rows(
 }
 
 #[tokio::test]
+async fn prune_retired_incarnation_workers_rejects_corrupt_candidate() {
+    let (pool, _tmp) = pool().await;
+    let node = register_test_node(&pool, "corrupt-prune-worker-node").await;
+    let incarnation_id = NodeIncarnationId::from_str("6123456789abcdef0123456789abcdef").unwrap();
+    let incarnations = SqliteNodeIncarnationRepo::new(pool.clone());
+    let workers = SqliteWorkerRepo::new(pool.clone());
+    let mut tx = pool.begin().await.unwrap();
+    incarnations
+        .insert_in_tx(
+            &mut tx,
+            NewNodeIncarnation {
+                id: incarnation_id,
+                node_id: node.id,
+                started_at: T0,
+            },
+        )
+        .await
+        .unwrap();
+    let worker = workers
+        .register_in_tx(
+            &mut tx,
+            NewWorker {
+                name: "corrupt-prune-worker".to_owned(),
+                kind: WorkerKind::Remote,
+                registered_at: T0,
+                node_id: Some(node.id),
+            },
+        )
+        .await
+        .unwrap();
+    workers
+        .bind_incarnation_in_tx(&mut tx, worker.id, node.id, incarnation_id)
+        .await
+        .unwrap();
+    workers
+        .retire_in_tx(&mut tx, worker.id, worker.epoch, T0)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE workers SET registered_at = 'not-a-timestamp' WHERE id = ?")
+        .bind(i64::try_from(worker.id.0).unwrap())
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+
+    let error = workers
+        .prune_retired_for_incarnation_in_tx(&mut tx, incarnation_id)
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.error_code(), ErrorCode::DbUnreachable);
+    let row_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM workers WHERE id = ?")
+        .bind(i64::try_from(worker.id.0).unwrap())
+        .fetch_one(&mut *tx)
+        .await
+        .unwrap();
+    assert_eq!(row_count, 1);
+}
+
+#[tokio::test]
+async fn prune_retains_both_scheduler_decision_worker_references() {
+    let (pool, _tmp) = pool().await;
+    let node = register_test_node(&pool, "scheduler-hold-node").await;
+    let incarnation_id = NodeIncarnationId::from_str("7123456789abcdef0123456789abcdef").unwrap();
+    let incarnations = SqliteNodeIncarnationRepo::new(pool.clone());
+    let workers = SqliteWorkerRepo::new(pool.clone());
+    let mut tx = pool.begin().await.unwrap();
+    incarnations
+        .insert_in_tx(
+            &mut tx,
+            NewNodeIncarnation {
+                id: incarnation_id,
+                node_id: node.id,
+                started_at: T0,
+            },
+        )
+        .await
+        .unwrap();
+    let mut held = Vec::new();
+    for name in ["scheduler-request-hold", "scheduler-selected-hold"] {
+        let worker = workers
+            .register_in_tx(
+                &mut tx,
+                NewWorker {
+                    name: name.to_owned(),
+                    kind: WorkerKind::Remote,
+                    registered_at: T0,
+                    node_id: Some(node.id),
+                },
+            )
+            .await
+            .unwrap();
+        workers
+            .bind_incarnation_in_tx(&mut tx, worker.id, node.id, incarnation_id)
+            .await
+            .unwrap();
+        workers
+            .retire_in_tx(&mut tx, worker.id, worker.epoch, T0)
+            .await
+            .unwrap();
+        held.push(worker.id);
+    }
+    let timestamp = T0.to_string();
+    sqlx::query(
+        "INSERT INTO scheduler_decisions \
+         (created_at, updated_at, first_seen_at, last_seen_at, decision_kind, request_source, \
+          request_worker_id, outcome, reason_code, summary, candidate_count, explanation_json) \
+         VALUES (?, ?, ?, ?, 'no_candidate', 'remote_acquire', ?, 'no_eligible_candidate', \
+                 'missing_capability', 'request hold', 1, '{}')",
+    )
+    .bind(&timestamp)
+    .bind(&timestamp)
+    .bind(&timestamp)
+    .bind(&timestamp)
+    .bind(i64::try_from(held[0].0).unwrap())
+    .execute(&mut *tx)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO scheduler_decisions \
+         (created_at, updated_at, first_seen_at, last_seen_at, decision_kind, request_source, \
+          selected_worker_id, outcome, reason_code, summary, candidate_count, explanation_json) \
+         VALUES (?, ?, ?, ?, 'lease_acquire', 'remote_acquire', ?, 'selected', 'selected', \
+                 'selected hold', 1, '{}')",
+    )
+    .bind(&timestamp)
+    .bind(&timestamp)
+    .bind(&timestamp)
+    .bind(&timestamp)
+    .bind(i64::try_from(held[1].0).unwrap())
+    .execute(&mut *tx)
+    .await
+    .unwrap();
+
+    assert_eq!(
+        workers
+            .prune_retired_for_incarnation_in_tx(&mut tx, incarnation_id)
+            .await
+            .unwrap(),
+        0
+    );
+    let references: Vec<(Option<i64>, Option<i64>)> = sqlx::query_as(
+        "SELECT request_worker_id, selected_worker_id FROM scheduler_decisions ORDER BY id",
+    )
+    .fetch_all(&mut *tx)
+    .await
+    .unwrap();
+    assert_eq!(
+        references,
+        vec![
+            (Some(i64::try_from(held[0].0).unwrap()), None),
+            (None, Some(i64::try_from(held[1].0).unwrap()))
+        ]
+    );
+    for worker_id in held {
+        assert!(
+            super::get_in_tx(&mut tx, worker_id)
+                .await
+                .unwrap()
+                .is_some()
+        );
+    }
+}
+
+#[tokio::test]
 async fn worker_foreign_key_actions_preserve_pruning_audit_holds() {
     let (pool, _tmp) = pool().await;
     let tables: Vec<String> = sqlx::query_scalar(

@@ -6,6 +6,7 @@ use super::super::{
 use secrecy::SecretString;
 use serde_json::json;
 use time::{Duration, OffsetDateTime};
+use tracing::instrument::WithSubscriber;
 use voom_core::{
     ArtifactAccessMode, ErrorCode, NodeIncarnationEndReason, NodeIncarnationStatus, OperationKind,
     clock_test_support::{FrozenClock, ManualClock},
@@ -236,9 +237,11 @@ async fn remote_activation_quota_rejection_is_operator_visible_without_secrets()
         .with_ansi(false)
         .with_writer(logs.clone())
         .finish();
-    let _guard = tracing::subscriber::set_default(subscriber);
-
-    let error = cp.remote_activate(rejected).await.unwrap_err();
+    let error = cp
+        .remote_activate(rejected)
+        .with_subscriber(subscriber)
+        .await
+        .unwrap_err();
 
     assert_eq!(error.error_code(), ErrorCode::Conflict);
     let output = logs.text();
