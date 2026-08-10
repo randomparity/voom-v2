@@ -1274,6 +1274,45 @@ async fn reconciliation_pages_in_location_order_with_an_exclusive_cursor() {
 }
 
 #[tokio::test]
+async fn reconciliation_rejects_off_page_nanosecond_timestamp_corruption() {
+    let (pool, _tmp) = fresh_pool().await;
+    let root = seed_test_storage_root(&pool).await.unwrap();
+    let mut locations = Vec::new();
+    for locator in ["first.mkv", "second.mkv", "third.mkv", "fourth.mkv"] {
+        locations.push(seed_rooted_location(&pool, root, locator).await);
+    }
+    let session = seed_succeeded_session(
+        &pool,
+        root,
+        locations.last().copied(),
+        u64::try_from(locations.len()).unwrap(),
+        "1970-01-01T00:02:00Z",
+    )
+    .await;
+    for location in &locations {
+        attribute_location(&pool, *location, session, "1970-01-01T00:02:00Z").await;
+    }
+    attribute_location(
+        &pool,
+        locations[3],
+        session,
+        "1970-01-01T00:02:00.000000001Z",
+    )
+    .await;
+
+    let repo = SqliteScanSessionRepo::new(pool);
+    let error = repo
+        .reconciliation_page(ScanReconciliationQuery {
+            scan_session_id: session,
+            after_id: None,
+            limit: 1,
+        })
+        .await
+        .unwrap_err();
+    assert!(matches!(error, VoomError::Database { .. }));
+}
+
+#[tokio::test]
 async fn reconciliation_rejects_limits_outside_one_through_one_hundred() {
     let (pool, _tmp) = fresh_pool().await;
     let repo = SqliteScanSessionRepo::new(pool);
