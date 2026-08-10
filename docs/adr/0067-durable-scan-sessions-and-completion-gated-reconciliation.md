@@ -55,10 +55,12 @@ remain inspectable. Incarnation termination and existing remote recovery mark af
 expired sessions stale; every later mutation also revalidates the same fences before acting.
 
 The inactivity deadline is initialized when the session is requested and reset only by a
-successful start or a newly accepted contiguous batch. Replays, rejected requests, and inspection
-do not extend it. At `now >= progress_deadline_at`, staleness wins over start, batch, success,
-failure, or operator cancellation. Before that boundary, the first terminal transaction to obtain
-the writer lock wins.
+successful start or a newly accepted contiguous batch. Already-accepted exact replays resolve to
+their stored outcome before deadline fencing; they do not extend the deadline, terminalize the
+session, or emit an event. Rejected requests and inspection also do not extend it. At
+`now >= progress_deadline_at`, staleness wins over every genuinely new start, batch, success,
+failure, or operator-cancellation mutation. Before that boundary, the first terminal transaction
+to obtain the writer lock wins.
 
 Session lifecycle and batch acceptance append one summary event per committed transition. The
 retained location row stores the successful scan session that retired it; this is durable
