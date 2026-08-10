@@ -380,8 +380,9 @@ impl SqliteScanSessionRepo {
         input: CompleteScanSessionInput,
     ) -> Result<ScanCompletionRecord, VoomError> {
         let session = completion_session_in_tx(tx, &input).await?;
-        validate_completion_binding(&session, &input)?;
+        validate_completion_authority_binding(&session, &input)?;
         validate_completion_ledger_in_tx(tx, &session).await?;
+        validate_completion_request_watermark(&session, &input)?;
         let candidates = completion_candidates_in_tx(tx, &session).await?;
         if let Some((commit_id, location_id)) = consult_scan_reconciliation_commit_lock_in_tx(
             tx,
@@ -810,7 +811,7 @@ async fn completion_session_in_tx(
     row_to_scan_session(&row)
 }
 
-fn validate_completion_binding(
+fn validate_completion_authority_binding(
     session: &ScanSession,
     input: &CompleteScanSessionInput,
 ) -> Result<(), VoomError> {
@@ -824,6 +825,13 @@ fn validate_completion_binding(
             session.id
         )));
     }
+    Ok(())
+}
+
+fn validate_completion_request_watermark(
+    session: &ScanSession,
+    input: &CompleteScanSessionInput,
+) -> Result<(), VoomError> {
     let expected_next_sequence = completion_next_sequence(input.last_sequence)?;
     if session.next_sequence != expected_next_sequence
         || session.observation_count != input.observation_count

@@ -929,6 +929,81 @@ async fn complete_rejects_wrong_final_sequence_or_count_without_reconciliation()
 }
 
 #[tokio::test]
+async fn complete_validates_corrupt_session_counters_before_request_watermark() {
+    let fixture = fixture().await;
+    let observed = seed_rooted_location(&fixture.cp, fixture.root_id, "batch/0-a.mkv").await;
+    let absent =
+        seed_rooted_location(&fixture.cp, fixture.root_id, "absent-after-corruption.mkv").await;
+    let running = running_session(&fixture, 30).await;
+    fixture
+        .cp
+        .accept_scan_observation_batch(batch_input(
+            &fixture,
+            running.id,
+            0,
+            "corrupt-ledger-batch",
+            'a',
+        ))
+        .await
+        .unwrap();
+    sqlx::query(
+        "UPDATE scan_sessions SET next_sequence = 0, batch_count = 0, observation_count = 0 \
+         WHERE id = ?",
+    )
+    .bind(i64::try_from(running.id.0).unwrap())
+    .execute(fixture.cp.pool_for_test())
+    .await
+    .unwrap();
+    let input = complete_input(&fixture, running.id, "corrupt-ledger-complete", Some(0), 1);
+
+    let error = fixture
+        .cp
+        .complete_scan_session(input.clone())
+        .await
+        .unwrap_err();
+
+    assert!(matches!(error, voom_core::VoomError::Database { .. }));
+    assert_eq!(
+        fixture.cp.scan_session(running.id).await.unwrap().status,
+        ScanSessionStatus::Running
+    );
+    assert!(location_retirement(&fixture.cp, observed).await.0.is_none());
+    assert!(location_retirement(&fixture.cp, absent).await.0.is_none());
+    assert_eq!(
+        reconciliation_pointer(&fixture.cp, fixture.root_id).await,
+        None
+    );
+    assert_eq!(
+        event_count(&fixture.cp, EventKind::ScanSessionSucceeded).await,
+        0
+    );
+    assert_eq!(
+        replay_rows_for_key(&fixture.cp, "corrupt-ledger-complete").await,
+        0
+    );
+
+    sqlx::query(
+        "UPDATE scan_sessions SET next_sequence = 1, batch_count = 1, observation_count = 1 \
+         WHERE id = ?",
+    )
+    .bind(i64::try_from(running.id.0).unwrap())
+    .execute(fixture.cp.pool_for_test())
+    .await
+    .unwrap();
+    let outcome = fixture.cp.complete_scan_session(input).await.unwrap();
+    assert_eq!(outcome.status, ScanSessionStatus::Succeeded);
+    assert!(location_retirement(&fixture.cp, observed).await.0.is_none());
+    assert_eq!(
+        location_retirement(&fixture.cp, absent).await.2,
+        Some(running.id)
+    );
+    assert_eq!(
+        event_count(&fixture.cp, EventKind::ScanSessionSucceeded).await,
+        1
+    );
+}
+
+#[tokio::test]
 async fn complete_never_reconciles_failed_cancelled_or_stale_sessions() {
     let failed = fixture().await;
     let failed_location = seed_rooted_location(&failed.cp, failed.root_id, "failed.mkv").await;
