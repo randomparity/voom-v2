@@ -152,10 +152,12 @@ Filtering by the pointer yields stable per-location evidence; its prior epoch is
 persisted epoch minus one.
 
 Foreign keys do not prove reconciliation semantics. Every inspection read that follows either
-pointer uses checked joins. A root pointer must reference a `succeeded` session for that same root.
-A location pointer must reference a `succeeded` session for the location's root, the location must
-be retired with epoch at least one, its `retired_at` must equal the session's `terminal_at`, its ID
-must not exceed that session's high-water mark, and its locator must be absent from that session's
+pointer uses checked joins. A root pointer must reference the highest-ID `succeeded` session for
+that same root; single-root serialization makes session ID the total order of successful scans,
+while historical session inspection remains valid independently of the pointer. A location
+pointer must reference a `succeeded` session for the location's root, the location must be retired
+with epoch at least one, its `retired_at` must equal the session's `terminal_at`, its ID must not
+exceed that session's high-water mark, and its locator must be absent from that session's
 observations. Session inspection also checks that the count of attributed location rows equals
 `retired_location_count`. Any violation is `VoomError::Database`, not an empty result or domain
 state.
@@ -455,9 +457,10 @@ is live.
   existing root and location rows, rejects invalid state shapes, and appears in schema probes.
 - Corrupt negative counters/epochs, unknown status, malformed timestamps, invalid locator/object
   identity, and impossible terminal shapes surface as database errors.
-- FK-valid reconciliation pointers to a wrong-root or non-succeeded session, mismatched terminal
-  and retirement timestamps, an above-watermark or observed attributed location, and a mismatched
-  retired count each surface as a database error before inspection returns domain data.
+- FK-valid reconciliation pointers to a wrong-root, non-succeeded, or older same-root successful
+  session; mismatched terminal and retirement timestamps; an above-watermark or observed
+  attributed location; and a mismatched retired count each surface as a database error before
+  inspection returns domain data.
 
 ### Repository and transaction tests
 
