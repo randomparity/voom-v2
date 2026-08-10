@@ -19,7 +19,9 @@ use serde_json::{Value as JsonValue, json};
 use sqlx::migrate::Migrator;
 use voom_events::Event;
 use voom_store::repo::audit::events::{EventFilter, EventRepo, Page, SqliteEventRepo};
-use voom_store::test_support::{create_uninitialized_pool, embedded_migrator, sqlite_url_for};
+use voom_store::test_support::{
+    create_uninitialized_pool, embedded_migrator, seed_test_storage_root, sqlite_url_for,
+};
 use voom_test_support::TempDatabase;
 
 const EXPECTED_MIGRATION_FILES: &[&str] = &[
@@ -161,6 +163,73 @@ async fn node_incarnation_migration_preserves_existing_nodes_and_workers() {
             .unwrap();
     assert_eq!(active_incarnation, None);
     assert_eq!(worker_incarnation, None);
+}
+
+#[tokio::test]
+async fn scan_session_migration_preserves_representative_0035_root_and_location_rows() {
+    let tmp = TempDatabase::new().unwrap();
+    let url = sqlite_url_for(tmp.path());
+    let pool = create_uninitialized_pool(&url).await.unwrap();
+    migrator_through(35).run(&pool).await.unwrap();
+    seed_test_storage_root(&pool).await.unwrap();
+    let asset_id = sqlx::query("INSERT INTO file_assets (created_at, epoch) VALUES (?, 0)")
+        .bind("1970-01-01T00:00:00Z")
+        .execute(&pool)
+        .await
+        .unwrap()
+        .last_insert_rowid();
+    let version_id = sqlx::query(
+        "INSERT INTO file_versions (file_asset_id, content_hash, size_bytes, produced_by, \
+         produced_from_version_id, created_at, retired_at, epoch) \
+         VALUES (?, 'scan-migration-preservation', 1, 'ingest', NULL, \
+                 '1970-01-01T00:00:00Z', NULL, 0)",
+    )
+    .bind(asset_id)
+    .execute(&pool)
+    .await
+    .unwrap()
+    .last_insert_rowid();
+    let location_id = sqlx::query(
+        "INSERT INTO file_locations (file_version_id, address_state, storage_root_id, \
+         provider_relative_locator, legacy_kind, legacy_locator, proof_kind, proof_value, \
+         observed_at, retired_at, epoch) VALUES (?, 'rooted', 9000001, \
+         'scan-migration-preservation', NULL, NULL, NULL, NULL, \
+         '1970-01-01T00:00:00Z', NULL, 0)",
+    )
+    .bind(version_id)
+    .execute(&pool)
+    .await
+    .unwrap()
+    .last_insert_rowid();
+
+    embedded_migrator().run(&pool).await.unwrap();
+
+    let root: (i64, String, i64, Option<i64>) = sqlx::query_as(
+        "SELECT id, provider_locator, root_epoch, last_scan_session_id \
+         FROM library_roots WHERE id = 9000001",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(root, (9_000_001, "/".to_owned(), 1, None));
+    let location: (i64, i64, String, Option<String>, Option<i64>) = sqlx::query_as(
+        "SELECT id, storage_root_id, provider_relative_locator, retired_at, \
+         retired_by_scan_session_id FROM file_locations WHERE id = ?",
+    )
+    .bind(location_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        location,
+        (
+            location_id,
+            9_000_001,
+            "scan-migration-preservation".to_owned(),
+            None,
+            None,
+        )
+    );
 }
 
 type RootRow = (

@@ -92,6 +92,44 @@ async fn library_root_decodes_null_scan_provenance_as_a_typed_optional_id() {
     assert_eq!(root.last_scan_session_id, None::<ScanSessionId>);
 }
 
+#[tokio::test]
+async fn library_root_decodes_scan_provenance_as_the_exact_typed_session_id() {
+    let (repo, _tmp) = repo().await;
+    let library_id = library(&repo, "scan-provenance-present", true).await;
+    let owner = node(&repo, "scan-provenance-present-owner", NodeStatus::Active).await;
+    let root = repo
+        .create_library_root(
+            new_root(library_id, owner, "/scan-provenance-present"),
+            at(1),
+        )
+        .await
+        .unwrap();
+    let session_id = sqlx::query(
+        "INSERT INTO scan_sessions (storage_root_id, root_epoch, owner_node_id, status, \
+         idle_timeout_seconds, progress_deadline_at, requested_at) VALUES (?, ?, ?, 'requested', \
+         300, '1970-01-01T00:05:00Z', '1970-01-01T00:00:00Z')",
+    )
+    .bind(i64::try_from(root.id.0).unwrap())
+    .bind(i64::try_from(root.root_epoch).unwrap())
+    .bind(i64::try_from(owner.0).unwrap())
+    .execute(&repo.pool)
+    .await
+    .unwrap()
+    .last_insert_rowid();
+    sqlx::query("UPDATE library_roots SET last_scan_session_id = ? WHERE id = ?")
+        .bind(session_id)
+        .bind(i64::try_from(root.id.0).unwrap())
+        .execute(&repo.pool)
+        .await
+        .unwrap();
+
+    let decoded = repo.get_library_root(root.id).await.unwrap().unwrap();
+    assert_eq!(
+        decoded.last_scan_session_id,
+        Some(ScanSessionId(u64::try_from(session_id).unwrap()))
+    );
+}
+
 struct RollbackBarrier {
     entered: tokio::sync::Notify,
     release: (Mutex<bool>, Condvar),

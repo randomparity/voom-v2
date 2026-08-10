@@ -2,7 +2,7 @@ use super::*;
 
 use serde_json::json;
 use time::Duration;
-use voom_core::PolicyVersionId;
+use voom_core::{PolicyVersionId, ScanSessionId};
 
 use crate::repo::policy::policies::{NewPolicyDocumentVersion, SqlitePolicyRepo};
 use crate::repo::policy::policy_inputs::SqlitePolicyInputRepo;
@@ -45,6 +45,39 @@ async fn file_location_decodes_null_scan_retirement_provenance() {
     let location = create_location(&repo, version.id, (), "/scan-provenance").await;
 
     assert!(location.retired_by_scan_session_id.is_none());
+}
+
+#[tokio::test]
+async fn file_location_decodes_scan_retirement_provenance_as_the_exact_typed_session_id() {
+    let (repo, _tmp) = fresh().await;
+    let asset = repo.create_file_asset(T0).await.unwrap();
+    let version = create_version(&repo, asset.id, "scan-provenance-present", None).await;
+    let location = create_location(&repo, version.id, (), "/scan-provenance-present").await;
+    let session_id = sqlx::query(
+        "INSERT INTO scan_sessions (storage_root_id, root_epoch, owner_node_id, status, \
+         idle_timeout_seconds, progress_deadline_at, requested_at) VALUES \
+         (9000001, 1, 9000001, 'requested', 300, '1970-01-01T00:05:00Z', \
+          '1970-01-01T00:00:00Z')",
+    )
+    .execute(&repo.pool)
+    .await
+    .unwrap()
+    .last_insert_rowid();
+    sqlx::query(
+        "UPDATE file_locations SET retired_at = '1970-01-01T00:01:00Z', \
+         retired_by_scan_session_id = ? WHERE id = ?",
+    )
+    .bind(session_id)
+    .bind(i64::try_from(location.id.0).unwrap())
+    .execute(&repo.pool)
+    .await
+    .unwrap();
+
+    let decoded = repo.get_file_location(location.id).await.unwrap().unwrap();
+    assert_eq!(
+        decoded.retired_by_scan_session_id,
+        Some(ScanSessionId(u64::try_from(session_id).unwrap()))
+    );
 }
 
 #[tokio::test]
