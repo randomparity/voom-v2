@@ -19,6 +19,15 @@ async fn open_exposes_seeded_video_profiles() {
 }
 
 #[tokio::test]
+async fn debug_includes_the_scan_session_repository() {
+    let (_keep, url) = fresh_url();
+    voom_store::init(&url).await.unwrap();
+    let cp = ControlPlane::open(&url).await.unwrap();
+
+    assert!(format!("{cp:?}").contains("scan_sessions"));
+}
+
+#[tokio::test]
 async fn control_plane_open_rejects_uninitialized_db() {
     let (_keep, url) = fresh_url();
     voom_store::test_support::create_uninitialized_pool(&url)

@@ -18,10 +18,17 @@ pub(crate) mod discovery;
 pub(crate) mod hash;
 pub(crate) mod library;
 pub(crate) mod persist;
+pub mod sessions;
 pub(crate) mod worker;
 
 pub use discovery::{ScanMode, SidecarKind, classify_sidecar, is_supported_media_path};
 pub use library::{RootBlockReason, RootScanBlocked, RootScanOutcome};
+pub use sessions::{
+    RemoteScanBatchInput, RemoteScanBatchOutcome, RemoteScanFailInput, RemoteScanInspectInput,
+    RemoteScanReconciliationInput, RemoteScanStartInput, RemoteScanStartOutcome,
+    RemoteScanTerminalOutcome, ScanObservation, ScanReconciliationEvidence, ScanReconciliationPage,
+    ScanReconciliationQuery, ScanSession, ScanSessionListQuery, ScanSessionPage,
+};
 
 #[derive(Debug, Clone)]
 struct ScanPathInput {

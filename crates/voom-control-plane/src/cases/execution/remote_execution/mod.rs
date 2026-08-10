@@ -314,7 +314,7 @@ impl ControlPlane {
     /// binary, so the row is repointed to a terminal `Error` in the same
     /// transaction — the already-executed mutation is never re-run, and future
     /// replays return a deterministic error instead of re-failing decode.
-    async fn finish_replay_in_tx<T, F>(
+    pub(crate) async fn finish_replay_in_tx<T, F>(
         &self,
         mut tx: Transaction<'_, Sqlite>,
         slot: ReplaySlot,
@@ -392,7 +392,7 @@ pub(super) fn route_lease_fail(lease_id: LeaseId) -> String {
     format!("POST /v1/execution/lease/{}/fail", lease_id.0)
 }
 
-pub(super) fn is_remote_replayable_error(err: &VoomError) -> bool {
+pub(crate) fn is_remote_replayable_error(err: &VoomError) -> bool {
     matches!(
         err.error_code(),
         ErrorCode::Conflict | ErrorCode::ConfigInvalid | ErrorCode::NotFound
@@ -402,11 +402,11 @@ pub(super) fn is_remote_replayable_error(err: &VoomError) -> bool {
 /// Identity of the idempotency row a replay decodes from — the tuple
 /// `repoint_completed_replay_in_tx` matches on. Owns `route_key` because some
 /// routes derive it (`route_lease_*`) rather than holding a borrowable field.
-pub(super) struct ReplaySlot {
-    node_id: NodeId,
-    route_key: String,
-    worker_id: Option<WorkerId>,
-    idempotency_key: String,
+pub(crate) struct ReplaySlot {
+    pub(crate) node_id: NodeId,
+    pub(crate) route_key: String,
+    pub(crate) worker_id: Option<WorkerId>,
+    pub(crate) idempotency_key: String,
 }
 
 /// Maps a remote-execution input to the idempotency row it replays from, so
@@ -493,7 +493,7 @@ impl ReplayRoute for RemoteFailInput {
     }
 }
 
-pub(super) fn incarnation_replay_key(id: NodeIncarnationId, key: &str) -> String {
+pub(crate) fn incarnation_replay_key(id: NodeIncarnationId, key: &str) -> String {
     format!("{id}:{key}")
 }
 
@@ -501,7 +501,7 @@ pub(super) fn decode_acquire_replay(data: JsonValue) -> Result<RemoteAcquireOutc
     decode_replay(data, "remote acquire")
 }
 
-pub(super) fn decode_replay<T>(data: JsonValue, label: &str) -> Result<T, VoomError>
+pub(crate) fn decode_replay<T>(data: JsonValue, label: &str) -> Result<T, VoomError>
 where
     T: serde::de::DeserializeOwned,
 {
@@ -518,7 +518,7 @@ fn replay_error(code: &str, message: String) -> VoomError {
     }
 }
 
-pub(super) fn remote_error_message(err: &VoomError) -> String {
+pub(crate) fn remote_error_message(err: &VoomError) -> String {
     match err {
         VoomError::Conflict(message)
         | VoomError::Config(message)
