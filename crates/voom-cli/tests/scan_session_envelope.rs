@@ -57,7 +57,7 @@ struct Fixture {
 }
 
 #[tokio::test]
-async fn scan_session_commands_emit_stable_public_envelopes() {
+async fn request_show_list_reconciliation_and_cancel_emit_stable_public_envelopes() {
     let fixture = fixture().await;
 
     snapshot_progress(&fixture);
@@ -562,6 +562,10 @@ fn success(fixture: &Fixture, args: &[&str]) -> Value {
     );
     assert_no_private_facts(fixture, &output);
     let mut value = single_envelope(output);
+    assert_eq!(value["schema_version"], "0");
+    assert_eq!(value["command"], "scan-session");
+    assert_eq!(value["status"], "ok");
+    assert!(value["error"].is_null());
     redact_local(&mut value);
     value
 }
