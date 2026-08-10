@@ -29,7 +29,10 @@ CREATE TABLE scan_sessions (
             )) > 0
         )
     ),
-    retired_location_count      INTEGER NOT NULL DEFAULT 0 CHECK (retired_location_count >= 0),
+    retired_location_count      INTEGER NOT NULL DEFAULT 0 CHECK (
+        retired_location_count >= 0
+        AND (status = 'succeeded' OR retired_location_count = 0)
+    ),
     CHECK (
         (status = 'requested'
          AND owner_incarnation_id IS NULL
@@ -92,7 +95,7 @@ CREATE TABLE scan_observations (
     provider_relative_locator   TEXT NOT NULL CHECK (
         length(CAST(provider_relative_locator AS BLOB)) BETWEEN 1 AND 4096
         AND instr(provider_relative_locator, char(0)) = 0
-        AND instr(provider_relative_locator, '\\') = 0
+        AND instr(provider_relative_locator, char(92)) = 0
         AND substr(provider_relative_locator, 1, 1) != '/'
         AND substr(provider_relative_locator, -1, 1) != '/'
         AND instr(provider_relative_locator, '//') = 0

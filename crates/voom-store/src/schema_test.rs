@@ -54,6 +54,7 @@ async fn scan_session_schema_enforces_lifecycle_and_provenance_backstops() {
         "status IN ('requested', 'running', 'succeeded', 'failed', 'cancelled', 'stale')"
     ));
     assert!(session_sql.contains("length(CAST(terminal_reason AS BLOB)) BETWEEN 1 AND 1024"));
+    assert!(session_sql.contains("status = 'succeeded' OR retired_location_count = 0"));
     assert!(
         session_sql.contains("char(9) || char(10) || char(11) || char(12) || char(13) || char(32)")
     );
@@ -106,6 +107,14 @@ async fn scan_session_schema_rejects_invalid_rows_and_preserves_byte_boundaries(
           '1970-01-01T00:00:00Z')",
     )
     .await;
+    assert_scan_session_rejected(
+        &pool,
+        "INSERT INTO scan_sessions (storage_root_id, root_epoch, owner_node_id, status, \
+         idle_timeout_seconds, progress_deadline_at, requested_at, retired_location_count) VALUES \
+         (9000001, 1, 9000001, 'requested', 300, '1970-01-01T00:05:00Z', \
+          '1970-01-01T00:00:00Z', 1)",
+    )
+    .await;
     for reason in [
         "''".to_owned(),
         "char(9) || char(10) || char(13) || ' '".to_owned(),
@@ -150,20 +159,14 @@ async fn scan_session_schema_rejects_invalid_rows_and_preserves_byte_boundaries(
     .unwrap();
     assert_eq!(stored_reason, exact_multibyte);
 
-    sqlx::query(
-        "INSERT INTO scan_sessions (storage_root_id, root_epoch, owner_node_id, status, \
-         idle_timeout_seconds, progress_deadline_at, requested_at) VALUES \
-         (9000001, 1, 9000001, 'requested', 300, '1970-01-01T00:05:00Z', \
-          '1970-01-01T00:00:00Z')",
-    )
-    .execute(&pool)
-    .await
-    .unwrap();
-    assert_scan_session_rejected(
+    insert_active_incarnation(&pool, "scan-schema-active-incarnation").await;
+    let active_session_id =
+        insert_running_scan_session(&pool, 9_000_001, "scan-schema-active-incarnation").await;
+    assert_scan_session_unique_rejected(
         &pool,
         "INSERT INTO scan_sessions (storage_root_id, root_epoch, owner_node_id, status, \
          idle_timeout_seconds, progress_deadline_at, requested_at) VALUES \
-         (9000001, 1, 9000001, 'running', 300, '1970-01-01T00:05:00Z', \
+         (9000001, 1, 9000001, 'requested', 300, '1970-01-01T00:05:00Z', \
           '1970-01-01T00:00:00Z')",
     )
     .await;
@@ -173,6 +176,46 @@ async fn scan_session_schema_rejects_invalid_rows_and_preserves_byte_boundaries(
          VALUES (9000001, 1, 9000001, 'cancelled', 300, '1970-01-01T00:05:00Z', \
          '1970-01-01T00:00:00Z', '1970-01-01T00:01:00Z', 'operator cancelled')",
     )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    seed_second_storage_root(&pool).await;
+    sqlx::query(
+        "INSERT INTO scan_sessions (storage_root_id, root_epoch, owner_node_id, status, \
+         idle_timeout_seconds, progress_deadline_at, requested_at) VALUES \
+         (9000002, 1, 9000001, 'requested', 300, '1970-01-01T00:05:00Z', \
+          '1970-01-01T00:00:00Z')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    sqlx::query(
+        "INSERT INTO scan_observation_batches \
+         (scan_session_id, sequence, request_hash, observation_count, accepted_at, \
+          cumulative_observation_count) VALUES (?, 0, ?, 1, '1970-01-01T00:00:01Z', 1)",
+    )
+    .bind(active_session_id)
+    .bind("a".repeat(64))
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert_scan_observation_rejected(
+        &pool,
+        active_session_id,
+        "single\\backslash",
+        "single backslash locator must be rejected by the migration",
+    )
+    .await;
+    sqlx::query(
+        "INSERT INTO scan_observations (scan_session_id, batch_sequence, ordinal, \
+         provider_relative_locator, provider_object_identity, size_bytes, modified_at, \
+         stability_started_at, stability_confirmed_at) VALUES (?, 0, 1, ?, 'object', 1, \
+         '1970-01-01T00:00:00Z', '1970-01-01T00:00:00Z', '1970-01-01T00:00:00Z')",
+    )
+    .bind(active_session_id)
+    .bind("normal/locator")
     .execute(&pool)
     .await
     .unwrap();
@@ -198,6 +241,88 @@ async fn assert_scan_session_rejected(pool: &sqlx::SqlitePool, sql: &str) {
         error.to_string().contains("constraint failed"),
         "expected SQLite constraint to reject scan session row, got {error:?}"
     );
+}
+
+async fn assert_scan_session_unique_rejected(pool: &sqlx::SqlitePool, sql: &str) {
+    let error = sqlx::query(sql).execute(pool).await.unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("UNIQUE constraint failed: scan_sessions.storage_root_id"),
+        "expected active-root unique index to reject a lifecycle-valid row, got {error:?}"
+    );
+}
+
+async fn assert_scan_observation_rejected(
+    pool: &sqlx::SqlitePool,
+    scan_session_id: i64,
+    locator: &str,
+    message: &str,
+) {
+    let error = sqlx::query(
+        "INSERT INTO scan_observations (scan_session_id, batch_sequence, ordinal, \
+         provider_relative_locator, provider_object_identity, size_bytes, modified_at, \
+         stability_started_at, stability_confirmed_at) VALUES (?, 0, 0, ?, 'object', 1, \
+         '1970-01-01T00:00:00Z', '1970-01-01T00:00:00Z', '1970-01-01T00:00:00Z')",
+    )
+    .bind(scan_session_id)
+    .bind(locator)
+    .execute(pool)
+    .await
+    .unwrap_err();
+    assert!(
+        error.to_string().contains("CHECK constraint failed"),
+        "{message}, got {error:?}"
+    );
+}
+
+async fn insert_active_incarnation(pool: &sqlx::SqlitePool, incarnation_id: &str) {
+    sqlx::query(
+        "INSERT INTO node_incarnations \
+         (incarnation_id, node_id, status, started_at, last_seen_at, ended_at, end_reason) \
+         VALUES (?, 9000001, 'active', '1970-01-01T00:00:00Z', \
+                 '1970-01-01T00:00:00Z', NULL, NULL)",
+    )
+    .bind(incarnation_id)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+async fn insert_running_scan_session(
+    pool: &sqlx::SqlitePool,
+    storage_root_id: i64,
+    incarnation_id: &str,
+) -> i64 {
+    sqlx::query(
+        "INSERT INTO scan_sessions (storage_root_id, root_epoch, owner_node_id, \
+         owner_incarnation_id, status, idle_timeout_seconds, progress_deadline_at, requested_at, \
+         started_at) VALUES (?, 1, 9000001, ?, 'running', 300, \
+         '1970-01-01T00:05:00Z', '1970-01-01T00:00:00Z', '1970-01-01T00:00:01Z')",
+    )
+    .bind(storage_root_id)
+    .bind(incarnation_id)
+    .execute(pool)
+    .await
+    .unwrap()
+    .last_insert_rowid()
+}
+
+async fn seed_second_storage_root(pool: &sqlx::SqlitePool) {
+    sqlx::query(
+        "INSERT INTO library_roots (id, library_id, owner_node_id, provider_kind, \
+         provider_locator, display_locator, state, root_epoch, activation_identity, \
+         include_globs, exclude_globs, extension_allowlist, scan_mode, symlink_policy, \
+         hidden_file_policy, max_depth, stability_seconds, debounce_seconds, \
+         default_output_root_id, default_staging_root_id, default_backup_root_id, enabled, \
+         created_at, updated_at) VALUES (9000002, 9000001, 9000001, 'local_filesystem', \
+         '/second-root', '/second-root', 'active', 1, 'second-root', '[]', '[]', '[]', \
+         'manual_recursive', 'reject', 'ignore', NULL, 0, 0, NULL, NULL, NULL, 1, \
+         '1970-01-01T00:00:00Z', '1970-01-01T00:00:00Z')",
+    )
+    .execute(pool)
+    .await
+    .unwrap();
 }
 
 async fn assert_file_location_rejected(pool: &sqlx::SqlitePool, sql: &str) {

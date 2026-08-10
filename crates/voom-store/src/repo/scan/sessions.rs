@@ -142,6 +142,12 @@ fn validate_scan_session(session: &ScanSession) -> Result<(), VoomError> {
             session.idle_timeout_seconds
         )));
     }
+    if session.status != ScanSessionStatus::Succeeded && session.retired_location_count != 0 {
+        return Err(VoomError::database(format!(
+            "scan_sessions {} has retired locations before succeeding",
+            session.id.0
+        )));
+    }
     let active = session.terminal_at.is_none() && session.terminal_reason.is_none();
     let bindings = session.owner_incarnation_id.is_some() && session.started_at.is_some();
     let unbound = session.owner_incarnation_id.is_none()
