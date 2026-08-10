@@ -1,8 +1,12 @@
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use secrecy::SecretString;
 use serde_json::json;
+use sqlx::ConnectOptions;
+use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
 use time::{Duration, OffsetDateTime};
+use tokio::sync::Notify;
 use voom_core::{
     ArtifactAccessMode, ErrorCode, LibraryId, NodeId, NodeIncarnationId, OperationKind,
     ProviderLocator, ProviderRelativeLocator, ScanSessionId, ScanSessionStatus, ScanTerminalReason,
@@ -37,7 +41,15 @@ struct Fixture {
     node_id: NodeId,
     incarnation_id: NodeIncarnationId,
     root_id: StorageRootId,
-    _database: voom_test_support::TempDatabase,
+    database: voom_test_support::TempDatabase,
+}
+
+struct ReconciliationFence {
+    cp: crate::ControlPlane,
+    barrier_pool: sqlx::SqlitePool,
+    armed: Arc<AtomicBool>,
+    releases: Arc<AtomicUsize>,
+    fenced: Arc<Notify>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -645,6 +657,156 @@ async fn remote_inspection_requires_current_owner_without_idempotency_rows() {
     assert_eq!(inspected.id, session.id);
     assert_eq!(page.error_code(), ErrorCode::Conflict);
     assert_eq!(completed_replay_count(&fixture.cp).await, before);
+}
+
+#[tokio::test]
+async fn reconciliation_keeps_authorization_and_evidence_in_one_transaction() {
+    let fixture = fixture().await;
+    seed_rooted_location(&fixture.cp, fixture.root_id, "fenced-evidence.mkv").await;
+    let running = running_session(&fixture, 30).await;
+    fixture
+        .cp
+        .complete_scan_session(complete_input(
+            &fixture,
+            running.id,
+            "complete-fenced-evidence",
+            None,
+            0,
+        ))
+        .await
+        .unwrap();
+
+    let fence = reconciliation_fence(&fixture).await;
+    let fence_completed = fence.fenced.notified();
+    fence.armed.store(true, Ordering::SeqCst);
+
+    let page = fence
+        .cp
+        .inspect_remote_scan_reconciliation(RemoteScanReconciliationInput {
+            auth: RemoteScanInspectInput {
+                node_id: fixture.node_id,
+                scan_session_id: running.id,
+                incarnation_id: fixture.incarnation_id,
+                token: fixture.token.clone(),
+            },
+            after_id: None,
+            limit: 50,
+        })
+        .await
+        .unwrap();
+    let post_request_barrier = fence.barrier_pool.acquire().await.unwrap();
+    fence.armed.store(false, Ordering::SeqCst);
+    drop(post_request_barrier);
+    fence_completed.await;
+
+    assert_eq!(page.items.len(), 1);
+    assert_eq!(fence.releases.load(Ordering::SeqCst), 1);
+}
+
+async fn reconciliation_fence(fixture: &Fixture) -> ReconciliationFence {
+    let armed = Arc::new(AtomicBool::new(false));
+    let releases = Arc::new(AtomicUsize::new(0));
+    let fenced = Arc::new(Notify::new());
+    let released = Arc::new(Notify::new());
+    let all_releases = Arc::new(AtomicUsize::new(0));
+    let node_id = i64::try_from(fixture.node_id.0).unwrap();
+    let hook_armed = Arc::clone(&armed);
+    let hook_releases = Arc::clone(&releases);
+    let hook_fenced = Arc::clone(&fenced);
+    let hook_released = Arc::clone(&released);
+    let hook_all_releases = Arc::clone(&all_releases);
+    let url = format!("sqlite://{}", fixture.database.path().display());
+    let options = url
+        .parse::<SqliteConnectOptions>()
+        .unwrap()
+        .foreign_keys(true)
+        .journal_mode(SqliteJournalMode::Wal)
+        .busy_timeout(std::time::Duration::from_secs(30))
+        .disable_statement_logging();
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .after_release(move |connection, _metadata| {
+            let hook_armed = Arc::clone(&hook_armed);
+            let hook_releases = Arc::clone(&hook_releases);
+            let hook_fenced = Arc::clone(&hook_fenced);
+            let hook_released = Arc::clone(&hook_released);
+            let hook_all_releases = Arc::clone(&hook_all_releases);
+            Box::pin(async move {
+                if hook_armed.load(Ordering::SeqCst) {
+                    let release = hook_releases.fetch_add(1, Ordering::SeqCst);
+                    if release == 0 {
+                        supersede_incarnation(connection, node_id).await?;
+                        hook_fenced.notify_one();
+                    }
+                }
+                hook_all_releases.fetch_add(1, Ordering::SeqCst);
+                hook_released.notify_one();
+                Ok(true)
+            })
+        })
+        .connect_with(options)
+        .await
+        .unwrap();
+    let barrier_pool = pool.clone();
+    let cp = crate::ControlPlane::open_with_pool_and_rng(
+        pool,
+        fixture.clock.clone(),
+        Arc::new(Mutex::new(FrozenRng::new(420))),
+    )
+    .await
+    .unwrap();
+    drain_release_hooks(&barrier_pool, &all_releases, &released).await;
+    assert_current_incarnation(fixture, node_id).await;
+    assert_eq!(releases.load(Ordering::SeqCst), 0);
+    ReconciliationFence {
+        cp,
+        barrier_pool,
+        armed,
+        releases,
+        fenced,
+    }
+}
+
+async fn supersede_incarnation(
+    connection: &mut sqlx::SqliteConnection,
+    node_id: i64,
+) -> Result<(), sqlx::Error> {
+    sqlx::query("UPDATE nodes SET active_incarnation_id = NULL WHERE id = ?")
+        .bind(node_id)
+        .execute(&mut *connection)
+        .await?;
+    sqlx::query(
+        "UPDATE node_incarnations SET status = 'superseded', ended_at = ?, \
+         end_reason = 'superseded' WHERE incarnation_id = ?",
+    )
+    .bind("1970-01-01T00:00:01Z")
+    .bind(INCARNATION)
+    .execute(&mut *connection)
+    .await?;
+    Ok(())
+}
+
+async fn drain_release_hooks(
+    pool: &sqlx::SqlitePool,
+    all_releases: &AtomicUsize,
+    released: &Notify,
+) {
+    let connection = pool.acquire().await.unwrap();
+    let before = all_releases.load(Ordering::SeqCst);
+    drop(connection);
+    while all_releases.load(Ordering::SeqCst) == before {
+        released.notified().await;
+    }
+}
+
+async fn assert_current_incarnation(fixture: &Fixture, node_id: i64) {
+    let current: Option<String> =
+        sqlx::query_scalar("SELECT active_incarnation_id FROM nodes WHERE id = ?")
+            .bind(node_id)
+            .fetch_one(fixture.cp.pool_for_test())
+            .await
+            .unwrap();
+    assert_eq!(current.as_deref(), Some(INCARNATION));
 }
 
 #[tokio::test]
@@ -1275,7 +1437,7 @@ async fn fixture() -> Fixture {
         node_id: registered.node.id,
         incarnation_id,
         root_id,
-        _database: database,
+        database,
     }
 }
 

@@ -508,15 +508,33 @@ impl SqliteScanSessionRepo {
         &self,
         query: ScanReconciliationQuery,
     ) -> Result<ScanReconciliationPage, VoomError> {
+        let mut tx = self.pool.begin().await.map_err(|error| {
+            VoomError::database_context("begin scan reconciliation transaction", error)
+        })?;
+        let page = self.reconciliation_page_in_tx(&mut tx, query).await?;
+        tx.commit().await.map_err(|error| {
+            VoomError::database_context("commit scan reconciliation transaction", error)
+        })?;
+        Ok(page)
+    }
+
+    pub async fn reconciliation_page_in_tx(
+        &self,
+        tx: &mut Transaction<'_, Sqlite>,
+        query: ScanReconciliationQuery,
+    ) -> Result<ScanReconciliationPage, VoomError> {
         let limit = checked_page_limit(query.limit, "scan reconciliation")?;
-        let Some(session) = self.get(query.scan_session_id).await? else {
+        let Some(session) = self.get_in_tx(tx, query.scan_session_id).await? else {
             return Err(VoomError::NotFound(format!(
                 "scan session {} not found",
                 query.scan_session_id
             )));
         };
-        self.validate_reconciliation_integrity(&session).await?;
-        let rows = self.reconciliation_page_rows(&query, limit + 1).await?;
+        self.validate_reconciliation_integrity_in_tx(tx, &session)
+            .await?;
+        let rows = self
+            .reconciliation_page_rows_in_tx(tx, &query, limit + 1)
+            .await?;
         let mut items = rows
             .iter()
             .map(|row| reconciliation_item(&session, row))
@@ -534,8 +552,9 @@ impl SqliteScanSessionRepo {
         })
     }
 
-    async fn validate_reconciliation_integrity(
+    async fn validate_reconciliation_integrity_in_tx(
         &self,
+        tx: &mut Transaction<'_, Sqlite>,
         session: &ScanSession,
     ) -> Result<(), VoomError> {
         let session_id = i64_from_u64(session.id.0, "file_locations.retired_by_scan_session_id")?;
@@ -543,7 +562,7 @@ impl SqliteScanSessionRepo {
             "SELECT COUNT(*) FROM file_locations WHERE retired_by_scan_session_id = ?",
         )
         .bind(session_id)
-        .fetch_one(&self.pool)
+        .fetch_one(&mut **tx)
         .await
         .map_err(|error| VoomError::database_context("scan reconciliation count", error))?;
         let attributed_count = u64_from_i64(attributed_count, "scan reconciliation count")?;
@@ -566,12 +585,13 @@ impl SqliteScanSessionRepo {
                 session.id, session.retired_location_count
             )));
         }
-        self.reject_invalid_reconciliation_locations(session, session_id)
+        self.reject_invalid_reconciliation_locations_in_tx(tx, session, session_id)
             .await
     }
 
-    async fn reject_invalid_reconciliation_locations(
+    async fn reject_invalid_reconciliation_locations_in_tx(
         &self,
+        tx: &mut Transaction<'_, Sqlite>,
         session: &ScanSession,
         session_id: i64,
     ) -> Result<(), VoomError> {
@@ -595,7 +615,7 @@ impl SqliteScanSessionRepo {
             .bind(high_watermark)
             .bind(high_watermark)
             .bind(session_id)
-            .fetch_one(&self.pool)
+            .fetch_one(&mut **tx)
             .await
             .map_err(|error| VoomError::database_context("scan reconciliation integrity", error))?;
         if invalid != 0 {
@@ -607,8 +627,9 @@ impl SqliteScanSessionRepo {
         Ok(())
     }
 
-    async fn reconciliation_page_rows(
+    async fn reconciliation_page_rows_in_tx(
         &self,
+        tx: &mut Transaction<'_, Sqlite>,
         query: &ScanReconciliationQuery,
         fetch_limit: i64,
     ) -> Result<Vec<sqlx::sqlite::SqliteRow>, VoomError> {
@@ -621,13 +642,13 @@ impl SqliteScanSessionRepo {
                 .bind(session_id)
                 .bind(i64_from_u64(after_id.0, "file_locations.id")?)
                 .bind(fetch_limit)
-                .fetch_all(&self.pool)
+                .fetch_all(&mut **tx)
                 .await
         } else {
             sqlx::query(RECONCILIATION_PAGE_FIRST_SQL)
                 .bind(session_id)
                 .bind(fetch_limit)
-                .fetch_all(&self.pool)
+                .fetch_all(&mut **tx)
                 .await
         };
         rows.map_err(|error| VoomError::database_context("scan reconciliation page", error))
