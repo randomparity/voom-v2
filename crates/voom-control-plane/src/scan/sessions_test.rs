@@ -19,7 +19,8 @@ use voom_store::repo::library::library_roots::{
 use voom_store::repo::scan::sessions::{ScanObservation, ScanSession};
 
 use super::{
-    RemoteScanBatchInput, RemoteScanBatchOutcome, RemoteScanFailInput, RemoteScanInspectInput,
+    RemoteScanBatchInput, RemoteScanBatchOutcome, RemoteScanCompleteInput,
+    RemoteScanCompleteOutcome, RemoteScanFailInput, RemoteScanInspectInput,
     RemoteScanReconciliationInput, RemoteScanStartInput, RemoteScanStartOutcome,
     RemoteScanTerminalOutcome,
 };
@@ -67,6 +68,14 @@ enum TerminalRollbackTrigger {
 enum CancelRollbackTrigger {
     EventInsert,
     SessionUpdate,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum CompleteRollbackTrigger {
+    LocationUpdate,
+    SessionUpdate,
+    EventInsert,
+    ReplayCompletion,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -796,6 +805,326 @@ async fn cancellation_abort_points_roll_back_session_observations_and_event() {
     }
 }
 
+#[tokio::test]
+async fn complete_empty_scan_retires_every_pre_start_location_with_one_summary_fact() {
+    let fixture = fixture().await;
+    let first = seed_rooted_location(&fixture.cp, fixture.root_id, "first-absent.mkv").await;
+    let second = seed_rooted_location(&fixture.cp, fixture.root_id, "second-absent.mkv").await;
+    let running = running_session(&fixture, 30).await;
+    fixture.clock.advance(Duration::seconds(1));
+    let input = complete_input(&fixture, running.id, "complete-empty", None, 0);
+
+    let outcome = fixture
+        .cp
+        .complete_scan_session(input.clone())
+        .await
+        .unwrap();
+    let replay = fixture.cp.complete_scan_session(input).await.unwrap();
+
+    assert_eq!(outcome, replay);
+    assert_eq!(outcome.status, ScanSessionStatus::Succeeded);
+    assert_eq!(outcome.observation_count, 0);
+    assert_eq!(outcome.retired_location_count, 2);
+    let completed = fixture.cp.scan_session(running.id).await.unwrap();
+    assert_eq!(completed.retired_location_count, 2);
+    let first_state = location_retirement(&fixture.cp, first).await;
+    let second_state = location_retirement(&fixture.cp, second).await;
+    assert_eq!(first_state.0, completed.terminal_at);
+    assert_eq!(second_state.0, completed.terminal_at);
+    assert_eq!(first_state.1, 1);
+    assert_eq!(second_state.1, 1);
+    assert_eq!(first_state.2, Some(running.id));
+    assert_eq!(second_state.2, Some(running.id));
+    assert_eq!(
+        reconciliation_pointer(&fixture.cp, fixture.root_id).await,
+        Some(i64::try_from(running.id.0).unwrap())
+    );
+    assert_eq!(
+        event_count(&fixture.cp, EventKind::ScanSessionSucceeded).await,
+        1
+    );
+    assert_eq!(file_location_event_count(&fixture.cp).await, 0);
+}
+
+#[tokio::test]
+async fn complete_retires_only_unobserved_pre_start_locations_from_the_session_root() {
+    let fixture = fixture().await;
+    let other_root = create_root(&fixture.cp, fixture.node_id, "completion-other").await;
+    let observed = seed_rooted_location(&fixture.cp, fixture.root_id, "observed.mkv").await;
+    let absent = seed_rooted_location(&fixture.cp, fixture.root_id, "absent.mkv").await;
+    let other = seed_rooted_location(&fixture.cp, other_root, "other.mkv").await;
+    let running = running_session(&fixture, 30).await;
+    let concurrent = seed_rooted_location(&fixture.cp, fixture.root_id, "concurrent.mkv").await;
+    let mut batch = batch_input(&fixture, running.id, 0, "complete-observation", 'a');
+    batch.observations[0].provider_relative_locator =
+        ProviderRelativeLocator::new("observed.mkv".to_owned()).unwrap();
+    fixture
+        .cp
+        .accept_scan_observation_batch(batch)
+        .await
+        .unwrap();
+
+    let outcome = fixture
+        .cp
+        .complete_scan_session(complete_input(
+            &fixture,
+            running.id,
+            "complete-observed",
+            Some(0),
+            1,
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(outcome.retired_location_count, 1);
+    assert!(location_retirement(&fixture.cp, observed).await.0.is_none());
+    assert_eq!(
+        location_retirement(&fixture.cp, absent).await.2,
+        Some(running.id)
+    );
+    assert!(
+        location_retirement(&fixture.cp, concurrent)
+            .await
+            .0
+            .is_none()
+    );
+    assert!(location_retirement(&fixture.cp, other).await.0.is_none());
+}
+
+#[tokio::test]
+async fn complete_rejects_wrong_final_sequence_or_count_without_reconciliation() {
+    for (last_sequence, observation_count) in [(Some(0), 0), (None, 1)] {
+        let fixture = fixture().await;
+        let location = seed_rooted_location(&fixture.cp, fixture.root_id, "still-live.mkv").await;
+        let running = running_session(&fixture, 30).await;
+
+        let error = fixture
+            .cp
+            .complete_scan_session(complete_input(
+                &fixture,
+                running.id,
+                "bad-watermark",
+                last_sequence,
+                observation_count,
+            ))
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.error_code(), ErrorCode::Conflict);
+        assert_eq!(
+            fixture.cp.scan_session(running.id).await.unwrap().status,
+            ScanSessionStatus::Running
+        );
+        assert!(location_retirement(&fixture.cp, location).await.0.is_none());
+        assert_eq!(
+            reconciliation_pointer(&fixture.cp, fixture.root_id).await,
+            None
+        );
+    }
+}
+
+#[tokio::test]
+async fn complete_never_reconciles_failed_cancelled_or_stale_sessions() {
+    let failed = fixture().await;
+    let failed_location = seed_rooted_location(&failed.cp, failed.root_id, "failed.mkv").await;
+    let failed_session = running_session(&failed, 30).await;
+    failed
+        .cp
+        .fail_scan_session(fail_input(&failed, failed_session.id, "terminal-failed"))
+        .await
+        .unwrap();
+    assert_terminal_completion_rejected(&failed, failed_session.id, failed_location).await;
+
+    let cancelled = fixture().await;
+    let cancelled_location =
+        seed_rooted_location(&cancelled.cp, cancelled.root_id, "cancelled.mkv").await;
+    let cancelled_session = running_session(&cancelled, 30).await;
+    cancelled
+        .cp
+        .cancel_scan_session(
+            cancelled_session.id,
+            ScanTerminalReason::new("operator cancelled").unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_terminal_completion_rejected(&cancelled, cancelled_session.id, cancelled_location).await;
+
+    let stale = fixture().await;
+    let stale_location = seed_rooted_location(&stale.cp, stale.root_id, "stale.mkv").await;
+    let stale_session = running_session(&stale, 30).await;
+    stale.clock.advance(Duration::seconds(30));
+    let _ = stale
+        .cp
+        .fail_scan_session(fail_input(&stale, stale_session.id, "terminal-stale"))
+        .await
+        .unwrap_err();
+    assert_terminal_completion_rejected(&stale, stale_session.id, stale_location).await;
+}
+
+#[tokio::test]
+async fn complete_fence_drift_marks_session_stale_without_reconciliation() {
+    for fence in ["epoch", "unavailable", "owner"] {
+        let fixture = fixture().await;
+        let location = seed_rooted_location(&fixture.cp, fixture.root_id, "fenced.mkv").await;
+        let running = running_session(&fixture, 30).await;
+        match fence {
+            "epoch" => {
+                sqlx::query("UPDATE library_roots SET root_epoch = root_epoch + 1 WHERE id = ?")
+                    .bind(i64::try_from(fixture.root_id.0).unwrap())
+                    .execute(fixture.cp.pool_for_test())
+                    .await
+                    .unwrap();
+            }
+            "unavailable" => {
+                sqlx::query("UPDATE library_roots SET state = 'unavailable' WHERE id = ?")
+                    .bind(i64::try_from(fixture.root_id.0).unwrap())
+                    .execute(fixture.cp.pool_for_test())
+                    .await
+                    .unwrap();
+            }
+            "owner" => {
+                let owner = seed_alternate_owner(&fixture.cp).await;
+                sqlx::query("UPDATE library_roots SET owner_node_id = ? WHERE id = ?")
+                    .bind(i64::try_from(owner.0).unwrap())
+                    .bind(i64::try_from(fixture.root_id.0).unwrap())
+                    .execute(fixture.cp.pool_for_test())
+                    .await
+                    .unwrap();
+            }
+            _ => unreachable!(),
+        }
+
+        let error = fixture
+            .cp
+            .complete_scan_session(complete_input(
+                &fixture,
+                running.id,
+                "complete-fenced",
+                None,
+                0,
+            ))
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.error_code(), ErrorCode::Conflict);
+        assert_eq!(
+            fixture.cp.scan_session(running.id).await.unwrap().status,
+            ScanSessionStatus::Stale
+        );
+        assert!(location_retirement(&fixture.cp, location).await.0.is_none());
+        assert_eq!(
+            reconciliation_pointer(&fixture.cp, fixture.root_id).await,
+            None
+        );
+    }
+}
+
+#[tokio::test]
+async fn complete_post_preflight_failures_roll_back_every_write() {
+    for trigger in [
+        CompleteRollbackTrigger::LocationUpdate,
+        CompleteRollbackTrigger::SessionUpdate,
+        CompleteRollbackTrigger::EventInsert,
+        CompleteRollbackTrigger::ReplayCompletion,
+    ] {
+        let fixture = fixture().await;
+        let location = seed_rooted_location(&fixture.cp, fixture.root_id, "rollback.mkv").await;
+        let running = running_session(&fixture, 30).await;
+        install_completion_rollback_trigger(&fixture.cp, trigger).await;
+
+        let error = fixture
+            .cp
+            .complete_scan_session(complete_input(
+                &fixture,
+                running.id,
+                "complete-rollback",
+                None,
+                0,
+            ))
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.error_code(), ErrorCode::DbUnreachable, "{trigger:?}");
+        assert_eq!(
+            fixture.cp.scan_session(running.id).await.unwrap().status,
+            ScanSessionStatus::Running,
+            "{trigger:?}"
+        );
+        assert!(
+            location_retirement(&fixture.cp, location).await.0.is_none(),
+            "{trigger:?}"
+        );
+        assert_eq!(
+            reconciliation_pointer(&fixture.cp, fixture.root_id).await,
+            None,
+            "{trigger:?}"
+        );
+        assert_eq!(
+            event_count(&fixture.cp, EventKind::ScanSessionSucceeded).await,
+            0,
+            "{trigger:?}"
+        );
+        assert_eq!(
+            replay_rows_for_key(&fixture.cp, "complete-rollback").await,
+            0,
+            "{trigger:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn complete_commit_locks_are_retryable_and_leave_the_session_running() {
+    for state in ["pending", "authorized", "recovery_required"] {
+        let fixture = fixture().await;
+        let location =
+            seed_rooted_location(&fixture.cp, fixture.root_id, "commit-locked.mkv").await;
+        let running = running_session(&fixture, 30).await;
+        let commit_id = seed_completion_commit_lock(&fixture.cp, location, state).await;
+
+        let error = fixture
+            .cp
+            .complete_scan_session(complete_input(
+                &fixture,
+                running.id,
+                "locked-completion",
+                None,
+                0,
+            ))
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.error_code(), ErrorCode::Conflict, "{state}");
+        assert_eq!(
+            fixture.cp.scan_session(running.id).await.unwrap().status,
+            ScanSessionStatus::Running,
+            "{state}"
+        );
+        assert!(location_retirement(&fixture.cp, location).await.0.is_none());
+        assert_eq!(
+            reconciliation_pointer(&fixture.cp, fixture.root_id).await,
+            None
+        );
+
+        sqlx::query("DELETE FROM commit_intents WHERE id = ?")
+            .bind(commit_id)
+            .execute(fixture.cp.pool_for_test())
+            .await
+            .unwrap();
+        let retried = fixture
+            .cp
+            .complete_scan_session(complete_input(
+                &fixture,
+                running.id,
+                "retry-completion",
+                None,
+                0,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(retried.status, ScanSessionStatus::Succeeded, "{state}");
+    }
+}
+
 #[test]
 fn replay_outcomes_reject_unknown_fields() {
     let incarnation_id = INCARNATION.parse().unwrap();
@@ -817,6 +1146,12 @@ fn replay_outcomes_reject_unknown_fields() {
         status: ScanSessionStatus::Failed,
         terminal_at: T0,
         terminal_reason: ScanTerminalReason::new("failed").unwrap(),
+    });
+    assert_unknown_rejected(RemoteScanCompleteOutcome {
+        scan_session_id: ScanSessionId(1),
+        status: ScanSessionStatus::Succeeded,
+        observation_count: 2,
+        retired_location_count: 3,
     });
 }
 
@@ -1073,6 +1408,39 @@ fn fail_input(fixture: &Fixture, id: ScanSessionId, key: &str) -> RemoteScanFail
     }
 }
 
+fn complete_input(
+    fixture: &Fixture,
+    id: ScanSessionId,
+    key: &str,
+    last_sequence: Option<u64>,
+    observation_count: u64,
+) -> RemoteScanCompleteInput {
+    RemoteScanCompleteInput {
+        node_id: fixture.node_id,
+        scan_session_id: id,
+        incarnation_id: fixture.incarnation_id,
+        token: fixture.token.clone(),
+        idempotency_key: key.to_owned(),
+        request_hash: format!("{key}-route-instance"),
+        last_sequence,
+        observation_count,
+    }
+}
+
+async fn assert_terminal_completion_rejected(fixture: &Fixture, id: ScanSessionId, location: u64) {
+    let error = fixture
+        .cp
+        .complete_scan_session(complete_input(fixture, id, "terminal-completion", None, 0))
+        .await
+        .unwrap_err();
+    assert_eq!(error.error_code(), ErrorCode::Conflict);
+    assert!(location_retirement(&fixture.cp, location).await.0.is_none());
+    assert_eq!(
+        reconciliation_pointer(&fixture.cp, fixture.root_id).await,
+        None
+    );
+}
+
 async fn seed_rooted_location(
     cp: &crate::ControlPlane,
     root_id: StorageRootId,
@@ -1258,6 +1626,90 @@ async fn install_cancel_rollback_trigger(cp: &crate::ControlPlane, trigger: Canc
     sqlx::query(sql).execute(cp.pool_for_test()).await.unwrap();
 }
 
+async fn install_completion_rollback_trigger(
+    cp: &crate::ControlPlane,
+    trigger: CompleteRollbackTrigger,
+) {
+    let sql = match trigger {
+        CompleteRollbackTrigger::LocationUpdate => {
+            "CREATE TRIGGER reject_scan_completion_location BEFORE UPDATE OF retired_at \
+             ON file_locations WHEN NEW.retired_by_scan_session_id IS NOT NULL \
+             BEGIN SELECT RAISE(ABORT, 'forced completion location rollback'); END"
+        }
+        CompleteRollbackTrigger::SessionUpdate => {
+            "CREATE TRIGGER reject_scan_completion_session BEFORE UPDATE OF status \
+             ON scan_sessions WHEN NEW.status = 'succeeded' \
+             BEGIN SELECT RAISE(ABORT, 'forced completion session rollback'); END"
+        }
+        CompleteRollbackTrigger::EventInsert => {
+            "CREATE TRIGGER reject_scan_completion_event BEFORE INSERT ON events \
+             WHEN NEW.kind = 'scan_session.succeeded' \
+             BEGIN SELECT RAISE(ABORT, 'forced completion event rollback'); END"
+        }
+        CompleteRollbackTrigger::ReplayCompletion => {
+            "CREATE TRIGGER reject_scan_completion_replay BEFORE UPDATE OF status \
+             ON remote_idempotency_keys WHEN NEW.status = 'completed' \
+             AND NEW.route_key = 'POST /v1/scan/session/complete' \
+             BEGIN SELECT RAISE(ABORT, 'forced completion replay rollback'); END"
+        }
+    };
+    sqlx::query(sql).execute(cp.pool_for_test()).await.unwrap();
+}
+
+async fn seed_alternate_owner(cp: &crate::ControlPlane) -> NodeId {
+    let id = sqlx::query(
+        "INSERT INTO nodes \
+         (name, kind, status, registered_at, last_seen_at, heartbeat_ttl_seconds, \
+          auth_token_hash, auth_token_hint, metadata, epoch) \
+         VALUES ('alternate-scan-owner', 'local', 'active', ?, ?, 60, \
+                 'hash', 'hint', '{}', 0)",
+    )
+    .bind("1970-01-01T00:00:00Z")
+    .bind("1970-01-01T00:00:00Z")
+    .execute(cp.pool_for_test())
+    .await
+    .unwrap()
+    .last_insert_rowid();
+    NodeId(u64::try_from(id).unwrap())
+}
+
+async fn seed_completion_commit_lock(cp: &crate::ControlPlane, location: u64, state: &str) -> i64 {
+    let commit_id = sqlx::query(
+        "INSERT INTO commit_intents \
+         (target, closure_initial, accepted_evidence_ids, state, started_at) \
+         VALUES ('{}', '{}', '[]', 'pending', '1970-01-01T00:00:00Z')",
+    )
+    .execute(cp.pool_for_test())
+    .await
+    .unwrap()
+    .last_insert_rowid();
+    sqlx::query(
+        "INSERT INTO commit_intent_scope_members (commit_intent_id, scope_location_id) \
+         VALUES (?, ?)",
+    )
+    .bind(commit_id)
+    .bind(i64::try_from(location).unwrap())
+    .execute(cp.pool_for_test())
+    .await
+    .unwrap();
+    if state != "pending" {
+        let recovery_reason = (state == "recovery_required").then_some("mutation_failed");
+        sqlx::query(
+            "UPDATE commit_intents SET state = ?, authorized_at = ?, \
+             closure_authorized = closure_initial, target_row_epochs = '[]', \
+             recovery_reason = ? WHERE id = ?",
+        )
+        .bind(state)
+        .bind("1970-01-01T00:00:01Z")
+        .bind(recovery_reason)
+        .bind(commit_id)
+        .execute(cp.pool_for_test())
+        .await
+        .unwrap();
+    }
+    commit_id
+}
+
 async fn lifecycle_snapshot(fixture: &Fixture, id: ScanSessionId) -> LifecycleSnapshot {
     LifecycleSnapshot {
         session: fixture.cp.scan_session(id).await.unwrap(),
@@ -1371,6 +1823,37 @@ async fn assert_conflict_replay(cp: &crate::ControlPlane, key: &str) {
 async fn reconciliation_pointer(cp: &crate::ControlPlane, root: StorageRootId) -> Option<i64> {
     sqlx::query_scalar("SELECT last_scan_session_id FROM library_roots WHERE id = ?")
         .bind(i64::try_from(root.0).unwrap())
+        .fetch_one(cp.pool_for_test())
+        .await
+        .unwrap()
+}
+
+async fn location_retirement(
+    cp: &crate::ControlPlane,
+    location: u64,
+) -> (Option<OffsetDateTime>, i64, Option<ScanSessionId>) {
+    let row: (Option<String>, i64, Option<i64>) = sqlx::query_as(
+        "SELECT retired_at, epoch, retired_by_scan_session_id FROM file_locations WHERE id = ?",
+    )
+    .bind(i64::try_from(location).unwrap())
+    .fetch_one(cp.pool_for_test())
+    .await
+    .unwrap();
+    (
+        row.0.map(|value| {
+            OffsetDateTime::parse(
+                &value,
+                &time::format_description::well_known::Iso8601::DEFAULT,
+            )
+            .unwrap()
+        }),
+        row.1,
+        row.2.map(|id| ScanSessionId(u64::try_from(id).unwrap())),
+    )
+}
+
+async fn file_location_event_count(cp: &crate::ControlPlane) -> i64 {
+    sqlx::query_scalar("SELECT COUNT(*) FROM events WHERE kind LIKE 'file_location.%'")
         .fetch_one(cp.pool_for_test())
         .await
         .unwrap()

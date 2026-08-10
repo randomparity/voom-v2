@@ -3,8 +3,8 @@ use voom_core::{
 };
 
 use super::{
-    NewScanObservationBatch, NewScanSession, ScanObservation, ScanReconciliationQuery,
-    ScanSessionListQuery, SqliteScanSessionRepo,
+    CompleteScanSessionInput, NewScanObservationBatch, NewScanSession, ScanObservation,
+    ScanReconciliationQuery, ScanSessionListQuery, SqliteScanSessionRepo,
 };
 use crate::test_support::{
     T0, fresh_initialized_pool_at, seed_test_storage_root, with_check_constraints_disabled,
@@ -1402,6 +1402,64 @@ async fn lifecycle_and_batch_mutations_remain_owned_by_the_callers_transaction()
         .await
         .unwrap();
     assert_eq!(batches, 0);
+}
+
+#[tokio::test]
+async fn completion_compare_and_set_rejects_non_running_session_without_reconciliation() {
+    let (pool, _tmp) = fresh_pool().await;
+    let root = seed_test_storage_root(&pool).await.unwrap();
+    let location = seed_rooted_location(&pool, root, "non-running.mkv").await;
+    let incarnation = "55555555555555555555555555555555";
+    seed_incarnation(&pool, incarnation).await;
+    let incarnation_id = incarnation.parse().unwrap();
+    let repo = SqliteScanSessionRepo::new(pool.clone());
+    let mut tx = pool.begin().await.unwrap();
+    let requested = repo
+        .insert_requested_in_tx(&mut tx, new_session(root))
+        .await
+        .unwrap();
+    repo.start_in_tx(
+        &mut tx,
+        requested.id,
+        incarnation_id,
+        T0 + time::Duration::minutes(5),
+        T0,
+    )
+    .await
+    .unwrap();
+    sqlx::query("UPDATE scan_sessions SET status = 'succeeded', terminal_at = ? WHERE id = ?")
+        .bind("1970-01-01T00:01:00Z")
+        .bind(i64::try_from(requested.id.0).unwrap())
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+
+    let error = repo
+        .complete_in_tx(
+            &mut tx,
+            CompleteScanSessionInput {
+                scan_session_id: requested.id,
+                expected_storage_root_id: root,
+                expected_root_epoch: 1,
+                expected_owner_node_id: NodeId(9_000_001),
+                expected_owner_incarnation_id: incarnation_id,
+                last_sequence: None,
+                observation_count: 0,
+                completed_at: T0 + time::Duration::minutes(2),
+            },
+        )
+        .await
+        .unwrap_err();
+
+    assert!(matches!(error, VoomError::Database { .. }));
+    tx.rollback().await.unwrap();
+    let retired_at: Option<String> =
+        sqlx::query_scalar("SELECT retired_at FROM file_locations WHERE id = ?")
+            .bind(location)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(retired_at.is_none());
 }
 
 #[derive(Clone, Copy)]

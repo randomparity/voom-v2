@@ -6,13 +6,18 @@ use voom_core::{
     FileLocationId, NodeId, NodeIncarnationId, ScanSessionId, ScanSessionStatus,
     ScanTerminalReason, StorageRootId, VoomError,
 };
-use voom_events::payload::{ScanObservationBatchAcceptedPayload, ScanSessionLifecyclePayload};
+use voom_events::payload::{
+    ScanObservationBatchAcceptedPayload, ScanSessionLifecyclePayload, ScanSessionSucceededPayload,
+};
 use voom_events::{Event, SubjectType};
 use voom_store::repo::execution::remote_idempotency::{
     IdempotencyOutcome, RemoteIdempotencyInput, RemoteMutationReplay,
 };
 use voom_store::repo::library::library_roots::EffectiveLibraryRoot;
-use voom_store::repo::scan::sessions::{NewScanObservationBatch, NewScanSession, ScanBatchOutcome};
+use voom_store::repo::scan::sessions::{
+    CompleteScanSessionInput, NewScanObservationBatch, NewScanSession, ScanBatchOutcome,
+    ScanCompletionRecord,
+};
 pub use voom_store::repo::scan::sessions::{
     ScanObservation, ScanReconciliationEvidence, ScanReconciliationPage, ScanReconciliationQuery,
     ScanSession, ScanSessionListQuery, ScanSessionPage,
@@ -27,6 +32,7 @@ use crate::cases::{append_event, begin_immediate_tx, begin_tx, commit_tx};
 
 const ROUTE_SCAN_START: &str = "POST /v1/scan/session/start";
 const ROUTE_SCAN_BATCH: &str = "POST /v1/scan/session/batch";
+const ROUTE_SCAN_COMPLETE: &str = "POST /v1/scan/session/complete";
 const ROUTE_SCAN_FAIL: &str = "POST /v1/scan/session/fail";
 
 #[derive(Debug, Clone)]
@@ -60,6 +66,18 @@ pub struct RemoteScanFailInput {
     pub idempotency_key: String,
     pub request_hash: String,
     pub reason: ScanTerminalReason,
+}
+
+#[derive(Debug, Clone)]
+pub struct RemoteScanCompleteInput {
+    pub node_id: NodeId,
+    pub scan_session_id: ScanSessionId,
+    pub incarnation_id: NodeIncarnationId,
+    pub token: SecretString,
+    pub idempotency_key: String,
+    pub request_hash: String,
+    pub last_sequence: Option<u64>,
+    pub observation_count: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -103,6 +121,15 @@ pub struct RemoteScanTerminalOutcome {
     pub status: ScanSessionStatus,
     pub terminal_at: OffsetDateTime,
     pub terminal_reason: ScanTerminalReason,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RemoteScanCompleteOutcome {
+    pub scan_session_id: ScanSessionId,
+    pub status: ScanSessionStatus,
+    pub observation_count: u64,
+    pub retired_location_count: u64,
 }
 
 impl ControlPlane {
@@ -319,6 +346,47 @@ impl ControlPlane {
         Ok(outcome)
     }
 
+    /// Atomically succeed a complete traversal and reconcile absent locations.
+    pub async fn complete_scan_session(
+        &self,
+        input: RemoteScanCompleteInput,
+    ) -> Result<RemoteScanCompleteOutcome, VoomError> {
+        validate_completion_input(&input)?;
+        let mut tx = begin_immediate_tx(&self.pool).await?;
+        let now = self.clock().now();
+        self.require_scan_authority_in_tx(&mut tx, &input.scan_auth())
+            .await?;
+        let replay_identity = input.replay(ROUTE_SCAN_COMPLETE);
+        let replay = self
+            .reserve_scan_replay_in_tx(&mut tx, &replay_identity, now)
+            .await?;
+        if let Some(replay) = replay {
+            return self
+                .finish_scan_replay(tx, &replay_identity, replay, "scan completion")
+                .await;
+        }
+        let session = match self
+            .owned_scan_session_in_tx(&mut tx, input.scan_session_id, input.node_id)
+            .await
+        {
+            Ok(session) => session,
+            Err(error) => return self.finish_scan_error(tx, &replay_identity, error).await,
+        };
+        let fence_error = self
+            .stale_fence_error_in_tx(&mut tx, &session, Some(input.incarnation_id), now)
+            .await?;
+        if let Err(error) = require_running_completion(&session) {
+            return self.finish_scan_error(tx, &replay_identity, error).await;
+        }
+        if let Some(error) = fence_error {
+            return self
+                .stale_remote_scan(tx, &replay_identity, session, error, now)
+                .await;
+        }
+        self.finish_new_scan_completion(tx, input, replay_identity, session, now)
+            .await
+    }
+
     /// Cancel an active session as a local operator action.
     pub async fn cancel_scan_session(
         &self,
@@ -412,6 +480,42 @@ impl ControlPlane {
 }
 
 impl ControlPlane {
+    async fn finish_new_scan_completion(
+        &self,
+        mut tx: Transaction<'_, Sqlite>,
+        input: RemoteScanCompleteInput,
+        replay: ScanReplayIdentity,
+        session: ScanSession,
+        now: OffsetDateTime,
+    ) -> Result<RemoteScanCompleteOutcome, VoomError> {
+        let completion = self
+            .scan_sessions
+            .complete_in_tx(
+                &mut tx,
+                CompleteScanSessionInput {
+                    scan_session_id: session.id,
+                    expected_storage_root_id: session.storage_root_id,
+                    expected_root_epoch: session.root_epoch,
+                    expected_owner_node_id: session.owner_node_id,
+                    expected_owner_incarnation_id: input.incarnation_id,
+                    last_sequence: input.last_sequence,
+                    observation_count: input.observation_count,
+                    completed_at: now,
+                },
+            )
+            .await;
+        let completion = match completion {
+            Ok(completion) => completion,
+            Err(error) => return self.finish_scan_error(tx, &replay, error).await,
+        };
+        let outcome = completion_outcome(&completion)?;
+        append_completion_event(self, &mut tx, &outcome, session.storage_root_id, now).await?;
+        self.complete_scan_ok_in_tx(&mut tx, &replay, &outcome)
+            .await?;
+        commit_tx(tx).await?;
+        Ok(outcome)
+    }
+
     async fn accept_new_scan_batch(
         &self,
         mut tx: Transaction<'_, Sqlite>,
@@ -741,6 +845,7 @@ macro_rules! remote_scan_input {
 
 remote_scan_input!(RemoteScanStartInput);
 remote_scan_input!(RemoteScanBatchInput);
+remote_scan_input!(RemoteScanCompleteInput);
 remote_scan_input!(RemoteScanFailInput);
 
 impl RemoteScanInspectInput {
@@ -852,6 +957,33 @@ fn terminal_outcome(session: &ScanSession) -> Result<RemoteScanTerminalOutcome, 
     })
 }
 
+fn completion_outcome(
+    completion: &ScanCompletionRecord,
+) -> Result<RemoteScanCompleteOutcome, VoomError> {
+    let session = &completion.session;
+    if session.status != ScanSessionStatus::Succeeded {
+        return Err(VoomError::database(format!(
+            "scan completion returned session {} in {}",
+            session.id,
+            session.status.as_str()
+        )));
+    }
+    let retired_location_count = u64::try_from(completion.retired_location_ids.len())
+        .map_err(|error| VoomError::database_context("scan completion retired count", error))?;
+    if retired_location_count != session.retired_location_count {
+        return Err(VoomError::database(format!(
+            "scan completion session {} count does not match returned locations",
+            session.id
+        )));
+    }
+    Ok(RemoteScanCompleteOutcome {
+        scan_session_id: session.id,
+        status: session.status,
+        observation_count: session.observation_count,
+        retired_location_count,
+    })
+}
+
 async fn append_lifecycle_event(
     control_plane: &ControlPlane,
     tx: &mut Transaction<'_, Sqlite>,
@@ -908,6 +1040,29 @@ async fn append_batch_event(
     .await
 }
 
+async fn append_completion_event(
+    control_plane: &ControlPlane,
+    tx: &mut Transaction<'_, Sqlite>,
+    outcome: &RemoteScanCompleteOutcome,
+    storage_root_id: StorageRootId,
+    now: OffsetDateTime,
+) -> Result<(), VoomError> {
+    append_event(
+        &control_plane.events,
+        tx,
+        SubjectType::ScanSession,
+        Some(outcome.scan_session_id.0),
+        now,
+        Event::ScanSessionSucceeded(ScanSessionSucceededPayload {
+            scan_session_id: outcome.scan_session_id,
+            storage_root_id,
+            observation_count: outcome.observation_count,
+            retired_location_count: outcome.retired_location_count,
+        }),
+    )
+    .await
+}
+
 fn require_root_available_for_request(root: &EffectiveLibraryRoot) -> Result<(), VoomError> {
     if root.available {
         Ok(())
@@ -947,6 +1102,13 @@ fn validate_batch_input(input: &RemoteScanBatchInput) -> Result<(), VoomError> {
         validate_observation(observation)?;
     }
     Ok(())
+}
+
+fn validate_completion_input(input: &RemoteScanCompleteInput) -> Result<(), VoomError> {
+    if let Some(last_sequence) = input.last_sequence {
+        require_storage_u64(last_sequence, "scan completion last sequence")?;
+    }
+    require_storage_u64(input.observation_count, "scan completion observation count")
 }
 
 fn validate_observation(observation: &ScanObservation) -> Result<(), VoomError> {
@@ -991,6 +1153,14 @@ fn running_required(session: &ScanSession, operation: &str) -> VoomError {
         session.id,
         session.status.as_str()
     ))
+}
+
+fn require_running_completion(session: &ScanSession) -> Result<(), VoomError> {
+    if session.status == ScanSessionStatus::Running {
+        Ok(())
+    } else {
+        Err(running_required(session, "complete"))
+    }
 }
 
 fn is_active_status(status: ScanSessionStatus) -> bool {

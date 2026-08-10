@@ -10,6 +10,7 @@ use super::super::Repository;
 use super::super::common::{
     i64_from_u64, iso8601, map_row_err, parse_iso8601, serialize_json, u32_from_i64, u64_from_i64,
 };
+use crate::repo::media::commit_safety_gate::consult_scan_reconciliation_commit_lock_in_tx;
 
 #[derive(Debug, Clone)]
 pub struct SqliteScanSessionRepo {
@@ -373,6 +374,37 @@ impl SqliteScanSessionRepo {
             })
     }
 
+    pub async fn complete_in_tx(
+        &self,
+        tx: &mut Transaction<'_, Sqlite>,
+        input: CompleteScanSessionInput,
+    ) -> Result<ScanCompletionRecord, VoomError> {
+        let session = completion_session_in_tx(tx, &input).await?;
+        validate_completion_binding(&session, &input)?;
+        let candidates = completion_candidates_in_tx(tx, &session).await?;
+        if let Some((commit_id, location_id)) = consult_scan_reconciliation_commit_lock_in_tx(
+            tx,
+            session.storage_root_id,
+            session.id,
+            session.location_high_watermark_id,
+        )
+        .await?
+        {
+            return Err(VoomError::Conflict(format!(
+                "scan session {} cannot reconcile location {location_id} while commit {commit_id} is in flight",
+                session.id
+            )));
+        }
+        retire_completion_candidates_in_tx(tx, &session, &input, candidates.len()).await?;
+        let session =
+            mark_completion_succeeded_in_tx(tx, &session, &input, candidates.len()).await?;
+        update_completion_root_pointer_in_tx(tx, &session, &input).await?;
+        Ok(ScanCompletionRecord {
+            session,
+            retired_location_ids: candidates,
+        })
+    }
+
     pub async fn list(&self, query: ScanSessionListQuery) -> Result<ScanSessionPage, VoomError> {
         let limit = checked_page_limit(query.limit, "scan session list")?;
         let mut builder = QueryBuilder::<Sqlite>::new(format!(
@@ -601,6 +633,24 @@ pub struct NewScanObservationBatch {
     pub next_progress_deadline_at: OffsetDateTime,
 }
 
+#[derive(Debug, Clone)]
+pub struct CompleteScanSessionInput {
+    pub scan_session_id: ScanSessionId,
+    pub expected_storage_root_id: StorageRootId,
+    pub expected_root_epoch: u64,
+    pub expected_owner_node_id: NodeId,
+    pub expected_owner_incarnation_id: NodeIncarnationId,
+    pub last_sequence: Option<u64>,
+    pub observation_count: u64,
+    pub completed_at: OffsetDateTime,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScanCompletionRecord {
+    pub session: ScanSession,
+    pub retired_location_ids: Vec<FileLocationId>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScanSessionListQuery {
     pub storage_root_id: Option<StorageRootId>,
@@ -678,6 +728,248 @@ const RECONCILIATION_INVALID_SQL: &str = "SELECT EXISTS(SELECT 1 FROM file_locat
      OR instr('/' || l.provider_relative_locator || '/', '/../') != 0 \
      OR EXISTS(SELECT 1 FROM scan_observations AS o WHERE o.scan_session_id = ? \
      AND o.provider_relative_locator = l.provider_relative_locator)))";
+
+const COMPLETION_CANDIDATES_SQL: &str = "WITH completion_scope(storage_root_id, scan_session_id, high_watermark_id) AS \
+     (VALUES (?, ?, ?)) \
+     SELECT l.id, l.provider_relative_locator FROM file_locations AS l \
+     CROSS JOIN completion_scope AS scope \
+     WHERE l.storage_root_id = scope.storage_root_id \
+       AND l.address_state = 'rooted' \
+       AND l.retired_at IS NULL \
+       AND scope.high_watermark_id IS NOT NULL \
+       AND l.id <= scope.high_watermark_id \
+       AND NOT EXISTS ( \
+           SELECT 1 FROM scan_observations AS observation \
+           WHERE observation.scan_session_id = scope.scan_session_id \
+             AND observation.provider_relative_locator = l.provider_relative_locator \
+       ) \
+     ORDER BY l.id ASC";
+
+const RETIRE_COMPLETION_CANDIDATES_SQL: &str = "WITH completion_scope(storage_root_id, scan_session_id, high_watermark_id) AS \
+     (VALUES (?, ?, ?)) \
+     UPDATE file_locations SET retired_at = ?, retired_by_scan_session_id = ?, epoch = epoch + 1 \
+     WHERE storage_root_id = (SELECT storage_root_id FROM completion_scope) \
+       AND address_state = 'rooted' \
+       AND retired_at IS NULL \
+       AND (SELECT high_watermark_id FROM completion_scope) IS NOT NULL \
+       AND id <= (SELECT high_watermark_id FROM completion_scope) \
+       AND NOT EXISTS ( \
+           SELECT 1 FROM scan_observations AS observation \
+           WHERE observation.scan_session_id = \
+                 (SELECT scan_session_id FROM completion_scope) \
+             AND observation.provider_relative_locator = file_locations.provider_relative_locator \
+       )";
+
+async fn completion_session_in_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    input: &CompleteScanSessionInput,
+) -> Result<ScanSession, VoomError> {
+    let row = sqlx::query(SELECT_SCAN_SESSION_COLS)
+        .bind(i64_from_u64(input.scan_session_id.0, "scan_sessions.id")?)
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(|error| VoomError::database_context("scan completion session read", error))?;
+    let Some(row) = row else {
+        return Err(VoomError::database(format!(
+            "scan completion session {} disappeared",
+            input.scan_session_id
+        )));
+    };
+    row_to_scan_session(&row)
+}
+
+fn validate_completion_binding(
+    session: &ScanSession,
+    input: &CompleteScanSessionInput,
+) -> Result<(), VoomError> {
+    if session.storage_root_id != input.expected_storage_root_id
+        || session.root_epoch != input.expected_root_epoch
+        || session.owner_node_id != input.expected_owner_node_id
+        || session.owner_incarnation_id != Some(input.expected_owner_incarnation_id)
+    {
+        return Err(VoomError::database(format!(
+            "scan session {} completion authority binding changed",
+            session.id
+        )));
+    }
+    let expected_next_sequence = completion_next_sequence(input.last_sequence)?;
+    if session.next_sequence != expected_next_sequence
+        || session.observation_count != input.observation_count
+    {
+        return Err(VoomError::Conflict(format!(
+            "scan session {} completion watermark does not match accepted observations",
+            session.id
+        )));
+    }
+    Ok(())
+}
+
+fn completion_next_sequence(last_sequence: Option<u64>) -> Result<u64, VoomError> {
+    last_sequence.map_or(Ok(0), |sequence| {
+        sequence.checked_add(1).ok_or_else(|| {
+            VoomError::Conflict("scan completion last sequence overflows".to_owned())
+        })
+    })
+}
+
+async fn completion_candidates_in_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    session: &ScanSession,
+) -> Result<Vec<FileLocationId>, VoomError> {
+    let rows = sqlx::query(COMPLETION_CANDIDATES_SQL)
+        .bind(i64_from_u64(
+            session.storage_root_id.0,
+            "scan completion storage root ID",
+        )?)
+        .bind(i64_from_u64(session.id.0, "scan completion session ID")?)
+        .bind(completion_high_watermark(session)?)
+        .fetch_all(&mut **tx)
+        .await
+        .map_err(|error| VoomError::database_context("scan completion candidates", error))?;
+    let mut candidates = Vec::with_capacity(rows.len());
+    for row in rows {
+        let id: i64 = row
+            .try_get("id")
+            .map_err(|error| map_row_err("scan completion candidate", error))?;
+        let locator: String = row
+            .try_get("provider_relative_locator")
+            .map_err(|error| map_row_err("scan completion candidate", error))?;
+        ProviderRelativeLocator::parse_database(
+            "file_locations.provider_relative_locator",
+            &locator,
+        )?;
+        candidates.push(FileLocationId(u64_from_i64(
+            id,
+            "scan completion candidate location ID",
+        )?));
+    }
+    Ok(candidates)
+}
+
+fn completion_high_watermark(session: &ScanSession) -> Result<Option<i64>, VoomError> {
+    session
+        .location_high_watermark_id
+        .map(|id| i64_from_u64(id.0, "scan completion high-water location ID"))
+        .transpose()
+}
+
+async fn retire_completion_candidates_in_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    session: &ScanSession,
+    input: &CompleteScanSessionInput,
+    candidate_count: usize,
+) -> Result<(), VoomError> {
+    let result = sqlx::query(RETIRE_COMPLETION_CANDIDATES_SQL)
+        .bind(i64_from_u64(
+            session.storage_root_id.0,
+            "scan completion storage root ID",
+        )?)
+        .bind(i64_from_u64(session.id.0, "scan completion session ID")?)
+        .bind(completion_high_watermark(session)?)
+        .bind(iso8601(input.completed_at)?)
+        .bind(i64_from_u64(session.id.0, "scan completion session ID")?)
+        .execute(&mut **tx)
+        .await
+        .map_err(|error| VoomError::database_context("retire scan completion candidates", error))?;
+    let expected = u64::try_from(candidate_count)
+        .map_err(|error| VoomError::database_context("scan completion candidate count", error))?;
+    if result.rows_affected() != expected {
+        return Err(VoomError::database(format!(
+            "scan completion expected to retire {expected} locations but retired {}",
+            result.rows_affected()
+        )));
+    }
+    Ok(())
+}
+
+async fn mark_completion_succeeded_in_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    session: &ScanSession,
+    input: &CompleteScanSessionInput,
+    candidate_count: usize,
+) -> Result<ScanSession, VoomError> {
+    let candidate_count = u64::try_from(candidate_count)
+        .map_err(|error| VoomError::database_context("scan completion candidate count", error))?;
+    let row = sqlx::query(&format!(
+        "UPDATE scan_sessions SET status = 'succeeded', terminal_at = ?, \
+         retired_location_count = ? WHERE id = ? AND status = 'running' \
+         AND storage_root_id = ? AND root_epoch = ? AND owner_node_id = ? \
+         AND owner_incarnation_id = ? AND next_sequence = ? AND observation_count = ? \
+         AND location_high_watermark_id IS ? RETURNING {SCAN_SESSION_COLS}"
+    ))
+    .bind(iso8601(input.completed_at)?)
+    .bind(i64_from_u64(
+        candidate_count,
+        "scan completion retired count",
+    )?)
+    .bind(i64_from_u64(session.id.0, "scan completion session ID")?)
+    .bind(i64_from_u64(
+        input.expected_storage_root_id.0,
+        "scan completion storage root ID",
+    )?)
+    .bind(i64_from_u64(
+        input.expected_root_epoch,
+        "scan completion root epoch",
+    )?)
+    .bind(i64_from_u64(
+        input.expected_owner_node_id.0,
+        "scan completion owner node ID",
+    )?)
+    .bind(input.expected_owner_incarnation_id.to_string())
+    .bind(i64_from_u64(
+        completion_next_sequence(input.last_sequence)?,
+        "scan completion next sequence",
+    )?)
+    .bind(i64_from_u64(
+        input.observation_count,
+        "scan completion observation count",
+    )?)
+    .bind(completion_high_watermark(session)?)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(|error| VoomError::database_context("mark scan session succeeded", error))?;
+    let Some(row) = row else {
+        return Err(VoomError::database(format!(
+            "scan session {} completion compare-and-set affected no row",
+            session.id
+        )));
+    };
+    row_to_scan_session(&row)
+}
+
+async fn update_completion_root_pointer_in_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    session: &ScanSession,
+    input: &CompleteScanSessionInput,
+) -> Result<(), VoomError> {
+    let result = sqlx::query(
+        "UPDATE library_roots SET last_scan_session_id = ? \
+         WHERE id = ? AND root_epoch = ? AND owner_node_id = ?",
+    )
+    .bind(i64_from_u64(session.id.0, "scan completion session ID")?)
+    .bind(i64_from_u64(
+        input.expected_storage_root_id.0,
+        "scan completion storage root ID",
+    )?)
+    .bind(i64_from_u64(
+        input.expected_root_epoch,
+        "scan completion root epoch",
+    )?)
+    .bind(i64_from_u64(
+        input.expected_owner_node_id.0,
+        "scan completion owner node ID",
+    )?)
+    .execute(&mut **tx)
+    .await
+    .map_err(|error| VoomError::database_context("update scan completion root pointer", error))?;
+    if result.rows_affected() != 1 {
+        return Err(VoomError::database(format!(
+            "scan session {} completion root binding changed",
+            session.id
+        )));
+    }
+    Ok(())
+}
 
 fn row_to_scan_session(row: &sqlx::sqlite::SqliteRow) -> Result<ScanSession, VoomError> {
     let session = ScanSession {
