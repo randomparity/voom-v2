@@ -3,15 +3,20 @@
 use secrecy::SecretString;
 use serde_json::Value as JsonValue;
 use sqlx::{Sqlite, Transaction};
+use time::OffsetDateTime;
 use voom_core::{
     ArtifactAccessMode, ErrorCode, FailureClass, LeaseId, NodeId, NodeIncarnationEndReason,
-    NodeIncarnationId, NodeIncarnationStatus, OperationKind, TicketId, VoomError, WorkerId,
+    NodeIncarnationId, NodeIncarnationStatus, OperationKind, ScanSessionId, TicketId, VoomError,
+    WorkerId,
 };
+use voom_events::payload::ScanSessionLifecyclePayload;
+use voom_events::{Event, SubjectType};
 use voom_store::repo::execution::remote_idempotency::RemoteMutationReplay;
+use voom_store::repo::scan::sessions::ScanSession;
 
 use crate::ControlPlane;
 
-use super::commit_tx;
+use super::{append_event, commit_tx};
 
 mod acquire;
 mod activation;
@@ -301,9 +306,34 @@ pub struct RemoteFailOutcome {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RemoteRecoverReport {
     pub stale_nodes: Vec<NodeId>,
+    pub stale_scan_sessions: Vec<ScanSessionId>,
     pub expired_leases: Vec<LeaseId>,
     pub requeued_tickets: Vec<TicketId>,
     pub failed_tickets: Vec<TicketId>,
+}
+
+async fn append_scan_stale_events_in_tx(
+    control_plane: &ControlPlane,
+    tx: &mut Transaction<'_, Sqlite>,
+    sessions: &[ScanSession],
+    now: OffsetDateTime,
+) -> Result<(), VoomError> {
+    for session in sessions {
+        append_event(
+            &control_plane.events,
+            tx,
+            SubjectType::ScanSession,
+            Some(session.id.0),
+            now,
+            Event::ScanSessionStale(ScanSessionLifecyclePayload {
+                scan_session_id: session.id,
+                storage_root_id: session.storage_root_id,
+                status: session.status,
+            }),
+        )
+        .await?;
+    }
+    Ok(())
 }
 
 impl ControlPlane {
