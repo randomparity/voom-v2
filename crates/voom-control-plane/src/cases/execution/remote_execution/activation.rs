@@ -82,7 +82,12 @@ impl ControlPlane {
         }
         let activation_count = self
             .node_incarnations
-            .count_started_at_or_after_in_tx(&mut tx, input.node_id, now - ACTIVATION_WINDOW)
+            .count_started_at_or_after_in_tx(
+                &mut tx,
+                input.node_id,
+                now - ACTIVATION_WINDOW,
+                MAX_FRESH_ACTIVATIONS,
+            )
             .await?;
         if activation_count >= MAX_FRESH_ACTIVATIONS {
             tracing::warn!(

@@ -8,7 +8,7 @@ use voom_core::{ErrorCode, NodeIncarnationId, TicketOperation, VoomError};
 
 use crate::repo::execution::node_incarnations::{NewNodeIncarnation, SqliteNodeIncarnationRepo};
 use crate::repo::execution::nodes::{NewNode, Node, NodeKind, SqliteNodeRepo};
-use crate::test_support::{T0, fresh_initialized_pool_at};
+use crate::test_support::{T0, fresh_initialized_pool_at, with_check_constraints_disabled};
 
 async fn pool() -> (sqlx::SqlitePool, voom_test_support::TempDatabase) {
     let tmp = voom_test_support::TempDatabase::new().unwrap();
@@ -273,11 +273,20 @@ async fn prune_retired_incarnation_workers_rejects_corrupt_candidate() {
         .retire_in_tx(&mut tx, worker.id, worker.epoch, T0)
         .await
         .unwrap();
-    sqlx::query("UPDATE workers SET registered_at = 'not-a-timestamp' WHERE id = ?")
-        .bind(i64::try_from(worker.id.0).unwrap())
-        .execute(&mut *tx)
-        .await
-        .unwrap();
+    tx.commit().await.unwrap();
+    let raw_worker_id = i64::try_from(worker.id.0).unwrap();
+    with_check_constraints_disabled(&pool, move |connection| {
+        Box::pin(async move {
+            sqlx::query("UPDATE workers SET retired_at = NULL WHERE id = ?")
+                .bind(raw_worker_id)
+                .execute(&mut *connection)
+                .await?;
+            Ok(())
+        })
+    })
+    .await
+    .unwrap();
+    let mut tx = pool.begin().await.unwrap();
 
     let error = workers
         .prune_retired_for_incarnation_in_tx(&mut tx, incarnation_id)

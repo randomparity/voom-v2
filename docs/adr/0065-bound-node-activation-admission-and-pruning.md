@@ -22,7 +22,8 @@ the existing immediate activation transaction acquires its writer lock, it sampl
 clock. Completed replay returns first, and the existing incarnation-uniqueness check then
 precedes quota evaluation. A genuinely fresh request counts incarnation starts at or after
 the inclusive lower bound; future-dated rows count conservatively if the clock moves
-backward. It rejects at the limit before supersession or any activation mutation.
+backward. Persisted timestamp offsets are decoded and compared as instants rather than as
+text. It rejects at the limit before supersession or any activation mutation.
 Rejection emits a structured warning with a fixed quota-exceeded reason and non-secret
 policy fields.
 
