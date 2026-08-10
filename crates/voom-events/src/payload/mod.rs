@@ -7,6 +7,7 @@ mod execution;
 mod external_system;
 mod media_identity;
 mod policy;
+mod scan;
 mod storage;
 mod system;
 mod use_leases;
@@ -18,6 +19,7 @@ pub use execution::*;
 pub use external_system::*;
 pub use media_identity::*;
 pub use policy::*;
+pub use scan::*;
 pub use storage::*;
 pub use system::*;
 pub use use_leases::*;
@@ -101,6 +103,20 @@ pub enum Event {
     StorageRootReactivated(StorageRootReactivatedPayload),
     #[serde(rename = "storage_root.retired")]
     StorageRootRetired(StorageRootRetiredPayload),
+    #[serde(rename = "scan_session.requested")]
+    ScanSessionRequested(ScanSessionLifecyclePayload),
+    #[serde(rename = "scan_session.started")]
+    ScanSessionStarted(ScanSessionLifecyclePayload),
+    #[serde(rename = "scan_session.observation_batch_accepted")]
+    ScanObservationBatchAccepted(ScanObservationBatchAcceptedPayload),
+    #[serde(rename = "scan_session.succeeded")]
+    ScanSessionSucceeded(ScanSessionSucceededPayload),
+    #[serde(rename = "scan_session.failed")]
+    ScanSessionFailed(ScanSessionLifecyclePayload),
+    #[serde(rename = "scan_session.cancelled")]
+    ScanSessionCancelled(ScanSessionLifecyclePayload),
+    #[serde(rename = "scan_session.stale")]
+    ScanSessionStale(ScanSessionLifecyclePayload),
     #[serde(rename = "worker.registered")]
     WorkerRegistered(WorkerRegisteredPayload),
     #[serde(rename = "worker.linked_to_node")]
@@ -299,6 +315,13 @@ impl Event {
             Self::StorageRootValidationLost(_) => EventKind::StorageRootValidationLost,
             Self::StorageRootReactivated(_) => EventKind::StorageRootReactivated,
             Self::StorageRootRetired(_) => EventKind::StorageRootRetired,
+            Self::ScanSessionRequested(_) => EventKind::ScanSessionRequested,
+            Self::ScanSessionStarted(_) => EventKind::ScanSessionStarted,
+            Self::ScanObservationBatchAccepted(_) => EventKind::ScanObservationBatchAccepted,
+            Self::ScanSessionSucceeded(_) => EventKind::ScanSessionSucceeded,
+            Self::ScanSessionFailed(_) => EventKind::ScanSessionFailed,
+            Self::ScanSessionCancelled(_) => EventKind::ScanSessionCancelled,
+            Self::ScanSessionStale(_) => EventKind::ScanSessionStale,
             Self::WorkerRegistered(_) => EventKind::WorkerRegistered,
             Self::WorkerLinkedToNode(_) => EventKind::WorkerLinkedToNode,
             Self::WorkerCapabilityRecorded(_) => EventKind::WorkerCapabilityRecorded,

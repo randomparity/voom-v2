@@ -61,6 +61,13 @@ fn _event_variants_are_exhaustive(e: &Event) {
         Event::StorageRootValidationLost(_) => {}
         Event::StorageRootReactivated(_) => {}
         Event::StorageRootRetired(_) => {}
+        Event::ScanSessionRequested(_) => {}
+        Event::ScanSessionStarted(_) => {}
+        Event::ScanObservationBatchAccepted(_) => {}
+        Event::ScanSessionSucceeded(_) => {}
+        Event::ScanSessionFailed(_) => {}
+        Event::ScanSessionCancelled(_) => {}
+        Event::ScanSessionStale(_) => {}
         Event::WorkerRegistered(_) => {}
         Event::WorkerLinkedToNode(_) => {}
         Event::WorkerCapabilityRecorded(_) => {}
@@ -322,6 +329,43 @@ fn event_kind_matches_serde_tag() {
             storage_root_id: voom_core::StorageRootId(1),
             owner_node_id: Some(voom_core::NodeId(1)),
             root_epoch: 1,
+        }),
+        Event::ScanSessionRequested(ScanSessionLifecyclePayload {
+            scan_session_id: voom_core::ScanSessionId(1),
+            storage_root_id: voom_core::StorageRootId(2),
+            status: voom_core::ScanSessionStatus::Requested,
+        }),
+        Event::ScanSessionStarted(ScanSessionLifecyclePayload {
+            scan_session_id: voom_core::ScanSessionId(1),
+            storage_root_id: voom_core::StorageRootId(2),
+            status: voom_core::ScanSessionStatus::Running,
+        }),
+        Event::ScanObservationBatchAccepted(ScanObservationBatchAcceptedPayload {
+            scan_session_id: voom_core::ScanSessionId(1),
+            sequence: 1,
+            batch_observation_count: 2,
+            cumulative_observation_count: 2,
+        }),
+        Event::ScanSessionSucceeded(ScanSessionSucceededPayload {
+            scan_session_id: voom_core::ScanSessionId(1),
+            storage_root_id: voom_core::StorageRootId(2),
+            observation_count: 2,
+            retired_location_count: 0,
+        }),
+        Event::ScanSessionFailed(ScanSessionLifecyclePayload {
+            scan_session_id: voom_core::ScanSessionId(1),
+            storage_root_id: voom_core::StorageRootId(2),
+            status: voom_core::ScanSessionStatus::Failed,
+        }),
+        Event::ScanSessionCancelled(ScanSessionLifecyclePayload {
+            scan_session_id: voom_core::ScanSessionId(1),
+            storage_root_id: voom_core::StorageRootId(2),
+            status: voom_core::ScanSessionStatus::Cancelled,
+        }),
+        Event::ScanSessionStale(ScanSessionLifecyclePayload {
+            scan_session_id: voom_core::ScanSessionId(1),
+            storage_root_id: voom_core::StorageRootId(2),
+            status: voom_core::ScanSessionStatus::Stale,
         }),
         Event::WorkerRegistered(WorkerRegisteredPayload {
             worker_id: voom_core::WorkerId(1),

@@ -32,6 +32,13 @@ fn each_kind_has_distinct_wire_string() {
         EventKind::StorageRootValidationLost,
         EventKind::StorageRootReactivated,
         EventKind::StorageRootRetired,
+        EventKind::ScanSessionRequested,
+        EventKind::ScanSessionStarted,
+        EventKind::ScanObservationBatchAccepted,
+        EventKind::ScanSessionSucceeded,
+        EventKind::ScanSessionFailed,
+        EventKind::ScanSessionCancelled,
+        EventKind::ScanSessionStale,
         EventKind::WorkerRegistered,
         EventKind::WorkerLinkedToNode,
         EventKind::WorkerCapabilityRecorded,
@@ -115,6 +122,25 @@ fn issue_lifecycle_event_kinds_use_dotted_wire_format() {
 }
 
 #[test]
+fn scan_session_event_kinds_use_exact_dotted_wire_format() {
+    for (kind, wire) in [
+        (EventKind::ScanSessionRequested, "scan_session.requested"),
+        (EventKind::ScanSessionStarted, "scan_session.started"),
+        (
+            EventKind::ScanObservationBatchAccepted,
+            "scan_session.observation_batch_accepted",
+        ),
+        (EventKind::ScanSessionSucceeded, "scan_session.succeeded"),
+        (EventKind::ScanSessionFailed, "scan_session.failed"),
+        (EventKind::ScanSessionCancelled, "scan_session.cancelled"),
+        (EventKind::ScanSessionStale, "scan_session.stale"),
+    ] {
+        assert_eq!(kind.as_str(), wire);
+        assert_eq!(EventKind::from_str(wire).unwrap(), kind);
+    }
+}
+
+#[test]
 fn node_event_kinds_use_dotted_wire_format() {
     assert_eq!(EventKind::NodeRegistered.as_str(), "node.registered");
     assert_eq!(
@@ -171,6 +197,13 @@ fn every_kind_round_trips_through_as_str_and_from_str() {
         EventKind::StorageRootValidationLost,
         EventKind::StorageRootReactivated,
         EventKind::StorageRootRetired,
+        EventKind::ScanSessionRequested,
+        EventKind::ScanSessionStarted,
+        EventKind::ScanObservationBatchAccepted,
+        EventKind::ScanSessionSucceeded,
+        EventKind::ScanSessionFailed,
+        EventKind::ScanSessionCancelled,
+        EventKind::ScanSessionStale,
         EventKind::WorkerRegistered,
         EventKind::WorkerLinkedToNode,
         EventKind::WorkerCapabilityRecorded,
