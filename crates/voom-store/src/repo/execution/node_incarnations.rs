@@ -123,6 +123,34 @@ impl SqliteNodeIncarnationRepo {
         rows.iter().map(row_to_incarnation).collect()
     }
 
+    /// Count one node's successful incarnation starts at or after a lower bound.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VoomError::Database`] when the query fails or the persisted count cannot
+    /// be represented as `u32`, and [`VoomError::Internal`] when the timestamp cannot be
+    /// encoded.
+    pub async fn count_started_at_or_after_in_tx(
+        &self,
+        tx: &mut Transaction<'_, Sqlite>,
+        node_id: NodeId,
+        lower_bound: OffsetDateTime,
+    ) -> Result<u32, VoomError> {
+        let lower_bound = iso8601(lower_bound)?;
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM node_incarnations WHERE node_id = ? AND started_at >= ?",
+        )
+        .bind(i64_from_u64(
+            node_id.0,
+            "node incarnation activation count node id",
+        )?)
+        .bind(lower_bound)
+        .fetch_one(&mut **tx)
+        .await
+        .map_err(|error| VoomError::database_context("node incarnation activation count", error))?;
+        activation_count_from_i64(count)
+    }
+
     /// Update the last-seen timestamp for an active incarnation.
     ///
     /// # Errors
@@ -327,6 +355,14 @@ fn worker_count_from_i64(value: i64) -> Result<u32, VoomError> {
     u32::try_from(value).map_err(|_| {
         VoomError::database(format!(
             "node incarnation worker count does not fit u32: {value}"
+        ))
+    })
+}
+
+fn activation_count_from_i64(value: i64) -> Result<u32, VoomError> {
+    u32::try_from(value).map_err(|_| {
+        VoomError::database(format!(
+            "node incarnation activation count does not fit u32: {value}"
         ))
     })
 }

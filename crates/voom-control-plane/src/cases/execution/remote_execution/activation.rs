@@ -31,6 +31,8 @@ use super::{
 const MAX_WORKERS: usize = 64;
 const MAX_LOGICAL_NAME_BYTES: usize = 64;
 const MAX_PARALLEL: u32 = 256;
+const MAX_FRESH_ACTIVATIONS: u32 = 5;
+const ACTIVATION_WINDOW: time::Duration = time::Duration::seconds(60);
 
 impl ControlPlane {
     /// Atomically start one node-process incarnation and register its complete worker manifest.
@@ -42,9 +44,9 @@ impl ControlPlane {
         input: RemoteActivateInput,
     ) -> Result<RemoteActivateOutcome, VoomError> {
         validate_manifest(&input.workers)?;
-        let now = self.clock().now();
         let route_key = super::route_node_activate(input.node_id);
         let mut tx = begin_immediate_tx(&self.pool).await?;
+        let now = self.clock().now();
         let auth = self
             .verify_remote_node_token_in_tx(&mut tx, input.node_id, &input.token)
             .await?;
@@ -76,6 +78,24 @@ impl ControlPlane {
             return Err(VoomError::Conflict(format!(
                 "node incarnation {} was already activated",
                 input.incarnation_id
+            )));
+        }
+        let activation_count = self
+            .node_incarnations
+            .count_started_at_or_after_in_tx(&mut tx, input.node_id, now - ACTIVATION_WINDOW)
+            .await?;
+        if activation_count >= MAX_FRESH_ACTIVATIONS {
+            tracing::warn!(
+                node_id = input.node_id.0,
+                activation_count,
+                activation_limit = MAX_FRESH_ACTIVATIONS,
+                window_seconds = ACTIVATION_WINDOW.whole_seconds(),
+                "remote node activation quota exceeded"
+            );
+            return Err(VoomError::Conflict(format!(
+                "remote node {} exceeded the limit of {MAX_FRESH_ACTIVATIONS} activations per {} seconds",
+                input.node_id,
+                ACTIVATION_WINDOW.whole_seconds()
             )));
         }
         if let Some(current) = auth.active_incarnation_id {

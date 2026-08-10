@@ -3165,6 +3165,7 @@ dependencies = [
  "time",
  "tokio",
  "tracing",
+ "tracing-subscriber",
  "voom-artifact",
  "voom-core",
  "voom-events",
