@@ -54,6 +54,11 @@ jobs:
       - name: just ci
         run: just ci
 
+      - name: Durable scan completion scale gate
+        run: >-
+          cargo test --release -p voom-control-plane --test scan_session_scale
+          -- --ignored --exact empty_scan_reconciles_100k_within_api_budget --nocapture
+
   coverage:
     name: coverage
     runs-on: ubuntu-latest

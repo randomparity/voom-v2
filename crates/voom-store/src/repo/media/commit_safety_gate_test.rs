@@ -8,6 +8,7 @@
 
 use super::*;
 use voom_core::ids::{FileLocationId, FileVersionId};
+use voom_core::{ScanSessionId, ScanSessionStatus};
 
 fn gate<'a>(
     pool: &'a SqlitePool,
@@ -2153,6 +2154,129 @@ async fn prepare_blocked_by_overlapping_pending_commit_on_location() {
         kinds.contains(&EventKind::CommitAbortedByPendingCommit),
         "expected CommitAbortedByPendingCommit in {kinds:?}"
     );
+}
+
+#[tokio::test]
+async fn scan_reconciliation_lock_covers_every_mutation_capable_commit_state() {
+    for state in ["pending", "authorized", "recovery_required"] {
+        let (pool, _tmp) = fresh_pool().await;
+        let seeded = seed_location(&pool, "scan-lock/state").await;
+        let session = seed_scan_lock_session(&pool).await;
+        let commit = prepare_pending_intent(&pool, seeded.location_id).await;
+        set_commit_state(&pool, commit, state).await;
+        let mut tx = pool.begin().await.unwrap();
+
+        let hit = consult_scan_reconciliation_commit_lock_in_tx(
+            &mut tx,
+            crate::test_support::TEST_STORAGE_ROOT_ID,
+            session,
+            Some(seeded.location_id),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(hit, Some((commit, seeded.location_id)), "{state}");
+        tx.rollback().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn singular_pending_commit_lock_keeps_its_existing_state_vocabulary() {
+    let (pool, _tmp) = fresh_pool().await;
+    let seeded = seed_location(&pool, "scan-lock/singular").await;
+    let commit = prepare_pending_intent(&pool, seeded.location_id).await;
+    set_commit_state(&pool, commit, "recovery_required").await;
+    let mut tx = pool.begin().await.unwrap();
+
+    let hit = consult_pending_commit_lock_in_tx(&mut tx, &LeaseScope::Location(seeded.location_id))
+        .await
+        .unwrap();
+
+    assert_eq!(hit, None);
+    tx.rollback().await.unwrap();
+}
+
+#[tokio::test]
+async fn scan_reconciliation_lock_executes_for_one_hundred_thousand_candidates_without_variables() {
+    let (pool, _tmp) = fresh_pool().await;
+    let seeded = seed_location(&pool, "scan-lock/0").await;
+    sqlx::query(
+        "WITH RECURSIVE numbers(value) AS (\
+             SELECT 1 UNION ALL SELECT value + 1 FROM numbers WHERE value < 99999\
+         )\
+         INSERT INTO file_locations (file_version_id, address_state, storage_root_id, \
+             provider_relative_locator, observed_at, epoch)\
+         SELECT ?, 'rooted', ?, 'scan-lock/' || value, '1970-01-01T00:00:00Z', 0 \
+         FROM numbers",
+    )
+    .bind(seeded.version_id.0.cast_signed())
+    .bind(crate::test_support::TEST_STORAGE_ROOT_ID.0.cast_signed())
+    .execute(&pool)
+    .await
+    .unwrap();
+    let high_watermark = sqlx::query_scalar::<_, i64>(
+        "SELECT MAX(id) FROM file_locations WHERE storage_root_id = ?",
+    )
+    .bind(crate::test_support::TEST_STORAGE_ROOT_ID.0.cast_signed())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let session = seed_scan_lock_session(&pool).await;
+    let mut tx = pool.begin().await.unwrap();
+
+    let hit = consult_scan_reconciliation_commit_lock_in_tx(
+        &mut tx,
+        crate::test_support::TEST_STORAGE_ROOT_ID,
+        session,
+        Some(FileLocationId(u64::try_from(high_watermark).unwrap())),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(hit, None);
+    assert!(!super::SCAN_RECONCILIATION_COMMIT_LOCK_SQL.contains("IN (?"));
+    assert_eq!(
+        super::SCAN_RECONCILIATION_COMMIT_LOCK_SQL
+            .matches('?')
+            .count(),
+        3
+    );
+    tx.rollback().await.unwrap();
+}
+
+async fn seed_scan_lock_session(pool: &SqlitePool) -> ScanSessionId {
+    let id = sqlx::query(
+        "INSERT INTO scan_sessions (storage_root_id, root_epoch, owner_node_id, status, \
+         idle_timeout_seconds, progress_deadline_at, requested_at) \
+         VALUES (?, 1, 9000001, ?, 300, '1970-01-01T00:05:00Z', \
+                 '1970-01-01T00:00:00Z')",
+    )
+    .bind(crate::test_support::TEST_STORAGE_ROOT_ID.0.cast_signed())
+    .bind(ScanSessionStatus::Requested.as_str())
+    .execute(pool)
+    .await
+    .unwrap()
+    .last_insert_rowid();
+    ScanSessionId(u64::try_from(id).unwrap())
+}
+
+async fn set_commit_state(pool: &SqlitePool, commit: CommitId, state: &str) {
+    if state == "pending" {
+        return;
+    }
+    let recovery_reason = (state == "recovery_required").then_some("mutation_failed");
+    sqlx::query(
+        "UPDATE commit_intents SET state = ?, authorized_at = ?, \
+         closure_authorized = closure_initial, target_row_epochs = '[]', recovery_reason = ? \
+         WHERE id = ?",
+    )
+    .bind(state)
+    .bind("1970-01-01T00:00:01Z")
+    .bind(recovery_reason)
+    .bind(commit.0.cast_signed())
+    .execute(pool)
+    .await
+    .unwrap();
 }
 
 // -- round-8 finding #1: expanded Applied recovery boundary ----------------
