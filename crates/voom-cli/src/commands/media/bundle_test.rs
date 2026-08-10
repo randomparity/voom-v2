@@ -35,6 +35,7 @@ fn rooted_location(id: u64, relative_locator: &str) -> FileLocation {
         proof_value: None,
         observed_at: EPOCH,
         retired_at: None,
+        retired_by_scan_session_id: None,
         epoch: 0,
     }
 }
@@ -51,6 +52,7 @@ fn legacy_location(id: u64) -> FileLocation {
         proof_value: None,
         observed_at: EPOCH,
         retired_at: None,
+        retired_by_scan_session_id: None,
         epoch: 0,
     }
 }

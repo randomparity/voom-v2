@@ -27,7 +27,215 @@ async fn probe_returns_uninitialized_on_fresh_db() {
 #[tokio::test]
 async fn expected_migrations_matches_embedded_count() {
     // review whenever a migration is added/removed.
-    assert_eq!(expected_migrations(), 35);
+    assert_eq!(expected_migrations(), 36);
+}
+
+#[tokio::test]
+async fn scan_session_schema_enforces_lifecycle_and_provenance_backstops() {
+    let (pool, _tmp) = fresh_pool().await;
+
+    let tables: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM sqlite_schema WHERE type = 'table' \
+         AND name IN ('scan_sessions', 'scan_observation_batches', 'scan_observations')",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(tables, 3, "migration 0036 must create all scan ledgers");
+
+    let session_sql: String = sqlx::query_scalar(
+        "SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = 'scan_sessions'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(session_sql.ends_with("STRICT"));
+    assert!(session_sql.contains(
+        "status IN ('requested', 'running', 'succeeded', 'failed', 'cancelled', 'stale')"
+    ));
+    assert!(session_sql.contains("length(CAST(terminal_reason AS BLOB)) BETWEEN 1 AND 1024"));
+    assert!(
+        session_sql.contains("char(9) || char(10) || char(11) || char(12) || char(13) || char(32)")
+    );
+
+    let active_index: String = sqlx::query_scalar(
+        "SELECT sql FROM sqlite_schema WHERE type = 'index' \
+         AND name = 'scan_sessions_one_active_per_root'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(active_index.contains("WHERE status IN ('requested', 'running')"));
+
+    let observation_index: String = sqlx::query_scalar(
+        "SELECT sql FROM sqlite_schema WHERE type = 'index' \
+         AND name = 'scan_observations_one_locator_per_session'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(observation_index.contains("scan_session_id, provider_relative_locator"));
+
+    let root_pointer: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM pragma_table_info('library_roots') WHERE name = 'last_scan_session_id'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(root_pointer, 1);
+
+    let location_pointer: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM pragma_table_info('file_locations') \
+         WHERE name = 'retired_by_scan_session_id'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(location_pointer, 1);
+}
+
+#[tokio::test]
+async fn scan_session_schema_rejects_invalid_rows_and_preserves_byte_boundaries() {
+    let (pool, _tmp) = fresh_pool().await;
+
+    assert_scan_session_rejected(
+        &pool,
+        "INSERT INTO scan_sessions (storage_root_id, root_epoch, owner_node_id, status, \
+         idle_timeout_seconds, progress_deadline_at, requested_at) VALUES \
+         (9000001, 1, 9000001, 'unknown', 300, '1970-01-01T00:05:00Z', \
+          '1970-01-01T00:00:00Z')",
+    )
+    .await;
+    for reason in [
+        "''".to_owned(),
+        "char(9) || char(10) || char(13) || ' '".to_owned(),
+        format!("'{}'", "é".repeat(513)),
+    ] {
+        assert_scan_session_rejected(
+            &pool,
+            &format!(
+                "INSERT INTO scan_sessions (storage_root_id, root_epoch, owner_node_id, status, \
+                 idle_timeout_seconds, progress_deadline_at, requested_at, terminal_at, \
+                 terminal_reason) VALUES (9000001, 1, 9000001, 'failed', 300, \
+                 '1970-01-01T00:05:00Z', '1970-01-01T00:00:00Z', \
+                 '1970-01-01T00:01:00Z', {reason})"
+            ),
+        )
+        .await;
+    }
+    assert_scan_session_rejected(
+        &pool,
+        "INSERT INTO scan_sessions (storage_root_id, root_epoch, owner_node_id, status, \
+         next_sequence, idle_timeout_seconds, progress_deadline_at, requested_at) VALUES \
+         (9000001, 1, 9000001, 'requested', -1, 300, '1970-01-01T00:05:00Z', \
+          '1970-01-01T00:00:00Z')",
+    )
+    .await;
+
+    let exact_multibyte = "é".repeat(512);
+    sqlx::query(&format!(
+        "INSERT INTO scan_sessions (storage_root_id, root_epoch, owner_node_id, status, \
+         idle_timeout_seconds, progress_deadline_at, requested_at, terminal_at, terminal_reason) \
+         VALUES (9000001, 1, 9000001, 'failed', 300, '1970-01-01T00:05:00Z', \
+         '1970-01-01T00:00:00Z', '1970-01-01T00:01:00Z', '{exact_multibyte}')"
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
+    let stored_reason: String = sqlx::query_scalar(
+        "SELECT terminal_reason FROM scan_sessions WHERE terminal_reason IS NOT NULL",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(stored_reason, exact_multibyte);
+
+    sqlx::query(
+        "INSERT INTO scan_sessions (storage_root_id, root_epoch, owner_node_id, status, \
+         idle_timeout_seconds, progress_deadline_at, requested_at) VALUES \
+         (9000001, 1, 9000001, 'requested', 300, '1970-01-01T00:05:00Z', \
+          '1970-01-01T00:00:00Z')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert_scan_session_rejected(
+        &pool,
+        "INSERT INTO scan_sessions (storage_root_id, root_epoch, owner_node_id, status, \
+         idle_timeout_seconds, progress_deadline_at, requested_at) VALUES \
+         (9000001, 1, 9000001, 'running', 300, '1970-01-01T00:05:00Z', \
+          '1970-01-01T00:00:00Z')",
+    )
+    .await;
+    sqlx::query(
+        "INSERT INTO scan_sessions (storage_root_id, root_epoch, owner_node_id, status, \
+         idle_timeout_seconds, progress_deadline_at, requested_at, terminal_at, terminal_reason) \
+         VALUES (9000001, 1, 9000001, 'cancelled', 300, '1970-01-01T00:05:00Z', \
+         '1970-01-01T00:00:00Z', '1970-01-01T00:01:00Z', 'operator cancelled')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let location_id = seed_live_rooted_location(&pool).await;
+    let session_id: i64 =
+        sqlx::query_scalar("SELECT id FROM scan_sessions WHERE status = 'requested' LIMIT 1")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_file_location_rejected(
+        &pool,
+        &format!(
+            "UPDATE file_locations SET retired_by_scan_session_id = {session_id} WHERE id = {location_id}"
+        ),
+    )
+    .await;
+}
+
+async fn assert_scan_session_rejected(pool: &sqlx::SqlitePool, sql: &str) {
+    let error = sqlx::query(sql).execute(pool).await.unwrap_err();
+    assert!(
+        error.to_string().contains("constraint failed"),
+        "expected SQLite constraint to reject scan session row, got {error:?}"
+    );
+}
+
+async fn assert_file_location_rejected(pool: &sqlx::SqlitePool, sql: &str) {
+    let error = sqlx::query(sql).execute(pool).await.unwrap_err();
+    assert!(
+        error.to_string().contains("CHECK constraint failed"),
+        "expected file-location provenance CHECK to reject row, got {error:?}"
+    );
+}
+
+async fn seed_live_rooted_location(pool: &sqlx::SqlitePool) -> i64 {
+    let asset_id = sqlx::query("INSERT INTO file_assets (created_at, epoch) VALUES (?, 0)")
+        .bind("1970-01-01T00:00:00Z")
+        .execute(pool)
+        .await
+        .unwrap()
+        .last_insert_rowid();
+    let version_id = sqlx::query(
+        "INSERT INTO file_versions (file_asset_id, content_hash, size_bytes, produced_by, \
+         produced_from_version_id, created_at, retired_at, epoch) \
+         VALUES (?, 'scan-schema-fixture', 1, 'ingest', NULL, '1970-01-01T00:00:00Z', NULL, 0)",
+    )
+    .bind(asset_id)
+    .execute(pool)
+    .await
+    .unwrap()
+    .last_insert_rowid();
+    sqlx::query(
+        "INSERT INTO file_locations (file_version_id, address_state, storage_root_id, \
+         provider_relative_locator, legacy_kind, legacy_locator, proof_kind, proof_value, \
+         observed_at, retired_at, epoch) VALUES (?, 'rooted', 9000001, 'scan-schema-fixture', \
+         NULL, NULL, NULL, NULL, '1970-01-01T00:00:00Z', NULL, 0)",
+    )
+    .bind(version_id)
+    .execute(pool)
+    .await
+    .unwrap()
+    .last_insert_rowid()
 }
 
 /// Column list every video-profile fixture below shares, so each test spells

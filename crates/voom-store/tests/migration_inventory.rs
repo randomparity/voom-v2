@@ -58,6 +58,7 @@ const EXPECTED_MIGRATION_FILES: &[&str] = &[
     "0033_remote_acquire_replay_shape.sql",
     "0034_node_owned_roots.sql",
     "0035_node_incarnations.sql",
+    "0036_scan_sessions.sql",
 ];
 
 fn workspace_root() -> PathBuf {

@@ -154,6 +154,9 @@ const MIGRATION_0034_SQL: &str = include_str!("../../../migrations/0034_node_own
 /// compile time.
 const MIGRATION_0035_SQL: &str = include_str!("../../../migrations/0035_node_incarnations.sql");
 
+/// SQL for migration 0036 (durable scan sessions), embedded at compile time.
+const MIGRATION_0036_SQL: &str = include_str!("../../../migrations/0036_scan_sessions.sql");
+
 /// Embedded migration set, constructed without the `sqlx::migrate!` macro.
 ///
 /// We don't use sqlx's `macros` feature: it pulls `sqlx-macros-core`, which
@@ -412,6 +415,13 @@ pub(crate) static MIGRATOR: LazyLock<Migrator> = LazyLock::new(|| Migrator {
             Cow::Borrowed("node_incarnations"),
             MigrationType::Simple,
             Cow::Borrowed(MIGRATION_0035_SQL),
+            false,
+        ),
+        Migration::new(
+            36,
+            Cow::Borrowed("scan_sessions"),
+            MigrationType::Simple,
+            Cow::Borrowed(MIGRATION_0036_SQL),
             false,
         ),
     ]),
