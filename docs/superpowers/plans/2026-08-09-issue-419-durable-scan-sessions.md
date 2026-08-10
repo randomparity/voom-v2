@@ -263,6 +263,9 @@ and assert preservation plus these database rejections:
 assert_eq!(expected_migrations(), 36);
 assert_sql_rejected("status = 'unknown'").await;
 assert_sql_rejected("terminal_reason = ''").await;
+let exact_multibyte = "é".repeat(512);
+assert_sql_accepted(&format!("terminal_reason = '{exact_multibyte}'")).await;
+assert_eq!(read_terminal_reason().await.unwrap().as_str(), exact_multibyte);
 assert_sql_rejected(&format!("terminal_reason = '{}'", "é".repeat(513))).await;
 assert_sql_rejected("next_sequence = -1").await;
 assert_sql_rejected("live location with retired_by_scan_session_id").await;
@@ -690,8 +693,37 @@ pub struct RemoteScanReconciliationInput {
 }
 ```
 
-Define strict start and terminal outcomes beside `RemoteScanBatchOutcome`; each carries the session
-ID and resulting status, and completion additionally carries observation and retirement counts.
+Define every exported outcome before the API task consumes it:
+
+```rust
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RemoteScanStartOutcome {
+    pub scan_session_id: ScanSessionId,
+    pub status: ScanSessionStatus,
+    pub owner_incarnation_id: NodeIncarnationId,
+    pub location_high_watermark_id: Option<FileLocationId>,
+    pub progress_deadline_at: OffsetDateTime,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RemoteScanBatchOutcome {
+    pub scan_session_id: ScanSessionId,
+    pub sequence: u64,
+    pub accepted_observation_count: u64,
+    pub cumulative_observation_count: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RemoteScanTerminalOutcome {
+    pub scan_session_id: ScanSessionId,
+    pub status: ScanSessionStatus,
+    pub terminal_at: OffsetDateTime,
+    pub terminal_reason: ScanTerminalReason,
+}
+```
 
 - [ ] **Step 1: Write failing request and lifecycle transaction tests**
 
@@ -737,14 +769,9 @@ Serialize the concrete strict outcome into the `data` field of the existing
 `RemoteMutationReplay`; do not add another replay envelope:
 
 ```rust
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RemoteScanBatchOutcome {
-    scan_session_id: ScanSessionId,
-    sequence: u64,
-    accepted_observation_count: u64,
-    cumulative_observation_count: u64,
-}
+let data = serde_json::to_value(&outcome)
+    .map_err(|error| VoomError::database_context("serialize scan replay outcome", error))?;
+let replay = RemoteMutationReplay::Ok { data };
 ```
 
 Give start, batch, completion, and failure outcomes their own strict content structs and decode
@@ -818,7 +845,36 @@ pub struct RemoteScanCompleteOutcome {
     pub observation_count: u64,
     pub retired_location_count: u64,
 }
+
+pub struct CompleteScanSessionInput {
+    pub scan_session_id: ScanSessionId,
+    pub expected_storage_root_id: StorageRootId,
+    pub expected_root_epoch: u64,
+    pub expected_owner_node_id: NodeId,
+    pub expected_owner_incarnation_id: NodeIncarnationId,
+    pub last_sequence: Option<u64>,
+    pub observation_count: u64,
+    pub completed_at: OffsetDateTime,
+}
+
+pub struct ScanCompletionRecord {
+    pub session: ScanSession,
+    pub retired_location_ids: Vec<FileLocationId>,
+}
+
+impl SqliteScanSessionRepo {
+    pub async fn complete_in_tx(
+        &self,
+        tx: &mut Transaction<'_, Sqlite>,
+        input: CompleteScanSessionInput,
+    ) -> Result<ScanCompletionRecord, VoomError>;
+}
 ```
+
+`complete_in_tx` owns checked session/watermark reads, candidate selection, the whole-set commit
+lock preflight, the location update, affected-row equality, the succeeded compare-and-set, and the
+root-pointer update. It does not append the event, complete remote replay, or commit the caller's
+transaction. Those remain control-plane responsibilities.
 
 - [ ] **Step 1: Write failing completion and absence tests**
 
@@ -853,9 +909,10 @@ three states and for existing use-lease/identity behavior.
 
 - [ ] **Step 4: Implement one-transaction completion**
 
-After authority/replay/fences/watermark checks, select candidates ordered by ID and preflight the
-entire set before mutation. Update only rows satisfying the same live/root/high-water/anti-join
-predicate:
+After authority/replay/fences, call `require_running_completion(&session)` and then
+`SqliteScanSessionRepo::complete_in_tx`. The repository revalidates expected root/owner/
+incarnation bindings and the watermark, selects candidates ordered by ID, and preflights the entire
+set before mutation. Update only rows satisfying the same live/root/high-water/anti-join predicate:
 
 ```sql
 UPDATE file_locations
@@ -873,9 +930,10 @@ WHERE storage_root_id = ?
   )
 ```
 
-Verify affected rows equal the preflight candidate count, then mark the session succeeded, set the
-root pointer, append one summary event, complete replay, and commit. Any mismatch or write error is
-`VoomError::Database` and rolls back everything.
+Inside `complete_in_tx`, verify affected rows equal the candidate count, mark the session succeeded
+with a compare-and-set on `running` plus every expected binding, and set the root pointer. Back in
+the control plane, append one summary event, complete replay, and commit. Any mismatch or write
+error is `VoomError::Database` and rolls back everything.
 
 - [ ] **Step 5: Force every post-preflight failure and verify full rollback**
 
@@ -1243,28 +1301,42 @@ git commit -m "feat: add scan session CLI"
 **Files:**
 
 - Create: `crates/voom-control-plane/tests/durable_scan_session_flow.rs`
+- Create: `crates/voom-api/tests/scan_session_flow.rs`
+- Modify: `crates/voom-cli/tests/scan_session_envelope.rs`
 
 **Interfaces:**
 
 - Consumes: the complete durable session implementation and all seven charter criteria.
-- Produces: one black-box cross-crate regression suite and a fully verified branch; no new public
+- Produces: a three-crate black-box charter matrix and a fully verified branch; no new public
   behavior beyond ADR 0067/spec.
 
-- [ ] **Step 1: Write the cross-crate charter test before adjusting implementation**
+- [ ] **Step 1: Write the owning-crate charter matrix before adjusting implementation**
 
-In one real-SQLite scenario, request/start, accept two ordered batches, replay each through both
-idempotency paths, reject sequence 3 before missing sequence 2 on a second session, complete the
-first session, and inspect it through control-plane/API/CLI surfaces. Assert exact observation,
-event, retirement, status, progress, terminal, and provenance counts. Separate cases cover empty
-success and every non-success terminal path.
+The control-plane integration test uses real SQLite to request/start, accept two ordered batches,
+replay through both idempotency paths, reject sequence 3 before missing sequence 2 on a second
+session, and complete the first session. It asserts exact observation, event, retirement, status,
+progress, terminal, and provenance counts; separate cases cover empty success and every
+non-success terminal path.
+
+The API integration test drives the same state through the router and proves authentication order,
+wire shapes, same-key replay, status/progress, terminal outcome, and paginated reconciliation. The
+CLI envelope integration test uses its existing subprocess fixture to prove request/show/list/
+reconciliation/cancel output. Each owning crate imports only dependencies already present in its
+manifest.
 
 - [ ] **Step 2: Run the charter test and fix only observed contract gaps**
 
-Run: `cargo test -p voom-control-plane --all-features --test durable_scan_session_flow`
+Run:
 
-Expected: all seven frozen completion criteria pass in the black-box suite. If it fails, stop this
-task, return to the owning earlier task, add its focused regression first, and commit that fix at
-the owning task boundary before rerunning this proof.
+```bash
+cargo test -p voom-control-plane --all-features --test durable_scan_session_flow
+cargo test -p voom-api --all-features --test scan_session_flow
+cargo test -p voom-cli --all-features --test scan_session_envelope
+```
+
+Expected: all seven frozen completion criteria pass across the three owning-crate suites. If one
+fails, stop this task, return to the owning earlier task, add its focused regression first, and
+commit that fix at the owning task boundary before rerunning the matrix.
 
 - [ ] **Step 3: Demonstrate three tests bite**
 
@@ -1272,7 +1344,8 @@ Perform each mutation separately, run its named test, observe failure, and resto
 the next mutation:
 
 ```text
-1. Remove `status = 'running'` from completion candidate eligibility:
+1. Remove the `require_running_completion(&session)` call immediately before
+   `SqliteScanSessionRepo::complete_in_tx`:
    failed_session_never_reconciles must FAIL.
 2. Remove `next_sequence = next_sequence + 1` from batch acceptance:
    batch_gap_and_replay_are_deterministic must FAIL.
@@ -1319,6 +1392,8 @@ exactly the ADR 0067 README row already committed by the design phase.
 Commit:
 
 ```bash
-git add crates/voom-control-plane/tests/durable_scan_session_flow.rs
+git add crates/voom-control-plane/tests/durable_scan_session_flow.rs \
+  crates/voom-api/tests/scan_session_flow.rs \
+  crates/voom-cli/tests/scan_session_envelope.rs
 git commit -m "test: prove durable scan session contract"
 ```
