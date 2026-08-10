@@ -427,7 +427,9 @@ reject negative or oversized SQLite integers before classification.
   strict request DTOs, and chronological stability checks constrain untrusted input.
 - One shared terminal-reason validator enforces 1–1024 UTF-8 bytes with no NUL for failure and
   cancellation API/use-case inputs, replay decoding, and persisted rows; migration CHECKs enforce
-  the byte length and nonblank/no-NUL shape as a database backstop.
+  the byte length and nonblank/no-NUL shape as a database backstop. The SQLite byte bound uses
+  `length(CAST(terminal_reason AS BLOB))`, never `length(terminal_reason)`, which counts Unicode
+  characters rather than encoded bytes.
 - Immediate transactions, database unique constraints, request hashes, and immutable terminal
   states constrain replay and races.
 - Root epoch/incarnation/availability/deadline checks and the high-water mark prevent stale or
@@ -461,9 +463,10 @@ is live.
   existing root and location rows, rejects invalid state shapes, and appears in schema probes.
 - Corrupt negative counters/epochs, unknown status, malformed timestamps, invalid locator/object
   identity, and impossible terminal shapes surface as database errors.
-- Empty, 1024-byte, and 1025-byte terminal reasons plus NUL-containing reasons are exercised
-  through failure API and cancellation CLI/use-case paths; only the 1024-byte value succeeds, and
-  persisted out-of-contract reasons decode as database errors.
+- Empty, ASCII 1024-byte, ASCII 1025-byte, and NUL-containing terminal reasons are exercised
+  through failure API and cancellation CLI/use-case paths. Multibyte cases accept exactly 1024
+  encoded bytes and reject the next complete UTF-8 scalar above the limit through both the shared
+  validator and direct SQL insertion. Persisted out-of-contract reasons decode as database errors.
 - FK-valid reconciliation pointers to a wrong-root, non-succeeded, or older same-root successful
   session; mismatched terminal and retirement timestamps; an above-watermark or observed
   attributed location; and a mismatched retired count each surface as a database error before
