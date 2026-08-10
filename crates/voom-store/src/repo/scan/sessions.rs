@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use sqlx::{Row, SqlitePool};
+use sqlx::{QueryBuilder, Row, Sqlite, SqlitePool, Transaction};
 use time::OffsetDateTime;
 use voom_core::{
     FileLocationId, NodeId, NodeIncarnationId, ProviderRelativeLocator, ScanSessionId,
@@ -7,7 +7,9 @@ use voom_core::{
 };
 
 use super::super::Repository;
-use super::super::common::{i64_from_u64, map_row_err, parse_iso8601, u32_from_i64, u64_from_i64};
+use super::super::common::{
+    i64_from_u64, iso8601, map_row_err, parse_iso8601, u32_from_i64, u64_from_i64,
+};
 
 #[derive(Debug, Clone)]
 pub struct SqliteScanSessionRepo {
@@ -27,6 +29,440 @@ impl SqliteScanSessionRepo {
             .await
             .map_err(|error| VoomError::database_context("scan_sessions get", error))?;
         row.as_ref().map(row_to_scan_session).transpose()
+    }
+
+    pub async fn latest_succeeded_for_root(
+        &self,
+        storage_root_id: StorageRootId,
+    ) -> Result<Option<ScanSession>, VoomError> {
+        let row = sqlx::query(
+            "SELECT last_scan_session_id, \
+             (SELECT MAX(id) FROM scan_sessions WHERE storage_root_id = library_roots.id \
+              AND status = 'succeeded') AS latest_succeeded_id \
+             FROM library_roots WHERE id = ?",
+        )
+        .bind(i64_from_u64(storage_root_id.0, "library_roots.id")?)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|error| VoomError::database_context("scan session latest root", error))?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let pointer = optional_scan_session_id(&row, "last_scan_session_id")?;
+        let latest = optional_scan_session_id(&row, "latest_succeeded_id")?;
+        if pointer != latest {
+            return Err(VoomError::database(format!(
+                "library root {storage_root_id} has invalid latest scan session pointer"
+            )));
+        }
+        let Some(id) = pointer else {
+            return Ok(None);
+        };
+        let session = self.get(id).await?.ok_or_else(|| {
+            VoomError::database(format!(
+                "library root {storage_root_id} scan session pointer {id} is missing"
+            ))
+        })?;
+        if session.storage_root_id != storage_root_id
+            || session.status != ScanSessionStatus::Succeeded
+        {
+            return Err(VoomError::database(format!(
+                "library root {storage_root_id} scan session pointer {id} is invalid"
+            )));
+        }
+        Ok(Some(session))
+    }
+
+    pub async fn insert_requested_in_tx(
+        &self,
+        tx: &mut Transaction<'_, Sqlite>,
+        input: NewScanSession,
+    ) -> Result<ScanSession, VoomError> {
+        validate_new_session(&input)?;
+        let row = sqlx::query(&format!(
+            "INSERT INTO scan_sessions (storage_root_id, root_epoch, owner_node_id, status, \
+             idle_timeout_seconds, progress_deadline_at, requested_at) \
+             VALUES (?, ?, ?, 'requested', ?, ?, ?) RETURNING {SCAN_SESSION_COLS}"
+        ))
+        .bind(i64_from_u64(
+            input.storage_root_id.0,
+            "scan_sessions.storage_root_id",
+        )?)
+        .bind(i64_from_u64(input.root_epoch, "scan_sessions.root_epoch")?)
+        .bind(i64_from_u64(
+            input.owner_node_id.0,
+            "scan_sessions.owner_node_id",
+        )?)
+        .bind(i64::from(input.idle_timeout_seconds))
+        .bind(iso8601(input.progress_deadline_at)?)
+        .bind(iso8601(input.requested_at)?)
+        .fetch_one(&mut **tx)
+        .await;
+        match row {
+            Ok(row) => row_to_scan_session(&row),
+            Err(error) if is_unique_violation(&error) => {
+                let active = self
+                    .active_for_root_in_tx(tx, input.storage_root_id)
+                    .await?;
+                let detail = active.map_or_else(
+                    || {
+                        format!(
+                            "scan session already active for root {}",
+                            input.storage_root_id
+                        )
+                    },
+                    |session| {
+                        format!(
+                            "scan session {} is already active for root {}",
+                            session.id, input.storage_root_id
+                        )
+                    },
+                );
+                Err(VoomError::Conflict(detail))
+            }
+            Err(error) => Err(VoomError::database_context(
+                "scan_sessions insert requested",
+                error,
+            )),
+        }
+    }
+
+    pub async fn get_in_tx(
+        &self,
+        tx: &mut Transaction<'_, Sqlite>,
+        id: ScanSessionId,
+    ) -> Result<Option<ScanSession>, VoomError> {
+        let row = sqlx::query(SELECT_SCAN_SESSION_COLS)
+            .bind(i64_from_u64(id.0, "scan_sessions.id")?)
+            .fetch_optional(&mut **tx)
+            .await
+            .map_err(|error| {
+                VoomError::database_context("scan_sessions get in transaction", error)
+            })?;
+        row.as_ref().map(row_to_scan_session).transpose()
+    }
+
+    pub async fn active_for_root_in_tx(
+        &self,
+        tx: &mut Transaction<'_, Sqlite>,
+        storage_root_id: StorageRootId,
+    ) -> Result<Option<ScanSession>, VoomError> {
+        let row = sqlx::query(&format!(
+            "SELECT {SCAN_SESSION_COLS} FROM scan_sessions WHERE storage_root_id = ? \
+             AND status IN ('requested', 'running') ORDER BY id ASC"
+        ))
+        .bind(i64_from_u64(
+            storage_root_id.0,
+            "scan_sessions.storage_root_id",
+        )?)
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(|error| VoomError::database_context("scan_sessions active root", error))?;
+        row.as_ref().map(row_to_scan_session).transpose()
+    }
+
+    pub async fn stale_expired_in_tx(
+        &self,
+        tx: &mut Transaction<'_, Sqlite>,
+        now: OffsetDateTime,
+    ) -> Result<Vec<ScanSession>, VoomError> {
+        let now = iso8601(now)?;
+        let mut sessions = sqlx::query(&format!(
+            "UPDATE scan_sessions SET status = 'stale', terminal_at = ?, \
+             terminal_reason = 'scan session progress deadline expired' \
+             WHERE status IN ('requested', 'running') AND progress_deadline_at <= ? \
+             RETURNING {SCAN_SESSION_COLS}"
+        ))
+        .bind(&now)
+        .bind(&now)
+        .fetch_all(&mut **tx)
+        .await
+        .map_err(|error| VoomError::database_context("scan_sessions stale expired", error))?
+        .iter()
+        .map(row_to_scan_session)
+        .collect::<Result<Vec<_>, _>>()?;
+        sessions.sort_by_key(|session| session.id);
+        Ok(sessions)
+    }
+
+    pub async fn start_in_tx(
+        &self,
+        tx: &mut Transaction<'_, Sqlite>,
+        id: ScanSessionId,
+        incarnation_id: NodeIncarnationId,
+        _location_high_watermark_id: Option<FileLocationId>,
+        deadline: OffsetDateTime,
+        now: OffsetDateTime,
+    ) -> Result<ScanSession, VoomError> {
+        let Some(session) = self.get_in_tx(tx, id).await? else {
+            return Err(VoomError::NotFound(format!("scan session {id} not found")));
+        };
+        if session.status != ScanSessionStatus::Requested {
+            return Err(VoomError::Conflict(format!(
+                "scan session {id} cannot start from {}",
+                session.status.as_str()
+            )));
+        }
+        let high_watermark = sqlx::query(
+            "SELECT MAX(id) AS id FROM file_locations WHERE storage_root_id = ? \
+             AND address_state = 'rooted' AND retired_at IS NULL",
+        )
+        .bind(i64_from_u64(
+            session.storage_root_id.0,
+            "file_locations.storage_root_id",
+        )?)
+        .fetch_one(&mut **tx)
+        .await
+        .map_err(|error| VoomError::database_context("scan_sessions start high watermark", error))?
+        .try_get::<Option<i64>, _>("id")
+        .map_err(|error| map_row_err("file_locations high watermark", error))?
+        .map(|value| u64_from_i64(value, "file_locations.id").map(FileLocationId))
+        .transpose()?;
+        let row = sqlx::query(&format!(
+            "UPDATE scan_sessions SET status = 'running', owner_incarnation_id = ?, \
+             location_high_watermark_id = ?, progress_deadline_at = ?, started_at = ? \
+             WHERE id = ? AND status = 'requested' RETURNING {SCAN_SESSION_COLS}"
+        ))
+        .bind(incarnation_id.to_string())
+        .bind(
+            high_watermark
+                .map(|value| i64_from_u64(value.0, "file_locations.id"))
+                .transpose()?,
+        )
+        .bind(iso8601(deadline)?)
+        .bind(iso8601(now)?)
+        .bind(i64_from_u64(id.0, "scan_sessions.id")?)
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(|error| VoomError::database_context("scan_sessions start", error))?;
+        row.as_ref()
+            .map(row_to_scan_session)
+            .transpose()?
+            .ok_or_else(|| VoomError::Conflict(format!("scan session {id} start raced")))
+    }
+
+    pub async fn accepted_batch_in_tx(
+        &self,
+        tx: &mut Transaction<'_, Sqlite>,
+        input: NewScanObservationBatch,
+    ) -> Result<ScanBatchOutcome, VoomError> {
+        let input = PreparedBatch::new(input)?;
+        if let Some(outcome) = batch_replay_in_tx(tx, &input).await? {
+            return Ok(outcome);
+        }
+        let Some(session) = self.get_in_tx(tx, input.scan_session_id).await? else {
+            return Err(VoomError::NotFound(format!(
+                "scan session {} not found",
+                input.scan_session_id
+            )));
+        };
+        if session.status != ScanSessionStatus::Running || session.next_sequence != input.sequence {
+            return Err(VoomError::Conflict(format!(
+                "scan session {} expects running batch {}",
+                session.id, session.next_sequence
+            )));
+        }
+        ensure_new_locators_in_tx(tx, &input).await?;
+        let cumulative_count = session
+            .observation_count
+            .checked_add(input.observation_count)
+            .ok_or_else(|| {
+                VoomError::database("scan session observation count overflow".to_owned())
+            })?;
+        let next_sequence = session
+            .next_sequence
+            .checked_add(1)
+            .ok_or_else(|| VoomError::database("scan session sequence overflow".to_owned()))?;
+        let batch_count = session
+            .batch_count
+            .checked_add(1)
+            .ok_or_else(|| VoomError::database("scan session batch count overflow".to_owned()))?;
+        let cumulative_count_i64 = i64_from_u64(
+            cumulative_count,
+            "scan_observation_batches.cumulative_observation_count",
+        )?;
+        let next_sequence_i64 = i64_from_u64(next_sequence, "scan_sessions.next_sequence")?;
+        let batch_count_i64 = i64_from_u64(batch_count, "scan_sessions.batch_count")?;
+        insert_batch_in_tx(tx, &input, cumulative_count_i64).await?;
+        insert_observations_in_tx(tx, &input).await?;
+        let updated = update_batch_progress_in_tx(
+            tx,
+            &input,
+            next_sequence_i64,
+            batch_count_i64,
+            cumulative_count_i64,
+        )
+        .await?;
+        if updated.rows_affected() != 1 {
+            return Err(VoomError::Conflict(format!(
+                "scan session {} batch {} raced",
+                input.scan_session_id, input.sequence
+            )));
+        }
+        Ok(ScanBatchOutcome {
+            scan_session_id: input.scan_session_id,
+            sequence: input.sequence,
+            accepted_observation_count: input.observation_count,
+            cumulative_observation_count: cumulative_count,
+        })
+    }
+
+    pub async fn terminalize_in_tx(
+        &self,
+        tx: &mut Transaction<'_, Sqlite>,
+        id: ScanSessionId,
+        status: ScanSessionStatus,
+        reason: ScanTerminalReason,
+        now: OffsetDateTime,
+    ) -> Result<ScanSession, VoomError> {
+        match status {
+            ScanSessionStatus::Failed | ScanSessionStatus::Cancelled | ScanSessionStatus::Stale => {
+            }
+            ScanSessionStatus::Requested
+            | ScanSessionStatus::Running
+            | ScanSessionStatus::Succeeded => {
+                return Err(VoomError::Config(format!(
+                    "scan session terminalize does not accept {}",
+                    status.as_str()
+                )));
+            }
+        }
+        let row = sqlx::query(&format!(
+            "UPDATE scan_sessions SET status = ?, terminal_reason = ?, terminal_at = ? \
+             WHERE id = ? AND status IN ('requested', 'running') RETURNING {SCAN_SESSION_COLS}"
+        ))
+        .bind(status.as_str())
+        .bind(reason.as_str())
+        .bind(iso8601(now)?)
+        .bind(i64_from_u64(id.0, "scan_sessions.id")?)
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(|error| VoomError::database_context("scan session terminalize", error))?;
+        row.as_ref()
+            .map(row_to_scan_session)
+            .transpose()?
+            .ok_or_else(|| {
+                VoomError::Conflict(format!("scan session {id} is already terminal or missing"))
+            })
+    }
+
+    pub async fn list(&self, query: ScanSessionListQuery) -> Result<ScanSessionPage, VoomError> {
+        let limit = checked_page_limit(query.limit, "scan session list")?;
+        let mut builder = QueryBuilder::<Sqlite>::new(format!(
+            "SELECT {SCAN_SESSION_COLS} FROM scan_sessions WHERE 1 = 1"
+        ));
+        if let Some(storage_root_id) = query.storage_root_id {
+            builder
+                .push(" AND storage_root_id = ")
+                .push_bind(i64_from_u64(
+                    storage_root_id.0,
+                    "scan_sessions.storage_root_id",
+                )?);
+        }
+        if let Some(status) = query.status {
+            builder.push(" AND status = ").push_bind(status.as_str());
+        }
+        if let Some(after_id) = query.after_id {
+            builder
+                .push(" AND id > ")
+                .push_bind(i64_from_u64(after_id.0, "scan_sessions.id")?);
+        }
+        builder.push(" ORDER BY id ASC LIMIT ").push_bind(limit + 1);
+        let rows = builder
+            .build()
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|error| VoomError::database_context("scan session list", error))?;
+        let mut items = rows
+            .iter()
+            .map(row_to_scan_session)
+            .collect::<Result<Vec<_>, _>>()?;
+        let limit = usize::try_from(limit)
+            .map_err(|error| VoomError::database_context("scan session list limit", error))?;
+        let has_more = items.len() > limit;
+        items.truncate(limit);
+        let next_after_id = has_more
+            .then(|| items.last().map(|session| session.id))
+            .flatten();
+        Ok(ScanSessionPage {
+            items,
+            next_after_id,
+        })
+    }
+
+    pub async fn reconciliation_page(
+        &self,
+        query: ScanReconciliationQuery,
+    ) -> Result<ScanReconciliationPage, VoomError> {
+        let limit = checked_page_limit(query.limit, "scan reconciliation")?;
+        let Some(session) = self.get(query.scan_session_id).await? else {
+            return Err(VoomError::NotFound(format!(
+                "scan session {} not found",
+                query.scan_session_id
+            )));
+        };
+        let location_rows = sqlx::query(
+            "SELECT id, storage_root_id, provider_relative_locator, retired_at, epoch FROM file_locations \
+             WHERE retired_by_scan_session_id = ? ORDER BY id ASC",
+        )
+        .bind(i64_from_u64(query.scan_session_id.0, "file_locations.retired_by_scan_session_id")?)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|error| VoomError::database_context("scan reconciliation evidence", error))?;
+        if session.status != ScanSessionStatus::Succeeded {
+            if location_rows.is_empty() {
+                return Err(VoomError::Conflict(format!(
+                    "scan session {} has not succeeded",
+                    query.scan_session_id
+                )));
+            }
+            return Err(VoomError::database(format!(
+                "non-succeeded scan session {} has attributed locations",
+                query.scan_session_id
+            )));
+        }
+        let observed_locators = self.observed_locators(session.id).await?;
+        let items = reconciliation_items(&session, &location_rows, &observed_locators)?;
+        let start = query.after_id.map_or(0, |after_id| {
+            items.partition_point(|item| item.file_location_id <= after_id)
+        });
+        let limit = usize::try_from(limit)
+            .map_err(|error| VoomError::database_context("scan reconciliation limit", error))?;
+        let end = start.saturating_add(limit).min(items.len());
+        let page_items = items[start..end].to_vec();
+        let next_after_id = (end < items.len())
+            .then(|| page_items.last().map(|item| item.file_location_id))
+            .flatten();
+        Ok(ScanReconciliationPage {
+            items: page_items,
+            next_after_id,
+        })
+    }
+
+    async fn observed_locators(
+        &self,
+        session_id: ScanSessionId,
+    ) -> Result<std::collections::BTreeSet<String>, VoomError> {
+        let rows = sqlx::query(
+            "SELECT provider_relative_locator FROM scan_observations \
+             WHERE scan_session_id = ? ORDER BY provider_relative_locator ASC",
+        )
+        .bind(i64_from_u64(
+            session_id.0,
+            "scan_observations.scan_session_id",
+        )?)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|error| VoomError::database_context("scan reconciliation observations", error))?;
+        let mut locators = std::collections::BTreeSet::new();
+        for row in rows {
+            let locator = ProviderRelativeLocator::parse_database(
+                "scan_observations.provider_relative_locator",
+                &string_column(&row, "provider_relative_locator")?,
+            )?;
+            locators.insert(locator.into_inner());
+        }
+        Ok(locators)
     }
 }
 
@@ -64,6 +500,53 @@ pub struct ScanObservation {
     pub stability_confirmed_at: OffsetDateTime,
 }
 
+#[derive(Debug, Clone)]
+pub struct NewScanSession {
+    pub storage_root_id: StorageRootId,
+    pub root_epoch: u64,
+    pub owner_node_id: NodeId,
+    pub idle_timeout_seconds: u32,
+    pub progress_deadline_at: OffsetDateTime,
+    pub requested_at: OffsetDateTime,
+}
+
+#[derive(Debug, Clone)]
+pub struct NewScanObservationBatch {
+    pub scan_session_id: ScanSessionId,
+    pub sequence: u64,
+    pub request_hash: String,
+    pub observations: Vec<ScanObservation>,
+    pub accepted_at: OffsetDateTime,
+    pub next_progress_deadline_at: OffsetDateTime,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScanSessionListQuery {
+    pub storage_root_id: Option<StorageRootId>,
+    pub status: Option<ScanSessionStatus>,
+    pub after_id: Option<ScanSessionId>,
+    pub limit: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScanSessionPage {
+    pub items: Vec<ScanSession>,
+    pub next_after_id: Option<ScanSessionId>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScanReconciliationQuery {
+    pub scan_session_id: ScanSessionId,
+    pub after_id: Option<FileLocationId>,
+    pub limit: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScanReconciliationPage {
+    pub items: Vec<ScanReconciliationEvidence>,
+    pub next_after_id: Option<FileLocationId>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ScanBatchOutcome {
@@ -80,6 +563,11 @@ pub struct ScanReconciliationEvidence {
     pub prior_epoch: u64,
     pub retired_epoch: u64,
 }
+
+const SCAN_SESSION_COLS: &str = "id, storage_root_id, root_epoch, owner_node_id, \
+    owner_incarnation_id, status, next_sequence, batch_count, observation_count, \
+    idle_timeout_seconds, progress_deadline_at, location_high_watermark_id, requested_at, \
+    started_at, terminal_at, terminal_reason, retired_location_count";
 
 const SELECT_SCAN_SESSION_COLS: &str = "SELECT id, storage_root_id, root_epoch, owner_node_id, \
     owner_incarnation_id, status, next_sequence, batch_count, observation_count, \
@@ -148,24 +636,7 @@ fn validate_scan_session(session: &ScanSession) -> Result<(), VoomError> {
             session.id.0
         )));
     }
-    let active = session.terminal_at.is_none() && session.terminal_reason.is_none();
-    let bindings = session.owner_incarnation_id.is_some() && session.started_at.is_some();
-    let unbound = session.owner_incarnation_id.is_none()
-        && session.started_at.is_none()
-        && session.location_high_watermark_id.is_none();
-    let valid = match session.status {
-        ScanSessionStatus::Requested => active && unbound,
-        ScanSessionStatus::Running => active && bindings,
-        ScanSessionStatus::Succeeded => {
-            bindings && session.terminal_at.is_some() && session.terminal_reason.is_none()
-        }
-        ScanSessionStatus::Failed | ScanSessionStatus::Cancelled | ScanSessionStatus::Stale => {
-            session.terminal_at.is_some()
-                && session.terminal_reason.is_some()
-                && (bindings || unbound)
-        }
-    };
-    if valid {
+    if has_valid_lifecycle_shape(session) {
         Ok(())
     } else {
         Err(VoomError::database(format!(
@@ -176,6 +647,43 @@ fn validate_scan_session(session: &ScanSession) -> Result<(), VoomError> {
     }
 }
 
+fn has_valid_lifecycle_shape(session: &ScanSession) -> bool {
+    match session.status {
+        ScanSessionStatus::Requested => is_active(session) && is_unbound(session),
+        ScanSessionStatus::Running => is_active(session) && has_start_bindings(session),
+        ScanSessionStatus::Succeeded => has_success_shape(session),
+        ScanSessionStatus::Failed | ScanSessionStatus::Cancelled | ScanSessionStatus::Stale => {
+            has_unsuccessful_terminal_shape(session)
+        }
+    }
+}
+
+fn is_active(session: &ScanSession) -> bool {
+    session.terminal_at.is_none() && session.terminal_reason.is_none()
+}
+
+fn has_start_bindings(session: &ScanSession) -> bool {
+    session.owner_incarnation_id.is_some() && session.started_at.is_some()
+}
+
+fn is_unbound(session: &ScanSession) -> bool {
+    session.owner_incarnation_id.is_none()
+        && session.started_at.is_none()
+        && session.location_high_watermark_id.is_none()
+}
+
+fn has_success_shape(session: &ScanSession) -> bool {
+    has_start_bindings(session)
+        && session.terminal_at.is_some()
+        && session.terminal_reason.is_none()
+}
+
+fn has_unsuccessful_terminal_shape(session: &ScanSession) -> bool {
+    session.terminal_at.is_some()
+        && session.terminal_reason.is_some()
+        && (has_start_bindings(session) || is_unbound(session))
+}
+
 fn validate_provider_object_identity(value: &str) -> Result<(), VoomError> {
     if value.is_empty() || value.len() > 4_096 || value.as_bytes().contains(&0) {
         return Err(VoomError::database(
@@ -184,6 +692,393 @@ fn validate_provider_object_identity(value: &str) -> Result<(), VoomError> {
         ));
     }
     Ok(())
+}
+
+fn validate_new_session(input: &NewScanSession) -> Result<(), VoomError> {
+    if !(1..=86_400).contains(&input.idle_timeout_seconds) {
+        return Err(VoomError::Config(format!(
+            "scan session idle timeout {} outside 1..=86400",
+            input.idle_timeout_seconds
+        )));
+    }
+    Ok(())
+}
+
+struct PreparedBatch {
+    scan_session_id: ScanSessionId,
+    session_id: i64,
+    sequence: u64,
+    sequence_i64: i64,
+    request_hash: String,
+    observations: Vec<PreparedObservation>,
+    observation_count: u64,
+    observation_count_i64: i64,
+    accepted_at: String,
+    next_progress_deadline_at: String,
+}
+
+impl PreparedBatch {
+    fn new(input: NewScanObservationBatch) -> Result<Self, VoomError> {
+        validate_batch_shape(&input)?;
+        let session_id = input_i64(input.scan_session_id.0, "scan session ID")?;
+        let sequence_i64 = input_i64(input.sequence, "scan batch sequence")?;
+        let observation_count = u64::try_from(input.observations.len())
+            .map_err(|error| VoomError::Config(format!("scan batch count invalid: {error}")))?;
+        let observation_count_i64 = input_i64(observation_count, "scan batch count")?;
+        let mut locators = std::collections::BTreeSet::new();
+        let mut observations = Vec::with_capacity(input.observations.len());
+        for (ordinal, observation) in input.observations.into_iter().enumerate() {
+            let locator = observation.provider_relative_locator.as_str();
+            if !locators.insert(locator.to_owned()) {
+                return Err(VoomError::Conflict(format!(
+                    "scan session batch repeats provider-relative locator {locator}"
+                )));
+            }
+            observations.push(PreparedObservation::new(ordinal, observation)?);
+        }
+        Ok(Self {
+            scan_session_id: input.scan_session_id,
+            session_id,
+            sequence: input.sequence,
+            sequence_i64,
+            request_hash: input.request_hash,
+            observations,
+            observation_count,
+            observation_count_i64,
+            accepted_at: iso8601(input.accepted_at)?,
+            next_progress_deadline_at: iso8601(input.next_progress_deadline_at)?,
+        })
+    }
+}
+
+struct PreparedObservation {
+    ordinal: i64,
+    provider_relative_locator: ProviderRelativeLocator,
+    provider_object_identity: String,
+    size_bytes: i64,
+    modified_at: String,
+    stability_started_at: String,
+    stability_confirmed_at: String,
+}
+
+impl PreparedObservation {
+    fn new(ordinal: usize, observation: ScanObservation) -> Result<Self, VoomError> {
+        validate_batch_observation(&observation)?;
+        let ordinal = u64::try_from(ordinal)
+            .map_err(|error| VoomError::Config(format!("scan observation ordinal: {error}")))?;
+        Ok(Self {
+            ordinal: input_i64(ordinal, "scan observation ordinal")?,
+            provider_relative_locator: observation.provider_relative_locator,
+            provider_object_identity: observation.provider_object_identity,
+            size_bytes: input_i64(observation.size_bytes, "scan observation size")?,
+            modified_at: iso8601(observation.modified_at)?,
+            stability_started_at: iso8601(observation.stability_started_at)?,
+            stability_confirmed_at: iso8601(observation.stability_confirmed_at)?,
+        })
+    }
+}
+
+fn validate_batch_shape(input: &NewScanObservationBatch) -> Result<(), VoomError> {
+    if !(1..=1_000).contains(&input.observations.len()) {
+        return Err(VoomError::Config(format!(
+            "scan session batch observation count {} outside 1..=1000",
+            input.observations.len()
+        )));
+    }
+    if !is_lowercase_sha256(&input.request_hash) {
+        return Err(VoomError::Config(
+            "scan session batch request hash must be lowercase SHA-256".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn is_lowercase_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|character| character.is_ascii_digit() || (b'a'..=b'f').contains(&character))
+}
+
+fn validate_batch_observation(observation: &ScanObservation) -> Result<(), VoomError> {
+    let identity = &observation.provider_object_identity;
+    if identity.is_empty() || identity.len() > 4_096 || identity.as_bytes().contains(&0) {
+        return Err(VoomError::Config(
+            "scan session batch provider object identity must be 1..=4096 bytes without NUL"
+                .to_owned(),
+        ));
+    }
+    if observation.stability_confirmed_at < observation.stability_started_at {
+        return Err(VoomError::Config(
+            "scan session batch stability confirmation precedes start".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn input_i64(value: u64, field: &str) -> Result<i64, VoomError> {
+    i64::try_from(value)
+        .map_err(|error| VoomError::Config(format!("{field} {value} exceeds storage: {error}")))
+}
+
+async fn batch_replay_in_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    input: &PreparedBatch,
+) -> Result<Option<ScanBatchOutcome>, VoomError> {
+    let row = sqlx::query(
+        "SELECT request_hash, observation_count, cumulative_observation_count \
+         FROM scan_observation_batches WHERE scan_session_id = ? AND sequence = ?",
+    )
+    .bind(input.session_id)
+    .bind(input.sequence_i64)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(|error| VoomError::database_context("scan batch replay lookup", error))?;
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    let request_hash: String = row
+        .try_get("request_hash")
+        .map_err(|error| map_row_err("scan_observation_batches", error))?;
+    if !is_lowercase_sha256(&request_hash) {
+        return Err(VoomError::database(format!(
+            "scan session {} batch {} has invalid persisted request hash",
+            input.scan_session_id, input.sequence
+        )));
+    }
+    if request_hash != input.request_hash {
+        return Err(VoomError::Conflict(format!(
+            "scan session {} batch {} request hash conflicts with accepted batch",
+            input.scan_session_id, input.sequence
+        )));
+    }
+    batch_outcome_from_row(&row, input.scan_session_id, input.sequence).map(Some)
+}
+
+async fn ensure_new_locators_in_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    input: &PreparedBatch,
+) -> Result<(), VoomError> {
+    for observation in &input.observations {
+        let exists = sqlx::query_scalar::<_, i64>(
+            "SELECT EXISTS(SELECT 1 FROM scan_observations WHERE scan_session_id = ? \
+             AND provider_relative_locator = ?)",
+        )
+        .bind(input.session_id)
+        .bind(observation.provider_relative_locator.as_str())
+        .fetch_one(&mut **tx)
+        .await
+        .map_err(|error| VoomError::database_context("scan observation locator check", error))?;
+        if exists != 0 {
+            return Err(VoomError::Conflict(format!(
+                "scan session {} already contains provider-relative locator {}",
+                input.scan_session_id,
+                observation.provider_relative_locator.as_str()
+            )));
+        }
+    }
+    Ok(())
+}
+
+async fn insert_batch_in_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    input: &PreparedBatch,
+    cumulative_count: i64,
+) -> Result<(), VoomError> {
+    sqlx::query(
+        "INSERT INTO scan_observation_batches (scan_session_id, sequence, request_hash, \
+         observation_count, accepted_at, cumulative_observation_count) VALUES (?, ?, ?, ?, ?, ?)",
+    )
+    .bind(input.session_id)
+    .bind(input.sequence_i64)
+    .bind(&input.request_hash)
+    .bind(input.observation_count_i64)
+    .bind(&input.accepted_at)
+    .bind(cumulative_count)
+    .execute(&mut **tx)
+    .await
+    .map_err(|error| VoomError::database_context("scan batch insert", error))?;
+    Ok(())
+}
+
+async fn insert_observations_in_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    input: &PreparedBatch,
+) -> Result<(), VoomError> {
+    for observation in &input.observations {
+        let inserted = sqlx::query(
+            "INSERT INTO scan_observations (scan_session_id, batch_sequence, ordinal, \
+             provider_relative_locator, provider_object_identity, size_bytes, modified_at, \
+             stability_started_at, stability_confirmed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(input.session_id)
+        .bind(input.sequence_i64)
+        .bind(observation.ordinal)
+        .bind(observation.provider_relative_locator.as_str())
+        .bind(&observation.provider_object_identity)
+        .bind(observation.size_bytes)
+        .bind(&observation.modified_at)
+        .bind(&observation.stability_started_at)
+        .bind(&observation.stability_confirmed_at)
+        .execute(&mut **tx)
+        .await;
+        if let Err(error) = inserted {
+            if is_unique_violation(&error) {
+                return Err(VoomError::Conflict(format!(
+                    "scan session {} already contains provider-relative locator {}",
+                    input.scan_session_id,
+                    observation.provider_relative_locator.as_str()
+                )));
+            }
+            return Err(VoomError::database_context(
+                "scan observation insert",
+                error,
+            ));
+        }
+    }
+    Ok(())
+}
+
+async fn update_batch_progress_in_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    input: &PreparedBatch,
+    next_sequence: i64,
+    batch_count: i64,
+    cumulative_count: i64,
+) -> Result<sqlx::sqlite::SqliteQueryResult, VoomError> {
+    sqlx::query(
+        "UPDATE scan_sessions SET next_sequence = ?, batch_count = ?, observation_count = ?, \
+         progress_deadline_at = ? WHERE id = ? AND status = 'running' AND next_sequence = ?",
+    )
+    .bind(next_sequence)
+    .bind(batch_count)
+    .bind(cumulative_count)
+    .bind(&input.next_progress_deadline_at)
+    .bind(input.session_id)
+    .bind(input.sequence_i64)
+    .execute(&mut **tx)
+    .await
+    .map_err(|error| VoomError::database_context("scan session batch progress", error))
+}
+
+fn batch_outcome_from_row(
+    row: &sqlx::sqlite::SqliteRow,
+    scan_session_id: ScanSessionId,
+    sequence: u64,
+) -> Result<ScanBatchOutcome, VoomError> {
+    let outcome = ScanBatchOutcome {
+        scan_session_id,
+        sequence,
+        accepted_observation_count: checked_u64(row, "observation_count")?,
+        cumulative_observation_count: checked_u64(row, "cumulative_observation_count")?,
+    };
+    if !(1..=1_000).contains(&outcome.accepted_observation_count)
+        || outcome.cumulative_observation_count < outcome.accepted_observation_count
+    {
+        return Err(VoomError::database(format!(
+            "scan session {scan_session_id} batch {sequence} has invalid persisted outcome"
+        )));
+    }
+    Ok(outcome)
+}
+
+fn reconciliation_items(
+    session: &ScanSession,
+    rows: &[sqlx::sqlite::SqliteRow],
+    observed_locators: &std::collections::BTreeSet<String>,
+) -> Result<Vec<ScanReconciliationEvidence>, VoomError> {
+    let expected_count = usize::try_from(session.retired_location_count)
+        .map_err(|error| VoomError::database_context("scan reconciliation count", error))?;
+    if rows.len() != expected_count {
+        return Err(VoomError::database(format!(
+            "scan session {} retired count {} does not match {} attributed locations",
+            session.id,
+            session.retired_location_count,
+            rows.len()
+        )));
+    }
+    let terminal_at = session.terminal_at.ok_or_else(|| {
+        VoomError::database(format!(
+            "succeeded scan session {} has no terminal timestamp",
+            session.id
+        ))
+    })?;
+    let mut items = Vec::with_capacity(rows.len());
+    for row in rows {
+        items.push(reconciliation_item(
+            session,
+            row,
+            terminal_at,
+            observed_locators,
+        )?);
+    }
+    Ok(items)
+}
+
+fn reconciliation_item(
+    session: &ScanSession,
+    row: &sqlx::sqlite::SqliteRow,
+    terminal_at: OffsetDateTime,
+    observed_locators: &std::collections::BTreeSet<String>,
+) -> Result<ScanReconciliationEvidence, VoomError> {
+    let file_location_id = FileLocationId(checked_u64(row, "id")?);
+    let storage_root_id = StorageRootId(checked_u64(row, "storage_root_id")?);
+    let locator = ProviderRelativeLocator::parse_database(
+        "file_locations.provider_relative_locator",
+        &string_column(row, "provider_relative_locator")?,
+    )?;
+    let retired_at = timestamp_column(row, "retired_at")?;
+    let retired_epoch = checked_u64(row, "epoch")?;
+    let Some(high_watermark) = session.location_high_watermark_id else {
+        return Err(invalid_reconciliation_location(
+            session.id,
+            file_location_id,
+        ));
+    };
+    if storage_root_id != session.storage_root_id
+        || retired_at != terminal_at
+        || file_location_id > high_watermark
+        || retired_epoch == 0
+        || observed_locators.contains(locator.as_str())
+    {
+        return Err(invalid_reconciliation_location(
+            session.id,
+            file_location_id,
+        ));
+    }
+    Ok(ScanReconciliationEvidence {
+        file_location_id,
+        retired_at,
+        prior_epoch: retired_epoch
+            .checked_sub(1)
+            .ok_or_else(|| VoomError::database("scan reconciliation epoch underflow".to_owned()))?,
+        retired_epoch,
+    })
+}
+
+fn invalid_reconciliation_location(
+    session_id: ScanSessionId,
+    location_id: FileLocationId,
+) -> VoomError {
+    VoomError::database(format!(
+        "scan session {session_id} has invalid reconciliation location {location_id}"
+    ))
+}
+
+fn checked_page_limit(limit: u32, operation: &str) -> Result<i64, VoomError> {
+    if !(1..=100).contains(&limit) {
+        return Err(VoomError::Config(format!(
+            "{operation} limit {limit} outside 1..=100"
+        )));
+    }
+    Ok(i64::from(limit))
+}
+
+fn is_unique_violation(error: &sqlx::Error) -> bool {
+    match error {
+        sqlx::Error::Database(error) => error.is_unique_violation(),
+        _ => false,
+    }
 }
 
 fn checked_u64(row: &sqlx::sqlite::SqliteRow, column: &'static str) -> Result<u64, VoomError> {
@@ -231,6 +1126,18 @@ fn optional_file_location_id(
         .map_err(|error| map_row_err("scan_sessions", error))?;
     value
         .map(|value| u64_from_i64(value, format!("scan_sessions.{column}")).map(FileLocationId))
+        .transpose()
+}
+
+fn optional_scan_session_id(
+    row: &sqlx::sqlite::SqliteRow,
+    column: &'static str,
+) -> Result<Option<ScanSessionId>, VoomError> {
+    let value: Option<i64> = row
+        .try_get(column)
+        .map_err(|error| map_row_err("scan session root pointer", error))?;
+    value
+        .map(|value| u64_from_i64(value, column).map(ScanSessionId))
         .transpose()
 }
 
