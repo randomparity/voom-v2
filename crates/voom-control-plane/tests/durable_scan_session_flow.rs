@@ -53,13 +53,7 @@ async fn two_batch_replay_completion_has_exact_counts_and_provenance() {
         seed_rooted_location(&fixture, root, "absent/one.mkv").await,
         seed_rooted_location(&fixture, root, "absent/two.mkv").await,
     ];
-    let requested = fixture.cp.request_scan_session(root, 300).await.unwrap();
-    let conflict = fixture
-        .cp
-        .request_scan_session(root, 300)
-        .await
-        .unwrap_err();
-    assert_eq!(conflict.error_code(), ErrorCode::Conflict);
+    let requested = request_same_root_concurrently(&fixture, root).await;
     start(&fixture, requested.id, "two-batch-start").await;
 
     let first = batch(
@@ -336,6 +330,41 @@ async fn fixture() -> Fixture {
         incarnation_id,
         token: registered.token,
     }
+}
+
+async fn request_same_root_concurrently(
+    fixture: &Fixture,
+    root: StorageRootId,
+) -> voom_control_plane::scan::ScanSession {
+    let first = fixture.cp.clone();
+    let second = fixture.cp.clone();
+    let (first, second) = tokio::join!(
+        first.request_scan_session(root, 300),
+        second.request_scan_session(root, 300)
+    );
+    let outcomes = [first, second];
+    assert_eq!(outcomes.iter().filter(|result| result.is_ok()).count(), 1);
+    assert_eq!(outcomes.iter().filter(|result| result.is_err()).count(), 1);
+
+    let mut winner = None;
+    for outcome in outcomes {
+        match outcome {
+            Ok(session) => winner = Some(session),
+            Err(error) => assert_eq!(error.error_code(), ErrorCode::Conflict),
+        }
+    }
+    let winner = winner.unwrap();
+    let active: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM scan_sessions WHERE storage_root_id = ? \
+         AND status IN ('requested', 'running')",
+    )
+    .bind(i64::try_from(root.0).unwrap())
+    .fetch_one(&fixture.pool)
+    .await
+    .unwrap();
+    assert_eq!(active, 1);
+    assert_eq!(scan_event_count(fixture, "scan_session.requested").await, 1);
+    winner
 }
 
 async fn create_root(fixture: &Fixture, suffix: &str) -> StorageRootId {
