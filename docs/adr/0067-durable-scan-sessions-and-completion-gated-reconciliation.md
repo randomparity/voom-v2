@@ -40,6 +40,14 @@ different body at the same sequence, a duplicate locator, or any sequence other 
 expected value is a conflict. The existing remote-idempotency ledger additionally makes lost
 HTTP responses replayable.
 
+A session accepts at most 100,000 cumulative observations. Exact replays of already-accepted
+batches remain available at that bound. After the normal authority, lifecycle, root, and deadline
+fences, a genuinely new eligible batch that would cross it fails with a cache-replayed `CONFLICT`
+before any batch, observation, progress, deadline-extension, or event mutation; the error names
+the maximum, current, and incoming counts. This bounds both per-session provisional storage growth
+controlled by an authenticated but faulty owner and the ledger validation performed inside
+completion.
+
 Success supplies a complete-traversal watermark: `last_sequence = null` for an empty traversal,
 or the last accepted sequence otherwise, plus the total observation count. In one `BEGIN
 IMMEDIATE` transaction, the control plane revalidates the session's root epoch, owner, current
@@ -83,12 +91,22 @@ prior epoch from the retained row's incremented epoch.
   observations.
 - Observation, event, and replay payload structs participate in ADR 0013's strict durable-payload
   inventory. Persisted numeric and timestamp fields are checked before business classification.
+- Session counters are relational invariants, not independent integers: batch count equals the
+  next sequence, every accepted batch is non-empty, and cumulative observations cannot exceed
+  100,000. Corrupt counters or a missing accepted-batch row are database errors, never cached
+  ordering conflicts.
+- A non-null start high-water mark is root-bound to the session at the database boundary. A
+  cross-root pointer is corrupt data and cannot widen a completion's retirement candidates.
+- The cumulative limit is per session, not a lifetime history quota. Authenticated nodes cannot
+  request replacement sessions; only the trusted local operator can do so. Retention policy and
+  deployment-level database capacity planning remain separate operational concerns.
 - Completion may return a retryable conflict while an in-flight commit owns a candidate
   location. It leaves the session running and performs no partial reconciliation.
-- Successful completion performs an O(number of pre-start live root locations) anti-join and
-  update in one SQLite writer transaction. The bounded batch and event counts do not make that
-  transaction constant-cost; implementation must prove the supported root scale fits the API
-  timeout or return to design rather than chunk a logically atomic reconciliation.
+- Successful completion performs an O(number of accepted observations + pre-start live root
+  locations) validation, anti-join, and update in one SQLite writer transaction. The 100,000
+  bounds on both cost drivers do not make that transaction constant-cost; implementation must
+  prove both supported maxima fit the API timeout or return to design rather than chunk a
+  logically atomic reconciliation.
 
 ## Considered & rejected
 
