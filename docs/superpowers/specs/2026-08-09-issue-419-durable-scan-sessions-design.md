@@ -187,17 +187,20 @@ It captures the maximum ID of currently live rooted locations for that root, tra
 appends `scan_session.started`, stores the replay outcome, and commits.
 
 The request transaction initializes `progress_deadline_at`. A successful start and each newly
-accepted contiguous batch reset it to authoritative `now + idle_timeout_seconds`; exact replays,
-rejected requests, and inspection do not. At `now >= progress_deadline_at`, the mutation first
-persists `stale` and its event, so expiry wins over start, batch, success, failure, and operator
-cancel. Before the boundary, immediate transactions serialize terminal outcomes and the first one
-to obtain the writer lock wins.
+accepted contiguous batch reset it to authoritative `now + idle_timeout_seconds`. After bearer,
+current-incarnation, and session-owner checks, an already-accepted exact replay—whether found by
+the HTTP key or by session/sequence request hash—returns its stored outcome before deadline or
+root-availability fencing. It does not extend the deadline, terminalize the session, or emit an
+event. Rejected requests and inspection also do not extend it. At
+`now >= progress_deadline_at`, every genuinely new mutation first persists `stale` and its event,
+so expiry wins over a new start, batch, success, failure, or operator cancel. Before the boundary,
+immediate transactions serialize terminal outcomes and the first one to obtain the writer lock
+wins.
 
 ### Accept batch
 
-The batch route repeats the bearer/current-incarnation, session/root, availability, epoch, and
-deadline fences. After those authority checks, it looks up `(session_id, sequence)` before
-requiring `running`:
+The batch route repeats the bearer/current-incarnation and session-owner checks, then looks up
+`(session_id, sequence)` before mutable root, availability, epoch, deadline, or `running` fences:
 
 - same request hash returns the stored accepted outcome, including after later terminalization,
   and emits nothing;
@@ -377,8 +380,9 @@ Public mutation ordering is:
 10. complete replay state and commit.
 
 An exact completed remote replay returns after steps 1–4 while still requiring current node
-authority. A batch replay under a new HTTP key continues through the session and batch identity
-checks, then returns the existing outcome without another event. Corrupt persisted state is
+authority. A batch replay under a new HTTP key continues through checked session ownership and
+batch identity, then returns the existing outcome before mutable fences and without another
+event. Corrupt persisted state is
 `VoomError::Database`, never `NotFound`, `Blocked`, or an ordering conflict. Checked conversions
 reject negative or oversized SQLite integers before classification.
 
@@ -446,6 +450,8 @@ is live.
 - Start binds the current incarnation and captures the correct location high-water mark.
 - A new batch advances exactly once. Replaying the same HTTP key or the same sequence/hash under a
   different key returns the same outcome with unchanged observation/event counts.
+- An exact accepted replay after its session deadline remains read-only and returns the stored
+  outcome; recovery or the next genuinely new mutation then persists `stale` exactly once.
 - Gaps, regressions, conflicting body hashes, duplicate locators within/across batches, cross-
   session key reuse, oversized batches, and invalid stability order fail before mutation.
 - Disconnect, explicit failure, cancellation, timeout recovery, incarnation supersession, root
