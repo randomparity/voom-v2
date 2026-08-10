@@ -10,6 +10,9 @@ use secrecy::SecretString;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
+use sha2::{Digest, Sha256};
+use time::OffsetDateTime;
+use time::format_description::well_known::Iso8601;
 use voom_control_plane::ControlPlane;
 use voom_control_plane::scan::sessions::RemoteScanCompleteInput;
 use voom_control_plane::scan::{
@@ -46,7 +49,18 @@ struct StartRequest {
 #[serde(deny_unknown_fields)]
 struct BatchRequest {
     incarnation_id: NodeIncarnationId,
-    observations: Vec<ScanObservation>,
+    observations: Vec<ScanObservationRequest>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ScanObservationRequest {
+    provider_relative_locator: voom_core::ProviderRelativeLocator,
+    provider_object_identity: String,
+    size_bytes: u64,
+    modified_at: String,
+    stability_started_at: String,
+    stability_confirmed_at: String,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -218,6 +232,10 @@ async fn batch(
         Ok(request) => request,
         Err(response) => return request_error_response(BATCH_COMMAND, response),
     };
+    let observations = match typed_observations(&request) {
+        Ok(observations) => observations,
+        Err(message) => return bad_args_response(BATCH_COMMAND, message),
+    };
     let route = format!("/v1/scan/node/{node_id}/session/{session_id}/batch/{sequence}");
     let request_hash = match stable_request_hash("POST", &route, &request) {
         Ok(hash) => hash,
@@ -232,7 +250,7 @@ async fn batch(
             idempotency_key,
             request_hash,
             sequence,
-            observations: request.observations,
+            observations,
         })
         .await
     {
@@ -262,6 +280,9 @@ async fn complete(
         Ok(request) => request,
         Err(response) => return request_error_response(COMPLETE_COMMAND, response),
     };
+    if let Err(message) = validate_complete_request(&request) {
+        return bad_args_response(COMPLETE_COMMAND, message);
+    }
     let route = format!("/v1/scan/node/{node_id}/session/{session_id}/complete");
     let request_hash = match stable_request_hash("POST", &route, &request) {
         Ok(hash) => hash,
@@ -527,7 +548,7 @@ fn stable_request_hash<T: Serialize>(
 ) -> Result<String, String> {
     let bytes = serde_json::to_vec(&(method, route_instance, value))
         .map_err(|error| format!("request hash serialization failed: {error}"))?;
-    Ok(blake3::hash(&bytes).to_hex().to_string())
+    Ok(format!("{:x}", Sha256::digest(bytes)))
 }
 
 fn page_limit(limit: Option<u32>) -> Result<u32, String> {
@@ -544,6 +565,64 @@ fn page_limit(limit: Option<u32>) -> Result<u32, String> {
 fn file_location_cursor(value: u64) -> Result<FileLocationId, String> {
     require_storage_value(value, "reconciliation after_id")?;
     Ok(FileLocationId(value))
+}
+
+fn typed_observations(request: &BatchRequest) -> Result<Vec<ScanObservation>, String> {
+    if !(1..=1_000).contains(&request.observations.len()) {
+        return Err(format!(
+            "scan batch observation count {} outside 1..=1000",
+            request.observations.len()
+        ));
+    }
+    request.observations.iter().map(typed_observation).collect()
+}
+
+fn typed_observation(request: &ScanObservationRequest) -> Result<ScanObservation, String> {
+    let observation = ScanObservation {
+        provider_relative_locator: request.provider_relative_locator.clone(),
+        provider_object_identity: request.provider_object_identity.clone(),
+        size_bytes: request.size_bytes,
+        modified_at: parse_observation_time("modified_at", &request.modified_at)?,
+        stability_started_at: parse_observation_time(
+            "stability_started_at",
+            &request.stability_started_at,
+        )?,
+        stability_confirmed_at: parse_observation_time(
+            "stability_confirmed_at",
+            &request.stability_confirmed_at,
+        )?,
+    };
+    validate_observation(&observation)?;
+    Ok(observation)
+}
+
+fn parse_observation_time(field: &str, value: &str) -> Result<OffsetDateTime, String> {
+    OffsetDateTime::parse(value, &Iso8601::DEFAULT)
+        .map_err(|error| format!("scan observation {field} must be ISO-8601: {error}"))
+}
+
+fn validate_observation(observation: &ScanObservation) -> Result<(), String> {
+    let identity = &observation.provider_object_identity;
+    if identity.is_empty() || identity.len() > 4_096 || identity.as_bytes().contains(&0) {
+        return Err(
+            "scan observation object identity must be 1..=4096 bytes without NUL".to_owned(),
+        );
+    }
+    require_storage_value(observation.size_bytes, "scan observation size")?;
+    if observation.stability_confirmed_at < observation.stability_started_at {
+        return Err("scan observation stability confirmation precedes start".to_owned());
+    }
+    Ok(())
+}
+
+fn validate_complete_request(request: &CompleteRequest) -> Result<(), String> {
+    if let Some(last_sequence) = request.last_sequence {
+        require_storage_value(last_sequence, "scan completion last sequence")?;
+    }
+    require_storage_value(
+        request.observation_count,
+        "scan completion observation count",
+    )
 }
 
 fn require_storage_value(value: u64, field: &str) -> Result<(), String> {

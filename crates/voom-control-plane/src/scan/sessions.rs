@@ -469,13 +469,24 @@ impl ControlPlane {
         &self,
         input: RemoteScanReconciliationInput,
     ) -> Result<ScanReconciliationPage, VoomError> {
-        self.inspect_remote_scan_session(input.auth.clone()).await?;
-        self.scan_reconciliation(ScanReconciliationQuery {
-            scan_session_id: input.auth.scan_session_id,
-            after_id: input.after_id,
-            limit: input.limit,
-        })
-        .await
+        let mut tx = begin_tx(&self.pool).await?;
+        self.require_scan_authority_in_tx(&mut tx, &input.auth.scan_auth())
+            .await?;
+        self.owned_scan_session_in_tx(&mut tx, input.auth.scan_session_id, input.auth.node_id)
+            .await?;
+        let page = self
+            .scan_sessions
+            .reconciliation_page_in_tx(
+                &mut tx,
+                ScanReconciliationQuery {
+                    scan_session_id: input.auth.scan_session_id,
+                    after_id: input.after_id,
+                    limit: input.limit,
+                },
+            )
+            .await?;
+        commit_tx(tx).await?;
+        Ok(page)
     }
 }
 

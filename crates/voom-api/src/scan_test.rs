@@ -3,9 +3,15 @@
     reason = "route tests use unwrap for fallible fixture and HTTP request construction"
 )]
 
-use axum::body::Body;
+use std::convert::Infallible;
+use std::pin::Pin;
+use std::task::{Context, Poll};
+use std::time::Duration;
+
+use axum::body::{Body, Bytes};
 use axum::http::header::{AUTHORIZATION, WWW_AUTHENTICATE};
-use axum::http::{HeaderValue, Request, Response, StatusCode};
+use axum::http::{HeaderValue, Method, Request, Response, StatusCode};
+use http_body::{Body as HttpBody, Frame};
 use http_body_util::BodyExt;
 use secrecy::ExposeSecret;
 use serde_json::Value;
@@ -26,7 +32,10 @@ use voom_store::repo::library::library_roots::{
 use voom_store::test_support::sqlite_url_for;
 use voom_test_support::TempDatabase;
 
-use super::{FailRequest, StartRequest, stable_request_hash};
+use super::{
+    BatchRequest, CompleteRequest, FailRequest, ScanObservationRequest, StartRequest,
+    stable_request_hash,
+};
 use crate::config::ServerLimits;
 use crate::server::bounded_router;
 use crate::{router, router_with_control_plane};
@@ -46,6 +55,13 @@ struct ScanApiFixture {
     other_token: String,
     other_incarnation_id: NodeIncarnationId,
     root_id: StorageRootId,
+}
+
+struct ScanRouteCase {
+    method: Method,
+    path: String,
+    body: Option<Value>,
+    command: &'static str,
 }
 
 impl ScanApiFixture {
@@ -304,6 +320,157 @@ async fn scan_routes_reject_unknown_fields_and_malformed_path_or_query() {
             .await;
         assert_error(response, StatusCode::BAD_REQUEST, "BAD_ARGS").await;
     }
+
+    for query in [
+        "incarnation_id=not-an-incarnation",
+        "incarnation_id=0123456789abcdef0123456789abcdef&unknown=true",
+    ] {
+        let response = fixture
+            .get(&format!(
+                "/v1/scan/node/{{node_id}}/session/{}?{query}",
+                session.id.0
+            ))
+            .await;
+        assert_error(response, StatusCode::BAD_REQUEST, "BAD_ARGS").await;
+    }
+}
+
+#[tokio::test]
+async fn every_scan_route_maps_malformed_paths_to_bad_args() {
+    let fixture = scan_fixture().await;
+    let session = fixture.request_session().await;
+    for (index, mut case) in scan_route_cases(session.id.0, INCARNATION)
+        .into_iter()
+        .enumerate()
+    {
+        case.path = case.path.replace("{node_id}", "not-a-node");
+        let command = case.command;
+        let response = request_route_case(
+            &fixture,
+            case,
+            fixture.node_id,
+            &fixture.token,
+            &format!("malformed-path-{index}"),
+        )
+        .await;
+        assert_route_error(response, StatusCode::BAD_REQUEST, "BAD_ARGS", command).await;
+    }
+}
+
+#[tokio::test]
+async fn scan_batch_accepts_only_literal_iso8601_timestamp_strings() {
+    let fixture = scan_fixture().await;
+    let accepted = fixture.request_session().await;
+    start_session(&fixture, accepted.id.0, "iso-start").await;
+    let accepted_response = fixture
+        .post(
+            &format!(
+                "/v1/scan/node/{{node_id}}/session/{}/batch/0",
+                accepted.id.0
+            ),
+            "iso-batch",
+            json!({
+                "incarnation_id": INCARNATION,
+                "observations": [wire_observation("literal-iso.mkv", "literal-iso")]
+            }),
+        )
+        .await;
+    assert_eq!(accepted_response.status(), StatusCode::OK);
+
+    let fixture = scan_fixture().await;
+    let rejected = fixture.request_session().await;
+    start_session(&fixture, rejected.id.0, "tuple-start").await;
+    let tuple_response = fixture
+        .post(
+            &format!(
+                "/v1/scan/node/{{node_id}}/session/{}/batch/0",
+                rejected.id.0
+            ),
+            "tuple-batch",
+            json!({
+                "incarnation_id": INCARNATION,
+                "observations": [observation("tuple.mkv", "tuple")]
+            }),
+        )
+        .await;
+    assert_error(tuple_response, StatusCode::BAD_REQUEST, "BAD_ARGS").await;
+}
+
+#[tokio::test]
+async fn scan_batch_client_bounds_use_bad_args_envelopes() {
+    let fixture = scan_fixture().await;
+    let session = fixture.request_session().await;
+    let path = format!("/v1/scan/node/{{node_id}}/session/{}/batch/0", session.id.0);
+    let base = wire_observation("bounded.mkv", "bounded-object");
+    let mut oversized_identity = base.clone();
+    oversized_identity["provider_object_identity"] = json!("x".repeat(4097));
+    let mut nul_identity = base.clone();
+    nul_identity["provider_object_identity"] = json!("bad\0identity");
+    let mut oversized_size = base.clone();
+    oversized_size["size_bytes"] = json!(u64::MAX);
+    let mut invalid_locator = base.clone();
+    invalid_locator["provider_relative_locator"] = json!("../escape.mkv");
+    let mut oversized_locator = base.clone();
+    oversized_locator["provider_relative_locator"] = json!("x".repeat(4_097));
+    let mut malformed_time = base.clone();
+    malformed_time["modified_at"] = json!("not-iso8601");
+    let mut unknown_observation_field = base.clone();
+    unknown_observation_field["unknown"] = json!(true);
+    let mut reversed = wire_observation("reversed.mkv", "reversed");
+    reversed["stability_started_at"] = json!("1970-01-01T00:00:01Z");
+    let cases = vec![
+        Vec::new(),
+        vec![base.clone(); 1_001],
+        vec![wire_observation("empty-identity.mkv", "")],
+        vec![oversized_identity],
+        vec![nul_identity],
+        vec![oversized_size],
+        vec![invalid_locator],
+        vec![oversized_locator],
+        vec![malformed_time],
+        vec![unknown_observation_field],
+        vec![reversed],
+    ];
+    for (index, observations) in cases.into_iter().enumerate() {
+        let response = fixture
+            .post(
+                &path,
+                &format!("bad-batch-bound-{index}"),
+                json!({"incarnation_id": INCARNATION, "observations": observations}),
+            )
+            .await;
+        assert_error(response, StatusCode::BAD_REQUEST, "BAD_ARGS").await;
+    }
+}
+
+#[tokio::test]
+async fn scan_completion_client_bounds_use_bad_args_envelopes() {
+    let fixture = scan_fixture().await;
+    let session = fixture.request_session().await;
+    let path = format!(
+        "/v1/scan/node/{{node_id}}/session/{}/complete",
+        session.id.0
+    );
+    for (index, body) in [
+        json!({
+            "incarnation_id": INCARNATION,
+            "last_sequence": u64::MAX,
+            "observation_count": 0
+        }),
+        json!({
+            "incarnation_id": INCARNATION,
+            "last_sequence": null,
+            "observation_count": u64::MAX
+        }),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let response = fixture
+            .post(&path, &format!("bad-complete-bound-{index}"), body)
+            .await;
+        assert_error(response, StatusCode::BAD_REQUEST, "BAD_ARGS").await;
+    }
 }
 
 #[tokio::test]
@@ -359,6 +526,82 @@ async fn scan_routes_keep_runtime_authentication_generic_and_map_session_errors(
 }
 
 #[tokio::test]
+async fn all_scan_routes_pin_runtime_auth_and_session_error_envelopes() {
+    let fixture = scan_fixture().await;
+    let unknown = 999_999;
+    for (index, case) in scan_route_cases(unknown, INCARNATION)
+        .into_iter()
+        .enumerate()
+    {
+        let command = case.command;
+        let response = request_route_case(
+            &fixture,
+            case,
+            fixture.node_id,
+            "invalid-token-private",
+            &format!("invalid-token-{index}"),
+        )
+        .await;
+        assert_generic_unauthorized_with_secrets(
+            response,
+            unknown,
+            &["invalid-token-private", "private-locator", "private-object"],
+            Some(command),
+        )
+        .await;
+    }
+
+    for (index, case) in scan_route_cases(unknown, INCARNATION)
+        .into_iter()
+        .enumerate()
+    {
+        let command = case.command;
+        let response = request_route_case(
+            &fixture,
+            case,
+            fixture.node_id,
+            &fixture.token,
+            &format!("missing-session-{index}"),
+        )
+        .await;
+        assert_route_error(response, StatusCode::NOT_FOUND, "NOT_FOUND", command).await;
+    }
+
+    let session = fixture.request_session().await;
+    for (index, case) in scan_route_cases(session.id.0, OTHER_INCARNATION)
+        .into_iter()
+        .enumerate()
+    {
+        let command = case.command;
+        let response = request_route_case(
+            &fixture,
+            case,
+            fixture.other_node_id,
+            &fixture.other_token,
+            &format!("non-owner-{index}"),
+        )
+        .await;
+        assert_route_error(response, StatusCode::CONFLICT, "CONFLICT", command).await;
+    }
+
+    for (index, case) in scan_route_cases(session.id.0, OTHER_INCARNATION)
+        .into_iter()
+        .enumerate()
+    {
+        let command = case.command;
+        let response = request_route_case(
+            &fixture,
+            case,
+            fixture.node_id,
+            &fixture.token,
+            &format!("stale-incarnation-{index}"),
+        )
+        .await;
+        assert_route_error(response, StatusCode::CONFLICT, "CONFLICT", command).await;
+    }
+}
+
+#[tokio::test]
 async fn scan_mutations_replay_exactly_and_inspection_omits_private_observation_facts() {
     let fixture = scan_fixture().await;
     let observed =
@@ -367,39 +610,27 @@ async fn scan_mutations_replay_exactly_and_inspection_omits_private_observation_
     let session = fixture.request_session().await;
     let start_path = format!("/v1/scan/node/{{node_id}}/session/{}/start", session.id.0);
     let start_body = json!({"incarnation_id": INCARNATION});
-    let first = fixture
-        .post(&start_path, "start-replay", start_body.clone())
-        .await;
-    assert_eq!(first.status(), StatusCode::OK);
-    let first = response_body(first).await;
+    let first = assert_post_replay(&fixture, &start_path, "start-replay", start_body).await;
     assert!(first["data"]["progress_deadline_at"].is_string());
-    let event_count = table_count(&fixture.pool, "events").await;
-    let replay = fixture.post(&start_path, "start-replay", start_body).await;
-    assert_eq!(replay.status(), StatusCode::OK);
-    assert_eq!(response_body(replay).await, first);
-    assert_eq!(table_count(&fixture.pool, "events").await, event_count);
+    assert!(!first.to_string().contains(&fixture.token));
+    assert!(!first.to_string().contains("start-replay"));
 
-    let observation = observation("observed-private.mkv", "object-identity-private");
+    let observation = wire_observation("observed-private.mkv", "object-identity-private");
     let batch_body = json!({
         "incarnation_id": INCARNATION,
         "observations": [observation]
     });
     let batch_path = format!("/v1/scan/node/{{node_id}}/session/{}/batch/0", session.id.0);
-    let first = fixture
-        .post(&batch_path, "batch-replay", batch_body.clone())
-        .await;
-    assert_eq!(first.status(), StatusCode::OK);
-    let first = response_body(first).await;
-    let observation_count = table_count(&fixture.pool, "scan_observations").await;
-    let event_count = table_count(&fixture.pool, "events").await;
-    let replay = fixture.post(&batch_path, "batch-replay", batch_body).await;
-    assert_eq!(replay.status(), StatusCode::OK);
-    assert_eq!(response_body(replay).await, first);
-    assert_eq!(
-        table_count(&fixture.pool, "scan_observations").await,
-        observation_count
-    );
-    assert_eq!(table_count(&fixture.pool, "events").await, event_count);
+    let first = assert_post_replay(&fixture, &batch_path, "batch-replay", batch_body).await;
+    let stored_hash: String = sqlx::query_scalar(
+        "SELECT request_hash FROM scan_observation_batches WHERE scan_session_id = ? AND sequence = 0",
+    )
+    .bind(i64::try_from(session.id.0).unwrap())
+    .fetch_one(&fixture.pool)
+    .await
+    .unwrap();
+    assert!(!first.to_string().contains(&stored_hash));
+    assert!(!first.to_string().contains("batch-replay"));
 
     let inspect = fixture
         .get(&format!(
@@ -422,19 +653,10 @@ async fn scan_mutations_replay_exactly_and_inspection_omits_private_observation_
         "last_sequence": 0,
         "observation_count": 1
     });
-    let first = fixture
-        .post(&complete_path, "complete-replay", complete_body.clone())
-        .await;
-    assert_eq!(first.status(), StatusCode::OK);
-    let first = response_body(first).await;
+    let first =
+        assert_post_replay(&fixture, &complete_path, "complete-replay", complete_body).await;
     assert_eq!(first["data"]["retired_location_count"], 1);
-    let event_count = table_count(&fixture.pool, "events").await;
-    let replay = fixture
-        .post(&complete_path, "complete-replay", complete_body)
-        .await;
-    assert_eq!(replay.status(), StatusCode::OK);
-    assert_eq!(response_body(replay).await, first);
-    assert_eq!(table_count(&fixture.pool, "events").await, event_count);
+    assert!(!first.to_string().contains("complete-replay"));
 
     let reconciliation = fixture
         .get(&format!(
@@ -470,16 +692,11 @@ async fn scan_failure_replays_and_hashes_the_full_body() {
     assert_eq!(started.status(), StatusCode::OK);
     let fail_path = format!("/v1/scan/node/{{node_id}}/session/{}/fail", failed.id.0);
     let fail_body = json!({"incarnation_id": INCARNATION, "reason": "scanner failed"});
-    let first = fixture
-        .post(&fail_path, "fail-replay", fail_body.clone())
-        .await;
-    assert_eq!(first.status(), StatusCode::OK);
-    let first = response_body(first).await;
+    let first = assert_post_replay(&fixture, &fail_path, "fail-replay", fail_body).await;
     assert!(first["data"]["terminal_at"].is_string());
     assert_eq!(first["data"]["terminal_reason"], "scanner failed");
-    let replay = fixture.post(&fail_path, "fail-replay", fail_body).await;
-    assert_eq!(replay.status(), StatusCode::OK);
-    assert_eq!(response_body(replay).await, first);
+    assert!(!first.to_string().contains(&fixture.token));
+    assert!(!first.to_string().contains("fail-replay"));
     let conflict = fixture
         .post(
             &fail_path,
@@ -592,6 +809,43 @@ async fn scan_mutations_share_the_one_mib_server_body_boundary() {
     let fixture = scan_fixture().await;
     let session = fixture.request_session().await;
     let app = bounded_router(fixture.app.clone(), ServerLimits::default());
+    for (index, suffix) in ["start", "batch/0", "complete", "fail"]
+        .into_iter()
+        .enumerate()
+    {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::post(format!(
+                    "/v1/scan/node/{}/session/{}/{suffix}",
+                    fixture.node_id.0, session.id.0
+                ))
+                .header(AUTHORIZATION, format!("Bearer {}", fixture.token))
+                .header("content-type", "application/json")
+                .header("x-voom-idempotency-key", format!("oversized-scan-{index}"))
+                .body(Body::from(vec![b'x'; 1024 * 1024 + 1]))
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_error(response, StatusCode::PAYLOAD_TOO_LARGE, "PAYLOAD_TOO_LARGE").await;
+    }
+}
+
+#[tokio::test]
+async fn scan_route_body_processing_uses_the_shared_request_deadline_envelope() {
+    let fixture = scan_fixture().await;
+    let session = fixture.request_session().await;
+    let limits = ServerLimits::new_for_test(
+        1024 * 1024,
+        Duration::from_secs(30),
+        Duration::from_secs(30),
+        Duration::from_millis(10),
+        Duration::from_secs(90),
+        Duration::from_secs(30),
+    )
+    .unwrap();
+    let app = bounded_router(fixture.app, limits);
     let response = app
         .oneshot(
             Request::post(format!(
@@ -600,17 +854,33 @@ async fn scan_mutations_share_the_one_mib_server_body_boundary() {
             ))
             .header(AUTHORIZATION, format!("Bearer {}", fixture.token))
             .header("content-type", "application/json")
-            .header("x-voom-idempotency-key", "oversized-scan")
-            .body(Body::from(vec![b'x'; 1024 * 1024 + 1]))
+            .header("x-voom-idempotency-key", "pending-scan")
+            .body(Body::new(OneFrameThenPending::new()))
             .unwrap(),
         )
         .await
         .unwrap();
-    assert_error(response, StatusCode::PAYLOAD_TOO_LARGE, "PAYLOAD_TOO_LARGE").await;
+
+    assert_eq!(response.status(), StatusCode::REQUEST_TIMEOUT);
+    assert_eq!(
+        response_body(response).await,
+        json!({
+            "schema_version": "0",
+            "command": "api.request",
+            "status": "error",
+            "data": null,
+            "warnings": [],
+            "error": {
+                "code": "REQUEST_TIMEOUT",
+                "message": "request processing exceeded the 30-second deadline",
+                "hint": "Retry a mutation with the same idempotency key if its outcome is unknown"
+            }
+        })
+    );
 }
 
 #[test]
-fn scan_request_hash_is_canonical_and_bound_to_the_concrete_route() {
+fn scan_start_hash_binds_method_node_session_and_body() {
     let request = StartRequest {
         incarnation_id: INCARNATION.parse().unwrap(),
     };
@@ -619,8 +889,28 @@ fn scan_request_hash_is_canonical_and_bound_to_the_concrete_route() {
     let other_session =
         stable_request_hash("POST", "/v1/scan/node/1/session/8/start", &request).unwrap();
     assert_eq!(first, replay);
+    assert_eq!(
+        first,
+        "34d3a59fbad336d532afb240f1ebb20e71080957745765346b1de0dbc2490409"
+    );
     assert_ne!(first, other_session);
 
+    let other_node =
+        stable_request_hash("POST", "/v1/scan/node/2/session/7/start", &request).unwrap();
+    let other_method =
+        stable_request_hash("PUT", "/v1/scan/node/1/session/7/start", &request).unwrap();
+    let other_body = StartRequest {
+        incarnation_id: OTHER_INCARNATION.parse().unwrap(),
+    };
+    let other_body =
+        stable_request_hash("POST", "/v1/scan/node/1/session/7/start", &other_body).unwrap();
+    assert_ne!(first, other_node);
+    assert_ne!(first, other_method);
+    assert_ne!(first, other_body);
+}
+
+#[test]
+fn scan_fail_hash_binds_node_session_and_every_body_field() {
     let failure_a = FailRequest {
         incarnation_id: INCARNATION.parse().unwrap(),
         reason: "failure a".to_owned(),
@@ -632,7 +922,122 @@ fn scan_request_hash_is_canonical_and_bound_to_the_concrete_route() {
     let first = stable_request_hash("POST", "/v1/scan/node/1/session/7/fail", &failure_a).unwrap();
     let other_body =
         stable_request_hash("POST", "/v1/scan/node/1/session/7/fail", &failure_b).unwrap();
+    let other_incarnation = FailRequest {
+        incarnation_id: OTHER_INCARNATION.parse().unwrap(),
+        reason: "failure a".to_owned(),
+    };
+    let other_incarnation =
+        stable_request_hash("POST", "/v1/scan/node/1/session/7/fail", &other_incarnation).unwrap();
+    let other_node =
+        stable_request_hash("POST", "/v1/scan/node/2/session/7/fail", &failure_a).unwrap();
+    let other_session =
+        stable_request_hash("POST", "/v1/scan/node/1/session/8/fail", &failure_a).unwrap();
     assert_ne!(first, other_body);
+    assert_ne!(first, other_incarnation);
+    assert_ne!(first, other_node);
+    assert_ne!(first, other_session);
+}
+
+#[test]
+fn scan_complete_hash_binds_node_session_and_every_body_field() {
+    let request = CompleteRequest {
+        incarnation_id: INCARNATION.parse().unwrap(),
+        last_sequence: Some(3),
+        observation_count: 4,
+    };
+    let first =
+        stable_request_hash("POST", "/v1/scan/node/1/session/7/complete", &request).unwrap();
+    let cases = [
+        stable_request_hash("POST", "/v1/scan/node/2/session/7/complete", &request).unwrap(),
+        stable_request_hash("POST", "/v1/scan/node/1/session/8/complete", &request).unwrap(),
+        stable_request_hash(
+            "POST",
+            "/v1/scan/node/1/session/7/complete",
+            &CompleteRequest {
+                incarnation_id: OTHER_INCARNATION.parse().unwrap(),
+                last_sequence: Some(3),
+                observation_count: 4,
+            },
+        )
+        .unwrap(),
+        stable_request_hash(
+            "POST",
+            "/v1/scan/node/1/session/7/complete",
+            &CompleteRequest {
+                incarnation_id: INCARNATION.parse().unwrap(),
+                last_sequence: None,
+                observation_count: 4,
+            },
+        )
+        .unwrap(),
+        stable_request_hash(
+            "POST",
+            "/v1/scan/node/1/session/7/complete",
+            &CompleteRequest {
+                incarnation_id: INCARNATION.parse().unwrap(),
+                last_sequence: Some(3),
+                observation_count: 5,
+            },
+        )
+        .unwrap(),
+    ];
+    assert!(cases.into_iter().all(|hash| hash != first));
+}
+
+#[test]
+fn scan_batch_hash_binds_node_session_sequence_and_every_body_field() {
+    let request = batch_hash_request(INCARNATION, "bound.mkv", "object", 1, 0, 0, 0);
+    let first = stable_request_hash("POST", "/v1/scan/node/1/session/7/batch/3", &request).unwrap();
+    let routes = [
+        "/v1/scan/node/2/session/7/batch/3",
+        "/v1/scan/node/1/session/8/batch/3",
+        "/v1/scan/node/1/session/7/batch/4",
+    ];
+    assert!(
+        routes
+            .into_iter()
+            .all(|route| { stable_request_hash("POST", route, &request).unwrap() != first })
+    );
+    for changed in [
+        batch_hash_request(OTHER_INCARNATION, "bound.mkv", "object", 1, 0, 0, 0),
+        batch_hash_request(INCARNATION, "other.mkv", "object", 1, 0, 0, 0),
+        batch_hash_request(INCARNATION, "bound.mkv", "other", 1, 0, 0, 0),
+        batch_hash_request(INCARNATION, "bound.mkv", "object", 2, 0, 0, 0),
+        batch_hash_request(INCARNATION, "bound.mkv", "object", 1, 1, 0, 0),
+        batch_hash_request(INCARNATION, "bound.mkv", "object", 1, 0, 1, 0),
+        batch_hash_request(INCARNATION, "bound.mkv", "object", 1, 0, 0, 1),
+    ] {
+        assert_ne!(
+            stable_request_hash("POST", "/v1/scan/node/1/session/7/batch/3", &changed).unwrap(),
+            first
+        );
+    }
+}
+
+fn batch_hash_request(
+    incarnation_id: &str,
+    locator: &str,
+    identity: &str,
+    size_bytes: u64,
+    modified_seconds: i64,
+    started_seconds: i64,
+    confirmed_seconds: i64,
+) -> BatchRequest {
+    BatchRequest {
+        incarnation_id: incarnation_id.parse().unwrap(),
+        observations: vec![ScanObservationRequest {
+            provider_relative_locator: ProviderRelativeLocator::new(locator.to_owned()).unwrap(),
+            provider_object_identity: identity.to_owned(),
+            size_bytes,
+            modified_at: iso_second(modified_seconds),
+            stability_started_at: iso_second(started_seconds),
+            stability_confirmed_at: iso_second(confirmed_seconds),
+        }],
+    }
+}
+
+fn iso_second(seconds: i64) -> String {
+    voom_core::format_iso8601(time::OffsetDateTime::UNIX_EPOCH + time::Duration::seconds(seconds))
 }
 
 async fn unconfigured_app() -> axum::Router {
@@ -652,22 +1057,147 @@ async fn assert_error(response: Response<Body>, status: StatusCode, code: &str) 
     let body = response_body(response).await;
     assert_eq!(body["schema_version"], "0");
     assert_eq!(body["status"], "error");
+    assert!(body["data"].is_null());
+    assert_eq!(body["warnings"], json!([]));
     assert_eq!(body["error"]["code"], code);
+    assert!(body["error"]["message"].is_string());
+}
+
+async fn assert_route_error(
+    response: Response<Body>,
+    status: StatusCode,
+    code: &str,
+    command: &str,
+) {
+    assert_eq!(response.status(), status);
+    let body = response_body(response).await;
+    assert_eq!(body["schema_version"], "0");
+    assert_eq!(body["command"], command);
+    assert_eq!(body["status"], "error");
+    assert!(body["data"].is_null());
+    assert_eq!(body["warnings"], json!([]));
+    assert_eq!(body["error"]["code"], code);
+    assert!(body["error"]["message"].is_string());
 }
 
 async fn assert_generic_unauthorized(response: Response<Body>, hidden_id: u64) {
+    assert_generic_unauthorized_with_secrets(response, hidden_id, &[], None).await;
+}
+
+async fn assert_generic_unauthorized_with_secrets(
+    response: Response<Body>,
+    hidden_id: u64,
+    secrets: &[&str],
+    command: Option<&str>,
+) {
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     assert_eq!(
         response.headers().get(WWW_AUTHENTICATE),
         Some(&HeaderValue::from_static("Bearer realm=\"voom\"")),
     );
     let body = response_body(response).await;
+    if let Some(command) = command {
+        assert_eq!(body["command"], command);
+    }
     assert_eq!(body["error"]["code"], "UNAUTHORIZED");
     assert_eq!(
         body["error"]["message"],
         "unauthorized: remote node authentication failed"
     );
-    assert!(!body.to_string().contains(&hidden_id.to_string()));
+    let text = body.to_string();
+    assert!(!text.contains(&hidden_id.to_string()));
+    for secret in secrets {
+        assert!(!text.contains(secret));
+    }
+}
+
+fn scan_route_cases(session_id: u64, incarnation_id: &str) -> Vec<ScanRouteCase> {
+    vec![
+        mutation_case(
+            format!("/v1/scan/node/{{node_id}}/session/{session_id}/start"),
+            json!({"incarnation_id": incarnation_id}),
+            "scan.start",
+        ),
+        mutation_case(
+            format!("/v1/scan/node/{{node_id}}/session/{session_id}/batch/0"),
+            json!({
+                "incarnation_id": incarnation_id,
+                "observations": [wire_observation("private-locator.mkv", "private-object")]
+            }),
+            "scan.batch",
+        ),
+        mutation_case(
+            format!("/v1/scan/node/{{node_id}}/session/{session_id}/complete"),
+            json!({
+                "incarnation_id": incarnation_id,
+                "last_sequence": null,
+                "observation_count": 0
+            }),
+            "scan.complete",
+        ),
+        mutation_case(
+            format!("/v1/scan/node/{{node_id}}/session/{session_id}/fail"),
+            json!({"incarnation_id": incarnation_id, "reason": "private-failure"}),
+            "scan.fail",
+        ),
+        ScanRouteCase {
+            method: Method::GET,
+            path: format!(
+                "/v1/scan/node/{{node_id}}/session/{session_id}?incarnation_id={incarnation_id}"
+            ),
+            body: None,
+            command: "scan.inspect",
+        },
+        ScanRouteCase {
+            method: Method::GET,
+            path: format!(
+                "/v1/scan/node/{{node_id}}/session/{session_id}/reconciliation?incarnation_id={incarnation_id}"
+            ),
+            body: None,
+            command: "scan.reconciliation",
+        },
+    ]
+}
+
+fn mutation_case(path: String, body: Value, command: &'static str) -> ScanRouteCase {
+    ScanRouteCase {
+        method: Method::POST,
+        path,
+        body: Some(body),
+        command,
+    }
+}
+
+async fn request_route_case(
+    fixture: &ScanApiFixture,
+    case: ScanRouteCase,
+    node_id: NodeId,
+    token: &str,
+    key: &str,
+) -> Response<Body> {
+    let path = case.path.replace("{node_id}", &node_id.0.to_string());
+    let mut request = Request::builder()
+        .method(&case.method)
+        .uri(path)
+        .header(AUTHORIZATION, format!("Bearer {token}"));
+    if case.method == Method::POST {
+        request = request
+            .header("content-type", "application/json")
+            .header("x-voom-idempotency-key", key);
+    }
+    fixture
+        .app
+        .clone()
+        .oneshot(
+            request
+                .body(
+                    case.body
+                        .map_or_else(Body::empty, |body| Body::from(body.to_string())),
+                )
+                .unwrap(),
+        )
+        .await
+        .unwrap()
 }
 
 async fn scan_fixture() -> ScanApiFixture {
@@ -790,6 +1320,28 @@ fn observation(locator: &str, object_identity: &str) -> Value {
     .unwrap()
 }
 
+fn wire_observation(locator: &str, object_identity: &str) -> Value {
+    json!({
+        "provider_relative_locator": locator,
+        "provider_object_identity": object_identity,
+        "size_bytes": 1,
+        "modified_at": "1970-01-01T00:00:00Z",
+        "stability_started_at": "1970-01-01T00:00:00Z",
+        "stability_confirmed_at": "1970-01-01T00:00:00Z"
+    })
+}
+
+async fn start_session(fixture: &ScanApiFixture, session_id: u64, key: &str) {
+    let response = fixture
+        .post(
+            &format!("/v1/scan/node/{{node_id}}/session/{session_id}/start"),
+            key,
+            json!({"incarnation_id": INCARNATION}),
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
 async fn seed_rooted_location(
     pool: &sqlx::SqlitePool,
     root_id: StorageRootId,
@@ -840,6 +1392,23 @@ async fn table_count(pool: &sqlx::SqlitePool, table: &str) -> i64 {
     sqlx::query_scalar(sql).fetch_one(pool).await.unwrap()
 }
 
+async fn assert_post_replay(fixture: &ScanApiFixture, path: &str, key: &str, body: Value) -> Value {
+    let first = fixture.post(path, key, body.clone()).await;
+    assert_eq!(first.status(), StatusCode::OK);
+    let first = response_body(first).await;
+    let observations = table_count(&fixture.pool, "scan_observations").await;
+    let events = table_count(&fixture.pool, "events").await;
+    let replay = fixture.post(path, key, body).await;
+    assert_eq!(replay.status(), StatusCode::OK);
+    assert_eq!(response_body(replay).await, first);
+    assert_eq!(
+        table_count(&fixture.pool, "scan_observations").await,
+        observations
+    );
+    assert_eq!(table_count(&fixture.pool, "events").await, events);
+    first
+}
+
 fn assert_private_facts_absent(body: &Value) {
     let text = body.to_string();
     assert!(!text.contains("object-identity-private"));
@@ -848,4 +1417,31 @@ fn assert_private_facts_absent(body: &Value) {
     assert!(!text.contains("pagination/private"));
     assert!(!text.contains("provider_object_identity"));
     assert!(!text.contains("provider_relative_locator"));
+}
+
+struct OneFrameThenPending {
+    yielded: bool,
+}
+
+impl OneFrameThenPending {
+    const fn new() -> Self {
+        Self { yielded: false }
+    }
+}
+
+impl HttpBody for OneFrameThenPending {
+    type Data = Bytes;
+    type Error = Infallible;
+
+    fn poll_frame(
+        mut self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+        if self.yielded {
+            Poll::Pending
+        } else {
+            self.yielded = true;
+            Poll::Ready(Some(Ok(Frame::data(Bytes::from_static(b"{")))))
+        }
+    }
 }

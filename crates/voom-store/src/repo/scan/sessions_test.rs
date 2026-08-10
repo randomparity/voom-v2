@@ -1356,6 +1356,21 @@ async fn reconciliation_pages_in_location_order_with_an_exclusive_cursor() {
         .unwrap();
     let repo = SqliteScanSessionRepo::new(pool.clone());
 
+    let mut transaction = pool.begin().await.unwrap();
+    let transactional_page = repo
+        .reconciliation_page_in_tx(
+            &mut transaction,
+            ScanReconciliationQuery {
+                scan_session_id: session,
+                after_id: None,
+                limit: 2,
+            },
+        )
+        .await
+        .unwrap();
+    transaction.commit().await.unwrap();
+    assert_eq!(transactional_page.items.len(), 2);
+
     let latest = repo.latest_succeeded_for_root(root).await.unwrap().unwrap();
     assert_eq!(latest.id, session);
     let first_page = repo
