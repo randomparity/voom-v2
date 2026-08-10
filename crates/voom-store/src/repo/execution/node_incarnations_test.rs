@@ -213,6 +213,43 @@ async fn activation_count_is_inclusive_and_scoped_to_one_node() {
 }
 
 #[tokio::test]
+async fn activation_count_includes_alternate_iso_date_representations() {
+    let (pool, _tmp) = fresh_pool().await;
+    let node = seed_node(&pool, "alternate-iso-activation-evidence").await;
+    let lower_bound = time::Date::from_calendar_date(2026, time::Month::January, 3)
+        .unwrap()
+        .midnight()
+        .assume_utc();
+    for (id, started_at) in [
+        (FIRST_ID, "2026-003T00:00:00Z"),
+        (SECOND_ID, "+002026-01-03T00:00:00Z"),
+    ] {
+        sqlx::query(
+            "INSERT INTO node_incarnations \
+             (incarnation_id, node_id, status, started_at, last_seen_at, ended_at, end_reason) \
+             VALUES (?, ?, 'superseded', ?, ?, ?, 'superseded')",
+        )
+        .bind(id)
+        .bind(i64::try_from(node.id.0).unwrap())
+        .bind(started_at)
+        .bind(started_at)
+        .bind(started_at)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+    let repo = SqliteNodeIncarnationRepo::new(pool.clone());
+    let mut tx = pool.begin().await.unwrap();
+
+    let count = repo
+        .count_started_at_or_after_in_tx(&mut tx, node.id, lower_bound, 5)
+        .await
+        .unwrap();
+
+    assert_eq!(count, 2);
+}
+
+#[tokio::test]
 async fn activation_count_rejects_malformed_qualifying_evidence() {
     let (pool, _tmp) = fresh_pool().await;
     let node = seed_node(&pool, "corrupt-activation-evidence").await;
@@ -272,7 +309,7 @@ async fn activation_count_compares_offset_timestamps_as_instants_and_honors_limi
     let lower_bound = T0 + Duration::seconds(60);
     let negative_offset = UtcOffset::from_hms(-25, -59, 0).unwrap();
     for ordinal in 100..164 {
-        let started_at = lower_bound - Duration::days(2);
+        let started_at = lower_bound - Duration::days(400);
         sqlx::query(
             "INSERT INTO node_incarnations \
              (incarnation_id, node_id, status, started_at, last_seen_at, ended_at, end_reason) \
@@ -293,9 +330,9 @@ async fn activation_count_compares_offset_timestamps_as_instants_and_honors_limi
          VALUES ('not-an-incarnation', ?, 'superseded', ?, ?, ?, 'superseded')",
     )
     .bind(i64::try_from(node.id.0).unwrap())
-    .bind(timestamp(lower_bound - Duration::days(2)))
-    .bind(timestamp(lower_bound - Duration::days(2)))
-    .bind(timestamp(lower_bound - Duration::days(2)))
+    .bind(timestamp(lower_bound - Duration::days(400)))
+    .bind(timestamp(lower_bound - Duration::days(400)))
+    .bind(timestamp(lower_bound - Duration::days(400)))
     .execute(&pool)
     .await
     .unwrap();
@@ -339,11 +376,12 @@ async fn activation_evidence_range_and_pages_use_the_history_index_without_temp_
     let mut details: Vec<String> = sqlx::query(
         "EXPLAIN QUERY PLAN \
          SELECT incarnation_id, started_at FROM node_incarnations \
-         WHERE node_id = ? AND started_at >= ? \
+         WHERE node_id = ? AND started_at >= ? AND started_at < ? \
          ORDER BY started_at DESC, incarnation_id DESC LIMIT 32",
     )
     .bind(i64::try_from(node.id.0).unwrap())
-    .bind(timestamp(T0 - Duration::hours(26)))
+    .bind("1969")
+    .bind("\u{10ffff}")
     .fetch_all(&pool)
     .await
     .unwrap()
@@ -354,12 +392,13 @@ async fn activation_evidence_range_and_pages_use_the_history_index_without_temp_
         sqlx::query(
             "EXPLAIN QUERY PLAN \
              SELECT incarnation_id, started_at FROM node_incarnations \
-             WHERE node_id = ? AND started_at >= ? \
+             WHERE node_id = ? AND started_at >= ? AND started_at < ? \
              AND (started_at, incarnation_id) < (?, ?) \
              ORDER BY started_at DESC, incarnation_id DESC LIMIT 32",
         )
         .bind(i64::try_from(node.id.0).unwrap())
-        .bind(timestamp(T0 - Duration::hours(26)))
+        .bind("1969")
+        .bind("\u{10ffff}")
         .bind(timestamp(T0))
         .bind(FIRST_ID)
         .fetch_all(&pool)

@@ -23,8 +23,10 @@ clock. Completed replay returns first, and the existing incarnation-uniqueness c
 precedes quota evaluation. A genuinely fresh request counts incarnation starts at or after
 the inclusive lower bound; future-dated rows count conservatively if the clock moves
 backward. Persisted timestamp offsets are decoded and compared as instants rather than as
-text. An indexable lexical lower envelope starts 26 hours before the UTC lower bound because
-the pinned timestamp parser accepts offsets through ±25:59:59; typed comparison remains
+text. Indexed unsigned-four-digit and signed-six-digit year ranges begin with the year that
+contains a lexical envelope 26 hours before the UTC lower bound. The 26-hour adjustment
+covers offsets through ±25:59:59; widening to the containing year covers the parser's
+calendar, ordinal, week, basic, and extended date representations. Typed comparison remains
 authoritative. It rejects at the limit before supersession or any activation mutation.
 Rejection emits a structured warning with a fixed quota-exceeded reason and non-secret
 policy fields.
