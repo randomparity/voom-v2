@@ -9,13 +9,13 @@ use serde::Serialize;
 use voom_cli::cli::{
     ArtifactCommand, BackupCommand, BundleCommand, Cli, Command, ComplianceCommand, EventCommand,
     ExternalSystemCommand, IssueCommand, JobCommand, LeaseCommand, LibraryCommand, NodeCommand,
-    PlanCommand, PolicyCommand, ProfileCommand, SafetyPolicyCommand, SchedulerCommand,
-    SchedulingPolicyCommand, ScoringProfileCommand, TicketCommand, WorkerCommand,
+    PlanCommand, PolicyCommand, ProfileCommand, SafetyPolicyCommand, ScanSessionCommand,
+    SchedulerCommand, SchedulingPolicyCommand, ScoringProfileCommand, TicketCommand, WorkerCommand,
 };
 use voom_cli::commands::{
     artifact, backup, bundle, compliance, event, external_system, health, init, issue, job, lease,
-    library, node, plan, policy, profile, safety_policy, scan, scheduler, scheduling_policy,
-    scoring_profile, ticket, version, worker,
+    library, node, plan, policy, profile, safety_policy, scan, scan_session, scheduler,
+    scheduling_policy, scoring_profile, ticket, version, worker,
 };
 use voom_cli::envelope::{Local, emit_err, emit_ok};
 use voom_cli::logging;
@@ -222,6 +222,7 @@ async fn dispatch(cli: Cli) -> Result<Exit> {
         Command::Ticket(ref command) => dispatch_ticket(&cli, command.clone()).await,
         Command::Artifact(ref command) => dispatch_artifact(&cli, command.clone()).await,
         Command::Scan { root } => dispatch_scan(&cli, root).await,
+        Command::ScanSession(ref command) => dispatch_scan_session(&cli, command.clone()).await,
         Command::Bundle(ref command) => dispatch_bundle(&cli, command.clone()).await,
         Command::Backup(ref command) => dispatch_backup(&cli, command.clone()).await,
         Command::Library(ref command) => dispatch_library(&cli, command.clone()).await,
@@ -399,6 +400,23 @@ async fn dispatch_scan(cli: &Cli, root: u64) -> Result<Exit> {
     };
     Ok(Exit::from_run_code(
         scan::run(&cfg.database_url, local, root).await?,
+    ))
+}
+
+async fn dispatch_scan_session(cli: &Cli, command: ScanSessionCommand) -> Result<Exit> {
+    let cfg = match resolve_cfg(cli) {
+        Ok(cfg) => cfg,
+        Err(err) => {
+            voom_cli::envelope::emit_err("scan-session", err.code(), err.to_string(), None, None)?;
+            return Ok(Exit::Failure);
+        }
+    };
+    let local = Local {
+        db_url: cfg.database_url.clone(),
+        config_path: cfg.config_path.display().to_string(),
+    };
+    Ok(Exit::from_run_code(
+        scan_session::run(&cfg.database_url, local, command).await?,
     ))
 }
 

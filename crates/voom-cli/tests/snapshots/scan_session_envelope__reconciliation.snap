@@ -1,0 +1,49 @@
+---
+source: crates/voom-cli/tests/scan_session_envelope.rs
+expression: "json!({\"first\": first, \"second\": second})"
+---
+{
+  "first": {
+    "schema_version": "0",
+    "command": "scan-session",
+    "status": "ok",
+    "data": {
+      "items": [
+        {
+          "file_location_id": 1,
+          "retired_at": "2033-05-18T03:33:20.000000000Z",
+          "prior_epoch": 0,
+          "retired_epoch": 1
+        }
+      ]
+    },
+    "next_cursor": 1,
+    "local": {
+      "db_url": "[db-url]",
+      "config_path": "[config-path]"
+    },
+    "warnings": [],
+    "error": null
+  },
+  "second": {
+    "schema_version": "0",
+    "command": "scan-session",
+    "status": "ok",
+    "data": {
+      "items": [
+        {
+          "file_location_id": 2,
+          "retired_at": "2033-05-18T03:33:20.000000000Z",
+          "prior_epoch": 0,
+          "retired_epoch": 1
+        }
+      ]
+    },
+    "local": {
+      "db_url": "[db-url]",
+      "config_path": "[config-path]"
+    },
+    "warnings": [],
+    "error": null
+  }
+}
