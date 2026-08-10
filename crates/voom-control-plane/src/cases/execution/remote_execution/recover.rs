@@ -20,7 +20,8 @@ impl ControlPlane {
     /// Run remote recovery primitives for stale nodes and expired leases.
     ///
     /// # Errors
-    /// Propagates stale-node marking or lease-expiry errors.
+    /// Propagates stale-node marking, scan-session transition, event-append,
+    /// scan-transaction commit, or lease-expiry errors.
     pub async fn remote_recover(
         &self,
         now: time::OffsetDateTime,
