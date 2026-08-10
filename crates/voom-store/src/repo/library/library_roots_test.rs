@@ -2,7 +2,7 @@ use std::error::Error;
 use std::sync::{Arc, Condvar, Mutex};
 
 use time::OffsetDateTime;
-use voom_core::{NodeKind, ProviderLocator};
+use voom_core::{NodeKind, ProviderLocator, ScanSessionId};
 
 use super::super::libraries::{LibraryMediaKind, NewLibrary};
 use super::*;
@@ -77,6 +77,19 @@ fn new_root(library_id: LibraryId, owner_node_id: NodeId, locator: &str) -> NewL
         default_backup_root_id: None,
         enabled: true,
     }
+}
+
+#[tokio::test]
+async fn library_root_decodes_null_scan_provenance_as_a_typed_optional_id() {
+    let (repo, _tmp) = repo().await;
+    let library_id = library(&repo, "scan-provenance", true).await;
+    let owner = node(&repo, "scan-provenance-owner", NodeStatus::Active).await;
+    let root = repo
+        .create_library_root(new_root(library_id, owner, "/scan-provenance"), at(1))
+        .await
+        .unwrap();
+
+    assert_eq!(root.last_scan_session_id, None::<ScanSessionId>);
 }
 
 struct RollbackBarrier {

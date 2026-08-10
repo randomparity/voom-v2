@@ -118,6 +118,7 @@ fn selected_source() -> SelectedSource {
             proof_value: None,
             observed_at: time::OffsetDateTime::UNIX_EPOCH,
             retired_at: None,
+            retired_by_scan_session_id: None,
             epoch: 0,
         },
         canonical_path: PathBuf::from("/canonical/library/Movie.mkv"),

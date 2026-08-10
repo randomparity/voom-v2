@@ -8,6 +8,7 @@ pub mod issues;
 pub mod library;
 pub mod media;
 pub mod policy;
+pub mod scan;
 
 /// Marker trait so future repository traits compose uniformly.
 pub trait Repository: Send + Sync {}

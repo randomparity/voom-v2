@@ -14,7 +14,8 @@ use sqlx::{Acquire, Row, SqlitePool};
 use time::OffsetDateTime;
 use voom_core::{
     EvidenceId, FileAssetId, FileLocationId, FileVersionId, MediaSnapshotId, MediaVariantId,
-    MediaWorkId, PolicyVersionId, ProviderRelativeLocator, StorageRootId, VoomError, WorkerId,
+    MediaWorkId, PolicyVersionId, ProviderRelativeLocator, ScanSessionId, StorageRootId, VoomError,
+    WorkerId,
 };
 use voom_events::AssertionKind;
 
@@ -386,6 +387,7 @@ pub struct FileLocation {
     pub proof_value: Option<String>,
     pub observed_at: OffsetDateTime,
     pub retired_at: Option<OffsetDateTime>,
+    pub retired_by_scan_session_id: Option<ScanSessionId>,
     pub epoch: u64,
 }
 
@@ -1635,7 +1637,7 @@ impl FileLocationRepo for SqliteIdentityRepo {
             "SELECT id, file_version_id, address_state, storage_root_id, \
                     provider_relative_locator, legacy_kind, legacy_locator, \
                     proof_kind, proof_value, \
-                    observed_at, retired_at, epoch \
+                    observed_at, retired_at, retired_by_scan_session_id, epoch \
              FROM file_locations WHERE file_version_id = ? ORDER BY id ASC",
         )
         .bind(i64_from_u64(
@@ -1656,7 +1658,7 @@ impl FileLocationRepo for SqliteIdentityRepo {
             "SELECT id, file_version_id, address_state, storage_root_id, \
                     provider_relative_locator, legacy_kind, legacy_locator, \
                     proof_kind, proof_value, \
-                    observed_at, retired_at, epoch \
+                    observed_at, retired_at, retired_by_scan_session_id, epoch \
              FROM file_locations WHERE file_version_id = ? AND retired_at IS NULL \
              ORDER BY id ASC",
         )
@@ -3031,7 +3033,7 @@ fn row_to_file_version(row: &sqlx::sqlite::SqliteRow) -> Result<FileVersion, Voo
 const SELECT_FILE_LOCATION_COLS: &str = concat!(
     "SELECT id, file_version_id, address_state, storage_root_id, ",
     "provider_relative_locator, legacy_kind, legacy_locator, proof_kind, proof_value, ",
-    "observed_at, retired_at, epoch FROM file_locations WHERE id = ?"
+    "observed_at, retired_at, retired_by_scan_session_id, epoch FROM file_locations WHERE id = ?"
 );
 
 async fn get_file_location_in_tx(
@@ -3083,9 +3085,23 @@ fn row_to_file_location(row: &sqlx::sqlite::SqliteRow) -> Result<FileLocation, V
     let retired_at: Option<String> = row
         .try_get("retired_at")
         .map_err(|e| map_row_err("file_locations", e))?;
+    let retired_by_scan_session_id: Option<i64> = row
+        .try_get("retired_by_scan_session_id")
+        .map_err(|e| map_row_err("file_locations", e))?;
     let epoch: i64 = row
         .try_get("epoch")
         .map_err(|e| map_row_err("file_locations", e))?;
+    let retired_at = retired_at.map(|value| parse_iso8601(&value)).transpose()?;
+    let retired_by_scan_session_id = retired_by_scan_session_id
+        .map(|value| {
+            u64_from_i64(value, "file_locations.retired_by_scan_session_id").map(ScanSessionId)
+        })
+        .transpose()?;
+    if retired_by_scan_session_id.is_some() && retired_at.is_none() {
+        return Err(VoomError::database(
+            "file_locations live row carries scan retirement provenance".to_owned(),
+        ));
+    }
     let address = decode_location_address(
         &address_state,
         storage_root_id,
@@ -3106,7 +3122,8 @@ fn row_to_file_location(row: &sqlx::sqlite::SqliteRow) -> Result<FileLocation, V
         proof_kind,
         proof_value,
         observed_at: parse_iso8601(&observed_at)?,
-        retired_at: retired_at.map(|s| parse_iso8601(&s)).transpose()?,
+        retired_at,
+        retired_by_scan_session_id,
         epoch: u64_from_i64(epoch, concat!(module_path!(), ": ", stringify!(epoch)))?,
     })
 }

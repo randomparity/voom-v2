@@ -4,8 +4,8 @@ use sqlx::sqlite::SqliteRow;
 use sqlx::{Row, Sqlite, Transaction};
 use time::OffsetDateTime;
 use voom_core::{
-    LibraryId, NodeId, NodeStatus, ProviderLocator, StorageProviderKind, StorageRootId,
-    StorageRootState, VoomError,
+    LibraryId, NodeId, NodeStatus, ProviderLocator, ScanSessionId, StorageProviderKind,
+    StorageRootId, StorageRootState, VoomError,
 };
 
 use super::super::common::{
@@ -108,6 +108,7 @@ pub struct LibraryRoot {
     pub default_output_root_id: Option<StorageRootId>,
     pub default_staging_root_id: Option<StorageRootId>,
     pub default_backup_root_id: Option<StorageRootId>,
+    pub last_scan_session_id: Option<ScanSessionId>,
     pub enabled: bool,
     pub created_at: OffsetDateTime,
     pub updated_at: OffsetDateTime,
@@ -153,7 +154,7 @@ const ROOT_COLS: &str = "r.id, r.library_id, r.owner_node_id, r.provider_kind, \
     r.include_globs, r.exclude_globs, r.extension_allowlist, r.scan_mode, r.symlink_policy, \
     r.hidden_file_policy, r.max_depth, r.stability_seconds, r.debounce_seconds, \
     r.default_output_root_id, r.default_staging_root_id, r.default_backup_root_id, r.enabled, \
-    r.created_at, r.updated_at";
+    r.created_at, r.updated_at, r.last_scan_session_id";
 
 impl SqliteLibraryRepo {
     pub async fn create_library_root(
@@ -814,6 +815,7 @@ fn row_to_root(row: &SqliteRow) -> Result<LibraryRoot, VoomError> {
         default_output_root_id: optional_root_column(row, "default_output_root_id")?,
         default_staging_root_id: optional_root_column(row, "default_staging_root_id")?,
         default_backup_root_id: optional_root_column(row, "default_backup_root_id")?,
+        last_scan_session_id: optional_scan_session_column(row, "last_scan_session_id")?,
         enabled: checked_bool(row, "enabled")?,
         created_at: parse_iso8601(&string_column(row, "created_at")?)?,
         updated_at: parse_iso8601(&string_column(row, "updated_at")?)?,
@@ -898,6 +900,18 @@ fn optional_root_column(
         .map_err(|error| map_row_err("library_roots", error))?;
     value
         .map(|value| u64_from_i64(value, "library_roots default root").map(StorageRootId))
+        .transpose()
+}
+
+fn optional_scan_session_column(
+    row: &SqliteRow,
+    column: &'static str,
+) -> Result<Option<ScanSessionId>, VoomError> {
+    let value: Option<i64> = row
+        .try_get(column)
+        .map_err(|error| map_row_err("library_roots", error))?;
+    value
+        .map(|value| u64_from_i64(value, "library_roots.last_scan_session_id").map(ScanSessionId))
         .transpose()
 }
 

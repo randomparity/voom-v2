@@ -6,7 +6,7 @@ use voom_core::PolicyVersionId;
 
 use crate::repo::policy::policies::{NewPolicyDocumentVersion, SqlitePolicyRepo};
 use crate::repo::policy::policy_inputs::SqlitePolicyInputRepo;
-use crate::test_support::{T0, fresh_initialized_pool_at};
+use crate::test_support::{T0, fresh_initialized_pool_at, with_check_constraints_disabled};
 
 async fn fresh() -> (SqliteIdentityRepo, voom_test_support::TempDatabase) {
     let tmp = voom_test_support::TempDatabase::new().unwrap();
@@ -35,6 +35,49 @@ async fn repository_capabilities_are_object_safe_and_commit_gate_composable() {
     let _: &dyn MediaSnapshotRepo = &repo;
     let _: &dyn CommitGateIdentityRepo = &repo;
     require_commit_gate(&repo);
+}
+
+#[tokio::test]
+async fn file_location_decodes_null_scan_retirement_provenance() {
+    let (repo, _tmp) = fresh().await;
+    let asset = repo.create_file_asset(T0).await.unwrap();
+    let version = create_version(&repo, asset.id, "scan-provenance", None).await;
+    let location = create_location(&repo, version.id, (), "/scan-provenance").await;
+
+    assert!(location.retired_by_scan_session_id.is_none());
+}
+
+#[tokio::test]
+async fn file_location_rejects_live_scan_retirement_provenance_as_database_corruption() {
+    let (repo, _tmp) = fresh().await;
+    let asset = repo.create_file_asset(T0).await.unwrap();
+    let version = create_version(&repo, asset.id, "scan-provenance-corrupt", None).await;
+    let location = create_location(&repo, version.id, (), "/scan-provenance-corrupt").await;
+    let session_id = sqlx::query(
+        "INSERT INTO scan_sessions (storage_root_id, root_epoch, owner_node_id, status, \
+         idle_timeout_seconds, progress_deadline_at, requested_at) VALUES \
+         (9000001, 1, 9000001, 'requested', 300, '1970-01-01T00:05:00Z', \
+          '1970-01-01T00:00:00Z')",
+    )
+    .execute(&repo.pool)
+    .await
+    .unwrap()
+    .last_insert_rowid();
+
+    with_check_constraints_disabled(&repo.pool, |connection| {
+        Box::pin(async move {
+            sqlx::query("UPDATE file_locations SET retired_by_scan_session_id = ? WHERE id = ?")
+                .bind(session_id)
+                .bind(i64::try_from(location.id.0).unwrap())
+                .execute(connection)
+                .await
+        })
+    })
+    .await
+    .unwrap();
+
+    let error = repo.get_file_location(location.id).await.unwrap_err();
+    assert!(matches!(error, VoomError::Database { .. }));
 }
 
 #[tokio::test]
