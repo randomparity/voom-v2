@@ -104,7 +104,7 @@ byte bound. An empty traversal sends no batch and completes with a null last seq
 | `progress_deadline_at` | requested/start/latest-new-batch time plus idle timeout |
 | `location_high_watermark_id` | nullable until start; highest pre-start rooted live location ID |
 | `requested_at`, `started_at`, `terminal_at` | lifecycle timestamps with state/NULL checks |
-| `terminal_reason` | null while active; bounded nonblank text for non-success terminal states |
+| `terminal_reason` | null while active; 1–1024 UTF-8 bytes with no NUL for non-success terminal states |
 | `retired_location_count` | zero until successful completion, checked non-negative |
 
 The state-shape CHECK requires:
@@ -275,9 +275,10 @@ chunking is not an acceptable fallback because it would expose partially reconci
 
 ### Other terminal outcomes and stale recovery
 
-- The owner node may mark a running session `failed` with a bounded nonblank reason.
+- The owner node may mark a running session `failed` with a 1–1024-byte UTF-8 reason containing
+  no NUL.
 - The operator may cancel a requested or running session through the local CLI/control-plane
-  method with a bounded nonblank reason.
+  method with the same reason contract.
 - Ending or superseding the bound incarnation marks its running sessions `stale` in the same
   node-lifecycle transaction.
 - `remote_recover(now)` marks requested/running sessions past `progress_deadline_at` stale after
@@ -424,6 +425,9 @@ reject negative or oversized SQLite integers before classification.
   node API call; root/session owner equality authorizes it.
 - Provider-relative locator validation, length/count/body bounds, checked numeric conversion,
   strict request DTOs, and chronological stability checks constrain untrusted input.
+- One shared terminal-reason validator enforces 1–1024 UTF-8 bytes with no NUL for failure and
+  cancellation API/use-case inputs, replay decoding, and persisted rows; migration CHECKs enforce
+  the byte length and nonblank/no-NUL shape as a database backstop.
 - Immediate transactions, database unique constraints, request hashes, and immutable terminal
   states constrain replay and races.
 - Root epoch/incarnation/availability/deadline checks and the high-water mark prevent stale or
@@ -457,6 +461,9 @@ is live.
   existing root and location rows, rejects invalid state shapes, and appears in schema probes.
 - Corrupt negative counters/epochs, unknown status, malformed timestamps, invalid locator/object
   identity, and impossible terminal shapes surface as database errors.
+- Empty, 1024-byte, and 1025-byte terminal reasons plus NUL-containing reasons are exercised
+  through failure API and cancellation CLI/use-case paths; only the 1024-byte value succeeds, and
+  persisted out-of-contract reasons decode as database errors.
 - FK-valid reconciliation pointers to a wrong-root, non-succeeded, or older same-root successful
   session; mismatched terminal and retirement timestamps; an above-watermark or observed
   attributed location; and a mismatched retired count each surface as a database error before
