@@ -162,8 +162,8 @@ pub async fn fresh_initialized_pool_at(path: &Path) -> Result<SqlitePool, VoomEr
 /// Run a test operation with `SQLite` check constraints disabled on one pooled connection.
 ///
 /// The operation must execute every statement that depends on the bypass through the
-/// supplied connection. Dropping the connection returns it to the pool and scopes the
-/// connection-local pragma to this operation.
+/// supplied connection. The connection is discarded after the operation so a
+/// connection-local bypass can never be reused.
 pub async fn with_check_constraints_disabled<T, F>(
     pool: &SqlitePool,
     operation: F,
@@ -176,13 +176,30 @@ where
     >,
 {
     let mut connection = pool.acquire().await?;
+    connection.close_on_drop();
     sqlx::query("PRAGMA ignore_check_constraints = ON")
         .execute(&mut *connection)
         .await?;
     let result = operation(&mut connection).await;
-    drop(connection);
+
+    sqlx::query("PRAGMA ignore_check_constraints = OFF")
+        .execute(&mut *connection)
+        .await?;
+    let constraints_disabled: i64 = sqlx::query_scalar("PRAGMA ignore_check_constraints")
+        .fetch_one(&mut *connection)
+        .await?;
+    if constraints_disabled != 0 {
+        return Err(sqlx::Error::Protocol(
+            "failed to restore SQLite check constraints".to_owned(),
+        ));
+    }
+    connection.close().await?;
     result
 }
+
+#[cfg(test)]
+#[path = "test_support_test.rs"]
+mod tests;
 
 /// Return the embedded migration registry for integration-test schema fixtures.
 ///
