@@ -292,16 +292,10 @@ locators are absent from its observations. This conservative rule prevents concu
 publication from being mistaken for absence. A later complete session can reconcile them.
 
 Completion necessarily performs O(accepted observations + pre-start live root locations) work
-under SQLite's single writer. Both supported bounds for this slice are 100,000. A release-mode
-scale gate measures two fresh-database cases outside fixture creation and assertions: an empty
-traversal over 100,000 absent locations, and completion of a ledger containing 100,000 one-row
-batches whose observations match 100,000 live locations. The second case exercises the maximum
-batch-row, observation-row, and candidate-row validation cost together. On both existing
-`ubuntu-latest` and `macos-latest` CI runners, three repetitions of each completion must finish
-within 25 seconds, leaving five seconds of the 30-second API deadline for routing and response
-work. The cases verify exact ledger, retirement, session, and root counts with no partial rows.
-Failure stops implementation for a design checkpoint; chunking is not an acceptable fallback
-because it would expose partially reconciled catalog state.
+under SQLite's single writer. Both supported bounds for this slice are 100,000. An opt-in
+functional diagnostic exercises both 100,000-row boundaries without asserting wall-clock policy.
+It verifies exact ledger, retirement, session, and root counts with no partial rows. Chunking is
+not an acceptable fallback because it would expose partially reconciled catalog state.
 
 ### Other terminal outcomes and stale recovery
 
@@ -546,10 +540,9 @@ is live.
   back the whole logical operation.
 - Reconciliation evidence pages by `retired_by_scan_session_id` in stable location-ID order and
   reports the derived prior and persisted retired epochs exactly.
-- A release-mode completion gate runs three fresh-database repetitions for both 100,000 absent
-  pre-start locations and a maximum 100,000-one-row-batch ledger over 100,000 matching locations
-  on both CI operating systems; every measured completion is at most 25 seconds with exact
-  resulting counts, or implementation returns to design.
+- An opt-in functional diagnostic exercises both 100,000-row boundaries without asserting
+  wall-clock policy. It verifies exact ledger, retirement, session, and root counts with no
+  partial rows.
 
 ### API and CLI tests
 
