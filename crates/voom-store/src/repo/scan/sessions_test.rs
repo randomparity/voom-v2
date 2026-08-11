@@ -24,6 +24,7 @@ async fn scan_session_capacity_accepts_the_limit_replays_and_rejects_crossing_at
     let (pool, _tmp) = fresh_pool().await;
     let root = seed_test_storage_root(&pool).await.unwrap();
     seed_incarnation(&pool, "abababababababababababababababab").await;
+    remove_batch_parent_frontier_guard(&pool).await;
     let repo = SqliteScanSessionRepo::new(pool.clone());
     let mut tx = pool.begin().await.unwrap();
     let session = repo
@@ -546,6 +547,13 @@ async fn remove_batch_update_guard(pool: &sqlx::SqlitePool) {
 
 async fn remove_batch_delete_guard(pool: &sqlx::SqlitePool) {
     sqlx::query("DROP TRIGGER scan_observation_batches_no_delete")
+        .execute(pool)
+        .await
+        .unwrap();
+}
+
+async fn remove_batch_parent_frontier_guard(pool: &sqlx::SqlitePool) {
+    sqlx::query("DROP TRIGGER IF EXISTS scan_observation_batches_validate_parent_frontier")
         .execute(pool)
         .await
         .unwrap();
@@ -1546,6 +1554,88 @@ async fn batch_replay_validates_the_stored_hash_and_outcome_before_returning_it(
     }
 }
 
+#[tokio::test]
+async fn batch_insert_rejects_a_frontier_not_owned_by_the_parent_session() {
+    let (pool, _tmp) = fresh_pool().await;
+    let root = seed_test_storage_root(&pool).await.unwrap();
+    seed_incarnation(&pool, "67676767676767676767676767676767").await;
+    let repo = SqliteScanSessionRepo::new(pool.clone());
+    let mut tx = pool.begin().await.unwrap();
+    let session = repo
+        .insert_requested_in_tx(&mut tx, new_session(root))
+        .await
+        .unwrap();
+    repo.start_in_tx(
+        &mut tx,
+        session.id,
+        "67676767676767676767676767676767".parse().unwrap(),
+        T0 + time::Duration::minutes(5),
+        T0,
+    )
+    .await
+    .unwrap();
+
+    let error = sqlx::query(
+        "INSERT INTO scan_observation_batches (scan_session_id, sequence, previous_sequence, \
+         request_hash, observation_count, accepted_at, cumulative_observation_count) \
+         VALUES (?, 0, NULL, ?, 1, '1970-01-01T00:00:00Z', 1)",
+    )
+    .bind(i64::try_from(session.id.0).unwrap())
+    .bind("a".repeat(64))
+    .execute(&mut *tx)
+    .await
+    .unwrap_err();
+    assert!(error.to_string().contains("parent frontier mismatch"));
+}
+
+#[tokio::test]
+async fn batch_replay_rejects_a_cached_outcome_ahead_of_the_parent_frontier() {
+    let (pool, _tmp) = fresh_pool().await;
+    let root = seed_test_storage_root(&pool).await.unwrap();
+    seed_incarnation(&pool, "68686868686868686868686868686868").await;
+    let repo = SqliteScanSessionRepo::new(pool.clone());
+    let mut tx = pool.begin().await.unwrap();
+    let session = repo
+        .insert_requested_in_tx(&mut tx, new_session(root))
+        .await
+        .unwrap();
+    repo.start_in_tx(
+        &mut tx,
+        session.id,
+        "68686868686868686868686868686868".parse().unwrap(),
+        T0 + time::Duration::minutes(5),
+        T0,
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+
+    remove_batch_parent_frontier_guard(&pool).await;
+    let session_id = i64::try_from(session.id.0).unwrap();
+    with_check_constraints_disabled(&pool, move |connection| {
+        Box::pin(async move {
+            sqlx::query(
+                "INSERT INTO scan_observation_batches (scan_session_id, sequence, \
+                 previous_sequence, request_hash, observation_count, accepted_at, \
+                 cumulative_observation_count) VALUES (?, 0, NULL, ?, 1, \
+                 '1970-01-01T00:00:00Z', 1)",
+            )
+            .bind(session_id)
+            .bind("a".repeat(64))
+            .execute(connection)
+            .await
+        })
+    })
+    .await
+    .unwrap();
+
+    let input = batch(session.id, 0, 'a', vec![observation("ahead.mkv")]);
+    let mut tx = pool.begin().await.unwrap();
+    let error = repo.accepted_batch_in_tx(&mut tx, input).await.unwrap_err();
+    assert!(matches!(error, VoomError::Database { .. }));
+    assert!(error.to_string().contains("does not match parent frontier"));
+}
+
 #[derive(Clone, Copy)]
 enum BatchLinkCorruption {
     MissingPredecessor,
@@ -1639,6 +1729,7 @@ async fn assert_batch_link_corruption_rejected(case: BatchLinkCorruption) {
 
     match case {
         BatchLinkCorruption::MissingPredecessor => {
+            remove_batch_parent_frontier_guard(&pool).await;
             sqlx::query(
                 "INSERT INTO scan_observation_batches (scan_session_id, sequence, \
                  previous_sequence, request_hash, observation_count, accepted_at, \
@@ -2627,7 +2718,15 @@ async fn assert_location_pointer_corruption(case: LocationPointerCorruption) {
         .unwrap_err(),
         VoomError::Database { .. }
     ));
-    assert_eq!(repo.get(session).await.unwrap().unwrap().id, session);
+    let inspected = repo.get(session).await;
+    if matches!(
+        case,
+        LocationPointerCorruption::NonSuccess | LocationPointerCorruption::RetiredCount
+    ) {
+        assert!(matches!(inspected.unwrap_err(), VoomError::Database { .. }));
+    } else {
+        assert_eq!(inspected.unwrap().unwrap().id, session);
+    }
 }
 
 #[tokio::test]
@@ -2641,5 +2740,40 @@ async fn location_pointer_semantic_corruption_is_database_only_when_followed() {
         LocationPointerCorruption::RetiredCount,
     ] {
         assert_location_pointer_corruption(case).await;
+    }
+}
+
+#[tokio::test]
+async fn session_get_and_list_reject_a_mismatched_attributed_retirement_count() {
+    let (pool, _tmp) = fresh_pool().await;
+    let root = seed_test_storage_root(&pool).await.unwrap();
+    let location = seed_rooted_location(&pool, root, "retired-count.mkv").await;
+    let session =
+        seed_succeeded_session(&pool, root, Some(location), 1, "1970-01-01T00:02:00Z").await;
+    attribute_location(&pool, location, session, "1970-01-01T00:02:00Z").await;
+    sqlx::query("UPDATE scan_sessions SET retired_location_count = 2 WHERE id = ?")
+        .bind(i64::try_from(session.0).unwrap())
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let repo = SqliteScanSessionRepo::new(pool);
+    let get_error = repo.get(session).await.unwrap_err();
+    let list_error = repo
+        .list(ScanSessionListQuery {
+            storage_root_id: Some(root),
+            status: None,
+            after_id: None,
+            limit: 100,
+        })
+        .await
+        .unwrap_err();
+    for error in [get_error, list_error] {
+        assert!(matches!(error, VoomError::Database { .. }));
+        assert!(
+            error
+                .to_string()
+                .contains("does not match 1 attributed locations")
+        );
     }
 }
