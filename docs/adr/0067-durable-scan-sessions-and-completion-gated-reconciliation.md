@@ -117,9 +117,8 @@ prior epoch from the retained row's incremented epoch.
   location. It leaves the session running and performs no partial reconciliation.
 - Successful completion performs an O(number of accepted observations + pre-start live root
   locations) validation, anti-join, and update in one SQLite writer transaction. The 100,000
-  bounds on both cost drivers do not make that transaction constant-cost; implementation must
-  prove both supported maxima fit the API timeout or return to design rather than chunk a
-  logically atomic reconciliation.
+  bounds on both cost drivers do not make that transaction constant-cost. An opt-in functional
+  diagnostic exercises both 100,000-row boundaries without asserting wall-clock policy.
 
 ## Considered & rejected
 

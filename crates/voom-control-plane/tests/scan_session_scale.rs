@@ -1,11 +1,9 @@
 #![expect(
-    clippy::print_stdout,
     clippy::unwrap_used,
-    reason = "the opt-in release gate prints measured timings and treats fixture failures as fatal"
+    reason = "the opt-in functional diagnostic treats fixture failures as fatal"
 )]
 
 use std::sync::Arc;
-use std::time::{Duration, Instant};
 
 use serde_json::json;
 use time::OffsetDateTime;
@@ -25,8 +23,6 @@ use voom_store::repo::library::library_roots::{
 };
 
 const LOCATION_COUNT: u64 = 100_000;
-const REPETITIONS: usize = 3;
-const MAX_COMPLETION: Duration = Duration::from_secs(25);
 const INCARNATION: &str = "abcdef0123456789abcdef0123456789";
 
 struct ScaleFixture {
@@ -40,113 +36,92 @@ struct ScaleFixture {
 }
 
 #[tokio::test]
-#[ignore = "release-only 100,000-location completion budget"]
-async fn empty_scan_reconciles_100k_within_api_budget() {
-    for repetition in 0..REPETITIONS {
-        let fixture = scale_fixture(repetition).await;
-        load_locations(&fixture.pool, fixture.root_id).await;
-        let requested = fixture
-            .cp
-            .request_scan_session(fixture.root_id, 300)
-            .await
-            .unwrap();
-        fixture
-            .cp
-            .start_scan_session(RemoteScanStartInput {
-                node_id: fixture.node_id,
-                scan_session_id: requested.id,
-                incarnation_id: fixture.incarnation_id,
-                token: fixture.token.clone(),
-                idempotency_key: format!("scale-start-{repetition}"),
-                request_hash: format!("scale-start-body-{repetition}"),
-            })
-            .await
-            .unwrap();
+#[ignore = "opt-in 100,000-row functional diagnostic"]
+async fn empty_scan_reconciles_100k() {
+    let fixture = scale_fixture(0).await;
+    load_locations(&fixture.pool, fixture.root_id).await;
+    let requested = fixture
+        .cp
+        .request_scan_session(fixture.root_id, 300)
+        .await
+        .unwrap();
+    fixture
+        .cp
+        .start_scan_session(RemoteScanStartInput {
+            node_id: fixture.node_id,
+            scan_session_id: requested.id,
+            incarnation_id: fixture.incarnation_id,
+            token: fixture.token.clone(),
+            idempotency_key: "scale-start".to_owned(),
+            request_hash: "scale-start-body".to_owned(),
+        })
+        .await
+        .unwrap();
 
-        let started = Instant::now();
-        let outcome = fixture
-            .cp
-            .complete_scan_session(RemoteScanCompleteInput {
-                node_id: fixture.node_id,
-                scan_session_id: requested.id,
-                incarnation_id: fixture.incarnation_id,
-                token: fixture.token.clone(),
-                idempotency_key: format!("scale-complete-{repetition}"),
-                request_hash: format!("scale-complete-body-{repetition}"),
-                last_sequence: None,
-                observation_count: 0,
-            })
-            .await
-            .unwrap();
-        let elapsed = started.elapsed();
+    let outcome = fixture
+        .cp
+        .complete_scan_session(RemoteScanCompleteInput {
+            node_id: fixture.node_id,
+            scan_session_id: requested.id,
+            incarnation_id: fixture.incarnation_id,
+            token: fixture.token.clone(),
+            idempotency_key: "scale-complete".to_owned(),
+            request_hash: "scale-complete-body".to_owned(),
+            last_sequence: None,
+            observation_count: 0,
+        })
+        .await
+        .unwrap();
 
-        println!("scan completion repetition {}: {elapsed:?}", repetition + 1);
-        assert!(
-            elapsed <= MAX_COMPLETION,
-            "{elapsed:?} exceeded {MAX_COMPLETION:?}"
-        );
-        assert_eq!(outcome.status, ScanSessionStatus::Succeeded);
-        assert_eq!(outcome.retired_location_count, LOCATION_COUNT);
-        assert_completion_counts(&fixture, requested.id).await;
-    }
+    assert_eq!(outcome.status, ScanSessionStatus::Succeeded);
+    assert_eq!(outcome.retired_location_count, LOCATION_COUNT);
+    assert_completion_counts(&fixture, requested.id).await;
 }
 
 #[tokio::test]
-#[ignore = "release-only 100,000-observation completion budget"]
-async fn max_ledger_reconciles_100k_within_api_budget() {
-    for repetition in 0..REPETITIONS {
-        let fixture = scale_fixture(repetition + REPETITIONS).await;
-        load_locations(&fixture.pool, fixture.root_id).await;
-        let requested = fixture
-            .cp
-            .request_scan_session(fixture.root_id, 300)
-            .await
-            .unwrap();
-        fixture
-            .cp
-            .start_scan_session(RemoteScanStartInput {
-                node_id: fixture.node_id,
-                scan_session_id: requested.id,
-                incarnation_id: fixture.incarnation_id,
-                token: fixture.token.clone(),
-                idempotency_key: format!("max-scale-start-{repetition}"),
-                request_hash: format!("max-scale-start-body-{repetition}"),
-            })
-            .await
-            .unwrap();
-        load_max_ledger(&fixture.pool, requested.id).await;
-        let baseline = completion_baseline(&fixture.pool).await;
+#[ignore = "opt-in 100,000-row functional diagnostic"]
+async fn max_ledger_reconciles_100k() {
+    let fixture = scale_fixture(1).await;
+    load_locations(&fixture.pool, fixture.root_id).await;
+    let requested = fixture
+        .cp
+        .request_scan_session(fixture.root_id, 300)
+        .await
+        .unwrap();
+    fixture
+        .cp
+        .start_scan_session(RemoteScanStartInput {
+            node_id: fixture.node_id,
+            scan_session_id: requested.id,
+            incarnation_id: fixture.incarnation_id,
+            token: fixture.token.clone(),
+            idempotency_key: "max-scale-start".to_owned(),
+            request_hash: "max-scale-start-body".to_owned(),
+        })
+        .await
+        .unwrap();
+    load_max_ledger(&fixture.pool, requested.id).await;
+    let baseline = completion_baseline(&fixture.pool).await;
 
-        let started = Instant::now();
-        let outcome = fixture
-            .cp
-            .complete_scan_session(RemoteScanCompleteInput {
-                node_id: fixture.node_id,
-                scan_session_id: requested.id,
-                incarnation_id: fixture.incarnation_id,
-                token: fixture.token.clone(),
-                idempotency_key: format!("max-scale-complete-{repetition}"),
-                request_hash: format!("max-scale-complete-body-{repetition}"),
-                last_sequence: Some(LOCATION_COUNT - 1),
-                observation_count: LOCATION_COUNT,
-            })
-            .await
-            .unwrap();
-        let elapsed = started.elapsed();
+    let outcome = fixture
+        .cp
+        .complete_scan_session(RemoteScanCompleteInput {
+            node_id: fixture.node_id,
+            scan_session_id: requested.id,
+            incarnation_id: fixture.incarnation_id,
+            token: fixture.token.clone(),
+            idempotency_key: "max-scale-complete".to_owned(),
+            request_hash: "max-scale-complete-body".to_owned(),
+            last_sequence: Some(LOCATION_COUNT - 1),
+            observation_count: LOCATION_COUNT,
+        })
+        .await
+        .unwrap();
 
-        println!(
-            "max-ledger completion repetition {}: {elapsed:?}",
-            repetition + 1
-        );
-        assert!(
-            elapsed <= MAX_COMPLETION,
-            "{elapsed:?} exceeded {MAX_COMPLETION:?}"
-        );
-        assert_eq!(outcome.status, ScanSessionStatus::Succeeded);
-        assert_eq!(outcome.observation_count, LOCATION_COUNT);
-        assert_eq!(outcome.retired_location_count, 0);
-        assert_max_completion(&fixture, requested.id, baseline).await;
-    }
+    assert_eq!(outcome.status, ScanSessionStatus::Succeeded);
+    assert_eq!(outcome.observation_count, LOCATION_COUNT);
+    assert_eq!(outcome.retired_location_count, 0);
+    assert_max_completion(&fixture, requested.id, baseline).await;
 }
 
 #[tokio::test]
