@@ -21,12 +21,18 @@ async fn checked_pool() -> (SqlitePool, TempDatabase) {
 }
 
 async fn assert_invalid_value_is_rejected(pool: &SqlitePool) {
-    let result = sqlx::query("INSERT INTO checked_values (value) VALUES (-1)")
-        .execute(pool)
-        .await;
+    let mut connection = pool
+        .acquire()
+        .await
+        .expect("reacquire connection after constraint bypass");
+    let error = sqlx::query("INSERT INTO checked_values (value) VALUES (-1)")
+        .execute(&mut *connection)
+        .await
+        .expect_err("reacquired connection must reject invalid CHECK value");
+    let message = error.to_string();
     assert!(
-        result.is_err(),
-        "reacquired connection must enforce CHECK constraints"
+        message.contains("CHECK constraint failed"),
+        "expected SQLite CHECK constraint rejection, got {message}"
     );
 }
 
