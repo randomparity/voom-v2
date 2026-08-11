@@ -426,6 +426,110 @@ async fn exact_batch_replays_precede_deadline_and_new_batch_persists_stale_once(
 }
 
 #[tokio::test]
+async fn scan_session_capacity_replays_the_limit_rejects_crossing_and_preserves_deadline_order() {
+    let fixture = fixture().await;
+    let session = running_session(&fixture, 10).await;
+    sqlx::query(
+        "UPDATE scan_sessions SET next_sequence = 100, batch_count = 100, \
+         observation_count = 99999 WHERE id = ?",
+    )
+    .bind(i64::try_from(session.id.0).unwrap())
+    .execute(fixture.cp.pool_for_test())
+    .await
+    .unwrap();
+    let last = batch_input(&fixture, session.id, 100, "capacity-last", 'a');
+    let accepted = fixture
+        .cp
+        .accept_scan_observation_batch(last.clone())
+        .await
+        .unwrap();
+    assert_eq!(accepted.cumulative_observation_count, 100_000);
+    assert_eq!(
+        fixture
+            .cp
+            .accept_scan_observation_batch(last)
+            .await
+            .unwrap(),
+        accepted
+    );
+
+    let before = fixture.cp.scan_session(session.id).await.unwrap();
+    let before_events = event_count(&fixture.cp, EventKind::ScanObservationBatchAccepted).await;
+    let crossing = batch_input(&fixture, session.id, 101, "capacity-crossing", 'b');
+    let error = fixture
+        .cp
+        .accept_scan_observation_batch(crossing.clone())
+        .await
+        .unwrap_err();
+    assert_eq!(error.error_code(), ErrorCode::Conflict);
+    let message = error.to_string();
+    assert!(message.contains("maximum 100000"));
+    assert!(message.contains("current 100000"));
+    assert!(message.contains("incoming 1"));
+    let replay = fixture
+        .cp
+        .accept_scan_observation_batch(crossing)
+        .await
+        .unwrap_err();
+    assert_eq!(replay.to_string(), error.to_string());
+    assert_eq!(fixture.cp.scan_session(session.id).await.unwrap(), before);
+    assert_eq!(observation_count(&fixture.cp, session.id).await, 1);
+    assert_eq!(
+        event_count(&fixture.cp, EventKind::ScanObservationBatchAccepted).await,
+        before_events
+    );
+    assert_conflict_replay(&fixture.cp, "capacity-crossing").await;
+
+    assert_expired_capacity_crossing_stales_once(&fixture).await;
+}
+
+async fn assert_expired_capacity_crossing_stales_once(fixture: &Fixture) {
+    let expired_root = create_root(&fixture.cp, fixture.node_id, "capacity-expired").await;
+    let requested = fixture
+        .cp
+        .request_scan_session(expired_root, 10)
+        .await
+        .unwrap();
+    fixture
+        .cp
+        .start_scan_session(start_input(fixture, requested.id, "capacity-expired-start"))
+        .await
+        .unwrap();
+    sqlx::query(
+        "UPDATE scan_sessions SET next_sequence = 100, batch_count = 100, \
+         observation_count = 100000 WHERE id = ?",
+    )
+    .bind(i64::try_from(requested.id.0).unwrap())
+    .execute(fixture.cp.pool_for_test())
+    .await
+    .unwrap();
+    fixture.clock.advance(Duration::seconds(10));
+    let expired = batch_input(fixture, requested.id, 100, "capacity-expired-crossing", 'c');
+    let stale = fixture
+        .cp
+        .accept_scan_observation_batch(expired.clone())
+        .await
+        .unwrap_err();
+    assert_eq!(stale.error_code(), ErrorCode::Conflict);
+    assert!(stale.to_string().contains("marked stale"));
+    assert!(!stale.to_string().contains("maximum 100000"));
+    let replayed = fixture
+        .cp
+        .accept_scan_observation_batch(expired)
+        .await
+        .unwrap_err();
+    assert_eq!(replayed.to_string(), stale.to_string());
+    assert_eq!(
+        fixture.cp.scan_session(requested.id).await.unwrap().status,
+        ScanSessionStatus::Stale
+    );
+    assert_eq!(
+        event_count(&fixture.cp, EventKind::ScanSessionStale).await,
+        1
+    );
+}
+
+#[tokio::test]
 async fn corrupt_batch_progress_is_database_and_repair_allows_the_same_key() {
     let fixture = fixture().await;
     let running = running_session(&fixture, 30).await;

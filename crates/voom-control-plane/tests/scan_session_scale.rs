@@ -91,6 +91,64 @@ async fn empty_scan_reconciles_100k_within_api_budget() {
     }
 }
 
+#[tokio::test]
+#[ignore = "release-only 100,000-observation completion budget"]
+async fn max_ledger_reconciles_100k_within_api_budget() {
+    for repetition in 0..REPETITIONS {
+        let fixture = scale_fixture(repetition + REPETITIONS).await;
+        load_locations(&fixture.pool, fixture.root_id).await;
+        let requested = fixture
+            .cp
+            .request_scan_session(fixture.root_id, 300)
+            .await
+            .unwrap();
+        fixture
+            .cp
+            .start_scan_session(RemoteScanStartInput {
+                node_id: fixture.node_id,
+                scan_session_id: requested.id,
+                incarnation_id: fixture.incarnation_id,
+                token: fixture.token.clone(),
+                idempotency_key: format!("max-scale-start-{repetition}"),
+                request_hash: format!("max-scale-start-body-{repetition}"),
+            })
+            .await
+            .unwrap();
+        load_max_ledger(&fixture.pool, requested.id).await;
+        let baseline = completion_baseline(&fixture.pool).await;
+
+        let started = Instant::now();
+        let outcome = fixture
+            .cp
+            .complete_scan_session(RemoteScanCompleteInput {
+                node_id: fixture.node_id,
+                scan_session_id: requested.id,
+                incarnation_id: fixture.incarnation_id,
+                token: fixture.token.clone(),
+                idempotency_key: format!("max-scale-complete-{repetition}"),
+                request_hash: format!("max-scale-complete-body-{repetition}"),
+                last_sequence: Some(LOCATION_COUNT - 1),
+                observation_count: LOCATION_COUNT,
+            })
+            .await
+            .unwrap();
+        let elapsed = started.elapsed();
+
+        println!(
+            "max-ledger completion repetition {}: {elapsed:?}",
+            repetition + 1
+        );
+        assert!(
+            elapsed <= MAX_COMPLETION,
+            "{elapsed:?} exceeded {MAX_COMPLETION:?}"
+        );
+        assert_eq!(outcome.status, ScanSessionStatus::Succeeded);
+        assert_eq!(outcome.observation_count, LOCATION_COUNT);
+        assert_eq!(outcome.retired_location_count, 0);
+        assert_max_completion(&fixture, requested.id, baseline).await;
+    }
+}
+
 async fn scale_fixture(repetition: usize) -> ScaleFixture {
     let database = voom_test_support::TempDatabase::new().unwrap();
     let url = format!("sqlite://{}", database.path().display());
@@ -212,6 +270,99 @@ async fn load_locations(pool: &sqlx::SqlitePool, root_id: StorageRootId) {
     .execute(pool)
     .await
     .unwrap();
+}
+
+async fn load_max_ledger(pool: &sqlx::SqlitePool, session_id: voom_core::ScanSessionId) {
+    let mut tx = pool.begin().await.unwrap();
+    let id = i64::try_from(session_id.0).unwrap();
+    let count = i64::try_from(LOCATION_COUNT).unwrap();
+    sqlx::query(
+        "WITH RECURSIVE numbers(value) AS (\
+             SELECT 0 UNION ALL SELECT value + 1 FROM numbers WHERE value + 1 < ?\
+         )\
+         INSERT INTO scan_observation_batches (scan_session_id, sequence, request_hash, \
+             observation_count, accepted_at, cumulative_observation_count)\
+         SELECT ?, value, printf('%064x', value), 1, \
+             '1970-01-01T00:00:00Z', value + 1 FROM numbers",
+    )
+    .bind(count)
+    .bind(id)
+    .execute(&mut *tx)
+    .await
+    .unwrap();
+    sqlx::query(
+        "WITH RECURSIVE numbers(value) AS (\
+             SELECT 0 UNION ALL SELECT value + 1 FROM numbers WHERE value + 1 < ?\
+         )\
+         INSERT INTO scan_observations (scan_session_id, batch_sequence, ordinal, \
+             provider_relative_locator, provider_object_identity, size_bytes, modified_at, \
+             stability_started_at, stability_confirmed_at)\
+         SELECT ?, value, 0, 'scale/' || (value + 1), 'object-' || value, 1, \
+             '1970-01-01T00:00:00Z', '1970-01-01T00:00:00Z', \
+             '1970-01-01T00:00:00Z' FROM numbers",
+    )
+    .bind(count)
+    .bind(id)
+    .execute(&mut *tx)
+    .await
+    .unwrap();
+    sqlx::query(
+        "UPDATE scan_sessions SET next_sequence = ?, batch_count = ?, observation_count = ? \
+         WHERE id = ?",
+    )
+    .bind(count)
+    .bind(count)
+    .bind(count)
+    .bind(id)
+    .execute(&mut *tx)
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+}
+
+async fn completion_baseline(pool: &sqlx::SqlitePool) -> (i64, i64, i64, i64) {
+    sqlx::query_as(
+        "SELECT (SELECT COUNT(*) FROM scan_observation_batches), \
+                (SELECT COUNT(*) FROM scan_observations), \
+                (SELECT COUNT(*) FROM events WHERE kind = 'scan_session.succeeded'), \
+                (SELECT COUNT(*) FROM remote_idempotency_keys WHERE status = 'completed')",
+    )
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
+async fn assert_max_completion(
+    fixture: &ScaleFixture,
+    session_id: voom_core::ScanSessionId,
+    baseline: (i64, i64, i64, i64),
+) {
+    let session = fixture.cp.scan_session(session_id).await.unwrap();
+    assert_eq!(session.status, ScanSessionStatus::Succeeded);
+    assert_eq!(session.observation_count, LOCATION_COUNT);
+    assert_eq!(session.retired_location_count, 0);
+    let after = completion_baseline(&fixture.pool).await;
+    assert_eq!(after.0, baseline.0);
+    assert_eq!(after.1, baseline.1);
+    assert_eq!(after.2, baseline.2 + 1);
+    assert_eq!(after.3, baseline.3 + 1);
+    assert_eq!(after.0, i64::try_from(LOCATION_COUNT).unwrap());
+    assert_eq!(after.1, i64::try_from(LOCATION_COUNT).unwrap());
+    let live: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM file_locations WHERE storage_root_id = ? AND retired_at IS NULL",
+    )
+    .bind(i64::try_from(fixture.root_id.0).unwrap())
+    .fetch_one(&fixture.pool)
+    .await
+    .unwrap();
+    let pointer: Option<i64> =
+        sqlx::query_scalar("SELECT last_scan_session_id FROM library_roots WHERE id = ?")
+            .bind(i64::try_from(fixture.root_id.0).unwrap())
+            .fetch_one(&fixture.pool)
+            .await
+            .unwrap();
+    assert_eq!(live, i64::try_from(LOCATION_COUNT).unwrap());
+    assert_eq!(pointer, Some(i64::try_from(session_id.0).unwrap()));
 }
 
 async fn assert_completion_counts(fixture: &ScaleFixture, session_id: voom_core::ScanSessionId) {

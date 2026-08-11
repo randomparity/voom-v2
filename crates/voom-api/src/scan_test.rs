@@ -678,6 +678,51 @@ async fn scan_mutations_replay_exactly_and_inspection_omits_private_observation_
 }
 
 #[tokio::test]
+async fn scan_session_capacity_maps_to_http_409_without_leaking_observation_data() {
+    let fixture = scan_fixture().await;
+    let session = fixture.request_session().await;
+    let start = fixture
+        .post(
+            &format!("/v1/scan/node/{{node_id}}/session/{}/start", session.id.0),
+            "capacity-api-start",
+            json!({"incarnation_id": INCARNATION}),
+        )
+        .await;
+    assert_eq!(start.status(), StatusCode::OK);
+    sqlx::query(
+        "UPDATE scan_sessions SET next_sequence = 100, batch_count = 100, \
+         observation_count = 100000 WHERE id = ?",
+    )
+    .bind(i64::try_from(session.id.0).unwrap())
+    .execute(&fixture.pool)
+    .await
+    .unwrap();
+    let private_locator = "capacity/private-name.mkv";
+    let response = fixture
+        .post(
+            &format!(
+                "/v1/scan/node/{{node_id}}/session/{}/batch/100",
+                session.id.0
+            ),
+            "capacity-api-crossing",
+            json!({
+                "incarnation_id": INCARNATION,
+                "observations": [wire_observation(private_locator, "private-object-identity")]
+            }),
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let body = response_body(response).await;
+    assert_eq!(body["error"]["code"], "CONFLICT");
+    let text = body.to_string();
+    assert!(text.contains("maximum 100000"));
+    assert!(text.contains("current 100000"));
+    assert!(text.contains("incoming 1"));
+    assert!(!text.contains(private_locator));
+    assert!(!text.contains("private-object-identity"));
+}
+
+#[tokio::test]
 async fn scan_failure_replays_and_hashes_the_full_body() {
     let fixture = scan_fixture().await;
     let failed = fixture.request_session().await;

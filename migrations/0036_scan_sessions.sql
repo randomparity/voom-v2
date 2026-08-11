@@ -13,7 +13,8 @@ CREATE TABLE scan_sessions (
         CHECK (status IN ('requested', 'running', 'succeeded', 'failed', 'cancelled', 'stale')),
     next_sequence               INTEGER NOT NULL DEFAULT 0 CHECK (next_sequence >= 0),
     batch_count                 INTEGER NOT NULL DEFAULT 0 CHECK (batch_count >= 0),
-    observation_count           INTEGER NOT NULL DEFAULT 0 CHECK (observation_count >= 0),
+    observation_count           INTEGER NOT NULL DEFAULT 0
+        CHECK (observation_count BETWEEN 0 AND 100000),
     idle_timeout_seconds        INTEGER NOT NULL CHECK (idle_timeout_seconds BETWEEN 1 AND 86400),
     progress_deadline_at        TEXT NOT NULL,
     location_high_watermark_id  INTEGER,
@@ -105,7 +106,8 @@ CREATE TABLE scan_observation_batches (
         CHECK (length(request_hash) = 64 AND request_hash NOT GLOB '*[^0-9a-f]*'),
     observation_count           INTEGER NOT NULL CHECK (observation_count BETWEEN 1 AND 1000),
     accepted_at                 TEXT NOT NULL,
-    cumulative_observation_count INTEGER NOT NULL CHECK (cumulative_observation_count >= 0),
+    cumulative_observation_count INTEGER NOT NULL
+        CHECK (cumulative_observation_count BETWEEN observation_count AND 100000),
     PRIMARY KEY (scan_session_id, sequence)
 ) STRICT;
 

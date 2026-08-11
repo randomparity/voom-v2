@@ -281,6 +281,32 @@ async fn scan_session_schema_rejects_invalid_rows_and_preserves_byte_boundaries(
     .await;
 }
 
+#[tokio::test]
+async fn scan_session_capacity_schema_rejects_session_and_batch_totals_over_the_limit() {
+    let (pool, _tmp) = fresh_pool().await;
+    insert_active_incarnation(&pool, "capacity-incarnation").await;
+    let active = insert_running_scan_session(&pool, 9_000_001, "capacity-incarnation").await;
+    assert_scan_session_rejected(
+        &pool,
+        &format!(
+            "UPDATE scan_sessions SET next_sequence = 101, batch_count = 101, \
+             observation_count = 100001 WHERE id = {active}"
+        ),
+    )
+    .await;
+    let error = sqlx::query(
+        "INSERT INTO scan_observation_batches (scan_session_id, sequence, request_hash, \
+         observation_count, accepted_at, cumulative_observation_count) \
+         VALUES (?, 0, ?, 1, '1970-01-01T00:00:00Z', 100001)",
+    )
+    .bind(active)
+    .bind("a".repeat(64))
+    .execute(&pool)
+    .await
+    .unwrap_err();
+    assert!(error.to_string().contains("CHECK constraint failed"));
+}
+
 async fn assert_scan_session_rejected(pool: &sqlx::SqlitePool, sql: &str) {
     let error = sqlx::query(sql).execute(pool).await.unwrap_err();
     assert!(

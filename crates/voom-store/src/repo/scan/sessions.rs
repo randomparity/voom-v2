@@ -12,6 +12,8 @@ use super::super::common::{
 };
 use crate::repo::media::commit_safety_gate::consult_scan_reconciliation_commit_lock_in_tx;
 
+pub const MAX_SCAN_SESSION_OBSERVATIONS: u64 = 100_000;
+
 #[derive(Debug, Clone)]
 pub struct SqliteScanSessionRepo {
     pool: SqlitePool,
@@ -348,13 +350,22 @@ impl SqliteScanSessionRepo {
                 session.id, session.next_sequence
             )));
         }
-        ensure_new_locators_in_tx(tx, &input).await?;
         let cumulative_count = session
             .observation_count
             .checked_add(input.observation_count)
             .ok_or_else(|| {
                 VoomError::database("scan session observation count overflow".to_owned())
             })?;
+        if cumulative_count > MAX_SCAN_SESSION_OBSERVATIONS {
+            return Err(VoomError::Conflict(format!(
+                "scan session {} observation capacity exceeded: maximum {}, current {}, incoming {}",
+                session.id,
+                MAX_SCAN_SESSION_OBSERVATIONS,
+                session.observation_count,
+                input.observation_count
+            )));
+        }
+        ensure_new_locators_in_tx(tx, &input).await?;
         let next_sequence = session
             .next_sequence
             .checked_add(1)
@@ -377,6 +388,7 @@ impl SqliteScanSessionRepo {
             next_sequence_i64,
             batch_count_i64,
             cumulative_count_i64,
+            i64_from_u64(session.observation_count, "scan_sessions.observation_count")?,
         )
         .await?;
         if updated.rows_affected() != 1 {
@@ -1390,6 +1402,12 @@ fn validate_scan_session(session: &ScanSession) -> Result<(), VoomError> {
             session.id.0
         )));
     }
+    if session.observation_count > MAX_SCAN_SESSION_OBSERVATIONS {
+        return Err(VoomError::database(format!(
+            "scan_sessions {} observation_count {} exceeds maximum {}",
+            session.id.0, session.observation_count, MAX_SCAN_SESSION_OBSERVATIONS
+        )));
+    }
     if !has_coherent_progress_counters(session) {
         return Err(VoomError::database(format!(
             "scan_sessions {} has incoherent progress counters",
@@ -1721,10 +1739,12 @@ async fn update_batch_progress_in_tx(
     next_sequence: i64,
     batch_count: i64,
     cumulative_count: i64,
+    current_count: i64,
 ) -> Result<sqlx::sqlite::SqliteQueryResult, VoomError> {
     sqlx::query(
         "UPDATE scan_sessions SET next_sequence = ?, batch_count = ?, observation_count = ?, \
-         progress_deadline_at = ? WHERE id = ? AND status = 'running' AND next_sequence = ?",
+         progress_deadline_at = ? WHERE id = ? AND status = 'running' AND next_sequence = ? \
+         AND observation_count = ?",
     )
     .bind(next_sequence)
     .bind(batch_count)
@@ -1732,6 +1752,7 @@ async fn update_batch_progress_in_tx(
     .bind(&input.next_progress_deadline_at)
     .bind(input.session_id)
     .bind(input.sequence_i64)
+    .bind(current_count)
     .execute(&mut **tx)
     .await
     .map_err(|error| VoomError::database_context("scan session batch progress", error))
@@ -1750,6 +1771,7 @@ fn batch_outcome_from_row(
     };
     if !(1..=1_000).contains(&outcome.accepted_observation_count)
         || outcome.cumulative_observation_count < outcome.accepted_observation_count
+        || outcome.cumulative_observation_count > MAX_SCAN_SESSION_OBSERVATIONS
     {
         return Err(VoomError::database(format!(
             "scan session {scan_session_id} batch {sequence} has invalid persisted outcome"
