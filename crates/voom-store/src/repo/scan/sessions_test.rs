@@ -4,8 +4,9 @@ use voom_core::{
 };
 
 use super::{
-    CompleteScanSessionInput, NewScanObservationBatch, NewScanSession, ScanObservation,
-    ScanReconciliationQuery, ScanSessionListQuery, SqliteScanSessionRepo,
+    CompleteScanSessionInput, MAX_SCAN_SESSION_OBSERVATIONS, NewScanObservationBatch,
+    NewScanSession, ScanObservation, ScanReconciliationQuery, ScanSessionListQuery,
+    SqliteScanSessionRepo,
 };
 use crate::test_support::{
     T0, fresh_initialized_pool_at, seed_test_storage_root, with_check_constraints_disabled,
@@ -15,6 +16,122 @@ async fn fresh_pool() -> (sqlx::SqlitePool, voom_test_support::TempDatabase) {
     let tmp = voom_test_support::TempDatabase::new().unwrap();
     let pool = fresh_initialized_pool_at(tmp.path()).await.unwrap();
     (pool, tmp)
+}
+
+#[tokio::test]
+async fn scan_session_capacity_accepts_the_limit_replays_and_rejects_crossing_atomically() {
+    let (pool, _tmp) = fresh_pool().await;
+    let root = seed_test_storage_root(&pool).await.unwrap();
+    seed_incarnation(&pool, "abababababababababababababababab").await;
+    let repo = SqliteScanSessionRepo::new(pool.clone());
+    let mut tx = pool.begin().await.unwrap();
+    let session = repo
+        .insert_requested_in_tx(&mut tx, new_session(root))
+        .await
+        .unwrap();
+    repo.start_in_tx(
+        &mut tx,
+        session.id,
+        "abababababababababababababababab".parse().unwrap(),
+        T0 + time::Duration::minutes(5),
+        T0,
+    )
+    .await
+    .unwrap();
+    sqlx::query(
+        "UPDATE scan_sessions SET next_sequence = 100, batch_count = 100, \
+         observation_count = ? WHERE id = ?",
+    )
+    .bind(i64::try_from(MAX_SCAN_SESSION_OBSERVATIONS - 1).unwrap())
+    .bind(i64::try_from(session.id.0).unwrap())
+    .execute(&mut *tx)
+    .await
+    .unwrap();
+    let at_limit = batch(session.id, 100, 'a', vec![observation("capacity/last.mkv")]);
+    let accepted = repo
+        .accepted_batch_in_tx(&mut tx, at_limit.clone())
+        .await
+        .unwrap();
+    assert_eq!(
+        accepted.cumulative_observation_count,
+        MAX_SCAN_SESSION_OBSERVATIONS
+    );
+    assert_eq!(
+        repo.accepted_batch_in_tx(&mut tx, at_limit).await.unwrap(),
+        accepted
+    );
+
+    let crossing = batch(
+        session.id,
+        101,
+        'b',
+        vec![observation("capacity/private.mkv")],
+    );
+    let before: (i64, i64, i64, String) = sqlx::query_as(
+        "SELECT next_sequence, batch_count, observation_count, progress_deadline_at \
+         FROM scan_sessions WHERE id = ?",
+    )
+    .bind(i64::try_from(session.id.0).unwrap())
+    .fetch_one(&mut *tx)
+    .await
+    .unwrap();
+    let error = repo
+        .accepted_batch_in_tx(&mut tx, crossing)
+        .await
+        .unwrap_err();
+    assert!(matches!(error, VoomError::Conflict(_)));
+    let message = error.to_string();
+    assert!(message.contains("maximum 100000"));
+    assert!(message.contains("current 100000"));
+    assert!(message.contains("incoming 1"));
+    let after: (i64, i64, i64, String) = sqlx::query_as(
+        "SELECT next_sequence, batch_count, observation_count, progress_deadline_at \
+         FROM scan_sessions WHERE id = ?",
+    )
+    .bind(i64::try_from(session.id.0).unwrap())
+    .fetch_one(&mut *tx)
+    .await
+    .unwrap();
+    assert_eq!(after, before);
+    let counts: (i64, i64) = sqlx::query_as(
+        "SELECT (SELECT COUNT(*) FROM scan_observation_batches WHERE scan_session_id = ?), \
+                (SELECT COUNT(*) FROM scan_observations WHERE scan_session_id = ?)",
+    )
+    .bind(i64::try_from(session.id.0).unwrap())
+    .bind(i64::try_from(session.id.0).unwrap())
+    .fetch_one(&mut *tx)
+    .await
+    .unwrap();
+    assert_eq!(counts, (1, 1));
+}
+
+#[tokio::test]
+async fn scan_session_capacity_typed_read_rejects_coherent_over_cap_counters() {
+    let (pool, _tmp) = fresh_pool().await;
+    let id = insert_requested_session(&pool).await;
+    with_check_constraints_disabled(&pool, move |connection| {
+        Box::pin(async move {
+            sqlx::query(
+                "UPDATE scan_sessions SET next_sequence = 101, batch_count = 101, \
+                 observation_count = 100001 WHERE id = ?",
+            )
+            .bind(id)
+            .execute(connection)
+            .await
+        })
+    })
+    .await
+    .unwrap();
+    let error = SqliteScanSessionRepo::new(pool)
+        .get(ScanSessionId(u64::try_from(id).unwrap()))
+        .await
+        .unwrap_err();
+    assert!(matches!(error, VoomError::Database { .. }));
+    assert!(
+        error
+            .to_string()
+            .contains("observation_count 100001 exceeds maximum 100000")
+    );
 }
 
 async fn insert_requested_session(pool: &sqlx::SqlitePool) -> i64 {
