@@ -73,15 +73,12 @@ async fn cancelled_operation_never_returns_a_tainted_connection_to_the_pool() {
 #[tokio::test]
 async fn reset_failure_discards_the_tainted_connection() {
     let (pool, _database) = checked_pool().await;
-    let result: Result<(), sqlx::Error> = with_check_constraints_disabled(&pool, |connection| {
-        Box::pin(async move {
-            sqlx::query("SELECT 1").execute(connection).await?;
-            Err(sqlx::Error::Protocol(
-                "operation failed before reset".to_owned(),
-            ))
-        })
-    })
-    .await;
+    let result: Result<(), sqlx::Error> = FORCE_CHECK_CONSTRAINTS_RESET_FAILURE
+        .scope(
+            (),
+            with_check_constraints_disabled(&pool, |_| Box::pin(async { Ok(()) })),
+        )
+        .await;
 
     assert!(result.is_err());
     assert_invalid_value_is_rejected(&pool).await;
