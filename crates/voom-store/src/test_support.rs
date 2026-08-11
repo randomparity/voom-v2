@@ -37,6 +37,11 @@ use crate::repo::execution::workers::{
     NewCapability, NewGrant, NewWorker, SqliteWorkerRepo, Worker, WorkerKind,
 };
 
+#[cfg(test)]
+tokio::task_local! {
+    static FORCE_CHECK_CONSTRAINTS_RESET_FAILURE: ();
+}
+
 /// Shared default timestamp for builder fixtures and tests. Keyed on
 /// `OffsetDateTime::UNIX_EPOCH` so snapshot diffs are stable across runs.
 /// Hoisted here so the 6+ `const T0` declarations across the test suite
@@ -181,6 +186,16 @@ where
         .execute(&mut *connection)
         .await?;
     let result = operation(&mut connection).await;
+
+    #[cfg(test)]
+    if FORCE_CHECK_CONSTRAINTS_RESET_FAILURE
+        .try_with(|()| ())
+        .is_ok()
+    {
+        return Err(sqlx::Error::Protocol(
+            "forced SQLite check-constraint reset failure".to_owned(),
+        ));
+    }
 
     sqlx::query("PRAGMA ignore_check_constraints = OFF")
         .execute(&mut *connection)
