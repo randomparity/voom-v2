@@ -690,6 +690,35 @@ async fn scan_session_capacity_maps_to_http_409_without_leaking_observation_data
         .await;
     assert_eq!(start.status(), StatusCode::OK);
     sqlx::query(
+        "WITH RECURSIVE numbers(value) AS (\
+             SELECT 0 UNION ALL SELECT value + 1 FROM numbers WHERE value < 99\
+         )\
+         INSERT INTO scan_observation_batches (scan_session_id, sequence, previous_sequence, \
+             request_hash, observation_count, accepted_at, cumulative_observation_count)\
+         SELECT ?, value, CASE WHEN value = 0 THEN NULL ELSE value - 1 END, \
+             printf('%064x', value), 1000, '1970-01-01T00:00:00Z', (value + 1) * 1000 \
+         FROM numbers ORDER BY value ASC",
+    )
+    .bind(i64::try_from(session.id.0).unwrap())
+    .execute(&fixture.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "WITH RECURSIVE numbers(value) AS (\
+             SELECT 0 UNION ALL SELECT value + 1 FROM numbers WHERE value < 99999\
+         )\
+         INSERT INTO scan_observations (scan_session_id, batch_sequence, ordinal, \
+             provider_relative_locator, provider_object_identity, size_bytes, modified_at, \
+             stability_started_at, stability_confirmed_at)\
+         SELECT ?, value / 1000, value % 1000, 'capacity/' || value, 'object-' || value, 1, \
+             '1970-01-01T00:00:00Z', '1970-01-01T00:00:00Z', \
+             '1970-01-01T00:00:00Z' FROM numbers ORDER BY value ASC",
+    )
+    .bind(i64::try_from(session.id.0).unwrap())
+    .execute(&fixture.pool)
+    .await
+    .unwrap();
+    sqlx::query(
         "UPDATE scan_sessions SET next_sequence = 100, batch_count = 100, \
          observation_count = 100000 WHERE id = ?",
     )

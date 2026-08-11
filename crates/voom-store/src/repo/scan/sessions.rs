@@ -145,6 +145,19 @@ impl SqliteScanSessionRepo {
         row.as_ref().map(row_to_scan_session).transpose()
     }
 
+    async fn mutation_session_in_tx(
+        &self,
+        tx: &mut Transaction<'_, Sqlite>,
+        id: ScanSessionId,
+    ) -> Result<Option<ScanSession>, VoomError> {
+        let row = sqlx::query(MUTATION_SELECT_SCAN_SESSION)
+            .bind(i64_from_u64(id.0, "scan_sessions.id")?)
+            .fetch_optional(&mut **tx)
+            .await
+            .map_err(|error| VoomError::database_context("scan session mutation read", error))?;
+        row.as_ref().map(row_to_mutation_session).transpose()
+    }
+
     pub async fn active_for_root_in_tx(
         &self,
         tx: &mut Transaction<'_, Sqlite>,
@@ -170,15 +183,17 @@ impl SqliteScanSessionRepo {
         now: OffsetDateTime,
     ) -> Result<Vec<ScanSession>, VoomError> {
         let active_rows = sqlx::query(&format!(
-            "SELECT {SCAN_SESSION_COLS} FROM scan_sessions \
-             WHERE status IN ('requested', 'running') ORDER BY id ASC"
+            "SELECT {MUTATION_SCAN_SESSION_COLS} FROM scan_sessions AS session \
+             LEFT JOIN node_incarnations AS incarnation \
+               ON incarnation.incarnation_id = session.owner_incarnation_id \
+             WHERE session.status IN ('requested', 'running') ORDER BY session.id ASC"
         ))
         .fetch_all(&mut **tx)
         .await
         .map_err(|error| VoomError::database_context("scan_sessions active expiry", error))?;
         let active = active_rows
             .iter()
-            .map(row_to_scan_session)
+            .map(row_to_mutation_session)
             .collect::<Result<Vec<_>, _>>()?;
         let expired_ids = active
             .iter()
@@ -224,15 +239,17 @@ impl SqliteScanSessionRepo {
         now: OffsetDateTime,
     ) -> Result<Vec<ScanSession>, VoomError> {
         let rows = sqlx::query(&format!(
-            "SELECT {SCAN_SESSION_COLS} FROM scan_sessions \
-             WHERE status = 'running' ORDER BY id ASC"
+            "SELECT {MUTATION_SCAN_SESSION_COLS} FROM scan_sessions AS session \
+             LEFT JOIN node_incarnations AS incarnation \
+               ON incarnation.incarnation_id = session.owner_incarnation_id \
+             WHERE session.status = 'running' ORDER BY session.id ASC"
         ))
         .fetch_all(&mut **tx)
         .await
         .map_err(|error| VoomError::database_context("scan_sessions running incarnation", error))?;
         let running = rows
             .iter()
-            .map(row_to_scan_session)
+            .map(row_to_mutation_session)
             .collect::<Result<Vec<_>, _>>()?;
         let session_ids = running
             .iter()
@@ -276,7 +293,7 @@ impl SqliteScanSessionRepo {
         deadline: OffsetDateTime,
         now: OffsetDateTime,
     ) -> Result<ScanSession, VoomError> {
-        let Some(session) = self.get_in_tx(tx, id).await? else {
+        let Some(session) = self.mutation_session_in_tx(tx, id).await? else {
             return Err(VoomError::NotFound(format!("scan session {id} not found")));
         };
         if session.status != ScanSessionStatus::Requested {
@@ -285,6 +302,7 @@ impl SqliteScanSessionRepo {
                 session.status.as_str()
             )));
         }
+        validate_incarnation_owner_in_tx(tx, incarnation_id, session.owner_node_id).await?;
         let high_watermark = sqlx::query(
             "SELECT MAX(id) AS id FROM file_locations WHERE storage_root_id = ? \
              AND address_state = 'rooted' AND retired_at IS NULL",
@@ -329,15 +347,18 @@ impl SqliteScanSessionRepo {
         input: NewScanObservationBatch,
     ) -> Result<ScanBatchOutcome, VoomError> {
         let input = PreparedBatch::new(input)?;
-        if let Some(outcome) = batch_replay_in_tx(tx, &input).await? {
-            return Ok(outcome);
-        }
-        let Some(session) = self.get_in_tx(tx, input.scan_session_id).await? else {
+        let Some(session) = self
+            .mutation_session_in_tx(tx, input.scan_session_id)
+            .await?
+        else {
             return Err(VoomError::NotFound(format!(
                 "scan session {} not found",
                 input.scan_session_id
             )));
         };
+        if let Some(outcome) = batch_replay_in_tx(tx, &input).await? {
+            return Ok(outcome);
+        }
         if input.sequence < session.next_sequence {
             return Err(VoomError::database(format!(
                 "scan session {} is missing accepted batch ledger sequence {} below next sequence {}",
@@ -350,6 +371,7 @@ impl SqliteScanSessionRepo {
                 session.id, session.next_sequence
             )));
         }
+        validate_new_batch_predecessor_in_tx(tx, &session, input.sequence).await?;
         let cumulative_count = session
             .observation_count
             .checked_add(input.observation_count)
@@ -424,6 +446,19 @@ impl SqliteScanSessionRepo {
                     status.as_str()
                 )));
             }
+        }
+        let Some(session) = self.mutation_session_in_tx(tx, id).await? else {
+            return Err(VoomError::Conflict(format!(
+                "scan session {id} is already terminal or missing"
+            )));
+        };
+        if !matches!(
+            session.status,
+            ScanSessionStatus::Requested | ScanSessionStatus::Running
+        ) {
+            return Err(VoomError::Conflict(format!(
+                "scan session {id} is already terminal or missing"
+            )));
         }
         let row = sqlx::query(&format!(
             "UPDATE scan_sessions SET status = ?, terminal_reason = ?, terminal_at = ? \
@@ -674,6 +709,28 @@ impl SqliteScanSessionRepo {
     }
 }
 
+async fn validate_incarnation_owner_in_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    incarnation_id: NodeIncarnationId,
+    owner_node_id: NodeId,
+) -> Result<(), VoomError> {
+    let valid: i64 = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM node_incarnations \
+         WHERE incarnation_id = ? AND node_id = ?)",
+    )
+    .bind(incarnation_id.to_string())
+    .bind(i64_from_u64(owner_node_id.0, "node_incarnations.node_id")?)
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(|error| VoomError::database_context("scan start incarnation owner", error))?;
+    if valid != 1 {
+        return Err(VoomError::database(format!(
+            "scan start incarnation {incarnation_id} does not belong to owner node {owner_node_id}"
+        )));
+    }
+    Ok(())
+}
+
 impl Repository for SqliteScanSessionRepo {}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -800,6 +857,38 @@ const SELECT_SCAN_SESSION_COLS: &str = "SELECT id, storage_root_id, root_epoch, 
     idle_timeout_seconds, progress_deadline_at, location_high_watermark_id, requested_at, \
     started_at, terminal_at, terminal_reason, retired_location_count FROM scan_sessions WHERE id = ?";
 
+const MUTATION_SCAN_SESSION_COLS: &str = "session.id AS id, \
+    session.storage_root_id AS storage_root_id, session.root_epoch AS root_epoch, \
+    session.owner_node_id AS owner_node_id, \
+    session.owner_incarnation_id AS owner_incarnation_id, session.status AS status, \
+    session.next_sequence AS next_sequence, session.batch_count AS batch_count, \
+    session.observation_count AS observation_count, \
+    session.idle_timeout_seconds AS idle_timeout_seconds, \
+    session.progress_deadline_at AS progress_deadline_at, \
+    session.location_high_watermark_id AS location_high_watermark_id, \
+    session.requested_at AS requested_at, session.started_at AS started_at, \
+    session.terminal_at AS terminal_at, session.terminal_reason AS terminal_reason, \
+    session.retired_location_count AS retired_location_count, \
+    CASE WHEN session.owner_incarnation_id IS NULL OR incarnation.node_id = session.owner_node_id \
+         THEN 1 ELSE 0 END AS owner_incarnation_valid";
+
+const MUTATION_SELECT_SCAN_SESSION: &str = "SELECT \
+    session.id AS id, session.storage_root_id AS storage_root_id, \
+    session.root_epoch AS root_epoch, session.owner_node_id AS owner_node_id, \
+    session.owner_incarnation_id AS owner_incarnation_id, session.status AS status, \
+    session.next_sequence AS next_sequence, session.batch_count AS batch_count, \
+    session.observation_count AS observation_count, \
+    session.idle_timeout_seconds AS idle_timeout_seconds, \
+    session.progress_deadline_at AS progress_deadline_at, \
+    session.location_high_watermark_id AS location_high_watermark_id, \
+    session.requested_at AS requested_at, session.started_at AS started_at, \
+    session.terminal_at AS terminal_at, session.terminal_reason AS terminal_reason, \
+    session.retired_location_count AS retired_location_count, \
+    CASE WHEN session.owner_incarnation_id IS NULL OR incarnation.node_id = session.owner_node_id \
+         THEN 1 ELSE 0 END AS owner_incarnation_valid \
+    FROM scan_sessions AS session LEFT JOIN node_incarnations AS incarnation \
+      ON incarnation.incarnation_id = session.owner_incarnation_id WHERE session.id = ?";
+
 const RECONCILIATION_PAGE_FIRST_SQL: &str = "SELECT l.id, l.storage_root_id, l.provider_relative_locator, l.retired_at, l.epoch \
      FROM file_locations AS l WHERE l.retired_by_scan_session_id = ? ORDER BY l.id ASC LIMIT ?";
 
@@ -857,7 +946,7 @@ const RETIRE_COMPLETION_CANDIDATES_SQL: &str = "WITH completion_scope(storage_ro
 
 const COMPLETION_LEDGER_PAGE_SIZE: i64 = 256;
 const COMPLETION_BATCH_PAGE_SQL: &str = "SELECT sequence, request_hash, observation_count, \
-     accepted_at, cumulative_observation_count FROM scan_observation_batches \
+     previous_sequence, accepted_at, cumulative_observation_count FROM scan_observation_batches \
      WHERE scan_session_id = ? AND (? IS NULL OR sequence > ?) \
      ORDER BY sequence ASC LIMIT ?";
 const COMPLETION_OBSERVATION_PAGE_SQL: &str = "SELECT batch_sequence, ordinal, \
@@ -889,7 +978,7 @@ async fn completion_session_in_tx(
     tx: &mut Transaction<'_, Sqlite>,
     input: &CompleteScanSessionInput,
 ) -> Result<ScanSession, VoomError> {
-    let row = sqlx::query(SELECT_SCAN_SESSION_COLS)
+    let row = sqlx::query(MUTATION_SELECT_SCAN_SESSION)
         .bind(i64_from_u64(input.scan_session_id.0, "scan_sessions.id")?)
         .fetch_optional(&mut **tx)
         .await
@@ -900,7 +989,7 @@ async fn completion_session_in_tx(
             input.scan_session_id
         )));
     };
-    row_to_scan_session(&row)
+    row_to_mutation_session(&row)
 }
 
 fn validate_completion_authority_binding(
@@ -1002,10 +1091,27 @@ async fn validate_completion_batches_in_tx(
                     "batch sequence is not contiguous",
                 ));
             }
+            validate_completion_predecessor(row, session, sequence)?;
             validate_completion_batch_row(row, session, &mut summary)?;
             after_sequence = Some(i64_from_u64(sequence, "scan batch sequence")?);
         }
     }
+}
+
+fn validate_completion_predecessor(
+    row: &sqlx::sqlite::SqliteRow,
+    session: &ScanSession,
+    sequence: u64,
+) -> Result<(), VoomError> {
+    let previous = optional_u64_column(row, "previous_sequence")?;
+    let expected = sequence.checked_sub(1);
+    if previous != expected {
+        return Err(invalid_completion_ledger(
+            session,
+            "batch predecessor is invalid",
+        ));
+    }
+    Ok(())
 }
 
 fn validate_completion_batch_row(
@@ -1367,6 +1473,20 @@ fn row_to_scan_session(row: &sqlx::sqlite::SqliteRow) -> Result<ScanSession, Voo
     Ok(session)
 }
 
+fn row_to_mutation_session(row: &sqlx::sqlite::SqliteRow) -> Result<ScanSession, VoomError> {
+    let session = row_to_scan_session(row)?;
+    let valid: i64 = row
+        .try_get("owner_incarnation_valid")
+        .map_err(|error| map_row_err("scan session owner incarnation binding", error))?;
+    if valid != 1 {
+        return Err(VoomError::database(format!(
+            "scan session {} owner incarnation does not belong to owner node",
+            session.id
+        )));
+    }
+    Ok(session)
+}
+
 pub fn decode_observation_row(row: &sqlx::sqlite::SqliteRow) -> Result<ScanObservation, VoomError> {
     let provider_object_identity = string_column(row, "provider_object_identity")?;
     validate_provider_object_identity(&provider_object_identity)?;
@@ -1619,18 +1739,11 @@ async fn batch_replay_in_tx(
     tx: &mut Transaction<'_, Sqlite>,
     input: &PreparedBatch,
 ) -> Result<Option<ScanBatchOutcome>, VoomError> {
-    let row = sqlx::query(
-        "SELECT request_hash, observation_count, cumulative_observation_count \
-         FROM scan_observation_batches WHERE scan_session_id = ? AND sequence = ?",
-    )
-    .bind(input.session_id)
-    .bind(input.sequence_i64)
-    .fetch_optional(&mut **tx)
-    .await
-    .map_err(|error| VoomError::database_context("scan batch replay lookup", error))?;
+    let row = batch_with_predecessor_in_tx(tx, input.session_id, input.sequence_i64).await?;
     let Some(row) = row else {
         return Ok(None);
     };
+    let outcome = validate_batch_link(&row, input.scan_session_id, input.sequence)?;
     let request_hash: String = row
         .try_get("request_hash")
         .map_err(|error| map_row_err("scan_observation_batches", error))?;
@@ -1646,7 +1759,105 @@ async fn batch_replay_in_tx(
             input.scan_session_id, input.sequence
         )));
     }
-    batch_outcome_from_row(&row, input.scan_session_id, input.sequence).map(Some)
+    Ok(Some(outcome))
+}
+
+async fn validate_new_batch_predecessor_in_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    session: &ScanSession,
+    sequence: u64,
+) -> Result<(), VoomError> {
+    let Some(previous_sequence) = sequence.checked_sub(1) else {
+        if session.observation_count == 0 {
+            return Ok(());
+        }
+        return Err(VoomError::database(format!(
+            "scan session {} sequence zero has non-zero persisted observations",
+            session.id
+        )));
+    };
+    let previous_sequence_i64 = i64_from_u64(
+        previous_sequence,
+        "scan_observation_batches.previous_sequence",
+    )?;
+    let session_id = i64_from_u64(session.id.0, "scan_observation_batches.scan_session_id")?;
+    let row = batch_with_predecessor_in_tx(tx, session_id, previous_sequence_i64)
+        .await?
+        .ok_or_else(|| {
+            VoomError::database(format!(
+                "scan session {} is missing predecessor batch {previous_sequence}",
+                session.id
+            ))
+        })?;
+    let predecessor = validate_batch_link(&row, session.id, previous_sequence)?;
+    if predecessor.cumulative_observation_count != session.observation_count {
+        return Err(VoomError::database(format!(
+            "scan session {} predecessor cumulative count does not match session progress",
+            session.id
+        )));
+    }
+    Ok(())
+}
+
+async fn batch_with_predecessor_in_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    session_id: i64,
+    sequence: i64,
+) -> Result<Option<sqlx::sqlite::SqliteRow>, VoomError> {
+    sqlx::query(
+        "SELECT batch.request_hash, batch.observation_count, \
+         batch.cumulative_observation_count, batch.previous_sequence, \
+         predecessor.sequence AS predecessor_sequence, \
+         predecessor.cumulative_observation_count AS predecessor_cumulative_observation_count \
+         FROM scan_observation_batches AS batch \
+         LEFT JOIN scan_observation_batches AS predecessor \
+           ON predecessor.scan_session_id = batch.scan_session_id \
+          AND predecessor.sequence = batch.previous_sequence \
+         WHERE batch.scan_session_id = ? AND batch.sequence = ?",
+    )
+    .bind(session_id)
+    .bind(sequence)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(|error| VoomError::database_context("scan batch predecessor lookup", error))
+}
+
+fn validate_batch_link(
+    row: &sqlx::sqlite::SqliteRow,
+    session_id: ScanSessionId,
+    sequence: u64,
+) -> Result<ScanBatchOutcome, VoomError> {
+    let outcome = batch_outcome_from_row(row, session_id, sequence)?;
+    let previous = optional_u64_column(row, "previous_sequence")?;
+    let predecessor_sequence = optional_u64_column(row, "predecessor_sequence")?;
+    let predecessor_cumulative =
+        optional_u64_column(row, "predecessor_cumulative_observation_count")?;
+    if sequence == 0 {
+        if previous.is_some()
+            || predecessor_sequence.is_some()
+            || predecessor_cumulative.is_some()
+            || outcome.cumulative_observation_count != outcome.accepted_observation_count
+        {
+            return Err(invalid_batch_link(session_id, sequence));
+        }
+        return Ok(outcome);
+    }
+    let expected_previous = sequence.checked_sub(1);
+    let expected_cumulative = predecessor_cumulative
+        .and_then(|count| count.checked_add(outcome.accepted_observation_count));
+    if previous != expected_previous
+        || predecessor_sequence != expected_previous
+        || expected_cumulative != Some(outcome.cumulative_observation_count)
+    {
+        return Err(invalid_batch_link(session_id, sequence));
+    }
+    Ok(outcome)
+}
+
+fn invalid_batch_link(session_id: ScanSessionId, sequence: u64) -> VoomError {
+    VoomError::database(format!(
+        "scan session {session_id} batch {sequence} has invalid predecessor relationship"
+    ))
 }
 
 async fn ensure_new_locators_in_tx(
@@ -1680,11 +1891,13 @@ async fn insert_batch_in_tx(
     cumulative_count: i64,
 ) -> Result<(), VoomError> {
     sqlx::query(
-        "INSERT INTO scan_observation_batches (scan_session_id, sequence, request_hash, \
-         observation_count, accepted_at, cumulative_observation_count) VALUES (?, ?, ?, ?, ?, ?)",
+        "INSERT INTO scan_observation_batches (scan_session_id, sequence, previous_sequence, \
+         request_hash, observation_count, accepted_at, cumulative_observation_count) \
+         VALUES (?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(input.session_id)
     .bind(input.sequence_i64)
+    .bind((input.sequence_i64 > 0).then(|| input.sequence_i64 - 1))
     .bind(&input.request_hash)
     .bind(input.observation_count_i64)
     .bind(&input.accepted_at)
@@ -1848,6 +2061,18 @@ fn checked_u64(row: &sqlx::sqlite::SqliteRow, column: &'static str) -> Result<u6
         .try_get(column)
         .map_err(|error| map_row_err("scan_sessions", error))?;
     u64_from_i64(value, format!("scan_sessions.{column}"))
+}
+
+fn optional_u64_column(
+    row: &sqlx::sqlite::SqliteRow,
+    column: &'static str,
+) -> Result<Option<u64>, VoomError> {
+    let value: Option<i64> = row
+        .try_get(column)
+        .map_err(|error| map_row_err("scan observation batch", error))?;
+    value
+        .map(|value| u64_from_i64(value, format!("scan_observation_batches.{column}")))
+        .transpose()
 }
 
 fn checked_u32(row: &sqlx::sqlite::SqliteRow, column: &'static str) -> Result<u32, VoomError> {

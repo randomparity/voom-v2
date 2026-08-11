@@ -77,6 +77,46 @@ async fn scan_session_schema_enforces_lifecycle_and_provenance_backstops() {
     .unwrap();
     assert!(observation_index.contains("scan_session_id, provider_relative_locator"));
 
+    let predecessor_column: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM pragma_table_info('scan_observation_batches') \
+         WHERE name = 'previous_sequence'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(predecessor_column, 1);
+
+    let immutable_triggers: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM sqlite_schema WHERE type = 'trigger' AND name IN (\
+         'scan_observation_batches_validate_insert', \
+         'scan_observation_batches_no_update', \
+         'scan_observation_batches_no_delete')",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(immutable_triggers, 3);
+
+    let batch_self_foreign_key: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM pragma_foreign_key_list('scan_observation_batches') \
+         WHERE \"table\" = 'scan_observation_batches' \
+         AND \"from\" IN ('scan_session_id', 'previous_sequence')",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(batch_self_foreign_key, 2);
+
+    let owner_incarnation_foreign_key: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM pragma_foreign_key_list('scan_sessions') \
+         WHERE \"table\" = 'node_incarnations' \
+         AND \"from\" IN ('owner_incarnation_id', 'owner_node_id')",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(owner_incarnation_foreign_key, 2);
+
     let reconciliation_index: Option<String> = sqlx::query_scalar(
         "SELECT sql FROM sqlite_schema WHERE type = 'index' \
          AND name = 'file_locations_by_retired_scan_session'",
@@ -111,6 +151,87 @@ async fn scan_session_schema_enforces_lifecycle_and_provenance_backstops() {
     .await
     .unwrap();
     assert_eq!(location_pointer, 1);
+}
+
+#[tokio::test]
+async fn scan_batch_schema_enforces_append_only_predecessor_arithmetic() {
+    let (pool, _tmp) = fresh_pool().await;
+    insert_active_incarnation(&pool, "batch-chain-incarnation").await;
+    let session = insert_running_scan_session(&pool, 9_000_001, "batch-chain-incarnation").await;
+
+    sqlx::query(
+        "INSERT INTO scan_observation_batches (scan_session_id, sequence, previous_sequence, \
+         request_hash, observation_count, accepted_at, cumulative_observation_count) \
+         VALUES (?, 0, NULL, ?, 2, '1970-01-01T00:00:01Z', 2)",
+    )
+    .bind(session)
+    .bind("a".repeat(64))
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO scan_observation_batches (scan_session_id, sequence, previous_sequence, \
+         request_hash, observation_count, accepted_at, cumulative_observation_count) \
+         VALUES (?, 1, 0, ?, 3, '1970-01-01T00:00:02Z', 5)",
+    )
+    .bind(session)
+    .bind("b".repeat(64))
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    for sql in [
+        "INSERT INTO scan_observation_batches (scan_session_id, sequence, previous_sequence, \
+         request_hash, observation_count, accepted_at, cumulative_observation_count) \
+         VALUES (?, 2, 1, printf('%064x', 2), 1, '1970-01-01T00:00:03Z', 99)",
+        "UPDATE scan_observation_batches SET cumulative_observation_count = 4 \
+         WHERE scan_session_id = ? AND sequence = 1",
+        "DELETE FROM scan_observation_batches WHERE scan_session_id = ? AND sequence = 1",
+    ] {
+        let error = sqlx::query(sql)
+            .bind(session)
+            .execute(&pool)
+            .await
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("scan observation batch"),
+            "expected append-only ledger trigger rejection, got {error:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn scan_session_schema_binds_owner_incarnation_to_owner_node() {
+    let (pool, _tmp) = fresh_pool().await;
+    sqlx::query(
+        "INSERT INTO nodes (id, name, kind, status, registered_at, last_seen_at, retired_at, \
+         heartbeat_ttl_seconds, auth_token_hash, auth_token_hint, metadata, epoch) \
+         VALUES (9000002, 'other-node', 'local', 'active', '1970-01-01T00:00:00Z', \
+         '1970-01-01T00:00:00Z', NULL, 60, 'other-hash', 'other-hint', '{}', 0)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO node_incarnations \
+         (incarnation_id, node_id, status, started_at, last_seen_at) \
+         VALUES ('other-incarnation', 9000002, 'active', '1970-01-01T00:00:00Z', \
+         '1970-01-01T00:00:00Z')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let error = sqlx::query(
+        "INSERT INTO scan_sessions (storage_root_id, root_epoch, owner_node_id, \
+         owner_incarnation_id, status, idle_timeout_seconds, progress_deadline_at, requested_at, \
+         started_at) VALUES (9000001, 1, 9000001, 'other-incarnation', 'running', 300, \
+         '1970-01-01T00:05:00Z', '1970-01-01T00:00:00Z', '1970-01-01T00:00:01Z')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap_err();
+    assert!(error.to_string().contains("FOREIGN KEY constraint failed"));
 }
 
 #[tokio::test]
@@ -239,8 +360,9 @@ async fn scan_session_schema_rejects_invalid_rows_and_preserves_byte_boundaries(
 
     sqlx::query(
         "INSERT INTO scan_observation_batches \
-         (scan_session_id, sequence, request_hash, observation_count, accepted_at, \
-          cumulative_observation_count) VALUES (?, 0, ?, 1, '1970-01-01T00:00:01Z', 1)",
+         (scan_session_id, sequence, previous_sequence, request_hash, observation_count, \
+          accepted_at, cumulative_observation_count) \
+         VALUES (?, 0, NULL, ?, 1, '1970-01-01T00:00:01Z', 1)",
     )
     .bind(active_session_id)
     .bind("a".repeat(64))
@@ -294,10 +416,14 @@ async fn scan_session_capacity_schema_rejects_session_and_batch_totals_over_the_
         ),
     )
     .await;
+    sqlx::query("DROP TRIGGER scan_observation_batches_validate_insert")
+        .execute(&pool)
+        .await
+        .unwrap();
     let error = sqlx::query(
-        "INSERT INTO scan_observation_batches (scan_session_id, sequence, request_hash, \
-         observation_count, accepted_at, cumulative_observation_count) \
-         VALUES (?, 0, ?, 1, '1970-01-01T00:00:00Z', 100001)",
+        "INSERT INTO scan_observation_batches (scan_session_id, sequence, previous_sequence, \
+         request_hash, observation_count, accepted_at, cumulative_observation_count) \
+         VALUES (?, 0, NULL, ?, 1, '1970-01-01T00:00:00Z', 100001)",
     )
     .bind(active)
     .bind("a".repeat(64))

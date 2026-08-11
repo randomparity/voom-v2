@@ -97,6 +97,12 @@ enum StartRootFence {
     Unavailable,
 }
 
+#[derive(Debug, Clone, Copy)]
+enum BatchLinkCorruption {
+    MissingPredecessor,
+    PredecessorCumulative,
+}
+
 #[derive(Debug)]
 struct LifecycleSnapshot {
     session: ScanSession,
@@ -429,14 +435,7 @@ async fn exact_batch_replays_precede_deadline_and_new_batch_persists_stale_once(
 async fn scan_session_capacity_replays_the_limit_rejects_crossing_and_preserves_deadline_order() {
     let fixture = fixture().await;
     let session = running_session(&fixture, 10).await;
-    sqlx::query(
-        "UPDATE scan_sessions SET next_sequence = 100, batch_count = 100, \
-         observation_count = 99999 WHERE id = ?",
-    )
-    .bind(i64::try_from(session.id.0).unwrap())
-    .execute(fixture.cp.pool_for_test())
-    .await
-    .unwrap();
+    seed_capacity_prefix(&fixture.cp, session.id, 99_999).await;
     let last = batch_input(&fixture, session.id, 100, "capacity-last", 'a');
     let accepted = fixture
         .cp
@@ -473,7 +472,7 @@ async fn scan_session_capacity_replays_the_limit_rejects_crossing_and_preserves_
         .unwrap_err();
     assert_eq!(replay.to_string(), error.to_string());
     assert_eq!(fixture.cp.scan_session(session.id).await.unwrap(), before);
-    assert_eq!(observation_count(&fixture.cp, session.id).await, 1);
+    assert_eq!(observation_count(&fixture.cp, session.id).await, 100_000);
     assert_eq!(
         event_count(&fixture.cp, EventKind::ScanObservationBatchAccepted).await,
         before_events
@@ -495,14 +494,7 @@ async fn assert_expired_capacity_crossing_stales_once(fixture: &Fixture) {
         .start_scan_session(start_input(fixture, requested.id, "capacity-expired-start"))
         .await
         .unwrap();
-    sqlx::query(
-        "UPDATE scan_sessions SET next_sequence = 100, batch_count = 100, \
-         observation_count = 100000 WHERE id = ?",
-    )
-    .bind(i64::try_from(requested.id.0).unwrap())
-    .execute(fixture.cp.pool_for_test())
-    .await
-    .unwrap();
+    seed_capacity_prefix(&fixture.cp, requested.id, 100_000).await;
     fixture.clock.advance(Duration::seconds(10));
     let expired = batch_input(fixture, requested.id, 100, "capacity-expired-crossing", 'c');
     let stale = fixture
@@ -527,6 +519,58 @@ async fn assert_expired_capacity_crossing_stales_once(fixture: &Fixture) {
         event_count(&fixture.cp, EventKind::ScanSessionStale).await,
         1
     );
+}
+
+async fn seed_capacity_prefix(
+    cp: &crate::ControlPlane,
+    session_id: ScanSessionId,
+    observation_total: i64,
+) {
+    let session_id = i64::try_from(session_id.0).unwrap();
+    let final_batch_count = observation_total - 99_000;
+    sqlx::query(
+        "WITH RECURSIVE numbers(value) AS (\
+             SELECT 0 UNION ALL SELECT value + 1 FROM numbers WHERE value < 99\
+         )\
+         INSERT INTO scan_observation_batches (scan_session_id, sequence, previous_sequence, \
+             request_hash, observation_count, accepted_at, cumulative_observation_count)\
+         SELECT ?, value, CASE WHEN value = 0 THEN NULL ELSE value - 1 END, \
+             printf('%064x', value), CASE WHEN value < 99 THEN 1000 ELSE ? END, \
+             '1970-01-01T00:00:00Z', \
+             CASE WHEN value < 99 THEN (value + 1) * 1000 ELSE ? END \
+         FROM numbers ORDER BY value ASC",
+    )
+    .bind(session_id)
+    .bind(final_batch_count)
+    .bind(observation_total)
+    .execute(cp.pool_for_test())
+    .await
+    .unwrap();
+    sqlx::query(
+        "WITH RECURSIVE numbers(value) AS (\
+             SELECT 0 UNION ALL SELECT value + 1 FROM numbers WHERE value + 1 < ?\
+         )\
+         INSERT INTO scan_observations (scan_session_id, batch_sequence, ordinal, \
+             provider_relative_locator, provider_object_identity, size_bytes, modified_at, \
+             stability_started_at, stability_confirmed_at)\
+         SELECT ?, value / 1000, value % 1000, 'capacity/' || value, 'object-' || value, 1, \
+             '1970-01-01T00:00:00Z', '1970-01-01T00:00:00Z', \
+             '1970-01-01T00:00:00Z' FROM numbers ORDER BY value ASC",
+    )
+    .bind(observation_total)
+    .bind(session_id)
+    .execute(cp.pool_for_test())
+    .await
+    .unwrap();
+    sqlx::query(
+        "UPDATE scan_sessions SET next_sequence = 100, batch_count = 100, \
+         observation_count = ? WHERE id = ?",
+    )
+    .bind(observation_total)
+    .bind(session_id)
+    .execute(cp.pool_for_test())
+    .await
+    .unwrap();
 }
 
 #[tokio::test]
@@ -621,6 +665,249 @@ async fn corrupt_batch_progress_is_database_and_repair_allows_the_same_key() {
     );
     assert_eq!(total_event_count(&fixture.cp).await, before_events + 1);
     assert_eq!(observation_count(&fixture.cp, running.id).await, 2);
+}
+
+#[tokio::test]
+async fn public_new_and_replayed_batches_reject_broken_links_without_side_effects() {
+    for case in [
+        BatchLinkCorruption::MissingPredecessor,
+        BatchLinkCorruption::PredecessorCumulative,
+    ] {
+        assert_public_batch_link_corruption(case).await;
+    }
+}
+
+async fn assert_public_batch_link_corruption(case: BatchLinkCorruption) {
+    let fixture = fixture().await;
+    let running = running_session(&fixture, 30).await;
+    let first = batch_input(&fixture, running.id, 0, "link-first", 'a');
+    let second = batch_input(&fixture, running.id, 1, "link-second", 'b');
+    fixture
+        .cp
+        .accept_scan_observation_batch(first)
+        .await
+        .unwrap();
+    fixture
+        .cp
+        .accept_scan_observation_batch(second)
+        .await
+        .unwrap();
+    corrupt_public_batch_link(&fixture.cp, running.id, case).await;
+    let before = lifecycle_snapshot(&fixture, running.id).await;
+
+    let replay = batch_input(&fixture, running.id, 1, "broken-link-replay", 'b');
+    let new = batch_input(&fixture, running.id, 2, "broken-link-new", 'c');
+    for input in [replay.clone(), new.clone()] {
+        let key = input.idempotency_key.clone();
+        let error = fixture
+            .cp
+            .accept_scan_observation_batch(input)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, voom_core::VoomError::Database { .. }));
+        assert_eq!(replay_rows_for_key(&fixture.cp, &key).await, 0);
+        assert_lifecycle_unchanged(&fixture, running.id, &before).await;
+    }
+
+    repair_public_batch_link(&fixture.cp, running.id, case).await;
+    assert_eq!(
+        fixture
+            .cp
+            .accept_scan_observation_batch(replay)
+            .await
+            .unwrap()
+            .sequence,
+        1
+    );
+    assert_eq!(
+        fixture
+            .cp
+            .accept_scan_observation_batch(new)
+            .await
+            .unwrap()
+            .sequence,
+        2
+    );
+}
+
+#[tokio::test]
+async fn public_mutations_reject_cross_node_incarnation_but_completed_replay_stays_first() {
+    let mutation_fixture = fixture().await;
+    let running = running_session(&mutation_fixture, 30).await;
+    let other_incarnation = seed_other_scan_incarnation(&mutation_fixture.cp).await;
+    corrupt_public_owner_incarnation(&mutation_fixture.cp, running.id, &other_incarnation).await;
+    let before = lifecycle_snapshot(&mutation_fixture, running.id).await;
+
+    let batch = batch_input(&mutation_fixture, running.id, 0, "cross-node-batch", 'a');
+    let batch_error = mutation_fixture
+        .cp
+        .accept_scan_observation_batch(batch)
+        .await
+        .unwrap_err();
+    assert!(matches!(batch_error, voom_core::VoomError::Database { .. }));
+    let fail_error = mutation_fixture
+        .cp
+        .fail_scan_session(fail_input(&mutation_fixture, running.id, "cross-node-fail"))
+        .await
+        .unwrap_err();
+    assert!(matches!(fail_error, voom_core::VoomError::Database { .. }));
+    let complete_error = mutation_fixture
+        .cp
+        .complete_scan_session(complete_input(
+            &mutation_fixture,
+            running.id,
+            "cross-node-complete",
+            None,
+            0,
+        ))
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        complete_error,
+        voom_core::VoomError::Database { .. }
+    ));
+    for key in ["cross-node-batch", "cross-node-fail", "cross-node-complete"] {
+        assert_eq!(replay_rows_for_key(&mutation_fixture.cp, key).await, 0);
+    }
+    assert_lifecycle_unchanged(&mutation_fixture, running.id, &before).await;
+
+    let replay_fixture = fixture().await;
+    let completed = running_session(&replay_fixture, 30).await;
+    let input = complete_input(
+        &replay_fixture,
+        completed.id,
+        "completed-before-corruption",
+        None,
+        0,
+    );
+    let outcome = replay_fixture
+        .cp
+        .complete_scan_session(input.clone())
+        .await
+        .unwrap();
+    let other_incarnation = seed_other_scan_incarnation(&replay_fixture.cp).await;
+    corrupt_public_owner_incarnation(&replay_fixture.cp, completed.id, &other_incarnation).await;
+    assert_eq!(
+        replay_fixture
+            .cp
+            .complete_scan_session(input)
+            .await
+            .unwrap(),
+        outcome
+    );
+}
+
+async fn seed_other_scan_incarnation(cp: &crate::ControlPlane) -> String {
+    let node_id = seed_alternate_owner(cp).await;
+    let incarnation = "78787878787878787878787878787878";
+    sqlx::query(
+        "INSERT INTO node_incarnations \
+         (incarnation_id, node_id, status, started_at, last_seen_at) \
+         VALUES (?, ?, 'active', '1970-01-01T00:00:00Z', '1970-01-01T00:00:00Z')",
+    )
+    .bind(incarnation)
+    .bind(i64::try_from(node_id.0).unwrap())
+    .execute(cp.pool_for_test())
+    .await
+    .unwrap();
+    incarnation.to_owned()
+}
+
+async fn corrupt_public_owner_incarnation(
+    cp: &crate::ControlPlane,
+    session_id: ScanSessionId,
+    incarnation: &str,
+) {
+    let mut connection = cp.pool_for_test().acquire().await.unwrap();
+    connection.close_on_drop();
+    sqlx::query("PRAGMA foreign_keys = OFF")
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE scan_sessions SET owner_incarnation_id = ? WHERE id = ?")
+        .bind(incarnation)
+        .bind(i64::try_from(session_id.0).unwrap())
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+    connection.close().await.unwrap();
+}
+
+async fn corrupt_public_batch_link(
+    cp: &crate::ControlPlane,
+    session_id: ScanSessionId,
+    case: BatchLinkCorruption,
+) {
+    let session_id = i64::try_from(session_id.0).unwrap();
+    match case {
+        BatchLinkCorruption::MissingPredecessor => {
+            sqlx::query("DROP TRIGGER scan_observation_batches_no_delete")
+                .execute(cp.pool_for_test())
+                .await
+                .unwrap();
+            let mut connection = cp.pool_for_test().acquire().await.unwrap();
+            connection.close_on_drop();
+            sqlx::query("PRAGMA foreign_keys = OFF")
+                .execute(&mut *connection)
+                .await
+                .unwrap();
+            sqlx::query(
+                "DELETE FROM scan_observation_batches WHERE scan_session_id = ? AND sequence = 0",
+            )
+            .bind(session_id)
+            .execute(&mut *connection)
+            .await
+            .unwrap();
+            connection.close().await.unwrap();
+        }
+        BatchLinkCorruption::PredecessorCumulative => {
+            sqlx::query("DROP TRIGGER scan_observation_batches_no_update")
+                .execute(cp.pool_for_test())
+                .await
+                .unwrap();
+            sqlx::query(
+                "UPDATE scan_observation_batches SET cumulative_observation_count = 2 \
+                 WHERE scan_session_id = ? AND sequence = 0",
+            )
+            .bind(session_id)
+            .execute(cp.pool_for_test())
+            .await
+            .unwrap();
+        }
+    }
+}
+
+async fn repair_public_batch_link(
+    cp: &crate::ControlPlane,
+    session_id: ScanSessionId,
+    case: BatchLinkCorruption,
+) {
+    let session_id = i64::try_from(session_id.0).unwrap();
+    match case {
+        BatchLinkCorruption::MissingPredecessor => {
+            sqlx::query(
+                "INSERT INTO scan_observation_batches (scan_session_id, sequence, \
+                 previous_sequence, request_hash, observation_count, accepted_at, \
+                 cumulative_observation_count) VALUES (?, 0, NULL, ?, 1, \
+                 '1970-01-01T00:00:00Z', 1)",
+            )
+            .bind(session_id)
+            .bind("a".repeat(64))
+            .execute(cp.pool_for_test())
+            .await
+            .unwrap();
+        }
+        BatchLinkCorruption::PredecessorCumulative => {
+            sqlx::query(
+                "UPDATE scan_observation_batches SET cumulative_observation_count = 1 \
+                 WHERE scan_session_id = ? AND sequence = 0",
+            )
+            .bind(session_id)
+            .execute(cp.pool_for_test())
+            .await
+            .unwrap();
+        }
+    }
 }
 
 #[tokio::test]

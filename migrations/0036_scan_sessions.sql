@@ -1,14 +1,16 @@
 CREATE UNIQUE INDEX file_locations_scan_watermark_root
 ON file_locations(id, storage_root_id);
 
+CREATE UNIQUE INDEX node_incarnations_owner_binding
+ON node_incarnations(incarnation_id, node_id);
+
 CREATE TABLE scan_sessions (
     id                          INTEGER PRIMARY KEY,
     storage_root_id             INTEGER NOT NULL
         REFERENCES library_roots(id) ON DELETE RESTRICT,
     root_epoch                  INTEGER NOT NULL CHECK (root_epoch >= 0),
     owner_node_id               INTEGER NOT NULL REFERENCES nodes(id) ON DELETE RESTRICT,
-    owner_incarnation_id        TEXT
-        REFERENCES node_incarnations(incarnation_id) ON DELETE RESTRICT,
+    owner_incarnation_id        TEXT,
     status                      TEXT NOT NULL
         CHECK (status IN ('requested', 'running', 'succeeded', 'failed', 'cancelled', 'stale')),
     next_sequence               INTEGER NOT NULL DEFAULT 0 CHECK (next_sequence >= 0),
@@ -38,6 +40,8 @@ CREATE TABLE scan_sessions (
     ),
     FOREIGN KEY (location_high_watermark_id, storage_root_id)
         REFERENCES file_locations(id, storage_root_id) ON DELETE RESTRICT,
+    FOREIGN KEY (owner_incarnation_id, owner_node_id)
+        REFERENCES node_incarnations(incarnation_id, node_id) ON DELETE RESTRICT,
     CHECK (
         batch_count = next_sequence
         AND (
@@ -102,14 +106,58 @@ CREATE TABLE scan_observation_batches (
     scan_session_id             INTEGER NOT NULL
         REFERENCES scan_sessions(id) ON DELETE RESTRICT,
     sequence                    INTEGER NOT NULL CHECK (sequence >= 0),
+    previous_sequence           INTEGER,
     request_hash                TEXT NOT NULL
         CHECK (length(request_hash) = 64 AND request_hash NOT GLOB '*[^0-9a-f]*'),
     observation_count           INTEGER NOT NULL CHECK (observation_count BETWEEN 1 AND 1000),
     accepted_at                 TEXT NOT NULL,
     cumulative_observation_count INTEGER NOT NULL
         CHECK (cumulative_observation_count BETWEEN observation_count AND 100000),
-    PRIMARY KEY (scan_session_id, sequence)
+    PRIMARY KEY (scan_session_id, sequence),
+    FOREIGN KEY (scan_session_id, previous_sequence)
+        REFERENCES scan_observation_batches(scan_session_id, sequence) ON DELETE RESTRICT,
+    CHECK (
+        (sequence = 0 AND previous_sequence IS NULL)
+        OR (sequence > 0 AND previous_sequence = sequence - 1)
+    )
 ) STRICT;
+
+CREATE TRIGGER scan_observation_batches_validate_insert
+BEFORE INSERT ON scan_observation_batches
+BEGIN
+    SELECT CASE
+        WHEN NEW.sequence > 0 AND NOT EXISTS (
+            SELECT 1 FROM scan_observation_batches AS predecessor
+            WHERE predecessor.scan_session_id = NEW.scan_session_id
+              AND predecessor.sequence = NEW.previous_sequence
+        )
+        THEN RAISE(ABORT, 'scan observation batch predecessor missing')
+    END;
+    SELECT CASE
+        WHEN NEW.sequence = 0
+             AND NEW.cumulative_observation_count != NEW.observation_count
+        THEN RAISE(ABORT, 'scan observation batch cumulative count mismatch')
+        WHEN NEW.sequence > 0 AND NEW.cumulative_observation_count != (
+            SELECT predecessor.cumulative_observation_count + NEW.observation_count
+            FROM scan_observation_batches AS predecessor
+            WHERE predecessor.scan_session_id = NEW.scan_session_id
+              AND predecessor.sequence = NEW.previous_sequence
+        )
+        THEN RAISE(ABORT, 'scan observation batch cumulative count mismatch')
+    END;
+END;
+
+CREATE TRIGGER scan_observation_batches_no_update
+BEFORE UPDATE ON scan_observation_batches
+BEGIN
+    SELECT RAISE(ABORT, 'scan observation batch rows are immutable');
+END;
+
+CREATE TRIGGER scan_observation_batches_no_delete
+BEFORE DELETE ON scan_observation_batches
+BEGIN
+    SELECT RAISE(ABORT, 'scan observation batch rows are immutable');
+END;
 
 CREATE TABLE scan_observations (
     scan_session_id             INTEGER NOT NULL,
