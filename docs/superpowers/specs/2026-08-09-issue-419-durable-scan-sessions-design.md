@@ -97,7 +97,7 @@ An empty traversal sends no batch and completes with a null last sequence.
 | `storage_root_id` | required FK to `library_roots`, `ON DELETE RESTRICT` |
 | `root_epoch` | checked non-negative snapshot taken at request time |
 | `owner_node_id` | required FK to the root owner at request time |
-| `owner_incarnation_id` | nullable until start, then required FK to `node_incarnations` |
+| `owner_incarnation_id` | nullable until start; composite FK binds it to `owner_node_id` |
 | `status` | closed six-token lifecycle vocabulary |
 | `next_sequence` | next zero-based batch sequence, initially `0` |
 | `batch_count`, `observation_count` | `batch_count = next_sequence`; observations `0..=100000` |
@@ -126,11 +126,16 @@ root/time inspection.
 
 ### `scan_observation_batches`
 
-The primary key is `(scan_session_id, sequence)`. Each row stores a lowercase SHA-256 request
-hash, observation count, accepted timestamp, and cumulative count returned to the caller. CHECKs
-require 1–1000 observations in a batch and bound cumulative count to 100,000. The row is inserted
-only in the same transaction as all its observation rows, the session counter advance, its event,
-and the remote idempotency completion.
+The primary key is `(scan_session_id, sequence)`. Each row stores a nullable predecessor sequence,
+a lowercase SHA-256 request hash, observation count, accepted timestamp, and cumulative count
+returned to the caller. Sequence zero requires a null predecessor; every later row requires
+`previous_sequence = sequence - 1` and self-references that row for the same session with
+`ON DELETE RESTRICT`. An insert trigger requires cumulative count to equal the row's observation
+count at sequence zero or its predecessor cumulative count plus its observation count otherwise.
+UPDATE and DELETE triggers make accepted batch rows immutable. CHECKs require 1–1000 observations
+in a batch and bound cumulative count to 100,000. The row is inserted only in the same transaction
+as all its observation rows, the session counter advance, its event, and the remote idempotency
+completion.
 
 ### `scan_observations`
 
@@ -237,6 +242,15 @@ observation, does not advance counters or the deadline, and emits no batch event
 relationships are validated before capacity classification; a below-next request whose
 accepted-batch row is missing is a database error, not a sequence conflict. The same idempotency
 key can succeed after repair.
+
+Before a new acceptance or exact ledger replay returns, the repository validates the immediate
+predecessor and cumulative relation. Sequence zero must begin at its own observation count; every
+later batch's cumulative count must equal its predecessor cumulative count plus its own count.
+Missing prefixes and inconsistent links are database errors before event, progress, deadline, or
+remote replay completion. This remains O(1) per request because the self-referential foreign key
+makes earlier-prefix deletion impossible through an enforcing connection and triggers preserve
+accepted cumulative links. Completion's bounded whole-ledger scan remains the diagnostic for
+arbitrary corruption introduced outside those enforcing boundaries.
 
 The remote idempotency key is namespaced by incarnation, as on existing node routes. Reusing one
 key for another session or sequence produces a different route-instance request hash and fails as
@@ -450,6 +464,10 @@ reject negative or oversized SQLite integers before classification.
   characters rather than encoded bytes.
 - Immediate transactions, database unique constraints, request hashes, and immutable terminal
   states constrain replay and races.
+- Composite owner/incarnation and root/high-water foreign keys prevent cross-owner persisted
+  pointers. Repository reads serving start, batch, terminalization, and completion revalidate the
+  incarnation binding before classification; bulk recovery validates every candidate before its
+  set update. A completed remote idempotency replay remains replay-first and read-only.
 - Root epoch/incarnation/availability/deadline checks and the high-water mark prevent stale or
   partial traversal evidence from widening retirement.
 - Complete-watermark checks, candidate preflight, commit-lock checks, and one transaction prevent
@@ -484,7 +502,8 @@ is live.
   existing root and location rows, rejects invalid state shapes, and appears in schema probes.
 - Corrupt negative or relationally incoherent counters, missing accepted-batch rows, epochs,
   unknown status, malformed timestamps, invalid locator/object identity, wrong-root high-water
-  marks, and impossible terminal shapes surface as database errors before business classification.
+  marks, cross-node owner incarnations, and impossible terminal shapes surface as database errors
+  before business classification.
 - Empty, ASCII 1024-byte, ASCII 1025-byte, and NUL-containing terminal reasons are exercised
   through failure API and cancellation CLI/use-case paths. Multibyte cases accept exactly 1024
   encoded bytes and reject the next complete UTF-8 scalar above the limit through both the shared
@@ -501,6 +520,12 @@ is live.
 - Start binds the current incarnation and captures the correct location high-water mark.
 - A new batch advances exactly once. Replaying the same HTTP key or the same sequence/hash under a
   different key returns the same outcome with unchanged observation/event counts.
+- Missing predecessor rows, broken cumulative links, and cross-node incarnation pointers fail as
+  database corruption with no session, deadline, event, or replay mutation; repairing the row lets
+  the same idempotency key succeed.
+- Insert arithmetic and immutable-ledger triggers reject direct SQL attempts to create, update, or
+  delete broken accepted links. Completion detects arbitrary deeper corruption introduced with
+  enforcement deliberately disabled.
 - An exact accepted replay after its session deadline remains read-only and returns the stored
   outcome; recovery or the next genuinely new mutation then persists `stale` exactly once.
 - Gaps, regressions, conflicting body hashes, duplicate locators within/across batches, cross-
