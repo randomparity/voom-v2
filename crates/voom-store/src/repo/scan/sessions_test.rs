@@ -1,3 +1,4 @@
+use sqlx::Acquire;
 use voom_core::{
     NodeId, ProviderRelativeLocator, ScanSessionId, ScanSessionStatus, ScanTerminalReason,
     StorageRootId, VoomError,
@@ -36,6 +37,37 @@ async fn scan_session_capacity_accepts_the_limit_replays_and_rejects_crossing_at
         T0 + time::Duration::minutes(5),
         T0,
     )
+    .await
+    .unwrap();
+    sqlx::query(
+        "WITH RECURSIVE numbers(value) AS (\
+             SELECT 0 UNION ALL SELECT value + 1 FROM numbers WHERE value < 99\
+         )\
+         INSERT INTO scan_observation_batches (scan_session_id, sequence, previous_sequence, \
+             request_hash, observation_count, accepted_at, cumulative_observation_count)\
+         SELECT ?, value, CASE WHEN value = 0 THEN NULL ELSE value - 1 END, \
+             printf('%064x', value), CASE WHEN value < 99 THEN 1000 ELSE 999 END, \
+             '1970-01-01T00:00:00Z', \
+             CASE WHEN value < 99 THEN (value + 1) * 1000 ELSE 99999 END \
+         FROM numbers ORDER BY value ASC",
+    )
+    .bind(i64::try_from(session.id.0).unwrap())
+    .execute(&mut *tx)
+    .await
+    .unwrap();
+    sqlx::query(
+        "WITH RECURSIVE numbers(value) AS (\
+             SELECT 0 UNION ALL SELECT value + 1 FROM numbers WHERE value < 99998\
+         )\
+         INSERT INTO scan_observations (scan_session_id, batch_sequence, ordinal, \
+             provider_relative_locator, provider_object_identity, size_bytes, modified_at, \
+             stability_started_at, stability_confirmed_at)\
+         SELECT ?, value / 1000, value % 1000, 'capacity/' || value, 'object-' || value, 1, \
+             '1970-01-01T00:00:00Z', '1970-01-01T00:00:00Z', \
+             '1970-01-01T00:00:00Z' FROM numbers ORDER BY value ASC",
+    )
+    .bind(i64::try_from(session.id.0).unwrap())
+    .execute(&mut *tx)
     .await
     .unwrap();
     sqlx::query(
@@ -102,7 +134,7 @@ async fn scan_session_capacity_accepts_the_limit_replays_and_rejects_crossing_at
     .fetch_one(&mut *tx)
     .await
     .unwrap();
-    assert_eq!(counts, (1, 1));
+    assert_eq!(counts, (101, 100_000));
 }
 
 #[tokio::test]
@@ -461,6 +493,62 @@ async fn seed_incarnation(pool: &sqlx::SqlitePool, incarnation: &str) {
     .execute(pool)
     .await
     .unwrap();
+}
+
+async fn seed_other_node_incarnation(pool: &sqlx::SqlitePool, incarnation: &str) {
+    sqlx::query(
+        "INSERT INTO nodes (id, name, kind, status, registered_at, last_seen_at, retired_at, \
+         heartbeat_ttl_seconds, auth_token_hash, auth_token_hint, metadata, epoch) \
+         VALUES (9000002, 'other-scan-owner', 'local', 'active', '1970-01-01T00:00:00Z', \
+         '1970-01-01T00:00:00Z', NULL, 60, 'other-hash', 'other-hint', '{}', 0)",
+    )
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO node_incarnations \
+         (incarnation_id, node_id, status, started_at, last_seen_at) \
+         VALUES (?, 9000002, 'active', '1970-01-01T00:00:00Z', \
+         '1970-01-01T00:00:00Z')",
+    )
+    .bind(incarnation)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+async fn corrupt_session_owner_incarnation(
+    pool: &sqlx::SqlitePool,
+    session: ScanSessionId,
+    incarnation: &str,
+) {
+    let mut connection = pool.acquire().await.unwrap();
+    connection.close_on_drop();
+    sqlx::query("PRAGMA foreign_keys = OFF")
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE scan_sessions SET owner_incarnation_id = ? WHERE id = ?")
+        .bind(incarnation)
+        .bind(i64::try_from(session.0).unwrap())
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+    connection.close().await.unwrap();
+}
+
+async fn remove_batch_update_guard(pool: &sqlx::SqlitePool) {
+    sqlx::query("DROP TRIGGER scan_observation_batches_no_update")
+        .execute(pool)
+        .await
+        .unwrap();
+}
+
+async fn remove_batch_delete_guard(pool: &sqlx::SqlitePool) {
+    sqlx::query("DROP TRIGGER scan_observation_batches_no_delete")
+        .execute(pool)
+        .await
+        .unwrap();
 }
 
 async fn seed_second_root(pool: &sqlx::SqlitePool) -> StorageRootId {
@@ -990,6 +1078,128 @@ async fn stale_running_for_incarnation_decodes_all_running_rows_before_mutation(
 }
 
 #[tokio::test]
+async fn mutation_and_recovery_reads_reject_cross_node_incarnation_before_updates() {
+    let (pool, _tmp) = fresh_pool().await;
+    let root = seed_test_storage_root(&pool).await.unwrap();
+    let owner_incarnation = "12121212121212121212121212121212";
+    let other_incarnation = "34343434343434343434343434343434";
+    seed_incarnation(&pool, owner_incarnation).await;
+    seed_other_node_incarnation(&pool, other_incarnation).await;
+    let repo = SqliteScanSessionRepo::new(pool.clone());
+    let mut tx = pool.begin().await.unwrap();
+    let session = repo
+        .insert_requested_in_tx(&mut tx, new_session(root))
+        .await
+        .unwrap();
+    repo.start_in_tx(
+        &mut tx,
+        session.id,
+        owner_incarnation.parse().unwrap(),
+        T0,
+        T0,
+    )
+    .await
+    .unwrap();
+    let accepted = batch(session.id, 0, 'a', vec![observation("cross-node.mkv")]);
+    repo.accepted_batch_in_tx(&mut tx, accepted.clone())
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    corrupt_session_owner_incarnation(&pool, session.id, other_incarnation).await;
+
+    for incarnation_scope in [false, true] {
+        let mut tx = pool.begin().await.unwrap();
+        let error = if incarnation_scope {
+            repo.stale_running_for_incarnation_in_tx(
+                &mut tx,
+                other_incarnation.parse().unwrap(),
+                voom_core::ScanTerminalReason::new("cross-node recovery").unwrap(),
+                T0,
+            )
+            .await
+            .unwrap_err()
+        } else {
+            repo.stale_expired_in_tx(&mut tx, T0 + time::Duration::minutes(5))
+                .await
+                .unwrap_err()
+        };
+        assert!(matches!(error, VoomError::Database { .. }));
+        tx.rollback().await.unwrap();
+    }
+
+    let mut tx = pool.begin().await.unwrap();
+    let error = repo
+        .accepted_batch_in_tx(&mut tx, accepted)
+        .await
+        .unwrap_err();
+    assert!(matches!(error, VoomError::Database { .. }));
+    tx.rollback().await.unwrap();
+
+    let mut tx = pool.begin().await.unwrap();
+    let error = repo
+        .terminalize_in_tx(
+            &mut tx,
+            session.id,
+            ScanSessionStatus::Stale,
+            voom_core::ScanTerminalReason::new("cross-node corruption").unwrap(),
+            T0,
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(error, VoomError::Database { .. }));
+    tx.rollback().await.unwrap();
+
+    let state: (String, i64, i64) = sqlx::query_as(
+        "SELECT status, next_sequence, observation_count FROM scan_sessions WHERE id = ?",
+    )
+    .bind(i64::try_from(session.id.0).unwrap())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(state, ("running".to_owned(), 1, 1));
+}
+
+#[tokio::test]
+async fn start_read_rejects_cross_node_incarnation_with_foreign_keys_disabled() {
+    let (pool, _tmp) = fresh_pool().await;
+    let root = seed_test_storage_root(&pool).await.unwrap();
+    let other_incarnation = "45454545454545454545454545454545";
+    seed_other_node_incarnation(&pool, other_incarnation).await;
+    let repo = SqliteScanSessionRepo::new(pool.clone());
+    let mut tx = pool.begin().await.unwrap();
+    let session = repo
+        .insert_requested_in_tx(&mut tx, new_session(root))
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+
+    let mut connection = pool.acquire().await.unwrap();
+    connection.close_on_drop();
+    sqlx::query("PRAGMA foreign_keys = OFF")
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+    let mut tx = connection.begin().await.unwrap();
+    let error = repo
+        .start_in_tx(
+            &mut tx,
+            session.id,
+            other_incarnation.parse().unwrap(),
+            T0 + time::Duration::minutes(5),
+            T0,
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(error, VoomError::Database { .. }));
+    tx.rollback().await.unwrap();
+    connection.close().await.unwrap();
+
+    let stored = repo.get(session.id).await.unwrap().unwrap();
+    assert_eq!(stored.status, ScanSessionStatus::Requested);
+    assert_eq!(stored.owner_incarnation_id, None);
+}
+
+#[tokio::test]
 async fn batch_acceptance_replays_the_same_session_sequence_and_rejects_conflicts_without_rows() {
     let (pool, _tmp) = fresh_pool().await;
     let root = seed_test_storage_root(&pool).await.unwrap();
@@ -1294,6 +1504,7 @@ async fn assert_batch_replay_rejects_corruption(case: BatchLedgerCorruption) {
         .await
         .unwrap();
     tx.commit().await.unwrap();
+    remove_batch_update_guard(&pool).await;
     with_check_constraints_disabled(&pool, |connection| {
         Box::pin(async move {
             match case {
@@ -1333,6 +1544,231 @@ async fn batch_replay_validates_the_stored_hash_and_outcome_before_returning_it(
     ] {
         assert_batch_replay_rejects_corruption(case).await;
     }
+}
+
+#[derive(Clone, Copy)]
+enum BatchLinkCorruption {
+    MissingPredecessor,
+    PredecessorCumulative,
+}
+
+async fn assert_batch_link_corruption_rejected(case: BatchLinkCorruption) {
+    let (pool, _tmp) = fresh_pool().await;
+    let root = seed_test_storage_root(&pool).await.unwrap();
+    seed_incarnation(&pool, "56565656565656565656565656565656").await;
+    let repo = SqliteScanSessionRepo::new(pool.clone());
+    let mut tx = pool.begin().await.unwrap();
+    let session = repo
+        .insert_requested_in_tx(&mut tx, new_session(root))
+        .await
+        .unwrap();
+    repo.start_in_tx(
+        &mut tx,
+        session.id,
+        "56565656565656565656565656565656".parse().unwrap(),
+        T0 + time::Duration::minutes(5),
+        T0,
+    )
+    .await
+    .unwrap();
+    let first = batch(session.id, 0, 'a', vec![observation("chain/first.mkv")]);
+    let second = batch(session.id, 1, 'b', vec![observation("chain/second.mkv")]);
+    repo.accepted_batch_in_tx(&mut tx, first.clone())
+        .await
+        .unwrap();
+    repo.accepted_batch_in_tx(&mut tx, second.clone())
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+
+    match case {
+        BatchLinkCorruption::MissingPredecessor => {
+            remove_batch_delete_guard(&pool).await;
+            let mut connection = pool.acquire().await.unwrap();
+            connection.close_on_drop();
+            sqlx::query("PRAGMA foreign_keys = OFF")
+                .execute(&mut *connection)
+                .await
+                .unwrap();
+            sqlx::query(
+                "DELETE FROM scan_observation_batches WHERE scan_session_id = ? AND sequence = 0",
+            )
+            .bind(i64::try_from(session.id.0).unwrap())
+            .execute(&mut *connection)
+            .await
+            .unwrap();
+            connection.close().await.unwrap();
+        }
+        BatchLinkCorruption::PredecessorCumulative => {
+            remove_batch_update_guard(&pool).await;
+            sqlx::query(
+                "UPDATE scan_observation_batches SET cumulative_observation_count = 2 \
+                 WHERE scan_session_id = ? AND sequence = 0",
+            )
+            .bind(i64::try_from(session.id.0).unwrap())
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+    }
+
+    let before: (i64, i64, i64, String) = sqlx::query_as(
+        "SELECT next_sequence, batch_count, observation_count, progress_deadline_at \
+         FROM scan_sessions WHERE id = ?",
+    )
+    .bind(i64::try_from(session.id.0).unwrap())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let third = batch(session.id, 2, 'c', vec![observation("chain/third.mkv")]);
+    let mut tx = pool.begin().await.unwrap();
+    for input in [second.clone(), third.clone()] {
+        let error = repo.accepted_batch_in_tx(&mut tx, input).await.unwrap_err();
+        assert!(matches!(error, VoomError::Database { .. }));
+    }
+    tx.commit().await.unwrap();
+    let after: (i64, i64, i64, String) = sqlx::query_as(
+        "SELECT next_sequence, batch_count, observation_count, progress_deadline_at \
+         FROM scan_sessions WHERE id = ?",
+    )
+    .bind(i64::try_from(session.id.0).unwrap())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(after, before);
+
+    match case {
+        BatchLinkCorruption::MissingPredecessor => {
+            sqlx::query(
+                "INSERT INTO scan_observation_batches (scan_session_id, sequence, \
+                 previous_sequence, request_hash, observation_count, accepted_at, \
+                 cumulative_observation_count) VALUES (?, 0, NULL, ?, 1, \
+                 '1970-01-01T00:00:00Z', 1)",
+            )
+            .bind(i64::try_from(session.id.0).unwrap())
+            .bind("a".repeat(64))
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        BatchLinkCorruption::PredecessorCumulative => {
+            sqlx::query(
+                "UPDATE scan_observation_batches SET cumulative_observation_count = 1 \
+                 WHERE scan_session_id = ? AND sequence = 0",
+            )
+            .bind(i64::try_from(session.id.0).unwrap())
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+    }
+    let mut tx = pool.begin().await.unwrap();
+    assert_eq!(
+        repo.accepted_batch_in_tx(&mut tx, second)
+            .await
+            .unwrap()
+            .sequence,
+        1
+    );
+    assert_eq!(
+        repo.accepted_batch_in_tx(&mut tx, third)
+            .await
+            .unwrap()
+            .sequence,
+        2
+    );
+    tx.commit().await.unwrap();
+}
+
+#[tokio::test]
+async fn new_and_replayed_batches_reject_broken_immediate_links_until_repaired() {
+    for case in [
+        BatchLinkCorruption::MissingPredecessor,
+        BatchLinkCorruption::PredecessorCumulative,
+    ] {
+        assert_batch_link_corruption_rejected(case).await;
+    }
+}
+
+#[tokio::test]
+async fn completion_global_backstop_rejects_deeper_batch_link_corruption() {
+    let (pool, _tmp) = fresh_pool().await;
+    let root = seed_test_storage_root(&pool).await.unwrap();
+    let absent = seed_rooted_location(&pool, root, "completion/deeper-absent.mkv").await;
+    let incarnation = "90909090909090909090909090909090";
+    seed_incarnation(&pool, incarnation).await;
+    let incarnation_id = incarnation.parse().unwrap();
+    let repo = SqliteScanSessionRepo::new(pool.clone());
+    let mut tx = pool.begin().await.unwrap();
+    let session = repo
+        .insert_requested_in_tx(&mut tx, new_session(root))
+        .await
+        .unwrap();
+    repo.start_in_tx(
+        &mut tx,
+        session.id,
+        incarnation_id,
+        T0 + time::Duration::minutes(5),
+        T0,
+    )
+    .await
+    .unwrap();
+    for (sequence, hash) in [(0, 'a'), (1, 'b'), (2, 'c')] {
+        repo.accepted_batch_in_tx(
+            &mut tx,
+            batch(
+                session.id,
+                sequence,
+                hash,
+                vec![observation(&format!("completion/deeper-{sequence}.mkv"))],
+            ),
+        )
+        .await
+        .unwrap();
+    }
+    tx.commit().await.unwrap();
+    remove_batch_update_guard(&pool).await;
+    sqlx::query(
+        "UPDATE scan_observation_batches SET cumulative_observation_count = 2 \
+         WHERE scan_session_id = ? AND sequence = 0",
+    )
+    .bind(i64::try_from(session.id.0).unwrap())
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let mut tx = pool.begin().await.unwrap();
+    let error = repo
+        .complete_in_tx(
+            &mut tx,
+            CompleteScanSessionInput {
+                scan_session_id: session.id,
+                expected_storage_root_id: root,
+                expected_root_epoch: 1,
+                expected_owner_node_id: NodeId(9_000_001),
+                expected_owner_incarnation_id: incarnation_id,
+                last_sequence: Some(2),
+                observation_count: 3,
+                completed_at: T0 + time::Duration::minutes(1),
+            },
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(error, VoomError::Database { .. }));
+    tx.rollback().await.unwrap();
+    let state: String = sqlx::query_scalar("SELECT status FROM scan_sessions WHERE id = ?")
+        .bind(i64::try_from(session.id.0).unwrap())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let retired_at: Option<String> =
+        sqlx::query_scalar("SELECT retired_at FROM file_locations WHERE id = ?")
+            .bind(absent)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(state, "running");
+    assert!(retired_at.is_none());
 }
 
 #[tokio::test]
@@ -1871,6 +2307,7 @@ async fn corrupt_completion_ledger(
             .unwrap();
         }
         CompletionLedgerCorruption::BatchAndSessionCountsExceedActual => {
+            remove_batch_update_guard(pool).await;
             sqlx::query(
                 "UPDATE scan_observation_batches SET observation_count = 2, \
                  cumulative_observation_count = 2 WHERE scan_session_id = ?",
@@ -2085,9 +2522,9 @@ async fn add_observed_locator(pool: &sqlx::SqlitePool, session: ScanSessionId) {
     .await
     .unwrap();
     sqlx::query(
-        "INSERT INTO scan_observation_batches (scan_session_id, sequence, request_hash, \
-         observation_count, accepted_at, cumulative_observation_count) \
-         VALUES (?, 0, ?, 1, '1970-01-01T00:01:00Z', 1)",
+        "INSERT INTO scan_observation_batches (scan_session_id, sequence, previous_sequence, \
+         request_hash, observation_count, accepted_at, cumulative_observation_count) \
+         VALUES (?, 0, NULL, ?, 1, '1970-01-01T00:01:00Z', 1)",
     )
     .bind(i64::try_from(session.0).unwrap())
     .bind("b".repeat(64))

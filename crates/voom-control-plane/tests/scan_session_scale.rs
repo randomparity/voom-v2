@@ -149,6 +149,74 @@ async fn max_ledger_reconciles_100k_within_api_budget() {
     }
 }
 
+#[tokio::test]
+async fn bulk_batch_fixture_requires_ascending_predecessor_order() {
+    let ascending = scale_fixture(100).await;
+    let ascending_session = start_fixture_session(&ascending, "fixture-ascending").await;
+    insert_batch_prefix(&ascending.pool, ascending_session, 10, "ASC")
+        .await
+        .unwrap();
+    let count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM scan_observation_batches WHERE scan_session_id = ?",
+    )
+    .bind(i64::try_from(ascending_session.0).unwrap())
+    .fetch_one(&ascending.pool)
+    .await
+    .unwrap();
+    assert_eq!(count, 10);
+
+    let descending = scale_fixture(101).await;
+    let descending_session = start_fixture_session(&descending, "fixture-descending").await;
+    let error = insert_batch_prefix(&descending.pool, descending_session, 10, "DESC")
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("predecessor missing"));
+}
+
+async fn start_fixture_session(fixture: &ScaleFixture, key: &str) -> voom_core::ScanSessionId {
+    let requested = fixture
+        .cp
+        .request_scan_session(fixture.root_id, 300)
+        .await
+        .unwrap();
+    fixture
+        .cp
+        .start_scan_session(RemoteScanStartInput {
+            node_id: fixture.node_id,
+            scan_session_id: requested.id,
+            incarnation_id: fixture.incarnation_id,
+            token: fixture.token.clone(),
+            idempotency_key: key.to_owned(),
+            request_hash: format!("{key}-body"),
+        })
+        .await
+        .unwrap();
+    requested.id
+}
+
+async fn insert_batch_prefix(
+    pool: &sqlx::SqlitePool,
+    session_id: voom_core::ScanSessionId,
+    count: i64,
+    order: &str,
+) -> Result<sqlx::sqlite::SqliteQueryResult, sqlx::Error> {
+    let query = format!(
+        "WITH RECURSIVE numbers(value) AS (\
+             SELECT 0 UNION ALL SELECT value + 1 FROM numbers WHERE value + 1 < ?\
+         )\
+         INSERT INTO scan_observation_batches (scan_session_id, sequence, previous_sequence, \
+             request_hash, observation_count, accepted_at, cumulative_observation_count)\
+         SELECT ?, value, CASE WHEN value = 0 THEN NULL ELSE value - 1 END, \
+             printf('%064x', value), 1, '1970-01-01T00:00:00Z', value + 1 \
+         FROM numbers ORDER BY value {order}"
+    );
+    sqlx::query(&query)
+        .bind(count)
+        .bind(i64::try_from(session_id.0).unwrap())
+        .execute(pool)
+        .await
+}
+
 async fn scale_fixture(repetition: usize) -> ScaleFixture {
     let database = voom_test_support::TempDatabase::new().unwrap();
     let url = format!("sqlite://{}", database.path().display());
@@ -280,10 +348,11 @@ async fn load_max_ledger(pool: &sqlx::SqlitePool, session_id: voom_core::ScanSes
         "WITH RECURSIVE numbers(value) AS (\
              SELECT 0 UNION ALL SELECT value + 1 FROM numbers WHERE value + 1 < ?\
          )\
-         INSERT INTO scan_observation_batches (scan_session_id, sequence, request_hash, \
-             observation_count, accepted_at, cumulative_observation_count)\
-         SELECT ?, value, printf('%064x', value), 1, \
-             '1970-01-01T00:00:00Z', value + 1 FROM numbers",
+         INSERT INTO scan_observation_batches (scan_session_id, sequence, previous_sequence, \
+             request_hash, observation_count, accepted_at, cumulative_observation_count)\
+         SELECT ?, value, CASE WHEN value = 0 THEN NULL ELSE value - 1 END, \
+             printf('%064x', value), 1, '1970-01-01T00:00:00Z', value + 1 \
+         FROM numbers ORDER BY value ASC",
     )
     .bind(count)
     .bind(id)
