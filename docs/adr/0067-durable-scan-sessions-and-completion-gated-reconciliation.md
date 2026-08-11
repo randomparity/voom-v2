@@ -22,8 +22,9 @@ locality.
 Migration 0036 adds normalized `scan_sessions`, `scan_observation_batches`, and
 `scan_observations` tables. A session snapshots the root ID,
 root epoch, owner node, an inactivity timeout, and—when it starts—the authenticated current
-owner incarnation and the highest pre-existing location ID for that root. A partial unique
-index permits at most one `requested` or `running` session per root.
+owner incarnation and the highest pre-existing location ID for that root. Composite foreign keys
+bind the incarnation to that owner node and the high-water location to that storage root. A
+partial unique index permits at most one `requested` or `running` session per root.
 
 The lifecycle is `requested -> running -> succeeded | failed | cancelled | stale`, with
 `requested -> cancelled | stale` also permitted. Terminal states are immutable. The existing
@@ -39,6 +40,14 @@ batch replay returns the original accepted outcome without another observation o
 different body at the same sequence, a duplicate locator, or any sequence other than the next
 expected value is a conflict. The existing remote-idempotency ledger additionally makes lost
 HTTP responses replayable.
+
+The batch ledger is an append-only predecessor chain: sequence zero has no predecessor and every
+later row self-references sequence minus one for the same session with `ON DELETE RESTRICT`.
+Insert triggers validate the immediate cumulative arithmetic, and immutable-update/delete triggers
+preserve accepted links. Acceptance and replay revalidate the immediate predecessor and cumulative
+relationship. On enforcing connections this makes a missing prefix or corrupt link a database
+error in O(1), without rescanning the ledger on every request. Completion retains its bounded O(n)
+whole-ledger validation as the global diagnostic backstop.
 
 A session accepts at most 100,000 cumulative observations. Exact replays of already-accepted
 batches remain available at that bound. After the normal authority, lifecycle, root, and deadline
@@ -97,6 +106,10 @@ prior epoch from the retained row's incremented epoch.
   ordering conflicts.
 - A non-null start high-water mark is root-bound to the session at the database boundary. A
   cross-root pointer is corrupt data and cannot widen a completion's retirement candidates.
+- A non-null owner incarnation is node-bound at the database boundary and revalidated on reads
+  used by every repository mutation and by all candidates before a bulk recovery update. A
+  cross-node pointer is corruption, never ordinary staleness. Completed remote replay remains the
+  documented read-only replay-first exception.
 - The cumulative limit is per session, not a lifetime history quota. Authenticated nodes cannot
   request replacement sessions; only the trusted local operator can do so. Retention policy and
   deployment-level database capacity planning remain separate operational concerns.
