@@ -357,7 +357,7 @@ impl SqliteScanSessionRepo {
             )));
         };
         if let Some(outcome) = batch_replay_in_tx(tx, &input).await? {
-            validate_batch_replay_parent_frontier(&session, &outcome)?;
+            validate_batch_replay_parent_frontier_in_tx(tx, &session, &outcome).await?;
             return Ok(outcome);
         }
         if input.sequence < session.next_sequence {
@@ -1777,7 +1777,8 @@ async fn batch_replay_in_tx(
     Ok(Some(outcome))
 }
 
-fn validate_batch_replay_parent_frontier(
+async fn validate_batch_replay_parent_frontier_in_tx(
+    tx: &mut Transaction<'_, Sqlite>,
     session: &ScanSession,
     outcome: &ScanBatchOutcome,
 ) -> Result<(), VoomError> {
@@ -1795,6 +1796,32 @@ fn validate_batch_replay_parent_frontier(
         return Err(VoomError::database(format!(
             "scan session {} batch {} does not match parent frontier",
             session.id, outcome.sequence
+        )));
+    }
+    let frontier_sequence = session.next_sequence.checked_sub(1).ok_or_else(|| {
+        VoomError::database(format!(
+            "scan session {} batch {} does not match parent frontier",
+            session.id, outcome.sequence
+        ))
+    })?;
+    let session_id = i64_from_u64(session.id.0, "scan_observation_batches.scan_session_id")?;
+    let frontier_sequence_i64 = i64_from_u64(
+        frontier_sequence,
+        "scan_observation_batches.frontier_sequence",
+    )?;
+    let row = batch_with_predecessor_in_tx(tx, session_id, frontier_sequence_i64)
+        .await?
+        .ok_or_else(|| {
+            VoomError::database(format!(
+                "scan session {} is missing frontier batch {frontier_sequence}",
+                session.id
+            ))
+        })?;
+    let frontier = validate_batch_link(&row, session.id, frontier_sequence)?;
+    if frontier.cumulative_observation_count != session.observation_count {
+        return Err(VoomError::database(format!(
+            "scan session {} frontier batch {frontier_sequence} cumulative count does not match parent progress",
+            session.id
         )));
     }
     Ok(())

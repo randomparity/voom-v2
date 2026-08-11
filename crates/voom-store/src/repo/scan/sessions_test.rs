@@ -1636,6 +1636,52 @@ async fn batch_replay_rejects_a_cached_outcome_ahead_of_the_parent_frontier() {
     assert!(error.to_string().contains("does not match parent frontier"));
 }
 
+#[tokio::test]
+async fn older_batch_replay_rejects_a_missing_parent_frontier_batch() {
+    let (pool, _tmp) = fresh_pool().await;
+    let root = seed_test_storage_root(&pool).await.unwrap();
+    seed_incarnation(&pool, "69696969696969696969696969696969").await;
+    let repo = SqliteScanSessionRepo::new(pool.clone());
+    let mut tx = pool.begin().await.unwrap();
+    let session = repo
+        .insert_requested_in_tx(&mut tx, new_session(root))
+        .await
+        .unwrap();
+    repo.start_in_tx(
+        &mut tx,
+        session.id,
+        "69696969696969696969696969696969".parse().unwrap(),
+        T0 + time::Duration::minutes(5),
+        T0,
+    )
+    .await
+    .unwrap();
+    let first = batch(session.id, 0, 'a', vec![observation("older/first.mkv")]);
+    let second = batch(session.id, 1, 'b', vec![observation("older/second.mkv")]);
+    repo.accepted_batch_in_tx(&mut tx, first.clone())
+        .await
+        .unwrap();
+    repo.accepted_batch_in_tx(&mut tx, second).await.unwrap();
+    tx.commit().await.unwrap();
+
+    sqlx::query("DELETE FROM scan_observations WHERE scan_session_id = ? AND batch_sequence = 1")
+        .bind(i64::try_from(session.id.0).unwrap())
+        .execute(&pool)
+        .await
+        .unwrap();
+    remove_batch_delete_guard(&pool).await;
+    sqlx::query("DELETE FROM scan_observation_batches WHERE scan_session_id = ? AND sequence = 1")
+        .bind(i64::try_from(session.id.0).unwrap())
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let mut tx = pool.begin().await.unwrap();
+    let error = repo.accepted_batch_in_tx(&mut tx, first).await.unwrap_err();
+    assert!(matches!(error, VoomError::Database { .. }));
+    assert!(error.to_string().contains("missing frontier batch 1"));
+}
+
 #[derive(Clone, Copy)]
 enum BatchLinkCorruption {
     MissingPredecessor,
