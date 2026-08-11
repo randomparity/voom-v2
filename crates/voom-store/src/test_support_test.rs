@@ -39,7 +39,10 @@ async fn operation_error_restores_check_constraints_before_pool_reuse() {
     })
     .await;
 
-    assert!(result.is_err());
+    assert!(matches!(
+        result,
+        Err(sqlx::Error::Protocol(message)) if message == "operation failed"
+    ));
     assert_invalid_value_is_rejected(&pool).await;
 }
 
@@ -73,13 +76,18 @@ async fn cancelled_operation_never_returns_a_tainted_connection_to_the_pool() {
 #[tokio::test]
 async fn reset_failure_discards_the_tainted_connection() {
     let (pool, _database) = checked_pool().await;
-    let result: Result<(), sqlx::Error> = FORCE_CHECK_CONSTRAINTS_RESET_FAILURE
-        .scope(
-            (),
-            with_check_constraints_disabled(&pool, |_| Box::pin(async { Ok(()) })),
-        )
-        .await;
+    let result: Result<(), sqlx::Error> = with_check_constraints_disabled(&pool, |connection| {
+        Box::pin(async move {
+            let mut handle = connection.lock_handle().await?;
+            handle.set_progress_handler(1, || false);
+            Ok(())
+        })
+    })
+    .await;
 
-    assert!(result.is_err());
+    assert!(matches!(
+        result,
+        Err(sqlx::Error::Database(error)) if error.message() == "interrupted"
+    ));
     assert_invalid_value_is_rejected(&pool).await;
 }
