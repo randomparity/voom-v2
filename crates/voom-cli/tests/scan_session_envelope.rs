@@ -67,6 +67,43 @@ async fn request_show_list_reconciliation_and_cancel_emit_stable_public_envelope
     assert_cancel_command(&fixture);
 }
 
+#[tokio::test]
+async fn show_and_list_reject_a_mismatched_attributed_retirement_count() {
+    let fixture = fixture().await;
+    let pool = voom_store::connect(&fixture.url).await.unwrap();
+    sqlx::query("UPDATE scan_sessions SET retired_location_count = 3 WHERE id = ?")
+        .bind(i64::try_from(fixture.succeeded_id.0).unwrap())
+        .execute(&pool)
+        .await
+        .unwrap();
+    pool.close().await;
+
+    let id = fixture.succeeded_id.0.to_string();
+    for args in [
+        vec!["scan-session", "show", "--id", &id],
+        vec!["scan-session", "list", "--limit", "50"],
+    ] {
+        let output = command(&fixture.url, &args).output().unwrap();
+        assert_eq!(
+            output.status.code(),
+            Some(2),
+            "stdout={} stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let envelope = single_envelope(output);
+        assert_eq!(envelope["command"], "scan-session");
+        assert_eq!(envelope["status"], "error");
+        assert_eq!(envelope["error"]["code"], "DB_UNREACHABLE");
+        assert!(
+            envelope["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("does not match 2 attributed locations")
+        );
+    }
+}
+
 #[test]
 fn invalid_scan_session_arguments_emit_one_bad_args_envelope() {
     let too_long = "a".repeat(1025);

@@ -86,16 +86,17 @@ async fn scan_session_schema_enforces_lifecycle_and_provenance_backstops() {
     .unwrap();
     assert_eq!(predecessor_column, 1);
 
-    let immutable_triggers: i64 = sqlx::query_scalar(
+    let batch_triggers: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM sqlite_schema WHERE type = 'trigger' AND name IN (\
          'scan_observation_batches_validate_insert', \
+         'scan_observation_batches_validate_parent_frontier', \
          'scan_observation_batches_no_update', \
          'scan_observation_batches_no_delete')",
     )
     .fetch_one(&pool)
     .await
     .unwrap();
-    assert_eq!(immutable_triggers, 3);
+    assert_eq!(batch_triggers, 4);
 
     let batch_self_foreign_key: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM pragma_foreign_key_list('scan_observation_batches') \
@@ -160,12 +161,28 @@ async fn scan_batch_schema_enforces_append_only_predecessor_arithmetic() {
     let session = insert_running_scan_session(&pool, 9_000_001, "batch-chain-incarnation").await;
 
     sqlx::query(
+        "UPDATE scan_sessions SET next_sequence = 1, batch_count = 1, observation_count = 2 \
+         WHERE id = ?",
+    )
+    .bind(session)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
         "INSERT INTO scan_observation_batches (scan_session_id, sequence, previous_sequence, \
          request_hash, observation_count, accepted_at, cumulative_observation_count) \
          VALUES (?, 0, NULL, ?, 2, '1970-01-01T00:00:01Z', 2)",
     )
     .bind(session)
     .bind("a".repeat(64))
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "UPDATE scan_sessions SET next_sequence = 2, batch_count = 2, observation_count = 5 \
+         WHERE id = ?",
+    )
+    .bind(session)
     .execute(&pool)
     .await
     .unwrap();
@@ -359,6 +376,14 @@ async fn scan_session_schema_rejects_invalid_rows_and_preserves_byte_boundaries(
     .unwrap();
 
     sqlx::query(
+        "UPDATE scan_sessions SET next_sequence = 1, batch_count = 1, observation_count = 1 \
+         WHERE id = ?",
+    )
+    .bind(active_session_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
         "INSERT INTO scan_observation_batches \
          (scan_session_id, sequence, previous_sequence, request_hash, observation_count, \
           accepted_at, cumulative_observation_count) \
@@ -417,6 +442,10 @@ async fn scan_session_capacity_schema_rejects_session_and_batch_totals_over_the_
     )
     .await;
     sqlx::query("DROP TRIGGER scan_observation_batches_validate_insert")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("DROP TRIGGER scan_observation_batches_validate_parent_frontier")
         .execute(&pool)
         .await
         .unwrap();

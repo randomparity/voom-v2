@@ -689,6 +689,10 @@ async fn scan_session_capacity_maps_to_http_409_without_leaking_observation_data
         )
         .await;
     assert_eq!(start.status(), StatusCode::OK);
+    sqlx::query("DROP TRIGGER IF EXISTS scan_observation_batches_validate_parent_frontier")
+        .execute(&fixture.pool)
+        .await
+        .unwrap();
     sqlx::query(
         "WITH RECURSIVE numbers(value) AS (\
              SELECT 0 UNION ALL SELECT value + 1 FROM numbers WHERE value < 99\

@@ -528,6 +528,10 @@ async fn seed_capacity_prefix(
 ) {
     let session_id = i64::try_from(session_id.0).unwrap();
     let final_batch_count = observation_total - 99_000;
+    sqlx::query("DROP TRIGGER IF EXISTS scan_observation_batches_validate_parent_frontier")
+        .execute(cp.pool_for_test())
+        .await
+        .unwrap();
     sqlx::query(
         "WITH RECURSIVE numbers(value) AS (\
              SELECT 0 UNION ALL SELECT value + 1 FROM numbers WHERE value < 99\
@@ -885,6 +889,10 @@ async fn repair_public_batch_link(
     let session_id = i64::try_from(session_id.0).unwrap();
     match case {
         BatchLinkCorruption::MissingPredecessor => {
+            sqlx::query("DROP TRIGGER IF EXISTS scan_observation_batches_validate_parent_frontier")
+                .execute(cp.pool_for_test())
+                .await
+                .unwrap();
             sqlx::query(
                 "INSERT INTO scan_observation_batches (scan_session_id, sequence, \
                  previous_sequence, request_hash, observation_count, accepted_at, \

@@ -175,6 +175,9 @@ async fn insert_batch_prefix(
     count: i64,
     order: &str,
 ) -> Result<sqlx::sqlite::SqliteQueryResult, sqlx::Error> {
+    sqlx::query("DROP TRIGGER IF EXISTS scan_observation_batches_validate_parent_frontier")
+        .execute(pool)
+        .await?;
     let query = format!(
         "WITH RECURSIVE numbers(value) AS (\
              SELECT 0 UNION ALL SELECT value + 1 FROM numbers WHERE value + 1 < ?\
@@ -316,6 +319,10 @@ async fn load_locations(pool: &sqlx::SqlitePool, root_id: StorageRootId) {
 }
 
 async fn load_max_ledger(pool: &sqlx::SqlitePool, session_id: voom_core::ScanSessionId) {
+    sqlx::query("DROP TRIGGER IF EXISTS scan_observation_batches_validate_parent_frontier")
+        .execute(pool)
+        .await
+        .unwrap();
     let mut tx = pool.begin().await.unwrap();
     let id = i64::try_from(session_id.0).unwrap();
     let count = i64::try_from(LOCATION_COUNT).unwrap();

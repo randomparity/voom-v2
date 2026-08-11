@@ -31,7 +31,7 @@ impl SqliteScanSessionRepo {
             .fetch_optional(&self.pool)
             .await
             .map_err(|error| VoomError::database_context("scan_sessions get", error))?;
-        row.as_ref().map(row_to_scan_session).transpose()
+        row.as_ref().map(row_to_inspected_scan_session).transpose()
     }
 
     pub async fn latest_succeeded_for_root(
@@ -142,7 +142,7 @@ impl SqliteScanSessionRepo {
             .map_err(|error| {
                 VoomError::database_context("scan_sessions get in transaction", error)
             })?;
-        row.as_ref().map(row_to_scan_session).transpose()
+        row.as_ref().map(row_to_inspected_scan_session).transpose()
     }
 
     async fn mutation_session_in_tx(
@@ -357,6 +357,7 @@ impl SqliteScanSessionRepo {
             )));
         };
         if let Some(outcome) = batch_replay_in_tx(tx, &input).await? {
+            validate_batch_replay_parent_frontier(&session, &outcome)?;
             return Ok(outcome);
         }
         if input.sequence < session.next_sequence {
@@ -402,9 +403,11 @@ impl SqliteScanSessionRepo {
         )?;
         let next_sequence_i64 = i64_from_u64(next_sequence, "scan_sessions.next_sequence")?;
         let batch_count_i64 = i64_from_u64(batch_count, "scan_sessions.batch_count")?;
-        insert_batch_in_tx(tx, &input, cumulative_count_i64).await?;
-        insert_observations_in_tx(tx, &input).await?;
-        let updated = update_batch_progress_in_tx(
+        sqlx::query("SAVEPOINT scan_batch_accept")
+            .execute(&mut **tx)
+            .await
+            .map_err(|error| VoomError::database_context("begin scan batch savepoint", error))?;
+        let persisted = persist_new_batch_in_tx(
             tx,
             &input,
             next_sequence_i64,
@@ -412,13 +415,12 @@ impl SqliteScanSessionRepo {
             cumulative_count_i64,
             i64_from_u64(session.observation_count, "scan_sessions.observation_count")?,
         )
-        .await?;
-        if updated.rows_affected() != 1 {
-            return Err(VoomError::Conflict(format!(
-                "scan session {} batch {} raced",
-                input.scan_session_id, input.sequence
-            )));
+        .await;
+        if let Err(error) = persisted {
+            rollback_batch_savepoint(tx).await?;
+            return Err(error);
         }
+        release_batch_savepoint(tx).await?;
         Ok(ScanBatchOutcome {
             scan_session_id: input.scan_session_id,
             sequence: input.sequence,
@@ -517,7 +519,10 @@ impl SqliteScanSessionRepo {
     pub async fn list(&self, query: ScanSessionListQuery) -> Result<ScanSessionPage, VoomError> {
         let limit = checked_page_limit(query.limit, "scan session list")?;
         let mut builder = QueryBuilder::<Sqlite>::new(format!(
-            "SELECT {SCAN_SESSION_COLS} FROM scan_sessions WHERE 1 = 1"
+            "SELECT {SCAN_SESSION_COLS}, \
+             (SELECT COUNT(*) FROM file_locations \
+              WHERE retired_by_scan_session_id = scan_sessions.id) AS attributed_location_count \
+             FROM scan_sessions WHERE 1 = 1"
         ));
         if let Some(storage_root_id) = query.storage_root_id {
             builder
@@ -543,7 +548,7 @@ impl SqliteScanSessionRepo {
             .map_err(|error| VoomError::database_context("scan session list", error))?;
         let mut items = rows
             .iter()
-            .map(row_to_scan_session)
+            .map(row_to_inspected_scan_session)
             .collect::<Result<Vec<_>, _>>()?;
         let limit = usize::try_from(limit)
             .map_err(|error| VoomError::database_context("scan session list limit", error))?;
@@ -612,31 +617,10 @@ impl SqliteScanSessionRepo {
         session: &ScanSession,
     ) -> Result<(), VoomError> {
         let session_id = i64_from_u64(session.id.0, "file_locations.retired_by_scan_session_id")?;
-        let attributed_count: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM file_locations WHERE retired_by_scan_session_id = ?",
-        )
-        .bind(session_id)
-        .fetch_one(&mut **tx)
-        .await
-        .map_err(|error| VoomError::database_context("scan reconciliation count", error))?;
-        let attributed_count = u64_from_i64(attributed_count, "scan reconciliation count")?;
         if session.status != ScanSessionStatus::Succeeded {
-            return if attributed_count == 0 {
-                Err(VoomError::Conflict(format!(
-                    "scan session {} has not succeeded",
-                    session.id
-                )))
-            } else {
-                Err(VoomError::database(format!(
-                    "non-succeeded scan session {} has attributed locations",
-                    session.id
-                )))
-            };
-        }
-        if attributed_count != session.retired_location_count {
-            return Err(VoomError::database(format!(
-                "scan session {} retired count {} does not match {attributed_count} attributed locations",
-                session.id, session.retired_location_count
+            return Err(VoomError::Conflict(format!(
+                "scan session {} has not succeeded",
+                session.id
             )));
         }
         self.reject_invalid_reconciliation_locations_in_tx(tx, session, session_id)
@@ -855,7 +839,10 @@ const SCAN_SESSION_COLS: &str = "id, storage_root_id, root_epoch, owner_node_id,
 const SELECT_SCAN_SESSION_COLS: &str = "SELECT id, storage_root_id, root_epoch, owner_node_id, \
     owner_incarnation_id, status, next_sequence, batch_count, observation_count, \
     idle_timeout_seconds, progress_deadline_at, location_high_watermark_id, requested_at, \
-    started_at, terminal_at, terminal_reason, retired_location_count FROM scan_sessions WHERE id = ?";
+    started_at, terminal_at, terminal_reason, retired_location_count, \
+    (SELECT COUNT(*) FROM file_locations \
+     WHERE retired_by_scan_session_id = scan_sessions.id) AS attributed_location_count \
+    FROM scan_sessions WHERE id = ?";
 
 const MUTATION_SCAN_SESSION_COLS: &str = "session.id AS id, \
     session.storage_root_id AS storage_root_id, session.root_epoch AS root_epoch, \
@@ -1473,6 +1460,13 @@ fn row_to_scan_session(row: &sqlx::sqlite::SqliteRow) -> Result<ScanSession, Voo
     Ok(session)
 }
 
+fn row_to_inspected_scan_session(row: &sqlx::sqlite::SqliteRow) -> Result<ScanSession, VoomError> {
+    let session = row_to_scan_session(row)?;
+    let attributed_location_count = checked_u64(row, "attributed_location_count")?;
+    validate_scan_session_integrity(&session, attributed_location_count)?;
+    Ok(session)
+}
+
 fn row_to_mutation_session(row: &sqlx::sqlite::SqliteRow) -> Result<ScanSession, VoomError> {
     let session = row_to_scan_session(row)?;
     let valid: i64 = row
@@ -1543,6 +1537,27 @@ fn validate_scan_session(session: &ScanSession) -> Result<(), VoomError> {
             session.status.as_str()
         )))
     }
+}
+
+fn validate_scan_session_integrity(
+    session: &ScanSession,
+    attributed_location_count: u64,
+) -> Result<(), VoomError> {
+    if session.status != ScanSessionStatus::Succeeded && attributed_location_count != 0 {
+        return Err(VoomError::database(format!(
+            "non-succeeded scan session {} has attributed locations",
+            session.id
+        )));
+    }
+    if session.status == ScanSessionStatus::Succeeded
+        && session.retired_location_count != attributed_location_count
+    {
+        return Err(VoomError::database(format!(
+            "scan session {} retired count {} does not match {attributed_location_count} attributed locations",
+            session.id, session.retired_location_count
+        )));
+    }
+    Ok(())
 }
 
 fn has_coherent_progress_counters(session: &ScanSession) -> bool {
@@ -1762,6 +1777,29 @@ async fn batch_replay_in_tx(
     Ok(Some(outcome))
 }
 
+fn validate_batch_replay_parent_frontier(
+    session: &ScanSession,
+    outcome: &ScanBatchOutcome,
+) -> Result<(), VoomError> {
+    let replayed_frontier = outcome.sequence.checked_add(1).ok_or_else(|| {
+        VoomError::database(format!(
+            "scan session {} batch {} frontier overflows",
+            session.id, outcome.sequence
+        ))
+    })?;
+    if replayed_frontier > session.next_sequence
+        || (replayed_frontier == session.next_sequence
+            && (session.batch_count != replayed_frontier
+                || session.observation_count != outcome.cumulative_observation_count))
+    {
+        return Err(VoomError::database(format!(
+            "scan session {} batch {} does not match parent frontier",
+            session.id, outcome.sequence
+        )));
+    }
+    Ok(())
+}
+
 async fn validate_new_batch_predecessor_in_tx(
     tx: &mut Transaction<'_, Sqlite>,
     session: &ScanSession,
@@ -1905,6 +1943,49 @@ async fn insert_batch_in_tx(
     .execute(&mut **tx)
     .await
     .map_err(|error| VoomError::database_context("scan batch insert", error))?;
+    Ok(())
+}
+
+async fn persist_new_batch_in_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    input: &PreparedBatch,
+    next_sequence: i64,
+    batch_count: i64,
+    cumulative_count: i64,
+    current_count: i64,
+) -> Result<(), VoomError> {
+    let updated = update_batch_progress_in_tx(
+        tx,
+        input,
+        next_sequence,
+        batch_count,
+        cumulative_count,
+        current_count,
+    )
+    .await?;
+    if updated.rows_affected() != 1 {
+        return Err(VoomError::Conflict(format!(
+            "scan session {} batch {} raced",
+            input.scan_session_id, input.sequence
+        )));
+    }
+    insert_batch_in_tx(tx, input, cumulative_count).await?;
+    insert_observations_in_tx(tx, input).await
+}
+
+async fn rollback_batch_savepoint(tx: &mut Transaction<'_, Sqlite>) -> Result<(), VoomError> {
+    sqlx::query("ROLLBACK TO scan_batch_accept")
+        .execute(&mut **tx)
+        .await
+        .map_err(|error| VoomError::database_context("rollback scan batch savepoint", error))?;
+    release_batch_savepoint(tx).await
+}
+
+async fn release_batch_savepoint(tx: &mut Transaction<'_, Sqlite>) -> Result<(), VoomError> {
+    sqlx::query("RELEASE scan_batch_accept")
+        .execute(&mut **tx)
+        .await
+        .map_err(|error| VoomError::database_context("release scan batch savepoint", error))?;
     Ok(())
 }
 

@@ -147,6 +147,21 @@ BEGIN
     END;
 END;
 
+CREATE TRIGGER scan_observation_batches_validate_parent_frontier
+BEFORE INSERT ON scan_observation_batches
+BEGIN
+    SELECT CASE
+        WHEN NOT EXISTS (
+            SELECT 1 FROM scan_sessions AS session
+            WHERE session.id = NEW.scan_session_id
+              AND session.next_sequence = NEW.sequence + 1
+              AND session.batch_count = NEW.sequence + 1
+              AND session.observation_count = NEW.cumulative_observation_count
+        )
+        THEN RAISE(ABORT, 'scan observation batch parent frontier mismatch')
+    END;
+END;
+
 CREATE TRIGGER scan_observation_batches_no_update
 BEFORE UPDATE ON scan_observation_batches
 BEGIN

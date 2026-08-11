@@ -196,6 +196,60 @@ async fn router_flow_proves_wire_replay_progress_terminal_and_pagination() {
     assert_private_facts_absent(&[start, batch, running, complete, terminal]);
 }
 
+#[tokio::test]
+async fn inspect_rejects_a_mismatched_attributed_retirement_count() {
+    let fixture = fixture().await;
+    seed_rooted_location(&fixture, "corrupt-retired-count.mkv").await;
+    let session = fixture
+        .cp
+        .request_scan_session(fixture.root_id, 300)
+        .await
+        .unwrap();
+    let base = format!(
+        "/v1/scan/node/{}/session/{}",
+        fixture.node_id.0, session.id.0
+    );
+    let start = replay_post(
+        &fixture,
+        &format!("{base}/start"),
+        "corrupt-count-start",
+        json!({"incarnation_id": fixture.incarnation_id}),
+    )
+    .await;
+    assert_ok_envelope(&start, "scan.start");
+    let complete = replay_post(
+        &fixture,
+        &format!("{base}/complete"),
+        "corrupt-count-complete",
+        json!({
+            "incarnation_id": fixture.incarnation_id,
+            "last_sequence": null,
+            "observation_count": 0
+        }),
+    )
+    .await;
+    assert_ok_envelope(&complete, "scan.complete");
+    assert_eq!(complete["data"]["retired_location_count"], 1);
+
+    sqlx::query("UPDATE scan_sessions SET retired_location_count = 2 WHERE id = ?")
+        .bind(i64::try_from(session.id.0).unwrap())
+        .execute(&fixture.pool)
+        .await
+        .unwrap();
+    let path = format!("{base}?incarnation_id={INCARNATION}");
+    let response = fixture.get(&path).await;
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body = response_json(response).await;
+    assert_eq!(body["command"], "scan.inspect");
+    assert_eq!(body["error"]["code"], "DB_UNREACHABLE");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("does not match 1 attributed locations")
+    );
+}
+
 async fn fixture() -> Fixture {
     let database = TempDatabase::new().unwrap();
     let url = voom_store::test_support::sqlite_url_for(database.path());
