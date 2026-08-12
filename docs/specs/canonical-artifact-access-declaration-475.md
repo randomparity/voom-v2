@@ -120,8 +120,11 @@ pub struct ArtifactAccessDeclaration(Vec<ArtifactAccessEntry>);
 
 `ArtifactAccessDeclaration::new(Vec<ArtifactAccessEntry>) -> Result<Self, VoomError>` is
 the only constructor, and the hand-written `Deserialize` impl calls it. Serializing a
-declaration and deserializing the result is therefore the identity, and no other byte
-sequence deserializes to an equal value.
+declaration and deserializing the result is therefore the identity, and no other *entry
+ordering, rights ordering, or entry multiplicity* deserializes to an equal value. JSON
+object-member order and whitespace remain serde's to accept, as they are everywhere else in
+the payload contract; the canonical-form rules constrain list order, not object-member
+order.
 
 `new` rejects, each with a distinct message and none naming a locator or path:
 
@@ -134,6 +137,7 @@ sequence deserializes to an equal value.
 | a `file_location_id` appears in more than one entry | one location, one intent — two entries for it conflict |
 | an `artifact_handle_id` appears in more than one entry | as above, for handles |
 | any ID is zero | `voom-core` ID newtypes are unvalidated `u64` wrappers (`ids.rs:1-7`), so a defaulted or truncated field would otherwise read as valid |
+| the entry list exceeds `MAX_ENTRIES` (8) | the threat model treats the persisted writer as untrusted, so the reader may not rely on the producer's two-entry maximum. 8 covers every shape `declaration_for` and the #476/#477 descriptions require, with room to spare |
 
 A `storage_root_id` may repeat across entries: reading a source location and writing an
 output into the same root is ordinary and unambiguous.
@@ -184,54 +188,84 @@ enumerates a root's contents, which #421 moves to the owner node.
 pub const WORKFLOW_OPERATION_NAMESPACE: &str = "synthetic.workflow.operation.";
 
 pub enum NormalizedTicketOperation {
-    Known(OperationKind),
+    /// A known operation. `namespaced` records whether the token arrived inside
+    /// `WORKFLOW_OPERATION_NAMESPACE` or as a bare wire token.
+    Known { kind: OperationKind, namespaced: bool },
+    /// An exact token outside every reserved namespace.
     CustomLocal(TicketOperation),
+    /// Inside a reserved namespace, with a suffix no `OperationKind` claims.
+    UnknownNamespaced(TicketOperation),
 }
 
 impl TicketOperation {
-    pub fn normalize_stored(&self, field: &str)
-        -> Result<NormalizedTicketOperation, VoomError>;
+    /// Total and infallible. Classification only; rejection is the caller's.
+    pub fn normalize(&self) -> NormalizedTicketOperation;
 }
 impl NormalizedTicketOperation {
     pub fn operation_kind(&self) -> Option<OperationKind>;
-    pub fn into_ticket_operation(self) -> TicketOperation;
+    /// The token to match `worker_capabilities.operation` and grant rows against.
+    pub fn matching_token(&self) -> TicketOperation;
 }
 ```
 
-Rules, in order:
+Classification rules, in order:
 
-1. token inside `WORKFLOW_OPERATION_NAMESPACE` with a suffix `OperationKind::from_wire`
-   recognizes → `Known(kind)`;
-2. token inside that namespace with any other suffix, including empty → `VoomError::Database`
-   naming `field`, the namespace, and the rejected suffix. **This is the behavior change**:
-   `normalized_worker_operation` currently returns the bare suffix as an operation and lets
-   it match worker capabilities;
-3. token equal to an `OperationKind` wire token → `Known(kind)`;
-4. any other token → `CustomLocal(self.clone())`, which preserves today's handling of
-   exact custom local kinds such as `disk.test` and `noop`.
+1. token inside `WORKFLOW_OPERATION_NAMESPACE` whose suffix `OperationKind::from_wire`
+   recognizes → `Known { kind, namespaced: true }`;
+2. token inside that namespace with any other suffix, including empty →
+   `UnknownNamespaced`;
+3. token equal to an `OperationKind` wire token → `Known { kind, namespaced: false }`;
+4. any other token → `CustomLocal`, preserving today's handling of exact custom local kinds
+   such as `disk.test` and `noop`.
 
-`normalize_stored` takes `field` and reports `VoomError::Database` because both call sites
-receive a `TicketOperation` read from SQLite, and AGENTS.md requires persisted values to be
-treated as untrusted with corruption reported as a database error. `normalized_worker_operation`
-and `ticket_payload::ticket_operation` are deleted; no third normalization is added.
+`matching_token()` returns `kind.as_str()` for `Known` and the **original, unmodified**
+token for the other two. That last point is the one behavior change at the capability seam:
+`normalized_worker_operation` today strips the namespace off an unknown token and matches
+capability rows against the bare suffix, so `synthetic.workflow.operation.bogus` is looked
+up as `bogus`. Neither form matches any real row, so no capability, grant, or limit result
+changes in practice — but the fabricated bare token stops being manufactured.
 
-**Where the failure lands.** `remote_acquire_candidates_in_tx`
-(`cases/execution/remote_execution/acquire.rs:295-352`) loops over candidate tickets and
-`?`-propagates `operation_eligibility_in_tx` and `operation_capacity_in_tx`, so an error
-raised inside those calls ends evaluation for the entire candidate set. Today an
-unrecognized kind merely matches no capability row and that one ticket scores ineligible.
-To avoid making one corrupt `tickets.kind` value stall acquisition for every well-formed
-ticket, `operation_eligibility_in_tx` and `operation_capacity_in_tx` catch a normalization
-failure and report the operation as ineligible with a reason, rather than propagating it.
-Fail-closed here means denied, never leased — not aborted. `parse_ticket` keeps the hard
-error, because it already runs per ticket and cannot spread. `acquire.rs` itself is not
-modified; the containment lives in `workers.rs`, inside the frozen surface.
+**Normalization is classification; rejection belongs to the caller.** This is why
+`normalize` is infallible. The alternative — a fallible `normalize_stored` — puts the error
+inside whichever function calls it, and the four current call sites do not all tolerate one:
+
+| Call site | Disposition |
+|---|---|
+| `workers.rs:1152` `operation_capacity_in_tx` | `matching_token()`; never raises |
+| `workers.rs:1218` `operation_capability_history` | `matching_token()`; never raises. Its caller (`spawn.rs:463`) passes an in-process token, so a `VoomError::Database` here would misclassify a caller bug as storage corruption |
+| `workers.rs:1415` `operation_capability_details_in_tx` | `matching_token()`; never raises |
+| `leases.rs:319` `acquire_guarded` | rejects `UnknownNamespaced` with `VoomError::Database`. This is the fail-closed point for criterion 4 on the lease path, and it is safe to raise here because `acquire_guarded` handles exactly one ticket (`input.ticket_id`) |
+
+`remote_acquire_candidates_in_tx` (`acquire.rs:295-352`) loops over candidates and
+`?`-propagates `operation_eligibility_in_tx` and `operation_capacity_in_tx`, so a raise in
+either would abort evaluation of the whole set. Neither raises under this design.
+Note that `operation_eligibility_in_tx` (`workers.rs:975-1037`) does **not** normalize today
+and does not gain normalization here: it binds the raw token into the capability query and
+grant comparison, so an `UnknownNamespaced` kind already yields `has_capability: false` and
+is denied. Adding normalization there would flip `has_capability` and `has_grant` for every
+`synthetic.workflow.operation.*` ticket and change scheduler candidate scoring — a
+scheduling change #476 owns, not this slice.
+
+`parse_ticket` is the other rejection point: it accepts only
+`Known { namespaced: true }`. `CustomLocal`, `UnknownNamespaced`, and a **bare** known token
+are all rejected, which keeps the accepted ticket-kind encoding exactly what
+`ticket_payload::ticket_operation` accepts today. Without the `namespaced` flag, rule 3
+would newly admit `probe_file` as a workflow ticket kind — a second accepted encoding for
+the kind field, which is the thing criterion 6 forbids for the declaration body.
+
+`normalized_worker_operation` and `ticket_payload::ticket_operation` are deleted; no third
+normalization is added. Deleting the former edits `crates/voom-store/src/repo/execution/leases.rs`,
+which is why that file is on the surface list — the edit there is a call-site swap plus the
+`UnknownNamespaced` rejection, and it changes no lease, replay, or idempotency behavior.
 
 The residual, stated rather than fixed: a ticket denied this way never leases, so it never
 attempts, never terminates, and never opens an ADR 0018 `terminal_failure` issue, and
-`WorkerOperationEligibility` carries the reason in memory only. That is today's behavior for
-an unrecognized kind carried forward — making it observable belongs to whoever owns
-scheduler decision persistence (#477).
+nothing durable records why. That is today's behavior for an unrecognized kind carried
+forward — making it observable belongs to whoever owns scheduler decision persistence
+(#477). No public store type gains a field: `WorkerOperationEligibility` and
+`WorkerOperationCapacity` are unchanged, which matters because `max_parallel: 0` would trip
+`candidate_from_ticket` (`acquire.rs:548-552`) and re-create the loop abort this design
+avoids.
 
 ### 5. The ticket payload gate
 
@@ -288,6 +322,15 @@ lines 91-121). That private helper is widened to `pub(crate)`; nothing about its
 changes. It is reused rather than duplicated, and it is the byte-free half of
 `select_local_source` — the declaration path must not canonicalize or stat anything.
 
+`select_location` returns a `FileLocation`, not a root. `storage_root_id` comes from
+`FileLocation::rooted_address()` (`operation_source.rs:148`); its
+`ProviderRelativeLocator` half is discarded, which is what keeps the declaration
+locator-free. Its error arm is unreachable here because `require_live_rooted_location` has
+already rejected every non-`Rooted` address, and the implementation propagates rather than
+swallowing it. A byte-touching node whose `policy_target` is neither `FileVersion` nor
+`FileLocation` keeps the existing `resolve_policy_file_source` error
+(`executor/tickets.rs:268-270`) — this slice does not widen the accepted target shapes.
+
 A new `crates/voom-control-plane/src/workflow/plan/artifact_access.rs` holds:
 
 ```rust
@@ -337,7 +380,25 @@ only when `PolicyFileSource.location_id` is `Some`, which `resolve_policy_file_s
 sets only for a `TargetRef::FileLocation` node. `PolicyFileSource.location_id` becomes a
 plain `FileLocationId`: `resolve_policy_file_source` resolves a `TargetRef::FileVersion`
 through `select_location` (decision D2) instead of leaving the field empty, and
-`insert_policy_file_source` always writes it. Two things follow. Rule 3 above binds for
+`insert_policy_file_source` always writes it.
+
+That helper covers only the four policy renderers (`binding.rs:208, 233, 285, 319`). The
+other renderer — `render_default_payload_with_fan_out` (`binding.rs:23-99`) — emits
+`path`, `operation`, `branch_id`, `duration_ms`, and `progress_interval_ms` and nothing
+else, and `executor/tickets.rs:209`'s `_ =>` arm plus every `expansion.rs` branch ticket
+route through it. It therefore gains the same field: after the per-operation match, when
+`operation.is_byte_touching() && operation != ScanLibrary`, insert `source_location_id`
+from `branch.storage_source` alongside the existing `operation` / `branch_id` insertions,
+and return a `BindingError` naming the operation when the branch carries no source. Without
+this, rule 3 rejects at encode every ticket that renderer produces — including the nine
+byte-touching nodes of the demo plan — and the only repairs available would be the two the
+spec forbids.
+
+The insertion is at the JSON-object level, alongside the loose keys the function already
+adds. `TranscodeVideoRequest` (`binding.rs:105-145`) is serialized before that point and is
+**not** modified: the worker-request shape belongs to #423.
+
+Two things then follow. Rule 3 above binds for
 every non-scan byte-touching ticket rather than for half of them. And the dispatch path —
 `operation_adapters::source_location_id` feeding `select_local_source` — now receives the
 render-time choice instead of independently re-resolving "the single live rooted location"
@@ -403,10 +464,13 @@ for the purposes of this design even though no remote actor writes it directly.
 so every rule in §2 applies to persisted input, not only to freshly built values.
 `deny_unknown_fields` on each content struct and on `ArtifactAccessEntry` rejects
 unrecognized fields; the internally tagged enum rejects unrecognized `kind` values. Entry
-count is bounded in practice by the producer (at most two entries), and no rule is
-quadratic in a way an adversarial payload could exploit: duplicate detection uses sorted
-comparison and hash sets. Failure messages name the rule, the field, and the rejected ID,
-and never a locator, path, hostname, or provider string.
+count is bounded by the `MAX_ENTRIES` rule in §2, not by trusting the producer this section
+declares untrusted — the `Deserialize` impl materializes the vector before `new` runs, so
+without that rule a hand-edited row could allocate an arbitrarily long list on every ticket
+read, including inside the acquisition transaction. No rule is quadratic in a way an
+adversarial payload could exploit: duplicate detection uses sorted comparison and hash sets.
+Failure messages name the rule, the field, and the rejected ID, and never a locator, path,
+hostname, or provider string.
 
 **Explicitly out of scope.** Whether the referenced root, location, or handle exists, is
 live, is owned by the acquiring node, or is at the expected epoch — all of that is #476,
@@ -482,6 +546,10 @@ whose stable references match the ticket's typed identity.**
 - `binding_test.rs` / `tickets_test.rs`: a `TargetRef::FileVersion` node renders a
   `source_location_id`, so the field is no longer conditional on the target shape and the
   dispatch path consumes the render-time choice rather than re-resolving.
+- `binding_test.rs::default_payload_rendering_covers_default_ci_operations`: every non-scan
+  byte-touching node rendered through `render_default_payload_with_fan_out` carries
+  `source_location_id`, `scan_library` does not, and a byte-touching branch with no
+  `storage_source` returns a `BindingError`.
 - `artifact_access_test.rs`: a **frozen canonical-encoding fixture** — the byte-exact JSON
   of a declaration carrying one entry of each of the four target variants, with multi-right
   entries — is asserted in both directions. Reordering variants or fields turns it red.
@@ -502,7 +570,8 @@ handles require a matching target-root reference.**
 
 **Criterion 3 — duplicate, conflicting, zero-ID, malformed, and non-canonical
 declarations fail before scheduling.**
-- `artifact_access_test.rs`: one case per rule in §2, asserting the specific message.
+- `artifact_access_test.rs`: one case per rule in §2, asserting the specific message —
+  including a nine-entry list rejected by `MAX_ENTRIES` and an eight-entry list accepted.
 - `artifact_access_test.rs`: a deterministic exhaustive test builds a fixed set of four
   distinct entries, enumerates all 24 orderings in code, and proves exactly the ascending
   ordering is accepted and `serialize → deserialize` is the identity on it. No new
@@ -514,16 +583,27 @@ declarations fail before scheduling.**
 **Criterion 4 — exact custom local operations remain supported; known exact and
 namespaced operations normalize deterministically; unknown namespaced operations fail
 closed.**
-- `ticket_operation_test.rs`: `probe_file` → `Known(ProbeFile)`;
-  `synthetic.workflow.operation.probe_file` → `Known(ProbeFile)`; `disk.test` and `noop` →
-  `CustomLocal`; `synthetic.workflow.operation.bogus` and
-  `synthetic.workflow.operation.` → `VoomError::Database` naming the field.
-- `ticket_operation_test.rs`: every `OperationKind::ALL` value normalizes identically from
-  its exact and its namespaced token.
-- `workers_test.rs` / `leases_test.rs`: acquiring a ticket whose kind is
-  `synthetic.workflow.operation.bogus` fails closed. Existing tests that use
-  `synthetic.workflow.operation.test` and `.extract` are updated to real operations, since
-  those kinds are exactly what this criterion makes invalid.
+- `ticket_operation_test.rs`: `probe_file` → `Known { ProbeFile, namespaced: false }`;
+  `synthetic.workflow.operation.probe_file` → `Known { ProbeFile, namespaced: true }`;
+  `disk.test` and `noop` → `CustomLocal`; `synthetic.workflow.operation.bogus` and
+  `synthetic.workflow.operation.` → `UnknownNamespaced`.
+- `ticket_operation_test.rs`: every `OperationKind::ALL` value yields the same `kind` from
+  its exact and its namespaced token, and `matching_token()` returns the bare wire token for
+  both. For `CustomLocal` and `UnknownNamespaced`, `matching_token()` returns the original
+  token unmodified — in particular `synthetic.workflow.operation.bogus` does **not** become
+  `bogus`.
+- `leases_test.rs`: acquiring a ticket whose kind is `synthetic.workflow.operation.bogus`
+  fails closed with a database error naming the field.
+- `workers_test.rs`: `operation_capacity_in_tx`, `operation_capability_history`, and
+  `operation_capability_details_in_tx` return normally for that same kind rather than
+  raising, and report the same capability and limit results as before the change. This is
+  the containment that keeps a corrupt row from aborting
+  `remote_acquire_candidates_in_tx`'s loop; it fails if any of the three propagates.
+- `ticket_payload_test.rs`: `parse_ticket("probe_file", ..)` — a bare known token — is
+  rejected, so the accepted ticket-kind encoding is unchanged and rule 3 of normalization
+  does not widen it.
+- Existing tests using `synthetic.workflow.operation.test` and `.extract` are updated to
+  real operations, since those kinds are exactly what this criterion makes invalid.
 
 **Criterion 5 — rights describe intended access only and cannot independently authorize
 mutation.**
