@@ -227,6 +227,12 @@ Fail-closed here means denied, never leased — not aborted. `parse_ticket` keep
 error, because it already runs per ticket and cannot spread. `acquire.rs` itself is not
 modified; the containment lives in `workers.rs`, inside the frozen surface.
 
+The residual, stated rather than fixed: a ticket denied this way never leases, so it never
+attempts, never terminates, and never opens an ADR 0018 `terminal_failure` issue, and
+`WorkerOperationEligibility` carries the reason in memory only. That is today's behavior for
+an unrecognized kind carried forward — making it observable belongs to whoever owns
+scheduler decision persistence (#477).
+
 ### 5. The ticket payload gate
 
 `WorkflowTicketPayload` (`crates/voom-control-plane/src/workflow/plan/ticket_payload.rs`)
@@ -331,11 +337,23 @@ render-time choice instead of independently re-resolving "the single live rooted
 against a table that may have changed since, so the declaration and the bytes actually
 opened cannot name different locations.
 
-`BranchContext` (`binding.rs:17`) gains `storage_source: Option<TicketStorageSource>`, so
-`expansion.rs` threads a parent ticket's resolved source into its children exactly as it
-already threads `source_file`. `executor/tickets.rs::render_node_ticket` resolves
-`node.policy_target()` once through `select_location` and passes the result to both the
-payload and `declaration_for`.
+`BranchContext` (`binding.rs:17`) gains `storage_source: Option<TicketStorageSource>`, and
+it — not `node.policy_target()` — is how the source reaches every renderer.
+`render_root_payload`'s `ScanLibrary` arm (`executor/tickets.rs:161`) calls
+`render_default_payload_with_fan_out(operation, branch, …)` and never reads the policy
+target, so a per-arm target lookup would not reach it.
+`executor/tickets.rs::render_node_ticket` resolves `node.policy_target()` once through
+`select_location` and populates `BranchContext` before dispatching to the arms;
+`expansion.rs` threads a parent ticket's already-resolved source into the same field,
+exactly as it already threads `source_file`, keeping that path synchronous and DB-free.
+
+**Fixture rework is part of this slice, not incidental.** `WorkflowPlan::default_ci`
+(`plan/model.rs:60-90`) has twelve nodes, nine of them byte-touching, all with
+`policy_target: None`. `durable_workflow_test.rs` submits it through the real scheduler at
+nine call sites, and `expansion_test.rs:423` and `binding_test.rs:27-30` build on it. Those
+fixtures gain a deterministic synthetic `TicketStorageSource` — including a root for the
+`scan_library` node. Weakening or deleting that end-to-end scheduler coverage is not an
+acceptable repair: it is the coverage this change most depends on.
 
 `WorkflowPlan::default_ci` is `#[cfg(test)]` (`model.rs:59`); every production plan node
 carries `policy_target: Some(..)` (`policy_bridge.rs:97`). Test plans supply a
@@ -409,8 +427,11 @@ step below is not tidiness: skipping it converts completable work into terminal 
 The action before upgrading is therefore to identify and fail or delete every unfinished
 workflow ticket whose kind names a byte-touching operation. Each one that instead reaches a
 terminal transition opens a `terminal_failure` issue (ADR 0018, deduped per ticket), so
-upgrading over a non-empty queue is loud rather than silent. The step folds into ADR 0055's
-flag-day root-assignment and rescan procedure, which such a deployment already owes.
+upgrading over a non-empty queue is loud rather than silent. The step is symmetric:
+`WorkflowTicketPayload` denies unknown fields, so rolling the binary back also requires
+failing or deleting the byte-touching tickets the new binary wrote. The forward step folds
+into ADR 0055's flag-day root-assignment and rescan procedure, which such a deployment
+already owes.
 
 This is a breaking `tickets.payload` change under ADR 0013, which requires the
 binary-before-DB ordering to be recorded in `docs/release-process.md`. That file gains the

@@ -95,8 +95,16 @@ renderer resolves every non-scan byte-touching node's source to exactly one live
 location and records it, whichever target shape the node carries. The declaration must then
 contain exactly one entry naming that location with `read` among its rights. `scan_library`
 is the complement: it addresses a root, so it carries no `source_location_id` and declares
-exactly one `storage_root` entry, taken from the source its renderer was given. The two
-rules partition the byte-touching operations, so the check is total rather than conditional.
+exactly one `storage_root` entry. The two rules partition the byte-touching operations, so
+the check is total rather than conditional.
+
+The source reaches every renderer through `BranchContext`, not through `node.policy_target()`
+directly — the `scan_library` arm calls `render_default_payload_with_fan_out(operation,
+branch, …)` and never reads the policy target, so a per-arm target lookup would not reach
+it. `render_node_ticket` resolves the target once and populates `BranchContext`;
+`plan/expansion.rs` threads the parent's already-resolved source into the same field. In
+production the scan rule governs nothing — `scan_library` has no ticket producer, per the
+Consequences below — so it is exercised only against fixture and hand-built payloads.
 
 `source_location_id` sits in the request envelope `dispatch.rs` clones to a worker, and is
 already read by the control plane's own adapter, so its dual role predates this change;
@@ -137,7 +145,16 @@ Payload decode keeps the hard error: `parse_ticket` runs per ticket and cannot s
 - `synthetic.workflow.operation.<unknown>` stops matching any capability, so a ticket
   carrying one is never leased. It is scored ineligible rather than raising, so a single
   corrupt row cannot stall acquisition for the rest of the candidate set. Tests that lease
-  such kinds must name a real operation.
+  such kinds must name a real operation. The residual is that fail-closed here is silent:
+  the ticket never leases, so it never attempts, never terminates, and never opens an ADR
+  0018 issue, and the ineligibility reason is in-memory only. That is today's behavior
+  carried forward, not a regression, but it is not observable and this change does not make
+  it so.
+- The `#[cfg(test)]` demo plan carries nine byte-touching nodes and no policy targets, and
+  `durable_workflow_test.rs`, `expansion_test.rs`, and `binding_test.rs` all run on it.
+  Giving that fixture resolvable sources is part of this slice, not incidental cleanup —
+  and the repair must not be to weaken the end-to-end scheduler coverage this decision most
+  depends on.
 - The declaration lives inside the durable `tickets.payload` column, so it joins the ADR
   0013 payload contract: its structs are listed in
   `docs/payload-contract-inventory.md` and `scripts/payload-contract-scope.txt`.
@@ -170,9 +187,12 @@ Payload decode keeps the hard error: `parse_ticket` runs per ticket and cannot s
   loses completable work rather than delaying it. The step: before rolling the new binary
   out, fail or delete every unfinished workflow ticket whose kind names a byte-touching
   operation. Skipping it is loud — each opens a `terminal_failure` issue per ADR 0018 at its
-  terminal transition. As a breaking `tickets.payload` change, the binary-before-DB ordering
-  and this step go in `docs/release-process.md` as ADR 0013 requires, folded into ADR 0055's
-  flag-day root-assignment and rescan procedure.
+  terminal transition. The step is symmetric: `WorkflowTicketPayload` denies unknown fields,
+  so rolling back also requires failing or deleting the byte-touching tickets the new binary
+  wrote — the harder direction, because a rollback is already an incident. As a breaking
+  `tickets.payload` change, the binary-before-DB ordering and both directions of the step go
+  in `docs/release-process.md` as ADR 0013 requires, folded into ADR 0055's flag-day
+  root-assignment and rescan procedure.
 
 ## Considered and rejected
 
@@ -200,6 +220,10 @@ Payload decode keeps the hard error: `parse_ticket` runs per ticket and cannot s
   cannot express what the next slices need: a source location and a *different* target root
   are two references with different rights, and `default_output_root_id` already makes them
   differ. #477 and #422 would each reopen the payload shape; the list form pays that once.
+  That is a forecast, so name what falsifies it and what being wrong costs: if #477 and #422
+  land without ever needing a second reference carrying different rights, the list was
+  speculative, and collapsing a permanently one-entry list back to two fields is itself
+  another breaking payload change, not a free simplification.
 - **Ship only `storage_root` and `file_location` now.** Rejected on operator decision D3:
   the four content-struct shapes are what make criterion 2 structural — an existing handle
   without a location, or a planned one without a target root, has no encoding — where a
@@ -213,8 +237,9 @@ Payload decode keeps the hard error: `parse_ticket` runs per ticket and cannot s
 - **Do nothing and let #476 derive intent from the operation and `source_location_id`.**
   This is genuinely cheap — the operation-to-entries mapping is total, and the location is
   an ID one lookup from its root, so nothing here needs paths. It also avoids both of this
-  ADR's largest costs: the breaking `tickets.payload` change and the pre-upgrade drain step.
-  Rejected because it leaves intent re-derived at scheduling time from a field the worker
-  contract owns and #423 is about to rewrite, and because it keeps the second resolution
-  point this decision closes — the ticket would still name no location, so dispatch would
-  resolve one independently.
+  ADR's largest costs: the breaking `tickets.payload` change and the drain step. Rejected on
+  one ground only: intent stays untyped, in a shape #423 owns and is about to rewrite, with
+  no vocabulary for a target root or a handle. Closing the second resolution point is *not*
+  a reason to reject it — that comes from widening `source_location_id` emission, which
+  lives inside the untyped `rendered_payload` and is separable from the declaration, so
+  do-nothing could take it too.
