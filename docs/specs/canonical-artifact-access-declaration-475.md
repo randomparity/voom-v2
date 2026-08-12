@@ -312,6 +312,13 @@ The mapping is total over `OperationKind` and each operation appears in exactly 
 | `remux`, `transcode_video`, `transcode_audio`, `extract_audio`, `edit_tracks`, `back_up_file`, `commit_artifact` | `file_location(root, loc)` with `read`, and `storage_root(root)` with `write` |
 | `delete_artifact` | `file_location(root, loc)` with `read, delete` |
 
+The rights column is part of the mapping, not a renderer choice. A renderer free to pick a
+different rights set for the same operation would make the evidence #476 resolves
+non-deterministic, and the canonical-form rules would not catch it, so `declaration_for` is
+the single place rights are decided. `delete_artifact` is the only producer of the `delete`
+right; like seven of the twelve byte-touching operations it has no production ticket
+producer yet, so that right is exercised only by tests.
+
 A byte-touching operation reached with `source: None` is a `VoomError::Config` naming the
 operation. That is the rule for the `render_default_payload` fallback arms
 (`executor/tickets.rs:176,188,199,207` and the `_ =>` catch-all at 209), which emit paths
@@ -336,6 +343,16 @@ every non-scan byte-touching ticket rather than for half of them. And the dispat
 render-time choice instead of independently re-resolving "the single live rooted location"
 against a table that may have changed since, so the declaration and the bytes actually
 opened cannot name different locations.
+
+**The cost of freezing, taken deliberately (decision D5).** Today a `TargetRef::FileVersion`
+ticket re-resolves at dispatch, so one whose location was retired and recreated by an ADR
+0055 rescan still runs. With the location frozen into the payload,
+`require_live_rooted_location` rejects it and the ticket fails terminally, opening an ADR
+0018 issue. Treating the recorded ID as a hint and re-resolving on retirement would restore
+the self-healing but let the declaration name one location while the process opens another
+— the divergence ADR 0050 exists to remove. #479 owns making that replay-safe; this slice
+adds no re-render path. A test covers it: a ticket whose recorded location is retired
+before dispatch fails terminally rather than silently retargeting.
 
 `BranchContext` (`binding.rs:17`) gains `storage_source: Option<TicketStorageSource>`, and
 it — not `node.policy_target()` — is how the source reaches every renderer.
@@ -424,14 +441,20 @@ A ticket referencing a **pre-0034** location was already undispatchable, because
 references a live rooted location and dispatches normally today, so for those rows the
 step below is not tidiness: skipping it converts completable work into terminal failures.
 
-The action before upgrading is therefore to identify and fail or delete every unfinished
-workflow ticket whose kind names a byte-touching operation. Each one that instead reaches a
-terminal transition opens a `terminal_failure` issue (ADR 0018, deduped per ticket), so
-upgrading over a non-empty queue is loud rather than silent. The step is symmetric:
-`WorkflowTicketPayload` denies unknown fields, so rolling the binary back also requires
-failing or deleting the byte-touching tickets the new binary wrote. The forward step folds
-into ADR 0055's flag-day root-assignment and rescan procedure, which such a deployment
-already owes.
+The upgrade step is therefore: quiesce workflow ticket creation, then fail or delete every
+unfinished workflow ticket whose kind names a byte-touching operation, then swap the binary.
+Quiescing first is load-bearing — the binary running the drain is the one still rendering
+old-shape tickets, so draining against a live writer leaves everything rendered in the
+window between drain and swap undecodable. Each ticket that instead reaches a terminal
+transition opens a `terminal_failure` issue (ADR 0018, deduped per ticket), so the loss is
+loud, but loud is not recovered. The step folds into ADR 0055's flag-day root-assignment and
+rescan procedure, which such a deployment already owes.
+
+Rollback keeps ADR 0013's snapshot restore as the safe default. This change also permits a
+narrower option, because its new shape is confined to one column: quiesce, then fail or
+delete the byte-touching tickets the new binary wrote. That preserves every other row the
+new binary committed and leaves those tickets' workflows incomplete — a trade the operator
+makes, not one this change makes for them.
 
 This is a breaking `tickets.payload` change under ADR 0013, which requires the
 binary-before-DB ordering to be recorded in `docs/release-process.md`. That file gains the

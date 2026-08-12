@@ -98,13 +98,17 @@ is the complement: it addresses a root, so it carries no `source_location_id` an
 exactly one `storage_root` entry. The two rules partition the byte-touching operations, so
 the check is total rather than conditional.
 
+Each entry's rights come from the operation, and the mapping is fixed rather than left to
+the renderer: `scan_library` reads its root; `probe_file`, `hash_file`, and
+`verify_artifact` read their location; the seven output-producing operations read their
+location and write their root; `delete_artifact` reads and deletes its location. A renderer
+that could choose a different rights set for the same operation would make the evidence
+#476 resolves non-deterministic, which the canonical-form rules do not catch.
+
 The source reaches every renderer through `BranchContext`, not through `node.policy_target()`
-directly — the `scan_library` arm calls `render_default_payload_with_fan_out(operation,
-branch, …)` and never reads the policy target, so a per-arm target lookup would not reach
-it. `render_node_ticket` resolves the target once and populates `BranchContext`;
-`plan/expansion.rs` threads the parent's already-resolved source into the same field. In
-production the scan rule governs nothing — `scan_library` has no ticket producer, per the
-Consequences below — so it is exercised only against fixture and hand-built payloads.
+directly — the `scan_library` arm never reads the policy target, so a per-arm lookup would
+not reach it. `render_node_ticket` resolves the target once and populates `BranchContext`;
+`plan/expansion.rs` threads the parent's already-resolved source into the same field.
 
 `source_location_id` sits in the request envelope `dispatch.rs` clones to a worker, and is
 already read by the control plane's own adapter, so its dual role predates this change;
@@ -115,12 +119,18 @@ Recording it also collapses two resolutions into one: dispatch re-resolves "the 
 rooted location" only when the field is absent, and a second resolution could pick a
 different row against a table that changed in between.
 
-Neither render path may emit an undeclared ticket. `executor/tickets.rs` resolves
-`node.policy_target()`, which every production plan node carries; `plan/expansion.rs` is
-synchronous and DB-free, so it threads the parent ticket's resolved source through
-`BranchContext` as it already threads `source_file`. A byte-touching node with a source
-from neither — the `render_default_payload` fallback arms, reachable only from the
-`#[cfg(test)]` demo plan — fails at render.
+That collapse has a symmetric cost, and this decision takes it deliberately (D5). Today a
+`TargetRef::FileVersion` ticket re-resolves at dispatch, so one whose location was retired
+and recreated by an ADR 0055 rescan still runs. Once the location is frozen into the
+payload, `require_live_rooted_location` rejects it and the ticket fails terminally. The
+alternative — treat the recorded ID as a hint and re-resolve when it is retired — would let
+the declaration name one location while the process opens another, which is precisely the
+divergence ADR 0050 exists to remove. A byte-touching ticket outliving a rescan of its own
+root should fail rather than silently retarget; #479 owns making that replay-safe.
+
+Neither render path may emit an undeclared ticket. A byte-touching node whose
+`BranchContext` carries no source — the `render_default_payload` fallback arms, reachable
+only from the `#[cfg(test)]` demo plan — fails at render.
 
 ### One ticket-kind normalization
 
@@ -186,13 +196,24 @@ Payload decode keeps the hard error: `parse_ticket` runs per ticket and cannot s
   ticket rendered **after** 0034 dispatches normally today, so skipping the upgrade step
   loses completable work rather than delaying it. The step: before rolling the new binary
   out, fail or delete every unfinished workflow ticket whose kind names a byte-touching
-  operation. Skipping it is loud — each opens a `terminal_failure` issue per ADR 0018 at its
-  terminal transition. The step is symmetric: `WorkflowTicketPayload` denies unknown fields,
-  so rolling back also requires failing or deleting the byte-touching tickets the new binary
-  wrote — the harder direction, because a rollback is already an incident. As a breaking
-  `tickets.payload` change, the binary-before-DB ordering and both directions of the step go
-  in `docs/release-process.md` as ADR 0013 requires, folded into ADR 0055's flag-day
-  root-assignment and rescan procedure.
+  operation — and quiesce ticket creation first, because the binary performing the drain is
+  the one still rendering old-shape tickets, so a drain run against a live writer leaves
+  everything rendered in the window between drain and swap undecodable. Skipping the step is
+  loud — each such ticket opens a `terminal_failure` issue per ADR 0018 at its terminal
+  transition — but loud is not the same as recovered.
+- Rollback is the mirror image and is the harder direction, because it is already an
+  incident. ADR 0013's blanket remedy is to restore the pre-upgrade database snapshot, and
+  that remains the safe default. This change narrows it deliberately: the new shape is
+  confined to one column, `tickets.payload`, so quiescing and then failing or deleting the
+  byte-touching tickets the new binary wrote is sufficient and preserves every other row the
+  new binary committed — which a snapshot restore would discard. It also leaves the
+  workflows owning those tickets incomplete, so an operator who wants a clean revert of
+  everything still takes the snapshot. Both options and the narrowing go in
+  `docs/release-process.md` as ADR 0013 requires, alongside the forward step, which folds
+  into ADR 0055's flag-day root-assignment and rescan procedure.
+- A byte-touching ticket that outlives a rescan of its own root now fails terminally rather
+  than re-resolving, because its location is frozen at render (D5). #479 owns making that
+  replay-safe.
 
 ## Considered and rejected
 
@@ -238,8 +259,20 @@ Payload decode keeps the hard error: `parse_ticket` runs per ticket and cannot s
   This is genuinely cheap — the operation-to-entries mapping is total, and the location is
   an ID one lookup from its root, so nothing here needs paths. It also avoids both of this
   ADR's largest costs: the breaking `tickets.payload` change and the drain step. Rejected on
-  one ground only: intent stays untyped, in a shape #423 owns and is about to rewrite, with
-  no vocabulary for a target root or a handle. Closing the second resolution point is *not*
-  a reason to reject it — that comes from widening `source_location_id` emission, which
-  lives inside the untyped `rendered_payload` and is separable from the declaration, so
-  do-nothing could take it too.
+  one ground, stated at the size it actually holds: this slice replaces a bare JSON number
+  in a shape #423 owns and is about to rewrite with a typed, locator-free reference that
+  #476 can gate on. The target-root and handle vocabulary is *not* part of that ground —
+  nothing produces it yet. Nor is closing the second resolution point, which comes from
+  widening `source_location_id` emission inside the untyped `rendered_payload` and is
+  separable, so do-nothing could take it too.
+- **Land the `voom-core` vocabulary now, defer the payload field to #477.** One coordinated
+  break instead of two, no drain step, and every typed-vocabulary benefit this slice
+  actually claims. Rejected on operator decision D6: criterion 1 requires that every
+  byte-touching ticket *carries* the declaration, so deferring the field would ship a
+  vocabulary nothing uses and satisfy criterion 4 alone — the slice would have to be
+  re-scoped and its criteria rewritten rather than met.
+- **Classify `scan_library` as not byte-touching, now that ADR 0067 owns scanning.** This
+  deletes the scan special case, the two-arm partition, and `storage_root`'s only named
+  producer. Rejected because scanning does read bytes and #421 moves exactly that work to
+  the owner node; classifying it false to shed an unexercised branch would put the wrong
+  answer in a closed vocabulary that #421 then has to correct.
