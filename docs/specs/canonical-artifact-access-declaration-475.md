@@ -138,6 +138,15 @@ sequence deserializes to an equal value.
 A `storage_root_id` may repeat across entries: reading a source location and writing an
 output into the same root is ordinary and unambiguous.
 
+Ordering decides whether a persisted payload decodes, so the total order is part of the
+wire contract and is fixed deliberately rather than left to whatever a derive happens to
+produce: targets order by variant as
+`storage_root < file_location < existing_artifact < planned_artifact`, and within a
+variant by field in declaration order; rights order as `read < write < delete`. The
+derived `Ord` impls must match that statement, and a test asserts the variant ordering
+directly so a later reorder of the enum fails a test instead of silently invalidating
+every stored declaration.
+
 Errors are `VoomError::Config`, matching `ProviderRelativeLocator::new`. The declaration
 is validated identically wherever it enters the process, so a corrupt persisted payload
 and a mis-built in-memory one are rejected by the same code.
@@ -219,15 +228,27 @@ pub artifact_access: Option<ArtifactAccessDeclaration>,
 2. `!operation.is_byte_touching()` and `artifact_access` is `Some` → reject. A ticket that
    touches no bytes has no access to declare, and a stray declaration would be evidence
    #476 must not act on.
-3. `rendered_payload.source_location_id` present → it must be a non-zero `u64`, and the
+3. `operation.is_byte_touching()` and `operation != ScanLibrary` →
+   `rendered_payload.source_location_id` must be present and a non-zero `u64`, and the
    declaration must contain exactly one entry naming that `FileLocationId` (as
    `file_location` or `existing_artifact`) with `read` among its rights. This is the
    anti-drift check: the typed declaration and the untyped rendered payload cannot
    disagree about the source.
+4. `operation == ScanLibrary` → `rendered_payload.source_location_id` must be absent, and
+   the declaration must contain exactly one `storage_root` entry and nothing else. A scan
+   addresses a root, not a file, so a source location on it would be evidence of a
+   mis-rendered ticket.
 
-Rule 3 is one-way by design. `probe_file` and `hash_file` render no `source_location_id`
-today (`binding.rs:47-52`) yet must still declare their source read, so requiring the
-rendered payload to carry every declared location would be unsatisfiable.
+Rules 3 and 4 partition the byte-touching operations, so the check binds for every one of
+them rather than only when the field happens to be present. That matters: a check
+conditional on presence would be absent for exactly the `TargetRef::FileVersion` nodes
+whose location is ambiguous — the case operator decision D2 exists to resolve — and a
+mis-resolved location would then be durable and unnoticed. §6 therefore makes every
+non-scan byte-touching renderer emit `source_location_id`.
+
+Rule 3 is one-way in the other direction: the declaration may name references the rendered
+payload does not, because a write intent names a target root that the worker-facing
+payload has no field for.
 
 `parse_ticket` derives the expected operation through `TicketOperation::normalize_stored`
 instead of the deleted local helper; a `CustomLocal` kind reaching
@@ -276,6 +297,18 @@ no artifact handle exists at render time; the target root is what is knowable, a
 what #476 needs to check ownership against. Selecting a distinct output root from the
 source root's `default_output_root_id` is `artifact_target_root`'s job at commit time and
 is out of scope here (#477 owns durable plans).
+
+`insert_policy_file_source` (`binding.rs:323-331`) currently writes `source_location_id`
+only when `PolicyFileSource.location_id` is `Some`, which `resolve_policy_file_source`
+sets only for a `TargetRef::FileLocation` node. `PolicyFileSource.location_id` becomes a
+plain `FileLocationId`: `resolve_policy_file_source` resolves a `TargetRef::FileVersion`
+through `select_location` (decision D2) instead of leaving the field empty, and
+`insert_policy_file_source` always writes it. Two things follow. Rule 3 above binds for
+every non-scan byte-touching ticket rather than for half of them. And the dispatch path —
+`operation_adapters::source_location_id` feeding `select_local_source` — now receives the
+render-time choice instead of independently re-resolving "the single live rooted location"
+against a table that may have changed since, so the declaration and the bytes actually
+opened cannot name different locations.
 
 `BranchContext` (`binding.rs:17`) gains `storage_source: Option<TicketStorageSource>`, so
 `expansion.rs` threads a parent ticket's resolved source into its children exactly as it
@@ -343,11 +376,18 @@ existing `tickets.payload` write path and is unchanged here.
 
 Pre-release, one-way. A byte-touching ticket row written by an earlier binary has no
 `artifact_access` field and no longer decodes; no backfill can invent a root or location
-that was never recorded, so none is attempted. Migration 0034 already quarantined every
-pre-existing file location as unassigned legacy, so such a ticket was already ineligible
-for byte work — it now fails terminally at decode rather than at dispatch. Operators drain
-byte-touching tickets before upgrading. No schema change, no migration, and no new
-dependency.
+that was never recorded, so none is attempted.
+
+Such a ticket cannot be drained by completing it: migration 0034 already quarantined every
+pre-existing file location as unassigned legacy, so it was already undispatchable. The
+available action before upgrading is to identify and fail or delete pre-upgrade
+byte-touching workflow tickets. Each one that instead reaches a terminal transition opens a
+`terminal_failure` issue (ADR 0018, deduped per ticket), so upgrading over a non-empty
+queue converts silently stuck tickets into a burst of issues. This adds no new operator
+procedure: ADR 0055's flag-day migration already requires deliberate root assignment and a
+rescan before byte work can resume, and this precondition rides with it.
+
+No schema change, no migration, and no new dependency.
 
 ## Test strategy and acceptance criteria
 
@@ -362,7 +402,17 @@ whose stable references match the ticket's typed identity.**
   requirement cannot be satisfied for one operation and missed for another.
 - `ticket_payload_test.rs`: a declaration naming a different `FileLocationId` than
   `rendered_payload.source_location_id` is rejected; naming it without `read` is rejected;
-  naming it with `read` is accepted.
+  naming it with `read` is accepted; a non-scan byte-touching payload with no
+  `source_location_id` at all is rejected; a `scan_library` payload carrying one is
+  rejected, and one declaring anything other than a single `storage_root` entry is
+  rejected.
+- `binding_test.rs` / `tickets_test.rs`: a `TargetRef::FileVersion` node renders a
+  `source_location_id`, so the field is no longer conditional on the target shape and the
+  dispatch path consumes the render-time choice rather than re-resolving.
+- `artifact_access_test.rs`: the variant ordering
+  `storage_root < file_location < existing_artifact < planned_artifact` is asserted
+  directly, so reordering the enum fails a test instead of silently invalidating every
+  stored declaration.
 
 **Criterion 2 — existing handles require a location/root reference; unmaterialized output
 handles require a matching target-root reference.**
