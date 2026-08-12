@@ -98,28 +98,21 @@ is the complement: it addresses a root, so it carries no `source_location_id` an
 exactly one `storage_root` entry, taken from the source its renderer was given. The two
 rules partition the byte-touching operations, so the check is total rather than conditional.
 
-Widening that emission puts one more control-plane field inside the request envelope that
-`dispatch.rs` clones to a worker, which is why the first rejected alternative below rejects
-*untyped-only* storage identity rather than routing evidence in the payload as such.
-`source_location_id` is already read by the control plane's own adapter
-(`operation_adapters::source_location_id`), so its dual role predates this change; what is
-new is that scheduling correctness now depends on it. #423, which replaces path-bearing
-worker requests, inherits the obligation to preserve or relocate the field rather than drop
-it with the paths.
+`source_location_id` sits in the request envelope `dispatch.rs` clones to a worker, and is
+already read by the control plane's own adapter, so its dual role predates this change;
+what is new is that scheduling correctness depends on it. #423 therefore inherits the
+obligation to preserve or relocate it rather than drop it with the paths.
 
-A byte-touching node reaches a renderer through one of two paths, and neither may produce
-an undeclared ticket. `executor/tickets.rs` resolves `node.policy_target()`; every
-production plan node carries one. `plan/expansion.rs` is synchronous and touches no
-database, so it threads the parent ticket's already-resolved source through
-`BranchContext` exactly as it threads `source_file` today. A byte-touching node that
-yields a source from neither — the `render_default_payload` fallback arms, reachable only
-from the `#[cfg(test)]` demo plan — fails at render rather than emitting a ticket without
-a declaration.
-
-Resolution also happens once: the dispatch path already
-consumes `source_location_id` and re-resolves only when it is absent, so recording it
-removes a second, later resolution of "the single live rooted location" that could pick a
+Recording it also collapses two resolutions into one: dispatch re-resolves "the single live
+rooted location" only when the field is absent, and a second resolution could pick a
 different row against a table that changed in between.
+
+Neither render path may emit an undeclared ticket. `executor/tickets.rs` resolves
+`node.policy_target()`, which every production plan node carries; `plan/expansion.rs` is
+synchronous and DB-free, so it threads the parent ticket's resolved source through
+`BranchContext` as it already threads `source_file`. A byte-touching node with a source
+from neither — the `render_default_payload` fallback arms, reachable only from the
+`#[cfg(test)]` demo plan — fails at render.
 
 ### One ticket-kind normalization
 
@@ -129,16 +122,12 @@ known `OperationKind` suffix or normalization fails. A token outside every reser
 namespace is a custom local operation and normalizes to itself.
 `normalized_worker_operation` and `ticket_payload::ticket_operation` are deleted.
 
-Failing closed means *denied*, not *aborted*, and where the distinction lands matters.
-`remote_acquire_candidates_in_tx` evaluates candidate tickets in a loop and
-`?`-propagates each store call, so an error raised there ends evaluation for the whole
-candidate set. One corrupt `tickets.kind` row would stall acquisition of every
-well-formed ticket for that worker until an operator found it — a worse outcome than
-today, where an unrecognized kind simply matches no capability row. So the store's
-eligibility and capacity predicates report an unnormalizable kind as **ineligible with a
-reason**, keeping the failure scoped to the offending ticket. Payload decode is the
-opposite case and stays an error: `parse_ticket` already runs per ticket, so raising
-there cannot spread.
+Failing closed means *denied*, not *aborted*. `remote_acquire_candidates_in_tx` evaluates
+candidates in a loop that `?`-propagates each store call, so raising there would let one
+corrupt `tickets.kind` row stall acquisition of every well-formed ticket — worse than
+today, where an unrecognized kind merely matches no capability. The store's eligibility and
+capacity predicates therefore report an unnormalizable kind as **ineligible with a reason**.
+Payload decode keeps the hard error: `parse_ticket` runs per ticket and cannot spread.
 
 ## Consequences
 
@@ -166,34 +155,24 @@ there cannot spread.
   silently ignorable — the failure class ADR 0013 exists to stop — so a frozen
   canonical-encoding fixture asserts the byte-exact encoding of a multi-entry,
   multi-variant declaration, and any reorder turns red.
-- Of the twelve byte-touching operations, only `remux`, `transcode_video`,
-  `transcode_audio`, `extract_audio`, and `verify_artifact` can reach a production ticket
-  today: `policy_bridge::execution_operation` maps those five and errors on the rest, and
-  the only other `WorkflowPlan` constructor is `#[cfg(test)]`. `scan_library` in particular
-  has no production ticket producer at all — ADR 0067 moved scanning to durable scan
-  sessions — so its rule and its `storage_root` entry are exercised only by fabricated test
-  data. Three of the four target variants therefore ship without a production producer, and
-  the fourth has five operations. The other seven byte-touching
-  classifications are enforced but unexercised outside tests until their producers exist,
-  so this slice removes proportionally less of #420's risk than the twelve-way
-  classification suggests.
-- A byte-touching ticket row written by an earlier binary has no `artifact_access` field
-  and no longer decodes. This is a deliberate coordinated payload change, not a silent
-  default: no backfill can invent a root or location that was never recorded. Such a
-  ticket referencing a **pre-0034** location was already undispatchable, because migration
-  0034 quarantined those locations as unassigned legacy. A ticket rendered **after** 0034
-  references a live rooted location and dispatches normally today, so for those rows the
-  drain step is not tidiness: skipping it converts completable work into terminal failures
-  and loses it. The upgrade therefore gains one concrete step: before rolling the new binary
+- Only `remux`, `transcode_video`, `transcode_audio`, `extract_audio`, and
+  `verify_artifact` can reach a production ticket today: `policy_bridge::execution_operation`
+  maps those five and errors on the rest, and the only other `WorkflowPlan` constructor is
+  `#[cfg(test)]`. `scan_library` has no production producer at all — ADR 0067 moved scanning
+  to durable scan sessions. So `file_location` is the one target variant with a production
+  producer; the other three, and the other seven byte-touching classifications, are enforced
+  but exercised only by tests until #422 or #476 supplies one. This slice removes
+  proportionally less of #420's risk than a twelve-way classification suggests.
+- A byte-touching row written by an earlier binary no longer decodes, and no backfill can
+  invent a root or location it never recorded. Rows referencing **pre-0034** locations were
+  already undispatchable — migration 0034 quarantined those as unassigned legacy — but a
+  ticket rendered **after** 0034 dispatches normally today, so skipping the upgrade step
+  loses completable work rather than delaying it. The step: before rolling the new binary
   out, fail or delete every unfinished workflow ticket whose kind names a byte-touching
-  operation. Skipping it is loud rather than silent — each such ticket opens a
-  `terminal_failure` issue per ADR 0018 when it reaches its terminal transition. This is a
-  breaking `tickets.payload` change under ADR 0013, so the
-  binary-before-DB ordering and this step are recorded in `docs/release-process.md`
-  alongside the existing payload-compatibility rules; the step folds into ADR 0055's
-  flag-day root-assignment and rescan procedure rather than standing alone.
-- `existing_artifact` and `planned_artifact` have no producer yet, so their validation is
-  exercised only by tests until #422 or #476 supplies one.
+  operation. Skipping it is loud — each opens a `terminal_failure` issue per ADR 0018 at its
+  terminal transition. As a breaking `tickets.payload` change, the binary-before-DB ordering
+  and this step go in `docs/release-process.md` as ADR 0013 requires, folded into ADR 0055's
+  flag-day root-assignment and rescan procedure.
 
 ## Considered and rejected
 
@@ -214,17 +193,13 @@ there cannot spread.
   by definition does not. That reading of "non-canonical" is recorded as decision D4 on
   issue #475. It is cheap to reverse if wrong: a write-canonicalising producer emits
   byte-identical output either way, so relaxing the reader later invalidates nothing.
-- **Two typed fields on the payload instead of a list.** Since the declaration *is* the
-  ticket's typed storage identity and the operation-to-entries mapping is total and
-  static, `storage_root_id` plus `file_location_id` with rights derived from
-  `OperationKind` would satisfy every criterion this slice owns, and would make
-  emptiness, duplication, conflict, and ordering uninhabitable instead of rejected —
-  deleting the whole canonical-form section. Rejected because it cannot express the
-  shape the next slices need: a source location and a *different* target root are two
-  references with different rights, and `default_output_root_id` already makes them
-  differ (`operation_source::artifact_target_root`). #477's durable access plans and
-  #422's commit intents would each require reopening the payload shape, which is the
-  coordinated change the list form pays for once.
+- **Two typed fields on the payload instead of a list.** `storage_root_id` plus
+  `file_location_id`, rights derived from `OperationKind`, would satisfy every criterion
+  this slice owns and make emptiness, duplication, conflict, and ordering uninhabitable
+  rather than rejected — deleting the canonical-form section outright. Rejected because it
+  cannot express what the next slices need: a source location and a *different* target root
+  are two references with different rights, and `default_output_root_id` already makes them
+  differ. #477 and #422 would each reopen the payload shape; the list form pays that once.
 - **Ship only `storage_root` and `file_location` now.** Rejected on operator decision D3:
   the four content-struct shapes are what make criterion 2 structural — an existing handle
   without a location, or a planned one without a target root, has no encoding — where a
