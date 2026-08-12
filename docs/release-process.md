@@ -69,10 +69,12 @@ byte-touching workflow ticket now requires an `artifact_access` declaration, and
 row written before that binary no longer decodes. No backfill is possible — the
 declaration names a storage root and location the old row never recorded. Before
 rolling the new binary out, fail or delete every unfinished workflow ticket whose
-kind names a byte-touching operation. Skipping the step is loud rather than silent:
-each such ticket opens a `terminal_failure` issue (ADR 0018) when it reaches its
-terminal transition. Fold the step into the ADR 0055 flag-day root-assignment and
-rescan procedure, which such a deployment already owes.
+kind names a byte-touching operation. A ticket rendered after migration 0034
+references a live rooted location and dispatches normally today, so skipping the
+step loses completable work rather than merely delaying it. Skipping it is loud
+rather than silent: each such ticket opens a `terminal_failure` issue (ADR 0018)
+when it reaches its terminal transition. Fold the step into the ADR 0055 flag-day
+root-assignment and rescan procedure, which such a deployment already owes.
 
 `policy_versions.compiled_json` follows this contract. Existing compiled policy
 versions remain readable by a newer binary, including documented legacy wire

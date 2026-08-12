@@ -143,9 +143,14 @@ wire contract and is fixed deliberately rather than left to whatever a derive ha
 produce: targets order by variant as
 `storage_root < file_location < existing_artifact < planned_artifact`, and within a
 variant by field in declaration order; rights order as `read < write < delete`. The
-derived `Ord` impls must match that statement, and a test asserts the variant ordering
-directly so a later reorder of the enum fails a test instead of silently invalidating
-every stored declaration.
+derived `Ord` impls must match that statement, and a frozen encoding fixture asserts it so
+a later reorder of the enum fails a test instead of silently invalidating every stored
+declaration.
+
+Reading criterion 3's "non-canonical" to include entry order is a decision, recorded as D4
+on issue #475 alongside D1-D3. It is cheap to reverse: a write-canonicalising producer
+emits byte-identical output whether or not the reader insists on order, so relaxing the
+reader later invalidates nothing already written.
 
 Errors are `VoomError::Config`, matching `ProviderRelativeLocator::new`. The declaration
 is validated identically wherever it enters the process, so a corrupt persisted payload
@@ -396,14 +401,16 @@ Pre-release, one-way. A byte-touching ticket row written by an earlier binary ha
 `artifact_access` field and no longer decodes; no backfill can invent a root or location
 that was never recorded, so none is attempted.
 
-Such a ticket cannot be drained by completing it: migration 0034 already quarantined every
-pre-existing file location as unassigned legacy, so it was already undispatchable. The
-available action before upgrading is to identify and fail or delete pre-upgrade
-byte-touching workflow tickets. Each one that instead reaches a terminal transition opens a
-`terminal_failure` issue (ADR 0018, deduped per ticket), so upgrading over a non-empty
-queue converts silently stuck tickets into a burst of issues. This adds no new operator
-procedure: ADR 0055's flag-day migration already requires deliberate root assignment and a
-rescan before byte work can resume, and this precondition rides with it.
+A ticket referencing a **pre-0034** location was already undispatchable, because migration
+0034 quarantined those locations as unassigned legacy. A ticket rendered **after** 0034
+references a live rooted location and dispatches normally today, so for those rows the
+step below is not tidiness: skipping it converts completable work into terminal failures.
+
+The action before upgrading is therefore to identify and fail or delete every unfinished
+workflow ticket whose kind names a byte-touching operation. Each one that instead reaches a
+terminal transition opens a `terminal_failure` issue (ADR 0018, deduped per ticket), so
+upgrading over a non-empty queue is loud rather than silent. The step folds into ADR 0055's
+flag-day root-assignment and rescan procedure, which such a deployment already owes.
 
 This is a breaking `tickets.payload` change under ADR 0013, which requires the
 binary-before-DB ordering to be recorded in `docs/release-process.md`. That file gains the

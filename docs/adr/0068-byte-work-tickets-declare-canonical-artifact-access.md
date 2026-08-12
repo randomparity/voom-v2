@@ -95,8 +95,17 @@ renderer resolves every non-scan byte-touching node's source to exactly one live
 location and records it, whichever target shape the node carries. The declaration must then
 contain exactly one entry naming that location with `read` among its rights. `scan_library`
 is the complement: it addresses a root, so it carries no `source_location_id` and declares
-exactly one `storage_root` entry. The two rules partition the byte-touching operations, so
-the check is total rather than conditional.
+exactly one `storage_root` entry, taken from the source its renderer was given. The two
+rules partition the byte-touching operations, so the check is total rather than conditional.
+
+Widening that emission puts one more control-plane field inside the request envelope that
+`dispatch.rs` clones to a worker, which is why the first rejected alternative below rejects
+*untyped-only* storage identity rather than routing evidence in the payload as such.
+`source_location_id` is already read by the control plane's own adapter
+(`operation_adapters::source_location_id`), so its dual role predates this change; what is
+new is that scheduling correctness now depends on it. #423, which replaces path-bearing
+worker requests, inherits the obligation to preserve or relocate the field rather than drop
+it with the paths.
 
 A byte-touching node reaches a renderer through one of two paths, and neither may produce
 an undeclared ticket. `executor/tickets.rs` resolves `node.policy_target()`; every
@@ -140,8 +149,6 @@ there cannot spread.
   carrying one is never leased. It is scored ineligible rather than raising, so a single
   corrupt row cannot stall acquisition for the rest of the candidate set. Tests that lease
   such kinds must name a real operation.
-- The reorder hazard below is guarded by a frozen canonical-encoding fixture rather than
-  by prose alone; see the test strategy in the spec.
 - The declaration lives inside the durable `tickets.payload` column, so it joins the ADR
   0013 payload contract: its structs are listed in
   `docs/payload-contract-inventory.md` and `scripts/payload-contract-scope.txt`.
@@ -162,20 +169,26 @@ there cannot spread.
 - Of the twelve byte-touching operations, only `remux`, `transcode_video`,
   `transcode_audio`, `extract_audio`, and `verify_artifact` can reach a production ticket
   today: `policy_bridge::execution_operation` maps those five and errors on the rest, and
-  the only other `WorkflowPlan` constructor is `#[cfg(test)]`. The other seven
+  the only other `WorkflowPlan` constructor is `#[cfg(test)]`. `scan_library` in particular
+  has no production ticket producer at all — ADR 0067 moved scanning to durable scan
+  sessions — so its rule and its `storage_root` entry are exercised only by fabricated test
+  data. Three of the four target variants therefore ship without a production producer, and
+  the fourth has five operations. The other seven byte-touching
   classifications are enforced but unexercised outside tests until their producers exist,
   so this slice removes proportionally less of #420's risk than the twelve-way
   classification suggests.
 - A byte-touching ticket row written by an earlier binary has no `artifact_access` field
   and no longer decodes. This is a deliberate coordinated payload change, not a silent
   default: no backfill can invent a root or location that was never recorded. Such a
-  ticket cannot be drained by completing it — migration 0034 already quarantined every
-  pre-existing file location as unassigned legacy, so it was already undispatchable. The
-  upgrade therefore gains one concrete step: before rolling the new binary out, fail or
-  delete every unfinished workflow ticket whose kind names a byte-touching operation.
-  Skipping it is not silent — each such ticket opens a `terminal_failure` issue per ADR
-  0018 when it reaches its terminal transition — but a burst of issues is a poor way to
-  learn. This is a breaking `tickets.payload` change under ADR 0013, so the
+  ticket referencing a **pre-0034** location was already undispatchable, because migration
+  0034 quarantined those locations as unassigned legacy. A ticket rendered **after** 0034
+  references a live rooted location and dispatches normally today, so for those rows the
+  drain step is not tidiness: skipping it converts completable work into terminal failures
+  and loses it. The upgrade therefore gains one concrete step: before rolling the new binary
+  out, fail or delete every unfinished workflow ticket whose kind names a byte-touching
+  operation. Skipping it is loud rather than silent — each such ticket opens a
+  `terminal_failure` issue per ADR 0018 when it reaches its terminal transition. This is a
+  breaking `tickets.payload` change under ADR 0013, so the
   binary-before-DB ordering and this step are recorded in `docs/release-process.md`
   alongside the existing payload-compatibility rules; the step folds into ADR 0055's
   flag-day root-assignment and rescan procedure rather than standing alone.
@@ -184,10 +197,12 @@ there cannot spread.
 
 ## Considered and rejected
 
-- **Leave storage identity in the untyped rendered payload.** Rejected because the
-  rendered payload is the worker-facing request shape owned by #423; overloading it with
-  routing evidence gives ownership resolution an input that changes whenever a worker
-  contract changes.
+- **Leave storage identity untyped, in the rendered payload only.** Rejected because
+  ownership resolution would then read bare JSON numbers out of a request shape #423 owns
+  and is about to rewrite, with no vocabulary for a target root or a handle. The decision
+  does keep one routing field there — `source_location_id`, widened to every non-scan
+  byte-touching ticket — because the cross-check needs something to bind against; the
+  typed declaration, not that field, is the evidence #476 resolves.
 - **A store-owned declaration type.** Rejected for the reason ADR 0053 gives: it reverses
   the crate layering and makes a domain decision depend on SQLite infrastructure.
 - **Accept any entry order and deduplicate on read.** Rejected because a reader that
@@ -195,11 +210,10 @@ there cannot spread.
 - **Accept any entry order, reject duplicates and conflicts, canonicalise only on write.**
   This repairs nothing, keeps one wire format, and removes the reorder hazard above, so it
   is the strongest alternative to the chosen rule. Rejected because criterion 3 requires
-  that "non-canonical" declarations fail before scheduling, which an order-insensitive
-  reader by definition does not do. The choice rests on that explicit wording, not on
-  reading criterion 6's "no second accepted wire format" to mean one intent must have
-  exactly one byte sequence — a gloss that would have carried the argument on its own and
-  should not.
+  that "non-canonical" declarations fail before scheduling, and an order-insensitive reader
+  by definition does not. That reading of "non-canonical" is recorded as decision D4 on
+  issue #475. It is cheap to reverse if wrong: a write-canonicalising producer emits
+  byte-identical output either way, so relaxing the reader later invalidates nothing.
 - **Two typed fields on the payload instead of a list.** Since the declaration *is* the
   ticket's typed storage identity and the operation-to-entries mapping is total and
   static, `storage_root_id` plus `file_location_id` with rights derived from
@@ -211,17 +225,21 @@ there cannot spread.
   differ (`operation_source::artifact_target_root`). #477's durable access plans and
   #422's commit intents would each require reopening the payload shape, which is the
   coordinated change the list form pays for once.
-- **Ship only `storage_root` and `file_location` now.** Rejected on operator decision D3.
-  The honest reason is that the four content-struct shapes are what make criterion 2
-  structural — an existing handle without a location, or a planned one without a target
-  root, has no encoding — where a two-variant vocabulary would have to re-add those rules
-  as validation branches later. The cost of deferring is smaller than it first appears:
-  adding a variant to an internally tagged enum is forward-additive, so old rows still
-  decode and only rollback is affected, which ADR 0013 already charges for every payload
-  change.
+- **Ship only `storage_root` and `file_location` now.** Rejected on operator decision D3:
+  the four content-struct shapes are what make criterion 2 structural — an existing handle
+  without a location, or a planned one without a target root, has no encoding — where a
+  two-variant vocabulary would re-add those rules as validation branches later. Deferring
+  would have been cheap, though: adding a variant to an internally tagged enum is
+  forward-additive, so old rows still decode and only rollback is affected, which ADR 0013
+  already charges for every payload change.
 - **Keep both normalizations and make them agree by review.** Rejected because they
   already disagree on unknown namespaced tokens, and the disagreement is invisible until
   a corrupt or hand-written ticket kind reaches acquisition.
-- **Do nothing and let #476 infer intent from the operation and rendered payload.**
-  Rejected because inference reintroduces path-derived reasoning at exactly the seam ADR
-  0050 removes it from.
+- **Do nothing and let #476 derive intent from the operation and `source_location_id`.**
+  This is genuinely cheap — the operation-to-entries mapping is total, and the location is
+  an ID one lookup from its root, so nothing here needs paths. It also avoids both of this
+  ADR's largest costs: the breaking `tickets.payload` change and the pre-upgrade drain step.
+  Rejected because it leaves intent re-derived at scheduling time from a field the worker
+  contract owns and #423 is about to rewrite, and because it keeps the second resolution
+  point this decision closes — the ticket would still name no location, so dispatch would
+  resolve one independently.
