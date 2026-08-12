@@ -307,7 +307,7 @@ Rule 3 is one-way in the other direction: the declaration may name references th
 payload does not, because a write intent names a target root that the worker-facing
 payload has no field for.
 
-`parse_ticket` derives the expected operation through `TicketOperation::normalize_stored`
+`parse_ticket` derives the expected operation through `TicketOperation::normalize`
 instead of the deleted local helper; a `CustomLocal` kind reaching
 `WorkflowTicketPayload::parse_ticket` is rejected, as it is today.
 
@@ -488,9 +488,14 @@ existing `tickets.payload` write path and is unchanged here.
   is written; ticket read fails before the ticket can be scheduled or leased.
 - Missing declaration on a byte-touching ticket, or present on a non-byte-touching one →
   same path, distinct message.
-- Unknown token inside the reserved namespace → `VoomError::Database` from
-  `normalize_stored`. At `operation_capacity_in_tx` this now rejects the acquisition
-  instead of matching a fabricated capability.
+- Unknown token inside the reserved namespace → `normalize` classifies it
+  `UnknownNamespaced` and raises nothing. Two callers reject it, each handling one ticket:
+  `acquire_guarded` (`leases.rs:319`) with `VoomError::Database` naming the field, and
+  `parse_ticket` with a `WorkflowTicketPayloadError`. The three `workers.rs` capability and
+  capacity functions do not raise — see §4's disposition table. Today's behavior for such a
+  token is that `normalized_worker_operation` strips the namespace and returns `Ok("bogus")`,
+  which matches no capability row either; the change is that the bare token stops being
+  manufactured and the lease path rejects explicitly.
 - Policy target that resolves to zero or several live rooted locations → the existing
   `VoomError::Config` messages from `select_location`, raised at render time.
 

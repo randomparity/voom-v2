@@ -134,7 +134,8 @@ only from the `#[cfg(test)]` demo plan — fails at render.
 
 ### One ticket-kind normalization
 
-`TicketOperation::normalize_stored` becomes the single implementation.
+`TicketOperation::normalize` becomes the single implementation. It classifies and does not
+raise; rejection belongs to the callers that handle one ticket at a time.
 `synthetic.workflow.operation.` is a reserved namespace: a token inside it must have a
 known `OperationKind` suffix or normalization fails. A token outside every reserved
 namespace is a custom local operation and normalizes to itself.
@@ -142,10 +143,12 @@ namespace is a custom local operation and normalizes to itself.
 
 Failing closed means *denied*, not *aborted*. `remote_acquire_candidates_in_tx` evaluates
 candidates in a loop that `?`-propagates each store call, so raising there would let one
-corrupt `tickets.kind` row stall acquisition of every well-formed ticket — worse than
-today, where an unrecognized kind merely matches no capability. The store's eligibility and
-capacity predicates therefore report an unnormalizable kind as **ineligible with a reason**.
-Payload decode keeps the hard error: `parse_ticket` runs per ticket and cannot spread.
+corrupt `tickets.kind` row stall acquisition of every well-formed ticket — worse than today,
+where an unrecognized kind merely matches no capability. So the capability and capacity
+functions never raise: they match on the unmodified token, which matches no row, and the
+worker is ineligible by the same mechanism as today. Rejection lives in the two callers that
+handle exactly one ticket — `acquire_guarded` on the lease path and `parse_ticket` on
+decode — where raising cannot spread.
 
 ## Consequences
 
