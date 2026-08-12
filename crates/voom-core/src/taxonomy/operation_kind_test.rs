@@ -90,6 +90,38 @@ fn from_wire_round_trips_every_variant_and_rejects_unknown() {
 }
 
 #[test]
+fn byte_touching_classification_is_the_documented_split() {
+    let not_byte_touching: &[OperationKind] = &[
+        OperationKind::IdentifyMedia,
+        OperationKind::ScoreQuality,
+        OperationKind::SyncExternalSystem,
+    ];
+    for operation in OperationKind::ALL {
+        let expected = !not_byte_touching.contains(operation);
+        assert_eq!(
+            operation.is_byte_touching(),
+            expected,
+            "classification of {operation:?}"
+        );
+    }
+    assert_eq!(
+        OperationKind::ALL
+            .iter()
+            .filter(|operation| operation.is_byte_touching())
+            .count(),
+        12
+    );
+}
+
+#[test]
+fn scan_library_is_byte_touching_and_identify_media_is_not() {
+    // scan_library enumerates a root's contents, which #421 moves to the owner
+    // node; identify_media derives from facts an earlier operation recorded.
+    assert!(OperationKind::ScanLibrary.is_byte_touching());
+    assert!(!OperationKind::IdentifyMedia.is_byte_touching());
+}
+
+#[test]
 fn unknown_string_fails_to_deserialize() {
     let res: Result<OperationKind, _> = serde_json::from_str("\"unknown_op\"");
     assert!(res.is_err(), "unknown_op should not deserialize");
