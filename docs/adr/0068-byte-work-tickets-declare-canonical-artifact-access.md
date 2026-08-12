@@ -96,8 +96,18 @@ location and records it, whichever target shape the node carries. The declaratio
 contain exactly one entry naming that location with `read` among its rights. `scan_library`
 is the complement: it addresses a root, so it carries no `source_location_id` and declares
 exactly one `storage_root` entry. The two rules partition the byte-touching operations, so
-the check is total rather than conditional, and the resolution happens once: the dispatch
-path already
+the check is total rather than conditional.
+
+A byte-touching node reaches a renderer through one of two paths, and neither may produce
+an undeclared ticket. `executor/tickets.rs` resolves `node.policy_target()`; every
+production plan node carries one. `plan/expansion.rs` is synchronous and touches no
+database, so it threads the parent ticket's already-resolved source through
+`BranchContext` exactly as it threads `source_file` today. A byte-touching node that
+yields a source from neither — the `render_default_payload` fallback arms, reachable only
+from the `#[cfg(test)]` demo plan — fails at render rather than emitting a ticket without
+a declaration.
+
+Resolution also happens once: the dispatch path already
 consumes `source_location_id` and re-resolves only when it is absent, so recording it
 removes a second, later resolution of "the single live rooted location" that could pick a
 different row against a table that changed in between.
@@ -106,28 +116,49 @@ different row against a table that changed in between.
 
 `TicketOperation::normalize_stored` becomes the single implementation.
 `synthetic.workflow.operation.` is a reserved namespace: a token inside it must have a
-known `OperationKind` suffix or the call fails closed as a database error. A token
-outside every reserved namespace is a custom local operation and normalizes to itself.
+known `OperationKind` suffix or normalization fails. A token outside every reserved
+namespace is a custom local operation and normalizes to itself.
 `normalized_worker_operation` and `ticket_payload::ticket_operation` are deleted.
+
+Failing closed means *denied*, not *aborted*, and where the distinction lands matters.
+`remote_acquire_candidates_in_tx` evaluates candidate tickets in a loop and
+`?`-propagates each store call, so an error raised there ends evaluation for the whole
+candidate set. One corrupt `tickets.kind` row would stall acquisition of every
+well-formed ticket for that worker until an operator found it — a worse outcome than
+today, where an unrecognized kind simply matches no capability row. So the store's
+eligibility and capacity predicates report an unnormalizable kind as **ineligible with a
+reason**, keeping the failure scoped to the offending ticket. Payload decode is the
+opposite case and stays an error: `parse_ticket` already runs per ticket, so raising
+there cannot spread.
 
 ## Consequences
 
 - A byte-touching ticket that cannot name its storage cannot be created. Issue #476 gets
   a typed, locator-free reference set to resolve, and #477 through #479 get the same
   evidence without re-deriving it from paths.
-- `synthetic.workflow.operation.<unknown>` stops being accepted at lease acquisition.
-  Tests that lease such kinds now fail closed and must name a real operation.
+- `synthetic.workflow.operation.<unknown>` stops matching any capability, so a ticket
+  carrying one is never leased. It is scored ineligible rather than raising, so a single
+  corrupt row cannot stall acquisition for the rest of the candidate set. Tests that lease
+  such kinds must name a real operation.
+- The reorder hazard below is guarded by a frozen canonical-encoding fixture rather than
+  by prose alone; see the test strategy in the spec.
 - The declaration lives inside the durable `tickets.payload` column, so it joins the ADR
   0013 payload contract: its structs are listed in
   `docs/payload-contract-inventory.md` and `scripts/payload-contract-scope.txt`.
 - Rendering a byte-touching ticket resolves its policy target to exactly one live rooted
   location, so a file version with zero or several live rooted locations fails closed at
-  render time instead of at dispatch. Source resolution now has one point, not two.
+  render time instead of at dispatch. For **workflow-rendered tickets** source resolution
+  now has one point, not two; CLI- and API-initiated operations still pass an optional
+  `source_location_id` and keep the dispatch-time resolution in
+  `operation_source::select_location`, so that branch stays live and must not be deleted
+  as dead.
 - Variant and field declaration order in `ArtifactAccessTarget` is durable payload
   contract. Reordering either silently reclassifies every previously written declaration
   as non-canonical; `deny_unknown_fields` and `check-payload-deny-unknown.sh` give no
-  signal, because no field is unknown and no attribute moved. Treat a reorder as a
-  breaking change under ADR 0013.
+  signal, because no field is unknown and no attribute moved. A written rule would be
+  silently ignorable — the failure class ADR 0013 exists to stop — so a frozen
+  canonical-encoding fixture asserts the byte-exact encoding of a multi-entry,
+  multi-variant declaration, and any reorder turns red.
 - Of the twelve byte-touching operations, only `remux`, `transcode_video`,
   `transcode_audio`, `extract_audio`, and `verify_artifact` can reach a production ticket
   today: `policy_bridge::execution_operation` maps those five and errors on the rest, and
@@ -139,13 +170,15 @@ outside every reserved namespace is a custom local operation and normalizes to i
   and no longer decodes. This is a deliberate coordinated payload change, not a silent
   default: no backfill can invent a root or location that was never recorded. Such a
   ticket cannot be drained by completing it — migration 0034 already quarantined every
-  pre-existing file location as unassigned legacy, so it was already undispatchable — so
-  the available action before upgrading is to identify and fail or delete pre-upgrade
-  byte-touching workflow tickets. Each one that instead reaches a terminal transition
-  opens a `terminal_failure` issue per ADR 0018, so an upgrade over a non-empty queue
-  turns silently stuck tickets into a burst of issues. This creates no new operator
-  procedure: ADR 0055's flag-day migration already requires deliberate root assignment and
-  a rescan before byte work can resume, and this precondition rides with it.
+  pre-existing file location as unassigned legacy, so it was already undispatchable. The
+  upgrade therefore gains one concrete step: before rolling the new binary out, fail or
+  delete every unfinished workflow ticket whose kind names a byte-touching operation.
+  Skipping it is not silent — each such ticket opens a `terminal_failure` issue per ADR
+  0018 when it reaches its terminal transition — but a burst of issues is a poor way to
+  learn. This is a breaking `tickets.payload` change under ADR 0013, so the
+  binary-before-DB ordering and this step are recorded in `docs/release-process.md`
+  alongside the existing payload-compatibility rules; the step folds into ADR 0055's
+  flag-day root-assignment and rescan procedure rather than standing alone.
 - `existing_artifact` and `planned_artifact` have no producer yet, so their validation is
   exercised only by tests until #422 or #476 supplies one.
 
@@ -157,9 +190,16 @@ outside every reserved namespace is a custom local operation and normalizes to i
   contract changes.
 - **A store-owned declaration type.** Rejected for the reason ADR 0053 gives: it reverses
   the crate layering and makes a domain decision depend on SQLite infrastructure.
-- **Accept any entry order and deduplicate on read.** Rejected because two byte-identical
-  intents would have several accepted encodings, which is the second wire format
-  criterion 6 forbids, and because a reader that repairs its input hides the producer bug.
+- **Accept any entry order and deduplicate on read.** Rejected because a reader that
+  repairs its input hides the producer bug that wrote a malformed declaration.
+- **Accept any entry order, reject duplicates and conflicts, canonicalise only on write.**
+  This repairs nothing, keeps one wire format, and removes the reorder hazard above, so it
+  is the strongest alternative to the chosen rule. Rejected because criterion 3 requires
+  that "non-canonical" declarations fail before scheduling, which an order-insensitive
+  reader by definition does not do. The choice rests on that explicit wording, not on
+  reading criterion 6's "no second accepted wire format" to mean one intent must have
+  exactly one byte sequence — a gloss that would have carried the argument on its own and
+  should not.
 - **Two typed fields on the payload instead of a list.** Since the declaration *is* the
   ticket's typed storage identity and the operation-to-entries mapping is total and
   static, `storage_root_id` plus `file_location_id` with rights derived from

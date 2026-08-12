@@ -64,6 +64,16 @@ rather than silently dropping a field:
   change requires restoring the pre-upgrade database snapshot
   (see `docs/runbooks/migration-rollback.md`).
 
+`tickets.payload` carries a breaking change under this contract (ADR 0068): a
+byte-touching workflow ticket now requires an `artifact_access` declaration, and a
+row written before that binary no longer decodes. No backfill is possible — the
+declaration names a storage root and location the old row never recorded. Before
+rolling the new binary out, fail or delete every unfinished workflow ticket whose
+kind names a byte-touching operation. Skipping the step is loud rather than silent:
+each such ticket opens a `terminal_failure` issue (ADR 0018) when it reaches its
+terminal transition. Fold the step into the ADR 0055 flag-day root-assignment and
+rescan procedure, which such a deployment already owes.
+
 `policy_versions.compiled_json` follows this contract. Existing compiled policy
 versions remain readable by a newer binary, including documented legacy wire
 forms. Add a field only as optional/defaulted, deploy the reader before any

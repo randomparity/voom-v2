@@ -210,6 +210,18 @@ receive a `TicketOperation` read from SQLite, and AGENTS.md requires persisted v
 treated as untrusted with corruption reported as a database error. `normalized_worker_operation`
 and `ticket_payload::ticket_operation` are deleted; no third normalization is added.
 
+**Where the failure lands.** `remote_acquire_candidates_in_tx`
+(`cases/execution/remote_execution/acquire.rs:295-352`) loops over candidate tickets and
+`?`-propagates `operation_eligibility_in_tx` and `operation_capacity_in_tx`, so an error
+raised inside those calls ends evaluation for the entire candidate set. Today an
+unrecognized kind merely matches no capability row and that one ticket scores ineligible.
+To avoid making one corrupt `tickets.kind` value stall acquisition for every well-formed
+ticket, `operation_eligibility_in_tx` and `operation_capacity_in_tx` catch a normalization
+failure and report the operation as ineligible with a reason, rather than propagating it.
+Fail-closed here means denied, never leased — not aborted. `parse_ticket` keeps the hard
+error, because it already runs per ticket and cannot spread. `acquire.rs` itself is not
+modified; the containment lives in `workers.rs`, inside the frozen surface.
+
 ### 5. The ticket payload gate
 
 `WorkflowTicketPayload` (`crates/voom-control-plane/src/workflow/plan/ticket_payload.rs`)
@@ -290,7 +302,11 @@ The mapping is total over `OperationKind` and each operation appears in exactly 
 | `delete_artifact` | `file_location(root, loc)` with `read, delete` |
 
 A byte-touching operation reached with `source: None` is a `VoomError::Config` naming the
-operation.
+operation. That is the rule for the `render_default_payload` fallback arms
+(`executor/tickets.rs:176,188,199,207` and the `_ =>` catch-all at 209), which emit paths
+and codecs but no IDs: a byte-touching node reaching them without a threaded or resolved
+source fails at render instead of producing an undeclared ticket. Those arms are reachable
+only from the `#[cfg(test)]` demo plan, whose fixtures supply a synthetic source.
 
 The write intent is a `storage_root` entry rather than a `planned_artifact` entry because
 no artifact handle exists at render time; the target root is what is knowable, and it is
@@ -328,7 +344,9 @@ inputs — which is precisely what "routing evidence only" means.
 module joins it, and `docs/payload-contract-inventory.md` gains the declaration structs,
 because they are typed content of the durable `tickets.payload` column.
 `docs/adr/README.md` gains the ADR 0068 row: `check-adr-index` is part of `just ci`, and
-CI runs `just ci`, so the row is a merge precondition.
+CI runs `just ci`, so the row is a merge precondition. `docs/release-process.md` gains the
+breaking-payload upgrade step, because ADR 0013 requires the binary-before-DB ordering to
+live there rather than only in a decision record.
 
 ## Threat model
 
@@ -387,6 +405,10 @@ queue converts silently stuck tickets into a burst of issues. This adds no new o
 procedure: ADR 0055's flag-day migration already requires deliberate root assignment and a
 rescan before byte work can resume, and this precondition rides with it.
 
+This is a breaking `tickets.payload` change under ADR 0013, which requires the
+binary-before-DB ordering to be recorded in `docs/release-process.md`. That file gains the
+precondition in this change; the surface list grows by that one file for that reason.
+
 No schema change, no migration, and no new dependency.
 
 ## Test strategy and acceptance criteria
@@ -409,10 +431,15 @@ whose stable references match the ticket's typed identity.**
 - `binding_test.rs` / `tickets_test.rs`: a `TargetRef::FileVersion` node renders a
   `source_location_id`, so the field is no longer conditional on the target shape and the
   dispatch path consumes the render-time choice rather than re-resolving.
-- `artifact_access_test.rs`: the variant ordering
-  `storage_root < file_location < existing_artifact < planned_artifact` is asserted
-  directly, so reordering the enum fails a test instead of silently invalidating every
-  stored declaration.
+- `artifact_access_test.rs`: a **frozen canonical-encoding fixture** — the byte-exact JSON
+  of a declaration carrying one entry of each of the four target variants, with multi-right
+  entries — is asserted in both directions. Reordering variants or fields turns it red.
+  Prose alone would be silently ignorable, which is the failure class ADR 0013 exists to
+  stop, and `check-payload-deny-unknown.sh` cannot see an ordering change.
+- `workers_test.rs`: a candidate set containing one ticket with an unnormalizable kind and
+  one well-formed ticket scores only the first ineligible; the second remains eligible.
+  This is the containment that keeps a corrupt row from stalling acquisition, and it fails
+  if the normalization error is propagated instead of caught.
 
 **Criterion 2 — existing handles require a location/root reference; unmaterialized output
 handles require a matching target-root reference.**
