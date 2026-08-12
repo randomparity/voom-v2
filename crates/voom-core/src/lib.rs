@@ -87,7 +87,9 @@ pub mod rng_test_support {
 }
 
 pub mod ticket_operation {
-    pub use crate::taxonomy::ticket_operation::TicketOperation;
+    pub use crate::taxonomy::ticket_operation::{
+        NormalizedTicketOperation, TicketOperation, WORKFLOW_OPERATION_NAMESPACE,
+    };
 }
 
 pub mod transcode_video_profile {
@@ -141,7 +143,9 @@ pub use taxonomy::execution_vocab::{
     NodeIncarnationEndReason, NodeIncarnationStatus, NodeKind, NodeStatus, WorkerKind, WorkerStatus,
 };
 pub use taxonomy::scan::{ScanSessionStatus, ScanTerminalReason};
-pub use ticket_operation::TicketOperation;
+pub use ticket_operation::{
+    NormalizedTicketOperation, TicketOperation, WORKFLOW_OPERATION_NAMESPACE,
+};
 pub use transcode_video_profile::{
     NvidiaVideoDecode, SoftwareVideoDecode, TRANSCODE_VIDEO_CODEC,
     TRANSCODE_VIDEO_CODEC_ALIAS_H265, TRANSCODE_VIDEO_CODEC_AV1, TRANSCODE_VIDEO_CODEC_H264,
