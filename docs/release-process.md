@@ -71,7 +71,10 @@ declaration names a storage root and location the old row never recorded.
 
 **Upgrade.** Quiesce workflow ticket creation, then fail or delete every unfinished
 workflow ticket whose kind names a byte-touching operation, then roll the new binary
-out. Quiescing first is load-bearing: the binary performing the drain is the one still
+out. No shipped command does either half yet — `voom ticket` offers only `list` and
+`show`, and `voom job cancel` takes non-byte-touching tickets with the job — so both
+steps currently require direct SQL against `tickets`. Issue #480 tracks shipping the
+control. Quiescing first is load-bearing: the binary performing the drain is the one still
 rendering old-shape tickets, so draining against a live writer leaves everything
 rendered between the drain and the swap undecodable. A ticket rendered after migration
 0034 references a live rooted location and dispatches normally today, so skipping the

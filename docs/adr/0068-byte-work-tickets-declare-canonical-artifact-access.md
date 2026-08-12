@@ -92,23 +92,30 @@ without it.
 For the cross-check against `rendered_payload.source_location_id` to bind, that field has
 to be present, and today it is emitted only for a `TargetRef::FileLocation` node. So the
 renderer resolves every non-scan byte-touching node's source to exactly one live rooted
-location and records it, whichever target shape the node carries. The declaration must then
-contain exactly one entry naming that location with `read` among its rights. `scan_library`
-is the complement: it addresses a root, so it carries no `source_location_id` and declares
-exactly one `storage_root` entry. The two rules partition the byte-touching operations, so
-the check is total rather than conditional.
+location and records it, whichever target shape the node carries. `scan_library` is the
+complement: it addresses a root, so it carries no `source_location_id`. The two cases
+partition the byte-touching operations, so the check is total rather than conditional.
 
-Each entry's rights come from the operation, and the mapping is fixed rather than left to
-the renderer: `scan_library` reads its root; `probe_file`, `hash_file`, and
-`verify_artifact` read their location; the seven output-producing operations read their
-location and write their root; `delete_artifact` reads and deletes its location. A renderer
-that could choose a different rights set for the same operation would make the evidence
-#476 resolves non-deterministic, which the canonical-form rules do not catch.
+Each entry's rights come from the operation, and the mapping is fixed: `scan_library` reads
+its root; `probe_file`, `hash_file`, and `verify_artifact` read their location; the seven
+output-producing operations read their location and write their root; `delete_artifact`
+reads and deletes its location.
 
-The source reaches every renderer through `BranchContext`, not through `node.policy_target()`
-directly — the `scan_library` arm never reads the policy target, so a per-arm lookup would
-not reach it. `render_node_ticket` resolves the target once and populates `BranchContext`;
-`plan/expansion.rs` threads the parent's already-resolved source into the same field.
+**The gate is equality, not shape.** The declaration must equal the one that mapping
+produces for the ticket's operation and source, entry for entry and right for right. A
+shape check would bind only targets, leaving a corrupted or hand-edited row free to give a
+`probe_file` ticket `write` and `delete` on its source and still pass every canonical-form
+rule — and #476 would then gate on it. Equality extends the untrusted-writer stance to
+rights, and makes one mapping the single definition of a valid declaration on both sides.
+It stays synchronous and read-only: it proves the declaration is well-formed for its
+operation, never that the storage exists or is owned.
+
+The source reaches every renderer through `BranchContext`, not `node.policy_target()` —
+the `scan_library` arm never reads the policy target. `render_node_ticket` resolves the
+target once, populates `BranchContext`, and hands the resolved source to the payload
+renderers so no arm resolves it a second time. Fan-out children cannot inherit a location
+from a `scan_library` parent, which has none, so the scanner result carries a
+`file_location_id` per file and the child pairs it with the parent's declared root.
 
 `source_location_id` sits in the request envelope `dispatch.rs` clones to a worker, and is
 already read by the control plane's own adapter, so its dual role predates this change;

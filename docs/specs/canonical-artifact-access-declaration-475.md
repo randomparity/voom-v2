@@ -126,18 +126,23 @@ object-member order and whitespace remain serde's to accept, as they are everywh
 the payload contract; the canonical-form rules constrain list order, not object-member
 order.
 
-`new` rejects, each with a distinct message and none naming a locator or path:
+`new` rejects with these exact messages, so the criterion-3 tests assert a contract the spec
+states rather than one the first implementation happens to produce. Every message is
+`VoomError::Config`, is distinct, and names no locator, path, or host:
 
-| Rule | Rejected because |
-|---|---|
-| entry list is empty | criterion 1 requires a non-empty declaration |
-| an entry's `rights` is empty | an entry that intends nothing is not an intent |
-| an entry's `rights` is not strictly ascending | catches duplicate and unordered rights in one rule |
-| entries are not strictly ascending by `target` | catches duplicate and unordered entries in one rule |
-| a `file_location_id` appears in more than one entry | one location, one intent — two entries for it conflict |
-| an `artifact_handle_id` appears in more than one entry | as above, for handles |
-| any ID is zero | `voom-core` ID newtypes are unvalidated `u64` wrappers (`ids.rs:1-7`), so a defaulted or truncated field would otherwise read as valid |
-| the entry list exceeds `MAX_ENTRIES` (8) | the threat model treats the persisted writer as untrusted, so the reader may not rely on the producer's two-entry maximum. 8 covers every shape `declaration_for` and the #476/#477 descriptions require, with room to spare |
+| Rule | Message | Rejected because |
+|---|---|---|
+| entry list is empty | `artifact access declaration must not be empty` | criterion 1 requires a non-empty declaration |
+| entry list longer than `MAX_ENTRIES` (8) | `artifact access declaration has {n} entries, at most 8 are allowed` | a canonicalization sanity bound; see the threat model for what it is *not* |
+| an entry's `rights` is empty | `artifact access entry {i} must declare at least one right` | an entry that intends nothing is not an intent |
+| an entry's `rights` is not strictly ascending | `artifact access entry {i} rights must be strictly ascending read < write < delete` | catches duplicate and unordered rights in one rule |
+| entries are not strictly ascending by `target` | `artifact access entries must be strictly ascending by target; entry {i} does not follow entry {i-1}` | catches duplicate and unordered entries in one rule |
+| a `file_location_id` appears in more than one entry | `artifact access declares file location {id} in more than one entry` | one location, one intent — two entries for it conflict |
+| an `artifact_handle_id` appears in more than one entry | `artifact access declares artifact handle {id} in more than one entry` | as above, for handles |
+| any ID is zero | `artifact access entry {i} has a zero {field}` | `voom-core` ID newtypes are unvalidated `u64` wrappers (`ids.rs:1-7`), so a defaulted or truncated field would otherwise read as valid |
+
+`{field}` is the struct field name (`storage_root_id`, `file_location_id`,
+`target_storage_root_id`, `artifact_handle_id`), and `{i}` is the zero-based entry index.
 
 A `storage_root_id` may repeat across entries: reading a source location and writing an
 output into the same root is ordinary and unambiguous.
@@ -285,16 +290,23 @@ pub artifact_access: Option<ArtifactAccessDeclaration>,
 2. `!operation.is_byte_touching()` and `artifact_access` is `Some` → reject. A ticket that
    touches no bytes has no access to declare, and a stray declaration would be evidence
    #476 must not act on.
-3. `operation.is_byte_touching()` and `operation != ScanLibrary` →
-   `rendered_payload.source_location_id` must be present and a non-zero `u64`, and the
-   declaration must contain exactly one entry naming that `FileLocationId` (as
-   `file_location` or `existing_artifact`) with `read` among its rights. This is the
-   anti-drift check: the typed declaration and the untyped rendered payload cannot
-   disagree about the source.
-4. `operation == ScanLibrary` → `rendered_payload.source_location_id` must be absent, and
-   the declaration must contain exactly one `storage_root` entry and nothing else. A scan
-   addresses a root, not a file, so a source location on it would be evidence of a
-   mis-rendered ticket.
+3. `operation == ScanLibrary` → `rendered_payload.source_location_id` must be absent, and
+   the declaration must be exactly `declaration_for(ScanLibrary, Root { r })` where `r` is
+   the root named by the declaration's single `storage_root` entry. A scan addresses a
+   root, not a file, so a source location on it is evidence of a mis-rendered ticket.
+4. every other byte-touching operation → `rendered_payload.source_location_id` must be
+   present and a non-zero `u64`; call it `l`. The declaration must contain exactly one
+   entry naming `l`, and that entry must name a root `r`. The declaration must then equal
+   `declaration_for(operation, Location { r, l })` **entry for entry and right for right**.
+
+Rule 4 is a total equality check, not a shape check, and that is deliberate. §6 fixes the
+rights each operation declares, but a shape check would only bind *targets* — so a
+hand-edited or corrupted row could give a `probe_file` ticket `read, write, delete` on its
+source, or bolt on a `storage_root` write entry, and pass every canonical-form rule. The
+threat model says the reader must treat the persisted writer as untrusted; equality is what
+extends that stance to rights. It also subsumes the old shape rules, so there is one rule
+where there were two, and it makes the operation-to-rights mapping in §6 the single
+definition of a valid declaration on both the write and the read side.
 
 Rules 3 and 4 partition the byte-touching operations, so the check binds for every one of
 them rather than only when the field happens to be present. That matters: a check
@@ -303,13 +315,13 @@ whose location is ambiguous — the case operator decision D2 exists to resolve 
 mis-resolved location would then be durable and unnoticed. §6 therefore makes every
 non-scan byte-touching renderer emit `source_location_id`.
 
-Rule 3 is one-way in the other direction: the declaration may name references the rendered
-payload does not, because a write intent names a target root that the worker-facing
-payload has no field for.
+Equality is evaluated against `declaration_for`, which is pure and takes no database
+handle, so `parse_ticket` stays synchronous and read-only. It proves the declaration is
+*well-formed for its operation* — never that the referenced storage exists, is live, or is
+owned by anyone, which remains #476's.
 
-`parse_ticket` derives the expected operation through `TicketOperation::normalize`
-instead of the deleted local helper; a `CustomLocal` kind reaching
-`WorkflowTicketPayload::parse_ticket` is rejected, as it is today.
+`parse_ticket` derives the expected operation through `TicketOperation::normalize` instead
+of the deleted local helper, and accepts only `Known { namespaced: true }`.
 
 ### 6. Producing the declaration
 
@@ -334,9 +346,14 @@ swallowing it. A byte-touching node whose `policy_target` is neither `FileVersio
 A new `crates/voom-control-plane/src/workflow/plan/artifact_access.rs` holds:
 
 ```rust
-pub(crate) struct TicketStorageSource {
-    pub(crate) storage_root_id: StorageRootId,
-    pub(crate) file_location_id: FileLocationId,
+pub(crate) enum TicketStorageSource {
+    /// A whole root. The only shape `scan_library` can carry.
+    Root { storage_root_id: StorageRootId },
+    /// A live location inside a root. Every other byte-touching operation.
+    Location {
+        storage_root_id: StorageRootId,
+        file_location_id: FileLocationId,
+    },
 }
 
 pub(crate) fn declaration_for(
@@ -344,6 +361,13 @@ pub(crate) fn declaration_for(
     source: Option<&TicketStorageSource>,
 ) -> Result<Option<ArtifactAccessDeclaration>, VoomError>;
 ```
+
+The two variants exist because a single struct with both fields required cannot express a
+scan: it would force every scan branch to carry a fabricated non-zero `file_location_id`
+that `declaration_for` discards and the renderer is forbidden to emit — and under D1's
+declaration-is-the-identity reading a fabricated ID is a live reference to somebody else's
+location. A `scan_library` node given `Location`, or any other byte-touching operation given
+`Root`, is a `VoomError::Config` naming the operation and the variant it received.
 
 The mapping is total over `OperationKind` and each operation appears in exactly one row:
 
@@ -415,13 +439,41 @@ the self-healing but let the declaration name one location while the process ope
 adds no re-render path. A test covers it: a ticket whose recorded location is retired
 before dispatch fails terminally rather than silently retargeting.
 
+**Fan-out children get their location from the scanner result.** `expand_scanner_completion`
+(`expansion.rs:52-83`) builds the probe / hash / identity children from `scanner_files`,
+whose `ScannerFile { path, source_file }` comes from the scan ticket's *result* — path
+strings with no IDs (`expansion.rs:365-402`). There is nothing to thread down: the parent is
+`scan_library`, which by design holds a root and no location. So the scanner result carries
+the missing half.
+
+`ScannerFile` gains `file_location_id: FileLocationId`, parsed from a required, non-zero
+`file_location_id` on each `result.files[]` object. The string form of a file entry
+(`expansion.rs:381-385`) no longer satisfies a byte-touching expansion and is rejected with
+`scanner result file entry requires file_location_id`. The root comes from the parent scan
+ticket's own declaration — its single `storage_root` entry — so no new lookup is added and
+the child's source is `Location { storage_root_id: parent_root, file_location_id }`. Reading
+the parent's declaration for this is not an inversion: the declaration is the parent
+ticket's typed storage identity under D1, which is exactly what a child needs to inherit.
+
+This is the fixture migration the operator authorized. It touches `ScannerFile`,
+`scanner_files`, `expand_scanner_completion`, and every test that seeds a scanner result;
+none of it is reachable in production, where `policy_bridge::execution_operation` admits no
+`scan_library` node at all.
+
 `BranchContext` (`binding.rs:17`) gains `storage_source: Option<TicketStorageSource>`, and
 it — not `node.policy_target()` — is how the source reaches every renderer.
 `render_root_payload`'s `ScanLibrary` arm (`executor/tickets.rs:161`) calls
 `render_default_payload_with_fan_out(operation, branch, …)` and never reads the policy
 target, so a per-arm target lookup would not reach it.
 `executor/tickets.rs::render_node_ticket` resolves `node.policy_target()` once through
-`select_location` and populates `BranchContext` before dispatching to the arms;
+`select_location`, populates `BranchContext`, and **passes the resolved `PolicyFileSource`
+into `render_root_payload`** so the policy arms consume it instead of each calling
+`resolve_policy_file_source` themselves (`tickets.rs:240-270`). Without that hand-off the
+render performs two independent async reads of the same target, so "one resolution point"
+would be false *within a single render*, and an ADR 0055 rescan landing between them would
+make the declaration and `source_location_id` disagree — turning a renderable ticket into a
+hard `VoomError::Config` at encode via rule 4. `resolve_policy_file_source` becomes a
+private helper of `render_node_ticket` with a single call site;
 `expansion.rs` threads a parent ticket's already-resolved source into the same field,
 exactly as it already threads `source_file`, keeping that path synchronous and DB-free.
 
@@ -464,17 +516,28 @@ for the purposes of this design even though no remote actor writes it directly.
 so every rule in §2 applies to persisted input, not only to freshly built values.
 `deny_unknown_fields` on each content struct and on `ArtifactAccessEntry` rejects
 unrecognized fields; the internally tagged enum rejects unrecognized `kind` values. Entry
-count is bounded by the `MAX_ENTRIES` rule in §2, not by trusting the producer this section
-declares untrusted — the `Deserialize` impl materializes the vector before `new` runs, so
-without that rule a hand-edited row could allocate an arbitrarily long list on every ticket
-read, including inside the acquisition transaction. No rule is quadratic in a way an
-adversarial payload could exploit: duplicate detection uses sorted comparison and hash sets.
-Failure messages name the rule, the field, and the rejected ID, and never a locator, path,
-hostname, or provider string.
+count is bounded by the `MAX_ENTRIES` rule in §2 rather than by trusting the producer this
+section declares untrusted. Be precise about what that rule is: a **canonicalization sanity
+bound, not a denial-of-service control**. Both the entry vector and each `rights` vector are
+materialized by serde before `new` runs, so neither rule prevents the allocation — the real
+bound on allocation is the size of the `tickets.payload` row, which this change does not
+alter. `rights` needs no length rule of its own: strict ascent over a three-variant enum
+caps a valid entry at three, and an invalid one is rejected after materialization exactly as
+an over-long entry list is. No rule is quadratic in a way an adversarial payload could
+exploit: duplicate detection uses sorted comparison and hash sets. Failure messages name the
+rule, the field, and the rejected ID, and never a locator, path, hostname, or provider
+string.
+
+**In scope, and worth naming because it is easy to miss.** A declaration's *rights* are
+bound to its operation on the read side, not only the write side: §5 rule 4 requires
+equality with `declaration_for`, so a corrupted row cannot give a `probe_file` ticket a
+`write` or `delete` intent. A rule that checked only targets would have left the untrusted
+writer free to escalate rights past every canonical-form check.
 
 **Explicitly out of scope.** Whether the referenced root, location, or handle exists, is
 live, is owned by the acquiring node, or is at the expected epoch — all of that is #476,
-and a declaration that passes validation here proves only that it is well-formed. Rights
+and a declaration that passes validation here proves only that it is well-formed for its
+operation. Rights
 authorize nothing: this change adds no code path that reads a right and performs an
 action, and #478 still owns the atomic capability, grant, and concurrency checks at
 acquisition. Denial of service through very large ticket payloads is bounded by the
@@ -519,6 +582,15 @@ transition opens a `terminal_failure` issue (ADR 0018, deduped per ticket), so t
 loud, but loud is not recovered. The step folds into ADR 0055's flag-day root-assignment and
 rescan procedure, which such a deployment already owes.
 
+**No shipped command performs either half of that step today.** `TicketCommand`
+(`voom-cli/src/cli.rs:1371-1388`) offers only `List` and `Show`; there is no fail, no
+delete, no filter by kind, and no quiesce switch. `voom job cancel` is not equivalent — it
+takes non-byte-touching tickets with the job. So the procedure currently requires direct SQL
+against `tickets`. That is stated plainly here and in `docs/release-process.md` rather than
+implied, and #480 tracks shipping the control. It does not block this change: the gap is in
+operator tooling for a procedure this change documents, and pre-release deployments already
+owe ADR 0055's flag-day rescan.
+
 Rollback keeps ADR 0013's snapshot restore as the safe default. This change also permits a
 narrower option, because its new shape is confined to one column: quiesce, then fail or
 delete the byte-touching tickets the new binary wrote. That preserves every other row the
@@ -543,11 +615,13 @@ whose stable references match the ticket's typed identity.**
 - `ticket_payload_test.rs`: table-driven over all fifteen `OperationKind` values, so the
   requirement cannot be satisfied for one operation and missed for another.
 - `ticket_payload_test.rs`: a declaration naming a different `FileLocationId` than
-  `rendered_payload.source_location_id` is rejected; naming it without `read` is rejected;
-  naming it with `read` is accepted; a non-scan byte-touching payload with no
-  `source_location_id` at all is rejected; a `scan_library` payload carrying one is
-  rejected, and one declaring anything other than a single `storage_root` entry is
-  rejected.
+  `rendered_payload.source_location_id` is rejected; a non-scan byte-touching payload with
+  no `source_location_id` is rejected; a `scan_library` payload carrying one is rejected.
+- `ticket_payload_test.rs`: the rule-4 equality check bites on **rights**, not just
+  targets — a `probe_file` payload whose declaration names the right location but carries
+  `read, write` instead of `read` is rejected, as is one carrying an extra `storage_root`
+  write entry. This is the case a target-only check would pass, and it is the one that
+  matters for a corrupted or hand-edited row.
 - `binding_test.rs` / `tickets_test.rs`: a `TargetRef::FileVersion` node renders a
   `source_location_id`, so the field is no longer conditional on the target shape and the
   dispatch path consumes the render-time choice rather than re-resolving.
@@ -555,15 +629,24 @@ whose stable references match the ticket's typed identity.**
   byte-touching node rendered through `render_default_payload_with_fan_out` carries
   `source_location_id`, `scan_library` does not, and a byte-touching branch with no
   `storage_source` returns a `BindingError`.
+- `expansion_test.rs`: a scanner result whose `files[]` entries carry `file_location_id`
+  expands to probe / hash / identity children whose declarations name that location and the
+  parent scan ticket's root; a string-form file entry, and an object entry with a zero or
+  missing `file_location_id`, are each rejected with the stated message.
+- `artifact_access_test.rs`: `declaration_for` rejects `ScanLibrary` given a `Location`
+  source and every other byte-touching operation given a `Root` source, so the two variants
+  cannot be crossed.
 - `artifact_access_test.rs`: a **frozen canonical-encoding fixture** — the byte-exact JSON
   of a declaration carrying one entry of each of the four target variants, with multi-right
   entries — is asserted in both directions. Reordering variants or fields turns it red.
   Prose alone would be silently ignorable, which is the failure class ADR 0013 exists to
   stop, and `check-payload-deny-unknown.sh` cannot see an ordering change.
-- `workers_test.rs`: a candidate set containing one ticket with an unnormalizable kind and
-  one well-formed ticket scores only the first ineligible; the second remains eligible.
-  This is the containment that keeps a corrupt row from stalling acquisition, and it fails
-  if the normalization error is propagated instead of caught.
+- `workers_test.rs`: a candidate set containing one ticket whose kind is
+  `synthetic.workflow.operation.` — the empty-suffix token, which `from_stored` rejects
+  **today**, so the current code aborts the loop — alongside one well-formed ticket. After
+  the change the first scores ineligible and the second stays eligible. The empty-suffix
+  token is the one that makes this test red before the change; `…operation.bogus` would not,
+  because `normalized_worker_operation` returns `Ok("bogus")` for it today.
 
 **Criterion 2 — existing handles require a location/root reference; unmaterialized output
 handles require a matching target-root reference.**
@@ -600,10 +683,11 @@ closed.**
 - `leases_test.rs`: acquiring a ticket whose kind is `synthetic.workflow.operation.bogus`
   fails closed with a database error naming the field.
 - `workers_test.rs`: `operation_capacity_in_tx`, `operation_capability_history`, and
-  `operation_capability_details_in_tx` return normally for that same kind rather than
-  raising, and report the same capability and limit results as before the change. This is
-  the containment that keeps a corrupt row from aborting
-  `remote_acquire_candidates_in_tx`'s loop; it fails if any of the three propagates.
+  `operation_capability_details_in_tx` return normally for `synthetic.workflow.operation.`
+  rather than raising, and report zero capability rows and the wildcard limit. That token
+  errors today, so all three cases are red before the change. A second case pins the
+  `matching_token()` behavior for `…operation.bogus`: the lookups bind the full token, not
+  the fabricated bare `bogus` the current helper produces.
 - `ticket_payload_test.rs`: `parse_ticket("probe_file", ..)` — a bare known token — is
   rejected, so the accepted ticket-kind encoding is unchanged and rule 3 of normalization
   does not widen it.
