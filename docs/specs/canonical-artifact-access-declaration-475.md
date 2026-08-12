@@ -351,11 +351,9 @@ emits. All are `WorkflowPlanError`-wrapped `WorkflowTicketPayloadError`:
 | 3 — root missing or zero | `byte-touching payload for {op} requires a non-zero rendered_payload.source_storage_root_id` |
 | 3 — location present but zero | `rendered_payload.source_location_id must be non-zero` |
 | 4 — equality fails | `declared_artifact_access does not match the canonical declaration for {op}` |
-| 4 — `declaration_for` itself errors | that error's message verbatim, wrapped, so a `scan_library` payload carrying a location reports `scan_library cannot be location-addressed` rather than a generic mismatch |
 
-The last row settles an otherwise-open question: a rule-4 failure caused by an invalid
-`(operation, source)` pair surfaces `declaration_for`'s message, not the equality message,
-because it names the actual defect.
+`declaration_for` is total over byte-touching operations and both source variants, so rule 4
+has no "invalid pair" case to report — a mismatch is always a mismatch.
 
 Equality is evaluated against `declaration_for`, which is pure and takes no database
 handle, so `parse_ticket` stays synchronous and read-only. It proves the declaration is
@@ -391,9 +389,13 @@ That is a behavior change worth naming: a `TargetRef::FileLocation` node pointin
 live-but-unrooted location — the migration-0034 `unassigned_legacy` shape the Compatibility
 section invokes — is rejected at render today only by accident of later path resolution.
 `resolve_policy_file_source`'s current branch (`executor/tickets.rs:255-266`) checks only
-`retired_at`. After this change it also gets `require_live_rooted_location`'s
-`file_version_id` cross-check. Moving that failure from dispatch to render is the same trade
-decision D5 makes for location freezing. A byte-touching node whose `policy_target` is neither `FileVersion` nor
+`retired_at`; after this change it also gets the `FileLocationAddress::Rooted` guard. Note
+what it does *not* gain: `require_live_rooted_location`'s `file_version_id` cross-check is
+vacuous on this path, because the current code derives `PolicyFileSource.file_version_id`
+from `location.file_version_id` (`tickets.rs:262-265`), so the comparison is the field
+against itself. The cross-check is real only for a `FileVersion` target, where the expected
+version comes from the policy target independently. Moving the rooted guard from dispatch to
+render is the same trade decision D5 makes for location freezing. A byte-touching node whose `policy_target` is neither `FileVersion` nor
 `FileLocation` keeps the existing `resolve_policy_file_source` error
 (`executor/tickets.rs:268-270`) — this slice does not widen the accepted target shapes.
 
@@ -419,43 +421,52 @@ pub(crate) fn declaration_for(
 The two variants exist because a single struct with both fields required cannot express a
 root-addressed ticket: it would force a fabricated non-zero `file_location_id` that
 `declaration_for` discards, and under D1's declaration-is-the-identity reading a fabricated
-ID is a live reference to somebody else's location. An operation given a variant its row in
-the table below rejects is a `VoomError::Config` reading
-`{operation} cannot be root-addressed` or `{operation} cannot be location-addressed`.
+ID is a live reference to somebody else's location. No operation rejects a variant; see the
+mapping table below for how each is interpreted.
 
 The mapping is total over `OperationKind` × source variant. Rights are a property of the
 operation; the source variant decides whether they attach to a location or to the root:
 
+**No operation rejects a source variant.** Rights are a property of the operation; the
+source variant decides only whether they attach to a location or to the root. `scan_library`
+is the one operation that *projects*: given a `Location { r, l }` it declares
+`storage_root(r)`, because a scan enumerates a root by definition and the location it was
+resolved from is not what it addresses.
+
 | Operation | rights | `Location { r, l }` | `Root { r }` |
 |---|---|---|---|
 | `identify_media`, `score_quality`, `sync_external_system` | — | `Ok(None)` — not byte-touching | `Ok(None)` |
-| `scan_library` | `read` | **rejected** — a scan enumerates a root by definition | `storage_root(r)` `read` |
-| `probe_file`, `hash_file` | `read` | `file_location(r, l)` `read` | **rejected** — these read one named file |
-| `remux`, `transcode_video`, `transcode_audio`, `extract_audio`, `edit_tracks`, `commit_artifact`, `delete_artifact` | see below | as below | **rejected** — each addresses one named source |
-| `verify_artifact` | `read` | `file_location(r, l)` `read` | `storage_root(r)` `read` |
-| `back_up_file` | `read`, `write` | `file_location(r, l)` `read` + `storage_root(r)` `write` | `storage_root(r)` `read, write` |
+| `scan_library` | `read` | `storage_root(r)` `read` — projected | `storage_root(r)` `read` |
+| `probe_file`, `hash_file`, `verify_artifact` | `read` | `file_location(r, l)` `read` | `storage_root(r)` `read` |
+| `remux`, `transcode_video`, `transcode_audio`, `extract_audio`, `edit_tracks`, `back_up_file`, `commit_artifact` | `read`, `write` | `storage_root(r)` `write` + `file_location(r, l)` `read` | `storage_root(r)` `read, write` |
+| `delete_artifact` | `read`, `delete` | `file_location(r, l)` `read, delete` | `storage_root(r)` `read, delete` |
 
-Rights for the fourth row: `remux`, `transcode_video`, `transcode_audio`, `extract_audio`,
-`edit_tracks`, and `commit_artifact` are `file_location(r, l)` `read` + `storage_root(r)`
-`write`; `delete_artifact` is `file_location(r, l)` `read, delete`.
+Entries in the two-entry row are written in canonical order — `storage_root` sorts before
+`file_location` per §2 — so the table can be transcribed literally. `declaration_for` does
+not sort; it constructs in this order and `new` accepts it.
 
-**Root-addressing is permitted for exactly three operations, and each earns it.**
-`scan_library` enumerates a root. `verify_artifact` and `back_up_file` are the two that a
-completed transform expands into, and those children operate on the transform's **staged
-output**, which has no `file_locations` row until commit creates one — so they cannot name a
-location, and naming their parent's *source* location would be a live reference to the wrong
-bytes. Both also have a policy-rendered form that *is* location-addressed, so both accept
-either variant. Every other byte-touching operation addresses one named file and rejects
-`Root` with `VoomError::Config`.
+**Why every operation accepts `Root`.** Three of the five `expand_*_completion` functions
+produce byte-touching children whose bytes are staged and unnamed. `expand_transform_completion`
+alone produces `back_up_file`, `commit_artifact`, and `edit_tracks` children, all operating
+on the transform's output, which has no `file_locations` row until commit creates one.
+Restricting `Root` to a hand-picked set of operations makes the demo plan unrenderable at
+those children, and the two alternatives the spec has already rejected remain rejected:
+inheriting the parent's `file_location` entry is a live reference to the wrong bytes, and
+inventing a location ID is worse.
 
-Bounding it this way matters on the read side, not just for tidiness. If `Root` were
-universal, an untrusted persisted row could drop `source_location_id` from a
-`transcode_video` ticket and downgrade it to a whole-root declaration that validates
-cleanly — the threat model's stance on rights would not extend to target granularity. The
-residual is that `verify_artifact` and `back_up_file` genuinely accept both, so for those
-two a dropped location is a valid alternative reading rather than a detectable corruption.
-That is inherent in an operation that legitimately addresses either, and #476 sees the
-difference because the declaration says which.
+**Why `scan_library` projects rather than rejecting.** Nothing can produce a `Root` source
+at render time: `select_location` returns a `FileLocation`, `voom_policy::TargetRef` has no
+storage-root variant, and this slice does not widen the accepted target shapes. `scan` is
+also a root node with no parent to thread from. Projection is what makes a root-addressed
+declaration reachable at all for the one operation that must have one.
+
+**The residual, stated rather than engineered away.** An untrusted persisted row can drop
+`source_location_id` from, say, a `transcode_video` ticket and present a whole-root
+declaration that validates cleanly, because that is a legitimate shape for the operation.
+The threat model's stance on rights does not extend to target granularity, and no rule
+available here would give it that reach — the addressing mode is not independently recorded
+anywhere. What bounds the consequence is that a forged root is no more useful than a forged
+location: #476 re-derives ownership from the database and must not trust either.
 
 The rights column is part of the mapping, not a renderer choice. A renderer free to pick a
 different rights set for the same operation would make the evidence #476 resolves
@@ -584,9 +595,13 @@ would be false *within a single render*, and an ADR 0055 rescan landing between 
 make the declaration and `source_location_id` disagree — turning a renderable ticket into a
 hard `VoomError::Config` at encode via rule 4. `resolve_policy_file_source` becomes a
 private helper of `render_node_ticket` with a single call site. Two consequences of
-hoisting, both deliberate: `render_node_ticket` resolves only when
-`node.operation().is_byte_touching()`, so a non-byte-touching node carrying a policy target
-gains no database read and no zero-or-several-live-locations failure it does not need; and
+hoisting, both deliberate: `render_node_ticket` resolves whenever the node carries a policy
+target, byte-touching or not. Resolving only for byte-touching nodes would contradict the
+threading invariant above — a non-byte-touching root node's payload is what its byte-touching
+children thread from, so skipping its resolution leaves them with nothing. `default_ci`'s only
+root node is `scan` and `policy_bridge::execution_operation` admits no non-byte-touching
+production node, so the case is latent today; the invariant is asserted unconditionally, so
+the resolution is unconditional too. And
 `render_root_remux_payload`'s own target-shape rejection (`executor/tickets.rs:233-236`)
 becomes unreachable once the hoisted arm fires first, so it is **deleted** rather than left
 as dead code with a message no path can produce.
@@ -630,16 +645,30 @@ do not fail loudly:
   summary rather than an error. This bites hardest on **completed** old-shape rows, which the
   upgrade drain does not cover (it names unfinished tickets) and which never take the
   terminal-failure path the Compatibility section calls "loud".
-- `workflow/errors.rs:44-53` maps a decode failure to
+- `workflow/execution/executor/errors.rs:44-53` maps a decode failure to
   `VoomError::Internal("…payload decode…")`, so a terminally failed old-shape ticket reports
   a decode error instead of `workflow ticket {node_id} failed`.
 
-Neither is redesigned here — changing summary semantics is its own change — but both are
-named, both go on the surface list, and `summary.rs` gains a counter: undecodable tickets are
-reported in a `skipped_undecodable` field rather than silently dropped, so the summary stops
-being internally inconsistent. A test in
-`voom-control-plane/.../workflow/summary_test.rs` seeds one undecodable byte-touching row and
-asserts `ticket_count` and the per-operation counts agree with it.
+Neither is redesigned here, and — after checking what a counter would actually cost — neither
+gains a field.
+
+`branch_count` and `ticket_count` are durable columns on the summary row
+(`voom-store/.../workflow_summaries.rs:241` `SUMMARY_COLS`, bound at `:381-382`, read at
+`:835-836`) under ADR 0006. A `skipped_undecodable` that an operator can see therefore needs a
+column and a migration, which this slice forbids outright; one that stays in memory leaves the
+persisted row exactly as inconsistent as before, so it buys nothing but a new
+`merge_invocation` rule (`summary.rs:29-57`) that a later ADR 0009 resume can get wrong. An
+earlier draft specified the counter without noticing either cost.
+
+So the behavior is left as it is and recorded instead: after the upgrade, a **completed**
+old-shape byte-touching row — which the drain does not cover, since the drain names unfinished
+tickets — is skipped by `summary.rs` forever, and historical workflow summaries under-report
+`branch_count` and per-operation counts while `ticket_count` still includes it. The
+Compatibility section's claim that the loss is "loud" covers the terminal-failure path only;
+completed rows never take it. A test in
+`voom-control-plane/.../workflow/summary_test.rs` pins the current behavior so a later change
+to it is deliberate: one undecodable row leaves `ticket_count` unchanged and reduces the
+per-operation total by one.
 
 ### 7. Guardrail manifests
 
@@ -767,10 +796,9 @@ whose stable references match the ticket's typed identity.**
 - `voom-control-plane/.../plan/ticket_payload_test.rs`: a declaration naming a different `FileLocationId` than
   `rendered_payload.source_location_id` is rejected; a byte-touching payload with no
   `source_storage_root_id` is rejected; a `probe_file` payload with no `source_location_id`
-  is rejected as `probe_file cannot be root-addressed`; a `scan_library` payload carrying one
-  is rejected as `scan_library cannot be location-addressed`; a `verify_artifact` payload is
-  accepted in *both* forms, since it is one of the three operations that may be
-  root-addressed.
+  yields a whole-root declaration and is accepted, which is the documented residual; a
+  `scan_library` payload carrying one projects to `storage_root` and is accepted; every
+  byte-touching operation is accepted in *both* source forms.
 - `voom-control-plane/.../plan/ticket_payload_test.rs`: the rule-4 equality check bites on **rights**, not just
   targets — a `probe_file` payload whose declaration names the right location but carries
   `read, write` instead of `read` is rejected, as is one carrying an extra `storage_root`
@@ -788,9 +816,11 @@ whose stable references match the ticket's typed identity.**
   expands to probe / hash / identity children whose declarations name that location and the
   parent scan ticket's root; a string-form file entry, and an object entry with a zero or
   missing `file_location_id`, are each rejected with the stated message.
-- `voom-control-plane/.../plan/access_declaration_test.rs`: `declaration_for` rejects `ScanLibrary` given a `Location`
-  source and every other byte-touching operation given a `Root` source, so the two variants
-  cannot be crossed.
+- `voom-control-plane/.../plan/access_declaration_test.rs`: `declaration_for` is total —
+  table-driven over all fifteen `OperationKind` values times both source variants, asserting
+  the exact entry list and rights of every cell in the §6 mapping table, and that every
+  produced declaration is accepted by `ArtifactAccessDeclaration::new` in the order
+  `declaration_for` builds it. `ScanLibrary` given a `Location` projects to `storage_root`.
 - `voom-core/src/taxonomy/artifact_access_declaration_test.rs`: a **frozen canonical-encoding fixture** — the byte-exact JSON
   of a declaration carrying one entry of each of the four target variants, with multi-right
   entries — is asserted in both directions. Reordering variants or fields turns it red.

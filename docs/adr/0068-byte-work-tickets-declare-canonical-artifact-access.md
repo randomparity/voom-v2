@@ -110,12 +110,26 @@ rights, and makes one mapping the single definition of a valid declaration on bo
 It stays synchronous and read-only: it proves the declaration is well-formed for its
 operation, never that the storage exists or is owned.
 
-A source is either a whole root or a location inside one, and every byte-touching operation
-accepts both — only `scan_library` rejects the location form. That is what makes the mapping
-total: a `back_up_file` or `verify_artifact` ticket expanded from a completed transform
-operates on the transform's **staged output**, which has no `file_locations` row until commit
-creates one. It declares the staging root. Naming its parent's source location instead would
-be a live reference to the wrong bytes, and inventing a location ID would be worse.
+A source is either a whole root or a location inside one, and **every byte-touching
+operation accepts both**. No operation rejects a variant; `scan_library` alone *projects*,
+declaring the root of a location source because a scan enumerates a root by definition.
+
+Totality is not a nicety — it is what makes the workflow lattice renderable.
+`expand_transform_completion` produces `back_up_file`, `commit_artifact`, and `edit_tracks`
+children that all operate on the transform's **staged output**, which has no
+`file_locations` row until commit creates one, so all three must be root-addressed. And
+nothing can construct a root source directly: `select_location` returns a location,
+`voom_policy::TargetRef` has no storage-root variant, and this slice does not widen the
+accepted target shapes — so projection is the only way `scan_library`, a root node with no
+parent to thread from, gets a root declaration at all. Restricting the variant per operation
+was tried and breaks both cases. The alternatives stay rejected: inheriting the parent's
+location entry is a live reference to the wrong bytes, and inventing a location ID is worse.
+
+The residual is that an untrusted persisted row can drop `source_location_id` and present a
+whole-root declaration that validates, because that is a legitimate shape for any
+byte-touching operation. Addressing mode is not independently recorded, so no read-side rule
+here reaches it. What bounds the consequence is that a forged root is no more useful than a
+forged location: #476 re-derives ownership from the database and trusts neither.
 
 The source reaches every renderer through `BranchContext`, not `node.policy_target()` —
 the `scan_library` arm never reads the policy target. `render_node_ticket` resolves the
