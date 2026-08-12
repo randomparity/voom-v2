@@ -15,6 +15,13 @@ pub mod clock {
     pub use crate::runtime::clock::{Clock, SystemClock, format_iso8601};
 }
 
+pub mod artifact_access_declaration {
+    pub use crate::taxonomy::artifact_access_declaration::{
+        ArtifactAccessDeclaration, ArtifactAccessEntry, ArtifactAccessRight, ArtifactAccessTarget,
+        ExistingArtifactAccess, FileLocationAccess, PlannedArtifactAccess, StorageRootAccess,
+    };
+}
+
 pub mod artifact_access_mode {
     pub use crate::taxonomy::artifact_access_mode::ArtifactAccessMode;
 }
@@ -99,6 +106,10 @@ pub mod version {
     pub use crate::runtime::version::VersionInfo;
 }
 
+pub use artifact_access_declaration::{
+    ArtifactAccessDeclaration, ArtifactAccessEntry, ArtifactAccessRight, ArtifactAccessTarget,
+    ExistingArtifactAccess, FileLocationAccess, PlannedArtifactAccess, StorageRootAccess,
+};
 pub use artifact_access_mode::ArtifactAccessMode;
 pub use clock::{Clock, SystemClock, format_iso8601};
 pub use config::{Config, EnvSource, LogFormat, MapEnv, ProcessEnv};
