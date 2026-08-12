@@ -65,7 +65,7 @@ rather than silently dropping a field:
   (see `docs/runbooks/migration-rollback.md`).
 
 `tickets.payload` carries a breaking change under this contract (ADR 0068): a
-byte-touching workflow ticket now requires an `artifact_access` declaration, and a
+byte-touching workflow ticket now requires a `declared_artifact_access` declaration, and a
 row written before that binary no longer decodes. No backfill is possible — the
 declaration names a storage root and location the old row never recorded.
 
