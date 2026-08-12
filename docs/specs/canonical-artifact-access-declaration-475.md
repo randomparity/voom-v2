@@ -143,7 +143,6 @@ states rather than one the first implementation happens to produce. Every messag
 | Rule | Message | Rejected because |
 |---|---|---|
 | entry list is empty | `artifact access declaration must not be empty` | criterion 1 requires a non-empty declaration |
-| entry list longer than `MAX_ENTRIES` (8) | `artifact access declaration has {n} entries, at most 8 are allowed` | a canonicalization sanity bound on the bare constructor; see the threat model for what it is *not*, and the note below for where it actually bites |
 | an entry's `rights` is empty | `artifact access entry {i} must declare at least one right` | an entry that intends nothing is not an intent |
 | an entry's `rights` is not strictly ascending | `artifact access entry {i} rights must be strictly ascending read < write < delete` | catches duplicate and unordered rights in one rule |
 | entries are not strictly ascending by `target` | `artifact access entries must be strictly ascending by target; entry {i} does not follow entry {i-1}` | catches duplicate and unordered entries in one rule |
@@ -157,13 +156,13 @@ states rather than one the first implementation happens to produce. Every messag
 A `storage_root_id` may repeat across entries: reading a source location and writing an
 output into the same root is ordinary and unambiguous.
 
-`MAX_ENTRIES` bites only on the bare `voom-core` constructor. At the persisted boundary the
-effective bound is **two**, because §5 rule 4 requires equality with `declaration_for`, whose
-mapping produces at most two entries — and under D3 no `existing_artifact` or
-`planned_artifact` entry can reach a ticket at all. The eight-entry allowance is forward
-vocabulary for #422 and #477, not a live shape, and the criterion-3 test that accepts eight
-entries exercises the constructor rather than the ticket layer. Saying so here stops a later
-reader mistaking the bound for the thing that protects the acquisition transaction.
+No entry-count bound is imposed. Criterion 3 lists duplicate, conflicting, zero-ID,
+malformed, and non-canonical declarations and says nothing about length, and the effective
+bound at the persisted boundary is **two** anyway: §5 rule 4 requires equality with
+`declaration_for`, whose mapping produces at most two entries, and under D3 no handle-bearing
+entry can reach a ticket at all. A constant, a rule, a message, and two tests serving slices
+that have not been designed is the repo's no-speculative-features rule in miniature. #422 and
+#477 add a bound when they have a shape that needs one.
 
 Ordering decides whether a persisted payload decodes, so the total order is part of the
 wire contract and is fixed deliberately rather than left to whatever a derive happens to
@@ -634,10 +633,22 @@ synthetic non-zero IDs are *not* valid inputs to it, and a fixture that supplies
 unseeded ID gets `NotFound`. "Routing evidence only" describes what the declaration is used
 for downstream, not an absence of reads while producing it.
 
-### 6a. The two consumers that swallow a decode failure
+### 6a. Every `parse_ticket` consumer
 
-Criterion 6 says "all direct serializers and consumers", and two callers of `parse_ticket`
-do not fail loudly:
+Criterion 6 says "all direct serializers and consumers", so here is the complete set. Five
+non-test call sites exist: `plan/expansion.rs:533`, `executor/tickets.rs:284`,
+`executor/expansion.rs:157`, `executor/errors.rs:45`, and `summary.rs:176`. The first two
+fail per ticket and need no change. The other three do not:
+
+- **`workflow/execution/executor/expansion.rs:141-166`** loops a batch of ready workflow
+  tickets and `?`-propagates a `VoomError::Internal` per ticket, so one undecodable
+  old-shape row aborts `ready_workflow_tickets` for the entire job. That is the same
+  batch-scoped hazard ADR 0068 argues against at `remote_acquire_candidates_in_tx`, and this
+  change is what makes decode failures newly possible there — so it is ours to contain. The
+  loop **skips** an undecodable ticket and records it, exactly as the acquisition candidate
+  loop scores rather than raises. Without this, skipping the upgrade drain produces a stall
+  rather than the per-ticket `terminal_failure` issues ADR 0068, this spec, and
+  `docs/release-process.md` all describe as "loud".
 
 - `workflow/summary.rs:175-179` uses `let Ok(payload) = … else { continue; }`, so an
   undecodable ticket vanishes from `branch_count` and `per_operation[..].ticket_count` while
@@ -695,14 +706,12 @@ for the purposes of this design even though no remote actor writes it directly.
 so every rule in §2 applies to persisted input, not only to freshly built values.
 `deny_unknown_fields` on each content struct and on `ArtifactAccessEntry` rejects
 unrecognized fields; the internally tagged enum rejects unrecognized `kind` values. Entry
-count is bounded by the `MAX_ENTRIES` rule in §2 rather than by trusting the producer this
-section declares untrusted. Be precise about what that rule is: a **canonicalization sanity
-bound, not a denial-of-service control**. Both the entry vector and each `rights` vector are
-materialized by serde before `new` runs, so neither rule prevents the allocation — the real
-bound on allocation is the size of the `tickets.payload` row, which this change does not
-alter. `rights` needs no length rule of its own: strict ascent over a three-variant enum
-caps a valid entry at three, and an invalid one is rejected after materialization exactly as
-an over-long entry list is. No rule is quadratic in a way an adversarial payload could
+count is not separately bounded, and that is deliberate rather than an oversight. Both the
+entry vector and each `rights` vector are materialized by serde before `new` runs, so a
+length rule would not prevent the allocation it appears to guard — the real bound is the size
+of the `tickets.payload` row, which this change does not alter. `rights` is capped at three by
+strict ascent over a three-variant enum, and §5 rule 4's equality with `declaration_for` caps
+a *persisted* declaration at two entries, which is a far tighter bound than any constant. No rule is quadratic in a way an adversarial payload could
 exploit: duplicate detection uses sorted comparison and hash sets. Failure messages name the
 rule, the field, and the rejected ID, and never a locator, path, hostname, or provider
 string.
@@ -771,7 +780,8 @@ operator tooling for a procedure this change documents, and pre-release deployme
 owe ADR 0055's flag-day rescan.
 
 Rollback keeps ADR 0013's snapshot restore as the safe default. This change also permits a
-narrower option, because its new shape is confined to one column: quiesce, then fail or
+narrower option, because its new shape is confined to `tickets.payload` for every production
+row: quiesce, then fail or
 delete the byte-touching tickets the new binary wrote. That preserves every other row the
 new binary committed and leaves those tickets' workflows incomplete — a trade the operator
 makes, not one this change makes for them.
@@ -779,6 +789,16 @@ makes, not one this change makes for them.
 This is a breaking `tickets.payload` change under ADR 0013, which requires the
 binary-before-DB ordering to be recorded in `docs/release-process.md`. That file gains the
 precondition in this change; the surface list grows by that one file for that reason.
+
+One narrowing is **not** in `tickets.payload`: `tickets.result` for `scan_library` now
+requires each `result.files[]` entry to be an object with a non-zero `file_location_id`, and
+the string form is rejected. `tickets.result` is an inventoried payload-contract column
+(`docs/payload-contract-inventory.md`), though this region is decoded from an untyped
+`Value` rather than a `deny_unknown_fields` struct. No production row is affected —
+`policy_bridge::execution_operation` admits no `scan_library` node — so the confinement claim
+above holds for production rows, which is what the narrowed rollback option rests on. The
+rollback direction is safe regardless: the old parser reads `path` by name and ignores extra
+fields.
 
 No schema change, no migration, and no new dependency.
 
@@ -844,7 +864,7 @@ handles require a matching target-root reference.**
 **Criterion 3 — duplicate, conflicting, zero-ID, malformed, and non-canonical
 declarations fail before scheduling.**
 - `voom-core/src/taxonomy/artifact_access_declaration_test.rs`: one case per rule in §2, asserting the specific message —
-  including a nine-entry list rejected by `MAX_ENTRIES` and an eight-entry list accepted.
+
 - `voom-core/src/taxonomy/artifact_access_declaration_test.rs`: a deterministic exhaustive test builds a fixed set of four
   distinct entries, enumerates all 24 orderings in code, and proves exactly the ascending
   ordering is accepted and `serialize → deserialize` is the identity on it. No new

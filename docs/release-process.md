@@ -85,7 +85,7 @@ which such a deployment already owes.
 
 **Rollback.** Restoring the pre-upgrade snapshot, as the general rule above says, is
 always safe and reverts everything. This change also permits a narrower option, because
-its new shape is confined to one column: quiesce, then fail or delete the byte-touching
+its new shape is confined to `tickets.payload` for every production row: quiesce, then fail or delete the byte-touching
 tickets the new binary wrote, before the older binary reads them. That preserves every
 other row the new binary committed, at the cost of leaving those tickets' workflows
 incomplete. Take the snapshot if you want a clean revert of all of it.

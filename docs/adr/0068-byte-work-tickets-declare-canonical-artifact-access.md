@@ -244,7 +244,7 @@ decode — where raising cannot spread.
 - Rollback is the mirror image and is the harder direction, because it is already an
   incident. ADR 0013's blanket remedy is to restore the pre-upgrade database snapshot, and
   that remains the safe default. This change narrows it deliberately: the new shape is
-  confined to one column, `tickets.payload`, so quiescing and then failing or deleting the
+  confined to `tickets.payload` for every production row, so quiescing and then failing or deleting the
   byte-touching tickets the new binary wrote is sufficient and preserves every other row the
   new binary committed — which a snapshot restore would discard. It also leaves the
   workflows owning those tickets incomplete, so an operator who wants a clean revert of
