@@ -1236,6 +1236,96 @@ async fn operation_capacity_honors_custom_ticket_operation_limit() {
 }
 
 #[tokio::test]
+async fn capability_lookups_tolerate_an_unknown_namespaced_operation() {
+    // These three run inside `remote_acquire_candidates_in_tx`'s candidate loop,
+    // which `?`-propagates. Raising here would stall every well-formed ticket in
+    // the set alongside the malformed one, so they report emptiness instead.
+    let fixture = worker_fixture().await;
+    let operation = worker_op("synthetic.workflow.operation.");
+
+    let history = fixture
+        .repo
+        .operation_capability_history(&operation)
+        .await
+        .unwrap();
+    assert!(history.is_empty());
+
+    let mut tx = fixture.repo.pool.begin().await.unwrap();
+    let capacity = fixture
+        .repo
+        .operation_capacity_in_tx(&mut tx, fixture.worker_id, &operation)
+        .await
+        .unwrap();
+    let (hardware, extra) =
+        operation_capability_details_in_tx(&mut tx, fixture.worker_id, &operation)
+            .await
+            .unwrap();
+    tx.rollback().await.unwrap();
+
+    assert_eq!(capacity.active_leases, 0);
+    assert_eq!(capacity.max_parallel, 1, "wildcard limit");
+    assert!(hardware.is_empty());
+    assert!(extra.is_empty());
+}
+
+#[tokio::test]
+async fn capability_lookups_bind_the_whole_unknown_namespaced_token() {
+    // The deleted helper stripped the namespace and looked `…operation.bogus` up
+    // as bare `bogus`, so a row named `bogus` would match a ticket that is not
+    // one. Only the exact token may match.
+    let fixture = worker_fixture().await;
+    fixture.insert_capability("bogus", &[]).await;
+    fixture
+        .insert_grant_with_limit(&["bogus"], &[], serde_json::json!({"bogus": 9}))
+        .await;
+    let namespaced = worker_op("synthetic.workflow.operation.bogus");
+
+    let history = fixture
+        .repo
+        .operation_capability_history(&namespaced)
+        .await
+        .unwrap();
+    let mut tx = fixture.repo.pool.begin().await.unwrap();
+    let capacity = fixture
+        .repo
+        .operation_capacity_in_tx(&mut tx, fixture.worker_id, &namespaced)
+        .await
+        .unwrap();
+    tx.rollback().await.unwrap();
+
+    assert!(history.is_empty(), "the bare `bogus` row must not match");
+    assert_eq!(capacity.max_parallel, 1, "the `bogus` limit must not apply");
+}
+
+#[tokio::test]
+async fn capability_lookups_resolve_both_encodings_of_a_known_operation() {
+    let fixture = worker_fixture().await;
+    fixture.insert_capability("probe_file", &[]).await;
+    fixture
+        .insert_grant_with_limit(&["probe_file"], &[], serde_json::json!({"probe_file": 5}))
+        .await;
+
+    for token in ["probe_file", "synthetic.workflow.operation.probe_file"] {
+        let operation = worker_op(token);
+        let history = fixture
+            .repo
+            .operation_capability_history(&operation)
+            .await
+            .unwrap();
+        let mut tx = fixture.repo.pool.begin().await.unwrap();
+        let capacity = fixture
+            .repo
+            .operation_capacity_in_tx(&mut tx, fixture.worker_id, &operation)
+            .await
+            .unwrap();
+        tx.rollback().await.unwrap();
+
+        assert_eq!(history.len(), 1, "capability history for {token}");
+        assert_eq!(capacity.max_parallel, 5, "limit for {token}");
+    }
+}
+
+#[tokio::test]
 async fn node_owned_worker_in_tx_returns_matching_worker() {
     let (pool, _tmp, repo, node, worker) = worker_with_node_fixture().await;
     let mut tx = pool.begin().await.unwrap();

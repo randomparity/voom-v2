@@ -5,7 +5,8 @@ use serde_json::Value as JsonValue;
 use sqlx::{Acquire, Row, SqlitePool};
 use time::{Duration, OffsetDateTime};
 use voom_core::{
-    FailureClass, JobId, LeaseId, NodeId, TicketId, TicketOperation, VoomError, WorkerId,
+    FailureClass, JobId, LeaseId, NodeId, NormalizedTicketOperation, TicketId, TicketOperation,
+    VoomError, WorkerId,
 };
 
 use super::Repository;
@@ -13,9 +14,7 @@ use super::common::{
     i64_from_u64, iso8601, map_row_err, parse_iso8601, serialize_json, u32_from_i64, u64_from_i64,
 };
 use super::tickets::SqliteTicketRepo;
-use super::workers::{
-    SqliteWorkerRepo, WorkerOperationEligibility, WorkerStatus, normalized_worker_operation,
-};
+use super::workers::{SqliteWorkerRepo, WorkerOperationEligibility, WorkerStatus};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LeaseState {
@@ -316,7 +315,17 @@ impl SqliteLeaseRepo {
             .get_in_tx(tx, input.ticket_id)
             .await?
             .ok_or_else(|| VoomError::NotFound(format!("ticket {}", input.ticket_id)))?;
-        let operation = normalized_worker_operation(&ticket.kind)?;
+        // Fail closed. This handles exactly one ticket, so raising here denies
+        // that ticket alone — unlike the capability lookups, which run inside a
+        // candidate loop and must stay total.
+        let normalized = ticket.kind.normalize();
+        if matches!(normalized, NormalizedTicketOperation::UnknownNamespaced(_)) {
+            return Err(VoomError::database(format!(
+                "ticket kind {:?} names no known operation",
+                ticket.kind.as_str()
+            )));
+        }
+        let operation = normalized.matching_token();
         let now_str = iso8601(input.now)?;
         let res = sqlx::query(
             "UPDATE tickets \
