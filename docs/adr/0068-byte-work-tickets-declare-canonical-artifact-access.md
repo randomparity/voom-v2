@@ -84,7 +84,7 @@ within a variant by field in declaration order. Rights order as `read < write < 
 adding an operation without classifying it fails to compile. `identify_media`,
 `score_quality`, and `sync_external_system` are false; the remaining twelve are true.
 
-`WorkflowTicketPayload` gains `artifact_access: Option<ArtifactAccessDeclaration>`,
+`WorkflowTicketPayload` gains `declared_artifact_access: Option<ArtifactAccessDeclaration>`,
 required exactly when the operation is byte-touching and rejected otherwise. Both
 `to_ticket_payload` and `parse_ticket` enforce it, so a ticket cannot be written or read
 without it.
@@ -110,12 +110,28 @@ rights, and makes one mapping the single definition of a valid declaration on bo
 It stays synchronous and read-only: it proves the declaration is well-formed for its
 operation, never that the storage exists or is owned.
 
+A source is either a whole root or a location inside one, and every byte-touching operation
+accepts both — only `scan_library` rejects the location form. That is what makes the mapping
+total: a `back_up_file` or `verify_artifact` ticket expanded from a completed transform
+operates on the transform's **staged output**, which has no `file_locations` row until commit
+creates one. It declares the staging root. Naming its parent's source location instead would
+be a live reference to the wrong bytes, and inventing a location ID would be worse.
+
 The source reaches every renderer through `BranchContext`, not `node.policy_target()` —
 the `scan_library` arm never reads the policy target. `render_node_ticket` resolves the
 target once, populates `BranchContext`, and hands the resolved source to the payload
-renderers so no arm resolves it a second time. Fan-out children cannot inherit a location
-from a `scan_library` parent, which has none, so the scanner result carries a
-`file_location_id` per file and the child pairs it with the parent's declared root.
+renderers so no arm resolves it a second time.
+
+Fan-out children thread their source from the parent's `rendered_payload`, which carries
+`source_storage_root_id` and, when the source is a location, `source_location_id` — for
+**every** workflow ticket, byte-touching or not. Keying the threading on the declaration
+instead would fail on three of the five expansion functions: a `scan_library` parent has no
+location, a `score_quality` parent is not byte-touching and so is forbidden a declaration
+at all, and the transform and backup children address different bytes than their parent.
+Those two payload fields are also what give the read-side equality check an independent
+anchor, so neither the root nor the location is read back out of the declaration being
+validated. A scan result is the one place a child's location is discovered rather than
+inherited, so `ScannerFile` carries a `file_location_id` per file.
 
 `source_location_id` sits in the request envelope `dispatch.rs` clones to a worker, and is
 already read by the control plane's own adapter, so its dual role predates this change;
