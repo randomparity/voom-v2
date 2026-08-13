@@ -158,4 +158,49 @@ Do not weaken or delete the `durable_workflow_test.rs` end-to-end coverage to ma
 Branch `feat/canonical-artifact-access-475`; `BASE_BRANCH` `main`; guardrails `just ci`;
 design committed; audit report at `.agent/oathbind/475-canonical-artifact-access.md`
 (git-ignored). Open follow-ups filed during design: #480 drain tooling, #481 frozen-location
-recovery, #482 summary under-reporting.
+recovery, #482 summary under-reporting. Filed during build: #483 stale
+`.voom-ffprobe-sibling.lock` (pre-existing test-support defect, not caused by this change).
+
+### Build state
+
+All nine tasks implemented. Commits, oldest first:
+
+| Task | Commit | Subject |
+|---|---|---|
+| 1 | `186070c3` | `feat(core): add canonical artifact access declaration` |
+| 2 | `03198e75` | `feat(core): classify byte-touching operation kinds` |
+| 3 | `ca759480` | `feat(core): add one ticket-kind normalization` |
+| 4 | `4239373f` | `fix(store): adopt one normalization and fail closed on unknown kinds` |
+| 5–8 | `d30153df` | `feat(control-plane): require canonical artifact access on byte-work tickets` |
+
+Tasks 5–8 landed together: the dead-code deny makes the intermediate state unbuildable,
+as the plan anticipated.
+
+### Divergences from the plan, and why
+
+- `artifact_access_declaration.rs`, not `artifact_access.rs` — the longer name says what
+  the module holds.
+- `crates/voom-store/src/test_support.rs` gained `seed_test_rooted_location` and
+  `TEST_FILE_LOCATION_ID` / `TEST_FILE_VERSION_ID`, rather than `voom-test-support`. The
+  seeding is raw SQL against tables `voom-store` owns, and `voom-store::test_support`
+  already holds `seed_test_storage_root`, which the new helper calls.
+- `crates/voom-fake-support/src/results.rs` and `validation.rs` were not on the plan's
+  file map. Both were forced by the change: the fake scanner must report
+  `file_location_id` per result entry, and `protocol_payload_without_runtime_metadata`
+  must strip the two new source fields, because the default `transcode_video` rendered
+  payload *is* a serialized `TranscodeVideoRequest` and that type denies unknown fields.
+- Four executor assertions on absolute SQLite rowids (`result_file_version_id == 2`) now
+  assert "a new version distinct from the source". Seeding a fixture row shifts the rowid
+  sequence; the absolute value was never the property under test.
+- Three tests whose premise this change removes were inverted rather than deleted:
+  `non_policy_remux_root_ticket_uses_default_payload` →
+  `byte_touching_root_node_without_a_target_fails_instead_of_rendering`;
+  `policy_remux_payload_omits_absent_source_location` →
+  `..._always_carries_its_source_root_and_location`; and both retired-location tests now
+  expect `NotFound`, which is how the shared `require_live_rooted_location` classifies it.
+
+### Next
+
+Quest steps 6–9: branch adversarial review against `main`, `$detect-evil` security pass
+(the diff qualifies — it changes what a ticket may claim about storage it opens),
+`$dispel`, then PR with a `WORK:REVIEW` comment.
