@@ -229,6 +229,19 @@ decode — where raising cannot spread.
   destination** — it names read locality, not write locality. The vocabulary is already
   sufficient for the fix: two `storage_root` entries with distinct ids are canonical
   today, so closing #484 adds an entry rather than a shape.
+- **Every future change to the operation→rights mapping repeats this release's payload
+  break.** Validation compares a stored declaration against the whole entry list
+  `declaration_for` computes from the mapping compiled into the reading binary, and the
+  payload carries no version marker, so an edit to that mapping makes every in-flight
+  persisted ticket for the affected operations undecodable — no backfill possible, drain
+  required. The preceding bullet schedules exactly such an edit: closing #484 adds an
+  entry for the seven output-producing operations, which is cheap in the vocabulary and
+  not cheap in the stored rows, because the equality check binds the list. Versioning the
+  declaration and tolerating older mappings would remove the recurrence, and is rejected
+  here: it is more machinery than the risk warrants, and a reader accepting two mappings
+  is the second accepted wire format acceptance criterion 6 forbids. The cost is paid at
+  deployment instead, and `docs/release-process.md` carries the standing drain procedure
+  rather than describing this release as a one-off.
 - Variant and field declaration order in `ArtifactAccessTarget` is durable payload
   contract. Reordering either silently reclassifies every previously written declaration
   as non-canonical; `deny_unknown_fields` and `check-payload-deny-unknown.sh` give no

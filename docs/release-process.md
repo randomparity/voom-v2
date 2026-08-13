@@ -95,6 +95,28 @@ be over-subscribed until those leases drain or expire. Both conditions end once 
 drain completes, and neither can recur afterwards, since no renderer emits an unknown
 suffix.
 
+**This drain is the standing procedure for any change to the rights table, not a
+one-off for this release.** `validate_artifact_access` compares a stored declaration
+against the whole entry list `declaration_for` computes from the operation→rights
+mapping compiled into the binary reading it, and the payload carries no version
+marker. So editing that mapping invalidates every in-flight persisted ticket for the
+affected operations, with the same symptom as above: an undecodable row, no possible
+backfill, and a drain required.
+
+That edit is already scheduled. Closing #484 adds a second `storage_root` entry naming
+the true destination root on the seven output-producing operations — `remux`,
+`transcode_video`, `transcode_audio`, `extract_audio`, `edit_tracks`, `back_up_file`,
+and `commit_artifact` — which invalidates every such ticket written by this release.
+Adding an entry is cheap in the *vocabulary* and not cheap in the *stored rows*,
+because the equality check binds the list rather than any single entry. Plan the same
+quiesce-and-drain into that deployment.
+
+The alternative — a declaration schema version plus a reader tolerant of older
+mappings — is deliberately not taken. It is more machinery than the risk warrants and
+would re-introduce the second accepted wire format that issue #475's sixth acceptance
+criterion forbids. The cost is paid at deployment instead, which is why it is written
+down here.
+
 **Rollback.** Restoring the pre-upgrade snapshot, as the general rule above says, is
 always safe and reverts everything. This change also permits a narrower option, because
 its new shape is confined to `tickets.payload` for every production row: quiesce, then fail or delete the byte-touching
