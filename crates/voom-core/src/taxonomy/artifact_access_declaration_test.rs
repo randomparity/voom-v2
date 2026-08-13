@@ -83,7 +83,10 @@ fn accepts_a_canonical_declaration_and_round_trips_it() {
 
 #[test]
 fn frozen_canonical_encoding_pins_variant_and_field_order() {
-    // Byte-exact. A variant reorder, a field reorder, or a tag rename turns this red.
+    // Compared as a *string*, not as a Value. The workspace builds serde_json with
+    // `preserve_order`, so `Value`'s Map is an IndexMap whose PartialEq ignores key
+    // order — a Value comparison here would stay green through the field reorder
+    // this test exists to catch.
     let declaration = ArtifactAccessDeclaration::new(vec![
         entry(
             root(1),
@@ -129,10 +132,37 @@ fn frozen_canonical_encoding_pins_variant_and_field_order() {
             "rights": ["write"]
         }
     ]);
-    assert_eq!(serde_json::to_value(&declaration).unwrap(), expected);
+    assert_eq!(
+        serde_json::to_string(&declaration).unwrap(),
+        serde_json::to_string(&expected).unwrap(),
+        "encoding is not byte-identical to the frozen form"
+    );
     assert_eq!(
         serde_json::from_value::<ArtifactAccessDeclaration>(expected).unwrap(),
         declaration
+    );
+}
+
+#[test]
+fn within_variant_field_order_decides_canonical_entry_order() {
+    // Two entries of the same variant, differing only in a field after the first.
+    // `ArtifactAccessTarget`'s derived `Ord` compares fields in declaration order,
+    // so swapping `storage_root_id` and `file_location_id` inside
+    // `FileLocationAccess` reverses which of these two sorts first and makes this
+    // list non-canonical. The single-entry-per-variant fixture above cannot see
+    // that, because no two of its entries share a variant.
+    let ascending = vec![
+        entry(location(1, 9), &[ArtifactAccessRight::Read]),
+        entry(location(2, 3), &[ArtifactAccessRight::Read]),
+    ];
+    assert!(ArtifactAccessDeclaration::new(ascending.clone()).is_ok());
+
+    let descending = vec![ascending[1].clone(), ascending[0].clone()];
+    let error = ArtifactAccessDeclaration::new(descending).unwrap_err();
+    assert_eq!(
+        message(&error),
+        "config error: artifact access entries must be strictly ascending by target; entry 1 \
+         does not follow entry 0"
     );
 }
 
@@ -398,4 +428,23 @@ fn permutations(targets: &[ArtifactAccessTarget; 4]) -> Vec<Vec<ArtifactAccessTa
         }
     }
     out
+}
+#[test]
+fn a_declaration_may_name_two_distinct_storage_roots() {
+    // Reading one root and writing another is expressible today. Nothing produces
+    // that shape yet — every current producer writes to the root it reads from —
+    // but when a producer resolves a distinct output root (#484), it needs no
+    // vocabulary change, only a second entry. Roots are the one reference a
+    // declaration may repeat, so only the ascending order rule applies.
+    let two_roots = ArtifactAccessDeclaration::new(vec![
+        entry(root(1), &[ArtifactAccessRight::Read]),
+        entry(root(2), &[ArtifactAccessRight::Write]),
+    ])
+    .unwrap();
+
+    assert_eq!(two_roots.entries().len(), 2);
+    assert_eq!(
+        two_roots.storage_root_ids().collect::<Vec<_>>(),
+        vec![StorageRootId(1), StorageRootId(2)]
+    );
 }

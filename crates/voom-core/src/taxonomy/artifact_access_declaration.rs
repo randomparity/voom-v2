@@ -9,7 +9,14 @@
 //! exactly one accepted encoding. **Variant and field declaration order below is
 //! durable wire contract**: `ArtifactAccessTarget`'s derived `Ord` decides whether a
 //! persisted payload is canonical, and reordering silently invalidates every stored
-//! declaration. The frozen-encoding test in the sibling file is the only guard.
+//! declaration.
+//!
+//! Two sibling tests guard that, and it takes both. `frozen_canonical_encoding_…`
+//! pins the serialized form by comparing *strings* — a `Value` comparison would not,
+//! because the workspace builds `serde_json` with `preserve_order` and `IndexMap`'s
+//! `PartialEq` ignores key order. `within_variant_field_order_…` pins the derived
+//! `Ord`, which the frozen fixture alone cannot reach: it holds one entry per
+//! variant, so no comparison in it ever gets past the variant discriminant.
 
 use std::collections::HashSet;
 
