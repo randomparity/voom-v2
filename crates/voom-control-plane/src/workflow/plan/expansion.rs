@@ -471,19 +471,26 @@ fn parent_storage_source(
     payload: &WorkflowTicketPayload,
 ) -> Result<TicketStorageSource, VoomError> {
     let storage_root_id = parent_storage_root(payload)?;
-    let file_location_id = payload
-        .rendered_payload
-        .get("source_location_id")
-        .and_then(Value::as_u64)
+    // Absent means the parent addresses its root. Present-but-unreadable does not:
+    // treating it as absent would silently widen the child from one location to
+    // read+write on the whole root, and the child's own payload and declaration
+    // would agree, so nothing downstream could notice.
+    let Some(raw) = payload.rendered_payload.get("source_location_id") else {
+        return Ok(TicketStorageSource::Root { storage_root_id });
+    };
+    let file_location_id = raw
+        .as_u64()
         .filter(|id| *id != 0)
-        .map(FileLocationId);
-    Ok(file_location_id.map_or(
-        TicketStorageSource::Root { storage_root_id },
-        |file_location_id| TicketStorageSource::Location {
-            storage_root_id,
-            file_location_id,
-        },
-    ))
+        .map(FileLocationId)
+        .ok_or_else(|| {
+            VoomError::Config(format!(
+                "parent ticket payload source_location_id must be a non-zero integer, got {raw}"
+            ))
+        })?;
+    Ok(TicketStorageSource::Location {
+        storage_root_id,
+        file_location_id,
+    })
 }
 
 pub(crate) fn branch_id_from_path(path: &str) -> Result<String, VoomError> {

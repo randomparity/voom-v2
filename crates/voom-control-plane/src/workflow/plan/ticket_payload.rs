@@ -188,19 +188,25 @@ impl WorkflowTicketPayload {
                      rendered_payload.source_storage_root_id"
                 ))
             })?;
-        let source = match self.rendered_source_id("source_location_id") {
-            Some(0) => {
-                return Err(WorkflowTicketPayloadError::new(
-                    "rendered_payload.source_location_id must be non-zero",
-                ));
-            }
-            Some(location) => TicketStorageSource::Location {
-                storage_root_id: StorageRootId(root),
-                file_location_id: FileLocationId(location),
-            },
+        // Absent means the ticket addresses its root. Present-but-unreadable is
+        // rejected rather than read as absent: a string, float, or negative id would
+        // otherwise fall through to the whole-root shape, which is a legitimate
+        // declaration for the operation and so passes every remaining rule.
+        let source = match self.rendered_payload.get("source_location_id") {
             None => TicketStorageSource::Root {
                 storage_root_id: StorageRootId(root),
             },
+            Some(raw) => {
+                let location = raw.as_u64().filter(|id| *id != 0).ok_or_else(|| {
+                    WorkflowTicketPayloadError::new(
+                        "rendered_payload.source_location_id must be a non-zero integer",
+                    )
+                })?;
+                TicketStorageSource::Location {
+                    storage_root_id: StorageRootId(root),
+                    file_location_id: FileLocationId(location),
+                }
+            }
         };
 
         let expected = declaration_for(self.operation, Some(&source)).map_err(|error| {

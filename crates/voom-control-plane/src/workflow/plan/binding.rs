@@ -369,6 +369,10 @@ fn insert_storage_source(object: &mut Map<String, Value>, source: &TicketStorage
     match *source {
         TicketStorageSource::Root { storage_root_id } => {
             object.insert("source_storage_root_id".to_owned(), json!(storage_root_id));
+            // A root-addressed render must not inherit a location key from whatever
+            // built the base payload; leaving one would describe a narrower access
+            // than the ticket actually has.
+            object.remove("source_location_id");
         }
         TicketStorageSource::Location {
             storage_root_id,
