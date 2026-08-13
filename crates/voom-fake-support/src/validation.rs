@@ -312,6 +312,10 @@ fn protocol_payload_without_runtime_metadata(payload: &serde_json::Value) -> ser
         "operation",
         "progress_interval_ms",
         "scenario",
+        // Routing evidence the control plane stamps on every workflow ticket
+        // (ADR 0068). Not part of any worker request shape.
+        "source_location_id",
+        "source_storage_root_id",
     ];
 
     let mut payload = payload.clone();

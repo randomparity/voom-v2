@@ -3,12 +3,13 @@ use std::sync::Arc;
 use serde_json::Value;
 use time::OffsetDateTime;
 use voom_core::OperationKind;
-use voom_core::{JobId, SystemClock, TicketId, TicketOperation};
+use voom_core::{FileLocationId, JobId, StorageRootId, SystemClock, TicketId, TicketOperation};
 use voom_store::repo::execution::jobs::NewJob;
 use voom_store::repo::execution::tickets::{NewTicket, Ticket};
 
 use crate::ControlPlane;
 use crate::workflow::execution::timing::EffectiveTiming;
+use crate::workflow::plan::access_declaration::{TicketStorageSource, declaration_for};
 use crate::workflow::plan::binding::{
     BranchContext, branch_context_with_probe_codec, render_default_payload,
     render_default_payload_with_fan_out,
@@ -21,6 +22,8 @@ use crate::workflow::plan::model::WorkflowPlan;
 use crate::workflow::plan::ticket_payload::WorkflowTicketPayload;
 
 const T0: OffsetDateTime = OffsetDateTime::UNIX_EPOCH;
+const SEED_ROOT: StorageRootId = StorageRootId(3);
+const SEED_LOCATION: FileLocationId = FileLocationId(7);
 
 #[tokio::test]
 async fn scanner_completion_creates_only_probe_hash_identity() {
@@ -325,9 +328,9 @@ async fn scanner_completion_dedupes_duplicate_file_outputs() {
             OperationKind::ScanLibrary,
             serde_json::json!({
                 "files": [
-                    "/library/file-000.mkv",
-                    "/library/file-000.mkv",
-                    {"path": "/library/file-001.mkv"}
+                    {"path": "/library/file-000.mkv", "file_location_id": 11},
+                    {"path": "/library/file-000.mkv", "file_location_id": 11},
+                    {"path": "/library/file-001.mkv", "file_location_id": 12}
                 ]
             }),
         )
@@ -352,8 +355,8 @@ async fn scanner_completion_disambiguates_branch_id_path_collisions() {
             OperationKind::ScanLibrary,
             serde_json::json!({
                 "files": [
-                    "/library/file-000.mkv",
-                    "/other/file-000.mp4"
+                    {"path": "/library/file-000.mkv", "file_location_id": 11},
+                    {"path": "/other/file-000.mp4", "file_location_id": 12}
                 ]
             }),
         )
@@ -420,7 +423,7 @@ impl WorkflowExpansionFixture {
             })
             .await
             .unwrap();
-        let plan = WorkflowPlan::default_ci();
+        let plan = WorkflowPlan::default_ci(SEED_LOCATION);
         Self {
             cp,
             _tmp: tmp,
@@ -465,6 +468,8 @@ impl WorkflowExpansionFixture {
             rendered_payload,
             timing: timing(),
             source_file: Some(source_file_for_branch(branch_id)),
+            declared_artifact_access: declaration_for(operation, branch.storage_source.as_ref())
+                .unwrap(),
         }
         .to_ticket_payload()
         .unwrap();
@@ -501,6 +506,8 @@ impl WorkflowExpansionFixture {
             rendered_payload,
             timing: timing(),
             source_file: Some(source_file_for_branch(branch_id)),
+            declared_artifact_access: declaration_for(operation, branch.storage_source.as_ref())
+                .unwrap(),
         }
         .to_ticket_payload()
         .unwrap();
@@ -643,6 +650,21 @@ fn branch_for_seed(branch_id: &str, operation: OperationKind) -> BranchContext {
             path: format!("/library/{branch_id}.mkv"),
             probe_codec: Some("h264".to_owned()),
             source_file: Some(source_file_for_branch(branch_id)),
+            storage_source: Some(seed_storage_source(operation)),
+        }
+    }
+}
+
+/// A scan addresses its root; every other seeded branch addresses a location.
+fn seed_storage_source(operation: OperationKind) -> TicketStorageSource {
+    if operation == OperationKind::ScanLibrary {
+        TicketStorageSource::Root {
+            storage_root_id: SEED_ROOT,
+        }
+    } else {
+        TicketStorageSource::Location {
+            storage_root_id: SEED_ROOT,
+            file_location_id: SEED_LOCATION,
         }
     }
 }
@@ -668,7 +690,8 @@ fn source_file_for_branch_with_size(branch_id: &str, size_bytes: u64) -> Value {
         "path": format!("/library/{branch_id}.mkv"),
         "size_bytes": size_bytes,
         "content_hash": format!("blake3:{branch_id}"),
-        "local_file_key": format!("/library/{branch_id}.mkv")
+        "local_file_key": format!("/library/{branch_id}.mkv"),
+        "file_location_id": SEED_LOCATION.0
     })
 }
 

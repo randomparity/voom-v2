@@ -2,7 +2,7 @@ use serde_json::Map;
 use serde_json::{Value, json};
 use std::path::Path;
 use voom_core::OperationKind;
-use voom_core::{FileLocationId, FileVersionId};
+use voom_core::{FileLocationId, FileVersionId, StorageRootId};
 use voom_plan::planner::audio::{AudioOperationPayload, AudioOperationType};
 use voom_plan::planner::remux::RemuxOperationPayload;
 use voom_worker_protocol::{
@@ -12,6 +12,7 @@ use voom_worker_protocol::{
 
 use crate::transcode::stage::{OutputName, output_file_name};
 use crate::workflow::execution::timing::EffectiveTiming;
+use crate::workflow::plan::access_declaration::TicketStorageSource;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BranchContext {
@@ -19,6 +20,10 @@ pub struct BranchContext {
     pub path: String,
     pub probe_codec: Option<String>,
     pub source_file: Option<Value>,
+    /// The storage this branch's tickets are rendered against. This — not
+    /// `node.policy_target()` — is how the source reaches this renderer, because
+    /// the `ScanLibrary` arm never reads a policy target.
+    pub storage_source: Option<TicketStorageSource>,
 }
 
 pub fn render_default_payload(
@@ -98,6 +103,19 @@ pub fn render_default_payload_with_fan_out(
         "progress_interval_ms".to_owned(),
         json!(timing.progress_interval_ms),
     );
+    match &branch.storage_source {
+        Some(source) => insert_storage_source(object, source),
+        // A byte-touching ticket without a source would be rejected at encode
+        // anyway; failing here names the branch instead of the payload.
+        None if operation.is_byte_touching() => {
+            return Err(BindingError::new(format!(
+                "byte-touching operation {} requires a storage source on branch `{}`",
+                operation.as_str(),
+                branch.branch_id
+            )));
+        }
+        None => {}
+    }
     Ok(payload)
 }
 
@@ -143,9 +161,17 @@ fn render_default_transcode_video_payload(branch: &BranchContext) -> Result<Valu
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[expect(
+    clippy::struct_field_names,
+    reason = "every field is a typed id; a shorter name would lose which id it is"
+)]
 pub struct PolicyFileSource {
     pub file_version_id: FileVersionId,
-    pub location_id: Option<FileLocationId>,
+    /// The root containing `location_id`. Both are required: a policy-rendered
+    /// ticket is byte-touching, so its payload must carry the identity its
+    /// declaration is checked against.
+    pub storage_root_id: StorageRootId,
+    pub location_id: FileLocationId,
 }
 
 pub fn render_policy_transcode_payload(
@@ -325,8 +351,32 @@ fn insert_policy_file_source(object: &mut Map<String, Value>, source: PolicyFile
         "source_file_version_id".to_owned(),
         json!(source.file_version_id),
     );
-    if let Some(location_id) = source.location_id {
-        object.insert("source_location_id".to_owned(), json!(location_id));
+    insert_storage_source(
+        object,
+        &TicketStorageSource::Location {
+            storage_root_id: source.storage_root_id,
+            file_location_id: source.location_id,
+        },
+    );
+}
+
+/// Write the identity a declaration is validated against.
+///
+/// Every workflow ticket carries this, byte-touching or not: a non-byte-touching
+/// ticket's payload is what its byte-touching children thread their own source
+/// from, so omitting it there would leave them with nothing to build.
+fn insert_storage_source(object: &mut Map<String, Value>, source: &TicketStorageSource) {
+    match *source {
+        TicketStorageSource::Root { storage_root_id } => {
+            object.insert("source_storage_root_id".to_owned(), json!(storage_root_id));
+        }
+        TicketStorageSource::Location {
+            storage_root_id,
+            file_location_id,
+        } => {
+            object.insert("source_storage_root_id".to_owned(), json!(storage_root_id));
+            object.insert("source_location_id".to_owned(), json!(file_location_id));
+        }
     }
 }
 
@@ -338,6 +388,10 @@ pub fn branch_context_with_probe_codec(branch_id: &str, codec: &str) -> BranchCo
         path: format!("/library/{branch_id}.mkv"),
         probe_codec: Some(codec.to_owned()),
         source_file: Some(test_source_file(branch_id)),
+        storage_source: Some(TicketStorageSource::Location {
+            storage_root_id: StorageRootId(3),
+            file_location_id: FileLocationId(7),
+        }),
     }
 }
 

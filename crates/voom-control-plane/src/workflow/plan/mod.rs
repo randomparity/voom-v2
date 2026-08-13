@@ -1,3 +1,4 @@
+pub(crate) mod access_declaration;
 pub(crate) mod binding;
 pub(crate) mod expansion;
 pub(crate) mod model;

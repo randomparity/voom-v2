@@ -12,8 +12,10 @@ use voom_store::repo::execution::tickets::{NewTicket, Ticket};
 use voom_store::repo::media::identity::{FileLocationRepo, FileVersionRepo};
 
 use crate::cases::{begin_immediate_tx, commit_tx};
+use crate::operation_source::select_location;
 use crate::workflow::execution::executor::{PlannedLineageGuard, WorkflowExecutor};
 use crate::workflow::execution::timing::{EffectiveTiming, seeded_timing};
+use crate::workflow::plan::access_declaration::{TicketStorageSource, declaration_for};
 use crate::workflow::plan::binding::{
     BindingError, BranchContext, PolicyFileSource, render_default_payload,
     render_default_payload_with_fan_out, render_policy_extract_audio_payload,
@@ -110,11 +112,28 @@ impl WorkflowExecutor {
         now: OffsetDateTime,
     ) -> Result<NewTicket, VoomError> {
         let operation = node.operation();
+        // Resolved once, here, and handed to every renderer. Two independent
+        // resolutions of the same target within one render could disagree if a
+        // rescan landed between them, leaving the declaration and
+        // `source_location_id` naming different locations. Unconditional on
+        // byte-touching: a non-byte-touching node's payload is what its
+        // byte-touching children thread from.
+        let policy_source = match node.policy_target() {
+            Some(target) => Some(
+                self.resolve_policy_file_source(target, operation.as_str())
+                    .await?,
+            ),
+            None => None,
+        };
         let branch = BranchContext {
             branch_id: "root".to_owned(),
             path: "/library/root.mkv".to_owned(),
             probe_codec: Some("h264".to_owned()),
             source_file: None,
+            storage_source: policy_source.map(|source| TicketStorageSource::Location {
+                storage_root_id: source.storage_root_id,
+                file_location_id: source.location_id,
+            }),
         };
         let timing = seeded_timing(
             plan.seed,
@@ -123,9 +142,9 @@ impl WorkflowExecutor {
             plan.timing.base_duration_ms,
             plan.timing.jitter_ms,
         );
-        let rendered_payload = self
-            .render_root_payload(plan, node, &branch, timing)
-            .await?;
+        let rendered_payload =
+            self.render_root_payload(plan, node, &branch, policy_source, timing)?;
+        let declared_artifact_access = declaration_for(operation, branch.storage_source.as_ref())?;
         let payload = WorkflowTicketPayload {
             workflow_id: workflow_id.to_owned(),
             plan_id: plan.id.clone(),
@@ -135,6 +154,7 @@ impl WorkflowExecutor {
             rendered_payload,
             timing,
             source_file: None,
+            declared_artifact_access,
         }
         .to_ticket_payload()
         .map_err(|e| VoomError::Config(format!("workflow ticket payload encode: {e}")))?;
@@ -148,108 +168,80 @@ impl WorkflowExecutor {
         })
     }
 
-    async fn render_root_payload(
+    fn render_root_payload(
         &self,
         plan: &WorkflowPlan,
         node: &OperationNode,
         branch: &BranchContext,
+        policy_source: Option<PolicyFileSource>,
         timing: EffectiveTiming,
     ) -> Result<Value, VoomError> {
         let operation = node.operation();
         let roots = &self.options.artifact_roots;
-        match operation {
-            OperationKind::ScanLibrary => root_payload_result(render_default_payload_with_fan_out(
-                operation,
-                branch,
-                timing,
-                plan.fan_out.max_files,
-            )),
-            OperationKind::TranscodeVideo => match node.policy_target() {
-                Some(target) => root_payload_result(render_policy_transcode_payload(
-                    self.resolve_policy_file_source(target, "transcode_video")
-                        .await?,
+        match (operation, policy_source) {
+            (OperationKind::ScanLibrary, _) => {
+                root_payload_result(render_default_payload_with_fan_out(
+                    operation,
+                    branch,
+                    timing,
+                    plan.fan_out.max_files,
+                ))
+            }
+            (OperationKind::TranscodeVideo, Some(source)) => {
+                root_payload_result(render_policy_transcode_payload(
+                    source,
                     node.operation_payload(),
                     &roots.transcode.staging_root,
                     &roots.transcode.target_dir,
                     timing,
-                )),
-                None => root_payload_result(render_default_payload(operation, branch, timing)),
-            },
-            OperationKind::Remux => self.render_root_remux_payload(node, branch, timing).await,
-            OperationKind::TranscodeAudio => match node.policy_target() {
-                Some(target) => root_payload_result(render_policy_transcode_audio_payload(
-                    self.resolve_policy_file_source(target, "transcode_audio")
-                        .await?,
+                ))
+            }
+            (OperationKind::Remux, Some(source)) => {
+                root_payload_result(render_policy_remux_payload(
+                    source,
+                    node.operation_payload(),
+                    &roots.remux.staging_root,
+                    &roots.remux.target_dir,
+                    timing,
+                ))
+            }
+            (OperationKind::TranscodeAudio, Some(source)) => {
+                root_payload_result(render_policy_transcode_audio_payload(
+                    source,
                     node.operation_payload(),
                     &roots.audio.staging_root,
                     &roots.audio.target_dir,
                     timing,
-                )),
-                None => root_payload_result(render_default_payload(operation, branch, timing)),
-            },
-            OperationKind::ExtractAudio => match node.policy_target() {
-                Some(target) => root_payload_result(render_policy_extract_audio_payload(
-                    self.resolve_policy_file_source(target, "extract_audio")
-                        .await?,
+                ))
+            }
+            (OperationKind::ExtractAudio, Some(source)) => {
+                root_payload_result(render_policy_extract_audio_payload(
+                    source,
                     node.operation_payload(),
                     &roots.audio.staging_root,
                     &roots.audio.target_dir,
                     timing,
-                )),
-                None => root_payload_result(render_default_payload(operation, branch, timing)),
-            },
-            OperationKind::VerifyArtifact => match node.policy_target() {
-                Some(target) => root_payload_result(render_policy_verify_artifact_payload(
-                    self.resolve_policy_file_source(target, "verify_artifact")
-                        .await?,
-                    timing,
-                )),
-                None => root_payload_result(render_default_payload(operation, branch, timing)),
-            },
+                ))
+            }
+            (OperationKind::VerifyArtifact, Some(source)) => {
+                root_payload_result(render_policy_verify_artifact_payload(source, timing))
+            }
             _ => root_payload_result(render_default_payload(operation, branch, timing)),
         }
     }
 
-    async fn render_root_remux_payload(
-        &self,
-        node: &OperationNode,
-        branch: &BranchContext,
-        timing: EffectiveTiming,
-    ) -> Result<Value, VoomError> {
-        match node.policy_target() {
-            Some(
-                target @ (voom_plan::TargetRef::FileVersion { .. }
-                | voom_plan::TargetRef::FileLocation { .. }),
-            ) => {
-                let roots = &self.options.artifact_roots.remux;
-                let rendered = render_policy_remux_payload(
-                    self.resolve_policy_file_source(target, "remux").await?,
-                    node.operation_payload(),
-                    &roots.staging_root,
-                    &roots.target_dir,
-                    timing,
-                );
-                root_payload_result(rendered)
-            }
-            Some(target) => Err(root_payload_error(&BindingError::new(format!(
-                "remux requires file_version or file_location target, got {target:?}"
-            )))),
-            None => {
-                root_payload_result(render_default_payload(OperationKind::Remux, branch, timing))
-            }
-        }
-    }
-
+    /// Resolve a node's policy target to the one live rooted location it names.
+    ///
+    /// Both target shapes route through `select_location`, so a `FileVersion`
+    /// resolves to its single live rooted location and a `FileLocation` gains the
+    /// liveness and rooted-address checks it did not run before.
     async fn resolve_policy_file_source(
         &self,
         target: &voom_plan::TargetRef,
         operation_name: &str,
     ) -> Result<PolicyFileSource, VoomError> {
-        match target {
-            voom_plan::TargetRef::FileVersion { id } => Ok(PolicyFileSource {
-                file_version_id: *id,
-                location_id: None,
-            }),
+        let (file_version_id, requested_location) = match target {
+            voom_plan::TargetRef::FileVersion { id } => (*id, None),
             voom_plan::TargetRef::FileLocation { id } => {
                 let location = self
                     .control_plane
@@ -257,18 +249,25 @@ impl WorkflowExecutor {
                     .get_file_location(*id)
                     .await?
                     .ok_or_else(|| VoomError::NotFound(format!("file_location {id}")))?;
-                if location.retired_at.is_some() {
-                    return Err(VoomError::Config(format!("file_location {id} is retired")));
-                }
-                Ok(PolicyFileSource {
-                    file_version_id: location.file_version_id,
-                    location_id: Some(*id),
-                })
+                (location.file_version_id, Some(*id))
             }
-            other => Err(VoomError::Config(format!(
-                "{operation_name} requires file_version or file_location target, got {other:?}"
-            ))),
-        }
+            other => {
+                return Err(VoomError::Config(format!(
+                    "{operation_name} requires file_version or file_location target, got {other:?}"
+                )));
+            }
+        };
+        let location =
+            select_location(&self.control_plane, file_version_id, requested_location).await?;
+        // `require_live_rooted_location` has already rejected a non-rooted
+        // address, so this arm is unreachable — propagated rather than expected,
+        // because that is an argument about callers, not a type-level guarantee.
+        let (storage_root_id, _) = location.rooted_address()?;
+        Ok(PolicyFileSource {
+            file_version_id,
+            storage_root_id,
+            location_id: location.id,
+        })
     }
 }
 

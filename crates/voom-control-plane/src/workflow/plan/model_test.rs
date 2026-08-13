@@ -1,11 +1,11 @@
 use crate::workflow::plan::model::{
     ConcurrencyPolicy, FanOutPolicy, OperationNode, TimingPolicy, WorkflowPlan,
 };
-use voom_core::OperationKind;
+use voom_core::{FileLocationId, OperationKind};
 
 #[test]
 fn default_ci_plan_has_seed_two_three_files_and_parallel_dispatches() {
-    let plan = WorkflowPlan::default_ci();
+    let plan = WorkflowPlan::default_ci(FileLocationId(7));
     assert_eq!(plan.id, "sprint-2-phase-7-default");
     assert_eq!(plan.seed, 2);
     assert_eq!(plan.fan_out.max_files, 3);

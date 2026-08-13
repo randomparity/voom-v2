@@ -1,8 +1,12 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use voom_core::OperationKind;
+use voom_core::{
+    ArtifactAccessDeclaration, FileLocationId, NormalizedTicketOperation, OperationKind,
+    StorageRootId, TicketOperation,
+};
 
 use crate::workflow::execution::timing::EffectiveTiming;
+use crate::workflow::plan::access_declaration::{TicketStorageSource, declaration_for};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -16,6 +20,10 @@ pub struct WorkflowTicketPayload {
     pub timing: EffectiveTiming,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_file: Option<Value>,
+    /// What this ticket intends to open. Required for a byte-touching operation
+    /// and forbidden for every other, enforced identically on encode and decode.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub declared_artifact_access: Option<ArtifactAccessDeclaration>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -24,6 +32,11 @@ pub struct WorkflowTicketPayloadError {
 }
 
 impl WorkflowTicketPayload {
+    /// A payload for tests, valid for its operation.
+    ///
+    /// A byte-touching operation gets the fixture source stamped into
+    /// `rendered_payload` and the matching canonical declaration, so callers
+    /// testing something other than the access gate do not have to construct one.
     #[must_use]
     pub fn new_for_test(
         workflow_id: &str,
@@ -34,6 +47,30 @@ impl WorkflowTicketPayload {
         rendered_payload: Value,
     ) -> Self {
         let timing = EffectiveTiming::for_test(25, 10);
+        let mut rendered_payload = rendered_payload;
+        let mut declared_artifact_access = None;
+        if operation.is_byte_touching()
+            && let Some(object) = rendered_payload.as_object_mut()
+        {
+            // Respect a source the caller already put in the payload; several
+            // fixtures pass real seeded ids and would break if these overwrote
+            // them. Otherwise supply a placeholder so the payload is valid.
+            let root = object
+                .get("source_storage_root_id")
+                .and_then(Value::as_u64)
+                .unwrap_or(3);
+            let location = object
+                .get("source_location_id")
+                .and_then(Value::as_u64)
+                .unwrap_or(7);
+            object.insert("source_storage_root_id".to_owned(), json!(root));
+            object.insert("source_location_id".to_owned(), json!(location));
+            let source = TicketStorageSource::Location {
+                storage_root_id: StorageRootId(root),
+                file_location_id: FileLocationId(location),
+            };
+            declared_artifact_access = declaration_for(operation, Some(&source)).ok().flatten();
+        }
         Self {
             workflow_id: workflow_id.to_owned(),
             plan_id: plan_id.to_owned(),
@@ -43,10 +80,12 @@ impl WorkflowTicketPayload {
             rendered_payload,
             timing,
             source_file: None,
+            declared_artifact_access,
         }
     }
 
     pub fn to_ticket_payload(&self) -> Result<Value, WorkflowTicketPayloadError> {
+        self.validate_artifact_access()?;
         let mut value = serde_json::to_value(self).map_err(|e| {
             WorkflowTicketPayloadError::new(format!("workflow ticket payload encode: {e}"))
         })?;
@@ -107,8 +146,79 @@ impl WorkflowTicketPayload {
                 parsed.operation,
             ));
         }
+        parsed.validate_artifact_access()?;
 
         Ok(parsed)
+    }
+
+    /// The one contract binding writers and readers of a ticket's access claim.
+    ///
+    /// The persisted writer is untrusted, so this is an equality check against
+    /// [`declaration_for`], not a shape check: a shape check would bind targets
+    /// alone, letting a corrupted row give a `probe_file` ticket `read, write,
+    /// delete` on its source and pass every canonical-form rule.
+    ///
+    /// The root and location are read from `rendered_payload`, never back out of
+    /// the declaration being validated — taking them from the declaration's own
+    /// entries would make the check circular, and a corrupted row could then name
+    /// any root and pass.
+    fn validate_artifact_access(&self) -> Result<(), WorkflowTicketPayloadError> {
+        let operation = self.operation.as_str();
+        if !self.operation.is_byte_touching() {
+            return if self.declared_artifact_access.is_some() {
+                Err(WorkflowTicketPayloadError::new(format!(
+                    "operation {operation} is not byte-touching and must not declare artifact access"
+                )))
+            } else {
+                Ok(())
+            };
+        }
+        let Some(declared) = self.declared_artifact_access.as_ref() else {
+            return Err(WorkflowTicketPayloadError::new(format!(
+                "operation {operation} is byte-touching and requires declared_artifact_access"
+            )));
+        };
+
+        let root = self
+            .rendered_source_id("source_storage_root_id")
+            .filter(|id| *id != 0)
+            .ok_or_else(|| {
+                WorkflowTicketPayloadError::new(format!(
+                    "byte-touching payload for {operation} requires a non-zero \
+                     rendered_payload.source_storage_root_id"
+                ))
+            })?;
+        let source = match self.rendered_source_id("source_location_id") {
+            Some(0) => {
+                return Err(WorkflowTicketPayloadError::new(
+                    "rendered_payload.source_location_id must be non-zero",
+                ));
+            }
+            Some(location) => TicketStorageSource::Location {
+                storage_root_id: StorageRootId(root),
+                file_location_id: FileLocationId(location),
+            },
+            None => TicketStorageSource::Root {
+                storage_root_id: StorageRootId(root),
+            },
+        };
+
+        let expected = declaration_for(self.operation, Some(&source)).map_err(|error| {
+            WorkflowTicketPayloadError::new(format!(
+                "canonical declaration for {operation}: {error}"
+            ))
+        })?;
+        if expected.as_ref() == Some(declared) {
+            Ok(())
+        } else {
+            Err(WorkflowTicketPayloadError::new(format!(
+                "declared_artifact_access does not match the canonical declaration for {operation}"
+            )))
+        }
+    }
+
+    fn rendered_source_id(&self, field: &str) -> Option<u64> {
+        self.rendered_payload.get(field)?.as_u64()
     }
 }
 
@@ -128,15 +238,34 @@ impl std::fmt::Display for WorkflowTicketPayloadError {
 
 impl std::error::Error for WorkflowTicketPayloadError {}
 
+/// The operation a workflow ticket kind names.
+///
+/// Only the namespaced encoding of a known operation is accepted. A bare
+/// `probe_file` is rejected even though it normalizes to a known operation:
+/// admitting it would give the kind field a second accepted encoding, which is
+/// exactly what this change forbids for the declaration body.
 pub(crate) fn ticket_operation(
     ticket_kind: &str,
 ) -> Result<OperationKind, WorkflowTicketPayloadError> {
-    let Some(operation) = ticket_kind.strip_prefix("synthetic.workflow.operation.") else {
-        return Err(WorkflowTicketPayloadError::new(format!(
-            "workflow ticket kind `{ticket_kind}` must start with synthetic.workflow.operation."
-        )));
-    };
-    parse_operation_name(operation)
+    let token = TicketOperation::new(ticket_kind).map_err(|error| {
+        WorkflowTicketPayloadError::new(format!("workflow ticket kind `{ticket_kind}`: {error}"))
+    })?;
+    match token.normalize() {
+        NormalizedTicketOperation::Known {
+            kind,
+            namespaced: true,
+        } => Ok(kind),
+        NormalizedTicketOperation::Known {
+            namespaced: false, ..
+        }
+        | NormalizedTicketOperation::CustomLocal(_)
+        | NormalizedTicketOperation::UnknownNamespaced(_) => {
+            Err(WorkflowTicketPayloadError::new(format!(
+                "workflow ticket kind `{ticket_kind}` must be a known operation inside \
+                 synthetic.workflow.operation."
+            )))
+        }
+    }
 }
 
 fn parse_operation_name(operation: &str) -> Result<OperationKind, WorkflowTicketPayloadError> {

@@ -443,6 +443,13 @@ fn advertised_access_modes<'a>(
     Ok(Vec::new())
 }
 
+/// First synthetic file-location id a fake scan reports.
+///
+/// Deliberately high so it cannot be mistaken for a row a repository test
+/// created. Nothing resolves these against the database — a scan result is
+/// routing evidence for the children it fans out to.
+const FAKE_SCANNER_FIRST_LOCATION_ID: u64 = 9_100_001;
+
 fn scanner_files(
     payload: &serde_json::Value,
     fan_out_count: Option<u32>,
@@ -457,6 +464,9 @@ fn scanner_files(
                 "size_bytes": 4_200_000_000_u64 + u64::from(index),
                 "content_hash": blake3_checksum(path.as_bytes()),
                 "local_file_key": path,
+                // A scan is where a child's location is discovered, so each entry
+                // must name one for the child to declare what it opens.
+                "file_location_id": FAKE_SCANNER_FIRST_LOCATION_ID + u64::from(index),
             })
         })
         .collect::<Vec<_>>();

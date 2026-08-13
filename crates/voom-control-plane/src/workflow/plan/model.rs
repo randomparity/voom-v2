@@ -1,6 +1,8 @@
 use std::collections::{HashMap, HashSet};
 
 use serde_json::Value;
+#[cfg(test)]
+use voom_core::FileLocationId;
 use voom_core::OperationKind;
 use voom_plan::TargetRef;
 
@@ -55,34 +57,74 @@ impl std::fmt::Display for WorkflowPlanError {
 impl std::error::Error for WorkflowPlanError {}
 
 impl WorkflowPlan {
+    /// The CI demo plan.
+    ///
+    /// Every byte-touching node carries `source_location_id` so it can declare
+    /// what it opens; callers seed that row (`seed_test_rooted_location`) before
+    /// submitting the plan.
     #[cfg(test)]
     #[must_use]
-    pub fn default_ci() -> Self {
+    pub fn default_ci(source_location_id: FileLocationId) -> Self {
+        let target = |operation: OperationKind| {
+            operation
+                .is_byte_touching()
+                .then_some(TargetRef::FileLocation {
+                    id: source_location_id,
+                })
+        };
         Self {
             id: "sprint-2-phase-7-default".to_owned(),
             seed: 2,
             nodes: vec![
-                operation("scan", OperationKind::ScanLibrary, &[]),
-                operation("probe", OperationKind::ProbeFile, &["scan"]),
-                operation("hash", OperationKind::HashFile, &["scan"]),
-                operation("identity", OperationKind::IdentifyMedia, &["scan"]),
-                operation("quality", OperationKind::ScoreQuality, &["probe"]),
-                selected_operation("remux", OperationKind::Remux, &["quality"], "transform"),
+                operation("scan", OperationKind::ScanLibrary, &[], &target),
+                operation("probe", OperationKind::ProbeFile, &["scan"], &target),
+                operation("hash", OperationKind::HashFile, &["scan"], &target),
+                operation("identity", OperationKind::IdentifyMedia, &["scan"], &target),
+                operation("quality", OperationKind::ScoreQuality, &["probe"], &target),
+                selected_operation(
+                    "remux",
+                    OperationKind::Remux,
+                    &["quality"],
+                    "transform",
+                    &target,
+                ),
                 selected_operation(
                     "transcode",
                     OperationKind::TranscodeVideo,
                     &["quality"],
                     "transform",
+                    &target,
                 ),
-                operation_after_selected("backup", OperationKind::BackUpFile, &["transform"]),
+                operation_after_selected(
+                    "backup",
+                    OperationKind::BackUpFile,
+                    &["transform"],
+                    &target,
+                ),
                 operation_after_selected(
                     "external-sync",
                     OperationKind::SyncExternalSystem,
                     &["transform"],
+                    &target,
                 ),
-                operation_after_selected("issue", OperationKind::CommitArtifact, &["transform"]),
-                operation_after_selected("use-lease", OperationKind::EditTracks, &["transform"]),
-                operation("verify", OperationKind::VerifyArtifact, &["backup"]),
+                operation_after_selected(
+                    "issue",
+                    OperationKind::CommitArtifact,
+                    &["transform"],
+                    &target,
+                ),
+                operation_after_selected(
+                    "use-lease",
+                    OperationKind::EditTracks,
+                    &["transform"],
+                    &target,
+                ),
+                operation(
+                    "verify",
+                    OperationKind::VerifyArtifact,
+                    &["backup"],
+                    &target,
+                ),
             ],
             fan_out: FanOutPolicy { max_files: 3 },
             concurrency: ConcurrencyPolicy {
@@ -194,11 +236,16 @@ impl WorkflowPlanError {
 }
 
 #[cfg(test)]
-fn operation(id: &str, operation: OperationKind, depends_on: &[&str]) -> OperationNode {
+fn operation(
+    id: &str,
+    operation: OperationKind,
+    depends_on: &[&str],
+    target: &dyn Fn(OperationKind) -> Option<TargetRef>,
+) -> OperationNode {
     OperationNode {
         id: id.to_owned(),
         operation,
-        policy_target: None,
+        policy_target: target(operation),
         operation_payload: Value::Null,
         depends_on: depends_on.iter().map(ToString::to_string).collect(),
         depends_on_selected: Vec::new(),
@@ -212,11 +259,12 @@ fn selected_operation(
     operation: OperationKind,
     depends_on: &[&str],
     provides_selected: &str,
+    target: &dyn Fn(OperationKind) -> Option<TargetRef>,
 ) -> OperationNode {
     OperationNode {
         id: id.to_owned(),
         operation,
-        policy_target: None,
+        policy_target: target(operation),
         operation_payload: Value::Null,
         depends_on: depends_on.iter().map(ToString::to_string).collect(),
         depends_on_selected: Vec::new(),
@@ -229,11 +277,12 @@ fn operation_after_selected(
     id: &str,
     operation: OperationKind,
     depends_on_selected: &[&str],
+    target: &dyn Fn(OperationKind) -> Option<TargetRef>,
 ) -> OperationNode {
     OperationNode {
         id: id.to_owned(),
         operation,
-        policy_target: None,
+        policy_target: target(operation),
         operation_payload: Value::Null,
         depends_on: Vec::new(),
         depends_on_selected: depends_on_selected

@@ -7,7 +7,7 @@ use crate::workflow::plan::binding::{
 };
 use crate::workflow::plan::model::WorkflowPlan;
 use voom_core::OperationKind;
-use voom_core::{FileLocationId, FileVersionId};
+use voom_core::{FileLocationId, FileVersionId, StorageRootId};
 
 #[test]
 fn default_payload_rendering_preserves_static_fields_then_applies_bindings() {
@@ -27,7 +27,7 @@ fn default_payload_rendering_preserves_static_fields_then_applies_bindings() {
 fn default_payload_rendering_covers_default_ci_operations() {
     let branch = branch_context_with_probe_codec("file-001", "h264");
     let timing = EffectiveTiming::for_test(25, 10);
-    for node in WorkflowPlan::default_ci().nodes {
+    for node in WorkflowPlan::default_ci(FileLocationId(7)).nodes {
         let payload = render_default_payload(node.operation(), &branch, timing).unwrap();
         assert_eq!(payload["operation"], operation_name_value(node.operation()));
         match node.operation() {
@@ -99,7 +99,8 @@ fn policy_verify_payload_pins_exact_file_identity_without_dsl_arguments() {
     let rendered = render_policy_verify_artifact_payload(
         PolicyFileSource {
             file_version_id: FileVersionId(42),
-            location_id: Some(FileLocationId(7)),
+            storage_root_id: StorageRootId(3),
+            location_id: FileLocationId(7),
         },
         EffectiveTiming::for_test(25, 10),
     )
@@ -110,6 +111,7 @@ fn policy_verify_payload_pins_exact_file_identity_without_dsl_arguments() {
         serde_json::json!({
             "operation": "verify_artifact",
             "source_file_version_id": 42,
+            "source_storage_root_id": 3,
             "source_location_id": 7,
             "duration_ms": 25,
             "progress_interval_ms": 10,
@@ -132,7 +134,8 @@ fn policy_transcode_video_payload_preserves_expected_source_video_facts() {
     let rendered = render_policy_transcode_payload(
         PolicyFileSource {
             file_version_id: FileVersionId(42),
-            location_id: Some(FileLocationId(7)),
+            storage_root_id: StorageRootId(3),
+            location_id: FileLocationId(7),
         },
         &operation_payload,
         std::path::Path::new("/tmp/voom-stage"),
@@ -159,7 +162,8 @@ fn policy_remux_payload_renders_source_target_and_operation_payload() {
     let rendered = render_policy_remux_payload(
         PolicyFileSource {
             file_version_id: FileVersionId(42),
-            location_id: Some(FileLocationId(7)),
+            storage_root_id: StorageRootId(3),
+            location_id: FileLocationId(7),
         },
         &operation_payload,
         std::path::Path::new("/tmp/voom-stage"),
@@ -191,7 +195,8 @@ fn policy_transcode_audio_payload_renders_source_target_and_operation_payload() 
     let rendered = render_policy_transcode_audio_payload(
         PolicyFileSource {
             file_version_id: FileVersionId(42),
-            location_id: Some(FileLocationId(7)),
+            storage_root_id: StorageRootId(3),
+            location_id: FileLocationId(7),
         },
         &operation_payload,
         std::path::Path::new("/custom/audio/staging"),
@@ -231,7 +236,8 @@ fn policy_transcode_audio_payload_accepts_published_synthesis_mode() {
     let rendered = render_policy_transcode_audio_payload(
         PolicyFileSource {
             file_version_id: FileVersionId(42),
-            location_id: Some(FileLocationId(7)),
+            storage_root_id: StorageRootId(3),
+            location_id: FileLocationId(7),
         },
         &operation_payload,
         std::path::Path::new("/custom/audio/staging"),
@@ -273,7 +279,8 @@ fn policy_extract_audio_payload_renders_source_target_and_operation_payload() {
     let rendered = render_policy_extract_audio_payload(
         PolicyFileSource {
             file_version_id: FileVersionId(42),
-            location_id: None,
+            storage_root_id: StorageRootId(3),
+            location_id: FileLocationId(7),
         },
         &operation_payload,
         std::path::Path::new("/custom/audio/staging"),
@@ -286,7 +293,10 @@ fn policy_extract_audio_payload_renders_source_target_and_operation_payload() {
     assert_eq!(rendered["audio"], operation_payload);
     assert_eq!(rendered["target_dir"], "/custom/audio/output");
     assert_eq!(rendered["source_file_version_id"], 42);
-    assert!(rendered.get("source_location_id").is_none());
+    // A policy-rendered node is byte-touching, so the identity its declaration
+    // is checked against is never optional.
+    assert_eq!(rendered["source_storage_root_id"], 3);
+    assert_eq!(rendered["source_location_id"], 7);
 }
 
 #[test]
@@ -294,7 +304,8 @@ fn policy_remux_payload_rejects_non_numeric_source_media_snapshot_id() {
     let err = render_policy_remux_payload(
         PolicyFileSource {
             file_version_id: FileVersionId(42),
-            location_id: None,
+            storage_root_id: StorageRootId(3),
+            location_id: FileLocationId(7),
         },
         &serde_json::json!({
             "type": "remux",
@@ -321,7 +332,8 @@ fn policy_remux_payload_rejects_missing_source_media_snapshot_id() {
     let err = render_policy_remux_payload(
         PolicyFileSource {
             file_version_id: FileVersionId(42),
-            location_id: None,
+            storage_root_id: StorageRootId(3),
+            location_id: FileLocationId(7),
         },
         &serde_json::json!({
             "type": "remux",
@@ -343,11 +355,12 @@ fn policy_remux_payload_rejects_missing_source_media_snapshot_id() {
 }
 
 #[test]
-fn policy_remux_payload_omits_absent_source_location() {
+fn policy_remux_payload_always_carries_its_source_root_and_location() {
     let rendered = render_policy_remux_payload(
         PolicyFileSource {
             file_version_id: FileVersionId(42),
-            location_id: None,
+            storage_root_id: StorageRootId(3),
+            location_id: FileLocationId(7),
         },
         &serde_json::json!({
             "type": "remux",
@@ -363,7 +376,10 @@ fn policy_remux_payload_omits_absent_source_location() {
     )
     .unwrap();
 
-    assert!(rendered.get("source_location_id").is_none());
+    // A policy-rendered node is byte-touching, so the identity its declaration
+    // is checked against is never optional.
+    assert_eq!(rendered["source_storage_root_id"], 3);
+    assert_eq!(rendered["source_location_id"], 7);
 }
 
 #[test]
@@ -371,7 +387,8 @@ fn policy_remux_payload_rejects_non_remux_payload() {
     let err = render_policy_remux_payload(
         PolicyFileSource {
             file_version_id: FileVersionId(42),
-            location_id: None,
+            storage_root_id: StorageRootId(3),
+            location_id: FileLocationId(7),
         },
         &serde_json::json!({"type": "set_container", "container": "mkv"}),
         std::path::Path::new("/tmp/voom-stage"),
@@ -388,7 +405,8 @@ fn policy_remux_payload_rejects_incomplete_typed_payload() {
     let err = render_policy_remux_payload(
         PolicyFileSource {
             file_version_id: FileVersionId(42),
-            location_id: None,
+            storage_root_id: StorageRootId(3),
+            location_id: FileLocationId(7),
         },
         &serde_json::json!({"type": "remux"}),
         std::path::Path::new("/tmp/voom-stage"),
@@ -405,7 +423,8 @@ fn policy_remux_payload_rejects_malformed_track_action_entry() {
     let err = render_policy_remux_payload(
         PolicyFileSource {
             file_version_id: FileVersionId(42),
-            location_id: None,
+            storage_root_id: StorageRootId(3),
+            location_id: FileLocationId(7),
         },
         &serde_json::json!({
             "type": "remux",
@@ -428,7 +447,8 @@ fn policy_remux_payload_preserves_attachment_track_action_target() {
     let rendered = render_policy_remux_payload(
         PolicyFileSource {
             file_version_id: FileVersionId(42),
-            location_id: None,
+            storage_root_id: StorageRootId(3),
+            location_id: FileLocationId(7),
         },
         &serde_json::json!({
             "type": "remux",
@@ -455,7 +475,8 @@ fn policy_remux_payload_rejects_malformed_track_order_entry() {
     let err = render_policy_remux_payload(
         PolicyFileSource {
             file_version_id: FileVersionId(42),
-            location_id: None,
+            storage_root_id: StorageRootId(3),
+            location_id: FileLocationId(7),
         },
         &serde_json::json!({
             "type": "remux",
@@ -478,7 +499,8 @@ fn policy_remux_payload_accepts_published_attachment_track_order_group() {
     let payload = render_policy_remux_payload(
         PolicyFileSource {
             file_version_id: FileVersionId(42),
-            location_id: None,
+            storage_root_id: StorageRootId(3),
+            location_id: FileLocationId(7),
         },
         &serde_json::json!({
             "type": "remux",
@@ -505,7 +527,8 @@ fn policy_remux_payload_rejects_duplicate_track_order_group() {
     let err = render_policy_remux_payload(
         PolicyFileSource {
             file_version_id: FileVersionId(42),
-            location_id: None,
+            storage_root_id: StorageRootId(3),
+            location_id: FileLocationId(7),
         },
         &serde_json::json!({
             "type": "remux",
@@ -531,7 +554,8 @@ fn policy_remux_payload_rejects_malformed_defaults_entry() {
     let err = render_policy_remux_payload(
         PolicyFileSource {
             file_version_id: FileVersionId(42),
-            location_id: None,
+            storage_root_id: StorageRootId(3),
+            location_id: FileLocationId(7),
         },
         &serde_json::json!({
             "type": "remux",

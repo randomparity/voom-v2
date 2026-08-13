@@ -26,7 +26,8 @@ use serde_json::Value as JsonValue;
 use sqlx::{SqliteConnection, SqlitePool};
 use time::OffsetDateTime;
 use voom_core::{
-    JobId, ProviderRelativeLocator, StorageRootId, TicketOperation, VoomError, WorkerId,
+    FileLocationId, FileVersionId, JobId, ProviderRelativeLocator, StorageRootId, TicketOperation,
+    VoomError, WorkerId,
 };
 
 use crate::init::init;
@@ -43,6 +44,8 @@ use crate::repo::execution::workers::{
 /// import a single source of truth instead of redeclaring it.
 pub const T0: OffsetDateTime = OffsetDateTime::UNIX_EPOCH;
 pub const TEST_STORAGE_ROOT_ID: StorageRootId = StorageRootId(9_000_001);
+pub const TEST_FILE_LOCATION_ID: FileLocationId = FileLocationId(9_000_001);
+pub const TEST_FILE_VERSION_ID: FileVersionId = FileVersionId(9_000_001);
 
 /// Seed one active storage root for repository tests whose subject is not root
 /// administration. The deliberately high stable ids avoid colliding with rows
@@ -84,6 +87,49 @@ pub async fn seed_test_storage_root(pool: &SqlitePool) -> Result<StorageRootId, 
     .await
     .map_err(|error| VoomError::database_context("seed test storage root", error))?;
     Ok(TEST_STORAGE_ROOT_ID)
+}
+
+/// Seed one live rooted file location on the shared test storage root.
+///
+/// Workflow tickets that touch bytes must name a real location, so a fixture
+/// whose subject is scheduling rather than identity needs one row to point at.
+/// Seeds the whole chain — asset, version, location — at stable high ids so it
+/// cannot collide with rows the repositories under test create.
+///
+/// # Errors
+///
+/// Returns a database error if the storage root or any identity row cannot be
+/// written.
+pub async fn seed_test_rooted_location(pool: &SqlitePool) -> Result<FileLocationId, VoomError> {
+    seed_test_storage_root(pool).await?;
+    sqlx::query(
+        "INSERT OR IGNORE INTO file_assets (id, created_at, retired_at, epoch) \
+         VALUES (9000001, '1970-01-01T00:00:00Z', NULL, 0)",
+    )
+    .execute(pool)
+    .await
+    .map_err(|error| VoomError::database_context("seed test file asset", error))?;
+    sqlx::query(
+        "INSERT OR IGNORE INTO file_versions \
+         (id, file_asset_id, content_hash, size_bytes, produced_by, \
+          produced_from_version_id, created_at, retired_at, epoch) \
+         VALUES (9000001, 9000001, 'blake3:workflow-fixture', 1024, 'ingest', NULL, \
+                 '1970-01-01T00:00:00Z', NULL, 0)",
+    )
+    .execute(pool)
+    .await
+    .map_err(|error| VoomError::database_context("seed test file version", error))?;
+    sqlx::query(
+        "INSERT OR IGNORE INTO file_locations \
+         (id, file_version_id, address_state, storage_root_id, provider_relative_locator, \
+          legacy_kind, legacy_locator, proof_kind, proof_value, observed_at, retired_at, epoch) \
+         VALUES (9000001, 9000001, 'rooted', 9000001, 'workflow-fixture.mkv', \
+                 NULL, NULL, NULL, NULL, '1970-01-01T00:00:00Z', NULL, 0)",
+    )
+    .execute(pool)
+    .await
+    .map_err(|error| VoomError::database_context("seed test file location", error))?;
+    Ok(TEST_FILE_LOCATION_ID)
 }
 
 /// Point the shared active test root at an isolated fixture directory.
@@ -430,8 +476,6 @@ impl WorkerBuilder {
 // actual filesystem-offline condition.
 
 use std::collections::BTreeSet;
-
-use voom_core::ids::{FileLocationId, FileVersionId};
 
 use crate::repo::media::commit_safety_gate::{AliasResolutionError, AliasResolver};
 
