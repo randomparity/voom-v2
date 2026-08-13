@@ -83,6 +83,18 @@ opens a `terminal_failure` issue (ADR 0018) at its terminal transition, but lost
 the same. Fold this into the ADR 0055 flag-day root-assignment and rescan procedure,
 which such a deployment already owes.
 
+The same drain covers a second break in the same release, and must be stated to,
+because the two have different symptoms. Ticket-kind normalization became strict
+(ADR 0068): a kind of the form `synthetic.workflow.operation.<suffix>` whose suffix
+is not a known operation is now rejected at lease acquisition, so such a ticket is
+permanently unleasable rather than merely undecodable. Drain those alongside the
+byte-touching ones. A lease already **held** on such a kind at the moment of the swap
+also stops counting toward its worker's `max_parallel`, because worker capacity now
+matches on the kind as stored instead of on a namespace-stripped form; that worker can
+be over-subscribed until those leases drain or expire. Both conditions end once the
+drain completes, and neither can recur afterwards, since no renderer emits an unknown
+suffix.
+
 **Rollback.** Restoring the pre-upgrade snapshot, as the general rule above says, is
 always safe and reverts everything. This change also permits a narrower option, because
 its new shape is confined to `tickets.payload` for every production row: quiesce, then fail or delete the byte-touching

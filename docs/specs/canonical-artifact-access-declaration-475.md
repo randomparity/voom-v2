@@ -482,10 +482,14 @@ source fails at render instead of producing an undeclared ticket. Those arms are
 only from the `#[cfg(test)]` demo plan, whose fixtures supply a synthetic source.
 
 The write intent is a `storage_root` entry rather than a `planned_artifact` entry because
-no artifact handle exists at render time; the target root is what is knowable, and it is
-what #476 needs to check ownership against. Selecting a distinct output root from the
-source root's `default_output_root_id` is `artifact_target_root`'s job at commit time and
-is out of scope here (#477 owns durable plans).
+no artifact handle exists at render time. **That entry names the source root, not the
+destination root.** An earlier draft of this paragraph said "the target root is what is
+knowable", which implied the opposite and was wrong: selecting a distinct output root
+from the source root's `default_output_root_id` is `artifact_target_root`'s job, and this
+slice does not do it. So when an operator has set `default_output_root_id` to a second
+root, the declared write names a root the ticket never writes and names nothing for the
+root it does. #484 owns closing that; #476 must not read the entry as a destination. See
+the ADR 0068 consequence of the same name for why it was not closed here.
 
 `insert_policy_file_source` (`binding.rs:323-331`) currently writes `source_location_id`
 only when `PolicyFileSource.location_id` is `Some`, which `resolve_policy_file_source`

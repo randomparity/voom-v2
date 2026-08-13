@@ -215,13 +215,33 @@ decode — where raising cannot spread.
   `source_location_id` and keep the dispatch-time resolution in
   `operation_source::select_location`, so that branch stays live and must not be deleted
   as dead.
+- **An output-producing operation declares `write` on the root it reads from, which is
+  not necessarily the root it writes to.** ADR 0055 resolves a destination as
+  `default_output_root_id.unwrap_or(source)`, and `artifact_target_root` implements it,
+  so whenever an operator has set that column to a second root the declared write names
+  a root the ticket never writes and names nothing for the root it does. This is a known
+  limitation of this slice, not an oversight: resolving the destination needs an
+  `effective_library_root` lookup, which is cheap on the root render path but not on the
+  expansion path, where `spec_for_branch` is deliberately synchronous and database-free.
+  Fixing only the root path would make root-rendered and expansion-rendered tickets make
+  different kinds of claim, which is worse than one uniform documented limitation. #484
+  owns closing it. Until it does, **#476 must not read the write entry as a
+  destination** — it names read locality, not write locality. The vocabulary is already
+  sufficient for the fix: two `storage_root` entries with distinct ids are canonical
+  today, so closing #484 adds an entry rather than a shape.
 - Variant and field declaration order in `ArtifactAccessTarget` is durable payload
   contract. Reordering either silently reclassifies every previously written declaration
   as non-canonical; `deny_unknown_fields` and `check-payload-deny-unknown.sh` give no
   signal, because no field is unknown and no attribute moved. A written rule would be
-  silently ignorable — the failure class ADR 0013 exists to stop — so a frozen
-  canonical-encoding fixture asserts the byte-exact encoding of a multi-entry,
-  multi-variant declaration, and any reorder turns red.
+  silently ignorable — the failure class ADR 0013 exists to stop — so two sibling
+  tests guard it, and it takes both. A frozen canonical-encoding fixture asserts the
+  encoding of a multi-entry, multi-variant declaration by **string** comparison, which
+  catches a variant reorder, a field reorder, and a tag rename; comparing `serde_json`
+  `Value`s would not, because the workspace enables `preserve_order` and `IndexMap`'s
+  `PartialEq` ignores key order. A second fixture holds two entries of the *same*
+  variant differing only in a later field, which is what pins the derived `Ord`: the
+  frozen fixture holds one entry per variant, so no comparison in it reaches past the
+  variant discriminant, and a within-variant field swap would leave it green.
 - Only `remux`, `transcode_video`, `transcode_audio`, `extract_audio`, and
   `verify_artifact` can reach a production ticket today: `policy_bridge::execution_operation`
   maps those five and errors on the rest, and the only other `WorkflowPlan` constructor is
