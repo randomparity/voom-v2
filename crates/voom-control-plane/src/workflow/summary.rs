@@ -172,11 +172,30 @@ impl WorkflowRunSummary {
         let mut branches = HashSet::new();
         let mut ticket_counts: BTreeMap<OperationKind, u64> = BTreeMap::new();
         for ticket in tickets {
-            let Ok(workflow_payload) =
-                WorkflowTicketPayload::parse_ticket(ticket.kind.as_str(), ticket.payload)
-            else {
-                continue;
-            };
+            let ticket_id = ticket.id;
+            let ticket_kind = ticket.kind.as_str().to_owned();
+            let workflow_payload =
+                match WorkflowTicketPayload::parse_ticket(ticket.kind.as_str(), ticket.payload) {
+                    Ok(payload) => payload,
+                    // Skipping is right — a payload this code cannot read tells it
+                    // nothing about branches or per-operation counts. Saying so is
+                    // also right: after the ADR 0068 payload break, an undrained
+                    // pre-upgrade byte-touching ticket lands here, and a ticket that
+                    // never leases never reaches the terminal transition that would
+                    // open an issue. Silence would leave an incomplete drain visible
+                    // nowhere, while under-reporting the very counts an operator
+                    // checks it against.
+                    Err(error) => {
+                        tracing::warn!(
+                            ticket_id = ticket_id.0,
+                            ticket_kind,
+                            %error,
+                            "workflow summary skipped a ticket whose payload did not decode; \
+                             branch and per-operation counts under-report by one"
+                        );
+                        continue;
+                    }
+                };
             if !is_synthetic_root_ticket(&workflow_payload) {
                 branches.insert(workflow_payload.branch_id);
             }

@@ -7,6 +7,7 @@ use time::OffsetDateTime;
 use voom_core::OperationKind;
 use voom_core::{
     FileLocationId, FileVersionId, JobId, StorageRootId, TicketId, TicketOperation, VoomError,
+    WORKFLOW_OPERATION_NAMESPACE,
 };
 use voom_events::payload::TicketCreatedPayload;
 use voom_events::{Event, SubjectType};
@@ -700,7 +701,7 @@ fn timing(ctx: &ExpansionContext<'_>, node_id: &str, branch_id: &str) -> Effecti
 
 fn ticket_kind(operation: OperationKind) -> Result<TicketOperation, VoomError> {
     TicketOperation::new(format!(
-        "synthetic.workflow.operation.{}",
+        "{WORKFLOW_OPERATION_NAMESPACE}{}",
         operation.as_str()
     ))
 }

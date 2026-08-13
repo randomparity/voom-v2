@@ -1586,3 +1586,18 @@ async fn insert_worker_with_missing_node(pool: &sqlx::SqlitePool) -> voom_core::
     .unwrap();
     voom_core::WorkerId(u64::try_from(res.last_insert_rowid()).unwrap())
 }
+
+/// The namespaced kind inside [`ACCELERATOR_ACTIVE_LEASES_SQL`] is a SQL string
+/// literal, so the compiler cannot tie it to [`WORKFLOW_OPERATION_NAMESPACE`].
+/// Without this, renaming the namespace would leave the query matching a kind no
+/// renderer emits — and the symptom is a silent undercount of held leases, which
+/// over-subscribes the device rather than failing.
+#[test]
+fn accelerator_sql_matches_the_namespace_constant() {
+    let expected = format!("'{WORKFLOW_OPERATION_NAMESPACE}transcode_video'");
+    assert!(
+        ACCELERATOR_ACTIVE_LEASES_SQL.contains(&expected),
+        "accelerator lease query does not match {WORKFLOW_OPERATION_NAMESPACE}: \
+         {ACCELERATOR_ACTIVE_LEASES_SQL}"
+    );
+}

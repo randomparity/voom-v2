@@ -446,8 +446,16 @@ fn advertised_access_modes<'a>(
 /// First synthetic file-location id a fake scan reports.
 ///
 /// Deliberately high so it cannot be mistaken for a row a repository test
-/// created. Nothing resolves these against the database — a scan result is
-/// routing evidence for the children it fans out to.
+/// created, and 100k clear of `voom-store`'s `TEST_FILE_LOCATION_ID` fixture band.
+///
+/// These ids name no `file_locations` row. That is sound only while nothing
+/// resolves them, which is true today — a scan result is routing evidence for the
+/// children it fans out to, and ADR 0068 grants a declaration no resolution — and
+/// stops being true at #476, which resolves a declaration to a storage owner. A
+/// fake-scanner-descended ticket will then fail resolution. Failing is the correct
+/// outcome for fabricated evidence, so the fix belongs with #476: either seed real
+/// rows for the fake flow, or have it assert the failure. Do not close that gap by
+/// making resolution tolerant of an id that names nothing.
 const FAKE_SCANNER_FIRST_LOCATION_ID: u64 = 9_100_001;
 
 fn scanner_files(

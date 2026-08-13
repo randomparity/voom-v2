@@ -7,12 +7,12 @@ use std::collections::HashSet;
 use serde_json::Value;
 use time::OffsetDateTime;
 use voom_core::OperationKind;
-use voom_core::{JobId, TicketOperation, VoomError};
+use voom_core::{JobId, TicketOperation, VoomError, WORKFLOW_OPERATION_NAMESPACE};
 use voom_store::repo::execution::tickets::{NewTicket, Ticket};
 use voom_store::repo::media::identity::{FileLocationRepo, FileVersionRepo};
 
 use crate::cases::{begin_immediate_tx, commit_tx};
-use crate::operation_source::select_location;
+use crate::operation_source::{require_live_rooted, select_location};
 use crate::workflow::execution::executor::{PlannedLineageGuard, WorkflowExecutor};
 use crate::workflow::execution::timing::{EffectiveTiming, seeded_timing};
 use crate::workflow::plan::access_declaration::{TicketStorageSource, declaration_for};
@@ -232,16 +232,20 @@ impl WorkflowExecutor {
 
     /// Resolve a node's policy target to the one live rooted location it names.
     ///
-    /// Both target shapes route through `select_location`, so a `FileVersion`
-    /// resolves to its single live rooted location and a `FileLocation` gains the
-    /// liveness and rooted-address checks it did not run before.
+    /// A `FileVersion` routes through `select_location`, which picks its single
+    /// live rooted location. A `FileLocation` names the row directly, so it is
+    /// read once and checked in place: routing it back through `select_location`
+    /// would re-read the same row to compare its `file_version_id` against a value
+    /// taken from that row.
     async fn resolve_policy_file_source(
         &self,
         target: &voom_plan::TargetRef,
         operation_name: &str,
     ) -> Result<PolicyFileSource, VoomError> {
-        let (file_version_id, requested_location) = match target {
-            voom_plan::TargetRef::FileVersion { id } => (*id, None),
+        let location = match target {
+            voom_plan::TargetRef::FileVersion { id } => {
+                select_location(&self.control_plane, *id, None).await?
+            }
             voom_plan::TargetRef::FileLocation { id } => {
                 let location = self
                     .control_plane
@@ -249,7 +253,8 @@ impl WorkflowExecutor {
                     .get_file_location(*id)
                     .await?
                     .ok_or_else(|| VoomError::NotFound(format!("file_location {id}")))?;
-                (location.file_version_id, Some(*id))
+                require_live_rooted(&location)?;
+                location
             }
             other => {
                 return Err(VoomError::Config(format!(
@@ -257,14 +262,12 @@ impl WorkflowExecutor {
                 )));
             }
         };
-        let location =
-            select_location(&self.control_plane, file_version_id, requested_location).await?;
-        // `require_live_rooted_location` has already rejected a non-rooted
-        // address, so this arm is unreachable — propagated rather than expected,
-        // because that is an argument about callers, not a type-level guarantee.
+        // Both arms have already rejected a non-rooted address, so this arm is
+        // unreachable — propagated rather than expected, because that is an
+        // argument about callers, not a type-level guarantee.
         let (storage_root_id, _) = location.rooted_address()?;
         Ok(PolicyFileSource {
-            file_version_id,
+            file_version_id: location.file_version_id,
             storage_root_id,
             location_id: location.id,
         })
@@ -286,7 +289,7 @@ pub(super) fn parse_payload(ticket: &Ticket) -> Result<WorkflowTicketPayload, Vo
 
 fn ticket_kind(operation: OperationKind) -> Result<TicketOperation, VoomError> {
     TicketOperation::new(format!(
-        "synthetic.workflow.operation.{}",
+        "{WORKFLOW_OPERATION_NAMESPACE}{}",
         operation.as_str()
     ))
 }
