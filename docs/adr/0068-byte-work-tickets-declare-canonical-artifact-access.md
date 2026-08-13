@@ -208,13 +208,27 @@ decode — where raising cannot spread.
 - The declaration lives inside the durable `tickets.payload` column, so it joins the ADR
   0013 payload contract: its structs are listed in
   `docs/payload-contract-inventory.md` and `scripts/payload-contract-scope.txt`.
-- Rendering a byte-touching ticket resolves its policy target to exactly one live rooted
-  location, so a file version with zero or several live rooted locations fails closed at
-  render time instead of at dispatch. For **workflow-rendered tickets** source resolution
-  now has one point, not two; CLI- and API-initiated operations still pass an optional
+- Rendering a ticket resolves its policy target to exactly one live rooted location, so a
+  file version with zero or several live rooted locations fails closed at render time
+  instead of at dispatch. For **workflow-rendered tickets** source resolution now has one
+  point, not two; CLI- and API-initiated operations still pass an optional
   `source_location_id` and keep the dispatch-time resolution in
   `operation_source::select_location`, so that branch stays live and must not be deleted
   as dead.
+
+  Resolution is keyed on the node **having** a policy target, not on its operation being
+  byte-touching: a non-byte-touching node's payload is what its byte-touching children
+  thread a source from, so skipping it there would strand them. The cost is that a target
+  naming no file — `MediaWork`, `MediaVariant`, `AssetBundle`, `FileAsset`, `Synthetic` —
+  now fails ticket render for any operation, where before only the five policy-rendered
+  byte-touching arms resolved at all. That is unreachable today and deliberately not
+  guarded: `policy_bridge::execution_operation` admits exactly five operations, all
+  byte-touching and all already requiring a `FileVersion` or `FileLocation` target, and it
+  is the only production `WorkflowPlan` constructor. Nothing in the types encodes that
+  coupling, and `WorkflowPlan::validate` does not check it, so a sixth operation or a
+  second constructor would surface the gap as a run-time render failure rather than a
+  validation error. Adding the check now would be a guard for a plan shape no producer
+  can emit; the coupling is recorded here instead.
 - **An output-producing operation declares `write` on the root it reads from, which is
   not necessarily the root it writes to.** ADR 0055 resolves a destination as
   `default_output_root_id.unwrap_or(source)`, and `artifact_target_root` implements it,
@@ -272,8 +286,11 @@ decode — where raising cannot spread.
   operation — and quiesce ticket creation first, because the binary performing the drain is
   the one still rendering old-shape tickets, so a drain run against a live writer leaves
   everything rendered in the window between drain and swap undecodable. Skipping the step is
-  loud — each such ticket opens a `terminal_failure` issue per ADR 0018 at its terminal
-  transition — but loud is not the same as recovered.
+  loud, but not per ticket: the ready-batch loop skips an undecodable ticket and dispatches
+  its well-formed siblings, then fails the run naming the ticket ids once nothing
+  dispatchable remains. Such a ticket never leases, so it never reaches a terminal
+  transition and opens no `terminal_failure` issue (ADR 0018) — #486 owns giving it a
+  lease-free terminal path. Loud is not the same as recovered either way.
 - Rollback is the mirror image and is the harder direction, because it is already an
   incident. ADR 0013's blanket remedy is to restore the pre-upgrade database snapshot, and
   that remains the safe default. This change narrows it deliberately: the new shape is

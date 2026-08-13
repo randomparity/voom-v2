@@ -650,9 +650,19 @@ fail per ticket and need no change. The other three do not:
   batch-scoped hazard ADR 0068 argues against at `remote_acquire_candidates_in_tx`, and this
   change is what makes decode failures newly possible there — so it is ours to contain. The
   loop **skips** an undecodable ticket and records it, exactly as the acquisition candidate
-  loop scores rather than raises. Without this, skipping the upgrade drain produces a stall
-  rather than the per-ticket `terminal_failure` issues ADR 0068, this spec, and
-  `docs/release-process.md` all describe as "loud".
+  loop scores rather than raises.
+
+  Skipping alone does not terminate, which this spec originally missed: an undecodable
+  ticket stays `ready`, so `workflow_idle_state` keeps reporting `Ready`,
+  `wait_or_fail_idle` keeps returning `Ok`, and the run spins on a batch that filters to
+  empty — trading a loud abort for a livelock. So the loop skips while anything else can
+  dispatch, and raises naming the undecodable ticket ids once nothing dispatchable
+  remains. Well-formed siblings therefore complete, and the run still stops.
+
+  What this does **not** deliver is the per-ticket `terminal_failure` issue ADR 0068, this
+  spec, and `docs/release-process.md` each described as the "loud" outcome. Such a ticket
+  never leases, so it never reaches a terminal transition; a lease-free terminal path is
+  #486's. All three documents now describe the run-scoped failure that actually ships.
 
 - `workflow/summary.rs:175-179` uses `let Ok(payload) = … else { continue; }`, so an
   undecodable ticket vanishes from `branch_count` and `per_operation[..].ticket_count` while
@@ -769,9 +779,11 @@ The upgrade step is therefore: quiesce workflow ticket creation, then fail or de
 unfinished workflow ticket whose kind names a byte-touching operation, then swap the binary.
 Quiescing first is load-bearing — the binary running the drain is the one still rendering
 old-shape tickets, so draining against a live writer leaves everything rendered in the
-window between drain and swap undecodable. Each ticket that instead reaches a terminal
-transition opens a `terminal_failure` issue (ADR 0018, deduped per ticket), so the loss is
-loud, but loud is not recovered. The step folds into ADR 0055's flag-day root-assignment and
+window between drain and swap undecodable. An undrained ticket is loud at the granularity
+of the run, not the ticket: its well-formed siblings dispatch, then the run fails naming
+the ticket ids to drain. It opens no `terminal_failure` issue (ADR 0018), because it never
+leases and so never reaches a terminal transition — #486 owns that path. Loud is not
+recovered either way. The step folds into ADR 0055's flag-day root-assignment and
 rescan procedure, which such a deployment already owes.
 
 **No shipped command performs either half of that step today.** `TicketCommand`

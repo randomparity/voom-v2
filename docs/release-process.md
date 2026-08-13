@@ -78,10 +78,23 @@ control. Quiescing first is load-bearing: the binary performing the drain is the
 rendering old-shape tickets, so draining against a live writer leaves everything
 rendered between the drain and the swap undecodable. A ticket rendered after migration
 0034 references a live rooted location and dispatches normally today, so skipping the
-step loses completable work rather than delaying it — loudly, since each such ticket
-opens a `terminal_failure` issue (ADR 0018) at its terminal transition, but lost all
-the same. Fold this into the ADR 0055 flag-day root-assignment and rescan procedure,
-which such a deployment already owes.
+step loses completable work rather than delaying it.
+
+**What skipping the drain actually looks like.** An undrained byte-touching ticket does
+not stop its siblings: the dispatch loop skips a ticket whose payload does not decode,
+logs it, and dispatches the rest of the batch. The workflow makes all the progress it
+can. It then fails once nothing dispatchable remains, with an error naming the ticket
+ids to drain (`executor/expansion.rs::ready_workflow_tickets`). Raising there is
+deliberate — an undecodable ticket stays `ready` forever, so skipping alone would leave
+the run spinning on a batch that filters to empty.
+
+The signal is therefore the run's failure, attributed to the run and naming the tickets;
+it is **not** a per-ticket `terminal_failure` issue (ADR 0018). Such a ticket never
+leases, so it never reaches the terminal transition that would open one. Issue #486
+tracks giving it a terminal failure path that does not require a lease. Until that
+lands, a partially drained deployment finishes what it can and then stops, once per
+affected workflow. Fold the drain into the ADR 0055 flag-day root-assignment and rescan
+procedure, which such a deployment already owes.
 
 The same drain covers a second break in the same release, and must be stated to,
 because the two have different symptoms. Ticket-kind normalization became strict

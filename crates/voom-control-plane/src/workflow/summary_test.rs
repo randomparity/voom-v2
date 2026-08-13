@@ -76,3 +76,81 @@ async fn refresh_counts_fails_loudly_when_the_pool_is_closed() {
 
     assert!(result.is_err());
 }
+
+/// Pins what an undecodable payload costs a summary, so a later change to it is
+/// deliberate. After the ADR 0068 payload break this is the shape of a completed
+/// pre-upgrade byte-touching row, which the upgrade drain does not cover — the
+/// drain names *unfinished* tickets — so such a row is skipped here forever.
+///
+/// The two counts disagree by design: `ticket_count` is taken from the row count
+/// before any payload is read, while `branch_count` and the per-operation totals
+/// are built by decoding. Recording the inconsistency beats papering over it with
+/// an in-memory counter, which would leave the durable summary row exactly as
+/// inconsistent while adding a `merge_invocation` rule a later resume can get wrong.
+#[tokio::test]
+async fn an_undecodable_ticket_is_counted_in_the_total_and_missing_from_per_operation() {
+    let (control, _db) = crate::cases::cp().await;
+    sqlx::query(
+        "INSERT INTO jobs (id, kind, state, priority, created_at, updated_at) \
+         VALUES (73, 'workflow', 'open', 0, '2026-01-01T00:00:00Z', \
+                 '2026-01-01T00:00:00Z')",
+    )
+    .execute(&control.pool)
+    .await
+    .unwrap();
+    let decodable = crate::workflow::plan::ticket_payload::WorkflowTicketPayload::new_for_test(
+        "wf-73",
+        "plan-73",
+        "node-a",
+        "branch-a",
+        OperationKind::IdentifyMedia,
+        serde_json::json!({}),
+    )
+    .to_ticket_payload()
+    .unwrap()
+    .to_string();
+    sqlx::query(
+        "INSERT INTO tickets \
+         (id, job_id, kind, state, payload, attempt, max_attempts, next_eligible_at, \
+          created_at, state_changed_at) VALUES \
+         (93, 73, 'synthetic.workflow.operation.identify_media', 'succeeded', ?, 1, 1, \
+          '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', '2026-01-01T00:00:10Z')",
+    )
+    .bind(&decodable)
+    .execute(&control.pool)
+    .await
+    .unwrap();
+    // A pre-upgrade row: same kind, payload without the declaration this release
+    // made required.
+    sqlx::query(
+        "INSERT INTO tickets \
+         (id, job_id, kind, state, payload, attempt, max_attempts, next_eligible_at, \
+          created_at, state_changed_at) VALUES \
+         (94, 73, 'synthetic.workflow.operation.identify_media', 'succeeded', '{}', 1, 1, \
+          '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', '2026-01-01T00:00:10Z')",
+    )
+    .execute(&control.pool)
+    .await
+    .unwrap();
+
+    let mut summary = WorkflowRunSummary::empty(JobId(73), Duration::from_secs(3));
+    summary
+        .refresh_counts(
+            &control.tickets,
+            &control.leases,
+            JobId(73),
+            Duration::from_secs(3),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(summary.ticket_count, 2, "the raw row count includes both");
+    assert_eq!(
+        summary
+            .per_operation
+            .get(&OperationKind::IdentifyMedia)
+            .map(|operation| operation.ticket_count),
+        Some(1),
+        "only the decodable ticket reaches the per-operation total"
+    );
+}
