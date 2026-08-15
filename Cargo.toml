@@ -59,8 +59,8 @@ voom-mkvtoolnix-worker = { version = "0.1.0-dev", path = "crates/voom-mkvtoolnix
 # features common to every consumer; member crates add crate-specific
 # features via `{ workspace = true, features = ["..."] }`.
 axum-server = { version = "0.8.0", features = ["tls-rustls-no-provider"] }
-base64 = "0.22.1"
-clap = { version = "=4.6.2", features = ["derive", "env"] }
+base64 = "0.23.1"
+clap = { version = "=4.6.6", features = ["derive", "env"] }
 hex = "0.4.3"
 rand = { version = "0.9.4", default-features = false, features = ["os_rng", "std", "std_rng"] }
 rcgen = { version = "0.14.8", default-features = false, features = ["pem", "ring"] }
@@ -74,7 +74,7 @@ tempfile = "3.27.0"
 time = { version = "0.3.45", features = ["formatting"] }
 tokio = { version = "1.52.3", default-features = false }
 tokio-rustls = { version = "0.26.4", default-features = false, features = ["ring", "tls12"] }
-tower-http = { version = "0.6.11", features = ["limit", "timeout"] }
+tower-http = { version = "0.7.0", features = ["limit", "timeout"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt", "json"] }
 
@@ -82,7 +82,7 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt", "jso
 async-trait = "0.1.89"
 blake3 = "1.5"
 bytes = "1.7"
-constant_time_eq = "0.4.2"
+constant_time_eq = "0.5.0"
 http = "1.4"
 http-body = "1"
 http-body-util = "0.1"
