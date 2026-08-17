@@ -13,11 +13,13 @@ use support::observed_state::{
 };
 use support::policy_seed::seed_transcode_policy_from_scan;
 use support::voom_cli::{VoomOutput, VoomTestDb, run_voom};
+use voom_core::StorageRootId;
 
 struct ScannedChaosRun {
     run: ChaosRun,
     db: VoomTestDb,
     scan: VoomOutput,
+    root_id: StorageRootId,
 }
 
 #[test]
@@ -137,7 +139,7 @@ fn chaos_run_scan_root_uses_fixture_library_directory() {
 #[ignore = "run with just chaos-e2e-ci; requires Chaos Librarian media tools"]
 async fn static_library_baseline_scans_exports_and_compares() {
     let chaos = ready_chaos();
-    let ScannedChaosRun { run, db, scan } =
+    let ScannedChaosRun { run, db, scan, .. } =
         scan_materialized_scenario(&chaos, &chaos.upstream_scenario("static-library.yaml")).await;
     assert_eq!(scan.status_code, Some(0), "stderr: {}", scan.stderr);
     assert_eq!(scan.json["status"], "ok");
@@ -184,7 +186,12 @@ async fn policy_seed_creates_durable_ids_from_scan_envelope() {
 #[ignore = "run with just chaos-e2e-ci; requires Chaos Librarian media tools"]
 async fn transcode_required_executes_real_worker_and_commits_hevc_mkv() {
     let chaos = ready_chaos();
-    let ScannedChaosRun { run, db, scan } = scan_materialized_scenario(
+    let ScannedChaosRun {
+        run,
+        db,
+        scan,
+        root_id,
+    } = scan_materialized_scenario(
         &chaos,
         &chaos.upstream_scenario("voom-ci/h264-transcode-candidate.yaml"),
     )
@@ -219,8 +226,15 @@ async fn transcode_required_executes_real_worker_and_commits_hevc_mkv() {
     let mut worker = support::voom_cli::TranscodeWorkerLaunch::start(&cp)
         .await
         .unwrap();
-    let stage = run.run_dir.join("voom-stage");
-    let out = run.run_dir.join("voom-output");
+    // Every phase commits its artifact into `<staging-root>/.committed/...`
+    // and only the terminal artifact is promoted to `--output-dir` after the
+    // run. ADR 0055 requires that commit target to sit inside the source
+    // root's configured output root, so the run's staging and output
+    // directories both live inside one registered root.
+    let work = run.run_dir.join("voom-work");
+    db.configure_output_root(root_id, &work).await.unwrap();
+    let stage = work.join("stage");
+    let out = work.join("out");
     let execute = run_voom(
         &db.url,
         [
@@ -484,12 +498,13 @@ async fn scan_materialized_scenario(chaos: &ChaosLibrarian, scenario: &Path) -> 
     let run = chaos.materialize(scenario).unwrap();
     let db = VoomTestDb::init().await.unwrap();
     let library_path = run.scan_root();
-    let root_id = db
-        .configure_local_root(&library_path)
-        .await
-        .unwrap()
-        .0
-        .to_string();
-    let scan = run_voom(&db.url, ["scan", "--root", root_id.as_str()]).unwrap();
-    ScannedChaosRun { run, db, scan }
+    let root_id = db.configure_local_root(&library_path).await.unwrap();
+    let root_arg = root_id.0.to_string();
+    let scan = run_voom(&db.url, ["scan", "--root", root_arg.as_str()]).unwrap();
+    ScannedChaosRun {
+        run,
+        db,
+        scan,
+        root_id,
+    }
 }
