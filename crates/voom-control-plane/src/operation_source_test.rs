@@ -131,3 +131,45 @@ async fn configured_root_alias_resolves_but_descendant_symlink_is_rejected() {
     assert_eq!(error.code(), "CONFIG_INVALID");
     assert!(error.to_string().contains("must not traverse a symlink"));
 }
+
+/// `require_contained` is the guard that rejects a commit target outside its
+/// storage root. Nothing else in the workspace asserts its rejection branch, so
+/// a change that let it pass unconditionally would only surface when a caller
+/// happened to misconfigure a root — which is how issue #491 reached a weekly
+/// scheduled run instead of `just ci`.
+#[tokio::test]
+async fn artifact_target_rejects_a_target_outside_the_resolved_root() {
+    let (cp, _db) = crate::cases::cp().await;
+    let root_dir = tempfile::tempdir().unwrap();
+    let outside_dir = tempfile::tempdir().unwrap();
+    let library_id = library(&cp, "contained-target").await;
+    let root = cp
+        .create_library_root(root_input(library_id, root_dir.path()))
+        .await
+        .unwrap();
+    cp.activate_library_root(root.id, "contained-target".to_owned())
+        .await
+        .unwrap();
+
+    let error = resolve_artifact_target(
+        &cp,
+        "test artifact",
+        root.id,
+        &outside_dir.path().join("output.mkv"),
+    )
+    .await
+    .unwrap_err();
+
+    // Assert the exact `require_contained` message, not just "escaped storage
+    // root": `rooted_target_address` also rejects an escape when `strip_prefix`
+    // fails, with "target escaped ...". A substring check passes on that
+    // fallback too, so it would not notice `require_contained` being disabled.
+    assert_eq!(error.code(), "CONFIG_INVALID");
+    assert_eq!(
+        error.to_string(),
+        format!(
+            "config error: test artifact path escaped storage root {}",
+            root.id
+        )
+    );
+}
