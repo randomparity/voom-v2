@@ -13,7 +13,8 @@ use support::observed_state::{
 };
 use support::policy_seed::seed_transcode_policy_from_scan;
 use support::voom_cli::{VoomOutput, VoomTestDb, run_voom};
-use voom_core::StorageRootId;
+use voom_core::{FileVersionId, StorageRootId};
+use voom_store::repo::media::identity::{FileLocationRepo, SqliteIdentityRepo};
 
 struct ScannedChaosRun {
     run: ChaosRun,
@@ -232,7 +233,7 @@ async fn transcode_required_executes_real_worker_and_commits_hevc_mkv() {
     // root's configured output root, so the run's staging and output
     // directories both live inside one registered root.
     let work = run.run_dir.join("voom-work");
-    db.configure_output_root(root_id, &work).await.unwrap();
+    let output_root_id = db.configure_output_root(root_id, &work).await.unwrap();
     let stage = work.join("stage");
     let out = work.join("out");
     let execute = run_voom(
@@ -270,6 +271,22 @@ async fn transcode_required_executes_real_worker_and_commits_hevc_mkv() {
     assert!(file_phase["reprobe_snapshot_id"].as_u64().unwrap() > 0);
     let produced = first_file_with_extension(&out, "mkv").unwrap();
     assert!(produced.is_file());
+
+    // The bytes landing under `out` do not prove which root the commit was
+    // recorded against: `artifact_target_root` falls back to the source root
+    // when `default_output_root_id` is absent, and the file would still be
+    // there. Assert the rooted address ADR 0055 governs, so a regression in
+    // output-root selection fails here instead of in a later weekly run.
+    let produced_version_id =
+        FileVersionId(file_phase["produced_file_version_id"].as_u64().unwrap());
+    let identity = SqliteIdentityRepo::new(voom_store::connect(&db.url).await.unwrap());
+    let locations = identity
+        .list_live_file_locations_by_version(produced_version_id)
+        .await
+        .unwrap();
+    assert_eq!(locations.len(), 1, "locations: {locations:?}");
+    let (recorded_root_id, _) = locations[0].rooted_address().unwrap();
+    assert_eq!(recorded_root_id, output_root_id);
 }
 
 #[tokio::test]

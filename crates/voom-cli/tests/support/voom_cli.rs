@@ -54,18 +54,22 @@ impl VoomTestDb {
     }
 
     /// Register `path` as an active output root of `source_root_id`'s library
-    /// and make it that root's default output root.
+    /// and make it that root's default output root. Returns the new root id.
     ///
     /// ADR 0055 requires an artifact commit target to sit inside the source
     /// root's configured output root, and inside the source root itself when
-    /// none is configured. An operator therefore registers the output
-    /// directory as its own root instead of writing artifacts back into the
-    /// library that was scanned.
+    /// none is configured.
+    ///
+    /// This registers and activates the root through `ControlPlane` APIs.
+    /// That is a harness seam, not an operator flow: activation is reserved
+    /// for the authenticated owner-agent contract and no operator surface
+    /// exposes it. Issue #436 owns replacing this with an agent-owned
+    /// acceptance bootstrap.
     pub async fn configure_output_root(
         &self,
         source_root_id: StorageRootId,
         path: &Path,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<StorageRootId, Box<dyn std::error::Error>> {
         std::fs::create_dir_all(path)?;
         let cp = self.control_plane().await?;
         let source = cp
@@ -111,7 +115,7 @@ impl VoomTestDb {
             },
         )
         .await?;
-        Ok(())
+        Ok(output.id)
     }
 }
 
