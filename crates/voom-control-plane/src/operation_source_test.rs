@@ -145,8 +145,13 @@ async fn configured_root_alias_resolves_but_descendant_symlink_is_rejected() {
 async fn artifact_target_rejects_a_target_outside_the_resolved_root() {
     let (cp, _db) = crate::cases::cp().await;
     let parent = tempfile::tempdir().unwrap();
-    let root_dir = parent.path().join("root");
-    let outside_dir = parent.path().join("root-outside");
+    // Canonicalize before joining: the symlink guard walks the target's
+    // ancestors, and on macOS the temp directory sits under `/var`, which is a
+    // symlink to `/private/var`. Without this the guard rejects the path for
+    // traversing a symlink before the containment check ever runs.
+    let base = parent.path().canonicalize().unwrap();
+    let root_dir = base.join("root");
+    let outside_dir = base.join("root-outside");
     std::fs::create_dir(&root_dir).unwrap();
     std::fs::create_dir(&outside_dir).unwrap();
     let library_id = library(&cp, "contained-target").await;
