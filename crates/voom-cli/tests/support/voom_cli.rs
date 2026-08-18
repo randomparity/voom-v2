@@ -9,6 +9,10 @@ use std::process::{Command, Output};
 
 use serde_json::Value;
 use voom_control_plane::ControlPlane;
+use voom_core::{ProviderLocator, StorageProviderKind, StorageRootId};
+use voom_store::repo::library::library_roots::{
+    HiddenFilePolicy, LibraryRootUpdate, LibraryScanMode, NewLibraryRoot, SymlinkPolicy,
+};
 use voom_test_support::TempDatabase;
 use voom_test_support::worker::{TestWorkerConfig, TestWorkerLaunch, target_debug_binary};
 
@@ -42,11 +46,76 @@ impl VoomTestDb {
     pub async fn configure_local_root(
         &self,
         path: &Path,
-    ) -> Result<voom_core::StorageRootId, Box<dyn std::error::Error>> {
+    ) -> Result<StorageRootId, Box<dyn std::error::Error>> {
         let pool = voom_store::connect(&self.url).await?;
         let root_id = voom_store::test_support::seed_test_storage_root(&pool).await?;
         voom_store::test_support::set_test_storage_root_path(&pool, path).await?;
         Ok(root_id)
+    }
+
+    /// Register `path` as an active output root of `source_root_id`'s library
+    /// and make it that root's default output root. Returns the new root id.
+    ///
+    /// ADR 0055 requires an artifact commit target to sit inside the source
+    /// root's configured output root, and inside the source root itself when
+    /// none is configured.
+    ///
+    /// This registers and activates the root through `ControlPlane` APIs.
+    /// That is a harness seam, not an operator flow: activation is reserved
+    /// for the authenticated owner-agent contract and no operator surface
+    /// exposes it. Issue #436 owns replacing this with an agent-owned
+    /// acceptance bootstrap.
+    pub async fn configure_output_root(
+        &self,
+        source_root_id: StorageRootId,
+        path: &Path,
+    ) -> Result<StorageRootId, Box<dyn std::error::Error>> {
+        std::fs::create_dir_all(path)?;
+        let cp = self.control_plane().await?;
+        let source = cp
+            .get_library_root(source_root_id)
+            .await?
+            .ok_or_else(|| format!("source root {source_root_id} does not exist"))?;
+        let owner_node_id = source
+            .owner_node_id
+            .ok_or_else(|| format!("source root {source_root_id} has no owner node"))?;
+        let locator = path
+            .to_str()
+            .ok_or_else(|| format!("output root path is not UTF-8: {}", path.display()))?
+            .to_owned();
+        let output = cp
+            .create_library_root(NewLibraryRoot {
+                library_id: source.library_id,
+                owner_node_id,
+                provider_kind: StorageProviderKind::LocalFilesystem,
+                provider_locator: ProviderLocator::new(locator.clone())?,
+                display_locator: locator,
+                include_globs: Vec::new(),
+                exclude_globs: Vec::new(),
+                extension_allowlist: Vec::new(),
+                scan_mode: LibraryScanMode::ManualRecursive,
+                symlink_policy: SymlinkPolicy::Reject,
+                hidden_file_policy: HiddenFilePolicy::Ignore,
+                max_depth: None,
+                stability_seconds: 0,
+                debounce_seconds: 0,
+                default_output_root_id: None,
+                default_staging_root_id: None,
+                default_backup_root_id: None,
+                enabled: true,
+            })
+            .await?;
+        cp.activate_library_root(output.id, "chaos-librarian-output".to_owned())
+            .await?;
+        cp.update_library_root(
+            source_root_id,
+            LibraryRootUpdate {
+                default_output_root_id: Some(Some(output.id)),
+                ..LibraryRootUpdate::default()
+            },
+        )
+        .await?;
+        Ok(output.id)
     }
 }
 

@@ -13,11 +13,14 @@ use support::observed_state::{
 };
 use support::policy_seed::seed_transcode_policy_from_scan;
 use support::voom_cli::{VoomOutput, VoomTestDb, run_voom};
+use voom_core::{FileVersionId, StorageRootId};
+use voom_store::repo::media::identity::{FileLocationRepo, SqliteIdentityRepo};
 
 struct ScannedChaosRun {
     run: ChaosRun,
     db: VoomTestDb,
     scan: VoomOutput,
+    root_id: StorageRootId,
 }
 
 #[test]
@@ -137,7 +140,7 @@ fn chaos_run_scan_root_uses_fixture_library_directory() {
 #[ignore = "run with just chaos-e2e-ci; requires Chaos Librarian media tools"]
 async fn static_library_baseline_scans_exports_and_compares() {
     let chaos = ready_chaos();
-    let ScannedChaosRun { run, db, scan } =
+    let ScannedChaosRun { run, db, scan, .. } =
         scan_materialized_scenario(&chaos, &chaos.upstream_scenario("static-library.yaml")).await;
     assert_eq!(scan.status_code, Some(0), "stderr: {}", scan.stderr);
     assert_eq!(scan.json["status"], "ok");
@@ -184,7 +187,12 @@ async fn policy_seed_creates_durable_ids_from_scan_envelope() {
 #[ignore = "run with just chaos-e2e-ci; requires Chaos Librarian media tools"]
 async fn transcode_required_executes_real_worker_and_commits_hevc_mkv() {
     let chaos = ready_chaos();
-    let ScannedChaosRun { run, db, scan } = scan_materialized_scenario(
+    let ScannedChaosRun {
+        run,
+        db,
+        scan,
+        root_id,
+    } = scan_materialized_scenario(
         &chaos,
         &chaos.upstream_scenario("voom-ci/h264-transcode-candidate.yaml"),
     )
@@ -219,8 +227,15 @@ async fn transcode_required_executes_real_worker_and_commits_hevc_mkv() {
     let mut worker = support::voom_cli::TranscodeWorkerLaunch::start(&cp)
         .await
         .unwrap();
-    let stage = run.run_dir.join("voom-stage");
-    let out = run.run_dir.join("voom-output");
+    // Every phase commits its artifact into `<staging-root>/.committed/...`
+    // and only the terminal artifact is promoted to `--output-dir` after the
+    // run. ADR 0055 requires that commit target to sit inside the source
+    // root's configured output root, so the run's staging and output
+    // directories both live inside one registered root.
+    let work = run.run_dir.join("voom-work");
+    let output_root_id = db.configure_output_root(root_id, &work).await.unwrap();
+    let stage = work.join("stage");
+    let out = work.join("out");
     let execute = run_voom(
         &db.url,
         [
@@ -256,6 +271,31 @@ async fn transcode_required_executes_real_worker_and_commits_hevc_mkv() {
     assert!(file_phase["reprobe_snapshot_id"].as_u64().unwrap() > 0);
     let produced = first_file_with_extension(&out, "mkv").unwrap();
     assert!(produced.is_file());
+
+    // The bytes landing under `out` do not prove what the database recorded:
+    // `artifact_target_root` falls back to the source root when
+    // `default_output_root_id` is absent, and the file would still be there.
+    // Assert both halves of the rooted address ADR 0055 governs. The locator
+    // half matters on its own: promotion moves the bytes out of
+    // `<stage>/.committed/` and rewrites the address, and both paths sit under
+    // the same root here, so the root id alone cannot catch a locator left
+    // pointing at the pre-promotion path.
+    let produced_version_id =
+        FileVersionId(file_phase["produced_file_version_id"].as_u64().unwrap());
+    // `ControlPlane::identity()` is gated on voom-control-plane's `test`
+    // feature, which this crate does not enable, so read through a store repo.
+    let identity = SqliteIdentityRepo::new(voom_store::connect(&db.url).await.unwrap());
+    let locations = identity
+        .list_live_file_locations_by_version(produced_version_id)
+        .await
+        .unwrap();
+    assert_eq!(locations.len(), 1, "locations: {locations:?}");
+    let (recorded_root_id, recorded_locator) = locations[0].rooted_address().unwrap();
+    assert_eq!(recorded_root_id, output_root_id);
+    assert_eq!(
+        recorded_locator.as_str(),
+        format!("out/{}", produced.file_name().unwrap().to_str().unwrap())
+    );
 }
 
 #[tokio::test]
@@ -484,12 +524,13 @@ async fn scan_materialized_scenario(chaos: &ChaosLibrarian, scenario: &Path) -> 
     let run = chaos.materialize(scenario).unwrap();
     let db = VoomTestDb::init().await.unwrap();
     let library_path = run.scan_root();
-    let root_id = db
-        .configure_local_root(&library_path)
-        .await
-        .unwrap()
-        .0
-        .to_string();
-    let scan = run_voom(&db.url, ["scan", "--root", root_id.as_str()]).unwrap();
-    ScannedChaosRun { run, db, scan }
+    let root_id = db.configure_local_root(&library_path).await.unwrap();
+    let root_arg = root_id.0.to_string();
+    let scan = run_voom(&db.url, ["scan", "--root", root_arg.as_str()]).unwrap();
+    ScannedChaosRun {
+        run,
+        db,
+        scan,
+        root_id,
+    }
 }
