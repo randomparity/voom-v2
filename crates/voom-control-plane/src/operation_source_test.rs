@@ -134,17 +134,24 @@ async fn configured_root_alias_resolves_but_descendant_symlink_is_rejected() {
 
 /// `require_contained` is the guard that rejects a commit target outside its
 /// storage root. Nothing else in the workspace asserts its rejection branch, so
-/// a change that let it pass unconditionally would only surface when a caller
-/// happened to misconfigure a root — which is how issue #491 reached a weekly
-/// scheduled run instead of `just ci`.
+/// a change that let it pass unconditionally would surface only in a run that
+/// misconfigures a root. Issue #491 showed that such runs happen only in the
+/// weekly `chaos-e2e` job, which is `#[ignore]`-gated out of `just ci`.
+///
+/// The escape target is a textual-prefix sibling of the root, not an unrelated
+/// directory, so this also fails if the component-wise `starts_with` check is
+/// ever replaced by a string prefix comparison.
 #[tokio::test]
 async fn artifact_target_rejects_a_target_outside_the_resolved_root() {
     let (cp, _db) = crate::cases::cp().await;
-    let root_dir = tempfile::tempdir().unwrap();
-    let outside_dir = tempfile::tempdir().unwrap();
+    let parent = tempfile::tempdir().unwrap();
+    let root_dir = parent.path().join("root");
+    let outside_dir = parent.path().join("root-outside");
+    std::fs::create_dir(&root_dir).unwrap();
+    std::fs::create_dir(&outside_dir).unwrap();
     let library_id = library(&cp, "contained-target").await;
     let root = cp
-        .create_library_root(root_input(library_id, root_dir.path()))
+        .create_library_root(root_input(library_id, &root_dir))
         .await
         .unwrap();
     cp.activate_library_root(root.id, "contained-target".to_owned())
@@ -155,21 +162,20 @@ async fn artifact_target_rejects_a_target_outside_the_resolved_root() {
         &cp,
         "test artifact",
         root.id,
-        &outside_dir.path().join("output.mkv"),
+        &outside_dir.join("output.mkv"),
     )
     .await
     .unwrap_err();
 
-    // Assert the exact `require_contained` message, not just "escaped storage
-    // root": `rooted_target_address` also rejects an escape when `strip_prefix`
-    // fails, with "target escaped ...". A substring check passes on that
-    // fallback too, so it would not notice `require_contained` being disabled.
+    // Discriminate on "path escaped", not on "escaped storage root":
+    // `rooted_target_address` rejects an escape a second time when
+    // `strip_prefix` fails, with "target escaped ...", so the looser substring
+    // would not notice `require_contained` being disabled. Match a substring
+    // rather than the whole rendered string, so the message can later name the
+    // rejected path without editing this test.
     assert_eq!(error.code(), "CONFIG_INVALID");
-    assert_eq!(
-        error.to_string(),
-        format!(
-            "config error: test artifact path escaped storage root {}",
-            root.id
-        )
+    assert!(
+        error.to_string().contains("path escaped storage root"),
+        "got: {error}"
     );
 }
