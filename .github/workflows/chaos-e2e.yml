@@ -41,14 +41,19 @@ jobs:
           sudo apt-get install -y mkvtoolnix
 
       - name: Install ffmpeg 7
-        # BtbN ships only rolling builds: dated autobuild-* tags are
-        # garbage-collected (a pinned URL 404s within weeks) and the `latest`
-        # tag's bytes change on every rebuild (a pinned SHA256 can never match
-        # for long). Track the rolling n7.1 `latest` asset for a stable URL over
-        # HTTPS-authenticated transport, and assert the major.minor version at
-        # runtime in place of a digest that cannot track a moving target.
+        # BtbN ships only rolling builds, so neither available tag is durable.
+        # This previously tracked the `latest` tag, on the reasoning that its
+        # URL is stable while dated autobuild-* tags are garbage-collected. That
+        # reasoning held only while `latest` carried 7.1: BtbN rotates which
+        # major versions that tag ships, and it has since dropped 7.1 in favour
+        # of 8.1 and 9.0, so the 7.1 asset now 404s there permanently.
+        #
+        # Pin a dated tag that still carries 7.1. Its bytes are immutable, so
+        # the runtime version assertion below stays meaningful. It is not a
+        # permanent fix: BtbN prunes dated tags, so this URL will 404 once this
+        # one is pruned. Caching or vendoring the archive is the durable answer.
         env:
-          FFMPEG_ARCHIVE_URL: https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-n7.1-latest-linux64-gpl-7.1.tar.xz
+          FFMPEG_ARCHIVE_URL: https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-08-11-13-11/ffmpeg-n7.1.5-12-g1fdbca85aa-linux64-gpl-7.1.tar.xz
         run: |
           archive="$RUNNER_TEMP/ffmpeg.tar.xz"
           install_dir="$RUNNER_TEMP/ffmpeg"
