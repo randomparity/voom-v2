@@ -480,12 +480,34 @@ fn assert_process_exited(pid: &str) {
     assert!(!status.success(), "child process {pid} still exists");
 }
 
+/// Wait for the helper script to write its pid file, bounded by real elapsed
+/// time.
+///
+/// An earlier version spun 1000 `yield_now()` calls with no sleep, which is not
+/// a wait: on a loaded host those complete in microseconds, well before the
+/// child has been exec'd, so the helper reported a missing pid file for a child
+/// that simply had not been scheduled yet. That made every test using it fail
+/// intermittently in CI while passing on an idle machine (issue #492).
+///
+/// Both call sites run this before `tokio::time::pause()`, so the sleep below
+/// advances against the real clock.
 async fn wait_for_pid_file(path: &Path) -> String {
-    for _ in 0..1_000 {
-        if let Ok(pid) = std::fs::read_to_string(path) {
-            return pid;
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        // The child writes the file with a single `printf`, but a reader can
+        // still observe it between create and write. Require a parsable pid
+        // rather than any successful read, so a truncated read retries instead
+        // of returning a pid nothing can signal.
+        if let Ok(contents) = std::fs::read_to_string(path)
+            && contents.trim().parse::<u32>().is_ok()
+        {
+            return contents;
         }
-        tokio::task::yield_now().await;
+        assert!(
+            std::time::Instant::now() < deadline,
+            "worker did not create pid file {} within 30s",
+            path.display()
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    panic!("worker did not create pid file {}", path.display());
 }
