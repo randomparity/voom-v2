@@ -119,7 +119,11 @@ inside our outer transaction — this is `sqlx`'s ordinary, existing behavior
 for `Connection::begin()` on an already-transacting connection and requires
 no change on our side.
 
-On success, the outer transaction commits:
+On success, the outer transaction commits, and the success-path `InitReport`
+is built from `locked_before_count` rather than the pre-lock `before_count`,
+replacing both of today's corresponding expressions
+(`migration_count.saturating_sub(before_count)` and
+`matches!(before, SchemaState::Current { .. })`):
 
 ```rust
 if let Ok(()) = migrate_result {
@@ -127,7 +131,25 @@ if let Ok(()) = migrate_result {
         VoomError::database_context("commit migration transaction", e)
     })?;
 }
+let after = probe_schema(pool).await?;
+let SchemaState::Current { migration_count, schema_init_at } = after else {
+    return Err(VoomError::Migration(format!(
+        "post-init schema state is not Current: {after:?}"
+    )));
+};
+let migrations_applied = migration_count.saturating_sub(locked_before_count);
+let already_initialized = migrations_applied == 0;
 ```
+
+This single formula covers both callers of the success path: a genuine
+first-time winner has `locked_before_count == 0`, so `migrations_applied ==
+migration_count` (every migration this call actually applied) and
+`already_initialized == false`; a blocked-then-no-op racing peer has
+`locked_before_count == migration_count` already (the winner it waited on
+already committed everything), so `migrations_applied == 0` and
+`already_initialized == true` — the two field values Failure behavior's
+"Ordinary race" bullet and the paragraph above already describe in prose, now
+pinned to one derivation instead of two illustrative examples.
 
 On error, the transaction is dropped (sqlx rolls back an uncommitted
 `Transaction` on `Drop`, releasing the write lock), and the code falls
@@ -235,14 +257,23 @@ detail.
   unit test below for that branch specifically.
 - A new unit test in `crates/voom-store/src/init_test.rs` forces busy-timeout
   exhaustion deterministically and directly, independent of incidental
-  full-workspace contention: open a connection against a test-local pool
-  configured with a short `busy_timeout` (e.g. a few hundred milliseconds),
-  hold `BEGIN IMMEDIATE` open on it past that timeout from a second task, and
-  assert that `run_migrations_on`'s call to `begin_with("BEGIN IMMEDIATE")`
-  on the first (blocked) connection returns a `VoomError::Database` wrapping
-  the `sqlx::Error` from `database_context`, distinct from every other
-  `VoomError` variant this path can produce (`DirtyMigration`, `SchemaTooNew`,
-  generic `Migration`).
+  full-workspace contention and with **no real-time wait at all** — the same
+  zero-wait pattern already proven in
+  `crates/voom-store/src/repo/media/commit_safety_gate_test.rs`
+  (`begin_gate_tx_emits_begin_immediate_and_takes_reserved_lock`): hold
+  `BEGIN IMMEDIATE` open on one connection, then on a second connection run
+  `PRAGMA busy_timeout = 0` before its own `begin_with("BEGIN IMMEDIATE")`
+  call, so the lock contention surfaces as an immediate `SQLITE_BUSY` error
+  with no sleep and no timing race. Assert that call returns a
+  `VoomError::Database` wrapping the `sqlx::Error` from `database_context`,
+  distinct from every other `VoomError` variant this path can produce
+  (`DirtyMigration`, `SchemaTooNew`, generic `Migration`). A sleep-based
+  short-`busy_timeout`-plus-real-wait design is explicitly rejected here: it
+  would make the test's outcome depend on real elapsed time and task
+  scheduling, reintroducing under CPU-starved CI the exact class of
+  timing-dependent flakiness this fix exists to eliminate (`detect-curse`:
+  "waiting on conditions, not on time" applies to the test as much as to the
+  production path it verifies).
 - `crates/voom-store/src/init_test.rs::migration_race_recovery_waits_for_slow_winner`
   (existing) is removed. It unit-tests `probe_after_failure`'s
   retry-with-backoff behavior directly — spawning a task that runs
