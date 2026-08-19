@@ -301,8 +301,13 @@ async fn cleartext_server_is_http1_and_closes_each_connection() -> TestResult {
         .is_ok()
     {
         let mut second = Vec::new();
-        stream.read_to_end(&mut second).await?;
-        assert!(second.is_empty());
+        match stream.read_to_end(&mut second).await {
+            Ok(_) => assert!(second.is_empty()),
+            // The server may already be tearing down the connection when the second
+            // request lands, which surfaces as a reset rather than a clean EOF.
+            Err(error) if error.kind() == io::ErrorKind::ConnectionReset => {}
+            Err(error) => return Err(error.into()),
+        }
     }
     server.shutdown_on(std::future::ready(())).await?;
     Ok(())
