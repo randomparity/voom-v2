@@ -1,0 +1,204 @@
+# Concurrent init migration locking
+
+Status: draft
+Date: 2026-08-19
+Base: `main` at `683a81d0`
+
+## Context
+
+`crates/voom-store/tests/init.rs::concurrent_init_stress` races six peers'
+`init()` calls against one on-disk SQLite file, twenty times, and
+intermittently fails under full-workspace test contention with
+`migration error: running migrations failed: while executing migration 2:
+error returned from database: (code: 1) table events already exists` (issue
+#505), after `probe_after_failure`'s 30-second recovery budget is exhausted.
+
+`sqlx`'s SQLite backend does not implement real migration locking:
+`SqliteConnection::lock()`/`unlock()` are no-ops (verified against vendored
+`sqlx-sqlite-0.8.6`). Every concurrent `init()` call independently reads
+`list_applied_migrations()` and may attempt `apply()` for a migration another
+peer is about to commit or has just committed; the loser hits a hard SQL
+error and falls into `probe_after_failure`'s retry-with-backoff loop, which
+polls `probe_schema` until it observes a terminal state or its budget
+expires.
+
+This is the third time this exact failure mode has surfaced as the migration
+set has grown (see ADR 0068's Context for the two prior recovery-budget
+increases). Reproducing #505 under two concurrent full-workspace
+`cargo test --workspace --quiet` runs on an 18-core host confirmed the
+mechanism directly: 49–53 losing-peer recoveries per run (all eventually
+succeeded), and a *successful, non-racing* `MIGRATOR.run` already took up to
+8–9 seconds under that contention — this crate's own migration set has grown
+large enough (36 files, ~3,638 lines of DDL) that simply applying it can
+consume a meaningful fraction of the existing 30-second budget before any
+race-recovery overhead is added.
+
+[ADR 0068](../adr/0068-serialize-sqlite-migration-application.md) records the
+decision: serialize the migration-application phase with a real held write
+lock (`BEGIN IMMEDIATE`) instead of raising the recovery budget a third time.
+
+## Decision
+
+`run_migrations_on` (`crates/voom-store/src/init.rs`) changes how it invokes
+the migrator. Today it calls `MIGRATOR.run(pool)`, which lets sqlx acquire
+its own pool connection internally. The new flow acquires the connection
+itself, explicitly locks it, and hands the locked connection to
+`MIGRATOR.run_direct`:
+
+```rust
+let mut conn = pool.acquire().await.map_err(|e| {
+    VoomError::database_context("acquire connection for migration", e)
+})?;
+let mut tx = conn.begin_with("BEGIN IMMEDIATE").await.map_err(|e| {
+    VoomError::database_context("acquire migration write lock", e)
+})?;
+let migrate_result = MIGRATOR.run_direct(&mut *tx).await;
+```
+
+`begin_with("BEGIN IMMEDIATE")` takes SQLite's write lock immediately
+(subject to the pool's existing 30-second `busy_timeout`), rather than
+`BEGIN`'s default deferred behavior, which only takes the lock at the first
+write statement and can observe a stale snapshot up to that point. A peer
+that loses the race for the lock blocks until the winner's transaction ends;
+when it acquires the lock, its `list_applied_migrations()` read (executed by
+`run_direct`, unchanged) runs inside its now-current transaction and sees
+every migration the winner committed. `run_direct`'s existing loop finds
+nothing left to apply for each already-known version (matching checksums)
+and returns `Ok(())`. No peer reaches `apply()` for a migration another peer
+already committed, so the `table X already exists` error path becomes
+unreachable for this race.
+
+`apply()`'s own per-migration `self.begin()` calls (unchanged, internal to
+`sqlx-sqlite`) become nested `SAVEPOINT`s because the connection is already
+inside our outer transaction — this is `sqlx`'s ordinary, existing behavior
+for `Connection::begin()` on an already-transacting connection and requires
+no change on our side.
+
+On success, the outer transaction commits:
+
+```rust
+if let Ok(()) = migrate_result {
+    tx.commit().await.map_err(|e| {
+        VoomError::database_context("commit migration transaction", e)
+    })?;
+}
+```
+
+On error, the transaction is dropped (sqlx rolls back an uncommitted
+`Transaction` on `Drop`, releasing the write lock), and the code falls
+through to a single `probe_schema(pool).await?` call feeding the *same*
+`match` block `run_migrations_on` already has today (`Current` →
+race-recovery success shape; `Dirty` → `VoomError::DirtyMigration`; `TooNew`
+→ `VoomError::SchemaTooNew`; anything else → the generic `VoomError::Migration`).
+That classification is unchanged and stays reachable for causes unrelated to
+peer racing (see Failure behavior). What is removed is `probe_after_failure`'s
+retry-with-backoff loop and its three budget constants
+(`MIGRATION_RACE_RECOVERY_BUDGET`, `MIGRATION_RACE_INITIAL_DELAY`,
+`MIGRATION_RACE_MAX_DELAY`) — the loop existed only to wait for a
+concurrently-racing peer, which can no longer happen (ADR 0068's Decision).
+The single probe call replaces the whole loop; the match arms it feeds are
+untouched.
+
+## Invariants and boundaries
+
+- `connect()`'s no-create, no-migrate contract (ADR 0003) is unaffected: the
+  new lock is acquired only inside `init()`'s migration path, never from
+  `connect()`.
+- `probe_schema`'s classification order and every `SchemaState` variant are
+  unchanged.
+- The pre-migration `before = probe_schema(pool).await?` check (used for
+  `TooNew`/`Dirty` short-circuit and `already_initialized`/`before_count`
+  bookkeeping) is unchanged and still runs against the pool directly, before
+  the migration connection is acquired — it remains advisory, as it already
+  was.
+- `emit_schema_initialized_if_missing` is unchanged and still runs against
+  the pool after the migration path (success or recovered) completes.
+- `MIGRATOR`'s migration set, versions, and checksums (`crates/voom-store/src/migrator.rs`)
+  are unchanged.
+
+## Failure behavior
+
+- **Ordinary race (the case this fix targets):** a losing peer blocks on
+  `BEGIN IMMEDIATE`, then no-ops through `run_direct` once it acquires the
+  lock. No error, no re-probe call.
+- **Busy-timeout exhaustion:** if `BEGIN IMMEDIATE` itself cannot acquire the
+  lock within the pool's 30-second `busy_timeout`, `begin_with` returns a
+  `sqlx::Error`, wrapped as `VoomError::database_context`. This is a new,
+  distinct failure point from today's `MIGRATOR.run` error branch — it is
+  surfaced directly, with no re-probe, because there is no partial migration
+  state to reconcile: this peer never started applying anything. SQLite's own
+  busy handler already retried lock acquisition internally for the full
+  `busy_timeout` window before returning this error, so no additional
+  application-level retry is added on top.
+- **A migration genuinely fails after the lock is held** (bad SQL, disk
+  error, corruption): `migrate_result` is `Err`, the transaction is dropped
+  (rolled back, releasing the lock), and a single `probe_schema(pool).await?`
+  call classifies the state (`Dirty`/`TooNew`/generic `Migration`) and
+  returns immediately. No peer collision could have caused this failure —
+  this peer held the only write lock — so there is nothing to wait for, and
+  the fix removes the retry-with-backoff loop that used to poll here (see
+  ADR 0068).
+- A process killed mid-migration leaves no `_sqlx_migrations` row for the
+  in-flight version (the whole transaction, including the row insert, rolls
+  back with the connection), so the next `init()` caller sees a clean
+  `Partial` state and reapplies from where the crashed peer left off — no
+  new crash-recovery behavior is introduced.
+
+## Compatibility and rollback
+
+This is an internal change to how `init()` invokes the existing migrator; it
+adds no migration, changes no schema, and changes no public type
+(`InitReport`, `SchemaState`, error codes). `voom init` and `ControlPlane::open`
+callers are unaffected. No rollback procedure changes.
+
+## Test strategy and acceptance criteria
+
+- `concurrent_init_stress` (existing) passes reliably: 50 consecutive
+  standalone runs, plus at least one full-workspace `cargo test --workspace --quiet`
+  run under contention comparable to the original failure report.
+- `crates/voom-store/src/init_test.rs::migration_race_recovery_waits_for_slow_winner`
+  (existing) is removed. It unit-tests `probe_after_failure`'s
+  retry-with-backoff behavior directly — spawning a task that runs
+  `MIGRATOR.run` a second later and asserting the probe waits for it — which
+  is exactly the capability ADR 0068 concludes is no longer needed:
+  `run_migrations_on`'s own call path never leaves a window where a
+  concurrently-running peer could still be applying migrations, so there is
+  nothing left for a probe to wait for. Removing the test is a direct
+  consequence of removing the capability it tests, not an untested deletion.
+- A new unit test in `crates/voom-store/src/init_test.rs` proves the
+  single-shot replacement's contract: given a database already left in a
+  non-terminal state (e.g. `_sqlx_migrations` created but no rows), the
+  replacement classifies and returns on the first probe — no polling,
+  observable via a bounded wall-clock assertion (e.g. completes in
+  well under `MIGRATION_RACE_INITIAL_DELAY`'s old 25ms, since there is no
+  sleep at all).
+- A new integration test in `crates/voom-store/tests/init.rs` proves a peer
+  that starts after another has fully migrated observes `Current`
+  immediately with zero calls into `apply()` (no error path exercised at
+  all) — the direct assertion that the race is closed structurally, not
+  just tolerated faster.
+- Existing single-peer `init()` tests (`init_on_disk_creates_schema_meta`,
+  `second_init_against_same_disk_db_is_noop`, `init_is_idempotent_on_same_pool`,
+  and the full existing `crates/voom-store` suite) continue to pass
+  unchanged — the locked transaction is transparent to the non-concurrent
+  path.
+- `run_migrations_on`'s doc comments are updated to drop the stale "separate
+  transactions" premise (ADR 0068's Context) and describe the new
+  lock-then-migrate flow and its narrowed failure classification.
+- `just ci` passes with zero failures and zero warnings.
+
+## Dependencies and exclusions
+
+In scope: `crates/voom-store/src/init.rs`'s migration-invocation path and its
+doc comments; new/updated tests in `crates/voom-store/tests/init.rs` and/or
+`crates/voom-store/src/init_test.rs`.
+
+Excluded: `crates/voom-store/src/schema.rs` (no change needed — `probe_schema`'s
+existing single-statement-atomic scan already closed the read-side TOCTOU in
+issue #13, and its `Current`/`Dirty`/`TooNew`/`Partial`/`Uninitialized`
+classification logic is reused unchanged, only called once instead of in a
+loop); `crates/voom-store/src/migrator.rs` and `migrations/*.sql` (no new
+migration or lock table); `crates/voom-api/src/server_test.rs` and anything
+in the already-merged PR #506; raising `MIGRATION_RACE_RECOVERY_BUDGET` (ADR
+0068 rejects this as the primary fix — the constant is removed entirely
+along with the retry loop it bounded, not raised).
