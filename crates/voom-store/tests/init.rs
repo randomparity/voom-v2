@@ -37,12 +37,25 @@ async fn second_init_against_same_disk_db_is_noop() {
     let url = sqlite_url_for(tmp.path());
 
     let first = init(&url).await.unwrap();
-    let second = init(&url).await.unwrap();
-
     assert!(!first.already_initialized);
+
+    // The second call starts strictly after the first fully committed, so it
+    // never contends for the migration write lock — a direct assertion that
+    // no calls into sqlx's internal `apply()` happen on this path. `apply()`
+    // itself is sqlx-internal and unobservable through voom-store's public
+    // API, so migrations_applied == 0 plus this wall-clock bound (generous
+    // relative to a single no-op probe) stand in for it.
+    let start = std::time::Instant::now();
+    let second = init(&url).await.unwrap();
+    let elapsed = start.elapsed();
+
     assert!(second.already_initialized);
     assert_eq!(second.migrations_applied, 0);
     assert_eq!(first.schema_init_at, second.schema_init_at);
+    assert!(
+        elapsed < std::time::Duration::from_millis(500),
+        "sequential no-op init must not poll or sleep: took {elapsed:?}"
+    );
 }
 
 /// Regression: two concurrent `init()` calls against the same on-disk
@@ -55,13 +68,13 @@ async fn second_init_against_same_disk_db_is_noop() {
 /// - The final on-disk state is exactly one migration applied.
 /// - Both processes observe the same `schema_init_at`, proving they read
 ///   the same migration row (only one was actually written).
-///
-/// Note: under race the individual `migrations_applied` count is each
-/// process's local-snapshot delta — both may report `applied=1` because
-/// each saw the schema go from "Uninitialized" (their probe-before) to
-/// "Current" (their probe-after), regardless of which one actually
-/// inserted the row. That's an accepted approximation; the durable
-/// invariant is "exactly one row is in the DB."
+/// - Exactly one peer (the write-lock winner) reports
+///   `migrations_applied == expected_migrations()` and
+///   `already_initialized == false`; the other (blocked on `BEGIN IMMEDIATE`,
+///   then a no-op through `run_direct` once it acquires the lock) reports
+///   `migrations_applied == 0` and `already_initialized == true` —
+///   deterministically correct under the locked migration flow, not an
+///   approximation.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concurrent_init_on_same_disk_db_is_safe() {
     let tmp = TempDatabase::new().unwrap();
@@ -90,6 +103,25 @@ async fn concurrent_init_on_same_disk_db_is_safe() {
     assert_eq!(
         a.schema_init_at, b.schema_init_at,
         "both inits must observe the same persisted schema_init_at row"
+    );
+
+    // Exactly one peer won the write lock and applied every migration; the
+    // other blocked and then no-opped, applying none.
+    let reports = [&a, &b];
+    let winners = reports
+        .iter()
+        .filter(|r| r.migrations_applied == expected_migrations() && !r.already_initialized)
+        .count();
+    let losers = reports
+        .iter()
+        .filter(|r| r.migrations_applied == 0 && r.already_initialized)
+        .count();
+    assert_eq!(
+        (winners, losers),
+        (1, 1),
+        "exactly one winner (applied={}, already_initialized=false) and one \
+         loser (applied=0, already_initialized=true), got a={a:?} b={b:?}",
+        expected_migrations()
     );
 
     // Final state: exactly one migration applied, Current.

@@ -341,12 +341,23 @@ In scope: `crates/voom-store/src/init.rs`'s migration-invocation path and its
 doc comments; new/updated tests in `crates/voom-store/tests/init.rs` and/or
 `crates/voom-store/src/init_test.rs`.
 
+**Migration squash added to scope during implementation** (see ADR 0068,
+"Discovered during implementation"): four of the pre-existing 36 migrations
+rebuild an FK-referenced table via `PRAGMA foreign_keys = OFF`, which SQLite
+refuses to run inside any open transaction — including the held lock this
+spec requires — no matter how those migrations are worded. Resolving this
+required folding `migrations/*.sql` and `crates/voom-store/src/migrator.rs`
+into scope: the 36 files are squashed into a single
+`migrations/0001_schema.sql`, verified byte-identical (schema and seed data)
+against the pre-squash chain's applied result. This is a prerequisite for the
+lock design to work at all, not a new goal — the acceptance criteria above are
+otherwise unchanged.
+
 Excluded: `crates/voom-store/src/schema.rs` (no change needed — `probe_schema`'s
 existing single-statement-atomic scan already closed the read-side TOCTOU in
 issue #13, and its `Current`/`Dirty`/`TooNew`/`Partial`/`Uninitialized`
 classification logic is reused unchanged, only called once instead of in a
-loop); `crates/voom-store/src/migrator.rs` and `migrations/*.sql` (no new
-migration or lock table); `crates/voom-api/src/server_test.rs` and anything
-in the already-merged PR #506; raising `MIGRATION_RACE_RECOVERY_BUDGET` (ADR
-0068 rejects this as the primary fix — the constant is removed entirely
-along with the retry loop it bounded, not raised).
+loop); `crates/voom-api/src/server_test.rs` and anything in the already-merged
+PR #506; raising `MIGRATION_RACE_RECOVERY_BUDGET` (ADR 0068 rejects this as
+the primary fix — the constant is removed entirely along with the retry loop
+it bounded, not raised).

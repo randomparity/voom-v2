@@ -1,4 +1,6 @@
+use sqlx::Connection;
 use sqlx::SqlitePool;
+use sqlx::migrate::Migrate;
 use time::OffsetDateTime;
 use voom_core::VoomError;
 use voom_events::{EventKind, SubjectType, payload::SchemaInitializedPayload};
@@ -7,10 +9,6 @@ use crate::migrator::MIGRATOR;
 use crate::pool::connect_or_create;
 use crate::repo::common::iso8601;
 use crate::schema::{SchemaState, probe_schema};
-
-const MIGRATION_RACE_RECOVERY_BUDGET: std::time::Duration = std::time::Duration::from_secs(30);
-const MIGRATION_RACE_INITIAL_DELAY: std::time::Duration = std::time::Duration::from_millis(25);
-const MIGRATION_RACE_MAX_DELAY: std::time::Duration = std::time::Duration::from_secs(1);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InitReport {
@@ -35,6 +33,16 @@ pub async fn init_on(pool: &SqlitePool) -> Result<InitReport, VoomError> {
     run_migrations_on(pool).await
 }
 
+/// Run migrations on `pool` behind a held `BEGIN IMMEDIATE` write lock (ADR
+/// 0068). Taking `SQLite`'s write lock immediately, rather than deferring it to
+/// the first write statement, means a losing peer blocks on lock acquisition
+/// (governed by the pool's `busy_timeout`) instead of racing an `apply()`
+/// call it cannot win. Once a blocked peer acquires the lock, its own
+/// `list_applied_migrations()` read happens inside its now-current
+/// transaction and sees every migration the prior lock-holder committed, so
+/// `run_direct`'s loop finds nothing left to apply and returns `Ok(())` with
+/// zero migrations applied — the race is closed structurally, not
+/// out-waited, and no post-failure recovery probe is needed for it.
 async fn run_migrations_on(pool: &SqlitePool) -> Result<InitReport, VoomError> {
     let before = probe_schema(pool).await?;
 
@@ -65,66 +73,28 @@ async fn run_migrations_on(pool: &SqlitePool) -> Result<InitReport, VoomError> {
         )));
     }
 
-    let before_count: u32 = match &before {
-        SchemaState::Uninitialized => 0,
-        SchemaState::Partial { applied, .. }
-        | SchemaState::TooNew { applied, .. }
-        | SchemaState::Dirty { applied, .. } => *applied,
-        SchemaState::Current {
-            migration_count, ..
-        } => *migration_count,
-    };
-    let already_initialized = matches!(before, SchemaState::Current { .. });
+    let mut conn = pool
+        .acquire()
+        .await
+        .map_err(|e| VoomError::database_context("acquire connection for migration", e))?;
+    let mut tx = conn
+        .begin_with("BEGIN IMMEDIATE")
+        .await
+        .map_err(|e| VoomError::database_context("acquire migration write lock", e))?;
+    tx.ensure_migrations_table()
+        .await
+        .map_err(|e| VoomError::database_context("ensure migrations table under lock", e))?;
+    let locked_applied = tx
+        .list_applied_migrations()
+        .await
+        .map_err(|e| VoomError::database_context("read applied migrations under lock", e))?;
+    let locked_before_count = u32::try_from(locked_applied.len()).unwrap_or(u32::MAX);
 
-    let migrate_result = MIGRATOR.run(pool).await;
-
-    if let Err(e) = migrate_result {
-        // Re-probe and classify by the post-error state, not the raw sqlx
-        // error. This handles three distinct scenarios that all surface as
-        // a `MigrateError` from sqlx but mean different things to operators:
-        //
-        // * `Current`  — race recovery. Between our pre-init probe and the
-        //                migration run, another process applied the same
-        //                migrations. Treat as idempotent success.
-        // * `Dirty`    — a migration ran far enough to insert a success=0
-        //                row in `_sqlx_migrations`, then failed. sqlx will
-        //                refuse to retry; surface as DB_DIRTY_MIGRATION so
-        //                operators perform manual cleanup instead of just
-        //                re-running init.
-        // * `TooNew`   — schema is now ahead of this binary (rare after a
-        //                run-time failure, but possible if a concurrent
-        //                peer migrated past us). Surface as
-        //                DB_SCHEMA_TOO_NEW so operators upgrade the binary.
-        // * otherwise  — propagate the original sqlx error as a generic
-        //                Migration (DB_PARTIAL_SCHEMA) so the message
-        //                surfaces verbatim.
-        //
-        // Under concurrent inits, the post-error probe can transiently
-        // observe `Partial` because the peer that beat us to migration N
-        // committed N's data tables but its `_sqlx_migrations` row for N
-        // is still in flight (separate tx in sqlx Migrator).
-        // `probe_after_failure` waits briefly for that to settle so a
-        // genuine race recovery isn't misclassified as a hard failure.
-        let after = probe_after_failure(pool).await?;
+    if let Err(e) = MIGRATOR.run_direct(&mut *tx).await {
+        drop(tx); // rolls back, releasing the write lock
+        drop(conn); // return the connection before probing the pool
+        let after = probe_schema(pool).await?;
         return match after {
-            SchemaState::Current {
-                schema_init_at,
-                migration_count,
-            } => {
-                // Race recovery doesn't tell us whether the other process
-                // also emitted `schema.initialized` — they may have applied
-                // migrations and then crashed before the event append. Run
-                // the same atomic emit-if-missing as the happy path so the
-                // row is present regardless. The statement is a no-op when
-                // the row already exists, so the cost of always running it
-                // is one indexed lookup.
-                emit_schema_initialized_if_missing(pool, migration_count, schema_init_at).await?;
-                Ok(InitReport {
-                    migrations_applied: 0,
-                    schema_init_at,
-                    already_initialized: true,
-                })
-            }
             SchemaState::Dirty {
                 failed_version,
                 applied,
@@ -148,6 +118,11 @@ async fn run_migrations_on(pool: &SqlitePool) -> Result<InitReport, VoomError> {
         };
     }
 
+    tx.commit()
+        .await
+        .map_err(|e| VoomError::database_context("commit migration transaction", e))?;
+    drop(conn); // return the connection before probing the pool
+
     let after = probe_schema(pool).await?;
     let SchemaState::Current {
         migration_count,
@@ -159,7 +134,8 @@ async fn run_migrations_on(pool: &SqlitePool) -> Result<InitReport, VoomError> {
         )));
     };
 
-    let migrations_applied = migration_count.saturating_sub(before_count);
+    let migrations_applied = migration_count.saturating_sub(locked_before_count);
+    let already_initialized = migrations_applied == 0;
 
     // Recovery-safe emit: a single INSERT ... WHERE NOT EXISTS statement is
     // atomic under SQLite's single-writer locking, so the existence check
@@ -183,46 +159,6 @@ async fn run_migrations_on(pool: &SqlitePool) -> Result<InitReport, VoomError> {
         schema_init_at,
         already_initialized,
     })
-}
-
-/// Probe `pool` repeatedly until it reports a terminal `SchemaState`
-/// (`Current`, `Dirty`, or `TooNew`) or the retry budget is exhausted.
-///
-/// sqlx's `Migrator::run` applies each migration in its own transaction —
-/// data DDL first, then an `_sqlx_migrations` row insert as a separate
-/// statement. Under concurrent inits, the peer that "loses" the race
-/// receives a hard error (e.g. `table … already exists`) while the
-/// winning peer's `_sqlx_migrations` v$N row hasn't fully committed yet.
-/// A single post-error probe in that window reports `Partial` even
-/// though the schema will be `Current` once the winning peer finishes.
-///
-/// The retry loop uses bounded exponential backoff for up to 30 seconds,
-/// matching the `SQLite` busy timeout. A losing migrator can fail on the first
-/// migration and must wait for the winner to finish the complete migration
-/// set; under load that can take seconds even when each individual
-/// transaction is short. If the probe never reaches a terminal state, the
-/// last observed `SchemaState` is returned and the caller classifies it the
-/// same way as a single-shot probe would.
-async fn probe_after_failure(pool: &SqlitePool) -> Result<SchemaState, VoomError> {
-    let deadline = tokio::time::Instant::now() + MIGRATION_RACE_RECOVERY_BUDGET;
-    let mut delay = MIGRATION_RACE_INITIAL_DELAY;
-    loop {
-        let state = probe_schema(pool).await?;
-        if matches!(
-            state,
-            SchemaState::Current { .. } | SchemaState::Dirty { .. } | SchemaState::TooNew { .. }
-        ) {
-            return Ok(state);
-        }
-
-        let now = tokio::time::Instant::now();
-        if now >= deadline {
-            return Ok(state);
-        }
-
-        tokio::time::sleep(delay.min(deadline - now)).await;
-        delay = delay.saturating_mul(2).min(MIGRATION_RACE_MAX_DELAY);
-    }
 }
 
 async fn emit_schema_initialized_if_missing(
