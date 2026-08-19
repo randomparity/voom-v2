@@ -185,6 +185,17 @@ existing `Current`/`Dirty`/`TooNew`/generic-`Migration` classification.
   N" to seed against, and the squashed file contains no rewrite steps at all
   — only final table shapes — so the behavior these tests exercised no longer
   exists in the codebase to test.
+- Anyone with a pre-existing local `voom.db` built against the pre-squash
+  36-migration history (a developer's persistent database, a manual-test
+  environment) will hit `SchemaState::TooNew { applied: 36, expected: 1 }` on
+  the first `voom init` after pulling this change — its `_sqlx_migrations`
+  table has rows for versions 2..36 that no longer exist in `MIGRATOR`. The
+  resulting error message ("upgrade the voom binary or roll back the
+  database") does not fit this cause: the binary is not behind, and there is
+  no rollback path back to a 36-file history that no longer exists on disk.
+  **Delete the local database file and let `voom init` recreate it** — this
+  is the only real remedy, and it is safe since no such database is expected
+  to hold anything but disposable local/test data.
 
 ## Considered & rejected
 
