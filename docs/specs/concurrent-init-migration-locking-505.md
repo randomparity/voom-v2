@@ -300,13 +300,22 @@ detail.
   sequential — the second peer starts strictly after the first fully
   migrated, not racing it) and a bounded wall-clock assertion analogous to
   the unit test above, ruling out a hidden retry/backoff path.
-- `concurrent_init_stress` (existing, extended) or a new dedicated integration
-  test asserts `migrations_applied == 0` and `already_initialized == true` for
-  a peer that genuinely raced another (started before the winner committed,
-  then blocked on the lock) — distinct from the sequential-peer test above,
-  which starts strictly after. This is the regression guard for
-  `locked_before_count` (see Decision): without it, a blocked-then-no-op
-  racing peer would report having applied every migration it never touched.
+- A new dedicated integration test in `crates/voom-store/tests/init.rs`
+  deterministically constructs the true-race scenario `locked_before_count`
+  exists to handle, rather than relying on `concurrent_init_stress`'s ambient
+  six-peer probabilistic race to happen to produce it on a given run (which
+  could go unexercised for long stretches on a lightly-loaded CI runner
+  without ever failing): hold a real `BEGIN IMMEDIATE` open on one connection
+  against an uninitialized database (pausing a first `init()` call inside its
+  locked region via a test hook, or driving the transaction directly),
+  spawn a second real `init()` task so its `begin_with("BEGIN IMMEDIATE")`
+  blocks behind the first, then let the first complete and commit, await the
+  second, and assert its `InitReport.migrations_applied == 0` and
+  `InitReport.already_initialized == true` — distinct from the sequential-peer
+  test above, which starts strictly after the winner already committed. This
+  is the regression guard for `locked_before_count` (see Decision): without
+  it, a blocked-then-no-op racing peer would report having applied every
+  migration it never touched.
 - A new unit test proves the all-or-nothing atomicity consequence directly:
   against a small, test-local `Migrator` (not the real 36-migration
   `MIGRATOR`) with two migrations where the second deliberately fails, run
