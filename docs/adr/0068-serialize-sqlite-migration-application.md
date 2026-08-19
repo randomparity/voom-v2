@@ -96,7 +96,14 @@ existing `Current`/`Dirty`/`TooNew`/generic-`Migration` classification.
 - `run_migrations_on`'s error branch becomes reachable only by a genuine,
   non-race migration failure while holding the lock, or by lock-acquisition
   timeout — never by the routine race. It reports either case immediately
-  instead of after a 30-second wait.
+  instead of after a 30-second wait. The two are distinguishable: a
+  lock-acquisition timeout maps to `VoomError::Database` via
+  `VoomError::database_context`, the same convention this crate's
+  `commit_safety_gate::begin_gate_tx` already uses for a failed
+  `begin_with("BEGIN IMMEDIATE")` (`crates/voom-store/src/repo/media/commit_safety_gate.rs`),
+  and is never mistaken for `DirtyMigration`/`SchemaTooNew`/generic
+  `Migration`, which remain reserved for a failure classified from
+  `probe_schema` after the lock was actually held.
 - `init()`'s worst-case latency changes shape: instead of every peer racing
   to fail-and-recover in parallel, N-1 peers serialize behind the lock
   holder. Aggregate wall-clock work is comparable (SQLite was already a
@@ -110,6 +117,19 @@ existing `Current`/`Dirty`/`TooNew`/generic-`Migration` classification.
 
 ## Considered & rejected
 
+- **Do nothing beyond fixing the stale doc comment.** The reproduction in
+  Context recovered every one of ~100 losing-peer events across both runs
+  within budget (worst case 8.75s of 30s), so it demonstrates the race
+  occurring and recovering, not the reported exhaustion itself. Rejected
+  anyway: the migration count driving `MIGRATOR.run`'s duration has gone
+  4 (commit `72381557`, 2026-05-17) → 25 (commit `4a98b16a`, 2026-07-27) →
+  36 (today, 2026-08-19) — accelerating, not merely growing, over roughly
+  three months. At today's count a successful run alone already consumes
+  ~30% of the fixed budget under twice-the-reproduction contention; the
+  next migration-set doubling, on the same trend, plausibly exhausts it the
+  same way the second bump was needed once the first one's headroom ran
+  out. Leaving the budget as the only defense repeats a pattern that has
+  already failed twice.
 - **Raise `MIGRATION_RACE_RECOVERY_BUDGET` again** (e.g. 30s → 90s). This is
   the same move `4a98b16a` already made once (775ms → 30s) for the same
   underlying reason; the reproduction here shows the pattern recurring as the
