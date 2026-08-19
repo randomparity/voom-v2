@@ -52,6 +52,9 @@ let mut conn = pool.acquire().await.map_err(|e| {
 let mut tx = conn.begin_with("BEGIN IMMEDIATE").await.map_err(|e| {
     VoomError::database_context("acquire migration write lock", e)
 })?;
+tx.ensure_migrations_table().await.map_err(|e| {
+    VoomError::database_context("ensure migrations table under lock", e)
+})?;
 let locked_applied = tx.list_applied_migrations().await.map_err(|e| {
     VoomError::database_context("read applied migrations under lock", e)
 })?;
@@ -59,12 +62,25 @@ let locked_before_count = locked_applied.len() as u32;
 let migrate_result = MIGRATOR.run_direct(&mut *tx).await;
 ```
 
+`tx.ensure_migrations_table()` is the same idempotent `CREATE TABLE IF NOT
+EXISTS _sqlx_migrations` call `run_direct` makes internally as its own first
+step; calling it here, before `list_applied_migrations()`, is required —
+against a genuinely fresh database (no prior `init()` has ever run;
+`concurrent_init_stress`'s setup and every real first `voom init` both start
+this way) `_sqlx_migrations` does not exist yet, and `list_applied_migrations()`
+is a raw `SELECT` with no existence guard that hard-errors against a missing
+table. Calling `ensure_migrations_table()` first guarantees the table exists
+before that `SELECT` runs. `run_direct`'s own subsequent internal call to
+`ensure_migrations_table()` is idempotent, so this adds one no-op statement on
+every call after the first and changes no other behavior.
+
 `tx.list_applied_migrations()` (the same `Migrate`-trait method `run_direct`'s
-own loop uses internally, called here once up front) reads the applied-migration
-count from inside the transaction that just took the write lock — the
-authoritative view of what this peer's own serialized turn actually starts
-from, as opposed to a separate, unlocked, pre-lock snapshot. `locked_before_count`
-replaces the pre-lock `before`-probe's count for `InitReport`'s
+own loop uses internally, called here once up front, after the table is
+guaranteed to exist) reads the applied-migration count from inside the
+transaction that just took the write lock — the authoritative view of what
+this peer's own serialized turn actually starts from, as opposed to a
+separate, unlocked, pre-lock snapshot. `locked_before_count` replaces the
+pre-lock `before`-probe's count for `InitReport`'s
 `migrations_applied`/`already_initialized` bookkeeping (see Invariants and
 boundaries); the pre-lock probe is kept only for its original `TooNew`/`Dirty`
 fast-fail short-circuit, which must still run before any connection or lock is
@@ -211,6 +227,22 @@ detail.
   not reliably generate the lock contention needed to exercise this fix's
   own new failure point (busy-timeout exhaustion on `BEGIN IMMEDIATE`, see
   Failure behavior), so it is not sufficient acceptance evidence on its own.
+  Full-workspace contention is evidence that the ordinary-race path holds up
+  under load, not a targeted check that the busy-timeout branch was hit or
+  classified correctly — `concurrent_init_stress` only asserts per-peer
+  success and final `migration_count`, so a pass is consistent with the
+  busy-timeout branch never having been reached at all. See the dedicated
+  unit test below for that branch specifically.
+- A new unit test in `crates/voom-store/src/init_test.rs` forces busy-timeout
+  exhaustion deterministically and directly, independent of incidental
+  full-workspace contention: open a connection against a test-local pool
+  configured with a short `busy_timeout` (e.g. a few hundred milliseconds),
+  hold `BEGIN IMMEDIATE` open on it past that timeout from a second task, and
+  assert that `run_migrations_on`'s call to `begin_with("BEGIN IMMEDIATE")`
+  on the first (blocked) connection returns a `VoomError::Database` wrapping
+  the `sqlx::Error` from `database_context`, distinct from every other
+  `VoomError` variant this path can produce (`DirtyMigration`, `SchemaTooNew`,
+  generic `Migration`).
 - `crates/voom-store/src/init_test.rs::migration_race_recovery_waits_for_slow_winner`
   (existing) is removed. It unit-tests `probe_after_failure`'s
   retry-with-backoff behavior directly — spawning a task that runs
