@@ -162,8 +162,13 @@ callers are unaffected. No rollback procedure changes.
 ## Test strategy and acceptance criteria
 
 - `concurrent_init_stress` (existing) passes reliably: 50 consecutive
-  standalone runs, plus at least one full-workspace `cargo test --workspace --quiet`
-  run under contention comparable to the original failure report.
+  standalone runs, plus two concurrent full-workspace `cargo test --workspace --quiet`
+  invocations against the same checkout — the same reproduction methodology
+  the Context section already used to surface #505 (49–53 losing-peer
+  recoveries per run on an 18-core host). A single full-workspace run does
+  not reliably generate the lock contention needed to exercise this fix's
+  own new failure point (busy-timeout exhaustion on `BEGIN IMMEDIATE`, see
+  Failure behavior), so it is not sufficient acceptance evidence on its own.
 - `crates/voom-store/src/init_test.rs::migration_race_recovery_waits_for_slow_winner`
   (existing) is removed. It unit-tests `probe_after_failure`'s
   retry-with-backoff behavior directly — spawning a task that runs
@@ -182,9 +187,14 @@ callers are unaffected. No rollback procedure changes.
   sleep at all).
 - A new integration test in `crates/voom-store/tests/init.rs` proves a peer
   that starts after another has fully migrated observes `Current`
-  immediately with zero calls into `apply()` (no error path exercised at
-  all) — the direct assertion that the race is closed structurally, not
-  just tolerated faster.
+  immediately with no calls into `apply()` — the direct assertion that the
+  race is closed structurally, not just tolerated faster. `apply()` itself
+  is sqlx-internal and unobservable through `voom-store`'s public API, so
+  the test asserts it through two proxies instead: `InitReport.migrations_applied
+  == 0` (a safe stand-in here specifically because this scenario is
+  sequential — the second peer starts strictly after the first fully
+  migrated, not racing it) and a bounded wall-clock assertion analogous to
+  the unit test above, ruling out a hidden retry/backoff path.
 - A new unit test proves the all-or-nothing atomicity consequence directly:
   against a small, test-local `Migrator` (not the real 36-migration
   `MIGRATOR`) with two migrations where the second deliberately fails, run
