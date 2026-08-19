@@ -137,7 +137,15 @@ untouched.
   returns immediately. No peer collision could have caused this failure —
   this peer held the only write lock — so there is nothing to wait for, and
   the fix removes the retry-with-backoff loop that used to poll here (see
-  ADR 0068).
+  ADR 0068). This failure now rolls back **every** migration applied earlier
+  in the same run, not just the failing one — each earlier `apply()` became
+  a nested `SAVEPOINT`/`RELEASE` inside the still-open outer transaction,
+  provisional until the final `COMMIT` — so the DB returns to its exact
+  pre-run state and the next `init()` reapplies the whole batch. A fresh
+  failure therefore surfaces through the generic `Migration` error, not
+  `Dirty` (`apply()` never writes a `success = false` row); `DirtyMigration`
+  remains reachable only for a row left dirty before this fix shipped, or
+  from direct `_sqlx_migrations` tampering. See ADR 0068's Consequences.
 - A process killed mid-migration leaves no `_sqlx_migrations` row for the
   in-flight version (the whole transaction, including the row insert, rolls
   back with the connection), so the next `init()` caller sees a clean
@@ -177,6 +185,15 @@ callers are unaffected. No rollback procedure changes.
   immediately with zero calls into `apply()` (no error path exercised at
   all) — the direct assertion that the race is closed structurally, not
   just tolerated faster.
+- A new unit test proves the all-or-nothing atomicity consequence directly:
+  against a small, test-local `Migrator` (not the real 36-migration
+  `MIGRATOR`) with two migrations where the second deliberately fails, run
+  the same acquire-lock-then-`run_direct` pattern and assert the *first*
+  migration's table is also absent afterward (not just that the call
+  returns `Err`) — proving migration 1 was never durably committed on its
+  own, only released as a `SAVEPOINT` inside the still-open outer
+  transaction. This is the regression guard for ADR 0068's Consequences
+  disclosure, not a test of the real production migration set.
 - Existing single-peer `init()` tests (`init_on_disk_creates_schema_meta`,
   `second_init_against_same_disk_db_is_noop`, `init_is_idempotent_on_same_pool`,
   and the full existing `crates/voom-store` suite) continue to pass

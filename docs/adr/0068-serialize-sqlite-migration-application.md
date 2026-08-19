@@ -109,6 +109,25 @@ existing `Current`/`Dirty`/`TooNew`/generic-`Migration` classification.
   holder. Aggregate wall-clock work is comparable (SQLite was already a
   single writer under the hood); peers no longer pay for a doomed `apply()`
   attempt and its subsequent probe-and-backoff cycle.
+- Wrapping the whole batch in one outer transaction changes failure
+  atomicity. Today, each migration's `apply()` commits independently (a
+  real `BEGIN`/`COMMIT` per migration), so a failure at migration N leaves
+  migrations 1..N-1 durably applied. Under this decision, `apply()`'s
+  per-migration `begin()`/commit becomes a nested `SAVEPOINT`/`RELEASE` —
+  provisional until the single outer `COMMIT` — so a genuine failure at
+  migration N rolls back migrations 1..N-1 from the same run too; the next
+  `init()` reapplies the whole batch from the pre-run state. This is a
+  stronger, not weaker, guarantee (no schema is ever left half-applied
+  across a process boundary) at the cost of redoing deterministic, cheap
+  DDL on retry. One concrete effect: `SchemaState::Dirty` becomes
+  effectively unreachable for a *freshly-introduced* failure under this
+  path — `apply()` never writes a `success = false` row (confirmed in the
+  vendored source), and an all-or-nothing rollback returns the DB to its
+  pre-run `Partial`/`Uninitialized` state rather than a dirty one, so a
+  fresh failure now surfaces through the generic `Migration` error instead.
+  `DirtyMigration`'s remediation path remains reachable only for a dirty
+  row left over from before this fix, or from direct manual tampering with
+  `_sqlx_migrations`.
 - The fix is local to `run_migrations_on`'s migration invocation. `probe_schema`,
   `emit_schema_initialized_if_missing`, and every caller-facing type
   (`InitReport`, `SchemaState`) are unchanged.
