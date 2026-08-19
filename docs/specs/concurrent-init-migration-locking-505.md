@@ -52,8 +52,23 @@ let mut conn = pool.acquire().await.map_err(|e| {
 let mut tx = conn.begin_with("BEGIN IMMEDIATE").await.map_err(|e| {
     VoomError::database_context("acquire migration write lock", e)
 })?;
+let locked_applied = tx.list_applied_migrations().await.map_err(|e| {
+    VoomError::database_context("read applied migrations under lock", e)
+})?;
+let locked_before_count = locked_applied.len() as u32;
 let migrate_result = MIGRATOR.run_direct(&mut *tx).await;
 ```
+
+`tx.list_applied_migrations()` (the same `Migrate`-trait method `run_direct`'s
+own loop uses internally, called here once up front) reads the applied-migration
+count from inside the transaction that just took the write lock — the
+authoritative view of what this peer's own serialized turn actually starts
+from, as opposed to a separate, unlocked, pre-lock snapshot. `locked_before_count`
+replaces the pre-lock `before`-probe's count for `InitReport`'s
+`migrations_applied`/`already_initialized` bookkeeping (see Invariants and
+boundaries); the pre-lock probe is kept only for its original `TooNew`/`Dirty`
+fast-fail short-circuit, which must still run before any connection or lock is
+taken.
 
 `begin_with("BEGIN IMMEDIATE")` takes SQLite's write lock immediately
 (subject to the pool's existing 30-second `busy_timeout`), rather than
@@ -67,6 +82,20 @@ nothing left to apply for each already-known version (matching checksums)
 and returns `Ok(())`. No peer reaches `apply()` for a migration another peer
 already committed, so the `table X already exists` error path becomes
 unreachable for this race.
+
+This is exactly the scenario `locked_before_count` exists to handle correctly.
+A peer whose pre-lock `before` probe observed `Uninitialized`/`Partial` (because
+it ran before any peer had migrated) but then blocks on `BEGIN IMMEDIATE` while
+another peer fully migrates now returns `Ok(())` from the *success* path, not
+the error path — so it must not report `migrations_applied` as the full
+migration count it never touched, or `already_initialized: false` for a
+database another peer just finished initializing. Using `locked_before_count`
+(read after this peer's own lock acquisition, once the winner's transaction has
+already committed) instead of the pre-lock `before_count` makes both values
+correct: `migrations_applied` becomes `0` for the blocked-then-no-op peer (it
+applied nothing — `run_direct` found nothing left to do), and
+`already_initialized` becomes `true` (this peer's own transaction, once
+serialized, observed a database another peer had already migrated).
 
 `apply()`'s own per-migration `self.begin()` calls (unchanged, internal to
 `sqlx-sqlite`) become nested `SAVEPOINT`s because the connection is already
@@ -106,11 +135,15 @@ untouched.
   `connect()`.
 - `probe_schema`'s classification order and every `SchemaState` variant are
   unchanged.
-- The pre-migration `before = probe_schema(pool).await?` check (used for
-  `TooNew`/`Dirty` short-circuit and `already_initialized`/`before_count`
-  bookkeeping) is unchanged and still runs against the pool directly, before
-  the migration connection is acquired — it remains advisory, as it already
-  was.
+- The pre-migration `before = probe_schema(pool).await?` check still runs
+  against the pool directly, before the migration connection is acquired, and
+  still short-circuits `TooNew`/`Dirty` before any lock is taken. It no longer
+  feeds `InitReport`'s `already_initialized`/`migrations_applied` bookkeeping
+  on the success path — that bookkeeping now comes from `locked_before_count`
+  (see Decision), read from inside the transaction that holds the write lock,
+  because the pre-lock probe can go stale for a peer that blocks on the lock
+  while another peer migrates. The pre-lock probe's role is now `TooNew`/`Dirty`
+  short-circuit only.
 - `emit_schema_initialized_if_missing` is unchanged and still runs against
   the pool after the migration path (success or recovered) completes.
 - `MIGRATOR`'s migration set, versions, and checksums (`crates/voom-store/src/migrator.rs`)
@@ -120,7 +153,10 @@ untouched.
 
 - **Ordinary race (the case this fix targets):** a losing peer blocks on
   `BEGIN IMMEDIATE`, then no-ops through `run_direct` once it acquires the
-  lock. No error, no re-probe call.
+  lock. No error, no re-probe call. `migrations_applied: 0` and
+  `already_initialized: true`, derived from `locked_before_count` (see
+  Decision) rather than the pre-lock probe, so the report accurately reflects
+  that this peer applied nothing.
 - **Busy-timeout exhaustion:** if `BEGIN IMMEDIATE` itself cannot acquire the
   lock within the pool's 30-second `busy_timeout`, `begin_with` returns a
   `sqlx::Error`, wrapped as `VoomError::database_context`. This is a new,
@@ -157,7 +193,13 @@ untouched.
 This is an internal change to how `init()` invokes the existing migrator; it
 adds no migration, changes no schema, and changes no public type
 (`InitReport`, `SchemaState`, error codes). `voom init` and `ControlPlane::open`
-callers are unaffected. No rollback procedure changes.
+callers are unaffected. No rollback procedure changes. `InitReport`'s field
+*values* for a racing peer become more accurate under this change (see
+Decision's `locked_before_count` discussion) — `voom-cli`'s `system init`
+command (`crates/voom-cli/src/commands/system/init.rs`) forwards
+`migrations_applied`/`already_initialized` verbatim into its JSON output, so
+this is a user-visible correctness fix, not just an internal bookkeeping
+detail.
 
 ## Test strategy and acceptance criteria
 
@@ -195,6 +237,13 @@ callers are unaffected. No rollback procedure changes.
   sequential — the second peer starts strictly after the first fully
   migrated, not racing it) and a bounded wall-clock assertion analogous to
   the unit test above, ruling out a hidden retry/backoff path.
+- `concurrent_init_stress` (existing, extended) or a new dedicated integration
+  test asserts `migrations_applied == 0` and `already_initialized == true` for
+  a peer that genuinely raced another (started before the winner committed,
+  then blocked on the lock) — distinct from the sequential-peer test above,
+  which starts strictly after. This is the regression guard for
+  `locked_before_count` (see Decision): without it, a blocked-then-no-op
+  racing peer would report having applied every migration it never touched.
 - A new unit test proves the all-or-nothing atomicity consequence directly:
   against a small, test-local `Migrator` (not the real 36-migration
   `MIGRATOR`) with two migrations where the second deliberately fails, run
