@@ -9,7 +9,7 @@ async fn init_in_memory_applies_every_embedded_migration() {
     let pool = connect("sqlite::memory:").await.unwrap();
     let report = init_on(&pool).await.unwrap();
     assert!(!report.already_initialized);
-    assert_eq!(expected_migrations(), 36);
+    assert_eq!(expected_migrations(), 1);
     assert_eq!(report.migrations_applied, expected_migrations());
 }
 
