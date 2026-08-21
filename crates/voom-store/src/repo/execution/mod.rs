@@ -1,6 +1,7 @@
 use super::{Repository, common};
 
 pub mod accelerator_claims;
+pub mod artifact_access_resolution;
 pub mod jobs;
 pub mod leases;
 pub mod node_incarnations;
