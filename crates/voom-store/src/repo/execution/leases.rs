@@ -183,9 +183,7 @@ pub enum LeaseAcquireOutcome {
     CapacityFull(WorkerCapacitySaturation),
     /// The ticket was not ready, not yet eligible, its parent job was not
     /// open, or its attempt budget was exhausted; nothing was mutated.
-    TicketNotReady {
-        ticket_id: TicketId,
-    },
+    TicketNotReady { ticket_id: TicketId },
     /// The worker could not be credited with the operation; nothing was
     /// mutated.
     WorkerIneligible {

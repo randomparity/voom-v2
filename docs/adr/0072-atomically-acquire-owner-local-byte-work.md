@@ -46,6 +46,13 @@ acquisition path remain unsatisfactory:
    exact custom local operations retain their exact token.
 5. No non-owner fallback, path-based proof, shared-mount proof, or transfer
    ticket is synthesized.
+   The readiness recheck deliberately folds three distinguishable facts —
+   ticket left `ready`, parent job closed, attempt budget exhausted — into one
+   documented reason, because the twelve-code vocabulary offers no finer code
+   and the pre-change conflict message conflated them identically; operators
+   read the distinguishing detail from the row's summary and explanation
+   columns. Finer attribution is a future vocabulary extension, not this
+   slice.
 
 Completed idempotent replay and terminal completion/failure plan semantics
 are owned by #479 and excluded.

@@ -1151,7 +1151,9 @@ async fn accelerator_capacity_is_aggregated_by_hardware_token() {
         .unwrap();
     let saturation = match outcome {
         LeaseAcquireOutcome::CapacityFull(saturation) => Some(saturation),
-        LeaseAcquireOutcome::Acquired(_) => None,
+        LeaseAcquireOutcome::Acquired(_)
+        | LeaseAcquireOutcome::TicketNotReady { .. }
+        | LeaseAcquireOutcome::WorkerIneligible { .. } => None,
     };
     assert!(saturation.is_some());
     let Some(saturation) = saturation else {

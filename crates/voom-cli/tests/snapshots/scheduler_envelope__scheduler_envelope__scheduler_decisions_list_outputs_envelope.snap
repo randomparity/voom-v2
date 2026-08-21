@@ -19,7 +19,7 @@ expression: json
         "ticket_id": 3,
         "selected_worker_id": 2,
         "selected_node_id": 1,
-        "selected_lease_id": null,
+        "selected_lease_id": 4,
         "candidate_count": 1,
         "selected_score": 1700,
         "suppressed_count": 0

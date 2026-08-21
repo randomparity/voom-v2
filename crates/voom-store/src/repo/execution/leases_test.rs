@@ -1721,9 +1721,18 @@ async fn try_acquire_reports_a_not_ready_ticket_as_a_structured_outcome() {
 #[tokio::test]
 async fn try_acquire_maps_every_ineligible_worker_state_to_a_structured_reason() {
     for (state, expected_reason) in [
-        (IneligibleWorkerState::Missing, LeaseIneligibilityReason::WorkerMissing),
-        (IneligibleWorkerState::Stale, LeaseIneligibilityReason::WorkerStale),
-        (IneligibleWorkerState::Retired, LeaseIneligibilityReason::WorkerRetired),
+        (
+            IneligibleWorkerState::Missing,
+            LeaseIneligibilityReason::WorkerMissing,
+        ),
+        (
+            IneligibleWorkerState::Stale,
+            LeaseIneligibilityReason::WorkerStale,
+        ),
+        (
+            IneligibleWorkerState::Retired,
+            LeaseIneligibilityReason::WorkerRetired,
+        ),
         (
             IneligibleWorkerState::MissingCapability,
             LeaseIneligibilityReason::MissingCapability,
@@ -1853,9 +1862,11 @@ async fn try_acquire_preserves_the_capacity_full_outcome() {
 
 #[test]
 fn into_lease_result_preserves_the_legacy_error_classification_for_changed_gates() {
-    let not_ready = LeaseAcquireOutcome::TicketNotReady { ticket_id: TicketId(7) }
-        .into_lease_result()
-        .unwrap_err();
+    let not_ready = LeaseAcquireOutcome::TicketNotReady {
+        ticket_id: TicketId(7),
+    }
+    .into_lease_result()
+    .unwrap_err();
     match not_ready {
         VoomError::Conflict(message) => assert_eq!(
             message,
@@ -1880,15 +1891,11 @@ fn into_lease_result_preserves_the_legacy_error_classification_for_changed_gates
         ),
         (
             LeaseIneligibilityReason::OperationDenied,
-            VoomError::Conflict(
-                "acquire rejected: worker 9 denied operation noop".to_owned(),
-            ),
+            VoomError::Conflict("acquire rejected: worker 9 denied operation noop".to_owned()),
         ),
         (
             LeaseIneligibilityReason::MissingCapability,
-            VoomError::Conflict(
-                "acquire rejected: worker 9 missing capability noop".to_owned(),
-            ),
+            VoomError::Conflict("acquire rejected: worker 9 missing capability noop".to_owned()),
         ),
         (
             LeaseIneligibilityReason::MissingGrant,
