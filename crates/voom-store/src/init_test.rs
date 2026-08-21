@@ -1,7 +1,11 @@
+use std::borrow::Cow;
+
 use super::*;
 use crate::pool::connect;
 use crate::repo::audit::events::{EventFilter, EventRepo, Page, SqliteEventRepo};
 use crate::schema::{expected_migrations, probe_schema};
+use sqlx::Connection;
+use sqlx::migrate::{Migrate, Migration, MigrationType, Migrator};
 use voom_events::{Event, EventKind};
 
 #[tokio::test]
@@ -9,7 +13,7 @@ async fn init_in_memory_applies_every_embedded_migration() {
     let pool = connect("sqlite::memory:").await.unwrap();
     let report = init_on(&pool).await.unwrap();
     assert!(!report.already_initialized);
-    assert_eq!(expected_migrations(), 36);
+    assert_eq!(expected_migrations(), 1);
     assert_eq!(report.migrations_applied, expected_migrations());
 }
 
@@ -207,8 +211,12 @@ async fn init_is_idempotent_on_same_pool() {
 }
 
 #[tokio::test]
-async fn migration_race_recovery_waits_for_slow_winner() {
+async fn single_shot_replacement_has_no_polling() {
     let pool = connect("sqlite::memory:").await.unwrap();
+    // Seed a Partial fixture ahead of the transaction so a full rollback
+    // (migration 1 fails immediately) returns to exactly this state, not
+    // Uninitialized — CREATE TABLE IF NOT EXISTS inside the transaction is a
+    // no-op against an already-existing table, so it isn't undone by rollback.
     sqlx::query(
         "CREATE TABLE _sqlx_migrations ( \
          version BIGINT PRIMARY KEY, \
@@ -223,18 +231,144 @@ async fn migration_race_recovery_waits_for_slow_winner() {
     .await
     .unwrap();
 
-    let migration_pool = pool.clone();
-    let migration = tokio::spawn(async move {
-        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-        MIGRATOR.run(&migration_pool).await.unwrap();
-    });
+    let broken = Migrator {
+        migrations: Cow::Owned(vec![Migration::new(
+            1,
+            Cow::Borrowed("broken"),
+            MigrationType::Simple,
+            Cow::Borrowed("NOT VALID SQL;"),
+            false,
+        )]),
+        ignore_missing: false,
+        locking: true,
+        no_tx: false,
+    };
 
-    let state = probe_after_failure(&pool).await.unwrap();
-    migration.await.unwrap();
+    let start = tokio::time::Instant::now();
+    let mut conn = pool.acquire().await.unwrap();
+    let mut tx = conn.begin_with("BEGIN IMMEDIATE").await.unwrap();
+    tx.ensure_migrations_table().await.unwrap();
+    let migrate_result = broken.run_direct(&mut *tx).await;
+    assert!(migrate_result.is_err(), "invalid SQL must fail run_direct");
+    drop(tx); // rolls back, releasing the lock
+    drop(conn); // return the sole :memory: pool connection before probing
+    let after = probe_schema(&pool).await.unwrap();
+    let elapsed = start.elapsed();
 
     assert!(
-        matches!(state, SchemaState::Current { .. }),
-        "recovery must wait for a winning migrator that takes longer than one second: {state:?}"
+        matches!(after, SchemaState::Partial { .. }),
+        "expected Partial after rollback to the pre-seeded fixture, got {after:?}"
+    );
+    assert!(
+        elapsed < std::time::Duration::from_millis(25),
+        "single-shot classification must not poll or sleep: took {elapsed:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn locked_migration_true_race_reports_zero_applied() {
+    let tmp = voom_test_support::TempDatabase::new().unwrap();
+    let url = crate::test_support::sqlite_url_for(tmp.path());
+    let pool = crate::test_support::create_uninitialized_pool(&url)
+        .await
+        .unwrap();
+
+    // Peer A: fully migrate on a directly-held, uncommitted transaction.
+    let mut conn_a = pool.acquire().await.unwrap();
+    let mut held = conn_a.begin_with("BEGIN IMMEDIATE").await.unwrap();
+    MIGRATOR.run_direct(&mut *held).await.unwrap();
+
+    // Peer B: spawn a real run_migrations_on against the same pool.
+    let pool_b = pool.clone();
+    let peer_b = tokio::spawn(async move { run_migrations_on(&pool_b).await });
+
+    // Release peer A's lock. Peer B's own `locked_before_count` read always
+    // happens either after this commit (sees everything already applied) or
+    // blocks on peer A's BEGIN IMMEDIATE until this same commit releases it
+    // — there is no interleaving that produces a different observable
+    // outcome for peer B, so this test needs no sleep or rendezvous signal.
+    held.commit().await.unwrap();
+
+    let report = peer_b.await.unwrap().unwrap();
+    assert_eq!(report.migrations_applied, 0);
+    assert!(report.already_initialized);
+}
+
+#[tokio::test]
+async fn busy_timeout_exhaustion_surfaces_database_error() {
+    let tmp = voom_test_support::TempDatabase::new().unwrap();
+    let url = crate::test_support::sqlite_url_for(tmp.path());
+    let pool = crate::test_support::create_uninitialized_pool(&url)
+        .await
+        .unwrap();
+
+    let mut conn1 = pool.acquire().await.unwrap();
+    let _held = conn1.begin_with("BEGIN IMMEDIATE").await.unwrap();
+
+    let mut conn2 = pool.acquire().await.unwrap();
+    sqlx::query("PRAGMA busy_timeout = 0")
+        .execute(&mut *conn2)
+        .await
+        .unwrap();
+    // Load-bearing: return conn2 to the pool's idle queue *before* calling
+    // run_migrations_on, whose own internal pool.acquire() calls must reuse
+    // this specific (busy_timeout = 0) connection rather than spin up a
+    // fresh one with the default 30s busy_timeout. conn1 stays checked out
+    // for the whole test and no other connection is ever created, so conn2
+    // is the only idle connection available when that happens.
+    drop(conn2);
+
+    let result = run_migrations_on(&pool).await;
+    assert!(
+        matches!(result, Err(VoomError::Database { .. })),
+        "expected a busy-timeout Database error, got {result:?}"
+    );
+}
+
+#[tokio::test]
+async fn all_or_nothing_rollback_on_migration_failure() {
+    let pool = connect("sqlite::memory:").await.unwrap();
+
+    let broken = Migrator {
+        migrations: Cow::Owned(vec![
+            Migration::new(
+                1,
+                Cow::Borrowed("first"),
+                MigrationType::Simple,
+                Cow::Borrowed("CREATE TABLE first_migration_marker (id INTEGER PRIMARY KEY);"),
+                false,
+            ),
+            Migration::new(
+                2,
+                Cow::Borrowed("second_invalid"),
+                MigrationType::Simple,
+                Cow::Borrowed("NOT VALID SQL;"),
+                false,
+            ),
+        ]),
+        ignore_missing: false,
+        locking: true,
+        no_tx: false,
+    };
+
+    let mut conn = pool.acquire().await.unwrap();
+    let mut tx = conn.begin_with("BEGIN IMMEDIATE").await.unwrap();
+    tx.ensure_migrations_table().await.unwrap();
+    let migrate_result = broken.run_direct(&mut *tx).await;
+    assert!(migrate_result.is_err(), "second migration must fail");
+    drop(tx); // rolls back, including migration 1's nested SAVEPOINT
+    drop(conn); // return the sole :memory: pool connection before querying
+
+    let exists: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = \
+         'first_migration_marker'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        exists, 0,
+        "migration 1's table must not survive rollback of migration 2's failure"
     );
 }
 

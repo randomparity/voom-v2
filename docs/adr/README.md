@@ -71,4 +71,5 @@ are append-only — supersede an ADR with a new one rather than rewriting histor
 | [0065](0065-bound-node-activation-admission-and-pruning.md) | Bound node activation admission and prune history explicitly |
 | [0066](0066-observe-graceful-shutdown-as-one-bounded-lifecycle.md) | Observe graceful shutdown as one bounded lifecycle |
 | [0067](0067-durable-scan-sessions-and-completion-gated-reconciliation.md) | Durable scan sessions and completion-gated reconciliation |
-| [0068](0068-byte-work-tickets-declare-canonical-artifact-access.md) | Byte-work tickets declare canonical artifact access |
+| [0068](0068-serialize-sqlite-migration-application.md) | Serialize SQLite migration application with a held write lock |
+| [0069](0069-byte-work-tickets-declare-canonical-artifact-access.md) | Byte-work tickets declare canonical artifact access |

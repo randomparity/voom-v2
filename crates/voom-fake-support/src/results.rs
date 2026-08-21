@@ -450,7 +450,7 @@ fn advertised_access_modes<'a>(
 ///
 /// These ids name no `file_locations` row. That is sound only while nothing
 /// resolves them, which is true today — a scan result is routing evidence for the
-/// children it fans out to, and ADR 0068 grants a declaration no resolution.
+/// children it fans out to, and ADR 0069 grants a declaration no resolution.
 ///
 /// It does **not** follow that #476 will fail on them by itself. `expand_scanner_
 /// completion` pairs each of these with the scan ticket's own real

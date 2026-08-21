@@ -52,6 +52,23 @@ skip = [
     # ring 0.17.14 retains the older Windows bindings. Tolerate only that transitive
     # version; the workspace's windows-sys 0.61.2 baseline remains unskipped.
     { crate = "windows-sys@0.52.0", reason = "ring TLS provider; baseline 0.61.2" },
+    # reqwest 0.13.4 pulls tower-http 0.6.11; reqwest hasn't published a release
+    # against tower-http 0.7 yet. Tolerate only that transitive version; the
+    # workspace's tower-http 0.7.0 baseline remains unskipped.
+    { crate = "tower-http@0.6.11", reason = "reqwest 0.13.4 pinned; baseline 0.7.0" },
+    # hyper-util, pem, reqwest, and sqlx-core pull base64 0.22.1; none has
+    # published a release against base64 0.23 yet. Tolerate only that
+    # transitive version; the workspace's base64 0.23.1 baseline remains unskipped.
+    { crate = "base64@0.22.1", reason = "hyper-util/pem/reqwest/sqlx-core pinned; baseline 0.23.1" },
+    # blake3's dev-dependencies pull constant_time_eq 0.4.2; blake3 hasn't
+    # published a release against constant_time_eq 0.5 yet. Tolerate only
+    # that transitive version; the workspace's 0.5.0 baseline remains unskipped.
+    { crate = "constant_time_eq@0.4.2", reason = "blake3 dev-dependency pinned; baseline 0.5.0" },
+    # async-trait, clap_derive, serde_derive, and thiserror-impl have moved to
+    # syn 3; tokio-macros, tracing-attributes, and the zerovec/yoke derive
+    # crates haven't yet. Tolerate the early-adopter version; the syn 2.0.117
+    # baseline used by the rest of the proc-macro graph remains unskipped.
+    { crate = "syn@3.0.3", reason = "async-trait/clap_derive/serde_derive/thiserror-impl early adopters; baseline 2.0.117" },
 ]
 skip-tree = []
 

@@ -5,7 +5,7 @@
 //! evidence downstream consumers resolve non-deterministic, and no canonical-form
 //! rule would catch it. Both the encode and the decode side of the payload gate
 //! compare against this one function, so a persisted declaration is valid exactly
-//! when it equals what this would have produced (ADR 0068).
+//! when it equals what this would have produced (ADR 0069).
 
 use voom_core::{
     ArtifactAccessDeclaration, ArtifactAccessEntry, ArtifactAccessRight, ArtifactAccessTarget,

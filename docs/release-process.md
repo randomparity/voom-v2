@@ -64,7 +64,7 @@ rather than silently dropping a field:
   change requires restoring the pre-upgrade database snapshot
   (see `docs/runbooks/migration-rollback.md`).
 
-`tickets.payload` carries a breaking change under this contract (ADR 0068): a
+`tickets.payload` carries a breaking change under this contract (ADR 0069): a
 byte-touching workflow ticket now requires a `declared_artifact_access` declaration, and a
 row written before that binary no longer decodes. No backfill is possible — the
 declaration names a storage root and location the old row never recorded.
@@ -76,9 +76,9 @@ out. No shipped command does either half yet — `voom ticket` offers only `list
 steps currently require direct SQL against `tickets`. Issue #480 tracks shipping the
 control. Quiescing first is load-bearing: the binary performing the drain is the one still
 rendering old-shape tickets, so draining against a live writer leaves everything
-rendered between the drain and the swap undecodable. A ticket rendered after migration
-0034 references a live rooted location and dispatches normally today, so skipping the
-step loses completable work rather than delaying it.
+rendered between the drain and the swap undecodable. A ticket rendered against
+node-owned roots (ADR 0055) references a live rooted location and dispatches normally
+today, so skipping the step loses completable work rather than delaying it.
 
 **Which kinds.** Twelve operations are byte-touching (`OperationKind::is_byte_touching`).
 The drain predicate is every one of them under the workflow namespace:
@@ -124,7 +124,7 @@ procedure, which such a deployment already owes.
 
 The same drain covers a second break in the same release, and must be stated to,
 because the two have different symptoms. Ticket-kind normalization became strict
-(ADR 0068): a kind of the form `synthetic.workflow.operation.<suffix>` whose suffix
+(ADR 0069): a kind of the form `synthetic.workflow.operation.<suffix>` whose suffix
 is not a known operation is now rejected at lease acquisition, so such a ticket is
 permanently unleasable rather than merely undecodable. Drain those alongside the
 byte-touching ones.

@@ -2,7 +2,7 @@
 //!
 //! Routing evidence only. Every target names stable IDs — never a path, provider
 //! locator, mount name, or host string — so nothing here can be mistaken for proof
-//! of locality (ADR 0050, ADR 0068). Rights state intent; this module exposes
+//! of locality (ADR 0050, ADR 0069). Rights state intent; this module exposes
 //! nothing that resolves, authorizes, or performs anything.
 //!
 //! Construction and deserialization run the same validation, so a declaration has

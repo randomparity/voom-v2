@@ -73,7 +73,7 @@ impl OperationKind {
     /// Whether this operation opens an artifact's bytes.
     ///
     /// A byte-touching operation must declare the storage it intends to access
-    /// (ADR 0068). The three excluded operations derive from facts an earlier
+    /// (ADR 0069). The three excluded operations derive from facts an earlier
     /// operation already recorded, or talk to an external system; none opens an
     /// artifact. `ScanLibrary` is included because it enumerates a root's
     /// contents.

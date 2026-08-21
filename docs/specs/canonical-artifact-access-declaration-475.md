@@ -3,7 +3,7 @@
 Status: draft
 Date: 2026-08-12
 Issue: #475 (parent #420, epic #413)
-ADR: [0068](../adr/0068-byte-work-tickets-declare-canonical-artifact-access.md)
+ADR: [0069](../adr/0069-byte-work-tickets-declare-canonical-artifact-access.md)
 Base: `main`
 
 ## Context
@@ -489,7 +489,7 @@ from the source root's `default_output_root_id` is `artifact_target_root`'s job,
 slice does not do it. So when an operator has set `default_output_root_id` to a second
 root, the declared write names a root the ticket never writes and names nothing for the
 root it does. #484 owns closing that; #476 must not read the entry as a destination. See
-the ADR 0068 consequence of the same name for why it was not closed here.
+the ADR 0069 consequence of the same name for why it was not closed here.
 
 `insert_policy_file_source` (`binding.rs:323-331`) currently writes `source_location_id`
 only when `PolicyFileSource.location_id` is `Some`, which `resolve_policy_file_source`
@@ -647,7 +647,7 @@ fail per ticket and need no change. The other three do not:
 - **`workflow/execution/executor/expansion.rs:141-166`** loops a batch of ready workflow
   tickets and `?`-propagates a `VoomError::Internal` per ticket, so one undecodable
   old-shape row aborts `ready_workflow_tickets` for the entire job. That is the same
-  batch-scoped hazard ADR 0068 argues against at `remote_acquire_candidates_in_tx`, and this
+  batch-scoped hazard ADR 0069 argues against at `remote_acquire_candidates_in_tx`, and this
   change is what makes decode failures newly possible there — so it is ours to contain.
   **This requirement is withdrawn, and #486 carries it.** The reasoning below is kept
   because the withdrawal is the interesting part.
@@ -665,7 +665,7 @@ fail per ticket and need no change. The other three do not:
   which at least fails before any work is wasted.
 
   What makes the skip correct is a terminal transition that does not require a lease, so
-  the row leaves `ready` for good and also opens the ADR 0018 issue this spec, ADR 0068
+  the row leaves `ready` for good and also opens the ADR 0018 issue this spec, ADR 0069
   and `docs/release-process.md` each described as the "loud" outcome. That is #486's
   scope, and the skip belongs with it rather than ahead of it. All three documents now
   describe the run-scoped abort that actually ships.
@@ -706,7 +706,7 @@ per-operation total by one.
 `ticket_payload.rs` is already in `scripts/payload-contract-scope.txt`. The new core
 module joins it, and `docs/payload-contract-inventory.md` gains the declaration structs,
 because they are typed content of the durable `tickets.payload` column.
-`docs/adr/README.md` gains the ADR 0068 row: `check-adr-index` is part of `just ci`, and
+`docs/adr/README.md` gains the ADR 0069 row: `check-adr-index` is part of `just ci`, and
 CI runs `just ci`, so the row is a merge precondition. `docs/release-process.md` gains the
 breaking-payload upgrade step, because ADR 0013 requires the binary-before-DB ordering to
 live there rather than only in a decision record.

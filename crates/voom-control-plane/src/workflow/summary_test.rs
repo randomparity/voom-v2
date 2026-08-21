@@ -78,7 +78,7 @@ async fn refresh_counts_fails_loudly_when_the_pool_is_closed() {
 }
 
 /// Pins what an undecodable payload costs a summary, so a later change to it is
-/// deliberate. After the ADR 0068 payload break this is the shape of a completed
+/// deliberate. After the ADR 0069 payload break this is the shape of a completed
 /// pre-upgrade byte-touching row, which the upgrade drain does not cover — the
 /// drain names *unfinished* tickets — so such a row is skipped here forever.
 ///
@@ -120,7 +120,7 @@ async fn an_undecodable_ticket_is_counted_in_the_total_and_missing_from_per_oper
     .execute(&control.pool)
     .await
     .unwrap();
-    // A pre-upgrade row, built to be undecodable for exactly the ADR 0068 reason and
+    // A pre-upgrade row, built to be undecodable for exactly the ADR 0069 reason and
     // no other: a well-formed byte-touching payload with `declared_artifact_access`
     // removed. An envelope-less `'{}'` would also fail to decode, but it failed
     // before this branch too, so it would leave this test green if the declaration
@@ -185,6 +185,6 @@ async fn an_undecodable_ticket_is_counted_in_the_total_and_missing_from_per_oper
             .per_operation
             .contains_key(&OperationKind::ProbeFile),
         "the undecodable byte-touching ticket reached a per-operation total, so the \
-         ADR 0068 declaration gate stopped rejecting a payload with no declaration"
+         ADR 0069 declaration gate stopped rejecting a payload with no declaration"
     );
 }

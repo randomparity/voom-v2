@@ -9,6 +9,8 @@ updates:
       default-days: 7
     groups:
       cargo-all:
+        patterns:
+          - "*"
         update-types:
           - "major"
           - "minor"
@@ -23,6 +25,8 @@ updates:
       default-days: 7
     groups:
       actions-all:
+        patterns:
+          - "*"
         update-types:
           - "major"
           - "minor"

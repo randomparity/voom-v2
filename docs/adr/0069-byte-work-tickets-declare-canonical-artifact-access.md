@@ -1,4 +1,4 @@
-# ADR 0068: Byte-work tickets declare canonical artifact access
+# ADR 0069: Byte-work tickets declare canonical artifact access
 
 ## Status
 
