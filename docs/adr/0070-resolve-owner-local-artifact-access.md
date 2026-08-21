@@ -57,7 +57,7 @@ All SQL queries live in `voom-store::repo::execution::artifact_access_resolution
 
 3. **Validate state:** Reject retired, unassigned, or invalid state roots and locations
 
-4. **Check epochs:** Validate `root_epoch` from database (accepting valid epoch zero)
+4. **Check epochs:** Decode `root_epoch` and reject negative values as corrupt; valid epoch zero is accepted
 
 5. **Resolve active incarnation:** Call `resolve_active_incarnation` for the owner's current active incarnation
 
@@ -65,7 +65,6 @@ All SQL queries live in `voom-store::repo::execution::artifact_access_resolution
 
 All SQLite data is treated as untrusted persisted data. Resolution performs:
 - Checked numeric conversions (e.g., `Option<i64>` before using)
-- Structural validation before business classification
 - Explicit error messages that never include paths or locators
 
 ### Database Error Classification

@@ -239,6 +239,36 @@ async fn test_resolve_storage_root_corrupt_state_fails_closed() {
 }
 
 #[tokio::test]
+async fn test_resolve_storage_root_negative_epoch_fails_closed() {
+    let (pool, _temp_dir) = setup_test_pool().await;
+
+    test_support::seed_test_storage_root(&pool).await.unwrap();
+    // The schema's own CHECK rejects negative epochs; bypass it to simulate a
+    // row written by something that ignored application-level invariants.
+    test_support::with_check_constraints_disabled(&pool, |conn| {
+        Box::pin(async move {
+            sqlx::query("UPDATE library_roots SET root_epoch = -1 WHERE id = ?1")
+                .bind(i64::try_from(test_support::TEST_STORAGE_ROOT_ID.0).unwrap())
+                .execute(&mut *conn)
+                .await
+        })
+    })
+    .await
+    .unwrap();
+    let result = resolve_storage_root(&pool, test_support::TEST_STORAGE_ROOT_ID).await;
+    match result {
+        Err(AccessResolutionError::InvalidRootEpoch {
+            storage_root_id,
+            root_epoch,
+        }) => {
+            assert_eq!(storage_root_id, test_support::TEST_STORAGE_ROOT_ID);
+            assert_eq!(root_epoch, -1);
+        }
+        other => panic!("Expected InvalidRootEpoch, got {other:?}"),
+    }
+}
+
+#[tokio::test]
 async fn test_resolve_file_location_unrooted_address_fails_closed() {
     let (pool, _temp_dir) = setup_test_pool().await;
 

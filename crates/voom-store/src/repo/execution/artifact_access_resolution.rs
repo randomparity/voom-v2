@@ -82,6 +82,11 @@ pub enum AccessResolutionError {
         storage_root_id: StorageRootId,
         state: String,
     },
+    /// A storage root carries a negative (corrupt) epoch.
+    InvalidRootEpoch {
+        storage_root_id: StorageRootId,
+        root_epoch: i64,
+    },
     /// A file location is not in a valid state.
     InvalidLocationState {
         file_location_id: FileLocationId,
@@ -123,6 +128,15 @@ impl std::fmt::Display for AccessResolutionError {
                 write!(
                     f,
                     "storage root {storage_root_id} has invalid state: {state}"
+                )
+            }
+            AccessResolutionError::InvalidRootEpoch {
+                storage_root_id,
+                root_epoch,
+            } => {
+                write!(
+                    f,
+                    "storage root {storage_root_id} has invalid epoch: {root_epoch}"
                 )
             }
             AccessResolutionError::InvalidLocationState {
@@ -210,7 +224,12 @@ where
     let root_epoch: i64 = row.try_get("root_epoch").map_err(|e| {
         AccessResolutionError::DatabaseError(format!("Failed to read root_epoch: {e}"))
     })?;
-
+    if root_epoch < 0 {
+        return Err(AccessResolutionError::InvalidRootEpoch {
+            storage_root_id,
+            root_epoch,
+        });
+    }
     Ok(ResolvedRoot {
         storage_root_id,
         owner_node_id,

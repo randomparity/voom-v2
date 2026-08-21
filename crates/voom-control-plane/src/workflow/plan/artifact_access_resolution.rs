@@ -57,6 +57,11 @@ pub enum AccessResolutionError {
         storage_root_id: StorageRootId,
         state: String,
     },
+    /// A storage root carries a negative (corrupt) epoch.
+    InvalidRootEpoch {
+        storage_root_id: StorageRootId,
+        root_epoch: i64,
+    },
     /// A file location is not in a valid state.
     InvalidLocationState {
         file_location_id: FileLocationId,
@@ -108,8 +113,16 @@ impl std::fmt::Display for AccessResolutionError {
             } => {
                 write!(
                     f,
-                    "file location {} is not in a valid state: {}",
-                    file_location_id.0, state
+                    "file location {file_location_id} has invalid state: {state}"
+                )
+            }
+            AccessResolutionError::InvalidRootEpoch {
+                storage_root_id,
+                root_epoch,
+            } => {
+                write!(
+                    f,
+                    "storage root {storage_root_id} has invalid epoch: {root_epoch}"
                 )
             }
             AccessResolutionError::MixedOwner {
@@ -158,6 +171,13 @@ impl From<RepoAccessResolutionError> for AccessResolutionError {
             } => AccessResolutionError::InvalidRootState {
                 storage_root_id,
                 state,
+            },
+            RepoAccessResolutionError::InvalidRootEpoch {
+                storage_root_id,
+                root_epoch,
+            } => AccessResolutionError::InvalidRootEpoch {
+                storage_root_id,
+                root_epoch,
             },
             RepoAccessResolutionError::InvalidLocationState {
                 file_location_id,
