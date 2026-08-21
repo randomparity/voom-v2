@@ -181,38 +181,6 @@ pub(crate) fn extract_audio_protocol_payload(
         .map_err(|err| invalid(format!("extract_audio protocol payload invalid: {err}")))
 }
 
-pub(crate) fn optional_string_array_field<'a>(
-    payload: &'a serde_json::Value,
-    field: &'static str,
-) -> Result<Option<Vec<&'a str>>, ProtocolError> {
-    payload
-        .as_object()
-        .and_then(|object| object.get(field))
-        .map(|value| {
-            value
-                .as_array()
-                .ok_or_else(|| invalid(format!("{field} must be an array")))
-                .and_then(|items| {
-                    items
-                        .iter()
-                        .map(|item| {
-                            item.as_str()
-                                .ok_or_else(|| invalid(format!("{field} must contain strings")))
-                        })
-                        .collect()
-                })
-        })
-        .transpose()
-}
-
-pub(crate) fn string_array_field<'a>(
-    payload: &'a serde_json::Value,
-    field: &'static str,
-) -> Result<Vec<&'a str>, ProtocolError> {
-    optional_string_array_field(payload, field)?
-        .ok_or_else(|| invalid(format!("payload missing {field}")))
-}
-
 pub(crate) fn invalid(detail: impl Into<String>) -> ProtocolError {
     ProtocolError::InvalidPayload {
         detail: detail.into(),

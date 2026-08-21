@@ -1,7 +1,8 @@
 # Durable Payload Contract Inventory
 
 This inventory is the completeness record for the durable JSON evolution contract in
-ADR 0013. It covers the SQLite schema through migration `0036` and separates payloads by
+ADR 0013. It covers the SQLite schema through logical migration `0037` (physical version 2)
+and separates payloads by
 their current enforcement state.
 
 A durable JSON value is in one of three states:
@@ -36,6 +37,8 @@ inventory and that scope file.
 | `audio_extract_operation_outputs.result_facts` | `audio/mod.rs::recovery_output_input` | `AudioObservedFacts` | Recovery facts reject unknown fields before they can drive a resumed commit. |
 | `policy_versions.compiled_json` | `plans.rs::deserialize_stored_compiled_policy` | `CompiledPolicy` and its compiled operation, filter, condition, value, profile, diagnostic, span, and provenance closure | All 41 tagged variants use strict content structs. Intentionally opaque metadata and provenance maps remain `JsonValue`. |
 | `remote_idempotency_keys.response_json` | `remote_idempotency.rs::reserve_or_replay_in_tx`, then route-specific replay decoders | `RemoteMutationReplay`, `RemoteAcquireOutcome`, execution heartbeat/complete/fail outcomes, scan start/batch/failure outcomes, `RemoteLeaseDispatch`, and `RemoteArtifactAccessPlan` | Envelope status values are `ok` and `error`; acquire outcomes are `idle`, `no_candidate`, and `leased`. Scan mutation routes decode stored `data` into their route-specific strict outcome. Strict wire structs preserve the public domain enums while rejecting unknown fields. |
+| `artifact_access_plans.access_evidence` | `voom-store/src/repo/media/artifact_access_plans.rs::row_to_plan` | `OwnerAccessEvidence`, `ArtifactAccessDeclaration`, and `RootEpoch` | Selection-time owner-local proof rejects unknown fields, unknown targets, negative epochs, non-canonical epoch order, and epoch sets that do not match the declaration's roots (ADR 0071). |
+| `scheduler_decisions.access_evidence` | `voom-store/src/repo/execution/scheduler_decisions.rs::row_to_decision` | `DecisionAccessEvidence` (`owner`/`rejected`) over `OwnerAccessEvidence` / `AccessRejectionEvidence` | Tagged evidence enum rejects unknown variant names; owner evidence only on selected decisions, rejected evidence only on unsupported-artifact-access rejections (repository-enforced); decode failures are database errors (ADR 0071). |
 
 ### Event families and audit boundary
 

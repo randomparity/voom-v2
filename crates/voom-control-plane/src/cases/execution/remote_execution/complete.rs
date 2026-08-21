@@ -286,45 +286,44 @@ fn validated_artifact_complete_evidence(
             "remote complete rejected: artifact access validation missing".to_owned(),
         ));
     }
-    let mode = evidence
-        .get("mode")
-        .and_then(JsonValue::as_str)
-        .ok_or_else(|| {
-            VoomError::Conflict("remote complete rejected: artifact access mode missing".to_owned())
-        })?;
-    if mode != plan.selected_access_mode.as_str() {
-        return Err(VoomError::Conflict(format!(
-            "remote complete rejected: artifact access mode {mode} does not match selected mode {}",
-            plan.selected_access_mode.as_str()
-        )));
-    }
-    let inputs = string_array_evidence(evidence, "inputs_consumed")?;
-    if inputs != plan.input_handles {
-        return Err(VoomError::Conflict(
-            "remote complete rejected: artifact input handles do not match selected plan"
-                .to_owned(),
-        ));
-    }
-    let outputs = string_array_evidence(evidence, "outputs_declared")?;
-    if outputs != plan.output_handles {
-        return Err(VoomError::Conflict(
-            "remote complete rejected: artifact output handles do not match selected plan"
-                .to_owned(),
-        ));
+    // The echo must agree with the persisted owner-local proof (ADR 0071):
+    // byte-work plans require the same owner and an equal evidence value;
+    // declaration-free plans must not claim either.
+    match (&plan.access_evidence, plan.owner_node_id) {
+        (Some(expected), Some(owner)) => {
+            let echoed_owner = evidence.get("owner_node_id").and_then(JsonValue::as_u64);
+            if echoed_owner != Some(owner.0) {
+                return Err(VoomError::Conflict(format!(
+                    "remote complete rejected: echoed artifact access owner {echoed_owner:?} \
+                     does not match selected plan owner {}",
+                    owner.0
+                )));
+            }
+            let expected_json = serde_json::to_value(expected).map_err(|e| {
+                VoomError::Internal(format!("persisted access evidence unserializable: {e}"))
+            })?;
+            if evidence.get("access_evidence") != Some(&expected_json) {
+                return Err(VoomError::Conflict(
+                    "remote complete rejected: echoed artifact access does not match selected plan"
+                        .to_owned(),
+                ));
+            }
+        }
+        (None, None) => {
+            if evidence.get("owner_node_id").is_some() || evidence.get("access_evidence").is_some()
+            {
+                return Err(VoomError::Conflict(
+                    "remote complete rejected: ticket declared no artifact access but the \
+                     worker echoed an access claim"
+                        .to_owned(),
+                ));
+            }
+        }
+        _ => {
+            return Err(VoomError::Internal(
+                "artifact access plan owner/evidence pair is half-present".to_owned(),
+            ));
+        }
     }
     Ok(evidence.clone())
-}
-
-fn string_array_evidence(value: &JsonValue, field: &'static str) -> Result<Vec<String>, VoomError> {
-    value
-        .get(field)
-        .and_then(JsonValue::as_array)
-        .ok_or_else(|| VoomError::Conflict(format!("remote complete rejected: {field} missing")))?
-        .iter()
-        .map(|item| {
-            item.as_str().map(str::to_owned).ok_or_else(|| {
-                VoomError::Conflict(format!("remote complete rejected: {field} must be strings"))
-            })
-        })
-        .collect()
 }

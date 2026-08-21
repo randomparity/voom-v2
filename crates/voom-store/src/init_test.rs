@@ -13,7 +13,7 @@ async fn init_in_memory_applies_every_embedded_migration() {
     let pool = connect("sqlite::memory:").await.unwrap();
     let report = init_on(&pool).await.unwrap();
     assert!(!report.already_initialized);
-    assert_eq!(expected_migrations(), 1);
+    assert_eq!(expected_migrations(), 2);
     assert_eq!(report.migrations_applied, expected_migrations());
 }
 
@@ -564,4 +564,243 @@ async fn init_from_partial_state_reports_delta_not_total() {
     let report = init_on(&pool).await.unwrap();
     assert!(!report.already_initialized);
     assert_eq!(report.migrations_applied, expected_migrations());
+}
+
+use sqlx::Row as _;
+
+// --- Migration 0037 (issue #477, ADR 0071) --------------------------------
+
+/// Apply only the squashed base schema (logical migrations through 0036),
+/// leaving the database one migration behind so a test can seed pre-0037
+/// rows and then run the real `init` upgrade path.
+async fn apply_base_schema_only(pool: &sqlx::SqlitePool) {
+    use sqlx::migrate::{Migration, MigrationType, Migrator};
+    use std::borrow::Cow;
+    let embedded = crate::test_support::embedded_migrator();
+    let base = Migrator {
+        migrations: Cow::Owned(vec![Migration::new(
+            embedded.migrations[0].version,
+            Cow::Borrowed(embedded.migrations[0].description.as_ref()),
+            MigrationType::Simple,
+            Cow::Borrowed(embedded.migrations[0].sql.as_ref()),
+            false,
+        )]),
+        ignore_missing: false,
+        locking: true,
+        no_tx: false,
+    };
+    let mut conn = pool.acquire().await.unwrap();
+    base.run(&mut *conn).await.unwrap();
+}
+
+const ALL_REASON_CODES: &[&str] = &[
+    "selected",
+    "no_ready_ticket",
+    "missing_capability",
+    "missing_grant",
+    "operation_denied",
+    "worker_not_executable",
+    "node_not_executable",
+    "heartbeat_expired",
+    "unsupported_artifact_access",
+    "worker_capacity_full",
+    "node_capacity_full",
+    "no_eligible_candidate",
+];
+
+#[tokio::test]
+async fn migration_0037_preserves_every_scheduler_decision_column_index_and_sequence() {
+    let tmp = voom_test_support::TempDatabase::new().unwrap();
+    let url = crate::test_support::sqlite_url_for(tmp.path());
+    let pool = crate::test_support::create_uninitialized_pool(&url)
+        .await
+        .unwrap();
+    apply_base_schema_only(&pool).await;
+
+    // A legacy idle decision with an explicit high id so the AUTOINCREMENT
+    // sequence has real state to preserve.
+    sqlx::query(
+        "INSERT INTO scheduler_decisions \
+         (id, created_at, updated_at, first_seen_at, last_seen_at, decision_kind, \
+          request_source, idempotency_key, request_node_id, request_worker_id, ticket_id, \
+          selected_worker_id, selected_node_id, selected_lease_id, outcome, reason_code, \
+          summary, candidate_count, selected_score, suppressed_count, suppression_key, \
+          explanation_json) \
+         VALUES (41, '1970-01-01T00:00:00Z', '1970-01-01T00:00:00Z', \
+                 '1970-01-01T00:00:00Z', '1970-01-01T00:00:00Z', 'idle', 'remote_acquire', \
+                 'legacy-key', NULL, NULL, NULL, NULL, NULL, NULL, 'idle', \
+                 'no_ready_ticket', 'legacy row', 0, NULL, 3, \
+                 'remote_acquire:node:1:worker:2:reason:no_ready_ticket:ops:none:bucket:2', \
+                 '{}')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let report = crate::init::init_on(&pool).await.unwrap();
+    assert_eq!(report.migrations_applied, 1);
+
+    // Every pre-existing column value survives, and the new column is NULL.
+    let row = sqlx::query("SELECT * FROM scheduler_decisions WHERE id = 41")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let columns: Vec<&str> = row.columns().iter().map(sqlx::Column::name).collect();
+    assert!(columns.contains(&"access_evidence"));
+    let access_evidence: Option<String> = row.try_get("access_evidence").unwrap();
+    assert_eq!(access_evidence, None);
+    let summary: String = row.try_get("summary").unwrap();
+    assert_eq!(summary, "legacy row");
+    let suppressed_count: i64 = row.try_get("suppressed_count").unwrap();
+    assert_eq!(suppressed_count, 3);
+
+    // All eight pre-existing indexes still exist.
+    for index in [
+        "scheduler_decisions_by_created_at",
+        "scheduler_decisions_by_ticket",
+        "scheduler_decisions_by_request_worker",
+        "scheduler_decisions_by_request_node",
+        "scheduler_decisions_by_selected_worker",
+        "scheduler_decisions_by_selected_node",
+        "scheduler_decisions_by_outcome",
+        "scheduler_decisions_by_reason_code",
+        "scheduler_decisions_by_suppression_key",
+    ] {
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sqlite_schema WHERE type = 'index' AND name = ?",
+        )
+        .bind(index)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(count, 1, "missing index {index}");
+    }
+
+    // The AUTOINCREMENT sequence continues past the preserved max id, and
+    // every supported reason code is still accepted by the schema.
+    for (position, reason) in ALL_REASON_CODES.iter().enumerate() {
+        let selected = *reason == "selected";
+        let sql = if selected {
+            "INSERT INTO scheduler_decisions \
+             (created_at, updated_at, first_seen_at, last_seen_at, decision_kind, \
+              request_source, request_node_id, request_worker_id, ticket_id, \
+              selected_worker_id, selected_node_id, outcome, reason_code, summary, \
+              candidate_count, explanation_json) \
+             VALUES ('1970-01-01T00:00:00Z', '1970-01-01T00:00:00Z', \
+                     '1970-01-01T00:00:00Z', '1970-01-01T00:00:00Z', 'lease_acquire', \
+                     'remote_acquire', NULL, NULL, NULL, NULL, NULL, 'selected', ?, \
+                     'shape probe', 1, '{}')"
+        } else {
+            "INSERT INTO scheduler_decisions \
+             (created_at, updated_at, first_seen_at, last_seen_at, decision_kind, \
+              request_source, request_node_id, request_worker_id, ticket_id, \
+              selected_worker_id, selected_node_id, outcome, reason_code, summary, \
+              candidate_count, explanation_json) \
+             VALUES ('1970-01-01T00:00:00Z', '1970-01-01T00:00:00Z', \
+                     '1970-01-01T00:00:00Z', '1970-01-01T00:00:00Z', 'no_candidate', \
+                     'remote_acquire', NULL, NULL, NULL, NULL, NULL, \
+                     'no_eligible_candidate', ?, 'shape probe', 1, '{}')"
+        };
+        let result = sqlx::query(sql).bind(reason).execute(&pool).await;
+        assert!(result.is_ok(), "reason {reason} rejected: {result:?}");
+        let expected_id = 42 + i64::try_from(position).unwrap();
+        let inserted = result.unwrap().last_insert_rowid();
+        assert_eq!(inserted, expected_id, "sequence must continue for {reason}");
+    }
+}
+
+#[tokio::test]
+async fn migration_0037_guard_rejects_legacy_plan_rows_before_any_schema_mutation() {
+    let tmp = voom_test_support::TempDatabase::new().unwrap();
+    let url = crate::test_support::sqlite_url_for(tmp.path());
+    let pool = crate::test_support::create_uninitialized_pool(&url)
+        .await
+        .unwrap();
+    apply_base_schema_only(&pool).await;
+
+    // Minimal FK parents, then one legacy-representation plan row.
+    sqlx::query(
+        "INSERT INTO nodes \
+         (id, name, kind, status, registered_at, last_seen_at, heartbeat_ttl_seconds, \
+          auth_token_hash, auth_token_hint, metadata) \
+         VALUES (1, 'node-1', 'synthetic', 'registered', '1970-01-01T00:00:00Z', \
+                 '1970-01-01T00:00:00Z', 60, 'token-hash', 'hint', '{}')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO workers (id, name, kind, status, node_id, registered_at, last_seen_at) \
+         VALUES (1, 'worker-1', 'remote', 'registered', 1, '1970-01-01T00:00:00Z', \
+                 '1970-01-01T00:00:00Z')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO jobs (id, kind, state, priority, created_at, updated_at) \
+         VALUES (1, 'guard-test', 'open', 0, '1970-01-01T00:00:00Z', '1970-01-01T00:00:00Z')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO tickets \
+         (id, job_id, kind, state, priority, payload, attempt, max_attempts, \
+          next_eligible_at, created_at, state_changed_at) \
+         VALUES (1, 1, 'guard-test', 'leased', 0, '{}', 1, 3, \
+                 '1970-01-01T00:00:00Z', '1970-01-01T00:00:00Z', '1970-01-01T00:00:00Z')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO leases \
+         (id, ticket_id, worker_id, state, acquired_at, expires_at, last_heartbeat_at, \
+          ttl_seconds) \
+         VALUES (1, 1, 1, 'held', '1970-01-01T00:00:00Z', '1970-01-01T00:01:00Z', \
+                 '1970-01-01T00:00:00Z', 60)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO artifact_access_plans \
+         (id, lease_id, ticket_id, worker_id, node_id, input_handles, output_handles, \
+          selected_access_mode, status, evidence, created_at, updated_at) \
+         VALUES (1, 1, 1, 1, 1, '[]', '[]', 'shared_mount', 'selected', '{}', \
+                 '1970-01-01T00:00:00Z', '1970-01-01T00:00:00Z')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let err = crate::init::init_on(&pool).await.unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("_0037_legacy_artifact_access_plan_rows_present"),
+        "guard must name itself: {err}"
+    );
+
+    // Nothing was mutated: the legacy table shape is untouched and migration
+    // 0037 is not recorded as applied.
+    let plan_sql: String = sqlx::query_scalar(
+        "SELECT sql FROM sqlite_schema WHERE type = 'table' \
+         AND name = 'artifact_access_plans'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(plan_sql.contains("selected_access_mode"));
+    assert!(!plan_sql.contains("owner_node_id"));
+    let applied: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM _sqlx_migrations")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(applied, 1);
+    let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM artifact_access_plans")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(rows, 1);
 }

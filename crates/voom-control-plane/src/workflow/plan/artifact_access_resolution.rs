@@ -40,6 +40,22 @@ pub struct ResolvedArtifact {
     pub owner_node_id: i64,
 }
 
+/// The reference whose resolution failed, paired with the stable error.
+///
+/// Resolution short-circuits at the first domain failure, so this is exactly
+/// the failing entry — later references are never invented (ADR 0071).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolutionFailure {
+    pub target: ArtifactAccessTarget,
+    pub error: AccessResolutionError,
+}
+
+impl std::fmt::Display for ResolutionFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.error)
+    }
+}
+
 /// Errors that can occur during artifact access resolution.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AccessResolutionError {
@@ -240,19 +256,33 @@ fn fold_common_owner(
 pub async fn resolve_artifact_access(
     executor: &mut SqliteConnection,
     declaration: &ArtifactAccessDeclaration,
-) -> Result<AccessResolution, AccessResolutionError> {
+) -> Result<AccessResolution, ResolutionFailure> {
     let mut common_owner: Option<i64> = None;
     let mut resolved_roots = Vec::new();
     let mut resolved_locations = Vec::new();
     let mut resolved_artifacts = Vec::new();
 
     for entry in declaration.entries() {
+        // Attach the failing entry to every error so rejection evidence never
+        // has to guess which reference resolution died on (ADR 0071).
+        let target = entry.target.clone();
+        let fail_store = |error: RepoAccessResolutionError| ResolutionFailure {
+            target: target.clone(),
+            error: error.into(),
+        };
+        let fail_fold = |error: AccessResolutionError| ResolutionFailure {
+            target: target.clone(),
+            error,
+        };
         match &entry.target {
             ArtifactAccessTarget::StorageRoot(root_access) => {
-                let resolved =
-                    resolve_storage_root(&mut *executor, root_access.storage_root_id).await?;
+                let resolved = resolve_storage_root(&mut *executor, root_access.storage_root_id)
+                    .await
+                    .map_err(fail_store)?;
 
-                common_owner = Some(fold_common_owner(common_owner, resolved.owner_node_id)?);
+                common_owner = Some(
+                    fold_common_owner(common_owner, resolved.owner_node_id).map_err(fail_fold)?,
+                );
 
                 resolved_roots.push(resolved);
             }
@@ -262,9 +292,12 @@ pub async fn resolve_artifact_access(
                     location_access.file_location_id,
                     location_access.storage_root_id,
                 )
-                .await?;
+                .await
+                .map_err(fail_store)?;
 
-                common_owner = Some(fold_common_owner(common_owner, resolved.owner_node_id)?);
+                common_owner = Some(
+                    fold_common_owner(common_owner, resolved.owner_node_id).map_err(fail_fold)?,
+                );
 
                 resolved_locations.push(resolved);
             }
@@ -275,9 +308,12 @@ pub async fn resolve_artifact_access(
                     artifact_access.file_location_id,
                     artifact_access.storage_root_id,
                 )
-                .await?;
+                .await
+                .map_err(fail_store)?;
 
-                common_owner = Some(fold_common_owner(common_owner, location.owner_node_id)?);
+                common_owner = Some(
+                    fold_common_owner(common_owner, location.owner_node_id).map_err(fail_fold)?,
+                );
 
                 resolved_artifacts.push(ResolvedArtifact {
                     artifact_handle_id: artifact_access.artifact_handle_id,
@@ -290,11 +326,12 @@ pub async fn resolve_artifact_access(
                 // Planned artifacts resolve only through their target root
                 let root_resolved =
                     resolve_storage_root(&mut *executor, artifact_access.target_storage_root_id)
-                        .await?;
+                        .await
+                        .map_err(fail_store)?;
 
                 let owner = root_resolved.owner_node_id;
 
-                common_owner = Some(fold_common_owner(common_owner, owner)?);
+                common_owner = Some(fold_common_owner(common_owner, owner).map_err(fail_fold)?);
 
                 // Record as a resolved root reference
                 resolved_roots.push(root_resolved);
@@ -310,10 +347,18 @@ pub async fn resolve_artifact_access(
         }
     }
 
-    let owner_node_id = common_owner
-        .ok_or_else(|| AccessResolutionError::DatabaseError("declaration is empty".to_string()))?;
+    // A validated declaration is never empty; a decoded one cannot be either.
+    let owner_node_id = common_owner.ok_or_else(|| ResolutionFailure {
+        target: declaration.entries()[0].target.clone(),
+        error: AccessResolutionError::DatabaseError("declaration is empty".to_string()),
+    })?;
 
-    let owner_incarnation_id = resolve_active_incarnation(&mut *executor, owner_node_id).await?;
+    let owner_incarnation_id = resolve_active_incarnation(&mut *executor, owner_node_id)
+        .await
+        .map_err(|error| ResolutionFailure {
+            target: declaration.entries()[0].target.clone(),
+            error: error.into(),
+        })?;
 
     Ok(AccessResolution {
         owner_node_id,

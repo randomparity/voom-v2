@@ -64,6 +64,7 @@ fn test_scheduler_decision() -> NewSchedulerDecision {
         candidate_count: 1,
         selected_score: Some(100),
         suppression_key: None,
+        access_evidence: None,
         explanation: json!({"scoring_version":1}),
         now: OffsetDateTime::UNIX_EPOCH,
     }

@@ -262,18 +262,20 @@ fn fake_transcoder_returns_typed_video_result_for_protocol_payload() {
 }
 
 #[test]
-fn artifact_access_evidence_validates_selected_advertised_mode() {
-    let payload = artifact_access_payload("shared_mount", &["shared_mount"]);
+fn artifact_access_evidence_echoes_owner_local_proof_unchanged() {
+    // The control plane compares this echo against its persisted evidence at
+    // complete time, so the echo must be exactly what was dispatched.
+    let evidence = serde_json::json!({"declaration":[],"root_epochs":[],"x":1});
+    let payload = artifact_access_payload(serde_json::json!(4), evidence.clone());
 
-    let evidence = synthetic_artifact_access_evidence(&payload).unwrap();
+    let echoed = synthetic_artifact_access_evidence(&payload).unwrap();
 
     assert_eq!(
-        evidence,
+        echoed,
         serde_json::json!({
             "artifact_access": {
-                "inputs_consumed": ["handle:input:1"],
-                "outputs_declared": ["handle:output:1"],
-                "mode": "shared_mount",
+                "owner_node_id": 4,
+                "access_evidence": evidence,
                 "validated": true
             }
         })
@@ -281,15 +283,15 @@ fn artifact_access_evidence_validates_selected_advertised_mode() {
 }
 
 #[test]
-fn artifact_access_evidence_rejects_unadvertised_selected_mode() {
-    let payload = artifact_access_payload("shared_mount", &["control_plane_placeholder"]);
+fn artifact_access_evidence_echoes_nothing_for_declaration_free_tickets() {
+    let payload = artifact_access_payload(serde_json::Value::Null, serde_json::Value::Null);
 
-    let err = synthetic_artifact_access_evidence(&payload).unwrap_err();
+    let echoed = synthetic_artifact_access_evidence(&payload).unwrap();
 
-    let voom_worker_protocol::ProtocolError::InvalidPayload { detail } = err else {
-        panic!("expected invalid payload for unadvertised artifact access mode");
-    };
-    assert!(detail.contains("artifact access mode shared_mount is not advertised"));
+    assert_eq!(
+        echoed,
+        serde_json::json!({ "artifact_access": { "validated": true } })
+    );
 }
 
 #[test]
@@ -309,11 +311,8 @@ fn artifact_access_evidence_is_merged_into_result_payload() {
             "path": "/library/file-000.mkv",
             "artifact_access_plan": {
                 "id": 7,
-                "input_handles": ["handle:input:1"],
-                "output_handles": ["handle:output:1"],
-                "selected_access_mode": "shared_mount"
-            },
-            "advertised_artifact_access": ["shared_mount"]
+                "owner_node_id": 4
+            }
         }),
     );
 
@@ -325,9 +324,7 @@ fn artifact_access_evidence_is_merged_into_result_payload() {
     assert_eq!(
         payload["artifact_access"],
         serde_json::json!({
-            "inputs_consumed": ["handle:input:1"],
-            "outputs_declared": ["handle:output:1"],
-            "mode": "shared_mount",
+            "owner_node_id": 4,
             "validated": true
         })
     );
@@ -385,18 +382,18 @@ fn terminal_payload(frames: &[ProgressFrame]) -> &serde_json::Value {
 }
 
 fn artifact_access_payload(
-    selected_access_mode: &str,
-    advertised_artifact_access: &[&str],
+    owner_node_id: serde_json::Value,
+    access_evidence: serde_json::Value,
 ) -> serde_json::Value {
-    serde_json::json!({
-        "artifact_access_plan": {
-            "id": 7,
-            "input_handles": ["handle:input:1"],
-            "output_handles": ["handle:output:1"],
-            "selected_access_mode": selected_access_mode
-        },
-        "advertised_artifact_access": advertised_artifact_access
-    })
+    let mut plan = serde_json::json!({ "id": 7 });
+    let object = plan.as_object_mut().unwrap();
+    if !owner_node_id.is_null() {
+        object.insert("owner_node_id".to_owned(), owner_node_id);
+    }
+    if !access_evidence.is_null() {
+        object.insert("access_evidence".to_owned(), access_evidence);
+    }
+    serde_json::json!({ "artifact_access_plan": plan })
 }
 
 fn unique_output_path(file_name: &str) -> std::path::PathBuf {

@@ -12,7 +12,7 @@ use voom_core::{
 use voom_store::test_support;
 
 use super::super::artifact_access_resolution::{
-    AccessResolution, AccessResolutionError,
+    AccessResolution, AccessResolutionError, ResolutionFailure,
     resolve_artifact_access as resolve_artifact_access_in_tx,
 };
 
@@ -20,9 +20,10 @@ use super::super::artifact_access_resolution::{
 async fn resolve_artifact_access(
     pool: &SqlitePool,
     declaration: &ArtifactAccessDeclaration,
-) -> Result<AccessResolution, AccessResolutionError> {
-    let mut conn = pool.acquire().await.map_err(|e| {
-        AccessResolutionError::DatabaseError(format!("failed to acquire connection: {e}"))
+) -> Result<AccessResolution, ResolutionFailure> {
+    let mut conn = pool.acquire().await.map_err(|e| ResolutionFailure {
+        target: declaration.entries()[0].target.clone(),
+        error: AccessResolutionError::DatabaseError(format!("failed to acquire connection: {e}")),
     })?;
     resolve_artifact_access_in_tx(&mut conn, declaration).await
 }
@@ -86,7 +87,10 @@ async fn test_resolve_storage_root_not_found() {
 
     let result = resolve_artifact_access(&pool, &declaration).await;
     match result {
-        Err(AccessResolutionError::StorageRootNotFound { storage_root_id }) => {
+        Err(ResolutionFailure {
+            error: AccessResolutionError::StorageRootNotFound { storage_root_id },
+            ..
+        }) => {
             assert_eq!(storage_root_id, StorageRootId(999_999));
         }
         other => panic!("Expected StorageRootNotFound, got {other:?}"),
@@ -147,7 +151,10 @@ async fn test_resolve_file_location_not_found() {
 
     let result = resolve_artifact_access(&pool, &declaration).await;
     match result {
-        Err(AccessResolutionError::FileLocationNotFound { file_location_id }) => {
+        Err(ResolutionFailure {
+            error: AccessResolutionError::FileLocationNotFound { file_location_id },
+            ..
+        }) => {
             assert_eq!(file_location_id, FileLocationId(999_999));
         }
         other => panic!("Expected FileLocationNotFound, got {other:?}"),
@@ -183,9 +190,13 @@ async fn test_resolve_file_location_root_mismatch() {
 
     let result = resolve_artifact_access(&pool, &declaration).await;
     match result {
-        Err(AccessResolutionError::LocationRootInvalid {
-            file_location_id,
-            storage_root_id,
+        Err(ResolutionFailure {
+            error:
+                AccessResolutionError::LocationRootInvalid {
+                    file_location_id,
+                    storage_root_id,
+                },
+            ..
         }) => {
             assert_eq!(file_location_id, test_support::TEST_FILE_LOCATION_ID);
             assert_eq!(storage_root_id, StorageRootId(9_999_999));
@@ -265,9 +276,13 @@ async fn test_resolve_mixed_owner_roots() {
 
     let result = resolve_artifact_access(&pool, &declaration).await;
     match result {
-        Err(AccessResolutionError::MixedOwner {
-            first_owner,
-            conflicting_owner,
+        Err(ResolutionFailure {
+            error:
+                AccessResolutionError::MixedOwner {
+                    first_owner,
+                    conflicting_owner,
+                },
+            ..
         }) => {
             assert_eq!(first_owner, 9_000_001);
             assert_eq!(conflicting_owner, 2);
@@ -399,7 +414,10 @@ async fn test_resolve_fake_scanner_location_id() {
 
     let result = resolve_artifact_access(&pool, &declaration).await;
     match result {
-        Err(AccessResolutionError::FileLocationNotFound { file_location_id }) => {
+        Err(ResolutionFailure {
+            error: AccessResolutionError::FileLocationNotFound { file_location_id },
+            ..
+        }) => {
             assert_eq!(file_location_id, fake_location_id);
         }
         other => panic!("Expected FileLocationNotFound for fake scanner id, got {other:?}"),
@@ -456,9 +474,13 @@ async fn test_resolve_rejects_corrupt_root_state_with_stable_evidence() {
     let declaration = root_read_declaration();
     let result = resolve_artifact_access(&pool, &declaration).await;
     match result {
-        Err(AccessResolutionError::InvalidRootState {
-            storage_root_id,
-            state,
+        Err(ResolutionFailure {
+            error:
+                AccessResolutionError::InvalidRootState {
+                    storage_root_id,
+                    state,
+                },
+            ..
         }) => {
             assert_eq!(storage_root_id, test_support::TEST_STORAGE_ROOT_ID);
             assert_eq!(state, "corrupted");

@@ -7,7 +7,7 @@ use time::OffsetDateTime;
 use voom_core::{
     ArtifactAccessMode, ErrorCode, FailureClass, LeaseId, NodeId, NodeIncarnationEndReason,
     NodeIncarnationId, NodeIncarnationStatus, OperationKind, ScanSessionId, TicketId, VoomError,
-    WorkerId,
+    WorkerId, owner_access_evidence::OwnerAccessEvidence,
 };
 use voom_events::payload::ScanSessionLifecyclePayload;
 use voom_events::{Event, SubjectType};
@@ -234,9 +234,26 @@ pub struct RemoteLeaseDispatch {
 #[serde(deny_unknown_fields)]
 pub struct RemoteArtifactAccessPlan {
     pub id: u64,
-    pub input_handles: Vec<String>,
-    pub output_handles: Vec<String>,
-    pub selected_access_mode: ArtifactAccessMode,
+    pub owner_node_id: Option<u64>,
+    pub access_evidence: Option<OwnerAccessEvidence>,
+}
+
+/// Regression for the removed-field rule (AGENTS.md): removing a serialized
+/// field removes the accepted input too. The legacy synthetic/shared-mount
+/// plan fields must fail decode on every mirror of this contract.
+#[cfg(test)]
+#[test]
+fn legacy_artifact_access_plan_fields_rejected_on_decode() {
+    for legacy in [
+        r#"{"id":1,"input_handles":["handle:input:synthetic"],
+            "output_handles":["handle:output:synthetic"],
+            "selected_access_mode":"shared_mount"}"#,
+        r#"{"id":1,"owner_node_id":null,"access_evidence":null,
+            "selected_access_mode":"shared_mount"}"#,
+    ] {
+        let err = serde_json::from_str::<RemoteArtifactAccessPlan>(legacy).unwrap_err();
+        assert!(err.to_string().contains("unknown field"), "{err}");
+    }
 }
 
 #[derive(Debug, Clone)]

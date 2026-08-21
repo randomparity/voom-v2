@@ -561,7 +561,7 @@ async fn delayed_validation_rotates_key_and_terminal_replay_never_dispatches() {
     assert_ne!(keys[0], keys[1]);
     drop(keys);
 
-    *control.acquire_mode.lock().await = AcquireMode::Lease(dispatch);
+    *control.acquire_mode.lock().await = AcquireMode::Lease(Box::new(dispatch));
     let permits = Arc::new(Semaphore::new(1));
     let worker = FakeWorker::new(WorkerMode::Silent);
     let terminal = match acquire_one(&context, permits).await.unwrap() {
@@ -1385,7 +1385,7 @@ enum HeartbeatAction {
 #[derive(Debug, Clone)]
 enum AcquireMode {
     Idle,
-    Lease(LeaseDispatch),
+    Lease(Box<LeaseDispatch>),
     Leases(Arc<StdMutex<VecDeque<LeaseDispatch>>>),
     GatedIdle(Arc<Notify>),
     Conflict,
@@ -1522,7 +1522,7 @@ impl ControlPlaneApi for FakeControlPlane {
         let mode = self.acquire_mode.lock().await.clone();
         match mode {
             AcquireMode::Idle => Ok(idle()),
-            AcquireMode::Lease(dispatch) => Ok(AcquireOutcome::Leased(dispatch)),
+            AcquireMode::Lease(dispatch) => Ok(AcquireOutcome::Leased(*dispatch)),
             AcquireMode::Leases(dispatches) => Ok(dispatches
                 .lock()
                 .unwrap()
@@ -2015,9 +2015,23 @@ fn dispatch_with_payload(lease_id: u64, payload: JsonValue) -> LeaseDispatch {
 fn access_plan() -> ArtifactAccessPlan {
     ArtifactAccessPlan {
         id: 15,
-        input_handles: vec!["input".to_owned()],
-        output_handles: vec!["output".to_owned()],
-        selected_access_mode: ArtifactAccessMode::SharedMount,
+        owner_node_id: None,
+        access_evidence: None,
+    }
+}
+
+#[test]
+fn legacy_artifact_access_plan_fields_rejected_on_decode() {
+    // Removed-field rule: the legacy synthetic/shared-mount plan shape is no
+    // longer an accepted input on any mirror of the dispatch contract.
+    for legacy in [
+        r#"{"id":15,"input_handles":["input"],"output_handles":["output"],
+            "selected_access_mode":"shared_mount"}"#,
+        r#"{"id":15,"owner_node_id":null,"access_evidence":null,
+            "selected_access_mode":"shared_mount"}"#,
+    ] {
+        let err = serde_json::from_str::<ArtifactAccessPlan>(legacy).unwrap_err();
+        assert!(err.to_string().contains("unknown field"), "{err}");
     }
 }
 

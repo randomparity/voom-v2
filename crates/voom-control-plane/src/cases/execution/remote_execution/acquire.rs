@@ -2,13 +2,26 @@
 
 use std::collections::HashMap;
 
-use crate::workflow::plan::artifact_access_resolution::resolve_artifact_access;
+use crate::ControlPlane;
+use crate::cases::execution::remote_execution::{
+    ROUTE_ACQUIRE, RemoteAcquireInput, RemoteAcquireOutcome, RemoteArtifactAccessPlan,
+    RemoteLeaseDispatch, ReplayRoute, decode_acquire_replay, is_remote_replayable_error,
+};
+use crate::cases::{begin_immediate_tx, commit_tx};
+use crate::workflow::plan::artifact_access_resolution::{
+    AccessResolution, AccessResolutionError, resolve_artifact_access,
+};
 use crate::workflow::plan::ticket_payload::WorkflowTicketPayload;
 use serde_json::{Value as JsonValue, json};
 use sqlx::{Sqlite, Transaction};
 use time::{Duration, OffsetDateTime};
 use voom_core::{
-    ArtifactAccessMode, LeaseId, NodeId, TicketId, TicketOperation, VoomError, WorkerId,
+    ArtifactAccessDeclaration, ArtifactAccessMode, LeaseId, NodeId, StorageRootId, TicketId,
+    TicketOperation, VoomError, WorkerId,
+    owner_access_evidence::{
+        AccessReferenceReason, AccessRejectionEvidence, DecisionAccessEvidence,
+        OwnerAccessEvidence, RootEpoch,
+    },
 };
 use voom_scheduler::{
     NodeCandidate, SCORING_VERSION, SchedulerCandidate, SchedulerScorer, ScoreDecision,
@@ -23,13 +36,6 @@ use voom_store::repo::execution::scheduler_decisions::{
 use voom_store::repo::execution::tickets::Ticket;
 use voom_store::repo::execution::workers::WorkerOperationEligibility;
 use voom_store::repo::media::artifact_access_plans::{ArtifactAccessPlan, NewArtifactAccessPlan};
-
-use crate::ControlPlane;
-use crate::cases::execution::remote_execution::{
-    ROUTE_ACQUIRE, RemoteAcquireInput, RemoteAcquireOutcome, RemoteArtifactAccessPlan,
-    RemoteLeaseDispatch, ReplayRoute, decode_acquire_replay, is_remote_replayable_error,
-};
-use crate::cases::{begin_immediate_tx, commit_tx};
 
 impl ControlPlane {
     /// Acquire the next ready ticket for a node-owned remote worker.
@@ -138,7 +144,7 @@ impl ControlPlane {
                 ticket,
                 eligibility,
                 scheduler_decision,
-                selected_access_mode,
+                locality,
             } => {
                 self.remote_acquire_leased_in_tx(
                     &mut tx,
@@ -146,7 +152,7 @@ impl ControlPlane {
                     ticket,
                     eligibility,
                     scheduler_decision,
-                    selected_access_mode,
+                    locality,
                     now,
                 )
                 .await?
@@ -177,12 +183,30 @@ impl ControlPlane {
             .ready_for_operations_in_tx(tx, &operations, now)
             .await?;
         // Owner-local gate: reject non-owner and mixed-owner byte work before
-        // scoring. Filtering here keeps the deterministic ready-ticket ordering
-        // and lets a fully rejected snapshot fall through to the idle path.
+        // scoring, and persist each rejection as a durable scheduler decision
+        // (issue #477). Filtering here keeps the deterministic ready-ticket
+        // ordering and lets a fully rejected snapshot fall through to the
+        // idle path.
         let mut gated = Vec::with_capacity(tickets.len());
+        let mut locality_by_ticket = HashMap::new();
         for ticket in tickets {
-            if declaration_is_owner_local_in_tx(tx, &ticket, input.node_id).await? {
-                gated.push(ticket);
+            match resolve_ticket_owner_locality_in_tx(tx, &ticket, input.node_id).await? {
+                TicketLocality::OwnerLocal(declaration, resolution) => {
+                    locality_by_ticket.insert(ticket.id, (declaration, resolution));
+                    gated.push(ticket);
+                }
+                TicketLocality::Rejected {
+                    evidence,
+                    fingerprint,
+                } => {
+                    self.scheduler_decisions
+                        .create_or_suppress_in_tx(
+                            tx,
+                            gate_rejection_decision(input, &ticket, &evidence, &fingerprint, now),
+                        )
+                        .await?;
+                }
+                TicketLocality::NoDeclaration => gated.push(ticket),
             }
         }
         tickets = gated;
@@ -195,7 +219,10 @@ impl ControlPlane {
             set_operation_set(&mut score.explanation, &operations);
             let decision = self
                 .scheduler_decisions
-                .create_or_suppress_in_tx(tx, decision_from_score(input, &score, None, now))
+                .create_or_suppress_in_tx(
+                    tx,
+                    decision_from_score(input, &score, None, Ok(None), now)?,
+                )
                 .await?;
             return Ok(RemoteAcquirePrepared::Idle(RemoteAcquireOutcome::Idle {
                 worker_id: input.worker_id,
@@ -204,7 +231,7 @@ impl ControlPlane {
         }
 
         let candidate_set = self
-            .remote_acquire_candidates_in_tx(tx, input, tickets)
+            .remote_acquire_candidates_in_tx(tx, input, tickets, locality_by_ticket)
             .await?;
         let score = score_remote_candidates(&candidate_set.candidates)?;
         match score.outcome {
@@ -214,7 +241,10 @@ impl ControlPlane {
             ScoreOutcome::NoEligibleCandidate => {
                 let decision = self
                     .scheduler_decisions
-                    .create_or_suppress_in_tx(tx, decision_from_score(input, &score, None, now))
+                    .create_or_suppress_in_tx(
+                        tx,
+                        decision_from_score(input, &score, None, Ok(None), now)?,
+                    )
                     .await?;
                 Ok(RemoteAcquirePrepared::NoCandidate(
                     RemoteAcquireOutcome::NoCandidate {
@@ -283,7 +313,11 @@ impl ControlPlane {
             return Ok(RemoteAcquirePrepared::NoCandidate(outcome));
         }
 
-        let selected_access_mode = selected.access_mode;
+        // Reuse the gate's resolution: one resolution, one point in time.
+        let locality = candidate_set.locality_by_ticket.get(&selected.ticket_id);
+        let access_evidence = locality
+            .map(|(declaration, resolution)| decision_owner_evidence(declaration, resolution))
+            .transpose()?;
         let scheduler_decision = self
             .scheduler_decisions
             .create_in_tx(
@@ -292,15 +326,16 @@ impl ControlPlane {
                     input,
                     score,
                     Some((selected.ticket_id, selected.worker_id, selected.node_id)),
+                    Ok(access_evidence),
                     now,
-                ),
+                )?,
             )
             .await?;
         Ok(RemoteAcquirePrepared::Leased {
             ticket,
             eligibility,
             scheduler_decision,
-            selected_access_mode,
+            locality: locality.cloned(),
         })
     }
 
@@ -309,6 +344,7 @@ impl ControlPlane {
         tx: &mut Transaction<'_, Sqlite>,
         input: &RemoteAcquireInput,
         tickets: Vec<Ticket>,
+        locality_by_ticket: HashMap<TicketId, (ArtifactAccessDeclaration, AccessResolution)>,
     ) -> Result<RemoteAcquireCandidateSet, VoomError> {
         let mut eligibility_by_operation = HashMap::new();
         let mut capacity_by_operation = HashMap::new();
@@ -359,6 +395,7 @@ impl ControlPlane {
             tickets,
             candidates,
             eligibility_by_operation,
+            locality_by_ticket,
         })
     }
 
@@ -461,7 +498,7 @@ impl ControlPlane {
         ticket: Ticket,
         eligibility: WorkerOperationEligibility,
         scheduler_decision: SchedulerDecision,
-        selected_access_mode: ArtifactAccessMode,
+        locality: Option<(ArtifactAccessDeclaration, AccessResolution)>,
         now: time::OffsetDateTime,
     ) -> Result<RemoteAcquireOutcome, VoomError> {
         let lease = self
@@ -483,10 +520,10 @@ impl ControlPlane {
                     input,
                     &ticket,
                     &eligibility,
-                    selected_access_mode,
+                    locality.as_ref(),
                     lease.id,
                     now,
-                ),
+                )?,
             )
             .await?;
         let scheduler_decision = self
@@ -517,32 +554,125 @@ impl ControlPlane {
     }
 }
 
-/// Prove a ready ticket's declared artifact access resolves to the acquiring
-/// node as its single common owner.
+/// What the owner-local gate proved about one ready ticket.
 ///
-/// Returns `true` when the ticket carries no resolvable declaration: payload
-/// decoding already enforces a declaration on every byte-touching operation,
-/// so an undecodable or declaration-free payload is not byte work this gate
-/// owns. Any resolution failure (missing, inactive, stale, retired,
-/// mixed-owner, or corrupt reference) rejects the candidate.
-async fn declaration_is_owner_local_in_tx(
+/// `Rejected` carries ready-to-persist rejection evidence: resolution
+/// short-circuits at the first domain failure, so the evidence records exactly
+/// that failing reference — reasons for references it never reached are never
+/// invented (ADR 0071).
+enum TicketLocality {
+    OwnerLocal(ArtifactAccessDeclaration, AccessResolution),
+    Rejected {
+        evidence: AccessRejectionEvidence,
+        fingerprint: String,
+    },
+    NoDeclaration,
+}
+
+/// Prove a ready ticket's declared artifact access resolves to the acquiring
+/// node as its single common owner, or produce stable locator-free rejection
+/// evidence.
+///
+/// A ticket with no resolvable declaration is not byte work this gate owns:
+/// payload decoding already enforces a declaration on every byte-touching
+/// operation. A `DatabaseError` from resolution is *not* a rejection — it
+/// propagates and fails the acquire, because corruption is never an
+/// eligibility result.
+async fn resolve_ticket_owner_locality_in_tx(
     tx: &mut Transaction<'_, Sqlite>,
     ticket: &Ticket,
     node_id: NodeId,
-) -> Result<bool, VoomError> {
+) -> Result<TicketLocality, VoomError> {
     let declaration =
         WorkflowTicketPayload::parse_ticket(ticket.kind.as_str(), ticket.payload.clone())
             .ok()
             .and_then(|payload| payload.declared_artifact_access);
     let Some(declaration) = declaration else {
-        return Ok(true);
+        return Ok(TicketLocality::NoDeclaration);
     };
-    let Ok(node_id) = i64::try_from(node_id.0) else {
-        return Ok(false);
+    let node = i64::try_from(node_id.0)
+        .map_err(|_| VoomError::Internal("acquiring node id exceeds i64".to_owned()))?;
+
+    match resolve_artifact_access(tx, &declaration).await {
+        Ok(resolution) if resolution.owner_node_id == node => {
+            Ok(TicketLocality::OwnerLocal(declaration, resolution))
+        }
+        Ok(_resolution) => Ok(TicketLocality::Rejected {
+            evidence: owner_mismatch_evidence(&declaration)?,
+            fingerprint: declaration_fingerprint(&declaration),
+        }),
+        Err(failure) => match failure.error {
+            // Corruption is a database error, never an eligibility result.
+            AccessResolutionError::DatabaseError(message) => Err(VoomError::database(format!(
+                "artifact access resolution: {message}"
+            ))),
+            domain_error => Ok(TicketLocality::Rejected {
+                evidence: failure_evidence(&failure.target, &domain_error)?,
+                fingerprint: declaration_fingerprint(&declaration),
+            }),
+        },
+    }
+}
+
+/// Stable rejection evidence for the failing reference resolution reported.
+fn failure_evidence(
+    target: &voom_core::ArtifactAccessTarget,
+    error: &AccessResolutionError,
+) -> Result<AccessRejectionEvidence, VoomError> {
+    let reason = match error {
+        AccessResolutionError::StorageRootNotFound { .. } => {
+            AccessReferenceReason::StorageRootNotFound
+        }
+        AccessResolutionError::FileLocationNotFound { .. } => {
+            AccessReferenceReason::FileLocationNotFound
+        }
+        AccessResolutionError::LocationRootInvalid { .. } => {
+            AccessReferenceReason::LocationRootInvalid
+        }
+        AccessResolutionError::InvalidRootState { .. } => AccessReferenceReason::InvalidRootState,
+        AccessResolutionError::InvalidRootEpoch { .. } => AccessReferenceReason::InvalidRootEpoch,
+        AccessResolutionError::InvalidLocationState { .. } => {
+            AccessReferenceReason::InvalidLocationState
+        }
+        AccessResolutionError::MixedOwner { .. } => AccessReferenceReason::MixedOwner,
+        AccessResolutionError::NoActiveIncarnation { .. } => {
+            AccessReferenceReason::NoActiveIncarnation
+        }
+        // The gate never routes database errors here.
+        AccessResolutionError::DatabaseError(message) => {
+            return Err(VoomError::database(format!(
+                "artifact access resolution: {message}"
+            )));
+        }
     };
-    Ok(resolve_artifact_access(tx, &declaration)
-        .await
-        .is_ok_and(|resolution| resolution.owner_node_id == node_id))
+    AccessRejectionEvidence::new(vec![
+        voom_core::owner_access_evidence::AccessReferenceRejection {
+            target: target.clone(),
+            reason,
+        },
+    ])
+    .map_err(|err| VoomError::Internal(format!("rejection evidence rejected: {err}")))
+}
+
+/// Rejection evidence when resolution succeeded but its common owner is not
+/// the acquiring node.
+fn owner_mismatch_evidence(
+    declaration: &voom_core::ArtifactAccessDeclaration,
+) -> Result<AccessRejectionEvidence, VoomError> {
+    AccessRejectionEvidence::new(vec![
+        voom_core::owner_access_evidence::AccessReferenceRejection {
+            target: declaration.entries()[0].target.clone(),
+            reason: AccessReferenceReason::OwnerMismatch,
+        },
+    ])
+    .map_err(|err| VoomError::Internal(format!("rejection evidence rejected: {err}")))
+}
+
+/// Canonical locality fingerprint for a suppression key: the compact JSON of
+/// the declaration alone. A failed resolution produced no trustworthy epochs,
+/// so only the locality claim is hashed.
+fn declaration_fingerprint(declaration: &voom_core::ArtifactAccessDeclaration) -> String {
+    serde_json::to_string(declaration).unwrap_or_else(|_| "opaque".to_owned())
 }
 
 #[expect(
@@ -556,7 +686,7 @@ enum RemoteAcquirePrepared {
         ticket: Ticket,
         eligibility: WorkerOperationEligibility,
         scheduler_decision: SchedulerDecision,
-        selected_access_mode: ArtifactAccessMode,
+        locality: Option<(ArtifactAccessDeclaration, AccessResolution)>,
     },
 }
 
@@ -565,6 +695,9 @@ struct RemoteAcquireCandidateSet {
     tickets: Vec<Ticket>,
     candidates: Vec<SchedulerCandidate>,
     eligibility_by_operation: HashMap<TicketOperation, WorkerOperationEligibility>,
+    /// The owner-local proof the gate captured for each byte-work ticket,
+    /// reused at selection time so no second resolution runs.
+    locality_by_ticket: HashMap<TicketId, (ArtifactAccessDeclaration, AccessResolution)>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -810,8 +943,9 @@ fn decision_from_score(
     input: &RemoteAcquireInput,
     score: &voom_scheduler::ScoreDecision,
     selected: Option<(TicketId, WorkerId, NodeId)>,
+    access_evidence: Result<Option<DecisionAccessEvidence>, VoomError>,
     now: OffsetDateTime,
-) -> NewSchedulerDecision {
+) -> Result<NewSchedulerDecision, VoomError> {
     let (ticket_id, selected_worker_id, selected_node_id) = selected
         .map_or((None, None, None), |(ticket_id, worker_id, node_id)| {
             (Some(ticket_id), Some(worker_id), Some(node_id))
@@ -827,8 +961,7 @@ fn decision_from_score(
             SchedulerDecisionOutcome::NoEligibleCandidate,
         ),
     };
-
-    NewSchedulerDecision {
+    Ok(NewSchedulerDecision {
         decision_kind,
         request_source: SchedulerRequestSource::RemoteAcquire,
         idempotency_key: Some(input.idempotency_key.clone()),
@@ -846,10 +979,11 @@ fn decision_from_score(
             ScoreOutcome::Selected => score.selected.as_ref().map(|selected| selected.score),
             ScoreOutcome::Idle | ScoreOutcome::NoEligibleCandidate => None,
         },
+        access_evidence: access_evidence?,
         suppression_key: suppression_key(input, score),
         explanation: score.explanation.clone(),
         now,
-    }
+    })
 }
 
 fn capacity_decision(
@@ -868,7 +1002,8 @@ fn capacity_decision(
         idempotency_key: Some(input.idempotency_key.clone()),
         request_node_id: Some(input.node_id),
         request_worker_id: Some(input.worker_id),
-        ticket_id: None,
+        // The key names this ticket, so the row must agree with it.
+        ticket_id: Some(selected_candidate.ticket.ticket_id),
         selected_worker_id: None,
         selected_node_id: None,
         selected_lease_id: None,
@@ -877,10 +1012,12 @@ fn capacity_decision(
         summary: format!("no eligible candidate: {reason}"),
         candidate_count: u32::try_from(candidate_count).unwrap_or(u32::MAX),
         selected_score: None,
+        access_evidence: None,
         suppression_key: Some(capacity_suppression_key(
             input,
             reason,
             &selected_candidate.ticket.operation,
+            selected_candidate.ticket.ticket_id,
         )),
         explanation: json!({
             "scoring_version": SCORING_VERSION,
@@ -946,6 +1083,7 @@ pub(super) fn suppression_key(
         input,
         score.reason_code.as_str(),
         &operation_fingerprint(&score.explanation),
+        None,
     ))
 }
 
@@ -953,18 +1091,23 @@ pub(super) fn capacity_suppression_key(
     input: &RemoteAcquireInput,
     reason: &str,
     operation: &TicketOperation,
+    ticket_id: TicketId,
 ) -> String {
-    remote_acquire_suppression_key(input, reason, operation.as_str())
+    remote_acquire_suppression_key(input, reason, operation.as_str(), Some(ticket_id))
 }
 
 fn remote_acquire_suppression_key(
     input: &RemoteAcquireInput,
     reason: &str,
     operation_fingerprint: &str,
+    ticket_id: Option<TicketId>,
 ) -> String {
     let bucket = input.lease_ttl_seconds.max(1) / 30;
+    let ticket_segment = ticket_id
+        .map(|ticket| format!(":ticket:{}", ticket.0))
+        .unwrap_or_default();
     format!(
-        "remote_acquire:node:{}:worker:{}:reason:{}:ops:{}:bucket:{}",
+        "remote_acquire:node:{}:worker:{}{ticket_segment}:reason:{}:ops:{}:bucket:{}",
         input.node_id, input.worker_id, reason, operation_fingerprint, bucket
     )
 }
@@ -1019,49 +1162,137 @@ fn operation_fingerprint(explanation: &JsonValue) -> String {
     }
 }
 
+/// Build the selected decision's owner-local evidence from the resolution the
+/// gate already proved — one resolution, one point in time.
+fn decision_owner_evidence(
+    declaration: &ArtifactAccessDeclaration,
+    resolution: &AccessResolution,
+) -> Result<DecisionAccessEvidence, VoomError> {
+    Ok(DecisionAccessEvidence::Owner(owner_access_evidence(
+        declaration,
+        resolution,
+    )?))
+}
+
+/// Fold every resolved reference's root epoch into one canonical epoch set.
+///
+/// Roots reached through `file_location` and `existing_artifact` entries carry
+/// their epoch on the resolved location, so one resolution yields the complete
+/// set; a disagreement between references to the same root is corruption.
+fn owner_access_evidence(
+    declaration: &ArtifactAccessDeclaration,
+    resolution: &AccessResolution,
+) -> Result<OwnerAccessEvidence, VoomError> {
+    let mut epoch_by_root: std::collections::BTreeMap<u64, u64> = std::collections::BTreeMap::new();
+    let mut record = |root_id: u64, epoch: i64| -> Result<(), VoomError> {
+        let epoch = u64::try_from(epoch).map_err(|_| {
+            VoomError::database("artifact access resolution returned a negative root epoch")
+        })?;
+        match epoch_by_root.get(&root_id) {
+            Some(existing) if *existing != epoch => Err(VoomError::database(format!(
+                "artifact access resolution disagreed on root {root_id} epoch"
+            ))),
+            _ => {
+                epoch_by_root.insert(root_id, epoch);
+                Ok(())
+            }
+        }
+    };
+    for root in &resolution.resolved_roots {
+        record(root.storage_root_id.0, root.root_epoch)?;
+    }
+    for location in &resolution.resolved_locations {
+        record(location.storage_root_id.0, location.root_epoch)?;
+    }
+    let root_epochs = epoch_by_root
+        .into_iter()
+        .map(|(storage_root_id, root_epoch)| RootEpoch {
+            storage_root_id: StorageRootId(storage_root_id),
+            root_epoch,
+        })
+        .collect();
+    OwnerAccessEvidence::new(declaration.clone(), root_epochs)
+        .map_err(|err| VoomError::Internal(format!("owner access evidence rejected: {err}")))
+}
+
+/// The durable plan record for a selected lease: full owner-local proof when
+/// the ticket declared byte work, the explicit absent pair otherwise.
 fn artifact_plan_input(
     input: &RemoteAcquireInput,
     ticket: &Ticket,
     eligibility: &WorkerOperationEligibility,
-    selected_access_mode: ArtifactAccessMode,
+    locality: Option<&(ArtifactAccessDeclaration, AccessResolution)>,
     lease_id: LeaseId,
     now: time::OffsetDateTime,
-) -> NewArtifactAccessPlan {
-    NewArtifactAccessPlan {
+) -> Result<NewArtifactAccessPlan, VoomError> {
+    let (owner_node_id, access_evidence) = match locality {
+        Some((declaration, resolution)) => (
+            Some(NodeId(u64::try_from(resolution.owner_node_id).map_err(
+                |_| VoomError::database("artifact access resolution owner node id overflow"),
+            )?)),
+            Some(owner_access_evidence(declaration, resolution)?),
+        ),
+        None => (None, None),
+    };
+    Ok(NewArtifactAccessPlan {
         lease_id,
         ticket_id: ticket.id,
         worker_id: input.worker_id,
         node_id: input.node_id,
-        input_handles: artifact_handles(&ticket.payload, "inputs"),
-        output_handles: artifact_handles(&ticket.payload, "outputs"),
-        selected_access_mode,
+        owner_node_id,
+        access_evidence,
         evidence: json!({
             "selected_by": "remote_acquire",
             "route": ROUTE_ACQUIRE,
             "advertised_artifact_access": eligibility.artifact_access,
         }),
         now,
-    }
+    })
 }
 
-fn artifact_handles(payload: &JsonValue, direction: &str) -> Vec<String> {
-    payload
-        .get("artifact_access")
-        .and_then(|access| access.get(direction))
-        .and_then(JsonValue::as_array)
-        .map(|items| {
-            items
+/// Durable rejection decision for one gated ticket: stable reason on the
+/// failing reference, suppressed by ticket + locality identity (ADR 0071).
+fn gate_rejection_decision(
+    input: &RemoteAcquireInput,
+    ticket: &Ticket,
+    evidence: &AccessRejectionEvidence,
+    fingerprint: &str,
+    now: OffsetDateTime,
+) -> NewSchedulerDecision {
+    let bucket = input.lease_ttl_seconds.max(1) / 30;
+    NewSchedulerDecision {
+        decision_kind: SchedulerDecisionKind::NoCandidate,
+        request_source: SchedulerRequestSource::RemoteAcquire,
+        idempotency_key: Some(input.idempotency_key.clone()),
+        request_node_id: Some(input.node_id),
+        request_worker_id: Some(input.worker_id),
+        ticket_id: Some(ticket.id),
+        selected_worker_id: None,
+        selected_node_id: None,
+        selected_lease_id: None,
+        outcome: SchedulerDecisionOutcome::NoEligibleCandidate,
+        reason_code: StoreSchedulerReasonCode::UnsupportedArtifactAccess,
+        summary: "no eligible candidate: unsupported_artifact_access".to_owned(),
+        candidate_count: 1,
+        selected_score: None,
+        access_evidence: Some(DecisionAccessEvidence::Rejected(evidence.clone())),
+        suppression_key: Some(format!(
+            "remote_acquire:node:{}:worker:{}:ticket:{}:reason:unsupported_artifact_access:\
+             refs:{}:bucket:{}",
+            input.node_id, input.worker_id, ticket.id.0, fingerprint, bucket
+        )),
+        explanation: json!({
+            "scoring_version": SCORING_VERSION,
+            "outcome": "no_eligible_candidate",
+            "reason": "unsupported_artifact_access",
+            "rejected_references": evidence
+                .references
                 .iter()
-                .filter_map(JsonValue::as_str)
-                .map(str::to_owned)
-                .collect::<Vec<_>>()
-        })
-        .filter(|handles| !handles.is_empty())
-        .unwrap_or_else(|| match direction {
-            "inputs" => vec!["handle:input:synthetic".to_owned()],
-            "outputs" => vec!["handle:output:synthetic".to_owned()],
-            _ => Vec::new(),
-        })
+                .map(|reference| json!({ "reason": reference.reason.as_str() }))
+                .collect::<Vec<_>>(),
+        }),
+        now,
+    }
 }
 
 fn heartbeat_after_seconds(ttl_seconds: i64) -> i64 {
@@ -1071,8 +1302,7 @@ fn heartbeat_after_seconds(ttl_seconds: i64) -> i64 {
 pub(super) fn remote_plan(plan: &ArtifactAccessPlan) -> RemoteArtifactAccessPlan {
     RemoteArtifactAccessPlan {
         id: plan.id,
-        input_handles: plan.input_handles.clone(),
-        output_handles: plan.output_handles.clone(),
-        selected_access_mode: plan.selected_access_mode,
+        owner_node_id: plan.owner_node_id.map(|id| id.0),
+        access_evidence: plan.access_evidence.clone(),
     }
 }

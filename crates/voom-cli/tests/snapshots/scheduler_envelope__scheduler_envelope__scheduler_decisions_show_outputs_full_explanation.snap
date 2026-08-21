@@ -23,6 +23,26 @@ expression: json
       "candidate_count": 1,
       "selected_score": 1700,
       "suppressed_count": 0,
+      "access_evidence": {
+        "evidence": "owner",
+        "declaration": [
+          {
+            "target": {
+              "kind": "storage_root",
+              "storage_root_id": 7
+            },
+            "rights": [
+              "read"
+            ]
+          }
+        ],
+        "root_epochs": [
+          {
+            "storage_root_id": 7,
+            "root_epoch": 3
+          }
+        ]
+      },
       "explanation_json": {
         "scoring_version": 1,
         "candidates": []

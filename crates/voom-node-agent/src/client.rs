@@ -605,13 +605,15 @@ pub struct LeaseDispatch {
     pub artifact_access_plan: ArtifactAccessPlan,
 }
 
+/// The dispatch plan's owner-local proof (ADR 0071). `owner_node_id` and
+/// `access_evidence` are present together when the ticket declared byte work
+/// and absent together otherwise; legacy mode/handle fields are rejected.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ArtifactAccessPlan {
     pub id: u64,
-    pub input_handles: Vec<String>,
-    pub output_handles: Vec<String>,
-    pub selected_access_mode: ArtifactAccessMode,
+    pub owner_node_id: Option<u64>,
+    pub access_evidence: Option<voom_core::OwnerAccessEvidence>,
 }
 
 #[derive(Debug, Clone, Serialize)]

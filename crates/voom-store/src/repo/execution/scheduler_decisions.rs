@@ -3,6 +3,7 @@
 use serde_json::Value as JsonValue;
 use sqlx::{Row, SqlitePool};
 use time::OffsetDateTime;
+use voom_core::owner_access_evidence::DecisionAccessEvidence;
 use voom_core::{LeaseId, NodeId, TicketId, VoomError, WorkerId};
 
 use super::Repository;
@@ -171,6 +172,7 @@ pub struct NewSchedulerDecision {
     pub candidate_count: u32,
     pub selected_score: Option<i64>,
     pub suppression_key: Option<String>,
+    pub access_evidence: Option<DecisionAccessEvidence>,
     pub explanation: JsonValue,
     pub now: OffsetDateTime,
 }
@@ -198,6 +200,7 @@ pub struct SchedulerDecision {
     pub selected_score: Option<i64>,
     pub suppressed_count: u32,
     pub suppression_key: Option<String>,
+    pub access_evidence: Option<DecisionAccessEvidence>,
     pub explanation: JsonValue,
 }
 
@@ -268,6 +271,7 @@ impl SqliteSchedulerDecisionRepo {
             &input,
             prepared.now,
             prepared.explanation,
+            prepared.access_evidence,
         )?
         .fetch_one(&mut **tx)
         .await
@@ -305,6 +309,7 @@ impl SqliteSchedulerDecisionRepo {
             &input,
             prepared.now,
             prepared.explanation,
+            prepared.access_evidence,
         )?
         .fetch_optional(&mut **tx)
         .await
@@ -456,12 +461,13 @@ const DECISION_COLS: &str = "id, created_at, updated_at, first_seen_at, last_see
      decision_kind, request_source, idempotency_key, request_node_id, request_worker_id, \
      ticket_id, selected_worker_id, selected_node_id, selected_lease_id, outcome, reason_code, \
      summary, candidate_count, selected_score, suppressed_count, suppression_key, \
-     explanation_json";
+     access_evidence, explanation_json";
 const DECISION_INSERT_COLS: &str = "created_at, updated_at, first_seen_at, last_seen_at, \
      decision_kind, request_source, idempotency_key, request_node_id, request_worker_id, \
      ticket_id, selected_worker_id, selected_node_id, selected_lease_id, outcome, reason_code, \
-     summary, candidate_count, selected_score, suppression_key, explanation_json";
-const DECISION_INSERT_VALUES: &str = "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?";
+     summary, candidate_count, selected_score, suppression_key, access_evidence, explanation_json";
+const DECISION_INSERT_VALUES: &str =
+    "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?";
 const REQUEST_NODE_FIELD: &str = "scheduler_decisions.request_node_id";
 const REQUEST_WORKER_FIELD: &str = "scheduler_decisions.request_worker_id";
 const TICKET_FIELD: &str = "scheduler_decisions.ticket_id";
@@ -487,6 +493,7 @@ const DECISION_INSERT_SUPPRESS_CLAUSE: &str = "ON CONFLICT(suppression_key) WHER
 struct PreparedSchedulerDecisionInsert {
     now: String,
     explanation: String,
+    access_evidence: Option<String>,
 }
 
 fn prepare_decision_insert(
@@ -498,6 +505,13 @@ fn prepare_decision_insert(
     Ok(PreparedSchedulerDecisionInsert {
         now: iso8601(input.now)?,
         explanation: serialize_json(&input.explanation, "scheduler decision explanation")?,
+        access_evidence: match &input.access_evidence {
+            Some(evidence) => Some(serialize_json(
+                evidence,
+                "scheduler_decisions.access_evidence",
+            )?),
+            None => None,
+        },
     })
 }
 
@@ -510,6 +524,7 @@ fn decision_insert_sql(suffix: &str) -> String {
 
 fn validate_decision_shape(input: &NewSchedulerDecision) -> Result<(), VoomError> {
     validate_request_context(input)?;
+    validate_access_evidence_placement(input)?;
     match (input.decision_kind, input.outcome) {
         (SchedulerDecisionKind::LeaseAcquire, SchedulerDecisionOutcome::Selected) => {
             if input.ticket_id.is_some()
@@ -577,6 +592,29 @@ fn validate_decision_shape(input: &NewSchedulerDecision) -> Result<(), VoomError
             input.decision_kind.as_str(),
             input.outcome.as_str()
         ))),
+    }
+}
+
+/// Owner-local evidence is durable scheduling evidence, not free-form state:
+/// `owner` proof belongs only to selected decisions; `rejected` evidence only
+/// to unsupported-artifact-access rejections. Absent elsewhere.
+fn validate_access_evidence_placement(input: &NewSchedulerDecision) -> Result<(), VoomError> {
+    match (&input.access_evidence, input.outcome, input.reason_code) {
+        (
+            Some(DecisionAccessEvidence::Rejected(_)),
+            SchedulerDecisionOutcome::NoEligibleCandidate,
+            SchedulerReasonCode::UnsupportedArtifactAccess,
+        )
+        | (
+            Some(DecisionAccessEvidence::Owner(_)),
+            SchedulerDecisionOutcome::Selected,
+            _,
+        )
+        | (None, _, _) => Ok(()),
+        _ => Err(VoomError::Config(
+            "scheduler decision access evidence is only valid on selected decisions or              unsupported_artifact_access no-candidate rejections"
+                .to_owned(),
+        )),
     }
 }
 
@@ -833,6 +871,7 @@ fn bind_decision_query<'a>(
     input: &'a NewSchedulerDecision,
     now: String,
     explanation: String,
+    access_evidence: Option<String>,
 ) -> Result<sqlx::query::Query<'a, sqlx::Sqlite, sqlx::sqlite::SqliteArguments<'a>>, VoomError> {
     let request_node_id = input
         .request_node_id
@@ -878,6 +917,7 @@ fn bind_decision_query<'a>(
         .bind(i64::from(input.candidate_count))
         .bind(input.selected_score)
         .bind(input.suppression_key.as_deref())
+        .bind(access_evidence)
         .bind(explanation))
 }
 
@@ -928,6 +968,9 @@ fn row_to_decision(row: &sqlx::sqlite::SqliteRow) -> Result<SchedulerDecision, V
     let suppression_key: Option<String> = row
         .try_get("suppression_key")
         .map_err(|e| map_row_err("scheduler_decisions", e))?;
+    let access_evidence_json: Option<String> = row
+        .try_get("access_evidence")
+        .map_err(|e| map_row_err("scheduler_decisions", e))?;
     let explanation_json: String = row
         .try_get("explanation_json")
         .map_err(|e| map_row_err("scheduler_decisions", e))?;
@@ -970,6 +1013,12 @@ fn row_to_decision(row: &sqlx::sqlite::SqliteRow) -> Result<SchedulerDecision, V
         selected_score,
         suppressed_count: u32_from_i64(suppressed_count)?,
         suppression_key,
+        access_evidence: match access_evidence_json.as_deref() {
+            Some(json) => Some(serde_json::from_str(json).map_err(|e| {
+                VoomError::database_context("scheduler_decisions.access_evidence", e)
+            })?),
+            None => None,
+        },
         explanation: serde_json::from_str(&explanation_json)
             .map_err(|e| VoomError::database_context("scheduler_decisions explanation_json", e))?,
     })
