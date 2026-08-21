@@ -22,6 +22,13 @@ pub mod artifact_access_declaration {
     };
 }
 
+pub mod owner_access_evidence {
+    pub use crate::taxonomy::owner_access_evidence::{
+        AccessReferenceReason, AccessReferenceRejection, AccessRejectionEvidence,
+        DecisionAccessEvidence, OwnerAccessEvidence, RootEpoch,
+    };
+}
+
 pub mod artifact_access_mode {
     pub use crate::taxonomy::artifact_access_mode::ArtifactAccessMode;
 }
@@ -132,6 +139,10 @@ pub use ids::{
 };
 pub use issue::{IssuePriority, IssueSeverity};
 pub use operation_kind::OperationKind;
+pub use owner_access_evidence::{
+    AccessReferenceReason, AccessReferenceRejection, AccessRejectionEvidence,
+    DecisionAccessEvidence, OwnerAccessEvidence, RootEpoch,
+};
 pub use remux::{
     REMUX_CONTAINER_MKV, RemuxTrackGroup, is_font_attachment_mime_type,
     is_supported_remux_container,

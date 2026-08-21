@@ -10,33 +10,35 @@ use voom_worker_protocol::{
 
 use crate::catalog::operation_name;
 use crate::validation::{
-    extract_audio_protocol_payload, invalid, optional_string_array_field, remux_protocol_payload,
-    string_array_field, string_field, transcode_audio_protocol_payload,
-    transcode_video_protocol_payload,
+    extract_audio_protocol_payload, invalid, remux_protocol_payload, string_field,
+    transcode_audio_protocol_payload, transcode_video_protocol_payload,
 };
 
+/// Echo the dispatch plan's owner-local proof back as worker evidence.
+///
+/// The control plane compares this echo against its persisted
+/// `OwnerAccessEvidence` at complete time (ADR 0071), so the echo must carry
+/// exactly what was dispatched — and nothing when no byte work was declared.
 pub fn synthetic_artifact_access_evidence(
     payload: &serde_json::Value,
 ) -> Result<serde_json::Value, ProtocolError> {
     let Some(plan) = payload.get("artifact_access_plan") else {
         return Ok(serde_json::json!({}));
     };
-    let selected_access_mode = string_field(plan, "selected_access_mode")?;
-    let advertised_access_modes = advertised_access_modes(payload, plan)?;
-    if !advertised_access_modes.contains(&selected_access_mode) {
-        return Err(invalid(format!(
-            "artifact access mode {selected_access_mode} is not advertised"
-        )));
+    if !plan.is_object() {
+        return Err(invalid("artifact access plan must be an object"));
     }
-
-    Ok(serde_json::json!({
-        "artifact_access": {
-            "inputs_consumed": string_array_field(plan, "input_handles")?,
-            "outputs_declared": string_array_field(plan, "output_handles")?,
-            "mode": selected_access_mode,
-            "validated": true,
+    let mut echo = serde_json::Map::new();
+    echo.insert("validated".to_owned(), serde_json::Value::Bool(true));
+    for field in ["owner_node_id", "access_evidence"] {
+        match plan.get(field) {
+            Some(value) if !value.is_null() => {
+                echo.insert(field.to_owned(), value.clone());
+            }
+            Some(_) | None => {}
         }
-    }))
+    }
+    Ok(serde_json::json!({ "artifact_access": echo }))
 }
 
 pub(crate) fn result_payload(
@@ -418,29 +420,6 @@ fn merge_artifact_access_evidence(
         result_object.insert(key.clone(), value.clone());
     }
     Ok(())
-}
-
-fn advertised_access_modes<'a>(
-    payload: &'a serde_json::Value,
-    plan: &'a serde_json::Value,
-) -> Result<Vec<&'a str>, ProtocolError> {
-    for (source, field) in [
-        (payload, "advertised_artifact_access"),
-        (payload, "advertised_access_modes"),
-        (plan, "advertised_artifact_access"),
-        (plan, "advertised_access_modes"),
-    ] {
-        if let Some(modes) = optional_string_array_field(source, field)? {
-            return Ok(modes);
-        }
-    }
-    if payload
-        .get("artifact_access")
-        .is_some_and(serde_json::Value::is_array)
-    {
-        return string_array_field(payload, "artifact_access");
-    }
-    Ok(Vec::new())
 }
 
 /// First synthetic file-location id a fake scan reports.

@@ -8,7 +8,11 @@ use std::process::Command;
 
 use serde_json::{Value, json};
 use time::OffsetDateTime;
-use voom_core::{NodeId, TicketId, WorkerId};
+use voom_core::{
+    ArtifactAccessDeclaration, ArtifactAccessEntry, ArtifactAccessRight, ArtifactAccessTarget,
+    NodeId, StorageRootAccess, StorageRootId, TicketId, WorkerId,
+    owner_access_evidence::{DecisionAccessEvidence, OwnerAccessEvidence, RootEpoch},
+};
 use voom_store::repo::execution::scheduler_decisions::{
     NewSchedulerDecision, SchedulerDecisionKind, SchedulerDecisionOutcome, SchedulerReasonCode,
     SchedulerRequestSource, SqliteSchedulerDecisionRepo,
@@ -55,6 +59,11 @@ mod scheduler_envelope {
         assert_eq!(json["status"], "ok");
         assert!(json["data"]["decision"].get("explanation_json").is_some());
         redact_local(&mut json);
+        // Locator-free output (issue #477): ids and reason codes only — no
+        // paths or provider locators anywhere in the rendered envelope.
+        let rendered = serde_json::to_string(&json).unwrap();
+        assert!(!rendered.contains('/'), "locator leak: {rendered}");
+        assert!(!rendered.contains("handle:"), "locator leak: {rendered}");
         insta::assert_json_snapshot!("scheduler_decisions_show_outputs_full_explanation", json);
     }
 
@@ -71,6 +80,23 @@ mod scheduler_envelope {
         let pool = voom_store::connect(&url).await.unwrap();
         seed_refs(&pool).await;
         let repo = SqliteSchedulerDecisionRepo::new(pool);
+        let declaration = ArtifactAccessDeclaration::new(vec![ArtifactAccessEntry {
+            target: ArtifactAccessTarget::StorageRoot(StorageRootAccess {
+                storage_root_id: StorageRootId(7),
+            }),
+            rights: vec![ArtifactAccessRight::Read],
+        }])
+        .unwrap();
+        let access_evidence = Some(DecisionAccessEvidence::Owner(
+            OwnerAccessEvidence::new(
+                declaration,
+                vec![RootEpoch {
+                    storage_root_id: StorageRootId(7),
+                    root_epoch: 3,
+                }],
+            )
+            .unwrap(),
+        ));
         let decision = repo
             .create(NewSchedulerDecision {
                 decision_kind: SchedulerDecisionKind::LeaseAcquire,
@@ -88,6 +114,7 @@ mod scheduler_envelope {
                 candidate_count: 1,
                 selected_score: Some(1700),
                 suppression_key: None,
+                access_evidence,
                 explanation: json!({"scoring_version":1,"candidates":[]}),
                 now: OffsetDateTime::UNIX_EPOCH,
             })

@@ -439,11 +439,11 @@ struct RemoteLeaseDispatch {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RemoteArtifactAccessPlan {
     id: u64,
-    input_handles: Vec<String>,
-    output_handles: Vec<String>,
-    selected_access_mode: String,
+    owner_node_id: Option<u64>,
+    access_evidence: Option<voom_core::OwnerAccessEvidence>,
 }
 
 fn operation_kind(operation: &str) -> Result<OperationKind, RemoteRunnerError> {

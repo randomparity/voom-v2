@@ -122,9 +122,8 @@ async fn remote_probe(
                 payload: serde_json::json!({
                     "path": "/tmp/remote.mov",
                     "artifact_access_plan": {
-                        "selected_access_mode": "shared_mount",
-                        "input_handles": ["handle:input:23"],
-                        "output_handles": ["handle:output:23"]
+                        "id": 9,
+                        "owner_node_id": 3
                     }
                 }),
                 heartbeat_deadline_ms: 1_000,
@@ -146,9 +145,7 @@ fn assert_remote_artifact_access(terminal: NdjsonOutcome) {
             "echoed_path": "/tmp/remote.mov",
             "artifact_access": {
                 "validated": true,
-                "mode": "shared_mount",
-                "inputs_consumed": ["handle:input:23"],
-                "outputs_declared": ["handle:output:23"]
+                "owner_node_id": 3
             }
         })
     );

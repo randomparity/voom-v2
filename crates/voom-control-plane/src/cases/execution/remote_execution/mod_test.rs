@@ -117,9 +117,8 @@ fn remote_acquire_outcomes_preserve_durable_wire_shapes() {
         heartbeat_after_seconds: 20,
         artifact_access_plan: RemoteArtifactAccessPlan {
             id: 1,
-            input_handles: vec!["input".to_owned()],
-            output_handles: vec!["output".to_owned()],
-            selected_access_mode: ArtifactAccessMode::SharedMount,
+            owner_node_id: None,
+            access_evidence: None,
         },
     });
     let mut expected = remote_lease_dispatch_json();
@@ -154,9 +153,8 @@ fn remote_lease_dispatch_json() -> serde_json::Value {
 fn remote_artifact_access_plan_json() -> serde_json::Value {
     json!({
         "id": 1,
-        "input_handles": ["input"],
-        "output_handles": ["output"],
-        "selected_access_mode": "shared_mount"
+        "owner_node_id": null,
+        "access_evidence": null
     })
 }
 
@@ -249,12 +247,7 @@ impl RemoteFixture {
             request_hash: request_hash.to_owned(),
             result: json!({
                 "ok": true,
-                "artifact_access": {
-                    "validated": true,
-                    "mode": "shared_mount",
-                    "inputs_consumed": ["handle:input:test"],
-                    "outputs_declared": ["handle:output:test"]
-                }
+                "artifact_access": {"validated": true}
             }),
         }
     }
@@ -307,7 +300,7 @@ impl RemoteFixture {
             request_hash: request_hash.to_owned(),
             reason: "artifact access mode shared_mount is not advertised".to_owned(),
             class: FailureClass::ArtifactUnavailable,
-            evidence: json!({"validated": false, "selected_access_mode": "shared_mount"}),
+            evidence: json!({"validated": false}),
         }
     }
 }
@@ -748,11 +741,13 @@ fn capacity_suppression_key_includes_operation_fingerprint() {
         &fixture_input,
         SchedulerReasonCode::NodeCapacityFull.as_str(),
         &ticket_op("transcode"),
+        TicketId(3),
     );
     let probe_key = capacity_suppression_key(
         &fixture_input,
         SchedulerReasonCode::NodeCapacityFull.as_str(),
         &ticket_op("probe"),
+        TicketId(3),
     );
 
     assert_ne!(transcode_key, probe_key);
@@ -1153,10 +1148,8 @@ async fn remote_acquire_requires_worker_node_ownership_capability_grant_and_no_d
     };
     assert_eq!(dispatch.ticket_id, ticket_id);
     assert_eq!(dispatch.worker_id, eligible.worker_id);
-    assert_eq!(
-        dispatch.artifact_access_plan.selected_access_mode,
-        ArtifactAccessMode::SharedMount
-    );
+    assert_eq!(dispatch.artifact_access_plan.owner_node_id, None);
+    assert_eq!(dispatch.artifact_access_plan.access_evidence, None);
 }
 
 #[tokio::test]
@@ -1185,11 +1178,10 @@ async fn remote_acquire_ignores_unknown_artifact_access_when_known_mode_is_adver
         .unwrap()
         .unwrap();
 
-    assert_eq!(
-        dispatch.artifact_access_plan.selected_access_mode,
-        ArtifactAccessMode::SharedMount
-    );
-    assert_eq!(plan.selected_access_mode, ArtifactAccessMode::SharedMount);
+    assert_eq!(dispatch.artifact_access_plan.owner_node_id, None);
+    assert_eq!(dispatch.artifact_access_plan.access_evidence, None);
+    assert_eq!(plan.owner_node_id, None);
+    assert_eq!(plan.access_evidence, None);
 }
 
 #[tokio::test]
@@ -1535,23 +1527,27 @@ async fn remote_complete_reuses_success_path_and_replays_same_idempotency_key() 
 
 #[tokio::test]
 async fn remote_complete_rejects_incomplete_or_mismatched_artifact_evidence() {
-    let missing = leased_fixture().await;
-    let missing_lease_id = fixture_lease_id(&missing).await;
-    let mut missing_input =
-        missing.complete_input(missing_lease_id, "missing-evidence", "hash-missing");
-    missing_input.result = json!({
+    // The plan proves absence of declared byte work (declaration-free ticket),
+    // so an echo claiming any owner or evidence is a forgery.
+    let claiming_owner = leased_fixture().await;
+    let claiming_owner_lease = fixture_lease_id(&claiming_owner).await;
+    let mut owner_input =
+        claiming_owner.complete_input(claiming_owner_lease, "owner-forgery", "hash-owner");
+    owner_input.result = json!({
         "ok": true,
-        "artifact_access": {"validated": true}
+        "artifact_access": {"validated": true, "owner_node_id": 1}
     });
-
-    let err = missing.cp.remote_complete(missing_input).await.unwrap_err();
-
+    let err = claiming_owner
+        .cp
+        .remote_complete(owner_input)
+        .await
+        .unwrap_err();
     assert_eq!(err.error_code(), ErrorCode::Conflict);
     assert_eq!(
-        missing
+        claiming_owner
             .cp
             .leases()
-            .get(missing_lease_id)
+            .get(claiming_owner_lease)
             .await
             .unwrap()
             .unwrap()
@@ -1559,31 +1555,40 @@ async fn remote_complete_rejects_incomplete_or_mismatched_artifact_evidence() {
         None
     );
 
-    let mismatched = leased_fixture().await;
-    let mismatched_lease_id = fixture_lease_id(&mismatched).await;
-    let mut mismatched_input = mismatched.complete_input(
-        mismatched_lease_id,
-        "mismatched-evidence",
-        "hash-mismatched",
+    let claiming_evidence = leased_fixture().await;
+    let claiming_evidence_lease = fixture_lease_id(&claiming_evidence).await;
+    let mut evidence_input = claiming_evidence.complete_input(
+        claiming_evidence_lease,
+        "evidence-forgery",
+        "hash-evidence",
     );
-    mismatched_input.result = json!({
+    evidence_input.result = json!({
         "ok": true,
-        "artifact_access": {
-            "validated": true,
-            "mode": "control_plane_placeholder",
-            "inputs_consumed": ["handle:input:test"],
-            "outputs_declared": ["handle:output:test"]
-        }
+        "artifact_access": {"validated": true, "access_evidence": {"declaration": []}}
     });
-
-    let err = mismatched
+    let err = claiming_evidence
         .cp
-        .remote_complete(mismatched_input)
+        .remote_complete(evidence_input)
         .await
         .unwrap_err();
-
     assert_eq!(err.error_code(), ErrorCode::Conflict);
-    assert_eq!(count(&mismatched.cp, EventKind::TicketSucceeded).await, 0);
+    assert_eq!(
+        count(&claiming_evidence.cp, EventKind::TicketSucceeded).await,
+        0
+    );
+
+    // A missing validation marker stays rejected regardless of plan shape.
+    let unvalidated = leased_fixture().await;
+    let unvalidated_lease_id = fixture_lease_id(&unvalidated).await;
+    let mut missing_input =
+        unvalidated.complete_input(unvalidated_lease_id, "missing-evidence", "hash-missing");
+    missing_input.result = json!({"ok": true});
+    let err = unvalidated
+        .cp
+        .remote_complete(missing_input)
+        .await
+        .unwrap_err();
+    assert_eq!(err.error_code(), ErrorCode::Conflict);
 }
 
 #[tokio::test]

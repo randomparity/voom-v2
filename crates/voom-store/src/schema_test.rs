@@ -27,7 +27,7 @@ async fn probe_returns_uninitialized_on_fresh_db() {
 #[tokio::test]
 async fn expected_migrations_matches_embedded_count() {
     // review whenever a migration is added/removed.
-    assert_eq!(expected_migrations(), 1);
+    assert_eq!(expected_migrations(), 2);
 }
 
 #[tokio::test]
@@ -1167,18 +1167,31 @@ async fn remote_execution_schema_contains_idempotency_and_artifact_access_tables
     assert!(plan_sql.contains("ticket_id"));
     assert!(plan_sql.contains("worker_id"));
     assert!(plan_sql.contains("node_id"));
-    assert!(plan_sql.contains("selected_access_mode"));
+    // Owner-local representation (ADR 0071): no legacy mode/handle columns.
+    assert!(!plan_sql.contains("selected_access_mode"));
+    assert!(!plan_sql.contains("input_handles"));
+    assert!(!plan_sql.contains("output_handles"));
+    assert!(plan_sql.contains("owner_node_id"));
+    assert!(plan_sql.contains("access_evidence"));
     assert!(plan_sql.contains("CHECK (status IN ('selected','consumed','rejected','failed'))"));
-    assert!(plan_sql.contains("CHECK (json_valid(input_handles))"));
-    assert!(plan_sql.contains("CHECK (json_valid(output_handles))"));
     assert!(plan_sql.contains("CHECK (json_valid(evidence))"));
+    assert!(plan_sql.contains("owner_node_id IS NULL AND access_evidence IS NULL"));
+    assert!(plan_sql.contains("owner_node_id = node_id AND access_evidence IS NOT NULL"));
+
+    let decision_sql: String = sqlx::query_scalar(
+        "SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = 'scheduler_decisions'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(decision_sql.contains("access_evidence"));
 
     for index_name in [
         "remote_idempotency_by_node_created",
         "artifact_access_plans_by_ticket",
         "artifact_access_plans_by_worker",
         "artifact_access_plans_by_node",
-        "artifact_access_plans_by_mode_status",
+        "artifact_access_plans_by_owner_status",
     ] {
         let index_count: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM sqlite_schema WHERE type = 'index' AND name = ?",

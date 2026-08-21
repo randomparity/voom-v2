@@ -79,7 +79,7 @@ pub(crate) fn handle_operation(req: OperationRequest) -> OperationFuture {
             lease_id: req.lease_id,
             seq: 1,
             emitted_at: now,
-            payload: probe_result(&req.payload, &path)?,
+            payload: probe_result(&req.payload, &path),
         };
         let mut body: Vec<u8> = Vec::new();
         body.extend_from_slice(&serde_json::to_vec(&progress).map_err(|e| {
@@ -104,55 +104,22 @@ pub(crate) fn handle_operation(req: OperationRequest) -> OperationFuture {
     })
 }
 
-fn probe_result(
-    request: &serde_json::Value,
-    path: &str,
-) -> Result<serde_json::Value, ProtocolError> {
+fn probe_result(request: &serde_json::Value, path: &str) -> serde_json::Value {
     let mut result = serde_json::json!({"echoed_path": path});
-    let Some(plan) = request.get("artifact_access_plan") else {
-        return Ok(result);
-    };
-    let selected_access_mode = required_string(plan, "selected_access_mode")?;
-    let input_handles = required_string_array(plan, "input_handles")?;
-    let output_handles = required_string_array(plan, "output_handles")?;
-    result["artifact_access"] = serde_json::json!({
-        "validated": true,
-        "mode": selected_access_mode,
-        "inputs_consumed": input_handles,
-        "outputs_declared": output_handles,
-    });
-    Ok(result)
-}
-
-fn required_string<'a>(
-    value: &'a serde_json::Value,
-    field: &'static str,
-) -> Result<&'a str, ProtocolError> {
-    value
-        .get(field)
-        .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| ProtocolError::InvalidPayload {
-            detail: format!("artifact_access_plan.{field} must be a string"),
-        })
-}
-
-fn required_string_array(
-    value: &serde_json::Value,
-    field: &'static str,
-) -> Result<Vec<String>, ProtocolError> {
-    value
-        .get(field)
-        .and_then(serde_json::Value::as_array)
-        .ok_or_else(|| ProtocolError::InvalidPayload {
-            detail: format!("artifact_access_plan.{field} must be an array"),
-        })?
-        .iter()
-        .map(|item| {
-            item.as_str()
-                .map(str::to_owned)
-                .ok_or_else(|| ProtocolError::InvalidPayload {
-                    detail: format!("artifact_access_plan.{field} entries must be strings"),
-                })
-        })
-        .collect()
+    if let Some(plan) = request.get("artifact_access_plan") {
+        // Echo the dispatch plan's owner-local proof back untouched: the
+        // control plane compares it against its persisted evidence at complete
+        // time (ADR 0071). Absent fields stay absent.
+        let mut echo = serde_json::Map::new();
+        echo.insert("validated".to_owned(), serde_json::Value::Bool(true));
+        if let Some(object) = plan.as_object() {
+            for field in ["owner_node_id", "access_evidence"] {
+                if let Some(value) = object.get(field).filter(|value| !value.is_null()) {
+                    echo.insert(field.to_owned(), value.clone());
+                }
+            }
+        }
+        result["artifact_access"] = serde_json::Value::Object(echo);
+    }
+    result
 }

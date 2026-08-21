@@ -60,6 +60,9 @@ struct DecisionData {
     candidate_count: u32,
     selected_score: Option<i64>,
     suppressed_count: u32,
+    /// Owner-local scheduling evidence (ADR 0071): locator-free ids and
+    /// reason codes only; `Null` when the decision carries none.
+    access_evidence: JsonValue,
     explanation_json: JsonValue,
 }
 
@@ -333,12 +336,17 @@ impl From<SchedulerDecision> for DecisionScalarData {
     }
 }
 
-fn split_decision(mut decision: SchedulerDecision) -> (DecisionScalarData, String, JsonValue) {
+fn split_decision(
+    mut decision: SchedulerDecision,
+) -> (DecisionScalarData, String, JsonValue, JsonValue) {
     let updated_at = decision.updated_at.to_string();
     let explanation_json = std::mem::take(&mut decision.explanation);
+    let access_evidence =
+        serde_json::to_value(&decision.access_evidence).unwrap_or(JsonValue::Null);
     (
         DecisionScalarData::from(decision),
         updated_at,
+        access_evidence,
         explanation_json,
     )
 }
@@ -367,7 +375,7 @@ impl From<SchedulerDecision> for DecisionSummaryData {
 
 impl From<SchedulerDecision> for DecisionData {
     fn from(decision: SchedulerDecision) -> Self {
-        let (scalars, updated_at, explanation_json) = split_decision(decision);
+        let (scalars, updated_at, access_evidence, explanation_json) = split_decision(decision);
         Self {
             id: scalars.id,
             created_at: scalars.created_at,
@@ -384,6 +392,7 @@ impl From<SchedulerDecision> for DecisionData {
             candidate_count: scalars.candidate_count,
             selected_score: scalars.selected_score,
             suppressed_count: scalars.suppressed_count,
+            access_evidence,
             explanation_json,
         }
     }

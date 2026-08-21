@@ -1,9 +1,13 @@
-//! Synthetic artifact access plans selected during remote lease acquisition.
+//! Owner-local artifact access plans selected during remote lease acquisition
+//! (issue #477, ADR 0071). Each row persists the resolved owner-local proof:
+//! the acquiring node as common owner plus canonical locator-free evidence.
 
 use serde_json::Value as JsonValue;
 use sqlx::{Row, SqlitePool};
 use time::OffsetDateTime;
-use voom_core::{ArtifactAccessMode, LeaseId, NodeId, TicketId, VoomError, WorkerId};
+use voom_core::{
+    LeaseId, NodeId, TicketId, VoomError, WorkerId, owner_access_evidence::OwnerAccessEvidence,
+};
 
 use super::Repository;
 use super::common::{
@@ -42,16 +46,14 @@ impl ArtifactAccessPlanStatus {
         }
     }
 }
-
 #[derive(Debug, Clone)]
 pub struct NewArtifactAccessPlan {
     pub lease_id: LeaseId,
     pub ticket_id: TicketId,
     pub worker_id: WorkerId,
     pub node_id: NodeId,
-    pub input_handles: Vec<String>,
-    pub output_handles: Vec<String>,
-    pub selected_access_mode: ArtifactAccessMode,
+    pub owner_node_id: Option<NodeId>,
+    pub access_evidence: Option<OwnerAccessEvidence>,
     pub evidence: JsonValue,
     pub now: OffsetDateTime,
 }
@@ -63,9 +65,8 @@ pub struct ArtifactAccessPlan {
     pub ticket_id: TicketId,
     pub worker_id: WorkerId,
     pub node_id: NodeId,
-    pub input_handles: Vec<String>,
-    pub output_handles: Vec<String>,
-    pub selected_access_mode: ArtifactAccessMode,
+    pub owner_node_id: Option<NodeId>,
+    pub access_evidence: Option<OwnerAccessEvidence>,
     pub status: ArtifactAccessPlanStatus,
     pub reason: Option<String>,
     pub evidence: JsonValue,
@@ -95,16 +96,21 @@ impl SqliteArtifactAccessPlanRepo {
     ) -> Result<ArtifactAccessPlan, VoomError> {
         validate_plan_coherence_in_tx(tx, &input).await?;
 
-        let input_handles = serialize_json(&input.input_handles, "input_handles")?;
-        let output_handles = serialize_json(&input.output_handles, "output_handles")?;
+        let access_evidence = match &input.access_evidence {
+            Some(evidence) => Some(serialize_json(
+                evidence,
+                "artifact_access_plans.access_evidence",
+            )?),
+            None => None,
+        };
         let evidence = serialize_json(&input.evidence, "artifact access evidence")?;
         let now = iso8601(input.now)?;
 
         let res = sqlx::query(
             "INSERT INTO artifact_access_plans \
-             (lease_id, ticket_id, worker_id, node_id, input_handles, output_handles, \
-              selected_access_mode, status, evidence, created_at, updated_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, 'selected', ?, ?, ?)",
+             (lease_id, ticket_id, worker_id, node_id, owner_node_id, \
+              access_evidence, status, evidence, created_at, updated_at) \
+             VALUES (?, ?, ?, ?, ?, ?, 'selected', ?, ?, ?)",
         )
         .bind(i64_from_u64(
             input.lease_id.0,
@@ -122,9 +128,19 @@ impl SqliteArtifactAccessPlanRepo {
             input.node_id.0,
             concat!(module_path!(), ": ", stringify!(input.node_id.0)),
         )?)
-        .bind(&input_handles)
-        .bind(&output_handles)
-        .bind(input.selected_access_mode.as_str())
+        .bind(
+            input
+                .owner_node_id
+                .map(|id| {
+                    i64::try_from(id.0).map_err(|_| {
+                        VoomError::Internal(
+                            "artifact_access_plans owner_node_id overflow".to_owned(),
+                        )
+                    })
+                })
+                .transpose()?,
+        )
+        .bind(access_evidence)
         .bind(&evidence)
         .bind(&now)
         .bind(&now)
@@ -309,45 +325,23 @@ impl SqliteArtifactAccessPlanRepo {
         )
         .await
     }
-
-    pub async fn list_by_mode_and_status(
-        &self,
-        mode: ArtifactAccessMode,
-        status: ArtifactAccessPlanStatus,
-    ) -> Result<Vec<ArtifactAccessPlan>, VoomError> {
-        let rows = sqlx::query(SELECT_PLANS_BY_MODE_STATUS)
-            .bind(mode.as_str())
-            .bind(status.as_str())
-            .fetch_all(&self.pool)
-            .await
-            .map_err(|e| {
-                VoomError::database(format!(
-                    "artifact_access_plans list_by_mode_and_status: {e}"
-                ))
-            })?;
-        rows.iter().map(row_to_plan).collect()
-    }
 }
 
 const SELECT_PLAN_BY_ID: &str = "SELECT id, lease_id, ticket_id, worker_id, node_id, \
-     input_handles, output_handles, selected_access_mode, status, reason, evidence, created_at, \
-     updated_at FROM artifact_access_plans WHERE id = ?";
+     owner_node_id, access_evidence, status, reason, evidence, created_at, updated_at \
+     FROM artifact_access_plans WHERE id = ?";
 const SELECT_PLAN_BY_LEASE: &str = "SELECT id, lease_id, ticket_id, worker_id, node_id, \
-     input_handles, output_handles, selected_access_mode, status, reason, evidence, created_at, \
-     updated_at FROM artifact_access_plans WHERE lease_id = ?";
+     owner_node_id, access_evidence, status, reason, evidence, created_at, updated_at \
+     FROM artifact_access_plans WHERE lease_id = ?";
 const SELECT_PLANS_BY_TICKET: &str = "SELECT id, lease_id, ticket_id, worker_id, node_id, \
-     input_handles, output_handles, selected_access_mode, status, reason, evidence, created_at, \
-     updated_at FROM artifact_access_plans WHERE ticket_id = ? ORDER BY id";
+     owner_node_id, access_evidence, status, reason, evidence, created_at, updated_at \
+     FROM artifact_access_plans WHERE ticket_id = ? ORDER BY id";
 const SELECT_PLANS_BY_WORKER: &str = "SELECT id, lease_id, ticket_id, worker_id, node_id, \
-     input_handles, output_handles, selected_access_mode, status, reason, evidence, created_at, \
-     updated_at FROM artifact_access_plans WHERE worker_id = ? ORDER BY id";
+     owner_node_id, access_evidence, status, reason, evidence, created_at, updated_at \
+     FROM artifact_access_plans WHERE worker_id = ? ORDER BY id";
 const SELECT_PLANS_BY_NODE: &str = "SELECT id, lease_id, ticket_id, worker_id, node_id, \
-     input_handles, output_handles, selected_access_mode, status, reason, evidence, created_at, \
-     updated_at FROM artifact_access_plans WHERE node_id = ? ORDER BY id";
-const SELECT_PLANS_BY_MODE_STATUS: &str = "SELECT id, lease_id, ticket_id, worker_id, node_id, \
-     input_handles, output_handles, selected_access_mode, status, reason, evidence, created_at, \
-     updated_at FROM artifact_access_plans WHERE selected_access_mode = ? AND status = ? \
-     ORDER BY id";
+     owner_node_id, access_evidence, status, reason, evidence, created_at, updated_at \
+     FROM artifact_access_plans WHERE node_id = ? ORDER BY id";
 
 async fn validate_plan_coherence_in_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
@@ -413,13 +407,30 @@ async fn validate_plan_coherence_in_tx(
             input.worker_id.0
         )));
     };
-
     let worker_node_id = u64_from_i64(worker_node_id, "artifact_access_plans.worker_node_id")?;
     if worker_node_id != input.node_id.0 {
         return Err(VoomError::Conflict(format!(
             "artifact_access_plans worker_id={} belongs to node_id={}, not node_id={}",
             input.worker_id.0, worker_node_id, input.node_id.0
         )));
+    }
+
+    match (input.owner_node_id, &input.access_evidence) {
+        (Some(owner), Some(_)) if owner == input.node_id => {}
+        (Some(owner), Some(_)) => {
+            return Err(VoomError::Conflict(format!(
+                "artifact_access_plans owner_node_id={} does not match acquiring node_id={}",
+                owner.0, input.node_id.0
+            )));
+        }
+        (None, None) => {}
+        _ => {
+            return Err(VoomError::Conflict(
+                "artifact_access_plans owner_node_id and access_evidence must be \
+                 present together or absent together"
+                    .to_owned(),
+            ));
+        }
     }
 
     Ok(())
@@ -499,14 +510,11 @@ fn row_to_plan(row: &sqlx::sqlite::SqliteRow) -> Result<ArtifactAccessPlan, Voom
     let node_id: i64 = row
         .try_get("node_id")
         .map_err(|e| map_row_err("artifact_access_plans", e))?;
-    let input_handles: String = row
-        .try_get("input_handles")
+    let owner_node_id: Option<i64> = row
+        .try_get("owner_node_id")
         .map_err(|e| map_row_err("artifact_access_plans", e))?;
-    let output_handles: String = row
-        .try_get("output_handles")
-        .map_err(|e| map_row_err("artifact_access_plans", e))?;
-    let mode: String = row
-        .try_get("selected_access_mode")
+    let access_evidence: Option<String> = row
+        .try_get("access_evidence")
         .map_err(|e| map_row_err("artifact_access_plans", e))?;
     let status: String = row
         .try_get("status")
@@ -542,18 +550,23 @@ fn row_to_plan(row: &sqlx::sqlite::SqliteRow) -> Result<ArtifactAccessPlan, Voom
             node_id,
             concat!(module_path!(), ": ", stringify!(node_id)),
         )?),
-        input_handles: serde_json::from_str(&input_handles)
-            .map_err(|e| VoomError::database_context("artifact_access_plans input_handles", e))?,
-        output_handles: serde_json::from_str(&output_handles)
-            .map_err(|e| VoomError::database_context("artifact_access_plans output_handles", e))?,
-        selected_access_mode: ArtifactAccessMode::parse_database(
-            "artifact_access_plans.selected_access_mode",
-            &mode,
-        )?,
+        owner_node_id: match owner_node_id {
+            Some(raw) => Some(NodeId(u64_from_i64(
+                raw,
+                "artifact_access_plans.owner_node_id",
+            )?)),
+            None => None,
+        },
+        access_evidence: match access_evidence.as_deref() {
+            Some(json) => Some(serde_json::from_str(json).map_err(|e| {
+                VoomError::database_context("artifact_access_plans.access_evidence", e)
+            })?),
+            None => None,
+        },
         status: ArtifactAccessPlanStatus::parse(&status)?,
         reason,
         evidence: serde_json::from_str(&evidence)
-            .map_err(|e| VoomError::database_context("artifact_access_plans evidence", e))?,
+            .map_err(|e| VoomError::database_context("artifact_access_plans.evidence", e))?,
         created_at: parse_iso8601(&created_at)?,
         updated_at: parse_iso8601(&updated_at)?,
     })

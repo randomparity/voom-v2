@@ -35,12 +35,17 @@ pub struct ResolvedRoot {
 }
 
 /// A resolved file location reference.
+///
+/// Carries the referenced root's epoch so one resolution yields the complete
+/// epoch set for every declared root — no second query, no TOCTOU window
+/// (ADR 0071).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedLocation {
     pub file_location_id: FileLocationId,
     pub storage_root_id: StorageRootId,
     pub owner_node_id: i64,
     pub state: LocationState,
+    pub root_epoch: i64,
 }
 
 /// A resolved artifact handle reference.
@@ -254,7 +259,8 @@ where
         r"
         SELECT fl.id AS id, fl.storage_root_id AS storage_root_id,
                fl.address_state AS address_state, fl.retired_at AS retired_at,
-               lr.owner_node_id AS owner_node_id, lr.state AS root_state
+               lr.owner_node_id AS owner_node_id, lr.state AS root_state,
+               lr.root_epoch AS root_epoch
         FROM file_locations fl
         LEFT JOIN library_roots lr ON lr.id = fl.storage_root_id
         WHERE fl.id = ?1
@@ -328,11 +334,22 @@ where
         }
     }
 
+    let root_epoch: i64 = row.try_get("root_epoch").map_err(|e| {
+        AccessResolutionError::DatabaseError(format!("Failed to read root_epoch: {e}"))
+    })?;
+    if root_epoch < 0 {
+        return Err(AccessResolutionError::InvalidRootEpoch {
+            storage_root_id,
+            root_epoch,
+        });
+    }
+
     Ok(ResolvedLocation {
         file_location_id,
         storage_root_id,
         owner_node_id,
         state: location_state,
+        root_epoch,
     })
 }
 

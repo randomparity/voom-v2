@@ -33,6 +33,9 @@ crates/voom-policy/src/syntax/span.rs
 crates/voom-core/src/media/transcode_video_profile.rs
 # Declaration carried inside the durable tickets.payload column (ADR 0069).
 crates/voom-core/src/taxonomy/artifact_access_declaration.rs
+# Owner-local scheduling evidence read from artifact_access_plans.access_evidence
+# and scheduler_decisions.access_evidence (ADR 0071).
+crates/voom-core/src/taxonomy/owner_access_evidence.rs
 crates/voom-worker-protocol/src/operations/audio.rs
 # This defines the typed accelerator object read from worker_capabilities.extra.
 crates/voom-worker-protocol/src/video_acceleration.rs

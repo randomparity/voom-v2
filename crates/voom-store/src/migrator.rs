@@ -8,6 +8,13 @@ use sqlx::migrate::{Migration, MigrationType, Migrator};
 /// rather than the sequential chain it replaced.
 const MIGRATION_0001_SQL: &str = include_str!("../../../migrations/0001_schema.sql");
 
+/// Migration 0037 (physical version 2): owner-local scheduling evidence
+/// (issue #477, ADR 0071). Logical numbering continues the pre-squash
+/// history; see the file header for its guarded rebuild of
+/// `artifact_access_plans` and the additive `scheduler_decisions` column.
+const MIGRATION_0037_SQL: &str =
+    include_str!("../../../migrations/0037_owner_local_scheduling_evidence.sql");
+
 /// Embedded migration set, constructed without the `sqlx::migrate!` macro.
 ///
 /// We don't use sqlx's `macros` feature: it pulls `sqlx-macros-core`, which
@@ -22,13 +29,22 @@ const MIGRATION_0001_SQL: &str = include_str!("../../../migrations/0001_schema.s
 /// Single source of truth for "what schema does this binary expect" — both
 /// `init()` and `probe_schema()` read from here.
 pub(crate) static MIGRATOR: LazyLock<Migrator> = LazyLock::new(|| Migrator {
-    migrations: Cow::Owned(vec![Migration::new(
-        1,
-        Cow::Borrowed("schema"),
-        MigrationType::Simple,
-        Cow::Borrowed(MIGRATION_0001_SQL),
-        false,
-    )]),
+    migrations: Cow::Owned(vec![
+        Migration::new(
+            1,
+            Cow::Borrowed("schema"),
+            MigrationType::Simple,
+            Cow::Borrowed(MIGRATION_0001_SQL),
+            false,
+        ),
+        Migration::new(
+            2,
+            Cow::Borrowed("owner_local_scheduling_evidence"),
+            MigrationType::Simple,
+            Cow::Borrowed(MIGRATION_0037_SQL),
+            false,
+        ),
+    ]),
     ignore_missing: false,
     locking: true,
     no_tx: false,
