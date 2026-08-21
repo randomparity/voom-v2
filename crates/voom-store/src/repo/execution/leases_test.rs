@@ -1670,3 +1670,251 @@ async fn timeline_for_job_returns_held_and_released_worker_intervals_in_order() 
         ]
     );
 }
+
+#[tokio::test]
+async fn try_acquire_reports_a_not_ready_ticket_as_a_structured_outcome() {
+    let (pool, trepo, _wrepo, lrepo, tid, wid, _tmp) = setup().await;
+    lrepo
+        .acquire(NewLease {
+            ticket_id: tid,
+            worker_id: wid,
+            ttl: Duration::seconds(60),
+            now: T0,
+        })
+        .await
+        .unwrap();
+    let leased = trepo.get(tid).await.unwrap().unwrap();
+
+    let mut tx = pool.begin().await.unwrap();
+    let outcome = lrepo
+        .try_acquire_in_tx(
+            &mut tx,
+            NewLease {
+                ticket_id: tid,
+                worker_id: wid,
+                ttl: Duration::seconds(60),
+                now: T0,
+            },
+        )
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+
+    match outcome {
+        LeaseAcquireOutcome::TicketNotReady { ticket_id } => assert_eq!(ticket_id, tid),
+        other => panic!("expected TicketNotReady, got {other:?}"),
+    }
+    // The rejected attempt mutated nothing: the ticket keeps its leased state
+    // and attempt count from the successful acquisition, and no second lease
+    // row exists.
+    let after = trepo.get(tid).await.unwrap().unwrap();
+    assert_eq!(after.state, TicketState::Leased);
+    assert_eq!(after.attempt, leased.attempt);
+    assert_eq!(after.epoch, leased.epoch);
+    let lease_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM leases")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(lease_count, 1);
+}
+
+#[tokio::test]
+async fn try_acquire_maps_every_ineligible_worker_state_to_a_structured_reason() {
+    for (state, expected_reason) in [
+        (IneligibleWorkerState::Missing, LeaseIneligibilityReason::WorkerMissing),
+        (IneligibleWorkerState::Stale, LeaseIneligibilityReason::WorkerStale),
+        (IneligibleWorkerState::Retired, LeaseIneligibilityReason::WorkerRetired),
+        (
+            IneligibleWorkerState::MissingCapability,
+            LeaseIneligibilityReason::MissingCapability,
+        ),
+        (
+            IneligibleWorkerState::MissingGrant,
+            LeaseIneligibilityReason::MissingGrant,
+        ),
+        (
+            IneligibleWorkerState::Denied,
+            LeaseIneligibilityReason::OperationDenied,
+        ),
+    ] {
+        let (pool, trepo, wrepo, lrepo, tid, wid, _tmp) = setup().await;
+        make_worker_ineligible(&pool, &wrepo, wid, state).await;
+        let before = trepo.get(tid).await.unwrap().unwrap();
+        let mut tx = pool.begin().await.unwrap();
+        let outcome = lrepo
+            .try_acquire_in_tx(
+                &mut tx,
+                NewLease {
+                    ticket_id: tid,
+                    worker_id: wid,
+                    ttl: Duration::seconds(60),
+                    now: T0,
+                },
+            )
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+
+        match outcome {
+            LeaseAcquireOutcome::WorkerIneligible {
+                worker_id,
+                operation,
+                reason,
+            } => {
+                assert_eq!(worker_id, wid, "state={state:?}");
+                assert_eq!(operation, ticket_op("noop"), "state={state:?}");
+                assert_eq!(reason, expected_reason, "state={state:?}");
+            }
+            other => panic!("state={state:?}, expected WorkerIneligible, got {other:?}"),
+        }
+        // The savepoint rolled the provisional ticket transition back.
+        let after = trepo.get(tid).await.unwrap().unwrap();
+        assert_eq!(after.state, TicketState::Ready, "state={state:?}");
+        assert_eq!(after.attempt, before.attempt, "state={state:?}");
+        assert_eq!(after.epoch, before.epoch, "state={state:?}");
+        let lease_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM leases")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(lease_count, 0, "state={state:?}");
+    }
+}
+
+#[tokio::test]
+async fn try_acquire_preserves_the_capacity_full_outcome() {
+    let (pool, trepo, wrepo, lrepo, tid, wid, _tmp) = setup().await;
+    // The single grant slot is already consumed by a held lease.
+    wrepo
+        .record_grant(NewGrant {
+            worker_id: wid,
+            can_execute: vec![ticket_op("noop")],
+            can_access_read: Vec::new(),
+            can_access_write: Vec::new(),
+            denies: Vec::new(),
+            max_parallel: json!({"*": 1}),
+        })
+        .await
+        .unwrap();
+    lrepo
+        .acquire(NewLease {
+            ticket_id: tid,
+            worker_id: wid,
+            ttl: Duration::seconds(60),
+            now: T0,
+        })
+        .await
+        .unwrap();
+    // A second ready ticket wants the same single-slot operation.
+    let second = trepo
+        .create(NewTicket {
+            job_id: None,
+            kind: ticket_op("noop"),
+            priority: 0,
+            payload: json!({}),
+            max_attempts: 3,
+            created_at: T0,
+        })
+        .await
+        .unwrap();
+    trepo.mark_ready_if_unblocked(second.id, T0).await.unwrap();
+
+    let mut tx = pool.begin().await.unwrap();
+    let outcome = lrepo
+        .try_acquire_in_tx(
+            &mut tx,
+            NewLease {
+                ticket_id: second.id,
+                worker_id: wid,
+                ttl: Duration::seconds(60),
+                now: T0,
+            },
+        )
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+
+    match outcome {
+        LeaseAcquireOutcome::CapacityFull(saturation) => {
+            assert_eq!(saturation.worker_id, wid);
+            assert_eq!(saturation.operation, ticket_op("noop"));
+            assert_eq!(saturation.active_leases, 1);
+            assert_eq!(saturation.max_parallel, 1);
+        }
+        other => panic!("expected CapacityFull, got {other:?}"),
+    }
+    // Only the first acquisition's lease exists; the saturated attempt
+    // rolled back.
+    let lease_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM leases")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(lease_count, 1);
+}
+
+#[test]
+fn into_lease_result_preserves_the_legacy_error_classification_for_changed_gates() {
+    let not_ready = LeaseAcquireOutcome::TicketNotReady { ticket_id: TicketId(7) }
+        .into_lease_result()
+        .unwrap_err();
+    match not_ready {
+        VoomError::Conflict(message) => assert_eq!(
+            message,
+            "acquire rejected for ticket 7: not ready, not eligible, \
+             parent job not open, or out of attempts"
+        ),
+        other => panic!("expected Conflict, got {other:?}"),
+    }
+
+    for (reason, expected) in [
+        (
+            LeaseIneligibilityReason::WorkerMissing,
+            VoomError::NotFound("worker 9".to_owned()),
+        ),
+        (
+            LeaseIneligibilityReason::WorkerStale,
+            VoomError::Conflict("acquire rejected: worker 9 stale".to_owned()),
+        ),
+        (
+            LeaseIneligibilityReason::WorkerRetired,
+            VoomError::Conflict("acquire rejected: worker 9 retired".to_owned()),
+        ),
+        (
+            LeaseIneligibilityReason::OperationDenied,
+            VoomError::Conflict(
+                "acquire rejected: worker 9 denied operation noop".to_owned(),
+            ),
+        ),
+        (
+            LeaseIneligibilityReason::MissingCapability,
+            VoomError::Conflict(
+                "acquire rejected: worker 9 missing capability noop".to_owned(),
+            ),
+        ),
+        (
+            LeaseIneligibilityReason::MissingGrant,
+            VoomError::Conflict("acquire rejected: worker 9 missing grant noop".to_owned()),
+        ),
+    ] {
+        let err = LeaseAcquireOutcome::WorkerIneligible {
+            worker_id: WorkerId(9),
+            operation: ticket_op("noop"),
+            reason,
+        }
+        .into_lease_result()
+        .unwrap_err();
+        assert_eq!(err.to_string(), expected.to_string(), "reason={reason:?}");
+    }
+
+    let capacity = LeaseAcquireOutcome::CapacityFull(WorkerCapacitySaturation {
+        worker_id: WorkerId(9),
+        operation: ticket_op("noop"),
+        active_leases: 2,
+        max_parallel: 1,
+    })
+    .into_lease_result()
+    .unwrap_err();
+    assert!(
+        matches!(capacity, VoomError::NoEligibleWorker(_)),
+        "expected NoEligibleWorker, got {capacity:?}"
+    );
+}
