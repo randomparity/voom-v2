@@ -450,12 +450,23 @@ fn advertised_access_modes<'a>(
 ///
 /// These ids name no `file_locations` row. That is sound only while nothing
 /// resolves them, which is true today — a scan result is routing evidence for the
-/// children it fans out to, and ADR 0068 grants a declaration no resolution — and
-/// stops being true at #476, which resolves a declaration to a storage owner. A
-/// fake-scanner-descended ticket will then fail resolution. Failing is the correct
-/// outcome for fabricated evidence, so the fix belongs with #476: either seed real
-/// rows for the fake flow, or have it assert the failure. Do not close that gap by
-/// making resolution tolerant of an id that names nothing.
+/// children it fans out to, and ADR 0068 grants a declaration no resolution.
+///
+/// It does **not** follow that #476 will fail on them by itself. `expand_scanner_
+/// completion` pairs each of these with the scan ticket's own real
+/// `storage_root_id`, so a descendant declares
+/// `file_location { storage_root_id: <real>, file_location_id: <fabricated> }`. A
+/// storage owner is a property of the root, so a resolver keyed on the root alone
+/// satisfies that entry without ever reading the fabricated id — and the fake flow
+/// would route as though its bytes were real. The hazard is a resolver that never
+/// looks, not one that is tolerant of what it finds.
+///
+/// So the deferral is a requirement on #476, not a prediction: resolution must read
+/// `file_location_id` whenever an entry names one, and must not satisfy a
+/// `file_location` entry from its `storage_root_id` alone. Whoever closes #476 then
+/// either seeds real rows for the fake flow — as
+/// `voom_store::test_support::seed_test_rooted_location` already does — or has it
+/// assert the failure.
 const FAKE_SCANNER_FIRST_LOCATION_ID: u64 = 9_100_001;
 
 fn scanner_files(

@@ -99,12 +99,22 @@ because the two have different symptoms. Ticket-kind normalization became strict
 (ADR 0068): a kind of the form `synthetic.workflow.operation.<suffix>` whose suffix
 is not a known operation is now rejected at lease acquisition, so such a ticket is
 permanently unleasable rather than merely undecodable. Drain those alongside the
-byte-touching ones. A lease already **held** on such a kind at the moment of the swap
-also stops counting toward its worker's `max_parallel`, because worker capacity now
-matches on the kind as stored instead of on a namespace-stripped form; that worker can
-be over-subscribed until those leases drain or expire. Both conditions end once the
-drain completes, and neither can recur afterwards, since no renderer emits an unknown
-suffix.
+byte-touching ones.
+
+Two capacity effects follow for such a kind, and they are not the same one.
+
+- **Audit `worker_grants` keys.** `max_parallel` is looked up by the kind as stored, so a
+  grant entry keyed on the bare `<suffix>` no longer matches. That worker falls back to
+  its `*` limit, or to 1 when it has none — which can raise *or* lower its effective
+  limit depending on the grant. This holds on every deployment carrying such a grant.
+- **A held lease usually still counts.** Capacity computed under the same namespaced kind
+  binds that kind on both sides and counts the lease. It goes uncounted only where a
+  separate custom-local ticket kind exactly equal to the suffix also exists, so that
+  capacity is computed for the bare token; that worker can then be over-subscribed until
+  the leases drain or expire. Check whether any such kind exists before watching for it.
+
+All of these end once the drain completes, and none can recur afterwards, since no
+renderer emits an unknown suffix.
 
 **This drain is the standing procedure for any change to the rights table, not a
 one-off for this release.** `validate_artifact_access` compares a stored declaration
