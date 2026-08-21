@@ -3,9 +3,9 @@ use super::*;
 use serde_json::json;
 use time::{Duration, OffsetDateTime};
 use voom_core::{
-    ArtifactAccessMode, ErrorCode, FailureClass, LeaseId, LibraryId, NodeId, ProviderLocator,
-    ProviderRelativeLocator, ScanSessionStatus, StorageProviderKind, StorageRootId, TicketId,
-    TicketOperation, clock_test_support::FrozenClock,
+    ArtifactAccessMode, ErrorCode, FailureClass, LeaseId, LibraryId, NodeId, OperationKind,
+    ProviderLocator, ProviderRelativeLocator, ScanSessionStatus, StorageProviderKind,
+    StorageRootId, TicketId, TicketOperation, clock_test_support::FrozenClock,
 };
 use voom_events::EventKind;
 use voom_scheduler::{
@@ -33,6 +33,7 @@ use crate::cases::workers::{
     NewWorkerCapabilityDraft, NewWorkerGrantDraft, RegisterWorkerForNodeInput,
 };
 use crate::scan::{RemoteScanBatchInput, RemoteScanStartInput};
+use crate::workflow::plan::ticket_payload::WorkflowTicketPayload;
 
 const T0: OffsetDateTime = OffsetDateTime::UNIX_EPOCH;
 const OP: &str = "test.remote";
@@ -1350,6 +1351,125 @@ async fn remote_acquire_skips_ineligible_higher_priority_work_for_eligible_ticke
     };
     assert_eq!(dispatch.ticket_id, eligible_ticket);
     assert_eq!(dispatch.operation, "test.allowed");
+}
+
+const WF_OP: &str = "synthetic.workflow.operation.transcode_video";
+
+/// A ready byte-touching ticket whose canonical declaration names the supplied
+/// rendered source, as the workflow planner would persist it.
+async fn ready_workflow_ticket(
+    fixture: &RemoteFixture,
+    priority: i64,
+    source_storage_root_id: u64,
+    source_location_id: u64,
+) -> TicketId {
+    let payload = WorkflowTicketPayload::new_for_test(
+        "wf-owner-local",
+        "plan-owner-local",
+        "node-owner-local",
+        "branch-owner-local",
+        OperationKind::TranscodeVideo,
+        json!({
+            "operation": "transcode_video",
+            "source_storage_root_id": source_storage_root_id,
+            "source_location_id": source_location_id,
+        }),
+    )
+    .to_ticket_payload()
+    .unwrap();
+    let ticket = fixture
+        .cp
+        .create_ticket(NewTicket {
+            job_id: None,
+            kind: ticket_op(WF_OP),
+            priority,
+            payload,
+            max_attempts: 2,
+            created_at: T0,
+        })
+        .await
+        .unwrap();
+    fixture
+        .cp
+        .mark_ready_if_unblocked(ticket.id, T0)
+        .await
+        .unwrap();
+    ticket.id
+}
+
+#[tokio::test]
+async fn remote_acquire_skips_unresolvable_declaration_and_preserves_order() {
+    // The scoring path matches capability rows by ticket kind; the lease write
+    // path rechecks under the operation's matching token, so both encodings are
+    // registered.
+    let fixture = remote_fixture(
+        &[
+            (WF_OP, vec!["shared_mount"]),
+            ("transcode_video", vec!["shared_mount"]),
+        ],
+        &[WF_OP, "transcode_video"],
+        &[],
+    )
+    .await;
+    let root = create_remote_scan_root(&fixture, "owner-local-order").await;
+    let location = seed_scan_location(&fixture.cp, root, "owner-local-order.mkv").await;
+
+    // The higher-priority ticket declares a location that names no row: rejected
+    // before scoring, so the lower-priority owner-local ticket leases.
+    ready_workflow_ticket(&fixture, 10, 999_999_999, 999_999_998).await;
+    let real = ready_workflow_ticket(&fixture, 0, root.0, location).await;
+
+    let outcome = fixture
+        .cp
+        .remote_acquire(fixture.acquire_input("gate-order", "hash-gate-order"))
+        .await
+        .unwrap();
+    let RemoteAcquireOutcome::Leased(dispatch) = outcome else {
+        panic!("expected the resolvable lower-priority ticket to lease");
+    };
+    assert_eq!(dispatch.ticket_id, real);
+}
+
+#[tokio::test]
+async fn remote_acquire_rejects_byte_work_owned_by_another_node() {
+    let fixture = remote_fixture(
+        &[
+            (WF_OP, vec!["shared_mount"]),
+            ("transcode_video", vec!["shared_mount"]),
+        ],
+        &[WF_OP, "transcode_video"],
+        &[],
+    )
+    .await;
+
+    // A real, live root and location owned by a different node (the shared test
+    // root's owner 9000001), so only the owner check can reject this candidate.
+    voom_store::test_support::seed_test_rooted_location(fixture.cp.pool_for_test())
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT OR IGNORE INTO node_incarnations (incarnation_id, node_id, status, started_at, last_seen_at) \
+         VALUES ('inc-9000001', 9000001, 'active', '1970-01-01T00:00:00Z', '1970-01-01T00:00:00Z')",
+    )
+    .execute(fixture.cp.pool_for_test())
+    .await
+    .unwrap();
+    ready_workflow_ticket(&fixture, 0, 9_000_001, 9_000_001).await;
+
+    let outcome = fixture
+        .cp
+        .remote_acquire(fixture.acquire_input("gate-foreign-owner", "hash-gate-foreign-owner"))
+        .await
+        .unwrap();
+    assert!(
+        matches!(outcome, RemoteAcquireOutcome::Idle { .. }),
+        "non-owner byte work must not become schedulable: {outcome:?}"
+    );
+    let leased: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM leases")
+        .fetch_one(fixture.cp.pool_for_test())
+        .await
+        .unwrap();
+    assert_eq!(leased, 0);
 }
 
 #[tokio::test]

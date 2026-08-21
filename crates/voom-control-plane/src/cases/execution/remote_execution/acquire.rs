@@ -2,6 +2,8 @@
 
 use std::collections::HashMap;
 
+use crate::workflow::plan::artifact_access_resolution::resolve_artifact_access;
+use crate::workflow::plan::ticket_payload::WorkflowTicketPayload;
 use serde_json::{Value as JsonValue, json};
 use sqlx::{Sqlite, Transaction};
 use time::{Duration, OffsetDateTime};
@@ -170,10 +172,20 @@ impl ControlPlane {
             .workers
             .candidate_operations_in_tx(tx, input.worker_id)
             .await?;
-        let tickets = self
+        let mut tickets = self
             .tickets
             .ready_for_operations_in_tx(tx, &operations, now)
             .await?;
+        // Owner-local gate: reject non-owner and mixed-owner byte work before
+        // scoring. Filtering here keeps the deterministic ready-ticket ordering
+        // and lets a fully rejected snapshot fall through to the idle path.
+        let mut gated = Vec::with_capacity(tickets.len());
+        for ticket in tickets {
+            if declaration_is_owner_local_in_tx(tx, &ticket, input.node_id).await? {
+                gated.push(ticket);
+            }
+        }
+        tickets = gated;
         if tickets.is_empty() {
             #[expect(
                 clippy::default_constructed_unit_structs,
@@ -309,7 +321,6 @@ impl ControlPlane {
             .active_count_for_node_in_tx(tx, input.node_id)
             .await?;
         let mut candidates = Vec::with_capacity(tickets.len());
-
         for ticket in &tickets {
             let eligibility =
                 if let Some(eligibility) = eligibility_by_operation.get(&ticket.kind).cloned() {
@@ -504,6 +515,34 @@ impl ControlPlane {
         .await?;
         Ok(outcome)
     }
+}
+
+/// Prove a ready ticket's declared artifact access resolves to the acquiring
+/// node as its single common owner.
+///
+/// Returns `true` when the ticket carries no resolvable declaration: payload
+/// decoding already enforces a declaration on every byte-touching operation,
+/// so an undecodable or declaration-free payload is not byte work this gate
+/// owns. Any resolution failure (missing, inactive, stale, retired,
+/// mixed-owner, or corrupt reference) rejects the candidate.
+async fn declaration_is_owner_local_in_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    ticket: &Ticket,
+    node_id: NodeId,
+) -> Result<bool, VoomError> {
+    let declaration =
+        WorkflowTicketPayload::parse_ticket(ticket.kind.as_str(), ticket.payload.clone())
+            .ok()
+            .and_then(|payload| payload.declared_artifact_access);
+    let Some(declaration) = declaration else {
+        return Ok(true);
+    };
+    let Ok(node_id) = i64::try_from(node_id.0) else {
+        return Ok(false);
+    };
+    Ok(resolve_artifact_access(tx, &declaration)
+        .await
+        .is_ok_and(|resolution| resolution.owner_node_id == node_id))
 }
 
 #[expect(
