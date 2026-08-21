@@ -93,13 +93,32 @@ For the cross-check against `rendered_payload.source_location_id` to bind, that 
 to be present, and today it is emitted only for a `TargetRef::FileLocation` node. So the
 renderer resolves every non-scan byte-touching node's source to exactly one live rooted
 location and records it, whichever target shape the node carries. `scan_library` is the
-complement: it addresses a root, so it carries no `source_location_id`. The two cases
-partition the byte-touching operations, so the check is total rather than conditional.
+one operation whose declaration does not name that location: it enumerates a root by
+definition, so `entries_for` projects a location source to the location's root and emits a
+root-only entry.
+
+That makes the cross-check **not** total, and the gap is worth stating rather than
+glossing. A scan node resolves its target like any other node, so `insert_storage_source`
+writes both `source_storage_root_id` and `source_location_id` into its rendered payload,
+and the declaration then binds only the root. A scan row can therefore carry any
+`source_location_id` — corrupted, hand-edited, or stale — and still satisfy
+`validate_artifact_access`. Only the root is cross-checked for that one operation. Nothing
+consumes the unbound field (`expand_scanner_completion` reads `parent_storage_root`), and
+`scan_library` has no production producer at all, so the exposure today is confined to
+fixtures; it is recorded because the "total cross-check" claim is what the criterion 1
+argument rests on, and that claim holds for every byte-touching operation except this one.
 
 Each entry's rights come from the operation, and the mapping is fixed: `scan_library` reads
 its root; `probe_file`, `hash_file`, and `verify_artifact` read their location; the seven
 output-producing operations read their location and write their root; `delete_artifact`
 reads and deletes its location.
+
+Those readings describe a **location-addressed** render. A root-addressed one — a ticket
+whose source is `TicketStorageSource::Root`, because it operates on staged output that has
+no `file_locations` row yet — has no location to name, so every right it declares attaches
+to the root: an output-producing operation collapses to a single `storage_root` entry
+carrying `[read, write]`, a read-only operation to `[read]` on the root, and
+`delete_artifact` to `[read, delete]` on the root.
 
 **The gate is equality, not shape.** The declaration must equal the one that mapping
 produces for the ticket's operation and source, entry for entry and right for right. A
@@ -176,7 +195,10 @@ raise; rejection belongs to the callers that handle one ticket at a time.
 `synthetic.workflow.operation.` is a reserved namespace: a token inside it must have a
 known `OperationKind` suffix or normalization fails. A token outside every reserved
 namespace is a custom local operation and normalizes to itself.
-`normalized_worker_operation` and `ticket_payload::ticket_operation` are deleted.
+`normalized_worker_operation` is deleted. `ticket_payload::ticket_operation` stays and is
+rewritten onto `normalize`, because it is a seam rather than a duplicate: it is where a
+workflow ticket kind is required to be namespaced, accepting only
+`Known { namespaced: true }` and rejecting a custom local or unknown token.
 
 Failing closed means *denied*, not *aborted*. `remote_acquire_candidates_in_tx` evaluates
 candidates in a loop that `?`-propagates each store call, so raising there would let one
@@ -243,6 +265,25 @@ decode — where raising cannot spread.
   destination** — it names read locality, not write locality. The vocabulary is already
   sufficient for the fix: two `storage_root` entries with distinct ids are canonical
   today, so closing #484 adds an entry rather than a shape.
+- **A root-addressed render declares the broadest claim the vocabulary can express, and
+  its `read` is no more a locality statement than its `write` is.** The bullet above warns
+  #476 off reading the write entry as a destination; the same warning applies to the read
+  half, and to every right on a root-addressed entry. With no location to name, an
+  output-producing operation collapses to one `storage_root` entry carrying
+  `[read, write]` — a claim over every artifact in the root, for a ticket that reads one
+  staged file. This is the *common* path rather than a corner: `expand_transform_completion`
+  builds a `Root` source for its `back_up_file`, `commit_artifact` and `edit_tracks`
+  children, and `expand_backup_completion` for its `verify_artifact` child, because staged
+  output has no `file_locations` row to point at.
+
+  Narrowing it needs a name for a not-yet-materialized artifact, which is exactly the
+  `planned_artifact` handle variant this slice ships but does not produce (D3) — no handle
+  ID exists at render time. So the breadth is a consequence of the vocabulary being ahead
+  of its producers, not of the mapping being careless, and it resolves when #422/#476 make
+  handle IDs available rather than by changing `entries_for`. Until then #476 and #477 must
+  treat a root-addressed entry as "this ticket touches something in this root" and must not
+  derive read locality, co-scheduling, or serialization scope from it — the over-broad
+  reading would show up as unnecessary serialization, and only once a consumer exists.
 - **The two producers of a `file_location` declaration entry do not validate it equally.**
   The policy path resolves through `resolve_policy_file_source`, which requires a live,
   rooted, non-retired location and takes the root from `location.rooted_address()` rather
