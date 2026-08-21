@@ -1,5 +1,8 @@
 use crate::workflow::plan::ticket_payload::WorkflowTicketPayload;
-use voom_core::OperationKind;
+use voom_core::{
+    ArtifactAccessDeclaration, ArtifactAccessEntry, ArtifactAccessRight, ArtifactAccessTarget,
+    FileLocationAccess, FileLocationId, OperationKind, StorageRootAccess, StorageRootId,
+};
 
 #[test]
 fn workflow_ticket_payload_rejects_operation_mismatch() {
@@ -190,4 +193,78 @@ fn a_non_byte_touching_payload_must_not_declare_artifact_access() {
             .contains("is not byte-touching and must not declare artifact access"),
         "message was {error}"
     );
+}
+
+#[test]
+fn a_canonical_declaration_that_is_not_the_operations_own_is_rejected_on_both_sides() {
+    // The reason the gate is an equality check against `declaration_for` rather than
+    // a shape check. Both forgeries below are canonical in their own right, so a
+    // shape check would admit both: the first is the exact threat the gate's doc
+    // comment names -- read, write, delete for a probe_file ticket on its source.
+    // `new_for_test` renders root 3 / location 7, which is what these must forge
+    // against for the mismatch to be about rights and target alone.
+    let widened_rights = vec![ArtifactAccessEntry {
+        target: ArtifactAccessTarget::FileLocation(FileLocationAccess {
+            storage_root_id: StorageRootId(3),
+            file_location_id: FileLocationId(7),
+        }),
+        rights: vec![
+            ArtifactAccessRight::Read,
+            ArtifactAccessRight::Write,
+            ArtifactAccessRight::Delete,
+        ],
+    }];
+    // Correct rights for probe_file, attached to the whole root instead of the
+    // location -- the other half of what equality binds.
+    let wrong_target = vec![ArtifactAccessEntry {
+        target: ArtifactAccessTarget::StorageRoot(StorageRootAccess {
+            storage_root_id: StorageRootId(3),
+        }),
+        rights: vec![ArtifactAccessRight::Read],
+    }];
+
+    for (case, entries) in [
+        ("widened rights", widened_rights),
+        ("wrong target", wrong_target),
+    ] {
+        // Constructing through `new` is the assertion that the forgery is canonical:
+        // it enforces every canonical-form rule and would fail here otherwise.
+        let forged = ArtifactAccessDeclaration::new(entries).unwrap();
+
+        let mut payload = WorkflowTicketPayload::new_for_test(
+            "wf",
+            "plan",
+            "probe",
+            "file-000",
+            OperationKind::ProbeFile,
+            serde_json::json!({"path": "/library/file-000.mkv"}),
+        );
+        let valid_wire = payload.to_ticket_payload().unwrap();
+        payload.declared_artifact_access = Some(forged.clone());
+
+        let encode_error = payload.to_ticket_payload().unwrap_err();
+        assert!(
+            encode_error
+                .to_string()
+                .contains("does not match the canonical declaration"),
+            "{case}: encode message was {encode_error}"
+        );
+
+        let mut forged_wire = valid_wire;
+        forged_wire.as_object_mut().unwrap().insert(
+            "declared_artifact_access".to_owned(),
+            serde_json::to_value(&forged).unwrap(),
+        );
+        let decode_error = WorkflowTicketPayload::parse_ticket(
+            "synthetic.workflow.operation.probe_file",
+            forged_wire,
+        )
+        .unwrap_err();
+        assert!(
+            decode_error
+                .to_string()
+                .contains("does not match the canonical declaration"),
+            "{case}: decode message was {decode_error}"
+        );
+    }
 }

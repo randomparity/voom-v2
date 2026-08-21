@@ -153,4 +153,30 @@ async fn an_undecodable_ticket_is_counted_in_the_total_and_missing_from_per_oper
         Some(1),
         "only the decodable ticket reaches the per-operation total"
     );
+    assert!(
+        summary.warned_undecodable,
+        "the first refresh that skips a ticket must warn"
+    );
+
+    // `refresh_counts` runs on every run-loop iteration, and the skipped row cannot
+    // change state until an operator drains it. The latch is what stops the warning
+    // repeating for the life of the run; the counts must still be recomputed.
+    summary
+        .refresh_counts(
+            &control.tickets,
+            &control.leases,
+            JobId(73),
+            Duration::from_secs(6),
+        )
+        .await
+        .unwrap();
+
+    assert!(
+        summary.warned_undecodable,
+        "the latch stays closed across refreshes"
+    );
+    assert_eq!(
+        summary.ticket_count, 2,
+        "a latched warning must not stop the counts refreshing"
+    );
 }

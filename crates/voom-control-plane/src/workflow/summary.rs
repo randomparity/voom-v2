@@ -23,6 +23,9 @@ pub struct WorkflowRunSummary {
     pub throughput_per_second: f64,
     pub per_operation: BTreeMap<OperationKind, OperationSummary>,
     max_active_by_worker: BTreeMap<WorkerId, u32>,
+    /// Latch for the undecodable-payload warning, so it is emitted once per run
+    /// rather than once per run-loop iteration. Not a durable summary field.
+    warned_undecodable: bool,
 }
 
 impl WorkflowRunSummary {
@@ -54,6 +57,9 @@ impl WorkflowRunSummary {
             let maximum = self.max_active_by_worker.entry(worker_id).or_default();
             *maximum = (*maximum).max(active);
         }
+        // Merging a run that already warned keeps the latch closed, so a merged
+        // summary does not re-announce a condition an operator has already seen.
+        self.warned_undecodable |= next.warned_undecodable;
     }
 
     #[cfg(test)]
@@ -113,6 +119,7 @@ impl WorkflowRunSummary {
             throughput_per_second: 0.0,
             per_operation: BTreeMap::new(),
             max_active_by_worker: BTreeMap::new(),
+            warned_undecodable: false,
         }
     }
 
@@ -198,11 +205,15 @@ impl WorkflowRunSummary {
         // an ADR 0018 issue, so silence would leave an incomplete drain visible
         // nowhere while under-reporting the counts an operator checks against it.
         //
-        // One line per refresh, not one per ticket. `refresh_counts` runs on every
-        // run-loop iteration over durable rows whose state cannot change until an
-        // operator drains them, so a per-ticket warning would repeat N times per
-        // iteration for the life of the run and bury whatever else is being logged.
-        if skipped > 0 {
+        // Once per run, not once per refresh and not once per ticket. Both
+        // multipliers are real: `refresh_counts` runs on every run-loop iteration
+        // (`executor/mod.rs`), over durable rows whose state cannot change until an
+        // operator drains them. Left unlatched this repeats for the life of the run
+        // and buries the rest of the run-loop output — during exactly the incident
+        // an operator is reading these logs for. A later refresh that skips more
+        // tickets stays silent; the drain, not the count, is the action.
+        if skipped > 0 && !self.warned_undecodable {
+            self.warned_undecodable = true;
             let (ticket_id, error) = first_skipped.unwrap_or_default();
             tracing::warn!(
                 skipped_ticket_count = skipped,
