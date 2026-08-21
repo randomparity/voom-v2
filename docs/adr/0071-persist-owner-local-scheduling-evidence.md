@@ -79,10 +79,15 @@ vocabulary lives in core):
   declared `ArtifactAccessTarget` with a closed `AccessReferenceReason` code
   (`storage_root_not_found`, `file_location_not_found`,
   `location_root_invalid`, `invalid_root_state`, `invalid_root_epoch`,
-  `invalid_location_state`, `mixed_owner`, `no_active_incarnation`). Reasons
-  for references resolution never reached are never invented; a cross-reference
-  verdict (`mixed_owner`) attaches to the reference whose fold detected it.
-  Targets only — never a path, mount name, or host string.
+  `invalid_location_state`, `mixed_owner`, `no_active_incarnation`), plus one
+  gate-level code, `owner_mismatch`, for resolution succeeding with a common
+  owner that is not the acquiring node. Reasons for references resolution
+  never reached are never invented; a cross-reference verdict (`mixed_owner`)
+  attaches to the reference whose fold detected it, and `owner_mismatch` —
+  which no single reference failed — attaches to the declaration's first
+  target as scope context for the declaration-level verdict, never as a
+  per-reference failure claim. Targets only — never a path, mount name, or
+  host string.
 - `DecisionAccessEvidence` — internally tagged (`tag = "evidence"`) enum with
   newtype variants `owner(OwnerAccessEvidence)` and
   `rejected(AccessRejectionEvidence)` over `deny_unknown_fields` content

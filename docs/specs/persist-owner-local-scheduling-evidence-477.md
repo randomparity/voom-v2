@@ -38,6 +38,8 @@ pub enum AccessReferenceReason {
     StorageRootNotFound, FileLocationNotFound, LocationRootInvalid,
     InvalidRootState, InvalidRootEpoch, InvalidLocationState,
     MixedOwner, NoActiveIncarnation,
+    OwnerMismatch,   // gate-level verdict; attaches to the first declared
+                     // target as scope context, not a per-reference failure
 }
 ```
 

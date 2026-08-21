@@ -313,7 +313,8 @@ fn validated_artifact_complete_evidence(
             if evidence.get("owner_node_id").is_some() || evidence.get("access_evidence").is_some()
             {
                 return Err(VoomError::Conflict(
-                    "remote complete rejected: ticket declared no artifact access but the worker                      echoed an access claim"
+                    "remote complete rejected: ticket declared no artifact access but the \
+                     worker echoed an access claim"
                         .to_owned(),
                 ));
             }
