@@ -120,15 +120,38 @@ async fn an_undecodable_ticket_is_counted_in_the_total_and_missing_from_per_oper
     .execute(&control.pool)
     .await
     .unwrap();
-    // A pre-upgrade row: same kind, payload without the declaration this release
-    // made required.
+    // A pre-upgrade row, built to be undecodable for exactly the ADR 0068 reason and
+    // no other: a well-formed byte-touching payload with `declared_artifact_access`
+    // removed. An envelope-less `'{}'` would also fail to decode, but it failed
+    // before this branch too, so it would leave this test green if the declaration
+    // gate were later relaxed.
+    let mut pre_upgrade =
+        crate::workflow::plan::ticket_payload::WorkflowTicketPayload::new_for_test(
+            "wf-73",
+            "plan-73",
+            "node-b",
+            "branch-b",
+            OperationKind::ProbeFile,
+            serde_json::json!({"path": "/library/file-000.mkv"}),
+        )
+        .to_ticket_payload()
+        .unwrap();
+    assert!(
+        pre_upgrade
+            .as_object_mut()
+            .unwrap()
+            .remove("declared_artifact_access")
+            .is_some(),
+        "fixture must start from a payload that carries a declaration"
+    );
     sqlx::query(
         "INSERT INTO tickets \
          (id, job_id, kind, state, payload, attempt, max_attempts, next_eligible_at, \
           created_at, state_changed_at) VALUES \
-         (94, 73, 'synthetic.workflow.operation.identify_media', 'succeeded', '{}', 1, 1, \
+         (94, 73, 'synthetic.workflow.operation.probe_file', 'succeeded', ?, 1, 1, \
           '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', '2026-01-01T00:00:10Z')",
     )
+    .bind(pre_upgrade.to_string())
     .execute(&control.pool)
     .await
     .unwrap();
@@ -152,5 +175,16 @@ async fn an_undecodable_ticket_is_counted_in_the_total_and_missing_from_per_oper
             .map(|operation| operation.ticket_count),
         Some(1),
         "only the decodable ticket reaches the per-operation total"
+    );
+    // The assertion that binds the skip to its cause. Without it the test passes
+    // whether or not the declaration gate still rejects the row, because a decodable
+    // probe_file would land in its own per-operation entry and leave the two above
+    // untouched.
+    assert!(
+        !summary
+            .per_operation
+            .contains_key(&OperationKind::ProbeFile),
+        "the undecodable byte-touching ticket reached a per-operation total, so the \
+         ADR 0068 declaration gate stopped rejecting a payload with no declaration"
     );
 }

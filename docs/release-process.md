@@ -80,6 +80,34 @@ rendered between the drain and the swap undecodable. A ticket rendered after mig
 0034 references a live rooted location and dispatches normally today, so skipping the
 step loses completable work rather than delaying it.
 
+**Which kinds.** Twelve operations are byte-touching (`OperationKind::is_byte_touching`).
+The drain predicate is every one of them under the workflow namespace:
+
+```sql
+WHERE state NOT IN ('succeeded', 'failed', 'cancelled')
+  AND kind IN (
+    'synthetic.workflow.operation.scan_library',
+    'synthetic.workflow.operation.probe_file',
+    'synthetic.workflow.operation.hash_file',
+    'synthetic.workflow.operation.back_up_file',
+    'synthetic.workflow.operation.remux',
+    'synthetic.workflow.operation.transcode_video',
+    'synthetic.workflow.operation.transcode_audio',
+    'synthetic.workflow.operation.edit_tracks',
+    'synthetic.workflow.operation.extract_audio',
+    'synthetic.workflow.operation.verify_artifact',
+    'synthetic.workflow.operation.commit_artifact',
+    'synthetic.workflow.operation.delete_artifact'
+  )
+```
+
+Confirm the list against `is_byte_touching` before running it — nothing enforces the
+agreement, and issue #512 tracks a guardrail that would. **The seven-operation list further
+down, under the rights-table procedure, is the #484 output-producing set and is not the
+drain set.** Draining only those seven leaves `scan_library`, `probe_file`, `hash_file`,
+`verify_artifact`, and `delete_artifact` behind; `verify_artifact` has a production
+producer today, so that is not a theoretical omission.
+
 **What skipping the drain actually looks like.** The first undrained byte-touching ticket
 the dispatch loop polls aborts the entire workflow run it belongs to
 (`executor/expansion.rs::ready_workflow_tickets`), naming the ticket and the decode error.
