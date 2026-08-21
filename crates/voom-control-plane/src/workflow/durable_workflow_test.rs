@@ -24,7 +24,8 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, ChildStdin};
 use voom_core::rng_test_support::FrozenRng;
 use voom_core::{
-    ErrorCode, FailureClass, JobId, SystemClock, TicketOperation, WorkerId, WorkerKind,
+    ErrorCode, FailureClass, FileLocationId, JobId, SystemClock, TicketOperation, WorkerId,
+    WorkerKind,
 };
 use voom_store::repo::execution::workers::{NewCapability, NewGrant};
 use voom_worker_protocol::http::OperationBody;
@@ -60,7 +61,7 @@ async fn default_ci_workflow_runs_all_branches_through_real_scheduler() -> TestR
     let result = async {
         let summary = fixture
             .executor()
-            .submit_and_run(WorkflowPlan::default_ci())
+            .submit_and_run(WorkflowPlan::default_ci(fixture.source_location_id))
             .await
             .map_err(|err| io_error(format!("workflow failed: {:?}", err.source)))?;
 
@@ -114,7 +115,7 @@ async fn chaos_worker_crash_maps_to_worker_crash() -> TestResult<()> {
     let result = async {
         let summary = fixture
             .executor()
-            .submit_and_run(WorkflowPlan::default_ci())
+            .submit_and_run(WorkflowPlan::default_ci(fixture.source_location_id))
             .await
             .unwrap_err()
             .summary;
@@ -148,7 +149,7 @@ async fn chaos_dispatch_timeout_maps_to_worker_timeout() -> TestResult<()> {
     let result = async {
         let summary = fixture
             .executor()
-            .submit_and_run(WorkflowPlan::default_ci())
+            .submit_and_run(WorkflowPlan::default_ci(fixture.source_location_id))
             .await
             .unwrap_err()
             .summary;
@@ -185,7 +186,7 @@ async fn chaos_malformed_result_maps_to_malformed_worker_result() -> TestResult<
     let result = async {
         let summary = fixture
             .executor()
-            .submit_and_run(WorkflowPlan::default_ci())
+            .submit_and_run(WorkflowPlan::default_ci(fixture.source_location_id))
             .await
             .unwrap_err()
             .summary;
@@ -223,7 +224,7 @@ async fn chaos_progress_timeout_maps_to_progress_timeout() -> TestResult<()> {
     let result = async {
         let summary = fixture
             .executor()
-            .submit_and_run(WorkflowPlan::default_ci())
+            .submit_and_run(WorkflowPlan::default_ci(fixture.source_location_id))
             .await
             .unwrap_err()
             .summary;
@@ -267,7 +268,7 @@ async fn chaos_missed_heartbeat_uses_executor_watchdog() -> TestResult<()> {
     let result = async {
         let summary = fixture
             .executor()
-            .submit_and_run(WorkflowPlan::default_ci())
+            .submit_and_run(WorkflowPlan::default_ci(fixture.source_location_id))
             .await
             .unwrap_err()
             .summary;
@@ -309,7 +310,7 @@ async fn benchmark_durable_workflow_reports_non_zero_throughput() -> TestResult<
     let result = async {
         let summary = fixture
             .executor()
-            .submit_and_run(WorkflowPlan::default_ci())
+            .submit_and_run(WorkflowPlan::default_ci(fixture.source_location_id))
             .await
             .map_err(|err| io_error(format!("workflow failed: {:?}", err.source)))?;
 
@@ -344,7 +345,7 @@ async fn benchmark_durable_workflow_reports_non_zero_throughput() -> TestResult<
 async fn stress_durable_workflow_respects_dispatch_and_worker_parallel_limits() -> TestResult<()> {
     let mut fixture = DurableWorkflowFixture::start_all_in_process_fake_providers(1).await?;
     let result = async {
-        let mut plan = WorkflowPlan::default_ci();
+        let mut plan = WorkflowPlan::default_ci(fixture.source_location_id);
         plan.concurrency.max_in_flight_dispatches = 3;
         plan.timing.base_duration_ms = 80;
         plan.timing.jitter_ms = 0;
@@ -381,7 +382,7 @@ async fn pre_lease_no_worker_retries_then_terminal_fails_without_dispatch() -> T
 
     let err = fixture
         .executor_with_options(options)
-        .submit_and_run(WorkflowPlan::default_ci())
+        .submit_and_run(WorkflowPlan::default_ci(fixture.source_location_id))
         .await
         .unwrap_err();
 
@@ -401,6 +402,7 @@ async fn pre_lease_no_worker_retries_then_terminal_fails_without_dispatch() -> T
 struct DurableWorkflowFixture {
     cp: ControlPlane,
     pool: SqlitePool,
+    source_location_id: FileLocationId,
     _tmp: voom_test_support::TempDatabase,
     registry: WorkerRuntimeRegistry,
     launches: Vec<ProviderLaunch>,
@@ -551,10 +553,13 @@ impl DurableWorkflowFixture {
             Arc::new(Mutex::new(FrozenRng::new(0))),
         )
         .await?;
+        // Byte-touching plan nodes must name a live rooted location.
+        let source_location_id = voom_store::test_support::seed_test_rooted_location(&pool).await?;
 
         Ok(Self {
             cp,
             pool,
+            source_location_id,
             _tmp: tmp,
             registry: WorkerRuntimeRegistry::new(),
             launches: Vec::new(),

@@ -88,7 +88,13 @@ fn source_media_snapshot_id(
         })
 }
 
-async fn select_location(
+/// Resolve a file version to exactly one live rooted location, failing closed on
+/// zero or several.
+///
+/// The byte-free half of `select_local_source`: it reads identity rows and does
+/// not canonicalize, stat, or open anything, which is what makes it reusable on
+/// the declaration path.
+pub(crate) async fn select_location(
     cp: &ControlPlane,
     file_version_id: FileVersionId,
     source_location_id: Option<FileLocationId>,
@@ -130,6 +136,17 @@ fn require_live_rooted_location(
             location.id, location.file_version_id
         )));
     }
+    require_live_rooted(location)
+}
+
+/// The half of [`require_live_rooted_location`] that asks only about the row
+/// itself: is it live, and does it have a rooted address.
+///
+/// Split out for the caller that already holds the row it looked up by id. There
+/// the ownership check above compares the row's `file_version_id` against a value
+/// read out of that same row, so it can never fire — and reaching it costs a
+/// second read of a row already in hand.
+pub(crate) fn require_live_rooted(location: &FileLocation) -> Result<(), VoomError> {
     if location.retired_at.is_some() {
         return Err(VoomError::NotFound(format!(
             "file_location {} is retired",

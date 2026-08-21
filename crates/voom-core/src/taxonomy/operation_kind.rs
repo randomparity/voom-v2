@@ -70,6 +70,35 @@ impl OperationKind {
         }
     }
 
+    /// Whether this operation opens an artifact's bytes.
+    ///
+    /// A byte-touching operation must declare the storage it intends to access
+    /// (ADR 0069). The three excluded operations derive from facts an earlier
+    /// operation already recorded, or talk to an external system; none opens an
+    /// artifact. `ScanLibrary` is included because it enumerates a root's
+    /// contents.
+    ///
+    /// The match is exhaustive with no wildcard arm, so adding a variant without
+    /// classifying it is a compile error rather than a silently unguarded ticket.
+    #[must_use]
+    pub const fn is_byte_touching(self) -> bool {
+        match self {
+            Self::ScanLibrary
+            | Self::ProbeFile
+            | Self::HashFile
+            | Self::BackUpFile
+            | Self::Remux
+            | Self::TranscodeVideo
+            | Self::TranscodeAudio
+            | Self::EditTracks
+            | Self::ExtractAudio
+            | Self::VerifyArtifact
+            | Self::CommitArtifact
+            | Self::DeleteArtifact => true,
+            Self::IdentifyMedia | Self::ScoreQuality | Self::SyncExternalSystem => false,
+        }
+    }
+
     /// Parse a wire string (the `snake_case` token produced by [`Self::as_str`])
     /// back into a variant, or `None` for an unknown token. Symmetric with
     /// [`Self::as_str`]; callers that need to validate an externally supplied

@@ -15,6 +15,13 @@ pub mod clock {
     pub use crate::runtime::clock::{Clock, SystemClock, format_iso8601};
 }
 
+pub mod artifact_access_declaration {
+    pub use crate::taxonomy::artifact_access_declaration::{
+        ArtifactAccessDeclaration, ArtifactAccessEntry, ArtifactAccessRight, ArtifactAccessTarget,
+        ExistingArtifactAccess, FileLocationAccess, PlannedArtifactAccess, StorageRootAccess,
+    };
+}
+
 pub mod artifact_access_mode {
     pub use crate::taxonomy::artifact_access_mode::ArtifactAccessMode;
 }
@@ -80,7 +87,9 @@ pub mod rng_test_support {
 }
 
 pub mod ticket_operation {
-    pub use crate::taxonomy::ticket_operation::TicketOperation;
+    pub use crate::taxonomy::ticket_operation::{
+        NormalizedTicketOperation, TicketOperation, WORKFLOW_OPERATION_NAMESPACE,
+    };
 }
 
 pub mod transcode_video_profile {
@@ -99,6 +108,10 @@ pub mod version {
     pub use crate::runtime::version::VersionInfo;
 }
 
+pub use artifact_access_declaration::{
+    ArtifactAccessDeclaration, ArtifactAccessEntry, ArtifactAccessRight, ArtifactAccessTarget,
+    ExistingArtifactAccess, FileLocationAccess, PlannedArtifactAccess, StorageRootAccess,
+};
 pub use artifact_access_mode::ArtifactAccessMode;
 pub use clock::{Clock, SystemClock, format_iso8601};
 pub use config::{Config, EnvSource, LogFormat, MapEnv, ProcessEnv};
@@ -130,7 +143,9 @@ pub use taxonomy::execution_vocab::{
     NodeIncarnationEndReason, NodeIncarnationStatus, NodeKind, NodeStatus, WorkerKind, WorkerStatus,
 };
 pub use taxonomy::scan::{ScanSessionStatus, ScanTerminalReason};
-pub use ticket_operation::TicketOperation;
+pub use ticket_operation::{
+    NormalizedTicketOperation, TicketOperation, WORKFLOW_OPERATION_NAMESPACE,
+};
 pub use transcode_video_profile::{
     NvidiaVideoDecode, SoftwareVideoDecode, TRANSCODE_VIDEO_CODEC,
     TRANSCODE_VIDEO_CODEC_ALIAS_H265, TRANSCODE_VIDEO_CODEC_AV1, TRANSCODE_VIDEO_CODEC_H264,

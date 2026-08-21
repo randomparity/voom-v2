@@ -5,13 +5,17 @@ use serde_json::Value;
 use sqlx::{Sqlite, Transaction};
 use time::OffsetDateTime;
 use voom_core::OperationKind;
-use voom_core::{FileVersionId, JobId, TicketId, TicketOperation, VoomError};
+use voom_core::{
+    FileLocationId, FileVersionId, JobId, StorageRootId, TicketId, TicketOperation, VoomError,
+    WORKFLOW_OPERATION_NAMESPACE,
+};
 use voom_events::payload::TicketCreatedPayload;
 use voom_events::{Event, SubjectType};
 use voom_store::repo::execution::tickets::{
     NewTicket, SqliteTicketRepo, Ticket, TicketState, WorkflowTicketIdentity,
 };
 
+use super::access_declaration::{TicketStorageSource, declaration_for};
 use super::binding::{BranchContext, render_default_payload};
 use super::model::{OperationNode, WorkflowPlan};
 use super::ticket_payload::WorkflowTicketPayload;
@@ -64,6 +68,9 @@ pub(crate) async fn expand_scanner_completion(
         .map(|file| file.path.clone())
         .collect::<Vec<_>>();
     let branch_ids = branch_ids_from_paths(&paths)?;
+    // The scan holds a root and no location; each child's location comes from the
+    // scan result entry that named it.
+    let storage_root_id = parent_storage_root(&parse_workflow_payload(scanner_ticket)?)?;
     let mut specs = Vec::new();
     for (file, branch_id) in files.into_iter().zip(branch_ids) {
         for node_id in ["probe", "hash", "identity"] {
@@ -76,6 +83,10 @@ pub(crate) async fn expand_scanner_completion(
                     probe_codec: (node_id == "probe")
                         .then(|| branch_codec(ctx.plan.seed, &branch_id).to_owned()),
                     source_file: Some(file.source_file.clone()),
+                    storage_source: Some(TicketStorageSource::Location {
+                        storage_root_id,
+                        file_location_id: file.file_location_id,
+                    }),
                 },
                 scanner_ticket.id,
                 scanner_ticket,
@@ -100,6 +111,8 @@ pub(crate) async fn expand_probe_completion(
             branch_id: branch_id.to_owned(),
             path,
             probe_codec: Some(codec),
+            // The quality child scores the same file the probe read.
+            storage_source: Some(parent_storage_source(&probe_payload)?),
             source_file: probe_payload.source_file,
         },
         probe_ticket.id,
@@ -127,6 +140,9 @@ pub(crate) async fn expand_quality_completion(
             branch_id: branch_id.to_owned(),
             path: rendered_path(&quality_payload)?,
             probe_codec: None,
+            // score_quality is not byte-touching and declares nothing, but it
+            // carries the source — which is what makes these children renderable.
+            storage_source: Some(parent_storage_source(&quality_payload)?),
             source_file: quality_payload.source_file,
         },
         quality_ticket.id,
@@ -141,11 +157,18 @@ pub(crate) async fn expand_transform_completion(
     transform_ticket: &Ticket,
 ) -> Result<Vec<Ticket>, VoomError> {
     let output_path = transform_result_output_path(transform_ticket)?;
+    let transform_payload = parse_workflow_payload(transform_ticket)?;
+    // These children operate on the transform's output, which has no
+    // file_locations row until commit creates one — so the root, not the
+    // parent's location, is what they can name.
     let branch = BranchContext {
         branch_id: branch_id.to_owned(),
         path: output_path,
         probe_codec: None,
-        source_file: parse_workflow_payload(transform_ticket)?.source_file,
+        storage_source: Some(TicketStorageSource::Root {
+            storage_root_id: parent_storage_root(&transform_payload)?,
+        }),
+        source_file: transform_payload.source_file,
     };
     let mut specs = Vec::new();
     for node_id in ["backup", "external-sync", "issue", "use-lease"] {
@@ -166,6 +189,7 @@ pub(crate) async fn expand_backup_completion(
     backup_ticket: &Ticket,
 ) -> Result<Vec<Ticket>, VoomError> {
     let local_backup_id = string_result_field(backup_ticket, "local_backup_id")?;
+    let backup_payload = parse_workflow_payload(backup_ticket)?;
     let spec = spec_for_branch(
         ctx,
         "verify",
@@ -173,7 +197,11 @@ pub(crate) async fn expand_backup_completion(
             branch_id: branch_id.to_owned(),
             path: local_backup_id,
             probe_codec: None,
-            source_file: parse_workflow_payload(backup_ticket)?.source_file,
+            // The verify child reads the backup artifact, not the parent's source.
+            storage_source: Some(TicketStorageSource::Root {
+                storage_root_id: parent_storage_root(&backup_payload)?,
+            }),
+            source_file: backup_payload.source_file,
         },
         backup_ticket.id,
         backup_ticket,
@@ -217,6 +245,7 @@ fn spec_for_branch(
         rendered_payload,
         timing,
         source_file: branch.source_file.clone(),
+        declared_artifact_access: declaration_for(operation, branch.storage_source.as_ref())?,
     }
     .to_ticket_payload()
     .map_err(|e| VoomError::Config(format!("workflow ticket payload encode: {e}")))?;
@@ -365,6 +394,9 @@ async fn ensure_dependency_in_tx(
 struct ScannerFile {
     path: String,
     source_file: Value,
+    /// A scan is the one place a child's location is discovered rather than
+    /// inherited, so each entry must name one.
+    file_location_id: FileLocationId,
 }
 
 fn scanner_files(scanner_ticket: &Ticket) -> Result<Vec<ScannerFile>, VoomError> {
@@ -379,10 +411,11 @@ fn scanner_files(scanner_ticket: &Ticket) -> Result<Vec<ScannerFile>, VoomError>
     files
         .iter()
         .map(|file| match file {
-            Value::String(path) => Ok(ScannerFile {
-                path: path.clone(),
-                source_file: serde_json::json!({ "path": path }),
-            }),
+            // The string form names no location, so it can no longer describe a
+            // file a byte-touching child will open.
+            Value::String(_) => Err(VoomError::Config(
+                "scanner result file entry requires file_location_id".to_owned(),
+            )),
             Value::Object(object) => {
                 let path = object
                     .get("path")
@@ -391,16 +424,75 @@ fn scanner_files(scanner_ticket: &Ticket) -> Result<Vec<ScannerFile>, VoomError>
                     .ok_or_else(|| {
                         VoomError::Config("scanner result file object requires path".to_owned())
                     })?;
+                let file_location_id = object
+                    .get("file_location_id")
+                    .and_then(Value::as_u64)
+                    .filter(|id| *id != 0)
+                    .map(FileLocationId)
+                    .ok_or_else(|| {
+                        VoomError::Config(
+                            "scanner result file entry requires file_location_id".to_owned(),
+                        )
+                    })?;
                 Ok(ScannerFile {
                     path,
                     source_file: file.clone(),
+                    file_location_id,
                 })
             }
             _ => Err(VoomError::Config(
-                "scanner result files must be strings or objects".to_owned(),
+                "scanner result files must be objects carrying path and file_location_id"
+                    .to_owned(),
             )),
         })
         .collect()
+}
+
+/// The source a parent ticket recorded.
+///
+/// Read off `rendered_payload`, never off the parent's declaration: three of the
+/// five expansions build children whose bytes are not the parent's, so inheriting
+/// a declaration would name the wrong bytes. The root is required because every
+/// workflow ticket that has a source records one.
+fn parent_storage_root(payload: &WorkflowTicketPayload) -> Result<StorageRootId, VoomError> {
+    payload
+        .rendered_payload
+        .get("source_storage_root_id")
+        .and_then(Value::as_u64)
+        .filter(|id| *id != 0)
+        .map(StorageRootId)
+        .ok_or_else(|| {
+            VoomError::Config(
+                "parent ticket payload requires a non-zero source_storage_root_id".to_owned(),
+            )
+        })
+}
+
+/// The parent's own source, for a child that operates on the same bytes.
+fn parent_storage_source(
+    payload: &WorkflowTicketPayload,
+) -> Result<TicketStorageSource, VoomError> {
+    let storage_root_id = parent_storage_root(payload)?;
+    // Absent means the parent addresses its root. Present-but-unreadable does not:
+    // treating it as absent would silently widen the child from one location to
+    // read+write on the whole root, and the child's own payload and declaration
+    // would agree, so nothing downstream could notice.
+    let Some(raw) = payload.rendered_payload.get("source_location_id") else {
+        return Ok(TicketStorageSource::Root { storage_root_id });
+    };
+    let file_location_id = raw
+        .as_u64()
+        .filter(|id| *id != 0)
+        .map(FileLocationId)
+        .ok_or_else(|| {
+            VoomError::Config(format!(
+                "parent ticket payload source_location_id must be a non-zero integer, got {raw}"
+            ))
+        })?;
+    Ok(TicketStorageSource::Location {
+        storage_root_id,
+        file_location_id,
+    })
 }
 
 pub(crate) fn branch_id_from_path(path: &str) -> Result<String, VoomError> {
@@ -610,7 +702,7 @@ fn timing(ctx: &ExpansionContext<'_>, node_id: &str, branch_id: &str) -> Effecti
 
 fn ticket_kind(operation: OperationKind) -> Result<TicketOperation, VoomError> {
     TicketOperation::new(format!(
-        "synthetic.workflow.operation.{}",
+        "{WORKFLOW_OPERATION_NAMESPACE}{}",
         operation.as_str()
     ))
 }

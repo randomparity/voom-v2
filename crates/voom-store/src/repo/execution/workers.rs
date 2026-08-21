@@ -4,8 +4,8 @@ use serde_json::Value as JsonValue;
 use sqlx::{QueryBuilder, Row, SqlitePool, error::ErrorKind};
 use time::OffsetDateTime;
 use voom_core::{
-    NodeId, NodeIncarnationId, NodeIncarnationStatus, OperationKind, TicketOperation, VoomError,
-    WorkerId,
+    NodeId, NodeIncarnationId, NodeIncarnationStatus, NormalizedTicketOperation, OperationKind,
+    TicketOperation, VoomError, WORKFLOW_OPERATION_NAMESPACE, WorkerId,
 };
 pub use voom_core::{WorkerKind, WorkerStatus};
 
@@ -1149,13 +1149,23 @@ impl SqliteWorkerRepo {
         worker_id: WorkerId,
         operation: &TicketOperation,
     ) -> Result<WorkerOperationCapacity, VoomError> {
-        let operation = normalized_worker_operation(operation)?;
+        let normalized = operation.normalize();
+        let operation = normalized.matching_token();
         if operation == TicketOperation::from(OperationKind::TranscodeVideo)
             && let Some(capacity) = accelerator_operation_capacity(tx, worker_id).await?
         {
             return Ok(capacity);
         }
-        let workflow_operation = format!("{WORKFLOW_OPERATION_PREFIX}{}", operation.as_str());
+        // A known operation's leases are held under either encoding, so both are
+        // counted. For anything else the token is already exactly what a ticket
+        // carries, and re-prefixing it would build a kind nothing can hold.
+        let workflow_operation = match normalized {
+            NormalizedTicketOperation::Known { .. } => {
+                format!("{WORKFLOW_OPERATION_NAMESPACE}{}", operation.as_str())
+            }
+            NormalizedTicketOperation::CustomLocal(_)
+            | NormalizedTicketOperation::UnknownNamespaced(_) => operation.as_str().to_owned(),
+        };
         let active_leases = sqlx::query_scalar::<_, i64>(
             "SELECT COUNT(*) \
              FROM leases \
@@ -1215,7 +1225,7 @@ impl SqliteWorkerRepo {
         &self,
         operation: &TicketOperation,
     ) -> Result<Vec<WorkerOperationCapability>, VoomError> {
-        let operation = normalized_worker_operation(operation)?;
+        let operation = operation.normalize().matching_token();
         let rows = sqlx::query(
             "SELECT worker_id, hardware, extra FROM worker_capabilities \
              WHERE operation = ? ORDER BY id ASC",
@@ -1336,6 +1346,23 @@ impl SqliteWorkerRepo {
     }
 }
 
+/// Held `transcode_video` leases on one accelerator device, counting both the
+/// exact kind and the namespaced kind a workflow renders.
+///
+/// A `const` rather than an inline literal because the namespaced form embeds
+/// [`WORKFLOW_OPERATION_NAMESPACE`] in SQL, where no Rust constant can be
+/// interpolated at compile time. `accelerator_sql_matches_the_namespace_constant`
+/// asserts the two agree, so renaming the namespace fails a test instead of
+/// silently counting nothing here.
+const ACCELERATOR_ACTIVE_LEASES_SQL: &str = "SELECT COUNT(DISTINCT leases.id) FROM leases \
+     JOIN tickets ON tickets.id = leases.ticket_id \
+     JOIN worker_capabilities ON worker_capabilities.worker_id = leases.worker_id \
+     WHERE leases.state = 'held' \
+       AND (tickets.kind = 'transcode_video' \
+            OR tickets.kind = 'synthetic.workflow.operation.transcode_video') \
+       AND worker_capabilities.operation = 'transcode_video' \
+       AND json_extract(worker_capabilities.hardware, '$[0]') = ?";
+
 /// Per-device `transcode_video` capacity for an accelerator-bound worker.
 ///
 /// The device is keyed off the capability's own `hardware` token rather than a
@@ -1387,20 +1414,11 @@ async fn accelerator_operation_capacity(
     .fetch_one(&mut **tx)
     .await
     .map_err(|error| VoomError::database_context("accelerator capacity limit", error))?;
-    let active_leases = sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(DISTINCT leases.id) FROM leases \
-         JOIN tickets ON tickets.id = leases.ticket_id \
-         JOIN worker_capabilities ON worker_capabilities.worker_id = leases.worker_id \
-         WHERE leases.state = 'held' \
-           AND (tickets.kind = 'transcode_video' \
-                OR tickets.kind = 'synthetic.workflow.operation.transcode_video') \
-           AND worker_capabilities.operation = 'transcode_video' \
-           AND json_extract(worker_capabilities.hardware, '$[0]') = ?",
-    )
-    .bind(hardware_token)
-    .fetch_one(&mut **tx)
-    .await
-    .map_err(|error| VoomError::database_context("accelerator active lease count", error))?;
+    let active_leases = sqlx::query_scalar::<_, i64>(ACCELERATOR_ACTIVE_LEASES_SQL)
+        .bind(hardware_token)
+        .fetch_one(&mut **tx)
+        .await
+        .map_err(|error| VoomError::database_context("accelerator active lease count", error))?;
     Ok(Some(WorkerOperationCapacity {
         active_leases: u32_from_i64(active_leases)?,
         max_parallel: u32_from_i64(max_parallel)?,
@@ -1412,7 +1430,7 @@ async fn operation_capability_details_in_tx(
     worker_id: WorkerId,
     operation: &TicketOperation,
 ) -> Result<(Vec<String>, Vec<JsonValue>), VoomError> {
-    let operation = normalized_worker_operation(operation)?;
+    let operation = operation.normalize().matching_token();
     let rows = sqlx::query(
         "SELECT hardware, extra FROM worker_capabilities \
          WHERE worker_id = ? AND operation = ? ORDER BY id ASC",
@@ -1484,17 +1502,6 @@ async fn max_parallel_in_tx(
         );
     }
     Ok(operation_limit.or(wildcard_limit).unwrap_or(1))
-}
-
-const WORKFLOW_OPERATION_PREFIX: &str = "synthetic.workflow.operation.";
-
-pub(super) fn normalized_worker_operation(
-    operation: &TicketOperation,
-) -> Result<TicketOperation, VoomError> {
-    let Some(operation) = operation.as_str().strip_prefix(WORKFLOW_OPERATION_PREFIX) else {
-        return Ok(operation.clone());
-    };
-    TicketOperation::from_stored(operation, "worker capacity operation")
 }
 
 fn max_limit(current: Option<u32>, candidate: Option<u32>) -> Option<u32> {

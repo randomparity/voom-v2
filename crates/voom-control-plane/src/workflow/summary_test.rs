@@ -76,3 +76,115 @@ async fn refresh_counts_fails_loudly_when_the_pool_is_closed() {
 
     assert!(result.is_err());
 }
+
+/// Pins what an undecodable payload costs a summary, so a later change to it is
+/// deliberate. After the ADR 0069 payload break this is the shape of a completed
+/// pre-upgrade byte-touching row, which the upgrade drain does not cover — the
+/// drain names *unfinished* tickets — so such a row is skipped here forever.
+///
+/// The two counts disagree by design: `ticket_count` is taken from the row count
+/// before any payload is read, while `branch_count` and the per-operation totals
+/// are built by decoding. Recording the inconsistency beats papering over it with
+/// an in-memory counter, which would leave the durable summary row exactly as
+/// inconsistent while adding a `merge_invocation` rule a later resume can get wrong.
+#[tokio::test]
+async fn an_undecodable_ticket_is_counted_in_the_total_and_missing_from_per_operation() {
+    let (control, _db) = crate::cases::cp().await;
+    sqlx::query(
+        "INSERT INTO jobs (id, kind, state, priority, created_at, updated_at) \
+         VALUES (73, 'workflow', 'open', 0, '2026-01-01T00:00:00Z', \
+                 '2026-01-01T00:00:00Z')",
+    )
+    .execute(&control.pool)
+    .await
+    .unwrap();
+    let decodable = crate::workflow::plan::ticket_payload::WorkflowTicketPayload::new_for_test(
+        "wf-73",
+        "plan-73",
+        "node-a",
+        "branch-a",
+        OperationKind::IdentifyMedia,
+        serde_json::json!({}),
+    )
+    .to_ticket_payload()
+    .unwrap()
+    .to_string();
+    sqlx::query(
+        "INSERT INTO tickets \
+         (id, job_id, kind, state, payload, attempt, max_attempts, next_eligible_at, \
+          created_at, state_changed_at) VALUES \
+         (93, 73, 'synthetic.workflow.operation.identify_media', 'succeeded', ?, 1, 1, \
+          '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', '2026-01-01T00:00:10Z')",
+    )
+    .bind(&decodable)
+    .execute(&control.pool)
+    .await
+    .unwrap();
+    // A pre-upgrade row, built to be undecodable for exactly the ADR 0069 reason and
+    // no other: a well-formed byte-touching payload with `declared_artifact_access`
+    // removed. An envelope-less `'{}'` would also fail to decode, but it failed
+    // before this branch too, so it would leave this test green if the declaration
+    // gate were later relaxed.
+    let mut pre_upgrade =
+        crate::workflow::plan::ticket_payload::WorkflowTicketPayload::new_for_test(
+            "wf-73",
+            "plan-73",
+            "node-b",
+            "branch-b",
+            OperationKind::ProbeFile,
+            serde_json::json!({"path": "/library/file-000.mkv"}),
+        )
+        .to_ticket_payload()
+        .unwrap();
+    assert!(
+        pre_upgrade
+            .as_object_mut()
+            .unwrap()
+            .remove("declared_artifact_access")
+            .is_some(),
+        "fixture must start from a payload that carries a declaration"
+    );
+    sqlx::query(
+        "INSERT INTO tickets \
+         (id, job_id, kind, state, payload, attempt, max_attempts, next_eligible_at, \
+          created_at, state_changed_at) VALUES \
+         (94, 73, 'synthetic.workflow.operation.probe_file', 'succeeded', ?, 1, 1, \
+          '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', '2026-01-01T00:00:10Z')",
+    )
+    .bind(pre_upgrade.to_string())
+    .execute(&control.pool)
+    .await
+    .unwrap();
+
+    let mut summary = WorkflowRunSummary::empty(JobId(73), Duration::from_secs(3));
+    summary
+        .refresh_counts(
+            &control.tickets,
+            &control.leases,
+            JobId(73),
+            Duration::from_secs(3),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(summary.ticket_count, 2, "the raw row count includes both");
+    assert_eq!(
+        summary
+            .per_operation
+            .get(&OperationKind::IdentifyMedia)
+            .map(|operation| operation.ticket_count),
+        Some(1),
+        "only the decodable ticket reaches the per-operation total"
+    );
+    // The assertion that binds the skip to its cause. Without it the test passes
+    // whether or not the declaration gate still rejects the row, because a decodable
+    // probe_file would land in its own per-operation entry and leave the two above
+    // untouched.
+    assert!(
+        !summary
+            .per_operation
+            .contains_key(&OperationKind::ProbeFile),
+        "the undecodable byte-touching ticket reached a per-operation total, so the \
+         ADR 0069 declaration gate stopped rejecting a payload with no declaration"
+    );
+}

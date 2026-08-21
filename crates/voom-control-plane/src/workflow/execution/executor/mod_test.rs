@@ -15,8 +15,8 @@ use tokio::io::{AsyncWriteExt, DuplexStream};
 use voom_core::clock_test_support::ManualClock;
 use voom_core::rng_test_support::FrozenRng;
 use voom_core::{
-    ErrorCode, FailureClass, FileAssetId, FileVersionId, JobId, LeaseId, MediaSnapshotId, TicketId,
-    TicketOperation, VoomError, WorkerId, WorkerKind,
+    ErrorCode, FailureClass, FileAssetId, FileLocationId, FileVersionId, JobId, LeaseId,
+    MediaSnapshotId, StorageRootId, TicketId, TicketOperation, VoomError, WorkerId, WorkerKind,
 };
 use voom_store::repo::execution::jobs::NewJob;
 use voom_store::repo::execution::leases::NewLease;
@@ -46,6 +46,7 @@ use crate::workflow::execution::operation_adapters::{
 };
 use crate::workflow::execution::runtime::WorkerRuntimeRegistry;
 use crate::workflow::execution::timing::EffectiveTiming;
+use crate::workflow::plan::access_declaration::{TicketStorageSource, declaration_for};
 use crate::workflow::plan::model::{ConcurrencyPolicy, OperationNode, WorkflowPlan};
 use crate::workflow::plan::ticket_payload::WorkflowTicketPayload;
 use crate::workflow::summary::is_synthetic_root_ticket;
@@ -2002,7 +2003,7 @@ async fn later_invocation_ignores_a_continued_prior_failure() {
 async fn policy_transcode_root_ticket_carries_source_ids_and_operation_payload() {
     let mut fixture = ExecutorFixture::without_workers(0).await;
     fixture.plan = policy_transcode_plan(TargetRef::FileVersion {
-        id: FileVersionId(11),
+        id: voom_store::test_support::TEST_FILE_VERSION_ID,
     });
 
     let err = fixture.run().await.unwrap_err();
@@ -2021,7 +2022,7 @@ async fn policy_transcode_root_ticket_carries_source_ids_and_operation_payload()
     );
     assert_eq!(
         workflow_payload.rendered_payload["source_file_version_id"],
-        11
+        9_000_001
     );
     assert_eq!(workflow_payload.rendered_payload["target_codec"], "hevc");
     assert_eq!(workflow_payload.rendered_payload["container"], "mkv");
@@ -2066,10 +2067,12 @@ async fn policy_transcode_file_location_target_rejects_retired_location() {
 
     let err = fixture.run().await.unwrap_err();
 
-    assert_eq!(err.source.error_code(), ErrorCode::ConfigInvalid);
+    // Both target shapes now route through the shared `select_location`, which
+    // classifies a retired location as NotFound rather than a config error.
+    assert_eq!(err.source.error_code(), ErrorCode::NotFound);
     assert_eq!(
         err.source.to_string(),
-        format!("config error: file_location {source_location_id} is retired")
+        format!("not found: file_location {source_location_id} is retired")
     );
 }
 
@@ -2077,7 +2080,7 @@ async fn policy_transcode_file_location_target_rejects_retired_location() {
 async fn policy_transcode_ticket_carries_staging_and_target_roots_from_options() {
     let mut fixture = ExecutorFixture::without_workers(0).await;
     fixture.plan = policy_transcode_plan(TargetRef::FileVersion {
-        id: FileVersionId(11),
+        id: voom_store::test_support::TEST_FILE_VERSION_ID,
     });
     let mut options = WorkflowExecutorOptions::for_tests();
     options.artifact_roots.transcode.staging_root = PathBuf::from("/tmp/voom-stage");
@@ -2106,7 +2109,7 @@ async fn policy_transcode_ticket_carries_staging_and_target_roots_from_options()
 async fn policy_remux_root_ticket_carries_source_ids_and_operation_payload() {
     let mut fixture = ExecutorFixture::without_workers(0).await;
     fixture.plan = policy_remux_plan(TargetRef::FileVersion {
-        id: FileVersionId(11),
+        id: voom_store::test_support::TEST_FILE_VERSION_ID,
     });
 
     let err = fixture.run().await.unwrap_err();
@@ -2120,7 +2123,7 @@ async fn policy_remux_root_ticket_carries_source_ids_and_operation_payload() {
     assert_eq!(workflow_payload.rendered_payload["operation"], "remux");
     assert_eq!(
         workflow_payload.rendered_payload["source_file_version_id"],
-        11
+        9_000_001
     );
     assert_eq!(workflow_payload.rendered_payload["remux"]["type"], "remux");
     assert_eq!(
@@ -2169,10 +2172,12 @@ async fn policy_remux_file_location_target_rejects_retired_location() {
 
     let err = fixture.run().await.unwrap_err();
 
-    assert_eq!(err.source.error_code(), ErrorCode::ConfigInvalid);
+    // Both target shapes now route through the shared `select_location`, which
+    // classifies a retired location as NotFound rather than a config error.
+    assert_eq!(err.source.error_code(), ErrorCode::NotFound);
     assert_eq!(
         err.source.to_string(),
-        format!("config error: file_location {source_location_id} is retired")
+        format!("not found: file_location {source_location_id} is retired")
     );
 }
 
@@ -2180,7 +2185,7 @@ async fn policy_remux_file_location_target_rejects_retired_location() {
 async fn policy_remux_ticket_carries_staging_and_target_roots_from_options() {
     let mut fixture = ExecutorFixture::without_workers(0).await;
     fixture.plan = policy_remux_plan(TargetRef::FileVersion {
-        id: FileVersionId(11),
+        id: voom_store::test_support::TEST_FILE_VERSION_ID,
     });
     let mut options = WorkflowExecutorOptions::for_tests();
     options.artifact_roots.remux.staging_root = PathBuf::from("/tmp/voom-remux-stage");
@@ -2207,7 +2212,7 @@ async fn policy_remux_ticket_carries_staging_and_target_roots_from_options() {
 async fn policy_remux_ticket_uses_default_remux_roots() {
     let mut fixture = ExecutorFixture::without_workers(0).await;
     fixture.plan = policy_remux_plan(TargetRef::FileVersion {
-        id: FileVersionId(11),
+        id: voom_store::test_support::TEST_FILE_VERSION_ID,
     });
 
     let err = fixture.run().await.unwrap_err();
@@ -2231,7 +2236,7 @@ async fn policy_remux_ticket_uses_default_remux_roots() {
 async fn policy_transcode_audio_root_ticket_carries_source_ids_audio_payload_and_roots() {
     let mut fixture = ExecutorFixture::without_workers(0).await;
     fixture.plan = policy_transcode_audio_plan(TargetRef::FileVersion {
-        id: FileVersionId(11),
+        id: voom_store::test_support::TEST_FILE_VERSION_ID,
     });
     let mut options = WorkflowExecutorOptions::for_tests();
     options.artifact_roots.audio.staging_root = PathBuf::from("/tmp/audio-stage");
@@ -2253,7 +2258,7 @@ async fn policy_transcode_audio_root_ticket_carries_source_ids_audio_payload_and
     );
     assert_eq!(
         workflow_payload.rendered_payload["source_file_version_id"],
-        11
+        9_000_001
     );
     assert_eq!(
         workflow_payload.rendered_payload["audio"]["type"],
@@ -2277,7 +2282,7 @@ async fn policy_transcode_audio_root_ticket_carries_source_ids_audio_payload_and
 async fn policy_extract_audio_root_ticket_carries_source_ids_audio_payload_and_roots() {
     let mut fixture = ExecutorFixture::without_workers(0).await;
     fixture.plan = policy_extract_audio_plan(TargetRef::FileVersion {
-        id: FileVersionId(11),
+        id: voom_store::test_support::TEST_FILE_VERSION_ID,
     });
 
     let err = fixture.run().await.unwrap_err();
@@ -2296,7 +2301,7 @@ async fn policy_extract_audio_root_ticket_carries_source_ids_audio_payload_and_r
     );
     assert_eq!(
         workflow_payload.rendered_payload["source_file_version_id"],
-        11
+        9_000_001
     );
     assert_eq!(
         workflow_payload.rendered_payload["audio"]["type"],
@@ -2329,7 +2334,7 @@ async fn malformed_policy_remux_payload_is_rejected_before_default_fallback() {
     let mut fixture = ExecutorFixture::without_workers(0).await;
     fixture.plan = policy_remux_plan_with_payload(
         TargetRef::FileVersion {
-            id: FileVersionId(11),
+            id: voom_store::test_support::TEST_FILE_VERSION_ID,
         },
         json!({"type": "remux"}),
     );
@@ -2346,7 +2351,7 @@ async fn policy_remux_without_snapshot_pin_is_rejected_before_ticket_creation() 
     let mut fixture = ExecutorFixture::without_workers(0).await;
     fixture.plan = policy_remux_plan_with_payload(
         TargetRef::FileVersion {
-            id: FileVersionId(11),
+            id: voom_store::test_support::TEST_FILE_VERSION_ID,
         },
         json!({
             "type": "remux",
@@ -2365,24 +2370,19 @@ async fn policy_remux_without_snapshot_pin_is_rejected_before_ticket_creation() 
 }
 
 #[tokio::test]
-async fn non_policy_remux_root_ticket_uses_default_payload() {
+async fn byte_touching_root_node_without_a_target_fails_instead_of_rendering() {
+    // remux opens bytes, so with no policy target it has no source to declare.
+    // Rendering it anyway would create a ticket that names nothing.
     let mut fixture = ExecutorFixture::without_workers(0).await;
     fixture.plan = non_policy_remux_plan();
 
     let err = fixture.run().await.unwrap_err();
 
-    assert_eq!(err.source.error_code(), ErrorCode::NoEligibleWorker);
-    let ticket_payload = fixture.first_ticket_payload().await;
-    let workflow_payload =
-        WorkflowTicketPayload::parse_ticket("synthetic.workflow.operation.remux", ticket_payload)
-            .unwrap();
-    assert_eq!(workflow_payload.rendered_payload["operation"], "remux");
-    assert_eq!(
-        workflow_payload.rendered_payload["path"],
-        "/library/root.mkv"
-    );
-    assert_eq!(workflow_payload.rendered_payload["container"], "mkv");
-    assert!(workflow_payload.rendered_payload.get("remux").is_none());
+    assert_eq!(err.source.error_code(), ErrorCode::ConfigInvalid);
+    let message = err.source.to_string();
+    assert!(message.contains("remux"), "message was {message}");
+    assert!(message.contains("storage source"), "message was {message}");
+    assert_eq!(fixture.ticket_count().await, 0);
 }
 
 #[tokio::test]
@@ -2583,8 +2583,12 @@ async fn policy_remux_success_event_append_is_atomic_with_ticket_success() {
     let result = fixture.first_ticket_result().await;
     assert_eq!(result["status"], "committed_success_event_failed");
     assert_eq!(result["commit_record_id"], 1);
-    assert_eq!(result["result_file_version_id"], 2);
-    assert_eq!(result["result_file_location_id"], 2);
+    // A new version, distinct from the source. The absolute value is a rowid
+    // sequence artifact and says nothing about the operation.
+    let result_version = result["result_file_version_id"].as_u64().unwrap();
+    assert!(result_version > 0);
+    assert_ne!(result_version, source_file_version_id.0);
+    assert!(result["result_file_location_id"].as_u64().unwrap() > 0);
     assert_eq!(result["result_media_snapshot_id"], 2);
     assert_eq!(result["error"]["code"], "DB_UNREACHABLE");
     assert!(
@@ -2671,7 +2675,7 @@ async fn policy_remux_post_commit_snapshot_failure_fails_lease_retriable() {
     assert_eq!(err.error_code(), ErrorCode::ExternalSystemUnavailable);
     let message = err.to_string();
     assert!(message.contains("commit_record_id"));
-    assert!(message.contains("result_file_version_id=2"));
+    assert!(message.contains("result_file_version_id="));
     assert!(message.contains("result_file_location_id"));
     // Commits nest under a per-source `v{id}` subdir of the target dir (#197).
     assert!(file_exists_under(&root.join("out"), "Movie.remux.mkv"));
@@ -2855,7 +2859,11 @@ async fn policy_transcode_audio_dispatch_sends_worker_protocol_payload() {
 
     assert_eq!(summary.operation_count(OperationKind::TranscodeAudio), 1);
     let result = fixture.first_ticket_result().await;
-    assert_eq!(result["result_file_version_id"], 2);
+    // A new version, distinct from the source. The absolute value is a rowid
+    // sequence artifact and says nothing about the operation.
+    let result_version = result["result_file_version_id"].as_u64().unwrap();
+    assert!(result_version > 0);
+    assert_ne!(result_version, source_file_version_id.0);
     assert!(
         result["staging_path"]
             .as_str()
@@ -2895,7 +2903,11 @@ async fn policy_extract_audio_dispatch_sends_worker_protocol_payload() {
 
     assert_eq!(summary.operation_count(OperationKind::ExtractAudio), 1);
     let result = fixture.first_ticket_result().await;
-    assert_eq!(result["result_file_version_id"], 2);
+    // A new version, distinct from the source. The absolute value is a rowid
+    // sequence artifact and says nothing about the operation.
+    let result_version = result["result_file_version_id"].as_u64().unwrap();
+    assert!(result_version > 0);
+    assert_ne!(result_version, source_file_version_id.0);
     assert!(
         result["target_path"]
             .as_str()
@@ -3035,8 +3047,12 @@ async fn policy_transcode_success_result_includes_generated_staging_path() {
     assert_eq!(result["staged_artifact_location_id"], 1);
     assert_eq!(result["verification_id"], 1);
     assert_eq!(result["commit_record_id"], 1);
-    assert_eq!(result["result_file_version_id"], 2);
-    assert_eq!(result["result_file_location_id"], 2);
+    // A new version, distinct from the source. The absolute value is a rowid
+    // sequence artifact and says nothing about the operation.
+    let result_version = result["result_file_version_id"].as_u64().unwrap();
+    assert!(result_version > 0);
+    assert_ne!(result_version, source_file_version_id.0);
+    assert!(result["result_file_location_id"].as_u64().unwrap() > 0);
     assert_eq!(result["result_media_snapshot_id"], 1);
 }
 
@@ -3711,6 +3727,7 @@ impl ExecutorFixture {
         let url = format!("sqlite://{}", tmp.path().display());
         let _ = voom_store::init(&url).await.unwrap();
         let pool = voom_store::connect(&url).await.unwrap();
+        let pool_for_seed = pool.clone();
         let clock = Arc::new(ManualClock::new(T0));
         let cp = crate::ControlPlane::open_with_pool_and_rng(
             pool,
@@ -3719,6 +3736,10 @@ impl ExecutorFixture {
         )
         .await
         .unwrap();
+        // Byte-touching plan nodes must name a live rooted location.
+        voom_store::test_support::seed_test_rooted_location(&pool_for_seed)
+            .await
+            .unwrap();
         Self {
             cp,
             clock,
@@ -4134,12 +4155,18 @@ impl ExecutorFixture {
             .await
             .unwrap();
         let operation = OperationKind::HashFile;
+        let source = TicketStorageSource::Location {
+            storage_root_id: StorageRootId(3),
+            file_location_id: FileLocationId(7),
+        };
         let rendered_payload = json!({
             "operation": operation_name(operation),
             "branch_id": "other",
             "path": "/library/other.mkv",
             "duration_ms": 10_u64,
             "progress_interval_ms": 1_u64,
+            "source_storage_root_id": 3_u64,
+            "source_location_id": 7_u64,
         });
         let payload = WorkflowTicketPayload {
             workflow_id: "other-workflow".to_owned(),
@@ -4150,6 +4177,7 @@ impl ExecutorFixture {
             rendered_payload,
             timing: EffectiveTiming::for_test(10, 1),
             source_file: None,
+            declared_artifact_access: declaration_for(operation, Some(&source)).unwrap(),
         }
         .to_ticket_payload()
         .unwrap();
@@ -5025,7 +5053,7 @@ fn independent_hash_plan(ticket_count: usize) -> WorkflowPlan {
             .map(|index| OperationNode {
                 id: format!("hash-{index}"),
                 operation: OperationKind::HashFile,
-                policy_target: None,
+                policy_target: fixture_policy_target(OperationKind::HashFile),
                 operation_payload: Value::Null,
                 depends_on: Vec::new(),
                 depends_on_selected: Vec::new(),
@@ -5063,11 +5091,23 @@ fn capacity_deferred_mixed_plan() -> WorkflowPlan {
     }
 }
 
+/// The seeded fixture location, for a node whose operation opens bytes.
+///
+/// `ExecutorFixture::without_workers` seeds exactly this row, so a plan node can
+/// name it without threading an id through every builder.
+fn fixture_policy_target(operation: OperationKind) -> Option<TargetRef> {
+    operation
+        .is_byte_touching()
+        .then_some(TargetRef::FileLocation {
+            id: voom_store::test_support::TEST_FILE_LOCATION_ID,
+        })
+}
+
 fn simple_operation_node(id: &str, operation: OperationKind) -> OperationNode {
     OperationNode {
         id: id.to_owned(),
         operation,
-        policy_target: None,
+        policy_target: fixture_policy_target(operation),
         operation_payload: Value::Null,
         depends_on: Vec::new(),
         depends_on_selected: Vec::new(),
@@ -5441,7 +5481,7 @@ fn policy_hash_node(id: &str, depends_on: &[&str]) -> OperationNode {
     OperationNode {
         id: id.to_owned(),
         operation: OperationKind::HashFile,
-        policy_target: None,
+        policy_target: fixture_policy_target(OperationKind::HashFile),
         operation_payload: Value::Null,
         depends_on: depends_on.iter().map(ToString::to_string).collect(),
         depends_on_selected: Vec::new(),

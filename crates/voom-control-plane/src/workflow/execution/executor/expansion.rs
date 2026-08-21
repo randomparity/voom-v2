@@ -153,6 +153,15 @@ impl WorkflowExecutor {
                 self.options.queue.ready_batch_size,
             )
             .await?;
+        // Raising here aborts the run rather than the ticket, which the #475 spec
+        // (section 6a) argued should instead skip the undecodable ticket and let its
+        // siblings dispatch. That containment cannot stand alone: an undecodable
+        // ticket never leases, so it never reaches a terminal state and stays
+        // `ready` forever. Skipping it alone livelocks the run loop; raising once a
+        // poll batch holds no decodable ticket aborts while siblings are still in
+        // flight and forfeits their expansion children. #486 owns the lease-free
+        // terminal transition that removes the row from `ready`, which is what makes
+        // skipping correct, and carries the skip with it.
         for ticket in &tickets {
             WorkflowTicketPayload::parse_ticket(ticket.kind.as_str(), ticket.payload.clone())
                 .map_err(|e| {

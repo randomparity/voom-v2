@@ -3,12 +3,13 @@ use std::sync::Arc;
 use serde_json::Value;
 use time::OffsetDateTime;
 use voom_core::OperationKind;
-use voom_core::{JobId, SystemClock, TicketId, TicketOperation};
+use voom_core::{FileLocationId, JobId, StorageRootId, SystemClock, TicketId, TicketOperation};
 use voom_store::repo::execution::jobs::NewJob;
 use voom_store::repo::execution::tickets::{NewTicket, Ticket};
 
 use crate::ControlPlane;
 use crate::workflow::execution::timing::EffectiveTiming;
+use crate::workflow::plan::access_declaration::{TicketStorageSource, declaration_for};
 use crate::workflow::plan::binding::{
     BranchContext, branch_context_with_probe_codec, render_default_payload,
     render_default_payload_with_fan_out,
@@ -16,11 +17,14 @@ use crate::workflow::plan::binding::{
 use crate::workflow::plan::expansion::{
     ExpansionContext, branch_ids_from_paths, expand_backup_completion, expand_probe_completion,
     expand_quality_completion, expand_scanner_completion, expand_transform_completion,
+    parent_storage_root, parent_storage_source,
 };
 use crate::workflow::plan::model::WorkflowPlan;
 use crate::workflow::plan::ticket_payload::WorkflowTicketPayload;
 
 const T0: OffsetDateTime = OffsetDateTime::UNIX_EPOCH;
+const SEED_ROOT: StorageRootId = StorageRootId(3);
+const SEED_LOCATION: FileLocationId = FileLocationId(7);
 
 #[tokio::test]
 async fn scanner_completion_creates_only_probe_hash_identity() {
@@ -325,9 +329,9 @@ async fn scanner_completion_dedupes_duplicate_file_outputs() {
             OperationKind::ScanLibrary,
             serde_json::json!({
                 "files": [
-                    "/library/file-000.mkv",
-                    "/library/file-000.mkv",
-                    {"path": "/library/file-001.mkv"}
+                    {"path": "/library/file-000.mkv", "file_location_id": 11},
+                    {"path": "/library/file-000.mkv", "file_location_id": 11},
+                    {"path": "/library/file-001.mkv", "file_location_id": 12}
                 ]
             }),
         )
@@ -352,8 +356,8 @@ async fn scanner_completion_disambiguates_branch_id_path_collisions() {
             OperationKind::ScanLibrary,
             serde_json::json!({
                 "files": [
-                    "/library/file-000.mkv",
-                    "/other/file-000.mp4"
+                    {"path": "/library/file-000.mkv", "file_location_id": 11},
+                    {"path": "/other/file-000.mp4", "file_location_id": 12}
                 ]
             }),
         )
@@ -420,7 +424,7 @@ impl WorkflowExpansionFixture {
             })
             .await
             .unwrap();
-        let plan = WorkflowPlan::default_ci();
+        let plan = WorkflowPlan::default_ci(SEED_LOCATION);
         Self {
             cp,
             _tmp: tmp,
@@ -465,6 +469,8 @@ impl WorkflowExpansionFixture {
             rendered_payload,
             timing: timing(),
             source_file: Some(source_file_for_branch(branch_id)),
+            declared_artifact_access: declaration_for(operation, branch.storage_source.as_ref())
+                .unwrap(),
         }
         .to_ticket_payload()
         .unwrap();
@@ -501,6 +507,8 @@ impl WorkflowExpansionFixture {
             rendered_payload,
             timing: timing(),
             source_file: Some(source_file_for_branch(branch_id)),
+            declared_artifact_access: declaration_for(operation, branch.storage_source.as_ref())
+                .unwrap(),
         }
         .to_ticket_payload()
         .unwrap();
@@ -643,6 +651,21 @@ fn branch_for_seed(branch_id: &str, operation: OperationKind) -> BranchContext {
             path: format!("/library/{branch_id}.mkv"),
             probe_codec: Some("h264".to_owned()),
             source_file: Some(source_file_for_branch(branch_id)),
+            storage_source: Some(seed_storage_source(operation)),
+        }
+    }
+}
+
+/// A scan addresses its root; every other seeded branch addresses a location.
+fn seed_storage_source(operation: OperationKind) -> TicketStorageSource {
+    if operation == OperationKind::ScanLibrary {
+        TicketStorageSource::Root {
+            storage_root_id: SEED_ROOT,
+        }
+    } else {
+        TicketStorageSource::Location {
+            storage_root_id: SEED_ROOT,
+            file_location_id: SEED_LOCATION,
         }
     }
 }
@@ -668,11 +691,142 @@ fn source_file_for_branch_with_size(branch_id: &str, size_bytes: u64) -> Value {
         "path": format!("/library/{branch_id}.mkv"),
         "size_bytes": size_bytes,
         "content_hash": format!("blake3:{branch_id}"),
-        "local_file_key": format!("/library/{branch_id}.mkv")
+        "local_file_key": format!("/library/{branch_id}.mkv"),
+        "file_location_id": SEED_LOCATION.0
     })
 }
 
 fn format_time(t: OffsetDateTime) -> String {
     t.format(&time::format_description::well_known::Iso8601::DEFAULT)
         .unwrap()
+}
+
+// --- source-threading readers ---
+//
+// Present-but-unreadable must not read as absent: absent legitimately means the
+// parent addresses its root, so a malformed value would widen the child from one
+// location to read+write on the whole root, and the child's own payload and
+// declaration would then agree.
+
+fn payload(rendered: Value) -> WorkflowTicketPayload {
+    // score_quality is the hop that matters: it is not byte-touching, so the
+    // payload gate never inspects its rendered_payload, yet its two source fields
+    // decide what its byte-touching children may declare.
+    WorkflowTicketPayload::new_for_test(
+        "wf",
+        "plan",
+        "quality",
+        "file-000",
+        OperationKind::ScoreQuality,
+        rendered,
+    )
+}
+
+/// Values that are present but not a usable id. Each must be an error.
+fn malformed_ids() -> Vec<(&'static str, Value)> {
+    vec![
+        // The realistic one: any JSON tool that stringifies integers past 2^53.
+        ("string", serde_json::json!("9000001")),
+        ("float", serde_json::json!(9_000_001.5)),
+        ("negative", serde_json::json!(-1)),
+        ("zero", serde_json::json!(0)),
+        ("null", serde_json::Value::Null),
+        ("bool", serde_json::json!(true)),
+        ("object", serde_json::json!({"id": 1})),
+    ]
+}
+
+#[test]
+fn a_malformed_source_location_id_is_rejected_rather_than_read_as_absent() {
+    for (label, value) in malformed_ids() {
+        let payload = payload(serde_json::json!({
+            "source_storage_root_id": 3,
+            "source_location_id": value,
+        }));
+
+        let error = parent_storage_source(&payload).unwrap_err();
+
+        assert!(
+            matches!(error, voom_core::VoomError::Config(_)),
+            "{label} produced {error:?}"
+        );
+        assert!(
+            error.to_string().contains("source_location_id"),
+            "{label} message was {error}"
+        );
+    }
+}
+
+#[test]
+fn an_absent_source_location_id_still_means_the_parent_addresses_its_root() {
+    let payload = payload(serde_json::json!({ "source_storage_root_id": 3 }));
+
+    assert_eq!(
+        parent_storage_source(&payload).unwrap(),
+        TicketStorageSource::Root {
+            storage_root_id: StorageRootId(3),
+        }
+    );
+}
+
+#[test]
+fn a_well_formed_pair_addresses_the_location() {
+    let payload = payload(serde_json::json!({
+        "source_storage_root_id": 3,
+        "source_location_id": 7,
+    }));
+
+    assert_eq!(
+        parent_storage_source(&payload).unwrap(),
+        TicketStorageSource::Location {
+            storage_root_id: StorageRootId(3),
+            file_location_id: FileLocationId(7),
+        }
+    );
+}
+
+#[test]
+fn a_malformed_or_absent_source_storage_root_id_is_rejected() {
+    for (label, value) in malformed_ids() {
+        let payload = payload(serde_json::json!({ "source_storage_root_id": value }));
+
+        let error = parent_storage_root(&payload).unwrap_err();
+
+        assert!(
+            matches!(error, voom_core::VoomError::Config(_)),
+            "{label} produced {error:?}"
+        );
+    }
+
+    let absent = payload(serde_json::json!({}));
+    let error = parent_storage_root(&absent).unwrap_err();
+    assert!(
+        error.to_string().contains("source_storage_root_id"),
+        "message was {error}"
+    );
+}
+
+#[test]
+fn a_malformed_location_never_widens_a_child_to_the_whole_root() {
+    // The regression this file exists for, stated as the observable outcome: the
+    // widened shape must be unreachable from a malformed input.
+    let widened = TicketStorageSource::Root {
+        storage_root_id: StorageRootId(3),
+    };
+    for (label, value) in malformed_ids() {
+        let payload = payload(serde_json::json!({
+            "source_storage_root_id": 3,
+            "source_location_id": value,
+        }));
+
+        assert!(
+            parent_storage_source(&payload).is_err_and(|_| true),
+            "{label} must not resolve at all"
+        );
+        assert_ne!(
+            parent_storage_source(&payload).ok(),
+            Some(widened),
+            "{label} widened the child to the whole root"
+        );
+    }
 }

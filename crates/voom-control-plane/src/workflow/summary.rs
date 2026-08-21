@@ -172,6 +172,15 @@ impl WorkflowRunSummary {
         let mut branches = HashSet::new();
         let mut ticket_counts: BTreeMap<OperationKind, u64> = BTreeMap::new();
         for ticket in tickets {
+            // Skipping is right: a payload this code cannot read says nothing about
+            // branches or per-operation counts. Staying silent about it is the spec's
+            // decision, not an oversight — see §6a of
+            // `docs/specs/canonical-artifact-access-declaration-475.md`. An operator-
+            // visible count would need a durable column and a migration under ADR
+            // 0006, which this slice forbids; an in-memory one leaves the persisted
+            // row exactly as inconsistent while adding a `merge_invocation` rule a
+            // later ADR 0009 resume can get wrong. The cost is recorded in the spec
+            // and pinned by a test instead.
             let Ok(workflow_payload) =
                 WorkflowTicketPayload::parse_ticket(ticket.kind.as_str(), ticket.payload)
             else {

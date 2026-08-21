@@ -308,12 +308,67 @@ async fn dispatch_context_rejects_lease_id_above_sqlite_integer_range() {
 
 #[tokio::test]
 async fn acquire_resolves_namespaced_workflow_ticket_kind_to_worker_operation() {
-    let (pool, _trepo, _wrepo, lrepo, ticket_id, worker_id, _tmp) = setup().await;
-    sqlx::query("UPDATE tickets SET kind = 'synthetic.workflow.operation.noop' WHERE id = ?")
+    let (pool, _trepo, wrepo, lrepo, ticket_id, worker_id, _tmp) = setup().await;
+    make_worker_eligible(&wrepo, worker_id, ticket_op("probe_file")).await;
+    sqlx::query("UPDATE tickets SET kind = 'synthetic.workflow.operation.probe_file' WHERE id = ?")
         .bind(i64::try_from(ticket_id.0).unwrap())
         .execute(&pool)
         .await
         .unwrap();
+
+    let lease = lrepo
+        .acquire(NewLease {
+            ticket_id,
+            worker_id,
+            ttl: Duration::seconds(60),
+            now: T0,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(lease.ticket_id, ticket_id);
+}
+
+#[tokio::test]
+async fn acquire_fails_closed_on_an_unknown_namespaced_ticket_kind() {
+    // `acquire_guarded` handles exactly one ticket, so it is safe to raise here —
+    // unlike the capability lookups, which run inside a candidate loop.
+    for kind in [
+        "synthetic.workflow.operation.bogus",
+        "synthetic.workflow.operation.",
+    ] {
+        let (pool, _trepo, _wrepo, lrepo, ticket_id, worker_id, _tmp) = setup().await;
+        sqlx::query("UPDATE tickets SET kind = ? WHERE id = ?")
+            .bind(kind)
+            .bind(i64::try_from(ticket_id.0).unwrap())
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let error = lrepo
+            .acquire(NewLease {
+                ticket_id,
+                worker_id,
+                ttl: Duration::seconds(60),
+                now: T0,
+            })
+            .await
+            .unwrap_err();
+
+        assert!(
+            matches!(error, VoomError::Database { .. }),
+            "acquire of {kind} returned {error:?}"
+        );
+        let message = error.to_string();
+        assert!(message.contains("ticket kind"), "message was {message}");
+        assert!(message.contains(kind), "message was {message}");
+    }
+}
+
+#[tokio::test]
+async fn acquire_still_accepts_an_exact_custom_local_ticket_kind() {
+    // `noop` is outside every reserved namespace, so it stays exactly itself.
+    let (_pool, _trepo, _wrepo, lrepo, ticket_id, worker_id, _tmp) = setup().await;
 
     let lease = lrepo
         .acquire(NewLease {
