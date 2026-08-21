@@ -23,9 +23,6 @@ pub struct WorkflowRunSummary {
     pub throughput_per_second: f64,
     pub per_operation: BTreeMap<OperationKind, OperationSummary>,
     max_active_by_worker: BTreeMap<WorkerId, u32>,
-    /// Latch for the undecodable-payload warning, so it is emitted once per run
-    /// rather than once per run-loop iteration. Not a durable summary field.
-    warned_undecodable: bool,
 }
 
 impl WorkflowRunSummary {
@@ -57,9 +54,6 @@ impl WorkflowRunSummary {
             let maximum = self.max_active_by_worker.entry(worker_id).or_default();
             *maximum = (*maximum).max(active);
         }
-        // Merging a run that already warned keeps the latch closed, so a merged
-        // summary does not re-announce a condition an operator has already seen.
-        self.warned_undecodable |= next.warned_undecodable;
     }
 
     #[cfg(test)]
@@ -119,7 +113,6 @@ impl WorkflowRunSummary {
             throughput_per_second: 0.0,
             per_operation: BTreeMap::new(),
             max_active_by_worker: BTreeMap::new(),
-            warned_undecodable: false,
         }
     }
 
@@ -178,50 +171,25 @@ impl WorkflowRunSummary {
 
         let mut branches = HashSet::new();
         let mut ticket_counts: BTreeMap<OperationKind, u64> = BTreeMap::new();
-        let mut skipped = 0_u32;
-        let mut first_skipped = None;
         for ticket in tickets {
-            let ticket_id = ticket.id;
-            let workflow_payload =
-                match WorkflowTicketPayload::parse_ticket(ticket.kind.as_str(), ticket.payload) {
-                    Ok(payload) => payload,
-                    Err(error) => {
-                        skipped += 1;
-                        if first_skipped.is_none() {
-                            first_skipped = Some((ticket_id.0, error.to_string()));
-                        }
-                        continue;
-                    }
-                };
+            // Skipping is right: a payload this code cannot read says nothing about
+            // branches or per-operation counts. Staying silent about it is the spec's
+            // decision, not an oversight — see §6a of
+            // `docs/specs/canonical-artifact-access-declaration-475.md`. An operator-
+            // visible count would need a durable column and a migration under ADR
+            // 0006, which this slice forbids; an in-memory one leaves the persisted
+            // row exactly as inconsistent while adding a `merge_invocation` rule a
+            // later ADR 0009 resume can get wrong. The cost is recorded in the spec
+            // and pinned by a test instead.
+            let Ok(workflow_payload) =
+                WorkflowTicketPayload::parse_ticket(ticket.kind.as_str(), ticket.payload)
+            else {
+                continue;
+            };
             if !is_synthetic_root_ticket(&workflow_payload) {
                 branches.insert(workflow_payload.branch_id);
             }
             *ticket_counts.entry(workflow_payload.operation).or_default() += 1;
-        }
-        // Skipping is right — a payload this code cannot read says nothing about
-        // branches or per-operation counts. Saying so is also right: after the ADR
-        // 0068 payload break an undrained pre-upgrade ticket lands here, and one
-        // that never leases never reaches the terminal transition that would open
-        // an ADR 0018 issue, so silence would leave an incomplete drain visible
-        // nowhere while under-reporting the counts an operator checks against it.
-        //
-        // Once per run, not once per refresh and not once per ticket. Both
-        // multipliers are real: `refresh_counts` runs on every run-loop iteration
-        // (`executor/mod.rs`), over durable rows whose state cannot change until an
-        // operator drains them. Left unlatched this repeats for the life of the run
-        // and buries the rest of the run-loop output — during exactly the incident
-        // an operator is reading these logs for. A later refresh that skips more
-        // tickets stays silent; the drain, not the count, is the action.
-        if skipped > 0 && !self.warned_undecodable {
-            self.warned_undecodable = true;
-            let (ticket_id, error) = first_skipped.unwrap_or_default();
-            tracing::warn!(
-                skipped_ticket_count = skipped,
-                example_ticket_id = ticket_id,
-                example_error = %error,
-                "workflow summary skipped tickets whose payloads did not decode; \
-                 branch and per-operation counts under-report by that many"
-            );
         }
         self.branch_count = u32::try_from(branches.len()).unwrap_or(u32::MAX);
         for (operation, count) in ticket_counts {
