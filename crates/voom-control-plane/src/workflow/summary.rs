@@ -171,28 +171,18 @@ impl WorkflowRunSummary {
 
         let mut branches = HashSet::new();
         let mut ticket_counts: BTreeMap<OperationKind, u64> = BTreeMap::new();
+        let mut skipped = 0_u32;
+        let mut first_skipped = None;
         for ticket in tickets {
             let ticket_id = ticket.id;
-            let ticket_kind = ticket.kind.as_str().to_owned();
             let workflow_payload =
                 match WorkflowTicketPayload::parse_ticket(ticket.kind.as_str(), ticket.payload) {
                     Ok(payload) => payload,
-                    // Skipping is right — a payload this code cannot read tells it
-                    // nothing about branches or per-operation counts. Saying so is
-                    // also right: after the ADR 0068 payload break, an undrained
-                    // pre-upgrade byte-touching ticket lands here, and a ticket that
-                    // never leases never reaches the terminal transition that would
-                    // open an issue. Silence would leave an incomplete drain visible
-                    // nowhere, while under-reporting the very counts an operator
-                    // checks it against.
                     Err(error) => {
-                        tracing::warn!(
-                            ticket_id = ticket_id.0,
-                            ticket_kind,
-                            %error,
-                            "workflow summary skipped a ticket whose payload did not decode; \
-                             branch and per-operation counts under-report by one"
-                        );
+                        skipped += 1;
+                        if first_skipped.is_none() {
+                            first_skipped = Some((ticket_id.0, error.to_string()));
+                        }
                         continue;
                     }
                 };
@@ -200,6 +190,27 @@ impl WorkflowRunSummary {
                 branches.insert(workflow_payload.branch_id);
             }
             *ticket_counts.entry(workflow_payload.operation).or_default() += 1;
+        }
+        // Skipping is right — a payload this code cannot read says nothing about
+        // branches or per-operation counts. Saying so is also right: after the ADR
+        // 0068 payload break an undrained pre-upgrade ticket lands here, and one
+        // that never leases never reaches the terminal transition that would open
+        // an ADR 0018 issue, so silence would leave an incomplete drain visible
+        // nowhere while under-reporting the counts an operator checks against it.
+        //
+        // One line per refresh, not one per ticket. `refresh_counts` runs on every
+        // run-loop iteration over durable rows whose state cannot change until an
+        // operator drains them, so a per-ticket warning would repeat N times per
+        // iteration for the life of the run and bury whatever else is being logged.
+        if skipped > 0 {
+            let (ticket_id, error) = first_skipped.unwrap_or_default();
+            tracing::warn!(
+                skipped_ticket_count = skipped,
+                example_ticket_id = ticket_id,
+                example_error = %error,
+                "workflow summary skipped tickets whose payloads did not decode; \
+                 branch and per-operation counts under-report by that many"
+            );
         }
         self.branch_count = u32::try_from(branches.len()).unwrap_or(u32::MAX);
         for (operation, count) in ticket_counts {

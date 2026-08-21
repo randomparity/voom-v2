@@ -441,7 +441,8 @@ fn scanner_files(scanner_ticket: &Ticket) -> Result<Vec<ScannerFile>, VoomError>
                 })
             }
             _ => Err(VoomError::Config(
-                "scanner result files must be strings or objects".to_owned(),
+                "scanner result files must be objects carrying path and file_location_id"
+                    .to_owned(),
             )),
         })
         .collect()

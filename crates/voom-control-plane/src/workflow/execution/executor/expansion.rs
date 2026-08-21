@@ -153,59 +153,25 @@ impl WorkflowExecutor {
                 self.options.queue.ready_batch_size,
             )
             .await?;
-        // Skip an undecodable ticket rather than raising, so one bad row cannot
-        // stall dispatch of every well-formed ticket beside it in the batch. This
-        // is the same containment ADR 0068 applies at
-        // `remote_acquire_candidates_in_tx`, where a candidate is scored
-        // ineligible instead of failing acquisition for the whole set — and it
-        // matters here for the same reason it matters there, now that the
-        // declaration requirement makes a decode failure the expected shape of an
-        // undrained pre-upgrade row rather than a sign of corruption.
-        //
-        // The skip is recorded and not counted: `branch_count` and `ticket_count`
-        // are durable summary columns, so a visible counter would need a column
-        // and a migration this slice forbids, and an in-memory one would leave the
-        // persisted row exactly as inconsistent while adding a `merge_invocation`
-        // rule a later resume can get wrong.
-        let mut ready = Vec::with_capacity(tickets.len());
-        let mut undecodable = Vec::new();
-        for ticket in tickets {
-            match WorkflowTicketPayload::parse_ticket(ticket.kind.as_str(), ticket.payload.clone())
-            {
-                Ok(_) => ready.push(ticket),
-                Err(error) => {
-                    tracing::warn!(
-                        job_id = job_id.0,
-                        workflow_id,
-                        ticket_id = ticket.id.0,
-                        ticket_kind = ticket.kind.as_str(),
-                        %error,
-                        "skipping a ready workflow ticket whose payload did not decode"
-                    );
-                    undecodable.push(format!("ticket {}: {error}", ticket.id.0));
-                }
-            }
+        // Raising here aborts the run rather than the ticket, which the #475 spec
+        // (section 6a) argued should instead skip the undecodable ticket and let its
+        // siblings dispatch. That containment cannot stand alone: an undecodable
+        // ticket never leases, so it never reaches a terminal state and stays
+        // `ready` forever. Skipping it alone livelocks the run loop; raising once a
+        // poll batch holds no decodable ticket aborts while siblings are still in
+        // flight and forfeits their expansion children. #486 owns the lease-free
+        // terminal transition that removes the row from `ready`, which is what makes
+        // skipping correct, and carries the skip with it.
+        for ticket in &tickets {
+            WorkflowTicketPayload::parse_ticket(ticket.kind.as_str(), ticket.payload.clone())
+                .map_err(|e| {
+                    VoomError::Internal(format!(
+                        "workflow ready tickets for {job_id}: ticket {} payload decode: {e}",
+                        ticket.id
+                    ))
+                })?;
         }
-        // Raise only once nothing else can proceed. Skipping alone would not
-        // terminate: an undecodable ticket stays `ready`, so `workflow_idle_state`
-        // keeps reporting `Ready`, `wait_or_fail_idle` keeps returning `Ok`, and
-        // the run spins on a batch that filters to empty. Trading a loud abort for
-        // a livelock is worse than the behavior being fixed.
-        //
-        // Failing the ticket terminally instead — so it leaves `ready` and opens
-        // an ADR 0018 issue — needs a terminal transition that does not require a
-        // lease, which does not exist yet. #486 owns it. Until then this is where
-        // the run stops, and the message names the tickets so an operator can drain
-        // exactly them.
-        if ready.is_empty() && !undecodable.is_empty() {
-            return Err(VoomError::Internal(format!(
-                "workflow ready tickets for {job_id}: no dispatchable ticket remains after \
-                 payload decode failures; drain these tickets (see the ADR 0068 upgrade step \
-                 in docs/release-process.md): {}",
-                undecodable.join("; ")
-            )));
-        }
-        Ok(ready)
+        Ok(tickets)
     }
 
     pub(super) async fn workflow_finished(

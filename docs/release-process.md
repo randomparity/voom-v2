@@ -80,20 +80,18 @@ rendered between the drain and the swap undecodable. A ticket rendered after mig
 0034 references a live rooted location and dispatches normally today, so skipping the
 step loses completable work rather than delaying it.
 
-**What skipping the drain actually looks like.** An undrained byte-touching ticket does
-not stop its siblings: the dispatch loop skips a ticket whose payload does not decode,
-logs it, and dispatches the rest of the batch. The workflow makes all the progress it
-can. It then fails once nothing dispatchable remains, with an error naming the ticket
-ids to drain (`executor/expansion.rs::ready_workflow_tickets`). Raising there is
-deliberate — an undecodable ticket stays `ready` forever, so skipping alone would leave
-the run spinning on a batch that filters to empty.
+**What skipping the drain actually looks like.** The first undrained byte-touching ticket
+the dispatch loop polls aborts the entire workflow run it belongs to
+(`executor/expansion.rs::ready_workflow_tickets`), naming the ticket and the decode error.
+Well-formed tickets in the same workflow that had not yet dispatched do not run, and the
+expansion children they would have produced are never created.
 
-The signal is therefore the run's failure, attributed to the run and naming the tickets;
-it is **not** a per-ticket `terminal_failure` issue (ADR 0018). Such a ticket never
-leases, so it never reaches the terminal transition that would open one. Issue #486
-tracks giving it a terminal failure path that does not require a lease. Until that
-lands, a partially drained deployment finishes what it can and then stops, once per
-affected workflow. Fold the drain into the ADR 0055 flag-day root-assignment and rescan
+The signal is therefore a failed run, not a per-ticket `terminal_failure` issue (ADR
+0018): such a ticket never leases, so it never reaches the terminal transition that would
+open one. Issue #486 tracks giving it a lease-free terminal failure path, which is what
+would let the run skip it and carry on; until that lands, treat the drain as required
+rather than advisable, and size the window on the assumption that a missed ticket costs
+its whole workflow. Fold the drain into the ADR 0055 flag-day root-assignment and rescan
 procedure, which such a deployment already owes.
 
 The same drain covers a second break in the same release, and must be stated to,

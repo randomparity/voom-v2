@@ -243,6 +243,18 @@ decode — where raising cannot spread.
   destination** — it names read locality, not write locality. The vocabulary is already
   sufficient for the fix: two `storage_root` entries with distinct ids are canonical
   today, so closing #484 adds an entry rather than a shape.
+- **The two producers of a `file_location` declaration entry do not validate it equally.**
+  The policy path resolves through `resolve_policy_file_source`, which requires a live,
+  rooted, non-retired location and takes the root from `location.rooted_address()` rather
+  than trusting a second source. The scan path pairs a `storage_root_id` from the scan
+  ticket's own payload with a `file_location_id` taken from the worker's result, checking
+  only that it is a non-zero integer — so a declaration can assert that a location lives in
+  a root without either being verified to exist or to belong together. Verifying it here is
+  deliberately not done: the only shipped producer of those ids is the fake scanner, whose
+  ids name no row by design, so the check would fail the fake flows immediately and the
+  repair belongs with #476, which is where resolution starts and where that note is
+  recorded. Nothing in production emits a `ScanLibrary` node today, so no live row carries
+  such a pair.
 - **Every future change to the operation→rights mapping repeats this release's payload
   break.** Validation compares a stored declaration against the whole entry list
   `declaration_for` computes from the mapping compiled into the reading binary, and the
@@ -286,11 +298,19 @@ decode — where raising cannot spread.
   operation — and quiesce ticket creation first, because the binary performing the drain is
   the one still rendering old-shape tickets, so a drain run against a live writer leaves
   everything rendered in the window between drain and swap undecodable. Skipping the step is
-  loud, but not per ticket: the ready-batch loop skips an undecodable ticket and dispatches
-  its well-formed siblings, then fails the run naming the ticket ids once nothing
-  dispatchable remains. Such a ticket never leases, so it never reaches a terminal
-  transition and opens no `terminal_failure` issue (ADR 0018) — #486 owns giving it a
-  lease-free terminal path. Loud is not the same as recovered either way.
+  loud at the granularity of the **run**, not the ticket: the first undecodable ticket in a
+  ready batch aborts the workflow run it belongs to. It opens no `terminal_failure` issue
+  (ADR 0018), because it never leases and so never reaches a terminal transition.
+
+  Containing that to the ticket was specified and then withdrawn, and the reason is worth
+  recording because the obvious fix does not work. Skipping the undecodable ticket alone
+  livelocks: the row stays `ready`, so `workflow_idle_state` keeps reporting `Ready`,
+  `wait_or_fail_idle` keeps returning `Ok`, and the loop spins on a batch that filters to
+  empty. Raising once a poll batch holds no decodable ticket instead aborts while siblings
+  are still leased — the store query sees only `ready` rows — forfeiting expansion children
+  that a completing sibling would have produced. Both variants are worse than the abort.
+  What makes skipping correct is a terminal transition that does not require a lease, so
+  the row leaves `ready` for good; #486 owns that and carries the skip with it.
 - Rollback is the mirror image and is the harder direction, because it is already an
   incident. ADR 0013's blanket remedy is to restore the pre-upgrade database snapshot, and
   that remains the safe default. This change narrows it deliberately: the new shape is

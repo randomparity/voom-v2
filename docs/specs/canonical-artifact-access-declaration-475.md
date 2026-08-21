@@ -648,21 +648,27 @@ fail per ticket and need no change. The other three do not:
   tickets and `?`-propagates a `VoomError::Internal` per ticket, so one undecodable
   old-shape row aborts `ready_workflow_tickets` for the entire job. That is the same
   batch-scoped hazard ADR 0068 argues against at `remote_acquire_candidates_in_tx`, and this
-  change is what makes decode failures newly possible there — so it is ours to contain. The
-  loop **skips** an undecodable ticket and records it, exactly as the acquisition candidate
-  loop scores rather than raises.
+  change is what makes decode failures newly possible there — so it is ours to contain.
+  **This requirement is withdrawn, and #486 carries it.** The reasoning below is kept
+  because the withdrawal is the interesting part.
 
-  Skipping alone does not terminate, which this spec originally missed: an undecodable
-  ticket stays `ready`, so `workflow_idle_state` keeps reporting `Ready`,
-  `wait_or_fail_idle` keeps returning `Ok`, and the run spins on a batch that filters to
-  empty — trading a loud abort for a livelock. So the loop skips while anything else can
-  dispatch, and raises naming the undecodable ticket ids once nothing dispatchable
-  remains. Well-formed siblings therefore complete, and the run still stops.
+  The remedy this section originally specified — skip the undecodable ticket and record
+  it, as the acquisition candidate loop scores rather than raises — cannot stand alone,
+  which the spec did not notice. An undecodable ticket never leases, so it never reaches a
+  terminal state and stays `ready` forever. Skipping it therefore livelocks the run:
+  `workflow_idle_state` keeps reporting `Ready`, `wait_or_fail_idle` keeps returning `Ok`,
+  and the loop spins on a batch that filters to empty. The obvious repair — raise once a
+  poll batch holds no decodable ticket — was implemented and then reverted, because the
+  store query sees only `ready` rows: a sibling that has just dispatched is leased and
+  therefore invisible, so the run aborts while it is still in flight and forfeits the
+  expansion children it would have produced. That is worse than the abort it replaced,
+  which at least fails before any work is wasted.
 
-  What this does **not** deliver is the per-ticket `terminal_failure` issue ADR 0068, this
-  spec, and `docs/release-process.md` each described as the "loud" outcome. Such a ticket
-  never leases, so it never reaches a terminal transition; a lease-free terminal path is
-  #486's. All three documents now describe the run-scoped failure that actually ships.
+  What makes the skip correct is a terminal transition that does not require a lease, so
+  the row leaves `ready` for good and also opens the ADR 0018 issue this spec, ADR 0068
+  and `docs/release-process.md` each described as the "loud" outcome. That is #486's
+  scope, and the skip belongs with it rather than ahead of it. All three documents now
+  describe the run-scoped abort that actually ships.
 
 - `workflow/summary.rs:175-179` uses `let Ok(payload) = … else { continue; }`, so an
   undecodable ticket vanishes from `branch_count` and `per_operation[..].ticket_count` while
@@ -780,11 +786,12 @@ unfinished workflow ticket whose kind names a byte-touching operation, then swap
 Quiescing first is load-bearing — the binary running the drain is the one still rendering
 old-shape tickets, so draining against a live writer leaves everything rendered in the
 window between drain and swap undecodable. An undrained ticket is loud at the granularity
-of the run, not the ticket: its well-formed siblings dispatch, then the run fails naming
-the ticket ids to drain. It opens no `terminal_failure` issue (ADR 0018), because it never
-leases and so never reaches a terminal transition — #486 owns that path. Loud is not
-recovered either way. The step folds into ADR 0055's flag-day root-assignment and
-rescan procedure, which such a deployment already owes.
+of the run, not the ticket: the first one polled aborts its whole workflow run, and the
+tickets that had not yet dispatched never do. It opens no `terminal_failure` issue (ADR
+0018), because it never leases and so never reaches a terminal transition — #486 owns that
+path and the containment that depends on it. Loud is not recovered either way. The step
+folds into ADR 0055's flag-day root-assignment and rescan procedure, which such a
+deployment already owes.
 
 **No shipped command performs either half of that step today.** `TicketCommand`
 (`voom-cli/src/cli.rs:1371-1388`) offers only `List` and `Show`; there is no fail, no
