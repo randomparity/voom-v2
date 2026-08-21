@@ -73,3 +73,4 @@ are append-only — supersede an ADR with a new one rather than rewriting histor
 | [0067](0067-durable-scan-sessions-and-completion-gated-reconciliation.md) | Durable scan sessions and completion-gated reconciliation |
 | [0068](0068-serialize-sqlite-migration-application.md) | Serialize SQLite migration application with a held write lock |
 | [0069](0069-byte-work-tickets-declare-canonical-artifact-access.md) | Byte-work tickets declare canonical artifact access |
+| [0070](0070-resolve-owner-local-artifact-access.md) | Resolve and gate owner-local artifact access |
