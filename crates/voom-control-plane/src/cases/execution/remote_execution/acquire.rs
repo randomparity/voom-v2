@@ -1343,7 +1343,7 @@ fn gate_rejection_decision(
 }
 
 /// Map a structured changed-gate outcome onto its documented stable reason.
-fn outcome_reason_code(outcome: &LeaseAcquireOutcome) -> StoreSchedulerReasonCode {
+pub(super) fn outcome_reason_code(outcome: &LeaseAcquireOutcome) -> StoreSchedulerReasonCode {
     match outcome {
         LeaseAcquireOutcome::TicketNotReady { .. } => StoreSchedulerReasonCode::NoReadyTicket,
         LeaseAcquireOutcome::WorkerIneligible { reason, .. } => match reason {
@@ -1365,7 +1365,7 @@ fn outcome_reason_code(outcome: &LeaseAcquireOutcome) -> StoreSchedulerReasonCod
 }
 
 /// Locator-free observed facts for one changed post-selection gate.
-fn changed_gate_explanation(
+pub(super) fn changed_gate_explanation(
     outcome: &LeaseAcquireOutcome,
     reason_code: StoreSchedulerReasonCode,
 ) -> JsonValue {
