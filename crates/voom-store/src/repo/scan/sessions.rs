@@ -2,8 +2,8 @@ use serde::{Deserialize, Serialize};
 use sqlx::{QueryBuilder, Row, Sqlite, SqlitePool, Transaction};
 use time::OffsetDateTime;
 use voom_core::{
-    FileLocationId, NodeId, NodeIncarnationId, ProviderRelativeLocator, ScanSessionId,
-    ScanSessionStatus, ScanTerminalReason, StorageRootId, VoomError,
+    FileLocationId, NodeId, NodeIncarnationId, ProviderRelativeLocator, ScanObservationEvidence,
+    ScanSessionId, ScanSessionStatus, ScanTerminalReason, StorageRootId, VoomError,
 };
 
 use super::super::Repository;
@@ -747,6 +747,10 @@ pub struct ScanObservation {
     pub modified_at: OffsetDateTime,
     pub stability_started_at: OffsetDateTime,
     pub stability_confirmed_at: OffsetDateTime,
+    /// Agreed hash+probe identity facts (ADR 0077). `None` records existence
+    /// without publishing identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence: Option<ScanObservationEvidence>,
 }
 
 #[derive(Debug, Clone)]
@@ -938,7 +942,7 @@ const COMPLETION_BATCH_PAGE_SQL: &str = "SELECT sequence, request_hash, observat
      ORDER BY sequence ASC LIMIT ?";
 const COMPLETION_OBSERVATION_PAGE_SQL: &str = "SELECT batch_sequence, ordinal, \
      provider_relative_locator, provider_object_identity, size_bytes, modified_at, \
-     stability_started_at, stability_confirmed_at FROM scan_observations \
+     stability_started_at, stability_confirmed_at, evidence_json FROM scan_observations \
      WHERE scan_session_id = ? AND (? IS NULL OR batch_sequence > ? \
        OR (batch_sequence = ? AND ordinal > ?)) \
      ORDER BY batch_sequence ASC, ordinal ASC LIMIT ?";
@@ -1484,6 +1488,13 @@ fn row_to_mutation_session(row: &sqlx::sqlite::SqliteRow) -> Result<ScanSession,
 pub fn decode_observation_row(row: &sqlx::sqlite::SqliteRow) -> Result<ScanObservation, VoomError> {
     let provider_object_identity = string_column(row, "provider_object_identity")?;
     validate_provider_object_identity(&provider_object_identity)?;
+    let evidence = match row
+        .try_get::<Option<String>, _>("evidence_json")
+        .map_err(|error| VoomError::database_context("scan_observations.evidence_json", error))?
+    {
+        Some(json) => Some(ScanObservationEvidence::parse_database(&json)?),
+        None => None,
+    };
     let observation = ScanObservation {
         provider_relative_locator: ProviderRelativeLocator::parse_database(
             "scan_observations.provider_relative_locator",
@@ -1494,6 +1505,7 @@ pub fn decode_observation_row(row: &sqlx::sqlite::SqliteRow) -> Result<ScanObser
         modified_at: timestamp_column(row, "modified_at")?,
         stability_started_at: timestamp_column(row, "stability_started_at")?,
         stability_confirmed_at: timestamp_column(row, "stability_confirmed_at")?,
+        evidence,
     };
     if observation.stability_confirmed_at < observation.stability_started_at {
         return Err(VoomError::database(
@@ -1688,6 +1700,7 @@ struct PreparedObservation {
     modified_at: String,
     stability_started_at: String,
     stability_confirmed_at: String,
+    evidence_json: Option<String>,
 }
 
 impl PreparedObservation {
@@ -1703,6 +1716,10 @@ impl PreparedObservation {
             modified_at: iso8601(observation.modified_at)?,
             stability_started_at: iso8601(observation.stability_started_at)?,
             stability_confirmed_at: iso8601(observation.stability_confirmed_at)?,
+            evidence_json: match &observation.evidence {
+                Some(evidence) => Some(evidence.to_database_json()?),
+                None => None,
+            },
         })
     }
 }
@@ -2024,7 +2041,7 @@ async fn insert_observations_in_tx(
         let inserted = sqlx::query(
             "INSERT INTO scan_observations (scan_session_id, batch_sequence, ordinal, \
              provider_relative_locator, provider_object_identity, size_bytes, modified_at, \
-             stability_started_at, stability_confirmed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             stability_started_at, stability_confirmed_at, evidence_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(input.session_id)
         .bind(input.sequence_i64)
@@ -2035,6 +2052,7 @@ async fn insert_observations_in_tx(
         .bind(&observation.modified_at)
         .bind(&observation.stability_started_at)
         .bind(&observation.stability_confirmed_at)
+        .bind(&observation.evidence_json)
         .execute(&mut **tx)
         .await;
         if let Err(error) = inserted {

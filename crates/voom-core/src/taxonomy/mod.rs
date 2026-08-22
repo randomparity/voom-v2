@@ -7,5 +7,6 @@ pub(super) mod issue;
 pub(super) mod operation_kind;
 pub(super) mod owner_access_evidence;
 pub(super) mod scan;
+pub(super) mod scan_evidence;
 pub(super) mod storage;
 pub(super) mod ticket_operation;

@@ -15,6 +15,13 @@ const MIGRATION_0001_SQL: &str = include_str!("../../../migrations/0001_schema.s
 const MIGRATION_0037_SQL: &str =
     include_str!("../../../migrations/0037_owner_local_scheduling_evidence.sql");
 
+/// Migration 0041 (physical version 3): scan observation evidence
+/// (issue #421, ADR 0077). Adds the nullable strict-JSON evidence payload to
+/// `scan_observations`; see the file header and
+/// `voom_core::ScanObservationEvidence`.
+const MIGRATION_0041_SQL: &str =
+    include_str!("../../../migrations/0041_scan_observation_evidence.sql");
+
 /// Embedded migration set, constructed without the `sqlx::migrate!` macro.
 ///
 /// We don't use sqlx's `macros` feature: it pulls `sqlx-macros-core`, which
@@ -42,6 +49,13 @@ pub(crate) static MIGRATOR: LazyLock<Migrator> = LazyLock::new(|| Migrator {
             Cow::Borrowed("owner_local_scheduling_evidence"),
             MigrationType::Simple,
             Cow::Borrowed(MIGRATION_0037_SQL),
+            false,
+        ),
+        Migration::new(
+            3,
+            Cow::Borrowed("scan_observation_evidence"),
+            MigrationType::Simple,
+            Cow::Borrowed(MIGRATION_0041_SQL),
             false,
         ),
     ]),

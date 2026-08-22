@@ -118,12 +118,17 @@ matching, allowlist filter) moves from `voom-control-plane/src/scan/discovery.rs
   ⇒ skipped, counted); reject any candidate whose joined path escapes the canonical root;
 - relative locators built from components joined with `/`; each component checked against
   `.`/`..`/empty/NUL (defense-in-depth beneath `ProviderRelativeLocator::new`);
+- scan-worker candidate frames carry at most 256 candidates AND at most 32 KiB serialized
+  payload per frame (protocol NDJSON frame cap is 64 KiB); overflow splits into another
+  frame. Sidecars descend the same component-wise O_NOFOLLOW path as primaries, and the
+  debt-0004 ancestor-replacement regressions cover sidecar inputs too;
 - hash worker resolves `canonical_root + relative_locator` component-wise using
   `openat`-equivalent semantics via `std::os::unix::fs::OpenOptionsExt` `O_NOFOLLOW` per
   component descent (`openat2::ResolveBeneath` not required; a manual loop opening each
-  component with `O_NOFOLLOW|O_DIRECTORY` and finally the file with `O_NOFOLLOW` suffices);
+  component with `O_NOFOLLOW|O_DIRECTORY` and finally the file with `O_NOFOLLOW` suffices),
+  for primaries and sidecars alike;
   stat before hash, re-stat after; any difference ⇒ terminal `Error` frame
-  (`FailureClass::ContentDrift`) with no facts.
+  (`FailureClass::ArtifactChecksumMismatch, stage hash_drift`) with no facts.
 - probe paths handed to ffprobe are always absolute (canonical root join), never starting
   with `-`; the ffprobe worker additionally receives them unchanged (no argv injection is
   possible through argv arrays, but absolute-path reconstruction is asserted in tests).
@@ -140,9 +145,12 @@ Pump behavior for a `scan_library` dispatch:
 2. `start_scan_session` → session status must become `running`; record deadline.
 3. Dispatch `ScanLibrary` to the worker child; consume candidate frames.
 4. For each candidate, bounded pipeline (JoinSet, ≤4 in flight): `HashFile` then `ProbeFile`
-   (expected = hash facts; verify pre/post match). Outcomes: agreed ⇒ observation WITH
-   evidence; drift/malformed/unreadable ⇒ observation WITHOUT evidence (existence recorded);
-   vanished mid-run ⇒ no observation (absence is real).
+   (expected = hash facts; verify pre/post match). Outcome classification reads the worker
+   Error frame's `(class, code)` pair, never message text: vanished ⇒ `ArtifactUnavailable`
+   + code `NOT_FOUND` ⇒ NO observation (absence is real); content drift ⇒
+   `ArtifactChecksumMismatch`; unreadable ⇒ `ArtifactUnavailable` with any other code;
+   malformed media ⇒ `MalformedMedia`. Every non-NOT_FOUND failure yields an observation
+   WITHOUT evidence (existence recorded, identity not published).
    Agreement predicate (exact fact set, evaluated in the pump): hash worker's post-read stat
    equals its pre-read stat AND ffprobe `pre_probe`/`post_probe` each match the hash result's
    {size_bytes, content_hash, modified_at}. Probe paths are absolute canonical-root joins
@@ -157,8 +165,12 @@ Pump behavior for a `scan_library` dispatch:
    observation_count)`; lease settles `Complete` with summary `{scan_session_id,
    observed_count, published: unknown-at-this-tier}` — actually summary carries only counts
    known agent-side (`observed_count`, `failed_content_count`, `skipped_count`).
-7. Fatal errors (worker crash, protocol error, CP unreachable after retries, batch conflict):
-   best-effort `fail_scan_session(reason)`; lease settles `Fail`.
+7. Fatal errors (worker crash, protocol error, CP unreachable after retries, batch conflict,
+   start conflict): best-effort `fail_scan_session(reason)`; lease settles `Fail`.
+8. Restart rule: sessions do NOT resume across agent restarts. A re-delivered ticket whose
+   session is no longer `requested` (start conflicts) fails the session with a reason naming
+   the restart; the operator re-requests the scan — resuming mid-tree would replay accepted
+   locators into duplicate-locator conflicts, so fail-closed beats partial resume.
 
 Runtime wiring: `run_lease` checks `dispatch.operation == "scan_library"` and routes to the
 pump instead of plain `dispatch_to_child`. This is the one deliberate edit inside
@@ -190,6 +202,12 @@ preflight, and artifact verification still consume them (#423/#424 surfaces). CL
 dispatch rewritten to request+poll (`--no-wait` skips polling); `VOOM_FFPROBE_BIN` warning
 replaced by nothing.
 Tests deleted/moved with their subjects; `check-test-layout` keeps siblings co-located.
+Debt disposition: docs/debt/0004 closes with this change — its Concern text described
+the transitional control-plane read; the replacement binds discovery and hash bytes to
+component-wise symlink-free descent from the canonical root for primaries AND sidecars,
+with deterministic ancestor-replacement regressions for both inputs. Its probe-leg residual
+stays open under #423 and is recorded as such when the record is closed.
+
 
 ## Data flow guarantees
 
