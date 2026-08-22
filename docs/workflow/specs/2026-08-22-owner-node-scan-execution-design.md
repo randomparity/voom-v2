@@ -143,6 +143,10 @@ Pump behavior for a `scan_library` dispatch:
    (expected = hash facts; verify pre/post match). Outcomes: agreed ⇒ observation WITH
    evidence; drift/malformed/unreadable ⇒ observation WITHOUT evidence (existence recorded);
    vanished mid-run ⇒ no observation (absence is real).
+   Agreement predicate (exact fact set, evaluated in the pump): hash worker's post-read stat
+   equals its pre-read stat AND ffprobe `pre_probe`/`post_probe` each match the hash result's
+   {size_bytes, content_hash, modified_at}. Probe paths are absolute canonical-root joins
+   (never option-like); probing stays pathname-based until #423 reference-passing.
 5. Buffer observations; flush a batch whenever ≥1000 accumulate or enumeration ends.
 6. After scan `Result`: flush remainder, `complete_scan_session(last_sequence,
    observation_count)`; lease settles `Complete` with summary `{scan_session_id,

@@ -42,7 +42,11 @@ in scan work exactly as ADR 0067 requires; no pull queue is introduced.
   the bytes, stats before and after, hashes sidecars (SHA-256), and fails closed when facts
   changed mid-read.
 - `voom-ffprobe-worker` continues to implement `OperationKind::ProbeFile`, now launched and
-  supervised by the agent instead of the control plane.
+  supervised by the agent instead of the control plane. The path it receives is
+  reconstructed by the agent as the canonical root joined with the validated relative
+  locator — always absolute, therefore never option-like — but probing remains a pathname
+  reopen: reference-passing through probing is #423's remaining work, so the probe leg does
+  not yet bind an open object the way the scan and hash legs do.
 
 Separate worker declarations yield separate capability grants (`can_execute`) derived at
 activation (ADR 0057); scheduler eligibility (ADR 0072) is what prevents a scan worker from
@@ -53,6 +57,12 @@ the session, dispatch enumeration to the scan worker, pipeline hash and probe di
 candidate through its other children, assemble observations, submit ordered idempotent
 batches, then complete or fail the session before settling the lease. Children never receive
 control-plane credentials; only the agent holds the bearer token and incarnation fence.
+
+Agreement is a pump-side predicate with an exact fact set: evidence attaches only when (a)
+the hash worker's post-read stat equals its pre-read stat, and (b) the probe result's
+`pre_probe` and `post_probe` facts each match the hash result's `size_bytes`, `content_hash`,
+and `modified_at`. A mutation between hash read and probe read fails (b) and leaves the
+observation evidence-less; nothing compares beyond this fact set anywhere else.
 
 **Evidence and publication.** Migration 0041 adds a nullable strict JSON `evidence` payload
 to `scan_observations` (additive, ADR 0013 inventory registered). An observation carries
@@ -81,16 +91,13 @@ run, then polls session inspection until terminal and prints the outcome envelop
   content-level failures never publish stale identity, and infrastructure failures fail the
   session without partial reconciliation.
 - Ticket failure or loss leaves the session `requested`; the inactivity deadline stales it.
-  There is no new recovery mechanism beyond the existing deadline fencing.
-- The workflow scanner-ticket result shape changes from per-file `{path, file_location_id}`
-  rows to a run summary keyed by scan session; downstream consumption of scanner results must
-  be reintroduced against published locations in a follow-up (#423-adjacent surface).
+- Discovery and hash byte access binds to a component-wise, symlink-free descent from the
+  canonical root — the race-free property debt 0004 demands for those legs. The probe leg
+  still reopens a reconstructed absolute pathname until #423 lands reference-passing; the
+  drift checks around each probe bound what that residual can publish, but they do not bind
+  an open object.
 - Observation rows now carry up to one strict evidence payload each; batch size bounds keep
   worst-case payloads within the existing 1000-observation route limit.
-- Root-policy enforcement moves into `voom-scan-worker`/`voom-hash-worker`, which bind every
-  byte read to a component-wise, symlink-free descent from the canonical root — the race-free
-  property debt 0004 demands for scans; #423 remains responsible for worker-dispatch
-  references for transform operations.
 - The scan path stops consuming `local_node_id`; the field itself keeps its
   transform/commit consumers (artifact stage and commit preparation, policy verification,
   audio/remux/transcode source selection, workflow promotion) owned by #423 and successors
