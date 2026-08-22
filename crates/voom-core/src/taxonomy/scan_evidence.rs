@@ -46,7 +46,7 @@ pub struct ScanSidecarEvidence {
     pub provider_relative_locator: String,
     /// Sidecar role vocabulary: `external_subtitle`, `nfo`, `poster`, `trailer`.
     pub role: String,
-    pub sha256_hex: String,
+    pub blake3_hex: String,
     pub size_bytes: u64,
 }
 
@@ -62,7 +62,7 @@ impl ScanSidecarEvidence {
                 )));
             }
         }
-        validate_sha256_hex(&self.sha256_hex)?;
+        validate_blake3_hex(&self.blake3_hex)?;
         Ok(())
     }
 }
@@ -77,7 +77,7 @@ fn validate_locator(value: &str) -> Result<(), VoomError> {
     Ok(())
 }
 
-fn validate_sha256_hex(value: &str) -> Result<(), VoomError> {
+fn validate_blake3_hex(value: &str) -> Result<(), VoomError> {
     if value.len() != 64 || !value.bytes().all(|b| b.is_ascii_hexdigit()) {
         return Err(VoomError::Config(
             "sidecar evidence digest must be 64 hex characters".to_owned(),

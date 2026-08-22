@@ -25,7 +25,7 @@ pub struct HashedSidecar {
     pub provider_relative_locator: String,
     /// Sidecar role (`external_subtitle|nfo|poster|trailer`).
     pub role: String,
-    pub sha256_hex: String,
+    pub blake3_hex: String,
     pub size_bytes: u64,
 }
 

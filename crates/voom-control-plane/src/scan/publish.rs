@@ -190,7 +190,7 @@ fn sidecars_from_evidence(
                 provider_relative_locator: ProviderRelativeLocator::new(
                     sidecar.provider_relative_locator.clone(),
                 )?,
-                content_hash: format!("sha256:{}", sidecar.sha256_hex),
+                content_hash: format!("blake3:{}", sidecar.blake3_hex),
                 size_bytes: sidecar.size_bytes,
             })
         })

@@ -286,7 +286,11 @@ async fn run_pump(
             &mut failed_content_count,
             &mut degraded_evidence_count,
         )
-        .await?;
+        .await
+        .map_err(|mut failure| {
+            failure.session = Some(session);
+            failure
+        })?;
     }
     batches.flush_if_nonempty().await?;
 
@@ -809,12 +813,14 @@ async fn process_candidate(
                         .as_str()
                         .to_owned(),
                     role: sidecar.kind.clone().unwrap_or_else(|| "unknown".to_owned()),
-                    sha256_hex: hex.to_owned(),
+                    blake3_hex: hex.to_owned(),
                     size_bytes: sidecar_hash.size_bytes,
                 });
             }
-            Ok(Err(CandidateGap::Vanished)) => return Ok(contribution),
-            Ok(Err(CandidateGap::UnusableIdentity)) => {
+            // A vanished sidecar is real absence for the sidecar only; the
+            // still-existing primary must stay recorded (evidence-less) so
+            // completion does not retire its location as absent.
+            Ok(Err(CandidateGap::Vanished | CandidateGap::UnusableIdentity)) => {
                 return Ok(evidence_less(&mut contribution, primary));
             }
             Err(failure) => return Err(failure),

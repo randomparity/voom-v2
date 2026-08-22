@@ -339,7 +339,7 @@ async fn sidecar_evidence_attaches_bundle_membership() {
     primary.sidecars.push(voom_core::ScanSidecarEvidence {
         provider_relative_locator: "library/movie.srt".to_owned(),
         role: "external_subtitle".to_owned(),
-        sha256_hex: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_owned(),
+        blake3_hex: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_owned(),
         size_bytes: 42,
     });
 

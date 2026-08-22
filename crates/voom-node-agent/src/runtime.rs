@@ -69,6 +69,14 @@ impl ChildEndpointRegistry {
         }
     }
 
+    /// Marks the named child down so consumers wait for the restart instead
+    /// of dispatching into a dead handle.
+    pub(crate) fn unpublish(&self, logical_name: &str) {
+        if let Some(sender) = self.entries.get(logical_name) {
+            sender.send_replace(None);
+        }
+    }
+
     /// Resolves the live endpoint whose declared operations include
     /// `operation`, or `None` while every matching child is down.
     pub(crate) fn resolve(&self, operation: OperationKind) -> Option<ChildEndpoint> {
@@ -670,6 +678,7 @@ async fn run_coordinator(
                 return CoordinatorExit::Shutdown(settlement);
             }
             CoordinatorEvent::ChildExit(Ok(())) => {
+                context.endpoints.unpublish(&context.worker.name);
                 // Settling here consumes any shutdown notification, so this arm must act on
                 // it. Falling through to a restart would leave the top-of-loop `changed()`
                 // waiting for a value that has already been sent.

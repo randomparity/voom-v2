@@ -18,7 +18,7 @@ fn result() -> HashFileResult {
         sidecars: vec![HashedSidecar {
             provider_relative_locator: "a.srt".to_owned(),
             role: "external_subtitle".to_owned(),
-            sha256_hex: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+            blake3_hex: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
                 .to_owned(),
             size_bytes: 7,
         }],
