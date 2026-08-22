@@ -44,9 +44,10 @@ additionally records the owner incarnation id and a one-time opaque 32-byte
 receipt column; an absent receipt means not started. This deliberately
 collapses the design spec's `not_started` journal step into receipt absence:
 the `applying` report is the sole mutation gate, so no separate
-pre-mutation receipt exists to produce or classify. Every transition is a
-compare-and-set on an optimistic `epoch` column, mirroring
-`commit_safety_gate`.
+pre-mutation receipt exists to produce or classify; the governing design
+spec's step-2 wording requires a conforming amendment, tracked as follow-up
+work on this change. Every transition is a compare-and-set on an optimistic
+`epoch` column, mirroring `commit_safety_gate`.
 Migration 0038 fails closed at apply time if any `artifact_commit_records`
 row is still `pending` or `recovery_required`: those rows' host-side
 recovery code is deleted by this change, so operators resolve them under
@@ -92,6 +93,20 @@ Authorize and complete replay idempotently through the existing
 original fenced outcome, a replayed complete the original report — neither
 re-mints, re-finalizes, nor creates rows.
 
+### Recovery evidence has a defined producer
+
+The coordinator also polls `recovery_required` intents for the roots it
+owns. For each it re-observes staging and target facts read-only against
+the pinned expected facts and files a supplemental typed receipt: target
+absent (and no temp sibling) → `outcome_unknown` resolved as not-applied,
+so recovery may abort and re-drive a fresh generation; target present with
+matching facts → `applied`, so recovery finalizes directly; target present
+with drifting facts → `mismatched`. This closes the crash window between
+install/fsync and an `applied` report — exactly the ambiguity issue #422
+names — because the byte-owning node, not the control plane, produces the
+missing observed facts. A `recovery_required` intent under a stale or
+retired owner has no producer by definition and stays operator-required.
+
 ### Ambiguity converges, never succeeds silently
 
 A lost response, agent crash between `applying` and reporting, or expiry
@@ -101,11 +116,12 @@ intent is safe to abort because the `applying` journal is the mutation gate —
 the node mutates only after its `applying` receipt is durably recorded, so a
 late report fails the compare-and-set and the node stands down; an intent
 carrying any receipt (`applying` or later) is never self-aborted — it becomes
-`recovery_required` and classifies as `applied` with matching facts
-(finalize directly; promotion already happened), `mismatched` or
-`outcome_unknown` (operator-required: the record stays `recovery_required`
-carrying the evidence for a human). An ambiguous promotion can therefore
-never surface as an untracked successful commit.
+`recovery_required` and classifies via the supplemental receipts above as
+`applied` with matching facts (finalize directly; promotion already
+happened) or `mismatched`/unresolved `outcome_unknown` (operator-required:
+the record stays `recovery_required` carrying the evidence for a human). An
+ambiguous promotion can therefore never surface as an untracked successful
+commit.
 
 ### Pending intents expire fail-closed
 
@@ -119,6 +135,7 @@ scope indefinitely. Authorized intents never expire into abort — they enter
 above.
 
 ### Host-side promotion is deleted, not demoted
+
 
 `ControlPlane::commit_artifact` becomes prepare + authorize issuance and a
 bounded wait for terminal convergence; `recover_commit` drives the evidence
@@ -143,6 +160,11 @@ registered in `docs/payload-contract-inventory.md` and
   finalization.
 - Rollback is a schema-preserving revert of migration 0038-era code; the
   additive table does not obstruct the prior binary.
+- An operator-required outcome wedges the affected artifact's commit slot
+  until a human resolves it: the one-owner-per-artifact and
+  one-owner-per-target indexes reserve the stuck record's slot, refusing
+  successor commits — the deliberate cost of never guessing across an
+  ambiguous promotion.
 
 ## Alternatives considered
 
