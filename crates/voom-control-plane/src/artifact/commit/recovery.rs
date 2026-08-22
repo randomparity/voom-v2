@@ -71,7 +71,7 @@ pub(super) async fn recover_commit(
         ArtifactCommitIntentState::Pending | ArtifactCommitIntentState::Authorized
             if receiptless =>
         {
-            abort_and_reprepare_report(cp, &record, &intent).await
+            abort_and_reprepare_report(cp, &record, &intent, intent.intent_epoch).await
         }
         ArtifactCommitIntentState::Authorized => {
             // A receipt-bearing authorized intent enters recovery_required
@@ -128,7 +128,7 @@ async fn classify_recovery_required(
         // Positive not-applied evidence from the current owner's read-only
         // re-observation resolves the ambiguity: re-drive a fresh generation.
         if supplemental.reason == RESOLVED_NOT_APPLIED_REASON {
-            return abort_and_reprepare_report(cp, &record, &intent).await;
+            return abort_and_reprepare_report(cp, &record, &intent, intent.intent_epoch).await;
         }
     }
     operator_required(&record, &intent)
@@ -179,18 +179,35 @@ async fn finalize_recovered(
     })
 }
 
-/// Safe abort (CAS) of a non-terminal intent plus its stuck record, retiring
-/// the staged-bytes address, followed by a fresh successor generation whose
-/// prepared state becomes the report.
-async fn abort_and_reprepare_report(
+/// Abort a classified intent and prepare a fresh successor generation. The
+/// abort only lands when the intent is unchanged since the classification
+/// snapshot: a receipt or supplemental receipt journaled in between bumps
+/// `intent_epoch`, and the abort fails closed for a fresh `recover_commit`
+/// classification instead of overriding a live node's mutation gate (the
+/// epoch compare-and-set alone cannot see that, because it matches on the
+/// re-read row's already-bumped epoch).
+pub(super) async fn abort_and_reprepare_report(
     cp: &ControlPlane,
     record: &ArtifactCommitRecord,
     intent: &ArtifactCommitIntent,
+    classified_intent_epoch: u64,
 ) -> Result<CommitArtifactReport, VoomError> {
     let now: OffsetDateTime = cp.clock().now();
     let mut tx = begin_immediate_tx(&cp.pool).await?;
-    // CAS on the intent epoch: a concurrent node report wins and this abort
-    // fails closed instead of racing a live promotion.
+    let current = cp
+        .artifact_commit_intents
+        .require_intent_in_tx(&mut tx, intent.id)
+        .await?;
+    if current.intent_epoch != classified_intent_epoch {
+        return Err(VoomError::Conflict(format!(
+            "commit intent {} changed under recovery classification (now {} at epoch {}, \
+             classified at epoch {}); re-run recovery",
+            intent.id,
+            current.state.as_str(),
+            current.intent_epoch,
+            classified_intent_epoch
+        )));
+    }
     cp.artifact_commit_intents
         .mark_aborted_in_tx(&mut tx, intent.id, now)
         .await?;

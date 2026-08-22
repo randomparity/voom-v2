@@ -5,6 +5,7 @@
 //! mutation inside one transaction, and a stored replay outcome. Fence values
 //! travel only in the authorize outcome payload — never in events.
 
+use constant_time_eq::constant_time_eq;
 use secrecy::SecretString;
 use serde_json::Value as JsonValue;
 use sqlx::Sqlite;
@@ -894,7 +895,7 @@ fn validate_fence_and_evidence(
         .ok()
         .filter(|bytes| bytes.len() == 32)
         .zip(intent.commit_fence.as_deref())
-        .is_some_and(|(bytes, stored)| bytes == stored);
+        .is_some_and(|(bytes, stored)| constant_time_eq(&bytes, stored));
     if !matches {
         return Err(VoomError::Conflict(format!(
             "commit intent {} completion rejected: commit fence mismatch",

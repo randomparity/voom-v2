@@ -693,3 +693,62 @@ async fn blocking_lease_refused_on_pinned_scope_until_abort() {
         LeaseScope::Location(voom_core::FileLocationId(STAGING_LOCATION_ID))
     );
 }
+
+// --- scan-completion retirement lock ---
+
+#[tokio::test]
+async fn scan_reconciliation_lock_refuses_retiring_a_pinned_staging_location() {
+    let (pool, _tmp, record) = fixture().await;
+    let intent = create_pending(&pool, record).await;
+
+    let mut tx = pool.begin().await.unwrap();
+    let hit = consult_scan_reconciliation_artifact_intent_lock_in_tx(
+        &mut tx,
+        StorageRootId(9_000_001),
+        voom_core::ids::ScanSessionId(1),
+        Some(voom_core::FileLocationId(STAGING_LOCATION_ID)),
+    )
+    .await
+    .unwrap();
+    tx.rollback().await.unwrap();
+    assert_eq!(
+        hit,
+        Some((intent.id, "pending".to_owned(), STAGING_LOCATION_ID))
+    );
+
+    // The fence stays blocking through authorization and recovery.
+    let intent = authorize(&pool, intent.id).await;
+    let mut tx = pool.begin().await.unwrap();
+    let hit = consult_scan_reconciliation_artifact_intent_lock_in_tx(
+        &mut tx,
+        StorageRootId(9_000_001),
+        voom_core::ids::ScanSessionId(1),
+        Some(voom_core::FileLocationId(STAGING_LOCATION_ID)),
+    )
+    .await
+    .unwrap();
+    tx.rollback().await.unwrap();
+    assert_eq!(
+        hit,
+        Some((intent.id, "authorized".to_owned(), STAGING_LOCATION_ID))
+    );
+
+    // Abort releases the pin: the location may be retired again.
+    let repo = SqliteArtifactCommitIntentRepo::new(pool.clone());
+    let mut tx = pool.begin().await.unwrap();
+    repo.mark_aborted_in_tx(&mut tx, intent.id, T0)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    let mut tx = pool.begin().await.unwrap();
+    let hit = consult_scan_reconciliation_artifact_intent_lock_in_tx(
+        &mut tx,
+        StorageRootId(9_000_001),
+        voom_core::ids::ScanSessionId(1),
+        Some(voom_core::FileLocationId(STAGING_LOCATION_ID)),
+    )
+    .await
+    .unwrap();
+    tx.rollback().await.unwrap();
+    assert_eq!(hit, None);
+}

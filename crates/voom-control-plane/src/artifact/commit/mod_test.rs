@@ -548,6 +548,61 @@ async fn recover_commit_aborts_receiptless_authorized_and_reprepares() {
 }
 
 #[tokio::test]
+async fn recovery_abort_fails_closed_when_a_receipt_lands_after_classification() {
+    let (cp, _db, dir) = fixture().await;
+    let node = simulated_node(&cp).await;
+    let staged = stage_and_verify_bytes(&cp, dir.path(), b"source bytes").await;
+    let target = dir.path().join("target.bin");
+
+    // Classification snapshot: authorized, receipt-less, at its current epoch.
+    let task_cp = cp.clone();
+    let task_target = target.clone();
+    let driver = tokio::spawn(async move {
+        task_cp
+            .commit_artifact(CommitArtifactInput {
+                artifact_handle_id: staged.artifact_handle_id,
+                target_path: task_target,
+            })
+            .await
+    });
+    let intent_id = wait_pending_intent_id(&cp, staged.artifact_handle_id).await;
+    node_authorize(&cp, &node, intent_id).await.unwrap();
+    let record = cp
+        .artifacts
+        .list_commit_records(staged.artifact_handle_id)
+        .await
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap();
+    let classified = cp
+        .artifact_commit_intents
+        .require_intent(intent_id)
+        .await
+        .unwrap();
+
+    // A node journals its mutation gate AFTER the classification snapshot:
+    // the abort must fail closed instead of overriding the live journal.
+    node_report_applying(&cp, &node, intent_id).await.unwrap();
+
+    let error = super::recovery::abort_and_reprepare_report(
+        &cp,
+        &record,
+        &classified,
+        classified.intent_epoch,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.error_code(), ErrorCode::Conflict);
+    assert!(
+        error
+            .to_string()
+            .contains("changed under recovery classification")
+    );
+    driver.abort();
+}
+
+#[tokio::test]
 async fn recover_commit_requires_operator_when_target_already_exists() {
     let (cp, _db, dir) = fixture().await;
     let node = simulated_node(&cp).await;

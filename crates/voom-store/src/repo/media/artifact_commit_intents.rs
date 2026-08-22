@@ -782,6 +782,70 @@ pub(crate) async fn consult_artifact_intent_lock_in_tx(
         "artifact_commit_intent {intent_id} ({state}) pins the requested scope"
     )))
 }
+/// Scan-completion retirement lock for fenced commit intents: returns the
+/// first non-terminal intent whose pinned staging location the supplied
+/// scan completion would retire (same scope predicate as
+/// `SCAN_RECONCILIATION_COMMIT_LOCK_SQL`, joined against
+/// `artifact_commit_intents.staging_location_id`). The destructive-commit
+/// counterpart protects its scope members; without this mirror a scan
+/// completing on a staging root could retire a pinned staging address out
+/// from under a live fence.
+pub(crate) const SCAN_RECONCILIATION_ARTIFACT_INTENT_LOCK_SQL: &str = "WITH \
+     completion_scope(storage_root_id, scan_session_id, high_watermark_id) AS \
+     (VALUES (?, ?, ?)) \
+     SELECT i.id AS intent_id, i.state AS intent_state, l.id AS location_id \
+     FROM artifact_commit_intents AS i \
+     JOIN file_locations AS l ON l.id = i.staging_location_id \
+     CROSS JOIN completion_scope AS scope \
+     WHERE i.state IN ('pending', 'authorized', 'recovery_required') \
+       AND l.storage_root_id = scope.storage_root_id \
+       AND l.address_state = 'rooted' \
+       AND l.retired_at IS NULL \
+       AND scope.high_watermark_id IS NOT NULL \
+       AND l.id <= scope.high_watermark_id \
+       AND NOT EXISTS ( \
+           SELECT 1 FROM scan_observations AS observation \
+           WHERE observation.scan_session_id = scope.scan_session_id \
+             AND observation.provider_relative_locator = l.provider_relative_locator \
+       ) \
+     ORDER BY i.id ASC, l.id ASC LIMIT 1";
+
+/// Consult [`SCAN_RECONCILIATION_ARTIFACT_INTENT_LOCK_SQL`] on the caller's
+/// transaction.
+pub(crate) async fn consult_scan_reconciliation_artifact_intent_lock_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    storage_root_id: StorageRootId,
+    scan_session_id: voom_core::ids::ScanSessionId,
+    location_high_watermark_id: Option<voom_core::FileLocationId>,
+) -> Result<Option<(ArtifactCommitIntentId, String, u64)>, VoomError> {
+    let row = sqlx::query_as::<_, (i64, String, i64)>(SCAN_RECONCILIATION_ARTIFACT_INTENT_LOCK_SQL)
+        .bind(i64_from_u64(
+            storage_root_id.0,
+            "scan reconciliation storage root ID",
+        )?)
+        .bind(i64_from_u64(
+            scan_session_id.0,
+            "scan reconciliation session ID",
+        )?)
+        .bind(
+            location_high_watermark_id
+                .map(|id| i64_from_u64(id.0, "scan reconciliation high-water location ID"))
+                .transpose()?,
+        )
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(|e| {
+            VoomError::database_context("consult scan reconciliation artifact intent lock", e)
+        })?;
+    let Some((intent_raw, state, location_raw)) = row else {
+        return Ok(None);
+    };
+    Ok(Some((
+        ArtifactCommitIntentId(u64_from_i64(intent_raw, "artifact_commit_intents.id")?),
+        state,
+        u64_from_i64(location_raw, "file_locations.id")?,
+    )))
+}
 
 #[cfg(test)]
 #[path = "artifact_commit_intents_test.rs"]
