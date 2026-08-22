@@ -19,7 +19,10 @@
 --      Authorization adds the owner incarnation and a one-time opaque
 --      32-byte `commit_fence`; node receipts (`applying`, `applied`,
 --      `mismatched`, `outcome_unknown`) land in typed JSON; an absent
---      receipt means not started. State coherence is enforced by CHECK.
+--      receipt means not started. The fence stays at rest only while it can
+--      still gate a mutation (`authorized`, `recovery_required`); terminal
+--      transitions null it so completed and aborted rows retain no fence
+--      material. State coherence is enforced by CHECK.
 
 -- ---------------------------------------------------------------------------
 -- 1. Preflight guard: reject unresolvable legacy commit rows before any DDL.
@@ -79,8 +82,11 @@ CREATE TABLE artifact_commit_intents (
         OR (state = 'authorized' AND commit_fence IS NOT NULL AND authorized_at IS NOT NULL
             AND owner_incarnation_id IS NOT NULL AND supplemental_receipt IS NULL
             AND terminal_at IS NULL)
-        OR ((state = 'completed' OR state = 'recovery_required')
-            AND commit_fence IS NOT NULL AND authorized_at IS NOT NULL
+        OR (state = 'completed' AND commit_fence IS NULL
+            AND authorized_at IS NOT NULL
+            AND owner_incarnation_id IS NOT NULL AND terminal_at IS NOT NULL)
+        OR (state = 'recovery_required' AND commit_fence IS NOT NULL
+            AND authorized_at IS NOT NULL
             AND owner_incarnation_id IS NOT NULL AND terminal_at IS NOT NULL)
         OR (state = 'aborted' AND terminal_at IS NOT NULL)
     )

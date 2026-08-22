@@ -397,7 +397,7 @@ async fn unknown_receipt_vocabulary_decodes_as_database_error() {
 async fn complete_consumes_fence_from_authorized() {
     let (pool, _tmp, record) = fixture().await;
     let intent = create_pending(&pool, record).await;
-    let fence = authorize(&pool, intent.id).await.commit_fence;
+    authorize(&pool, intent.id).await;
 
     let repo = SqliteArtifactCommitIntentRepo::new(pool.clone());
     let mut tx = pool.begin().await.unwrap();
@@ -406,7 +406,9 @@ async fn complete_consumes_fence_from_authorized() {
         .await
         .unwrap();
     assert_eq!(completed.state, ArtifactCommitIntentState::Completed);
-    assert_eq!(completed.commit_fence, fence);
+    // The terminal row retains no fence material once it can no longer
+    // gate a mutation.
+    assert_eq!(completed.commit_fence, None);
     assert_eq!(completed.terminal_at, Some(T0));
 
     // Terminal states never reopen.
@@ -452,7 +454,9 @@ async fn recovery_required_accepts_supplemental_receipt_then_completes() {
         .await
         .unwrap();
     assert_eq!(stuck.state, ArtifactCommitIntentState::RecoveryRequired);
-
+    // The fence keeps blocking through recovery; only a terminal
+    // transition nulls it.
+    assert!(stuck.commit_fence.is_some());
     repo.append_supplemental_receipt_in_tx(
         &mut tx,
         intent.id,
@@ -468,7 +472,26 @@ async fn recovery_required_accepts_supplemental_receipt_then_completes() {
         .await
         .unwrap();
     assert_eq!(completed.state, ArtifactCommitIntentState::Completed);
+    assert_eq!(completed.commit_fence, None);
     assert!(completed.supplemental_receipt.is_some());
+}
+
+#[tokio::test]
+async fn abort_nulls_the_fence_of_an_authorized_intent() {
+    let (pool, _tmp, record) = fixture().await;
+    let intent = create_pending(&pool, record).await;
+    assert!(authorize(&pool, intent.id).await.commit_fence.is_some());
+
+    let repo = SqliteArtifactCommitIntentRepo::new(pool.clone());
+    let mut tx = pool.begin().await.unwrap();
+    let aborted = repo
+        .mark_aborted_in_tx(&mut tx, intent.id, T0)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    assert_eq!(aborted.state, ArtifactCommitIntentState::Aborted);
+    assert_eq!(aborted.commit_fence, None);
+    assert_eq!(aborted.terminal_at, Some(T0));
 }
 
 #[tokio::test]

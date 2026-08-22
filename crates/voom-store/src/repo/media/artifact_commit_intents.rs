@@ -627,8 +627,8 @@ impl SqliteArtifactCommitIntentRepo {
     }
 
     /// Transition `authorized -> completed` (CAS on `intent_epoch`),
-    /// consuming the fence. Recovery may complete from
-    /// `recovery_required`.
+    /// consuming the fence: the terminal row retains no fence material.
+    /// Recovery may complete from `recovery_required`.
     pub async fn mark_completed_in_tx(
         &self,
         tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
@@ -639,7 +639,8 @@ impl SqliteArtifactCommitIntentRepo {
         let terminal_at = iso8601(now)?;
         let res = sqlx::query(
             "UPDATE artifact_commit_intents \
-             SET state = 'completed', terminal_at = ?, intent_epoch = intent_epoch + 1 \
+             SET state = 'completed', commit_fence = NULL, terminal_at = ?, \
+                 intent_epoch = intent_epoch + 1 \
              WHERE id = ? AND state IN ('authorized', 'recovery_required') AND intent_epoch = ?",
         )
         .bind(&terminal_at)
@@ -680,7 +681,8 @@ impl SqliteArtifactCommitIntentRepo {
 
     /// Abort a non-terminal intent (CAS on `intent_epoch`). Aborting a
     /// pending intent is always safe (it holds no fence); abort releases
-    /// the intent's lease-refusal on its pinned scope.
+    /// the intent's lease-refusal on its pinned scope and nulls any fence
+    /// material so the terminal row retains none.
     pub async fn mark_aborted_in_tx(
         &self,
         tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
@@ -691,7 +693,8 @@ impl SqliteArtifactCommitIntentRepo {
         let terminal_at = iso8601(now)?;
         let res = sqlx::query(
             "UPDATE artifact_commit_intents \
-             SET state = 'aborted', terminal_at = ?, intent_epoch = intent_epoch + 1 \
+             SET state = 'aborted', commit_fence = NULL, terminal_at = ?, \
+                 intent_epoch = intent_epoch + 1 \
              WHERE id = ? AND state IN ('pending', 'authorized', 'recovery_required') \
                AND intent_epoch = ?",
         )
