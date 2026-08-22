@@ -77,6 +77,13 @@ Flow for one staged commit (all steps durable):
    directly; `mismatched` / `outcome_unknown` / stale-authorization drift →
    operator-required (record stays `recovery_required`, evidence carried).
    Pending intents whose owner node is stale or retired abort fail-closed.
+   The node coordinator also polls `recovery_required` intents for roots it
+   owns and files supplemental typed receipts by re-observing staging and
+   target bytes read-only against the pinned expected facts: target absent
+   → `outcome_unknown` resolved as not-applied (recovery may abort and
+   re-drive); matching target present → `applied` (recovery finalizes
+   directly); drifting target present → `mismatched`. A stale/retired owner
+   has no producer: the record stays operator-required.
 
 ## Components and files
 
