@@ -190,10 +190,12 @@ impl WorkflowExecutor {
             LeaseAcquireOutcome::Acquired(lease) => lease,
             // Only capacity saturation defers the spawn: the worker may gain
             // capacity later. A ticket that is not ready or a worker that is
-            // ineligible is a loud error, never a silent deferral loop.
+            // ineligible is a loud error with the legacy classification,
+            // never a silent deferral loop.
+            LeaseAcquireOutcome::CapacityFull(_) => {
+                return Ok(SpawnOutcome::CapacityDeferred);
+            }
             rejection => {
-                // Loud failure with the legacy error classification; never a
-                // silent deferral loop.
                 return match rejection.into_lease_result() {
                     Err(error) => Err(error),
                     Ok(_) => Err(VoomError::Internal(
