@@ -58,11 +58,15 @@ control-plane credentials; only the agent holds the bearer token and incarnation
 to `scan_observations` (additive, ADR 0013 inventory registered). An observation carries
 evidence if and only if current hash and probe results agree on stable facts; an
 evidence-less observation records existence so a concurrently mutated file can never be
-retired as absent, while publishing no identity. Completion publishes policy-ready identity
-inside the completion transaction — same-address replay, hardlink attach by inode facts, or
-fresh ingest with sidecar bundles — using the DB-only relocation of today's persist logic,
-then retires unobserved pre-start locations exactly as ADR 0067 specifies. The control plane
-never opens discovered bytes.
+retired as absent, while publishing no identity. Each enumerated candidate gets exactly one
+hash/probe attempt per session and is recorded immediately as evidence-less when that
+attempt fails — the pump never re-dispatches a failed candidate, because the server-enforced
+`(session_id, locator)` uniqueness would turn any later success into a duplicate-locator
+conflict and an unbounded retry loop; a later scan session covers the file. Completion
+publishes policy-ready identity inside the completion transaction — same-address replay,
+hardlink attach by inode facts, or fresh ingest with sidecar bundles — using the DB-only
+relocation of today's persist logic, then retires unobserved pre-start locations exactly as
+ADR 0067 specifies. The control plane never opens discovered bytes.
 
 **Removal.** The control-plane-local discovery walk, byte hashing, path-grouping probe
 dispatch, bundled-ffprobe launch/readiness helpers, built-in `builtin.ffprobe` worker
@@ -87,7 +91,10 @@ run, then polls session inspection until terminal and prints the outcome envelop
   byte read to a component-wise, symlink-free descent from the canonical root — the race-free
   property debt 0004 demands for scans; #423 remains responsible for worker-dispatch
   references for transform operations.
-- `local_node_id` loses its only production consumer and is removed from the control plane.
+- The scan path stops consuming `local_node_id`; the field itself keeps its
+  transform/commit consumers (artifact stage and commit preparation, policy verification,
+  audio/remux/transcode source selection, workflow promotion) owned by #423 and successors
+  and is not removed by this change.
 
 ## Considered & rejected
 
@@ -109,3 +116,8 @@ run, then polls session inspection until terminal and prints the outcome envelop
 - **Fail the whole session when any file mutates mid-hash.** judgment: one unstable file
   would veto an otherwise complete traversal; recording existence without evidence preserves
   the no-stale-facts guarantee at strictly lower cost.
+- **Keep the transitional control-plane-local scan path until #423's reference-passing
+  design lands.** judgment: it avoids new worker surface today, but ADR 0050 already
+  commits byte ownership to the owner node, debt 0004 records the current path as not
+  race-free, and the durable session substrate this builds on is otherwise unused — waiting
+  keeps a known defect alive for no simplification that survives #423.

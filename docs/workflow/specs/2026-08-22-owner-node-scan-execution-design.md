@@ -177,7 +177,7 @@ byte reads); `verify_probe_facts` semantics move into the pump's agree/disagree 
 Delete: `scan/discovery.rs`, `scan/hash.rs`, `scan/mod.rs` byte pipeline (`scan_path*`,
 grouping, launcher/classifier traits, report builder stays only where still used),
 `scan/worker.rs` local launch helpers, `scan/bootstrap.rs`, old `scan/library.rs`
-filesystem checks; `local_node_id` + `with_local_node_id`; CLI direct dispatch rewritten to
+filesystem checks; CLI direct dispatch rewritten to
 request+poll (`--no-wait` skips polling); `VOOM_FFPROBE_BIN` warning replaced by nothing.
 Tests deleted/moved with their subjects; `check-test-layout` keeps siblings co-located.
 

@@ -122,8 +122,8 @@ Files: rewrite `crates/voom-cli/src/commands/media/scan.rs` (+snapshot updates) 
 `request_scan_run` then poll `cp.scan_session` until terminal (bounded by deadline;
 `--no-wait` flag exits after request); delete old pipeline modules and their tests
 (`discovery.rs`, `hash.rs`, `mod.rs` pipeline sections, `worker.rs`, `bootstrap.rs`,
-`persist.rs` byte paths, old `library.rs` checks); remove `local_node_id`/
-`with_local_node_id` and their callers; update any insta snapshots.
+`persist.rs` byte paths, old `library.rs` checks); keep `local_node_id` (transform/commit
+consumers remain, owned by #423+); update any insta snapshots.
 Grep gate: no references to removed symbols remain in workspace.
 Verify: `cargo build --workspace && just fmt && just lint && just check-test-layout`.
 
