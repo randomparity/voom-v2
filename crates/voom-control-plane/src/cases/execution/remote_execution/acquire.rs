@@ -478,6 +478,14 @@ impl ControlPlane {
         })
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "remote acquire keeps the transaction input and selected facts explicit"
+    )]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the acquired and changed-gate branches are clearer in transaction order"
+    )]
     async fn remote_acquire_leased_in_tx(
         &self,
         tx: &mut Transaction<'_, Sqlite>,
@@ -532,10 +540,23 @@ impl ControlPlane {
                         ),
                     )
                     .await?;
-                return Ok(RemoteAcquireOutcome::NoCandidate {
+                let outcome = RemoteAcquireOutcome::NoCandidate {
                     worker_id: input.worker_id,
                     scheduler_decision_id: decision.id,
-                });
+                };
+                // The request reached a terminal decision, so its idempotency
+                // reservation must complete — an unfinished reservation would
+                // poison every replay of this key with a conflict.
+                self.complete_remote_ok_in_tx(
+                    tx,
+                    input.node_id,
+                    ROUTE_ACQUIRE,
+                    Some(input.worker_id),
+                    &super::incarnation_replay_key(input.incarnation_id, &input.idempotency_key),
+                    &outcome,
+                )
+                .await?;
+                return Ok(outcome);
             }
         };
 
@@ -1374,9 +1395,9 @@ pub(super) fn changed_gate_explanation(
         "outcome": "no_eligible_candidate",
         "reason": reason_code.as_str(),
     });
-    let object = explanation
-        .as_object_mut()
-        .expect("explanation is an object");
+    let Some(object) = explanation.as_object_mut() else {
+        return explanation;
+    };
     match outcome {
         LeaseAcquireOutcome::TicketNotReady { ticket_id } => {
             object.insert("selected_ticket_id".to_owned(), json!(ticket_id.0));

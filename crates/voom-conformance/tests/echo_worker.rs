@@ -176,8 +176,7 @@ async fn echo_worker_executes_the_normalized_namespaced_operation_token() {
                 OperationRequest {
                     // What dispatch_to_child sends after normalization: the
                     // bare matching token, never the namespaced form.
-                    operation: voom_core::OperationKind::from_wire(normalized.as_str())
-                        .unwrap(),
+                    operation: voom_core::OperationKind::from_wire(normalized.as_str()).unwrap(),
                     lease_id: LeaseId(31),
                     payload: serde_json::json!({"path": "/tmp/input.mov"}),
                     heartbeat_deadline_ms: 1_000,

@@ -2253,7 +2253,8 @@ async fn remote_acquire_leased_binds_one_lease_plan_and_decision_atomically() {
     assert_eq!(plan.4, i64::try_from(ticket.0).unwrap());
     assert_eq!(plan.5, i64::try_from(fixture.worker_id.0).unwrap());
     assert_eq!(plan.6, i64::try_from(fixture.node_id.0).unwrap());
-    let owner_node_id = plan.1.expect("owner-local plan names its owner");
+    let owner_node_id = plan.1.unwrap();
+    assert_ne!(owner_node_id, 0, "owner-local plan names its owner");
     assert_eq!(owner_node_id, i64::try_from(fixture.node_id.0).unwrap());
     let plan_evidence: serde_json::Value = serde_json::from_str(&plan.2).unwrap();
 
@@ -2262,7 +2263,7 @@ async fn remote_acquire_leased_binds_one_lease_plan_and_decision_atomically() {
         .scheduler_decision(dispatch.scheduler_decision_id)
         .await
         .unwrap()
-        .expect("selected decision exists");
+        .unwrap();
     assert_eq!(decision.outcome, SchedulerDecisionOutcome::Selected);
     assert_eq!(
         decision.selected_lease_id,
@@ -2319,7 +2320,7 @@ async fn remote_acquire_changed_gate_missing_capability_decides_without_leasing(
         .scheduler_decision(scheduler_decision_id)
         .await
         .unwrap()
-        .expect("changed-gate decision is durable");
+        .unwrap();
     assert_eq!(
         decision.outcome,
         SchedulerDecisionOutcome::NoEligibleCandidate
@@ -2327,9 +2328,8 @@ async fn remote_acquire_changed_gate_missing_capability_decides_without_leasing(
     assert_eq!(decision.reason_code, SchedulerReasonCode::MissingCapability);
     assert_eq!(decision.ticket_id, Some(ticket));
     assert_eq!(decision.candidate_count, 1);
-    let key = decision
-        .suppression_key
-        .expect("changed-gate decisions are suppressed");
+    let key = decision.suppression_key.unwrap();
+    assert!(!key.is_empty(), "changed-gate decisions are suppressed");
     assert!(
         key.contains(&format!(":ticket:{}:", ticket.0)),
         "suppression key names the ticket: {key}"
@@ -2403,8 +2403,7 @@ async fn remote_acquire_changed_gate_missing_grant_and_denied_decide_with_docume
         .cp
         .scheduler_decision(scheduler_decision_id)
         .await
-        .unwrap()
-        .expect("decision exists");
+        .unwrap();
     assert_eq!(decision.reason_code, SchedulerReasonCode::MissingGrant);
     assert_eq!(decision.ticket_id, Some(ticket));
     let pool = fixture.cp.pool_for_test();
