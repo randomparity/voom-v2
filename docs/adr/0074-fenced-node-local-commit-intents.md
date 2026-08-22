@@ -37,7 +37,10 @@ the full authorized scope at creation: artifact handle, source file version,
 verification id, staging location id + epoch, target root id +
 `root_epoch`, target provider-relative locator, expected file facts
 (`{size_bytes, content_hash}` as a typed JSON column under the ADR 0013
-deny-unknown-fields contract), and the resolved owner node. Authorization
+deny-unknown-fields contract), and the resolved owner node. Prepare
+requires the staging root and the target root to resolve to the same
+owner node — one node must both read the staging bytes and promote into
+the target — and fails pre-mutation otherwise. Authorization
 additionally records the owner incarnation id and a one-time opaque 32-byte
 `commit_fence`. Node-reported receipts (`applying`, `applied`,
 `mismatched`, `outcome_unknown`) with observed facts land in a typed JSON
@@ -63,10 +66,13 @@ commit safety gate (ADR 0019 semantics), revalidates every pinned epoch
 holds an active incarnation, and is live, then transitions `pending ->
 authorized`, mints the fence, and returns the fenced payload (locators,
 expected facts, fence). Any drift aborts the intent fail-closed; the caller
-sees `Conflict`. While an intent is `pending`/`authorized`, new blocking
-use leases on its pinned scope are refused by lease acquisition, exactly as
-`consult_pending_commit_lock_in_tx` does for destructive intents, so a
-conflicting lease can never enter an authorized scope after the gate passes.
+sees `Conflict`. While an intent is `pending`, `authorized`, or
+`recovery_required`, new blocking use leases on its pinned scope are
+refused by lease acquisition, exactly as `consult_pending_commit_lock_in_tx`
+does for destructive intents — after authorization the fence remains
+blocking through recovery, so a conflicting lease can never enter the
+authorized scope while the intent can still converge; abort and completion
+release it.
 
 ### The node verifies, promotes add-only, and journals before mutating
 
@@ -96,16 +102,23 @@ re-mints, re-finalizes, nor creates rows.
 ### Recovery evidence has a defined producer
 
 The coordinator also polls `recovery_required` intents for the roots it
-owns. For each it re-observes staging and target facts read-only against
-the pinned expected facts and files a supplemental typed receipt: target
-absent (and no temp sibling) → `outcome_unknown` resolved as not-applied,
-so recovery may abort and re-drive a fresh generation; target present with
-matching facts → `applied`, so recovery finalizes directly; target present
+currently owns. Receipts are observations, not mutations, so the *current*
+root owner may file a supplemental typed receipt even when it was not the
+authorized node — incarnation-fenced like every other receipt. For each
+intent it re-observes staging and target facts read-only against the pinned
+expected facts: target absent (and no temp sibling) → `outcome_unknown`
+resolved as not-applied, so recovery may abort and re-drive a fresh
+generation; target present with matching facts → `applied`; target present
 with drifting facts → `mismatched`. This closes the crash window between
 install/fsync and an `applied` report — exactly the ambiguity issue #422
 names — because the byte-owning node, not the control plane, produces the
-missing observed facts. A `recovery_required` intent under a stale or
-retired owner has no producer by definition and stays operator-required.
+missing observed facts. Recovery-driven finalization re-runs the lineage
+safety gate and revalidates current root ownership before finalizing,
+mirroring the host path's pre-re-promotion gate check; an intent whose
+owner is stale or retired has no producer by definition and stays
+operator-required until the operator resolves it. The node-initiated
+complete route still requires the exact fence, so only recovery can
+converge an intent whose authorized node is gone.
 
 ### Ambiguity converges, never succeeds silently
 
@@ -153,13 +166,15 @@ registered in `docs/payload-contract-inventory.md` and
   byte work lives behind the fence on the storage-owner node (ADR 0050).
 - Commit completion latency now includes a node poll cycle; callers wait on
   durable state instead of in-process filesystem work.
+- Code rollback is a clean `git revert`; schema rollback is not automatic —
+  the prior binary refuses a version-3 database (`SchemaTooNew`), so
+  downgrading additionally requires an operator to drop
+  `artifact_commit_intents` and its migration row.
 - A node crash anywhere in the sequence lands in a distinguishable recovery
   state with typed evidence, replacing today's host-local path probing.
 - The fence and epoch pins make stale authorization inert: mutations
   attempted under a superseded scope fail closed at receipt, completion, or
   finalization.
-- Rollback is a schema-preserving revert of migration 0038-era code; the
-  additive table does not obstruct the prior binary.
 - An operator-required outcome wedges the affected artifact's commit slot
   until a human resolves it: the one-owner-per-artifact and
   one-owner-per-target indexes reserve the stuck record's slot, refusing
