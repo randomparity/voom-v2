@@ -34,11 +34,59 @@ const VALIDATION_ATTEMPTS: u32 = 3;
 const CRASH_LIMIT: u32 = 3;
 const CRASH_WINDOW: Duration = Duration::from_mins(1);
 
+/// One live child's dispatch surface, published by its coordinator so the
+/// scan-session pump can reach workers it does not own (ADR 0077 plan-review
+/// finding b: one coordinator owns exactly one child).
+#[derive(Clone, Debug)]
+pub(crate) struct ChildEndpoint {
+    pub(crate) client: Arc<dyn ClientHandle>,
+    pub(crate) credentials: WorkerCredentials,
+    pub(crate) operations: Vec<OperationKind>,
+}
+
+/// Shared per-incarnation map of logical worker name to that worker's live
+/// child endpoint. Coordinators publish on startup and after every restart;
+/// consumers observe the live handle or `None` while the child is down.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct ChildEndpointRegistry {
+    entries: Arc<HashMap<String, watch::Sender<Option<ChildEndpoint>>>>,
+}
+
+impl ChildEndpointRegistry {
+    pub(crate) fn new(workers: &[WorkerConfig]) -> Self {
+        let entries = workers
+            .iter()
+            .map(|worker| (worker.name.clone(), watch::channel(None).0))
+            .collect();
+        Self {
+            entries: Arc::new(entries),
+        }
+    }
+
+    pub(crate) fn publish(&self, logical_name: &str, endpoint: ChildEndpoint) {
+        if let Some(sender) = self.entries.get(logical_name) {
+            sender.send_replace(Some(endpoint));
+        }
+    }
+
+    /// Resolves the live endpoint whose declared operations include
+    /// `operation`, or `None` while every matching child is down.
+    pub(crate) fn resolve(&self, operation: OperationKind) -> Option<ChildEndpoint> {
+        self.entries
+            .values()
+            .filter_map(|sender| sender.borrow().clone())
+            .find(|endpoint| endpoint.operations.contains(&operation))
+    }
+}
+
 /// Owns one node incarnation from activation through ordered deactivation.
 #[derive(Debug)]
 pub struct AgentRuntime {
     config: LoadedAgentConfig,
     client: Arc<dyn ControlPlaneApi>,
+    /// Concrete HTTP transport for the scan-session pump; absent in tests
+    /// that inject a fake [`ControlPlaneApi`], whose leases never route there.
+    scan_client: Option<Arc<ControlPlaneClient>>,
 }
 
 impl AgentRuntime {
@@ -49,15 +97,21 @@ impl AgentRuntime {
     /// Returns a configuration error when the control-plane client cannot be built.
     pub fn new(config: LoadedAgentConfig) -> Result<Self, VoomError> {
         let client = ControlPlaneClient::from_config(&config)?;
+        let client = Arc::new(client);
         Ok(Self {
             config,
-            client: Arc::new(client),
+            scan_client: Some(Arc::clone(&client)),
+            client,
         })
     }
 
     #[cfg(test)]
     fn with_client(config: LoadedAgentConfig, client: Arc<dyn ControlPlaneApi>) -> Self {
-        Self { config, client }
+        Self {
+            config,
+            scan_client: None,
+            client,
+        }
     }
 
     /// Run until SIGINT or SIGTERM requests an orderly shutdown.
@@ -354,6 +408,7 @@ impl AgentRuntime {
             .iter()
             .map(|worker| (worker.name.as_str(), worker))
             .collect::<HashMap<_, _>>();
+        let endpoints = ChildEndpointRegistry::new(&self.config.config.workers);
         let mut coordinators = JoinSet::new();
         for child in children {
             let worker = workers.get(child.spec().logical_name()).ok_or_else(|| {
@@ -361,6 +416,8 @@ impl AgentRuntime {
             })?;
             let context = CoordinatorContext {
                 client: Arc::clone(&self.client),
+                scan_client: self.scan_client.clone(),
+                endpoints: endpoints.clone(),
                 node_id: self.config.config.node_id,
                 incarnation_id,
                 worker_id: child.spec().credentials().worker_id,
@@ -508,6 +565,8 @@ impl NodeHeartbeatHandle {
 #[derive(Clone)]
 struct CoordinatorContext {
     client: Arc<dyn ControlPlaneApi>,
+    /// Concrete HTTP transport for the scan-session pump; absent in tests.
+    scan_client: Option<Arc<ControlPlaneClient>>,
     node_id: voom_core::NodeId,
     incarnation_id: NodeIncarnationId,
     worker_id: WorkerId,
@@ -516,6 +575,7 @@ struct CoordinatorContext {
     poll_interval: Duration,
     shutdown_grace: Duration,
     worker: WorkerConfig,
+    endpoints: ChildEndpointRegistry,
     fatal_tx: mpsc::UnboundedSender<RuntimeFatal>,
 }
 
@@ -524,6 +584,18 @@ enum CoordinatorExit {
     Shutdown(LeaseSettlement),
     RestartExhausted,
     Fatal(RuntimeFatal),
+}
+
+/// Publishes one coordinator's live child into the shared endpoint registry.
+fn publish_child_endpoint(context: &CoordinatorContext, child: &RunningChild) {
+    context.endpoints.publish(
+        &context.worker.name,
+        ChildEndpoint {
+            client: child.client(),
+            credentials: child.spec().credentials().clone(),
+            operations: context.worker.operations.clone(),
+        },
+    );
 }
 
 async fn run_coordinator(
@@ -537,6 +609,7 @@ async fn run_coordinator(
     let mut crashes = CrashBudget::new();
     let (cancel_tx, cancel_rx) = watch::channel(LeaseCancellation::Running);
     let mut poll_before_acquire = false;
+    publish_child_endpoint(&context, &child);
     loop {
         drain_finished_leases(&mut leases);
         let event = if poll_before_acquire {
@@ -614,6 +687,7 @@ async fn run_coordinator(
                 match restart_child(&context, child.spec().clone()).await {
                     Ok(restarted) => {
                         child = restarted;
+                        publish_child_endpoint(&context, &child);
                         let _ = cancel_tx.send(LeaseCancellation::Running);
                     }
                     Err(_) => return CoordinatorExit::RestartExhausted,
@@ -830,7 +904,7 @@ async fn run_lease(
     });
 
     let outcome = tokio::select! {
-        outcome = dispatch_to_child(&lease.dispatch, child.as_ref(), &credentials, &context) => outcome,
+        outcome = dispatch_outcome(&lease.dispatch, Arc::clone(&child), &credentials, &context) => outcome,
         changed = worker_cancel.changed() => cancellation_outcome(&changed, *worker_cancel.borrow()),
         changed = shutdown.changed() => shutdown_outcome(&changed, *shutdown.borrow()),
         Some(()) = lease_fence_rx.recv() => LeaseOutcome::TerminalElsewhere,
@@ -903,6 +977,51 @@ async fn lease_heartbeat_loop(
             }
         }
     }
+}
+
+/// Routes one leased operation: `scan_library` drives the durable scan-session
+/// pump against the shared child-endpoint registry; everything else keeps the
+/// plain single-child dispatch.
+async fn dispatch_outcome(
+    dispatch: &LeaseDispatch,
+    child: Arc<dyn ClientHandle>,
+    credentials: &WorkerCredentials,
+    context: &CoordinatorContext,
+) -> LeaseOutcome {
+    if dispatch.operation == OperationKind::ScanLibrary.as_str() {
+        return scan_library_outcome(dispatch, child, credentials, context).await;
+    }
+    dispatch_to_child(dispatch, child.as_ref(), credentials, context).await
+}
+
+async fn scan_library_outcome(
+    dispatch: &LeaseDispatch,
+    child: Arc<dyn ClientHandle>,
+    credentials: &WorkerCredentials,
+    context: &CoordinatorContext,
+) -> LeaseOutcome {
+    let Some(scan_client) = context.scan_client.as_deref() else {
+        return LeaseOutcome::Failure(
+            FailureClass::MalformedWorkerResult,
+            "scan_library lease dispatched without an HTTP control-plane transport".to_owned(),
+            json!({}),
+        );
+    };
+    crate::scan_session::pump_scan_session(
+        dispatch,
+        child,
+        credentials,
+        &context.endpoints,
+        scan_client,
+        &crate::scan_session::ScanPumpContext {
+            node_id: context.node_id.0,
+            incarnation_id: context.incarnation_id,
+            lease_id: dispatch.lease_id,
+            lease_ttl_ms: duration_millis_u32(context.lease_ttl),
+            progress_timeout: context.progress_timeout,
+        },
+    )
+    .await
 }
 
 async fn dispatch_to_child(
@@ -1024,7 +1143,8 @@ async fn consume_progress_stream(
     }
 }
 
-enum LeaseOutcome {
+#[derive(Debug)]
+pub(crate) enum LeaseOutcome {
     Complete(JsonValue),
     Failure(FailureClass, String, JsonValue),
     TerminalElsewhere,

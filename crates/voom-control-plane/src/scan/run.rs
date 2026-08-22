@@ -123,6 +123,8 @@ impl ControlPlane {
             owner_node_id,
             storage_root_id,
             idle_timeout_seconds,
+            provider_locator.as_str(),
+            effective.root.extension_allowlist.as_slice(),
         )?;
         let ticket = self
             .create_ticket_in_tx(
@@ -157,6 +159,8 @@ fn scan_run_ticket_payload(
     owner_node_id: voom_core::NodeId,
     storage_root_id: StorageRootId,
     idle_timeout_seconds: u32,
+    provider_locator: &str,
+    extension_allowlist: &[String],
 ) -> Result<serde_json::Value, VoomError> {
     let duration_ms = u64::from(idle_timeout_seconds) * 1_000;
     let declared_artifact_access = declaration_for(
@@ -174,6 +178,8 @@ fn scan_run_ticket_payload(
             "operation": "scan_library",
             "source_storage_root_id": storage_root_id.0,
             "scan_session_id": scan_session_id.to_string(),
+            "provider_locator": provider_locator,
+            "extension_allowlist": extension_allowlist,
         }),
         timing: EffectiveTiming {
             duration_ms,

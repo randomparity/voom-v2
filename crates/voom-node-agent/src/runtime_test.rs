@@ -1952,6 +1952,8 @@ fn loaded_config_with_worker(worker: WorkerConfig) -> LoadedAgentConfig {
 fn context(control: Arc<FakeControlPlane>) -> CoordinatorContext {
     CoordinatorContext {
         client: control,
+        scan_client: None,
+        endpoints: ChildEndpointRegistry::new(&[]),
         node_id: NodeId(7),
         incarnation_id: incarnation(),
         worker_id: WorkerId(14),
