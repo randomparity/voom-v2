@@ -69,10 +69,14 @@ Flow for one staged commit (all steps durable):
    events. Idempotent replay via `remote_idempotency_keys`.
 7. **Recovery**: lost responses/crashes/stale authorization land the record
    in `recovery_required`. `recover_commit` classifies from receipts:
-   `not_started` → abort intent, prepare successor generation;
-   `applied` + matching target facts → finalize directly;
-   `mismatched` / `outcome_unknown` / stale-authorization drift →
+   a receipt-less authorized intent is safe to abort and re-prepare a
+   successor generation — the `applying` journal is the mutation gate (the
+   node mutates only after its `applying` receipt is durably accepted; a
+   late report fails the CAS and the node stands down); an intent with any
+   receipt classifies as `applied` + matching target facts → finalize
+   directly; `mismatched` / `outcome_unknown` / stale-authorization drift →
    operator-required (record stays `recovery_required`, evidence carried).
+   Pending intents whose owner node is stale or retired abort fail-closed.
 
 ## Components and files
 

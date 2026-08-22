@@ -87,12 +87,27 @@ re-mints, re-finalizes, nor creates rows.
 
 A lost response, agent crash between `applying` and reporting, or expiry
 after authorization leaves the record `recovery_required` with typed
-evidence. Recovery classifies from node evidence: `not_started` → safe
-abort and fresh successor intent; `applied` with matching facts → finalize
-directly (promotion already happened); `mismatched`, `outcome_unknown`, or
-an occupied target with drifting facts → `operator-required`: the record
-stays `recovery_required` carrying the evidence for a human. An ambiguous
-promotion can therefore never surface as an untracked successful commit.
+evidence. Recovery classifies from node receipts: a receipt-less authorized
+intent is safe to abort because the `applying` journal is the mutation gate —
+the node mutates only after its `applying` receipt is durably recorded, so a
+late report fails the compare-and-set and the node stands down; an intent
+carrying any receipt (`applying` or later) is never self-aborted — it becomes
+`recovery_required` and classifies as `applied` with matching facts
+(finalize directly; promotion already happened), `mismatched` or
+`outcome_unknown` (operator-required: the record stays `recovery_required`
+carrying the evidence for a human). An ambiguous promotion can therefore
+never surface as an untracked successful commit.
+
+### Pending intents expire fail-closed
+
+A `pending` intent holds no fence, so aborting it is always safe. The
+recovery path aborts a pending intent whose owner node is stale or retired
+(the same liveness rule the execution routes apply), and `commit_artifact`'s
+bounded wait surfaces the timeout to its caller meanwhile. Abort releases
+the lease-refusal the intent held, so one dead node cannot freeze a lease
+scope indefinitely. Authorized intents never expire into abort — they enter
+`recovery_required` with the fence still blocking, per the classification
+above.
 
 ### Host-side promotion is deleted, not demoted
 
@@ -137,6 +152,16 @@ registered in `docs/payload-contract-inventory.md` and
   inbound control-plane endpoint and speaks only as an HTTP client
   (`crates/voom-node-agent/src/client.rs`); a push channel would add an
   unauthenticated-surface-bearing server the pull model makes unnecessary.
+- **Do nothing — keep today's host-local promotion.** Rejected: verified —
+  the issue's expected behavior states "the control plane never opens
+  staging or target bytes", and ADR 0050 retires the single-host assumption
+  this path embodies; AGENTS.md marks the path transitional pending #422.
+- **Carry promotion through the owner-local byte-work ticket chain (ADRs
+  0069–0073).** Rejected: judgment — that chain is scheduler-dispatched and
+  scoped to the worker-lease lifecycle, which cannot express a
+  control-plane-minted one-time fence, a 1:1 coupling to an
+  `artifact_commit_records` row, or authorization re-validated outside a
+  scheduler decision.
 - **Pin only the target locator, not lineage/location epochs.** Rejected:
   judgment — without epoch pins a staging swap or root reassignment between
   authorize and apply would let bytes from a different generation be
