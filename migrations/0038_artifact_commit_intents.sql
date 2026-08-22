@@ -65,14 +65,20 @@ CREATE TABLE artifact_commit_intents (
     intent_epoch                   INTEGER NOT NULL DEFAULT 0 CHECK (intent_epoch >= 0),
     commit_fence                   BLOB CHECK (commit_fence IS NULL OR length(commit_fence) = 32),
     receipt                        TEXT CHECK (receipt IS NULL OR json_valid(receipt)),
+    -- Recovery classification evidence: the current root owner's typed
+    -- re-observation, kept alongside (not replacing) the original receipt
+    -- so the stuck record carries both for a human.
+    supplemental_receipt           TEXT CHECK (supplemental_receipt IS NULL OR json_valid(supplemental_receipt)),
     requested_at                   TEXT NOT NULL,
     authorized_at                  TEXT,
     terminal_at                    TEXT,
     CHECK (
            (state = 'pending' AND commit_fence IS NULL AND authorized_at IS NULL
-            AND owner_incarnation_id IS NULL AND receipt IS NULL AND terminal_at IS NULL)
+            AND owner_incarnation_id IS NULL AND receipt IS NULL
+            AND supplemental_receipt IS NULL AND terminal_at IS NULL)
         OR (state = 'authorized' AND commit_fence IS NOT NULL AND authorized_at IS NOT NULL
-            AND owner_incarnation_id IS NOT NULL AND terminal_at IS NULL)
+            AND owner_incarnation_id IS NOT NULL AND supplemental_receipt IS NULL
+            AND terminal_at IS NULL)
         OR ((state = 'completed' OR state = 'recovery_required')
             AND commit_fence IS NOT NULL AND authorized_at IS NOT NULL
             AND owner_incarnation_id IS NOT NULL AND terminal_at IS NOT NULL)

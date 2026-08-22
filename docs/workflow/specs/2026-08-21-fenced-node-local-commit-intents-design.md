@@ -74,17 +74,28 @@ Flow for one staged commit (all steps durable):
    successor generation — the `applying` journal is the mutation gate (the
    node mutates only after its `applying` receipt is durably accepted; a
    late report fails the CAS and the node stands down); an intent with any
-   receipt classifies as `applied` + matching target facts → finalize
-   directly; `mismatched` / `outcome_unknown` / stale-authorization drift →
-   operator-required (record stays `recovery_required`, evidence carried).
-   Pending intents whose owner node is stale or retired abort fail-closed.
-   The node coordinator also polls `recovery_required` intents for roots it
-   owns and files supplemental typed receipts by re-observing staging and
-   target bytes read-only against the pinned expected facts: target absent
-   → `outcome_unknown` resolved as not-applied (recovery may abort and
-   re-drive); matching target present → `applied` (recovery finalizes
-   directly); drifting target present → `mismatched`. A stale/retired owner
-   has no producer: the record stays operator-required.
+   control-plane-visible receipt classifies as `applied` + matching target
+   facts → finalize directly; a supplemental re-observation showing target
+   absent with no temp sibling is positive not-applied evidence → abort
+   and re-drive a fresh generation; `mismatched`, or `outcome_unknown`
+   that stays unresolved because no current owner can observe the bytes →
+   operator-required (record stays `recovery_required` carrying both the
+   original receipt and the supplemental observation). Pending intents
+   whose owner node is stale or retired abort fail-closed. An authorized
+   intent enters `recovery_required` when drift is observed
+   (`mismatched`/`outcome_unknown` receipt) or when recovery classification
+   runs against it with a receipt present — via the prepare driver's
+   bounded-wait timeout path or operator invocation — never silently on a
+   timer.
+   The node coordinator also polls all non-terminal intents (`pending`,
+   `authorized`, `recovery_required`) for roots it owns; for
+   `recovery_required` it files supplemental typed receipts by re-observing
+   staging and target bytes read-only against the pinned expected facts:
+   target absent → `outcome_unknown` resolved as not-applied (recovery may
+   abort and re-drive); matching target present → `applied` (recovery
+   finalizes directly); drifting target present → `mismatched`; it writes
+   to the supplemental-receipt slot so the original evidence survives. A
+   stale/retired owner has no producer: the record stays operator-required.
 
 ## Components and files
 
@@ -100,20 +111,25 @@ Flow for one staged commit (all steps durable):
 
 ### Node API routes
 
+- `POST /v1/artifact/commit/open` — lists non-terminal intents (`pending`,
+  `authorized`, `recovery_required`) for the caller's owned active roots,
+  each with its state, so the executor branches correctly and a restarted
+  agent rediscovers intents it authorized before crashing.
 - `POST /v1/artifact/commit/{intent_id}/authorize`
 - `POST /v1/artifact/commit/{intent_id}/applying`
+- `POST /v1/artifact/commit/{intent_id}/outcome` — typed failure evidence
+  (`mismatched` / `outcome_unknown`) and supplemental re-observations
 - `POST /v1/artifact/commit/{intent_id}/complete`
-- `POST /v1/artifact/commit/{intent_id}/mismatched` (typed failure evidence)
-- `GET`-free design: pending-intent discovery rides `authorize` responses of
-  a `POST /v1/artifact/commit/pending` listing scoped to the caller's owned
-  active roots.
+
+GET-free design: intent discovery rides the `open` listing; no other
+node-facing commit surface exists.
 
 All requests carry bearer node token + `X-Voom-Idempotency-Key`; bodies are
 `deny_unknown_fields`; envelopes/errors identical to `execution.rs`.
 
 ## Threat model
 
-- **Boundaries added**: four new authenticated node-facing HTTP routes
+- **Boundaries added**: five new authenticated node-facing HTTP routes
   (widening the existing `/v1/execution` + `/v1/scan` authenticated node
   surface). Actor: an authenticated remote node (possesses a node token);
   anonymous internet is rejected at the bearer check as today.
@@ -125,8 +141,11 @@ All requests carry bearer node token + `X-Voom-Idempotency-Key`; bodies are
   match at completion. Bodies are typed `deny_unknown_fields`; locators are
   provider-relative strings validated by the existing locator checks; the
   node resolves paths only within roots it owns (containment mirrors the
-  verify worker's staging-root rule). Fence values never enter events,
-  logs, or replay payloads (replay stores only outcomes).
+  verify worker's staging-root rule). Fence values never enter events or
+  logs; the authorize replay outcome stored in `remote_idempotency_keys`
+  necessarily carries the fence (a replayed authorize must return the
+  original fenced outcome) and is protected by the same store boundary as
+  every other replayed authenticated outcome.
 - **Out of scope**: malicious storage-owner node corrupting bytes it
   already owns (the node is the byte authority per ADR 0050; integrity is
   bounded by the content-hash pinning at verification and finalize);
@@ -153,6 +172,6 @@ All requests carry bearer node token + `X-Voom-Idempotency-Key`; bodies are
 | Blocking lease acquired between prepare and authorize | Authorize fails; intent aborted; no mutation |
 | Root reassigned / epoch bumped after authorize | Receipt + complete rejected; record recovery_required |
 | Staging bytes drift before promote | `mismatched` receipt; no mutation |
-| Crash after applying, before reporting | Stale applying → operator-required evidence |
+| Crash after applying, before reporting | Stale `applying` → `recovery_required`; resolved not-applied by a supplemental target-absent re-observation, else operator-required evidence |
 | Promote done, completion lost | Node replays complete; finalize converges once |
 | Replayed authorize/complete | Original outcome returned; no new rows/events |

@@ -130,18 +130,24 @@ belongs here for atomicity: generate 32 bytes via `rand::rngs::OsRng`
 sets `authorized_at`;
 `record_receipt_in_tx(tx, id, receipt)` — requires `state='authorized'`
 (CAS on epoch; applying may overwrite only a NULL receipt; applied/mismatched
-may follow applying); `mark_completed_in_tx`, `mark_recovery_required_in_tx`,
+may follow applying);
+`append_supplemental_receipt_in_tx(tx, id, receipt)` — requires
+`state='recovery_required'` (CAS on epoch); writes the typed
+supplemental-receipt column so the original receipt survives alongside it;
+`mark_completed_in_tx`, `mark_recovery_required_in_tx`,
 `mark_aborted_in_tx` — CAS on prior state + epoch;
-`list_pending_for_roots_in_tx(tx, node_id)` — pending intents whose target
-root is owned by `node_id` (join `library_roots` owner + epoch current).
+`list_open_for_roots_in_tx(tx, node_id)` — non-terminal intents
+(`pending`/`authorized`/`recovery_required`) whose target root is owned by
+`node_id` (join `library_roots` owner + epoch current), each row carrying
+its state so the executor branches.
 Row mapping with checked conversions; unknown state/receipt vocabulary →
 `VoomError::database` (untrusted persisted data rule).
 
 Lease-scope consultation: add `consult_artifact_intent_lock_in_tx(tx,
 scope: &LeaseScope) -> Result<Option<String>, VoomError>` returning a
-conflict reason when a `pending|authorized` intent pins the scope (match on
-source file version / staging location / source asset scopes as encoded by
-`LeaseScope`), and call it beside
+conflict reason when a `pending|authorized|recovery_required` intent pins
+the scope (match on source file version / staging location / target root
+scopes as encoded by `LeaseScope`), and call it beside
 `consult_pending_commit_lock_in_tx` in `use_leases.rs` blocking-lease
 acquisition (~line 604). Reuse the join style of
 `commit_safety_gate.rs:631`.
@@ -240,8 +246,9 @@ deleted with the byte ops.
 load record + intent; classify per spec step 7 — receipt-less authorized
 (or stale-pending whose node is dead): safe abort via CAS then fresh
 successor prepare; `applied` (original or supplemental) w/ matching facts:
-finalize directly (no mutation); `outcome_unknown` resolved as not-applied
-(supplemental receipt: target absent): abort and re-drive fresh generation;
+finalizes directly (no mutation); `outcome_unknown`/stale `applying`
+resolved as not-applied (supplemental receipt in the supplemental column:
+target absent, no temp sibling): abort and re-drive fresh generation;
 `mismatched`/unresolved `outcome_unknown`/epoch drift: return
 operator-required Conflict carrying evidence (record stays). Delete local
 path probing (`inspect_recovery_target` filesystem half, `observe_regular_file`
@@ -269,7 +276,7 @@ Routes (POST, execution.rs handler pattern verbatim — HeaderMap credentials,
 `stable_request_hash`, envelopes, `voom_route_error_response`):
 
 ```
-POST /v1/artifact/commit/pending                        -> list pending intents for caller's owned roots
+POST /v1/artifact/commit/open                           -> list non-terminal (pending|authorized|recovery_required) intents for caller's owned roots, with state
 POST /v1/artifact/commit/{intent_id}/authorize          -> fenced authorization
 POST /v1/artifact/commit/{intent_id}/applying           -> journal receipt
 POST /v1/artifact/commit/{intent_id}/outcome            -> applied|mismatched|outcome_unknown evidence
@@ -295,18 +302,23 @@ existing endpoint-wrapper pattern client.rs:280–351; add to the
 `ControlPlaneApi` test seam trait runtime.rs:1194–1244).
 
 Executor (`commit.rs`): poll loop period = config `poll_interval_ms` with
-`centered_jitter` (ADR 0064); per pending intent: authorize → applying →
-verify staging facts (observe + compare expected; drift → outcome=mismatched,
-no mutation) → copy to unique temp sibling → install no-replace → fsync
-parent dirs → observe target → complete. Per `recovery_required` intent for
-an owned root: re-observe staging/target read-only and file the supplemental
-typed receipt (target absent → outcome_unknown-not-applied; matching →
-applied; drifting → mismatched). Port add-only install semantics
-verbatim from the retired host promote (hard-link/rename no replacement,
-parent-dir fsync, symlink rejection). Journal-before-mutate: if the applying
-report errors terminally, stand down. Crash between apply and complete is
-safe: on restart, authorize replays the same fence; observing an existing
-matching target yields applied evidence → complete converges.
+`centered_jitter` (ADR 0064); per intent from the open listing, branching
+on its state: `pending` → authorize → applying → verify staging facts
+(observe + compare expected; drift → outcome=mismatched, no mutation) →
+copy to unique temp sibling → install no-replace → fsync parent dirs →
+observe target → complete. `authorized` → re-request authorize (replay
+returns the same fence) → resume at the applying step.
+Per `recovery_required` intent for an owned root: re-observe
+staging/target read-only and file the supplemental typed receipt through
+the outcome route (target absent, no temp sibling → outcome_unknown
+resolved as not-applied; matching → applied; drifting → mismatched).
+Port add-only install semantics verbatim from the retired host promote
+(hard-link/rename no replacement, parent-dir fsync, symlink rejection).
+Journal-before-mutate: if the applying report errors terminally, stand
+down. Crash between apply and complete is safe: on restart the open
+listing rediscovers the authorized intent, authorize replays the same
+fence; observing an existing matching target yields applied evidence →
+complete converges.
 
 Runtime: spawn the executor task alongside the acquire coordinator sharing
 shutdown (`watch::Receiver<ShutdownKind>`); graceful drain per ADR 0060.
@@ -330,8 +342,11 @@ manifest deps).
 Final verification: `just ci` green end-to-end; `git rebase`-free clean
 history; push and open PR (handled by `$deliver`).
 
-Rollback: single-feature revert; migration 0038 is additive-only and the
-prior binary ignores the table.
+Rollback: code is a single-feature revert; schema rollback additionally
+requires an operator to drop `artifact_commit_intents` and the version-3
+migration row — the prior binary refuses a version-3 database
+(`SchemaTooNew`), and the 0038 preflight guard fails closed on
+non-terminal legacy commit rows.
 
 ## Self-review checklist
 

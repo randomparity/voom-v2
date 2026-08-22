@@ -44,8 +44,10 @@ the target — and fails pre-mutation otherwise. Authorization
 additionally records the owner incarnation id and a one-time opaque 32-byte
 `commit_fence`. Node-reported receipts (`applying`, `applied`,
 `mismatched`, `outcome_unknown`) with observed facts land in a typed JSON
-receipt column; an absent receipt means not started. This deliberately
-collapses the design spec's `not_started` journal step into receipt absence:
+receipt column; a recovery re-observation lands in a separate
+supplemental-receipt column so the original evidence survives beside it;
+an absent receipt means not started. This deliberately collapses the
+design spec's `not_started` journal step into receipt absence:
 the `applying` report is the sole mutation gate, so no separate
 pre-mutation receipt exists to produce or classify; the governing design
 spec's step-2 wording requires a conforming amendment, tracked as follow-up
@@ -101,10 +103,15 @@ re-mints, re-finalizes, nor creates rows.
 
 ### Recovery evidence has a defined producer
 
-The coordinator also polls `recovery_required` intents for the roots it
-currently owns. Receipts are observations, not mutations, so the *current*
+The coordinator polls non-terminal intents (`pending`, `authorized`,
+`recovery_required`) for the roots it currently owns through the node
+listing route, so a restarted agent rediscovers an intent it authorized
+before crashing and replays its authorize call for the fence. Receipts
+are observations, not mutations, so the *current*
 root owner may file a supplemental typed receipt even when it was not the
-authorized node — incarnation-fenced like every other receipt. For each
+authorized node — incarnation-fenced like every other receipt, written to
+the intent's supplemental-receipt slot so the original evidence survives
+alongside it. For each
 intent it re-observes staging and target facts read-only against the pinned
 expected facts: target absent (and no temp sibling) → `outcome_unknown`
 resolved as not-applied, so recovery may abort and re-drive a fresh
@@ -112,7 +119,12 @@ generation; target present with matching facts → `applied`; target present
 with drifting facts → `mismatched`. This closes the crash window between
 install/fsync and an `applied` report — exactly the ambiguity issue #422
 names — because the byte-owning node, not the control plane, produces the
-missing observed facts. Recovery-driven finalization re-runs the lineage
+missing observed facts. An `authorized` intent reaches `recovery_required`
+when the control plane observes drift (a `mismatched` or `outcome_unknown`
+receipt) or when recovery classification runs against it with a receipt
+present — via the prepare driver's bounded-wait timeout path or an
+operator invocation — never silently on a timer. Recovery-driven
+finalization re-runs the lineage
 safety gate and revalidates current root ownership before finalizing,
 mirroring the host path's pre-re-promotion gate check; an intent whose
 owner is stale or retired has no producer by definition and stays
@@ -127,14 +139,22 @@ after authorization leaves the record `recovery_required` with typed
 evidence. Recovery classifies from node receipts: a receipt-less authorized
 intent is safe to abort because the `applying` journal is the mutation gate —
 the node mutates only after its `applying` receipt is durably recorded, so a
-late report fails the compare-and-set and the node stands down; an intent
-carrying any receipt (`applying` or later) is never self-aborted — it becomes
-`recovery_required` and classifies via the supplemental receipts above as
-`applied` with matching facts (finalize directly; promotion already
-happened) or `mismatched`/unresolved `outcome_unknown` (operator-required:
-the record stays `recovery_required` carrying the evidence for a human). An
+late report fails the compare-and-set and the node stands down. An intent
+carrying any control-plane-visible receipt (`applying` or later) is never
+self-aborted on the strength of that receipt alone — it becomes
+`recovery_required` and classifies via the supplemental receipts above:
+`applied` with matching facts finalizes directly (promotion already
+happened); a target-absent-with-no-temp-sibling re-observation is *positive*
+evidence that promotion did not happen (the authorized node's process died;
+a live one would have completed or reported), which resolves the earlier
+`outcome_unknown`/stale `applying` marker to not-applied and permits abort
+plus a fresh successor generation; `mismatched`, or an `outcome_unknown`
+that stays unresolved because no current owner can observe the bytes,
+is operator-required: the record stays `recovery_required` carrying both
+the original receipt and the supplemental observation for a human. An
 ambiguous promotion can therefore never surface as an untracked successful
 commit.
+
 
 ### Pending intents expire fail-closed
 
