@@ -44,6 +44,11 @@ use crate::cases::{append_event, begin_immediate_tx, commit_tx};
 /// resolved-not-applied.
 pub const RESOLVED_NOT_APPLIED_REASON: &str = "target_absent_no_temp_sibling";
 
+/// Placeholder rendered by the redacting [`std::fmt::Debug`] impls of every
+/// struct carrying `fence_hex` so no log or telemetry surface can leak the
+/// one-time fence value.
+const FENCE_DEBUG_REDACTED: &str = "[REDACTED]";
+
 pub(crate) fn route_intent_authorize(intent_id: ArtifactCommitIntentId) -> String {
     format!("POST /v1/artifact/commit/{}/authorize", intent_id.0)
 }
@@ -72,8 +77,7 @@ pub struct RemoteCommitAuthorizeInput {
 
 /// The fenced authorization payload returned to the node (and stored verbatim
 /// as the replay outcome, fence included — spec §Threat model).
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct AuthorizeCommitOutcome {
     pub intent_id: ArtifactCommitIntentId,
     pub commit_record_id: voom_core::ids::ArtifactCommitRecordId,
@@ -86,7 +90,29 @@ pub struct AuthorizeCommitOutcome {
     /// Hex-encoded one-time 32-byte commit fence. Never serialized into events.
     pub fence_hex: String,
 }
-
+impl std::fmt::Debug for AuthorizeCommitOutcome {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The fence is capability material: its Debug rendering must never
+        // leak it into a log or telemetry surface.
+        f.debug_struct("AuthorizeCommitOutcome")
+            .field("intent_id", &self.intent_id)
+            .field("commit_record_id", &self.commit_record_id)
+            .field("staging_storage_root_id", &self.staging_storage_root_id)
+            .field(
+                "staging_provider_relative_locator",
+                &self.staging_provider_relative_locator,
+            )
+            .field("target_storage_root_id", &self.target_storage_root_id)
+            .field(
+                "target_provider_relative_locator",
+                &self.target_provider_relative_locator,
+            )
+            .field("expected_size_bytes", &self.expected_size_bytes)
+            .field("expected_content_hash", &self.expected_content_hash)
+            .field("fence_hex", &FENCE_DEBUG_REDACTED)
+            .finish()
+    }
+}
 #[derive(Debug, Clone)]
 pub struct RemoteCommitApplyingInput {
     pub intent_id: ArtifactCommitIntentId,
@@ -151,8 +177,7 @@ pub struct RemoteCommitReceiptOutcome {
     pub intent_id: ArtifactCommitIntentId,
     pub kind: String,
 }
-
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct RemoteCommitCompleteInput {
     pub intent_id: ArtifactCommitIntentId,
     pub node_id: NodeId,
@@ -164,6 +189,19 @@ pub struct RemoteCommitCompleteInput {
     pub fence_hex: String,
 }
 
+impl std::fmt::Debug for RemoteCommitCompleteInput {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RemoteCommitCompleteInput")
+            .field("intent_id", &self.intent_id)
+            .field("node_id", &self.node_id)
+            .field("token", &self.token)
+            .field("incarnation_id", &self.incarnation_id)
+            .field("idempotency_key", &self.idempotency_key)
+            .field("request_hash", &self.request_hash)
+            .field("fence_hex", &FENCE_DEBUG_REDACTED)
+            .finish()
+    }
+}
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RemoteCommitCompleteOutcome {

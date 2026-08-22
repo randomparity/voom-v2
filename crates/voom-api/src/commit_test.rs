@@ -818,3 +818,16 @@ fn assert_missing_incarnation_rejected<T: DeserializeOwned>(value: Value) {
     };
     panic!("expected missing-incarnation rejection");
 }
+#[test]
+fn complete_request_debug_redacts_fence_hex() {
+    let request = CompleteRequest {
+        node_id: 1,
+        incarnation_id: INCARNATION.parse().unwrap(),
+        fence_hex: "deadbeef".to_owned(),
+    };
+    // The one-time fence is capability material: its Debug rendering must
+    // never leak it into a log or telemetry surface.
+    let rendered = format!("{request:?}");
+    assert!(!rendered.contains("deadbeef"), "{rendered}");
+    assert!(rendered.contains("[REDACTED]"), "{rendered}");
+}

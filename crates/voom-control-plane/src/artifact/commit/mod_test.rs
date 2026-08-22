@@ -1036,6 +1036,107 @@ async fn complete_rejects_fence_mismatch_then_accepts_exact_fence() {
         "committed"
     );
 }
+/// The incarnation-pin policy of ADR 0074 (issue #524): post-authorization
+/// mutations revalidate the caller's token against its currently-active
+/// incarnation plus the pinned epochs — never against the pinned
+/// `owner_incarnation_id` — while the one-time fence stays bound to the
+/// authorizing incarnation's replay slot. A storage owner that re-registered
+/// under a fresh incarnation mid-promotion therefore resumes and converges
+/// the intent instead of wedging it into operator-required recovery.
+#[tokio::test]
+async fn post_authorization_mutations_follow_the_active_incarnation_not_the_pin() {
+    let (cp, _db, dir) = fixture().await;
+    let node = simulated_node(&cp).await;
+    let staged = stage_and_verify_bytes(&cp, dir.path(), b"source bytes").await;
+    let target = dir.path().join("target.bin");
+    spawn_commit_task(&cp, staged.artifact_handle_id, &target);
+    let intent_id = wait_pending_intent_id(&cp, staged.artifact_handle_id).await;
+    let outcome = node_authorize(&cp, &node, intent_id).await.unwrap();
+
+    // The node re-registers: a fresh incarnation becomes the active fence.
+    let fresh = SimulatedOwnerNode::new().unwrap();
+    // Re-registration supersedes the prior active incarnation, then points
+    // the node's active-incarnation fence at the new row.
+    sqlx::query(
+        "UPDATE node_incarnations SET status = 'superseded', \
+         ended_at = '1970-01-01T00:01:00Z', end_reason = 'superseded' \
+         WHERE node_id = ? AND status = 'active'",
+    )
+    .bind(i64::try_from(node.node_id.0).unwrap())
+    .execute(cp.pool_for_test())
+    .await
+    .unwrap();
+    fresh
+        .install_for(cp.pool_for_test(), node.node_id)
+        .await
+        .unwrap();
+
+    // A fresh authorize is refused fail-closed: the intent is no longer
+    // pending, so no second fence can be minted for it.
+    let err = node_authorize(&cp, &fresh, intent_id).await.unwrap_err();
+    assert_eq!(err.error_code(), ErrorCode::Conflict);
+    assert_eq!(intent_state(&cp, intent_id).await, "authorized");
+
+    // Receipts from the fresh active incarnation are accepted.
+    node_report_applying(&cp, &fresh, intent_id).await.unwrap();
+    std::fs::copy(&staged.staging_path, &target).unwrap();
+    let bytes = std::fs::read(&staged.staging_path).unwrap();
+    node_report_outcome(
+        &cp,
+        &fresh,
+        intent_id,
+        CommitOutcomeEvidence::Applied(AppliedEvidence {
+            observed: voom_test_support::commit_node::observed_facts(&bytes),
+        }),
+    )
+    .await
+    .unwrap();
+
+    // Completion with the exact fence converges rather than routing the
+    // resumed promotion into recovery.
+    let completed = node_complete(&cp, &fresh, intent_id, &outcome.fence_hex)
+        .await
+        .unwrap();
+    assert_eq!(completed.intent_id, intent_id);
+    assert_eq!(
+        record_state(&cp, completed.commit_record_id).await,
+        "committed"
+    );
+}
+
+#[test]
+fn authorize_outcome_debug_redacts_fence_hex() {
+    let outcome = crate::artifact::commit::intent::AuthorizeCommitOutcome {
+        intent_id: ArtifactCommitIntentId(1),
+        commit_record_id: ArtifactCommitRecordId(1),
+        staging_storage_root_id: StorageRootId(1),
+        staging_provider_relative_locator: "staging/a.bin".to_owned(),
+        target_storage_root_id: StorageRootId(1),
+        target_provider_relative_locator: "committed/a.bin".to_owned(),
+        expected_size_bytes: 1,
+        expected_content_hash: "blake3:x".to_owned(),
+        fence_hex: "deadbeef".to_owned(),
+    };
+    let rendered = format!("{outcome:?}");
+    assert!(!rendered.contains("deadbeef"), "{rendered}");
+    assert!(rendered.contains("[REDACTED]"), "{rendered}");
+}
+
+#[test]
+fn complete_input_debug_redacts_fence_hex() {
+    let input = crate::artifact::commit::intent::RemoteCommitCompleteInput {
+        intent_id: ArtifactCommitIntentId(1),
+        node_id: NodeId(1),
+        token: secrecy::SecretString::from("node-token".to_owned()),
+        incarnation_id: "fedcba9876543210fedcba9876543210".parse().unwrap(),
+        idempotency_key: "key".to_owned(),
+        request_hash: "hash".to_owned(),
+        fence_hex: "deadbeef".to_owned(),
+    };
+    let rendered = format!("{input:?}");
+    assert!(!rendered.contains("deadbeef"), "{rendered}");
+    assert!(rendered.contains("[REDACTED]"), "{rendered}");
+}
 
 // --- idempotent replays (G3/G4) -----------------------------------------------
 

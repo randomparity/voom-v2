@@ -777,7 +777,7 @@ pub struct CommitAuthorizeRequest {
 
 /// Mirror of the fenced authorization payload returned by
 /// `POST /v1/artifact/commit/{intent_id}/authorize`.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CommitAuthorizeOutcome {
     pub intent_id: ArtifactCommitIntentId,
@@ -791,6 +791,30 @@ pub struct CommitAuthorizeOutcome {
     /// Hex-encoded one-time 32-byte commit fence. Never logged or re-sent
     /// anywhere except the matching complete request.
     pub fence_hex: String,
+}
+
+impl std::fmt::Debug for CommitAuthorizeOutcome {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The one-time fence is capability material: never leak it through
+        // a log or telemetry surface.
+        f.debug_struct("CommitAuthorizeOutcome")
+            .field("intent_id", &self.intent_id)
+            .field("commit_record_id", &self.commit_record_id)
+            .field("staging_storage_root_id", &self.staging_storage_root_id)
+            .field(
+                "staging_provider_relative_locator",
+                &self.staging_provider_relative_locator,
+            )
+            .field("target_storage_root_id", &self.target_storage_root_id)
+            .field(
+                "target_provider_relative_locator",
+                &self.target_provider_relative_locator,
+            )
+            .field("expected_size_bytes", &self.expected_size_bytes)
+            .field("expected_content_hash", &self.expected_content_hash)
+            .field("fence_hex", &"[REDACTED]")
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -858,12 +882,22 @@ pub struct CommitReceiptOutcome {
     pub kind: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Clone, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct CommitCompleteRequest {
     pub node_id: NodeId,
     pub incarnation_id: NodeIncarnationId,
     pub fence_hex: String,
+}
+
+impl std::fmt::Debug for CommitCompleteRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CommitCompleteRequest")
+            .field("node_id", &self.node_id)
+            .field("incarnation_id", &self.incarnation_id)
+            .field("fence_hex", &"[REDACTED]")
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
