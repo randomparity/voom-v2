@@ -72,11 +72,15 @@ retired as absent, while publishing no identity. Each enumerated candidate gets 
 hash/probe attempt per session and is recorded immediately as evidence-less when that
 attempt fails — the pump never re-dispatches a failed candidate, because the server-enforced
 `(session_id, locator)` uniqueness would turn any later success into a duplicate-locator
-conflict and an unbounded retry loop; a later scan session covers the file. Completion
-publishes policy-ready identity inside the completion transaction — same-address replay,
-hardlink attach by inode facts, or fresh ingest with sidecar bundles — using the DB-only
-relocation of today's persist logic, then retires unobserved pre-start locations exactly as
-ADR 0067 specifies. The control plane never opens discovered bytes.
+conflict and an unbounded retry loop; a later scan session covers the file. Vanishing counts
+differently from failing: a candidate that no longer exists when hash or probe reaches it
+(ENOENT) yields no observation at all, because its absence is real and completion may retire
+it; every other failed attempt (unreadable file, content drift, malformed media,
+infrastructure error) yields an evidence-less observation that blocks false retirement.
+Completion publishes policy-ready identity inside the completion transaction — same-address
+replay, hardlink attach by inode facts, or fresh ingest with sidecar bundles — using the
+DB-only relocation of today's persist logic, then retires unobserved pre-start locations
+exactly as ADR 0067 specifies. The control plane never opens discovered bytes.
 
 **Removal.** The control-plane-local discovery walk, byte hashing, path-grouping probe
 dispatch, bundled-ffprobe launch/readiness helpers, built-in `builtin.ffprobe` worker
@@ -91,6 +95,8 @@ run, then polls session inspection until terminal and prints the outcome envelop
   content-level failures never publish stale identity, and infrastructure failures fail the
   session without partial reconciliation.
 - Ticket failure or loss leaves the session `requested`; the inactivity deadline stales it.
+  re-requested by hand — ADR 0067 lets only the trusted local operator request sessions, so
+  an unattended deployment stalls until a human re-requests the scan.
 - The workflow scanner-ticket result shape changes from per-file `{path, file_location_id}`
   rows to a run summary keyed by scan session; downstream consumption of scanner results must
   be reintroduced against published locations in a follow-up (#423-adjacent surface).
@@ -131,3 +137,9 @@ run, then polls session inspection until terminal and prints the outcome envelop
   commits byte ownership to the owner node, debt 0004 records the current path as not
   race-free, and the durable session substrate this builds on is otherwise unused — waiting
   keeps a known defect alive for no simplification that survives #423.
+- **Harden the probe leg now with a root+locator payload and worker-side component-wise
+  descent.** judgment: it would narrow the ancestor-replacement residual before #423, but it
+  adds a second addressing mode to the shared `ProbeFileRequest` contract that #423 replaces
+  one issue later, and debt 0004 explicitly warns against duplicating or preempting the
+  dispatch-reference contract; the pre/post drift checks bound what the pathname reopen can
+  publish in the interim.
