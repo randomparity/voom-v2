@@ -3,7 +3,8 @@ use time::OffsetDateTime;
 use voom_core::ids::{ArtifactCommitRecordId, ArtifactVerificationId};
 use voom_core::{
     ArtifactHandleId, ArtifactLocationId, BundleId, FailureClass, FileAssetId, FileLocationId,
-    FileVersionId, JobId, LeaseId, MediaSnapshotId, TicketId, UseLeaseId, WorkerId,
+    FileVersionId, JobId, LeaseId, MediaSnapshotId, NodeId, StorageRootId, TicketId, UseLeaseId,
+    WorkerId,
 };
 
 // --- artifacts -------------------------------------------------------------
@@ -132,6 +133,54 @@ pub struct ArtifactCommitRecoveryRequiredPayload {
     pub recovery_reason: String,
     pub error_code: String,
     pub message: String,
+}
+
+/// `artifact.commit_intent_recorded` — a fenced node-local commit intent was
+/// recorded against its target storage root (issue #422, ADR 0074). One per
+/// `artifact_commit_intents` row entering `state = 'pending'`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ArtifactCommitIntentRecordedPayload {
+    pub commit_record_id: ArtifactCommitRecordId,
+    pub artifact_handle_id: ArtifactHandleId,
+    pub verification_id: ArtifactVerificationId,
+    pub owner_node_id: NodeId,
+    pub target_root_id: StorageRootId,
+    pub target_provider_relative_locator: String,
+    #[serde(with = "time::serde::iso8601")]
+    pub started_at: OffsetDateTime,
+}
+
+/// `artifact.commit_intent_authorized` — the owner node authorized the
+/// pending intent by minting a one-time opaque commit fence. The fence value
+/// itself is never carried here; the event attests only that authorization
+/// happened, under which owner incarnation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ArtifactCommitIntentAuthorizedPayload {
+    pub commit_record_id: ArtifactCommitRecordId,
+    pub artifact_handle_id: ArtifactHandleId,
+    pub owner_node_id: NodeId,
+    pub incarnation_id: String,
+    #[serde(with = "time::serde::iso8601")]
+    pub authorized_at: OffsetDateTime,
+}
+
+/// `artifact.commit_receipt_reported` — a node reported a receipt outcome
+/// (`"applying"`, `"applied"`, `"mismatched"`, `"outcome_unknown"`) for a
+/// fenced commit intent. Observation fields are optional: the reporter
+/// includes only what it actually observed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ArtifactCommitReceiptReportedPayload {
+    pub commit_record_id: ArtifactCommitRecordId,
+    pub artifact_handle_id: ArtifactHandleId,
+    pub kind: String,
+    pub reason: Option<String>,
+    pub observed_size_bytes: Option<u64>,
+    pub observed_checksum: Option<String>,
+    #[serde(with = "time::serde::iso8601")]
+    pub reported_at: OffsetDateTime,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

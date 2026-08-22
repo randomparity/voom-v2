@@ -2,6 +2,7 @@ use super::*;
 use crate::payload::{Event, EventKind};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
+use time::OffsetDateTime;
 use voom_core::FailureClass;
 
 /// Assert that `valid` round-trips and that injecting a top-level unknown field
@@ -1016,6 +1017,97 @@ fn artifact_commit_recovery_required_payload_round_trip() {
 }
 
 #[test]
+fn artifact_commit_intent_recorded_payload_round_trip() {
+    let p = ArtifactCommitIntentRecordedPayload {
+        commit_record_id: voom_core::ids::ArtifactCommitRecordId(30),
+        artifact_handle_id: voom_core::ArtifactHandleId(10),
+        verification_id: voom_core::ids::ArtifactVerificationId(20),
+        owner_node_id: voom_core::NodeId(3),
+        target_root_id: voom_core::StorageRootId(4),
+        target_provider_relative_locator: "library/incoming/final.bin".to_owned(),
+        started_at: OffsetDateTime::UNIX_EPOCH,
+    };
+    let json = serde_json::to_value(Event::ArtifactCommitIntentRecorded(p.clone())).unwrap();
+    assert_eq!(json["kind"], "artifact.commit_intent_recorded");
+    let back: Event = serde_json::from_value(json).unwrap();
+    assert!(matches!(back, Event::ArtifactCommitIntentRecorded(q) if q == p));
+    assert_eq!(
+        Event::ArtifactCommitIntentRecorded(p).kind(),
+        EventKind::ArtifactCommitIntentRecorded
+    );
+}
+
+#[test]
+fn artifact_commit_intent_authorized_payload_round_trip() {
+    let p = ArtifactCommitIntentAuthorizedPayload {
+        commit_record_id: voom_core::ids::ArtifactCommitRecordId(30),
+        artifact_handle_id: voom_core::ArtifactHandleId(10),
+        owner_node_id: voom_core::NodeId(3),
+        incarnation_id: "inc-7f3a".to_owned(),
+        authorized_at: OffsetDateTime::UNIX_EPOCH,
+    };
+    let json = serde_json::to_value(Event::ArtifactCommitIntentAuthorized(p.clone())).unwrap();
+    assert_eq!(json["kind"], "artifact.commit_intent_authorized");
+    // The one-time fence value never travels on this event.
+    assert!(json["payload"].get("commit_fence").is_none());
+    let back: Event = serde_json::from_value(json).unwrap();
+    assert!(matches!(back, Event::ArtifactCommitIntentAuthorized(q) if q == p));
+    assert_eq!(
+        Event::ArtifactCommitIntentAuthorized(p).kind(),
+        EventKind::ArtifactCommitIntentAuthorized
+    );
+}
+
+#[test]
+fn artifact_commit_receipt_reported_payload_round_trip() {
+    let p = ArtifactCommitReceiptReportedPayload {
+        commit_record_id: voom_core::ids::ArtifactCommitRecordId(30),
+        artifact_handle_id: voom_core::ArtifactHandleId(10),
+        kind: "applied".to_owned(),
+        reason: None,
+        observed_size_bytes: Some(2048),
+        observed_checksum: Some("sha256:deadbeef".to_owned()),
+        reported_at: OffsetDateTime::UNIX_EPOCH,
+    };
+    let json = serde_json::to_value(Event::ArtifactCommitReceiptReported(p.clone())).unwrap();
+    assert_eq!(json["kind"], "artifact.commit_receipt_reported");
+    let back: Event = serde_json::from_value(json).unwrap();
+    assert!(matches!(back, Event::ArtifactCommitReceiptReported(q) if q == p));
+    assert_eq!(
+        Event::ArtifactCommitReceiptReported(p).kind(),
+        EventKind::ArtifactCommitReceiptReported
+    );
+}
+
+#[test]
+fn artifact_commit_receipt_reported_payload_round_trips_absent_observations() {
+    // A node that could not observe the promoted artifact reports null
+    // observation fields rather than dropping them (`deny_unknown_fields`
+    // keeps the shape closed, so `null` distinguishes "not observed" from
+    // an unknown field).
+    let p = ArtifactCommitReceiptReportedPayload {
+        commit_record_id: voom_core::ids::ArtifactCommitRecordId(31),
+        artifact_handle_id: voom_core::ArtifactHandleId(11),
+        kind: "outcome_unknown".to_owned(),
+        reason: Some("node restarted mid-promotion".to_owned()),
+        observed_size_bytes: None,
+        observed_checksum: None,
+        reported_at: OffsetDateTime::UNIX_EPOCH,
+    };
+    let json = serde_json::to_value(Event::ArtifactCommitReceiptReported(p.clone())).unwrap();
+    assert_eq!(
+        json["payload"]["observed_size_bytes"],
+        serde_json::Value::Null
+    );
+    assert_eq!(
+        json["payload"]["observed_checksum"],
+        serde_json::Value::Null
+    );
+    let back: Event = serde_json::from_value(json).unwrap();
+    assert!(matches!(back, Event::ArtifactCommitReceiptReported(q) if q == p));
+}
+
+#[test]
 fn artifact_handle_created_payload_rejects_unknown_field() {
     assert_rejects_unknown(&ArtifactHandleCreatedPayload {
         artifact_handle_id: voom_core::ArtifactHandleId(1),
@@ -1144,6 +1236,43 @@ fn artifact_commit_recovery_required_payload_rejects_unknown_field() {
         recovery_reason: "target_appeared_after_prepare".to_owned(),
         error_code: "TARGET_EXISTS".to_owned(),
         message: "target path appeared during promotion".to_owned(),
+    });
+}
+
+#[test]
+fn artifact_commit_intent_recorded_payload_rejects_unknown_field() {
+    assert_rejects_unknown(&ArtifactCommitIntentRecordedPayload {
+        commit_record_id: voom_core::ids::ArtifactCommitRecordId(30),
+        artifact_handle_id: voom_core::ArtifactHandleId(10),
+        verification_id: voom_core::ids::ArtifactVerificationId(20),
+        owner_node_id: voom_core::NodeId(3),
+        target_root_id: voom_core::StorageRootId(4),
+        target_provider_relative_locator: "library/incoming/final.bin".to_owned(),
+        started_at: OffsetDateTime::UNIX_EPOCH,
+    });
+}
+
+#[test]
+fn artifact_commit_intent_authorized_payload_rejects_unknown_field() {
+    assert_rejects_unknown(&ArtifactCommitIntentAuthorizedPayload {
+        commit_record_id: voom_core::ids::ArtifactCommitRecordId(30),
+        artifact_handle_id: voom_core::ArtifactHandleId(10),
+        owner_node_id: voom_core::NodeId(3),
+        incarnation_id: "inc-7f3a".to_owned(),
+        authorized_at: OffsetDateTime::UNIX_EPOCH,
+    });
+}
+
+#[test]
+fn artifact_commit_receipt_reported_payload_rejects_unknown_field() {
+    assert_rejects_unknown(&ArtifactCommitReceiptReportedPayload {
+        commit_record_id: voom_core::ids::ArtifactCommitRecordId(30),
+        artifact_handle_id: voom_core::ArtifactHandleId(10),
+        kind: "applied".to_owned(),
+        reason: None,
+        observed_size_bytes: Some(2048),
+        observed_checksum: Some("sha256:deadbeef".to_owned()),
+        reported_at: OffsetDateTime::UNIX_EPOCH,
     });
 }
 

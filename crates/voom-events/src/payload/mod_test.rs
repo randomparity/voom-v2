@@ -85,6 +85,9 @@ fn _event_variants_are_exhaustive(e: &Event) {
         Event::ArtifactCommitCompleted(_) => {}
         Event::ArtifactCommitFailedPreMutation(_) => {}
         Event::ArtifactCommitRecoveryRequired(_) => {}
+        Event::ArtifactCommitIntentRecorded(_) => {}
+        Event::ArtifactCommitIntentAuthorized(_) => {}
+        Event::ArtifactCommitReceiptReported(_) => {}
         Event::ArtifactTranscodeStarted(_) => {}
         Event::ArtifactTranscodeProgress(_) => {}
         Event::ArtifactTranscodeSucceeded(_) => {}
@@ -471,6 +474,31 @@ fn event_kind_matches_serde_tag() {
             recovery_reason: "promotion_failed".to_owned(),
             error_code: "PROMOTION_FAILED".to_owned(),
             message: "promotion failed".to_owned(),
+        }),
+        Event::ArtifactCommitIntentRecorded(ArtifactCommitIntentRecordedPayload {
+            commit_record_id: voom_core::ids::ArtifactCommitRecordId(1),
+            artifact_handle_id: voom_core::ArtifactHandleId(1),
+            verification_id: voom_core::ids::ArtifactVerificationId(1),
+            owner_node_id: voom_core::NodeId(1),
+            target_root_id: voom_core::StorageRootId(1),
+            target_provider_relative_locator: "library/incoming/x".to_owned(),
+            started_at: OffsetDateTime::UNIX_EPOCH,
+        }),
+        Event::ArtifactCommitIntentAuthorized(ArtifactCommitIntentAuthorizedPayload {
+            commit_record_id: voom_core::ids::ArtifactCommitRecordId(1),
+            artifact_handle_id: voom_core::ArtifactHandleId(1),
+            owner_node_id: voom_core::NodeId(1),
+            incarnation_id: "inc-1".to_owned(),
+            authorized_at: OffsetDateTime::UNIX_EPOCH,
+        }),
+        Event::ArtifactCommitReceiptReported(ArtifactCommitReceiptReportedPayload {
+            commit_record_id: voom_core::ids::ArtifactCommitRecordId(1),
+            artifact_handle_id: voom_core::ArtifactHandleId(1),
+            kind: "applied".to_owned(),
+            reason: None,
+            observed_size_bytes: Some(1),
+            observed_checksum: None,
+            reported_at: OffsetDateTime::UNIX_EPOCH,
         }),
         Event::ArtifactTranscodeStarted(ArtifactTranscodeStartedPayload {
             job_id: voom_core::JobId(1),
