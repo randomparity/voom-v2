@@ -82,17 +82,25 @@ impl SimulatedOwnerNode {
     pub async fn install_for(&self, pool: &SqlitePool, node_id: NodeId) -> Result<(), VoomError> {
         let token_hash = voom_control_plane::workers::hash_node_token(self.token.expose_secret());
         let hint = format!("sim-{}", self.node_id.0);
+        let node_id_i64 = i64::try_from(node_id.0)
+            .map_err(|error| VoomError::database(format!("node id out of range: {error}")))?;
+        // One BEGIN IMMEDIATE transaction: the three raw fixture writes must
+        // not interleave with concurrent test writers (CLI child processes,
+        // worker providers, the driver thread). A deferred transaction would
+        // upgrade read-to-write and can surface SQLITE_BUSY under contention
+        // (the same class fixed on the audio sidecar commit path).
+        let mut tx = pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(|error| VoomError::database_context("simulated node install begin", error))?;
         sqlx::query(
             "UPDATE nodes SET kind = 'remote', auth_token_hash = ?, auth_token_hint = ? \
                      WHERE id = ?",
         )
         .bind(&token_hash)
         .bind(&hint)
-        .bind(
-            i64::try_from(node_id.0)
-                .map_err(|error| VoomError::database(format!("node id out of range: {error}")))?,
-        )
-        .execute(pool)
+        .bind(node_id_i64)
+        .execute(&mut *tx)
         .await
         .map_err(|error| VoomError::database_context("simulated node install", error))?;
         let incarnation_hex = self.incarnation_id.to_string();
@@ -102,25 +110,21 @@ impl SimulatedOwnerNode {
                      VALUES (?, ?, 'active', ?, ?)",
         )
         .bind(&incarnation_hex)
-        .bind(
-            i64::try_from(node_id.0)
-                .map_err(|error| VoomError::database(format!("node id out of range: {error}")))?,
-        )
+        .bind(node_id_i64)
         .bind(INSTALL_TIME)
         .bind(INSTALL_TIME)
-        .execute(pool)
+        .execute(&mut *tx)
         .await
         .map_err(|error| VoomError::database_context("simulated node incarnation", error))?;
         sqlx::query("UPDATE nodes SET active_incarnation_id = ?, status = 'active' WHERE id = ?")
             .bind(&incarnation_hex)
-            .bind(
-                i64::try_from(node_id.0).map_err(|error| {
-                    VoomError::database(format!("node id out of range: {error}"))
-                })?,
-            )
-            .execute(pool)
+            .bind(node_id_i64)
+            .execute(&mut *tx)
             .await
             .map_err(|error| VoomError::database_context("simulated node activation", error))?;
+        tx.commit()
+            .await
+            .map_err(|error| VoomError::database_context("simulated node install commit", error))?;
         Ok(())
     }
 

@@ -595,7 +595,12 @@ async fn resolve_rooted_path_resolves_deep_valid_locator() {
         .await
         .unwrap();
 
-    assert_eq!(resolved, f.root.path().join("a/b/c/deep.bin"));
+    // The resolver canonicalizes the storage root and joins the locator
+    // lexically (the locator need not exist). On macOS /var is a symlink to
+    // /private/var, so the expectation must canonicalize the same root rather
+    // than weakening the resolver.
+    let root = tokio::fs::canonicalize(f.root.path()).await.unwrap();
+    assert_eq!(resolved, root.join("a/b/c/deep.bin"));
 }
 
 #[cfg(unix)]

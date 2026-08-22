@@ -177,9 +177,9 @@ impl SqlitePolicyInputRepo {
             .map_err(|error| VoomError::PolicyValidationError(error.message()))?;
         let mut tx = self
             .pool
-            .begin()
+            .begin_with("BEGIN IMMEDIATE")
             .await
-            .map_err(|e| VoomError::database_context("begin", e))?;
+            .map_err(|e| VoomError::database_context("begin immediate", e))?;
         let out = self.create_input_set_in_tx(&mut tx, input).await?;
         tx.commit()
             .await
