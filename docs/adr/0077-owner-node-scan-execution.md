@@ -93,9 +93,9 @@ with the direct-path entry points in `scan/mod.rs`, the filesystem checks of the
 `scan/library.rs`, and the direct-path CLI dispatch. Everything else that still serves
 non-scan surfaces stays: `scan/worker.rs`'s bundled-ffprobe launcher and readiness helper,
 and `scan/bootstrap.rs`'s built-in worker registration are consumed by audio/remux/transcode
-commit probing, policy tool preflight, and artifact verification owned by #423/#424, which
-may delete or relocate them later. `voom scan --root` requests the run, then polls session
-inspection until terminal and prints the outcome envelope.
+commit probing and policy tool preflight today; #423/#424 own their later deletion or
+relocation. `voom scan --root` requests the run, then polls session inspection until
+terminal and prints the outcome envelope.
 
 ## Consequences
 
@@ -121,12 +121,10 @@ inspection until terminal and prints the outcome envelope.
   API's request-body cap (~1 MiB): the pump flushes whichever bound binds first, so a
   sidecar-dense root produces more, smaller batches instead of a deterministically rejected
   submission.
-- Durable workflows whose plans contain scan nodes fail loudly at ticket expansion until
-  scanner-result consumption against published locations is reintroduced (#423-adjacent);
-  no production submission path exists today, so nothing live regresses.
-  roots: a root enumerating more than that fails batch acceptance deterministically and
-  re-requests reproduce the failure, where the transitional local scanner had no ceiling.
-  Raising or chunking the cap is ADR 0067's decision to revisit, not this one's.
+- ADR 0067's 100,000 cumulative-observation session ceiling is inherited unchanged: a root
+  enumerating more than that fails batch acceptance deterministically and re-requests
+  reproduce the failure, where the transitional local scanner had no ceiling. Raising or
+  chunking the cap is ADR 0067's decision to revisit, not this one's.
 - The scan path stops consuming `local_node_id`; the field itself keeps its
   transform/commit consumers (artifact stage and commit preparation, policy verification,
   audio/remux/transcode source selection, workflow promotion) owned by #423 and successors
