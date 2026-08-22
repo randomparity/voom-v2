@@ -674,6 +674,7 @@ fn observation(locator: &str) -> ScanObservation {
         modified_at: T0,
         stability_started_at: T0,
         stability_confirmed_at: T0,
+        evidence: None,
     }
 }
 
@@ -1240,6 +1241,7 @@ async fn batch_acceptance_replays_the_same_session_sequence_and_rejects_conflict
             modified_at: T0,
             stability_started_at: T0,
             stability_confirmed_at: T0,
+            evidence: None,
         }],
         accepted_at: T0 + time::Duration::minutes(5),
         next_progress_deadline_at: T0 + time::Duration::minutes(10),
@@ -1274,6 +1276,7 @@ async fn batch_acceptance_replays_the_same_session_sequence_and_rejects_conflict
             modified_at: T0,
             stability_started_at: T0,
             stability_confirmed_at: T0,
+            evidence: None,
         })
         .collect();
     let outcome = repo
@@ -1338,6 +1341,7 @@ async fn batch_locator_conflict_leaves_no_partial_ledger_row_when_the_caller_com
             modified_at: T0,
             stability_started_at: T0,
             stability_confirmed_at: T0,
+            evidence: None,
         }],
         accepted_at: T0,
         next_progress_deadline_at: T0 + time::Duration::minutes(5),
@@ -1353,6 +1357,7 @@ async fn batch_locator_conflict_leaves_no_partial_ledger_row_when_the_caller_com
             modified_at: T0,
             stability_started_at: T0,
             stability_confirmed_at: T0,
+            evidence: None,
         }],
         accepted_at: T0,
         next_progress_deadline_at: T0 + time::Duration::minutes(5),
@@ -2002,6 +2007,7 @@ async fn batch_validation_rejects_bounds_overflow_and_reversed_stability_before_
         modified_at: T0,
         stability_started_at: T0,
         stability_confirmed_at: T0,
+        evidence: None,
     };
     let batch = |observations: Vec<ScanObservation>| NewScanObservationBatch {
         scan_session_id: ScanSessionId(999),
@@ -2031,6 +2037,7 @@ async fn batch_validation_rejects_bounds_overflow_and_reversed_stability_before_
     ));
     let reversed = ScanObservation {
         stability_confirmed_at: T0 - time::Duration::seconds(1),
+        evidence: None,
         ..observation
     };
     assert!(matches!(

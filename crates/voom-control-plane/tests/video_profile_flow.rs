@@ -20,13 +20,13 @@ use voom_control_plane::ControlPlane;
 use voom_control_plane::policy::{
     ComplianceExecuteData, ComplianceExecutionOptions, PolicyInputFromScanInput,
 };
-use voom_control_plane::scan::{RootScanOutcome, ScanReportFileStatus};
 use voom_core::{FileVersionId, MediaSnapshotId, PolicyVersionId};
 use voom_ffmpeg_worker::preflight_from_process_env;
 use voom_plan::PlanOperationKind;
 use voom_policy::{MediaSnapshotInput, PolicyInputSetDraft, PolicyInputSourceKind, TargetRef};
 use voom_store::repo::media::identity::{MediaSnapshotRepo, SqliteIdentityRepo};
 use voom_test_support::TempDatabase;
+use voom_test_support::scan_seed::{SeedFile, seed_scanned_files};
 use voom_test_support::worker::{
     FfprobeSiblingGuard, TestWorkerConfig, TestWorkerLaunch, cargo_build_package,
     hide_stale_fake_ffprobe_sibling, target_debug_binary,
@@ -193,7 +193,7 @@ async fn run_case(case: &Case) -> CaseOutcome {
         .unwrap()
         .with_local_node_id(Some(voom_core::NodeId(9_000_001)));
 
-    let source_file_version_id = scan_source(&cp, &source).await;
+    let source_file_version_id = scan_source(&cp, &url, &root, &source, case).await;
     let policy = cp
         .create_policy_document(case.slug, case.policy_source)
         .await
@@ -431,20 +431,43 @@ fn find_output(out_dir: &Path, prefix: &str, container: &str) -> std::path::Path
     );
 }
 
-async fn scan_source(cp: &ControlPlane, source: &Path) -> FileVersionId {
-    let outcome = cp
-        .scan_library_root(voom_store::test_support::TEST_STORAGE_ROOT_ID)
-        .await
-        .unwrap();
-    let RootScanOutcome::Scanned(scan) = outcome else {
-        unreachable!("active local test root must scan")
-    };
-    scan.files
-        .iter()
-        .find(|file| file.path == source && file.status == ScanReportFileStatus::Scanned)
+async fn scan_source(
+    cp: &ControlPlane,
+    url: &str,
+    root: &Path,
+    source: &Path,
+    case: &Case,
+) -> FileVersionId {
+    let locator = source
+        .strip_prefix(root)
         .unwrap()
-        .file_version_id
+        .to_str()
         .unwrap()
+        .replace(std::path::MAIN_SEPARATOR, "/");
+    let seeded = seed_scanned_files(
+        cp,
+        url,
+        voom_store::test_support::TEST_STORAGE_ROOT_ID,
+        &[SeedFile {
+            locator: &locator,
+            path: source,
+            probe_snapshot: json!({
+                "format": "sprint10-v1",
+                "container": { "format_name": "mov,mp4,m4a,3gp,3g2,mj2" },
+                "streams": [{
+                    "index": 0,
+                    "kind": "video",
+                    "codec_name": case.source_codec,
+                    "width": case.source_width,
+                    "height": case.source_height,
+                    "pixel_format": "yuv420p",
+                }],
+            }),
+        }],
+    )
+    .await
+    .unwrap();
+    seeded[0].file_version_id
 }
 
 fn require_encoders() {

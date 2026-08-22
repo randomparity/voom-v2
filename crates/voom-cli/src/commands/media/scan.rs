@@ -1,130 +1,40 @@
+//! `voom scan --root <id>`: request a durable scan run and, unless
+//! `--no-wait`, poll it to a terminal state. The bytes are read by the owner
+//! node's workers (ADR 0077); the CLI only talks to the control plane.
+
 use std::io;
-use std::path::Path;
+use std::time::Duration;
 
 use serde::Serialize;
-use voom_control_plane::scan::{
-    RootScanBlocked, RootScanOutcome, ScanFileErrorReport, ScanFileReport, ScanMode, ScanReport,
-    ScanReportFileStatus, ScanSidecarReport,
-};
-use voom_core::{ErrorCode, FailureClass, StorageRootId};
+use voom_control_plane::scan::{RootScanBlocked, ScanRunOutcome};
+use voom_core::{ErrorCode, StorageRootId};
 
 use crate::commands::common::open_control_plane;
 use crate::envelope::{Local, emit_err_with_data_and_warnings, emit_ok};
 
+/// Idle timeout granted to the requested session; the agent-side pump must
+/// make progress well inside it.
+const DEFAULT_IDLE_TIMEOUT_SECONDS: u32 = 600;
+/// How often the CLI re-reads the session while waiting.
+const POLL_INTERVAL: Duration = Duration::from_millis(500);
+
+/// The request outcome: the durable session and its ready ticket.
 #[derive(Debug, Serialize)]
-pub struct ScanData {
-    pub path: String,
-    pub mode: String,
-    pub summary: ScanSummaryData,
-    pub files: Vec<ScanFileData>,
-    pub skipped: Vec<ScanFileData>,
+pub struct ScanRequestData {
+    pub scan_session_id: u64,
+    pub ticket_id: u64,
 }
 
+/// The waited outcome: the session's terminal state and publication counters.
 #[derive(Debug, Serialize)]
-pub struct ScanSummaryData {
-    pub discovered: u64,
-    pub ingested: u64,
-    pub probed: u64,
-    pub snapshots_recorded: u64,
-    pub hardlinked: u64,
-    pub skipped: u64,
-    pub failed: u64,
-}
-
-#[derive(Debug, Serialize)]
-pub struct ScanFileData {
-    pub path: String,
+pub struct ScanOutcomeData {
+    pub scan_session_id: u64,
     pub status: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub file_asset_id: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub file_version_id: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub file_location_id: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub media_snapshot_id: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub content_hash: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub size_bytes: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub probe_worker_id: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub bundle_id: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub bundle_member_role: Option<String>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub sidecars: Vec<ScanSidecarData>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub error: Option<ScanFileErrorData>,
+    pub observation_count: u64,
+    pub retired_location_count: u64,
 }
 
-#[derive(Debug, Serialize)]
-pub struct ScanSidecarData {
-    pub path: String,
-    pub file_asset_id: u64,
-    pub file_version_id: u64,
-    pub file_location_id: u64,
-    pub bundle_id: u64,
-    pub bundle_member_role: String,
-    pub content_hash: String,
-    pub size_bytes: u64,
-}
-
-#[derive(Debug, Serialize)]
-pub struct ScanFileErrorData {
-    pub code: &'static str,
-    pub failure_class: String,
-    pub message: String,
-}
-
-pub async fn run(database_url: &str, local: Local, root: u64) -> io::Result<i32> {
-    run_root(database_url, local, StorageRootId(root)).await
-}
-
-async fn run_root(database_url: &str, local: Local, root_id: StorageRootId) -> io::Result<i32> {
-    let cp = match open_control_plane("scan", database_url, &local).await? {
-        Ok(cp) => cp,
-        Err(code) => return Ok(code),
-    };
-    match cp.scan_library_root(root_id).await {
-        Ok(RootScanOutcome::Scanned(report)) => {
-            emit_ok("scan", ScanData::from(report), Some(local), scan_warnings()).map(|()| 0)
-        }
-        Ok(RootScanOutcome::Blocked(blocked)) => {
-            let message = format!(
-                "library root {} is blocked ({}); not scanned",
-                blocked.storage_root_id,
-                blocked.reason.as_str()
-            );
-            emit_err_with_data_and_warnings(
-                "scan",
-                BlockedData::from(blocked),
-                ErrorCode::Blocked.as_str(),
-                message,
-                None,
-                Some(local),
-                scan_warnings(),
-            )?;
-            Ok(2)
-        }
-        Err(err) => {
-            let code = err.code();
-            let message = err.to_string();
-            emit_err_with_data_and_warnings(
-                "scan",
-                ScanData::from(err.into_report()),
-                code.as_str(),
-                message,
-                None,
-                Some(local),
-                scan_warnings(),
-            )?;
-            Ok(2)
-        }
-    }
-}
-
+/// A blocked root: nothing was requested.
 #[derive(Debug, Serialize)]
 pub struct BlockedData {
     pub status: &'static str,
@@ -146,132 +56,141 @@ impl From<RootScanBlocked> for BlockedData {
     }
 }
 
-fn scan_warnings() -> Vec<String> {
-    let Some(ffprobe_bin) = std::env::var_os("VOOM_FFPROBE_BIN") else {
-        return Vec::new();
+pub async fn run(database_url: &str, local: Local, root: u64, no_wait: bool) -> io::Result<i32> {
+    run_root(database_url, local, StorageRootId(root), no_wait).await
+}
+
+async fn run_root(
+    database_url: &str,
+    local: Local,
+    root_id: StorageRootId,
+    no_wait: bool,
+) -> io::Result<i32> {
+    let cp = match open_control_plane("scan", database_url, &local).await? {
+        Ok(cp) => cp,
+        Err(code) => return Ok(code),
     };
-    vec![format!(
-        "VOOM_FFPROBE_BIN is set; scan ffprobe binary: {}",
-        std::path::Path::new(&ffprobe_bin).display()
-    )]
-}
-
-impl From<ScanReport> for ScanData {
-    fn from(report: ScanReport) -> Self {
-        Self {
-            path: path_wire(&report.path),
-            mode: mode_wire(report.mode).to_owned(),
-            summary: ScanSummaryData {
-                discovered: report.summary.discovered,
-                ingested: report.summary.ingested,
-                probed: report.summary.probed,
-                snapshots_recorded: report.summary.snapshots_recorded,
-                hardlinked: report.summary.hardlinked,
-                skipped: report.summary.skipped,
-                failed: report.summary.failed,
-            },
-            files: report.files.into_iter().map(ScanFileData::from).collect(),
-            skipped: report.skipped.into_iter().map(ScanFileData::from).collect(),
+    match cp
+        .request_scan_run(root_id, DEFAULT_IDLE_TIMEOUT_SECONDS)
+        .await
+    {
+        Ok(ScanRunOutcome::Requested(requested)) => {
+            if no_wait {
+                return emit_ok(
+                    "scan",
+                    ScanRequestData {
+                        scan_session_id: requested.scan_session_id.0,
+                        ticket_id: requested.ticket_id.0,
+                    },
+                    Some(local),
+                    Vec::new(),
+                )
+                .map(|()| 0);
+            }
+            wait_for_terminal(&cp, local, requested.scan_session_id.0).await
+        }
+        Ok(ScanRunOutcome::Blocked(blocked)) => {
+            let message = format!(
+                "library root {} is blocked ({}); scan not requested",
+                blocked.storage_root_id,
+                blocked.reason.as_str()
+            );
+            emit_err_with_data_and_warnings(
+                "scan",
+                BlockedData::from(blocked),
+                ErrorCode::Blocked.as_str(),
+                message,
+                None,
+                Some(local),
+                Vec::new(),
+            )?;
+            Ok(2)
+        }
+        Err(err) => {
+            let message = err.to_string();
+            emit_err_with_data_and_warnings(
+                "scan",
+                serde_json::json!({ "storage_root_id": root_id.0 }),
+                err.code(),
+                message,
+                None,
+                Some(local),
+                Vec::new(),
+            )?;
+            Ok(2)
         }
     }
 }
 
-impl From<ScanFileReport> for ScanFileData {
-    fn from(file: ScanFileReport) -> Self {
-        Self {
-            path: path_wire(&file.path),
-            status: status_wire(file.status).to_owned(),
-            file_asset_id: file.file_asset_id.map(|id| id.0),
-            file_version_id: file.file_version_id.map(|id| id.0),
-            file_location_id: file.file_location_id.map(|id| id.0),
-            media_snapshot_id: file.media_snapshot_id.map(|id| id.0),
-            content_hash: file.content_hash,
-            size_bytes: file.size_bytes,
-            probe_worker_id: file.probe_worker_id.map(|id| id.0),
-            bundle_id: file.bundle_id.map(|id| id.0),
-            bundle_member_role: file.bundle_member_role,
-            sidecars: file
-                .sidecars
-                .into_iter()
-                .map(ScanSidecarData::from)
-                .collect(),
-            error: file.error.map(ScanFileErrorData::from),
+/// Poll the session until it reaches a terminal state, bounded by the granted
+/// idle timeout plus a publication grace window.
+async fn wait_for_terminal(
+    cp: &voom_control_plane::ControlPlane,
+    local: Local,
+    scan_session_id: u64,
+) -> io::Result<i32> {
+    let session_id = voom_core::ScanSessionId(scan_session_id);
+    let deadline = std::time::Instant::now()
+        + Duration::from_secs(u64::from(DEFAULT_IDLE_TIMEOUT_SECONDS) + 60);
+    loop {
+        match cp.scan_session(session_id).await {
+            Ok(session) => {
+                if is_terminal(session.status) {
+                    let status = session.status.as_str().to_owned();
+                    let succeeded = status == "succeeded";
+                    return emit_ok(
+                        "scan",
+                        ScanOutcomeData {
+                            scan_session_id,
+                            status,
+                            observation_count: session.observation_count,
+                            retired_location_count: session.retired_location_count,
+                        },
+                        Some(local),
+                        Vec::new(),
+                    )
+                    .map(|()| if succeeded { 0 } else { 2 });
+                }
+            }
+            Err(err) => {
+                let message = err.to_string();
+                emit_err_with_data_and_warnings(
+                    "scan",
+                    serde_json::json!({ "scan_session_id": scan_session_id }),
+                    err.code(),
+                    message,
+                    None,
+                    Some(local),
+                    Vec::new(),
+                )?;
+                return Ok(2);
+            }
         }
-    }
-}
-
-impl From<ScanSidecarReport> for ScanSidecarData {
-    fn from(sidecar: ScanSidecarReport) -> Self {
-        Self {
-            path: path_wire(&sidecar.path),
-            file_asset_id: sidecar.file_asset_id.0,
-            file_version_id: sidecar.file_version_id.0,
-            file_location_id: sidecar.file_location_id.0,
-            bundle_id: sidecar.bundle_id.0,
-            bundle_member_role: sidecar.bundle_member_role,
-            content_hash: sidecar.content_hash,
-            size_bytes: sidecar.size_bytes,
+        if std::time::Instant::now() >= deadline {
+            emit_err_with_data_and_warnings(
+                "scan",
+                serde_json::json!({ "scan_session_id": scan_session_id }),
+                ErrorCode::RequestTimeout.as_str(),
+                format!("scan session {scan_session_id} did not reach a terminal state in time"),
+                None,
+                Some(local),
+                Vec::new(),
+            )?;
+            return Ok(2);
         }
+        tokio::time::sleep(POLL_INTERVAL).await;
     }
 }
 
-impl From<ScanFileErrorReport> for ScanFileErrorData {
-    fn from(error: ScanFileErrorReport) -> Self {
-        Self {
-            code: error.code.as_str(),
-            failure_class: failure_class_wire(error.failure_class),
-            message: error.message,
-        }
-    }
-}
-
-fn path_wire(path: &Path) -> String {
-    path.to_str()
-        .map_or_else(|| non_utf8_path_wire(path), str::to_owned)
-}
-
-#[cfg(unix)]
-fn non_utf8_path_wire(path: &Path) -> String {
-    use std::os::unix::ffi::OsStrExt;
-
-    let mut encoded = String::from("os_bytes_hex:");
-    for byte in path.as_os_str().as_bytes() {
-        use std::fmt::Write as _;
-
-        let _ = write!(&mut encoded, "{byte:02x}");
-    }
-    encoded
-}
-
-#[cfg(not(unix))]
-fn non_utf8_path_wire(path: &Path) -> String {
-    path.display().to_string()
-}
-
-fn mode_wire(mode: ScanMode) -> &'static str {
-    match mode {
-        ScanMode::File => "file",
-        ScanMode::Directory => "directory",
-    }
-}
-
-fn status_wire(status: ScanReportFileStatus) -> &'static str {
-    match status {
-        ScanReportFileStatus::Scanned => "scanned",
-        ScanReportFileStatus::ScannedHardlink => "scanned_hardlink",
-        ScanReportFileStatus::SkippedInaccessible => "skipped_inaccessible",
-        ScanReportFileStatus::SkippedUnsupportedExtension => "skipped_unsupported_extension",
-        ScanReportFileStatus::FailedContentDrift => "failed_content_drift",
-        ScanReportFileStatus::Failed => "failed",
-    }
-}
-
-#[must_use]
-pub fn failure_class_wire(class: FailureClass) -> String {
-    serde_json::to_value(class)
-        .ok()
-        .and_then(|value| value.as_str().map(str::to_owned))
-        .unwrap_or_else(|| "malformed_worker_result".to_owned())
+/// Terminal scan-session statuses (mirrors the store's state machine).
+fn is_terminal(status: voom_core::ScanSessionStatus) -> bool {
+    matches!(
+        status,
+        voom_core::ScanSessionStatus::Succeeded
+            | voom_core::ScanSessionStatus::Failed
+            | voom_core::ScanSessionStatus::Cancelled
+            | voom_core::ScanSessionStatus::Stale
+    )
 }
 
 #[cfg(test)]

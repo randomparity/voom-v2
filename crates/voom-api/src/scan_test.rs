@@ -1110,6 +1110,7 @@ fn batch_hash_request(
             modified_at: iso_second(modified_seconds),
             stability_started_at: iso_second(started_seconds),
             stability_confirmed_at: iso_second(confirmed_seconds),
+            evidence: None,
         }],
     }
 }
@@ -1394,6 +1395,7 @@ fn observation(locator: &str, object_identity: &str) -> Value {
         modified_at: time::OffsetDateTime::UNIX_EPOCH,
         stability_started_at: time::OffsetDateTime::UNIX_EPOCH,
         stability_confirmed_at: time::OffsetDateTime::UNIX_EPOCH,
+        evidence: None,
     })
     .unwrap()
 }

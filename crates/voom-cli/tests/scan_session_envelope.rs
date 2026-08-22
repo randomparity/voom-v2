@@ -524,6 +524,7 @@ fn batch_input(node_id: NodeId, id: ScanSessionId, token: &SecretString) -> Remo
             modified_at: at(FIXED_TIME),
             stability_started_at: at(FIXED_TIME),
             stability_confirmed_at: at(FIXED_TIME),
+            evidence: None,
         }],
     }
 }

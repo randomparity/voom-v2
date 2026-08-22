@@ -17,12 +17,7 @@
 //! `cargo test --workspace`; it skips with a clear message when ffmpeg, ffprobe,
 //! or mkvmerge is absent.
 
-#![expect(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::panic,
-    reason = "integration test setup should fail loudly with direct assertions"
-)]
+#![expect(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use std::path::Path;
 use std::process::Command;
@@ -30,12 +25,12 @@ use std::time::Duration;
 
 use voom_control_plane::ControlPlane;
 use voom_control_plane::policy::{ComplianceExecutionOptions, PolicyInputFromScanInput};
-use voom_control_plane::scan::{RootScanOutcome, ScanReportFileStatus};
 use voom_control_plane::workflow::CoordinatorOutcome;
 use voom_core::FileVersionId;
 use voom_store::repo::execution::workflow_summaries::{
     FilePhaseOutcome, PhaseOutcome, SqliteWorkflowSummaryRepo,
 };
+use voom_test_support::scan_seed::{SeedFile, seed_scanned_files};
 use voom_test_support::worker::{
     TestWorkerConfig, TestWorkerLaunch, cargo_build_package, hide_stale_fake_ffprobe_sibling,
     target_debug_binary,
@@ -114,7 +109,7 @@ async fn phase_barrier_runs_transcode_remux_audio_chain_end_to_end() {
         .unwrap()
         .with_local_node_id(Some(voom_core::NodeId(9_000_001)));
 
-    let scanned = scan_one(&cp, &source).await;
+    let scanned = scan_one(&cp, &url, &root, &source).await;
     let scanned_version = scanned.file_version_id;
     let policy = cp
         .create_policy_document("sprint-16-combined", COMBINED_POLICY)
@@ -349,22 +344,60 @@ struct ScannedFile {
     media_snapshot_id: voom_core::MediaSnapshotId,
 }
 
-async fn scan_one(cp: &ControlPlane, source: &Path) -> ScannedFile {
-    let outcome = cp
-        .scan_library_root(voom_store::test_support::TEST_STORAGE_ROOT_ID)
-        .await
-        .unwrap();
-    let RootScanOutcome::Scanned(scan) = outcome else {
-        unreachable!("active local test root must scan")
-    };
-    let scanned = scan
-        .files
-        .iter()
-        .find(|file| file.path == source && file.status == ScanReportFileStatus::Scanned)
-        .unwrap();
+async fn scan_one(cp: &ControlPlane, url: &str, root: &Path, source: &Path) -> ScannedFile {
+    let locator = source
+        .strip_prefix(root)
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .replace(std::path::MAIN_SEPARATOR, "/");
+    // Faithful to `generate_combined_fixture` as probed by real ffprobe: one
+    // h264 video plus two title-less mono aac tracks (eng default, spa not).
+    let seeded = seed_scanned_files(
+        cp,
+        url,
+        voom_store::test_support::TEST_STORAGE_ROOT_ID,
+        &[SeedFile {
+            locator: &locator,
+            path: source,
+            probe_snapshot: serde_json::json!({
+                "format": "sprint10-v1",
+                "container": { "format_name": "matroska,webm" },
+                "streams": [
+                    {
+                        "index": 0,
+                        "kind": "video",
+                        "codec_name": "h264",
+                        "width": 32,
+                        "height": 32,
+                        "pixel_format": "yuv420p",
+                        "disposition": { "default": false, "forced": false, "commentary": false },
+                    },
+                    {
+                        "index": 1,
+                        "kind": "audio",
+                        "codec_name": "aac",
+                        "language": "eng",
+                        "channels": 1,
+                        "disposition": { "default": true, "forced": false, "commentary": false },
+                    },
+                    {
+                        "index": 2,
+                        "kind": "audio",
+                        "codec_name": "aac",
+                        "language": "spa",
+                        "channels": 1,
+                        "disposition": { "default": false, "forced": false, "commentary": false },
+                    },
+                ],
+            }),
+        }],
+    )
+    .await
+    .unwrap();
     ScannedFile {
-        file_version_id: scanned.file_version_id.unwrap(),
-        media_snapshot_id: scanned.media_snapshot_id.unwrap(),
+        file_version_id: seeded[0].file_version_id,
+        media_snapshot_id: seeded[0].media_snapshot_id,
     }
 }
 

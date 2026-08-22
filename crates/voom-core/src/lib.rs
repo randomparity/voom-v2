@@ -155,6 +155,10 @@ pub use taxonomy::execution_vocab::{
     NodeIncarnationEndReason, NodeIncarnationStatus, NodeKind, NodeStatus, WorkerKind, WorkerStatus,
 };
 pub use taxonomy::scan::{ScanSessionStatus, ScanTerminalReason};
+pub use taxonomy::scan_evidence::{
+    FileKeyFacts, MAX_EVIDENCE_BYTES, MAX_EVIDENCE_SIDECARS, ScanObservationEvidence,
+    ScanSidecarEvidence,
+};
 pub use ticket_operation::{
     NormalizedTicketOperation, TicketOperation, WORKFLOW_OPERATION_NAMESPACE,
 };

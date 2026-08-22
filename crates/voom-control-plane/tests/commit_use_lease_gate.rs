@@ -18,15 +18,43 @@ use voom_test_support::TempDatabase;
 
 use voom_control_plane::ControlPlane;
 use voom_control_plane::artifact::{CommitArtifactInput, StageCopyInput, VerifyArtifactInput};
-use voom_control_plane::scan::RootScanOutcome;
 use voom_core::ErrorCode;
 use voom_store::repo::media::use_leases::{
     BlockingMode, IssuerKind, LeaseScope, NewUseLease, UseLeaseKind, UseLeaseReleaseReason,
 };
+use voom_test_support::scan_seed::{SeedFile, seed_scanned_files};
 use voom_test_support::worker::{
     FfprobeSiblingGuard, cargo_bin_or_build, install_fake_ffprobe_sibling, target_debug_binary,
     workspace_root,
 };
+
+/// Canned normalized probe snapshot matching what the fake ffprobe sibling
+/// (`basic-mp4.json`) reports once `voom-ffprobe-worker` normalizes it, so the
+/// seeded source snapshot agrees with every later staged-artifact probe.
+fn basic_mp4_probe_snapshot() -> serde_json::Value {
+    serde_json::json!({
+        "format": "sprint10-v1",
+        "container": {
+            "format_name": "mov,mp4,m4a,3gp,3g2,mj2",
+            "format_long_name": "QuickTime / MOV",
+        },
+        "streams": [
+            {
+                "index": 0,
+                "kind": "video",
+                "codec_name": "h264",
+                "width": 320,
+                "height": 180,
+            },
+            {
+                "index": 1,
+                "kind": "audio",
+                "codec_name": "aac",
+                "channels": 2,
+            },
+        ],
+    })
+}
 
 const BASIC_FFPROBE_JSON: &str =
     include_str!("../../voom-ffprobe-worker/fixtures/ffprobe/basic-mp4.json");
@@ -35,7 +63,7 @@ const BASIC_FFPROBE_JSON: &str =
 async fn blocking_use_lease_fails_commit_before_target_is_written() {
     let _ffprobe_guard = install_worker_siblings();
     let (cp, db, dir) = fixture().await;
-    let verified = verified_fixture(&cp, dir.path(), "blocked").await;
+    let verified = verified_fixture(&cp, &db, dir.path(), "blocked").await;
 
     let lease = cp
         .use_leases()
@@ -69,8 +97,8 @@ async fn blocking_use_lease_fails_commit_before_target_is_written() {
 #[tokio::test]
 async fn released_lease_does_not_block_commit() {
     let _ffprobe_guard = install_worker_siblings();
-    let (cp, _db, dir) = fixture().await;
-    let verified = verified_fixture(&cp, dir.path(), "released").await;
+    let (cp, db, dir) = fixture().await;
+    let verified = verified_fixture(&cp, &db, dir.path(), "released").await;
 
     let lease = cp
         .use_leases()
@@ -102,8 +130,8 @@ async fn released_lease_does_not_block_commit() {
 #[tokio::test]
 async fn ttl_expired_lease_does_not_block_commit() {
     let _ffprobe_guard = install_worker_siblings();
-    let (cp, _db, dir) = fixture().await;
-    let verified = verified_fixture(&cp, dir.path(), "expired").await;
+    let (cp, db, dir) = fixture().await;
+    let verified = verified_fixture(&cp, &db, dir.path(), "expired").await;
 
     // Acquired an hour ago with a 1s TTL — expired against the control-plane
     // clock, but never swept (release_reason still NULL).
@@ -137,7 +165,7 @@ async fn ttl_expired_lease_does_not_block_commit() {
 async fn advisory_lease_is_recorded_in_commit_event() {
     let _ffprobe_guard = install_worker_siblings();
     let (cp, db, dir) = fixture().await;
-    let verified = verified_fixture(&cp, dir.path(), "advisory").await;
+    let verified = verified_fixture(&cp, &db, dir.path(), "advisory").await;
 
     let lease = cp
         .use_leases()
@@ -287,26 +315,28 @@ fn artifact_tempdir() -> TempDir {
     TempDir::new_in(std::env::current_dir().unwrap()).unwrap()
 }
 
-async fn verified_fixture(cp: &ControlPlane, dir: &Path, name: &str) -> StagedFixture {
+async fn verified_fixture(cp: &ControlPlane, db: &Db, dir: &Path, name: &str) -> StagedFixture {
     let source_path = dir.join(format!("{name}-source.mp4"));
     std::fs::copy(tiny_media_fixture(), &source_path).unwrap();
-    let outcome = cp
-        .scan_library_root(voom_store::test_support::TEST_STORAGE_ROOT_ID)
-        .await
-        .unwrap();
-    let RootScanOutcome::Scanned(scan) = outcome else {
-        unreachable!("active local test root must scan")
-    };
-    let scanned = scan
-        .files
-        .iter()
-        .find(|file| file.path == source_path)
-        .unwrap();
+    let locator = format!("{name}-source.mp4");
+    let seeded = seed_scanned_files(
+        cp,
+        &db.url,
+        voom_store::test_support::TEST_STORAGE_ROOT_ID,
+        &[SeedFile {
+            locator: &locator,
+            path: &source_path,
+            probe_snapshot: basic_mp4_probe_snapshot(),
+        }],
+    )
+    .await
+    .unwrap();
+    let seeded = &seeded[0];
     let staging_path = dir.join(format!("{name}-staged.mp4"));
     let staged = cp
         .stage_copy(StageCopyInput {
-            file_version_id: scanned.file_version_id.unwrap(),
-            source_location_id: scanned.file_location_id,
+            file_version_id: seeded.file_version_id,
+            source_location_id: Some(seeded.file_location_id),
             staging_path: staging_path.clone(),
         })
         .await

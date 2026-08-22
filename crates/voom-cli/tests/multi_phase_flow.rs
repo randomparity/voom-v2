@@ -28,11 +28,11 @@ use std::process::Command;
 
 use serde_json::{Value, json};
 use voom_control_plane::ControlPlane;
-use voom_control_plane::scan::{RootScanOutcome, ScanReportFileStatus};
 use voom_core::FileVersionId;
 use voom_policy::{MediaSnapshotInput, PolicyInputSetDraft, PolicyInputSourceKind, TargetRef};
 use voom_store::test_support::sqlite_url_for;
 use voom_test_support::TempDatabase;
+use voom_test_support::scan_seed::{SeedFile, seed_scanned_files};
 use voom_test_support::worker::{
     TestWorkerConfig, TestWorkerLaunch, hide_stale_fake_ffprobe_sibling, target_debug_binary,
 };
@@ -107,7 +107,7 @@ async fn multi_phase_execute_then_report_by_job_id() {
         .unwrap()
         .with_local_node_id(Some(voom_core::NodeId(9_000_001)));
 
-    let file = scan_one(&cp, &source).await;
+    let file = scan_one(&cp, &url, &root, &source).await;
     let policy = cp
         .create_policy_document(
             "video-transcode-hevc-archive",
@@ -276,22 +276,40 @@ struct ScannedFile {
     media_snapshot_id: Option<voom_core::MediaSnapshotId>,
 }
 
-async fn scan_one(cp: &ControlPlane, source: &Path) -> ScannedFile {
-    let outcome = cp
-        .scan_library_root(voom_store::test_support::TEST_STORAGE_ROOT_ID)
-        .await
-        .unwrap();
-    let RootScanOutcome::Scanned(scan) = outcome else {
-        panic!("active local test root must scan")
-    };
-    let scanned = scan
-        .files
-        .iter()
-        .find(|file| file.path == source && file.status == ScanReportFileStatus::Scanned)
-        .unwrap();
+async fn scan_one(cp: &ControlPlane, url: &str, root: &Path, source: &Path) -> ScannedFile {
+    let locator = source
+        .strip_prefix(root)
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .replace(std::path::MAIN_SEPARATOR, "/");
+    let seeded = seed_scanned_files(
+        cp,
+        url,
+        voom_store::test_support::TEST_STORAGE_ROOT_ID,
+        &[SeedFile {
+            locator: &locator,
+            path: source,
+            probe_snapshot: json!({
+                "format": "sprint10-v1",
+                "container": { "format_name": "mov,mp4,m4a,3gp,3g2,mj2" },
+                "streams": [{
+                    "index": 0,
+                    "kind": "video",
+                    "codec_name": "h264",
+                    "width": 32,
+                    "height": 32,
+                    "disposition": { "default": true, "forced": false, "commentary": false },
+                }],
+            }),
+        }],
+    )
+    .await
+    .unwrap();
+    let seeded = &seeded[0];
     ScannedFile {
-        file_version_id: scanned.file_version_id.unwrap(),
-        media_snapshot_id: scanned.media_snapshot_id,
+        file_version_id: seeded.file_version_id,
+        media_snapshot_id: Some(seeded.media_snapshot_id),
     }
 }
 

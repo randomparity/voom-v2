@@ -20,6 +20,6 @@ expression: json
   "warnings": [],
   "error": {
     "code": "BLOCKED",
-    "message": "library root 1 is blocked (root_disabled); not scanned"
+    "message": "library root 1 is blocked (root_disabled); scan not requested"
   }
 }

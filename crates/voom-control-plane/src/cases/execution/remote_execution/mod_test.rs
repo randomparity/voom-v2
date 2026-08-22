@@ -1846,6 +1846,7 @@ async fn remote_recover_marks_scan_sessions_stale() {
                 modified_at: T0,
                 stability_started_at: T0,
                 stability_confirmed_at: T0,
+                evidence: None,
             }],
         })
         .await

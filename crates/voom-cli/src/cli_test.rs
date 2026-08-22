@@ -149,9 +149,13 @@ fn scan_session_rejects_invalid_cancel_reasons_and_missing_subcommand() {
 }
 
 #[test]
-fn legacy_scan_parse_contract_is_unchanged() {
+fn scan_parse_contract_is_root_plus_optional_no_wait() {
     assert_eq!(
         parsed_command(&["voom", "scan", "--root", "7"]),
-        "Scan { root: 7 }"
+        "Scan { root: 7, no_wait: false }"
+    );
+    assert_eq!(
+        parsed_command(&["voom", "scan", "--root", "7", "--no-wait"]),
+        "Scan { root: 7, no_wait: true }"
     );
 }

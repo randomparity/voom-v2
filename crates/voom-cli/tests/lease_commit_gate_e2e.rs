@@ -8,9 +8,10 @@
 //! #282 end-to-end: a manual use-lease acquired through `voom lease acquire`
 //! blocks a real `voom artifact commit` via the #270 commit safety gate, and
 //! `voom lease force-release` unblocks it. Everything is driven through the
-//! shipped `voom` binary against one shared on-disk `SQLite` database; scan,
-//! verify, and the post-commit reprobe use the built worker binaries with a
-//! canned ffprobe (no ffmpeg required).
+//! shipped `voom` binary against one shared on-disk `SQLite` database; identity
+//! rows are seeded through the durable scan-session chain (`scan_seed`) and
+//! verify / the post-commit reprobe use built worker binaries with a canned
+//! ffprobe (no ffmpeg required).
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -18,8 +19,10 @@ use std::sync::OnceLock;
 
 use serde_json::Value;
 use tempfile::TempDir;
+use voom_control_plane::ControlPlane;
 use voom_store::test_support::sqlite_url_for;
 use voom_test_support::TempDatabase;
+use voom_test_support::scan_seed::{SeedFile, seed_scanned_files};
 use voom_test_support::worker::cargo_bin_or_build;
 
 const BASIC_FFPROBE_JSON: &str =
@@ -87,17 +90,24 @@ async fn manual_lock_blocks_commit_and_force_release_unblocks_it() {
         });
     }
 
-    // Scan the fixture and stage + verify an artifact ready to commit.
-    let scan = run(
-        cmd(&url).args([
-            "scan",
-            "--root",
-            &voom_store::test_support::TEST_STORAGE_ROOT_ID.0.to_string(),
-        ]),
-        0,
-    );
-    let file_version_id = id(&scan["data"]["files"][0]["file_version_id"]);
-    let file_location_id = id(&scan["data"]["files"][0]["file_location_id"]);
+    // Seed the fixture's identity rows, then stage + verify an artifact ready
+    // to commit.
+    let cp = ControlPlane::open(&url).await.unwrap();
+    let seeded_source = seed_scanned_files(
+        &cp,
+        &url,
+        voom_store::test_support::TEST_STORAGE_ROOT_ID,
+        &[SeedFile {
+            locator: "tiny.mp4",
+            path: &source,
+            probe_snapshot: basic_mp4_probe_snapshot(),
+        }],
+    )
+    .await
+    .unwrap();
+    let seeded_source = &seeded_source[0];
+    let file_version_id = seeded_source.file_version_id.0;
+    let file_location_id = seeded_source.file_location_id.0;
 
     let stage = run(
         cmd(&url)
@@ -278,6 +288,7 @@ fn success_ffprobe_binary() -> &'static PathBuf {
              {BASIC_FFPROBE_JSON}\n\
              JSON\n"
         );
+
         let path = dir.path().join("ffprobe");
         std::fs::write(&path, script).unwrap();
         let mut permissions = std::fs::metadata(&path).unwrap().permissions();
@@ -286,6 +297,33 @@ fn success_ffprobe_binary() -> &'static PathBuf {
         (dir, path)
     })
     .1
+}
+
+/// Canned normalized probe snapshot matching what the real ffprobe worker
+/// reports for the tiny fixture (`basic-mp4.json` once normalized).
+fn basic_mp4_probe_snapshot() -> Value {
+    serde_json::json!({
+        "format": "sprint10-v1",
+        "container": {
+            "format_name": "mov,mp4,m4a,3gp,3g2,mj2",
+            "format_long_name": "QuickTime / MOV",
+        },
+        "streams": [
+            {
+                "index": 0,
+                "kind": "video",
+                "codec_name": "h264",
+                "width": 320,
+                "height": 180,
+            },
+            {
+                "index": 1,
+                "kind": "audio",
+                "codec_name": "aac",
+                "channels": 2,
+            },
+        ],
+    })
 }
 
 fn run(command: &mut Command, expected: i32) -> Value {

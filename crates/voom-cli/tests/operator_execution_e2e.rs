@@ -24,6 +24,8 @@ use std::process::Command;
 use std::time::Duration;
 
 use serde_json::Value;
+use voom_control_plane::ControlPlane;
+use voom_test_support::scan_seed::{SeedFile, seed_scanned_files};
 use voom_test_support::worker::hide_stale_fake_ffprobe_sibling;
 
 #[path = "support/local_worker.rs"]
@@ -49,7 +51,7 @@ const BUILD_TIMEOUT: Duration = Duration::from_mins(5);
 async fn operator_runs_real_media_pipeline_through_cli() {
     prepare_worker_binaries();
     let _ffprobe_guard = hide_stale_fake_ffprobe_sibling("operator-execution-e2e").unwrap();
-    let (_tmp, root, library, url) = prepare_operator_fixture();
+    let (_tmp, _root, library, url) = prepare_operator_fixture();
     assert_ok(&run_voom(&url, &["init"]), "init");
     let pool = voom_store::connect(&url).await.unwrap();
     voom_store::test_support::seed_test_storage_root(&pool)
@@ -105,7 +107,7 @@ async fn operator_runs_real_media_pipeline_through_cli() {
     let mut mkvtoolnix = LocalWorker::spawn(&url, "mkvtoolnix").unwrap();
     ffmpeg.wait_for_ready(READY_TIMEOUT).unwrap();
     mkvtoolnix.wait_for_ready(READY_TIMEOUT).unwrap();
-    let (policy_version_id, input_set_id) = create_library_policy(&url, &root);
+    let (policy_version_id, input_set_id) = create_library_policy(&url, &library).await;
 
     let out_dir = library.join("out");
     let staging_root = library.join("stage");
@@ -137,26 +139,28 @@ async fn operator_runs_real_media_pipeline_through_cli() {
     assert_no_live_worker(&final_json, mkvtoolnix_id);
 }
 
-fn create_library_policy(url: &str, root: &Path) -> (u64, u64) {
-    let scan = run_voom(
+async fn create_library_policy(url: &str, library: &Path) -> (u64, u64) {
+    // Seed the one video's identity rows through the real scan-session chain;
+    // notes.txt never becomes a file-version because only media files are
+    // seeded.
+    let cp = ControlPlane::open(url).await.unwrap();
+    let source = library.join("Movie.mp4");
+    let seeded = seed_scanned_files(
+        &cp,
         url,
-        &[
-            "scan",
-            "--root",
-            &voom_store::test_support::TEST_STORAGE_ROOT_ID.0.to_string(),
-        ],
-    );
-    let scan_json = assert_ok(&scan, "scan");
-    assert_eq!(
-        scan_json["data"]["summary"]["ingested"], 1,
-        "exactly the one video is ingested: {scan_json}"
-    );
-    assert_eq!(
-        scan_json["data"]["summary"]["skipped"], 1,
-        "notes.txt is skipped at scan as an unsupported extension: {scan_json}"
-    );
+        voom_store::test_support::TEST_STORAGE_ROOT_ID,
+        &[SeedFile {
+            locator: "Movie.mp4",
+            path: &source,
+            probe_snapshot: basic_mp4_probe_snapshot(),
+        }],
+    )
+    .await
+    .unwrap();
+    assert_eq!(seeded.len(), 1, "exactly the one video is ingested");
 
-    let policy_file = root.join("remux-and-hevc.voom");
+    let policy_file = library.join("remux-and-hevc.voom");
+
     std::fs::write(&policy_file, POLICY).unwrap();
     let policy = run_voom(
         url,
@@ -463,4 +467,26 @@ fn generate_h264_fixture(path: &Path) {
         "{}",
         output.diagnostics("ffmpeg fixture generation")
     );
+}
+
+/// Canned normalized probe snapshot matching what the real ffprobe worker
+/// reports for the generated video-only h264 fixture.
+fn basic_mp4_probe_snapshot() -> Value {
+    serde_json::json!({
+        "format": "sprint10-v1",
+        "container": {
+            "format_name": "mov,mp4,m4a,3gp,3g2,mj2",
+            "format_long_name": "QuickTime / MOV",
+        },
+        "streams": [
+            {
+                "index": 0,
+                "kind": "video",
+                "codec_name": "h264",
+                "width": 320,
+                "height": 180,
+                "disposition": { "default": true, "forced": false, "commentary": false },
+            },
+        ],
+    })
 }

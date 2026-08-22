@@ -289,7 +289,7 @@ mod library_envelope {
         let fx = fixture().await;
         library_and_root(&fx.url);
         run(&fx.url, &["library", "root", "disable", "--root-id", "1"]);
-        let (code, mut json) = run(&fx.url, &["scan", "--root", "1"]);
+        let (code, mut json) = run(&fx.url, &["scan", "--root", "1", "--no-wait"]);
         assert_eq!(code, 2);
         assert_eq!(json["command"], "scan");
         assert_eq!(json["error"]["code"], "BLOCKED");
@@ -302,7 +302,7 @@ mod library_envelope {
     #[tokio::test]
     async fn scan_root_missing_is_not_found() {
         let fx = fixture().await;
-        let (code, json) = run(&fx.url, &["scan", "--root", "7"]);
+        let (code, json) = run(&fx.url, &["scan", "--root", "7", "--no-wait"]);
         assert_eq!(code, 2);
         assert_eq!(json["error"]["code"], "NOT_FOUND");
     }

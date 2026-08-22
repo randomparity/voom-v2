@@ -52,7 +52,9 @@ use crate::artifact::fs::{
     recover_staged_add_only_with_temp, require_expected_staging_facts, unique_temp_sibling_path,
 };
 use crate::cases::{append_event, begin_immediate_tx, begin_tx, commit_tx};
-use crate::scan::persist::{ObservedCandidateFacts, snapshot_with_stream_ids, verify_probe_facts};
+use crate::scan::worker::{
+    ObservedFileFacts as ObservedCandidateFacts, snapshot_with_stream_ids, verify_probe_facts,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StagedAudioArtifact {
@@ -921,8 +923,7 @@ async fn dispatch_verified_result_probe(
 ) -> Result<ProbedAudioResult, VoomError> {
     let request = result_probe_request(staging_path, expected)?;
     let probed = dispatcher.dispatch_result_probe(cp, request).await?;
-    verify_probe_facts(expected, &probed.result)
-        .map_err(|error| VoomError::ArtifactChecksumMismatch(error.message().to_owned()))?;
+    verify_probe_facts(expected, &probed.result)?;
     Ok(probed)
 }
 

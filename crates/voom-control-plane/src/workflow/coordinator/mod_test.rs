@@ -3600,9 +3600,9 @@ async fn promote_terminal_artifacts_rejects_symlinked_working_dir() {
         .join("Movie.mkv")
         .display()
         .to_string();
-    let facts = crate::scan::hash::observe_candidate_file(&working.join("Movie.mkv"))
-        .await
-        .unwrap();
+    let seeded_bytes = std::fs::read(working.join("Movie.mkv")).unwrap();
+    let facts_content_hash = format!("blake3:{}", blake3::hash(&seeded_bytes).to_hex());
+    let facts_size_bytes = u64::try_from(seeded_bytes.len()).unwrap();
     let outcome = cp
         .record_discovered_file(
             DiscoveredFile {
@@ -3610,8 +3610,8 @@ async fn promote_terminal_artifacts_rejects_symlinked_working_dir() {
                 provider_relative_locator: voom_store::test_support::test_relative_locator(
                     &symlinked_value,
                 ),
-                content_hash: facts.content_hash,
-                size_bytes: facts.size_bytes,
+                content_hash: facts_content_hash,
+                size_bytes: facts_size_bytes,
                 observed_at: T0,
                 proof: None,
             },

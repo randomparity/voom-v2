@@ -1,0 +1,19 @@
+---
+source: crates/voom-cli/tests/scan_envelope.rs
+expression: json
+---
+{
+  "schema_version": "0",
+  "command": "scan",
+  "status": "ok",
+  "data": {
+    "scan_session_id": 1,
+    "ticket_id": 1
+  },
+  "local": {
+    "db_url": "[db-url]",
+    "config_path": "[config-path]"
+  },
+  "warnings": [],
+  "error": null
+}

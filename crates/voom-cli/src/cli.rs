@@ -75,10 +75,13 @@ pub enum Command {
     /// Stage, verify, commit, or inspect artifacts.
     #[command(subcommand)]
     Artifact(ArtifactCommand),
-    /// Scan a configured node-owned storage root.
+    /// Request a durable scan run for a node-owned storage root.
     Scan {
         #[arg(long)]
         root: u64,
+        /// Exit after requesting; do not poll the session to its terminal state.
+        #[arg(long)]
+        no_wait: bool,
     },
     /// Request, inspect, reconcile, or cancel durable scan sessions.
     #[command(subcommand)]

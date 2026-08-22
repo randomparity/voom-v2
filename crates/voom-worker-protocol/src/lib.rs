@@ -38,6 +38,7 @@ pub use operations::audio::{
     validate_extract_audio_request, validate_extract_audio_result,
 };
 pub use operations::backup::{BackUpFileRequest, BackUpFileResult, BackUpFileStatus};
+pub use operations::hash_file::{HashFileRequest, HashFileResult, HashedSidecar};
 pub use operations::probe_file::{
     ExpectedFileFacts, ObservedFileFacts, ProbeFileRequest, ProbeFileResult, ProbeFileStatus,
 };
@@ -45,6 +46,11 @@ pub use operations::remux::{
     REMUX_CONTAINER_MKV, RemuxExpectedFacts, RemuxInput, RemuxObservedFacts, RemuxOutput,
     RemuxRequest, RemuxResult, RemuxSelection, RemuxStatus, RemuxStreamRef, RemuxTrackGroup,
     is_supported_remux_container,
+};
+pub use operations::scan_library::{
+    MAX_PROGRESS_CANDIDATES, MAX_PROGRESS_PAYLOAD_BYTES, ScanCandidate, ScanCandidateFile,
+    ScanLibraryRequest, ScanLibraryResult, ScanProgressDecodeError, decode_candidate_progress,
+    encode_candidate_progress,
 };
 pub use operations::transcode_video::{
     TRANSCODE_VIDEO_CODEC, TRANSCODE_VIDEO_CODEC_ALIAS_H265, TRANSCODE_VIDEO_CODEC_AV1,
