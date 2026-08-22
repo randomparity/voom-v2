@@ -151,6 +151,12 @@ pub enum Event {
     ArtifactCommitFailedPreMutation(ArtifactCommitFailedPreMutationPayload),
     #[serde(rename = "artifact.commit_recovery_required")]
     ArtifactCommitRecoveryRequired(ArtifactCommitRecoveryRequiredPayload),
+    #[serde(rename = "artifact.commit_intent_recorded")]
+    ArtifactCommitIntentRecorded(ArtifactCommitIntentRecordedPayload),
+    #[serde(rename = "artifact.commit_intent_authorized")]
+    ArtifactCommitIntentAuthorized(ArtifactCommitIntentAuthorizedPayload),
+    #[serde(rename = "artifact.commit_receipt_reported")]
+    ArtifactCommitReceiptReported(ArtifactCommitReceiptReportedPayload),
     #[serde(rename = "artifact.transcode_started")]
     ArtifactTranscodeStarted(ArtifactTranscodeStartedPayload),
     #[serde(rename = "artifact.transcode_progress")]
@@ -339,6 +345,9 @@ impl Event {
             Self::ArtifactCommitCompleted(_) => EventKind::ArtifactCommitCompleted,
             Self::ArtifactCommitFailedPreMutation(_) => EventKind::ArtifactCommitFailedPreMutation,
             Self::ArtifactCommitRecoveryRequired(_) => EventKind::ArtifactCommitRecoveryRequired,
+            Self::ArtifactCommitIntentRecorded(_) => EventKind::ArtifactCommitIntentRecorded,
+            Self::ArtifactCommitIntentAuthorized(_) => EventKind::ArtifactCommitIntentAuthorized,
+            Self::ArtifactCommitReceiptReported(_) => EventKind::ArtifactCommitReceiptReported,
             Self::ArtifactTranscodeStarted(_) => EventKind::ArtifactTranscodeStarted,
             Self::ArtifactTranscodeProgress(_) => EventKind::ArtifactTranscodeProgress,
             Self::ArtifactTranscodeSucceeded(_) => EventKind::ArtifactTranscodeSucceeded,

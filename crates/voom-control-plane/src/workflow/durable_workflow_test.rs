@@ -305,8 +305,13 @@ async fn chaos_missed_heartbeat_uses_executor_watchdog() -> TestResult<()> {
 
 #[tokio::test]
 async fn benchmark_durable_workflow_reports_non_zero_throughput() -> TestResult<()> {
-    let _process_provider_guard = process_provider_test_guard().await;
-    let mut fixture = DurableWorkflowFixture::start_all_fake_providers().await?;
+    // In-process fake providers, not process ones: the benchmark verifies the
+    // summary math (non-zero throughput over populated dispatch/success
+    // counts), not process dispatch overhead. Out-of-process workers let a
+    // loaded runner corrupt a frame or lose a spawn and fail the whole
+    // workflow with MalformedWorkerResult — the same flake the unreachable
+    // runtime fixture below documents and avoids this way.
+    let mut fixture = DurableWorkflowFixture::start_all_in_process_fake_providers(1).await?;
     let result = async {
         let summary = fixture
             .executor()

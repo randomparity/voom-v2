@@ -180,7 +180,7 @@ impl ControlPlane {
         Ok(outcome)
     }
 
-    pub(super) async fn complete_remote_ok_in_tx<T>(
+    pub(crate) async fn complete_remote_ok_in_tx<T>(
         &self,
         tx: &mut Transaction<'_, Sqlite>,
         node_id: NodeId,
@@ -208,7 +208,7 @@ impl ControlPlane {
             .await
     }
 
-    pub(super) async fn complete_remote_error_in_tx(
+    pub(crate) async fn complete_remote_error_in_tx(
         &self,
         tx: &mut Transaction<'_, Sqlite>,
         node_id: NodeId,

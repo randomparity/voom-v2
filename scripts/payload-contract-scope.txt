@@ -39,3 +39,6 @@ crates/voom-core/src/taxonomy/owner_access_evidence.rs
 crates/voom-worker-protocol/src/operations/audio.rs
 # This defines the typed accelerator object read from worker_capabilities.extra.
 crates/voom-worker-protocol/src/video_acceleration.rs
+# Typed durable columns of artifact_commit_intents (expected_facts, receipt,
+# supplemental_receipt) decoded in this file (ADR 0074).
+crates/voom-store/src/repo/media/artifact_commit_intents.rs

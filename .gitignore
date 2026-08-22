@@ -17,6 +17,7 @@ Cargo.lock.bak
 
 # Local scratch and Python bytecode
 /.tmp/
+.tmp*/
 __pycache__/
 
 # Coverage artifacts (cargo-llvm-cov)

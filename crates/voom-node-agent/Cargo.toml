@@ -12,6 +12,7 @@ voom-core.workspace = true
 voom-worker-protocol.workspace = true
 
 async-trait.workspace = true
+blake3.workspace = true
 clap.workspace = true
 rand.workspace = true
 reqwest = { workspace = true, features = ["rustls"] }

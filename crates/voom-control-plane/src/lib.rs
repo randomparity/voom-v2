@@ -40,7 +40,8 @@ use voom_store::repo::{
     issues::SqliteIssueRepo,
     library::SqliteLibraryRepo,
     media::{
-        artifact_access_plans::SqliteArtifactAccessPlanRepo, artifacts::SqliteArtifactRepo,
+        artifact_access_plans::SqliteArtifactAccessPlanRepo,
+        artifact_commit_intents::SqliteArtifactCommitIntentRepo, artifacts::SqliteArtifactRepo,
         audio_extract_operations::SqliteAudioExtractOperationRepo,
         audio_synthesis_operations::SqliteAudioSynthesisOperationRepo, backups::SqliteBackupRepo,
         bundles::SqliteBundleRepo, identity::SqliteIdentityRepo, use_leases::SqliteUseLeaseRepo,
@@ -83,6 +84,19 @@ pub mod execution {
         RemoteRecoverReport, RemoteWorkerDeclaration,
     };
     pub use crate::cases::execution::tickets::PreLeaseFailureOutcome;
+}
+pub mod artifact_commit {
+    pub use crate::artifact::commit::intent::{
+        AppliedEvidence, AuthorizeCommitOutcome, CommitOutcomeEvidence, MismatchedEvidence,
+        OpenCommitIntent, OutcomeUnknownEvidence, RemoteCommitApplyingInput,
+        RemoteCommitApplyingOutcome, RemoteCommitAuthorizeInput, RemoteCommitCompleteInput,
+        RemoteCommitCompleteOutcome, RemoteCommitIntentsOpenInput, RemoteCommitIntentsOpenOutcome,
+        RemoteCommitOutcomeInput, RemoteCommitReceiptOutcome,
+    };
+    pub use crate::artifact::commit::{
+        COMMIT_CONVERGENCE_TIMEOUT, CommitArtifactCommandError, CommitArtifactInput,
+        CommitArtifactPreMutationReport, CommitArtifactReport,
+    };
 }
 
 pub mod policy {
@@ -145,6 +159,7 @@ pub struct ControlPlane {
     pub(crate) leases: SqliteLeaseRepo,
     pub(crate) remote_idempotency: SqliteRemoteIdempotencyRepo,
     pub(crate) scan_sessions: SqliteScanSessionRepo,
+    pub(crate) artifact_commit_intents: SqliteArtifactCommitIntentRepo,
     pub(crate) artifact_access_plans: SqliteArtifactAccessPlanRepo,
     pub(crate) artifacts: SqliteArtifactRepo,
     pub(crate) audio_extract_operations: SqliteAudioExtractOperationRepo,
@@ -186,6 +201,7 @@ impl std::fmt::Debug for ControlPlane {
             .field("nodes", &self.nodes)
             .field("node_incarnations", &self.node_incarnations)
             .field("leases", &self.leases)
+            .field("artifact_commit_intents", &self.artifact_commit_intents)
             .field("remote_idempotency", &self.remote_idempotency)
             .field("scan_sessions", &self.scan_sessions)
             .field("artifact_access_plans", &self.artifact_access_plans)
@@ -310,6 +326,7 @@ impl ControlPlane {
             node_incarnations: SqliteNodeIncarnationRepo::new(pool.clone()),
             leases: SqliteLeaseRepo::new(pool.clone()),
             remote_idempotency: SqliteRemoteIdempotencyRepo::new(pool.clone()),
+            artifact_commit_intents: SqliteArtifactCommitIntentRepo::new(pool.clone()),
             scan_sessions: SqliteScanSessionRepo::new(pool.clone()),
             artifact_access_plans: SqliteArtifactAccessPlanRepo::new(pool.clone()),
             artifacts: SqliteArtifactRepo::new(pool.clone()),

@@ -962,10 +962,12 @@ async fn synthesis_atomically_recovers_after_lineage_transaction_failure() {
     .unwrap_err();
 
     assert_eq!(error.error_code(), voom_core::ErrorCode::DbUnreachable);
+    // The fenced commit itself is terminal before the lineage transaction
+    // runs (ADR 0074): the result version exists and completion is durable.
     assert_table_count(&cp, "artifact_commit_records", 1).await;
-    assert_table_count(&cp, "file_versions", 1).await;
+    assert_table_count(&cp, "file_versions", 2).await;
     assert_table_count(&cp, "audio_synthesis_stream_lineage", 0).await;
-    assert_event_count(&cp, "artifact.commit_completed", 0).await;
+    assert_event_count(&cp, "artifact.commit_completed", 1).await;
     assert_event_count(&cp, "artifact.audio_transcode_succeeded", 0).await;
     sqlx::query("DROP TRIGGER fail_synthesis_lineage")
         .execute(cp.pool_for_test())
@@ -991,7 +993,8 @@ async fn synthesis_atomically_recovers_after_lineage_transaction_failure() {
     let counts_after_replay = synthesis_publication_counts(&cp).await;
     assert_eq!(counts_after_replay[0], counts_before_replay[0]);
     assert_eq!(counts_after_replay[1], counts_before_replay[1]);
-    assert_eq!(counts_after_replay[2], counts_before_replay[2] + 1);
+    // The committed generation was adopted: only the lineage-side rows grow.
+    assert_eq!(counts_after_replay[2], counts_before_replay[2]);
     assert_eq!(counts_after_replay[3], counts_before_replay[3] + 1);
     assert_eq!(counts_after_replay[4], counts_before_replay[4]);
     assert_eq!(counts_after_replay[5], counts_before_replay[5]);
@@ -2360,6 +2363,10 @@ async fn fixture() -> (crate::ControlPlane, voom_test_support::TempDatabase) {
     )
     .await
     .unwrap();
+    // Drive fenced commit intents to convergence from a simulated node.
+    let node = voom_test_support::commit_node::SimulatedOwnerNode::new().unwrap();
+    node.install(cp.pool_for_test()).await.unwrap();
+    let _auto_driver = crate::artifact::commit::commit_test_support::spawn_auto_driver(&cp, &node);
     (cp, db)
 }
 

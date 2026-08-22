@@ -1800,7 +1800,11 @@ async fn finalize_extract_set(
     input: &CommitAudioExtractSetInput,
     prepared: &[PreparedSidecarCommit],
 ) -> Result<Vec<CommittedAudioExtractOutput>, VoomError> {
-    let mut tx = begin_tx(&cp.pool).await?;
+    // Immediate: this transaction reads sidecar inputs and then writes
+    // commit rows; a deferred transaction would have to upgrade under load,
+    // which surfaces as a spurious `database is locked` instead of waiting
+    // out the pool's busy timeout.
+    let mut tx = begin_immediate_tx(&cp.pool).await?;
     let now = cp.clock().now();
     let mut committed = Vec::with_capacity(prepared.len());
     for (output, member) in input.outputs.iter().zip(prepared) {

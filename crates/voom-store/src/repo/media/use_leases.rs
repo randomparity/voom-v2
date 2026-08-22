@@ -14,6 +14,7 @@ use time::{Duration, OffsetDateTime};
 use voom_core::{BundleId, FileAssetId, FileLocationId, FileVersionId, UseLeaseId, VoomError};
 
 use super::Repository;
+use super::artifact_commit_intents::consult_artifact_intent_lock_in_tx;
 use super::commit_safety_gate::consult_pending_commit_lock_in_tx;
 use super::common::{i64_from_u64, iso8601, map_row_err, parse_iso8601, u64_from_i64};
 
@@ -610,6 +611,18 @@ impl SqliteUseLeaseRepo {
                 commit_id,
                 offending_scope.type_str(),
                 offending_scope.id_u64(),
+            )));
+        }
+
+        // Fenced artifact commit intents (ADR 0074): refuse blocking
+        // use leases while a non-terminal intent pins the requested
+        // scope — the fence stays blocking through recovery.
+        if let Some(reason) = consult_artifact_intent_lock_in_tx(tx, &input.scope).await? {
+            return Err(VoomError::Conflict(format!(
+                "use_lease scope {} {} blocked by {}",
+                input.scope.type_str(),
+                input.scope.id_u64(),
+                reason,
             )));
         }
 

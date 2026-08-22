@@ -196,6 +196,41 @@ async fn control_plane(root: &Path) -> (ControlPlane, String, TempDatabase) {
     voom_store::test_support::seed_test_storage_root(&pool)
         .await
         .unwrap();
+    // Background stand-in for the storage-owner agent (ADR 0074): drives the
+    // fenced commit intent so the pipeline's commit phase converges.
+    {
+        let node = voom_test_support::commit_node::SimulatedOwnerNode::new().unwrap();
+        node.install(&pool).await.unwrap();
+        let driver_cp = ControlPlane::open(&url).await.unwrap();
+        let driver_pool = pool.clone();
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            rt.block_on(async move {
+                loop {
+                    let pending: Option<(i64, i64)> = sqlx::query_as(
+                        "SELECT id, artifact_handle_id FROM artifact_commit_intents \
+                         WHERE state = 'pending' ORDER BY id ASC LIMIT 1",
+                    )
+                    .fetch_optional(&driver_pool)
+                    .await
+                    .unwrap();
+                    if let Some((_, handle)) = pending {
+                        let _ = node
+                            .drive_pending_commit(
+                                &driver_cp,
+                                &driver_pool,
+                                voom_core::ArtifactHandleId(u64::try_from(handle).unwrap()),
+                            )
+                            .await;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                }
+            });
+        });
+    }
     voom_store::test_support::set_test_storage_root_path(&pool, root)
         .await
         .unwrap();

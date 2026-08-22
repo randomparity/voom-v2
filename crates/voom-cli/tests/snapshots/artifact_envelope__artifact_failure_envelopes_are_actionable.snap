@@ -94,11 +94,19 @@ expression: json
     "status": "error",
     "data": {
       "artifact": {
+        "commit_record_id": 1,
         "artifact_handle_id": 2,
         "verification_id": 1,
         "target_path": "[artifact-dir]/drift-target.mp4",
-        "error_code": "ARTIFACT_CHECKSUM_MISMATCH",
-        "message": "artifact checksum mismatch: staged artifact facts no longer match the successful verification"
+        "state": "recovery_required",
+        "recovery_required": {
+          "recovery_reason": "intent_receipt_mismatched",
+          "target_path": "[artifact-dir]/drift-target.mp4",
+          "target_exists": false,
+          "temp_exists": false,
+          "staging_path": "",
+          "staging_exists": false
+        }
       }
     },
     "local": {
@@ -108,7 +116,7 @@ expression: json
     "warnings": [],
     "error": {
       "code": "ARTIFACT_CHECKSUM_MISMATCH",
-      "message": "artifact checksum mismatch: staged artifact facts no longer match the successful verification"
+      "message": "commit intent 1 reported mismatched"
     }
   },
   {
@@ -131,38 +139,6 @@ expression: json
     "error": {
       "code": "CONFIG_INVALID",
       "message": "config error: artifact path must not already exist: [artifact-dir]/already-exists.mp4"
-    }
-  },
-  {
-    "schema_version": "0",
-    "command": "artifact.commit",
-    "status": "error",
-    "data": {
-      "artifact": {
-        "commit_record_id": 1,
-        "artifact_handle_id": 5,
-        "verification_id": 4,
-        "target_path": "[artifact-dir]/long-target.mp4",
-        "temp_path": "[artifact-dir]/.voom-tmp.long-target.mp4.[temp]",
-        "state": "recovery_required",
-        "recovery_required": {
-          "recovery_reason": "promotion_failed",
-          "target_path": "[artifact-dir]/long-target.mp4",
-          "target_exists": false,
-          "temp_exists": false,
-          "staging_path": "[artifact-dir]/recovery-failure-staged.mp4",
-          "staging_exists": true
-        }
-      }
-    },
-    "local": {
-      "db_url": "[db-url]",
-      "config_path": "[config-path]"
-    },
-    "warnings": [],
-    "error": {
-      "code": "COMMIT_FAILURE",
-      "message": "commit failure: commit promotion requires recovery"
     }
   }
 ]

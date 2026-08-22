@@ -48,6 +48,45 @@ async fn manual_lock_blocks_commit_and_force_release_unblocks_it() {
     let staging = dir.path().join("staged.mp4");
     let target = dir.path().join("committed.mp4");
 
+    // Background stand-in for the storage-owner agent (ADR 0074): the CLI
+    // prepares a fenced intent; this thread drives it to convergence.
+    {
+        let driver_url = url.clone();
+        std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            runtime.block_on(async move {
+                let pool = voom_store::connect(&driver_url).await.unwrap();
+                let node = voom_test_support::commit_node::SimulatedOwnerNode::new().unwrap();
+                node.install(&pool).await.unwrap();
+                let cp = voom_control_plane::ControlPlane::open(&driver_url)
+                    .await
+                    .unwrap();
+                loop {
+                    let pending: Option<(i64, i64)> = sqlx::query_as(
+                        "SELECT id, artifact_handle_id FROM artifact_commit_intents \
+                         WHERE state = 'pending' ORDER BY id ASC LIMIT 1",
+                    )
+                    .fetch_optional(&pool)
+                    .await
+                    .unwrap();
+                    if let Some((_, handle)) = pending {
+                        let _ = node
+                            .drive_pending_commit(
+                                &cp,
+                                &pool,
+                                voom_core::ArtifactHandleId(u64::try_from(handle).unwrap()),
+                            )
+                            .await;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                }
+            });
+        });
+    }
+
     // Scan the fixture and stage + verify an artifact ready to commit.
     let scan = run(
         cmd(&url).args([
