@@ -120,7 +120,10 @@ terminal and prints the outcome envelope.
   both the 1000-observation route limit and an accumulated-evidence byte budget under the
   API's request-body cap (~1 MiB): the pump flushes whichever bound binds first, so a
   sidecar-dense root produces more, smaller batches instead of a deterministically rejected
-  submission.
+  submission. A single observation is bounded too: a primary contributes at most 64 sidecar
+  digest entries to its evidence payload, and a primary beyond that — or whose evidence
+  alone would exceed 64 KiB — degrades to an evidence-less observation with the overflow
+  counted, so no single file can make its batch permanently unsubmittable.
 - ADR 0067's 100,000 cumulative-observation session ceiling is inherited unchanged: a root
   enumerating more than that fails batch acceptance deterministically and re-requests
   reproduce the failure, where the transitional local scanner had no ceiling. Raising or
