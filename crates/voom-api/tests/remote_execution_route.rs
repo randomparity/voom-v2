@@ -805,6 +805,31 @@ async fn unconfigured_remote_execution_route_returns_api_error_envelope() {
 }
 
 async fn api_fixture() -> ApiFixture {
+    api_fixture_with_capabilities(
+        vec![NewWorkerCapabilityDraft {
+            operation: ticket_op(OP),
+            codecs: vec!["json".to_owned()],
+            hardware: Vec::new(),
+            artifact_access: vec!["shared_mount".to_owned()],
+            extra: json!({}),
+        }],
+        vec![NewWorkerGrantDraft {
+            can_execute: vec![ticket_op(OP)],
+            can_access_read: Vec::new(),
+            can_access_write: Vec::new(),
+            denies: Vec::new(),
+            max_parallel: json!({"*": 1}),
+        }],
+    )
+    .await
+}
+
+/// The fixture's single worker is registered with exactly the capability and
+/// grant drafts given, before the node incarnation is activated.
+async fn api_fixture_with_capabilities(
+    capabilities: Vec<NewWorkerCapabilityDraft>,
+    grants: Vec<NewWorkerGrantDraft>,
+) -> ApiFixture {
     let tmp = TempDatabase::new().unwrap();
     let url = sqlite_url_for(tmp.path());
     voom_store::init(&url).await.unwrap();
@@ -824,20 +849,8 @@ async fn api_fixture() -> ApiFixture {
             token: registered.token.clone(),
             name: "remote-worker".to_owned(),
             kind: WorkerKind::Remote,
-            capabilities: vec![NewWorkerCapabilityDraft {
-                operation: ticket_op(OP),
-                codecs: vec!["json".to_owned()],
-                hardware: Vec::new(),
-                artifact_access: vec!["shared_mount".to_owned()],
-                extra: json!({}),
-            }],
-            grants: vec![NewWorkerGrantDraft {
-                can_execute: vec![ticket_op(OP)],
-                can_access_read: Vec::new(),
-                can_access_write: Vec::new(),
-                denies: Vec::new(),
-                max_parallel: json!({"*": 1}),
-            }],
+            capabilities,
+            grants,
         })
         .await
         .unwrap();
@@ -908,4 +921,194 @@ async fn assert_unauthorized_envelope(res: Response<Body>, command: &str) {
         json["error"]["message"],
         "unauthorized: remote node authentication failed"
     );
+}
+
+/// One successful owner-local acquisition over the remote API (issue #478):
+/// a namespaced byte-work ticket whose canonical declaration resolves to the
+/// acquiring node leases, and the leased response dispatches the normalized
+/// bare operation together with the plan identity and its owner evidence.
+#[tokio::test]
+async fn acquire_leased_owner_local_byte_work_dispatches_normalized_operation() {
+    use voom_core::StorageProviderKind;
+    use voom_store::repo::library::libraries::{LibraryMediaKind, NewLibrary};
+    use voom_store::repo::library::library_roots::{
+        HiddenFilePolicy, LibraryScanMode, NewLibraryRoot, SymlinkPolicy,
+    };
+    let fixture = api_fixture_with_capabilities(
+        vec![
+            NewWorkerCapabilityDraft {
+                operation: ticket_op("synthetic.workflow.operation.transcode_video"),
+                codecs: vec!["json".to_owned()],
+                hardware: Vec::new(),
+                artifact_access: vec!["shared_mount".to_owned()],
+                extra: json!({}),
+            },
+            NewWorkerCapabilityDraft {
+                operation: ticket_op("transcode_video"),
+                codecs: vec!["json".to_owned()],
+                hardware: Vec::new(),
+                artifact_access: vec!["shared_mount".to_owned()],
+                extra: json!({}),
+            },
+        ],
+        vec![NewWorkerGrantDraft {
+            can_execute: vec![
+                ticket_op("synthetic.workflow.operation.transcode_video"),
+                ticket_op("transcode_video"),
+            ],
+            can_access_read: Vec::new(),
+            can_access_write: Vec::new(),
+            denies: Vec::new(),
+            max_parallel: json!({"*": 1}),
+        }],
+    )
+    .await;
+    // A live root owned by the acquiring node plus one rooted location, so the
+    // declaration resolves owner-local.
+    let library = fixture
+        .cp
+        .create_library(NewLibrary {
+            slug: "owner-local-api".to_owned(),
+            display_name: "Owner local api".to_owned(),
+            media_kind: LibraryMediaKind::Movie,
+            description: None,
+            enabled: true,
+        })
+        .await
+        .unwrap();
+    let root = fixture
+        .cp
+        .create_library_root(NewLibraryRoot {
+            library_id: library.id,
+            owner_node_id: fixture.node_id,
+            provider_kind: StorageProviderKind::LocalFilesystem,
+            provider_locator: voom_core::ProviderLocator::new("/owner-local-api".to_owned())
+                .unwrap(),
+            display_locator: "/owner-local-api".to_owned(),
+            include_globs: Vec::new(),
+            exclude_globs: Vec::new(),
+            extension_allowlist: Vec::new(),
+            scan_mode: LibraryScanMode::ManualRecursive,
+            symlink_policy: SymlinkPolicy::Reject,
+            hidden_file_policy: HiddenFilePolicy::Ignore,
+            max_depth: None,
+            stability_seconds: 0,
+            debounce_seconds: 0,
+            default_output_root_id: None,
+            default_staging_root_id: None,
+            default_backup_root_id: None,
+            enabled: true,
+        })
+        .await
+        .unwrap();
+    fixture
+        .cp
+        .activate_library_root(root.id, "owner-local-api".to_owned())
+        .await
+        .unwrap();
+    let pool = voom_store::connect(&fixture.url).await.unwrap();
+    let asset_id = sqlx::query("INSERT INTO file_assets (created_at, epoch) VALUES (?, 0)")
+        .bind("1970-01-01T00:00:00Z")
+        .execute(&pool)
+        .await
+        .unwrap()
+        .last_insert_rowid();
+    let version_id = sqlx::query(
+        "INSERT INTO file_versions (file_asset_id, content_hash, size_bytes, produced_by, \
+         produced_from_version_id, created_at, retired_at, epoch) \
+         VALUES (?, ?, 1, 'ingest', NULL, '1970-01-01T00:00:00Z', NULL, 0)",
+    )
+    .bind(asset_id)
+    .bind("owner-local-api")
+    .execute(&pool)
+    .await
+    .unwrap()
+    .last_insert_rowid();
+    let location_id = sqlx::query(
+        "INSERT INTO file_locations (file_version_id, address_state, storage_root_id, \
+         provider_relative_locator, observed_at, epoch) \
+         VALUES (?, 'rooted', ?, ?, '1970-01-01T00:00:00Z', 0)",
+    )
+    .bind(version_id)
+    .bind(i64::try_from(root.id.0).unwrap())
+    .bind("movie.mkv")
+    .execute(&pool)
+    .await
+    .unwrap()
+    .last_insert_rowid();
+
+    // The workflow payload is frozen to the canonical encoding ADR 0069 pins:
+    // storage_root write entry first, then the file_location read entry.
+    let payload = json!({
+        "workflow_id": "wf-api",
+        "plan_id": "plan-api",
+        "node_id": "node-api",
+        "branch_id": "branch-api",
+        "operation": "transcode_video",
+        "rendered_payload": {
+            "operation": "transcode_video",
+            "source_storage_root_id": root.id.0,
+            "source_location_id": location_id,
+        },
+        "timing": {"duration_ms": 25, "progress_interval_ms": 10},
+        "declared_artifact_access": [
+            {"target": {"kind": "storage_root", "storage_root_id": root.id.0}, "rights": ["write"]},
+            {"target": {"kind": "file_location", "storage_root_id": root.id.0,
+                        "file_location_id": location_id}, "rights": ["read"]}
+        ],
+    });
+    let ticket = SqliteTicketRepo::new(pool.clone())
+        .create(NewTicket {
+            job_id: None,
+            kind: ticket_op("synthetic.workflow.operation.transcode_video"),
+            priority: 0,
+            payload,
+            max_attempts: 2,
+            created_at: time::OffsetDateTime::UNIX_EPOCH,
+        })
+        .await
+        .unwrap();
+    fixture
+        .cp
+        .mark_ready_if_unblocked(ticket.id, time::OffsetDateTime::UNIX_EPOCH)
+        .await
+        .unwrap();
+
+    let res = fixture
+        .post_json(
+            "/v1/execution/lease/acquire",
+            "owner-local-acquire",
+            json!({"node_id": fixture.node_id.0, "worker_id": fixture.worker_id.0}),
+        )
+        .await;
+    let status = res.status();
+    let json = response_json(res).await;
+    assert_eq!(status, StatusCode::OK, "body: {json}");
+    assert_eq!(json["data"]["outcome"], "leased");
+    // Criterion 4: normalized before dispatch — never the namespaced token.
+    assert_eq!(json["data"]["operation"], "transcode_video");
+    let plan = &json["data"]["artifact_access_plan"];
+    assert!(plan["id"].as_u64().unwrap() > 0);
+    assert_eq!(plan["owner_node_id"], json!(fixture.node_id.0));
+    let evidence = &plan["access_evidence"];
+    assert!(
+        evidence.is_object()
+            && evidence["declaration"].is_array()
+            && !evidence["declaration"].as_array().unwrap().is_empty()
+            && evidence["root_epochs"].is_array(),
+        "the plan carries the canonical access evidence: {evidence}"
+    );
+
+    // The decision row binds decision, lease, ticket, worker, owner, evidence.
+    let decision_id = json["data"]["scheduler_decision_id"].as_u64().unwrap();
+    let lease_id = json["data"]["lease_id"].as_u64().unwrap();
+    let row: (Option<i64>, Option<String>) = sqlx::query_as(
+        "SELECT selected_lease_id, access_evidence FROM scheduler_decisions WHERE id = ?",
+    )
+    .bind(i64::try_from(decision_id).unwrap())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(row.0, Some(i64::try_from(lease_id).unwrap()));
+    assert!(row.1.is_some());
 }
