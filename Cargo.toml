@@ -16,6 +16,8 @@ members = [
     "crates/voom-test-support",
     "crates/voom-fake-support",
     "crates/voom-fakes",
+    "crates/voom-hash-worker",
+    "crates/voom-scan-worker",
     "crates/voom-ffprobe-worker",
     "crates/voom-ffmpeg-worker",
     "crates/voom-mkvtoolnix-worker",

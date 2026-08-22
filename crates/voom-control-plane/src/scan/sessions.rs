@@ -499,6 +499,17 @@ impl ControlPlane {
         session: ScanSession,
         now: OffsetDateTime,
     ) -> Result<RemoteScanCompleteOutcome, VoomError> {
+        // Publish identity from agreed evidence first (ADR 0077): inside this
+        // transaction, before retirement, so a failed completion rolls back
+        // every published row with it.
+        super::publish::publish_session_evidence_in_tx(
+            self,
+            &mut tx,
+            session.id,
+            session.storage_root_id,
+            now,
+        )
+        .await?;
         let completion = self
             .scan_sessions
             .complete_in_tx(
@@ -1010,7 +1021,7 @@ fn completion_outcome(
     })
 }
 
-async fn append_lifecycle_event(
+pub(super) async fn append_lifecycle_event(
     control_plane: &ControlPlane,
     tx: &mut Transaction<'_, Sqlite>,
     session: &ScanSession,
@@ -1101,7 +1112,7 @@ fn require_root_available_for_request(root: &EffectiveLibraryRoot) -> Result<(),
     }
 }
 
-fn validate_idle_timeout(seconds: u32) -> Result<(), VoomError> {
+pub(super) fn validate_idle_timeout(seconds: u32) -> Result<(), VoomError> {
     if (1..=86_400).contains(&seconds) {
         Ok(())
     } else {
@@ -1166,7 +1177,7 @@ fn is_lowercase_sha256(value: &str) -> bool {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
-fn progress_deadline(now: OffsetDateTime, seconds: u32) -> Result<OffsetDateTime, VoomError> {
+pub(super) fn progress_deadline(now: OffsetDateTime, seconds: u32) -> Result<OffsetDateTime, VoomError> {
     now.checked_add(Duration::seconds(i64::from(seconds)))
         .ok_or_else(|| {
             VoomError::Config("scan session progress deadline overflows time".to_owned())

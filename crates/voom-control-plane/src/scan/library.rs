@@ -64,7 +64,7 @@ impl RootBlockReason {
 }
 
 impl RootBlockReason {
-    fn from_availability(reason: RootAvailabilityReason) -> Option<Self> {
+    pub(super) fn from_availability(reason: RootAvailabilityReason) -> Option<Self> {
         match reason {
             RootAvailabilityReason::Available => None,
             RootAvailabilityReason::LibraryDisabled => Some(Self::LibraryDisabled),

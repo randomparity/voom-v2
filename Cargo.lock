@@ -3318,6 +3318,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "voom-hash-worker"
+version = "0.1.0-dev"
+dependencies = [
+ "blake3",
+ "libc",
+ "secrecy",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "time",
+ "tokio",
+ "voom-core",
+ "voom-worker-protocol",
+]
+
+[[package]]
 name = "voom-mkvtoolnix-worker"
 version = "0.1.0-dev"
 dependencies = [
@@ -3382,6 +3399,21 @@ dependencies = [
  "serde_json",
  "time",
  "voom-core",
+]
+
+[[package]]
+name = "voom-scan-worker"
+version = "0.1.0-dev"
+dependencies = [
+ "secrecy",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "time",
+ "tokio",
+ "voom-core",
+ "voom-worker-protocol",
 ]
 
 [[package]]

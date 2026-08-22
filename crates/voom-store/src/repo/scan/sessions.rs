@@ -516,6 +516,45 @@ impl SqliteScanSessionRepo {
         })
     }
 
+    /// Load every observation of one session in discovery order.
+    ///
+    /// Publication input for completion (ADR 0077): evidence-bearing rows
+    /// carry their strict evidence payload, decoded and validated here so the
+    /// control plane never trusts raw persisted JSON.
+    pub async fn session_observations_in_tx(
+        tx: &mut Transaction<'_, Sqlite>,
+        scan_session_id: ScanSessionId,
+    ) -> Result<Vec<ScanObservation>, VoomError> {
+        let session_id = i64_from_u64(scan_session_id.0, "scan session ID")?;
+        let mut after_sequence: Option<i64> = None;
+        let mut after_ordinal: Option<i64> = None;
+        let mut observations = Vec::new();
+        loop {
+            let rows = sqlx::query(COMPLETION_OBSERVATION_PAGE_SQL)
+                .bind(session_id)
+                .bind(after_sequence)
+                .bind(after_sequence)
+                .bind(after_sequence)
+                .bind(after_ordinal)
+                .bind(COMPLETION_LEDGER_PAGE_SIZE)
+                .fetch_all(&mut **tx)
+                .await
+                .map_err(|error| {
+                    VoomError::database_context("scan session observation page", error)
+                })?;
+            if rows.is_empty() {
+                return Ok(observations);
+            }
+            for row in &rows {
+                let sequence = checked_u64(row, "batch_sequence")?;
+                let ordinal = checked_u64(row, "ordinal")?;
+                after_sequence = Some(i64_from_u64(sequence, "scan observation batch sequence")?);
+                after_ordinal = Some(i64_from_u64(ordinal, "scan observation ordinal")?);
+                observations.push(decode_observation_row(row)?);
+            }
+        }
+    }
+
     pub async fn list(&self, query: ScanSessionListQuery) -> Result<ScanSessionPage, VoomError> {
         let limit = checked_page_limit(query.limit, "scan session list")?;
         let mut builder = QueryBuilder::<Sqlite>::new(format!(
