@@ -31,7 +31,6 @@ test --all-features, doc, deny, audit) plus gated `scripts/check-adr-index.sh`.
   voom-api commit-intent routes — keep edits there minimal (one wiring arm; client methods
   in a separate file).
 - Clippy pedantic, panic/unwrap/expect denied; zero warnings.
-
 ## Task 1 — Evidence field end-to-end (migration 0041)
 
 Files:
@@ -48,13 +47,19 @@ probe_snapshot }`, `FileKeyFacts { dev, ino, nlink }`, `ScanSidecarEvidence`.
 
 Steps: failing store test (round-trip batch with/without evidence) → migration + struct →
 pass → register inventory rows → `cargo test -p voom-store -p voom-core scan`.
+Delivered in Task 1 commits ff97846b + a74133f9 (plan-review finding d): this task also
+owned the voom-api surface — `crates/voom-api/src/scan.rs` wire `ScanObservationRequest`
+gained the same optional strict `evidence` field with `#[serde(default)]` plus its
+round-trip test, and the payload-contract inventory + `scripts/payload-contract-scope.txt`
+rows were registered. No separate api task exists; Tasks 2-9 consume that surface as-is.
 
 ## Task 2 — Worker protocol contracts
 
 Files: create `crates/voom-worker-protocol/src/operations/scan_library.rs`,
 `operations/hash_file.rs`; edit `operations/mod.rs` registry; re-export from `lib.rs`.
 Shapes per spec C2, all `deny_unknown_fields`. Unit tests: round-trip decode rejects unknown
-fields; progress payload bound ≤256 candidates enforced by decode helper.
+fields; progress payload bound enforced by decode helper — at most 256 candidates AND at
+most 32 KiB serialized payload per frame (protocol NDJSON frame cap is 64 KiB).
 Verify: `cargo test -p voom-worker-protocol`.
 
 ## Task 3 — voom-scan-worker crate
@@ -86,18 +91,45 @@ Verify: `cargo test -p voom-hash-worker`.
 
 Files: create `crates/voom-control-plane/src/scan/run.rs` (+test); wire into
 `scan/mod.rs` exports and `lib.rs`.
-Behavior per spec C5: availability fail-close (reuse `RootBlockReason::from_availability`),
-session insert + ticket creation + ready-marking in one transaction; payload encode via
-`WorkflowTicketPayload` with byte-touching declaration; returns ids.
-Tests: happy path creates requested session + ready ticket carrying session id and root-read
-declaration; blocked root creates nothing; duplicate active session conflicts without ticket.
+Behavior per spec C5, with the plan-review finding (a) corrections: the ticket kind MUST
+be `synthetic.workflow.operation.scan_library` — `WorkflowTicketPayload::parse_ticket`
+accepts only namespaced kinds, and a bare `scan_library` kind silently degrades acquire
+gating to NoDeclaration. `rendered_payload` is an object carrying at minimum
+`operation: "scan_library"`, `source_storage_root_id: <root>` (non-zero), and
+`scan_session_id`; it MUST NOT carry `source_location_id`, so `validate_artifact_access`
+derives the whole-root read declaration (`TicketStorageSource::Root`) that
+`declaration_for(ScanLibrary, …)` produces. Availability fail-close reuses
+`RootBlockReason::from_availability` — relocated in this task from `library.rs` into
+`run.rs` (with `RootScanOutcome`/`RootBlockReason` re-exported from `scan/mod.rs`) so Task
+8 can delete `library.rs` wholesale without orphaning them (plan-review finding c).
+Flow: session insert + ticket creation + ready-marking in one transaction; payload encoded
+via `WorkflowTicketPayload::to_ticket_payload`; returns `{scan_session_id, ticket_id}`.
+Tests: happy path creates requested session + ready ticket whose kind is the namespaced
+operation, whose payload round-trips through `parse_ticket`, carries the session id and the
+root-read declaration; blocked root creates nothing; duplicate active session conflicts
+without ticket.
 
 ## Task 6 — Agent pump + client methods
 
 Files: create `crates/voom-node-agent/src/scan_client.rs` (inherent impl on
 `ControlPlaneClient`: start/batch/complete/fail over existing `send` transport),
 `src/scan_session.rs` (pump per spec C4) + tests; edit `src/runtime.rs` **only** to route
-`scan_library` dispatches to the pump; edit `src/main.rs` module decls if needed.
+`scan_library` dispatches to the pump and to publish/consume the child endpoint registry
+described below; edit `src/main.rs` module decls if needed.
+
+Cross-worker dispatch (plan-review finding b): one coordinator owns exactly one child, so
+the coordinator that acquires a `scan_library` lease holds only the scan worker's child and
+cannot reach hash/probe children. The runtime therefore builds a shared
+`ChildEndpointRegistry` (`Arc<...>`, one entry per configured logical worker name) before
+spawning coordinators. Each entry is a `watch::channel<Option<ChildEndpoint>>` where
+`ChildEndpoint { client: Arc<dyn ClientHandle>, credentials: WorkerCredentials,
+operations: Vec<OperationKind> }`. Coordinators publish their current child's endpoint on
+startup and again after every restart, so a registry consumer always sees the live handle
+or `None` while the child is down. The pump resolves the HashFile dispatch from the entry
+whose `operations` contains `hash_file`, and ProbeFile likewise for `probe_file`; an
+absent or stale endpoint fails the session after a short bounded wait (child restarts take
+~250 ms) rather than retrying unboundedly. Plain leases never read the registry — only the
+scan-session pump consumes it.
 Batch idempotency key format: `{incarnation_id}-scan-{session_id}-{sequence}`.
 Tests (mock CP server via local axum or existing test doubles used by runtime tests):
 ordered batches, retry replays accepted sequence, drift candidate yields evidence-less
@@ -118,8 +150,6 @@ re-publishing same content hits same-address replay; hardlink attach; no evidenc
 publication but location protected from retirement; commit-lock conflict path unchanged.
 Verify: `cargo test -p voom-control-plane scan`.
 
-## Task 8 — CLI rewiring + removal sweep
-
 Files: rewrite `crates/voom-cli/src/commands/media/scan.rs` (+snapshot updates) to call
 `request_scan_run` then poll `cp.scan_session` until terminal (bounded by deadline;
 `--no-wait` flag exits after request); delete old pipeline modules and their tests
@@ -133,9 +163,13 @@ Verify: `cargo build --workspace && just fmt && just lint && just check-test-lay
 
 ## Task 9 — Docs + debt close
 
-Files: add README row `| [0077](0077-owner-node-scan-execution.md) | Owner-node scan
-execution |` to `docs/adr/README.md`; set `docs/debt/0004` Status to Delivered with pointer
-to ADR 0077 (record format rules respected); note agent-config worker declarations in the
-operator runbook section touched by this change only if a runbook already documents scan
-setup (check `docs/runbooks/`).
+Files: the `docs/adr/README.md` row for 0077 already exists at HEAD (plan-review finding
+e) — verify it, do not add a second row. Set `docs/debt/0004` Status to `Delivered`
+(record format rules respected), with this close text: the Concern described the
+transitional control-plane read; ADR 0077 replaces it so discovery and hash bytes bind to
+a component-wise symlink-free descent from the canonical root for primaries AND sidecars,
+with deterministic ancestor-replacement regressions covering both inputs; the probe leg's
+pathname-reopen residual remains open under #423 and is recorded as such in the close
+note. Note agent-config worker declarations in the operator runbook section touched by
+this change only if a runbook already documents scan setup (check `docs/runbooks/`).
 Verify: `bash scripts/check-adr-index.sh` passes; full `just ci` green; push branch.
