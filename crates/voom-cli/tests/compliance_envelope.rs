@@ -522,7 +522,6 @@ async fn seed(fixture: FixtureName) -> Seeded {
     }
 }
 
-
 /// Background stand-in for the storage-owner agent (ADR 0074): drives every
 /// pending commit intent to convergence so CLI commits complete.
 fn spawn_commit_driver(url: &str) {
@@ -571,7 +570,8 @@ async fn seed_scanned_remux() -> Seeded {
         .await
         .unwrap();
 
-    spawn_commit_driver(&url);    let cp = voom_control_plane::ControlPlane::open_with_pool(
+    spawn_commit_driver(&url);
+    let cp = voom_control_plane::ControlPlane::open_with_pool(
         pool,
         std::sync::Arc::new(voom_core::SystemClock),
     )
@@ -668,7 +668,8 @@ async fn seed_scanned_verify() -> Seeded {
         .await
         .unwrap();
 
-    spawn_commit_driver(&url);    let cp = voom_control_plane::ControlPlane::open_with_pool(
+    spawn_commit_driver(&url);
+    let cp = voom_control_plane::ControlPlane::open_with_pool(
         pool,
         std::sync::Arc::new(voom_core::SystemClock),
     )
@@ -753,7 +754,8 @@ async fn seed_scanned_audio() -> Seeded {
         .await
         .unwrap();
 
-    spawn_commit_driver(&url);    let cp = voom_control_plane::ControlPlane::open_with_pool(
+    spawn_commit_driver(&url);
+    let cp = voom_control_plane::ControlPlane::open_with_pool(
         pool,
         std::sync::Arc::new(voom_core::SystemClock),
     )

@@ -9,21 +9,17 @@ use std::path::{Path, PathBuf};
 
 use serde_json::json;
 use voom_core::ids::ArtifactVerificationId;
-use voom_core::{
-    ArtifactHandleId, FileAssetId, FileVersionId, NodeId, StorageRootId, VoomError,
-};
+use voom_core::{ArtifactHandleId, FileAssetId, FileVersionId, NodeId, StorageRootId, VoomError};
 use voom_events::Event;
 use voom_events::payload::{ArtifactCommitFailedPreMutationPayload, ArtifactCommitStartedPayload};
 use voom_store::repo::library::library_roots::LibraryRoot;
+use voom_store::repo::media::artifact_commit_intents::NewArtifactCommitIntent;
 use voom_store::repo::media::artifacts::{
     ArtifactExpectedFacts, ArtifactLocationKind, ArtifactVerification, LiveArtifactLocation,
     NewArtifactCommitRecord,
 };
-use voom_store::repo::media::artifact_commit_intents::NewArtifactCommitIntent;
 use voom_store::repo::media::commit_safety_gate::check_lineage_commit_leases_in_tx;
-use voom_store::repo::media::identity::{
-    FileLocationRepo, FileVersionRepo, NewFileLocation,
-};
+use voom_store::repo::media::identity::{FileLocationRepo, FileVersionRepo, NewFileLocation};
 
 use voom_artifact::commit_pipeline::{
     PendingCommitRecordError, append_commit_event_in_tx,
@@ -95,8 +91,7 @@ async fn prepare_commit_in_tx(
         context: inputs.verified_staging.context.clone(),
     };
     let record = create_prepared_record(cp, tx, &draft, &staged_path, &scope, now).await?;
-    let pinned =
-        pin_staging_and_record_intent(cp, tx, &draft, record.id, scope, now).await?;
+    let pinned = pin_staging_and_record_intent(cp, tx, &draft, record.id, scope, now).await?;
 
     let prepared_record_id = record.id;
     Ok(PreparedCommit {
@@ -192,8 +187,7 @@ struct PreparedInputs {
     context: PreMutationContext,
     source: CommitSourceFacts,
     verified_staging: VerifiedStagingFacts,
-    expected_facts:
-        voom_store::repo::media::artifact_commit_intents::CommitExpectedFacts,
+    expected_facts: voom_store::repo::media::artifact_commit_intents::CommitExpectedFacts,
     gate_evaluated_lease_ids: Vec<voom_core::UseLeaseId>,
     target_storage_root_id: StorageRootId,
     target_relative_locator: voom_core::ProviderRelativeLocator,
@@ -226,9 +220,14 @@ async fn read_prepare_inputs(
         )
         .await
         .map_err(|err| pre_mutation_error(&context, &err))?;
-    let verified_staging =
-        read_verified_staging_facts(cp, tx, input.artifact_handle_id, &input.target_path, &context)
-            .await?;
+    let verified_staging = read_verified_staging_facts(
+        cp,
+        tx,
+        input.artifact_handle_id,
+        &input.target_path,
+        &context,
+    )
+    .await?;
     // Expected facts are pinned by the successful verification — the control
     // plane never re-observes the staged bytes here (ADR 0074).
     let expected_facts =
@@ -277,8 +276,7 @@ struct PendingIntentDraft {
     artifact_handle_id: ArtifactHandleId,
     source_file_version_id: FileVersionId,
     verification_id: ArtifactVerificationId,
-    expected_facts:
-        voom_store::repo::media::artifact_commit_intents::CommitExpectedFacts,
+    expected_facts: voom_store::repo::media::artifact_commit_intents::CommitExpectedFacts,
     context: PreMutationContext,
 }
 
@@ -624,16 +622,19 @@ pub(super) fn expected_facts_from_verification(
     if handle.size_bytes != verification.expected_size_bytes
         || handle.checksum != verification.expected_checksum
         || verification.observed_size_bytes != Some(verification.expected_size_bytes)
-        || verification.observed_checksum.as_deref() != Some(verification.expected_checksum.as_str())
+        || verification.observed_checksum.as_deref()
+            != Some(verification.expected_checksum.as_str())
     {
         return Err(VoomError::ArtifactChecksumMismatch(
             "successful verification facts disagree with the artifact handle".to_owned(),
         ));
     }
-    Ok(voom_store::repo::media::artifact_commit_intents::CommitExpectedFacts {
-        size_bytes: verification.expected_size_bytes,
-        content_hash: verification.expected_checksum.clone(),
-    })
+    Ok(
+        voom_store::repo::media::artifact_commit_intents::CommitExpectedFacts {
+            size_bytes: verification.expected_size_bytes,
+            content_hash: verification.expected_checksum.clone(),
+        },
+    )
 }
 
 /// Resolve which active local storage root contains the staged bytes, and the
@@ -643,15 +644,21 @@ async fn resolve_staging_rooted_address(
     cp: &ControlPlane,
     staged_path: &Path,
     context: &PreMutationContext,
-) -> Result<(StorageRootId, voom_core::ProviderRelativeLocator, Option<NodeId>), PrepareCommitError>
-{
-    let roots = cp.list_library_roots(None).await.map_err(|err| pre_mutation_error(context, &err))?;
+) -> Result<
+    (
+        StorageRootId,
+        voom_core::ProviderRelativeLocator,
+        Option<NodeId>,
+    ),
+    PrepareCommitError,
+> {
+    let roots = cp
+        .list_library_roots(None)
+        .await
+        .map_err(|err| pre_mutation_error(context, &err))?;
     let mut best: Option<(usize, &LibraryRoot)> = None;
     for root in &roots {
-        if !matches!(
-            root.state,
-            voom_core::StorageRootState::Active
-        ) {
+        if !matches!(root.state, voom_core::StorageRootState::Active) {
             continue;
         }
         let Ok(root_path) = tokio::fs::canonicalize(root.provider_locator.as_str()).await else {

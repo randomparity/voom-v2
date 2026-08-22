@@ -164,6 +164,11 @@ pub struct ArtifactCommitIntentAuthorizedPayload {
     pub incarnation_id: String,
     #[serde(with = "time::serde::iso8601")]
     pub authorized_at: OffsetDateTime,
+    /// Use-lease ids the re-run commit safety gate evaluated at
+    /// authorization (ADR 0019 semantics). Records written before this
+    /// field existed decode to an empty vec.
+    #[serde(default)]
+    pub gate_evaluated_lease_ids: Vec<UseLeaseId>,
 }
 
 /// `artifact.commit_receipt_reported` — a node reported a receipt outcome

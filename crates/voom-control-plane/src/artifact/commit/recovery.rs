@@ -90,13 +90,13 @@ pub(super) async fn recover_commit(
         // A pending intent that somehow carries a receipt is a state-machine
         // impossibility; fail closed to the operator.
         ArtifactCommitIntentState::Pending => operator_required(&record, &intent),
-        ArtifactCommitIntentState::Completed | ArtifactCommitIntentState::Aborted => Err(
-            VoomError::Conflict(format!(
+        ArtifactCommitIntentState::Completed | ArtifactCommitIntentState::Aborted => {
+            Err(VoomError::Conflict(format!(
                 "artifact commit {} intent is already {}",
                 record.id,
                 intent.state.as_str()
-            )),
-        ),
+            )))
+        }
     }
 }
 
@@ -106,13 +106,16 @@ async fn classify_recovery_required(
     record: ArtifactCommitRecord,
     intent: ArtifactCommitIntent,
 ) -> Result<CommitArtifactReport, VoomError> {
-    let applied = [intent.receipt.as_ref(), intent.supplemental_receipt.as_ref()]
-        .into_iter()
-        .flatten()
-        .find_map(|receipt| match receipt {
-            CommitReceipt::Applied(applied) => Some(applied.clone()),
-            _ => None,
-        });
+    let applied = [
+        intent.receipt.as_ref(),
+        intent.supplemental_receipt.as_ref(),
+    ]
+    .into_iter()
+    .flatten()
+    .find_map(|receipt| match receipt {
+        CommitReceipt::Applied(applied) => Some(applied.clone()),
+        _ => None,
+    });
     if let Some(applied) = applied {
         if applied.observed.size_bytes != intent.expected_facts.size_bytes
             || applied.observed.content_hash != intent.expected_facts.content_hash
@@ -145,11 +148,23 @@ async fn finalize_recovered(
     guard_intent_scope_in_tx(cp, &mut tx, intent, intent.owner_node_id).await?;
     let source_asset_id =
         crate::artifact::commit::intent::intent_source_asset_id(cp, &mut tx, intent).await?;
-    evaluate_commit_safety_gate(cp, &mut tx, source_asset_id, intent.source_file_version_id, now)
-        .await?;
-    let outcome =
-        crate::artifact::commit::intent::converge_intent_in_tx(cp, &mut tx, intent, record, now)
-            .await?;
+    let gate_evaluated_lease_ids = evaluate_commit_safety_gate(
+        cp,
+        &mut tx,
+        source_asset_id,
+        intent.source_file_version_id,
+        now,
+    )
+    .await?;
+    let outcome = crate::artifact::commit::intent::converge_intent_in_tx(
+        cp,
+        &mut tx,
+        intent,
+        record,
+        now,
+        gate_evaluated_lease_ids,
+    )
+    .await?;
     commit_tx(tx).await?;
     Ok(CommitArtifactReport {
         commit_record_id: outcome.commit_record_id,
@@ -203,12 +218,7 @@ async fn abort_and_reprepare_report(
         .filter(|location| location.retired_at.is_none());
     if let Some(location) = location {
         cp.identity
-            .retire_file_location_in_tx(
-                &mut tx,
-                intent.staging_location_id,
-                now,
-                location.epoch,
-            )
+            .retire_file_location_in_tx(&mut tx, intent.staging_location_id, now, location.epoch)
             .await?;
     }
     commit_tx(tx).await?;
@@ -245,7 +255,10 @@ fn operator_required(
         record.id,
         intent.id,
         intent.receipt.as_ref().map(CommitReceipt::kind_str),
-        intent.supplemental_receipt.as_ref().map(CommitReceipt::kind_str),
+        intent
+            .supplemental_receipt
+            .as_ref()
+            .map(CommitReceipt::kind_str),
         intent.expected_facts,
     )))
 }
@@ -293,12 +306,18 @@ pub(super) async fn durable_report(
     let target_path = std::path::PathBuf::from(&record.target_path);
     let recovery = (record.state == ArtifactCommitState::RecoveryRequired)
         .then(|| durable_recovery_report(&record));
-    Ok(super::finalize::report_from_record(&record, &target_path, recovery))
+    Ok(super::finalize::report_from_record(
+        &record,
+        &target_path,
+        recovery,
+    ))
 }
 
 /// Durable recovery evidence for the report payload. Existence flags describe
 /// only what the record claims; live observation stays with inspection.
-pub(super) fn durable_recovery_report(record: &ArtifactCommitRecord) -> super::CommitRecoveryReport {
+pub(super) fn durable_recovery_report(
+    record: &ArtifactCommitRecord,
+) -> super::CommitRecoveryReport {
     super::CommitRecoveryReport {
         recovery_reason: record.recovery_reason.clone().unwrap_or_default(),
         target_path: std::path::PathBuf::from(&record.target_path),

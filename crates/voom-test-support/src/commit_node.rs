@@ -79,42 +79,45 @@ impl SimulatedOwnerNode {
     /// # Errors
     ///
     /// Returns database errors from the raw fixture writes.
-    pub async fn install_for(
-        &self,
-        pool: &SqlitePool,
-        node_id: NodeId,
-    ) -> Result<(), VoomError> {
-        let token_hash =
-            voom_control_plane::workers::hash_node_token(self.token.expose_secret());
+    pub async fn install_for(&self, pool: &SqlitePool, node_id: NodeId) -> Result<(), VoomError> {
+        let token_hash = voom_control_plane::workers::hash_node_token(self.token.expose_secret());
         let hint = format!("sim-{}", self.node_id.0);
-        sqlx::query("UPDATE nodes SET kind = 'remote', auth_token_hash = ?, auth_token_hint = ? \
-                     WHERE id = ?")
-            .bind(&token_hash)
-            .bind(&hint)
-            .bind(i64::try_from(node_id.0).map_err(|error| {
-                VoomError::database(format!("node id out of range: {error}"))
-            })?)
-            .execute(pool)
-            .await
-            .map_err(|error| VoomError::database_context("simulated node install", error))?;
+        sqlx::query(
+            "UPDATE nodes SET kind = 'remote', auth_token_hash = ?, auth_token_hint = ? \
+                     WHERE id = ?",
+        )
+        .bind(&token_hash)
+        .bind(&hint)
+        .bind(
+            i64::try_from(node_id.0)
+                .map_err(|error| VoomError::database(format!("node id out of range: {error}")))?,
+        )
+        .execute(pool)
+        .await
+        .map_err(|error| VoomError::database_context("simulated node install", error))?;
         let incarnation_hex = self.incarnation_id.to_string();
-        sqlx::query("INSERT INTO node_incarnations \
+        sqlx::query(
+            "INSERT INTO node_incarnations \
                      (incarnation_id, node_id, status, started_at, last_seen_at) \
-                     VALUES (?, ?, 'active', ?, ?)")
-            .bind(&incarnation_hex)
-            .bind(i64::try_from(node_id.0).map_err(|error| {
-                VoomError::database(format!("node id out of range: {error}"))
-            })?)
-            .bind(INSTALL_TIME)
-            .bind(INSTALL_TIME)
-            .execute(pool)
-            .await
-            .map_err(|error| VoomError::database_context("simulated node incarnation", error))?;
+                     VALUES (?, ?, 'active', ?, ?)",
+        )
+        .bind(&incarnation_hex)
+        .bind(
+            i64::try_from(node_id.0)
+                .map_err(|error| VoomError::database(format!("node id out of range: {error}")))?,
+        )
+        .bind(INSTALL_TIME)
+        .bind(INSTALL_TIME)
+        .execute(pool)
+        .await
+        .map_err(|error| VoomError::database_context("simulated node incarnation", error))?;
         sqlx::query("UPDATE nodes SET active_incarnation_id = ?, status = 'active' WHERE id = ?")
             .bind(&incarnation_hex)
-            .bind(i64::try_from(node_id.0).map_err(|error| {
-                VoomError::database(format!("node id out of range: {error}"))
-            })?)
+            .bind(
+                i64::try_from(node_id.0).map_err(|error| {
+                    VoomError::database(format!("node id out of range: {error}"))
+                })?,
+            )
             .execute(pool)
             .await
             .map_err(|error| VoomError::database_context("simulated node activation", error))?;
@@ -229,8 +232,18 @@ impl SimulatedOwnerNode {
         let outcome = self.authorize(cp, intent_id).await?;
         self.report_applying(cp, intent_id).await?;
 
-        let staging_path = resolve_rooted_path(pool, outcome.staging_storage_root_id.0, &outcome.staging_provider_relative_locator).await?;
-        let target_path = resolve_rooted_path(pool, outcome.target_storage_root_id.0, &outcome.target_provider_relative_locator).await?;
+        let staging_path = resolve_rooted_path(
+            pool,
+            outcome.staging_storage_root_id.0,
+            &outcome.staging_provider_relative_locator,
+        )
+        .await?;
+        let target_path = resolve_rooted_path(
+            pool,
+            outcome.target_storage_root_id.0,
+            &outcome.target_provider_relative_locator,
+        )
+        .await?;
         let expected = CommitObservedFacts {
             size_bytes: outcome.expected_size_bytes,
             content_hash: outcome.expected_content_hash.clone(),
@@ -282,6 +295,59 @@ impl SimulatedOwnerNode {
     }
 }
 
+/// Spawn a background thread that installs the simulated owner on the pool's
+/// seeded root and drives every pending commit intent to convergence.
+/// Integration-suite stand-in for the storage-owner agent (ADR 0074):
+/// non-blocked commits converge while the test observes durable events.
+///
+/// # Panics
+///
+/// Panics when the simulated owner cannot be installed or a driver step
+/// fails; integration setups fail loudly by design.
+#[expect(
+    clippy::unwrap_used,
+    reason = "the driver runs on a detached thread where Result plumbing cannot \
+              surface; a failed setup or driver step must panic the thread"
+)]
+pub fn install_and_spawn_driver(pool: &SqlitePool) {
+    let driver_pool = pool.clone();
+    std::thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async move {
+            let node = SimulatedOwnerNode::new().unwrap();
+            node.install(&driver_pool).await.unwrap();
+            let driver_cp = voom_control_plane::ControlPlane::open_with_pool(
+                driver_pool.clone(),
+                std::sync::Arc::new(voom_core::SystemClock),
+            )
+            .await
+            .unwrap();
+            loop {
+                let pending: Option<(i64, i64)> = sqlx::query_as(
+                    "SELECT id, artifact_handle_id FROM artifact_commit_intents \
+                     WHERE state = 'pending' ORDER BY id ASC LIMIT 1",
+                )
+                .fetch_optional(&driver_pool)
+                .await
+                .unwrap();
+                if let Some((_, handle)) = pending {
+                    let _ = node
+                        .drive_pending_commit(
+                            &driver_cp,
+                            &driver_pool,
+                            ArtifactHandleId(u64::try_from(handle).unwrap()),
+                        )
+                        .await;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+        });
+    });
+}
+
 /// Poll for the newest pending intent of an artifact handle.
 ///
 /// # Errors
@@ -322,12 +388,13 @@ async fn resolve_rooted_path(
 ) -> Result<PathBuf, VoomError> {
     let root_id = i64::try_from(storage_root_id)
         .map_err(|error| VoomError::database(format!("root id out of range: {error}")))?;
-    let locator: String = sqlx::query_scalar("SELECT provider_locator FROM library_roots WHERE id = ?")
-        .bind(root_id)
-        .fetch_optional(pool)
-        .await
-        .map_err(|error| VoomError::database_context("library root lookup", error))?
-        .ok_or_else(|| VoomError::NotFound(format!("library_roots {storage_root_id}")))?;
+    let locator: String =
+        sqlx::query_scalar("SELECT provider_locator FROM library_roots WHERE id = ?")
+            .bind(root_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|error| VoomError::database_context("library root lookup", error))?
+            .ok_or_else(|| VoomError::NotFound(format!("library_roots {storage_root_id}")))?;
     let root_path = tokio::fs::canonicalize(&locator).await.map_err(|error| {
         VoomError::ArtifactUnavailable(format!(
             "cannot resolve storage root {storage_root_id} at {locator}: {error}"

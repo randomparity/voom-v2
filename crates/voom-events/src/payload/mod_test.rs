@@ -490,6 +490,7 @@ fn event_kind_matches_serde_tag() {
             owner_node_id: voom_core::NodeId(1),
             incarnation_id: "inc-1".to_owned(),
             authorized_at: OffsetDateTime::UNIX_EPOCH,
+            gate_evaluated_lease_ids: Vec::new(),
         }),
         Event::ArtifactCommitReceiptReported(ArtifactCommitReceiptReportedPayload {
             commit_record_id: voom_core::ids::ArtifactCommitRecordId(1),

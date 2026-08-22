@@ -7,6 +7,7 @@
 
 use std::path::{Path, PathBuf};
 
+use voom_artifact::commit_pipeline::append_commit_event_in_tx;
 use voom_core::VoomError;
 use voom_events::Event;
 use voom_events::payload::ArtifactCommitCompletedPayload;
@@ -14,7 +15,6 @@ use voom_store::repo::media::artifacts::ArtifactCommitRecord;
 use voom_store::repo::media::identity::{
     FileLocationRepo, FileVersionRepo, NewFileLocation, NewFileVersion, ProducedBy,
 };
-use voom_artifact::commit_pipeline::append_commit_event_in_tx;
 
 use crate::ControlPlane;
 use crate::artifact::commit::{CommitArtifactReport, CommitFinalizeInput, CommitRecoveryReport};

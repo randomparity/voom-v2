@@ -6,22 +6,22 @@
 //! travel only in the authorize outcome payload — never in events.
 
 use secrecy::SecretString;
+use serde_json::Value as JsonValue;
 use sqlx::Sqlite;
 use voom_artifact::commit_pipeline::{
     RecoveryRequiredCommit, mark_recovery_required_with_event_in_tx,
 };
 use voom_core::ids::ArtifactCommitIntentId;
-use voom_core::{ErrorCode, FailureClass, NodeIncarnationId, NodeId, VoomError};
+use voom_core::{ErrorCode, FailureClass, NodeId, NodeIncarnationId, VoomError};
 use voom_events::Event;
 use voom_events::payload::{
     ArtifactCommitIntentAuthorizedPayload, ArtifactCommitReceiptReportedPayload,
 };
-use serde_json::Value as JsonValue;
 use voom_store::repo::execution::remote_idempotency::{
     IdempotencyOutcome, RemoteIdempotencyInput, RemoteMutationReplay,
 };
 use voom_store::repo::media::artifact_commit_intents::{
-    AppliedReceipt, ArtifactCommitIntent, ArtifactCommitIntentState, ApplyingReceipt,
+    AppliedReceipt, ApplyingReceipt, ArtifactCommitIntent, ArtifactCommitIntentState,
     CommitObservedFacts, CommitReceipt, MismatchedReceipt, OutcomeUnknownReceipt,
 };
 use voom_store::repo::media::artifacts::{ArtifactCommitFailure, ArtifactCommitRecord};
@@ -212,9 +212,11 @@ async fn begin_intent_case<'a>(
         .await?
     {
         IdempotencyOutcome::Reserved => Ok(CaseReservation::Fresh { tx, replay_key }),
-        IdempotencyOutcome::Replay(replay) => {
-            Ok(CaseReservation::Replay { tx, replay, replay_key })
-        }
+        IdempotencyOutcome::Replay(replay) => Ok(CaseReservation::Replay {
+            tx,
+            replay,
+            replay_key,
+        }),
     }
 }
 
@@ -344,17 +346,15 @@ impl ControlPlane {
                     Err(err) => {
                         if is_remote_replayable_error(&err) {
                             abort_pending_on_drift(self, &mut tx, input.intent_id, now).await;
-                            return Err(
-                                store_case_error(
-                                    self,
-                                    tx,
-                                    input.node_id,
-                                    &route_key,
-                                    &replay_key,
-                                    err,
-                                )
-                                .await
-                            );
+                            return Err(store_case_error(
+                                self,
+                                tx,
+                                input.node_id,
+                                &route_key,
+                                &replay_key,
+                                err,
+                            )
+                            .await);
                         }
                         // Transient drift (e.g. `BlockedByUseLease`) is not
                         // replay-stored: the reservation rolls back, but the
@@ -429,10 +429,15 @@ impl ControlPlane {
                 let outcome = match applying_mutation(self, &mut tx, &input, now).await {
                     Ok(outcome) => outcome,
                     Err(err) => {
-                        return Err(
-                            store_case_error(self, tx, input.node_id, &route_key, &replay_key, err)
-                                .await
-                        );
+                        return Err(store_case_error(
+                            self,
+                            tx,
+                            input.node_id,
+                            &route_key,
+                            &replay_key,
+                            err,
+                        )
+                        .await);
                     }
                 };
                 self.complete_remote_ok_in_tx(
@@ -503,10 +508,15 @@ impl ControlPlane {
                 let outcome = match outcome_mutation(self, &mut tx, &input, now).await {
                     Ok(outcome) => outcome,
                     Err(err) => {
-                        return Err(
-                            store_case_error(self, tx, input.node_id, &route_key, &replay_key, err)
-                                .await
-                        );
+                        return Err(store_case_error(
+                            self,
+                            tx,
+                            input.node_id,
+                            &route_key,
+                            &replay_key,
+                            err,
+                        )
+                        .await);
                     }
                 };
                 self.complete_remote_ok_in_tx(
@@ -574,10 +584,15 @@ impl ControlPlane {
                 let outcome = match complete_mutation(self, &mut tx, &input, now).await {
                     Ok(outcome) => outcome,
                     Err(err) => {
-                        return Err(
-                            store_case_error(self, tx, input.node_id, &route_key, &replay_key, err)
-                                .await
-                        );
+                        return Err(store_case_error(
+                            self,
+                            tx,
+                            input.node_id,
+                            &route_key,
+                            &replay_key,
+                            err,
+                        )
+                        .await);
                     }
                 };
                 self.complete_remote_ok_in_tx(
@@ -682,7 +697,9 @@ async fn complete_mutation(
     let intent = require_authorized_intent_in_tx(cp, tx, input.intent_id, input.node_id).await?;
     validate_fence_and_evidence(&intent, &input.fence_hex)?;
     let record = require_commit_record(cp, &intent).await?;
-    converge_intent_in_tx(cp, tx, &intent, &record, now).await
+    // The authorize transaction re-ran the gate and audited its evaluated
+    // leases on the authorized event; nothing further belongs here.
+    converge_intent_in_tx(cp, tx, &intent, &record, now, Vec::new()).await
 }
 
 /// The guarded authorize mutation: scope revalidation, gate re-run, fence
@@ -696,7 +713,9 @@ async fn authorize_pending_mutation(
     let intent = require_pending_intent_in_tx(cp, tx, input.intent_id).await?;
     let staging_address = guard_intent_scope_in_tx(cp, tx, &intent, input.node_id).await?;
     let source_asset_id = intent_source_asset_id(cp, tx, &intent).await?;
-    evaluate_commit_safety_gate(cp, tx, source_asset_id, intent.source_file_version_id, now).await?;
+    let gate_evaluated_lease_ids =
+        evaluate_commit_safety_gate(cp, tx, source_asset_id, intent.source_file_version_id, now)
+            .await?;
     let authorized = cp
         .artifact_commit_intents
         .authorize_in_tx(tx, intent.id, input.incarnation_id, now)
@@ -713,6 +732,7 @@ async fn authorize_pending_mutation(
             owner_node_id: intent.owner_node_id,
             incarnation_id: input.incarnation_id.to_string(),
             authorized_at: now,
+            gate_evaluated_lease_ids,
         }),
     )
     .await?;
@@ -809,10 +829,7 @@ pub(super) async fn guard_intent_scope_in_tx(
         .get_library_root_in_tx(tx, intent.target_storage_root_id)
         .await?
         .ok_or_else(|| {
-            VoomError::NotFound(format!(
-                "library_roots {}",
-                intent.target_storage_root_id
-            ))
+            VoomError::NotFound(format!("library_roots {}", intent.target_storage_root_id))
         })?;
     if root.owner_node_id != Some(node_id) {
         return Err(VoomError::Conflict(format!(
@@ -920,7 +937,10 @@ async fn record_receipt_in_tx(
         CommitReceipt::Applying(_) => (None, None),
         CommitReceipt::Applied(applied) => (
             None,
-            Some((applied.observed.size_bytes, applied.observed.content_hash.clone())),
+            Some((
+                applied.observed.size_bytes,
+                applied.observed.content_hash.clone(),
+            )),
         ),
         CommitReceipt::Mismatched(mismatched) => (
             Some(mismatched.reason.clone()),
@@ -956,7 +976,10 @@ async fn record_receipt_in_tx(
             .mark_recovery_required_in_tx(tx, intent.id, now)
             .await?;
         let (failure_class, error_code) = if matches!(receipt, CommitReceipt::Mismatched(_)) {
-            (FailureClass::ArtifactChecksumMismatch, ErrorCode::ArtifactChecksumMismatch)
+            (
+                FailureClass::ArtifactChecksumMismatch,
+                ErrorCode::ArtifactChecksumMismatch,
+            )
         } else {
             (FailureClass::CommitFailure, ErrorCode::CommitFailure)
         };
@@ -1003,22 +1026,27 @@ async fn require_commit_record(
     intent: &ArtifactCommitIntent,
 ) -> Result<ArtifactCommitRecord, VoomError> {
     let commit_record_id = intent.commit_record_id;
-    cp.artifacts.get_commit_record(commit_record_id).await?.ok_or_else(|| {
-        VoomError::NotFound(format!("artifact_commit_records {commit_record_id}"))
-    })
+    cp.artifacts
+        .get_commit_record(commit_record_id)
+        .await?
+        .ok_or_else(|| VoomError::NotFound(format!("artifact_commit_records {commit_record_id}")))
 }
 
 /// Converge one authorized/recovery-required intent: validate applied
 /// evidence against the pinned facts, run the finalize transaction (result
 /// version/location, retire staging rows, mark committed), and mark the
 /// intent completed — all in the caller's transaction. Shared by node
-/// completion and recovery-driven finalization.
+/// completion (which passes an empty audit list: the authorize transaction
+/// already recorded the gate's evaluated leases on the authorized event)
+/// and recovery-driven finalization (which passes the leases its own
+/// fail-closed gate re-run evaluated).
 pub(crate) async fn converge_intent_in_tx(
     cp: &ControlPlane,
     tx: &mut sqlx::Transaction<'_, Sqlite>,
     intent: &ArtifactCommitIntent,
     record: &ArtifactCommitRecord,
     now: time::OffsetDateTime,
+    gate_evaluated_lease_ids: Vec<voom_core::UseLeaseId>,
 ) -> Result<RemoteCommitCompleteOutcome, VoomError> {
     let Some(CommitReceipt::Applied(applied)) = &intent.receipt else {
         return Err(VoomError::Conflict(format!(
@@ -1059,9 +1087,7 @@ pub(crate) async fn converge_intent_in_tx(
         // Promotion happened on the node; the durable promotion window runs
         // from authorization to this completion.
         promotion_started_at: intent.authorized_at.unwrap_or(record.started_at),
-        // The authorize transaction re-ran the gate; the evaluated lease ids
-        // it audited belong to that event.
-        gate_evaluated_lease_ids: Vec::new(),
+        gate_evaluated_lease_ids,
     };
     let report = finalize::finalize_commit_in_tx(cp, tx, &finalize_input, &facts).await?;
     cp.artifact_commit_intents
@@ -1086,10 +1112,7 @@ pub(crate) async fn intent_source_asset_id(
         .await?
         .map(|version| version.file_asset_id)
         .ok_or_else(|| {
-            VoomError::NotFound(format!(
-                "file_versions {}",
-                intent.source_file_version_id
-            ))
+            VoomError::NotFound(format!("file_versions {}", intent.source_file_version_id))
         })
 }
 

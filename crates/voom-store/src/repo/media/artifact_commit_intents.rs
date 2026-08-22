@@ -461,6 +461,29 @@ impl SqliteArtifactCommitIntentRepo {
         self.require_intent_in_tx(&mut tx, id).await
     }
 
+    /// Pool-level discovery read for drivers between transactions: the ids
+    /// of intents still awaiting authorization, oldest first.
+    pub async fn list_pending_intent_ids(
+        &self,
+        limit: u64,
+    ) -> Result<Vec<ArtifactCommitIntentId>, VoomError> {
+        let rows: Vec<i64> = sqlx::query_scalar(
+            "SELECT id FROM artifact_commit_intents \
+             WHERE state = 'pending' ORDER BY id ASC LIMIT ?",
+        )
+        .bind(
+            i64::try_from(limit).map_err(|_| {
+                VoomError::database("artifact_commit_intents list limit out of range")
+            })?,
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| VoomError::database_context("artifact_commit_intents pending listing", e))?;
+        rows.iter()
+            .map(|raw| u64_from_i64(*raw, "artifact_commit_intents.id").map(ArtifactCommitIntentId))
+            .collect()
+    }
+
     pub async fn get_by_commit_record_in_tx(
         &self,
         tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,

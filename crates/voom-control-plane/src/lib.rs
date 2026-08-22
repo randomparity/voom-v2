@@ -86,15 +86,15 @@ pub mod execution {
     pub use crate::cases::execution::tickets::PreLeaseFailureOutcome;
 }
 pub mod artifact_commit {
-    pub use crate::artifact::commit::{
-        CommitArtifactCommandError, CommitArtifactInput, CommitArtifactPreMutationReport,
-        CommitArtifactReport, COMMIT_CONVERGENCE_TIMEOUT,
-    };
     pub use crate::artifact::commit::intent::{
         AppliedEvidence, AuthorizeCommitOutcome, CommitOutcomeEvidence, MismatchedEvidence,
         OutcomeUnknownEvidence, RemoteCommitApplyingInput, RemoteCommitApplyingOutcome,
         RemoteCommitAuthorizeInput, RemoteCommitCompleteInput, RemoteCommitCompleteOutcome,
         RemoteCommitOutcomeInput, RemoteCommitReceiptOutcome,
+    };
+    pub use crate::artifact::commit::{
+        COMMIT_CONVERGENCE_TIMEOUT, CommitArtifactCommandError, CommitArtifactInput,
+        CommitArtifactPreMutationReport, CommitArtifactReport,
     };
 }
 

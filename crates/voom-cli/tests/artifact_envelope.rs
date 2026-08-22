@@ -1,7 +1,6 @@
 #![expect(
     clippy::unwrap_used,
     clippy::panic,
-    clippy::too_many_lines,
     reason = "integration tests favor unwrap/panic over plumbing Result<()> through every assertion"
 )]
 
@@ -413,8 +412,8 @@ fn spawn_commit_driver(seeded: &Seeded) {
                         .await
                         .ok();
                 }
-                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                }
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
         });
     });
 }

@@ -6,7 +6,8 @@
 //! #270 — the commit safety gate is wired into the production commit path.
 //! A blocking use lease live at commit time fails `commit_artifact` before the
 //! target file is written; a terminal or TTL-expired lease does not; an
-//! advisory lease is recorded in the completed event for audit.
+//! advisory lease is recorded on the `commit_intent_authorized` event for
+//! audit (the authorize transaction re-runs the gate under ADR 0074).
 
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -158,9 +159,8 @@ async fn advisory_lease_is_recorded_in_commit_event() {
     })
     .await
     .unwrap();
-
     let evaluated =
-        commit_completed_evaluated_lease_ids(&db.url, verified.artifact_handle_id.0).await;
+        authorized_event_evaluated_lease_ids(&db.url, verified.artifact_handle_id.0).await;
     assert!(
         evaluated.contains(&lease.id.0),
         "advisory lease {} must appear in gate_evaluated_lease_ids {evaluated:?}",
@@ -196,12 +196,11 @@ async fn latest_commit_failed_pre_mutation(url: &str) -> (String, String) {
     let message = payload["message"].as_str().unwrap().to_owned();
     (row.0, message)
 }
-
-async fn commit_completed_evaluated_lease_ids(url: &str, artifact_handle_id: u64) -> Vec<u64> {
+async fn authorized_event_evaluated_lease_ids(url: &str, artifact_handle_id: u64) -> Vec<u64> {
     let pool = voom_store::connect(url).await.unwrap();
     let payload: String = sqlx::query_scalar(
         "SELECT payload FROM events \
-         WHERE kind = 'artifact.commit_completed' AND subject_id = ? \
+         WHERE kind = 'artifact.commit_intent_authorized' AND subject_id = ? \
          ORDER BY event_id DESC LIMIT 1",
     )
     .bind(i64::try_from(artifact_handle_id).unwrap())

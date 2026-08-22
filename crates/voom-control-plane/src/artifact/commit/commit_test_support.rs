@@ -1,19 +1,15 @@
 //! In-crate test helpers for driving fenced commit intents (ADR 0074).
 
-
 use voom_test_support::commit_node::{SimulatedOwnerNode, observed_facts};
 
-
-use crate::ControlPlane;
 use super::tests::{
     intent_state, node_authorize, node_complete, node_report_applying, node_report_outcome,
     rooted_path,
 };
-use crate::artifact::commit::intent::{
-    AppliedEvidence, CommitOutcomeEvidence, MismatchedEvidence,
-};
-use voom_core::ids::ArtifactCommitIntentId;
+use crate::ControlPlane;
+use crate::artifact::commit::intent::{AppliedEvidence, CommitOutcomeEvidence, MismatchedEvidence};
 use voom_core::VoomError;
+use voom_core::ids::ArtifactCommitIntentId;
 
 pub(crate) fn spawn_auto_driver(
     cp: &ControlPlane,
@@ -23,16 +19,13 @@ pub(crate) fn spawn_auto_driver(
     let node = node.clone();
     tokio::spawn(async move {
         loop {
-            let pending: Option<i64> = sqlx::query_scalar(
-                "SELECT id FROM artifact_commit_intents WHERE state = 'pending' \
-                 ORDER BY id ASC LIMIT 1",
-            )
-            .fetch_optional(cp.pool_for_test())
-            .await
-            .unwrap();
-            if let Some(id) = pending {
-                let intent_id = ArtifactCommitIntentId(u64::try_from(id).unwrap());
-                let _ = drive_one(&cp, &node, intent_id).await;
+            let pending = cp
+                .artifact_commit_intents
+                .list_pending_intent_ids(1)
+                .await
+                .unwrap();
+            if let Some(intent_id) = pending.first() {
+                let _ = drive_one(&cp, &node, *intent_id).await;
             }
             // Slow poll: the driver only adds read pressure; the driver wait in
             // commit_artifact is seconds-scale.
@@ -49,7 +42,10 @@ pub(crate) async fn drive_one(
     node: &SimulatedOwnerNode,
     intent_id: ArtifactCommitIntentId,
 ) -> Result<(), VoomError> {
-    if !matches!(intent_state(cp, intent_id).await.as_str(), "pending" | "authorized") {
+    if !matches!(
+        intent_state(cp, intent_id).await.as_str(),
+        "pending" | "authorized"
+    ) {
         return Ok(());
     }
     let outcome = node_authorize(cp, node, intent_id).await?;
@@ -72,7 +68,9 @@ pub(crate) async fn drive_one(
         let existing = std::fs::read(&target_path).unwrap();
         let existing_facts = observed_facts(&existing);
         if existing_facts == staged_facts {
-            CommitOutcomeEvidence::Applied(AppliedEvidence { observed: existing_facts })
+            CommitOutcomeEvidence::Applied(AppliedEvidence {
+                observed: existing_facts,
+            })
         } else {
             CommitOutcomeEvidence::Mismatched(MismatchedEvidence {
                 reason: "target already exists with different bytes".to_owned(),
@@ -83,7 +81,9 @@ pub(crate) async fn drive_one(
         && staged_facts.content_hash == outcome.expected_content_hash
     {
         std::fs::write(&target_path, &staged_bytes).unwrap();
-        CommitOutcomeEvidence::Applied(AppliedEvidence { observed: staged_facts })
+        CommitOutcomeEvidence::Applied(AppliedEvidence {
+            observed: staged_facts,
+        })
     } else {
         CommitOutcomeEvidence::Mismatched(MismatchedEvidence {
             reason: "staged bytes do not match the pinned expected facts".to_owned(),

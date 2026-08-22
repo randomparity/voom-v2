@@ -1045,6 +1045,7 @@ fn artifact_commit_intent_authorized_payload_round_trip() {
         owner_node_id: voom_core::NodeId(3),
         incarnation_id: "inc-7f3a".to_owned(),
         authorized_at: OffsetDateTime::UNIX_EPOCH,
+        gate_evaluated_lease_ids: vec![voom_core::UseLeaseId(4), voom_core::UseLeaseId(8)],
     };
     let json = serde_json::to_value(Event::ArtifactCommitIntentAuthorized(p.clone())).unwrap();
     assert_eq!(json["kind"], "artifact.commit_intent_authorized");
@@ -1056,6 +1057,29 @@ fn artifact_commit_intent_authorized_payload_round_trip() {
         Event::ArtifactCommitIntentAuthorized(p).kind(),
         EventKind::ArtifactCommitIntentAuthorized
     );
+}
+
+#[test]
+fn artifact_commit_intent_authorized_payload_defaults_missing_gate_lease_ids() {
+    // Records written before the fenced-intent rework lack
+    // `gate_evaluated_lease_ids`; the `#[serde(default)]` contract decodes
+    // them to an empty vec. Drop the key from a serialized payload and
+    // confirm it round-trips to empty.
+    let mut value = serde_json::to_value(ArtifactCommitIntentAuthorizedPayload {
+        commit_record_id: voom_core::ids::ArtifactCommitRecordId(30),
+        artifact_handle_id: voom_core::ArtifactHandleId(10),
+        owner_node_id: voom_core::NodeId(3),
+        incarnation_id: "inc-7f3a".to_owned(),
+        authorized_at: OffsetDateTime::UNIX_EPOCH,
+        gate_evaluated_lease_ids: vec![voom_core::UseLeaseId(4), voom_core::UseLeaseId(8)],
+    })
+    .unwrap();
+    value
+        .as_object_mut()
+        .unwrap()
+        .remove("gate_evaluated_lease_ids");
+    let back: ArtifactCommitIntentAuthorizedPayload = serde_json::from_value(value).unwrap();
+    assert!(back.gate_evaluated_lease_ids.is_empty());
 }
 
 #[test]
@@ -1260,6 +1284,7 @@ fn artifact_commit_intent_authorized_payload_rejects_unknown_field() {
         owner_node_id: voom_core::NodeId(3),
         incarnation_id: "inc-7f3a".to_owned(),
         authorized_at: OffsetDateTime::UNIX_EPOCH,
+        gate_evaluated_lease_ids: Vec::new(),
     });
 }
 

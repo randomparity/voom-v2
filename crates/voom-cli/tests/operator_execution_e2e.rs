@@ -68,7 +68,9 @@ async fn operator_runs_real_media_pipeline_through_cli() {
                 let pool = voom_store::connect(&driver_url).await.unwrap();
                 let node = voom_test_support::commit_node::SimulatedOwnerNode::new().unwrap();
                 node.install(&pool).await.unwrap();
-                let cp = voom_control_plane::ControlPlane::open(&driver_url).await.unwrap();
+                let cp = voom_control_plane::ControlPlane::open(&driver_url)
+                    .await
+                    .unwrap();
                 loop {
                     let pending: Option<(i64, i64)> = sqlx::query_as(
                         "SELECT id, artifact_handle_id FROM artifact_commit_intents \

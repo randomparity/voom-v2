@@ -2366,8 +2366,7 @@ async fn fixture() -> (crate::ControlPlane, voom_test_support::TempDatabase) {
     // Drive fenced commit intents to convergence from a simulated node.
     let node = voom_test_support::commit_node::SimulatedOwnerNode::new().unwrap();
     node.install(cp.pool_for_test()).await.unwrap();
-    let _auto_driver =
-        crate::artifact::commit::commit_test_support::spawn_auto_driver(&cp, &node);
+    let _auto_driver = crate::artifact::commit::commit_test_support::spawn_auto_driver(&cp, &node);
     (cp, db)
 }
 

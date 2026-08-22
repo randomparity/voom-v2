@@ -102,8 +102,7 @@ async fn stale_verification_for_retired_or_different_staging_location_is_rejecte
 async fn staged_byte_drift_is_detected_by_the_node_and_requires_recovery() {
     let (cp, _db, dir) = fixture().await;
     let node = simulated_node(&cp).await;
-    let _driver =
-        crate::artifact::commit::commit_test_support::spawn_auto_driver(&cp, &node);
+    let _driver = crate::artifact::commit::commit_test_support::spawn_auto_driver(&cp, &node);
     let staged = stage_and_verify_bytes(&cp, dir.path(), b"source bytes").await;
     std::fs::write(&staged.staging_path, b"changed bytes").unwrap();
     let target = dir.path().join("target.bin");
@@ -173,10 +172,15 @@ async fn conflicting_target_is_reported_mismatched_and_requires_recovery() {
     node_report_applying(&cp, &node, intent_id).await.unwrap();
     std::fs::write(&target, b"concurrent writer").unwrap();
     let conflicting = std::fs::read(&target).unwrap();
-    node_report_outcome(&cp, &node, intent_id, CommitOutcomeEvidence::Mismatched(MismatchedEvidence {
-        reason: "target already exists with different bytes".to_owned(),
-        observed: Some(voom_test_support::commit_node::observed_facts(&conflicting)),
-    }))
+    node_report_outcome(
+        &cp,
+        &node,
+        intent_id,
+        CommitOutcomeEvidence::Mismatched(MismatchedEvidence {
+            reason: "target already exists with different bytes".to_owned(),
+            observed: Some(voom_test_support::commit_node::observed_facts(&conflicting)),
+        }),
+    )
     .await
     .unwrap();
 
@@ -432,10 +436,15 @@ async fn staged_drift_is_reported_mismatched_without_promotion() {
     node_authorize(&cp, &node, intent_id).await.unwrap();
     node_report_applying(&cp, &node, intent_id).await.unwrap();
     let drifted = std::fs::read(&staged.staging_path).unwrap();
-    node_report_outcome(&cp, &node, intent_id, CommitOutcomeEvidence::Mismatched(MismatchedEvidence {
-        reason: "staged bytes do not match the pinned expected facts".to_owned(),
-        observed: Some(voom_test_support::commit_node::observed_facts(&drifted)),
-    }))
+    node_report_outcome(
+        &cp,
+        &node,
+        intent_id,
+        CommitOutcomeEvidence::Mismatched(MismatchedEvidence {
+            reason: "staged bytes do not match the pinned expected facts".to_owned(),
+            observed: Some(voom_test_support::commit_node::observed_facts(&drifted)),
+        }),
+    )
     .await
     .unwrap();
 
@@ -466,14 +475,7 @@ async fn recover_commit_finalizes_directly_from_matching_applied_receipt() {
             .await
     });
     let intent_id = wait_pending_intent_id(&cp, staged.artifact_handle_id).await;
-    drive_to_applied_not_completed(
-        &cp,
-        &node,
-        intent_id,
-        &target,
-        &staged.staging_path,
-    )
-    .await;
+    drive_to_applied_not_completed(&cp, &node, intent_id, &target, &staged.staging_path).await;
     driver.abort();
 
     let report = cp.recover_commit(staged.artifact_handle_id).await.unwrap();
@@ -492,8 +494,6 @@ async fn recover_commit_finalizes_directly_from_matching_applied_receipt() {
     );
 }
 
-
-
 #[tokio::test]
 async fn recovery_uses_prepared_rooted_target_after_default_changes() {
     let (cp, _db, dir) = fixture().await;
@@ -508,8 +508,7 @@ async fn recovery_uses_prepared_rooted_target_after_default_changes() {
 
     let staged = stage_and_verify_bytes(&cp, dir.path(), b"source bytes").await;
     let target = overlap.join("target.bin");
-    spawn_and_drive_to_applied_not_completed(&cp, &node, staged.artifact_handle_id, &target)
-        .await;
+    spawn_and_drive_to_applied_not_completed(&cp, &node, staged.artifact_handle_id, &target).await;
 
     // The default output root changed after prepare; recovery must finalize
     // into the pinned target root, not the new default.
@@ -528,7 +527,6 @@ async fn recovery_uses_prepared_rooted_target_after_default_changes() {
     assert_eq!(std::fs::read(target).unwrap(), b"source bytes");
 }
 
-
 #[tokio::test]
 async fn recover_commit_aborts_receiptless_authorized_and_reprepares() {
     let (cp, _db, dir) = fixture().await;
@@ -538,8 +536,8 @@ async fn recover_commit_aborts_receiptless_authorized_and_reprepares() {
 
     // Authorized but receipt-less: the node never mutated, so recovery may
     // safely abort and prepare a fresh successor generation.
-    let original_record_id = spawn_and_drive_authorize_only(&cp, &node, staged.artifact_handle_id, &target)
-        .await;
+    let original_record_id =
+        spawn_and_drive_authorize_only(&cp, &node, staged.artifact_handle_id, &target).await;
     assert!(!target.exists());
 
     let report = cp.recover_commit(staged.artifact_handle_id).await.unwrap();
@@ -570,7 +568,6 @@ async fn recover_commit_requires_operator_when_target_already_exists() {
     assert_eq!(err.error_code(), ErrorCode::CommitFailure);
     assert_eq!(std::fs::read(&target).unwrap(), b"occupying bytes");
 }
-
 
 #[tokio::test]
 async fn duplicate_pending_committed_and_recovery_owners_are_rejected_by_repo_constraints() {
@@ -623,20 +620,6 @@ async fn duplicate_pending_committed_and_recovery_owners_are_rejected_by_repo_co
     .unwrap_err();
     assert_eq!(duplicate_recovery.error_code(), ErrorCode::Conflict);
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 #[tokio::test]
 async fn blocking_use_lease_blocks_prepare_before_pending_record() {
@@ -711,9 +694,7 @@ async fn authorize_rejects_wrong_node_and_aborts_intent() {
         spawn_and_wait_pending_intent(&cp, staged.artifact_handle_id, dir.path().join("t.bin"))
             .await;
 
-    let err = node_authorize(&cp, &wrong, intent_id)
-        .await
-        .unwrap_err();
+    let err = node_authorize(&cp, &wrong, intent_id).await.unwrap_err();
     assert_eq!(err.error_code(), ErrorCode::Conflict);
     // Drift aborts the still-pending intent fail-closed.
     assert_eq!(intent_state(&cp, intent_id).await, "aborted");
@@ -728,12 +709,14 @@ async fn authorize_rejects_staging_location_epoch_bump_and_aborts_intent() {
         spawn_and_wait_pending_intent(&cp, staged.artifact_handle_id, dir.path().join("t.bin"))
             .await;
 
-    sqlx::query("UPDATE file_locations SET epoch = epoch + 1 WHERE id = \
-                 (SELECT staging_location_id FROM artifact_commit_intents WHERE id = ?)")
-        .bind(i64::try_from(intent_id.0).unwrap())
-        .execute(cp.pool_for_test())
-        .await
-        .unwrap();
+    sqlx::query(
+        "UPDATE file_locations SET epoch = epoch + 1 WHERE id = \
+                 (SELECT staging_location_id FROM artifact_commit_intents WHERE id = ?)",
+    )
+    .bind(i64::try_from(intent_id.0).unwrap())
+    .execute(cp.pool_for_test())
+    .await
+    .unwrap();
 
     let err = node_authorize(&cp, &node, intent_id).await.unwrap_err();
     assert_eq!(err.error_code(), ErrorCode::Conflict);
@@ -796,17 +779,27 @@ async fn applied_receipt_before_applying_journal_is_rejected() {
     // The applying journal is the sole mutation gate: an outcome receipt
     // without it is an ordering violation.
     let bytes = std::fs::read(&staged.staging_path).unwrap();
-    let err = node_report_outcome(&cp, &node, intent_id, CommitOutcomeEvidence::Applied(AppliedEvidence {
-        observed: voom_test_support::commit_node::observed_facts(&bytes),
-    }))
-        .await
-        .unwrap_err();
+    let err = node_report_outcome(
+        &cp,
+        &node,
+        intent_id,
+        CommitOutcomeEvidence::Applied(AppliedEvidence {
+            observed: voom_test_support::commit_node::observed_facts(&bytes),
+        }),
+    )
+    .await
+    .unwrap_err();
     assert_eq!(err.error_code(), ErrorCode::Conflict);
 
     node_report_applying(&cp, &node, intent_id).await.unwrap();
-    node_report_outcome(&cp, &node, intent_id, CommitOutcomeEvidence::Applied(AppliedEvidence {
-        observed: voom_test_support::commit_node::observed_facts(&bytes),
-    }))
+    node_report_outcome(
+        &cp,
+        &node,
+        intent_id,
+        CommitOutcomeEvidence::Applied(AppliedEvidence {
+            observed: voom_test_support::commit_node::observed_facts(&bytes),
+        }),
+    )
     .await
     .unwrap();
     assert_eq!(intent_receipt_kind(&cp, intent_id).await, "applied");
@@ -821,14 +814,17 @@ async fn complete_rejects_fence_mismatch_then_accepts_exact_fence() {
     spawn_commit_task(&cp, staged.artifact_handle_id, &target);
     let intent_id = wait_pending_intent_id(&cp, staged.artifact_handle_id).await;
     let outcome = node_authorize(&cp, &node, intent_id).await.unwrap();
-    node_report_applying(&cp, &node, intent_id)
-        .await
-        .unwrap();
+    node_report_applying(&cp, &node, intent_id).await.unwrap();
     std::fs::copy(&staged.staging_path, &target).unwrap();
     let bytes = std::fs::read(&staged.staging_path).unwrap();
-    node_report_outcome(&cp, &node, intent_id, CommitOutcomeEvidence::Applied(AppliedEvidence {
-        observed: voom_test_support::commit_node::observed_facts(&bytes),
-    }))
+    node_report_outcome(
+        &cp,
+        &node,
+        intent_id,
+        CommitOutcomeEvidence::Applied(AppliedEvidence {
+            observed: voom_test_support::commit_node::observed_facts(&bytes),
+        }),
+    )
     .await
     .unwrap();
 
@@ -860,25 +856,29 @@ async fn replayed_authorize_returns_identical_stored_outcome() {
             .await;
 
     let first = cp
-        .remote_authorize_commit_intent(crate::artifact::commit::intent::RemoteCommitAuthorizeInput {
-            intent_id,
-            node_id: node.node_id,
-            token: node.token.clone(),
-            incarnation_id: node.incarnation_id,
-            idempotency_key: "sim-authorize-replay".to_owned(),
-            request_hash: "sim-authorize-replay-hash".to_owned(),
-        })
+        .remote_authorize_commit_intent(
+            crate::artifact::commit::intent::RemoteCommitAuthorizeInput {
+                intent_id,
+                node_id: node.node_id,
+                token: node.token.clone(),
+                incarnation_id: node.incarnation_id,
+                idempotency_key: "sim-authorize-replay".to_owned(),
+                request_hash: "sim-authorize-replay-hash".to_owned(),
+            },
+        )
         .await
         .unwrap();
     let second = cp
-        .remote_authorize_commit_intent(crate::artifact::commit::intent::RemoteCommitAuthorizeInput {
-            intent_id,
-            node_id: node.node_id,
-            token: node.token.clone(),
-            incarnation_id: node.incarnation_id,
-            idempotency_key: "sim-authorize-replay".to_owned(),
-            request_hash: "sim-authorize-replay-hash".to_owned(),
-        })
+        .remote_authorize_commit_intent(
+            crate::artifact::commit::intent::RemoteCommitAuthorizeInput {
+                intent_id,
+                node_id: node.node_id,
+                token: node.token.clone(),
+                incarnation_id: node.incarnation_id,
+                idempotency_key: "sim-authorize-replay".to_owned(),
+                request_hash: "sim-authorize-replay-hash".to_owned(),
+            },
+        )
         .await
         .unwrap();
 
@@ -895,14 +895,17 @@ async fn replayed_complete_returns_identical_stored_outcome() {
     spawn_commit_task(&cp, staged.artifact_handle_id, &target);
     let intent_id = wait_pending_intent_id(&cp, staged.artifact_handle_id).await;
     let authorized = node_authorize(&cp, &node, intent_id).await.unwrap();
-    node_report_applying(&cp, &node, intent_id)
-        .await
-        .unwrap();
+    node_report_applying(&cp, &node, intent_id).await.unwrap();
     std::fs::copy(&staged.staging_path, &target).unwrap();
     let bytes = std::fs::read(&staged.staging_path).unwrap();
-    node_report_outcome(&cp, &node, intent_id, CommitOutcomeEvidence::Applied(AppliedEvidence {
-        observed: voom_test_support::commit_node::observed_facts(&bytes),
-    }))
+    node_report_outcome(
+        &cp,
+        &node,
+        intent_id,
+        CommitOutcomeEvidence::Applied(AppliedEvidence {
+            observed: voom_test_support::commit_node::observed_facts(&bytes),
+        }),
+    )
     .await
     .unwrap();
 
@@ -915,8 +918,14 @@ async fn replayed_complete_returns_identical_stored_outcome() {
         request_hash: "sim-complete-replay-hash".to_owned(),
         fence_hex: authorized.fence_hex.clone(),
     };
-    let first = cp.remote_complete_commit_intent(complete_input.clone()).await.unwrap();
-    let second = cp.remote_complete_commit_intent(complete_input).await.unwrap();
+    let first = cp
+        .remote_complete_commit_intent(complete_input.clone())
+        .await
+        .unwrap();
+    let second = cp
+        .remote_complete_commit_intent(complete_input)
+        .await
+        .unwrap();
     assert_eq!(first, second);
     // The fence was consumed once; a second generation was never created.
     assert_eq!(
@@ -936,17 +945,27 @@ async fn recover_commit_redrives_after_supplemental_resolved_not_applied() {
     spawn_commit_task(&cp, staged.artifact_handle_id, &target);
     let intent_id = wait_pending_intent_id(&cp, staged.artifact_handle_id).await;
     drive_authorize_and_applying(&cp, &node, intent_id).await;
-    node_report_outcome(&cp, &node, intent_id, CommitOutcomeEvidence::OutcomeUnknown(OutcomeUnknownEvidence {
-        reason: "node crashed mid-promotion".to_owned(),
-    }))
+    node_report_outcome(
+        &cp,
+        &node,
+        intent_id,
+        CommitOutcomeEvidence::OutcomeUnknown(OutcomeUnknownEvidence {
+            reason: "node crashed mid-promotion".to_owned(),
+        }),
+    )
     .await
     .unwrap();
 
     // The owner's read-only re-observation finds no target and no temp
     // sibling: positive evidence promotion never happened.
-    node_report_outcome(&cp, &node, intent_id, CommitOutcomeEvidence::OutcomeUnknown(OutcomeUnknownEvidence {
-        reason: RESOLVED_NOT_APPLIED_REASON.to_owned(),
-    }))
+    node_report_outcome(
+        &cp,
+        &node,
+        intent_id,
+        CommitOutcomeEvidence::OutcomeUnknown(OutcomeUnknownEvidence {
+            reason: RESOLVED_NOT_APPLIED_REASON.to_owned(),
+        }),
+    )
     .await
     .unwrap();
 
@@ -966,10 +985,15 @@ async fn recover_commit_requires_operator_for_mismatched_receipt() {
     spawn_commit_task(&cp, staged.artifact_handle_id, &target);
     let intent_id = wait_pending_intent_id(&cp, staged.artifact_handle_id).await;
     drive_authorize_and_applying(&cp, &node, intent_id).await;
-    node_report_outcome(&cp, &node, intent_id, CommitOutcomeEvidence::Mismatched(MismatchedEvidence {
-        reason: "target exists with different bytes".to_owned(),
-        observed: None,
-    }))
+    node_report_outcome(
+        &cp,
+        &node,
+        intent_id,
+        CommitOutcomeEvidence::Mismatched(MismatchedEvidence {
+            reason: "target exists with different bytes".to_owned(),
+            observed: None,
+        }),
+    )
     .await
     .unwrap();
 
@@ -991,9 +1015,14 @@ async fn recover_commit_requires_operator_for_unresolved_outcome_unknown() {
     spawn_commit_task(&cp, staged.artifact_handle_id, &target);
     let intent_id = wait_pending_intent_id(&cp, staged.artifact_handle_id).await;
     drive_authorize_and_applying(&cp, &node, intent_id).await;
-    node_report_outcome(&cp, &node, intent_id, CommitOutcomeEvidence::OutcomeUnknown(OutcomeUnknownEvidence {
-        reason: "node crashed mid-promotion".to_owned(),
-    }))
+    node_report_outcome(
+        &cp,
+        &node,
+        intent_id,
+        CommitOutcomeEvidence::OutcomeUnknown(OutcomeUnknownEvidence {
+            reason: "node crashed mid-promotion".to_owned(),
+        }),
+    )
     .await
     .unwrap();
 
@@ -1237,28 +1266,9 @@ async fn create_pending_commit_result(
     }
 }
 
-
-
-
-
 // The in-crate test build compiles a distinct `voom-control-plane` instance
 // from the one voom-test-support links, so the case calls are driven through
 // these thin local wrappers instead of the shared helper's methods.
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 fn spawn_commit_task(
     cp: &ControlPlane,
@@ -1320,10 +1330,7 @@ async fn spawn_and_drive_to_applied_not_completed(
 }
 
 /// Resolve the staged bytes' path for the handle's live staging location.
-async fn staging_path_for(
-    cp: &ControlPlane,
-    artifact_handle_id: ArtifactHandleId,
-) -> PathBuf {
+async fn staging_path_for(cp: &ControlPlane, artifact_handle_id: ArtifactHandleId) -> PathBuf {
     let report: String = sqlx::query_scalar(
         "SELECT report FROM artifact_commit_records WHERE artifact_handle_id = ? \
          ORDER BY id DESC LIMIT 1",
@@ -1501,14 +1508,16 @@ pub(crate) async fn node_authorize(
     node: &SimulatedOwnerNode,
     intent_id: ArtifactCommitIntentId,
 ) -> Result<crate::artifact::commit::intent::AuthorizeCommitOutcome, VoomError> {
-    cp.remote_authorize_commit_intent(crate::artifact::commit::intent::RemoteCommitAuthorizeInput {
-        intent_id,
-        node_id: node.node_id,
-        token: node.token.clone(),
-        incarnation_id: node.incarnation_id,
-        idempotency_key: unique_key("authorize"),
-        request_hash: unique_key("authorize-hash"),
-    })
+    cp.remote_authorize_commit_intent(
+        crate::artifact::commit::intent::RemoteCommitAuthorizeInput {
+            intent_id,
+            node_id: node.node_id,
+            token: node.token.clone(),
+            incarnation_id: node.incarnation_id,
+            idempotency_key: unique_key("authorize"),
+            request_hash: unique_key("authorize-hash"),
+        },
+    )
     .await
 }
 
@@ -1597,7 +1606,6 @@ pub(crate) async fn wait_pending_intent_id(
     panic!("no pending commit intent appeared for handle {artifact_handle_id}");
 }
 
-
 /// Spawn `commit_artifact` concurrently with a simulated-node driver so the
 /// bounded convergence wait sees the fenced intent reach a terminal state.
 pub(crate) async fn commit_with_node(
@@ -1627,10 +1635,18 @@ pub(crate) async fn drive_pending_commit_local(
     let intent_id = wait_pending_intent_id(cp, artifact_handle_id).await;
     let outcome = node_authorize(cp, node, intent_id).await?;
     node_report_applying(cp, node, intent_id).await?;
-    let staging_path =
-        rooted_path(cp, outcome.staging_storage_root_id.0, &outcome.staging_provider_relative_locator).await;
-    let target_path =
-        rooted_path(cp, outcome.target_storage_root_id.0, &outcome.target_provider_relative_locator).await;
+    let staging_path = rooted_path(
+        cp,
+        outcome.staging_storage_root_id.0,
+        &outcome.staging_provider_relative_locator,
+    )
+    .await;
+    let target_path = rooted_path(
+        cp,
+        outcome.target_storage_root_id.0,
+        &outcome.target_provider_relative_locator,
+    )
+    .await;
     let staged_bytes = std::fs::read(&staging_path).unwrap();
     let staged_facts = voom_test_support::commit_node::observed_facts(&staged_bytes);
     let expected = crate::artifact::commit::intent::AuthorizeCommitOutcome {
@@ -1695,7 +1711,10 @@ pub(crate) async fn intent_state(cp: &ControlPlane, intent_id: ArtifactCommitInt
         .unwrap()
 }
 
-pub(crate) async fn intent_receipt_kind(cp: &ControlPlane, intent_id: ArtifactCommitIntentId) -> String {
+pub(crate) async fn intent_receipt_kind(
+    cp: &ControlPlane,
+    intent_id: ArtifactCommitIntentId,
+) -> String {
     let receipt: String =
         sqlx::query_scalar("SELECT receipt FROM artifact_commit_intents WHERE id = ?")
             .bind(i64::try_from(intent_id.0).unwrap())
@@ -1760,7 +1779,7 @@ pub(crate) async fn install_second_remote_node(cp: &ControlPlane) -> SimulatedOw
         .bind(i64::try_from(wrong_id.0).unwrap())
         .execute(pool)
         .await
-    .unwrap();
+        .unwrap();
     SimulatedOwnerNode {
         node_id: wrong_id,
         token: node.token,
@@ -1792,9 +1811,14 @@ pub(crate) async fn drive_to_applied_not_completed(
     drive_authorize_and_applying(cp, node, intent_id).await;
     std::fs::copy(staged_path, target_path).unwrap();
     let bytes = std::fs::read(staged_path).unwrap();
-    node_report_outcome(cp, node, intent_id, CommitOutcomeEvidence::Applied(AppliedEvidence {
-        observed: voom_test_support::commit_node::observed_facts(&bytes),
-    }))
+    node_report_outcome(
+        cp,
+        node,
+        intent_id,
+        CommitOutcomeEvidence::Applied(AppliedEvidence {
+            observed: voom_test_support::commit_node::observed_facts(&bytes),
+        }),
+    )
     .await
     .unwrap();
 }

@@ -977,7 +977,10 @@ async fn drive_synthesis_commit(
     let records = cp.artifacts.list_commit_records(artifact_handle_id).await?;
     // A committed generation is adopted as-is: a lineage failure after the
     // fenced commit completed must never re-drive the bytes.
-    if let Some(committed) = records.iter().find(|record| record.state == ArtifactCommitState::Committed) {
+    if let Some(committed) = records
+        .iter()
+        .find(|record| record.state == ArtifactCommitState::Committed)
+    {
         return Ok(crate::artifact::commit::CommitArtifactReport {
             commit_record_id: committed.id,
             artifact_handle_id: committed.artifact_handle_id,

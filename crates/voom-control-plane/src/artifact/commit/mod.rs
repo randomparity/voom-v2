@@ -279,11 +279,7 @@ async fn wait_for_commit_convergence(
             })?;
         match record.state {
             ArtifactCommitState::Committed => {
-                return Ok(finalize::report_from_record(
-                    &record,
-                    target_path,
-                    None,
-                ));
+                return Ok(finalize::report_from_record(&record, target_path, None));
             }
             ArtifactCommitState::Failed | ArtifactCommitState::RecoveryRequired => {
                 let report = finalize::report_from_record(
@@ -296,9 +292,7 @@ async fn wait_for_commit_convergence(
                     .clone()
                     .unwrap_or_else(|| "commit requires recovery".to_owned());
                 return Err(CommitArtifactCommandError {
-                    code: record
-                        .error_code
-                        .unwrap_or(ErrorCode::CommitFailure),
+                    code: record.error_code.unwrap_or(ErrorCode::CommitFailure),
                     message,
                     pre_mutation_report: None,
                     commit_report: Some(report),
