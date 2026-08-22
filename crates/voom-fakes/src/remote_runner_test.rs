@@ -313,3 +313,74 @@ async fn runner_completes_acquired_byte_work_with_bound_plan_and_decision() {
         "the selected decision and the plan bind the same lease"
     );
 }
+
+/// Issue #479: the acquire key the synthetic runner used replays the original
+/// leased outcome after the ticket reached its terminal state — one lease,
+/// one plan, one execution, no second mutation.
+#[tokio::test]
+async fn runner_acquire_key_replays_identically_without_second_execution() {
+    use voom_control_plane::execution::{RemoteAcquireInput, RemoteAcquireOutcome};
+    use voom_core::{NodeIncarnationId, WorkerId};
+
+    let fixture = RemoteRunnerFixture::new().await;
+    let ticket_id = fixture
+        .ready_ticket(transcode_video_ticket(
+            "/library/movie.mkv",
+            "runner-replay.mkv",
+        ))
+        .await;
+    let summary = RemoteSyntheticRunner::new(fixture.config())
+        .run_once_to_completion()
+        .await
+        .unwrap();
+    assert_eq!(summary.completed, 1);
+
+    let pool = voom_store::connect(&fixture.url).await.unwrap();
+    let (stored_key, request_hash): (String, String) = sqlx::query_as(
+        "SELECT idempotency_key, request_hash FROM remote_idempotency_keys \
+         WHERE route_key = 'POST /v1/execution/lease/acquire' AND status = 'completed' \
+         ORDER BY id DESC LIMIT 1",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let (incarnation_token, client_key) = stored_key.split_once(':').unwrap();
+    let incarnation_id: NodeIncarnationId = incarnation_token.parse().unwrap();
+
+    let replay = fixture
+        .cp
+        .remote_acquire(RemoteAcquireInput {
+            node_id: fixture.node_id,
+            token: fixture.token.clone(),
+            incarnation_id,
+            worker_id: WorkerId(1),
+            idempotency_key: client_key.to_owned(),
+            request_hash,
+            lease_ttl_seconds: 60,
+        })
+        .await
+        .unwrap();
+    assert!(
+        matches!(replay, RemoteAcquireOutcome::Leased(_)),
+        "replay must return the original leased outcome"
+    );
+    let RemoteAcquireOutcome::Leased(dispatch) = replay else {
+        return;
+    };
+    assert_eq!(dispatch.ticket_id.0, ticket_id.0);
+
+    let leases: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM leases")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let plans: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM artifact_access_plans")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(leases, 1);
+    assert_eq!(plans, 1);
+    assert_eq!(
+        fixture.ticket_state(ticket_id).await,
+        TicketState::Succeeded
+    );
+}

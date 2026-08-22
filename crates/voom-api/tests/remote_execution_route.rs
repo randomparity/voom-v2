@@ -599,12 +599,7 @@ async fn complete_route_releases_ticket_consumes_plan_and_replays() {
         "worker_id": fixture.worker_id.0,
         "result": {
             "ok": true,
-            "artifact_access": {
-                "validated": true,
-                "mode": "shared_mount",
-                "inputs_consumed": ["handle:input:route"],
-                "outputs_declared": ["handle:output:route"]
-            }
+            "artifact_access": {"validated": true}
         }
     });
 
@@ -1115,4 +1110,70 @@ async fn acquire_leased_owner_local_byte_work_dispatches_normalized_operation() 
     .unwrap();
     assert_eq!(row.0, Some(i64::try_from(lease_id).unwrap()));
     assert!(row.1.is_some());
+}
+
+#[tokio::test]
+async fn acquire_replay_survives_completion_and_corruption_over_http() {
+    let fixture = api_fixture().await;
+    let (lease_id, _ticket_id) = fixture.acquire_lease("http-replay-acquire").await;
+
+    // Complete the lease with the exact consumption evidence.
+    let complete = fixture
+        .post_json(
+            &format!("/v1/execution/lease/{}/complete", lease_id.0),
+            "http-replay-complete",
+            json!({
+                "node_id": fixture.node_id.0,
+                "worker_id": fixture.worker_id.0,
+                "result": {"ok": true, "artifact_access": {"validated": true}}
+            }),
+        )
+        .await;
+    assert_eq!(complete.status(), StatusCode::OK);
+
+    // The original acquire key still replays the leased outcome after the
+    // terminal mutation.
+    let body = json!({"node_id": fixture.node_id.0, "worker_id": fixture.worker_id.0});
+    let first = fixture
+        .post_json(
+            "/v1/execution/lease/acquire",
+            "http-replay-acquire",
+            body.clone(),
+        )
+        .await;
+    let replay = fixture
+        .post_json("/v1/execution/lease/acquire", "http-replay-acquire", body)
+        .await;
+    assert_eq!(first.status(), StatusCode::OK);
+    assert_eq!(replay.status(), StatusCode::OK);
+    assert_eq!(response_json(first).await, response_json(replay).await);
+}
+
+#[tokio::test]
+async fn acquire_replay_reports_store_corruption_as_database_error() {
+    let fixture = api_fixture().await;
+    fixture.acquire_lease("corrupt-acquire").await;
+
+    // Corrupt the stored response so it decodes but disagrees with the rows:
+    // a zero lease id is serde-valid and semantically corrupt (ADR 0073).
+    let pool = voom_store::connect(&fixture.url).await.unwrap();
+    sqlx::query(
+        "UPDATE remote_idempotency_keys \
+         SET response_json = json_set(response_json, '$.data.lease_id', 0) \
+         WHERE route_key = 'POST /v1/execution/lease/acquire'",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let res = fixture
+        .post_json(
+            "/v1/execution/lease/acquire",
+            "corrupt-acquire",
+            json!({"node_id": fixture.node_id.0, "worker_id": fixture.worker_id.0}),
+        )
+        .await;
+    assert_eq!(res.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let json = response_json(res).await;
+    assert_eq!(json["error"]["code"], "DB_UNREACHABLE");
 }

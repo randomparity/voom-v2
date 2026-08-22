@@ -340,6 +340,29 @@ impl SqliteSchedulerDecisionRepo {
         row.as_ref().map(row_to_decision).transpose()
     }
 
+    /// Look up a decision by id inside the caller's transaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VoomError::Database`] if the query or row decoding fails.
+    pub async fn get_in_tx(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        id: u64,
+    ) -> Result<Option<SchedulerDecision>, VoomError> {
+        let row = sqlx::query(&format!(
+            "SELECT {DECISION_COLS} FROM scheduler_decisions WHERE id = ?"
+        ))
+        .bind(i64_from_u64(
+            id,
+            concat!(module_path!(), ": ", stringify!(id)),
+        )?)
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(|e| VoomError::database_context("scheduler_decisions get_in_tx", e))?;
+        row.as_ref().map(row_to_decision).transpose()
+    }
+
     pub async fn list(
         &self,
         filter: SchedulerDecisionFilter,

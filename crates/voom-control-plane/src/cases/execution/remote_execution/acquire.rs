@@ -30,7 +30,9 @@ use voom_scheduler::{
 use voom_store::repo::execution::leases::{
     LeaseAcquireOutcome, LeaseIneligibilityReason, NewLease,
 };
-use voom_store::repo::execution::remote_idempotency::{IdempotencyOutcome, RemoteIdempotencyInput};
+use voom_store::repo::execution::remote_idempotency::{
+    IdempotencyOutcome, RemoteIdempotencyInput, RemoteMutationReplay,
+};
 use voom_store::repo::execution::scheduler_decisions::{
     NewSchedulerDecision, SchedulerDecisionKind, SchedulerDecisionOutcome,
     SchedulerReasonCode as StoreSchedulerReasonCode, SchedulerRequestSource,
@@ -84,9 +86,7 @@ impl ControlPlane {
         {
             IdempotencyOutcome::Reserved => {}
             IdempotencyOutcome::Replay(replay) => {
-                return self
-                    .finish_replay_in_tx(tx, input.replay_slot(), replay, decode_acquire_replay)
-                    .await;
+                return self.finish_acquire_replay_in_tx(tx, &input, replay).await;
             }
         }
 
@@ -1466,5 +1466,260 @@ pub(super) fn remote_plan(plan: &ArtifactAccessPlan) -> RemoteArtifactAccessPlan
         id: plan.id,
         owner_node_id: plan.owner_node_id.map(|id| id.0),
         access_evidence: plan.access_evidence.clone(),
+    }
+}
+
+impl ControlPlane {
+    /// Finish an acquire replay: decode the stored response, prove its evidence
+    /// against durable rows, and return the original outcome.
+    ///
+    /// Decode failures keep the existing poison-repoint contract
+    /// (`finish_replay_in_tx`). Semantic corruption — a decodable response whose
+    /// identities disagree with the lease, plan, decision, or ticket rows — is a
+    /// database error and never repoints the row: the stored response is the only
+    /// surviving copy of the original outcome (ADR 0073).
+    pub(super) async fn finish_acquire_replay_in_tx(
+        &self,
+        mut tx: Transaction<'_, Sqlite>,
+        input: &RemoteAcquireInput,
+        replay: RemoteMutationReplay,
+    ) -> Result<RemoteAcquireOutcome, VoomError> {
+        let slot = input.replay_slot();
+        let data = match &replay {
+            RemoteMutationReplay::Error { .. } => {
+                return self
+                    .finish_replay_in_tx(tx, slot, replay, decode_acquire_replay)
+                    .await;
+            }
+            RemoteMutationReplay::Ok { data } => data.clone(),
+        };
+        let outcome = match decode_acquire_replay(data) {
+            Ok(outcome) => outcome,
+            Err(decode_error) => {
+                // Unreadable stored result: keep the poison-repoint behavior.
+                return self
+                    .finish_replay_in_tx(tx, slot, replay, |_| Err(decode_error))
+                    .await;
+            }
+        };
+        Self::validate_acquire_replay_evidence_in_tx(&mut tx, self, input, &outcome).await?;
+        commit_tx(tx).await?;
+        Ok(outcome)
+    }
+
+    fn require_replay_id(id: u64, label: &str) -> Result<(), VoomError> {
+        if id == 0 {
+            Err(VoomError::database(format!(
+                "acquire replay evidence: zero {label}"
+            )))
+        } else {
+            Ok(())
+        }
+    }
+
+    fn replay_mismatch(detail: &str) -> VoomError {
+        VoomError::database(format!(
+            "acquire replay evidence disagrees with durable rows: {detail}"
+        ))
+    }
+
+    /// Canonical JSON text of typed evidence; both sides serialize through the
+    /// same validating types, so text equality is content equality.
+    fn evidence_fingerprint(evidence: Option<&OwnerAccessEvidence>) -> Result<String, VoomError> {
+        evidence
+            .map(serde_json::to_string)
+            .transpose()
+            .map(Option::unwrap_or_default)
+            .map_err(|e| VoomError::database(format!("acquire replay evidence: {e}")))
+    }
+
+    async fn validate_acquire_replay_evidence_in_tx(
+        tx: &mut Transaction<'_, Sqlite>,
+        plane: &ControlPlane,
+        input: &RemoteAcquireInput,
+        outcome: &RemoteAcquireOutcome,
+    ) -> Result<(), VoomError> {
+        match outcome {
+            RemoteAcquireOutcome::Idle {
+                worker_id,
+                scheduler_decision_id,
+            } => {
+                Self::validate_non_selected_decision_replay_in_tx(
+                    tx,
+                    plane,
+                    *worker_id,
+                    *scheduler_decision_id,
+                    SchedulerDecisionKind::Idle,
+                    SchedulerDecisionOutcome::Idle,
+                )
+                .await
+            }
+            RemoteAcquireOutcome::NoCandidate {
+                worker_id,
+                scheduler_decision_id,
+            } => {
+                Self::validate_non_selected_decision_replay_in_tx(
+                    tx,
+                    plane,
+                    *worker_id,
+                    *scheduler_decision_id,
+                    SchedulerDecisionKind::NoCandidate,
+                    SchedulerDecisionOutcome::NoEligibleCandidate,
+                )
+                .await
+            }
+            RemoteAcquireOutcome::Leased(dispatch) => {
+                Self::validate_leased_replay_evidence_in_tx(tx, plane, input, dispatch).await
+            }
+        }
+    }
+
+    /// An idle or no-candidate replay must name the decision that produced it.
+    async fn validate_non_selected_decision_replay_in_tx(
+        tx: &mut Transaction<'_, Sqlite>,
+        plane: &ControlPlane,
+        worker_id: WorkerId,
+        scheduler_decision_id: u64,
+        kind: SchedulerDecisionKind,
+        expected_outcome: SchedulerDecisionOutcome,
+    ) -> Result<(), VoomError> {
+        Self::require_replay_id(scheduler_decision_id, "scheduler decision id")?;
+        let decision = plane
+            .scheduler_decisions
+            .get_in_tx(tx, scheduler_decision_id)
+            .await?
+            .ok_or_else(|| {
+                Self::replay_mismatch(&format!(
+                    "scheduler decision {scheduler_decision_id} is missing"
+                ))
+            })?;
+        if decision.decision_kind != kind
+            || decision.outcome != expected_outcome
+            || decision.request_worker_id != Some(worker_id)
+        {
+            return Err(Self::replay_mismatch(&format!(
+                "scheduler decision {scheduler_decision_id} does not describe this outcome"
+            )));
+        }
+        Ok(())
+    }
+
+    #[expect(
+        clippy::too_many_lines,
+        reason = "each identity binding of the stored acquisition is one explicit check"
+    )]
+    async fn validate_leased_replay_evidence_in_tx(
+        tx: &mut Transaction<'_, Sqlite>,
+        plane: &ControlPlane,
+        input: &RemoteAcquireInput,
+        dispatch: &RemoteLeaseDispatch,
+    ) -> Result<(), VoomError> {
+        Self::require_replay_id(dispatch.lease_id.0, "lease id")?;
+        Self::require_replay_id(dispatch.scheduler_decision_id, "scheduler decision id")?;
+        Self::require_replay_id(dispatch.ticket_id.0, "ticket id")?;
+        Self::require_replay_id(dispatch.worker_id.0, "worker id")?;
+        Self::require_replay_id(dispatch.artifact_access_plan.id, "access plan id")?;
+        if dispatch.artifact_access_plan.owner_node_id == Some(0) {
+            return Err(Self::replay_mismatch("zero owner node id"));
+        }
+
+        // Identity only: lease state and plan status legitimately change after
+        // terminal processing, so replay must not depend on them (ADR 0073).
+        let lease = plane
+            .leases
+            .get_in_tx(tx, dispatch.lease_id)
+            .await?
+            .ok_or_else(|| {
+                Self::replay_mismatch(&format!("lease {} is missing", dispatch.lease_id.0))
+            })?;
+        if lease.ticket_id != dispatch.ticket_id || lease.worker_id != dispatch.worker_id {
+            return Err(Self::replay_mismatch(&format!(
+                "lease {} binds ticket {:?}/worker {:?}, not ticket {:?}/worker {:?}",
+                dispatch.lease_id.0,
+                lease.ticket_id,
+                lease.worker_id,
+                dispatch.ticket_id,
+                dispatch.worker_id
+            )));
+        }
+
+        let plan = plane
+            .artifact_access_plans
+            .get_by_lease_in_tx(tx, dispatch.lease_id)
+            .await?
+            .ok_or_else(|| {
+                Self::replay_mismatch(&format!(
+                    "access plan for lease {} is missing",
+                    dispatch.lease_id.0
+                ))
+            })?;
+        if plan.id != dispatch.artifact_access_plan.id {
+            return Err(Self::replay_mismatch(&format!(
+                "lease {} is bound to plan {}, not plan {}",
+                dispatch.lease_id.0, plan.id, dispatch.artifact_access_plan.id
+            )));
+        }
+        if plan.ticket_id != dispatch.ticket_id
+            || plan.worker_id != dispatch.worker_id
+            || plan.node_id != input.node_id
+        {
+            return Err(Self::replay_mismatch(
+                "access plan bindings disagree with the dispatch",
+            ));
+        }
+        if plan.owner_node_id.map(|id| id.0) != dispatch.artifact_access_plan.owner_node_id {
+            return Err(Self::replay_mismatch(
+                "access plan owner disagrees with the dispatch",
+            ));
+        }
+        if Self::evidence_fingerprint(plan.access_evidence.as_ref())?
+            != Self::evidence_fingerprint(dispatch.artifact_access_plan.access_evidence.as_ref())?
+        {
+            return Err(Self::replay_mismatch(
+                "access plan evidence disagrees with the dispatch",
+            ));
+        }
+
+        let decision = plane
+            .scheduler_decisions
+            .get_in_tx(tx, dispatch.scheduler_decision_id)
+            .await?
+            .ok_or_else(|| {
+                Self::replay_mismatch(&format!(
+                    "scheduler decision {} is missing",
+                    dispatch.scheduler_decision_id
+                ))
+            })?;
+        if decision.decision_kind != SchedulerDecisionKind::LeaseAcquire
+            || decision.outcome != SchedulerDecisionOutcome::Selected
+            || decision.selected_lease_id != Some(dispatch.lease_id)
+            || decision.request_source != SchedulerRequestSource::RemoteAcquire
+            || decision.request_worker_id != Some(dispatch.worker_id)
+            || decision.request_node_id != Some(input.node_id)
+        {
+            return Err(Self::replay_mismatch(&format!(
+                "scheduler decision {} does not select lease {}",
+                dispatch.scheduler_decision_id, dispatch.lease_id.0
+            )));
+        }
+
+        let ticket = plane
+            .tickets
+            .get_in_tx(tx, dispatch.ticket_id)
+            .await?
+            .ok_or_else(|| {
+                Self::replay_mismatch(&format!("ticket {} is missing", dispatch.ticket_id.0))
+            })?;
+        if ticket.kind.normalize().matching_token().into_string() != dispatch.operation {
+            return Err(Self::replay_mismatch(
+                "dispatch operation disagrees with the ticket kind",
+            ));
+        }
+        if ticket.payload != dispatch.dispatch_payload {
+            return Err(Self::replay_mismatch(
+                "dispatch payload disagrees with the ticket payload",
+            ));
+        }
+        Ok(())
     }
 }

@@ -2499,3 +2499,617 @@ fn changed_gate_outcomes_map_to_the_documented_stable_reasons() {
         assert!(explanation.get("scoring_version").is_some());
     }
 }
+
+// ---- #479: terminal-safe owner-local acquisition replay ----
+
+fn leased_dispatch(outcome: &RemoteAcquireOutcome) -> &RemoteLeaseDispatch {
+    let RemoteAcquireOutcome::Leased(dispatch) = outcome else {
+        panic!("expected a leased acquire outcome, got {outcome:?}");
+    };
+    dispatch
+}
+
+async fn evidence_counts(fixture: &RemoteFixture) -> (i64, i64, i64, i64) {
+    let pool = fixture.cp.pool_for_test();
+    let leases: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM leases")
+        .fetch_one(pool)
+        .await
+        .unwrap();
+    let plans: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM artifact_access_plans")
+        .fetch_one(pool)
+        .await
+        .unwrap();
+    let decisions: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM scheduler_decisions")
+        .fetch_one(pool)
+        .await
+        .unwrap();
+    let events: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM events")
+        .fetch_one(pool)
+        .await
+        .unwrap();
+    (leases, plans, decisions, events)
+}
+
+/// The stored `data` payload of a completed acquire replay row.
+async fn stored_acquire_data(fixture: &RemoteFixture, key: &str) -> serde_json::Value {
+    let json: String = sqlx::query_scalar(
+        "SELECT response_json FROM remote_idempotency_keys WHERE idempotency_key = ?",
+    )
+    .bind(incarnation_replay_key(fixture.incarnation_id, key))
+    .fetch_one(fixture.cp.pool_for_test())
+    .await
+    .unwrap();
+    let mut envelope: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(envelope["status"], json!("ok"));
+    envelope.get_mut("data").unwrap().take()
+}
+
+async fn overwrite_acquire_data(fixture: &RemoteFixture, key: &str, data: serde_json::Value) {
+    let json: String = sqlx::query_scalar(
+        "SELECT response_json FROM remote_idempotency_keys WHERE idempotency_key = ?",
+    )
+    .bind(incarnation_replay_key(fixture.incarnation_id, key))
+    .fetch_one(fixture.cp.pool_for_test())
+    .await
+    .unwrap();
+    let mut envelope: serde_json::Value = serde_json::from_str(&json).unwrap();
+    envelope["data"] = data;
+    sqlx::query("UPDATE remote_idempotency_keys SET response_json = ? WHERE idempotency_key = ?")
+        .bind(envelope.to_string())
+        .bind(incarnation_replay_key(fixture.incarnation_id, key))
+        .execute(fixture.cp.pool_for_test())
+        .await
+        .unwrap();
+}
+
+/// A byte-work fixture: live root owned by the acquiring node plus one rooted
+/// location, so the declared declaration resolves owner-local (the control-plane
+/// twin of the API route's owner-local seeding).
+async fn byte_work_fixture() -> (RemoteFixture, StorageRootId, u64) {
+    let namespaced = "synthetic.workflow.operation.transcode_video";
+    let fixture = remote_fixture(
+        &[
+            (namespaced, vec!["shared_mount"]),
+            ("transcode_video", vec!["shared_mount"]),
+        ],
+        &[namespaced, "transcode_video"],
+        &[],
+    )
+    .await;
+    let library = fixture
+        .cp
+        .create_library(NewLibrary {
+            slug: "owner-local-replay".to_owned(),
+            display_name: "Owner local replay".to_owned(),
+            media_kind: LibraryMediaKind::Movie,
+            description: None,
+            enabled: true,
+        })
+        .await
+        .unwrap();
+    let root = fixture
+        .cp
+        .create_library_root(NewLibraryRoot {
+            library_id: library.id,
+            owner_node_id: fixture.node_id,
+            provider_kind: StorageProviderKind::LocalFilesystem,
+            provider_locator: ProviderLocator::new("/owner-local-replay".to_owned()).unwrap(),
+            display_locator: "/owner-local-replay".to_owned(),
+            include_globs: Vec::new(),
+            exclude_globs: Vec::new(),
+            extension_allowlist: Vec::new(),
+            scan_mode: LibraryScanMode::ManualRecursive,
+            symlink_policy: SymlinkPolicy::Reject,
+            hidden_file_policy: HiddenFilePolicy::Ignore,
+            max_depth: None,
+            stability_seconds: 0,
+            debounce_seconds: 0,
+            default_output_root_id: None,
+            default_staging_root_id: None,
+            default_backup_root_id: None,
+            enabled: true,
+        })
+        .await
+        .unwrap();
+    fixture
+        .cp
+        .activate_library_root(root.id, "owner-local-replay".to_owned())
+        .await
+        .unwrap();
+    let pool = fixture.cp.pool_for_test();
+    let asset_id = sqlx::query("INSERT INTO file_assets (created_at, epoch) VALUES (?, 0)")
+        .bind("1970-01-01T00:00:00Z")
+        .execute(pool)
+        .await
+        .unwrap()
+        .last_insert_rowid();
+    let version_id = sqlx::query(
+        "INSERT INTO file_versions (file_asset_id, content_hash, size_bytes, produced_by, \
+         produced_from_version_id, created_at, retired_at, epoch) \
+         VALUES (?, ?, 1, 'ingest', NULL, '1970-01-01T00:00:00Z', NULL, 0)",
+    )
+    .bind(asset_id)
+    .bind("owner-local-replay")
+    .execute(pool)
+    .await
+    .unwrap()
+    .last_insert_rowid();
+    let location_id = sqlx::query(
+        "INSERT INTO file_locations (file_version_id, address_state, storage_root_id, \
+         provider_relative_locator, observed_at, epoch) \
+         VALUES (?, 'rooted', ?, ?, '1970-01-01T00:00:00Z', 0)",
+    )
+    .bind(version_id)
+    .bind(i64::try_from(root.id.0).unwrap())
+    .bind("movie.mkv")
+    .execute(pool)
+    .await
+    .unwrap()
+    .last_insert_rowid();
+    ready_byte_work_ticket(&fixture, root.id, u64::try_from(location_id).unwrap()).await;
+    (fixture, root.id, u64::try_from(location_id).unwrap())
+}
+
+/// Create and ready one owner-local byte-work ticket against the fixture's
+/// rooted location.
+async fn ready_byte_work_ticket(fixture: &RemoteFixture, root_id: StorageRootId, location_id: u64) {
+    let namespaced = "synthetic.workflow.operation.transcode_video";
+    let payload = json!({
+        "workflow_id": "wf-replay",
+        "plan_id": "plan-replay",
+        "node_id": "node-replay",
+        "branch_id": "branch-replay",
+        "operation": "transcode_video",
+        "rendered_payload": {
+            "operation": "transcode_video",
+            "source_storage_root_id": root_id.0,
+            "source_location_id": location_id,
+        },
+        "timing": {"duration_ms": 25, "progress_interval_ms": 10},
+        "declared_artifact_access": [
+            {"target": {"kind": "storage_root", "storage_root_id": root_id.0}, "rights": ["write"]},
+            {"target": {"kind": "file_location", "storage_root_id": root_id.0,
+                        "file_location_id": location_id}, "rights": ["read"]}
+        ],
+    });
+    let ticket = fixture
+        .cp
+        .create_ticket(NewTicket {
+            job_id: None,
+            kind: ticket_op(namespaced),
+            priority: 0,
+            payload,
+            max_attempts: 2,
+            created_at: T0,
+        })
+        .await
+        .unwrap();
+    fixture
+        .cp
+        .mark_ready_if_unblocked(ticket.id, T0)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn remote_acquire_leased_replay_proves_evidence_and_creates_nothing() {
+    let (fixture, _root, _location) = byte_work_fixture().await;
+    let key = "replay-proves-evidence";
+    let first = fixture
+        .cp
+        .remote_acquire(fixture.acquire_input(key, "hash-rpe"))
+        .await
+        .unwrap();
+    let dispatch = leased_dispatch(&first).clone();
+    assert!(dispatch.artifact_access_plan.owner_node_id.is_some());
+    assert!(dispatch.artifact_access_plan.access_evidence.is_some());
+
+    let before = evidence_counts(&fixture).await;
+    let replay = fixture
+        .cp
+        .remote_acquire(fixture.acquire_input(key, "hash-rpe"))
+        .await
+        .unwrap();
+    assert_eq!(replay, first);
+    assert_eq!(evidence_counts(&fixture).await, before);
+}
+
+#[tokio::test]
+async fn remote_acquire_leased_replay_survives_completion_and_failure() {
+    // Replay after normal completion.
+    let fixture = remote_fixture(&[(OP, vec!["shared_mount"])], &[OP], &[]).await;
+    fixture.ready_ticket(OP).await;
+    let complete_key = "replay-after-complete";
+    let first = fixture
+        .cp
+        .remote_acquire(fixture.acquire_input(complete_key, "hash-rac"))
+        .await
+        .unwrap();
+    let lease_id = leased_dispatch(&first).lease_id;
+    fixture
+        .cp
+        .remote_complete(fixture.complete_input(lease_id, "complete-rac", "hash-cr"))
+        .await
+        .unwrap();
+    let replay = fixture
+        .cp
+        .remote_acquire(fixture.acquire_input(complete_key, "hash-rac"))
+        .await
+        .unwrap();
+    assert_eq!(replay, first);
+
+    // Replay after failure.
+    let failed = remote_fixture(&[(OP, vec!["shared_mount"])], &[OP], &[]).await;
+    failed.ready_ticket(OP).await;
+    let fail_key = "replay-after-fail";
+    let failed_first = failed
+        .cp
+        .remote_acquire(failed.acquire_input(fail_key, "hash-raf"))
+        .await
+        .unwrap();
+    let failed_lease = leased_dispatch(&failed_first).lease_id;
+    failed
+        .cp
+        .remote_fail(failed.fail_input(failed_lease, "fail-raf", "hash-fr"))
+        .await
+        .unwrap();
+    let failed_replay = failed
+        .cp
+        .remote_acquire(failed.acquire_input(fail_key, "hash-raf"))
+        .await
+        .unwrap();
+    assert_eq!(failed_replay, failed_first);
+}
+
+#[tokio::test]
+async fn remote_acquire_replay_rejects_semantic_corruption_as_database_error() {
+    fn zero(field: &str) -> impl Fn(&mut serde_json::Value) {
+        move |d: &mut serde_json::Value| d[field] = json!(0)
+    }
+    type CorruptFn = Box<dyn Fn(&mut serde_json::Value)>;
+    let cases: Vec<(&str, CorruptFn)> = vec![
+        ("zero-lease-id", Box::new(zero("lease_id"))),
+        (
+            "zero-scheduler-decision-id",
+            Box::new(zero("scheduler_decision_id")),
+        ),
+        ("zero-ticket-id", Box::new(zero("ticket_id"))),
+        ("zero-worker-id", Box::new(zero("worker_id"))),
+        (
+            "zero-plan-id",
+            Box::new(|d| d["artifact_access_plan"]["id"] = json!(0)),
+        ),
+        (
+            "wrong-owner",
+            Box::new(|d: &mut serde_json::Value| {
+                d["artifact_access_plan"]["owner_node_id"] = json!(987_654);
+            }),
+        ),
+        (
+            "evidence-mismatch",
+            Box::new(|d: &mut serde_json::Value| {
+                let epoch = u64::try_from(
+                    d["artifact_access_plan"]["access_evidence"]["root_epochs"][0]["root_epoch"]
+                        .as_i64()
+                        .unwrap(),
+                )
+                .unwrap();
+                d["artifact_access_plan"]["access_evidence"]["root_epochs"][0]["root_epoch"] =
+                    json!(epoch + 1);
+            }),
+        ),
+        (
+            "altered-operation",
+            Box::new(|d: &mut serde_json::Value| d["operation"] = json!("remux")),
+        ),
+        (
+            "altered-payload",
+            Box::new(|d: &mut serde_json::Value| {
+                d["dispatch_payload"] = json!({"tampered": true});
+            }),
+        ),
+    ];
+
+    for (name, mutate) in cases {
+        let (fixture, _root, _location) = byte_work_fixture().await;
+        let key = format!("corrupt-{name}");
+        let hash = format!("hash-{name}");
+        let first = fixture
+            .cp
+            .remote_acquire(fixture.acquire_input(&key, &hash))
+            .await
+            .unwrap();
+        assert!(
+            matches!(first, RemoteAcquireOutcome::Leased(_),),
+            "{name}: fixture must lease"
+        );
+        let mut data = stored_acquire_data(&fixture, &key).await;
+        mutate(&mut data);
+        overwrite_acquire_data(&fixture, &key, data).await;
+
+        let before = evidence_counts(&fixture).await;
+        let err = fixture
+            .cp
+            .remote_acquire(fixture.acquire_input(&key, &hash))
+            .await
+            .unwrap_err();
+        assert_eq!(
+            err.error_code(),
+            ErrorCode::DbUnreachable,
+            "{name}: semantic corruption must be a database error, got {err:?}"
+        );
+        assert_eq!(
+            evidence_counts(&fixture).await,
+            before,
+            "{name}: replay created nothing"
+        );
+        // Semantic corruption never repoints the stored response.
+        let stored = stored_acquire_data(&fixture, &key).await;
+        assert!(
+            !stored.to_string().contains("\"status\":\"error\""),
+            "{name}: stored response must be retained"
+        );
+    }
+}
+
+#[tokio::test]
+async fn remote_acquire_replay_rejects_row_drift_as_database_error() {
+    // Row-level drift the response cannot see: every mutation keeps the
+    // schema's own constraints but breaks one identity the replay must prove.
+    for name in [
+        "plan-deleted",
+        "plan-evidence-tampered",
+        "decision-deleted",
+        "ticket-kind-drift",
+        "ticket-payload-drift",
+    ] {
+        let (fixture, _root, _location) = byte_work_fixture().await;
+        let key = format!("drift-{name}");
+        let hash = format!("hash-{name}");
+        let first = fixture
+            .cp
+            .remote_acquire(fixture.acquire_input(&key, &hash))
+            .await
+            .unwrap();
+        let dispatch = leased_dispatch(&first).clone();
+        let pool = fixture.cp.pool_for_test();
+        match name {
+            "plan-deleted" => {
+                sqlx::query("DELETE FROM artifact_access_plans WHERE lease_id = ?")
+                    .bind(i64::try_from(dispatch.lease_id.0).unwrap())
+                    .execute(pool)
+                    .await
+                    .unwrap();
+            }
+            "plan-evidence-tampered" => {
+                sqlx::query(
+                    "UPDATE artifact_access_plans SET access_evidence = ? WHERE lease_id = ?",
+                )
+                .bind(json!({"declaration": [], "root_epochs": []}).to_string())
+                .bind(i64::try_from(dispatch.lease_id.0).unwrap())
+                .execute(pool)
+                .await
+                .unwrap();
+            }
+            "decision-deleted" => {
+                sqlx::query("DELETE FROM scheduler_decisions WHERE id = ?")
+                    .bind(i64::try_from(dispatch.scheduler_decision_id).unwrap())
+                    .execute(pool)
+                    .await
+                    .unwrap();
+            }
+            "ticket-kind-drift" => {
+                sqlx::query(
+                    "UPDATE tickets SET kind = 'synthetic.workflow.operation.remux' WHERE id = ?",
+                )
+                .bind(i64::try_from(dispatch.ticket_id.0).unwrap())
+                .execute(pool)
+                .await
+                .unwrap();
+            }
+            _ => {
+                sqlx::query("UPDATE tickets SET payload = ? WHERE id = ?")
+                    .bind(json!({"tampered": true}).to_string())
+                    .bind(i64::try_from(dispatch.ticket_id.0).unwrap())
+                    .execute(pool)
+                    .await
+                    .unwrap();
+            }
+        }
+
+        let err = fixture
+            .cp
+            .remote_acquire(fixture.acquire_input(&key, &hash))
+            .await
+            .unwrap_err();
+        assert_eq!(
+            err.error_code(),
+            ErrorCode::DbUnreachable,
+            "{name}: got {err:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn remote_acquire_idle_replay_rejects_corrupt_decision_reference() {
+    let fixture = remote_fixture(&[(OP, vec!["shared_mount"])], &[OP], &[]).await;
+    let key = "idle-corrupt";
+    let first = fixture
+        .cp
+        .remote_acquire(fixture.acquire_input(key, "hash-idc"))
+        .await
+        .unwrap();
+    let RemoteAcquireOutcome::Idle {
+        scheduler_decision_id,
+        ..
+    } = first
+    else {
+        panic!("expected idle outcome");
+    };
+    assert!(scheduler_decision_id > 0);
+
+    for bad in [json!(0), json!(987_654)] {
+        let mut data = stored_acquire_data(&fixture, key).await;
+        data["scheduler_decision_id"] = bad.clone();
+        overwrite_acquire_data(&fixture, key, data).await;
+        let err = fixture
+            .cp
+            .remote_acquire(fixture.acquire_input(key, "hash-idc"))
+            .await
+            .unwrap_err();
+        assert_eq!(
+            err.error_code(),
+            ErrorCode::DbUnreachable,
+            "decision id {bad}: got {err:?}"
+        );
+        // restore a valid row for the next iteration
+        let mut restored = stored_acquire_data(&fixture, key).await;
+        restored["scheduler_decision_id"] = json!(scheduler_decision_id);
+        overwrite_acquire_data(&fixture, key, restored).await;
+    }
+}
+
+#[tokio::test]
+async fn remote_complete_requires_exact_typed_consumption_evidence() {
+    // Declaration-free plan: the only valid echo is exactly {"validated": true}.
+    let fixture = leased_fixture().await;
+    let lease_id = fixture_lease_id(&fixture).await;
+    for (name, echo) in [
+        (
+            "legacy-shape",
+            json!({"validated": true, "mode": "shared_mount"}),
+        ),
+        (
+            "unknown-field",
+            json!({"validated": true, "inputs_consumed": ["handle:input"]}),
+        ),
+        ("unvalidated", json!({"validated": false})),
+        ("missing-marker", json!({})),
+    ] {
+        let mut input = fixture.complete_input(lease_id, &format!("exact-{name}"), "hash-x");
+        input.result = json!({"ok": true, "artifact_access": echo});
+        let err = fixture.cp.remote_complete(input).await.unwrap_err();
+        assert_eq!(err.error_code(), ErrorCode::Conflict, "{name}: got {err:?}");
+        assert_eq!(
+            count(&fixture.cp, EventKind::TicketSucceeded).await,
+            0,
+            "{name}: no terminal mutation"
+        );
+    }
+
+    // The exact shape completes and stores the typed echo as consumption evidence.
+    let mut ok = fixture.complete_input(lease_id, "exact-ok", "hash-ok");
+    ok.result = json!({"ok": true, "artifact_access": {"validated": true}});
+    let outcome = fixture.cp.remote_complete(ok).await.unwrap();
+    let plan = fixture
+        .cp
+        .artifact_access_plans()
+        .get_by_lease(outcome.lease_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(plan.status, ArtifactAccessPlanStatus::Consumed);
+    assert_eq!(plan.evidence, json!({"validated": true}));
+}
+
+#[tokio::test]
+async fn remote_complete_byte_work_requires_matching_owner_and_evidence_echo() {
+    let (fixture, _root, _location) = byte_work_fixture().await;
+    let key = "byte-work-complete";
+    let first = fixture
+        .cp
+        .remote_acquire(fixture.acquire_input(key, "hash-bwc"))
+        .await
+        .unwrap();
+    let dispatch = leased_dispatch(&first).clone();
+    let owner = dispatch.artifact_access_plan.owner_node_id.unwrap();
+    let evidence = dispatch.artifact_access_plan.access_evidence.clone();
+
+    // Wrong evidence value: conflict, nothing consumed.
+    let mut forged = evidence.clone();
+    if let Some(first_epoch) = forged.as_mut().and_then(|e| e.root_epochs.first_mut()) {
+        first_epoch.root_epoch += 1;
+    }
+    for (name, echo) in [
+        (
+            "wrong-owner",
+            json!({
+                "validated": true,
+                "owner_node_id": owner + 1,
+                "access_evidence": serde_json::to_value(&evidence).unwrap()
+            }),
+        ),
+        (
+            "wrong-evidence",
+            json!({
+                "validated": true,
+                "owner_node_id": owner,
+                "access_evidence": serde_json::to_value(&forged).unwrap()
+            }),
+        ),
+        (
+            "missing-evidence",
+            json!({"validated": true, "owner_node_id": owner}),
+        ),
+    ] {
+        let mut input = fixture.complete_input(dispatch.lease_id, &format!("bwc-{name}"), "hash-b");
+        input.result = json!({"ok": true, "artifact_access": echo});
+        let err = fixture.cp.remote_complete(input).await.unwrap_err();
+        assert_eq!(err.error_code(), ErrorCode::Conflict, "{name}: got {err:?}");
+        let plan = fixture
+            .cp
+            .artifact_access_plans()
+            .get_by_lease(dispatch.lease_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            plan.status,
+            ArtifactAccessPlanStatus::Selected,
+            "{name}: consumption not claimed"
+        );
+    }
+
+    // The exact typed echo consumes.
+    let mut ok = fixture.complete_input(dispatch.lease_id, "bwc-ok", "hash-bok");
+    ok.result = json!({
+        "ok": true,
+        "artifact_access": {
+            "validated": true,
+            "owner_node_id": owner,
+            "access_evidence": serde_json::to_value(&evidence).unwrap()
+        }
+    });
+    let outcome = fixture.cp.remote_complete(ok).await.unwrap();
+    let plan = fixture
+        .cp
+        .artifact_access_plans()
+        .get_by_lease(outcome.lease_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(plan.status, ArtifactAccessPlanStatus::Consumed);
+}
+
+#[tokio::test]
+async fn remote_fail_never_claims_consumption() {
+    let (fixture, _root, _location) = byte_work_fixture().await;
+    let first = fixture
+        .cp
+        .remote_acquire(fixture.acquire_input("fail-bw", "hash-fbw"))
+        .await
+        .unwrap();
+    let lease_id = leased_dispatch(&first).lease_id;
+    let mut input = fixture.fail_input(lease_id, "fail-key", "hash-ff");
+    input.evidence = json!({"consumed": true});
+    fixture.cp.remote_fail(input).await.unwrap();
+    let plan = fixture
+        .cp
+        .artifact_access_plans()
+        .get_by_lease(lease_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_ne!(plan.status, ArtifactAccessPlanStatus::Consumed);
+    assert_ne!(plan.status, ArtifactAccessPlanStatus::Selected);
+}
