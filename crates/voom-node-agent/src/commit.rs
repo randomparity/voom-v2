@@ -30,10 +30,10 @@ use voom_core::ids::ArtifactCommitIntentId;
 use voom_core::{NodeId, NodeIncarnationId, StorageRootId, VoomError};
 
 use crate::client::{
-    CommitAppliedEvidence, CommitApplyingRequest, CommitAuthorizeRequest, CommitCompleteOutcome,
-    CommitCompleteRequest, CommitMismatchedEvidence, CommitObservedFacts, CommitOpenOutcome,
-    CommitOpenRequest, CommitOutcomeEvidence, CommitOutcomeRequest, CommitOutcomeUnknownEvidence,
-    CommitReceiptOutcome, OpenCommitIntent, RetryRequest,
+    CommitAppliedEvidence, CommitApplyingRequest, CommitAuthorizeOutcome, CommitAuthorizeRequest,
+    CommitCompleteOutcome, CommitCompleteRequest, CommitMismatchedEvidence, CommitObservedFacts,
+    CommitOpenOutcome, CommitOpenRequest, CommitOutcomeEvidence, CommitOutcomeRequest,
+    CommitOutcomeUnknownEvidence, CommitReceiptOutcome, OpenCommitIntent, RetryRequest,
 };
 use crate::runtime::{
     ControlPlaneApi, CoordinatorExit, LeaseSettlement, RuntimeFatal, ShutdownKind, centered_jitter,
@@ -79,10 +79,13 @@ enum InstallError {
 /// Run the commit-intent executor until shutdown.
 ///
 /// Each cycle drives every open intent to convergence (or records typed
-/// drift evidence), then sleeps a jittered poll interval. Any case error —
-/// transport exhaustion after client retries, protocol conflict, fence
-/// mismatch, filesystem failure — stands the executor down fatally rather
-/// than risking un-journaled mutation.
+/// drift evidence), then sleeps a jittered poll interval. One conflict is
+/// classified instead of fatal: an authorize refused as `not pending` (an
+/// `authorized` intent minted by a prior incarnation) is skipped and left to
+/// control-plane recovery. Any other case error — transport exhaustion after
+/// client retries, protocol conflict, fence mismatch, filesystem failure —
+/// stands the executor down fatally rather than risking un-journaled
+/// mutation.
 pub(crate) async fn run_commit_coordinator(
     context: CommitCoordinatorContext,
     mut shutdown: watch::Receiver<ShutdownKind>,
@@ -147,25 +150,13 @@ async fn drive_commit_intent(
     intent_id: ArtifactCommitIntentId,
     authorize_requests: &mut HashMap<u64, RetryRequest<CommitAuthorizeRequest>>,
 ) -> Result<(), VoomError> {
-    let authorized = if let Some(request) = authorize_requests.get(&intent_id.0) {
-        context
-            .api
-            .authorize_commit_intent(intent_id, request)
-            .await?
-    } else {
-        let request = RetryRequest::new(
-            new_key("commit-authorize"),
-            &CommitAuthorizeRequest {
-                node_id: context.node_id,
-                incarnation_id: context.incarnation_id,
-            },
-        )?;
-        let outcome = context
-            .api
-            .authorize_commit_intent(intent_id, &request)
-            .await?;
-        authorize_requests.insert(intent_id.0, request);
-        outcome
+    let Some(authorized) = authorize_intent(context, intent_id, authorize_requests).await? else {
+        // The intent left the pending state between the listing and the
+        // authorize — the signature of an `authorized` intent minted by a
+        // prior agent incarnation. Per the module contract it belongs to the
+        // control plane's recovery classification: skip it and keep the
+        // normal poll cadence instead of standing down fatally.
+        return Ok(());
     };
 
     let applying_request = RetryRequest::new(
@@ -210,6 +201,46 @@ async fn drive_commit_intent(
         complete_commit(context, intent_id, &authorized.fence_hex).await?;
     }
     Ok(())
+}
+
+/// Authorize one intent, replaying the frozen request when this incarnation
+/// already issued it. Returns `Ok(None)` when a fresh authorization is
+/// refused because the intent is no longer pending — the control plane's
+/// marker that the intent was authorized by an earlier agent incarnation and
+/// now belongs to its recovery classification. Any other error, including
+/// every other conflict (fence mismatch, recovery disputes), stays fatal.
+async fn authorize_intent(
+    context: &CommitCoordinatorContext,
+    intent_id: ArtifactCommitIntentId,
+    authorize_requests: &mut HashMap<u64, RetryRequest<CommitAuthorizeRequest>>,
+) -> Result<Option<CommitAuthorizeOutcome>, VoomError> {
+    if let Some(request) = authorize_requests.get(&intent_id.0) {
+        return Ok(Some(
+            context
+                .api
+                .authorize_commit_intent(intent_id, request)
+                .await?,
+        ));
+    }
+    let request = RetryRequest::new(
+        new_key("commit-authorize"),
+        &CommitAuthorizeRequest {
+            node_id: context.node_id,
+            incarnation_id: context.incarnation_id,
+        },
+    )?;
+    match context
+        .api
+        .authorize_commit_intent(intent_id, &request)
+        .await
+    {
+        Ok(outcome) => {
+            authorize_requests.insert(intent_id.0, request);
+            Ok(Some(outcome))
+        }
+        Err(VoomError::Conflict(message)) if message.contains("not pending") => Ok(None),
+        Err(error) => Err(error),
+    }
 }
 
 /// Re-observe a `recovery_required` intent read-only and file the typed
@@ -601,7 +632,6 @@ async fn temp_sibling_present(path: &Path) -> Result<bool, VoomError> {
             path.display()
         ))
     })?;
-    let prefix = format!("{TEMP_SIBLING_PREFIX}{}", file_name.to_string_lossy());
     let mut entries = match tokio::fs::read_dir(parent).await {
         Ok(entries) => entries,
         Err(error) if error.kind() == ErrorKind::NotFound => return Ok(false),
@@ -618,11 +648,35 @@ async fn temp_sibling_present(path: &Path) -> Result<bool, VoomError> {
             parent.display()
         ))
     })? {
-        if entry.file_name().to_string_lossy().starts_with(&prefix) {
+        if is_temp_sibling_of(
+            &entry.file_name().to_string_lossy(),
+            &file_name.to_string_lossy(),
+        ) {
             return Ok(true);
         }
     }
     Ok(false)
+}
+
+/// Exact match against the retired promoter's naming:
+/// `{TEMP_SIBLING_PREFIX}{file_name}.{pid}.{counter}` with numeric pid and
+/// counter. Prefix-only matching would misclassify lookalikes — e.g. a
+/// `.voom-tmp.data.bin2.…` sibling belongs to `data.bin2`, not `data.bin`.
+fn is_temp_sibling_of(entry_name: &str, file_name: &str) -> bool {
+    let Some(tail) = entry_name
+        .strip_prefix(TEMP_SIBLING_PREFIX)
+        .and_then(|rest| rest.strip_prefix(file_name))
+        .and_then(|tail| tail.strip_prefix('.'))
+    else {
+        return false;
+    };
+    let mut parts = tail.split('.');
+    let numeric =
+        |value: &str| !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit());
+    match (parts.next(), parts.next(), parts.next()) {
+        (Some(pid), Some(counter), None) => numeric(pid) && numeric(counter),
+        _ => false,
+    }
 }
 
 fn unique_temp_sibling_path(final_path: &Path) -> Result<PathBuf, VoomError> {
@@ -648,6 +702,19 @@ async fn resolve_rooted_path(
     storage_root_id: StorageRootId,
     relative_locator: &str,
 ) -> Result<PathBuf, VoomError> {
+    let relative = Path::new(relative_locator);
+    if relative_locator.is_empty()
+        || relative.is_absolute()
+        || relative_locator.contains('\\')
+        || relative
+            .components()
+            .any(|component| component == std::path::Component::ParentDir)
+    {
+        return Err(VoomError::Config(format!(
+            "storage root {storage_root_id} locator {relative_locator:?} must be a relative path \
+             with no '..', backslash, or empty components"
+        )));
+    }
     let locator = context
         .storage_roots
         .get(&storage_root_id.0)
@@ -662,7 +729,40 @@ async fn resolve_rooted_path(
             locator.display()
         ))
     })?;
-    Ok(root_path.join(relative_locator))
+    let resolved = root_path.join(relative);
+    if !resolved.starts_with(&root_path) {
+        return Err(VoomError::Config(format!(
+            "storage root {storage_root_id} locator {relative_locator:?} escapes the root at {}",
+            root_path.display()
+        )));
+    }
+    // A symlinked directory component could redirect the sink outside the
+    // root even though the textual locator stays inside it. Every component
+    // except the leaf (which may legitimately not exist yet) must be a real
+    // directory inside the canonical root.
+    let components: Vec<_> = relative.components().collect();
+    let mut walked = root_path.clone();
+    for component in components.iter().take(components.len().saturating_sub(1)) {
+        walked.push(component);
+        match tokio::fs::symlink_metadata(&walked).await {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(VoomError::Config(format!(
+                    "storage root {storage_root_id} locator {relative_locator:?} traverses \
+                     symlink {}",
+                    walked.display()
+                )));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(VoomError::ArtifactUnavailable(format!(
+                    "cannot inspect artifact path component {}: {error}",
+                    walked.display()
+                )));
+            }
+        }
+    }
+    Ok(resolved)
 }
 
 async fn remove_file_if_exists(path: &Path) -> Result<(), VoomError> {

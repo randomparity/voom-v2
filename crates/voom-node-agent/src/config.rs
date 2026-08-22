@@ -5,6 +5,14 @@ use std::path::{Path, PathBuf};
 use secrecy::SecretString;
 use serde::Deserialize;
 use voom_core::{ArtifactAccessMode, NodeId, OperationKind, VoomError};
+/// Upper bound for the agent's poll interval, kept at half of the control
+/// plane's `COMMIT_CONVERGENCE_TIMEOUT` (`Duration::from_secs(10)` in
+/// voom-control-plane `artifact/commit`). voom-node-agent only depends on
+/// that crate as a dev-dependency, so the deadline is restated here with this
+/// comment as the coupling record: a poll interval at or above 10 s would let
+/// every staged commit run out its convergence deadline and report
+/// `CommitFailure`.
+const MAX_COMMIT_POLL_INTERVAL_MS: u64 = 5_000;
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -91,7 +99,15 @@ impl AgentConfig {
 
     pub(crate) fn validate(&self) -> Result<(), VoomError> {
         validate_url(&self.control_plane_url)?;
-        validate_bound("poll_interval_ms", self.poll_interval_ms, 50, 60_000)?;
+        if !(50..=MAX_COMMIT_POLL_INTERVAL_MS).contains(&self.poll_interval_ms) {
+            return Err(config_error(format!(
+                "poll_interval_ms must be between 50 and {MAX_COMMIT_POLL_INTERVAL_MS}; got {}. \
+                 The commit coordinator must poll well inside the control plane's \
+                 COMMIT_CONVERGENCE_TIMEOUT (10 s, voom-control-plane artifact/commit) or every \
+                 staged commit reports CommitFailure",
+                self.poll_interval_ms
+            )));
+        }
         validate_bound(
             "lease_ttl_seconds",
             u64::from(self.lease_ttl_seconds),

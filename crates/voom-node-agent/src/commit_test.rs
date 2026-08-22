@@ -493,6 +493,148 @@ async fn recovery_required_absent_target_files_resolved_not_applied() {
     );
 }
 
+/// A restarted agent rediscovers an `authorized` intent its prior incarnation
+/// authorized. The fresh authorize is refused as not-pending; the executor
+/// must classify that conflict, skip the intent for control-plane recovery,
+/// and keep polling instead of exiting fatally.
+#[tokio::test]
+async fn restarted_agent_defers_authorized_intent_minted_by_prior_incarnation() {
+    let bytes = b"restart-bytes".to_vec();
+    let f = fixture_with_bytes(&bytes);
+    f.queue_listing(open_intent("authorized", &bytes)).await;
+
+    // Fresh incarnation: no frozen authorize request is cached yet.
+    f.drive().await.unwrap();
+    assert_eq!(f.calls().await, vec!["open", "authorize"]);
+    assert!(f.api.evidences.lock().await.is_empty());
+    assert!(f.api.fences_sent_to_complete.lock().await.is_empty());
+}
+
+/// The same scenario through the real coordinator loop: the classified
+/// conflict must not produce `CoordinatorExit::Fatal`, and the normal poll
+/// cadence must continue afterwards.
+#[tokio::test(start_paused = true)]
+async fn coordinator_survives_restart_authorized_conflict_and_keeps_polling() {
+    let bytes = b"survive-bytes".to_vec();
+    let root = TempDir::new().unwrap();
+    let api = Arc::new(FakeCommitControlPlane::default());
+    let context = CommitCoordinatorContext {
+        api: Arc::clone(&api) as Arc<dyn ControlPlaneApi>,
+        node_id: NodeId(1),
+        incarnation_id: NodeIncarnationId::generate().unwrap(),
+        poll_interval: Duration::from_secs(1),
+        storage_roots: HashMap::from([(1_u64, root.path().to_path_buf())]),
+    };
+    let queue = async |intent| {
+        api.open_queue.lock().await.push_back(CommitOpenOutcome {
+            intents: vec![intent],
+        });
+    };
+    queue(open_intent("authorized", &bytes)).await;
+
+    let (shutdown_tx, shutdown_rx) = watch::channel(ShutdownKind::Running);
+    let joined = tokio::spawn(run_commit_coordinator(
+        context,
+        shutdown_rx,
+        StdRng::from_os_rng(),
+    ));
+    for _ in 0..2_000 {
+        if api.calls.lock().await.len() >= 4 {
+            break;
+        }
+        tokio::time::advance(Duration::from_millis(10)).await;
+        if api.calls.lock().await.len() == 2 {
+            // The next cycle must still list and defer, proving cadence.
+            queue(open_intent("authorized", &bytes)).await;
+        }
+    }
+    assert!(
+        api.calls.lock().await.len() >= 4,
+        "the coordinator stopped polling: {:?}",
+        api.calls.lock().await
+    );
+
+    shutdown_tx.send(ShutdownKind::User).unwrap();
+    assert!(
+        matches!(
+            joined.await.unwrap(),
+            CoordinatorExit::Shutdown(LeaseSettlement::Completed)
+        ),
+        "a restart-authorized conflict must never fatal the coordinator"
+    );
+    assert!(api.evidences.lock().await.is_empty());
+}
+
+/// Sink-side containment: traversal locators are rejected before any join.
+#[tokio::test]
+async fn resolve_rooted_path_rejects_traversal_locators() {
+    let f = fixture_with_bytes(b"");
+    for locator in [
+        "../../etc/passwd",
+        "/etc/passwd",
+        "library/../secrets.bin",
+        "library\\asset.bin",
+        "",
+    ] {
+        let error = resolve_rooted_path(&f.context, StorageRootId(1), locator)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, VoomError::Config(_)),
+            "locator {locator:?} must be rejected, got {error:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn resolve_rooted_path_resolves_deep_valid_locator() {
+    let f = fixture_with_bytes(b"");
+    std::fs::create_dir_all(f.root.path().join("a/b")).unwrap();
+
+    let resolved = resolve_rooted_path(&f.context, StorageRootId(1), "a/b/c/deep.bin")
+        .await
+        .unwrap();
+
+    assert_eq!(resolved, f.root.path().join("a/b/c/deep.bin"));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn resolve_rooted_path_rejects_symlinked_intermediate_component() {
+    let f = fixture_with_bytes(b"");
+    let outside = TempDir::new().unwrap();
+    std::os::unix::fs::symlink(outside.path(), f.root.path().join("escape")).unwrap();
+
+    let error = resolve_rooted_path(&f.context, StorageRootId(1), "escape/asset.bin")
+        .await
+        .unwrap_err();
+
+    assert!(
+        matches!(&error, VoomError::Config(message) if message.contains("symlink")),
+        "a symlinked intermediate component must be rejected, got {error:?}"
+    );
+}
+
+/// Only the retired promoter's exact `.voom-tmp.<file>.<pid>.<counter>`
+/// naming counts: similarly named targets own their own siblings.
+#[tokio::test]
+async fn temp_sibling_detection_matches_exact_promoter_naming() {
+    let f = fixture_with_bytes(b"");
+    let dir = f.root.path().join("library");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join(".voom-tmp.data.bin2.123.4"), b"x").unwrap();
+    std::fs::write(dir.join(".voom-tmp.data.bin.extra"), b"x").unwrap();
+    let target = dir.join("data.bin");
+
+    assert!(
+        !temp_sibling_present(&target).await.unwrap(),
+        "lookalike siblings of data.bin2 must not match data.bin"
+    );
+
+    std::fs::write(dir.join(".voom-tmp.data.bin.555.7"), b"x").unwrap();
+    assert!(temp_sibling_present(&target).await.unwrap());
+}
+
 #[tokio::test]
 async fn coordinator_exits_gracefully_then_forced_on_shutdown() {
     let root = TempDir::new().unwrap();
