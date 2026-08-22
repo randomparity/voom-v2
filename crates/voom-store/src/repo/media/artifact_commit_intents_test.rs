@@ -53,11 +53,40 @@ async fn fixture() -> (SqlitePool, TempDatabase, ArtifactCommitRecordId) {
     seed_test_rooted_location(&pool).await.unwrap();
 
     sqlx::query(
+        "INSERT INTO media_works (id, kind, display_title, created_at) \
+         VALUES (9000001, 'unknown', 'intent-fixture-work', '1970-01-01T00:00:00Z')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO media_variants (id, media_work_id, label, created_at) \
+         VALUES (9000001, 9000001, 'main', '1970-01-01T00:00:00Z')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO asset_bundles (id, media_variant_id, display_name, created_at) \
+         VALUES (9000001, 9000001, 'intent-fixture-bundle', '1970-01-01T00:00:00Z')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO file_assets (id, created_at, retired_at, epoch) \
+         VALUES (9000002, '1970-01-01T00:00:00Z', NULL, 0)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    sqlx::query(
         "INSERT INTO artifact_handles \
          (id, privacy_class, durability_class, allowed_access_modes, mutability, \
-          created_at, file_asset_id) \
+          created_at, file_asset_id, asset_bundle_id) \
          VALUES (9000001, 'private', 'durable', '[]', 'immutable', \
-                 '1970-01-01T00:00:00Z', 9000001)",
+                 '1970-01-01T00:00:00Z', 9000001, 9000001)",
     )
     .execute(&pool)
     .await
@@ -601,11 +630,34 @@ async fn blocking_lease_refused_on_pinned_scope_until_abort() {
         "version scope must be pinned"
     );
 
+    // The parent asset and bundle of the pinned artifact handle are pinned too.
+    for scope in [
+        LeaseScope::Asset(voom_core::FileAssetId(9_000_001)),
+        LeaseScope::Bundle(voom_core::BundleId(9_000_001)),
+    ] {
+        let err = leases
+            .acquire(NewUseLease {
+                kind: UseLeaseKind::Playback,
+                scope,
+                issuer_kind: IssuerKind::User,
+                issuer_ref: "alice".to_owned(),
+                blocking_mode: BlockingMode::Blocking,
+                ttl: Some(Duration::seconds(60)),
+                acquired_at: T0,
+            })
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, VoomError::Conflict(_)),
+            "{scope:?} must be pinned"
+        );
+    }
+
     // Unrelated scopes are unaffected.
     let other = leases
         .acquire(NewUseLease {
             kind: UseLeaseKind::Playback,
-            scope: LeaseScope::Asset(voom_core::FileAssetId(9_000_001)),
+            scope: LeaseScope::Asset(voom_core::FileAssetId(9_000_002)),
             issuer_kind: IssuerKind::User,
             issuer_ref: "alice".to_owned(),
             blocking_mode: BlockingMode::Blocking,

@@ -706,26 +706,48 @@ impl SqliteArtifactCommitIntentRepo {
 }
 
 /// Lease-scope consultation for blocking use-lease acquisition: returns a
-/// conflict reason when a non-terminal commit intent pins `scope` (the
-/// intent's source file version or staging location). Mirrors
-/// `consult_pending_commit_lock_in_tx`; the fence stays blocking through
-/// recovery, so abort and completion release it.
+/// conflict reason when a non-terminal commit intent pins `scope` — its
+/// source file version, staging location, or the asset/bundle the pinned
+/// artifact handle belongs to. Mirrors `consult_pending_commit_lock_in_tx`
+/// scope coverage; the fence stays blocking through recovery, so abort and
+/// completion release it.
 pub(crate) async fn consult_artifact_intent_lock_in_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     scope: &LeaseScope,
 ) -> Result<Option<String>, VoomError> {
-    let (column, bind_id) = match scope {
-        LeaseScope::Version(version_id) => ("source_file_version_id", version_id.0),
-        LeaseScope::Location(location_id) => ("staging_location_id", location_id.0),
-        LeaseScope::Asset(_) | LeaseScope::Bundle(_) => return Ok(None),
+    // Column-driven query: each variant filters exactly one column. The
+    // asset/bundle granularities resolve through the pinned artifact
+    // handle (`artifact_handles.file_asset_id` / `.asset_bundle_id`).
+    let (sql, bind_id) = match scope {
+        LeaseScope::Version(version_id) => (
+            "SELECT i.id, i.state FROM artifact_commit_intents i \
+             WHERE i.state IN ('pending', 'authorized', 'recovery_required') \
+               AND i.source_file_version_id = ? ORDER BY i.id ASC LIMIT 1",
+            version_id.0,
+        ),
+        LeaseScope::Location(location_id) => (
+            "SELECT i.id, i.state FROM artifact_commit_intents i \
+             WHERE i.state IN ('pending', 'authorized', 'recovery_required') \
+               AND i.staging_location_id = ? ORDER BY i.id ASC LIMIT 1",
+            location_id.0,
+        ),
+        LeaseScope::Asset(asset_id) => (
+            "SELECT i.id, i.state FROM artifact_commit_intents i \
+             JOIN artifact_handles h ON h.id = i.artifact_handle_id \
+             WHERE i.state IN ('pending', 'authorized', 'recovery_required') \
+               AND h.file_asset_id = ? ORDER BY i.id ASC LIMIT 1",
+            asset_id.0,
+        ),
+        LeaseScope::Bundle(bundle_id) => (
+            "SELECT i.id, i.state FROM artifact_commit_intents i \
+             JOIN artifact_handles h ON h.id = i.artifact_handle_id \
+             WHERE i.state IN ('pending', 'authorized', 'recovery_required') \
+               AND h.asset_bundle_id = ? ORDER BY i.id ASC LIMIT 1",
+            bundle_id.0,
+        ),
     };
-    let sql = format!(
-        "SELECT id, state FROM artifact_commit_intents \
-         WHERE state IN ('pending', 'authorized', 'recovery_required') \
-           AND {column} = ? ORDER BY id ASC LIMIT 1"
-    );
-    let row: Option<(i64, String)> = sqlx::query_as(&sql)
-        .bind(checked_id(bind_id, column)?)
+    let row: Option<(i64, String)> = sqlx::query_as(sql)
+        .bind(checked_id(bind_id, "scope id")?)
         .fetch_optional(&mut **tx)
         .await
         .map_err(|e| VoomError::database_context("consult_artifact_intent_lock", e))?;
