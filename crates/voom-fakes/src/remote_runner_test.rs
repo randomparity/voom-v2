@@ -360,10 +360,14 @@ async fn runner_acquire_key_replays_identically_without_second_execution() {
         })
         .await
         .unwrap();
+    assert!(
+        matches!(replay, RemoteAcquireOutcome::Leased(_)),
+        "replay must return the original leased outcome"
+    );
     let RemoteAcquireOutcome::Leased(dispatch) = replay else {
-        panic!("replay must return the original leased outcome");
+        return;
     };
-    assert_eq!(dispatch.ticket_id.0, u64::try_from(ticket_id.0).unwrap());
+    assert_eq!(dispatch.ticket_id.0, ticket_id.0);
 
     let leases: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM leases")
         .fetch_one(&pool)

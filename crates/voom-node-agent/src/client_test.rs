@@ -471,7 +471,7 @@ fn replayed_acquire_wire_decodes_identically_and_rejects_unknown_fields() {
     let second: AcquireOutcome = serde_json::from_value(leased).unwrap();
     assert_eq!(first, second);
     let AcquireOutcome::Leased(dispatch) = first else {
-        panic!("expected the leased mirror to decode");
+        unreachable!("the leased mirror decoded above");
     };
     assert_eq!(dispatch.lease_id, LeaseId(11));
     assert_eq!(dispatch.ticket_id, TicketId(3));

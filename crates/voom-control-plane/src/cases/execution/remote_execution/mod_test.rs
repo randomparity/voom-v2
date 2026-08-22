@@ -2766,7 +2766,8 @@ async fn remote_acquire_replay_rejects_semantic_corruption_as_database_error() {
     fn zero(field: &str) -> impl Fn(&mut serde_json::Value) {
         move |d: &mut serde_json::Value| d[field] = json!(0)
     }
-    let cases: Vec<(&str, Box<dyn Fn(&mut serde_json::Value)>)> = vec![
+    type CorruptFn = Box<dyn Fn(&mut serde_json::Value)>;
+    let cases: Vec<(&str, CorruptFn)> = vec![
         ("zero-lease-id", Box::new(zero("lease_id"))),
         (
             "zero-scheduler-decision-id",
@@ -2781,7 +2782,7 @@ async fn remote_acquire_replay_rejects_semantic_corruption_as_database_error() {
         (
             "wrong-owner",
             Box::new(|d: &mut serde_json::Value| {
-                d["artifact_access_plan"]["owner_node_id"] = json!(987654);
+                d["artifact_access_plan"]["owner_node_id"] = json!(987_654);
             }),
         ),
         (
@@ -2947,7 +2948,7 @@ async fn remote_acquire_idle_replay_rejects_corrupt_decision_reference() {
     };
     assert!(scheduler_decision_id > 0);
 
-    for bad in [json!(0), json!(987654)] {
+    for bad in [json!(0), json!(987_654)] {
         let mut data = stored_acquire_data(&fixture, key).await;
         data["scheduler_decision_id"] = bad.clone();
         overwrite_acquire_data(&fixture, key, data).await;

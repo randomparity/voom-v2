@@ -1517,7 +1517,7 @@ impl ControlPlane {
         }
     }
 
-    fn replay_mismatch(detail: String) -> VoomError {
+    fn replay_mismatch(detail: &str) -> VoomError {
         VoomError::database(format!(
             "acquire replay evidence disagrees with durable rows: {detail}"
         ))
@@ -1525,12 +1525,11 @@ impl ControlPlane {
 
     /// Canonical JSON text of typed evidence; both sides serialize through the
     /// same validating types, so text equality is content equality.
-    fn evidence_fingerprint(evidence: &Option<OwnerAccessEvidence>) -> Result<String, VoomError> {
+    fn evidence_fingerprint(evidence: Option<&OwnerAccessEvidence>) -> Result<String, VoomError> {
         evidence
-            .as_ref()
             .map(serde_json::to_string)
             .transpose()
-            .map(|text| text.unwrap_or_default())
+            .map(Option::unwrap_or_default)
             .map_err(|e| VoomError::database(format!("acquire replay evidence: {e}")))
     }
 
@@ -1564,7 +1563,7 @@ impl ControlPlane {
                     .get_in_tx(tx, *scheduler_decision_id)
                     .await?
                     .ok_or_else(|| {
-                        Self::replay_mismatch(format!(
+                        Self::replay_mismatch(&format!(
                             "scheduler decision {scheduler_decision_id} is missing"
                         ))
                     })?;
@@ -1572,7 +1571,7 @@ impl ControlPlane {
                     || decision.outcome != expected_outcome
                     || decision.request_worker_id != Some(*worker_id)
                 {
-                    return Err(Self::replay_mismatch(format!(
+                    return Err(Self::replay_mismatch(&format!(
                         "scheduler decision {scheduler_decision_id} does not describe this outcome"
                     )));
                 }
@@ -1584,6 +1583,10 @@ impl ControlPlane {
         }
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "each identity binding of the stored acquisition is one explicit check"
+    )]
     async fn validate_leased_replay_evidence_in_tx(
         tx: &mut Transaction<'_, Sqlite>,
         plane: &ControlPlane,
@@ -1596,7 +1599,7 @@ impl ControlPlane {
         Self::require_replay_id(dispatch.worker_id.0, "worker id")?;
         Self::require_replay_id(dispatch.artifact_access_plan.id, "access plan id")?;
         if dispatch.artifact_access_plan.owner_node_id == Some(0) {
-            return Err(Self::replay_mismatch("zero owner node id".to_owned()));
+            return Err(Self::replay_mismatch("zero owner node id"));
         }
 
         // Identity only: lease state and plan status legitimately change after
@@ -1606,10 +1609,10 @@ impl ControlPlane {
             .get_in_tx(tx, dispatch.lease_id)
             .await?
             .ok_or_else(|| {
-                Self::replay_mismatch(format!("lease {} is missing", dispatch.lease_id.0))
+                Self::replay_mismatch(&format!("lease {} is missing", dispatch.lease_id.0))
             })?;
         if lease.ticket_id != dispatch.ticket_id || lease.worker_id != dispatch.worker_id {
-            return Err(Self::replay_mismatch(format!(
+            return Err(Self::replay_mismatch(&format!(
                 "lease {} binds ticket {:?}/worker {:?}, not ticket {:?}/worker {:?}",
                 dispatch.lease_id.0,
                 lease.ticket_id,
@@ -1624,13 +1627,13 @@ impl ControlPlane {
             .get_by_lease_in_tx(tx, dispatch.lease_id)
             .await?
             .ok_or_else(|| {
-                Self::replay_mismatch(format!(
+                Self::replay_mismatch(&format!(
                     "access plan for lease {} is missing",
                     dispatch.lease_id.0
                 ))
             })?;
         if plan.id != dispatch.artifact_access_plan.id {
-            return Err(Self::replay_mismatch(format!(
+            return Err(Self::replay_mismatch(&format!(
                 "lease {} is bound to plan {}, not plan {}",
                 dispatch.lease_id.0, plan.id, dispatch.artifact_access_plan.id
             )));
@@ -1640,19 +1643,19 @@ impl ControlPlane {
             || plan.node_id != input.node_id
         {
             return Err(Self::replay_mismatch(
-                "access plan bindings disagree with the dispatch".to_owned(),
+                "access plan bindings disagree with the dispatch",
             ));
         }
         if plan.owner_node_id.map(|id| id.0) != dispatch.artifact_access_plan.owner_node_id {
             return Err(Self::replay_mismatch(
-                "access plan owner disagrees with the dispatch".to_owned(),
+                "access plan owner disagrees with the dispatch",
             ));
         }
-        if Self::evidence_fingerprint(&plan.access_evidence)?
-            != Self::evidence_fingerprint(&dispatch.artifact_access_plan.access_evidence)?
+        if Self::evidence_fingerprint(plan.access_evidence.as_ref())?
+            != Self::evidence_fingerprint(dispatch.artifact_access_plan.access_evidence.as_ref())?
         {
             return Err(Self::replay_mismatch(
-                "access plan evidence disagrees with the dispatch".to_owned(),
+                "access plan evidence disagrees with the dispatch",
             ));
         }
 
@@ -1661,7 +1664,7 @@ impl ControlPlane {
             .get_in_tx(tx, dispatch.scheduler_decision_id)
             .await?
             .ok_or_else(|| {
-                Self::replay_mismatch(format!(
+                Self::replay_mismatch(&format!(
                     "scheduler decision {} is missing",
                     dispatch.scheduler_decision_id
                 ))
@@ -1673,7 +1676,7 @@ impl ControlPlane {
             || decision.request_worker_id != Some(dispatch.worker_id)
             || decision.request_node_id != Some(input.node_id)
         {
-            return Err(Self::replay_mismatch(format!(
+            return Err(Self::replay_mismatch(&format!(
                 "scheduler decision {} does not select lease {}",
                 dispatch.scheduler_decision_id, dispatch.lease_id.0
             )));
@@ -1684,16 +1687,16 @@ impl ControlPlane {
             .get_in_tx(tx, dispatch.ticket_id)
             .await?
             .ok_or_else(|| {
-                Self::replay_mismatch(format!("ticket {} is missing", dispatch.ticket_id.0))
+                Self::replay_mismatch(&format!("ticket {} is missing", dispatch.ticket_id.0))
             })?;
         if ticket.kind.normalize().matching_token().into_string() != dispatch.operation {
             return Err(Self::replay_mismatch(
-                "dispatch operation disagrees with the ticket kind".to_owned(),
+                "dispatch operation disagrees with the ticket kind",
             ));
         }
         if ticket.payload != dispatch.dispatch_payload {
             return Err(Self::replay_mismatch(
-                "dispatch payload disagrees with the ticket payload".to_owned(),
+                "dispatch payload disagrees with the ticket payload",
             ));
         }
         Ok(())
