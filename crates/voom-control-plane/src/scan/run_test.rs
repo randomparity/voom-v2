@@ -1,14 +1,14 @@
+use super::{RootBlockReason, ScanRunOutcome};
+use crate::workflow::plan::ticket_payload::WorkflowTicketPayload;
+use crate::{ControlPlane, cases::cp};
 use voom_core::{
-    LibraryId, NodeId, ProviderLocator, ScanSessionStatus, StorageProviderKind,
-    StorageRootId, TicketOperation,
+    LibraryId, NodeId, ProviderLocator, ScanSessionStatus, StorageProviderKind, StorageRootId,
+    TicketOperation,
 };
 use voom_store::repo::library::libraries::{LibraryMediaKind, NewLibrary};
 use voom_store::repo::library::library_roots::{
     HiddenFilePolicy, LibraryScanMode, NewLibraryRoot, SymlinkPolicy,
 };
-use super::{RootBlockReason, ScanRunOutcome};
-use crate::workflow::plan::ticket_payload::WorkflowTicketPayload;
-use crate::{ControlPlane, cases::cp};
 
 fn new_library(slug: &str) -> NewLibrary {
     NewLibrary {
@@ -98,16 +98,15 @@ async fn request_creates_session_and_ready_namespaced_ticket() {
     // The payload must round-trip through the strict workflow decode — the same
     // gate the acquire route applies. A payload that only *looks* right would
     // silently degrade acquire gating to NoDeclaration.
-    let payload =
-        WorkflowTicketPayload::parse_ticket(ticket.kind.as_str(), ticket.payload.clone())
-            .unwrap_or_else(|error| panic!("payload must parse: {error}"));
+    let payload = WorkflowTicketPayload::parse_ticket(ticket.kind.as_str(), ticket.payload.clone())
+        .unwrap_or_else(|error| panic!("payload must parse: {error}"));
     assert_eq!(payload.operation, voom_core::OperationKind::ScanLibrary);
     assert_eq!(
         payload.rendered_payload["scan_session_id"],
         requested.scan_session_id.to_string()
     );
     assert!(payload.rendered_payload.get("source_location_id").is_none());
-    let declaration = payload.declared_artifact_access.expect("byte-touching");
+    let declaration = payload.declared_artifact_access.unwrap();
     assert_eq!(declaration.entries().len(), 1);
 }
 
@@ -157,7 +156,10 @@ async fn duplicate_active_session_conflicts_without_a_ticket() {
 #[tokio::test]
 async fn missing_root_is_not_found() {
     let (cp, _tmp) = cp().await;
-    let error = cp.request_scan_run(StorageRootId(9_999), 60).await.unwrap_err();
+    let error = cp
+        .request_scan_run(StorageRootId(9_999), 60)
+        .await
+        .unwrap_err();
     assert_eq!(error.code(), "NOT_FOUND");
 }
 

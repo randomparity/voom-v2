@@ -6,8 +6,8 @@ use serde_json::json;
 use time::OffsetDateTime;
 use voom_core::clock_test_support::ManualClock;
 use voom_core::rng_test_support::FrozenRng;
-use voom_core::{ProviderRelativeLocator, ScanSessionId, StorageRootId, VoomError};
 use voom_core::{FileKeyFacts, ScanObservationEvidence};
+use voom_core::{ProviderRelativeLocator, ScanSessionId, StorageRootId, VoomError};
 use voom_store::repo::scan::sessions::ScanObservation;
 
 const T0: OffsetDateTime = OffsetDateTime::UNIX_EPOCH;
@@ -25,8 +25,7 @@ async fn publish(
     for observation in &observations {
         insert_observation(cp, session, observation).await;
     }
-    let summary =
-        publish_session_evidence_in_tx(cp, &mut tx, session, ROOT, T0).await?;
+    let summary = publish_session_evidence_in_tx(cp, &mut tx, session, ROOT, T0).await?;
     tx.commit().await.unwrap();
     Ok(summary)
 }
@@ -34,33 +33,73 @@ async fn publish(
 /// A minimal durable session plus its first accepted batch: publication reads
 /// only `scan_observations`, but those rows carry foreign keys into both.
 async fn stage_session(cp: &crate::ControlPlane, session: ScanSessionId, count: u64) {
-    let count = i64::try_from(count).unwrap();
+    // `scan_sessions` carries foreign keys into the storage-root chain and
+    // the owner's incarnation, so seed the same rows the shared store fixture
+    // provides before staging the session itself.
+    voom_store::test_support::seed_test_storage_root(cp.pool_for_test())
+        .await
+        .unwrap();
     sqlx::query(
-        "INSERT INTO scan_sessions (id, storage_root_id, root_epoch, owner_node_id, status, \
-         idle_timeout_seconds, progress_deadline_at, requested_at, \
-         owner_incarnation_id, started_at) \
-         VALUES (?, ?, 1, 9_000_001, 'running', 600, '1970-01-01T01:00:00Z', \
-                 '1970-01-01T00:00:00Z', 'incarnation-publish', '1970-01-01T00:00:00Z')",
+        "INSERT OR IGNORE INTO node_incarnations \
+         (incarnation_id, node_id, status, started_at, last_seen_at) \
+         VALUES ('incarnation-publish', 9000001, 'active', \
+                 '1970-01-01T00:00:00Z', '1970-01-01T00:00:00Z')",
     )
-    .bind(i64::try_from(session.0).unwrap())
+    .execute(cp.pool_for_test())
+    .await
+    .unwrap();
+    let count = i64::try_from(count).unwrap();
+    // Republish tests call this twice for one session, so skip staging when
+    // the durable session and its first batch already exist.
+    let staged: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM scan_sessions WHERE id = ?")
+        .bind(i64::try_from(session.0).unwrap())
+        .fetch_one(cp.pool_for_test())
+        .await
+        .unwrap();
+    // Only one live session may exist per root; retire any earlier one so a
+    // second staged session (republish/conflict tests) does not trip the
+    // `scan_sessions_one_active_per_root` index.
+    sqlx::query(
+        "UPDATE scan_sessions SET status = 'succeeded', terminal_at = '1970-01-01T01:00:00Z' \
+         WHERE storage_root_id = ? AND status = 'running'",
+    )
     .bind(i64::try_from(ROOT.0).unwrap())
     .execute(cp.pool_for_test())
     .await
     .unwrap();
-    sqlx::query(
-        "INSERT INTO scan_observation_batches (scan_session_id, sequence, previous_sequence, \
-         request_hash, observation_count, accepted_at, cumulative_observation_count) \
-         VALUES (?, 0, NULL, '0000000000000000000000000000000000000000000000000000000000000000', \
-         ?, '1970-01-01T00:00:00Z', ?)",
-    )
-    .bind(i64::try_from(session.0).unwrap())
-    .bind(count.max(1))
-    .bind(count.max(1))
-    .execute(cp.pool_for_test())
-    .await
-    .unwrap();
+    if staged == 0 {
+        // The batch-insert trigger requires the session frontier to already
+        // sit one past this batch, so stage the session at its post-acceptance
+        // state.
+        sqlx::query(
+            "INSERT INTO scan_sessions (id, storage_root_id, root_epoch, owner_node_id, status, \
+             idle_timeout_seconds, progress_deadline_at, requested_at, \
+             owner_incarnation_id, started_at, next_sequence, batch_count, \
+             observation_count) \
+             VALUES (?, ?, 1, 9_000_001, 'running', 600, '1970-01-01T01:00:00Z', \
+                     '1970-01-01T00:00:00Z', 'incarnation-publish', \
+                     '1970-01-01T00:00:00Z', 1, 1, ?)",
+        )
+        .bind(i64::try_from(session.0).unwrap())
+        .bind(i64::try_from(ROOT.0).unwrap())
+        .bind(count.max(1))
+        .execute(cp.pool_for_test())
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO scan_observation_batches (scan_session_id, sequence, previous_sequence, \
+             request_hash, observation_count, accepted_at, cumulative_observation_count) \
+             VALUES (?, 0, NULL, '0000000000000000000000000000000000000000000000000000000000000000', \
+             ?, '1970-01-01T00:00:00Z', ?)",
+        )
+        .bind(i64::try_from(session.0).unwrap())
+        .bind(count.max(1))
+        .bind(count.max(1))
+        .execute(cp.pool_for_test())
+        .await
+        .unwrap();
+    }
 }
-
 async fn insert_observation(
     cp: &crate::ControlPlane,
     session: ScanSessionId,
@@ -142,7 +181,10 @@ async fn publishes_identity_and_media_snapshot_from_agreed_evidence() {
 
     let summary = publish(
         &cp,
-        vec![observation("library/movie.mkv", Some(evidence(&blake3(&"a".repeat(64)))))],
+        vec![observation(
+            "library/movie.mkv",
+            Some(evidence(&blake3(&"a".repeat(64)))),
+        )],
         SESSION,
     )
     .await
@@ -155,19 +197,17 @@ async fn publishes_identity_and_media_snapshot_from_agreed_evidence() {
     assert_eq!(table_count(&cp, "media_snapshots").await, 1);
 
     // Provenance is the session's batches, not a control-plane worker row.
-    let probed_by: Option<i64> =
-        sqlx::query_scalar("SELECT probed_by_worker_id FROM media_snapshots")
+    let probed_by: Option<i64> = sqlx::query_scalar("SELECT probed_by FROM media_snapshots")
+        .fetch_one(cp.pool_for_test())
+        .await
+        .unwrap();
+    assert_eq!(probed_by, None);
+
+    let stream_id: String =
+        sqlx::query_scalar("SELECT json_extract(payload, '$.streams[0].id') FROM media_snapshots")
             .fetch_one(cp.pool_for_test())
             .await
             .unwrap();
-    assert_eq!(probed_by, None);
-
-    let stream_id: String = sqlx::query_scalar(
-        "SELECT json_extract(payload, '$.streams[0].id') FROM media_snapshots",
-    )
-    .fetch_one(cp.pool_for_test())
-    .await
-    .unwrap();
     assert_eq!(stream_id, "stream-0");
 }
 
@@ -175,13 +215,9 @@ async fn publishes_identity_and_media_snapshot_from_agreed_evidence() {
 async fn evidence_less_observation_publishes_nothing() {
     let (cp, _tmp) = cp_with_manual_clock(T0).await;
 
-    let summary = publish(
-        &cp,
-        vec![observation("library/mutated.mkv", None)],
-        SESSION,
-    )
-    .await
-    .unwrap();
+    let summary = publish(&cp, vec![observation("library/mutated.mkv", None)], SESSION)
+        .await
+        .unwrap();
 
     assert_eq!(summary.published, 0);
     assert_eq!(table_count(&cp, "file_assets").await, 0);
@@ -193,7 +229,10 @@ async fn republishing_same_content_hits_same_address_replay() {
     let (cp, _tmp) = cp_with_manual_clock(T0).await;
     let first = publish(
         &cp,
-        vec![observation("library/replay.mkv", Some(evidence(&blake3(&"b".repeat(64)))))],
+        vec![observation(
+            "library/replay.mkv",
+            Some(evidence(&blake3(&"b".repeat(64)))),
+        )],
         SESSION,
     )
     .await
@@ -227,7 +266,10 @@ async fn changed_bytes_at_same_rooted_address_conflict() {
     let (cp, _tmp) = cp_with_manual_clock(T0).await;
     publish(
         &cp,
-        vec![observation("library/edit.mkv", Some(evidence(&blake3(&"c".repeat(64)))))],
+        vec![observation(
+            "library/edit.mkv",
+            Some(evidence(&blake3(&"c".repeat(64)))),
+        )],
         SESSION,
     )
     .await
@@ -297,8 +339,7 @@ async fn sidecar_evidence_attaches_bundle_membership() {
     primary.sidecars.push(voom_core::ScanSidecarEvidence {
         provider_relative_locator: "library/movie.srt".to_owned(),
         role: "external_subtitle".to_owned(),
-        sha256_hex: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-            .to_owned(),
+        sha256_hex: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_owned(),
         size_bytes: 42,
     });
 

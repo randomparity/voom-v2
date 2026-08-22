@@ -1177,7 +1177,10 @@ fn is_lowercase_sha256(value: &str) -> bool {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
-pub(super) fn progress_deadline(now: OffsetDateTime, seconds: u32) -> Result<OffsetDateTime, VoomError> {
+pub(super) fn progress_deadline(
+    now: OffsetDateTime,
+    seconds: u32,
+) -> Result<OffsetDateTime, VoomError> {
     now.checked_add(Duration::seconds(i64::from(seconds)))
         .ok_or_else(|| {
             VoomError::Config("scan session progress deadline overflows time".to_owned())

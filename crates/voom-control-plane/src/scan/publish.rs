@@ -9,13 +9,13 @@
 
 use std::path::Path;
 
+use serde_json::Value;
+use sqlx::Sqlite;
+use time::OffsetDateTime;
 use voom_core::{
     BundleId, FileAssetId, FileLocationId, FileVersionId, ProviderRelativeLocator,
     ScanObservationEvidence, ScanSessionId, ScanSidecarEvidence, StorageRootId, VoomError,
 };
-use serde_json::Value;
-use sqlx::Sqlite;
-use time::OffsetDateTime;
 use voom_events::payload::{
     AssetBundleMemberAddedPayload, FileAssetCreatedPayload, FileLocationRootedAliasedPayload,
     FileLocationRootedRecordedPayload, FileVersionCreatedPayload, IdentityEvidenceRecordedPayload,
@@ -62,8 +62,15 @@ pub(super) async fn publish_session_evidence_in_tx(
         let Some(evidence) = observation.evidence.clone() else {
             continue;
         };
-        let hardlink = publish_one(control_plane, tx, &observation, &evidence, storage_root_id, now)
-            .await?;
+        let hardlink = publish_one(
+            control_plane,
+            tx,
+            &observation,
+            &evidence,
+            storage_root_id,
+            now,
+        )
+        .await?;
         summary.published += 1;
         if hardlink {
             summary.hardlinked += 1;
@@ -328,14 +335,14 @@ async fn ingest_new_scanned_file(
         )
         .await?;
     let ingested = emit_ingest_events(control_plane, tx, &outcome, now).await?;
-    record_inode_fact(tx, ingested.file_location_id, candidate, now).await?;
+    record_inode_fact(tx, ingested.location, candidate, now).await?;
     // The probe ran on the owner node under a worker identity the control plane
     // does not attribute per-file; provenance stays with the session's batches.
     crate::media_snapshot::record_with_event_in_tx(
         control_plane,
         tx,
         NewMediaSnapshot {
-            file_version_id: ingested.file_version_id,
+            file_version_id: ingested.version,
             probed_by: None,
             probed_at: now,
             payload: normalize_snapshot_stream_ids(snapshot_payload)?,
@@ -343,7 +350,7 @@ async fn ingest_new_scanned_file(
     )
     .await?;
     Ok(ResolvedIdentity {
-        file_version_id: ingested.file_version_id,
+        file_version_id: ingested.version,
         hardlink: false,
     })
 }
@@ -368,8 +375,15 @@ async fn record_inode_fact(
     now: OffsetDateTime,
 ) -> Result<(), VoomError> {
     if let (Some(dev), Some(ino)) = (candidate.dev, candidate.ino) {
-        record_scan_fact_in_tx(tx, file_location_id, dev, ino, candidate.nlink.unwrap_or(0), now)
-            .await?;
+        record_scan_fact_in_tx(
+            tx,
+            file_location_id,
+            dev,
+            ino,
+            candidate.nlink.unwrap_or(0),
+            now,
+        )
+        .await?;
     }
     Ok(())
 }
@@ -383,12 +397,9 @@ async fn persist_sidecar(
     sidecar: PublishedSidecar,
     observed_at: OffsetDateTime,
 ) -> Result<(), VoomError> {
-    if let Some(existing) = find_live_scanned_address_in_tx(
-        tx,
-        storage_root_id,
-        &sidecar.provider_relative_locator,
-    )
-    .await?
+    if let Some(existing) =
+        find_live_scanned_address_in_tx(tx, storage_root_id, &sidecar.provider_relative_locator)
+            .await?
     {
         if existing.content_hash != sidecar.content_hash
             || existing.size_bytes != sidecar.size_bytes
@@ -429,7 +440,7 @@ async fn persist_sidecar(
         tx,
         bundle_id,
         &sidecar,
-        ingested.file_asset_id,
+        ingested.asset,
         observed_at,
     )
     .await
@@ -571,9 +582,7 @@ async fn emit_ingest_events(
                     .get_identity_evidence_in_tx(tx, *ev_id)
                     .await?
                     .ok_or_else(|| {
-                        VoomError::Internal(format!(
-                            "scan publication: evidence {ev_id} vanished"
-                        ))
+                        VoomError::Internal(format!("scan publication: evidence {ev_id} vanished"))
                     })?;
                 append_event(
                     &control_plane.events,
@@ -595,9 +604,9 @@ async fn emit_ingest_events(
                 .await?;
             }
             Ok(IngestedIds {
-                file_asset_id: *file_asset_id,
-                file_version_id: *file_version_id,
-                file_location_id: *file_location_id,
+                asset: *file_asset_id,
+                version: *file_version_id,
+                location: *file_location_id,
             })
         }
         IngestOutcome::AliasAttached {
@@ -638,9 +647,9 @@ async fn emit_ingest_events(
                     ))
                 })?;
             Ok(IngestedIds {
-                file_asset_id: version.file_asset_id,
-                file_version_id: *file_version_id,
-                file_location_id: *new_file_location_id,
+                asset: version.file_asset_id,
+                version: *file_version_id,
+                location: *new_file_location_id,
             })
         }
     }
@@ -648,9 +657,9 @@ async fn emit_ingest_events(
 
 /// Identity ids one ingest path resolved to.
 struct IngestedIds {
-    file_asset_id: FileAssetId,
-    file_version_id: FileVersionId,
-    file_location_id: FileLocationId,
+    asset: FileAssetId,
+    version: FileVersionId,
+    location: FileLocationId,
 }
 
 /// Guarantee every persisted snapshot stream carries an id, mirroring the

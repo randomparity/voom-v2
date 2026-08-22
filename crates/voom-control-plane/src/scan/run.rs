@@ -18,12 +18,12 @@ use voom_store::repo::scan::sessions::NewScanSession;
 
 use super::library::{RootBlockReason, RootScanBlocked};
 use super::sessions::{append_lifecycle_event, progress_deadline, validate_idle_timeout};
+use crate::ControlPlane;
 use crate::cases::execution::remote_execution::is_remote_replayable_error;
 use crate::cases::{begin_immediate_tx, commit_tx};
 use crate::workflow::execution::timing::EffectiveTiming;
 use crate::workflow::plan::access_declaration::{TicketStorageSource, declaration_for};
 use crate::workflow::plan::ticket_payload::WorkflowTicketPayload;
-use crate::ControlPlane;
 
 /// Ticket-kind suffix for scan runs. The ticket kind itself MUST be the
 /// namespaced form `{WORKFLOW_OPERATION_NAMESPACE}.scan_library`:
@@ -115,10 +115,11 @@ impl ControlPlane {
             Err(error) => return Err(error),
         };
 
-        let kind =
-            TicketOperation::new(format!("{WORKFLOW_OPERATION_NAMESPACE}.{SCAN_RUN_TICKET_KIND}"))?;
+        let kind = TicketOperation::new(format!(
+            "{WORKFLOW_OPERATION_NAMESPACE}{SCAN_RUN_TICKET_KIND}"
+        ))?;
         let payload = scan_run_ticket_payload(
-            &session.id,
+            session.id,
             owner_node_id,
             storage_root_id,
             idle_timeout_seconds,
@@ -152,7 +153,7 @@ impl ControlPlane {
 /// session id in `rendered_payload`, no `source_location_id` (the declaration
 /// addresses the whole root), and the canonical read-only declaration.
 fn scan_run_ticket_payload(
-    scan_session_id: &ScanSessionId,
+    scan_session_id: ScanSessionId,
     owner_node_id: voom_core::NodeId,
     storage_root_id: StorageRootId,
     idle_timeout_seconds: u32,
