@@ -102,7 +102,8 @@ Batch idempotency key format: `{incarnation_id}-scan-{session_id}-{sequence}`.
 Tests (mock CP server via local axum or existing test doubles used by runtime tests):
 ordered batches, retry replays accepted sequence, drift candidate yields evidence-less
 observation, fatal worker crash ⇒ fail_scan_session + lease Fail, empty enumeration ⇒
-complete with null last_sequence, >1000 candidates split flushes.
+complete with null last_sequence, >1000 candidates split flushes, sidecar-dense root
+flushes at the 512 KiB evidence-byte budget before the ~1 MiB request-body cap rejects.
 Verify: `cargo test -p voom-node-agent`.
 
 ## Task 7 — Completion publication
