@@ -39,10 +39,19 @@ verification id, staging location id + epoch, target root id +
 (`{size_bytes, content_hash}` as a typed JSON column under the ADR 0013
 deny-unknown-fields contract), and the resolved owner node. Authorization
 additionally records the owner incarnation id and a one-time opaque 32-byte
-`commit_fence`. Node-reported receipts (`not_started`, `applying`,
-`applied`, `mismatched`, `outcome_unknown`) with observed facts land in a
-typed JSON receipt column. Every transition is a compare-and-set on an
-optimistic `epoch` column, mirroring `commit_safety_gate`.
+`commit_fence`. Node-reported receipts (`applying`, `applied`,
+`mismatched`, `outcome_unknown`) with observed facts land in a typed JSON
+receipt column; an absent receipt means not started. This deliberately
+collapses the design spec's `not_started` journal step into receipt absence:
+the `applying` report is the sole mutation gate, so no separate
+pre-mutation receipt exists to produce or classify. Every transition is a
+compare-and-set on an optimistic `epoch` column, mirroring
+`commit_safety_gate`.
+Migration 0038 fails closed at apply time if any `artifact_commit_records`
+row is still `pending` or `recovery_required`: those rows' host-side
+recovery code is deleted by this change, so operators resolve them under
+the prior binary before upgrading. Pre-release deployments carry no
+backfill-compat obligation for them.
 
 ### Authorization is the control plane's fail-closed gate, re-run late
 

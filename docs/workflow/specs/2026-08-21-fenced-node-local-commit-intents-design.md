@@ -82,9 +82,9 @@ Flow for one staged commit (all steps durable):
 
 | Crate | Change |
 |---|---|
-| `migrations/0038_artifact_commit_intents.sql` | New STRICT table, CHECK-coherent states, json_valid columns |
+| `migrations/0038_artifact_commit_intents.sql` | New STRICT table, CHECK-coherent states, json_valid columns; fails closed at apply time if any non-terminal (`pending`/`recovery_required`) `artifact_commit_records` rows exist — operators resolve them under the prior binary |
 | `crates/voom-store` | Migrator entry + schema-test bump; `repo/media/artifact_commit_intents.rs` repo (+ tests) |
-| `crates/voom-events` | Payloads: intent recorded/authorized, receipt reported (kinds `not_started`/`applying`/`applied`/`mismatched`/`outcome_unknown`); no fence value ever serialized |
+| `crates/voom-events` | Payloads: intent recorded/authorized, receipt reported (kinds `applying`/`applied`/`mismatched`/`outcome_unknown`; receipt absence means not started — the design spec's `not_started` journal step is deliberately collapsed into absence, with the `applying` report as the sole mutation gate); no fence value ever serialized |
 | `crates/voom-control-plane` | Commit path rework: prepare pins intent; authorize/complete/receipt case functions; recovery classification; delete host promotion code |
 | `crates/voom-api` | `commit.rs` routes under `/v1/artifact/commit/…` following `execution.rs` handler pattern |
 | `crates/voom-node-agent` | Client methods (`RetryRequest`), coordinator task polling intents, node-side verify+promote module (ported add-only install) |
