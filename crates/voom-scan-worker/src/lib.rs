@@ -2,7 +2,7 @@
 //!
 //! The worker walks one storage root metadata-only, classifies primary media
 //! and sidecars, and answers `scan_library` dispatches with candidate
-//! progress frames plus a terminal [`ScanLibraryResult`]. Pure classification
+//! progress frames plus a terminal `ScanLibraryResult`. Pure classification
 //! lives in [`discover`], the filesystem walk in [`walk`], and the
 //! worker-protocol surface in [`handler`].
 

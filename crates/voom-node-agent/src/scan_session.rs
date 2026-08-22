@@ -3,7 +3,7 @@
 //! One `scan_library` lease drives one durable scan session: start it on the
 //! control plane, stream candidates from the scan worker's own child, run each
 //! candidate through a bounded hash→sidecar-hash→probe pipeline against the
-//! cross-worker [`ChildEndpointRegistry`], and submit ordered idempotent
+//! cross-worker child-endpoint registry, and submit ordered idempotent
 //! observation batches. Sessions never resume across agent restarts — a
 //! re-delivered ticket whose session is no longer startable by this
 //! incarnation fails closed rather than replaying accepted locators into
