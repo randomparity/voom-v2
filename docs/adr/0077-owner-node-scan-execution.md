@@ -94,9 +94,10 @@ run, then polls session inspection until terminal and prints the outcome envelop
 - A mutated file degrades to an evidence-less observation instead of failing the session;
   content-level failures never publish stale identity, and infrastructure failures fail the
   session without partial reconciliation.
-- Ticket failure or loss leaves the session `requested`; the inactivity deadline stales it.
-  re-requested by hand — ADR 0067 lets only the trusted local operator request sessions, so
-  an unattended deployment stalls until a human re-requests the scan.
+- Ticket failure or loss leaves the session `requested` until the inactivity deadline stales
+  it; the session must then be re-requested by hand — ADR 0067 lets only the trusted local
+  operator request sessions, so an unattended deployment stalls until a human re-requests
+  the scan.
 - The workflow scanner-ticket result shape changes from per-file `{path, file_location_id}`
   rows to a run summary keyed by scan session; downstream consumption of scanner results must
   be reintroduced against published locations in a follow-up (#423-adjacent surface).
@@ -107,6 +108,10 @@ run, then polls session inspection until terminal and prints the outcome envelop
   an open object.
 - Observation rows now carry up to one strict evidence payload each; batch size bounds keep
   worst-case payloads within the existing 1000-observation route limit.
+- The ADR 0067 cumulative cap of 100,000 observations per session now bounds scannable
+  roots: a root enumerating more than that fails batch acceptance deterministically and
+  re-requests reproduce the failure, where the transitional local scanner had no ceiling.
+  Raising or chunking the cap is ADR 0067's decision to revisit, not this one's.
 - The scan path stops consuming `local_node_id`; the field itself keeps its
   transform/commit consumers (artifact stage and commit preparation, policy verification,
   audio/remux/transcode source selection, workflow promotion) owned by #423 and successors
