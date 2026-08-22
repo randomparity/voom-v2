@@ -277,6 +277,7 @@ impl LiveFixture {
                 lease_ttl_seconds: 6,
                 progress_idle_timeout_seconds: 5,
                 shutdown_grace_seconds: 1,
+                storage_roots: Vec::new(),
                 node_token: TokenSource::Env {
                     name: "VOOM_NODE_TOKEN".to_owned(),
                 },

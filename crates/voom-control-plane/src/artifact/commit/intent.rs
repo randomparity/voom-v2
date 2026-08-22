@@ -12,7 +12,7 @@ use sqlx::Sqlite;
 use voom_artifact::commit_pipeline::{
     RecoveryRequiredCommit, mark_recovery_required_with_event_in_tx,
 };
-use voom_core::ids::ArtifactCommitIntentId;
+use voom_core::ids::{ArtifactCommitIntentId, ArtifactHandleId};
 use voom_core::{ErrorCode, FailureClass, NodeId, NodeIncarnationId, VoomError};
 use voom_events::Event;
 use voom_events::payload::{
@@ -23,7 +23,8 @@ use voom_store::repo::execution::remote_idempotency::{
 };
 use voom_store::repo::media::artifact_commit_intents::{
     AppliedReceipt, ApplyingReceipt, ArtifactCommitIntent, ArtifactCommitIntentState,
-    CommitObservedFacts, CommitReceipt, MismatchedReceipt, OutcomeUnknownReceipt,
+    CommitExpectedFacts, CommitObservedFacts, CommitReceipt, MismatchedReceipt,
+    OutcomeUnknownReceipt,
 };
 use voom_store::repo::media::artifacts::{ArtifactCommitFailure, ArtifactCommitRecord};
 
@@ -170,6 +171,39 @@ pub struct RemoteCommitCompleteOutcome {
     pub commit_record_id: voom_core::ids::ArtifactCommitRecordId,
     pub result_file_version_id: Option<voom_core::FileVersionId>,
     pub result_file_location_id: Option<voom_core::FileLocationId>,
+}
+
+/// Input for the node pull listing of open commit intents.
+#[derive(Debug, Clone)]
+pub struct RemoteCommitIntentsOpenInput {
+    pub node_id: NodeId,
+    pub token: SecretString,
+    pub incarnation_id: NodeIncarnationId,
+}
+
+/// One advertised open commit intent: everything a coordinator needs to
+/// drive the intent, projected from the pinned scope. Never carries fence
+/// material.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OpenCommitIntent {
+    pub id: ArtifactCommitIntentId,
+    pub state: String,
+    pub artifact_handle_id: ArtifactHandleId,
+    pub expected_facts: CommitExpectedFacts,
+    pub staging_storage_root_id: voom_core::StorageRootId,
+    pub staging_provider_relative_locator: String,
+    pub staging_location_epoch: u64,
+    pub target_storage_root_id: voom_core::StorageRootId,
+    pub target_provider_relative_locator: String,
+    pub target_root_epoch: u64,
+    pub intent_epoch: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RemoteCommitIntentsOpenOutcome {
+    pub intents: Vec<OpenCommitIntent>,
 }
 
 fn rfc3339(now: time::OffsetDateTime) -> Result<String, VoomError> {
@@ -609,6 +643,78 @@ impl ControlPlane {
                 Ok(outcome)
             }
         }
+    }
+
+    /// List the requesting node's actionable commit intents (the node pull
+    /// listing): every non-terminal (`pending`/`authorized`/
+    /// `recovery_required`) intent whose pinned target root is currently
+    /// owned by the caller at the pinned epoch. Authentication-only — no
+    /// idempotency reservation, a pure read projection. An intent whose
+    /// pinned staging location no longer resolves to a live rooted location
+    /// at the pinned epoch is not advertised: it is not actionable through
+    /// these routes (every mutating case revalidates the same pin and fails
+    /// closed), mirroring how the store listing stops advertising stale
+    /// roots. Never includes fence material.
+    ///
+    /// # Errors
+    /// Authentication or storage errors.
+    pub async fn remote_open_commit_intents(
+        &self,
+        input: RemoteCommitIntentsOpenInput,
+    ) -> Result<RemoteCommitIntentsOpenOutcome, VoomError> {
+        use voom_store::repo::media::identity::{FileLocationAddress, FileLocationRepo};
+
+        let now = self.clock().now();
+        let mut tx = begin_immediate_tx(&self.pool).await?;
+        let auth = self
+            .require_remote_incarnation_fence_in_tx(
+                &mut tx,
+                input.node_id,
+                &input.token,
+                input.incarnation_id,
+                None,
+            )
+            .await?;
+        validate_remote_node_live(&auth, input.node_id, now, false)?;
+        let intents = self
+            .artifact_commit_intents
+            .list_open_for_roots_in_tx(&mut tx, input.node_id)
+            .await?;
+        let mut listed = Vec::with_capacity(intents.len());
+        for intent in intents {
+            let Some(location) = self
+                .identity
+                .get_file_location_in_tx(&mut tx, intent.staging_location_id)
+                .await?
+            else {
+                continue;
+            };
+            if location.retired_at.is_some() || location.epoch != intent.staging_location_epoch {
+                continue;
+            }
+            let FileLocationAddress::Rooted {
+                storage_root_id,
+                provider_relative_locator,
+            } = location.address
+            else {
+                continue;
+            };
+            listed.push(OpenCommitIntent {
+                id: intent.id,
+                state: intent.state.as_str().to_owned(),
+                artifact_handle_id: intent.artifact_handle_id,
+                expected_facts: intent.expected_facts,
+                staging_storage_root_id: storage_root_id,
+                staging_provider_relative_locator: provider_relative_locator.as_str().to_owned(),
+                staging_location_epoch: intent.staging_location_epoch,
+                target_storage_root_id: intent.target_storage_root_id,
+                target_provider_relative_locator: intent.target_provider_relative_locator,
+                target_root_epoch: intent.target_root_epoch,
+                intent_epoch: intent.intent_epoch,
+            });
+        }
+        commit_tx(tx).await?;
+        Ok(RemoteCommitIntentsOpenOutcome { intents: listed })
     }
 }
 

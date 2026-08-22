@@ -3340,6 +3340,7 @@ dependencies = [
  "async-trait",
  "axum",
  "axum-server",
+ "blake3",
  "clap",
  "rand 0.9.5",
  "rcgen",

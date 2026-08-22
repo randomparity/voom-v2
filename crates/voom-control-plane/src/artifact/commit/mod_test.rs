@@ -819,6 +819,144 @@ async fn authorize_rejects_stale_incarnation_without_touching_intent() {
     assert_eq!(intent_state(&cp, intent_id).await, "pending");
 }
 
+// --- open intent listing (node pull) ------------------------------------------
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "the open-listing lifecycle drive reads linearly; splitting scatters the sequence"
+)]
+#[tokio::test]
+async fn remote_open_commit_intents_lists_caller_owned_open_intents_only() {
+    let (cp, _db, dir) = fixture().await;
+    let node = simulated_node(&cp).await;
+    let staged = stage_and_verify_bytes(&cp, dir.path(), b"source bytes").await;
+    let handle = staged.artifact_handle_id;
+    let target = dir.path().join("target.bin");
+
+    // Prepare one fenced intent and leave it undriven until the listing
+    // assertions below have run.
+    let task_cp = cp.clone();
+    let task_target = target.clone();
+    let driver = tokio::spawn(async move {
+        task_cp
+            .commit_artifact(CommitArtifactInput {
+                artifact_handle_id: handle,
+                target_path: task_target,
+            })
+            .await
+    });
+    let intent_id = wait_pending_intent_id(&cp, handle).await;
+
+    let open_input = crate::artifact::commit::intent::RemoteCommitIntentsOpenInput {
+        node_id: node.node_id,
+        token: node.token.clone(),
+        incarnation_id: node.incarnation_id,
+    };
+    let listing = cp
+        .remote_open_commit_intents(open_input.clone())
+        .await
+        .unwrap();
+    assert_eq!(listing.intents.len(), 1);
+    assert_eq!(listing.intents[0].id, intent_id);
+    assert_eq!(listing.intents[0].state, "pending");
+    assert_eq!(listing.intents[0].artifact_handle_id, handle);
+    // The fence value never travels in the listing projection.
+    let wire = serde_json::to_string(&listing).unwrap();
+    assert!(
+        !wire.contains("fence"),
+        "open listing leaked fence material: {wire}"
+    );
+
+    // A different authenticated remote node owns no roots and sees nothing.
+    let other = install_second_remote_node(&cp).await;
+    let other_listing = cp
+        .remote_open_commit_intents(
+            crate::artifact::commit::intent::RemoteCommitIntentsOpenInput {
+                node_id: other.node_id,
+                token: other.token.clone(),
+                incarnation_id: other.incarnation_id,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(other_listing.intents.is_empty());
+
+    // Bad credentials are rejected before any listing work happens.
+    let unauthorized = cp
+        .remote_open_commit_intents(
+            crate::artifact::commit::intent::RemoteCommitIntentsOpenInput {
+                token: secrecy::SecretString::from("not-the-token".to_owned()),
+                ..open_input.clone()
+            },
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(unauthorized.code(), ErrorCode::Unauthorized.as_str());
+
+    // After authorization the listing reflects the new state and the same
+    // pinned scope the fenced outcome carries.
+    let authorized = node_authorize(&cp, &node, intent_id).await.unwrap();
+    let listing = cp
+        .remote_open_commit_intents(open_input.clone())
+        .await
+        .unwrap();
+    assert_eq!(listing.intents.len(), 1);
+    assert_eq!(listing.intents[0].state, "authorized");
+    assert_eq!(
+        listing.intents[0].staging_storage_root_id,
+        authorized.staging_storage_root_id
+    );
+    assert_eq!(
+        listing.intents[0].staging_provider_relative_locator,
+        authorized.staging_provider_relative_locator
+    );
+    assert_eq!(
+        listing.intents[0].target_storage_root_id,
+        authorized.target_storage_root_id
+    );
+    assert_eq!(
+        listing.intents[0].target_provider_relative_locator,
+        authorized.target_provider_relative_locator
+    );
+    assert_eq!(
+        listing.intents[0].expected_facts.size_bytes,
+        authorized.expected_size_bytes
+    );
+    assert_eq!(
+        listing.intents[0].expected_facts.content_hash,
+        authorized.expected_content_hash
+    );
+
+    // Converge the intent; completed intents drop out of the listing.
+    node_report_applying(&cp, &node, intent_id).await.unwrap();
+    let staged_path = rooted_path(
+        &cp,
+        authorized.staging_storage_root_id.0,
+        &authorized.staging_provider_relative_locator,
+    )
+    .await;
+    let bytes = std::fs::read(&staged_path).unwrap();
+    std::fs::copy(&staged_path, &target).unwrap();
+    node_report_outcome(
+        &cp,
+        &node,
+        intent_id,
+        CommitOutcomeEvidence::Applied(AppliedEvidence {
+            observed: voom_test_support::commit_node::observed_facts(&bytes),
+        }),
+    )
+    .await
+    .unwrap();
+    node_complete(&cp, &node, intent_id, &authorized.fence_hex)
+        .await
+        .unwrap();
+    let final_listing = cp.remote_open_commit_intents(open_input).await.unwrap();
+    assert!(final_listing.intents.is_empty());
+
+    // The waiting prepare leg sees the converged committed record.
+    let report = driver.await.unwrap().unwrap();
+    assert_eq!(report.state, ArtifactCommitState::Committed);
+}
 // --- receipt ordering and fence ----------------------------------------------
 
 #[tokio::test]

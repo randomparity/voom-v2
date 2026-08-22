@@ -88,8 +88,9 @@ pub mod execution {
 pub mod artifact_commit {
     pub use crate::artifact::commit::intent::{
         AppliedEvidence, AuthorizeCommitOutcome, CommitOutcomeEvidence, MismatchedEvidence,
-        OutcomeUnknownEvidence, RemoteCommitApplyingInput, RemoteCommitApplyingOutcome,
-        RemoteCommitAuthorizeInput, RemoteCommitCompleteInput, RemoteCommitCompleteOutcome,
+        OpenCommitIntent, OutcomeUnknownEvidence, RemoteCommitApplyingInput,
+        RemoteCommitApplyingOutcome, RemoteCommitAuthorizeInput, RemoteCommitCompleteInput,
+        RemoteCommitCompleteOutcome, RemoteCommitIntentsOpenInput, RemoteCommitIntentsOpenOutcome,
         RemoteCommitOutcomeInput, RemoteCommitReceiptOutcome,
     };
     pub use crate::artifact::commit::{

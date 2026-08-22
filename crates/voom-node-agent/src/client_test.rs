@@ -275,6 +275,7 @@ fn loaded_config(url: &str) -> LoadedAgentConfig {
             lease_ttl_seconds: 30,
             progress_idle_timeout_seconds: 300,
             shutdown_grace_seconds: 10,
+            storage_roots: Vec::new(),
             node_token: TokenSource::Env {
                 name: "VOOM_NODE_TOKEN".to_owned(),
             },

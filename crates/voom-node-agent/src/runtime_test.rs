@@ -15,6 +15,7 @@ use tokio::io::{AsyncRead, AsyncWriteExt};
 use tokio::sync::{Mutex, Notify, oneshot};
 use voom_core::{
     ArtifactAccessMode, LeaseId, NodeId, NodeIncarnationStatus, OperationKind, TicketId, WorkerId,
+    ids::{ArtifactCommitIntentId, ArtifactCommitRecordId},
 };
 use voom_worker_protocol::{
     DispatchStream, HandshakeResponse, HttpServer, NdjsonReader, OperationFuture, OperationHandler,
@@ -24,8 +25,10 @@ use voom_worker_protocol::{
 
 use super::*;
 use crate::client::{
-    AcquireIdle, ArtifactAccessPlan, CompleteOutcome, DeactivateOutcome, FailOutcome,
-    LeaseHeartbeatOutcome, NodeHeartbeatOutcome,
+    AcquireIdle, ArtifactAccessPlan, CommitApplyingOutcome, CommitApplyingRequest,
+    CommitAuthorizeOutcome, CommitAuthorizeRequest, CommitCompleteOutcome, CommitCompleteRequest,
+    CommitOpenOutcome, CommitOpenRequest, CommitOutcomeRequest, CommitReceiptOutcome,
+    CompleteOutcome, DeactivateOutcome, FailOutcome, LeaseHeartbeatOutcome, NodeHeartbeatOutcome,
 };
 use crate::config::{AgentConfig, TokenSource};
 
@@ -1616,6 +1619,53 @@ impl ControlPlaneApi for FakeControlPlane {
             artifact_access_plan: access_plan(),
         })
     }
+
+    async fn commit_open(
+        &self,
+        _request: &RetryRequest<CommitOpenRequest>,
+    ) -> Result<CommitOpenOutcome, VoomError> {
+        Ok(CommitOpenOutcome { intents: vec![] })
+    }
+
+    async fn authorize_commit_intent(
+        &self,
+        intent_id: ArtifactCommitIntentId,
+        _request: &RetryRequest<CommitAuthorizeRequest>,
+    ) -> Result<CommitAuthorizeOutcome, VoomError> {
+        Err(VoomError::NotFound(format!("commit intent {intent_id}")))
+    }
+
+    async fn report_commit_applying(
+        &self,
+        intent_id: ArtifactCommitIntentId,
+        _request: &RetryRequest<CommitApplyingRequest>,
+    ) -> Result<CommitApplyingOutcome, VoomError> {
+        Ok(CommitApplyingOutcome { intent_id })
+    }
+
+    async fn report_commit_outcome(
+        &self,
+        intent_id: ArtifactCommitIntentId,
+        _request: &RetryRequest<CommitOutcomeRequest>,
+    ) -> Result<CommitReceiptOutcome, VoomError> {
+        Ok(CommitReceiptOutcome {
+            intent_id,
+            kind: "applied".to_owned(),
+        })
+    }
+
+    async fn complete_commit_intent(
+        &self,
+        intent_id: ArtifactCommitIntentId,
+        _request: &RetryRequest<CommitCompleteRequest>,
+    ) -> Result<CommitCompleteOutcome, VoomError> {
+        Ok(CommitCompleteOutcome {
+            intent_id,
+            commit_record_id: ArtifactCommitRecordId(1),
+            result_file_version_id: None,
+            result_file_location_id: None,
+        })
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1940,6 +1990,7 @@ fn loaded_config_with_worker(worker: WorkerConfig) -> LoadedAgentConfig {
             lease_ttl_seconds: 6,
             progress_idle_timeout_seconds: 5,
             shutdown_grace_seconds: 1,
+            storage_roots: Vec::new(),
             node_token: TokenSource::Env {
                 name: "VOOM_NODE_TOKEN".to_owned(),
             },
