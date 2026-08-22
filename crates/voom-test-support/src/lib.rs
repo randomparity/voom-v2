@@ -6,4 +6,5 @@
 mod temp_database;
 
 pub use temp_database::TempDatabase;
+pub mod scan_seed;
 pub mod worker;

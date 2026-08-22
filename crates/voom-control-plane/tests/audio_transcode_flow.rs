@@ -10,15 +10,60 @@ use std::process::Command;
 use serde_json::{Value, json};
 use voom_control_plane::ControlPlane;
 use voom_control_plane::policy::{ComplianceExecutionOptions, PolicyInputFromScanInput};
-use voom_control_plane::scan::{RootScanOutcome, ScanReportFileStatus};
 use voom_core::{FileLocationId, FileVersionId, MediaSnapshotId};
 use voom_plan::PlanOperationKind;
 use voom_store::repo::media::identity::{MediaSnapshotRepo, SqliteIdentityRepo};
 use voom_test_support::TempDatabase;
+use voom_test_support::scan_seed::{SeedFile, seed_scanned_files};
 use voom_test_support::worker::{
     TestWorkerConfig, TestWorkerLaunch, cargo_build_package, hide_stale_fake_ffprobe_sibling,
     target_debug_binary,
 };
+
+/// Canned normalized probe snapshot for the audio-transcode fixture: 1 video
+/// plus 2 audio streams at provider indexes 1 and 2, matching ffprobe output
+/// for `generate_audio_fixture`; languages/titles are overlaid by
+/// `audio_snapshot_with_preservation_facts` before planning.
+fn audio_transcode_probe_snapshot() -> serde_json::Value {
+    serde_json::json!({
+        "format": "sprint10-v1",
+        "probe": {
+            "provider": "ffprobe",
+            "provider_version": "flow-seed",
+            "command": "ffprobe",
+            "probed_at": "2026-01-01T00:00:00Z",
+        },
+        "container": { "format_name": "matroska,webm" },
+        "streams": [
+            {
+                "index": 0,
+                "kind": "video",
+                "codec_name": "h264",
+                "width": 32,
+                "height": 32,
+                "disposition": { "default": true, "forced": false, "commentary": false },
+            },
+            {
+                "index": 1,
+                "kind": "audio",
+                "codec_name": "aac",
+                "language": "eng",
+                "title": "Main",
+                "channels": 1,
+                "disposition": { "default": true, "forced": false, "commentary": false },
+            },
+            {
+                "index": 2,
+                "kind": "audio",
+                "codec_name": "aac",
+                "language": "jpn",
+                "title": "Secondary",
+                "channels": 1,
+                "disposition": { "default": false, "forced": false, "commentary": false },
+            },
+        ],
+    })
+}
 
 const AUDIO_TRANSCODE_POLICY: &str = r#"
 policy "audio transcode opus" {
@@ -45,7 +90,7 @@ async fn audio_transcode_flow_verifies_commits_and_authoritative_replan() {
     generate_audio_fixture(&source);
 
     let (cp, url, _db) = control_plane(tmp.path()).await;
-    let scanned = scan_fixture(&cp, &source).await;
+    let scanned = scan_fixture(&cp, &url, tmp.path(), &source).await;
     let source_snapshot_id =
         record_augmented_audio_snapshot(&cp, &url, scanned.file_version_id, scanned.snapshot_id)
             .await;
@@ -123,7 +168,7 @@ async fn audio_transcode_existing_target_path_fails_before_success_reporting() {
     generate_audio_fixture(&source);
 
     let (cp, url, _db) = control_plane(tmp.path()).await;
-    let scanned = scan_fixture(&cp, &source).await;
+    let scanned = scan_fixture(&cp, &url, tmp.path(), &source).await;
     let source_snapshot_id =
         record_augmented_audio_snapshot(&cp, &url, scanned.file_version_id, scanned.snapshot_id)
             .await;
@@ -206,23 +251,29 @@ async fn control_plane(root: &Path) -> (ControlPlane, String, TempDatabase) {
     (cp, url, db)
 }
 
-async fn scan_fixture(cp: &ControlPlane, source: &Path) -> ScannedFixture {
-    let outcome = cp
-        .scan_library_root(voom_store::test_support::TEST_STORAGE_ROOT_ID)
-        .await
-        .unwrap();
-    let RootScanOutcome::Scanned(scan) = outcome else {
-        unreachable!("active local test root must scan")
-    };
-    assert_eq!(scan.summary.scanned_count(), 1);
-    let scanned = scan
-        .files
-        .iter()
-        .find(|file| file.path == source && file.status == ScanReportFileStatus::Scanned)
-        .unwrap();
+async fn scan_fixture(cp: &ControlPlane, url: &str, root: &Path, source: &Path) -> ScannedFixture {
+    let locator = source
+        .strip_prefix(root)
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .replace(std::path::MAIN_SEPARATOR, "/");
+    let seeded = seed_scanned_files(
+        cp,
+        url,
+        voom_store::test_support::TEST_STORAGE_ROOT_ID,
+        &[SeedFile {
+            locator: &locator,
+            path: source,
+            probe_snapshot: audio_transcode_probe_snapshot(),
+        }],
+    )
+    .await
+    .unwrap();
+    let seeded = &seeded[0];
     ScannedFixture {
-        file_version_id: scanned.file_version_id.unwrap(),
-        snapshot_id: scanned.media_snapshot_id.unwrap(),
+        file_version_id: seeded.file_version_id,
+        snapshot_id: seeded.media_snapshot_id,
     }
 }
 
@@ -500,16 +551,6 @@ async fn assert_row_exists(pool: &sqlx::SqlitePool, sql: &str, id: u64) {
         .await
         .unwrap();
     assert_eq!(count, 1);
-}
-
-trait ScanSummaryExt {
-    fn scanned_count(&self) -> u64;
-}
-
-impl ScanSummaryExt for voom_control_plane::scan::ScanSummary {
-    fn scanned_count(&self) -> u64 {
-        self.ingested
-    }
 }
 
 fn require_command(program: &str, args: &[&str]) {

@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::process::ExitStatus;
 use std::time::Duration;
 
-use voom_core::{ErrorCode, FailureClass, WorkerId};
+use voom_core::{ErrorCode, FailureClass, VoomError, WorkerId};
 #[cfg(test)]
 use voom_worker_protocol::HttpClient;
 use voom_worker_protocol::{
@@ -34,11 +34,16 @@ pub struct ScanWorkerError {
 }
 
 impl ScanWorkerError {
+    /// Test-only accessors; the dispatch pipeline that consumed them moved to
+    /// the owner-node agent (ADR 0077) and the remaining production callers
+    /// only ask [`Self::should_shutdown_worker`].
+    #[cfg(test)]
     #[must_use]
     pub const fn failure_class(&self) -> FailureClass {
         self.failure_class
     }
 
+    #[cfg(test)]
     #[must_use]
     pub const fn error_code(&self) -> ErrorCode {
         self.error_code
@@ -47,6 +52,18 @@ impl ScanWorkerError {
     #[must_use]
     pub(crate) const fn should_shutdown_worker(&self) -> bool {
         self.shutdown_worker
+    }
+
+    #[cfg(test)]
+    pub(crate) fn is_unprobeable_media(&self) -> bool {
+        self.error_code == ErrorCode::MalformedMedia
+            || (self.error_code == ErrorCode::ExternalSystemUnavailable
+                && self
+                    .terminal_payload
+                    .as_ref()
+                    .and_then(|payload| payload.get("stage"))
+                    .and_then(serde_json::Value::as_str)
+                    == Some("exit"))
     }
 
     fn new(
@@ -102,23 +119,6 @@ impl ScanWorkerError {
         payload: Option<serde_json::Value>,
     ) -> Self {
         Self::new(failure_class, error_code, message, false, payload)
-    }
-
-    /// A per-file probe fault the directory scan can survive: the file itself is
-    /// unprobeable (either a transient probe `exit` failure, or the permanent
-    /// `MalformedMedia` — structurally corrupt source, #248/#287), as opposed to
-    /// a worker-level fault (crash, protocol error) that should abort the group.
-    pub(crate) fn is_unprobeable_media(&self) -> bool {
-        if self.error_code == ErrorCode::MalformedMedia {
-            return true;
-        }
-        self.error_code == ErrorCode::ExternalSystemUnavailable
-            && self
-                .terminal_payload
-                .as_ref()
-                .and_then(|payload| payload.get("stage"))
-                .and_then(serde_json::Value::as_str)
-                == Some("exit")
     }
 
     #[cfg(test)]
@@ -190,11 +190,6 @@ impl BundledWorkerProcess {
         })
     }
 
-    #[must_use]
-    pub const fn worker_id(&self) -> WorkerId {
-        self.inner.worker_id
-    }
-
     #[cfg(test)]
     #[must_use]
     pub const fn credentials(&self) -> &WorkerCredentials {
@@ -228,6 +223,14 @@ impl BundledWorkerProcess {
 
     async fn terminate(&mut self) {
         self.inner.terminate(SHUTDOWN_TIMEOUT).await;
+    }
+}
+
+#[cfg(test)]
+impl BundledWorkerProcess {
+    #[must_use]
+    pub const fn worker_id(&self) -> WorkerId {
+        self.inner.worker_id
     }
 }
 
@@ -399,3 +402,80 @@ const fn probe_file_stream_labels() -> WorkerStreamLabels {
 #[cfg(test)]
 #[path = "worker_test.rs"]
 mod tests;
+
+/// Expected/observed byte facts for one probed file, captured from the same
+/// stat that produced the content hash. `(dev, ino)` identifies the underlying
+/// physical object so two hardlinked paths resolve to one file (#249); `nlink`
+/// is the link count at scan time. `None` where the platform does not expose
+/// them; hardlink resolution simply does not apply then.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ObservedFileFacts {
+    pub size_bytes: u64,
+    pub content_hash: String,
+    pub modified_at: Option<std::time::SystemTime>,
+    pub dev: Option<u64>,
+    pub ino: Option<u64>,
+    pub nlink: Option<u64>,
+}
+
+/// Verify that the worker probed the exact bytes the dispatcher hashed before
+/// dispatch. Any mismatch is content drift: the caller must leave no durable
+/// identity or snapshot rows for the changed file.
+///
+/// # Errors
+/// Returns [`VoomError::ArtifactChecksumMismatch`] when either probe snapshot
+/// disagrees with the expected facts.
+pub fn verify_probe_facts(
+    candidate: &ObservedFileFacts,
+    result: &ProbeFileResult,
+) -> Result<(), VoomError> {
+    if result.pre_probe.size_bytes == candidate.size_bytes
+        && result.post_probe.size_bytes == candidate.size_bytes
+        && result.pre_probe.content_hash == candidate.content_hash
+        && result.post_probe.content_hash == candidate.content_hash
+    {
+        return Ok(());
+    }
+    Err(VoomError::ArtifactChecksumMismatch(
+        "worker probe facts drifted from the dispatched file facts".to_owned(),
+    ))
+}
+
+/// Guarantee every persisted snapshot stream carries an id, mirroring the
+/// ffprobe worker's own normalization so rows written before that worker
+/// change stay readable.
+///
+/// # Errors
+/// Returns [`VoomError::Config`] for a non-object stream entry or a stream
+/// lacking both `id` and a numeric `index`.
+pub(crate) fn snapshot_with_stream_ids(
+    snapshot: &serde_json::Value,
+) -> Result<serde_json::Value, VoomError> {
+    let mut normalized = snapshot.clone();
+    let Some(streams) = normalized.get_mut("streams") else {
+        return Ok(normalized);
+    };
+    let Some(streams) = streams.as_array_mut() else {
+        return Ok(normalized);
+    };
+    for stream in streams {
+        let Some(stream) = stream.as_object_mut() else {
+            return Err(VoomError::Config(
+                "snapshot stream entries must be objects".to_owned(),
+            ));
+        };
+        if stream.contains_key("id") {
+            continue;
+        }
+        let Some(index) = stream.get("index").and_then(serde_json::Value::as_u64) else {
+            return Err(VoomError::Config(
+                "snapshot stream without id must include numeric index".to_owned(),
+            ));
+        };
+        stream.insert(
+            "id".to_owned(),
+            serde_json::Value::String(format!("stream-{index}")),
+        );
+    }
+    Ok(normalized)
+}

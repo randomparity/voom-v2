@@ -10,14 +10,16 @@
 
 use serde_json::json;
 use voom_core::{
-    OperationKind, ScanSessionId, StorageRootId, TicketId, TicketOperation, VoomError,
+    LibraryId, OperationKind, ScanSessionId, StorageRootId, TicketId, TicketOperation, VoomError,
     WORKFLOW_OPERATION_NAMESPACE,
 };
 use voom_store::repo::execution::tickets::NewTicket;
 use voom_store::repo::scan::sessions::NewScanSession;
 
-use super::library::{RootBlockReason, RootScanBlocked};
+use voom_store::repo::library::library_roots::RootAvailabilityReason;
+
 use super::sessions::{append_lifecycle_event, progress_deadline, validate_idle_timeout};
+
 use crate::ControlPlane;
 use crate::cases::execution::remote_execution::is_remote_replayable_error;
 use crate::cases::{begin_immediate_tx, commit_tx};
@@ -148,6 +150,59 @@ impl ControlPlane {
             scan_session_id: session.id,
             ticket_id: ticket.id,
         }))
+    }
+}
+
+/// Why a root scan was refused, plus the identifiers an operator needs.
+#[derive(Debug)]
+pub struct RootScanBlocked {
+    pub library_id: LibraryId,
+    pub storage_root_id: StorageRootId,
+    pub reason: RootBlockReason,
+    pub provider_locator: String,
+}
+
+/// The disabled resource that blocked the scan request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RootBlockReason {
+    LibraryDisabled,
+    RootDisabled,
+    RootUnassigned,
+    RootNotActive,
+    OwnerRegistered,
+    OwnerStale,
+    OwnerRetired,
+    LocalNodeUnconfigured,
+    OwnerNotLocal,
+}
+
+impl RootBlockReason {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::RootDisabled => "root_disabled",
+            Self::LibraryDisabled => "library_disabled",
+            Self::RootUnassigned => "root_unassigned",
+            Self::RootNotActive => "root_not_active",
+            Self::OwnerRegistered => "owner_registered",
+            Self::OwnerStale => "owner_stale",
+            Self::OwnerRetired => "owner_retired",
+            Self::LocalNodeUnconfigured => "local_node_unconfigured",
+            Self::OwnerNotLocal => "owner_not_local",
+        }
+    }
+
+    pub(super) fn from_availability(reason: RootAvailabilityReason) -> Option<Self> {
+        match reason {
+            RootAvailabilityReason::Available => None,
+            RootAvailabilityReason::LibraryDisabled => Some(Self::LibraryDisabled),
+            RootAvailabilityReason::RootDisabled => Some(Self::RootDisabled),
+            RootAvailabilityReason::RootUnassigned => Some(Self::RootUnassigned),
+            RootAvailabilityReason::RootNotActive => Some(Self::RootNotActive),
+            RootAvailabilityReason::OwnerRegistered => Some(Self::OwnerRegistered),
+            RootAvailabilityReason::OwnerStale => Some(Self::OwnerStale),
+            RootAvailabilityReason::OwnerRetired => Some(Self::OwnerRetired),
+        }
     }
 }
 

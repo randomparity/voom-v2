@@ -2,8 +2,7 @@
 
 ## Status
 
-Open
-review-by: 2026-10-31
+> **Resolved by ADR 0077 owner-node scan execution (#421)** (2026-08-22)
 
 ## Concern
 
@@ -46,3 +45,13 @@ target: crates/voom-control-plane/src/scan/hash.rs
 Challenge run `challenge-418-impl-r3-20260805` found the concern on 2026-08-04.
 tracker: #421
 Related tracker: #423
+
+## Resolution
+
+The Concern described the transitional control-plane read. ADR 0077 replaces it: discovery
+and hash bytes now bind to a component-wise symlink-free descent from the canonical root on
+the storage-owner node, for primaries AND sidecars alike, with deterministic
+ancestor-replacement regressions covering both inputs (voom-scan-worker `walk`/`discover`
+and voom-hash-worker `descent` regression suites). The probe leg's pathname-reopen residual
+is NOT resolved here — it remains open under #423 and is recorded as such in that issue's
+scope.

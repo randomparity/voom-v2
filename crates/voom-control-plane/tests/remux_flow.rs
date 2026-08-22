@@ -9,11 +9,11 @@ use std::process::Command;
 
 use voom_control_plane::ControlPlane;
 use voom_control_plane::policy::{ComplianceExecutionOptions, PolicyInputFromScanInput};
-use voom_control_plane::scan::{RootScanOutcome, ScanReportFileStatus};
 use voom_core::{FileLocationId, FileVersionId, MediaSnapshotId};
 use voom_plan::PlanOperationKind;
 use voom_store::repo::media::identity::{MediaSnapshotRepo, SqliteIdentityRepo};
 use voom_test_support::TempDatabase;
+use voom_test_support::scan_seed::{SeedFile, seed_scanned_files};
 use voom_test_support::worker::{
     TestWorkerConfig, TestWorkerLaunch, cargo_build_package, hide_stale_fake_ffprobe_sibling,
     target_debug_binary,
@@ -35,6 +35,85 @@ policy "remux track selection" {
   }
 }
 "#;
+
+/// Canned normalized probe snapshot for `Movie.mkv`, mirroring what a real
+/// ffprobe pass over `generate_remux_fixture` output records: 1 video, 3 audio
+/// (eng / spa / eng commentary), 2 subtitles (eng, spa forced), and 2
+/// attachments (font + cover), with the provider indexes mkvmerge addresses.
+fn remux_probe_snapshot() -> serde_json::Value {
+    serde_json::json!({
+        "format": "sprint10-v1",
+        "probe": {
+            "provider": "ffprobe",
+            "provider_version": "flow-seed",
+            "command": "ffprobe",
+            "probed_at": "2026-01-01T00:00:00Z",
+        },
+        "container": { "format_name": "matroska,webm" },
+        "streams": [
+            {
+                "index": 0,
+                "kind": "video",
+                "codec_name": "h264",
+                "disposition": { "default": true, "forced": false, "commentary": false },
+            },
+            {
+                "index": 1,
+                "kind": "audio",
+                "codec_name": "aac",
+                "language": "eng",
+                "channels": 2,
+                "disposition": { "default": true, "forced": false, "commentary": false },
+            },
+            {
+                "index": 2,
+                "kind": "audio",
+                "codec_name": "aac",
+                "language": "spa",
+                "channels": 2,
+                "disposition": { "default": false, "forced": false, "commentary": false },
+            },
+            {
+                "index": 3,
+                "kind": "audio",
+                "codec_name": "aac",
+                "language": "eng",
+                "channels": 2,
+                "title": "Commentary",
+                "disposition": { "default": false, "forced": false, "commentary": true },
+            },
+            {
+                "index": 4,
+                "kind": "subtitle",
+                "codec_name": "subrip",
+                "language": "eng",
+                "disposition": { "default": false, "forced": false, "commentary": false },
+            },
+            {
+                "index": 5,
+                "kind": "subtitle",
+                "codec_name": "subrip",
+                "language": "spa",
+                "disposition": { "default": false, "forced": true, "commentary": false },
+            },
+            {
+                "index": 6,
+                "kind": "attachment",
+                "codec_name": "ttf",
+                "filename": "OpenSans.ttf",
+                "mime_type": "font/ttf",
+                "disposition": { "default": false, "forced": false, "commentary": false },
+            },
+            {
+                "index": 7,
+                "kind": "attachment",
+                "filename": "cover.bin",
+                "mime_type": "application/octet-stream",
+                "disposition": { "default": false, "forced": false, "commentary": false },
+            },
+        ],
+    })
+}
 
 #[tokio::test]
 async fn remux_flow_verifies_commits_and_records_result_snapshot() {
@@ -65,21 +144,21 @@ async fn remux_flow_verifies_commits_and_records_result_snapshot() {
         .unwrap()
         .with_local_node_id(Some(voom_core::NodeId(9_000_001)));
 
-    let outcome = cp
-        .scan_library_root(voom_store::test_support::TEST_STORAGE_ROOT_ID)
-        .await
-        .unwrap();
-    let RootScanOutcome::Scanned(scan) = outcome else {
-        unreachable!("active local test root must scan")
-    };
-    assert_eq!(scan.summary.scanned_count(), 1);
-    let scanned = scan
-        .files
-        .iter()
-        .find(|file| file.status == ScanReportFileStatus::Scanned)
-        .unwrap();
-    let source_file_version_id = scanned.file_version_id.unwrap();
-    let source_media_snapshot_id = scanned.media_snapshot_id.unwrap();
+    let seeded = seed_scanned_files(
+        &cp,
+        &url,
+        voom_store::test_support::TEST_STORAGE_ROOT_ID,
+        &[SeedFile {
+            locator: "Movie.mkv",
+            path: &source,
+            probe_snapshot: remux_probe_snapshot(),
+        }],
+    )
+    .await
+    .unwrap();
+    let seeded_source = &seeded[0];
+    let source_file_version_id = seeded_source.file_version_id;
+    let source_media_snapshot_id = seeded_source.media_snapshot_id;
     assert_scanned_stream_facts(&url, source_file_version_id, source_media_snapshot_id).await;
 
     let policy = cp
@@ -144,16 +223,6 @@ async fn remux_flow_verifies_commits_and_records_result_snapshot() {
         result_snapshot,
     )
     .await;
-}
-
-trait ScanSummaryExt {
-    fn scanned_count(&self) -> u64;
-}
-
-impl ScanSummaryExt for voom_control_plane::scan::ScanSummary {
-    fn scanned_count(&self) -> u64 {
-        self.ingested
-    }
 }
 
 async fn assert_scanned_stream_facts(

@@ -10,7 +10,6 @@ use std::process::Command;
 use serde_json::json;
 use voom_control_plane::ControlPlane;
 use voom_control_plane::policy::{ComplianceExecutionOptions, PolicyInputFromScanInput};
-use voom_control_plane::scan::{RootScanOutcome, ScanReportFileStatus};
 use voom_core::{FileVersionId, MediaSnapshotId};
 use voom_plan::PlanOperationKind;
 use voom_policy::{
@@ -18,6 +17,7 @@ use voom_policy::{
 };
 use voom_store::repo::media::identity::{MediaSnapshotRepo, SqliteIdentityRepo};
 use voom_test_support::TempDatabase;
+use voom_test_support::scan_seed::{SeedFile, seed_scanned_files};
 use voom_test_support::worker::{
     TestWorkerConfig, TestWorkerLaunch, cargo_build_package, hide_stale_fake_ffprobe_sibling,
     target_debug_binary,
@@ -52,20 +52,32 @@ async fn video_transcode_flow_verifies_commits_and_authoritative_replan() {
         .unwrap()
         .with_local_node_id(Some(voom_core::NodeId(9_000_001)));
 
-    let outcome = cp
-        .scan_library_root(voom_store::test_support::TEST_STORAGE_ROOT_ID)
-        .await
-        .unwrap();
-    let RootScanOutcome::Scanned(scan) = outcome else {
-        unreachable!("active local test root must scan")
-    };
-    assert_eq!(scan.summary.scanned_count(), 1);
-    let scanned = scan
-        .files
-        .iter()
-        .find(|file| file.status == ScanReportFileStatus::Scanned)
-        .unwrap();
-    let source_file_version_id = scanned.file_version_id.unwrap();
+    let seeded = seed_scanned_files(
+        &cp,
+        &url,
+        voom_store::test_support::TEST_STORAGE_ROOT_ID,
+        &[SeedFile {
+            locator: "Movie.mp4",
+            path: &source,
+            probe_snapshot: json!({
+                "format": "sprint10-v1",
+                "container": { "format_name": "mov,mp4,m4a,3gp,3g2,mj2" },
+                "streams": [{
+                    "index": 0,
+                    "kind": "video",
+                    "codec_name": "h264",
+                    "width": 32,
+                    "height": 32,
+                    "pixel_format": "yuv420p",
+                    "disposition": { "default": true, "forced": false, "commentary": false },
+                }],
+            }),
+        }],
+    )
+    .await
+    .unwrap();
+    let seeded_source = &seeded[0];
+    let source_file_version_id = seeded_source.file_version_id;
 
     let policy = cp
         .create_policy_document(
@@ -78,7 +90,7 @@ async fn video_transcode_flow_verifies_commits_and_authoritative_replan() {
         .create_policy_input_set(input_for(
             "movie-h264",
             source_file_version_id,
-            scanned.media_snapshot_id,
+            Some(seeded_source.media_snapshot_id),
             "mp4",
             "h264",
         ))
@@ -228,16 +240,6 @@ async fn ticket_result(url: &str, job_id: u64, operation: &str) -> serde_json::V
     .await
     .unwrap();
     serde_json::from_str(&result).unwrap()
-}
-
-trait ScanSummaryExt {
-    fn scanned_count(&self) -> u64;
-}
-
-impl ScanSummaryExt for voom_control_plane::scan::ScanSummary {
-    fn scanned_count(&self) -> u64 {
-        self.ingested
-    }
 }
 
 fn input_for(

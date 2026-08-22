@@ -10,7 +10,10 @@ use std::process::Command;
 use std::time::Duration;
 
 use serde_json::Value;
+use voom_control_plane::ControlPlane;
+use voom_ffprobe_worker::{FfprobeConfig, normalize_ffprobe_json, run_ffprobe_json};
 use voom_test_support::TempDatabase;
+use voom_test_support::scan_seed::{SeedFile, SeededSource, seed_scanned_files};
 use voom_test_support::worker::hide_stale_fake_ffprobe_sibling;
 
 use crate::local_worker::LocalWorker;
@@ -50,12 +53,10 @@ pub fn prepare_worker_binaries() -> io::Result<WorkerBinaryGuard> {
         _ffprobe: hide_stale_fake_ffprobe_sibling("published-grammar-corpus")?,
     })
 }
-
 pub fn execute_core(media: &ScenarioMedia) -> io::Result<()> {
     let mut run = ScenarioRun::start(&media.root, &media.library)?;
-    let scan = run.scan(&media.library)?;
-    require(scan["data"]["summary"]["ingested"] == 1, "C1 scan ingested")?;
-    require(scan["data"]["summary"]["failed"] == 0, "C1 scan failures")?;
+    let seeded = run.scan(&media.library)?;
+    require(seeded.len() == 1, "C1 scan ingested")?;
     let version_id = run.create_policy("published-grammar-core", "published-grammar-core.voom")?;
     let input_id = run.create_input("published-grammar-core-input", 1)?;
     let preview = run.preview(version_id, input_id)?;
@@ -79,9 +80,8 @@ pub fn execute_core(media: &ScenarioMedia) -> io::Result<()> {
 
 pub fn execute_tracks(media: &ScenarioMedia) -> io::Result<()> {
     let mut run = ScenarioRun::start(&media.root, &media.library)?;
-    let scan = run.scan(&media.library)?;
-    require(scan["data"]["summary"]["ingested"] == 3, "T1 scan ingested")?;
-    require(scan["data"]["summary"]["failed"] == 0, "T1 scan failures")?;
+    let seeded = run.scan(&media.library)?;
+    require(seeded.len() == 3, "T1 scan ingested")?;
     let version_id =
         run.create_policy("published-grammar-tracks", "published-grammar-tracks.voom")?;
     let input_id = run.create_input("published-grammar-tracks-input", 3)?;
@@ -130,9 +130,10 @@ pub fn execute_tracks(media: &ScenarioMedia) -> io::Result<()> {
 
 pub fn execute_audio(media: &ScenarioMedia) -> io::Result<()> {
     let mut run = ScenarioRun::start(&media.root, &media.library)?;
-    let scan = run.scan(&media.library)?;
-    require(scan["data"]["summary"]["ingested"] == 2, "A1 scan ingested")?;
-    require(scan["data"]["summary"]["failed"] == 0, "A1 scan failures")?;
+    let seeded = run.scan(&media.library)?;
+    // The scenario's .eng.srt sidecar is no longer a scanned identity row;
+    // only the feature's media file seeds.
+    require(seeded.len() == 1, "A1 scan ingested")?;
     let version_id =
         run.create_policy("published-grammar-audio", "published-grammar-audio.voom")?;
     let input_id = run.create_input("published-grammar-audio-input", 1)?;
@@ -157,11 +158,10 @@ pub fn execute_audio(media: &ScenarioMedia) -> io::Result<()> {
 
 pub fn execute_control_flow(media: &ScenarioMedia) -> io::Result<()> {
     let mut run = ScenarioRun::start(&media.root, &media.library)?;
-    let scan = run.scan(&media.library)?;
-    require(scan["data"]["summary"]["ingested"] == 3, "F1 scan ingested")?;
-    require(scan["data"]["summary"]["failed"] == 0, "F1 scan failures")?;
-    let fail_version_id = scanned_version_id(&scan, media.file("f1c")?)?;
-    let modify_version_id = scanned_version_id(&scan, media.file("f1a")?)?;
+    let seeded = run.scan(&media.library)?;
+    require(seeded.len() == 3, "F1 scan ingested")?;
+    let fail_version_id = seeded_version_id(&seeded, &media.library, media.file("f1c")?)?;
+    let modify_version_id = seeded_version_id(&seeded, &media.library, media.file("f1a")?)?;
     let version_id = run.create_policy(
         "published-grammar-control-flow",
         "published-grammar-control-flow.voom",
@@ -248,16 +248,60 @@ impl ScenarioRun {
         })
     }
 
-    fn scan(&self, _library: &Path) -> io::Result<Value> {
-        self.ok(
-            &[
-                "scan",
-                "--root",
-                &voom_store::test_support::TEST_STORAGE_ROOT_ID.0.to_string(),
-            ],
-            "scan",
-            "scan",
-        )
+    /// Seed every media file under `library` through the real scan-session
+    /// chain, probing each file with the same ffprobe + normalization the
+    /// owner-node worker uses so the published snapshots agree with every
+    /// downstream plan and reprobe. Returns `(locator, ids)` pairs.
+    fn scan(&self, library: &Path) -> io::Result<Vec<(String, SeededSource)>> {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+        runtime.block_on(async {
+            let config = FfprobeConfig::from_process_env()
+                .map_err(|error| io::Error::other(error.to_string()))?;
+            let mut files = Vec::new();
+            collect_media_files(library, &mut files)?;
+            files.sort();
+            let mut entries = Vec::with_capacity(files.len());
+            for path in &files {
+                let raw = run_ffprobe_json(path, &config)
+                    .await
+                    .map_err(|error| io::Error::other(error.to_string()))?;
+                let snapshot = normalize_ffprobe_json(raw, "ffprobe", "1970-01-01T00:00:00Z")
+                    .map_err(|error| io::Error::other(error.to_string()))?;
+                let locator = path
+                    .strip_prefix(library)
+                    .map_err(|error| io::Error::other(error.to_string()))?
+                    .to_str()
+                    .ok_or_else(|| io::Error::other("media locator is not UTF-8"))?
+                    .replace(std::path::MAIN_SEPARATOR, "/");
+                entries.push((path.clone(), locator, snapshot));
+            }
+            let seeds = entries
+                .iter()
+                .map(|(path, locator, snapshot)| SeedFile {
+                    locator,
+                    path,
+                    probe_snapshot: snapshot.clone(),
+                })
+                .collect::<Vec<_>>();
+            let cp = ControlPlane::open(&self.url)
+                .await
+                .map_err(|error| io::Error::other(error.to_string()))?;
+            let seeded = seed_scanned_files(
+                &cp,
+                &self.url,
+                voom_store::test_support::TEST_STORAGE_ROOT_ID,
+                &seeds,
+            )
+            .await
+            .map_err(|error| io::Error::other(error.to_string()))?;
+            Ok(entries
+                .iter()
+                .map(|(_, locator, _)| locator.clone())
+                .zip(seeded)
+                .collect())
+        })
     }
 
     fn create_policy(&self, slug: &str, file_name: &str) -> io::Result<u64> {
@@ -1407,13 +1451,53 @@ fn number(value: &Value, what: &str) -> io::Result<u64> {
         .ok_or_else(|| io::Error::other(format!("{what} is not a number: {value}")))
 }
 
-fn scanned_version_id(scan: &Value, path: &Path) -> io::Result<u64> {
-    let path = path.display().to_string();
-    let file = array(&scan["data"]["files"], "scan files")?
+fn seeded_version_id(
+    seeded: &[(String, SeededSource)],
+    library: &Path,
+    path: &Path,
+) -> io::Result<u64> {
+    let locator = path
+        .strip_prefix(library)
+        .map_err(|error| io::Error::other(error.to_string()))?
+        .to_str()
+        .ok_or_else(|| io::Error::other("media locator is not UTF-8"))?
+        .replace(std::path::MAIN_SEPARATOR, "/");
+    seeded
         .iter()
-        .find(|file| file["path"] == path)
-        .ok_or_else(|| io::Error::other(format!("scan did not report {path}: {scan}")))?;
-    number(&file["file_version_id"], "scanned file version id")
+        .find(|(entry, _)| *entry == locator)
+        .map(|(_, source)| source.file_version_id.0)
+        .ok_or_else(|| {
+            io::Error::other(format!(
+                "scan did not publish {} (locator {locator})",
+                path.display()
+            ))
+        })
+}
+
+fn collect_media_files(dir: &Path, out: &mut Vec<PathBuf>) -> io::Result<()> {
+    let mut entries = std::fs::read_dir(dir)
+        .map_err(|error| io::Error::other(error.to_string()))?
+        .map(|entry| entry.map(|entry| entry.path()))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| io::Error::other(error.to_string()))?;
+    entries.sort();
+    for entry in entries {
+        if entry.is_dir() {
+            collect_media_files(&entry, out)?;
+        } else if is_probable_media_file(&entry) {
+            out.push(entry);
+        }
+    }
+    Ok(())
+}
+
+fn is_probable_media_file(path: &Path) -> bool {
+    const MEDIA_EXTENSIONS: [&str; 6] = ["mp4", "mkv", "mov", "avi", "webm", "m4v"];
+    path.is_file()
+        && path
+            .extension()
+            .and_then(|value| value.to_str())
+            .is_some_and(|extension| MEDIA_EXTENSIONS.contains(&extension))
 }
 
 fn require(condition: bool, message: impl std::fmt::Display) -> io::Result<()> {

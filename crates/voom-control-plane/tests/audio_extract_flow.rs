@@ -9,7 +9,6 @@ use std::process::Command;
 
 use voom_control_plane::ControlPlane;
 use voom_control_plane::policy::{ComplianceExecutionOptions, PolicyInputFromScanInput};
-use voom_control_plane::scan::{RootScanOutcome, ScanReportFileStatus};
 use voom_core::{FileAssetId, FileVersionId, JobId, MediaSnapshotId};
 use voom_plan::PlanOperationKind;
 use voom_policy::{MediaSnapshotInput, PolicyInputSetDraft, PolicyInputSourceKind, TargetRef};
@@ -20,6 +19,50 @@ use voom_test_support::worker::{
     TestWorkerConfig, TestWorkerLaunch, cargo_build_package, hide_stale_fake_ffprobe_sibling,
     target_debug_binary,
 };
+
+use voom_test_support::scan_seed::{SeedFile, seed_scanned_files};
+
+/// Canned normalized probe snapshot for the audio-extract fixtures: 1 video
+/// plus 2 eng audio streams at provider indexes 1 and 2, matching what ffprobe
+/// records for `generate_audio_extract_fixture` output.
+fn audio_extract_probe_snapshot() -> serde_json::Value {
+    serde_json::json!({
+        "format": "sprint10-v1",
+        "probe": {
+            "provider": "ffprobe",
+            "provider_version": "flow-seed",
+            "command": "ffprobe",
+            "probed_at": "2026-01-01T00:00:00Z",
+        },
+        "container": { "format_name": "matroska,webm" },
+        "streams": [
+            {
+                "index": 0,
+                "kind": "video",
+                "codec_name": "h264",
+                "width": 32,
+                "height": 32,
+                "disposition": { "default": true, "forced": false, "commentary": false },
+            },
+            {
+                "index": 1,
+                "kind": "audio",
+                "codec_name": "aac",
+                "language": "eng",
+                "channels": 2,
+                "disposition": { "default": true, "forced": false, "commentary": false },
+            },
+            {
+                "index": 2,
+                "kind": "audio",
+                "codec_name": "aac",
+                "language": "eng",
+                "channels": 2,
+                "disposition": { "default": false, "forced": false, "commentary": true },
+            },
+        ],
+    })
+}
 
 const EXTRACT_COMMENTARY_POLICY: &str = r#"
 policy "extract commentary audio" {
@@ -68,7 +111,7 @@ async fn audio_extract_flow_verifies_commits_and_adds_sidecar_to_source_bundle()
             .unwrap()
             .with_local_node_id(Some(voom_core::NodeId(9_000_001)));
 
-    let scanned = scan_source(&cp, &source).await;
+    let scanned = scan_source(&cp, &url, tmp.path(), &source).await;
     let scanned = enrich_audio_snapshot_for_extract(&cp, &url, scanned).await;
     assert_audio_snapshot_has_single_commentary_match(
         &url,
@@ -153,7 +196,7 @@ async fn audio_extract_multi_match_publishes_ordered_media_and_lineage() {
             .unwrap()
             .with_local_node_id(Some(voom_core::NodeId(9_000_001)));
 
-    let scanned = scan_source(&cp, &source).await;
+    let scanned = scan_source(&cp, &url, tmp.path(), &source).await;
     let scanned = enrich_audio_snapshot_for_extract(&cp, &url, scanned).await;
     let policy = cp
         .create_policy_document("extract-english-audio", EXTRACT_ENGLISH_POLICY)
@@ -261,7 +304,7 @@ async fn duplicate_basename_sidecars_keep_their_source_subtrees() {
         .await
         .unwrap()
         .with_local_node_id(Some(voom_core::NodeId(9_000_001)));
-    let scanned = scan_sources(&cp, &[&first_path, &second_path]).await;
+    let scanned = scan_sources(&cp, &url, tmp.path(), &[&first_path, &second_path]).await;
     let first = enrich_audio_snapshot_for_extract(&cp, &url, scanned[0].clone()).await;
     let second = enrich_audio_snapshot_for_extract(&cp, &url, scanned[1].clone()).await;
     let policy = cp
@@ -347,43 +390,51 @@ fn two_audio_file_input(files: &[ScannedSource]) -> PolicyInputSetDraft {
     }
 }
 
-async fn scan_source(cp: &ControlPlane, source: &Path) -> ScannedSource {
-    scan_sources(cp, &[source]).await.remove(0)
+async fn scan_source(cp: &ControlPlane, url: &str, root: &Path, source: &Path) -> ScannedSource {
+    scan_sources(cp, url, root, &[source]).await.remove(0)
 }
 
-async fn scan_sources(cp: &ControlPlane, sources: &[&Path]) -> Vec<ScannedSource> {
-    let outcome = cp
-        .scan_library_root(voom_store::test_support::TEST_STORAGE_ROOT_ID)
-        .await
-        .unwrap();
-    let RootScanOutcome::Scanned(scan) = outcome else {
-        unreachable!("active local test root must scan")
-    };
-    assert!(scan.summary.scanned_count() >= u64::try_from(sources.len()).unwrap());
-    sources
+async fn scan_sources(
+    cp: &ControlPlane,
+    url: &str,
+    root: &Path,
+    sources: &[&Path],
+) -> Vec<ScannedSource> {
+    let locators = sources
         .iter()
         .map(|source| {
-            let scanned = scan
-                .files
-                .iter()
-                .find(|file| file.path == *source && file.status == ScanReportFileStatus::Scanned)
-                .unwrap();
-            ScannedSource {
-                file_version_id: scanned.file_version_id.unwrap(),
-                snapshot_id: scanned.media_snapshot_id.unwrap(),
-            }
+            source
+                .strip_prefix(root)
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .replace(std::path::MAIN_SEPARATOR, "/")
+        })
+        .collect::<Vec<_>>();
+    let seed_files = sources
+        .iter()
+        .zip(&locators)
+        .map(|(source, locator)| SeedFile {
+            locator,
+            path: source,
+            probe_snapshot: audio_extract_probe_snapshot(),
+        })
+        .collect::<Vec<_>>();
+    let seeded = seed_scanned_files(
+        cp,
+        url,
+        voom_store::test_support::TEST_STORAGE_ROOT_ID,
+        &seed_files,
+    )
+    .await
+    .unwrap();
+    seeded
+        .iter()
+        .map(|source| ScannedSource {
+            file_version_id: source.file_version_id,
+            snapshot_id: source.media_snapshot_id,
         })
         .collect()
-}
-
-trait ScanSummaryExt {
-    fn scanned_count(&self) -> u64;
-}
-
-impl ScanSummaryExt for voom_control_plane::scan::ScanSummary {
-    fn scanned_count(&self) -> u64 {
-        self.ingested
-    }
 }
 
 async fn assert_audio_snapshot_has_single_commentary_match(

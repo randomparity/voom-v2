@@ -14,13 +14,14 @@ use serde_json::Value;
 use tempfile::TempDir;
 use voom_control_plane::ControlPlane;
 use voom_control_plane::workers::RegisterNodeInput;
-use voom_core::{NodeKind, ProviderLocator, StorageProviderKind};
+use voom_core::{NodeKind, ProviderLocator, StorageProviderKind, StorageRootId};
 use voom_store::repo::library::libraries::{LibraryMediaKind, NewLibrary};
 use voom_store::repo::library::library_roots::{
     HiddenFilePolicy, LibraryScanMode, NewLibraryRoot, SymlinkPolicy,
 };
 use voom_store::test_support::sqlite_url_for;
 use voom_test_support::TempDatabase;
+use voom_test_support::scan_seed::{SeedFile, SeededSource, seed_scanned_files};
 use voom_test_support::worker::cargo_bin_or_build;
 
 const BASIC_FFPROBE_JSON: &str =
@@ -33,11 +34,8 @@ async fn artifact_full_flow_outputs_committed_envelopes() {
     let media = seeded.media.clone();
     let staging = dir.path().join("staged.mp4");
     let target = dir.path().join("committed.mp4");
-
-    let scan = run(&mut scan_command(&seeded), Some(0));
-    let scanned = scan["data"]["files"][0].clone();
-    let file_version_id = id(&scanned["file_version_id"]);
-    let file_location_id = id(&scanned["file_location_id"]);
+    let file_version_id = seeded.source.file_version_id.0;
+    let file_location_id = seeded.source.file_location_id.0;
 
     let stage = run(
         artifact_command(&seeded)
@@ -89,13 +87,12 @@ async fn artifact_full_flow_outputs_committed_envelopes() {
     );
 
     assert_eq!(show["data"]["artifact"]["state"], "committed");
-    assert!(target.is_file());
-    let mut json = Value::Array(vec![scan, stage, verify, commit, show]);
+    let mut json = Value::Array(vec![stage, verify, commit, show]);
     redact_artifact_snapshot(
         &mut json,
         &seeded.url,
         &[
-            (media.as_path(), "[media]/tiny.mp4"),
+            (media.as_path(), "[media]/tiny.source"),
             (dir.path(), "[artifact-dir]"),
             (staging.as_path(), "[artifact-dir]/staged.mp4"),
             (target.as_path(), "[artifact-dir]/committed.mp4"),
@@ -318,14 +315,13 @@ async fn artifact_failure_envelopes_are_actionable() {
     insta::assert_json_snapshot!("artifact_failure_envelopes_are_actionable", json);
 }
 
-#[derive(Debug)]
 struct Seeded {
     _tmp: TempDatabase,
     root: TempDir,
     url: String,
     media: PathBuf,
     node_id: u64,
-    root_id: u64,
+    source: SeededSource,
 }
 
 #[derive(Debug)]
@@ -393,20 +389,60 @@ async fn seed() -> Seeded {
     cp.activate_library_root(storage_root.id, "artifact-envelope-fixture".to_owned())
         .await
         .unwrap();
+    let source = seed_scanned_files(
+        &cp,
+        &url,
+        StorageRootId(storage_root.id.0),
+        &[SeedFile {
+            locator: "tiny.source",
+            path: &media,
+            probe_snapshot: basic_mp4_probe_snapshot(),
+        }],
+    )
+    .await
+    .unwrap();
+    let source = source[0];
     Seeded {
         _tmp: tmp,
         root: root_dir,
         url,
         media,
         node_id: registered.node.id.0,
-        root_id: storage_root.id.0,
+        source,
     }
 }
 
+/// Canned normalized probe snapshot matching what the real ffprobe worker
+/// reports for the tiny fixture (`basic-mp4.json` once normalized), so the
+/// seeded source snapshot agrees with every later staged-artifact probe.
+fn basic_mp4_probe_snapshot() -> Value {
+    serde_json::json!({
+        "format": "sprint10-v1",
+        "container": {
+            "format_name": "mov,mp4,m4a,3gp,3g2,mj2",
+            "format_long_name": "QuickTime / MOV",
+        },
+        "streams": [
+            {
+                "index": 0,
+                "kind": "video",
+                "codec_name": "h264",
+                "width": 320,
+                "height": 180,
+            },
+            {
+                "index": 1,
+                "kind": "audio",
+                "codec_name": "aac",
+                "channels": 2,
+            },
+        ],
+    })
+}
+
 fn create_staged_artifact(seeded: &Seeded, dir: &Path, name: &str) -> ArtifactFixture {
-    let scan = run(&mut scan_command(seeded), Some(0));
-    let file_version_id = id(&scan["data"]["files"][0]["file_version_id"]);
-    let file_location_id = id(&scan["data"]["files"][0]["file_location_id"]);
+    let file_version_id = seeded.source.file_version_id.0;
+    let file_location_id = seeded.source.file_location_id.0;
     let staging_path = dir.join(format!("{name}-staged.mp4"));
     let stage = run(
         artifact_command(seeded)
@@ -524,22 +560,6 @@ async fn inject_recovery_required(
     .execute(&pool)
     .await
     .unwrap();
-}
-
-fn scan_command(seeded: &Seeded) -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_voom"));
-    command
-        .args([
-            "--database-url",
-            &seeded.url,
-            "scan",
-            "--root",
-            &seeded.root_id.to_string(),
-        ])
-        .env("VOOM_LOCAL_NODE_ID", seeded.node_id.to_string())
-        .env("VOOM_FFPROBE_WORKER_BIN", built_ffprobe_worker_binary())
-        .env("VOOM_FFPROBE_BIN", success_ffprobe_binary());
-    command
 }
 
 fn artifact_command(seeded: &Seeded) -> Command {

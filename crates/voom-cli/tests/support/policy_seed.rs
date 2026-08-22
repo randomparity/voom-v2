@@ -1,6 +1,3 @@
-use std::io;
-
-use serde_json::Value;
 use voom_control_plane::ControlPlane;
 use voom_core::{FileVersionId, MediaSnapshotId};
 use voom_policy::{
@@ -12,32 +9,25 @@ pub struct SeededPolicyIds {
     pub input_set_id: u64,
 }
 
-pub async fn seed_transcode_policy_from_scan(
+/// Create the transcode-hevc policy document plus an input set targeting one
+/// scanned source. Callers pass the durable ids published by the scan-session
+/// chain (`voom_test_support::scan_seed`) — the CLI no longer reads bytes or
+/// emits scanned-file envelopes.
+pub async fn seed_transcode_policy(
     cp: &ControlPlane,
-    scan_envelope: &Value,
     slug: &str,
     container: &str,
     video_codec: &str,
+    file_version_id: FileVersionId,
+    existing_media_snapshot_id: Option<MediaSnapshotId>,
 ) -> Result<SeededPolicyIds, Box<dyn std::error::Error>> {
-    let file = scan_envelope["data"]["files"]
-        .as_array()
-        .ok_or_else(|| io::Error::other("scan envelope missing data.files"))?
-        .iter()
-        .find(|file| file["status"] == "scanned")
-        .ok_or_else(|| io::Error::other("scan envelope has no scanned file"))?;
-    let file_version_id = file["file_version_id"]
-        .as_u64()
-        .map(FileVersionId)
-        .ok_or_else(|| io::Error::other("scanned file missing file_version_id"))?;
-    let media_snapshot_id = file["media_snapshot_id"].as_u64().map(MediaSnapshotId);
-
     let policy = cp
         .create_policy_document(
             "video-transcode-hevc",
             &load_policy_fixture("fixtures/policies/video-transcode-hevc.voom")?,
         )
         .await
-        .map_err(|err| io::Error::other(format!("create policy document: {err:?}")))?;
+        .map_err(|err| std::io::Error::other(format!("create policy document: {err:?}")))?;
     let input = cp
         .create_policy_input_set(PolicyInputSetDraft {
             slug: slug.to_owned(),
@@ -64,7 +54,7 @@ pub async fn seed_transcode_policy_from_scan(
                 audio_languages: Vec::new(),
                 subtitle_languages: Vec::new(),
                 health_flags: Vec::new(),
-                existing_media_snapshot_id: media_snapshot_id,
+                existing_media_snapshot_id,
             }],
             identity_evidence: Vec::new(),
             bundle_targets: Vec::new(),
