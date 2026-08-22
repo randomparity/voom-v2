@@ -3417,7 +3417,10 @@ dependencies = [
 name = "voom-test-support"
 version = "0.1.0-dev"
 dependencies = [
+ "blake3",
+ "secrecy",
  "serde_json",
+ "sqlx",
  "tempfile",
  "tokio",
  "voom-control-plane",

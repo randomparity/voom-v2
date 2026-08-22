@@ -954,26 +954,10 @@ async fn finish_synthesis_operation(
     let artifact_handle_id = operation.operation.artifact_handle_id.ok_or_else(|| {
         VoomError::Internal("staged audio synthesis has no artifact handle".to_owned())
     })?;
-    let prepared = prepare_or_recover_synthesis(cp, operation, artifact_handle_id).await?;
-    if let Err(error) =
-        finalize_synthesis_lineage(cp, input, source_location_id, operation, &prepared).await
-    {
-        if let Err(recovery_error) = crate::artifact::commit::transition_prepared_artifact_recovery(
-            cp,
-            &prepared,
-            VoomError::CommitFailure(error.to_string()),
-        )
-        .await
-        {
-            tracing::warn!(
-                primary_error = %error,
-                secondary_error = %recovery_error,
-                operation_key = operation.operation.operation_key,
-                "audio synthesis recovery transition failed"
-            );
-        }
-        return Err(error);
-    }
+    let report = drive_synthesis_commit(cp, operation, artifact_handle_id).await?;
+    // The fenced commit is already terminal at this point; lineage
+    // recording failures cannot roll it back and surface as-is.
+    finalize_synthesis_lineage(cp, input, source_location_id, operation, &report).await?;
     let operation = cp
         .audio_synthesis_operations
         .get_by_key(&operation.operation.operation_key)
@@ -982,32 +966,58 @@ async fn finish_synthesis_operation(
     synthesis_report(input, source_location_id, &operation)
 }
 
-async fn prepare_or_recover_synthesis(
+/// Drive the staged synthesis commit through the fenced node-local intent
+/// flow: recover a stuck generation from node receipts, or prepare a fresh
+/// one, then wait out convergence so the report is terminal.
+async fn drive_synthesis_commit(
     cp: &ControlPlane,
     operation: &AudioSynthesisOperationRecord,
     artifact_handle_id: ArtifactHandleId,
-) -> Result<crate::artifact::commit::PreparedArtifactCommit, VoomError> {
+) -> Result<crate::artifact::commit::CommitArtifactReport, VoomError> {
     let records = cp.artifacts.list_commit_records(artifact_handle_id).await?;
-    if let Some(state) = [
-        ArtifactCommitState::RecoveryRequired,
-        ArtifactCommitState::Pending,
-    ]
-    .into_iter()
-    .find(|state| records.iter().any(|record| record.state == *state))
-    {
-        crate::artifact::commit::prepare_artifact_recovery(cp, artifact_handle_id, state).await
+    // A committed generation is adopted as-is: a lineage failure after the
+    // fenced commit completed must never re-drive the bytes.
+    if let Some(committed) = records.iter().find(|record| record.state == ArtifactCommitState::Committed) {
+        return Ok(crate::artifact::commit::CommitArtifactReport {
+            commit_record_id: committed.id,
+            artifact_handle_id: committed.artifact_handle_id,
+            verification_id: committed.verification_id,
+            target_path: PathBuf::from(&committed.target_path),
+            temp_path: committed.temp_path.as_ref().map(PathBuf::from),
+            state: committed.state,
+            result_file_version_id: committed.result_file_version_id,
+            result_file_location_id: committed.result_file_location_id,
+            recovery_required: None,
+        });
+    }
+    let mut report = if records.iter().any(|record| {
+        matches!(
+            record.state,
+            ArtifactCommitState::Pending | ArtifactCommitState::RecoveryRequired
+        )
+    }) {
+        cp.recover_commit(artifact_handle_id).await?
     } else {
-        let prepared = crate::artifact::commit::prepare_and_promote_artifact(
+        cp.commit_artifact(crate::artifact::commit::CommitArtifactInput {
+            artifact_handle_id,
+            target_path: PathBuf::from(&operation.operation.target_path),
+        })
+        .await
+        .map_err(|error| VoomError::CommitFailure(error.to_string()))?
+    };
+    if report.state == ArtifactCommitState::Pending {
+        // Recovery prepared a fresh successor generation; wait for the node
+        // to drive it to a terminal state.
+        report = crate::artifact::commit::wait_for_record_convergence(
             cp,
-            CommitArtifactInput {
-                artifact_handle_id,
-                target_path: PathBuf::from(&operation.operation.target_path),
-            },
+            artifact_handle_id,
+            report.commit_record_id,
+            &report.target_path,
         )
         .await
         .map_err(|error| VoomError::CommitFailure(error.to_string()))?;
-        Ok(prepared)
     }
+    Ok(report)
 }
 
 async fn finalize_synthesis_lineage(
@@ -1015,7 +1025,7 @@ async fn finalize_synthesis_lineage(
     input: &ExecuteTranscodeAudioInput,
     source_location_id: FileLocationId,
     operation: &AudioSynthesisOperationRecord,
-    prepared: &crate::artifact::commit::PreparedArtifactCommit,
+    report: &crate::artifact::commit::CommitArtifactReport,
 ) -> Result<(), VoomError> {
     let probe_worker_id = operation.operation.probe_worker_id.ok_or_else(|| {
         VoomError::Internal("staged audio synthesis has no probe worker".to_owned())
@@ -1023,15 +1033,13 @@ async fn finalize_synthesis_lineage(
     let probe_payload = operation.operation.probe_payload.clone().ok_or_else(|| {
         VoomError::Internal("staged audio synthesis has no probe payload".to_owned())
     })?;
-    let mut tx = crate::cases::begin_immediate_tx(&cp.pool).await?;
-    let committed =
-        crate::artifact::commit::finalize_prepared_artifact_in_tx(cp, &mut tx, prepared).await?;
-    let result_file_version_id = committed.result_file_version_id.ok_or_else(|| {
+    let result_file_version_id = report.result_file_version_id.ok_or_else(|| {
         VoomError::Internal("audio synthesis commit has no result file version".to_owned())
     })?;
-    let result_file_location_id = committed.result_file_location_id.ok_or_else(|| {
+    let result_file_location_id = report.result_file_location_id.ok_or_else(|| {
         VoomError::Internal("audio synthesis commit has no result file location".to_owned())
     })?;
+    let mut tx = crate::cases::begin_immediate_tx(&cp.pool).await?;
     let result_file_asset_id =
         synthesis_result_file_asset_id(cp, &mut tx, result_file_version_id).await?;
     let snapshot = crate::media_snapshot::record_with_event_in_tx(
@@ -1049,7 +1057,7 @@ async fn finalize_synthesis_lineage(
         &mut tx,
         &FinalizeAudioSynthesisOperation {
             operation_id: operation.operation.id,
-            commit_record_id: committed.commit_record_id,
+            commit_record_id: report.commit_record_id,
             result_file_asset_id,
             result_file_version_id,
             result_file_location_id,

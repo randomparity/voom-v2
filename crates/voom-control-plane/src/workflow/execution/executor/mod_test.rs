@@ -3736,6 +3736,11 @@ impl ExecutorFixture {
         )
         .await
         .unwrap();
+        // Drive fenced commit intents to convergence from a simulated node.
+        let node = voom_test_support::commit_node::SimulatedOwnerNode::new().unwrap();
+        node.install(cp.pool_for_test()).await.unwrap();
+        let _auto_driver =
+            crate::artifact::commit::commit_test_support::spawn_auto_driver(&cp, &node);
         // Byte-touching plan nodes must name a live rooted location.
         voom_store::test_support::seed_test_rooted_location(&pool_for_seed)
             .await

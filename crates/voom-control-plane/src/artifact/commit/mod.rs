@@ -1,24 +1,48 @@
+//! Staged-artifact commit driver (ADR 0074): prepare a fenced node-local
+//! commit intent, then wait a bounded time for the storage-owner node to
+//! authorize, promote, and report completion through the case functions in
+//! [`intent`]. The control plane never opens staging or target bytes.
+
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use serde::Deserialize;
-use voom_core::ids::{ArtifactCommitRecordId, ArtifactVerificationId};
+use voom_core::ids::{
+    ArtifactCommitIntentId, ArtifactCommitRecordId, ArtifactLocationId, ArtifactVerificationId,
+};
 use voom_core::{
-    ArtifactHandleId, ArtifactLocationId, ErrorCode, FileLocationId, FileVersionId,
-    ProviderRelativeLocator, StorageRootId, VoomError,
+    ArtifactHandleId, ErrorCode, FileLocationId, FileVersionId, ProviderRelativeLocator,
+    StorageRootId, VoomError,
 };
 use voom_store::repo::media::artifacts::{ArtifactCommitRecord, ArtifactCommitState};
 
 use crate::ControlPlane;
-use crate::artifact::fs::ArtifactFileFacts;
 
-mod finalize;
+pub(crate) mod finalize;
+pub(crate) mod intent;
+
+#[cfg(test)]
+pub(crate) mod commit_test_support;
+
 mod prepare;
-mod promote;
 mod recovery;
 
 pub(crate) use prepare::evaluate_commit_safety_gate;
+
+/// Upper bound on how long [`ControlPlane::commit_artifact`] waits after the
+/// durable prepare for the fenced intent to reach a terminal state. Must
+/// comfortably exceed several node poll cycles: the storage-owner agent
+/// discovers the pending intent through the open-intent listing, authorizes,
+/// journals, promotes, and reports on its own schedule. On deadline the
+/// pending record stays `pending` (recoverable) and the caller receives a
+/// `CommitFailure` naming the intent.
+pub const COMMIT_CONVERGENCE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Poll cadence of the bounded wait. Purely local (one indexed read), so a
+/// short interval keeps driver latency low without meaningful load.
+const COMMIT_CONVERGENCE_POLL: Duration = Duration::from_millis(200);
 
 #[derive(Debug)]
 pub struct CommitArtifactInput {
@@ -39,6 +63,9 @@ pub struct CommitArtifactReport {
     pub recovery_required: Option<CommitRecoveryReport>,
 }
 
+/// Durable recovery evidence for a stuck commit. The driver is byte-blind, so
+/// the `*_exists` flags here describe only what the durable record claims;
+/// live path observation stays with inspection (`show_artifact`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommitRecoveryReport {
     pub recovery_reason: String,
@@ -124,14 +151,19 @@ impl Display for CommitArtifactCommandError {
 impl Error for CommitArtifactCommandError {}
 
 impl ControlPlane {
-    /// Commit a verified staged artifact to a new local target path without
-    /// replacing any existing target bytes.
+    /// Commit a verified staged artifact by preparing a fenced node-local
+    /// commit intent and waiting a bounded time
+    /// ([`COMMIT_CONVERGENCE_TIMEOUT`]) for the storage-owner node to drive it
+    /// to a terminal state through the authorize/receipt/complete case
+    /// functions.
     ///
     /// # Errors
     /// Returns `Config`/`ArtifactChecksumMismatch` before durable prepare when
-    /// commit preconditions fail. Once a pending record is prepared, promotion
-    /// or finalize failures transition that row to `recovery_required` and are
-    /// returned as command errors carrying a recovery report.
+    /// commit preconditions fail. Once a pending record is prepared, a
+    /// `recovery_required` or `failed` terminal report is returned as a
+    /// command error carrying that report; a convergence deadline elapses as a
+    /// `CommitFailure` naming the pending intent (the record stays pending and
+    /// remains recoverable).
     pub async fn commit_artifact(
         &self,
         input: CommitArtifactInput,
@@ -139,25 +171,26 @@ impl ControlPlane {
         commit_artifact_with_hooks(self, input, &NoCommitArtifactHooks).await
     }
 
-    /// Re-drive a commit left in `recovery_required` back to completion.
+    /// Re-drive a stuck commit from node receipts (spec step 7, ADR 0074).
     ///
-    /// A fresh `commit_artifact` cannot recover such an artifact: the
-    /// one-owner-per-artifact index reserves the slot for the stuck record. This
-    /// resumes that existing record from the still-verified staging artifact. If
-    /// the target was already installed (the original attempt failed at or after
-    /// finalize) it re-runs finalize only; otherwise it re-promotes. A target
-    /// that already exists with mismatched facts is a hard conflict and the
-    /// record stays `recovery_required`.
+    /// Classifies the non-terminal record's fenced intent:
+    /// receipt-less (pending, or authorized with no journal) aborts fail-closed
+    /// and prepares a fresh successor generation; an `applied` receipt with
+    /// matching facts finalizes directly without further mutation; a
+    /// supplemental not-applied re-observation aborts and re-drives a fresh
+    /// generation; anything ambiguous (`mismatched`, unresolved
+    /// `outcome_unknown`, epoch drift) is operator-required and the record
+    /// stays put.
     ///
     /// # Errors
-    /// `Conflict` if the artifact has no `recovery_required` commit or the target
-    /// exists with the wrong facts; `NotFound`/`Config`/`Database` for missing
-    /// inputs or durable failures.
+    /// `Conflict` when the artifact has no non-terminal commit or the evidence
+    /// requires an operator; `NotFound`/`Config`/`Database` for missing inputs
+    /// or durable failures.
     pub async fn recover_commit(
         &self,
         artifact_handle_id: ArtifactHandleId,
     ) -> Result<CommitArtifactReport, VoomError> {
-        recovery::recover_commit_inner(self, artifact_handle_id).await
+        recovery::recover_commit(self, artifact_handle_id).await
     }
 }
 
@@ -168,54 +201,12 @@ impl ControlPlane {
 )]
 pub(crate) struct CommitArtifactPreparedContext<'a> {
     pub commit_record_id: ArtifactCommitRecordId,
+    pub intent_id: ArtifactCommitIntentId,
     pub target_path: &'a Path,
-    pub temp_path: &'a Path,
-    pub staging_path: &'a Path,
-}
-
-#[derive(Debug, Clone, Copy)]
-#[expect(
-    dead_code,
-    reason = "test-only commit hooks inspect whichever context fields their failure mode needs"
-)]
-pub(crate) struct CommitArtifactInstallContext<'a> {
-    pub commit_record_id: ArtifactCommitRecordId,
-    pub target_path: &'a Path,
-    pub temp_path: &'a Path,
-}
-
-#[derive(Debug, Clone, Copy)]
-#[expect(
-    dead_code,
-    reason = "test-only commit hooks inspect whichever context fields their failure mode needs"
-)]
-pub(crate) struct CommitArtifactFinalizeContext<'a> {
-    pub commit_record_id: ArtifactCommitRecordId,
-    pub target_path: &'a Path,
-    pub temp_path: &'a Path,
-    pub staging_path: &'a Path,
 }
 
 pub(crate) trait CommitArtifactHooks: Send + Sync {
     fn after_prepare(&self, _context: CommitArtifactPreparedContext<'_>) -> Result<(), VoomError> {
-        Ok(())
-    }
-
-    fn before_temp_copy(
-        &self,
-        _context: CommitArtifactPreparedContext<'_>,
-    ) -> Result<(), VoomError> {
-        Ok(())
-    }
-
-    fn before_install(&self, _context: CommitArtifactInstallContext<'_>) -> Result<(), VoomError> {
-        Ok(())
-    }
-
-    fn before_finalize(
-        &self,
-        _context: CommitArtifactFinalizeContext<'_>,
-    ) -> Result<(), VoomError> {
         Ok(())
     }
 }
@@ -233,104 +224,104 @@ pub(crate) async fn commit_artifact_with_hooks(
     let prepared = prepare::prepare_commit(cp, input).await?;
     if let Err(err) = hooks.after_prepare(CommitArtifactPreparedContext {
         commit_record_id: prepared.record.id,
-        target_path: &prepared.target_path,
-        temp_path: &prepared.temp_path,
-        staging_path: &prepared.staging_path,
+        intent_id: prepared.intent_id,
+        target_path: &prepared.finalize.target_path,
     }) {
-        let report = recovery::transition_recovery(cp, &prepared, err).await?;
+        let report = recovery::abort_prepared_after_hook_failure(cp, &prepared, err).await?;
         return Err(CommitArtifactCommandError::committed_error(
             &VoomError::CommitFailure("commit failed after durable prepare".to_owned()),
             report,
         ));
     }
-
-    let promotion = match promote::promote_prepared(cp, &prepared, hooks).await {
-        Ok(promotion) => promotion,
-        Err(err) => {
-            let report = recovery::transition_recovery(cp, &prepared, err).await?;
-            return Err(CommitArtifactCommandError::committed_error(
-                &VoomError::CommitFailure("commit promotion requires recovery".to_owned()),
-                report,
-            ));
-        }
-    };
-
-    if let Err(err) = hooks.before_finalize(CommitArtifactFinalizeContext {
-        commit_record_id: prepared.record.id,
-        target_path: &prepared.target_path,
-        temp_path: &prepared.temp_path,
-        staging_path: &prepared.staging_path,
-    }) {
-        let report = recovery::transition_recovery(cp, &prepared, err).await?;
-        return Err(CommitArtifactCommandError::committed_error(
-            &VoomError::database("commit finalize requires recovery"),
-            report,
-        ));
-    }
-
-    match finalize::finalize_commit(cp, &prepared, &promotion).await {
-        Ok(report) => Ok(report),
-        Err(err) => {
-            let code = err.error_code();
-            let report = recovery::transition_recovery(cp, &prepared, err).await?;
-            Err(CommitArtifactCommandError {
-                code,
-                message: "commit finalize requires recovery".to_owned(),
-                pre_mutation_report: None,
-                commit_report: Some(report),
-            })
-        }
-    }
+    wait_for_commit_convergence(
+        cp,
+        prepared.artifact_handle_id,
+        prepared.record.id,
+        &prepared.finalize.target_path,
+        Some(prepared.intent_id),
+    )
+    .await
 }
 
-pub(crate) struct PreparedArtifactCommit {
-    prepared: PreparedCommit,
-    promotion: PromotionOutcome,
-}
-
-pub(crate) async fn prepare_and_promote_artifact(
-    cp: &ControlPlane,
-    input: CommitArtifactInput,
-) -> Result<PreparedArtifactCommit, CommitArtifactCommandError> {
-    let prepared = prepare::prepare_commit(cp, input).await?;
-    let promotion = match promote::promote_prepared(cp, &prepared, &NoCommitArtifactHooks).await {
-        Ok(promotion) => promotion,
-        Err(err) => {
-            let report = recovery::transition_recovery(cp, &prepared, err).await?;
-            return Err(CommitArtifactCommandError::committed_error(
-                &VoomError::CommitFailure("commit promotion requires recovery".to_owned()),
-                report,
-            ));
-        }
-    };
-    Ok(PreparedArtifactCommit {
-        prepared,
-        promotion,
-    })
-}
-
-pub(crate) async fn finalize_prepared_artifact_in_tx(
-    cp: &ControlPlane,
-    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-    prepared: &PreparedArtifactCommit,
-) -> Result<CommitArtifactReport, VoomError> {
-    finalize::finalize_commit_in_tx(cp, tx, &prepared.prepared, &prepared.promotion).await
-}
-
-pub(crate) async fn transition_prepared_artifact_recovery(
-    cp: &ControlPlane,
-    prepared: &PreparedArtifactCommit,
-    error: VoomError,
-) -> Result<CommitArtifactReport, CommitArtifactCommandError> {
-    recovery::transition_recovery(cp, &prepared.prepared, error).await
-}
-
-pub(crate) async fn prepare_artifact_recovery(
+/// Poll the durable record until the fenced intent converges. Terminal
+/// `committed` reports success; `recovery_required`/`failed` return a command
+/// error carrying the durable report; the deadline leaves the record pending
+/// and names the intent.
+pub(crate) async fn wait_for_record_convergence(
     cp: &ControlPlane,
     artifact_handle_id: ArtifactHandleId,
-    state: ArtifactCommitState,
-) -> Result<PreparedArtifactCommit, VoomError> {
-    recovery::prepare_commit_recovery(cp, artifact_handle_id, state).await
+    record_id: ArtifactCommitRecordId,
+    target_path: &Path,
+) -> Result<CommitArtifactReport, CommitArtifactCommandError> {
+    wait_for_commit_convergence(cp, artifact_handle_id, record_id, target_path, None).await
+}
+
+async fn wait_for_commit_convergence(
+    cp: &ControlPlane,
+    artifact_handle_id: ArtifactHandleId,
+    record_id: ArtifactCommitRecordId,
+    target_path: &Path,
+    intent_id: Option<ArtifactCommitIntentId>,
+) -> Result<CommitArtifactReport, CommitArtifactCommandError> {
+    let deadline = tokio::time::Instant::now() + COMMIT_CONVERGENCE_TIMEOUT;
+    loop {
+        let record = cp
+            .artifacts
+            .list_commit_records(artifact_handle_id)
+            .await
+            .map_err(CommitArtifactCommandError::from)?
+            .into_iter()
+            .find(|record| record.id == record_id)
+            .ok_or_else(|| {
+                CommitArtifactCommandError::from(VoomError::database(format!(
+                    "artifact commit record {record_id} vanished while waiting for convergence"
+                )))
+            })?;
+        match record.state {
+            ArtifactCommitState::Committed => {
+                return Ok(finalize::report_from_record(
+                    &record,
+                    target_path,
+                    None,
+                ));
+            }
+            ArtifactCommitState::Failed | ArtifactCommitState::RecoveryRequired => {
+                let report = finalize::report_from_record(
+                    &record,
+                    target_path,
+                    Some(recovery::durable_recovery_report(&record)),
+                );
+                let message = record
+                    .message
+                    .clone()
+                    .unwrap_or_else(|| "commit requires recovery".to_owned());
+                return Err(CommitArtifactCommandError {
+                    code: record
+                        .error_code
+                        .unwrap_or(ErrorCode::CommitFailure),
+                    message,
+                    pre_mutation_report: None,
+                    commit_report: Some(report),
+                });
+            }
+            ArtifactCommitState::Pending => {}
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(CommitArtifactCommandError {
+                code: ErrorCode::CommitFailure,
+                message: format!(
+                    "artifact commit {} did not converge within {}s; \
+                     artifact_commit_intent {} remains pending and recoverable",
+                    record_id,
+                    COMMIT_CONVERGENCE_TIMEOUT.as_secs(),
+                    intent_id.map_or(record_id.0, |id| id.0),
+                ),
+                pre_mutation_report: None,
+                commit_report: None,
+            });
+        }
+        tokio::time::sleep(COMMIT_CONVERGENCE_POLL).await;
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -369,34 +360,37 @@ pub(crate) fn rooted_target_from_commit_report(
     Ok((StorageRootId(persisted.storage_root_id), relative))
 }
 
+/// Everything the finalize transaction needs to converge one prepared commit.
+/// The control plane is byte-blind, so target facts come from node-reported
+/// evidence validated against the pinned expected facts.
 #[derive(Debug)]
-pub(super) struct PreparedCommit {
-    record: ArtifactCommitRecord,
-    artifact_handle_id: ArtifactHandleId,
-    source_file_version_id: FileVersionId,
-    source_file_asset_id: voom_core::FileAssetId,
-    staging_location_id: ArtifactLocationId,
-    staging_path: PathBuf,
-    target_path: PathBuf,
-    target_storage_root_id: StorageRootId,
-    target_relative_locator: ProviderRelativeLocator,
-    temp_path: PathBuf,
-    expected_facts: ArtifactFileFacts,
-    promotion_started_at: time::OffsetDateTime,
+pub(crate) struct CommitFinalizeInput {
+    pub record_id: ArtifactCommitRecordId,
+    pub artifact_handle_id: ArtifactHandleId,
+    pub source_file_asset_id: voom_core::FileAssetId,
+    pub source_file_version_id: FileVersionId,
+    /// The `artifact_locations` kind=staging marker retired at finalize.
+    pub staging_artifact_location_id: ArtifactLocationId,
+    /// The rooted `file_locations` row addressing the staged bytes, with its
+    /// pinned epoch; retired at finalize (spec amendment, ADR 0074).
+    pub staging_file_location: Option<(FileLocationId, u64)>,
+    pub target_storage_root_id: StorageRootId,
+    pub target_relative_locator: ProviderRelativeLocator,
+    pub target_path: PathBuf,
+    pub promotion_started_at: time::OffsetDateTime,
     /// Use-lease ids the commit safety gate evaluated at prepare time (none
     /// blocked). Recorded on the `ArtifactCommitCompleted` event for audit.
-    gate_evaluated_lease_ids: Vec<voom_core::UseLeaseId>,
+    pub gate_evaluated_lease_ids: Vec<voom_core::UseLeaseId>,
 }
 
 #[derive(Debug)]
-pub(super) struct PromotionOutcome {
-    target_facts: ArtifactFileFacts,
-}
-
-pub(super) fn same_file_facts(left: &ArtifactFileFacts, right: &ArtifactFileFacts) -> bool {
-    left.size_bytes == right.size_bytes && left.content_hash == right.content_hash
+pub(super) struct PreparedCommit {
+    pub(super) record: ArtifactCommitRecord,
+    pub(super) intent_id: ArtifactCommitIntentId,
+    pub(super) artifact_handle_id: ArtifactHandleId,
+    pub(super) finalize: CommitFinalizeInput,
 }
 
 #[cfg(test)]
 #[path = "mod_test.rs"]
-mod tests;
+pub(super) mod tests;

@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use time::OffsetDateTime;
 use voom_core::ids::{ArtifactCommitRecordId, ArtifactVerificationId};
 use voom_core::{
-    ArtifactHandleId, ErrorCode, FailureClass, FileLocationId, FileVersionId, VoomError,
+    ArtifactHandleId, ErrorCode, FailureClass, FileLocationId, FileVersionId,
     rng_test_support::FrozenRng,
 };
 use voom_store::repo::media::artifacts::{
@@ -18,10 +18,7 @@ use voom_worker_protocol::{
 };
 
 use crate::ControlPlane;
-use crate::artifact::commit::{
-    CommitArtifactHooks, CommitArtifactInput, CommitArtifactInstallContext,
-    commit_artifact_with_hooks,
-};
+use crate::artifact::commit::CommitArtifactInput;
 use crate::artifact::stage::{StageCopyInput, StageCopyReport};
 use crate::artifact::verify::{
     NoVerifyArtifactHooks, VerifyArtifactDispatcher, VerifyArtifactInput,
@@ -228,7 +225,7 @@ async fn show_recovery_required_artifact_reports_recovery_filesystem_facts() {
 
     assert_eq!(detail.state, ArtifactInspectionState::RecoveryRequired);
     let recovery = detail.latest_commit.unwrap().recovery.unwrap();
-    assert_eq!(recovery.reason.as_deref(), Some("promotion_failed"));
+    assert_eq!(recovery.reason.as_deref(), Some("injected"));
     assert!(recovery.target.exists);
     assert!(recovery.temp.as_ref().unwrap().exists);
     assert!(recovery.staging.as_ref().unwrap().exists);
@@ -298,6 +295,11 @@ async fn fixture() -> (
     )
     .await
     .unwrap();
+    // Drive fenced commit intents to convergence from a simulated node.
+    let node = voom_test_support::commit_node::SimulatedOwnerNode::new().unwrap();
+    node.install(cp.pool_for_test()).await.unwrap();
+    let _auto_driver =
+        crate::artifact::commit::commit_test_support::spawn_auto_driver(&cp, &node);
     (cp, db, artifact_tempdir())
 }
 
@@ -404,6 +406,10 @@ async fn stage_verify_and_fail_commit_bytes(
     let verification_id = latest_verification_id(cp, staged.artifact_handle_id).await;
     let target_path = unique_path(dir, "target.bin").display().to_string();
     let pending = create_pending_commit(cp, &staged, verification_id, &target_path).await;
+    // Live-path evidence inspection reports on: a conflicting promoted target
+    // and a leftover temp sibling from the retired host-side flow shape.
+    std::fs::write(&target_path, b"concurrent writer").unwrap();
+    std::fs::write(format!("{target_path}.tmp"), b"recovery bytes").unwrap();
     let mut tx = cp.pool_for_test().begin().await.unwrap();
     let failed = cp
         .artifacts()
@@ -432,25 +438,37 @@ async fn stage_verify_and_recovery_commit_bytes(
     dir: &Path,
     bytes: &[u8],
 ) -> CommitOutcome {
+    // Inject the recovery_required record durably: the commit driver's
+    // node-local flow no longer exposes host-side failure hooks, and
+    // inspection only reads the record row plus live paths.
     let staged = stage_and_verify_bytes(cp, dir, bytes).await;
-    let target = unique_path(dir, "target.bin");
-    let err = commit_artifact_with_hooks(
-        cp,
-        CommitArtifactInput {
-            artifact_handle_id: staged.artifact_handle_id,
-            target_path: target,
-        },
-        &CreateTargetBeforeInstall {
-            bytes: b"concurrent writer",
-        },
-    )
-    .await
-    .unwrap_err();
-    let report = err.commit_report().unwrap();
+    let verification_id = latest_verification_id(cp, staged.artifact_handle_id).await;
+    let target_path = unique_path(dir, "target.bin").display().to_string();
+    let pending = create_pending_commit(cp, &staged, verification_id, &target_path).await;
+    // Live-path evidence inspection reports on: a conflicting promoted target
+    // and a leftover temp sibling from the retired host-side flow shape.
+    std::fs::write(&target_path, b"concurrent writer").unwrap();
+    std::fs::write(format!("{target_path}.tmp"), b"recovery bytes").unwrap();
+    let mut tx = cp.pool_for_test().begin().await.unwrap();
+    cp.artifacts()
+        .mark_commit_recovery_required_in_tx(
+            &mut tx,
+            pending.id,
+            ArtifactCommitFailure {
+                failure_class: FailureClass::CommitFailure,
+                error_code: ErrorCode::CommitFailure,
+                message: "injected recovery for inspection".to_owned(),
+                finished_at: OffsetDateTime::UNIX_EPOCH,
+            },
+            "injected".to_owned(),
+        )
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
     CommitOutcome {
         artifact_handle_id: staged.artifact_handle_id,
-        commit_record_id: report.commit_record_id,
-        target_path: report.target_path.clone(),
+        commit_record_id: pending.id,
+        target_path: PathBuf::from(target_path),
     }
 }
 
@@ -605,16 +623,5 @@ impl VerifyArtifactDispatcher for StaticDispatcher {
                 *class, *code, *message,
             )),
         }
-    }
-}
-
-struct CreateTargetBeforeInstall {
-    bytes: &'static [u8],
-}
-
-impl CommitArtifactHooks for CreateTargetBeforeInstall {
-    fn before_install(&self, context: CommitArtifactInstallContext<'_>) -> Result<(), VoomError> {
-        std::fs::write(context.target_path, self.bytes).unwrap();
-        Ok(())
     }
 }

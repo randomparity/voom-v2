@@ -4,10 +4,10 @@ use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
 use time::OffsetDateTime;
-use voom_core::ids::{ArtifactCommitRecordId, ArtifactVerificationId};
+use voom_core::ids::{ArtifactCommitIntentId, ArtifactCommitRecordId, ArtifactVerificationId};
 use voom_core::{
-    ArtifactHandleId, ErrorCode, FailureClass, FileLocationId, FileVersionId, StorageRootId,
-    VoomError, rng_test_support::FrozenRng,
+    ArtifactHandleId, ErrorCode, FailureClass, FileLocationId, FileVersionId, NodeId,
+    StorageRootId, VoomError, rng_test_support::FrozenRng,
 };
 use voom_events::EventKind;
 use voom_store::repo::audit::events::{EventFilter, EventRepo, Page};
@@ -28,6 +28,14 @@ use crate::artifact::verify::{
 };
 use voom_worker_protocol::{
     VerifyArtifactObservedFacts, VerifyArtifactRequest, VerifyArtifactResult, VerifyArtifactStatus,
+};
+
+use secrecy::ExposeSecret;
+use voom_test_support::commit_node::SimulatedOwnerNode;
+
+use crate::artifact::commit::intent::{
+    AppliedEvidence, CommitOutcomeEvidence, MismatchedEvidence, OutcomeUnknownEvidence,
+    RESOLVED_NOT_APPLIED_REASON,
 };
 
 #[tokio::test]
@@ -91,25 +99,30 @@ async fn stale_verification_for_retired_or_different_staging_location_is_rejecte
 }
 
 #[tokio::test]
-async fn staged_byte_drift_before_prepare_is_rejected_before_pending_record() {
+async fn staged_byte_drift_is_detected_by_the_node_and_requires_recovery() {
     let (cp, _db, dir) = fixture().await;
+    let node = simulated_node(&cp).await;
+    let _driver =
+        crate::artifact::commit::commit_test_support::spawn_auto_driver(&cp, &node);
     let staged = stage_and_verify_bytes(&cp, dir.path(), b"source bytes").await;
     std::fs::write(&staged.staging_path, b"changed bytes").unwrap();
+    let target = dir.path().join("target.bin");
 
     let err = cp
         .commit_artifact(CommitArtifactInput {
             artifact_handle_id: staged.artifact_handle_id,
-            target_path: dir.path().join("target.bin"),
+            target_path: target.clone(),
         })
         .await
         .unwrap_err();
 
+    // The control plane is byte-blind at prepare (ADR 0074): the drift is
+    // caught by the node's staging re-observation and journaled as a
+    // mismatched receipt.
     assert_eq!(err.code(), ErrorCode::ArtifactChecksumMismatch);
-    assert_no_commit_records(&cp, staged.artifact_handle_id).await;
-    assert_eq!(
-        count_events(&cp, EventKind::ArtifactCommitFailedPreMutation).await,
-        1
-    );
+    assert!(!target.exists());
+    let report = err.commit_report().unwrap();
+    assert_eq!(report.state, ArtifactCommitState::RecoveryRequired);
 }
 
 #[tokio::test]
@@ -137,32 +150,42 @@ async fn existing_target_is_rejected_before_pending_record() {
 }
 
 #[tokio::test]
-async fn target_created_after_prepare_is_not_overwritten_and_requires_recovery() {
+async fn conflicting_target_is_reported_mismatched_and_requires_recovery() {
     let (cp, _db, dir) = fixture().await;
+    let node = simulated_node(&cp).await;
     let staged = stage_and_verify_bytes(&cp, dir.path(), b"source bytes").await;
     let target = dir.path().join("target.bin");
 
-    let err = commit_artifact_with_hooks(
-        &cp,
-        CommitArtifactInput {
-            artifact_handle_id: staged.artifact_handle_id,
-            target_path: target.clone(),
-        },
-        &CreateTargetBeforeInstall {
-            bytes: b"concurrent writer",
-        },
-    )
+    // The node finds a concurrent writer's bytes already at the target,
+    // reports typed mismatch evidence, and stops before completing.
+    let task_cp = cp.clone();
+    let task_target = target.clone();
+    let driver = tokio::spawn(async move {
+        task_cp
+            .commit_artifact(CommitArtifactInput {
+                artifact_handle_id: staged.artifact_handle_id,
+                target_path: task_target,
+            })
+            .await
+    });
+    let intent_id = wait_pending_intent_id(&cp, staged.artifact_handle_id).await;
+    node_authorize(&cp, &node, intent_id).await.unwrap();
+    node_report_applying(&cp, &node, intent_id).await.unwrap();
+    std::fs::write(&target, b"concurrent writer").unwrap();
+    let conflicting = std::fs::read(&target).unwrap();
+    node_report_outcome(&cp, &node, intent_id, CommitOutcomeEvidence::Mismatched(MismatchedEvidence {
+        reason: "target already exists with different bytes".to_owned(),
+        observed: Some(voom_test_support::commit_node::observed_facts(&conflicting)),
+    }))
     .await
-    .unwrap_err();
+    .unwrap();
 
-    assert_eq!(err.code(), ErrorCode::CommitFailure);
+    let err = driver.await.unwrap().unwrap_err();
+    assert_eq!(err.code(), ErrorCode::ArtifactChecksumMismatch);
     assert_eq!(std::fs::read(&target).unwrap(), b"concurrent writer");
     let report = err.commit_report().unwrap();
     assert_eq!(report.state, ArtifactCommitState::RecoveryRequired);
-    let recovery = report.recovery_required.as_ref().unwrap();
-    assert!(recovery.target_exists);
-    assert!(recovery.temp_exists);
-    assert!(recovery.staging_exists);
+    assert_eq!(report.result_file_version_id, None);
     assert_eq!(
         count_commit_records(&cp, staged.artifact_handle_id).await,
         1
@@ -171,65 +194,36 @@ async fn target_created_after_prepare_is_not_overwritten_and_requires_recovery()
         count_events(&cp, EventKind::ArtifactCommitRecoveryRequired).await,
         1
     );
-}
 
-#[tokio::test]
-async fn temp_mutation_before_install_leaves_durable_recovery_evidence() {
-    let (cp, _db, dir) = fixture().await;
-    let staged = stage_and_verify_bytes(&cp, dir.path(), b"source bytes").await;
-    let target = dir.path().join("target.bin");
-
-    let error = commit_artifact_with_hooks(
-        &cp,
-        CommitArtifactInput {
-            artifact_handle_id: staged.artifact_handle_id,
-            target_path: target.clone(),
-        },
-        &MutateTempBeforeInstall,
-    )
-    .await
-    .unwrap_err();
-
-    assert_eq!(error.code(), ErrorCode::CommitFailure);
-    assert_eq!(std::fs::read(&target).unwrap(), b"mutated temp bytes");
-    let report = error.commit_report().unwrap();
-    assert_eq!(report.state, ArtifactCommitState::RecoveryRequired);
-    assert_eq!(report.result_file_version_id, None);
-    assert_eq!(report.result_file_location_id, None);
-    let recovery = report.recovery_required.as_ref().unwrap();
-    assert!(recovery.target_exists);
-    assert!(!recovery.temp_exists);
-    assert!(recovery.staging_exists);
-    assert_eq!(
-        count_events(&cp, EventKind::ArtifactCommitRecoveryRequired).await,
-        1
-    );
-
+    // Mismatched evidence is unresolved: recovery requires an operator.
     let recovery_error = cp
         .recover_commit(staged.artifact_handle_id)
         .await
         .unwrap_err();
     assert_eq!(recovery_error.error_code(), ErrorCode::Conflict);
-    assert_eq!(std::fs::read(&target).unwrap(), b"mutated temp bytes");
     assert_eq!(
-        count_events(&cp, EventKind::ArtifactCommitRecoveryRequired).await,
-        1
+        record_state(&cp, report.commit_record_id).await,
+        "recovery_required"
     );
 }
 
 #[tokio::test]
 async fn successful_commit_promotes_target_records_identity_retires_staging_and_emits_events() {
     let (cp, _db, dir) = fixture().await;
+    let node = simulated_node(&cp).await;
     let staged = stage_and_verify_bytes(&cp, dir.path(), b"source bytes").await;
     let target = dir.path().join("target.bin");
 
-    let report = cp
-        .commit_artifact(CommitArtifactInput {
+    let report = commit_with_node(
+        &cp,
+        &node,
+        CommitArtifactInput {
             artifact_handle_id: staged.artifact_handle_id,
             target_path: target.clone(),
-        })
-        .await
-        .unwrap();
+        },
+    )
+    .await
+    .unwrap();
 
     assert_eq!(std::fs::read(&target).unwrap(), b"source bytes");
     assert_eq!(report.artifact_handle_id, staged.artifact_handle_id);
@@ -305,6 +299,7 @@ async fn successful_commit_promotes_target_records_identity_retires_staging_and_
 #[tokio::test]
 async fn commit_accepts_relative_provider_locator_for_rooted_target() {
     let (cp, _db, dir) = fixture().await;
+    let node = simulated_node(&cp).await;
     let staged = stage_and_verify_bytes(&cp, dir.path(), b"source bytes").await;
     let current_dir = std::env::current_dir().unwrap();
     let relative_root = dir.path().strip_prefix(&current_dir).unwrap();
@@ -313,13 +308,16 @@ async fn commit_accepts_relative_provider_locator_for_rooted_target() {
     set_test_default_output_root(&cp, relative_root_id).await;
     let target = dir.path().join("relative-root-target.bin");
 
-    let report = cp
-        .commit_artifact(CommitArtifactInput {
+    let report = commit_with_node(
+        &cp,
+        &node,
+        CommitArtifactInput {
             artifact_handle_id: staged.artifact_handle_id,
             target_path: target.clone(),
-        })
-        .await
-        .unwrap();
+        },
+    )
+    .await
+    .unwrap();
 
     assert_eq!(report.state, ArtifactCommitState::Committed);
     assert_eq!(std::fs::read(target).unwrap(), b"source bytes");
@@ -328,6 +326,7 @@ async fn commit_accepts_relative_provider_locator_for_rooted_target() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concurrent_independent_commits_all_complete() {
     let (cp, _db, dir) = fixture().await;
+    let node = simulated_node(&cp).await;
     let cp = std::sync::Arc::new(cp);
     let inputs = [
         b"concurrent source a".as_slice(),
@@ -350,14 +349,23 @@ async fn concurrent_independent_commits_all_complete() {
     let mut tasks = tokio::task::JoinSet::new();
     for (artifact_handle_id, target_path) in commits {
         let cp = cp.clone();
+        let node = node.clone();
         let barrier = barrier.clone();
         tasks.spawn(async move {
             barrier.wait().await;
-            cp.commit_artifact(CommitArtifactInput {
-                artifact_handle_id,
-                target_path,
-            })
-            .await
+            let driver_cp = cp.clone();
+            let driver_node = node.clone();
+            let driver = tokio::spawn(async move {
+                drive_pending_commit_local(&driver_cp, &driver_node, artifact_handle_id).await
+            });
+            let outcome = cp
+                .commit_artifact(CommitArtifactInput {
+                    artifact_handle_id,
+                    target_path,
+                })
+                .await;
+            driver.await.unwrap().unwrap();
+            outcome
         });
     }
 
@@ -374,7 +382,7 @@ async fn concurrent_independent_commits_all_complete() {
 }
 
 #[tokio::test]
-async fn injected_failure_after_prepare_marks_recovery_required() {
+async fn injected_failure_after_prepare_terminates_cleanly_without_recovery() {
     let (cp, _db, dir) = fixture().await;
     let staged = stage_and_verify_bytes(&cp, dir.path(), b"source bytes").await;
     let target = dir.path().join("target.bin");
@@ -390,98 +398,90 @@ async fn injected_failure_after_prepare_marks_recovery_required() {
     .await
     .unwrap_err();
 
+    // Nothing has mutated and the intent is still pending, so the hook
+    // failure terminates both rows cleanly instead of requiring recovery.
     assert_eq!(err.code(), ErrorCode::CommitFailure);
     assert!(!target.exists());
     let report = err.commit_report().unwrap();
-    assert_eq!(report.state, ArtifactCommitState::RecoveryRequired);
-    let recovery = report.recovery_required.as_ref().unwrap();
-    assert!(!recovery.target_exists);
-    assert_eq!(recovery.temp_path, None);
-    assert!(recovery.staging_exists);
+    assert_eq!(report.state, ArtifactCommitState::Failed);
+    assert_eq!(report.recovery_required, None);
 }
 
 #[tokio::test]
-async fn staged_drift_after_prepare_before_copy_marks_recovery_without_temp_file() {
+async fn staged_drift_is_reported_mismatched_without_promotion() {
     let (cp, _db, dir) = fixture().await;
+    let node = simulated_node(&cp).await;
     let staged = stage_and_verify_bytes(&cp, dir.path(), b"source bytes").await;
     let target = dir.path().join("target.bin");
 
-    let err = commit_artifact_with_hooks(
-        &cp,
-        CommitArtifactInput {
-            artifact_handle_id: staged.artifact_handle_id,
-            target_path: target.clone(),
-        },
-        &DriftStagingBeforeTempCopy,
-    )
-    .await
-    .unwrap_err();
+    let task_cp = cp.clone();
+    let task_target = target.clone();
+    let driver = tokio::spawn(async move {
+        task_cp
+            .commit_artifact(CommitArtifactInput {
+                artifact_handle_id: staged.artifact_handle_id,
+                target_path: task_target,
+            })
+            .await
+    });
+    let intent_id = wait_pending_intent_id(&cp, staged.artifact_handle_id).await;
 
-    assert_eq!(err.code(), ErrorCode::CommitFailure);
+    // The staged bytes drift after prepare; the node observes the pinned
+    // facts no longer hold and reports mismatched without promoting.
+    std::fs::write(&staged.staging_path, b"mutated staging bytes").unwrap();
+    node_authorize(&cp, &node, intent_id).await.unwrap();
+    node_report_applying(&cp, &node, intent_id).await.unwrap();
+    let drifted = std::fs::read(&staged.staging_path).unwrap();
+    node_report_outcome(&cp, &node, intent_id, CommitOutcomeEvidence::Mismatched(MismatchedEvidence {
+        reason: "staged bytes do not match the pinned expected facts".to_owned(),
+        observed: Some(voom_test_support::commit_node::observed_facts(&drifted)),
+    }))
+    .await
+    .unwrap();
+
+    let err = driver.await.unwrap().unwrap_err();
+    assert_eq!(err.code(), ErrorCode::ArtifactChecksumMismatch);
     assert!(!target.exists());
     let report = err.commit_report().unwrap();
     assert_eq!(report.state, ArtifactCommitState::RecoveryRequired);
-    let recovery = report.recovery_required.as_ref().unwrap();
-    assert!(!recovery.target_exists);
-    assert!(!recovery.temp_exists);
-    assert!(recovery.staging_exists);
-    let temp_path = report.temp_path.as_ref().unwrap();
-    assert!(!temp_path.exists());
 }
 
 #[tokio::test]
-async fn failure_after_target_install_before_finalize_keeps_target_visible_and_marks_recovery() {
+async fn recover_commit_finalizes_directly_from_matching_applied_receipt() {
     let (cp, _db, dir) = fixture().await;
+    let node = simulated_node(&cp).await;
     let staged = stage_and_verify_bytes(&cp, dir.path(), b"source bytes").await;
     let target = dir.path().join("target.bin");
 
-    let err = commit_artifact_with_hooks(
+    // The node promoted matching bytes but crashed before completing: the
+    // applied receipt survives and recovery finalizes from it.
+    let task_cp = cp.clone();
+    let task_target = target.clone();
+    let driver = tokio::spawn(async move {
+        task_cp
+            .commit_artifact(CommitArtifactInput {
+                artifact_handle_id: staged.artifact_handle_id,
+                target_path: task_target,
+            })
+            .await
+    });
+    let intent_id = wait_pending_intent_id(&cp, staged.artifact_handle_id).await;
+    drive_to_applied_not_completed(
         &cp,
-        CommitArtifactInput {
-            artifact_handle_id: staged.artifact_handle_id,
-            target_path: target.clone(),
-        },
-        &FailBeforeFinalize,
+        &node,
+        intent_id,
+        &target,
+        &staged.staging_path,
     )
-    .await
-    .unwrap_err();
-
-    assert_eq!(err.code(), ErrorCode::DbUnreachable);
-    assert_eq!(std::fs::read(&target).unwrap(), b"source bytes");
-    let report = err.commit_report().unwrap();
-    assert_eq!(report.result_file_version_id, None);
-    assert_eq!(report.result_file_location_id, None);
-    let recovery = report.recovery_required.as_ref().unwrap();
-    assert_eq!(recovery.target_path, target.canonicalize().unwrap());
-    assert!(recovery.target_exists);
-    assert!(!recovery.temp_exists);
-    assert!(recovery.staging_exists);
-}
-
-#[tokio::test]
-async fn recover_commit_resumes_finalize_when_target_already_installed() {
-    let (cp, _db, dir) = fixture().await;
-    let staged = stage_and_verify_bytes(&cp, dir.path(), b"source bytes").await;
-    let target = dir.path().join("target.bin");
-
-    // Fail at before_finalize: the target is installed but the record is stuck.
-    commit_artifact_with_hooks(
-        &cp,
-        CommitArtifactInput {
-            artifact_handle_id: staged.artifact_handle_id,
-            target_path: target.clone(),
-        },
-        &FailBeforeFinalize,
-    )
-    .await
-    .unwrap_err();
+    .await;
+    driver.abort();
 
     let report = cp.recover_commit(staged.artifact_handle_id).await.unwrap();
 
     assert_eq!(report.state, ArtifactCommitState::Committed);
     assert!(report.result_file_version_id.is_some());
     assert_eq!(std::fs::read(&target).unwrap(), b"source bytes");
-    // The single owner record was resumed, not duplicated.
+    // The single owner record was finalized, not duplicated.
     assert_eq!(
         count_commit_records(&cp, staged.artifact_handle_id).await,
         1
@@ -492,9 +492,12 @@ async fn recover_commit_resumes_finalize_when_target_already_installed() {
     );
 }
 
+
+
 #[tokio::test]
 async fn recovery_uses_prepared_rooted_target_after_default_changes() {
     let (cp, _db, dir) = fixture().await;
+    let node = simulated_node(&cp).await;
     let overlap = dir.path().join("overlap");
     std::fs::create_dir(&overlap).unwrap();
     let prepared_root_id = StorageRootId(9_000_002);
@@ -505,17 +508,11 @@ async fn recovery_uses_prepared_rooted_target_after_default_changes() {
 
     let staged = stage_and_verify_bytes(&cp, dir.path(), b"source bytes").await;
     let target = overlap.join("target.bin");
-    commit_artifact_with_hooks(
-        &cp,
-        CommitArtifactInput {
-            artifact_handle_id: staged.artifact_handle_id,
-            target_path: target.clone(),
-        },
-        &FailBeforeFinalize,
-    )
-    .await
-    .unwrap_err();
+    spawn_and_drive_to_applied_not_completed(&cp, &node, staged.artifact_handle_id, &target)
+        .await;
 
+    // The default output root changed after prepare; recovery must finalize
+    // into the pinned target root, not the new default.
     set_test_default_output_root(&cp, replacement_root_id).await;
     let report = cp.recover_commit(staged.artifact_handle_id).await.unwrap();
     let location_id = report.result_file_location_id.unwrap();
@@ -531,134 +528,39 @@ async fn recovery_uses_prepared_rooted_target_after_default_changes() {
     assert_eq!(std::fs::read(target).unwrap(), b"source bytes");
 }
 
+
 #[tokio::test]
-async fn recovery_rejects_unknown_persisted_rooted_target_fields() {
+async fn recover_commit_aborts_receiptless_authorized_and_reprepares() {
     let (cp, _db, dir) = fixture().await;
-    let staged = stage_and_verify_bytes(&cp, dir.path(), b"source bytes").await;
-    let target = dir.path().join("target.bin");
-    commit_artifact_with_hooks(
-        &cp,
-        CommitArtifactInput {
-            artifact_handle_id: staged.artifact_handle_id,
-            target_path: target,
-        },
-        &FailAfterPrepare,
-    )
-    .await
-    .unwrap_err();
-    sqlx::query(
-        "UPDATE artifact_commit_records \
-         SET report = json_set(report, '$.rooted_target.removed_field', 'legacy') \
-         WHERE artifact_handle_id = ?",
-    )
-    .bind(i64::try_from(staged.artifact_handle_id.0).unwrap())
-    .execute(cp.pool_for_test())
-    .await
-    .unwrap();
-
-    let error = cp
-        .recover_commit(staged.artifact_handle_id)
-        .await
-        .unwrap_err();
-    assert_eq!(error.error_code(), ErrorCode::DbUnreachable);
-    assert!(error.to_string().contains("unknown field"));
-}
-
-#[tokio::test]
-async fn recovery_rejects_invalid_persisted_rooted_target_sqlite_ids() {
-    for invalid_id in [0, u64::MAX] {
-        let (cp, _db, dir) = fixture().await;
-        let staged = stage_and_verify_bytes(&cp, dir.path(), b"source bytes").await;
-        commit_artifact_with_hooks(
-            &cp,
-            CommitArtifactInput {
-                artifact_handle_id: staged.artifact_handle_id,
-                target_path: dir.path().join("target.bin"),
-            },
-            &FailAfterPrepare,
-        )
-        .await
-        .unwrap_err();
-        let mut report: serde_json::Value = sqlx::query_scalar(
-            "SELECT report FROM artifact_commit_records WHERE artifact_handle_id = ?",
-        )
-        .bind(i64::try_from(staged.artifact_handle_id.0).unwrap())
-        .fetch_one(cp.pool_for_test())
-        .await
-        .map(|raw: String| serde_json::from_str(&raw).unwrap())
-        .unwrap();
-        report["rooted_target"]["storage_root_id"] = serde_json::json!(invalid_id);
-        sqlx::query("UPDATE artifact_commit_records SET report = ? WHERE artifact_handle_id = ?")
-            .bind(report.to_string())
-            .bind(i64::try_from(staged.artifact_handle_id.0).unwrap())
-            .execute(cp.pool_for_test())
-            .await
-            .unwrap();
-
-        let error = cp
-            .recover_commit(staged.artifact_handle_id)
-            .await
-            .unwrap_err();
-        assert_eq!(error.error_code(), ErrorCode::DbUnreachable);
-        assert!(error.to_string().contains("not a valid SQLite ID"));
-    }
-}
-
-#[tokio::test]
-async fn recover_commit_repromotes_when_target_absent() {
-    let (cp, _db, dir) = fixture().await;
+    let node = simulated_node(&cp).await;
     let staged = stage_and_verify_bytes(&cp, dir.path(), b"source bytes").await;
     let target = dir.path().join("target.bin");
 
-    // Fail after prepare: the target was never installed.
-    commit_artifact_with_hooks(
-        &cp,
-        CommitArtifactInput {
-            artifact_handle_id: staged.artifact_handle_id,
-            target_path: target.clone(),
-        },
-        &FailAfterPrepare,
-    )
-    .await
-    .unwrap_err();
+    // Authorized but receipt-less: the node never mutated, so recovery may
+    // safely abort and prepare a fresh successor generation.
+    let original_record_id = spawn_and_drive_authorize_only(&cp, &node, staged.artifact_handle_id, &target)
+        .await;
     assert!(!target.exists());
 
     let report = cp.recover_commit(staged.artifact_handle_id).await.unwrap();
 
-    assert_eq!(report.state, ArtifactCommitState::Committed);
-    assert_eq!(std::fs::read(&target).unwrap(), b"source bytes");
-    assert_eq!(
-        count_commit_records(&cp, staged.artifact_handle_id).await,
-        1
-    );
+    assert_eq!(report.state, ArtifactCommitState::Pending);
+    assert_ne!(report.commit_record_id, original_record_id);
+    assert!(!target.exists());
 }
 
 #[tokio::test]
-async fn recover_commit_errors_when_target_stat_fails_non_absent() {
+async fn recover_commit_requires_operator_when_target_already_exists() {
     let (cp, _db, dir) = fixture().await;
+    let node = simulated_node(&cp).await;
     let staged = stage_and_verify_bytes(&cp, dir.path(), b"source bytes").await;
-    let install = dir.path().join("install");
-    std::fs::create_dir(&install).unwrap();
-    let target = install.join("target.bin");
+    let target = dir.path().join("target.bin");
 
-    // Fail after prepare: a recovery-required record exists, target never installed.
-    commit_artifact_with_hooks(
-        &cp,
-        CommitArtifactInput {
-            artifact_handle_id: staged.artifact_handle_id,
-            target_path: target.clone(),
-        },
-        &FailAfterPrepare,
-    )
-    .await
-    .unwrap_err();
-    assert!(!target.exists());
-
-    // Replace the intermediate directory with a regular file so stat'ing the
-    // target fails with ENOTDIR (kind != NotFound). This must surface loudly,
-    // not be mistaken for an absent target and re-promoted.
-    std::fs::remove_dir_all(&install).unwrap();
-    std::fs::write(&install, b"x").unwrap();
+    // Authorized but receipt-less, yet the target already exists (a crashed
+    // node wrote it before journaling): the fresh successor prepare fails
+    // closed instead of clobbering the occupying file.
+    spawn_and_drive_authorize_only(&cp, &node, staged.artifact_handle_id, &target).await;
+    std::fs::write(&target, b"occupying bytes").unwrap();
 
     let err = cp
         .recover_commit(staged.artifact_handle_id)
@@ -666,29 +568,9 @@ async fn recover_commit_errors_when_target_stat_fails_non_absent() {
         .unwrap_err();
 
     assert_eq!(err.error_code(), ErrorCode::CommitFailure);
-    // The occupying file was not clobbered by a spurious fresh-install attempt.
-    assert_eq!(std::fs::read(&install).unwrap(), b"x");
+    assert_eq!(std::fs::read(&target).unwrap(), b"occupying bytes");
 }
 
-#[tokio::test]
-async fn recover_commit_without_recovery_required_is_conflict() {
-    let (cp, _db, dir) = fixture().await;
-    let staged = stage_and_verify_bytes(&cp, dir.path(), b"source bytes").await;
-    let target = dir.path().join("target.bin");
-    cp.commit_artifact(CommitArtifactInput {
-        artifact_handle_id: staged.artifact_handle_id,
-        target_path: target,
-    })
-    .await
-    .unwrap();
-
-    let err = cp
-        .recover_commit(staged.artifact_handle_id)
-        .await
-        .unwrap_err();
-
-    assert_eq!(err.error_code(), ErrorCode::Conflict);
-}
 
 #[tokio::test]
 async fn duplicate_pending_committed_and_recovery_owners_are_rejected_by_repo_constraints() {
@@ -740,6 +622,442 @@ async fn duplicate_pending_committed_and_recovery_owners_are_rejected_by_repo_co
     .await
     .unwrap_err();
     assert_eq!(duplicate_recovery.error_code(), ErrorCode::Conflict);
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+#[tokio::test]
+async fn blocking_use_lease_blocks_prepare_before_pending_record() {
+    use voom_store::repo::media::use_leases::{
+        BlockingMode, IssuerKind, LeaseScope, NewUseLease, UseLeaseKind,
+    };
+    let (cp, _db, dir) = fixture().await;
+    let staged = stage_and_verify_bytes(&cp, dir.path(), b"source bytes").await;
+
+    // A blocking lease on the affected scope is refused at prepare, before
+    // any durable record exists.
+    cp.use_leases()
+        .acquire(NewUseLease {
+            kind: UseLeaseKind::Playback,
+            scope: LeaseScope::Version(staged.source_file_version_id),
+            issuer_kind: IssuerKind::User,
+            issuer_ref: "watcher".to_owned(),
+            blocking_mode: BlockingMode::Blocking,
+            ttl: Some(time::Duration::seconds(3600)),
+            acquired_at: OffsetDateTime::now_utc(),
+        })
+        .await
+        .unwrap();
+
+    let err = cp
+        .commit_artifact(CommitArtifactInput {
+            artifact_handle_id: staged.artifact_handle_id,
+            target_path: dir.path().join("target.bin"),
+        })
+        .await
+        .unwrap_err();
+
+    assert_eq!(err.code(), ErrorCode::BlockedByUseLease);
+    assert_no_commit_records(&cp, staged.artifact_handle_id).await;
+}
+
+#[tokio::test]
+async fn authorize_rejects_out_of_band_blocking_lease_and_aborts_intent() {
+    let (cp, _db, dir) = fixture().await;
+    let node = simulated_node(&cp).await;
+    let staged = stage_and_verify_bytes(&cp, dir.path(), b"source bytes").await;
+    let intent_id =
+        spawn_and_wait_pending_intent(&cp, staged.artifact_handle_id, dir.path().join("t.bin"))
+            .await;
+
+    // A lease that appears after prepare can only come from out of band
+    // (another plane instance); simulate it at the storage layer. The
+    // authorize-time gate re-run must still fail closed.
+    sqlx::query(
+        "INSERT INTO asset_use_leases \
+         (kind, scope_version_id, issuer_kind, issuer_ref, blocking_mode, ttl_bound, \
+          acquired_at, expires_at, clock_source) \
+         VALUES ('playback', ?, 'user', 'out-of-band', 'blocking', 1, \
+                 '1970-01-01T00:00:00Z', '9999-01-01T00:00:00Z', 'control_plane')",
+    )
+    .bind(i64::try_from(staged.source_file_version_id.0).unwrap())
+    .execute(cp.pool_for_test())
+    .await
+    .unwrap();
+
+    let err = node_authorize(&cp, &node, intent_id).await.unwrap_err();
+    assert_eq!(err.error_code(), ErrorCode::BlockedByUseLease);
+    assert_eq!(intent_state(&cp, intent_id).await, "aborted");
+}
+
+#[tokio::test]
+async fn authorize_rejects_wrong_node_and_aborts_intent() {
+    let (cp, _db, dir) = fixture().await;
+    let wrong = install_second_remote_node(&cp).await;
+    let staged = stage_and_verify_bytes(&cp, dir.path(), b"source bytes").await;
+    let intent_id =
+        spawn_and_wait_pending_intent(&cp, staged.artifact_handle_id, dir.path().join("t.bin"))
+            .await;
+
+    let err = node_authorize(&cp, &wrong, intent_id)
+        .await
+        .unwrap_err();
+    assert_eq!(err.error_code(), ErrorCode::Conflict);
+    // Drift aborts the still-pending intent fail-closed.
+    assert_eq!(intent_state(&cp, intent_id).await, "aborted");
+}
+
+#[tokio::test]
+async fn authorize_rejects_staging_location_epoch_bump_and_aborts_intent() {
+    let (cp, _db, dir) = fixture().await;
+    let node = simulated_node(&cp).await;
+    let staged = stage_and_verify_bytes(&cp, dir.path(), b"source bytes").await;
+    let intent_id =
+        spawn_and_wait_pending_intent(&cp, staged.artifact_handle_id, dir.path().join("t.bin"))
+            .await;
+
+    sqlx::query("UPDATE file_locations SET epoch = epoch + 1 WHERE id = \
+                 (SELECT staging_location_id FROM artifact_commit_intents WHERE id = ?)")
+        .bind(i64::try_from(intent_id.0).unwrap())
+        .execute(cp.pool_for_test())
+        .await
+        .unwrap();
+
+    let err = node_authorize(&cp, &node, intent_id).await.unwrap_err();
+    assert_eq!(err.error_code(), ErrorCode::Conflict);
+    assert_eq!(intent_state(&cp, intent_id).await, "aborted");
+}
+
+#[tokio::test]
+async fn authorize_rejects_root_reassignment_and_aborts_intent() {
+    let (cp, _db, dir) = fixture().await;
+    let node = simulated_node(&cp).await;
+    let other = install_second_remote_node(&cp).await;
+    let staged = stage_and_verify_bytes(&cp, dir.path(), b"source bytes").await;
+    let intent_id =
+        spawn_and_wait_pending_intent(&cp, staged.artifact_handle_id, dir.path().join("t.bin"))
+            .await;
+
+    sqlx::query("UPDATE library_roots SET owner_node_id = ? WHERE id = 9000001")
+        .bind(i64::try_from(other.node_id.0).unwrap())
+        .execute(cp.pool_for_test())
+        .await
+        .unwrap();
+
+    let err = node_authorize(&cp, &node, intent_id).await.unwrap_err();
+    assert_eq!(err.error_code(), ErrorCode::Conflict);
+    assert_eq!(intent_state(&cp, intent_id).await, "aborted");
+}
+
+#[tokio::test]
+async fn authorize_rejects_stale_incarnation_without_touching_intent() {
+    let (cp, _db, dir) = fixture().await;
+    let node = simulated_node(&cp).await;
+    let stale = SimulatedOwnerNode {
+        incarnation_id: "fedcba9876543210fedcba9876543210".parse().unwrap(),
+        ..node.clone()
+    };
+    let staged = stage_and_verify_bytes(&cp, dir.path(), b"source bytes").await;
+    let intent_id =
+        spawn_and_wait_pending_intent(&cp, staged.artifact_handle_id, dir.path().join("t.bin"))
+            .await;
+
+    // The incarnation fence fails before any reservation: unauthenticated
+    // callers never mutate the intent.
+    let err = node_authorize(&cp, &stale, intent_id).await.unwrap_err();
+    assert_eq!(err.error_code(), ErrorCode::Conflict);
+    assert_eq!(intent_state(&cp, intent_id).await, "pending");
+}
+
+// --- receipt ordering and fence ----------------------------------------------
+
+#[tokio::test]
+async fn applied_receipt_before_applying_journal_is_rejected() {
+    let (cp, _db, dir) = fixture().await;
+    let node = simulated_node(&cp).await;
+    let staged = stage_and_verify_bytes(&cp, dir.path(), b"source bytes").await;
+    let target = dir.path().join("target.bin");
+    spawn_commit_task(&cp, staged.artifact_handle_id, &target);
+    let intent_id = wait_pending_intent_id(&cp, staged.artifact_handle_id).await;
+    node_authorize(&cp, &node, intent_id).await.unwrap();
+
+    // The applying journal is the sole mutation gate: an outcome receipt
+    // without it is an ordering violation.
+    let bytes = std::fs::read(&staged.staging_path).unwrap();
+    let err = node_report_outcome(&cp, &node, intent_id, CommitOutcomeEvidence::Applied(AppliedEvidence {
+        observed: voom_test_support::commit_node::observed_facts(&bytes),
+    }))
+        .await
+        .unwrap_err();
+    assert_eq!(err.error_code(), ErrorCode::Conflict);
+
+    node_report_applying(&cp, &node, intent_id).await.unwrap();
+    node_report_outcome(&cp, &node, intent_id, CommitOutcomeEvidence::Applied(AppliedEvidence {
+        observed: voom_test_support::commit_node::observed_facts(&bytes),
+    }))
+    .await
+    .unwrap();
+    assert_eq!(intent_receipt_kind(&cp, intent_id).await, "applied");
+}
+
+#[tokio::test]
+async fn complete_rejects_fence_mismatch_then_accepts_exact_fence() {
+    let (cp, _db, dir) = fixture().await;
+    let node = simulated_node(&cp).await;
+    let staged = stage_and_verify_bytes(&cp, dir.path(), b"source bytes").await;
+    let target = dir.path().join("target.bin");
+    spawn_commit_task(&cp, staged.artifact_handle_id, &target);
+    let intent_id = wait_pending_intent_id(&cp, staged.artifact_handle_id).await;
+    let outcome = node_authorize(&cp, &node, intent_id).await.unwrap();
+    node_report_applying(&cp, &node, intent_id)
+        .await
+        .unwrap();
+    std::fs::copy(&staged.staging_path, &target).unwrap();
+    let bytes = std::fs::read(&staged.staging_path).unwrap();
+    node_report_outcome(&cp, &node, intent_id, CommitOutcomeEvidence::Applied(AppliedEvidence {
+        observed: voom_test_support::commit_node::observed_facts(&bytes),
+    }))
+    .await
+    .unwrap();
+
+    let wrong_fence = format!("{:064}", 0);
+    let err = node_complete(&cp, &node, intent_id, &wrong_fence)
+        .await
+        .unwrap_err();
+    assert_eq!(err.error_code(), ErrorCode::Conflict);
+
+    let completed = node_complete(&cp, &node, intent_id, &outcome.fence_hex)
+        .await
+        .unwrap();
+    assert_eq!(completed.intent_id, intent_id);
+    assert_eq!(
+        record_state(&cp, completed.commit_record_id).await,
+        "committed"
+    );
+}
+
+// --- idempotent replays (G3/G4) -----------------------------------------------
+
+#[tokio::test]
+async fn replayed_authorize_returns_identical_stored_outcome() {
+    let (cp, _db, dir) = fixture().await;
+    let node = simulated_node(&cp).await;
+    let staged = stage_and_verify_bytes(&cp, dir.path(), b"source bytes").await;
+    let intent_id =
+        spawn_and_wait_pending_intent(&cp, staged.artifact_handle_id, dir.path().join("t.bin"))
+            .await;
+
+    let first = cp
+        .remote_authorize_commit_intent(crate::artifact::commit::intent::RemoteCommitAuthorizeInput {
+            intent_id,
+            node_id: node.node_id,
+            token: node.token.clone(),
+            incarnation_id: node.incarnation_id,
+            idempotency_key: "sim-authorize-replay".to_owned(),
+            request_hash: "sim-authorize-replay-hash".to_owned(),
+        })
+        .await
+        .unwrap();
+    let second = cp
+        .remote_authorize_commit_intent(crate::artifact::commit::intent::RemoteCommitAuthorizeInput {
+            intent_id,
+            node_id: node.node_id,
+            token: node.token.clone(),
+            incarnation_id: node.incarnation_id,
+            idempotency_key: "sim-authorize-replay".to_owned(),
+            request_hash: "sim-authorize-replay-hash".to_owned(),
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(first, second);
+    assert!(!second.fence_hex.is_empty());
+}
+
+#[tokio::test]
+async fn replayed_complete_returns_identical_stored_outcome() {
+    let (cp, _db, dir) = fixture().await;
+    let node = simulated_node(&cp).await;
+    let staged = stage_and_verify_bytes(&cp, dir.path(), b"source bytes").await;
+    let target = dir.path().join("target.bin");
+    spawn_commit_task(&cp, staged.artifact_handle_id, &target);
+    let intent_id = wait_pending_intent_id(&cp, staged.artifact_handle_id).await;
+    let authorized = node_authorize(&cp, &node, intent_id).await.unwrap();
+    node_report_applying(&cp, &node, intent_id)
+        .await
+        .unwrap();
+    std::fs::copy(&staged.staging_path, &target).unwrap();
+    let bytes = std::fs::read(&staged.staging_path).unwrap();
+    node_report_outcome(&cp, &node, intent_id, CommitOutcomeEvidence::Applied(AppliedEvidence {
+        observed: voom_test_support::commit_node::observed_facts(&bytes),
+    }))
+    .await
+    .unwrap();
+
+    let complete_input = crate::artifact::commit::intent::RemoteCommitCompleteInput {
+        intent_id,
+        node_id: node.node_id,
+        token: node.token.clone(),
+        incarnation_id: node.incarnation_id,
+        idempotency_key: "sim-complete-replay".to_owned(),
+        request_hash: "sim-complete-replay-hash".to_owned(),
+        fence_hex: authorized.fence_hex.clone(),
+    };
+    let first = cp.remote_complete_commit_intent(complete_input.clone()).await.unwrap();
+    let second = cp.remote_complete_commit_intent(complete_input).await.unwrap();
+    assert_eq!(first, second);
+    // The fence was consumed once; a second generation was never created.
+    assert_eq!(
+        count_commit_records(&cp, staged.artifact_handle_id).await,
+        1
+    );
+}
+
+// --- recovery classification (spec step 7) -------------------------------------
+
+#[tokio::test]
+async fn recover_commit_redrives_after_supplemental_resolved_not_applied() {
+    let (cp, _db, dir) = fixture().await;
+    let node = simulated_node(&cp).await;
+    let staged = stage_and_verify_bytes(&cp, dir.path(), b"source bytes").await;
+    let target = dir.path().join("target.bin");
+    spawn_commit_task(&cp, staged.artifact_handle_id, &target);
+    let intent_id = wait_pending_intent_id(&cp, staged.artifact_handle_id).await;
+    drive_authorize_and_applying(&cp, &node, intent_id).await;
+    node_report_outcome(&cp, &node, intent_id, CommitOutcomeEvidence::OutcomeUnknown(OutcomeUnknownEvidence {
+        reason: "node crashed mid-promotion".to_owned(),
+    }))
+    .await
+    .unwrap();
+
+    // The owner's read-only re-observation finds no target and no temp
+    // sibling: positive evidence promotion never happened.
+    node_report_outcome(&cp, &node, intent_id, CommitOutcomeEvidence::OutcomeUnknown(OutcomeUnknownEvidence {
+        reason: RESOLVED_NOT_APPLIED_REASON.to_owned(),
+    }))
+    .await
+    .unwrap();
+
+    let report = cp.recover_commit(staged.artifact_handle_id).await.unwrap();
+
+    assert_eq!(report.state, ArtifactCommitState::Pending);
+    assert!(!target.exists());
+    assert_eq!(intent_state(&cp, intent_id).await, "aborted");
+}
+
+#[tokio::test]
+async fn recover_commit_requires_operator_for_mismatched_receipt() {
+    let (cp, _db, dir) = fixture().await;
+    let node = simulated_node(&cp).await;
+    let staged = stage_and_verify_bytes(&cp, dir.path(), b"source bytes").await;
+    let target = dir.path().join("target.bin");
+    spawn_commit_task(&cp, staged.artifact_handle_id, &target);
+    let intent_id = wait_pending_intent_id(&cp, staged.artifact_handle_id).await;
+    drive_authorize_and_applying(&cp, &node, intent_id).await;
+    node_report_outcome(&cp, &node, intent_id, CommitOutcomeEvidence::Mismatched(MismatchedEvidence {
+        reason: "target exists with different bytes".to_owned(),
+        observed: None,
+    }))
+    .await
+    .unwrap();
+
+    let err = cp
+        .recover_commit(staged.artifact_handle_id)
+        .await
+        .unwrap_err();
+    assert_eq!(err.error_code(), ErrorCode::Conflict);
+    // Operator-required evidence keeps the stuck rows in place.
+    assert_eq!(intent_state(&cp, intent_id).await, "recovery_required");
+}
+
+#[tokio::test]
+async fn recover_commit_requires_operator_for_unresolved_outcome_unknown() {
+    let (cp, _db, dir) = fixture().await;
+    let node = simulated_node(&cp).await;
+    let staged = stage_and_verify_bytes(&cp, dir.path(), b"source bytes").await;
+    let target = dir.path().join("target.bin");
+    spawn_commit_task(&cp, staged.artifact_handle_id, &target);
+    let intent_id = wait_pending_intent_id(&cp, staged.artifact_handle_id).await;
+    drive_authorize_and_applying(&cp, &node, intent_id).await;
+    node_report_outcome(&cp, &node, intent_id, CommitOutcomeEvidence::OutcomeUnknown(OutcomeUnknownEvidence {
+        reason: "node crashed mid-promotion".to_owned(),
+    }))
+    .await
+    .unwrap();
+
+    let err = cp
+        .recover_commit(staged.artifact_handle_id)
+        .await
+        .unwrap_err();
+    assert_eq!(err.error_code(), ErrorCode::Conflict);
+    assert_eq!(intent_state(&cp, intent_id).await, "recovery_required");
+}
+
+#[tokio::test]
+async fn recover_commit_without_non_terminal_commit_is_conflict() {
+    let (cp, _db, dir) = fixture().await;
+    let node = simulated_node(&cp).await;
+    let staged = stage_and_verify_bytes(&cp, dir.path(), b"source bytes").await;
+    commit_with_node(
+        &cp,
+        &node,
+        CommitArtifactInput {
+            artifact_handle_id: staged.artifact_handle_id,
+            target_path: dir.path().join("target.bin"),
+        },
+    )
+    .await
+    .unwrap();
+
+    let err = cp
+        .recover_commit(staged.artifact_handle_id)
+        .await
+        .unwrap_err();
+    assert_eq!(err.error_code(), ErrorCode::Conflict);
+}
+
+// --- convergence deadline ------------------------------------------------------
+
+#[tokio::test]
+async fn convergence_deadline_names_pending_intent_and_keeps_record_recoverable() {
+    let (cp, _db, dir) = fixture().await;
+    // No simulated node drives the pending intent.
+    let staged = stage_and_verify_bytes(&cp, dir.path(), b"source bytes").await;
+    let target = dir.path().join("target.bin");
+
+    let err = cp
+        .commit_artifact(CommitArtifactInput {
+            artifact_handle_id: staged.artifact_handle_id,
+            target_path: target.clone(),
+        })
+        .await
+        .unwrap_err();
+
+    assert_eq!(err.code(), ErrorCode::CommitFailure);
+    assert!(
+        err.to_string().contains("artifact_commit_intent"),
+        "deadline error must name the pending intent: {err}"
+    );
+    assert!(!target.exists());
+    // The record stays pending and recoverable.
+    assert_eq!(
+        count_commit_records(&cp, staged.artifact_handle_id).await,
+        1
+    );
+    let report = cp.recover_commit(staged.artifact_handle_id).await.unwrap();
+    assert_eq!(report.state, ArtifactCommitState::Pending);
 }
 
 #[derive(Debug, Clone)]
@@ -919,6 +1237,104 @@ async fn create_pending_commit_result(
     }
 }
 
+
+
+
+
+// The in-crate test build compiles a distinct `voom-control-plane` instance
+// from the one voom-test-support links, so the case calls are driven through
+// these thin local wrappers instead of the shared helper's methods.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+fn spawn_commit_task(
+    cp: &ControlPlane,
+    artifact_handle_id: ArtifactHandleId,
+    target_path: &Path,
+) -> tokio::task::JoinHandle<Result<CommitArtifactReport, CommitArtifactCommandError>> {
+    let task_cp = cp.clone();
+    let task_target = target_path.to_path_buf();
+    tokio::spawn(async move {
+        task_cp
+            .commit_artifact(CommitArtifactInput {
+                artifact_handle_id,
+                target_path: task_target,
+            })
+            .await
+    })
+}
+
+/// Spawn `commit_artifact` and wait until its pending intent row appears.
+async fn spawn_and_wait_pending_intent(
+    cp: &ControlPlane,
+    artifact_handle_id: ArtifactHandleId,
+    target_path: PathBuf,
+) -> ArtifactCommitIntentId {
+    let _task = spawn_commit_task(cp, artifact_handle_id, &target_path);
+    wait_pending_intent_id(cp, artifact_handle_id).await
+}
+
+/// Spawn a commit, authorize it, and leave the commit task waiting with an
+/// authorized receipt-less intent. Returns the stuck record id.
+async fn spawn_and_drive_authorize_only(
+    cp: &ControlPlane,
+    node: &SimulatedOwnerNode,
+    artifact_handle_id: ArtifactHandleId,
+    target_path: &Path,
+) -> ArtifactCommitRecordId {
+    let task = spawn_commit_task(cp, artifact_handle_id, target_path);
+    let intent_id = wait_pending_intent_id(cp, artifact_handle_id).await;
+    node_authorize(cp, node, intent_id).await.unwrap();
+    let record_id = latest_record_id(cp, artifact_handle_id).await;
+    task.abort();
+    record_id
+}
+
+/// Spawn a commit and drive the node half to "applied but not completed":
+/// matching bytes promoted, applied receipt reported, no completion.
+async fn spawn_and_drive_to_applied_not_completed(
+    cp: &ControlPlane,
+    node: &SimulatedOwnerNode,
+    artifact_handle_id: ArtifactHandleId,
+    target_path: &Path,
+) {
+    let task = spawn_commit_task(cp, artifact_handle_id, target_path);
+    let intent_id = wait_pending_intent_id(cp, artifact_handle_id).await;
+    // The staged bytes live beside the target in the fixture directory.
+    let staging_path = staging_path_for(cp, artifact_handle_id).await;
+    drive_to_applied_not_completed(cp, node, intent_id, target_path, &staging_path).await;
+    task.abort();
+}
+
+/// Resolve the staged bytes' path for the handle's live staging location.
+async fn staging_path_for(
+    cp: &ControlPlane,
+    artifact_handle_id: ArtifactHandleId,
+) -> PathBuf {
+    let report: String = sqlx::query_scalar(
+        "SELECT report FROM artifact_commit_records WHERE artifact_handle_id = ? \
+         ORDER BY id DESC LIMIT 1",
+    )
+    .bind(i64::try_from(artifact_handle_id.0).unwrap())
+    .fetch_one(cp.pool_for_test())
+    .await
+    .unwrap();
+    let value: serde_json::Value = serde_json::from_str(&report).unwrap();
+    PathBuf::from(value["staging_path"].as_str().unwrap().to_owned())
+}
 async fn mark_pending_committed(
     cp: &ControlPlane,
     commit_id: ArtifactCommitRecordId,
@@ -1072,24 +1488,315 @@ impl VerifyArtifactDispatcher for StaticDispatcher {
     }
 }
 
-struct CreateTargetBeforeInstall {
-    bytes: &'static [u8],
+// --- simulated storage-owner node -------------------------------------------
+
+pub(crate) fn unique_key(label: &str) -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(1);
+    format!("sim-{label}-{}", COUNTER.fetch_add(1, Ordering::Relaxed))
 }
 
-impl CommitArtifactHooks for CreateTargetBeforeInstall {
-    fn before_install(&self, context: CommitArtifactInstallContext<'_>) -> Result<(), VoomError> {
-        std::fs::write(context.target_path, self.bytes).unwrap();
-        Ok(())
+pub(crate) async fn node_authorize(
+    cp: &ControlPlane,
+    node: &SimulatedOwnerNode,
+    intent_id: ArtifactCommitIntentId,
+) -> Result<crate::artifact::commit::intent::AuthorizeCommitOutcome, VoomError> {
+    cp.remote_authorize_commit_intent(crate::artifact::commit::intent::RemoteCommitAuthorizeInput {
+        intent_id,
+        node_id: node.node_id,
+        token: node.token.clone(),
+        incarnation_id: node.incarnation_id,
+        idempotency_key: unique_key("authorize"),
+        request_hash: unique_key("authorize-hash"),
+    })
+    .await
+}
+
+pub(crate) async fn node_report_applying(
+    cp: &ControlPlane,
+    node: &SimulatedOwnerNode,
+    intent_id: ArtifactCommitIntentId,
+) -> Result<(), VoomError> {
+    cp.remote_report_commit_applying(crate::artifact::commit::intent::RemoteCommitApplyingInput {
+        intent_id,
+        node_id: node.node_id,
+        token: node.token.clone(),
+        incarnation_id: node.incarnation_id,
+        idempotency_key: unique_key("applying"),
+        request_hash: unique_key("applying-hash"),
+    })
+    .await
+    .map(|_| ())
+}
+
+pub(crate) async fn node_report_outcome(
+    cp: &ControlPlane,
+    node: &SimulatedOwnerNode,
+    intent_id: ArtifactCommitIntentId,
+    evidence: CommitOutcomeEvidence,
+) -> Result<(), VoomError> {
+    cp.remote_report_commit_outcome(crate::artifact::commit::intent::RemoteCommitOutcomeInput {
+        intent_id,
+        node_id: node.node_id,
+        token: node.token.clone(),
+        incarnation_id: node.incarnation_id,
+        idempotency_key: unique_key("outcome"),
+        request_hash: unique_key("outcome-hash"),
+        evidence,
+    })
+    .await
+    .map(|_| ())
+}
+
+pub(crate) async fn node_complete(
+    cp: &ControlPlane,
+    node: &SimulatedOwnerNode,
+    intent_id: ArtifactCommitIntentId,
+    fence_hex: &str,
+) -> Result<crate::artifact::commit::intent::RemoteCommitCompleteOutcome, VoomError> {
+    cp.remote_complete_commit_intent(crate::artifact::commit::intent::RemoteCommitCompleteInput {
+        intent_id,
+        node_id: node.node_id,
+        token: node.token.clone(),
+        incarnation_id: node.incarnation_id,
+        idempotency_key: unique_key("complete"),
+        request_hash: unique_key("complete-hash"),
+        fence_hex: fence_hex.to_owned(),
+    })
+    .await
+}
+
+/// Flip the seeded root-owner node into the simulated remote node and return
+/// its principal. Every test that drives a commit to convergence needs this.
+pub(crate) async fn simulated_node(cp: &ControlPlane) -> SimulatedOwnerNode {
+    let node = SimulatedOwnerNode::new().unwrap();
+    node.install(cp.pool_for_test()).await.unwrap();
+    node
+}
+
+/// Wait for the newest pending intent of an artifact handle (the driver half
+/// of a spawned `commit_artifact` prepares it asynchronously).
+pub(crate) async fn wait_pending_intent_id(
+    cp: &ControlPlane,
+    artifact_handle_id: ArtifactHandleId,
+) -> ArtifactCommitIntentId {
+    for _ in 0..200 {
+        let pending: Option<i64> = sqlx::query_scalar(
+            "SELECT id FROM artifact_commit_intents \
+             WHERE artifact_handle_id = ? AND state = 'pending' ORDER BY id DESC LIMIT 1",
+        )
+        .bind(i64::try_from(artifact_handle_id.0).unwrap())
+        .fetch_optional(cp.pool_for_test())
+        .await
+        .unwrap();
+        if let Some(id) = pending {
+            return ArtifactCommitIntentId(u64::try_from(id).unwrap());
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    panic!("no pending commit intent appeared for handle {artifact_handle_id}");
+}
+
+
+/// Spawn `commit_artifact` concurrently with a simulated-node driver so the
+/// bounded convergence wait sees the fenced intent reach a terminal state.
+pub(crate) async fn commit_with_node(
+    cp: &ControlPlane,
+    node: &SimulatedOwnerNode,
+    input: CommitArtifactInput,
+) -> Result<CommitArtifactReport, CommitArtifactCommandError> {
+    let driver_cp = cp.clone();
+    let driver_node = node.clone();
+    let driver_handle = input.artifact_handle_id;
+    let driver = tokio::spawn(async move {
+        drive_pending_commit_local(&driver_cp, &driver_node, driver_handle).await
+    });
+    let outcome = cp.commit_artifact(input).await;
+    driver.await.unwrap().unwrap();
+    outcome
+}
+
+/// Drive the pending intent for a handle through authorize -> applying ->
+/// no-replace promotion -> applied evidence -> fenced completion (the same
+/// steps a real storage-owner node performs).
+pub(crate) async fn drive_pending_commit_local(
+    cp: &ControlPlane,
+    node: &SimulatedOwnerNode,
+    artifact_handle_id: ArtifactHandleId,
+) -> Result<(), VoomError> {
+    let intent_id = wait_pending_intent_id(cp, artifact_handle_id).await;
+    let outcome = node_authorize(cp, node, intent_id).await?;
+    node_report_applying(cp, node, intent_id).await?;
+    let staging_path =
+        rooted_path(cp, outcome.staging_storage_root_id.0, &outcome.staging_provider_relative_locator).await;
+    let target_path =
+        rooted_path(cp, outcome.target_storage_root_id.0, &outcome.target_provider_relative_locator).await;
+    let staged_bytes = std::fs::read(&staging_path).unwrap();
+    let staged_facts = voom_test_support::commit_node::observed_facts(&staged_bytes);
+    let expected = crate::artifact::commit::intent::AuthorizeCommitOutcome {
+        expected_size_bytes: outcome.expected_size_bytes,
+        expected_content_hash: outcome.expected_content_hash.clone(),
+        ..outcome.clone()
+    };
+    let matches_expected = staged_facts.size_bytes == expected.expected_size_bytes
+        && staged_facts.content_hash == expected.expected_content_hash;
+    let evidence = if !matches_expected {
+        CommitOutcomeEvidence::Mismatched(MismatchedEvidence {
+            reason: "staged bytes do not match the pinned expected facts".to_owned(),
+            observed: Some(staged_facts),
+        })
+    } else if target_path.exists() {
+        let existing = std::fs::read(&target_path).unwrap();
+        let existing_facts = voom_test_support::commit_node::observed_facts(&existing);
+        if existing_facts == staged_facts {
+            CommitOutcomeEvidence::Applied(AppliedEvidence {
+                observed: existing_facts,
+            })
+        } else {
+            CommitOutcomeEvidence::Mismatched(MismatchedEvidence {
+                reason: "target already exists with different bytes".to_owned(),
+                observed: Some(existing_facts),
+            })
+        }
+    } else {
+        std::fs::write(&target_path, &staged_bytes).unwrap();
+        CommitOutcomeEvidence::Applied(AppliedEvidence {
+            observed: staged_facts,
+        })
+    };
+    let is_mismatch = matches!(evidence, CommitOutcomeEvidence::Mismatched(_));
+    node_report_outcome(cp, node, intent_id, evidence).await?;
+    if is_mismatch {
+        return Ok(());
+    }
+    node_complete(cp, node, intent_id, &outcome.fence_hex).await?;
+    Ok(())
+}
+
+pub(crate) async fn rooted_path(
+    cp: &ControlPlane,
+    storage_root_id: u64,
+    relative_locator: &str,
+) -> PathBuf {
+    let locator: String =
+        sqlx::query_scalar("SELECT provider_locator FROM library_roots WHERE id = ?")
+            .bind(i64::try_from(storage_root_id).unwrap())
+            .fetch_one(cp.pool_for_test())
+            .await
+            .unwrap();
+    PathBuf::from(locator).join(relative_locator)
+}
+
+pub(crate) async fn intent_state(cp: &ControlPlane, intent_id: ArtifactCommitIntentId) -> String {
+    sqlx::query_scalar("SELECT state FROM artifact_commit_intents WHERE id = ?")
+        .bind(i64::try_from(intent_id.0).unwrap())
+        .fetch_one(cp.pool_for_test())
+        .await
+        .unwrap()
+}
+
+pub(crate) async fn intent_receipt_kind(cp: &ControlPlane, intent_id: ArtifactCommitIntentId) -> String {
+    let receipt: String =
+        sqlx::query_scalar("SELECT receipt FROM artifact_commit_intents WHERE id = ?")
+            .bind(i64::try_from(intent_id.0).unwrap())
+            .fetch_one(cp.pool_for_test())
+            .await
+            .unwrap();
+    let value: serde_json::Value = serde_json::from_str(&receipt).unwrap();
+    value["kind"].as_str().unwrap().to_owned()
+}
+
+pub(crate) async fn record_state(cp: &ControlPlane, record_id: ArtifactCommitRecordId) -> String {
+    sqlx::query_scalar("SELECT state FROM artifact_commit_records WHERE id = ?")
+        .bind(i64::try_from(record_id.0).unwrap())
+        .fetch_one(cp.pool_for_test())
+        .await
+        .unwrap()
+}
+
+pub(crate) async fn latest_record_id(
+    cp: &ControlPlane,
+    artifact_handle_id: ArtifactHandleId,
+) -> ArtifactCommitRecordId {
+    cp.artifacts()
+        .list_commit_records(artifact_handle_id)
+        .await
+        .unwrap()
+        .last()
+        .map(|record| record.id)
+        .unwrap()
+}
+
+/// Insert a second, separately authenticated remote node for wrong-node
+/// drift tests.
+pub(crate) async fn install_second_remote_node(cp: &ControlPlane) -> SimulatedOwnerNode {
+    let node = SimulatedOwnerNode::new().unwrap();
+    let pool = cp.pool_for_test();
+    let wrong_id = NodeId(9_000_042);
+    sqlx::query(
+        "INSERT INTO nodes (id, name, kind, status, registered_at, last_seen_at, \
+         heartbeat_ttl_seconds, auth_token_hash, auth_token_hint, metadata, epoch) \
+         VALUES (?, 'wrong-node', 'remote', 'active', \
+                 '1970-01-01T00:00:00Z', '1970-01-01T00:00:00Z', 60, ?, 'wrong', '{}', 0)",
+    )
+    .bind(i64::try_from(wrong_id.0).unwrap())
+    .bind(crate::workers::hash_node_token(node.token.expose_secret()))
+    .execute(pool)
+    .await
+    .unwrap();
+    let incarnation = node.incarnation_id.to_string();
+    sqlx::query(
+        "INSERT INTO node_incarnations \
+         (incarnation_id, node_id, status, started_at, last_seen_at) \
+         VALUES (?, ?, 'active', '1970-01-01T00:00:00Z', '1970-01-01T00:00:00Z')",
+    )
+    .bind(&incarnation)
+    .bind(i64::try_from(wrong_id.0).unwrap())
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query("UPDATE nodes SET active_incarnation_id = ? WHERE id = ?")
+        .bind(&incarnation)
+        .bind(i64::try_from(wrong_id.0).unwrap())
+        .execute(pool)
+        .await
+    .unwrap();
+    SimulatedOwnerNode {
+        node_id: wrong_id,
+        token: node.token,
+        incarnation_id: node.incarnation_id,
     }
 }
 
-struct MutateTempBeforeInstall;
+/// Drive one prepared generation through authorize + applying only, leaving
+/// it receipt-bearing but never promoted.
+pub(crate) async fn drive_authorize_and_applying(
+    cp: &ControlPlane,
+    node: &SimulatedOwnerNode,
+    intent_id: ArtifactCommitIntentId,
+) {
+    node_authorize(cp, node, intent_id).await.unwrap();
+    node_report_applying(cp, node, intent_id).await.unwrap();
+}
 
-impl CommitArtifactHooks for MutateTempBeforeInstall {
-    fn before_install(&self, context: CommitArtifactInstallContext<'_>) -> Result<(), VoomError> {
-        std::fs::write(context.temp_path, b"mutated temp bytes").unwrap();
-        Ok(())
-    }
+/// Drive one prepared generation to "applied but not completed": the node
+/// promoted matching bytes and reported them, then the generation is left for
+/// recovery to finalize.
+pub(crate) async fn drive_to_applied_not_completed(
+    cp: &ControlPlane,
+    node: &SimulatedOwnerNode,
+    intent_id: ArtifactCommitIntentId,
+    target_path: &Path,
+    staged_path: &Path,
+) {
+    drive_authorize_and_applying(cp, node, intent_id).await;
+    std::fs::copy(staged_path, target_path).unwrap();
+    let bytes = std::fs::read(staged_path).unwrap();
+    node_report_outcome(cp, node, intent_id, CommitOutcomeEvidence::Applied(AppliedEvidence {
+        observed: voom_test_support::commit_node::observed_facts(&bytes),
+    }))
+    .await
+    .unwrap();
 }
 
 struct FailAfterPrepare;
@@ -1098,31 +1805,6 @@ impl CommitArtifactHooks for FailAfterPrepare {
     fn after_prepare(&self, _context: CommitArtifactPreparedContext<'_>) -> Result<(), VoomError> {
         Err(VoomError::CommitFailure(
             "injected failure after durable prepare".to_owned(),
-        ))
-    }
-}
-
-struct DriftStagingBeforeTempCopy;
-
-impl CommitArtifactHooks for DriftStagingBeforeTempCopy {
-    fn before_temp_copy(
-        &self,
-        context: CommitArtifactPreparedContext<'_>,
-    ) -> Result<(), VoomError> {
-        std::fs::write(context.staging_path, b"changed bytes").unwrap();
-        Ok(())
-    }
-}
-
-struct FailBeforeFinalize;
-
-impl CommitArtifactHooks for FailBeforeFinalize {
-    fn before_finalize(
-        &self,
-        _context: CommitArtifactFinalizeContext<'_>,
-    ) -> Result<(), VoomError> {
-        Err(VoomError::database(
-            "injected finalize transaction failure".to_owned(),
         ))
     }
 }
