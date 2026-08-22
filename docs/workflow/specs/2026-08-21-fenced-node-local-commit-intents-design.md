@@ -45,6 +45,13 @@ Flow for one staged commit (all steps durable):
    target roots must resolve to the same owner or the commit fails
    pre-mutation. Local byte observation in prepare is removed; freshness
    moves to the node's pre-mutation verify.
+   The staged bytes are addressed as a NEW rooted `file_locations` row on
+   the source file version — storage root = staging root,
+   provider-relative locator derived from the staged path relative to that
+   root — created in the prepare transaction and retired at finalize or
+   abort; `staging location id + epoch` pins that row. The existing
+   `artifact_locations` kind=staging marker is unchanged (its host-path
+   value is not a node-usable address and carries no epoch).
 2. **Authorize** (node pull): the agent polls a fetch route returning
    pending intents for roots it owns; it requests authorization per intent.
    In one control-plane tx: re-run the lineage gate; revalidate pinned
