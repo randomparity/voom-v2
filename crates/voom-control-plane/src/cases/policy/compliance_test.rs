@@ -1708,9 +1708,9 @@ async fn scanned_snapshot_for_existing_file(
         .await
         .unwrap();
     let relative_locator = path.file_name().unwrap().to_string_lossy();
-    let facts = crate::scan::hash::observe_candidate_file(path)
-        .await
-        .unwrap();
+    let bytes = std::fs::read(path).unwrap();
+    let content_hash = format!("blake3:{}", blake3::hash(&bytes).to_hex());
+    let size_bytes = u64::try_from(bytes.len()).unwrap();
     let outcome = cp
         .record_discovered_file(
             DiscoveredFile {
@@ -1718,8 +1718,8 @@ async fn scanned_snapshot_for_existing_file(
                 provider_relative_locator: voom_store::test_support::test_relative_locator(
                     &relative_locator,
                 ),
-                content_hash: facts.content_hash,
-                size_bytes: facts.size_bytes,
+                content_hash,
+                size_bytes,
                 observed_at: T0,
                 proof: None,
             },
@@ -1846,13 +1846,10 @@ async fn materialized_scan_source(
         .get("file");
     let path = Path::new(&database_path).parent().unwrap().join(name);
     std::fs::write(&path, bytes).unwrap();
-    let facts = crate::scan::hash::observe_candidate_file(&path)
-        .await
-        .unwrap();
     (
         voom_store::test_support::test_relative_locator(&path.display().to_string()),
-        facts.content_hash,
-        facts.size_bytes,
+        format!("blake3:{}", blake3::hash(bytes).to_hex()),
+        u64::try_from(bytes.len()).unwrap(),
     )
 }
 

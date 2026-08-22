@@ -99,6 +99,13 @@ async fn create_empty_inputs(database_url: &str, root: &Path) -> u64 {
         .activate_library_root(StorageRootId(1), "empty-root-fixture".to_owned())
         .await
         .unwrap();
+    // An empty root still accepts a durable scan request; `--no-wait` asserts
+    // the request envelope without pumping the session (no agent is attached).
+    let scan_request = ok(run(database_url, &["scan", "--root", "1", "--no-wait"]));
+    assert_eq!(scan_request["command"], "scan");
+    assert_eq!(scan_request["status"], "ok");
+    assert!(scan_request["data"]["scan_session_id"].as_u64().unwrap() > 0);
+    assert!(scan_request["data"]["ticket_id"].as_u64().unwrap() > 0);
     let root_input = ok(run(
         database_url,
         &[
@@ -199,7 +206,7 @@ async fn assert_durable_zero_work(database_url: &str) {
     .fetch_one(&pool)
     .await
     .unwrap();
-    assert_eq!(durable, (2, 2, 0, 1, 0, 0, 0));
+    assert_eq!(durable, (2, 2, 0, 1, 0, 1, 0));
 
     let event_kinds: Vec<String> = sqlx::query_scalar("SELECT kind FROM events ORDER BY event_id")
         .fetch_all(&pool)
@@ -213,6 +220,9 @@ async fn assert_durable_zero_work(database_url: &str) {
             "node.heartbeat_recorded",
             "storage_root.created",
             "storage_root.activated",
+            "ticket.created",
+            "ticket.ready",
+            "scan_session.requested",
             "job.opened",
             "job.succeeded",
         ]

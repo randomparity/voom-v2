@@ -472,6 +472,7 @@ fn batch(
             modified_at: T0,
             stability_started_at: T0,
             stability_confirmed_at: T0,
+            evidence: None,
         }],
     }
 }

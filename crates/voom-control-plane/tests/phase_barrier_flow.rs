@@ -10,7 +10,6 @@ use std::process::Command;
 use serde_json::json;
 use voom_control_plane::ControlPlane;
 use voom_control_plane::policy::ComplianceExecutionOptions;
-use voom_control_plane::scan::{RootScanOutcome, ScanReportFileStatus};
 use voom_control_plane::workflow::CoordinatorOutcome;
 use voom_core::{FileVersionId, MediaSnapshotId};
 use voom_policy::{
@@ -21,6 +20,7 @@ use voom_store::repo::execution::workflow_summaries::{
     FilePhaseOutcome, FilePhaseSummary, PhaseOutcome, SqliteWorkflowSummaryRepo,
 };
 use voom_test_support::TempDatabase;
+use voom_test_support::scan_seed::{SeedFile, seed_scanned_files};
 use voom_test_support::worker::{
     TestWorkerConfig, TestWorkerLaunch, cargo_build_package, hide_stale_fake_ffprobe_sibling,
     target_debug_binary,
@@ -69,8 +69,8 @@ async fn phase_barrier_commits_every_file_in_a_single_phase() {
     let pool = voom_store::connect(&url).await.unwrap();
     let cp = open_test_control_plane(pool, &root).await;
 
-    let file_one = scan_one(&cp, &source_one).await;
-    let file_two = scan_one(&cp, &source_two).await;
+    let file_one = scan_one(&cp, &url, &root, &source_one).await;
+    let file_two = scan_one(&cp, &url, &root, &source_two).await;
 
     let policy = cp
         .create_policy_document(
@@ -128,9 +128,9 @@ async fn sliding_window_advances_a_file_while_its_sibling_is_in_an_earlier_phase
     voom_store::init(&url).await.unwrap();
     let pool = voom_store::connect(&url).await.unwrap();
     let cp = open_test_control_plane(pool.clone(), &root).await;
-    let first = scan_one(&cp, &first_path).await;
-    let second = scan_one(&cp, &second_path).await;
-    let third = scan_one(&cp, &third_path).await;
+    let first = scan_one(&cp, &url, &root, &first_path).await;
+    let second = scan_one(&cp, &url, &root, &second_path).await;
+    let third = scan_one(&cp, &url, &root, &third_path).await;
     let policy = cp
         .create_policy_document(
             "sliding-window-order",
@@ -377,7 +377,7 @@ async fn phase_barrier_chains_committed_artifact_into_the_next_phase() {
     let pool = voom_store::connect(&url).await.unwrap();
     let cp = open_test_control_plane(pool, &root).await;
 
-    let file = scan_one(&cp, &source).await;
+    let file = scan_one(&cp, &url, &root, &source).await;
     let scanned_version = file.file_version_id;
     let policy = cp
         .create_policy_document(
@@ -602,8 +602,8 @@ async fn phase_barrier_records_committed_sibling_when_a_file_fails() {
     let pool = voom_store::connect(&url).await.unwrap();
     let cp = open_test_control_plane(pool, &root).await;
 
-    let good_file = scan_one(&cp, &good).await;
-    let doomed_file = scan_one(&cp, &doomed).await;
+    let good_file = scan_one(&cp, &url, &root, &good).await;
+    let doomed_file = scan_one(&cp, &url, &root, &doomed).await;
     let doomed_version = doomed_file.file_version_id;
     // Corrupt the doomed source AFTER scanning so its transcode fails on the
     // source-facts check (size/hash no longer match the scanned file version),
@@ -707,8 +707,8 @@ async fn phase_barrier_continue_blocks_failed_file_and_promotes_committed_siblin
     voom_store::init(&url).await.unwrap();
     let pool = voom_store::connect(&url).await.unwrap();
     let cp = open_test_control_plane(pool, &root).await;
-    let good_file = scan_one(&cp, &good).await;
-    let doomed_file = scan_one(&cp, &doomed).await;
+    let good_file = scan_one(&cp, &url, &root, &good).await;
+    let doomed_file = scan_one(&cp, &url, &root, &doomed).await;
     std::fs::write(&doomed, b"not a video anymore").unwrap();
     let source = "policy \"video transcode hevc\" {\n  \
         config { on_error: continue }\n  \
@@ -800,8 +800,8 @@ async fn phase_barrier_resumes_failed_file_without_remutating_committed_sibling(
     let pool = voom_store::connect(&url).await.unwrap();
     let cp = open_test_control_plane(pool, &root).await;
 
-    let good_file = scan_one(&cp, &good).await;
-    let doomed_file = scan_one(&cp, &doomed).await;
+    let good_file = scan_one(&cp, &url, &root, &good).await;
+    let doomed_file = scan_one(&cp, &url, &root, &doomed).await;
     // Corrupt the doomed source after scanning so its transcode fails the
     // source-facts check, while the good file commits inline.
     std::fs::write(&doomed, b"not a video anymore").unwrap();
@@ -920,7 +920,7 @@ async fn phase_barrier_promotes_only_terminal_artifact_across_phases() {
     let pool = voom_store::connect(&url).await.unwrap();
     let cp = open_test_control_plane(pool, &root).await;
 
-    let file = scan_one(&cp, &source).await;
+    let file = scan_one(&cp, &url, &root, &source).await;
     let scanned_version = file.file_version_id;
     let policy = cp
         .create_policy_document(
@@ -1010,7 +1010,7 @@ async fn phase_barrier_withholds_intermediate_when_later_phase_blocks() {
     let pool = voom_store::connect(&url).await.unwrap();
     let cp = open_test_control_plane(pool, &root).await;
 
-    let file = scan_one(&cp, &source).await;
+    let file = scan_one(&cp, &url, &root, &source).await;
     let scanned_version = file.file_version_id;
     let policy = cp
         .create_policy_document(
@@ -1303,22 +1303,68 @@ async fn transcode_lineage_sources(url: &str) -> Vec<i64> {
     .unwrap()
 }
 
-async fn scan_one(cp: &ControlPlane, source: &Path) -> ScannedFile {
-    let outcome = cp
-        .scan_library_root(voom_store::test_support::TEST_STORAGE_ROOT_ID)
-        .await
-        .unwrap();
-    let RootScanOutcome::Scanned(scan) = outcome else {
-        unreachable!("active local test root must scan")
-    };
-    let scanned = scan
-        .files
+/// Seed every h264 fixture currently in the root in one scan session and return
+/// the ids for `source`. A completed session retires the root locations it did
+/// not observe, so each call re-observes the whole root — replicating the old
+/// whole-root scans that kept earlier fixtures' locations live.
+async fn scan_one(cp: &ControlPlane, url: &str, root: &Path, source: &Path) -> ScannedFile {
+    let mut fixtures = std::fs::read_dir(root)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| {
+            path.is_file() && path.extension().is_some_and(|extension| extension == "mp4")
+        })
+        .collect::<Vec<_>>();
+    if !fixtures.iter().any(|path| path == source) {
+        fixtures.push(source.to_path_buf());
+    }
+    fixtures.sort();
+    let locators = fixtures
         .iter()
-        .find(|file| file.path == source && file.status == ScanReportFileStatus::Scanned)
-        .unwrap();
+        .map(|path| {
+            path.strip_prefix(root)
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .replace(std::path::MAIN_SEPARATOR, "/")
+        })
+        .collect::<Vec<_>>();
+    let seed_files = fixtures
+        .iter()
+        .zip(&locators)
+        .map(|(path, locator)| SeedFile {
+            locator,
+            path,
+            probe_snapshot: serde_json::json!({
+                "format": "sprint10-v1",
+                "container": { "format_name": "mov,mp4,m4a,3gp,3g2,mj2" },
+                "streams": [{
+                    "index": 0,
+                    "kind": "video",
+                    "codec_name": "h264",
+                    "width": 32,
+                    "height": 32,
+                    "pixel_format": "yuv420p",
+                    "disposition": { "default": true, "forced": false, "commentary": false },
+                }],
+            }),
+        })
+        .collect::<Vec<_>>();
+    let seeded = seed_scanned_files(
+        cp,
+        url,
+        voom_store::test_support::TEST_STORAGE_ROOT_ID,
+        &seed_files,
+    )
+    .await
+    .unwrap();
+    let index = fixtures
+        .iter()
+        .position(|path| path == source)
+        .expect("requested source must be among the seeded fixtures");
     ScannedFile {
-        file_version_id: scanned.file_version_id.unwrap(),
-        media_snapshot_id: scanned.media_snapshot_id,
+        file_version_id: seeded[index].file_version_id,
+        media_snapshot_id: Some(seeded[index].media_snapshot_id),
     }
 }
 

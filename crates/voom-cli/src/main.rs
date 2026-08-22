@@ -221,7 +221,7 @@ async fn dispatch(cli: Cli) -> Result<Exit> {
         Command::Job(ref command) => dispatch_job(&cli, command.clone()).await,
         Command::Ticket(ref command) => dispatch_ticket(&cli, command.clone()).await,
         Command::Artifact(ref command) => dispatch_artifact(&cli, command.clone()).await,
-        Command::Scan { root } => dispatch_scan(&cli, root).await,
+        Command::Scan { root, no_wait } => dispatch_scan(&cli, root, no_wait).await,
         Command::ScanSession(ref command) => dispatch_scan_session(&cli, command.clone()).await,
         Command::Bundle(ref command) => dispatch_bundle(&cli, command.clone()).await,
         Command::Backup(ref command) => dispatch_backup(&cli, command.clone()).await,
@@ -386,7 +386,7 @@ async fn dispatch_policy(cli: &Cli, command: PolicyCommand) -> Result<Exit> {
     ))
 }
 
-async fn dispatch_scan(cli: &Cli, root: u64) -> Result<Exit> {
+async fn dispatch_scan(cli: &Cli, root: u64, no_wait: bool) -> Result<Exit> {
     let cfg = match resolve_cfg(cli) {
         Ok(cfg) => cfg,
         Err(err) => {
@@ -399,7 +399,7 @@ async fn dispatch_scan(cli: &Cli, root: u64) -> Result<Exit> {
         config_path: cfg.config_path.display().to_string(),
     };
     Ok(Exit::from_run_code(
-        scan::run(&cfg.database_url, local, root).await?,
+        scan::run(&cfg.database_url, local, root, no_wait).await?,
     ))
 }
 

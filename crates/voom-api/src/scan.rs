@@ -61,6 +61,8 @@ struct ScanObservationRequest {
     modified_at: String,
     stability_started_at: String,
     stability_confirmed_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    evidence: Option<voom_core::ScanObservationEvidence>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -591,7 +593,11 @@ fn typed_observation(request: &ScanObservationRequest) -> Result<ScanObservation
             "stability_confirmed_at",
             &request.stability_confirmed_at,
         )?,
+        evidence: request.evidence.clone(),
     };
+    if let Some(evidence) = &observation.evidence {
+        evidence.validate().map_err(|error| error.to_string())?;
+    }
     validate_observation(&observation)?;
     Ok(observation)
 }

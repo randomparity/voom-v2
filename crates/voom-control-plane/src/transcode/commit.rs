@@ -20,7 +20,9 @@ use voom_worker_protocol::{
 use super::ExecuteTranscodeVideoInput;
 use crate::ControlPlane;
 use crate::cases::{append_event, begin_immediate_tx, begin_tx, commit_tx};
-use crate::scan::persist::{ObservedCandidateFacts, snapshot_with_stream_ids, verify_probe_facts};
+use crate::scan::worker::{
+    ObservedFileFacts as ObservedCandidateFacts, snapshot_with_stream_ids, verify_probe_facts,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StagedTranscodeArtifact {
@@ -165,8 +167,7 @@ pub(crate) async fn probe_staged_result(
     let expected = result_probe_expected_facts(&result.output);
     let request = result_probe_request(staging_path, &expected)?;
     let probed = dispatcher.dispatch_result_probe(cp, request).await?;
-    verify_probe_facts(&expected, &probed.result)
-        .map_err(|err| VoomError::ArtifactChecksumMismatch(err.message().to_owned()))?;
+    verify_probe_facts(&expected, &probed.result)?;
     let payload = snapshot_with_stream_ids(&probed.result.snapshot)?;
     Ok(ProbedResultPayload {
         worker_id: probed.worker_id,

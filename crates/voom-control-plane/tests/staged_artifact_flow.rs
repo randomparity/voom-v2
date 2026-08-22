@@ -12,14 +12,42 @@ use voom_control_plane::artifact::{
     ArtifactInspectionState, ArtifactListInput, CommitArtifactInput, StageCopyInput,
     VerifyArtifactInput,
 };
-use voom_control_plane::scan::RootScanOutcome;
 use voom_core::ErrorCode;
 use voom_store::repo::media::artifacts::ArtifactCommitState;
 use voom_test_support::TempDatabase;
+use voom_test_support::scan_seed::{SeedFile, SeededSource, seed_scanned_files};
 use voom_test_support::worker::{
     FfprobeSiblingGuard, cargo_bin_or_build, install_fake_ffprobe_sibling, target_debug_binary,
     workspace_root,
 };
+
+/// Canned normalized probe snapshot matching what the fake ffprobe sibling
+/// (`basic-mp4.json`) reports once `voom-ffprobe-worker` normalizes it, so the
+/// seeded source snapshot agrees with every later staged-artifact probe.
+fn basic_mp4_probe_snapshot() -> serde_json::Value {
+    serde_json::json!({
+        "format": "sprint10-v1",
+        "container": {
+            "format_name": "mov,mp4,m4a,3gp,3g2,mj2",
+            "format_long_name": "QuickTime / MOV",
+        },
+        "streams": [
+            {
+                "index": 0,
+                "kind": "video",
+                "codec_name": "h264",
+                "width": 320,
+                "height": 180,
+            },
+            {
+                "index": 1,
+                "kind": "audio",
+                "codec_name": "aac",
+                "channels": 2,
+            },
+        ],
+    })
+}
 
 const BASIC_FFPROBE_JSON: &str =
     include_str!("../../voom-ffprobe-worker/fixtures/ffprobe/basic-mp4.json");
@@ -27,23 +55,28 @@ const BASIC_FFPROBE_JSON: &str =
 #[tokio::test]
 async fn scan_stage_verify_commit_flow_persists_committed_artifact() {
     let _ffprobe_guard = install_worker_siblings();
-    let (cp, _db, dir) = fixture().await;
+    let (cp, db, dir) = fixture().await;
     let media = dir.path().join("committed-source.mp4");
     std::fs::copy(tiny_media_fixture(), &media).unwrap();
 
-    let outcome = cp
-        .scan_library_root(voom_store::test_support::TEST_STORAGE_ROOT_ID)
-        .await
-        .unwrap();
-    let RootScanOutcome::Scanned(scan) = outcome else {
-        unreachable!("active local test root must scan")
-    };
-    let scanned = scan.files.iter().find(|file| file.path == media).unwrap();
+    let seeded = seed_scanned_files(
+        &cp,
+        &db.url,
+        voom_store::test_support::TEST_STORAGE_ROOT_ID,
+        &[SeedFile {
+            locator: "committed-source.mp4",
+            path: &media,
+            probe_snapshot: basic_mp4_probe_snapshot(),
+        }],
+    )
+    .await
+    .unwrap();
+    let seeded = &seeded[0];
     let staging_path = dir.path().join("staged.mp4");
     let staged = cp
         .stage_copy(StageCopyInput {
-            file_version_id: scanned.file_version_id.unwrap(),
-            source_location_id: scanned.file_location_id,
+            file_version_id: seeded.file_version_id,
+            source_location_id: Some(seeded.file_location_id),
             staging_path: staging_path.clone(),
         })
         .await
@@ -79,10 +112,44 @@ async fn scan_stage_verify_commit_flow_persists_committed_artifact() {
 async fn commit_rejections_and_recovery_visibility_are_inspectable() {
     let _ffprobe_guard = install_worker_siblings();
     let (cp, db, dir) = fixture().await;
-    let unverified = stage_fixture(&cp, dir.path(), "unverified").await;
-    let verified = verified_fixture(&cp, dir.path(), "drift").await;
+    // One scan session for all three sources: a completed session retires the
+    // root locations it did not observe, so seeding sequentially would retire
+    // earlier sources before their commits run.
+    let names = ["unverified", "drift", "recovery"];
+    let paths = names
+        .iter()
+        .map(|name| {
+            let path = dir.path().join(format!("{name}-source.mp4"));
+            std::fs::copy(tiny_media_fixture(), &path).unwrap();
+            path
+        })
+        .collect::<Vec<_>>();
+    let locators = names
+        .iter()
+        .map(|name| format!("{name}-source.mp4"))
+        .collect::<Vec<_>>();
+    let seed_files = names
+        .iter()
+        .zip(&paths)
+        .zip(&locators)
+        .map(|((_, path), locator)| SeedFile {
+            locator,
+            path,
+            probe_snapshot: basic_mp4_probe_snapshot(),
+        })
+        .collect::<Vec<_>>();
+    let seeded = seed_scanned_files(
+        &cp,
+        &db.url,
+        voom_store::test_support::TEST_STORAGE_ROOT_ID,
+        &seed_files,
+    )
+    .await
+    .unwrap();
+    let unverified = staged_fixture(&cp, dir.path(), "unverified", &seeded[0]).await;
+    let verified = verified_fixture(&cp, dir.path(), "drift", &seeded[1]).await;
     std::fs::write(&verified.staging_path, b"changed bytes").unwrap();
-    let recovery = verified_fixture(&cp, dir.path(), "recovery").await;
+    let recovery = verified_fixture(&cp, dir.path(), "recovery", &seeded[2]).await;
 
     let unverified_err = cp
         .commit_artifact(CommitArtifactInput {
@@ -128,18 +195,8 @@ async fn commit_rejections_and_recovery_visibility_are_inspectable() {
     );
 }
 
-#[derive(Debug)]
-struct Db {
-    _tmp: TempDatabase,
-    url: String,
-}
-
-#[derive(Debug)]
-struct StagedFixture {
-    artifact_handle_id: voom_core::ArtifactHandleId,
-    source_file_version_id: voom_core::FileVersionId,
-    staging_path: PathBuf,
-    verification_id: Option<voom_core::ids::ArtifactVerificationId>,
+fn artifact_tempdir() -> TempDir {
+    TempDir::new_in(std::env::current_dir().unwrap()).unwrap()
 }
 
 async fn fixture() -> (ControlPlane, Db, TempDir) {
@@ -161,30 +218,31 @@ async fn fixture() -> (ControlPlane, Db, TempDir) {
     (cp, Db { _tmp: tmp, url }, dir)
 }
 
-fn artifact_tempdir() -> TempDir {
-    TempDir::new_in(std::env::current_dir().unwrap()).unwrap()
+#[derive(Debug)]
+struct Db {
+    _tmp: TempDatabase,
+    url: String,
 }
 
-async fn stage_fixture(cp: &ControlPlane, dir: &Path, name: &str) -> StagedFixture {
-    let source_path = dir.join(format!("{name}-source.mp4"));
-    std::fs::copy(tiny_media_fixture(), &source_path).unwrap();
-    let outcome = cp
-        .scan_library_root(voom_store::test_support::TEST_STORAGE_ROOT_ID)
-        .await
-        .unwrap();
-    let RootScanOutcome::Scanned(scan) = outcome else {
-        unreachable!("active local test root must scan")
-    };
-    let scanned = scan
-        .files
-        .iter()
-        .find(|file| file.path == source_path)
-        .unwrap();
+#[derive(Debug)]
+struct StagedFixture {
+    artifact_handle_id: voom_core::ArtifactHandleId,
+    source_file_version_id: voom_core::FileVersionId,
+    staging_path: PathBuf,
+    verification_id: Option<voom_core::ids::ArtifactVerificationId>,
+}
+
+async fn staged_fixture(
+    cp: &ControlPlane,
+    dir: &Path,
+    name: &str,
+    seeded: &SeededSource,
+) -> StagedFixture {
     let staging_path = dir.join(format!("{name}-staged.mp4"));
     let staged = cp
         .stage_copy(StageCopyInput {
-            file_version_id: scanned.file_version_id.unwrap(),
-            source_location_id: scanned.file_location_id,
+            file_version_id: seeded.file_version_id,
+            source_location_id: Some(seeded.file_location_id),
             staging_path: staging_path.clone(),
         })
         .await
@@ -197,8 +255,13 @@ async fn stage_fixture(cp: &ControlPlane, dir: &Path, name: &str) -> StagedFixtu
     }
 }
 
-async fn verified_fixture(cp: &ControlPlane, dir: &Path, name: &str) -> StagedFixture {
-    let mut staged = stage_fixture(cp, dir, name).await;
+async fn verified_fixture(
+    cp: &ControlPlane,
+    dir: &Path,
+    name: &str,
+    seeded: &SeededSource,
+) -> StagedFixture {
+    let mut staged = staged_fixture(cp, dir, name, seeded).await;
     let verified = cp
         .verify_artifact(VerifyArtifactInput {
             artifact_handle_id: staged.artifact_handle_id,

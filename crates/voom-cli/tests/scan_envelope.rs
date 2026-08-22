@@ -4,271 +4,173 @@
     reason = "integration tests favor unwrap/panic over plumbing Result<()> through every assertion"
 )]
 
+//! `voom scan` wire contracts after ADR 0077: the CLI requests a durable scan
+//! session (and, without `--no-wait`, polls it to its terminal state). The
+//! bytes are read by owner-node workers, so identity rows for downstream
+//! policy commands are seeded through the real session chain (`scan_seed`).
+
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
-use std::sync::OnceLock;
+use std::process::{Command, Output, Stdio};
+use std::time::{Duration, Instant};
 
 use serde_json::Value;
 use tempfile::TempDir;
+use voom_control_plane::ControlPlane;
+use voom_control_plane::execution::{RemoteActivateInput, RemoteWorkerDeclaration};
+use voom_control_plane::scan::{RemoteScanCompleteInput, RemoteScanStartInput};
+use voom_control_plane::workers::RegisterNodeInput;
+use voom_core::{ArtifactAccessMode, NodeIncarnationId, NodeKind, OperationKind};
 use voom_policy::load_policy_fixture;
 use voom_store::test_support::sqlite_url_for;
 use voom_test_support::TempDatabase;
-use voom_test_support::worker::cargo_bin_or_build;
+use voom_test_support::scan_seed::{SeedFile, seed_scanned_files};
 
-const BASIC_FFPROBE_JSON: &str =
-    include_str!("../../voom-ffprobe-worker/fixtures/ffprobe/basic-mp4.json");
+/// Fixed incarnation for the waited-scan driver node.
+const DRIVER_INCARNATION: &str = "0123456789abcdef0123456789abcdef";
+/// Route-level `request_hash` inputs must be lowercase SHA-256-shaped; any
+/// stable 64-char lowercase-hex digest satisfies the format gate.
+const DRIVER_REQUEST_HASH: &str =
+    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
 #[tokio::test]
-async fn scan_file_success_outputs_envelope_and_persists_snapshot() {
+async fn scan_request_outputs_durable_session_and_ticket() {
     let seeded = seed().await;
-    let media = seeded.root.path().join("tiny.mp4");
-    std::fs::copy(tiny_media_fixture(), &media).unwrap();
 
-    let output = scan_command(&seeded).output().unwrap();
+    let output = scan_command(&seeded).arg("--no-wait").output().unwrap();
 
     assert_status(&output, Some(0));
     let mut json = envelope(output.stdout);
     assert_eq!(json["command"], "scan");
     assert_eq!(json["status"], "ok");
-    assert_eq!(json["warnings"].as_array().unwrap().len(), 1);
-    assert!(
-        json["warnings"][0]
-            .as_str()
-            .unwrap()
-            .contains("VOOM_FFPROBE_BIN is set; scan ffprobe binary: ")
-    );
+    assert!(json["data"]["scan_session_id"].as_u64().unwrap() > 0);
+    assert!(json["data"]["ticket_id"].as_u64().unwrap() > 0);
     redact_common(&mut json);
-    redact_path_set(&mut json, &[(seeded.root.path(), "[media]")]);
-    redact_path_set(&mut json, &[(media.as_path(), "[media]/tiny.mp4")]);
-    redact_content_hashes(&mut json);
-    insta::assert_json_snapshot!(
-        "scan_file_success_outputs_envelope_and_persists_snapshot",
-        json
-    );
+    insta::assert_json_snapshot!("scan_request_outputs_durable_session_and_ticket", json);
+}
 
+#[tokio::test]
+async fn scan_blocked_root_emits_blocked_envelope() {
+    let seeded = seed().await;
     let pool = voom_store::connect(&seeded.url).await.unwrap();
-    assert_table_count(&pool, "workers", 1).await;
-    assert_table_count(&pool, "worker_capabilities", 1).await;
-    assert_table_count(&pool, "worker_grants", 1).await;
-    assert_table_count(&pool, "file_assets", 1).await;
-    assert_table_count(&pool, "file_versions", 1).await;
-    assert_table_count(&pool, "file_locations", 1).await;
-    assert_table_count(&pool, "media_snapshots", 1).await;
-}
-
-#[tokio::test]
-async fn scan_file_success_finds_worker_beside_cli_without_worker_env() {
-    let seeded = seed().await;
-    let media = seeded.root.path().join("tiny.mp4");
-    std::fs::copy(tiny_media_fixture(), &media).unwrap();
-
-    let output = scan_command_without_worker_env(&seeded).output().unwrap();
-
-    assert_status(&output, Some(0));
-    let json = envelope(output.stdout);
-    assert_eq!(json["command"], "scan");
-    assert_eq!(json["status"], "ok");
-    assert_eq!(json["data"]["summary"]["ingested"], 1);
-    assert_eq!(json["data"]["summary"]["probed"], 1);
-    assert_eq!(json["data"]["summary"]["snapshots_recorded"], 1);
-    assert_eq!(json["data"]["files"][0]["probe_worker_id"], 1);
-}
-
-#[tokio::test]
-async fn scan_directory_reports_unsupported_entries_as_skipped() {
-    let seeded = seed().await;
-    let dir = seeded.root.path();
-    let media = dir.join("tiny.mp4");
-    std::fs::copy(tiny_media_fixture(), &media).unwrap();
-    let note = dir.join("note.txt");
-    std::fs::write(&note, b"not media").unwrap();
-
-    let output = scan_command(&seeded).output().unwrap();
-
-    assert_status(&output, Some(0));
-    let mut json = envelope(output.stdout);
-    assert_eq!(json["command"], "scan");
-    assert_eq!(json["status"], "ok");
-    assert_eq!(json["data"]["summary"]["skipped"], 1);
-    redact_common(&mut json);
-    redact_path_set(
-        &mut json,
-        &[
-            (dir, "[scan-dir]"),
-            (media.as_path(), "[scan-dir]/tiny.mp4"),
-            (note.as_path(), "[scan-dir]/note.txt"),
-        ],
-    );
-    redact_content_hashes(&mut json);
-    insta::assert_json_snapshot!(
-        "scan_directory_reports_unsupported_entries_as_skipped",
-        json
-    );
-
-    let pool = voom_store::connect(&seeded.url).await.unwrap();
-    assert_table_count(&pool, "media_snapshots", 1).await;
-}
-
-#[tokio::test]
-async fn scan_directory_outputs_durable_sidecar_links() {
-    let seeded = seed().await;
-    let dir = seeded.root.path();
-    let media = dir.join("Movie.Name.mp4");
-    std::fs::copy(tiny_media_fixture(), &media).unwrap();
-    let sidecar = dir.join("Movie.Name.eng.srt");
-    std::fs::write(&sidecar, b"1\n00:00:00,000 --> 00:00:01,000\nHello\n").unwrap();
-
-    let output = scan_command(&seeded).output().unwrap();
-
-    assert_status(&output, Some(0));
-    let json = envelope(output.stdout);
-    assert_eq!(json["command"], "scan");
-    assert_eq!(json["status"], "ok");
-    assert_eq!(json["data"]["summary"]["discovered"], 2);
-    assert_eq!(json["data"]["summary"]["ingested"], 2);
-    assert_eq!(json["data"]["summary"]["snapshots_recorded"], 1);
-    assert_eq!(json["data"]["summary"]["skipped"], 0);
-    let file = &json["data"]["files"][0];
-    assert_eq!(
-        file["path"],
-        media.canonicalize().unwrap().display().to_string()
-    );
-    assert_eq!(file["bundle_member_role"], "primary_video");
-    assert!(file["bundle_id"].as_u64().unwrap() > 0);
-    assert_eq!(file["sidecars"].as_array().unwrap().len(), 1);
-    assert_eq!(
-        file["sidecars"][0]["path"],
-        sidecar.canonicalize().unwrap().display().to_string()
-    );
-    assert_eq!(file["sidecars"][0]["bundle_id"], file["bundle_id"]);
-    assert_eq!(
-        file["sidecars"][0]["bundle_member_role"],
-        "external_subtitle"
-    );
-    assert!(
-        file["sidecars"][0]["content_hash"]
-            .as_str()
-            .unwrap()
-            .starts_with("sha256:")
-    );
-
-    let pool = voom_store::connect(&seeded.url).await.unwrap();
-    assert_table_count(&pool, "file_assets", 2).await;
-    assert_table_count(&pool, "media_snapshots", 1).await;
-    assert_table_count(&pool, "asset_bundle_members", 2).await;
-}
-
-#[tokio::test]
-async fn scan_directory_reports_unsupported_file_as_skipped() {
-    let seeded = seed().await;
-    let note = seeded.root.path().join("note.txt");
-    std::fs::write(&note, b"not media").unwrap();
-
-    let output = scan_command(&seeded).output().unwrap();
-
-    assert_status(&output, Some(0));
-    let mut json = envelope(output.stdout);
-    assert_eq!(json["command"], "scan");
-    assert_eq!(json["status"], "ok");
-    assert_eq!(json["data"]["summary"]["skipped"], 1);
-    redact_common(&mut json);
-    redact_path_set(&mut json, &[(seeded.root.path(), "[scan-dir]")]);
-    redact_path_set(&mut json, &[(note.as_path(), "[scan-dir]/note.txt")]);
-    insta::assert_json_snapshot!("scan_directory_reports_unsupported_file_as_skipped", json);
-
-    let pool = voom_store::connect(&seeded.url).await.unwrap();
-    assert_table_count(&pool, "workers", 0).await;
-    assert_table_count(&pool, "media_snapshots", 0).await;
-}
-
-#[tokio::test]
-async fn scan_reuses_builtin_ffprobe_worker_row() {
-    let seeded = seed().await;
-    let media = seeded.root.path().join("tiny.mp4");
-    std::fs::copy(tiny_media_fixture(), &media).unwrap();
-
-    let first = scan_command(&seeded).output().unwrap();
-    assert_status(&first, Some(0));
-    let second = scan_command(&seeded).output().unwrap();
-
-    assert_status(&second, Some(0));
-    let mut json = envelope(second.stdout);
-    assert_eq!(json["command"], "scan");
-    assert_eq!(json["status"], "ok");
-    redact_common(&mut json);
-    redact_path_set(&mut json, &[(seeded.root.path(), "[media]")]);
-    redact_path_set(&mut json, &[(media.as_path(), "[media]/tiny.mp4")]);
-    redact_content_hashes(&mut json);
-    insta::assert_json_snapshot!("scan_reuses_builtin_ffprobe_worker_row", json);
-
-    let pool = voom_store::connect(&seeded.url).await.unwrap();
-    let worker_count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM workers \
-         WHERE name = 'builtin.ffprobe' OR name LIKE 'builtin.ffprobe-%'",
-    )
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    assert_eq!(worker_count, 1);
-    let probed_by: Vec<i64> =
-        sqlx::query_scalar("SELECT DISTINCT probed_by FROM media_snapshots ORDER BY probed_by")
-            .fetch_all(&pool)
-            .await
-            .unwrap();
-    assert_eq!(probed_by, vec![1]);
-    assert_table_count(&pool, "media_snapshots", 1).await;
-}
-
-#[tokio::test]
-async fn scan_content_drift_fails_without_snapshot() {
-    let seeded = seed().await;
-    let dir = seeded.root.path();
-    let media = dir.join("drift.mp4");
-    std::fs::write(&media, b"media before probe").unwrap();
-    let tool_dir = TempDir::new().unwrap();
-    let fake_ffprobe = write_drifting_ffprobe(tool_dir.path());
-
-    let output = scan_command(&seeded)
-        .env("VOOM_FFPROBE_BIN", &fake_ffprobe)
-        .output()
+    sqlx::query("UPDATE library_roots SET enabled = 0 WHERE id = ?")
+        .bind(i64::try_from(voom_store::test_support::TEST_STORAGE_ROOT_ID.0).unwrap())
+        .execute(&pool)
+        .await
         .unwrap();
+
+    let output = scan_command(&seeded).arg("--no-wait").output().unwrap();
 
     assert_status(&output, Some(2));
     let mut json = envelope(output.stdout);
-    assert_eq!(json["command"], "scan");
-    assert_eq!(json["status"], "error");
-    assert_eq!(json["error"]["code"], "ARTIFACT_CHECKSUM_MISMATCH");
-    assert_eq!(
-        json["data"]["files"][0]["error"]["failure_class"],
-        "artifact_checksum_mismatch"
-    );
-    redact_common(&mut json);
-    redact_path_set(
-        &mut json,
-        &[
-            (seeded.root.path(), "[scan-dir]"),
-            (media.as_path(), "[scan-dir]/drift.mp4"),
-            (fake_ffprobe.as_path(), "[tool-dir]/ffprobe"),
-        ],
-    );
-    redact_content_hashes(&mut json);
-    insta::assert_json_snapshot!("scan_content_drift_fails_without_snapshot", json);
 
+    assert_eq!(json["command"], "scan");
+    assert_eq!(json["error"]["code"], "BLOCKED");
+    assert_eq!(json["data"]["status"], "blocked");
+    assert_eq!(json["data"]["reason"], "root_disabled");
+    assert_eq!(json["data"]["library_id"], 9_000_001);
+    assert_eq!(
+        json["data"]["storage_root_id"],
+        voom_store::test_support::TEST_STORAGE_ROOT_ID.0
+    );
+    json["data"]["provider_locator"] = Value::String("[provider-locator]".to_owned());
+    redact_common(&mut json);
+    insta::assert_json_snapshot!("scan_blocked_root_emits_blocked_envelope", json);
+}
+
+#[tokio::test]
+async fn scan_wait_reports_terminal_outcome() {
+    let seeded = seed().await;
+    let cp = ControlPlane::open(&seeded.url).await.unwrap();
+    // Claim the root to a driver node this test holds credentials for, so the
+    // CLI-requested session can be pumped to completion from here.
+    let registered = cp
+        .register_node(RegisterNodeInput {
+            name: "scan-envelope-driver".to_owned(),
+            kind: NodeKind::Remote,
+            heartbeat_ttl_seconds: 600,
+            metadata: serde_json::json!({}),
+        })
+        .await
+        .unwrap();
+    let incarnation: NodeIncarnationId = DRIVER_INCARNATION.parse().unwrap();
+    cp.remote_activate(RemoteActivateInput {
+        node_id: registered.node.id,
+        token: registered.token.clone(),
+        idempotency_key: "scan-envelope-driver-activate".to_owned(),
+        request_hash: DRIVER_REQUEST_HASH.to_owned(),
+        incarnation_id: incarnation,
+        workers: vec![RemoteWorkerDeclaration {
+            logical_name: "scan-envelope-driver".to_owned(),
+            operations: vec![OperationKind::ScanLibrary],
+            artifact_access: vec![ArtifactAccessMode::SharedMount],
+            max_parallel: 1,
+        }],
+    })
+    .await
+    .unwrap();
     let pool = voom_store::connect(&seeded.url).await.unwrap();
-    assert_table_count(&pool, "media_snapshots", 0).await;
+    sqlx::query("UPDATE library_roots SET owner_node_id = ? WHERE id = ?")
+        .bind(i64::try_from(registered.node.id.0).unwrap())
+        .bind(i64::try_from(voom_store::test_support::TEST_STORAGE_ROOT_ID.0).unwrap())
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    // The waited CLI polls until the session reaches a terminal state; the
+    // test plays the owner-node agent and completes it under the CLI's feet.
+    let child = scan_command(&seeded)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let scan_session_id = wait_for_requested_session(&pool).await;
+    let token = registered.token;
+    cp.start_scan_session(RemoteScanStartInput {
+        node_id: registered.node.id,
+        scan_session_id,
+        incarnation_id: incarnation,
+        token: token.clone(),
+        idempotency_key: "scan-envelope-driver-start".to_owned(),
+        request_hash: DRIVER_REQUEST_HASH.to_owned(),
+    })
+    .await
+    .unwrap();
+    let outcome = cp
+        .complete_scan_session(RemoteScanCompleteInput {
+            node_id: registered.node.id,
+            scan_session_id,
+            incarnation_id: incarnation,
+            token: token.clone(),
+            idempotency_key: "scan-envelope-driver-complete".to_owned(),
+            request_hash: DRIVER_REQUEST_HASH.to_owned(),
+            last_sequence: None,
+            observation_count: 0,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        outcome.status,
+        voom_core::ScanSessionStatus::Succeeded,
+        "the driven session must complete successfully"
+    );
+
+    let output = child.wait_with_output().unwrap();
+    assert_status(&output, Some(0));
+    let json = envelope(output.stdout);
+    assert_eq!(json["command"], "scan");
+    assert_eq!(json["status"], "ok");
+    assert_eq!(json["data"]["scan_session_id"], scan_session_id.0);
+    assert_eq!(json["data"]["status"], "succeeded");
+    assert_eq!(json["data"]["observation_count"], 0);
+    assert_eq!(json["data"]["retired_location_count"], 0);
 }
 
 #[tokio::test]
 async fn policy_input_create_from_scan_outputs_ids_for_scanned_file() {
     let seeded = seed().await;
-    let media = seeded.root.path().join("tiny.mp4");
-    std::fs::copy(tiny_media_fixture(), &media).unwrap();
-    let scan = scan_command(&seeded).output().unwrap();
-    assert_status(&scan, Some(0));
-    let scan_json = envelope(scan.stdout);
-    let file = &scan_json["data"]["files"][0];
-    let file_version_id = file["file_version_id"].as_u64().unwrap().to_string();
-    let media_snapshot_id = file["media_snapshot_id"].as_u64().unwrap().to_string();
+    let source = seed_one_media_file(&seeded).await;
+    let file_version_id = source.file_version_id.0.to_string();
+    let media_snapshot_id = source.media_snapshot_id.0.to_string();
 
     let output = policy_input_from_scan_command(
         &seeded.url,
@@ -290,25 +192,20 @@ async fn policy_input_create_from_scan_outputs_ids_for_scanned_file() {
     assert_eq!(json["data"]["input_set"]["source_kind"], "imported");
     assert_eq!(
         json["data"]["input_set"]["file_version_id"],
-        file["file_version_id"]
+        source.file_version_id.0
     );
     assert_eq!(
         json["data"]["input_set"]["media_snapshot_id"],
-        file["media_snapshot_id"]
+        source.media_snapshot_id.0
     );
 }
 
 #[tokio::test]
 async fn policy_input_create_from_scan_can_feed_plan_show() {
     let seeded = seed().await;
-    let media = seeded.root.path().join("tiny.mp4");
-    std::fs::copy(tiny_media_fixture(), &media).unwrap();
-    let scan = scan_command(&seeded).output().unwrap();
-    assert_status(&scan, Some(0));
-    let scan_json = envelope(scan.stdout);
-    let file = &scan_json["data"]["files"][0];
-    let file_version_id = file["file_version_id"].as_u64().unwrap().to_string();
-    let media_snapshot_id = file["media_snapshot_id"].as_u64().unwrap().to_string();
+    let source = seed_one_media_file(&seeded).await;
+    let file_version_id = source.file_version_id.0.to_string();
+    let media_snapshot_id = source.media_snapshot_id.0.to_string();
     let cp = voom_control_plane::ControlPlane::open(&seeded.url)
         .await
         .unwrap();
@@ -363,13 +260,7 @@ async fn policy_input_create_from_scan_can_feed_plan_show() {
 #[tokio::test]
 async fn policy_input_create_from_scan_all_builds_whole_library() {
     let seeded = seed().await;
-    let dir = seeded.root.path();
-    let media = dir.join("Movie.Name.mp4");
-    std::fs::copy(tiny_media_fixture(), &media).unwrap();
-    let sidecar = dir.join("Movie.Name.eng.srt");
-    std::fs::write(&sidecar, b"1\n00:00:00,000 --> 00:00:01,000\nHello\n").unwrap();
-    let scan = scan_command(&seeded).output().unwrap();
-    assert_status(&scan, Some(0));
+    seed_one_media_file(&seeded).await;
 
     let output = policy_input_whole_scan_command(&seeded.url, "whole")
         .output()
@@ -382,7 +273,7 @@ async fn policy_input_create_from_scan_all_builds_whole_library() {
     assert!(json["data"]["input_set"]["input_set_id"].as_u64().unwrap() > 0);
     assert_eq!(json["data"]["input_set"]["slug"], "whole");
     assert_eq!(json["data"]["input_set"]["included_count"], 1);
-    assert_eq!(json["data"]["input_set"]["skipped_count"], 1);
+    assert_eq!(json["data"]["input_set"]["skipped_count"], 0);
 }
 
 #[tokio::test]
@@ -492,6 +383,54 @@ async fn seed() -> Seeded {
     }
 }
 
+/// Seed one tiny media fixture through the real scan-session chain and return
+/// its published identity ids.
+async fn seed_one_media_file(seeded: &Seeded) -> voom_test_support::scan_seed::SeededSource {
+    let media = seeded.root.path().join("tiny.mp4");
+    std::fs::copy(tiny_media_fixture(), &media).unwrap();
+    let cp = ControlPlane::open(&seeded.url).await.unwrap();
+    let seeded_sources = seed_scanned_files(
+        &cp,
+        &seeded.url,
+        voom_store::test_support::TEST_STORAGE_ROOT_ID,
+        &[SeedFile {
+            locator: "tiny.mp4",
+            path: &media,
+            probe_snapshot: basic_mp4_probe_snapshot(),
+        }],
+    )
+    .await
+    .unwrap();
+    seeded_sources[0]
+}
+
+/// Canned normalized probe snapshot matching what the real ffprobe worker
+/// reports for the tiny fixture (`basic-mp4.json` once normalized).
+fn basic_mp4_probe_snapshot() -> Value {
+    serde_json::json!({
+        "format": "sprint10-v1",
+        "container": {
+            "format_name": "mov,mp4,m4a,3gp,3g2,mj2",
+            "format_long_name": "QuickTime / MOV",
+        },
+        "streams": [
+            {
+                "index": 0,
+                "kind": "video",
+                "codec_name": "h264",
+                "width": 320,
+                "height": 180,
+            },
+            {
+                "index": 1,
+                "kind": "audio",
+                "codec_name": "aac",
+                "channels": 2,
+            },
+        ],
+    })
+}
+
 fn scan_command(seeded: &Seeded) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_voom"));
     command
@@ -505,31 +444,31 @@ fn scan_command(seeded: &Seeded) -> Command {
         .env(
             "VOOM_LOCAL_NODE_ID",
             voom_store::test_support::TEST_STORAGE_ROOT_ID.0.to_string(),
-        )
-        .env("VOOM_FFPROBE_WORKER_BIN", built_worker_binary())
-        .env("VOOM_FFPROBE_BIN", success_ffprobe_binary());
+        );
     command
 }
 
-fn scan_command_without_worker_env(seeded: &Seeded) -> Command {
-    let _worker_binary = built_worker_binary();
-    let mut command = Command::new(env!("CARGO_BIN_EXE_voom"));
-    command
-        .args([
-            "--database-url",
-            &seeded.url,
-            "scan",
-            "--root",
-            &voom_store::test_support::TEST_STORAGE_ROOT_ID.0.to_string(),
-        ])
-        .env(
-            "VOOM_LOCAL_NODE_ID",
-            voom_store::test_support::TEST_STORAGE_ROOT_ID.0.to_string(),
+/// Poll for the scan session the waited CLI just requested (the newest row in
+/// the `requested` state).
+async fn wait_for_requested_session(pool: &sqlx::SqlitePool) -> voom_core::ScanSessionId {
+    let started = Instant::now();
+    loop {
+        let row: Option<i64> = sqlx::query_scalar(
+            "SELECT id FROM scan_sessions WHERE status = 'requested' \
+             ORDER BY id DESC LIMIT 1",
         )
-        .env_remove("VOOM_FFPROBE_WORKER_BIN")
-        .env("VOOM_FFPROBE_BIN", success_ffprobe_binary())
-        .env("PATH", "/usr/bin:/bin");
-    command
+        .fetch_optional(pool)
+        .await
+        .unwrap();
+        if let Some(id) = row {
+            return voom_core::ScanSessionId(u64::try_from(id).unwrap());
+        }
+        assert!(
+            started.elapsed() <= Duration::from_secs(10),
+            "the waited scan never requested a session"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
 }
 
 fn policy_input_from_scan_command(
@@ -576,11 +515,6 @@ fn policy_input_whole_scan_command(url: &str, slug: &str) -> Command {
     command
 }
 
-fn built_worker_binary() -> &'static PathBuf {
-    static BIN: OnceLock<PathBuf> = OnceLock::new();
-    BIN.get_or_init(|| cargo_bin_or_build("voom-ffprobe-worker", "voom-ffprobe-worker").unwrap())
-}
-
 fn workspace_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -597,64 +531,12 @@ fn tiny_media_fixture() -> PathBuf {
         .unwrap()
 }
 
-fn success_ffprobe_binary() -> &'static PathBuf {
-    static BIN: OnceLock<(TempDir, PathBuf)> = OnceLock::new();
-    &BIN.get_or_init(|| {
-        let dir = TempDir::new().unwrap();
-        let path = write_success_ffprobe(dir.path());
-        (dir, path)
-    })
-    .1
-}
-
-fn write_success_ffprobe(dir: &Path) -> PathBuf {
-    let script = format!(
-        "#!/usr/bin/env sh\n\
-         set -eu\n\
-         if [ \"${{1:-}}\" = '-version' ]; then printf 'ffprobe version test-helper Copyright\\n'; exit 0; fi\n\
-         cat <<'JSON'\n\
-         {BASIC_FFPROBE_JSON}\n\
-         JSON\n"
-    );
-    write_executable(dir, "ffprobe", &script)
-}
-
-fn write_drifting_ffprobe(dir: &Path) -> PathBuf {
-    write_executable(
-        dir,
-        "ffprobe",
-        "#!/usr/bin/env sh\n\
-         set -eu\n\
-         if [ \"${1:-}\" = '-version' ]; then printf 'ffprobe version test-helper Copyright\\n'; exit 0; fi\n\
-         last=''\n\
-         for arg in \"$@\"; do last=\"$arg\"; done\n\
-         printf drift >> \"$last\"\n\
-         printf '{\"format\":{\"format_name\":\"mov,mp4\",\"duration\":\"1.0\",\"bit_rate\":\"1\"},\"streams\":[]}\\n'\n",
-    )
-}
-
-fn write_executable(dir: &Path, name: &str, contents: &str) -> PathBuf {
-    use std::os::unix::fs::PermissionsExt as _;
-
-    let path = dir.join(name);
-    std::fs::write(&path, contents).unwrap();
-    let mut permissions = std::fs::metadata(&path).unwrap().permissions();
-    permissions.set_mode(0o755);
-    std::fs::set_permissions(&path, permissions).unwrap();
-    path
-}
-
-async fn assert_table_count(pool: &sqlx::SqlitePool, table: &str, expected: i64) {
-    let sql = format!("SELECT COUNT(*) FROM {table}");
-    let count: i64 = sqlx::query_scalar(&sql).fetch_one(pool).await.unwrap();
-    assert_eq!(count, expected, "unexpected row count for {table}");
-}
-
 fn assert_status(output: &Output, expected: Option<i32>) {
     assert_eq!(
         output.status.code(),
         expected,
-        "stderr: {}",
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
 }
@@ -668,72 +550,4 @@ fn envelope(stdout: Vec<u8>) -> Value {
 fn redact_common(json: &mut Value) {
     json["local"]["db_url"] = Value::String("[db-url]".to_owned());
     json["local"]["config_path"] = Value::String("[config-path]".to_owned());
-    redact_path_set(
-        json,
-        &[(success_ffprobe_binary().as_path(), "[ffprobe-bin]")],
-    );
-}
-
-fn redact_path_set(value: &mut Value, paths: &[(&Path, &str)]) {
-    let mut replacements = paths
-        .iter()
-        .flat_map(|(path, replacement)| path_redactions(path, replacement))
-        .collect::<Vec<_>>();
-    replacements.sort_by_key(|(needle, _)| std::cmp::Reverse(needle.len()));
-    redact_paths(value, &replacements);
-}
-
-fn path_redactions(path: &Path, replacement: &str) -> Vec<(String, String)> {
-    let replacement = replacement.to_owned();
-    let mut redactions = vec![(path.display().to_string(), replacement.clone())];
-    if let Ok(canonical) = path.canonicalize() {
-        let canonical = canonical.display().to_string();
-        if redactions.iter().all(|(needle, _)| needle != &canonical) {
-            redactions.push((canonical, replacement));
-        }
-    }
-    redactions
-}
-
-fn redact_paths(value: &mut Value, replacements: &[(String, String)]) {
-    match value {
-        Value::String(text) => {
-            for (needle, replacement) in replacements {
-                *text = text.replace(needle, replacement);
-            }
-        }
-        Value::Array(items) => {
-            for item in items {
-                redact_paths(item, replacements);
-            }
-        }
-        Value::Object(map) => {
-            for item in map.values_mut() {
-                redact_paths(item, replacements);
-            }
-        }
-        Value::Null | Value::Bool(_) | Value::Number(_) => {}
-    }
-}
-
-fn redact_content_hashes(value: &mut Value) {
-    match value {
-        Value::Array(items) => {
-            for item in items {
-                redact_content_hashes(item);
-            }
-        }
-        Value::Object(map) => {
-            if map.get("content_hash").is_some_and(Value::is_string) {
-                map.insert(
-                    "content_hash".to_owned(),
-                    Value::String("[content-hash]".to_owned()),
-                );
-            }
-            for item in map.values_mut() {
-                redact_content_hashes(item);
-            }
-        }
-        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {}
-    }
 }

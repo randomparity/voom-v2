@@ -355,11 +355,15 @@ plane spawns them as managed subprocesses as needed.
 ### 3. Scan the library
 
 ```
-voom scan --path /mnt/pool0/test-video
+voom scan --root <storage-root-id>
 ```
 
-Creates file-versions + media snapshots. Non-media files (unsupported extensions)
-are excluded at scan.
+Requests a durable scan run and polls it to a terminal state (`--no-wait`
+exits after the request). The bytes are read by the storage-owner node's
+agent, so that node's config must declare `scan_library`, `hash_file`, and
+`probe_file` workers (see `operator-node-agent.md`); publication happens when
+the session completes. Non-media files (unsupported extensions) are excluded
+at discovery.
 
 ### 4. Author and accept the policy
 

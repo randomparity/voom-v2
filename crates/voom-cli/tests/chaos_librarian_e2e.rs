@@ -11,13 +11,14 @@ use support::chaos_librarian::{ChaosLibrarian, ChaosRun};
 use support::observed_state::{
     export_observed_state, library_relative_path, sha256_to_observed_hash,
 };
-use support::policy_seed::seed_transcode_policy_from_scan;
-use support::voom_cli::{VoomOutput, VoomTestDb, run_voom};
+use support::policy_seed::seed_transcode_policy;
+use support::voom_cli::{VoomTestDb, run_voom};
+use voom_test_support::scan_seed::{SeedFile, SeededSource, seed_scanned_files};
 
-struct ScannedChaosRun {
+struct SeededChaosRun {
     run: ChaosRun,
     db: VoomTestDb,
-    scan: VoomOutput,
+    seeded: Vec<SeededSource>,
 }
 
 #[test]
@@ -135,14 +136,14 @@ fn chaos_run_scan_root_uses_fixture_library_directory() {
 
 #[tokio::test]
 #[ignore = "run with just chaos-e2e-ci; requires Chaos Librarian media tools"]
-async fn static_library_baseline_scans_exports_and_compares() {
+async fn static_library_baseline_seeds_exports_and_compares() {
     let chaos = ready_chaos();
-    let ScannedChaosRun { run, db, scan } =
-        scan_materialized_scenario(&chaos, &chaos.upstream_scenario("static-library.yaml")).await;
-    assert_eq!(scan.status_code, Some(0), "stderr: {}", scan.stderr);
-    assert_eq!(scan.json["status"], "ok");
-    assert!(scan.json["data"]["summary"]["ingested"].as_u64().unwrap() > 0);
-    assert_eq!(scan.json["data"]["summary"]["failed"], 0);
+    let SeededChaosRun { run, db, seeded } =
+        seed_materialized_scenario(&chaos, &chaos.upstream_scenario("static-library.yaml")).await;
+    assert!(
+        !seeded.is_empty(),
+        "the static-library scenario must materialize media files"
+    );
 
     let observed_path = run.run_dir.join("observed-state.json");
     export_observed_state(
@@ -162,19 +163,25 @@ async fn static_library_baseline_scans_exports_and_compares() {
 
 #[tokio::test]
 #[ignore = "run with just chaos-e2e-ci; requires Chaos Librarian media tools"]
-async fn policy_seed_creates_durable_ids_from_scan_envelope() {
+async fn policy_seed_creates_durable_ids_from_seeded_source() {
     let chaos = ready_chaos();
-    let ScannedChaosRun { db, scan, .. } = scan_materialized_scenario(
+    let SeededChaosRun { db, seeded, .. } = seed_materialized_scenario(
         &chaos,
         &chaos.upstream_scenario("voom-ci/h264-transcode-candidate.yaml"),
     )
     .await;
-    assert_eq!(scan.status_code, Some(0), "stderr: {}", scan.stderr);
 
     let cp = db.control_plane().await.unwrap();
-    let ids = seed_transcode_policy_from_scan(&cp, &scan.json, "seed-test", "mp4", "h264")
-        .await
-        .unwrap();
+    let ids = seed_transcode_policy(
+        &cp,
+        "seed-test",
+        "mp4",
+        "h264",
+        seeded[0].file_version_id,
+        Some(seeded[0].media_snapshot_id),
+    )
+    .await
+    .unwrap();
 
     assert!(ids.policy_version_id > 0);
     assert!(ids.input_set_id > 0);
@@ -184,17 +191,23 @@ async fn policy_seed_creates_durable_ids_from_scan_envelope() {
 #[ignore = "run with just chaos-e2e-ci; requires Chaos Librarian media tools"]
 async fn transcode_required_executes_real_worker_and_commits_hevc_mkv() {
     let chaos = ready_chaos();
-    let ScannedChaosRun { run, db, scan } = scan_materialized_scenario(
+    let SeededChaosRun { run, db, seeded } = seed_materialized_scenario(
         &chaos,
         &chaos.upstream_scenario("voom-ci/h264-transcode-candidate.yaml"),
     )
     .await;
-    assert_eq!(scan.status_code, Some(0), "stderr: {}", scan.stderr);
 
     let cp = db.control_plane().await.unwrap();
-    let ids = seed_transcode_policy_from_scan(&cp, &scan.json, "chaos-h264", "mp4", "h264")
-        .await
-        .unwrap();
+    let ids = seed_transcode_policy(
+        &cp,
+        "chaos-h264",
+        "mp4",
+        "h264",
+        seeded[0].file_version_id,
+        Some(seeded[0].media_snapshot_id),
+    )
+    .await
+    .unwrap();
     let plan = run_voom(
         &db.url,
         [
@@ -263,24 +276,21 @@ async fn transcode_required_executes_real_worker_and_commits_hevc_mkv() {
 async fn transcode_noop_does_not_schedule_worker_mutation() {
     let chaos = ready_chaos();
 
-    let run = chaos
-        .materialize(&chaos.upstream_scenario("voom-ci/hevc-noop.yaml"))
-        .unwrap();
-    let db = VoomTestDb::init().await.unwrap();
-    let library_path = run.scan_root();
-    let root_id = db
-        .configure_local_root(&library_path)
-        .await
-        .unwrap()
-        .0
-        .to_string();
-    let scan = run_voom(&db.url, ["scan", "--root", root_id.as_str()]).unwrap();
-    assert_eq!(scan.status_code, Some(0), "stderr: {}", scan.stderr);
+    let SeededChaosRun { db, seeded, .. } =
+        seed_materialized_scenario(&chaos, &chaos.upstream_scenario("voom-ci/hevc-noop.yaml"))
+            .await;
 
     let cp = db.control_plane().await.unwrap();
-    let ids = seed_transcode_policy_from_scan(&cp, &scan.json, "chaos-hevc", "mkv", "hevc")
-        .await
-        .unwrap();
+    let ids = seed_transcode_policy(
+        &cp,
+        "chaos-hevc",
+        "mkv",
+        "hevc",
+        seeded[0].file_version_id,
+        Some(seeded[0].media_snapshot_id),
+    )
+    .await
+    .unwrap();
     let report = run_voom(
         &db.url,
         [
@@ -324,14 +334,16 @@ async fn step_mutation_rescan_rejects_changed_bytes_at_live_rooted_address() {
     let db = VoomTestDb::init().await.unwrap();
     let library_path = run_dir.join("library");
     wait_for_file_with_extension(&library_path, "mkv");
-    let root_id = db
-        .configure_local_root(&library_path)
+    let root_id = db.configure_local_root(&library_path).await.unwrap();
+
+    // The first seeding publishes the original bytes' identity at the live
+    // rooted address.
+    let cp = db.control_plane().await.unwrap();
+    let (mut files, mut locators) = (Vec::new(), Vec::new());
+    let seeds = media_seeds_for_library(&library_path, &mut files, &mut locators);
+    seed_scanned_files(&cp, &db.url, root_id, &seeds)
         .await
-        .unwrap()
-        .0
-        .to_string();
-    let first = run_voom(&db.url, ["scan", "--root", root_id.as_str()]).unwrap();
-    assert_eq!(first.status_code, Some(0), "stderr: {}", first.stderr);
+        .unwrap();
 
     let output = child.wait_with_output().unwrap();
     assert!(
@@ -340,104 +352,93 @@ async fn step_mutation_rescan_rejects_changed_bytes_at_live_rooted_address() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    let second = run_voom(&db.url, ["scan", "--root", root_id.as_str()]).unwrap();
-    assert_eq!(second.status_code, Some(2), "stderr: {}", second.stderr);
-    assert_eq!(second.json["error"]["code"], "CONFLICT");
+
+    // A rescan that observes different bytes at the same address must refuse
+    // to overwrite the recorded identity during completion.
+    let conflict = seed_scanned_files(&cp, &db.url, root_id, &seeds).await;
+    let error = conflict
+        .err()
+        .unwrap_or_else(|| unreachable!("rescanning changed bytes must conflict"));
     assert!(
-        second.json["error"]["message"]
-            .as_str()
-            .unwrap()
-            .contains("already records different bytes")
+        error
+            .to_string()
+            .contains("already records different bytes"),
+        "conflict must name the byte mismatch: {error}"
     );
 }
 
 #[tokio::test]
 #[ignore = "run with just chaos-e2e-ci; requires Chaos Librarian media tools"]
-async fn malformed_media_records_per_file_failure_without_execution_ticket() {
+async fn malformed_media_scan_request_stays_accepted_without_worker_side_effects() {
     let chaos = ready_chaos();
-    let ScannedChaosRun { db, scan, .. } = scan_materialized_scenario(
-        &chaos,
-        &chaos.upstream_scenario("malformed-container-header.yaml"),
-    )
-    .await;
+    let run = chaos
+        .materialize(&chaos.upstream_scenario("malformed-container-header.yaml"))
+        .unwrap();
+    let db = VoomTestDb::init().await.unwrap();
+    let root_id = db
+        .configure_local_root(&run.scan_root())
+        .await
+        .unwrap()
+        .0
+        .to_string();
 
-    // Directory scans continue past unprobeable media (#213): the command
-    // succeeds while the malformed file carries an explicit per-file error.
-    assert_eq!(scan.status_code, Some(0), "stderr: {}", scan.stderr);
-    assert_eq!(scan.json["status"], "ok");
-    assert_eq!(scan.json["data"]["summary"]["failed"], 1);
-    assert_eq!(scan.json["data"]["summary"]["ingested"], 0);
-    let file = &scan.json["data"]["files"][0];
-    assert_eq!(file["status"], "failed");
-    assert_ne!(file["error"]["code"], "INTERNAL");
-    assert!(
-        file["error"]["message"]
-            .as_str()
-            .unwrap()
-            .contains("ffprobe"),
-        "file error should surface the probe failure: {}",
-        file["error"]
-    );
+    // The CLI only requests the durable session; probing (and any per-file
+    // probe failure on unprobeable media, #213) belongs to owner-node workers.
+    let request = run_voom(&db.url, ["scan", "--root", root_id.as_str(), "--no-wait"]).unwrap();
+    assert_eq!(request.status_code, Some(0), "stderr: {}", request.stderr);
+    assert!(request.json["data"]["scan_session_id"].as_u64().unwrap() > 0);
+    assert!(request.json["data"]["ticket_id"].as_u64().unwrap() > 0);
 
     let pool = voom_store::connect(&db.url).await.unwrap();
     let ticket_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tickets")
         .fetch_one(&pool)
         .await
         .unwrap();
-    assert_eq!(ticket_count, 0);
+    assert_eq!(
+        ticket_count, 1,
+        "only the scan-request ticket exists; no execution ticket"
+    );
 }
 
 #[tokio::test]
 #[ignore = "run with just chaos-e2e-ci; requires Chaos Librarian media tools"]
 async fn hardlinked_paths_resolve_to_one_physical_file() {
     let chaos = ready_chaos();
-    let ScannedChaosRun { scan, .. } = scan_materialized_scenario(
+    let SeededChaosRun { seeded, .. } = seed_materialized_scenario(
         &chaos,
         &chaos.upstream_recipe("scanner/hardlink-duplicates.yaml"),
     )
     .await;
-    assert_eq!(scan.status_code, Some(0), "stderr: {}", scan.stderr);
 
-    // #249: the scanner records (dev, ino) inode facts, so two hardlinked paths
-    // resolve to one physical file — one asset ingested and the second path
-    // recorded as a hardlink (an added location), never a second asset. A
-    // byte-identical copy (distinct inode) would remain a separate asset.
-    assert_eq!(scan.json["data"]["summary"]["ingested"], 1);
-    assert_eq!(scan.json["data"]["summary"]["hardlinked"], 1);
-    assert_eq!(scan.json["data"]["summary"]["failed"], 0);
-    let files = scan.json["data"]["files"].as_array().unwrap();
-    assert_eq!(files.len(), 2);
-    assert_eq!(files[0]["content_hash"], files[1]["content_hash"]);
-    // Both paths point at the same physical file: one asset/version, and the
-    // hardlink is flagged with the scanned_hardlink status.
-    assert_eq!(files[0]["file_asset_id"], files[1]["file_asset_id"]);
-    let statuses: std::collections::BTreeSet<&str> = files
-        .iter()
-        .map(|file| file["status"].as_str().unwrap())
-        .collect();
-    assert_eq!(
-        statuses,
-        ["scanned", "scanned_hardlink"].into_iter().collect()
-    );
+    // #249: the seeder records (dev, ino) inode facts from disk, so two
+    // hardlinked paths resolve through publication to one physical file — one
+    // asset/version with the second path as an added location. A byte-identical
+    // copy (distinct inode) would remain a separate asset.
+    assert_eq!(seeded.len(), 2);
+    assert_eq!(seeded[0].file_version_id, seeded[1].file_version_id);
 }
 
 #[tokio::test]
 #[ignore = "run with just chaos-e2e-ci; requires Chaos Librarian media tools"]
-async fn symlinked_media_is_skipped_not_double_counted() {
+async fn symlinked_media_scan_request_is_accepted() {
     let chaos = ready_chaos();
-    let ScannedChaosRun { scan, .. } = scan_materialized_scenario(
-        &chaos,
-        &chaos.upstream_recipe("scanner/symlink-external.yaml"),
-    )
-    .await;
-    assert_eq!(scan.status_code, Some(0), "stderr: {}", scan.stderr);
+    let run = chaos
+        .materialize(&chaos.upstream_recipe("scanner/symlink-external.yaml"))
+        .unwrap();
+    let db = VoomTestDb::init().await.unwrap();
+    let root_id = db
+        .configure_local_root(&run.scan_root())
+        .await
+        .unwrap()
+        .0
+        .to_string();
 
-    // The scanner skips symlinks rather than following them, so the linked
-    // target ingests exactly once and the link itself is recorded as skipped.
-    assert_eq!(scan.json["data"]["summary"]["discovered"], 2);
-    assert_eq!(scan.json["data"]["summary"]["ingested"], 1);
-    assert_eq!(scan.json["data"]["summary"]["skipped"], 1);
-    assert_eq!(scan.json["data"]["summary"]["failed"], 0);
+    // The scanner's skip-symlinks policy is worker-side now; the CLI contract
+    // is that a request for the root is accepted durably.
+    let request = run_voom(&db.url, ["scan", "--root", root_id.as_str(), "--no-wait"]).unwrap();
+    assert_eq!(request.status_code, Some(0), "stderr: {}", request.stderr);
+    assert_eq!(request.json["status"], "ok");
+    assert!(request.json["data"]["scan_session_id"].as_u64().unwrap() > 0);
 }
 
 fn first_file_with_extension(dir: &std::path::Path, extension: &str) -> Option<std::path::PathBuf> {
@@ -480,16 +481,103 @@ fn ready_chaos() -> ChaosLibrarian {
     chaos
 }
 
-async fn scan_materialized_scenario(chaos: &ChaosLibrarian, scenario: &Path) -> ScannedChaosRun {
+/// Media extensions the chaos scenarios materialize.
+const MEDIA_EXTENSIONS: [&str; 6] = ["mp4", "mkv", "mov", "avi", "webm", "m4v"];
+
+fn is_media_file(path: &Path) -> bool {
+    path.is_file()
+        && path
+            .extension()
+            .and_then(|value| value.to_str())
+            .is_some_and(|extension| MEDIA_EXTENSIONS.contains(&extension))
+}
+
+fn collect_media_files(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
+    let mut entries: Vec<std::path::PathBuf> = std::fs::read_dir(dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect();
+    entries.sort();
+    for entry in entries {
+        if entry.is_dir() {
+            collect_media_files(&entry, out);
+        } else if is_media_file(&entry) {
+            out.push(entry);
+        }
+    }
+}
+
+/// Canned normalized probe snapshot for a media file; the codec follows the
+/// container family the scenario materialized (mp4-family h264, mkv-family
+/// hevc), matching what each downstream policy assertion assumes.
+fn probe_for_extension(path: &Path) -> serde_json::Value {
+    let extension = path.extension().and_then(|value| value.to_str());
+    let codec = match extension {
+        Some("mkv" | "webm") => "hevc",
+        _ => "h264",
+    };
+    serde_json::json!({
+        "format": "sprint10-v1",
+        "container": { "format_name": "application/octet-stream" },
+        "streams": [{
+            "index": 0,
+            "kind": "video",
+            "codec_name": codec,
+            "width": 320,
+            "height": 180,
+        }],
+    })
+}
+
+/// Build `SeedFile`s for every media file under the materialized library.
+fn media_seeds_for_library<'a>(
+    library_path: &Path,
+    files: &'a mut Vec<std::path::PathBuf>,
+    locators: &'a mut Vec<String>,
+) -> Vec<SeedFile<'a>> {
+    files.clear();
+    collect_media_files(library_path, files);
+    assert!(
+        !files.is_empty(),
+        "the scenario must materialize media files under {}",
+        library_path.display()
+    );
+    *locators = files
+        .iter()
+        .map(|path| {
+            path.strip_prefix(library_path)
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .replace(std::path::MAIN_SEPARATOR, "/")
+        })
+        .collect();
+    files
+        .iter()
+        .zip(locators.iter())
+        .map(|(path, locator)| SeedFile {
+            locator,
+            path,
+            probe_snapshot: probe_for_extension(path),
+        })
+        .collect()
+}
+
+/// Materialize a chaos scenario and publish every media file's identity rows
+/// through the real request/start/batch/complete scan-session chain. The CLI
+/// no longer scans in-process (ADR 0077), so flows seed through the seeder
+/// instead of parsing a scanned-file envelope.
+async fn seed_materialized_scenario(chaos: &ChaosLibrarian, scenario: &Path) -> SeededChaosRun {
     let run = chaos.materialize(scenario).unwrap();
     let db = VoomTestDb::init().await.unwrap();
     let library_path = run.scan_root();
-    let root_id = db
-        .configure_local_root(&library_path)
+    let root_id = db.configure_local_root(&library_path).await.unwrap();
+    let mut files = Vec::new();
+    let mut locators = Vec::new();
+    let seeds = media_seeds_for_library(&library_path, &mut files, &mut locators);
+    let cp = db.control_plane().await.unwrap();
+    let seeded = seed_scanned_files(&cp, &db.url, root_id, &seeds)
         .await
-        .unwrap()
-        .0
-        .to_string();
-    let scan = run_voom(&db.url, ["scan", "--root", root_id.as_str()]).unwrap();
-    ScannedChaosRun { run, db, scan }
+        .unwrap();
+    SeededChaosRun { run, db, seeded }
 }
