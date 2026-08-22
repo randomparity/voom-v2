@@ -1543,44 +1543,65 @@ impl ControlPlane {
             RemoteAcquireOutcome::Idle {
                 worker_id,
                 scheduler_decision_id,
+            } => {
+                Self::validate_non_selected_decision_replay_in_tx(
+                    tx,
+                    plane,
+                    *worker_id,
+                    *scheduler_decision_id,
+                    SchedulerDecisionKind::Idle,
+                    SchedulerDecisionOutcome::Idle,
+                )
+                .await
             }
-            | RemoteAcquireOutcome::NoCandidate {
+            RemoteAcquireOutcome::NoCandidate {
                 worker_id,
                 scheduler_decision_id,
             } => {
-                let (kind, expected_outcome) = match outcome {
-                    RemoteAcquireOutcome::Idle { .. } => {
-                        (SchedulerDecisionKind::Idle, SchedulerDecisionOutcome::Idle)
-                    }
-                    _ => (
-                        SchedulerDecisionKind::NoCandidate,
-                        SchedulerDecisionOutcome::NoEligibleCandidate,
-                    ),
-                };
-                Self::require_replay_id(*scheduler_decision_id, "scheduler decision id")?;
-                let decision = plane
-                    .scheduler_decisions
-                    .get_in_tx(tx, *scheduler_decision_id)
-                    .await?
-                    .ok_or_else(|| {
-                        Self::replay_mismatch(&format!(
-                            "scheduler decision {scheduler_decision_id} is missing"
-                        ))
-                    })?;
-                if decision.decision_kind != kind
-                    || decision.outcome != expected_outcome
-                    || decision.request_worker_id != Some(*worker_id)
-                {
-                    return Err(Self::replay_mismatch(&format!(
-                        "scheduler decision {scheduler_decision_id} does not describe this outcome"
-                    )));
-                }
-                Ok(())
+                Self::validate_non_selected_decision_replay_in_tx(
+                    tx,
+                    plane,
+                    *worker_id,
+                    *scheduler_decision_id,
+                    SchedulerDecisionKind::NoCandidate,
+                    SchedulerDecisionOutcome::NoEligibleCandidate,
+                )
+                .await
             }
             RemoteAcquireOutcome::Leased(dispatch) => {
                 Self::validate_leased_replay_evidence_in_tx(tx, plane, input, dispatch).await
             }
         }
+    }
+
+    /// An idle or no-candidate replay must name the decision that produced it.
+    async fn validate_non_selected_decision_replay_in_tx(
+        tx: &mut Transaction<'_, Sqlite>,
+        plane: &ControlPlane,
+        worker_id: WorkerId,
+        scheduler_decision_id: u64,
+        kind: SchedulerDecisionKind,
+        expected_outcome: SchedulerDecisionOutcome,
+    ) -> Result<(), VoomError> {
+        Self::require_replay_id(scheduler_decision_id, "scheduler decision id")?;
+        let decision = plane
+            .scheduler_decisions
+            .get_in_tx(tx, scheduler_decision_id)
+            .await?
+            .ok_or_else(|| {
+                Self::replay_mismatch(&format!(
+                    "scheduler decision {scheduler_decision_id} is missing"
+                ))
+            })?;
+        if decision.decision_kind != kind
+            || decision.outcome != expected_outcome
+            || decision.request_worker_id != Some(worker_id)
+        {
+            return Err(Self::replay_mismatch(&format!(
+                "scheduler decision {scheduler_decision_id} does not describe this outcome"
+            )));
+        }
+        Ok(())
     }
 
     #[expect(
