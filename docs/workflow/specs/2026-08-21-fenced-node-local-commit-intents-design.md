@@ -40,10 +40,11 @@ Flow for one staged commit (all steps durable):
    lineage safety-gate evaluation, pending `artifact_commit_records` row.
    Additionally creates the pending `artifact_commit_intents` row pinning:
    handle, source file version, verification id, staging location id +
-   epoch, target root id + `root_epoch`, target locator, expected facts
-   `{size_bytes, content_hash}` taken from the pinned verification, owner
-   node resolved from the root's `owner_node_id`. Local byte observation in
-   prepare is removed; freshness moves to the node's pre-mutation verify.
+   epoch, target root id + `root_epoch`, target locator, expected facts,
+   owner node resolved from the target root's `owner_node_id`; staging and
+   target roots must resolve to the same owner or the commit fails
+   pre-mutation. Local byte observation in prepare is removed; freshness
+   moves to the node's pre-mutation verify.
 2. **Authorize** (node pull): the agent polls a fetch route returning
    pending intents for roots it owns; it requests authorization per intent.
    In one control-plane tx: re-run the lineage gate; revalidate pinned
