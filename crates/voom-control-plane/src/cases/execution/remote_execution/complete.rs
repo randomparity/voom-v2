@@ -12,8 +12,8 @@ use voom_store::repo::media::artifact_access_plans::{
 
 use crate::ControlPlane;
 use crate::cases::execution::remote_execution::{
-    RemoteCompleteInput, RemoteCompleteOutcome, ReplayRoute, decode_replay,
-    is_remote_replayable_error, remote_error_message, route_lease_complete,
+    RemoteCompleteInput, RemoteCompleteOutcome, ReplayRoute, ValidatedArtifactAccess,
+    decode_replay, is_remote_replayable_error, remote_error_message, route_lease_complete,
 };
 use crate::cases::{begin_immediate_tx, commit_tx};
 
@@ -276,12 +276,20 @@ fn validated_artifact_complete_evidence(
     result: &JsonValue,
     plan: &ArtifactAccessPlan,
 ) -> Result<JsonValue, VoomError> {
-    let evidence = result.get("artifact_access").ok_or_else(|| {
+    let echo = result.get("artifact_access").ok_or_else(|| {
         VoomError::Conflict(
             "remote complete rejected: artifact access validation missing".to_owned(),
         )
     })?;
-    if evidence.get("validated") != Some(&JsonValue::Bool(true)) {
+    // Exact typed consumption evidence: unknown fields are rejected before
+    // any agreement check (issue #479, ADR 0073).
+    let evidence: ValidatedArtifactAccess = serde_json::from_value(echo.clone()).map_err(|e| {
+        VoomError::Conflict(format!(
+            "remote complete rejected: echoed artifact access is not exact consumption \
+                 evidence: {e}"
+        ))
+    })?;
+    if !evidence.validated {
         return Err(VoomError::Conflict(
             "remote complete rejected: artifact access validation missing".to_owned(),
         ));
@@ -291,18 +299,14 @@ fn validated_artifact_complete_evidence(
     // declaration-free plans must not claim either.
     match (&plan.access_evidence, plan.owner_node_id) {
         (Some(expected), Some(owner)) => {
-            let echoed_owner = evidence.get("owner_node_id").and_then(JsonValue::as_u64);
-            if echoed_owner != Some(owner.0) {
+            if evidence.owner_node_id != Some(owner.0) {
                 return Err(VoomError::Conflict(format!(
-                    "remote complete rejected: echoed artifact access owner {echoed_owner:?} \
+                    "remote complete rejected: echoed artifact access owner {:?} \
                      does not match selected plan owner {}",
-                    owner.0
+                    evidence.owner_node_id, owner.0
                 )));
             }
-            let expected_json = serde_json::to_value(expected).map_err(|e| {
-                VoomError::Internal(format!("persisted access evidence unserializable: {e}"))
-            })?;
-            if evidence.get("access_evidence") != Some(&expected_json) {
+            if evidence.access_evidence.as_ref() != Some(expected) {
                 return Err(VoomError::Conflict(
                     "remote complete rejected: echoed artifact access does not match selected plan"
                         .to_owned(),
@@ -310,8 +314,7 @@ fn validated_artifact_complete_evidence(
             }
         }
         (None, None) => {
-            if evidence.get("owner_node_id").is_some() || evidence.get("access_evidence").is_some()
-            {
+            if evidence.owner_node_id.is_some() || evidence.access_evidence.is_some() {
                 return Err(VoomError::Conflict(
                     "remote complete rejected: ticket declared no artifact access but the \
                      worker echoed an access claim"
@@ -325,5 +328,6 @@ fn validated_artifact_complete_evidence(
             ));
         }
     }
-    Ok(evidence.clone())
+    serde_json::to_value(&evidence)
+        .map_err(|e| VoomError::Internal(format!("consumption evidence unserializable: {e}")))
 }

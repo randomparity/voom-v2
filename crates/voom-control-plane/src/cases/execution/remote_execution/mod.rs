@@ -238,6 +238,19 @@ pub struct RemoteArtifactAccessPlan {
     pub access_evidence: Option<OwnerAccessEvidence>,
 }
 
+/// The exact consumption evidence a worker must echo to complete a lease
+/// (issue #479, ADR 0073). Unknown fields are rejected: the legacy
+/// synthetic/shared-mount echo shape stopped validating with #477.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ValidatedArtifactAccess {
+    pub validated: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_node_id: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub access_evidence: Option<OwnerAccessEvidence>,
+}
+
 /// Regression for the removed-field rule (AGENTS.md): removing a serialized
 /// field removes the accepted input too. The legacy synthetic/shared-mount
 /// plan fields must fail decode on every mirror of this contract.
