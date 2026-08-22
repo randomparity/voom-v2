@@ -8,6 +8,7 @@
 
 pub mod child;
 pub mod client;
+pub mod commit;
 pub mod config;
 pub mod runtime;
 pub mod scan_client;

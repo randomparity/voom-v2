@@ -97,7 +97,7 @@ impl ControlPlane {
     }
 }
 
-pub(super) fn validate_remote_node_live(
+pub(crate) fn validate_remote_node_live(
     auth: &NodeAuthRecord,
     node_id: NodeId,
     now: time::OffsetDateTime,

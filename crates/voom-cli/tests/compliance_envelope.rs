@@ -522,6 +522,43 @@ async fn seed(fixture: FixtureName) -> Seeded {
     }
 }
 
+/// Background stand-in for the storage-owner agent (ADR 0074): drives every
+/// pending commit intent to convergence so CLI commits complete.
+fn spawn_commit_driver(url: &str) {
+    let url = url.to_owned();
+    std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async move {
+            let pool = voom_store::connect(&url).await.unwrap();
+            let node = voom_test_support::commit_node::SimulatedOwnerNode::new().unwrap();
+            node.install(&pool).await.unwrap();
+            let cp = voom_control_plane::ControlPlane::open(&url).await.unwrap();
+            loop {
+                let pending: Option<(i64, i64)> = sqlx::query_as(
+                    "SELECT id, artifact_handle_id FROM artifact_commit_intents \
+                     WHERE state = 'pending' ORDER BY id ASC LIMIT 1",
+                )
+                .fetch_optional(&pool)
+                .await
+                .unwrap();
+                if let Some((_, handle)) = pending {
+                    let _ = node
+                        .drive_pending_commit(
+                            &cp,
+                            &pool,
+                            voom_core::ArtifactHandleId(u64::try_from(handle).unwrap()),
+                        )
+                        .await;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+        });
+    });
+}
+
 async fn seed_scanned_remux() -> Seeded {
     let tmp = TempDatabase::new().unwrap();
     let dir = TempDir::new().unwrap();
@@ -532,6 +569,8 @@ async fn seed_scanned_remux() -> Seeded {
     voom_store::test_support::seed_test_storage_root(&pool)
         .await
         .unwrap();
+
+    spawn_commit_driver(&url);
     let cp = voom_control_plane::ControlPlane::open_with_pool(
         pool,
         std::sync::Arc::new(voom_core::SystemClock),
@@ -628,6 +667,8 @@ async fn seed_scanned_verify() -> Seeded {
     voom_store::test_support::seed_test_storage_root(&pool)
         .await
         .unwrap();
+
+    spawn_commit_driver(&url);
     let cp = voom_control_plane::ControlPlane::open_with_pool(
         pool,
         std::sync::Arc::new(voom_core::SystemClock),
@@ -712,6 +753,8 @@ async fn seed_scanned_audio() -> Seeded {
     voom_store::test_support::seed_test_storage_root(&pool)
         .await
         .unwrap();
+
+    spawn_commit_driver(&url);
     let cp = voom_control_plane::ControlPlane::open_with_pool(
         pool,
         std::sync::Arc::new(voom_core::SystemClock),

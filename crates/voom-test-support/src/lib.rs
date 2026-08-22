@@ -5,6 +5,8 @@
 
 mod temp_database;
 
+pub mod commit_node;
+
 pub use temp_database::TempDatabase;
 pub mod scan_seed;
 pub mod worker;

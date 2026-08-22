@@ -500,9 +500,12 @@ impl SqliteArtifactRepo {
         let finished_at = iso8601(failure.finished_at)?;
         let failure_class = failure.failure_class.as_str();
         let res = sqlx::query(
+            // `recovery_reason` must be cleared: the failed-row CHECK requires
+            // it NULL, and this transition may leave `recovery_required`.
             "UPDATE artifact_commit_records \
-             SET state = 'failed', failure_class = ?, error_code = ?, message = ?, finished_at = ? \
-             WHERE id = ? AND state = 'pending'",
+             SET state = 'failed', failure_class = ?, error_code = ?, message = ?, \
+                 finished_at = ?, recovery_reason = NULL \
+             WHERE id = ? AND state IN ('pending', 'recovery_required')",
         )
         .bind(failure_class)
         .bind(failure.error_code.as_str())

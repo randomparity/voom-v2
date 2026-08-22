@@ -101,6 +101,9 @@ async fn phase_barrier_runs_transcode_remux_audio_chain_end_to_end() {
     voom_store::test_support::set_test_storage_root_path(&pool, &root)
         .await
         .unwrap();
+    // Background stand-in for the storage-owner agent (ADR 0074): drives the
+    // fenced commit intent so non-blocked commits converge.
+    voom_test_support::commit_node::install_and_spawn_driver(&pool);
     let cp = ControlPlane::open_with_pool(pool, std::sync::Arc::new(voom_core::SystemClock))
         .await
         .unwrap()

@@ -10,6 +10,7 @@ use super::super::Repository;
 use super::super::common::{
     i64_from_u64, iso8601, map_row_err, parse_iso8601, serialize_json, u32_from_i64, u64_from_i64,
 };
+use crate::repo::media::artifact_commit_intents::consult_scan_reconciliation_artifact_intent_lock_in_tx;
 use crate::repo::media::commit_safety_gate::consult_scan_reconciliation_commit_lock_in_tx;
 
 pub const MAX_SCAN_SESSION_OBSERVATIONS: u64 = 100_000;
@@ -505,6 +506,21 @@ impl SqliteScanSessionRepo {
                 commit_id,
                 location_id,
             ));
+        }
+        if let Some((intent_id, state, location_id)) =
+            consult_scan_reconciliation_artifact_intent_lock_in_tx(
+                tx,
+                session.storage_root_id,
+                session.id,
+                session.location_high_watermark_id,
+            )
+            .await?
+        {
+            return Err(VoomError::Conflict(format!(
+                "{COMPLETION_COMMIT_LOCK_PREFIX}scan session {} cannot retire location {} \
+                 while fenced artifact_commit_intent {} ({}) pins it",
+                session.id, location_id, intent_id, state
+            )));
         }
         retire_completion_candidates_in_tx(tx, &session, &input, candidates.len()).await?;
         let session =

@@ -8,12 +8,13 @@ authors.workspace = true
 repository.workspace = true
 
 [dependencies]
-blake3 = "1.5"
-secrecy.workspace = true
+blake3 = { workspace = true }
+secrecy = { workspace = true }
 serde_json = { workspace = true }
-sqlx = { workspace = true, features = ["runtime-tokio", "sqlite"] }
+sqlx = { workspace = true }
 tempfile = { workspace = true }
-time.workspace = true
+time = { workspace = true }
+tokio = { workspace = true, features = ["rt", "time", "io-util", "fs"] }
 voom-control-plane = { workspace = true }
 voom-core = { workspace = true }
 voom-store = { workspace = true }

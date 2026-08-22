@@ -61,10 +61,9 @@ expression: json
         "artifact_handle_id": 1,
         "verification_id": 1,
         "target_path": "[artifact-dir]/committed.mp4",
-        "temp_path": "[artifact-dir]/.voom-tmp.committed.mp4.[temp]",
         "state": "committed",
         "result_file_version_id": 2,
-        "result_file_location_id": 2
+        "result_file_location_id": 3
       }
     },
     "local": {
@@ -104,10 +103,9 @@ expression: json
             "id": 1,
             "verification_id": 1,
             "target_path": "[artifact-dir]/committed.mp4",
-            "temp_path": "[artifact-dir]/.voom-tmp.committed.mp4.[temp]",
             "state": "committed",
             "result_file_version_id": 2,
-            "result_file_location_id": 2
+            "result_file_location_id": 3
           }
         ],
         "latest_verification": {
@@ -125,10 +123,9 @@ expression: json
           "id": 1,
           "verification_id": 1,
           "target_path": "[artifact-dir]/committed.mp4",
-          "temp_path": "[artifact-dir]/.voom-tmp.committed.mp4.[temp]",
           "state": "committed",
           "result_file_version_id": 2,
-          "result_file_location_id": 2
+          "result_file_location_id": 3
         }
       }
     },

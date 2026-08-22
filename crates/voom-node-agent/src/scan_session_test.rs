@@ -187,6 +187,7 @@ async fn pump_fixture() -> PumpFixture {
                 name: "VOOM_TEST_TOKEN".to_owned(),
             },
             workers: Vec::new(),
+            storage_roots: Vec::new(),
         },
         node_token,
     };

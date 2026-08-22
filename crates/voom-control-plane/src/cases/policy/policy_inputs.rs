@@ -16,7 +16,7 @@ use crate::ControlPlane;
 use crate::cases::begin_immediate_tx;
 use crate::media_snapshot::stream_summary_from_snapshot_payload;
 
-use super::{begin_tx, commit_tx};
+use super::commit_tx;
 
 #[derive(Debug, Clone)]
 pub struct PolicyInputFromScanInput {
@@ -136,7 +136,7 @@ impl ControlPlane {
         &self,
         input: PolicyInputFromScanInput,
     ) -> Result<PolicyInputFromScanResult, VoomError> {
-        let mut tx = begin_tx(&self.pool).await?;
+        let mut tx = begin_immediate_tx(&self.pool).await?;
         let file_version = self
             .identity
             .get_file_version_in_tx(&mut tx, input.file_version_id)

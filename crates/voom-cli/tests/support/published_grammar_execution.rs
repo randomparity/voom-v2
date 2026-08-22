@@ -222,6 +222,44 @@ impl ScenarioRun {
             voom_store::test_support::seed_test_storage_root(&pool)
                 .await
                 .map_err(|error| io::Error::other(error.to_string()))?;
+            // Background stand-in for the storage-owner agent (ADR 0074).
+            {
+                let node = voom_test_support::commit_node::SimulatedOwnerNode::new()
+                    .map_err(|error| io::Error::other(error.to_string()))?;
+                node.install(&pool)
+                    .await
+                    .map_err(|error| io::Error::other(error.to_string()))?;
+                let driver_cp = voom_control_plane::ControlPlane::open(&url)
+                    .await
+                    .map_err(|error| io::Error::other(error.to_string()))?;
+                let driver_pool = pool.clone();
+                std::thread::spawn(move || {
+                    let rt = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .unwrap();
+                    rt.block_on(async move {
+                        loop {
+                            let pending: Option<(i64, i64)> = sqlx::query_as(
+                                "SELECT id, artifact_handle_id FROM artifact_commit_intents WHERE state = 'pending' ORDER BY id ASC LIMIT 1",
+                            )
+                            .fetch_optional(&driver_pool)
+                            .await
+                            .unwrap();
+                            if let Some((_, handle)) = pending {
+                                let _ = node
+                                    .drive_pending_commit(
+                                        &driver_cp,
+                                        &driver_pool,
+                                        voom_core::ArtifactHandleId(u64::try_from(handle).unwrap()),
+                                    )
+                                    .await;
+                            }
+                            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                        }
+                    });
+                });
+            }
             sqlx::query(
                 "UPDATE library_roots SET provider_locator = ?, display_locator = ? WHERE id = ?",
             )

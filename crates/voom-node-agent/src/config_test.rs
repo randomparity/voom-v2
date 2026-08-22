@@ -3,6 +3,8 @@ use std::path::Path;
 use secrecy::ExposeSecret;
 use tempfile::TempDir;
 
+use voom_core::VoomError;
+
 use super::AgentConfig;
 
 #[test]
@@ -22,7 +24,7 @@ fn config_rejects_unknown_fields_and_invalid_numeric_bounds() {
     let fixture = ConfigFixture::new("token");
     for (field, value) in [
         ("poll_interval_ms", "49"),
-        ("poll_interval_ms", "60001"),
+        ("poll_interval_ms", "5001"),
         ("lease_ttl_seconds", "4"),
         ("lease_ttl_seconds", "3601"),
         ("progress_idle_timeout_seconds", "4"),
@@ -38,6 +40,36 @@ fn config_rejects_unknown_fields_and_invalid_numeric_bounds() {
     }
     fixture.rewrite(&format!("{}\nunknown = true\n", fixture.document));
     assert!(AgentConfig::load(&fixture.config_path).is_err());
+}
+
+/// The commit coordinator must converge inside the control plane's
+/// `COMMIT_CONVERGENCE_TIMEOUT` (10 s): the poll bound is capped below it and a
+/// violation names that coupling.
+#[test]
+fn config_caps_poll_interval_below_commit_convergence_timeout() {
+    let fixture = ConfigFixture::new("token");
+
+    fixture.rewrite(&replace_assignment(
+        &fixture.document,
+        "poll_interval_ms",
+        "5000",
+    ));
+    assert!(
+        AgentConfig::load(&fixture.config_path).is_ok(),
+        "poll_interval_ms = 5000 sits at the cap and must be accepted"
+    );
+
+    fixture.rewrite(&replace_assignment(
+        &fixture.document,
+        "poll_interval_ms",
+        "5001",
+    ));
+    let error = AgentConfig::load(&fixture.config_path).unwrap_err();
+    assert!(
+        matches!(&error, VoomError::Config(message)
+            if message.contains("COMMIT_CONVERGENCE_TIMEOUT")),
+        "the rejection must name the convergence-timeout coupling, got {error:?}"
+    );
 }
 
 #[test]

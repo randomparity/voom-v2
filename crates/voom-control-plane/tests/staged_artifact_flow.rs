@@ -188,11 +188,13 @@ async fn commit_rejections_and_recovery_visibility_are_inspectable() {
         .await
         .unwrap()
         .artifacts;
-    assert_eq!(recoveries.len(), 1);
-    assert_eq!(
-        recoveries[0].artifact_handle_id,
-        recovery.artifact_handle_id
-    );
+    // Both the injected recovery and the drift-rejected commit park in
+    // recovery_required: under ADR 0074 the node's mismatched receipt makes
+    // the drift commit operator-visible instead of failing silently.
+    let recovery_ids: Vec<voom_core::ArtifactHandleId> =
+        recoveries.iter().map(|a| a.artifact_handle_id).collect();
+    assert!(recovery_ids.contains(&verified.artifact_handle_id));
+    assert!(recovery_ids.contains(&recovery.artifact_handle_id));
 }
 
 fn artifact_tempdir() -> TempDir {
@@ -211,6 +213,9 @@ async fn fixture() -> (ControlPlane, Db, TempDir) {
     voom_store::test_support::set_test_storage_root_path(&pool, dir.path())
         .await
         .unwrap();
+    // Background stand-in for the storage-owner agent (ADR 0074): drives the
+    // fenced commit intent so non-blocked commits converge.
+    voom_test_support::commit_node::install_and_spawn_driver(&pool);
     let cp = ControlPlane::open_with_pool(pool, std::sync::Arc::new(voom_core::SystemClock))
         .await
         .unwrap()

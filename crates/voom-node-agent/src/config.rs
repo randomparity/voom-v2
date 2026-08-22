@@ -5,6 +5,14 @@ use std::path::{Path, PathBuf};
 use secrecy::SecretString;
 use serde::Deserialize;
 use voom_core::{ArtifactAccessMode, NodeId, OperationKind, VoomError};
+/// Upper bound for the agent's poll interval, kept at half of the control
+/// plane's `COMMIT_CONVERGENCE_TIMEOUT` (`Duration::from_secs(10)` in
+/// voom-control-plane `artifact/commit`). voom-node-agent only depends on
+/// that crate as a dev-dependency, so the deadline is restated here with this
+/// comment as the coupling record: a poll interval at or above 10 s would let
+/// every staged commit run out its convergence deadline and report
+/// `CommitFailure`.
+const MAX_COMMIT_POLL_INTERVAL_MS: u64 = 5_000;
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -17,6 +25,10 @@ pub struct AgentConfig {
     pub progress_idle_timeout_seconds: u32,
     pub shutdown_grace_seconds: u32,
     pub node_token: TokenSource,
+    /// Filesystem provider locators backing the storage roots this node owns
+    /// byte work for (ADR 0074 commit-intent executor).
+    #[serde(default)]
+    pub storage_roots: Vec<StorageRootBinding>,
     pub workers: Vec<WorkerConfig>,
 }
 
@@ -37,6 +49,17 @@ pub struct WorkerConfig {
     pub operations: Vec<OperationKind>,
     pub artifact_access: Vec<ArtifactAccessMode>,
     pub max_parallel: u32,
+}
+
+/// One storage root this node owns byte work for: the control plane addresses
+/// staged and committed bytes by `(storage_root_id, relative_locator)`; this
+/// binding supplies the filesystem root that relative locators resolve under.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StorageRootBinding {
+    pub storage_root_id: u64,
+    /// Absolute filesystem path of the root's provider locator.
+    pub provider_locator: PathBuf,
 }
 
 #[derive(Clone)]
@@ -74,9 +97,17 @@ impl AgentConfig {
         Ok(LoadedAgentConfig { config, node_token })
     }
 
-    fn validate(&self) -> Result<(), VoomError> {
+    pub(crate) fn validate(&self) -> Result<(), VoomError> {
         validate_url(&self.control_plane_url)?;
-        validate_bound("poll_interval_ms", self.poll_interval_ms, 50, 60_000)?;
+        if !(50..=MAX_COMMIT_POLL_INTERVAL_MS).contains(&self.poll_interval_ms) {
+            return Err(config_error(format!(
+                "poll_interval_ms must be between 50 and {MAX_COMMIT_POLL_INTERVAL_MS}; got {}. \
+                 The commit coordinator must poll well inside the control plane's \
+                 COMMIT_CONVERGENCE_TIMEOUT (10 s, voom-control-plane artifact/commit) or every \
+                 staged commit reports CommitFailure",
+                self.poll_interval_ms
+            )));
+        }
         validate_bound(
             "lease_ttl_seconds",
             u64::from(self.lease_ttl_seconds),
@@ -109,6 +140,23 @@ impl AgentConfig {
                 return Err(config_error(format!(
                     "worker name {:?} is duplicated",
                     worker.name
+                )));
+            }
+        }
+
+        let mut storage_root_ids = HashSet::with_capacity(self.storage_roots.len());
+        for root in &self.storage_roots {
+            if !root.provider_locator.is_absolute() {
+                return Err(config_error(format!(
+                    "storage root {} provider_locator {:?} must be an absolute path",
+                    root.storage_root_id,
+                    root.provider_locator.display()
+                )));
+            }
+            if !storage_root_ids.insert(root.storage_root_id) {
+                return Err(config_error(format!(
+                    "storage root {} is bound more than once",
+                    root.storage_root_id
                 )));
             }
         }
