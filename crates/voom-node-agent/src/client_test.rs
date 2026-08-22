@@ -435,3 +435,63 @@ fn write_response(stream: &mut TcpStream, status: u16, body: &str) {
     );
     let _ = stream.write_all(response.as_bytes());
 }
+
+/// Issue #479: the replayed acquire response is byte-identical to the fresh
+/// one, so the agent's mirror decodes both identically and stays strict about
+/// unknown fields. Store-level corruption (e.g. a zero lease id) decodes here
+/// by contract — proving it is the control plane's replay validator's job.
+#[test]
+fn replayed_acquire_wire_decodes_identically_and_rejects_unknown_fields() {
+    use crate::client::AcquireOutcome;
+    use voom_core::{LeaseId, TicketId, WorkerId};
+
+    let leased = serde_json::json!({
+        "outcome": "leased",
+        "lease_id": 11,
+        "scheduler_decision_id": 7,
+        "ticket_id": 3,
+        "worker_id": 4,
+        "operation": "transcode_video",
+        "dispatch_payload": {"operation": "transcode_video"},
+        "lease_ttl_seconds": 60,
+        "heartbeat_after_seconds": 30,
+        "artifact_access_plan": {
+            "id": 5,
+            "owner_node_id": 1,
+            "access_evidence": {
+                "declaration": [
+                    {"target": {"kind": "storage_root", "storage_root_id": 2},
+                     "rights": ["write"]}
+                ],
+                "root_epochs": [{"storage_root_id": 2, "root_epoch": 0}]
+            }
+        }
+    });
+    let first: AcquireOutcome = serde_json::from_value(leased.clone()).unwrap();
+    let second: AcquireOutcome = serde_json::from_value(leased).unwrap();
+    assert_eq!(first, second);
+    let AcquireOutcome::Leased(dispatch) = first else {
+        panic!("expected the leased mirror to decode");
+    };
+    assert_eq!(dispatch.lease_id, LeaseId(11));
+    assert_eq!(dispatch.ticket_id, TicketId(3));
+    assert_eq!(dispatch.worker_id, WorkerId(4));
+
+    let mut unknown = serde_json::json!({
+        "outcome": "leased",
+        "lease_id": 11,
+        "scheduler_decision_id": 7,
+        "ticket_id": 3,
+        "worker_id": 4,
+        "operation": "transcode_video",
+        "dispatch_payload": {},
+        "lease_ttl_seconds": 60,
+        "heartbeat_after_seconds": 30,
+        "artifact_access_plan": {"id": 5, "owner_node_id": null, "access_evidence": null},
+        "legacy_mode": "shared_mount"
+    });
+    assert!(serde_json::from_value::<AcquireOutcome>(unknown.clone()).is_err());
+    unknown.as_object_mut().unwrap().remove("legacy_mode");
+    unknown["artifact_access_plan"]["mode"] = serde_json::json!("shared_mount");
+    assert!(serde_json::from_value::<AcquireOutcome>(unknown).is_err());
+}
