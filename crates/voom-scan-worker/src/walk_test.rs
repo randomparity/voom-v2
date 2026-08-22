@@ -188,10 +188,16 @@ fn non_utf8_filename_is_skipped_and_counted() {
     };
     write_file(dir.path(), "good.mkv", b"x");
     let bad_name = std::ffi::OsStr::from_bytes(b"\xff\xfebad.mkv");
-    assert!(
-        fs::write(dir.path().join(bad_name), b"x").is_ok(),
-        "seed non-UTF-8 filename"
-    );
+    // APFS rejects non-UTF-8 filenames outright, so macOS runners cannot seed
+    // the fixture; the skip-counting contract still holds on ext4-style
+    // filesystems, and elsewhere the test degrades to the single good file.
+    if fs::write(dir.path().join(bad_name), b"x").is_err() {
+        let Some(outcome) = scan(dir.path(), &[]) else {
+            return;
+        };
+        assert_eq!(primary_locators(&outcome), vec!["good.mkv"]);
+        return;
+    }
 
     let Some(outcome) = scan(dir.path(), &[]) else {
         return;
