@@ -178,11 +178,12 @@ inode scan-fact recording. Logic relocates DB-only from `scan/persist.rs` (which
 byte reads); `verify_probe_facts` semantics move into the pump's agree/disagree rule.
 
 **C6 — Removal.**
-Delete: `scan/discovery.rs`, `scan/hash.rs`, `scan/mod.rs` byte pipeline (`scan_path*`,
-grouping, launcher/classifier traits, report builder stays only where still used),
-`scan/worker.rs` local launch helpers, `scan/bootstrap.rs`, old `scan/library.rs`
-filesystem checks; CLI direct dispatch rewritten to
-request+poll (`--no-wait` skips polling); `VOOM_FFPROBE_BIN` warning replaced by nothing.
+Delete: `scan/discovery.rs`, `scan/hash.rs`, the `scan/mod.rs` byte pipeline (`scan_path*`,
+grouping, launcher/classifier traits), old `scan/library.rs` filesystem checks. KEEP
+`scan/worker.rs` and `scan/bootstrap.rs`: audio/remux/transcode commit probing, policy tool
+preflight, and artifact verification still consume them (#423/#424 surfaces). CLI direct
+dispatch rewritten to request+poll (`--no-wait` skips polling); `VOOM_FFPROBE_BIN` warning
+replaced by nothing.
 Tests deleted/moved with their subjects; `check-test-layout` keeps siblings co-located.
 
 ## Data flow guarantees
