@@ -147,7 +147,8 @@ Pump behavior for a `scan_library` dispatch:
    equals its pre-read stat AND ffprobe `pre_probe`/`post_probe` each match the hash result's
    {size_bytes, content_hash, modified_at}. Probe paths are absolute canonical-root joins
    (never option-like); probing stays pathname-based until #423 reference-passing.
-5. Buffer observations; flush a batch whenever ≥1000 accumulate or enumeration ends.
+5. Buffer observations; flush a batch when ≥1000 accumulate, accumulated evidence bytes
+   reach 512 KiB (staying under the API's ~1 MiB request-body cap), or enumeration ends.
 6. After scan `Result`: flush remainder, `complete_scan_session(last_sequence,
    observation_count)`; lease settles `Complete` with summary `{scan_session_id,
    observed_count, published: unknown-at-this-tier}` — actually summary carries only counts

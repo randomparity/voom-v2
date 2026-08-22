@@ -116,9 +116,14 @@ inspection until terminal and prints the outcome envelope.
   still reopens a reconstructed absolute pathname until #423 lands reference-passing; the
   drift checks around each probe bound what that residual can publish, but they do not bind
   an open object.
-- Observation rows now carry up to one strict evidence payload each; batch size bounds keep
-  worst-case payloads within the existing 1000-observation route limit.
-- The ADR 0067 cumulative cap of 100,000 observations per session now bounds scannable
+- Observation rows now carry up to one strict evidence payload each. Batches are bounded by
+  both the 1000-observation route limit and an accumulated-evidence byte budget under the
+  API's request-body cap (~1 MiB): the pump flushes whichever bound binds first, so a
+  sidecar-dense root produces more, smaller batches instead of a deterministically rejected
+  submission.
+- Durable workflows whose plans contain scan nodes fail loudly at ticket expansion until
+  scanner-result consumption against published locations is reintroduced (#423-adjacent);
+  no production submission path exists today, so nothing live regresses.
   roots: a root enumerating more than that fails batch acceptance deterministically and
   re-requests reproduce the failure, where the transitional local scanner had no ceiling.
   Raising or chunking the cap is ADR 0067's decision to revisit, not this one's.
@@ -158,3 +163,7 @@ inspection until terminal and prints the outcome envelope.
   one issue later, and debt 0004 explicitly warns against duplicating or preempting the
   dispatch-reference contract; the pre/post drift checks bound what the pathname reopen can
   publish in the interim.
+- **Keep session orchestration in the control plane while owner-node workers do the byte
+  work.** verified: it is structurally simpler, but ADR 0067 gates every start/batch/success/
+  failure route on the remote-node bearer token plus the current-incarnation fence, so only
+  the agent can drive a session — a control-plane pump has no authorized caller.
