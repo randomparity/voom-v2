@@ -149,7 +149,7 @@ impl WorkerCapacitySaturation {
 }
 
 /// Why a worker could not take the operation it tried to acquire, classified
-/// from the same facts [`WorkerOperationEligibility`](crate::repo::execution::workers::WorkerOperationEligibility)
+/// from the same facts [`WorkerOperationEligibility`]
 /// reports. The set is closed: every ineligible shape maps to exactly one
 /// reason.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
