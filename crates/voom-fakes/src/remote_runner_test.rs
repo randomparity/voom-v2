@@ -239,3 +239,77 @@ impl Drop for RemoteRunnerFixture {
         self.server.abort();
     }
 }
+
+/// Issue #478: the synthetic runner consumes the acquire response's dispatch
+/// contract end to end — the leased byte-work operation (already normalized
+/// by the control plane before dispatch) executes and completes, and the
+/// durable records bind one lease to its access plan and selected decision.
+///
+/// The activation surface declares closed bare `OperationKind` tokens only
+/// (ADR 0071/#423), so this e2e exercises the canonical encoding; the
+/// namespaced-encoding equivalence and owner-local evidence are covered at
+/// the control-plane and API surfaces where worker registration is explicit.
+#[tokio::test]
+async fn runner_completes_acquired_byte_work_with_bound_plan_and_decision() {
+    use voom_store::repo::execution::leases::{LeaseFilter, SqliteLeaseRepo};
+    use voom_store::repo::execution::scheduler_decisions::{
+        SchedulerDecisionFilter, SchedulerDecisionOutcome,
+    };
+
+    let fixture = RemoteRunnerFixture::new().await;
+    let ticket_id = fixture
+        .ready_ticket(transcode_video_ticket(
+            "/library/movie.mkv",
+            "runner-plan-bind.mkv",
+        ))
+        .await;
+
+    let summary = RemoteSyntheticRunner::new(fixture.config())
+        .run_once_to_completion()
+        .await
+        .unwrap();
+    assert_eq!(summary.acquired, 1);
+    assert_eq!(summary.completed, 1);
+    assert_eq!(summary.failed, 0);
+    assert_eq!(
+        fixture.ticket_state(ticket_id).await,
+        TicketState::Succeeded
+    );
+
+    // Exactly one lease, exactly one plan bound to it, and the selected
+    // decision names that same lease.
+    let pool = voom_store::connect(&fixture.url).await.unwrap();
+    // The completed lease has left `held`, so list without a state filter.
+    let leases = SqliteLeaseRepo::new(pool.clone())
+        .list(LeaseFilter { state: None }, None, 10)
+        .await
+        .unwrap();
+    assert_eq!(
+        leases.len(),
+        1,
+        "exactly one lease was acquired for the byte-work ticket"
+    );
+    let plans = voom_store::repo::media::artifact_access_plans::SqliteArtifactAccessPlanRepo::new(
+        pool.clone(),
+    )
+    .list_by_ticket(ticket_id)
+    .await
+    .unwrap();
+    assert_eq!(plans.len(), 1, "exactly one plan binds the ticket's lease");
+    let decisions =
+        voom_store::repo::execution::scheduler_decisions::SqliteSchedulerDecisionRepo::new(pool)
+            .list(SchedulerDecisionFilter {
+                ticket_id: Some(ticket_id),
+                outcome: Some(SchedulerDecisionOutcome::Selected),
+                limit: 10,
+                ..SchedulerDecisionFilter::default()
+            })
+            .await
+            .unwrap();
+    assert_eq!(decisions.len(), 1);
+    assert_eq!(
+        decisions[0].selected_lease_id,
+        Some(plans[0].lease_id),
+        "the selected decision and the plan bind the same lease"
+    );
+}

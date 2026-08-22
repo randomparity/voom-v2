@@ -102,7 +102,7 @@ fn selected_input() -> NewSchedulerDecision {
         ticket_id: Some(TicketId(7)),
         selected_worker_id: Some(WorkerId(5)),
         selected_node_id: Some(NodeId(3)),
-        selected_lease_id: None,
+        selected_lease_id: Some(LeaseId(11)),
         outcome: SchedulerDecisionOutcome::Selected,
         reason_code: SchedulerReasonCode::Selected,
         summary: "selected worker 5 for ticket 7".to_owned(),
@@ -116,22 +116,41 @@ fn selected_input() -> NewSchedulerDecision {
 }
 
 #[tokio::test]
-async fn create_selected_and_link_lease_round_trip() {
+async fn created_selected_decisions_name_their_lease() {
     let (repo, _tmp) = repo().await;
 
     let created = repo.create(selected_input()).await.unwrap();
 
     assert_eq!(created.outcome, SchedulerDecisionOutcome::Selected);
-    assert_eq!(created.selected_lease_id, None);
-
-    let linked = repo
-        .link_selected_lease(created.id, LeaseId(11), T0)
-        .await
-        .unwrap();
-    assert_eq!(linked.selected_lease_id, Some(LeaseId(11)));
+    assert_eq!(created.selected_lease_id, Some(LeaseId(11)));
 
     let fetched = repo.get(created.id).await.unwrap().unwrap();
     assert_eq!(fetched.selected_lease_id, Some(LeaseId(11)));
+}
+
+#[tokio::test]
+async fn selected_decisions_require_a_coherent_lease_at_creation() {
+    let (repo, _tmp) = repo().await;
+
+    // A selected decision without a lease is rejected outright.
+    let mut input = selected_input();
+    input.selected_lease_id = None;
+    let err = repo.create(input).await.unwrap_err();
+    assert_eq!(err.error_code(), voom_core::ErrorCode::ConfigInvalid);
+
+    // A lease whose ticket differs from the row's facts conflicts.
+    // Lease 21 holds ticket 17; the row still claims ticket 7.
+    let mut input = selected_input();
+    input.selected_lease_id = Some(LeaseId(21));
+    let err = repo.create(input).await.unwrap_err();
+    assert_eq!(err.error_code(), voom_core::ErrorCode::Conflict);
+    assert!(err.to_string().contains("does not match"));
+
+    // A missing lease is not found.
+    let mut input = selected_input();
+    input.selected_lease_id = Some(LeaseId(99));
+    let err = repo.create(input).await.unwrap_err();
+    assert_eq!(err.error_code(), voom_core::ErrorCode::NotFound);
 }
 
 #[tokio::test]
@@ -142,6 +161,7 @@ async fn idle_decisions_are_suppressed_by_key() {
     input.ticket_id = None;
     input.selected_worker_id = None;
     input.selected_node_id = None;
+    input.selected_lease_id = None;
     input.selected_score = None;
     input.outcome = SchedulerDecisionOutcome::Idle;
     input.reason_code = SchedulerReasonCode::NoReadyTicket;
@@ -170,6 +190,7 @@ async fn suppression_key_keeps_selected_rows_separate_from_idle_rows() {
     idle.ticket_id = None;
     idle.selected_worker_id = None;
     idle.selected_node_id = None;
+    idle.selected_lease_id = None;
     idle.selected_score = None;
     idle.candidate_count = 0;
     repo.create_or_suppress(idle.clone()).await.unwrap();
@@ -242,17 +263,6 @@ async fn selected_decisions_cannot_be_suppressed() {
 }
 
 #[tokio::test]
-async fn selected_lease_id_must_be_linked_after_create() {
-    let (repo, _tmp) = repo().await;
-    let mut input = selected_input();
-    input.selected_lease_id = Some(LeaseId(21));
-
-    let err = repo.create(input).await.unwrap_err();
-
-    assert_eq!(err.error_code(), voom_core::ErrorCode::ConfigInvalid);
-}
-
-#[tokio::test]
 async fn impossible_decision_shapes_are_rejected() {
     let (repo, _tmp) = repo().await;
     let mut idle_selected = selected_input();
@@ -271,6 +281,7 @@ async fn impossible_decision_shapes_are_rejected() {
     idle_with_ticket.reason_code = SchedulerReasonCode::NoReadyTicket;
     idle_with_ticket.selected_worker_id = None;
     idle_with_ticket.selected_node_id = None;
+    idle_with_ticket.selected_lease_id = None;
     idle_with_ticket.selected_score = None;
     let err = repo.create(idle_with_ticket).await.unwrap_err();
     assert_eq!(err.error_code(), voom_core::ErrorCode::ConfigInvalid);
@@ -282,6 +293,7 @@ async fn impossible_decision_shapes_are_rejected() {
     idle_with_candidates.ticket_id = None;
     idle_with_candidates.selected_worker_id = None;
     idle_with_candidates.selected_node_id = None;
+    idle_with_candidates.selected_lease_id = None;
     idle_with_candidates.selected_score = None;
     let err = repo.create(idle_with_candidates).await.unwrap_err();
     assert_eq!(err.error_code(), voom_core::ErrorCode::ConfigInvalid);
@@ -319,6 +331,7 @@ async fn rejected_decisions_are_persistable_without_selected_tuple() {
     input.reason_code = SchedulerReasonCode::WorkerCapacityFull;
     input.selected_worker_id = None;
     input.selected_node_id = None;
+    input.selected_lease_id = None;
     input.selected_score = None;
 
     let row = repo.create(input).await.unwrap();
@@ -336,6 +349,7 @@ async fn suppression_key_reuse_requires_equivalent_decision() {
     input.ticket_id = None;
     input.selected_worker_id = None;
     input.selected_node_id = None;
+    input.selected_lease_id = None;
     input.selected_score = None;
     input.outcome = SchedulerDecisionOutcome::Idle;
     input.reason_code = SchedulerReasonCode::NoReadyTicket;
@@ -351,54 +365,4 @@ async fn suppression_key_reuse_requires_equivalent_decision() {
         err.to_string()
             .contains("already belongs to a different decision")
     );
-}
-
-#[tokio::test]
-async fn link_selected_lease_rejects_incoherent_rows() {
-    let (repo, _tmp) = repo().await;
-    let selected = repo.create(selected_input()).await.unwrap();
-    let err = repo
-        .link_selected_lease(selected.id, LeaseId(21), T0)
-        .await
-        .unwrap_err();
-    assert_eq!(err.error_code(), voom_core::ErrorCode::Conflict);
-
-    let mut idle = selected_input();
-    idle.decision_kind = SchedulerDecisionKind::Idle;
-    idle.ticket_id = None;
-    idle.selected_worker_id = None;
-    idle.selected_node_id = None;
-    idle.selected_score = None;
-    idle.outcome = SchedulerDecisionOutcome::Idle;
-    idle.reason_code = SchedulerReasonCode::NoReadyTicket;
-    idle.candidate_count = 0;
-    let idle = repo.create(idle).await.unwrap();
-    let err = repo
-        .link_selected_lease(idle.id, LeaseId(11), T0)
-        .await
-        .unwrap_err();
-    assert_eq!(err.error_code(), voom_core::ErrorCode::Conflict);
-}
-
-#[tokio::test]
-async fn link_selected_lease_is_idempotent_but_not_replaceable() {
-    let (repo, _tmp) = repo().await;
-    let selected = repo.create(selected_input()).await.unwrap();
-
-    let first = repo
-        .link_selected_lease(selected.id, LeaseId(11), T0)
-        .await
-        .unwrap();
-    let replay = repo
-        .link_selected_lease(selected.id, LeaseId(11), T0)
-        .await
-        .unwrap();
-    assert_eq!(first.selected_lease_id, Some(LeaseId(11)));
-    assert_eq!(replay.selected_lease_id, Some(LeaseId(11)));
-
-    let err = repo
-        .link_selected_lease(selected.id, LeaseId(12), T0)
-        .await
-        .unwrap_err();
-    assert_eq!(err.error_code(), voom_core::ErrorCode::Conflict);
 }

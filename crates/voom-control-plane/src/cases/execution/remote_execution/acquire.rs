@@ -27,10 +27,12 @@ use voom_scheduler::{
     NodeCandidate, SCORING_VERSION, SchedulerCandidate, SchedulerScorer, ScoreDecision,
     ScoreOutcome, ScoreReasonCode, TicketCandidate, WorkerCandidate,
 };
-use voom_store::repo::execution::leases::NewLease;
+use voom_store::repo::execution::leases::{
+    LeaseAcquireOutcome, LeaseIneligibilityReason, NewLease,
+};
 use voom_store::repo::execution::remote_idempotency::{IdempotencyOutcome, RemoteIdempotencyInput};
 use voom_store::repo::execution::scheduler_decisions::{
-    NewSchedulerDecision, SchedulerDecision, SchedulerDecisionKind, SchedulerDecisionOutcome,
+    NewSchedulerDecision, SchedulerDecisionKind, SchedulerDecisionOutcome,
     SchedulerReasonCode as StoreSchedulerReasonCode, SchedulerRequestSource,
 };
 use voom_store::repo::execution::tickets::Ticket;
@@ -143,16 +145,16 @@ impl ControlPlane {
             RemoteAcquirePrepared::Leased {
                 ticket,
                 eligibility,
-                scheduler_decision,
                 locality,
+                score,
             } => {
                 self.remote_acquire_leased_in_tx(
                     &mut tx,
                     &input,
                     ticket,
                     eligibility,
-                    scheduler_decision,
                     locality,
+                    &score,
                     now,
                 )
                 .await?
@@ -306,6 +308,8 @@ impl ControlPlane {
                 ))
             })?
             .clone();
+        // Advisory scoring used stale capacity facts; re-read them before
+        // committing to this candidate.
         if let Some(outcome) = self
             .recheck_selected_remote_capacity_in_tx(tx, input, selected_candidate, &ticket, now)
             .await?
@@ -314,28 +318,15 @@ impl ControlPlane {
         }
 
         // Reuse the gate's resolution: one resolution, one point in time.
+        // The selected decision is created only after the lease and plan
+        // exist, so a changed post-selection gate never leaves a selected
+        // decision row behind (ADR 0072).
         let locality = candidate_set.locality_by_ticket.get(&selected.ticket_id);
-        let access_evidence = locality
-            .map(|(declaration, resolution)| decision_owner_evidence(declaration, resolution))
-            .transpose()?;
-        let scheduler_decision = self
-            .scheduler_decisions
-            .create_in_tx(
-                tx,
-                decision_from_score(
-                    input,
-                    score,
-                    Some((selected.ticket_id, selected.worker_id, selected.node_id)),
-                    Ok(access_evidence),
-                    now,
-                )?,
-            )
-            .await?;
         Ok(RemoteAcquirePrepared::Leased {
             ticket,
             eligibility,
-            scheduler_decision,
             locality: locality.cloned(),
+            score: score.clone(),
         })
     }
 
@@ -491,18 +482,22 @@ impl ControlPlane {
         clippy::too_many_arguments,
         reason = "remote acquire keeps the transaction input and selected facts explicit"
     )]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the acquired and changed-gate branches are clearer in transaction order"
+    )]
     async fn remote_acquire_leased_in_tx(
         &self,
         tx: &mut Transaction<'_, Sqlite>,
         input: &RemoteAcquireInput,
         ticket: Ticket,
         eligibility: WorkerOperationEligibility,
-        scheduler_decision: SchedulerDecision,
         locality: Option<(ArtifactAccessDeclaration, AccessResolution)>,
+        score: &ScoreDecision,
         now: time::OffsetDateTime,
     ) -> Result<RemoteAcquireOutcome, VoomError> {
-        let lease = self
-            .acquire_lease_in_tx(
+        let outcome = self
+            .try_acquire_lease_in_tx(
                 tx,
                 NewLease {
                     ticket_id: ticket.id,
@@ -512,6 +507,59 @@ impl ControlPlane {
                 },
             )
             .await?;
+        let lease = match &outcome {
+            LeaseAcquireOutcome::Acquired(lease) => lease.clone(),
+            LeaseAcquireOutcome::WorkerIneligible {
+                worker_id,
+                reason: LeaseIneligibilityReason::WorkerMissing,
+                ..
+            } => {
+                // The same transaction read this worker at preflight; a
+                // mid-transaction vanish is an invariant violation, not a
+                // scheduling gate.
+                return Err(VoomError::Internal(format!(
+                    "remote acquire selected worker {worker_id} vanished before lease creation"
+                )));
+            }
+            rejected => {
+                // A post-selection gate changed under the selected candidate.
+                // The savepoint rolled back, so zero leases and zero bound
+                // access plans exist; the changed gate becomes one durable
+                // decision carrying the documented stable reason (ADR 0072).
+                let reason_code = outcome_reason_code(rejected);
+                let decision = self
+                    .scheduler_decisions
+                    .create_or_suppress_in_tx(
+                        tx,
+                        changed_gate_decision(
+                            input,
+                            &ticket,
+                            reason_code,
+                            changed_gate_explanation(rejected, reason_code),
+                            now,
+                        ),
+                    )
+                    .await?;
+                let outcome = RemoteAcquireOutcome::NoCandidate {
+                    worker_id: input.worker_id,
+                    scheduler_decision_id: decision.id,
+                };
+                // The request reached a terminal decision, so its idempotency
+                // reservation must complete — an unfinished reservation would
+                // poison every replay of this key with a conflict.
+                self.complete_remote_ok_in_tx(
+                    tx,
+                    input.node_id,
+                    ROUTE_ACQUIRE,
+                    Some(input.worker_id),
+                    &super::incarnation_replay_key(input.incarnation_id, &input.idempotency_key),
+                    &outcome,
+                )
+                .await?;
+                return Ok(outcome);
+            }
+        };
+
         let plan = self
             .artifact_access_plans
             .create_selected_in_tx(
@@ -526,16 +574,29 @@ impl ControlPlane {
                 )?,
             )
             .await?;
+        let access_evidence = locality
+            .as_ref()
+            .map(|(declaration, resolution)| decision_owner_evidence(declaration, resolution))
+            .transpose()?;
         let scheduler_decision = self
             .scheduler_decisions
-            .link_selected_lease_in_tx(tx, scheduler_decision.id, lease.id, now)
+            .create_in_tx(
+                tx,
+                decision_from_score(
+                    input,
+                    score,
+                    Some((ticket.id, input.worker_id, input.node_id, lease.id)),
+                    Ok(access_evidence),
+                    now,
+                )?,
+            )
             .await?;
         let outcome = RemoteAcquireOutcome::Leased(RemoteLeaseDispatch {
             lease_id: lease.id,
             scheduler_decision_id: scheduler_decision.id,
             ticket_id: ticket.id,
             worker_id: input.worker_id,
-            operation: ticket.kind.into_string(),
+            operation: ticket.kind.normalize().matching_token().into_string(),
             dispatch_payload: ticket.payload,
             lease_ttl_seconds: lease.ttl_seconds,
             heartbeat_after_seconds: heartbeat_after_seconds(lease.ttl_seconds),
@@ -685,8 +746,8 @@ enum RemoteAcquirePrepared {
     Leased {
         ticket: Ticket,
         eligibility: WorkerOperationEligibility,
-        scheduler_decision: SchedulerDecision,
         locality: Option<(ArtifactAccessDeclaration, AccessResolution)>,
+        score: ScoreDecision,
     },
 }
 
@@ -942,14 +1003,21 @@ fn selected_candidate_key(
 fn decision_from_score(
     input: &RemoteAcquireInput,
     score: &voom_scheduler::ScoreDecision,
-    selected: Option<(TicketId, WorkerId, NodeId)>,
+    selected: Option<(TicketId, WorkerId, NodeId, LeaseId)>,
     access_evidence: Result<Option<DecisionAccessEvidence>, VoomError>,
     now: OffsetDateTime,
 ) -> Result<NewSchedulerDecision, VoomError> {
-    let (ticket_id, selected_worker_id, selected_node_id) = selected
-        .map_or((None, None, None), |(ticket_id, worker_id, node_id)| {
-            (Some(ticket_id), Some(worker_id), Some(node_id))
-        });
+    let (ticket_id, selected_worker_id, selected_node_id, selected_lease_id) = selected.map_or(
+        (None, None, None, None),
+        |(ticket_id, worker_id, node_id, lease_id)| {
+            (
+                Some(ticket_id),
+                Some(worker_id),
+                Some(node_id),
+                Some(lease_id),
+            )
+        },
+    );
     let (decision_kind, outcome) = match score.outcome {
         ScoreOutcome::Selected => (
             SchedulerDecisionKind::LeaseAcquire,
@@ -970,7 +1038,7 @@ fn decision_from_score(
         ticket_id,
         selected_worker_id,
         selected_node_id,
-        selected_lease_id: None,
+        selected_lease_id,
         outcome,
         reason_code: scheduler_reason(score.reason_code),
         summary: scheduler_summary(score),
@@ -1291,6 +1359,100 @@ fn gate_rejection_decision(
                 .map(|reference| json!({ "reason": reference.reason.as_str() }))
                 .collect::<Vec<_>>(),
         }),
+        now,
+    }
+}
+
+/// Map a structured changed-gate outcome onto its documented stable reason.
+pub(super) fn outcome_reason_code(outcome: &LeaseAcquireOutcome) -> StoreSchedulerReasonCode {
+    match outcome {
+        LeaseAcquireOutcome::TicketNotReady { .. } => StoreSchedulerReasonCode::NoReadyTicket,
+        LeaseAcquireOutcome::WorkerIneligible { reason, .. } => match reason {
+            LeaseIneligibilityReason::WorkerStale | LeaseIneligibilityReason::WorkerRetired => {
+                StoreSchedulerReasonCode::WorkerNotExecutable
+            }
+            LeaseIneligibilityReason::OperationDenied => StoreSchedulerReasonCode::OperationDenied,
+            LeaseIneligibilityReason::MissingCapability => {
+                StoreSchedulerReasonCode::MissingCapability
+            }
+            LeaseIneligibilityReason::MissingGrant => StoreSchedulerReasonCode::MissingGrant,
+            LeaseIneligibilityReason::WorkerMissing => {
+                StoreSchedulerReasonCode::NoEligibleCandidate
+            }
+        },
+        LeaseAcquireOutcome::CapacityFull(_) => StoreSchedulerReasonCode::WorkerCapacityFull,
+        LeaseAcquireOutcome::Acquired(_) => StoreSchedulerReasonCode::Selected,
+    }
+}
+
+/// Locator-free observed facts for one changed post-selection gate.
+pub(super) fn changed_gate_explanation(
+    outcome: &LeaseAcquireOutcome,
+    reason_code: StoreSchedulerReasonCode,
+) -> JsonValue {
+    let mut explanation = json!({
+        "scoring_version": SCORING_VERSION,
+        "outcome": "no_eligible_candidate",
+        "reason": reason_code.as_str(),
+    });
+    let Some(object) = explanation.as_object_mut() else {
+        return explanation;
+    };
+    match outcome {
+        LeaseAcquireOutcome::TicketNotReady { ticket_id } => {
+            object.insert("selected_ticket_id".to_owned(), json!(ticket_id.0));
+        }
+        LeaseAcquireOutcome::WorkerIneligible { operation, .. } => {
+            object.insert("operation".to_owned(), json!(operation.as_str()));
+        }
+        LeaseAcquireOutcome::CapacityFull(saturation) => {
+            object.insert("operation".to_owned(), json!(saturation.operation.as_str()));
+            object.insert(
+                "observed".to_owned(),
+                json!({
+                    "active_leases": saturation.active_leases,
+                    "limit": saturation.max_parallel
+                }),
+            );
+        }
+        LeaseAcquireOutcome::Acquired(_) => {}
+    }
+    explanation
+}
+
+/// Durable no-candidate record for one changed post-selection gate: it names
+/// the selected ticket, and its suppression key carries the matching ticket
+/// segment so key and row agree (ADR 0072).
+fn changed_gate_decision(
+    input: &RemoteAcquireInput,
+    ticket: &Ticket,
+    reason_code: StoreSchedulerReasonCode,
+    explanation: JsonValue,
+    now: OffsetDateTime,
+) -> NewSchedulerDecision {
+    NewSchedulerDecision {
+        decision_kind: SchedulerDecisionKind::NoCandidate,
+        request_source: SchedulerRequestSource::RemoteAcquire,
+        idempotency_key: Some(input.idempotency_key.clone()),
+        request_node_id: Some(input.node_id),
+        request_worker_id: Some(input.worker_id),
+        ticket_id: Some(ticket.id),
+        selected_worker_id: None,
+        selected_node_id: None,
+        selected_lease_id: None,
+        outcome: SchedulerDecisionOutcome::NoEligibleCandidate,
+        reason_code,
+        summary: format!("no eligible candidate: {}", reason_code.as_str()),
+        candidate_count: 1,
+        selected_score: None,
+        access_evidence: None,
+        suppression_key: Some(remote_acquire_suppression_key(
+            input,
+            reason_code.as_str(),
+            ticket.kind.as_str(),
+            Some(ticket.id),
+        )),
+        explanation,
         now,
     }
 }

@@ -148,26 +148,104 @@ impl WorkerCapacitySaturation {
     }
 }
 
+/// Why a worker could not take the operation it tried to acquire, classified
+/// from the same facts [`WorkerOperationEligibility`]
+/// reports. The set is closed: every ineligible shape maps to exactly one
+/// reason.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LeaseIneligibilityReason {
+    /// The worker row does not exist.
+    WorkerMissing,
+    /// The worker is alive but stale.
+    WorkerStale,
+    /// The worker has been retired.
+    WorkerRetired,
+    /// A grant explicitly denies the operation.
+    OperationDenied,
+    /// No capability row advertises the operation.
+    MissingCapability,
+    /// No grant authorizes the operation.
+    MissingGrant,
+}
+
 /// Store-owned result of an otherwise valid lease-acquisition attempt.
+///
+/// Every guarded recheck — readiness, worker eligibility, capacity — resolves
+/// to an outcome rather than an error, so callers that handle one acquisition
+/// can turn a changed gate into a documented decision while callers that
+/// cannot (`into_lease_result`) still get today's error classification. All
+/// non-`Acquired` outcomes roll back the acquire savepoint and mutate nothing.
 #[derive(Debug, Clone)]
 pub enum LeaseAcquireOutcome {
     /// The ticket transition and held lease committed inside the savepoint.
     Acquired(Lease),
     /// Capacity was full and the savepoint was rolled back without side effects.
     CapacityFull(WorkerCapacitySaturation),
+    /// The ticket was not ready, not yet eligible, its parent job was not
+    /// open, or its attempt budget was exhausted; nothing was mutated.
+    TicketNotReady { ticket_id: TicketId },
+    /// The worker could not be credited with the operation; nothing was
+    /// mutated.
+    WorkerIneligible {
+        worker_id: WorkerId,
+        operation: TicketOperation,
+        reason: LeaseIneligibilityReason,
+    },
 }
 
 impl LeaseAcquireOutcome {
     /// Convert to the legacy acquisition result and public error classification.
     ///
+    /// The messages below are public-observable behavior of the standalone and
+    /// local acquisition paths and are pinned by tests; change them only
+    /// deliberately.
+    ///
     /// # Errors
     ///
-    /// Returns `NoEligibleWorker` when the typed outcome is capacity saturation.
+    /// Returns `NoEligibleWorker` when the typed outcome is capacity
+    /// saturation, `NotFound`/`Conflict` when a guarded recheck rejected the
+    /// acquisition.
     pub fn into_lease_result(self) -> Result<Lease, VoomError> {
         match self {
             Self::Acquired(lease) => Ok(lease),
             Self::CapacityFull(saturation) => Err(saturation.into_error()),
+            Self::TicketNotReady { ticket_id } => Err(VoomError::Conflict(format!(
+                "acquire rejected for ticket {ticket_id}: not ready, not eligible, \
+                 parent job not open, or out of attempts"
+            ))),
+            Self::WorkerIneligible {
+                worker_id,
+                operation,
+                reason,
+            } => Err(ineligibility_error(worker_id, &operation, reason)),
         }
+    }
+}
+
+fn ineligibility_error(
+    worker_id: WorkerId,
+    operation: &TicketOperation,
+    reason: LeaseIneligibilityReason,
+) -> VoomError {
+    match reason {
+        LeaseIneligibilityReason::WorkerMissing => {
+            VoomError::NotFound(format!("worker {worker_id}"))
+        }
+        LeaseIneligibilityReason::WorkerStale => {
+            VoomError::Conflict(format!("acquire rejected: worker {worker_id} stale"))
+        }
+        LeaseIneligibilityReason::WorkerRetired => {
+            VoomError::Conflict(format!("acquire rejected: worker {worker_id} retired"))
+        }
+        LeaseIneligibilityReason::OperationDenied => VoomError::Conflict(format!(
+            "acquire rejected: worker {worker_id} denied operation {operation}"
+        )),
+        LeaseIneligibilityReason::MissingCapability => VoomError::Conflict(format!(
+            "acquire rejected: worker {worker_id} missing capability {operation}"
+        )),
+        LeaseIneligibilityReason::MissingGrant => VoomError::Conflict(format!(
+            "acquire rejected: worker {worker_id} missing grant {operation}"
+        )),
     }
 }
 
@@ -266,19 +344,21 @@ impl SqliteLeaseRepo {
             .map_err(|e| VoomError::database_context("lease acquire savepoint begin", e))?;
         let result = self.acquire_guarded(&mut savepoint, &input, ttl_secs).await;
         match result {
-            Ok(LeaseAcquireOutcome::Acquired(lease)) => {
+            Ok(outcome @ LeaseAcquireOutcome::Acquired(_)) => {
                 savepoint.commit().await.map_err(|e| {
                     VoomError::database_context("lease acquire savepoint release", e)
                 })?;
-                Ok(LeaseAcquireOutcome::Acquired(lease))
+                Ok(outcome)
             }
-            Ok(LeaseAcquireOutcome::CapacityFull(saturation)) => {
+            Ok(rejected) => {
+                // Every rejection rolls the provisional ticket transition
+                // back: a changed gate mutates nothing.
                 savepoint.rollback().await.map_err(|rollback_error| {
                     VoomError::database(format!(
-                        "lease acquire rollback after capacity saturation: {rollback_error}"
+                        "lease acquire rollback after {rejected:?}: {rollback_error}"
                     ))
                 })?;
-                Ok(LeaseAcquireOutcome::CapacityFull(saturation))
+                Ok(rejected)
             }
             Err(error) => {
                 savepoint.rollback().await.map_err(|rollback_error| {
@@ -348,17 +428,21 @@ impl SqliteLeaseRepo {
         .await
         .map_err(|e| VoomError::database_context("tickets transition to leased", e))?;
         if res.rows_affected() == 0 {
-            return Err(VoomError::Conflict(format!(
-                "acquire rejected for ticket {}: not ready, not eligible, \
-                 parent job not open, or out of attempts",
-                input.ticket_id
-            )));
+            return Ok(LeaseAcquireOutcome::TicketNotReady {
+                ticket_id: input.ticket_id,
+            });
         }
         let workers = SqliteWorkerRepo::new(self.pool.clone());
         let eligibility = workers
             .operation_eligibility_in_tx(tx, input.worker_id, &operation)
             .await?;
-        require_operation_eligibility(input.worker_id, &operation, &eligibility)?;
+        if let Some(reason) = ineligibility_reason(&eligibility) {
+            return Ok(LeaseAcquireOutcome::WorkerIneligible {
+                worker_id: input.worker_id,
+                operation,
+                reason,
+            });
+        }
         let capacity = workers
             .operation_capacity_in_tx(tx, input.worker_id, &operation)
             .await?;
@@ -1412,46 +1496,33 @@ fn decode_expired_lease_row(
     Ok((lease_id_raw, ticket_id_raw, lease_id, ticket_id))
 }
 
-fn require_operation_eligibility(
-    worker_id: WorkerId,
-    operation: &TicketOperation,
+/// Classify an operation-eligibility observation into the closed
+/// [`LeaseIneligibilityReason`] set, or `None` when the worker is eligible.
+///
+/// The order mirrors how the facts rule each other out: lifecycle first, then
+/// denial, then capability, then grant.
+fn ineligibility_reason(
     eligibility: &WorkerOperationEligibility,
-) -> Result<(), VoomError> {
+) -> Option<LeaseIneligibilityReason> {
     if eligibility.is_eligible() {
-        return Ok(());
+        return None;
     }
     match eligibility.worker_status {
-        None => return Err(VoomError::NotFound(format!("worker {worker_id}"))),
-        Some(WorkerStatus::Stale) => {
-            return Err(VoomError::Conflict(format!(
-                "acquire rejected: worker {worker_id} stale"
-            )));
-        }
-        Some(WorkerStatus::Retired) => {
-            return Err(VoomError::Conflict(format!(
-                "acquire rejected: worker {worker_id} retired"
-            )));
-        }
+        None => return Some(LeaseIneligibilityReason::WorkerMissing),
+        Some(WorkerStatus::Stale) => return Some(LeaseIneligibilityReason::WorkerStale),
+        Some(WorkerStatus::Retired) => return Some(LeaseIneligibilityReason::WorkerRetired),
         Some(WorkerStatus::Registered | WorkerStatus::Active) => {}
     }
     if eligibility.is_denied {
-        return Err(VoomError::Conflict(format!(
-            "acquire rejected: worker {worker_id} denied operation {operation}"
-        )));
+        return Some(LeaseIneligibilityReason::OperationDenied);
     }
     if !eligibility.has_capability {
-        return Err(VoomError::Conflict(format!(
-            "acquire rejected: worker {worker_id} missing capability {operation}"
-        )));
+        return Some(LeaseIneligibilityReason::MissingCapability);
     }
     if !eligibility.has_grant {
-        return Err(VoomError::Conflict(format!(
-            "acquire rejected: worker {worker_id} missing grant {operation}"
-        )));
+        return Some(LeaseIneligibilityReason::MissingGrant);
     }
-    Err(VoomError::Internal(format!(
-        "worker {worker_id} failed eligibility for {operation} without a rejection reason"
-    )))
+    None
 }
 
 async fn get_lease_in_tx(

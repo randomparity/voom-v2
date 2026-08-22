@@ -73,7 +73,7 @@ impl ControlPlane {
             .into_lease_result()
     }
 
-    async fn try_acquire_lease_in_tx(
+    pub(crate) async fn try_acquire_lease_in_tx(
         &self,
         tx: &mut Transaction<'_, Sqlite>,
         input: NewLease,

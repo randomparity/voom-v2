@@ -27,7 +27,7 @@ async fn decision_data_maps_full_record() {
             ticket_id: Some(TicketId(3)),
             selected_worker_id: Some(WorkerId(2)),
             selected_node_id: Some(NodeId(1)),
-            selected_lease_id: None,
+            selected_lease_id: Some(voom_core::LeaseId(4)),
             outcome: SchedulerDecisionOutcome::Selected,
             reason_code: SchedulerReasonCode::Selected,
             summary: "selected".to_owned(),
@@ -54,7 +54,7 @@ async fn decision_data_maps_full_record() {
     assert_eq!(summary.ticket_id, Some(3));
     assert_eq!(summary.selected_worker_id, Some(2));
     assert_eq!(summary.selected_node_id, Some(1));
-    assert_eq!(summary.selected_lease_id, None);
+    assert_eq!(summary.selected_lease_id, Some(4));
     assert_eq!(summary.candidate_count, 1);
     assert_eq!(summary.selected_score, Some(100));
     assert_eq!(summary.suppressed_count, 0);
@@ -101,6 +101,15 @@ async fn seed_refs(pool: &sqlx::SqlitePool) {
          VALUES (3, NULL, 'probe_file', 'ready', 0, '{}', 0, 3, \
                  '1970-01-01T00:00:00Z', '1970-01-01T00:00:00Z', \
                  '1970-01-01T00:00:00Z')",
+    )
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO leases \
+         (id, ticket_id, worker_id, state, acquired_at, expires_at, last_heartbeat_at, ttl_seconds) \
+         VALUES (4, 3, 2, 'held', '1970-01-01T00:00:00Z', '1970-01-01T00:01:00Z', \
+                 '1970-01-01T00:00:00Z', 60)",
     )
     .execute(pool)
     .await

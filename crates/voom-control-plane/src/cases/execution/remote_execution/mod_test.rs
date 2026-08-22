@@ -2200,3 +2200,302 @@ fn node_input(name: &str, kind: NodeKind) -> RegisterNodeInput {
         metadata: json!({}),
     }
 }
+
+// --- Issue #478: atomic owner-local acquisition and changed-gate decisions ---
+
+#[tokio::test]
+async fn remote_acquire_leased_binds_one_lease_plan_and_decision_atomically() {
+    let fixture = remote_fixture(
+        &[
+            (WF_OP, vec!["shared_mount"]),
+            ("transcode_video", vec!["shared_mount"]),
+        ],
+        &[WF_OP, "transcode_video"],
+        &[],
+    )
+    .await;
+    let root = create_remote_scan_root(&fixture, "atomic-bind").await;
+    let location = seed_scan_location(&fixture.cp, root, "atomic-bind.mkv").await;
+    let ticket = ready_workflow_ticket(&fixture, 0, root.0, location).await;
+
+    let outcome = fixture
+        .cp
+        .remote_acquire(fixture.acquire_input("atomic-bind", "hash-atomic-bind"))
+        .await
+        .unwrap();
+    let RemoteAcquireOutcome::Leased(dispatch) = outcome else {
+        panic!("expected the owner-local ticket to lease: {outcome:?}");
+    };
+    assert_eq!(dispatch.ticket_id, ticket);
+    // Criterion 4: the namespaced byte-work ticket dispatches under its bare
+    // wire token, exactly like the canonical encoding.
+    assert_eq!(dispatch.operation, "transcode_video");
+    assert!(dispatch.artifact_access_plan.owner_node_id.is_some());
+    assert!(dispatch.artifact_access_plan.access_evidence.is_some());
+
+    let pool = fixture.cp.pool_for_test();
+    // Criterion 3: exactly one lease, bound to the exact plan and decision.
+    let lease_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM leases")
+        .fetch_one(pool)
+        .await
+        .unwrap();
+    assert_eq!(lease_count, 1);
+    let plan: (i64, Option<i64>, String, i64, i64, i64, i64, Option<String>) = sqlx::query_as(
+        "SELECT p.id, p.owner_node_id, p.access_evidence, p.lease_id, p.ticket_id, \
+                p.worker_id, p.node_id, p.status \
+         FROM artifact_access_plans p",
+    )
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    assert_eq!(plan.7.as_deref(), Some("selected"));
+    assert_eq!(plan.3, i64::try_from(dispatch.lease_id.0).unwrap());
+    assert_eq!(plan.4, i64::try_from(ticket.0).unwrap());
+    assert_eq!(plan.5, i64::try_from(fixture.worker_id.0).unwrap());
+    assert_eq!(plan.6, i64::try_from(fixture.node_id.0).unwrap());
+    let owner_node_id = plan.1.unwrap();
+    assert_ne!(owner_node_id, 0, "owner-local plan names its owner");
+    assert_eq!(owner_node_id, i64::try_from(fixture.node_id.0).unwrap());
+    let plan_evidence: serde_json::Value = serde_json::from_str(&plan.2).unwrap();
+
+    let decision = fixture
+        .cp
+        .scheduler_decision(dispatch.scheduler_decision_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(decision.outcome, SchedulerDecisionOutcome::Selected);
+    assert_eq!(
+        decision.selected_lease_id,
+        Some(dispatch.lease_id),
+        "the selected decision names its lease at creation"
+    );
+    assert_eq!(decision.ticket_id, Some(ticket));
+    assert_eq!(decision.selected_worker_id, Some(fixture.worker_id));
+    assert_eq!(decision.selected_node_id, Some(fixture.node_id));
+    let voom_store::repo::execution::scheduler_decisions::SchedulerDecision {
+        access_evidence: decision_evidence,
+        ..
+    } = decision;
+    let Some(voom_core::owner_access_evidence::DecisionAccessEvidence::Owner(evidence)) =
+        decision_evidence
+    else {
+        panic!("selected byte-work decision carries owner evidence");
+    };
+    // Plan and decision carry the same canonical access evidence.
+    assert_eq!(
+        serde_json::to_value(&evidence).unwrap(),
+        plan_evidence,
+        "plan and decision bind the identical canonical evidence"
+    );
+}
+
+#[tokio::test]
+async fn remote_acquire_changed_gate_missing_capability_decides_without_leasing() {
+    // The worker advertises and is granted only the namespaced encoding, so
+    // candidate scoring (raw-token lookup) selects the ticket while the lease
+    // write path rechecks under the bare matching token. The changed gate must
+    // decide — one durable no-candidate row — instead of raising, and must
+    // leave zero leases and zero bound access plans.
+    let fixture = remote_fixture(&[(WF_OP, vec!["shared_mount"])], &[WF_OP], &[]).await;
+    let root = create_remote_scan_root(&fixture, "changed-gate").await;
+    let location = seed_scan_location(&fixture.cp, root, "changed-gate.mkv").await;
+    let ticket = ready_workflow_ticket(&fixture, 0, root.0, location).await;
+
+    let outcome = fixture
+        .cp
+        .remote_acquire(fixture.acquire_input("changed-gate", "hash-changed-gate"))
+        .await
+        .unwrap();
+    let RemoteAcquireOutcome::NoCandidate {
+        worker_id: _,
+        scheduler_decision_id,
+    } = outcome
+    else {
+        panic!("expected the changed gate to reject without leasing: {outcome:?}");
+    };
+
+    let decision = fixture
+        .cp
+        .scheduler_decision(scheduler_decision_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        decision.outcome,
+        SchedulerDecisionOutcome::NoEligibleCandidate
+    );
+    assert_eq!(decision.reason_code, SchedulerReasonCode::MissingCapability);
+    assert_eq!(decision.ticket_id, Some(ticket));
+    assert_eq!(decision.candidate_count, 1);
+    let key = decision.suppression_key.unwrap();
+    assert!(!key.is_empty(), "changed-gate decisions are suppressed");
+    assert!(
+        key.contains(&format!(":ticket:{}:", ticket.0)),
+        "suppression key names the ticket: {key}"
+    );
+    assert!(
+        key.contains("reason:missing_capability"),
+        "suppression key carries the documented stable reason: {key}"
+    );
+    let explanation = decision.explanation;
+    assert_eq!(explanation["reason"], "missing_capability");
+    assert_eq!(explanation["operation"], "transcode_video");
+
+    let pool = fixture.cp.pool_for_test();
+    let lease_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM leases")
+        .fetch_one(pool)
+        .await
+        .unwrap();
+    assert_eq!(lease_count, 0, "a changed gate never leases");
+    let plan_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM artifact_access_plans")
+        .fetch_one(pool)
+        .await
+        .unwrap();
+    assert_eq!(plan_count, 0, "a changed gate never binds an access plan");
+    let selected_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM scheduler_decisions WHERE outcome = 'selected'")
+            .fetch_one(pool)
+            .await
+            .unwrap();
+    assert_eq!(selected_count, 0, "a changed gate never leaves a selection");
+    // The rejected ticket stays ready for a correctly-configured worker.
+    let state: String = sqlx::query_scalar("SELECT state FROM tickets WHERE id = ?")
+        .bind(i64::try_from(ticket.0).unwrap())
+        .fetch_one(pool)
+        .await
+        .unwrap();
+    assert_eq!(state, "ready");
+}
+
+#[tokio::test]
+async fn remote_acquire_changed_gate_missing_grant_and_denied_decide_with_documented_reasons() {
+    // Capability rows exist for both encodings but the grant only covers the
+    // namespaced one, so candidate scoring (raw-token lookup) selects the
+    // namespaced byte-work ticket while the lease path rechecks the bare
+    // matching token and finds no grant.
+    let fixture = remote_fixture(
+        &[
+            (WF_OP, vec!["shared_mount"]),
+            ("transcode_video", vec!["shared_mount"]),
+        ],
+        &[WF_OP],
+        &[],
+    )
+    .await;
+    let root = create_remote_scan_root(&fixture, "changed-grant").await;
+    let location = seed_scan_location(&fixture.cp, root, "changed-grant.mkv").await;
+    let ticket = ready_workflow_ticket(&fixture, 0, root.0, location).await;
+
+    let outcome = fixture
+        .cp
+        .remote_acquire(fixture.acquire_input("changed-grant", "hash-changed-grant"))
+        .await
+        .unwrap();
+    let RemoteAcquireOutcome::NoCandidate {
+        scheduler_decision_id,
+        ..
+    } = outcome
+    else {
+        panic!("expected the missing grant to decide: {outcome:?}");
+    };
+    let decision = fixture
+        .cp
+        .scheduler_decision(scheduler_decision_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(decision.reason_code, SchedulerReasonCode::MissingGrant);
+    assert_eq!(decision.ticket_id, Some(ticket));
+    let pool = fixture.cp.pool_for_test();
+    let lease_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM leases")
+        .fetch_one(pool)
+        .await
+        .unwrap();
+    assert_eq!(lease_count, 0);
+}
+
+#[tokio::test]
+async fn remote_acquire_dispatches_custom_local_operations_under_their_exact_token() {
+    let fixture = remote_fixture(&[("disk.test", vec!["shared_mount"])], &["disk.test"], &[]).await;
+    fixture.ready_ticket("disk.test").await;
+
+    let outcome = fixture
+        .cp
+        .remote_acquire(fixture.acquire_input("custom-local", "hash-custom-local"))
+        .await
+        .unwrap();
+    let RemoteAcquireOutcome::Leased(dispatch) = outcome else {
+        panic!("expected the custom local ticket to lease: {outcome:?}");
+    };
+    // Criterion 4: an exact custom local operation keeps its exact token.
+    assert_eq!(dispatch.operation, "disk.test");
+    // No declared byte work: the plan proves absence with the NULL pair.
+    assert_eq!(dispatch.artifact_access_plan.owner_node_id, None);
+    assert_eq!(dispatch.artifact_access_plan.access_evidence, None);
+}
+
+#[test]
+fn changed_gate_outcomes_map_to_the_documented_stable_reasons() {
+    use super::acquire::{changed_gate_explanation, outcome_reason_code};
+    use voom_store::repo::execution::leases::{
+        LeaseAcquireOutcome, LeaseIneligibilityReason, WorkerCapacitySaturation,
+    };
+
+    let cases: [(LeaseAcquireOutcome, SchedulerReasonCode); 6] = [
+        (
+            LeaseAcquireOutcome::TicketNotReady {
+                ticket_id: TicketId(1),
+            },
+            SchedulerReasonCode::NoReadyTicket,
+        ),
+        (
+            LeaseAcquireOutcome::WorkerIneligible {
+                worker_id: WorkerId(2),
+                operation: ticket_op("probe_file"),
+                reason: LeaseIneligibilityReason::WorkerStale,
+            },
+            SchedulerReasonCode::WorkerNotExecutable,
+        ),
+        (
+            LeaseAcquireOutcome::WorkerIneligible {
+                worker_id: WorkerId(2),
+                operation: ticket_op("probe_file"),
+                reason: LeaseIneligibilityReason::WorkerRetired,
+            },
+            SchedulerReasonCode::WorkerNotExecutable,
+        ),
+        (
+            LeaseAcquireOutcome::WorkerIneligible {
+                worker_id: WorkerId(2),
+                operation: ticket_op("probe_file"),
+                reason: LeaseIneligibilityReason::OperationDenied,
+            },
+            SchedulerReasonCode::OperationDenied,
+        ),
+        (
+            LeaseAcquireOutcome::WorkerIneligible {
+                worker_id: WorkerId(2),
+                operation: ticket_op("probe_file"),
+                reason: LeaseIneligibilityReason::MissingCapability,
+            },
+            SchedulerReasonCode::MissingCapability,
+        ),
+        (
+            LeaseAcquireOutcome::CapacityFull(WorkerCapacitySaturation {
+                worker_id: WorkerId(2),
+                operation: ticket_op("probe_file"),
+                active_leases: 1,
+                max_parallel: 1,
+            }),
+            SchedulerReasonCode::WorkerCapacityFull,
+        ),
+    ];
+    for (outcome, expected) in cases {
+        assert_eq!(outcome_reason_code(&outcome), expected, "{outcome:?}");
+        let explanation = changed_gate_explanation(&outcome, expected);
+        assert_eq!(explanation["reason"], expected.as_str());
+        assert_eq!(explanation["outcome"], "no_eligible_candidate");
+        assert!(explanation.get("scoring_version").is_some());
+    }
+}

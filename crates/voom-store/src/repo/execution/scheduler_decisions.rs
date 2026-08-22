@@ -265,6 +265,7 @@ impl SqliteSchedulerDecisionRepo {
         input: NewSchedulerDecision,
     ) -> Result<SchedulerDecision, VoomError> {
         let prepared = prepare_decision_insert(&input)?;
+        validate_selected_lease_coherence_in_tx(tx, &input).await?;
         let sql = decision_insert_sql(&format!("RETURNING {DECISION_COLS}"));
         let row = bind_decision_query(
             sqlx::query(&sql),
@@ -301,6 +302,7 @@ impl SqliteSchedulerDecisionRepo {
         input: NewSchedulerDecision,
     ) -> Result<SchedulerDecision, VoomError> {
         let prepared = prepare_decision_insert(&input)?;
+        validate_selected_lease_coherence_in_tx(tx, &input).await?;
         let sql = decision_insert_sql(&format!(
             "{DECISION_INSERT_SUPPRESS_CLAUSE} RETURNING {DECISION_COLS}"
         ));
@@ -322,64 +324,6 @@ impl SqliteSchedulerDecisionRepo {
                     "scheduler suppression_key already belongs to a different decision".to_owned(),
                 )
             })
-    }
-
-    pub async fn link_selected_lease(
-        &self,
-        id: u64,
-        lease_id: LeaseId,
-        now: OffsetDateTime,
-    ) -> Result<SchedulerDecision, VoomError> {
-        let mut tx = self
-            .pool
-            .begin()
-            .await
-            .map_err(|e| VoomError::database_context("begin", e))?;
-        let decision = self
-            .link_selected_lease_in_tx(&mut tx, id, lease_id, now)
-            .await?;
-        tx.commit()
-            .await
-            .map_err(|e| VoomError::database_context("commit", e))?;
-        Ok(decision)
-    }
-
-    pub async fn link_selected_lease_in_tx(
-        &self,
-        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-        id: u64,
-        lease_id: LeaseId,
-        now: OffsetDateTime,
-    ) -> Result<SchedulerDecision, VoomError> {
-        validate_selected_lease_link_in_tx(tx, id, lease_id).await?;
-        let now = iso8601(now)?;
-        let row = sqlx::query(&format!(
-            "UPDATE scheduler_decisions \
-             SET selected_lease_id = ?, updated_at = ? \
-             WHERE id = ? AND (selected_lease_id IS NULL OR selected_lease_id = ?) \
-             RETURNING {DECISION_COLS}"
-        ))
-        .bind(i64_from_u64(
-            lease_id.0,
-            concat!(module_path!(), ": ", stringify!(lease_id.0)),
-        )?)
-        .bind(now)
-        .bind(i64_from_u64(
-            id,
-            concat!(module_path!(), ": ", stringify!(id)),
-        )?)
-        .bind(i64_from_u64(
-            lease_id.0,
-            concat!(module_path!(), ": ", stringify!(lease_id.0)),
-        )?)
-        .fetch_optional(&mut **tx)
-        .await
-        .map_err(|e| VoomError::database_context("scheduler_decisions link lease", e))?;
-
-        match row.as_ref().map(row_to_decision).transpose()? {
-            Some(decision) => Ok(decision),
-            None => link_selected_lease_after_empty_update_in_tx(tx, id, lease_id).await,
-        }
     }
 
     pub async fn get(&self, id: u64) -> Result<Option<SchedulerDecision>, VoomError> {
@@ -501,7 +445,7 @@ fn prepare_decision_insert(
 ) -> Result<PreparedSchedulerDecisionInsert, VoomError> {
     validate_decision_shape(input)?;
     validate_suppression_key(input)?;
-    reject_selected_lease_on_create(input)?;
+
     Ok(PreparedSchedulerDecisionInsert {
         now: iso8601(input.now)?,
         explanation: serialize_json(&input.explanation, "scheduler decision explanation")?,
@@ -527,7 +471,8 @@ fn validate_decision_shape(input: &NewSchedulerDecision) -> Result<(), VoomError
     validate_access_evidence_placement(input)?;
     match (input.decision_kind, input.outcome) {
         (SchedulerDecisionKind::LeaseAcquire, SchedulerDecisionOutcome::Selected) => {
-            if input.ticket_id.is_some()
+            if input.selected_lease_id.is_some()
+                && input.ticket_id.is_some()
                 && input.selected_worker_id.is_some()
                 && input.selected_node_id.is_some()
                 && input.reason_code == SchedulerReasonCode::Selected
@@ -538,7 +483,7 @@ fn validate_decision_shape(input: &NewSchedulerDecision) -> Result<(), VoomError
                 Ok(())
             } else {
                 Err(VoomError::Config(
-                    "selected scheduler decisions require selected reason, candidates, ticket, and matching request/selected worker and node ids".to_owned(),
+                    "selected scheduler decisions require their lease, selected reason, candidates, ticket, and matching request/selected worker and node ids".to_owned(),
                 ))
             }
         }
@@ -652,82 +597,66 @@ fn validate_suppression_key(input: &NewSchedulerDecision) -> Result<(), VoomErro
     ))
 }
 
-fn reject_selected_lease_on_create(input: &NewSchedulerDecision) -> Result<(), VoomError> {
-    if input.selected_lease_id.is_none() {
-        return Ok(());
-    }
-    Err(VoomError::Config(
-        "scheduler selected_lease_id must be linked after decision creation".to_owned(),
-    ))
-}
-
-async fn validate_selected_lease_link_in_tx(
+/// A selected decision names its lease at creation, and the named lease must
+/// agree with every fact the row claims: kind/outcome, ticket, worker, and
+/// the worker's node. Non-selected shapes never name a lease; that rule is
+/// enforced by `validate_decision_shape`.
+async fn validate_selected_lease_coherence_in_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-    decision_id: u64,
-    lease_id: LeaseId,
+    input: &NewSchedulerDecision,
 ) -> Result<(), VoomError> {
+    let Some(lease_id) = input.selected_lease_id else {
+        return Ok(());
+    };
     let row = sqlx::query(
-        "SELECT d.decision_kind, d.outcome, d.ticket_id, d.selected_worker_id, \
-                d.selected_node_id, d.selected_lease_id, l.ticket_id AS lease_ticket_id, \
-                l.worker_id AS lease_worker_id, w.node_id AS lease_node_id \
-         FROM scheduler_decisions d \
-         LEFT JOIN leases l ON l.id = ? \
+        "SELECT l.ticket_id AS lease_ticket_id, l.worker_id AS lease_worker_id, \
+                w.node_id AS lease_node_id \
+         FROM leases l \
          LEFT JOIN workers w ON w.id = l.worker_id \
-         WHERE d.id = ?",
+         WHERE l.id = ?",
     )
     .bind(i64_from_u64(
         lease_id.0,
         concat!(module_path!(), ": ", stringify!(lease_id.0)),
     )?)
-    .bind(i64_from_u64(
-        decision_id,
-        concat!(module_path!(), ": ", stringify!(decision_id)),
-    )?)
     .fetch_optional(&mut **tx)
     .await
-    .map_err(|e| VoomError::database_context("scheduler_decisions link coherence", e))?;
+    .map_err(|e| VoomError::database_context("scheduler_decisions lease coherence", e))?;
 
     let Some(row) = row else {
         return Err(VoomError::NotFound(format!(
-            "scheduler_decisions id={decision_id} not found"
+            "leases id={} not found",
+            lease_id.0
         )));
     };
 
-    validate_selected_lease_link_facts(decision_id, lease_id, &link_facts_from_row(&row)?)
-}
-
-async fn link_selected_lease_after_empty_update_in_tx(
-    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-    decision_id: u64,
-    lease_id: LeaseId,
-) -> Result<SchedulerDecision, VoomError> {
-    let row = sqlx::query(&format!(
-        "SELECT {DECISION_COLS} FROM scheduler_decisions WHERE id = ?"
-    ))
-    .bind(i64_from_u64(
-        decision_id,
-        concat!(module_path!(), ": ", stringify!(decision_id)),
-    )?)
-    .fetch_optional(&mut **tx)
-    .await
-    .map_err(|e| VoomError::database_context("scheduler_decisions link reread", e))?;
-
-    let Some(row) = row else {
-        return Err(VoomError::NotFound(format!(
-            "scheduler_decisions id={decision_id} not found"
-        )));
+    let facts = SelectedLeaseLinkFacts {
+        decision_kind: input.decision_kind.as_str().to_owned(),
+        outcome: input.outcome.as_str().to_owned(),
+        decision_ticket_id: input
+            .ticket_id
+            .map(|id| i64_from_u64(id.0, "scheduler_decisions.ticket_id"))
+            .transpose()?,
+        decision_worker_id: input
+            .selected_worker_id
+            .map(|id| i64_from_u64(id.0, "scheduler_decisions.selected_worker_id"))
+            .transpose()?,
+        decision_node_id: input
+            .selected_node_id
+            .map(|id| i64_from_u64(id.0, "scheduler_decisions.selected_node_id"))
+            .transpose()?,
+        existing_lease_id: None,
+        lease_ticket_id: row
+            .try_get::<Option<i64>, _>("lease_ticket_id")
+            .map_err(|e| map_row_err("scheduler_decisions lease coherence", e))?,
+        lease_worker_id: row
+            .try_get::<Option<i64>, _>("lease_worker_id")
+            .map_err(|e| map_row_err("scheduler_decisions lease coherence", e))?,
+        lease_node_id: row
+            .try_get::<Option<i64>, _>("lease_node_id")
+            .map_err(|e| map_row_err("scheduler_decisions lease coherence", e))?,
     };
-    let decision = row_to_decision(&row)?;
-    if decision
-        .selected_lease_id
-        .is_some_and(|existing| existing != lease_id)
-    {
-        return Err(VoomError::Conflict(format!(
-            "scheduler_decisions id={decision_id} is already linked to lease_id={}",
-            decision.selected_lease_id.map_or(0, |id| id.0)
-        )));
-    }
-    Ok(decision)
+    validate_selected_lease_link_facts(0, lease_id, &facts)
 }
 
 #[derive(Debug)]
@@ -741,38 +670,6 @@ struct SelectedLeaseLinkFacts {
     lease_ticket_id: Option<i64>,
     lease_worker_id: Option<i64>,
     lease_node_id: Option<i64>,
-}
-
-fn link_facts_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<SelectedLeaseLinkFacts, VoomError> {
-    Ok(SelectedLeaseLinkFacts {
-        decision_kind: row
-            .try_get("decision_kind")
-            .map_err(|e| map_row_err("scheduler_decisions link coherence", e))?,
-        outcome: row
-            .try_get("outcome")
-            .map_err(|e| map_row_err("scheduler_decisions link coherence", e))?,
-        decision_ticket_id: row
-            .try_get("ticket_id")
-            .map_err(|e| map_row_err("scheduler_decisions link coherence", e))?,
-        decision_worker_id: row
-            .try_get("selected_worker_id")
-            .map_err(|e| map_row_err("scheduler_decisions link coherence", e))?,
-        decision_node_id: row
-            .try_get("selected_node_id")
-            .map_err(|e| map_row_err("scheduler_decisions link coherence", e))?,
-        existing_lease_id: row
-            .try_get("selected_lease_id")
-            .map_err(|e| map_row_err("scheduler_decisions link coherence", e))?,
-        lease_ticket_id: row
-            .try_get("lease_ticket_id")
-            .map_err(|e| map_row_err("scheduler_decisions link coherence", e))?,
-        lease_worker_id: row
-            .try_get("lease_worker_id")
-            .map_err(|e| map_row_err("scheduler_decisions link coherence", e))?,
-        lease_node_id: row
-            .try_get("lease_node_id")
-            .map_err(|e| map_row_err("scheduler_decisions link coherence", e))?,
-    })
 }
 
 fn validate_selected_lease_link_facts(

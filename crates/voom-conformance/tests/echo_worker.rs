@@ -150,3 +150,50 @@ fn assert_remote_artifact_access(terminal: NdjsonOutcome) {
         })
     );
 }
+
+/// Issue #478: the control plane normalizes a namespaced byte-work ticket's
+/// operation through `TicketOperation::normalize().matching_token()` before
+/// dispatch, so the worker protocol only ever sees bare wire tokens. This
+/// pins that a token derived from the reserved workflow namespace executes
+/// identically to its canonical encoding at the protocol surface.
+#[tokio::test]
+async fn echo_worker_executes_the_normalized_namespaced_operation_token() {
+    use voom_core::TicketOperation;
+
+    let namespaced = TicketOperation::new("synthetic.workflow.operation.probe_file").unwrap();
+    let normalized = namespaced.normalize().matching_token();
+    assert_eq!(normalized.as_str(), "probe_file");
+
+    let harness = Harness::new(env!("CARGO_BIN_EXE_echo-worker"));
+    let launch = harness.launch().await.unwrap();
+
+    let outcome = async {
+        let client = HttpClient::new(launch.bound);
+        let mut stream = client
+            .dispatch(
+                &launch.credentials,
+                "echo-normalized-31",
+                OperationRequest {
+                    // What dispatch_to_child sends after normalization: the
+                    // bare matching token, never the namespaced form.
+                    operation: voom_core::OperationKind::from_wire(normalized.as_str()).unwrap(),
+                    lease_id: LeaseId(31),
+                    payload: serde_json::json!({"path": "/tmp/input.mov"}),
+                    heartbeat_deadline_ms: 1_000,
+                    progress_idle_deadline_ms: 1_000,
+                },
+            )
+            .await?;
+        let _accepted = stream.frames.next_frame().await?;
+        stream.frames.next_frame().await
+    }
+    .await;
+
+    let shutdown = launch.shutdown(Duration::from_secs(5)).await;
+    let terminal = outcome.unwrap();
+    assert!(shutdown.unwrap().success(), "worker exited cleanly");
+    match terminal {
+        NdjsonOutcome::Terminated(ProgressFrame::Result { .. }) => {}
+        other => panic!("expected a terminal result frame, got {other:?}"),
+    }
+}
