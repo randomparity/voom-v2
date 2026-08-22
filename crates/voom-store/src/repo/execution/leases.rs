@@ -1142,6 +1142,31 @@ impl SqliteLeaseRepo {
         row.as_ref().map(row_to_lease).transpose()
     }
 
+    /// Look up a lease by id inside the caller's transaction, in any state.
+    ///
+    /// Replay validation must prove identity against the same snapshot the
+    /// reservation transaction already holds; lease state is deliberately
+    /// not filtered (ADR 0073).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VoomError::Database`] if the query or row decoding fails.
+    pub async fn get_in_tx(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        id: LeaseId,
+    ) -> Result<Option<Lease>, VoomError> {
+        let row = sqlx::query(SELECT_LEASE_COLS)
+            .bind(i64_from_u64(
+                id.0,
+                concat!(module_path!(), ": ", stringify!(id.0)),
+            )?)
+            .fetch_optional(&mut **tx)
+            .await
+            .map_err(|e| VoomError::database_context("leases get_in_tx", e))?;
+        row.as_ref().map(row_to_lease).transpose()
+    }
+
     /// Return the worker context for a currently held lease.
     ///
     /// # Errors
