@@ -64,6 +64,11 @@ the hash worker's post-read stat equals its pre-read stat, and (b) the probe res
 and `modified_at`. A mutation between hash read and probe read fails (b) and leaves the
 observation evidence-less; nothing compares beyond this fact set anywhere else.
 
+The predicate governs primary-file identity only. Sidecars are hashed on the node but never
+probed — media metadata exists only for primaries — so a primary's sidecar digests ride
+inside its evidence payload once the primary agrees, and no observation is ever emitted for
+a sidecar alone.
+
 **Evidence and publication.** Migration 0041 adds a nullable strict JSON `evidence` payload
 to `scan_observations` (additive, ADR 0013 inventory registered). An observation carries
 evidence if and only if current hash and probe results agree on stable facts; an
@@ -82,10 +87,15 @@ replay, hardlink attach by inode facts, or fresh ingest with sidecar bundles —
 DB-only relocation of today's persist logic, then retires unobserved pre-start locations
 exactly as ADR 0067 specifies. The control plane never opens discovered bytes.
 
-**Removal.** The control-plane-local discovery walk, byte hashing, path-grouping probe
-dispatch, bundled-ffprobe launch/readiness helpers, built-in `builtin.ffprobe` worker
-registration, and the direct-path CLI dispatch are deleted. `voom scan --root` requests the
-run, then polls session inspection until terminal and prints the outcome envelope.
+**Removal.** The control-plane-local scan pipeline is deleted: the discovery walk
+(`scan/discovery.rs`), byte hashing (`scan/hash.rs`), candidate grouping and probe dispatch
+with the direct-path entry points in `scan/mod.rs`, the filesystem checks of the old
+`scan/library.rs`, and the direct-path CLI dispatch. Everything else that still serves
+non-scan surfaces stays: `scan/worker.rs`'s bundled-ffprobe launcher and readiness helper,
+and `scan/bootstrap.rs`'s built-in worker registration are consumed by audio/remux/transcode
+commit probing, policy tool preflight, and artifact verification owned by #423/#424, which
+may delete or relocate them later. `voom scan --root` requests the run, then polls session
+inspection until terminal and prints the outcome envelope.
 
 ## Consequences
 
