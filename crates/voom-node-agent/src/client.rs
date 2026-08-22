@@ -9,9 +9,11 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use sha2::{Digest, Sha256};
+use voom_core::ids::{ArtifactCommitIntentId, ArtifactCommitRecordId};
 use voom_core::{
-    ArtifactAccessMode, FailureClass, LeaseId, NodeId, NodeIncarnationEndReason, NodeIncarnationId,
-    NodeIncarnationStatus, TicketId, VoomError, WorkerId,
+    ArtifactAccessMode, ArtifactHandleId, FailureClass, FileLocationId, FileVersionId, LeaseId,
+    NodeId, NodeIncarnationEndReason, NodeIncarnationId, NodeIncarnationStatus, StorageRootId,
+    TicketId, VoomError, WorkerId,
 };
 
 use crate::config::LoadedAgentConfig;
@@ -349,6 +351,61 @@ impl ControlPlaneClient {
         self.send(&format!("/v1/execution/lease/{}/fail", lease_id.0), request)
             .await
     }
+
+    pub async fn commit_open(
+        &self,
+        request: &RetryRequest<CommitOpenRequest>,
+    ) -> Result<CommitOpenOutcome, VoomError> {
+        self.send("/v1/artifact/commit/open", request).await
+    }
+
+    pub async fn authorize_commit_intent(
+        &self,
+        intent_id: ArtifactCommitIntentId,
+        request: &RetryRequest<CommitAuthorizeRequest>,
+    ) -> Result<CommitAuthorizeOutcome, VoomError> {
+        self.send(
+            &format!("/v1/artifact/commit/{}/authorize", intent_id.0),
+            request,
+        )
+        .await
+    }
+
+    pub async fn report_commit_applying(
+        &self,
+        intent_id: ArtifactCommitIntentId,
+        request: &RetryRequest<CommitApplyingRequest>,
+    ) -> Result<CommitApplyingOutcome, VoomError> {
+        self.send(
+            &format!("/v1/artifact/commit/{}/applying", intent_id.0),
+            request,
+        )
+        .await
+    }
+
+    pub async fn report_commit_outcome(
+        &self,
+        intent_id: ArtifactCommitIntentId,
+        request: &RetryRequest<CommitOutcomeRequest>,
+    ) -> Result<CommitReceiptOutcome, VoomError> {
+        self.send(
+            &format!("/v1/artifact/commit/{}/outcome", intent_id.0),
+            request,
+        )
+        .await
+    }
+
+    pub async fn complete_commit_intent(
+        &self,
+        intent_id: ArtifactCommitIntentId,
+        request: &RetryRequest<CommitCompleteRequest>,
+    ) -> Result<CommitCompleteOutcome, VoomError> {
+        self.send(
+            &format!("/v1/artifact/commit/{}/complete", intent_id.0),
+            request,
+        )
+        .await
+    }
 }
 
 enum AttemptResult<T> {
@@ -669,6 +726,153 @@ pub struct FailOutcome {
     pub ticket_id: TicketId,
     pub worker_id: WorkerId,
     pub artifact_access_plan: ArtifactAccessPlan,
+}
+
+/// Request body for `POST /v1/artifact/commit/open` (ADR 0074).
+#[derive(Debug, Clone, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct CommitOpenRequest {
+    pub node_id: NodeId,
+    pub incarnation_id: NodeIncarnationId,
+}
+
+/// The pinned expected facts of a commit intent (size + content hash).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CommitExpectedFacts {
+    pub size_bytes: u64,
+    pub content_hash: String,
+}
+
+/// One open commit intent from the listing for the caller's owned roots.
+/// Never carries the fence.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OpenCommitIntent {
+    pub id: ArtifactCommitIntentId,
+    pub state: String,
+    pub artifact_handle_id: ArtifactHandleId,
+    pub staging_storage_root_id: StorageRootId,
+    pub staging_provider_relative_locator: String,
+    pub staging_location_epoch: u64,
+    pub target_storage_root_id: StorageRootId,
+    pub target_provider_relative_locator: String,
+    pub target_root_epoch: u64,
+    pub intent_epoch: u64,
+    pub expected_facts: CommitExpectedFacts,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CommitOpenOutcome {
+    pub intents: Vec<OpenCommitIntent>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct CommitAuthorizeRequest {
+    pub node_id: NodeId,
+    pub incarnation_id: NodeIncarnationId,
+}
+
+/// Mirror of the fenced authorization payload returned by
+/// `POST /v1/artifact/commit/{intent_id}/authorize`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CommitAuthorizeOutcome {
+    pub intent_id: ArtifactCommitIntentId,
+    pub commit_record_id: ArtifactCommitRecordId,
+    pub staging_storage_root_id: StorageRootId,
+    pub staging_provider_relative_locator: String,
+    pub target_storage_root_id: StorageRootId,
+    pub target_provider_relative_locator: String,
+    pub expected_size_bytes: u64,
+    pub expected_content_hash: String,
+    /// Hex-encoded one-time 32-byte commit fence. Never logged or re-sent
+    /// anywhere except the matching complete request.
+    pub fence_hex: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct CommitApplyingRequest {
+    pub node_id: NodeId,
+    pub incarnation_id: NodeIncarnationId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CommitApplyingOutcome {
+    pub intent_id: ArtifactCommitIntentId,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct CommitOutcomeRequest {
+    pub node_id: NodeId,
+    pub incarnation_id: NodeIncarnationId,
+    pub evidence: CommitOutcomeEvidence,
+}
+
+/// Typed receipt evidence reported by the node (ADR 0074). The tag
+/// discriminator rejects unknown variant names; each variant rejects unknown
+/// fields.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum CommitOutcomeEvidence {
+    Applied(CommitAppliedEvidence),
+    Mismatched(CommitMismatchedEvidence),
+    OutcomeUnknown(CommitOutcomeUnknownEvidence),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CommitObservedFacts {
+    pub size_bytes: u64,
+    pub content_hash: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CommitAppliedEvidence {
+    pub observed: CommitObservedFacts,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CommitMismatchedEvidence {
+    pub reason: String,
+    pub observed: Option<CommitObservedFacts>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CommitOutcomeUnknownEvidence {
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CommitReceiptOutcome {
+    pub intent_id: ArtifactCommitIntentId,
+    pub kind: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct CommitCompleteRequest {
+    pub node_id: NodeId,
+    pub incarnation_id: NodeIncarnationId,
+    pub fence_hex: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CommitCompleteOutcome {
+    pub intent_id: ArtifactCommitIntentId,
+    pub commit_record_id: ArtifactCommitRecordId,
+    pub result_file_version_id: Option<FileVersionId>,
+    pub result_file_location_id: Option<FileLocationId>,
 }
 
 #[cfg(test)]

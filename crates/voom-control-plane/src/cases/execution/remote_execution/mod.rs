@@ -32,6 +32,8 @@ use acquire::{
 
 pub(super) const ROUTE_ACQUIRE: &str = "POST /v1/execution/lease/acquire";
 
+pub(crate) use recover::validate_remote_node_live;
+
 #[derive(Debug, Clone)]
 pub struct RemoteActivateInput {
     pub node_id: NodeId,

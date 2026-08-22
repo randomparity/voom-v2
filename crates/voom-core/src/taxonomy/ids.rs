@@ -139,6 +139,7 @@ define_id!(ArtifactHandleId);
 define_id!(ArtifactLocationId);
 define_id!(ArtifactVerificationId);
 define_id!(ArtifactCommitRecordId);
+define_id!(ArtifactCommitIntentId);
 
 // Identity layer (M2).
 //

@@ -3340,6 +3340,7 @@ dependencies = [
  "async-trait",
  "axum",
  "axum-server",
+ "blake3",
  "clap",
  "rand 0.9.5",
  "rcgen",
@@ -3417,7 +3418,10 @@ dependencies = [
 name = "voom-test-support"
 version = "0.1.0-dev"
 dependencies = [
+ "blake3",
+ "secrecy",
  "serde_json",
+ "sqlx",
  "tempfile",
  "tokio",
  "voom-control-plane",

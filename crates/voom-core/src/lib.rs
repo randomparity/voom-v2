@@ -58,12 +58,13 @@ pub mod failure {
 
 pub mod ids {
     pub use crate::taxonomy::ids::{
-        ArtifactCommitRecordId, ArtifactHandleId, ArtifactLocationId, ArtifactVerificationId,
-        BackupId, BundleId, CommitId, EventId, EvidenceId, ExternalPathMappingId, ExternalSystemId,
-        ExternalSystemLinkId, FileAssetId, FileLocationId, FileVersionId, IssueId, JobId, LeaseId,
-        LibraryId, LibraryRootId, MediaSnapshotId, MediaVariantId, MediaWorkId, NodeId,
-        NodeIncarnationId, PolicyDocumentId, PolicyInputSetId, PolicySyntheticTargetId,
-        PolicyVersionId, ScanSessionId, StorageRootId, TicketId, UseLeaseId, WorkerId,
+        ArtifactCommitIntentId, ArtifactCommitRecordId, ArtifactHandleId, ArtifactLocationId,
+        ArtifactVerificationId, BackupId, BundleId, CommitId, EventId, EvidenceId,
+        ExternalPathMappingId, ExternalSystemId, ExternalSystemLinkId, FileAssetId, FileLocationId,
+        FileVersionId, IssueId, JobId, LeaseId, LibraryId, LibraryRootId, MediaSnapshotId,
+        MediaVariantId, MediaWorkId, NodeId, NodeIncarnationId, PolicyDocumentId, PolicyInputSetId,
+        PolicySyntheticTargetId, PolicyVersionId, ScanSessionId, StorageRootId, TicketId,
+        UseLeaseId, WorkerId,
     };
 }
 

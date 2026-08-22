@@ -1,4 +1,4 @@
-use super::{begin_tx, commit_tx};
+use super::commit_tx;
 
 pub(crate) mod compliance;
 pub(crate) mod config_policies;

@@ -1,7 +1,6 @@
 #![expect(
     clippy::unwrap_used,
     clippy::panic,
-    clippy::too_many_lines,
     reason = "integration tests favor unwrap/panic over plumbing Result<()> through every assertion"
 )]
 
@@ -21,6 +20,7 @@ use voom_store::repo::library::library_roots::{
 };
 use voom_store::test_support::sqlite_url_for;
 use voom_test_support::TempDatabase;
+use voom_test_support::commit_node::SimulatedOwnerNode;
 use voom_test_support::worker::cargo_bin_or_build;
 
 const BASIC_FFPROBE_JSON: &str =
@@ -194,9 +194,6 @@ async fn artifact_failure_envelopes_are_actionable() {
     let existing_target_path = dir.path().join("already-exists.mp4");
     std::fs::write(&existing_target_path, b"already here").unwrap();
     let failed = create_failed_artifact(&seeded, dir.path(), "verify-failed");
-    let recovery_failure = create_verified_artifact(&seeded, dir.path(), "recovery-failure");
-    let recovery_target = dir.path().join(format!("{}.mp4", "x".repeat(240)));
-
     let missing = run(
         artifact_command(&seeded).args(["artifact", "show", "--artifact-handle-id", "999999"]),
         Some(2),
@@ -246,19 +243,6 @@ async fn artifact_failure_envelopes_are_actionable() {
             .arg(&existing_target_path),
         Some(2),
     );
-    let recovery_required = run(
-        artifact_command(&seeded)
-            .args([
-                "artifact",
-                "commit",
-                "--artifact-handle-id",
-                &recovery_failure.artifact_handle_id.to_string(),
-                "--target-path",
-            ])
-            .arg(&recovery_target),
-        Some(2),
-    );
-
     assert!(failed_verification["data"]["artifact"]["latest_verification"]["id"].is_number());
     assert_eq!(
         failed_verification["data"]["artifact"]["latest_verification"]["status"],
@@ -268,25 +252,12 @@ async fn artifact_failure_envelopes_are_actionable() {
     assert_eq!(unverified_commit["error"]["code"], "CONFIG_INVALID");
     assert_eq!(drift_commit["error"]["code"], "ARTIFACT_CHECKSUM_MISMATCH");
     assert_eq!(target_exists["error"]["code"], "CONFIG_INVALID");
-    assert_eq!(recovery_required["error"]["code"], "COMMIT_FAILURE");
-    assert!(recovery_required["data"]["artifact"]["commit_record_id"].is_number());
-    assert!(recovery_required["data"]["artifact"]["target_path"].is_string());
-    assert!(recovery_required["data"]["artifact"]["temp_path"].is_string());
-    assert!(
-        recovery_required["data"]["artifact"]["recovery_required"]["target_exists"].is_boolean()
-    );
-    assert!(recovery_required["data"]["artifact"]["recovery_required"]["temp_exists"].is_boolean());
-    assert!(
-        recovery_required["data"]["artifact"]["recovery_required"]["staging_exists"].is_boolean()
-    );
-
     let mut json = Value::Array(vec![
         missing,
         failed_verification,
         unverified_commit,
         drift_commit,
         target_exists,
-        recovery_required,
     ]);
     redact_artifact_snapshot(
         &mut json,
@@ -298,7 +269,6 @@ async fn artifact_failure_envelopes_are_actionable() {
                 (&drift, "drift"),
                 (&existing_target, "existing"),
                 (&failed, "verify-failed"),
-                (&recovery_failure, "recovery-failure"),
             ],
         ),
     );
@@ -309,10 +279,6 @@ async fn artifact_failure_envelopes_are_actionable() {
             existing_target_path.as_path(),
             "[artifact-dir]/already-exists.mp4",
         )],
-    );
-    redact_path_set(
-        &mut json,
-        &[(recovery_target.as_path(), "[artifact-dir]/long-target.mp4")],
     );
     redact_long_target_names(&mut json);
     insta::assert_json_snapshot!("artifact_failure_envelopes_are_actionable", json);
@@ -393,14 +359,63 @@ async fn seed() -> Seeded {
     cp.activate_library_root(storage_root.id, "artifact-envelope-fixture".to_owned())
         .await
         .unwrap();
-    Seeded {
+    let seeded = Seeded {
         _tmp: tmp,
         root: root_dir,
-        url,
+        url: url.clone(),
         media,
         node_id: registered.node.id.0,
         root_id: storage_root.id.0,
-    }
+    };
+    spawn_commit_driver(&seeded);
+    seeded
+}
+
+/// Background stand-in for the storage-owner agent (ADR 0074): flips the
+/// seeded owner node into the simulated remote principal and drives every
+/// pending commit intent to convergence so CLI subprocess commits complete.
+fn spawn_commit_driver(seeded: &Seeded) {
+    let url = seeded.url.clone();
+    let owner_node_id = seeded.node_id;
+    // The tests drive the CLI as a blocking subprocess, so the driver needs
+    // its own thread and runtime to make progress.
+    std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async move {
+            let pool = voom_store::connect(&url).await.unwrap();
+            let mut node = SimulatedOwnerNode::new().unwrap();
+            node.install_for(&pool, voom_core::NodeId(owner_node_id))
+                .await
+                .unwrap();
+            // Authenticate as the installed seeded owner, not the default
+            // simulated principal id.
+            node.node_id = voom_core::NodeId(owner_node_id);
+            let cp = ControlPlane::open(&url).await.unwrap();
+            loop {
+                let pending: Option<(i64, i64)> = sqlx::query_as(
+                    "SELECT id, artifact_handle_id FROM artifact_commit_intents \
+                     WHERE state = 'pending' ORDER BY id ASC LIMIT 1",
+                )
+                .fetch_optional(&pool)
+                .await
+                .unwrap();
+                if let Some((_, artifact_handle_id)) = pending {
+                    let _ = node
+                        .drive_pending_commit(
+                            &cp,
+                            &pool,
+                            voom_core::ArtifactHandleId(u64::try_from(artifact_handle_id).unwrap()),
+                        )
+                        .await
+                        .ok();
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+        });
+    });
 }
 
 fn create_staged_artifact(seeded: &Seeded, dir: &Path, name: &str) -> ArtifactFixture {

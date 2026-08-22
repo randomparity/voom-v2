@@ -56,6 +56,9 @@ fn each_kind_has_distinct_wire_string() {
         EventKind::ArtifactCommitCompleted,
         EventKind::ArtifactCommitFailedPreMutation,
         EventKind::ArtifactCommitRecoveryRequired,
+        EventKind::ArtifactCommitIntentRecorded,
+        EventKind::ArtifactCommitIntentAuthorized,
+        EventKind::ArtifactCommitReceiptReported,
         EventKind::ArtifactTranscodeStarted,
         EventKind::ArtifactTranscodeProgress,
         EventKind::ArtifactTranscodeSucceeded,
@@ -164,6 +167,11 @@ fn node_event_kinds_use_dotted_wire_format() {
 }
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one flat list entry per EventKind variant keeps the round-trip table \
+              an explicit, greppable mirror of the enum"
+)]
 fn every_kind_round_trips_through_as_str_and_from_str() {
     // Programmatically enumerate every variant — if a new variant is added
     // without an as_str/from_str pair, this test fails.
@@ -221,6 +229,9 @@ fn every_kind_round_trips_through_as_str_and_from_str() {
         EventKind::ArtifactCommitCompleted,
         EventKind::ArtifactCommitFailedPreMutation,
         EventKind::ArtifactCommitRecoveryRequired,
+        EventKind::ArtifactCommitIntentRecorded,
+        EventKind::ArtifactCommitIntentAuthorized,
+        EventKind::ArtifactCommitReceiptReported,
         EventKind::ArtifactTranscodeStarted,
         EventKind::ArtifactTranscodeProgress,
         EventKind::ArtifactTranscodeSucceeded,
@@ -387,6 +398,18 @@ fn staged_artifact_event_kinds_use_exact_sprint_11_wire_strings() {
         (
             EventKind::ArtifactCommitRecoveryRequired,
             "artifact.commit_recovery_required",
+        ),
+        (
+            EventKind::ArtifactCommitIntentRecorded,
+            "artifact.commit_intent_recorded",
+        ),
+        (
+            EventKind::ArtifactCommitIntentAuthorized,
+            "artifact.commit_intent_authorized",
+        ),
+        (
+            EventKind::ArtifactCommitReceiptReported,
+            "artifact.commit_receipt_reported",
         ),
     ];
 

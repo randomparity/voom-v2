@@ -13,7 +13,7 @@ async fn init_in_memory_applies_every_embedded_migration() {
     let pool = connect("sqlite::memory:").await.unwrap();
     let report = init_on(&pool).await.unwrap();
     assert!(!report.already_initialized);
-    assert_eq!(expected_migrations(), 2);
+    assert_eq!(expected_migrations(), 3);
     assert_eq!(report.migrations_applied, expected_migrations());
 }
 
@@ -638,7 +638,8 @@ async fn migration_0037_preserves_every_scheduler_decision_column_index_and_sequ
     .unwrap();
 
     let report = crate::init::init_on(&pool).await.unwrap();
-    assert_eq!(report.migrations_applied, 1);
+    // Version-1 databases apply both later migrations (0037 and 0038).
+    assert_eq!(report.migrations_applied, 2);
 
     // Every pre-existing column value survives, and the new column is NULL.
     let row = sqlx::query("SELECT * FROM scheduler_decisions WHERE id = 41")

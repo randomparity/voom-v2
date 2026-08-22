@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::future::Future;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -22,11 +23,16 @@ use voom_worker_protocol::{
 use crate::child::{ChildErrorKind, ChildSpec, ChildSupervisor, RunningChild};
 use crate::client::{
     AcquireOutcome, AcquireRequest, ActivateOutcome, ActivateRequest, ActivatedWorker,
-    CompleteOutcome, CompleteRequest, ControlPlaneClient, DeactivateOutcome, DeactivateRequest,
-    FailOutcome, FailRequest, LeaseDispatch, LeaseHeartbeatOutcome, LeaseHeartbeatRequest,
-    NodeHeartbeatOutcome, NodeHeartbeatRequest, RetryRequest, WorkerDeclaration,
+    CommitApplyingOutcome, CommitApplyingRequest, CommitAuthorizeOutcome, CommitAuthorizeRequest,
+    CommitCompleteOutcome, CommitCompleteRequest, CommitOpenOutcome, CommitOpenRequest,
+    CommitOutcomeRequest, CommitReceiptOutcome, CompleteOutcome, CompleteRequest,
+    ControlPlaneClient, DeactivateOutcome, DeactivateRequest, FailOutcome, FailRequest,
+    LeaseDispatch, LeaseHeartbeatOutcome, LeaseHeartbeatRequest, NodeHeartbeatOutcome,
+    NodeHeartbeatRequest, RetryRequest, WorkerDeclaration,
 };
-use crate::config::{LoadedAgentConfig, WorkerConfig};
+use crate::commit::{CommitCoordinatorContext, run_commit_coordinator};
+use crate::config::{AgentConfig, LoadedAgentConfig, WorkerConfig};
+use voom_core::ids::ArtifactCommitIntentId;
 
 const HEARTBEAT_DIVISOR: u32 = 3;
 const RESTART_DELAY: Duration = Duration::from_millis(250);
@@ -381,6 +387,20 @@ impl AgentRuntime {
                 coordinator_rng,
             ));
         }
+
+        let commit_rng = derive_schedule_rng(schedule_rng);
+        let commit_context = CommitCoordinatorContext {
+            api: Arc::clone(&self.client),
+            node_id: self.config.config.node_id,
+            incarnation_id,
+            poll_interval: Duration::from_millis(self.config.config.poll_interval_ms),
+            storage_roots: storage_root_bindings(&self.config.config)?,
+        };
+        coordinators.spawn(run_commit_coordinator(
+            commit_context,
+            shutdown.clone(),
+            commit_rng,
+        ));
         Ok(coordinators)
     }
 
@@ -520,7 +540,7 @@ struct CoordinatorContext {
 }
 
 #[derive(Debug)]
-enum CoordinatorExit {
+pub(crate) enum CoordinatorExit {
     Shutdown(LeaseSettlement),
     RestartExhausted,
     Fatal(RuntimeFatal),
@@ -1193,7 +1213,7 @@ async fn send_node_heartbeat(
 }
 
 #[async_trait]
-trait ControlPlaneApi: std::fmt::Debug + Send + Sync {
+pub(crate) trait ControlPlaneApi: std::fmt::Debug + Send + Sync {
     async fn activate(
         &self,
         node_id: voom_core::NodeId,
@@ -1234,6 +1254,35 @@ trait ControlPlaneApi: std::fmt::Debug + Send + Sync {
         lease_id: LeaseId,
         request: &RetryRequest<FailRequest>,
     ) -> Result<FailOutcome, VoomError>;
+
+    async fn commit_open(
+        &self,
+        request: &RetryRequest<CommitOpenRequest>,
+    ) -> Result<CommitOpenOutcome, VoomError>;
+
+    async fn authorize_commit_intent(
+        &self,
+        intent_id: ArtifactCommitIntentId,
+        request: &RetryRequest<CommitAuthorizeRequest>,
+    ) -> Result<CommitAuthorizeOutcome, VoomError>;
+
+    async fn report_commit_applying(
+        &self,
+        intent_id: ArtifactCommitIntentId,
+        request: &RetryRequest<CommitApplyingRequest>,
+    ) -> Result<CommitApplyingOutcome, VoomError>;
+
+    async fn report_commit_outcome(
+        &self,
+        intent_id: ArtifactCommitIntentId,
+        request: &RetryRequest<CommitOutcomeRequest>,
+    ) -> Result<CommitReceiptOutcome, VoomError>;
+
+    async fn complete_commit_intent(
+        &self,
+        intent_id: ArtifactCommitIntentId,
+        request: &RetryRequest<CommitCompleteRequest>,
+    ) -> Result<CommitCompleteOutcome, VoomError>;
 }
 
 #[async_trait]
@@ -1291,6 +1340,45 @@ impl ControlPlaneApi for ControlPlaneClient {
         request: &RetryRequest<FailRequest>,
     ) -> Result<FailOutcome, VoomError> {
         Self::fail(self, lease_id, request).await
+    }
+
+    async fn commit_open(
+        &self,
+        request: &RetryRequest<CommitOpenRequest>,
+    ) -> Result<CommitOpenOutcome, VoomError> {
+        Self::commit_open(self, request).await
+    }
+
+    async fn authorize_commit_intent(
+        &self,
+        intent_id: ArtifactCommitIntentId,
+        request: &RetryRequest<CommitAuthorizeRequest>,
+    ) -> Result<CommitAuthorizeOutcome, VoomError> {
+        Self::authorize_commit_intent(self, intent_id, request).await
+    }
+
+    async fn report_commit_applying(
+        &self,
+        intent_id: ArtifactCommitIntentId,
+        request: &RetryRequest<CommitApplyingRequest>,
+    ) -> Result<CommitApplyingOutcome, VoomError> {
+        Self::report_commit_applying(self, intent_id, request).await
+    }
+
+    async fn report_commit_outcome(
+        &self,
+        intent_id: ArtifactCommitIntentId,
+        request: &RetryRequest<CommitOutcomeRequest>,
+    ) -> Result<CommitReceiptOutcome, VoomError> {
+        Self::report_commit_outcome(self, intent_id, request).await
+    }
+
+    async fn complete_commit_intent(
+        &self,
+        intent_id: ArtifactCommitIntentId,
+        request: &RetryRequest<CommitCompleteRequest>,
+    ) -> Result<CommitCompleteOutcome, VoomError> {
+        Self::complete_commit_intent(self, intent_id, request).await
     }
 }
 
@@ -1541,7 +1629,7 @@ impl RuntimeExit {
 }
 
 #[derive(Debug)]
-enum RuntimeFatal {
+pub(crate) enum RuntimeFatal {
     ControlPlane(VoomError),
     Internal(String),
 }
@@ -1553,7 +1641,7 @@ enum ShutdownSignalPhase {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum LeaseSettlement {
+pub(crate) enum LeaseSettlement {
     Completed,
     Forced,
 }
@@ -1577,7 +1665,7 @@ struct ShutdownProgress {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ShutdownKind {
+pub(crate) enum ShutdownKind {
     Running,
     User,
     Forced,
@@ -1598,8 +1686,27 @@ impl CoordinatorContext {
         self.worker_id
     }
 }
+/// Index the configured storage-root provider locators by root id, rejecting
+/// duplicate bindings at spawn time.
+pub(crate) fn storage_root_bindings(
+    config: &AgentConfig,
+) -> Result<HashMap<u64, PathBuf>, VoomError> {
+    let mut bindings = HashMap::with_capacity(config.storage_roots.len());
+    for root in &config.storage_roots {
+        if bindings
+            .insert(root.storage_root_id, root.provider_locator.clone())
+            .is_some()
+        {
+            return Err(VoomError::Config(format!(
+                "storage root {} is bound more than once",
+                root.storage_root_id
+            )));
+        }
+    }
+    Ok(bindings)
+}
 
-fn classify_control_plane_error(error: VoomError) -> RuntimeFatal {
+pub(crate) fn classify_control_plane_error(error: VoomError) -> RuntimeFatal {
     RuntimeFatal::ControlPlane(error)
 }
 
@@ -1645,7 +1752,7 @@ fn lease_heartbeat_delay(interval: Duration, ttl: Duration, rng: &mut impl Rng) 
     }
 }
 
-fn centered_jitter(interval: Duration, rng: &mut impl Rng) -> Duration {
+pub(crate) fn centered_jitter(interval: Duration, rng: &mut impl Rng) -> Duration {
     let half = interval / 2;
     let lower = half.as_nanos();
     let upper = interval.saturating_add(half).as_nanos();
@@ -1675,7 +1782,7 @@ fn duration_millis_u32(duration: Duration) -> u32 {
     u32::try_from(duration.as_millis()).unwrap_or(u32::MAX)
 }
 
-fn new_key(prefix: &str) -> String {
+pub(crate) fn new_key(prefix: &str) -> String {
     format!("{prefix}-{}", random_hex(16))
 }
 

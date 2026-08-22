@@ -20,6 +20,7 @@ use voom_core::{ErrorCode, VoomError, format_iso8601};
 
 pub const SCHEMA_VERSION: &str = "0";
 
+mod commit;
 pub mod config;
 mod execution;
 mod scan;
@@ -60,6 +61,7 @@ pub fn router_with_control_plane(
 fn base_router(state: AppState) -> axum::Router {
     axum::Router::new()
         .route("/health", get(health))
+        .merge(commit::routes())
         .merge(execution::routes())
         .merge(scan::routes())
         .with_state(state)

@@ -1,0 +1,184 @@
+# Spec: Fenced node-local verification and commit intents (#422)
+
+ADR: [0074](../../adr/0074-fenced-node-local-commit-intents.md) ·
+Issue: randomparity/voom-v2#422 · Branch:
+`feat/fenced-node-local-commit-intents-422` · Base: `main`
+
+## Goal
+
+Staged artifact commits execute on the storage-owner node behind a durable,
+fenced authorization. The control plane prepares, authorizes, finalizes, and
+recovers; it never opens staging or target bytes.
+
+## Normative guarantees
+
+Each traces to an issue acceptance criterion (AC1–AC6) or a necessary
+consequence recorded in ADR 0074:
+
+- G1 (AC1): A stale lease, root owner, node epoch/incarnation, location
+  epoch, or wrong/absent commit fence prevents mutation and finalization.
+- G2 (AC2): While an intent is `pending`/`authorized`, conflicting blocking
+  use leases are refused on its pinned scope, and alias/location changes
+  cannot join the authorized scope (the scope is exactly the pinned rows;
+  pinned-row drift fails authorization and any later receipt/finalize).
+- G3 (AC3): Replayed authorize and complete calls return the original
+  outcome idempotently.
+- G4 (AC4): An ambiguous promotion never becomes an untracked successful
+  commit; completion requires exact fence + matching evidence.
+- G5 (AC5): Recovery distinguishes not-started, promoted, mismatched, and
+  operator-required states from node receipts.
+- G6 (AC6): Add-only install, backup, verification, audit-event, and
+  use-lease guarantees are preserved (no-replace install; gate re-evaluated
+  at authorize; every state transition emits its event).
+
+## Architecture
+
+Flow for one staged commit (all steps durable):
+
+1. **Prepare** (control plane tx): as today — source facts, target root +
+   locator resolution, verified staging location + verification pin,
+   lineage safety-gate evaluation, pending `artifact_commit_records` row.
+   Additionally creates the pending `artifact_commit_intents` row pinning:
+   handle, source file version, verification id, staging location id +
+   epoch, target root id + `root_epoch`, target locator, expected facts,
+   owner node resolved from the target root's `owner_node_id`; staging and
+   target roots must resolve to the same owner or the commit fails
+   pre-mutation. Local byte observation in prepare is removed; freshness
+   moves to the node's pre-mutation verify.
+   The staged bytes are addressed as a NEW rooted `file_locations` row on
+   the source file version — storage root = staging root,
+   provider-relative locator derived from the staged path relative to that
+   root — created in the prepare transaction and retired at finalize or
+   abort; `staging location id + epoch` pins that row. The existing
+   `artifact_locations` kind=staging marker is unchanged (its host-path
+   value is not a node-usable address and carries no epoch).
+2. **Authorize** (node pull): the agent polls a fetch route returning
+   pending intents for roots it owns; it requests authorization per intent.
+   In one control-plane tx: re-run the lineage gate; revalidate pinned
+   epochs unchanged; confirm requesting node = current root owner with an
+   active incarnation and fresh heartbeat; transition `pending ->
+   authorized` (CAS on intent `epoch`); mint a random 32-byte fence; store
+   it; return the fenced payload (staging/target locators, expected facts,
+   fence). Drift or a live blocking lease aborts fail-closed (`Conflict`).
+3. **Applying journal** (node → route): before touching bytes the node
+   reports `applying`; the route records the receipt durably. The node
+   mutates nothing if this report cannot succeed. Route guards:
+   `require_remote_incarnation_fence_in_tx` + intent `authorized`.
+4. **Verify** (node local): observe staging bytes; compare size + hash to
+   expected facts. Drift → report `mismatched` evidence; no mutation.
+5. **Promote** (node local): copy to unique temp sibling; install without
+   replacement (add-only semantics ported from the retired host promote);
+   fsync file parent directories; observe target facts.
+6. **Complete** (node → route): report `applied` + observed target facts +
+   fence. Control plane validates fence (exact match, unconsumed), applied
+   receipt present, epochs still pinned, then runs the existing finalize
+   transaction (result version/location, retire staging, mark committed)
+   and marks the intent `completed`, consuming the fence. Emits completion
+   events. Idempotent replay via `remote_idempotency_keys`.
+7. **Recovery**: lost responses/crashes/stale authorization land the record
+   in `recovery_required`. `recover_commit` classifies from receipts:
+   a receipt-less authorized intent is safe to abort and re-prepare a
+   successor generation — the `applying` journal is the mutation gate (the
+   node mutates only after its `applying` receipt is durably accepted; a
+   late report fails the CAS and the node stands down); an intent with any
+   control-plane-visible receipt classifies as `applied` + matching target
+   facts → finalize directly; a supplemental re-observation showing target
+   absent with no temp sibling is positive not-applied evidence → abort
+   and re-drive a fresh generation; `mismatched`, or `outcome_unknown`
+   that stays unresolved because no current owner can observe the bytes →
+   operator-required (record stays `recovery_required` carrying both the
+   original receipt and the supplemental observation). Pending intents
+   whose owner node is stale or retired abort fail-closed. An authorized
+   intent enters `recovery_required` when drift is observed
+   (`mismatched`/`outcome_unknown` receipt) or when recovery classification
+   runs against it with a receipt present — via the prepare driver's
+   bounded-wait timeout path or operator invocation — never silently on a
+   timer.
+   The node coordinator also polls all non-terminal intents (`pending`,
+   `authorized`, `recovery_required`) for roots it owns; for
+   `recovery_required` it files supplemental typed receipts by re-observing
+   staging and target bytes read-only against the pinned expected facts:
+   target absent → `outcome_unknown` resolved as not-applied (recovery may
+   abort and re-drive); matching target present → `applied` (recovery
+   finalizes directly); drifting target present → `mismatched`; it writes
+   to the supplemental-receipt slot so the original evidence survives. A
+   stale/retired owner has no producer: the record stays operator-required.
+
+## Components and files
+
+| Crate | Change |
+|---|---|
+| `migrations/0038_artifact_commit_intents.sql` | New STRICT table, CHECK-coherent states, json_valid columns; fails closed at apply time if any non-terminal (`pending`/`recovery_required`) `artifact_commit_records` rows exist — operators resolve them under the prior binary |
+| `crates/voom-store` | Migrator entry + schema-test bump; `repo/media/artifact_commit_intents.rs` repo (+ tests) |
+| `crates/voom-events` | Payloads: intent recorded/authorized, receipt reported (kinds `applying`/`applied`/`mismatched`/`outcome_unknown`; receipt absence means not started — the design spec's `not_started` journal step is deliberately collapsed into absence, with the `applying` report as the sole mutation gate); no fence value ever serialized |
+| `crates/voom-control-plane` | Commit path rework: prepare pins intent; authorize/complete/receipt case functions; recovery classification; delete host promotion code |
+| `crates/voom-api` | `commit.rs` routes under `/v1/artifact/commit/…` following `execution.rs` handler pattern |
+| `crates/voom-node-agent` | Client methods (`RetryRequest`), coordinator task polling intents, node-side verify+promote module (ported add-only install) |
+| docs/scripts | ADR 0074 + index row; payload-contract inventory/scope entries |
+
+### Node API routes
+
+- `POST /v1/artifact/commit/open` — lists non-terminal intents (`pending`,
+  `authorized`, `recovery_required`) for the caller's owned active roots,
+  each with its state, so the executor branches correctly and a restarted
+  agent rediscovers intents it authorized before crashing.
+- `POST /v1/artifact/commit/{intent_id}/authorize`
+- `POST /v1/artifact/commit/{intent_id}/applying`
+- `POST /v1/artifact/commit/{intent_id}/outcome` — typed failure evidence
+  (`mismatched` / `outcome_unknown`) and supplemental re-observations
+- `POST /v1/artifact/commit/{intent_id}/complete`
+
+GET-free design: intent discovery rides the `open` listing; no other
+node-facing commit surface exists.
+
+All requests carry bearer node token + `X-Voom-Idempotency-Key`; bodies are
+`deny_unknown_fields`; envelopes/errors identical to `execution.rs`.
+
+## Threat model
+
+- **Boundaries added**: five new authenticated node-facing HTTP routes
+  (widening the existing `/v1/execution` + `/v1/scan` authenticated node
+  surface). Actor: an authenticated remote node (possesses a node token);
+  anonymous internet is rejected at the bearer check as today.
+- **Controls**: every route authenticates via the shared
+  `require_remote_incarnation_fence_in_tx` primitive (token hash compare,
+  remote-node kind, active incarnation, optional worker binding) plus
+  per-request liveness; authorization to mutate one intent additionally
+  requires the requester to be the root's current owner and the fence to
+  match at completion. Bodies are typed `deny_unknown_fields`; locators are
+  provider-relative strings validated by the existing locator checks; the
+  node resolves paths only within roots it owns (containment mirrors the
+  verify worker's staging-root rule). Fence values never enter events or
+  logs; the authorize replay outcome stored in `remote_idempotency_keys`
+  necessarily carries the fence (a replayed authorize must return the
+  original fenced outcome) and is protected by the same store boundary as
+  every other replayed authenticated outcome.
+- **Out of scope**: malicious storage-owner node corrupting bytes it
+  already owns (the node is the byte authority per ADR 0050; integrity is
+  bounded by the content-hash pinning at verification and finalize);
+  TLS/transport security (owned by the API server config, ADR 0054).
+
+## Testing
+
+- Store: migration applies; repo CAS transitions, fence mint/consume,
+  receipt writes, replay behavior.
+- Control plane: authorize fail-closed on each drift axis (lease, epochs,
+  incarnation, ownership); complete fence validation; recovery
+  classification across the four evidence states; idempotent replays;
+  existing staged-flow/gate suites migrated to drive the node half through
+  the case functions.
+- API: route auth (401/404/409 paths), envelope shape, replay headers.
+- Node agent: verify+promote against temp dirs (match, mismatch, existing
+  target); add-only no-replace preserved; journal-before-mutate ordering.
+- Guardrails: `just ci` green before push.
+
+## Failure modes mapped to tests
+
+| Failure | Expected outcome |
+|---|---|
+| Blocking lease acquired between prepare and authorize | Authorize fails; intent aborted; no mutation |
+| Root reassigned / epoch bumped after authorize | Receipt + complete rejected; record recovery_required |
+| Staging bytes drift before promote | `mismatched` receipt; no mutation |
+| Crash after applying, before reporting | Stale `applying` → `recovery_required`; resolved not-applied by a supplemental target-absent re-observation, else operator-required evidence |
+| Promote done, completion lost | Node replays complete; finalize converges once |
+| Replayed authorize/complete | Original outcome returned; no new rows/events |

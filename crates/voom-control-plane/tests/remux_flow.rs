@@ -60,6 +60,9 @@ async fn remux_flow_verifies_commits_and_records_result_snapshot() {
     voom_store::test_support::set_test_storage_root_path(&pool, tmp.path())
         .await
         .unwrap();
+    // Background stand-in for the storage-owner agent (ADR 0074): drives the
+    // fenced commit intent so non-blocked commits converge.
+    voom_test_support::commit_node::install_and_spawn_driver(&pool);
     let cp = ControlPlane::open_with_pool(pool, std::sync::Arc::new(voom_core::SystemClock))
         .await
         .unwrap()

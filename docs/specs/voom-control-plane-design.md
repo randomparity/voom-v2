@@ -1456,6 +1456,15 @@ During healthy execution, the workflow heartbeat and its operation claims cover
 dispatch, validation, verification, commit, and terminal lease transition.
 Genuine expiry remains fail-closed and cannot resurrect a lease or claim.
 
+Conforming amendment (issue #422, ADR 0074): for the fenced staged
+artifact-commit intent, step 2's separate `not_started` journal receipt is
+collapsed into receipt absence — the durable `applying` report is the sole
+mutation gate, so no distinct pre-mutation receipt exists to produce or
+classify. Recovery treats a receipt-less authorized intent as safe to
+abort; a target-absent supplemental re-observation is positive not-applied
+evidence resolving an ambiguous outcome, while `mismatched` or unresolved
+`outcome_unknown` stays operator-required.
+
 The following co-located gate details describe the implementation before #422.
 They remain the safety baseline, but references to one host transaction opening
 or mutating paths are superseded by the fenced control-plane/owner-agent
