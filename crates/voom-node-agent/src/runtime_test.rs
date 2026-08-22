@@ -2104,3 +2104,114 @@ async fn advance_seconds(seconds: u64) {
         tokio::task::yield_now().await;
     }
 }
+
+/// A child client that records the operation request it was handed.
+#[derive(Debug)]
+struct CapturingWorker {
+    request: Mutex<Option<OperationRequest>>,
+}
+
+impl CapturingWorker {
+    fn new() -> Self {
+        Self {
+            request: Mutex::new(None),
+        }
+    }
+}
+
+#[async_trait]
+impl ClientHandle for CapturingWorker {
+    async fn handshake(&self, offered: u32) -> Result<HandshakeResponse, ProtocolError> {
+        Ok(HandshakeResponse { agreed: offered })
+    }
+
+    async fn identity(
+        &self,
+        credentials: &WorkerCredentials,
+    ) -> Result<WorkerIdentityResponse, ProtocolError> {
+        Ok(WorkerIdentityResponse {
+            worker_id: credentials.worker_id,
+            worker_epoch: credentials.worker_epoch,
+            protocol_version: voom_core::PROTOCOL_VERSION,
+            proof: String::new(),
+        })
+    }
+
+    async fn dispatch(
+        &self,
+        _credentials: &WorkerCredentials,
+        _idempotency_key: &str,
+        request: OperationRequest,
+    ) -> Result<DispatchStream, ProtocolError> {
+        *self.request.lock().await = Some(request.clone());
+        let frame = ProgressFrame::Result {
+            lease_id: request.lease_id,
+            seq: 0,
+            emitted_at: OffsetDateTime::UNIX_EPOCH,
+            payload: serde_json::json!({"ok": true, "validated": true}),
+        };
+        let (mut writer, reader) = tokio::io::duplex(4096);
+        tokio::spawn(async move {
+            let mut bytes = serde_json::to_vec(&frame).unwrap();
+            bytes.push(b'\n');
+            let _ = writer.write_all(&bytes).await;
+        });
+        let reader: Pin<Box<dyn AsyncRead + Send + Unpin>> = Box::pin(reader);
+        Ok(DispatchStream {
+            response: OperationResponse {
+                lease_id: request.lease_id,
+                accepted_at: OffsetDateTime::UNIX_EPOCH,
+            },
+            frames: NdjsonReader::new(reader, request.lease_id),
+        })
+    }
+}
+
+#[tokio::test]
+async fn dispatch_to_child_forwards_owner_local_plan_and_normalized_operation() {
+    // Issue #478: the control plane normalizes the operation before dispatch,
+    // so the child request carries the bare wire token, and the dispatch's
+    // owner-local plan rides along for the worker's validated echo.
+    let child = CapturingWorker::new();
+    let control = Arc::new(FakeControlPlane::default());
+    let mut dispatch = dispatch_with_payload(31, json!({"path": "/media/a.mkv"}));
+    dispatch.operation = "probe_file".to_owned();
+    dispatch.artifact_access_plan = ArtifactAccessPlan {
+        id: 32,
+        owner_node_id: Some(7),
+        access_evidence: Some(
+            serde_json::from_value(json!({
+                "declaration": [
+                    {"target": {"kind": "storage_root", "storage_root_id": 5},
+                     "rights": ["read"]}
+                ],
+                "root_epochs": [{"storage_root_id": 5, "root_epoch": 2}]
+            }))
+            .unwrap(),
+        ),
+    };
+
+    let outcome = dispatch_to_child(
+        &dispatch,
+        &child,
+        &credentials(),
+        &context(Arc::clone(&control)),
+    )
+    .await;
+    assert!(
+        matches!(outcome, LeaseOutcome::Complete(_)),
+        "expected a completed dispatch"
+    );
+    let request = child
+        .request
+        .lock()
+        .await
+        .take()
+        .expect("child was dispatched");
+    assert_eq!(request.operation, OperationKind::ProbeFile);
+    assert_eq!(request.lease_id, LeaseId(31));
+    assert_eq!(
+        request.lease_id, dispatch.lease_id,
+        "the owner-local dispatch reaches the child with its lease identity"
+    );
+}
