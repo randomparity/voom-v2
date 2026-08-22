@@ -2202,12 +2202,11 @@ async fn dispatch_to_child_forwards_owner_local_plan_and_normalized_operation() 
         matches!(outcome, LeaseOutcome::Complete(_)),
         "expected a completed dispatch"
     );
-    let request = child
-        .request
-        .lock()
-        .await
-        .take()
-        .expect("child was dispatched");
+    let request = child.request.lock().await.take().unwrap();
+    assert!(
+        request.operation == OperationKind::ProbeFile,
+        "child was dispatched"
+    );
     assert_eq!(request.operation, OperationKind::ProbeFile);
     assert_eq!(request.lease_id, LeaseId(31));
     assert_eq!(

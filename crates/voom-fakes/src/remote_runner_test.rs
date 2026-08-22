@@ -251,6 +251,11 @@ impl Drop for RemoteRunnerFixture {
 /// the control-plane and API surfaces where worker registration is explicit.
 #[tokio::test]
 async fn runner_completes_acquired_byte_work_with_bound_plan_and_decision() {
+    use voom_store::repo::execution::leases::{LeaseFilter, SqliteLeaseRepo};
+    use voom_store::repo::execution::scheduler_decisions::{
+        SchedulerDecisionFilter, SchedulerDecisionOutcome,
+    };
+
     let fixture = RemoteRunnerFixture::new().await;
     let ticket_id = fixture
         .ready_ticket(transcode_video_ticket(
@@ -274,10 +279,6 @@ async fn runner_completes_acquired_byte_work_with_bound_plan_and_decision() {
     // Exactly one lease, exactly one plan bound to it, and the selected
     // decision names that same lease.
     let pool = voom_store::connect(&fixture.url).await.unwrap();
-    use voom_store::repo::execution::leases::{LeaseFilter, SqliteLeaseRepo};
-    use voom_store::repo::execution::scheduler_decisions::{
-        SchedulerDecisionFilter, SchedulerDecisionOutcome,
-    };
     // The completed lease has left `held`, so list without a state filter.
     let leases = SqliteLeaseRepo::new(pool.clone())
         .list(LeaseFilter { state: None }, None, 10)

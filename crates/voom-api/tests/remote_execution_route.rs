@@ -928,6 +928,10 @@ async fn assert_unauthorized_envelope(res: Response<Body>, command: &str) {
 /// acquiring node leases, and the leased response dispatches the normalized
 /// bare operation together with the plan identity and its owner evidence.
 #[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the owner-local fixture seeding and the binding assertions read best inline"
+)]
 async fn acquire_leased_owner_local_byte_work_dispatches_normalized_operation() {
     use voom_core::StorageProviderKind;
     use voom_store::repo::library::libraries::{LibraryMediaKind, NewLibrary};
