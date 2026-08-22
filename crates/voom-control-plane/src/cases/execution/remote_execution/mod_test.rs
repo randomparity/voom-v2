@@ -2403,6 +2403,7 @@ async fn remote_acquire_changed_gate_missing_grant_and_denied_decide_with_docume
         .cp
         .scheduler_decision(scheduler_decision_id)
         .await
+        .unwrap()
         .unwrap();
     assert_eq!(decision.reason_code, SchedulerReasonCode::MissingGrant);
     assert_eq!(decision.ticket_id, Some(ticket));
