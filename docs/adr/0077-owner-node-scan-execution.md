@@ -107,7 +107,8 @@ terminal and prints the outcome envelope.
 - Ticket failure or loss leaves the session `requested` until the inactivity deadline stales
   it; the session must then be re-requested by hand — ADR 0067 lets only the trusted local
   operator request sessions, so an unattended deployment stalls until a human re-requests
-  the scan.
+  the scan. Automating recovery is ADR 0067's decision to revisit, not this one's; scans are
+  operator-initiated today, so no live path regresses.
 - The workflow scanner-ticket result shape changes from per-file `{path, file_location_id}`
   rows to a run summary keyed by scan session; downstream consumption of scanner results must
   be reintroduced against published locations in a follow-up (#423-adjacent surface).
@@ -117,10 +118,10 @@ terminal and prints the outcome envelope.
   drift checks around each probe bound what that residual can publish, but they do not bind
   an open object.
 - Observation rows now carry up to one strict evidence payload each. Batches are bounded by
-  both the 1000-observation route limit and an accumulated-evidence byte budget under the
-  API's request-body cap (~1 MiB): the pump flushes whichever bound binds first, so a
-  sidecar-dense root produces more, smaller batches instead of a deterministically rejected
-  submission. A single observation is bounded too: a primary contributes at most 64 sidecar
+  both the 1000-observation route limit and an estimated serialized-batch byte budget under
+  the API's request-body cap (~1 MiB), counting locators, identity strings, timestamps, and
+  evidence alike: the pump flushes whichever bound binds first, so dense or deep-path roots
+  produce more, smaller batches instead of a deterministically rejected submission. A single observation is bounded too: a primary contributes at most 64 sidecar
   digest entries to its evidence payload, and a primary beyond that — or whose evidence
   alone would exceed 64 KiB — degrades to an evidence-less observation with the overflow
   counted, so no single file can make its batch permanently unsubmittable.

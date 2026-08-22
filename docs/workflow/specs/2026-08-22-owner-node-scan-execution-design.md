@@ -148,7 +148,9 @@ Pump behavior for a `scan_library` dispatch:
    {size_bytes, content_hash, modified_at}. Probe paths are absolute canonical-root joins
    (never option-like); probing stays pathname-based until #423 reference-passing.
 5. Buffer observations; flush a batch when ≥1000 accumulate, accumulated evidence bytes
-   reach 512 KiB (staying under the API's ~1 MiB request-body cap), or enumeration ends.
+   reach an estimated serialized-batch size of 512 KiB — counting locators, identity strings,
+   timestamps, and evidence alike, staying under the API's ~1 MiB request-body cap — or
+   enumeration ends.
    Per-observation bound: at most 64 sidecar digest entries per primary and ≤64 KiB evidence
    per primary; overflow degrades to an evidence-less observation (counted).
 6. After scan `Result`: flush remainder, `complete_scan_session(last_sequence,

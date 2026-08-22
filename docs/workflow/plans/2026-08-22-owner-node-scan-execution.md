@@ -103,7 +103,8 @@ Tests (mock CP server via local axum or existing test doubles used by runtime te
 ordered batches, retry replays accepted sequence, drift candidate yields evidence-less
 observation, fatal worker crash ⇒ fail_scan_session + lease Fail, empty enumeration ⇒
 complete with null last_sequence, >1000 candidates split flushes, sidecar-dense root
-flushes at the 512 KiB evidence-byte budget before the ~1 MiB request-body cap rejects.
+flushes at the estimated serialized-batch byte budget (512 KiB; locators+identity+
+evidence) before the ~1 MiB request-body cap rejects.
 Verify: `cargo test -p voom-node-agent`.
 
 ## Task 7 — Completion publication
