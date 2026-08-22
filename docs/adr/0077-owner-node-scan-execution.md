@@ -91,6 +91,9 @@ run, then polls session inspection until terminal and prints the outcome envelop
   content-level failures never publish stale identity, and infrastructure failures fail the
   session without partial reconciliation.
 - Ticket failure or loss leaves the session `requested`; the inactivity deadline stales it.
+- The workflow scanner-ticket result shape changes from per-file `{path, file_location_id}`
+  rows to a run summary keyed by scan session; downstream consumption of scanner results must
+  be reintroduced against published locations in a follow-up (#423-adjacent surface).
 - Discovery and hash byte access binds to a component-wise, symlink-free descent from the
   canonical root — the race-free property debt 0004 demands for those legs. The probe leg
   still reopens a reconstructed absolute pathname until #423 lands reference-passing; the
