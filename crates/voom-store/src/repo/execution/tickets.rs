@@ -95,6 +95,10 @@ pub struct WorkflowTicketFacts {
     pub ready: u32,
     pub leased: u32,
     pub failed: u32,
+    /// How many of `ready` are node-local media-dispatch operations
+    /// (ADR 0075): the bundled executor never claims them, so an all-`ready`
+    /// batch of these is externally held work, not a stalled queue.
+    pub ready_node_local_media: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -749,28 +753,33 @@ impl SqliteTicketRepo {
         job_id: JobId,
         workflow_id: &str,
     ) -> Result<WorkflowTicketFacts, VoomError> {
-        let (unfinished, ready, leased, failed): (i64, i64, i64, i64) = sqlx::query_as(
-            "SELECT \
-               COALESCE(SUM(state IN ('pending', 'ready', 'leased')), 0), \
-               COALESCE(SUM(state = 'ready'), 0), \
-               COALESCE(SUM(state = 'leased'), 0), \
-               COALESCE(SUM(state = 'failed'), 0) \
-             FROM tickets \
-             WHERE job_id = ? AND json_extract(payload, '$.workflow_id') = ?",
-        )
-        .bind(i64_from_u64(
-            job_id.0,
-            concat!(module_path!(), ": ", stringify!(job_id.0)),
-        )?)
-        .bind(workflow_id)
-        .fetch_one(&self.pool)
-        .await
-        .map_err(|e| VoomError::database_context("workflow ticket facts", e))?;
+        let (unfinished, ready, leased, failed, ready_node_local_media): (i64, i64, i64, i64, i64) =
+            sqlx::query_as(
+                "SELECT \
+                   COALESCE(SUM(state IN ('pending', 'ready', 'leased')), 0), \
+                   COALESCE(SUM(state = 'ready'), 0), \
+                   COALESCE(SUM(state = 'leased'), 0), \
+                   COALESCE(SUM(state = 'failed'), 0), \
+                   COALESCE(SUM(state = 'ready' AND json_extract(payload, '$.operation') IN (\
+                     'probe_file', 'transcode_audio', 'extract_audio', 'transcode_video', \
+                     'remux', 'back_up_file', 'verify_artifact')), 0) \
+                 FROM tickets \
+                 WHERE job_id = ? AND json_extract(payload, '$.workflow_id') = ?",
+            )
+            .bind(i64_from_u64(
+                job_id.0,
+                concat!(module_path!(), ": ", stringify!(job_id.0)),
+            )?)
+            .bind(workflow_id)
+            .fetch_one(&self.pool)
+            .await
+            .map_err(|e| VoomError::database_context("workflow ticket facts", e))?;
         Ok(WorkflowTicketFacts {
             unfinished: u32_from_i64(unfinished)?,
             ready: u32_from_i64(ready)?,
             leased: u32_from_i64(leased)?,
             failed: u32_from_i64(failed)?,
+            ready_node_local_media: u32_from_i64(ready_node_local_media)?,
         })
     }
 

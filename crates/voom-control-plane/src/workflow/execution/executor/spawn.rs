@@ -43,6 +43,11 @@ pub(super) enum SpawnOutcome {
     PreLeaseTerminal(VoomError),
     CapacityDeferred,
     AcceleratorUnavailable(Vec<String>),
+    /// The ticket executes through its storage owner's node agent (ADR 0075):
+    /// the executor neither leases nor pushes it. It stays `ready` until an
+    /// agent acquires it through the remote-lease flow, and the run loop waits
+    /// for that externally owned progress.
+    NodeLocalDispatched,
 }
 
 struct DispatchTask {
@@ -110,7 +115,9 @@ impl WorkflowExecutor {
             },
         );
     }
+}
 
+impl WorkflowExecutor {
     pub(super) async fn try_spawn_dispatch(
         &self,
         state: &mut RunLoopState,
@@ -118,6 +125,9 @@ impl WorkflowExecutor {
         accelerator_runtimes: &mut Option<WorkerRuntimeRegistry>,
     ) -> Result<SpawnOutcome, VoomError> {
         let mut workflow_payload = parse_payload(&ticket)?;
+        if let Some(outcome) = node_local_dispatch_outcome(state, ticket.id, &workflow_payload) {
+            return Ok(outcome);
+        }
         let projected = self
             .candidate_workers(
                 workflow_payload.operation,
@@ -212,6 +222,60 @@ impl WorkflowExecutor {
         };
         self.start_dispatch(state, ticket, workflow_payload, runtime, identity);
         Ok(SpawnOutcome::Spawned(recovery_tokens))
+    }
+
+    /// Poll the node-locally dispatched media tickets (ADR 0075) and settle
+    /// their durable outcomes into the run.
+    ///
+    /// The executor holds no lease for these tickets: the storage owner's
+    /// agent drives the fenced remote-lease flow, so their completion is
+    /// observed here rather than arriving through a dispatch task. A succeeded
+    /// ticket expands exactly as a locally dispatched one would; a failed one
+    /// keeps its recorded failure class and follows the run's failure mode;
+    pub(super) async fn settle_node_local_completions(
+        &self,
+        state: &mut RunLoopState,
+        invocation: &RunInvocation<'_>,
+    ) -> Result<(), VoomError> {
+        let outstanding: Vec<(TicketId, OperationKind)> = state
+            .node_local_outstanding
+            .iter()
+            .map(|(ticket_id, operation)| (*ticket_id, *operation))
+            .collect();
+        for (ticket_id, operation) in outstanding {
+            let Some(ticket) = self.control_plane.tickets.get(ticket_id).await? else {
+                state.node_local_outstanding.remove(&ticket_id);
+                continue;
+            };
+            match ticket.state {
+                TicketState::Succeeded => {
+                    state.node_local_outstanding.remove(&ticket_id);
+                    state.summary.record_success(operation);
+                    self.expand_successful_ticket(
+                        invocation.plan,
+                        invocation.workflow_id,
+                        invocation.job_id,
+                        ticket_id,
+                    )
+                    .await?;
+                }
+                TicketState::Failed => {
+                    state.node_local_outstanding.remove(&ticket_id);
+                    let class = self
+                        .ticket_failure_class(ticket_id)
+                        .await?
+                        .unwrap_or(FailureClass::VerificationFailure);
+                    state.summary.record_failure(operation, class);
+                    let source = VoomError::Internal(format!(
+                        "node-locally dispatched {operation:?} ticket {ticket_id} failed \
+                         with class {class:?}"
+                    ));
+                    record_terminal_dispatch_failure(state, source, invocation.failure_mode, false);
+                }
+                TicketState::Pending | TicketState::Ready | TicketState::Leased => {}
+            }
+        }
+        Ok(())
     }
 
     fn dispatch_runtime(
@@ -930,6 +994,32 @@ fn videotoolbox_decoder_matches(
 
 fn increment_reservation(reservations: &mut HashMap<WorkerId, u32>, worker_id: WorkerId) {
     *reservations.entry(worker_id).or_default() += 1;
+}
+
+/// The ADR 0075 routing gate: an envelope-bearing byte-touching ticket
+/// executes ONLY through its storage owner's agent via the remote-lease flow.
+/// The bundled executor never leases or pushes it, so no candidate projection,
+/// accelerator reservation, or local runtime applies; the ticket stays `ready`
+/// until an agent takes it. Tickets still rendered without the
+/// `media_dispatch` object keep the pre-ADR-0075 path until the payload
+/// renderers flip.
+fn node_local_dispatch_outcome(
+    state: &mut RunLoopState,
+    ticket_id: TicketId,
+    workflow_payload: &WorkflowTicketPayload,
+) -> Option<SpawnOutcome> {
+    if !workflow_payload.operation.is_node_local_media_dispatch()
+        || workflow_payload
+            .rendered_payload
+            .get("media_dispatch")
+            .is_none()
+    {
+        return None;
+    }
+    state
+        .node_local_outstanding
+        .insert(ticket_id, workflow_payload.operation);
+    Some(SpawnOutcome::NodeLocalDispatched)
 }
 
 fn record_terminal_dispatch_failure(

@@ -37,7 +37,8 @@ use voom_worker_protocol::{
 use super::super::leases::retry_on_database_locked;
 use super::{
     CapacityDeferredTestSync, DispatchIdentity, DispatchReadyOutcome, PostDispatchTestSync,
-    RunInvocation, RunLoopState, WorkflowFailureDisposition, workflow_failure_source,
+    RunInvocation, RunLoopState, SpawnOutcome, WorkflowFailureDisposition, WorkflowIdleState,
+    workflow_failure_source,
 };
 use crate::workflow::execution::dispatch::{DispatchOutcome, DispatchTerminal};
 use crate::workflow::execution::executor::WorkflowExecutorOptions;
@@ -5605,4 +5606,96 @@ fn accelerator_unavailable_clocks_are_independent_and_reset_by_token() {
     assert!(!state.accelerator_wait_started.contains_key("nvidia:GPU-a"));
     assert!(!state.accelerator_wait_started.contains_key("nvidia:GPU-b"));
     assert_eq!(state.timed_out_accelerator(Duration::from_secs(10)), None);
+}
+
+#[tokio::test]
+async fn envelope_bearing_media_tickets_route_to_owner_node_execution() {
+    // ADR 0075: a byte-touching ticket whose payload carries the
+    // `media_dispatch` envelope is never leased or pushed by the bundled
+    // executor — even when a locally registered worker could execute it. It
+    // stays `ready` for its storage owner's agent, and the run loop treats
+    // the workflow as externally held while it waits.
+    let mut fixture = ExecutorFixture::without_workers(0).await;
+    fixture
+        .register_worker(
+            "ffmpeg-worker",
+            OperationKind::TranscodeVideo,
+            8,
+            FakeBehavior::Success,
+        )
+        .await;
+    let job_id = fixture.open_workflow_job().await;
+    let operation = OperationKind::TranscodeVideo;
+    let mut rendered_payload = json!({
+        "operation": operation_name(operation),
+        "branch_id": "root",
+        "duration_ms": 10_u64,
+        "progress_interval_ms": 1_u64,
+        "media_dispatch": {"operation": "transcode_video"},
+    });
+    rendered_payload["source_storage_root_id"] = json!(3_u64);
+    rendered_payload["source_location_id"] = json!(7_u64);
+    let source = TicketStorageSource::Location {
+        storage_root_id: StorageRootId(3),
+        file_location_id: FileLocationId(7),
+    };
+    let payload = WorkflowTicketPayload {
+        workflow_id: format!("workflow-{}", job_id.0),
+        plan_id: "executor-test-0".to_owned(),
+        node_id: "transcode".to_owned(),
+        branch_id: "root".to_owned(),
+        operation,
+        rendered_payload,
+        timing: EffectiveTiming::for_test(10, 1),
+        source_file: None,
+        declared_artifact_access: declaration_for(operation, Some(&source)).unwrap(),
+    }
+    .to_ticket_payload()
+    .unwrap();
+    let ticket = fixture
+        .cp
+        .create_ticket(NewTicket {
+            job_id: Some(job_id),
+            kind: workflow_ticket_op(operation),
+            priority: 0,
+            payload,
+            max_attempts: 1,
+            created_at: T0,
+        })
+        .await
+        .unwrap();
+    fixture
+        .cp
+        .mark_ready_if_unblocked(ticket.id, T0)
+        .await
+        .unwrap();
+
+    let executor = fixture.executor_with_options(WorkflowExecutorOptions::for_tests());
+    let mut state = RunLoopState::new(job_id, Duration::ZERO);
+    let mut accelerator_runtimes = None;
+    let outcome = executor
+        .try_spawn_dispatch(&mut state, ticket.clone(), &mut accelerator_runtimes)
+        .await
+        .unwrap();
+
+    assert!(matches!(outcome, SpawnOutcome::NodeLocalDispatched));
+    assert_eq!(
+        state.node_local_outstanding.get(&ticket.id),
+        Some(&operation)
+    );
+    // No lease was minted and the bundled runtime was never consulted.
+    assert_eq!(fixture.lease_count().await, 0);
+    let stored = fixture.cp.tickets.get(ticket.id).await.unwrap().unwrap();
+    assert_eq!(
+        stored.state,
+        voom_store::repo::execution::tickets::TicketState::Ready
+    );
+
+    // With every ready ticket held by an owner-node agent, the idle state is
+    // externally-held work, not a stalled ready queue.
+    let idle = executor
+        .workflow_idle_state(job_id, &format!("workflow-{}", job_id.0))
+        .await
+        .unwrap();
+    assert_eq!(idle, WorkflowIdleState::Leased);
 }

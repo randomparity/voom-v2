@@ -759,8 +759,46 @@ async fn workflow_ticket_facts_distinguish_each_execution_state() {
             ready: 1,
             leased: 1,
             failed: 1,
+            ready_node_local_media: 0,
         }
     );
+}
+
+#[tokio::test]
+async fn workflow_ticket_facts_count_ready_node_local_media_operations() {
+    let (pool, _tmp) = pool().await;
+    let repo = SqliteTicketRepo::new(pool.clone());
+    let job = SqliteJobRepo::new(pool).create(sample_job()).await.unwrap();
+    // Two ready tickets: one envelope-gated media operation, one ordinary
+    // synthetic operation. Only the media operation counts as node-local.
+    for (node_id, operation) in [("media", "transcode_video"), ("plain", "score_quality")] {
+        let ticket = repo
+            .create(NewTicket {
+                job_id: Some(job.id),
+                kind: ticket_op("synthetic.workflow.operation.test"),
+                priority: 0,
+                payload: serde_json::json!({
+                    "workflow_id": "wf",
+                    "branch_id": "branch",
+                    "node_id": node_id,
+                    "operation": operation,
+                    "rendered_payload": {"operation": operation}
+                }),
+                max_attempts: 3,
+                created_at: OffsetDateTime::UNIX_EPOCH,
+            })
+            .await
+            .unwrap();
+        sqlx::query("UPDATE tickets SET state = 'ready' WHERE id = ?")
+            .bind(i64::try_from(ticket.id.0).unwrap())
+            .execute(&repo.pool)
+            .await
+            .unwrap();
+    }
+
+    let facts = repo.workflow_ticket_facts(job.id, "wf").await.unwrap();
+    assert_eq!(facts.ready, 2);
+    assert_eq!(facts.ready_node_local_media, 1);
 }
 
 #[tokio::test]

@@ -207,6 +207,10 @@ struct RunLoopState {
     capacity_wait_started: Option<Instant>,
     accelerator_wait_started: HashMap<String, Instant>,
     accelerator_history: HashMap<String, Vec<String>>,
+    /// Node-locally dispatched media tickets (ADR 0075) awaiting an agent's
+    /// remote completion. The executor owns no lease for these; it polls their
+    /// durable states and runs expansion/failure handling as they settle.
+    node_local_outstanding: HashMap<TicketId, OperationKind>,
 }
 
 struct RunInvocation<'a> {
@@ -265,6 +269,7 @@ impl RunLoopState {
             capacity_wait_started: None,
             accelerator_wait_started: HashMap::new(),
             accelerator_history: HashMap::new(),
+            node_local_outstanding: HashMap::new(),
         }
     }
 
@@ -611,6 +616,15 @@ impl WorkflowExecutor {
                     Ok(SpawnOutcome::AcceleratorUnavailable(hardware_tokens)) => {
                         outcome.accelerator_unavailable.extend(hardware_tokens);
                     }
+                    Ok(SpawnOutcome::NodeLocalDispatched) => {
+                        // Externally owned execution (ADR 0075): the ticket
+                        // stays `ready` until its storage owner's agent takes
+                        // it, so this is deliberately not dispatch progress —
+                        // counting it would hot-spin the ready query. The run
+                        // loop settles the ticket through
+                        // `settle_node_local_completions`; `try_spawn_dispatch`
+                        // has already recorded it as outstanding.
+                    }
                 }
             }
             if state.has_fatal_error() || !batch_made_progress {
@@ -618,6 +632,22 @@ impl WorkflowExecutor {
             }
         }
         outcome
+    }
+
+    /// One run-loop pass of node-local completion settlement (ADR 0075),
+    /// failing the job when the durable poll itself errors.
+    async fn settle_node_local_step(
+        &self,
+        state: &mut RunLoopState,
+        invocation: &RunInvocation<'_>,
+        started: Instant,
+    ) -> Result<(), WorkflowRunError> {
+        if let Err(source) = self.settle_node_local_completions(state, invocation).await {
+            return Err(state
+                .fail_job(&self.control_plane, invocation.job_id, source, started)
+                .await);
+        }
+        Ok(())
     }
 
     async fn capacity_wait_outcome(
@@ -1076,6 +1106,8 @@ impl WorkflowExecutor {
 
         loop {
             state.process_completed_dispatches(self, &invocation).await;
+            self.settle_node_local_step(&mut state, &invocation, started)
+                .await?;
 
             if let Err(source) = state.refresh(control, job_id, started).await {
                 return Err(state.fail_job(control, job_id, source, started).await);
