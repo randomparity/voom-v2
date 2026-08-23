@@ -20,7 +20,7 @@ use crate::artifact::fs::{
     ArtifactFileFacts, PromotionFailpoint, PromotionFailpointContext,
     canonical_new_leaf_no_symlink, observe_regular_file, promote_staged_add_only,
 };
-use crate::cases::{append_event, begin_tx, commit_tx};
+use crate::cases::{append_event, begin_immediate_tx, commit_tx};
 
 #[derive(Debug)]
 pub struct StageCopyInput {
@@ -281,7 +281,10 @@ async fn record_staged_artifact(
 ) -> Result<StageCopyReport, VoomError> {
     hooks.before_database_transaction(StageCopyDatabaseContext { staging_path })?;
 
-    let mut tx = begin_tx(&cp.pool).await?;
+    // BEGIN IMMEDIATE: the transaction writes (artifact handle insert) after
+    // reads, and a deferred start deadlocks into SQLITE_BUSY when a concurrent
+    // writer holds the write lock during the upgrade.
+    let mut tx = begin_immediate_tx(&cp.pool).await?;
     let source_version = cp
         .identity
         .get_file_version_in_tx(&mut tx, source_version.id)

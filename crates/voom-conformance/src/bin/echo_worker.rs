@@ -105,6 +105,40 @@ pub(crate) fn handle_operation(req: OperationRequest) -> OperationFuture {
 }
 
 fn probe_result(request: &serde_json::Value, path: &str) -> serde_json::Value {
+    if let Some(expected) = request.get("expected") {
+        // Handle-shaped media dispatch (ADR 0075): answer with a valid typed
+        // ProbeFileResult that echoes the expected facts as observed, so a
+        // fixture pointing `expected` at real file facts drives the agent
+        // executor's post-dispatch verification end to end. `echoed_path`
+        // stays absent here: the typed result shape is strict.
+        return serde_json::json!({
+            "status": "probed",
+            "provider": "echo",
+            "provider_version": "0",
+            "pre_probe": observed_from_expected(expected),
+            "post_probe": observed_from_expected(expected),
+            "snapshot": {},
+        });
+    }
+    legacy_echo_result(request, path)
+}
+
+fn observed_from_expected(expected: &serde_json::Value) -> serde_json::Value {
+    let mut observed = serde_json::json!({
+        "size_bytes": expected.get("size_bytes").cloned().unwrap_or(serde_json::Value::Null),
+        "content_hash": expected.get("content_hash").cloned().unwrap_or(serde_json::Value::Null),
+    });
+    if let Some(object) = expected.as_object() {
+        for field in ["modified_at", "local_file_key"] {
+            if let Some(value) = object.get(field).filter(|value| !value.is_null()) {
+                observed[field] = value.clone();
+            }
+        }
+    }
+    observed
+}
+
+fn legacy_echo_result(request: &serde_json::Value, path: &str) -> serde_json::Value {
     let mut result = serde_json::json!({"echoed_path": path});
     if let Some(plan) = request.get("artifact_access_plan") {
         // Echo the dispatch plan's owner-local proof back untouched: the

@@ -55,9 +55,13 @@ operations — probe, transcode-audio (including synthesize/add-track),
 extract-audio, transcode-video, remux, backup-file, and verify-artifact.
 Every variant carries only
 stable vocabulary: `StorageRootId` + `ProviderRelativeLocator` pairs for
-sources and planned outputs, expected-fact blocks, and (where the destination
-is fenced) root/location epochs mirroring the ADR 0074 intent shape. No
-variant carries an absolute path. Envelopes render into the durable ticket
+sources and planned outputs, and expected-fact blocks. No variant carries an
+absolute path, and no variant carries epochs: lease serialization plus the
+overwrite discipline (planned outputs are overwrite-false, stale residue is
+cleared pre-dispatch) fence planned outputs; root/location epochs stay where
+fencing is durable — the ADR 0074 commit intent, which this change extends
+with a source handle.
+Envelopes render into the durable ticket
 payload under the ADR 0013 deny-unknown-fields contract; migration 0042
 carries a preflight guard that aborts the upgrade when in-flight
 non-terminal media workflow tickets exist, because their path-shaped
@@ -146,7 +150,7 @@ owner; retargeting it is issue #424's assigned surface and is excluded here.
   dispatched evidence, and non-byte-touching operations never see envelopes.
 - The operator inspection surface (`artifact/inspect.rs`) and the
   workflow-coordinator terminal-artifact move/reclaim path remain as-is;
-  both are owned by the follow-up split around #436.
+  both are tracked with a named owner in issue #528.
 - Backup destinations move from control-plane-built absolute paths to
   planned outputs addressed on configured backup storage roots; operators
   provisioning nodes must bind those roots in agent configuration, and

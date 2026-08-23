@@ -2014,6 +2014,7 @@ fn context(control: Arc<FakeControlPlane>) -> CoordinatorContext {
         shutdown_grace: Duration::from_secs(1),
         worker: worker(),
         fatal_tx: mpsc::unbounded_channel().0,
+        storage_roots: HashMap::new(),
     }
 }
 
@@ -2057,7 +2058,7 @@ fn dispatch_with_payload(lease_id: u64, payload: JsonValue) -> LeaseDispatch {
         scheduler_decision_id: 12,
         ticket_id: TicketId(13),
         worker_id: WorkerId(14),
-        operation: "probe_file".to_owned(),
+        operation: "hash_file".to_owned(),
         dispatch_payload: payload,
         lease_ttl_seconds: 6,
         heartbeat_after_seconds: 1,

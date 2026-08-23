@@ -576,3 +576,434 @@ fn policy_remux_payload_rejects_malformed_defaults_entry() {
 fn operation_name_value(operation: OperationKind) -> serde_json::Value {
     serde_json::to_value(operation).unwrap()
 }
+
+use crate::workflow::plan::access_declaration::TicketStorageSource;
+use crate::workflow::plan::binding::insert_storage_source;
+use crate::workflow::plan::binding::media_dispatch::{
+    DestinationRole, MediaDispatchSource, MediaExtractionRequest, backup_destination_locator,
+    extract_audio_output_file_name, planned_output_locator, remux_output_file_name,
+    render_media_dispatch_back_up_file, render_media_dispatch_extract_audio,
+    render_media_dispatch_probe, render_media_dispatch_remux,
+    render_media_dispatch_transcode_audio, render_media_dispatch_transcode_video,
+    render_media_dispatch_verify_artifact, resolve_destination_root,
+    transcode_audio_output_file_name, transcode_video_output_file_name,
+};
+use voom_core::{PROTOCOL_VERSION, ProviderRelativeLocator};
+use voom_worker_protocol::{
+    AudioExpectedFacts, AudioStreamRef, ExpectedFileFacts, MediaBackUpFileDispatch, MediaDispatch,
+    MediaExtractAudioDispatch, MediaExtractOutput, MediaPlannedOutput, MediaProbeDispatch,
+    MediaRemuxDispatch, MediaSourceRef, MediaTranscodeAudioDispatch, MediaTranscodeVideoDispatch,
+    MediaVerifyArtifactDispatch, RemuxExpectedFacts, RemuxSelection, TranscodeAudioSelection,
+    TranscodeAudioSettings, TranscodeVideoExpectedFacts, TranscodeVideoProfile,
+    VerifyArtifactExpectedFacts, decode_media_dispatch,
+};
+
+fn location_source() -> MediaDispatchSource {
+    MediaDispatchSource::Location {
+        storage_root_id: StorageRootId(7),
+        file_location_id: FileLocationId(11),
+        provider_relative_locator: ProviderRelativeLocator::new("library/Movie.mkv".to_owned())
+            .unwrap(),
+    }
+}
+
+fn staged_output_source() -> MediaDispatchSource {
+    MediaDispatchSource::RecordedStagedOutput {
+        storage_root_id: StorageRootId(9),
+        provider_relative_locator: ProviderRelativeLocator::new(
+            "staging/file-001/Movie.default-hevc.hevc.mkv".to_owned(),
+        )
+        .unwrap(),
+    }
+}
+
+fn expected_planned(root: StorageRootId, relative: &str) -> MediaPlannedOutput {
+    MediaPlannedOutput {
+        storage_root_id: root,
+        provider_relative_locator: ProviderRelativeLocator::new(relative.to_owned()).unwrap(),
+        overwrite: false,
+    }
+}
+
+fn expected_file_facts() -> ExpectedFileFacts {
+    ExpectedFileFacts {
+        size_bytes: 4_200_000_000,
+        content_hash: "blake3:file-001".to_owned(),
+        modified_at: None,
+        local_file_key: None,
+    }
+}
+
+fn audio_facts() -> AudioExpectedFacts {
+    AudioExpectedFacts {
+        size_bytes: 4_200_000_000,
+        content_hash: "blake3:file-001".to_owned(),
+        modified_at: None,
+        local_file_key: None,
+    }
+}
+
+fn remux_facts() -> RemuxExpectedFacts {
+    RemuxExpectedFacts {
+        size_bytes: 4_200_000_000,
+        content_hash: "blake3:file-001".to_owned(),
+        modified_at: None,
+        local_file_key: None,
+    }
+}
+
+fn transcode_video_facts() -> TranscodeVideoExpectedFacts {
+    TranscodeVideoExpectedFacts {
+        size_bytes: 4_200_000_000,
+        content_hash: "blake3:file-001".to_owned(),
+        modified_at: None,
+        local_file_key: None,
+    }
+}
+
+fn verify_facts() -> VerifyArtifactExpectedFacts {
+    VerifyArtifactExpectedFacts {
+        size_bytes: 4_200_000_000,
+        content_hash: "blake3:file-001".to_owned(),
+        modified_at: None,
+        local_file_key: None,
+    }
+}
+
+#[test]
+fn probe_backup_and_verify_envelopes_round_trip_through_decode() {
+    let source = MediaSourceRef {
+        storage_root_id: StorageRootId(7),
+        provider_relative_locator: ProviderRelativeLocator::new("library/Movie.mkv".to_owned())
+            .unwrap(),
+    };
+
+    let probe = render_media_dispatch_probe(&location_source(), expected_file_facts()).unwrap();
+    assert_eq!(
+        decode_media_dispatch(&probe).unwrap(),
+        MediaDispatch::Probe(MediaProbeDispatch {
+            schema: PROTOCOL_VERSION,
+            source: source.clone(),
+            expected: expected_file_facts(),
+        })
+    );
+    // Scalar declaration keys live beside the envelope, not inside it.
+    assert!(probe.get("source_storage_root_id").is_none());
+    assert!(probe.get("source_location_id").is_none());
+
+    let backup =
+        render_media_dispatch_back_up_file(&location_source(), FileVersionId(42), StorageRootId(5))
+            .unwrap();
+    assert_eq!(
+        decode_media_dispatch(&backup).unwrap(),
+        MediaDispatch::BackUpFile(MediaBackUpFileDispatch {
+            schema: PROTOCOL_VERSION,
+            source: source.clone(),
+            destination: expected_planned(StorageRootId(5), "v42/Movie.mkv"),
+        })
+    );
+
+    let verify =
+        render_media_dispatch_verify_artifact(&staged_output_source(), verify_facts()).unwrap();
+    assert_eq!(
+        decode_media_dispatch(&verify).unwrap(),
+        MediaDispatch::VerifyArtifact(MediaVerifyArtifactDispatch {
+            schema: PROTOCOL_VERSION,
+            target: MediaSourceRef {
+                storage_root_id: StorageRootId(9),
+                provider_relative_locator: ProviderRelativeLocator::new(
+                    "staging/file-001/Movie.default-hevc.hevc.mkv".to_owned()
+                )
+                .unwrap(),
+            },
+            expected: verify_facts(),
+        })
+    );
+
+    for rendered in [&probe, &backup, &verify] {
+        // No absolute path ever leaves the control plane in the envelope.
+        assert!(!rendered.to_string().contains("/library/"));
+    }
+}
+
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one round-trip table over seven envelope families"
+)]
+fn staging_envelopes_round_trip_with_overwrite_false_outputs() {
+    let source = MediaSourceRef {
+        storage_root_id: StorageRootId(7),
+        provider_relative_locator: ProviderRelativeLocator::new("library/Movie.mkv".to_owned())
+            .unwrap(),
+    };
+    let destination_root = StorageRootId(5);
+
+    let selection = TranscodeAudioSelection {
+        selected_streams: vec![AudioStreamRef {
+            snapshot_stream_id: "a-1".to_owned(),
+            provider_stream_index: 1,
+        }],
+    };
+    let settings = TranscodeAudioSettings {
+        target_codec: "aac".to_owned(),
+        profile: "default".to_owned(),
+        add_track: false,
+        target_channels: None,
+    };
+    let audio = render_media_dispatch_transcode_audio(
+        "file-001",
+        &location_source(),
+        audio_facts(),
+        selection.clone(),
+        settings.clone(),
+        destination_root,
+    )
+    .unwrap();
+    let MediaDispatch::TranscodeAudio(decoded) = decode_media_dispatch(&audio).unwrap() else {
+        panic!("expected a transcode_audio envelope");
+    };
+    assert_eq!(
+        decoded,
+        MediaTranscodeAudioDispatch {
+            schema: PROTOCOL_VERSION,
+            source: source.clone(),
+            expected: audio_facts(),
+            output_container: "mkv".to_owned(),
+            output: expected_planned(destination_root, "file-001/Movie.audio-aac.mkv"),
+            selection,
+            settings,
+        }
+    );
+    assert!(!decoded.output.overwrite);
+
+    let extractions = vec![
+        MediaExtractionRequest {
+            output_id: "track-1".to_owned(),
+            selection: AudioStreamRef {
+                snapshot_stream_id: "a-1".to_owned(),
+                provider_stream_index: 1,
+            },
+            audio_codec: "opus".to_owned(),
+        },
+        MediaExtractionRequest {
+            output_id: "track-2".to_owned(),
+            selection: AudioStreamRef {
+                snapshot_stream_id: "a-2".to_owned(),
+                provider_stream_index: 2,
+            },
+            audio_codec: "opus".to_owned(),
+        },
+    ];
+    let extract = render_media_dispatch_extract_audio(
+        "file-001",
+        &location_source(),
+        audio_facts(),
+        &extractions,
+        destination_root,
+    )
+    .unwrap();
+    let MediaDispatch::ExtractAudio(decoded) = decode_media_dispatch(&extract).unwrap() else {
+        panic!("expected an extract_audio envelope");
+    };
+    assert_eq!(
+        decoded,
+        MediaExtractAudioDispatch {
+            schema: PROTOCOL_VERSION,
+            source: source.clone(),
+            expected: audio_facts(),
+            output_container: "ogg".to_owned(),
+            outputs: vec![
+                MediaExtractOutput {
+                    output_id: "track-1".to_owned(),
+                    selection: AudioStreamRef {
+                        snapshot_stream_id: "a-1".to_owned(),
+                        provider_stream_index: 1,
+                    },
+                    audio_codec: "opus".to_owned(),
+                    output: expected_planned(destination_root, "file-001/Movie.a-1.opus.ogg"),
+                },
+                MediaExtractOutput {
+                    output_id: "track-2".to_owned(),
+                    selection: AudioStreamRef {
+                        snapshot_stream_id: "a-2".to_owned(),
+                        provider_stream_index: 2,
+                    },
+                    audio_codec: "opus".to_owned(),
+                    output: expected_planned(destination_root, "file-001/Movie.a-2.opus.ogg"),
+                },
+            ],
+        }
+    );
+    for output in &decoded.outputs {
+        assert!(!output.output.overwrite);
+    }
+
+    let profile = TranscodeVideoProfile::default_hevc();
+    let video = render_media_dispatch_transcode_video(
+        "file-001",
+        &location_source(),
+        transcode_video_facts(),
+        destination_root,
+        profile.clone(),
+        None,
+        false,
+    )
+    .unwrap();
+    let MediaDispatch::TranscodeVideo(decoded) = decode_media_dispatch(&video).unwrap() else {
+        panic!("expected a transcode_video envelope");
+    };
+    assert_eq!(
+        decoded,
+        MediaTranscodeVideoDispatch {
+            schema: PROTOCOL_VERSION,
+            source: source.clone(),
+            expected: transcode_video_facts(),
+            output_container: "mkv".to_owned(),
+            output_video_codec: "hevc".to_owned(),
+            output: expected_planned(destination_root, "file-001/Movie.default-hevc.hevc.mkv"),
+            profile,
+            hardware_assignment: None,
+            copy_video: false,
+        }
+    );
+    assert!(!decoded.output.overwrite);
+
+    let remux_selection = RemuxSelection {
+        keep_streams: vec![],
+        default_streams: vec![],
+        clear_default_streams: vec![],
+        track_order: vec![],
+        head_streams: vec![],
+        forced_streams: vec![],
+        clear_forced_streams: vec![],
+    };
+    let remux = render_media_dispatch_remux(
+        "file-001",
+        &location_source(),
+        remux_facts(),
+        remux_selection.clone(),
+        destination_root,
+    )
+    .unwrap();
+    let MediaDispatch::Remux(decoded) = decode_media_dispatch(&remux).unwrap() else {
+        panic!("expected a remux envelope");
+    };
+    assert_eq!(
+        decoded,
+        MediaRemuxDispatch {
+            schema: PROTOCOL_VERSION,
+            source,
+            expected: remux_facts(),
+            output_container: "mkv".to_owned(),
+            output: expected_planned(destination_root, "file-001/Movie.remux.mkv"),
+            selection: remux_selection,
+        }
+    );
+    assert!(!decoded.output.overwrite);
+}
+
+#[test]
+fn scalar_keys_survive_nested_media_dispatch_insertion() {
+    let mut payload = serde_json::json!({ "operation": "probe" });
+    let object = payload.as_object_mut().unwrap();
+    insert_storage_source(
+        object,
+        &TicketStorageSource::Location {
+            storage_root_id: StorageRootId(7),
+            file_location_id: FileLocationId(11),
+        },
+    );
+    payload["media_dispatch"] =
+        render_media_dispatch_probe(&location_source(), expected_file_facts()).unwrap();
+
+    // The declaration still derives from the untouched scalar keys.
+    assert_eq!(payload["source_storage_root_id"], 7);
+    assert_eq!(payload["source_location_id"], 11);
+    assert_eq!(
+        location_source().ticket_storage_source(),
+        TicketStorageSource::Location {
+            storage_root_id: StorageRootId(7),
+            file_location_id: FileLocationId(11),
+        }
+    );
+    assert_eq!(
+        staged_output_source().ticket_storage_source(),
+        TicketStorageSource::Root {
+            storage_root_id: StorageRootId(9),
+        }
+    );
+}
+
+#[test]
+fn unset_default_destination_roots_fail_render_descriptively() {
+    for role in [
+        DestinationRole::Output,
+        DestinationRole::Staging,
+        DestinationRole::Backup,
+    ] {
+        let err = resolve_destination_root(role, None)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains(role.as_str()) && err.contains("no default"),
+            "uninformative error for {role:?}: {err}"
+        );
+    }
+    assert_eq!(
+        resolve_destination_root(DestinationRole::Output, Some(StorageRootId(5))).unwrap(),
+        StorageRootId(5)
+    );
+}
+
+#[test]
+fn planned_output_locators_mirror_current_path_based_names_and_are_deterministic() {
+    let video = transcode_video_output_file_name("Movie", "default-hevc", "hevc", "mkv");
+    assert_eq!(video, "Movie.default-hevc.hevc.mkv");
+    let locator = planned_output_locator("file-001", &video).unwrap();
+    assert_eq!(locator.as_str(), "file-001/Movie.default-hevc.hevc.mkv");
+    assert_eq!(locator, planned_output_locator("file-001", &video).unwrap());
+
+    assert_eq!(remux_output_file_name("Movie", "mkv"), "Movie.remux.mkv");
+    assert_eq!(
+        transcode_audio_output_file_name("Movie", "aac", "mkv"),
+        "Movie.audio-aac.mkv"
+    );
+    assert_eq!(
+        extract_audio_output_file_name("Movie", "a-1", "opus"),
+        "Movie.a-1.opus.ogg"
+    );
+    assert_eq!(
+        backup_destination_locator(FileVersionId(42), "Movie.mkv")
+            .unwrap()
+            .as_str(),
+        "v42/Movie.mkv"
+    );
+
+    // Branch identity cannot smuggle absolute or traversing paths in.
+    assert!(planned_output_locator("", "x.mkv").is_err());
+    assert!(planned_output_locator("..", "x.mkv").is_err());
+}
+
+#[test]
+fn recorded_staged_output_addresses_feed_verification_only() {
+    let probe_err = render_media_dispatch_probe(&staged_output_source(), expected_file_facts())
+        .unwrap_err()
+        .to_string();
+    assert!(probe_err.contains("verification"), "{probe_err}");
+    let backup_err = render_media_dispatch_back_up_file(
+        &staged_output_source(),
+        FileVersionId(1),
+        StorageRootId(5),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(backup_err.contains("live location"), "{backup_err}");
+    let verify_err = render_media_dispatch_verify_artifact(&location_source(), verify_facts())
+        .unwrap_err()
+        .to_string();
+    assert!(
+        verify_err.contains("recorded staged-output"),
+        "{verify_err}"
+    );
+}

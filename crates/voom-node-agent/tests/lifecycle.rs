@@ -43,8 +43,6 @@ use voom_test_support::TempDatabase;
 /// Raising it was considered and rejected. Under 16 concurrent copies of this suite on a
 /// CPU-oversubscribed host, run durations are bimodal: a run either settles in 6-9s or
 /// consumes the whole budget exactly, with nothing in between. Bounds of 60s and 150s each
-/// reproduced the same expiry at the same rate as 10s, so the waits that fail are hung, not
-/// slow, and a larger budget only delays the report. 30s keeps headroom over the observed
 /// 6-9s loaded ceiling while still surfacing a hang promptly.
 const HANG_GUARD: Duration = Duration::from_secs(30);
 
@@ -75,10 +73,14 @@ async fn live_agent_fences_prior_incarnation_and_retires_orderly() {
     .await;
 
     let ticket_id = fixture.ready_probe_ticket().await;
+    let completed = wait_for_ticket_state(&fixture.cp, ticket_id, TicketState::Succeeded).await;
+    let mut request_counts = std::collections::BTreeMap::new();
+    for request in fixture.requests.lock().await.iter() {
+        *request_counts.entry(request.clone()).or_insert(0usize) += 1;
+    }
     assert!(
-        wait_for_ticket_state(&fixture.cp, ticket_id, TicketState::Succeeded).await,
-        "ticket did not complete; requests={:?}",
-        fixture.requests.lock().await
+        completed,
+        "ticket did not complete; paths={request_counts:?}"
     );
 
     let (stop_second, second_shutdown) = oneshot::channel();
@@ -217,6 +219,10 @@ struct LiveFixture {
     server_shutdown: oneshot::Sender<()>,
     server: tokio::task::JoinHandle<()>,
     requests: Arc<Mutex<Vec<String>>>,
+    /// Storage root the probe-ticket fixture resolves against; bound into
+    /// every agent config this fixture spawns.
+    media_root: PathBuf,
+    _media_root_guard: tempfile::TempDir,
 }
 
 impl LiveFixture {
@@ -255,6 +261,8 @@ impl LiveFixture {
                 .await
                 .unwrap();
         });
+        let media_root_guard = tempfile::tempdir().unwrap();
+        let media_root = media_root_guard.path().to_path_buf();
         Self {
             _database: database,
             cp,
@@ -264,6 +272,8 @@ impl LiveFixture {
             server_shutdown,
             server,
             requests,
+            media_root,
+            _media_root_guard: media_root_guard,
         }
     }
 
@@ -271,13 +281,16 @@ impl LiveFixture {
         LoadedAgentConfig {
             config: AgentConfig {
                 control_plane_url: self.base_url.clone(),
-                ca_cert: None,
                 node_id: self.node_id,
+                ca_cert: None,
+                storage_roots: vec![voom_node_agent::config::StorageRootBinding {
+                    storage_root_id: 1,
+                    provider_locator: self.media_root.clone(),
+                }],
                 poll_interval_ms: 50,
                 lease_ttl_seconds: 6,
                 progress_idle_timeout_seconds: 5,
                 shutdown_grace_seconds: 1,
-                storage_roots: Vec::new(),
                 node_token: TokenSource::Env {
                     name: "VOOM_NODE_TOKEN".to_owned(),
                 },
@@ -296,6 +309,11 @@ impl LiveFixture {
 
     async fn ready_probe_ticket(&self) -> TicketId {
         let now = OffsetDateTime::now_utc();
+        // A real file on the bound root: the echo worker echoes the expected
+        // facts back, so the executor's post-dispatch observation agrees.
+        let media_path = self.media_root.join("lifecycle.mkv");
+        std::fs::write(&media_path, b"lifecycle-media-bytes").unwrap();
+        let content_hash = format!("blake3:{}", blake3::hash(b"lifecycle-media-bytes"));
         let ticket = self
             .cp
             .create_ticket(NewTicket {
@@ -303,10 +321,19 @@ impl LiveFixture {
                 kind: TicketOperation::new("probe_file").unwrap(),
                 priority: 0,
                 payload: json!({
-                    "path": "/media/lifecycle.mkv",
-                    "artifact_access": {
-                        "inputs": ["handle:input:lifecycle"],
-                        "outputs": ["handle:output:lifecycle"]
+                    "media_dispatch": {
+                        "operation": "probe",
+                        "schema": voom_core::PROTOCOL_VERSION,
+                        "source": {
+                            "storage_root_id": 1,
+                            "provider_relative_locator": "lifecycle.mkv",
+                        },
+                        "expected": {
+                            "size_bytes": 21,
+                            "content_hash": content_hash,
+                            "modified_at": null,
+                            "local_file_key": null,
+                        },
                     }
                 }),
                 max_attempts: 2,
