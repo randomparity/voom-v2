@@ -505,6 +505,8 @@ fn commit_dtos_debug_redact_fence_hex() {
         staging_provider_relative_locator: "staging/a.bin".to_owned(),
         target_storage_root_id: voom_core::StorageRootId(1),
         target_provider_relative_locator: "committed/a.bin".to_owned(),
+        source_storage_root_id: voom_core::StorageRootId(1),
+        source_provider_relative_locator: "library/a.bin".to_owned(),
         expected_size_bytes: 1,
         expected_content_hash: "blake3:x".to_owned(),
         fence_hex: "deadbeef".to_owned(),

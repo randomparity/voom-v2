@@ -54,6 +54,8 @@ fn open_intent(state: &str, bytes: &[u8]) -> OpenCommitIntent {
         staging_storage_root_id: StorageRootId(1),
         staging_provider_relative_locator: "staging/asset.bin".to_owned(),
         staging_location_epoch: 3,
+        source_storage_root_id: StorageRootId(1),
+        source_provider_relative_locator: "source/asset.bin".to_owned(),
         target_storage_root_id: StorageRootId(1),
         target_provider_relative_locator: "library/asset.bin".to_owned(),
         target_root_epoch: 4,
@@ -68,6 +70,8 @@ fn authorize_outcome(bytes: &[u8]) -> CommitAuthorizeOutcome {
         commit_record_id: ArtifactCommitRecordId(9),
         staging_storage_root_id: StorageRootId(1),
         staging_provider_relative_locator: "staging/asset.bin".to_owned(),
+        source_storage_root_id: StorageRootId(1),
+        source_provider_relative_locator: "source/asset.bin".to_owned(),
         target_storage_root_id: StorageRootId(1),
         target_provider_relative_locator: "library/asset.bin".to_owned(),
         expected_size_bytes: bytes.len() as u64,
@@ -247,6 +251,7 @@ fn fixture_with_bytes(staging_bytes: &[u8]) -> Fixture {
         poll_interval: Duration::from_millis(50),
         storage_roots,
     };
+    write_root_file(&root, "source/asset.bin", staging_bytes);
     if !staging_bytes.is_empty() {
         let staging = root.path().join("staging/asset.bin");
         std::fs::create_dir_all(staging.parent().unwrap()).unwrap();
@@ -258,6 +263,20 @@ fn fixture_with_bytes(staging_bytes: &[u8]) -> Fixture {
         root,
         authorize_requests: Mutex::new(HashMap::new()),
     }
+}
+
+fn write_root_file(root: &TempDir, relative: &str, bytes: &[u8]) {
+    let path = root.path().join(relative);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(path, bytes).unwrap();
+}
+
+/// A fixture whose staged bytes are absent: the pinned source handle must
+/// materialize them during `applying` (ADR 0075).
+fn fixture_with_source(source_bytes: &[u8]) -> Fixture {
+    let f = fixture_with_bytes(&[]);
+    write_root_file(&f.root, "source/asset.bin", source_bytes);
+    f
 }
 
 impl Fixture {
@@ -411,6 +430,67 @@ async fn staging_drift_reports_mismatched_without_promotion() {
     assert!(
         !tokio::fs::try_exists(f.target_path()).await.unwrap(),
         "drifted staging must never be promoted"
+    );
+}
+
+#[tokio::test]
+async fn absent_staging_is_materialized_from_source_handle_then_promoted() {
+    let bytes = b"source-materialized-bytes".to_vec();
+    let f = fixture_with_source(&bytes);
+    *f.api.authorize.lock().await = Some(authorize_outcome(&bytes));
+    f.queue_listing(open_intent("pending", &bytes)).await;
+
+    f.drive().await.unwrap();
+
+    assert_eq!(
+        f.calls().await,
+        vec!["open", "authorize", "applying", "outcome", "complete"]
+    );
+    let evidences = f.api.evidences.lock().await;
+    assert!(matches!(
+        evidences.as_slice(),
+        [CommitOutcomeEvidence::Applied(_)]
+    ));
+    drop(evidences);
+    let staged =
+        tokio::fs::read(f.root.path().join("staging/asset.bin")).await.unwrap();
+    assert_eq!(staged, bytes, "staging must hold the materialized source bytes");
+    let promoted = tokio::fs::read(f.target_path()).await.unwrap();
+    assert_eq!(promoted, bytes);
+}
+
+#[tokio::test]
+async fn absent_staging_with_drifting_source_reports_mismatched() {
+    let pinned = b"pinned-bytes".to_vec();
+    let f = fixture_with_source(b"wrong-source-bytes");
+    *f.api.authorize.lock().await = Some(authorize_outcome(&pinned));
+    f.queue_listing(open_intent("pending", &pinned)).await;
+
+    f.drive().await.unwrap();
+
+    assert_eq!(
+        f.calls().await,
+        vec!["open", "authorize", "applying", "outcome"]
+    );
+    let evidences = f.api.evidences.lock().await;
+    assert!(
+        matches!(
+            evidences.as_slice(),
+            [CommitOutcomeEvidence::Mismatched(mismatched)]
+                if mismatched.observed == Some(observed(b"wrong-source-bytes")),
+        ),
+        "expected mismatched evidence naming the source facts, got {evidences:?}"
+    );
+    drop(evidences);
+    assert!(
+        !tokio::fs::try_exists(f.root.path().join("staging/asset.bin"))
+            .await
+            .unwrap(),
+        "drifting source bytes must never be installed as staging"
+    );
+    assert!(
+        !tokio::fs::try_exists(f.target_path()).await.unwrap(),
+        "nothing may be promoted when the source handle cannot produce the pins"
     );
 }
 
