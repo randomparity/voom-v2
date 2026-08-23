@@ -2,8 +2,8 @@ use super::*;
 use crate::ProtocolError;
 
 #[test]
-fn protocol_version_is_two() {
-    assert_eq!(voom_core::PROTOCOL_VERSION, 2);
+fn protocol_version_is_three() {
+    assert_eq!(voom_core::PROTOCOL_VERSION, 3);
 }
 
 #[test]
