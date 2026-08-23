@@ -384,18 +384,13 @@ fn insert_storage_source(object: &mut Map<String, Value>, source: &TicketStorage
     }
 }
 
-// --- Node-local media dispatch envelopes (spec C2), staged for the flip ---
+// --- Node-local media dispatch envelopes (ADR 0075 flip) ---
 //
 // These helpers render the nested `media_dispatch` object a ticket payload
-// carries alongside its existing scalar source keys. Production renderers
-// adopt them in the integrated flip task; until then only `binding_test.rs`
-// exercises them, so the module is exempt from `dead_code` in the non-test
-// build and the exemption goes away with the flip.
-
-#[cfg_attr(not(test), expect(dead_code))]
+// carries alongside its existing scalar source keys. Production call sites
+// live in `plan::envelope` (ticket creation) and `binding_test.rs` pins the
+// wire shapes.
 pub(crate) mod media_dispatch {
-    // Imports used only by the staged (dead-code-allowed) surface stay
-    // exempt until the flip wires the call sites.
     use serde_json::Value;
     use std::path::Path;
     use voom_core::{
@@ -416,12 +411,12 @@ pub(crate) mod media_dispatch {
     use crate::transcode::stage::{OutputName, output_file_name};
     use crate::workflow::plan::access_declaration::TicketStorageSource;
 
-    // --- Node-local media dispatch envelopes (spec C2) ---
+    // --- Node-local media dispatch envelopes (ADR 0075) ---
     //
     // The helpers below render the nested `media_dispatch` object a ticket
-    // payload carries alongside its existing scalar source keys. They are pure:
-    // production call sites adopt them in the integrated flip task, and until
-    // then the unit tests in `binding_test.rs` pin their shapes.
+    // payload carries alongside its existing scalar source keys. They are
+    // pure; `plan::envelope` supplies the durable inputs and the unit tests
+    // in `binding_test.rs` pin the wire shapes.
 
     /// The handle-shaped byte source a media-dispatch envelope addresses.
     ///
@@ -439,6 +434,9 @@ pub(crate) mod media_dispatch {
             provider_relative_locator: ProviderRelativeLocator,
         },
         /// A recorded staged-output address left by a producing operation.
+        /// Constructed only by the backup->verify chain, which migrates with
+        /// T8; until then only `binding_test.rs` pins its shapes.
+        #[cfg_attr(not(test), expect(dead_code))]
         RecordedStagedOutput {
             storage_root_id: StorageRootId,
             provider_relative_locator: ProviderRelativeLocator,
@@ -448,6 +446,7 @@ pub(crate) mod media_dispatch {
     impl MediaDispatchSource {
         /// The scalar-key identity this source satisfies.
         #[must_use]
+        #[cfg_attr(not(test), expect(dead_code))] // T8: backup->verify chain
         pub(crate) const fn ticket_storage_source(&self) -> TicketStorageSource {
             match self {
                 Self::Location {
@@ -515,6 +514,7 @@ pub(crate) mod media_dispatch {
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub(crate) enum DestinationRole {
         /// `LibraryRoot.default_output_root_id`
+        #[cfg_attr(not(test), expect(dead_code))] // T8: output-root destinations
         Output,
         /// `LibraryRoot.default_staging_root_id`
         Staging,
@@ -540,6 +540,7 @@ pub(crate) mod media_dispatch {
     ///
     /// Fails descriptively when no default root is configured: a handle-shaped
     /// destination must name a concrete storage root.
+    #[cfg_attr(not(test), expect(dead_code))] // T8: backup->verify chain
     pub(crate) fn resolve_destination_root(
         role: DestinationRole,
         default_root_id: Option<StorageRootId>,
@@ -903,6 +904,7 @@ pub(crate) mod media_dispatch {
     /// # Errors
     ///
     /// Fails when `source` is not a recorded staged-output address.
+    #[cfg_attr(not(test), expect(dead_code))] // T8: backup->verify chain
     pub(crate) fn render_media_dispatch_verify_artifact(
         source: &MediaDispatchSource,
         expected: VerifyArtifactExpectedFacts,

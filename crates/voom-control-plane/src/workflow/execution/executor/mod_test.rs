@@ -42,6 +42,7 @@ use super::{
 };
 use crate::workflow::execution::dispatch::{DispatchOutcome, DispatchTerminal};
 use crate::workflow::execution::executor::WorkflowExecutorOptions;
+use crate::workflow::execution::executor::tickets::parse_payload;
 use crate::workflow::execution::operation_adapters::{
     LeaseHeartbeatContext, await_with_lease_heartbeats,
 };
@@ -5698,4 +5699,78 @@ async fn envelope_bearing_media_tickets_route_to_owner_node_execution() {
         .await
         .unwrap();
     assert_eq!(idle, WorkflowIdleState::Leased);
+}
+
+#[tokio::test]
+async fn envelope_backed_policy_media_tickets_render_dispatches_and_route_owner_node() {
+    // ADR 0075 flip: a policy remux root ticket whose planning inputs are all
+    // durably derivable (live rooted source, snapshot, configured staging
+    // default) is created with a handle-shaped `media_dispatch` object that
+    // decodes as the exact protocol envelope, and the executor routes it to
+    // the storage owner's agent without minting a lease.
+    let mut fixture = ExecutorFixture::without_workers(0).await;
+    let (file_version_id, _location_id) = fixture.seed_local_source().await;
+    let snapshot_id = fixture.record_source_snapshot(file_version_id).await;
+    fixture.plan = policy_remux_plan_for_snapshot(
+        TargetRef::FileVersion {
+            id: file_version_id,
+        },
+        snapshot_id,
+    );
+    // The shared test root ships with no default destinations; point staging
+    // at itself so the planned output resolves.
+    sqlx::query("UPDATE library_roots SET default_staging_root_id = id WHERE id = ?")
+        .bind(i64::try_from(voom_store::test_support::TEST_STORAGE_ROOT_ID.0).unwrap())
+        .execute(&fixture.cp.pool)
+        .await
+        .unwrap();
+
+    let plan = fixture.plan.clone();
+    let executor = fixture.executor_with_options(WorkflowExecutorOptions::for_tests());
+    let job_id = fixture.open_workflow_job().await;
+    let workflow_id = format!("workflow-{}", job_id.0);
+    executor
+        .create_root_tickets(&plan, &workflow_id, job_id, T0)
+        .await
+        .unwrap();
+
+    let tickets = executor
+        .ready_workflow_tickets(job_id, &workflow_id)
+        .await
+        .unwrap();
+    assert_eq!(tickets.len(), 1);
+    let payload = parse_payload(&tickets[0]).unwrap();
+
+    let Some(dispatch) = payload.rendered_payload.get("media_dispatch") else {
+        panic!("policy remux ticket with fully derivable inputs must carry media_dispatch");
+    };
+    let decoded = voom_worker_protocol::decode_media_dispatch(dispatch).unwrap();
+    match &decoded {
+        voom_worker_protocol::MediaDispatch::Remux(remux) => {
+            assert_eq!(
+                remux.source.storage_root_id,
+                voom_store::test_support::TEST_STORAGE_ROOT_ID
+            );
+            assert_eq!(
+                remux.output.storage_root_id,
+                voom_store::test_support::TEST_STORAGE_ROOT_ID
+            );
+            assert!(!remux.output.provider_relative_locator.as_str().is_empty());
+            assert!(!remux.selection.default_streams.is_empty());
+        }
+        other => panic!("unexpected dispatch envelope: {other:?}"),
+    }
+
+    let mut accelerator_runtimes: Option<WorkerRuntimeRegistry> = None;
+    let outcome = executor
+        .try_spawn_dispatch(
+            &mut RunLoopState::new(job_id, std::time::Duration::ZERO),
+            tickets[0].clone(),
+            &mut accelerator_runtimes,
+        )
+        .await
+        .unwrap();
+    assert!(matches!(outcome, SpawnOutcome::NodeLocalDispatched));
+    // No lease was minted: the ticket waits for its storage owner's agent.
+    assert_eq!(fixture.lease_count().await, 0);
 }

@@ -1,6 +1,7 @@
 pub(crate) mod access_declaration;
 pub(crate) mod artifact_access_resolution;
 pub(crate) mod binding;
+pub(crate) mod envelope;
 pub(crate) mod expansion;
 pub(crate) mod model;
 pub(crate) mod policy_bridge;

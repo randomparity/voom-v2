@@ -22,6 +22,7 @@ use crate::workflow::plan::binding::{
     render_policy_remux_payload, render_policy_transcode_audio_payload,
     render_policy_transcode_payload, render_policy_verify_artifact_payload,
 };
+use crate::workflow::plan::envelope;
 use crate::workflow::plan::model::{OperationNode, WorkflowPlan};
 use crate::workflow::plan::ticket_payload::WorkflowTicketPayload;
 
@@ -142,8 +143,25 @@ impl WorkflowExecutor {
             plan.timing.base_duration_ms,
             plan.timing.jitter_ms,
         );
-        let rendered_payload =
+        let mut rendered_payload =
             self.render_root_payload(plan, node, &branch, policy_source, timing)?;
+        // ADR 0075 flip: byte-touching media tickets whose planning inputs are
+        // fully derivable carry a handle-shaped dispatch envelope and route to
+        // their storage owner's agent instead of the bundled adapters.
+        if operation.is_node_local_media_dispatch()
+            && let Some(source) = policy_source.as_ref()
+            && let Some(media_dispatch) = envelope::policy_envelope(
+                &self.control_plane,
+                &branch.branch_id,
+                operation,
+                source,
+                node.operation_payload(),
+            )
+            .await?
+            && let Some(object) = rendered_payload.as_object_mut()
+        {
+            object.insert("media_dispatch".to_owned(), media_dispatch);
+        }
         let declared_artifact_access = declaration_for(operation, branch.storage_source.as_ref())?;
         let payload = WorkflowTicketPayload {
             workflow_id: workflow_id.to_owned(),
