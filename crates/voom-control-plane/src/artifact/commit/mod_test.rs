@@ -1138,6 +1138,31 @@ fn complete_input_debug_redacts_fence_hex() {
     assert!(rendered.contains("[REDACTED]"), "{rendered}");
 }
 
+/// Regression (ADR 0013): `AuthorizeCommitOutcome` is deserialized at the
+/// replay boundary, so an added or corrupted field in the stored capability-
+/// bearing payload must fail closed.
+#[test]
+fn authorize_outcome_replay_decode_rejects_unknown_fields() {
+    use crate::artifact::commit::intent::AuthorizeCommitOutcome;
+    let mut value = serde_json::to_value(AuthorizeCommitOutcome {
+        intent_id: ArtifactCommitIntentId(1),
+        commit_record_id: ArtifactCommitRecordId(1),
+        staging_storage_root_id: StorageRootId(1),
+        staging_provider_relative_locator: "staging/a.bin".to_owned(),
+        target_storage_root_id: StorageRootId(1),
+        target_provider_relative_locator: "committed/a.bin".to_owned(),
+        expected_size_bytes: 1,
+        expected_content_hash: "blake3:x".to_owned(),
+        fence_hex: "deadbeef".to_owned(),
+    })
+    .unwrap();
+    value["bogus"] = serde_json::json!("field");
+    assert!(
+        serde_json::from_value::<AuthorizeCommitOutcome>(value).is_err(),
+        "unknown fields must be rejected on the replay decode boundary"
+    );
+}
+
 // --- idempotent replays (G3/G4) -----------------------------------------------
 
 #[tokio::test]

@@ -88,7 +88,7 @@ CREATE TABLE artifact_commit_intents (
         OR (state = 'recovery_required' AND commit_fence IS NOT NULL
             AND authorized_at IS NOT NULL
             AND owner_incarnation_id IS NOT NULL AND terminal_at IS NOT NULL)
-        OR (state = 'aborted' AND terminal_at IS NOT NULL)
+        OR (state = 'aborted' AND commit_fence IS NULL AND terminal_at IS NOT NULL)
     )
 );
 

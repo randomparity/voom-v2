@@ -262,6 +262,24 @@ async fn authorize_mints_one_time_fence_and_bumps_epoch() {
     assert!(matches!(err, VoomError::Conflict(_)));
 }
 
+#[tokio::test]
+async fn intent_debug_redacts_fence_bytes() {
+    let (pool, _tmp, record) = fixture().await;
+    let intent = create_pending(&pool, record).await;
+    let authorized = authorize(&pool, intent.id).await;
+
+    // The raw fence is capability material: the repo row's Debug rendering
+    // must never leak it into a log or telemetry surface.
+    let rendered = format!("{authorized:?}");
+    let fence = authorized.commit_fence.as_ref().unwrap();
+    let fence_hex = fence
+        .iter()
+        .fold(String::new(), |acc, byte| format!("{acc}{byte:02x}"));
+    assert!(!rendered.contains(&fence_hex), "{rendered}");
+    assert!(!rendered.contains(&format!("{fence:?}")), "{rendered}");
+    assert!(rendered.contains("[REDACTED]"), "{rendered}");
+}
+
 // --- receipts ---
 
 #[tokio::test]

@@ -152,7 +152,7 @@ pub struct NewArtifactCommitIntent {
 }
 
 /// One durable fenced commit intent.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ArtifactCommitIntent {
     pub id: ArtifactCommitIntentId,
     pub commit_record_id: ArtifactCommitRecordId,
@@ -175,6 +175,39 @@ pub struct ArtifactCommitIntent {
     pub requested_at: OffsetDateTime,
     pub authorized_at: Option<OffsetDateTime>,
     pub terminal_at: Option<OffsetDateTime>,
+}
+
+impl std::fmt::Debug for ArtifactCommitIntent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The raw fence is capability material: its Debug rendering must
+        // never leak it into a log or telemetry surface.
+        f.debug_struct("ArtifactCommitIntent")
+            .field("id", &self.id)
+            .field("commit_record_id", &self.commit_record_id)
+            .field("artifact_handle_id", &self.artifact_handle_id)
+            .field("source_file_version_id", &self.source_file_version_id)
+            .field("verification_id", &self.verification_id)
+            .field("staging_location_id", &self.staging_location_id)
+            .field("staging_location_epoch", &self.staging_location_epoch)
+            .field("target_storage_root_id", &self.target_storage_root_id)
+            .field("target_root_epoch", &self.target_root_epoch)
+            .field(
+                "target_provider_relative_locator",
+                &self.target_provider_relative_locator,
+            )
+            .field("owner_node_id", &self.owner_node_id)
+            .field("owner_incarnation_id", &self.owner_incarnation_id)
+            .field("expected_facts", &self.expected_facts)
+            .field("state", &self.state)
+            .field("intent_epoch", &self.intent_epoch)
+            .field("commit_fence", &"[REDACTED]")
+            .field("receipt", &self.receipt)
+            .field("supplemental_receipt", &self.supplemental_receipt)
+            .field("requested_at", &self.requested_at)
+            .field("authorized_at", &self.authorized_at)
+            .field("terminal_at", &self.terminal_at)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone)]

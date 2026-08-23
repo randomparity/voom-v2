@@ -78,6 +78,7 @@ pub struct RemoteCommitAuthorizeInput {
 /// The fenced authorization payload returned to the node (and stored verbatim
 /// as the replay outcome, fence included — spec §Threat model).
 #[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AuthorizeCommitOutcome {
     pub intent_id: ArtifactCommitIntentId,
     pub commit_record_id: voom_core::ids::ArtifactCommitRecordId,
