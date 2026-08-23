@@ -19,7 +19,7 @@ use voom_core::ids::{
     ArtifactCommitIntentId, ArtifactCommitRecordId, ArtifactHandleId, ArtifactVerificationId,
     FileLocationId, FileVersionId,
 };
-use voom_core::{NodeId, NodeIncarnationId, StorageRootId, VoomError};
+use voom_core::{NodeId, NodeIncarnationId, ProviderRelativeLocator, StorageRootId, VoomError};
 
 /// Facts a staged commit's bytes must match, pinned at prepare from the
 /// verified staging verification. Durable JSON column `expected_facts`.
@@ -149,6 +149,11 @@ pub struct NewArtifactCommitIntent {
     pub owner_node_id: NodeId,
     pub expected_facts: CommitExpectedFacts,
     pub requested_at: OffsetDateTime,
+    /// Where the staged bytes come from: the source file version's live
+    /// rooted address pinned at prepare (ADR 0075). The node materializes
+    /// staging from this handle during `applying`.
+    pub source_storage_root_id: StorageRootId,
+    pub source_provider_relative_locator: ProviderRelativeLocator,
 }
 
 /// One durable fenced commit intent.
@@ -164,6 +169,8 @@ pub struct ArtifactCommitIntent {
     pub target_storage_root_id: StorageRootId,
     pub target_root_epoch: u64,
     pub target_provider_relative_locator: String,
+    pub source_storage_root_id: StorageRootId,
+    pub source_provider_relative_locator: ProviderRelativeLocator,
     pub owner_node_id: NodeId,
     pub owner_incarnation_id: Option<NodeIncarnationId>,
     pub expected_facts: CommitExpectedFacts,
@@ -186,6 +193,11 @@ impl std::fmt::Debug for ArtifactCommitIntent {
             .field("commit_record_id", &self.commit_record_id)
             .field("artifact_handle_id", &self.artifact_handle_id)
             .field("source_file_version_id", &self.source_file_version_id)
+            .field("source_storage_root_id", &self.source_storage_root_id)
+            .field(
+                "source_provider_relative_locator",
+                &self.source_provider_relative_locator,
+            )
             .field("verification_id", &self.verification_id)
             .field("staging_location_id", &self.staging_location_id)
             .field("staging_location_epoch", &self.staging_location_epoch)
@@ -223,10 +235,10 @@ impl SqliteArtifactCommitIntentRepo {
 }
 
 impl Repository for SqliteArtifactCommitIntentRepo {}
-
 const SELECT_ARTIFACT_COMMIT_INTENT_COLS: &str = "SELECT i.id, i.commit_record_id, \
     i.artifact_handle_id, i.source_file_version_id, i.verification_id, \
-    i.staging_location_id, i.staging_location_epoch, i.target_storage_root_id, \
+    i.staging_location_id, i.staging_location_epoch, i.source_storage_root_id, \
+    i.source_provider_relative_locator, i.target_storage_root_id, \
     i.target_root_epoch, i.target_provider_relative_locator, i.owner_node_id, \
     i.owner_incarnation_id, i.expected_facts, i.state, i.intent_epoch, i.commit_fence, \
     i.receipt, i.supplemental_receipt, i.requested_at, i.authorized_at, i.terminal_at \
@@ -294,6 +306,9 @@ fn row_to_intent(row: &sqlx::sqlite::SqliteRow) -> Result<ArtifactCommitIntent, 
     let verification_id: i64 = get_col(row, "verification_id")?;
     let staging_location_id: i64 = get_col(row, "staging_location_id")?;
     let staging_location_epoch: i64 = get_col(row, "staging_location_epoch")?;
+    let source_storage_root_id: i64 = get_col(row, "source_storage_root_id")?;
+    let source_provider_relative_locator: String =
+        get_col(row, "source_provider_relative_locator")?;
     let target_storage_root_id: i64 = get_col(row, "target_storage_root_id")?;
     let target_root_epoch: i64 = get_col(row, "target_root_epoch")?;
     let target_provider_relative_locator: String =
@@ -343,6 +358,14 @@ fn row_to_intent(row: &sqlx::sqlite::SqliteRow) -> Result<ArtifactCommitIntent, 
         target_root_epoch: u64_from_i64(
             target_root_epoch,
             "artifact_commit_intents.target_root_epoch",
+        )?,
+        source_storage_root_id: StorageRootId(u64_from_i64(
+            source_storage_root_id,
+            "artifact_commit_intents.source_storage_root_id",
+        )?),
+        source_provider_relative_locator: ProviderRelativeLocator::parse_database(
+            "artifact_commit_intents.source_provider_relative_locator",
+            &source_provider_relative_locator,
         )?,
         target_provider_relative_locator,
         owner_node_id: NodeId(u64_from_i64(
@@ -400,10 +423,11 @@ impl SqliteArtifactCommitIntentRepo {
         let res = sqlx::query(
             "INSERT INTO artifact_commit_intents \
              (commit_record_id, artifact_handle_id, source_file_version_id, verification_id, \
-              staging_location_id, staging_location_epoch, target_storage_root_id, \
+              staging_location_id, staging_location_epoch, source_storage_root_id, \
+              source_provider_relative_locator, target_storage_root_id, \
               target_root_epoch, target_provider_relative_locator, owner_node_id, \
               expected_facts, state, intent_epoch, requested_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?)",
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?)",
         )
         .bind(checked_id(input.commit_record_id.0, "commit_record_id")?)
         .bind(checked_id(
@@ -423,6 +447,11 @@ impl SqliteArtifactCommitIntentRepo {
             input.staging_location_epoch,
             "staging_location_epoch",
         )?)
+        .bind(checked_id(
+            input.source_storage_root_id.0,
+            "source_storage_root_id",
+        )?)
+        .bind(input.source_provider_relative_locator.as_str())
         .bind(checked_id(
             input.target_storage_root_id.0,
             "target_storage_root_id",
@@ -448,6 +477,8 @@ impl SqliteArtifactCommitIntentRepo {
             verification_id: input.verification_id,
             staging_location_id: input.staging_location_id,
             staging_location_epoch: input.staging_location_epoch,
+            source_storage_root_id: input.source_storage_root_id,
+            source_provider_relative_locator: input.source_provider_relative_locator,
             target_storage_root_id: input.target_storage_root_id,
             target_root_epoch: input.target_root_epoch,
             target_provider_relative_locator: input.target_provider_relative_locator,

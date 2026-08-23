@@ -1111,6 +1111,11 @@ fn authorize_outcome_debug_redacts_fence_hex() {
         commit_record_id: ArtifactCommitRecordId(1),
         staging_storage_root_id: StorageRootId(1),
         staging_provider_relative_locator: "staging/a.bin".to_owned(),
+        source_storage_root_id: StorageRootId(1),
+        source_provider_relative_locator: voom_core::ProviderRelativeLocator::new(
+            "sources/a.bin".to_owned(),
+        )
+        .unwrap(),
         target_storage_root_id: StorageRootId(1),
         target_provider_relative_locator: "committed/a.bin".to_owned(),
         expected_size_bytes: 1,
@@ -1149,6 +1154,11 @@ fn authorize_outcome_replay_decode_rejects_unknown_fields() {
         commit_record_id: ArtifactCommitRecordId(1),
         staging_storage_root_id: StorageRootId(1),
         staging_provider_relative_locator: "staging/a.bin".to_owned(),
+        source_storage_root_id: StorageRootId(1),
+        source_provider_relative_locator: voom_core::ProviderRelativeLocator::new(
+            "sources/a.bin".to_owned(),
+        )
+        .unwrap(),
         target_storage_root_id: StorageRootId(1),
         target_provider_relative_locator: "committed/a.bin".to_owned(),
         expected_size_bytes: 1,

@@ -9,14 +9,14 @@ use std::borrow::Cow;
 use sqlx::migrate::{Migration, MigrationType, Migrator};
 use voom_test_support::TempDatabase;
 
-/// Apply every embedded migration except the last (physical versions 1–4),
-/// leaving the database one migration behind so a test can seed pre-0042
-/// rows and then run the real upgrade path.
+/// Apply every embedded migration except the last two (physical versions
+/// 1–4), leaving the database one media-ticket migration behind so a test
+/// can seed pre-0042 rows and then run the real upgrade path.
 async fn apply_through_0041(pool: &sqlx::SqlitePool) {
     let embedded = crate::test_support::embedded_migrator();
     let prefix = Migrator {
         migrations: Cow::Owned(
-            embedded.migrations[..embedded.migrations.len() - 1]
+            embedded.migrations[..embedded.migrations.len() - 2]
                 .iter()
                 .map(|m| {
                     Migration::new(
@@ -141,12 +141,12 @@ async fn migration_0042_applies_once_every_media_ticket_is_drainable() {
     .unwrap();
 
     let report = crate::init::init_on(&pool).await.unwrap();
-    assert_eq!(report.migrations_applied, 1);
+    assert_eq!(report.migrations_applied, 2);
 
     let applied: Vec<i64> =
         sqlx::query_scalar("SELECT version FROM _sqlx_migrations ORDER BY version")
             .fetch_all(&pool)
             .await
             .unwrap();
-    assert_eq!(applied, vec![1, 2, 3, 4, 5]);
+    assert_eq!(applied, vec![1, 2, 3, 4, 5, 6]);
 }

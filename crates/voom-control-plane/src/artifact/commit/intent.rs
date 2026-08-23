@@ -86,6 +86,10 @@ pub struct AuthorizeCommitOutcome {
     pub staging_provider_relative_locator: String,
     pub target_storage_root_id: voom_core::StorageRootId,
     pub target_provider_relative_locator: String,
+    pub source_storage_root_id: voom_core::StorageRootId,
+    /// Where the staged bytes come from: the pinned source rooted address
+    /// the node materializes staging from during `applying` (ADR 0075).
+    pub source_provider_relative_locator: voom_core::ProviderRelativeLocator,
     pub expected_size_bytes: u64,
     pub expected_content_hash: String,
     /// Hex-encoded one-time 32-byte commit fence. Never serialized into events.
@@ -103,6 +107,11 @@ impl std::fmt::Debug for AuthorizeCommitOutcome {
             .field(
                 "staging_provider_relative_locator",
                 &self.staging_provider_relative_locator,
+            )
+            .field("source_storage_root_id", &self.source_storage_root_id)
+            .field(
+                "source_provider_relative_locator",
+                &self.source_provider_relative_locator,
             )
             .field("target_storage_root_id", &self.target_storage_root_id)
             .field(
@@ -235,6 +244,8 @@ pub struct OpenCommitIntent {
     pub staging_storage_root_id: voom_core::StorageRootId,
     pub staging_provider_relative_locator: String,
     pub staging_location_epoch: u64,
+    pub source_storage_root_id: voom_core::StorageRootId,
+    pub source_provider_relative_locator: voom_core::ProviderRelativeLocator,
     pub target_storage_root_id: voom_core::StorageRootId,
     pub target_provider_relative_locator: String,
     pub target_root_epoch: u64,
@@ -742,6 +753,8 @@ impl ControlPlane {
             };
             listed.push(OpenCommitIntent {
                 id: intent.id,
+                source_storage_root_id: intent.source_storage_root_id,
+                source_provider_relative_locator: intent.source_provider_relative_locator.clone(),
                 state: intent.state.as_str().to_owned(),
                 artifact_handle_id: intent.artifact_handle_id,
                 expected_facts: intent.expected_facts,
@@ -1294,6 +1307,8 @@ fn authorize_outcome(
         commit_record_id: authorized.commit_record_id,
         staging_storage_root_id: staging.storage_root_id,
         staging_provider_relative_locator: staging.provider_relative_locator.clone(),
+        source_storage_root_id: authorized.source_storage_root_id,
+        source_provider_relative_locator: authorized.source_provider_relative_locator.clone(),
         target_storage_root_id: authorized.target_storage_root_id,
         target_provider_relative_locator: authorized.target_provider_relative_locator.clone(),
         expected_size_bytes: authorized.expected_facts.size_bytes,

@@ -35,6 +35,10 @@ fn new_intent(commit_record_id: ArtifactCommitRecordId) -> NewArtifactCommitInte
         verification_id: voom_core::ids::ArtifactVerificationId(9_000_001),
         staging_location_id: voom_core::FileLocationId(STAGING_LOCATION_ID),
         staging_location_epoch: 0,
+        source_storage_root_id: StorageRootId(9_000_001),
+        source_provider_relative_locator: crate::test_support::test_relative_locator(
+            "source/movie.mkv",
+        ),
         target_storage_root_id: StorageRootId(9_000_001),
         target_root_epoch: 1,
         target_provider_relative_locator: "committed/movie.mkv".to_owned(),

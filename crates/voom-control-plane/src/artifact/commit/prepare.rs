@@ -83,11 +83,25 @@ async fn prepare_commit_in_tx(
     )
     .await?;
 
+    // Pin where the staged bytes come from: the source file version's single
+    // live rooted location (ADR 0075). Byte-free on purpose — identity rows
+    // only, no stat/canonicalize; the node resolves this handle against its
+    // own bound roots when it materializes staging during `applying`.
+    let source_location =
+        crate::operation_source::select_location(cp, inputs.source.source_file_version_id, None)
+            .await
+            .map_err(|err| pre_mutation_error(&inputs.context, &err))?;
+    let (source_storage_root_id, source_locator) = source_location
+        .rooted_address()
+        .map_err(|err| pre_mutation_error(&inputs.context, &err))?;
+
     let draft = PendingIntentDraft {
         artifact_handle_id: input.artifact_handle_id,
         source_file_version_id: inputs.source.source_file_version_id,
         verification_id: inputs.verified_staging.verification.id,
         expected_facts: inputs.expected_facts,
+        source_storage_root_id,
+        source_provider_relative_locator: source_locator.clone(),
         context: inputs.verified_staging.context.clone(),
     };
     let record = create_prepared_record(cp, tx, &draft, &staged_path, &scope, now).await?;
@@ -277,6 +291,10 @@ struct PendingIntentDraft {
     source_file_version_id: FileVersionId,
     verification_id: ArtifactVerificationId,
     expected_facts: voom_store::repo::media::artifact_commit_intents::CommitExpectedFacts,
+    /// Where the staged bytes come from: the source file version's live
+    /// rooted address, pinned byte-free at prepare (ADR 0075).
+    source_storage_root_id: StorageRootId,
+    source_provider_relative_locator: voom_core::ProviderRelativeLocator,
     context: PreMutationContext,
 }
 
@@ -374,6 +392,8 @@ async fn pin_staging_and_record_intent(
                 artifact_handle_id: draft.artifact_handle_id,
                 source_file_version_id: draft.source_file_version_id,
                 verification_id: draft.verification_id,
+                source_storage_root_id: draft.source_storage_root_id,
+                source_provider_relative_locator: draft.source_provider_relative_locator.clone(),
                 staging_location_id: staging_location.id,
                 staging_location_epoch: staging_location.epoch,
                 target_storage_root_id: scope.target_storage_root_id,
