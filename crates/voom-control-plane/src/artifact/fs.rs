@@ -26,9 +26,13 @@ pub struct PromotionReport {
     pub temp_path: PathBuf,
 }
 
+// The context fields are read only by test failpoints since the staging
+// byte-copy retired (ADR 0075); production installs run failpoint-free.
 #[derive(Debug, Clone, Copy)]
 pub struct PromotionFailpointContext<'a> {
+    #[cfg_attr(not(test), expect(dead_code))]
     pub temp_path: &'a Path,
+    #[cfg_attr(not(test), expect(dead_code))]
     pub target_path: &'a Path,
 }
 
@@ -316,6 +320,7 @@ pub async fn copy_to_unique_temp_then_install_no_replace(
     Ok(report.target)
 }
 
+#[cfg_attr(not(test), expect(dead_code))]
 pub async fn promote_staged_add_only(
     staging: impl AsRef<Path>,
     target: impl AsRef<Path>,

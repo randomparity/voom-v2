@@ -10,7 +10,6 @@ pub(crate) mod commit;
 pub(crate) mod fs;
 pub(crate) mod inspect;
 pub(crate) mod policy_target;
-pub(crate) mod stage;
 pub(crate) mod verify;
 pub(crate) mod worker;
 
@@ -22,5 +21,4 @@ pub use inspect::{
     ArtifactDetail, ArtifactInspectionState, ArtifactListInput, ArtifactListPage, ArtifactSummary,
     CommitSummary, PathFacts, PathObservation, RecoverySummary, VerificationSummary,
 };
-pub use stage::{StageCopyCommandError, StageCopyInput, StageCopyReport};
 pub use verify::{VerifyArtifactInput, VerifyArtifactReport};

@@ -5,7 +5,7 @@ use serde_json::json;
 use voom_control_plane::artifact::{
     ArtifactDetail, ArtifactInspectionState, ArtifactSummary, CommitArtifactReport,
     CommitRecoveryReport, CommitSummary, PathFacts, PathObservation, RecoverySummary,
-    StageCopyReport, VerificationSummary, VerifyArtifactReport,
+    VerificationSummary, VerifyArtifactReport,
 };
 use voom_core::ids::{ArtifactCommitRecordId, ArtifactVerificationId};
 use voom_core::{
@@ -16,8 +16,7 @@ use voom_store::repo::media::artifacts::{ArtifactCommitState, ArtifactVerificati
 
 use super::{
     ArtifactDetailData, ArtifactEnvelopeData, ArtifactSummaryData, CommitArtifactData,
-    StageCopyData, VerifyArtifactData, artifact_state_to_control_plane, command_error_code,
-    path_wire,
+    VerifyArtifactData, artifact_state_to_control_plane, command_error_code, path_wire,
 };
 use crate::cli::{ArtifactCommand, ArtifactStateArg, Cli, Command};
 use crate::envelope::{Envelope, Status};
@@ -25,18 +24,6 @@ use crate::envelope::{Envelope, Status};
 #[test]
 fn artifact_command_names_and_flags_parse() {
     for command in [
-        [
-            "voom",
-            "artifact",
-            "stage-copy",
-            "--file-version-id",
-            "10",
-            "--source-location-id",
-            "11",
-            "--staging-path",
-            "/tmp/staged.bin",
-        ]
-        .as_slice(),
         [
             "voom",
             "artifact",
@@ -193,19 +180,6 @@ fn artifact_detail_serializes_commit_recovery_fields() {
 #[test]
 fn operation_reports_serialize_stable_ids_and_paths() {
     assert_eq!(
-        serde_json::to_value(StageCopyData::from(stage_report_fixture())).unwrap(),
-        json!({
-            "artifact_handle_id": 10,
-            "artifact_location_id": 40,
-            "source_file_version_id": 20,
-            "source_location_id": 90,
-            "source_path": "/tmp/source.bin",
-            "staging_path": "/tmp/staged.bin",
-            "size_bytes": 123,
-            "checksum": "blake3:expected"
-        })
-    );
-    assert_eq!(
         serde_json::to_value(VerifyArtifactData::from(verify_report_fixture())).unwrap(),
         json!({
             "artifact_handle_id": 10,
@@ -262,7 +236,6 @@ fn error_code_mapping_preserves_command_error_codes() {
 #[test]
 fn each_artifact_command_shape_has_exactly_one_json_envelope() {
     let commands = [
-        "artifact.stage_copy",
         "artifact.verify",
         "artifact.commit",
         "artifact.list",
@@ -294,18 +267,14 @@ fn each_artifact_command_shape_has_exactly_one_json_envelope() {
 }
 
 #[test]
-fn clap_help_includes_artifact_subcommands() {
+fn clap_help_lists_artifact_subcommands() {
     let mut command = Cli::command();
     let artifact = command.find_subcommand_mut("artifact").unwrap();
-    let help = artifact.render_long_help().to_string();
-    let list_help = artifact
-        .find_subcommand_mut("list")
-        .unwrap()
-        .render_long_help()
-        .to_string();
 
-    assert!(help.contains("stage-copy"));
-    assert!(list_help.contains("recovery_required"));
+    assert!(artifact.find_subcommand_mut("verify").is_some());
+    assert!(artifact.find_subcommand_mut("commit").is_some());
+    assert!(artifact.find_subcommand_mut("list").is_some());
+    assert!(artifact.find_subcommand_mut("show").is_some());
 }
 
 #[test]
@@ -478,18 +447,6 @@ fn commit_summary_fixture() -> CommitSummary {
     }
 }
 
-fn stage_report_fixture() -> StageCopyReport {
-    StageCopyReport {
-        artifact_handle_id: ArtifactHandleId(10),
-        artifact_location_id: ArtifactLocationId(40),
-        source_file_version_id: FileVersionId(20),
-        source_location_id: FileLocationId(90),
-        source_path: PathBuf::from("/tmp/source.bin"),
-        staging_path: PathBuf::from("/tmp/staged.bin"),
-        size_bytes: 123,
-        checksum: "blake3:expected".to_owned(),
-    }
-}
 
 fn verify_report_fixture() -> VerifyArtifactReport {
     VerifyArtifactReport {

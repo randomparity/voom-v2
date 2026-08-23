@@ -6,18 +6,16 @@ use voom_control_plane::artifact::{
     ArtifactDetail, ArtifactInspectionState, ArtifactListInput, ArtifactSummary,
     CommitArtifactInput, CommitArtifactPreMutationReport, CommitArtifactReport,
     CommitRecoveryReport, CommitSummary, PathFacts, PathObservation, RecoverySummary,
-    StageCopyInput, StageCopyReport, VerificationSummary, VerifyArtifactInput,
-    VerifyArtifactReport,
+    VerificationSummary, VerifyArtifactInput, VerifyArtifactReport,
 };
 use voom_control_plane::audio::AcknowledgeExtractDispatchQuiescenceInput;
-use voom_core::{ArtifactHandleId, ErrorCode, FileLocationId, FileVersionId, WorkerId};
+use voom_core::{ArtifactHandleId, ErrorCode, WorkerId};
 use voom_store::repo::media::artifacts::{ArtifactCommitState, ArtifactVerificationStatus};
 
 use crate::cli::{ArtifactCommand, ArtifactStateArg};
 use crate::commands::common::{emit_voom_error, open_control_plane};
 use crate::envelope::{Local, emit_err, emit_err_with_data, emit_ok, emit_ok_page};
 
-const COMMAND_STAGE_COPY: &str = "artifact.stage_copy";
 const COMMAND_VERIFY: &str = "artifact.verify";
 const COMMAND_COMMIT: &str = "artifact.commit";
 const COMMAND_RECOVER_COMMIT: &str = "artifact.recover_commit";
@@ -45,18 +43,6 @@ struct ExtractQuiescenceData {
 #[derive(Debug, Serialize)]
 struct ArtifactListData {
     artifacts: Vec<ArtifactSummaryData>,
-}
-
-#[derive(Debug, Serialize)]
-struct StageCopyData {
-    artifact_handle_id: u64,
-    artifact_location_id: u64,
-    source_file_version_id: u64,
-    source_location_id: u64,
-    source_path: String,
-    staging_path: String,
-    size_bytes: u64,
-    checksum: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -241,20 +227,6 @@ struct PathFactsData {
 
 pub async fn run(database_url: &str, local: Local, command: ArtifactCommand) -> io::Result<i32> {
     match command {
-        ArtifactCommand::StageCopy {
-            file_version_id,
-            source_location_id,
-            staging_path,
-        } => {
-            stage_copy(
-                database_url,
-                local,
-                file_version_id,
-                source_location_id,
-                staging_path.as_path(),
-            )
-            .await
-        }
         ArtifactCommand::Verify {
             artifact_handle_id,
             staging_root,
@@ -305,52 +277,6 @@ pub async fn run(database_url: &str, local: Local, command: ArtifactCommand) -> 
         } => list(database_url, local, state, after_id, limit).await,
         ArtifactCommand::Show { artifact_handle_id } => {
             show(database_url, local, artifact_handle_id).await
-        }
-    }
-}
-
-async fn stage_copy(
-    database_url: &str,
-    local: Local,
-    file_version_id: u64,
-    source_location_id: Option<u64>,
-    staging_path: &Path,
-) -> io::Result<i32> {
-    let cp = match open_control_plane(COMMAND_STAGE_COPY, database_url, &local).await? {
-        Ok(cp) => cp,
-        Err(code) => return Ok(code),
-    };
-    match cp
-        .stage_copy(StageCopyInput {
-            file_version_id: FileVersionId(file_version_id),
-            source_location_id: source_location_id.map(FileLocationId),
-            staging_path: staging_path.to_path_buf(),
-        })
-        .await
-    {
-        Ok(report) => emit_ok(
-            COMMAND_STAGE_COPY,
-            ArtifactEnvelopeData {
-                artifact: StageCopyData::from(report),
-            },
-            Some(local),
-            Vec::new(),
-        )
-        .map(|()| 0),
-        Err(err) => {
-            let code = command_error_code(err.code());
-            match err.data() {
-                Some(data) => emit_err_with_data(
-                    COMMAND_STAGE_COPY,
-                    data,
-                    code,
-                    err.to_string(),
-                    None,
-                    Some(local),
-                )?,
-                None => emit_err(COMMAND_STAGE_COPY, code, err.to_string(), None, Some(local))?,
-            }
-            Ok(2)
         }
     }
 }
@@ -570,21 +496,6 @@ fn artifact_state_to_control_plane(state: ArtifactStateArg) -> ArtifactInspectio
 
 fn command_error_code(code: ErrorCode) -> &'static str {
     code.as_str()
-}
-
-impl From<StageCopyReport> for StageCopyData {
-    fn from(report: StageCopyReport) -> Self {
-        Self {
-            artifact_handle_id: report.artifact_handle_id.0,
-            artifact_location_id: report.artifact_location_id.0,
-            source_file_version_id: report.source_file_version_id.0,
-            source_location_id: report.source_location_id.0,
-            source_path: path_wire(&report.source_path),
-            staging_path: path_wire(&report.staging_path),
-            size_bytes: report.size_bytes,
-            checksum: report.checksum,
-        }
-    }
 }
 
 impl From<VerifyArtifactReport> for VerifyArtifactData {

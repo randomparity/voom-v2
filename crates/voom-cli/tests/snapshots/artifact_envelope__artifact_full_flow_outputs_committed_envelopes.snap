@@ -5,29 +5,6 @@ expression: json
 [
   {
     "schema_version": "0",
-    "command": "artifact.stage_copy",
-    "status": "ok",
-    "data": {
-      "artifact": {
-        "artifact_handle_id": 1,
-        "artifact_location_id": 1,
-        "source_file_version_id": 1,
-        "source_location_id": 1,
-        "source_path": "[media]/tiny.source",
-        "staging_path": "[artifact-dir]/staged.mp4",
-        "size_bytes": 1545,
-        "checksum": "[hash]"
-      }
-    },
-    "local": {
-      "db_url": "[db-url]",
-      "config_path": "[config-path]"
-    },
-    "warnings": [],
-    "error": null
-  },
-  {
-    "schema_version": "0",
     "command": "artifact.verify",
     "status": "ok",
     "data": {
