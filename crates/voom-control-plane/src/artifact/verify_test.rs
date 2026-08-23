@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use time::OffsetDateTime;
 use voom_core::{
-    ArtifactHandleId, ErrorCode, FailureClass, FileLocationId, FileVersionId, WorkerId,
+    ArtifactHandleId, ErrorCode, FailureClass, FileVersionId, WorkerId,
     rng_test_support::FrozenRng,
 };
 use voom_events::EventKind;
@@ -18,7 +18,6 @@ use voom_worker_protocol::{
 };
 
 use crate::ControlPlane;
-use crate::artifact::stage::{StageCopyInput, StageCopyReport};
 
 #[tokio::test]
 async fn missing_artifact_handle_returns_not_found() {
@@ -196,7 +195,7 @@ async fn verification_persistence_survives_a_concurrent_writer_attempt() {
         },
         ArtifactExpectedFacts {
             source_file_version_id: Some(staged.source_file_version_id),
-            source_file_location_id: Some(staged.source_location_id),
+            source_file_location_id: Some(staged.source_file_location_id),
             size_bytes: 12,
             checksum: blake3_checksum(b"source bytes"),
         },
@@ -406,7 +405,6 @@ async fn verification_events_use_same_transaction_as_persisted_verification_rows
 #[derive(Debug, Clone)]
 struct SeededSource {
     file_version_id: FileVersionId,
-    file_location_id: FileLocationId,
 }
 
 async fn fixture() -> (
@@ -449,18 +447,11 @@ async fn seed_source(cp: &ControlPlane, path: &Path, bytes: &[u8]) -> SeededSour
         )
         .await
         .unwrap();
-    let IngestOutcome::NewFileAsset {
-        file_version_id,
-        file_location_id,
-        ..
-    } = outcome
+    let IngestOutcome::NewFileAsset { file_version_id, .. } = outcome
     else {
         panic!("seed_source should create a new file asset");
     };
-    SeededSource {
-        file_version_id,
-        file_location_id,
-    }
+    SeededSource { file_version_id }
 }
 
 async fn stage_source(
@@ -468,13 +459,14 @@ async fn stage_source(
     source: &Path,
     staging: &Path,
     bytes: &[u8],
-) -> StageCopyReport {
+) -> voom_test_support::staging_seed::SeededStagedArtifact {
     let seeded = seed_source(cp, source, bytes).await;
-    cp.stage_copy(StageCopyInput {
-        file_version_id: seeded.file_version_id,
-        source_location_id: Some(seeded.file_location_id),
-        staging_path: staging.to_path_buf(),
-    })
+    std::fs::write(staging, bytes).unwrap();
+    voom_test_support::staging_seed::seed_staged_artifact(
+        cp.pool_for_test(),
+        seeded.file_version_id,
+        staging,
+    )
     .await
     .unwrap()
 }
