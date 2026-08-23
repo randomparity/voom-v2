@@ -496,3 +496,28 @@ fn replayed_acquire_wire_decodes_identically_and_rejects_unknown_fields() {
     unknown["artifact_access_plan"]["mode"] = serde_json::json!("shared_mount");
     assert!(serde_json::from_value::<AcquireOutcome>(unknown).is_err());
 }
+#[test]
+fn commit_dtos_debug_redact_fence_hex() {
+    let outcome = super::CommitAuthorizeOutcome {
+        intent_id: voom_core::ids::ArtifactCommitIntentId(1),
+        commit_record_id: voom_core::ids::ArtifactCommitRecordId(1),
+        staging_storage_root_id: voom_core::StorageRootId(1),
+        staging_provider_relative_locator: "staging/a.bin".to_owned(),
+        target_storage_root_id: voom_core::StorageRootId(1),
+        target_provider_relative_locator: "committed/a.bin".to_owned(),
+        expected_size_bytes: 1,
+        expected_content_hash: "blake3:x".to_owned(),
+        fence_hex: "deadbeef".to_owned(),
+    };
+    let request = super::CommitCompleteRequest {
+        node_id: NodeId(1),
+        incarnation_id: "0123456789abcdef0123456789abcdef".parse().unwrap(),
+        fence_hex: "deadbeef".to_owned(),
+    };
+    // The one-time fence is capability material: its Debug rendering must
+    // never leak it into a log or telemetry surface.
+    for rendered in [format!("{outcome:?}"), format!("{request:?}")] {
+        assert!(!rendered.contains("deadbeef"), "{rendered}");
+        assert!(rendered.contains("[REDACTED]"), "{rendered}");
+    }
+}

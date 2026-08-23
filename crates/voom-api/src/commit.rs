@@ -58,13 +58,25 @@ struct OutcomeRequest {
     evidence: CommitOutcomeEvidence,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct CompleteRequest {
     node_id: u64,
     incarnation_id: NodeIncarnationId,
     /// Hex-encoded one-time 32-byte commit fence from the authorize outcome.
     fence_hex: String,
+}
+
+impl std::fmt::Debug for CompleteRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The one-time fence is capability material: never leak it through
+        // a log or telemetry surface.
+        f.debug_struct("CompleteRequest")
+            .field("node_id", &self.node_id)
+            .field("incarnation_id", &self.incarnation_id)
+            .field("fence_hex", &"[REDACTED]")
+            .finish()
+    }
 }
 
 pub(crate) fn routes() -> axum::Router<AppState> {

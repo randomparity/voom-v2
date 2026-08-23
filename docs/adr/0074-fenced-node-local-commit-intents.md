@@ -59,6 +59,29 @@ recovery code is deleted by this change, so operators resolve them under
 the prior binary before upgrading. Pre-release deployments carry no
 backfill-compat obligation for them.
 
+### Post-authorization mutations bind scope and fence, not the authorizing incarnation
+
+`authorize_in_tx` pins `owner_incarnation_id`, but no post-authorization
+route compares the caller's incarnation against that pin, and this is
+deliberate (issue #524). Every post-authorization mutation revalidates the
+node token against the *currently active* incarnation, node liveness, root
+ownership at the pinned epoch, and staging-location liveness at the pinned
+epoch; completion additionally requires the exact one-time fence. The fence,
+not the incarnation pin, is the capability that gates convergence: it is
+unreachable for any incarnation that did not authorize, because the replay
+key binds the issuing incarnation (`{incarnation}:{idempotency_key}`), so a
+fresh incarnation's authorize call is a fresh reservation against a
+non-pending intent and is refused. The node-agent coordinator relies on
+exactly this: an `authorized` intent whose authorize request the current
+incarnation never issued is left for control-plane recovery. The same
+storage owner resuming an in-flight promotion under a fresh incarnation can
+therefore journal receipts and complete with its predecessor's fence rather
+than wedging the record into operator-required recovery. The scan-session
+sibling fence rejects cross-incarnation mutations outright because scan
+sessions carry no one-time capability — their owner-incarnation staleness
+rule *is* the capability; commit intents deliberately layer the stronger
+fence on top of epoch pins instead.
+
 ### Authorization is the control plane's fail-closed gate, re-run late
 
 The node requests authorization for a pending intent over an authenticated
@@ -95,7 +118,15 @@ finalization after the fact.
 Completion requires the exact `commit_fence` plus matching applied evidence.
 The control plane validates fence and facts in the finalize transaction that
 creates the result version/location, retires staging, and marks the record
-`committed`; the intent ends `completed` and the fence is consumed.
+`committed`; the intent ends `completed`. The fence is single-use at the
+state-machine level and capability-material at rest: terminal transitions
+(`completed`, `aborted`) null `commit_fence` so no finished row retains
+fence bytes, while `recovery_required` keeps it — it must stay blocking
+until recovery converges the intent. Migration 0038's coherence CHECK
+encodes exactly this split.
+Every struct carrying `fence_hex` renders the value `[REDACTED]` in its
+`Debug` output, so no log or telemetry surface can leak the capability even
+if one is added later (issue #524's hardening pass, recorded here).
 Authorize and complete replay idempotently through the existing
 `remote_idempotency_keys` mechanism: a replayed authorize returns the
 original fenced outcome, a replayed complete the original report — neither
@@ -232,3 +263,15 @@ registered in `docs/payload-contract-inventory.md` and
   judgment — without epoch pins a staging swap or root reassignment between
   authorize and apply would let bytes from a different generation be
   promoted under the old authorization, defeating criterion 1.
+- **Enforce the pinned `owner_incarnation_id` on post-authorization
+  mutations (applying/outcome/complete).** Rejected: judgment — a fresh
+  incarnation cannot obtain the fence (the replay key binds the issuing
+  incarnation, so its authorize is refused on a non-pending intent), which
+  already denies resumed intents any path to completion they did not have;
+  receipts are non-mutating evidence gated by token + currently-active
+  incarnation + liveness + pinned-epoch checks, so enforcement adds no
+  reachable protection while routing every mid-promotion re-registration
+  into recovery classification. Applied to the outcome route it would also
+  contradict the supplemental-receipt design above, which lets the current
+  root owner file evidence "even when it was not the authorized node"
+  (issue #524).
