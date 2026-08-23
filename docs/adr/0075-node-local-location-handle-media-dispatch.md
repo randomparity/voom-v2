@@ -49,20 +49,20 @@ agent supervises on the same host.
 `voom_core::PROTOCOL_VERSION` moves 2 → 3. Exact-version matching (ADR 0016)
 already fails mixed binaries at handshake/activation, satisfying "protocol
 mismatch fails before lease execution" for version skew.
-
 For payload skew, voom-worker-protocol gains one dispatch-envelope family
 (`operations/dispatch.rs`): a tagged enum over the byte-touching media
 operations — probe, transcode-audio (including synthesize/add-track),
-extract-audio, transcode-video, remux, backup-file, verify-artifact, and
-stage-source (the add-only commit staging copy). Every variant carries only
+extract-audio, transcode-video, remux, backup-file, and verify-artifact.
+Every variant carries only
 stable vocabulary: `StorageRootId` + `ProviderRelativeLocator` pairs for
 sources and planned outputs, expected-fact blocks, and (where the destination
 is fenced) root/location epochs mirroring the ADR 0074 intent shape. No
 variant carries an absolute path. Envelopes render into the durable ticket
-payload under the ADR 0013 deny-unknown-fields contract; migration 0042 fails
-closed on in-flight non-terminal media workflow tickets because their
-path-shaped payloads cannot be re-rendered by the new binary (pre-release;
-same disposition as migration 0038).
+payload under the ADR 0013 deny-unknown-fields contract; migration 0042
+carries a preflight guard that aborts the upgrade when in-flight
+non-terminal media workflow tickets exist, because their path-shaped
+payloads cannot be re-rendered by the new binary (pre-release; identical
+abort semantics to migration 0038).
 
 The agent parses the envelope strictly (deny-unknown-fields decode) **before**
 executing anything: an unparseable or wrong-schema dispatch fails the lease
@@ -92,10 +92,13 @@ control-plane ffprobe launches.
 ### Staging copy joins the fenced commit intent
 
 Add-only commit staging stops being a control-plane byte copy
-(`artifact/stage.rs`). The ADR 0074 commit intent carries the source location
-handle in addition to the staging/target addresses; the agent materializes
-staging bytes during `applying` and reports receipts under the existing fenced
-state machine. Prepare stays DB-only; recovery stays receipt-only.
+(`artifact/stage.rs`). The fenced commit intent is the authoritative channel
+for this copy — it is deliberately **not** part of the lease-envelope family,
+so no second execution path exists. The ADR 0074 intent carries the source
+location handle in addition to the staging/target addresses; the agent
+materializes staging bytes during `applying` and reports receipts under the
+existing fenced state machine. Prepare stays DB-only; recovery stays
+receipt-only.
 
 ### One media contract
 
@@ -106,6 +109,10 @@ remote execution share one envelope, one fact-check placement, and one
 executor shape: the node agent. Backup and artifact verification become
 owner-node dispatches of the same family rather than in-process control-plane
 worker sessions.
+
+The policy-tool readiness preflight keeps its control-plane-side bundled
+ffprobe check, which targets the wrong host once probing runs on the storage
+owner; retargeting it is issue #424's assigned surface and is excluded here.
 
 ## Considered & rejected
 
@@ -131,11 +138,16 @@ worker sessions.
 ## Consequences
 
 - Mixed-version control plane/agent binaries fail at activation, not mid-lease.
-- In-flight non-terminal media workflow tickets are cancelled by migration 0042
-  at upgrade (fail closed, pre-release).
+- Migration 0042 carries a preflight guard that aborts the upgrade when
+  in-flight non-terminal media workflow tickets exist (pre-release; identical
+  semantics to migration 0038).
 - Single-host deployments run one node agent process to execute media work.
 - Synthetic/fake providers keep operating unchanged: their results echo the
   dispatched evidence, and non-byte-touching operations never see envelopes.
 - The operator inspection surface (`artifact/inspect.rs`) and the
   workflow-coordinator terminal-artifact move/reclaim path remain as-is;
   both are owned by the follow-up split around #436.
+- Backup destinations move from control-plane-built absolute paths to
+  planned outputs addressed on configured backup storage roots; operators
+  provisioning nodes must bind those roots in agent configuration, and
+  pre-existing control-plane backup trees are not migrated.

@@ -41,8 +41,8 @@ pub use operations::backup::{BackUpFileRequest, BackUpFileResult, BackUpFileStat
 pub use operations::dispatch::{
     MediaBackUpFileDispatch, MediaDispatch, MediaExtractAudioDispatch, MediaExtractOutput,
     MediaPlannedOutput, MediaProbeDispatch, MediaRemuxDispatch, MediaSourceRef,
-    MediaStageSourceDispatch, MediaTranscodeAudioDispatch, MediaTranscodeVideoDispatch,
-    MediaVerifyArtifactDispatch, decode_media_dispatch,
+    MediaTranscodeAudioDispatch, MediaTranscodeVideoDispatch, MediaVerifyArtifactDispatch,
+    decode_media_dispatch,
 };
 pub use operations::hash_file::{HashFileRequest, HashFileResult, HashedSidecar};
 pub use operations::probe_file::{

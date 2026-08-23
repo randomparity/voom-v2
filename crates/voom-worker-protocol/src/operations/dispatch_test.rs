@@ -118,18 +118,6 @@ fn extract_audio_dispatch_round_trips_ordered_outputs() {
 }
 
 #[test]
-fn stage_source_dispatch_round_trips() {
-    let dispatch = MediaDispatch::StageSource(MediaStageSourceDispatch {
-        schema: PROTOCOL_VERSION,
-        source: source(5, "library/incoming/a.mkv"),
-        expected: expected(),
-        target: planned(6, "staging/v2/a.mkv"),
-    });
-    let decoded = decode_media_dispatch(&serde_json::to_value(&dispatch).unwrap()).unwrap();
-    assert_eq!(decoded, dispatch);
-}
-
-#[test]
 fn transcode_audio_additive_settings_round_trip() {
     let dispatch = MediaDispatch::TranscodeAudio(MediaTranscodeAudioDispatch {
         schema: PROTOCOL_VERSION,

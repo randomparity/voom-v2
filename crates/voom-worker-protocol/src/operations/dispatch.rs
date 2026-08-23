@@ -134,17 +134,6 @@ pub struct MediaVerifyArtifactDispatch {
     pub expected: VerifyArtifactExpectedFacts,
 }
 
-/// Add-only commit staging copy: materialize `source` bytes into the staged
-/// address during the fenced commit intent's applying phase (ADR 0074/0075).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct MediaStageSourceDispatch {
-    pub schema: u32,
-    pub source: MediaSourceRef,
-    pub expected: ExpectedFileFacts,
-    pub target: MediaPlannedOutput,
-}
-
 /// Handle-shaped dispatch envelope for one byte-touching media operation.
 ///
 /// Tagged enum over annotated content structs per the durable-payload rule:
@@ -160,7 +149,6 @@ pub enum MediaDispatch {
     Remux(MediaRemuxDispatch),
     BackUpFile(MediaBackUpFileDispatch),
     VerifyArtifact(MediaVerifyArtifactDispatch),
-    StageSource(MediaStageSourceDispatch),
 }
 
 impl MediaDispatch {
@@ -175,7 +163,6 @@ impl MediaDispatch {
             Self::Remux(dispatch) => dispatch.schema,
             Self::BackUpFile(dispatch) => dispatch.schema,
             Self::VerifyArtifact(dispatch) => dispatch.schema,
-            Self::StageSource(dispatch) => dispatch.schema,
         }
     }
 }

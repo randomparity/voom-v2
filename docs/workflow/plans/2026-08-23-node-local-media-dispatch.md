@@ -8,14 +8,19 @@ Migration 0042 is assigned. Conventions: AGENTS.md (deny_unknown_fields on
 durable payloads; sibling *_test.rs; BEGIN IMMEDIATE in multi-write fixtures;
 no tokio pause + SqlitePool).
 
+Ordering note: the control-plane switchover (renderers stop emitting paths,
+adapters die) must land as one atomic task per operation family — no window
+may exist where renderers emit envelopes while path-parsing adapters still
+run. T4 therefore only adds resolution plumbing and tests; emission flips
+inside T6.
+
 ## T1 — Protocol envelopes (voom-worker-protocol, voom-core)
 
-Files: `crates/voom-core/src/lib.rs` (PROTOCOL_VERSION 2→3),
+Files: `crates/voom-core/src/lib.rs` (PROTOCOL_VERSION 2→3, done),
 `crates/voom-worker-protocol/src/operations/dispatch.rs` (+ `dispatch_test.rs`,
-`mod.rs` wiring), re-export surface.
-Work per spec C1. Reuse existing fact/selection types from the op modules;
-planned-output locators are plain validated strings at this layer.
-Verify: `cargo test -p voom-worker-protocol -p voom-core`.
+`mod.rs` wiring), re-export surface, version-pin test updates. Done in
+commit 3c500438 except any review-driven adjustments (StageSource variant was
+removed by decision: fenced intent owns that copy).
 
 ## T2 — Agent handle resolution + observation helpers (voom-node-agent)
 
@@ -28,46 +33,60 @@ Verify: `cargo test -p voom-node-agent`.
 ## T3 — Agent media executor (voom-node-agent)
 
 Files: `crates/voom-node-agent/src/media.rs` (+test), `runtime.rs`
-(route byte-touching operations from `dispatch_outcome`; keep
-`augment_payload` for non-envelope ops).
-Work per spec C3 steps 1–6: strict decode → resolve → pre-observe → child
-request build (move request-builder logic from deleted CP
-`audio/worker_contract.rs`, `remux/dispatch.rs`, `transcode/dispatch.rs` here,
-parameterized by resolved paths) → dispatch → post-observe/probe →
+(route byte-touching operations from `dispatch_outcome`; decode raw payload
+pre-augment per spec C3 step 1).
+Work per spec C3: strict decode → resolve → pre-observe → stale-residue
+clear → child request build (move request-builder logic from soon-deleted CP
+`audio/worker_contract.rs`, `remux/dispatch.rs`, `transcode/dispatch.rs`
+here, parameterized by resolved paths) → dispatch → post-observe/probe →
 `agent_observed` evidence in completion result. Staged probe via
 `ChildEndpointRegistry::resolve(ProbeFile)`.
 Verify: `cargo test -p voom-node-agent`.
 
-## T4 — Ticket rendering to envelopes (voom-control-plane)
+## T4 — Renderer plumbing, no emission flip yet (voom-control-plane)
 
-Files: `crates/voom-control-plane/src/workflow/plan/binding.rs`(+test),
-`workflow/plan/ticket_payload.rs` (validate derivation against new payload
-fields), staging/output root resolution (`LibraryRoot.default_*_root_id`).
-Work per spec C2. Deterministic relative locator scheme documented inline.
+Files: `crates/voom-control-plane/src/workflow/plan/binding.rs`(+
+`binding_test.rs` if present), handle-resolution helpers for staging/output/
+backup roots (`LibraryRoot.default_*_root_id`; unset → render error).
+Additive only: new render functions exist and are unit-tested; nothing calls
+them from production paths yet.
 Verify: `cargo test -p voom-control-plane workflow::plan`.
 
-## T5 — Migration 0042 + durable-payload contract
+## T5 — Migration 0042
 
-Files: `migrations/0042_*.sql`, `crates/voom-store/src/migrator.rs`,
-`docs/payload-contract-inventory.md`, `scripts/payload-contract-scope.txt` if a
-new typed column lands (prefer none).
-Fail closed on in-flight non-terminal media workflow tickets (cancel with
-recorded reason, mirroring 0038's disposition comment).
+Files: `migrations/0042_*.sql`, `crates/voom-store/src/migrator.rs`.
+Preflight guard mirroring migration 0038's abort semantics exactly: the
+migration aborts (transaction fails, data untouched) when in-flight
+non-terminal media workflow tickets exist. No row mutation.
 Verify: `cargo test -p voom-store`.
 
-## T6 — Control-plane data-only validation + deletions (C4/C5/C7)
+## T6 — Atomic switchover + deletions (C2 flip, C4, C5, C7)
 
-Delete CP-side: three `revalidate_source_file`, three
-`require_output_file_matches_result`, media canonicalization callers of
-`select_local_source` (keep byte-free `select_location`),
-`dispatch_control_plane_*` adapters + runtime dispatchers, backup bundled
-dispatcher (gate re-minted as ticket per C5), bundled verify dispatchers,
-staged-result ffprobe launches, orphaned `worker_process.rs`/
-`artifact/worker.rs` parts (verify scan pump sharing first).
-Rewrite affected validators data-only (spec C4) and backup/verify flows onto
-tickets (C5). Update all sibling tests; e2e moves to agent-driven execution
-(spec test strategy) — chaos overrides move agent-side.
-Verify: `cargo test -p voom-control-plane -p voom-cli`.
+One task because renderers and consumers must flip together:
+
+- Flip renderers to emit nested `media_dispatch` (scalar keys preserved).
+- Delete CP-side: three `revalidate_source_file`, three
+  `require_output_file_matches_result`, media canonicalization callers of
+  `select_local_source` (keep byte-free `select_location`),
+  `dispatch_control_plane_*` adapters + runtime dispatchers, backup bundled
+  dispatcher (gate re-minted as ticket per C5), bundled verify dispatchers,
+  staged-result ffprobe launches (audio/remux/transcode commit.rs probe
+  helpers), orphaned `worker_process.rs`/`artifact/worker.rs` parts. The
+  `scan/worker.rs` ffprobe launcher survives (policy tool_preflight, #424).
+- Rewrite affected validators data-only (spec C4); backup/verify flows onto
+  tickets (C5). Update all sibling tests.
+
+Known cross-crate callers to migrate with the stage_copy/staging deletion
+(T7 shares some): CLI command `artifact.stage_copy`
+(`crates/voom-cli/src/commands/media/artifact.rs:249-330`) and its snapshots;
+voom-api seeding helper (`crates/voom-api/src/commit_test.rs:202`);
+integration suites seeding via `cp.stage_copy` directly
+(`tests/staged_artifact_flow.rs`, `tests/commit_use_lease_gate.rs`,
+`tests/recover_commit_gate.rs`, `artifact/inspect_test.rs`,
+`artifact/verify_test.rs`, `artifact/commit/mod_test.rs`). These move to
+fenced-intent-driven staging or direct DB seeding helpers — enumerate via
+grep before deleting anything.
+Verify: `cargo test -p voom-control-plane -p voom-api`.
 
 ## T7 — Commit-intent source handle (C6)
 
@@ -76,22 +95,31 @@ Files: `crates/voom-control-plane/src/artifact/commit/{intent,prepare,recovery}.
 `commit.rs` (applying does source→staging materialization then promote),
 `crates/voom-test-support/src/commit_node.rs`,
 `crates/voom-artifact` if receipt enums extend (additive only),
-`artifact/stage.rs` deletion, orphaned `artifact/fs.rs` helpers.
+`artifact/stage.rs` deletion + its cross-crate callers from T6's list,
+orphaned `artifact/fs.rs` helpers.
 Extend receipts additively; recovery stays receipt-only.
-Verify: `cargo test -p voom-control-plane artifact::commit -p voom-node-agent -p voom-test-support` consumers.
+Verify: `cargo test -p voom-control-plane -p voom-node-agent -p voom-test-support -p voom-cli`.
 
-## T8 — Full suite + docs
+## T8 — E2E migration to agent-driven execution
 
-Runbook touch-ups only where commands change (`docs/runbooks/operator-real-media-execution.md`);
-AGENTS.md crate map unchanged (no new crates). `just ci` green.
+Files: `crates/voom-cli/tests/operator_execution_e2e.rs` (+support),
+chaos override relocation to the agent-side executor, any remaining
+workflow-level tests relying on control-plane adapters.
+Drive media ops through an in-process `AgentRuntime` (lifecycle pattern).
+Verify: `cargo test -p voom-cli --test operator_execution_e2e` then full
+suite.
 
-Ordering: T1 → T2/T4 parallel → T3/T5 → T6 → T7 → T8. T6 depends on T3
-(agent must execute before adapters die); T7 is independent of T6 except for
-shared fs.rs/stage.rs deletions — land after T6.
+## T9 — Full suite + docs
+
+Runbook touch-ups only where commands change
+(`docs/runbooks/operator-real-media-execution.md`); AGENTS.md crate map
+unchanged (no new crates). `just ci` green.
+
+Ordering: T1 → T2 ∥ T4 ∥ T5 → T3 → T6 → T7 → T8 → T9.
 
 ## Verification mapping (acceptance criteria)
 
-- Owner-node execution: e2e through in-process AgentRuntime (T6).
+- Owner-node execution: e2e through in-process AgentRuntime (T8).
 - Cross-root isolation: binding-miss tests (T3).
 - Mismatch before lease execution: schema/decode rejection tests (T1/T3);
   PROTOCOL_VERSION bump (T1).
@@ -99,5 +127,5 @@ shared fs.rs/stage.rs deletions — land after T6.
   new executor classification tests (T3/T7).
 - Unified contracts: no separate control-plane adapter path remains (T6).
 - No control-plane byte work: grep gate in review — no stat/hash/copy/probe
-  calls on the named pipeline post-T6/T7 (inspect.rs and
-  workflow/coordinator/promotion.rs excluded per charter/#436).
+  calls on the named pipeline post-T6/T7 (inspect.rs, promotion.rs, and
+  policy tool_preflight excluded per charter/#436/#424).
