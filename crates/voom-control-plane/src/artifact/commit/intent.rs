@@ -91,6 +91,7 @@ pub struct AuthorizeCommitOutcome {
     /// Hex-encoded one-time 32-byte commit fence. Never serialized into events.
     pub fence_hex: String,
 }
+
 impl std::fmt::Debug for AuthorizeCommitOutcome {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // The fence is capability material: its Debug rendering must never
@@ -114,6 +115,7 @@ impl std::fmt::Debug for AuthorizeCommitOutcome {
             .finish()
     }
 }
+
 #[derive(Debug, Clone)]
 pub struct RemoteCommitApplyingInput {
     pub intent_id: ArtifactCommitIntentId,
